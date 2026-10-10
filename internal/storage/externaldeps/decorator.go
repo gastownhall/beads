@@ -680,7 +680,9 @@ func (s *Store) CloseIssueChecked(ctx context.Context, issueID, actor string, op
 }
 
 // GetDependencyTree appends external refs as synthetic leaf nodes because no
-// local issue row exists for the normal graph hydrator to return.
+// local issue row exists for the normal graph hydrator to return. A store that
+// serves its roles refuses the reads this makes; bd dep tree goes through
+// remoteTreeWalker (remote_roles.go) there.
 func (s *Store) GetDependencyTree(ctx context.Context, issueID string, maxDepth int, showAllPaths bool, reverse bool) ([]*types.TreeNode, error) {
 	tree, err := s.inner.GetDependencyTree(ctx, issueID, maxDepth, showAllPaths, reverse)
 	if err != nil || reverse || len(tree) == 0 {

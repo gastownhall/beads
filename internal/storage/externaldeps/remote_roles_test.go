@@ -550,13 +550,13 @@ func TestRemoteBatchCloserRefusesExternallyBlockedItems(t *testing.T) {
 	}
 }
 
-// TestRemoteBatchCloserRefusesANextClaim: a served close cannot keep
-// externally blocked work out of its claim, so a batch with a next claim is
-// refused whole, the same way whether the workspace holds an open holder of
-// an external ref, only a closed one, or none, and with Force too. The
-// refusal reads nothing, closes nothing and names the commands that do the
-// same work. A server that enforces the policy itself gets the request as it
-// came, and its closer answers.
+// TestRemoteBatchCloserRefusesANextClaim: the served batch close cannot carry
+// a next claim, so a batch with one is refused whole, the same way whether the
+// workspace holds an open holder of an external ref, only a closed one, or
+// none, and with Force too. The refusal leads with that wire fact, reads
+// nothing, closes nothing and names the commands that do the same work. A
+// server that enforces the policy itself gets the request as it came, and its
+// closer answers.
 func TestRemoteBatchCloserRefusesANextClaim(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -596,8 +596,8 @@ func TestRemoteBatchCloserRefusesANextClaim(t *testing.T) {
 				if !errors.As(err, &unsupported) || unsupported.Op != "CloseBatchRequest.ClaimNext" {
 					t.Fatalf("CloseBatch with ClaimNext = %v, want the CloseBatchRequest.ClaimNext refusal", err)
 				}
-				if msg := err.Error(); !strings.Contains(msg, "nothing was closed") || !strings.Contains(msg, "then run `bd ready --claim`") {
-					t.Fatalf("refusal %q does not say that nothing closed and what to run instead", msg)
+				if msg := err.Error(); !strings.Contains(msg, "cannot carry a next claim") || !strings.Contains(msg, "nothing was closed") || !strings.Contains(msg, "then run `bd ready --claim`") {
+					t.Fatalf("refusal %q does not say why, that nothing closed, and what to run instead", msg)
 				}
 			}
 			if !slices.Equal(raw.served, tc.wantServed) {

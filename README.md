@@ -186,9 +186,11 @@ for embedding beads in another program as a library.
 bd connect https://bd.example.com --expect-project-id my-project
 
 # The everyday commands work the same way: create, show, list, update, close,
-# dependencies (including `bd dep tree`), comments, ready/count queries,
-# `bd ready --claim`, and batch apply all round-trip over the wire with the
-# same semantics as a local database.
+# dependencies (including `bd dep tree`), comments, ready/count queries, and
+# batch apply all round-trip over the wire with the same semantics as a local
+# database. So does `bd ready --claim`, except against an older server or while
+# any issue holds an unsatisfied external ref: then it lists and claims in two
+# steps rather than one transaction (ledger row L14, linked below).
 bd create "Fix auth bug" -p 1 -t bug
 bd ready --json
 bd close bd-a1b2 "Fixed"

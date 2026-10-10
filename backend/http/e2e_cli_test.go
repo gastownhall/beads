@@ -42,7 +42,7 @@ const e2eDatabase = "httpe2e"
 // precondition_failed body), close, dep add, ready, count, list (JSON, text
 // and --deps), an external dependency through dep tree, ready, list --ready,
 // ready --claim, a refused close --claim-next and a refused then forced close,
-// and delete.
+// a claim after that close, and delete.
 func TestE2E_BDOverHTTP(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 	bin := buildBD(t)
@@ -255,6 +255,23 @@ func TestE2E_BDOverHTTP(t *testing.T) {
 		t.Errorf("bd show %s (exit %d) status = %q after bd close --force, want %q: stderr=%s", extID, forcedShow.code, status, "closed", forcedShow.stderr)
 	}
 	refuseClaimNext("after " + extID + " was closed")
+
+	// The closed extID still holds an unsatisfied external ref, so the claim
+	// stays on the decorator's composed leg (ledger row L14). It must still
+	// take what the served claim would: the one open, unassigned issue, since
+	// depID is claimed and id is assigned.
+	next := runBD(t, bin, workspace, nil, "create", "Claimable after the holder closed", "--json")
+	if next.code != 0 {
+		t.Fatalf("bd create (claimable) failed (exit %d): stdout=%s stderr=%s", next.code, next.stdout, next.stderr)
+	}
+	nextID := firstJSONField(t, next.stdout, "id")
+	reclaim := runBD(t, bin, workspace, nil, "ready", "--claim", "--json")
+	if reclaim.code != 0 {
+		t.Fatalf("bd ready --claim after %s was closed failed (exit %d): stdout=%s stderr=%s", extID, reclaim.code, reclaim.stdout, reclaim.stderr)
+	}
+	if got := firstJSONField(t, reclaim.stdout, "id"); got != nextID {
+		t.Errorf("bd ready --claim after %s was closed claimed %q, want %s: %s", extID, got, nextID, reclaim.stdout)
+	}
 
 	if r := runBD(t, bin, workspace, nil, "close", depID, "--json"); r.code != 0 {
 		t.Fatalf("bd close failed (exit %d): stdout=%s stderr=%s", r.code, r.stdout, r.stderr)
@@ -501,6 +518,96 @@ func TestE2E_SwitchingBackToDoltLeavesOriginalIdentityIntact(t *testing.T) {
 	}
 	if !strings.Contains(string(sidecar), e2eProjectID) {
 		t.Errorf("sidecar does not carry the http server's project id %q: %s", e2eProjectID, sidecar)
+	}
+}
+
+// TestE2E_ConnectClearRestoresThePreviousBackend pins `bd connect --clear`
+// (bee-ghosttrack CHANGES_REQUESTED on #7288, should-fix 1): a dolt workspace
+// forced onto http and then cleared must select dolt again, with the sidecar
+// gone and metadata.json's own dolt identity untouched. A second --clear finds
+// nothing to clear and leaves metadata.json alone.
+func TestE2E_ConnectClearRestoresThePreviousBackend(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	bin := buildBD(t)
+	addr := startE2EServer(t)
+	workspace := t.TempDir()
+	beadsDir := filepath.Join(workspace, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	const (
+		originalProjectID = "dolt-original-project-for-clear"
+		originalDatabase  = "dolt-original-db-for-clear"
+	)
+	metadataPath := filepath.Join(beadsDir, "metadata.json")
+	original := fmt.Sprintf(`{"backend":"dolt","database":%q,"project_id":%q}`, originalDatabase, originalProjectID)
+	if err := os.WriteFile(metadataPath, []byte(original), 0o600); err != nil {
+		t.Fatalf("write metadata.json: %v", err)
+	}
+	sidecarPath := filepath.Join(beadsDir, "http_target.json")
+
+	forced := runBD(t, bin, workspace, nil, "connect", "http://"+addr, "--force", "--json")
+	if forced.code != 0 {
+		t.Fatalf("bd connect --force failed (exit %d): stdout=%s stderr=%s", forced.code, forced.stdout, forced.stderr)
+	}
+	if _, err := os.Stat(sidecarPath); err != nil {
+		t.Fatalf("bd connect --force did not write the sidecar: %v", err)
+	}
+
+	type clearResult struct {
+		Cleared         bool   `json:"cleared"`
+		RestoredBackend string `json:"restored_backend"`
+	}
+	type identity struct {
+		Backend   string `json:"backend"`
+		Database  string `json:"database"`
+		ProjectID string `json:"project_id"`
+	}
+	readMetadata := func() identity {
+		t.Helper()
+		data, err := os.ReadFile(metadataPath)
+		if err != nil {
+			t.Fatalf("read metadata.json: %v", err)
+		}
+		var got identity
+		if err := json.Unmarshal(data, &got); err != nil {
+			t.Fatalf("parse metadata.json: %v\n%s", err, data)
+		}
+		return got
+	}
+	want := identity{Backend: "dolt", Database: originalDatabase, ProjectID: originalProjectID}
+
+	cleared := runBD(t, bin, workspace, nil, "connect", "--clear", "--json")
+	if cleared.code != 0 {
+		t.Fatalf("bd connect --clear failed (exit %d): stdout=%s stderr=%s", cleared.code, cleared.stdout, cleared.stderr)
+	}
+	var first clearResult
+	if err := json.Unmarshal([]byte(cleared.stdout), &first); err != nil {
+		t.Fatalf("parse bd connect --clear --json: %v\n%s", err, cleared.stdout)
+	}
+	if !first.Cleared || first.RestoredBackend != "dolt" {
+		t.Errorf("bd connect --clear = %+v, want cleared and dolt restored: %s", first, cleared.stdout)
+	}
+	if _, err := os.Stat(sidecarPath); !os.IsNotExist(err) {
+		t.Errorf("sidecar still present after bd connect --clear (stat err %v)", err)
+	}
+	if got := readMetadata(); got != want {
+		t.Errorf("metadata.json after bd connect --clear = %+v, want %+v", got, want)
+	}
+
+	again := runBD(t, bin, workspace, nil, "connect", "--clear", "--json")
+	if again.code != 0 {
+		t.Fatalf("second bd connect --clear failed (exit %d): stdout=%s stderr=%s", again.code, again.stdout, again.stderr)
+	}
+	var second clearResult
+	if err := json.Unmarshal([]byte(again.stdout), &second); err != nil {
+		t.Fatalf("parse second bd connect --clear --json: %v\n%s", err, again.stdout)
+	}
+	if second != (clearResult{}) {
+		t.Errorf("second bd connect --clear = %+v, want nothing cleared or restored: %s", second, again.stdout)
+	}
+	if got := readMetadata(); got != want {
+		t.Errorf("metadata.json after a second bd connect --clear = %+v, want %+v", got, want)
 	}
 }
 

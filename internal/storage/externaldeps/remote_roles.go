@@ -392,7 +392,7 @@ func (c *remoteBatchCloser) closeAndClaimNext(ctx context.Context, request issue
 	}
 	if !enforced {
 		return issueops.CloseBatchResult{}, fmt.Errorf(
-			"close with a next claim: a served close cannot keep externally blocked work out of its claim, so nothing was closed; close without --claim-next, then run `bd ready --claim` (%w)",
+			"close with a next claim: the served batch close cannot carry a next claim, so nothing was closed; close without --claim-next, then run `bd ready --claim` (%w)",
 			&storage.ErrUnsupported{Op: "CloseBatchRequest.ClaimNext", Backend: fmt.Sprintf("%T", storage.UnwrapStore(c.policy.inner))})
 	}
 	served, err := c.policy.inner.BatchCloser()
