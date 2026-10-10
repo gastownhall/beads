@@ -933,6 +933,15 @@ func TestEmbeddedGateListScoped(t *testing.T) {
 
 	taskA := bdCreate(t, bd, dir, "Task A", "--type", "task")
 	taskB := bdCreate(t, bd, dir, "Task B", "--type", "task")
+
+	// No gates yet: both routes emit an empty JSON array, never `null`.
+	if out := strings.TrimSpace(bdGate(t, bd, dir, "list", "--json")); out != "[]" {
+		t.Fatalf("expected [] from DB-wide gate list with no gates, got: %s", out)
+	}
+	if out := strings.TrimSpace(bdGate(t, bd, dir, "list", taskA.ID, "--json")); out != "[]" {
+		t.Fatalf("expected [] from gate list scoped to %s with no gates, got: %s", taskA.ID, out)
+	}
+
 	bdGate(t, bd, dir, "create", "--blocks", taskA.ID, "--type", "gh:pr", "--await-id", "111")
 	bdGate(t, bd, dir, "create", "--blocks", taskB.ID, "--type", "gh:pr", "--await-id", "222")
 

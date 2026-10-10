@@ -233,6 +233,26 @@ func TestProxiedServerGateLifecycle(t *testing.T) {
 		}
 	})
 
+	// An empty gate list is `[]`, never `null`, on both the DB-wide and the
+	// bead-scoped routes.
+	t.Run("empty_list_json_is_array", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "gle")
+		target := bdProxiedCreate(t, bd, p.dir, "No gates here")
+		for _, args := range [][]string{
+			{"gate", "list", "--json"},
+			{"gate", "list", target.ID, "--json"},
+		} {
+			out, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, args...)
+			if err != nil {
+				t.Fatalf("bd %s failed: %v\nstderr:\n%s", strings.Join(args, " "), err, stderr)
+			}
+			if got := strings.TrimSpace(out); got != "[]" {
+				t.Errorf("bd %s: expected empty JSON array, got: %s", strings.Join(args, " "), out)
+			}
+		}
+	})
+
 	// Fail-closed: every bad read or bad target exits nonzero with a
 	// distinguishable message; nothing prints a success shape.
 	t.Run("error_paths_fail_closed", func(t *testing.T) {

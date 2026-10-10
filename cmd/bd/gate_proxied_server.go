@@ -548,7 +548,11 @@ func runGateListProxiedServer(cmd *cobra.Command, ctx context.Context, args []st
 		return HandleErrorRespectJSON("%v", err)
 	}
 	if jsonOutput {
-		return outputJSON(page.Items)
+		items := page.Items
+		if items == nil {
+			items = []*types.Issue{}
+		}
+		return outputJSON(items)
 	}
 	displayGates(page.Items, allFlag)
 	return nil
