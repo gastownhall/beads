@@ -11,7 +11,105 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
+
+	"github.com/steveyegge/beads/internal/storage/schema"
 )
+
+// TestProxyMaintenanceAllowsTheSharedConsentVerb pins the capability facts the
+// #6575 proxied data-behind guidance is written against: the consent command
+// that guidance prescribes is NOT refused at the proxied front door, while the
+// bare `bd migrate` verb and the `bd dolt pull` remedy are.
+//
+// The capability registry keys on the full command path. It refuses the bare
+// `migrate` verb and `migrate hooks` / `migrate issues` / `migrate sync`, but
+// permits `migrate schema` — so that path passes
+// validateProxyRegistryBeforeProvider and reaches `bd migrate schema`'s own
+// proxied arm, which reports the migration the provider open already applied
+// under this verb's consent.
+//
+// An earlier revision of that guidance asserted the opposite on three runtime
+// surfaces and nothing failed, because no test called the front door with this
+// command. The wording is not cosmetic: forceOrEnvConsent honors `--force`
+// BEFORE the data-behind stop is routed, so an operator told "it is refused
+// here anyway" who types it to confirm takes the exact wedge the stop exists
+// to prevent.
+//
+// The command is resolved from the constant the gate prescribes rather than
+// retyped here, so drift on either side has to face this test.
+func TestProxyMaintenanceAllowsTheSharedConsentVerb(t *testing.T) {
+	oldJSON := jsonOutput
+	jsonOutput = true
+	t.Cleanup(func() { jsonOutput = oldJSON })
+
+	args := strings.Fields(strings.TrimPrefix(schema.SharedConsentCommandForced, "bd "))
+	target, _, err := rootCmd.Find(args)
+	if err != nil || target == rootCmd {
+		t.Fatalf("the gate prescribes %q, which does not resolve to a subcommand: %v",
+			schema.SharedConsentCommandForced, err)
+	}
+	if path := commandRegistryPath(target); path != "migrate schema" {
+		t.Fatalf("prescribed consent command resolves to path %q, want %q", path, "migrate schema")
+	}
+
+	find := func(t *testing.T, args ...string) *cobra.Command {
+		t.Helper()
+		cmd, _, err := rootCmd.Find(args)
+		if err != nil || cmd == rootCmd {
+			t.Fatalf("bd %s does not resolve: %v", strings.Join(args, " "), err)
+		}
+		return cmd
+	}
+	bareMigrate := find(t, "migrate")
+	doltPull := find(t, "dolt", "pull")
+
+	for _, topology := range []ProxyTopology{
+		ProxyTopologyManagedLocal, ProxyTopologyExternalTCP,
+		ProxyTopologyExternalUnix, ProxyTopologyTeamServer,
+	} {
+		t.Run(string(topology), func(t *testing.T) {
+			var allowErr error
+			out := captureStdout(t, func() error {
+				allowErr = validateProxyRegistryBeforeProvider(target, topology)
+				if allowErr == nil {
+					allowErr = validateProxyCapabilitiesBeforeProvider(target)
+				}
+				return nil
+			})
+			if allowErr != nil {
+				t.Errorf("%q is refused before the provider (%v), but the #6575 proxied data-behind guidance tells the operator it can be run from this workspace",
+					schema.SharedConsentCommandForced, allowErr)
+			}
+			if out != "" {
+				t.Errorf("a non-refusal still emitted a typed error: %s", out)
+			}
+
+			// The counterfactuals, so "only the bare `bd migrate` verb is
+			// refused here" and "the pull cannot be run from here" are claims
+			// and not vacuous ones.
+			for _, tc := range []struct {
+				cmd  *cobra.Command
+				code string
+			}{
+				{bareMigrate, "proxy.migrate.unsupported"},
+				{doltPull, "proxy.dolt_pull.unsupported"},
+			} {
+				var refuseErr error
+				refusal := captureStdout(t, func() error {
+					refuseErr = validateProxyRegistryBeforeProvider(tc.cmd, topology)
+					return nil
+				})
+				if refuseErr == nil {
+					t.Errorf("bd %s is no longer refused in proxied-server mode; the data-behind guidance says it is",
+						commandRegistryPath(tc.cmd))
+					continue
+				}
+				if !strings.Contains(refusal, `"code": "`+tc.code+`"`) {
+					t.Errorf("bd %s refusal = %q, want %s", commandRegistryPath(tc.cmd), refusal, tc.code)
+				}
+			}
+		})
+	}
+}
 
 func TestProxyCapabilityMatrix(t *testing.T) {
 	for _, capability := range []ProxyCapability{ProxyCapReadonly, ProxyCapMaxRows} {
