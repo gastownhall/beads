@@ -3123,7 +3123,26 @@ func checkExistingBeadsData(prefix string) error {
 	if beadsDir == "" {
 		return nil // Can't determine target, allow init to proceed
 	}
-	return checkExistingBeadsDataAt(beadsDir, prefix)
+	err := checkExistingBeadsDataAt(beadsDir, prefix)
+	// In a git worktree (without a caller-supplied BEADS_DIR) the target is the
+	// main repository's shared .beads, so "already initialized" is the expected
+	// state, not a sign of corruption. Say so instead of offering
+	// --reinit-local, which would destroy the database every worktree shares
+	// (GH#6956). The live BEADS_DIR cannot answer "did the caller set it": the
+	// pre-run hook exports one for every command (prepareSelectedCommandContext).
+	if errors.Is(err, errWorkspaceAlreadyInitialized) && !beadsDirProvidedAtStartup && isGitRepo() && git.IsWorktree() {
+		return alreadyInitialized(`
+%s This workspace is already initialized: this git worktree shares the main
+repository's beads database at %s
+
+Worktrees use the main repository's .beads directory, so no init is needed here.
+
+To use the shared database:
+  Just run bd commands normally (e.g., %s)
+
+Aborting.`, ui.RenderWarn("⚠"), beadsDir, ui.RenderAccent("bd list"))
+	}
+	return err
 }
 
 // isNonInteractiveInit returns true if init should run without interactive prompts.
