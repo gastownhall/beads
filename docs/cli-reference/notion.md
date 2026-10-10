@@ -1,6 +1,6 @@
 ---
 title: "bd notion"
-description: "Commands for syncing issues between beads and Notion."
+description: "Notion integration commands"
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
@@ -10,7 +10,7 @@ Generated from `bd help --doc notion`.
 Commands for syncing issues between beads and Notion.
 
 ```
-bd notion [flags]
+bd notion [command]
 ```
 
 ## bd notion connect

@@ -1,6 +1,6 @@
 ---
 title: "bd jira"
-description: "Synchronize issues between beads and Jira."
+description: "Jira integration commands"
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
@@ -31,7 +31,7 @@ Examples:
   bd jira status              # Show sync status
 
 ```
-bd jira [flags]
+bd jira [command]
 ```
 
 ## bd jira pull

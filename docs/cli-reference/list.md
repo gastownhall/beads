@@ -18,6 +18,7 @@ bd list [flags]
 ```
       --all                          Show all issues including closed (overrides default filter)
   -a, --assignee string              Filter by assignee
+      --brief                        Omit the free-form text (description, design, acceptance criteria, notes, payload, waiters) from each row. Filters that read those fields, such as --desc-contains, still select on them. An omitted field is indistinguishable from an empty one in --json; fetch a whole issue with bd show.
       --closed-after string          Filter issues closed after date (YYYY-MM-DD or RFC3339)
       --closed-before string         Filter issues closed before date (YYYY-MM-DD or RFC3339)
       --created-after string         Filter issues created after date (YYYY-MM-DD or RFC3339)
@@ -25,12 +26,15 @@ bd list [flags]
       --defer-after string           Filter issues deferred after date (supports relative: +6h, tomorrow)
       --defer-before string          Filter issues deferred before date (supports relative: +6h, tomorrow)
       --deferred                     Show only issues with defer_until set
+      --deps string[="scheduling"]   Annotate tree with dependency edges and order siblings by them: 'scheduling' (bare --deps) or 'all'
       --desc-contains string         Filter by description substring (case-insensitive)
       --due-after string             Filter issues due after date (supports relative: +6h, tomorrow)
       --due-before string            Filter issues due before date (supports relative: +6h, tomorrow)
       --empty-description            Filter issues with empty or missing description
       --exclude-label strings        Exclude issues that have ANY of these labels
       --exclude-type strings         Exclude issue types from results (comma-separated or repeatable, e.g., --exclude-type=convoy,epic)
+      --external-contains string     Filter by external ref substring (case-insensitive)
+      --external-ref string          Filter by exact external_ref value
       --flat                         Disable tree format and use legacy flat list output
       --format string                Output format: 'digraph' (for golang.org/x/tools/cmd/digraph), 'dot' (Graphviz), or Go template
       --has-metadata-key string      Filter issues that have this metadata key set
@@ -44,6 +48,7 @@ bd list [flags]
       --label-regex string           Filter by label regex pattern (e.g., 'tech-(debt|legacy)')
   -n, --limit int                    Limit results (default 50, use 0 for unlimited) (default 50)
       --long                         Show detailed multi-line output for each issue
+      --max-rows int                 Hard upper bound on rows returned. Returns a non-zero exit (code 2) and an error to stderr if exceeded. 0 disables (the default). Overrides BEADS_MAX_ROWS for this invocation. Useful in CI/agent rigs that want a circuit breaker against pathological queries. Honored on both the direct and the --proxied-server route.
       --metadata-field stringArray   Filter by metadata field (key=value, repeatable)
       --mol-type string              Filter by molecule type: swarm, patrol, or work
       --no-assignee                  Filter issues with no assignee

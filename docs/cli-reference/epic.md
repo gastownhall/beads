@@ -10,7 +10,7 @@ Generated from `bd help --doc epic`.
 Epic management commands
 
 ```
-bd epic [flags]
+bd epic [command]
 ```
 
 ## bd epic close-eligible
@@ -24,7 +24,8 @@ bd epic close-eligible [flags]
 **Flags:**
 
 ```
-      --dry-run   Preview what would be closed without making changes
+      --dry-run         Preview what would be closed without making changes
+  -r, --reason string   Close reason applied to every epic closed (default "All children completed")
 ```
 
 ## bd epic status
