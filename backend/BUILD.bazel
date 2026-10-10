@@ -12,6 +12,7 @@ go_library(
     deps = [
         "//internal/storage",
         "//internal/storage/backends",
+        "//internal/storage/issueops",
         "//internal/types",
     ],
 )
@@ -27,6 +28,7 @@ go_test(
         ":backend",
         "//backend/conformance",
         "//internal/storage",
+        "//internal/storage/issueops",
         "//internal/testutil/bazeltest",
     ],
 )

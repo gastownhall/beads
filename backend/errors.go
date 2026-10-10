@@ -2,6 +2,7 @@ package backend
 
 import (
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -35,6 +36,10 @@ var (
 
 	// ErrFieldTooLong pairs with MaxFieldLen.
 	ErrFieldTooLong = types.ErrFieldTooLong
+
+	// ErrRenameLabelSameName is what RenameLabel must return when old and new
+	// label are equal after trimming; the conformance suite asserts it.
+	ErrRenameLabelSameName = issueops.ErrRenameLabelSameName
 )
 
 // ClaimedByFragment and NotClaimableStatusFragment are the exact message
