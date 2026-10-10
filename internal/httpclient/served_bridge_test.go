@@ -417,9 +417,10 @@ func TestTheReadyBridgeEnforcesMaxRowsClientSide(t *testing.T) {
 }
 
 // TestTheParentExistenceProbeCrossesTheWire is the raw GetIssue the walk runs
-// before it descends: a miss is (nil, nil), because getHierarchicalChildren
-// reads a nil result as "parent issue not found" and an error would print the
-// transport's vocabulary in its place.
+// before it descends, and the explicit-id probe `bd create --graph` runs. A
+// miss is storage.ErrNotFound on EVERY leg — the local reference store and the
+// http store alike — so a caller written against the backend contract never
+// needs a second, http-only branch for (nil, nil).
 func TestTheParentExistenceProbeCrossesTheWire(t *testing.T) {
 	e := newServedEnv(t, "prb")
 	ctx := t.Context()
@@ -432,8 +433,28 @@ func TestTheParentExistenceProbeCrossesTheWire(t *testing.T) {
 	if err != nil || got == nil || got.ID != "prb-1" {
 		t.Fatalf("GetIssue on a hit = (%v, %v)", got, err)
 	}
-	if got, err = e.subject.GetIssue(ctx, "prb-nope"); err != nil || got != nil {
-		t.Errorf("GetIssue on a miss = (%v, %v), want (nil, nil)", got, err)
+	legs := []struct {
+		name  string
+		store interface {
+			GetIssue(context.Context, string) (*types.Issue, error)
+		}
+	}{
+		{"local", e.reference},
+		{"http", e.subject},
+	}
+	for _, leg := range legs {
+		for _, id := range []string{"prb-nope", ""} {
+			got, err := leg.store.GetIssue(ctx, id)
+			if !errors.Is(err, issueops.ErrNotFound) || got != nil {
+				t.Errorf("%s GetIssue(%q) on a miss = (%v, %v), want (nil, storage.ErrNotFound)", leg.name, id, got, err)
+			}
+		}
+	}
+	// The http miss reads exactly as the local one does.
+	_, local := e.reference.GetIssue(ctx, "prb-nope")
+	_, remote := e.subject.GetIssue(ctx, "prb-nope")
+	if local == nil || remote == nil || local.Error() != remote.Error() {
+		t.Errorf("miss text: local %q, http %q; want the same", local, remote)
 	}
 }
 

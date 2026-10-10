@@ -8146,22 +8146,34 @@ components:
             `issues.create.defaultPriority`, which announces that a create
             (`POST /v0/beads/issues`, `issues:batchCreate` and
             `issues:batchApply` create items) with no `priority` member stores
-            the default P2 rather than P0. The
+            the default P2 rather than P0. One behavior token is
+            CONDITIONAL rather than build-level: `policy.external_dependencies`
+            announces that this server's ready, claim, claim-next, close,
+            blocking and dependency-tree operations already apply bd's
+            external-dependency policy (an issue blocked by an unsatisfied
+            `external:<project>:<capability>` dependency is neither ready,
+            claimable nor closable without force). A server advertises it
+            only when it enforces that policy; a client that sees it must not
+            apply the policy again, and a client that does not see it applies
+            the policy itself. The
             list grows additively, and an operation never appears here unless
             it is fully implemented. This is how a client checks for an
             operation or a behavior — never the version string.
 
 
-            THIS LIST IS BUILD-LEVEL, NOT WORKSPACE-LEVEL. It says which
-            operations this binary serves, and for every entry but two that is
-            the whole answer. `events.list` and `events.watch` are the
-            exceptions: the durable events journal is a per-workspace setting
-            that is OFF by default, so a server that advertises them may still
-            refuse every request to both with 409 `events_journal_disabled` —
-            correctly, because the operations exist and the workspace has no
-            journal. A consumer of either MUST treat the capability as "this
-            server speaks it" and the 409 as "not on this workspace", and must
-            not read the capability as a promise that records will arrive.
+            THIS LIST IS BUILD-LEVEL, NOT WORKSPACE-LEVEL, apart from the
+            conditional `policy.external_dependencies` above, which depends on
+            how this server composed its roles rather than on the build. It
+            says which operations this binary serves, and for every entry but
+            two that is the whole answer. `events.list` and `events.watch` are
+            the exceptions: the durable events journal is a per-workspace
+            setting that is OFF by default, so a server that advertises them
+            may still refuse every request to both with 409
+            `events_journal_disabled` — correctly, because the operations exist
+            and the workspace has no journal. A consumer of either MUST treat
+            the capability as "this server speaks it" and the 409 as "not on
+            this workspace", and must not read the capability as a promise that
+            records will arrive.
           items:
             type: string
         wire_revision:

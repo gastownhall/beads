@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/backends"
 	"github.com/steveyegge/beads/internal/storage/contextinfo"
 	"github.com/steveyegge/beads/internal/storage/domain"
+	"github.com/steveyegge/beads/internal/storage/externaldeps"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/issueops"
 	"github.com/steveyegge/beads/memoryops"
@@ -343,9 +344,13 @@ func runServe() error {
 			// extraction, this flag and the maintenance ticker cannot disagree
 			// about whether this workspace journals.
 			EventsJournalEnabled: journalEnabled,
-			Workspace:            info,
-			SchemaVersion:        JSONSchemaVersion,
-			Mode:                 serveResolvedMode(info, db),
+			// The roles above come from the storage chain, which interposes
+			// the external-dependency policy (wireStorageDecorators); the
+			// handshake advertises it only if that layer is really there.
+			ExternalDependencyPolicy: externaldeps.Applied(store),
+			Workspace:                info,
+			SchemaVersion:            JSONSchemaVersion,
+			Mode:                     serveResolvedMode(info, db),
 		})
 	}
 
@@ -419,10 +424,11 @@ func runServe() error {
 		// is still the workspace's answer and still has to be handed in — the
 		// provider knows how to READ the journal, not whether this workspace has
 		// one.
-		EventsJournalEnabled: eventsjournal.EnabledFor(info.BeadsDir),
-		Workspace:            info,
-		SchemaVersion:        JSONSchemaVersion,
-		Mode:                 serveResolvedMode(info, db),
+		EventsJournalEnabled:     eventsjournal.EnabledFor(info.BeadsDir),
+		ExternalDependencyPolicy: externaldeps.AppliedToProvider(provider),
+		Workspace:                info,
+		SchemaVersion:            JSONSchemaVersion,
+		Mode:                     serveResolvedMode(info, db),
 	})
 }
 

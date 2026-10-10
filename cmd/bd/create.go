@@ -523,7 +523,6 @@ var createCmd = &cobra.Command{
 			Ephemeral:          wisp,
 			NoHistory:          noHistory,
 			StorageClass:       storageClass,
-			CreatedBy:          getActorWithGit(),
 			Owner:              getOwner(),
 			Labels:             labels,
 			MolType:            molType,

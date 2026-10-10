@@ -6,6 +6,7 @@ package bdhttp_test
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/steveyegge/beads/backend"
 	bdhttp "github.com/steveyegge/beads/backend/http"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/backends"
 )
 
@@ -333,7 +335,10 @@ func TestExplicitCredentialIgnoresTheEnvPlaintextGrant(t *testing.T) {
 	doors := []struct {
 		name string
 		// call drives one request through the door with a fresh explicit
-		// credential and returns that request's error.
+		// credential and returns that request's error. plaintextRemote
+		// answers the issue read not_found, which GetIssue reports as
+		// storage.ErrNotFound; that request reached the remote, so the
+		// store doors count it as success.
 		call func(t *testing.T, target bdhttp.Target, client *http.Client) error
 	}{
 		{"OpenWith", func(t *testing.T, target bdhttp.Target, client *http.Client) error {
@@ -352,7 +357,9 @@ func TestExplicitCredentialIgnoresTheEnvPlaintextGrant(t *testing.T) {
 				t.Fatalf("OpenWith: %v", err)
 			}
 			t.Cleanup(func() { _ = store.Close() })
-			_, err = store.GetIssue(ctx, "bd-1")
+			if _, err = store.GetIssue(ctx, "bd-1"); errors.Is(err, storage.ErrNotFound) {
+				return nil
+			}
 			return err
 		}},
 		{"Open", func(t *testing.T, target bdhttp.Target, client *http.Client) error {
@@ -363,7 +370,9 @@ func TestExplicitCredentialIgnoresTheEnvPlaintextGrant(t *testing.T) {
 				t.Fatalf("Open: %v", err)
 			}
 			t.Cleanup(func() { _ = store.Close() })
-			_, err = store.GetIssue(ctx, "bd-1")
+			if _, err = store.GetIssue(ctx, "bd-1"); errors.Is(err, storage.ErrNotFound) {
+				return nil
+			}
 			return err
 		}},
 		{"Handshake", func(t *testing.T, target bdhttp.Target, client *http.Client) error {

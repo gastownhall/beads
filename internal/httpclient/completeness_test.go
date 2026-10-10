@@ -281,7 +281,6 @@ var legitimatelyUnsupported = map[string]string{
 	"GetNextChildID":             "raw read: id allocation is a server-side act",
 	"GetStaleIssues":             "raw read: no staleness operation",
 	"GetStatisticsNoBlocked":     "raw read: getStats has no blocked-suppression variant",
-	"SearchIssueIDs":             "raw read: no partial-id search operation (D11)",
 	"SearchIssueSummaries":       "raw read: no summary-projection search operation; SearchIssues (role: Searcher) hydrates full issues, and the wire publishes no narrower searchIssues projection for list-shaped rendering to drop onto",
 	"SearchIssuesWithCounts":     "raw read: no counts-bearing search operation",
 

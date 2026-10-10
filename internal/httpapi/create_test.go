@@ -190,17 +190,15 @@ func TestCreateForwardsEveryDocumentedMember(t *testing.T) {
 		t.Errorf("the handler put edges or comments on the issue (%d/%d); they belong to the request's own members",
 			len(issue.Dependencies), len(issue.Comments))
 	}
-	// created_at is unpublished, so a fresh row must reach the role with it
-	// zero and take the implementation's own value. created_by IS stamped by
-	// this handler, from the same trimmed actor identity asserted above —
-	// matching the local front door's semantics (cmd/bd/create.go sets
-	// issue.CreatedBy from getActorWithGit() before calling the same role,
-	// because the role itself never stamps it).
+	// created_at and created_by are unpublished, so a fresh row reaches the
+	// role with both zero: the implementation stamps created_at, and the role
+	// defaults created_by to the request's actor (the lifecycle-create
+	// contract in backend/conformance pins that half), as for every caller.
 	if !issue.CreatedAt.IsZero() {
 		t.Errorf("the handler set created_at (%v); it is not published on this operation", issue.CreatedAt)
 	}
-	if issue.CreatedBy != "alice" {
-		t.Errorf("created_by = %q, want the actor %q", issue.CreatedBy, "alice")
+	if issue.CreatedBy != "" {
+		t.Errorf("created_by = %q, want it left to the role", issue.CreatedBy)
 	}
 
 	if len(req.Dependencies) != 2 {

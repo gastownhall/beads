@@ -1025,14 +1025,43 @@ type ExternalDependencyQueryStore interface {
 // RemoteBackendStore is implemented by a DoltStorage that is a pure network
 // client of a remote bd serve process (a registered backend whose
 // backends.Backend.Remote is true — see internal/storage/backends). It is
-// metadata about the store's transport, not a policy decision. Its one in-tree
-// consumer is the external-deps decorator, which wraps a remote store like any
-// other and reads this marker only to choose how it composes its roles: over a
-// remote store it builds each role on the store's own served role instead of
-// the legacy methods such a store refuses. Whether the decorator skips its
-// client-side enforcement is ExternalDependencyPolicyProber's question.
+// metadata about the store's transport, not a policy decision. Such a store
+// serves its ROLES natively and only a slice of the legacy DoltStorage
+// method seam, so a decorator that builds role views must compose over the
+// inner store's roles rather than rebuild them from that seam: the
+// external-deps decorator consults it for exactly that (remote_roles.go).
+// It never decides whether a policy runs — the decorator asks
+// ExternalDependencyPolicyProber whether to skip its client-side enforcement.
 type RemoteBackendStore interface {
 	IsRemoteBackendStore() bool
+}
+
+// CallerAttributionLimitedStore is implemented by a DoltStorage whose write
+// transport cannot carry two caller-authored attribution members:
+//
+//   - a history entry's Provenance label (UpdateRequest.Provenance,
+//     ReopenRequest.Provenance), because the serving process labels the
+//     entries it writes itself;
+//   - a patch's ClosedBySession, which only the close operation carries.
+//
+// Its role implementations refuse those members rather than drop them, since a
+// library caller may mean them. A front door that knows its own value is
+// derivable or advisory — `bd reopen`'s fixed "bd: reopen <id>" label, the
+// ambient CLAUDE_SESSION_ID on `bd update -s closed` — omits it for such a
+// store instead of failing the write; cmd/bd/remote_backend.go records
+// which members it omits and why.
+type CallerAttributionLimitedStore interface {
+	CallerAttributionLimited() bool
+}
+
+// Pinger is implemented by a DoltStorage whose cheapest honest liveness check
+// is not an issue query. `bd ping` uses it when present and falls back to a
+// one-row SearchIssues otherwise. A remote store implements it with its
+// authenticated handshake read, which reaches the serving process and checks
+// the credential and the workspace pin without touching an issue table its
+// legacy method seam may not serve at all.
+type Pinger interface {
+	Ping(ctx context.Context) error
 }
 
 // ExternalDependencyPolicyProber is implemented by a DoltStorage that can

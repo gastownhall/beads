@@ -66,11 +66,11 @@ func getHierarchicalChildren(ctx context.Context, store storage.DoltStorage, dbP
 		parentIssue, err = s.GetIssue(ctx, parentID)
 		return err
 	})
+	if errors.Is(err, storage.ErrNotFound) || (err == nil && parentIssue == nil) {
+		return nil, fmt.Errorf("parent issue '%s' not found", parentID)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("error checking parent issue: %v", err)
-	}
-	if parentIssue == nil {
-		return nil, fmt.Errorf("parent issue '%s' not found", parentID)
 	}
 
 	// Use recursive search to find all descendants using the same logic as --parent filter.

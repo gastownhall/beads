@@ -22,7 +22,8 @@ var pingCmd = &cobra.Command{
 Steps:
   1. Resolve the .beads workspace
   2. Open the store (embedded or server)
-  3. Run a trivial query (issue count)
+  3. Run a trivial query (one issue row; a remote backend reads its
+     authenticated server context instead)
   4. Report timing
 
 Exit 0 on success, exit 1 on failure.
@@ -60,8 +61,14 @@ Examples:
 		}
 		storeMs := time.Since(start).Milliseconds()
 
-		filter := types.IssueFilter{Limit: 1}
-		_, err := st.SearchIssues(rootCtx, "", filter)
+		// A store with its own liveness check (a remote backend's handshake
+		// read) answers through it; every other store runs the one-row query.
+		var err error
+		if pinger, ok := storage.UnwrapStore(st).(storage.Pinger); ok {
+			err = pinger.Ping(rootCtx)
+		} else {
+			_, err = st.SearchIssues(rootCtx, "", types.IssueFilter{Limit: 1})
+		}
 		if err != nil {
 			return pingFail(start, fmt.Sprintf("query failed: %v", err))
 		}

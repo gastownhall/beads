@@ -14,18 +14,20 @@ import (
 
 // IssueReader builds the read role on the policy store. In particular, Ready
 // and List(ReadyFlag) must call this store's filtered ready methods rather than
-// promoted methods on the undecorated store. Over a remote store the served
-// reader answers everything else (remote_roles.go).
+// promoted methods on the undecorated store.
+//
+// A remote inner store answers with its own reader instead, with the ready
+// exclusion laid over it (remote_roles.go): storereader is built from the
+// legacy method seam a remote store only partly serves.
 func (s *Store) IssueReader() (issueops.Reader, error) {
-	policy, err := storereader.New(s)
-	if err != nil || !s.servesRoles() {
-		return policy, err
+	if s.rolesAreRemote() {
+		inner, err := s.inner.IssueReader()
+		if err != nil {
+			return nil, err
+		}
+		return &remoteReader{inner: inner, policy: s}, nil
 	}
-	served, err := s.inner.IssueReader()
-	if err != nil {
-		return nil, err
-	}
-	return &remoteReader{served: served, policy: policy}, nil
+	return storereader.New(s)
 }
 
 // IssueClaimer rejects a direct claim of externally blocked work before the
@@ -36,8 +38,8 @@ func (s *Store) IssueClaimer() (issueops.Claimer, error) {
 	if err != nil {
 		return nil, err
 	}
-	if s.servesRoles() {
-		return &remoteClaimer{served: inner, policy: s}, nil
+	if s.rolesAreRemote() {
+		return &remoteClaimer{inner: inner, policy: s}, nil
 	}
 	return &issueClaimer{inner: inner, policy: s}, nil
 }
@@ -61,8 +63,12 @@ func (c *issueClaimer) Claim(ctx context.Context, req issueops.ClaimRequest) (is
 // ReadyClaimer keeps external blockers out of the ready-claim selection used
 // by HTTP serving. The local compare-and-swap remains inside ClaimReadyIssue.
 func (s *Store) ReadyClaimer() (issueops.ReadyClaimer, error) {
-	if s.servesRoles() {
-		return &remoteReadyClaimer{policy: s}, nil
+	if s.rolesAreRemote() {
+		inner, err := s.inner.ReadyClaimer()
+		if err != nil {
+			return nil, err
+		}
+		return &remoteReadyClaimer{inner: inner, policy: s}, nil
 	}
 	return &readyClaimer{policy: s}, nil
 }
@@ -103,8 +109,8 @@ func (s *Store) BlockingAnnotator() (issueops.BlockingAnnotator, error) {
 	if err != nil {
 		return nil, err
 	}
-	if s.servesRoles() {
-		return &remoteBlockingAnnotator{served: inner, policy: s}, nil
+	if s.rolesAreRemote() {
+		return &remoteBlockingAnnotator{inner: inner, policy: s}, nil
 	}
 	return &blockingAnnotator{inner: inner, policy: s}, nil
 }
@@ -139,8 +145,8 @@ func (s *Store) TreeWalker() (issueops.TreeWalker, error) {
 	if err != nil {
 		return nil, err
 	}
-	if s.servesRoles() {
-		return &remoteTreeWalker{served: inner, policy: s}, nil
+	if s.rolesAreRemote() {
+		return &remoteTreeWalker{inner: inner, policy: s}, nil
 	}
 	return &treeWalker{inner: inner, policy: s}, nil
 }
@@ -151,7 +157,7 @@ type treeWalker struct {
 }
 
 func (t *treeWalker) WalkTree(ctx context.Context, req issueops.WalkTreeRequest) (issueops.TreeResult, error) {
-	if !plainDownTree(req) {
+	if (req.Direction != "" && req.Direction != issueops.TreeDown) || req.Status != "" || req.MaxRows != 0 {
 		return t.inner.WalkTree(ctx, req)
 	}
 	nodes, err := t.policy.GetDependencyTree(ctx, req.RootID, req.MaxDepth, false, false)

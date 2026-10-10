@@ -3,634 +3,357 @@ package externaldeps
 import (
 	"context"
 	"errors"
-	"fmt"
-	"slices"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
-	publicops "github.com/steveyegge/beads/issueops"
+	"github.com/steveyegge/beads/issueops"
 )
 
-// remoteStore models httpclient.Store for remote_roles.go. Each role it hands
-// out is served over the embedded fakeStore's rows, the way a server that
-// knows nothing of the policy answers it, and each legacy method a base
-// accessor builds on is refused, so a composition that reaches one fails the
-// test instead of passing on a fake that answers it. Like httpclient.Store it
-// cannot express ExcludeIDs and has no BatchCloserWithPolicy.
-type remoteStore struct {
+func pageOf(hasMore bool, ids ...string) issueops.IssuePage {
+	items := make([]*issueops.IssueWithCounts, 0, len(ids))
+	for _, id := range ids {
+		items = append(items, &issueops.IssueWithCounts{Issue: &types.Issue{ID: id}})
+	}
+	return issueops.IssuePage{Items: items, HasMore: hasMore}
+}
+
+func idsOf(page issueops.IssuePage) string {
+	ids := make([]string, 0, len(page.Items))
+	for _, row := range page.Items {
+		ids = append(ids, row.ID)
+	}
+	return strings.Join(ids, ",")
+}
+
+// TestExcludeAndPage pins the client-side half of the remote ready
+// exclusion: drop the blocked rows from the widened window, then cut the
+// caller's own page, with an honest HasMore.
+func TestExcludeAndPage(t *testing.T) {
+	blocked := map[string]bool{"b1": true, "b2": true}
+	for _, tc := range []struct {
+		name        string
+		window      issueops.IssuePage
+		offset      int
+		limit       int
+		wantIDs     string
+		wantHasMore bool
+	}{
+		{"blocked rows leave the page full", pageOf(false, "b1", "a", "b2", "c", "d"), 0, 2, "a,c", true},
+		{"offset counts unblocked rows only", pageOf(false, "a", "b1", "c", "d"), 1, 2, "c,d", false},
+		{"unlimited keeps every unblocked row", pageOf(false, "a", "b1", "c"), 0, 0, "a,c", false},
+		{"a server-truncated window keeps HasMore", pageOf(true, "a", "b1"), 0, 5, "a", true},
+		{"an offset past the end is an empty page", pageOf(false, "a"), 3, 2, "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := excludeAndPage(tc.window, blocked, tc.offset, tc.limit)
+			if idsOf(got) != tc.wantIDs || got.HasMore != tc.wantHasMore {
+				t.Errorf("got %q hasMore=%v, want %q hasMore=%v", idsOf(got), got.HasMore, tc.wantIDs, tc.wantHasMore)
+			}
+			if got.Items == nil {
+				t.Error("an empty page must be an empty slice, not nil")
+			}
+		})
+	}
+}
+
+func TestWidenedLimit(t *testing.T) {
+	if got := *widenedLimit(3, 10, 2); got != 15 {
+		t.Errorf("widenedLimit(3,10,2) = %d, want 15", got)
+	}
+	if got := *widenedLimit(3, 0, 2); got != 0 {
+		t.Errorf("an unlimited read stays unlimited, got %d", got)
+	}
+}
+
+// remoteFake is a remote backend (storage.RemoteBackendStore) whose legacy
+// method seam is the embedded fakeStore's and whose reader role is its own:
+// remoteReader must be reached through the decorator's IssueReader, and the
+// fake's legacy ready reads are never consulted by it.
+type remoteFake struct {
 	*fakeStore
-	// served logs each served role call, in order.
-	served []string
-	// closes logs the item ids of each served batch close.
-	closes [][]string
-	// edgeReads logs how many anchors each served edge read named.
-	edgeReads []int
-	// scans counts the whole-workspace dependency scans read through it.
-	scans int
-	// localBlockers is the served annotation's own BlockedBy, per id.
-	localBlockers map[string][]string
-	// claimErr, when set, answers every served Claim.
-	claimErr error
+	reader *recordingReader
 }
 
-var errLegacyRefused = errors.New("remoteStore: legacy method refused")
+func (r *remoteFake) IsRemoteBackendStore() bool { return true }
 
-// wireEdgeAnchorCap is the most anchors the wire's listDependencies accepts.
-const wireEdgeAnchorCap = 100
+func (r *remoteFake) IssueReader() (issueops.Reader, error) { return r.reader, nil }
 
-func newRemoteStore(ready ...*types.Issue) *remoteStore {
-	return &remoteStore{fakeStore: &fakeStore{
-		ready:                 ready,
-		deps:                  make(map[string][]*types.Dependency),
-		excludeIDsUnsupported: true,
-	}}
+// recordingReader serves a fixed ready set in order and records the limits it
+// was asked for, so the widened window is observable.
+type recordingReader struct {
+	ready  []string
+	limits []int
+	lists  int
 }
 
-func (r *remoteStore) IsRemoteBackendStore() bool { return true }
-
-// httpclient.Store serves the vocabulary a listing loads before its search.
-func (r *remoteStore) GetCustomStatusesDetailed(context.Context) ([]types.CustomStatus, error) {
-	return nil, nil
-}
-func (r *remoteStore) GetCustomTypes(context.Context) ([]string, error) { return nil, nil }
-func (r *remoteStore) GetInfraTypes(context.Context) map[string]bool    { return nil }
-
-func (r *remoteStore) SearchIssuesWithCounts(context.Context, string, types.IssueFilter) ([]*types.IssueWithCounts, error) {
-	return nil, errLegacyRefused
-}
-
-func (r *remoteStore) IsBlocked(context.Context, string) (bool, []string, error) {
-	return false, nil, errLegacyRefused
-}
-
-func (r *remoteStore) GetDependencyRecordsForIssues(context.Context, []string) (map[string][]*types.Dependency, error) {
-	return nil, errLegacyRefused
-}
-
-func (r *remoteStore) GetDependencyTree(context.Context, string, int, bool, bool) ([]*types.TreeNode, error) {
-	return nil, errLegacyRefused
-}
-
-func (r *remoteStore) ClaimReadyIssue(context.Context, types.WorkFilter, string) (*types.Issue, error) {
-	return nil, errLegacyRefused
-}
-
-func (r *remoteStore) GetAllDependencyRecords(ctx context.Context) (map[string][]*types.Dependency, error) {
-	r.scans++
-	return r.fakeStore.GetAllDependencyRecords(ctx)
-}
-
-func (r *remoteStore) GetExternalBlockingDependencyRecords(ctx context.Context) (map[string][]*types.Dependency, error) {
-	r.scans++
-	return r.fakeStore.GetExternalBlockingDependencyRecords(ctx)
-}
-
-func (r *remoteStore) IssueReader() (publicops.Reader, error)   { return servedReader{r}, nil }
-func (r *remoteStore) IssueClaimer() (publicops.Claimer, error) { return servedClaimer{r}, nil }
-func (r *remoteStore) ReadyClaimer() (publicops.ReadyClaimer, error) {
-	return servedReadyClaimer{r}, nil
-}
-func (r *remoteStore) TreeWalker() (publicops.TreeWalker, error)   { return servedWalker{r}, nil }
-func (r *remoteStore) EdgeReader() (publicops.EdgeReader, error)   { return servedEdgeReader{r}, nil }
-func (r *remoteStore) BatchCloser() (publicops.BatchCloser, error) { return servedCloser{r}, nil }
-
-func (r *remoteStore) BlockingAnnotator() (publicops.BlockingAnnotator, error) {
-	return servedAnnotator{r}, nil
-}
-
-type servedReader struct{ s *remoteStore }
-
-func (r servedReader) Ready(context.Context, publicops.ReadyRequest) (publicops.IssuePage, error) {
-	return publicops.IssuePage{}, errors.New("served Ready: ready work is the policy reader's to answer")
-}
-
-func (r servedReader) List(context.Context, publicops.ListRequest) (publicops.IssuePage, error) {
-	r.s.served = append(r.s.served, "List")
-	items := make([]*types.IssueWithCounts, 0, len(r.s.ready))
-	for _, issue := range r.s.ready {
-		items = append(items, &types.IssueWithCounts{Issue: issue})
+func (r *recordingReader) Ready(_ context.Context, req issueops.ReadyRequest) (issueops.IssuePage, error) {
+	limit := 0
+	if req.Limit != nil {
+		limit = *req.Limit
 	}
-	return publicops.IssuePage{Items: items}, nil
+	r.limits = append(r.limits, limit)
+	ids := r.ready[req.Offset:]
+	hasMore := false
+	if limit > 0 && len(ids) > limit {
+		ids, hasMore = ids[:limit], true
+	}
+	return pageOf(hasMore, ids...), nil
 }
 
-func (r servedReader) Get(ctx context.Context, req publicops.GetRequest) (*publicops.IssueDetails, error) {
-	r.s.served = append(r.s.served, "Get "+req.ID)
-	issue, err := r.s.GetIssue(ctx, req.ID)
+func (r *recordingReader) List(context.Context, issueops.ListRequest) (issueops.IssuePage, error) {
+	r.lists++
+	return pageOf(false, r.ready...), nil
+}
+
+func (r *recordingReader) Get(context.Context, issueops.GetRequest) (*issueops.IssueDetails, error) {
+	return nil, issueops.ErrNotFound
+}
+
+func newRemotePolicyStore(enforced bool) (*Store, *recordingReader) {
+	reader := &recordingReader{ready: []string{"be-x", "be-a", "be-b"}}
+	raw := &remoteFake{
+		fakeStore: &fakeStore{
+			enforced: enforced,
+			deps: map[string][]*types.Dependency{
+				"be-x": {externalDep("be-x", "external:remote:payments", types.DepBlocks)},
+			},
+		},
+		reader: reader,
+	}
+	store := New(raw, func(ProjectName) (string, bool) { return "", false }, nil)
+	store.warnProject = nil
+	return store, reader
+}
+
+// TestRemoteReaderReadyExcludesExternallyBlocked is the role-level half of
+// S6c's ready exclusion (bd ready itself reads through the legacy seam): the
+// reader the decorator hands out for a remote store drops the externally
+// blocked row from a widened window and still fills the page.
+func TestRemoteReaderReadyExcludesExternallyBlocked(t *testing.T) {
+	store, reader := newRemotePolicyStore(false)
+	rd, err := store.IssueReader()
 	if err != nil {
-		return nil, err
+		t.Fatal(err)
 	}
-	if issue == nil {
-		return nil, publicops.ErrNotFound
+	if _, ok := rd.(*remoteReader); !ok {
+		t.Fatalf("IssueReader over a remote store = %T, want the inner role passed through", rd)
 	}
-	return &publicops.IssueDetails{Issue: *issue}, nil
+	one := 1
+	page, err := rd.Ready(t.Context(), issueops.ReadyRequest{Limit: &one})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if idsOf(page) != "be-a" || !page.HasMore {
+		t.Errorf("Ready(limit 1) = %q hasMore=%v, want \"be-a\" with more", idsOf(page), page.HasMore)
+	}
+	if len(reader.limits) != 1 || reader.limits[0] != 2 {
+		t.Errorf("inner ready limits = %v, want one read widened to 2", reader.limits)
+	}
+	if _, err := rd.List(t.Context(), issueops.ListRequest{}); err != nil || reader.lists != 1 {
+		t.Errorf("an ordinary List did not pass through: lists=%d err=%v", reader.lists, err)
+	}
 }
 
-type servedClaimer struct{ s *remoteStore }
-
-func (c servedClaimer) Claim(ctx context.Context, req publicops.ClaimRequest) (publicops.ClaimResult, error) {
-	c.s.served = append(c.s.served, "Claim "+req.IssueID)
-	if c.s.claimErr != nil {
-		return publicops.ClaimResult{}, c.s.claimErr
+// TestRemoteReaderReadyPassesThroughWhenServerEnforces: a server that
+// advertises the policy has applied it; the client neither filters nor widens.
+func TestRemoteReaderReadyPassesThroughWhenServerEnforces(t *testing.T) {
+	store, reader := newRemotePolicyStore(true)
+	rd, err := store.IssueReader()
+	if err != nil {
+		t.Fatal(err)
 	}
-	if err := c.s.ClaimIssue(ctx, req.IssueID, req.Actor); err != nil {
-		return publicops.ClaimResult{}, err
+	two := 2
+	page, err := rd.Ready(t.Context(), issueops.ReadyRequest{Limit: &two})
+	if err != nil {
+		t.Fatal(err)
 	}
-	issue, err := c.s.GetIssue(ctx, req.IssueID)
-	return publicops.ClaimResult{Issue: issue, Changed: true}, err
+	if idsOf(page) != "be-x,be-a" || reader.limits[0] != 2 {
+		t.Errorf("Ready = %q (limits %v), want the server's page untouched", idsOf(page), reader.limits)
+	}
 }
 
-// servedReadyClaimer claims the first unassigned ready row, blind to the
-// policy as a claim-next with no exclusion parameter is.
-type servedReadyClaimer struct{ s *remoteStore }
+type recordingClaimer struct{ claimed []string }
 
-func (c servedReadyClaimer) ClaimNext(ctx context.Context, req publicops.ClaimNextRequest) (publicops.ClaimNextResult, error) {
-	c.s.served = append(c.s.served, "ClaimNext")
-	for _, issue := range c.s.ready {
-		if issue.Assignee != "" {
-			continue
-		}
-		if err := c.s.ClaimIssue(ctx, issue.ID, req.Actor); err != nil {
-			return publicops.ClaimNextResult{}, err
-		}
-		return publicops.ClaimNextResult{Claimed: &types.IssueWithCounts{Issue: issue}}, nil
-	}
-	return publicops.ClaimNextResult{}, nil
+func (c *recordingClaimer) Claim(_ context.Context, req issueops.ClaimRequest) (issueops.ClaimResult, error) {
+	c.claimed = append(c.claimed, req.IssueID)
+	return issueops.ClaimResult{Issue: &types.Issue{ID: req.IssueID}, Changed: true}, nil
 }
 
-type servedAnnotator struct{ s *remoteStore }
+// remoteClaimFake adds the claim and edge roles a remote claim check uses.
+type remoteClaimFake struct {
+	*remoteFake
+	claimer *recordingClaimer
+}
 
-func (a servedAnnotator) AnnotateBlocking(_ context.Context, req publicops.BlockingRequest) (publicops.BlockingResult, error) {
-	a.s.served = append(a.s.served, "AnnotateBlocking")
-	items := make([]publicops.IssueBlocking, 0, len(req.IDs))
+func (r *remoteClaimFake) IssueClaimer() (issueops.Claimer, error) { return r.claimer, nil }
+
+func (r *remoteClaimFake) EdgeReader() (issueops.EdgeReader, error) { return fakeEdges{r.deps}, nil }
+
+type fakeEdges struct {
+	deps map[string][]*types.Dependency
+}
+
+func (f fakeEdges) ReadEdges(_ context.Context, req issueops.EdgeReadRequest) (issueops.EdgeReadResult, error) {
+	out := issueops.EdgeReadResult{}
 	for _, id := range req.IDs {
-		items = append(items, publicops.IssueBlocking{ID: id, BlockedBy: slices.Clone(a.s.localBlockers[id])})
+		out.Anchors = append(out.Anchors, issueops.AnchorEdges{ID: id, Edges: f.deps[id]})
 	}
-	return publicops.BlockingResult{Items: items}, nil
+	return out, nil
 }
 
-type servedWalker struct{ s *remoteStore }
-
-func (w servedWalker) WalkTree(context.Context, publicops.WalkTreeRequest) (publicops.TreeResult, error) {
-	w.s.served = append(w.s.served, "WalkTree")
-	return publicops.TreeResult{Nodes: slices.Clone(w.s.tree)}, nil
-}
-
-type servedEdgeReader struct{ s *remoteStore }
-
-func (e servedEdgeReader) ReadEdges(_ context.Context, req publicops.EdgeReadRequest) (publicops.EdgeReadResult, error) {
-	if len(req.IDs) > wireEdgeAnchorCap {
-		return publicops.EdgeReadResult{}, fmt.Errorf("served ReadEdges: %d anchors, past the wire's %d", len(req.IDs), wireEdgeAnchorCap)
+// TestRemoteClaimerRefusesExternallyBlocked pins the direct-claim guard of
+// the remote composition (the CLI's own `update --claim` goes through the
+// lifecycle guard instead; this role is what bd serve and library callers
+// reach), reading only the claimed issue's edges.
+func TestRemoteClaimerRefusesExternallyBlocked(t *testing.T) {
+	store, _ := newRemotePolicyStore(false)
+	raw := &remoteClaimFake{remoteFake: store.inner.(*remoteFake), claimer: &recordingClaimer{}}
+	store = New(raw, func(ProjectName) (string, bool) { return "", false }, nil)
+	store.warnProject = nil
+	claimer, err := store.IssueClaimer()
+	if err != nil {
+		t.Fatal(err)
 	}
-	e.s.edgeReads = append(e.s.edgeReads, len(req.IDs))
-	anchors := make([]publicops.AnchorEdges, 0, len(req.IDs))
-	for _, id := range req.IDs {
-		anchors = append(anchors, publicops.AnchorEdges{ID: id, Edges: e.s.deps[id]})
+	if _, err := claimer.Claim(t.Context(), issueops.ClaimRequest{Actor: "a", IssueID: "be-x"}); !errors.Is(err, storage.ErrCloseBlocked) {
+		t.Errorf("claim of the externally blocked be-x: err = %v, want ErrCloseBlocked", err)
 	}
-	return publicops.EdgeReadResult{Anchors: anchors}, nil
-}
-
-type servedCloser struct{ s *remoteStore }
-
-// errServedClaimNextRefused is the served closer's answer to a next claim.
-// httpclient refuses one on every server: the v0 wire's batch close has no
-// member to carry it (ledger row W-CloseBatchRequest.ClaimNext).
-var errServedClaimNextRefused = &storage.ErrUnsupported{Op: "BatchCloser.CloseBatch", Backend: "http"}
-
-func (c servedCloser) CloseBatch(ctx context.Context, req publicops.CloseBatchRequest) (publicops.CloseBatchResult, error) {
-	if req.ClaimNext != nil {
-		c.s.served = append(c.s.served, "CloseBatch ClaimNext")
-		return publicops.CloseBatchResult{}, errServedClaimNextRefused
+	if _, err := claimer.Claim(t.Context(), issueops.ClaimRequest{Actor: "a", IssueID: "be-a"}); err != nil {
+		t.Errorf("claim of the unblocked be-a: %v", err)
 	}
-	ids := make([]string, 0, len(req.Items))
-	outcomes := make([]publicops.CloseOutcome, 0, len(req.Items))
-	for _, item := range req.Items {
-		ids = append(ids, item.IssueID)
-		result, err := c.s.CloseIssueChecked(ctx, item.IssueID, req.Actor, storage.CloseIssueOptions{})
-		outcomes = append(outcomes, publicops.CloseOutcome{IssueID: item.IssueID, Changed: err == nil && !result.Unchanged, Err: err})
-	}
-	c.s.closes = append(c.s.closes, ids)
-	return publicops.CloseBatchResult{Outcomes: outcomes}, nil
-}
-
-const paymentsRef = "external:remote:payments"
-
-func blockOnPayments(raw *remoteStore, ids ...string) {
-	for _, id := range ids {
-		raw.deps[id] = []*types.Dependency{externalDep(id, paymentsRef, types.DepBlocks)}
+	if strings.Join(raw.claimer.claimed, ",") != "be-a" {
+		t.Errorf("server claims = %v, want only be-a", raw.claimer.claimed)
 	}
 }
 
-func closeItems(ids ...string) []publicops.BatchCloseItem {
-	items := make([]publicops.BatchCloseItem, 0, len(ids))
-	for _, id := range ids {
-		items = append(items, publicops.BatchCloseItem{IssueID: id})
-	}
-	return items
+// passthroughFake is a remote store whose policy-bearing roles all record
+// their calls, and whose edge reader fails the test if read: against a server
+// that applies the policy, the client must neither read edges nor run its own
+// read-then-claim loop.
+type passthroughFake struct {
+	*remoteFake
+	claimer    *recordingClaimer
+	claimNexts int
+	counts     int
+	closes     int
+	edgeReads  int
 }
 
-// TestRemoteRolesAnswerWithoutTheLegacyMethods pins the blocker the base
-// accessors had over httpclient.Store: built over legacy methods a remote
-// store refuses, they failed bd list, bd show, bd dep tree, bd ready --claim
-// and bd close in a workspace where nothing had an external dependency.
-func TestRemoteRolesAnswerWithoutTheLegacyMethods(t *testing.T) {
-	a, b := issue("be-a"), issue("be-b")
-	raw := newRemoteStore(a, b)
-	raw.tree = []*types.TreeNode{{Issue: *a}}
-	store := testStore(raw, &fakeStore{}, true)
+func (p *passthroughFake) IssueClaimer() (issueops.Claimer, error) { return p.claimer, nil }
+
+func (p *passthroughFake) EdgeReader() (issueops.EdgeReader, error) { return countingEdges{p}, nil }
+
+func (p *passthroughFake) ReadyClaimer() (issueops.ReadyClaimer, error) { return p, nil }
+
+func (p *passthroughFake) ReadyCounter() (issueops.ReadyCounter, error) { return p, nil }
+
+func (p *passthroughFake) BatchCloser() (issueops.BatchCloser, error) { return p, nil }
+
+func (p *passthroughFake) ClaimNext(context.Context, issueops.ClaimNextRequest) (issueops.ClaimNextResult, error) {
+	p.claimNexts++
+	return issueops.ClaimNextResult{Claimed: &issueops.IssueWithCounts{Issue: &types.Issue{ID: "be-x"}}}, nil
+}
+
+func (p *passthroughFake) CountReady(context.Context, issueops.ReadyRequest) (issueops.ReadyCountResult, error) {
+	p.counts++
+	return issueops.ReadyCountResult{Total: 3}, nil
+}
+
+func (p *passthroughFake) CloseBatch(_ context.Context, req issueops.CloseBatchRequest) (issueops.CloseBatchResult, error) {
+	p.closes++
+	return issueops.CloseBatchResult{Outcomes: make([]issueops.CloseOutcome, len(req.Items))}, nil
+}
+
+type countingEdges struct{ p *passthroughFake }
+
+func (c countingEdges) ReadEdges(context.Context, issueops.EdgeReadRequest) (issueops.EdgeReadResult, error) {
+	c.p.edgeReads++
+	return issueops.EdgeReadResult{}, nil
+}
+
+// TestRemoteRolesPassThroughWhenServerEnforces pins the advertised half of
+// design 3.6 at the role level: every policy-bearing role over a server that
+// advertises policy.external_dependencies is the server's own operation,
+// untouched. In particular claim-next is ONE call to the server's atomic
+// ClaimNext, even though the client's own view would call be-x blocked.
+func TestRemoteRolesPassThroughWhenServerEnforces(t *testing.T) {
+	base, reader := newRemotePolicyStore(true)
+	raw := &passthroughFake{remoteFake: base.inner.(*remoteFake), claimer: &recordingClaimer{}}
+	store := New(raw, func(ProjectName) (string, bool) { return "", false }, nil)
+	store.warnProject = nil
 	ctx := t.Context()
 
-	reader, err := store.IssueReader()
+	rc, err := store.ReadyClaimer()
 	if err != nil {
-		t.Fatalf("IssueReader: %v", err)
+		t.Fatal(err)
 	}
-	if page, err := reader.List(ctx, publicops.ListRequest{}); err != nil || len(page.Items) != 2 {
-		t.Fatalf("List = %d items, %v; want 2", len(page.Items), err)
+	res, err := rc.ClaimNext(ctx, issueops.ClaimNextRequest{Actor: "a"})
+	if err != nil || res.Claimed == nil || res.Claimed.ID != "be-x" {
+		t.Errorf("ClaimNext = %+v, %v; want the server's own answer", res, err)
 	}
-	if details, err := reader.Get(ctx, publicops.GetRequest{ID: a.ID}); err != nil || details.ID != a.ID {
-		t.Fatalf("Get = %v, %v; want %s", details, err, a.ID)
-	}
-	if page, err := reader.Ready(ctx, publicops.ReadyRequest{}); err != nil || len(page.Items) != 2 {
-		t.Fatalf("Ready = %d items, %v; want 2", len(page.Items), err)
+	if raw.claimNexts != 1 || len(reader.limits) != 0 || len(raw.claimer.claimed) != 0 {
+		t.Errorf("claim-next: server ClaimNext calls=%d, ready reads=%v, by-id claims=%v; want one atomic call and nothing else",
+			raw.claimNexts, reader.limits, raw.claimer.claimed)
 	}
 
 	claimer, err := store.IssueClaimer()
 	if err != nil {
-		t.Fatalf("IssueClaimer: %v", err)
+		t.Fatal(err)
 	}
-	if _, err := claimer.Claim(ctx, publicops.ClaimRequest{Actor: "worker", IssueID: a.ID}); err != nil {
-		t.Fatalf("Claim: %v", err)
-	}
-	readyClaimer, err := store.ReadyClaimer()
-	if err != nil {
-		t.Fatalf("ReadyClaimer: %v", err)
-	}
-	if next, err := readyClaimer.ClaimNext(ctx, publicops.ClaimNextRequest{Actor: "worker"}); err != nil || next.Claimed == nil || next.Claimed.ID != b.ID {
-		t.Fatalf("ClaimNext = %+v, %v; want %s", next.Claimed, err, b.ID)
-	}
-
-	annotator, err := store.BlockingAnnotator()
-	if err != nil {
-		t.Fatalf("BlockingAnnotator: %v", err)
-	}
-	if result, err := annotator.AnnotateBlocking(ctx, publicops.BlockingRequest{IDs: []string{a.ID, b.ID}}); err != nil || len(result.Items) != 2 {
-		t.Fatalf("AnnotateBlocking = %+v, %v; want 2 items", result.Items, err)
-	}
-	walker, err := store.TreeWalker()
-	if err != nil {
-		t.Fatalf("TreeWalker: %v", err)
-	}
-	if tree, err := walker.WalkTree(ctx, publicops.WalkTreeRequest{RootID: a.ID, MaxDepth: 50}); err != nil || len(tree.Nodes) != 1 {
-		t.Fatalf("WalkTree = %d nodes, %v; want the served root alone", len(tree.Nodes), err)
+	if _, err := claimer.Claim(ctx, issueops.ClaimRequest{Actor: "a", IssueID: "be-x"}); err != nil {
+		t.Errorf("claim of be-x against an enforcing server: %v; want the server to judge it", err)
 	}
 
 	closer, err := store.BatchCloser()
 	if err != nil {
-		t.Fatalf("BatchCloser: %v", err)
+		t.Fatal(err)
 	}
-	result, err := closer.CloseBatch(ctx, publicops.CloseBatchRequest{Actor: "worker", Items: closeItems(a.ID, b.ID)})
-	if err != nil || len(result.Outcomes) != 2 {
-		t.Fatalf("CloseBatch = %+v, %v; want 2 outcomes", result.Outcomes, err)
+	if _, err := closer.CloseBatch(ctx, issueops.CloseBatchRequest{Actor: "a", Items: []issueops.BatchCloseItem{{IssueID: "be-x"}}}); err != nil || raw.closes != 1 {
+		t.Errorf("close of be-x: closes=%d err=%v; want one server batch close", raw.closes, err)
 	}
 
-	if want := []string{"List", "Get be-a", "Claim be-a", "ClaimNext", "AnnotateBlocking", "WalkTree"}; !slices.Equal(raw.served, want) {
-		t.Fatalf("served calls = %v, want %v", raw.served, want)
-	}
-	if want := [][]string{{a.ID, b.ID}}; !slices.EqualFunc(raw.closes, want, slices.Equal[[]string]) {
-		t.Fatalf("served closes = %v, want %v", raw.closes, want)
-	}
-}
-
-// TestRemoteReaderPolicesReadyWorkOnly: an externally blocked issue leaves the
-// ready listing and stays in a plain one, which claims nothing about
-// readiness.
-func TestRemoteReaderPolicesReadyWorkOnly(t *testing.T) {
-	a, b := issue("be-a"), issue("be-b")
-	raw := newRemoteStore(a, b)
-	blockOnPayments(raw, a.ID)
-	reader, err := testStore(raw, &fakeStore{}, true).IssueReader()
+	counter, err := store.ReadyCounter()
 	if err != nil {
-		t.Fatalf("IssueReader: %v", err)
+		t.Fatal(err)
+	}
+	if got, err := counter.CountReady(ctx, issueops.ReadyRequest{}); err != nil || got.Total != 3 || raw.counts != 1 {
+		t.Errorf("CountReady = %+v, %v (server counts %d); want the server's count", got, err, raw.counts)
 	}
 
-	ready, err := reader.Ready(t.Context(), publicops.ReadyRequest{})
-	if err != nil {
-		t.Fatalf("Ready: %v", err)
-	}
-	if len(ready.Items) != 1 || ready.Items[0].ID != b.ID {
-		t.Fatalf("Ready = %d items, want %s alone (%s is externally blocked)", len(ready.Items), b.ID, a.ID)
-	}
-	listed, err := reader.List(t.Context(), publicops.ListRequest{})
-	if err != nil {
-		t.Fatalf("List: %v", err)
-	}
-	if len(listed.Items) != 2 {
-		t.Fatalf("List = %d items, want both", len(listed.Items))
+	if raw.edgeReads != 0 {
+		t.Errorf("the client read edges %d times against a server that applies the policy", raw.edgeReads)
 	}
 }
 
-func TestRemoteClaimerRefusesExternallyBlockedWork(t *testing.T) {
-	for _, enforced := range []bool{false, true} {
-		t.Run(fmt.Sprintf("server enforces %v", enforced), func(t *testing.T) {
-			a := issue("be-a")
-			raw := newRemoteStore(a)
-			raw.enforced = enforced
-			blockOnPayments(raw, a.ID)
-			claimer, err := testStore(raw, &fakeStore{}, true).IssueClaimer()
-			if err != nil {
-				t.Fatalf("IssueClaimer: %v", err)
-			}
-
-			_, err = claimer.Claim(t.Context(), publicops.ClaimRequest{Actor: "worker", IssueID: a.ID})
-			if enforced {
-				// The server already applied the policy, so the claim is its
-				// to answer.
-				if err != nil || !slices.Equal(raw.served, []string{"Claim be-a"}) {
-					t.Fatalf("Claim = %v, served %v; want the served claim", err, raw.served)
-				}
-				return
-			}
-			if !errors.Is(err, storage.ErrCloseBlocked) || !strings.Contains(err.Error(), paymentsRef) {
-				t.Fatalf("Claim = %v, want ErrCloseBlocked naming %s", err, paymentsRef)
-			}
-			if len(raw.served) != 0 {
-				t.Fatalf("served calls = %v, want none for a refused claim", raw.served)
-			}
-		})
+// TestAppliedFindsThePolicyLayer pins what bd serve reads to decide whether to
+// advertise policy.external_dependencies: the decorator anywhere in the chain
+// counts, its absence does not.
+func TestAppliedFindsThePolicyLayer(t *testing.T) {
+	raw := &fakeStore{}
+	if Applied(raw) || Applied(nil) {
+		t.Error("a chain without the policy layer reports it applied")
+	}
+	if !Applied(New(raw, nil, nil)) {
+		t.Error("the policy decorator itself is not reported applied")
+	}
+	if !Applied(storage.NewHookFiringStore(New(raw, nil, nil), nil)) {
+		t.Error("the policy decorator beneath the hook layer is not found")
+	}
+	plain := &fakeUOWProvider{}
+	if AppliedToProvider(nil) || AppliedToProvider(plain) {
+		t.Error("a provider chain without the policy layer reports it applied")
+	}
+	wrapped := WrapUOWProvider(plain, nil, nil)
+	if !AppliedToProvider(wrapped) {
+		t.Error("WrapUOWProvider's layer is not reported applied")
+	}
+	if !AppliedToProvider(uow.NewNotifyingProvider(wrapped, uow.Sinks{Hook: noHooks{}})) {
+		t.Error("the policy layer beneath a notifying provider is not found")
 	}
 }
 
-// TestRemoteReadyClaimerSkipsExternallyBlockedWork: the served claim-next
-// cannot be told what to skip, so with anything externally blocked the claim
-// walks the policy's ready page through the served Claimer instead. be-a sorts
-// first, where the served claim-next would take it.
-func TestRemoteReadyClaimerSkipsExternallyBlockedWork(t *testing.T) {
-	a, b := issue("be-a"), issue("be-b")
-	raw := newRemoteStore(a, b)
-	blockOnPayments(raw, a.ID)
-	claimer, err := testStore(raw, &fakeStore{}, true).ReadyClaimer()
-	if err != nil {
-		t.Fatalf("ReadyClaimer: %v", err)
-	}
+type noHooks struct{}
 
-	next, err := claimer.ClaimNext(t.Context(), publicops.ClaimNextRequest{Actor: "worker"})
-	if err != nil {
-		t.Fatalf("ClaimNext: %v", err)
-	}
-	if next.Claimed == nil || next.Claimed.ID != b.ID || b.Assignee != "worker" {
-		t.Fatalf("ClaimNext claimed %+v, want %s for worker", next.Claimed, b.ID)
-	}
-	if want := []string{"Claim be-b"}; !slices.Equal(raw.served, want) {
-		t.Fatalf("served calls = %v, want %v", raw.served, want)
-	}
-}
-
-// TestRemoteReadyClaimerReportsLostRaces: a front that had work but lost every
-// candidate is an error, not the empty answer that means there is no work.
-func TestRemoteReadyClaimerReportsLostRaces(t *testing.T) {
-	a, b := issue("be-a"), issue("be-b")
-	raw := newRemoteStore(a, b)
-	blockOnPayments(raw, a.ID)
-	raw.claimErr = storage.ErrAlreadyClaimed
-	claimer, err := testStore(raw, &fakeStore{}, true).ReadyClaimer()
-	if err != nil {
-		t.Fatalf("ReadyClaimer: %v", err)
-	}
-
-	next, err := claimer.ClaimNext(t.Context(), publicops.ClaimNextRequest{Actor: "worker"})
-	if err == nil || !strings.Contains(err.Error(), "lost 1 races") || next.Claimed != nil {
-		t.Fatalf("ClaimNext = %+v, %v; want a lost-races error", next.Claimed, err)
-	}
-}
-
-// TestRemoteBlockingAnnotatorMergesExternalBlockers: the served annotation's
-// own blockers stay, the external ones join them, and the edges behind them
-// are read in chunks the wire accepts.
-func TestRemoteBlockingAnnotatorMergesExternalBlockers(t *testing.T) {
-	issues := make([]*types.Issue, 0, 150)
-	ids := make([]string, 0, 150)
-	for i := range 150 {
-		issues = append(issues, issue(fmt.Sprintf("be-%03d", i)))
-		ids = append(ids, issues[i].ID)
-	}
-	raw := newRemoteStore(issues...)
-	blockOnPayments(raw, "be-000", "be-149")
-	raw.localBlockers = map[string][]string{"be-000": {"be-local"}}
-	annotator, err := testStore(raw, &fakeStore{}, true).BlockingAnnotator()
-	if err != nil {
-		t.Fatalf("BlockingAnnotator: %v", err)
-	}
-
-	result, err := annotator.AnnotateBlocking(t.Context(), publicops.BlockingRequest{IDs: ids})
-	if err != nil {
-		t.Fatalf("AnnotateBlocking: %v", err)
-	}
-	blockedBy := make(map[string][]string, len(result.Items))
-	for _, item := range result.Items {
-		blockedBy[item.ID] = item.BlockedBy
-	}
-	if want := []string{"be-local", paymentsRef}; !slices.Equal(blockedBy["be-000"], want) {
-		t.Errorf("be-000 blocked by %v, want %v", blockedBy["be-000"], want)
-	}
-	if want := []string{paymentsRef}; !slices.Equal(blockedBy["be-149"], want) {
-		t.Errorf("be-149 blocked by %v, want %v", blockedBy["be-149"], want)
-	}
-	if len(blockedBy["be-001"]) != 0 {
-		t.Errorf("be-001 blocked by %v, want nothing", blockedBy["be-001"])
-	}
-	if want := []int{100, 50}; !slices.Equal(raw.edgeReads, want) {
-		t.Errorf("served edge reads named %v anchors, want %v", raw.edgeReads, want)
-	}
-}
-
-// TestRemoteTreeWalkerAddsExternalLeaves: the served down-tree gains the leaf
-// its stored edges name, a leaf the server rendered is not repeated, and any
-// other walk is the served answer as it came.
-func TestRemoteTreeWalkerAddsExternalLeaves(t *testing.T) {
-	root := &types.TreeNode{Issue: *issue("be-a")}
-	served := &types.TreeNode{Issue: types.Issue{ID: paymentsRef, Title: "served leaf"}, Depth: 1, ParentID: "be-a"}
-	for _, tc := range []struct {
-		name    string
-		req     publicops.WalkTreeRequest
-		tree    []*types.TreeNode
-		wantIDs []string
-	}{
-		{name: "down walk", req: publicops.WalkTreeRequest{RootID: "be-a", MaxDepth: 50}, tree: []*types.TreeNode{root}, wantIDs: []string{"be-a", paymentsRef}},
-		{name: "server rendered the leaf", req: publicops.WalkTreeRequest{RootID: "be-a", MaxDepth: 50}, tree: []*types.TreeNode{root, served}, wantIDs: []string{"be-a", paymentsRef}},
-		{name: "up walk", req: publicops.WalkTreeRequest{RootID: "be-a", MaxDepth: 50, Direction: publicops.TreeUp}, tree: []*types.TreeNode{root}, wantIDs: []string{"be-a"}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			raw := newRemoteStore()
-			raw.tree = tc.tree
-			blockOnPayments(raw, "be-a")
-			walker, err := testStore(raw, &fakeStore{}, true).TreeWalker()
-			if err != nil {
-				t.Fatalf("TreeWalker: %v", err)
-			}
-
-			result, err := walker.WalkTree(t.Context(), tc.req)
-			if err != nil {
-				t.Fatalf("WalkTree: %v", err)
-			}
-			ids := make([]string, 0, len(result.Nodes))
-			for _, node := range result.Nodes {
-				ids = append(ids, node.ID)
-			}
-			if !slices.Equal(ids, tc.wantIDs) {
-				t.Fatalf("tree = %v, want %v", ids, tc.wantIDs)
-			}
-			if leaf := result.Nodes[len(result.Nodes)-1]; tc.name == "down walk" {
-				if leaf.Status != types.StatusOpen || leaf.ParentID != "be-a" || leaf.Depth != 1 || leaf.Title != "○ payments" {
-					t.Fatalf("leaf = %+v, want the open payments leaf under be-a", leaf)
-				}
-			}
-		})
-	}
-}
-
-// TestRemoteBatchCloserRefusesExternallyBlockedItems: a still-open externally
-// blocked item is refused the way the local policy close refuses it and the
-// rest close in one served request. An item already closed keeps the served
-// answer, Force waives the policy, and a server that enforces the policy gets
-// the whole batch.
-func TestRemoteBatchCloserRefusesExternallyBlockedItems(t *testing.T) {
-	for _, tc := range []struct {
-		name        string
-		force       bool
-		enforced    bool
-		wantRefused bool
-	}{
-		{name: "policy", wantRefused: true},
-		{name: "force", force: true},
-		{name: "server enforces", enforced: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			blocked, free, done := issue("be-blocked"), issue("be-free"), issue("be-done")
-			done.Status = types.StatusClosed
-			raw := newRemoteStore(blocked, free, done)
-			raw.enforced = tc.enforced
-			blockOnPayments(raw, blocked.ID, done.ID)
-			closer, err := testStore(raw, &fakeStore{}, true).BatchCloser()
-			if err != nil {
-				t.Fatalf("BatchCloser: %v", err)
-			}
-
-			request := publicops.CloseBatchRequest{Actor: "worker", Force: tc.force, Items: closeItems(blocked.ID, free.ID, done.ID)}
-			result, err := closer.CloseBatch(t.Context(), request)
-			if err != nil {
-				t.Fatalf("CloseBatch: %v", err)
-			}
-			if len(result.Outcomes) != len(request.Items) {
-				t.Fatalf("CloseBatch answered %d outcomes for %d items", len(result.Outcomes), len(request.Items))
-			}
-			for i, outcome := range result.Outcomes {
-				if outcome.IssueID != request.Items[i].IssueID {
-					t.Fatalf("outcome %d is %s's, want %s's", i, outcome.IssueID, request.Items[i].IssueID)
-				}
-			}
-			wantServed := []string{blocked.ID, free.ID, done.ID}
-			if tc.wantRefused {
-				refusal := result.Outcomes[0].Err
-				want := "cannot close blocked issue: be-blocked is blocked by [" + paymentsRef + "]"
-				if !errors.Is(refusal, storage.ErrCloseBlocked) || refusal.Error() != want {
-					t.Fatalf("be-blocked outcome = %v, want %q", refusal, want)
-				}
-				wantServed = []string{free.ID, done.ID}
-			} else if result.Outcomes[0].Err != nil {
-				t.Fatalf("be-blocked outcome = %v, want it closed", result.Outcomes[0].Err)
-			}
-			if result.Outcomes[1].Err != nil || result.Outcomes[2].Err != nil {
-				t.Fatalf("be-free, be-done outcomes = %v, %v; want the served answers", result.Outcomes[1].Err, result.Outcomes[2].Err)
-			}
-			if want := [][]string{wantServed}; !slices.EqualFunc(raw.closes, want, slices.Equal[[]string]) {
-				t.Fatalf("served closes = %v, want %v", raw.closes, want)
-			}
-		})
-	}
-}
-
-// TestRemoteBatchCloserRefusesANextClaim: the served batch close cannot carry
-// a next claim, so a batch with one is refused whole, the same way whether the
-// workspace holds an open holder of an external ref, only a closed one, or
-// none, and with Force too. The refusal leads with that wire fact, reads
-// nothing, closes nothing and names the commands that do the same work. A
-// server that enforces the policy itself gets the request as it came, and its
-// closer answers.
-func TestRemoteBatchCloserRefusesANextClaim(t *testing.T) {
-	for _, tc := range []struct {
-		name       string
-		holder     types.Status
-		force      bool
-		enforced   bool
-		wantServed []string
-	}{
-		{name: "open holder", holder: types.StatusOpen},
-		{name: "closed holder", holder: types.StatusClosed},
-		{name: "no holder"},
-		{name: "force", holder: types.StatusOpen, force: true},
-		{name: "server enforces", holder: types.StatusOpen, enforced: true, wantServed: []string{"CloseBatch ClaimNext"}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			free, holder := issue("be-free"), issue("be-holder")
-			raw := newRemoteStore(free, holder)
-			raw.enforced = tc.enforced
-			if tc.holder != "" {
-				holder.Status = tc.holder
-				blockOnPayments(raw, holder.ID)
-			}
-			closer, err := testStore(raw, &fakeStore{}, true).BatchCloser()
-			if err != nil {
-				t.Fatalf("BatchCloser: %v", err)
-			}
-
-			_, err = closer.CloseBatch(t.Context(), publicops.CloseBatchRequest{
-				Actor: "worker", Force: tc.force, Items: closeItems(free.ID), ClaimNext: &publicops.ReadyRequest{},
-			})
-			if tc.enforced {
-				if !errors.Is(err, errServedClaimNextRefused) {
-					t.Fatalf("CloseBatch with ClaimNext = %v, want the served closer's answer", err)
-				}
-			} else {
-				var unsupported *storage.ErrUnsupported
-				if !errors.As(err, &unsupported) || unsupported.Op != "CloseBatchRequest.ClaimNext" {
-					t.Fatalf("CloseBatch with ClaimNext = %v, want the CloseBatchRequest.ClaimNext refusal", err)
-				}
-				if msg := err.Error(); !strings.Contains(msg, "cannot carry a next claim") || !strings.Contains(msg, "nothing was closed") || !strings.Contains(msg, "then run `bd ready --claim`") {
-					t.Fatalf("refusal %q does not say why, that nothing closed, and what to run instead", msg)
-				}
-			}
-			if !slices.Equal(raw.served, tc.wantServed) {
-				t.Fatalf("served calls = %v, want %v", raw.served, tc.wantServed)
-			}
-			if len(raw.closes) != 0 || len(raw.edgeReads) != 0 || raw.scans != 0 {
-				t.Fatalf("closes %v, edge reads %v, scans %d; want none", raw.closes, raw.edgeReads, raw.scans)
-			}
-		})
-	}
-}
-
-// TestRemoteBatchCloserValidatesANextClaimFirst: a next claim that is invalid
-// on every backend is ErrValidation, not the refusal.
-func TestRemoteBatchCloserValidatesANextClaimFirst(t *testing.T) {
-	for name, claim := range map[string]*publicops.ReadyRequest{
-		"offset":   {Offset: 1},
-		"bad sort": {Sort: "bogus"},
-	} {
-		t.Run(name, func(t *testing.T) {
-			raw := newRemoteStore(issue("be-free"))
-			closer, err := testStore(raw, &fakeStore{}, true).BatchCloser()
-			if err != nil {
-				t.Fatalf("BatchCloser: %v", err)
-			}
-
-			_, err = closer.CloseBatch(t.Context(), publicops.CloseBatchRequest{
-				Actor: "worker", Items: closeItems("be-free"), ClaimNext: claim,
-			})
-			var unsupported *storage.ErrUnsupported
-			if !errors.Is(err, storage.ErrValidation) || errors.As(err, &unsupported) {
-				t.Fatalf("CloseBatch with ClaimNext %+v = %v, want ErrValidation", claim, err)
-			}
-		})
-	}
-}
+func (noHooks) Run(string, *types.Issue) {}

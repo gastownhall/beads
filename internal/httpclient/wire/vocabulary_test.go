@@ -141,6 +141,9 @@ func TestTheProjectIdentityVocabularyMatchesTheServer(t *testing.T) {
 	if CapProjectEnforce != httpapi.CapProjectEnforce {
 		t.Errorf("CapProjectEnforce = %q, server says %q", CapProjectEnforce, httpapi.CapProjectEnforce)
 	}
+	if CapExternalDependencies != httpapi.CapExternalDependencies {
+		t.Errorf("CapExternalDependencies = %q, server says %q", CapExternalDependencies, httpapi.CapExternalDependencies)
+	}
 	if CapListSort != httpapi.CapIssuesListSort {
 		t.Errorf("CapListSort = %q, server says %q", CapListSort, httpapi.CapIssuesListSort)
 	}

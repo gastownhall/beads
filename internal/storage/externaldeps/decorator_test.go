@@ -374,7 +374,7 @@ func TestGetReadyWorkFailsClosedForUnconfiguredProject(t *testing.T) {
 // mutation coverage. Nothing else in the suite exercises enforced==true: see
 // internal/httpclient/served_external_dependency_policy_test.go, which
 // documents exercising only enforced==false against a real served server
-// (OSS httpapi never advertises the capability).
+// (its harness serves raw roles, so it withholds the capability).
 //
 // configured=false on the foreign-project locator reproduces the fail-closed
 // path from TestGetReadyWorkFailsClosedForUnconfiguredProject: if the
