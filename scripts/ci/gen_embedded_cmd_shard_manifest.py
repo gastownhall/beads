@@ -4,32 +4,35 @@
 Discovery must stay in step with embedded-test-shard.sh: both select every
 top-level TestEmbedded* function from cmd/bd/*_embedded_test.go.
 
-Two cost models, selected by --weights (default: inits, matching
+Two cost models, selected by --weights (default: duration, matching
 gen_proxied_shard_manifest.py's convention — see that script's module
 docstring for the full rationale this one shares):
 
-  --weights=inits (default): a cheap static proxy for wall-time — the
-    function's subtest count (t.Run( occurrences), floored at 1. Unlike the
-    proxied generator's bd-init count, embedded cmd tests do not share one
-    dominant per-call cost center, so subtest count is the simplest proxy
-    that is still monotonic in "more scenarios this function exercises."
-
-  --weights=duration: measured wall-time from
+  --weights=duration (default): measured wall-time from
     scripts/ci/embedded_cmd_test_durations.json (see that file's header for
     provenance). A function missing from that file — a test added since it
     was last captured — falls back to its inits cost times the file's
     "seconds_per_init_fallback" ratio. A from-scratch pack models the shard
     process (pack_concurrent): functions without a top-level t.Parallel()
-    run one after another, the rest share -test.parallel=4 slots.
+    run one after another, the rest share -test.parallel=4 slots. The
+    manifest's only remaining block is duration-packed (see below), so this
+    is also the only --weights whose render() header matches what is
+    committed — a bare `--write` with no flags reproduces the committed file
+    instead of silently clobbering its header with the inits one.
 
-This file's existing 20-shard block (hand-assigned, round-robin; see its own
-header) is the FROZEN block PR Risk's and main.yml's legacy fork/push jobs
-read — see engdocs/TESTING.md. Do NOT regenerate it. This generator's
---weights=duration path targets a *separate*, Bazel-only shard total (the
-bazel-embedded job in .github/workflows/bazel.yml): a different total_shards
-value, written as its own block in the same manifest file (see
-split_blocks()/write_block() in _embedded_shard_manifest_lib.py for how one
-file holds more than one independent block).
+  --weights=inits: a cheap static proxy for wall-time — the function's
+    subtest count (t.Run( occurrences), floored at 1. Unlike the proxied
+    generator's bd-init count, embedded cmd tests do not share one dominant
+    per-call cost center, so subtest count is the simplest proxy that is
+    still monotonic in "more scenarios this function exercises." Pass this
+    explicitly if you want it; --write still honors it, it is just no longer
+    the default.
+
+This generator's --weights=duration path targets the Bazel-only shard total
+(the bazel-embedded job in .github/workflows/bazel.yml). The legacy,
+hand-assigned 20-shard block that PR Risk's and main.yml's retired fork/push
+jobs used to read has been deleted (those jobs no longer exist; see
+engdocs/TESTING.md): the manifest file now holds exactly the one live block.
 
 --write is INCREMENTAL by default (see --repack to force a full rebalance);
 --check verifies exact-once NAME coverage only, not shard assignments. Both
@@ -54,7 +57,9 @@ from _embedded_shard_manifest_lib import (  # noqa: E402
 
 default_manifest_path = '.github/scripts/embedded-cmd-test-shards.txt'
 durations_filename = 'embedded_cmd_test_durations.json'
-default_total_shards = 20
+# The Bazel-only block's total (bd_embedded_test + bd_embedded_part2_test's
+# shard_counts in cmd/bd/BUILD.bazel must sum to this).
+default_total_shards = 100
 # .bazelrc's test:embedded --test_arg=-test.parallel=4: how many t.Parallel
 # top-level tests one shard's process runs at once (--weights=duration).
 test_parallelism = 4
@@ -131,35 +136,27 @@ def render(total, shards, weights):
     out.append('#')
     out.append('# Format: <total_shards> <shard_number> <top_level_test_name>')
     out.append('#')
-    if total == default_total_shards and weights == 'inits':
-        out.append(f'# {total}-shard split. This block is hand-assigned (round-robin,')
-        out.append('# not cost-balanced) and FROZEN for pr-risk.yml/main.yml\'s legacy')
-        out.append('# fork/push jobs (see engdocs/TESTING.md): do not regenerate it. Newly-')
-        out.append('# added tests not listed here hash-distribute via embedded-test-shard.sh:')
-        out.append('# cksum(name) % total. --check does not cover this block; only the')
-        out.append('# Bazel-only --weights=duration block is checked in CI.')
-    else:
-        out.append(f'# {total}-shard split for the Bazel-only embedded-Dolt cmd tier')
-        out.append('# (bazel-embedded in .github/workflows/bazel.yml), bin-packed')
-        out.append('# longest-first by measured wall-time from')
-        out.append(f'# scripts/ci/{durations_filename} (see that file for provenance')
-        out.append('# and its "relative weight, not absolute SLA" caveat) onto the shard')
-        out.append('# whose estimated wall time grows least: serial tests (no top-level')
-        out.append(f'# t.Parallel) add up, parallel ones share -test.parallel={test_parallelism}.')
-        out.append(f'# Regenerate with scripts/ci/gen_embedded_cmd_shard_manifest.py {total}')
-        out.append('# --weights=duration --write after adding, splitting or removing')
-        out.append('# TestEmbedded* functions in cmd/bd/*_embedded_test.go. --write is')
-        out.append('# incremental: it keeps every already-assigned test on its current shard')
-        out.append('# and only places newly-discovered names, onto whichever shard is')
-        out.append('# currently lightest, so two unrelated PRs that each add one test do not')
-        out.append('# textually conflict or silently invalidate each other\'s packing. Pass')
-        out.append('# --repack to force a full from-scratch rebalance instead (a deliberate,')
-        out.append('# separate change — expect a large diff). --check only verifies every')
-        out.append('# discovered name is listed here exactly once (no stale or duplicate')
-        out.append('# entries); it does NOT verify the packing is still well-balanced.')
-        out.append('#')
-        out.append('# This file is generated: notes added here are erased by the next')
-        out.append('# regeneration. Add them to the generator or the durations file instead.')
+    out.append(f'# {total}-shard split for the Bazel-only embedded-Dolt cmd tier')
+    out.append('# (bazel-embedded in .github/workflows/bazel.yml), bin-packed')
+    out.append('# longest-first by measured wall-time from')
+    out.append(f'# scripts/ci/{durations_filename} (see that file for provenance')
+    out.append('# and its "relative weight, not absolute SLA" caveat) onto the shard')
+    out.append('# whose estimated wall time grows least: serial tests (no top-level')
+    out.append(f'# t.Parallel) add up, parallel ones share -test.parallel={test_parallelism}.')
+    out.append(f'# Regenerate with scripts/ci/gen_embedded_cmd_shard_manifest.py {total}')
+    out.append('# --weights=duration --write after adding, splitting or removing')
+    out.append('# TestEmbedded* functions in cmd/bd/*_embedded_test.go. --write is')
+    out.append('# incremental: it keeps every already-assigned test on its current shard')
+    out.append('# and only places newly-discovered names, onto whichever shard is')
+    out.append('# currently lightest, so two unrelated PRs that each add one test do not')
+    out.append('# textually conflict or silently invalidate each other\'s packing. Pass')
+    out.append('# --repack to force a full from-scratch rebalance instead (a deliberate,')
+    out.append('# separate change — expect a large diff). --check only verifies every')
+    out.append('# discovered name is listed here exactly once (no stale or duplicate')
+    out.append('# entries); it does NOT verify the packing is still well-balanced.')
+    out.append('#')
+    out.append('# This file is generated: notes added here are erased by the next')
+    out.append('# regeneration. Add them to the generator or the durations file instead.')
     out.append('')
     for i in range(total):
         for name in sorted(shards[i]):
@@ -171,7 +168,7 @@ def render(total, shards, weights):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     ap.add_argument('total_shards', nargs='?', type=int, default=None)
-    ap.add_argument('--weights', choices=['inits', 'duration'], default='inits')
+    ap.add_argument('--weights', choices=['inits', 'duration'], default='duration')
     ap.add_argument('--manifest', default=default_manifest_path,
                      help=f'manifest file to read/write (default: {default_manifest_path})')
     mode = ap.add_mutually_exclusive_group()
@@ -186,20 +183,6 @@ def main():
                           'from-scratch LPT pack')
     args = ap.parse_args()
     if args.total_shards is None:
-        # N3 (F1 review): omitting total_shards used to default to 20, the
-        # FROZEN legacy block's own total, with --weights=inits also
-        # defaulting on -- so a bare `--write` silently rewrote the frozen
-        # legacy 20-shard block instead of erroring or targeting the
-        # Bazel-only block. Require the caller to say which total they mean
-        # whenever they're about to write; --check/dry-run keep the old
-        # default_total_shards=20 fallback since reading the legacy block is
-        # harmless and already how engdocs/TESTING.md documents inspecting it.
-        if args.write:
-            ap.error(f'total_shards is required with --write (the default, {default_total_shards}, '
-                     'is the FROZEN legacy block -- see its header in embedded-cmd-test-shards.txt; '
-                     'it must not be regenerated). Pass the Bazel-only total explicitly instead, e.g. '
-                     '"100 --weights=duration" for bazel-embedded\'s block (see cmd/bd/BUILD.bazel\'s '
-                     'bd_embedded_test/bd_embedded_part2_test --shard-total for the current value)')
         args.total_shards = default_total_shards
 
     inits = discover_inits_cost()

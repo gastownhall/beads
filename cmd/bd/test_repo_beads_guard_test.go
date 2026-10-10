@@ -16,6 +16,7 @@ import (
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/migration"
 	"github.com/steveyegge/beads/internal/testutil"
+	"github.com/steveyegge/beads/internal/testutil/bazeltest"
 	"github.com/steveyegge/beads/internal/testutil/credentialcmd"
 	"github.com/steveyegge/beads/internal/workspacegate"
 )
@@ -176,23 +177,28 @@ func testMainInner(m *testing.M) int {
 	// /tmp and exhausted tmpfs over time (bd-3q2u).
 	testTempRoot = tmp
 
-	// Preserve Go build cache before changing HOME.
-	// On macOS, GOCACHE defaults to $HOME/Library/Caches/go-build.
-	// Changing HOME would cause tests that run `go build` (e.g., TestShow)
-	// to miss the cache and do a full CGO rebuild (~80s each).
-	if os.Getenv("GOCACHE") == "" {
-		if out, err := exec.Command("go", "env", "GOCACHE").Output(); err == nil {
-			_ = os.Setenv("GOCACHE", strings.TrimSpace(string(out)))
+	// Preserve Go build cache before changing HOME. On macOS, GOCACHE
+	// defaults to $HOME/Library/Caches/go-build. Changing HOME would cause
+	// tests that run `go build` (e.g., TestShow) to miss the cache and do a
+	// full CGO rebuild (~80s each). Under Bazel there is no host Go
+	// toolchain on the hermetic test PATH (tools/bazel/test_env.sh) and no
+	// in-test `go build` to preserve a cache for, so skip the host `go env`
+	// exec entirely rather than rely on its error being ignored.
+	if !bazeltest.IsBazel() {
+		if os.Getenv("GOCACHE") == "" {
+			if out, err := exec.Command("go", "env", "GOCACHE").Output(); err == nil {
+				_ = os.Setenv("GOCACHE", strings.TrimSpace(string(out)))
+			}
 		}
-	}
 
-	// Same for the module cache: GOMODCACHE defaults to $HOME/go/pkg/mod,
-	// so without this the in-test `go build` (buildEmbeddedBD) re-downloads
-	// every dependency into the temp HOME on each run — slow, and a hard
-	// failure when the network is unavailable.
-	if os.Getenv("GOMODCACHE") == "" {
-		if out, err := exec.Command("go", "env", "GOMODCACHE").Output(); err == nil {
-			_ = os.Setenv("GOMODCACHE", strings.TrimSpace(string(out)))
+		// Same for the module cache: GOMODCACHE defaults to $HOME/go/pkg/mod,
+		// so without this the in-test `go build` (buildEmbeddedBD) re-downloads
+		// every dependency into the temp HOME on each run — slow, and a hard
+		// failure when the network is unavailable.
+		if os.Getenv("GOMODCACHE") == "" {
+			if out, err := exec.Command("go", "env", "GOMODCACHE").Output(); err == nil {
+				_ = os.Setenv("GOMODCACHE", strings.TrimSpace(string(out)))
+			}
 		}
 	}
 

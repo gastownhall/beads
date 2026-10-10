@@ -12,6 +12,16 @@ go_binary(
     srcs = ["testdata/preflight-go.go"],
 )
 
+# The external `dolt` stand-in for TestRunCompactDoltTargetsOnlyAuthorizedActiveDatabase
+# (compact_gc_target_test.go), entirely env-driven at run time, so one
+# prebuilt copy covers every test case and mode: the test never needs a host
+# Go toolchain under Bazel (bazeltest.RunfileEnv, BEADS_TEST_COMPACT_GC_FIXTURE).
+go_binary(
+    name = "compact_gc_fixture",
+    testonly = True,
+    srcs = ["testdata/compact-gc-fixture.go"],
+)
+
 go_library(
     name = "bd_lib",
     srcs = [
@@ -1267,6 +1277,7 @@ go_test(
     ],
     data = glob(["testdata/**"]) + [
         ":bd_for_tests",
+        ":compact_gc_fixture",
         ":go_srcs",
         ":preflight_go_fixture",
         "//:bd_test_files",
@@ -1279,6 +1290,7 @@ go_test(
     env = {
         "BEADS_TEST_BD_BINARY": "$(rlocationpath :bd_for_tests)",
         "BEADS_TEST_GOFMT": "$(rlocationpath @go_sdk//:bin/gofmt)",
+        "BEADS_TEST_COMPACT_GC_FIXTURE": "$(rlocationpath :compact_gc_fixture)",
         "BEADS_TEST_PREFLIGHT_GO": "$(rlocationpath :preflight_go_fixture)",
     },
     shard_count = 16,
@@ -1411,13 +1423,12 @@ go_test(
 # check_shard_coverage.py fails unless the two ranges tile the block exactly
 # once). Both run this configuration's bd_test with
 # BEADS_TEST_EMBEDDED_DOLT=1 and the race bd (//cmd/bd:bd under
-# --config=embedded) as the subprocess binary. This is a *different* shard
-# count from PR Risk's legacy fork/push jobs, "Test (Embedded Dolt Cmd
-# N/20)" (pr-risk.yml): those keep running 20 shards of their own, frozen
-# hand-assigned block in the same manifest file — shard k here is not the
-# same split as their shard k. Each repeats bd_test's `env` (the wrapper
-# cannot inherit it). The two shard_counts must sum to --shard-total, the
-# manifest block's shard total.
+# --config=embedded) as the subprocess binary. PR Risk's legacy fork/push
+# jobs, "Test (Embedded Dolt Cmd N/20)" (pr-risk.yml), which used to run 20
+# shards of their own hand-assigned block in the same manifest file, no
+# longer exist; the manifest now holds only this 100-shard block. Each
+# repeats bd_test's `env` (the wrapper cannot inherit it). The two
+# shard_counts must sum to --shard-total, the manifest block's shard total.
 #
 # Tags:
 #   embedded: the embedded-Dolt tier; excluded from --config=prcore/ci,
@@ -1509,15 +1520,14 @@ sh_test(
 # functions, assigned by the manifest's 34-shard block (duration-balanced;
 # see scripts/ci/proxied_test_durations.json), against this configuration's
 # (race) bd_test with BEADS_TEST_PROXIED_SERVER=1 and the non-race
-# bd_for_tests as the subprocess binary. This is a *different* shard count
-# from PR Risk's legacy fork/push jobs, "Test (Proxied Dolt Cmd N/15)"
-# (pr-risk.yml): those keep running 15 shards of their own,
-# frozen bd-init-cost-proxy block in the same manifest file — shard k here
-# is not the same split as their shard k. PR Risk builds its bd-cmd-test
-# with -race, as here. The shared proxied harness gets its dolt sql-server from
-# internal/testutil's local backend (the pinned dolt in the test
-# wrapper's runfiles) instead of the jobs' container, and fails instead
-# of skipping when it cannot start one. It repeats bd_test's `env`.
+# bd_for_tests as the subprocess binary. PR Risk's legacy fork/push jobs,
+# "Test (Proxied Dolt Cmd N/15)" (pr-risk.yml), which used to run 15 shards
+# of their own frozen bd-init-cost-proxy block in the same manifest file, no
+# longer exist; the manifest now holds only this 34-shard block. The shared
+# proxied harness gets its dolt sql-server from internal/testutil's local
+# backend (the pinned dolt in the test wrapper's runfiles) instead of a
+# container, and fails instead of skipping when it cannot start one. It
+# repeats bd_test's `env`.
 # shard_count must stay equal to the manifest block's shard total.
 #
 # Tags:
@@ -1602,6 +1612,7 @@ sh_test(
     data = [
         ":bd_for_tests",
         ":bd_test",
+        ":compact_gc_fixture",
         ":go_srcs",
         ":preflight_go_fixture",
         "@go_sdk//:bin/gofmt",
@@ -1610,6 +1621,7 @@ sh_test(
         "BEADS_TEST_BD_BINARY": "$(rlocationpath :bd_for_tests)",
         "BEADS_TEST_DOLT_SERVER": "local",
         "BEADS_TEST_GOFMT": "$(rlocationpath @go_sdk//:bin/gofmt)",
+        "BEADS_TEST_COMPACT_GC_FIXTURE": "$(rlocationpath :compact_gc_fixture)",
         "BEADS_TEST_PREFLIGHT_GO": "$(rlocationpath :preflight_go_fixture)",
         "BEADS_TEST_PROXIED_LOCAL": "1",
         "BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1",
@@ -1658,6 +1670,7 @@ sh_test(
     data = [
         ":bd_for_tests",
         ":bd_test",
+        ":compact_gc_fixture",
         ":dolt_server_pinned_shards.txt",
         ":preflight_go_fixture",
         "@go_sdk//:bin/gofmt",
@@ -1668,6 +1681,7 @@ sh_test(
         # The integration jobs' global git identity (tools/bazel/test_env.sh).
         "BEADS_TEST_GIT_IDENTITY": "1",
         "BEADS_TEST_GOFMT": "$(rlocationpath @go_sdk//:bin/gofmt)",
+        "BEADS_TEST_COMPACT_GC_FIXTURE": "$(rlocationpath :compact_gc_fixture)",
         "BEADS_TEST_PREFLIGHT_GO": "$(rlocationpath :preflight_go_fixture)",
         "BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1",
         # TestSharedServerConcurrent (skipped everywhere else) as a bounded
