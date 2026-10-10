@@ -2626,3 +2626,60 @@ DROP TABLE IF EXISTS wisps;
 	requireDoltCount(t, dir,
 		`SELECT COUNT(*) AS c FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'wisps'`, "0")
 }
+
+// TestShowTableExistsMatchesInformationSchemaOnDolt proves the per-open table
+// probe (SHOW TABLES LIKE, exact name) agrees with the INFORMATION_SCHEMA.TABLES
+// count it replaced, on a real Dolt: for a present table, an absent one, a
+// dolt_ignored table that lives only in the working set (the wisp tables'
+// shape), and a name whose '_' LIKE-matches a different table.
+func TestShowTableExistsMatchesInformationSchemaOnDolt(t *testing.T) {
+	testutil.RequireDoltBinary(t)
+
+	dir := filepath.Join(t.TempDir(), "show-tables-probe")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("create probe dir: %v", err)
+	}
+	runDoltCommand(t, dir, "init", "--name", "test", "--email", "test@example.com")
+
+	infoSchemaHas := func(table string) bool {
+		rows := queryDoltCSV(t, dir, fmt.Sprintf(`
+SELECT COUNT(*) AS cnt
+FROM INFORMATION_SCHEMA.TABLES
+WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '%s'`, table))
+		return len(rows) == 1 && rows[0]["cnt"] == "1"
+	}
+	showTablesHas := func(table string) bool {
+		rows := queryDoltCSV(t, dir, fmt.Sprintf("SHOW TABLES LIKE '%s'", table))
+		for _, r := range rows {
+			for _, v := range r {
+				if v == table {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	agree := func(state, table string, want bool) {
+		t.Helper()
+		if got := showTablesHas(table); got != want {
+			t.Fatalf("%s: SHOW TABLES reported %s present=%v, want %v", state, table, got, want)
+		}
+		if got := infoSchemaHas(table); got != want {
+			t.Fatalf("%s: INFORMATION_SCHEMA reported %s present=%v, want %v", state, table, got, want)
+		}
+	}
+
+	agree("empty database", "wisps", false)
+
+	runDoltSQL(t, dir, "CREATE TABLE issues (id VARCHAR(64) PRIMARY KEY)")
+	agree("committed-shape table", "issues", true)
+
+	runDoltSQL(t, dir, "INSERT INTO dolt_ignore VALUES ('wisp_*', true)")
+	runDoltSQL(t, dir, "CREATE TABLE wisp_dependencies (id VARCHAR(64) PRIMARY KEY)")
+	agree("dolt_ignored working-set table", "wisp_dependencies", true)
+
+	// 'schemaxmigrations' LIKE-matches 'schema_migrations'; only the exact
+	// compare keeps the probe from reporting the cursor table present.
+	runDoltSQL(t, dir, "CREATE TABLE schemaxmigrations (id INT PRIMARY KEY)")
+	agree("LIKE wildcard lookalike", "schema_migrations", false)
+}

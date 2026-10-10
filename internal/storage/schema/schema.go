@@ -1363,28 +1363,40 @@ func (m migrationSource) bootstrapSQL() string {
 
 // hasContentHashColumn reports whether the cursor table already carries the
 // content_hash column. A not-yet-created table simply reports false.
-//
-// It probes a single table with SHOW COLUMNS rather than INFORMATION_SCHEMA.COLUMNS,
-// whose predicate Dolt does not push down. The LIKE narrows the result set, but
-// we still compare the Field name exactly because '_' is a LIKE single-character
-// wildcard.
 func (m migrationSource) hasContentHashColumn(ctx context.Context, db DBConn) (bool, error) {
-	//nolint:gosec // G201: m.cursorTable is a hardcoded constant; the LIKE literal is fixed.
-	rows, err := db.QueryContext(ctx, "SHOW COLUMNS FROM "+m.cursorTable+" LIKE 'content_hash'")
+	return showColumnExists(ctx, db, m.cursorTable, "content_hash")
+}
+
+// showColumnExists reports whether table carries column, probing the ONE table
+// with SHOW COLUMNS rather than INFORMATION_SCHEMA.COLUMNS, whose predicate Dolt
+// does not push down: on a server hosting ~30 databases the INFORMATION_SCHEMA
+// form scanned every database and took 5-6 s per probe (measured 2026-09-17,
+// portharbour, dolt 2.3.x), and cursorRealityFloor runs it on EVERY store open —
+// a 15-store federated `gc ready` spent ~80 s of its 90 s here. SHOW COLUMNS on
+// the same server answers in 0.15 s.
+//
+// The LIKE narrows the result set, but the Field name is still compared exactly
+// because '_' is a LIKE single-character wildcard (the LIKE literal is left
+// unescaped on purpose: the exact compare is the guard, and the repair-path
+// mocks pin this literal form). A missing table reports false, as the
+// INFORMATION_SCHEMA count did. table and column are the hardcoded
+// identifiers the migration series names — never user input.
+func showColumnExists(ctx context.Context, db DBConn, table, column string) (bool, error) {
+	//nolint:gosec // G201: table and the LIKE literal are migration-series constants.
+	rows, err := db.QueryContext(ctx, "SHOW COLUMNS FROM "+table+" LIKE '"+column+"'")
 	if err != nil {
-		// SHOW COLUMNS errors on a missing table; the old INFORMATION_SCHEMA
-		// probe returned count 0 instead. Preserve that: an absent cursor table
-		// has no content_hash column.
+		// SHOW COLUMNS errors on a missing table; the INFORMATION_SCHEMA probe
+		// returned count 0 instead. Preserve that: an absent table has no columns.
 		if dberrors.IsTableNotExist(err) {
 			return false, nil
 		}
-		return false, fmt.Errorf("checking %s.content_hash: %w", m.cursorTable, err)
+		return false, fmt.Errorf("checking %s.%s: %w", table, column, err)
 	}
 	defer func() { _ = rows.Close() }()
 
 	cols, err := rows.Columns()
 	if err != nil {
-		return false, fmt.Errorf("checking %s.content_hash: %w", m.cursorTable, err)
+		return false, fmt.Errorf("checking %s.%s: %w", table, column, err)
 	}
 	// SHOW COLUMNS returns Field, Type, Null, Key, Default, Extra (and possibly
 	// more on some servers); scan every column into RawBytes and read the first
@@ -1396,14 +1408,14 @@ func (m migrationSource) hasContentHashColumn(ctx context.Context, db DBConn) (b
 	}
 	for rows.Next() {
 		if err := rows.Scan(dest...); err != nil {
-			return false, fmt.Errorf("checking %s.content_hash: %w", m.cursorTable, err)
+			return false, fmt.Errorf("checking %s.%s: %w", table, column, err)
 		}
-		if len(cells) > 0 && string(cells[0]) == "content_hash" {
+		if len(cells) > 0 && string(cells[0]) == column {
 			return true, nil
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return false, fmt.Errorf("checking %s.content_hash: %w", m.cursorTable, err)
+		return false, fmt.Errorf("checking %s.%s: %w", table, column, err)
 	}
 	return false, nil
 }
@@ -1583,19 +1595,65 @@ func (m migrationSource) cursorRealityFloor(ctx context.Context, db DBConn) (int
 
 // sentinelTableExists is a function variable for the same reason
 // issueRowCounter is: it lets the cursor-reality tests exercise the real
-// decision without a live database.
-var sentinelTableExists = func(ctx context.Context, db DBConn, table string) (bool, error) {
-	var n int
-	if err := db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES
-		 WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?`,
-		table).Scan(&n); err != nil {
-		return false, err
+// decision without a live database. It runs on EVERY store open
+// (cursorRealityFloor, two tables on the ignored source), so it takes the
+// SHOW TABLES prober for the reason sentinelColumnExists takes SHOW COLUMNS.
+var sentinelTableExists = showTableExists
+
+// showTableExists reports whether the session's current database holds table,
+// probing with SHOW TABLES rather than INFORMATION_SCHEMA.TABLES. Dolt does not
+// push the TABLES predicate down any more than the COLUMNS one: the probe walks
+// the catalog of every database on the server, and the open path ran it three
+// times per store open (two sentinels plus the stray-scratch check). On a
+// shared server taking a dozen bd opens a second those walks were a large share
+// of the server's CPU (measured 2026-10-08, 9 databases, dolt 2.1.10); SHOW
+// TABLES reads only the current database.
+//
+// Unlike the INFORMATION_SCHEMA count, SHOW TABLES errors when no database is
+// selected, so this is only for callers already on the target database: the
+// cursor-existence probe in currentVersion, which must succeed on any session
+// (be-bv7x), keeps the INFORMATION_SCHEMA form. The name is compared exactly
+// because '_' is a LIKE single-character wildcard; table is a migration-series
+// constant, never user input.
+func showTableExists(ctx context.Context, db DBConn, table string) (bool, error) {
+	//nolint:gosec // G201: table is a migration-series constant.
+	rows, err := db.QueryContext(ctx, "SHOW TABLES LIKE '"+table+"'")
+	if err != nil {
+		return false, fmt.Errorf("checking table %s: %w", table, err)
 	}
-	return n > 0, nil
+	defer func() { _ = rows.Close() }()
+
+	cols, err := rows.Columns()
+	if err != nil {
+		return false, fmt.Errorf("checking table %s: %w", table, err)
+	}
+	// SHOW TABLES returns Tables_in_<db> (plus Table_type on SHOW FULL TABLES
+	// and on some servers); the first column is the table name.
+	cells := make([]sql.RawBytes, len(cols))
+	dest := make([]any, len(cols))
+	for i := range cells {
+		dest[i] = &cells[i]
+	}
+	for rows.Next() {
+		if err := rows.Scan(dest...); err != nil {
+			return false, fmt.Errorf("checking table %s: %w", table, err)
+		}
+		if len(cells) > 0 && string(cells[0]) == table {
+			return true, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("checking table %s: %w", table, err)
+	}
+	return false, nil
 }
 
-var sentinelColumnExists = schemaColumnExists
+// sentinelColumnExists runs on EVERY store open (cursorRealityFloor), so it
+// takes the SHOW COLUMNS prober rather than schemaColumnExists's
+// INFORMATION_SCHEMA form: 0.15 s against 5-6 s per probe on a Dolt server
+// hosting ~30 databases (measured 2026-09-17). The repair paths keep
+// schemaColumnExists as is — they run once per migration, not per open.
+var sentinelColumnExists = showColumnExists
 
 func (m migrationSource) pendingVersions(ctx context.Context, db DBConn) ([]int, error) {
 	current, err := m.currentVersion(ctx, db)
