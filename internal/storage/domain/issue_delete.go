@@ -428,7 +428,7 @@ func (u *issueUseCaseImpl) rewriteTextReferences(
 				continue
 			}
 			opts := IssueTableOpts{UseWispsTable: isWisp[connID]}
-			if err := u.issueRepo.Update(ctx, connID, updates, actor, opts); err != nil {
+			if err := u.issueRepo.Update(ctx, connID, updates, actor, opts, false); err != nil {
 				return len(touched), fmt.Errorf("rewrite refs %s: %w", connID, err)
 			}
 			touched[connID] = true
