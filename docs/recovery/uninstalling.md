@@ -1,6 +1,6 @@
 ---
 title: Uninstalling
-description: Remove beads from a repository with bd admin reset, uninstall git hooks, and delete the bd binary after backing up issue data
+description: Remove beads with manual cleanup for the default embedded backend or bd admin reset in server mode, then uninstall the bd binary after backing up issue data
 ---
 
 This guide explains how to remove beads from a repository or remove the `bd`
@@ -26,47 +26,11 @@ bd export -o ~/beads-issues-$(date +%Y%m%d).jsonl
 `bd export` is not a complete restorable database backup. It does not preserve
 Dolt branches, commit history, working-set state, or non-issue tables.
 
-## Repository Reset
-
-Use `bd admin reset` from the repository root. It previews what will be
-removed by default:
-
-```bash
-bd admin reset
-```
-
-If the preview is correct, run:
-
-```bash
-bd admin reset --force
-```
-
-This removes beads-managed repository data such as:
-
-- the `.beads/` directory
-- git hooks that beads installed in full
-- legacy beads sync worktrees under `.git/beads-worktrees/`
-
-Reset works on whole hook files, not on sections. A hook of your own that
-beads injected a section into is left in place and reported, because deleting
-the file would take your content with it. Remove the section from those with
-`bd hooks uninstall`.
-
-## Remove Hooks Only
-
-To keep issue data but remove git hooks:
-
-```bash
-bd hooks uninstall
-```
-
-This is preferable to manually deleting hook files because beads preserves
-unrelated user hook content outside its managed hook markers.
-
 ## Manual Cleanup
 
-Use manual cleanup only if `bd admin reset` is unavailable or cannot run in
-the repository.
+Use manual cleanup for the default embedded backend. `bd admin reset` is
+supported only in server mode; see [Repository Reset (Server Mode)](#repository-reset-server-mode).
+Manual cleanup also works if reset is unavailable in a server-mode repository.
 
 Start by stopping a local Dolt server, if one is running:
 
@@ -79,10 +43,11 @@ bd dolt stop 2>/dev/null || true
 There is no batch command for this step, deliberately. `pre-commit`,
 `prepare-commit-msg`, `post-merge`, `pre-push` and `post-checkout` are the
 standard git hook names, not names beads reserves, so any of them may be a hook
-you wrote — and if you are reading this section, `bd hooks uninstall` was not
-available to tell the difference for you.
+you wrote. If `bd hooks uninstall` is available, use it as described in
+[Remove Hooks Only](#remove-hooks-only). Otherwise, inspect the files before
+deleting or editing them.
 
-List which of them exist and what beads left in them:
+To remove hooks manually, list which of them exist and what beads left in them:
 
 ```bash
 grep -l -e 'bd-hooks-version:' -e 'bd-shim' -e 'bd (beads)' -e 'BEGIN BEADS INTEGRATION' \
@@ -138,6 +103,44 @@ hook manager (husky's `.husky/_`, for example) rather than `.beads/hooks` or
 `.beads-hooks`, leave it alone; unsetting it would disable that tool's hooks
 too. `bd doctor` applies the same rule and will not touch a hooks path it did
 not set.
+
+## Repository Reset (Server Mode)
+
+For server-mode repositories, use `bd admin reset` from the repository root.
+This command does not support embedded mode. It previews what will be removed
+by default:
+
+```bash
+bd admin reset
+```
+
+If the preview is correct, run:
+
+```bash
+bd admin reset --force
+```
+
+This removes beads-managed repository data such as:
+
+- the `.beads/` directory
+- git hooks that beads installed in full
+- legacy beads sync worktrees under `.git/beads-worktrees/`
+
+Reset works on whole hook files, not on sections. A hook of your own that
+beads injected a section into is left in place and reported, because deleting
+the file would take your content with it. Remove the section from those with
+`bd hooks uninstall`.
+
+## Remove Hooks Only
+
+To keep issue data but remove git hooks:
+
+```bash
+bd hooks uninstall
+```
+
+This is preferable to manually deleting hook files because beads preserves
+unrelated user hook content outside its managed hook markers.
 
 ## Remove the `bd` Binary
 
