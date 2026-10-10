@@ -12,10 +12,7 @@ import (
 )
 
 func TestUpgradeSmokeMultiVersionDispatch(t *testing.T) {
-	bash, err := exec.LookPath("bash")
-	if err != nil {
-		t.Fatal(err)
-	}
+	bash := requireHostTool(t, "bash")
 	for _, tc := range []struct {
 		name, candidate, failVersion string
 		wantExit                     int
@@ -40,6 +37,8 @@ func TestUpgradeSmokeMultiVersionDispatch(t *testing.T) {
 			// The actual dispatch body below this insertion stays byte-for-byte unchanged.
 			const observer = `if [ -z "${BEADS_LOOP_ROOT:-}" ]; then
     export BEADS_LOOP_ROOT=1
+    # Keep the parent value local so the child records prove forwarding.
+    export -n CANDIDATE_BIN
 else
     if [ -z "${1:-}" ]; then
         printf 'child version is empty (BASH_VERSION=%s)\n' "${BASH_VERSION:-unknown}" >&2
