@@ -516,8 +516,15 @@ func TestEmbeddedCloseAlreadyClosedContinue(t *testing.T) {
 		// Retry the close WITH --continue against the now already-closed step. The
 		// idempotent re-close must advance the molecule AND persist the advance, not
 		// just mutate the in-memory working set.
+		//
+		// The retry replays the reason the first close STORED. A crashed close
+		// replays its own command, so its reason matches by construction; an
+		// explicit reason that DIFFERS is the one re-close `bd close` refuses
+		// rather than report a write it cannot perform (be-ctr). That refusal is
+		// pinned by cmd/bd/close_reason_amend_test.go, not here — this subtest's
+		// subject is --continue advancing across an already-closed step.
 		beforeCommits := countCommits()
-		_ = bdClose(t, bd, cdir, step1.ID, "--reason", "retry", "--continue")
+		_ = bdClose(t, bd, cdir, step1.ID, "--reason", "first", "--continue")
 
 		got, err := os.ReadFile(filepath.Join(cbeads, "last-touched"))
 		if err != nil {
@@ -637,8 +644,11 @@ func TestEmbeddedCloseAlreadyClosedClaimNextAndMolecule(t *testing.T) {
 		}
 
 		// Re-close the already-closed final step. The idempotent re-close must replay
-		// molecule auto-close and re-close the stranded-open root.
-		_ = bdClose(t, bd, mdir, step2.ID, "--reason", "retry")
+		// molecule auto-close and re-close the stranded-open root. As above, the
+		// replay carries the reason step2 already STORED: a differing explicit
+		// reason is refused under first-close-wins (be-ctr), which is pinned in
+		// cmd/bd/close_reason_amend_test.go and is not this subtest's subject.
+		_ = bdClose(t, bd, mdir, step2.ID, "--reason", "two")
 
 		if got := bdShow(t, bd, mdir, root.ID); got.Status != types.StatusClosed {
 			t.Errorf("expected stranded-open molecule root %s re-closed by an already-closed re-close of the final step, got %s",

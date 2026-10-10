@@ -37,7 +37,17 @@ the fallback anywhere, or =0 to disable it entirely.
 When closing multiple issues, provide one --reason for all IDs or repeat
 --reason once per ID. Reasons map positionally: the first --reason applies
 to the first ID, the second --reason to the second ID, regardless of where
-the flags appear in the command line.`,
+the flags appear in the command line.
+
+A close reason is FIRST-CLOSE-WINS: re-closing an already-closed issue keeps
+the reason the first close recorded. So a re-close carrying a different
+--reason writes nothing, and bd reports that on stderr and exits non-zero
+rather than confirming a write it did not perform; the success line reports
+the reason on the record, not the one just discarded. To add to a closed
+issue's record use "bd comment"; to replace the reason itself, "bd reopen"
+(which clears it) and close again. Re-closing with no reason, or with the
+reason already stored, stays a silent idempotent success, so a retried close
+is unaffected.`,
 	// Refuse a missing ID in argument validation, before root's
 	// PersistentPreRunE can open the store, migrate, or auto-import
 	// (bd-m00pb); see updateCmd for the full rationale.
@@ -72,7 +82,7 @@ the flags appear in the command line.`,
 			}
 			args = []string{lastTouched}
 		}
-		reasons, updatedArgs, err := resolveCloseReasons(cmd, args)
+		reasons, updatedArgs, reasonExplicit, err := resolveCloseReasons(cmd, args)
 		if err != nil {
 			return HandleErrorRespectJSON("%v", err)
 		}
@@ -170,6 +180,11 @@ the flags appear in the command line.`,
 		alreadyClosed := 0
 		var failures []closeIDFailure
 		firstSettledID := ""
+		// An explicit reason the engine dropped on an already-closed re-close.
+		// It does not undo the close — the issue IS closed, and every retry-safe
+		// post-close contract below still replays — but the command did not do
+		// what it was asked, so it must not exit 0. See closeReasonDiscarded.
+		reasonDiscarded := false
 
 		for i, id := range resolvedIDs {
 			res := outcomes[i]
@@ -202,7 +217,18 @@ the flags appear in the command line.`,
 			issue := results[i].Issue
 
 			if !res.Changed {
-				// Already closed: an idempotent no-op on the step's stored state. The
+				// Already closed. Before anything else, answer the one request this
+				// path CANNOT honor: a reason the caller spelled that disagrees with
+				// the stored one. first-close-wins drops it, so say so on stderr and
+				// mark the command for a non-zero exit — the historical rc=0 with the
+				// caller's own text echoed back is what made a discarded amendment
+				// read as a successful one (be-ctr).
+				if closeReasonDiscarded(res.Changed, reasonExplicit, reason, storedCloseReason(res.Issue, issue)) {
+					fmt.Fprintln(os.Stderr, closeReasonDiscardedRefusal(id, storedCloseReason(res.Issue, issue)))
+					reasonDiscarded = true
+				}
+
+				// An idempotent no-op on the step's stored state. The
 				// old CloseIssue path also returned nil here and still reported the
 				// (already-closed) issue, so keep OUTPUT parity via the shared display
 				// block below — the issue stays in --json output and the text report
@@ -212,7 +238,8 @@ the flags appear in the command line.`,
 				// write itself is a no-op), but still count the command as a successful
 				// close for its retry-safe post-close contracts (last-touched,
 				// --continue, --suggest-next, --claim-next) via alreadyClosed below.
-				// Exit stays 0.
+				// Exit stays 0 unless the re-close carried a differing explicit
+				// reason (reasonDiscarded above).
 				alreadyClosed++
 
 				// Molecule auto-close is itself a retry-safe, fully state-derived
@@ -269,7 +296,11 @@ the flags appear in the command line.`,
 					closedIssues = append(closedIssues, closedIssue)
 				}
 			} else {
-				debug.PrintNormal("%s Closed %s: %s\n", ui.RenderPass("✓"), formatFeedbackID(id, issueTitleOrEmpty(issue)), reason)
+				// The reason PRINTED is the one on the record, which on an
+				// already-closed no-op is the stored reason rather than the
+				// discarded one just supplied.
+				debug.PrintNormal("%s Closed %s: %s\n", ui.RenderPass("✓"), formatFeedbackID(id, issueTitleOrEmpty(issue)),
+					closeReportedReason(res.Changed, reason, storedCloseReason(closedIssue, issue)))
 			}
 		}
 
@@ -299,7 +330,7 @@ the flags appear in the command line.`,
 			unblocked, err := postCloseStore.GetNewlyUnblockedByClose(ctx, resolvedIDs[0])
 			if err == nil && len(unblocked) > 0 {
 				if jsonOutput {
-					return outputJSON(map[string]interface{}{
+					return closeJSONExit(reasonDiscarded, map[string]interface{}{
 						"closed":    closedIssues,
 						"unblocked": unblocked,
 					})
@@ -332,7 +363,7 @@ the flags appear in the command line.`,
 					mutatedStores[postCloseStore] = append(mutatedStores[postCloseStore], result.NextStep.ID)
 				}
 				if jsonOutput {
-					return outputJSON(map[string]interface{}{
+					return closeJSONExit(reasonDiscarded, map[string]interface{}{
 						"closed":   closedIssues,
 						"continue": result,
 					})
@@ -416,6 +447,12 @@ the flags appear in the command line.`,
 		if totalAttempted > 0 && closedCount == 0 && alreadyClosed == 0 {
 			return SilentExit()
 		}
+		// A discarded reason exits non-zero. The refusal is already on stderr,
+		// naming the id and both amendment paths, so there is nothing left to
+		// print — what a caller still needs is a status it can branch on.
+		if reasonDiscarded {
+			return SilentExit()
+		}
 		return nil
 	},
 }
@@ -427,6 +464,28 @@ the flags appear in the command line.`,
 type closeIDFailure struct {
 	ID    string `json:"id"`
 	Error string `json:"error"`
+}
+
+// closeJSONExit emits one of the post-close-flag JSON documents and then
+// applies the same discarded-reason exit status the text path takes.
+//
+// --suggest-next and --continue own their --json output because each carries a
+// second key beside "closed", so both branches emit and RETURN right there —
+// the shared exit block at the bottom of RunE never runs for them, and falling
+// through instead is not an option: the generic `if jsonOutput && len(
+// closedIssues) > 0` emitter below would print a SECOND document. Without this
+// the refusal would land on stderr and the command would still exit 0, i.e.
+// the be-ctr defect would survive on the machine-readable path for the exact
+// audience — agents, which drive bd with --json and --continue — that the
+// change was written for.
+func closeJSONExit(reasonDiscarded bool, payload interface{}) error {
+	if err := outputJSON(payload); err != nil {
+		return err
+	}
+	if reasonDiscarded {
+		return SilentExit()
+	}
+	return nil
 }
 
 // closeClaimedID names the issue --claim-next claimed on this run, or "" when
@@ -553,14 +612,25 @@ func (v *closeReasonFlagValue) Values() []string {
 	return out
 }
 
-func resolveCloseReasons(cmd *cobra.Command, args []string) ([]string, []string, error) {
+// resolveCloseReasons resolves `bd close`'s reason list, and reports whether
+// the CALLER spelled one.
+//
+// The explicit bool is not cosmetic. Every close carries a reason, because an
+// unflagged one falls through to bd's own "Closed" default below, so the
+// reason VALUE cannot distinguish "the caller asked for this text" from "the
+// caller asked for nothing". closeReasonDiscarded needs exactly that
+// distinction — an unrequested default that the engine drops on a re-close is
+// nothing to report, and a reason the caller typed and lost is (be-ctr) — so
+// it is decided here, at the one place that knows, rather than re-derived by
+// each route from the flags.
+func resolveCloseReasons(cmd *cobra.Command, args []string) ([]string, []string, bool, error) {
 	reasons, err := collectCloseReasonFlags(cmd)
 	if err != nil {
-		return nil, args, err
+		return nil, args, false, err
 	}
 
 	if fileReason, ok, err := resolveReasonFile(cmd, len(reasons) > 0); err != nil {
-		return nil, args, err
+		return nil, args, false, err
 	} else if ok {
 		reasons = []string{fileReason}
 	}
@@ -572,13 +642,107 @@ func resolveCloseReasons(cmd *cobra.Command, args []string) ([]string, []string,
 		args = args[:len(args)-1]
 	}
 
+	// Everything above this line came from the caller; the default below does not.
+	explicit := len(reasons) > 0
+
 	if len(reasons) == 0 {
 		reasons = []string{"Closed"}
 	}
 	if len(reasons) > 1 && len(reasons) != len(args) {
-		return nil, args, fmt.Errorf("got %d close reasons for %d issue IDs; provide exactly one shared reason or one reason per issue", len(reasons), len(args))
+		return nil, args, explicit, fmt.Errorf("got %d close reasons for %d issue IDs; provide exactly one shared reason or one reason per issue", len(reasons), len(args))
 	}
-	return reasons, args, nil
+	return reasons, args, explicit, nil
+}
+
+// closeReasonDiscarded reports the one case where `bd close --reason` reads
+// like it worked and did not: the issue was ALREADY closed, so the engine's
+// first-close-wins rule (issueops.CloseRequest.Reason) keeps the stored reason
+// and drops the one just supplied. Both `bd close` routes ask here.
+//
+// It is deliberately narrow, because the ordinary idempotent retry must stay a
+// silent rc=0 success and every other re-close still is one:
+//
+//   - a re-close carrying no reason of its own is not an amendment attempt, so
+//     `explicit` gates it — the "Closed" default is bd's word, not the caller's;
+//   - a re-close carrying the SAME reason already stored asked for the state
+//     that exists, which is precisely what a crashed close replays.
+//
+// What is left is an explicit reason that DISAGREES with the stored one: a
+// request the command cannot honor, which today it answers with rc=0 and an
+// echo of the caller's own text. That is the defect — an agent repairing a
+// misleading close_reason is told it succeeded and has written nothing.
+func closeReasonDiscarded(changed, explicit bool, supplied, stored string) bool {
+	if changed || !explicit {
+		return false
+	}
+	return strings.TrimSpace(supplied) != "" && supplied != stored
+}
+
+// closeReasonDiscardedRefusal spells that case for one id.
+//
+// It names BOTH amendment paths, because "already closed" on its own only
+// relocates the dead end. `bd comment` adds to the record and works on a
+// closed issue; reopen-then-close is what actually replaces close_reason,
+// since a reopen clears the field the first close won.
+func closeReasonDiscardedRefusal(id, stored string) string {
+	// An issue closed without one has no stored reason to quote, and %q would
+	// render that as an empty pair of quotes — which reads like a reason the
+	// close wrote rather than one it never had.
+	held := fmt.Sprintf("the stored reason %q is unchanged", stored)
+	if stored == "" {
+		held = "the issue keeps the empty close reason its first close left"
+	}
+	return fmt.Sprintf("close reason NOT recorded on %s: it was already closed, and a close reason is first-close-wins, so %s.\n"+
+		"  To add to the record:  bd comment %s \"...\"\n"+
+		"  To replace the reason: bd reopen %s && bd close %s --reason \"...\"", id, held, id, id, id)
+}
+
+// closeReportedReason is the reason `bd close` PRINTS for one settled id.
+//
+// A real close reports the reason it just wrote. An already-closed no-op
+// reports what is ON THE RECORD and NEVER the supplied text — echoing back
+// text the close discarded is what made this failure read as confirmation, and
+// it reads most like confirmation exactly when the caller passed --reason-file
+// and sees its whole file come back out (be-ctr).
+//
+// A no-op with nothing stored says so rather than borrowing the caller's text.
+// An earlier revision fell back to the supplied reason here, on the grounds
+// that an empty reason is nothing to print; codex caught that it reintroduced
+// the exact defect for issues closed WITHOUT a reason, which is the shape the
+// live instance (be-mh0, close_reason "Closed") is closest to. "Nothing truer
+// to print" was wrong: that a close recorded no reason is itself true, and it
+// is the fact an agent amending the record most needs to see.
+func closeReportedReason(changed bool, supplied, stored string) string {
+	if changed {
+		return supplied
+	}
+	if strings.TrimSpace(stored) == "" {
+		return noCloseReasonRecorded
+	}
+	return stored
+}
+
+// noCloseReasonRecorded is what an already-closed issue with no stored reason
+// reports. Parenthesized so it cannot be mistaken for a reason someone wrote.
+const noCloseReasonRecorded = "(no close reason recorded)"
+
+// storedCloseReason reads the close reason already on the record.
+//
+// The operation's own POST-STATE snapshot is authoritative and is used
+// whenever there is one, INCLUDING when it is empty. An earlier revision fell
+// back to the pre-close read on an empty post-state; codex caught that this
+// makes a concurrent reopen-and-reclose report the reason the old closure had
+// — and, worse, lets a supplied reason match that stale value and pass as an
+// idempotent success. The pre-close read is a fallback for a route that hands
+// back no post-state at all, and for nothing else.
+func storedCloseReason(after, before *types.Issue) string {
+	if after != nil {
+		return after.CloseReason
+	}
+	if before != nil {
+		return before.CloseReason
+	}
+	return ""
 }
 
 func collectCloseReasonFlags(cmd *cobra.Command) ([]string, error) {

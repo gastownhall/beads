@@ -50,12 +50,24 @@ type closeProxiedInput struct {
 // per route — which is the drift this whole close rewire exists to remove. A
 // policy refusal decided here has no separate display form, so both slots hold
 // the one sentence closeProxiedCheckOne returned.
+//
+// reasonRefusals is a THIRD list at the same indices, for the one refusal that
+// is not a failure to close: a close reason first-close-wins discarded. That id
+// IS closed, so it must not enter errors — errors is what closeProxiedFailures
+// turns into "N of M issues failed to close" and into the --json failed[]
+// envelope, and an id reported both closed and failed is self-contradictory
+// output the direct route never produces (it prints that refusal on stderr and
+// appends nothing to failures). Keeping it index-aligned rather than in a bare
+// append-order slice preserves the typed-order guarantee above. The two can
+// never both be set for one argument: an engine refusal takes the `continue`
+// in closeProxiedOutcomes before the discarded-reason check is reached.
 type closeProxiedPreflight struct {
-	items         []issueops.BatchCloseItem
-	itemArgs      []int
-	before        map[string]*types.Issue
-	errors        []string
-	failureErrors []string
+	items          []issueops.BatchCloseItem
+	itemArgs       []int
+	before         map[string]*types.Issue
+	errors         []string
+	failureErrors  []string
+	reasonRefusals []string
 }
 
 type closeProxiedOutcome struct {
@@ -81,7 +93,7 @@ func runCloseProxiedServer(cmd *cobra.Command, ctx context.Context, args []strin
 		return HandleErrorRespectJSON("no issue ID provided")
 	}
 
-	reasons, updatedArgs, err := resolveCloseReasons(cmd, args)
+	reasons, updatedArgs, reasonExplicit, err := resolveCloseReasons(cmd, args)
 	if err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}
@@ -152,12 +164,18 @@ func runCloseProxiedServer(cmd *cobra.Command, ctx context.Context, args []strin
 		}
 	}
 
-	outcomes, closeReasons := closeProxiedOutcomes(&pre, result)
+	outcomes, closeReasons, reasonDiscarded := closeProxiedOutcomes(&pre, result, reasonExplicit)
 	post := closeProxiedRunPostClose(ctx, args, in, outcomes)
 
-	for _, e := range pre.errors {
+	// One pass over both refusal lists, so a discarded reason still prints in
+	// the order the caller typed the ids even though it is not a failure. At
+	// most one of the two slots is set for any argument.
+	for i, e := range pre.errors {
 		if e != "" {
 			fmt.Fprintln(os.Stderr, e)
+		}
+		if r := pre.reasonRefusals[i]; r != "" {
+			fmt.Fprintln(os.Stderr, r)
 		}
 	}
 	failures := closeProxiedFailures(&pre, args)
@@ -222,6 +240,12 @@ func runCloseProxiedServer(cmd *cobra.Command, ctx context.Context, args []strin
 	if len(args) > 0 && len(outcomes) == 0 {
 		return SilentExit()
 	}
+	// A reason the caller spelled and first-close-wins dropped exits non-zero,
+	// matching the direct route. The refusal is already on stderr with the
+	// argument-ordered ones above it.
+	if reasonDiscarded {
+		return SilentExit()
+	}
 	return nil
 }
 
@@ -260,9 +284,10 @@ func proxiedBatchCloser() (issueops.BatchCloser, error) {
 // close policy to it, in one read-only unit of work.
 func closeProxiedRunPreflight(ctx context.Context, args, reasons []string, in closeProxiedInput) (closeProxiedPreflight, error) {
 	pre := closeProxiedPreflight{
-		errors:        make([]string, len(args)),
-		failureErrors: make([]string, len(args)),
-		before:        make(map[string]*types.Issue, len(args)),
+		errors:         make([]string, len(args)),
+		failureErrors:  make([]string, len(args)),
+		reasonRefusals: make([]string, len(args)),
+		before:         make(map[string]*types.Issue, len(args)),
 	}
 	_, err := uow.RunTxRead(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (struct{}, error) {
 		for i, id := range args {
@@ -326,9 +351,13 @@ func closeProxiedCheckOne(ctx context.Context, uw uow.UnitOfWork, id string, in 
 // argument list: a refusal lands in its argument's own error slot so the
 // stderr report stays in typed order, and the survivors keep the shape the
 // display block has always consumed.
-func closeProxiedOutcomes(pre *closeProxiedPreflight, result issueops.CloseBatchResult) ([]closeProxiedOutcome, []string) {
+// The third return reports whether any item discarded a reason the caller
+// spelled, under closeReasonDiscarded's rule; the route turns that into a
+// non-zero exit.
+func closeProxiedOutcomes(pre *closeProxiedPreflight, result issueops.CloseBatchResult, reasonExplicit bool) ([]closeProxiedOutcome, []string, bool) {
 	var outcomes []closeProxiedOutcome
 	var reasons []string
+	reasonDiscarded := false
 	for j, outcome := range result.Outcomes {
 		item := pre.items[j]
 		if outcome.Err != nil {
@@ -351,6 +380,26 @@ func closeProxiedOutcomes(pre *closeProxiedPreflight, result issueops.CloseBatch
 			// snapshot for exactly this reason.
 			after.Dependencies = nil
 		}
+		// A reason first-close-wins dropped goes into this argument's own
+		// discarded-reason slot, so it prints in typed order beside every other
+		// refusal — and the ✓ line below reports the STORED reason rather than
+		// echoing the one the close discarded (be-ctr).
+		//
+		// Deliberately NOT pre.errors: that list means "this id did not close",
+		// and this id did. Routing it there made closeProxiedFailures count the
+		// id a failure, so the same id printed "✓ Closed" AND was summarized as
+		// "1 of 2 issues failed to close" (and under --json appeared in both the
+		// closed and the failed document) — while the direct route, given the
+		// same batch, prints the refusal and no failure summary at all. It also
+		// made the route's own `if reasonDiscarded { return SilentExit() }` dead
+		// code, because a non-empty errors slot always returned through
+		// reportCloseFailures first.
+		stored := storedCloseReason(after, before)
+		if closeReasonDiscarded(outcome.Changed, reasonExplicit, item.Reason, stored) {
+			pre.reasonRefusals[pre.itemArgs[j]] = closeReasonDiscardedRefusal(item.IssueID, stored)
+			reasonDiscarded = true
+		}
+
 		outcomes = append(outcomes, closeProxiedOutcome{
 			id:          item.IssueID,
 			before:      before,
@@ -359,9 +408,9 @@ func closeProxiedOutcomes(pre *closeProxiedPreflight, result issueops.CloseBatch
 			auditOld:    oldStatus,
 			auditReason: item.Reason,
 		})
-		reasons = append(reasons, item.Reason)
+		reasons = append(reasons, closeReportedReason(outcome.Changed, item.Reason, stored))
 	}
-	return outcomes, reasons
+	return outcomes, reasons, reasonDiscarded
 }
 
 // closeProxiedFailures pairs every refused argument with the id it belongs to,
@@ -369,10 +418,12 @@ func closeProxiedOutcomes(pre *closeProxiedPreflight, result issueops.CloseBatch
 //
 // Both slices are indexed by ARGUMENT position, so args[i] is the id that earned
 // pre.errors[i], and the failures come back in the order the caller typed the
-// ids. errors decides WHICH arguments failed — it is the slot the stderr print
+// ids. errors decides WHICH arguments failed — it is a slot the stderr print
 // consults too, so the two halves of the report can never disagree about that —
 // while failureErrors supplies the reason, because that is the field where the
-// typed error belongs.
+// typed error belongs. pre.reasonRefusals, the third list the stderr print
+// consults, is deliberately NOT read here: a discarded close reason is a
+// refusal to amend a CLOSED issue, not a failure to close it.
 //
 // Every writer of an errors slot fills its failureErrors twin, so the fallback
 // below is unreachable today. It is here because the cost of getting that wrong

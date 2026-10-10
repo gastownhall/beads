@@ -339,12 +339,84 @@ func TestProxiedServerCloseB(t *testing.T) {
 		issue := bdProxiedCreate(t, bd, p.dir, "Double close")
 		bdProxiedClose(t, bd, p.dir, issue.ID, "--reason", "first")
 		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "close", issue.ID, "--reason", "second")
-		_ = stdout
-		_ = stderr
-		_ = err
 		db := openProxiedDB(t, p)
 		if got := readCloseReason(t, db, issue.ID); got != "first" {
 			t.Errorf("re-close must not overwrite reason: got %q, want %q", got, "first")
+		}
+		// The write not happening is only half of it. This route reported that
+		// no-op as rc=0 with "second" echoed onto stdout, which is what made a
+		// discarded amendment read as a successful one (be-ctr). It refuses
+		// loudly now, and the direct route is pinned to the same behavior in
+		// close_reason_amend_test.go.
+		if err == nil {
+			t.Error("re-close with a different reason exited 0; rc=0 is what made this read as success")
+		}
+		if !strings.Contains(stderr, "close reason NOT recorded on "+issue.ID) {
+			t.Errorf("stderr does not report the discarded reason:\n%s", stderr)
+		}
+		if !strings.Contains(stderr, "bd comment "+issue.ID) {
+			t.Errorf("stderr does not name bd comment as the amendment path:\n%s", stderr)
+		}
+		if strings.Contains(stdout, "second") {
+			t.Errorf("stdout echoed the discarded reason back:\n%s", stdout)
+		}
+		if !strings.Contains(stdout, "first") {
+			t.Errorf("stdout does not report the reason on the record:\n%s", stdout)
+		}
+	})
+
+	// close_already_closed above closes one id, and reportCloseFailures never
+	// summarizes a single id, so it cannot see whether a discarded reason is
+	// counted as a failed close. A batch can. The id IS closed; only the
+	// amendment was refused, so it belongs in `closed` and nowhere in the
+	// failure report. The direct route's twin is
+	// TestCloseMultiIDDiscardedReasonIsNotReportedAsAFailedClose.
+	t.Run("close_already_closed_in_batch_is_not_a_failure", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "cacb")
+		done := bdProxiedCreate(t, bd, p.dir, "Batch already closed")
+		open := bdProxiedCreate(t, bd, p.dir, "Batch still open")
+		bdProxiedClose(t, bd, p.dir, done.ID, "--reason", "first")
+
+		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "close", "--json", done.ID, open.ID, "--reason", "second")
+		if err == nil {
+			t.Errorf("batch re-close with a different reason exited 0\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+		if !strings.Contains(stderr, "close reason NOT recorded on "+done.ID) {
+			t.Errorf("stderr does not report the discarded reason:\n%s", stderr)
+		}
+		if strings.Contains(stderr, "failed to close") {
+			t.Errorf("a discarded reason was counted as a failed close; both issues are closed:\n%s", stderr)
+		}
+		if line := lastJSONObjectLine(stderr); line != "" {
+			t.Errorf("stderr carries a JSON failure report for a batch where nothing failed:\n%s", line)
+		}
+
+		start := strings.Index(stdout, "[")
+		if start < 0 {
+			t.Fatalf("expected the closed-issues array on stdout, got:\n%s", stdout)
+		}
+		var closed []*types.Issue
+		if jsonErr := json.Unmarshal([]byte(stdout[start:]), &closed); jsonErr != nil {
+			t.Fatalf("parse closed array: %v\nraw: %s", jsonErr, stdout[start:])
+		}
+		reasons := map[string]string{}
+		for _, issue := range closed {
+			reasons[issue.ID] = issue.CloseReason
+		}
+		if got, ok := reasons[done.ID]; !ok || got != "first" {
+			t.Errorf("closed array reports %s with reason %q (present=%v), want it present with the stored %q", done.ID, got, ok, "first")
+		}
+		if got, ok := reasons[open.ID]; !ok || got != "second" {
+			t.Errorf("closed array reports %s with reason %q (present=%v), want it present with %q", open.ID, got, ok, "second")
+		}
+
+		db := openProxiedDB(t, p)
+		if got := readCloseReason(t, db, done.ID); got != "first" {
+			t.Errorf("re-close must not overwrite reason: got %q, want %q", got, "first")
+		}
+		if got := readCloseReason(t, db, open.ID); got != "second" {
+			t.Errorf("the real close in the batch: got reason %q, want %q", got, "second")
 		}
 	})
 

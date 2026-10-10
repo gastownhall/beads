@@ -566,6 +566,8 @@ go_test(
         "close_if_revision_proxied_test.go",
         "close_last_touched_test.go",
         "close_proxied_integration_test.go",
+        "close_proxied_reason_test.go",
+        "close_reason_amend_test.go",
         "close_reason_file_test.go",
         "close_routing_test.go",
         "cobra_flag_reset_test.go",
