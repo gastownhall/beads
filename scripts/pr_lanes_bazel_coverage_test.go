@@ -64,6 +64,8 @@ var bazelPRLaneRCLines = map[string][]string{
 		"test:doltserver --test_arg=-test.parallel=4",
 		"test:doltserver --local_test_jobs=4",
 		"test:doltserver --remote_download_regex=.*/test\\.(log|xml)$",
+		// F5 S1: the race configuration's nogo is owned by the test lane.
+		"test:doltserver --norun_validations",
 	},
 	"pure": {
 		"build:pure --@rules_go//go/config:pure",
@@ -318,7 +320,11 @@ func testPackageGateJobs(t *testing.T, prGateRequired []string) {
 		// e2b78f7d7a: both configs cquery to the identical
 		// bazel-out/k8-fastbuild-ST-.../bin/cmd/bd/bd_for_tests/bd path).
 		buildStep := job.step(t, "bazel build //cmd/bd:bd_for_tests")
-		if buildStep.If != bazelPathIf || buildStep.Run != `bazel build --@rules_go//go/config:race //cmd/bd:bd_for_tests --remote_download_regex='.*/bin/cmd/bd/bd_for_tests/bd$'` {
+		// F5 S1: the package gates' build is a race-configuration non-owner
+		// (bd_for_tests is also built, with its nogo already validated, by
+		// bazel-test's `bazel test //... --config=ci`), so it passes
+		// --norun_validations too.
+		if buildStep.If != bazelPathIf || buildStep.Run != `bazel build --@rules_go//go/config:race //cmd/bd:bd_for_tests --remote_download_regex='.*/bin/cmd/bd/bd_for_tests/bd$' --norun_validations` {
 			t.Errorf("%s bazel build step: if %q, run %q; want if %q", lane.job, buildStep.If, buildStep.Run, bazelPathIf)
 		}
 		pkgBD := job.step(t, "Package the Bazel-built bd")

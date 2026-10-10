@@ -49,8 +49,14 @@ Where it gates:
   validates each of those compiles. So `//go:build windows`, `darwin`,
   `!linux` (and freebsd, android, arm64) files are analyzed from Linux: a
   superset of golangci-lint's former `GOOS=windows`/`GOOS=darwin` legs.
-- **Every other Bazel lane** (integration, embedded, dolt-server) validates
-  what it compiles, including files only its build tags select.
+- The race configuration's nogo validations run once, owned by the `test`
+  lane above: `embedded`, `doltserver`, `doltserver-proxied`, `dolt-race`
+  (shadow) and the package gates (`package-mcp`, `package-npm`) all pass
+  `--norun_validations`, since each compiles a strict subset of what `test`
+  already validates on that configuration (`scripts/nogo_lint_policy_test.go`'s
+  `TestNogoConfigurationsHaveOneValidatingLane` pins this).
+- **Every other Bazel lane** (integration) still validates what it compiles,
+  including files only its build tags select.
 
 Every PR is checked against the whole tree, not only its diff: the tree has
 no findings, so there is no baseline to scope against.
