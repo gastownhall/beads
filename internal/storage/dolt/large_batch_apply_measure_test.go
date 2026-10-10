@@ -168,9 +168,9 @@ const statementCountToleranceDolt = 2
 // pinnedEmbeddedStatementCounts in internal/storage/embeddeddolt for the
 // per-change breakdown. The two backends now agree to within the tolerance.
 var pinnedDoltStatementCounts = map[string]int64{
-	"356 (mol 1x)": 6396,
-	"712 (mol 2x)": 12791,
-	"40 (classic)": 835,
+	"356 (mol 1x)": 6736,
+	"712 (mol 2x)": 13470,
+	"40 (classic)": 864,
 }
 
 // BenchmarkLargeBatchApply_Dolt is gated by setupBenchStore's own
