@@ -53,6 +53,11 @@ type UVLockChecker func(root string) (available bool, err error)
 
 var releaseSources = []source{
 	{
+		path:        "default.nix",
+		description: "Nix package version",
+		read:        readNixPackageVersion,
+	},
+	{
 		path:        "integrations/beads-mcp/pyproject.toml",
 		description: "MCP pyproject.toml",
 		read:        readProjectTOMLVersion,
@@ -126,6 +131,10 @@ var releaseSources = []source{
 		expected:    assemblyIdentityVersion,
 	},
 }
+
+var nixPackageVersionPattern = regexp.MustCompile(
+	`(?m)^[ \t]*version[ \t]*=[ \t]*"([^"\r\n]+)"[ \t]*;[ \t]*(?:#.*)?$`,
+)
 
 // manifestAssemblyVersionPattern anchors on line start: the XML declaration on
 // line 1 also carries a version="1.0" attribute.
@@ -552,6 +561,21 @@ func readProjectTOMLVersion(path string) (string, error) {
 		return "", fmt.Errorf("non-empty string field [project].version not found")
 	}
 	return version, nil
+}
+
+func readNixPackageVersion(path string) (string, error) {
+	content, err := os.ReadFile(path) //nolint:gosec // callers supply a fixed repository-relative path
+	if err != nil {
+		return "", err
+	}
+	matches := nixPackageVersionPattern.FindAllSubmatch(content, -1)
+	if len(matches) != 1 {
+		return "", fmt.Errorf(
+			"found %d Nix version string declarations, want exactly one",
+			len(matches),
+		)
+	}
+	return string(matches[0][1]), nil
 }
 
 func readUVLockPackageVersion(path string) (string, error) {
