@@ -858,6 +858,37 @@ async def test_add_comment_not_found(bd_client):
 
 
 @pytest.mark.asyncio
+async def test_run_text_command_places_global_flags_before_a_dashdash_boundary(mock_process):
+    """_run_text_command (GH#7317): option-shaped positional text must not be
+    parsed as a flag, and the configured actor must not be swallowed as text.
+
+    The argv built for `[bd, "comment", id, text, *global_flags]` puts no
+    boundary before id/text, so bd's own flag parser can consume an
+    option-shaped text value as a flag (losing the text), or treat a literal
+    "--" in text as the boundary that turns the TRAILING global flags into
+    positional content instead (losing the actor override). Both land as one
+    fixed `[bd, command, *global_flags, "--", *positional]` shape with the
+    boundary ahead of every caller-supplied value.
+    """
+    client = BdClient(bd_path="/usr/bin/bd", beads_db="/tmp/test.db", actor="configured-actor")
+    mock_process.communicate = AsyncMock(return_value=(b"ok\n", b""))
+
+    with patch("asyncio.create_subprocess_exec", return_value=mock_process) as mock_exec:
+        await client._run_text_command("comment", "bd-1", "--actor=injected")
+
+    call_args = list(mock_exec.call_args[0])
+    dashdash = call_args.index("--")
+    # Every caller-supplied value (command args) is AFTER the boundary, so
+    # bd's own parser cannot read any of them as a flag.
+    assert call_args.index("bd-1") > dashdash
+    assert call_args.index("--actor=injected") > dashdash
+    # The configured actor flag is BEFORE the boundary, so a positional value
+    # of "--" could never swallow it into literal text.
+    assert call_args.index("--actor") < dashdash
+    assert call_args.index("configured-actor") < dashdash
+
+
+@pytest.mark.asyncio
 async def test_add_note(bd_client, mock_process):
     """Test add_note method (bd note <id> <text>)."""
     mock_process.communicate = AsyncMock(return_value=(b"Note appended\n", b""))
