@@ -6,6 +6,7 @@ package bdhttp_test
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -258,6 +259,152 @@ func TestHandshakeWithACredential(t *testing.T) {
 	provider.mu.Unlock()
 	if calls == 0 {
 		t.Error("the handshake never asked the supplied provider to authorize")
+	}
+}
+
+// plaintextRemote stands in for a bd serve reached over plain http at a
+// non-loopback address (the TLS-terminating proxy a plaintext grant exists
+// for) without opening a socket. It answers the handshake, and not_found for
+// anything else, and records the Authorization header of every request that
+// actually reached it.
+type plaintextRemote struct {
+	mu    sync.Mutex
+	auths []string
+}
+
+func (r *plaintextRemote) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Body != nil {
+		_ = req.Body.Close()
+	}
+	r.mu.Lock()
+	r.auths = append(r.auths, req.Header.Get("Authorization"))
+	r.mu.Unlock()
+	status, contentType, body := http.StatusNotFound, "application/problem+json", `{"status":404,"code":"not_found"}`
+	if strings.HasSuffix(req.URL.Path, "/v0/beads/context") {
+		status, contentType = http.StatusOK, "application/json"
+		body = `{"api_version":"v0","backend":"dolt","bd_version":"9.9.9",` +
+			`"beads_dir":"/srv/.beads","capabilities":["issues.get"],` +
+			`"database":"beads","dolt_mode":"server","project_id":"proj-remote","repo_root":"/srv",` +
+			`"schema_version":1,"wire_revision":1,"min_client_wire_revision":1}`
+	}
+	return &http.Response{
+		StatusCode:    status,
+		Header:        http.Header{"Content-Type": {contentType}},
+		Body:          io.NopCloser(strings.NewReader(body)),
+		ContentLength: -1,
+		Request:       req,
+	}, nil
+}
+
+func (r *plaintextRemote) seen() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.auths...)
+}
+
+// TestExplicitCredentialIgnoresTheEnvPlaintextGrant pins, at each production
+// door, that BEADS_HTTP_ALLOW_INSECURE=1 grants an explicit credential
+// nothing. Against a plain-http, non-loopback target, the registry's OpenWith
+// (ProvidedCredential), Open and Handshake (Options.Credential) each refuse
+// before any request reaches the transport, and the refusal names the grant
+// that does work there. Every other explicit-door test dials loopback, where
+// the guard returns before it reads the variable, so a door reverted to the
+// env-consulting DialWith passed them all.
+//
+// Each door's control differs from its refused leg only in
+// Target.AllowInsecureCredential, and must send the explicit token exactly
+// once. The ambient control shows the same environment does grant the
+// built-in ladder plaintext, so the refusals are the door's doing and not a
+// variable nobody reads.
+func TestExplicitCredentialIgnoresTheEnvPlaintextGrant(t *testing.T) {
+	hermeticEnv(t)
+	t.Setenv("BEADS_HTTP_ALLOW_INSECURE", "1")
+	registerForTest(t, bdhttp.Options{})
+	registered, ok := backend.Lookup(backendName)
+	if !ok {
+		t.Fatal("the http backend is not registered")
+	}
+	ctx := context.Background()
+	remote, err := url.Parse("http://198.51.100.1/") // RFC 5737 TEST-NET-2: never dialed.
+	if err != nil {
+		t.Fatalf("parse the remote URL: %v", err)
+	}
+
+	doors := []struct {
+		name string
+		// call drives one request through the door with a fresh explicit
+		// credential and returns that request's error.
+		call func(t *testing.T, target bdhttp.Target, client *http.Client) error
+	}{
+		{"OpenWith", func(t *testing.T, target bdhttp.Target, client *http.Client) error {
+			beadsDir := filepath.Join(t.TempDir(), ".beads")
+			if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+				t.Fatalf("create workspace: %v", err)
+			}
+			if err := bdhttp.SaveTarget(beadsDir, target); err != nil {
+				t.Fatalf("save the activation sidecar: %v", err)
+			}
+			store, err := registered.OpenWith(ctx, beadsDir, backends.OpenOptions{
+				Credential: bdhttp.ProvidedCredential{Provider: &recordingProvider{token: "explicit-token"}},
+				HTTPClient: client,
+			})
+			if err != nil {
+				t.Fatalf("OpenWith: %v", err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			_, err = store.GetIssue(ctx, "bd-1")
+			return err
+		}},
+		{"Open", func(t *testing.T, target bdhttp.Target, client *http.Client) error {
+			store, err := bdhttp.Open(ctx, target, bdhttp.Options{
+				HTTPClient: client, Credential: &recordingProvider{token: "explicit-token"},
+			})
+			if err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			_, err = store.GetIssue(ctx, "bd-1")
+			return err
+		}},
+		{"Handshake", func(t *testing.T, target bdhttp.Target, client *http.Client) error {
+			_, err := bdhttp.Handshake(ctx, target, bdhttp.Options{
+				HTTPClient: client, Credential: &recordingProvider{token: "explicit-token"},
+			})
+			return err
+		}},
+	}
+	for _, door := range doors {
+		t.Run(door.name, func(t *testing.T) {
+			refused := &plaintextRemote{}
+			err := door.call(t, bdhttp.Target{BaseURL: remote}, &http.Client{Transport: refused})
+			if err == nil || !strings.Contains(err.Error(), "refusing to send a credential") {
+				t.Fatalf("got %v, want the plaintext refusal: BEADS_HTTP_ALLOW_INSECURE=1 must grant an explicit credential nothing", err)
+			}
+			if msg := err.Error(); strings.Contains(msg, "BEADS_HTTP_ALLOW_INSECURE") || !strings.Contains(msg, "Target.AllowInsecureCredential") {
+				t.Errorf("refusal %q must name Target.AllowInsecureCredential, the grant this door honors, and not BEADS_HTTP_ALLOW_INSECURE, which it never reads", msg)
+			}
+			if got := refused.seen(); len(got) != 0 {
+				t.Errorf("the transport saw %d request(s) %q; the refusal must stop the credential before the wire", len(got), got)
+			}
+
+			granted := &plaintextRemote{}
+			if err := door.call(t, bdhttp.Target{BaseURL: remote, AllowInsecureCredential: true}, &http.Client{Transport: granted}); err != nil {
+				t.Fatalf("with Target.AllowInsecureCredential: %v", err)
+			}
+			if got := granted.seen(); len(got) != 1 || got[0] != "Bearer explicit-token" {
+				t.Errorf("with Target.AllowInsecureCredential the transport saw %q, want one request carrying the explicit token", got)
+			}
+		})
+	}
+
+	// Control: the same environment does grant the built-in ladder plaintext.
+	t.Setenv(bdhttp.TokenEnv, "198.51.100.1=ambient-token")
+	ambient := &plaintextRemote{}
+	if _, err := bdhttp.Handshake(ctx, bdhttp.Target{BaseURL: remote}, bdhttp.Options{HTTPClient: &http.Client{Transport: ambient}}); err != nil {
+		t.Fatalf("ambient Handshake under BEADS_HTTP_ALLOW_INSECURE=1: %v; the control no longer shows the variable is live", err)
+	}
+	if got := ambient.seen(); len(got) != 1 || got[0] != "Bearer ambient-token" {
+		t.Errorf("the ambient Handshake sent %q, want one request carrying the ambient token", got)
 	}
 }
 

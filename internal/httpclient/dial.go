@@ -74,14 +74,15 @@ type DialOptions struct {
 	caOverride *resolvedCA
 
 	// AllowInsecureCredential opts THIS dial into sending a credential over
-	// plain http to a non-loopback target (MED-4, S6 review). Left false,
-	// DialWith refuses to let a credential cross such a target at all — see
-	// guardInsecureCredential. connect.go sets this from --allow-plaintext so
-	// its own Handshake probe honors the same opt-in the CLI flag already
-	// granted; every other caller defaults to false and relies on the
-	// process-wide BEADS_HTTP_ALLOW_INSECURE=1 escape hatch instead, since
-	// Open/OpenReadOnly/OpenWith's callers have no flag of their own to set
-	// this through.
+	// plain http to a non-loopback target (MED-4, S6 review); see
+	// guardInsecureCredential for every grant DialWith honors. connect.go sets
+	// this from --allow-plaintext so its own Handshake probe honors the same
+	// opt-in the CLI flag already granted, before the sidecar recording it
+	// (Target.AllowInsecureCredential) exists. Every other caller leaves it
+	// false: a later dial takes the grant from Target.AllowInsecureCredential,
+	// and an ambient-ladder dial also from the process-wide
+	// BEADS_HTTP_ALLOW_INSECURE=1 escape hatch, which the explicit-credential
+	// door (DialWithCredential) never reads.
 	AllowInsecureCredential bool
 
 	// explicitCredential is set by DialWithCredential alone: the caller

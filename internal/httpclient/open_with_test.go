@@ -109,8 +109,8 @@ func contextOnlyServer(t *testing.T, project string) (*httptest.Server, func() [
 	}
 }
 
-// spyGetenv swaps the package's one environment reader for a recorder for the
-// life of t. It must not be used from a parallel test: getenv is a package
+// spyGetenv swaps getenv, the package's reader for the variables that choose
+// or grant a credential, for a recorder for the life of t. It must not be used from a parallel test: getenv is a package
 // variable, and top-level tests that call t.Parallel only resume after every
 // sequential test (this one included) has finished and restored it.
 func spyGetenv(t *testing.T) func() []string {
@@ -143,9 +143,9 @@ func spyGetenv(t *testing.T) func() []string {
 
 // TestExplicitCredentialReadsNoEnvironment pins the explicit-credential door's
 // promise: a dial, a handshake and a registry OpenWith handed their own
-// credential consult no process environment at all — no token, no token
-// command, no CA pattern, no plaintext opt-in. The control dial through the
-// ambient ladder proves the spy actually sees reads.
+// credential consult none of the variables that choose or grant one — no
+// token, no token command, no CA pattern, no plaintext opt-in. The control
+// dial through the ambient ladder proves the spy actually sees reads.
 func TestExplicitCredentialReadsNoEnvironment(t *testing.T) {
 	srv, auths := contextOnlyServer(t, "proj-env")
 	base, err := url.Parse(srv.URL)
@@ -178,8 +178,10 @@ func TestExplicitCredentialReadsNoEnvironment(t *testing.T) {
 		t.Fatalf("OpenWith: %v", err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	if _, err := store.GetMetadata(ctx, "_project_id"); err != nil {
-		t.Fatalf("GetMetadata: %v", err)
+	// GetMetadata reports a failed handshake as ("", nil), so the project id
+	// is the evidence this open reached the server at all.
+	if got, err := store.GetMetadata(ctx, "_project_id"); err != nil || got != "proj-env" {
+		t.Fatalf("GetMetadata = (%q, %v), want proj-env from the server", got, err)
 	}
 
 	// A plain-http, non-loopback target is where the guard would consult
@@ -220,12 +222,21 @@ func TestDialWithCredentialRefusesNil(t *testing.T) {
 
 // TestGuardInsecureCredentialIgnoresEnvWhenNotConsulted is the guard half of
 // the explicit door: with consultEnv false, BEADS_HTTP_ALLOW_INSECURE=1 grants
-// nothing and the refusal wrapper stays on.
+// nothing, the refusal wrapper stays on, and its refusal names the grant that
+// door honors instead of the variable it never reads.
 func TestGuardInsecureCredentialIgnoresEnvWhenNotConsulted(t *testing.T) {
 	t.Setenv(AllowInsecureCredentialEnv, "1")
 	target := Target{BaseURL: mustParseURL(t, "http://"+nonLoopbackTestHost+"/")}
 	guarded := guardInsecureCredential(target, stubProvider{tag: "explicit"}, false, false)
 	if _, ok := guarded.(*insecureCredentialGuard); !ok {
 		t.Fatalf("guardInsecureCredential(consultEnv=false) returned %T, want the refusal wrapper despite %s=1", guarded, AllowInsecureCredentialEnv)
+	}
+
+	err := guarded.Authorize(context.Background(), newTestRequest(t, "http://"+nonLoopbackTestHost+"/v0/beads/context"))
+	if err == nil || !strings.Contains(err.Error(), "refusing to send a credential") {
+		t.Fatalf("Authorize = %v, want the plaintext refusal", err)
+	}
+	if msg := err.Error(); strings.Contains(msg, AllowInsecureCredentialEnv) || !strings.Contains(msg, "Target.AllowInsecureCredential") {
+		t.Errorf("refusal %q must name Target.AllowInsecureCredential and not %s, which this door never reads", msg, AllowInsecureCredentialEnv)
 	}
 }

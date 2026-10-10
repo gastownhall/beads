@@ -53,8 +53,8 @@ func NewBearerProvider(base *url.URL) *BearerProvider {
 // process-wide and cannot hold one credential per tenant, but the per-open
 // OpenWith seam can, and this is the opaque wrapper type that seam
 // recognizes. Either way the supplied provider is the ONLY credential the
-// open uses and nothing ambient is read; see the package doc's
-// "Credentials" section. See httpclient.ResolveCredential and
+// open uses, and no ambient credential, CA or plaintext grant is read; see the
+// package doc's "Credentials" section. See httpclient.ResolveCredential and
 // backends.OpenOptions.Credential's own doc comment for the single-tenant
 // ambient-ladder default this exists to opt out of.
 type ProvidedCredential = httpclient.ProvidedCredential

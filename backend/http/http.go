@@ -161,9 +161,9 @@ func Register(opts Options) {
 // configuration, or minted per tenant — and would otherwise have to write a
 // .beads directory for the sole benefit of a registry lookup. Registration is
 // not required and does not affect it: Open dials fresh from the Options it is
-// handed. With Options.Credential set, that credential is the only one used and
-// no ambient state is read; without it, Open uses the same built-in bearer
-// ladder Open/OpenReadOnly use.
+// handed. With Options.Credential set, that credential is the only one used, and
+// no ambient credential, CA or plaintext grant is read; without it, Open uses
+// the same built-in bearer ladder Open/OpenReadOnly use.
 //
 // The store carries no local metadata file, which is benign: the two
 // per-user keys it would hold read as unset and write nowhere.

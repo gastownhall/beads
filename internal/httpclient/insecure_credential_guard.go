@@ -20,14 +20,23 @@ import (
 )
 
 // AllowInsecureCredentialEnv opts an entire process into sending a credential
-// over plain http to a non-loopback bd serve.
+// over plain http to a non-loopback bd serve, on the ambient ladder's dials
+// only.
 //
-// It exists because Open/OpenReadOnly/OpenWith's callers — every bd command
-// but connect — have no flag of their own to thread an opt-in through, unlike
+// It exists because the ambient ladder's callers — every bd command but
+// connect, through Open/OpenReadOnly, and an OpenWith with no credential —
+// have no flag of their own to thread an opt-in through, unlike
 // `bd connect --allow-plaintext`. Setting it is a deliberate, informed
 // decision (the same one --allow-plaintext records at connect time): the
 // operator trusts the network path, typically a reverse proxy terminating TLS
 // in front of bd serve.
+//
+// The explicit-credential door (DialWithCredential, which OpenWith with a
+// ProvidedCredential and backend/http's Options.Credential ride) never reads
+// it: a process-wide grant would be one tenant's decision applied to every
+// tenant's credential. That door's only plaintext grant is
+// Target.AllowInsecureCredential (or DialOptions.AllowInsecureCredential), and
+// its refusal names that grant instead of this one.
 //
 // #nosec G101 -- the NAME of an environment variable, not a credential.
 const AllowInsecureCredentialEnv = "BEADS_HTTP_ALLOW_INSECURE"
@@ -46,8 +55,9 @@ func allowInsecureCredentialFromEnv() bool {
 // LATER dial for this workspace — see Target.AllowInsecureCredential's own
 // doc) is true, or — only when consultEnv is true — BEADS_HTTP_ALLOW_INSECURE=1
 // is set in the environment. consultEnv is false on the explicit-credential
-// door (DialWithCredential): an open that was handed its own credential reads
-// no process environment at all, so one tenant's grant is never another's.
+// door (DialWithCredential): an open that was handed its own credential takes
+// no plaintext grant from the process environment, so one tenant's grant is
+// never another's, and its refusal offers only the grants that door honors.
 //
 // It wraps the resolved wire.CredentialProvider itself, never switching on
 // its concrete type, so the refusal is uniform across the ambient
@@ -72,7 +82,7 @@ func guardInsecureCredential(target Target, creds CredentialProvider, allowed, c
 	if allowed || (consultEnv && allowInsecureCredentialFromEnv()) {
 		return creds
 	}
-	return &insecureCredentialGuard{inner: creds, endpoint: base.Redacted()}
+	return &insecureCredentialGuard{inner: creds, endpoint: base.Redacted(), consultEnv: consultEnv}
 }
 
 // insecureCredentialGuard is guardInsecureCredential's refusal. It lets the
@@ -86,6 +96,10 @@ func guardInsecureCredential(target Target, creds CredentialProvider, allowed, c
 type insecureCredentialGuard struct {
 	inner    CredentialProvider
 	endpoint string
+	// consultEnv is guardInsecureCredential's own. When false (the
+	// explicit-credential door), AllowInsecureCredentialEnv grants nothing,
+	// so the refusal must not send the caller after it.
+	consultEnv bool
 }
 
 func (g *insecureCredentialGuard) Authorize(ctx context.Context, req *http.Request) error {
@@ -94,6 +108,11 @@ func (g *insecureCredentialGuard) Authorize(ctx context.Context, req *http.Reque
 		return err
 	}
 	if len(req.Header) > before {
+		if !g.consultEnv {
+			return fmt.Errorf(
+				"refusing to send a credential to %s over plain http: %s is not loopback, and the credential would cross the network unencrypted; use https://, or set Target.AllowInsecureCredential (what `bd connect --allow-plaintext` records for a workspace) to accept the risk knowingly for this server; an explicitly supplied credential takes no plaintext grant from the environment",
+				g.endpoint, req.URL.Hostname())
+		}
 		return fmt.Errorf(
 			"refusing to send a credential to %s over plain http: %s is not loopback, and the credential would cross the network unencrypted; use https://, run `bd connect --allow-plaintext` to accept the risk knowingly for this server, or set %s=1 to override",
 			g.endpoint, req.URL.Hostname(), AllowInsecureCredentialEnv)
