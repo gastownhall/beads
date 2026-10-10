@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -159,6 +160,10 @@ func addLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issueID,
 			eventTable = et
 		}
 	}
+	useWisps, err := labelTableUsesWisps(labelTable)
+	if err != nil {
+		return fmt.Errorf("add label: %w", err)
+	}
 	//nolint:gosec // G201: labelTable is from WispTableRouting ("labels" or "wisp_labels")
 	res, err := tx.ExecContext(ctx, fmt.Sprintf(`INSERT IGNORE INTO %s (issue_id, label) VALUES (?, ?)`, labelTable), issueID, label)
 	if err != nil {
@@ -168,6 +173,21 @@ func addLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issueID,
 	if err != nil {
 		return fmt.Errorf("add label: rows affected: %w", err)
 	}
+	if inserted == 0 {
+		issueTable := "issues"
+		if useWisps {
+			issueTable = "wisps"
+		}
+		var count int
+		//nolint:gosec // G201: issueTable is one of two hardcoded constants.
+		if err := tx.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE id = ?", issueTable), issueID).Scan(&count); err != nil {
+			return fmt.Errorf("add label: verify issue: %w", err)
+		}
+		if count == 0 {
+			return fmt.Errorf("add label: issue %s does not exist", issueID)
+		}
+		return nil
+	}
 	comment := "Added label: " + label
 	if err := InsertDerivedEvent(ctx, tx, eventTable, AuxEvent{
 		IssueID:   issueID,
@@ -176,6 +196,16 @@ func addLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issueID,
 		Comment:   str(comment),
 	}); err != nil {
 		return fmt.Errorf("add label: record event: %w", err)
+	}
+	// A label write bypasses UpdateIssueInTx entirely, so it must bump
+	// updated_at itself -- otherwise --updated-after filtering, stale-upsert
+	// rejection, and LWW merge are all blind to label-only churn (#5442).
+	// Must run before RecordEventInTx below so the journal snapshot below
+	// captures the bumped value, matching UpdateIssueInTx's own ordering.
+	if inserted > 0 {
+		if err := TouchIssueUpdatedAtInTx(ctx, tx, issueID, useWisps); err != nil {
+			return fmt.Errorf("add label: %w", err)
+		}
 	}
 	// A label is part of the bead snapshot, so a label write journals as an
 	// update carrying the complete post-mutation set.
@@ -214,6 +244,10 @@ func removeLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issue
 			eventTable = et
 		}
 	}
+	useWisps, err := labelTableUsesWisps(labelTable)
+	if err != nil {
+		return fmt.Errorf("remove label: %w", err)
+	}
 	res, err := tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE issue_id = ? AND label = ?`, labelTable), issueID, label)
 	if err != nil {
 		return fmt.Errorf("remove label: %w", err)
@@ -221,6 +255,9 @@ func removeLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issue
 	deleted, err := res.RowsAffected()
 	if err != nil {
 		return fmt.Errorf("remove label: rows affected: %w", err)
+	}
+	if deleted == 0 {
+		return nil
 	}
 	comment := "Removed label: " + label
 	if err := InsertDerivedEvent(ctx, tx, eventTable, AuxEvent{
@@ -234,7 +271,10 @@ func removeLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issue
 	if err := RecordEventInTx(ctx, tx, EventUpdate, issueID, actor); err != nil {
 		return err
 	}
-	if !mintVersion || deleted == 0 {
+	if err := TouchIssueUpdatedAtInTx(ctx, tx, issueID, useWisps); err != nil {
+		return fmt.Errorf("remove label: %w", err)
+	}
+	if !mintVersion {
 		return nil
 	}
 	return RecordVersionInTx(ctx, tx, issueID, actor)
@@ -438,4 +478,42 @@ func issueIDsWithLabelInTx(ctx context.Context, tx DBTX, labelTable, label strin
 		ids = append(ids, id)
 	}
 	return ids, rows.Err()
+}
+
+// labelTableUsesWisps validates the exhaustive label-table routing contract.
+// Failing loudly protects future routing additions from silently touching the
+// permanent issues table.
+func labelTableUsesWisps(labelTable string) (bool, error) {
+	switch labelTable {
+	case "labels":
+		return false, nil
+	case "wisp_labels":
+		return true, nil
+	default:
+		return false, fmt.Errorf("unexpected label table %q", labelTable)
+	}
+}
+
+// TouchIssueUpdatedAtInTx bumps an issue's updated_at without touching any other
+// column. Callers that mutate an issue through a side channel other than
+// UpdateIssueInTx -- label add/remove write directly to the labels/
+// wisp_labels table, bypassing the normal field-update path entirely --
+// must call this so --updated-after filtering, stale-upsert rejection, and
+// LWW merge all see the edit (#5442). Also mints a fresh row_lock, matching
+// every other issues/wisps content write (see the freshRowLock invariant in
+// lease.go) -- otherwise this write would be invisible to RowVersion-gated
+// optimistic-concurrency checks.
+func TouchIssueUpdatedAtInTx(ctx context.Context, tx DBTX, issueID string, useWisps bool) error {
+	issueTable := "issues"
+	if useWisps {
+		issueTable = "wisps"
+	}
+	rowLockClause, rowLockArgs := RowLockClause()
+	args := append([]interface{}{time.Now().UTC()}, rowLockArgs...)
+	args = append(args, issueID)
+	//nolint:gosec // G201: issueTable is one of two hardcoded constants.
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`UPDATE %s SET updated_at = ?, %s WHERE id = ?`, issueTable, rowLockClause), args...); err != nil {
+		return fmt.Errorf("touch updated_at: %w", err)
+	}
+	return nil
 }
