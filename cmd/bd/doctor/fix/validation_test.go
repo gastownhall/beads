@@ -331,3 +331,132 @@ func TestChildParentDependencies_PreservesParentChildType(t *testing.T) {
 		t.Errorf("Expected 1 'parent-child' dependency preserved, got %d", parentChildCount)
 	}
 }
+
+// TestChildParentDependencies_FixesBadDeps_ReversedDirection verifies the
+// parent→child arm (the new direction added for GH#4814) removes a genuine
+// hierarchy deadlock: a parent blocked on/waiting for its own child across a
+// real parent-child edge. This uses waits-for because it is the only
+// dependency type that reaches this state via the CLI today —
+// blocks/conditional-blocks in this direction are already rejected at write
+// time by CheckBlockingHierarchyInTx once a real parent-child edge exists
+// (bee-ghosttrack review, PR#5131).
+func TestChildParentDependencies_FixesBadDeps_ReversedDirection(t *testing.T) {
+	dir := t.TempDir()
+	store := newFixTestStore(t, dir, "bd")
+	ctx := context.Background()
+
+	for _, id := range []string{"bd-abc", "bd-abc.1"} {
+		issue := &types.Issue{
+			ID:        id,
+			Title:     "Issue " + id,
+			Status:    types.StatusOpen,
+			IssueType: types.TypeTask,
+			CreatedAt: time.Now(),
+		}
+		if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Real parent-child edge: bd-abc.1 is a structural child of bd-abc.
+	pcDep := &types.Dependency{
+		IssueID:     "bd-abc.1",
+		DependsOnID: "bd-abc",
+		Type:        types.DepParentChild,
+		CreatedAt:   time.Now(),
+		CreatedBy:   "test",
+	}
+	if err := store.AddDependency(ctx, pcDep, "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Deadlock: the parent (bd-abc) waits for its own child (bd-abc.1).
+	waitsDep := &types.Dependency{
+		IssueID:     "bd-abc",
+		DependsOnID: "bd-abc.1",
+		Type:        types.DepWaitsFor,
+		CreatedAt:   time.Now(),
+		CreatedBy:   "test",
+	}
+	if err := store.AddDependency(ctx, waitsDep, "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Run fix
+	if err := ChildParentDependencies(dir, false); err != nil {
+		t.Errorf("ChildParentDependencies failed: %v", err)
+	}
+
+	// The deadlocking waits-for edge must be removed...
+	db := store.UnderlyingDB()
+	var waitsCount int
+	if err := db.QueryRow("SELECT COUNT(*) FROM dependencies WHERE type = 'waits-for'").Scan(&waitsCount); err != nil {
+		t.Fatal(err)
+	}
+	if waitsCount != 0 {
+		t.Errorf("Expected 0 'waits-for' dependencies after fix, got %d", waitsCount)
+	}
+
+	// ...but the real structural parent-child edge must survive.
+	var pcCount int
+	if err := db.QueryRow("SELECT COUNT(*) FROM dependencies WHERE type = 'parent-child'").Scan(&pcCount); err != nil {
+		t.Fatal(err)
+	}
+	if pcCount != 1 {
+		t.Errorf("Expected the real parent-child edge to survive, got %d", pcCount)
+	}
+}
+
+// TestChildParentDependencies_PreservesDottedEdgeWithoutRealParentChildLink
+// verifies the new parent→child arm requires a genuine parent-child edge, not
+// just a dotted-ID coincidence. An orphaned-dotted subtask (dotted ID
+// surviving a reparent or import, with no --parent edge) that its "epic"
+// blocks on is an ordinary "epic waits for its subtask" shape, not a
+// deadlock, and must survive the fix (bee-ghosttrack review, PR#5131).
+func TestChildParentDependencies_PreservesDottedEdgeWithoutRealParentChildLink(t *testing.T) {
+	dir := t.TempDir()
+	store := newFixTestStore(t, dir, "bd")
+	ctx := context.Background()
+
+	for _, id := range []string{"bd-abc", "bd-abc.1"} {
+		issue := &types.Issue{
+			ID:        id,
+			Title:     "Issue " + id,
+			Status:    types.StatusOpen,
+			IssueType: types.TypeTask,
+			CreatedAt: time.Now(),
+		}
+		if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// No parent-child edge is added: bd-abc.1's dotted ID is coincidental
+	// (e.g. it survives a reparent or import), not a structural child of
+	// bd-abc.
+	blockDep := &types.Dependency{
+		IssueID:     "bd-abc",
+		DependsOnID: "bd-abc.1",
+		Type:        types.DepBlocks,
+		CreatedAt:   time.Now(),
+		CreatedBy:   "test",
+	}
+	if err := store.AddDependency(ctx, blockDep, "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Run fix
+	if err := ChildParentDependencies(dir, false); err != nil {
+		t.Errorf("ChildParentDependencies failed: %v", err)
+	}
+
+	// The healthy edge (no real parent-child link) must survive.
+	db := store.UnderlyingDB()
+	var count int
+	if err := db.QueryRow("SELECT COUNT(*) FROM dependencies WHERE type = 'blocks'").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Errorf("Expected the healthy dotted-ID edge (no real parent-child link) to survive, got %d", count)
+	}
+}
