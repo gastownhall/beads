@@ -1092,6 +1092,8 @@ var bazelDoltServerRCLines = map[string][]string{
 		"test:doltserver-proxied --local_test_jobs=4",
 		"test:doltserver-proxied --remote_download_regex=.*/test\\.(log|xml)$",
 		"test:doltserver-proxied --experimental_remote_cache_eviction_retries=0",
+		// F5 S1: the race configuration's nogo is owned by the test lane.
+		"test:doltserver-proxied --norun_validations",
 	},
 	"doltserver-integration": {
 		"build:doltserver-integration --@rules_go//go/config:tags=gms_pure_go,integration",

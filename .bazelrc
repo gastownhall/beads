@@ -104,6 +104,16 @@ test:embedded --remote_download_regex=.*/test\.xml$
 # jobs, which never retried. Evicted inputs fail the step instead; a
 # visible "Re-run failed jobs" retries it.
 test:embedded --experimental_remote_cache_eviction_retries=0
+# The race configuration's nogo validations run once, in bazel.yml's `test`
+# lane (`bazel test //... --config=ci`), which is a strict superset of every
+# race-group lane's RunNogo/ValidateNogo keys. --norun_validations is a
+# build-request option, not a configuration flag: it changes no action key
+# (compiles, links and test PASSes are shared with `test` through the
+# action cache) and discards no analysis; it only skips re-running nogo's
+# validation actions that the owner lane already runs on this configuration.
+# scripts/nogo_lint_policy_test.go's TestNogoConfigurationsHaveOneValidatingLane
+# pins `test` as this configuration's sole validating lane.
+test:embedded --norun_validations
 
 # Dolt-server lane: what pr.yml's retired container-backed jobs ("Test
 # (storage domain + uow)" and "Contract corpus") ran, but every dolt
@@ -127,6 +137,9 @@ test:doltserver --test_arg=-test.parallel=4
 # runner shape; remote workers are not limited by it.
 test:doltserver --local_test_jobs=4
 test:doltserver --remote_download_regex=.*/test\.(log|xml)$
+# Race-group nogo is owned by the `test` lane; see test:embedded's comment
+# above.
+test:doltserver --norun_validations
 
 # Proxied-server tier: PR Risk's "Test (Proxied Dolt Cmd N/15)" jobs, as
 # //cmd/bd:bd_proxied_test and //cmd/bd:bd_managed_local_test (the
@@ -160,6 +173,9 @@ test:doltserver-proxied --remote_download_regex=.*/test\.(log|xml)$
 # jobs, which never retried. Evicted inputs fail the step instead; a
 # visible "Re-run failed jobs" retries it.
 test:doltserver-proxied --experimental_remote_cache_eviction_retries=0
+# Race-group nogo is owned by the `test` lane; see test:embedded's comment
+# above.
+test:doltserver-proxied --norun_validations
 
 # dolt-server + proxied union (item 5, Phase 1 shadow): bazel.yml's advisory
 # bazel-dolt-race job runs both tiers in one invocation, beside their own
@@ -186,6 +202,10 @@ test:dolt-race --test_arg=-test.parallel=4
 test:dolt-race --local_test_jobs=4
 test:dolt-race --remote_download_regex=.*/test\.(log|xml)$
 test:dolt-race --experimental_remote_cache_eviction_retries=0
+# The union carries its members' --norun_validations line
+# (TestBazelDoltRaceConfigIsMemberUnion needs no change: both members and the
+# union carry the same line).
+test:dolt-race --norun_validations
 
 # Server-Dolt storage tier: PR Risk's "Test (Server Dolt Conformance)" and
 # "Test (Server Dolt Full Suite N/16)" jobs, as

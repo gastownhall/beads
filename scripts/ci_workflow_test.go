@@ -4294,6 +4294,8 @@ var bazelEmbeddedRCLines = []string{
 	"test:embedded --test_env=GO_TEST_WRAP_TESTV=1",
 	"test:embedded --remote_download_regex=.*/test\\.xml$",
 	"test:embedded --experimental_remote_cache_eviction_retries=0",
+	// F5 S1: the race configuration's nogo is owned by the test lane.
+	"test:embedded --norun_validations",
 }
 
 func TestBazelEmbeddedJobRunsEmbeddedTier(t *testing.T) {

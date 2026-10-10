@@ -976,10 +976,15 @@ Required` requires them to have run remotely and passed.
     the job it replaces.
   - `go test`'s own vet checks (cmd/go's `defaultVetFlags`, policy-tested
     equal to the toolchain's) and the golangci-lint linters `.golangci.yml`
-    enables run as nogo (`//tools/nogo`) beside every compile of every Bazel
-    lane: natively in `bazel test //... --config=ci`, and for every release
-    platform in the `bazel-release-cross` lane
-    (engdocs/LINTING.md). The former
+    enables run as nogo (`//tools/nogo`): natively in `bazel test //...
+    --config=ci`, and for every release platform in the
+    `bazel-release-cross` lane (engdocs/LINTING.md). Each Bazel configuration
+    validates in exactly one required lane, not beside every compile of
+    every lane: the race configuration's nogo is owned by `test` above, and
+    `embedded`, `doltserver`, `doltserver-proxied`, `dolt-race` (shadow) and
+    the package gates pass `--norun_validations`, since they compile a
+    strict subset of what `test` already validates on that configuration
+    (`scripts/nogo_lint_policy_test.go`, engdocs/LINTING.md). The former
     `scripts-go-checks` (`Go checks (vet)`) and `pr-lint-wrapper`
     (`PR Lint (native|windows|darwin)`) jobs are retired.
   - The repository policy tests (`./scripts/...`, including the D2 guards)

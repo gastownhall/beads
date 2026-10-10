@@ -2530,7 +2530,7 @@ jobs:
       # bazel-out/k8-fastbuild-ST-.../bin/cmd/bd/bd_for_tests/bd path).
       - name: bazel build //cmd/bd:bd_for_tests
         if: ${{ steps.detect.outputs.mcp_package == 'true' && needs.rbe.outputs.mode == 'remote' }}
-        run: bazel build --@rules_go//go/config:race //cmd/bd:bd_for_tests --remote_download_regex='.*/bin/cmd/bd/bd_for_tests/bd$'
+        run: bazel build --@rules_go//go/config:race //cmd/bd:bd_for_tests --remote_download_regex='.*/bin/cmd/bd/bd_for_tests/bd$' --norun_validations
 
       - name: Package the Bazel-built bd
         if: ${{ steps.detect.outputs.mcp_package == 'true' && needs.rbe.outputs.mode == 'remote' }}
@@ -2652,7 +2652,7 @@ jobs:
       # bazel-out/k8-fastbuild-ST-.../bin/cmd/bd/bd_for_tests/bd path).
       - name: bazel build //cmd/bd:bd_for_tests
         if: ${{ steps.detect.outputs.npm_package == 'true' && needs.rbe.outputs.mode == 'remote' }}
-        run: bazel build --@rules_go//go/config:race //cmd/bd:bd_for_tests --remote_download_regex='.*/bin/cmd/bd/bd_for_tests/bd$'
+        run: bazel build --@rules_go//go/config:race //cmd/bd:bd_for_tests --remote_download_regex='.*/bin/cmd/bd/bd_for_tests/bd$' --norun_validations
 
       - name: Package the Bazel-built bd
         if: ${{ steps.detect.outputs.npm_package == 'true' && needs.rbe.outputs.mode == 'remote' }}
