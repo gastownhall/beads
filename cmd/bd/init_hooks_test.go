@@ -256,6 +256,21 @@ func TestGenerateHookSection_Timeout(t *testing.T) {
 	}
 }
 
+// countMarkerLines counts lines that start at column 0 with prefix. The
+// generated section also contains hookSectionBeginPrefix's text a second
+// time, indented and quoted inside the chain-detection case arm (GH#6751) —
+// a raw strings.Count over the whole text would count that too, so callers
+// that need "exactly one real marker" must anchor to column 0 instead.
+func countMarkerLines(s, prefix string) int {
+	count := 0
+	for _, line := range strings.Split(s, "\n") {
+		if strings.HasPrefix(line, prefix) {
+			count++
+		}
+	}
+	return count
+}
+
 func TestTrackedManagedHookSectionsMatchGenerator(t *testing.T) {
 	for _, hookName := range managedHookNames {
 		hookName := hookName
@@ -267,7 +282,7 @@ func TestTrackedManagedHookSectionsMatchGenerator(t *testing.T) {
 			}
 
 			tracked := string(content)
-			if strings.Count(tracked, hookSectionBeginPrefix) != 1 || strings.Count(tracked, hookSectionEndPrefix) != 1 {
+			if countMarkerLines(tracked, hookSectionBeginPrefix) != 1 || strings.Count(tracked, hookSectionEndPrefix) != 1 {
 				t.Fatal("tracked hook must contain exactly one managed section")
 			}
 			// Locate the section by marker PREFIX, not by the versioned marker
@@ -314,22 +329,23 @@ func TestTrackedManagedHookSectionsMatchGenerator(t *testing.T) {
 	}
 }
 
-// TestGenerateHookSection_DBNotInitialized verifies exit code 3 handling (GH#2449).
-func TestGenerateHookSection_DBNotInitialized(t *testing.T) {
-	section := generateHookSection("pre-commit")
-
-	// Exit code 3 = beads database not initialized; hook must continue gracefully
-	if !strings.Contains(section, `"$_bd_exit" -eq 3`) {
-		t.Error("section missing exit code 3 (DB not initialized) handling")
-	}
-	if !strings.Contains(section, "database not initialized") {
-		t.Error("section missing DB-not-initialized warning message")
-	}
-
-	// After handling exit code 3, the effective exit must be 0 (success)
-	// Verify the pattern: set _bd_exit=0 after detecting code 3
-	if !strings.Contains(section, `if [ "$_bd_exit" -eq 3 ]; then`) {
-		t.Error("section missing exit code 3 conditional")
+// TestGenerateHookSection_NoExitCodeThreeSpecialCase verifies GH#2449's
+// exit-code-3 special case is gone (GH#6751). "hooks" is in noDbCommands
+// (cmd/bd/main.go), so `bd hooks run <name>` never opens a store and cannot
+// itself produce a "database not initialized" exit code; the parent
+// runXHook functions (cmd/bd/hooks.go) only ever return the chained
+// `<name>.old` hook's own exit code unmodified (runChainedHook). Swallowing
+// a `3` here was swallowing that chained hook's real exit status — the same
+// fail-open class as GH#6751's other two cases — not a beads DB condition.
+func TestGenerateHookSection_NoExitCodeThreeSpecialCase(t *testing.T) {
+	for _, hookName := range managedHookNames {
+		section := generateHookSection(hookName)
+		if strings.Contains(section, `"$_bd_exit" -eq 3`) {
+			t.Errorf("%s: section still special-cases exit code 3; a chained hook's real exit(3) must propagate, not be swallowed as a DB-not-initialized warning", hookName)
+		}
+		if strings.Contains(section, "database not initialized") {
+			t.Errorf("%s: section still contains the stale DB-not-initialized warning", hookName)
+		}
 	}
 }
 
@@ -427,7 +443,7 @@ func TestInjectHookSection(t *testing.T) {
 				"reversed markers (END before BEGIN)":    true,
 			}
 			if brokenCases[tt.name] {
-				beginCount := strings.Count(result, hookSectionBeginPrefix)
+				beginCount := countMarkerLines(result, hookSectionBeginPrefix)
 				if beginCount != 1 {
 					t.Errorf("expected exactly 1 BEGIN marker, got %d\ngot:\n%s", beginCount, result)
 				}
