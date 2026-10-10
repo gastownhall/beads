@@ -4,23 +4,29 @@
 Discovery must stay in step with embedded-test-shard.sh: both select every
 top-level TestEmbedded* function from cmd/bd/*_embedded_test.go.
 
-Two cost models, selected by --weights (default: inits, matching
+Two cost models, selected by --weights (default: duration, matching
 gen_proxied_shard_manifest.py's convention — see that script's module
 docstring for the full rationale this one shares):
 
-  --weights=inits (default): a cheap static proxy for wall-time — the
-    function's subtest count (t.Run( occurrences), floored at 1. Unlike the
-    proxied generator's bd-init count, embedded cmd tests do not share one
-    dominant per-call cost center, so subtest count is the simplest proxy
-    that is still monotonic in "more scenarios this function exercises."
-
-  --weights=duration: measured wall-time from
+  --weights=duration (default): measured wall-time from
     scripts/ci/embedded_cmd_test_durations.json (see that file's header for
     provenance). A function missing from that file — a test added since it
     was last captured — falls back to its inits cost times the file's
     "seconds_per_init_fallback" ratio. A from-scratch pack models the shard
     process (pack_concurrent): functions without a top-level t.Parallel()
-    run one after another, the rest share -test.parallel=4 slots.
+    run one after another, the rest share -test.parallel=4 slots. The
+    manifest's only remaining block is duration-packed (see below), so this
+    is also the only --weights whose render() header matches what is
+    committed — a bare `--write` with no flags reproduces the committed file
+    instead of silently clobbering its header with the inits one.
+
+  --weights=inits: a cheap static proxy for wall-time — the function's
+    subtest count (t.Run( occurrences), floored at 1. Unlike the proxied
+    generator's bd-init count, embedded cmd tests do not share one dominant
+    per-call cost center, so subtest count is the simplest proxy that is
+    still monotonic in "more scenarios this function exercises." Pass this
+    explicitly if you want it; --write still honors it, it is just no longer
+    the default.
 
 This generator's --weights=duration path targets the Bazel-only shard total
 (the bazel-embedded job in .github/workflows/bazel.yml). The legacy,
@@ -162,7 +168,7 @@ def render(total, shards, weights):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     ap.add_argument('total_shards', nargs='?', type=int, default=None)
-    ap.add_argument('--weights', choices=['inits', 'duration'], default='inits')
+    ap.add_argument('--weights', choices=['inits', 'duration'], default='duration')
     ap.add_argument('--manifest', default=default_manifest_path,
                      help=f'manifest file to read/write (default: {default_manifest_path})')
     mode = ap.add_mutually_exclusive_group()

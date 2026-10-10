@@ -333,9 +333,12 @@ func TestBazelRetiredLanesCheckListedTestsRan(t *testing.T) {
 		{bazelEmbedJobName, "embedded", []suite{
 			// bazel-embedded runs its own duration-balanced manifest blocks
 			// (scripts/ci/embedded_{cmd,storage}_test_durations.json), not
-			// PR Risk's frozen 20- and 5-shard blocks (slice F1): neither is
-			// a drop-in retirement of its legacy job's shard count, just its
-			// tests. bazelEmbeddedCmdShardCount/bazelEmbeddedStorageShardCount
+			// PR Risk's 20-shard cmd block, which was frozen and has since
+			// been deleted (those jobs no longer exist; see
+			// engdocs/TESTING.md), or the still-frozen 5-shard storage block
+			// (slice F1): neither is a drop-in retirement of its legacy
+			// job's shard count, just its tests.
+			// bazelEmbeddedCmdShardCount/bazelEmbeddedStorageShardCount
 			// read the real counts from BUILD.bazel, making these suites'
 			// `want` (below) genuine cross-file pins against bazel.yml's own
 			// check_shard_coverage.py arguments, not independently
@@ -347,9 +350,11 @@ func TestBazelRetiredLanesCheckListedTestsRan(t *testing.T) {
 		}, []string{"//internal/storage/embeddeddolt:embeddeddolt_conformance_core_test", "//internal/storage/embeddeddolt:embeddeddolt_conformance_core_slow_test", "//internal/storage/embeddeddolt:embeddeddolt_conformance_audit_test"}},
 		{bazelProxiedJobName, "doltserver-proxied", []suite{
 			// bazel-proxied runs its own duration-balanced manifest block
-			// (scripts/ci/proxied_test_durations.json), not PR Risk's frozen
-			// 15-shard bd-init-cost-proxy block: it is not a drop-in
-			// retirement of test-proxied-cmd's shard count, just its tests.
+			// (scripts/ci/proxied_test_durations.json), not PR Risk's
+			// 15-shard bd-init-cost-proxy block, which was frozen and has
+			// since been deleted (that job no longer exists; see
+			// engdocs/TESTING.md): it was never a drop-in retirement of
+			// test-proxied-cmd's shard count, just its tests.
 			// bazelProxiedShardCount reads the real count from
 			// cmd/bd/BUILD.bazel, making this suite's `want` (below) a
 			// genuine cross-file pin against bazel.yml's own

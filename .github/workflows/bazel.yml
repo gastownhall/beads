@@ -1331,9 +1331,11 @@ jobs:
           JOB_STATUS: ${{ job.status }}
         run: echo "result=$JOB_STATUS" >> "$GITHUB_OUTPUT"
 
-  # pr-risk.yml's embedded-Dolt tier ("Test (Embedded Dolt Cmd N/20)",
+  # pr-risk.yml's retired embedded-Dolt tier ("Test (Embedded Dolt Cmd N/20)",
   # "Test (Embedded Dolt Storage N/5)", "Test (Embedded Dolt Conformance -
-  # core/audit)") as --config=embedded: the embedded-tagged variants of
+  # core/audit)") as --config=embedded: those jobs, and the frozen 20-shard
+  # cmd block they read, no longer exist (see engdocs/TESTING.md) — this runs
+  # the embedded-tagged variants of
   # //cmd/bd:bd_test and //internal/storage/embeddeddolt:embeddeddolt_test.
   # The shard variants run the jobs' own shard scripts and manifests, so Bazel
   # shard k runs exactly the tests of job k. A job of its own rather than a
@@ -1821,13 +1823,15 @@ jobs:
           JOB_STATUS: ${{ job.status }}
         run: echo "result=$JOB_STATUS" >> "$GITHUB_OUTPUT"
 
-  # Like pr-risk.yml's proxied-server tier, "Test (Proxied Dolt Cmd N/15)",
-  # as --config=doltserver-proxied: //cmd/bd:bd_proxied_test runs the shard
-  # script, so shard k runs exactly that manifest entry's tests. This lane
-  # runs 34 shards of its own (.github/scripts/proxied-cmd-test-shards.txt's
-  # duration-balanced 34-block; see scripts/ci/proxied_test_durations.json),
-  # not the legacy jobs' 15 — shard k here is not the same split as their
-  # shard k. Same build as --config=doltserver (race bd_test, non-race
+  # Like pr-risk.yml's retired proxied-server tier, "Test (Proxied Dolt Cmd
+  # N/15)" (that job, and the frozen 15-shard block it read, no longer exist;
+  # see engdocs/TESTING.md), as --config=doltserver-proxied:
+  # //cmd/bd:bd_proxied_test runs the shard script, so shard k runs exactly
+  # that manifest entry's tests. This lane runs 34 shards of its own
+  # (.github/scripts/proxied-cmd-test-shards.txt's duration-balanced 34-block;
+  # see scripts/ci/proxied_test_durations.json) — shard k here was never the
+  # same split as the retired job's shard k. Same build as --config=doltserver
+  # (race bd_test, non-race
   # bd_for_tests), shared with bazel-doltserver through the remote cache.
   # The test binary is race, as PR Risk's retired jobs built it. It also runs
   # //cmd/bd:bd_managed_local_test, the managed-local proxied lifecycle

@@ -159,9 +159,13 @@ func TestShardScriptsListOnlyRealTests(t *testing.T) {
 		case ".github/scripts/proxied-test-shard.sh":
 			totalsSet[bazelProxiedShardCount(t)] = true
 		case ".github/scripts/embedded-test-shard.sh":
-			// F1: the Bazel-only bazel-embedded lane reads a 50-shard cmd
-			// block that no PR-Risk-matrix-only (20-shard) check exercises;
-			// without this, "BUILD.bazel's shard_count and bazel.yml's
+			// F1: the Bazel-only bazel-embedded lane reads a 100-shard cmd
+			// block (split over embeddedCmdTargets); the legacy, frozen
+			// 20-shard block PR Risk's/main.yml's retired fork/push jobs
+			// used to read has been deleted (those jobs no longer exist; see
+			// engdocs/TESTING.md), so there is no longer a second check that
+			// would catch this total drifting on its own. Without this,
+			// "BUILD.bazel's shard_count and bazel.yml's
 			// check_shard_coverage.py arg both drift to a new total with no
 			// manifest block" passes every policy test (see review S3) --
 			// the lane then silently goes 100% hash fallback and loses its
@@ -277,4 +281,55 @@ func TestProxiedShardManifestGeneratorNotStale(t *testing.T) {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Errorf("gen_proxied_shard_manifest.py %s --weights=duration --check: %v\n%s", shards, err, out)
 	}
+}
+
+// bareWriteReproducesManifest runs `generator --write --manifest COPY` with
+// no other flags (in particular no --weights) against a scratch copy of
+// manifest, and asserts the result is byte-identical to the committed file.
+//
+// This pins the --weights default against the footgun a reviewer caught on
+// this PR: the manifest's only remaining block is duration-packed (the
+// legacy, frozen inits-packed blocks were deleted alongside the PR Risk
+// fork/push jobs that read them — see engdocs/TESTING.md), so a --weights
+// default of "inits" made a bare `--write` silently rewrite the live
+// block's header (and, since costs then came from the wrong model, its
+// incremental placement of any newly-discovered test) to the inits form
+// without --check ever catching it. Defaulting --weights to "duration"
+// makes a bare `--write` idempotent on an up-to-date, duration-packed file.
+func bareWriteReproducesManifest(t *testing.T, root, generator, manifest string) {
+	t.Helper()
+	python := requireHostTool(t, "python3")
+	want, err := os.ReadFile(filepath.Join(root, manifest))
+	if err != nil {
+		t.Fatalf("read %s: %v", manifest, err)
+	}
+	scratch := filepath.Join(t.TempDir(), filepath.Base(manifest))
+	if err := os.WriteFile(scratch, want, 0o644); err != nil {
+		t.Fatalf("seed scratch copy of %s: %v", manifest, err)
+	}
+	cmd := exec.Command(python, generator, "--write", "--manifest", scratch)
+	cmd.Dir = root
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("%s --write --manifest %s (no --weights): %v\n%s", generator, scratch, err, out)
+	}
+	got, err := os.ReadFile(scratch)
+	if err != nil {
+		t.Fatalf("read %s after --write: %v", scratch, err)
+	}
+	if string(got) != string(want) {
+		t.Errorf("%s --write with no --weights changed %s; a bare --write should reproduce the "+
+			"committed, duration-packed file exactly (--weights defaulting to anything but "+
+			"\"duration\" clobbers its header and repacks with the wrong cost model):\ngot:\n%s\nwant:\n%s",
+			generator, manifest, got, want)
+	}
+}
+
+func TestProxiedShardManifestBareWriteIsIdempotent(t *testing.T) {
+	bareWriteReproducesManifest(t, sourceRepoRoot(t),
+		"scripts/ci/gen_proxied_shard_manifest.py", ".github/scripts/proxied-cmd-test-shards.txt")
+}
+
+func TestEmbeddedCmdShardManifestBareWriteIsIdempotent(t *testing.T) {
+	bareWriteReproducesManifest(t, sourceRepoRoot(t),
+		"scripts/ci/gen_embedded_cmd_shard_manifest.py", ".github/scripts/embedded-cmd-test-shards.txt")
 }

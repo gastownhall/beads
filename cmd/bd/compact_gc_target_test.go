@@ -335,7 +335,16 @@ func buildCompactGCFixture(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("locate Go toolchain for subprocess fixture: %v", err)
 	}
-	path := filepath.Join("testdata", "compact-gc-fixture.go")
+	// Absolute, resolved from this file's own directory rather than the test
+	// binary's working directory: `go test` happens to run from the package
+	// directory, but nothing here should depend on that (and t.Chdir, a
+	// -run subset launched from elsewhere, etc. would otherwise break this
+	// silently with a confusing "no such file" from `go build`).
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	path := filepath.Join(filepath.Dir(thisFile), "testdata", "compact-gc-fixture.go")
 	cmd := exec.Command(realGo, "build", "-o", target, path)
 	cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GOWORK=off")
 	if output, err := cmd.CombinedOutput(); err != nil {

@@ -5,19 +5,24 @@ Discovery must stay in step with proxied-test-shard.sh: both select the
 TestProxiedServer* and TestServerMode* entry points, which share the
 requireSharedProxiedServer gate and the shared dolt sql-server.
 
-Two cost models, selected by --weights (default: inits):
+Two cost models, selected by --weights (default: duration):
 
-  --weights=inits (default): bd-init count (newSharedProxiedProject
-    occurrences) per top-level function — a cheap static proxy for
-    wall-time that undercounts a test whose cost is dominated by what it
-    does per init rather than how many inits it runs.
-
-  --weights=duration: measured wall-time from
+  --weights=duration (default): measured wall-time from
     scripts/ci/proxied_test_durations.json (that file's header explains its
     provenance and limits). A function missing from that file — a test
     added since it was last captured — falls back to its inits cost times
     the file's "seconds_per_init_fallback" ratio, so a brand-new test still
     gets a plausible seconds-shaped weight instead of a unit-mismatched one.
+    The manifest's only remaining block is duration-packed (see below), so
+    this is also the only --weights that renders a header matching what is
+    committed — a bare `--write` with no flags reproduces the committed file
+    instead of silently clobbering its header with the inits one.
+
+  --weights=inits: bd-init count (newSharedProxiedProject occurrences) per
+    top-level function — a cheap static proxy for wall-time that undercounts
+    a test whose cost is dominated by what it does per init rather than how
+    many inits it runs. Pass this explicitly if you want it; --write still
+    honors it, it is just no longer the default.
 
 Either way, a from-scratch pack puts TOTAL shards' worth of tests together
 longest-processing-time-first (heaviest first onto the currently lightest
@@ -324,7 +329,7 @@ def check_coverage(path, total, universe):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     ap.add_argument('total_shards', nargs='?', type=int, default=34)
-    ap.add_argument('--weights', choices=['inits', 'duration'], default='inits')
+    ap.add_argument('--weights', choices=['inits', 'duration'], default='duration')
     ap.add_argument('--manifest', default=default_manifest_path,
                      help=f'manifest file to read/write (default: {default_manifest_path})')
     mode = ap.add_mutually_exclusive_group()
