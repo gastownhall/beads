@@ -259,7 +259,7 @@ var showCmd = &cobra.Command{
 			for _, sec := range groupDepSections(dependentsWithMeta, false, relatedSeen) {
 				printDepSection(sec)
 				if sec.Type == types.DepParentChild && issue.IssueType == types.TypeEpic {
-					printEpicChildProgress(sec.Deps)
+					printEpicChildProgress(sec.Deps, issue.Status)
 				}
 			}
 
