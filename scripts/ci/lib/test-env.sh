@@ -34,12 +34,14 @@ beads_test_env_enter() {
         fi
     fi
 
-    mkdir -p "$root/home" "$root/xdg-config" "$root/dolt-root"
+    mkdir -p "$root/home" "$root/xdg-config" "$root/appdata" "$root/localappdata" "$root/dolt-root"
     : >"$root/gitconfig"
 
     export HOME="$root/home"
     export USERPROFILE="$root/home"
     export XDG_CONFIG_HOME="$root/xdg-config"
+    export APPDATA="$root/appdata"
+    export LOCALAPPDATA="$root/localappdata"
     export DOLT_ROOT_PATH="$root/dolt-root"
     export GIT_CONFIG_NOSYSTEM=1
     export GIT_CONFIG_GLOBAL="$root/gitconfig"
