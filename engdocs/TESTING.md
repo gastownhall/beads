@@ -57,6 +57,30 @@ offline and without Bazel, but they are not what CI enforces. GitHub Actions
 jobs that still run Go-native suites call the `-go` names, never `make test`
 (`TestWorkflowsNameTheirTestEngine`).
 
+### Native macOS C/C++ toolchain
+
+Bazel uses pinned LLVM 22.1.8 Clang on macOS, with the installed Apple SDK
+and its native linker (`xcrun --find ld`). `MODULE.bazel` selects
+`linker = "auto"` only for Darwin arm64 and x86_64. The macOS 27 SDK contains
+`arm64e.x1` TAPI targets that the bundled LLVM 22.1.8 `ld64.lld` cannot parse;
+pairing the SDK with Apple's linker avoids that incompatibility without
+changing the shared SDK, Xcode selection, or installed compiler. Darwin's
+SDK/linker are host dependencies, so this is not a hermetic macOS build.
+
+Linux x86_64 still uses the SHA-pinned LLVM compiler and bundled LLD with
+the pinned Ubuntu 24.04 sysroot. Host C/C++ toolchain detection stays disabled
+on every platform; the Darwin override does not select `local_config_cc`.
+`scripts/bazel_hermetic_cc_test.go` guards both contracts. A focused local
+race build exercises the native cgo link through Go's race standard library:
+
+```bash
+bazel test //scripts:scripts_test --config=ci --test_filter='^TestBazelHermetic'
+```
+
+This link check is separate from full macOS gate portability: the Linux-only
+timeout test backends remain tracked in upstream issue #7362. Run the full
+`make test` gate on its supported Linux platform as well.
+
 ## Choose the Smallest Useful Test
 
 Test at the lowest seam that can fail for the user-visible reason. Add a

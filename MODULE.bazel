@@ -165,6 +165,13 @@ llvm_host_dist(
 llvm = use_extension("@toolchains_llvm//toolchain/extensions:llvm.bzl", "llvm")
 llvm.toolchain(
     name = "llvm_toolchain",
+    # Pair Darwin's host SDK with its native linker. LLVM 22.1.8's ld64.lld
+    # cannot parse the arm64e.x1 TAPI targets in the macOS 27 SDK. Keep the
+    # pinned Clang compiler; Linux keeps the bundled LLD and pinned sysroot.
+    linker = {
+        "darwin-aarch64": "auto",
+        "darwin-x86_64": "auto",
+    },
     llvm_version = LLVM_VERSION,
     # The sysroot's libstdc++, linked dynamically as host-gcc builds did.
     stdlib = {"linux-x86_64": "dynamic-stdc++"},

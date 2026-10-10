@@ -88,6 +88,8 @@ func checkHermeticCCModule(module string) []error {
 		}
 	}
 
+	errs = append(errs, checkDarwinLinker(module)...)
+
 	if sysroot, err := moduleCall(module, "llvm.sysroot", hermeticCCSysrootLabel); err != nil {
 		errs = append(errs, err)
 	} else if !strings.Contains(sysroot, `targets = ["linux-x86_64"]`) {
@@ -126,6 +128,34 @@ func checkHermeticCCModule(module string) []error {
 		errs = append(errs, checkDebSysroot(module, m[1])...)
 	}
 	return errs
+}
+
+// Darwin already uses the installed SDK, so pair it with Apple's linker.
+// No default or Linux override is allowed: those must retain bundled LLD.
+func checkDarwinLinker(module string) []error {
+	toolchain, err := moduleCall(stripStarlarkComments(module), "llvm.toolchain", `name = "llvm_toolchain"`)
+	if err != nil {
+		return []error{err}
+	}
+	linkers := regexp.MustCompile(`(?s)\blinker\s*=\s*\{([^}]*?)\}`).FindAllStringSubmatch(toolchain, -1)
+	if len(linkers) != 1 {
+		return []error{errors.New("llvm.toolchain must select native linkers only for Darwin")}
+	}
+	pairs := regexp.MustCompile(`"([^"]*)"\s*:\s*"([^"]*)"`)
+	entries := pairs.FindAllStringSubmatch(linkers[0][1], -1)
+	remaining := pairs.ReplaceAllString(linkers[0][1], "")
+	seen := map[string]bool{}
+	for _, entry := range entries {
+		key := entry[1]
+		if (key != "darwin-aarch64" && key != "darwin-x86_64") || entry[2] != "auto" || seen[key] {
+			return []error{errors.New("linker overrides must be exactly Darwin aarch64 and x86_64 = auto; Linux must use bundled LLD")}
+		}
+		seen[key] = true
+	}
+	if len(seen) != 2 || strings.Trim(remaining, ", \t\r\n") != "" {
+		return []error{errors.New("linker overrides must be exactly Darwin aarch64 and x86_64 = auto")}
+	}
+	return nil
 }
 
 // checkDebSysroot: every package is an amd64 pool .deb pinned by sha256 that
@@ -331,6 +361,14 @@ llvm_host_dist(
     llvm_versions = {"": LLVM_VERSION},
 )
 
+llvm.toolchain(
+    name = "llvm_toolchain",
+    linker = {
+        "darwin-aarch64": "auto",
+        "darwin-x86_64": "auto",
+    },
+)
+
 llvm.toolchain_root(
     name = "llvm_toolchain",
     label = "` + hermeticCCLLVMLabel + `",
@@ -351,6 +389,15 @@ llvm.sysroot(
 		t.Fatalf("good MODULE.bazel fixture: %v", errs)
 	}
 	for name, bad := range map[string]string{
+		"no linker selection":      strings.Replace(module, "linker = {", "other = {", 1),
+		"missing Darwin arm64":     strings.Replace(module, `"darwin-aarch64": "auto",`, "", 1),
+		"missing Darwin x86":       strings.Replace(module, `"darwin-x86_64": "auto",`, "", 1),
+		"bundled Darwin LLD":       strings.Replace(module, `"darwin-aarch64": "auto"`, `"darwin-aarch64": ""`, 1),
+		"global native linker":     strings.Replace(module, `"darwin-aarch64": "auto"`, `"": "auto"`, 1),
+		"Linux native linker":      strings.Replace(module, `"darwin-aarch64": "auto"`, `"linux-x86_64": "auto"`, 1),
+		"extra Linux override":     strings.Replace(module, "linker = {", `linker = {"linux-aarch64": "auto",`, 1),
+		"duplicate Darwin key":     strings.Replace(module, "linker = {", `linker = {"darwin-aarch64": "auto",`, 1),
+		"commented linker":         strings.Replace(module, "    linker = {", "    # linker = {", 1),
 		"no toolchains_llvm":       strings.Replace(module, `bazel_dep(name = "toolchains_llvm", version = "1.11.0")`, "", 1),
 		"no registration":          strings.Replace(module, hermeticCCToolchains, "", 1),
 		"second registration":      module + `register_toolchains("@local_config_cc//:all")` + "\n",
