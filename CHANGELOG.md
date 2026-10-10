@@ -403,6 +403,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   issues' dependency targets alongside the blockers they already fetched.
   Pinned-never-blocks itself is unchanged.
 
+- **Tracker incremental pull no longer loses remote changes that surface
+  late.** `bd <tracker> sync` stored `<tracker>.last_sync` as the end of the
+  sync and the next pull asked the tracker only for issues updated since
+  then, so an issue created or edited on the tracker just before or during a
+  sync that its list endpoint did not return yet (GitHub's issue list lags
+  writes by a few seconds) was never imported until it was edited again.
+  Incremental pulls now fetch from 5 minutes before `last_sync`; re-fetched
+  issues whose synced fields (title, description, priority, status, type,
+  assignee, labels, external ref) have not changed are skipped without a
+  local write. The conflict guard still uses the exact `last_sync` value,
+  and for a re-fetched issue that the remote last changed before
+  `last_sync` it keeps any local copy edited after the remote's own
+  `updated_at`. The overlap adds up to 5 minutes of re-fetch to each
+  incremental pull's API usage.
 - **`bd list` no longer silently drops all but the last repeated filter flag.**
   `--status`, `--state`, and `--id` were plain string flags, so
   `bd list --status open --status closed --status pinned` kept only `pinned` —
