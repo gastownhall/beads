@@ -704,7 +704,7 @@ func renderPrimeMemories(memories map[string]string, compact bool, maxCount, max
 		}
 		sb.WriteString("Stored via `bd remember`. Update in place with `bd remember --key <key> \"new content\"`. Search with `bd memories <keyword>`. Remove with `bd forget <key>`.\n\n")
 		if elided > 0 {
-			sb.WriteString(fmt.Sprintf("> %d more memories are not shown here (%s). Browse the full set with `bd memories <keyword>` or recall one with `bd remember <key>`.\n\n", elided, primeMemoryCapNote(noteCount, noteChars)))
+			sb.WriteString(fmt.Sprintf("> %d more memories are not shown here (%s). Browse the full set with `bd memories <keyword>` or read one in full with `bd recall <key>`.\n\n", elided, primeMemoryCapNote(noteCount, noteChars)))
 		}
 	}
 	for _, entry := range entries {
