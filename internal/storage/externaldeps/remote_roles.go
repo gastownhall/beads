@@ -9,6 +9,7 @@ import (
 	storageissueops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/workapi"
+	"github.com/steveyegge/beads/internal/workapi/storereader"
 	"github.com/steveyegge/beads/issueops"
 )
 
@@ -151,27 +152,21 @@ func (r *remoteReader) Get(ctx context.Context, req issueops.GetRequest) (*issue
 }
 
 // List passes an ordinary listing straight through. A ready listing
-// (ReadyFlag) is a ready read and gets the same exclusion as Ready.
+// (ReadyFlag, `bd list --ready`) is the ready question, which a remote
+// listing cannot carry (httpclient ledger row E-ListRequest.ReadyFlag: over
+// the wire it is listReadyWork, a different operation). The policy store's
+// own reader answers it through the ready reads, which the remote store
+// serves and the policy filters, so it is the same answer the CLI gets
+// locally; against a server that applies the policy those reads stand down.
 func (r *remoteReader) List(ctx context.Context, req issueops.ListRequest) (issueops.IssuePage, error) {
 	if !req.ReadyFlag {
 		return r.inner.List(ctx, req)
 	}
-	blocked, err := r.policy.externallyBlockedIDs(ctx)
+	ready, err := storereader.New(r.policy)
 	if err != nil {
 		return issueops.IssuePage{}, err
 	}
-	if len(blocked) == 0 {
-		return r.inner.List(ctx, req)
-	}
-	limit := workapi.PageLimit(req)
-	widened := req
-	widened.Offset = 0
-	widened.Limit = widenedLimit(req.Offset, limit, len(blocked))
-	page, err := r.inner.List(ctx, widened)
-	if err != nil {
-		return issueops.IssuePage{}, err
-	}
-	return excludeAndPage(page, blocked, req.Offset, limit), nil
+	return ready.List(ctx, req)
 }
 
 // Ready excludes externally blocked sources.
@@ -268,7 +263,8 @@ type remoteReadyClaimer struct {
 // cannot be told what to skip, so there the choice is made here: read the
 // ready candidates in the requested order, skip the blocked ones, and claim
 // each remaining candidate by id until one is won. A candidate another actor
-// took in between is a lost race, not a failure.
+// took in between is a lost race: the next one is tried, and only a page on
+// which every candidate was lost is an error.
 func (c *remoteReadyClaimer) ClaimNext(ctx context.Context, req issueops.ClaimNextRequest) (issueops.ClaimNextResult, error) {
 	// externallyBlockedIDs is empty against a server that applies the policy
 	// (loadBlockingState's probe), so that server's atomic claim answers.
@@ -297,12 +293,14 @@ func (c *remoteReadyClaimer) ClaimNext(ctx context.Context, req issueops.ClaimNe
 	if err != nil {
 		return issueops.ClaimNextResult{}, err
 	}
+	lost := 0
 	for _, row := range page.Items {
 		if row == nil || row.Issue == nil || blocked[row.ID] {
 			continue
 		}
 		res, err := claimer.Claim(ctx, issueops.ClaimRequest{Actor: req.Actor, IssueID: row.ID})
 		if errors.Is(err, issueops.ErrAlreadyClaimed) || errors.Is(err, issueops.ErrNotClaimable) || errors.Is(err, issueops.ErrNotFound) {
+			lost++
 			continue
 		}
 		if err != nil {
@@ -313,6 +311,11 @@ func (c *remoteReadyClaimer) ClaimNext(ctx context.Context, req issueops.ClaimNe
 			claimed.Issue = res.Issue
 		}
 		return issueops.ClaimNextResult{Claimed: &claimed}, nil
+	}
+	if lost > 0 {
+		// There was work, and every candidate went to another actor first: an
+		// empty answer would say there is no work.
+		return issueops.ClaimNextResult{}, fmt.Errorf("claim ready: lost %d races for externally unblocked ready work; re-run to take the next one", lost)
 	}
 	return issueops.ClaimNextResult{}, nil
 }
@@ -429,13 +432,15 @@ type remoteBatchCloser struct {
 // still travels, so its idempotent re-close and the server's not-found
 // precedence are the server's answer, as they are locally.
 //
-// A forced batch has nothing to judge. A ClaimNext batch is passed through
-// whole: no remote batch close carries a claim, so the server's refusal is the
-// answer, not a claim made without the external exclusions. Against a server
-// that applies the policy, externalBlockersFor reads nothing and the whole
-// request goes through untouched.
+// A forced batch has nothing to judge. A ClaimNext batch goes to
+// closeAndClaimNext, Force or not. Against a server that applies the policy,
+// externalBlockersFor reads nothing and the whole request goes through
+// untouched.
 func (c *remoteBatchCloser) CloseBatch(ctx context.Context, request issueops.CloseBatchRequest) (issueops.CloseBatchResult, error) {
-	if request.Force || request.ClaimNext != nil {
+	if request.ClaimNext != nil {
+		return c.closeAndClaimNext(ctx, request)
+	}
+	if request.Force {
 		return c.inner.CloseBatch(ctx, request)
 	}
 	ids := make([]string, 0, len(request.Items))
@@ -493,3 +498,29 @@ var (
 	_ issueops.TreeWalker        = (*remoteTreeWalker)(nil)
 	_ issueops.ReadyCounter      = (*remoteReadyCounter)(nil)
 )
+
+// closeAndClaimNext answers a batch with a next claim. A request that is
+// invalid on every backend is still ErrValidation. Against a server that does
+// not apply the policy the batch is refused whole, before anything is read or
+// closed: a served close cannot keep externally blocked work out of its claim,
+// and the v0 wire's batch close cannot carry a next claim at all (ledger row
+// W-CloseBatchRequest.ClaimNext). A server that applies the policy gets the
+// request as it came; over the v0 wire its closer refuses the claim too.
+func (c *remoteBatchCloser) closeAndClaimNext(ctx context.Context, request issueops.CloseBatchRequest) (issueops.CloseBatchResult, error) {
+	if err := storageissueops.ValidateCloseBatchRequest(request); err != nil {
+		return issueops.CloseBatchResult{}, err
+	}
+	if _, err := workapi.BuildReadyFilter(*request.ClaimNext); err != nil {
+		return issueops.CloseBatchResult{}, err
+	}
+	enforced, err := c.policy.serverEnforcesPolicy(ctx)
+	if err != nil {
+		return issueops.CloseBatchResult{}, err
+	}
+	if !enforced {
+		return issueops.CloseBatchResult{}, fmt.Errorf(
+			"close with a next claim: the served batch close cannot carry a next claim, so nothing was closed; close without --claim-next, then run `bd ready --claim` (%w)",
+			&storage.ErrUnsupported{Op: "CloseBatchRequest.ClaimNext", Backend: fmt.Sprintf("%T", storage.UnwrapStore(c.policy.inner))})
+	}
+	return c.inner.CloseBatch(ctx, request)
+}

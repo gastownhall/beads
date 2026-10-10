@@ -102,11 +102,26 @@ func (r *remoteStore) BlockingAnnotator() (publicops.BlockingAnnotator, error) {
 
 type servedReader struct{ s *remoteStore }
 
-func (r servedReader) Ready(context.Context, publicops.ReadyRequest) (publicops.IssuePage, error) {
-	return publicops.IssuePage{}, errors.New("served Ready: ready work is the policy reader's to answer")
+// Ready serves the ready rows the way a server that knows nothing of the
+// policy does: in order, up to the request's limit, with has_more past it.
+func (r servedReader) Ready(_ context.Context, req publicops.ReadyRequest) (publicops.IssuePage, error) {
+	r.s.served = append(r.s.served, "Ready")
+	items := make([]*types.IssueWithCounts, 0, len(r.s.ready))
+	for _, issue := range r.s.ready {
+		items = append(items, &types.IssueWithCounts{Issue: issue})
+	}
+	if req.Limit != nil && *req.Limit >= 0 && *req.Limit < len(items) {
+		return publicops.IssuePage{Items: items[:*req.Limit], HasMore: true}, nil
+	}
+	return publicops.IssuePage{Items: items}, nil
 }
 
-func (r servedReader) List(context.Context, publicops.ListRequest) (publicops.IssuePage, error) {
+func (r servedReader) List(_ context.Context, req publicops.ListRequest) (publicops.IssuePage, error) {
+	if req.ReadyFlag {
+		// Like httpclient: listIssues cannot carry ReadyFlag (ledger row
+		// E-ListRequest.ReadyFlag); a ready listing is listReadyWork's question.
+		return publicops.IssuePage{}, &storage.ErrUnsupported{Op: "ListRequest.ReadyFlag", Backend: "http"}
+	}
 	r.s.served = append(r.s.served, "List")
 	items := make([]*types.IssueWithCounts, 0, len(r.s.ready))
 	for _, issue := range r.s.ready {
@@ -294,7 +309,7 @@ func TestRemoteRolesAnswerWithoutTheLegacyMethods(t *testing.T) {
 		t.Fatalf("CloseBatch = %+v, %v; want 2 outcomes", result.Outcomes, err)
 	}
 
-	if want := []string{"List", "Get be-a", "Claim be-a", "ClaimNext", "AnnotateBlocking", "WalkTree"}; !slices.Equal(raw.served, want) {
+	if want := []string{"List", "Get be-a", "Ready", "Claim be-a", "ClaimNext", "AnnotateBlocking", "WalkTree"}; !slices.Equal(raw.served, want) {
 		t.Fatalf("served calls = %v, want %v", raw.served, want)
 	}
 	if want := [][]string{{a.ID, b.ID}}; !slices.EqualFunc(raw.closes, want, slices.Equal[[]string]) {
@@ -327,6 +342,47 @@ func TestRemoteReaderPolicesReadyWorkOnly(t *testing.T) {
 	}
 	if len(listed.Items) != 2 {
 		t.Fatalf("List = %d items, want both", len(listed.Items))
+	}
+}
+
+// TestRemoteReaderAnswersAReadyListingWithoutTheWireFlag: `bd list --ready`
+// is a List with ReadyFlag, which the served listing refuses. Over a remote
+// store it is the ready question, answered by the policy store's own reader
+// with externally blocked work left out, and never sent to the served List.
+func TestRemoteReaderAnswersAReadyListingWithoutTheWireFlag(t *testing.T) {
+	a, b := issue("be-a"), issue("be-b")
+	for _, tc := range []struct {
+		name    string
+		blocked bool
+		want    []string
+	}{
+		{name: "no external refs", want: []string{a.ID, b.ID}},
+		{name: "an externally blocked issue", blocked: true, want: []string{b.ID}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := newRemoteStore(a, b)
+			if tc.blocked {
+				blockOnPayments(raw, a.ID)
+			}
+			reader, err := testStore(raw, &fakeStore{}, true).IssueReader()
+			if err != nil {
+				t.Fatalf("IssueReader: %v", err)
+			}
+			listed, err := reader.List(t.Context(), publicops.ListRequest{ReadyFlag: true})
+			if err != nil {
+				t.Fatalf("List(ReadyFlag): %v", err)
+			}
+			got := make([]string, 0, len(listed.Items))
+			for _, row := range listed.Items {
+				got = append(got, row.ID)
+			}
+			if !slices.Equal(got, tc.want) {
+				t.Fatalf("List(ReadyFlag) = %v, want %v", got, tc.want)
+			}
+			if slices.Contains(raw.served, "List") {
+				t.Fatalf("served calls = %v: a ready listing reached the served List", raw.served)
+			}
+		})
 	}
 }
 
@@ -381,7 +437,7 @@ func TestRemoteReadyClaimerSkipsExternallyBlockedWork(t *testing.T) {
 	if next.Claimed == nil || next.Claimed.ID != b.ID || b.Assignee != "worker" {
 		t.Fatalf("ClaimNext claimed %+v, want %s for worker", next.Claimed, b.ID)
 	}
-	if want := []string{"Claim be-b"}; !slices.Equal(raw.served, want) {
+	if want := []string{"Ready", "Claim be-b"}; !slices.Equal(raw.served, want) {
 		t.Fatalf("served calls = %v, want %v", raw.served, want)
 	}
 }

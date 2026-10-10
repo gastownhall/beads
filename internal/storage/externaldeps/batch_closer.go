@@ -10,8 +10,8 @@ import (
 )
 
 // BatchCloser preserves external policy on bd close, including its next claim.
-// Over a store that serves its roles, remoteBatchCloser refuses the next claim
-// instead.
+// Over a remote store, remoteBatchCloser refuses the next claim unless the
+// server applies the policy itself.
 func (s *Store) BatchCloser() (issueops.BatchCloser, error) {
 	if s.rolesAreRemote() {
 		inner, err := s.inner.BatchCloser()
