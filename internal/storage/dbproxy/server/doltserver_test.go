@@ -44,6 +44,16 @@ func requireDolt(t *testing.T) string {
 	return p
 }
 
+// isolateDoltHome points HOME at a fresh TempDir and disables dolt's
+// exit-time event flush. Without the latter every dolt command forks a
+// detached `dolt send-metrics` child that re-creates <HOME>/.dolt after the
+// parent exits, racing TempDir cleanup ("directory not empty", #7327).
+func isolateDoltHome(t *testing.T) {
+	t.Helper()
+	t.Setenv("DOLT_DISABLE_EVENT_FLUSH", "1")
+	t.Setenv("HOME", t.TempDir())
+}
+
 func freePort(t *testing.T) int {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -69,7 +79,7 @@ listener:
 func newDoltServer(t *testing.T) (*server.DoltServer, string) {
 	t.Helper()
 	bin := requireDolt(t)
-	t.Setenv("HOME", t.TempDir())
+	isolateDoltHome(t)
 	rootDir := t.TempDir()
 	port := freePort(t)
 	cfg := writeConfig(t, port)
@@ -338,7 +348,7 @@ func TestDoltServer_StartStop_UnixSocket(t *testing.T) {
 		t.Skip("unix domain sockets not supported on windows")
 	}
 	bin := requireDolt(t)
-	t.Setenv("HOME", t.TempDir())
+	isolateDoltHome(t)
 	rootDir := t.TempDir()
 
 	// Not t.TempDir(): it nests the test's name, which alone takes the socket
@@ -405,7 +415,7 @@ listener:
 
 func TestDoltServer_Stop_RunsGCWhenDatabaseSet(t *testing.T) {
 	bin := requireDolt(t)
-	t.Setenv("HOME", t.TempDir())
+	isolateDoltHome(t)
 	rootDir := t.TempDir()
 	port := freePort(t)
 	cfg := writeConfig(t, port)
@@ -453,7 +463,7 @@ func TestDoltServer_StartStopStart_SameInstanceErrors(t *testing.T) {
 
 func TestDoltServer_StartStopStart_NewInstanceSameRootDirSucceeds(t *testing.T) {
 	bin := requireDolt(t)
-	t.Setenv("HOME", t.TempDir())
+	isolateDoltHome(t)
 	rootDir := t.TempDir()
 	logPath := filepath.Join(t.TempDir(), "server.log")
 	ctx := context.Background()
@@ -515,7 +525,7 @@ func TestDoltServer_Dial_BeforeStart(t *testing.T) {
 
 func TestDoltServer_LogFile_CapturesOutput(t *testing.T) {
 	bin := requireDolt(t)
-	t.Setenv("HOME", t.TempDir())
+	isolateDoltHome(t)
 	rootDir := t.TempDir()
 	port := freePort(t)
 	cfgPath := writeConfig(t, port)
@@ -556,7 +566,7 @@ func TestDoltServer_StopCancelsBeforeReady(t *testing.T) {
 
 func TestDoltServer_ConcurrentStart_SameRootDir_OneWins(t *testing.T) {
 	bin := requireDolt(t)
-	t.Setenv("HOME", t.TempDir())
+	isolateDoltHome(t)
 
 	// Pre-configure dolt's global user.name/email so doltConfigure is a
 	// no-op for every concurrent Start (no JSON-write race on
@@ -619,7 +629,7 @@ func TestDoltServer_ConcurrentStart_SameRootDir_OneWins(t *testing.T) {
 
 func TestDoltServer_DoltInit_Idempotent(t *testing.T) {
 	bin := requireDolt(t)
-	t.Setenv("HOME", t.TempDir())
+	isolateDoltHome(t)
 	rootDir := t.TempDir()
 
 	// Pre-init the dolt repo manually. dolt init refuses to run without
@@ -678,7 +688,7 @@ func holdPort(t *testing.T) int {
 func newDoltServerOnPort(t *testing.T, port int) (*server.DoltServer, string, string) {
 	t.Helper()
 	bin := requireDolt(t)
-	t.Setenv("HOME", t.TempDir())
+	isolateDoltHome(t)
 	rootDir := t.TempDir()
 	cfg := writeConfig(t, port)
 	log := filepath.Join(t.TempDir(), "server.log")
@@ -790,7 +800,7 @@ func TestDoltServer_Start_PolicyDeclines(t *testing.T) {
 // must accept a dial alone rather than wait for a line that cannot come.
 func TestDoltServer_Start_QuietLogLevelUsesDialReadiness(t *testing.T) {
 	bin := requireDolt(t)
-	t.Setenv("HOME", t.TempDir())
+	isolateDoltHome(t)
 	rootDir := t.TempDir()
 	cfg := filepath.Join(t.TempDir(), "config.yaml")
 	require.NoError(t, os.WriteFile(cfg, []byte(fmt.Sprintf("log_level: warning\nlistener:\n  host: 127.0.0.1\n  port: %d\n", freePort(t))), 0o600))
