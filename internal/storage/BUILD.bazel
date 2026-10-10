@@ -78,6 +78,7 @@ go_library(
 go_test(
     name = "storage_test",
     srcs = [
+        "batch_apply_policy_test.go",
         "batch_apply_test.go",
         "batch_close_policy_test.go",
         "contract_leg_registry_test.go",

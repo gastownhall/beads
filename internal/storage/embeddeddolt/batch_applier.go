@@ -24,7 +24,20 @@ func NewBatchApplier(store *EmbeddedDoltStore) (issueops.BatchApplier, error) {
 	return &batchApplier{store: store}, nil
 }
 
-type batchApplier struct{ store *EmbeddedDoltStore }
+// BatchApplierWithPolicy retains externally resolved close blockers inside the batch.
+func (s *EmbeddedDoltStore) BatchApplierWithPolicy(policy storage.BatchClosePolicy) (issueops.BatchApplier, error) {
+	if s == nil {
+		return nil, &storage.ErrUnsupported{Op: "BatchApplierWithPolicy", Backend: "nil"}
+	}
+	return &batchApplier{store: s, policy: policy}, nil
+}
+
+var _ storage.PolicyBatchApplierSource = (*EmbeddedDoltStore)(nil)
+
+type batchApplier struct {
+	store  *EmbeddedDoltStore
+	policy storage.BatchClosePolicy
+}
 
 var _ issueops.BatchApplier = (*batchApplier)(nil)
 
@@ -46,7 +59,7 @@ func (o *batchApplier) ApplyBatch(ctx context.Context, request issueops.ApplyBat
 
 	var result issueops.ApplyBatchResult
 	err = o.store.runIssueOperationTxWithMessage(ctx, func(tx *sql.Tx) (storageissueops.ChangedTables, string, error) {
-		attempt, write, err := storageissueops.ApplyBatchInTx(ctx, tx, plan)
+		attempt, write, err := storageissueops.ApplyBatchInTxWithPolicy(ctx, tx, plan, o.policy)
 		if err != nil {
 			return nil, "", err
 		}

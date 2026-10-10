@@ -63,6 +63,7 @@ go_library(
 go_test(
     name = "telemetry_test",
     srcs = [
+        "batch_applier_policy_test.go",
         "batch_close_policy_test.go",
         "issue_claimer_test.go",
         "issue_operations_test.go",

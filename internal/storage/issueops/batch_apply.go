@@ -58,8 +58,17 @@ import (
 // knows what to do with that; see BatchApplyWrite for why those are two facts
 // rather than one.
 func ApplyBatchInTx(ctx context.Context, tx *sql.Tx, plan storage.ApplyBatchPlan) (publicops.ApplyBatchResult, BatchApplyWrite, error) {
+	return ApplyBatchInTxWithPolicy(ctx, tx, plan, storage.BatchClosePolicy{})
+}
+
+// ApplyBatchInTxWithPolicy is ApplyBatchInTx with an externally resolved close
+// policy evaluated at each close item. A refused close fails the whole request,
+// because an apply batch is all-or-nothing rather than the close batch's
+// skip-and-continue.
+func ApplyBatchInTxWithPolicy(ctx context.Context, tx *sql.Tx, plan storage.ApplyBatchPlan, policy storage.BatchClosePolicy) (publicops.ApplyBatchResult, BatchApplyWrite, error) {
 	run := &applyBatchRun{
 		plan:   plan,
+		policy: policy,
 		keys:   make(map[string]string, len(plan.KeyIndex)),
 		planes: map[string]bool{},
 		write:  BatchApplyWrite{Tables: ChangedTables{}},
@@ -168,7 +177,8 @@ func plural(n int) string {
 // bound to, the plane each row it CREATED landed on, the edges it added, and
 // what it wrote.
 type applyBatchRun struct {
-	plan storage.ApplyBatchPlan
+	plan   storage.ApplyBatchPlan
+	policy storage.BatchClosePolicy
 	// keys maps a create item's Key to the id it was bound to. It is the
 	// resolution table every backward ref reads.
 	keys map[string]string
@@ -305,6 +315,9 @@ func (r *applyBatchRun) applyClose(ctx context.Context, tx *sql.Tx, index int, i
 	if err != nil {
 		return err
 	}
+	if err := applyClosePolicy(ctx, tx, r.policy, id, item.Force); err != nil {
+		return &publicops.ItemError{Index: index, Kind: publicops.ItemClose, Key: item.Target.Key, IssueID: id, Err: err}
+	}
 	closed, tables, err := ExecuteClose(ctx, tx, publicops.CloseRequest{
 		Actor:           r.plan.Actor,
 		IssueID:         id,
@@ -324,6 +337,27 @@ func (r *applyBatchRun) applyClose(ctx context.Context, tx *sql.Tx, index int, i
 		Changed:    closed.Changed,
 		RowVersion: closed.Issue.RowVersion,
 		Issue:      closed.Issue,
+	}
+	return nil
+}
+
+// applyClosePolicy refuses a non-forced close of an issue an external blocker
+// still holds open. An issue that is already closed or absent is left to
+// ExecuteClose, which keeps idempotent re-closes and not-found precedence.
+func applyClosePolicy(ctx context.Context, tx DBTX, policy storage.BatchClosePolicy, id string, force bool) error {
+	if force {
+		return nil
+	}
+	refusal := policy.CheckClose(id, false)
+	if refusal == nil {
+		return nil
+	}
+	closed, _, found, err := isClosedInTx(ctx, tx, id)
+	if err != nil {
+		return err
+	}
+	if found && !closed {
+		return refusal
 	}
 	return nil
 }
