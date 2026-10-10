@@ -74,6 +74,12 @@ bd config unset jira.url
 
 `bd config set` automatically routes the write to the right location: keys in the YAML namespace (see below) are written to the project `config.yaml`; everything else is written to the Dolt database. `beads.role` is stored in git config.
 
+Machine-global YAML keys are the exception: `metrics.*`, `node_id`, and
+`dolt.remotesapi-port` are written to `~/.config/bd/config.yaml`, never a
+project's tracked `.beads/config.yaml`. The remotesapi setting controls the one
+shared Dolt process on that machine; `BEADS_DOLT_REMOTESAPI_PORT` has highest
+precedence, followed by the user-global value, then the disabled default (`0`).
+
 Unrecognized keys produce a warning with a did-you-mean suggestion; use the `custom.*` namespace for user-defined keys.
 
 ## YAML-only Keys (Startup Settings)
@@ -114,6 +120,7 @@ Any key whose name contains `api_key`, `api-key`, `secret`, `token`, or `passwor
 | `dolt.auto-push-interval` | — | `BD_DOLT_AUTO_PUSH_INTERVAL` | `5m` | Minimum time between auto-pushes |
 | `dolt.auto-push-timeout` | — | `BD_DOLT_AUTO_PUSH_TIMEOUT` | `30s` | Timeout for a single auto-push attempt |
 | `dolt.shared-server` | `--shared-server` | `BEADS_DOLT_SHARED_SERVER` | `false` | Share one Dolt server at `~/.beads/shared-server/` |
+| `dolt.remotesapi-port` | `bd dolt set remotesapi-port` | `BEADS_DOLT_REMOTESAPI_PORT` | `0` | Machine-global remotesapi listener for the local shared server; 0 disables it. Apply with `bd dolt restart` |
 | `dolt.max-conns` | — | `BEADS_DOLT_MAX_CONNS` | `10` | Connection pool size |
 | `git.author` | — | `BD_GIT_AUTHOR` | (none) | Override commit author for beads commits |
 | `git.no-gpg-sign` | — | `BD_GIT_NO_GPG_SIGN` | `false` | Disable GPG signing for beads commits |

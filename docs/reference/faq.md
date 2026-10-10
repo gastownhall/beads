@@ -323,7 +323,7 @@ This applies to server mode only (embedded mode has no server):
 ```bash
 bd doctor                        # Check health
 cat .beads/dolt-server.log       # Check server logs (server mode)
-bd dolt stop && bd dolt start    # Restart the server
+bd dolt restart                  # Restart the server
 ```
 
 See [Troubleshooting](/reference/troubleshooting).

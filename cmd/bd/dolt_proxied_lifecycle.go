@@ -24,9 +24,10 @@ import (
 // so this one is frozen; the message beside it is informative.
 const proxyDoltStartConflictCode = "proxy.dolt_start.conflict"
 
-const proxyDoltStartConflictMessage = "dolt start is not supported in proxied-server mode: " +
-	"the proxy owns its dolt backend, and a second sql-server over the same data directory risks corrupting it; " +
+const proxyDoltStartConflictDetail = "the proxy owns its dolt backend, and a second sql-server over the same data directory risks corrupting it; " +
 	"the proxy starts on demand — run 'bd dolt status' to see what is running, or 'bd dolt stop' to shut it down"
+
+const proxyDoltStartConflictMessage = "dolt start is not supported in proxied-server mode: " + proxyDoltStartConflictDetail
 
 // proxiedDoltStartRefusal is enforced inside the command rather than by the
 // pre-provider capability gate because `bd dolt` is a noDbCommands entry: its
@@ -37,6 +38,17 @@ func proxiedDoltStartRefusal() *ProxyCapabilityError {
 	return &ProxyCapabilityError{
 		Code:     proxyDoltStartConflictCode,
 		Message:  proxyDoltStartConflictMessage,
+		ExitCode: 1,
+	}
+}
+
+// proxiedDoltRestartRefusal is the same conflict reached through `bd dolt
+// restart`: its start half would be the second sql-server the code names, so
+// consumers see the one frozen code while the message names the command run.
+func proxiedDoltRestartRefusal() *ProxyCapabilityError {
+	return &ProxyCapabilityError{
+		Code:     proxyDoltStartConflictCode,
+		Message:  "dolt restart is not supported in proxied-server mode: " + proxyDoltStartConflictDetail,
 		ExitCode: 1,
 	}
 }
