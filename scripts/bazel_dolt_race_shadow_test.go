@@ -16,7 +16,9 @@ import (
 // lanes, so the union-job model can be measured against them before any
 // cutover. It must be advisory: no workflow_call output, nothing in pr.yml's
 // gates or bazel-gate.sh/ci-gate.sh, and a failure that cannot fail the
-// call's aggregate result (BAZEL) that pr.yml's ci-gate requires.
+// call's aggregate result (BAZEL) that pr.yml's ci-gate requires. It cannot
+// fail the gate, but the gate still waits for it: ci-gate needs the whole
+// bazel call, which completes only when every job in it has finished.
 
 const (
 	bazelDoltRaceJobName = "bazel-dolt-race"
@@ -36,6 +38,10 @@ const (
 var bazelShadowLanes = map[string]string{
 	bazelDoltRaceJobName: "item 5 Phase 1: the dolt-server + proxied union beside its member lanes, advisory until a cutover PR",
 }
+
+// bazelDoltRaceJobTimeoutHeadroom: the minutes the shadow job's
+// timeout-minutes must exceed its test step's (TestBazelDoltRaceShadowIsAdvisory).
+const bazelDoltRaceJobTimeoutHeadroom = 10
 
 // The union's members, and the tag filter each owns.
 var bazelDoltRaceMembers = []struct{ config, tag string }{
@@ -145,11 +151,13 @@ func sameStringSet(a, b []string) bool {
 	return true
 }
 
-// TestBazelDoltRaceShadowIsAdvisory pins what keeps the shadow out of every
-// gate: remote-only, job-level continue-on-error (a job's failure otherwise
-// fails the reusable-workflow call, whose result pr.yml's ci-gate requires
-// as BAZEL), no workflow_call output, no job needs it, and no gate script
-// or caller names it.
+// TestBazelDoltRaceShadowIsAdvisory pins what keeps the shadow from failing
+// any gate: remote-only, job-level continue-on-error (a job's failure
+// otherwise fails the reusable-workflow call, whose result pr.yml's ci-gate
+// requires as BAZEL), timeout headroom (a job cancelled at its own timeout
+// is not covered by continue-on-error), no workflow_call output, no
+// bazel.yml job needs it, and no gate script or caller names it. ci-gate
+// still waits for it to finish, through its needs on the whole call.
 func TestBazelDoltRaceShadowIsAdvisory(t *testing.T) {
 	workflow := readCIWorkflow(t, bazelWorkflowName)
 	job := workflow.job(t, bazelDoltRaceJobName)
@@ -165,7 +173,7 @@ func TestBazelDoltRaceShadowIsAdvisory(t *testing.T) {
 	}
 	for name, other := range workflow.Jobs {
 		if slices.Contains(other.Needs, bazelDoltRaceJobName) {
-			t.Errorf("job %s needs %s; nothing may wait on the shadow", name, bazelDoltRaceJobName)
+			t.Errorf("job %s needs %s; no bazel.yml job may depend on the shadow", name, bazelDoltRaceJobName)
 		}
 	}
 
@@ -173,6 +181,21 @@ func TestBazelDoltRaceShadowIsAdvisory(t *testing.T) {
 	test := job.step(t, "bazel test //... --config="+bazelDoltRaceConfig)
 	if strings.TrimSpace(test.Run) != bazelTierTestRun(bazelDoltRaceConfig) {
 		t.Errorf("%s test step run changed; want exactly:\n%s\ngot:\n%s", bazelDoltRaceJobName, bazelTierTestRun(bazelDoltRaceConfig), test.Run)
+	}
+
+	// Timeout headroom. continue-on-error covers a failed or timed-out step,
+	// not a job GitHub cancels at its own timeout-minutes; a cancelled job
+	// can make the call (needs.bazel.result) non-success and turn ci-gate
+	// red. So the job outlives its test step by at least
+	// bazelDoltRaceJobTimeoutHeadroom minutes, for setup before it and the
+	// checks, uploads and analytics after it. Both sides come from the
+	// workflow: a step without timeout-minutes would default to 360.
+	if test.TimeoutMinutes <= 0 {
+		t.Errorf("%s test step has no timeout-minutes; it would default to GitHub's 360 and outlive the job", bazelDoltRaceJobName)
+	}
+	if job.TimeoutMinutes < test.TimeoutMinutes+bazelDoltRaceJobTimeoutHeadroom {
+		t.Errorf("%s timeout-minutes %d, want at least the test step's %d + %d: a job cancelled at its own timeout can turn ci-gate red",
+			bazelDoltRaceJobName, job.TimeoutMinutes, test.TimeoutMinutes, bazelDoltRaceJobTimeoutHeadroom)
 	}
 
 	// No workflow_call output reads the job.

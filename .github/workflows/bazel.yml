@@ -48,8 +48,9 @@
 # local (rbe=off) still skips it. Direct runs (push to main,
 # workflow_dispatch, nightly.yml's call) gate nothing. bazel-dolt-race (the
 # dolt-server + proxied union shadow, mode remote on PRs and merge groups
-# only) gates nothing either: no output, job-level continue-on-error (see its
-# comment and engdocs/CI_REQUIRED_CHECK_TOPOLOGY.md, "dolt-race Shadow").
+# only) cannot fail the gate either: no output, job-level continue-on-error.
+# The gate still waits for it, as for every job of the call (see its comment
+# and engdocs/CI_REQUIRED_CHECK_TOPOLOGY.md, "dolt-race Shadow").
 #
 # Execution mode, decided once by the rbe job (every other job needs it and
 # reads its outputs; none re-derives the condition) and passed to
@@ -1996,10 +1997,16 @@ jobs:
   # cutover. Each member target's test action key is unchanged, so the shadow
   # and the member lanes share cached results, and rbe-west deduplicates
   # identical in-flight executions.
-  # Advisory and outside every gate: job-level continue-on-error (a failed
+  # Advisory: it cannot fail the gate. Job-level continue-on-error (a failed
   # job otherwise fails the whole call, whose result pr.yml's ci-gate
-  # requires as BAZEL), no workflow_call output, no job outputs, nothing
-  # needs it, and no gate script or caller names it. Mode remote only, on
+  # requires as BAZEL), no workflow_call output, no job outputs, no job in
+  # this file needs it, and no gate script or caller names it. The gate does
+  # wait for it: ci-gate needs pr.yml's bazel call, which completes only when
+  # every job in it has finished (success, failure or timeout), so a slow
+  # shadow delays the gate and the merge queue. continue-on-error does not
+  # cover a job GitHub cancels at its own timeout-minutes, which could turn
+  # the call red: the job timeout keeps 10 minutes over the test step's
+  # (TestBazelDoltRaceShadowIsAdvisory). Mode remote only, on
   # same-repo pull requests and merge groups (mode remote on a pull_request
   # is never a fork): no fork mode, no cache or local mode, and not on push,
   # nightly, dispatch or bazel-farm.yml's call. Its ci-analytics LANE is
@@ -2009,7 +2016,7 @@ jobs:
     needs: rbe
     runs-on: ${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     if: ${{ needs.rbe.outputs.mode == 'remote' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}
-    timeout-minutes: 30
+    timeout-minutes: 35
     continue-on-error: true
     steps:
       # inputs.checkout-sha: see the header (empty: the event's default ref).
@@ -2073,7 +2080,11 @@ jobs:
           exit "$rc"
 
       # The member lanes' checks over the union's BEP: bazel-proxied's (the
-      # dolt-server lane has none), which ignore targets they do not list.
+      # dolt-server lane has none). check_shard_coverage ignores targets it
+      # does not list; check_testcases checks every target, so it covers the
+      # dolt-server tier too, which bazel-doltserver does not check: a
+      # dolt-server shard that runs no test turns this job red while both
+      # member lanes stay green.
       - name: Every target and shard ran tests
         if: ${{ always() && steps.test.outcome != 'skipped' }}
         run: python3 tools/bazel/check_testcases.py --bep "$RUNNER_TEMP/bazel-bep.json"

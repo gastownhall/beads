@@ -635,10 +635,17 @@ with the member lanes.
 - It runs in mode `remote` on `pull_request` and `merge_group` events only.
   It never runs in a fork mode (`fork-ro`, `fork-rw`), in mode `cache` or
   `local`, on `bazel-farm.yml`'s call, on push, nightly or dispatch.
-- It gates nothing. It has job-level `continue-on-error`, so its failure
-  cannot fail the call's aggregate result (`BAZEL`). It has no
-  `workflow_call` output, no job `needs` it, and `pr.yml`, `ci-gate.sh` and
-  `bazel-gate.sh` never name it.
+- It cannot fail the gate. It has job-level `continue-on-error`, so its
+  failure cannot fail the call's aggregate result (`BAZEL`). It has no
+  `workflow_call` output, no `bazel.yml` job `needs` it, and `pr.yml`,
+  `ci-gate.sh` and `bazel-gate.sh` never name it.
+- The gate still waits for it. `CI Gate` needs `pr.yml`'s `bazel` call, and
+  a reusable-workflow call completes only when all of its jobs have finished
+  (success, failure or timeout), `continue-on-error` ones included. A slow
+  shadow therefore delays `CI Gate` and the merge queue, up to its
+  timeout. `continue-on-error` does not cover a job GitHub cancels at its
+  own `timeout-minutes`, so the job's timeout stays 10 minutes above its
+  test step's (policy-tested).
 - Its ci-analytics `LANE` is `dolt-race`.
 - Policy: `scripts/bazel_dolt_race_shadow_test.go`. Removing the job, its
   `.bazelrc` config and its line in `.github/scripts/rrc-lane-commands.txt`
