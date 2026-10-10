@@ -420,7 +420,6 @@ go_library(
         "//internal/storage/embeddeddolt",
         "//internal/storage/externaldeps",
         "//internal/storage/fs",
-        "//internal/storage/git",
         "//internal/storage/issueops",
         "//internal/storage/kvkeys",
         "//internal/storage/schema",

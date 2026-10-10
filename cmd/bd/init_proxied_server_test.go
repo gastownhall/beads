@@ -18,9 +18,191 @@ import (
 	"github.com/steveyegge/beads/internal/storage/domain"
 	storagefs "github.com/steveyegge/beads/internal/storage/fs"
 	storagegit "github.com/steveyegge/beads/internal/storage/git"
+	"github.com/steveyegge/beads/internal/utils"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// Serial: changes the process working directory and environment.
+func TestProxiedInitGitBootstrapUsesSelectedProject(t *testing.T) {
+	for _, entry := range os.Environ() {
+		key := gitenv.EntryKey(entry)
+		if gitenv.IsRoutingKeyForOS(key, runtime.GOOS) {
+			t.Setenv(key, "")
+			require.NoError(t, os.Unsetenv(key))
+		}
+	}
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	runGit := func(t *testing.T, dir string, args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir, cmd.Env = dir, gitenv.ScrubRouting(os.Environ())
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "fixture git %v: %s", args, out)
+		return strings.TrimSpace(string(out))
+	}
+	for _, name := range []string{"fresh", "decoy", "invalid", "inline", "existing_decoy", "existing_invalid", "bare", "blocked", "canceled"} {
+		t.Run(name, func(t *testing.T) {
+			home := t.TempDir()
+			for _, key := range []string{"HOME", "USERPROFILE", "XDG_CONFIG_HOME"} {
+				t.Setenv(key, home)
+			}
+			global := filepath.Join(home, ".gitconfig")
+			require.NoError(t, os.WriteFile(global, []byte("[user]\n\tname = bootstrap fixture\n"), 0600))
+			selected, decoy := t.TempDir(), newGitRepo(t)
+			t.Chdir(decoy) // Selection comes from the explicit argument, not process cwd.
+			existing := strings.HasPrefix(name, "existing_") || name == "bare"
+			if existing {
+				args := []string{"init"}
+				if name == "bare" {
+					args = append(args, "--bare")
+				}
+				runGit(t, selected, args...)
+			}
+			if name == "blocked" {
+				require.NoError(t, os.WriteFile(filepath.Join(selected, ".git"), []byte("occupied\n"), 0600))
+			}
+			before := map[string][]byte{}
+			for _, path := range []string{global, filepath.Join(decoy, ".git", "config"), filepath.Join(decoy, ".git", "HEAD")} {
+				data, err := os.ReadFile(path)
+				require.NoError(t, err)
+				before[path] = data
+			}
+			missing := filepath.Join(home, "inherited-missing.git")
+			switch {
+			case strings.HasSuffix(name, "decoy"):
+				t.Setenv("GIT_DIR", filepath.Join(decoy, ".git"))
+				t.Setenv("GIT_WORK_TREE", decoy)
+			case strings.HasSuffix(name, "invalid"):
+				t.Setenv("GIT_DIR", missing)
+			case name == "inline":
+				t.Setenv("GIT_CONFIG_COUNT", "1")
+				t.Setenv("GIT_CONFIG_KEY_0", "core.bare")
+				t.Setenv("GIT_CONFIG_VALUE_0", "true")
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if name == "canceled" {
+				cancel()
+			}
+			envBefore := os.Environ()
+			result, err := ensureProxiedInitGitRepo(ctx, selected)
+			require.Equal(t, envBefore, os.Environ())
+			cwd, cwdErr := os.Getwd()
+			require.NoError(t, cwdErr)
+			require.True(t, utils.PathsEqual(decoy, cwd), "process cwd = %q, want %q", cwd, decoy)
+			if name == "blocked" || name == "canceled" {
+				require.Error(t, err)
+				require.Equal(t, domain.EnsureGitRepoResult{}, result)
+				if name == "canceled" {
+					require.ErrorIs(t, err, context.Canceled)
+					require.NoDirExists(t, filepath.Join(selected, ".git"))
+				} else {
+					data, readErr := os.ReadFile(filepath.Join(selected, ".git"))
+					require.NoError(t, readErr)
+					require.Equal(t, "occupied\n", string(data))
+				}
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, domain.EnsureGitRepoResult{DidInit: !existing, AlreadyExists: existing}, result)
+				gitDir := filepath.Join(selected, ".git")
+				if name == "bare" {
+					gitDir = selected
+				}
+				gotGitDir := runGit(t, selected, "rev-parse", "--absolute-git-dir")
+				require.True(t, utils.PathsEqual(gitDir, gotGitDir), "Git directory = %q, want %q", gotGitDir, gitDir)
+			}
+			for path, data := range before {
+				after, readErr := os.ReadFile(path)
+				require.NoError(t, readErr)
+				require.Equal(t, data, after, "changed unselected config: %s", path)
+			}
+			require.NoDirExists(t, missing)
+			require.NoDirExists(t, filepath.Join(selected, ".beads"))
+		})
+	}
+}
+
+// Serial: changes the process working directory, environment, and loaded config.
+func TestRunInitProxiedServerGitBootstrap(t *testing.T) {
+	for _, entry := range os.Environ() {
+		key := gitenv.EntryKey(entry)
+		if gitenv.IsRoutingKeyForOS(key, runtime.GOOS) {
+			t.Setenv(key, "")
+			require.NoError(t, os.Unsetenv(key))
+		}
+	}
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	for _, name := range []string{"fresh_decoy", "blocked_decoy", "canceled", "explicit_storage"} {
+		t.Run(name, func(t *testing.T) {
+			home := t.TempDir()
+			for _, key := range []string{"HOME", "USERPROFILE", "XDG_CONFIG_HOME"} {
+				t.Setenv(key, home)
+			}
+			global := filepath.Join(home, ".gitconfig")
+			require.NoError(t, os.WriteFile(global, []byte("[user]\n\tname = call-site fixture\n"), 0600))
+			selected, decoy := t.TempDir(), newGitRepo(t)
+			t.Chdir(selected)
+			isolateBeadsDirForTest(t)
+			initConfigForTest(t)
+			resetRepoCachesForTest(t)
+			gitPath := filepath.Join(selected, ".git")
+			if name == "blocked_decoy" {
+				require.NoError(t, os.WriteFile(gitPath, []byte("occupied\n"), 0600))
+			}
+			storage := filepath.Join(t.TempDir(), "explicit-beads")
+			if name == "explicit_storage" {
+				t.Setenv("BEADS_DIR", storage)
+			}
+			before := map[string][]byte{}
+			for _, path := range []string{global, filepath.Join(decoy, ".git", "config"), filepath.Join(decoy, ".git", "HEAD")} {
+				data, err := os.ReadFile(path)
+				require.NoError(t, err)
+				before[path] = data
+			}
+			t.Setenv("GIT_DIR", filepath.Join(decoy, ".git"))
+			t.Setenv("GIT_WORK_TREE", decoy)
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			if name == "canceled" {
+				cancel()
+			}
+			// External mode skips the managed Dolt probe. The relative path stops
+			// after Git bootstrap, before .beads writes or database initialization.
+			err := runInitProxiedServer(&cobra.Command{}, ctx, initProxiedServerInput{
+				prefix: "bootstrap", quiet: true, externalConfig: &configfile.ExternalDoltConfig{},
+				serverRootPath: "stop-before-storage",
+			})
+			if name == "blocked_decoy" || name == "canceled" {
+				require.ErrorContains(t, err, "failed to initialize git repository:")
+				if name == "canceled" {
+					require.ErrorIs(t, err, context.Canceled)
+					_, statErr := os.Stat(gitPath)
+					require.ErrorIs(t, statErr, os.ErrNotExist)
+				} else {
+					data, readErr := os.ReadFile(gitPath)
+					require.NoError(t, readErr)
+					require.Equal(t, "occupied\n", string(data))
+				}
+			} else {
+				require.EqualError(t, err, `buildProxiedServerClientInfo: path "stop-before-storage" is not absolute`)
+				if name == "fresh_decoy" {
+					require.DirExists(t, gitPath)
+				} else {
+					_, statErr := os.Stat(gitPath)
+					require.ErrorIs(t, statErr, os.ErrNotExist)
+				}
+			}
+			for path, data := range before {
+				after, readErr := os.ReadFile(path)
+				require.NoError(t, readErr)
+				require.Equal(t, data, after, "changed unselected config: %s", path)
+			}
+			require.NoDirExists(t, filepath.Join(selected, ".beads"))
+			require.NoDirExists(t, storage)
+		})
+	}
+}
 
 func TestProxiedInitRemoteURLUsesSelectedProject(t *testing.T) {
 	// Serial: each fixture owns the process directory, environment and loaded config.
@@ -360,6 +542,11 @@ func TestIsTeamServerManaged_RequiresProxiedServerMode(t *testing.T) {
 
 	cfg.DoltMode = configfile.DoltModeProxiedServer
 	assert.True(t, cfg.IsTeamServerManaged())
+}
+
+func TestProxiedInitTailRequiresGitContext(t *testing.T) {
+	err := runInitProxiedServerTail(&cobra.Command{}, t.Context(), initProxiedServerInput{}, runInitTailContext{})
+	require.EqualError(t, err, "proxied init tail requires a working directory or Git use case")
 }
 
 func TestProxiedInitTailRoleIgnoresInheritedGitRouting(t *testing.T) {
