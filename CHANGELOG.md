@@ -1362,6 +1362,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`federation.allowed-remote-patterns` treats `?` as a query delimiter**
+  ([#5951](https://github.com/gastownhall/beads/pull/5951)). A `?` in a
+  pattern now starts its query and is no longer `path.Match`'s
+  single-character wildcard; a remote that carries a query string only
+  matches a pattern that also carries one, with strict query parsing and
+  `endpoint=` validation. Queryless remotes keep the previous glob semantics
+  unchanged. See `docs/reference/configuration.md`, Sync and Federation.
+
 - **The managed shared Dolt server now opens its configured remotesapi
   listener** ([#6020](https://github.com/gastownhall/beads/pull/6020)).
   `dolt.remotesapi-port` (machine-global user config) and
