@@ -502,7 +502,7 @@ Selected commonly-used variables:
 | `BD_FEDERATION_REMOTE`, `BD_FEDERATION_SOVEREIGNTY` | Override federation settings |
 | `BD_VALIDATION_ON_CREATE` / `_ON_CLOSE` / `_ON_SYNC` | Override validation modes |
 | `BD_NO_PAGER`, `BD_PAGER` | Pager behavior |
-| `BD_NON_INTERACTIVE` | Disable prompts |
+| `BD_NON_INTERACTIVE` | `1`/`true` disables prompts; `0`/`false` has [command-specific behavior](#non-interactive-mode) |
 | `BD_DEBUG` | Enable debug logging |
 | `BD_MIGRATION_FREEZE_FILE` | Check this exact path for the freeze marker instead of walking ancestor directories; authoritative when set (see [Migration Freeze](#migration-freeze)) |
 | `BEADS_DIR` | Force the active beads workspace directory |
@@ -519,6 +519,32 @@ Selected commonly-used variables:
 Integration secrets follow tracker-specific conventions: `LINEAR_API_KEY`, `GITHUB_TOKEN`, `GITLAB_TOKEN`, `JIRA_API_TOKEN`, `AZURE_DEVOPS_PAT`, `ANTHROPIC_API_KEY`. These are preferred over storing the value in `config.yaml` for git-tracked projects.
 
 `bd config show` will display the source of every effective key, making overrides explicit.
+
+### Non-interactive mode
+
+`BD_NON_INTERACTIVE` is not a universal force-interactive switch. Its supported
+values have different meanings for these consumers:
+
+| Consumer | `1` or `true` | `0` or `false` | Unset |
+|---|---|---|---|
+| `bd init` | Suppress prompts | Allow prompts even in CI or with piped stdin | Detect CI and whether stdin is a terminal |
+| `bd bootstrap` | Suppress confirmation prompts | Continue to CI and stdin detection | Detect CI and whether stdin is a terminal |
+| Last-touched fallback for no-ID mutations | Deny the fallback | Continue to CI and stdin detection | Allow only with terminal stdin outside CI |
+
+For these checks, `CI=1` or `CI=true` selects non-interactive behavior. An
+explicit `bd init --non-interactive` still suppresses prompts even when
+`BD_NON_INTERACTIVE=0` or `false`; `bd bootstrap --non-interactive` and
+`--yes`/`-y` also take precedence over the environment.
+
+For no-ID mutations, `BD_LAST_TOUCHED_FALLBACK` is a separate, higher-priority
+override: `1`/`true` permits the fallback, while `0`/`false` denies it, regardless
+of `BD_NON_INTERACTIVE`, CI, or stdin. Automation should supply explicit issue
+IDs to avoid modifying an unintended last-touched issue.
+
+An init wizard fixture can use `BD_NON_INTERACTIVE=0` while piping its answers.
+Copying that setting to a bootstrap fixture does not enable prompts when CI or
+piped stdin would suppress them. These existing per-consumer contracts are
+preserved; sharing their environment parsing would change behavior.
 
 ## Migration Freeze
 
