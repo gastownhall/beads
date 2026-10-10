@@ -13,15 +13,22 @@ import (
 func (s *DoltStore) AddLabel(ctx context.Context, issueID, label, actor string) error {
 	return s.withCircuitWrite(ctx, func(ctx context.Context) error {
 		isWisp := s.isActiveWisp(ctx, issueID)
+		changed := false
 		if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
-			return issueops.AddLabelInTx(ctx, tx, "", "", issueID, label, actor)
+			var err error
+			changed, err = issueops.AddLabelInTx(ctx, tx, "", "", issueID, label, actor)
+			return err
 		}); err != nil {
 			return err
 		}
 		if isWisp {
 			return nil
 		}
-		return s.doltAddAndCommit(ctx, []string{"events", "labels"}, fmt.Sprintf("bd: label add %s", issueID))
+		tables := []string{"events"}
+		if changed {
+			tables = []string{"issues", "events", "labels"}
+		}
+		return s.doltAddAndCommit(ctx, tables, fmt.Sprintf("bd: label add %s", issueID))
 	})
 }
 
@@ -30,15 +37,22 @@ func (s *DoltStore) AddLabel(ctx context.Context, issueID, label, actor string) 
 func (s *DoltStore) RemoveLabel(ctx context.Context, issueID, label, actor string) error {
 	return s.withCircuitWrite(ctx, func(ctx context.Context) error {
 		isWisp := s.isActiveWisp(ctx, issueID)
+		changed := false
 		if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
-			return issueops.RemoveLabelInTx(ctx, tx, "", "", issueID, label, actor)
+			var err error
+			changed, err = issueops.RemoveLabelInTx(ctx, tx, "", "", issueID, label, actor)
+			return err
 		}); err != nil {
 			return err
 		}
 		if isWisp {
 			return nil
 		}
-		return s.doltAddAndCommit(ctx, []string{"events", "labels"}, fmt.Sprintf("bd: label remove %s", issueID))
+		tables := []string{"events"}
+		if changed {
+			tables = []string{"issues", "events", "labels"}
+		}
+		return s.doltAddAndCommit(ctx, tables, fmt.Sprintf("bd: label remove %s", issueID))
 	})
 }
 

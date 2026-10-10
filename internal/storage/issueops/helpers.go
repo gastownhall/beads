@@ -155,9 +155,11 @@ const issueInsertRow = `(
 			?, ?
 		)`
 
-// issueInsertArgs binds issue to issueInsertRow. row_lock is minted fresh
-// per row (freshRowLock), as every issues/wisps content write must.
-func issueInsertArgs(issue *types.Issue) []any {
+// issueInsertArgs binds issue to issueInsertRow. rowLock is the freshly
+// minted row_lock for this row (freshRowLock), passed in so the caller can
+// reflect the stored token back to the issue when the write path guarantees
+// it is the stored one (#5738).
+func issueInsertArgs(issue *types.Issue, rowLock int64) []any {
 	return []any{
 		issue.ID, issue.ContentHash, issue.Title, issue.Description, issue.Design, issue.AcceptanceCriteria, issue.Notes,
 		issue.Status, issue.Priority, issue.IssueType, NullString(issue.Assignee), NullInt(issue.EstimatedMinutes),
@@ -168,15 +170,23 @@ func issueInsertArgs(issue *types.Issue) []any {
 		issue.EventKind, issue.Actor, issue.Target, issue.Payload,
 		issue.AwaitType, issue.AwaitID, issue.Timeout.Nanoseconds(), FormatJSONStringArray(issue.Waiters),
 		issue.DueAt, issue.DeferUntil, JSONMetadata(issue.Metadata),
-		freshRowLock(), NullString(string(issue.StorageClass.Normalize())),
+		rowLock, NullString(string(issue.StorageClass.Normalize())),
 	}
 }
 
 //nolint:gosec // G201: table is a hardcoded constant ("issues" or "wisps")
 func executeIssueInsert(ctx context.Context, tx DBTX, table string, issue *types.Issue, suffix string) error {
-	_, err := tx.ExecContext(ctx, issueInsertSQL(table, 1, suffix), issueInsertArgs(issue)...)
+	rowVersion := freshRowLock()
+	_, err := tx.ExecContext(ctx, issueInsertSQL(table, 1, suffix), issueInsertArgs(issue, rowVersion)...)
 	if err != nil {
 		return fmt.Errorf("insert issue into %s: %w", table, err)
+	}
+	// Reflect the stored revision back to the caller only on the create-only
+	// path: an ON DUPLICATE KEY UPDATE suffix can keep the existing row's
+	// row_lock (rejectStaleUpdate), so the minted token is only provably the
+	// stored one when no upsert branch exists (#5738).
+	if suffix == "" {
+		issue.RowVersion = rowVersion
 	}
 	return nil
 }
@@ -241,7 +251,7 @@ func insertIssueRowsIntoTable(ctx context.Context, tx DBTX, table string, issues
 	for _, chunk := range issueInsertChunks(issues) {
 		args := make([]any, 0, len(chunk)*49)
 		for _, issue := range chunk {
-			args = append(args, issueInsertArgs(issue)...)
+			args = append(args, issueInsertArgs(issue, freshRowLock())...)
 		}
 		if _, err := tx.ExecContext(ctx, issueInsertSQL(table, len(chunk), suffix), args...); err == nil {
 			continue

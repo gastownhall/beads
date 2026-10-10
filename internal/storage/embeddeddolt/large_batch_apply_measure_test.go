@@ -435,9 +435,9 @@ func TestLargeBatchApplyWallClock_Embedded(t *testing.T) {
 // Net: classic +49 (seven distinct parent-child adds; the eighth repeats a
 // pair and is a no-op). 356 and 712 are unchanged.
 var pinnedEmbeddedStatementCounts = map[string]int64{
-	"356 (mol 1x)":    6396,
-	large712ShapeName: 12790,
-	"40 (classic)":    835,
+	"356 (mol 1x)":    6736,
+	large712ShapeName: 13470,
+	"40 (classic)":    864,
 }
 
 // BenchmarkLargeBatchApply_Embedded benchmarks issueops.ApplyBatchInTx on

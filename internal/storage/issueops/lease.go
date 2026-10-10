@@ -44,7 +44,8 @@ func leaseTTL(ctx context.Context) time.Duration {
 
 // freshRowLock returns a random non-zero int64 for the row_lock cell.
 //
-// row_lock is the keystone of dead-worker recovery on Dolt. Dolt has no real
+// row_lock is the aggregate revision and the keystone of dead-worker recovery
+// on Dolt. Dolt has no real
 // row locking and merges concurrent commits cell-by-cell, so two transactions
 // that touch DIFFERENT cells of the same issue row (a reclaim writing status,
 // a close writing closed_at) merge silently instead of conflicting — which
@@ -57,12 +58,14 @@ func leaseTTL(ctx context.Context) time.Duration {
 // column default) so a freshly-claimed row is always distinguishable from a
 // never-touched one.
 //
-// INVARIANT: any path that mutates status, assignee, or started_at on an
-// in_progress issue MUST rewrite row_lock — that is the set the reclaim/close
-// races care about (claim, close, updateIssueInTx, reclaim, unclaim all do).
-// Paths that touch only orthogonal cells (is_blocked, compaction_level,
-// dependency metadata, rename, or reopen — which acts on closed rows) are safe
-// to merge with a reclaim and intentionally do NOT rewrite it. Heartbeats no
+// INVARIANT: every supported write that changes the user-authored issue
+// aggregate MUST rewrite row_lock. That includes scalar and lifecycle fields,
+// labels, comments, dependency edges, compaction/restoration and rename. Exact
+// no-ops do not rewrite it. The derived is_blocked projection is deliberately
+// excluded: it is recomputed from other rows, is not authored issue state, and
+// bumping it would make an otherwise stable issue token depend on graph-cache
+// maintenance. The dependency mutation that caused a recompute still rewrites
+// its source aggregate's token. Heartbeats no
 // longer touch the issues row at all (bd-lrgn1): the lease lives in the
 // ephemeral leases table, where a racing heartbeat and reclaim contend on the
 // SAME lease row and conflict without any help. Adding a new path that sets
@@ -116,6 +119,30 @@ func RowLockClause() (string, []interface{}) {
 // like the classic insert (see the freshRowLock invariant and types.Issue.RowVersion).
 func FreshRowLock() int64 {
 	return freshRowLock()
+}
+
+// TouchRowVersionInTx remints the aggregate revision for issueID in the same
+// transaction as an auxiliary-table mutation. issueTable is the already
+// resolved "issues" or "wisps" plane that owns the auxiliary row; resolving it
+// again on another Dolt session can route a wisp mutation to the durable plane.
+// Call it only after a genuine mutation; no-ops keep the token stable.
+func TouchRowVersionInTx(ctx context.Context, tx DBTX, issueTable, issueID string) error {
+	if issueTable != "issues" && issueTable != "wisps" {
+		return fmt.Errorf("touch row version for %s: invalid issue table %q", issueID, issueTable)
+	}
+	//nolint:gosec // G201: issueTable is validated above.
+	result, err := tx.ExecContext(ctx, fmt.Sprintf("UPDATE %s SET row_lock = ?, updated_at = updated_at WHERE id = ?", issueTable), freshRowLock(), issueID)
+	if err != nil {
+		return fmt.Errorf("touch row version for %s: %w", issueID, err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("touch row version for %s: rows affected: %w", issueID, err)
+	}
+	if rows == 0 {
+		return fmt.Errorf("%w: issue %s", storage.ErrNotFound, issueID)
+	}
+	return nil
 }
 
 // LeaseTTL is the exported form of leaseTTL: it resolves the lease TTL for the

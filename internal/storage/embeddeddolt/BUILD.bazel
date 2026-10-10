@@ -104,6 +104,7 @@ go_test(
     timeout = "long",
     srcs = [
         "active_database_size_test.go",
+        "aggregate_revision_test.go",
         "batch_apply_contract_test.go",
         "batch_closer_contract_test.go",
         "batch_creator_contract_test.go",
@@ -182,6 +183,7 @@ go_test(
         "merge_blockers_test.go",
         "merge_strategy_test.go",
         "metadata_cas_contract_test.go",
+        "migrate_aggregate_revision_test.go",
         "migrate_consent_gate_test.go",
         "migrate_dep_rekey_dedup_test.go",
         "migrate_events_flip_test.go",

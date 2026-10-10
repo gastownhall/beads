@@ -108,6 +108,7 @@ func (r *dependencySQLRepositoryImpl) Insert(ctx context.Context, dep *types.Dep
 		}
 	}
 	table := pickDepTable(opts.UseWispsTable)
+	issueTable := pickIssueTable(opts.UseWispsTable)
 
 	var existingType string
 	var existingMetadataNS, existingThreadNS sql.NullString
@@ -145,6 +146,11 @@ func (r *dependencySQLRepositoryImpl) Insert(ctx context.Context, dep *types.Dep
 			// version snapshot is what records the new thread.
 			if err := issueops.RecordDepEventInTx(ctx, r.runner, issueops.EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor); err != nil {
 				return err
+			}
+			// The refresh is a durable mutation of the source issue, so the
+			// aggregate row_lock token advances with it (#5738).
+			if err := issueops.TouchRowVersionInTx(ctx, r.runner, issueTable, dep.IssueID); err != nil {
+				return fmt.Errorf("db: DependencySQLRepository.Insert: %w", err)
 			}
 			// The metadata or thread genuinely changed, so this re-add is a
 			// real durable-state mutation of the source issue (its version
@@ -184,6 +190,9 @@ func (r *dependencySQLRepositoryImpl) Insert(ctx context.Context, dep *types.Dep
 		if missing := r.classifyMissingEndpoint(ctx, dep, opts.UseWispsTable, targetCol, err); missing != nil {
 			return missing
 		}
+		return fmt.Errorf("db: DependencySQLRepository.Insert: %w", err)
+	}
+	if err := issueops.TouchRowVersionInTx(ctx, r.runner, issueTable, dep.IssueID); err != nil {
 		return fmt.Errorf("db: DependencySQLRepository.Insert: %w", err)
 	}
 	if dep.Type == types.DepParentChild {
@@ -390,6 +399,10 @@ func (r *dependencySQLRepositoryImpl) Delete(ctx context.Context, issueID, depen
 		issueID, dependsOnID,
 	); err != nil {
 		return domain.DepDeleteResult{}, fmt.Errorf("db: DependencySQLRepository.Delete: %s -> %s: %w", issueID, dependsOnID, err)
+	}
+	issueTable := pickIssueTable(opts.UseWispsTable)
+	if err := issueops.TouchRowVersionInTx(ctx, r.runner, issueTable, issueID); err != nil {
+		return domain.DepDeleteResult{}, fmt.Errorf("db: DependencySQLRepository.Delete: %w", err)
 	}
 
 	// The type lookup above returned Found:false when no edge existed, so reaching
