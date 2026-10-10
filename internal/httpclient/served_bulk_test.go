@@ -237,6 +237,10 @@ func TestServedDeleterRewritesReferencesInNeighbors(t *testing.T) {
 	conformance.RunDeleterRewritesReferencesInNeighbors(t, t.Context(), newServedDeleterFixture(t, "hx12"))
 }
 
+func TestServedDeleterRewritesOnlyTheDeletedIDInAHierarchy(t *testing.T) {
+	conformance.RunDeleterRewritesOnlyTheDeletedIDInAHierarchy(t, t.Context(), newServedDeleterFixture(t, "hx23"))
+}
+
 func TestServedDeleterDryRunChangesNothing(t *testing.T) {
 	conformance.RunDeleterDryRunChangesNothing(t, t.Context(), newServedDeleterFixture(t, "hx13"))
 }

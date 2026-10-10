@@ -3,7 +3,6 @@ package domain
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"sort"
 
 	"github.com/steveyegge/beads/internal/storage/dberrors"
@@ -407,22 +406,20 @@ func (u *issueUseCaseImpl) rewriteTextReferences(
 ) (int, error) {
 	touched := make(map[string]bool)
 	for _, id := range deletedIDs {
-		pattern := `(^|[^A-Za-z0-9_-])(` + regexp.QuoteMeta(id) + `)($|[^A-Za-z0-9_-])`
-		re := regexp.MustCompile(pattern)
-		replacement := `$1[deleted:` + id + `]$3`
+		re := types.DeletedReferencePattern(id)
 		for connID, conn := range connected {
 			updates := map[string]any{}
 			if re.MatchString(conn.Description) {
-				updates["description"] = re.ReplaceAllString(conn.Description, replacement)
+				updates["description"] = types.RewriteDeletedReferences(re, conn.Description, id)
 			}
 			if conn.Notes != "" && re.MatchString(conn.Notes) {
-				updates["notes"] = re.ReplaceAllString(conn.Notes, replacement)
+				updates["notes"] = types.RewriteDeletedReferences(re, conn.Notes, id)
 			}
 			if conn.Design != "" && re.MatchString(conn.Design) {
-				updates["design"] = re.ReplaceAllString(conn.Design, replacement)
+				updates["design"] = types.RewriteDeletedReferences(re, conn.Design, id)
 			}
 			if conn.AcceptanceCriteria != "" && re.MatchString(conn.AcceptanceCriteria) {
-				updates["acceptance_criteria"] = re.ReplaceAllString(conn.AcceptanceCriteria, replacement)
+				updates["acceptance_criteria"] = types.RewriteDeletedReferences(re, conn.AcceptanceCriteria, id)
 			}
 			if len(updates) == 0 {
 				continue

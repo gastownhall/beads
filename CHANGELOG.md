@@ -328,6 +328,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rollout) still stores P0, with no error on either side.
   Out-of-tree storage backends must now honor `DefaultPriority`; see the
   BREAKING (out-of-tree storage backends) entry under `### Changed`.
+
+
+
+- **`bd delete` no longer rewrites a citation of a surviving child into a
+  `[deleted:…]` marker for its parent.**
+  ([#7377](https://github.com/gastownhall/beads/pull/7377)). The rule that
+  turns a deleted id
+  into `[deleted:<id>]` in its neighbours' text treated `.` as a boundary,
+  and a hierarchical child's id is its parent's plus `.<n>`. Deleting
+  `bd-a1.1` turned "step bd-a1.1.2 failed" into
+  "step [deleted:bd-a1.1].2 failed", although `bd-a1.1.2` was still there;
+  deleting a parent and its descendant together could nest one marker in
+  another (`[deleted:[deleted:bd-a1].1.2]`), and a `--cascade` delete left a
+  deleted grandchild cited as `[deleted:bd-a1].1.2`. A `.` followed by an id
+  character now belongs to the id, a `.` that ends a sentence is still a
+  boundary, and each deleted id gets exactly its own marker. A second
+  citation of the same id separated from the first by a single character
+  ("bd-a1 bd-a1") is now rewritten too. The direct and proxied-server delete
+  routes share one copy of the rule.
+
 - **PRs based on `hotfix/**` branches now run full CI, not just
   cross-version historical smokes and triage labeling.** `pr.yml`,
   `pr-risk.yml`, `conformance.yml`, `cross-version-smoke.yml` and

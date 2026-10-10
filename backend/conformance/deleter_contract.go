@@ -652,6 +652,67 @@ func RunDeleterRewritesReferencesInNeighbors(t *testing.T, ctx context.Context, 
 	}
 }
 
+// RunDeleterRewritesOnlyTheDeletedIDInAHierarchy pins the same word-boundary
+// rule against hierarchical ids (issueops/deleter.go, Deleter.Delete: "WHICH
+// ROWS GET REWRITTEN"). A child's id is its parent's plus `.<n>`, so a parent's
+// id is a prefix of every descendant's, and the `.` between them is not a
+// boundary the way a `.` that ends a sentence is.
+//
+// Two deletions against one neighbor, each half its own failure:
+//
+//   - Deleting the CHILD alone must leave the surviving grandchild's citation
+//     verbatim. Rewriting it calls a live row deleted and loses its id
+//     ("[deleted:<child>].2"), while the child's own citation at the end of
+//     a sentence is still rewritten.
+//   - Deleting the grandchild and the root in ONE request, descendant first,
+//     must leave one marker per id. The root's id is a prefix of the
+//     grandchild's marker and of the child's marker the first deletion left,
+//     and rewriting inside either nests one marker in another.
+func RunDeleterRewritesOnlyTheDeletedIDInAHierarchy(t *testing.T, ctx context.Context, fixture DeleterFixture) {
+	t.Helper()
+	root := deleterSeedIssue(t, ctx, fixture, "dotted", "root")
+	child := deleterIssue(fixture, "dotted", "child", false)
+	child.ID = root + ".1"
+	deleterSeed(t, ctx, fixture, child)
+	grandchild := deleterIssue(fixture, "dotted", "grandchild", false)
+	grandchild.ID = child.ID + ".2"
+	deleterSeed(t, ctx, fixture, grandchild)
+	deleterAddParentChildEdge(t, ctx, fixture, child.ID, root)
+	deleterAddParentChildEdge(t, ctx, fixture, grandchild.ID, child.ID)
+
+	neighbor := deleterIssue(fixture, "dotted", "neighbor", false)
+	neighbor.Description = "step " + grandchild.ID + " failed; see " + child.ID + ". Root " + root + " is parked"
+	deleterSeed(t, ctx, fixture, neighbor)
+	deleterAddEdge(t, ctx, fixture, neighbor.ID, child.ID)
+	deleterAddEdge(t, ctx, fixture, neighbor.ID, grandchild.ID)
+
+	deleterDelete(t, ctx, fixture, publicops.DeleteRequest{
+		IDs:   []string{child.ID},
+		Force: true,
+		Actor: "deleter-contract",
+	})
+	deleterAssertIssueRows(t, ctx, fixture, 1, grandchild.ID)
+	want := "step " + grandchild.ID + " failed; see [deleted:" + child.ID + "]. Root " + root + " is parked"
+	if got := deleterText(t, ctx, fixture, neighbor.ID, "description"); got != want {
+		t.Errorf("after deleting %s the neighbor's description = %q, want %q — "+
+			"the surviving descendant %s must stay verbatim", child.ID, got, want, grandchild.ID)
+	}
+
+	deleterDelete(t, ctx, fixture, publicops.DeleteRequest{
+		IDs:   []string{grandchild.ID, root},
+		Force: true,
+		Actor: "deleter-contract",
+	})
+	want = "step [deleted:" + grandchild.ID + "] failed; see [deleted:" + child.ID + "]. Root [deleted:" + root + "] is parked"
+	got := deleterText(t, ctx, fixture, neighbor.ID, "description")
+	if strings.Contains(got, "[deleted:[deleted:") {
+		t.Errorf("deleting %s and %s nested a marker inside a marker: %q", grandchild.ID, root, got)
+	}
+	if got != want {
+		t.Errorf("after deleting %s and %s the neighbor's description = %q, want %q", grandchild.ID, root, got, want)
+	}
+}
+
 // RunDeleterDryRunChangesNothing pins the preview promise
 // (issueops/deleter.go, Deleter.Delete: "A DRY RUN CHANGES NOTHING"): the
 // preview reports the counts the real deletion goes on to report, rewrites

@@ -64,6 +64,9 @@ func TestDeleterContract(t *testing.T) {
 	t.Run("RewritesReferencesInNeighbors", func(t *testing.T) {
 		conformance.RunDeleterRewritesReferencesInNeighbors(t, ctx, fixture)
 	})
+	t.Run("RewritesOnlyTheDeletedIDInAHierarchy", func(t *testing.T) {
+		conformance.RunDeleterRewritesOnlyTheDeletedIDInAHierarchy(t, ctx, fixture)
+	})
 	t.Run("DryRunChangesNothing", func(t *testing.T) {
 		conformance.RunDeleterDryRunChangesNothing(t, ctx, fixture)
 	})
