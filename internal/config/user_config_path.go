@@ -42,10 +42,23 @@ func nativeUserConfigValidationSource() string {
 	}
 }
 
+// userHomeValidationSourceForOS names the environment source used by os.UserHomeDir.
+func userHomeValidationSourceForOS(goos string) string {
+	switch goos {
+	case "windows":
+		return "USERPROFILE"
+	case "plan9":
+		return "home"
+	default:
+		return "HOME"
+	}
+}
+
 func buildUserConfigYamlCandidates(homeDir string, homeErr error, nativeConfigDir string, nativeErr error) userConfigYamlCandidates {
 	var candidates userConfigYamlCandidates
 
-	if home, err := cleanAbsoluteUserDirectory("user home directory (HOME/USERPROFILE)", homeDir, homeErr); err != nil {
+	homeLabel := "user home directory (" + userHomeValidationSourceForOS(runtime.GOOS) + ")"
+	if home, err := cleanAbsoluteUserDirectory(homeLabel, homeDir, homeErr); err != nil {
 		candidates.homeErr = err
 	} else {
 		candidates.legacy = filepath.Clean(filepath.Join(home, ".beads", "config.yaml"))
