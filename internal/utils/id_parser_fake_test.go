@@ -10,6 +10,7 @@ package utils_test
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -172,6 +173,48 @@ func TestResolvePartialIDExact_AbbreviationRefusalIsDistinguishableFromNotFound(
 	// confirming the fixture didn't accidentally break the happy path.
 	if got, err := utils.ResolvePartialIDExact(ctx, store, "hq-a3f8e9"); err != nil || got != "hq-a3f8e9" {
 		t.Errorf("ResolvePartialIDExact(%q) = (%q, %v); want (%q, nil)", "hq-a3f8e9", got, err, "hq-a3f8e9")
+	}
+}
+
+// TestResolvePartialIDExact_AbbreviationErrorNamesTheMatches pins the typed
+// error behind ErrAbbreviatedIDNotAllowed: errors.As yields the input and the
+// sorted full ids it abbreviates, so a caller can name them (bd delete does),
+// while errors.Is and the error text stay what they were.
+func TestResolvePartialIDExact_AbbreviationErrorNamesTheMatches(t *testing.T) {
+	ctx := context.Background()
+	store := &fakeResolverStore{
+		issues: []fakeIssue{
+			{id: "hq-a3f8zz", ephemeral: false},
+			{id: "hq-a3f8e9", ephemeral: false},
+		},
+		config: map[string]string{"issue_prefix": "hq"},
+	}
+
+	_, err := utils.ResolvePartialIDExact(ctx, store, "a3f8")
+	var abbrev *utils.AbbreviatedIDError
+	if !errors.As(err, &abbrev) {
+		t.Fatalf(`ResolvePartialIDExact("a3f8") error = %v; want an *AbbreviatedIDError`, err)
+	}
+	if abbrev.Input != "a3f8" {
+		t.Errorf("Input = %q; want %q", abbrev.Input, "a3f8")
+	}
+	if want := []string{"hq-a3f8e9", "hq-a3f8zz"}; !slices.Equal(abbrev.Matches, want) {
+		t.Errorf("Matches = %v; want %v (sorted)", abbrev.Matches, want)
+	}
+	if !errors.Is(err, utils.ErrAbbreviatedIDNotAllowed) {
+		t.Errorf("error %v no longer wraps ErrAbbreviatedIDNotAllowed", err)
+	}
+	if want := `id is a valid abbreviation, but exact-match resolution is required here: "a3f8" (matches [hq-a3f8e9 hq-a3f8zz])`; err.Error() != want {
+		t.Errorf("error text = %q; want %q", err.Error(), want)
+	}
+
+	// The wisp branch builds the same error.
+	_, err = utils.ResolvePartialIDExact(ctx, &fakeResolverStore{
+		issues: []fakeIssue{{id: "hq-wisp-list3t0", ephemeral: true}},
+		config: map[string]string{"issue_prefix": "hq"},
+	}, "list")
+	if !errors.As(err, &abbrev) || !slices.Equal(abbrev.Matches, []string{"hq-wisp-list3t0"}) {
+		t.Errorf(`ResolvePartialIDExact("list") error = %v; want an *AbbreviatedIDError naming hq-wisp-list3t0`, err)
 	}
 }
 

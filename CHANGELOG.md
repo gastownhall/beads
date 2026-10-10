@@ -637,6 +637,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   resolution never performed abbreviation matching in the first place) — a
   regression test now locks that in rather than leaving it undocumented.
 
+- **`bd delete` no longer resolves an id it cannot find to a different issue
+  whose id begins with it.**
+  ([#7375](https://github.com/gastownhall/beads/pull/7375)). The direct
+  (embedded and server) route resolved
+  each id with the abbreviation-tolerant resolver, so an id that was already
+  gone (a retried delete, a re-run `--from-file` list, a parent whose child
+  survives) resolved by leading-prefix match to whichever surviving issue's id
+  it begins: after `fx-t00003` was deleted, `bd delete fx-t00003` previewed
+  `fx-t000031` and printed `bd delete fx-t000031 --force` as the next step,
+  and with `--force` deleted it. `--quiet` silenced the partial-id notice, so
+  a `--force --quiet` re-run deleted issues it never named without a word.
+  `bd delete` now requires an exact id on the preview and with `--force`, as
+  `bd comment` does and as the team-server route already did; full ids, bare
+  full hashes, child ids and routed ids resolve as before. An abbreviation is
+  refused with `bd delete needs the full issue id: no issue has the id "t000",
+  which is the start of fx-t000031`, naming every id it matches. This is a
+  user-visible change: a script or habit that deletes by abbreviation now gets
+  that error and must pass the full id. Reads and other writes keep accepting
+  abbreviations; see [Working with
+  IDs](docs/core-concepts/hash-ids.md#working-with-ids).
+
 - **A git hook beads never wrote is no longer reported as installed**
   ([#6084](https://github.com/gastownhall/beads/issues/6084)). `getHookVersion`
   returns no error for a readable hook file that carries no beads markers, so a

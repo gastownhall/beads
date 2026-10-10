@@ -33,6 +33,22 @@ var ErrAmbiguousID = errors.New("ambiguous issue ID")
 // id") — see bd comment's resolveAndGetIssueForMutationExact caller.
 var ErrAbbreviatedIDNotAllowed = errors.New("id is a valid abbreviation, but exact-match resolution is required here")
 
+// AbbreviatedIDError is the error ResolvePartialIDExact returns when Input
+// names no issue exactly but is a leading-prefix abbreviation of Matches. It
+// wraps ErrAbbreviatedIDNotAllowed, so errors.Is callers see the sentinel
+// unchanged; a caller that wants to name the full ids reads Matches through
+// errors.As.
+type AbbreviatedIDError struct {
+	Input   string
+	Matches []string // sorted
+}
+
+func (e *AbbreviatedIDError) Error() string {
+	return fmt.Sprintf("%v: %q (matches %v)", ErrAbbreviatedIDNotAllowed, e.Input, e.Matches)
+}
+
+func (e *AbbreviatedIDError) Unwrap() error { return ErrAbbreviatedIDNotAllowed }
+
 type PartialIDResolverStore interface {
 	SearchIssues(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error)
 	SearchIssueIDs(ctx context.Context, query string, filter types.IssueFilter) ([]string, error)
@@ -284,7 +300,7 @@ func resolvePartialID(ctx context.Context, store PartialIDResolverStore, input s
 			// resolveAndGetIssueForMutationExact) can surface an accurate,
 			// actionable message rather than claiming the issue is missing.
 			sort.Strings(abbrevOnly)
-			return "", fmt.Errorf("%w: %q (matches %v)", ErrAbbreviatedIDNotAllowed, input, abbrevOnly)
+			return "", &AbbreviatedIDError{Input: input, Matches: abbrevOnly}
 		}
 		return "", fmt.Errorf("no issue found matching %q", input)
 	}
