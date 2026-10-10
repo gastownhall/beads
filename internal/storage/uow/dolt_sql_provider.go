@@ -50,6 +50,9 @@ type doltSQLProvider struct {
 	// non-mutating preview (--dry-run, --inspect). The open creates no
 	// database and applies no migration; see providerOptions.preview.
 	preview bool
+	// createIfMissing: whether this open may create the database when the
+	// probe finds none; see providerOptions.createIfMissing.
+	createIfMissing bool
 	// readOnly: the command that opened this provider only reads. Unlike
 	// preview it still bootstraps and migrates normally — it only changes what
 	// happens when the migration gate REFUSES; see providerOptions.readOnly.
@@ -125,10 +128,20 @@ type providerOptions struct {
 	// the same contract embeddeddolt.OpenForPreviewCommand gives the embedded
 	// path.
 	preview bool
+	// createIfMissing: whether the open path may create the database when
+	// the probe finds none. The default is false: a missing database is a
+	// not-found error, never a silent create (#2189). Only a caller that is
+	// explicitly initializing a workspace (bd init) should pass true. The
+	// default is deliberately the safe behavior so a future caller that
+	// forgets the option cannot re-open the implicit-create hole.
+	createIfMissing bool
+	// noDatabaseBind opens a server-wide maintenance connection; see
+	// WithNoDatabaseBind.
+	noDatabaseBind bool
 	// readOnly opens for a command that only reads (bd list, show, …). It is
-	// deliberately weaker than preview: the open still creates and migrates as
-	// usual, because a read command on a fresh or behind workspace has always
-	// been served by the ordinary open. It changes exactly one thing — when
+	// deliberately weaker than preview: the open migrates as usual (creation
+	// is governed by createIfMissing), because a read command on a behind
+	// workspace has always been served by the ordinary open. It changes exactly one thing — when
 	// the shared-store migration gate refuses, the open warns and attaches to
 	// the database at its current schema instead of failing, so reads keep
 	// working through the upgrade window. That is the same warn-and-continue
@@ -139,6 +152,24 @@ type providerOptions struct {
 // WithPreview opens the provider for a non-mutating preview command.
 func WithPreview() ProviderOption {
 	return func(o *providerOptions) { o.preview = true }
+}
+
+// WithCreateIfMissing sets whether the open path may create the database
+// when the probe finds none; see providerOptions.createIfMissing.
+func WithCreateIfMissing(create bool) ProviderOption {
+	return func(o *providerOptions) { o.createIfMissing = create }
+}
+
+// WithNoDatabaseBind opens a server-wide maintenance connection: the open
+// neither probes, creates, USEs, nor migrates the configured database, and
+// the returned provider has no default database bound. Only server-scoped
+// operations (MaintenanceProvider.RunNonTx issuing statements like SHOW
+// DATABASES or DROP DATABASE) are meaningful on such a provider; per-database
+// UnitOfWork/Tx use requires a bound database. Used by
+// `bd dolt clean-databases`, which must work precisely when the configured
+// database has been dropped server-side.
+func WithNoDatabaseBind() ProviderOption {
+	return func(o *providerOptions) { o.noDatabaseBind = true }
 }
 
 // WithReadOnly opens the provider for a command that only reads.
@@ -154,6 +185,19 @@ func applyProviderOptions(opts []ProviderOption) providerOptions {
 		}
 	}
 	return resolved
+}
+
+// CreateIfMissingForTest reports the create-if-missing policy a set of
+// provider options resolves to. Test support only (policy-wiring tests in
+// cmd/bd assert which policy each call site passes).
+func CreateIfMissingForTest(opts ...ProviderOption) bool {
+	return applyProviderOptions(opts).createIfMissing
+}
+
+// NoDatabaseBindForTest reports whether a set of provider options resolves
+// to a server-wide, no-database-bind open. Test support only.
+func NoDatabaseBindForTest(opts ...ProviderOption) bool {
+	return applyProviderOptions(opts).noDatabaseBind
 }
 
 var (
@@ -524,32 +568,57 @@ func (b *bootstrapPreparer) prepare(ctx context.Context, conn *sql.Conn) (*schem
 			return nil, &bootstrapPreparationError{err: fmt.Errorf("uow: creating database: %w", err)}
 		}
 	} else {
-		switch err := ddl.CreateDatabase(ctx, b.database); {
-		case err == nil:
-			b.created = true
-			justCreated = true
-		case isDatabaseExistsError(err):
-			// Pre-existing (or a concurrent initializer won the create
-			// race): not ours, heal stays off.
-		case isSerializationError(err):
-			// Only the initial bare CREATE preserves its historical
-			// serialization retry classification. The later sticky CREATE,
-			// USE, and identity capture remain permanent regardless of
-			// their nested driver error.
-			return nil, &bootstrapPreparationError{
-				err:       fmt.Errorf("uow: creating database: %w", err),
-				retryable: true,
+		// Probe before any DDL: an existing database is opened without a
+		// CREATE attempt, so an account with no server CREATE privilege is
+		// not denied (Error 1105) opening a database that is already there.
+		// The bare CREATE below still arbitrates creation of a missing
+		// database exactly as before, so the ownership proof is unchanged.
+		exists, err := ddl.DatabaseExists(ctx, b.database)
+		if err != nil {
+			if isSerializationError(err) {
+				return nil, &bootstrapPreparationError{
+					err:       fmt.Errorf("uow: probing database: %w", err),
+					retryable: true,
+				}
 			}
-		case isAccessDeniedError(err):
-			// A server that provisions databases itself denies CREATE to the
-			// credentials it hands out. Say so instead of surfacing the raw
-			// driver error, and do not retry or fall back: bd must not go
-			// looking for another way to create a database it was refused.
+			return nil, &bootstrapPreparationError{err: fmt.Errorf("uow: probing database: %w", err)}
+		}
+		switch {
+		case exists:
+			// Pre-existing: not ours, heal stays off, and no CREATE is
+			// attempted.
+		case !b.provider.createIfMissing:
 			return nil, &bootstrapPreparationError{err: fmt.Errorf(
-				"uow: creating database %q was denied for this credential — this server provisions databases server-side; ask the server administrator to provision it, then re-run init: %w",
-				b.database, err)}
+				"uow: database %q not found on Dolt server; check dolt_database in .beads/metadata.json (or BEADS_DOLT_SERVER_DATABASE, --database, --db)",
+				b.database)}
 		default:
-			return nil, &bootstrapPreparationError{err: fmt.Errorf("uow: creating database: %w", err)}
+			switch err := ddl.CreateDatabase(ctx, b.database); {
+			case err == nil:
+				b.created = true
+				justCreated = true
+			case isDatabaseExistsError(err):
+				// A concurrent initializer won the create race: not ours,
+				// heal stays off.
+			case isSerializationError(err):
+				// Only the initial bare CREATE preserves its historical
+				// serialization retry classification. The later sticky
+				// CREATE, USE, and identity capture remain permanent
+				// regardless of their nested driver error.
+				return nil, &bootstrapPreparationError{
+					err:       fmt.Errorf("uow: creating database: %w", err),
+					retryable: true,
+				}
+			case isAccessDeniedError(err):
+				// A server that provisions databases itself denies CREATE to the
+				// credentials it hands out. Say so instead of surfacing the raw
+				// driver error, and do not retry or fall back: bd must not go
+				// looking for another way to create a database it was refused.
+				return nil, &bootstrapPreparationError{err: fmt.Errorf(
+					"uow: creating database %q was denied for this credential — this server provisions databases server-side; ask the server administrator to provision it, then re-run init: %w",
+					b.database, err)}
+			default:
+				return nil, &bootstrapPreparationError{err: fmt.Errorf("uow: creating database: %w", err)}
+			}
 		}
 	}
 	if err := ddl.UseDatabase(ctx, b.database); err != nil {
@@ -774,6 +843,20 @@ func openPool(dsn string, prove func(*sql.DB) error) (*sql.DB, error) {
 }
 
 func openAndInitSchema(ctx context.Context, ep proxy.Endpoint, database, rootUser, rootPassword, tlsConfigName string, teamServer bool, expectedProjectID string, opts providerOptions) (UnitOfWorkProvider, error) {
+	if opts.noDatabaseBind {
+		// Server-wide maintenance open (WithNoDatabaseBind): no probe, no
+		// create, no USE, no migrate — the configured database may not even
+		// exist. The connection carries no default database.
+		dbConn, err := openDB(ctx, buildDSN(ep, "", rootUser, rootPassword, tlsConfigName))
+		if err != nil {
+			return nil, err
+		}
+		return &doltSQLProvider{
+			defaultBranch: defaultBranch,
+			db:            dbConn,
+		}, nil
+	}
+
 	newProvider := func(pool *sql.DB) *doltSQLProvider {
 		return &doltSQLProvider{
 			defaultBranch:     defaultBranch,
@@ -783,6 +866,7 @@ func openAndInitSchema(ctx context.Context, ep proxy.Endpoint, database, rootUse
 			expectedProjectID: expectedProjectID,
 			preview:           opts.preview,
 			readOnly:          opts.readOnly,
+			createIfMissing:   opts.createIfMissing,
 		}
 	}
 
@@ -792,11 +876,10 @@ func openAndInitSchema(ctx context.Context, ep proxy.Endpoint, database, rootUse
 	// a database that already exists, which is every open but the very
 	// first — costs ONE MySQL session instead of two: initSchema runs on
 	// this pool (USE + the converged-schema reads, or a real migration
-	// when one is pending; the bare CREATE DATABASE inside the locked
-	// preparation is refused with 1007 exactly as it is on a no-database
-	// connection, so `created` stays false and fresh-bootstrap heal can
-	// never be armed by a database this call did not create), and the
-	// same pool is then handed to the provider.
+	// when one is pending; the locked preparation's probe finds the
+	// database and issues no CREATE, so `created` stays false and
+	// fresh-bootstrap heal can never be armed by a database this call did
+	// not create), and the same pool is then handed to the provider.
 	//
 	// Reusing the migrating pool is safe — but NOT because migrations leave
 	// the session alone. They do not: six shipped migrations issue

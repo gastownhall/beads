@@ -40,6 +40,7 @@ func openTestUOWProvider(t *testing.T, bin string) (UnitOfWorkProvider, error) {
 		0,
 		false,
 		"",
+		WithCreateIfMissing(true),
 	)
 }
 
