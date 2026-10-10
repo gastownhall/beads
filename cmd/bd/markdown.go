@@ -450,7 +450,9 @@ func lintMarkdownTemplates(templates []*IssueTemplate, in createInput) error {
 	for _, template := range templates {
 		lintIssue := &types.Issue{
 			IssueType:          template.IssueType,
+			Title:              template.Title,
 			Description:        template.Description,
+			Design:             template.Design,
 			AcceptanceCriteria: template.AcceptanceCriteria,
 		}
 		if err := validation.LintIssue(lintIssue); err != nil {
