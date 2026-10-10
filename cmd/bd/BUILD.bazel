@@ -1277,8 +1277,8 @@ go_test(
     ],
     data = glob(["testdata/**"]) + [
         ":bd_for_tests",
-        ":go_srcs",
         ":compact_gc_fixture",
+        ":go_srcs",
         ":preflight_go_fixture",
         "//:bd_test_files",
         "//cmd/bd/doctor:go_srcs",
@@ -1612,8 +1612,8 @@ sh_test(
     data = [
         ":bd_for_tests",
         ":bd_test",
-        ":go_srcs",
         ":compact_gc_fixture",
+        ":go_srcs",
         ":preflight_go_fixture",
         "@go_sdk//:bin/gofmt",
     ],
@@ -1670,8 +1670,8 @@ sh_test(
     data = [
         ":bd_for_tests",
         ":bd_test",
-        ":dolt_server_pinned_shards.txt",
         ":compact_gc_fixture",
+        ":dolt_server_pinned_shards.txt",
         ":preflight_go_fixture",
         "@go_sdk//:bin/gofmt",
     ],
