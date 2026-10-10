@@ -300,9 +300,8 @@ var showCmd = &cobra.Command{
 		} else if foundCount > 0 {
 			maybeShowTip(store)
 		} else {
-			if len(args) > 0 {
-				SetLastTouchedID(args[0])
-			}
+			// A failed lookup must not replace a valid last-touched marker
+			// with an unknown raw argument.
 			return SilentExit()
 		}
 
