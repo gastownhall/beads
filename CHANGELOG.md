@@ -415,6 +415,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Override it with `BEADS_INIT_GATE_TIMEOUT` (`2m`, `90`). Other exclusive
   operations keep their 5s wait.
 
+- **The proxy-outage backoff no longer spins at the CPU's rate after its
+  window ends.** `pingWithRetry`'s `outageWindowBackOff` clamped every wait
+  to the outage window's remaining time once ANY upstream-outage report had
+  been seen, including waits that followed a later, ordinary transient
+  error (an invalid connection, EOF, a dial failure). Once the window
+  passed, every such wait clamped to zero, turning the rest of the retry
+  budget into a tight CPU-bound loop instead of a backoff — the repro in
+  #7183 measured nearly two million calls in 1.25s. The clamp now applies
+  only to the wait immediately following an outage report, not to every
+  wait once the window has been opened (#7183).
+
 - **A proxied-server command against an unreachable external Dolt upstream
   now fails within about a second with a clear error instead of stalling
   ~20-30s.** The local db proxy stayed up, so the client only saw a bare

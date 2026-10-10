@@ -655,17 +655,29 @@ func isTransientPingError(err error) bool {
 var upstreamOutageRetryWindow = time.Second
 
 // outageWindowBackOff clamps the wrapped backoff so that, once the first
-// upstream-outage report has been seen, no wait runs past the end of
-// upstreamOutageRetryWindow: the last attempt lands at the window's end
-// rather than up to one backoff interval after it.
+// upstream-outage report has been seen, no wait for ANOTHER outage report
+// runs past the end of upstreamOutageRetryWindow: the last attempt lands at
+// the window's end rather than up to one backoff interval after it.
+//
+// The clamp applies only to the wait that immediately follows an outage
+// report (armClamp), not to every wait once deadline is set. Once the
+// window has elapsed, deadline stays in the past forever, so clamping
+// unconditionally would clamp every later wait to zero too — including the
+// wait after an ordinary transient error (invalid connection, EOF, a
+// dial failure) that has nothing to do with the outage window. That
+// zero-wait clamp turned pingWithRetry's remaining MaxElapsedTime budget
+// into a CPU-bound spin instead of a backoff (#7183).
 type outageWindowBackOff struct {
 	backoff.BackOff
 	deadline time.Time // zero until the first upstream-outage report
+	armClamp bool      // set by the attempt that just saw an outage report
 }
 
 func (b *outageWindowBackOff) NextBackOff() time.Duration {
 	d := b.BackOff.NextBackOff()
-	if d == backoff.Stop || b.deadline.IsZero() {
+	clamp := b.armClamp
+	b.armClamp = false
+	if d == backoff.Stop || b.deadline.IsZero() || !clamp {
 		return d
 	}
 	if remaining := time.Until(b.deadline); remaining < d {
@@ -705,6 +717,7 @@ func pingWithRetry(ctx context.Context, p pinger, bo *backoff.ExponentialBackOff
 			if !time.Now().Before(window.deadline) {
 				return backoff.Permanent(err)
 			}
+			window.armClamp = true
 			return err
 		}
 		if isTransientPingError(err) {
