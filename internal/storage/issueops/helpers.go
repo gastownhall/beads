@@ -411,6 +411,16 @@ func SeedCounterFromExistingIssuesTx(ctx context.Context, tx DBTX, prefix string
 
 // GetAdaptiveIDLengthTx returns the appropriate hash length based on database size.
 //
+// issues and wisps share one ID space: a promoted wisp keeps its
+// <prefix>-wisp-* ID in issues, and a demoted issue keeps its ID in wisps. So the
+// count for a prefix is the target table's own count plus the other table's
+// count of that prefix's exact namespace, the rows shaped <prefix>-<hash> with
+// no further "-" or ".". A longer sub-prefix such as <prefix>-wisp-* is a
+// different namespace, which a <prefix>-<hash> ID can never equal, so live
+// <prefix>-wisp-* wisps must not lengthen <prefix>'s own IDs. The target table
+// keeps its existing prefix-% rule, which also counts sub-prefixed rows, so no
+// prefix's IDs get shorter.
+//
 //nolint:gosec // G201: table is a hardcoded constant
 func GetAdaptiveIDLengthTx(ctx context.Context, tx DBTX, table, prefix string) (int, error) {
 	var count int
@@ -424,8 +434,24 @@ func GetAdaptiveIDLengthTx(ctx context.Context, tx DBTX, table, prefix string) (
 		return 6, err
 	}
 
+	siblingTable := "issues"
+	if table == "issues" {
+		siblingTable = "wisps"
+	}
+	var siblingCount int
+	err = tx.QueryRowContext(ctx, fmt.Sprintf(`
+		SELECT COUNT(*)
+		FROM %s
+		WHERE id LIKE CONCAT(?, '-%%')
+		  AND INSTR(SUBSTRING(id, LENGTH(?) + 2), '.') = 0
+		  AND INSTR(SUBSTRING(id, LENGTH(?) + 2), '-') = 0
+	`, siblingTable), prefix, prefix, prefix).Scan(&siblingCount)
+	if err != nil {
+		return 6, err
+	}
+
 	cfg := GetAdaptiveConfigTx(ctx, tx)
-	return ComputeAdaptiveLength(count, cfg), nil
+	return ComputeAdaptiveLength(count+siblingCount, cfg), nil
 }
 
 // AdaptiveIDConfig holds configuration for adaptive ID length computation.
