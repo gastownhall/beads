@@ -37,8 +37,11 @@
 # TestProxiedServerClose3 (shard 13) and TestProxiedServerClose4 (shard 2)
 # are the two parents gastownhall/beads#7173 split off TestProxiedServerClose
 # to pull shard 5 (15m+) back under the timeout, pinned onto the two
-# lightest shards of that PR's own run (6m51s and 7m57s) rather than
-# hashed; the lines are listed under their shards like every other pin.
+# lightest shards of that PR's own run other than shard 5 itself (6m51s
+# and 7m57s; shard 5 ran 5m50s only because their 12 subtests had just
+# left it, and putting Close3 back would recreate most of the set that
+# timed out) rather than hashed; the lines are listed under their shards
+# like every other pin.
 #
 # This file is generated: notes added here are erased by the next
 # regeneration. Add them to the generator instead. Known blind spots
