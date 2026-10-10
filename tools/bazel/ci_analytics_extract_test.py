@@ -1528,5 +1528,58 @@ class BEPReadContractTests(unittest.TestCase):
         self.assertEqual(rec["mnemonics"], [])
 
 
+class NegativeTestTimingTests(unittest.TestCase):
+    """rbe-west scheduler/worker clock skew: a remotely executed test's BEP
+    timingBreakdown reports a slightly negative queueTime. Extractor 1.1.0
+    kept the sign, and the collector rejected the whole artifact on
+    $.invocations[].tests[].results[].queue_ms (1,131 artifacts on
+    2026-10-08..10, all from remote test results, -1 to -24 ms)."""
+
+    @staticmethod
+    def _result(children, duration="1.5s"):
+        ev = {
+            "id": {"testResult": {"label": "//pkg:t", "shard": 1, "run": 1, "attempt": 1}},
+            "testResult": {
+                "status": "PASSED",
+                "testAttemptDuration": duration,
+                "executionInfo": {
+                    "strategy": "remote",
+                    "timingBreakdown": {"child": children},
+                },
+            },
+        }
+        tests, _ = extract.build_tests([ev])
+        return tests[0]["results"][0]
+
+    def test_skewed_remote_test_timing_clamps_to_zero(self):
+        r = self._result(
+            [
+                {"name": "queueTime", "time": "-0.000612s"},
+                {"name": "fetchTime", "time": "-0.002s"},
+                {"name": "executionWallTime", "time": "1.2s"},
+            ]
+        )
+        self.assertEqual(r["runner"], "remote")
+        self.assertEqual(
+            (r["queue_ms"], r["fetch_ms"], r["exec_ms"], r["duration_ms"]), (0, 0, 1200, 1500)
+        )
+
+    def test_worst_observed_skew_and_negative_duration_clamp_to_zero(self):
+        # -24 ms is the most negative queue_ms in the rejected artifacts.
+        r = self._result(
+            [
+                {"name": "queueTime", "time": "-0.024s"},
+                {"name": "executionWallTime", "time": "-1s"},
+            ],
+            duration="-0.5s",
+        )
+        self.assertEqual((r["queue_ms"], r["exec_ms"], r["duration_ms"]), (0, 0, 0))
+
+    def test_implausibly_large_test_timing_clamps_to_zero(self):
+        too_big = "%ds" % (extract.MAX_SANE_DURATION_MS // 1000 + 1)
+        r = self._result([{"name": "queueTime", "time": too_big}], duration=too_big)
+        self.assertEqual((r["queue_ms"], r["duration_ms"]), (0, 0))
+
+
 if __name__ == "__main__":
     unittest.main()
