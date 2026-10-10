@@ -208,7 +208,11 @@ func (s *Store) GetReadyWork(ctx context.Context, filter types.WorkFilter) ([]*t
 	if err != nil {
 		return nil, err
 	}
-	return dropBlockedIssues(issues, blockedIDs, filter.Limit), nil
+	kept := dropBlockedIssues(issues, blockedIDs, filter.Limit)
+	if err := capKeptRows(len(kept), filter, blockedIDs); err != nil {
+		return nil, err
+	}
+	return kept, nil
 }
 
 // GetReadyWorkWithCounts is the counts-bearing equivalent of GetReadyWork.
@@ -230,6 +234,9 @@ func (s *Store) readyWorkWithCounts(ctx context.Context, filter types.WorkFilter
 		return nil, err
 	}
 	kept, _ := dropBlockedIssuesWithCounts(rows, blockedIDs, filter.Limit)
+	if err := capKeptRows(len(kept), filter, blockedIDs); err != nil {
+		return nil, err
+	}
 	return kept, nil
 }
 
@@ -263,6 +270,14 @@ func (s *Store) GetReadyWorkWithCountsAndTotal(ctx context.Context, filter types
 // len(refsByIssue) of the bumped window's extra rows can be ones this
 // decorator has to drop. Whichever path is taken, the policy itself is never
 // skipped — only where the exclusion happens differs.
+//
+// The client-side path also takes the MaxRows cap off the inner query. That
+// store caps the rows it fetched, which the bump lets outnumber Limit, so
+// `--limit N --max-rows N` failed with exit 2 as soon as more than N issues
+// were ready, refusing a page that could never exceed N. The caller enforces
+// the cap on the rows it keeps instead (capKeptRows), after the Limit trim,
+// which is where issueops enforces it on the rows a SQL store delivers
+// (finishReadyWorkWithCounts).
 func (s *Store) readyExclusion(filter types.WorkFilter, refsByIssue map[string][]string) (queryFilter types.WorkFilter, blockedIDs map[string]bool) {
 	if len(refsByIssue) == 0 {
 		return filter, nil
@@ -278,7 +293,19 @@ func (s *Store) readyExclusion(filter types.WorkFilter, refsByIssue map[string][
 	if queryFilter.Limit > 0 {
 		queryFilter.Limit += len(blockedIDs)
 	}
+	queryFilter.MaxRows = 0
+	queryFilter.MaxRowsSource = ""
 	return queryFilter, blockedIDs
+}
+
+// capKeptRows enforces the MaxRows cap readyExclusion took off the inner
+// query, on the kept rows the caller is handed. With nothing to drop
+// client-side the inner query kept the cap and has already enforced it.
+func capKeptRows(kept int, filter types.WorkFilter, blockedIDs map[string]bool) error {
+	if len(blockedIDs) == 0 {
+		return nil
+	}
+	return issueops.EnforceMaxRowsCap(kept, filter.MaxRows, filter.MaxRowsSource)
 }
 
 // dropBlockedIssues is readyExclusion's client-side half: it drops the rows
@@ -349,6 +376,9 @@ func (s *Store) readyWorkWithCountsAndTotal(ctx context.Context, filter types.Wo
 	kept, blockedSeen := dropBlockedIssuesWithCounts(rows, blockedIDs, filter.Limit)
 	if len(blockedIDs) == 0 {
 		return kept, total, nil
+	}
+	if err := capKeptRows(len(kept), filter, blockedIDs); err != nil {
+		return nil, 0, err
 	}
 
 	var adjustedTotal int

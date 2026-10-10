@@ -10,6 +10,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/externaldeps"
+	storageops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/workapi"
 	"github.com/steveyegge/beads/issueops"
@@ -395,6 +396,87 @@ func TestServedReadyTotalIgnoresAnExternallyBlockedIssueOutsideTheFilter(t *test
 	if count != want || total != want || len(rows) != workapi.DefaultReadyLimit {
 		t.Errorf("over http, alice's ready work: CountReadyWork = %d; page = %d rows, total %d; want count and total %d, %d rows",
 			count, len(rows), total, want, workapi.DefaultReadyLimit)
+	}
+}
+
+// TestServedReadyMaxRowsCountsTheRowsKept pins `bd ready --limit N
+// --max-rows N` over http, which failed with exit 2 once more than N issues
+// were ready and any issue held an unsatisfied external blocker. The decorator
+// fetches a window wider than the limit to make room for the rows it drops,
+// and the http bridge caps the rows it fetched, so the cap counted rows the
+// caller was never handed. A SQL store caps the page it delivers, and so must
+// this path.
+func TestServedReadyMaxRowsCountsTheRowsKept(t *testing.T) {
+	env := newServedEnv(t, "hixm")
+	ctx := t.Context()
+
+	free := []string{env.prefix + "-a", env.prefix + "-b", env.prefix + "-c"}
+	blockedID := env.prefix + "-z"
+	// The priorities fix the ready order: the three free issues, then the
+	// blocked one, so a window of the limit plus one can leave it out and
+	// still hold more rows than the limit.
+	for i, id := range append(slices.Clone(free), blockedID) {
+		if err := env.createIssue(ctx, &types.Issue{
+			ID: id, Title: id, Status: types.StatusOpen, Priority: i + 1, IssueType: types.TypeTask,
+		}, "tester"); err != nil {
+			t.Fatalf("seed %s: %v", id, err)
+		}
+	}
+	if err := env.addDependency(ctx, &types.Dependency{
+		IssueID:     blockedID,
+		DependsOnID: "external:otherproj:cap",
+		Type:        types.DepBlocks,
+	}, "tester"); err != nil {
+		t.Fatalf("seed external dependency: %v", err)
+	}
+	decorated := externaldeps.New(env.subject, nil, nil)
+
+	for _, tc := range []struct {
+		name           string
+		limit, maxRows int
+		want           []string // nil: the cap fires
+	}{
+		// The window is 2+1 rows, all free; the cap counts the page of two.
+		{name: "cap equals the limit", limit: 2, maxRows: 2, want: free[:2]},
+		// The window holds all four rows, three of them kept.
+		{name: "cap below the limit", limit: 5, maxRows: 3, want: free},
+		// The server's default page, again all four.
+		{name: "unlimited", limit: 0, maxRows: 3, want: free},
+		// The three rows kept exceed the caller's cap, which still fires.
+		{name: "kept rows exceed the cap", limit: 5, maxRows: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			limit := tc.limit
+			filter, err := workapi.BuildReadyFilter(issueops.ReadyRequest{Limit: &limit})
+			if err != nil {
+				t.Fatalf("BuildReadyFilter: %v", err)
+			}
+			filter.MaxRows, filter.MaxRowsSource = tc.maxRows, "--max-rows"
+			check := func(method string, ids []string, err error) {
+				t.Helper()
+				var tooMany *storageops.ErrTooManyRows
+				switch {
+				case tc.want == nil:
+					if !errors.As(err, &tooMany) || tooMany.Cap != tc.maxRows || tooMany.Source != "--max-rows" {
+						t.Errorf("%s over http = %v, %v; want the --max-rows cap of %d to fire on the rows kept", method, ids, err, tc.maxRows)
+					}
+				case err != nil:
+					t.Errorf("%s over http: %v; want %v, which a cap of %d admits", method, err, tc.want, tc.maxRows)
+				case !slices.Equal(ids, tc.want):
+					t.Errorf("%s over http = %v, want %v (%q excluded)", method, ids, tc.want, blockedID)
+				}
+			}
+
+			issues, err := decorated.GetReadyWork(ctx, filter)
+			check("GetReadyWork", issueIDs(issues), err)
+			rows, err := decorated.GetReadyWorkWithCounts(ctx, filter)
+			check("GetReadyWorkWithCounts", rowIDs(rows), err)
+			rows, total, err := decorated.GetReadyWorkWithCountsAndTotal(ctx, filter)
+			check("GetReadyWorkWithCountsAndTotal", rowIDs(rows), err)
+			if err == nil && total != len(free) {
+				t.Errorf("GetReadyWorkWithCountsAndTotal over http: total %d, want %d (%q excluded)", total, len(free), blockedID)
+			}
+		})
 	}
 }
 
