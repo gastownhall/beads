@@ -5,7 +5,7 @@ description: Complete reference for bd configuration across config.yaml and data
 
 Complete configuration reference for beads.
 
-Last reviewed: 2026-09-10
+Last reviewed: 2026-10-08
 
 Freshness source: `cmd/bd/main.go`, `cmd/bd/config.go`, and `internal/configfile/`.
 
@@ -88,7 +88,7 @@ The full namespaces routed to YAML are:
 
 Plus these individual keys:
 
-`no-db`, `json`, `db`, `actor`, `identity`, `no-push`, `no-git-ops`, `agent.profile`, `create.require-description`, `import.auto`, `import.path`, `prime.max-memories`, `prime.max-memory-chars`, `memories.budget-chars`, and the secret keys `github.token`, `gitlab.token`, `jira.api_token`, `ado.pat`, `linear.api_key`, `linear.oauth_client_id`, `linear.oauth_client_secret`, `notion.token`.
+`json`, `db`, `actor`, `identity`, `no-push`, `no-git-ops`, `agent.profile`, `create.require-description`, `import.auto`, `import.path`, `prime.max-memories`, `prime.max-memory-chars`, `memories.budget-chars`, and the secret keys `github.token`, `gitlab.token`, `jira.api_token`, `ado.pat`, `linear.api_key`, `linear.oauth_client_id`, `linear.oauth_client_secret`, `notion.token`.
 
 Any key whose name contains `api_key`, `api-key`, `secret`, `token`, or `password` is treated as a secret: it is refused on git-tracked `config.yaml` files unless you pass `--force-git-tracked`. Prefer exporting the value as an environment variable instead (e.g. `LINEAR_API_KEY`).
 
@@ -102,7 +102,6 @@ Any key whose name contains `api_key`, `api-key`, `secret`, `token`, or `passwor
 | `db` | `--db` | `BD_DB` | (auto-discover) | Database path |
 | `actor` | `--actor` | `BEADS_ACTOR` | `git config user.name` | Actor name for audit trail (see [Actor identity](#actor-identity-resolution)) |
 | `identity` | `--identity` | `BEADS_IDENTITY` | (git user / hostname) | Sender identity for `bd mail` |
-| `no-db` | `--no-db` | `BD_NO_DAEMON` (related) | `false` | Run without opening the database |
 | `no-push` | `--no-push` | `BD_NO_PUSH` | `false` | Skip pushing to the remote in `bd dolt push` |
 | `no-git-ops` | — | — | `false` | Disable git ops in `bd prime` close protocol |
 | `agent.profile` | — | `BD_AGENT_PROFILE` | `conservative` | Policy profile `bd prime` uses for git/commit authority: `conservative`, `minimal`, `team-maintainer`; invalid values fall back to `conservative` |

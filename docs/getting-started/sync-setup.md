@@ -125,15 +125,18 @@ bd bootstrap
 `bd bootstrap` auto-detects `refs/dolt/data` on origin, clones the Dolt database, and configures the remote. Verify with:
 
 ```bash
-bd list       # should show your issues
-bd history    # should show recent issue history
+bd list          # should show your issues
+bd history <id>  # should show history for a specific issue (needs one of your own IDs)
 ```
 
 If `bd bootstrap` succeeds, you're done — skip to [Day-to-day Sync](#day-to-day-sync).
 
 ### Manual path (if bootstrap fails)
 
-If `bd bootstrap` doesn't work (older bd versions, unusual remote configs), follow these steps:
+If `bd bootstrap` doesn't work (older bd versions, unusual remote configs), follow
+these steps instead. `bd init` defaults to embedded mode, where there is no Dolt
+server to stop or start — the steps below use `bd init`'s own `--remote` flag,
+which clones the remote's Dolt data in one step regardless of storage mode.
 
 **Step 1: Confirm the remote has beads data**
 
@@ -143,58 +146,18 @@ git ls-remote origin | grep dolt
 # If missing, the remote has no beads data — use bd init normally.
 ```
 
-**Step 2: Initialize beads**
+**Step 2: Initialize beads, cloning from the remote**
 
 ```bash
-bd init
+bd init --remote git@github.com:org/repo.git
 ```
 
-This creates `.beads/` with an empty database. Ignore any warnings about `bd bootstrap` — we'll replace the empty database manually.
+This clones the Dolt data from the remote's `refs/dolt/data` and persists
+`sync.remote`, so no separate `bd dolt remote add` step is needed afterward. If
+the remote genuinely has no Dolt data yet, `bd init` falls back to a fresh local
+database and says so.
 
-**Step 3: Stop the Dolt server**
-
-```bash
-bd dolt stop
-```
-
-**Step 4: Find your database name and remove the empty database**
-
-```bash
-# Check your database name
-cat .beads/metadata.json    # look for "dolt_database"
-```
-
-The `dolt_database` field is your `<dbname>` (typically the repo name).
-
-```bash
-# Remove the empty database
-rm -rf .beads/dolt/<dbname>/
-```
-
-**Step 5: Clone the Dolt data from the remote**
-
-```bash
-cd .beads/dolt
-dolt clone git@github.com:org/repo.git <dbname>
-cd ../..
-```
-
-**Step 6: Start the server and migrate**
-
-```bash
-bd dolt start
-bd migrate --yes
-```
-
-**Step 7: Ensure the remote is registered**
-
-```bash
-bd dolt remote add origin git+ssh://git@github.com/org/repo.git
-```
-
-If you see "remote already exists", that's fine — `dolt clone` already set it up.
-
-**Step 8: Verify**
+**Step 3: Verify**
 
 ```bash
 bd dolt remote list   # should show origin
