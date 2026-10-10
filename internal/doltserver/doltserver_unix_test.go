@@ -3,9 +3,108 @@
 package doltserver
 
 import (
+	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
+	"strconv"
 	"testing"
+	"time"
 )
+
+func TestIsProcessAliveTreatsEPERMAsAlive(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root may signal any process, so there is no EPERM to observe")
+	}
+	// PID 1 always exists, and an unprivileged user gets EPERM from kill(1, 0).
+	if !isProcessAlive(1) {
+		t.Error("expected PID 1 to be reported alive")
+	}
+}
+
+// startStaleServerFiles writes a pid file naming an unrelated process (a
+// sleep child, as if the PID had been reused) and a port file. The returned
+// channel receives the child's exit.
+func startStaleServerFiles(t *testing.T, dir string) chan error {
+	t.Helper()
+	t.Setenv("GT_ROOT", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+
+	child := exec.Command("sleep", "300")
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	exited := make(chan error, 1)
+	go func() { exited <- child.Wait() }()
+	t.Cleanup(func() {
+		_ = child.Process.Kill()
+		<-exited
+	})
+	if err := os.WriteFile(pidPath(dir), []byte(strconv.Itoa(child.Process.Pid)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writePortFile(dir, 14599); err != nil {
+		t.Fatal(err)
+	}
+	return exited
+}
+
+func expectNotSignaled(t *testing.T, exited chan error) {
+	t.Helper()
+	select {
+	case err := <-exited:
+		exited <- err // let the cleanup finish
+		t.Errorf("the unrelated process was signaled: %v", err)
+	case <-time.After(500 * time.Millisecond):
+	}
+}
+
+func TestStopDoesNotSignalUnverifiedProcess(t *testing.T) {
+	dir := t.TempDir()
+	exited := startStaleServerFiles(t, dir)
+	orig := readDoltProcesses
+	readDoltProcesses = func() ([]int, error) { return nil, errors.New("listing processes: operation not permitted") }
+	t.Cleanup(func() { readDoltProcesses = orig })
+
+	err := Stop(dir)
+	if err == nil || errors.Is(err, ErrServerNotRunning) {
+		t.Errorf("expected Stop to refuse an unverified PID, got %v", err)
+	}
+	expectNotSignaled(t, exited)
+	for _, path := range []string{pidPath(dir), portPath(dir)} {
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("expected %s to be kept: %v", filepath.Base(path), err)
+		}
+	}
+}
+
+func TestStopDoesNotSignalReusedPIDWhenListBecomesReadable(t *testing.T) {
+	dir := t.TempDir()
+	exited := startStaleServerFiles(t, dir)
+	// The first read (inside IsRunning) fails, the second (in stopLocked) works
+	// and does not contain the PID.
+	calls := 0
+	orig := readDoltProcesses
+	readDoltProcesses = func() ([]int, error) {
+		calls++
+		if calls == 1 {
+			return nil, errors.New("listing processes: resource temporarily unavailable")
+		}
+		return nil, nil
+	}
+	t.Cleanup(func() { readDoltProcesses = orig })
+
+	if err := Stop(dir); !errors.Is(err, ErrServerNotRunning) {
+		t.Errorf("expected ErrServerNotRunning for a reused PID, got %v", err)
+	}
+	expectNotSignaled(t, exited)
+	for _, path := range []string{pidPath(dir), portPath(dir)} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("expected %s to be removed", filepath.Base(path))
+		}
+	}
+}
 
 func TestParseDoltProcessPIDs(t *testing.T) {
 	tests := []struct {
