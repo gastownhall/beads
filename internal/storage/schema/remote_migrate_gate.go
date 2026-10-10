@@ -152,7 +152,10 @@ const (
 const (
 	// fallbackReasonUnreadableState: the remote's cached schema state could
 	// not be read (no cached ref, a stale/pre-content_hash one, or the cached
-	// remote is simply behind this clone and so not a safe first-mover).
+	// remote is simply behind this clone and so not a safe first-mover), or
+	// it read fine but the ancestry query against the cached ref failed, so
+	// where this clone's history stands relative to it is unknowable
+	// (gastownhall/beads#6666).
 	fallbackReasonUnreadableState = "unreadable-remote-state"
 	// fallbackReasonBelowFloor: remote and local agree, but a legacy
 	// non-deterministic migration is still pending (below the convergence
@@ -258,7 +261,7 @@ func (e *RemoteMigrateGateError) fallbackReasonNote() string {
 	var why string
 	switch e.FallbackReason {
 	case fallbackReasonUnreadableState:
-		why = "it could not read the remote's cached schema state (no cached ref, a stale/pre-content_hash one, or the cached remote is behind this clone)"
+		why = "it could not read the remote's cached schema state or this clone's ancestry relative to it (no cached ref, a stale/pre-content_hash one, the cached remote is behind this clone, or the ancestry query against the cached ref failed)"
 	case fallbackReasonBelowFloor:
 		why = "this database is below the convergence floor — a legacy non-deterministic migration is still pending, so an unattended first-mover migrate is not safe to trust"
 	case fallbackReasonOptedOut:
