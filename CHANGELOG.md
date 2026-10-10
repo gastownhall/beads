@@ -72,6 +72,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `float64` intermediate. The proxied-server route (`*_proxied_server.go`'s
   uow-backed preflight/apply path), previously untested for `--if-revision`
   on any verb, now has coverage for all five.
+- `bd close --cascade` closes an issue's open descendants with it (children
+  via parent-child edges, recursively) in the batch's single transaction,
+  descendants first: the open-children guard is satisfied by the cascade
+  itself rather than waived, so a blocked, pinned, or gate-held descendant
+  prunes its subtree and keeps its ancestors open unless `--force` is also
+  given. Already-closed descendants are untouched — walking through them
+  recovers the stranded-open-children-under-a-closed-parent case from
+  gastownhall/beads#1439 and #3681. Works on both the direct and
+  proxied-server routes; `--if-revision` refuses the combination.
 - `backends.Backend` gains an optional `OpenWith(ctx, beadsDir, OpenOptions)`
   and a `Remote bool` field for a registered extension backend (for example
   an HTTP client registrant). `OpenOptions{Credential, HTTPClient,

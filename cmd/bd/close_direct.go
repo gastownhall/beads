@@ -154,13 +154,17 @@ func closeDirectRequest(batch closeDirectBatch, session string, force bool, clai
 // an argument the batch never saw, either because the CLI's own policy refused
 // it or because it was never an argument at all.
 //
+// slotCount sizes the outcome slice: one slot per typed argument plus, under
+// --cascade, one per discovered descendant, whose items carry slots numbered
+// after the typed ones.
+//
 // A batch-level error means the batch never ran — request validation,
 // cancellation or infrastructure — so every id in it is reported the way a
 // single failed close has always been reported here, and the remaining stores'
 // batches still run. That is the same skip-and-continue the per-id loop had:
 // one store's outage does not silently drop another store's closes.
-func closeDirectRun(ctx context.Context, batches []closeDirectBatch, argCount int, session string, force bool, claimStore storage.DoltStorage, claimNext *issueops.ReadyRequest) ([]*issueops.CloseOutcome, *types.IssueWithCounts) {
-	outcomes := make([]*issueops.CloseOutcome, argCount)
+func closeDirectRun(ctx context.Context, batches []closeDirectBatch, slotCount int, session string, force bool, claimStore storage.DoltStorage, claimNext *issueops.ReadyRequest) ([]*issueops.CloseOutcome, *types.IssueWithCounts) {
+	outcomes := make([]*issueops.CloseOutcome, slotCount)
 	var claimed *types.IssueWithCounts
 
 	for _, batch := range batches {

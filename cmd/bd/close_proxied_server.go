@@ -22,6 +22,7 @@ import (
 
 type closeProxiedInput struct {
 	force       bool
+	cascade     bool
 	continueOn  bool
 	noAuto      bool
 	suggestNext bool
@@ -56,6 +57,13 @@ type closeProxiedPreflight struct {
 	before        map[string]*types.Issue
 	errors        []string
 	failureErrors []string
+	// cascadeExp is the --cascade expansion over the surviving typed
+	// arguments; nil without the flag. Its items sit at the end of items
+	// with a -1 itemArgs slot — no typed argument to fold an outcome back
+	// onto — and its refusals report through extraErrors/extraFailures.
+	cascadeExp    *cascadeExpansion
+	extraErrors   []string
+	extraFailures []closeIDFailure
 }
 
 type closeProxiedOutcome struct {
@@ -107,8 +115,8 @@ func runCloseProxiedServer(cmd *cobra.Command, ctx context.Context, args []strin
 		// honoring them would mean silently dropping what the caller asked
 		// for. Refuse instead of guessing, the same way --continue and
 		// --suggest-next already refuse a multi-id batch below.
-		if in.continueOn || in.suggestNext || in.claimNext {
-			return HandleErrorRespectJSON("--if-revision does not support --continue, --suggest-next, or --claim-next")
+		if in.continueOn || in.suggestNext || in.claimNext || in.cascade {
+			return HandleErrorRespectJSON("--if-revision does not support --continue, --suggest-next, --claim-next, or --cascade")
 		}
 		return runCloseProxiedIfRevision(ctx, args[0], reasonForCloseIndex(reasons, 0), in.force, in.session, *ifRevision)
 	}
@@ -160,7 +168,20 @@ func runCloseProxiedServer(cmd *cobra.Command, ctx context.Context, args []strin
 			fmt.Fprintln(os.Stderr, e)
 		}
 	}
+	for _, e := range pre.extraErrors {
+		fmt.Fprintln(os.Stderr, e)
+	}
 	failures := closeProxiedFailures(&pre, args)
+	if pre.cascadeExp != nil {
+		// Descendants the CLI's own close policy refused during the
+		// expansion, before the batch ever saw them — the proxied twin of
+		// the direct route's cascade-refusal report.
+		for _, r := range pre.cascadeExp.refusals {
+			fmt.Fprintln(os.Stderr, r.refusal)
+			failures = append(failures, closeIDFailure{ID: r.id, Error: r.refusal})
+		}
+	}
+	failures = append(failures, pre.extraFailures...)
 	for _, w := range post.warnings {
 		fmt.Fprintf(os.Stderr, "Warning: %s\n", w)
 	}
@@ -217,7 +238,7 @@ func runCloseProxiedServer(cmd *cobra.Command, ctx context.Context, args []strin
 	}
 
 	if len(failures) > 0 {
-		return reportCloseFailures(failures, len(args), closeClaimedID(claimedNextIssue), in.jsonOut)
+		return reportCloseFailures(failures, len(args)+pre.cascadeExp.cascadeCount(), closeClaimedID(claimedNextIssue), in.jsonOut)
 	}
 	if len(args) > 0 && len(outcomes) == 0 {
 		return SilentExit()
@@ -228,6 +249,7 @@ func runCloseProxiedServer(cmd *cobra.Command, ctx context.Context, args []strin
 func gatherCloseProxiedInput(cmd *cobra.Command) closeProxiedInput {
 	in := closeProxiedInput{}
 	in.force, _ = cmd.Flags().GetBool("force")
+	in.cascade, _ = cmd.Flags().GetBool("cascade")
 	in.continueOn, _ = cmd.Flags().GetBool("continue")
 	in.noAuto, _ = cmd.Flags().GetBool("no-auto")
 	in.suggestNext, _ = cmd.Flags().GetBool("suggest-next")
@@ -257,7 +279,10 @@ func proxiedBatchCloser() (issueops.BatchCloser, error) {
 }
 
 // closeProxiedRunPreflight resolves every argument and applies the CLI's own
-// close policy to it, in one read-only unit of work.
+// close policy to it, in one read-only unit of work. Under --cascade the same
+// unit of work also expands each surviving argument's open descendants and
+// applies the same per-node policy to them, so the batch below receives one
+// deepest-first item list no matter which route built it.
 func closeProxiedRunPreflight(ctx context.Context, args, reasons []string, in closeProxiedInput) (closeProxiedPreflight, error) {
 	pre := closeProxiedPreflight{
 		errors:        make([]string, len(args)),
@@ -278,6 +303,43 @@ func closeProxiedRunPreflight(ctx context.Context, args, reasons []string, in cl
 			pre.before[id] = current
 			pre.items = append(pre.items, issueops.BatchCloseItem{IssueID: id, Reason: reasonForCloseIndex(reasons, i)})
 			pre.itemArgs = append(pre.itemArgs, i)
+		}
+
+		if in.cascade && len(pre.items) > 0 {
+			roots := make([]cascadeRootSpec, 0, len(pre.items))
+			for _, item := range pre.items {
+				roots = append(roots, cascadeRootSpec{
+					id:     item.IssueID,
+					reason: item.Reason,
+					childrenOf: func(ctx context.Context, id string) ([]*types.Issue, error) {
+						page, err := uw.IssueUseCase().SearchIssues(ctx, "", types.IssueFilter{ParentID: &id, Limit: 0})
+						if err != nil {
+							return nil, err
+						}
+						return page.Items, nil
+					},
+					// The route's own policy, verbatim; the re-read it
+					// performs also seeds pre.before, which is what the
+					// outcome fold reads the audit entry's old status from.
+					checkOne: func(id string, issue *types.Issue) string {
+						refusal, current := closeProxiedCheckOne(ctx, uw, id, in)
+						if refusal == "" && current != nil {
+							pre.before[id] = current
+						}
+						return refusal
+					},
+				})
+			}
+			exp, cerr := expandCloseCascade(ctx, roots)
+			if cerr != nil {
+				return struct{}{}, cerr
+			}
+			pre.cascadeExp = exp
+			for _, ci := range exp.items {
+				pre.items = append(pre.items, issueops.BatchCloseItem{IssueID: ci.id, Reason: ci.reason})
+				pre.itemArgs = append(pre.itemArgs, -1)
+			}
+			orderCloseCascadePerm(exp, pre.items, pre.itemArgs)
 		}
 		return struct{}{}, nil
 	})
@@ -325,12 +387,43 @@ func closeProxiedCheckOne(ctx context.Context, uw uow.UnitOfWork, id string, in 
 // closeProxiedOutcomes folds the batch's per-item outcomes back onto the
 // argument list: a refusal lands in its argument's own error slot so the
 // stderr report stays in typed order, and the survivors keep the shape the
-// display block has always consumed.
+// display block has always consumed. A cascade-discovered item has no typed
+// slot — its itemArgs entry is -1 — so its refusal becomes its own report
+// line and failure entry, and its landing joins the outcomes after every
+// typed argument, in the order the batch closed them.
 func closeProxiedOutcomes(pre *closeProxiedPreflight, result issueops.CloseBatchResult) ([]closeProxiedOutcome, []string) {
 	var outcomes []closeProxiedOutcome
 	var reasons []string
 	for j, outcome := range result.Outcomes {
 		item := pre.items[j]
+		if pre.itemArgs[j] < 0 {
+			if outcome.Err != nil {
+				pre.extraErrors = append(pre.extraErrors, closeProxiedRefusal(item.IssueID, outcome.Err))
+				// The typed error, not the decorated display line — same
+				// split as the typed slots below and the direct route.
+				pre.extraFailures = append(pre.extraFailures, closeIDFailure{ID: item.IssueID, Error: closeProxiedTypedRefusal(outcome.Err)})
+				continue
+			}
+			before := pre.before[item.IssueID]
+			oldStatus := "open"
+			if before != nil && before.Status != "" {
+				oldStatus = string(before.Status)
+			}
+			after := outcome.Issue
+			if after != nil {
+				after.Dependencies = nil
+			}
+			outcomes = append(outcomes, closeProxiedOutcome{
+				id:          item.IssueID,
+				before:      before,
+				after:       after,
+				closed:      outcome.Changed,
+				auditOld:    oldStatus,
+				auditReason: item.Reason,
+			})
+			reasons = append(reasons, item.Reason)
+			continue
+		}
 		if outcome.Err != nil {
 			pre.errors[pre.itemArgs[j]] = closeProxiedRefusal(item.IssueID, outcome.Err)
 			// The typed error, not the decorated display line: the --force hint

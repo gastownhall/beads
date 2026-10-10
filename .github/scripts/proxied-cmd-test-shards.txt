@@ -302,6 +302,7 @@
 34 6 TestProxiedServerUpdate2B
 34 6 TestProxiedServerWispList
 
+34 7 TestProxiedServerCloseCascade
 34 7 TestProxiedServerCloseConcurrent
 34 7 TestProxiedServerCreateInfraTypeRoutesToWisps
 34 7 TestProxiedServerExternalCreate

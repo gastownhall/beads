@@ -381,7 +381,7 @@ linters:
       # and a reviewer can count them.
       #
       # Inside cmd/bd the rule is deny-by-default, so each entry below is a
-      # HOLE in it and carries the reason that hole exists. 59 of the 389
+      # HOLE in it and carries the reason that hole exists. 60 of the 389
       # non-test files under cmd/bd are on this list; widening it is an edit
       # here and a diff a reviewer sees. internal/httpapi has no entry and is
       # meant not to.
@@ -503,6 +503,20 @@ linters:
       # front door reached the role.
       
       - path: '^cmd/bd/(cleanup|completions|gate_discover|lint|ping|repo|swarm|template)\.go$'
+        text: 'do not write a filter here'
+        linters:
+          - forbidigo
+      # `bd close --cascade` walks each target's subtree one level of
+      # parent-child edges at a time through the SAME one-level ParentID
+      # clause `bd list --tree` uses, because that raw hierarchy read is what
+      # the engine's open-children guard counts. No workapi builder serves
+      # it: BuildListFilter applies the listing's visibility suppressions
+      # (gates, templates, done-status hiding) that the guard does not, so a
+      # builder-built filter would under-discover children and turn the
+      # cascade's guard-passing close into refusals. The filter names one
+      # parent id and no other clause. close.go stays off this list; the
+      # construction lives only in the expansion helper.
+      - path: '^cmd/bd/close_cascade\.go$'
         text: 'do not write a filter here'
         linters:
           - forbidigo
