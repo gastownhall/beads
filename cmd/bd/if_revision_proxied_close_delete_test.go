@@ -99,16 +99,16 @@ func TestProxiedServerIfRevisionDeleteMatchAndMismatch(t *testing.T) {
 	})
 }
 
-// TestProxiedIfRevisionTargetGoneIsPreconditionFailed is the proxied-route
+// TestProxiedServerIfRevisionTargetGoneIsPreconditionFailed is the proxied-route
 // twin of TestIfRevisionPreflightGoneIsPreconditionFailedOnEveryVerb
 // (ga-vnycm2.10): a guarded close, update or assign whose row a concurrent
 // `bd delete` already removed must report precondition_failed /
 // ExitGuardMismatch, whichever step (the advisory pre-read or the guarded
 // write) first observes the row gone — never an unclassified "not found"
-// exit 1. TestProxiedDeleteIfRevisionSingleWinner's delete_vs_close and
+// exit 1. TestProxiedServerDeleteIfRevisionSingleWinner's delete_vs_close and
 // delete_vs_update race exactly this; here the winning delete runs first, so
 // the outcome is deterministic.
-func TestProxiedIfRevisionTargetGoneIsPreconditionFailed(t *testing.T) {
+func TestProxiedServerIfRevisionTargetGoneIsPreconditionFailed(t *testing.T) {
 	requireSharedProxiedServer(t)
 	t.Parallel()
 	bd := buildEmbeddedBD(t)

@@ -308,6 +308,7 @@
 34 7 TestProxiedServerDeleteIfRevisionSingleWinner
 34 7 TestProxiedServerExternalCreate
 34 7 TestProxiedServerIfRevisionGuardDelete
+34 7 TestProxiedServerIfRevisionTargetGoneIsPreconditionFailed
 34 7 TestProxiedServerLabelC
 34 7 TestProxiedServerTypesAgreeWithCreate
 
