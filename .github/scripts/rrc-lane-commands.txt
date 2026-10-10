@@ -9,6 +9,7 @@ test //... --config=embedded
 test //... --config=integration
 test //... --config=doltserver
 test //... --config=doltserver-proxied
+test //... --config=dolt-race
 test //... --config=doltserver-integration
 test //... --config=doltserver-cmd
 build --config=pure //cmd/bd:bd //cmd/bd:bd_test //internal/storage/embeddeddolt:embeddeddolt_test //internal/tracker:tracker_test

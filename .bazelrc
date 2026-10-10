@@ -161,6 +161,32 @@ test:doltserver-proxied --remote_download_regex=.*/test\.(log|xml)$
 # visible "Re-run failed jobs" retries it.
 test:doltserver-proxied --experimental_remote_cache_eviction_retries=0
 
+# dolt-server + proxied union (item 5, Phase 1 shadow): bazel.yml's advisory
+# bazel-dolt-race job runs both tiers in one invocation, beside their own
+# lanes, to measure one client per group of lanes before any cutover. Exactly
+# the union of --config=doltserver's and --config=doltserver-proxied's lines,
+# with one tag filter naming both tiers
+# (scripts/bazel_dolt_race_shadow_test.go). Every other flag is the same in
+# both members or outside any action key for the other: the race build,
+# -test.parallel=4 and GO_TEST_WRAP_TESTV=1 are common; the eternal timeout
+# applies to no dolt-server target; the eviction retry count is what
+# doltserver already gets from --config=sole-run in mode remote, the only mode
+# the shadow runs in; test_summary, local_test_jobs and remote_download_regex
+# are not in any action key. So each member target's test action is
+# unchanged, and the two lanes' cached results carry over. The member configs
+# stay for make, developers and the member lanes.
+test:dolt-race --@rules_go//go/config:race
+test:dolt-race --test_tag_filters=dolt-server,dolt-server-proxied
+test:dolt-race --build_tests_only
+test:dolt-race --keep_going
+test:dolt-race --test_summary=terse
+test:dolt-race --test_timeout=-1,-1,-1,1200
+test:dolt-race --test_env=GO_TEST_WRAP_TESTV=1
+test:dolt-race --test_arg=-test.parallel=4
+test:dolt-race --local_test_jobs=4
+test:dolt-race --remote_download_regex=.*/test\.(log|xml)$
+test:dolt-race --experimental_remote_cache_eviction_retries=0
+
 # Server-Dolt storage tier: PR Risk's "Test (Server Dolt Conformance)" and
 # "Test (Server Dolt Full Suite N/16)" jobs, as
 # //internal/storage/dolt:dolt_server_{conformance,full}_test

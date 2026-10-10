@@ -207,6 +207,7 @@ func TestMergeQueuePullRequestFieldsHandleMergeGroup(t *testing.T) {
 		"bazel-proxied.steps[*].env.PR_HINT":        "ci-analytics-summary metadata only (--pr-hint); `|| 0` already covers merge_group same as a non-PR push",
 		"bazel-server-storage.steps[*].env.PR_HINT": "ci-analytics-summary metadata only (--pr-hint); `|| 0` already covers merge_group same as a non-PR push",
 		"bazel-cmd-dolt.steps[*].env.PR_HINT":       "ci-analytics-summary metadata only (--pr-hint); `|| 0` already covers merge_group same as a non-PR push",
+		"bazel-dolt-race.steps[*].env.PR_HINT":      "ci-analytics-summary metadata only (--pr-hint); `|| 0` already covers merge_group same as a non-PR push",
 	}
 	used := map[string]bool{}
 	var fallbacks []string

@@ -48,8 +48,9 @@ const (
 // alone under `canary`). Not bazel-release-cross (other target platforms,
 // not seeded) nor the package gates.
 var bazelRRCReadLanes = []string{
-	"bazel-cmd-dolt", "bazel-doltserver", "bazel-embedded", "bazel-integration",
-	"bazel-proxied", "bazel-pure", "bazel-server-storage", "bazel-test",
+	"bazel-cmd-dolt", "bazel-dolt-race", "bazel-doltserver", "bazel-embedded",
+	"bazel-integration", "bazel-proxied", "bazel-pure", "bazel-server-storage",
+	"bazel-test",
 }
 
 // bazelRRCReadLines: the reader's .bazelrc.local lines; both are key neutral

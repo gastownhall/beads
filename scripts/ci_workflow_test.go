@@ -1779,7 +1779,7 @@ const (
 // bazel.yml's jobs: the rbe job that decides the execution mode, the
 // --config=ci lane, one job per CI job a Bazel config mirrors, and the two
 // package gates (F3), sorted alphabetically to match TestBazelWorkflowJobsAndExecutionMode's sort.Strings.
-var bazelJobNames = []string{bazelCmdDoltJobName, bazelDoltJobName, bazelEmbedJobName, bazelIntegJobName, bazelProxiedJobName, bazelPureJobName, bazelReleaseCrossJobName, bazelServerJobName, bazelJobName, bazelPackageMCPJobName, bazelPackageNPMJobName, bazelRBEJobName, bazelRBEPrewarmJobName, bazelRRCSeedJob, bazelRRCVerifyJob}
+var bazelJobNames = []string{bazelCmdDoltJobName, bazelDoltRaceJobName, bazelDoltJobName, bazelEmbedJobName, bazelIntegJobName, bazelProxiedJobName, bazelPureJobName, bazelReleaseCrossJobName, bazelServerJobName, bazelJobName, bazelPackageMCPJobName, bazelPackageNPMJobName, bazelRBEJobName, bazelRBEPrewarmJobName, bazelRRCSeedJob, bazelRRCVerifyJob}
 
 // The lanes that only run remotely (skipped unless the rbe job chose remote);
 // bazel-integration runs remotely or with the read-only cache (bazelIntegIf);
@@ -2086,8 +2086,14 @@ func TestBazelWorkflowJobsAndExecutionMode(t *testing.T) {
 		// bazel.yml's own run - and thus pr.yml's ci-gate - red for a job
 		// nothing requires.
 		_, flagGated := bazelFlagGatedLanes[name]
-		if job.ContinueOnError && name != bazelRBEPrewarmJobName && !flagGated {
+		// So is each shadow lane (bazelShadowLanes): it reports into no
+		// gate, so its failure must not fail the call (BAZEL) either.
+		_, shadow := bazelShadowLanes[name]
+		if job.ContinueOnError && name != bazelRBEPrewarmJobName && !flagGated && !shadow {
 			t.Errorf("%s continue-on-error hides failures from pr.yml's ci-gate", name)
+		}
+		if shadow && !job.ContinueOnError {
+			t.Errorf("%s is a shadow lane (%s) but lacks job-level continue-on-error", name, bazelShadowLanes[name])
 		}
 		// A flag-gated lane is advisory until its flag says otherwise, and
 		// an advisory job's failure must not fail the call (BAZEL).
@@ -2172,6 +2178,11 @@ func TestBazelWorkflowJobsAndExecutionMode(t *testing.T) {
 			// setup-bazel, so wantJobSetupEnv is moot (the per-step check
 			// below only fires for a setup-bazel step).
 			wantJobRunsOn, wantJobIf = bazelPrewarmRunsOn, bazelRBEPrewarmIf
+		} else if name == bazelDoltRaceJobName {
+			// Mode remote, on pull_request and merge_group events only
+			// (bazel_dolt_race_shadow_test.go); the lanes' runner and
+			// setup-bazel env otherwise.
+			wantJobIf = bazelDoltRaceJobIf
 		}
 		if job.RunsOn != wantJobRunsOn {
 			t.Errorf("%s runs-on = %q, want %q", name, job.RunsOn, wantJobRunsOn)
@@ -2717,6 +2728,15 @@ func TestBazelLaneIsGated(t *testing.T) {
 		if name == bazelRBEJobName || isBazelRRCJob(name) {
 			continue // the rrc jobs never run in a PR call (bazel_rrc_test.go)
 		}
+		if _, shadow := bazelShadowLanes[name]; shadow {
+			// A shadow lane reports into nothing: no job outputs, so no
+			// workflow_call output and no gate id
+			// (TestBazelDoltRaceShadowIsAdvisory).
+			if len(job.Outputs) != 0 {
+				t.Errorf("shadow lane %s outputs = %v, want none", name, job.Outputs)
+			}
+			continue
+		}
 		_, gated := bazelLaneGateIDs[name]
 		_, advisory := bazelAdvisoryLanes[name]
 		_, flagGated := bazelFlagGatedLanes[name]
@@ -3042,6 +3062,13 @@ func bazelLaneRunModes(t *testing.T, lane, ifExpr string, with map[string]string
 		// lanes, this one legitimately runs in pr.yml's own call (see
 		// bazelAdvisoryLanes' name-specific exception in
 		// TestBazelGateSimulation below).
+		return map[string]bool{"remote": true}
+	case bazelDoltRaceJobIf:
+		// Mode remote, and only on pull_request and merge_group events:
+		// within pr.yml's call (the only PR-time caller these simulations
+		// model) that is mode remote. bazel-farm.yml's pull_request_target
+		// call, push, nightly and dispatch never run it
+		// (TestBazelDoltRaceShadowRunsOnlyInRemotePRCalls).
 		return map[string]bool{"remote": true}
 	case bazelRRCSeedJobIf, bazelRRCVerifyJobIf:
 		// The remote repo contents cache's writer (push to main) and
@@ -4738,8 +4765,11 @@ func TestBazelWorkflowSecretsAndFailureSurface(t *testing.T) {
 			// (bazelCIAnalyticsStepNames): reporting only, never a `needs`
 			// of anything and never read back by this workflow or its
 			// callers.
+			// And each shadow lane's (bazelShadowLanes): it reports into no
+			// gate, so its failure must not fail the call either.
 			_, flagGated := bazelFlagGatedLanes[strings.TrimSuffix(strings.TrimPrefix(path, ".jobs."), ".continue-on-error")]
-			if path != bazelRBEPrewarmContinueOnErrorPath && !flagGated && !ciAnalyticsPaths[path] {
+			_, shadow := bazelShadowLanes[strings.TrimSuffix(strings.TrimPrefix(path, ".jobs."), ".continue-on-error")]
+			if path != bazelRBEPrewarmContinueOnErrorPath && !flagGated && !shadow && !ciAnalyticsPaths[path] {
 				t.Errorf("%s: %s hides failures from pr.yml's ci-gate", bazelWorkflowName, path)
 			}
 		}

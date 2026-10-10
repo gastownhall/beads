@@ -620,6 +620,30 @@ job's `if:` or rotating the key, in either of two ways:
   step's own kill switch, checked before any network call. Deleting the
   variable does not disable pre-warming; it restores the default of 1.
 
+## dolt-race Shadow (Not Required)
+
+`bazel.yml`'s `bazel-dolt-race` job (check name `Bazel / dolt-race`) is an
+advisory shadow, not a required check. It runs
+`bazel test //... --config=dolt-race`, the union of `--config=doltserver` and
+`--config=doltserver-proxied` with one tag filter for both tiers, beside the
+`bazel-doltserver` and `bazel-proxied` lanes. Its purpose is to measure one
+client per group of lanes against the two lanes it would replace (end time,
+runner minutes, test counts and results) before any cutover. Each member
+target's test action key is unchanged, so the shadow shares cached results
+with the member lanes.
+
+- It runs in mode `remote` on `pull_request` and `merge_group` events only.
+  It never runs in a fork mode (`fork-ro`, `fork-rw`), in mode `cache` or
+  `local`, on `bazel-farm.yml`'s call, on push, nightly or dispatch.
+- It gates nothing. It has job-level `continue-on-error`, so its failure
+  cannot fail the call's aggregate result (`BAZEL`). It has no
+  `workflow_call` output, no job `needs` it, and `pr.yml`, `ci-gate.sh` and
+  `bazel-gate.sh` never name it.
+- Its ci-analytics `LANE` is `dolt-race`.
+- Policy: `scripts/bazel_dolt_race_shadow_test.go`. Removing the job, its
+  `.bazelrc` config and its line in `.github/scripts/rrc-lane-commands.txt`
+  is the rollback; nothing reads them.
+
 ## Remote Repo Contents Cache
 
 A cold lane client re-runs its repository rules (gazelle's `go_deps`, the Go

@@ -35,6 +35,7 @@ go_test(
     srcs = [
         "bazel_autofix_push_test.go",
         "bazel_cache_mode_test.go",
+        "bazel_dolt_race_shadow_test.go",
         "bazel_farm_workflow_test.go",
         "bazel_fork_mode_test.go",
         "bazel_go_repository_tools_test.go",

@@ -46,7 +46,10 @@
 # only what the PR changed is built and tested on the runner, and it is
 # their only PR-time integration run (no legacy job runs it on PRs). Mode
 # local (rbe=off) still skips it. Direct runs (push to main,
-# workflow_dispatch, nightly.yml's call) gate nothing.
+# workflow_dispatch, nightly.yml's call) gate nothing. bazel-dolt-race (the
+# dolt-server + proxied union shadow, mode remote on PRs and merge groups
+# only) gates nothing either: no output, job-level continue-on-error (see its
+# comment and engdocs/CI_REQUIRED_CHECK_TOPOLOGY.md, "dolt-race Shadow").
 #
 # Execution mode, decided once by the rbe job (every other job needs it and
 # reads its outputs; none re-derives the condition) and passed to
@@ -1982,6 +1985,148 @@ jobs:
         env:
           JOB_STATUS: ${{ job.status }}
         run: echo "result=$JOB_STATUS" >> "$GITHUB_OUTPUT"
+
+  # Item 5, Phase 1 (scripts/bazel_dolt_race_shadow_test.go): the advisory
+  # shadow of a union lane. One `bazel test --config=dolt-race` runs the
+  # dolt-server and proxied-server tiers together (.bazelrc: exactly the
+  # union of --config=doltserver's and --config=doltserver-proxied's lines,
+  # one tag filter for both), beside bazel-doltserver and bazel-proxied, so
+  # one client per group of lanes can be compared with the two it would
+  # replace (end time, runner minutes, test counts and results) before any
+  # cutover. Each member target's test action key is unchanged, so the shadow
+  # and the member lanes share cached results, and rbe-west deduplicates
+  # identical in-flight executions.
+  # Advisory and outside every gate: job-level continue-on-error (a failed
+  # job otherwise fails the whole call, whose result pr.yml's ci-gate
+  # requires as BAZEL), no workflow_call output, no job outputs, nothing
+  # needs it, and no gate script or caller names it. Mode remote only, on
+  # same-repo pull requests and merge groups (mode remote on a pull_request
+  # is never a fork): no fork mode, no cache or local mode, and not on push,
+  # nightly, dispatch or bazel-farm.yml's call. Its ci-analytics LANE is
+  # dolt-race. Removing it is the rollback; nothing reads it.
+  bazel-dolt-race:
+    name: dolt-race
+    needs: rbe
+    runs-on: ${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    if: ${{ needs.rbe.outputs.mode == 'remote' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}
+    timeout-minutes: 30
+    continue-on-error: true
+    steps:
+      # inputs.checkout-sha: see the header (empty: the event's default ref).
+      # checkout v7 refuses a fork head on pull_request_target unless opted
+      # in; only bazel-farm.yml's authorized call opts in (false elsewhere).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.checkout-sha }}
+          persist-credentials: false
+          allow-unsafe-pr-checkout: ${{ inputs.fork-farm == 'authorized' && github.event_name == 'pull_request_target' }}
+
+      # The remote repo contents cache, read-only, as in bazel-test.
+      - name: Remote repo contents cache (read)
+        if: ${{ needs.rbe.outputs.mode == 'remote' && needs.rbe.outputs.rrc == 'on' }}
+        run: |
+          {
+            echo 'startup --experimental_remote_repo_contents_cache'
+            echo 'common --loading_phase_threads=64'
+          } >> .bazelrc.local
+
+      - name: Set up Bazel
+        id: bazel
+        uses: ./.github/actions/setup-bazel
+        env:
+          BAZEL_REMOTE_EXECUTOR: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_WEST_EXECUTOR || '' }}
+          RBE_TLS_CERT: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_TLS_CERT || '' }}
+          RBE_TLS_KEY: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_TLS_KEY || '' }}
+          RBE_TLS_CA: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_TLS_CA || '' }}
+          RBE_INSTANCE: ${{ needs.rbe.outputs.mode == 'remote' && 'oss' || '' }}
+          BAZEL_FORK_CACHE: ${{ needs.rbe.outputs.mode == 'cache' && 'true' || '' }}
+          BAZEL_FORK_REMOTE: ${{ startsWith(needs.rbe.outputs.mode, 'fork-') && 'true' || '' }}
+          RBE_FORK_TIER: ${{ needs.rbe.outputs.tier }}
+          RBE_FORK_PR: ${{ github.event.pull_request.number }}
+
+      # As in bazel-proxied.
+      - name: No test target is marked flaky
+        run: |
+          flaky="$(bazel query 'attr(flaky, 1, tests(//...))')"
+          if [ -n "$flaky" ]; then
+            echo "::error::flaky = True on ${flaky//$'\n'/ }: the gated lanes run each test once"
+            exit 1
+          fi
+
+      # Both tiers' shards at once: 27 dolt-server + 35 proxied test actions,
+      # under the remote-exec config's 64 jobs. The step timeout is
+      # bazel-proxied's (the longer tier on rbe-west).
+      - name: bazel test //... --config=dolt-race
+        id: test
+        timeout-minutes: 25
+        run: |
+          set -o pipefail
+          start=$(date +%s)
+          rc=0
+          bazel test //... --config=dolt-race ${BAZEL_FRESH:+"$BAZEL_FRESH"} \
+            --build_event_json_file="$RUNNER_TEMP/bazel-bep.json" \
+            --execution_log_compact_file="$RUNNER_TEMP/bazel-exec.log.zst" \
+            --profile="$RUNNER_TEMP/bazel-profile.json" \
+            --experimental_build_event_upload_strategy=local \
+            2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?
+          echo "bazel test --config=dolt-race: exit $rc, $(( $(date +%s) - start ))s wall" | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+
+      # The member lanes' checks over the union's BEP: bazel-proxied's (the
+      # dolt-server lane has none), which ignore targets they do not list.
+      - name: Every target and shard ran tests
+        if: ${{ always() && steps.test.outcome != 'skipped' }}
+        run: python3 tools/bazel/check_testcases.py --bep "$RUNNER_TEMP/bazel-bep.json"
+
+      - name: Every listed test ran in its shard
+        if: ${{ always() && steps.test.outcome != 'skipped' }}
+        run: >-
+          python3 tools/bazel/check_shard_coverage.py
+          --bep "$RUNNER_TEMP/bazel-bep.json"
+          --suite //cmd/bd:bd_proxied_test .github/scripts/proxied-test-shard.sh 34
+
+      - name: Upload test logs
+        if: ${{ failure() && steps.test.outcome != 'skipped' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          overwrite: true # a job re-run is the same run: replace, not 409
+          name: bazel-dolt-race-testlogs
+          path: |
+            bazel-testlogs/**/test.log
+            bazel-testlogs/**/test.xml
+          if-no-files-found: ignore
+          retention-days: 7
+
+      # Same redacted summary as bazel-test's; see its comment.
+      - name: CI analytics summary
+        id: ci-analytics
+        if: "!cancelled() && steps.test.outcome != 'skipped'"
+        continue-on-error: true
+        timeout-minutes: 3
+        env:
+          LANE: dolt-race
+          MODE: ${{ needs.rbe.outputs.mode }}
+          CHECK_RUN_ID: ${{ job.check_run_id }}
+          PR_HINT: ${{ github.event.pull_request.number || 0 }}
+        run: |
+          [ -f "$RUNNER_TEMP/bazel-bep.json" ] || exit 0
+          zstd --version || echo "::warning::zstd missing: no per-mnemonic data in this lane's summary"
+          python3 tools/bazel/ci_analytics_extract.py \
+            --lane "$LANE" --mode "$MODE" --check-run-id "$CHECK_RUN_ID" --pr-hint "$PR_HINT" \
+            --invocation test "$RUNNER_TEMP/bazel-bep.json" "$RUNNER_TEMP/bazel-exec.log.zst" "$RUNNER_TEMP/bazel-profile.json" \
+            --out "$RUNNER_TEMP/ci-analytics/ci-analytics.json"
+
+      - name: Upload CI analytics summary
+        if: "!cancelled() && steps.ci-analytics.outcome == 'success'"
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          overwrite: true # a job re-run is the same run: replace, not 409
+          name: ci-analytics-dolt-race-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-analytics/ci-analytics.json
+          retention-days: 7
+          if-no-files-found: ignore
 
   # pr-risk.yml's server-Dolt storage tier, "Test (Server Dolt Conformance)"
   # and "Test (Server Dolt Full Suite N/16)", as --config=doltserver-integration:
