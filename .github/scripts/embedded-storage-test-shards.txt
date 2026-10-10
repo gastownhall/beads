@@ -176,6 +176,7 @@
 40 3 TestTransactionCleanupBeforeSQLCommitRemainsDefinite
 40 3 TestUnknownProvenanceLeaseStaysReclaimable
 
+40 4 TestAggregateRevisionMigrationBackfillsIssuesAndWisps
 40 4 TestCreateBatchFastPathsMatchPerRowSmallDepAdd_Embedded
 40 4 TestEmbeddedIssueOperationsUpdateLabelPatchOrdering
 40 4 TestEmbeddedReaderGetMissIsNotFoundAndBackendFailureDoesNotDecay
@@ -262,6 +263,7 @@
 40 13 TestEmbeddedRelationsDirectionSelectsTheInverseGraph
 40 13 TestGraphWalkPlansHonorJoinHints
 
+40 14 TestAggregateRevisionCreateWritesBackAndNoOpsStayStable
 40 14 TestBatchCreatorContract
 40 14 TestBlockingAnnotatorContract
 40 14 TestCountsIncludeWispDependencies
@@ -273,6 +275,7 @@
 40 14 TestEmbeddedReadyClaimerDoesNotMutateTheCallerRequest
 40 14 TestHistory_NullTextColumns
 
+40 15 TestAggregateRevisionAuxiliaryMutationInvalidatesGuard
 40 15 TestCreateIssuesRejectStaleUpserts
 40 15 TestDecryptPassword_ShortCiphertextClassifiesAsKeyMismatch
 40 15 TestEmbeddedGetMergeBlockersOnAQuietStore
@@ -372,6 +375,7 @@
 40 23 TestEventsAutoPruneBoundsTheJournalToTheFloors
 40 23 TestJournalContract
 
+40 24 TestAggregateRevisionAuxiliaryUpdatesCommitTheRemintedToken
 40 24 TestBootstrapperContract
 40 24 TestEmbeddedBatchCloserOutcomesMirrorItemsIndexForIndex
 40 24 TestEmbeddedClaimerReclaimsAcrossSpellingWithoutWriting
@@ -384,6 +388,7 @@
 40 24 TestLargeBatchApplyStatementCountsClassic40_Embedded
 40 24 TestReopenIssue
 
+40 25 TestAggregateRevisionChangesForEveryVisibleAuxiliaryMutation
 40 25 TestBatchGetterContract
 40 25 TestDualWriteFixtureKitIsWired
 40 25 TestEmbeddedBatchCloserClaimNextIsNilWhenNothingClosed
@@ -432,6 +437,7 @@
 40 28 TestUpdateIssueType
 40 28 TestWithPeerAuth_RestoresEnvWhenCallbackFails
 
+40 29 TestAggregateRevisionTransactionLabelEventsDoNotRemintNoOps
 40 29 TestEmbeddedBatchCloserClaimFilterValueFailureIsARequestValidationFailure
 40 29 TestEmbeddedBatchCloserClaimNextIsNilWhenTheFrontIsEmpty
 40 29 TestEmbeddedDepRekeyMergesFreshDuplicateEdges
