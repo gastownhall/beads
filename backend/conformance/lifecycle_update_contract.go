@@ -1917,6 +1917,47 @@ func RunLifecycleUpdateParentIDReplacesEveryParent(t *testing.T, ctx context.Con
 	assertLifecycleUpdateParents(t, ctx, fixture, childID, "after replacing every parent", thirdID)
 }
 
+// RunLifecycleUpdateParentIDRefusesDetachingADottedChild pins GH#7091: a
+// dotted ID implies its parent, and the parent filters fall back to that ID
+// prefix when no parent-child edge exists, so clearing the parent of P.1 would
+// report success while every listing still returned it under P. The detach is
+// refused as ErrValidation and writes no member of the patch; reparenting the
+// same child to another issue still works.
+func RunLifecycleUpdateParentIDRefusesDetachingADottedChild(t *testing.T, ctx context.Context, fixture LifecycleUpdateFixture) {
+	t.Helper()
+
+	if fixture.AddDependency == nil || fixture.ListDependencies == nil {
+		t.Skip("fixture cannot seed or read an edge: AddDependency or ListDependencies is nil")
+	}
+
+	parentID := fixture.IssuePrefix + "-lup-dotted"
+	childID := parentID + ".1"
+	otherID := fixture.IssuePrefix + "-lup-dotted-other"
+	seedLifecycleUpdateIssue(t, ctx, fixture, lifecycleUpdateIssue(parentID))
+	seedLifecycleUpdateIssue(t, ctx, fixture, lifecycleUpdateIssue(childID))
+	seedLifecycleUpdateIssue(t, ctx, fixture, lifecycleUpdateIssue(otherID))
+	seedLifecycleUpdateEdge(t, ctx, fixture, childID, parentID, types.DepParentChild)
+
+	_, err := fixture.Lifecycle.Update(ctx, publicops.UpdateRequest{Actor: "writer", IssueID: childID, Patch: publicops.IssuePatch{
+		Title:    publicops.Field[string]{Set: true, Value: "renamed"},
+		ParentID: publicops.Field[string]{Set: true, Value: ""},
+	}})
+	if !errors.Is(err, storage.ErrValidation) {
+		t.Fatalf("detaching dotted child %s = %v, want ErrValidation", childID, err)
+	}
+	if got := lifecycleUpdateRow(t, ctx, fixture, childID).Title; got != childID {
+		t.Errorf("refused detach wrote title %q, want %q unchanged", got, childID)
+	}
+	assertLifecycleUpdateParents(t, ctx, fixture, childID, "after refused detach", parentID)
+
+	if _, err := fixture.Lifecycle.Update(ctx, publicops.UpdateRequest{Actor: "writer", IssueID: childID, Patch: publicops.IssuePatch{
+		ParentID: publicops.Field[string]{Set: true, Value: otherID},
+	}}); err != nil {
+		t.Fatalf("reparent dotted child %s to %s: %v", childID, otherID, err)
+	}
+	assertLifecycleUpdateParents(t, ctx, fixture, childID, "after reparent", otherID)
+}
+
 // RunLifecycleUpdatePersistentPreservesUnversionedClass pins the half of the
 // Persistence clause nobody else asserts: "Persistent preserves an existing
 // durable unversioned class" (issueops/issueops.go:135-136). The refusal beside

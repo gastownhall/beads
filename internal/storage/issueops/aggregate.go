@@ -107,6 +107,14 @@ func ValidateUpdateRequest(request publicops.UpdateRequest) error {
 	if patch.Persistence.Set && !patch.Persistence.Value.IsValid() {
 		return fmt.Errorf("%w: invalid persistence mode %q", storage.ErrValidation, patch.Persistence.Value)
 	}
+	// A dotted ID implies its parent: with no parent-child edge, the parent
+	// filters fall back to the ID prefix and claim the child again, so a
+	// detach would report success and change nothing the listings see (GH#7091).
+	if patch.ParentID.Set && patch.ParentID.Value == "" {
+		if implied, _, ok := ParseHierarchicalID(request.IssueID); ok {
+			return fmt.Errorf("%w: %s is a child of %s by its ID and cannot be detached; reparent it to another issue instead", storage.ErrValidation, request.IssueID, implied)
+		}
+	}
 	return nil
 }
 

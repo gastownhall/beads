@@ -461,6 +461,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (already "bug"); pass a single value`.
   Single-flag and comma-form spellings behave exactly as before.
 
+- **`bd update <P.1> --parent ""` is refused instead of half-detaching a
+  dotted-ID child.** Removing the parent edge succeeded, but parent filters
+  fall back to the dotted ID prefix when an issue has no parent edge, so
+  `bd children`, `bd list --parent` and `parent=` queries still returned the
+  child. Detaching a hierarchical ID now fails validation and names the
+  implied parent; reparenting it to another issue still works (#7091).
+
 - **`bd restore`, `bd admin compact`, `bd repo <add|remove|list|sync>`,
   `bd migrate [sync|hooks|schema]` and `bd preflight` no longer register a
   local `--json` that shadows the root persistent flag.** pflag keeps a

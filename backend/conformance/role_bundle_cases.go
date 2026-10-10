@@ -487,6 +487,7 @@ var roleContractCases = []roleContract{
 		RunLifecycleUpdateClaimIsAMutationWhenThePatchRestoresTheRow,
 		RunLifecycleUpdateParentIDReplacesTheParentEdge,
 		RunLifecycleUpdateParentIDReplacesEveryParent,
+		RunLifecycleUpdateParentIDRefusesDetachingADottedChild,
 		RunLifecycleUpdatePersistentPreservesUnversionedClass,
 		RunLifecycleUpdateProvenanceLabelsHistory,
 		RunLifecycleUpdateRefusesATemplate,
