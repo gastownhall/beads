@@ -1826,6 +1826,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   make, and the `--json` payload for a yaml-only key carries a `changed` boolean
   so the machine branch can tell an absent key from an unpopulated field.
 
+- **The store-requiring command path ignored `BEADS_DB`/`BD_DB` and silently
+  read the ambient workspace instead**
+  ([#6255](https://github.com/gastownhall/beads/pull/6255)).
+  `selectedNoDBBeadsDir` already resolved an explicit `BEADS_DB`/`BD_DB`
+  target on the no-DB path, but the store-requiring path left `dbPath` empty
+  until the ambient discovery block ran `prepareSelectedCommandContext`, which
+  sets `BEADS_DIR`. `beads.FindDatabasePath()` takes its `BEADS_DIR` branch
+  first and returns early, so its own `BEADS_DB` handling was never reached —
+  and it has no `BD_DB` handling at all. `bd where` and `bd list` could
+  therefore disagree about which workspace was selected: `where` honored the
+  explicit target, `list` silently read whatever `.beads` directory the
+  ambient workspace resolved to. Both variables are now resolved before
+  ambient discovery runs, matching the no-DB path.
+
+  **Four behaviour changes come with this:**
+
+  - **Workspace-selection precedence is now `--db` > `-C` > `BEADS_DB` >
+    `BD_DB` > `BEADS_DIR` > the `config.yaml` `db` key > directory discovery,
+    on both the no-DB and store-requiring paths.** Previously the store path
+    resolved `BEADS_DIR` first (via `FindDatabasePath`'s own ordering) while
+    the no-DB path already ranked `BEADS_DB`/`BD_DB` above it. If you pin a
+    workspace with `BEADS_DIR` while a stale `BEADS_DB` or `BD_DB` is still
+    exported in the same shell, the stale variable now wins on
+    `bd list`/`create`/`update` as it already did on `bd where`. Unset the one
+    you do not mean.
+  - **For an env-selected workspace, the same PreRun steps `--db` skips are
+    now also skipped**: carrying a redirect's `SourceDatabase` into
+    `BEADS_DOLT_SERVER_DATABASE`, the legacy-workspace upgrade guards, and the
+    proxied-server/registered-remote/unsupported-backend routing branch.
+    Proxied-server workspaces still route correctly — the `.beads` directory
+    is itself the resolved path, and this is pinned by
+    `TestStorePathEnvDBTargetRoutesProxiedServerWorkspace`.
+  - **`-C <dir>` now clears `BEADS_DB` and `BD_DB` for the duration of the
+    command**, so the most explicit per-invocation selector the CLI has cannot
+    be outranked by a variable left exported in the shell. `-C` is implemented
+    as `BEADS_DIR`, which the precedence above ranks *below* the two DB
+    variables; without this, `bd -C /work/alpha list` read whatever workspace
+    a stale `BEADS_DB` named, at exit 0 and with no warning. **This also
+    changes pre-existing behaviour on the no-DB commands:** `bd where -C
+    /work/alpha` with a stale `BEADS_DB` exported resolved the variable's
+    workspace before this release too, because `selectedNoDBBeadsDir` already
+    ranked the DB variables above `BEADS_DIR`. It now resolves `/work/alpha` on
+    both paths. The existing `-C` snapshot/restore already covered all three
+    variables, so nothing leaks past the command.
+  - **On the store-requiring commands, a `BEADS_DB`/`BD_DB` that is set but
+    names a path that does not exist is now an error.** On these commands the
+    variables do not fall through to a lower rung, so an unchecked stale or
+    typo'd value reached the bootstrap fallback (`filepath.Dir` of the target),
+    which created a brand-new empty embedded database beside the typo, answered
+    `No issues found.` and exited 0 — a false all-clear, plus an `embeddeddolt`
+    directory and gate lock written outside any real workspace. `bd` now names
+    the variable and the missing path and exits non-zero. The exception is a
+    missing path whose parent directory is an initialized workspace (it holds
+    `metadata.json`): the legacy file-valued `BEADS_DB=<ws>/.beads/beads.db`
+    names a file a Dolt workspace never creates, so it still selects that
+    workspace, as `TestStorePathHonorsEnvDBTargetOverAmbientWorkspace` pins
+    for both variables. `bd where` and
+    `bd context` still do not check the path, and `bd where` exits 0 printing
+    a location derived from it, so it cannot catch the typo. `bd init` and
+    `bd bootstrap` are unaffected: they skip store initialization and never
+    reach this resolution step.
+
+  Note that a directory-valued `BEADS_DB` naming the workspace **root** (no
+  trailing `/.beads`) is still not honored by either path — `cmd/bd` resolves
+  such a target by walking upward from its parent, so `<ws>` never finds
+  `<ws>/.beads`. Use the `.beads` directory itself. Both paths agree on this,
+  which `TestStorePathAndNoDBPathAgreeOnWorkspaceRootEnvTarget` pins.
+
 ## [1.3.0] - 2026-09-15
 
 The first tested release off `main` since the 1.1 line. [1.2.2] was a recovery
