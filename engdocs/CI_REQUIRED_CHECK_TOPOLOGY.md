@@ -620,6 +620,38 @@ job's `if:` or rotating the key, in either of two ways:
   step's own kill switch, checked before any network call. Deleting the
   variable does not disable pre-warming; it restores the default of 1.
 
+## Remote Repo Contents Cache
+
+A cold lane client re-runs its repository rules (gazelle's `go_deps`, the Go
+SDK, the LLVM slice) before its first action. Bazel 9's remote repo contents
+cache serves those extracted trees from rbe-west's `oss` action cache instead
+(ported from gascity's `bazel.yml`; design: gascity
+`engdocs/design/bazel-remote-repo-contents-cache.md`). The repository variable
+`RBE_REPO_CONTENTS_CACHE` rolls it out, in mode `remote` only:
+
+| value | effect |
+|---|---|
+| unset / `off` | nothing (default) |
+| `seed` | each push to main runs `bazel.yml`'s `rrc-seed` job: every lane's command in `.github/scripts/rrc-lane-commands.txt` with `--nobuild`, uploading repository trees with a 30-minute `rbe-rrc-writer-beads` certificate that rbe-west's mint signs only for that job (GitHub OIDC; `.github/scripts/rrc-writer-credential.sh`). rbe-west's `rrc-gate` admits only repo-contents entries from it |
+| `canary` | `seed`, and the `test` lane reads the cache |
+| `on` | `seed`, and every lane but the release cross-compile and the package gates reads it |
+
+Readers append `startup --experimental_remote_repo_contents_cache` and
+`common --loading_phase_threads=64` to `.bazelrc.local` before setting up
+Bazel; both are key neutral, and the lanes keep
+`--noremote_upload_local_results`. While the variable is not `off`,
+nightly.yml's call also runs `rrc-verify`: a cold fetch of every lane,
+compared with the cached entries by `tools/bazel/rrc_verify.py`; a mismatch
+fails the job and opens an `rrc-verify` issue.
+
+`rrc-seed` asks for `id-token: write` and `rrc-verify` for `issues: write`, so
+every caller of `bazel.yml` (pr.yml, nightly.yml, bazel-farm.yml) grants both:
+GitHub checks a called workflow's job permissions when the run starts, even
+for jobs that skip. Neither job runs on a pull_request, merge_group or
+pull_request_target event, and every other `bazel.yml` job keeps
+`contents: read`. Rollback: set the variable to `off` (or `seed`, to keep the
+cache warm without readers).
+
 ## Required Check Contract
 
 After the aggregate checks are verified on the branch, branch protection or the

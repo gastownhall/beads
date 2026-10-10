@@ -34,6 +34,8 @@ var ciAnalyticsExcludedJobs = map[string]string{
 	"package-mcp":         "F3 package gate; runs pytest, not a bazel invocation with a BEP to extract",
 	"package-npm":         "F3 package gate; runs npm, not a bazel invocation with a BEP to extract",
 	"bazel-release-cross": "one bazel-release-cross-compile.sh run with no BEP/exec-log/profile capture, as when it was a bazel-pure step",
+	"rrc-seed":            "the remote repo contents cache writer: --nobuild analysis on push to main, no test lane to summarize",
+	"rrc-verify":          "the remote repo contents cache's nightly check: --nobuild cold fetches, no test lane to summarize",
 }
 
 // ciAnalyticsRunTemplateRE finds a GitHub Actions expression (${{ ... }})

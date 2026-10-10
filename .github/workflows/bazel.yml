@@ -424,6 +424,7 @@ jobs:
       enabled: ${{ steps.decide.outputs.enabled }}
       mode: ${{ steps.decide.outputs.mode }}
       tier: ${{ steps.decide.outputs.tier }}
+      rrc: ${{ steps.rrc.outputs.rrc }}
     steps:
       # The expressions' == is case-insensitive (RBE_WEST_WORKERS=True counts).
       # A push, merge_group or dispatch has no pull_request, so FORK is false.
@@ -495,6 +496,37 @@ jobs:
             echo "tier=$tier"
           } >> "$GITHUB_OUTPUT"
           echo "Bazel execution mode: **$mode** (RBE_WEST_WORKERS on: $RBE_VAR_ON, rbe=off: $RBE_INPUT_OFF, rbe=cache: $RBE_INPUT_CACHE, fork: $FORK, dependabot: $DEPENDABOT, fork farm: $FORK_FARM, executor secret: $HAS_EXECUTOR)" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # Bazel's remote repo contents cache on rbe-west (ga-vnycm2.29, ported
+      # from gascity's bazel.yml; gascity
+      # engdocs/design/bazel-remote-repo-contents-cache.md): extracted
+      # external repositories (go_deps, the Go SDK, the LLVM slice) come from
+      # rbe-west's action cache instead of being re-fetched by every cold lane
+      # client. vars.RBE_REPO_CONTENTS_CACHE rolls it out:
+      #   unset/off  nothing (the default);
+      #   seed       main pushes seed the cache (rrc-seed); no lane reads it;
+      #   canary     seed, and bazel-test reads;
+      #   on         seed, and every lane in .github/scripts/rrc-lane-commands.txt
+      #              reads.
+      # Mode remote only: fork pull_request runs see no vars, and only
+      # rbe-west's trusted edge serves the entries. Any other value is off,
+      # with a warning, so a typo never fails the required gate. Like decide,
+      # this step runs no repository code (it comes before the checkout).
+      - name: Remote repo contents cache
+        id: rrc
+        env:
+          RRC: ${{ vars.RBE_REPO_CONTENTS_CACHE }}
+          MODE: ${{ steps.decide.outputs.mode }}
+        run: |
+          rrc=off
+          case "$RRC" in
+            "" | off) ;;
+            seed | canary | on)
+              if [ "$MODE" = remote ]; then rrc=$RRC; fi ;;
+            *) echo "::warning title=RBE_REPO_CONTENTS_CACHE::unknown value '$RRC' (want off, seed, canary or on); treated as off" ;;
+          esac
+          echo "rrc=$rrc" >> "$GITHUB_OUTPUT"
+          echo "Remote repo contents cache: **$rrc**" >> "$GITHUB_STEP_SUMMARY"
 
       # The worker-env preflight (see the job's comment): the PR's own copy,
       # so a PR that syncs it passes. Only the two paths it compares.
@@ -785,6 +817,22 @@ jobs:
       - name: Verify restored Go modules
         run: go mod verify
 
+      # The remote repo contents cache, read-only (the rbe job's rrc output:
+      # canary, bazel-test; on, every lane). Each cached repository costs
+      # several sequential round trips, resolved on Skyframe's loading
+      # threads (default: the CPU count), so without 64 of them a cached read
+      # is slower than fetching. Both lines are key neutral (startup and
+      # loading only). Reading only: setup-bazel's rc keeps
+      # --noremote_upload_local_results, so nothing here writes; rrc-seed
+      # writes, on push to main. Before Set up Bazel: no server starts first.
+      - name: Remote repo contents cache (read)
+        if: ${{ needs.rbe.outputs.mode == 'remote' && (needs.rbe.outputs.rrc == 'on' || needs.rbe.outputs.rrc == 'canary') }}
+        run: |
+          {
+            echo 'startup --experimental_remote_repo_contents_cache'
+            echo 'common --loading_phase_threads=64'
+          } >> .bazelrc.local
+
       - name: Set up Bazel
         id: bazel
         uses: ./.github/actions/setup-bazel
@@ -1044,6 +1092,15 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
         with:
           node-version: '24'
+
+      # The remote repo contents cache, read-only, as in bazel-test.
+      - name: Remote repo contents cache (read)
+        if: ${{ needs.rbe.outputs.mode == 'remote' && needs.rbe.outputs.rrc == 'on' }}
+        run: |
+          {
+            echo 'startup --experimental_remote_repo_contents_cache'
+            echo 'common --loading_phase_threads=64'
+          } >> .bazelrc.local
 
       - name: Set up Bazel
         id: bazel
@@ -1333,6 +1390,15 @@ jobs:
           persist-credentials: false
           allow-unsafe-pr-checkout: ${{ inputs.fork-farm == 'authorized' && github.event_name == 'pull_request_target' }}
 
+      # The remote repo contents cache, read-only, as in bazel-test.
+      - name: Remote repo contents cache (read)
+        if: ${{ needs.rbe.outputs.mode == 'remote' && needs.rbe.outputs.rrc == 'on' }}
+        run: |
+          {
+            echo 'startup --experimental_remote_repo_contents_cache'
+            echo 'common --loading_phase_threads=64'
+          } >> .bazelrc.local
+
       - name: Set up Bazel
         id: bazel
         uses: ./.github/actions/setup-bazel
@@ -1505,6 +1571,15 @@ jobs:
           persist-credentials: false
           allow-unsafe-pr-checkout: ${{ inputs.fork-farm == 'authorized' && github.event_name == 'pull_request_target' }}
 
+      # The remote repo contents cache, read-only, as in bazel-test.
+      - name: Remote repo contents cache (read)
+        if: ${{ needs.rbe.outputs.mode == 'remote' && needs.rbe.outputs.rrc == 'on' }}
+        run: |
+          {
+            echo 'startup --experimental_remote_repo_contents_cache'
+            echo 'common --loading_phase_threads=64'
+          } >> .bazelrc.local
+
       - name: Set up Bazel
         id: bazel
         uses: ./.github/actions/setup-bazel
@@ -1650,6 +1725,15 @@ jobs:
           persist-credentials: false
           allow-unsafe-pr-checkout: ${{ inputs.fork-farm == 'authorized' && github.event_name == 'pull_request_target' }}
 
+      # The remote repo contents cache, read-only, as in bazel-test.
+      - name: Remote repo contents cache (read)
+        if: ${{ needs.rbe.outputs.mode == 'remote' && needs.rbe.outputs.rrc == 'on' }}
+        run: |
+          {
+            echo 'startup --experimental_remote_repo_contents_cache'
+            echo 'common --loading_phase_threads=64'
+          } >> .bazelrc.local
+
       - name: Set up Bazel
         id: bazel
         uses: ./.github/actions/setup-bazel
@@ -1769,6 +1853,15 @@ jobs:
           ref: ${{ inputs.checkout-sha }}
           persist-credentials: false
           allow-unsafe-pr-checkout: ${{ inputs.fork-farm == 'authorized' && github.event_name == 'pull_request_target' }}
+
+      # The remote repo contents cache, read-only, as in bazel-test.
+      - name: Remote repo contents cache (read)
+        if: ${{ needs.rbe.outputs.mode == 'remote' && needs.rbe.outputs.rrc == 'on' }}
+        run: |
+          {
+            echo 'startup --experimental_remote_repo_contents_cache'
+            echo 'common --loading_phase_threads=64'
+          } >> .bazelrc.local
 
       - name: Set up Bazel
         id: bazel
@@ -1921,6 +2014,15 @@ jobs:
           ref: ${{ inputs.checkout-sha }}
           persist-credentials: false
           allow-unsafe-pr-checkout: ${{ inputs.fork-farm == 'authorized' && github.event_name == 'pull_request_target' }}
+
+      # The remote repo contents cache, read-only, as in bazel-test.
+      - name: Remote repo contents cache (read)
+        if: ${{ needs.rbe.outputs.mode == 'remote' && needs.rbe.outputs.rrc == 'on' }}
+        run: |
+          {
+            echo 'startup --experimental_remote_repo_contents_cache'
+            echo 'common --loading_phase_threads=64'
+          } >> .bazelrc.local
 
       - name: Set up Bazel
         id: bazel
@@ -2084,6 +2186,15 @@ jobs:
           ref: ${{ inputs.checkout-sha }}
           persist-credentials: false
           allow-unsafe-pr-checkout: ${{ inputs.fork-farm == 'authorized' && github.event_name == 'pull_request_target' }}
+
+      # The remote repo contents cache, read-only, as in bazel-test.
+      - name: Remote repo contents cache (read)
+        if: ${{ needs.rbe.outputs.mode == 'remote' && needs.rbe.outputs.rrc == 'on' }}
+        run: |
+          {
+            echo 'startup --experimental_remote_repo_contents_cache'
+            echo 'common --loading_phase_threads=64'
+          } >> .bazelrc.local
 
       - name: Set up Bazel
         id: bazel
@@ -2432,3 +2543,138 @@ jobs:
         env:
           JOB_STATUS: ${{ job.status }}
         run: echo "result=$JOB_STATUS" >> "$GITHUB_OUTPUT"
+
+  # The remote repo contents cache's only writer (ga-vnycm2.29, ported from
+  # gascity's bazel.yml). On a push to main, with the rbe job's rrc not off,
+  # run every lane's loading and analysis (.github/scripts/rrc-lane-commands.txt,
+  # --nobuild): only main's repository rules and Starlark run (gazelle's
+  # fetch_repo, the Go SDK and LLVM downloads, extraction: what every lane
+  # already runs on its runner), never a build or test action. Bazel uploads
+  # each reproducible repository's tree (--remote_upload_local_results) with
+  # a 30-minute rbe-rrc-writer-beads certificate that rbe-west's mint signs
+  # only for this workflow on a push to main
+  # (.github/scripts/rrc-writer-credential.sh); rbe-west's rrc-gate admits
+  # repo-contents entries from it and refuses every other action cache
+  # write, and the certificate cannot Execute. Cache only (--remote_cache,
+  # no executor). Not a lane: no result output, never in pr.yml's gate
+  # (which never sees it anyway: push only), so a failed seed only leaves the
+  # lanes fetching. setup-bazel runs in local mode (no secrets): its rc, the
+  # runner cache and the pinned Bazel, nothing else. The only bazel.yml job
+  # with id-token: write; every caller must grant it (GitHub checks a called
+  # workflow's job permissions at startup, even for a job that skips), and
+  # the mint refuses any token but a main-push bazel.yml one.
+  rrc-seed:
+    name: repo contents cache seed
+    needs: rbe
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.rbe.outputs.mode == 'remote' && needs.rbe.outputs.rrc != 'off' }}
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write # the rbe-rrc-writer-beads certificate (GitHub OIDC)
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Bazel
+        uses: ./.github/actions/setup-bazel
+      - name: rbe-rrc-writer certificate
+        id: writer
+        env:
+          BAZEL_CI_SECRET_DIR: ${{ runner.temp }}/bazel-ci-secret
+        run: bash .github/scripts/rrc-writer-credential.sh
+      - name: Seed the remote repo contents cache
+        if: ${{ steps.writer.outputs.cert != '' }}
+        env:
+          CERT: ${{ steps.writer.outputs.cert }}
+          KEY: ${{ steps.writer.outputs.key }}
+          ENDPOINT: ${{ steps.writer.outputs.endpoint }}
+          INSTANCE: ${{ steps.writer.outputs.instance }}
+        run: >-
+          bash .github/scripts/rrc-run-lanes.sh --experimental_remote_repo_contents_cache --
+          --loading_phase_threads=64
+          "--remote_cache=$ENDPOINT" "--remote_instance_name=$INSTANCE"
+          "--tls_client_certificate=$CERT" "--tls_client_key=$KEY"
+          --remote_upload_local_results
+      - name: Remove the writer key
+        if: ${{ always() }}
+        run: rm -f -- "$RUNNER_TEMP/bazel-ci-secret/rrc-writer.key" "$RUNNER_TEMP/bazel-ci-secret/rrc-writer.crt"
+
+  # Nightly check of the remote repo contents cache (gascity design R1/R2). A
+  # cached repository tree is trusted by every reader, and nothing on the
+  # reader checks it against what its rule produces. So, from nightly.yml (or
+  # a dispatch), fetch every lane's repositories cold (rrc-lane-commands.txt
+  # with --nobuild and no repo contents cache, Bazel set up exactly as a
+  # lane) and compare each repository's tree and marker with the cached
+  # entry a lane would read for the same key (tools/bazel/rrc_verify.py,
+  # reads only, with the lanes' certificate and the endpoint from
+  # setup-bazel's rc: no secret is referenced outside setup-bazel). A
+  # mismatch is a poisoned entry or a rule falsely marked reproducible: the
+  # job fails and opens (or comments on) an rrc-verify issue. Not a lane:
+  # never gated. The only bazel.yml job with issues: write; every caller
+  # must grant it, as for rrc-seed's id-token.
+  rrc-verify:
+    name: repo contents cache verify
+    needs: rbe
+    if: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && needs.rbe.outputs.mode == 'remote' && needs.rbe.outputs.rrc != 'off' }}
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      issues: write # the rrc-verify alert issue
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Bazel
+        uses: ./.github/actions/setup-bazel
+        env:
+          BAZEL_REMOTE_EXECUTOR: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_WEST_EXECUTOR || '' }}
+          RBE_TLS_CERT: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_TLS_CERT || '' }}
+          RBE_TLS_KEY: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_TLS_KEY || '' }}
+          RBE_TLS_CA: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_TLS_CA || '' }}
+          RBE_INSTANCE: ${{ needs.rbe.outputs.mode == 'remote' && 'oss' || '' }}
+      - name: Cold fetch (every lane, no repo contents cache)
+        run: bash .github/scripts/rrc-run-lanes.sh -- --loading_phase_threads=64
+      - name: Compare with the cache
+        id: verify
+        run: |
+          set -euo pipefail
+          secret_dir="$RUNNER_TEMP/bazel-ci-secret"
+          prefix='build:remote-exec --remote_executor='
+          endpoint=$(grep -F -m1 "$prefix" "$secret_dir/ci.bazelrc" || true)
+          endpoint=${endpoint#"$prefix"}
+          [ -n "$endpoint" ] || { echo "::error::setup-bazel's rc names no executor"; exit 1; }
+          python3 tools/bazel/rrc_verify.py \
+            --output-base "$(bazel info output_base)" \
+            --endpoint "$endpoint" --instance oss \
+            --cert "$secret_dir/client.crt" --key "$secret_dir/client.key" \
+            --bazel-version "$(tr -d '[:space:]' < .bazelversion)" \
+            --json "$RUNNER_TEMP/rrc-verify.json" --summary "$GITHUB_STEP_SUMMARY"
+      - name: Upload the report
+        if: ${{ always() && hashFiles(format('{0}/rrc-verify.json', runner.temp)) != '' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          overwrite: true # a job re-run is the same run: replace, not 409
+          name: rrc-verify-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/rrc-verify.json
+          retention-days: 30
+      - name: Alert (rrc-verify issue)
+        if: ${{ failure() && steps.verify.outcome == 'failure' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="rrc-verify: remote repo contents cache differs from a cold fetch"
+          body="The nightly rrc-verify run found cached repository trees that differ from a cold fetch, or could not check them: $RUN_URL (summary and the rrc-verify report artifact).
+
+          A mismatch is a poisoned entry or a repository rule falsely marked reproducible (gascity engdocs/design/bazel-remote-repo-contents-cache.md, R1/R2). Stop readers first: set the repository variable RBE_REPO_CONTENTS_CACHE to off. Then follow gascity/infra nativelink-cas/west/README.md (remote repo contents cache writer, poisoned entries)."
+          gh label create rrc-verify -R "$GITHUB_REPOSITORY" --color B60205 \
+            --description "Remote repo contents cache verification failures" 2>/dev/null || true
+          n=$(gh issue list -R "$GITHUB_REPOSITORY" --label rrc-verify --state open --json number --jq '.[0].number // empty')
+          if [ -n "$n" ]; then
+            gh issue comment "$n" -R "$GITHUB_REPOSITORY" --body "Again: $RUN_URL"
+          else
+            gh issue create -R "$GITHUB_REPOSITORY" --label rrc-verify --title "$title" --body "$body"
+          fi

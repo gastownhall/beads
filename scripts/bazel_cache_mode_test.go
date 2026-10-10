@@ -212,8 +212,8 @@ func TestBazelCacheModeReachesTheRC(t *testing.T) {
 
 			var lanes []string
 			for name, job := range workflow.Jobs {
-				if name == bazelRBEJobName {
-					continue
+				if name == bazelRBEJobName || isBazelRRCJob(name) {
+					continue // not lanes: never in a PR call (bazel_rrc_test.go)
 				}
 				runs := bazelLaneRunModes(t, name, job.If, s.with)[mode]
 				switch {

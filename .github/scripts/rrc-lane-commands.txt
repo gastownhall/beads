@@ -1,0 +1,15 @@
+# Every bazel.yml lane's loading and analysis, for the remote repo contents
+# cache: rrc-seed runs each line with --nobuild on a push to main (uploading
+# the repositories it fetches) and rrc-verify runs each cold every night.
+# One `bazel` command per line (no shell quoting); # starts a comment.
+# scripts/bazel_rrc_test.go checks that every --config a reading lane's
+# bazel command uses appears here.
+test //... --config=ci
+test //... --config=embedded
+test //... --config=integration
+test //... --config=doltserver
+test //... --config=doltserver-proxied
+test //... --config=doltserver-integration
+test //... --config=doltserver-cmd
+build --config=pure //cmd/bd:bd //cmd/bd:bd_test //internal/storage/embeddeddolt:embeddeddolt_test //internal/tracker:tracker_test
+build --config=js-wasm //internal/hooks:hooks_test

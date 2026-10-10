@@ -41,6 +41,7 @@ go_test(
         "bazel_hermetic_cc_test.go",
         "bazel_policy_test.go",
         "bazel_rbe_prewarm_test.go",
+        "bazel_rrc_test.go",
         "ci_actions_policy_test.go",
         "ci_analytics_workflow_test.go",
         "ci_blacksmith_runner_test.go",

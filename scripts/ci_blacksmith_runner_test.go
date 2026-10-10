@@ -580,8 +580,8 @@ func TestBlacksmithBazelRunnerSizes(t *testing.T) {
 	for _, mode := range []string{"remote", "fork-ro", "fork-rw", "local", "cache", "skip"} {
 		ctx := map[string]string{"needs.rbe.outputs.mode": mode}
 		for name, job := range workflow.Jobs {
-			if name == bazelRBEJobName {
-				continue
+			if name == bazelRBEJobName || isBazelRRCJob(name) {
+				continue // rrc jobs: push/schedule only, never a fork (literal label)
 			}
 			want := "ubuntu-latest"
 			if mode == "remote" {

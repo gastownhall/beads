@@ -94,7 +94,8 @@ func TestBazelFarmWorkflowSecurity(t *testing.T) {
 	}
 
 	// Permissions: contents: read at the workflow and on every job, and
-	// nothing else anywhere in the file.
+	// nothing else anywhere in the file, but the farm call's grant of what
+	// bazel.yml's rrc jobs ask for (bazelCallPermissions).
 	readOnly := map[string]any{"contents": "read"}
 	if !reflect.DeepEqual(doc.Permissions, readOnly) {
 		t.Errorf("workflow permissions = %v, want %v", doc.Permissions, readOnly)
@@ -103,8 +104,12 @@ func TestBazelFarmWorkflowSecurity(t *testing.T) {
 	var jobs []string
 	for name, job := range workflow.Jobs {
 		jobs = append(jobs, name)
-		if !reflect.DeepEqual(job.Permissions, readOnly) {
-			t.Errorf("job %s permissions = %v, want %v", name, job.Permissions, readOnly)
+		want := readOnly
+		if name == "farm" {
+			want = bazelCallPermissions
+		}
+		if !reflect.DeepEqual(job.Permissions, want) {
+			t.Errorf("job %s permissions = %v, want %v", name, job.Permissions, want)
 		}
 		if len(job.Env) != 0 {
 			t.Errorf("job %s env = %v; want none", name, job.Env)
@@ -116,7 +121,8 @@ func TestBazelFarmWorkflowSecurity(t *testing.T) {
 	}
 	secretRef := regexp.MustCompile(`\bsecrets\s*(\.|\[)`)
 	walkYAML(root, "", func(path string, key bool, value string) {
-		if strings.Contains(path, "permissions") && !key && value != "read" {
+		if strings.Contains(path, "permissions") && !key && value != "read" &&
+			!(strings.HasPrefix(path, ".jobs.farm.permissions.") && bazelCallPermissions[strings.TrimPrefix(path, ".jobs.farm.permissions.")] == value) {
 			t.Errorf("%s = %q; only read permissions are allowed", path, value)
 		}
 		if key && value == "continue-on-error" {
@@ -227,6 +233,19 @@ func TestBazelFarmWorkflowSecurity(t *testing.T) {
 	}
 }
 
+// bazelCallPermissions: every bazel.yml call's token permissions (farm,
+// pr.yml, nightly.yml). A called workflow's job gets at most its caller's,
+// and GitHub checks them when the run starts, even for a job whose if:
+// skips it, so each call grants what bazel.yml's rrc jobs ask for:
+// rrc-seed's id-token: write (push to main only) and rrc-verify's issues:
+// write (schedule and dispatch only). Neither runs on pull_request,
+// merge_group or pull_request_target, and every other bazel.yml job, every
+// lane that runs PR or fork code included, keeps contents: read
+// (TestBazelWorkflowPermissionsReadOnly), so no PR-authored step ever holds
+// either; rbe-west's mint refuses any OIDC token but a main-push bazel.yml
+// one anyway.
+var bazelCallPermissions = map[string]any{"contents": "read", "id-token": "write", "issues": "write"}
+
 // bazel.yml's side of the farm: the pinned checkout, the one decision input,
 // and nothing a pull_request_target run could hand a privileged consumer.
 func TestBazelWorkflowForkFarmInputs(t *testing.T) {
@@ -244,6 +263,15 @@ func TestBazelWorkflowForkFarmInputs(t *testing.T) {
 				t.Errorf("%s job %s step %q interpolates an expression into its script", bazelWorkflowName, name, step.Name)
 			}
 			if actionFamily(step.Uses) != "actions/checkout" {
+				continue
+			}
+			// The rrc jobs run on push to main, schedule and dispatch only,
+			// never on pull_request_target: they check out the event's ref,
+			// with no fork opt-in.
+			if isBazelRRCJob(name) {
+				if want := map[string]string{"persist-credentials": "false"}; !reflect.DeepEqual(step.With, want) {
+					t.Errorf("%s job %s checkout with = %v, want %v", bazelWorkflowName, name, step.With, want)
+				}
 				continue
 			}
 			checkouts++
@@ -271,8 +299,8 @@ func TestBazelWorkflowForkFarmInputs(t *testing.T) {
 	// shared gascity credential). rbe's checkout (sparse) comes after its
 	// decide step, for the worker-env preflight
 	// (TestBazelRBEWorkerEnvPreflight).
-	if checkouts != len(workflow.Jobs)-1 {
-		t.Errorf("%d checkouts in %s, want one per job excluding %s (%d)", checkouts, bazelWorkflowName, bazelRBEPrewarmJobName, len(workflow.Jobs)-1)
+	if want := len(workflow.Jobs) - 1 - len(bazelRRCJobs); checkouts != want {
+		t.Errorf("%d checkouts in %s, want one per job excluding %s and the rrc jobs (%d)", checkouts, bazelWorkflowName, bazelRBEPrewarmJobName, want)
 	}
 	if got := workflow.job(t, bazelRBEJobName).Steps[0].Env["FORK_FARM"]; got != bazelForkFarmValue {
 		t.Errorf("rbe FORK_FARM = %q, want %q", got, bazelForkFarmValue)
@@ -617,7 +645,11 @@ func TestBazelFarmCacheModeStaysReadOnly(t *testing.T) {
 }
 
 // bazel.yml's token: exactly contents: read, at the top and on any job that
-// declares permissions (a call cannot exceed its caller's, but pin it).
+// declares permissions (a call cannot exceed its caller's, but pin it),
+// except the rrc jobs: rrc-seed's id-token: write and rrc-verify's issues:
+// write (pinned by TestBazelRRCSeedJob and TestBazelRRCVerifyJob; neither
+// runs on a pull_request, merge_group or pull_request_target event, so the
+// callers' wider grants reach no lane and no fork-authored code).
 func TestBazelWorkflowPermissionsReadOnly(t *testing.T) {
 	var doc struct {
 		Permissions any `yaml:"permissions"`
@@ -630,6 +662,9 @@ func TestBazelWorkflowPermissionsReadOnly(t *testing.T) {
 		t.Errorf("%s permissions = %v, want exactly %v", bazelWorkflowName, doc.Permissions, readOnly)
 	}
 	for name, job := range readCIWorkflow(t, bazelWorkflowName).Jobs {
+		if isBazelRRCJob(name) {
+			continue
+		}
 		if job.Permissions != nil && !reflect.DeepEqual(job.Permissions, readOnly) {
 			t.Errorf("%s job %s permissions = %v, want none or exactly %v", bazelWorkflowName, name, job.Permissions, readOnly)
 		}

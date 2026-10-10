@@ -367,21 +367,21 @@ func TestRBEWorkerEnvSync(t *testing.T) {
 // mode the lanes read is decide's alone.
 func TestBazelRBEWorkerEnvPreflight(t *testing.T) {
 	job := readCIWorkflow(t, bazelWorkflowName).job(t, bazelRBEJobName)
-	if len(job.Steps) != 3 || job.Steps[0].ID != "decide" {
-		t.Fatalf("%s steps = %d (first %q), want decide, the checkout and the worker-env check", bazelRBEJobName, len(job.Steps), job.Steps[0].ID)
+	if len(job.Steps) != 4 || job.Steps[0].ID != "decide" || job.Steps[1].ID != bazelRRCModeStepID {
+		t.Fatalf("%s steps = %d (first %q), want decide, rrc (TestBazelRRCModeStep), the checkout and the worker-env check", bazelRBEJobName, len(job.Steps), job.Steps[0].ID)
 	}
 	if !strings.Contains(job.Steps[0].Run, `case "$mode" in remote|fork-ro|fork-rw) enabled=true ;; esac`) {
 		t.Errorf("%s decide no longer sets enabled exactly for the remote modes; the preflight's if depends on it", bazelRBEJobName)
 	}
-	checkout, check := job.Steps[1], job.Steps[2]
+	checkout, check := job.Steps[2], job.Steps[3]
 	if actionFamily(checkout.Uses) != "actions/checkout" || checkout.If != rbeWorkerEnvEnabledIf || checkout.With["sparse-checkout"] != bazelRBESparseCheckout {
-		t.Errorf("%s step 2: uses %q, if %q, sparse-checkout %q; want a checkout of %q if %s",
+		t.Errorf("%s step 3: uses %q, if %q, sparse-checkout %q; want a checkout of %q if %s",
 			bazelRBEJobName, checkout.Uses, checkout.If, checkout.With["sparse-checkout"], bazelRBESparseCheckout, rbeWorkerEnvEnabledIf)
 	}
 	wantEnv := map[string]string{"MODE": "${{ steps.decide.outputs.mode }}"}
 	if check.If != rbeWorkerEnvEnabledIf || check.ID != "" || check.Uses != "" || check.ContinueOnError != nil || !reflect.DeepEqual(check.Env, wantEnv) ||
 		!strings.Contains(check.Run, "tools/rbe/worker-env-sync main") {
-		t.Errorf("%s step 3: if %q, id %q, uses %q, continue-on-error %v, env %v; want if %s, no id, env %v, running tools/rbe/worker-env-sync main",
+		t.Errorf("%s step 4: if %q, id %q, uses %q, continue-on-error %v, env %v; want if %s, no id, env %v, running tools/rbe/worker-env-sync main",
 			bazelRBEJobName, check.If, check.ID, check.Uses, check.ContinueOnError, check.Env, rbeWorkerEnvEnabledIf, wantEnv)
 	}
 
@@ -427,8 +427,11 @@ func TestNightlyWorkerEnvSyncOpensIssue(t *testing.T) {
 	}
 	for name, job := range nightly.Jobs {
 		want := any(nil)
-		if name == nightlyWorkerEnvJob {
+		switch name {
+		case nightlyWorkerEnvJob:
 			want = map[string]any{"contents": "read", "issues": "write"}
+		case "bazel": // the bazel.yml call: what its rrc jobs ask for
+			want = bazelCallPermissions
 		}
 		if !reflect.DeepEqual(job.Permissions, want) {
 			t.Errorf("nightly.yml job %s permissions = %v, want %v", name, job.Permissions, want)
