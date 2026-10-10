@@ -1046,3 +1046,72 @@ func TestParentChildCascade_WispGateUnderExogenousParent(t *testing.T) {
 	nested["pcwm-c3"] = false
 	step("its own blocker closed", nested)
 }
+
+// A cycle member with no reason rows of its own must not hold its own stale
+// bit up (gastownhall/beads#7386). Q is P's parent-child parent and P is Q's
+// (a cycle, built past the cycle check as import and merge replay do); P
+// blocks on its own child C; Q carries no reason row. A forced is_blocked = 1
+// on Q used to survive full repair: the walk marked Q, which no read returns,
+// as a final unexplained parent, Q dropped P from the explained set, and P
+// darkened Q and C. Q's bit is inherited, so the walk must decide it from what
+// is above Q, and nothing is.
+func TestParentChildCascade_CycleStaleBitSelfSustains(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+	for _, id := range []string{"zc-q", "zc-p", "zc-c"} {
+		createPerm(t, ctx, store, id)
+	}
+	addDependencyWithMeta(t, ctx, store, "zc-p", "zc-q", types.DepParentChild, "")
+	addDependencyWithMeta(t, ctx, store, "zc-p", "zc-c", types.DepBlocks, "")
+	addDepSkippingCycleCheck(ctx, t, store, "zc-c", "zc-p", types.DepParentChild)
+	addDepSkippingCycleCheck(ctx, t, store, "zc-q", "zc-p", types.DepParentChild)
+	recomputeAll(ctx, t, store.db)
+	assertBlockedFlags(ctx, t, store, "clean start", map[string]bool{"zc-q": false, "zc-p": true, "zc-c": false})
+
+	if _, err := store.db.ExecContext(ctx, "UPDATE issues SET is_blocked = 1 WHERE id = 'zc-q'"); err != nil {
+		t.Fatal(err)
+	}
+	if n := countInconsistencies(ctx, t, store.db); n == 0 {
+		t.Errorf("inconsistencies with q's stale bit = 0, want > 0")
+	}
+	recomputeAll(ctx, t, store.db)
+	assertBlockedFlags(ctx, t, store, "after repair of stale q", map[string]bool{"zc-q": false, "zc-p": true, "zc-c": false})
+	if n := countInconsistencies(ctx, t, store.db); n != 0 {
+		t.Errorf("inconsistencies after repair = %d, want 0", n)
+	}
+}
+
+// The other side of the same rule: a parent with no reason rows is transparent,
+// not explained. R blocks on outside X; Q is R's child with no reason row; P is
+// Q's child and blocks on its own child C. R's gate reaches C through Q, so P
+// is blocked from above and must darken C, on the clean recompute and again
+// after Q's bit is forced stale (cleared) and the store repaired.
+func TestParentChildCascade_InheritedBitStillCascades(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+	for _, id := range []string{"zi-x", "zi-r", "zi-q", "zi-p", "zi-c"} {
+		createPerm(t, ctx, store, id)
+	}
+	addDependencyWithMeta(t, ctx, store, "zi-r", "zi-x", types.DepBlocks, "")
+	addDependencyWithMeta(t, ctx, store, "zi-q", "zi-r", types.DepParentChild, "")
+	addDependencyWithMeta(t, ctx, store, "zi-p", "zi-q", types.DepParentChild, "")
+	// The blocks edge goes in before the hierarchy that closes the gate.
+	addDependencyWithMeta(t, ctx, store, "zi-p", "zi-c", types.DepBlocks, "")
+	addDepSkippingCycleCheck(ctx, t, store, "zi-c", "zi-p", types.DepParentChild)
+	recomputeAll(ctx, t, store.db)
+	want := map[string]bool{"zi-x": false, "zi-r": true, "zi-q": true, "zi-p": true, "zi-c": true}
+	assertBlockedFlags(ctx, t, store, "clean start", want)
+
+	if _, err := store.db.ExecContext(ctx, "UPDATE issues SET is_blocked = 0 WHERE id = 'zi-q'"); err != nil {
+		t.Fatal(err)
+	}
+	recomputeAll(ctx, t, store.db)
+	assertBlockedFlags(ctx, t, store, "after repair of cleared q", want)
+	if n := countInconsistencies(ctx, t, store.db); n != 0 {
+		t.Errorf("inconsistencies after repair = %d, want 0", n)
+	}
+}

@@ -369,6 +369,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rollout) still stores P0, with no error on either side.
   Out-of-tree storage backends must now honor `DefaultPriority`; see the
   BREAKING (out-of-tree storage backends) entry under `### Changed`.
+- Blocked-state repair no longer lets a stale `is_blocked` bit on a parent
+  with no reason row of its own survive in a malformed parent-child cycle
+  (gastownhall/beads#7386). The explained-parent walk now climbs through such
+  a parent, whose bit is inherited, instead of treating it as a final
+  unexplained ancestor; `bd doctor`'s Blocked State check counts the stale bit
+  and `--fix` clears it.
 - **PRs based on `hotfix/**` branches now run full CI, not just
   cross-version historical smokes and triage labeling.** `pr.yml`,
   `pr-risk.yml`, `conformance.yml`, `cross-version-smoke.yml` and
