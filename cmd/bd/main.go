@@ -869,11 +869,25 @@ func resolveCommandBeadsDir(dbPath string) string {
 	}
 
 	bound := ceiling.For(filepath.Dir(dbPath))
-	for dir := filepath.Dir(dbPath); dir != "" && dir != filepath.Dir(dir) && !bound.Excludes(dir); dir = filepath.Dir(dir) {
+	// Test each directory BEFORE deciding to stop. The previous guard,
+	// `dir != filepath.Dir(dir)`, is false at the point where a directory is
+	// its own parent — "." for a relative path and "/" for an absolute one —
+	// so the body never ran for those and ./.beads was never tested. With
+	// dbPath ".beads/embeddeddolt/proj" the walk checked
+	// ".beads/embeddeddolt/.beads" and ".beads/.beads", then stopped without
+	// testing "./.beads", fell through to filepath.Dir(dbPath), found no
+	// config there, and defaulted the database name to "beads" — opening a
+	// database that is not the one named on the command line, at rc=0.
+	for dir := filepath.Dir(dbPath); dir != "" && !bound.Excludes(dir); {
 		candidate := filepath.Join(dir, ".beads")
 		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
 			return candidate
 		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break // self-parent: "." or "/". Already tested above.
+		}
+		dir = parent
 	}
 
 	// No candidate matched — fall back to parent directory of the db path.
