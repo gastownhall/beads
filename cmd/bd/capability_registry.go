@@ -335,6 +335,8 @@ var proxyCapabilityRegistry = []capabilityRow{
 		withHistory(HistoryDirectOnly),
 	refusedPath("dolt pull", "proxy.dolt_pull.unsupported", ProxyReasonUnimplemented, trackVersionCtl).
 		withHistory(HistoryDirectOnly),
+	refusedPath("dolt rebase", "proxy.dolt_rebase.unsupported", ProxyReasonUnimplemented, trackVersionCtl).
+		withHistory(HistoryDirectOnly),
 	refusedPath("dolt remote", "proxy.dolt_remote.unsupported", ProxyReasonUnimplemented, trackVersionCtl).
 		withHistory(HistoryDirectOnly).
 		asParentGroup(),
