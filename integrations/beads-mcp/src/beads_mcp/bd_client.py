@@ -578,6 +578,8 @@ class BdCliClient(BdClientBase):
             args.extend(["--notes", params.notes])
         if params.external_ref:
             args.extend(["--external-ref", params.external_ref])
+        if params.labels is not None:
+            args.extend(["--set-labels", ",".join(params.labels)])
 
         data = await self._run_command(*args)
         # bd update returns an array, extract first element
