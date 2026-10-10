@@ -460,6 +460,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		if os.Getenv("BEADS_DOLT_PROXIED_SERVER") == "1" {
 			initProxiedServer = true
 		}
+		ephemeralRoot := os.Getenv("BEADS_EPHEMERAL_ROOT") == "1"
 
 		initEvt := metrics.NewCommandEvent("init-" + resolveInitDoltMode(initProxiedServer, sharedServer, initServerMode))
 		defer func() {
@@ -524,6 +525,9 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		if idleTimeoutSet {
 			if !initProxiedServer {
 				return fmt.Errorf("--proxied-server-idle-timeout requires --proxied-server")
+			}
+			if err := validateEphemeralIdleTimeout(ephemeralRoot, idleTimeoutSet, serverProxyIdleTimeout); err != nil {
+				return err
 			}
 			if serverProxyIdleTimeout < 0 {
 				return fmt.Errorf("--proxied-server-idle-timeout must be 0 (never) or a positive duration, got %s", serverProxyIdleTimeout)
@@ -2313,7 +2317,7 @@ func init() {
 	initCmd.Flags().String("proxied-server-log-path", "", "[EXPERIMENTAL] Absolute path to the proxied dolt sql-server log file (proxied-server mode only). Default: <beadsDir>/dolt/server.log. Relative paths are rejected.")
 	initCmd.Flags().String("proxied-server-root-path", "", "[EXPERIMENTAL] Absolute directory holding the proxied dolt sql-server's lockfiles, pidfiles, and child .dolt repository (proxied-server mode only). Default: <beadsDir>/dolt. May not exist yet — bd will create it. Relative paths are rejected.")
 	initCmd.Flags().Int("proxied-server-port", 0, "[EXPERIMENTAL] Fixed TCP port for the proxy's loopback listener (proxied-server mode only). Default 0 = an OS-assigned free port. Startup fails if the port is already in use.")
-	initCmd.Flags().Duration("proxied-server-idle-timeout", 0, "[EXPERIMENTAL] Idle duration after which the proxy shuts down its loopback listener and backend (proxied-server mode only). Omit for the built-in default (30s); 0 keeps the proxy and backend alive indefinitely; a positive value sets the window.")
+	initCmd.Flags().Duration("proxied-server-idle-timeout", 0, "[EXPERIMENTAL] Idle duration after which the proxy shuts down its loopback listener and backend (proxied-server mode only). Omit for the built-in default (30s); 0 keeps the proxy and backend alive indefinitely; a positive value sets the window. With BEADS_EPHEMERAL_ROOT=1 set (no other value enables it), 0 is refused, so a throwaway root cannot be told never to idle out; the variable changes nothing else.")
 	initCmd.Flags().String("proxied-server-external-host", "", "[EXPERIMENTAL] Hostname or IP of an externally-managed dolt sql-server the proxy should front (proxied-server mode only). Mutually exclusive with --proxied-server-external-socket-path.")
 	initCmd.Flags().Int("proxied-server-external-port", 0, "[EXPERIMENTAL] TCP port of the externally-managed dolt sql-server (proxied-server mode only). Required when --proxied-server-external-host is set.")
 	initCmd.Flags().String("proxied-server-external-socket-path", "", "[EXPERIMENTAL] Absolute unix socket path of the externally-managed dolt sql-server (proxied-server mode only). Mutually exclusive with --proxied-server-external-host. Relative paths are rejected.")
