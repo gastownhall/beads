@@ -4,9 +4,7 @@ package main
 
 import (
 	"fmt"
-	"os/exec"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 )
@@ -63,31 +61,19 @@ func assertCommentsTailOne(t *testing.T, route, out, issueID string) {
 	}
 }
 
-// stripShowTips removes the "💡 Tip: …" line maybeShowTip (show.go, on the
-// direct route after a text render) may append. Whether a tip prints is a
-// per-run probability roll behind a per-tip frequency gate recorded in the
-// store, independent of --comments-tail, so of two renders that are
-// otherwise identical one can carry the tip and the other not. Trailing
-// newlines are normalized with it, since the tip block arrives as a blank
-// line plus the tip line.
-func stripShowTips(out string) string {
-	var kept []string
-	for _, line := range strings.Split(out, "\n") {
-		if strings.HasPrefix(line, "💡 Tip: ") {
-			continue
-		}
-		kept = append(kept, line)
-	}
-	return strings.TrimRight(strings.Join(kept, "\n"), "\n") + "\n"
-}
-
 // assertCommentsTailOff checks that a render with the flag in its off state
 // (0, or a cap at or above the count) is byte-identical to a render without
-// the flag (tips stripped, see stripShowTips), and that the uncapped render
-// carries every comment and no elision line.
-func assertCommentsTailOff(t *testing.T, route, withFlag, without string) {
+// the flag, and that the uncapped render carries every comment and no elision
+// line. Only on the direct route (tips) may the two legitimately differ, by
+// the trailing tip block stripTrailingShowTip removes from both first; the
+// proxied route never prints a tip, so its renders are compared as they came.
+// Nothing else is forgiven: a stray trailing blank line printed only under
+// --comments-tail fails here on every route.
+func assertCommentsTailOff(t *testing.T, route string, tips bool, withFlag, without string) {
 	t.Helper()
-	withFlag, without = stripShowTips(withFlag), stripShowTips(without)
+	if tips {
+		withFlag, without = stripTrailingShowTip(withFlag), stripTrailingShowTip(without)
+	}
 	if withFlag != without {
 		t.Errorf("%s: render differs from the flag's absence\n--- with flag\n%s\n--- without\n%s", route, withFlag, without)
 	}
@@ -102,48 +88,17 @@ func assertCommentsTailOff(t *testing.T, route, withFlag, without string) {
 }
 
 // runShowWatchOnce starts `bd show <args>` (the caller passes --watch), waits
-// for the first render to land, stops the watch with SIGINT and returns the
-// stdout of that single render. The render/quiet/stop choreography is the
-// one TestProxiedServerShowWatch uses, so see its comments for why the
+// for the first render to land on stdout, stops the watch with SIGINT and
+// returns the stdout of that single render. The start / stop choreography is
+// startShowWatch + interrupt (show_proxied_watch_integration_test.go), the
+// same TestProxiedServerShowWatch runs; the quiet wait in between is why the
 // banner alone is not proof that stdout has fully landed.
 func runShowWatchOnce(t *testing.T, bd, dir string, env []string, args ...string) string {
 	t.Helper()
-	stdout := &watchBannerWriter{renders: make(chan int, 1)}
-	stderr := &watchBannerWriter{renders: make(chan int, 1)}
-	cmd := exec.Command(bd, append([]string{"show"}, args...)...)
-	cmd.Dir = dir
-	cmd.Env = env
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start bd show %s: %v", strings.Join(args, " "), err)
-	}
-	var waitErr error
-	exited := make(chan struct{})
-	go func() {
-		waitErr = cmd.Wait()
-		close(exited)
-	}()
-	t.Cleanup(func() {
-		_ = cmd.Process.Kill()
-		<-exited
-	})
-	if !stderr.waitForRender(1, 60*time.Second, exited) {
-		t.Fatalf("bd show %s never started watching\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), stdout.String(), stderr.String())
-	}
-	stdout.waitForQuiet(500*time.Millisecond, 10*time.Second, exited)
-	if err := cmd.Process.Signal(syscall.SIGINT); err != nil {
-		t.Fatalf("signal bd show --watch: %v", err)
-	}
-	select {
-	case <-exited:
-		if waitErr != nil {
-			t.Fatalf("bd show %s exited with %v after SIGINT, want 0\nstderr:\n%s", strings.Join(args, " "), waitErr, stderr.String())
-		}
-	case <-time.After(30 * time.Second):
-		t.Fatalf("bd show %s ignored SIGINT\nstderr:\n%s", strings.Join(args, " "), stderr.String())
-	}
-	return stdout.String()
+	w := startShowWatch(t, bd, dir, env, append([]string{"show"}, args...)...)
+	w.stdout.waitForQuiet(500*time.Millisecond, 10*time.Second, w.exited)
+	w.interrupt(t)
+	return w.stdout.String()
 }
 
 // TestProxiedServerShowCommentsTail drives the proxied route
@@ -169,8 +124,8 @@ func TestProxiedServerShowCommentsTail(t *testing.T) {
 	t.Run("proxied_off_state_matches_absence", func(t *testing.T) {
 		t.Parallel()
 		without := bdProxiedShowRaw(t, bd, p.dir, issue.ID)
-		assertCommentsTailOff(t, "proxied --comments-tail 0", bdProxiedShowRaw(t, bd, p.dir, issue.ID, "--comments-tail", "0"), without)
-		assertCommentsTailOff(t, "proxied --comments-tail 5", bdProxiedShowRaw(t, bd, p.dir, issue.ID, "--comments-tail", "5"), without)
+		assertCommentsTailOff(t, "proxied --comments-tail 0", false, bdProxiedShowRaw(t, bd, p.dir, issue.ID, "--comments-tail", "0"), without)
+		assertCommentsTailOff(t, "proxied --comments-tail 5", false, bdProxiedShowRaw(t, bd, p.dir, issue.ID, "--comments-tail", "5"), without)
 	})
 
 	t.Run("proxied_negative_is_usage_error", func(t *testing.T) {
