@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/notion"
 	"github.com/steveyegge/beads/internal/storage"
@@ -574,21 +573,8 @@ func summarizeNotionSyncWarnings(warnings []string) []string {
 }
 
 func buildNotionPullHooks(ctx context.Context) *tracker.PullHooks {
-	prefix := "bd"
-	if p := config.GetString("issue-prefix"); p != "" {
-		prefix = p
-	} else if store != nil {
-		if p, err := store.GetConfig(ctx, "issue_prefix"); err == nil && p != "" {
-			prefix = p
-		}
-	}
 	return &tracker.PullHooks{
-		GenerateID: func(_ context.Context, issue *types.Issue) error {
-			if issue.ID == "" {
-				issue.ID = generateIssueID(prefix)
-			}
-			return nil
-		},
+		GenerateID: pullIssueIDHook(ctx),
 	}
 }
 
