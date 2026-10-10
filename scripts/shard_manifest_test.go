@@ -266,9 +266,10 @@ func TestShardScriptsListOnlyRealTests(t *testing.T) {
 // (//scripts:go_test_sources_test under Bazel) instead of only
 // surfacing as a test silently never running in any shard. The legacy
 // 15-shard block is deliberately excluded: its header documents that it is
-// frozen and must not be regenerated (see
-// .github/scripts/proxied-cmd-test-shards.txt and engdocs/TESTING.md), so a
-// --check against it would always fail by design.
+// historical and intentionally lacks tests added after its last packing
+// (see .github/scripts/proxied-cmd-test-shards.txt and engdocs/TESTING.md),
+// so a coverage --check against it would fail by design. Its header
+// round-trip is checked separately below.
 func TestProxiedShardManifestGeneratorNotStale(t *testing.T) {
 	python := requireHostTool(t, "python3")
 	root := sourceRepoRoot(t)
@@ -277,5 +278,38 @@ func TestProxiedShardManifestGeneratorNotStale(t *testing.T) {
 	cmd.Dir = root
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Errorf("gen_proxied_shard_manifest.py %s --weights=duration --check: %v\n%s", shards, err, out)
+	}
+}
+
+// The retired 15-shard block is intentionally incomplete, but an explicit
+// --write must not erase its historical pin rationale (bd-3lht).
+func TestProxiedLegacyShardHeaderSurvivesWrite(t *testing.T) {
+	python := requireHostTool(t, "python3")
+	root := sourceRepoRoot(t)
+	original := readPolicyFile(t, root, ".github/scripts/proxied-cmd-test-shards.txt")
+	manifest := filepath.Join(t.TempDir(), "manifest.txt")
+	if err := os.WriteFile(manifest, []byte(original), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(python, "scripts/ci/gen_proxied_shard_manifest.py", "15", "--write", "--manifest", manifest)
+	cmd.Dir = root
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("15 --write: %v\n%s", err, out)
+	}
+	written, err := os.ReadFile(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeHeader, _, beforeOK := strings.Cut(original, "\n15 ")
+	afterHeader, _, afterOK := strings.Cut(string(written), "\n15 ")
+	if !beforeOK || !afterOK || beforeHeader != afterHeader {
+		t.Errorf("15 --write changed the historical header\nbefore:\n%s\nafter:\n%s", beforeHeader, afterHeader)
+	}
+	// Also protect the live block from a historical-block rewrite.
+	const blockStart = "# Proxied-server cmd test shard manifest."
+	_, beforeLive, beforeOK := strings.Cut(original, "\n"+blockStart)
+	_, afterLive, afterOK := strings.Cut(string(written), "\n"+blockStart)
+	if !beforeOK || !afterOK || beforeLive != afterLive {
+		t.Error("15 --write changed or removed the live manifest block")
 	}
 }

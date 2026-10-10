@@ -2,62 +2,47 @@
 #
 # Format: <total_shards> <shard_number> <top_level_test_name>
 #
-# 15-shard split, bin-packed longest-processing-time-first by
-# estimated cost (bd-init count; per-init migration chains dominate), as of
-# the test set that existed when this block was last generated.
-# Regenerating it (scripts/ci/gen_proxied_shard_manifest.py 15 --write) is
-# deliberately NOT part of normal maintenance: this block is frozen for
-# pr-risk.yml's/main.yml's legacy fork/push jobs (see engdocs/TESTING.md),
-# so every TestProxiedServer*/TestServerMode* function added since it was
-# last generated hash-distributes via proxied-test-shard.sh (cksum(name) %
-# total) instead of being explicitly listed here. Only reweight it on
-# purpose, and expect the shard assignments below to change substantially
-# if you do (a fresh run packs every currently-discovered test, not just
-# the ones already listed here).
+# 15-shard split retained as historical data for the legacy
+# pr-risk.yml/main.yml fork/push jobs, retired in gastownhall/beads#7353.
+# No live CI job reads this block; bazel-proxied reads the 34-shard
+# duration-balanced block below. This block stays frozen, including tests
+# that were hash-distributed rather than listed before the jobs retired.
+# It was bin-packed by estimated bd-init count, not measured wall-time.
+# An explicit scripts/ci/gen_proxied_shard_manifest.py 15 --write preserves
+# existing assignments and this header, drops stale names, and adds missing
+# tests. Use --repack only for an intentional full rebalance. CI checks
+# exact-once coverage of the live Bazel block, not this historical block.
 #
-# Deliberate exception (Oct 2026): four tests that had been hash-placed
-# onto the two shards closest to the 15m -test.timeout are pinned here
-# by hand, onto shards whose measured CI job time was lowest; nothing
-# that was already listed moved. TestProxiedServerStorageClass and
+# Historical pins (Oct 2026): four tests that had been hash-placed
+# onto the two shards closest to the 15m -test.timeout were pinned
+# by hand onto shards whose measured CI job time was lowest; nothing
+# already listed moved. TestProxiedServerStorageClass and
 # TestProxiedServerServeRefusesAStaleCheckpointWithGone (discovered
 # from #7129 on) had hashed onto shard 5, which then hit the timeout on
-# most Main runs; pinning them returns shard 5 to its earlier test set.
+# most Main runs; pinning them returned shard 5 to its earlier test set.
 # TestProxiedServerListComments and
 # TestProxiedServerServeRefusesAStreamOnADisabledJournal had hashed
-# onto shard 3, which runs within about a minute of the timeout. An
-# incremental --write keeps pinned lines where they are; a pin is a
-# reviewed choice, not a regeneration of this block.
+# onto shard 3, which ran within about a minute of the timeout.
 #
-# TestProxiedServerOutageReconnectAcceptanceMatrix is pinned to shard 1
-# (the lightest in recent Main runs, ~6.5 min) instead of hashing onto
-# shard 14, which already runs ~13.5 min of the 15m timeout. These jobs
-# have no socat, so today it skips here; the pin keeps shard 14 safe if
-# socat is ever installed.
+# TestProxiedServerOutageReconnectAcceptanceMatrix was pinned to shard 1
+# (the lightest in those Main runs, ~6.5 min) instead of hashing onto
+# shard 14, which already ran ~13.5 min of the 15m timeout. Those jobs
+# had no socat, so the test skipped there; the pin protected shard 14
+# in case socat was installed before the jobs retired.
 #
 # TestProxiedServerClose3 (shard 13) and TestProxiedServerClose4 (shard 2)
-# are the two parents gastownhall/beads#7173 split off TestProxiedServerClose
+# are the parents gastownhall/beads#7173 split off TestProxiedServerClose
 # to pull shard 5 (15m+) back under the timeout, pinned onto the two
 # lightest shards of that PR's own run other than shard 5 itself (6m51s
 # and 7m57s; shard 5 ran 5m50s only because their 12 subtests had just
 # left it, and putting Close3 back would recreate most of the set that
-# timed out) rather than hashed; the lines are listed under their shards
-# like every other pin.
+# timed out) rather than hashed; the lines are listed under their shards.
 #
-# This file is generated: notes added here are erased by the next
-# regeneration. Add them to the generator instead. Known blind spots
-# of the cost proxy (it counts inits, not the work done per init):
-#
-#   TestProxiedServerListSortRetiresTheWalk is the most expensive
-#   entry and one of the cheapest-looking: off a single init it seeds
-#   1400 rows and walks the listing three ways. It is the measurement
-#   behind the claim that sort=priority retires the client-side walk,
-#   so it has to run on PRs.
-#
-#   TestProxiedServerServeReadParity is the CLI/HTTP read parity
-#   oracle, the behavioural half of the anti-drift claim. It being in
-#   this lane, and this lane being required by the PR Risk CI gate,
-#   is what makes that claim enforced on PRs rather than asserted in
-#   a doc comment.
+# This file is generated: add notes to the generator, not this header.
+# The bd-init cost proxy undercounts work done per init: for example,
+# TestProxiedServerListSortRetiresTheWalk seeds 1400 rows from one init
+# and walks the listing three ways. TestProxiedServerServeReadParity is
+# the CLI/HTTP read parity oracle. Both run in the live Bazel lane.
 
 15 1 TestProxiedServerBlocked
 15 1 TestProxiedServerCompactDolt

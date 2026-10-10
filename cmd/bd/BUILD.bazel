@@ -1406,13 +1406,11 @@ go_test(
 # check_shard_coverage.py fails unless the two ranges tile the block exactly
 # once). Both run this configuration's bd_test with
 # BEADS_TEST_EMBEDDED_DOLT=1 and the race bd (//cmd/bd:bd under
-# --config=embedded) as the subprocess binary. This is a *different* shard
-# count from PR Risk's legacy fork/push jobs, "Test (Embedded Dolt Cmd
-# N/20)" (pr-risk.yml): those keep running 20 shards of their own, frozen
-# hand-assigned block in the same manifest file — shard k here is not the
-# same split as their shard k. Each repeats bd_test's `env` (the wrapper
-# cannot inherit it). The two shard_counts must sum to --shard-total, the
-# manifest block's shard total.
+# --config=embedded) as the subprocess binary. The manifest retains the
+# retired PR Risk jobs' 20-shard block for history (#7353); no live job
+# reads it. Each target repeats bd_test's `env` (the wrapper cannot inherit
+# it). The two shard_counts must sum to --shard-total, the live manifest
+# block's shard total.
 #
 # Tags:
 #   embedded: the embedded-Dolt tier; excluded from --config=prcore/ci,
@@ -1504,15 +1502,13 @@ sh_test(
 # functions, assigned by the manifest's 34-shard block (duration-balanced;
 # see scripts/ci/proxied_test_durations.json), against this configuration's
 # (race) bd_test with BEADS_TEST_PROXIED_SERVER=1 and the non-race
-# bd_for_tests as the subprocess binary. This is a *different* shard count
-# from PR Risk's legacy fork/push jobs, "Test (Proxied Dolt Cmd N/15)"
-# (pr-risk.yml): those keep running 15 shards of their own,
-# frozen bd-init-cost-proxy block in the same manifest file — shard k here
-# is not the same split as their shard k. PR Risk builds its bd-cmd-test
-# with -race, as here. The shared proxied harness gets its dolt sql-server from
-# internal/testutil's local backend (the pinned dolt in the test
-# wrapper's runfiles) instead of the jobs' container, and fails instead
-# of skipping when it cannot start one. It repeats bd_test's `env`.
+# bd_for_tests as the subprocess binary. The manifest's frozen 15-shard
+# bd-init-cost-proxy block is historical: #7353 retired the PR Risk
+# fork/push jobs that read it. This Bazel lane is the only live reader,
+# and selects the 34-shard block. The shared proxied harness gets its
+# dolt sql-server from internal/testutil's local backend (the pinned dolt
+# in the test wrapper's runfiles), and fails instead of skipping when it
+# cannot start one. It repeats bd_test's `env`.
 # shard_count must stay equal to the manifest block's shard total.
 #
 # Tags:
@@ -1550,7 +1546,7 @@ sh_test(
         "BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1",
         # The external-unix / outage-matrix subtests bridge endpoints with
         # socat, which the workers have: fail rather than skip if it is
-        # missing (requireSocat). The legacy GitHub lane leaves this unset.
+        # missing (requireSocat). The retired GitHub lane left this unset.
         "BEADS_TEST_REQUIRE_SOCAT": "1",
         # The 4-vCPU runner shape: -test.parallel defaults to GOMAXPROCS, and
         # the job runs 4 tests at once, not one per worker core (39

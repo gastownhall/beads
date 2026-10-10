@@ -1817,14 +1817,13 @@ jobs:
           JOB_STATUS: ${{ job.status }}
         run: echo "result=$JOB_STATUS" >> "$GITHUB_OUTPUT"
 
-  # Like pr-risk.yml's proxied-server tier, "Test (Proxied Dolt Cmd N/15)",
-  # as --config=doltserver-proxied: //cmd/bd:bd_proxied_test runs the shard
-  # script, so shard k runs exactly that manifest entry's tests. This lane
-  # runs 34 shards of its own (.github/scripts/proxied-cmd-test-shards.txt's
-  # duration-balanced 34-block; see scripts/ci/proxied_test_durations.json),
-  # not the legacy jobs' 15 — shard k here is not the same split as their
-  # shard k. Same build as --config=doltserver (race bd_test, non-race
-  # bd_for_tests), shared with bazel-doltserver through the remote cache.
+  # The proxied-server tier replaces pr-risk.yml's jobs retired in #7353.
+  # With --config=doltserver-proxied, //cmd/bd:bd_proxied_test runs the shard
+  # script against the manifest's live, duration-balanced 34-shard block
+  # (see scripts/ci/proxied_test_durations.json). The old 15-shard block is
+  # retained for history; no live CI job reads it. Same build as
+  # --config=doltserver (race bd_test, non-race bd_for_tests), shared with
+  # bazel-doltserver through the remote cache.
   # The test binary is race, as PR Risk's retired jobs built it. It also runs
   # //cmd/bd:bd_managed_local_test, the managed-local proxied lifecycle
   # (formerly proxied-local-smoke.yml) in a loopback-only network
@@ -1833,7 +1832,7 @@ jobs:
   # call and its gate requires it (BAZEL_PROXIED).
   bazel-proxied:
     name: proxied-server tier
-    # Remote execution only, like bazel-embedded: 30 concurrent shards, each
+    # Remote execution only, like bazel-embedded: 34 concurrent shards, each
     # running its own dolt sql-server busy on ~4 cores, do not fit a
     # GitHub-hosted runner regardless of any single shard's wall time.
     # This lane is the tier's only PR run (pr-risk.yml's legacy jobs are
