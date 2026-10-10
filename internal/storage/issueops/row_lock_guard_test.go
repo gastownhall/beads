@@ -199,7 +199,13 @@ func TestAllIssueRowWritesStampRowLock(t *testing.T) {
 // gastownhall/beads#4682 and #4697.
 func TestAllAuxiliaryAggregateWritersTouchRowVersion(t *testing.T) {
 	writers := map[string][]string{
-		"labels.go":       {"AddLabelInTx", "RemoveLabelInTx"},
+		// addLabelInTx/removeLabelInTx (not their exported wrappers) own the
+		// label SQL since the mintVersion split: AddLabelInTx/RemoveLabelInTx
+		// delegate with mintVersion=true, and applyLabelPatch reuses the same
+		// bodies with mintVersion=false, touching once itself after the last
+		// row. The chokepoint this inventory pins is where the SQL and its
+		// paired touch live.
+		"labels.go":       {"addLabelInTx", "removeLabelInTx"},
 		"comments.go":     {"addIssueCommentInTx", "AddCommentEventInTx"},
 		"dependencies.go": {"addDependencyInTx", "removeDependencyInTx"},
 		filepath.Join("..", "domain", "db", "label.go"):      {"Insert", "Delete"},

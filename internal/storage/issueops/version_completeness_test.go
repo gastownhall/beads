@@ -156,12 +156,13 @@ var versionedEntryPoints = []string{
 var versionExemptions = map[string]string{
 	// comments — a separate table, not part of durable_state (GetIssueInTx
 	// hydrates labels, not comments), so a comment write versions nothing.
-	"AddIssueCommentInTx":    "comments are not in durable_state",
-	"ImportIssueCommentInTx": "comments are not in durable_state",
-	"ExecuteAddComment":      "comments are not in durable_state",
-	"AddCommentEventInTx":    "comments are not in durable_state",
-	"PersistComments":        "constituent comment write of a create; comments are not in durable_state",
-	"InsertDerivedComment":   "raw comment insert; comments are not in durable_state",
+	"AddIssueCommentInTx":              "comments are not in durable_state",
+	"ImportIssueCommentInTx":           "comments are not in durable_state",
+	"ImportIssueCommentInTxWithResult": "comments are not in durable_state",
+	"ExecuteAddComment":                "comments are not in durable_state",
+	"AddCommentEventInTx":              "comments are not in durable_state",
+	"PersistComments":                  "constituent comment write of a create; comments are not in durable_state",
+	"InsertDerivedComment":             "raw comment insert; comments are not in durable_state",
 
 	// is_blocked — derived readiness state, recomputed from the graph, never
 	// a mutation of the bead in its own right.
@@ -197,6 +198,7 @@ var versionExemptions = map[string]string{
 	"RestoreFromSnapshotInTx": "restore: CAS composition is Phase 3 (#6358)",
 
 	// constituent sub-helpers whose entry point mints the whole mutation once
+	"TouchRowVersionInTx":                    "constituent aggregate-token (row_lock) write; the calling label/comment/dependency entry point mints the version",
 	"InsertIssueIntoTable":                   "raw issue insert; the calling create entry point mints",
 	"InsertIssueIfNew":                       "raw issue insert; the calling create entry point mints",
 	"InsertIssueStrictInTx":                  "raw issue insert; the calling create/persistence-move entry point mints",

@@ -22,15 +22,20 @@ import (
 // existed. A count derived from rows-affected reads 1; the old
 // check-then-insert shape read 0 against this same script.
 
-// expectRenameEventScript scripts the per-issue event mint that follows the
-// label sweep (InsertDerivedEvent: same-content SELECT + INSERT). The
-// journal half (RecordEventInTx) no-ops because neither the context key nor
-// the per-tx registration enables it here.
-func expectRenameEventScript(mock sqlmock.Sqlmock, times int) {
-	for i := 0; i < times; i++ {
+// expectRenameEventScript scripts the per-issue tail that follows the label
+// sweep for each touched id: the event mint (InsertDerivedEvent:
+// same-content SELECT + INSERT) and the aggregate row_lock touch
+// (TouchRowVersionInTx's UPDATE, #5738). The journal half (RecordEventInTx)
+// and the version mint (RecordVersionInTx) no-op because neither the context
+// key nor the per-tx registration enables them here.
+func expectRenameEventScript(mock sqlmock.Sqlmock, ids ...string) {
+	for _, id := range ids {
 		mock.ExpectQuery(`SELECT id FROM events`).
 			WillReturnRows(sqlmock.NewRows([]string{"id"}))
 		mock.ExpectExec(`INSERT INTO events`).
+			WillReturnResult(sqlmock.NewResult(0, 1))
+		mock.ExpectExec(`UPDATE issues SET row_lock = \?, updated_at = updated_at WHERE id = \?`).
+			WithArgs(sqlmock.AnyArg(), id).
 			WillReturnResult(sqlmock.NewResult(0, 1))
 	}
 }
@@ -64,7 +69,7 @@ func TestRenameLabelInPlane_ConcurrentAddLabelStillCountsMerge(t *testing.T) {
 	mock.ExpectExec(`DELETE FROM labels WHERE label = \? AND issue_id IN`).
 		WithArgs("old", "i1").
 		WillReturnResult(sqlmock.NewResult(0, 1))
-	expectRenameEventScript(mock, 1)
+	expectRenameEventScript(mock, "i1")
 
 	ctx := context.Background()
 	tx, err := db.BeginTx(ctx, nil)
@@ -107,7 +112,7 @@ func TestRenameLabelInPlane_CleanRenameCountsZeroMerges(t *testing.T) {
 	mock.ExpectExec(`DELETE FROM labels WHERE label = \? AND issue_id IN`).
 		WithArgs("old", "i1", "i2").
 		WillReturnResult(sqlmock.NewResult(0, 2))
-	expectRenameEventScript(mock, 2)
+	expectRenameEventScript(mock, "i1", "i2")
 
 	ctx := context.Background()
 	tx, err := db.BeginTx(ctx, nil)

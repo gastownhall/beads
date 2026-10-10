@@ -265,8 +265,8 @@ func TestReplaceDependencyTargetRekeysCascadedRows(t *testing.T) {
 			AddRow(depid.New("source", "old-target"), "source", "new-target", nil, nil).
 			// An already-correct sibling must not be touched.
 			AddRow(depid.New("other", "new-target"), "other", "new-target", nil, nil))
-	mock.ExpectExec(regexp.QuoteMeta("UPDATE dependencies SET id = ? WHERE id = ?")).
-		WithArgs(depid.New("source", "new-target"), depid.New("source", "old-target")).
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE dependencies SET id = ? WHERE issue_id = ? AND id = ?")).
+		WithArgs(depid.New("source", "new-target"), "source", depid.New("source", "old-target")).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 

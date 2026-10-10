@@ -970,7 +970,7 @@ func rekeyDependencyTargetInTx(ctx context.Context, tx *sql.Tx, table, column, n
 	if err != nil {
 		return fmt.Errorf("query renamed dependency targets in %s: %w", table, err)
 	}
-	type rekey struct{ oldRowID, newRowID string }
+	type rekey struct{ oldRowID, newRowID, issueID string }
 	var rekeys []rekey
 	for queryRows.Next() {
 		var id, issueID string
@@ -987,7 +987,7 @@ func rekeyDependencyTargetInTx(ctx context.Context, tx *sql.Tx, table, column, n
 			continue // ck_dep_one_target guarantees one target; skip defensively
 		}
 		if want := depid.New(issueID, target); want != id {
-			rekeys = append(rekeys, rekey{oldRowID: id, newRowID: want})
+			rekeys = append(rekeys, rekey{oldRowID: id, newRowID: want, issueID: issueID})
 		}
 	}
 	_ = queryRows.Close()
@@ -995,9 +995,17 @@ func rekeyDependencyTargetInTx(ctx context.Context, tx *sql.Tx, table, column, n
 		return fmt.Errorf("iterate renamed dependency targets: %w", err)
 	}
 	for _, rk := range rekeys {
+		// The WHERE carries the row's issue_id beside its id: the surrogate id is
+		// already unique, but the natural-key predicate pins the write to the
+		// edge it was derived from, and issue_id is a column only the dependency
+		// tables carry — which is also how TestAllIssueRowWritesStampRowLock's
+		// scan tells this %s-templated aux-table write from an issues/wisps row
+		// write (its auxOrExemptMarkers). No row_lock stamp belongs here: these
+		// tables have no row_lock column, and the id rewrite is merge hygiene
+		// (same edge, re-derived primary key), not aggregate content.
 		//nolint:gosec // table is hardcoded by callers.
-		if _, err := tx.ExecContext(ctx, fmt.Sprintf("UPDATE %s SET id = ? WHERE id = ?", table),
-			rk.newRowID, rk.oldRowID); err != nil {
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf("UPDATE %s SET id = ? WHERE issue_id = ? AND id = ?", table),
+			rk.newRowID, rk.issueID, rk.oldRowID); err != nil {
 			return fmt.Errorf("rekey dependency target id %s -> %s in %s: %w", rk.oldRowID, rk.newRowID, table, err)
 		}
 	}
