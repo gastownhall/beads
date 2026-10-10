@@ -30,12 +30,12 @@ func TestWispGCProtectsActiveWisps(t *testing.T) {
 	// against the predicate degenerating into "protect everything".
 	//
 	// Ordering matters: every wisp expected to be RECLAIMED is created and
-	// last-touched first, before the protected ones. The age predicate is
-	// now.Sub(updated_at) > threshold against a timestamp written by the
-	// database, so the most recently touched bead can briefly appear
-	// not-yet-stale if the DB clock runs ahead of the test process. Protected
-	// wisps are excluded regardless of age, so only the reclaimable
-	// assertions are sensitive to this.
+	// last-touched first, before the protected ones. updated_at is stored at
+	// whole-second precision and the age predicate (wispIdleAtLeast) compares
+	// at that precision, so with a sub-second --age the most recently touched
+	// bead can read as zero seconds idle. Protected wisps are excluded
+	// regardless of age, so only the reclaimable assertions are sensitive to
+	// this.
 	bdCommand(t, bd, dir, "config", "set", "status.custom", "reviewing:wip,triaging:active")
 
 	// Genuinely abandoned: an idle open ephemeral wisp. Must be reclaimed.

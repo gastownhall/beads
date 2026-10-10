@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -168,4 +169,39 @@ func TestWispCreateDryRunFanoutMessage(t *testing.T) {
 			t.Errorf("skip message should reference --root-only flag, got:\n%s", output)
 		}
 	})
+}
+
+// TestWispIdleAtLeastAtStoragePrecision pins ga-vnycm2.44: updated_at is a
+// whole-second DATETIME, and Dolt ROUNDS a fractional write to the nearest
+// second, so a wisp written at hh:mm:00.7 reads back as hh:mm:01 — 300ms in
+// the future of the write. A `bd mol wisp gc --age 0s` at hh:mm:00.9 used to
+// compute a negative age (now.Sub(updated_at) = -100ms), fail `> 0`, and miss
+// the wisp it was asked to reclaim (TestCLI_WispGCExcludeType's flake). Age is
+// now measured at the precision updated_at is stored at.
+func TestWispIdleAtLeastAtStoragePrecision(t *testing.T) {
+	base := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
+	written := base.Add(700 * time.Millisecond)
+	stored := written.Round(time.Second) // what Dolt's DATETIME holds: 12:00:01
+
+	for _, tc := range []struct {
+		name      string
+		now       time.Time
+		threshold time.Duration
+		want      bool
+	}{
+		{"age 0 just after a rounded-up write", base.Add(900 * time.Millisecond), 0, true},
+		{"age 0 in the same instant as the write", written, 0, true},
+		{"1ms threshold just after a rounded-up write", base.Add(900 * time.Millisecond), time.Millisecond, false},
+		{"1ms threshold a second later", base.Add(1900 * time.Millisecond), time.Millisecond, true},
+		{"1h threshold, fresh", base.Add(30 * time.Minute), time.Hour, false},
+		{"1h threshold, exactly an hour at storage precision", stored.Add(time.Hour), time.Hour, true},
+		{"1h threshold, well past", base.Add(2 * time.Hour), time.Hour, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := wispIdleAtLeast(tc.now, stored, tc.threshold); got != tc.want {
+				t.Errorf("wispIdleAtLeast(now=%s, updated_at=%s, %s) = %v, want %v",
+					tc.now.Format("15:04:05.000"), stored.Format("15:04:05"), tc.threshold, got, tc.want)
+			}
+		})
+	}
 }

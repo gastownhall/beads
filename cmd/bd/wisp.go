@@ -822,6 +822,26 @@ func runWispGC(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// updatedAtPrecision is the precision issues.updated_at / wisps.updated_at are
+// stored at: a DATETIME with no fractional seconds.
+const updatedAtPrecision = time.Second
+
+// wispIdleAtLeast reports whether a wisp last updated at updatedAt (as read
+// back from the store) has been idle for at least threshold at now.
+//
+// Age is measured at the precision updated_at is stored at, not at now's
+// nanosecond precision. Dolt ROUNDS a fractional write to the nearest second,
+// so a row written at hh:mm:00.7 reads back as hh:mm:01, up to 500ms in the
+// future of the write; raw now.Sub(updatedAt) is then negative for up to half
+// a second, and `--age 0s` (every wisp) missed the wisp it was asked to
+// reclaim (ga-vnycm2.44). Rounding now the same way keeps the comparison
+// monotone — round(write) <= round(now) for any write at or before now — so a
+// wisp's age is never negative and `--age 0s` always includes it. A threshold
+// below one second is therefore only as fine as the stored timestamp.
+func wispIdleAtLeast(now, updatedAt time.Time, threshold time.Duration) bool {
+	return now.Round(updatedAtPrecision).Sub(updatedAt) >= threshold
+}
+
 func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThreshold time.Duration, excludeTypes []types.IssueType) ([]*types.Issue, error) {
 	ephemeralFlag := true
 	filter := types.IssueFilter{
@@ -860,7 +880,7 @@ func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThre
 		if isProtectedWisp(issue, blockedSet, protectedStatuses) {
 			continue
 		}
-		if now.Sub(issue.UpdatedAt) > ageThreshold {
+		if wispIdleAtLeast(now, issue.UpdatedAt, ageThreshold) {
 			abandoned = append(abandoned, issue)
 		}
 	}
