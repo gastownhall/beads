@@ -1730,6 +1730,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   spelling), where commenting the key out would leave the body behind as a value
   of its own. Unsetting a key that is not set remains a successful no-op in
   every shape.
+- **`dolt.user` in `config.yaml` is honored again** (GH#6598).
+  `GetDoltServerUser` read `BEADS_DOLT_SERVER_USER` and the
+  `metadata.json`-sourced field, but never consulted the global
+  `config.yaml`'s `dolt.user` the way `GetDoltServerHost` already consults
+  `dolt.host` — so a caller whose environment lacked
+  `BEADS_DOLT_SERVER_USER` (an editor plugin, a scheduled job, any non-shell
+  surface) silently authenticated as the `root` default even with
+  `dolt.user` configured, surfacing as `Access denied for user 'root'` on a
+  server that had `root` disabled. `GetDoltServerUser` now falls back to
+  `config.yaml`'s `dolt.user` before the default, mirroring the host
+  precedence exactly: env > `metadata.json` > `config.yaml` > default.
+
 - **A self-hosted GitLab no longer re-creates its own issues on every push**
   ([#6735](https://github.com/gastownhall/beads/issues/6735)). The tracker
   decided whether a stored `external_ref` was one of its own by looking for
@@ -1778,7 +1790,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deliberately no optional-interface fallback — a store that cannot size the
   ready set should fail to compile rather than silently fall back to an
   unbounded query.
-
 - **`storage.Storage` gains a required `SearchIssueSummaries` method**
   ([#3458](https://github.com/gastownhall/beads/pull/3458)). It is a
   narrow-projection variant of `SearchIssues` for list-shaped rendering: it
@@ -1792,7 +1803,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   It honors `SortBy`/`SortDesc` and `SkipLabels` exactly as `SearchIssues`
   does, `IncludeDependencies` is a silent no-op (a summary has nowhere to put
   dependency records), and wisps are merged in unless `SkipWisps` is set, with
-  their markers set so a wisp row stays distinguishable from a durable issue.
+   their markers set so a wisp row stays distinguishable from a durable issue.
 
 - **Push `--dry-run` now honors `--create-only`**
   ([#6337](https://github.com/gastownhall/beads/issues/6337)). The sequential
