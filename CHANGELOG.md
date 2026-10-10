@@ -737,7 +737,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ([#6716](https://github.com/gastownhall/beads/issues/6716)). The post-commit
   recheck the Dolt store write transactions gained for that issue now also
   runs on every write the proxied-server (uow/domain-db) route serves, which
-  under `--proxied-server` — the default topology — is `bd close` (single
+  under `--proxied-server` is `bd close` (single
   and batch), `bd update --status`, `bd dep remove`, `bd delete`, `bd batch`
   and `bd serve`; on `RunInTransaction` (`bd batch` direct, `bd cook`,
   `bd mol squash`/`burn`, and SDK callers that close or update inside a
