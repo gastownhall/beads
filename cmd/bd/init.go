@@ -3213,7 +3213,10 @@ func getBeadsRole() (string, bool) {
 func setBeadsRole(role string) error {
 	cmd := exec.Command("git", "config", "beads.role", role)
 	cmd.Env = gitenv.ScrubRoutingAndSuppression(os.Environ())
-	return cmd.Run()
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git config beads.role: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 // promptContributorMode prompts the user to determine if they are a contributor.
