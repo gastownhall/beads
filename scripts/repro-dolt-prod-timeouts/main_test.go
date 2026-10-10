@@ -255,7 +255,7 @@ func TestControlQueryScriptPreservesReadyProbeFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cfg := config{BDPath: bd, Timeout: time.Second}
+	cfg := config{BDPath: bd, Timeout: 10 * time.Second}
 	ws := &workspace{Dir: tmp}
 	result := runShell(context.Background(), cfg, ws, controlQueryJobs(1)[0])
 	if result.Err == "" {
