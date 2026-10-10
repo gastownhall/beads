@@ -286,6 +286,7 @@ go_test(
         "migration_0052_test.go",
         "mixed_table_lifecycle_test.go",
         "multistore_multiprocess_test.go",
+        "open_retry_test.go",
         "open_test.go",
         "pool_timeouts_test.go",
         "port_provenance_test.go",
