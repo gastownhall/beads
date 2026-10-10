@@ -63,44 +63,47 @@ func TestProxiedGatedTestsRunInTheProxiedLane(t *testing.T) {
 // into a no-op.
 func TestProxiedGatedTestsDetector(t *testing.T) {
 	dir := t.TempDir()
+	// Every fixture line is indented one tab, so repo scanners that find
+	// tests by a line-anchored `^func TestX(t *testing.T)` (equivalence.py)
+	// do not mistake the fixture's functions for this package's tests.
 	const src = `package main
 
-import (
-	"os"
-	"testing"
-)
+	import (
+		"os"
+		"testing"
+	)
 
-func requireGate(t *testing.T) {
-	if os.Getenv("BEADS_TEST_PROXIED_SERVER") != "1" {
-		t.Skip("gated")
+	func requireGate(t *testing.T) {
+		if os.Getenv("BEADS_TEST_PROXIED_SERVER") != "1" {
+			t.Skip("gated")
+		}
 	}
-}
 
-func newProject(t *testing.T) { requireGate(t) }
+	func newProject(t *testing.T) { requireGate(t) }
 
-func requireEither(t *testing.T) {
-	if os.Getenv("BEADS_TEST_PROXIED_SERVER") != "1" && os.Getenv("OTHER") != "1" {
-		t.Skip("either lane")
+	func requireEither(t *testing.T) {
+		if os.Getenv("BEADS_TEST_PROXIED_SERVER") != "1" && os.Getenv("OTHER") != "1" {
+			t.Skip("either lane")
+		}
 	}
-}
 
-type harness struct{}
+	type harness struct{}
 
-func (harness) start(t *testing.T) { newProject(t) }
+	func (harness) start(t *testing.T) { newProject(t) }
 
-func TestDirect(t *testing.T)     { requireGate(t) }
-func TestTransitive(t *testing.T) { newProject(t) }
-func TestMethod(t *testing.T)     { harness{}.start(t) }
-func TestInSubtest(t *testing.T) {
-	t.Run("x", func(t *testing.T) { newProject(t) })
-}
-func TestInline(t *testing.T) {
-	if os.Getenv("BEADS_TEST_PROXIED_SERVER") != "1" {
-		t.Skip("gated")
+	func TestDirect(t *testing.T)     { requireGate(t) }
+	func TestTransitive(t *testing.T) { newProject(t) }
+	func TestMethod(t *testing.T)     { harness{}.start(t) }
+	func TestInSubtest(t *testing.T) {
+		t.Run("x", func(t *testing.T) { newProject(t) })
 	}
-}
-func TestEitherLane(t *testing.T) { requireEither(t) }
-func TestUngated(t *testing.T)    {}
+	func TestInline(t *testing.T) {
+		if os.Getenv("BEADS_TEST_PROXIED_SERVER") != "1" {
+			t.Skip("gated")
+		}
+	}
+	func TestEitherLane(t *testing.T) { requireEither(t) }
+	func TestUngated(t *testing.T)    {}
 `
 	if err := os.WriteFile(filepath.Join(dir, "fixture_test.go"), []byte(src), 0o644); err != nil {
 		t.Fatal(err)
