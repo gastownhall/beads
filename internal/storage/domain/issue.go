@@ -957,6 +957,7 @@ func (u *issueUseCaseImpl) create(ctx context.Context, params CreateIssueParams,
 		issue.CreatedAt = time.Now().UTC()
 	}
 
+	var isMinted bool
 	switch {
 	case params.ExplicitID != "":
 		issue.ID = params.ExplicitID
@@ -972,6 +973,7 @@ func (u *issueUseCaseImpl) create(ctx context.Context, params CreateIssueParams,
 			return CreateIssueResult{}, fmt.Errorf("create: mint top-level ID: %w", err)
 		}
 		issue.ID = minted
+		isMinted = true
 	}
 
 	if params.CreateOnly && params.ExplicitID != "" && !params.ForcePrefix {
@@ -994,7 +996,10 @@ func (u *issueUseCaseImpl) create(ctx context.Context, params CreateIssueParams,
 		}
 	}
 
-	insertOpts := InsertIssueOpts{UseWispsTable: useWisp, CreateOnly: params.CreateOnly}
+	// Force the strict create-only path for a minted ID: the non-CreateOnly
+	// insert upserts on a duplicate key and would silently overwrite a row
+	// the counter or hash minter raced past instead of failing loud.
+	insertOpts := InsertIssueOpts{UseWispsTable: useWisp, CreateOnly: params.CreateOnly || isMinted}
 	if err := u.issueRepo.Insert(ctx, issue, actor, insertOpts); err != nil {
 		return CreateIssueResult{}, fmt.Errorf("create: insert: %w", err)
 	}
@@ -1679,9 +1684,18 @@ func (u *issueUseCaseImpl) mintTopLevelID(ctx context.Context, issue *types.Issu
 	for length := baseLength; length <= cfg.MaxLength; length++ {
 		for nonce := 0; nonce < 10; nonce++ {
 			candidate := idgen.GenerateHashID(prefix, issue.Title, issue.Description, actor, issue.CreatedAt, length, nonce)
-			exists, err := u.issueRepo.Exists(ctx, candidate, tableOpts)
+			// issues and wisps share one ID space, so a candidate is only
+			// free if NEITHER plane holds it — checked independently of
+			// tableOpts, which stays own-table-only for CountForPrefix above.
+			exists, err := u.issueRepo.Exists(ctx, candidate, IssueTableOpts{UseWispsTable: false})
 			if err != nil {
 				return "", err
+			}
+			if !exists {
+				exists, err = u.issueRepo.Exists(ctx, candidate, IssueTableOpts{UseWispsTable: true})
+				if err != nil {
+					return "", err
+				}
 			}
 			if !exists {
 				return candidate, nil
