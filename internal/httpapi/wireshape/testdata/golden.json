@@ -4218,6 +4218,12 @@
     },
     {
       "schema": "Statistics",
+      "member": "infra_issues",
+      "type": "integer",
+      "required": false
+    },
+    {
+      "schema": "Statistics",
       "member": "open_issues",
       "type": "integer",
       "required": true
