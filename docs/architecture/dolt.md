@@ -53,15 +53,29 @@ proxied-server mode use. Embedded mode is unaffected either way: it links the
 Dolt engine into `bd` at the version in `go.mod`, currently the commit tagged
 v2.2.0 upstream, no matter which `dolt` CLI is on your PATH.
 
-Dolt 2.3.0 (released 2026-08-13) regressed `CALL DOLT_RESET('--hard')`. A few
-percent of freshly created databases come up with that procedure unusable —
+Dolt 2.2.4 through 2.3.1 can break
+`CALL DOLT_RESET('--hard')`
+([dolthub/dolt#11581](https://github.com/dolthub/dolt/issues/11581), first
+reported against 2.3.0; 2.2.4 is the first affected release). Some freshly created
+databases (a few percent to over a third in the measurements below, more
+under concurrent load) come up with that procedure unusable —
 every call answers `Error 1105 (HY000): context canceled`, from any session
 and any new connection, for the life of that server process. Nothing else
 about the database looks wrong: `SELECT 1`, `CALL DOLT_CLEAN()`,
 `CALL DOLT_CHECKOUT('.')`, `CALL DOLT_COMMIT()` and soft resets all work
 normally, so the damage is invisible until something needs a hard reset.
 
-Measured by creating fresh databases and immediately calling the procedure:
+Upstream fixed it in 2.3.2
+([dolthub/dolt#11652](https://github.com/dolthub/dolt/pull/11652)), and 2.3.4
+also fixes a related journal-writer race on a canceled context
+([dolthub/dolt#11796](https://github.com/dolthub/dolt/pull/11796)). Use
+**2.2.0** or **2.3.4 or newer**; avoid 2.2.4 through 2.3.1. 2.2.1 through
+2.2.3 measured clean (below, and in the per-version table on
+[dolthub/dolt#11581](https://github.com/dolthub/dolt/issues/11581)); they are
+simply not the pinned version.
+
+Measured by creating fresh databases and immediately calling the procedure
+(first four rows), and again with the method below (the other rows):
 
 | Dolt version | Fresh databases with `DOLT_RESET('--hard')` broken |
 |--------------|----------------------------------------------------|
@@ -69,17 +83,32 @@ Measured by creating fresh databases and immediately calling the procedure:
 | 2.2.0        | 0 / 60                                             |
 | 2.3.0        | 3 / 60                                             |
 | 2.3.1        | 3 / 100                                            |
+| 2.2.0        | 0 / 200; 8 clients: 0 / 200                        |
+| 2.2.1        | 8 clients: 0 / 200                                 |
+| 2.2.3        | 8 clients: 0 / 200                                 |
+| 2.2.4        | 8 clients: 74 / 200                                |
+| 2.3.1        | 32 / 200; 8 clients: 78 / 200 and 68 / 160         |
+| 2.3.4        | 8 clients: 0 / 200                                 |
+| 2.3.5        | 0 / 200; 8 clients: 0 / 200; 16 clients: 0 / 640   |
 
-Versions after 2.3.1 have not been measured. Raise the pin only once a newer
-release is confirmed clean by that same measurement — not because it is
-newer.
+The second measurement starts a fresh `dolt sql-server` per version and runs
+one client, or 8 or 16 in parallel, each sending every statement over a new
+connection. Per fresh database: `CREATE DATABASE`, then
+`CALL DOLT_RESET('--hard')`; `CREATE TABLE` with an `AUTO_INCREMENT` key;
+`CALL DOLT_COMMIT('-Am', …)`, then `CALL DOLT_RESET('--hard')` again. A
+failing step is retried twice, and `SELECT 1` on the same database is the
+control. On 2.2.4 and 2.3.1 every failure was `Error 1105 (HY000): context canceled`,
+both retries failed too, and `SELECT 1` succeeded.
+
+Raise the pin only to a release confirmed clean by that same measurement —
+not because it is newer.
 
 Pin rather than track `latest` for a second, independent reason: the upstream
 `releases/latest` URL resolves to the most recently *created* release, not the
 highest version, so it can move backwards — v1.88.2 was created on
 2026-08-17, after both v2.2.4 and v2.3.0.
 
-#### If you are already running 2.3.x
+#### If you are running 2.2.4 through 2.3.1
 
 Whether a database is affected is decided per database, when it is created —
 two databases on the same server can differ — so check each one you care
@@ -107,7 +136,7 @@ The breakage lives in the running server process, not on disk, so restarting
 `dolt sql-server` clears it — verified by re-running the check on an affected
 database after a restart, with a healthy database on the same server as the
 control. A restart re-rolls the dice for every database, though, so the
-durable fix is to move to the pinned version.
+durable fix is to move to 2.2.0 or to 2.3.4 or newer.
 
 This matters because `bd flatten` and the Dolt-history compaction in
 `bd admin compact` both finish by hard-resetting `main` onto a temporary
@@ -254,11 +283,11 @@ bd prune --older-than 90d --ignore-references --force
 transient. For full Dolt storage reclaim after deleting many rows, follow
 with `bd flatten`.
 
-**On Dolt 2.3.x, storage-reclaim operations can fail partway.** `bd flatten`
-and the Dolt-history compaction in `bd admin compact` both build a temporary
-branch and then hard-reset `main` onto it, and the merge-settle path behind
-`bd dolt pull` / `bd sync` falls back to a hard reset when it abandons a
-merge. On an affected database that hard reset returns
+**On Dolt 2.2.4 through 2.3.1, storage-reclaim operations can fail
+partway.** `bd flatten` and the Dolt-history compaction in `bd admin compact`
+both build a temporary branch and then hard-reset `main` onto it, and the
+merge-settle path behind `bd dolt pull` / `bd sync` falls back to a hard reset
+when it abandons a merge. On an affected database that hard reset returns
 `Error 1105 (HY000): context canceled`: `bd flatten` and `bd admin compact`
 stop at that step, and an abandoned merge is left without its rollback. See
 [Which Dolt version to install](#which-dolt-version-to-install) for the check
