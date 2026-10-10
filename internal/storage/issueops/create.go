@@ -1028,8 +1028,23 @@ func PersistComments(ctx context.Context, tx DBTX, issue *types.Issue) (CreateIs
 				return result, fmt.Errorf("failed to insert comment for %s: %w", issue.ID, err)
 			}
 			createdAt = stamped
+		} else {
+			createdAt = createdAt.UTC()
 		}
 		createdAtText := FormatAuxTime(createdAt)
+		// Re-read the stamp back out of the text that is actually stored, the
+		// same way domain/db.CommentSQLRepository.InsertRecord does. createdAt
+		// also reaches the caller as result.persistedComments[].CreatedAt, which
+		// is marshaled into the durable bd_events_journal.comment_json; without
+		// this the event stream keeps sub-second parts the second-granular
+		// comments.created_at column cannot hold, which is exactly the
+		// divergence backend/conformance/commenter_contract.go rejects as not
+		// cursor-safe.
+		parsedCreatedAt, err := ParseAuxTime(createdAtText)
+		if err != nil {
+			return result, fmt.Errorf("failed to insert comment for %s: %w", issue.ID, err)
+		}
+		createdAt = parsedCreatedAt
 		if comment.ID == "" {
 			// No incoming id (fresh comment): content-derived id, collapsing
 			// onto an identical existing row exactly like the import dedup.
@@ -1060,7 +1075,7 @@ func PersistComments(ctx context.Context, tx DBTX, issue *types.Issue) (CreateIs
 			continue
 		}
 		//nolint:gosec // G201: table is determined by ephemeral flag
-		_, err := tx.ExecContext(ctx, fmt.Sprintf(`
+		_, err = tx.ExecContext(ctx, fmt.Sprintf(`
 			INSERT INTO %s (id, issue_id, author, text, created_at)
 			VALUES (?, ?, ?, ?, ?)
 		`, commentTable), comment.ID, issue.ID, comment.Author, comment.Text, createdAtText)
@@ -1161,10 +1176,7 @@ func PersistDependenciesWithOptionsResult(ctx context.Context, tx DBTX, issues [
 				return result, fmt.Errorf("invalid dependency %s -> %s: %w", dep.IssueID, dep.DependsOnID, err)
 			}
 
-			createdAt := dep.CreatedAt
-			if createdAt.IsZero() {
-				createdAt = time.Now().UTC()
-			}
+			createdAt := DependencyCreatedAt(dep)
 			// Deterministic id from (issue_id, target) keeps bulk-imported edges
 			// merge-safe across clones — two clones importing the same JSONL get the
 			// same primary key, not two random UUIDs that collide on uk_dep_* (#4259).
@@ -1221,6 +1233,30 @@ func dependencyCreatedBy(dep *types.Dependency, actor string) string {
 		return dep.CreatedBy
 	}
 	return actor
+}
+
+// DependencyCreatedAt is the single source of a dependency edge's audit stamp
+// for every write path: the batch/import path (PersistDependencies...), the
+// embedded single-edge path (AddDependencyInTx), and the use-case/server-mode
+// path (domain/db.DependencySQLRepository.Insert). A supplied instant is
+// preserved in UTC so an import keeps the edge's real history; only a zero
+// value defaults to now. Exported so the use-case plane binds the same
+// semantics instead of re-stamping imported edges.
+//
+// The result is rounded to the second because dependencies.created_at is
+// DATETIME with no fractional-seconds precision (schema/migrations/
+// 0002_create_dependencies.up.sql). time.Round rounds halfway values up, the
+// same conversion the Dolt engine applies to a sub-second bind, so the instant
+// computed here is the one persisted rather than one the server re-rounds.
+// Truncating would instead store any edge stamped at .5s or later a second
+// earlier than the server-rounded issue rows of the same import, which the
+// legacy upgrade bridge rejects: its normalize_export (scripts/
+// migrate-legacy-to-current.sh) rounds every stamp half-up before comparing.
+func DependencyCreatedAt(dep *types.Dependency) time.Time {
+	if dep == nil || dep.CreatedAt.IsZero() {
+		return time.Now().UTC().Round(time.Second)
+	}
+	return dep.CreatedAt.UTC().Round(time.Second)
 }
 
 func recordSkippedDependency(opts storage.BatchCreateOptions, dep *types.Dependency, reason string) {

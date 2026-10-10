@@ -183,6 +183,33 @@ func testAuditReadyWorkDepCreatedAtParity(t *testing.T, f Factory) {
 	if !got.Equal(depCreatedAt) {
 		t.Fatalf("rendered dependency created_at = %v, want %v (imported edge timestamp)", got, depCreatedAt)
 	}
+
+	// Single-edge arm. The batch path above and AddDependency are separate writers
+	// (issueops.PersistDependencies... vs issueops.AddDependencyInTx), and only the
+	// batch one was covered, so an importer that replays edges one at a time — bd
+	// mol port's dep loop, internal/migration/legacysqlite — could re-stamp them
+	// "now" with the suite green. Both maintained backends route AddDependency to
+	// AddDependencyInTx, so this arm pins that writer for both of them.
+	singleEdgeCreatedAt := time.Date(2021, 3, 4, 5, 6, 7, 0, time.UTC)
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "dca-t2", Title: "single-edge target"}), "a"))
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "dca-s2", Title: "single-edge source"}), "a"))
+	must(t, s.AddDependency(c, &types.Dependency{
+		IssueID: "dca-s2", DependsOnID: "dca-t2", Type: types.DepBlocks, CreatedAt: singleEdgeCreatedAt,
+	}, "a"))
+
+	items, err = s.SearchIssuesWithCounts(c, "", types.IssueFilter{})
+	must(t, err)
+	single := auditCountsByID(items)["dca-s2"]
+	if single == nil {
+		t.Fatal("dca-s2 missing from SearchIssuesWithCounts result")
+	}
+	if len(single.Dependencies) != 1 {
+		t.Fatalf("dca-s2 rendered deps = %d, want 1", len(single.Dependencies))
+	}
+	if got := single.Dependencies[0].CreatedAt; !got.Equal(singleEdgeCreatedAt) {
+		t.Fatalf("single-edge dependency created_at = %v, want %v (supplied edge timestamp)",
+			got, singleEdgeCreatedAt)
+	}
 }
 
 // countByColumnInTx emits COALESCE(priority, ”) GROUP BY priority; priority is
