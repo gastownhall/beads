@@ -18,20 +18,20 @@ import (
 // connecting to the one shared Dolt server (requireSharedProxiedServer).
 const proxiedDeleteIfRevisionRacers = 10
 
-// TestProxiedDeleteIfRevisionSingleWinner pins mc-zndi7.73 on the proxied
+// TestProxiedServerDeleteIfRevisionSingleWinner pins mc-zndi7.73 on the proxied
 // route — the topology every shared-dolt-server clone actually writes
 // through. It is the proxied-tier companion to
 // TestSharedServerDeleteIfRevisionSingleWinner (same three pairings: a
 // same-token delete race, delete vs close, delete vs update), proved here
 // against real `bd` subprocesses each going through their own local dbproxy
 // instance rather than connecting to the shared Dolt server directly. Every
-// existing proxied --if-revision test (TestProxiedIfRevisionDeleteMatchAndMismatch,
-// TestProxiedIfRevisionOutranksReassignFence) races sequentially — set up a
+// existing proxied --if-revision test (TestProxiedServerIfRevisionDeleteMatchAndMismatch,
+// TestProxiedServerIfRevisionOutranksReassignFence) races sequentially — set up a
 // "holder", then try a stale "thief" afterward — which can never observe two
 // writes actually overlapping at the storage layer. This test launches all
 // racers concurrently via goroutines, the way
 // TestSharedServerIfRevisionSingleWinner's race helper does.
-func TestProxiedDeleteIfRevisionSingleWinner(t *testing.T) {
+func TestProxiedServerDeleteIfRevisionSingleWinner(t *testing.T) {
 	requireSharedProxiedServer(t)
 	t.Parallel()
 	bd := buildEmbeddedBD(t)

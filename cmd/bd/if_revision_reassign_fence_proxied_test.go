@@ -45,13 +45,13 @@ func bdProxiedShowRevision(t *testing.T, bd, dir, id string) int64 {
 
 func proxiedRevStr(rev int64) string { return strconv.FormatInt(rev, 10) }
 
-// TestProxiedIfRevisionOutranksReassignFence pins mc-zndi7.74 on the
+// TestProxiedServerIfRevisionOutranksReassignFence pins mc-zndi7.74 on the
 // proxied-server route, the topology where this race actually happens: every
 // shared-dolt-server clone writes through it. See
 // TestIfRevisionOutranksReassignFenceCLI's doc for the full race shape —
 // this is the same scenario, proved against the real shared Dolt server
 // instead of embedded Dolt.
-func TestProxiedIfRevisionOutranksReassignFence(t *testing.T) {
+func TestProxiedServerIfRevisionOutranksReassignFence(t *testing.T) {
 	requireSharedProxiedServer(t)
 	t.Parallel()
 	bd := buildEmbeddedBD(t)

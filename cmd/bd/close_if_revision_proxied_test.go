@@ -9,14 +9,14 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// TestProxiedIfRevisionCloseReplaysMoleculeAutoClose is
+// TestProxiedServerIfRevisionCloseReplaysMoleculeAutoClose is
 // TestIfRevisionCloseReplaysMoleculeAutoClose's proxied-server twin, pinning
 // mc-zndi7.75 item 1 on the route `bd serve` actually runs:
 // runCloseProxiedIfRevision bypasses the batch entirely (A8, beads#4682), so
 // it must re-drive molecule auto-close itself via its own post-close unit of
 // work, exactly as closeProxiedRunPostClose does for the unguarded batch
 // route.
-func TestProxiedIfRevisionCloseReplaysMoleculeAutoClose(t *testing.T) {
+func TestProxiedServerIfRevisionCloseReplaysMoleculeAutoClose(t *testing.T) {
 	requireSharedProxiedServer(t)
 	t.Parallel()
 	bd := buildEmbeddedBD(t)
@@ -50,10 +50,10 @@ func TestProxiedIfRevisionCloseReplaysMoleculeAutoClose(t *testing.T) {
 	}
 }
 
-// TestProxiedIfRevisionCloseWarnsOnForcedOpenChildren is
+// TestProxiedServerIfRevisionCloseWarnsOnForcedOpenChildren is
 // TestIfRevisionCloseWarnsOnForcedOpenChildren's proxied-server twin, pinning
 // mc-zndi7.75 item 3 on the proxied route.
-func TestProxiedIfRevisionCloseWarnsOnForcedOpenChildren(t *testing.T) {
+func TestProxiedServerIfRevisionCloseWarnsOnForcedOpenChildren(t *testing.T) {
 	requireSharedProxiedServer(t)
 	t.Parallel()
 	bd := buildEmbeddedBD(t)

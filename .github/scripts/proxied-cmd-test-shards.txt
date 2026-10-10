@@ -276,6 +276,7 @@
 34 3 TestProxiedServerAutoPrune
 34 3 TestProxiedServerClose2B
 34 3 TestProxiedServerEventsJournalOffByDefault
+34 3 TestProxiedServerIfRevisionCloseMismatchRefuses
 34 3 TestProxiedServerMolLastActivity
 34 3 TestProxiedServerPurgeWispsPlaneRetention
 34 3 TestProxiedServerServeLifecycle
@@ -304,6 +305,7 @@
 
 34 7 TestProxiedServerCloseConcurrent
 34 7 TestProxiedServerCreateInfraTypeRoutesToWisps
+34 7 TestProxiedServerDeleteIfRevisionSingleWinner
 34 7 TestProxiedServerExternalCreate
 34 7 TestProxiedServerIfRevisionGuardDelete
 34 7 TestProxiedServerLabelC
@@ -320,6 +322,7 @@
 34 9 TestProxiedServerGateLifecycle
 34 9 TestProxiedServerHistoryRemoteSupportedFrontDoorParity
 34 9 TestProxiedServerIfRevisionGuardReopen
+34 9 TestProxiedServerIfRevisionOutranksReassignFence
 34 9 TestProxiedServerServeRefusesTheJournalWhenItIsDisabled
 34 9 TestProxiedServerUpdate
 34 9 TestServerModeServe
@@ -350,6 +353,7 @@
 34 13 TestProxiedServerCompactDolt
 34 13 TestProxiedServerCreate2
 34 13 TestProxiedServerGraph
+34 13 TestProxiedServerHistoryRemoteSupportedDirectParity
 34 13 TestProxiedServerMolSquash
 34 13 TestProxiedServerPromote
 34 13 TestProxiedServerServeRefusesAStaleCheckpointWithGone
@@ -358,6 +362,7 @@
 34 14 TestProxiedServerCloseB
 34 14 TestProxiedServerDuplicates
 34 14 TestProxiedServerHeartbeat
+34 14 TestProxiedServerIfRevisionCloseReplaysMoleculeAutoClose
 34 14 TestProxiedServerInitIfMissing
 34 14 TestProxiedServerMolReadyGated
 
@@ -429,6 +434,7 @@
 34 24 TestProxiedServerDeleteBlockedJSONSingleDoc
 34 24 TestProxiedServerDeleteForceOrphans
 34 24 TestProxiedServerHuman
+34 24 TestProxiedServerIfRevisionDeleteMatchAndMismatch
 34 24 TestProxiedServerIfRevisionGuardAssign
 34 24 TestProxiedServerListComments
 34 24 TestProxiedServerListSortRetiresTheWalk
@@ -458,6 +464,7 @@
 
 34 28 TestProxiedServerDep2C
 34 28 TestProxiedServerDoltLifecycle
+34 28 TestProxiedServerIfRevisionCloseWarnsOnForcedOpenChildren
 34 28 TestProxiedServerReady2
 34 28 TestProxiedServerReassignFence
 34 28 TestProxiedServerSQLStatementRouting

@@ -138,6 +138,7 @@ go_test(
         "managed_local_lane_test.go",
         "pinned_shards_helpers_test.go",
         "pinned_shards_sources_test.go",
+        "proxied_lane_coverage_test.go",
         "repo_helpers_test.go",
         "scripts_targets_test.go",
         "shard_manifest_test.go",

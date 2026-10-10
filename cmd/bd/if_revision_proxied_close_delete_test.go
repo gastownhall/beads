@@ -11,15 +11,15 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// TestProxiedIfRevisionCloseMismatchRefuses pins mc-zndi7.76 (gap 4 / mutant
+// TestProxiedServerIfRevisionCloseMismatchRefuses pins mc-zndi7.76 (gap 4 / mutant
 // MD2): close_if_revision.go's proxied route wires ExpectedVersion into both
 // of its SingleIssueUpdate calls (the plain close and the --force one), but
 // until now nothing on the proxied route ever gave it a STALE token --
-// TestProxiedIfRevisionCloseReplaysMoleculeAutoClose and
-// TestProxiedIfRevisionCloseWarnsOnForcedOpenChildren only ever close with the
+// TestProxiedServerIfRevisionCloseReplaysMoleculeAutoClose and
+// TestProxiedServerIfRevisionCloseWarnsOnForcedOpenChildren only ever close with the
 // current revision. A stale guard must refuse the close outright, before any
 // write, on the real shared Dolt server.
-func TestProxiedIfRevisionCloseMismatchRefuses(t *testing.T) {
+func TestProxiedServerIfRevisionCloseMismatchRefuses(t *testing.T) {
 	requireSharedProxiedServer(t)
 	t.Parallel()
 	bd := buildEmbeddedBD(t)
@@ -50,12 +50,12 @@ func TestProxiedIfRevisionCloseMismatchRefuses(t *testing.T) {
 	}
 }
 
-// TestProxiedIfRevisionDeleteMatchAndMismatch pins mc-zndi7.76 (gap 4 / mutant
+// TestProxiedServerIfRevisionDeleteMatchAndMismatch pins mc-zndi7.76 (gap 4 / mutant
 // MD4): delete_proxied_server.go wires ExpectedVersion: ifRevision into the
 // issueops.DeleteRequest it sends to the real Deleter, but no proxied test
 // gave --if-revision to delete at all before now. A matching guard deletes
 // the row; a stale guard refuses, and the row survives.
-func TestProxiedIfRevisionDeleteMatchAndMismatch(t *testing.T) {
+func TestProxiedServerIfRevisionDeleteMatchAndMismatch(t *testing.T) {
 	requireSharedProxiedServer(t)
 	t.Parallel()
 	bd := buildEmbeddedBD(t)
