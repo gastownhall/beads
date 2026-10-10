@@ -85,7 +85,7 @@ A curated list of community-built UIs, extensions, and integrations for Beads. R
 
 Install with `uv tool install git+https://github.com/jklenk/thread`. Built by [@jklenk](https://github.com/jklenk). (Python/DuckDB)
 
-- **[emBEADings](https://github.com/DyrtyJax/embeadings)** - Technical-preview, read-only coordination CLI that turns typed Beads relationships, local semantic retrieval, and active Git worktree changes into bounded, deterministic review leads. Reads the live tracker through allowlisted `bd --readonly ... --json` commands, embeds issue text locally, and has no tracker-write operations. Install from [PyPI](https://pypi.org/project/embeadings/) with `pipx install embeadings` or `uv tool install embeadings`. Built by [@DyrtyJax](https://github.com/DyrtyJax). (Python)
+- **[emBEADings](https://github.com/CantrellJax/embeadings)** - Read-only tool that finds duplicate and related issues by meaning, using a local embedding model with no API key, and skips pairs that are already linked. It also lists the open issues that merged pull requests already fixed (`embead superseded`), and flags active work about to touch the same files. Reads through `bd --readonly ... --json` and never writes. Website and guides: [embeadings.jacksoncantrell.com](https://embeadings.jacksoncantrell.com). Install with `pipx install embeadings`. Built by [@CantrellJax](https://github.com/CantrellJax). (Python)
 
 ## SDKs & Libraries
 
