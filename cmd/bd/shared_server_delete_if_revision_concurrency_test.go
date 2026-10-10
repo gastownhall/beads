@@ -42,6 +42,13 @@ const sharedServerDeleteIfRevisionRacers = 10
 // Error 1213 rather than being retried and reclassified as a version
 // mismatch. This test pins the single-winner, precondition_failed outcome
 // for all three pairings.
+//
+// A close/update loser can observe a winning delete at either of two points:
+// inside its guarded write (the delete commits after it resolved the id) or
+// at its pre-flight resolution (the delete commits first, so the racers never
+// overlap at the storage layer). Both are the same lost race and both must
+// report precondition_failed / exit 13 — whichever point the scheduler
+// happens to pick (ga-vnycm2.10; reportIfRevisionTargetGone).
 func TestSharedServerDeleteIfRevisionSingleWinner(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("not supported on Windows")

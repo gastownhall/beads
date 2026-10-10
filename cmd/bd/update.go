@@ -478,6 +478,13 @@ pointless).`,
 				if result != nil {
 					result.Close()
 				}
+				// A concurrent `bd delete` that commits before this
+				// resolution is the same lost race as one that commits
+				// inside the guarded write below. requireSingleIfRevisionID
+				// guarantees this is the only id, so nothing is pending.
+				if reported, ok := reportIfRevisionTargetGone("updating", id, err, ifRevision); ok {
+					return reported
+				}
 				fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", id, err)
 				recordFailure(id, fmt.Sprintf("resolving issue: %v", err))
 				continue

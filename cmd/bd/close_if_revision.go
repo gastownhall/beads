@@ -29,6 +29,11 @@ import (
 func runCloseDirectIfRevision(ctx context.Context, id, reason string, force bool, session string, expectedVersion int64) error {
 	result, err := resolveAndGetIssueForMutation(ctx, store, id)
 	if err != nil {
+		// A concurrent `bd delete` that commits before this resolution is
+		// the same lost race as one that commits inside ops.Close below.
+		if reported, ok := reportIfRevisionTargetGone("closing", id, err, &expectedVersion); ok {
+			return reported
+		}
 		fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", id, err)
 		return &exitError{Code: 1}
 	}

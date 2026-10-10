@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -283,6 +284,44 @@ func TestClassifyIfRevisionFailureNotFoundSentinel(t *testing.T) {
 	ee, isExitErr := reported.(*exitError)
 	if !isExitErr || ee.Code != ExitGuardMismatch {
 		t.Fatalf("reported error = %#v, want *exitError{Code: %d}", reported, ExitGuardMismatch)
+	}
+}
+
+// TestReportIfRevisionTargetGone pins ga-vnycm2.10's pre-flight mapping: a
+// verb's resolution failing with not-found (the storage sentinel, or
+// ResolvePartialID's unwrapped "no issue found matching" text) reports as
+// precondition_failed / ExitGuardMismatch only under an active --if-revision
+// guard; with no guard, or for any other resolution failure, it is not a
+// guard outcome and the caller's own handling applies.
+func TestReportIfRevisionTargetGone(t *testing.T) {
+	ifRevision := int64(3)
+	for _, tc := range []struct {
+		name       string
+		err        error
+		ifRevision *int64
+		wantOK     bool
+	}{
+		{"sentinel_guarded", fmt.Errorf("resolving: %w", storage.ErrNotFound), &ifRevision, true},
+		{"partial_id_text_guarded", errors.New(`no issue found matching "bd-x"`), &ifRevision, true},
+		{"sentinel_unguarded", storage.ErrNotFound, nil, false},
+		{"other_error_guarded", errors.New("connection refused"), &ifRevision, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reported, ok := reportIfRevisionTargetGone("closing", "bd-x", tc.err, tc.ifRevision)
+			if ok != tc.wantOK {
+				t.Fatalf("reportIfRevisionTargetGone ok = %v, want %v", ok, tc.wantOK)
+			}
+			if !ok {
+				if reported != nil {
+					t.Errorf("reported = %v, want nil when not a guard outcome", reported)
+				}
+				return
+			}
+			ee, isExitErr := reported.(*exitError)
+			if !isExitErr || ee.Code != ExitGuardMismatch {
+				t.Fatalf("reported error = %#v, want *exitError{Code: %d}", reported, ExitGuardMismatch)
+			}
+		})
 	}
 }
 

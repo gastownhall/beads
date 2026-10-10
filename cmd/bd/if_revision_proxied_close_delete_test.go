@@ -98,3 +98,53 @@ func TestProxiedServerIfRevisionDeleteMatchAndMismatch(t *testing.T) {
 		assertRowAbsent(t, db, "issues", issue.ID)
 	})
 }
+
+// TestProxiedIfRevisionTargetGoneIsPreconditionFailed is the proxied-route
+// twin of TestIfRevisionPreflightGoneIsPreconditionFailedOnEveryVerb
+// (ga-vnycm2.10): a guarded close, update or assign whose row a concurrent
+// `bd delete` already removed must report precondition_failed /
+// ExitGuardMismatch, whichever step (the advisory pre-read or the guarded
+// write) first observes the row gone — never an unclassified "not found"
+// exit 1. TestProxiedDeleteIfRevisionSingleWinner's delete_vs_close and
+// delete_vs_update race exactly this; here the winning delete runs first, so
+// the outcome is deterministic.
+func TestProxiedIfRevisionTargetGoneIsPreconditionFailed(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+	p := newSharedProxiedProject(t, bd, "ivtg")
+
+	for _, tc := range []struct {
+		verb string
+		args func(id, rev string) []string
+	}{
+		{"close", func(id, rev string) []string { return []string{"close", id, "--if-revision", rev, "--reason", "gone"} }},
+		{"update", func(id, rev string) []string {
+			return []string{"update", id, "--if-revision", rev, "--spec-id", "gone"}
+		}},
+		{"assign", func(id, rev string) []string { return []string{"assign", id, "someone", "--if-revision", rev} }},
+	} {
+		t.Run(tc.verb, func(t *testing.T) {
+			t.Parallel()
+			issue := bdProxiedCreate(t, bd, p.dir, "Proxied guarded "+tc.verb+" vs deleted row")
+			rev0 := bdProxiedShowRevision(t, bd, p.dir, issue.ID)
+			bdProxiedDelete(t, bd, p.dir, issue.ID, "--force")
+
+			stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, tc.args(issue.ID, proxiedRevStr(rev0))...)
+			if err == nil {
+				t.Fatalf("--if-revision %s of a deleted row should have failed, got:\nstdout:\n%s\nstderr:\n%s", tc.verb, stdout, stderr)
+			}
+			var ee *exec.ExitError
+			if !errors.As(err, &ee) {
+				t.Fatalf("--if-revision %s of a deleted row failed without an exit code: %v", tc.verb, err)
+			}
+			out := stdout + stderr
+			if ee.ExitCode() != ExitGuardMismatch {
+				t.Errorf("--if-revision %s of a deleted row exit code = %d, want %d\n%s", tc.verb, ee.ExitCode(), ExitGuardMismatch, out)
+			}
+			if !strings.Contains(out, "precondition failed: issue no longer exists") {
+				t.Errorf("--if-revision %s of a deleted row should say \"precondition failed: issue no longer exists\", got:\n%s", tc.verb, out)
+			}
+		})
+	}
+}

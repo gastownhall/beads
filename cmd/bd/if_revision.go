@@ -82,18 +82,18 @@ func classifyIfRevisionFailure(err error, ifRevision *int64) (code, reason strin
 	case errors.As(err, &vme):
 		return ifRevisionCodePreconditionFailed, "revision mismatch", &vme.Expected, &vme.Current, true
 	case errors.Is(err, storage.ErrNotFound):
-		// The row named by a single-id --if-revision write no longer exists.
-		// The plain CLI routes refuse a genuine typo earlier, via
-		// resolveAndGetIssueForMutation, before this guard ever runs — so in
-		// practice this fires either on a route with no such pre-check (the
-		// proxied routes) or, for a guarded delete racing an identical delete
-		// on a Dolt sql-server (mc-zndi7.73), on the same-token loser that
-		// re-checks after the winner's delete has already landed. Both are
-		// the same precondition failure from this guard's point of view:
-		// the exact revision the caller named is gone, so there is nothing
-		// left to compare it against. current is omitted (nothing to
-		// report); expected falls back to the caller's own --if-revision
-		// value, same as the bare storage.ErrVersionMismatch case below.
+		// The row named by a single-id --if-revision write no longer exists:
+		// a guarded write that lost to a concurrent delete (mc-zndi7.73),
+		// observed either inside the guarded write or at the verb's
+		// pre-flight resolution (reportIfRevisionTargetGone). Both are the
+		// same precondition failure from this guard's point of view: the
+		// exact revision the caller named is gone, so there is nothing left
+		// to compare it against. A mistyped id under --if-revision reports
+		// the same way — the CLI cannot tell "never existed" from "deleted
+		// a moment ago", and either way the named revision is not current.
+		// current is omitted (nothing to report); expected falls back to the
+		// caller's own --if-revision value, same as the bare
+		// storage.ErrVersionMismatch case below.
 		return ifRevisionCodePreconditionFailed, "issue no longer exists", ifRevision, nil, true
 	case errors.Is(err, storage.ErrAssigneeMismatch):
 		return ifRevisionCodePreconditionFailed, "assignee mismatch", nil, nil, true
@@ -110,6 +110,30 @@ func classifyIfRevisionFailure(err error, ifRevision *int64) (code, reason strin
 		return ifRevisionCodeUnsupported, "", nil, nil, true
 	}
 	return "", "", nil, nil, false
+}
+
+// reportIfRevisionTargetGone reports a single-id --if-revision write whose
+// pre-flight resolution (resolveAndGetIssueForMutation on the direct route,
+// the advisory pre-read on the proxied route) found no row. Every guarded
+// verb resolves the row BEFORE its guarded write, so a racer that loses to a
+// concurrent `bd delete` sees the row vanish either here or inside the guarded
+// write, depending only on which side of the delete's commit its resolution
+// lands (mc-zndi7.81 for delete, ga-vnycm2.10 for close/update/assign). Both
+// are the same outcome — the revision the caller named is gone — so both
+// report precondition_failed / ExitGuardMismatch with the reason "issue no
+// longer exists". With no --if-revision there is no guard to report through,
+// and any other resolution failure is not a guard outcome; ok is false for
+// both and the caller's ordinary failure handling applies unchanged.
+//
+// err is matched with isNotFoundErr, which also accepts ResolvePartialID's
+// unwrapped "no issue found matching" text, and reported as the literal
+// storage.ErrNotFound sentinel classifyIfRevisionFailure matches via
+// errors.Is.
+func reportIfRevisionTargetGone(action, id string, err error, ifRevision *int64) (reportedErr error, ok bool) {
+	if ifRevision == nil || !isNotFoundErr(err) {
+		return nil, false
+	}
+	return reportIfRevisionFailure(action, id, storage.ErrNotFound, ifRevision)
 }
 
 // ifRevisionFailureBody is the machine JSON this CLI attaches to a refused

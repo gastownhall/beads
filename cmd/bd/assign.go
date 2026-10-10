@@ -63,6 +63,12 @@ Examples:
 			if result != nil {
 				result.Close()
 			}
+			// A concurrent `bd delete` that commits before this resolution
+			// is the same lost race as one that commits inside the guarded
+			// write below.
+			if reported, ok := reportIfRevisionTargetGone("assigning", id, err, ifRevision); ok {
+				return reported
+			}
 			return HandleErrorRespectJSON("resolving %s: %v", id, err)
 		}
 		if result == nil || result.Issue == nil {
