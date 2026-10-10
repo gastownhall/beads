@@ -694,6 +694,8 @@ func e2eServeConfig(t *testing.T, s storage.DoltStorage, projectID, database str
 	fail("GraphCounter")
 	cfg.BatchGetter, err = s.BatchGetter()
 	fail("BatchGetter")
+	cfg.LeaseReclaimer, err = s.LeaseReclaimer()
+	fail("LeaseReclaimer")
 	cfg.Relations, err = s.IssueRelations()
 	fail("IssueRelations")
 	cfg.Commenter, err = s.Commenter()
