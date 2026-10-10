@@ -344,6 +344,15 @@ func checkModeRC(t *testing.T, lane, mode, outputs, rc string, files []string, l
 	if has("remote_cache_compression") {
 		t.Errorf("%s (mode %s): rc asks for compression:\n%s", lane, mode, rc)
 	}
+	// The remote repo contents cache: mode cache's probe is refused here too
+	// (TestSetupBazelRCWriter runs it answered), and no other mode probes,
+	// so no rc here reads it (the trusted lanes read through bazel.yml's own
+	// reader steps, in .bazelrc.local).
+	for _, line := range bazelRRCReadLines {
+		if has(line) {
+			t.Errorf("%s (mode %s): rc carries %q:\n%s", lane, mode, line, rc)
+		}
+	}
 	credentialFree := func() {
 		for _, bad := range []string{"remote_executor", "remote-exec", "tls_", "remote_instance_name", "--remote_upload_local_results", "--remote_cache", "--remote_header", "--bes_", "farm.invalid"} {
 			if has(bad) {
@@ -407,6 +416,14 @@ func checkModeRC(t *testing.T, lane, mode, outputs, rc string, files []string, l
 // cacheZstdProbe: setup-bazel's zstd probe for the fork cache (a byte copy
 // of gascity's tools/rbe/cache-zstd-probe.sh).
 const cacheZstdProbe = setupBazelActionDir + "/cache-zstd-probe.sh"
+
+// cacheRRCProbe: setup-bazel's remote repo contents cache probe for the fork
+// cache (a copy of gascity's tools/rbe/cache-rrc-probe.sh; the kill switch
+// line, cacheRRCKillLine, is beads' own).
+const (
+	cacheRRCProbe    = setupBazelActionDir + "/cache-rrc-probe.sh"
+	cacheRRCKillLine = "fork_rrc_read=on"
+)
 
 // refusedProbeURL: a loopback port nothing listens on, the probe's URL in
 // tests that do not serve one (a refused connection: no flag).
@@ -630,6 +647,118 @@ func TestCacheZstdProbe(t *testing.T) {
 		check(t, ok, stdout, stderr, false)
 		if hits.Load() != 0 {
 			t.Errorf("probe completed a request through an untrusted certificate")
+		}
+	})
+}
+
+// TestCacheRRCProbe runs cache-rrc-probe.sh against a stand-in rbe-cache:
+// only a gRPC status 0 GetCapabilities answer with cache_capabilities
+// passes; every error, refusal, timeout or unreadable answer fails, and so
+// does a copy with the kill switch off, without asking rbe-cache at all.
+// The probe never writes stdout and always says why on stderr.
+func TestCacheRRCProbe(t *testing.T) {
+	bash := requireHostTool(t, "bash")
+	requireCacheZstdProbeTools(t)
+	root := sourceRepoRoot(t)
+	probeText := readPolicyFile(t, root, cacheRRCProbe)
+	for _, want := range []string{
+		"\n" + cacheRRCKillLine + "\n",
+		"url=${RBE_CACHE_PROBE_URL:-https://rbe-cache.ops.gascity.com:8443}\n",
+		`printf '\000\000\000\000\005\012\003oss'`,
+		"--connect-timeout 3 --max-time \"$max_time\"",
+		"max_time=${RBE_CACHE_PROBE_MAX_TIME:-5}\n",
+	} {
+		if strings.Count(probeText, want) != 1 {
+			t.Errorf("%s lacks %q (once)", cacheRRCProbe, want)
+		}
+	}
+	switchedOff := filepath.Join(t.TempDir(), "cache-rrc-probe.sh")
+	if err := os.WriteFile(switchedOff, []byte(strings.Replace(probeText, "\n"+cacheRRCKillLine+"\n", "\nfork_rrc_read=off\n", 1)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run := func(t *testing.T, script string, env ...string) (bool, string, string) {
+		t.Helper()
+		cmd := exec.Command(bash, script)
+		cmd.Dir = t.TempDir()
+		cmd.Env = append([]string{"PATH=" + os.Getenv("PATH"), "RBE_CACHE_PROBE_MAX_TIME=1"}, env...)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+		err := cmd.Run()
+		var exit *exec.ExitError
+		if err != nil && !errors.As(err, &exit) {
+			t.Fatalf("run %s: %v", script, err)
+		}
+		return err == nil, stdout.String(), stderr.String()
+	}
+	check := func(t *testing.T, ok bool, stdout, stderr string, want bool) {
+		t.Helper()
+		if ok != want {
+			t.Errorf("probe passed: %v, want %v; stderr:\n%s", ok, want, stderr)
+		}
+		if stdout != "" {
+			t.Errorf("probe wrote stdout %q; write-bazelrc.sh would mistake it for its reason", stdout)
+		}
+		verdict := "; this lane fetches external repositories itself\n"
+		if want {
+			verdict = "; this lane reads the remote repo contents cache\n"
+		}
+		if !strings.HasPrefix(stderr, "rbe-cache rrc probe: ") || !strings.HasSuffix(stderr, verdict) || strings.Count(stderr, "\n") != 1 {
+			t.Errorf("probe stderr %q; want one verdict line ending %q", stderr, verdict)
+		}
+	}
+	script := filepath.Join(root, cacheRRCProbe)
+	live := grpcMessage(capsZstd)
+	for _, c := range []struct {
+		name   string
+		answer capsAnswer
+		want   bool
+	}{
+		{"rbe-cache today", capsAnswer{grpc: "0", body: live}, true},
+		{"rbe-cache before zstd", capsAnswer{grpc: "0", body: grpcMessage(capsLive)}, true},
+		{"no cache_capabilities", capsAnswer{grpc: "0", body: grpcMessage(capsLiveAPIVersions)}, false},
+		{"gRPC error after the answer", capsAnswer{grpc: "13", body: live}, false},
+		{"no grpc-status", capsAnswer{body: live}, false},
+		{"trailers-only PERMISSION_DENIED", capsAnswer{grpc: "7"}, false},
+		{"HTTP 502", capsAnswer{status: http.StatusBadGateway, grpc: "0", body: live}, false},
+		{"compressed message", capsAnswer{grpc: "0", body: append([]byte{1}, live[1:]...)}, false},
+		{"truncated message", capsAnswer{grpc: "0", body: live[:len(live)-1]}, false},
+		{"not gRPC", capsAnswer{grpc: "0", body: []byte("<html>bad gateway</html>")}, false},
+		{"timeout", capsAnswer{grpc: "0", body: live, delay: 10 * time.Second}, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			url, ca, hits := serveCapabilities(t, c.answer)
+			start := time.Now()
+			ok, stdout, stderr := run(t, script, "RBE_CACHE_PROBE_URL="+url, "CURL_CA_BUNDLE="+ca)
+			check(t, ok, stdout, stderr, c.want)
+			if hits.Load() != 1 {
+				t.Errorf("probe asked %d times, want 1", hits.Load())
+			}
+			if d := time.Since(start); d > 5*time.Second {
+				t.Errorf("probe took %v; RBE_CACHE_PROBE_MAX_TIME=1 bounds it", d)
+			}
+		})
+	}
+	t.Run("refused", func(t *testing.T) {
+		ok, stdout, stderr := run(t, script, "RBE_CACHE_PROBE_URL="+refusedProbeURL)
+		check(t, ok, stdout, stderr, false)
+	})
+	t.Run("untrusted certificate", func(t *testing.T) {
+		url, _, hits := serveCapabilities(t, capsAnswer{grpc: "0", body: live})
+		ok, stdout, stderr := run(t, script, "RBE_CACHE_PROBE_URL="+url)
+		check(t, ok, stdout, stderr, false)
+		if hits.Load() != 0 {
+			t.Errorf("probe completed a request through an untrusted certificate")
+		}
+	})
+	t.Run("kill switch off", func(t *testing.T) {
+		url, ca, hits := serveCapabilities(t, capsAnswer{grpc: "0", body: live})
+		ok, stdout, stderr := run(t, switchedOff, "RBE_CACHE_PROBE_URL="+url, "CURL_CA_BUNDLE="+ca)
+		check(t, ok, stdout, stderr, false)
+		if !strings.Contains(stderr, "switched off") {
+			t.Errorf("switched-off probe stderr %q does not say it is switched off", stderr)
+		}
+		if hits.Load() != 0 {
+			t.Errorf("switched-off probe asked rbe-cache %d times, want 0", hits.Load())
 		}
 	})
 }

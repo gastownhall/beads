@@ -512,10 +512,11 @@ jobs:
       #   canary     seed, and bazel-test reads;
       #   on         seed, and every lane in .github/scripts/rrc-lane-commands.txt
       #              reads.
-      # Mode remote only: fork pull_request runs see no vars, and only
-      # rbe-west's trusted edge serves the entries. Any other value is off,
-      # with a warning, so a typo never fails the required gate. Like decide,
-      # this step runs no repository code (it comes before the checkout).
+      # Mode remote only: fork pull_request runs see no vars (mode cache
+      # reads through setup-bazel's rc instead, behind its probe of rbe-cache:
+      # write-bazelrc.sh). Any other value is off, with a warning, so a typo
+      # never fails the required gate. Like decide, this step runs no
+      # repository code (it comes before the checkout).
       - name: Remote repo contents cache
         id: rrc
         env:

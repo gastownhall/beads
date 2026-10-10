@@ -677,6 +677,16 @@ nightly.yml's call also runs `rrc-verify`: a cold fetch of every lane,
 compared with the cached entries by `tools/bazel/rrc_verify.py`; a mismatch
 fails the job and opens an `rrc-verify` issue.
 
+Mode `cache` lanes (fork PRs while rbe-fork is closed, `rbe=cache`
+dispatches) see no repository variables. They read the same entries through
+rbe-cache's anonymous AC and CAS reads: setup-bazel's `write-bazelrc.sh` adds
+the same two lines to its rc whenever
+`.github/actions/setup-bazel/cache-rrc-probe.sh` gets a GetCapabilities
+answer from rbe-cache. An unreachable cache with the startup flag set costs
+every repository a failed lookup, so a closed or down rbe-cache gets no lines
+and a notice instead. Kill switch: set `fork_rrc_read=off` in that script (a
+one-line PR). rbe-cache refuses every write, and fork-cache uploads nothing.
+
 `rrc-seed` asks for `id-token: write` and `rrc-verify` for `issues: write`, so
 every caller of `bazel.yml` (pr.yml, nightly.yml, bazel-farm.yml) grants both:
 GitHub checks a called workflow's job permissions when the run starts, even

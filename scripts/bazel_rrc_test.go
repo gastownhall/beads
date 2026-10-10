@@ -174,9 +174,10 @@ func TestBazelRRCModeStep(t *testing.T) {
 	}
 }
 
-// TestBazelRRCReadSteps: exactly bazelRRCReadLanes read, in mode remote only
-// (fork and local runs never: only rbe-west's trusted edge serves the
-// entries), bazel-test under canary and every one of them under on; each
+// TestBazelRRCReadSteps: exactly bazelRRCReadLanes read through these steps,
+// in mode remote only (fork modes and local never; mode cache reads through
+// setup-bazel's rc instead, behind cache-rrc-probe.sh: TestSetupBazelRCWriter),
+// bazel-test under canary and every one of them under on; each
 // writes exactly bazelRRCReadLines, never mentions uploads, and comes before
 // the job's Set up Bazel (so no Bazel server starts without it).
 func TestBazelRRCReadSteps(t *testing.T) {
