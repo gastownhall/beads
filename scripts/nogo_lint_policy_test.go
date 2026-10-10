@@ -24,7 +24,8 @@ import (
 // `run_validations` anywhere in .bazelrc ("every lane validates"); that
 // blanket ban is replaced by TestNogoConfigurationsHaveOneValidatingLane
 // (T1), TestNogoOwnersAreRequired (T2), TestNogoRaceOwnerBuildsEverything
-// (T3) and TestNoUnconditionalValidationOff (T5), which together pin "every
+// (T3), TestNoUnconditionalValidationOff (T5) and
+// TestRunValidationsOnlyOnAllowlistedLines (T6), which together pin "every
 // configuration's nogo runs in exactly one required lane" instead.
 // --norun_validations is a build-request option, not a configuration flag:
 // it changes no action key and discards no analysis.
@@ -362,12 +363,26 @@ func TestNogoOwnersAreRequired(t *testing.T) {
 // deliberately ignores).
 func TestNogoRaceOwnerBuildsEverything(t *testing.T) {
 	workflow := readCIWorkflow(t, bazelWorkflowName)
-	test := workflow.job(t, bazelJobName).step(t, "bazel test //... --config=ci")
+	ownerJob := workflow.job(t, bazelJobName)
+	test := ownerJob.step(t, "bazel test //... --config=ci")
 	if !strings.Contains(test.Run, "bazel test //... --config=ci") {
 		t.Fatalf("%s step does not run bazel test //... --config=ci:\n%s", bazelJobName, test.Run)
 	}
 	if regexp.MustCompile(`bazel test[^\n]*\s-//`).MatchString(test.Run) {
 		t.Errorf("%s excludes a target (-//...) from //...: it would stop validating what it excludes", bazelJobName)
+	}
+	// The race owner's validating step must be unconditional: a step-level
+	// `if:` or continue-on-error here would let the suite report green while
+	// race-group nogo silently did not run, with nothing else in this file
+	// (or T1/T2, which only check job-level fields) noticing.
+	if test.If != "" {
+		t.Errorf("%s step %q has if %q; the race owner's validating step must be unconditional", bazelJobName, test.Name, test.If)
+	}
+	if test.ContinueOnError != nil && test.ContinueOnError != false {
+		t.Errorf("%s step %q has continue-on-error %v; a failed race-group nogo finding there would never fail the job", bazelJobName, test.Name, test.ContinueOnError)
+	}
+	if ownerJob.ContinueOnError {
+		t.Errorf("%s job has continue-on-error; the race owner's job must be able to fail", bazelJobName)
 	}
 
 	rc := readPolicyFile(t, bazelPolicyRoot(t), ".bazelrc")
@@ -419,6 +434,68 @@ func TestNoUnconditionalValidationOff(t *testing.T) {
 	for _, row := range nogoConfigurations {
 		if bazelrcConfigSkipsValidations(rc, row.configs[0]) {
 			t.Errorf("row %q owner config --config=%s passes --norun_validations; it is the row's only validating lane", row.name, row.configs[0])
+		}
+	}
+}
+
+// T6 TestRunValidationsOnlyOnAllowlistedLines: the only
+// run_validations/norun_validations lines anywhere in .bazelrc or bazel.yml
+// are exactly the ones T1's race row already requires: one
+// "test:<non-owner config> --norun_validations" line per non-owner in
+// .bazelrc, and the two package-gate jobs' bazel-build steps. Main's
+// TestLintAndVetRunAsNogo used to ban run_validations outright, which caught
+// a configuration outside T1's table (e.g. test:integration,
+// test:doltserver-cmd -- the race+integration group is a later slice,
+// f5-spec.md §5 S2) quietly adding --norun_validations with no owner to
+// notice. T5 does not re-check that case: it only forbids unconfigured
+// lines and a short prefix list. This allowlist restores the ban for every
+// other line without re-banning the four the race row requires.
+func TestRunValidationsOnlyOnAllowlistedLines(t *testing.T) {
+	root := sourceRepoRoot(t)
+
+	var raceNonOwners []string
+	for _, row := range nogoConfigurations {
+		if row.name == "race" {
+			raceNonOwners = row.configs[1:]
+		}
+	}
+	if len(raceNonOwners) == 0 {
+		t.Fatal("race row has no non-owner configs to allowlist")
+	}
+	allowed := map[string]bool{}
+	for _, cfg := range raceNonOwners {
+		allowed["test:"+cfg+" --norun_validations"] = true
+	}
+
+	rc := readPolicyFile(t, root, ".bazelrc")
+	for _, raw := range strings.Split(rc, "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.Contains(line, "run_validations") && !allowed[line] {
+			t.Errorf(".bazelrc %q: run_validations is only allowed as one of %v; any other line (an unlisted config, an --integration config, or a bare --run_validations toggle) would turn validation off with no owner lane catching it", line, sortedKeys(allowed))
+		}
+	}
+
+	// bazel.yml: only the two package-gate jobs' bazel-build steps may pass
+	// --norun_validations (they spell the race build flags out on the
+	// command line rather than through a .bazelrc --config; T1 pins their
+	// content). Anywhere else -- a new job, a new step, a non-package-gate
+	// job -- would turn a lane's validation off unnoticed.
+	workflow := readCIWorkflow(t, bazelWorkflowName)
+	for name, j := range workflow.Jobs {
+		for _, st := range j.Steps {
+			if !strings.Contains(st.Run, "run_validations") {
+				continue
+			}
+			if !slices.Contains(nogoPackageGateJobs, name) {
+				stepLabel := st.Name
+				if stepLabel == "" {
+					stepLabel = st.Uses
+				}
+				t.Errorf("%s job %q step %q: run_validations outside the package-gate build steps", bazelWorkflowName, name, stepLabel)
+			}
 		}
 	}
 }

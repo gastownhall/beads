@@ -340,11 +340,15 @@ build:js-wasm --use_target_platform_for_tests
 build:js-wasm --remote_download_outputs=toplevel
 
 # nogo (//tools/nogo: go test's vet checks plus the golangci-lint linters
-# .golangci.yml enables) runs beside every Go compile of every lane, so any
-# `bazel build`/`bazel test` fails on a finding. --config=nogo asks for the
-# analysis alone (the nogo_fix output group; nothing is linked), in the race
-# configuration bazel.yml's unit lane (test:ci) builds, so a local run reuses
-# CI's remote cache. make lint, scripts/pr-lint and the pre-commit hook use it.
+# .golangci.yml enables) runs beside every Go compile, so `bazel build`/
+# `bazel test` fails on a finding -- in bazel.yml's one validating (owner)
+# lane per configuration (since F5 S1: a race-group non-owner lane reuses
+# its owner's nogo results instead of re-running them; see
+# scripts/nogo_lint_policy_test.go's nogoConfigurations table).
+# --config=nogo asks for the analysis alone (the nogo_fix output group;
+# nothing is linked), in the race configuration bazel.yml's unit lane
+# (test:ci) builds, so a local run reuses CI's remote cache. make lint,
+# scripts/pr-lint and the pre-commit hook use it.
 build:nogo --@rules_go//go/config:race
 build:nogo --keep_going
 build:nogo --output_groups=nogo_fix
