@@ -75,8 +75,8 @@ func TestApplyMetadataPatchRejectsUnsafeKeysAndNullMerge(t *testing.T) {
 		name  string
 		patch publicops.MetadataPatch
 	}{
-		{"set key with unsafe characters", publicops.MetadataPatch{Set: map[string]json.RawMessage{"bad-key": json.RawMessage(`"value"`)}}},
-		{"unset key with unsafe characters", publicops.MetadataPatch{Unset: []string{"bad-key"}}},
+		{"set key with unsafe characters", publicops.MetadataPatch{Set: map[string]json.RawMessage{"bad:key": json.RawMessage(`"value"`)}}},
+		{"unset key with unsafe characters", publicops.MetadataPatch{Unset: []string{"bad:key"}}},
 		{"null merge payload", publicops.MetadataPatch{Merge: publicops.Field[json.RawMessage]{Set: true, Value: json.RawMessage(`null`)}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
