@@ -1147,6 +1147,7 @@ go_test(
         "sql_multistatement_proxied_integration_test.go",
         "sql_multistatement_test.go",
         "sql_proxied_integration_test.go",
+        "sql_readonly_test.go",
         "sql_test.go",
         "stale_embedded_test.go",
         "stale_test.go",

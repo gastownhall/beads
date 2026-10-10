@@ -113,12 +113,16 @@ func eventsJournalMaintenanceRunnerFor(plumbing any) issueops.EventsMaintenanceR
 //   - runsPostCommandMaintenance excludes strict --readonly (a store opened to
 //     refuse writes) and `bd serve`, which drives the same pass from its own
 //     ticker rather than from a command boundary it does not have.
-//   - isReadOnlyCommand excludes the classified reads, and it is load-bearing
-//     rather than belt-and-braces: a read-only classification opens the store
-//     with OpenForReadOnlyCommand, which is "otherwise a normal writable
-//     store", so nothing underneath refuses a maintenance delete. Drop this
-//     check and `bd list` prunes the journal — which
-//     TestAutoPruneDoesNotRunForReadOnlyCommands catches.
+//   - commandIsEffectivelyReadOnly excludes the classified reads, and it is
+//     load-bearing rather than belt-and-braces: a read-only classification
+//     opens the store with OpenForReadOnlyCommand, which is "otherwise a
+//     normal writable store", so nothing underneath refuses a maintenance
+//     delete. Drop this check and `bd list` prunes the journal — which
+//     TestAutoPruneDoesNotRunForReadOnlyCommands catches. The dynamic
+//     `bd sql` arm (GH#4121) joins the same exclusion, and the rationale
+//     applies with more force there: that store is opened read-only on the
+//     strength of a query-text classification, so a maintenance delete behind
+//     it would be precisely the write the classification promised was absent.
 //
 // Two more gates are specific to this trigger:
 //
@@ -146,7 +150,7 @@ func shouldAutoPruneEventsJournal(cmd *cobra.Command) bool {
 	if cmd == nil {
 		return false
 	}
-	if !runsPostCommandMaintenance(cmd.Name(), readonlyMode) || isReadOnlyCommand(cmd.Name()) {
+	if !runsPostCommandMaintenance(cmd.Name(), readonlyMode) || commandIsEffectivelyReadOnly(cmd.Name()) {
 		return false
 	}
 	if isPreviewCommand(cmd) || isEventsJournalCommand(cmd) {

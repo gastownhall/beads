@@ -37,6 +37,10 @@ committed batch and report "OK", and --database runs the query against a
 different server database (equivalent to a session USE) without changing the
 project's configured database.
 
+When the query is provably read-only (a single SELECT and similar), the database
+is opened read-only, as for 'bd list' and the other read commands. Like them, the
+query then skips the automatic JSONL import that fills an empty database.
+
 WARNING: Direct database access bypasses the storage layer. Use with caution.`,
 	Args:          cobra.ExactArgs(1),
 	SilenceUsage:  true,
@@ -230,12 +234,84 @@ WARNING: Direct database access bypasses the storage layer. Use with caution.`,
 	},
 }
 
+// sqlCommandWantsReadOnlyStore reports whether this `bd sql` invocation should
+// open the store read-only, the way readOnlyCommands do (GH#4121). `sql` cannot
+// live in readOnlyCommands because it can also write; instead the root
+// PersistentPreRunE consults the query itself before the store opens.
+func sqlCommandWantsReadOnlyStore(cmdName string, args []string) bool {
+	return cmdName == "sql" && len(args) == 1 && isReadOnlySQLQuery(args[0])
+}
+
+// isReadOnlySQLQuery reports whether query is a single statement that only
+// reads from the database. It reuses the shared statement classification
+// (sqlclass.Classify / topLevelStatementCount) so both paths agree on what a
+// read is, then tightens EXPLAIN: EXPLAIN ANALYZE executes its target
+// statement, so EXPLAIN only classifies as read-only when the explained
+// statement is itself a SELECT.
+//
+// The classification is deliberately conservative. Writes, multi-statement
+// batches, comment-prefixed input, and anything unrecognized classify as
+// read-write, preserving today's writable open for them. Every query this
+// function accepts is also routed through QueryContext by the RunE above
+// (its read set is a superset of this one), so a read-only store open never
+// pairs with the Exec/CheckReadonly write path.
+func isReadOnlySQLQuery(query string) bool {
+	if topLevelStatementCount(query) != 1 {
+		return false
+	}
+	// Fail closed on any SQL comment. This pre-open gate decides whether the
+	// store may be opened read-only at all, so it stays stricter than the
+	// statement classifier it delegates to. A commented read merely keeps
+	// today's writable open.
+	if strings.Contains(query, "/*") || strings.Contains(query, "--") || strings.Contains(query, "#") {
+		return false
+	}
+	// Fail closed on any backslash: escape semantics depend on the server's
+	// sql_mode (NO_BACKSLASH_ESCAPES flips them), which is unknowable here
+	// before a session exists. A backslash-bearing read merely keeps today's
+	// writable open; no sql_mode can make this classifier unsafe.
+	if strings.Contains(query, `\`) {
+		return false
+	}
+	upper := strings.ToUpper(query)
+	// Dolt exposes mutating procedures such as DOLT_COMMIT and DOLT_RESET
+	// as SELECT-callable functions. ReadOnly only suppresses schema setup; it
+	// is not a write barrier, so keep any DOLT_ query on a writable open and
+	// preserve the post-run export, push, and journal-prune gates.
+	if strings.Contains(upper, "DOLT_") {
+		return false
+	}
+	trimmed := strings.TrimSpace(upper)
+	if rest, ok := strings.CutPrefix(trimmed, "EXPLAIN"); ok {
+		if rest != "" && rest[0] != ' ' && rest[0] != '\t' && rest[0] != '\n' && rest[0] != '\r' {
+			return false // some other word that merely starts with EXPLAIN
+		}
+		return explainTargetIsSelect(rest)
+	}
+	return sqlclass.Classify(query) == sqlclass.Read
+}
+
+// explainTargetIsSelect reports whether the (upper-cased) remainder of an
+// EXPLAIN statement explains a SELECT, skipping the ANALYZE and
+// FORMAT=TRADITIONAL|JSON|TREE modifiers. Bare EXPLAIN, EXPLAIN <table>
+// (DESCRIBE shorthand), and EXPLAIN of write statements report false.
+func explainTargetIsSelect(rest string) bool {
+	for _, tok := range strings.Fields(strings.ReplaceAll(rest, "=", " ")) {
+		switch tok {
+		case "ANALYZE", "FORMAT", "TRADITIONAL", "JSON", "TREE":
+			continue
+		}
+		return strings.HasPrefix(tok, "SELECT")
+	}
+	return false
+}
+
 func init() {
 	sqlCmd.Flags().Bool("csv", false, "Output results in CSV format")
 
-	// Register as a read-only command for SELECT queries.
-	// Write queries will be caught by CheckReadonly.
-	// We don't add to readOnlyCommands because it can do writes too.
+	// `sql` is not in readOnlyCommands because it can do writes too. Read-only
+	// queries still get a read-only store open via sqlCommandWantsReadOnlyStore
+	// in the root PersistentPreRunE; write queries are caught by CheckReadonly.
 
 	rootCmd.AddCommand(sqlCmd)
 }
