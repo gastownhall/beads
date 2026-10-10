@@ -1,6 +1,7 @@
 package doltserver
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"net"
@@ -342,6 +343,181 @@ func TestDefaultConfig(t *testing.T) {
 			t.Errorf("expected port file port 14000, got %d", cfg.Port)
 		}
 	})
+}
+
+// captureStderr swaps os.Stderr to a pipe for the duration of fn and returns
+// whatever was written. Both pipe ends are closed so no FD leaks across the
+// many config-resolution tests in this package.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	orig := os.Stderr
+	os.Stderr = w
+	defer func() { os.Stderr = orig }()
+
+	fn()
+
+	if err := w.Close(); err != nil {
+		t.Fatalf("closing stderr pipe writer: %v", err)
+	}
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+	_ = r.Close()
+	return buf.String()
+}
+
+// resetPortResolutionEnv clears the env knobs that feed ResolveServerMode /
+// externalNonLocalhostHost / the port-source chain, so each test starts from a
+// deterministic baseline independent of the ambient CI runner.
+func resetPortResolutionEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("GT_ROOT", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	t.Setenv("BEADS_DOLT_PORT", "")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	config.ResetForTesting()
+}
+
+// TestDefaultConfig_NoDeprecatedPortWarning_NonLoopbackHost is a regression
+// test for the GH#2372 deprecation warning's HOST-BASED gate. A non-loopback
+// dolt_server_host names a shared server ON PURPOSE (the One True Dolt Server
+// for a team/site); committing its port is the intended design, not a leak,
+// because every contributor dials the SAME remote host rather than whatever
+// happens to listen on that port on their own box. The warning must stay
+// SILENT there and the committed port must still be HONORED unchanged.
+//
+// Gating on externalNonLocalhostHost (rather than ResolveServerMode) matters:
+// an explicit metadata port selects ServerModeExternal (rule #4), so a
+// mode-based gate would leave the warning reachable only in the contrived
+// dolt_mode="embedded"+port case — i.e. never in the loopback-port leak it
+// was written for. This pins the approved post-review behavior.
+func TestDefaultConfig_NoDeprecatedPortWarning_NonLoopbackHost(t *testing.T) {
+	resetPortResolutionEnv(t)
+
+	dir := t.TempDir()
+	metaCfg := &configfile.Config{
+		DoltServerHost: "dolt.example.org",
+		DoltServerPort: 3307,
+	}
+	if err := metaCfg.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	var cfg *Config
+	stderr := captureStderr(t, func() {
+		cfg = DefaultConfig(dir)
+	})
+
+	if cfg.Mode != ServerModeExternal {
+		t.Errorf("expected Mode = ServerModeExternal, got %v", cfg.Mode)
+	}
+	if cfg.Port != 3307 {
+		t.Errorf("expected committed port 3307 honored, got %d", cfg.Port)
+	}
+	if cfg.PortSource != PortSourceMetadataJSON {
+		t.Errorf("expected PortSource = %q, got %q", PortSourceMetadataJSON, cfg.PortSource)
+	}
+	if stderr != "" {
+		t.Errorf("expected NO deprecation warning for a non-loopback host, got stderr:\n%s", stderr)
+	}
+}
+
+// TestDefaultConfig_DeprecatedPortWarning_LoopbackHost is the OTHER side of
+// the host-based gate: the GH#2372 leak is a LOOPBACK problem — a committed
+// dolt_server_port paired with a localhost-or-absent host routes every
+// contributor's clone to whatever listens on that port on THEIR OWN machine.
+// The warning must KEEP FIRING here, but with CORRECTED remediation text that
+// names the untracked ways to stay External (BEADS_DOLT_SERVER_MODE=1 +
+// BEADS_DOLT_SERVER_PORT, or dolt.port in the global/project config.yaml) and
+// warns that blindly deleting the field flips the mode to "owned". The old
+// text falsely pointed at the port file as "the primary source", which is
+// never written in External mode.
+func TestDefaultConfig_DeprecatedPortWarning_LoopbackHost(t *testing.T) {
+	resetPortResolutionEnv(t)
+
+	dir := t.TempDir()
+	// Loopback host + committed port: the textbook GH#2372 footprint. The
+	// host is recorded explicitly to prove the gate keys on host locality,
+	// not merely on host absence.
+	metaCfg := &configfile.Config{
+		DoltServerHost: "127.0.0.1",
+		DoltServerPort: 3307,
+	}
+	if err := metaCfg.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	var cfg *Config
+	stderr := captureStderr(t, func() {
+		cfg = DefaultConfig(dir)
+	})
+
+	if cfg.Mode != ServerModeExternal {
+		t.Errorf("expected Mode = ServerModeExternal (explicit port), got %v", cfg.Mode)
+	}
+	if cfg.Port != 3307 {
+		t.Errorf("expected committed port 3307 still honored, got %d", cfg.Port)
+	}
+	if cfg.PortSource != PortSourceMetadataJSON {
+		t.Errorf("expected PortSource = %q, got %q", PortSourceMetadataJSON, cfg.PortSource)
+	}
+	if !strings.Contains(stderr, "dolt_server_port in metadata.json is deprecated") {
+		t.Errorf("expected the deprecation WARNING to fire for a loopback host, got stderr:\n%s", stderr)
+	}
+	// Corrected remediation: must name the untracked External-preserving
+	// sources, NOT the never-written port file.
+	if !strings.Contains(stderr, "BEADS_DOLT_SERVER_MODE=1") {
+		t.Errorf("warning should mention BEADS_DOLT_SERVER_MODE=1, got:\n%s", stderr)
+	}
+	if !strings.Contains(stderr, "BEADS_DOLT_SERVER_PORT") {
+		t.Errorf("warning should mention BEADS_DOLT_SERVER_PORT, got:\n%s", stderr)
+	}
+	if !strings.Contains(stderr, "dolt.port") {
+		t.Errorf("warning should mention the config.yaml dolt.port alternative, got:\n%s", stderr)
+	}
+	if strings.Contains(stderr, "port file (.beads/dolt-server.port) is now the primary source") {
+		t.Errorf("warning must NOT claim the port file is the primary source (false in External mode), got:\n%s", stderr)
+	}
+	// Must forewarn the silent mode-flip footgun.
+	if !strings.Contains(stderr, "owned") || !strings.Contains(stderr, "ephemeral") {
+		t.Errorf("warning should warn that bare removal flips mode to owned/ephemeral, got:\n%s", stderr)
+	}
+}
+
+// TestDefaultConfig_DeprecatedPortWarning_AbsentHost mirrors the loopback
+// case for the common real-world footprint: a committed dolt_server_port with
+// NO dolt_server_host recorded (so the effective host is the 127.0.0.1
+// default). Same leak shape, same expected warning.
+func TestDefaultConfig_DeprecatedPortWarning_AbsentHost(t *testing.T) {
+	resetPortResolutionEnv(t)
+
+	dir := t.TempDir()
+	metaCfg := &configfile.Config{
+		DoltServerPort: 3307,
+	}
+	if err := metaCfg.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	var cfg *Config
+	stderr := captureStderr(t, func() {
+		cfg = DefaultConfig(dir)
+	})
+
+	if cfg.Mode != ServerModeExternal {
+		t.Errorf("expected Mode = ServerModeExternal (explicit port), got %v", cfg.Mode)
+	}
+	if cfg.Port != 3307 {
+		t.Errorf("expected committed port 3307 still honored, got %d", cfg.Port)
+	}
+	if !strings.Contains(stderr, "dolt_server_port in metadata.json is deprecated") {
+		t.Errorf("expected the deprecation warning to fire when host is absent (defaults to loopback), got stderr:\n%s", stderr)
+	}
 }
 
 func TestEnsurePortFile(t *testing.T) {
