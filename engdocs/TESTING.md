@@ -184,9 +184,9 @@ builds with the integration tag like `--config=integration`. Each shard runs
 its CI job's shard script, so for `--config=doltserver-integration` Bazel
 shard k runs the tests of job k+1 (both split the manifest's 16-shard block
 the same way). `--config=doltserver-proxied`'s `bd_proxied_test` instead
-runs the manifest's own 34-shard block — bin-packed by measured duration,
-not the legacy jobs' 15-shard, bd-init-cost-proxy block — so shard k there
-is not job k+1's tests; it is a different split of the same tests.
+runs the manifest's own 34-shard block, bin-packed by measured duration (the
+manifest's legacy 15-shard, bd-init-cost-proxy block, once read by PR Risk's
+retired fork/push jobs, has been deleted; those jobs no longer exist).
 
 `--config=doltserver-cmd` (`//cmd/bd:bd_dolt_server_test`, bazel.yml's
 advisory `bazel-cmd-dolt` job) runs the whole integration-tagged cmd/bd

@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/testutil/bazeltest"
 )
 
 type compactGCStoreStub struct {
@@ -292,31 +293,50 @@ func TestRunCompactDoltTargetsOnlyAuthorizedActiveDatabase(t *testing.T) {
 	}
 }
 
+// compactGCFixtureEnv names the environment variable a go_test sets from its
+// BUILD file to the prebuilt compact-gc-fixture.go binary (built once by
+// Bazel as a testonly go_binary), the same pattern preflight_test.go uses for
+// BEADS_TEST_PREFLIGHT_GO:
+//
+//	data = [":compact_gc_fixture"],
+//	env = {"BEADS_TEST_COMPACT_GC_FIXTURE": "$(rlocationpath :compact_gc_fixture)"},
+//
+// so this test never needs a host Go toolchain under Bazel.
+const compactGCFixtureEnv = "BEADS_TEST_COMPACT_GC_FIXTURE"
+
+// buildCompactGCFixture produces a directory holding a `dolt` executable that
+// stands in for the external Dolt CLI. Under Bazel it copies the prebuilt
+// fixture from runfiles (bazeltest.RunfileEnv); outside Bazel (plain
+// `go test`) it falls back to compiling testdata/compact-gc-fixture.go with
+// the host Go toolchain, as before.
 func buildCompactGCFixture(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-	const source = `package main
-import ("encoding/json"; "fmt"; "os")
-func main() {
- dir, err := os.Getwd(); if err != nil { panic(err) }
- log, err := os.OpenFile(os.Getenv("BEADS_COMPACT_GC_FIXTURE_LOG"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600); if err != nil { panic(err) }
- if err := json.NewEncoder(log).Encode(struct { Dir string; Args []string }{dir, os.Args[1:]}); err != nil { panic(err) }; if err := log.Close(); err != nil { panic(err) }
- mode := os.Getenv("BEADS_COMPACT_GC_FIXTURE_MODE")
- if mode == "fallback" && len(os.Args) == 4 { fmt.Fprintln(os.Stderr, "unknown flag: --archive-level"); os.Exit(23) }
- if mode == "failure" { fmt.Fprintln(os.Stderr, "genuine GC failure"); os.Exit(23) }
- if err := os.WriteFile("gc-ran", []byte("collected"), 0600); err != nil { panic(err) }
-}
-`
-	path := filepath.Join(dir, "fixture.go")
-	if err := os.WriteFile(path, []byte(source), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	name := "dolt"
 	if runtime.GOOS == "windows" {
 		name += ".exe"
 	}
-	cmd := exec.Command("go", "build", "-o", filepath.Join(dir, name), path)
-	cmd.Dir = dir
+	target := filepath.Join(dir, name)
+	if bazeltest.IsBazel() {
+		fixture, err := bazeltest.RunfileEnv(compactGCFixtureEnv)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(fixture)
+		if err != nil {
+			t.Fatalf("read prebuilt GC fixture: %v", err)
+		}
+		if err := os.WriteFile(target, data, 0o755); err != nil {
+			t.Fatalf("install prebuilt GC fixture: %v", err)
+		}
+		return dir
+	}
+	realGo, err := exec.LookPath("go")
+	if err != nil {
+		t.Fatalf("locate Go toolchain for subprocess fixture: %v", err)
+	}
+	path := filepath.Join("testdata", "compact-gc-fixture.go")
+	cmd := exec.Command(realGo, "build", "-o", target, path)
 	cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GOWORK=off")
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("build owned GC fixture: %v\n%s", err, output)

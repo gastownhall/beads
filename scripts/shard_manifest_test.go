@@ -19,19 +19,20 @@ import (
 
 // S3 (F1, mirroring F2's TestProxiedShardManifestGeneratorNotStale below —
 // see that test's doc comment for the full --check rationale, not repeated
-// here): the Bazel-only 100-shard cmd block and 40-shard storage block are
-// not frozen like their files' legacy 20- and 5-shard blocks.
+// here): the Bazel-only 100-shard cmd block and 40-shard storage block.
 // gen_embedded_{cmd,storage}_shard_manifest.py --check verifies only that
 // the committed block names every discovered test exactly once, failing with
 // the exact command to fix it when a name is missing, stale, or duplicated —
 // run here so a drifted block fails `go test ./scripts/...`
 // (//scripts:go_test_sources_test under Bazel) instead of only surfacing as
-// a test silently never running in any shard. The legacy blocks are
-// deliberately excluded: both files document that their 20- and 5-shard
-// blocks are frozen (see .github/scripts/embedded-{cmd,storage}-
-// test-shards.txt and engdocs/TESTING.md), so a --check against them is
-// expected to report "missing" entries by design (see those generators'
-// module docstrings) and is not what this test runs.
+// a test silently never running in any shard. The cmd file's legacy,
+// hand-assigned 20-shard block (frozen for PR Risk's and main.yml's retired
+// fork/push jobs) has been deleted; those jobs no longer exist (see
+// engdocs/TESTING.md). The storage file's legacy 5-shard block is still
+// frozen and deliberately excluded here: its header documents that (see
+// .github/scripts/embedded-storage-test-shards.txt and engdocs/TESTING.md),
+// so a --check against it is expected to report "missing" entries by design
+// (see that generator's module docstring) and is not what this test runs.
 func TestCmdEmbeddedShardManifestGeneratorNotStale(t *testing.T) {
 	python := requireHostTool(t, "python3")
 	root := sourceRepoRoot(t)
@@ -249,26 +250,24 @@ func TestShardScriptsListOnlyRealTests(t *testing.T) {
 	}
 }
 
-// S3: the Bazel-only 34-shard block is not frozen like the legacy 15-shard
-// block (TestShardScriptsListOnlyRealTests's B1 fix catches outright
-// corruption, but not a committed block that has drifted from the currently
-// discovered TestProxiedServer*/TestServerMode* test set, e.g. a test added,
-// renamed, or removed without anyone running --write). gen_proxied_shard_
-// manifest.py --check verifies only that the committed block names every
-// discovered test exactly once -- not that its shard *assignments* match a
-// fresh LPT pack -- and fails with the exact command to fix it when a name
-// is missing, stale, or duplicated. It deliberately does NOT fail merely
-// because proxied_test_durations.json's weights changed and the existing
-// packing is now suboptimal: two PRs each adding one proxied test would
-// otherwise force a full repack and conflict on unrelated shard lines (see
-// --repack below for the explicit opt-in to that). Run --check here so a
-// block with missing/stale/duplicate names fails go test ./scripts/...
-// (//scripts:go_test_sources_test under Bazel) instead of only
-// surfacing as a test silently never running in any shard. The legacy
-// 15-shard block is deliberately excluded: its header documents that it is
-// frozen and must not be regenerated (see
-// .github/scripts/proxied-cmd-test-shards.txt and engdocs/TESTING.md), so a
-// --check against it would always fail by design.
+// S3: the manifest's Bazel-only 34-shard block, the file's only remaining
+// block now that its legacy, frozen 15-shard block (read by PR Risk's and
+// main.yml's retired fork/push jobs) has been deleted — those jobs no
+// longer exist (see engdocs/TESTING.md). TestShardScriptsListOnlyRealTests's
+// B1 fix catches outright corruption, but not a committed block that has
+// drifted from the currently discovered TestProxiedServer*/TestServerMode*
+// test set, e.g. a test added, renamed, or removed without anyone running
+// --write. gen_proxied_shard_manifest.py --check verifies only that the
+// committed block names every discovered test exactly once -- not that its
+// shard *assignments* match a fresh LPT pack -- and fails with the exact
+// command to fix it when a name is missing, stale, or duplicated. It
+// deliberately does NOT fail merely because proxied_test_durations.json's
+// weights changed and the existing packing is now suboptimal: two PRs each
+// adding one proxied test would otherwise force a full repack and conflict
+// on unrelated shard lines (see --repack below for the explicit opt-in to
+// that). Run --check here so a block with missing/stale/duplicate names
+// fails go test ./scripts/... (//scripts:go_test_sources_test under Bazel)
+// instead of only surfacing as a test silently never running in any shard.
 func TestProxiedShardManifestGeneratorNotStale(t *testing.T) {
 	python := requireHostTool(t, "python3")
 	root := sourceRepoRoot(t)
