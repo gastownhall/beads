@@ -58,14 +58,56 @@ func ValidateWalkTreeRequest(req publicops.WalkTreeRequest) (publicops.TreeDirec
 // only as somebody's ancestor, never for its own sake, so a tree with no
 // matching member comes back empty rather than as a lone root — see
 // issueops.WalkTreeRequest.Status, which states it as a promise.
+//
+// STUBS THAT PRUNE AWAY. A Deduped stub survives only when no full occurrence
+// of its id survives the prune. When both stand, the FULL node is emitted and
+// the stub is dropped: the pruned answer carries each id at most once. This is
+// a DELIBERATE, STATED RULE, not an oversight (gastownhall/beads#5283 delta
+// review): it costs the second edge under --status — `root → shared` is not
+// re-shown when `mid → shared` already stands — in exchange for a pruned tree
+// where an id never appears twice. "Every edge is visible" describes the UNPRUNED
+// walk; a status prune narrows the graph and drops the duplicate view with it.
+// This is no regression against a world without stubs, where no mode showed
+// the second edge at all.
 func PruneTreeByStatus(nodes []*types.TreeNode, status types.Status) []*types.TreeNode {
 	if len(nodes) == 0 {
 		return nodes
 	}
 	keep := make(map[string]bool, len(nodes))
 	parentOf := make(map[string]string, len(nodes))
+
+	// FULL OCCURRENCE = an id that appears at least once NOT Deduped. Stubs
+	// decide against this set, not against parentOf membership: the root's
+	// full occurrence has no parent and so never enters parentOf, and a
+	// cycle-closing stub of the root used to install parentOf[root] = <last
+	// node of the cycle>, letting the ancestor walk run past the root and
+	// around the cycle — keeping every closed member of a cycle through an
+	// --status prune (the bug the cycle-shape probe pins).
+	full := make(map[string]bool, len(nodes))
+	for _, node := range nodes {
+		if node != nil && !node.Deduped {
+			full[node.ID] = true
+		}
+	}
 	for _, node := range nodes {
 		if node == nil {
+			continue
+		}
+		// DEDUP STUBS LOSE. A diamond now carries one node TWICE: the full
+		// occurrence at the first path's parent, and a Deduped stub at the
+		// second's. Keying last-write-wins would let the stub clobber the
+		// full occurrence's parent, so the ancestor walk would keep the
+		// stub's parent instead of the real chain — the exact orphan this
+		// function's promise forbids. The first (non-stub) occurrence wins;
+		// a stub only supplies a parent for an id with no full occurrence.
+		if node.Deduped {
+			if _, seen := full[node.ID]; !seen {
+				if _, ok := parentOf[node.ID]; !ok {
+					if node.ParentID != "" && node.ParentID != node.ID {
+						parentOf[node.ID] = node.ParentID
+					}
+				}
+			}
 			continue
 		}
 		if node.ParentID != "" && node.ParentID != node.ID {
@@ -91,10 +133,20 @@ func PruneTreeByStatus(nodes []*types.TreeNode, status types.Status) []*types.Tr
 		}
 	}
 	filtered := make([]*types.TreeNode, 0, len(nodes))
+	emitted := make(map[string]bool, len(nodes))
 	for _, node := range nodes {
-		if node != nil && keep[node.ID] {
-			filtered = append(filtered, node)
+		if node == nil || !keep[node.ID] {
+			continue
 		}
+		// A Deduped stub is kept only when no full occurrence survived: the
+		// stub's edge is already implied by the full node's presence, and a
+		// kept-but-duplicate entry would reintroduce the ambiguity the walk's
+		// stub contract exists to make explicit.
+		if node.Deduped && emitted[node.ID] {
+			continue
+		}
+		emitted[node.ID] = true
+		filtered = append(filtered, node)
 	}
 	return filtered
 }

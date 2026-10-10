@@ -1287,9 +1287,10 @@ Examples:
   bd dep tree gt-0iqq --status=open      # Only show open issues
   bd dep tree gt-0iqq --depth=3          # Limit to 3 levels deep
 
-A node reached by two paths is shown ONCE, under the first path that got
-there, and a cycle simply ends the descent. --show-all-paths is a deprecated
-no-op; use 'bd dep cycles' to find circular dependencies.
+A node reached by two paths is expanded ONCE, under the first path that got
+there, and shown again under the second as a deduped marker so every edge
+stays visible; a cycle simply ends the descent. --show-all-paths is a
+deprecated no-op; use 'bd dep cycles' to find circular dependencies.
 
 --max-rows / BEADS_MAX_ROWS caveat: the tree walk has no query filter to
 thread the cap through, so the full tree is always built first and the
@@ -1617,7 +1618,7 @@ func init() {
 	// contract states the first-visit rule as a promise
 	// (issueops/treewalker.go, TreeResult.Nodes) and this flag stays accepted so
 	// no script breaks. Same story as TreeNode.Truncated.
-	depTreeCmd.Flags().Bool("show-all-paths", false, "Deprecated no-op: accepted and ignored. A node reached by two paths is shown once, under the first.")
+	depTreeCmd.Flags().Bool("show-all-paths", false, "Deprecated no-op: accepted and ignored. A node reached by two paths is expanded once, under the first, and marked again under the second.")
 	depTreeCmd.Flags().IntP("max-depth", "d", 50, "Maximum tree depth to display (safety limit)")
 	depTreeCmd.Flags().Bool("reverse", false, "Show dependent tree (deprecated: use --direction=up)")
 	depTreeCmd.Flags().String("direction", "", "Tree direction: 'down' (dependencies), 'up' (dependents), or 'both'")
