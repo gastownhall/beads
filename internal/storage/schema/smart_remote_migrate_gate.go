@@ -246,9 +246,11 @@ func routeAdoptFastForward(ctx context.Context, db DBConn, ref string, adopt *Fa
 // (behind == 0) and a purely-ahead clone (behind == 0, ahead >= 1) are still
 // permitted — they are genuine first-movers with nothing to pull.
 //
-// adopt may be nil, or wire neither callback (the shared unit-of-work
-// provider's injection site) — then there is no ancestry fact to read and
-// routing stays exactly as it was before this check existed. With only
+// adopt may be nil, or wire neither callback — then there is no ancestry fact
+// to read and routing stays exactly as it was before this check existed. (The
+// shared unit-of-work provider's injection site wires AheadBehind only; every
+// other callback stays nil there deliberately, so no new auto-write path
+// opens.) With only
 // IsStrictAncestor wired, the fact narrows to the ahead == 0 shape; the
 // diverged shape then reads "not behind", which is the pre-widening
 // behavior rather than a new hazard.

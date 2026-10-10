@@ -1063,6 +1063,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   section — plus the upgrade and init-safety ordering rules — now records the
   `bd dolt pull` exception instead of stating the pull is always refused.
 
+  **Proxied-server mode reaches the stop too, and is told where to run the
+  remedy.** The store-open gate on that path supplied no branch-position
+  callback, so a proxied clone that was level on schema and behind in data
+  could never be classified data-behind: it got the blunt shared-store refusal,
+  whose body is the designated-migrator recipe — `bd migrate --force` then
+  `bd dolt push` — which in this state is the wedge the stop exists to prevent.
+  It now routes to the same data-behind stop as every other topology. Because
+  `bd dolt pull` is refused at the proxied front door
+  (`proxy.dolt_pull.unsupported`), along with `bd dolt push`, the bare
+  `bd migrate` and `bd conflicts`, the guidance there names the machine the pull
+  has to run on rather than printing a command this binary rejects; the `--json`
+  option is `pull-first-on-server-host`, and `expected` carries the same
+  qualifier so a single-field reader is not handed a locally-refused command.
+  The shared-store consent step is the other way round: `bd migrate schema
+  --force` is *not* refused here — the capability registry permits the
+  two-word `migrate schema` path — so the guidance says it can be run from this
+  workspace but only after the pull lands on the server host, and the warning
+  against forcing past the stop names it alongside `BD_ALLOW_REMOTE_MIGRATE=1`
+  as the two consent surfaces this topology can still reach. Read-only proxied
+  opens print the same pull-first block instead of the shared-consent template.
+
   Both existing escape hatches are unchanged: `bd migrate --force` /
   `BD_ALLOW_REMOTE_MIGRATE=1` are still consulted before the smart gate, and
   `BD_SMART_GATE=0` still yields the blunt gate unconditionally (including for
