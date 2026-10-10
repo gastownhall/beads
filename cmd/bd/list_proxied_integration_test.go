@@ -643,10 +643,31 @@ func TestProxiedServerList(t *testing.T) {
 		if len(page) != 2 {
 			t.Errorf("--limit 2 should cap at 2 rows, got %d", len(page))
 		}
-		stdout, _ := bdProxiedListCapture(t, bd, p, "--all", "--limit", "2")
+		stdout, stderr := bdProxiedListCapture(t, bd, p, "--all", "--limit", "2")
 		if strings.Contains(stdout, "more results matched") {
 			t.Errorf("truncation hint must not leak into stdout:\n%s", stdout)
 		}
+		// GH#5102: the hint reaches piped stderr on the proxied route too.
+		if !strings.Contains(stderr, "more results matched") {
+			t.Errorf("expected truncation hint on piped stderr (GH#5102), got:\n%s", stderr)
+		}
+	})
+
+	t.Run("limit_pagination_envelope", func(t *testing.T) {
+		// GH#5102: emitProxiedListJSONResult is its own emit site, so without
+		// this assertion dropping its pagination argument would leave the
+		// suite green on the strength of the direct route's coverage alone.
+		assertTruncatedPagination(t,
+			bdProxiedEnvelopeJSON(t, bd, p, "list", "--json", "--all", "--limit", "2"), 2)
+
+		// Absent when nothing was cut, so callers can test for presence.
+		if env := bdProxiedEnvelopeJSON(t, bd, p, "list", "--json", "--all", "--limit", "0"); env["pagination"] != nil {
+			t.Errorf("unexpected pagination key on untruncated page: %s", env["pagination"])
+		}
+
+		// Its --skip-labels arm is a separate outputJSONWithPagination call.
+		assertTruncatedPagination(t,
+			bdProxiedEnvelopeJSON(t, bd, p, "list", "--json", "--all", "--limit", "2", "--skip-labels"), 2)
 	})
 
 	t.Run("truncation_hint_suppressed_when_no_overflow", func(t *testing.T) {

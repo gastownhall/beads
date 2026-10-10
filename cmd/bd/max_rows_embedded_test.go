@@ -628,14 +628,13 @@ func TestEmbeddedMaxRowsListLimitInteraction(t *testing.T) {
 	// lockstep, so EnforceMaxRowsCap's comparison excludes the probe row
 	// from the cap check while the CLI's own len(results)>effectiveLimit
 	// truncation detection still sees it. See workapi.WithFetchOneExtra's doc
-	// comment in list.go for why this can't false-negative a real
-	// violation. Covered directly (bump values, not exit behavior) by
-	// TestWithFetchOneExtra_LimitEqualsCap_BumpsBothForTruncationProbe
-	// below, since printTruncationHint's text is gated on
-	// ui.IsStderrTerminal() and unconditionally suppressed for this
-	// subprocess harness's piped stderr (see list_embedded_test.go's
-	// limit_truncation_hint subtest) — these end-to-end subtests can only
-	// assert the absence of the false cap error and the delivered count.
+	// comment in internal/workapi/sort.go for why this can't false-negative a
+	// real violation. Covered directly (bump values, not exit behavior) by
+	// TestWithFetchOneExtra_LimitEqualsCap_BumpsBothForTruncationProbe in
+	// max_rows_test.go. Since GH#5102 the notice also reaches this harness's
+	// piped stderr (see list_embedded_test.go's limit_truncation_hint
+	// subtest); these end-to-end subtests still only assert the absence of
+	// the false cap error and the delivered count.
 	t.Run("LimitEqualsCap_TruncatesNotErrors", func(t *testing.T) {
 		out, code := bdRunRaw(t, bd, dir, nil, "list",
 			"--limit", "5", "--max-rows", "5")
