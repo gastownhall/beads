@@ -1428,6 +1428,14 @@ type fakeSyncStore struct {
 	pushCalls       int
 	pushRemoteCalls int
 	lastRemoteArg   string
+
+	// heads controls GetCurrentCommit: calls return heads[0], heads[1], ... in
+	// order, then "" once exhausted — nil means every call returns "", matching
+	// GetCurrentCommit's own best-effort-empty-on-failure contract and leaving
+	// the currency signal (PullAdvanced) false by default for every pre-existing
+	// case here that does not set it.
+	heads     []string
+	headCalls int
 }
 
 func (f *fakeSyncStore) Pull(context.Context) error { f.pullCalls++; return f.pullErr }
@@ -1450,6 +1458,14 @@ func (f *fakeSyncStore) RecomputeAllBlocked(context.Context) (int, error) {
 }
 func (f *fakeSyncStore) ListRemotes(context.Context) ([]storage.RemoteInfo, error) {
 	return f.remotes, nil
+}
+func (f *fakeSyncStore) CommitPending(context.Context, string) (bool, error) { return false, nil }
+func (f *fakeSyncStore) GetCurrentCommit(context.Context) (string, error) {
+	defer func() { f.headCalls++ }()
+	if f.headCalls < len(f.heads) {
+		return f.heads[f.headCalls], nil
+	}
+	return "", nil
 }
 
 // setupSyncCommandTest wires the fake store, resets the sync command's flags
@@ -1692,6 +1708,58 @@ func TestRunSyncCommandJSONEnvelopePerStatus(t *testing.T) {
 			}
 			if got.Pushed != tt.wantPushed {
 				t.Errorf("Pushed = %v, want %v", got.Pushed, tt.wantPushed)
+			}
+		})
+	}
+}
+
+// TestRunSyncCommandReportsPullCurrency covers GH#6671 / GH#4068: bd sync's
+// --json must say what the pull actually did, not just that the step ran, so
+// a supervising loop can tell a silent catch-up from a healthy no-op without
+// parsing output.
+func TestRunSyncCommandReportsPullCurrency(t *testing.T) {
+	tests := []struct {
+		name         string
+		heads        []string
+		wantAdvanced bool
+	}{
+		{
+			name:         "already current: HEAD unchanged",
+			heads:        []string{"abc123", "abc123"},
+			wantAdvanced: false,
+		},
+		{
+			name:         "caught up: HEAD moved",
+			heads:        []string{"abc123", "def456"},
+			wantAdvanced: true,
+		},
+		{
+			name:         "hash unavailable: never claims advancement",
+			heads:        nil,
+			wantAdvanced: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := &fakeSyncStore{recomputed: 1, heads: tt.heads}
+			setupSyncCommandTest(t, fake)
+			jsonOutput = true
+
+			out := captureStdout(t, func() error { return runSyncCommand(syncCmd, nil) })
+			var got syncOutcome
+			if err := json.Unmarshal([]byte(out), &got); err != nil {
+				t.Fatalf("json.Unmarshal(%q): %v", out, err)
+			}
+			if got.PullAdvanced != tt.wantAdvanced {
+				t.Errorf("PullAdvanced = %v, want %v", got.PullAdvanced, tt.wantAdvanced)
+			}
+			if len(tt.heads) == 2 {
+				if got.PullHeadBefore != tt.heads[0] {
+					t.Errorf("PullHeadBefore = %q, want %q", got.PullHeadBefore, tt.heads[0])
+				}
+				if got.PullHeadAfter != tt.heads[1] {
+					t.Errorf("PullHeadAfter = %q, want %q", got.PullHeadAfter, tt.heads[1])
+				}
 			}
 		})
 	}
