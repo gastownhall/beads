@@ -48,6 +48,12 @@ const bazelDoltRaceJobTimeoutHeadroom = 10
 // must exceed the sum of all its step timeouts.
 const bazelDoltRaceJobTimeoutMargin = 5
 
+// bazelDoltRaceMergeQueueTimeout: the merge queue's check timeout (ruleset
+// merge_queue.check_response_timeout_minutes). CI Gate waits for the shadow,
+// so the shadow's job timeout must stay below it or a hung shadow drops the
+// group from the queue.
+const bazelDoltRaceMergeQueueTimeout = 60
+
 // The union's members, and the tag filter each owns.
 var bazelDoltRaceMembers = []struct{ config, tag string }{
 	{"doltserver", "dolt-server"},
@@ -219,6 +225,10 @@ func TestBazelDoltRaceShadowIsAdvisory(t *testing.T) {
 	if job.TimeoutMinutes < sum+bazelDoltRaceJobTimeoutMargin {
 		t.Errorf("%s timeout-minutes %d, want at least the sum of its step timeouts (%d) + %d",
 			bazelDoltRaceJobName, job.TimeoutMinutes, sum, bazelDoltRaceJobTimeoutMargin)
+	}
+	if job.TimeoutMinutes >= bazelDoltRaceMergeQueueTimeout {
+		t.Errorf("%s timeout-minutes %d, want below the merge queue's %d-minute check timeout: CI Gate waits for the shadow",
+			bazelDoltRaceJobName, job.TimeoutMinutes, bazelDoltRaceMergeQueueTimeout)
 	}
 
 	// No workflow_call output reads the job.

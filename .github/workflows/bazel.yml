@@ -2024,7 +2024,7 @@ jobs:
     # cancels it, which continue-on-error does not cover
     # (TestBazelDoltRaceShadowIsAdvisory). bazel-proxied's steps have no
     # timeouts but its test step's; these bound the rest.
-    timeout-minutes: 65
+    timeout-minutes: 55
     continue-on-error: true
     steps:
       # inputs.checkout-sha: see the header (empty: the event's default ref).
@@ -2049,7 +2049,7 @@ jobs:
 
       - name: Set up Bazel
         id: bazel
-        timeout-minutes: 10
+        timeout-minutes: 5
         uses: ./.github/actions/setup-bazel
         env:
           BAZEL_REMOTE_EXECUTOR: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_WEST_EXECUTOR || '' }}
@@ -2064,7 +2064,7 @@ jobs:
 
       # As in bazel-proxied.
       - name: No test target is marked flaky
-        timeout-minutes: 5
+        timeout-minutes: 3
         run: |
           flaky="$(bazel query 'attr(flaky, 1, tests(//...))')"
           if [ -n "$flaky" ]; then
@@ -2099,12 +2099,12 @@ jobs:
       # member lanes stay green.
       - name: Every target and shard ran tests
         if: ${{ always() && steps.test.outcome != 'skipped' }}
-        timeout-minutes: 3
+        timeout-minutes: 2
         run: python3 tools/bazel/check_testcases.py --bep "$RUNNER_TEMP/bazel-bep.json"
 
       - name: Every listed test ran in its shard
         if: ${{ always() && steps.test.outcome != 'skipped' }}
-        timeout-minutes: 3
+        timeout-minutes: 2
         run: >-
           python3 tools/bazel/check_shard_coverage.py
           --bep "$RUNNER_TEMP/bazel-bep.json"
@@ -2128,7 +2128,7 @@ jobs:
         id: ci-analytics
         if: "!cancelled() && steps.test.outcome != 'skipped'"
         continue-on-error: true
-        timeout-minutes: 3
+        timeout-minutes: 2
         env:
           LANE: dolt-race
           MODE: ${{ needs.rbe.outputs.mode }}
