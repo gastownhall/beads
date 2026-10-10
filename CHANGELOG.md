@@ -444,6 +444,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   issues' dependency targets alongside the blockers they already fetched.
   Pinned-never-blocks itself is unchanged.
 
+- **`install.sh` no longer reports success when the installed `bd` cannot
+  run.** It printed "bd is installed and ready!" before running anything and
+  hid a failing `bd version` behind "bd (development build)", so a glibc
+  binary on Alpine looked installed. It now runs the binary it just installed
+  first, shows the error and exits non-zero, with a hint to build with
+  `go install` on musl-based systems (#6739).
+
 - **`bd list` no longer silently drops all but the last repeated filter flag.**
   `--status`, `--state`, and `--id` were plain string flags, so
   `bd list --status open --status closed --status pinned` kept only `pinned` —
