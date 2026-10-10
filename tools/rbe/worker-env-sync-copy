@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# worker-env-sync-copy: copy gascity's worker-env manifest and pin here.
+#
+#   tools/rbe/worker-env-sync-copy [REF]
+#
+# tools/rbe/worker-env-sync only detects an out-of-step pin (exit 1) or that
+# it could not compare (exit 2); it never writes. This is the write half,
+# run only after that exit-1 detection: it fetches gascity's
+# tools/rbe/worker-env.txt and platforms/BUILD.bazel at REF (default main)
+# and overwrites beads' copies, byte for byte, the same edit #7419 made by
+# hand. It does not touch git (no add, commit, or push) -- the caller
+# (worker-env-autosync.yml) stages and opens the PR.
+#
+# Env: WORKER_ENV_SYNC_URL, gascity's raw-content base (default
+# https://raw.githubusercontent.com/gastownhall/gascity). Tests only.
+# Run from the repository root.
+set -Eeuo pipefail
+
+ref=${1:-main}
+base=${WORKER_ENV_SYNC_URL:-https://raw.githubusercontent.com/gastownhall/gascity}/$ref
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+curl -fsSL --connect-timeout 5 --max-time 15 --retry 2 -o "$tmp/worker-env.txt" "$base/tools/rbe/worker-env.txt"
+curl -fsSL --connect-timeout 5 --max-time 15 --retry 2 -o "$tmp/BUILD.bazel" "$base/platforms/BUILD.bazel"
+
+pin=$(sed -n 's/^ *"worker-env": "\(sha256:[0-9a-f]\{64\}\)",$/\1/p' "$tmp/BUILD.bazel")
+if [ -z "$pin" ]; then
+	echo "worker-env-sync-copy: gascity $ref's platforms/BUILD.bazel has no worker-env pin; nothing copied" >&2
+	exit 1
+fi
+
+cp "$tmp/worker-env.txt" tools/rbe/worker-env.txt
+sed -i -E "s#\"worker-env\": \"sha256:[0-9a-f]{64}\",#\"worker-env\": \"$pin\",#" platforms/BUILD.bazel
+
+ours=$(sed -n 's/^ *"worker-env": "\(sha256:[0-9a-f]\{64\}\)",$/\1/p' platforms/BUILD.bazel)
+if [ "$ours" != "$pin" ]; then
+	echo "worker-env-sync-copy: platforms/BUILD.bazel still pins $ours after the edit, want $pin" >&2
+	exit 1
+fi
+echo "worker-env-sync-copy: copied gascity $ref's worker-env ($pin)"

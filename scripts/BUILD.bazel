@@ -61,6 +61,7 @@ go_test(
         "pr_risk_bazel_coverage_test.go",
         "rbe_worker_env_test.go",
         "repo_helpers_test.go",
+        "worker_env_autosync_test.go",
     ],  # keep
     data = [
         "//:repo_other_files",

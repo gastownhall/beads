@@ -1,0 +1,196 @@
+# Keep beads' rbe worker-env pin in step with gastownhall/gascity main
+# without the ~100-minute wait #7419 fixed by hand.
+#
+# rbe-west's OSS pool is gascity's: its workers advertise the sha256 of the
+# toolchain manifest gascity's tools/rbe/worker-env measures, and the
+# schedulers match //platforms:rbe_worker's worker-env exec property
+# exactly. beads' tools/rbe/worker-env.txt and the platforms/BUILD.bazel pin
+# are a byte-for-byte copy of gascity main's; when gascity moves the pin (a
+# Go, dolt, or OS/library bump -- #7387 was a Go security release), every
+# beads remote-execution run stops in bazel.yml's rbe-job preflight
+# (tools/rbe/worker-env-sync) until the copy catches up. nightly.yml's
+# rbe-worker-env-sync job already opens a ci/infra issue for a human to fix;
+# this instead opens the fix itself, every 15 minutes, so the gap is
+# minutes, not until someone reads the issue.
+#
+# tools/rbe/worker-env-sync only detects the mismatch (exit 1) or that it
+# could not compare with gascity (exit 2, e.g. GitHub is briefly
+# unreachable; the next run retries). The write half, tools/rbe/worker-env-
+# sync-copy, runs only after that exit-1 detection, on a checkout already in
+# hand -- so a transient gascity outage can turn "in step" into "unknown",
+# never into an unwanted write.
+#
+# TWO TOKENS, ONE JOB EACH: GitHub never runs checks on a PR a plain
+# GITHUB_TOKEN opens (its loop-prevention rule), so this needs a GitHub App
+# token to open the PR. The gastownhall-autofix App (contents:write only on
+# this repo) mints push-token and does the git push of the fixed branch
+# (bot/worker-env-sync); it cannot open, label or merge a PR. The separate
+# gascity-autofix App (pull-requests:write only, no contents) mints pr-token
+# and does everything PR-shaped: create/update, the status/needs-review-auto
+# label, and arming auto-merge. Splitting them means a bug in the PR-shaped
+# half can never push a commit, and a bug in the push half can never touch a
+# PR; neither token can do the other's job even by accident. Both Apps'
+# credentials are secrets of the same `autofix` environment.
+#
+# peter-evans/create-pull-request takes one token for the whole push+PR
+# flow, so it cannot honor this split; this uses plain git for the push and
+# gh for the PR instead. Every `${{ }}` is resolved into a step's `env:`,
+# never written inside a `run:` script, so a value that happened to look
+# like shell (a title or body containing `` ` `` or `$`) is data to the
+# shell, not something GitHub's expression syntax or the shell re-parses.
+#
+# SECURITY: schedule and workflow_dispatch are never fork events (no
+# pull_request trigger here at all), so neither App's private key -- secrets
+# of the `autofix` environment, whose deployment-branch policy allows only
+# main -- is ever readable by a fork. The guard on github.repository is
+# defense in depth for a fork of this repo, where the secrets would not
+# exist anyway. Both mint steps run only once worker-env-sync has already
+# found a real mismatch, so a run that is in step or can't compare asks
+# neither App for a token. gh pr merge --auto only arms GitHub's native
+# auto-merge (it still waits for every required check and the branch
+# protection rule); it does not merge anything itself.
+name: rbe worker-env autosync
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  autosync:
+    name: Sync worker-env pin with gascity main
+    if: github.repository == 'gastownhall/beads'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Grants the job read access to this environment's secrets (both Apps'
+    # id and private key); its deployment-branch policy restricts that to
+    # jobs running on main, which schedule and workflow_dispatch on this
+    # repo always are.
+    environment: autofix
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          persist-credentials: false
+
+      # Never fails the step itself: rc is the signal every later step
+      # gates on (1, a real mismatch; 2, gascity unreachable -- the next
+      # scheduled run retries; 0, in step). A run every 15 minutes failing
+      # red for however long a mismatch takes to review and merge would be
+      # noise, not signal.
+      - name: Compare the worker-env manifest and pin with gascity's main
+        id: sync
+        run: |
+          rc=0
+          tools/rbe/worker-env-sync main || rc=$?
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+
+      - name: Copy gascity main's worker-env manifest and pin
+        if: steps.sync.outputs.rc == '1'
+        run: tools/rbe/worker-env-sync-copy main
+
+      - name: Confirm only the worker-env files moved
+        if: steps.sync.outputs.rc == '1'
+        run: |
+          changed="$(git diff --name-only)"
+          untracked="$(git ls-files --others --exclude-standard)"
+          want=$'platforms/BUILD.bazel\ntools/rbe/worker-env.txt'
+          if [ -n "$untracked" ] || [ "$(printf '%s\n' "$changed" | sort)" != "$(printf '%s\n' "$want" | sort)" ]; then
+            echo "::error::worker-env-sync-copy touched more than platforms/BUILD.bazel and tools/rbe/worker-env.txt:"
+            printf '%s\n' "$changed" "$untracked"
+            exit 1
+          fi
+
+      # contents:write only, on this repo alone: all it can do is push
+      # bot/worker-env-sync. Minted only once a real mismatch needs a push.
+      - name: Mint push token (gastownhall-autofix)
+        id: push-token
+        if: steps.sync.outputs.rc == '1'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        with:
+          app-id: ${{ secrets.AUTOFIX_APP_ID }}
+          private-key: ${{ secrets.AUTOFIX_APP_PRIVATE_KEY }}
+          owner: gastownhall
+          repositories: beads
+          permission-contents: write
+
+      # pull-requests:write only, on this repo alone: all it can do is
+      # open, label and arm auto-merge on a PR -- never push a commit.
+      - name: Mint PR token (gascity-autofix)
+        id: pr-token
+        if: steps.sync.outputs.rc == '1'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        with:
+          app-id: ${{ secrets.GASCITY_AUTOFIX_APP_ID }}
+          private-key: ${{ secrets.GASCITY_AUTOFIX_APP_PRIVATE_KEY }}
+          owner: gastownhall
+          repositories: beads
+          permission-pull-requests: write
+
+      # push-token alone; it cannot see a PR exists, let alone touch one.
+      # Leased to the branch: a force-with-lease scoped to refs/heads/
+      # bot/worker-env-sync only, so a push can never move any other ref.
+      - name: Commit and push the sync branch
+        if: steps.sync.outputs.rc == '1'
+        env:
+          PUSH_TOKEN: ${{ steps.push-token.outputs.token }}
+          REPO: ${{ github.repository }}
+          BRANCH: bot/worker-env-sync
+          COMMIT_SUBJECT: "build(rbe): sync worker-env pin with gascity main"
+          GIT_AUTHOR_NAME: gastownhall-autofix[bot]
+          GIT_AUTHOR_EMAIL: gastownhall-autofix[bot]@users.noreply.github.com
+          GIT_COMMITTER_NAME: gastownhall-autofix[bot]
+          GIT_COMMITTER_EMAIL: gastownhall-autofix[bot]@users.noreply.github.com
+        run: |
+          git checkout -B "$BRANCH"
+          git add platforms/BUILD.bazel tools/rbe/worker-env.txt
+          git commit -m "$COMMIT_SUBJECT"
+          git push "https://x-access-token:${PUSH_TOKEN}@github.com/${REPO}.git" \
+            "HEAD:refs/heads/$BRANCH" "--force-with-lease=refs/heads/$BRANCH"
+
+      # pr-token alone; it cannot push a commit, only act on the PR the
+      # step above already pushed.
+      - name: Open or update the sync PR
+        id: pr
+        if: steps.sync.outputs.rc == '1'
+        env:
+          GH_TOKEN: ${{ steps.pr-token.outputs.token }}
+          REPO: ${{ github.repository }}
+          BRANCH: bot/worker-env-sync
+          TITLE: "build(rbe): sync worker-env pin with gascity main"
+          LABEL: status/needs-review-auto
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          body="$(cat <<BODY
+          rbe-west's pool workers advertise gastownhall/gascity main's worker-env
+          pin; beads' copy (\`tools/rbe/worker-env.txt\` and the
+          \`platforms/BUILD.bazel\` pin) had fallen out of step, so beads' remote
+          actions were queueing on a pin no worker serves
+          (\`tools/rbe/worker-env-sync main\`, run $RUN_URL).
+
+          This copies gascity main's manifest and pin byte for byte, same as
+          #7419. Auto-merge is armed: it lands once the automated review and the
+          rest of the required checks are green.
+          BODY
+          )"
+          number="$(gh pr list --repo "$REPO" --head "$BRANCH" --base main --state open --json number --jq '.[0].number')"
+          if [ -n "$number" ]; then
+            gh pr edit "$number" --repo "$REPO" --title "$TITLE" --body "$body"
+          else
+            gh pr create --repo "$REPO" --base main --head "$BRANCH" --title "$TITLE" --body "$body"
+            number="$(gh pr list --repo "$REPO" --head "$BRANCH" --base main --state open --json number --jq '.[0].number')"
+          fi
+          gh pr edit "$number" --repo "$REPO" --add-label "$LABEL"
+          echo "number=$number" >> "$GITHUB_OUTPUT"
+
+      - name: Enable auto-merge
+        if: steps.sync.outputs.rc == '1' && steps.pr.outputs.number
+        env:
+          GH_TOKEN: ${{ steps.pr-token.outputs.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+        run: gh pr merge --auto --squash --repo "$REPO" "$PR_NUMBER"
