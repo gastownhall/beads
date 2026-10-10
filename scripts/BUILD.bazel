@@ -87,6 +87,7 @@ go_test(
     name = "shell_scripts_test",
     srcs = [
         "check_build_tags_test.go",
+        "check_doc_flags_test.go",
         "check_doc_freshness_test.go",
         "check_release_cross_compile_test.go",
         "check_testing_short_test.go",
