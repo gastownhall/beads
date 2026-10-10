@@ -86,7 +86,7 @@ func handleRemoteMigrateGateJSON(e *schema.RemoteMigrateGateError) {
 		// beads_global, so the project-scoped `bd migrate schema` would consent
 		// the WRONG database and leave the refusal in place. Mirror the
 		// human/text path (printGlobalDatabaseConsentHint,
-		// noticeSharedMigrateRefusal) and name the --global verb when this
+		// noticeAutoMigrateRefusal) and name the --global verb when this
 		// invocation targeted the global database. Only shared-no-remote is
 		// retargeted; the remote-backed arms coordinate through bd bootstrap /
 		// bd migrate --force, which --global does not rewrite.
