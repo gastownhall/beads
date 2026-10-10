@@ -924,6 +924,12 @@ type EventsJournalAccessor interface {
 	// retain-days / retain-rows floors (0 = floor disabled), and returns the
 	// number of rows deleted.
 	PruneEventsJournal(ctx context.Context, before int64, retainDays, retainRows int) (int64, error)
+	// JournalHead returns the journal's head (the highest seq ever assigned)
+	// and floor (the lowest seq still retained), without reading any journal
+	// rows. `bd events head` is the only caller: a consumer that wants to
+	// follow the journal "from now" otherwise has no cheap way to learn where
+	// "now" is (#7084). See issueops.ReadEventsHeadAndFloorInTx.
+	JournalHead(ctx context.Context) (head, floor int64, err error)
 }
 
 // EventsJournalConfigurer controls durable events journal activation on ONE

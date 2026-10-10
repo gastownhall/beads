@@ -1277,6 +1277,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   work, so an HTTP client can forward `bd update --claim` instead of refusing
   it, and can never mistake an older server for one that dropped the claim.
 
+- **`bd events head [--json]` prints the journal's head and floor without
+  reading any journal rows.** A consumer that wants to start following the
+  journal "from now" previously had no cheap way to learn where "now" is:
+  `bd events tail --since <past the head>` returns nothing without saying
+  where the head is, and `--since 0` replays the whole retained window just
+  to find the last line. `bd events head` answers both directly — read the
+  head once, then `tail --since <head>` to follow everything committed after
+  that moment. Works in embedded, server-mode, and proxied-server storage the
+  same way `tail`/`prune` do.
+
 ### Fixed
 
 - **`bd show` counts a wisp's comments instead of reporting `comment_count: 0`**
