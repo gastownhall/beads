@@ -1,6 +1,7 @@
 package scripts_test
 
 import (
+	"cmp"
 	"os"
 	"path/filepath"
 	"slices"
@@ -42,6 +43,10 @@ var bazelShadowLanes = map[string]string{
 // bazelDoltRaceJobTimeoutHeadroom: the minutes the shadow job's
 // timeout-minutes must exceed its test step's (TestBazelDoltRaceShadowIsAdvisory).
 const bazelDoltRaceJobTimeoutHeadroom = 10
+
+// bazelDoltRaceJobTimeoutMargin: the minutes the shadow job's timeout-minutes
+// must exceed the sum of all its step timeouts.
+const bazelDoltRaceJobTimeoutMargin = 5
 
 // The union's members, and the tag filter each owns.
 var bazelDoltRaceMembers = []struct{ config, tag string }{
@@ -196,6 +201,24 @@ func TestBazelDoltRaceShadowIsAdvisory(t *testing.T) {
 	if job.TimeoutMinutes < test.TimeoutMinutes+bazelDoltRaceJobTimeoutHeadroom {
 		t.Errorf("%s timeout-minutes %d, want at least the test step's %d + %d: a job cancelled at its own timeout can turn ci-gate red",
 			bazelDoltRaceJobName, job.TimeoutMinutes, test.TimeoutMinutes, bazelDoltRaceJobTimeoutHeadroom)
+	}
+
+	// And no step can run the job into its own timeout: every step has a
+	// timeout-minutes (a step timeout is a step failure, which
+	// continue-on-error covers), and their sum plus
+	// bazelDoltRaceJobTimeoutMargin minutes (runner setup, post-job
+	// cleanup) fits in the job's.
+	sum := 0
+	for i, step := range job.Steps {
+		if step.TimeoutMinutes <= 0 {
+			t.Errorf("%s step %d (%q) has no timeout-minutes; a hang would run into the job timeout, a cancellation continue-on-error does not cover",
+				bazelDoltRaceJobName, i, cmp.Or(step.Name, step.Uses))
+		}
+		sum += step.TimeoutMinutes
+	}
+	if job.TimeoutMinutes < sum+bazelDoltRaceJobTimeoutMargin {
+		t.Errorf("%s timeout-minutes %d, want at least the sum of its step timeouts (%d) + %d",
+			bazelDoltRaceJobName, job.TimeoutMinutes, sum, bazelDoltRaceJobTimeoutMargin)
 	}
 
 	// No workflow_call output reads the job.

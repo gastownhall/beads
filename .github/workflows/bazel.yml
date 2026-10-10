@@ -1995,8 +1995,11 @@ jobs:
   # one client per group of lanes can be compared with the two it would
   # replace (end time, runner minutes, test counts and results) before any
   # cutover. Each member target's test action key is unchanged, so the shadow
-  # and the member lanes share cached results, and rbe-west deduplicates
-  # identical in-flight executions.
+  # and the member lanes share cached results; and rbe-west deduplicates
+  # identical in-flight executions (confirmed by the farm maintainer:
+  # NativeLink 1.7.1 subscribes a second identical Execute of a cacheable
+  # action to the operation already in flight), so the shadow adds no
+  # executions.
   # Advisory: it cannot fail the gate. Job-level continue-on-error (a failed
   # job otherwise fails the whole call, whose result pr.yml's ci-gate
   # requires as BAZEL), no workflow_call output, no job outputs, no job in
@@ -2005,7 +2008,7 @@ jobs:
   # every job in it has finished (success, failure or timeout), so a slow
   # shadow delays the gate and the merge queue. continue-on-error does not
   # cover a job GitHub cancels at its own timeout-minutes, which could turn
-  # the call red: the job timeout keeps 10 minutes over the test step's
+  # the call red: every step has a timeout, and the job's exceeds their sum
   # (TestBazelDoltRaceShadowIsAdvisory). Mode remote only, on
   # same-repo pull requests and merge groups (mode remote on a pull_request
   # is never a fork): no fork mode, no cache or local mode, and not on push,
@@ -2016,13 +2019,19 @@ jobs:
     needs: rbe
     runs-on: ${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     if: ${{ needs.rbe.outputs.mode == 'remote' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}
-    timeout-minutes: 35
+    # At least every step's timeout-minutes plus 5 (and the test step's plus
+    # 10): a hung step then fails the job (continue-on-error) before GitHub
+    # cancels it, which continue-on-error does not cover
+    # (TestBazelDoltRaceShadowIsAdvisory). bazel-proxied's steps have no
+    # timeouts but its test step's; these bound the rest.
+    timeout-minutes: 65
     continue-on-error: true
     steps:
       # inputs.checkout-sha: see the header (empty: the event's default ref).
       # checkout v7 refuses a fork head on pull_request_target unless opted
       # in; only bazel-farm.yml's authorized call opts in (false elsewhere).
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 5
         with:
           ref: ${{ inputs.checkout-sha }}
           persist-credentials: false
@@ -2031,6 +2040,7 @@ jobs:
       # The remote repo contents cache, read-only, as in bazel-test.
       - name: Remote repo contents cache (read)
         if: ${{ needs.rbe.outputs.mode == 'remote' && needs.rbe.outputs.rrc == 'on' }}
+        timeout-minutes: 1
         run: |
           {
             echo 'startup --experimental_remote_repo_contents_cache'
@@ -2039,6 +2049,7 @@ jobs:
 
       - name: Set up Bazel
         id: bazel
+        timeout-minutes: 10
         uses: ./.github/actions/setup-bazel
         env:
           BAZEL_REMOTE_EXECUTOR: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_WEST_EXECUTOR || '' }}
@@ -2053,6 +2064,7 @@ jobs:
 
       # As in bazel-proxied.
       - name: No test target is marked flaky
+        timeout-minutes: 5
         run: |
           flaky="$(bazel query 'attr(flaky, 1, tests(//...))')"
           if [ -n "$flaky" ]; then
@@ -2087,10 +2099,12 @@ jobs:
       # member lanes stay green.
       - name: Every target and shard ran tests
         if: ${{ always() && steps.test.outcome != 'skipped' }}
+        timeout-minutes: 3
         run: python3 tools/bazel/check_testcases.py --bep "$RUNNER_TEMP/bazel-bep.json"
 
       - name: Every listed test ran in its shard
         if: ${{ always() && steps.test.outcome != 'skipped' }}
+        timeout-minutes: 3
         run: >-
           python3 tools/bazel/check_shard_coverage.py
           --bep "$RUNNER_TEMP/bazel-bep.json"
@@ -2098,6 +2112,7 @@ jobs:
 
       - name: Upload test logs
         if: ${{ failure() && steps.test.outcome != 'skipped' }}
+        timeout-minutes: 3
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           overwrite: true # a job re-run is the same run: replace, not 409

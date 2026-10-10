@@ -644,8 +644,10 @@ with the member lanes.
   (success, failure or timeout), `continue-on-error` ones included. A slow
   shadow therefore delays `CI Gate` and the merge queue, up to its
   timeout. `continue-on-error` does not cover a job GitHub cancels at its
-  own `timeout-minutes`, so the job's timeout stays 10 minutes above its
-  test step's (policy-tested).
+  own `timeout-minutes`, so every step has its own timeout and the job's
+  (65 minutes) stays at least 5 minutes above their sum and 10 above the
+  test step's (policy-tested). A hung step then fails the job, which
+  `continue-on-error` covers, before GitHub would cancel it.
 - Its ci-analytics `LANE` is `dolt-race`.
 - Policy: `scripts/bazel_dolt_race_shadow_test.go`. Removing the job, its
   `.bazelrc` config and its line in `.github/scripts/rrc-lane-commands.txt`
