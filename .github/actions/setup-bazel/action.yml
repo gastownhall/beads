@@ -8,7 +8,9 @@ description: >
   BAZEL_REMOTE_EXECUTOR, RBE_TLS_CERT and RBE_TLS_KEY in the step env, that rc
   enables --config=remote-exec for every bazel command; with none of them the
   job runs locally; with BAZEL_FORK_CACHE=true (and no secrets) it enables
-  the read-only fork cache (--config=fork-cache); with BAZEL_FORK_REMOTE=true
+  the read-only fork cache (--config=fork-cache), and with BAZEL_RRC_READ=true
+  too (the remote repo contents cache readers) Bazel's remote repo contents
+  cache through rbe-cache while it answers; with BAZEL_FORK_REMOTE=true
   (fork and Dependabot PRs, bazel.yml modes fork-ro/fork-rw; needs
   RBE_FORK_PR and RBE_FORK_TIER) it gets a short-lived certificate from
   rbe-fork-mint (fork-credential.sh, proving the run with a CSR artifact) and

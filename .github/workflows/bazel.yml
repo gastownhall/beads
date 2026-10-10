@@ -513,8 +513,8 @@ jobs:
       #   on         seed, and every lane in .github/scripts/rrc-lane-commands.txt
       #              reads.
       # Mode remote only: fork pull_request runs see no vars (mode cache
-      # reads through setup-bazel's rc instead, behind its probe of rbe-cache:
-      # write-bazelrc.sh). Any other value is off, with a warning, so a typo
+      # reads through setup-bazel's rc instead, in the jobs that pass
+      # BAZEL_RRC_READ, behind its probe of rbe-cache: write-bazelrc.sh). Any other value is off, with a warning, so a typo
       # never fails the required gate. Like decide, this step runs no
       # repository code (it comes before the checkout).
       - name: Remote repo contents cache
@@ -764,7 +764,10 @@ jobs:
     # and cache runs (forks, rbe=off/cache, no secrets) build everything
     # they miss on the runner, so they get the larger GitHub-hosted one.
     # Fork modes (fork-ro/fork-rw) execute remotely but stay GitHub-hosted,
-    # like every fork job: the runner is only a client.
+    # like every fork job: the runner is only a client. ubuntu-24.04, not
+    # ubuntu-latest, in every lane that reads the remote repo contents cache
+    # in mode cache: the cached trees are Linux x86_64 ones from a 24.04 host
+    # (design R2), so the image must not move under them.
     #
     # 8 vCPU, not the other lanes' 4: with every action a remote cache hit,
     # this lane's `bazel test //... --config=ci` spent ~63 of 81s in
@@ -773,7 +776,7 @@ jobs:
     # parallelizes across the client's cores. Analysis-only, seeded runner
     # cache (ga-vnycm2.8): 38.3s on 2 vCPU, 25.6s on 4, 16.3s on 8.
     needs: rbe
-    runs-on: ${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-8vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    runs-on: ${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-8vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     # Remote execution goes to rbe-west (instance "oss", the Blacksmith-backed
     # worker pool shared with gascity). Skipped only in mode skip (same-repo
     # runs while RBE_WEST_WORKERS is unset).
@@ -848,6 +851,7 @@ jobs:
           RBE_TLS_CA: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_TLS_CA || '' }}
           RBE_INSTANCE: ${{ needs.rbe.outputs.mode == 'remote' && 'oss' || '' }}
           BAZEL_FORK_CACHE: ${{ needs.rbe.outputs.mode == 'cache' && 'true' || '' }}
+          BAZEL_RRC_READ: 'true' # mode cache reads the repo contents cache through rbe-cache
           BAZEL_FORK_REMOTE: ${{ startsWith(needs.rbe.outputs.mode, 'fork-') && 'true' || '' }}
           RBE_FORK_TIER: ${{ needs.rbe.outputs.tier }}
           RBE_FORK_PR: ${{ github.event.pull_request.number }}
@@ -1062,7 +1066,7 @@ jobs:
     name: pure-Go and js/wasm
     # Same runner and skip rule as bazel-test.
     needs: rbe
-    runs-on: ${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    runs-on: ${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     if: ${{ needs.rbe.outputs.mode != 'skip' }}
     timeout-minutes: 90
     outputs:
@@ -1117,6 +1121,7 @@ jobs:
           RBE_TLS_CA: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_TLS_CA || '' }}
           RBE_INSTANCE: ${{ needs.rbe.outputs.mode == 'remote' && 'oss' || '' }}
           BAZEL_FORK_CACHE: ${{ needs.rbe.outputs.mode == 'cache' && 'true' || '' }}
+          BAZEL_RRC_READ: 'true' # mode cache reads the repo contents cache through rbe-cache
           BAZEL_FORK_REMOTE: ${{ startsWith(needs.rbe.outputs.mode, 'fork-') && 'true' || '' }}
           RBE_FORK_TIER: ${{ needs.rbe.outputs.tier }}
           RBE_FORK_PR: ${{ github.event.pull_request.number }}
@@ -1414,6 +1419,7 @@ jobs:
           RBE_TLS_CA: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_TLS_CA || '' }}
           RBE_INSTANCE: ${{ needs.rbe.outputs.mode == 'remote' && 'oss' || '' }}
           BAZEL_FORK_CACHE: ${{ needs.rbe.outputs.mode == 'cache' && 'true' || '' }}
+          BAZEL_RRC_READ: 'true' # mode cache reads the repo contents cache through rbe-cache
           BAZEL_FORK_REMOTE: ${{ startsWith(needs.rbe.outputs.mode, 'fork-') && 'true' || '' }}
           RBE_FORK_TIER: ${{ needs.rbe.outputs.tier }}
           RBE_FORK_PR: ${{ github.event.pull_request.number }}
@@ -1561,7 +1567,7 @@ jobs:
     # A caller may turn it off with integration: "off"; pr.yml and
     # bazel-farm.yml pass "on".
     needs: rbe
-    runs-on: ${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    runs-on: ${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     if: ${{ (needs.rbe.outputs.enabled == 'true' || needs.rbe.outputs.mode == 'cache') && inputs.integration != 'off' }}
     timeout-minutes: 85
     outputs:
@@ -1595,6 +1601,7 @@ jobs:
           RBE_TLS_CA: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_TLS_CA || '' }}
           RBE_INSTANCE: ${{ needs.rbe.outputs.mode == 'remote' && 'oss' || '' }}
           BAZEL_FORK_CACHE: ${{ needs.rbe.outputs.mode == 'cache' && 'true' || '' }}
+          BAZEL_RRC_READ: 'true' # mode cache reads the repo contents cache through rbe-cache
           BAZEL_FORK_REMOTE: ${{ startsWith(needs.rbe.outputs.mode, 'fork-') && 'true' || '' }}
           RBE_FORK_TIER: ${{ needs.rbe.outputs.tier }}
           RBE_FORK_PR: ${{ github.event.pull_request.number }}
@@ -1706,7 +1713,7 @@ jobs:
     name: dolt-server lane
     # Same runner and skip rule as bazel-test.
     needs: rbe
-    runs-on: ${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    runs-on: ${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     if: ${{ needs.rbe.outputs.mode != 'skip' }}
     timeout-minutes: 90
     outputs:
@@ -1749,6 +1756,7 @@ jobs:
           RBE_TLS_CA: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_TLS_CA || '' }}
           RBE_INSTANCE: ${{ needs.rbe.outputs.mode == 'remote' && 'oss' || '' }}
           BAZEL_FORK_CACHE: ${{ needs.rbe.outputs.mode == 'cache' && 'true' || '' }}
+          BAZEL_RRC_READ: 'true' # mode cache reads the repo contents cache through rbe-cache
           BAZEL_FORK_REMOTE: ${{ startsWith(needs.rbe.outputs.mode, 'fork-') && 'true' || '' }}
           RBE_FORK_TIER: ${{ needs.rbe.outputs.tier }}
           RBE_FORK_PR: ${{ github.event.pull_request.number }}
@@ -1878,6 +1886,7 @@ jobs:
           RBE_TLS_CA: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_TLS_CA || '' }}
           RBE_INSTANCE: ${{ needs.rbe.outputs.mode == 'remote' && 'oss' || '' }}
           BAZEL_FORK_CACHE: ${{ needs.rbe.outputs.mode == 'cache' && 'true' || '' }}
+          BAZEL_RRC_READ: 'true' # mode cache reads the repo contents cache through rbe-cache
           BAZEL_FORK_REMOTE: ${{ startsWith(needs.rbe.outputs.mode, 'fork-') && 'true' || '' }}
           RBE_FORK_TIER: ${{ needs.rbe.outputs.tier }}
           RBE_FORK_PR: ${{ github.event.pull_request.number }}
@@ -2206,6 +2215,7 @@ jobs:
           RBE_TLS_CA: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_TLS_CA || '' }}
           RBE_INSTANCE: ${{ needs.rbe.outputs.mode == 'remote' && 'oss' || '' }}
           BAZEL_FORK_CACHE: ${{ needs.rbe.outputs.mode == 'cache' && 'true' || '' }}
+          BAZEL_RRC_READ: 'true' # mode cache reads the repo contents cache through rbe-cache
           BAZEL_FORK_REMOTE: ${{ startsWith(needs.rbe.outputs.mode, 'fork-') && 'true' || '' }}
           RBE_FORK_TIER: ${{ needs.rbe.outputs.tier }}
           RBE_FORK_PR: ${{ github.event.pull_request.number }}
@@ -2343,7 +2353,7 @@ jobs:
   bazel-cmd-dolt:
     name: cmd/bd Dolt-server tier
     needs: rbe
-    runs-on: ${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    runs-on: ${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     if: ${{ (needs.rbe.outputs.enabled == 'true' || needs.rbe.outputs.mode == 'cache') && inputs.integration != 'off' }}
     timeout-minutes: 85
     continue-on-error: true
@@ -2378,6 +2388,7 @@ jobs:
           RBE_TLS_CA: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_TLS_CA || '' }}
           RBE_INSTANCE: ${{ needs.rbe.outputs.mode == 'remote' && 'oss' || '' }}
           BAZEL_FORK_CACHE: ${{ needs.rbe.outputs.mode == 'cache' && 'true' || '' }}
+          BAZEL_RRC_READ: 'true' # mode cache reads the repo contents cache through rbe-cache
           BAZEL_FORK_REMOTE: ${{ startsWith(needs.rbe.outputs.mode, 'fork-') && 'true' || '' }}
           RBE_FORK_TIER: ${{ needs.rbe.outputs.tier }}
           RBE_FORK_PR: ${{ github.event.pull_request.number }}
@@ -2841,7 +2852,7 @@ jobs:
           title="rrc-verify: remote repo contents cache differs from a cold fetch"
           body="The nightly rrc-verify run found cached repository trees that differ from a cold fetch, or could not check them: $RUN_URL (summary and the rrc-verify report artifact).
 
-          A mismatch is a poisoned entry or a repository rule falsely marked reproducible (gascity engdocs/design/bazel-remote-repo-contents-cache.md, R1/R2). Stop readers first: set the repository variable RBE_REPO_CONTENTS_CACHE to off. Then follow gascity/infra nativelink-cas/west/README.md (remote repo contents cache writer, poisoned entries)."
+          A mismatch is a poisoned entry or a repository rule falsely marked reproducible (gascity engdocs/design/bazel-remote-repo-contents-cache.md, R1/R2). Contain the fork-cache readers first: they see no repository variables, so (1) commit fork_rrc_read=off in both probe scripts, beads .github/actions/setup-bazel/cache-rrc-probe.sh and gascity tools/rbe/cache-rrc-probe.sh (beads has no fresh-merge: an open fork PR keeps the old switch until it is pushed again); (2) for immediate server-side containment, an operator runs rbe-cache-gate close on core, which stops all fork-cache, and fails fork-cache lanes already reading; (3) on a mismatch, set RBE_REPO_CONTENTS_CACHE to seed: the trusted readers read the same entries (rbe-cache serves the oss action cache), and seed stops every one of them while rrc-seed and this check keep running; set it to off only to stop seeding too, which also stops rrc-verify; if this run only says it could not check, leave the variable as it is. Then follow gascity/infra nativelink-cas/west/README.md (remote repo contents cache writer, poisoned entries)."
           gh label create rrc-verify -R "$GITHUB_REPOSITORY" --color B60205 \
             --description "Remote repo contents cache verification failures" 2>/dev/null || true
           n=$(gh issue list -R "$GITHUB_REPOSITORY" --label rrc-verify --state open --json number --jq '.[0].number // empty')

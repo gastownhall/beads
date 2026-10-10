@@ -675,25 +675,64 @@ Bazel; both are key neutral, and the lanes keep
 `--noremote_upload_local_results`. While the variable is not `off`,
 nightly.yml's call also runs `rrc-verify`: a cold fetch of every lane,
 compared with the cached entries by `tools/bazel/rrc_verify.py`; a mismatch
-fails the job and opens an `rrc-verify` issue.
+fails the job and opens an `rrc-verify` issue, which lists the containment
+steps below.
 
 Mode `cache` lanes (fork PRs while rbe-fork is closed, `rbe=cache`
-dispatches) see no repository variables. They read the same entries through
-rbe-cache's anonymous AC and CAS reads: setup-bazel's `write-bazelrc.sh` adds
-the same two lines to its rc whenever
+dispatches) see no repository variables. The jobs with a reader step above
+pass `BAZEL_RRC_READ: 'true'` to setup-bazel, and only those: their configs
+are the ones `rrc-lane-commands.txt` seeds (`bazel-release-cross` builds for
+other platforms and does not opt in). In mode `cache` they read the same
+entries through rbe-cache's anonymous AC and CAS reads: `write-bazelrc.sh`
+adds the same two lines to its rc whenever
 `.github/actions/setup-bazel/cache-rrc-probe.sh` gets a GetCapabilities
-answer from rbe-cache. An unreachable cache with the startup flag set costs
-every repository a failed lookup, so a closed or down rbe-cache gets no lines
-and a notice instead. Kill switch: set `fork_rrc_read=off` in that script (a
-one-line PR). rbe-cache refuses every write, and fork-cache uploads nothing.
+answer from rbe-cache, then NOT_FOUND for a GetActionResult key no action
+has and for a ByteStream Read of a blob the CAS does not hold. The reader
+lanes that run in mode `cache` use a pinned `ubuntu-24.04` runner there,
+not `ubuntu-latest`. Each job's step summary records whether it reads, and
+rbe-cache's TCP connect time (DNS lookup excluded). rbe-cache refuses every
+write, and fork-cache uploads nothing.
+
+An unreachable cache with the startup flag set costs every repository a
+failed lookup, so a cache that is closed or down when the probe runs gets
+no lines and a notice instead, and the lane fetches as before. That holds
+at probe time only. After loading, Bazel fetches a cached repository's
+files lazily from rbe-cache (:8443). If the cache goes away mid-run
+(rbe-cache-gate closes, the runner's IP is banned, or the breaker opens),
+the command fails, and Bazel does not re-fetch the repository (bazel#30218,
+gascity design R4).
+
+To stop mode `cache` lanes reading:
+
+1. Commit `fork_rrc_read=off` in both probe scripts: beads'
+   `.github/actions/setup-bazel/cache-rrc-probe.sh` and gascity's
+   `tools/rbe/cache-rrc-probe.sh`. This is the preferred way: lanes that
+   already read finish, and later runs fetch for themselves. beads has no
+   fresh-merge, so an open fork PR keeps its old switch until it is pushed
+   again.
+2. For immediate server-side containment, an operator runs
+   `rbe-cache-gate close` on core. That stops all fork-cache, cache hits
+   included, and fails the lanes that are reading at that moment.
+3. The mode `remote` lanes read the same entries: rbe-cache serves the same
+   `oss` action cache. On an `rrc-verify` mismatch, set
+   `RBE_REPO_CONTENTS_CACHE` to `seed`. That stops every mode `remote`
+   reader, while `rrc-seed` and `rrc-verify` keep running. Set it to `off`
+   only to stop seeding too; that also stops `rrc-verify`. If the run only
+   says it could not check the cache, leave the variable as it is.
+
+Known limit (gascity design R4): rbe-cache's anonymous CAS is a size
+partition whose upper store, for blobs of 512 MiB or more, is a noop. A
+cached repository with a file that large is a hit whose download always
+fails. rrc-gate does not refuse such entries today.
 
 `rrc-seed` asks for `id-token: write` and `rrc-verify` for `issues: write`, so
 every caller of `bazel.yml` (pr.yml, nightly.yml, bazel-farm.yml) grants both:
 GitHub checks a called workflow's job permissions when the run starts, even
 for jobs that skip. Neither job runs on a pull_request, merge_group or
 pull_request_target event, and every other `bazel.yml` job keeps
-`contents: read`. Rollback: set the variable to `off` (or `seed`, to keep the
-cache warm without readers).
+`contents: read`. Rollback for the mode `remote` readers: set the variable to
+`off` (or `seed`, to keep the cache warm without readers). It does not reach
+mode `cache`; use the steps above.
 
 ## Required Check Contract
 

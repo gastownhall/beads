@@ -3,6 +3,7 @@ package scripts_test
 import (
 	"fmt"
 	"math"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -61,6 +62,21 @@ const blacksmithWindows4vcpuRunsOn = "${{ 'blacksmith-4vcpu-windows-2025' }}"
 // every lane's pinned runs-on is the same literal apart from the label.
 func bazelRemoteRunsOn(label string) string {
 	return "${{ needs.rbe.outputs.mode == 'remote' && '" + label + "' || 'ubuntu-latest' }}"
+}
+
+// bazelRRCCacheReaderRunsOn is bazelRemoteRunsOn for the lanes that read the
+// remote repo contents cache in mode cache (isBazelRRCCacheReader): their
+// GitHub-hosted fallback is ubuntu-24.04, not ubuntu-latest, because the
+// cached trees come from a 24.04 host (design R2) and the image must not
+// move under them.
+func bazelRRCCacheReaderRunsOn(label string) string {
+	return "${{ needs.rbe.outputs.mode == 'remote' && '" + label + "' || 'ubuntu-24.04' }}"
+}
+
+// isBazelRRCCacheReader: a remote repo contents cache reader
+// (bazelRRCReadLanes) that also runs in mode cache (not remote-only).
+func isBazelRRCCacheReader(name string) bool {
+	return slices.Contains(bazelRRCReadLanes, name) && !bazelRemoteOnlyJobs[name]
 }
 
 // The default lane size: every action executes on rbe-west, but the
@@ -584,6 +600,9 @@ func TestBlacksmithBazelRunnerSizes(t *testing.T) {
 				continue // rrc jobs: push/schedule only, never a fork (literal label)
 			}
 			want := "ubuntu-latest"
+			if isBazelRRCCacheReader(name) {
+				want = "ubuntu-24.04"
+			}
 			if mode == "remote" {
 				want = "blacksmith-4vcpu-ubuntu-2404"
 				if label, ok := wantRemote[name]; ok {

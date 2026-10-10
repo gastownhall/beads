@@ -163,9 +163,12 @@ func TestReleaseCrossCompileRunsInItsOwnBazelLane(t *testing.T) {
 	}
 	cross := bazel.job(t, bazelReleaseCrossJobName)
 	pure := bazel.job(t, bazelPureJobName)
-	if cross.RunsOn != pure.RunsOn || cross.If != pure.If || !slices.Equal(cross.Needs, pure.Needs) {
-		t.Errorf("%s runs-on/if/needs = %q / %q / %v, want %s's %q / %q / %v",
-			bazelReleaseCrossJobName, cross.RunsOn, cross.If, cross.Needs, bazelPureJobName, pure.RunsOn, pure.If, pure.Needs)
+	// Not pure's runs-on: pure reads the remote repo contents cache in mode
+	// cache (ubuntu-24.04, bazelRRCCacheReaderRunsOn), the release lane does
+	// not (its target platforms are not seeded).
+	if cross.RunsOn != bazelLaneRunsOn || cross.If != pure.If || !slices.Equal(cross.Needs, pure.Needs) {
+		t.Errorf("%s runs-on/if/needs = %q / %q / %v, want %q / %s's %q / %v",
+			bazelReleaseCrossJobName, cross.RunsOn, cross.If, cross.Needs, bazelLaneRunsOn, bazelPureJobName, pure.If, pure.Needs)
 	}
 	run := cross.step(t, stepName).Run
 	for _, required := range []string{
@@ -2163,6 +2166,19 @@ func TestBazelWorkflowJobsAndExecutionMode(t *testing.T) {
 		wantJobRunsOn, wantJobIf, wantJobSetupEnv := wantRunsOn, wantIf, wantSetupEnv
 		if name == bazelJobName {
 			wantJobRunsOn = bazelTestLaneRunsOn
+		}
+		// The remote repo contents cache readers opt in to reading it in
+		// mode cache (BAZEL_RRC_READ, bazel_rrc_test.go); those that run
+		// there fall back to ubuntu-24.04.
+		if slices.Contains(bazelRRCReadLanes, name) {
+			wantJobSetupEnv = copyMap(wantSetupEnv)
+			wantJobSetupEnv["BAZEL_RRC_READ"] = "true"
+		}
+		if isBazelRRCCacheReader(name) {
+			wantJobRunsOn = bazelRRCCacheReaderRunsOn("blacksmith-4vcpu-ubuntu-2404")
+			if name == bazelJobName {
+				wantJobRunsOn = bazelRRCCacheReaderRunsOn("blacksmith-8vcpu-ubuntu-2404")
+			}
 		}
 		if bazelPackageJobs[name] {
 			wantJobRunsOn, wantJobIf, wantJobSetupEnv = bazelPackageRunsOn[name], bazelPackageGatesIf, wantPackageSetupEnv
@@ -5223,20 +5239,26 @@ func TestSetupBazelRCWriter(t *testing.T) {
 			}
 		}
 	})
-	// The fork cache reads the remote repo contents cache exactly while
-	// rbe-cache answers (cache-rrc-probe.sh against a stand-in;
-	// TestCacheRRCProbe runs every other answer and the kill switch): the
-	// reader's two lines, after --config=fork-cache and any zstd line, and
-	// nothing else; otherwise none, with a notice saying why. The lane never
-	// fails on the probe.
+	// The fork cache of a job that opts in (BAZEL_RRC_READ=true: the remote
+	// repo contents cache readers, bazel_rrc_test.go) reads the remote repo
+	// contents cache exactly while rbe-cache answers (cache-rrc-probe.sh
+	// against a stand-in; TestCacheRRCProbe runs every other answer and the
+	// kill switch): the reader's two lines, after --config=fork-cache and
+	// any zstd line, and nothing else; otherwise none, with a notice saying
+	// why. A job that does not opt in never probes. The step summary says
+	// which, and why. The lane never fails on the probe.
 	t.Run("fork cache repo contents cache follows rbe-cache", func(t *testing.T) {
 		requireCacheZstdProbeTools(t)
-		for answer, wantRead := range map[string]bool{"answers": true, "zstd": true, "denied": false, "refused": false} {
-			env := []string{"BAZEL_FORK_CACHE=true"}
+		for answer, wantRead := range map[string]bool{"answers": true, "zstd": true, "denied": false, "refused": false, "not a reader": false} {
+			summaryFile := filepath.Join(t.TempDir(), "summary.md")
+			env := []string{"BAZEL_FORK_CACHE=true", "BAZEL_RRC_READ=true", "GITHUB_STEP_SUMMARY=" + summaryFile}
 			switch answer {
 			case "answers":
 				url, ca, _ := serveCapabilities(t, capsAnswer{grpc: "0", body: grpcMessage(capsLive)})
 				env = append(env, "RBE_CACHE_PROBE_URL="+url, "CURL_CA_BUNDLE="+ca)
+			case "not a reader":
+				url, ca, _ := serveCapabilities(t, capsAnswer{grpc: "0", body: grpcMessage(capsLive)})
+				env = []string{"BAZEL_FORK_CACHE=true", "GITHUB_STEP_SUMMARY=" + summaryFile, "RBE_CACHE_PROBE_URL=" + url, "CURL_CA_BUNDLE=" + ca}
 			case "zstd":
 				url, ca, _ := serveCapabilities(t, capsAnswer{grpc: "0", body: grpcMessage(capsZstd)})
 				env = append(env, "RBE_CACHE_PROBE_URL="+url, "CURL_CA_BUNDLE="+ca)
@@ -5273,12 +5295,24 @@ func TestSetupBazelRCWriter(t *testing.T) {
 			if !strings.Contains(outputs, "cache=true") || strings.Contains(rc, "remote-exec") || strings.Contains(rc, "--remote_upload_local_results") {
 				t.Errorf("rbe-cache %s: outputs = %q rc = %q; want cache=true, no remote-exec and no upload", answer, outputs, rc)
 			}
+			probed := answer != "not a reader"
 			notice := "::notice title=No remote repo contents cache::rbe-cache rrc probe: "
-			if got := strings.Contains(logs, notice); got == wantRead {
-				t.Errorf("rbe-cache %s: notice %v, want %v (the probe's reason, only when it fails):\n%s", answer, got, !wantRead, logs)
+			if got := strings.Contains(logs, notice); got != (probed && !wantRead) {
+				t.Errorf("rbe-cache %s: notice %v, want %v (the probe's reason, only when it fails):\n%s", answer, got, probed && !wantRead, logs)
 			}
-			if !strings.Contains(logs, "rbe-cache rrc probe: ") {
-				t.Errorf("rbe-cache %s: log lacks the probe's verdict:\n%s", answer, logs)
+			if got := strings.Contains(logs, "rbe-cache rrc probe: "); got != probed {
+				t.Errorf("rbe-cache %s: log has the probe's verdict %v, want %v:\n%s", answer, got, probed, logs)
+			}
+			summary, _ := os.ReadFile(summaryFile)
+			wantSummary := map[string]string{
+				"answers":      "**on** (rbe-cache answers GetCapabilities, GetActionResult and ByteStream Read (tcp connect ",
+				"zstd":         "**on** (rbe-cache answers GetCapabilities, GetActionResult and ByteStream Read (tcp connect ",
+				"denied":       "**off** (gRPC status 7 (tcp connect ",
+				"refused":      "**off** (",
+				"not a reader": "**off** (not a remote repo contents cache reader (no BAZEL_RRC_READ))\n",
+			}[answer]
+			if !strings.HasPrefix(string(summary), "Fork cache remote repo contents cache read: "+wantSummary) || strings.Count(string(summary), "\n") != 1 {
+				t.Errorf("rbe-cache %s: step summary %q, want one line starting %q", answer, summary, wantSummary)
 			}
 		}
 	})
@@ -5323,6 +5357,11 @@ func TestSetupBazelRCWriter(t *testing.T) {
 		t.Run("rejects BAZEL_FORK_CACHE="+bad, func(t *testing.T) {
 			if _, _, logs, err := run(t, "BAZEL_FORK_CACHE="+bad); err == nil {
 				t.Errorf("want failure, got success:\n%s", logs)
+			}
+		})
+		t.Run("rejects BAZEL_RRC_READ="+bad, func(t *testing.T) {
+			if _, _, logs, err := run(t, "BAZEL_FORK_CACHE=true", "BAZEL_RRC_READ="+bad); err == nil || !strings.Contains(logs, "BAZEL_RRC_READ must be") {
+				t.Errorf("want failure naming BAZEL_RRC_READ, got %v:\n%s", err, logs)
 			}
 		})
 	}
