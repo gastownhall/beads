@@ -177,6 +177,7 @@ go_test(
         "public_snapshot_test.go",
         "ready_work_missing_table_test.go",
         "ready_work_test.go",
+        "ready_work_walk_once_test.go",
         "reopen_test.go",
         "role_requests_test.go",
         "row_lock_guard_test.go",
