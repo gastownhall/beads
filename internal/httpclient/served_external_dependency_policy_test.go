@@ -207,8 +207,9 @@ func TestServedReadyCountExcludesAnExternallyBlockedIssuePastTheDefaultPage(t *t
 // them over legacy methods that store refuses, which failed `bd list`,
 // `bd show`, `bd dep tree`, `bd ready --claim` and `bd close` even for an issue
 // nothing blocks. And each still holds the externally blocked issue out of
-// ready work, claims and closes. The served handler here binds its roles to
-// the raw reference store, which knows nothing of the policy, so every
+// ready work, claims and closes, while the composed claim-next takes only the
+// unassigned work a local one would. The served handler here binds its roles
+// to the raw reference store, which knows nothing of the policy, so every
 // exclusion below is the client's.
 func TestServedRolesKeepTheExternalDependencyPolicy(t *testing.T) {
 	env := newServedEnv(t, "hixr")
@@ -305,13 +306,49 @@ func TestServedRolesKeepTheExternalDependencyPolicy(t *testing.T) {
 	if _, err := claimer.Claim(ctx, issueops.ClaimRequest{Actor: "worker", IssueID: blockedID}); !errors.Is(err, storage.ErrCloseBlocked) {
 		t.Errorf("Claim %s over http = %v, want ErrCloseBlocked", blockedID, err)
 	}
+	// Open rows already held sort ahead of the free work, one by another actor
+	// and one by the claimant. A local claim-next (ClaimReadyIssueInTx) takes
+	// neither, with or without an assignee filter, so the composed claim must
+	// not either. A second free issue gives the filtered claim something to
+	// take once freeID is gone.
+	rivalID, mineID, laterID := env.prefix+"-rival", env.prefix+"-mine", env.prefix+"-later"
+	for _, seed := range []*types.Issue{
+		{ID: rivalID, Title: "held by another actor", Status: types.StatusOpen, Priority: 0, IssueType: types.TypeTask, Assignee: "rival"},
+		{ID: mineID, Title: "held by the claimant", Status: types.StatusOpen, Priority: 0, IssueType: types.TypeTask, Assignee: "worker"},
+		{ID: laterID, Title: "not blocked by anything either", Status: types.StatusOpen, Priority: 3, IssueType: types.TypeTask},
+	} {
+		if err := env.createIssue(ctx, seed, "tester"); err != nil {
+			t.Fatalf("seed %s: %v", seed.ID, err)
+		}
+	}
 	readyClaimer, err := decorated.ReadyClaimer()
 	if err != nil {
 		t.Fatalf("ReadyClaimer: %v", err)
 	}
-	next, err := readyClaimer.ClaimNext(ctx, issueops.ClaimNextRequest{Actor: "worker"})
-	if err != nil || next.Claimed == nil || next.Claimed.ID != freeID {
-		t.Fatalf("ClaimNext over http = %+v, %v; want %s", next.Claimed, err, freeID)
+	for _, claim := range []struct {
+		filter issueops.ReadyRequest
+		want   string
+	}{
+		{want: freeID},
+		{filter: issueops.ReadyRequest{Assignee: "worker"}, want: laterID},
+	} {
+		next, err := readyClaimer.ClaimNext(ctx, issueops.ClaimNextRequest{Actor: "worker", Filter: claim.filter})
+		var got string
+		if next.Claimed != nil && next.Claimed.Issue != nil {
+			got = next.Claimed.ID
+		}
+		if err != nil || got != claim.want {
+			t.Errorf("ClaimNext over http with assignee %q claimed %q, %v; want %s", claim.filter.Assignee, got, err, claim.want)
+		}
+	}
+	for id, holder := range map[string]string{rivalID: "rival", mineID: "worker"} {
+		issue, err := env.getIssue(ctx, id)
+		if err != nil || issue == nil {
+			t.Fatalf("read %s back: %v, %v", id, issue, err)
+		}
+		if issue.Status != types.StatusOpen || issue.Assignee != holder {
+			t.Errorf("after the claims %s is %s and held by %q, want open and still held by %q", id, issue.Status, issue.Assignee, holder)
+		}
 	}
 
 	closer, err := decorated.BatchCloser()

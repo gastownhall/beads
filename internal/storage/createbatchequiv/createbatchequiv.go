@@ -90,9 +90,10 @@ func largeScenarios() []scenario {
 // (ebe3b6bcb), so the check holds the current code — fast and per-row
 // bodies alike, including changes the fast-path switch does not gate — to
 // what that code stored. One deliberate behavior change since: the create
-// role defaults an empty created_by to the request's actor (c2866ea7fe), so
-// apply.json's issues, wisps and events digests were re-recorded with every
-// apply-created row carrying created_by "apply-writer"; nothing else moved.
+// role defaults an empty created_by to the request's actor
+// (issueops.PreparePublicCreateRequest), so apply.json's issues, wisps and
+// events digests were re-recorded with every apply-created row carrying
+// created_by "apply-writer"; nothing else moved.
 const GoldenDirEnv = "CREATEBATCHEQUIV_GOLDEN_DIR"
 
 // Run seeds fresh databases, applies each scenario's batch through the fast

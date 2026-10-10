@@ -8161,16 +8161,19 @@ components:
             operation or a behavior — never the version string.
 
 
-            THIS LIST IS BUILD-LEVEL, NOT WORKSPACE-LEVEL. It says which
-            operations this binary serves, and for every entry but two that is
-            the whole answer. `events.list` and `events.watch` are the
-            exceptions: the durable events journal is a per-workspace setting
-            that is OFF by default, so a server that advertises them may still
-            refuse every request to both with 409 `events_journal_disabled` —
-            correctly, because the operations exist and the workspace has no
-            journal. A consumer of either MUST treat the capability as "this
-            server speaks it" and the 409 as "not on this workspace", and must
-            not read the capability as a promise that records will arrive.
+            THIS LIST IS BUILD-LEVEL, NOT WORKSPACE-LEVEL, apart from the
+            conditional `policy.external_dependencies` above, which depends on
+            how this server composed its roles rather than on the build. It
+            says which operations this binary serves, and for every entry but
+            two that is the whole answer. `events.list` and `events.watch` are
+            the exceptions: the durable events journal is a per-workspace
+            setting that is OFF by default, so a server that advertises them
+            may still refuse every request to both with 409
+            `events_journal_disabled` — correctly, because the operations exist
+            and the workspace has no journal. A consumer of either MUST treat
+            the capability as "this server speaks it" and the 409 as "not on
+            this workspace", and must not read the capability as a promise that
+            records will arrive.
           items:
             type: string
         wire_revision:

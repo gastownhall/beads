@@ -33,6 +33,12 @@ type remoteStore struct {
 	localBlockers map[string][]string
 	// claimErr, when set, answers every served Claim.
 	claimErr error
+	// takenFirst names the rows a rival actor claims just before a served
+	// Claim of them lands: that claim is a lost race, and the row leaves the
+	// unassigned set.
+	takenFirst map[string]bool
+	// getErrs, per id, fails the GetIssue read of that id.
+	getErrs map[string]error
 }
 
 var errLegacyRefused = errors.New("remoteStore: legacy method refused")
@@ -49,6 +55,13 @@ func newRemoteStore(ready ...*types.Issue) *remoteStore {
 }
 
 func (r *remoteStore) IsRemoteBackendStore() bool { return true }
+
+func (r *remoteStore) GetIssue(ctx context.Context, id string) (*types.Issue, error) {
+	if err := r.getErrs[id]; err != nil {
+		return nil, err
+	}
+	return r.fakeStore.GetIssue(ctx, id)
+}
 
 // httpclient.Store serves the vocabulary a listing loads before its search.
 func (r *remoteStore) GetCustomStatusesDetailed(context.Context) ([]types.CustomStatus, error) {
@@ -103,11 +116,20 @@ func (r *remoteStore) BlockingAnnotator() (publicops.BlockingAnnotator, error) {
 type servedReader struct{ s *remoteStore }
 
 // Ready serves the ready rows the way a server that knows nothing of the
-// policy does: in order, up to the request's limit, with has_more past it.
+// policy does: in order, narrowed by the request's assignee rule (Unassigned
+// wins over Assignee, as in workapi.BuildReadyFilter), up to its limit, with
+// has_more past it.
 func (r servedReader) Ready(_ context.Context, req publicops.ReadyRequest) (publicops.IssuePage, error) {
 	r.s.served = append(r.s.served, "Ready")
 	items := make([]*types.IssueWithCounts, 0, len(r.s.ready))
 	for _, issue := range r.s.ready {
+		if req.Unassigned {
+			if issue.Assignee != "" {
+				continue
+			}
+		} else if req.Assignee != "" && issue.Assignee != req.Assignee {
+			continue
+		}
 		items = append(items, &types.IssueWithCounts{Issue: issue})
 	}
 	if req.Limit != nil && *req.Limit >= 0 && *req.Limit < len(items) {
@@ -148,6 +170,11 @@ func (c servedClaimer) Claim(ctx context.Context, req publicops.ClaimRequest) (p
 	c.s.served = append(c.s.served, "Claim "+req.IssueID)
 	if c.s.claimErr != nil {
 		return publicops.ClaimResult{}, c.s.claimErr
+	}
+	if c.s.takenFirst[req.IssueID] {
+		if err := c.s.ClaimIssue(ctx, req.IssueID, "rival"); err != nil {
+			return publicops.ClaimResult{}, err
+		}
 	}
 	if err := c.s.ClaimIssue(ctx, req.IssueID, req.Actor); err != nil {
 		return publicops.ClaimResult{}, err
@@ -197,6 +224,10 @@ type servedEdgeReader struct{ s *remoteStore }
 func (e servedEdgeReader) ReadEdges(_ context.Context, req publicops.EdgeReadRequest) (publicops.EdgeReadResult, error) {
 	if len(req.IDs) > wireEdgeAnchorCap {
 		return publicops.EdgeReadResult{}, fmt.Errorf("served ReadEdges: %d anchors, past the wire's %d", len(req.IDs), wireEdgeAnchorCap)
+	}
+	if slices.Contains(req.IDs, "") {
+		// As httpclient's validateAnchors refuses one.
+		return publicops.EdgeReadResult{}, fmt.Errorf("%w: an anchor id must not be empty", publicops.ErrValidation)
 	}
 	e.s.edgeReads = append(e.s.edgeReads, len(req.IDs))
 	anchors := make([]publicops.AnchorEdges, 0, len(req.IDs))
@@ -460,6 +491,113 @@ func TestRemoteReadyClaimerReportsLostRaces(t *testing.T) {
 	}
 }
 
+// TestRemoteReadyClaimerTakesOnlyUnassignedWork: the composed claim selects
+// what a local claim-next selects (ClaimReadyIssueInTx), open and unassigned
+// whatever assignee the request names. A row another actor holds, sorted
+// first, is not a race to lose, and a request naming the caller does not try
+// to re-take the caller's own row.
+func TestRemoteReadyClaimerTakesOnlyUnassignedWork(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		filter publicops.ReadyRequest
+	}{
+		{name: "any assignee"},
+		{name: "the caller as assignee", filter: publicops.ReadyRequest{Assignee: "worker"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			held, blocked, mine, free := issue("be-held"), issue("be-blocked"), issue("be-mine"), issue("be-free")
+			held.Assignee, mine.Assignee = "alice", "worker"
+			raw := newRemoteStore(held, blocked, mine, free)
+			blockOnPayments(raw, blocked.ID)
+			claimer, err := testStore(raw, &fakeStore{}, true).ReadyClaimer()
+			if err != nil {
+				t.Fatalf("ReadyClaimer: %v", err)
+			}
+
+			next, err := claimer.ClaimNext(t.Context(), publicops.ClaimNextRequest{Actor: "worker", Filter: tc.filter})
+			if err != nil {
+				t.Fatalf("ClaimNext: %v", err)
+			}
+			if next.Claimed == nil || next.Claimed.ID != free.ID || free.Assignee != "worker" {
+				t.Fatalf("ClaimNext claimed %+v, want %s for worker", next.Claimed, free.ID)
+			}
+			if want := []string{"Ready", "Claim be-free"}; !slices.Equal(raw.served, want) {
+				t.Fatalf("served calls = %v, want %v", raw.served, want)
+			}
+			if held.Assignee != "alice" {
+				t.Fatalf("be-held assignee = %q, want alice's claim untouched", held.Assignee)
+			}
+		})
+	}
+}
+
+// TestRemoteReadyClaimerWalksAContendedFront: candidates a rival takes between
+// the read and the claim are passed over, however many lead the front. A full
+// window lost end to end is read once more, and the rows the rivals took have
+// left it; only when that pass is lost too is it an error, and a second pass
+// with nothing left to take is no work.
+func TestRemoteReadyClaimerWalksAContendedFront(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		rivals    int  // leading candidates a rival takes first
+		last      bool // be-last follows them
+		lastTaken bool // and a rival takes it first too
+		wantLast  bool
+		wantErr   string
+		wantReads int
+	}{
+		{name: "three lost ahead", rivals: 3, last: true, wantLast: true, wantReads: 1},
+		{name: "a full window lost", rivals: remoteClaimPage, last: true, wantLast: true, wantReads: 2},
+		{name: "both passes lost", rivals: remoteClaimPage, last: true, lastTaken: true, wantErr: "lost 26 races", wantReads: 2},
+		{name: "nothing behind a lost window", rivals: remoteClaimPage, wantReads: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			blocked, last := issue("be-blocked"), issue("be-last")
+			raw := newRemoteStore(blocked)
+			blockOnPayments(raw, blocked.ID)
+			raw.takenFirst = make(map[string]bool)
+			for i := range tc.rivals {
+				taken := issue(fmt.Sprintf("be-taken-%02d", i))
+				raw.ready = append(raw.ready, taken)
+				raw.takenFirst[taken.ID] = true
+			}
+			if tc.last {
+				raw.ready = append(raw.ready, last)
+				raw.takenFirst[last.ID] = tc.lastTaken
+			}
+			claimer, err := testStore(raw, &fakeStore{}, true).ReadyClaimer()
+			if err != nil {
+				t.Fatalf("ReadyClaimer: %v", err)
+			}
+
+			next, err := claimer.ClaimNext(t.Context(), publicops.ClaimNextRequest{Actor: "worker"})
+			switch {
+			case tc.wantErr != "":
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) || next.Claimed != nil {
+					t.Fatalf("ClaimNext = %+v, %v; want a %q error", next.Claimed, err, tc.wantErr)
+				}
+			case err != nil:
+				t.Fatalf("ClaimNext: %v", err)
+			case tc.wantLast:
+				if next.Claimed == nil || next.Claimed.ID != last.ID || last.Assignee != "worker" {
+					t.Fatalf("ClaimNext claimed %+v, want %s for worker", next.Claimed, last.ID)
+				}
+			case next.Claimed != nil:
+				t.Fatalf("ClaimNext claimed %+v, want no work: rivals took every candidate", next.Claimed)
+			}
+			reads := 0
+			for _, call := range raw.served {
+				if call == "Ready" {
+					reads++
+				}
+			}
+			if reads != tc.wantReads {
+				t.Fatalf("served ready reads = %d, want %d", reads, tc.wantReads)
+			}
+		})
+	}
+}
+
 // TestRemoteBlockingAnnotatorMergesExternalBlockers: the served annotation's
 // own blockers stay, the external ones join them, and the edges behind them
 // are read in chunks the wire accepts.
@@ -500,25 +638,53 @@ func TestRemoteBlockingAnnotatorMergesExternalBlockers(t *testing.T) {
 	}
 }
 
+// TestRemoteEdgesNamesEachAnchorOnce: the edge read behind every per-issue
+// policy question names each id once and never an empty one, which the http
+// EdgeReader refuses; nothing to name reads nothing.
+func TestRemoteEdgesNamesEachAnchorOnce(t *testing.T) {
+	raw := newRemoteStore(issue("be-a"))
+	blockOnPayments(raw, "be-a")
+	store := testStore(raw, &fakeStore{}, true)
+
+	deps, err := store.remoteEdges(t.Context(), []string{"be-a", "", "be-a"})
+	if err != nil {
+		t.Fatalf("remoteEdges: %v", err)
+	}
+	if len(deps["be-a"]) != 1 {
+		t.Fatalf("be-a edges = %v, want its one edge", deps["be-a"])
+	}
+	if _, err := store.remoteEdges(t.Context(), []string{""}); err != nil {
+		t.Fatalf("remoteEdges of an empty id: %v", err)
+	}
+	if want := []int{1}; !slices.Equal(raw.edgeReads, want) {
+		t.Fatalf("served edge reads named %v anchors, want %v", raw.edgeReads, want)
+	}
+}
+
 // TestRemoteTreeWalkerAddsExternalLeaves: the served down-tree gains the leaf
 // its stored edges name, a leaf the server rendered is not repeated, and any
-// other walk is the served answer as it came.
+// other walk is the served answer as it came. A policy probe that fails does
+// not fail the walk the server answered: its leaves are rendered here.
 func TestRemoteTreeWalkerAddsExternalLeaves(t *testing.T) {
 	root := &types.TreeNode{Issue: *issue("be-a")}
 	served := &types.TreeNode{Issue: types.Issue{ID: paymentsRef, Title: "served leaf"}, Depth: 1, ParentID: "be-a"}
 	for _, tc := range []struct {
-		name    string
-		req     publicops.WalkTreeRequest
-		tree    []*types.TreeNode
-		wantIDs []string
+		name     string
+		req      publicops.WalkTreeRequest
+		tree     []*types.TreeNode
+		probeErr error
+		wantIDs  []string
 	}{
 		{name: "down walk", req: publicops.WalkTreeRequest{RootID: "be-a", MaxDepth: 50}, tree: []*types.TreeNode{root}, wantIDs: []string{"be-a", paymentsRef}},
 		{name: "server rendered the leaf", req: publicops.WalkTreeRequest{RootID: "be-a", MaxDepth: 50}, tree: []*types.TreeNode{root, served}, wantIDs: []string{"be-a", paymentsRef}},
 		{name: "up walk", req: publicops.WalkTreeRequest{RootID: "be-a", MaxDepth: 50, Direction: publicops.TreeUp}, tree: []*types.TreeNode{root}, wantIDs: []string{"be-a"}},
+		{name: "probe fails", req: publicops.WalkTreeRequest{RootID: "be-a", MaxDepth: 50}, tree: []*types.TreeNode{root}, probeErr: errors.New("probe failed"), wantIDs: []string{"be-a", paymentsRef}},
+		{name: "probe fails, server rendered the leaf", req: publicops.WalkTreeRequest{RootID: "be-a", MaxDepth: 50}, tree: []*types.TreeNode{root, served}, probeErr: errors.New("probe failed"), wantIDs: []string{"be-a", paymentsRef}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			raw := newRemoteStore()
 			raw.tree = tc.tree
+			raw.enforcedErr = tc.probeErr
 			blockOnPayments(raw, "be-a")
 			walker, err := testStore(raw, &fakeStore{}, true).TreeWalker()
 			if err != nil {
@@ -536,7 +702,7 @@ func TestRemoteTreeWalkerAddsExternalLeaves(t *testing.T) {
 			if !slices.Equal(ids, tc.wantIDs) {
 				t.Fatalf("tree = %v, want %v", ids, tc.wantIDs)
 			}
-			if leaf := result.Nodes[len(result.Nodes)-1]; tc.name == "down walk" {
+			if leaf := result.Nodes[len(result.Nodes)-1]; tc.name == "down walk" || tc.name == "probe fails" {
 				if leaf.Status != types.StatusOpen || leaf.ParentID != "be-a" || leaf.Depth != 1 || leaf.Title != "○ payments" {
 					t.Fatalf("leaf = %+v, want the open payments leaf under be-a", leaf)
 				}
@@ -600,6 +766,52 @@ func TestRemoteBatchCloserRefusesExternallyBlockedItems(t *testing.T) {
 				t.Fatalf("be-free, be-done outcomes = %v, %v; want the served answers", result.Outcomes[1].Err, result.Outcomes[2].Err)
 			}
 			if want := [][]string{wantServed}; !slices.EqualFunc(raw.closes, want, slices.Equal[[]string]) {
+				t.Fatalf("served closes = %v, want %v", raw.closes, want)
+			}
+		})
+	}
+}
+
+// TestRemoteBatchCloserAnswersAFailedReadWithIt: whether an externally blocked
+// item is live is a read, and a read that fails is that item's outcome. Passing
+// the item to the server's close instead would close blocked work on a guess.
+// A missing item still travels, for the server's own not-found.
+func TestRemoteBatchCloserAnswersAFailedReadWithIt(t *testing.T) {
+	errRead := errors.New("served read failed")
+	for _, tc := range []struct {
+		name       string
+		present    bool
+		readErr    error
+		wantErr    error
+		wantServed []string
+	}{
+		{name: "failed read", present: true, readErr: errRead, wantErr: errRead, wantServed: []string{"be-free"}},
+		{name: "missing", readErr: fmt.Errorf("%w: issue be-blocked", storage.ErrNotFound), wantErr: storage.ErrNotFound, wantServed: []string{"be-blocked", "be-free"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			blocked, free := issue("be-blocked"), issue("be-free")
+			raw := newRemoteStore(free)
+			if tc.present {
+				raw.ready = append(raw.ready, blocked)
+			}
+			blockOnPayments(raw, blocked.ID)
+			raw.getErrs = map[string]error{blocked.ID: tc.readErr}
+			closer, err := testStore(raw, &fakeStore{}, true).BatchCloser()
+			if err != nil {
+				t.Fatalf("BatchCloser: %v", err)
+			}
+
+			result, err := closer.CloseBatch(t.Context(), publicops.CloseBatchRequest{Actor: "worker", Items: closeItems(blocked.ID, free.ID)})
+			if err != nil {
+				t.Fatalf("CloseBatch: %v", err)
+			}
+			if len(result.Outcomes) != 2 || result.Outcomes[0].IssueID != blocked.ID || !errors.Is(result.Outcomes[0].Err, tc.wantErr) || result.Outcomes[1].Err != nil {
+				t.Fatalf("outcomes = %+v; want be-blocked answered %v and be-free closed", result.Outcomes, tc.wantErr)
+			}
+			if blocked.Status != types.StatusOpen {
+				t.Fatalf("be-blocked is %s, want it still open", blocked.Status)
+			}
+			if want := [][]string{tc.wantServed}; !slices.EqualFunc(raw.closes, want, slices.Equal[[]string]) {
 				t.Fatalf("served closes = %v, want %v", raw.closes, want)
 			}
 		})

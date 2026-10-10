@@ -97,16 +97,29 @@ func (s *Store) externalBlockersFor(ctx context.Context, ids []string) (map[stri
 }
 
 // remoteEdges reads the stored outgoing edges of ids through the inner
-// EdgeReader, keyed by source id.
+// EdgeReader, keyed by source id. Each id is named once, and an empty one not
+// at all: the http EdgeReader refuses an empty anchor, which would answer a
+// batch close's own validation question with an edge-read error.
 func (s *Store) remoteEdges(ctx context.Context, ids []string) (map[string][]*types.Dependency, error) {
+	anchors := make([]string, 0, len(ids))
+	named := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		if id != "" && !named[id] {
+			named[id] = true
+			anchors = append(anchors, id)
+		}
+	}
+	deps := make(map[string][]*types.Dependency, len(anchors))
+	if len(anchors) == 0 {
+		return deps, nil
+	}
 	reader, err := s.inner.EdgeReader()
 	if err != nil {
 		return nil, err
 	}
-	deps := make(map[string][]*types.Dependency, len(ids))
-	for start := 0; start < len(ids); start += maxRemoteEdgeAnchors {
-		end := min(start+maxRemoteEdgeAnchors, len(ids))
-		res, err := reader.ReadEdges(ctx, issueops.EdgeReadRequest{IDs: ids[start:end]})
+	for start := 0; start < len(anchors); start += maxRemoteEdgeAnchors {
+		end := min(start+maxRemoteEdgeAnchors, len(anchors))
+		res, err := reader.ReadEdges(ctx, issueops.EdgeReadRequest{IDs: anchors[start:end]})
 		if err != nil {
 			return nil, err
 		}
@@ -252,6 +265,10 @@ func (c *remoteClaimer) Claim(ctx context.Context, req issueops.ClaimRequest) (i
 
 // ── ReadyClaimer ────────────────────────────────────────────────────
 
+// remoteClaimPage is how many externally unblocked candidates one pass of
+// remoteReadyClaimer reads, matching httpclient's composed ready claim.
+const remoteClaimPage = 25
+
 type remoteReadyClaimer struct {
 	inner  issueops.ReadyClaimer
 	policy *Store
@@ -260,11 +277,14 @@ type remoteReadyClaimer struct {
 // ClaimNext is the server's atomic claim-next, untouched, against a server
 // that applies the policy itself, and against any server while nothing is
 // externally blocked. Only an older server with externally blocked work
-// cannot be told what to skip, so there the choice is made here: read the
-// ready candidates in the requested order, skip the blocked ones, and claim
-// each remaining candidate by id until one is won. A candidate another actor
-// took in between is a lost race: the next one is tried, and only a page on
-// which every candidate was lost is an error.
+// cannot be told what to skip, so there the choice is made here, among the
+// candidates a local claim-next selects (ClaimReadyIssueInTx): read the open,
+// unassigned ready rows in the requested order, skip the blocked ones, and
+// claim each remaining candidate by id until one is won. A candidate another
+// actor took in between is a lost race and the next one is tried. A full
+// window lost end to end is read once more: claimed rows leave the unassigned
+// set, so the second pass reads the candidates behind them. Only a claim that
+// tried candidates and won none is an error.
 func (c *remoteReadyClaimer) ClaimNext(ctx context.Context, req issueops.ClaimNextRequest) (issueops.ClaimNextResult, error) {
 	// externallyBlockedIDs is empty against a server that applies the policy
 	// (loadBlockingState's probe), so that server's atomic claim answers.
@@ -286,38 +306,78 @@ func (c *remoteReadyClaimer) ClaimNext(ctx context.Context, req issueops.ClaimNe
 	if err != nil {
 		return issueops.ClaimNextResult{}, err
 	}
+	// Unassigned whatever assignee the request names, as locally: a row
+	// another actor holds is never a candidate. Each window holds
+	// remoteClaimPage candidates past the blocked rows it may also hold.
 	filter := req.Filter
+	filter.Unassigned = true
+	filter.Assignee = ""
 	filter.Offset = 0
-	filter.Limit = widenedLimit(0, 1, len(blocked))
-	page, err := reader.Ready(ctx, filter)
-	if err != nil {
-		return issueops.ClaimNextResult{}, err
-	}
+	window := remoteClaimPage + len(blocked)
+	filter.Limit = &window
 	lost := 0
-	for _, row := range page.Items {
+	for range 2 {
+		page, err := reader.Ready(ctx, filter)
+		if err != nil {
+			return issueops.ClaimNextResult{}, err
+		}
+		claimed, tried, err := claimFirstCandidate(ctx, claimer, req.Actor, page.Items, blocked)
+		if err != nil {
+			return issueops.ClaimNextResult{}, err
+		}
+		if claimed != nil {
+			return issueops.ClaimNextResult{Claimed: claimed}, nil
+		}
+		if tried == 0 {
+			// Nothing unblocked is left to take, whatever an earlier pass lost.
+			return issueops.ClaimNextResult{}, nil
+		}
+		lost += tried
+		if len(page.Items) < window {
+			// A short window is the whole front: reading it again would only
+			// re-read the rows that just refused.
+			break
+		}
+	}
+	// There was work, and every candidate went to another actor first: an
+	// empty answer would say there is no work.
+	return issueops.ClaimNextResult{}, fmt.Errorf("claim ready: lost %d races for externally unblocked ready work; re-run to take the next one", lost)
+}
+
+// claimFirstCandidate claims, by id and in order, the first row that is not
+// externally blocked and that no other actor takes first. tried counts the
+// candidates it attempted, so with nothing claimed it is the races lost.
+func claimFirstCandidate(ctx context.Context, claimer issueops.Claimer, actor string, rows []*issueops.IssueWithCounts, blocked map[string]bool) (*issueops.IssueWithCounts, int, error) {
+	tried := 0
+	for _, row := range rows {
 		if row == nil || row.Issue == nil || blocked[row.ID] {
 			continue
 		}
-		res, err := claimer.Claim(ctx, issueops.ClaimRequest{Actor: req.Actor, IssueID: row.ID})
-		if errors.Is(err, issueops.ErrAlreadyClaimed) || errors.Is(err, issueops.ErrNotClaimable) || errors.Is(err, issueops.ErrNotFound) {
-			lost++
+		tried++
+		res, err := claimer.Claim(ctx, issueops.ClaimRequest{Actor: actor, IssueID: row.ID})
+		if isLostClaimRace(err) {
 			continue
 		}
 		if err != nil {
-			return issueops.ClaimNextResult{}, err
+			return nil, tried, err
 		}
 		claimed := *row
 		if res.Issue != nil {
 			claimed.Issue = res.Issue
 		}
-		return issueops.ClaimNextResult{Claimed: &claimed}, nil
+		return &claimed, tried, nil
 	}
-	if lost > 0 {
-		// There was work, and every candidate went to another actor first: an
-		// empty answer would say there is no work.
-		return issueops.ClaimNextResult{}, fmt.Errorf("claim ready: lost %d races for externally unblocked ready work; re-run to take the next one", lost)
-	}
-	return issueops.ClaimNextResult{}, nil
+	return nil, tried, nil
+}
+
+// isLostClaimRace classifies the refusals that mean someone else took a
+// candidate first. ErrNotFound joins them, as in httpclient's own composed
+// claim: a ready row deleted before it was claimed is the same situation for
+// a caller that wants the next piece of work.
+func isLostClaimRace(err error) bool {
+	return errors.Is(err, issueops.ErrAlreadyClaimed) ||
+		errors.Is(err, issueops.ErrNotClaimable) ||
+		errors.Is(err, issueops.ErrNotFound)
 }
 
 // ── ReadyCounter ────────────────────────────────────────────────────
@@ -387,6 +447,11 @@ type remoteTreeWalker struct {
 // WalkTree is the server's walk. For the plain down-tree request it also hangs
 // the synthetic external leaves the local walker shows — unless the server
 // enforces the external-dependency policy, whose own walker already does.
+//
+// The probe only spares the edge reads: a leaf is display, not enforcement,
+// and appendTreeExternalReferences skips an id the tree already holds. So a
+// probe that fails renders the leaves here rather than failing a walk the
+// server has already answered.
 func (t *remoteTreeWalker) WalkTree(ctx context.Context, req issueops.WalkTreeRequest) (issueops.TreeResult, error) {
 	result, err := t.inner.WalkTree(ctx, req)
 	if err != nil || len(result.Nodes) == 0 {
@@ -395,9 +460,8 @@ func (t *remoteTreeWalker) WalkTree(ctx context.Context, req issueops.WalkTreeRe
 	if (req.Direction != "" && req.Direction != issueops.TreeDown) || req.Status != "" || req.MaxRows != 0 {
 		return result, nil
 	}
-	enforced, err := t.policy.serverEnforcesPolicy(ctx)
-	if err != nil || enforced {
-		return result, err
+	if enforced, err := t.policy.serverEnforcesPolicy(ctx); err == nil && enforced {
+		return result, nil
 	}
 	ids := make([]string, 0, len(result.Nodes))
 	for _, node := range result.Nodes {
@@ -429,8 +493,9 @@ type remoteBatchCloser struct {
 // externally blocked live issue is split: that item gets the policy refusal as
 // its outcome — exactly the outcome the local batch body records — and the
 // rest go to the server in one request. A blocked item that is already closed
-// still travels, so its idempotent re-close and the server's not-found
-// precedence are the server's answer, as they are locally.
+// or missing still travels, so its idempotent re-close and the server's
+// not-found precedence are the server's answer, as they are locally; one whose
+// state cannot be read gets that read's error (liveRefusal).
 //
 // A forced batch has nothing to judge. A ClaimNext batch goes to
 // closeAndClaimNext, Force or not. Against a server that applies the policy,
@@ -465,9 +530,8 @@ func (c *remoteBatchCloser) CloseBatch(ctx context.Context, request issueops.Clo
 	policy := storage.NewBatchClosePolicy(blockers)
 	for i, item := range request.Items {
 		if refusal := policy.CheckClose(item.IssueID, false); refusal != nil {
-			issue, getErr := c.policy.inner.GetIssue(ctx, item.IssueID)
-			if getErr == nil && issue != nil && issue.Status != types.StatusClosed {
-				outcomes[i] = issueops.CloseOutcome{IssueID: item.IssueID, Err: refusal}
+			if err := c.liveRefusal(ctx, item.IssueID, refusal); err != nil {
+				outcomes[i] = issueops.CloseOutcome{IssueID: item.IssueID, Err: err}
 				continue
 			}
 		}
@@ -487,6 +551,24 @@ func (c *remoteBatchCloser) CloseBatch(ctx context.Context, request issueops.Clo
 		}
 	}
 	return issueops.CloseBatchResult{Outcomes: outcomes}, nil
+}
+
+// liveRefusal is the outcome of an externally blocked item, or nil when the
+// item travels to the server. As in the local close only a live issue is
+// refused, so an already closed one keeps its idempotent re-close and a
+// missing one the server's not-found. Any other failed read is the item's
+// outcome: it is neither refused nor closed on a guess.
+func (c *remoteBatchCloser) liveRefusal(ctx context.Context, issueID string, refusal error) error {
+	issue, err := c.policy.inner.GetIssue(ctx, issueID)
+	switch {
+	case errors.Is(err, storage.ErrNotFound):
+		return nil
+	case err != nil:
+		return err
+	case issue != nil && issue.Status != types.StatusClosed:
+		return refusal
+	}
+	return nil
 }
 
 var (
