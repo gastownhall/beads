@@ -83,7 +83,7 @@ func proxiedIssueLifecycle() (issueops.Lifecycle, error) {
 // applyUpdateProxiedOne applies one issue's update — plain or --claim —
 // through issueops.Lifecycle. What stays here is this surface's own protocol:
 // the template guard, the advisory reassign pre-read, the per-id failure
-// taxonomy the multi-id batch needs and the notes-overwrite warning. Hooks are
+// taxonomy the multi-id batch needs. Hooks are
 // NOT among them: they fire from the write plumbing now (the notifying provider
 // wired in main.go), which is what makes an update fire the same events here as
 // it does on the embedded path.
@@ -111,7 +111,6 @@ func applyUpdateProxiedOne(ctx context.Context, id string, in *updateInput) (*ty
 		fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, err)
 		return nil, &updateIDFailure{ID: id, Error: fmt.Sprintf("updating: %v", err)}, nil
 	}
-	notesOverwritten := replacesExistingNotes(before.Notes, in.fields)
 
 	var expectedStatus *issueops.Status
 	if in.ifStatus != nil {
@@ -162,11 +161,6 @@ func applyUpdateProxiedOne(ctx context.Context, id string, in *updateInput) (*ty
 		updated.Comments = nil
 	}
 
-	// Post-commit reporting: the write has landed, so these run exactly once no
-	// matter how many attempts the contract's conflict retry burned.
-	if notesOverwritten {
-		warnNotesReplacement(id)
-	}
 	return updated, nil, nil
 }
 
@@ -174,7 +168,8 @@ func applyUpdateProxiedOne(ctx context.Context, id string, in *updateInput) (*ty
 // for the things the mutation's own result cannot answer: whether the target is
 // a template, whether an unguarded assignee edit is about to take the issue
 // from a live foreign holder, whether --notes is about to replace existing
-// notes, and whether --defer="" should also clear a deferred status. It no
+// notes without --force, and whether --defer="" should also clear a deferred
+// status. It no
 // longer reads the pre-state to decide a hook: a status-crossing update fires
 // on_update and nothing else, from the plumbing, exactly as it does on the
 // embedded path.
@@ -211,6 +206,10 @@ func proxiedUpdateTarget(ctx context.Context, id string, in *updateInput) (*type
 			fmt.Fprintf(os.Stderr, "%s\n", err)
 			return nil, &updateIDFailure{ID: id, Error: err.Error()}
 		}
+	}
+	if err := refuseNotesReplacement(id, current.Notes, in.fields, in.force); err != nil {
+		fmt.Fprintf(os.Stderr, "%s\n", err)
+		return nil, &updateIDFailure{ID: id, Error: err.Error()}
 	}
 	return current, nil
 }

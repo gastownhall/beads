@@ -67,23 +67,23 @@ func TestProxiedServerUpdate(t *testing.T) {
 		}
 	})
 
-	t.Run("notes_overwrite_warns_on_stderr", func(t *testing.T) {
+	t.Run("notes_replace_requires_force", func(t *testing.T) {
 		p := bdProxiedInit(t, bd, "unw")
 		issue := bdProxiedCreate(t, bd, p.dir, "Notes overwrite", "--notes", "original notes")
 		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir,
 			"update", "--json", issue.ID, "--notes", "replacement notes")
-		if err != nil {
-			t.Fatalf("overwrite notes: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		if err == nil {
+			t.Fatalf("replacing notes without --force should fail\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
 		}
-		warning := fmt.Sprintf("warning: %s: --notes replaced existing notes (use --append-notes to preserve history)", issue.ID)
-		if !strings.Contains(stderr, warning) {
-			t.Errorf("expected stderr to contain %q, got: %s", warning, stderr)
+		if !strings.Contains(stderr, "--force") {
+			t.Errorf("refusal should name the --force override, got: %s", stderr)
 		}
-		if strings.Contains(stdout, "warning:") {
-			t.Errorf("warning must not appear on stdout, got: %s", stdout)
+		if got := bdProxiedShow(t, bd, p.dir, issue.ID); got.Notes != "original notes" {
+			t.Fatalf("refused update must leave notes intact, got %q", got.Notes)
 		}
-		if got := bdProxiedShow(t, bd, p.dir, issue.ID); got.Notes != "replacement notes" {
-			t.Errorf("notes: got %q, want %q", got.Notes, "replacement notes")
+		updated := bdProxiedUpdateOne(t, bd, p.dir, issue.ID, "--notes", "replacement notes", "--force")
+		if updated.Notes != "replacement notes" {
+			t.Errorf("--force should replace notes, got %q", updated.Notes)
 		}
 	})
 
@@ -946,7 +946,7 @@ func TestProxiedServerUpdate3(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "un")
 		issue := bdProxiedCreate(t, bd, p.dir, "Notes test", "--notes", "first")
-		updated := bdProxiedUpdateOne(t, bd, p.dir, issue.ID, "--notes", "replacement")
+		updated := bdProxiedUpdateOne(t, bd, p.dir, issue.ID, "--notes", "replacement", "--force")
 		if updated.Notes != "replacement" {
 			t.Errorf("notes: got %q, want %q", updated.Notes, "replacement")
 		}

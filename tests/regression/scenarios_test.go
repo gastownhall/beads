@@ -1066,6 +1066,7 @@ func TestUndeferRoundTrip(t *testing.T) {
 // TestNotesOverwriteSemantics verifies that --notes replaces existing notes
 // while --append-notes concatenates. Data loss risk if semantics drift.
 func TestNotesOverwriteSemantics(t *testing.T) {
+	t.Skip("intentional change: --notes over existing notes now refuses without --force (Projects-bvho); v0.49.6 replaced silently and has no update --force")
 	compareExports(t, func(w *workspace) {
 		id := w.create("--title", "Notes overwrite test", "--type", "task",
 			"--notes", "Original notes content")

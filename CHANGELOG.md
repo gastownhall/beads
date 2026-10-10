@@ -277,6 +277,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`bd update --notes` now REFUSES to replace existing notes unless `--force`
+  is given** (Projects-bvho). `--notes` replaces the whole field, and the old
+  safeguard was a warning printed *after* the commit, by which point the
+  previous text was already gone. The check now runs in the pre-flight that
+  both update routes share (embedded and proxied-server), so the refusal
+  happens before any write and exits 1: `refusing to update <id>: --notes
+  would replace its existing notes (use --append-notes to add to them, or
+  --force to replace them)`. Setting notes on an issue that has none, and
+  re-setting identical text, are unchanged. Clearing existing notes with
+  `--notes ""` is a replacement and also needs `--force`. In a multi-id update
+  only the issues that already have notes are refused; the rest still apply.
+  Scripts that keep a single "current state" note and overwrite it must add
+  `--force`. The beads-mcp `update(notes=...)` tool passes `--notes` as well, so
+  it now fails on an issue that already has notes; use its `note` tool to
+  append.
+
 - **Text-input commands now REFUSE two sources instead of silently picking
   one** (#5332). `bd comment`, `bd note` and `bd comments add` used to apply a
   precedence order when a caller gave both positional text and `--stdin` or

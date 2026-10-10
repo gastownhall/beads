@@ -342,7 +342,7 @@ Session End Handoff:
 - [ ] Prompt user: "We just completed X and started Y on <issue-id>.
        Should I update the beads notes for next session?"
 - [ ] If yes, suggest command:
-       bd update <issue-id> --notes "COMPLETED: X. IN PROGRESS: Y. NEXT: Z"
+       bd update <issue-id> --notes "COMPLETED: X. IN PROGRESS: Y. NEXT: Z" --force
 - [ ] User reviews and confirms
 - [ ] Claude executes the update
 - [ ] Notes saved for next session's resumption

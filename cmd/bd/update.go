@@ -385,8 +385,9 @@ pointless).`,
 
 		// Get claim flag
 		claimFlag, _ := cmd.Flags().GetBool("claim")
-		// --force bypasses the live-claim reassign fence (bd-98s5c); mutually
-		// exclusive with --if-assignee at the flag-group level.
+		// --force bypasses the live-claim reassign fence (bd-98s5c) and the
+		// notes-replacement refusal; mutually exclusive with --if-assignee at
+		// the flag-group level.
 		forceFlag, _ := cmd.Flags().GetBool("force")
 
 		if len(updates) == 0 && !claimFlag {
@@ -409,7 +410,7 @@ pointless).`,
 		}
 
 		// One typed patch for the whole batch. The flag-derived map is still
-		// the source (the guard rules and the notes-overwrite warning read it);
+		// the source (the guard rules and the notes-replacement refusal read it);
 		// this reshapes it once instead of once per issue.
 		basePatch, err := buildUpdatePatch(updates)
 		if err != nil {
@@ -428,7 +429,6 @@ pointless).`,
 			failures = append(failures, updateIDFailure{ID: id, Error: reason})
 		}
 		mutatedStores := map[storage.DoltStorage][]string{}
-		notesOverwriteWarnings := map[storage.DoltStorage][]string{}
 		mutatedResults := map[*RoutedResult]bool{}
 		pendingCloseResults := []*RoutedResult{}
 		trackMutation := func(result *RoutedResult) {
@@ -505,6 +505,17 @@ pointless).`,
 				}
 			}
 
+			// Projects-bvho: --notes over existing notes destroys them, and a
+			// warning printed after the commit cannot bring them back. Refuse
+			// up front unless --force says the replacement is intended. A
+			// policy refusal, so it exits 1, not 13.
+			if err := refuseNotesReplacement(id, issue.Notes, updates, forceFlag); err != nil {
+				fmt.Fprintf(os.Stderr, "%s\n", err)
+				recordFailure(id, err.Error())
+				closeIfUnmutated(result)
+				continue
+			}
+
 			// One atomic operation carries the claim, every field edit, the
 			// label edits, the metadata edits and the reparent. Metadata edits
 			// (--metadata, --set-metadata, --unset-metadata) and --append-notes
@@ -519,7 +530,6 @@ pointless).`,
 			if clearDeferStatus && issue.Status == types.StatusDeferred {
 				patch.Status = issueops.Field[issueops.Status]{Set: true, Value: types.StatusOpen}
 			}
-			notesOverwritten := replacesExistingNotes(issue.Notes, updates)
 
 			ops, err := writeOps(issueStore)
 			if err != nil {
@@ -531,7 +541,8 @@ pointless).`,
 			// Guards ride the operation itself: a stale assignee/status refuses
 			// atomically with a typed mismatch error and MUST surface as a
 			// non-zero exit — never collapse it to success (finding #10).
-			// One --force, two overrides. The assignee half only applies to an
+			// One --force, three overrides. The notes half was settled by the
+			// pre-flight above; the assignee half only applies to an
 			// assignee edit — asserting it without one is an invalid request,
 			// which is why it is conditioned here rather than passed straight
 			// through: `--force -s closed` is now a legitimate way to ask for
@@ -557,9 +568,6 @@ pointless).`,
 			}
 			updatedIssue := updateResult.Issue
 			trackMutation(result)
-			if notesOverwritten {
-				notesOverwriteWarnings[issueStore] = append(notesOverwriteWarnings[issueStore], id)
-			}
 			// Audit log key field changes (survives Dolt GC flatten)
 			if patch.Status.Set {
 				audit.LogFieldChange(result.ResolvedID, "status", string(issue.Status), string(patch.Status.Value), actor, "")
@@ -608,9 +616,6 @@ pointless).`,
 				}); err != nil {
 					closePendingResults()
 					return HandleErrorRespectJSON("failed to commit: %v", err)
-				}
-				for _, id := range notesOverwriteWarnings[s] {
-					warnNotesReplacement(id)
 				}
 			}
 		}
@@ -804,8 +809,13 @@ func replacesExistingNotes(existing string, fields map[string]any) bool {
 	return replacing && existing != "" && newNotes != existing
 }
 
-func warnNotesReplacement(id string) {
-	fmt.Fprintf(os.Stderr, "warning: %s: --notes replaced existing notes (use --append-notes to preserve history)\n", id) //nolint:gosec // G705: stderr, not a browser context
+// refuseNotesReplacement is the pre-flight both update routes share: replacing
+// non-empty notes needs --force, because the old text is gone once it commits.
+func refuseNotesReplacement(id, existing string, fields map[string]any, force bool) error {
+	if force || !replacesExistingNotes(existing, fields) {
+		return nil
+	}
+	return fmt.Errorf("refusing to update %s: --notes would replace its existing notes (use --append-notes to add to them, or --force to replace them)", id)
 }
 
 // ExitGuardMismatch is the exit code when a `bd update` run failed solely
@@ -974,7 +984,7 @@ func init() {
 	updateCmd.Flags().String("title", "", "New title")
 	updateCmd.Flags().StringP("type", "t", "", "New type (bug|feature|task|epic|chore|decision|spike|story|milestone); custom types require types.custom config; aliases: enhancement/feat→feature, dec/adr→decision")
 	registerCommonIssueFlags(updateCmd)
-	updateCmd.Flags().Lookup("notes").Usage = "Additional notes (replaces existing notes; use --append-notes to append)"
+	updateCmd.Flags().Lookup("notes").Usage = "Set notes (refuses to replace existing notes without --force; use --append-notes to append)"
 	updateCmd.Flags().Bool("allow-empty-description", false, "Allow empty description replacement when reading from stdin or file")
 	updateCmd.Flags().String("spec-id", "", "Link to specification document")
 	updateCmd.Flags().String("acceptance-criteria", "", "DEPRECATED: use --acceptance")
@@ -985,8 +995,9 @@ func init() {
 	updateCmd.Flags().StringSlice("set-labels", nil, "Set labels, replacing all existing (repeatable)")
 	updateCmd.Flags().String("parent", "", "New parent issue ID (reparents the issue, use empty string to remove parent)")
 	updateCmd.Flags().Bool("claim", false, "Atomically claim the issue (sets assignee to you, status to in_progress; idempotent if already claimed by you; issues assigned to a pool alias listed in the claim.pools config are claimable too)")
-	// Overrides the live-claim reassign fence (bd-98s5c) and close policy.
-	updateCmd.Flags().Bool("force", false, "Override two refusals: let -a/--assignee overwrite another actor's live in_progress claim (use only for abandoned claims — crashed agent, expired lease; prefer bd reclaim), and let -s/--status move the issue into closed (or a configured done status) despite open children or a live blocker (same as bd close --force)")
+	// Overrides the live-claim reassign fence (bd-98s5c), the close policy,
+	// and the notes-replacement refusal (Projects-bvho).
+	updateCmd.Flags().Bool("force", false, "Override three refusals: let -a/--assignee overwrite another actor's live in_progress claim (use only for abandoned claims — crashed agent, expired lease; prefer bd reclaim), let -s/--status move the issue into closed (or a configured done status) despite open children or a live blocker (same as bd close --force), and let --notes replace existing notes")
 	// Conditional (compare-and-set) update guards (bd-wsqvw)
 	updateCmd.Flags().String("if-assignee", "", "Apply the update only if the current assignee equals this value (--if-assignee '' requires unassigned); a mismatch writes nothing and exits 13 (vs 1 for other failures). Requires a field update; cannot combine with --claim")
 	updateCmd.Flags().String("if-status", "", "Apply the update only if the current status equals this value; a mismatch writes nothing and exits 13 (vs 1 for other failures). Requires a field update; cannot combine with --claim")

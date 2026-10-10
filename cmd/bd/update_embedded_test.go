@@ -388,20 +388,24 @@ func TestEmbeddedUpdate(t *testing.T) {
 		}
 	})
 
-	t.Run("update_notes_overwrite_warns", func(t *testing.T) {
-		issue := bdCreate(t, bd, dir, "Notes warning test", "--type", "task")
+	t.Run("update_notes_replace_requires_force", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Notes refusal test", "--type", "task")
 		bdUpdate(t, bd, dir, issue.ID, "--notes", "original notes")
 
-		stdout, stderr := bdUpdateCapture(t, bd, dir, issue.ID, "--notes", "replacement notes")
-		warning := fmt.Sprintf("warning: %s: --notes replaced existing notes (use --append-notes to preserve history)", issue.ID)
-		if !strings.Contains(stderr, warning) {
-			t.Errorf("expected stderr to contain %q, got: %s", warning, stderr)
+		out, code := bdUpdateFailCode(t, bd, dir, issue.ID, "--notes", "replacement notes")
+		if code != 1 {
+			t.Errorf("expected exit 1 for a policy refusal, got %d: %s", code, out)
 		}
-		if strings.Contains(stdout, "warning:") {
-			t.Errorf("warning must not appear on stdout, got: %s", stdout)
+		if !strings.Contains(out, "--force") {
+			t.Errorf("refusal should name the --force override, got: %s", out)
 		}
+		if got := bdShow(t, bd, dir, issue.ID); got.Notes != "original notes" {
+			t.Fatalf("refused update must leave notes intact, got %q", got.Notes)
+		}
+
+		bdUpdate(t, bd, dir, issue.ID, "--notes", "replacement notes", "--force")
 		if got := bdShow(t, bd, dir, issue.ID); got.Notes != "replacement notes" {
-			t.Errorf("expected notes %q, got %q", "replacement notes", got.Notes)
+			t.Errorf("--force should replace notes, got %q", got.Notes)
 		}
 	})
 
