@@ -491,8 +491,10 @@ func TestMigrationWorkNeededWhenLeaseGrantedNodeAbsent(t *testing.T) {
 		mock.ExpectQuery(regexp.QuoteMeta("FROM INFORMATION_SCHEMA.TABLES")).
 			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 	}
-	mock.ExpectQuery(regexp.QuoteMeta("FROM INFORMATION_SCHEMA.COLUMNS")).
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	// The column sentinel is a SHOW COLUMNS probe (showColumnExists); an
+	// absent column is an empty result set, not a zero count.
+	mock.ExpectQuery(regexp.QuoteMeta("SHOW COLUMNS FROM leases LIKE 'granted_node'")).
+		WillReturnRows(sqlmock.NewRows([]string{"Field", "Type", "Null", "Key", "Default", "Extra"}))
 
 	needed, err := migrationWorkNeeded(context.Background(), db)
 	if err != nil {
@@ -590,8 +592,10 @@ func TestMigrateStartsAboveTheFloorUnderColumnContradiction(t *testing.T) {
 		mock.ExpectQuery(regexp.QuoteMeta("FROM INFORMATION_SCHEMA.TABLES")).
 			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 	}
-	mock.ExpectQuery(regexp.QuoteMeta("FROM INFORMATION_SCHEMA.COLUMNS")).
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	// The column sentinel is a SHOW COLUMNS probe (showColumnExists); an
+	// absent column is an empty result set, not a zero count.
+	mock.ExpectQuery(regexp.QuoteMeta("SHOW COLUMNS FROM leases LIKE 'granted_node'")).
+		WillReturnRows(sqlmock.NewRows([]string{"Field", "Type", "Null", "Key", "Default", "Extra"}))
 
 	boom := errors.New("stop here: the applier resumed above the floor")
 	mock.ExpectExec(".*").WillReturnError(boom)

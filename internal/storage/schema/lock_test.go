@@ -805,10 +805,12 @@ func TestMigrateUpWithLockFreshBootstrapHealResetFailureStaysFatal(t *testing.T)
 	}
 }
 
-// expectIgnoredSentinelProbes mocks the INFORMATION_SCHEMA lookups
-// currentVersion issues to confirm a non-zero ignored cursor against the
-// schema it claims (gh 5033). They fire only for a non-zero cursor, in
-// ignoredSource's table then column sentinel order.
+// expectIgnoredSentinelProbes mocks the schema lookups currentVersion issues
+// to confirm a non-zero ignored cursor against the schema it claims (gh 5033):
+// an INFORMATION_SCHEMA.TABLES count per sentinel table, then a SHOW COLUMNS
+// probe per sentinel column (showColumnExists — the INFORMATION_SCHEMA.COLUMNS
+// form cost 5-6 s per store open on a many-database Dolt server). They fire
+// only for a non-zero cursor, in ignoredSource's table then column order.
 func expectIgnoredSentinelProbes(mock sqlmock.Sqlmock, present bool) {
 	count := 0
 	if present {
@@ -819,9 +821,10 @@ func expectIgnoredSentinelProbes(mock sqlmock.Sqlmock, present bool) {
 			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(count))
 	}
 	if present {
-		for range ignoredSource.sentinelColumns {
-			mock.ExpectQuery(regexp.QuoteMeta("FROM INFORMATION_SCHEMA.COLUMNS")).
-				WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+		for _, column := range ignoredSource.sentinelColumns {
+			mock.ExpectQuery(regexp.QuoteMeta("SHOW COLUMNS FROM " + column.table + " LIKE '" + column.column + "'")).
+				WillReturnRows(sqlmock.NewRows([]string{"Field", "Type", "Null", "Key", "Default", "Extra"}).
+					AddRow(column.column, "varchar(255)", "YES", "", nil, ""))
 		}
 	}
 }
