@@ -26,6 +26,8 @@ func TestResetDataRefNamesMatchDolt(t *testing.T) {
 
 func TestEnvWithNoGitHooksPreservesExistingParameters(t *testing.T) {
 	const existing = "'user.email=ci@example.com'"
+	// os.Environ returns key=value entries; a bare valueless parameters key
+	// cannot reach this boundary. Shared helper tests cover that slice form.
 	t.Setenv(githooksenv.ParametersEnv, existing)
 	t.Setenv("BEADS_TEST_NO_HOOKS_KEEP", "GIT_CONFIG_PARAMETERS=unrelated-value")
 
@@ -39,6 +41,26 @@ func TestEnvWithNoGitHooksPreservesExistingParameters(t *testing.T) {
 	}
 	want = append(want, githooksenv.ParametersEnv+"="+existing+" "+githooksenv.NoHooksParam)
 	if got := envWithNoGitHooks(); !slices.Equal(got, want) {
+		for i := 0; i < len(got) && i < len(want); i++ {
+			if got[i] == want[i] {
+				continue
+			}
+			gotKey, wantKey := execenv.EntryKey(got[i]), execenv.EntryKey(want[i])
+			if !execenv.KeyEqual(gotKey, wantKey) {
+				t.Fatalf("envWithNoGitHooks() first difference at entry %d: got key %q, want key %q (values omitted)", i, gotKey, wantKey)
+			}
+			// Same key, differing value: the likelier regression here (a wrong
+			// separator, a dropped pre-existing parameter, a reordered list).
+			// Reporting only the key would print the same string twice and imply
+			// a key mismatch that did not happen. The parameters entry is
+			// composed from a test-local constant and the exported
+			// NoHooksParam, neither secret, so show it; inherited os.Environ()
+			// values stay omitted.
+			if execenv.KeyEqual(gotKey, githooksenv.ParametersEnv) {
+				t.Fatalf("envWithNoGitHooks() entry %d key %q: values differ: got %q, want %q", i, gotKey, got[i], want[i])
+			}
+			t.Fatalf("envWithNoGitHooks() entry %d key %q: values differ (got %d bytes, want %d bytes; values omitted)", i, gotKey, len(got[i]), len(want[i]))
+		}
 		t.Fatalf("envWithNoGitHooks() differs from the expected environment: got %d entries, want %d", len(got), len(want))
 	}
 }
