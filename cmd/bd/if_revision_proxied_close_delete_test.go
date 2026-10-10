@@ -100,9 +100,9 @@ func TestProxiedServerIfRevisionDeleteMatchAndMismatch(t *testing.T) {
 }
 
 // TestProxiedServerIfRevisionTargetGoneIsPreconditionFailed is the proxied-route
-// twin of TestIfRevisionPreflightGoneIsPreconditionFailedOnEveryVerb
-// (ga-vnycm2.10): a guarded close, update or assign whose row a concurrent
-// `bd delete` already removed must report precondition_failed /
+// twin of TestEmbeddedIfRevisionPreflightGoneIsPreconditionFailedOnEveryVerb
+// (ga-vnycm2.10): a guarded close, update, assign, reopen or delete whose row
+// a concurrent `bd delete` already removed must report precondition_failed /
 // ExitGuardMismatch, whichever step (the advisory pre-read or the guarded
 // write) first observes the row gone — never an unclassified "not found"
 // exit 1. TestProxiedServerDeleteIfRevisionSingleWinner's delete_vs_close and
@@ -123,6 +123,11 @@ func TestProxiedServerIfRevisionTargetGoneIsPreconditionFailed(t *testing.T) {
 			return []string{"update", id, "--if-revision", rev, "--spec-id", "gone"}
 		}},
 		{"assign", func(id, rev string) []string { return []string{"assign", id, "someone", "--if-revision", rev} }},
+		{"reopen", func(id, rev string) []string { return []string{"reopen", id, "--if-revision", rev} }},
+		{"delete", func(id, rev string) []string { return []string{"delete", id, "--force", "--if-revision", rev} }},
+		{"delete_cascade", func(id, rev string) []string {
+			return []string{"delete", id, "--cascade", "--force", "--if-revision", rev}
+		}},
 	} {
 		t.Run(tc.verb, func(t *testing.T) {
 			t.Parallel()
@@ -145,6 +150,34 @@ func TestProxiedServerIfRevisionTargetGoneIsPreconditionFailed(t *testing.T) {
 			if !strings.Contains(out, "precondition failed: issue no longer exists") {
 				t.Errorf("--if-revision %s of a deleted row should say \"precondition failed: issue no longer exists\", got:\n%s", tc.verb, out)
 			}
+			// Every route's own not-found wording: "Issue <id> not found"
+			// (reportIssueLookupFailure), "issue <id> not found" (assign's
+			// pre-read), "issues not found: <id>" (the delete role).
+			if strings.Contains(out, "not found") {
+				t.Errorf("--if-revision %s of a deleted row leaked the raw, unclassified lookup error instead of the guard envelope:\n%s", tc.verb, out)
+			}
 		})
 	}
+
+	// Without --if-revision there is no guard to report through. The assign
+	// pre-read wraps storage.ErrNotFound for the guarded case; unguarded, its
+	// rendered text must stay the "issue <id> not found" it always printed.
+	t.Run("unguarded_assign_still_not_found", func(t *testing.T) {
+		t.Parallel()
+		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "assign", "ivtg-doesnotexist", "someone")
+		var ee *exec.ExitError
+		if !errors.As(err, &ee) {
+			t.Fatalf("unguarded assign of a missing id should exit non-zero, got err=%v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		out := stdout + stderr
+		if ee.ExitCode() != 1 {
+			t.Errorf("unguarded assign of a missing id exit code = %d, want 1\n%s", ee.ExitCode(), out)
+		}
+		if !strings.Contains(out, "issue ivtg-doesnotexist not found") {
+			t.Errorf("unguarded assign of a missing id should say \"issue ivtg-doesnotexist not found\", got:\n%s", out)
+		}
+		if strings.Contains(out, "precondition failed") {
+			t.Errorf("unguarded assign of a missing id must not report a guard outcome:\n%s", out)
+		}
+	})
 }

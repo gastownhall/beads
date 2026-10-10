@@ -69,6 +69,13 @@ another actor won the race, so retrying the same guard is pointless).`,
 			// Resolve with prefix routing (supports cross-rig reopens like `bd reopen xe-5ls`)
 			result, err := resolveAndGetIssueForMutation(ctx, store, id)
 			if err != nil {
+				// A concurrent `bd delete` that commits before this
+				// resolution is the same lost race as one that commits
+				// inside ops.Reopen below. requireSingleIfRevisionID
+				// guarantees this is the only id, so nothing is pending.
+				if reported, ok := reportIfRevisionTargetGone("reopening", id, err, ifRevision); ok {
+					return reported
+				}
 				fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", id, err)
 				hasError = true
 				continue

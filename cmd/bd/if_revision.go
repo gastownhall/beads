@@ -15,8 +15,8 @@ import (
 )
 
 // ifRevisionFlagHelp is the shared half of --if-revision's --help text across
-// `bd update`, `bd close`, `bd assign` and `bd delete`: the value syntax, the
-// one-id rule and the exit-code contract. Each verb appends what is specific
+// `bd update`, `bd close`, `bd assign`, `bd delete` and `bd reopen`: the value
+// syntax, the one-id rule and the exit-code contract. Each verb appends what is specific
 // to it (close has no other guards to compose with; update composes with
 // --if-assignee/--if-status).
 const ifRevisionFlagHelp = "Apply the write only if the issue's current revision equals this value (the decimal int64 from `bd show --json`'s \"revision\" field). One id only: refused before any write when combined with more than one issue id. A mismatch writes nothing and exits 13 (vs 1 for other failures)."
@@ -118,12 +118,15 @@ func classifyIfRevisionFailure(err error, ifRevision *int64) (code, reason strin
 // verb resolves the row BEFORE its guarded write, so a racer that loses to a
 // concurrent `bd delete` sees the row vanish either here or inside the guarded
 // write, depending only on which side of the delete's commit its resolution
-// lands (mc-zndi7.81 for delete, ga-vnycm2.10 for close/update/assign). Both
-// are the same outcome — the revision the caller named is gone — so both
+// lands (mc-zndi7.81 for delete, ga-vnycm2.10 for close/update/assign/reopen).
+// Both are the same outcome — the revision the caller named is gone — so both
 // report precondition_failed / ExitGuardMismatch with the reason "issue no
 // longer exists". With no --if-revision there is no guard to report through,
 // and any other resolution failure is not a guard outcome; ok is false for
-// both and the caller's ordinary failure handling applies unchanged.
+// both and the caller's ordinary failure handling applies unchanged. `bd
+// delete --cascade` resolves through deleteBatch instead: its not-found error
+// keeps the storage.ErrNotFound sentinel, so the caller's
+// reportIfRevisionFailure classifies it the same way.
 //
 // err is matched with isNotFoundErr, which also accepts ResolvePartialID's
 // unwrapped "no issue found matching" text, and reported as the literal

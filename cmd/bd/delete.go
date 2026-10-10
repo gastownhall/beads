@@ -353,7 +353,15 @@ func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, c
 		defer func() { _ = routedStore.Close() }()
 	}
 	if len(notFound) > 0 {
-		return fmt.Errorf("issues not found: %s", strings.Join(notFound, ", "))
+		// The role's own existence probe reports a missing id with this same
+		// error, and its text is the flat list every caller has always
+		// printed. What it adds is the storage.ErrNotFound sentinel, which
+		// lets the guarded `bd delete --cascade` caller's
+		// reportIfRevisionFailure report a target that a concurrent `bd
+		// delete` removed before this resolution as the same lost race as one
+		// removed inside deleter.Delete below: precondition_failed, not exit 1
+		// (see reportIfRevisionTargetGone).
+		return &issueops.NotFoundError{IDs: notFound}
 	}
 	batchStore := store
 	if routedStore != nil {

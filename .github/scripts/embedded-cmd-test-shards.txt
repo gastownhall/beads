@@ -310,6 +310,7 @@
 
 100 64 TestEmbeddedGateWaiterCheckLifecycle
 
+100 65 TestEmbeddedIfRevisionPreflightGoneIsPreconditionFailedOnEveryVerb
 100 65 TestEmbeddedSupersede
 
 100 66 TestEmbeddedCloseBasicIsolatedStores
