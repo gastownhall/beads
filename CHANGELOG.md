@@ -403,6 +403,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   issues' dependency targets alongside the blockers they already fetched.
   Pinned-never-blocks itself is unchanged.
 
+- **`bd flatten` preserves pending configuration and clone-local schemas.**
+  It checkpoints pending tracked changes, then soft-resets and commits on the
+  same `main` connection. Avoiding temporary-branch checkout and hard reset
+  retains dirty memories, ignored-table foreign keys and existing orphan rows
+  without a repair purge. The ancestry root is selected by parentage rather
+  than timestamps; ambiguous or nonempty roots are refused. History remains
+  intentionally shortened to the empty root and current snapshot. Related:
+  Cherub Kumar's broader hard-reset repair work in #6772.
+
 - **`bd list` no longer silently drops all but the last repeated filter flag.**
   `--status`, `--state`, and `--id` were plain string flags, so
   `bd list --status open --status closed --status pinned` kept only `pinned` —

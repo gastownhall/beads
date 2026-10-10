@@ -17,17 +17,16 @@ var (
 var flattenCmd = &cobra.Command{
 	Use:     "flatten",
 	GroupID: "maint",
-	Short:   "Squash all Dolt history into a single commit",
-	Long: `Nuclear option: squash ALL Dolt commit history into a single commit.
+	Short:   "Squash Dolt history to the current snapshot",
+	Long: `Nuclear option: replace old Dolt snapshots with the current state.
 
-This uses the Tim Sehn recipe:
-  1. Create a new branch from the current state
-  2. Soft-reset to the initial commit (preserving all data)
+This preserves the current working state on main:
+  1. Checkpoint pending changes on the same connection
+  2. Soft-reset to the verified empty ancestry root (preserving all data)
   3. Commit everything as a single snapshot
-  4. Swap main branch to the new flattened branch
-  5. Prune remote-tracking refs (they would keep the old history alive;
+  4. Prune remote-tracking refs (they would keep the old history alive;
      the next push or fetch re-creates them at the new tip)
-  6. Run a full Dolt GC (all storage generations) to reclaim the old history
+  5. Run a full Dolt GC (all storage generations) to reclaim the old history
 
 The GC pass is a full collection: Dolt storage is generational, and a default
 GC never revisits data an earlier GC moved to the old generation. On any store
@@ -35,8 +34,12 @@ that has been GC'd before (bd gc, or a previous flatten or compact), only a
 full collection reclaims the squashed history. A full GC can take minutes on
 multi-gigabyte stores.
 
-This is irreversible — all commit history is lost. The resulting database
-has exactly one commit containing all current data.
+This removes old snapshots and their commit metadata from reachable history.
+The resulting database retains the empty root plus one snapshot commit
+containing all tracked data.
+Ignored tables retain their current rows, schemas, and foreign keys locally.
+Pause tracker writers and synchronization jobs and keep a verified backup
+before using --force. Ambiguous or nonempty ancestry roots are refused.
 
 Use this when:
   - Your active database has grown very large
