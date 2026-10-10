@@ -217,6 +217,7 @@ go_test(
         "remote_peer_auth_test.go",
         "remote_sync_gate_test.go",
         "reopen_category_test.go",
+        "restore_source_test.go",
         "retention_epoch_contract_test.go",
         "role_fixture_kit_test.go",
         "role_test_helpers_test.go",

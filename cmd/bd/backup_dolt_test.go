@@ -54,6 +54,14 @@ func TestResolveDoltBackupURL(t *testing.T) {
 			wantExact: "gs://bucket/path",
 		},
 		{
+			// Was absolutized into file://$PWD/s3:/bucket/path, which
+			// registerBackupRemote then persisted as the backup destination
+			// after a successful `bd backup restore s3://…`.
+			name:      "s3:// URL passes through",
+			input:     "s3://bucket/path",
+			wantExact: "s3://bucket/path",
+		},
+		{
 			name:      "absolute path gets file:// prefix",
 			input:     absBackup,
 			wantExact: "file://" + absBackup,
