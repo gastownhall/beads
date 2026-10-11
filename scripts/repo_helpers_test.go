@@ -187,4 +187,4 @@ func exits(body *ast.BlockStmt) bool {
 	return false
 }
 
-const doltSQLServerImage = "dolthub/dolt-sql-server:2.2.0"
+const doltSQLServerImage = "dolthub/dolt-sql-server:2.4.1"

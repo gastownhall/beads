@@ -238,7 +238,8 @@ func freshBootstrapIntegrationConfig(beadsDir string, port int, database, pathSu
 // twenty comes up with it permanently unusable, answering
 // "Error 1105 (HY000): context canceled" to every session for the life of the
 // server process (measured 2026-08-20: 2.1.8 0/40, 2.2.0 0/60, 2.3.0 3/60,
-// 2.3.1 3/100 fresh databases broken). Without this probe the defect surfaces
+// 2.3.1 3/100 fresh databases broken; re-measured 2026-10-10: 2.3.1 8/150,
+// 2.4.1 0/250). Without this probe the defect surfaces
 // only as the heal's generic #4566 dirty-table refusal, which reads like a
 // beads bug and points the reader at "run 'bd dolt commit'" — advice that
 // cannot work, because the reset the heal needs is the thing that is broken.
