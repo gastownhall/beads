@@ -95,3 +95,35 @@ func TestLoadBeadsEnvFile(t *testing.T) {
 		}
 	})
 }
+
+// An operator who exports a selector as empty chose local discovery; the
+// early selector loader must not fill it from .beads/.env (GH#7303). Only an
+// unset selector inherits the file's value.
+func TestLoadBeadsSelectionEnvFileKeepsExplicitlyEmptySelectors(t *testing.T) {
+	setBeadsDirStartupProvenanceForTest(t, false)
+	dir := t.TempDir()
+	env := "BEADS_DIR=/other/.beads\nBEADS_DB=/other/.beads/dolt\nBD_DB=/other/.beads/dolt\n"
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(env), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"BEADS_DIR", "BEADS_DB", "BD_DB"} {
+		t.Setenv(key, "")
+	}
+
+	loadBeadsSelectionEnvFile(dir)
+
+	for _, key := range []string{"BEADS_DIR", "BEADS_DB", "BD_DB"} {
+		if got, ok := os.LookupEnv(key); !ok || got != "" {
+			t.Errorf("%s = %q (set=%v), want the explicitly empty value kept", key, got, ok)
+		}
+	}
+	if beadsDirProvidedAtStartup {
+		t.Error("an ignored .env BEADS_DIR must not record selection provenance")
+	}
+
+	os.Unsetenv("BEADS_DB")
+	loadBeadsSelectionEnvFile(dir)
+	if got := os.Getenv("BEADS_DB"); got != "/other/.beads/dolt" {
+		t.Errorf("unset BEADS_DB = %q, want it loaded from .env", got)
+	}
+}

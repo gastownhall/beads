@@ -439,6 +439,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `RunBatchApplyAppliesTheDefaultPriority`.
 
 ### Fixed
+- **An explicitly empty `BEADS_DIR`, `BEADS_DB` or `BD_DB` is no longer
+  overwritten by `.beads/.env`.** The selector loader treated a set-but-empty
+  variable as unset, so `BEADS_DIR= bd ...` still followed a `.env` that
+  named another workspace. It now checks whether the variable is set, matching
+  how the rest of `.env` loading behaves (#7303).
+
 - **An update of a template is now refused for every caller, not only
   `bd update`.** The template guard used to be a pre-read in `cmd/bd`, so an
   update through `bd serve` (`PATCH /v0/beads/issues/{id}`), an `update` item

@@ -437,9 +437,12 @@ func TestLoadSelectionEnvironmentUsesAmbientEnvFileForBEADSDB(t *testing.T) {
 	}
 
 	t.Chdir(callerRepo)
-	t.Setenv("BEADS_DIR", "")
-	t.Setenv("BEADS_DB", "")
-	t.Setenv("BD_DB", "")
+	// Unset, not empty: an explicitly empty selector keeps local discovery
+	// (GH#7303), so only absent selectors inherit the .env value.
+	for _, key := range []string{"BEADS_DIR", "BEADS_DB", "BD_DB"} {
+		t.Setenv(key, "")
+		os.Unsetenv(key)
+	}
 
 	loadSelectionEnvironment()
 
