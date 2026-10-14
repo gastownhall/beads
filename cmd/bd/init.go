@@ -870,6 +870,10 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// valid (directory names like "001" are common in temp dirs).
 		prefix = normalizeIssuePrefix(prefix)
 		remoteDivergenceConfirmed := false
+		// Set when the safety decision proceeds with a divergence the user
+		// authorized, by destroy token or by the confirmation above; the
+		// data-ref guard then takes an existing ref without asking again.
+		remoteDivergenceAuthorized := false
 
 		// Cross-boundary safety (bd-q83 / ADR 0002): check remote state
 		// BEFORE any filesystem side-effects so a refusal exits cleanly.
@@ -1277,6 +1281,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				if err != nil {
 					return err
 				}
+				remoteDivergenceAuthorized = remoteDivergenceAuthorized || (!bootstrap && decision.Action == ActionProceedWithDivergence)
 				syncFromRemote = bootstrap
 				if !bootstrap && decision.Action == ActionNoRemoteData && !quiet {
 					// Skipping the clone (because the probe came back clean)
@@ -1287,7 +1292,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			}
 		} else if syncRemoteSource == initSyncRemoteNone && !stealth && isGitRepo() && !isBareGitRepo() {
 			if originURL, err := gitOriginGetURL(); err == nil && originURL != "" {
-				syncURL = normalizeRemoteURL(originURL)
+				syncURL = gitOriginDoltURL(originURL, resolveSyncRemoteRef())
 				syncURLFromGitOrigin = true
 				hasData, probeErr := gitOriginHasDoltDataRefStatus()
 				remoteHasDoltData, lateProbeNote = resolveRemoteHasDoltDataProbe(syncURL, hasData, probeErr)
@@ -1310,6 +1315,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				if err != nil {
 					return err
 				}
+				remoteDivergenceAuthorized = remoteDivergenceAuthorized || (!bootstrap && decision.Action == ActionProceedWithDivergence)
 				if bootstrap {
 					if probeErr != nil {
 						// The fail-closed UNKNOWN kept the refusal gate shut
@@ -1336,7 +1342,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			syncURL = doltRemoteURL(syncURL)
 			cloneCfg := initTimeCloneConfig(initServerMode, serverHost, serverPort, serverSocket, serverUser, dbName)
 			disposition, err := runInitRemoteClone(syncURL, func(remoteURL string) error {
-				return cloneFromRemoteWithMode(ctx, beadsDir, remoteURL, dbName, cloneCfg, initRemoteCloneMode(initServerMode, externalServer))
+				return cloneFromRemoteWithMode(ctx, beadsDir, remoteURL, dbName, syncRemoteRefForURL(remoteURL), cloneCfg, initRemoteCloneMode(initServerMode, externalServer))
 			})
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error: failed to clone remote %q: %v\n", syncURL, err)
@@ -1567,7 +1573,20 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// it to the remotesapi client — the #4421 storm, one leg further down
 		// (#5743).
 		if shouldWriteInitDoltRemote(doltCfg.Gateway, syncURL, syncFromRemote, syncURLFromConfig, syncURLFromGitOrigin, isDoltLocalOnly()) {
-			configureInitDoltRemote(ctx, store, doltRemoteURL(syncURL), quiet)
+			// The ref is decided against the routed URL: a forge URL without
+			// .git is not git-backed for dolt as written, but its git+ form is.
+			// Unless the database was just cloned from that ref, which proves
+			// it holds Dolt data, a ref under refs/heads/ or refs/tags/ is
+			// checked against the repository first, as bd dolt remote add checks
+			// it: the origin probe above reports a branch holding source as
+			// found, and the clone of it is what reported no Dolt data. A
+			// divergence the user authorized above counts as consent to take an
+			// existing ref; the default branch is refused either way.
+			routed := doltRemoteURL(syncURL)
+			ref := syncRemoteRefForURL(routed)
+			if bootstrappedFromRemote || guardInitDoltRemoteRef(routed, ref, !nonInteractive, remoteDivergenceAuthorized, confirmGitDataRefTarget) {
+				configureInitDoltRemote(ctx, store, routed, ref, quiet)
+			}
 		}
 
 		// === CONFIGURATION METADATA (Pattern A: Fatal) ===
@@ -3325,7 +3344,7 @@ func shouldWriteInitDoltRemote(gateway bool, syncURL string, syncFromRemote, syn
 // failure (empty on success) so the caller can tell the user why.
 func resolveRemoteHasDoltDataProbe(syncURL string, hasData bool, err error) (bool, string) {
 	if err != nil {
-		return true, fmt.Sprintf("could not verify refs/dolt/data on %s (%v); treating remote as having Dolt history", syncURL, err)
+		return true, fmt.Sprintf("could not verify %s on %s (%v); treating remote as having Dolt history", storage.EffectiveGitDataRef(resolveSyncRemoteRef()), redactRemoteURL(syncURL), err)
 	}
 	return hasData, ""
 }
@@ -3373,18 +3392,26 @@ func handleRemoteSafetyDecision(decision RemoteSafetyDecision, prefix, syncURL, 
 	return false, nil
 }
 
-func configureInitDoltRemote(ctx context.Context, store storage.DoltStorage, syncURL string, quiet bool) {
+// configureInitDoltRemote wires the Dolt origin remote at syncURL on the git
+// data ref ref ("" = refs/dolt/data). An existing origin is left alone: after
+// a clone, Dolt has already recorded the remote, ref included.
+func configureInitDoltRemote(ctx context.Context, store storage.DoltStorage, syncURL, ref string, quiet bool) {
 	hasRemote, _ := store.HasRemote(ctx, "origin")
 	if hasRemote {
 		return
 	}
-	if err := store.AddRemote(ctx, "origin", syncURL); err != nil {
+	if err := store.AddRemoteWithRef(ctx, "origin", syncURL, ref); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to add remote 'origin': %v\n", err)
 		return
 	}
-	if !quiet {
-		fmt.Printf("  %s Configured Dolt remote: origin → %s\n", ui.RenderPass("✓"), syncURL)
+	if quiet {
+		return
 	}
+	if ref != "" {
+		fmt.Printf("  %s Configured Dolt remote: origin → %s (ref %s)\n", ui.RenderPass("✓"), redactRemoteURL(syncURL), ref)
+		return
+	}
+	fmt.Printf("  %s Configured Dolt remote: origin → %s\n", ui.RenderPass("✓"), redactRemoteURL(syncURL))
 }
 
 func printInitNoDoltRemoteWarning(withExportNote bool) {

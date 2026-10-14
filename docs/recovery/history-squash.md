@@ -116,13 +116,15 @@ On a *git-backed* remote (issue data riding your code remote under
 `refs/dolt/data`) there is no fresh path to pick — the storage is the git
 repository itself, and its manifest lists every historical table file as
 current, so the full old store stays reachable even after the force-push.
-Replace the data plane in place instead: delete the Dolt data refs on the
-git remote, then force-push to rebuild a fresh store holding only live
-chunks. Code branches are untouched.
+Replace the data plane in place instead: `bd dolt remote reset-data` deletes
+the Dolt data refs on the git remote (the ref this database's remote was
+added with, `refs/dolt/data` unless `--ref` named another, plus the info
+ref) and force-pushes a fresh store holding only live chunks. Code branches
+are untouched, and so are the refs of any other database kept in the same
+repository.
 
 ```bash
-git push origin :refs/dolt/data :refs/heads/__dolt_remote_info__
-bd dolt push --force
+bd dolt remote reset-data origin
 ```
 
 **Step 5:** Verify, then re-clone everywhere else. On this machine:

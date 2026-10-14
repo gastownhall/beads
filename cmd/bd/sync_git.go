@@ -11,6 +11,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/doltremote"
+	"github.com/steveyegge/beads/internal/storage"
 )
 
 // isGitRepo checks if the current working directory is in a git repository.
@@ -94,7 +95,8 @@ func gitOriginGetURLForActiveRepo(ctx context.Context) (string, error) {
 	return strings.TrimSpace(string(output)), nil
 }
 
-// gitOriginHasDoltDataRef checks if origin has refs/dolt/data.
+// gitOriginHasDoltDataRef checks if origin has Dolt data on the configured
+// data ref (sync.remote-ref, else refs/dolt/data).
 // Returns false on any error (network, no remote, timeout, etc).
 // Uses a 10s timeout since this is a network call used for auto-detection,
 // and suppresses credential prompts to avoid blocking on SSH remotes.
@@ -113,21 +115,37 @@ func gitOriginHasDoltDataRefStatus() (bool, error) {
 }
 
 // A non-nil error means UNKNOWN, not "no data" — the bool is meaningless.
-//
-// The error names the failure, not the remote: every caller already names the
-// remote it probed, and wrapping here too produced messages that said the URL
-// and the ref twice ("...on sync.remote \"X\": probe refs/dolt/data on X: exit
-// status 128").
+// The ref probed is sync.remote-ref when configured, else refs/dolt/data.
 func gitRemoteHasDoltDataRefStatus(remote string) (bool, error) {
+	return gitRemoteHasDoltDataRefAtStatus(remote, resolveSyncRemoteRef())
+}
+
+// gitRemoteHasDoltDataRefAt is gitRemoteHasDoltDataRef for an explicit data
+// ref ("" = refs/dolt/data).
+func gitRemoteHasDoltDataRefAt(remote, ref string) bool {
+	hasData, err := gitRemoteHasDoltDataRefAtStatus(remote, ref)
+	return err == nil && hasData
+}
+
+// gitRemoteHasDoltDataRefAtStatus probes remote for Dolt data on ref ("" =
+// refs/dolt/data). A non-nil error means UNKNOWN, not "no data".
+//
+// The error names the failure, not the remote or the ref: every caller
+// already names what it probed, and wrapping here too produced messages that
+// said the URL and the ref twice ("...on sync.remote \"X\": probe
+// refs/dolt/data on X: exit status 128").
+func gitRemoteHasDoltDataRefAtStatus(remote, ref string) (bool, error) {
+	dataRef := storage.EffectiveGitDataRef(ref)
 	ctx, cancel := context.WithTimeout(context.Background(), gitDoltDataProbeTimeout)
 	defer cancel()
 	// #nosec G702 -- no shell is involved: the binary is the literal "git" and
-	// the remote URL is its own argv element, so it cannot inject a command.
-	// The value is this repo's configured sync remote, local operator state
-	// rather than request data; gosec only reaches it because this PR routed
-	// config discovery through env-derived paths (see testSSHConnectivity in
-	// dolt.go for the same taint path).
-	cmd := exec.CommandContext(ctx, "git", "ls-remote", gitRemoteURLForLsRemote(remote), "refs/dolt/data")
+	// the remote URL and the ref are their own argv elements, so they cannot
+	// inject a command. Both values are this repo's configured sync remote and
+	// data ref, local operator state rather than request data; gosec only
+	// reaches them because config discovery is routed through env-derived
+	// paths (see testSSHConnectivity in dolt.go for the same taint path).
+	// -- keeps a URL from reading as an option.
+	cmd := exec.CommandContext(ctx, "git", "ls-remote", "--", gitRemoteURLForLsRemote(remote), dataRef)
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	output, err := cmd.Output()
 	if err != nil {
@@ -173,8 +191,28 @@ func firstNonEmptyLine(s string) string {
 	return ""
 }
 
+// gitRemoteURLForLsRemote is what git reads for a Dolt remote URL: the git+
+// prefix dropped, and a scheme-less host/path ending in .git given the
+// https:// that dolt's NormalizeGitRemoteUrl gives it, so a probe reads the
+// repository dolt will push to; git on its own would read host:1234/repo.git
+// as an scp address, a different endpoint. Everything else is what git reads
+// already: a URL with a scheme, an scp form dolt recognizes (a dot or an @ in
+// the host), a local path, and a git remote name such as origin.
 func gitRemoteURLForLsRemote(remote string) string {
-	return strings.TrimPrefix(remote, "git+")
+	if strings.HasPrefix(strings.ToLower(remote), "git+") {
+		return remote[len("git+"):]
+	}
+	if strings.Contains(remote, "://") || isScpLikeForDolt(remote) || looksLikeLocalPathForDolt(remote) {
+		return remote
+	}
+	base := remote
+	if i := strings.IndexAny(base, "?#"); i >= 0 {
+		base = base[:i]
+	}
+	if !strings.HasSuffix(base, ".git") {
+		return remote
+	}
+	return "https://" + remote
 }
 
 // gitURLToDoltRemote converts a git remote URL to dolt's remote format.

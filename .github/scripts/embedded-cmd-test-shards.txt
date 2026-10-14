@@ -144,13 +144,17 @@
 
 100 60 TestEmbeddedCommentsCLI
 
+100 61 TestEmbeddedGitDataRefRefChangeNeedsYesWithoutTerminal
 100 61 TestEmbeddedUpdateRoutedStoreCommitsTargetHead
 
+100 62 TestEmbeddedGitDataRefOriginProbeFollowsRef
 100 62 TestEmbeddedReadyBlockersAndLabels
 
 100 63 TestEmbeddedDepAndLinkBatchAutoCommitDoesNotAdvanceHead
+100 63 TestEmbeddedGitDataRefBootstrapWiresFreshDatabaseOnRef
 
 100 64 TestEmbeddedGateWaiterCheckLifecycle
+100 64 TestEmbeddedGitDataRefRemoteAddPushesToRefAndBootstrapReadsIt
 
 100 65 TestEmbeddedIfRevisionPreflightGoneIsPreconditionFailedOnEveryVerb
 100 65 TestEmbeddedSupersede
