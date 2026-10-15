@@ -688,6 +688,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   negative duration and fails, even though `--age 0s`'s own contract is
   that every wisp qualifies. `ageThreshold <= 0` now bypasses the clock
   comparison entirely (#7236).
+- **`bd find-duplicates --method ai` and `bd admin compact --auto` accept a
+  reply that opens with a thinking block.** Both read only the first content
+  block and gave up unless it was text; they now use the first text block
+  (#7515).
 - `bd create --parent` works on the HTTP backend: the create role mints the
   `<parent>.<n>` child id (and inherits the parent's labels) inside the
   create on every route, instead of the CLI reserving it through a raw
