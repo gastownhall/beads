@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage/kvkeys"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
@@ -63,6 +64,21 @@ func ValidateSettingWrite(key, value string) (string, error) {
 	}
 	if err := types.CheckTextLen("config value", value); err != nil {
 		return "", fmt.Errorf("%w: %w", issueops.ErrValidation, err)
+	}
+	// config.YamlOnlyKeys — startup settings and the tracker secrets
+	// (github.token, linear.api_key, jira.api_token, gitlab.token, ado.pat) —
+	// must live in the workspace's local config.yaml, never in this plane's
+	// row-per-key storage: that storage is the Dolt config table, which is a
+	// SYNCED table (bd dolt push/pull, DOLT_CLONE, DOLT_PULL all replicate
+	// it). `bd config set` already refuses these at its own door; this is
+	// the only other door onto this plane (the settings HTTP surface bd
+	// serve and its dashboard expose), and it had no such rule, so a secret
+	// PUT through it landed in the synced table and reached every remote on
+	// the next push (GH#7559).
+	if config.IsYamlOnlyKey(key) {
+		return "", fmt.Errorf("%w: %q must be set in the workspace's local config.yaml (bd config set %s <value>), not written here: "+
+			"this plane is the Dolt config table, which syncs to every remote on push/pull",
+			issueops.ErrValidation, key, key)
 	}
 	// The prefix is owned by bd init --prefix, bd bootstrap and bd
 	// rename-prefix. Refused HERE rather than at the front door because `bd
