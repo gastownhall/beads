@@ -269,6 +269,7 @@
 100 59 TestEmbeddedDoctorSupportedChecks
 100 59 TestEmbeddedIdentityGateRendersSchemaSkewFromForwardDriftedWorkspace
 100 59 TestEmbeddedMigratePersonal_refusesPlanningRepoThatIsTheProject
+100 59 TestEmbeddedReadyCtx
 100 59 TestEmbeddedRetainIDs
 100 59 TestEmbeddedVersionedHistorySetManyRefusesUnversionableMetadata
 
