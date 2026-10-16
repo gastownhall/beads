@@ -1223,7 +1223,10 @@ func commentOutYamlKey(content, key string) (string, error) {
 			continue
 		}
 
-		if name, indent, ok := yamlKeyOnLine(line); ok && walk.step(name, indent) {
+		name, indent, ok := yamlKeyOnLine(line)
+		if !ok {
+			walk.stepOver(line)
+		} else if walk.step(name, indent) {
 			if err := mappingValueUnsetRefusal(lines, i, indent, key); err != nil {
 				return "", err
 			}
@@ -1384,6 +1387,31 @@ func (w *nestedKeyWalk) step(name string, indent int) bool {
 	}
 	w.opaque = indent
 	return false
+}
+
+// stepOver advances the walk by one line that has content but declares no key
+// yamlKeyOnLine can read, a list item above all. A dotted key names mappings
+// only, so nothing nested under such a line can continue the match, and the
+// walk skips that subtree as it does one under a key that does not match. These
+// lines used to bypass the walk entirely, so unsetting `dolt.host` on
+//
+//	dolt:
+//	  - port: 3307
+//	    host: 10.0.0.1
+//
+// read the item's `host:` as a direct child of `dolt:` and commented out a key
+// the file never set, reporting success (mc-2nfr1).
+//
+// The skip is armed only while none is. Narrowing an armed one would end the
+// skip over a section the key does not own partway through it, and widening
+// one would trust a line that need not end anything: yaml.v3 accepts a quoted
+// value continued at column 0, and the target can follow it.
+func (w *nestedKeyWalk) stepOver(line string) {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" || strings.HasPrefix(trimmed, "#") || w.opaque >= 0 {
+		return
+	}
+	w.opaque = lineIndent(line)
 }
 
 // unsupportedUnsetShape reports the two shapes named in the changelog — a key
