@@ -54,7 +54,7 @@ func TestSettingWriteValidationMatchesTheSharedValidator(t *testing.T) {
 		key   string
 		value string
 	}{
-		{"an ordinary key", "routing.default", "core"},
+		{"an ordinary key", "notes", "core"},
 		{"an empty key", "", "x"},
 		{"a blank key", "   ", "x"},
 		{"the protected key", issueops.SettingKeyIssuePrefix, "bd"},
@@ -86,6 +86,10 @@ func TestSettingWriteValidationMatchesTheSharedValidator(t *testing.T) {
 		{"a value of exactly the column's bytes", "custom.big", strings.Repeat("v", types.MaxTextBytes)},
 		{"a value past the column", "custom.big", strings.Repeat("v", types.MaxTextBytes+1)},
 		{"a value past the column in bytes but not in characters", "custom.big", strings.Repeat("\u00e9", types.MaxTextBytes/2+1)},
+		// config.IsYamlOnlyKey, GH#7559: exact-match (a tracker secret) and
+		// prefix-match (a whole family, e.g. routing.*) both refuse here now.
+		{"a yaml-only key, exact match", "github.token", "ghp_x"},
+		{"a yaml-only key, prefix match", "routing.default", "core"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			mine := validateSettingWrite(tc.key, tc.value)
@@ -244,13 +248,21 @@ func TestConfigWritesDialTheKeyInThePath(t *testing.T) {
 // right answer: the projection withholds the value it just accepted, so there is
 // nothing to transcribe and the request is the only honest source. Both arms in
 // one case so neither can be satisfied by a body that always does one of them.
+//
+// BOTH ARMS USE AN ORDINARY KEY. The redacted/not-redacted branch is driven by
+// the fake answer's own Redacted field, not by the key name, and since GH#7559
+// a real credential-bearing key (or any other config.IsYamlOnlyKey key) never
+// reaches this transport at all — validateSettingWrite refuses it client-side
+// first. That doctrine has its own pin (TestSettingWriteValidationMatchesTheSharedValidator);
+// this case is only about what the client does with the answer once a write is
+// accepted.
 func TestSetSettingTranscribesTheAnswerRatherThanEchoingTheRequest(t *testing.T) {
 	const sent = "what the caller sent"
 
 	stored := "what the server stored"
-	plain := &settingAnswerWire{answer: apigen.Setting{Key: "routing.default", Value: &stored}}
+	plain := &settingAnswerWire{answer: apigen.Setting{Key: "notes", Value: &stored}}
 	res, err := settingsOver(t, plain).SetSetting(context.Background(),
-		issueops.SetSettingRequest{Key: "routing.default", Value: sent})
+		issueops.SetSettingRequest{Key: "notes", Value: sent})
 	if err != nil {
 		t.Fatalf("SetSetting: %v", err)
 	}
@@ -258,15 +270,15 @@ func TestSetSettingTranscribesTheAnswerRatherThanEchoingTheRequest(t *testing.T)
 		t.Errorf("SetSetting reported %q, want the answer's %q: the result is what the workspace holds, "+
 			"and echoing the request would report a value it does not", res.Value, stored)
 	}
-	if res.Key != "routing.default" {
+	if res.Key != "notes" {
 		t.Errorf("SetSetting reported key %q, want the answer's", res.Key)
 	}
 
-	withheld := &settingAnswerWire{answer: apigen.Setting{Key: "notion.token", Redacted: true}}
+	withheld := &settingAnswerWire{answer: apigen.Setting{Key: "custom.thing", Redacted: true}}
 	res, err = settingsOver(t, withheld).SetSetting(context.Background(),
-		issueops.SetSettingRequest{Key: "notion.token", Value: sent})
+		issueops.SetSettingRequest{Key: "custom.thing", Value: sent})
 	if err != nil {
-		t.Fatalf("SetSetting on a credential-bearing key: %v", err)
+		t.Fatalf("SetSetting on an answer that redacts: %v", err)
 	}
 	if res.Value != sent {
 		t.Errorf("SetSetting on a withheld answer reported %q, want the request's %q: \"\" would say the plane "+
