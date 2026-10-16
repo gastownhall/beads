@@ -1,7 +1,9 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -643,8 +645,23 @@ var rulesAuditCmd = &cobra.Command{
 }
 
 var rulesCompactCmd = &cobra.Command{
-	Use:           "compact",
-	Short:         "Merge related rules into composites",
+	Use:   "compact",
+	Short: "Merge related rules into composites",
+	Long: `Merge related rules into composites.
+
+A composite keeps only the **Do:** and **Don't:** lines of its sources, plus a
+"Source rules:" line naming them. Any other prose in the source files is not
+carried over, and the source files are deleted when the merge is applied.
+
+Without --force, compact only prints the composite and the files it would
+delete. With --force it writes the composite and deletes the sources. It
+refuses to write a composite over an existing file, including one of its own
+sources.
+
+Examples:
+  bd rules compact --auto                    # Preview the audit's suggested merges
+  bd rules compact --auto --force            # Apply them
+  bd rules compact --group alpha,beta --force`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE:          runRulesCompact,
@@ -658,8 +675,9 @@ func init() {
 	// Compact command flags
 	rulesCompactCmd.Flags().String("path", ".claude/rules/", "Path to rules directory")
 	rulesCompactCmd.Flags().StringSlice("group", nil, "Rule names to merge")
-	rulesCompactCmd.Flags().Bool("auto", false, "Apply audit suggestions")
-	rulesCompactCmd.Flags().Bool("dry-run", false, "Preview without applying")
+	rulesCompactCmd.Flags().Bool("auto", false, "Use audit suggestions to select merge groups")
+	rulesCompactCmd.Flags().Bool("dry-run", false, "Preview without applying (the default without --force)")
+	rulesCompactCmd.Flags().Bool("force", false, "Write the composite and delete the source files (without this flag, shows preview)")
 
 	// Register subcommands
 	rulesCmd.AddCommand(rulesAuditCmd)
@@ -732,7 +750,7 @@ func runRulesAudit(cmd *cobra.Command, args []string) error {
 			suggested := strings.ReplaceAll(mc.GroupLabel, " ", "-") + ".md"
 			fmt.Printf("    Suggested: merge into %s\n\n", suggested)
 		}
-		fmt.Printf("Run `bd rules compact --auto` to apply suggested merges.\n")
+		fmt.Printf("Run `bd rules compact --auto` to preview these merges, then add --force to apply them.\n")
 	}
 	return nil
 }
@@ -751,6 +769,8 @@ func runRulesCompact(cmd *cobra.Command, args []string) error {
 	groupNames, _ := cmd.Flags().GetStringSlice("group")
 	autoMode, _ := cmd.Flags().GetBool("auto")
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
+	force, _ := cmd.Flags().GetBool("force")
+	apply := force && !dryRun
 
 	if !autoMode && len(groupNames) == 0 {
 		return HandleErrorRespectJSON("specify --group <rule1,rule2,...> or --auto")
@@ -775,8 +795,10 @@ func runRulesCompact(cmd *cobra.Command, args []string) error {
 			Output  string `json:"output"`
 			Rules   int    `json:"rules_merged"`
 			Applied bool   `json:"applied"`
+			Error   string `json:"error,omitempty"`
 		}
 		var results []compactResult
+		failed := 0
 
 		for _, mc := range result.MergeCandidates {
 			// Parse the actual rule files for this group
@@ -797,44 +819,37 @@ func runRulesCompact(cmd *cobra.Command, args []string) error {
 				continue
 			}
 
-			applied := false
-			if !dryRun {
-				outName := strings.ReplaceAll(mc.GroupLabel, " ", "-") + ".md"
-				outPath := filepath.Join(rulesPath, outName)
-				if err := os.WriteFile(outPath, []byte(merged), 0o600); err != nil {
-					fmt.Fprintf(os.Stderr, "Error writing %s: %v\n", outPath, err)
-					continue
-				}
-				// Delete source files
-				for _, ruleName := range mc.Rules {
-					srcPath := filepath.Join(rulesPath, ruleName)
-					_ = os.Remove(srcPath)
-				}
-				applied = true
+			outName := strings.ReplaceAll(mc.GroupLabel, " ", "-") + ".md"
+			res := compactResult{
+				Group:  mc.GroupLabel,
+				Output: merged,
+				Rules:  len(groupRules),
 			}
-
-			results = append(results, compactResult{
-				Group:   mc.GroupLabel,
-				Output:  merged,
-				Rules:   len(groupRules),
-				Applied: applied,
-			})
+			if apply {
+				written, err := writeCompactedRule(filepath.Join(rulesPath, outName), merged, groupRules)
+				res.Applied = written
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+					res.Error = err.Error()
+					failed++
+				}
+			}
+			results = append(results, res)
 
 			if !jsonOutput {
-				if dryRun {
-					fmt.Printf("Preview merge → %s.md:\n", mc.GroupLabel)
-				} else {
-					fmt.Printf("Merged → %s.md:\n", mc.GroupLabel)
-				}
-				fmt.Println(strings.Repeat("─", 40))
-				fmt.Print(merged)
-				fmt.Println(strings.Repeat("─", 40))
-				fmt.Println()
+				printCompactPreview(outName, merged, groupRules, res.Applied, res.Error == "")
 			}
 		}
 
 		if jsonOutput {
-			return outputJSON(results)
+			if err := outputJSON(results); err != nil {
+				return err
+			}
+		} else if !apply {
+			fmt.Println(compactPreviewFooter)
+		}
+		if failed > 0 {
+			return &exitError{Code: 1}
 		}
 		return nil
 	}
@@ -862,36 +877,106 @@ func runRulesCompact(cmd *cobra.Command, args []string) error {
 		return HandleErrorRespectJSON("compact failed: %v", err)
 	}
 
+	outName := strings.ReplaceAll(label, " ", "-") + ".md"
+	written := false
+	var applyErr error
+	if apply {
+		written, applyErr = writeCompactedRule(filepath.Join(rulesPath, outName), merged, groupRules)
+	}
+
 	if jsonOutput {
-		return outputJSON(map[string]interface{}{
+		result := map[string]interface{}{
 			"group":   label,
 			"output":  merged,
 			"rules":   len(groupRules),
-			"dry_run": dryRun,
-		})
+			"dry_run": !apply,
+			"applied": written,
+		}
+		if applyErr != nil {
+			result["error"] = applyErr.Error()
+		}
+		if err := outputJSON(result); err != nil {
+			return err
+		}
+		if applyErr != nil {
+			return &exitError{Code: 1}
+		}
+		return nil
 	}
 
-	outName := strings.ReplaceAll(label, " ", "-") + ".md"
-	if dryRun {
-		fmt.Printf("Preview merge → %s:\n", outName)
-	} else {
+	if applyErr != nil && !written {
+		return HandleError("%v", applyErr)
+	}
+	printCompactPreview(outName, merged, groupRules, written, applyErr == nil)
+	if applyErr != nil {
+		return HandleError("%v", applyErr)
+	}
+	if !apply {
+		fmt.Println(compactPreviewFooter)
+	}
+	return nil
+}
+
+const compactPreviewFooter = "Preview only, nothing written. Re-run with --force to write the composite and delete its source files."
+
+// printCompactPreview shows a composite and the source files it replaces.
+func printCompactPreview(outName, merged string, sources []RuleFile, applied, sourcesDeleted bool) {
+	if applied {
 		fmt.Printf("Merged → %s:\n", outName)
+	} else {
+		fmt.Printf("Preview merge → %s:\n", outName)
 	}
 	fmt.Println(strings.Repeat("─", 40))
 	fmt.Print(merged)
 	fmt.Println(strings.Repeat("─", 40))
-
-	if !dryRun {
-		outPath := filepath.Join(rulesPath, outName)
-		if err := os.WriteFile(outPath, []byte(merged), 0o600); err != nil {
-			return HandleErrorRespectJSON("write merged file: %v", err)
-		}
-		for _, rf := range groupRules {
-			_ = os.Remove(rf.Path)
-		}
-		fmt.Printf("\nCreated %s, deleted %d source files.\n", outName, len(groupRules))
+	names := make([]string, 0, len(sources))
+	for _, rf := range sources {
+		names = append(names, filepath.Base(rf.Path))
 	}
-	return nil
+	switch {
+	case applied && sourcesDeleted:
+		fmt.Printf("Created %s, deleted %d source files: %s\n\n", outName, len(names), strings.Join(names, ", "))
+	case applied:
+		fmt.Printf("Created %s, but not every source file was deleted (see the error).\n\n", outName)
+	default:
+		fmt.Printf("Would delete: %s\n\n", strings.Join(names, ", "))
+	}
+}
+
+// writeCompactedRule creates outPath and then removes the sources, reporting
+// whether outPath was written even when a delete fails afterwards. It never
+// replaces an existing file: a composite named like one of its own sources
+// would otherwise be written and then deleted with them, and one named like an
+// unrelated rule would silently replace it.
+func writeCompactedRule(outPath, merged string, sources []RuleFile) (bool, error) {
+	// #nosec G304 -- path comes from controlled filepath.Join of user-specified rules directory
+	f, err := os.OpenFile(outPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if errors.Is(err, fs.ErrExist) {
+		return false, fmt.Errorf("%s already exists; refusing to overwrite it. Rename or move that file (and update --group if it names it), then re-run", outPath)
+	}
+	if err != nil {
+		return false, fmt.Errorf("write %s: %w", outPath, err)
+	}
+	if _, err := f.WriteString(merged); err != nil {
+		_ = f.Close()
+		_ = os.Remove(outPath)
+		return false, fmt.Errorf("write %s: %w", outPath, err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(outPath)
+		return false, fmt.Errorf("write %s: %w", outPath, err)
+	}
+
+	var failures []string
+	for _, rf := range sources {
+		if err := os.Remove(rf.Path); err != nil {
+			failures = append(failures, err.Error())
+		}
+	}
+	if len(failures) > 0 {
+		return true, fmt.Errorf("wrote %s but could not delete %d source file(s): %s", outPath, len(failures), strings.Join(failures, "; "))
+	}
+	return true, nil
 }
 
 // titleCase capitalizes the first letter of each word.

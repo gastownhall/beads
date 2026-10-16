@@ -79,7 +79,7 @@ Merge Candidates (similarity > 0.60):
     → context-loading.md
     Suggested: merge into context-management.md
 
-Run `bd rules compact --auto` to apply suggested merges.
+Run `bd rules compact --auto` to preview these merges, then add --force to apply them.
 ```
 
 ### `bd rules compact`
@@ -87,22 +87,23 @@ Run `bd rules compact --auto` to apply suggested merges.
 Merge related rules into composites.
 
 ```
-bd rules compact --group <rule1> <rule2> ...   # Merge specific rules
-bd rules compact --auto                         # Apply audit suggestions
-bd rules compact --dry-run                      # Show diff without applying
+bd rules compact --group <rule1>,<rule2>,...   # Preview merging specific rules
+bd rules compact --auto                         # Preview audit suggestions
+bd rules compact --auto --force                 # Apply audit suggestions
 
 Flags:
   --path         Path to rules directory (default: .claude/rules/)
   --group        List of rule filenames (without .md) to merge
-  --auto         Use merge candidates from last audit
-  --dry-run      Preview merged output without writing files
+  --auto         Run an audit and use its merge candidates as the groups
+  --dry-run      Preview merged output without writing files (the default)
+  --force        Write the composite and delete the source files
   --json         Structured JSON output
 ```
 
 **Compact workflow:**
 
 ```
-$ bd rules compact --group agent-spawn-discipline agent-efficiency agent-token-efficiency
+$ bd rules compact --group agent-spawn-discipline,agent-efficiency,agent-token-efficiency
 Preview merge → agent-discipline.md:
 ────────────────────────────────────
 # Agent Discipline
@@ -111,10 +112,16 @@ Preview merge → agent-discipline.md:
 
 Source rules: agent-spawn-discipline.md, agent-efficiency.md, agent-token-efficiency.md
 ────────────────────────────────────
-Apply? [y/N]: y
-✓ Created .claude/rules/agent-discipline.md
-✓ Deleted 3 source files
+Would delete: agent-spawn-discipline.md, agent-efficiency.md, agent-token-efficiency.md
+
+Preview only, nothing written. Re-run with --force to write the composite and delete its source files.
 ```
+
+Re-running with `--force` writes the composite and deletes the sources. The
+confirmation is a flag rather than a `[y/N]` prompt so the command behaves the
+same in noninteractive workflows, the same shape as `bd delete --force`.
+Compact refuses to write a composite over an existing file, including one of
+its own sources.
 
 ---
 
@@ -196,8 +203,8 @@ Given a group of rules to merge:
 **Don't:** {deduplicated don't entries, newline-separated}
 ```
 
-6. Show diff before applying
-7. On confirmation: write merged file, delete source files
+6. Without --force, show the composite and the files it would delete, and stop
+7. With --force: create the merged file (refusing if the path exists), then delete source files, reporting any delete that fails
 
 ---
 
@@ -300,8 +307,9 @@ func init() {
 
     rulesCompactCmd.Flags().String("path", ".claude/rules/", "Path to rules directory")
     rulesCompactCmd.Flags().StringSlice("group", nil, "Rule names to merge")
-    rulesCompactCmd.Flags().Bool("auto", false, "Apply audit suggestions")
+    rulesCompactCmd.Flags().Bool("auto", false, "Use audit suggestions to select merge groups")
     rulesCompactCmd.Flags().Bool("dry-run", false, "Preview without applying")
+    rulesCompactCmd.Flags().Bool("force", false, "Write the composite and delete the source files")
     rulesCompactCmd.Flags().Bool("json", false, "JSON output")
 
     rulesCmd.AddCommand(rulesAuditCmd)
