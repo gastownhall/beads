@@ -118,6 +118,30 @@ bd show bd-a1b2c3d4
 bd list --full-ids
 ```
 
+### `bd delete` requires the full id
+
+Every command above resolves an abbreviation the same way, with one deliberate
+exception: `bd delete` accepts only a full, exact id, never an abbreviation. An
+abbreviation that happens to be a leading-prefix match for the wrong issue would
+otherwise land the deletion there, and a deletion cannot be undone.
+
+The wrong match is easy to reach by accident. The id of an issue that is
+already gone is still the start of other ids — its child's (`bd-a3f8e9.1`
+after `bd-a3f8e9` is deleted), or a longer hash that happens to begin with it —
+so retrying a delete or re-running a `--from-file` list would otherwise reach an
+issue nobody named. The refusal says delete needs the full id and names the ids
+the input matches.
+
+Reads and every other mutation (`show`, `close`, `update`, …) keep accepting
+abbreviations as documented above.
+
+```bash
+bd show a1b2              # OK — abbreviation resolves for reads
+bd close a1b2              # OK — abbreviation resolves for other writes
+bd delete a1b2             # refused — deletes require the full id
+bd delete bd-a1b2c3d4      # OK — previews the deletion; add --force to delete
+```
+
 ## Migration from Sequential IDs
 
 If migrating from a system with sequential IDs:
@@ -132,7 +156,9 @@ bd show bd-new --json | jq '.original_id'
 
 ## Best Practices
 
-1. **Use short references** - `bd-a1b2` is usually unique enough
+1. **Use short references** - `bd-a1b2` is usually unique enough, except on
+   `bd delete`, which requires the full id (see
+   [Working with IDs](#working-with-ids) above)
 2. **Use `--json` for scripts** - Parse full ID programmatically
 3. **Reference by hash in commits** - `Fixed bd-a1b2` in commit messages
 4. **Let hierarchies form naturally** - Create epics, add children as needed
