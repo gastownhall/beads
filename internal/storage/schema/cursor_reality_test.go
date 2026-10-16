@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -43,6 +44,29 @@ func stubSentinelColumns(t *testing.T, present map[string]bool, probeErr error) 
 		return present[key], nil
 	}
 	return &probed
+}
+
+// expectSentinelColumnProbe mocks the real column-sentinel probe in order: the
+// carrier table's existence through sentinelTableExists's INFORMATION_SCHEMA
+// point read, then — only when the table is there — the SHOW COLUMNS read. An
+// absent column is an empty SHOW COLUMNS result set, not a zero count.
+func expectSentinelColumnProbe(mock sqlmock.Sqlmock, sc schemaSentinelColumn, tablePresent, columnPresent bool) {
+	count := 0
+	if tablePresent {
+		count = 1
+	}
+	mock.ExpectQuery(regexp.QuoteMeta("FROM INFORMATION_SCHEMA.TABLES")).
+		WithArgs(sc.table).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(count))
+	if !tablePresent {
+		return
+	}
+	rows := sqlmock.NewRows([]string{"Field", "Type", "Null", "Key", "Default", "Extra"})
+	if columnPresent {
+		rows.AddRow(sc.column, "varchar(255)", "YES", "", nil, "")
+	}
+	mock.ExpectQuery(regexp.QuoteMeta("SHOW COLUMNS FROM " + sc.table + " LIKE '" + sc.column + "'")).
+		WillReturnRows(rows)
 }
 
 // allSentinelTables is the "everything the table sentinels ask for is present"
@@ -121,12 +145,13 @@ func TestCursorRealityFloor(t *testing.T) {
 		// These two cases document the two real-world shapes the stub seam
 		// collapses: an absent leases table and a present-but-column-less leases
 		// table both drive sentinelColumnExists to false
-		// (columns["leases.granted_node"] == false), because the real
-		// schemaColumnExists COUNT(*) is 0 for a missing table and a missing
-		// column alike. They deliberately exercise the same branch — the naming
-		// records intent, not a distinct seam path. Both floor at 11, which is
-		// what lets the replay heal both (0012 re-creates leases, 0016 adds the
-		// column) without reaching back to 0007.
+		// (columns["leases.granted_node"] == false), because the real probe
+		// reports a missing table (its existence read) and a missing column (its
+		// SHOW COLUMNS read) alike. They deliberately exercise the same branch —
+		// the naming records intent, not a distinct seam path; the probe itself
+		// is pinned by TestSentinelColumnProbeNeverAsksAMissingTable. Both floor
+		// at 11, which is what lets the replay heal both (0012 re-creates leases,
+		// 0016 adds the column) without reaching back to 0007.
 		{
 			name:        "leases table absent",
 			present:     allSentinelTables(),
@@ -673,8 +698,10 @@ func TestMigrationWorkNeededWhenLeaseGrantedNodeAbsent(t *testing.T) {
 		mock.ExpectQuery(regexp.QuoteMeta("FROM INFORMATION_SCHEMA.TABLES")).
 			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 	}
-	mock.ExpectQuery(regexp.QuoteMeta("FROM INFORMATION_SCHEMA.COLUMNS")).
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	// leases is present; only its granted_node column is missing.
+	for _, sc := range ignoredSource.sentinelColumns {
+		expectSentinelColumnProbe(mock, sc, true, false)
+	}
 
 	needed, err := migrationWorkNeeded(context.Background(), db)
 	if err != nil {
@@ -685,6 +712,159 @@ func TestMigrationWorkNeededWhenLeaseGrantedNodeAbsent(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet ordered sentinel probes: %v", err)
+	}
+}
+
+// TestIgnoredCursorReadWithLeasesAbsentIssuesNoFailingStatement is the
+// missing-carrier shape end to end through the guarded cursor read every
+// write-capable open performs. Every released tree (v1.1.0, v1.1.2, v1.2.x)
+// has no leases table at all, and an out-of-band copy can arrive at-latest
+// without it. The ordered mock admits exactly the carrier's existence read for
+// the column sentinel: a SHOW COLUMNS sent to the absent table is unexpected,
+// and currentVersion surfaces that rather than swallowing it the way atLatest
+// does, so this fails if the probe ever issues the statement that pins a pooled
+// Dolt session (be-bv7x).
+func TestIgnoredCursorReadWithLeasesAbsentIssuesNoFailingStatement(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	expectCursorProbe(mock, "ignored_schema_migrations", true)
+	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", LatestIgnoredVersion())
+	for range ignoredSource.sentinelTables {
+		mock.ExpectQuery(regexp.QuoteMeta("FROM INFORMATION_SCHEMA.TABLES")).
+			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	}
+	for range ignoredSource.sentinelFlooredTables {
+		mock.ExpectQuery(regexp.QuoteMeta("FROM INFORMATION_SCHEMA.TABLES")).
+			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	}
+	for _, sc := range ignoredSource.sentinelColumns {
+		expectSentinelColumnProbe(mock, sc, false, false)
+	}
+
+	got, err := ignoredSource.currentVersion(context.Background(), db)
+	if err != nil {
+		t.Fatalf("currentVersion with leases absent: %v", err)
+	}
+	if want := 11; got != want {
+		t.Errorf("currentVersion = %d, want the leases.granted_node replayFloor %d", got, want)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet ordered sentinel probes: %v", err)
+	}
+}
+
+// TestSentinelColumnProbeNeverAsksAMissingTable pins the probe mechanism behind
+// the column sentinel, through the real sentinelColumnExists and a stubbed
+// sentinelTableExists. SHOW COLUMNS errors on a missing table, and with the
+// store's multiStatements DSN a failing statement leaves the pooled Dolt
+// session pinned to its pre-statement catalog, so tables that other
+// connections create afterwards stay invisible to it (be-bv7x; reproduced on
+// dolt 2.1.8 and 2.2.0). The carrier table must therefore be established by
+// the existence probe, which answers an empty set rather than an error, before
+// any SHOW COLUMNS is sent. The mock has no expectations: any statement at all
+// fails the probe.
+func TestSentinelColumnProbeNeverAsksAMissingTable(t *testing.T) {
+	if len(ignoredSource.sentinelColumns) == 0 {
+		t.Fatal("ignoredSource has no sentinel columns; this guard is inert")
+	}
+	probed := stubSentinelTables(t, allSentinelTables(), nil)
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	for _, sc := range ignoredSource.sentinelColumns {
+		present, err := sentinelColumnExists(context.Background(), db, sc.table, sc.column)
+		if err != nil {
+			t.Fatalf("sentinelColumnExists(%s.%s) with the table absent: %v", sc.table, sc.column, err)
+		}
+		if present {
+			t.Errorf("sentinelColumnExists(%s.%s) = true with the table absent", sc.table, sc.column)
+		}
+		if !slices.Contains(*probed, sc.table) {
+			t.Errorf("carrier table %s was never probed for existence; probed %v", sc.table, *probed)
+		}
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
+// TestSentinelColumnProbeReadsAPresentTableExactly covers the other half: once
+// the carrier exists, SHOW COLUMNS answers, and its Field is compared exactly
+// because '_' is a LIKE single-character wildcard.
+func TestSentinelColumnProbeReadsAPresentTableExactly(t *testing.T) {
+	present := allSentinelTables()
+	for _, sc := range ignoredSource.sentinelColumns {
+		present[sc.table] = true
+	}
+	probed := stubSentinelTables(t, present, nil)
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	showColumns := regexp.QuoteMeta("SHOW COLUMNS FROM leases LIKE 'granted_node'")
+	columns := []string{"Field", "Type", "Null", "Key", "Default", "Extra"}
+	mock.ExpectQuery(showColumns).WillReturnRows(sqlmock.NewRows(columns).AddRow("grantedXnode", "varchar(255)", "YES", "", nil, ""))
+	mock.ExpectQuery(showColumns).WillReturnRows(sqlmock.NewRows(columns))
+	mock.ExpectQuery(showColumns).WillReturnRows(sqlmock.NewRows(columns).AddRow("granted_node", "varchar(255)", "YES", "", nil, ""))
+
+	for i, want := range []bool{false, false, true} {
+		got, err := sentinelColumnExists(context.Background(), db, "leases", "granted_node")
+		if err != nil {
+			t.Fatalf("probe %d: sentinelColumnExists: %v", i, err)
+		}
+		if got != want {
+			t.Errorf("probe %d: sentinelColumnExists = %v, want %v", i, got, want)
+		}
+	}
+	if want := []string{"leases", "leases", "leases"}; !slices.Equal(*probed, want) {
+		t.Errorf("carrier existence probes = %v, want %v (one ahead of every SHOW COLUMNS)", *probed, want)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
+// A failed carrier probe must surface, not read as "column absent": that would
+// clamp a healthy at-latest cursor to the column's replayFloor and replay the
+// tail on a catalog nobody could read — the same rule
+// TestCursorProbeErrorIsNotTreatedAsContradicted pins for the table sentinels.
+func TestSentinelColumnCarrierProbeErrorIsNotTreatedAsContradicted(t *testing.T) {
+	boom := errors.New("information_schema unavailable")
+	present := allSentinelTables()
+	orig := sentinelTableExists
+	t.Cleanup(func() { sentinelTableExists = orig })
+	sentinelTableExists = func(_ context.Context, _ DBConn, table string) (bool, error) {
+		for _, sc := range ignoredSource.sentinelColumns {
+			if table == sc.table {
+				return false, boom
+			}
+		}
+		return present[table], nil
+	}
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	_, limited, err := ignoredSource.cursorRealityFloor(context.Background(), db)
+	if !errors.Is(err, boom) {
+		t.Errorf("carrier probe error was swallowed: err = %v", err)
+	}
+	if limited {
+		t.Error("an unreadable carrier probe reported the cursor as contradicted")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
 	}
 }
 
@@ -778,8 +958,9 @@ func TestMigrateStartsAboveTheFloorUnderColumnContradiction(t *testing.T) {
 		mock.ExpectQuery(regexp.QuoteMeta("FROM INFORMATION_SCHEMA.TABLES")).
 			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 	}
-	mock.ExpectQuery(regexp.QuoteMeta("FROM INFORMATION_SCHEMA.COLUMNS")).
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	for _, sc := range ignoredSource.sentinelColumns {
+		expectSentinelColumnProbe(mock, sc, true, false)
+	}
 
 	boom := errors.New("stop here: the applier resumed above the floor")
 	mock.ExpectExec(".*").WillReturnError(boom)
