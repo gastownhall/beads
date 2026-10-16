@@ -220,6 +220,10 @@ func GetBlockedIssuesInTx(ctx context.Context, tx DBTX, filter types.WorkFilter)
 	for _, tables := range []sqlbuild.FilterTables{IssuesFilterTables, WispsFilterTables} {
 		table := tables.Main
 		labelWhere, labelArgs := sqlbuild.LabelSetClauses("id", tables, filter.Labels, filter.LabelsAny, filter.ExcludeLabels)
+		if clause, ctxArgs, ok := sqlbuild.RequiresClause("id", tables, filter.Ctx); ok {
+			labelWhere = append(labelWhere, clause)
+			labelArgs = append(labelArgs, ctxArgs...)
+		}
 		labelClause := ""
 		if len(labelWhere) > 0 {
 			labelClause = " AND " + strings.Join(labelWhere, " AND ")

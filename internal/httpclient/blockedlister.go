@@ -7,6 +7,7 @@ import (
 	"net/url"
 
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
+	"github.com/steveyegge/beads/internal/httpclient/encode"
 	"github.com/steveyegge/beads/internal/httpclient/wire"
 	storageops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
@@ -31,6 +32,15 @@ type httpBlockedLister struct{ store *Store }
 var _ issueops.BlockedLister = (*httpBlockedLister)(nil)
 
 func (l *httpBlockedLister) ListBlocked(ctx context.Context, req issueops.BlockedRequest) (issueops.BlockedResult, error) {
+	// A declared execution context refuses before the dial: listBlockedIssues
+	// publishes no ctx parameter, and the predicate it builds is a negative
+	// one no published parameter composes (E-BlockedRequest.Ctx). nil is "not
+	// declared"; an empty non-nil context is declared and refuses too.
+	if req.Ctx != nil {
+		return issueops.BlockedResult{}, &encode.RefusedError{
+			Op: encode.Op(wire.OpListBlockedIssues), Row: encode.RowByID("E-BlockedRequest.Ctx"),
+		}
+	}
 	var body apigen.BlockedPage
 	if err := l.store.dispatch(ctx, wire.Request{
 		Op:     wire.OpListBlockedIssues,
@@ -98,12 +108,14 @@ func blockedParams(req issueops.BlockedRequest) url.Values {
 // dropped in silence: a filter carrying a Limit, an Offset or a MaxRows is
 // applied to the listing the server returned, exactly as the external-
 // dependency decorator applies them to the local one (finishBlockedIssues).
-// Every other WorkFilter field the legacy door never read stays unread.
+// A declared Ctx reaches the role's refusal. Every other WorkFilter field the
+// legacy door never read stays unread.
 func (s *Store) GetBlockedIssues(ctx context.Context, filter types.WorkFilter) ([]*types.BlockedIssue, error) {
 	req := issueops.BlockedRequest{
 		Labels:        filter.Labels,
 		LabelsAny:     filter.LabelsAny,
 		ExcludeLabels: filter.ExcludeLabels,
+		Ctx:           filter.Ctx,
 	}
 	if filter.ParentID != nil {
 		req.ParentID = *filter.ParentID

@@ -64,6 +64,10 @@ func readyRequestRows() []Row {
 			"a molecule-type restriction on ready work refuses",
 			"neither listReadyWork nor countReadyWork publishes a mol-type parameter, and the ready query applies molecule typing inside — so a dropped restriction would answer with the wider set of every molecule type",
 			fieldSpec),
+		refusal("E-ReadyRequest.Ctx", tyReadyRequest, "Ctx",
+			"a declared execution context (--ctx) on ready work refuses",
+			"listReadyWork and countReadyWork publish no ctx parameter yet, and the predicate is a NEGATIVE one (hide every row carrying a `requires:` label the declared context does not satisfy) that no published label parameter can compose — dropping it would answer with exactly the rows the caller declared it cannot run, so it refuses until the server publishes `ctx` (L12)",
+			fieldSpec),
 		refusal("E-ReadyRequest.Offset", tyReadyRequest, "Offset",
 			"a non-zero Offset on ready work refuses",
 			"the wire publishes no offset parameter, and the store-backed role refuses a non-zero Offset itself with a typed *ErrUnsupported. A ready request carries no keyset position, so there is no portable way to page ready work at all — a caller that must page pages a ListRequest instead",
@@ -115,11 +119,28 @@ func readyRequestRows() []Row {
 // naming the token, so none of them can be dropped. What is left below is the
 // part of the vocabulary that is a different question (ReadyFlag), a different
 // projection (IncludeComments) or a page shape (Offset).]
+// blockedRequestRows is the blocked listing's one inexpressible member.
+//
+// issueops.BlockedRequest is hand-encoded (httpclient/blockedlister.go
+// blockedParams), not table-encoded, so the row is raised from code there, the
+// way the write-shape rows are; the bijection gates exempt it for the same
+// reason.
+func blockedRequestRows() []Row {
+	row := refusal("E-BlockedRequest.Ctx", tyBlockedRequest, "Ctx",
+		"a declared execution context (--ctx) on the blocked listing refuses",
+		"listBlockedIssues publishes no ctx parameter (internal/httpapi/blocked.go handleListBlocked; internal/httpapi/spec/openapi.v0.yaml), and the predicate is the NEGATIVE one E-ReadyRequest.Ctx records (hide every row carrying a `requires:` label the declared context does not satisfy) that no published label parameter composes — dropping it would list as blocked exactly the rows the caller declared it cannot run. A declared-EMPTY context refuses too: nil and empty are the predicate's off and on",
+		fieldSpec)
+	row.PinnedBy = "TestBlockedWithADeclaredContextRefusesBeforeTheDial"
+	return []Row{row}
+}
+
 func listRequestRows() []Row {
 	listRefusal := func(field, what, why string) Row {
 		return refusal("E-ListRequest."+field, tyListRequest, field, what, why, fieldSpec)
 	}
 	rows := []Row{
+		listRefusal("Ctx", "a declared execution context (--ctx) refuses",
+			noWireList+" — and no published label parameter composes the negative predicate it builds (hide every row carrying a `requires:` label the context does not satisfy); see E-ReadyRequest.Ctx"),
 		listRefusal("ReadyFlag", "switching a listing onto the ready set refuses",
 			"ReadyFlag is not a filter but a change of QUESTION: it selects the blocker-aware ready query, which reads a narrower filter vocabulary than a ListRequest can describe. Over the wire that question is listReadyWork, a different operation with a different parameter table. "+
 				"Routing it there would have to decide, silently, which of this request's fields survive the crossing — so v1 refuses and the retirement path is an explicit route in the store, not a re-encode here"),
@@ -343,7 +364,7 @@ func parentWalkRows() []Row {
 // a list computed from the struct would absorb a field added upstream, and the
 // bijection gate exists to catch exactly that arrival.
 var parentWalkRefusals = []string{
-	"Priority", "LabelPattern", "LabelRegex",
+	"Priority", "LabelPattern", "LabelRegex", "Ctx",
 	"TitleSearch", "IDPrefix", "SpecIDPrefix",
 	"TitleContains", "DescriptionContains", "NotesContains", "ExternalRefContains", "ExternalRef",
 	"UpdatedAfter", "UpdatedBefore", "ClosedAfter", "ClosedBefore", "StartedAfter", "StartedBefore",
@@ -363,7 +384,7 @@ var parentWalkRefusals = []string{
 // the encoder tables read this one enumeration, so the two cannot disagree.
 var issueFilterBridgeRefusals = []string{
 	"Status", "Statuses", "Priority", "IssueType", "Assignee",
-	"Labels", "LabelsAny", "ExcludeLabels", "LabelPattern", "LabelRegex",
+	"Labels", "LabelsAny", "ExcludeLabels", "LabelPattern", "LabelRegex", "Ctx",
 	"TitleSearch", "IDPrefix", "SpecIDPrefix",
 	"TitleContains", "DescriptionContains", "NotesContains", "ExternalRefContains", "ExternalRef",
 	"CreatedAfter", "CreatedBefore", "UpdatedAfter", "UpdatedBefore",
@@ -421,6 +442,8 @@ func workFilterRows() []Row {
 			"listReadyWork publishes no status parameter, and an OR-set is neither the server's derived default (open only) nor anything the wire can carry — dropping it would widen the answer to statuses the caller did not ask for, so it refuses alongside a non-default Status (L12)"),
 		bridge("MoleculeID", "restricting ready work to one molecule's direct children refuses",
 			"listReadyWork publishes `parent` for the RECURSIVE descendant restriction and nothing for direct membership; the two are different sets, so `parent` is not a substitute"),
+		bridge("Ctx", "a declared execution context (--ctx) on ready work refuses",
+			"no wire parameter — the same absence E-ReadyRequest.Ctx records, reached from the other source shape"),
 		bridge("MolType", "a molecule-type restriction on ready work refuses",
 			"no wire parameter — the same absence E-ReadyRequest.MolType records, reached from the other source shape"),
 		bridge("WispType", "a wisp-type restriction on ready work refuses",

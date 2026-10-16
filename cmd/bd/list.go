@@ -81,7 +81,7 @@ func newSkipLabelsListJSONResponse(issues []*types.IssueWithCounts) skipLabelsLi
 
 // skipLabelsConflicts returns the names of label-filter flags that conflict
 // with --skip-labels. Empty result means no conflict. AD-02 Wireframe 5.
-func skipLabelsConflicts(labels, labelsAny []string, labelPattern, labelRegex string, excludeLabels []string, noLabels bool) []string {
+func skipLabelsConflicts(labels, labelsAny []string, labelPattern, labelRegex string, excludeLabels []string, noLabels bool, ctx []string) []string {
 	var conflicts []string
 	if len(labels) > 0 {
 		conflicts = append(conflicts, "--label")
@@ -100,6 +100,9 @@ func skipLabelsConflicts(labels, labelsAny []string, labelPattern, labelRegex st
 	}
 	if noLabels {
 		conflicts = append(conflicts, "--no-labels")
+	}
+	if ctx != nil {
+		conflicts = append(conflicts, "--ctx")
 	}
 	return conflicts
 }
@@ -127,7 +130,7 @@ func formatSkipLabelsConflictError(conflicts []string) string {
 	return fmt.Sprintf(
 		"error: --skip-labels cannot be combined with --label,\n"+
 			"       --label-any, --label-pattern, --label-regex,\n"+
-			"       --exclude-label, or --no-labels (the filter).\n"+
+			"       --exclude-label, --no-labels (the filter), or --ctx.\n"+
 			"       (got: --skip-labels %s)\n"+
 			"reason: --skip-labels suppresses the labels JOIN that those\n"+
 			"        filters depend on.\n\n"+
@@ -431,6 +434,7 @@ func init() {
 	listCmd.Flags().StringSlice("exclude-label", []string{}, "Exclude issues that have ANY of these labels")
 	listCmd.Flags().String("label-pattern", "", "Filter by label glob pattern (e.g., 'tech-*' matches tech-debt, tech-legacy)")
 	listCmd.Flags().String("label-regex", "", "Filter by label regex pattern (e.g., 'tech-(debt|legacy)')")
+	addCtxFlags(listCmd.Flags())
 	listCmd.Flags().String("title", "", "Filter by title text (case-insensitive substring match)")
 	listCmd.Flags().String("spec", "", "Filter by spec_id prefix")
 	listCmd.Flags().Var(&listIDFlag, "id", "Filter by specific issue IDs (comma-separated or repeated, e.g., bd-1,bd-5,bd-10)")
@@ -467,7 +471,7 @@ func init() {
 		"Skip label hydration. The labels field in output will be empty regardless "+
 			"of actual labels. Use only when the caller does not depend on label data. "+
 			"Cannot combine with --label, --label-any, --label-pattern, --label-regex, "+
-			"--exclude-label, or --no-labels.")
+			"--exclude-label, --no-labels, or --ctx.")
 
 	// Projection toggle. Like --skip-labels it trades data for bytes, and
 	// unlike it the dropped fields leave a mark on the row (IsLitePartial).

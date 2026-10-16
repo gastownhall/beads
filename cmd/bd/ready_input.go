@@ -85,6 +85,11 @@ func gatherReadyInput(cmd *cobra.Command, resolveCap func(*cobra.Command) (int, 
 	in.ExcludeLabels, _ = cmd.Flags().GetStringSlice("exclude-label")
 	in.LabelPattern, _ = cmd.Flags().GetString("label-pattern")
 	in.LabelRegex, _ = cmd.Flags().GetString("label-regex")
+	ctxTokens, ctxErr := ctxFromFlags(cmd)
+	if ctxErr != nil {
+		return in, HandleErrorRespectJSON("%v", ctxErr)
+	}
+	in.Ctx = ctxTokens
 	in.IssueType, _ = cmd.Flags().GetString("type")
 	in.ParentID, _ = cmd.Flags().GetString("parent")
 	in.IncludeDeferred, _ = cmd.Flags().GetBool("include-deferred")
@@ -112,6 +117,9 @@ func gatherReadyInput(cmd *cobra.Command, resolveCap func(*cobra.Command) (int, 
 		return in, HandleErrorRespectJSON("--claim cannot be combined with --explain")
 	}
 	if err := briefModeConflict(in.Brief, in.claim, in.gated, in.explain, in.molID, in.jsonOut); err != nil {
+		return in, err
+	}
+	if err := ctxModeConflict(in.Ctx != nil, in.gated, in.explain, in.molID); err != nil {
 		return in, err
 	}
 	if in.Offset > 0 && in.claim {
