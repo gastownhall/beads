@@ -44,6 +44,26 @@ func ReadMigrationContentHashes(ctx context.Context, db DBConn, ref string) (map
 		err  error
 	)
 	if ref == "" {
+		// Probe the cursor's shape before selecting, as the AS OF arm below
+		// does. Here a failing SELECT costs more than a server warning: `bd
+		// doctor` reaches this read on a database it never migrates, and the
+		// statement pins the pooled Dolt session to its pre-statement catalog
+		// (be-bv7x). tableInCurrentDatabase is currentVersion's probe, which
+		// succeeds on any session.
+		hasTable, queryErr := tableInCurrentDatabase(ctx, db, "schema_migrations")
+		if queryErr != nil {
+			return nil, queryErr
+		}
+		if !hasTable {
+			return nil, fmt.Errorf("table not found: schema_migrations")
+		}
+		hasContentHash, queryErr := showColumnExists(ctx, db, "schema_migrations", "content_hash")
+		if queryErr != nil {
+			return nil, queryErr
+		}
+		if !hasContentHash {
+			return nil, fmt.Errorf("unknown column content_hash in schema_migrations")
+		}
 		rows, err = db.QueryContext(ctx, "SELECT version, content_hash FROM schema_migrations")
 	} else {
 		if verr := validateMigrationRef(ref); verr != nil {
