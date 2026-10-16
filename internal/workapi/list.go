@@ -308,6 +308,8 @@ func BuildListFilter(in issueops.ListRequest, cfg ListConfig) (types.IssueFilter
 	if in.LabelRegex != "" {
 		filter.LabelRegex = in.LabelRegex
 	}
+	// nil stays nil: a declared-but-empty context is a real (strict) request.
+	filter.Ctx = types.NormalizeCtx(in.Ctx)
 	if in.TitleSearch != "" {
 		filter.TitleSearch = in.TitleSearch
 	}

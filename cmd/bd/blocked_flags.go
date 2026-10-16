@@ -23,7 +23,7 @@ type blockedFlagRow struct {
 
 // blockedFlagFilterFlags are the listing's filters, which --flags does not
 // take: it answers about the ids it is handed, not about a set it derives.
-var blockedFlagFilterFlags = []string{"parent", "label", "label-any", "exclude-label"}
+var blockedFlagFilterFlags = []string{"parent", "label", "label-any", "exclude-label", "ctx", "ctx-file"}
 
 // runBlockedFlags is `bd blocked --flags`: the blocked flag for each id read
 // from stdin (one per line; blank lines and repeats ignored), through the
