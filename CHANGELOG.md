@@ -557,6 +557,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A bare hash that two prefixes share is reported as ambiguous instead of
+  resolving to one of them.** With `hacker-news-abc123` and `ops-abc123` in
+  one workspace (under `allowed_prefixes`, say), `abc123` matched both
+  exactly, and the resolver kept whichever the store listed last:
+  `bd update abc123 --status in_progress` updated `ops-abc123` and printed a
+  success line, `bd comment abc123` wrote to it, and `bd delete abc123`
+  previewed it and printed `bd delete ops-abc123 --force` as the next step.
+  An exact hash match is not an abbreviation, so the partial-id notice stayed
+  silent too. Every command that resolves an id through the shared resolver
+  now refuses such a hash with `ambiguous issue ID: "abc123" matches 2
+  issues: [hacker-news-abc123 ops-abc123]` and asks for the full id, as
+  [Working with IDs](docs/core-concepts/hash-ids.md#working-with-ids)
+  documents for ambiguous cases; ephemeral wisps follow the same rule. A hash
+  that only one prefix uses, a full id, and the workspace's own prefix
+  (`bd-abc123` in a `bd` workspace, still looked up first) resolve as before.
+  A connected HTTP workspace resolves exact ids only and was not affected.
+
 - **`bd gate check` works over a connected HTTP workspace.** Its open-gate
   listing built the same raw `SearchIssues` filter `bd gate list` did before
   S20, so the HTTP backend refused the command before reading a gate and gc's

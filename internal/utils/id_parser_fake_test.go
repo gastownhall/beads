@@ -394,3 +394,89 @@ func TestResolvePartialID_FakeStore_QualifiedInputsNeverResolveToAnotherBead(t *
 		})
 	}
 }
+
+// TestResolvePartialID_FakeStore_SharedHashAcrossPrefixesIsAmbiguous pins
+// mc-ke8mg. When two prefixes share a hash and neither is the configured
+// prefix, the bare hash names both issues equally well. The resolver used to
+// keep whichever one the store returned last, silently, and without the
+// partial-ID notice, because the match counts as exact. So the store's return
+// order picked the issue a command acted on. Both resolvers must refuse with
+// ErrAmbiguousID and name every candidate, whatever order the store answers in.
+func TestResolvePartialID_FakeStore_SharedHashAcrossPrefixesIsAmbiguous(t *testing.T) {
+	ctx := context.Background()
+	config := map[string]string{"issue_prefix": "bd", "allowed_prefixes": "hacker-news,ops"}
+	resolvers := []struct {
+		name    string
+		resolve func(context.Context, utils.PartialIDResolverStore, string) (string, error)
+	}{
+		{"ResolvePartialID", utils.ResolvePartialID},
+		{"ResolvePartialIDExact", utils.ResolvePartialIDExact},
+	}
+
+	cases := []struct {
+		name    string
+		a, b    fakeIssue
+		input   string
+		wantErr string
+	}{
+		{
+			name:    "issues",
+			a:       fakeIssue{id: "hacker-news-abc123"},
+			b:       fakeIssue{id: "ops-abc123"},
+			input:   "abc123",
+			wantErr: "ambiguous issue ID: \"abc123\" matches 2 issues: [hacker-news-abc123 ops-abc123]\nUse the full ID to disambiguate",
+		},
+		{
+			// The wisp fallback strips the "wisp-" infix before it compares
+			// hashes, so it reaches the same choice on its own.
+			name:    "wisps",
+			a:       fakeIssue{id: "hacker-news-wisp-t3st", ephemeral: true},
+			b:       fakeIssue{id: "ops-wisp-t3st", ephemeral: true},
+			input:   "t3st",
+			wantErr: "ambiguous issue ID: \"t3st\" matches 2 issues: [hacker-news-wisp-t3st ops-wisp-t3st]\nUse the full ID to disambiguate",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Try both store orders, since the order is what used to decide.
+			for _, issues := range [][]fakeIssue{{tc.a, tc.b}, {tc.b, tc.a}} {
+				store := &fakeResolverStore{issues: issues, config: config}
+				for _, r := range resolvers {
+					got, err := r.resolve(ctx, store, tc.input)
+					if !errors.Is(err, utils.ErrAmbiguousID) {
+						t.Errorf("%s(%q) with %s first = (%q, %v); want an ErrAmbiguousID error", r.name, tc.input, issues[0].id, got, err)
+					} else if err.Error() != tc.wantErr {
+						t.Errorf("%s(%q) error = %q; want %q", r.name, tc.input, err, tc.wantErr)
+					}
+				}
+			}
+
+			// A full ID still names exactly one issue. A hash that only one
+			// prefix uses is still an exact match.
+			for _, r := range resolvers {
+				store := &fakeResolverStore{issues: []fakeIssue{tc.a, tc.b}, config: config}
+				if got, err := r.resolve(ctx, store, tc.b.id); err != nil || got != tc.b.id {
+					t.Errorf("%s(%q) = (%q, %v); want (%q, nil)", r.name, tc.b.id, got, err, tc.b.id)
+				}
+				store = &fakeResolverStore{issues: []fakeIssue{tc.a}, config: config}
+				if got, err := r.resolve(ctx, store, tc.input); err != nil || got != tc.a.id {
+					t.Errorf("%s(%q) with only %s = (%q, %v); want (%q, nil)", r.name, tc.input, tc.a.id, got, err, tc.a.id)
+				}
+			}
+		})
+	}
+
+	// The configured prefix's own spelling is looked up before any search.
+	// So a bare hash that prefix uses still resolves to it, even when other
+	// prefixes share the hash.
+	store := &fakeResolverStore{
+		issues: []fakeIssue{{id: "hacker-news-abc123"}, {id: "ops-abc123"}, {id: "bd-abc123"}},
+		config: config,
+	}
+	for _, r := range resolvers {
+		if got, err := r.resolve(ctx, store, "abc123"); err != nil || got != "bd-abc123" {
+			t.Errorf("%s(%q) = (%q, %v); want (%q, nil)", r.name, "abc123", got, err, "bd-abc123")
+		}
+	}
+}

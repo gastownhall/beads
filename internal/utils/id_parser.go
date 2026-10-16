@@ -101,6 +101,7 @@ func parseIssueID(input string, prefix string) string {
 // - The input is a bare tooling sentinel ("", "null", "undefined", "none", "nil")
 // - No issue found matching the ID
 // - Multiple issues match (ambiguous prefix)
+// - Multiple issues share the input's hash under different prefixes
 func ResolvePartialID(ctx context.Context, store PartialIDResolverStore, input string) (string, error) {
 	return resolvePartialID(ctx, store, input, true)
 }
@@ -232,6 +233,9 @@ func resolvePartialID(ctx context.Context, store PartialIDResolverStore, input s
 
 	var matches []string
 	var exactMatch string
+	// hashMatches collects every candidate whose hash equals the input's, so
+	// a hash that two prefixes share is reported, not picked (soleHashMatch).
+	var hashMatches []string
 	// abbrevOnly collects candidates that matched ONLY via leading-prefix
 	// abbreviation while allowAbbrev is false — never resolved to, only used
 	// to make the final "not found" error truthful (see ErrAbbreviatedIDNotAllowed).
@@ -256,7 +260,7 @@ func resolvePartialID(ctx context.Context, store PartialIDResolverStore, input s
 
 		// Check for exact hash match (excluding hierarchical children)
 		if issueHash == hashPart {
-			exactMatch = id
+			hashMatches = append(hashMatches, id)
 			// Don't break - keep searching in case there's a full ID match
 		} else if strings.HasPrefix(issueHash, hashPart) {
 			// Leading-prefix abbreviation (documented UX, e.g. "a3f8" -> "a3f8e9...").
@@ -276,6 +280,9 @@ func resolvePartialID(ctx context.Context, store PartialIDResolverStore, input s
 	// Prefer exact match over substring matches
 	if exactMatch != "" {
 		return exactMatch, nil
+	}
+	if len(hashMatches) > 0 {
+		return soleHashMatch(input, hashMatches)
 	}
 
 	// Fallback: explicitly search wisps table for partial ID resolution.
@@ -302,7 +309,7 @@ func resolvePartialID(ctx context.Context, store PartialIDResolverStore, input s
 				// against the isolated hash, not the full "wisp-t3st" string.
 				wispHash := strings.TrimPrefix(wHash, "wisp-")
 				if wHash == hashPart || wispHash == hashPart {
-					exactMatch = wID
+					hashMatches = append(hashMatches, wID)
 				} else if strings.HasPrefix(wispHash, hashPart) {
 					if allowAbbrev {
 						matches = append(matches, wID)
@@ -311,8 +318,8 @@ func resolvePartialID(ctx context.Context, store PartialIDResolverStore, input s
 					}
 				}
 			}
-			if exactMatch != "" {
-				return exactMatch, nil
+			if len(hashMatches) > 0 {
+				return soleHashMatch(input, hashMatches)
 			}
 		}
 	}
@@ -348,6 +355,19 @@ func resolvePartialID(ctx context.Context, store PartialIDResolverStore, input s
 		emitPartialResolutionNotice(input, resolved)
 	}
 	return resolved, nil
+}
+
+// soleHashMatch resolves to the one candidate whose hash equals the input's.
+// Two prefixes can share a hash (hacker-news-abc123 and ops-abc123), and the
+// store's return order is not a contract, so with more than one candidate the
+// input is ambiguous and nothing is picked. Typing more characters cannot tell
+// such IDs apart; only the full ID can.
+func soleHashMatch(input string, candidates []string) (string, error) {
+	if len(candidates) == 1 {
+		return candidates[0], nil
+	}
+	sort.Strings(candidates)
+	return "", fmt.Errorf("%w: %q matches %d issues: %v\nUse the full ID to disambiguate", ErrAmbiguousID, input, len(candidates), candidates)
 }
 
 // resolveExactIDOnly is resolvePartialID for an ExactIDLookupStore: the exact
