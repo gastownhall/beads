@@ -120,7 +120,7 @@ func expectIgnoredCursorGate(mock sqlmock.Sqlmock, qualifier string, tracked boo
 	if tracked {
 		expectIgnoreResolution(mock, qualifier, ignoredSource.cursorTable, matches)
 	}
-	expectSchemaTableExists(mock, ignoredCursorUntrackTempTable, stray)
+	expectShowTable(mock, ignoredCursorUntrackTempTable, stray)
 }
 
 // expectIgnoredCursorHealNoop mocks the whole open-time reconcile on a healthy
@@ -758,7 +758,7 @@ func TestAlreadyConvergedDeclinesOnALegacyTrackedCursor(t *testing.T) {
 	expectDoltIgnoreRead(mock, unqualifiedDoltIgnore, seededIgnorePatterns(LatestVersion()))
 	expectHeadTableProbe(mock, "", ignoredSource.cursorTable, true)
 	expectIgnoreResolution(mock, "", ignoredSource.cursorTable, exactlyIgnored(true))
-	expectSchemaTableExists(mock, ignoredCursorUntrackTempTable, false)
+	expectShowTable(mock, ignoredCursorUntrackTempTable, false)
 
 	converged, err := alreadyConverged(context.Background(), db, "testdb", nil)
 	if err != nil {
@@ -787,7 +787,7 @@ func TestAlreadyConvergedDeclinesOnASurvivingScratchTable(t *testing.T) {
 	expectNoMigrationWorkNeeded(mock)
 	expectDoltIgnoreRead(mock, unqualifiedDoltIgnore, seededIgnorePatterns(LatestVersion()))
 	expectHeadTableProbe(mock, "", ignoredSource.cursorTable, false)
-	expectSchemaTableExists(mock, ignoredCursorUntrackTempTable, true)
+	expectShowTable(mock, ignoredCursorUntrackTempTable, true)
 
 	converged, err := alreadyConverged(context.Background(), db, "testdb", nil)
 	if err != nil {
@@ -814,7 +814,7 @@ func TestAlreadyConvergedAcceptsATrackedCursorTheOperatorUnignored(t *testing.T)
 	expectDoltIgnoreRead(mock, unqualifiedDoltIgnore, seededIgnorePatterns(LatestVersion()))
 	expectHeadTableProbe(mock, "", ignoredSource.cursorTable, true)
 	expectIgnoreResolution(mock, "", ignoredSource.cursorTable, exactlyIgnored(false))
-	expectSchemaTableExists(mock, ignoredCursorUntrackTempTable, false)
+	expectShowTable(mock, ignoredCursorUntrackTempTable, false)
 	expectMigrationLockProbe(mock, "testdb", 1)
 
 	converged, err := alreadyConverged(context.Background(), db, "testdb", nil)
@@ -858,7 +858,7 @@ func TestAlreadyConvergedKeepsTheLockProbeLast(t *testing.T) {
 	expectDoltIgnoreRead(mock, unqualifiedDoltIgnore, seededIgnorePatterns(LatestVersion()))
 	expectHeadTableProbe(mock, "", ignoredSource.cursorTable, true)
 	expectIgnoreResolution(mock, "", ignoredSource.cursorTable, exactlyIgnored(true))
-	expectSchemaTableExists(mock, ignoredCursorUntrackTempTable, false)
+	expectShowTable(mock, ignoredCursorUntrackTempTable, false)
 
 	if _, err := alreadyConverged(context.Background(), db, "testdb", nil); err != nil {
 		t.Fatalf("alreadyConverged() error = %v", err)
