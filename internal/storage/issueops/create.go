@@ -40,6 +40,11 @@ type BatchContext struct {
 	// Singular creates leave this false and mint in place — they never run
 	// the dependency pass.
 	DeferVersionMint bool
+	// SkipRowVersionReadback lets the batch entry point defer each issue's
+	// final row_lock readback until all cross-issue dependencies have been
+	// persisted (#5738). Singular creates leave this false and read the final
+	// token in place.
+	SkipRowVersionReadback bool
 	// cache, when set, answers the per-issue presence/label lookups from one
 	// up-front batch read and buffers the batch's audit events for one
 	// bulk write (see createBatchCache). CreateIssuesInTxWithContext sets it
@@ -254,6 +259,11 @@ func finishCreateIssueInTx(ctx context.Context, tx DBTX, bc *BatchContext, issue
 			return result, err
 		}
 	}
+	if !bc.SkipRowVersionReadback {
+		if err := tx.QueryRowContext(ctx, fmt.Sprintf("SELECT row_lock FROM %s WHERE id = ?", issueTable), issue.ID).Scan(&issue.RowVersion); err != nil {
+			return result, fmt.Errorf("read final row version for %s: %w", issue.ID, err)
+		}
+	}
 	return result, nil
 }
 
@@ -352,8 +362,10 @@ func CreateIssuesInTxWithContext(ctx context.Context, tx DBTX, bc *BatchContext,
 	// The per-issue create leaves the version mint to this function: the
 	// creation-time edges below land after the per-issue loop, and the first
 	// version of each issue must carry them (one version per issue at
-	// creation, minted last).
+	// creation, minted last). The final row_lock readback defers with it, for
+	// the same reason (#5738).
 	batch.DeferVersionMint = true
+	batch.SkipRowVersionReadback = true
 	if len(issues) >= createBatchCacheMinIssues && !createFastPathsDisabled.Load() {
 		cache, err := newCreateBatchCache(ctx, tx, issues)
 		if err != nil {
@@ -464,6 +476,20 @@ func CreateIssuesInTxWithContext(ctx context.Context, tx DBTX, bc *BatchContext,
 	for _, id := range toVersion {
 		if err := RecordVersionInTx(ctx, tx, id, actor); err != nil {
 			return CreateIssuesResult{}, err
+		}
+	}
+	// Auxiliary aggregate writes (notably dependency creation) may remint the
+	// token after the row insert. Return the final in-transaction token on each
+	// caller-owned Issue so an immediate guarded mutation does not start stale
+	// (#5738; the per-issue readback was deferred by SkipRowVersionReadback).
+	for _, issue := range accepted {
+		if issue == nil {
+			continue
+		}
+		table, _ := TableRouting(issue)
+		//nolint:gosec // G201: table comes from TableRouting.
+		if err := tx.QueryRowContext(ctx, fmt.Sprintf("SELECT row_lock FROM %s WHERE id = ?", table), issue.ID).Scan(&issue.RowVersion); err != nil {
+			return CreateIssuesResult{}, fmt.Errorf("read final row version for %s: %w", issue.ID, err)
 		}
 	}
 	return result, nil

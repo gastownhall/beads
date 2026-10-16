@@ -242,8 +242,12 @@ func (s *DoltStore) updateWispChecked(ctx context.Context, id string, updates ma
 }
 
 // closeWisp closes a wisp in the wisps table.
-// Delegates SQL work to issueops.CloseIssueInTx; no Dolt versioning needed
-// since wisps live in dolt_ignored tables.
+// Delegates SQL work to issueops.CloseIssueInTx. The wisp row itself needs no
+// Dolt versioning (wisps live in dolt_ignored tables), but the close's
+// depender recompute can change durable issues rows, and those must be
+// committed exactly as ReopenIssue commits its recompute — otherwise the
+// unblock sits in the working set and the NEXT durable commit silently
+// carries it (#5738: staging the add-dep recompute exposed this).
 func (s *DoltStore) closeWisp(ctx context.Context, id string, reason string, actor string, session string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -256,8 +260,14 @@ func (s *DoltStore) closeWisp(ctx context.Context, id string, reason string, act
 	clearRecheckScope := issueops.ScopeBlockedRecheckTransaction(tx)
 	defer clearRecheckScope()
 
-	if _, err := issueops.CloseIssueInTx(ctx, tx, id, reason, actor, session); err != nil {
+	res, err := issueops.CloseIssueInTx(ctx, tx, id, reason, actor, session)
+	if err != nil {
 		return err
+	}
+	if res.IssueRowsChanged {
+		if err := s.doltAddAndCommitInTx(ctx, tx, []string{"issues"}, fmt.Sprintf("bd: close %s", id)); err != nil {
+			return err
+		}
 	}
 
 	return s.commitSQLTxAndRecheck(ctx, "commit close wisp", tx)
@@ -268,9 +278,10 @@ func (s *DoltStore) closeWisp(ctx context.Context, id string, reason string, act
 // unless opts.Force is set — and, when opts.ExpectedVersion is non-nil, with
 // storage.ErrVersionMismatch when the row's RowVersion no longer matches (an
 // orthogonal CAS that Force does not bypass). The checks and the close share the
-// same transaction; wisps live in dolt_ignored tables, so there is no
-// DOLT_COMMIT. On any rejection the deferred Rollback discards the transaction —
-// no close or event is written.
+// same transaction; the wisp row itself needs no DOLT_COMMIT (dolt_ignored),
+// but a durable depender recompute commits exactly as closeWisp's does. On any
+// rejection the deferred Rollback discards the transaction — no close or event
+// is written.
 //
 // Unlike the permanent path, the wisp close uses a bare BeginTx/Commit with no
 // withRetryTx (consistent with the rest of the wisp write path — do not add one
@@ -294,6 +305,11 @@ func (s *DoltStore) closeWispChecked(ctx context.Context, id string, actor strin
 	res, err := issueops.CloseIssueCheckedInTx(ctx, tx, id, opts.Reason, actor, opts.Session, opts.Force, opts.ExpectedVersion)
 	if err != nil {
 		return storage.CloseIssueResult{}, err
+	}
+	if res.IssueRowsChanged {
+		if err := s.doltAddAndCommitInTx(ctx, tx, []string{"issues"}, fmt.Sprintf("bd: close %s", id)); err != nil {
+			return storage.CloseIssueResult{}, err
+		}
 	}
 
 	if err := s.commitSQLTxAndRecheck(ctx, "commit close wisp", tx); err != nil {

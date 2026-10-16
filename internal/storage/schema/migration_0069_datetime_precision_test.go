@@ -48,9 +48,12 @@ const migration0069RemovedAtDatetimeGuard = "@issue_versions_removed_at_needs_wi
 // failing to explain why 69 is datetime-precision-shaped, which the CLI test
 // below checks.
 func TestLatestVersionIncludesMigration0069(t *testing.T) {
-	const want = 69
+	// 0070 (backfill_aggregate_row_lock, #5738) claimed the next slot, so the
+	// pin this test holds moved from 69 to 70, per this file's own convention
+	// of superseding the previous migration's pin.
+	const want = 70
 	if got := LatestVersion(); got != want {
-		t.Fatalf("LatestVersion() = %d, want %d (issue_versions change_at/removed_at DATETIME(6) migration slot claimed by be-hs42e.8)", got, want)
+		t.Fatalf("LatestVersion() = %d, want %d (aggregate row_lock backfill slot claimed by #5738)", got, want)
 	}
 }
 

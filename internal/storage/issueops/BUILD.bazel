@@ -180,6 +180,7 @@ go_test(
         "reopen_test.go",
         "role_requests_test.go",
         "row_lock_guard_test.go",
+        "row_version_touch_test.go",
         "scan_test.go",
         "search_counts_test.go",
         "search_goside_sort_test.go",

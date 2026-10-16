@@ -228,18 +228,24 @@ func GetCommentCountsInTx(ctx context.Context, tx *sql.Tx, issueIDs []string) (m
 //
 //nolint:gosec // G201: table names come from hardcoded constants
 func AddIssueCommentInTx(ctx context.Context, tx *sql.Tx, issueID, author, text string) (*types.Comment, error) {
-	return addIssueCommentInTx(ctx, tx, issueID, author, text, time.Now().UTC().Truncate(time.Second), true)
+	comment, _, err := addIssueCommentInTx(ctx, tx, issueID, author, text, time.Now().UTC().Truncate(time.Second), true)
+	return comment, err
 }
 
 // ImportIssueCommentInTx adds a comment preserving the original timestamp.
 //
 //nolint:gosec // G201: table names come from hardcoded constants
 func ImportIssueCommentInTx(ctx context.Context, tx *sql.Tx, issueID, author, text string, createdAt time.Time) (*types.Comment, error) {
+	comment, _, err := ImportIssueCommentInTxWithResult(ctx, tx, issueID, author, text, createdAt)
+	return comment, err
+}
+
+func ImportIssueCommentInTxWithResult(ctx context.Context, tx *sql.Tx, issueID, author, text string, createdAt time.Time) (*types.Comment, bool, error) {
 	return addIssueCommentInTx(ctx, tx, issueID, author, text, createdAt, false)
 }
 
 //nolint:gosec // G201: table names come from hardcoded constants
-func addIssueCommentInTx(ctx context.Context, tx *sql.Tx, issueID, author, text string, createdAt time.Time, live bool) (*types.Comment, error) {
+func addIssueCommentInTx(ctx context.Context, tx *sql.Tx, issueID, author, text string, createdAt time.Time, live bool) (*types.Comment, bool, error) {
 	isWisp := IsActiveWispInTx(ctx, tx, issueID)
 	issueTable, _, _, _ := WispTableRouting(isWisp)
 	commentTable := "comments"
@@ -251,28 +257,33 @@ func addIssueCommentInTx(ctx context.Context, tx *sql.Tx, issueID, author, text 
 	var exists bool
 	if err := tx.QueryRowContext(ctx, fmt.Sprintf(
 		`SELECT EXISTS(SELECT 1 FROM %s WHERE id = ?)`, issueTable), issueID).Scan(&exists); err != nil {
-		return nil, fmt.Errorf("check issue existence: %w", err)
+		return nil, false, fmt.Errorf("check issue existence: %w", err)
 	}
 	if !exists {
-		return nil, fmt.Errorf("issue %s not found", issueID)
+		return nil, false, fmt.Errorf("issue %s not found", issueID)
 	}
 
 	if live {
 		advanced, err := NextLiveCommentTime(ctx, tx, commentTable, issueID, createdAt)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		createdAt = advanced
 	}
 
 	createdAtText := FormatAuxTime(createdAt)
-	id, _, err := InsertDerivedComment(ctx, tx, commentTable, issueID, author, text, createdAtText)
+	id, existed, err := InsertDerivedComment(ctx, tx, commentTable, issueID, author, text, createdAtText)
 	if err != nil {
-		return nil, err
+		return nil, false, err
+	}
+	if !existed {
+		if err := TouchRowVersionInTx(ctx, tx, issueTable, issueID); err != nil {
+			return nil, false, err
+		}
 	}
 	stored, err := ParseAuxTime(createdAtText)
 	if err != nil {
-		return nil, fmt.Errorf("add comment to %s: %w", commentTable, err)
+		return nil, false, fmt.Errorf("add comment to %s: %w", commentTable, err)
 	}
 
 	comment := &types.Comment{
@@ -285,9 +296,9 @@ func addIssueCommentInTx(ctx context.Context, tx *sql.Tx, issueID, author, text 
 	if err := RecordCommentEventInTx(ctx, tx, issueID, &EventComment{
 		ID: id, Author: author, Text: text, CreatedAt: stored, Source: CommentSourceStructured,
 	}); err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	return comment, nil
+	return comment, !existed, nil
 }
 
 // AddCommentEventInTx adds a comment as an event to an issue within a transaction.
@@ -296,7 +307,7 @@ func addIssueCommentInTx(ctx context.Context, tx *sql.Tx, issueID, author, text 
 //nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
 func AddCommentEventInTx(ctx context.Context, tx DBTX, issueID, actor, comment string) error {
 	isWisp := IsActiveWispInTx(ctx, tx, issueID)
-	_, _, eventTable, _ := WispTableRouting(isWisp)
+	issueTable, _, eventTable, _ := WispTableRouting(isWisp)
 
 	createdAt := NowAuxTime()
 	id, err := InsertDerivedEventReturningID(ctx, tx, eventTable, AuxEvent{
@@ -307,6 +318,9 @@ func AddCommentEventInTx(ctx context.Context, tx DBTX, issueID, actor, comment s
 		CreatedAt: createdAt,
 	})
 	if err != nil {
+		return fmt.Errorf("add comment event to %s: %w", eventTable, err)
+	}
+	if err := TouchRowVersionInTx(ctx, tx, issueTable, issueID); err != nil {
 		return fmt.Errorf("add comment event to %s: %w", eventTable, err)
 	}
 	stored, err := ParseAuxTime(createdAt)
