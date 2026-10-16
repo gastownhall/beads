@@ -139,6 +139,13 @@ func TestSetSettingProjectsTheWholeRequest(t *testing.T) {
 // one place — and `Setting.redacted` would mean two different things depending on
 // which operation produced it. Comparing the two responses is what makes a second
 // projection impossible to add without failing here.
+//
+// THE CREDENTIAL-BEARING CASE RUNS AGAINST A FAKE ROLE (`&roleSettings{}`,
+// which accepts any write), not workapi.ValidateSettingWrite. Since GH#7559
+// the real role refuses notion.token — and every other config.IsYamlOnlyKey
+// key — before this projection ever runs, so this case now exercises only the
+// redaction PROJECTION in isolation: if a real server's role ever did accept
+// a credential write, this is the shape the response would have to take.
 func TestSetSettingAnswersWhatTheReadWouldAnswer(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -146,7 +153,7 @@ func TestSetSettingAnswersWhatTheReadWouldAnswer(t *testing.T) {
 		value string
 	}{
 		{name: "an ordinary key", key: "status.custom", value: "awaiting_review:active"},
-		{name: "a credential-bearing key", key: "notion.token", value: "shhh-real-secret"},
+		{name: "a credential-bearing key, against a fake role that accepts it", key: "notion.token", value: "shhh-real-secret"},
 		{name: "a key stored empty", key: "notes", value: ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -173,15 +180,19 @@ func TestSetSettingAnswersWhatTheReadWouldAnswer(t *testing.T) {
 }
 
 // TestSetSettingWithholdsACredentialItJustAccepted is the doctrine, asserted
-// directly rather than only through the equality above: the write is PERMITTED
-// and the value does not come back.
+// directly rather than only through the equality above: AGAINST A ROLE THAT
+// ACCEPTS THE WRITE, the response is PERMITTED and the value does not come
+// back.
 //
-// PERMITTED because redaction is a rule about DISCLOSURE. The role refuses no
-// credential-bearing key — `bd config set`'s own secret guard is about writing
-// one into a git-tracked config.yaml, a different plane with a different hazard —
-// and a writer already holds the value, so refusing here would protect nothing
-// while leaving a workspace's credentials visible as PRESENT and permanently
-// unconfigurable through this door.
+// IT RUNS AGAINST A FAKE ROLE (`&roleSettings{}`), not
+// workapi.ValidateSettingWrite. Since GH#7559 the real role refuses every
+// config.IsYamlOnlyKey key — including every tracker credential, writing
+// them to a git-tracked config.yaml instead via `bd config set`'s own guard
+// — because that plane is the Dolt config table, synced to every remote on
+// push/pull. What this test pins is narrower: IF a role's write succeeds,
+// the HTTP layer's redaction projection must withhold the value from its own
+// answer regardless, which is what the handler owns and the only part of
+// this doctrine the httpapi package can prove on its own.
 func TestSetSettingWithholdsACredentialItJustAccepted(t *testing.T) {
 	const key = "notion.token"
 	if !config.IsSecretKey(key) {

@@ -48,14 +48,13 @@ type ConfigReader interface {
 // clears the file and any row an older bd left behind. That matters because the
 // config table's contents are replicated by `bd dolt push`.
 //
-// ONE DOOR IS STILL OPEN, and this comment deliberately does not claim
-// otherwise: the routing lives in the CLI command, not at the write chokepoint,
-// so PUT /v0/beads/config/notion.token — `bd serve`, and the dashboard behind
-// it — still writes the row with no refusal. That hole is not Notion's; it is
-// identical for github.token, jira.api_token, linear.api_key and ado.pat, which
-// is why closing it belongs at the role (workapi.ValidateSettingWrite /
-// SetSetting), where every tracker credential gets the rule in one change,
-// rather than here. Tracked as follow-up to GH#6676.
+// THE DOOR CLOSED IN GH#7559: PUT /v0/beads/config/notion.token — `bd
+// serve`, and the dashboard behind it — now refuses the write at the role
+// (workapi.ValidateSettingWrite and the httpclient-side mirror it is pinned
+// to), the same chokepoint every tracker credential refuses through, since
+// the routing used to live only in the CLI command, not at the write
+// chokepoint, and github.token/jira.api_token/linear.api_key/ado.pat shared
+// the identical hole.
 //
 // The database read below therefore remains, both as the upgrade path for a
 // workspace configured before the key moved and as the reader for anything that
