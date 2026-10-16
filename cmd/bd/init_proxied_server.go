@@ -273,8 +273,12 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 
 	// metadata.json was written with a locally-minted project id before any
 	// DB connection existed; the adopted id must replace it before the tail
-	// git-commits .beads/.
-	if in.teamServer && adoptedProjectID != projectID {
+	// git-commits .beads/. This applies in BOTH modes: the plain proxied path
+	// above can adopt an existing database's identity exactly as team-server
+	// mode can, and until GH#7576 that adoption was never saved back to disk
+	// outside team-server mode, leaving every later clone with its own
+	// mismatched local project_id while the server kept the adopted one.
+	if adoptedProjectID != projectID {
 		fileCfg, err := configfile.Load(beadsDir)
 		if err != nil || fileCfg == nil {
 			return HandleError("failed to reload %s to adopt the provisioned project identity: %v", configfile.ConfigFileName, err)
