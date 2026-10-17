@@ -12,6 +12,9 @@ type EventsJournalSQLRepository interface {
 	Read(ctx context.Context, since int64, limit int) ([]storage.EventsJournalRow, error)
 	ReadPage(ctx context.Context, since int64, limit int) (storage.EventsJournalPage, error)
 	Prune(ctx context.Context, before int64, retainDays, retainRows int) (int64, error)
+	// Head returns the journal's head and floor without reading any rows. See
+	// issueops.ReadEventsHeadAndFloorInTx.
+	Head(ctx context.Context) (head, floor int64, err error)
 }
 
 // EventsJournalUseCase exposes the bounded cursor operations needed by
@@ -23,6 +26,10 @@ type EventsJournalUseCase interface {
 	// issueops.ReadEventsPageInTx for why the head is not folded into Read.
 	ReadPage(ctx context.Context, since int64, limit int) (storage.EventsJournalPage, error)
 	Prune(ctx context.Context, before int64, retainDays, retainRows int) (int64, error)
+	// Head returns the journal's head and floor without reading any rows —
+	// `bd events head` in proxied-server mode. See
+	// issueops.ReadEventsHeadAndFloorInTx.
+	Head(ctx context.Context) (head, floor int64, err error)
 }
 
 func NewEventsJournalUseCase(repo EventsJournalSQLRepository) EventsJournalUseCase {
@@ -45,4 +52,8 @@ func (u *eventsJournalUseCase) ReadPage(ctx context.Context, since int64, limit 
 
 func (u *eventsJournalUseCase) Prune(ctx context.Context, before int64, retainDays, retainRows int) (int64, error) {
 	return u.repo.Prune(ctx, before, retainDays, retainRows)
+}
+
+func (u *eventsJournalUseCase) Head(ctx context.Context) (head, floor int64, err error) {
+	return u.repo.Head(ctx)
 }

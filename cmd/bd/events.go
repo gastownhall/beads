@@ -139,6 +139,28 @@ to continue with a known gap, or rebuild from a full export.`,
 	},
 }
 
+var eventsHeadCmd = &cobra.Command{
+	Use:   "head",
+	Short: "Print the journal's head and floor sequence numbers",
+	Long: `Print the events journal's head (the highest seq ever assigned) and
+floor (the lowest seq still retained), without reading any journal rows.
+
+A consumer that wants to start following the journal "from now" otherwise has
+no cheap way to learn where "now" is: 'tail --since' past the head returns
+nothing without saying where the head is, and 'tail --since 0' replays the
+whole retained window just to find the last line. Read the head once here,
+then 'tail --since <head>' to follow everything committed after this moment.
+
+floor is the oldest seq still retained — the same field a truncated 'tail'
+reports. A --since at or above floor-1 is safe to resume from; below it will
+fail typed the same way 'tail' does.`,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, _ []string) error {
+		return runEventsHead(rootCtx)
+	},
+}
+
 var eventsExportCmd = &cobra.Command{
 	Use:   "export",
 	Short: "Print the entire journal from the beginning (JSON lines)",
@@ -204,6 +226,7 @@ func init() {
 	eventsPruneCmd.Flags().Int64("before", 0, "delete records with seq less than this value")
 
 	eventsCmd.AddCommand(eventsTailCmd)
+	eventsCmd.AddCommand(eventsHeadCmd)
 	eventsCmd.AddCommand(eventsExportCmd)
 	eventsCmd.AddCommand(eventsPruneCmd)
 	rootCmd.AddCommand(eventsCmd)
@@ -314,6 +337,46 @@ func runEventsTail(ctx context.Context, since int64, limit int, follow bool) err
 			}
 		}
 	}
+}
+
+// runEventsHead prints the journal's head and floor without reading any rows
+// — see eventsHeadCmd's help for why a consumer needs this instead of
+// bisecting 'tail' or replaying from seq 0.
+func runEventsHead(ctx context.Context) error {
+	head, floor, err := journalHead(ctx)
+	if err != nil {
+		return HandleErrorRespectJSON("reading events journal head: %v", err)
+	}
+	return reportEventsHead(head, floor)
+}
+
+func reportEventsHead(head, floor int64) error {
+	if jsonOutput {
+		return outputJSON(map[string]any{"head": head, "floor": floor})
+	}
+	fmt.Printf("head=%d floor=%d\n", head, floor)
+	return nil
+}
+
+// journalHead resolves the head+floor through whichever storage seam this
+// process holds, mirroring readJournal's proxied-vs-direct branch.
+func journalHead(ctx context.Context) (head, floor int64, err error) {
+	if usesProxiedServer() {
+		if uowProvider == nil {
+			return 0, 0, fmt.Errorf("no proxied-server unit-of-work provider available")
+		}
+		uw, err := uowProvider.NewUOW(ctx)
+		if err != nil {
+			return 0, 0, err
+		}
+		defer uw.Close(ctx)
+		return uw.EventsJournalUseCase().Head(ctx)
+	}
+	acc, err := journalAccessor()
+	if err != nil {
+		return 0, 0, err
+	}
+	return acc.JournalHead(ctx)
 }
 
 func runEventsPrune(ctx context.Context, before int64) error {
