@@ -2749,6 +2749,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   make, and the `--json` payload for a yaml-only key carries a `changed` boolean
   so the machine branch can tell an absent key from an unpopulated field.
 
+### Security
+
+- **Raised the `golang.org/x/net` floor to `v0.60.0` and `golang.org/x/crypto`
+  to `v0.57.0`, past the seven fixable advisories they carry into a locally
+  built `bd`.** `govulncheck` reports all seven as reachable from `bd`'s own
+  code on `main`:
+
+  | Advisory | Module on `main` | Fixed in |
+  |---|---|---|
+  | GO-2026-6603 | `golang.org/x/net v0.58.0` | `v0.60.0` |
+  | GO-2026-6610 | `golang.org/x/net v0.58.0` | `v0.60.0` |
+  | GO-2026-6611 | `golang.org/x/net v0.58.0` | `v0.60.0` |
+  | GO-2026-6612 | `golang.org/x/net v0.58.0` | `v0.60.0` |
+  | GO-2026-6617 | `golang.org/x/net v0.58.0` | `v0.60.0` |
+  | GO-2026-6355 | `golang.org/x/crypto v0.55.0` | `v0.56.0` |
+  | GO-2026-6354 | `golang.org/x/crypto v0.55.0` | `v0.56.0` |
+
+  `x/net v0.60.0` requires `x/crypto v0.57.0`, `x/text v0.42.0` and
+  `x/mod v0.41.0`, so those rise with it.
+
+  GO-2026-5932 (also `x/crypto`) has no fixed version at any release, so it
+  is carried forward and named rather than counted as resolved. Both example
+  modules are mirrored so they cannot pin a lower floor than the module they
+  demonstrate. All upgrades, no downgrades.
+
+  The `grpc` half of the original change is gone: `main` reached `v1.83.2`
+  on its own. These floors matter because the versions are baked into the
+  binary `make build` and `make install` produce, so a downstream image-build
+  override cannot reach them; only the module floor can. Re-derive rather
+  than trusting this table: `govulncheck -scan module`.
+
 ## [1.3.0] - 2026-09-15
 
 The first tested release off `main` since the 1.1 line. [1.2.2] was a recovery
