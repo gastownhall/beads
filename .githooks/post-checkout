@@ -26,14 +26,14 @@ if command -v bd >/dev/null 2>&1; then
   done
   if [ -n "$_bd_timeout_command" ]; then
     _bd_timeout_backend=coreutils
-    if "$_bd_timeout_command" -- "$_bd_timeout" bd hooks run post-checkout "$@"; then
+    if "$_bd_timeout_command" -- "$_bd_timeout" sh -c '"$@" || _bd_s=$?; if [ "${_bd_s:-0}" -eq 124 ]; then _bd_s=117; fi; exit "${_bd_s:-0}"' _bd_timeout_shim bd hooks run post-checkout "$@"; then
       _bd_exit=0
     else
       _bd_exit=$?
     fi
   elif command -v perl >/dev/null 2>&1; then
     _bd_timeout_backend=perl
-    if perl -e 'alarm shift; exec @ARGV' -- "$_bd_timeout" bd hooks run post-checkout "$@"; then
+    if perl -e 'my $t = shift; my $p = fork; defined $p or die "fork: $!"; if ($p == 0) { exec @ARGV; exit 127 } $SIG{ALRM} = sub { kill ALRM => $p; waitpid $p, 0; exit 142 }; alarm $t; waitpid $p, 0; alarm 0; my $c = $? & 127 ? 128 + ($? & 127) : $? >> 8; exit($c == 142 ? 117 : $c)' -- "$_bd_timeout" bd hooks run post-checkout "$@"; then
       _bd_exit=0
     else
       _bd_exit=$?
