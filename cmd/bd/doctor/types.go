@@ -51,6 +51,7 @@ type OrphanIssue struct {
 	IssueID             string
 	Title               string
 	Status              string
+	Labels              []string
 	LatestCommit        string
 	LatestCommitMessage string
 }

@@ -901,6 +901,7 @@ func FindOrphanedIssues(gitPath string, provider types.IssueProvider) ([]OrphanI
 			IssueID: issue.ID,
 			Title:   issue.Title,
 			Status:  string(issue.Status),
+			Labels:  issue.Labels,
 		}
 	}
 
