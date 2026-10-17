@@ -106,9 +106,9 @@ func TestClaimIssueWrapperRoutesItsOwnBranches(t *testing.T) {
 	// would be a test that cannot fail.
 	//
 	// C-C. And the wisp branch's refusal, which is a different question from
-	// C-A: the branch runs its CAS over a bare BeginTx with a deferred
-	// Rollback, so a refusal has to both surface the sentinel AND leave the
-	// ephemeral row alone. The role cannot ask this at all.
+	// C-A: the branch runs its CAS in a transaction of its own, so a refusal
+	// has to both surface the sentinel AND leave the ephemeral row alone. The
+	// role cannot ask this at all.
 	t.Run("RefusesAWispHeldByAnotherActorAndLeavesItAlone", func(t *testing.T) {
 		createWisp(t, ctx, store, "clwrap-wisp-held")
 		if err := store.ClaimIssue(ctx, "clwrap-wisp-held", "worker1"); err != nil {

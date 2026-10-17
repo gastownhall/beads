@@ -111,8 +111,8 @@ func TestBlockedRecheck_RunInTransactionCommittingLast(t *testing.T) {
 	}
 }
 
-// TestBlockedRecheck_ConcurrentWispCloses races the raw-transaction wisp
-// close path (closeWisp) against itself. It cannot pin the interleaving the
+// TestBlockedRecheck_ConcurrentWispCloses races the wisp close path
+// (closeWisp) against itself. It cannot pin the interleaving the
 // way the tests above do, so it only proves the settled outcome: whichever
 // close commits last, the dependent ends up ready.
 func TestBlockedRecheck_ConcurrentWispCloses(t *testing.T) {

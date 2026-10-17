@@ -19,28 +19,11 @@ var versionScopeCalls = map[string]bool{
 // reason. The staleness check below fails if one stops being flagged, so an
 // exemption cannot rot.
 //
-// Every entry is a WISP-PLANE mutation. They reach the shared issueops
-// mutators, which is why the scan flags them, but RecordVersionInTx returns
-// early on IsWisp(issue): issue_versions is the permanent-issues history and
-// wisps are the ephemeral plane, whose own current_revision column is shape
-// parity only (migration 0067's "SEMANTIC ASYMMETRY, DELIBERATE" note).
-// Binding activation to these transactions could not mint a row, so it would
-// be inert code that reads as coverage.
-//
 // The journal guard exempts a different set — the is_blocked recompute passes
 // — which deliberately does NOT appear here: those recomputes never reach a
 // versioning mutator at all, so this scan does not flag them, and listing them
 // would rot immediately under the staleness check below.
-var rawTxVersionScopeExemptions = map[string]string{
-	"DoltStore.claimWisp":         "wisp-plane claim: RecordVersionInTx returns early on IsWisp, so no issue_versions row is reachable from this transaction",
-	"DoltStore.closeWisp":         "wisp-plane close: RecordVersionInTx returns early on IsWisp, so no issue_versions row is reachable from this transaction",
-	"DoltStore.closeWispChecked":  "wisp-plane checked close: RecordVersionInTx returns early on IsWisp, so no issue_versions row is reachable from this transaction",
-	"DoltStore.updateWisp":        "wisp-plane update: RecordVersionInTx returns early on IsWisp, so no issue_versions row is reachable from this transaction",
-	"DoltStore.updateWispChecked": "wisp-plane checked update: RecordVersionInTx returns early on IsWisp, so no issue_versions row is reachable from this transaction",
-	"DoltStore.addWispDependency": "wisp-plane dependency edit: wisp edges live in wisp_dependencies and RecordVersionInTx returns early on IsWisp",
-	"DoltStore.mergeMetadataWisp": "wisp slot metadata merge: mutates the wisp plane only, and RecordVersionInTx returns early on IsWisp",
-	"DoltStore.clearMetadataWisp": "wisp slot metadata clear: mutates the wisp plane only, and RecordVersionInTx returns early on IsWisp",
-}
+var rawTxVersionScopeExemptions = map[string]string{}
 
 // TestEveryRawTxVersionScopeIsScopedOrExempt is the versioned-history twin of
 // TestEveryRawTxJournalScopeIsScopedOrExempt, and exists for the same reason:
@@ -57,12 +40,9 @@ var rawTxVersionScopeExemptions = map[string]string{
 // — a lie that reads as well-formed history.
 //
 // KNOWN LIMIT, inherited from the journal guard's shape: the scan is per
-// FUNCTION, not per transaction. RemoveDependencyWithOptions begins two
-// transactions in one body (wisp arm, non-wisp arm) and satisfies this guard
-// once EITHER arm scopes — measured, by deleting each arm's scope in turn:
-// only deleting both turns it red. That is the reason the fix scoped the
-// inert wisp arm too rather than the issues-plane arm alone; a half-scoped
-// two-arm function is a shape this guard cannot see.
+// FUNCTION, not per transaction. A function that begins two transactions in
+// one body satisfies this guard once EITHER of them scopes; a half-scoped
+// two-transaction function is a shape this guard cannot see.
 func TestEveryRawTxVersionScopeIsScopedOrExempt(t *testing.T) {
 	issueFns, err := journalscan.ParsePackage("../issueops")
 	if err != nil {

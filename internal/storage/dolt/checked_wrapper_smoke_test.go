@@ -95,8 +95,8 @@ func TestCheckedWrappersRouteTheirPreconditions(t *testing.T) {
 	})
 
 	// The wisp branch is a THIRD composition — updateWispChecked runs the same
-	// guards over a bare BeginTx with a deferred Rollback rather than
-	// withRetryTx — so it is routed to separately here.
+	// guards in a transaction of its own, with no Dolt commit — so it is
+	// routed to separately here.
 	t.Run("UpdateRoutesAWispToTheWispChecker", func(t *testing.T) {
 		createWisp(t, ctx, store, "wrapsmoke-wisp")
 		before := get(t, "wrapsmoke-wisp").Title

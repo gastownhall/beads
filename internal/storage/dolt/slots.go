@@ -49,24 +49,12 @@ func (s *DoltStore) MergeMetadata(ctx context.Context, issueID, key string, valu
 
 // mergeMetadataWisp merges a metadata key on a wisp. Mirrors closeWisp: no Dolt
 // versioning since wisps live in dolt_ignored tables. The read and write still
-// share the one transaction, so the atomic-merge property holds.
+// share the one transaction, which withRetryTx replays whole, so the
+// atomic-merge property holds.
 func (s *DoltStore) mergeMetadataWisp(ctx context.Context, issueID, key string, value json.RawMessage, actor string) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	clearJournalScope := s.scopeEventsJournalTransaction(tx)
-	defer clearJournalScope()
-
-	if err := issueops.MergeMetadataInTx(ctx, tx, issueID, key, value, actor); err != nil {
-		return err
-	}
-	if err := s.commitSQLTx(ctx, "commit merge metadata wisp", tx); err != nil {
-		return err
-	}
-	return nil
+	return s.withRetryTx(ctx, func(tx *sql.Tx) error {
+		return issueops.MergeMetadataInTx(ctx, tx, issueID, key, value, actor)
+	})
 }
 
 // SlotSet sets a key-value pair in the issue's metadata JSON.
@@ -152,20 +140,7 @@ func (s *DoltStore) SlotClear(ctx context.Context, issueID, key, actor string) e
 // clearMetadataWisp clears a metadata key on a wisp. Mirrors mergeMetadataWisp /
 // closeWisp: no Dolt versioning since wisps live in dolt_ignored tables.
 func (s *DoltStore) clearMetadataWisp(ctx context.Context, issueID, key, actor string) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	clearJournalScope := s.scopeEventsJournalTransaction(tx)
-	defer clearJournalScope()
-
-	if err := issueops.DeleteMetadataInTx(ctx, tx, issueID, key, actor); err != nil {
-		return err
-	}
-	if err := s.commitSQLTx(ctx, "commit clear metadata wisp", tx); err != nil {
-		return err
-	}
-	return nil
+	return s.withRetryTx(ctx, func(tx *sql.Tx) error {
+		return issueops.DeleteMetadataInTx(ctx, tx, issueID, key, actor)
+	})
 }

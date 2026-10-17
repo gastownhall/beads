@@ -26,9 +26,11 @@ import (
 //
 // Both DoltStore.AddDependency write seams funnel through the single typed-conflict
 // return at issueops/dependencies.go, but wrap it differently, so both are covered:
-//   - issues source: commits via withRetryTx (backoff-permanent, no retry loop).
-//   - wisp source: addWispDependency (dolt/wisps.go) uses its own BeginTx/Commit,
-//     returning the conflict before it reaches Commit — a distinct wrapping point.
+//   - issues source: commits via withRetryTx and a Dolt commit (backoff-permanent,
+//     no retry loop).
+//   - wisp source: addWispDependency (dolt/wisps.go) runs its own withRetryTx with
+//     no Dolt commit, returning the conflict before it reaches Commit — a distinct
+//     wrapping point.
 //
 // The external/cross-prefix route shares the same issueops/dependencies.go return
 // and is not separately exercised here.
