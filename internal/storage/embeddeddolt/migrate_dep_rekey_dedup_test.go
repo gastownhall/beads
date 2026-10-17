@@ -405,7 +405,7 @@ func TestEmbeddedDepRekeyAbortLeavesMarkerUnrecorded(t *testing.T) {
 	// without it would be the worse outcome. Nothing is lost: the marker is
 	// still unrecorded, so the next strict open retries.
 	closeConn2()
-	store, err := embeddeddolt.OpenForReadOnlyCommand(ctx, filepath.Dir(dataDir), "testdb", "main")
+	store, err := embeddeddolt.OpenForReadOnlyCommand(ctx, filepath.Dir(dataDir), "testdb", "main", false)
 	if err != nil {
 		t.Fatalf("OpenForReadOnlyCommand over an unconvergible re-key: %v", err)
 	}
