@@ -94,3 +94,23 @@ func TestDbProxyChildRegistersExternalFlags(t *testing.T) {
 		})
 	}
 }
+
+// TestDbProxyChildIdleTimeoutHelpAgreesWithInit guards AC3: a reader of
+// `bd db-proxy-child --help` alone must not conclude that 0 is a safe
+// default. init's --proxied-server-idle-timeout already documents the
+// three-way contract (omit -> 30s default; explicit 0 -> never; positive ->
+// that duration); db-proxy-child's own --idle-timeout must state the same
+// contract rather than describing 0/negative in isolation.
+func TestDbProxyChildIdleTimeoutHelpAgreesWithInit(t *testing.T) {
+	childFlag := dbProxyChildCmd.Flags().Lookup("idle-timeout")
+	require.NotNil(t, childFlag, "db-proxy-child does not register --idle-timeout")
+
+	initFlag := initCmd.Flags().Lookup("proxied-server-idle-timeout")
+	require.NotNil(t, initFlag, "init does not register --proxied-server-idle-timeout")
+	require.Contains(t, initFlag.Usage, "30s", "precondition: init's help is expected to already document the 30s default")
+
+	assert.Contains(t, childFlag.Usage, "30s",
+		"db-proxy-child's --idle-timeout help must mention the 30s default applied upstream, before this flag is ever set to 0")
+	assert.Contains(t, childFlag.Usage, "never",
+		"db-proxy-child's --idle-timeout help must explicitly say 0 means never, matching init's contract")
+}
