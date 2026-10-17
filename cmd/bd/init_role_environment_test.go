@@ -161,6 +161,7 @@ func TestAutoConfigureForkContributorIgnoresInheritedGitRouting(t *testing.T) {
 	for _, name := range []string{"configure", "configured", "maintainer", "not_fork", "config_lock", "config_lock_quiet"} {
 		t.Run(name, func(t *testing.T) {
 			target, decoy, home := newInitRoleFixture(t)
+			t.Setenv("LC_ALL", "C")
 			if name != "not_fork" {
 				initRoleFixtureGit(t, target, "remote", "add", "upstream", "https://example.invalid/upstream/repo.git")
 			}
@@ -202,6 +203,16 @@ func TestAutoConfigureForkContributorIgnoresInheritedGitRouting(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			if strings.HasPrefix(name, "config_lock") {
+				err := setBeadsRole("contributor")
+				var exitErr *exec.ExitError
+				if !errors.As(err, &exitErr) {
+					t.Fatalf("role write lost Git exit cause: %v", err)
+				}
+				if !strings.Contains(err.Error(), "could not lock config file") {
+					t.Errorf("role write lost Git diagnostic: %v", err)
+				}
+			}
 			// Repeating the real call proves configured/idempotent and flag precedence.
 			for call := range 2 {
 				var callErr error
@@ -231,6 +242,9 @@ func TestAutoConfigureForkContributorIgnoresInheritedGitRouting(t *testing.T) {
 				wantWarning := name == "config_lock" && call == 0
 				if got := strings.Contains(stderr, "Warning: failed to set beads.role=contributor:"); got != wantWarning {
 					t.Errorf("call %d: role warning = %q, want warning %v", call+1, stderr, wantWarning)
+				}
+				if wantWarning && !strings.Contains(stderr, "could not lock config file") {
+					t.Errorf("role warning lost Git diagnostic: %q", stderr)
 				}
 				if !wantWarning && stderr != "" {
 					t.Errorf("call %d: unexpected stderr %q", call+1, stderr)
