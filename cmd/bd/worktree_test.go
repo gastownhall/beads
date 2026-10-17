@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/gitenv"
+	"github.com/steveyegge/beads/internal/githooksenv"
 )
 
 func TestTruncateForBox(t *testing.T) {
@@ -142,6 +143,78 @@ func TestScrubWorktreeRemovalGitEnvUsesSharedWindowsKeyIdentity(t *testing.T) {
 	want := []string{"GıT_OPTIONAL_LOCKS=1", "KEEP=value"}
 	if got := scrubWorktreeRemovalGitEnvForOS(input, "windows"); !reflect.DeepEqual(got, want) {
 		t.Fatalf("scrubWorktreeRemovalGitEnvForOS(windows) = %q, want %q", got, want)
+	}
+}
+
+func TestGitCmdInDirSuppressesWorktreeHookAfterRoutingScrub(t *testing.T) {
+	profile := t.TempDir()
+	for _, key := range []string{"HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "XDG_CONFIG_HOME"} {
+		t.Setenv(key, profile)
+	}
+	suppression := map[string]string{"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.DevNull, "GIT_CONFIG_SYSTEM": os.DevNull}
+	for key, value := range suppression {
+		t.Setenv(key, value)
+	}
+	repo := t.TempDir()
+	runGit := func(args ...string) {
+		t.Helper()
+		cmd := gitCmdInDir(t.Context(), repo, args...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	runGit("init", "--initial-branch=main")
+	runGit("-c", "user.name=Test", "-c", "user.email=test@example.com",
+		"commit", "--no-gpg-sign", "--allow-empty", "-m", "seed")
+	hooksDir := t.TempDir()
+	runGit("config", "--local", "core.hooksPath", filepath.ToSlash(hooksDir))
+	hook := "#!/bin/sh\nprintf 'hook ran\\n' > \"$BD_WORKTREE_HOOK_MARKER\"\n"
+	if err := os.WriteFile(filepath.Join(hooksDir, "post-checkout"), []byte(hook), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reproduce the composed boundary from bd-qv0lj: the environment scrub
+	// removes this valid hook override, while argv independently disables hooks.
+	t.Setenv(githooksenv.ParametersEnv, githooksenv.NoHooksParam)
+	for _, tc := range []struct {
+		name              string
+		removeSuppression bool
+	}{
+		{name: "suppressed"},
+		{name: "without_argv_suppression", removeSuppression: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			marker := filepath.Join(root, "hook-marker")
+			t.Setenv("BD_WORKTREE_HOOK_MARKER", filepath.ToSlash(marker))
+			cmd := gitCmdInDir(t.Context(), repo, "worktree", "add", "--detach", filepath.Join(root, "checkout"), "HEAD")
+			for _, entry := range cmd.Env {
+				key := worktreeGitEnvKey(entry)
+				if want, ok := suppression[key]; ok && entry == key+"="+want {
+					continue
+				}
+				if gitenv.IsRoutingKeyForOS(worktreeGitEnvKey(entry), runtime.GOOS) && entry != "GIT_TEMPLATE_DIR=" {
+					t.Fatalf("worktree command retained routing state: %q", entry)
+				}
+			}
+			if tc.removeSuppression {
+				if len(cmd.Args) < 3 || cmd.Args[1] != "-c" || cmd.Args[2] != "core.hooksPath=" {
+					t.Fatalf("cannot remove only hook suppression from argv: %q", cmd.Args)
+				}
+				cmd.Args = append([]string{cmd.Args[0]}, cmd.Args[3:]...)
+			}
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("git worktree add: %v\n%s", err, out)
+			}
+			data, err := os.ReadFile(marker)
+			if tc.removeSuppression {
+				if err != nil || string(data) != "hook ran\n" {
+					t.Fatalf("hook control did not run: marker=%q, err=%v", data, err)
+				}
+			} else if !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("hook ran despite command-line suppression: marker=%q, err=%v", data, err)
+			}
+		})
 	}
 }
 
