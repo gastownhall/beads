@@ -498,7 +498,9 @@ func ExpansionVarRefs(f *Formula, targetID string) []string {
 // The step's ExpandVars are passed as variable overrides to the expansion.
 //
 // This differs from compose.Expand in that the expansion is declared inline on the
-// step itself rather than in a central compose section.
+// step itself rather than in a central compose section. As with compose.Expand,
+// other steps' dependencies on an expanded step are pointed at the last step of
+// its expansion.
 //
 // Returns a new steps slice with inline expansions applied.
 // The original steps slice is not modified.
@@ -507,12 +509,27 @@ func ApplyInlineExpansions(steps []*Step, parser *Parser) ([]*Step, error) {
 		return steps, nil
 	}
 
-	return applyInlineExpansionsRecursive(steps, parser, 0)
+	var expansions []inlineExpansion
+	result, err := applyInlineExpansionsRecursive(steps, parser, 0, &expansions)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, e := range expansions {
+		result = UpdateDependenciesForExpansion(result, e.targetID, e.lastStepID)
+	}
+
+	return result, nil
+}
+
+type inlineExpansion struct {
+	targetID   string
+	lastStepID string
 }
 
 // applyInlineExpansionsRecursive handles inline expansions for a slice of steps.
 // depth tracks recursion to prevent infinite expansion loops.
-func applyInlineExpansionsRecursive(steps []*Step, parser *Parser, depth int) ([]*Step, error) {
+func applyInlineExpansionsRecursive(steps []*Step, parser *Parser, depth int, expansions *[]inlineExpansion) ([]*Step, error) {
 	if depth > DefaultMaxExpansionDepth {
 		return nil, fmt.Errorf("inline expansion depth limit exceeded: max %d levels", DefaultMaxExpansionDepth)
 	}
@@ -549,8 +566,13 @@ func applyInlineExpansionsRecursive(steps []*Step, parser *Parser, depth int) ([
 			// Propagate the original step's dependencies to root steps of the expansion
 			propagateTargetDeps(step, expandedSteps)
 
+			*expansions = append(*expansions, inlineExpansion{
+				targetID:   step.ID,
+				lastStepID: expandedSteps[len(expandedSteps)-1].ID,
+			})
+
 			// Recursively process expanded steps for nested inline expansions
-			processedSteps, err := applyInlineExpansionsRecursive(expandedSteps, parser, depth+1)
+			processedSteps, err := applyInlineExpansionsRecursive(expandedSteps, parser, depth+1, expansions)
 			if err != nil {
 				return nil, err
 			}
@@ -561,7 +583,7 @@ func applyInlineExpansionsRecursive(steps []*Step, parser *Parser, depth int) ([
 			clone := cloneStep(step)
 
 			if len(step.Children) > 0 {
-				processedChildren, err := applyInlineExpansionsRecursive(step.Children, parser, depth)
+				processedChildren, err := applyInlineExpansionsRecursive(step.Children, parser, depth, expansions)
 				if err != nil {
 					return nil, err
 				}
