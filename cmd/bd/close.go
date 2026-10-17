@@ -468,25 +468,28 @@ func closeClaimedID(claimed *types.Issue) string {
 // denominator, because only it knows what it attempted — the direct route
 // counts resolved ids, the proxied one counts arguments.
 //
-// The summary is suppressed for a single-id batch deliberately: one inline
-// refusal is already unambiguous about which id failed, and suppressing it
-// keeps single-id stderr byte-identical to what it was before close learned to
-// fail a partial batch.
+// The text summary is suppressed for a single-id batch deliberately: one
+// inline refusal is already unambiguous about which id failed, and suppressing
+// it keeps single-id stderr byte-identical to what it was before close learned
+// to fail a partial batch.
 //
 // In --json mode the summary is one compact JSON line on stderr — the shape
 // reportUpdateFailures established — so a consumer that sees exit 1 can read
 // WHICH ids failed instead of scraping English prose, while stdout keeps the
-// plain closed-issues array a successful close emits. claimedNextID names the
-// issue --claim-next claimed on this run, if any: that claim is committed
-// inside the batch's own transaction and a sibling's refusal does not roll it
-// back, so the report names it rather than pretending it did not happen.
+// plain closed-issues array a successful close emits. It is emitted for a
+// single id too, as reportUpdateFailures' is: a consumer closing one id at a
+// time needs a parseable reason as much as one closing a batch. claimedNextID
+// names the issue --claim-next claimed on this run, if any: that claim is
+// committed inside the batch's own transaction and a sibling's refusal does
+// not roll it back, so the report names it rather than pretending it did not
+// happen.
 func reportCloseFailures(failures []closeIDFailure, total int, claimedNextID string, jsonOut bool) error {
-	if total <= 1 {
-		return SilentExit()
-	}
 	msg := fmt.Sprintf("%d of %d issues failed to close", len(failures), total)
 
 	if !jsonOut {
+		if total <= 1 {
+			return SilentExit()
+		}
 		fmt.Fprintf(os.Stderr, "Error: %s\n", msg)
 		if claimedNextID != "" {
 			fmt.Fprintf(os.Stderr, "Note: --claim-next already claimed %s; it stays assigned to you.\n", claimedNextID)
