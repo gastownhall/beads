@@ -2163,6 +2163,7 @@ type IssueFilter struct {
 	ExcludeLabels []string // Exclusion: issue must NOT have ANY of these labels
 	LabelPattern  string   // Glob pattern for label matching (e.g., "tech-*")
 	LabelRegex    string   // Regex pattern for label matching (e.g., "tech-(debt|legacy)")
+	Ctx           []string // Declared execution context; nil = predicate off, non-nil = hide unmet `requires:` rows (see WorkFilter.Ctx)
 	TitleSearch   string
 	IDs           []string // Filter by specific issue IDs
 	IDPrefix      string   // Filter by ID prefix (e.g., "bd-" to match "bd-abc123")
@@ -2463,8 +2464,16 @@ type WorkFilter struct {
 	ExcludeLabels []string // Exclusion: issue must NOT have ANY of these labels
 	LabelPattern  string   // Glob pattern for label matching (e.g., "tech-*")
 	LabelRegex    string   // Regex pattern for label matching (e.g., "tech-(debt|legacy)")
-	Limit         int
-	SortPolicy    SortPolicy
+	// Ctx is the reader's DECLARED EXECUTION CONTEXT, as tokens (`k` or `k=v`).
+	// nil means none was declared and the requires predicate is off: every row
+	// shows, exactly as before this field existed. Non-nil, EVEN EMPTY, hides
+	// every issue carrying a `requires:<token>` label (RequiresLabelPrefix)
+	// whose token the context does not satisfy; see RequiresSatisfiedLabels
+	// for the rule. The nil/empty distinction is the whole semantics, so
+	// callers normalize it with NormalizeCtx, never utils.NormalizeLabels.
+	Ctx        []string
+	Limit      int
+	SortPolicy SortPolicy
 
 	// Parent filtering: filter to descendants of a bead/epic (recursive)
 	ParentID *string // Show all descendants of this issue

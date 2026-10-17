@@ -309,10 +309,14 @@ func readyWorkExcludeTypes(extra []types.IssueType) []types.IssueType {
 func readyWorkWispIssueFilter(filter types.WorkFilter) types.IssueFilter {
 	pinnedFalse := false
 	wispFilter := types.IssueFilter{
-		Priority:       filter.Priority,
-		Labels:         filter.Labels,
-		LabelsAny:      filter.LabelsAny,
-		ExcludeLabels:  filter.ExcludeLabels,
+		Priority:      filter.Priority,
+		Labels:        filter.Labels,
+		LabelsAny:     filter.LabelsAny,
+		ExcludeLabels: filter.ExcludeLabels,
+		// The declared execution context reaches the wisp plane too: without
+		// it the text listing and --claim handed out `requires:` wisps the
+		// caller declared it could not run (nil stays nil: predicate off).
+		Ctx:            filter.Ctx,
 		Limit:          filter.Limit,
 		MolType:        filter.MolType,
 		WispType:       filter.WispType,

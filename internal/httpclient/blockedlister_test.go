@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/httpclient/encode"
 	"github.com/steveyegge/beads/internal/httpclient/wire"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
@@ -226,5 +227,49 @@ func TestBlockedRefusesAServerThatReportsMore(t *testing.T) {
 	}
 	if _, err := s.GetBlockedIssues(t.Context(), types.WorkFilter{}); !errors.As(err, &truncated) {
 		t.Errorf("GetBlockedIssues with has_more: err %v, want *TruncatedListingError", err)
+	}
+}
+
+// TestBlockedWithADeclaredContextRefusesBeforeTheDial: listBlockedIssues
+// publishes no ctx parameter and the predicate is a negative one, so a declared
+// context — EMPTY INCLUDED, since a declared-empty context hides every requiring
+// row — refuses with the ledger row before anything is sent, on the role and on
+// the legacy door alike. An undeclared (nil) context dials as before.
+func TestBlockedWithADeclaredContextRefusesBeforeTheDial(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		ctx  []string
+	}{
+		{"declared-empty", []string{}},
+		{"declared", []string{"gpu", "host=studio"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := &blockedStub{reply: `{"items":[],"has_more":false}`}
+			s := stub.store(t, "blocked.list")
+
+			_, err := blockedListerOf(t, s).ListBlocked(t.Context(), issueops.BlockedRequest{Ctx: tc.ctx})
+			if !errors.Is(err, encode.ErrRefused) {
+				t.Fatalf("ListBlocked with a declared context = %v, want encode.ErrRefused", err)
+			}
+			var refused *encode.RefusedError
+			if !errors.As(err, &refused) || refused.Row.ID != "E-BlockedRequest.Ctx" {
+				t.Errorf("refusal = %v, want the E-BlockedRequest.Ctx row", err)
+			}
+			if _, err := s.GetBlockedIssues(t.Context(), types.WorkFilter{Ctx: tc.ctx}); !errors.Is(err, encode.ErrRefused) {
+				t.Errorf("GetBlockedIssues with a declared context = %v, want encode.ErrRefused", err)
+			}
+			if n := len(stub.dials()); n != 0 {
+				t.Errorf("%d blocked GETs reached the server, want 0", n)
+			}
+		})
+	}
+
+	stub := &blockedStub{reply: `{"items":[],"has_more":false}`}
+	s := stub.store(t, "blocked.list")
+	if _, err := blockedListerOf(t, s).ListBlocked(t.Context(), issueops.BlockedRequest{}); err != nil {
+		t.Fatalf("ListBlocked with no context = %v, want the dial", err)
+	}
+	if n := len(stub.dials()); n != 1 {
+		t.Errorf("%d blocked GETs for an undeclared context, want 1", n)
 	}
 }

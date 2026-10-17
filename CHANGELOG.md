@@ -96,6 +96,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   members the ready query cannot carry. There is no `bd list` flag for it
   yet.
 
+- `bd ready`, `bd list` and `bd blocked` take `--ctx <token>` (repeatable or
+  comma-separated, `k` or `k=v`) and `--ctx-file <path>` to declare the
+  caller's execution context, and hide every issue carrying a label under the
+  reserved `requires:` namespace (`requires:gpu`, `requires:host=studio`) that
+  the declared context does not satisfy — all of an issue's requirements must
+  be met; a bare `requires:k` is met by `k` or any `k=<v>`, a keyed
+  `requires:k=v` only by that exact token. Declaring nothing changes nothing;
+  declaring a context, even an empty one (`--ctx ''`), is strict, so
+  `bd ready --ctx-file … --claim` claims only work the caller can run. It is a
+  label convention with a read-side predicate (`types.RequiresLabelPrefix`,
+  `types.WorkFilter.Ctx` / `types.IssueFilter.Ctx`): no field, schema, JSONL,
+  sync or wire change, and a client that does not know the convention sees the
+  rows as before. Refused, rather than ignored, with `bd ready --gated|--mol|
+  --explain`, with `bd list --skip-labels`, and on the HTTP client until the
+  server publishes a `ctx` parameter (divergence-ledger rows
+  `E-ReadyRequest.Ctx`, `E-ListRequest.Ctx`, `E-BlockedRequest.Ctx`,
+  `E-WorkFilter.Ctx`, `P-IssueFilter.Ctx`; a declared-empty context refuses
+  there too, never crossing as "no context"). The context reaches the wisp
+  plane of `bd ready`, so the text listing and `--claim` never hand out a
+  `requires:` wisp the caller cannot run. Docs: Core Concepts → Labels → "Execution-context
+  requirements".
 - `bd serve` publishes the gate members: `await_type`,
   `await_id`, `timeout` (nanoseconds) and `waiters` on `POST
   /v0/beads/issues` and on `issues:batchApply` create items, behind the new

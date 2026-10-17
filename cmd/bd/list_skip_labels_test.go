@@ -21,9 +21,12 @@ func TestSkipLabelsConflicts(t *testing.T) {
 		labelRegex    string
 		excludeLabels []string
 		noLabels      bool
+		ctx           []string
 		want          []string
 	}{
 		{name: "no conflict — no label filters set", want: nil},
+		{name: "ctx declared empty still conflicts", ctx: []string{}, want: []string{"--ctx"}},
+		{name: "ctx with tokens", ctx: []string{"gpu"}, want: []string{"--ctx"}},
 		{name: "label", labels: []string{"needs-pm"}, want: []string{"--label"}},
 		{name: "label-any", labelsAny: []string{"frontend"}, want: []string{"--label-any"}},
 		{name: "label-pattern", labelPattern: "tech-*", want: []string{"--label-pattern"}},
@@ -42,7 +45,7 @@ func TestSkipLabelsConflicts(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := skipLabelsConflicts(tt.labels, tt.labelsAny, tt.labelPattern, tt.labelRegex, tt.excludeLabels, tt.noLabels)
+			got := skipLabelsConflicts(tt.labels, tt.labelsAny, tt.labelPattern, tt.labelRegex, tt.excludeLabels, tt.noLabels, tt.ctx)
 			if len(got) != len(tt.want) {
 				t.Fatalf("len mismatch: got %v, want %v", got, tt.want)
 			}

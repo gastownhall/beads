@@ -48,6 +48,12 @@ type ReadyRequest struct {
 	// against labels.
 	LabelPattern string
 	LabelRegex   string
+	// Ctx is the caller's declared execution context, as `k` / `k=v` tokens.
+	// nil leaves the answer as it has always been; non-nil (even empty) hides
+	// every issue whose `requires:<token>` labels the context does not satisfy
+	// (types.RequiresLabelPrefix, types.RequiresSatisfiedLabels). Raw:
+	// normalization happens inside and keeps nil and empty apart.
+	Ctx []string
 
 	// Priority is an exact priority. It is a pointer because 0 is a real
 	// priority: a value-plus-flag pair would let one half be filled in without
@@ -179,6 +185,10 @@ type ListRequest struct {
 	ExcludeLabels []string
 	LabelPattern  string
 	LabelRegex    string
+	// Ctx is the declared execution context; see ReadyRequest.Ctx for the
+	// rule. It IS carried onto the ReadyFlag arm, since that arm is the same
+	// blocker-aware query `bd ready` runs and a worker reads either.
+	Ctx []string
 
 	TitleContains    string
 	DescContains     string

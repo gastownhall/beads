@@ -60,6 +60,7 @@ func BuildReadyFilter(in issueops.ReadyRequest) (types.WorkFilter, error) {
 		ExcludeLabels:    utils.NormalizeLabels(in.ExcludeLabels),
 		LabelPattern:     in.LabelPattern,
 		LabelRegex:       in.LabelRegex,
+		Ctx:              types.NormalizeCtx(in.Ctx),
 		IncludeDeferred:  in.IncludeDeferred,
 		IncludeEphemeral: in.IncludeEphemeral,
 		ExcludeTypes:     normalizeExcludeTypes(in.ExcludeTypes),

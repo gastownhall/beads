@@ -11,8 +11,7 @@ import (
 )
 
 // BlockedFilter is the WorkFilter a BlockedRequest compiles to: the filter
-// `bd blocked` has always handed GetBlockedIssues, built from the same four
-// flags. Labels are normalized as every other label filter normalizes them
+// `bd blocked` has always handed GetBlockedIssues, built from the same flags. Labels are normalized as every other label filter normalizes them
 // (trimmed, blanks and repeats dropped): these clauses match a label EXACTLY,
 // so an untrimmed `--label 'a, b'` value would otherwise match nothing.
 //
@@ -27,6 +26,10 @@ func BlockedFilter(req publicops.BlockedRequest) types.WorkFilter {
 	filter.Labels = utils.NormalizeLabels(req.Labels)
 	filter.LabelsAny = utils.NormalizeLabels(req.LabelsAny)
 	filter.ExcludeLabels = utils.NormalizeLabels(req.ExcludeLabels)
+	// The declared context keeps nil and empty apart: NormalizeCtx returns nil
+	// for nil (nothing declared, predicate off) and a non-nil slice otherwise,
+	// which is what the requires clause turns on (sqlbuild.RequiresClause).
+	filter.Ctx = types.NormalizeCtx(req.Ctx)
 	return filter
 }
 

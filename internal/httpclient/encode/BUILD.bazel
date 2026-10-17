@@ -26,6 +26,7 @@ go_test(
     name = "encode_test",
     srcs = [
         "bijection_test.go",
+        "declared_test.go",
         "ledger_render_test.go",
         "list_filters_test.go",
         "list_fold_test.go",

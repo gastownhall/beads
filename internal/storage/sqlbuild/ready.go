@@ -197,6 +197,13 @@ func BuildReadyWorkWhere(filter types.WorkFilter, tables FilterTables, in ReadyW
 		whereClauses = append(whereClauses, fmt.Sprintf("id IN (SELECT issue_id FROM %s WHERE label REGEXP ?)", tables.Labels))
 		args = append(args, filter.LabelRegex)
 	}
+	// The declared-context predicate (--ctx): hides rows whose `requires:`
+	// labels the caller cannot satisfy, so a worker's `bd ready --claim` never
+	// claims work it cannot run. Off when Ctx is nil; see RequiresClause.
+	if clause, ctxArgs, ok := RequiresClause("id", tables, filter.Ctx); ok {
+		whereClauses = append(whereClauses, clause)
+		args = append(args, ctxArgs...)
+	}
 
 	// Parent filtering: return all transitive descendants of parentID.
 	// GH#3396: a one-hop subquery silently dropped grandchildren despite the

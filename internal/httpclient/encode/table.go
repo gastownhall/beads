@@ -141,6 +141,10 @@ type FieldEntry struct {
 	// corresponding member of the server-side type, and stating it here is what
 	// lets the round-trip gate compare the two without a hand-written twin.
 	Decoded string
+	// Declared, on a DispRefused entry, refuses the field when it is set at
+	// all rather than when it is populated: a nil-aware slice or map whose
+	// empty value is a real restriction (see declared).
+	Declared bool
 	// Fixed is the value the server pins (DispServerFixed).
 	Fixed string
 	// Why is required on every disposition but DispParam and DispPath.
@@ -232,6 +236,18 @@ func refused(name, ledger string) FieldEntry {
 	return FieldEntry{Name: name, Disposition: DispRefused, Ledger: ledger}
 }
 
+// declared marks a refused entry whose field refuses when SET AT ALL, empty or
+// not. The default reading (populated) treats an empty slice as absent, which
+// is right for a label list — an empty one constrains nothing — and wrong for
+// a field whose nil/empty distinction is its whole semantics: a declared-empty
+// execution context (`--ctx ”`) hides every requiring row, so letting it
+// cross the wire as "no context" answers with exactly the rows the caller
+// declared it cannot run.
+func declared(entry FieldEntry) FieldEntry {
+	entry.Declared = true
+	return entry
+}
+
 func dropped(name, ledger, why string) FieldEntry {
 	return FieldEntry{Name: name, Disposition: DispDropped, Ledger: ledger, Why: why}
 }
@@ -260,6 +276,7 @@ func readyFilterEntries() []FieldEntry {
 		param("ExcludeLabels", "exclude_label"),
 		param("LabelPattern", "label_pattern"),
 		param("LabelRegex", "label_regex"),
+		declared(refused("Ctx", "E-ReadyRequest.Ctx")),
 		param("Priority", "priority"),
 		paramTo("ParentID", "parent", "ParentID"),
 		refused("MolType", "E-ReadyRequest.MolType"),
@@ -352,6 +369,7 @@ func listTable() Table {
 			param("ExcludeLabels", "exclude_label"),
 			paramTo("LabelPattern", "label_pattern", "LabelPattern"),
 			paramTo("LabelRegex", "label_regex", "LabelRegex"),
+			declared(refused("Ctx", "E-ListRequest.Ctx")),
 			// A TitleContains alone, or equal to TitleSearch up to letter
 			// case, never reaches the encoder: httpReader.List folds it onto
 			// `title` first (FoldTitleContains). What is left is a pair that
@@ -606,6 +624,7 @@ func readyBridgeTable() Table {
 			paramTo("ExcludeLabels", "exclude_label", "ExcludeLabels"),
 			paramTo("LabelPattern", "label_pattern", "LabelPattern"),
 			paramTo("LabelRegex", "label_regex", "LabelRegex"),
+			declared(refused("Ctx", "E-WorkFilter.Ctx")),
 			paramTo("Limit", "limit", "Limit"),
 			paramTo("SortPolicy", "sort", "Sort"),
 			paramTo("ParentID", "parent", "ParentID"),
@@ -710,6 +729,7 @@ func searchParentWalkTable() Table {
 			walkRefusal("Priority"),
 			walkRefusal("LabelPattern"),
 			walkRefusal("LabelRegex"),
+			declared(walkRefusal("Ctx")),
 			walkRefusal("TitleSearch"),
 			walkRefusal("IDPrefix"),
 			walkRefusal("SpecIDPrefix"),

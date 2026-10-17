@@ -308,3 +308,22 @@ func TestReadyWorkWispIssueFilterPropagatesStatuses(t *testing.T) {
 		t.Fatalf("wisp filter Statuses = %v, want %v", filter.Statuses, want)
 	}
 }
+
+// TestReadyWorkWispIssueFilterCarriesCtx: the declared execution context
+// reaches the wisp plane, nil and empty kept apart (nil is "predicate off";
+// empty hides every requiring wisp). Without it the text listing and --claim
+// handed out `requires:` wisps the caller declared it could not run.
+func TestReadyWorkWispIssueFilterCarriesCtx(t *testing.T) {
+	t.Parallel()
+
+	if got := readyWorkWispIssueFilter(types.WorkFilter{}).Ctx; got != nil {
+		t.Fatalf("undeclared context reached the wisp plane as %#v, want nil", got)
+	}
+	if got := readyWorkWispIssueFilter(types.WorkFilter{Ctx: []string{}}).Ctx; got == nil || len(got) != 0 {
+		t.Fatalf("declared-empty context reached the wisp plane as %#v, want a non-nil empty slice", got)
+	}
+	want := []string{"gpu", "host=studio"}
+	if got := readyWorkWispIssueFilter(types.WorkFilter{Ctx: want}).Ctx; !reflect.DeepEqual(got, want) {
+		t.Fatalf("wisp filter Ctx = %v, want %v", got, want)
+	}
+}

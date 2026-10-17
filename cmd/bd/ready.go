@@ -57,6 +57,9 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		if err := briefModeConflictFromFlags(cmd); err != nil {
 			return err
 		}
+		if err := ctxModeConflictFromFlags(cmd); err != nil {
+			return err
+		}
 
 		if usesProxiedServer() {
 			// The proxied ready role cannot enforce a row cap, including on
@@ -344,17 +347,26 @@ func rejectReadyMaxRowsUnderProxiedServer(cmd *cobra.Command) error {
 // in an empty-label clause that matches nothing at all. Normalizing in the
 // role rather than here is what makes a served listing normalize the same way
 // for every client.
-func blockedRequestFromFlags(cmd *cobra.Command) issueops.BlockedRequest {
+//
+// The declared execution context (--ctx / --ctx-file) rides the same request:
+// nil when neither flag was given, non-nil (even empty) when one was, which is
+// the distinction the requires predicate turns on (types.WorkFilter.Ctx).
+func blockedRequestFromFlags(cmd *cobra.Command) (issueops.BlockedRequest, error) {
 	parentID, _ := cmd.Flags().GetString("parent")
 	labels, _ := cmd.Flags().GetStringSlice("label")
 	labelsAny, _ := cmd.Flags().GetStringSlice("label-any")
 	excludeLabels, _ := cmd.Flags().GetStringSlice("exclude-label")
+	ctxTokens, err := ctxFromFlags(cmd)
+	if err != nil {
+		return issueops.BlockedRequest{}, err
+	}
 	return issueops.BlockedRequest{
 		ParentID:      parentID,
 		Labels:        labels,
 		LabelsAny:     labelsAny,
 		ExcludeLabels: excludeLabels,
-	}
+		Ctx:           ctxTokens,
+	}, nil
 }
 
 // blockedLister is the blocked-listing role for the route this invocation
@@ -398,7 +410,11 @@ var blockedCmd = &cobra.Command{
 		if err != nil {
 			return HandleErrorRespectJSON("%v", err)
 		}
-		result, err := lister.ListBlocked(ctx, blockedRequestFromFlags(cmd))
+		req, err := blockedRequestFromFlags(cmd)
+		if err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
+		result, err := lister.ListBlocked(ctx, req)
 		if err != nil {
 			return HandleErrorRespectJSON("%v", err)
 		}
@@ -790,6 +806,7 @@ func init() {
 	readyCmd.Flags().StringSlice("exclude-label", []string{}, "Exclude issues that have ANY of these labels")
 	readyCmd.Flags().String("label-pattern", "", "Filter by label glob pattern (e.g., 'tech-*' matches tech-debt, tech-legacy)")
 	readyCmd.Flags().String("label-regex", "", "Filter by label regex pattern (e.g., 'tech-(debt|legacy)')")
+	addCtxFlags(readyCmd.Flags())
 	readyCmd.Flags().StringP("type", "t", "", "Filter by issue type (task, bug, feature, epic, decision, merge-request). Aliases: mr→merge-request, feat→feature, mol→molecule, dec/adr→decision")
 	readyCmd.Flags().String("mol", "", "Filter to steps within a specific molecule")
 	readyCmd.Flags().String("parent", "", "Filter to descendants of this bead/epic")
@@ -823,6 +840,7 @@ func init() {
 	blockedCmd.Flags().StringSlice("exclude-label", []string{}, "Exclude issues that have ANY of these labels")
 	blockedCmd.Flags().Bool("raw", false, "With --flags: the stored blocked column itself, without the external-dependency policy (an unsatisfied external: blocker does not set it)")
 	blockedCmd.Flags().Bool("flags", false, "Print the blocked flag for each id read from stdin (one per line) instead of the listing; with --json, [{\"id\",\"is_blocked\"}]")
+	addCtxFlags(blockedCmd.Flags())
 	rootCmd.AddCommand(blockedCmd)
 }
 

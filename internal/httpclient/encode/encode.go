@@ -746,10 +746,22 @@ func (b *builder) refuseInexpressible(source any) {
 			b.err = fmt.Errorf("encode: %s has no field %s", table.Source, entry.Name)
 			return
 		}
-		if populated(field) {
+		if populated(field) || (entry.Declared && declaredValue(field)) {
 			b.err = &RefusedError{Op: b.op, Shape: b.shape, Row: RowByID(entry.Ledger)}
 			return
 		}
+	}
+}
+
+// declaredValue reports whether a nil-aware field was set at all: a non-nil
+// slice or map, empty or not. It is the reading a Declared entry gets, where
+// the empty value is itself a restriction the wire cannot carry.
+func declaredValue(v reflect.Value) bool {
+	switch v.Kind() {
+	case reflect.Slice, reflect.Map:
+		return !v.IsNil()
+	default:
+		return populated(v)
 	}
 }
 

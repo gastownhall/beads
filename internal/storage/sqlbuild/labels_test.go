@@ -175,3 +175,139 @@ func TestLabelSetClausesMatchesFilterClauses(t *testing.T) {
 		}
 	}
 }
+
+// TestRequiresClause pins the declared-context predicate behind --ctx: off
+// when nil, LIKE-only when declared empty, and NOT IN over the satisfied set
+// (bare key implied by a keyed token) otherwise. The prefix is LIKE-escaped
+// the way globToLikePattern escapes, so the two cannot drift.
+func TestRequiresClause(t *testing.T) {
+	t.Parallel()
+
+	const likePrefix = "requires:%"
+	cases := []struct {
+		name      string
+		ctx       []string
+		wantOK    bool
+		wantWhere string
+		wantArgs  []any
+	}{
+		{name: "nil ctx: predicate off", ctx: nil},
+		{
+			name:      "declared empty: every requirement is unmet",
+			ctx:       []string{},
+			wantOK:    true,
+			wantWhere: "id NOT IN (SELECT issue_id FROM labels WHERE label LIKE ? ESCAPE '|')",
+			wantArgs:  []any{likePrefix},
+		},
+		{
+			name:      "tokens that normalize away are a declared-empty context",
+			ctx:       []string{"", " "},
+			wantOK:    true,
+			wantWhere: "id NOT IN (SELECT issue_id FROM labels WHERE label LIKE ? ESCAPE '|')",
+			wantArgs:  []any{likePrefix},
+		},
+		{
+			name:      "keyed token satisfies itself and its bare key, sorted",
+			ctx:       []string{"host=studio", "gpu"},
+			wantOK:    true,
+			wantWhere: "id NOT IN (SELECT issue_id FROM labels WHERE label LIKE ? ESCAPE '|' AND label NOT IN (?, ?, ?))",
+			wantArgs:  []any{likePrefix, "requires:gpu", "requires:host", "requires:host=studio"},
+		},
+		{
+			name:      "wisps table",
+			ctx:       []string{"gpu"},
+			wantOK:    true,
+			wantWhere: "id NOT IN (SELECT issue_id FROM wisp_labels WHERE label LIKE ? ESCAPE '|' AND label NOT IN (?))",
+			wantArgs:  []any{likePrefix, "requires:gpu"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tables := IssuesFilterTables
+			if tc.name == "wisps table" {
+				tables = WispsFilterTables
+			}
+			where, args, ok := RequiresClause("id", tables, tc.ctx)
+			if ok != tc.wantOK {
+				t.Fatalf("ok = %v, want %v (where %q)", ok, tc.wantOK, where)
+			}
+			if where != tc.wantWhere {
+				t.Errorf("where:\n got: %s\nwant: %s", where, tc.wantWhere)
+			}
+			if len(args) != len(tc.wantArgs) {
+				t.Fatalf("args = %v, want %v", args, tc.wantArgs)
+			}
+			for i := range args {
+				if args[i] != tc.wantArgs[i] {
+					t.Errorf("arg[%d] = %v, want %v", i, args[i], tc.wantArgs[i])
+				}
+			}
+		})
+	}
+}
+
+// TestRequiresClauseReachesEveryListing pins that the ready, list and blocked
+// builders all carry the predicate: a Ctx set on the filter must show up as
+// the RequiresClause text in each, and a nil Ctx must leave each unchanged.
+func TestRequiresClauseReachesEveryListing(t *testing.T) {
+	t.Parallel()
+
+	ctx := []string{"gpu"}
+	wantClause, wantArgs, ok := RequiresClause("id", IssuesFilterTables, ctx)
+	if !ok {
+		t.Fatal("RequiresClause declined a declared context")
+	}
+	contains := func(t *testing.T, name string, where []string, args []any) {
+		t.Helper()
+		found := false
+		for _, w := range where {
+			if w == wantClause {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%s: predicate missing from WHERE %v", name, where)
+		}
+		seen := 0
+		for _, a := range args {
+			for _, w := range wantArgs {
+				if a == w {
+					seen++
+				}
+			}
+		}
+		if seen != len(wantArgs) {
+			t.Errorf("%s: predicate args missing from %v", name, args)
+		}
+	}
+
+	listWhere, listArgs, err := BuildIssueFilterClauses("", types.IssueFilter{Ctx: ctx}, IssuesFilterTables)
+	if err != nil {
+		t.Fatalf("BuildIssueFilterClauses: %v", err)
+	}
+	contains(t, "list", listWhere, listArgs)
+	bareWhere, _, err := BuildIssueFilterClauses("", types.IssueFilter{}, IssuesFilterTables)
+	if err != nil {
+		t.Fatalf("BuildIssueFilterClauses (nil ctx): %v", err)
+	}
+	if len(bareWhere) != len(listWhere)-1 {
+		t.Errorf("list: a nil Ctx must add no clause; bare=%d declared=%d", len(bareWhere), len(listWhere))
+	}
+
+	readyWhere, readyArgs, err := BuildReadyWorkWhere(types.WorkFilter{Ctx: ctx}, IssuesFilterTables, ReadyWorkWhereInputs{})
+	if err != nil {
+		t.Fatalf("BuildReadyWorkWhere: %v", err)
+	}
+	if !strings.Contains(readyWhere, wantClause) {
+		t.Errorf("ready: predicate missing from WHERE %q", readyWhere)
+	}
+	contains(t, "ready", []string{wantClause}, readyArgs)
+	bareReady, _, err := BuildReadyWorkWhere(types.WorkFilter{}, IssuesFilterTables, ReadyWorkWhereInputs{})
+	if err != nil {
+		t.Fatalf("BuildReadyWorkWhere (nil ctx): %v", err)
+	}
+	if strings.Contains(bareReady, types.RequiresLabelPrefix) {
+		t.Errorf("ready: a nil Ctx must add no clause: %q", bareReady)
+	}
+}

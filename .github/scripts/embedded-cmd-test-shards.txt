@@ -141,6 +141,7 @@
 100 58 TestEmbeddedDepAAddRejectionsAndBulk
 
 100 59 TestEmbeddedDeferAutoWake
+100 59 TestEmbeddedReadyCtx
 
 100 60 TestEmbeddedCommentsCLI
 100 60 TestEmbeddedRoutedWriteMissDoesNotCreateTargetDatabase
