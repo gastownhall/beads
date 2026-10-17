@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Backport of six `main` fixes/perf changes for the shared-Dolt-server,
+many-short-lived-process pattern (gastownhall/beads#7657):
+[#6291](https://github.com/gastownhall/beads/pull/6291),
+[#6145](https://github.com/gastownhall/beads/pull/6145),
+[#7052](https://github.com/gastownhall/beads/pull/7052),
+[#7224](https://github.com/gastownhall/beads/pull/7224),
+[#7592](https://github.com/gastownhall/beads/pull/7592),
+[#7596](https://github.com/gastownhall/beads/pull/7596) (which itself
+folds in [#7409](https://github.com/gastownhall/beads/pull/7409)). No
+schema migration.
+
+### Changed
+
+- **Per-open schema probes no longer walk `INFORMATION_SCHEMA` on a
+  shared Dolt sql-server** ([#7592](https://github.com/gastownhall/beads/pull/7592),
+  [#7596](https://github.com/gastownhall/beads/pull/7596)). The column
+  sentinel now reads `SHOW COLUMNS` behind a carrier-table existence
+  check instead of `INFORMATION_SCHEMA.COLUMNS`, and the per-open table
+  probes use `SHOW TABLES` instead of `INFORMATION_SCHEMA.TABLES`.
+  Dolt does not push either `INFORMATION_SCHEMA` predicate down, so on
+  a server hosting many databases each probe walked every database's
+  catalog; on a 28-database scratch server this cut `bd update`'s
+  server time from 537 ms to 78 ms and `bd show`'s from 53 ms to 28 ms
+  (median, 15 interleaved runs).
+- **`is_blocked` mark/unmark recompute batches through a batch-scoped
+  should-be-blocked union** instead of recomputing per item
+  ([#6291](https://github.com/gastownhall/beads/pull/6291)).
+- **Dependency-add cycle/hierarchy walks are indexed, blocked-state
+  lookup plans are pinned, and waits-for spawner checks are split from
+  the general walk** ([#7224](https://github.com/gastownhall/beads/pull/7224)).
+
+### Fixed
+
+- **`BEADS_DOLT_POOL_READ_TIMEOUT` / `dolt.pool-read-timeout` (and the
+  write twins) now apply to every `bd` command in server mode**
+  ([#6145](https://github.com/gastownhall/beads/pull/6145)). The
+  CLI's own store open hand-builds its config and goes straight to
+  `New`, bypassing the ladder that previously ran only for
+  `NewFromConfig*` callers, so every `bd` command kept the built-in
+  10 s pool deadline whatever the knob said — on a loaded shared
+  server that is what made `bd close` of a bead with dependents die
+  in its recompute with `i/o timeout` and no relief valve
+  ([#6144](https://github.com/gastownhall/beads/issues/6144)).
+- **`BEADS_DOLT_MAX_CONNS` / `dolt.max-conns` now apply to every store
+  open the same way** ([#7052](https://github.com/gastownhall/beads/pull/7052)).
+
 ## [1.3.2-rc.2] - 2026-10-10
 
 Second release candidate for 1.3.2. Like rc.1 it has **no schema migration**:

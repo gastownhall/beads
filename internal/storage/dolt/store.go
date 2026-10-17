@@ -1638,6 +1638,10 @@ func applyConfigDefaults(cfg *Config) {
 	if cfg.RemotePassword == "" {
 		cfg.RemotePassword = os.Getenv("DOLT_REMOTE_PASSWORD")
 	}
+	// Pool knobs last: every DoltStore open (the CLI's store and library
+	// callers of New/NewFromConfig*) reaches New, so the knob ladders hold
+	// here regardless of how cfg was built.
+	applyPoolKnobs(cfg)
 }
 
 // New creates a new Dolt storage backend.
@@ -4914,12 +4918,12 @@ func (s *DoltStore) RecomputeAllBlocked(ctx context.Context) (int, error) {
 }
 
 func (s *DoltStore) recomputeAllBlocked(ctx context.Context) (int, error) {
-	// The full pass's batched UPDATEs carry five correlated EXISTS subqueries
-	// each; on a loaded shared server a single batch can outlive the pool's
-	// per-I/O deadline (default 10s, see buildServerDSN), killing the repair
-	// with "i/o timeout" — and the retry dies the same way, so the owed
-	// recompute never lands (bd-bn8jo). Run it on a dedicated long-timeout
-	// connection like the other known-long maintenance ops.
+	// The full pass runs unbatched whole-table semi-join UPDATEs, looped until
+	// the fixpoint converges; on a loaded shared server a single one can
+	// outlive the pool's per-I/O deadline (default 10s, see buildServerDSN),
+	// killing the repair with "i/o timeout" — and the retry dies the same way,
+	// so the owed recompute never lands (bd-bn8jo). Run it on a dedicated
+	// long-timeout connection like the other known-long maintenance ops.
 	db, err := s.openLongTimeoutConn()
 	if err != nil {
 		return 0, err
