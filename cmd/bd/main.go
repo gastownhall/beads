@@ -1969,6 +1969,11 @@ var rootCmd = &cobra.Command{
 			// failing each read on an unknown column. Not for a preview,
 			// which reports an incompatibility through its own query.
 			RequireReadableSchema: !previewMode,
+			// dc-6jaq: reused as-is (one lookup answers the whole invocation,
+			// see commandFreeze's own comment above) so the embedded store's
+			// classified-read open can gate its sweep off during a freeze
+			// (GH#7634) without a second, possibly-disagreeing marker lookup.
+			MigrationFrozen: commandFreeze.Frozen(),
 		}
 
 		// Load config to get database name and server connection settings.

@@ -108,7 +108,7 @@ func newDoltStore(ctx context.Context, cfg *dolt.Config) (s storage.DoltStorage,
 		// Ordinary classified-read commands (bd show, bd list, ...) must
 		// not be bricked by the #4259 remote-migrate gate (bd-578h9.5);
 		// server mode's ReadOnly opens already skip migration entirely.
-		return embeddeddolt.OpenForReadOnlyCommand(ctx, cfg.BeadsDir, cfg.Database, "main")
+		return embeddeddolt.OpenForReadOnlyCommand(ctx, cfg.BeadsDir, cfg.Database, "main", cfg.MigrationFrozen)
 	}
 	if cfg.LenientOpen {
 		// Working-set-reconcile commands (bd dolt commit, bd vc commit) must

@@ -29,7 +29,7 @@ type cacheEntry struct {
 // This prevents redundant engine initializations when multiple code paths open
 // connectors against the same data directory in the same process.
 func Open(ctx context.Context, beadsDir, database, branch string) (*EmbeddedDoltStore, error) {
-	return openCached(ctx, beadsDir, database, branch, openStrict)
+	return openCached(ctx, beadsDir, database, branch, openStrict, false)
 }
 
 // OpenForReadOnlyCommand opens like Open, except that a #4259 remote-migrate
@@ -37,9 +37,12 @@ func Open(ctx context.Context, beadsDir, database, branch string) (*EmbeddedDolt
 // failing the open (bd-578h9.5): the gate exists to stop in-place migration,
 // not reads, and server mode's read-only opens already skip migration. The
 // returned store is otherwise a normal writable store (read-only commands
-// can still write incidentally, e.g. the post-command autocommit net).
-func OpenForReadOnlyCommand(ctx context.Context, beadsDir, database, branch string) (*EmbeddedDoltStore, error) {
-	return openCached(ctx, beadsDir, database, branch, openReadOnlyCommand)
+// can still write incidentally, e.g. the post-command autocommit net) —
+// except for the lazy defer-wake sweep while frozen is true (dc-6jaq,
+// GH#7634): the caller has already let a read proceed through an active
+// MIGRATION-FREEZE marker, and the sweep is a write that must not follow it.
+func OpenForReadOnlyCommand(ctx context.Context, beadsDir, database, branch string, frozen bool) (*EmbeddedDoltStore, error) {
+	return openCached(ctx, beadsDir, database, branch, openReadOnlyCommand, frozen)
 }
 
 // OpenForWorkingSetReconcile opens like Open, except that a schema.
@@ -53,7 +56,7 @@ func OpenForReadOnlyCommand(ctx context.Context, beadsDir, database, branch stri
 // (toleratesConsentRefusal). The returned store is otherwise a normal
 // writable store.
 func OpenForWorkingSetReconcile(ctx context.Context, beadsDir, database, branch string) (*EmbeddedDoltStore, error) {
-	return openCached(ctx, beadsDir, database, branch, openWorkingSetReconcile)
+	return openCached(ctx, beadsDir, database, branch, openWorkingSetReconcile, false)
 }
 
 // OpenForRemoteSync opens like Open, except that the #6575 data-behind
@@ -66,10 +69,10 @@ func OpenForWorkingSetReconcile(ctx context.Context, beadsDir, database, branch 
 // exactly as they fail a strict one. The returned store is otherwise a normal
 // writable store.
 func OpenForRemoteSync(ctx context.Context, beadsDir, database, branch string) (*EmbeddedDoltStore, error) {
-	return openCached(ctx, beadsDir, database, branch, openRemoteSync)
+	return openCached(ctx, beadsDir, database, branch, openRemoteSync, false)
 }
 
-func openCached(ctx context.Context, beadsDir, database, branch string, intent openIntent) (*EmbeddedDoltStore, error) {
+func openCached(ctx context.Context, beadsDir, database, branch string, intent openIntent, frozen bool) (*EmbeddedDoltStore, error) {
 	key, err := cacheKey(beadsDir)
 	if err != nil {
 		return nil, err
@@ -77,19 +80,21 @@ func openCached(ctx context.Context, beadsDir, database, branch string, intent o
 
 	cacheMu.Lock()
 	if entry, ok := cache[key]; ok {
-		// Cache hit: the requested intent is ignored - the store keeps
-		// whatever intent it was opened with on the slow path below. This is
-		// safe today because intent is derived once per process from the
-		// command classification (isReadOnlyCommand /
-		// isWorkingSetReconcileCommand / isRemoteSyncCommand in
-		// cmd/bd/main.go), so a single process never opens the same data
-		// directory under two different intents, and autoMigrateOnVersionBump
-		// (cmd/bd/version_tracking.go) always opens its own openStrict store
-		// and closes it before the main command's open runs, so it never
-		// races a cache hit either. A future caller needing a genuinely
-		// different intent on a cache hit would have to plumb intent through
-		// here instead of silently reusing the first store's; it is load-
-		// bearing that no current caller does.
+		// Cache hit: the requested intent (and frozen) is ignored - the store
+		// keeps whatever intent/frozen it was opened with on the slow path
+		// below. This is safe today because both are derived once per
+		// process from the command classification and the single freeze
+		// lookup (isReadOnlyCommand / isWorkingSetReconcileCommand /
+		// isRemoteSyncCommand, commandFreeze.Frozen() in cmd/bd/main.go), so
+		// a single process never opens the same data directory under two
+		// different intents or two different freeze readings, and
+		// autoMigrateOnVersionBump (cmd/bd/version_tracking.go) always opens
+		// its own openStrict store and closes it before the main command's
+		// open runs, so it never races a cache hit either. A future caller
+		// needing a genuinely different intent or frozen value on a cache
+		// hit would have to plumb it through here instead of silently
+		// reusing the first store's; it is load-bearing that no current
+		// caller does.
 		entry.refCount++
 		cacheMu.Unlock()
 		return entry.store, nil
@@ -97,7 +102,7 @@ func openCached(ctx context.Context, beadsDir, database, branch string, intent o
 	cacheMu.Unlock()
 
 	// Slow path: create a new store outside the lock.
-	s, err := newStore(ctx, beadsDir, database, branch, intent)
+	s, err := newStore(ctx, beadsDir, database, branch, intent, frozen)
 	if err != nil {
 		return nil, err
 	}
