@@ -8,7 +8,7 @@ from contextvars import ContextVar
 from functools import lru_cache
 from typing import Annotated, Any
 
-from .bd_client import BdClientBase, BdError, create_bd_client
+from .bd_client import BdClientBase, BdCommandError, BdError, create_bd_client
 from .models import (
     AddCommentParams,
     AddDependencyParams,
@@ -511,9 +511,10 @@ async def beads_update_issue(
 ) -> Issue | list[Issue]:
     """Update an existing issue.
 
-    Note: Setting status to 'closed' or 'open' will automatically route to
-    beads_close_issue() or beads_reopen_issue() respectively to ensure
-    proper approval workflows are followed.
+    Note: Setting status to 'closed' automatically routes to
+    beads_close_issue(). Setting a closed issue back to 'open' routes through
+    reopen; already-open, deferred, or blocked issues use a normal update so
+    other fields in the same request are preserved.
     """
     # Smart routing: intercept lifecycle status changes and route to dedicated tools
     if status == "closed":
@@ -522,9 +523,52 @@ async def beads_update_issue(
         return await beads_close_issue(issue_id=issue_id, reason=reason)
 
     if status == "open":
-        # Route to reopen tool to respect approval workflows
+        client = await _get_client()
+        current = await client.show(ShowIssueParams(issue_id=issue_id))
+        if current.status != "closed":
+            return await client.update(
+                UpdateIssueParams(
+                    issue_id=issue_id,
+                    status=status,
+                    priority=priority,
+                    assignee=assignee,
+                    title=title,
+                    description=description,
+                    design=design,
+                    acceptance_criteria=acceptance_criteria,
+                    notes=notes,
+                    external_ref=external_ref,
+                )
+            )
+
+        # Closed issues still route through reopen to respect approval workflows.
         reason = notes if notes else "Reopened"
-        return await beads_reopen_issue(issue_ids=[issue_id], reason=reason)
+        reopened = await client.reopen(ReopenIssueParams(issue_ids=[issue_id], reason=reason))
+        if any(
+            value is not None
+            for value in (
+                priority,
+                assignee,
+                title,
+                description,
+                design,
+                acceptance_criteria,
+                external_ref,
+            )
+        ):
+            return await client.update(
+                UpdateIssueParams(
+                    issue_id=issue_id,
+                    priority=priority,
+                    assignee=assignee,
+                    title=title,
+                    description=description,
+                    design=design,
+                    acceptance_criteria=acceptance_criteria,
+                    external_ref=external_ref,
+                )
+            )
+        return reopened
 
     # Normal attribute updates proceed as usual
     client = await _get_client()
@@ -579,6 +623,10 @@ async def beads_reopen_issue(
     More explicit than 'update --status open'.
     """
     client = await _get_client()
+    for issue_id in issue_ids:
+        issue = await client.show(ShowIssueParams(issue_id=issue_id))
+        if issue.status != "closed":
+            raise BdCommandError(f"Cannot reopen {issue_id}: issue is {issue.status}, not closed")
     params = ReopenIssueParams(issue_ids=issue_ids, reason=reason)
     return await client.reopen(params)
 
