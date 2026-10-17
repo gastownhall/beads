@@ -660,6 +660,100 @@ func TestPredicateEvaluation(t *testing.T) {
 	}
 }
 
+func TestPredicateParentAndMolTypeParity(t *testing.T) {
+	now := time.Date(2025, 2, 4, 12, 0, 0, 0, time.UTC)
+	parentDep := &types.Dependency{IssueID: "child", DependsOnID: "epic-1", Type: types.DepParentChild}
+	blockingDep := &types.Dependency{IssueID: "blocked", DependsOnID: "epic-1", Type: types.DepBlocks}
+
+	tests := []struct {
+		name              string
+		query             string
+		issue             *types.Issue
+		matches           bool
+		needsDependencies bool
+	}{
+		{
+			name:              "parent after status OR matches explicit child",
+			query:             "(status=open OR status=in_progress) AND parent=epic-1",
+			issue:             &types.Issue{ID: "child", Status: types.StatusOpen, Dependencies: []*types.Dependency{parentDep}},
+			matches:           true,
+			needsDependencies: true,
+		},
+		{
+			name:              "parent before status OR matches dotted child",
+			query:             "parent=epic-1 AND (status=open OR status=in_progress)",
+			issue:             &types.Issue{ID: "epic-1.2", Status: types.StatusInProgress},
+			matches:           true,
+			needsDependencies: true,
+		},
+		{
+			name:              "non-parent dependency does not suppress dotted fallback",
+			query:             "parent=epic-1 AND (status=open OR status=in_progress)",
+			issue:             &types.Issue{ID: "epic-1.2", Status: types.StatusOpen, Dependencies: []*types.Dependency{blockingDep}},
+			matches:           true,
+			needsDependencies: true,
+		},
+		{
+			name:              "explicit different parent suppresses dotted fallback",
+			query:             "parent=epic-1 AND (status=open OR status=in_progress)",
+			issue:             &types.Issue{ID: "epic-1.2", Status: types.StatusOpen, Dependencies: []*types.Dependency{{IssueID: "epic-1.2", DependsOnID: "other", Type: types.DepParentChild}}},
+			matches:           false,
+			needsDependencies: true,
+		},
+		{
+			name:              "parent inside OR matches hydrated explicit child",
+			query:             "parent=epic-1 OR status=closed",
+			issue:             &types.Issue{ID: "child", Status: types.StatusOpen, Dependencies: []*types.Dependency{parentDep}},
+			matches:           true,
+			needsDependencies: true,
+		},
+		{
+			name:    "mol type after status OR normalizes value",
+			query:   "(status=open OR status=in_progress) AND mol_type=SWARM",
+			issue:   &types.Issue{ID: "mol", Status: types.StatusOpen, MolType: types.MolTypeSwarm},
+			matches: true,
+		},
+		{
+			name:    "mol type mismatch",
+			query:   "mol_type=swarm AND (status=open OR status=in_progress)",
+			issue:   &types.Issue{ID: "mol", Status: types.StatusOpen, MolType: types.MolTypePatrol},
+			matches: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := EvaluateAt(tt.query, now)
+			if err != nil {
+				t.Fatalf("EvaluateAt() error = %v", err)
+			}
+			if !result.RequiresPredicate || result.Predicate == nil {
+				t.Fatal("expected predicate evaluation")
+			}
+			if result.Filter.IncludeDependencies != tt.needsDependencies {
+				t.Fatalf("IncludeDependencies = %v, want %v", result.Filter.IncludeDependencies, tt.needsDependencies)
+			}
+			if got := result.Predicate(tt.issue); got != tt.matches {
+				t.Fatalf("predicate(%s) = %v, want %v", tt.issue.ID, got, tt.matches)
+			}
+		})
+	}
+}
+
+func TestPredicateParentAndMolTypeValidationParity(t *testing.T) {
+	for _, query := range []string{
+		"parent!=epic-1 OR status=open",
+		"mol_type!=swarm OR status=open",
+		"mol_type=invalid OR status=open",
+	} {
+		t.Run(query, func(t *testing.T) {
+			if _, err := Evaluate(query); err == nil {
+				t.Fatal("expected predicate-mode validation error")
+			}
+		})
+	}
+}
+
 func TestEvaluatorErrors(t *testing.T) {
 	tests := []struct {
 		name  string
