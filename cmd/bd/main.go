@@ -1894,7 +1894,23 @@ var rootCmd = &cobra.Command{
 		// before the main command's open further down. A caller with neither
 		// env var and no git identity keeps the historical beads/beads@local
 		// author (SetCommitIdentity is a no-op on an empty name or email).
-		embeddeddolt.SetCommitIdentity(resolvedCommitAuthorName(), getOwner())
+		//
+		// Gated on !useReadOnly (gh-startup-git-exec): resolvedCommitAuthorName
+		// and getOwner each fall back to a `git config` subprocess, exactly the
+		// cost deferActorGitFallback exists to avoid for the actor above. A
+		// read-only command's connection never commits, so the DSN's commit-
+		// identity params it opens with are never consumed — paying for two
+		// `git config` spawns on every `bd list`/`bd show` regressed the
+		// no-git-on-reads invariant TestEmbeddedReadOnlyCommandsSpawnNoGit pins.
+		// The one narrow gap this accepts: a maintenance write that piggybacks
+		// on a read-classified command (trackBdVersion/autoMigrateOnVersionBump
+		// below, which run "regardless of the command's own classification" per
+		// the comment above) keeps the historical beads/beads@local author
+		// instead of the resolved one — unchanged from every release before
+		// GH#7628, and narrower than this fix's scope asks for.
+		if !useReadOnly {
+			embeddeddolt.SetCommitIdentity(resolvedCommitAuthorName(), getOwner())
+		}
 
 		// dc-6jaq (review round 2, ask #1): a command classified read-only —
 		// or an explicit preview — is deliberately allowed past the gate
