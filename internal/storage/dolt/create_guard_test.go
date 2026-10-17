@@ -114,10 +114,20 @@ func containsAny(s string, substrs ...string) bool {
 	return false
 }
 
-// skipIfNoServer skips the test if the shared test Dolt server is not running.
+// requireDoltTestServer fails an explicitly requested real-server test before
+// acquiring any database slots. Ordinary optional local runs may still skip.
+func requireDoltTestServer(t *testing.T) {
+	t.Helper()
+	if testServerPort == 0 && realDoltTestServerRequired() {
+		t.Fatal("BEADS_TEST_ENV_RUN_DOLT=1 requires a shared Dolt test server, but none is available; check the TestMain startup diagnostics")
+	}
+}
+
+// skipIfNoServer skips an optional test if the shared Dolt server is not running.
 // Acquires a semaphore slot (released via t.Cleanup) to limit container load.
 func skipIfNoServer(t *testing.T) {
 	t.Helper()
+	requireDoltTestServer(t)
 	if testServerPort == 0 {
 		t.Skip("no test Dolt server running")
 	}
