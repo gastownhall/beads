@@ -55,6 +55,8 @@ class IssueMinimal(BaseModel):
     labels: list[str] = Field(default_factory=list)
     dependency_count: int = 0
     dependent_count: int = 0
+    comment_count: int = 0
+    comments_omitted: bool = False
 
     @field_validator("priority")
     @classmethod
@@ -79,7 +81,7 @@ class CompactedResult(BaseModel):
 
 
 class BriefIssue(BaseModel):
-    """Ultra-minimal issue for scanning (4 fields).
+    """Ultra-minimal issue for scanning.
 
     Use for quick scans where only identification + priority needed.
     ~95% smaller than full Issue.
@@ -89,6 +91,8 @@ class BriefIssue(BaseModel):
     title: str
     status: IssueStatus
     priority: int = Field(ge=0, le=4)
+    comment_count: int = 0
+    comments_omitted: bool = False
 
 
 class BriefDep(BaseModel):
@@ -122,6 +126,16 @@ class OperationResult(BaseModel):
 # =============================================================================
 
 
+class Comment(BaseModel):
+    """A comment on an issue (matches `bd comments <id> --json`)."""
+
+    id: str
+    issue_id: str
+    author: str | None = None
+    text: str
+    created_at: datetime
+
+
 class IssueBase(BaseModel):
     """Base issue model with shared fields."""
 
@@ -142,6 +156,8 @@ class IssueBase(BaseModel):
     labels: list[str] = Field(default_factory=list)
     dependency_count: int = 0
     dependent_count: int = 0
+    comment_count: int = 0
+    comments_omitted: bool = False
 
     @field_validator("priority")
     @classmethod
@@ -163,6 +179,7 @@ class Issue(IssueBase):
 
     dependencies: list[LinkedIssue] = Field(default_factory=list)
     dependents: list[LinkedIssue] = Field(default_factory=list)
+    comments: list[Comment] = Field(default_factory=list)
 
 
 class Dependency(BaseModel):
@@ -331,16 +348,6 @@ class InitResult(BaseModel):
 # =============================================================================
 # COMMENTS & NOTES
 # =============================================================================
-
-
-class Comment(BaseModel):
-    """A comment on an issue (matches `bd comments <id> --json`)."""
-
-    id: str
-    issue_id: str
-    author: str | None = None
-    text: str
-    created_at: datetime
 
 
 class AddCommentParams(BaseModel):
