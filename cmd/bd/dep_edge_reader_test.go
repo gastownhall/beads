@@ -242,3 +242,46 @@ func captureDepListOutput(t *testing.T, asJSON bool, anchors []issueops.AnchorEd
 	}
 	return string(outBytes), string(errBytes)
 }
+
+type fixedEdgeReader struct{ edges []*types.Dependency }
+
+func (r fixedEdgeReader) ReadEdges(_ context.Context, req issueops.EdgeReadRequest) (issueops.EdgeReadResult, error) {
+	return issueops.EdgeReadResult{Anchors: []issueops.AnchorEdges{{ID: req.IDs[0], Edges: r.edges}}}, nil
+}
+
+// TestDepListSingleIDNoLocalDepsWithExternalEdge pins #6557: the single-id
+// "down" route shows no rows (Relations dropped the external edge), so the
+// human line must not affirmatively say "has no dependencies" — the edge is
+// stored and was just named on stderr. With no stored edge at all, the old
+// line stays.
+func TestDepListSingleIDNoLocalDepsWithExternalEdge(t *testing.T) {
+	run := func(edges []*types.Dependency) (string, string) {
+		return captureStdio(t, func() {
+			hidden := warnDroppedDepEdges(context.Background(), fixedEdgeReader{edges: edges}, "bd-1", "", nil)
+			printNoDependencies("bd-1", hidden)
+		})
+	}
+
+	t.Run("external only", func(t *testing.T) {
+		stdout, stderr := run([]*types.Dependency{{IssueID: "bd-1", DependsOnID: "external:proj:cap", Type: types.DepBlocks}})
+		if strings.Contains(stdout, "has no dependencies") {
+			t.Errorf("stdout = %q, must not claim no dependencies when an external edge is stored", stdout)
+		}
+		if !strings.Contains(stdout, "bd-1 has no local dependencies (1 cross-repo/external edge(s) listed on stderr)") {
+			t.Errorf("stdout = %q, want the no-local-dependencies line", stdout)
+		}
+		if !strings.Contains(stderr, "external:proj:cap via blocks") {
+			t.Errorf("stderr = %q, want the dropped edge named", stderr)
+		}
+	})
+
+	t.Run("none", func(t *testing.T) {
+		stdout, stderr := run(nil)
+		if !strings.Contains(stdout, "bd-1 has no dependencies") {
+			t.Errorf("stdout = %q, want the unchanged no-dependencies line", stdout)
+		}
+		if stderr != "" {
+			t.Errorf("stderr = %q, want nothing", stderr)
+		}
+	})
+}
