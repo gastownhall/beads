@@ -274,6 +274,9 @@ func GetMoleculeLastActivityInTx(ctx context.Context, tx *sql.Tx, moleculeID str
 		childIDs = append(childIDs, id)
 	}
 	_ = depRows.Close()
+	if err := depRows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate molecule children: %w", err)
+	}
 
 	if len(childIDs) == 0 {
 		var updatedAt time.Time
