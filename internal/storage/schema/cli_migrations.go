@@ -28,7 +28,7 @@ package schema
 //
 // The measurement that check stands in for: run AllMigrationsSQL() through
 // each CLI and diff information_schema. On 2026-08-21, with 0060's and 0065's
-// overrides both in place, dolt 2.1.8, 2.2.0 (the pinned CLI) and 2.3.1 agree
+// overrides both in place, dolt 2.1.8, 2.2.0 (the CLI pinned then) and 2.3.1 agree
 // on all 504 snapshot lines including the wisp_ tables the parity oracle
 // excludes — so no prepared statement the bundle still carries changes its
 // committed schema. Before that, 2.3.1 landed three extra columns (0060's
@@ -122,7 +122,7 @@ func cliCompatibleMigrationSQL(name, sqlText string) string {
 		// upgraded databases, and the 2.2.x CLI no-ops the prepared ALTER
 		// (measured 2026-08-20: AllMigrationsSQL() through dolt 2.2.0 lands
 		// bd_events_journal WITHOUT actor; 2.3.1 — and 2.2.3, which already
-		// carries the #11345 fix — land it; CI pins 2.2.0). The table
+		// carries the #11345 fix — land it; CI pinned 2.2.0 then). The table
 		// itself is always present here: 0064's prepared RENAME executes on
 		// 2.2.0 (same measurement), so a fresh bundle always needs the column.
 		return cliMigration0066AddEventsJournalActor

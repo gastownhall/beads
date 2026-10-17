@@ -23,7 +23,13 @@ set -euo pipefail
 # releases/latest moved to 2.3.x, and it also puts bd dolt compact/flatten
 # and the #4566 fresh-bootstrap heal at risk on 2.3.x. Raise this pin only
 # once a Dolt release is confirmed clean by that same measurement.
-readonly version="2.2.0"
+#
+# 2.4.1 is that release. Measured 2026-10-10 the same way: 2.3.1 8/150 broken
+# (the positive control, so the method still reproduces the regression),
+# 2.4.1 0/250 over two runs, and the embedded engine via driver v2.4.1 0/60.
+# The pin must also track the driver in go.mod: storage the 2.4.1 engine
+# writes is not writable by dolt 2.2.0 or 2.3.1 ("table has unknown fields").
+readonly version="2.4.1"
 readonly max_attempts=3
 readonly retry_delay_seconds=5
 
@@ -71,8 +77,8 @@ sudo install -m 0755 "$workdir/dolt-${os}-${arch}/bin/dolt" /usr/local/bin/dolt
 # Fail loudly if PATH resolves to some other dolt: a stale runner-image copy
 # earlier on PATH would silently put the suite back on an unpinned binary.
 # No `| head` here: pipefail turns dolt's SIGPIPE into a failed install.
-# Compare the version token exactly rather than as a substring: `*"2.2.0"*`
-# also matches 12.2.0 and 2.2.0-rc1, so a substring test would wave through
+# Compare the version token exactly rather than as a substring: `*"2.4.1"*`
+# also matches 12.4.1 and 2.4.1-rc1, so a substring test would wave through
 # releases the pin exists to keep out.
 installed="$(dolt version)"
 installed="${installed%%$'\n'*}"

@@ -57,8 +57,8 @@ import (
 // steps follow as their own PR.
 //
 // "Single writer" means one writer AT A TIME per store, not merely one
-// clone. SELECT COALESCE(MAX(revision), 0) + 1 against PRIMARY KEY
-// (issue_id, revision) is not a safe allocator for two concurrent
+// clone. The MAX(revision) + 1 read against PRIMARY KEY (issue_id, revision)
+// in RecordVersionInTx is not a safe allocator for two concurrent
 // transactions in one store either, and the label and dependency paths are
 // not serialized on the issue row the way the claim/close CAS is; the
 // RunDualWrite* contract cases exclude concurrent writers, so no test
@@ -278,9 +278,15 @@ func RecordVersionInTx(ctx context.Context, tx DBTX, issueID, actor string) erro
 		return fmt.Errorf("versioned history: read store epoch: %w", err)
 	}
 
+	// The scalar-subquery form is deliberate: go-mysql-server's
+	// aggregate-over-index rewrite (dolthub/go-mysql-server#3907) returns zero
+	// rows, not one NULL row, for an ungrouped MAX over an empty primary-key
+	// prefix, so "SELECT COALESCE(MAX(revision), 0) + 1 FROM issue_versions
+	// WHERE issue_id = ?" fails every first mint. The outer SELECT has no FROM
+	// and yields exactly one row on every engine.
 	var newRevision int64
 	if err := tx.QueryRowContext(ctx,
-		"SELECT COALESCE(MAX(revision), 0) + 1 FROM issue_versions WHERE issue_id = ?", issueID,
+		"SELECT COALESCE((SELECT MAX(revision) FROM issue_versions WHERE issue_id = ?), 0) + 1", issueID,
 	).Scan(&newRevision); err != nil {
 		return fmt.Errorf("versioned history: compute next revision for %s: %w", issueID, err)
 	}

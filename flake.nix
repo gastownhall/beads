@@ -2,7 +2,7 @@
   description = "beads (bd) - An issue tracker designed for AI-supervised coding workflows";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
   };
 
   outputs =
