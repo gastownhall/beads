@@ -11,10 +11,11 @@ import (
 
 func TestLexer(t *testing.T) {
 	tests := []struct {
-		name     string
-		input    string
-		expected []TokenType
-		values   []string
+		name      string
+		input     string
+		expected  []TokenType
+		values    []string
+		positions []int
 	}{
 		{
 			name:     "simple equality",
@@ -177,6 +178,49 @@ func TestLexer(t *testing.T) {
 			expected: []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenEOF},
 			values:   []string{"label", "=", "30MIN", ""},
 		},
+		{
+			name:     "quoted multi-byte value round-trips",
+			input:    `title="größe"`,
+			expected: []TokenType{TokenIdent, TokenEquals, TokenString, TokenEOF},
+			values:   []string{"title", "=", "größe", ""},
+		},
+		{
+			name:     "quoted CJK value round-trips",
+			input:    `title="日本語"`,
+			expected: []TokenType{TokenIdent, TokenEquals, TokenString, TokenEOF},
+			values:   []string{"title", "=", "日本語", ""},
+		},
+		{
+			name:     "quoted accented value with space round-trips",
+			input:    `title="naïve café"`,
+			expected: []TokenType{TokenIdent, TokenEquals, TokenString, TokenEOF},
+			values:   []string{"title", "=", "naïve café", ""},
+		},
+		{
+			name:     "bare multi-byte value is one identifier",
+			input:    "label=größe",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenEOF},
+			values:   []string{"label", "=", "größe", ""},
+		},
+		{
+			name:     "bare accented value is one identifier",
+			input:    "label=fête",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenEOF},
+			values:   []string{"label", "=", "fête", ""},
+		},
+		{
+			name:      "token after multi-byte value has byte position",
+			input:     "label=fête AND status=open",
+			expected:  []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenAnd, TokenIdent, TokenEquals, TokenIdent, TokenEOF},
+			values:    []string{"label", "=", "fête", "AND", "status", "=", "open", ""},
+			positions: []int{0, 5, 6, 12, 16, 22, 23, 27},
+		},
+		{
+			name:     "invalid UTF-8 inside quotes round-trips unchanged",
+			input:    "title=\"a\xffb\"",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenString, TokenEOF},
+			values:   []string{"title", "=", "a\xffb", ""},
+		},
 	}
 
 	for _, tt := range tests {
@@ -197,6 +241,9 @@ func TestLexer(t *testing.T) {
 				}
 				if tt.values != nil && tok.Value != tt.values[i] {
 					t.Errorf("token %d: got value %q, want %q", i, tok.Value, tt.values[i])
+				}
+				if tt.positions != nil && tok.Pos != tt.positions[i] {
+					t.Errorf("token %d: got pos %d, want %d", i, tok.Pos, tt.positions[i])
 				}
 			}
 		})
