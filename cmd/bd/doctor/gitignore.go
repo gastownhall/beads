@@ -38,6 +38,7 @@ push-state.json
 
 # Local version tracking (prevents upgrade notification spam after git ops)
 .local_version
+.upgrade_review_from
 
 proxied_server_client_info.json
 
@@ -149,6 +150,7 @@ var requiredPatterns = []string{
 	"http_target.json",
 	"http_local_metadata.json",
 	".local_version",
+	".upgrade_review_from",
 	"backup/",
 }
 
