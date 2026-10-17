@@ -38,14 +38,15 @@ func expectBatchExogeneityRead(mock sqlmock.Sqlmock, depTable string) {
 		WillReturnRows(sqlmock.NewRows([]string{"issue_parents", "wisp_parents"}).AddRow(0, 0))
 }
 
-// expectOwnEdgesProbe expects planRecomputeInTx's probe of depTable and
-// answers that every id in withEdges has a dependency row of its own.
-func expectOwnEdgesProbe(mock sqlmock.Sqlmock, depTable string, withEdges ...string) {
+// expectUnmarkOnlyProbe expects planRecomputeInTx's probe of depTable and
+// answers that every id in viaUnion has a dependency row of its own and is
+// neither closed nor pinned.
+func expectUnmarkOnlyProbe(mock sqlmock.Sqlmock, depTable string, viaUnion ...string) {
 	rows := sqlmock.NewRows([]string{"issue_id"})
-	for _, id := range withEdges {
+	for _, id := range viaUnion {
 		rows.AddRow(id)
 	}
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT DISTINCT issue_id FROM " + depTable + " WHERE issue_id IN")).
+	mock.ExpectQuery(regexp.QuoteMeta("DISTINCT d.issue_id FROM " + depTable + " d")).
 		WillReturnRows(rows)
 }
 
@@ -145,7 +146,7 @@ func TestRunMarkUnmarkBatchedInTxPropagatesRowsAffectedErrors(t *testing.T) {
 // unmark once did), and not revisited on later passes.
 func TestRecomputeIsBlockedSkipsUnionForIDsWithoutEdges(t *testing.T) {
 	mock, db := newBlockedStateResultMock(t)
-	expectOwnEdgesProbe(mock, "dependencies", "issue-2")
+	expectUnmarkOnlyProbe(mock, "dependencies", "issue-2")
 	// Pass 1: the union statements over the id with edges, then the plain
 	// unmark over the edgeless ids.
 	expectBatchExogeneityRead(mock, "dependencies")

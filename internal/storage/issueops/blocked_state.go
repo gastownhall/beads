@@ -171,11 +171,11 @@ func RecomputeIsBlockedInTxWithResult(
 }
 
 // recomputeIsBlockedInTxWithResult is RecomputeIsBlockedInTxWithResult with
-// the caller's say on the no-edge shortcut (planRecomputeInTx): a create
-// passes splitEdgeless, because its ids are mostly fresh rows without edges;
+// the caller's say on the unmark-only shortcut (planRecomputeInTx): a create
+// passes forceSplit, because its ids are mostly fresh rows without edges;
 // every other caller leaves it to the chunk size.
 func recomputeIsBlockedInTxWithResult(
-	ctx context.Context, tx DBTX, issueIDs, wispIDs []string, splitEdgeless bool,
+	ctx context.Context, tx DBTX, issueIDs, wispIDs []string, forceSplit bool,
 ) (RecomputeIsBlockedResult, error) {
 	var result RecomputeIsBlockedResult
 	if len(issueIDs) == 0 && len(wispIDs) == 0 {
@@ -185,11 +185,11 @@ func recomputeIsBlockedInTxWithResult(
 	if err != nil {
 		return result, err
 	}
-	issuePlan, err := planRecomputeInTx(ctx, tx, issuesBlockedSpec, issueIDs, splitEdgeless)
+	issuePlan, err := planRecomputeInTx(ctx, tx, issuesBlockedSpec, issueIDs, forceSplit)
 	if err != nil {
 		return result, err
 	}
-	wispPlan, err := planRecomputeInTx(ctx, tx, wispsBlockedSpec, wispIDs, splitEdgeless)
+	wispPlan, err := planRecomputeInTx(ctx, tx, wispsBlockedSpec, wispIDs, forceSplit)
 	if err != nil {
 		return result, err
 	}
@@ -475,48 +475,59 @@ func runMarkUnmarkBatchedInTx(ctx context.Context, tx DBTX, spec blockedTableSpe
 }
 
 // recomputeSplitMinChunk is the chunk size from which planRecomputeInTx
-// probes for edgeless ids without being asked to.
+// probes for unmark-only ids without being asked to.
 const recomputeSplitMinChunk = 32
 
-// recomputeChunk is one queryBatchSize chunk of a recompute's ids, split by
-// whether each id has a dependency row of its own (see planRecomputeInTx).
+// recomputeChunk is one queryBatchSize chunk of a recompute's ids, split into
+// the ids the union statements settle and the ids only the plain unmark can
+// move (see planRecomputeInTx).
 type recomputeChunk struct {
-	withEdges, edgeless []string
+	viaUnion, unmarkOnly []string
 }
 
 // recomputePlan is a recompute's chunks for one table, split once per
 // RecomputeIsBlockedInTxWithResult call: the fixpoint loop writes only
-// is_blocked, never dependency rows, so the split holds for every pass.
+// is_blocked, never dependency rows or statuses, so the split holds for every
+// pass.
 type recomputePlan struct {
 	spec   blockedTableSpec
 	chunks []recomputeChunk
 }
 
 // planRecomputeInTx chunks ids exactly as runMarkUnmarkBatchedInTx would and
-// splits each chunk by whether spec.depTable holds a row with that id as its
-// issue_id.
+// splits each chunk into the ids the mark and unmark templates must settle and
+// the unmark-only ids, whose recompute reduces to "is_blocked = 1 -> 0":
 //
-// Every leg of the should-be-blocked union the mark/unmark templates probe is
-// scoped to `d.issue_id IN (batch)` on spec.depTable
-// (shouldBeBlockedIDsUnionScopedPrecomputedSQL), so an id with no row of its
-// own there is never in that union: mark cannot select it, and unmark reduces
-// to "is_blocked = 1 -> 0". Those ids — every freshly created issue without
-// edges, which is most of what a large create or apply-batch recomputes —
-// need not ride the two union statements, whose cost grows with the table.
+//   - an id with no row of its own in spec.depTable. Every leg of the
+//     should-be-blocked union is scoped to `d.issue_id IN (batch)`
+//     (shouldBeBlockedIDsUnionScopedPrecomputedSQL), so such an id is never in
+//     that union: mark cannot select it, and unmark clears it. That is every
+//     freshly created issue without edges, which is most of what a large create
+//     or apply-batch recomputes.
+//   - a closed or pinned id. The mark template refuses it and the unmark
+//     template clears it whatever the union holds. That is most of a close of a
+//     finished epic, whose affected set is the epic's whole subtree
+//     (gastownhall/beads#5427, #5939).
+//
+// Neither kind need ride the two union statements, whose cost grows with the
+// table, and leaving them out changes nothing for the rest of the chunk: each
+// union leg selects a row by that row's own dependency rows, and the batch's
+// exogeneity read decides each parent from its own reasons and the chain above
+// it, not from which other rows share the batch (scopedExplainedParentsInTx).
 //
 // The split costs one probe per chunk, which only pays when the chunk holds
-// edgeless ids worth skipping. So it runs when the caller asks (splitEdgeless:
-// the create paths) or when the chunk is large; the single-issue recomputes of
-// close, reopen, update and dependency edits keep exactly the statements they
-// ran before the shortcut existed.
-func planRecomputeInTx(ctx context.Context, tx DBTX, spec blockedTableSpec, ids []string, splitEdgeless bool) (recomputePlan, error) {
+// ids worth skipping. So it runs when the caller asks (forceSplit: the create
+// paths) or when the chunk is large; the few-id recomputes of close, reopen,
+// update and dependency edits keep exactly the statements they ran before the
+// shortcut existed.
+func planRecomputeInTx(ctx context.Context, tx DBTX, spec blockedTableSpec, ids []string, forceSplit bool) (recomputePlan, error) {
 	plan := recomputePlan{spec: spec}
 	for start := 0; start < len(ids); start += queryBatchSize {
 		end := min(start+queryBatchSize, len(ids))
-		chunk := recomputeChunk{withEdges: ids[start:end]}
-		if !createFastPathsDisabled.Load() && (splitEdgeless || end-start >= recomputeSplitMinChunk) {
+		chunk := recomputeChunk{viaUnion: ids[start:end]}
+		if !createFastPathsDisabled.Load() && (forceSplit || end-start >= recomputeSplitMinChunk) {
 			var err error
-			chunk.withEdges, chunk.edgeless, err = splitByOwnDependencyRowsInTx(ctx, tx, spec.depTable, ids[start:end])
+			chunk.viaUnion, chunk.unmarkOnly, err = splitUnmarkOnlyInTx(ctx, tx, spec, ids[start:end])
 			if err != nil {
 				return plan, err
 			}
@@ -526,16 +537,15 @@ func planRecomputeInTx(ctx context.Context, tx DBTX, spec blockedTableSpec, ids 
 	return plan, nil
 }
 
-// runRecomputePassInTx is one fixpoint pass over the plan,
-// statement-for-statement equivalent to runMarkUnmarkBatchedInTx over the
-// plan's full ids. Per chunk: the mark and unmark templates run over the ids
-// with edges — the union, scoped to them, holds exactly what it held scoped to
-// the whole chunk, and so does the batch's exogeneity read (an edgeless id
-// names no parent) — and then, on the first pass only, a plain unmark clears
-// the edgeless ids. It runs after both templates so their unions see the
-// edgeless rows' pre-pass is_blocked, as they did when those rows were cleared
-// by the chunk's own unmark statement; on later passes it would match no row
-// (nothing marks an edgeless id), so it is skipped.
+// runRecomputePassInTx is one fixpoint pass over the plan, equivalent to
+// runMarkUnmarkBatchedInTx over the plan's full ids. Per chunk: the mark and
+// unmark templates run over the viaUnion ids (see planRecomputeInTx for why
+// the union and the exogeneity read answer the same for them), and then, on
+// the first pass only, a plain unmark clears the unmark-only ids. It runs after
+// both templates so their unions see those rows' pre-pass is_blocked, as they
+// did when the chunk's own unmark statement cleared them. On later passes it
+// would match no row: nothing marks an edgeless id, and the mark template
+// refuses a closed or pinned one. So it is skipped.
 //
 // It is a function rather than a method on recomputePlan because the
 // structural write guards follow bare-identifier calls only: as a method, the
@@ -545,17 +555,17 @@ func planRecomputeInTx(ctx context.Context, tx DBTX, spec blockedTableSpec, ids 
 func runRecomputePassInTx(ctx context.Context, tx DBTX, p recomputePlan, firstPass bool) (int64, error) {
 	var changed int64
 	for _, chunk := range p.chunks {
-		if len(chunk.withEdges) > 0 {
-			n, err := runMarkUnmarkBatchedInTx(ctx, tx, p.spec, chunk.withEdges)
+		if len(chunk.viaUnion) > 0 {
+			n, err := runMarkUnmarkBatchedInTx(ctx, tx, p.spec, chunk.viaUnion)
 			changed += n
 			if err != nil {
 				return changed, err
 			}
 		}
-		if !firstPass || len(chunk.edgeless) == 0 {
+		if !firstPass || len(chunk.unmarkOnly) == 0 {
 			continue
 		}
-		placeholders, args := buildSQLInClause(chunk.edgeless)
+		placeholders, args := buildSQLInClause(chunk.unmarkOnly)
 		//nolint:gosec // G201: table is one of two constants; only placeholders are formatted in.
 		res, err := tx.ExecContext(ctx, fmt.Sprintf(`
 			UPDATE %[1]s t SET t.is_blocked = 0, t.updated_at = t.updated_at
@@ -573,38 +583,44 @@ func runRecomputePassInTx(ctx context.Context, tx DBTX, p recomputePlan, firstPa
 	return changed, nil
 }
 
-// splitByOwnDependencyRowsInTx partitions ids by whether depTable holds at
-// least one row with that id as its issue_id, preserving input order.
+// splitUnmarkOnlyInTx partitions ids, preserving input order, into those with
+// at least one row of their own in spec.depTable whose row is neither closed
+// nor pinned, and the rest. An id with no row in spec.table at all lands in the
+// rest, where the plain unmark matches nothing, as the templates would.
 //
-//nolint:gosec // G201: depTable is one of two constants; only placeholders are formatted in.
-func splitByOwnDependencyRowsInTx(ctx context.Context, tx DBTX, depTable string, ids []string) (withEdges, withoutEdges []string, err error) {
+//nolint:gosec // G201: the spec's tables are constants; only placeholders are formatted in.
+func splitUnmarkOnlyInTx(ctx context.Context, tx DBTX, spec blockedTableSpec, ids []string) (viaUnion, unmarkOnly []string, err error) {
 	placeholders, args := buildSQLInClause(ids)
-	rows, err := tx.QueryContext(ctx, fmt.Sprintf(
-		"SELECT DISTINCT issue_id FROM %s WHERE issue_id IN (%s)", depTable, placeholders), args...)
+	rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
+		SELECT /*+ JOIN_ORDER(d, t) LOOKUP_JOIN(d, t) */ DISTINCT d.issue_id FROM %[1]s d
+		JOIN %[2]s t ON t.id = d.issue_id
+		WHERE d.issue_id IN (%[3]s)
+		  AND t.status <> 'closed' AND t.status <> 'pinned'
+	`, spec.depTable, spec.table, placeholders), args...)
 	if err != nil {
-		return nil, nil, fmt.Errorf("recompute is_blocked: probe %s: %w", depTable, err)
+		return nil, nil, fmt.Errorf("recompute is_blocked: probe %s: %w", spec.depTable, err)
 	}
-	has := make(map[string]bool, len(ids))
+	union := make(map[string]bool, len(ids))
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
 			_ = rows.Close()
-			return nil, nil, fmt.Errorf("recompute is_blocked: probe %s: %w", depTable, err)
+			return nil, nil, fmt.Errorf("recompute is_blocked: probe %s: %w", spec.depTable, err)
 		}
-		has[id] = true
+		union[id] = true
 	}
 	_ = rows.Close()
 	if err := rows.Err(); err != nil {
-		return nil, nil, fmt.Errorf("recompute is_blocked: probe %s: %w", depTable, err)
+		return nil, nil, fmt.Errorf("recompute is_blocked: probe %s: %w", spec.depTable, err)
 	}
 	for _, id := range ids {
-		if has[id] {
-			withEdges = append(withEdges, id)
+		if union[id] {
+			viaUnion = append(viaUnion, id)
 		} else {
-			withoutEdges = append(withoutEdges, id)
+			unmarkOnly = append(unmarkOnly, id)
 		}
 	}
-	return withEdges, withoutEdges, nil
+	return viaUnion, unmarkOnly, nil
 }
 
 func runMarkBatchedInTx(ctx context.Context, tx DBTX, spec blockedTableSpec, ids []string) (int64, error) {
