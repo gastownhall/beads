@@ -116,6 +116,13 @@ func bdEnv(dir string) []string {
 		if strings.HasPrefix(e, "BEADS_") || strings.HasPrefix(e, "BD_ROUTING_MODE=") {
 			continue
 		}
+		// An ambient envelope opt-in would wrap every fixture command's JSON
+		// in {schema_version, data} and break the bare-array parsing all the
+		// bdList*JSON helpers do. Tests that want the envelope opt in per
+		// child command (exec.Cmd keeps the last duplicate env entry).
+		if strings.HasPrefix(e, "BD_JSON_ENVELOPE=") {
+			continue
+		}
 		env = append(env, e)
 	}
 	return append(env,

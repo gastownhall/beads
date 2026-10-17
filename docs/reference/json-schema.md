@@ -31,15 +31,18 @@ Every `--json` command wraps output as:
 The original payload is untouched inside `.data` — no type corruption,
 no field injection. Works identically for objects, arrays, and maps.
 
-When a `--limit`-truncated listing runs in envelope mode (currently wired
-for `bd ready`), the envelope also carries a `pagination` key:
+When a `--limit`-truncated listing runs in envelope mode (`bd ready`,
+`bd list`, `bd query`), the envelope also carries a `pagination` key:
 
 ```json
 {"schema_version": 1, "data": [...], "pagination": {"returned": 10, "total": 42, "truncated": true}}
 ```
 
-`total` is omitted when unknown; the whole `pagination` key is absent when
-the result was not truncated. Legacy mode keeps the stderr text hint instead.
+`total` is omitted when unknown (`bd list` and `bd query` report only
+`returned` and `truncated`: their page carries a has-more verdict, not a
+count); the whole `pagination` key is absent when the result was not
+truncated. The stderr text hint is emitted in both legacy and envelope
+mode, tty or not, so piped callers can detect a capped page either way.
 
 ### Updating consumers
 

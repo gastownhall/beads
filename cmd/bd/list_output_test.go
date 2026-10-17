@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
 
 	lipgloss "charm.land/lipgloss/v2"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/ui"
 )
 
 func listOutputFixture() ([]*types.Issue, map[string][]*types.Dependency) {
@@ -244,6 +246,30 @@ func TestFormatTruncationHintExactBytes(t *testing.T) {
 	}
 	if strings.HasPrefix(got10, "\n\n") {
 		t.Fatalf("leading double newline: %q", got10)
+	}
+}
+
+// GH#5102 removed the hint's stderr-TTY emission gate, but color is decided on
+// STDOUT (ui.ShouldUseColor ends in ui.IsTerminal), so an interactive stdout
+// with a redirected stderr had live styles and no gate. The renderer choice is
+// the fix; assert the wiring rather than the bytes, because package ui
+// initializes styles once at init from stdout and this process has none, so
+// both arms render identically here.
+func TestTruncationHintRendererKeysOnStderrNotStdout(t *testing.T) {
+	t.Parallel()
+
+	const sample = "sample"
+	if got := truncationHintRenderer(false)(sample); got != sample {
+		t.Fatalf("a non-terminal stderr must get the text unstyled: got %q, want %q", got, sample)
+	}
+
+	plain := reflect.ValueOf(truncationHintRenderer(false)).Pointer()
+	styled := reflect.ValueOf(truncationHintRenderer(true)).Pointer()
+	if plain == styled {
+		t.Fatal("both arms returned the same renderer, so the stderr check is not wired")
+	}
+	if want := reflect.ValueOf(ui.RenderWarn).Pointer(); styled != want {
+		t.Fatal("a terminal stderr must still be styled with ui.RenderWarn")
 	}
 }
 

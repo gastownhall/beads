@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -289,18 +290,21 @@ func (c *bdClient) show(id string) (map[string]any, error) {
 }
 
 // list runs bd list --json --flat with extra args and returns the result array.
+// It parses stdout alone: a --limit that cuts the page writes the truncation
+// notice to stderr even when piped (GH#5102), and in combined output that
+// notice trails the JSON array.
 func (c *bdClient) list(extra ...string) ([]any, error) {
 	c.op++
 	start := time.Now()
 	args := append([]string{"list", "--json", "--flat"}, extra...)
-	out, err := ssExec(c.ctx, c.binary, c.dir, c.env, args...)
+	stdout, stderr, err := ssExecBuffers(c.ctx, c.binary, c.dir, c.env, args...)
 	c.t.Logf("%s [op %d] list %s — %s", c.tag, c.op, strings.Join(extra, " "), time.Since(start))
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", out, err)
+		return nil, fmt.Errorf("%w\nstdout: %s\nstderr: %s", err, stdout, stderr)
 	}
 	var result []any
-	if err := json.Unmarshal([]byte(ssFirstJSON(out)), &result); err != nil {
-		return nil, fmt.Errorf("parse list JSON: %w\noutput: %s", err, out)
+	if err := json.Unmarshal([]byte(ssFirstJSON(stdout)), &result); err != nil {
+		return nil, fmt.Errorf("parse list JSON: %w\nstdout: %s\nstderr: %s", err, stdout, stderr)
 	}
 	return result, nil
 }
@@ -590,6 +594,19 @@ func ssExec(ctx context.Context, binary, dir string, env []string, args ...strin
 	cmd.Env = env
 	out, err := cmd.CombinedOutput()
 	return string(out), err
+}
+
+// ssExecBuffers is ssExec with stdout and stderr kept apart, for a caller that
+// parses stdout and must not read stderr notices as part of it.
+func ssExecBuffers(ctx context.Context, binary, dir string, env []string, args ...string) (stdout, stderr string, err error) {
+	cmd := exec.CommandContext(ctx, binary, args...)
+	cmd.Dir = dir
+	cmd.Env = env
+	var outBuf, errBuf bytes.Buffer
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
+	err = cmd.Run()
+	return outBuf.String(), errBuf.String(), err
 }
 
 // ssFirstJSON returns the substring starting at the first '{' or '['.
