@@ -1082,6 +1082,18 @@ func getOwner() string {
 	return ""
 }
 
+// resolvedCommitAuthorName resolves the Dolt commit author's name for
+// embedded mode (GH#7628): GIT_AUTHOR_NAME first — matching server mode's own
+// CommitterName resolution — else the resolved actor (--actor/BEADS_ACTOR/
+// BD_ACTOR/git user.name/$USER), which the issue asks embedded mode to fall
+// back to in addition to server mode's narrower GIT_AUTHOR_NAME-only check.
+func resolvedCommitAuthorName() string {
+	if name := os.Getenv("GIT_AUTHOR_NAME"); name != "" {
+		return name
+	}
+	return getActorWithGit()
+}
+
 func init() {
 	// Initialize viper configuration
 	if err := config.Initialize(); err != nil {
@@ -1871,6 +1883,18 @@ var rootCmd = &cobra.Command{
 				return err
 			}
 		}
+
+		// GH#7628: resolve the Dolt commit identity embedded mode's connections
+		// use, the same way server mode's CommitterName/CommitterEmail already
+		// resolve (store.go's applyConfigDefaults) — GIT_AUTHOR_NAME first,
+		// then the actor fallback chain; email reuses getOwner's existing
+		// GIT_AUTHOR_EMAIL / git config user.email resolution. Set once, as
+		// early as possible, so it is in effect before autoMigrateOnVersionBump
+		// or trackBdVersion below open their own embedded stores, not only
+		// before the main command's open further down. A caller with neither
+		// env var and no git identity keeps the historical beads/beads@local
+		// author (SetCommitIdentity is a no-op on an empty name or email).
+		embeddeddolt.SetCommitIdentity(resolvedCommitAuthorName(), getOwner())
 
 		// dc-6jaq (review round 2, ask #1): a command classified read-only —
 		// or an explicit preview — is deliberately allowed past the gate
