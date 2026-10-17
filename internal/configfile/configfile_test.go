@@ -2,6 +2,7 @@ package configfile
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -157,9 +158,9 @@ func TestDatabasePath_Dolt(t *testing.T) {
 	})
 
 	t.Run("absolute path is honored", func(t *testing.T) {
-		cfg := &Config{Database: "/custom/path/dolt", Backend: BackendDolt}
+		want := filepath.Join(t.TempDir(), "custom", "path", "dolt")
+		cfg := &Config{Database: want, Backend: BackendDolt}
 		got := cfg.DatabasePath(beadsDir)
-		want := "/custom/path/dolt"
 		if got != want {
 			t.Errorf("DatabasePath() = %q, want %q", got, want)
 		}
@@ -873,6 +874,31 @@ func TestProxiedServerClientInfo_RoundTrip(t *testing.T) {
 	})
 }
 
+func TestSaveProxiedServerClientInfo_WriteFailures(t *testing.T) {
+	t.Run("missing parent", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "missing")
+		if err := SaveProxiedServerClientInfo(dir, &ProxiedServerClientInfo{}); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("Save: got %v, want missing-directory error", err)
+		}
+	})
+	t.Run("directory destination", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.Mkdir(ProxiedServerClientInfoPath(dir), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := SaveProxiedServerClientInfo(dir, &ProxiedServerClientInfo{}); err == nil {
+			t.Fatal("Save with directory destination succeeded")
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 1 || entries[0].Name() != ProxiedServerClientInfoFileName || !entries[0].IsDir() {
+			t.Fatalf("failed save changed destination or leaked temp files: %v", entries)
+		}
+	})
+}
+
 func TestSaveProxiedServerClientInfo_WritesEffectiveIdleTimeout(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -923,9 +949,10 @@ func TestProxiedServerClientInfo_ResolvedPaths(t *testing.T) {
 	})
 
 	t.Run("absolute returned as-is", func(t *testing.T) {
-		info := &ProxiedServerClientInfo{RootPath: "/srv/abs"}
-		if got := info.ResolvedRootPath(beadsDir); got != "/srv/abs" {
-			t.Errorf("ResolvedRootPath = %q, want absolute as-is", got)
+		want := filepath.Join(t.TempDir(), "abs")
+		info := &ProxiedServerClientInfo{RootPath: want}
+		if got := info.ResolvedRootPath(beadsDir); got != want {
+			t.Errorf("ResolvedRootPath = %q, want %q", got, want)
 		}
 	})
 
