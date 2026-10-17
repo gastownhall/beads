@@ -768,6 +768,84 @@ func TestMigrateToProxiedServer_ResumeReplaysRecordedIdleTimeout(t *testing.T) {
 	}
 }
 
+// TestMigrateResume_JournalFromBeforeEffectiveIdleTimeout covers an upgrade in
+// the middle of a migration. Releases before the sidecar persisted its
+// effective idle timeout recorded a defaulted timeout as an absent key, in the
+// journal's plan and in the sidecar alike. The sidecar load now resolves that
+// to the default, so comparing it raw against the journal's zero would refuse
+// the resume in both directions over a plan that never changed (bd-mnhq6). A
+// timeout that really differs must still be refused.
+func TestMigrateResume_JournalFromBeforeEffectiveIdleTimeout(t *testing.T) {
+	// legacyShape drops idle_timeout from a sidecar, or from the sidecar a
+	// journal records, which is how those releases wrote a defaulted timeout.
+	legacyShape := func(t *testing.T, path, sidecarKey string) {
+		t.Helper()
+		var doc map[string]any
+		require.NoError(t, json.Unmarshal(mustReadFile(t, path), &doc))
+		sidecar := doc
+		if sidecarKey != "" {
+			sidecar = doc[sidecarKey].(map[string]any)
+		}
+		require.Contains(t, sidecar, "idle_timeout")
+		delete(sidecar, "idle_timeout")
+		b, err := json.Marshal(doc)
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(path, b, 0o600))
+	}
+	forward := func(t *testing.T) (string, func() error) {
+		beadsDir := migrateModeWorkspace(t, configfile.DoltModeServer)
+		return beadsDir, func() error { return runMigrateToProxiedServer(false, 0, false) }
+	}
+	reverse := func(t *testing.T) (string, func() error) {
+		beadsDir := migrateModeWorkspace(t, configfile.DoltModeProxiedServer)
+		require.NoError(t, configfile.SaveProxiedServerClientInfo(beadsDir, &configfile.ProxiedServerClientInfo{RootPath: filepath.Join(beadsDir, "dolt")}))
+		return beadsDir, func() error { return runMigrateFromProxiedServer(false, false) }
+	}
+
+	for _, tc := range []struct {
+		name    string
+		setup   func(*testing.T) (string, func() error)
+		phase   migratePhase
+		changed time.Duration // non-zero: the sidecar on disk no longer holds the default
+	}{
+		{name: "forward at target_configured", setup: forward, phase: migrateTargetConfigured},
+		{name: "reverse at prepared", setup: reverse, phase: migratePrepared},
+		{name: "reverse at target_configured", setup: reverse, phase: migrateTargetConfigured},
+		{name: "forward with a changed timeout refuses", setup: forward, phase: migrateTargetConfigured, changed: 45 * time.Second},
+		{name: "reverse with a changed timeout refuses", setup: reverse, phase: migratePrepared, changed: 45 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			beadsDir, migrate := tc.setup(t)
+			t.Setenv("BEADS_MIGRATION_FAIL_PHASE", string(tc.phase))
+			require.Error(t, migrate())
+			t.Setenv("BEADS_MIGRATION_FAIL_PHASE", "")
+
+			legacyShape(t, migrateJournalPath(beadsDir), "sidecar")
+			if tc.changed == 0 {
+				legacyShape(t, configfile.ProxiedServerClientInfoPath(beadsDir), "")
+			} else {
+				info, err := configfile.LoadProxiedServerClientInfo(beadsDir)
+				require.NoError(t, err)
+				require.NotNil(t, info)
+				info.IdleTimeout = tc.changed
+				require.NoError(t, configfile.SaveProxiedServerClientInfo(beadsDir, info))
+			}
+
+			var migrateErr error
+			stderr := captureStderr(t, func() { migrateErr = migrate() })
+			if tc.changed != 0 {
+				require.Error(t, migrateErr)
+				assert.Contains(t, stderr, "migration sidecar does not match prepared state")
+				return
+			}
+			require.NoError(t, migrateErr, "stderr: %s", stderr)
+			j, err := loadMigrateJournal(beadsDir)
+			require.NoError(t, err)
+			assert.Nil(t, j, "successful migration removes its journal")
+		})
+	}
+}
+
 func TestMigrateJournal_UnknownPhaseFailsClosed(t *testing.T) {
 	beadsDir := migrateModeWorkspace(t, configfile.DoltModeServer)
 	path := migrateJournalPath(beadsDir)
