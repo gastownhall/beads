@@ -296,7 +296,7 @@ type Step struct {
 // When a step has a Gate, bd cook creates a gate issue that blocks the step.
 // The gate must be closed (manually or via watchers) to unblock the step.
 type Gate struct {
-	// Type is the condition type: gh:run, gh:pr, timer, human, mail.
+	// Type is the condition type: gh:run, gh:pr, gl:pipeline, gl:mr, timer, human, mail.
 	Type string `json:"type"`
 
 	// ID is the condition identifier (e.g., workflow name for gh:run).
@@ -309,11 +309,13 @@ type Gate struct {
 	// Timeout is how long to wait before escalation (e.g., "1h", "24h").
 	Timeout string `json:"timeout,omitempty"`
 
-	// Repo optionally selects the GitHub repository (OWNER/REPO or
-	// HOST/OWNER/REPO) a gh:run or gh:pr gate's condition is checked
-	// against. Empty means the current Git repository - the same default
-	// as an ad-hoc `bd gate create` gate. Ignored for non-GitHub gate
-	// types (human, timer, bead).
+	// Repo optionally selects the repository or project for a forge gate.
+	// GitHub gates (gh:run, gh:pr) accept OWNER/REPO or HOST/OWNER/REPO.
+	// GitLab gates (gl:pipeline, gl:mr) accept NAMESPACE/PROJECT (including
+	// nested namespaces) or https://HOST/NAMESPACE/PROJECT. Empty uses the
+	// current Git repository, with GitLab host and project selection delegated
+	// to glab. This matches an ad-hoc `bd gate create` gate's default.
+	// Ignored for non-forge gate types (human, timer, bead, mail).
 	Repo string `json:"repo,omitempty" toml:"repo,omitempty"`
 }
 

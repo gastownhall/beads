@@ -38,7 +38,7 @@ type GHWorkflowRun struct {
 // gateDiscoverCmd discovers GitHub run IDs for gh:run gates
 var gateDiscoverCmd = &cobra.Command{
 	Use:   "discover",
-	Short: "Discover await_id for gh:run gates",
+	Short: "Discover await_id for gh:run and gl:pipeline gates",
 	Long: `Discovers GitHub workflow run IDs for gates awaiting CI/CD completion.
 
 This command finds open gates with await_type="gh:run" that don't have an await_id,
@@ -49,6 +49,10 @@ queries recent GitHub workflow runs, and matches them using heuristics:
 
 Once matched, the gate's await_id is updated with the GitHub run ID, enabling
 subsequent polling to check the run's status.
+
+GitLab gl:pipeline gates with an empty await_id are matched to the newest
+pipeline for the current branch HEAD using glab. Pipeline discovery requires
+the current Git branch and commit; --branch can select the branch to query.
 
 A gate whose metadata.repo targets another repository is only matched
 against runs queried from that repository, never against the current
@@ -98,7 +102,7 @@ func runGateDiscover(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(gates) == 0 {
-		fmt.Println("No pending gh:run gates found (all gates have numeric run IDs)")
+		fmt.Println("No pending CI gates found (all gates have numeric IDs)")
 		return nil
 	}
 
@@ -120,9 +124,24 @@ func runGateDiscover(cmd *cobra.Command, args []string) error {
 	// queried FROM that repository, never against a same-named workflow run
 	// from the current repo. matchGatesToRuns groups gates by their
 	// validated repo and issues one query per distinct repo.
-	matches := matchGatesToRuns(gates, maxAge, func(repo, workflowHint string) ([]GHWorkflowRun, error) {
+	matches := matchGatesToRuns(githubDiscoveryGates(gates), maxAge, func(repo, workflowHint string) ([]GHWorkflowRun, error) {
 		return queryGitHubRunsInRepo(branchFilterForRepo(branchFilter, repo, userSpecifiedBranch), limit, repo, workflowHint)
 	})
+
+	for _, gate := range gates {
+		if gate.AwaitType != "gl:pipeline" {
+			continue
+		}
+		id, discoverErr := discoverGLPipelineWithRunner(gate, branchFilter, getGitCommitForGateDiscovery(), runGLCommandFunc)
+		m := gateDiscoveryMatch{gate: gate}
+		if discoverErr != nil {
+			m.err = &gateQueryError{repo: "GitLab " + gate.ID, err: discoverErr}
+		} else if id != "" {
+			numericID, _ := strconv.ParseInt(id, 10, 64)
+			m.run = &GHWorkflowRun{DatabaseID: numericID, Status: "discovered"}
+		}
+		matches = append(matches, m)
+	}
 
 	// Step 3/4: report matches (and, outside dry-run, persist them)
 	// matchCount counts the gates whose run ID was recorded (or, under
@@ -192,7 +211,7 @@ func runGateDiscover(cmd *cobra.Command, args []string) error {
 			}
 			details = append(details, fmt.Sprintf("%s: %v", label, failures[repo]))
 		}
-		return HandleError("querying GitHub runs failed for %d repo(s): %s", len(failures), strings.Join(details, "; "))
+		return HandleError("querying CI runs failed for %d repo(s): %s", len(failures), strings.Join(details, "; "))
 	}
 	if updateFailures > 0 {
 		return HandleError("recording the discovered run ID failed for %d gate(s)", updateFailures)
@@ -339,6 +358,9 @@ func isNumericRunID(s string) bool {
 // needsDiscovery returns true if a gh:run gate needs run ID discovery.
 // This is true when AwaitID is empty OR contains a non-numeric workflow name hint.
 func needsDiscovery(g *types.Issue) bool {
+	if g.AwaitType == "gl:pipeline" {
+		return g.AwaitID == ""
+	}
 	if g.AwaitType != "gh:run" {
 		return false
 	}
@@ -604,4 +626,16 @@ func matchGateToRun(gate *types.Issue, runs []GHWorkflowRun, maxAge time.Duratio
 // advertise that token refuses it before any request is sent.
 func updateGateAwaitID(_ interface{}, gateID, runID string) error {
 	return persistGateCheckAwaitID(rootCtx, gateID, runID)
+}
+
+// githubDiscoveryGates keeps GitHub heuristics separate from exact GitLab
+// branch/HEAD matching while sharing discovery reporting and persistence.
+func githubDiscoveryGates(gates []*types.Issue) []*types.Issue {
+	var result []*types.Issue
+	for _, gate := range gates {
+		if gate.AwaitType == "gh:run" {
+			result = append(result, gate)
+		}
+	}
+	return result
 }
