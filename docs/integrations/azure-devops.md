@@ -121,12 +121,27 @@ Priority mapping is bidirectional but **lossy for P3/P4**:
 
 For Bug-type work items, ADO also requires a Severity field:
 
-| Beads Priority | ADO Severity |
-|---|---|
-| 0 | 1 - Critical |
-| 1 | 2 - High |
-| 2 | 3 - Medium |
-| 3, 4 | 4 - Low |
+| Beads Priority | ADO Severity | Config Key |
+|---|---|---|
+| 0 | 1 - Critical | `ado.severity_map.0` |
+| 1 | 2 - High | `ado.severity_map.1` |
+| 2 | 3 - Medium | `ado.severity_map.2` |
+| 3, 4 | 4 - Low | `ado.severity_map.3`, `ado.severity_map.4` |
+
+Override defaults to match your process template or team conventions:
+
+```bash
+# Example: three-level Minor/Major/Critical scheme
+bd config set ado.severity_map.0 "Critical"
+bd config set ado.severity_map.1 "Critical"
+bd config set ado.severity_map.2 "Major"
+bd config set ado.severity_map.3 "Minor"
+bd config set ado.severity_map.4 "Minor"
+```
+
+Keys must be `0`-`4`. Values are trimmed and empty values are ignored. Invalid keys are silently ignored so one bad config entry cannot break the entire mapping.
+
+> **Note:** `ado.severity` is preserved in metadata for round-trip fidelity. For already-synced issues, the value pulled from ADO takes precedence over the configured `ado.severity_map.*` until the `ado.severity` metadata is removed. Severity is only sent to ADO for Bug-type work items.
 
 ### Status Mapping
 
