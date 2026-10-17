@@ -9,6 +9,7 @@ import (
 
 	_ "github.com/go-sql-driver/mysql"
 
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
 
@@ -24,13 +25,17 @@ type freshCloneDBCheck struct {
 // whether the named database exists via SHOW DATABASES. The connection is
 // closed before returning. Returns Reachable=false when the server cannot be
 // reached, so the caller can skip the server-mode check (FR-030).
-func checkFreshCloneDB(host string, port int, user, password, dbName string, tls bool) freshCloneDBCheck {
+func checkFreshCloneDB(host string, port int, user, password, dbName string, tls, allowCleartext bool) freshCloneDBCheck {
+	if err := configfile.ValidateServerAuthConfig(allowCleartext, tls); err != nil {
+		return freshCloneDBCheck{Reachable: false, Err: err}
+	}
 	dsn := doltutil.ServerDSN{
-		Host:     host,
-		Port:     port,
-		User:     user,
-		Password: password,
-		TLS:      tls,
+		Host:                    host,
+		Port:                    port,
+		User:                    user,
+		Password:                password,
+		TLS:                     tls,
+		AllowCleartextPasswords: allowCleartext,
 	}.String()
 
 	db, err := sql.Open("mysql", dsn)

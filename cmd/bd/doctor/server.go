@@ -296,13 +296,26 @@ func checkDoltVersion(cfg *configfile.Config, beadsDir string) (DoctorCheck, *sq
 	// the metadata port (bd-h5k7).
 	password := cfg.GetDoltServerPasswordForPort(port)
 
+	allowCleartext, err := cfg.GetDoltServerAllowCleartextPasswordChecked()
+	if err != nil {
+		return DoctorCheck{
+			Name:     "Dolt Version",
+			Status:   StatusError,
+			Message:  "Failed to open connection",
+			Detail:   err.Error(),
+			Fix:      "Set dolt_server_tls or unset dolt_server_allow_cleartext_password",
+			Category: CategoryFederation,
+		}, nil
+	}
+
 	// Build DSN without database (just to test server connectivity)
 	connStr := doltutil.ServerDSN{
-		Host:     host,
-		Port:     port,
-		User:     user,
-		Password: password,
-		TLS:      cfg.GetDoltServerTLS(),
+		Host:                    host,
+		Port:                    port,
+		User:                    user,
+		Password:                password,
+		TLS:                     cfg.GetDoltServerTLS(),
+		AllowCleartextPasswords: allowCleartext,
 	}.String()
 
 	db, err := sql.Open("mysql", connStr)

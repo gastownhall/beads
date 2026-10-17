@@ -112,20 +112,25 @@ func runDoltServerDiagnostics(metrics *DoltPerfMetrics, host string, port int, d
 	// for externally-hosted Dolt servers (bd-h5k7).
 	user := configfile.DefaultDoltServerUser
 	var password string
-	var tls bool
+	var tls, allowCleartext bool
 	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil {
 		user = cfg.GetDoltServerUser()
 		tls = cfg.GetDoltServerTLS()
+		allowCleartext = cfg.GetDoltServerAllowCleartextPassword()
 		password = cfg.GetDoltServerPasswordForPort(port)
+	}
+	if err := configfile.ValidateServerAuthConfig(allowCleartext, tls); err != nil {
+		return err
 	}
 
 	dsn := doltutil.ServerDSN{
-		Host:     host,
-		Port:     port,
-		User:     user,
-		Password: password,
-		Database: dbName,
-		TLS:      tls,
+		Host:                    host,
+		Port:                    port,
+		User:                    user,
+		Password:                password,
+		Database:                dbName,
+		TLS:                     tls,
+		AllowCleartextPasswords: allowCleartext,
 	}.String()
 
 	// Measure connection time
