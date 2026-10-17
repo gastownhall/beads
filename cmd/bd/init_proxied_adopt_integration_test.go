@@ -11,13 +11,13 @@ import (
 	"github.com/steveyegge/beads/internal/testutil"
 )
 
-// TestProxiedInitAdoptSavesIdentityWithoutTeamServer pins GH#7576: outside
+// TestProxiedServerInitAdoptSavesIdentityWithoutTeamServer pins GH#7576: outside
 // --team-server, an init that ADOPTS an existing database's project identity
 // never saved the adopted id back to metadata.json — only team-server mode
 // did. The file was written with a locally-minted id before any DB
 // connection existed, so every later clone kept that mismatched local id
 // forever, while the server kept the one it adopted.
-func TestProxiedInitAdoptSavesIdentityWithoutTeamServer(t *testing.T) {
+func TestProxiedServerInitAdoptSavesIdentityWithoutTeamServer(t *testing.T) {
 	requireProxiedServerEnv(t)
 
 	bd := buildEmbeddedBD(t)

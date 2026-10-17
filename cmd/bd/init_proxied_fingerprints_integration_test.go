@@ -40,7 +40,7 @@ func readMetadataValue(t *testing.T, port, database, key string) string {
 	return value
 }
 
-// TestProxiedInitDoesNotWriteSharedFingerprints pins GH#7577: repo_id and
+// TestProxiedServerInitDoesNotWriteSharedFingerprints pins GH#7577: repo_id and
 // clone_id are per-clone fingerprints, but the shared database's metadata
 // table has exactly one row per key, so writing them there on every init was
 // last-init-wins — a second clone's init silently corrupted the first
@@ -53,7 +53,7 @@ func readMetadataValue(t *testing.T, port, database, key string) string {
 // row in the shared metadata table — there is no per-clone destination for
 // them in proxied-server mode, so the fix is to not write them there at all,
 // the same way team-server mode already does not.
-func TestProxiedInitDoesNotWriteSharedFingerprints(t *testing.T) {
+func TestProxiedServerInitDoesNotWriteSharedFingerprints(t *testing.T) {
 	requireProxiedServerEnv(t)
 
 	bd := buildEmbeddedBD(t)
