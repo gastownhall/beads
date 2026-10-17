@@ -163,6 +163,7 @@ filegroup(
     name = "release_metadata_files",
     srcs = [
         ".claude-plugin/marketplace.json",
+        "default.nix",
         "integrations/beads-mcp/pyproject.toml",
         "integrations/beads-mcp/src/beads_mcp/__init__.py",
         "integrations/beads-mcp/uv.lock",
