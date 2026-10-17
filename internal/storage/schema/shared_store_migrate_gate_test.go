@@ -69,7 +69,8 @@ func TestSharedStoreGateNoRemote(t *testing.T) {
 		for _, want := range []string{
 			"lock out every co-resident bd client",
 			"bd migrate schema",
-			"Read commands keep working",
+			// v1 predates the leases table, so reads are not promised (#7302).
+			"Read commands may fail too",
 			AllowRemoteMigrateEnv + "=1",
 		} {
 			if !strings.Contains(msg, want) {
