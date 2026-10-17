@@ -410,6 +410,44 @@ func TestUnsetRemovesADottedKeyInEveryShape(t *testing.T) {
 			key:       "dolt.host",
 			survivors: map[string]string{"other.dolt.host": "should-survive"},
 		},
+		{
+			// The key's own section spelled as a list of mappings. A dotted key
+			// names mappings only, so nothing here is dolt.host, but the walk never
+			// saw the `- ` line, read the item's `host:` as the section's direct
+			// child, and commented it out with a success exit (mc-2nfr1).
+			name: "section spelled as a list of mappings",
+			seed: "dolt:\n  - port: 3307\n    host: 10.0.0.1\n  - port: 3308\n    host: 10.0.0.2\n",
+			key:  "dolt.host",
+		},
+		{
+			// YAML lets the list sit at the section's own indentation.
+			name: "section spelled as a list at its own indentation",
+			seed: "dolt:\n- port: 3307\n  host: 10.0.0.1\n",
+			key:  "dolt.host",
+		},
+		{
+			// A list nested in a section the key does not own must not end the
+			// skip over that section: the leaf name after it is still other.host.
+			name:      "list inside a section the key does not own",
+			seed:      "dolt:\n  other:\n    list:\n    - a\n    host: keep\n",
+			key:       "dolt.host",
+			survivors: map[string]string{"dolt.other.host": "keep"},
+		},
+		{
+			// Blank lines and comments declare no key either, but they are not
+			// content: the key beneath them is still the target.
+			name: "blank line and comment between the section and the key",
+			seed: "sync:\n\n# where bd pushes\n    remote: \"file:///origin.git\"\n",
+			key:  "sync.remote",
+		},
+		{
+			// yaml.v3 accepts a quoted value continued at column 0. That line
+			// declares no key, and it must not hide the target that follows it.
+			name:      "quoted value continued at column 0 before the target",
+			seed:      "dolt:\n  note: \"line one\nline two\"\n  host: kill-me\n",
+			key:       "dolt.host",
+			survivors: map[string]string{"dolt.note": "line one line two"},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -447,6 +485,12 @@ func TestUnsetRemovesADottedKeyInEveryShape(t *testing.T) {
 			// stated contract, so it must still be visible — commented.
 			if wasSet && !strings.Contains(string(body), leaf+":") {
 				t.Errorf("unset removed the key instead of commenting it out:\n%s", body)
+			}
+			// A key that was never set leaves nothing to comment out. Checked on
+			// the text because a key inside a list item has no dotted spelling
+			// the survivors below could read it back by.
+			if !wasSet && string(body) != tc.seed {
+				t.Errorf("unset of a key that was never set edited the file:\n%s", body)
 			}
 			// Anything the unset was not asked about is none of its business.
 			for key, want := range tc.survivors {
