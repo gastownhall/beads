@@ -91,6 +91,31 @@ const (
 	NotClaimableStatusFragment = ": status "
 )
 
+// ClaimHolderSteeringRefusal composes the refusal an OPEN issue held by
+// someone else answers with - the copy that steers a losing claimant toward
+// the holder rather than at a release command (wy-yuclk: refusal copy naming
+// one gets pattern-matched by batch agents into an unclaim+claim steamroller
+// of live claims, so NEITHER variant names a command). It deliberately omits
+// the parseable " by <assignee>" tail, so beads.ParseClaimConflict recovers
+// the holder from the ClaimConflictError field, never the prose (bd-at6rc).
+//
+// Both claim bodies produce this refusal through THIS function -
+// issueops.ClaimIssueInTx (passing its ctx-resolved gate) and
+// domain.issueUseCaseImpl.claim (passing the configuration gate) - so the
+// twins cannot drift. The two variants report the state truthfully:
+//
+//   - heartbeat enabled: the claim carries a lease, so an abandoned holder's
+//     claim goes stale and bd reclaim reverts it;
+//   - heartbeat disabled (heartbeat.enabled=false, gastownhall/beads#7506):
+//     no lease is armed, so promising lease expiry would be a lie - the copy
+//     names the flag and says the claim is never recovered automatically.
+func ClaimHolderSteeringRefusal(assignee string, heartbeatEnabled bool) error {
+	if heartbeatEnabled {
+		return fmt.Errorf("%w: already assigned to %q — coordinate with the holder; if their claim is abandoned (crashed agent), lease expiry will surface it for bd reclaim", ErrAlreadyClaimed, assignee)
+	}
+	return fmt.Errorf("%w: already assigned to %q — coordinate with the holder; this deployment runs with heartbeat.enabled=false, so the claim carries no lease and an abandoned holder’s claim is never recovered automatically", ErrAlreadyClaimed, assignee)
+}
+
 // ErrCredentialKeyMismatch is returned when a stored federation peer's password
 // cannot be decrypted with the local credential key. federation_peers rows
 // travel with the database, but the key file is machine-local and gitignored,

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/idgen"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dberrors"
@@ -703,7 +704,18 @@ func (u *issueUseCaseImpl) claim(ctx context.Context, id, actor string, useWisp 
 			// it only recovers claims whose lease has already expired. The
 			// parseable " by <assignee>" tail is deliberately absent, so the
 			// holder is recovered from the typed field instead.
-			refusal = fmt.Errorf("%w: already assigned to %q — coordinate with the holder; if their claim is abandoned (crashed agent), lease expiry will surface it for bd reclaim", storage.ErrAlreadyClaimed, row.CurrentAssignee)
+			// The prose is the shared composer's, so it cannot drift from the
+			// issueops twin; the GATE cannot be shared the same way. This
+			// stack resolves it from CONFIGURATION and does not honor the
+			// per-call override issueops.WithHeartbeatEnabled installs:
+			// issueops owns that context key and imports this package, so the
+			// key cannot be read from here. A caller that overrides the gate
+			// would therefore be told the configuration's prose while the
+			// issueops route armed or refused a lease under the override.
+			// That asymmetry is recorded rather than hidden: the override
+			// exists for tests and embedders, which claim through issueops,
+			// and with the machinery on by default the two agree.
+			refusal = storage.ClaimHolderSteeringRefusal(row.CurrentAssignee, config.HeartbeatEnabled())
 		default:
 			refusal = fmt.Errorf("%w%s%s", storage.ErrAlreadyClaimed, storage.ClaimedByFragment, row.CurrentAssignee)
 		}

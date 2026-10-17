@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/steveyegge/beads/internal/storage"
+	storeops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/workapi"
@@ -37,6 +38,16 @@ func runHeartbeatProxied(ctx context.Context, id string) error {
 		return HandleErrorRespectJSON("heartbeat %s: %v", issue.ID, err)
 	}
 	SetLastTouchedID(issue.ID)
+	// Wording only: the exit code — the worker contract — is the storage
+	// layer's answer either way, and on this route it already reflects the
+	// SERVER's heartbeat.enabled, resolved inside the server's transaction
+	// by RenewLeaseInTx (gastownhall/beads#7506). This reads the CLIENT's
+	// copy, so when the two configs disagree only this human line can be
+	// wrong — acceptable for prose, and why nothing machine-readable
+	// branches on it.
+	if !storeops.HeartbeatEnabled(ctx) {
+		return renderHeartbeatDisabled(issue.ID)
+	}
 	return renderHeartbeatSuccess(issue.ID, issue.Title)
 }
 

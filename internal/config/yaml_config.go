@@ -53,6 +53,12 @@ var YamlOnlyKeys = map[string]bool{
 	// GH#536 class this map exists to prevent.
 	"node_id": true,
 
+	// Lease-heartbeat feature gate (gastownhall/beads#7506). Read through
+	// viper (config.HeartbeatEnabled) at claim/heartbeat/reclaim time, so a
+	// DB-backed write would be set successfully and never read — the GH#536
+	// class this map exists to prevent.
+	"heartbeat.enabled": true,
+
 	// Git settings
 	"git.author":      true,
 	"git.no-gpg-sign": true,

@@ -531,7 +531,9 @@ func (r *issueSQLRepositoryImpl) Claim(ctx context.Context, id, actor string, op
 	// Grant the lease in the ephemeral leases table, mirroring
 	// issueops.ClaimIssueInTx. Wisps are never leased. This dual must stay in
 	// lockstep with the primary path (see the row_lock comment above).
-	if !opts.UseWispsTable {
+	// Skipped entirely while heartbeat.enabled is false
+	// (gastownhall/beads#7506), mirroring issueops.ClaimIssueInTx's gate.
+	if !opts.UseWispsTable && issueops.HeartbeatEnabled(ctx) {
 		if err := issueops.UpsertLeaseInTx(ctx, r.runner, id, actor, now, issueops.LeaseTTL(ctx)); err != nil {
 			return domain.ClaimRowResult{}, fmt.Errorf("db: Claim %s: %w", id, err)
 		}

@@ -263,6 +263,13 @@ func Initialize() error {
 	// own deletion itself. Env: BD_EVENTS_JOURNAL_AUTO_PRUNE.
 	v.SetDefault("events-journal-auto-prune", true)
 	v.SetDefault("audit.enabled", false)
+	// Lease-heartbeat machinery (bd claim's armed lease, bd heartbeat, bd
+	// reclaim). ON by default, so an upgrade keeps dead-worker recovery: a
+	// claim arms a lease, `bd heartbeat` refreshes it, and `bd reclaim` reverts
+	// an issue whose holder stopped heartbeating. Set heartbeat.enabled false
+	// (yaml or BD_HEARTBEAT_ENABLED=0) to turn the machinery off: claims then
+	// record assignee/status only, and the two commands become no-ops.
+	v.SetDefault("heartbeat.enabled", true)
 	v.SetDefault("no-db", false)
 	v.SetDefault("no-hooks", false)
 	v.SetDefault("db", "")
@@ -1115,6 +1122,28 @@ func GetIdentity(flagValue string) string {
 // than fail closed.
 func NodeID() string {
 	return strings.TrimSpace(GetString("node_id"))
+}
+
+// HeartbeatEnabled reports whether the claim-lease heartbeat feature is
+// active: claims arm a lease, `bd heartbeat` refreshes it, and `bd reclaim`
+// reverts issues whose lease went stale. ON by default; set
+// heartbeat.enabled false in config.yaml or BD_HEARTBEAT_ENABLED=0 to turn the
+// machinery off (gastownhall/beads#7506). Per-call overrides live in
+// issueops.WithHeartbeatEnabled, which wins over this global.
+func HeartbeatEnabled() bool {
+	if v == nil {
+		// No config.Initialize() in this process — a library consumer or a
+		// test binary. GetBool answers false for EVERY key off a nil viper,
+		// which would silently disarm dead-worker recovery for exactly the
+		// embedders that never see a config.yaml. Answer the default
+		// instead: the machinery is on, and nothing can turn it off in this
+		// state — both the config key and BD_HEARTBEAT_ENABLED are read
+		// through viper's AutomaticEnv, and there is no viper. An embedder
+		// that wants it off must call config.Initialize() first or override
+		// per call chain with issueops.WithHeartbeatEnabled.
+		return true
+	}
+	return GetBool("heartbeat.enabled")
 }
 
 // FederationConfig holds the federation (Dolt remote) configuration.

@@ -86,6 +86,7 @@ go_test(
         "batch_apply_test.go",
         "batch_close_policy_test.go",
         "blocked_recomputer_test.go",
+        "claim_holder_steering_refusal_test.go",
         "contract_leg_registry_test.go",
         "directory_size_test.go",
         "hook_batch_applier_test.go",

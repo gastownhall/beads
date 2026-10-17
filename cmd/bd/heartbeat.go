@@ -6,6 +6,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/steveyegge/beads/internal/metrics"
+	storeops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/issueops"
 )
@@ -33,6 +34,13 @@ and committed, once. Leases are only enforceable on the node that granted them;
 cross-machine claim visibility rides the issue's status and assignee, which do
 commit.
 
+The lease machinery is gated by heartbeat.enabled (on by default, and turned off
+with heartbeat.enabled false in .beads/config.yaml or BD_HEARTBEAT_ENABLED=0).
+With it off, a claim records assignee/status only and carries no lease: this
+command still resolves the issue and checks that you hold the claim, then
+reports the refresh as skipped, so an unconditional worker heartbeat loop keeps
+exiting 0.
+
 Examples:
   bd heartbeat bd-123
   bd hb bd-123`,
@@ -59,6 +67,17 @@ Examples:
 		// proxied-server provider's on the proxied one. On every leg a refresh
 		// writes ONLY the lease row (no revision remint, no history, no Dolt
 		// commit); a re-arm is recorded as a mutation and committed once.
+		//
+		// heartbeat.enabled deliberately does NOT short-circuit above this
+		// dispatch. On the proxied route the lease is armed and refreshed
+		// inside the SERVER's transaction, where RenewLeaseInTx resolves
+		// heartbeat.enabled from the server's own configuration; returning
+		// early on this process's copy of the flag is how a client that
+		// disagrees with the server stops refreshing a lease the server
+		// armed, after which the server's bd reclaim reverts a live worker's
+		// claim out from under it (gastownhall/beads#7506). Let the storage
+		// layer decide; the flag near the bottom only picks the wording of
+		// the success line.
 		if usesProxiedServer() {
 			return runHeartbeatProxied(ctx, id)
 		}
@@ -99,8 +118,34 @@ Examples:
 
 		SetLastTouchedID(result.ResolvedID)
 
+		// Reached only after the storage layer resolved the issue and
+		// confirmed the caller holds the claim, so "skipped" means "nothing
+		// to refresh", never "did not look".
+		if !storeops.HeartbeatEnabled(ctx) {
+			return renderHeartbeatDisabled(result.ResolvedID)
+		}
+
 		return renderHeartbeatSuccess(result.ResolvedID, result.Issue.Title)
 	},
+}
+
+// renderHeartbeatDisabled is bd heartbeat with heartbeat.enabled=false
+// (gastownhall/beads#7506): exit 0, and the SAME --json shape as
+// renderHeartbeatSuccess, so a worker loop that heartbeats on a timer keeps
+// parsing its output. Only the human line differs, and it says why. Both
+// routes call it only after the storage layer resolved the issue and
+// confirmed the caller holds the claim, so "skipped" means "nothing to
+// refresh", never "did not look".
+func renderHeartbeatDisabled(id string) error {
+	if jsonOutput {
+		return outputJSON(map[string]string{
+			"id":     id,
+			"status": "heartbeat",
+			"owner":  currentActor(),
+		})
+	}
+	fmt.Printf("%s Heartbeat %s skipped (heartbeat.enabled=false)\n", ui.RenderSkipIcon(), formatFeedbackID(id, ""))
+	return nil
 }
 
 // renderHeartbeatSuccess prints the success shape every storage route shares —
