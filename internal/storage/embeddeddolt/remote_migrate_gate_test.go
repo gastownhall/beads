@@ -265,7 +265,7 @@ func TestEmbeddedOpenForReadOnlyCommand_LenientGate(t *testing.T) {
 	}
 
 	// The read-only-command open must succeed without migrating.
-	roStore, roErr := embeddeddolt.OpenForReadOnlyCommand(ctx, beadsDir, "testdb", "main")
+	roStore, roErr := embeddeddolt.OpenForReadOnlyCommand(ctx, beadsDir, "testdb", "main", false)
 	if roErr != nil {
 		t.Fatalf("OpenForReadOnlyCommand: %v", roErr)
 	}
