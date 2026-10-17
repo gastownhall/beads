@@ -177,12 +177,11 @@ bd show bd-a1b2 --json
 bd sql "SELECT event_type, actor, created_at FROM events WHERE issue_id = 'bd-a1b2' ORDER BY created_at DESC LIMIT 20"
 ```
 
-Events:
-- `issue.created`
-- `issue.updated`
-- `issue.closed`
-- `dependency.added`
-- `sync.completed`
+Events (non-exhaustive):
+- `created`
+- `updated`
+- `closed`
+- `dependency_added`
 
 ## Batch Operations
 
