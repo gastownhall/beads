@@ -34,17 +34,6 @@ type Tracker struct {
 	store  tracker.Store
 }
 
-// LinkResolver returns a relationship resolver bound to this tracker's
-// repository, or nil when the tracker has not been initialized. Callers get
-// the resolver (and, through it, the repository ref scope) rather than the raw
-// REST client, so relationship sync cannot reach past the endpoints it needs.
-func (t *Tracker) LinkResolver() *LinkResolver {
-	if t.client == nil {
-		return nil
-	}
-	return NewLinkResolver(t.client)
-}
-
 func (t *Tracker) Name() string         { return "github" }
 func (t *Tracker) DisplayName() string  { return "GitHub" }
 func (t *Tracker) ConfigPrefix() string { return "github" }
