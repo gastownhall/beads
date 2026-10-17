@@ -172,6 +172,97 @@ var countsEntryPoints = []countsEntryPoint{
 		},
 		wantTolerated: "rows=0",
 	},
+	// A bounded page is answered ids-first (#7635): the id scan, then by-IDs
+	// hydration. Either statement can be the one a broken wisp plane fails,
+	// and the same tolerance applies to both. The scan joins wisp_labels for
+	// the label filter; the hydration reaches every counts table.
+	{
+		name:    "SearchIssuesWithCountsInTx/ephemeral/bounded-idscan",
+		missing: []string{"wisp_labels"},
+		prime: func(mock sqlmock.Sqlmock, wispErr error) {
+			mock.ExpectQuery(`SELECT 1 FROM wisp_dependencies LIMIT 1`).WillReturnRows(probeRow())
+			mock.ExpectQuery(`SELECT 1 FROM wisps LIMIT 1`).WillReturnRows(probeRow())
+			mock.ExpectQuery(`^SELECT DISTINCT wisps\.id FROM wisps JOIN wisp_labels`).WillReturnError(wispErr)
+			mock.ExpectQuery(`^SELECT DISTINCT issues\.id FROM issues JOIN labels`).WillReturnRows(idRows())
+			mock.ExpectQuery(`(?s)FROM issues i\s.*WHERE i\.id IN \(\?\)`).WillReturnRows(emptyCountsRows())
+		},
+		run: func(ctx context.Context, tx *sql.Tx) (string, error) {
+			out, err := SearchIssuesWithCountsInTx(ctx, tx, "", types.IssueFilter{Ephemeral: boolPtr(true), Labels: []string{"hot"}, Limit: 5})
+			return fmt.Sprintf("rows=%d", len(out)), err
+		},
+		wantTolerated: "rows=0",
+	},
+	{
+		name:    "SearchIssuesWithCountsInTx/merge/bounded-idscan",
+		missing: []string{"wisp_labels"},
+		prime: func(mock sqlmock.Sqlmock, wispErr error) {
+			mock.ExpectQuery(`SELECT 1 FROM wisp_dependencies LIMIT 1`).WillReturnRows(probeRow())
+			mock.ExpectQuery(`^SELECT DISTINCT issues\.id FROM issues JOIN labels`).WillReturnRows(idRows())
+			mock.ExpectQuery(`(?s)FROM issues i\s.*WHERE i\.id IN \(\?\)`).WillReturnRows(emptyCountsRows())
+			mock.ExpectQuery(`SELECT 1 FROM wisps LIMIT 1`).WillReturnRows(probeRow())
+			mock.ExpectQuery(`^SELECT DISTINCT wisps\.id FROM wisps JOIN wisp_labels`).WillReturnError(wispErr)
+		},
+		run: func(ctx context.Context, tx *sql.Tx) (string, error) {
+			out, err := SearchIssuesWithCountsInTx(ctx, tx, "", types.IssueFilter{Labels: []string{"hot"}, Limit: 5})
+			return fmt.Sprintf("rows=%d", len(out)), err
+		},
+		wantTolerated: "rows=0",
+	},
+	{
+		name:    "SearchIssuesWithCountsInTx/merge/bounded-hydrate",
+		missing: countsMegaQueryTables,
+		prime: func(mock sqlmock.Sqlmock, wispErr error) {
+			mock.ExpectQuery(`SELECT 1 FROM wisp_dependencies LIMIT 1`).WillReturnRows(probeRow())
+			mock.ExpectQuery(`^SELECT issues\.id FROM issues`).WillReturnRows(idRows())
+			mock.ExpectQuery(`(?s)FROM issues i\s.*WHERE i\.id IN \(\?\)`).WillReturnRows(emptyCountsRows())
+			mock.ExpectQuery(`SELECT 1 FROM wisps LIMIT 1`).WillReturnRows(probeRow())
+			mock.ExpectQuery(`^SELECT wisps\.id FROM wisps`).WillReturnRows(idRows("bw-1"))
+			mock.ExpectQuery(`(?s)FROM wisps i\s.*WHERE i\.id IN \(\?\)`).WillReturnError(wispErr)
+		},
+		run: func(ctx context.Context, tx *sql.Tx) (string, error) {
+			out, err := SearchIssuesWithCountsInTx(ctx, tx, "", types.IssueFilter{Limit: 5})
+			return fmt.Sprintf("rows=%d", len(out)), err
+		},
+		wantTolerated: "rows=0",
+	},
+	// An id scan that finds nothing still runs one by-IDs statement (over a
+	// sentinel id, rows discarded), so a page that matches nothing over a
+	// broken plane fails the way the predicate form did instead of answering
+	// an empty success.
+	{
+		name:    "SearchIssuesWithCountsInTx/ephemeral/bounded-empty-scan",
+		missing: countsMegaQueryTables,
+		prime: func(mock sqlmock.Sqlmock, wispErr error) {
+			mock.ExpectQuery(`SELECT 1 FROM wisp_dependencies LIMIT 1`).WillReturnRows(probeRow())
+			mock.ExpectQuery(`SELECT 1 FROM wisps LIMIT 1`).WillReturnRows(probeRow())
+			mock.ExpectQuery(`^SELECT wisps\.id FROM wisps`).WillReturnRows(idRows())
+			mock.ExpectQuery(`(?s)FROM wisps i\s.*WHERE i\.id IN \(\?\)`).WillReturnError(wispErr)
+			mock.ExpectQuery(`^SELECT issues\.id FROM issues`).WillReturnRows(idRows())
+			mock.ExpectQuery(`(?s)FROM issues i\s.*WHERE i\.id IN \(\?\)`).WillReturnRows(emptyCountsRows())
+		},
+		run: func(ctx context.Context, tx *sql.Tx) (string, error) {
+			out, err := SearchIssuesWithCountsInTx(ctx, tx, "", types.IssueFilter{Ephemeral: boolPtr(true), Limit: 5})
+			return fmt.Sprintf("rows=%d", len(out)), err
+		},
+		wantTolerated: "rows=0",
+	},
+	{
+		name:    "SearchIssuesWithCountsInTx/merge/bounded-empty-scan",
+		missing: countsMegaQueryTables,
+		prime: func(mock sqlmock.Sqlmock, wispErr error) {
+			mock.ExpectQuery(`SELECT 1 FROM wisp_dependencies LIMIT 1`).WillReturnRows(probeRow())
+			mock.ExpectQuery(`^SELECT issues\.id FROM issues`).WillReturnRows(idRows())
+			mock.ExpectQuery(`(?s)FROM issues i\s.*WHERE i\.id IN \(\?\)`).WillReturnRows(emptyCountsRows())
+			mock.ExpectQuery(`SELECT 1 FROM wisps LIMIT 1`).WillReturnRows(probeRow())
+			mock.ExpectQuery(`^SELECT wisps\.id FROM wisps`).WillReturnRows(idRows())
+			mock.ExpectQuery(`(?s)FROM wisps i\s.*WHERE i\.id IN \(\?\)`).WillReturnError(wispErr)
+		},
+		run: func(ctx context.Context, tx *sql.Tx) (string, error) {
+			out, err := SearchIssuesWithCountsInTx(ctx, tx, "", types.IssueFilter{Limit: 5})
+			return fmt.Sprintf("rows=%d", len(out)), err
+		},
+		wantTolerated: "rows=0",
+	},
 	{
 		name:    "GetReadyWorkWithCountsInTx",
 		missing: countsMegaQueryTables,
