@@ -243,6 +243,9 @@ func TestRunInTransactionSerializationConflictInvokesCallbacksOnce(t *testing.T)
 	if errors.Is(err, ErrCommitIndeterminate) {
 		t.Fatalf("stale transaction error = %v unexpectedly marks an indeterminate commit", err)
 	}
+	if !errors.Is(err, storage.ErrTransactionConflict) {
+		t.Fatalf("stale transaction error = %v, want it marked storage.ErrTransactionConflict so a caller may replay it", err)
+	}
 	if got := callsA.Load(); got != 1 {
 		t.Errorf("winner callback calls = %d, want 1", got)
 	}
