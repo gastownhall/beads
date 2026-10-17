@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
 	"sort"
 	"testing"
@@ -176,6 +177,85 @@ func seedChain(f *fakeMolecules) {
 	}
 	f.edge("m.b", "m.a", types.DepBlocks)
 	f.edge("m.c", "m.b", types.DepBlocks)
+}
+
+// seedGroupedFormula builds the exact grouped-formula shape from GH#7638:
+// brief <- group (needs brief) <- a, b (needs a). Only Brief should ever be
+// ready: Group is blocked by the still-open Brief, and A is blocked too,
+// inherited from its blocked parent Group, even though A carries no direct
+// blocking edge of its own.
+func seedGroupedFormula(f *fakeMolecules) {
+	f.add("m", types.TypeMolecule, types.StatusOpen)
+	f.add("m.brief", types.TypeTask, types.StatusOpen)
+	f.add("m.group", types.TypeTask, types.StatusOpen)
+	f.add("m.a", types.TypeTask, types.StatusOpen)
+	f.add("m.b", types.TypeTask, types.StatusOpen)
+	for _, id := range []string{"m.brief", "m.group"} {
+		f.edge(id, "m", types.DepParentChild)
+	}
+	for _, id := range []string{"m.a", "m.b"} {
+		f.edge(id, "m.group", types.DepParentChild)
+	}
+	f.edge("m.group", "m.brief", types.DepBlocks)
+	f.edge("m.b", "m.a", types.DepBlocks)
+}
+
+// TestMoleculeReadyInheritsParentBlockedState pins GH#7638: bd ready --mol
+// must agree with bd ready and bd blocked that a step whose parent is
+// blocked is itself blocked (parent-child's documented semantics,
+// docs/workflows/molecules.md:111, BlockedStateInvariant), and must never
+// offer the molecule root itself as a ready step.
+func TestMoleculeReadyInheritsParentBlockedState(t *testing.T) {
+	f := newFakeMolecules()
+	seedGroupedFormula(f)
+
+	view, err := issueops.ViewMolecule(context.Background(), f.reader(), "m")
+	if err != nil {
+		t.Fatalf("ViewMolecule: %v", err)
+	}
+
+	ready := map[string]bool{}
+	for _, issue := range view.Ready {
+		ready[issue.ID] = true
+	}
+	if want := map[string]bool{"m.brief": true}; !reflect.DeepEqual(ready, want) {
+		t.Fatalf("Ready = %v, want only m.brief: Group is blocked by the open Brief, A inherits Group's blocked state, B is blocked directly by A, and the root is not a step", ready)
+	}
+
+	info := view.Analysis.Steps["m.a"]
+	if info == nil || info.IsReady {
+		t.Fatalf("Steps[m.a].IsReady = %+v, want not ready: its parent m.group is blocked", info)
+	}
+	if len(info.BlockedBy) != 0 {
+		t.Fatalf("Steps[m.a].BlockedBy = %v, want empty: A carries no direct blocking edge, only an inherited one", info.BlockedBy)
+	}
+}
+
+// TestMoleculeReadyLetsAChildGoReadyOnceItsClosedParentStopsBlocking confirms
+// the inheritance in the test above is not a blanket ban on a parent-child
+// edge: once Group (A and B's parent) closes, it is no longer itself
+// blocked (closed rows are never blocked), so A becomes ready on its own
+// merits again.
+func TestMoleculeReadyLetsAChildGoReadyOnceItsClosedParentStopsBlocking(t *testing.T) {
+	f := newFakeMolecules()
+	seedGroupedFormula(f)
+	f.issues["m.brief"].Status = types.StatusClosed
+	f.issues["m.group"].Status = types.StatusClosed
+
+	view, err := issueops.ViewMolecule(context.Background(), f.reader(), "m")
+	if err != nil {
+		t.Fatalf("ViewMolecule: %v", err)
+	}
+	ready := map[string]bool{}
+	for _, issue := range view.Ready {
+		ready[issue.ID] = true
+	}
+	if !ready["m.a"] {
+		t.Fatalf("Ready = %v, want m.a ready once its closed parent m.group no longer blocks it", ready)
+	}
+	if ready["m.b"] {
+		t.Fatalf("Ready = %v, want m.b still blocked directly by the still-open m.a", ready)
+	}
 }
 
 func TestMoleculeRootsWalksToTheTopmostMoleculeRoot(t *testing.T) {
