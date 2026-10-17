@@ -47,6 +47,9 @@ func TestClassify(t *testing.T) {
 		{"drop table", "DROP TABLE x", Write},
 		{"set", "SET @x = 1", Write},
 		{"select into variable", "SELECT 1 INTO @x", Write},
+		{"union into outfile", "(SELECT id FROM issues) UNION ALL (SELECT id FROM issues) INTO OUTFILE '/tmp/issues.tsv'", Write},
+		{"union into dumpfile", "SELECT id FROM issues UNION SELECT id FROM issues INTO DUMPFILE '/tmp/issues.bin'", Write},
+		{"cte union into outfile", "WITH ids AS (SELECT id FROM issues) SELECT id FROM ids UNION SELECT id FROM issues INTO OUTFILE '/tmp/issues.tsv'", Write},
 
 		// Statements that may write AND return rows, or that the parser
 		// cannot classify, must run in a committing transaction that still
