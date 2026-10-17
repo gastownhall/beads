@@ -22,7 +22,7 @@ This command helps debug issues where bd is using an unexpected database. It sho
   - The absolute path to the database file
   - Database statistics (issue count)
   - Schema information (with --schema flag)
-  - What's new in recent versions (with --whats-new flag)
+  - Documented release history (with --whats-new flag)
 
 Examples:
   bd info
@@ -1485,7 +1485,7 @@ var versionChanges = []VersionChange{
 		Date:    "2025-11-08",
 		Changes: []string{
 			"Agent Mail integration - Python adapter library with 98.5% reduction in git traffic",
-			"`bd info --whats-new` - Quick upgrade summaries for agents (shows last 3 versions)",
+			"`bd info --whats-new` - Quick upgrade summaries for agents",
 			"`bd hooks install` - Embedded git hooks command (replaces external script)",
 			"`bd cleanup` - Bulk deletion for agent-driven compaction",
 			"`bd new` alias added - Agents often tried this instead of `bd create`",
@@ -1535,7 +1535,7 @@ func showWhatsNew() error {
 
 func init() {
 	infoCmd.Flags().Bool("schema", false, "Include schema information in output")
-	infoCmd.Flags().Bool("whats-new", false, "Show agent-relevant changes from recent versions")
+	infoCmd.Flags().Bool("whats-new", false, "Show agent-relevant changes for every documented version")
 	infoCmd.Flags().Bool("thanks", false, "Show thank you page for contributors")
 	rootCmd.AddCommand(infoCmd)
 }
