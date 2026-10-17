@@ -84,6 +84,9 @@ func TestLifecycleUpdateContract(t *testing.T) {
 	t.Run("ParentIDReplacesEveryParent", func(t *testing.T) {
 		conformance.RunLifecycleUpdateParentIDReplacesEveryParent(t, ctx, fixture)
 	})
+	t.Run("ParentIDRefusesDetachingADottedChild", func(t *testing.T) {
+		conformance.RunLifecycleUpdateParentIDRefusesDetachingADottedChild(t, ctx, fixture)
+	})
 	t.Run("PersistentPreservesUnversionedClass", func(t *testing.T) {
 		conformance.RunLifecycleUpdatePersistentPreservesUnversionedClass(t, ctx, fixture)
 	})
