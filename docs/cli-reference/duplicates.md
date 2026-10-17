@@ -1,6 +1,6 @@
 ---
 title: "bd duplicates"
-description: "Find issues with identical content (title, description, design, acceptance criteria)."
+description: "Find and optionally merge duplicate issues"
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
