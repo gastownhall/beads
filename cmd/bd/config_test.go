@@ -1185,3 +1185,47 @@ func TestBeadsRoleWriteErrorsRetainGitDiagnostics(t *testing.T) {
 		}
 	}
 }
+
+func TestBeadsRoleReadsSharedStoreOutsideGit(t *testing.T) {
+	isolateBeadsDirForTest(t)
+	home := t.TempDir()
+	for _, key := range []string{"HOME", "USERPROFILE", "XDG_CONFIG_HOME"} {
+		t.Setenv(key, home)
+	}
+	workspace := t.TempDir()
+	store := newGitRepo(t)
+	beadsDir := filepath.Join(store, "data", ".beads")
+	nested := filepath.Join(workspace, "arcadia", "project", "nested")
+	for _, dir := range []string{beadsDir, nested} {
+		if err := os.MkdirAll(dir, 0750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("issue-prefix: test\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(beadsDir, filepath.Join(workspace, ".beads")); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(nested)
+	oldJSON := jsonOutput
+	jsonOutput = false
+	t.Cleanup(func() { jsonOutput = oldJSON })
+	for _, role := range []string{"maintainer", "contributor"} {
+		cmd := gitCommand("-C", store, "config", "--local", "beads.role", role)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("set role: %v: %s", err, out)
+		}
+		if got, ok := getBeadsRole(); !ok || got != role {
+			t.Fatalf("init role = %q, %v; want %q", got, ok, role)
+		}
+		out := captureStdout(t, func() error { return configGetCmd.RunE(configGetCmd, []string{"beads.role"}) })
+		if strings.TrimSpace(out) != role {
+			t.Fatalf("config get = %q; want %q", out, role)
+		}
+		entries := collectGitConfigEntries()
+		if len(entries) != 1 || entries[0].Value != role {
+			t.Fatalf("config show entries = %+v; want role %q", entries, role)
+		}
+	}
+}

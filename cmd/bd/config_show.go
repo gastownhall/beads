@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"sort"
 	"strings"
 
@@ -11,7 +10,6 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/gitenv"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/workapi"
 )
@@ -333,15 +331,8 @@ func databaseConfigEntries(dbConfig map[string]string) []configEntry {
 func collectGitConfigEntries() []configEntry {
 	var entries []configEntry
 
-	// beads.role is the only git config key currently
-	cmd := exec.Command("git", "config", "--get", "beads.role")
-	cmd.Env = gitenv.ScrubRoutingAndSuppression(os.Environ())
-	output, err := cmd.Output()
-	if err == nil {
-		value := strings.TrimSpace(string(output))
-		if value != "" {
-			entries = append(entries, configEntry{Key: "beads.role", Value: value, Source: "git"})
-		}
+	if value, ok := beads.ReadRoleConfig(""); ok && value != "" {
+		entries = append(entries, configEntry{Key: "beads.role", Value: value, Source: "git"})
 	}
 
 	return entries

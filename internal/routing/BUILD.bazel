@@ -6,6 +6,7 @@ go_library(
     importpath = "github.com/steveyegge/beads/internal/routing",
     visibility = ["//:__subpackages__"],
     deps = [
+        "//internal/beads",
         "//internal/git",
         "//internal/gitenv",
     ],

@@ -235,3 +235,45 @@ func TestCheckBeadsRoleIgnoresInheritedRouting(t *testing.T) {
 		})
 	}
 }
+
+func TestCheckBeadsRoleSharedStore(t *testing.T) {
+	isolateGlobalGitConfig(t)
+	t.Setenv("BEADS_DIR", "")
+	workspace := t.TempDir()
+	store := newGitRepo(t)
+	beadsDir := filepath.Join(store, ".beads")
+	nested := filepath.Join(workspace, "arcadia", "project", "nested")
+	for _, dir := range []string{beadsDir, nested} {
+		if err := os.MkdirAll(dir, 0750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("issue-prefix: test\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(beadsDir, filepath.Join(workspace, ".beads")); err != nil {
+		t.Fatal(err)
+	}
+	for _, role := range []string{"maintainer", "contributor", "invalid"} {
+		cmd := gitCommand("-C", store, "config", "--local", "beads.role", role)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("set role: %v: %s", err, out)
+		}
+		for _, check := range []DoctorCheck{CheckBeadsRole(nested), CheckBeadsRoleWithStore(nested, nil)} {
+			want := StatusOK
+			if role == "invalid" {
+				want = StatusWarning
+			}
+			if check.Status != want || check.Message != validateRole(role).Message {
+				t.Fatalf("shared store diagnostic: %+v; want role %q", check, role)
+			}
+		}
+	}
+	if err := gitCommand("-C", store, "config", "--unset", "beads.role").Run(); err != nil {
+		t.Fatal(err)
+	}
+	check := checkBeadsRoleNotInGit(nested)
+	if check.Status != StatusWarning || check.Message != "beads.role not configured" {
+		t.Fatalf("missing shared-store role: %+v", check)
+	}
+}
