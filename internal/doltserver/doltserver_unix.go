@@ -3,6 +3,7 @@
 package doltserver
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -42,15 +43,16 @@ func findPIDOnPort(port int) int {
 	return 0
 }
 
-// listDoltProcessPIDs returns PIDs of all running dolt sql-server processes.
-// Excludes zombies and defunct processes. Callers derive count (len) and
-// membership (linear scan) from the returned slice.
-func listDoltProcessPIDs() []int {
+// readDoltProcessPIDs returns PIDs of all running dolt sql-server processes.
+// Excludes zombies and defunct processes. An error means the process list
+// could not be read (ps can be refused, e.g. inside a macOS sandbox), which
+// is not the same as there being no dolt processes.
+func readDoltProcessPIDs() ([]int, error) {
 	out, err := exec.Command("ps", "-axo", "pid=,state=,command=").Output()
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("listing processes: %w", err)
 	}
-	return parseDoltProcessPIDs(out)
+	return parseDoltProcessPIDs(out), nil
 }
 
 // parseDoltProcessPIDs returns matching, non-defunct Dolt server PIDs from a
@@ -126,12 +128,15 @@ func isProcessInDir(pid int, dir string) bool {
 
 // isProcessAlive checks if a process with the given PID is running.
 // Uses signal 0 which doesn't send a signal but checks process existence.
+// EPERM means the process exists but may not be signaled by this user, so
+// it counts as alive; only "no such process" means dead.
 func isProcessAlive(pid int) bool {
 	process, err := os.FindProcess(pid)
 	if err != nil {
 		return false
 	}
-	return process.Signal(syscall.Signal(0)) == nil
+	err = process.Signal(syscall.Signal(0))
+	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
 // gracefulStop sends SIGTERM, waits for the process to exit, then SIGKILL if needed.
