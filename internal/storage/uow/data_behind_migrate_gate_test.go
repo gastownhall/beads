@@ -35,6 +35,10 @@ func expectSmartGateDataBehindRoute(mock sqlmock.Sqlmock, ahead, behind int) {
 	}
 	ref := "remotes/origin/main"
 
+	// The local cursor's shape probes (be-bv7x) precede the HEAD read.
+	expectCursorProbe(mock, "schema_migrations", true)
+	mock.ExpectQuery(regexp.QuoteMeta("SHOW COLUMNS FROM schema_migrations LIKE 'content_hash'")).
+		WillReturnRows(sqlmock.NewRows([]string{"column"}).AddRow("content_hash"))
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT version, content_hash FROM schema_migrations")).
 		WillReturnRows(hashes())
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT active_branch()")).
