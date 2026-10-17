@@ -84,7 +84,7 @@ The full namespaces routed to YAML are:
 
 `routing.*`, `sync.*`, `git.*`, `directory.*`, `repos.*`, `external_projects.*`, `validation.*`, `lint.*`, `hierarchy.*`, `ai.*`, `backup.*`, `export.*`, `dolt.*`, `federation.*`, `metrics.*`, `list.*`, `audit.*`, `storage-class.*`
 
-`lint.*` holds lint settings: `lint.sections.<type>` is a comma-separated, additive list of sections that `bd lint` additionally requires for issues of that type (built-in required sections still apply; unset means no behavior change).
+`lint.*` holds lint settings: `lint.sections.<type>` is a comma-separated, additive list of sections that `bd lint` additionally requires for issues of that type (built-in required sections still apply; unset means no behavior change). `lint.max-chars.<field>` caps a text field (`title`, `description`, `design`, `acceptance_criteria`, `notes`) at that many characters for every issue type; `lint.max-chars-hint.<field>` is free text shown verbatim with each over-length finding, so a workspace can say what the limit means for its own workflow (for example `"Split into child issues; keep history in comments"`). Both are unset by default. Findings appear in `bd lint`, in the `bd doctor` conventions check, and on create under `validation.on-create`.
 
 Plus these individual keys:
 
