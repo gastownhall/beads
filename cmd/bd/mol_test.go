@@ -2538,9 +2538,11 @@ func TestAnalyzeMoleculeParallelNoBlocking(t *testing.T) {
 
 	analysis := analyzeMoleculeParallel(subgraph)
 
-	// All 3 should be ready (root + 2 children with no blocking deps)
-	if analysis.ReadySteps != 3 {
-		t.Errorf("ReadySteps = %d, want 3", analysis.ReadySteps)
+	// Both children should be ready (no blocking deps); the root is the
+	// molecule's container, not a step a worker claims (#7638), so it is
+	// excluded from ReadySteps.
+	if analysis.ReadySteps != 2 {
+		t.Errorf("ReadySteps = %d, want 2", analysis.ReadySteps)
 	}
 
 	// Children should be in the same parallel group
@@ -2607,9 +2609,11 @@ func TestAnalyzeMoleculeParallelWithBlocking(t *testing.T) {
 
 	analysis := analyzeMoleculeParallel(subgraph)
 
-	// Only root and step1 should be ready (step2 is blocked)
-	if analysis.ReadySteps != 2 {
-		t.Errorf("ReadySteps = %d, want 2 (step2 blocked)", analysis.ReadySteps)
+	// Only step1 should be ready: step2 is blocked, and the root is the
+	// molecule's container, not a step a worker claims (#7638), so it is
+	// excluded from ReadySteps.
+	if analysis.ReadySteps != 1 {
+		t.Errorf("ReadySteps = %d, want 1 (step2 blocked, root excluded)", analysis.ReadySteps)
 	}
 
 	step1Info := analysis.Steps[step1.ID]
@@ -2814,9 +2818,10 @@ func TestAnalyzeMoleculeParallelMultipleArms(t *testing.T) {
 
 	analysis := analyzeMoleculeParallel(subgraph)
 
-	// All 3 should be ready
-	if analysis.ReadySteps != 3 {
-		t.Errorf("ReadySteps = %d, want 3", analysis.ReadySteps)
+	// Both arms should be ready; the root is the molecule's container, not
+	// a step a worker claims (#7638), so it is excluded from ReadySteps.
+	if analysis.ReadySteps != 2 {
+		t.Errorf("ReadySteps = %d, want 2", analysis.ReadySteps)
 	}
 
 	// Arms should be in the same parallel group

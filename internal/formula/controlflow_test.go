@@ -1,6 +1,7 @@
 package formula
 
 import (
+	"slices"
 	"strings"
 	"testing"
 )
@@ -479,6 +480,108 @@ func TestApplyLoops_ExternalDependencies(t *testing.T) {
 	// Internal dependency should be prefixed
 	if len(save1.Needs) != 1 || save1.Needs[0] != "process.iter1.work" {
 		t.Errorf("Internal dependency should be 'process.iter1.work', got %v", save1.Needs)
+	}
+}
+
+// TestApplyLoops_OwnNeedsCarryToFirstIterationEntrySteps pins GH#7636's first
+// half: a loop step's own Needs/DependsOn, declared outside its body, name no
+// step the rewrite in expandLoopIteration can see at all, so before this fix
+// they were silently dropped the moment the loop step stopped existing post
+// -expansion. They must land on the first iteration's own entry steps (the
+// ones with no dependency of their own on a body sibling) — not every
+// iteration, since only the very first one gates the loop as a whole.
+func TestApplyLoops_OwnNeedsCarryToFirstIterationEntrySteps(t *testing.T) {
+	steps := []*Step{
+		{ID: "brief", Title: "Brief"},
+		{
+			ID:        "round",
+			Title:     "Round",
+			Needs:     []string{"brief"},
+			DependsOn: []string{"brief"},
+			Loop: &LoopSpec{
+				Count: 2,
+				Body: []*Step{
+					{ID: "work", Title: "Work"},
+				},
+			},
+		},
+	}
+
+	result, err := ApplyLoops(steps)
+	if err != nil {
+		t.Fatalf("ApplyLoops failed: %v", err)
+	}
+
+	byID := make(map[string]*Step, len(result))
+	for _, s := range result {
+		byID[s.ID] = s
+	}
+
+	work1 := byID["round.iter1.work"]
+	if work1 == nil {
+		t.Fatal("round.iter1.work not found")
+	}
+	if len(work1.Needs) != 1 || work1.Needs[0] != "brief" {
+		t.Errorf("round.iter1.work.Needs = %v, want [brief] (the loop step's own Needs)", work1.Needs)
+	}
+	if len(work1.DependsOn) != 1 || work1.DependsOn[0] != "brief" {
+		t.Errorf("round.iter1.work.DependsOn = %v, want [brief] (the loop step's own DependsOn)", work1.DependsOn)
+	}
+
+	work2 := byID["round.iter2.work"]
+	if work2 == nil {
+		t.Fatal("round.iter2.work not found")
+	}
+	if !slices.Contains(work2.Needs, "round.iter1.work") {
+		t.Errorf("round.iter2.work.Needs = %v, want chained to round.iter1.work", work2.Needs)
+	}
+	if slices.Contains(work2.Needs, "brief") {
+		t.Errorf("round.iter2.work.Needs = %v, want the loop's own Needs NOT repeated on a later iteration", work2.Needs)
+	}
+}
+
+// TestApplyLoops_OwnNeedsSkipABodyStepThatAlreadyDependsOnASibling confirms
+// the carry-over above targets only genuine entry steps: a body step that
+// already names another body step in its own Needs is gated by that sibling,
+// not by the loop's external Needs, so it must not also receive them.
+func TestApplyLoops_OwnNeedsSkipABodyStepThatAlreadyDependsOnASibling(t *testing.T) {
+	steps := []*Step{
+		{ID: "brief", Title: "Brief"},
+		{
+			ID:    "round",
+			Title: "Round",
+			Needs: []string{"brief"},
+			Loop: &LoopSpec{
+				Count: 1,
+				Body: []*Step{
+					{ID: "work", Title: "Work"},
+					{ID: "verify", Title: "Verify", Needs: []string{"work"}},
+				},
+			},
+		},
+	}
+
+	result, err := ApplyLoops(steps)
+	if err != nil {
+		t.Fatalf("ApplyLoops failed: %v", err)
+	}
+	byID := make(map[string]*Step, len(result))
+	for _, s := range result {
+		byID[s.ID] = s
+	}
+
+	if work := byID["round.iter1.work"]; work == nil || !slices.Contains(work.Needs, "brief") {
+		t.Errorf("round.iter1.work.Needs = %v, want [brief]: it is the body's entry step", work)
+	}
+	verify := byID["round.iter1.verify"]
+	if verify == nil {
+		t.Fatal("round.iter1.verify not found")
+	}
+	if slices.Contains(verify.Needs, "brief") {
+		t.Errorf("round.iter1.verify.Needs = %v, want brief NOT added: verify is gated by its sibling work, not the loop's own Needs", verify.Needs)
+	}
+	if !slices.Contains(verify.Needs, "round.iter1.work") {
+		t.Errorf("round.iter1.verify.Needs = %v, want its own internal dependency on round.iter1.work preserved", verify.Needs)
 	}
 }
 
