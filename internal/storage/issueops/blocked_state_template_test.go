@@ -1,6 +1,7 @@
 package issueops
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -208,6 +209,33 @@ func TestWaitsForGateSplitsSpawnerColumns(t *testing.T) {
 	for _, col := range []string{"depends_on_issue_id", "depends_on_wisp_id"} {
 		if got := strings.Count(waitsForGateBlockedSQL, "cd."+col+" = d."+col); got != 4 {
 			t.Errorf("gate matches cd.%s in %d EXISTS, want 4", col, got)
+		}
+	}
+}
+
+// TestParentChildLegsRefuseClosedAndPinnedParents is the fast-tier tripwire
+// for the closed/pinned parent guard on the should-be-blocked union's
+// parent-child legs, in every statement built on the union: the batched
+// templates, the full repair and the doctor count (which splices the union
+// twice). TestClosedParentWithStaleFlagDoesNotPropagate (embeddeddolt) pins the
+// behavior against a real engine.
+func TestParentChildLegsRefuseClosedAndPinnedParents(t *testing.T) {
+	leg := regexp.MustCompile(`\bp\.is_blocked = 1`)
+	guarded := regexp.MustCompile(`\bp\.is_blocked = 1\s+AND p\.status <> 'closed' AND p\.status <> 'pinned'`)
+	explained := explainedFixture()
+	statements := batchedTemplates(explained)
+	for _, s := range []blockedTableSpec{issuesBlockedSpec, wispsBlockedSpec} {
+		statements["markAllBlockedSQL/"+s.table] = markAllBlockedSQL(s.table, s.alias, s.depTable, explained)
+		statements["unmarkAllBlockedSQL/"+s.table] = unmarkAllBlockedSQL(s.table, s.alias, s.depTable, explained)
+		statements["countStaleIsBlockedSQL/"+s.table] = countStaleIsBlockedSQL(s.table, s.alias, s.depTable, explained)
+	}
+	for name, stmt := range statements {
+		legs := len(leg.FindAllStringIndex(stmt, -1))
+		if legs == 0 || legs%2 != 0 {
+			t.Errorf("%s: %d parent-child legs, want a positive even number (an issue and a wisp parent per union)", name, legs)
+		}
+		if got := len(guarded.FindAllStringIndex(stmt, -1)); got != legs {
+			t.Errorf("%s: %d of %d parent-child legs refuse a closed or pinned parent", name, got, legs)
 		}
 	}
 }

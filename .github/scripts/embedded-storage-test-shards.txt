@@ -176,6 +176,7 @@
 40 3 TestTransactionCleanupBeforeSQLCommitRemainsDefinite
 40 3 TestUnknownProvenanceLeaseStaysReclaimable
 
+40 4 TestClosedParentWithStaleFlagDoesNotUnexplainAGate
 40 4 TestCreateBatchFastPathsMatchPerRowSmallDepAdd_Embedded
 40 4 TestEmbeddedIssueOperationsUpdateLabelPatchOrdering
 40 4 TestEmbeddedReaderGetMissIsNotFoundAndBackendFailureDoesNotDecay
@@ -264,6 +265,7 @@
 
 40 14 TestBatchCreatorContract
 40 14 TestBlockingAnnotatorContract
+40 14 TestClosedParentWithStaleFlagDoesNotPropagate
 40 14 TestCountsIncludeWispDependencies
 40 14 TestEmbeddedIssueOperationsPersistenceRollbackWispAndDetachedResults
 40 14 TestEmbeddedOpenForRemoteSync_DataBehind
