@@ -261,15 +261,16 @@ func (s *DoltStore) GetStatisticsNoBlocked(ctx context.Context) (*types.Statisti
 	return stats, nil
 }
 
-// getChildrenOfDeferredParents returns IDs of issues whose parent has a future
-// defer_until date. Uses separate single-table queries to avoid correlated
+// getChildrenOfDeferredParents returns IDs of issues whose parent is deferred
+// (status 'deferred' or a future defer_until). Uses separate single-table queries to avoid correlated
 // cross-table JOIN subqueries that trigger Dolt joinIter hangs (GH#1190).
 // Caller must hold s.mu (at least RLock).
 func (s *DoltStore) getChildrenOfDeferredParents(ctx context.Context) ([]string, error) {
-	// Step 1: Get IDs of issues with future defer_until
+	// Step 1: Get IDs of deferred issues
 	deferredRows, err := s.queryContext(ctx, `
 		SELECT id FROM issues
-		WHERE defer_until IS NOT NULL AND defer_until > UTC_TIMESTAMP()
+		WHERE status = 'deferred'
+		   OR (defer_until IS NOT NULL AND defer_until > UTC_TIMESTAMP())
 	`)
 	if err != nil {
 		return nil, wrapQueryError("deferred parents: get deferred issues", err)

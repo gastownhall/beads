@@ -9,7 +9,7 @@ import (
 )
 
 func deferredParentProbeRegex(issueTable string) string {
-	return `SELECT 1 FROM ` + issueTable + ` WHERE defer_until IS NOT NULL AND defer_until > UTC_TIMESTAMP\(\) LIMIT 1`
+	return `SELECT 1 FROM ` + issueTable + ` WHERE status = 'deferred' OR \(defer_until IS NOT NULL AND defer_until > UTC_TIMESTAMP\(\)\) LIMIT 1`
 }
 
 func deferredEdgeRegex(e deferredParentEdge) string {
@@ -20,7 +20,7 @@ func deferredEdgeRegex(e deferredParentEdge) string {
 func noDeferredChildren() *sqlmock.Rows { return sqlmock.NewRows([]string{"issue_id"}) }
 
 // TestDeferredParentEdgesBrokenDurablePlaneIsAnError is the domain/db twin of
-// the issueops guard on the same join. `descendantsOfFutureDeferredParents`
+// the issueops guard on the same join. `descendantsOfDeferredParents`
 // walks four (dependency table, issue table) pairs, and three of the four name
 // a table every beads database must have. Its gate classified the error class
 // alone with no plane guard at all, and it continues rather than aborting, so
