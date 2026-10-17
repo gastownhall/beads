@@ -27,10 +27,15 @@ func (s *testSuite) TestBeadsDirFSRepository() {
 		s.Run("IdempotentOnMatchingContent", s.writeBeadsGitignoreIdempotent)
 		s.Run("AppendsMissingPatternsPreservingLocal", s.writeBeadsGitignoreAppendsMissing)
 		s.Run("LeavesFileWithAllPatternsUntouched", s.writeBeadsGitignoreLeavesCoveredFile)
+		s.Run("RecognizesFirstPatternBehindBOM", s.writeBeadsGitignoreRecognizesPatternBehindBOM)
+		s.Run("AppendsGenuinelyMissingPatternBehindBOM", s.writeBeadsGitignoreAppendsMissingBehindBOM)
 	})
 	s.Run("BeadsGitignoreExists", func() {
 		s.Run("MissingReturnsFalse", s.beadsGitignoreExistsMissing)
 		s.Run("PresentReturnsTrue", s.beadsGitignoreExistsPresent)
+	})
+	s.Run("MissingTemplatePatternLines", func() {
+		s.Run("Cases", s.missingTemplatePatternLinesCases)
 	})
 	s.Run("WriteProjectGitignore", func() {
 		s.Run("CreatesWithHeaderAndPatterns", s.writeProjectGitignoreCreates)
@@ -174,6 +179,89 @@ func (s *testSuite) writeBeadsGitignoreLeavesCoveredFile() {
 	data, err := os.ReadFile(path)
 	s.Require().NoError(err)
 	s.Equal(local, string(data))
+}
+
+func (s *testSuite) writeBeadsGitignoreRecognizesPatternBehindBOM() {
+	_, beadsDir, repo := s.newRepo()
+	s.Require().NoError(os.MkdirAll(beadsDir, 0700))
+	path := filepath.Join(beadsDir, ".gitignore")
+	// #6973: a BOM at byte zero used to hide the first pattern, so a file that
+	// was already complete got "dolt/" appended to it on every call.
+	local := utf8BOM + "dolt/\n"
+	s.Require().NoError(os.WriteFile(path, []byte(local), 0600))
+
+	s.Require().NoError(repo.WriteBeadsGitignore(s.Ctx()))
+
+	data, err := os.ReadFile(path)
+	s.Require().NoError(err)
+	s.Equal(local, string(data), "a complete file must stay byte-identical behind a BOM")
+}
+
+func (s *testSuite) writeBeadsGitignoreAppendsMissingBehindBOM() {
+	workDir, beadsDir, _ := s.newRepo()
+	s.Require().NoError(os.MkdirAll(beadsDir, 0700))
+	path := filepath.Join(beadsDir, ".gitignore")
+	// The first template pattern sits behind the BOM, the second is genuinely
+	// absent, so only the second may be appended and the BOM must survive.
+	templates := testTemplates()
+	templates.BeadsGitignore = "# test beads gitignore\ndolt/\n!issues.jsonl\n"
+	repo := NewBeadsDirFSRepository(workDir, templates)
+	local := utf8BOM + "dolt/\n"
+	s.Require().NoError(os.WriteFile(path, []byte(local), 0600))
+
+	s.Require().NoError(repo.WriteBeadsGitignore(s.Ctx()))
+
+	data, err := os.ReadFile(path)
+	s.Require().NoError(err)
+	s.Equal(1, strings.Count(string(data), "dolt/\n"),
+		"the pattern already present behind the BOM must not be appended again, got:\n%s", data)
+	s.Equal(1, strings.Count(string(data), "!issues.jsonl\n"),
+		"the genuinely missing pattern must be appended exactly once, got:\n%s", data)
+	s.True(strings.HasPrefix(string(data), local), "BOM and user content must stay at the top, got:\n%s", data)
+}
+
+func (s *testSuite) missingTemplatePatternLinesCases() {
+	for _, tc := range []struct {
+		name     string
+		existing string
+		template string
+		want     []string
+	}{
+		{
+			name:     "LeadingBOMDoesNotHideFirstPattern",
+			existing: utf8BOM + "dolt/\n!issues.jsonl\n",
+			template: "# header\ndolt/\n!issues.jsonl\n",
+			want:     nil,
+		},
+		{
+			name:     "LeadingBOMStillReportsGenuinelyMissingPattern",
+			existing: utf8BOM + "dolt/\n",
+			template: "# header\ndolt/\n!issues.jsonl\n",
+			want:     []string{"!issues.jsonl"},
+		},
+		{
+			name:     "NoBOMBehavesAsBefore",
+			existing: "dolt/\n",
+			template: "# header\ndolt/\n!issues.jsonl\n",
+			want:     []string{"!issues.jsonl"},
+		},
+		{
+			name:     "InteriorBOMIsAnOrdinaryCharacter",
+			existing: "note " + utf8BOM + "x\n",
+			template: "# header\n" + utf8BOM + "x\n",
+			want:     []string{utf8BOM + "x"},
+		},
+		{
+			name:     "EmptyExistingReportsEveryPattern",
+			existing: "",
+			template: "# header\ndolt/\n!issues.jsonl\n",
+			want:     []string{"dolt/", "!issues.jsonl"},
+		},
+	} {
+		s.Run(tc.name, func() {
+			s.Equal(tc.want, missingTemplatePatternLines(tc.existing, tc.template))
+		})
+	}
 }
 
 func (s *testSuite) beadsGitignoreExistsMissing() {
