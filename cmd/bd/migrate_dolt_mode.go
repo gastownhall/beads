@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -164,9 +165,12 @@ func saveMigrateJournal(beadsDir string, j *migrateJournal) error {
 	if err != nil {
 		return fmt.Errorf("syncing %s directory: %w", migrateJournalFileName, err)
 	}
-	if err = d.Sync(); err != nil {
-		_ = d.Close()
-		return fmt.Errorf("syncing %s directory: %w", migrateJournalFileName, err)
+	// Windows cannot sync a directory handle opened by os.Open.
+	if runtime.GOOS != "windows" {
+		if err = d.Sync(); err != nil {
+			_ = d.Close()
+			return fmt.Errorf("syncing %s directory: %w", migrateJournalFileName, err)
+		}
 	}
 	if err = d.Close(); err != nil {
 		return fmt.Errorf("closing %s directory: %w", migrateJournalFileName, err)
@@ -182,9 +186,12 @@ func removeMigrateJournal(beadsDir string) error {
 	if err != nil {
 		return fmt.Errorf("opening migration directory: %w", err)
 	}
-	if err = d.Sync(); err != nil {
-		_ = d.Close()
-		return fmt.Errorf("syncing migration directory: %w", err)
+	// Windows cannot sync a directory handle opened by os.Open.
+	if runtime.GOOS != "windows" {
+		if err = d.Sync(); err != nil {
+			_ = d.Close()
+			return fmt.Errorf("syncing migration directory: %w", err)
+		}
 	}
 	if err = d.Close(); err != nil {
 		return fmt.Errorf("closing migration directory: %w", err)
