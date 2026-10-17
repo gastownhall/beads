@@ -131,6 +131,13 @@ var releaseSources = []source{
 // line 1 also carries a version="1.0" attribute.
 var manifestAssemblyVersionPattern = regexp.MustCompile(`(?m)^[ \t]*version="([0-9][^"]*)"`)
 
+var (
+	stableReleasePattern    = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`)
+	pythonPrereleasePattern = regexp.MustCompile(
+		`^([0-9]+\.[0-9]+\.[0-9]+)-(alpha|beta|rc)(?:\.([0-9]+))?$`,
+	)
+)
+
 var trackedHookMarkerPatterns = []struct {
 	name    string
 	pattern *regexp.Regexp
@@ -230,7 +237,7 @@ func Check(root string) (Report, error) {
 	// uv.lock is not one of the six published metadata surfaces, but the
 	// existing release gate also requires its local beads-mcp package pin to
 	// match. Preserve that assertion without expanding the release inventory.
-	lockExpected := normalizePythonVersion(canonical)
+	lockExpected, normalizeErr := normalizePythonVersion(canonical)
 	lockVersion, lockErr := readUVLockPackageVersion(
 		filepath.Join(root, "integrations", "beads-mcp", "uv.lock"),
 	)
@@ -240,6 +247,12 @@ func Check(root string) (Report, error) {
 		Expected:    lockExpected,
 	}
 	switch {
+	case normalizeErr != nil:
+		lockResult.Problem = normalizeErr.Error()
+		problems = append(
+			problems,
+			fmt.Sprintf("%s: %v", lockResult.Description, normalizeErr),
+		)
 	case lockErr != nil:
 		lockResult.Problem = lockErr.Error()
 		problems = append(
@@ -351,9 +364,27 @@ func firstHookMarkerVersion(content []byte, pattern *regexp.Regexp) (string, boo
 	return "", false
 }
 
-func normalizePythonVersion(version string) string {
-	version = strings.Replace(version, "-rc.", "rc", 1)
-	return strings.Replace(version, "-rc", "rc", 1)
+func normalizePythonVersion(version string) (string, error) {
+	if stableReleasePattern.MatchString(version) {
+		return version, nil
+	}
+	match := pythonPrereleasePattern.FindStringSubmatch(version)
+	if match == nil {
+		return "", fmt.Errorf(
+			"canonical version %q is not a supported stable, alpha, beta, or rc release",
+			version,
+		)
+	}
+	marker := map[string]string{
+		"alpha": "a",
+		"beta":  "b",
+		"rc":    "rc",
+	}[match[2]]
+	number := match[3]
+	if number == "" {
+		number = "0"
+	}
+	return match[1] + marker + number, nil
 }
 
 // CheckUVLockFreshness runs uv directly, without selecting a shell. A missing
