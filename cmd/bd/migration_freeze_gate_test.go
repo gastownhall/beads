@@ -778,6 +778,59 @@ func TestImportBlockedDuringMigrationFreeze(t *testing.T) {
 	}
 }
 
+// TestSQLBlockedDuringMigrationFreeze pins the one pre-existing seam the
+// GH#4121 read-only store open reaches into, and must not change: this early
+// freeze gate.
+//
+// `bd sql` is absent from readOnlyCommands because it can write, so both rows
+// below were refused before GH#4121 and have to stay refused. The "sql read"
+// row is the regression guard. useReadOnly is this gate's skip condition and
+// GH#4121 promotes that same flag for a provably read-only query, so resolving
+// the SQL classification ABOVE the gate — instead of below it, where main.go
+// deliberately does it — silently exempts `bd sql 'SELECT …'` from a
+// fail-closed safety gate, with no per-command allowlist in
+// migrationFreezeRefusal to catch it downstream. Measured: hoist that block
+// back above the gate and the "sql read" row goes red on its own — the exit
+// code stops being ExitMigrationFrozen, because the refusal never runs — while
+// "sql write" stays green. That split is what makes the two rows worth having:
+// one row alone could go red for any reason that reaches `bd sql`, and the
+// green write row is what says the cause was the classification.
+//
+// This is also the first test to exercise the root PersistentPreRunE actually
+// deciding useReadOnly for a real `bd sql` invocation: the sibling units pin
+// the classifier (TestIsReadOnlySQLQuery), the helper
+// (TestSQLCommandWantsReadOnlyStore) and the flag's command scope
+// (TestCommandIsEffectivelyReadOnlyScopesDynamicSQLFlag), but none of them
+// reach the wiring.
+func TestSQLBlockedDuringMigrationFreeze(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		query string
+	}{
+		// Provably read-only — the shape GH#4121 opens the store read-only for.
+		{name: "sql read", query: "SELECT COUNT(*) FROM issues"},
+		// Classified read-write, so it never set the flag either way.
+		{name: "sql write", query: "DELETE FROM dirty_issues WHERE issue_id = 'nope'"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bd, dir := setupMigrationFreezeWorkspace(t)
+			writeFreezeMarker(t, dir, "migrator", "dolt v2 migration")
+
+			stdout, stderr, code := runBDFrozen(t, bd, dir, "sql", tc.query)
+			if code != ExitMigrationFrozen {
+				t.Fatalf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, ExitMigrationFrozen, stdout, stderr)
+			}
+			if !strings.Contains(stderr, "workspace is frozen for migration") {
+				t.Errorf("stderr missing 'workspace is frozen for migration':\n%s", stderr)
+			}
+			if strings.TrimSpace(stdout) != "" {
+				t.Errorf("stdout should be empty when blocked, got:\n%s", stdout)
+			}
+			assertVendorNeutral(t, stderr)
+		})
+	}
+}
+
 // TestAutoMigrateSkippedDuringMigrationFreeze is the structural ordering
 // check (dc-6jaq review, ask #2): a frozen write must be blocked before
 // PersistentPreRunE's own store-touching side effects run, not after, from
