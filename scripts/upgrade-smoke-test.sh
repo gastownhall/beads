@@ -15,7 +15,8 @@ set -euo pipefail
 # Usage:
 #   ./scripts/upgrade-smoke-test.sh              # test previous release → candidate
 #   ./scripts/upgrade-smoke-test.sh v0.62.0      # test specific version → candidate
-#   CANDIDATE_BIN=./bd ./scripts/upgrade-smoke-test.sh  # use prebuilt candidate
+#   make BUILD_DIR=out build
+#   CANDIDATE_BIN="./out/bd" ./scripts/upgrade-smoke-test.sh  # use "./out/bd.exe" on Windows
 #
 #   # Test multiple versions (space-separated):
 #   SMOKE_VERSIONS="v0.62.0 v0.61.0 v0.60.0" ./scripts/upgrade-smoke-test.sh

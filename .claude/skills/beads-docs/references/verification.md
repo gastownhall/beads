@@ -20,8 +20,11 @@ go test ./test/docsync
 
 # 3. Doc flags + freshness markers: stale flag/command references and the
 #    `Last reviewed:` / `Freshness source:` markers on reference docs.
-#    (make check-docs runs 1 + 3 together.)
-./scripts/check-doc-flags.sh ./bd
+#    make check-docs builds its docs-check binary and runs 1 + 3 together.
+#    For manual checks, supply that build's path: ./bd by default, or
+#    ./out/bd when the docs-check target uses BUILD_DIR=out.
+#    An active docs/cli-docs.pin overrides the supplied path.
+./scripts/check-doc-flags.sh "./bd"
 ./scripts/check-doc-freshness.sh
 
 # 4. Live preview while editing.
