@@ -395,12 +395,15 @@ Managed proxied-server mode spawns an external `dolt` CLI it finds via
 clone-local sidecar setting will slot between the two when the sidecar
 reader lands in contract part 2). On
 startup it probes that binary with `dolt version` and recommends
-**dolt >= 2.4.1**, matching the Dolt engine `bd` links (the v2.4.1 driver):
-storage that engine writes is not writable by older dolt CLIs — measured
-2026-10-10, dolt 2.2.0 and 2.3.1 fail a plain `INSERT` into a database
-`bd init` created with `table has unknown fields`, while 2.4.1 succeeds.
-(Earlier, the 2026-07-25 cross-version matrix had found that dolt < 2.0.0
-cannot even *read* storage the module wrote.)
+**dolt >= 2.4.1**, matching the Dolt engine `bd` links (the v2.4.1 driver).
+Storage that engine writes is not writable by dolt older than 2.3.3, the
+first release that stores descending index columns (dolthub/dolt#11746):
+measured 2026-10-17, dolt 2.2.0 and 2.3.2 fail a plain `INSERT` into a
+database `bd init` created with `table has unknown fields`, while 2.3.3,
+2.4.0 and 2.4.1 succeed. Dolt before 2.4.0 also has a join bug that returns
+wrong results (dolthub/dolt#11886). (Earlier, the 2026-07-25 cross-version
+matrix had found that dolt < 2.0.0 cannot even *read* storage the module
+wrote.)
 
 This is a warning, not a hard failure — there is deliberately no hard
 version floor, so an older dolt can still be used at your own risk. To
@@ -409,8 +412,8 @@ resolve it, install the pinned dolt version — see
 — and either update PATH or set `BEADS_DOLT_BIN` to the new binary's path.
 Install that specific version rather than `latest`: the pin is the release
 measured clean for a
-[separate data-operation defect](/architecture/dolt#which-dolt-version-to-install)
-that 2.3.x carries, and `releases/latest` can move to an unmeasured release.
+[separate data-operation defect](/architecture/dolt#which-dolt-version-to-install),
+and `releases/latest` can move to an unmeasured release.
 
 The advisory repeats at most once per day, not on every command: the probe
 result and the warning timestamp are cached (keyed by the binary's path,

@@ -11,7 +11,10 @@ import (
 // dolthub/driver v2.4.1 module in go.mod) because an external CLI must be able
 // to write storage that engine created: measured 2026-10-10 against a database
 // `bd init` wrote through driver v2.4.1, dolt 2.2.0 and 2.3.1 both fail a plain
-// INSERT with "table has unknown fields", and dolt 2.4.1 succeeds. Keep it
+// INSERT with "table has unknown fields", and dolt 2.4.1 succeeds. The write
+// boundary itself is 2.3.3, the first release that stores descending index
+// columns (dolthub/dolt#11746); 2.4.1 is the release CI pins and measured, and
+// releases before 2.4.0 also mis-plan a join (dolthub/dolt#11886). Keep it
 // aligned with the CLI/container test pins (scripts/ci/install-dolt.sh).
 //
 // This is deliberately a recommendation, not a hard floor (see

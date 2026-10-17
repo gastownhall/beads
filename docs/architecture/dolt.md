@@ -52,8 +52,10 @@ This pin is about the standalone `dolt` CLI, which only server and
 proxied-server mode use. Embedded mode is unaffected either way: it links the
 Dolt engine into `bd` through the v2.4.1 driver in `go.mod`, no matter which
 `dolt` CLI is on your PATH. Server and proxied-server mode do care: storage the
-v2.4.1 engine writes is not writable by dolt 2.2.0 or 2.3.1 (a plain `INSERT`
-fails with `table has unknown fields`), so the CLI pin tracks the driver.
+v2.4.1 engine writes is not writable by dolt older than 2.3.3, the first
+release that stores descending index columns (dolthub/dolt#11746; a plain
+`INSERT` fails with `table has unknown fields`), so the CLI pin tracks the
+driver.
 
 Dolt 2.3.0 (released 2026-08-13) regressed `CALL DOLT_RESET('--hard')`. A few
 percent of freshly created databases come up with that procedure unusable —
@@ -75,9 +77,9 @@ Measured by creating fresh databases and immediately calling the procedure:
 
 The 2026-10-10 runs re-measured 2.3.1 as a positive control, confirming the
 method still reproduces the regression; the embedded engine through the
-v2.4.1 driver measured 0 / 60. Versions after 2.4.1 have not been measured. Raise the pin only once a newer
-release is confirmed clean by that same measurement — not because it is
-newer.
+v2.4.1 driver measured 0 / 60. No other release after 2.3.1 has been
+measured here. Raise the pin only once a newer release is confirmed clean by
+that same measurement — not because it is newer.
 
 Pin rather than track `latest` for a second, independent reason: the upstream
 `releases/latest` URL resolves to the most recently *created* release, not the

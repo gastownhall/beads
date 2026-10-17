@@ -438,13 +438,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   earlier keeps its ascending index and stays readable and writable by older
   and newer Dolt alike, even after this release writes to it. Every `bd` that
   touches a new database must be this release or later. The recommended
-  `dolt` CLI and `dolt sql-server` version is now 2.4.1 or later (2.3.x can
-  open such a database but carries the `DOLT_RESET('--hard')` regression
-  described in docs/architecture/dolt.md). Managed proxied-server mode now
+  `dolt` CLI and `dolt sql-server` version is now 2.4.1 or later, the
+  release CI pins, measured free of the `DOLT_RESET('--hard')` defect
+  described in docs/architecture/dolt.md. Dolt 2.3.3 through 2.4.0 can open
+  such a database, but releases before 2.4.0 also drop a join condition
+  when an `ON` clause has an `OR` over indexed columns (dolthub/dolt#11886,
+  the cause of #7037). Managed proxied-server mode now
   recommends dolt 2.4.1 or newer and warns below it; it is still a warning,
-  not a refusal. Dolt 2.4.1 also reports a stricter default `sql_mode` than
-  2.2.0, adding `NO_ZERO_IN_DATE`, `NO_ZERO_DATE` and
-  `ERROR_FOR_DIVISION_BY_ZERO`, in embedded mode and on Dolt 2.4.1 servers.
+  not a refusal. Dolt 2.3.3 and later also report a stricter default
+  `sql_mode` than 2.2.0, adding `NO_ZERO_IN_DATE`, `NO_ZERO_DATE` and
+  `ERROR_FOR_DIVISION_BY_ZERO`, in embedded mode and on those servers.
 - **`created_by` defaults to the actor in the library, for every create
   shape and every backend.** `PreparePublicCreateRequest`, which
   `Lifecycle.Create`, `BatchCreator` items and batch-apply create items all
