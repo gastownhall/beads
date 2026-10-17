@@ -261,6 +261,14 @@ func (c checkedCommenter) AddComment(ctx context.Context, req issueops.AddCommen
 	return result, err
 }
 
+func (c checkedCommenter) DeleteComment(ctx context.Context, req issueops.DeleteCommentRequest) (issueops.DeleteCommentResult, error) {
+	result, err := c.inner.DeleteComment(ctx, req)
+	if err == nil && result.Comment == nil {
+		return issueops.DeleteCommentResult{}, fmt.Errorf("delete comment %q: the commenter reported success without a comment", req.CommentID)
+	}
+	return result, err
+}
+
 // checkedReleaser is the releaser the release handler is handed.
 //
 // It exists for checkedClaimer's reason exactly: handleRelease writes

@@ -97,6 +97,29 @@ func runCommentsAddProxiedServer(ctx context.Context, issueID, author, text stri
 	return nil
 }
 
+func runCommentsDeleteProxiedServer(ctx context.Context, issueID, commentID, actor string) error {
+	issue, err := resolveCommentTargetProxied(ctx, issueID)
+	if err != nil {
+		return HandleErrorRespectJSON("%v", err)
+	}
+	commenter, err := proxiedCommenter()
+	if err != nil {
+		return HandleErrorRespectJSON("deleting comment: %v", err)
+	}
+	result, err := commenter.DeleteComment(ctx, issueops.DeleteCommentRequest{
+		Actor: actor, IssueID: issue.ID, CommentID: commentID,
+	})
+	if err != nil {
+		return HandleErrorRespectJSON("deleting comment: %v", err)
+	}
+	SetLastTouchedID(issue.ID)
+	if jsonOutput {
+		return outputJSON(result.Comment)
+	}
+	fmt.Printf("Comment deleted from %s\n", issue.ID)
+	return nil
+}
+
 // proxiedCommenter hands back the guarded add-comment surface for the
 // proxied-server provider, through the provider's OWN capability accessor —
 // the same two-step proxiedIssueReader performs, and for the same reason: the

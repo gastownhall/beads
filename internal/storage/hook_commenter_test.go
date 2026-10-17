@@ -21,6 +21,10 @@ func (f *fakeCommenter) AddComment(context.Context, issueops.AddCommentRequest) 
 	return issueops.AddCommentResult{Comment: f.comment}, f.err
 }
 
+func (f *fakeCommenter) DeleteComment(context.Context, issueops.DeleteCommentRequest) (issueops.DeleteCommentResult, error) {
+	return issueops.DeleteCommentResult{Comment: f.comment}, f.err
+}
+
 // commenterStore is a DoltStorage whose only real method is Commenter.
 type commenterStore struct {
 	DoltStorage

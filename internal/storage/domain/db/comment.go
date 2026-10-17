@@ -117,10 +117,14 @@ func (r *commentSQLRepositoryImpl) Insert(ctx context.Context, issueID, author, 
 	if err != nil {
 		return nil, fmt.Errorf("db: CommentSQLRepository.Insert: %w", err)
 	}
-	return r.InsertRecord(ctx, &types.Comment{IssueID: issueID, Author: author, Text: text, CreatedAt: stamp}, opts)
+	return r.insertRecord(ctx, &types.Comment{IssueID: issueID, Author: author, Text: text, CreatedAt: stamp}, opts, true)
 }
 
 func (r *commentSQLRepositoryImpl) InsertRecord(ctx context.Context, comment *types.Comment, opts domain.CommentOpts) (*types.Comment, error) {
+	return r.insertRecord(ctx, comment, opts, false)
+}
+
+func (r *commentSQLRepositoryImpl) insertRecord(ctx context.Context, comment *types.Comment, opts domain.CommentOpts, live bool) (*types.Comment, error) {
 	if comment == nil {
 		return nil, fmt.Errorf("db: CommentSQLRepository.InsertRecord: comment must not be nil")
 	}
@@ -167,6 +171,11 @@ func (r *commentSQLRepositoryImpl) InsertRecord(ctx context.Context, comment *ty
 		return nil, fmt.Errorf("db: CommentSQLRepository.InsertRecord: %w", err)
 	}
 	copy.CreatedAt = createdAt
+	if live {
+		if err := issueops.TouchIssueActivityInTx(ctx, r.runner, copy.IssueID, copy.CreatedAt); err != nil {
+			return nil, err
+		}
+	}
 
 	if err := issueops.RecordCommentEventInTx(ctx, r.runner, copy.IssueID, &issueops.EventComment{
 		ID: copy.ID, Author: copy.Author, Text: copy.Text, CreatedAt: copy.CreatedAt, Source: issueops.CommentSourceStructured,
@@ -174,4 +183,8 @@ func (r *commentSQLRepositoryImpl) InsertRecord(ctx context.Context, comment *ty
 		return nil, err
 	}
 	return &copy, nil
+}
+
+func (r *commentSQLRepositoryImpl) Delete(ctx context.Context, issueID, commentID, actor string, opts domain.CommentOpts) (*types.Comment, error) {
+	return issueops.DeleteIssueCommentInTx(ctx, r.runner, issueID, commentID, actor)
 }
