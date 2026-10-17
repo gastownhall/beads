@@ -64,6 +64,7 @@
 34 5 TestProxiedServerUpdate3
 34 5 TestServerModeDeferAutoWake
 
+34 6 TestProxiedServerInitAdoptSavesIdentityWithoutTeamServer
 34 6 TestProxiedServerPing
 34 6 TestProxiedServerQuick
 34 6 TestProxiedServerServeReadsTheJournalItJustWrote
@@ -249,6 +250,7 @@
 34 29 TestProxiedServerState
 
 34 30 TestProxiedServerDeleteConcurrent
+34 30 TestProxiedServerInitDoesNotWriteSharedFingerprints
 34 30 TestProxiedServerReadyC
 34 30 TestProxiedServerServeAddComment
 34 30 TestProxiedServerStatus
