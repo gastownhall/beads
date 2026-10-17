@@ -40,14 +40,15 @@ var _ issueops.Bootstrapper = (*bootstrapper)(nil)
 // matches what this store's ordinary SetConfig/SetMetadata already do: they
 // land in the working set and the front door's own initial commit is what
 // records them. Adding a DOLT_COMMIT would give a bootstrap an entry that `bd
-// init`'s commit then duplicates.
+// init`'s commit then duplicates. Like theirs, its transaction records no journal
+// event and so takes no journal writer lock.
 func (b *bootstrapper) Bootstrap(ctx context.Context, req issueops.BootstrapRequest) (issueops.BootstrapResult, error) {
 	req, err := workapi.ValidateBootstrapRequest(req)
 	if err != nil {
 		return issueops.BootstrapResult{}, err
 	}
 	var result issueops.BootstrapResult
-	if err := b.store.withWriteTx(ctx, func(tx *sql.Tx) error {
+	if err := b.store.withWriteTxNoJournal(ctx, func(tx *sql.Tx) error {
 		var err error
 		result, err = storeops.BootstrapInTx(ctx, tx, req)
 		return err

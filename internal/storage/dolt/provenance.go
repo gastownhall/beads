@@ -13,9 +13,10 @@ import (
 // the provenance_events table. The id is always derived deterministically from
 // the event's idempotency basis, so a duplicate insert is ignored: inserted is
 // false when the id already existed. Append-only — there is no update or delete
-// path.
+// path. A provenance event is not a journal event, so the insert takes no
+// journal writer lock.
 func (s *DoltStore) RecordProvenanceEvent(ctx context.Context, ev types.ProvenanceEvent) (id string, inserted bool, err error) {
-	err = s.withRetryTx(ctx, func(tx *sql.Tx) error {
+	err = s.withRetryTxNoJournal(ctx, func(tx *sql.Tx) error {
 		var txErr error
 		id, inserted, txErr = issueops.RecordProvenanceEventInTx(ctx, tx, ev)
 		return txErr

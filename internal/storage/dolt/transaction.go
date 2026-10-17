@@ -200,6 +200,14 @@ func (s *DoltStore) runDoltTransactionRecording(ctx context.Context, commitMsg s
 		return issueops.BlockedRecheck{}, fmt.Errorf("failed to acquire connection: %w", err)
 	}
 	defer conn.Close()
+	// Queue behind other journaled writers before the transaction begins; see
+	// lockJournalWriter. Taken after the pool-wait bracket above, so a lock wait
+	// is not reported as pool exhaustion.
+	unlock, err := s.lockJournalWriter(ctx, conn)
+	if err != nil {
+		return issueops.BlockedRecheck{}, err
+	}
+	defer unlock()
 
 	var currentBranch string
 	if err := conn.QueryRowContext(ctx, "SELECT active_branch()").Scan(&currentBranch); err != nil {
