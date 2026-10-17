@@ -42,14 +42,7 @@ func TestSetupGitExclude_Worktree(t *testing.T) {
 		t.Fatalf("failed to create worktree: %v", err)
 	}
 
-	// Change to worktree directory and run setupGitExclude
-	origDir, _ := os.Getwd()
-	if err := os.Chdir(worktreeDir); err != nil {
-		t.Fatalf("failed to chdir to worktree: %v", err)
-	}
-	defer os.Chdir(origDir)
-
-	if err := setupGitExclude(false); err != nil {
+	if err := setupGitExcludeAt(worktreeDir, false); err != nil {
 		t.Fatalf("setupGitExclude failed: %v", err)
 	}
 
@@ -111,14 +104,7 @@ func TestSetupForkExclude_Worktree(t *testing.T) {
 		t.Fatalf("failed to create worktree: %v", err)
 	}
 
-	// Change to worktree directory and run setupForkExclude
-	origDir, _ := os.Getwd()
-	if err := os.Chdir(worktreeDir); err != nil {
-		t.Fatalf("failed to chdir to worktree: %v", err)
-	}
-	defer os.Chdir(origDir)
-
-	if err := setupForkExclude(false); err != nil {
+	if err := setupForkExcludeAt(worktreeDir, false); err != nil {
 		t.Fatalf("setupForkExclude failed: %v", err)
 	}
 
@@ -162,7 +148,7 @@ func TestSetupForkExcludeIgnoresInheritedGitRouting(t *testing.T) {
 	t.Chdir(selected)
 	t.Setenv("GIT_DIR", filepath.Join(foreign, ".git"))
 
-	if err := setupForkExclude(false); err != nil {
+	if err := setupForkExcludeAt(selected, false); err != nil {
 		t.Fatalf("setupForkExclude failed: %v", err)
 	}
 
@@ -466,13 +452,7 @@ func TestCheckProjectExcludeStealth_WarnsOnLeakedGitignore(t *testing.T) {
 func TestSetupGitExclude_RegularRepo(t *testing.T) {
 	dir := newGitRepo(t)
 
-	origDir, _ := os.Getwd()
-	if err := os.Chdir(dir); err != nil {
-		t.Fatalf("failed to chdir: %v", err)
-	}
-	defer os.Chdir(origDir)
-
-	if err := setupGitExclude(false); err != nil {
+	if err := setupGitExcludeAt(dir, false); err != nil {
 		t.Fatalf("setupGitExclude failed: %v", err)
 	}
 
