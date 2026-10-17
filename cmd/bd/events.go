@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"time"
 
@@ -129,11 +130,20 @@ to continue with a known gap, or rebuild from a full export.`,
 		since, _ := cmd.Flags().GetInt64("since")
 		limit, _ := cmd.Flags().GetInt("limit")
 		follow, _ := cmd.Flags().GetBool("follow")
+		exitOnStdinEOF, _ := cmd.Flags().GetBool("exit-on-stdin-eof")
 		// A negative checkpoint is a caller bug — most likely arithmetic on an
 		// empty cursor. `seq > -5` would quietly serve the whole journal as if
 		// it were a legitimate resume, so say so instead.
 		if since < 0 {
 			return HandleErrorRespectJSON("--since must be zero or a positive sequence number (got %d); use 0 to read from the beginning", since)
+		}
+		if exitOnStdinEOF && !follow {
+			return HandleErrorRespectJSON("--exit-on-stdin-eof requires --follow")
+		}
+		if exitOnStdinEOF {
+			ctx, cancel := contextWithReaderEOF(rootCtx, os.Stdin)
+			defer cancel()
+			return runEventsTail(ctx, since, limit, follow)
 		}
 		return runEventsTail(rootCtx, since, limit, follow)
 	},
@@ -200,6 +210,7 @@ func init() {
 	eventsTailCmd.Flags().Int64("since", 0, "return records with seq greater than this value")
 	eventsTailCmd.Flags().Int("limit", 0, "maximum number of records to return (0 = no limit)")
 	eventsTailCmd.Flags().Bool("follow", false, "keep printing new records as they are committed (Ctrl-C to stop)")
+	eventsTailCmd.Flags().Bool("exit-on-stdin-eof", false, "with --follow, exit when stdin closes (for parent-process lifecycle tracking)")
 	eventsExportCmd.Flags().Int("limit", 0, "maximum number of records to return (0 = no limit)")
 	eventsPruneCmd.Flags().Int64("before", 0, "delete records with seq less than this value")
 
@@ -207,6 +218,20 @@ func init() {
 	eventsCmd.AddCommand(eventsExportCmd)
 	eventsCmd.AddCommand(eventsPruneCmd)
 	rootCmd.AddCommand(eventsCmd)
+}
+
+// contextWithReaderEOF returns a child context that is canceled when r reaches
+// EOF (or otherwise becomes unreadable). Long-lived integrations can pass a
+// pipe as stdin and use its closure as a cross-platform parent-liveness signal;
+// unlike stdout, a quiet follower does not otherwise touch the pipe and cannot
+// notice that its consumer disappeared until the next journal record arrives.
+func contextWithReaderEOF(parent context.Context, r io.Reader) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(parent)
+	go func() {
+		_, _ = io.Copy(io.Discard, r)
+		cancel()
+	}()
+	return ctx, cancel
 }
 
 // reportEventsTruncated renders a pruned-past checkpoint as a machine-readable

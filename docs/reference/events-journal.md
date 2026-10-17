@@ -73,6 +73,7 @@ and each has an environment equivalent: `BD_EVENTS_JOURNAL`,
 bd events tail --since 0                # every retained record, oldest first
 bd events tail --since 4211             # resume from a checkpoint
 bd events tail --since 4211 --follow    # ...and keep printing as writes commit (polls once a second; Ctrl-C to stop)
+bd events tail --since 4211 --follow --exit-on-stdin-eof # also stop when a caller-owned stdin pipe closes
 bd events tail --since 4211 --limit 100 # cap one batch
 bd events export                        # the whole journal from seq 1 — same as --since 0
 ```
@@ -87,6 +88,12 @@ Output is JSON Lines, one record per line, in sequence order:
 
 A consumer advances its checkpoint to the highest `seq` it has durably
 processed, and passes that as the next `--since`.
+
+Desktop and editor integrations whose own process lifetime is not guaranteed
+to clean up child processes can combine `--follow --exit-on-stdin-eof` and pass
+the follower a pipe as stdin. Closing the parent side makes the follower exit
+even when the workspace is quiet. Without the opt-in flag, stdin is ignored and
+the existing Ctrl-C/output-error behavior is unchanged.
 
 ### Over HTTP
 

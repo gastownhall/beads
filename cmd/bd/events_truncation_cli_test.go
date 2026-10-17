@@ -4,8 +4,10 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strconv"
@@ -15,6 +17,96 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage"
 )
+
+func TestContextWithReaderEOF(t *testing.T) {
+	reader, writer := io.Pipe()
+	t.Cleanup(func() {
+		_ = reader.Close()
+		_ = writer.Close()
+	})
+
+	ctx, cancel := contextWithReaderEOF(context.Background(), reader)
+	defer cancel()
+	select {
+	case <-ctx.Done():
+		t.Fatal("context canceled before the stdin sentinel closed")
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close stdin sentinel: %v", err)
+	}
+	select {
+	case <-ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("context remained live after the stdin sentinel reached EOF")
+	}
+}
+
+func TestEventsTailExitOnStdinEOFRequiresFollow(t *testing.T) {
+	cmd := eventsTailCmd
+	if err := cmd.Flags().Set("exit-on-stdin-eof", "true"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("follow", "false"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Flags().Set("exit-on-stdin-eof", "false")
+		_ = cmd.Flags().Set("follow", "false")
+	})
+	if err := cmd.RunE(cmd, nil); err == nil {
+		t.Fatal("RunE succeeded, want --exit-on-stdin-eof to require --follow")
+	}
+}
+
+func TestEventsTailFollowExitsOnStdinEOF(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "eof", "--skip-hooks", "--skip-agents")
+	follow := exec.Command(bd, "events", "tail", "--since", "0", "--follow", "--exit-on-stdin-eof")
+	follow.Dir = dir
+	follow.Env = append(bdEnv(dir), "BD_EVENTS_JOURNAL=1")
+	stdin, err := follow.StdinPipe()
+	if err != nil {
+		t.Fatalf("stdin pipe: %v", err)
+	}
+	var stderr bytes.Buffer
+	follow.Stderr = &stderr
+	if err := follow.Start(); err != nil {
+		t.Fatalf("start follower: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- follow.Wait() }()
+	t.Cleanup(func() {
+		if follow.ProcessState == nil {
+			_ = follow.Process.Kill()
+		}
+	})
+
+	// A quiet follower must remain alive while its caller-owned sentinel is
+	// open, then exit promptly when that pipe closes without needing a journal
+	// record to provoke a stdout write.
+	select {
+	case err := <-done:
+		t.Fatalf("follower exited before stdin EOF: %v\nstderr:\n%s", err, stderr.String())
+	case <-time.After(2 * eventFollowPollInterval):
+	}
+	if err := stdin.Close(); err != nil {
+		t.Fatalf("close follower stdin: %v", err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("follower exit after stdin EOF: %v\nstderr:\n%s", err, stderr.String())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("follower remained alive after stdin EOF")
+	}
+}
 
 // TestEventsTailReportsTruncationToTheCLI is the end-to-end guard for the
 // retention boundary as a consumer actually meets it: through the binary, not
