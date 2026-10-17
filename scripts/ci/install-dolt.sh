@@ -23,7 +23,13 @@ set -euo pipefail
 # releases/latest moved to 2.3.x, and it also puts bd dolt compact/flatten
 # and the #4566 fresh-bootstrap heal at risk on 2.3.x. Raise this pin only
 # once a Dolt release is confirmed clean by that same measurement.
-readonly version="2.2.0"
+#
+# 2.3.5 measured clean by @bee-ghosttrack (beads#6811 review, 2026-10-06):
+# two dolt sql-server instances (2.3.1 control, 2.3.5 candidate) on the same
+# box, 150 fresh databases each, same CREATE DATABASE + CALL
+# DOLT_RESET('--hard') probe. 2.3.1 (control) 13/150 broken; 2.3.5 0/150.
+# One platform, one run; see the PR for the full methodology.
+readonly version="2.3.5"
 readonly max_attempts=3
 readonly retry_delay_seconds=5
 

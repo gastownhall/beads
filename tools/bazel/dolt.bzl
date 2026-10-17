@@ -10,7 +10,7 @@ MODULE.bazel declares one repository per platform (dolt_<os>_<arch>); only the
 one selected by //tools/bazel:dolt for the execution platform is fetched.
 """
 
-DOLT_VERSION = "2.2.0"
+DOLT_VERSION = "2.3.5"
 
 # sha256 of the upstream release tarballs dolt-<os>-<arch>.tar.gz, keyed by
 # version so that bumping DOLT_VERSION without adding its digests fails instead
@@ -29,6 +29,12 @@ DOLT_SHA256 = {
         "darwin-arm64": "c6737dc2c5806e2eeef4839ad76c28167c861f878af3071df1242a6589d81267",
         "linux-amd64": "1f7ad8c2622995789420a3fb0f2d16b4aa7430000a825dd91d5938f36480cbf6",
         "linux-arm64": "a49a566d7c1ee9fdff553644855737f9d87047557c1ce1951aa7e7053277f4af",
+    },
+    "2.3.5": {
+        "darwin-amd64": "ffcfcdde00c14bd43c4ad7c71b6210fbfb33717bb23712398cb2d36cf6dca61f",
+        "darwin-arm64": "ad1e3770accbb7e8a059069228ead22bdf6f2759131212451b44f518661b8e40",
+        "linux-amd64": "c49d4c3e004cf1581ba0d4a00c5023a26f84eb2ec15d5fe876eed36d5343f463",
+        "linux-arm64": "9ce70fc81e50139e97758ef7f4dc57e9583e4e5ef05ad75d7535c30caa161387",
     },
 }
 
