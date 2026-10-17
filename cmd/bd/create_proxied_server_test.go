@@ -295,13 +295,26 @@ func TestParseMarkdownDependencies(t *testing.T) {
 		{"whitespace skipped", []string{"  ", ""}, nil, false},
 		{"bare id → blocks edge", []string{"bd-1"},
 			[]issueops.CreateDependency{{Type: types.DepBlocks, TargetID: "bd-1"}}, false},
-		{"type:id preserved verbatim (no alias)", []string{"depends-on:bd-2"},
-			[]issueops.CreateDependency{{Type: types.DependencyType("depends-on"), TargetID: "bd-2"}}, false},
+		{"depends-on normalized without reversal", []string{"depends-on:bd-2"},
+			[]issueops.CreateDependency{{Type: types.DepBlocks, TargetID: "bd-2"}}, false},
+		{"blocked-by normalized without reversal", []string{"blocked-by:bd-2"},
+			[]issueops.CreateDependency{{Type: types.DepBlocks, TargetID: "bd-2"}}, false},
 		{"discovered-from preserved", []string{"discovered-from:bd-3"},
 			[]issueops.CreateDependency{{Type: types.DepDiscoveredFrom, TargetID: "bd-3"}}, false},
 		{"whitespace trimmed", []string{"  blocks : bd-4 "},
+			[]issueops.CreateDependency{{Type: types.DepBlocks, TargetID: "bd-4", Reverse: true}}, false},
+		{"alias whitespace trimmed", []string{"  blocked-by : bd-4 "},
 			[]issueops.CreateDependency{{Type: types.DepBlocks, TargetID: "bd-4"}}, false},
+		{"custom type preserved", []string{"custom-relationship:bd-3"},
+			[]issueops.CreateDependency{{Type: types.DependencyType("custom-relationship"), TargetID: "bd-3"}}, false},
+		{"repeated edges preserved", []string{"depends-on:bd-2", "blocked-by:bd-2"},
+			[]issueops.CreateDependency{{Type: types.DepBlocks, TargetID: "bd-2"}, {Type: types.DepBlocks, TargetID: "bd-2"}}, false},
+		{"same target distinct types preserved", []string{"depends-on:bd-2", "discovered-from:bd-2"},
+			[]issueops.CreateDependency{{Type: types.DepBlocks, TargetID: "bd-2"}, {Type: types.DepDiscoveredFrom, TargetID: "bd-2"}}, false},
+		{"empty target preserved for batch validation", []string{"depends-on:"},
+			[]issueops.CreateDependency{{Type: types.DepBlocks}}, false},
 		{"empty type rejected", []string{":bd-1"}, nil, true},
+		{"whitespace type rejected", []string{" : bd-1 "}, nil, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -309,6 +322,9 @@ func TestParseMarkdownDependencies(t *testing.T) {
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("expected error, got %v", got)
+				}
+				if want := `invalid dependency type "" for issue "Test Title"`; err.Error() != want {
+					t.Errorf("error = %q, want %q", err, want)
 				}
 				return
 			}
@@ -322,13 +338,13 @@ func TestParseMarkdownDependencies(t *testing.T) {
 	}
 }
 
-func TestParseMarkdownDependencies_DoesNotSwapBlocks(t *testing.T) {
+func TestParseMarkdownDependencies_SwapsExplicitBlocks(t *testing.T) {
 	got, err := parseMarkdownDependencies([]string{"blocks:bd-5"}, "T")
 	if err != nil {
 		t.Fatalf("error: %v", err)
 	}
-	want := []issueops.CreateDependency{{Type: types.DepBlocks, TargetID: "bd-5"}}
+	want := []issueops.CreateDependency{{Type: types.DepBlocks, TargetID: "bd-5", Reverse: true}}
 	if !reflect.DeepEqual(got, want) {
-		t.Errorf("got %#v, want %#v (no swap-direction)", got, want)
+		t.Errorf("got %#v, want %#v (explicit blocks reverses direction)", got, want)
 	}
 }
