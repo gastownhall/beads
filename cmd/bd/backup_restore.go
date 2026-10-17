@@ -11,6 +11,7 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
@@ -70,7 +71,13 @@ To initialize and restore in one step, use: bd init && bd backup restore`,
 
 		// One success report for both topologies. Under --json this used to
 		// print nothing at all, which left a caller unable to tell a completed
-		// restore from a silently skipped one.
+		// restore from a silently skipped one. "source" is the argument
+		// verbatim, not redacted like the prose echoes of it: it is data a
+		// caller compares against what it passed, and RedactBackupURL has to
+		// over-strip to fail closed (file:///srv/backups@2024/db would come back
+		// as file://2024/db, a different location). It is the caller's own input
+		// on its own stdout, as raw as the backup_url that 'bd backup init
+		// --json' and 'bd backup status --json' already report.
 		if jsonOutput {
 			return outputJSON(map[string]interface{}{
 				"restored": true,
@@ -167,9 +174,31 @@ func syncProjectIDFromDB(ctx context.Context, s storage.DoltStorage) error {
 	return cfg.Save(beadsDir)
 }
 
+// validateBackupRestoreDir refuses a source that is plainly not there before
+// either route runs, so the common typo gets the short answer instead of a
+// Dolt error.
+//
+// A recognized backup URL is exempt, and that exemption is what makes remote
+// restore reachable at all. This gate runs BEFORE the proxied/direct split, so
+// statting the argument here rejected every URL-shaped source with "backup
+// directory not found" on both topologies — os.Stat("s3://bucket/db") is
+// IsNotExist — before any of the code that knows what a backup URL is could
+// run. A recognized URL is checked by versioncontrolops.ResolveBackupSource,
+// which every restore route goes through, this gate or not (bootstrap restores
+// without it): it stats the directory a file:// URL names — the form bd itself
+// persists and prints — and a remote URL has nothing local to stat. Its
+// "backup source does not exist" error is load-bearing and test-asserted. An
+// unrecognized scheme (S3://, az://) is not a backup URL, so it still lands
+// here.
 func validateBackupRestoreDir(dir string) error {
+	if versioncontrolops.IsBackupURL(dir) {
+		return nil
+	}
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
-		return fmt.Errorf("backup directory not found: %s\nRun 'bd backup' first to create a backup", dir)
+		// An unrecognized scheme reaches this line, so the source can still
+		// carry credentials.
+		return fmt.Errorf("backup directory not found: %s\nRun 'bd backup' first to create a backup",
+			versioncontrolops.RedactBackupURL(dir))
 	}
 	return nil
 }

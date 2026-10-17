@@ -363,7 +363,17 @@ func runBackupRestoreProxied(ctx context.Context, dir string, force bool) error 
 	if err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}
-	backupURL, err := versioncontrolops.DirToFileURL(dir)
+	// ResolveBackupSource, not DirToFileURL: this is a restore path, and the
+	// capability BackupStore.RestoreDatabase documents in storage.go (a remote
+	// URL source need not exist on the local filesystem) is written into the
+	// interface both stores implement — but the proxied route never calls that
+	// method, it runs DOLT_BACKUP over the proxied connection itself. Building
+	// the URL with DirToFileURL here would keep rejecting every backup URL on
+	// this topology, so the feature would ship on one of the two supported
+	// ones. The two calls have the same signature and ResolveBackupSource keeps
+	// the directory-arm errors, DirToFileURL included, and stats the directory
+	// a file:// URL names before the topology is taken down for it.
+	backupURL, err := versioncontrolops.ResolveBackupSource(dir)
 	if err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}
@@ -405,19 +415,33 @@ func runBackupRestoreProxied(ctx context.Context, dir string, force bool) error 
 // afterReconcile distinguishes the two steps, because a teardown failure costs
 // the operator different follow-up work either side of the reconcile: before
 // it, the backup destination has not been re-registered yet.
+//
+// dir reaches the operator in three of these four messages, and since the
+// proxied route accepts backup URLs it can carry credentials, so every echo of
+// it goes through RedactBackupURL. The 'bd backup init' suggestion is spelled
+// out as a command only when redaction left the source intact. A redacted URL
+// is still a recognized backup URL and DOLT_BACKUP('add') records a URL without
+// contacting it, so 'bd backup init <redacted>' would succeed and register a
+// destination that cannot authenticate, found only at the next 'bd backup
+// sync'. For such a source the message names the step instead.
 func proxiedRestoreFailureMessage(dir string, afterReconcile bool, err error) string {
+	safeDir := versioncontrolops.RedactBackupURL(dir)
 	var teardown *proxiedTeardownError
 	if errors.As(err, &teardown) {
 		if afterReconcile {
 			return fmt.Sprintf("restored from %s, but shutting the proxied server down afterwards failed: %v; "+
-				"the data is restored and reconciled — run 'bd dolt stop --force' before the next command", dir, teardown)
+				"the data is restored and reconciled — run 'bd dolt stop --force' before the next command", safeDir, teardown)
+		}
+		reinit := "'bd backup init " + safeDir + "'"
+		if safeDir != dir {
+			reinit = "'bd backup init' with the unredacted backup URL"
 		}
 		return fmt.Sprintf("restored from %s, but shutting the proxied server down afterwards failed: %v; "+
-			"the data is restored — run 'bd dolt stop --force', then 'bd backup init %s' to re-register the "+
-			"backup destination, which this run did not reach", dir, teardown, dir)
+			"the data is restored — run 'bd dolt stop --force', then %s to re-register the "+
+			"backup destination, which this run did not reach", safeDir, teardown, reinit)
 	}
 	if afterReconcile {
-		return fmt.Sprintf("restored from %s, but the restored database did not reopen: %v", dir, err)
+		return fmt.Sprintf("restored from %s, but the restored database did not reopen: %v", safeDir, err)
 	}
 	return fmt.Sprintf("restore failed: %v", err)
 }

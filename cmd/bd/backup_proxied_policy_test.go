@@ -21,6 +21,7 @@ func TestProxiedRestoreFailureMessage(t *testing.T) {
 
 	for _, tc := range []struct {
 		name           string
+		dir            string // "" uses the plain local-directory fixture
 		afterReconcile bool
 		err            error
 		wantContains   []string
@@ -34,9 +35,11 @@ func TestProxiedRestoreFailureMessage(t *testing.T) {
 			wantMissing:  []string{"the data is restored"},
 		},
 		{
+			// A plain directory survives redaction intact, so the
+			// re-registration is still a command the operator can paste.
 			name:         "restore succeeded, teardown failed",
 			err:          &proxiedTeardownError{err: boom},
-			wantContains: []string{"the data is restored", "bd dolt stop --force", "bd backup init"},
+			wantContains: []string{"the data is restored", "bd dolt stop --force", "'bd backup init /tmp/backup'"},
 			wantMissing:  []string{"restore failed"},
 		},
 		{
@@ -54,9 +57,42 @@ func TestProxiedRestoreFailureMessage(t *testing.T) {
 			// Nothing left to re-register: the reconcile already ran.
 			wantMissing: []string{"restore failed", "bd backup init"},
 		},
+		{
+			// The proxied route accepts backup URLs, so dir can carry
+			// credentials. The message quotes it redacted, and must not offer
+			// the redacted URL as a command: 'bd backup init aws://bucket/beads'
+			// would succeed and register a destination that cannot
+			// authenticate.
+			name: "credentialed URL source is redacted and not offered as a command",
+			dir:  "aws://AKIAEXAMPLE:wJalrXUtnFEMI/K7MDENG@bucket/beads",
+			err:  &proxiedTeardownError{err: boom},
+			wantContains: []string{"restored from aws://bucket/beads",
+				"'bd backup init' with the unredacted backup URL"},
+			wantMissing: []string{"AKIAEXAMPLE", "wJalrXUtnFEMI", "K7MDENG", "bd backup init aws://"},
+		},
+		{
+			name:           "credentialed URL source is redacted after reconcile",
+			dir:            "aws://AKIAEXAMPLE:wJalrXUtnFEMI/K7MDENG@bucket/beads",
+			afterReconcile: true,
+			err:            errors.New("open provider: schema is behind"),
+			wantContains:   []string{"restored from aws://bucket/beads"},
+			wantMissing:    []string{"AKIAEXAMPLE", "wJalrXUtnFEMI", "K7MDENG"},
+		},
+		{
+			name:           "malformed credentialed source fails closed after reconcile",
+			dir:            "aws:/AKIAEXAMPLE:hunter2pass@bucket/beads",
+			afterReconcile: true,
+			err:            errors.New("open provider: schema is behind"),
+			wantContains:   []string{"restored from aws:[redacted]"},
+			wantMissing:    []string{"AKIAEXAMPLE", "hunter2pass"},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := proxiedRestoreFailureMessage("/tmp/backup", tc.afterReconcile, tc.err)
+			dir := tc.dir
+			if dir == "" {
+				dir = "/tmp/backup"
+			}
+			got := proxiedRestoreFailureMessage(dir, tc.afterReconcile, tc.err)
 			for _, want := range tc.wantContains {
 				if !strings.Contains(got, want) {
 					t.Errorf("message %q does not contain %q", got, want)
