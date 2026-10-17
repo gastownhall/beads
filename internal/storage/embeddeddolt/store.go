@@ -87,11 +87,16 @@ const lenientSharedGateGuidance = "  This is a coordination decision, not an aut
 // blunt gate refusals while allowing smart-gate decisions to explain their
 // narrower recovery. A non-empty Decision means UserMessage has a shaped body;
 // data-behind is the one shaped refusal deliberately represented as a fallback.
+// The blunt arm swaps only UserMessage's body for the shared guidance and keeps
+// the gate's Notes after it, where UserMessage (and so server mode) prints
+// them: the smart gate's fallback reason is what tells an unreadable remote
+// state apart from a below-floor database or a BD_SMART_GATE=0 opt-out, and
+// each calls for a different next step (bd-1z1pc).
 func lenientGateWarningBody(gateErr *schema.RemoteMigrateGateError) string {
 	if gateErr.Decision != "" || gateErr.IsDataBehind() {
 		return "Warning: " + gateErr.UserMessage()
 	}
-	return "Warning: " + gateErr.Error() + "\n" + lenientSharedGateGuidance
+	return "Warning: " + gateErr.Error() + "\n" + lenientSharedGateGuidance + gateErr.Notes()
 }
 
 // openIntent classifies why a store is being opened. openStrict fails the
