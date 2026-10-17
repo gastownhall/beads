@@ -132,6 +132,7 @@ go_test(
         "comments_page_test.go",
         "commit_all_cgo_test.go",
         "commit_all_internal_test.go",
+        "commit_identity_internal_test.go",
         "commit_nothing_to_commit_test.go",
         "concurrency_test.go",
         "conformance_test.go",
