@@ -284,6 +284,11 @@ func applyResolvedConfig(ctx context.Context, beadsDir string, fileCfg *configfi
 		// precedence chain and carries the source along with the port.
 		ApplyResolvedServerPort(beadsDir, cfg)
 	}
+	// Caller, then BEADS_DOLT_SERVER_SOCKET, then metadata.json, as on the CLI
+	// path. Still a preference: ResolveSocketTransport may fall back to TCP.
+	if cfg.ServerSocket == "" {
+		cfg.ServerSocket = fileCfg.GetDoltServerSocket()
+	}
 	// Resolve the server-mode credential (the connection username). In server mode a
 	// configured credential command takes precedence over the static user; it fails
 	// closed (see ApplyGatewayCredential). The command runs only in server mode — an

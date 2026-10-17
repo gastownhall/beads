@@ -222,6 +222,12 @@ control is simpler than network allowlists. The Dolt server must be started
 with `dolt sql-server --socket <path>`. Auto-start is not supported in socket
 mode.
 
+`bd init --server-socket` records the path as `dolt_server_socket` in
+`.beads/metadata.json`. A socket passed directly by a library caller wins, then
+`BEADS_DOLT_SERVER_SOCKET`, then `dolt_server_socket`. The socket is a
+preference, not a requirement: if it does not answer but the TCP host and port
+do, bd connects over TCP. If neither answers, the error names the socket.
+
 Switch to server mode when you need:
 - Multiple agents writing simultaneously
 - Orchestrator multi-rig setups
