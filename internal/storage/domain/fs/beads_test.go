@@ -27,6 +27,7 @@ func (s *testSuite) TestBeadsDirFSRepository() {
 		s.Run("IdempotentOnMatchingContent", s.writeBeadsGitignoreIdempotent)
 		s.Run("AppendsMissingPatternsPreservingLocal", s.writeBeadsGitignoreAppendsMissing)
 		s.Run("LeavesFileWithAllPatternsUntouched", s.writeBeadsGitignoreLeavesCoveredFile)
+		s.Run("PreservesAppendLineEndings", s.writeBeadsGitignorePreservesAppendLineEndings)
 	})
 	s.Run("BeadsGitignoreExists", func() {
 		s.Run("MissingReturnsFalse", s.beadsGitignoreExistsMissing)
@@ -174,6 +175,36 @@ func (s *testSuite) writeBeadsGitignoreLeavesCoveredFile() {
 	data, err := os.ReadFile(path)
 	s.Require().NoError(err)
 	s.Equal(local, string(data))
+}
+
+func (s *testSuite) writeBeadsGitignorePreservesAppendLineEndings() {
+	const lfBlock = "\n# Added by bd (missing required patterns)\ndolt/\n"
+	const crlfBlock = "\r\n# Added by bd (missing required patterns)\r\ndolt/\r\n"
+	for _, tc := range []struct {
+		name, existing, want string
+	}{
+		{"empty", "", lfBlock},
+		{"delimiter-free", "!issues.jsonl", "!issues.jsonl\n" + lfBlock},
+		{"LF", "!issues.jsonl\n", "!issues.jsonl\n" + lfBlock},
+		{"CRLF", "!issues.jsonl\r\n", "!issues.jsonl\r\n" + crlfBlock},
+		{"CRLF unterminated", "!issues.jsonl\r\nlocal", "!issues.jsonl\r\nlocal\r\n" + crlfBlock},
+		{"CRLF pending CR", "!issues.jsonl\r\nlocal\r", "!issues.jsonl\r\nlocal\r\n" + crlfBlock},
+		{"mixed", "a\r\nb\n", "a\r\nb\n" + lfBlock},
+		{"complete CRLF", "!issues.jsonl\r\ndolt/\r\n", "!issues.jsonl\r\ndolt/\r\n"},
+	} {
+		s.Run(tc.name, func() {
+			_, beadsDir, repo := s.newRepo()
+			s.Require().NoError(os.MkdirAll(beadsDir, 0700))
+			path := filepath.Join(beadsDir, ".gitignore")
+			s.Require().NoError(os.WriteFile(path, []byte(tc.existing), 0600))
+			for call := 1; call <= 2; call++ {
+				s.Require().NoError(repo.WriteBeadsGitignore(s.Ctx()), "call %d", call)
+				got, err := os.ReadFile(path)
+				s.Require().NoError(err)
+				s.Equal(tc.want, string(got), "call %d: exact file bytes", call)
+			}
+		})
+	}
 }
 
 func (s *testSuite) beadsGitignoreExistsMissing() {
