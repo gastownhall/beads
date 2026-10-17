@@ -193,6 +193,14 @@ Use this before switching to server mode to ensure the server is running.`,
 // error. This typically happens when the remote was added via `dolt remote add`
 // (filesystem config) but not via `bd dolt remote add` (which also registers it
 // in the SQL server's dolt_remotes table).
+func isRemoteAlreadyExistsErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "remote") && strings.Contains(msg, "already exists")
+}
+
 func isRemoteNotFoundErr(err error) bool {
 	if err == nil {
 		return false
@@ -1634,6 +1642,11 @@ func ensureDoltRemote(ctx context.Context, st doltRemoteAddStore, name, url stri
 	}
 
 	if doltutil.RemoteURLsMatch(existingURL, url) {
+		if existingFromDiskOnly {
+			if err := st.AddRemote(ctx, name, url); err != nil && !isRemoteAlreadyExistsErr(err) {
+				return doltRemoteAddResult{}, fmt.Errorf("add remote %s: %w", name, err)
+			}
+		}
 		return doltRemoteAddResult{}, nil
 	}
 
