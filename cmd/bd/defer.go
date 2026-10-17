@@ -14,12 +14,15 @@ import (
 	"github.com/steveyegge/beads/internal/utils"
 )
 
-// deferUntilFormatHint restates the vocabulary of
-// timeparsing.ParseCompactDuration for every flag that reaches it. The unit set
-// and its order track that parser's doc comment, so a unit added there must be
-// added here too -- TestDeferUntilFormatHintCoversCompactUnits only catches
-// units this constant already names.
-const deferUntilFormatHint = "Use a relative offset [+-]?<n><unit> with unit min=minutes, h=hours, d=days, w=weeks, m=months, y=years (+30min, +1h, +3m), natural language (tomorrow, next monday), or a date (2025-01-15)"
+// relativeTimeFormats restates the vocabulary of
+// timeparsing.ParseCompactDuration for every flag that reaches it, in both the
+// --help usage and the rejection hint. The unit set and its order track that
+// parser's doc comment, so a unit added there must be added here too --
+// TestDeferUntilFormatHintCoversCompactUnits only catches units this constant
+// already names.
+const relativeTimeFormats = "a relative offset [+-]?<n><unit> with unit min=minutes, h=hours, d=days, w=weeks, m=months, y=years (+30min, +1h, +3m), natural language (tomorrow, next monday), or a date (2025-01-15)"
+
+const deferUntilFormatHint = "Use " + relativeTimeFormats
 
 var deferCmd = &cobra.Command{
 	Use:   "defer [id...]",
@@ -153,7 +156,7 @@ Examples:
 
 func init() {
 	// Time-based scheduling flag (GH#820)
-	deferCmd.Flags().String("until", "", "Defer until specific time (e.g., +1h, tomorrow, next monday)")
+	deferCmd.Flags().String("until", "", "Defer until specific time. Accepts "+relativeTimeFormats)
 	deferCmd.Flags().String("reason", "", "Record why this issue is being deferred (appended to notes)")
 	deferCmd.ValidArgsFunction = issueIDCompletion
 	rootCmd.AddCommand(deferCmd)
