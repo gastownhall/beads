@@ -107,7 +107,9 @@ func runRename(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// updateReferencesInAllIssues updates text references to the old ID in all issues
+// updateReferencesInAllIssues updates text references to the old ID in all
+// issues, the renamed one included: it runs after the rename, so that issue is
+// listed under newID with its text still naming oldID.
 func updateReferencesInAllIssues(ctx context.Context, store storage.DoltStorage, oldID, newID, actor string) error {
 	// Get all issues
 	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
@@ -115,40 +117,24 @@ func updateReferencesInAllIssues(ctx context.Context, store storage.DoltStorage,
 		return fmt.Errorf("failed to list issues: %w", err)
 	}
 
-	// Pattern to match the old ID as a word boundary
-	oldPattern := regexp.MustCompile(`\b` + regexp.QuoteMeta(oldID) + `\b`)
+	oldPattern := idRefPattern(oldID)
 
 	for _, issue := range issues {
-		if issue.ID == newID {
-			continue // Skip the renamed issue itself
-		}
-
-		updated := false
 		updates := make(map[string]interface{})
-
-		// Check and update each text field
-		if oldPattern.MatchString(issue.Title) {
-			updates["title"] = oldPattern.ReplaceAllString(issue.Title, newID)
-			updated = true
-		}
-		if oldPattern.MatchString(issue.Description) {
-			updates["description"] = oldPattern.ReplaceAllString(issue.Description, newID)
-			updated = true
-		}
-		if oldPattern.MatchString(issue.Design) {
-			updates["design"] = oldPattern.ReplaceAllString(issue.Design, newID)
-			updated = true
-		}
-		if oldPattern.MatchString(issue.Notes) {
-			updates["notes"] = oldPattern.ReplaceAllString(issue.Notes, newID)
-			updated = true
-		}
-		if oldPattern.MatchString(issue.AcceptanceCriteria) {
-			updates["acceptance_criteria"] = oldPattern.ReplaceAllString(issue.AcceptanceCriteria, newID)
-			updated = true
+		for field, text := range map[string]string{
+			"title":               issue.Title,
+			"description":         issue.Description,
+			"design":              issue.Design,
+			"notes":               issue.Notes,
+			"acceptance_criteria": issue.AcceptanceCriteria,
+			"close_reason":        issue.CloseReason,
+		} {
+			if oldPattern.MatchString(text) {
+				updates[field] = oldPattern.ReplaceAllString(text, newID+"${1}")
+			}
 		}
 
-		if updated {
+		if len(updates) > 0 {
 			if err := store.UpdateIssue(ctx, issue.ID, updates, actor); err != nil {
 				return fmt.Errorf("failed to update references in %s: %w", issue.ID, err)
 			}
@@ -156,6 +142,13 @@ func updateReferencesInAllIssues(ctx context.Context, store storage.DoltStorage,
 	}
 
 	return nil
+}
+
+// idRefPattern matches id as a whole word in text, but not as the parent part
+// of a dotted child id: "bd-1" matches in "see bd-1." and not in "bd-1.2".
+// Group 1 holds the text consumed after the id, for the replacement to keep.
+func idRefPattern(id string) *regexp.Regexp {
+	return regexp.MustCompile(`\b` + regexp.QuoteMeta(id) + `(\.*(?:[^\w.]|$))`)
 }
 
 // beadGateRenameStore is the part of the store a rename writes through.
