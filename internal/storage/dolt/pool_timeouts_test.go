@@ -1,6 +1,8 @@
 package dolt
 
 import (
+	"bytes"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -182,6 +184,123 @@ func TestApplyConfigDefaultsAppliesPoolSizeLadder(t *testing.T) {
 		}
 		if got := poolSize(t, cfg); got != 25 {
 			t.Fatalf("pool MaxOpenConnections = %d, want 25", got)
+		}
+	})
+}
+
+// captureStderr runs fn with os.Stderr redirected to a pipe and returns
+// whatever fn wrote to it, mirroring the capture already used in
+// TestApplyResolvedConfig (open_test.go) for the data-dir warning.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	oldStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	os.Stderr = w
+
+	fn()
+
+	w.Close()
+	os.Stderr = oldStderr
+	var buf bytes.Buffer
+	_, _ = io.Copy(&buf, r)
+	return buf.String()
+}
+
+// TestApplyPoolKnobsWarnsOnMalformedEnv pins GH#7564: a malformed
+// BEADS_DOLT_POOL_READ_TIMEOUT, BEADS_DOLT_POOL_WRITE_TIMEOUT or
+// BEADS_DOLT_MAX_CONNS silently fell through to config.yaml (or the
+// built-in default) with no warning, so an operator who set the env var to
+// override config and made a typo got the config value with nothing to say
+// their override never took effect. The ladder itself is unchanged - the
+// malformed value still falls through - but it must now say so.
+func TestApplyPoolKnobsWarnsOnMalformedEnv(t *testing.T) {
+	t.Run("malformed read-timeout falls through to config.yaml, but warns", func(t *testing.T) {
+		config.ResetForTesting()
+		t.Cleanup(config.ResetForTesting)
+		beadsDir := t.TempDir()
+		body := "dolt:\n  pool-read-timeout: 45s\n"
+		if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(body), 0o644); err != nil {
+			t.Fatalf("writing config.yaml: %v", err)
+		}
+		t.Setenv("BEADS_DOLT_POOL_READ_TIMEOUT", "30x")
+		cfg := &Config{BeadsDir: beadsDir}
+
+		output := captureStderr(t, func() { applyPoolKnobs(cfg) })
+
+		if cfg.PoolReadTimeout != 45*time.Second {
+			t.Fatalf("PoolReadTimeout = %v, want 45s from config.yaml (precedence is unchanged)", cfg.PoolReadTimeout)
+		}
+		if !strings.Contains(output, "BEADS_DOLT_POOL_READ_TIMEOUT") || !strings.Contains(output, `"30x"`) {
+			t.Errorf("expected a warning naming BEADS_DOLT_POOL_READ_TIMEOUT and the bad value, got: %q", output)
+		}
+	})
+
+	t.Run("malformed write-timeout falls through to the built-in default, but warns", func(t *testing.T) {
+		config.ResetForTesting()
+		t.Cleanup(config.ResetForTesting)
+		t.Setenv("BEADS_DOLT_POOL_WRITE_TIMEOUT", "30x")
+		cfg := &Config{BeadsDir: t.TempDir()}
+
+		output := captureStderr(t, func() { applyPoolKnobs(cfg) })
+
+		if cfg.PoolWriteTimeout != 0 {
+			t.Fatalf("PoolWriteTimeout = %v, want 0 so buildServerDSN applies its default", cfg.PoolWriteTimeout)
+		}
+		if !strings.Contains(output, "BEADS_DOLT_POOL_WRITE_TIMEOUT") || !strings.Contains(output, `"30x"`) {
+			t.Errorf("expected a warning naming BEADS_DOLT_POOL_WRITE_TIMEOUT and the bad value, got: %q", output)
+		}
+	})
+
+	t.Run("malformed max-conns falls through to config.yaml, but warns", func(t *testing.T) {
+		config.ResetForTesting()
+		t.Cleanup(config.ResetForTesting)
+		beadsDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("dolt:\n  max-conns: 25\n"), 0o644); err != nil {
+			t.Fatalf("writing config.yaml: %v", err)
+		}
+		t.Setenv("BEADS_DOLT_MAX_CONNS", "not-a-number")
+		cfg := &Config{BeadsDir: beadsDir}
+
+		output := captureStderr(t, func() { applyPoolKnobs(cfg) })
+
+		if cfg.MaxOpenConns != 25 {
+			t.Fatalf("MaxOpenConns = %d, want 25 from config.yaml (precedence is unchanged)", cfg.MaxOpenConns)
+		}
+		if !strings.Contains(output, "BEADS_DOLT_MAX_CONNS") || !strings.Contains(output, `"not-a-number"`) {
+			t.Errorf("expected a warning naming BEADS_DOLT_MAX_CONNS and the bad value, got: %q", output)
+		}
+	})
+
+	t.Run("a valid env value never warns", func(t *testing.T) {
+		config.ResetForTesting()
+		t.Cleanup(config.ResetForTesting)
+		t.Setenv("BEADS_DOLT_POOL_READ_TIMEOUT", "30s")
+		t.Setenv("BEADS_DOLT_POOL_WRITE_TIMEOUT", "30s")
+		t.Setenv("BEADS_DOLT_MAX_CONNS", "5")
+		cfg := &Config{BeadsDir: t.TempDir()}
+
+		output := captureStderr(t, func() { applyPoolKnobs(cfg) })
+
+		if output != "" {
+			t.Errorf("valid env values must not warn, got: %q", output)
+		}
+	})
+
+	t.Run("an unset env var never warns", func(t *testing.T) {
+		config.ResetForTesting()
+		t.Cleanup(config.ResetForTesting)
+		t.Setenv("BEADS_DOLT_POOL_READ_TIMEOUT", "")
+		t.Setenv("BEADS_DOLT_POOL_WRITE_TIMEOUT", "")
+		t.Setenv("BEADS_DOLT_MAX_CONNS", "")
+		cfg := &Config{BeadsDir: t.TempDir()}
+
+		output := captureStderr(t, func() { applyPoolKnobs(cfg) })
+
+		if output != "" {
+			t.Errorf("an unset env var must not warn, got: %q", output)
 		}
 	})
 }
