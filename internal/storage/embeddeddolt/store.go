@@ -356,7 +356,7 @@ func openReadOnly(ctx context.Context, beadsDir, database, branch string, checkB
 	}
 	dataDir := filepath.Join(absBeadsDir, "embeddeddolt")
 	if _, err := os.Stat(dataDir); err != nil {
-		return nil, fmt.Errorf("embeddeddolt: no embedded database at %s: %w", dataDir, err)
+		return nil, fmt.Errorf("%w at %s: %w", ErrNoEmbeddedDatabase, dataDir, err)
 	}
 
 	s := &EmbeddedDoltStore{

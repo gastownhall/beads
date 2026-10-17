@@ -2749,8 +2749,14 @@ func flushBatchCommitOnShutdown() {
 // run, not a workspace problem. It must stay narrow: any other previewErr
 // (unreachable server, bad config, ...) has to refuse rather than silently
 // wave the real, mutating open through (be-3bt2e).
+//
+// So it matches the embedded store's own no-database error, and only when the
+// cause is a missing data dir — not any ENOENT. A dial to a configured unix
+// socket whose server is down satisfies errors.Is(err, os.ErrNotExist) too,
+// as does a data dir missing an internal file, and neither is a first run
+// (bd-wlygc).
 func isBootstrapPreviewErr(err error) bool {
-	return errors.Is(err, os.ErrNotExist)
+	return errors.Is(err, embeddeddolt.ErrNoEmbeddedDatabase) && errors.Is(err, os.ErrNotExist)
 }
 
 // refuseUnverifiablePreviewOpen renders the identity gate's refusal when the
