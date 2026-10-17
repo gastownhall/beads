@@ -113,7 +113,7 @@ func TestOutputContextFunction(t *testing.T) {
 			stealthMode:   true,
 			ephemeralMode: false, // stealth mode overrides ephemeral detection
 			localOnlyMode: false,
-			expectText:    []string{"Beads Workflow Context", "bd close", "Git authority: no git operations in this context"},
+			expectText:    []string{"Beads Workflow Context", "bd close", "Beads Git/GitHub features only"},
 			rejectText:    []string{"git push", "git pull", "git commit", "git status", "git add", "bd export", "No git remote configured", "Git authority: local-only/no-remote"},
 		},
 		{
@@ -150,7 +150,7 @@ func TestOutputContextFunction(t *testing.T) {
 			stealthMode:   true,
 			ephemeralMode: false,
 			localOnlyMode: true, // local-only is true but stealth takes precedence
-			expectText:    []string{"Beads Workflow Context", "bd close", "Git authority: no git operations in this context"},
+			expectText:    []string{"Beads Workflow Context", "bd close", "Beads Git/GitHub features only"},
 			rejectText:    []string{"git push", "git pull", "git commit", "git status", "git add", "No git remote configured", "Git authority: local-only/no-remote", "bd export"},
 		},
 		{
@@ -197,7 +197,7 @@ func TestOutputContextFunction(t *testing.T) {
 			stealthMode:   true,
 			ephemeralMode: false, // stealth mode overrides ephemeral detection
 			localOnlyMode: false,
-			expectText:    []string{"Beads Issue Tracker Active", "bd close", "Git authority: no git operations in this context"},
+			expectText:    []string{"Beads Issue Tracker Active", "bd close", "Beads Git/GitHub features only"},
 			rejectText:    []string{"git push", "git pull", "git commit", "git status", "git add", "bd export", "No git remote configured", "Git authority: local-only/no-remote"},
 		},
 		{
@@ -234,7 +234,7 @@ func TestOutputContextFunction(t *testing.T) {
 			stealthMode:   true,
 			ephemeralMode: false,
 			localOnlyMode: true, // local-only is true but stealth takes precedence
-			expectText:    []string{"Beads Issue Tracker Active", "bd close", "Git authority: no git operations in this context"},
+			expectText:    []string{"Beads Issue Tracker Active", "bd close", "Beads Git/GitHub features only"},
 			rejectText:    []string{"git push", "git pull", "git commit", "git status", "git add", "bd export", "Git authority: local-only/no-remote"},
 		},
 		// The following cases pin the two-axis fix (gh#4130, gh#4230 review):
@@ -314,6 +314,25 @@ func TestOutputContextFunction(t *testing.T) {
 			}
 
 			output := buf.String()
+			if tt.stealthMode {
+				for _, expected := range []string{
+					"Do not use Beads features that perform Git or GitHub operations",
+					"does not restrict ordinary project git or gh CLI commands",
+					"active user, orchestrator, and repository instructions",
+				} {
+					if !strings.Contains(output, expected) {
+						t.Errorf("stealth output must scope authority to Beads features: missing %q", expected)
+					}
+				}
+				for _, rejected := range []string{
+					"Git authority: no git operations in this context",
+					"Git workflow: stealth mode (no git ops)",
+				} {
+					if strings.Contains(output, rejected) {
+						t.Errorf("stealth output must not impose a project-wide Git ban: %q", rejected)
+					}
+				}
+			}
 
 			for _, expected := range tt.expectText {
 				if !strings.Contains(output, expected) {

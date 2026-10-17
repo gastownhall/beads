@@ -221,6 +221,9 @@ go_test(
 # check-testing-short.sh over every Go file, test and non-test, plus the
 # Go-exec half of the host-go-under-Bazel policy (host_tool_exec_policy_test.go
 # scans //:repo_go_srcs and //:repo_go_test_srcs for a literal go/gofmt exec).
+# Also the console-window policy (console_spawn_policy_test.go scans
+# //:repo_go_srcs, the non-test half only, for a spawn under a package that can
+# run console-less: gastownhall/beads#6076/#6077).
 # The shell-script half (host_tool_shell_policy_test.go) is its own
 # :shell_host_tool_policy_test below: it reads a fixed, narrow list of shell
 # scripts, not every Go source file, so it would otherwise pay this target's
@@ -228,6 +231,7 @@ go_test(
 go_test(
     name = "go_sources_test",
     srcs = [
+        "console_spawn_policy_test.go",
         "host_tool_exec_policy_test.go",
         "repo_helpers_test.go",
         "testing_short_tree_test.go",

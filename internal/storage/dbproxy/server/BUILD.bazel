@@ -5,6 +5,8 @@ go_library(
     srcs = [
         "doltserver.go",
         "external_dolt_server.go",
+        "procattr_other.go",
+        "procattr_windows.go",
         "server.go",
         "testserver.go",
     ],
@@ -13,6 +15,7 @@ go_library(
     deps = [
         "//internal/configfile",
         "//internal/doltserver",
+        "//internal/execwin",
         "//internal/procid",
         "//internal/storage/dbproxy/identity",
         "//internal/storage/dbproxy/pidfile",
@@ -23,7 +26,12 @@ go_library(
         "@com_github_dolthub_dolt_go//libraries/utils/filesys",
         "@com_github_go_sql_driver_mysql//:mysql",
         "@org_golang_x_sync//errgroup",
-    ],
+    ] + select({
+        "@rules_go//go/platform:windows": [
+            "@org_golang_x_sys//windows",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 go_test(

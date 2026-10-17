@@ -629,6 +629,21 @@ type hostToolAllowlistEntry struct {
 // findPrebuiltBDBinary()/bazeltest.PrebuiltBD() result `!= ""` and returns),
 // so they need no allowlist entry.
 var hostToolExecAllowlist = map[string][]hostToolAllowlistEntry{
+	// execwin_test.go builds a *exec.Cmd for Hide to mutate and never starts
+	// it: "go" is an arbitrary command name there, so no host go toolchain is
+	// executed under Bazel or anywhere else.
+	"internal/execwin/execwin_test.go": {
+		{
+			fn:      "TestHideReturnsSameCommand",
+			snippet: `cmd := exec.Command("go", "version")`,
+			why:     "never started: the Cmd is only a value for Hide to mutate, so no host go toolchain runs",
+		},
+		{
+			fn:      "TestHideDoesNotOverwriteExistingAttr",
+			snippet: `cmd := exec.Command("go", "version")`,
+			why:     "never started: the Cmd is only a value for Hide to mutate, so no host go toolchain runs",
+		},
+	},
 	"internal/storage/embeddeddolt/concurrency_test.go": {
 		{
 			fn:      "TestConcurrencyMultiProcess",
