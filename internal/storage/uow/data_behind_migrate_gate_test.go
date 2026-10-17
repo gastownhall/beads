@@ -220,8 +220,8 @@ func TestInitSchemaProxiedDataBehind(t *testing.T) {
 	})
 
 	t.Run("read-only open prints the pull-first block, not the consent template", func(t *testing.T) {
-		// readThroughRefusedMigration's template names the shared consent verb
-		// for every refusal. For this stop that verb is doubly wrong: the
+		// readThroughRefusedMigration's blunt-fallback template names the
+		// shared consent verb. For this stop that verb is doubly wrong: the
 		// remedy is the pull, and a remote-backed shared store never reads the
 		// bare verb's consent at all (schema.SharedConsentCommandForced).
 		p, mock := newProxiedProvider(t)
