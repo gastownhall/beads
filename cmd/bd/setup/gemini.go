@@ -141,6 +141,8 @@ func installGemini(env geminiEnv, project bool, stealth bool) error {
 
 	if addHookCommand(hooks, "SessionStart", command) {
 		_, _ = fmt.Fprintln(env.stdout, "✓ Registered SessionStart hook")
+	} else {
+		_, _ = fmt.Fprintln(env.stdout, "✓ Hook already registered: SessionStart")
 	}
 
 	data, err := json.MarshalIndent(settings, "", "  ")
