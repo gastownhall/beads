@@ -1,12 +1,15 @@
 package scripts_test
 
 import (
+	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -157,8 +160,8 @@ func TestWorkerEnvAutosyncWorkflowShape(t *testing.T) {
 	if !strings.Contains(push.Run, workerEnvAutosyncBranch) && push.Env["BRANCH"] != workerEnvAutosyncBranch {
 		t.Errorf("push step does not reference the fixed branch %q", workerEnvAutosyncBranch)
 	}
-	if !strings.Contains(push.Run, "force-with-lease=refs/heads/$BRANCH") {
-		t.Errorf("push step run %q, want a --force-with-lease scoped to the fixed branch's ref alone", push.Run)
+	if !strings.Contains(push.Run, `ref="refs/heads/$BRANCH"`) || !strings.Contains(push.Run, "--force-with-lease=$ref:$remote_sha") {
+		t.Errorf("push step run %q, want a lease scoped to the fixed branch and its observed SHA", push.Run)
 	}
 
 	pr := job.step(t, "Open or update the sync PR")
@@ -190,6 +193,26 @@ func TestWorkerEnvAutosyncWorkflowShape(t *testing.T) {
 	}
 	if merge.Env["GH_TOKEN"] != "${{ steps.pr-token.outputs.token }}" {
 		t.Errorf("merge step env GH_TOKEN = %q, want pr-token (enabling auto-merge is PR-shaped, not a push)", merge.Env["GH_TOKEN"])
+	}
+}
+
+// TestWorkerEnvAutosyncPushAgainstFixture executes the actual workflow Bash
+// against one local bare Git remote. The fixture redirects only the synthetic
+// authenticated URL and injects a concurrent ref move before the real push.
+func TestWorkerEnvAutosyncPushAgainstFixture(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skipf("worker-env autosync push fixture follows the Linux-only worker-env-autosync.yml test policy; GOOS=%s", runtime.GOOS)
+	}
+	python := requireHostTool(t, "python3")
+	requireHostTool(t, "bash")
+	requireHostTool(t, "git")
+	push := readCIWorkflow(t, workerEnvAutosyncWorkflow).job(t, workerEnvAutosyncJob).step(t, "Commit and push the sync branch")
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, python, "-I", filepath.Join(bazelPolicyRoot(t), "scripts/worker_env_autosync_push_fixture.py"), "--fixture", t.TempDir())
+	cmd.Stdin = strings.NewReader(push.Run)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("worker-env autosync push fixture: %v\n%s", err, out)
 	}
 }
 
