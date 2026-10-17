@@ -43,6 +43,7 @@ non-localhost dolt_server_host. The server-only commands below fail with
 Server lifecycle (server mode only):
   bd dolt start        Start the Dolt server for this project
   bd dolt stop         Stop the Dolt server for this project
+  bd dolt restart      Gracefully restart a locally managed Dolt server
 
 Diagnostics (both modes):
   bd dolt status       Show Dolt engine status (embedded: in-process, data dir)
@@ -68,6 +69,7 @@ Configuration keys for 'bd dolt set':
   port      Server port (auto-detected; override with bd dolt set port <N>)
   user      MySQL user (default: root)
   data-dir  Custom dolt data directory (absolute path; default: .beads/dolt)
+  remotesapi-port  Dolt remotesapi port (0 disables; machine-global in shared mode)
 
 Remote server authentication (password + TLS) is NOT stored via 'bd dolt set'
 (keeps secrets out of metadata.json). Configure them with:
@@ -112,7 +114,9 @@ var doltSetCmd = &cobra.Command{
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	Short:         "Set a Dolt configuration value",
-	Long: `Set a Dolt configuration value in metadata.json.
+	Long: `Set a Dolt configuration value. Most keys are stored in metadata.json.
+remotesapi-port is a machine-global setting for the local shared server and is
+stored in the user config shown by 'bd config get dolt.remotesapi-port'.
 
 Keys:
   database  Database name (default: issue prefix or "beads")
@@ -120,6 +124,7 @@ Keys:
   port      Server port (auto-detected; override with bd dolt set port <N>)
   user      MySQL user (default: root)
   data-dir  Custom dolt data directory (absolute path; default: .beads/dolt)
+  remotesapi-port  Dolt remotesapi port (0 disables; machine-global in shared mode)
 
 There is no 'password' or 'tls' key here on purpose — secrets and TLS must
 not land in metadata.json. Use environment variables or the credentials file:
@@ -135,13 +140,15 @@ not land in metadata.json. Use environment variables or the credentials file:
 
   See: bd dolt --help and docs/architecture/dolt.md
 
-Use --update-config to also write to config.yaml for team-wide defaults.
+Use --update-config to also write to project config.yaml for team-wide defaults.
+It is not valid for machine-global remotesapi-port.
 
 Examples:
   bd dolt set database myproject
   bd dolt set host 192.168.1.100
   bd dolt set port 3307 --update-config
   bd dolt set data-dir /home/user/.beads-dolt/myproject
+  bd dolt set remotesapi-port 8080
   export BEADS_DOLT_PASSWORD=... BEADS_DOLT_SERVER_TLS=1`,
 	Args: cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -851,6 +858,9 @@ is running and 'bd dolt stop' to shut it down.`,
 		}
 
 		fmt.Printf("Dolt server started (PID %d, port %d)\n", state.PID, state.Port)
+		if state.RemotesAPIPort > 0 {
+			fmt.Printf("  RemotesAPI: %d\n", state.RemotesAPIPort)
+		}
 		fmt.Printf("  Data: %s\n", state.DataDir)
 		fmt.Printf("  Logs: %s\n", doltserver.LogPath(serverDir))
 		if doltserver.IsSharedServerMode() {
@@ -863,6 +873,107 @@ is running and 'bd dolt stop' to shut it down.`,
 		}
 		return nil
 	},
+}
+
+// validateDoltRestartMode applies the ownership guards of 'bd dolt start' to a
+// restart, in the same order: the proxied refusal runs first and consults both
+// the process-wide mode and the selected workspace's metadata, because the
+// start half of a restart is the second sql-server over the proxy's data
+// directory that the refusal exists to prevent. Then embedded mode, then a
+// remote server host that bd does not own.
+func validateDoltRestartMode(fileCfg *configfile.Config, sqlServer, proxied bool) error {
+	if proxied || fileCfg.IsDoltProxiedServerMode() {
+		return proxiedDoltRestartRefusal()
+	}
+	if !sqlServer {
+		return errors.New("'bd dolt restart' is not supported in embedded mode (no Dolt server)")
+	}
+	if host := fileCfg.GetDoltServerHost(); !configfile.IsLocalHostString(host) {
+		return fmt.Errorf("the configured Dolt server host is remote (%s); 'bd dolt restart' only manages a local server.\nRestart the server on that host, or clear dolt_server_host / dolt.host / BEADS_DOLT_SERVER_HOST to manage one locally", host)
+	}
+	return nil
+}
+
+// renderDoltRestartResult reports the server that is now running. wasRunning
+// distinguishes a true restart from a start of a server that was down, so the
+// output never claims to have replaced a process that did not exist.
+func renderDoltRestartResult(state *doltserver.State, wasRunning, sharedServer bool) error {
+	if jsonOutput {
+		return outputJSON(map[string]interface{}{
+			"restarted":       true,
+			"was_running":     wasRunning,
+			"pid":             state.PID,
+			"port":            state.Port,
+			"remotesapi_port": state.RemotesAPIPort,
+			"data_dir":        state.DataDir,
+		})
+	}
+	if wasRunning {
+		fmt.Printf("Dolt server restarted (PID %d, port %d)\n", state.PID, state.Port)
+	} else {
+		fmt.Printf("Dolt server was not running; started (PID %d, port %d)\n", state.PID, state.Port)
+	}
+	if state.RemotesAPIPort > 0 {
+		fmt.Printf("  RemotesAPI: %d\n", state.RemotesAPIPort)
+	}
+	fmt.Printf("  Data: %s\n", state.DataDir)
+	if sharedServer {
+		fmt.Println("  Mode: shared server")
+	}
+	return nil
+}
+
+var doltRestartCmd = &cobra.Command{
+	Use:           "restart",
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	Short:         "Gracefully restart a locally managed Dolt SQL server",
+	Long: `Gracefully restart a locally managed dolt sql-server.
+
+The lifecycle lock is held across the complete stop/start transition, excluding
+concurrent auto-starts. The SQL port of the running server is preserved and the
+command returns only after SQL and any configured remotesapi listener are
+ready. A configuration the new server could not start with (a remotesapi port
+equal to the SQL port, or one already in use) is refused before the running
+server is stopped. As an explicit operator action, restart remains available
+when transparent auto-start is disabled.
+
+In shared-server mode the one process serves every local workspace, so open
+connections from other projects are interrupted while it restarts.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		beadsDir := selectedDoltBeadsDir()
+		if beadsDir == "" {
+			return HandleErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
+		}
+		fileCfg, err := loadDoltBackendConfig(beadsDir)
+		if err != nil {
+			return HandleError("%v", err)
+		}
+		if err := validateDoltRestartMode(fileCfg, usesSQLServer(), usesProxiedServer()); err != nil {
+			return HandleProxyCapabilityError(err)
+		}
+		serverDir := doltserver.ResolveServerDir(beadsDir)
+		// Informational only: Restart re-reads state under the lifecycle lock.
+		wasRunning := false
+		if prev, prevErr := doltserver.IsRunning(serverDir); prevErr == nil && prev != nil {
+			wasRunning = prev.Running
+		}
+		state, err := doltserver.Restart(serverDir)
+		if err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
+		return renderDoltRestartResult(state, wasRunning, doltserver.IsSharedServerMode())
+	},
+}
+
+// sharedServerSQLPort is the SQL port the shared server listens on: the live
+// server's port when one is running, else the port a start would resolve.
+func sharedServerSQLPort(beadsDir string) int {
+	serverDir := doltserver.ResolveServerDir(beadsDir)
+	if state, err := doltserver.IsRunning(serverDir); err == nil && state != nil && state.Running {
+		return state.Port
+	}
+	return doltserver.DefaultConfig(beadsDir).Port
 }
 
 var doltStopCmd = &cobra.Command{
@@ -1295,7 +1406,8 @@ func isLocalHost(host string) bool {
 // user-relevant signals.
 func runExternalDoltStatus(beadsDir string, cfg *configfile.Config) {
 	host := cfg.GetDoltServerHost()
-	port := doltserver.DefaultConfig(beadsDir).Port
+	serverCfg := doltserver.DefaultConfig(beadsDir)
+	port := serverCfg.Port
 	user := cfg.GetDoltServerUser()
 	database := cfg.GetDoltDatabase()
 	tls := cfg.GetDoltServerTLS()
@@ -1317,6 +1429,16 @@ func runExternalDoltStatus(beadsDir string, cfg *configfile.Config) {
 		"user":     user,
 		"database": database,
 		"tls":      tls,
+	}
+	sharedServer := doltserver.IsSharedServerMode()
+	remotesAPIReachable := false
+	if sharedServer {
+		result["remotesapi_enabled"] = serverCfg.RemotesAPIPort > 0
+		if serverCfg.RemotesAPIPort > 0 {
+			remotesAPIReachable = doltserver.ProbeRemotesAPI(serverCfg.RemotesAPIPort)
+			result["remotesapi_port"] = serverCfg.RemotesAPIPort
+			result["remotesapi_reachable"] = remotesAPIReachable
+		}
 	}
 
 	db, openErr := sql.Open("mysql", dsn)
@@ -1364,6 +1486,9 @@ func runExternalDoltStatus(beadsDir string, cfg *configfile.Config) {
 	fmt.Printf("  Database: %s\n", database)
 	fmt.Printf("  User:     %s\n", user)
 	fmt.Printf("  TLS:      %t\n", tls)
+	if sharedServer {
+		renderRemotesAPIStatus(serverCfg.RemotesAPIPort, true, remotesAPIReachable, running)
+	}
 	if version != "" {
 		fmt.Printf("  Version:  %s\n", version)
 	}
@@ -1865,7 +1990,7 @@ func isTimeoutError(err error) bool {
 }
 
 func init() {
-	doltSetCmd.Flags().Bool("update-config", false, "Also write to config.yaml for team-wide defaults")
+	doltSetCmd.Flags().Bool("update-config", false, "Also write to project config.yaml (not valid for machine-global remotesapi-port)")
 	doltStopCmd.Flags().Bool("force", false, "Force stop (proxied recovery still requires a bd/dolt executable match)")
 	doltPushCmd.Flags().Bool("force", false, "Force push (overwrite remote changes)")
 	doltPushCmd.Flags().String("remote", "", "Push to a specific named remote instead of the default")
@@ -1889,6 +2014,7 @@ func init() {
 	doltCmd.AddCommand(doltPushCmd)
 	doltCmd.AddCommand(doltPullCmd)
 	doltCmd.AddCommand(doltStartCmd)
+	doltCmd.AddCommand(doltRestartCmd)
 	doltCmd.AddCommand(doltStopCmd)
 	doltCmd.AddCommand(doltStatusCmd)
 	doltCmd.AddCommand(doltKillallCmd)
@@ -1998,6 +2124,28 @@ func resolveDoltShowRemotes(beadsDir string, cfg *configfile.Config) []storage.R
 	return nil
 }
 
+// renderRemotesAPIStatus prints the shared server's remotesapi endpoint. When
+// probed, an unreachable listener is explained by the SQL server's own state:
+// a down server has no listener to restart, while a running server without
+// the configured listener needs 'bd dolt restart' to apply it.
+func renderRemotesAPIStatus(port int, probed, reachable, sqlUp bool) {
+	if port == 0 {
+		fmt.Println("  RemotesAPI: disabled")
+		return
+	}
+	fmt.Printf("  RemotesAPI: 127.0.0.1:%d", port)
+	switch {
+	case !probed:
+	case reachable:
+		fmt.Print(" (reachable)")
+	case sqlUp:
+		fmt.Print(" (not reachable; run 'bd dolt restart' to apply the configured port)")
+	default:
+		fmt.Print(" (not reachable; server not running)")
+	}
+	fmt.Println()
+}
+
 func showDoltConfig(testConnection bool) error {
 	beadsDir := selectedDoltBeadsDir()
 	if beadsDir == "" {
@@ -2039,6 +2187,16 @@ func showDoltConfig(testConnection bool) error {
 				result["user"] = cfg.GetDoltServerUser()
 				result["tls"] = cfg.GetDoltServerTLS()
 				result["shared_server"] = doltserver.IsSharedServerMode()
+				if doltserver.IsSharedServerMode() {
+					result["remotesapi_enabled"] = dsCfg.RemotesAPIPort > 0
+					if dsCfg.RemotesAPIPort > 0 {
+						result["remotesapi_port"] = dsCfg.RemotesAPIPort
+						if testConnection {
+							result["remotesapi_reachable"] = doltserver.ProbeRemotesAPI(dsCfg.RemotesAPIPort)
+						}
+					}
+				}
+
 				if testConnection {
 					result["connection_ok"] = testServerConnection(showHost, showPort)
 				}
@@ -2066,7 +2224,13 @@ func showDoltConfig(testConnection bool) error {
 		fmt.Printf("  Port:     %d\n", showPort)
 		fmt.Printf("  User:     %s\n", cfg.GetDoltServerUser())
 		fmt.Printf("  TLS:      %t\n", cfg.GetDoltServerTLS())
+		connOK := false
+		if testConnection {
+			connOK = testServerConnection(showHost, showPort)
+		}
 		if doltserver.IsSharedServerMode() {
+			reachable := testConnection && dsCfg.RemotesAPIPort > 0 && doltserver.ProbeRemotesAPI(dsCfg.RemotesAPIPort)
+			renderRemotesAPIStatus(dsCfg.RemotesAPIPort, testConnection, reachable, connOK)
 			fmt.Println("  Mode:     shared server")
 			if sharedDir, err := doltserver.SharedServerDir(); err == nil {
 				fmt.Printf("  Server:   %s\n", sharedDir)
@@ -2077,7 +2241,7 @@ func showDoltConfig(testConnection bool) error {
 
 		if testConnection {
 			fmt.Println()
-			if testServerConnection(showHost, showPort) {
+			if connOK {
 				fmt.Printf("  %s\n", ui.RenderPass("✓ Server connection OK"))
 			} else {
 				fmt.Printf("  %s\n", ui.RenderWarn("✗ Server not reachable"))
@@ -2149,6 +2313,52 @@ func setDoltConfig(key, value string, updateConfig bool) error {
 		}
 		cfg.DoltServerPort = port
 		yamlKey = "dolt.port"
+
+	case "remotesapi-port":
+		port, err := strconv.Atoi(value)
+		if err != nil || port < 0 || port > 65535 {
+			return HandleError("remotesapi-port must be 0 (disabled) or a valid port number (1-65535)")
+		}
+		if !doltserver.IsSharedServerMode() {
+			return HandleError("remotesapi-port configures the local shared Dolt server; enable dolt.shared-server first")
+		}
+		if updateConfig {
+			return HandleError("--update-config is not valid for remotesapi-port; the shared server setting is already machine-global and never written to project config")
+		}
+		// Refuse the shared server's own SQL port here rather than at
+		// 'bd dolt restart': restart re-pins the live SQL port, so a
+		// colliding value could only ever be applied by taking the shared
+		// server down for every workspace on the machine.
+		if sqlPort := sharedServerSQLPort(beadsDir); port != 0 && port == sqlPort {
+			return HandleError("remotesapi-port %d equals the shared Dolt server's SQL port; choose a different port", port)
+		}
+		const configKey = "dolt.remotesapi-port"
+		if err := config.SetUserYamlConfig(configKey, value); err != nil {
+			return HandleError("setting shared-server remotesapi port: %v", err)
+		}
+		logDoltConfigChange(beadsDir, key, value)
+		location := config.UserConfigYamlDisplayPath()
+		envOverride := strings.TrimSpace(os.Getenv("BEADS_DOLT_REMOTESAPI_PORT"))
+		if jsonOutput {
+			result := map[string]interface{}{
+				"key":      key,
+				"value":    value,
+				"location": location,
+			}
+			if envOverride != "" {
+				result["env_override"] = envOverride
+			}
+			if err := outputJSON(result); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			}
+			return nil
+		}
+		fmt.Printf("Set %s = %s (in %s)\n", key, value, location)
+		if envOverride != "" {
+			fmt.Fprintf(os.Stderr, "Warning: BEADS_DOLT_REMOTESAPI_PORT=%s is set and overrides this value while it is exported.\n", envOverride)
+		}
+		fmt.Println("From a shared-server-enabled workspace, run 'bd dolt restart' for this change to take effect.")
+		return nil
 
 	case "socket":
 		// Empty value clears the socket (reverts to TCP host/port).
@@ -2223,7 +2433,7 @@ func setDoltConfig(key, value string, updateConfig bool) error {
 
 	default:
 		fmt.Fprintf(os.Stderr, "Error: unknown key '%s'\n", key)
-		fmt.Fprintf(os.Stderr, "Valid keys: database, host, port, socket, user, data-dir, shared-server\n")
+		fmt.Fprintln(os.Stderr, "Valid keys: database, host, port, remotesapi-port, socket, user, data-dir, shared-server")
 		return SilentExit()
 	}
 

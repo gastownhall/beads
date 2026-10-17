@@ -2477,9 +2477,71 @@ func TestVerifyRemotesAPIState(t *testing.T) {
 	}
 	_ = listener.Close()
 	if _, err := verifyRemotesAPIState(&Config{RemotesAPIPort: port}, state); err == nil ||
-		!strings.Contains(err.Error(), "bd dolt stop && bd dolt start") {
-		t.Fatalf("unreachable remotesapi verification = %v, want stop/start-required error", err)
+		!strings.Contains(err.Error(), "bd dolt restart") {
+		t.Fatalf("unreachable remotesapi verification = %v, want restart-required error", err)
 	}
+}
+
+// TestPreflightRestart pins the checks Restart makes before it stops a
+// server: a configuration the start step would reject must be refused while
+// the server is still running, and the one legitimate busy port — the
+// listener of the server being replaced — must pass.
+func TestPreflightRestart(t *testing.T) {
+	t.Run("remotesapi port equal to the re-pinned SQL port", func(t *testing.T) {
+		// The live server's port wins over the configured one, because
+		// Restart restores it through the port file.
+		err := preflightRestart(&Config{Port: 3309, RemotesAPIPort: 3308}, &State{Running: true, PID: 41, Port: 3308})
+		if err == nil || !strings.Contains(err.Error(), "equals SQL port 3308") || !strings.Contains(err.Error(), "bd dolt set remotesapi-port") {
+			t.Fatalf("preflight = %v, want distinct-port refusal naming the remedy", err)
+		}
+	})
+
+	t.Run("disabled listener needs no port", func(t *testing.T) {
+		if err := preflightRestart(&Config{Port: 3308}, nil); err != nil {
+			t.Fatalf("preflight = %v, want nil", err)
+		}
+	})
+
+	t.Run("free remotesapi port", func(t *testing.T) {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		port := ln.Addr().(*net.TCPAddr).Port
+		_ = ln.Close()
+		if err := preflightRestart(&Config{Port: 3308, RemotesAPIPort: port}, &State{Running: true, PID: 41, Port: 3308}); err != nil {
+			t.Fatalf("preflight = %v, want nil for a free port", err)
+		}
+	})
+
+	t.Run("remotesapi port held by another process", func(t *testing.T) {
+		ln, err := net.Listen("tcp", net.JoinHostPort("", "0"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer ln.Close()
+		port := ln.Addr().(*net.TCPAddr).Port
+		// PID 1 is never this test process, which is what holds the port.
+		err = preflightRestart(&Config{Port: 3308, RemotesAPIPort: port}, &State{Running: true, PID: 1, Port: 3308})
+		if err == nil || !strings.Contains(err.Error(), "unavailable") || !strings.Contains(err.Error(), "bd dolt set remotesapi-port") {
+			t.Fatalf("preflight = %v, want unavailable-port refusal naming the remedy", err)
+		}
+	})
+
+	t.Run("remotesapi port held by the server being replaced", func(t *testing.T) {
+		ln, err := net.Listen("tcp", net.JoinHostPort("", "0"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer ln.Close()
+		port := ln.Addr().(*net.TCPAddr).Port
+		if findPIDOnPort(port) != os.Getpid() {
+			t.Skip("cannot identify this process as the listener (lsof/netstat unavailable); the refusal branch is covered above")
+		}
+		if err := preflightRestart(&Config{Port: 3308, RemotesAPIPort: port}, &State{Running: true, PID: os.Getpid(), Port: 3308}); err != nil {
+			t.Fatalf("preflight = %v, want nil when the replaced server owns the listener", err)
+		}
+	})
 }
 
 // TestBuildDoltServerYAMLConfig verifies the --config counterpart to

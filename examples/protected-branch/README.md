@@ -219,7 +219,7 @@ Dolt handles merges natively using three-way merge. If conflicts occur:
 The Dolt server creates it automatically on first commit. To create manually:
 ```bash
 bd config get sync.branch  # Verify it's set
-bd dolt stop && bd dolt start              # Server will create worktree
+bd dolt restart                           # Server will create worktree
 ```
 
 **"Changes not syncing"**

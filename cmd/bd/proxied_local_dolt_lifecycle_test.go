@@ -180,20 +180,27 @@ func TestManagedLocalProxiedDoltStartRefusesOverLiveProxy(t *testing.T) {
 		t.Fatalf("expected a live proxy and backend; proxy=%+v backend=%+v", proxyBefore, backendBefore)
 	}
 
-	stdout, stderr, err := bdProxiedRunBuffersWithEnv(t, bd, p.dir, []string{"BEADS_JSON=1"}, "--json", "dolt", "start")
-	if err == nil {
-		t.Errorf("bd dolt start succeeded on a live proxied workspace:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
-	}
-	assertProxyStartRefusal(t, stdout, stderr)
-	assertNoClassicServerArtifacts(t, p.beadsDir, "after bd dolt start")
+	for _, verb := range []string{"start", "restart"} {
+		stdout, stderr, err := bdProxiedRunBuffersWithEnv(t, bd, p.dir, []string{"BEADS_JSON=1"}, "--json", "dolt", verb)
+		if err == nil {
+			t.Errorf("bd dolt %s succeeded on a live proxied workspace:\nstdout:\n%s\nstderr:\n%s", verb, stdout, stderr)
+		}
+		// restart shares start's frozen code: its start half is the same
+		// second sql-server over the proxy's data directory.
+		assertProxyStartRefusal(t, stdout, stderr)
+		if verb == "restart" && !strings.Contains(stdout, "dolt restart is not supported") {
+			t.Errorf("restart refusal does not name the command run:\n%s", stdout)
+		}
+		assertNoClassicServerArtifacts(t, p.beadsDir, "after bd dolt "+verb)
 
-	proxyAfter := readManagedProxyPidFile(t, p)
-	backendAfter := readManagedBackendPidFile(t, p)
-	if proxyAfter == nil || proxyAfter.Pid != proxyBefore.Pid {
-		t.Errorf("proxy record changed across a refused start: before=%+v after=%+v", proxyBefore, proxyAfter)
-	}
-	if backendAfter == nil || backendAfter.Pid != backendBefore.Pid {
-		t.Errorf("backend record changed across a refused start: before=%+v after=%+v", backendBefore, backendAfter)
+		proxyAfter := readManagedProxyPidFile(t, p)
+		backendAfter := readManagedBackendPidFile(t, p)
+		if proxyAfter == nil || proxyAfter.Pid != proxyBefore.Pid {
+			t.Errorf("proxy record changed across a refused %s: before=%+v after=%+v", verb, proxyBefore, proxyAfter)
+		}
+		if backendAfter == nil || backendAfter.Pid != backendBefore.Pid {
+			t.Errorf("backend record changed across a refused %s: before=%+v after=%+v", verb, backendBefore, backendAfter)
+		}
 	}
 }
 
@@ -299,6 +306,22 @@ func TestManagedLocalProxiedDoltLifecycleLeavesOtherTopologiesAlone(t *testing.T
 		}
 		if !strings.Contains(startOut, "Dolt server started (PID ") {
 			t.Fatalf("direct start output changed:\n%s", startOut)
+		}
+		first, err := doltserver.IsRunning(beadsDir)
+		if err != nil || first == nil || !first.Running {
+			t.Fatalf("server state after start = %+v (err %v), want running", first, err)
+		}
+
+		restartOut, restartErr, err := runDirectBD(t, bd, dir, true, "dolt", "restart")
+		if err != nil {
+			t.Fatalf("bd dolt restart failed on a direct local server: %v\nstdout:\n%s\nstderr:\n%s", err, restartOut, restartErr)
+		}
+		if !strings.Contains(restartOut, "Dolt server restarted (PID ") {
+			t.Fatalf("direct restart output changed:\n%s", restartOut)
+		}
+		second, err := doltserver.IsRunning(beadsDir)
+		if err != nil || second == nil || !second.Running || second.PID == first.PID || second.Port != first.Port {
+			t.Fatalf("server state after restart = %+v (err %v), want a replacement process on port %d (was PID %d)", second, err, first.Port, first.PID)
 		}
 
 		statusOut, statusErr, err := runDirectBD(t, bd, dir, true, "dolt", "status")

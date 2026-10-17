@@ -157,6 +157,7 @@ go_test(
     env = {"BEADS_TEST_BD_BINARY": "$(rlocationpath //cmd/bd:bd_for_tests)"},
     deps = [
         "//internal/beads",
+        "//internal/config",
         "//internal/configfile",
         "//internal/doltserver",
         "//internal/git",

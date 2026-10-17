@@ -167,14 +167,14 @@ func collectViperEntries() []configEntry {
 			}
 		}
 
-		// User-global keys (metrics.*) are honored at runtime from the user-global
-		// config.yaml only, never merged project config; report that authoritative
-		// value AND its user-global source so the listing matches what bd actually
-		// uses (and `bd config get`), not a project value/source that has no
-		// runtime effect. The viper source label alone is ambiguous: a project
-		// .beads/config.yaml that also sets a metrics key makes GetValueSource
-		// report SourceConfigFile ("config.yaml"), which would attribute the
-		// displayed user-global value to the project file the runtime ignores.
+		// User-global keys are honored at runtime from the user-global config.yaml
+		// only, never merged project config; report that authoritative value AND
+		// its user-global source so the listing matches what bd actually uses (and
+		// `bd config get`), not a project value/source with no runtime effect. The
+		// viper source label alone is ambiguous: a project .beads/config.yaml that
+		// also sets a user-global key makes GetValueSource report SourceConfigFile
+		// ("config.yaml"), which would attribute the displayed user-global value
+		// to the project file the runtime ignores.
 		if config.IsUserGlobalKey(key) {
 			value = formatViperValue(config.GetUserYamlConfig(key))
 			if value == "" {

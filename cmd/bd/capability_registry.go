@@ -517,7 +517,7 @@ var proxyPermittedPaths = []string{
 
 	// storage, history and migration paths that are already routed or store-free
 	"compact", "events export", "events prune", "events tail",
-	"dolt clean-databases", "dolt killall", "dolt set", "dolt show", "dolt status",
+	"dolt clean-databases", "dolt killall", "dolt restart", "dolt set", "dolt show", "dolt status",
 	"dolt start", "dolt stop", "dolt test",
 	"migrate from-proxied-server-to-server", "migrate from-proxied-server-to-shared-server",
 	"migrate from-server-to-proxied-server", "migrate from-shared-server-to-proxied-server",

@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -138,6 +140,7 @@ func TestDoltShowConfigServerMode(t *testing.T) {
 	cfg.DoltServerHost = "192.168.1.100"
 	cfg.DoltServerPort = 3308
 	cfg.DoltServerUser = "testuser"
+	cfg.DoltRemotesAPIPort = 9090
 	if err := cfg.Save(beadsDir); err != nil {
 		t.Fatalf("failed to save config: %v", err)
 	}
@@ -174,6 +177,9 @@ func TestDoltShowConfigServerMode(t *testing.T) {
 		if !containsAny(output, "testuser", "User") {
 			t.Errorf("output should show user: %s", output)
 		}
+		if strings.Contains(output, "RemotesAPI:") {
+			t.Errorf("non-shared show must not report the machine-global shared remotesapi setting: %s", output)
+		}
 	})
 
 	t.Run("json output", func(t *testing.T) {
@@ -202,9 +208,73 @@ func TestDoltShowConfigServerMode(t *testing.T) {
 		if result["user"] != "testuser" {
 			t.Errorf("expected user 'testuser', got %v", result["user"])
 		}
+		if _, ok := result["remotesapi_enabled"]; ok {
+			t.Errorf("non-shared JSON must omit shared remotesapi fields, got %v", result)
+		}
 	})
 }
 
+func TestDoltShowConfigSharedRemotesAPI(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+	t.Setenv("BEADS_SHARED_SERVER_DIR", filepath.Join(home, ".beads", "shared-server"))
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "1")
+	t.Setenv("BEADS_DOLT_REMOTESAPI_PORT", "")
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := configfile.DefaultConfig()
+	cfg.Backend = configfile.BackendDolt
+	cfg.DoltMode = configfile.DoltModeServer
+	cfg.DoltDatabase = "shared_show"
+	if err := cfg.Save(beadsDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DIR", beadsDir)
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	rapiPort := listener.Addr().(*net.TCPAddr).Port
+	if err := config.SetUserYamlConfig("dolt.remotesapi-port", strconv.Itoa(rapiPort)); err != nil {
+		t.Fatal(err)
+	}
+
+	jsonOutput = false
+	text := captureStdout(t, func() error { return showDoltConfig(true) })
+	if want := fmt.Sprintf("RemotesAPI: 127.0.0.1:%d (reachable)", rapiPort); !strings.Contains(text, want) {
+		t.Fatalf("shared show output missing %q:\n%s", want, text)
+	}
+
+	jsonOutput = true
+	t.Cleanup(func() { jsonOutput = false })
+	raw := captureStdout(t, func() error { return showDoltConfig(true) })
+	var result map[string]any
+	if err := json.Unmarshal([]byte(raw), &result); err != nil {
+		t.Fatalf("decode shared show JSON: %v\n%s", err, raw)
+	}
+	if result["remotesapi_enabled"] != true || result["remotesapi_reachable"] != true {
+		t.Fatalf("shared show JSON remotesapi state = %v, want enabled+reachable", result)
+	}
+
+	if err := config.SetUserYamlConfig("dolt.remotesapi-port", "0"); err != nil {
+		t.Fatal(err)
+	}
+	jsonOutput = false
+	text = captureStdout(t, func() error { return showDoltConfig(false) })
+	if !strings.Contains(text, "RemotesAPI: disabled") {
+		t.Fatalf("shared show must report explicit disable:\n%s", text)
+	}
+}
 func TestDoltSetConfigValidation(t *testing.T) {
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
@@ -278,6 +348,87 @@ func TestDoltSetConfigValidation(t *testing.T) {
 			t.Errorf("expected user 'admin', got %s", loadedCfg.DoltServerUser)
 		}
 	})
+}
+func TestSetDoltConfigSharedRemotesAPIPortWritesUserConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+	t.Setenv("BEADS_SHARED_SERVER_DIR", filepath.Join(home, ".beads", "shared-server"))
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	t.Setenv("BEADS_DOLT_REMOTESAPI_PORT", "")
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := configfile.DefaultConfig()
+	cfg.Backend = configfile.BackendDolt
+	cfg.DoltMode = configfile.DoltModeServer
+	if err := cfg.Save(beadsDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DIR", beadsDir)
+
+	out := captureDoltSetOutput(t, "remotesapi-port", "8001", false)
+	if !strings.Contains(out, config.UserConfigYamlDisplayPath()) {
+		t.Fatalf("shared remotesapi set output must name user-global config, got:\n%s", out)
+	}
+	if !strings.Contains(out, "bd dolt restart") || !strings.Contains(out, "shared-server-enabled workspace") {
+		t.Fatalf("shared remotesapi set output must name supported restart context, got:\n%s", out)
+	}
+	if got := config.GetUserYamlConfig("dolt.remotesapi-port"); got != "8001" {
+		t.Fatalf("user-global remotesapi port = %q, want 8001", got)
+	}
+	loaded, err := configfile.Load(beadsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.DoltRemotesAPIPort != 0 {
+		t.Fatalf("project metadata remotesapi port = %d, want untouched 0", loaded.DoltRemotesAPIPort)
+	}
+	if got := doltserver.DefaultConfig(beadsDir).RemotesAPIPort; got != 8001 {
+		t.Fatalf("resolved shared remotesapi port = %d, want 8001", got)
+	}
+
+	out = captureDoltSetOutput(t, "remotesapi-port", "8002", true)
+	if !strings.Contains(out, "--update-config is not valid") {
+		t.Fatalf("shared remotesapi --update-config output = %q, want explicit refusal", out)
+	}
+
+	// The shared server's own SQL port is refused at set time: restart
+	// re-pins the live SQL port, so the collision could only be applied by
+	// taking the server down for every workspace.
+	sqlPort := doltserver.DefaultConfig(beadsDir).Port
+	out = captureDoltSetOutput(t, "remotesapi-port", strconv.Itoa(sqlPort), false)
+	if !strings.Contains(out, "equals the shared Dolt server's SQL port") {
+		t.Fatalf("set remotesapi-port %d (the SQL port) output = %q, want refusal", sqlPort, out)
+	}
+	if got := config.GetUserYamlConfig("dolt.remotesapi-port"); got != "8001" {
+		t.Fatalf("user-global remotesapi port after refused set = %q, want unchanged 8001", got)
+	}
+
+	// An exported BEADS_DOLT_REMOTESAPI_PORT outranks the stored value; the
+	// set succeeds but says so.
+	t.Setenv("BEADS_DOLT_REMOTESAPI_PORT", "9999")
+	out = captureDoltSetOutput(t, "remotesapi-port", "8003", false)
+	if !strings.Contains(out, "BEADS_DOLT_REMOTESAPI_PORT=9999") || !strings.Contains(out, "overrides") {
+		t.Fatalf("set under env override output = %q, want the override warning", out)
+	}
+	if got := config.GetUserYamlConfig("dolt.remotesapi-port"); got != "8003" {
+		t.Fatalf("user-global remotesapi port = %q, want 8003 stored despite the override", got)
+	}
+	t.Setenv("BEADS_DOLT_REMOTESAPI_PORT", "")
+
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	config.ResetForTesting()
+	out = captureDoltSetOutput(t, "remotesapi-port", "8002", false)
+	if !strings.Contains(out, "enable dolt.shared-server first") {
+		t.Fatalf("non-shared remotesapi set output = %q, want shared-only refusal", out)
+	}
 }
 
 func TestDoltSetConfigJSONOutput(t *testing.T) {
@@ -812,12 +963,12 @@ func TestDoltPushPullCommitNeedStore(t *testing.T) {
 }
 
 // TestDoltConfigSubcommandsSkipStore verifies that dolt config/diagnostic
-// subcommands (show, set, test, start, stop, status) don't require the store.
-// These commands manage their own config loading and should work without
+// subcommands (show, set, test, start, restart, stop, status) don't require the
+// store. These commands manage their own config loading and should work without
 // PersistentPreRun's store initialization.
 func TestDoltConfigSubcommandsSkipStore(t *testing.T) {
-	// Verify these are registered as children of doltCmd
-	configSubcommands := []string{"show", "set", "test", "start", "stop", "status"}
+	// Verify these are registered as children of doltCmd.
+	configSubcommands := []string{"show", "set", "test", "start", "restart", "stop", "status"}
 	for _, name := range configSubcommands {
 		found := false
 		for _, cmd := range doltCmd.Commands() {
@@ -844,6 +995,85 @@ func TestDoltConfigSubcommandsSkipStore(t *testing.T) {
 		if !found {
 			t.Errorf("expected dolt subcommand %q to be registered", name)
 		}
+	}
+}
+
+func TestDoltRestartModeValidation(t *testing.T) {
+	local := &configfile.Config{DoltServerHost: "127.0.0.1"}
+	remote := &configfile.Config{DoltServerHost: "db.example.com"}
+	// Proxied mode declared by the workspace's own metadata, with the
+	// process-wide mode still "server": the guard must consult both.
+	proxiedMeta := &configfile.Config{Backend: configfile.BackendDolt, DoltMode: configfile.DoltModeProxiedServer, DoltServerHost: "127.0.0.1"}
+	tests := []struct {
+		name      string
+		cfg       *configfile.Config
+		sqlServer bool
+		proxied   bool
+		want      string
+		wantCode  string
+	}{
+		{name: "embedded", cfg: local, want: "embedded mode"},
+		{name: "proxied process mode", cfg: local, sqlServer: true, proxied: true, want: "dolt restart is not supported in proxied-server mode", wantCode: proxyDoltStartConflictCode},
+		{name: "proxied metadata", cfg: proxiedMeta, sqlServer: true, want: "dolt restart is not supported in proxied-server mode", wantCode: proxyDoltStartConflictCode},
+		{name: "remote", cfg: remote, sqlServer: true, want: "remote"},
+		{name: "local managed", cfg: local, sqlServer: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateDoltRestartMode(tt.cfg, tt.sqlServer, tt.proxied)
+			if tt.want == "" {
+				if err != nil {
+					t.Fatalf("validation error = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("validation error = %v, want containing %q", err, tt.want)
+			}
+			var capErr *ProxyCapabilityError
+			if got := errors.As(err, &capErr); got != (tt.wantCode != "") {
+				t.Fatalf("structured refusal = %v, want %v", got, tt.wantCode != "")
+			}
+			if capErr != nil && (capErr.Code != tt.wantCode || capErr.Mutates) {
+				t.Fatalf("refusal = %+v, want code %q mutates=false", capErr, tt.wantCode)
+			}
+		})
+	}
+}
+
+func TestRenderDoltRestartResult(t *testing.T) {
+	state := &doltserver.State{
+		Running:        true,
+		PID:            42,
+		Port:           3308,
+		RemotesAPIPort: 8080,
+		DataDir:        "/tmp/shared/dolt",
+	}
+	jsonOutput = false
+	text := captureStdout(t, func() error { return renderDoltRestartResult(state, true, true) })
+	for _, want := range []string{"Dolt server restarted", "PID 42", "port 3308", "RemotesAPI: 8080", "/tmp/shared/dolt", "Mode: shared server"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("restart text missing %q:\n%s", want, text)
+		}
+	}
+	// Nothing was running: the output must not claim a process was replaced.
+	text = captureStdout(t, func() error { return renderDoltRestartResult(state, false, false) })
+	if !strings.Contains(text, "was not running; started") || strings.Contains(text, "restarted") || strings.Contains(text, "shared server") {
+		t.Fatalf("cold restart text = %q, want a start report without shared-mode note", text)
+	}
+
+	jsonOutput = true
+	t.Cleanup(func() { jsonOutput = false })
+	raw := captureStdout(t, func() error { return renderDoltRestartResult(state, false, true) })
+	var result map[string]any
+	if err := json.Unmarshal([]byte(raw), &result); err != nil {
+		t.Fatalf("decode restart JSON: %v\n%s", err, raw)
+	}
+	if result["restarted"] != true ||
+		result["was_running"] != false ||
+		int(result["port"].(float64)) != 3308 ||
+		int(result["remotesapi_port"].(float64)) != 8080 {
+		t.Fatalf("restart JSON = %v", result)
 	}
 }
 
@@ -1470,8 +1700,17 @@ func TestIsLocalHost(t *testing.T) {
 // build, ping failure branch, and both output modes (text + JSON) without
 // needing a running Dolt server.
 func TestRunExternalDoltStatus_Unreachable(t *testing.T) {
-	// Force the resolved port to 1 (guaranteed unreachable on loopback).
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+	t.Setenv("BEADS_SHARED_SERVER_DIR", filepath.Join(home, ".beads", "shared-server"))
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+
+	// Force the resolved ports to guaranteed-unreachable loopback endpoints.
 	t.Setenv("BEADS_DOLT_SERVER_PORT", "1")
+	t.Setenv("BEADS_DOLT_REMOTESAPI_PORT", "2")
 
 	beadsDir := t.TempDir()
 	// Use 127.0.0.1 so the OS RSTs the connect() fast (connection refused)
@@ -1503,6 +1742,9 @@ func TestRunExternalDoltStatus_Unreachable(t *testing.T) {
 			"TLS:",
 			"true",
 			"Error:",
+			"RemotesAPI:",
+			"127.0.0.1:2",
+			"not reachable",
 		} {
 			if !strings.Contains(out, want) {
 				t.Errorf("expected output to contain %q, got:\n%s", want, out)
@@ -1539,6 +1781,15 @@ func TestRunExternalDoltStatus_Unreachable(t *testing.T) {
 		}
 		if result["tls"] != true {
 			t.Errorf("tls = %v, want true", result["tls"])
+		}
+		if result["remotesapi_enabled"] != true {
+			t.Errorf("remotesapi_enabled = %v, want true", result["remotesapi_enabled"])
+		}
+		if port, ok := result["remotesapi_port"].(float64); !ok || int(port) != 2 {
+			t.Errorf("remotesapi_port = %v, want 2", result["remotesapi_port"])
+		}
+		if result["remotesapi_reachable"] != false {
+			t.Errorf("remotesapi_reachable = %v, want false", result["remotesapi_reachable"])
 		}
 		if _, ok := result["error"]; !ok {
 			t.Error("expected 'error' field in JSON output for unreachable server")

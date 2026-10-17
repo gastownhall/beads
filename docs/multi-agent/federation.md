@@ -179,6 +179,18 @@ push/pull:
 └─────────────────┘         └─────────────────┘
 ```
 
+For a bd-managed shared server, enable the remotesapi listener explicitly:
+
+```bash
+bd dolt set remotesapi-port 8080
+bd dolt restart
+bd dolt status
+```
+
+The setting is machine-global and defaults to disabled. Current Dolt releases
+bind remotesapi on all interfaces; use a firewall/private network until Dolt
+offers a remotesapi bind-address option.
+
 ### Multi-Repo Support
 
 Issues track their `SourceSystem` to identify which federated system created

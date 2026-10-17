@@ -740,6 +740,36 @@ bd init --prefix myproject --shared-server
 - The file lock mechanism ensures safe concurrent access from multiple projects
 - Default port is 3308 (not 3307) to avoid conflict with the orchestrator. Override with `BEADS_DOLT_SERVER_PORT` or `dolt.port` in config.yaml
 
+#### Enabling remotesapi on the shared server
+
+The shared server keeps remotesapi disabled unless an operator explicitly
+configures a port. The setting is machine-global because one server process
+serves every local beads workspace:
+
+```bash
+bd dolt set remotesapi-port 8080
+bd dolt restart
+bd dolt status
+```
+
+`BEADS_DOLT_REMOTESAPI_PORT` overrides the persisted value; `0` disables the
+listener. `bd dolt restart` holds the lifecycle lock across graceful stop and
+start, preserves the SQL port, and returns only after SQL and remotesapi are
+ready. It checks the configuration before it stops the running server: a
+remotesapi port equal to the SQL port, or one already in use, is refused and
+the server keeps serving. The check cannot cover the moment between it and the
+new server's bind; a process that takes the port in that window leaves the
+server stopped with the SQL port kept for a retry, and the error says so. It
+remains available when `dolt.auto-start: false`, because that setting disables
+transparent starts rather than explicit operator lifecycle commands. The
+shared server serves every local workspace, so a restart interrupts other
+projects' open connections.
+
+Current Dolt releases bind remotesapi on all interfaces even when the SQL
+listener is bound to `127.0.0.1`; there is no remotesapi host knob. Restrict
+network access with the host firewall or private network until Dolt supports an
+explicit bind address. The SQL listener remains loopback-bound.
+
 **Important:** Each project on a shared server **must have a unique prefix** (database name).
 Two projects with the same prefix share the same database — if this happens accidentally,
 the project identity check will detect the mismatch and refuse to connect, preventing

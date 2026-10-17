@@ -93,6 +93,34 @@ func TestProxiedServerDoltLifecycle(t *testing.T) {
 		}
 	})
 
+	t.Run("restart is refused with the start conflict code", func(t *testing.T) {
+		stdout, stderr, err := bdProxiedRunBuffersWithEnv(t, bd, p.dir, []string{"BEADS_JSON=1"}, "--json", "dolt", "restart")
+		if err == nil {
+			t.Errorf("bd dolt restart succeeded on an external proxied workspace:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+		var got struct {
+			Code    string `json:"code"`
+			Error   string `json:"error"`
+			Mutates bool   `json:"mutates"`
+		}
+		if jsonErr := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &got); jsonErr != nil {
+			t.Fatalf("refusal is not typed JSON (%v)\nstdout:\n%s\nstderr:\n%s", jsonErr, stdout, stderr)
+		}
+		// The start half of a restart is the conflict the frozen code names;
+		// the message names the command the operator ran.
+		if got.Code != proxyDoltStartConflictCode || got.Mutates || !strings.Contains(got.Error, "dolt restart") {
+			t.Errorf("refusal=%+v, want code=%q mutates=false naming dolt restart", got, proxyDoltStartConflictCode)
+		}
+		if running, pid := proxy.IsRunning(p.proxyRoot); !running || pid != proxyPid {
+			t.Errorf("proxy after refused restart: running=%v pid=%d, want running pid %d", running, pid, proxyPid)
+		}
+		for _, name := range []string{doltserver.PIDFileName, doltserver.PortFileName} {
+			if _, statErr := os.Stat(filepath.Join(p.beadsDir, name)); statErr == nil {
+				t.Errorf("%s exists after a refused restart", name)
+			}
+		}
+	})
+
 	if out, err := bdProxiedRun(t, bd, p.dir, "create", "--json", "post-refusal write"); err != nil {
 		t.Fatalf("workspace unusable after the lifecycle probes: %v\n%s", err, out)
 	}

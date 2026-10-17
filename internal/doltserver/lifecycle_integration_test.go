@@ -639,13 +639,13 @@ func TestLifecycle_StartRequiresRestartForNewRemotesAPIConfig(t *testing.T) {
 	}
 
 	t.Setenv("BEADS_DOLT_REMOTESAPI_PORT", fmt.Sprintf("%d", rapiPort))
-	if _, err := doltserver.Start(beadsDir); err == nil || !strings.Contains(err.Error(), "bd dolt stop && bd dolt start") {
-		t.Fatalf("Start after remotesapi config = %v, want actionable stop/start-required error", err)
+	if _, err := doltserver.Start(beadsDir); err == nil || !strings.Contains(err.Error(), "bd dolt restart") {
+		t.Fatalf("Start after remotesapi config = %v, want actionable restart-required error", err)
 	}
 	// The auto-start fast path must NOT fail hard on the same gap:
 	// BEADS_DOLT_REMOTESAPI_PORT predates the listener wiring, so a server
 	// started before the setting appeared keeps serving SQL (with a warning)
-	// until an explicit stop/start applies it.
+	// until an explicit restart applies it.
 	if port, startedByUs, err := doltserver.EnsureRunningDetailed(beadsDir); err != nil {
 		t.Fatalf("EnsureRunningDetailed with unapplied remotesapi config = %v, want warn-and-serve", err)
 	} else if startedByUs || port != sqlPort {
@@ -687,8 +687,8 @@ func TestLifecycle_AdoptedServerRequiresConfiguredRemotesAPI(t *testing.T) {
 	}
 
 	t.Setenv("BEADS_DOLT_REMOTESAPI_PORT", fmt.Sprintf("%d", rapiPort))
-	if _, err := doltserver.Start(beadsDir); err == nil || !strings.Contains(err.Error(), "bd dolt stop && bd dolt start") {
-		t.Fatalf("adopted Start = %v, want actionable stop/start-required error", err)
+	if _, err := doltserver.Start(beadsDir); err == nil || !strings.Contains(err.Error(), "bd dolt restart") {
+		t.Fatalf("adopted Start = %v, want actionable restart-required error", err)
 	}
 	state, err := doltserver.IsRunning(beadsDir)
 	if err != nil {
@@ -703,7 +703,11 @@ func TestLifecycle_AdoptedServerRequiresConfiguredRemotesAPI(t *testing.T) {
 	reg.Deregister(first.PID)
 }
 
-func TestLifecycle_RestartRemotesAPIFailureLeavesCleanStoppedState(t *testing.T) {
+// TestLifecycle_RestartPreflightLeavesServerRunning pins that a restart whose
+// configuration the start step would reject is refused before the running
+// server is stopped. A shared server that stopped first would be down for
+// every workspace on the machine until the user-global key was reverted.
+func TestLifecycle_RestartPreflightLeavesServerRunning(t *testing.T) {
 	beadsDir := setupLifecycleTestDir(t)
 	reg := integration.NewProcessRegistry(t)
 	diag := integration.NewDiagnostics(t, beadsDir)
@@ -741,26 +745,41 @@ func TestLifecycle_RestartRemotesAPIFailureLeavesCleanStoppedState(t *testing.T)
 		reg.Register(proc)
 	}
 
-	t.Setenv("BEADS_DOLT_REMOTESAPI_PORT", fmt.Sprintf("%d", blockedRAPIPort))
-
-	_, restartErr := doltserver.Restart(beadsDir)
-	if restartErr == nil {
-		t.Fatal("Restart succeeded with occupied remotesapi port")
-	}
-	reg.Deregister(first.PID)
-	for _, want := range []string{"server remains stopped", "remotesapi", doltserver.LogPath(beadsDir)} {
-		if !strings.Contains(restartErr.Error(), want) {
-			t.Fatalf("Restart error %q missing %q", restartErr, want)
+	assertStillRunning := func(label string, restartErr error) {
+		t.Helper()
+		if restartErr == nil {
+			t.Fatalf("%s: Restart succeeded, want refusal", label)
+		}
+		for _, want := range []string{"server left running", "remotesapi", "bd dolt set remotesapi-port"} {
+			if !strings.Contains(restartErr.Error(), want) {
+				t.Fatalf("%s: Restart error %q missing %q", label, restartErr, want)
+			}
+		}
+		if strings.Contains(restartErr.Error(), "server remains stopped") {
+			t.Fatalf("%s: Restart error %q claims the server stopped", label, restartErr)
+		}
+		state, err := doltserver.IsRunning(beadsDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !state.Running || state.PID != first.PID || state.Port != sqlPort {
+			t.Fatalf("%s: state after refused restart = %+v, want the original server (PID %d, port %d) running", label, state, first.PID, sqlPort)
+		}
+		if greeted, probeErr := doltserver.ProbeSQLServer("tcp", fmt.Sprintf("127.0.0.1:%d", sqlPort), 2*time.Second); probeErr != nil || !greeted {
+			t.Fatalf("%s: SQL port %d stopped serving after a refused restart (greeted=%v, err=%v)", label, sqlPort, greeted, probeErr)
 		}
 	}
-	state, err := doltserver.IsRunning(beadsDir)
-	if err != nil {
-		t.Fatal(err)
+
+	t.Setenv("BEADS_DOLT_REMOTESAPI_PORT", fmt.Sprintf("%d", blockedRAPIPort))
+	_, restartErr := doltserver.Restart(beadsDir)
+	assertStillRunning("occupied remotesapi port", restartErr)
+
+	t.Setenv("BEADS_DOLT_REMOTESAPI_PORT", fmt.Sprintf("%d", sqlPort))
+	_, restartErr = doltserver.Restart(beadsDir)
+	assertStillRunning("remotesapi port equal to SQL port", restartErr)
+
+	if err := doltserver.Stop(beadsDir); err != nil {
+		t.Fatalf("Stop: %v", err)
 	}
-	if state.Running {
-		t.Fatalf("server still running after failed restart: %+v", state)
-	}
-	if got := doltserver.ReadPortFile(beadsDir); got != sqlPort {
-		t.Fatalf("SQL port after failed restart = %d, want preserved %d for retry", got, sqlPort)
-	}
+	reg.Deregister(first.PID)
 }
