@@ -1136,14 +1136,15 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 					fmt.Fprintf(os.Stderr, "%s %s\n", ui.RenderWarn("!"), earlyProbeNote)
 				}
 				earlyDecision := CheckRemoteSafety(RemoteSafetyInput{
-					Force:             force,
-					ReinitLocal:       reinitLocal,
-					FromJSONL:         fromJSONL,
-					DiscardRemote:     discardRemote,
-					DestroyToken:      destroyToken,
-					ExpectedToken:     FormatDestroyToken(prefix),
-					RemoteHasDoltData: earlyRemoteHasDoltData,
-					IsInteractive:     term.IsTerminal(int(os.Stdin.Fd())),
+					Force:              force,
+					ReinitLocal:        reinitLocal,
+					FromJSONL:          fromJSONL,
+					DiscardRemote:      discardRemote,
+					DestroyToken:       destroyToken,
+					ExpectedToken:      FormatDestroyToken(prefix),
+					RemoteHasDoltData:  earlyRemoteHasDoltData,
+					RemoteProbeUnknown: earlyProbeNote != "",
+					IsInteractive:      term.IsTerminal(int(os.Stdin.Fd())),
 				})
 				if _, err := handleRemoteSafetyDecision(earlyDecision, prefix, earlySyncURL, destroyToken, func() (bool, error) {
 					switch earlyRemoteSource {
@@ -1500,14 +1501,15 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			}
 			if !syncFromRemote {
 				decision := CheckRemoteSafety(RemoteSafetyInput{
-					Force:             force,
-					ReinitLocal:       reinitLocal,
-					FromJSONL:         fromJSONL,
-					DiscardRemote:     discardRemote,
-					DestroyToken:      destroyToken,
-					ExpectedToken:     FormatDestroyToken(prefix),
-					RemoteHasDoltData: remoteHasDoltData,
-					IsInteractive:     term.IsTerminal(int(os.Stdin.Fd())),
+					Force:              force,
+					ReinitLocal:        reinitLocal,
+					FromJSONL:          fromJSONL,
+					DiscardRemote:      discardRemote,
+					DestroyToken:       destroyToken,
+					ExpectedToken:      FormatDestroyToken(prefix),
+					RemoteHasDoltData:  remoteHasDoltData,
+					RemoteProbeUnknown: lateProbeNote != "",
+					IsInteractive:      term.IsTerminal(int(os.Stdin.Fd())),
 				})
 				bootstrap, err := handleRemoteSafetyDecision(decision, prefix, syncURL, destroyToken, func() (bool, error) {
 					return gitRemoteHasDoltDataRefStatus(syncURL)
@@ -1535,14 +1537,15 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				}
 
 				decision := CheckRemoteSafety(RemoteSafetyInput{
-					Force:             force,
-					ReinitLocal:       reinitLocal,
-					FromJSONL:         fromJSONL,
-					DiscardRemote:     discardRemote,
-					DestroyToken:      destroyToken,
-					ExpectedToken:     FormatDestroyToken(prefix),
-					RemoteHasDoltData: remoteHasDoltData,
-					IsInteractive:     term.IsTerminal(int(os.Stdin.Fd())),
+					Force:              force,
+					ReinitLocal:        reinitLocal,
+					FromJSONL:          fromJSONL,
+					DiscardRemote:      discardRemote,
+					DestroyToken:       destroyToken,
+					ExpectedToken:      FormatDestroyToken(prefix),
+					RemoteHasDoltData:  remoteHasDoltData,
+					RemoteProbeUnknown: lateProbeNote != "",
+					IsInteractive:      term.IsTerminal(int(os.Stdin.Fd())),
 				})
 
 				bootstrap, err := handleRemoteSafetyDecision(decision, prefix, syncURL, destroyToken, gitOriginHasDoltDataRefStatus, remoteHasDoltData, &remoteDivergenceConfirmed)
@@ -3601,9 +3604,15 @@ func shouldWriteInitDoltRemote(gateway bool, syncURL string, syncFromRemote, syn
 }
 
 // resolveRemoteHasDoltDataProbe fails closed: a probe error is UNKNOWN, and
-// ADR-0002 treats unknown as has-data (refuse) rather than no-data. Returns
-// the resolved bool for CheckRemoteSafety plus a note naming the probe
-// failure (empty on success) so the caller can tell the user why.
+// the bool returned here is the fail-closed RemoteHasDoltData CheckRemoteSafety
+// sees for its default (no-override) bootstrap decision. Returns the resolved
+// bool plus a note naming the probe failure (empty on success) so the caller
+// can tell the user why. The note deliberately does not assert what CheckRemoteSafety
+// will do with the result — it differs by caller mode (GH#7665): the
+// no-override path falls back to a fresh local database, and so does
+// --force/--reinit-local/--from-jsonl without an explicit --discard-remote
+// (see RemoteSafetyInput.RemoteProbeUnknown), while an explicit
+// --discard-remote still runs its destroy-token flow.
 func resolveRemoteHasDoltDataProbe(syncURL string, hasData bool, err error) (bool, string) {
 	if err != nil {
 		return true, fmt.Sprintf("could not verify refs/dolt/data on %s (%s); treating remote as having Dolt history", remedy.PrintedValue(syncURL), remedy.PrintedText(err.Error()))

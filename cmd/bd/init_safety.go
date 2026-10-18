@@ -126,6 +126,16 @@ type RemoteSafetyInput struct {
 	// Observed state.
 	RemoteHasDoltData bool
 
+	// RemoteProbeUnknown is true when RemoteHasDoltData is set to true only
+	// because the refs/dolt/data probe failed (network/auth/timeout — see
+	// resolveRemoteHasDoltDataProbe's fail-closed UNKNOWN convention), not
+	// because the probe actually observed Dolt history. Zero value (false)
+	// means the probe result is trustworthy: either it genuinely found
+	// refs/dolt/data, or RemoteHasDoltData is false because the probe
+	// genuinely found none. Existing callers that don't set this field keep
+	// their prior meaning.
+	RemoteProbeUnknown bool
+
 	// IsInteractive is true when the caller is attached to a TTY.
 	// Interactive callers can prompt for destroy-token confirmation, so the
 	// decision returned for an interactive caller that supplied NO token
@@ -167,6 +177,26 @@ func CheckRemoteSafety(in RemoteSafetyInput) RemoteSafetyDecision {
 	// safe adoption path — this is the existing correct behavior.
 	if !userOverride {
 		return RemoteSafetyDecision{Action: ActionBootstrap, Reason: "bootstrap-from-remote"}
+	}
+
+	// Remote state was never actually observed (the refs/dolt/data probe
+	// failed — network, auth, or a nonexistent remote) and the user did
+	// not explicitly declare they know about remote data via
+	// --discard-remote. Treat it exactly like no-remote-data instead of
+	// refusing. This mirrors the no-override path's own existing fallback
+	// for an unreachable origin (see the probeErr-gated fallback in
+	// init.go, next to resolveRemoteHasDoltDataProbe): there is nothing to
+	// protect against orphan-pushing over a remote whose state was never
+	// confirmed, and --force/--reinit-local/--from-jsonl must not be
+	// refused over a probe failure they did not cause — the prior
+	// behavior refused with "remote already has Dolt history", which is
+	// not true; the remote was simply unreachable (GH#7665). An explicit
+	// --discard-remote still runs the destroy-token flow below: naming
+	// discard is the user's own claim that there is something to discard,
+	// so a declared intent to discard gets a safety check attached rather
+	// than being silently ignored.
+	if in.RemoteProbeUnknown && !in.DiscardRemote {
+		return RemoteSafetyDecision{Action: ActionNoRemoteData, Reason: "remote-state-unverified"}
 	}
 
 	// User wanted to override but did NOT authorize the cross-boundary
