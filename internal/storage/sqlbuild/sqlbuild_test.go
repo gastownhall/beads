@@ -466,8 +466,12 @@ func TestSearchCountsSQLShape(t *testing.T) {
 	}
 
 	// By-IDs form: driver and every subquery are constrained to the ids, and the
-	// arg count matches the placeholder injection points (labels, dc, rc-deps,
-	// rc-wisp, cc, pc, d, driver = 8 for the wisp family with labels).
+	// arg count matches the placeholder injection points (labels=1, dc=1,
+	// rc-deps=3, rc-wisp=3, cc=1, pc=1, d=1, driver=1 = 12 for the wisp family
+	// with labels). rc-deps/rc-wisp each inject idArgs three times — once per
+	// OR'd target column (depends_on_issue_id/depends_on_wisp_id/
+	// depends_on_external) — instead of once through a COALESCE filter
+	// (GH#7666: COALESCE in a WHERE clause defeats Dolt's index).
 	byIDs, idArgs := SearchCountsSQL(WispsFilterTables, []string{"a", "b"}, "", "", "", true, CountsHydration{})
 	if !strings.Contains(byIDs, "WHERE i.id IN (?,?)") {
 		t.Errorf("by-IDs counts SQL missing driver id filter:\n%s", byIDs)
@@ -481,15 +485,21 @@ func TestSearchCountsSQLShape(t *testing.T) {
 	if strings.Contains(byIDs, "ORDER BY") || strings.Contains(byIDs, "LIMIT") {
 		t.Error("by-IDs counts SQL must not carry ORDER BY / LIMIT (order restored in Go)")
 	}
-	if len(idArgs) != 8*2 {
-		t.Errorf("by-IDs args = %d, want %d", len(idArgs), 8*2)
+	if strings.Contains(byIDs, "COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) IN") {
+		t.Errorf("by-IDs counts SQL must not filter the reverse-blocker subquery through COALESCE (GH#7666):\n%s", byIDs)
+	}
+	if !strings.Contains(byIDs, "(depends_on_issue_id IN (?,?) OR depends_on_wisp_id IN (?,?) OR depends_on_external IN (?,?))") {
+		t.Errorf("by-IDs counts SQL missing the index-friendly OR'd target-column filter:\n%s", byIDs)
+	}
+	if len(idArgs) != 12*2 {
+		t.Errorf("by-IDs args = %d, want %d", len(idArgs), 12*2)
 	}
 
 	// skipLabels drops the labels point and !includeWispReverseDeps drops the
-	// rc-wisp point, leaving 6 injection points (dc, rc-deps, cc, pc, d, driver).
+	// rc-wisp points, leaving dc=1, rc-deps=3, cc=1, pc=1, d=1, driver=1 = 8.
 	_, idArgsNoLabels := SearchCountsSQL(IssuesFilterTables, []string{"a", "b"}, "", "", "", false, CountsHydration{SkipLabels: true})
-	if len(idArgsNoLabels) != 6*2 {
-		t.Errorf("by-IDs args (skipLabels, no wisp deps) = %d, want %d", len(idArgsNoLabels), 6*2)
+	if len(idArgsNoLabels) != 8*2 {
+		t.Errorf("by-IDs args (skipLabels, no wisp deps) = %d, want %d", len(idArgsNoLabels), 8*2)
 	}
 
 	// SkipCounts drops the three cardinality joins and projects constants in

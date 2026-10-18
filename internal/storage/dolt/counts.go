@@ -22,6 +22,18 @@ import (
 // matches issueops.DepTargetExpr on main.
 const depTargetExpr = "COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external)"
 
+// depTargetEqualsOrD is a SARGABLE target-equality predicate as an explicit
+// per-column OR, qualified with the "d." alias CountDependentsByStatus's two
+// dependency-table joins use, binding the target id once per typed column
+// (three args, in that column order): unlike depTargetExpr's COALESCE
+// wrapper, which wraps the columns in an expression no index can match, each
+// disjunct is a bare indexed column. The COALESCE form forced a full table
+// scan of dependencies/wisp_dependencies that grows with total dependency
+// rows rather than with the matched set (GH#7666). This mirrors
+// issueops.depTargetEqualsOr() on main; see that function's comment for the
+// index-merge planner comparison.
+const depTargetEqualsOrD = "(d.depends_on_issue_id = ? OR d.depends_on_wisp_id = ? OR d.depends_on_external = ?)"
+
 // CountIssues returns the number of issues matching query and filter.
 // Filter.Limit and Filter.Offset are ignored; all other fields apply.
 // Wisps-merge semantics follow SearchIssues: SkipWisps=true counts the
@@ -56,7 +68,10 @@ func (s *DoltStore) CountIssuesByGroup(ctx context.Context, filter types.IssueFi
 // total matches GetDependentsWithMetadata (bd-cif6y4). An edge held in both
 // planes counts once, and a database with no `wisp_dependencies` counts the
 // durable plane alone. The body is issueops.CountDependencyEdgesInTx, the one
-// the proxied path runs.
+// the proxied path runs; its target lookups use the SARGABLE depTargetEqualsOr
+// predicate rather than depTargetExpr's COALESCE form, which defeated the
+// index and turned this into a full table scan that grew with total
+// dependency rows (GH#7666).
 func (s *DoltStore) CountDependents(ctx context.Context, issueID string) (int64, error) {
 	var n int64
 	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
@@ -128,15 +143,15 @@ func (s *DoltStore) CountDependentsByStatus(ctx context.Context, issueID string,
 		if err := tx.QueryRowContext(ctx,
 			`SELECT count(*) FROM dependencies d
 			 JOIN issues i ON i.id = d.issue_id
-			 WHERE COALESCE(d.depends_on_issue_id, d.depends_on_wisp_id, d.depends_on_external) = ? AND i.status = ?`,
-			issueID, string(status)).Scan(&perm); err != nil {
+			 WHERE `+depTargetEqualsOrD+` AND i.status = ?`,
+			issueID, issueID, issueID, string(status)).Scan(&perm); err != nil {
 			return err
 		}
 		if err := tx.QueryRowContext(ctx,
 			`SELECT count(*) FROM wisp_dependencies d
 			 JOIN wisps w ON w.id = d.issue_id
-			 WHERE COALESCE(d.depends_on_issue_id, d.depends_on_wisp_id, d.depends_on_external) = ? AND w.status = ?`,
-			issueID, string(status)).Scan(&wisp); err != nil {
+			 WHERE `+depTargetEqualsOrD+` AND w.status = ?`,
+			issueID, issueID, issueID, string(status)).Scan(&wisp); err != nil {
 			return err
 		}
 		n = perm + wisp
