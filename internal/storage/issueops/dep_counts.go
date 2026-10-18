@@ -26,14 +26,23 @@ func CountDependencyEdgesInTx(ctx context.Context, tx DBTX, sourceID string, dir
 
 	var total int64
 	if dir == domain.DepDirectionOut || dir == domain.DepDirectionBoth {
-		n, err := countDistinctEdges(ctx, tx, "issue_id = ?", DepTargetExpr, DepTargetExpr+" IS NOT NULL", typeClause, sourceID, typeArgs)
+		n, err := countDistinctEdges(ctx, tx, "issue_id = ?", DepTargetExpr, DepTargetExpr+" IS NOT NULL", typeClause, []any{sourceID}, typeArgs)
 		if err != nil {
 			return 0, err
 		}
 		total += n
 	}
 	if dir == domain.DepDirectionIn || dir == domain.DepDirectionBoth {
-		n, err := countDistinctEdges(ctx, tx, DepTargetExpr+" = ?", "issue_id", "", typeClause, sourceID, typeArgs)
+		// depTargetEqualsOr, not DepTargetExpr+" = ?": the COALESCE form
+		// wraps the three target columns in an expression no index can
+		// match, so this count degraded into a full table scan of
+		// dependencies/wisp_dependencies (GH#7666). depTargetEqualsOr is
+		// the existing SARGABLE per-column-OR predicate already used by
+		// queryDependentRecordsFromTable and CountDependentRecordsInTx
+		// for the same reason — this just wires it into the one count
+		// path that still used the COALESCE form. sourceID repeats once
+		// per OR'd column (depTargetEqualsOr's own doc comment).
+		n, err := countDistinctEdges(ctx, tx, depTargetEqualsOr(), "issue_id", "", typeClause, []any{sourceID, sourceID, sourceID}, typeArgs)
 		if err != nil {
 			return 0, err
 		}
@@ -45,9 +54,12 @@ func CountDependencyEdgesInTx(ctx context.Context, tx DBTX, sourceID string, dir
 // countDistinctEdges counts the durable rows matching anchorExpr, plus the wisp
 // rows matching it whose farCol the durable plane does not already hold for the
 // same anchor. farGuard, when set, keeps NULL far ends out of the NOT IN list,
-// where a single NULL would make every comparison unknown.
-func countDistinctEdges(ctx context.Context, tx DBTX, anchorExpr, farCol, farGuard, typeClause, sourceID string, typeArgs []any) (int64, error) {
-	durable, err := countDepWhere(ctx, tx, "dependencies", anchorExpr, typeClause, []any{sourceID}, typeArgs)
+// where a single NULL would make every comparison unknown. anchorArgs binds
+// anchorExpr's own placeholders (once for the durable count; doubled for the
+// wisp count, since wispWhere embeds anchorExpr twice — once directly, once
+// inside durableFar's nested subquery).
+func countDistinctEdges(ctx context.Context, tx DBTX, anchorExpr, farCol, farGuard, typeClause string, anchorArgs []any, typeArgs []any) (int64, error) {
+	durable, err := countDepWhere(ctx, tx, "dependencies", anchorExpr, typeClause, anchorArgs, typeArgs)
 	if err != nil {
 		return 0, err
 	}
@@ -56,7 +68,8 @@ func countDistinctEdges(ctx context.Context, tx DBTX, anchorExpr, farCol, farGua
 		durableFar += " AND " + farGuard
 	}
 	wispWhere := fmt.Sprintf("%s AND %s NOT IN (%s)", anchorExpr, farCol, durableFar)
-	wisp, err := countDepWhere(ctx, tx, "wisp_dependencies", wispWhere, typeClause, []any{sourceID, sourceID}, typeArgs)
+	wispArgs := append(append([]any{}, anchorArgs...), anchorArgs...)
+	wisp, err := countDepWhere(ctx, tx, "wisp_dependencies", wispWhere, typeClause, wispArgs, typeArgs)
 	if err != nil {
 		if optionalBlockedTable("wisp_dependencies") && dberrors.IsMissingTable(err, "wisp_dependencies") {
 			return durable, nil
