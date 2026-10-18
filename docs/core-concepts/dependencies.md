@@ -214,33 +214,38 @@ beads issue status.
 
 ### Creating Gates
 
+`bd gate create` creates the gate and wires it to block the named issue in
+one step — there is no separate `bd dep add` call to make afterward.
+
 ```bash
 # Wait for PR #42 to merge
-bd create --type=gate --title="Wait for PR #42" \
-  --await-type=gh:pr --await-id=42
+bd gate create --type=gh:pr --blocks issue-2 --await-id=42 \
+  --title="Wait for PR #42"
 
 # Wait for CI run
-bd create --type=gate --title="Wait for CI" \
-  --await-type=gh:run --await-id=12345
+bd gate create --type=gh:run --blocks issue-2 --await-id=12345 \
+  --title="Wait for CI"
 
 # Wait 30 minutes
-bd create --type=gate --title="Cooldown" \
-  --await-type=timer --await-id=30m
+bd gate create --type=timer --blocks issue-2 --timeout=30m \
+  --title="Cooldown"
 
 # Wait for a cross-rig bead to close
-bd create --type=gate --title="Wait for upstream fix" \
-  --await-type=bead --await-id=other-rig:issue-id
+bd gate create --type=bead --blocks issue-2 --await-id=other-rig:issue-id \
+  --title="Wait for upstream fix"
 
-# Manual approval gate
-bd create --type=gate --title="Deploy approval"
+# Manual approval gate (the default type when --type is omitted)
+bd gate create --blocks issue-2 --title="Deploy approval"
 ```
 
 ### Wiring Gates into Dependencies
 
-A gate is an issue. Wire it into the dependency graph like any other:
+`--blocks` above already wires the gate into the dependency graph — `bd dep
+add` is not needed for a gate created this way. It stays available for
+wiring an *existing* gate issue (or any other issue) as a dependency by hand:
 
 ```bash
-# issue-2 waits for the gate (which waits for PR #42)
+# issue-2 waits for an existing gate <gate-id> (which waits for PR #42)
 bd dep add issue-2 <gate-id>
 ```
 
