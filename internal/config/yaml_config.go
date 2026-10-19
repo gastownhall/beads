@@ -1557,8 +1557,13 @@ func unsupportedUnsetShape(content, key string) error {
 			if err := blockScalarUnsetRefusal(top.Content[idx+1], key); err != nil {
 				return err
 			}
-			if err := spansLinesUnsetRefusal(content, top.Content[idx], key); err != nil {
-				return err
+			// The probe holds only for an entry of a block mapping: under a
+			// flow-style top level the cut can end inside the mapping's own
+			// braces, which fails whatever the value is.
+			if top.Style&yaml.FlowStyle == 0 {
+				if err := spansLinesUnsetRefusal(content, top.Content[idx], key); err != nil {
+					return err
+				}
 			}
 		}
 	}

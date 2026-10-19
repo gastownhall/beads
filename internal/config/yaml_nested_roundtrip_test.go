@@ -600,6 +600,10 @@ func TestUnsetRefusesShapesItCannotEdit(t *testing.T) {
 	}{
 		{name: "flow style section", seed: "sync: {remote: \"file:///origin.git\"}\n", key: "sync.remote", want: "flow style"},
 		{name: "flow style nested deeper", seed: "dolt:\n    limits: {host: mini}\n", key: "dolt.limits.host", want: "flow style"},
+		// A flow-style top level spread over lines is still named for its
+		// style. The key's own value ends on its line; only the mapping
+		// around it goes on.
+		{name: "flow style top level spread over lines", seed: "{notes: x,\n  node_id: mini}\n", key: "notes", want: "flow style"},
 		{name: "literal block scalar", seed: "sync:\n    remote: |\n        line1\n        line2\n", key: "sync.remote", want: "block scalar"},
 		{name: "folded block scalar", seed: "sync:\n    remote: >\n        line1\n", key: "sync.remote", want: "block scalar"},
 		// The flat spelling reaches the same body-left-behind outcome by the
