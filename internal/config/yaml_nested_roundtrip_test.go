@@ -618,6 +618,10 @@ func TestUnsetRefusesShapesItCannotEdit(t *testing.T) {
 		// indented `branch: b}` parses as the whole document and the keys
 		// after it (`node_id`) stop reading at all.
 		{name: "flow mapping wrapped under the flat spelling", seed: "sync.remote: {url: a,\n  branch: b}\nnode_id: mini\n", key: "sync.remote", want: "spans more than one line"},
+		// The rest can sit at the key's own indentation, where it reads as a
+		// sibling key rather than as lines beneath this one, so no indentation
+		// rule sees it; only where the entry ends does.
+		{name: "flow mapping that closes at the key's own indentation", seed: "sync:\n  remote: {url: a,\n  branch: b}\nnode_id: mini\n", key: "sync.remote", want: "spans more than one line"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
