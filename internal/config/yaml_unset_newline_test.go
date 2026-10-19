@@ -255,6 +255,46 @@ func TestUnsetOfAPresentKeyInACRLFFileReportsTheWrite(t *testing.T) {
 	})
 }
 
+// The user-global config.yaml goes through the same line matcher, so a value
+// that wraps onto the next line is refused there as well, with nothing written
+// and no change reported. node_id has a single segment, so this is the
+// top-level half of the refusal.
+func TestUnsetUserYamlConfigRefusesAValueThatSpansLines(t *testing.T) {
+	const body = "node_id: \"mini\n  box\"\n"
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	path, err := UserConfigYamlPath()
+	if err != nil {
+		t.Fatalf("UserConfigYamlPath: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := UnsetUserYamlConfig("node_id")
+	if err == nil {
+		after, _ := os.ReadFile(path) //nolint:gosec,errcheck // test-owned temp path; diagnostic
+		t.Fatalf("UnsetUserYamlConfig reported success on a value that spans two lines:\n%q", string(after))
+	}
+	if !strings.Contains(err.Error(), "node_id") || !strings.Contains(err.Error(), "spans more than one line") {
+		t.Errorf("the error names neither the key nor the shape: %v", err)
+	}
+	if changed {
+		t.Error("UnsetUserYamlConfig() changed = true for an unset it refused")
+	}
+	after, err := os.ReadFile(path) //nolint:gosec // test-owned temp path
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != body {
+		t.Errorf("a refused unset still changed the file:\ngot:  %q\nwant: %q", string(after), body)
+	}
+}
+
 // The set twin of TestCommentOutYamlKeyPreservesTheTrailingNewline.
 // updateYamlKey's flat-key path read the document with bufio.Scanner and joined
 // the lines back with "\n" — the shape commentOutYamlKey used to have — so it
