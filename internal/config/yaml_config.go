@@ -1555,6 +1555,7 @@ func unsupportedUnsetShape(content, key string) error {
 	}
 
 	node := root.Content[0]
+	var keyNode *yaml.Node
 	parents := make([]*yaml.Node, 0, len(segments))
 	for _, segment := range segments {
 		if node.Kind != yaml.MappingNode {
@@ -1565,7 +1566,7 @@ func unsupportedUnsetShape(content, key string) error {
 			return nil
 		}
 		parents = append(parents, node)
-		node = node.Content[idx+1]
+		keyNode, node = node.Content[idx], node.Content[idx+1]
 	}
 
 	for i, parent := range parents {
@@ -1578,7 +1579,10 @@ func unsupportedUnsetShape(content, key string) error {
 		}
 		return fmt.Errorf("cannot unset %q: %s is written in flow style ({...}), which bd cannot edit; remove the key by hand", key, where)
 	}
-	return blockScalarUnsetRefusal(node, key)
+	if err := blockScalarUnsetRefusal(node, key); err != nil {
+		return err
+	}
+	return spansLinesUnsetRefusal(content, keyNode, key)
 }
 
 // blockScalarUnsetRefusal refuses a key whose value is written as a block
@@ -1590,6 +1594,39 @@ func blockScalarUnsetRefusal(valueNode *yaml.Node, key string) error {
 		return nil
 	}
 	return fmt.Errorf("cannot unset %q: its value is a block scalar (| or >), and commenting the key out would leave the body behind as a value of its own; remove the key by hand", key)
+}
+
+// spansLinesUnsetRefusal refuses a key of a block mapping whose value starts on
+// the key's own line and does not end there: a flow collection or a quoted
+// string wrapped onto the next line (`remote: {url: a,` then `branch: b}`).
+// The line matcher comments out only the key's line, so the rest of the value
+// would stay behind with its opening bracket or quote gone: as a line that
+// re-reads as a key nobody set (`branch: b}`), or one that stops the file from
+// parsing.
+//
+// It is decided by where the entry ends, not by the value's style: the same
+// collection written on one line comments out cleanly. Everything above an
+// entry of a block mapping is either a finished entry or an enclosing block
+// mapping, and those end with the document, so the document cut off after the
+// key's line parses whenever the entry ends on that line, and fails while a
+// flow collection or quoted string opened on it is still open. Cutting the
+// document rather than parsing the one line on its own, as replaceFlatKeyLine
+// does, keeps anchors in scope: `remote: *r` is a whole entry, but its alias
+// resolves only against an anchor defined above it.
+//
+// A plain scalar continued onto the next line (`remote: file:///a`, then a
+// deeper `b`) is not caught: cut after any of its lines it still parses, as a
+// shorter value, and yaml.v3 records where a value starts, not where it ends.
+func spansLinesUnsetRefusal(content string, keyNode *yaml.Node, key string) error {
+	lines := strings.Split(content, "\n")
+	if keyNode.Line < 1 || keyNode.Line > len(lines) {
+		return nil
+	}
+	var probe yaml.Node
+	if yaml.Unmarshal([]byte(strings.Join(lines[:keyNode.Line], "\n")), &probe) == nil {
+		return nil
+	}
+	return fmt.Errorf("cannot unset %q: its value spans more than one line, and commenting the key out would leave the rest of it behind; remove the key by hand", key)
 }
 
 // blockScalarIndent reports the indentation of a key whose value is a literal

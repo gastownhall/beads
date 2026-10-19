@@ -607,6 +607,13 @@ func TestUnsetRefusesShapesItCannotEdit(t *testing.T) {
 		{name: "plain scalar on the next line", seed: "dolt.mode:\n  server\n", key: "dolt.mode", want: "lines beneath it"},
 		// A CRLF blank line is a lone carriage return, not content at column 0.
 		{name: "mapping behind a CRLF blank line", seed: "backup:\r\n\r\n  enabled: false\r\n", key: "backup", want: "lines beneath it"},
+		// A value that starts on the key's line and wraps onto the next one:
+		// commenting the key line out leaves the rest of the value behind
+		// without its opening bracket or quote, as a line that re-reads as a
+		// key of the section (`sync.branch: "b}"`) or one that stops the file
+		// from parsing. The same value written on one line still comments out
+		// cleanly.
+		{name: "flow mapping wrapped onto the next line", seed: "sync:\n    remote: {url: a,\n        branch: b}\nnode_id: mini\n", key: "sync.remote", want: "spans more than one line"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
