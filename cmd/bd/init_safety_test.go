@@ -148,6 +148,8 @@ func TestInitReinitLocalWithUnreachableGitOriginSucceeds(t *testing.T) {
 	workDir := t.TempDir()
 	runGitForBootstrapTest(t, workDir, "init", "-b", "main")
 	runGitForBootstrapTest(t, workDir, "config", "core.hooksPath", ".git/hooks")
+	runGitForBootstrapTest(t, workDir, "config", "user.email", "test@test.com")
+	runGitForBootstrapTest(t, workDir, "config", "user.name", "Test User")
 	runGitForBootstrapTest(t, workDir, "commit", "--allow-empty", "-m", "init")
 	// An origin whose probe errors (missing path -> git ls-remote exit 128),
 	// not one that answers "no refs/dolt/data" — the issue's own repro shape.
