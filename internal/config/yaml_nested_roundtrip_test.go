@@ -622,6 +622,7 @@ func TestUnsetRefusesShapesItCannotEdit(t *testing.T) {
 		// sibling key rather than as lines beneath this one, so no indentation
 		// rule sees it; only where the entry ends does.
 		{name: "flow mapping that closes at the key's own indentation", seed: "sync:\n  remote: {url: a,\n  branch: b}\nnode_id: mini\n", key: "sync.remote", want: "spans more than one line"},
+		{name: "flow sequence wrapped onto the next line", seed: "types.custom: [step,\n  slot]\nnode_id: mini\n", key: "types.custom", want: "spans more than one line"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
