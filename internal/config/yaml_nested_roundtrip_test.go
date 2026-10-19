@@ -626,6 +626,7 @@ func TestUnsetRefusesShapesItCannotEdit(t *testing.T) {
 		// A quoted string can wrap as well; YAML folds the break into a space.
 		// Left behind, `line two"` stops the file from parsing.
 		{name: "double-quoted string wrapped onto the next line", seed: "notes: \"line one\n  line two\"\nnode_id: mini\n", key: "notes", want: "spans more than one line"},
+		{name: "single-quoted string wrapped under the flat spelling", seed: "dolt.host: '10.0.0.1\n  more'\nnode_id: mini\n", key: "dolt.host", want: "spans more than one line"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
