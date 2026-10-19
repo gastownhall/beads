@@ -500,6 +500,17 @@ func TestUnsetRemovesADottedKeyInEveryShape(t *testing.T) {
 			key:       "dolt.host",
 			survivors: map[string]string{"dolt.note": "line one line two"},
 		},
+		{
+			// A flow collection that opens and closes on the key's own line is
+			// a whole entry on that line, so commenting the line out removes
+			// it cleanly. TestUnsetRefusesShapesItCannotEdit refuses the same
+			// collection wrapped onto the next line; that refusal is decided by
+			// where the entry ends, not by its style, and must not reach this.
+			name:      "flow mapping leaf on one line",
+			seed:      "sync:\n  remote: {url: a, branch: b}\nnode_id: mini\n",
+			key:       "sync.remote",
+			survivors: map[string]string{"node_id": "mini"},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
