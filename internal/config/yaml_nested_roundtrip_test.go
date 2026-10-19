@@ -511,6 +511,24 @@ func TestUnsetRemovesADottedKeyInEveryShape(t *testing.T) {
 			key:       "sync.remote",
 			survivors: map[string]string{"node_id": "mini"},
 		},
+		{
+			// An alias resolves only against an anchor defined above it, so
+			// the key's line parsed on its own fails on `*r` even though the
+			// entry ends right there. The refusal must judge the line with the
+			// anchor in scope, or it refuses a value it can remove cleanly.
+			name:      "alias to an anchor above",
+			seed:      "sync:\n  remote: &r file:///a\nbackup:\n  remote: *r\n",
+			key:       "backup.remote",
+			survivors: map[string]string{"sync.remote": "file:///a"},
+		},
+		{
+			// The same holds for an alias inside a one-line collection, which an
+			// exception for a value that is a bare alias would not cover.
+			name:      "alias inside a one-line collection",
+			seed:      "sync:\n  remote: &r file:///a\nbackup:\n  remotes: [*r, file:///b]\n",
+			key:       "backup.remotes",
+			survivors: map[string]string{"sync.remote": "file:///a"},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
