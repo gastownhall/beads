@@ -623,6 +623,9 @@ func TestUnsetRefusesShapesItCannotEdit(t *testing.T) {
 		// rule sees it; only where the entry ends does.
 		{name: "flow mapping that closes at the key's own indentation", seed: "sync:\n  remote: {url: a,\n  branch: b}\nnode_id: mini\n", key: "sync.remote", want: "spans more than one line"},
 		{name: "flow sequence wrapped onto the next line", seed: "types.custom: [step,\n  slot]\nnode_id: mini\n", key: "types.custom", want: "spans more than one line"},
+		// A quoted string can wrap as well; YAML folds the break into a space.
+		// Left behind, `line two"` stops the file from parsing.
+		{name: "double-quoted string wrapped onto the next line", seed: "notes: \"line one\n  line two\"\nnode_id: mini\n", key: "notes", want: "spans more than one line"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
