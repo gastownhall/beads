@@ -1513,18 +1513,24 @@ func (w *nestedKeyWalk) stepOver(line string) {
 	w.opaque = lineIndent(line)
 }
 
-// unsupportedUnsetShape reports the two shapes named in the changelog — a key
-// under a flow-style mapping, and a key whose value is a block scalar — in
-// whichever spelling the file uses. Both used to be silent: the flow-style one
-// reported success while the value stayed live, and the block scalar had its key
-// line commented out while the body stayed behind as a value of its own. The set
-// direction already refuses what it cannot write correctly, so unset says so too.
+// unsupportedUnsetShape reports the shapes named in the changelog — a key under
+// a flow-style mapping, a key whose value is a block scalar, and a key whose
+// flow collection or quoted string wraps past its own line — in whichever
+// spelling the file uses. All three used to be silent: the flow-style one
+// reported success while the value stayed live, and the other two had their
+// key line commented out while the rest of the value stayed behind, to be
+// re-read as something else or to stop the file from parsing. The set
+// direction already refuses what it cannot write correctly, so unset says so
+// too.
 //
-// This is a list of known shapes, not a decision procedure for the whole class:
-// a value that spans lines in flow or quoted style lands its body in the same
-// place and is still silent. A mapping-valued key is refused by the line
-// matcher itself (mappingValueUnsetRefusal), which also covers single-segment
-// keys this function never walks.
+// The first two are named shapes with diagnoses of their own. The third is
+// decided by where the entry ends rather than by the value's style
+// (spansLinesUnsetRefusal), so the same value written on one line still
+// comments out cleanly. A plain scalar continued onto the next line wraps as
+// well and is still silent: nothing yaml.v3 records says where it ends. A
+// mapping-valued key is refused by the line matcher itself
+// (mappingValueUnsetRefusal), which also covers single-segment keys this
+// function never walks.
 //
 // Only a key that is actually present can be refused: unsetting a key that was
 // never there has always been a successful no-op, and staying silent about a
@@ -1549,6 +1555,9 @@ func unsupportedUnsetShape(content, key string) error {
 	if top := root.Content[0]; top.Kind == yaml.MappingNode {
 		if idx := findMappingChild(top, key); idx != -1 {
 			if err := blockScalarUnsetRefusal(top.Content[idx+1], key); err != nil {
+				return err
+			}
+			if err := spansLinesUnsetRefusal(content, top.Content[idx], key); err != nil {
 				return err
 			}
 		}

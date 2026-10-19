@@ -5132,16 +5132,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `sync.remote` silently left the remote live. Keys the write does not own,
   including dotted ones somebody else put there, are left exactly as they are.
 
-  Four things that used to succeed now report an error instead, because each one
+  Five things that used to succeed now report an error instead, because each one
   produced a value no reader could see, or claimed to remove a value it had
   left live. On `bd config set`: a key under a parent that already holds a value
   (`sync: enabled`, then `bd config set sync.remote`), and a key in a file whose
   top level is not a mapping. On `bd config unset`: a key inside a flow-style
   mapping (`sync: {remote: "..."}`), which bd matches by line and so cannot
-  edit, and a key whose value is a block scalar (`remote: |`, in either
-  spelling), where commenting the key out would leave the body behind as a value
-  of its own. Unsetting a key that is not set remains a successful no-op in
-  every shape.
+  edit; a key whose value is a block scalar (`remote: |`, in either spelling),
+  where commenting the key out would leave the body behind as a value of its
+  own; and a key whose value starts on its line and wraps onto the next (a
+  `{...}` or `[...]` collection or a quoted string spread over lines, in either
+  spelling), where commenting the key line out would leave the rest of the value
+  behind. The same value written on one line still unsets. Unsetting a key that
+  is not set remains a successful no-op in every shape.
 - **A self-hosted GitLab no longer re-creates its own issues on every push**
   ([#6735](https://github.com/gastownhall/beads/issues/6735)). The tracker
   decided whether a stored `external_ref` was one of its own by looking for

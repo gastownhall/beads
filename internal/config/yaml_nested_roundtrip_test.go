@@ -614,6 +614,10 @@ func TestUnsetRefusesShapesItCannotEdit(t *testing.T) {
 		// from parsing. The same value written on one line still comments out
 		// cleanly.
 		{name: "flow mapping wrapped onto the next line", seed: "sync:\n    remote: {url: a,\n        branch: b}\nnode_id: mini\n", key: "sync.remote", want: "spans more than one line"},
+		// Under the flat spelling the rest lands at the top level, where the
+		// indented `branch: b}` parses as the whole document and the keys
+		// after it (`node_id`) stop reading at all.
+		{name: "flow mapping wrapped under the flat spelling", seed: "sync.remote: {url: a,\n  branch: b}\nnode_id: mini\n", key: "sync.remote", want: "spans more than one line"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
