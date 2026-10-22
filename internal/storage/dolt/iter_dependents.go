@@ -22,6 +22,7 @@ import (
 	"fmt"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
@@ -46,12 +47,13 @@ type doltDependentsIter struct {
 // matches GetDependentsWithMetadata. See the package doc for why the join
 // target per edge table is unambiguous.
 func (s *DoltStore) IterDependentsWithMetadata(ctx context.Context, issueID string) (storage.Iter[types.IssueWithDependencyMetadata], error) {
-	q := fmt.Sprintf(`
+	durable := fmt.Sprintf(`
 		SELECT %s, d.type
 		FROM issues i
 		JOIN dependencies d ON d.issue_id = i.id
 		%s
-		WHERE %s = ?
+		WHERE %s = ?`, prefixedIssueColumns("i"), sqlbuild.LeaseJoin("i"), depTargetExprWithAlias("d"))
+	q := fmt.Sprintf(`%s
 		UNION ALL
 		SELECT %s, d.type
 		FROM wisps w
@@ -59,9 +61,16 @@ func (s *DoltStore) IterDependentsWithMetadata(ctx context.Context, issueID stri
 		%s
 		WHERE %s = ?
 		ORDER BY created_at ASC
-	`, prefixedIssueColumns("i"), sqlbuild.LeaseJoin("i"), depTargetExprWithAlias("d"),
-		prefixedIssueColumns("w"), sqlbuild.LeaseJoin("w"), depTargetExprWithAlias("d"))
-	return s.iterIssuesWithDepType(ctx, q, issueID, issueID)
+	`, durable, prefixedIssueColumns("w"), sqlbuild.LeaseJoin("w"), depTargetExprWithAlias("d"))
+	it, err := s.iterIssuesWithDepType(ctx, q, issueID, issueID)
+	// The wisp plane is dolt-ignored, so a working-set reset can drop wisps or
+	// wisp_dependencies from a server database (bd-cif6y4). Its absence means
+	// there are no wisp dependents: stream the durable leg alone, as the slice
+	// path does. Any other missing table is a broken database and stays an error.
+	if name, ok := dberrors.MissingTableName(err); ok && sqlbuild.OptionalWispTable(name) {
+		return s.iterIssuesWithDepType(ctx, durable+"\n\t\tORDER BY created_at ASC", issueID)
+	}
+	return it, err
 }
 
 func depTargetExprWithAlias(alias string) string {

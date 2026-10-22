@@ -1755,7 +1755,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (bd-cif6y4). With the table missing from a Dolt server's working set
   (after a received `dolt push`, for example), the CHILDREN section, the
   dependency listings and `dependent_count` failed with "table not found"
-  instead of reading the durable edges. With an edge stored in both
+  instead of reading the durable edges, and `bd show --json
+  --include-dependents` failed the same way with either `wisps` or
+  `wisp_dependencies` missing. With an edge stored in both
   `dependencies` and `wisp_dependencies`, the child was listed and counted
   twice, so `bd show` printed 2N children and warned about edges whose far
   end has no row. Each far end is now listed and counted once, carrying the

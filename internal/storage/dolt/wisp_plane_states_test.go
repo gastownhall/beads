@@ -29,6 +29,11 @@ var wispPlaneStates = []wispPlaneState{
 	{name: "missing_wisp_dependencies", apply: func(t *testing.T, ctx context.Context, store *DoltStore, _ string) {
 		execOnOneConn(t, ctx, store, "DROP TABLE wisp_dependencies")
 	}},
+	// The same reset with the wisps table gone instead; the wisp-plane tables
+	// that reference it keep their (now dangling) foreign keys.
+	{name: "missing_wisps", apply: func(t *testing.T, ctx context.Context, store *DoltStore, _ string) {
+		execOnOneConn(t, ctx, store, "SET foreign_key_checks = 0", "DROP TABLE wisps", "SET foreign_key_checks = 1")
+	}},
 }
 
 // seedEpicWithChildren creates an epic with n durable parent-child children
@@ -97,7 +102,8 @@ func mirrorInboundEdgesIntoWispPlane(t *testing.T, ctx context.Context, store *D
 // makes agrees on the epic's N children whatever state the wisp plane is in:
 // the listing behind CHILDREN, the count beside it (a count above the listing
 // prints a false "edges whose far end has no row" warning), and the
-// dependent_count `bd show --json` publishes.
+// dependent_count `bd show --json` publishes, and the dependents and epic
+// rollup `bd show --json --include-dependents` streams.
 func TestDependentsAcrossWispPlaneStates(t *testing.T) {
 	for _, state := range wispPlaneStates {
 		t.Run(state.name, func(t *testing.T) {
@@ -136,18 +142,28 @@ func TestDependentsAcrossWispPlaneStates(t *testing.T) {
 				t.Fatalf("CountDependencies(%s) = %d, %v; want 1, nil", children[1], n, err)
 			}
 
-			details, err := workapi.BuildIssueDetails(ctx, workapi.NewStoreDetailSource(store), epic, false, workapi.DetailOptions{})
+			details, err := workapi.BuildIssueDetails(ctx, workapi.NewStoreDetailSource(store), epic, false, workapi.DetailOptions{IncludeDependents: true})
 			if err != nil {
 				t.Fatalf("BuildIssueDetails: %v", err)
 			}
 			if details.DependentCount == nil || *details.DependentCount != want {
 				t.Fatalf("dependent_count = %v, want %d", derefCount(details.DependentCount), want)
 			}
+			if len(details.Dependents) != len(children) {
+				t.Fatalf("streamed %d dependents, want %d", len(details.Dependents), len(children))
+			}
+			if details.UnresolvableDependents != nil {
+				t.Fatalf("unresolvable_dependents = %d, want unset", *details.UnresolvableDependents)
+			}
+			if derefCount(details.EpicTotalChildren) != len(children) || derefCount(details.EpicClosedChildren) != 1 {
+				t.Fatalf("epic progress = %v/%v, want 1/%d",
+					derefCount(details.EpicClosedChildren), derefCount(details.EpicTotalChildren), len(children))
+			}
 		})
 	}
 }
 
-func derefCount(n *int64) any {
+func derefCount[T int | int64](n *T) any {
 	if n == nil {
 		return nil
 	}
