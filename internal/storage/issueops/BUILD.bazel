@@ -166,6 +166,7 @@ go_test(
         "dependencies_test.go",
         "dependency_coordination_test.go",
         "dependency_queries_test.go",
+        "dependency_readers_missing_table_test.go",
         "dependency_tree_test.go",
         "edge_counts_test.go",
         "edge_role_requests_test.go",
