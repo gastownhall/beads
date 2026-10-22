@@ -60,6 +60,37 @@ var depReaderEntryPoints = []depReaderEntryPoint{
 			return metadataRows(out), err
 		},
 	},
+	{
+		name:     "GetDependenciesWithMetadataInTx",
+		withType: true,
+		run: func(ctx context.Context, tx *sql.Tx, anchor string) ([]readerRow, error) {
+			out, err := GetDependenciesWithMetadataInTx(ctx, tx, anchor)
+			return metadataRows(out), err
+		},
+	},
+	{
+		name:    "GetDependentsInTx",
+		inbound: true,
+		run: func(ctx context.Context, tx *sql.Tx, anchor string) ([]readerRow, error) {
+			out, err := GetDependentsInTx(ctx, tx, anchor)
+			return issueRowsOf(out), err
+		},
+	},
+	{
+		name: "GetDependenciesInTx",
+		run: func(ctx context.Context, tx *sql.Tx, anchor string) ([]readerRow, error) {
+			out, err := GetDependenciesInTx(ctx, tx, anchor)
+			return issueRowsOf(out), err
+		},
+	},
+}
+
+func issueRowsOf(in []*types.Issue) []readerRow {
+	out := make([]readerRow, len(in))
+	for i, iss := range in {
+		out[i] = readerRow{id: iss.ID}
+	}
+	return out
 }
 
 // edgeQueryRegex is the exact per-plane SQL each reader issues today.

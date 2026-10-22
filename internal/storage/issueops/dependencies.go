@@ -1310,33 +1310,10 @@ func GetIssuesByIDsInTx(ctx context.Context, tx DBTX, ids []string, wispSet map[
 // GetDependenciesWithMetadataInTx returns issues that the given issueID depends on,
 // along with the dependency type. Works within an existing transaction.
 // Queries both dependency tables to handle cross-table dependencies.
-//
-//nolint:gosec // G201: table names come from hardcoded constants
 func GetDependenciesWithMetadataInTx(ctx context.Context, tx DBTX, issueID string) ([]*types.IssueWithDependencyMetadata, error) {
-	type depMeta struct {
-		depID, depType string
-	}
-
-	// Query both dependency tables to find all dependencies.
-	var deps []depMeta
-	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
-		rows, err := tx.QueryContext(ctx, fmt.Sprintf(
-			`SELECT %s AS depends_on_id, type FROM %s WHERE issue_id = ?`, DepTargetExpr, depTable), issueID)
-		if err != nil {
-			return nil, fmt.Errorf("get dependencies from %s: %w", depTable, err)
-		}
-		for rows.Next() {
-			var d depMeta
-			if scanErr := rows.Scan(&d.depID, &d.depType); scanErr != nil {
-				_ = rows.Close()
-				return nil, fmt.Errorf("get dependencies: scan: %w", scanErr)
-			}
-			deps = append(deps, d)
-		}
-		_ = rows.Close()
-		if err := rows.Err(); err != nil {
-			return nil, fmt.Errorf("get dependencies: rows from %s: %w", depTable, err)
-		}
+	deps, err := anchorEdgesInTx(ctx, tx, issueID, false, true)
+	if err != nil {
+		return nil, err
 	}
 
 	if len(deps) == 0 {
@@ -1346,7 +1323,7 @@ func GetDependenciesWithMetadataInTx(ctx context.Context, tx DBTX, issueID strin
 	// Fetch all dependency target issues.
 	ids := make([]string, len(deps))
 	for i, d := range deps {
-		ids[i] = d.depID
+		ids[i] = d.farID
 	}
 	issues, err := GetIssuesByIDsInTx(ctx, tx, ids, nil)
 	if err != nil {
@@ -1359,7 +1336,7 @@ func GetDependenciesWithMetadataInTx(ctx context.Context, tx DBTX, issueID strin
 
 	var results []*types.IssueWithDependencyMetadata
 	for _, d := range deps {
-		issue, ok := issueMap[d.depID]
+		issue, ok := issueMap[d.farID]
 		if !ok {
 			continue
 		}
@@ -1484,66 +1461,29 @@ func GetDependentsWithMetadataInTx(ctx context.Context, tx DBTX, issueID string)
 
 // GetDependenciesInTx returns issues that the given issueID depends on.
 // Queries both dependencies and wisp_dependencies tables.
-//
-//nolint:gosec // G201: table names come from hardcoded constants
 func GetDependenciesInTx(ctx context.Context, tx *sql.Tx, issueID string) ([]*types.Issue, error) {
-	var ids []string
-	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
-		rows, err := tx.QueryContext(ctx, fmt.Sprintf(
-			`SELECT %s AS depends_on_id FROM %s WHERE issue_id = ?`, DepTargetExpr, depTable), issueID)
-		if err != nil {
-			return nil, fmt.Errorf("get dependencies from %s: %w", depTable, err)
-		}
-		for rows.Next() {
-			var id string
-			if scanErr := rows.Scan(&id); scanErr != nil {
-				_ = rows.Close()
-				return nil, fmt.Errorf("get dependencies: scan: %w", scanErr)
-			}
-			ids = append(ids, id)
-		}
-		_ = rows.Close()
-		if err := rows.Err(); err != nil {
-			return nil, fmt.Errorf("get dependencies: rows from %s: %w", depTable, err)
-		}
-	}
-
-	if len(ids) == 0 {
-		return nil, nil
-	}
-
-	return GetIssuesByIDsInTx(ctx, tx, ids, nil)
+	return getAnchorIssuesInTx(ctx, tx, issueID, false)
 }
 
 // GetDependentsInTx returns issues that depend on the given issueID.
 // Queries both dependencies and wisp_dependencies tables.
-//
-//nolint:gosec // G201: table names come from hardcoded constants
 func GetDependentsInTx(ctx context.Context, tx *sql.Tx, issueID string) ([]*types.Issue, error) {
-	var ids []string
-	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
-		rows, err := tx.QueryContext(ctx, fmt.Sprintf(
-			`SELECT issue_id FROM %s WHERE %s = ?`, depTable, DepTargetExpr), issueID)
-		if err != nil {
-			return nil, fmt.Errorf("get dependents from %s: %w", depTable, err)
-		}
-		for rows.Next() {
-			var id string
-			if scanErr := rows.Scan(&id); scanErr != nil {
-				_ = rows.Close()
-				return nil, fmt.Errorf("get dependents: scan: %w", scanErr)
-			}
-			ids = append(ids, id)
-		}
-		_ = rows.Close()
-		if err := rows.Err(); err != nil {
-			return nil, fmt.Errorf("get dependents: rows from %s: %w", depTable, err)
-		}
+	return getAnchorIssuesInTx(ctx, tx, issueID, true)
+}
+
+func getAnchorIssuesInTx(ctx context.Context, tx *sql.Tx, issueID string, inbound bool) ([]*types.Issue, error) {
+	edges, err := anchorEdgesInTx(ctx, tx, issueID, inbound, false)
+	if err != nil {
+		return nil, err
 	}
 
-	if len(ids) == 0 {
+	if len(edges) == 0 {
 		return nil, nil
 	}
 
+	ids := make([]string, len(edges))
+	for i, e := range edges {
+		ids[i] = e.farID
+	}
 	return GetIssuesByIDsInTx(ctx, tx, ids, nil)
 }
