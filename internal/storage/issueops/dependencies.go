@@ -1388,6 +1388,15 @@ type anchorEdge struct {
 // #3445: `bd show <epic>` lost its whole CHILDREN section). Only that named
 // table is tolerated; a missing `dependencies` or any other error is returned.
 //
+// Each far end is returned once. A local AddDependency writes an edge to one
+// plane only (WispTableRouting), but the same edge can still sit in both: a
+// pull or merge lands another clone's promotion of a wisp next to the local
+// wisp copy. For a fixed anchor the far-end id is the pair depid.New hashes,
+// so it is the key; the type is not (AddDependency refuses a second type for
+// one pair) and neither is the id column, which a read-only open of an older
+// database cannot assume exists. The first row seen wins, so a durable row and
+// its type beat the wisp copy; order is durable rows, then wisp-only rows.
+//
 //nolint:gosec // G201: table names are hardcoded constants
 func anchorEdgesInTx(ctx context.Context, tx DBTX, anchor string, inbound, withType bool) ([]anchorEdge, error) {
 	farCol, where, verb := DepTargetExpr+" AS depends_on_id", "issue_id = ?", "dependencies"
@@ -1400,6 +1409,7 @@ func anchorEdgesInTx(ctx context.Context, tx DBTX, anchor string, inbound, withT
 	}
 
 	var edges []anchorEdge
+	seen := make(map[string]struct{})
 	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
 		rows, err := tx.QueryContext(ctx, fmt.Sprintf(`SELECT %s FROM %s WHERE %s`, cols, depTable, where), anchor)
 		if err != nil {
@@ -1418,6 +1428,10 @@ func anchorEdgesInTx(ctx context.Context, tx DBTX, anchor string, inbound, withT
 				_ = rows.Close()
 				return nil, fmt.Errorf("get %s: scan: %w", verb, scanErr)
 			}
+			if _, dup := seen[e.farID]; dup {
+				continue
+			}
+			seen[e.farID] = struct{}{}
 			edges = append(edges, e)
 		}
 		_ = rows.Close()

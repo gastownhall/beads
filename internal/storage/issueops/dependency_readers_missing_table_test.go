@@ -166,3 +166,42 @@ func TestDependencyReadersMissingWispPlaneIsNotAnError(t *testing.T) {
 		})
 	}
 }
+
+// TestDependencyReadersCrossTableDuplicateReturnedOnce: the same edge can sit
+// in both planes (another clone's promotion pulled in next to a still-local
+// wisp copy). It is one edge: `bd show <epic>` must list N children and k/N,
+// not 2N and 2k/2N. The durable row wins, type included, and an edge that is
+// only in wisp_dependencies is still returned.
+func TestDependencyReadersCrossTableDuplicateReturnedOnce(t *testing.T) {
+	wispOnly := readerRow{id: "wisp-child", depType: string(types.DepParentChild)}
+	wispPlane := []readerRow{
+		// A type-divergent copy of child-1: the durable parent-child must win.
+		{id: "child-1", depType: string(types.DepBlocks)},
+		threeChildren[1],
+		threeChildren[2],
+		wispOnly,
+	}
+	want := append(append([]readerRow{}, threeChildren...), wispOnly)
+
+	for _, ep := range depReaderEntryPoints {
+		t.Run(ep.name, func(t *testing.T) {
+			_, mock, tx := beginMockTx(t)
+			mock.ExpectQuery(edgeQueryRegex(ep, "dependencies")).WithArgs("epic-1").
+				WillReturnRows(edgeRows(ep, threeChildren))
+			mock.ExpectQuery(edgeQueryRegex(ep, "wisp_dependencies")).WithArgs("epic-1").
+				WillReturnRows(edgeRows(ep, wispPlane))
+			expectDurableHydration(mock, readerIDs(want))
+
+			got, err := ep.run(context.Background(), tx, "epic-1")
+			if err != nil {
+				t.Fatalf("%s: %v", ep.name, err)
+			}
+			if fmt.Sprint(got) != wantRows(ep, want) {
+				t.Fatalf("%s = %v, want %s", ep.name, got, wantRows(ep, want))
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("%s: unmet sql expectations: %v", ep.name, err)
+			}
+		})
+	}
+}
