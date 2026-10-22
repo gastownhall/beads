@@ -439,6 +439,7 @@
 40 26 TestReclaimAnyReplicaOverride
 40 26 TestWithPeerAuth_EnvFallbackDoesNotObservePeerCredentials
 
+40 27 TestDependentsAcrossWispPlaneStates
 40 27 TestEmbeddedBatchCloserDurableHistoryNeverNamesAWisp
 40 27 TestEmbeddedBatchCloserRequestValidationReturnsZeroResultAndChangesNothing
 40 27 TestEmbeddedBlockedRecheckSettlesDependentAfterCommit

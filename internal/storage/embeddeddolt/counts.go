@@ -104,8 +104,10 @@ func (s *EmbeddedDoltStore) CountEvents(ctx context.Context, issueID string, lim
 // CountDependentsByStatus counts both dependency tables, joining each to its
 // home issue table (dependencies→issues, wisp_dependencies→wisps), so wisp
 // dependents are included the same way GetDependentsWithMetadata includes them.
-// Counted as two separate queries summed in Go (see CountDependents for why a
-// single combined query is avoided).
+// Counted as two separate queries summed in Go. Each matches the target on the
+// split physical columns (a COALESCE, as sqlbuild.DepTargetExpr) rather than
+// the STORED generated depends_on_id, which a count(*) can fail to resolve
+// under the pure-Go GMS analyzer.
 func (s *EmbeddedDoltStore) CountDependentsByStatus(ctx context.Context, issueID string, status types.Status) (int64, error) {
 	var n int64
 	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
