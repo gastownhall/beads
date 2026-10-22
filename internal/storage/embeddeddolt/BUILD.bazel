@@ -256,6 +256,7 @@ go_test(
         "version_subsecond_test.go",
         "versioned_history_activation_cost_test.go",
         "versioned_read_contract_test.go",
+        "wisp_plane_states_test.go",
         "workspace_config_contract_test.go",
     ],
     embed = [":embeddeddolt"],

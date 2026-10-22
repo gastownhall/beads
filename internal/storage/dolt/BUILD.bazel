@@ -394,6 +394,7 @@ go_test(
         "wisp_gc_test.go",
         "wisp_infra_dep_test.go",
         "wisp_partition_test.go",
+        "wisp_plane_states_test.go",
         "wisp_row_lock_heal_test.go",
         "wisp_set_routing_test.go",
         "wisp_set_scoped_test.go",

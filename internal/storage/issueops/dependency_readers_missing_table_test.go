@@ -11,6 +11,7 @@ import (
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 
+	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -229,6 +230,45 @@ func TestDependencyReadersCrossTableDuplicateReturnedOnce(t *testing.T) {
 			}
 			if fmt.Sprint(got) != wantRows(ep, want) {
 				t.Fatalf("%s = %v, want %s", ep.name, got, wantRows(ep, want))
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("%s: unmet sql expectations: %v", ep.name, err)
+			}
+		})
+	}
+}
+
+// edgeCountEntryPoint is one direction of CountDependencyEdgesInTx, the count
+// `bd show` prints beside the listing on every backend. It has to count what
+// the listing returns, or show reports the gap as unresolvable edges.
+type edgeCountEntryPoint struct {
+	name string
+	dir  domain.DepDirection
+}
+
+var edgeCountEntryPoints = []edgeCountEntryPoint{
+	{name: "CountDependencyEdgesInTx/in", dir: domain.DepDirectionIn},
+	{name: "CountDependencyEdgesInTx/out", dir: domain.DepDirectionOut},
+}
+
+// TestCountDependencyEdgesMissingWispPlaneIsNotAnError: with no
+// wisp_dependencies the durable count is the whole answer, as it is for the
+// listing, instead of an error that publishes a count of 0.
+func TestCountDependencyEdgesMissingWispPlaneIsNotAnError(t *testing.T) {
+	for _, ep := range edgeCountEntryPoints {
+		t.Run(ep.name, func(t *testing.T) {
+			_, mock, tx := beginMockTx(t)
+			mock.ExpectQuery(`^SELECT count\(\*\) FROM dependencies WHERE `).
+				WillReturnRows(scalarCountRows(3))
+			mock.ExpectQuery(`^SELECT count\(\*\) FROM wisp_dependencies WHERE `).
+				WillReturnError(tableNotFound("wisp_dependencies"))
+
+			n, err := CountDependencyEdgesInTx(context.Background(), tx, "epic-1", ep.dir, nil)
+			if err != nil {
+				t.Fatalf("%s errored on a database with no wisp_dependencies: %v", ep.name, err)
+			}
+			if n != 3 {
+				t.Fatalf("%s = %d, want 3 (the durable edges)", ep.name, n)
 			}
 			if err := mock.ExpectationsWereMet(); err != nil {
 				t.Fatalf("%s: unmet sql expectations: %v", ep.name, err)
