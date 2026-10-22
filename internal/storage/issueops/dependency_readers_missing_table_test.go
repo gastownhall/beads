@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -274,5 +275,113 @@ func TestCountDependencyEdgesMissingWispPlaneIsNotAnError(t *testing.T) {
 				t.Fatalf("%s: unmet sql expectations: %v", ep.name, err)
 			}
 		})
+	}
+}
+
+// TestDependencyReadersBrokenPlaneIsAnError pins how narrow the tolerance is.
+// Only the absence of wisp_dependencies means "no wisp edges"; a missing
+// durable plane, a table hydration reads (leases through sqlbuild.LeaseJoin,
+// wisp_labels for a wisp far end) or a failed connection is a broken database,
+// and `bd show` must say so rather than print a short CHILDREN list.
+func TestDependencyReadersBrokenPlaneIsAnError(t *testing.T) {
+	wispChild := []readerRow{{id: "wisp-child", depType: string(types.DepParentChild)}}
+	cases := []struct {
+		name  string
+		gone  error
+		prime func(mock sqlmock.Sqlmock, ep depReaderEntryPoint, gone error)
+	}{
+		{
+			name: "missing dependencies",
+			gone: tableNotFound("dependencies"),
+			prime: func(mock sqlmock.Sqlmock, ep depReaderEntryPoint, gone error) {
+				mock.ExpectQuery(edgeQueryRegex(ep, "dependencies")).WillReturnError(gone)
+			},
+		},
+		{
+			name: "broken connection on the wisp plane",
+			gone: errors.New("connection refused"),
+			prime: func(mock sqlmock.Sqlmock, ep depReaderEntryPoint, gone error) {
+				mock.ExpectQuery(edgeQueryRegex(ep, "dependencies")).WillReturnRows(edgeRows(ep, threeChildren))
+				mock.ExpectQuery(edgeQueryRegex(ep, "wisp_dependencies")).WillReturnError(gone)
+			},
+		},
+		{
+			name: "missing leases during hydration",
+			gone: tableNotFound("leases"),
+			prime: func(mock sqlmock.Sqlmock, ep depReaderEntryPoint, gone error) {
+				mock.ExpectQuery(edgeQueryRegex(ep, "dependencies")).WillReturnRows(edgeRows(ep, threeChildren))
+				mock.ExpectQuery(edgeQueryRegex(ep, "wisp_dependencies")).WillReturnRows(edgeRows(ep, nil))
+				mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM wisps LIMIT 1")).WillReturnError(sql.ErrNoRows)
+				mock.ExpectQuery(regexp.QuoteMeta(" FROM issues " + sqlbuild.LeaseJoin("issues"))).WillReturnError(gone)
+			},
+		},
+		{
+			name: "missing wisp_labels during wisp hydration",
+			gone: tableNotFound("wisp_labels"),
+			prime: func(mock sqlmock.Sqlmock, ep depReaderEntryPoint, gone error) {
+				mock.ExpectQuery(edgeQueryRegex(ep, "dependencies")).WillReturnRows(edgeRows(ep, nil))
+				mock.ExpectQuery(edgeQueryRegex(ep, "wisp_dependencies")).WillReturnRows(edgeRows(ep, wispChild))
+				mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM wisps LIMIT 1")).
+					WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
+				mock.ExpectQuery(regexp.QuoteMeta("SELECT id FROM wisps WHERE id IN (?)")).
+					WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("wisp-child"))
+				mock.ExpectQuery(regexp.QuoteMeta(" FROM wisps " + sqlbuild.LeaseJoin("wisps"))).
+					WillReturnRows(issueRows().AddRow(issueRowValues("wisp-child", "wisp-child")...))
+				mock.ExpectQuery(regexp.QuoteMeta("FROM wisp_labels")).WillReturnError(gone)
+			},
+		},
+	}
+	for _, tc := range cases {
+		for _, ep := range depReaderEntryPoints {
+			t.Run(tc.name+"/"+ep.name, func(t *testing.T) {
+				_, mock, tx := beginMockTx(t)
+				tc.prime(mock, ep, tc.gone)
+
+				got, err := ep.run(context.Background(), tx, "epic-1")
+				if err == nil {
+					t.Fatalf("%s succeeded on a broken database, returning %v", ep.name, got)
+				}
+				if !errors.Is(err, tc.gone) {
+					t.Fatalf("%s error is not the primed failure %v: %v", ep.name, tc.gone, err)
+				}
+			})
+		}
+	}
+}
+
+// TestCountDependencyEdgesBrokenPlaneIsAnError is the same guard for the
+// count: the wisp leg's NOT IN subquery reads dependencies, so a missing
+// dependencies table reported from that leg is not the optional plane either.
+func TestCountDependencyEdgesBrokenPlaneIsAnError(t *testing.T) {
+	cases := []struct {
+		name          string
+		durable, wisp error
+	}{
+		{name: "missing dependencies", durable: tableNotFound("dependencies")},
+		{name: "missing dependencies under the wisp leg", wisp: tableNotFound("dependencies")},
+		{name: "broken connection on the wisp leg", wisp: errors.New("connection refused")},
+	}
+	for _, tc := range cases {
+		for _, ep := range edgeCountEntryPoints {
+			t.Run(tc.name+"/"+ep.name, func(t *testing.T) {
+				_, mock, tx := beginMockTx(t)
+				gone := tc.durable
+				if gone != nil {
+					mock.ExpectQuery(`^SELECT count\(\*\) FROM dependencies WHERE `).WillReturnError(gone)
+				} else {
+					gone = tc.wisp
+					mock.ExpectQuery(`^SELECT count\(\*\) FROM dependencies WHERE `).WillReturnRows(scalarCountRows(3))
+					mock.ExpectQuery(`^SELECT count\(\*\) FROM wisp_dependencies WHERE `).WillReturnError(gone)
+				}
+
+				n, err := CountDependencyEdgesInTx(context.Background(), tx, "epic-1", ep.dir, nil)
+				if err == nil {
+					t.Fatalf("%s succeeded on a broken database, returning %d", ep.name, n)
+				}
+				if !errors.Is(err, gone) {
+					t.Fatalf("%s error is not the primed failure %v: %v", ep.name, gone, err)
+				}
+			})
+		}
 	}
 }

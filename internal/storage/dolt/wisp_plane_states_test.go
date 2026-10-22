@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/workapi"
 )
@@ -160,6 +161,30 @@ func TestDependentsAcrossWispPlaneStates(t *testing.T) {
 					derefCount(details.EpicClosedChildren), derefCount(details.EpicTotalChildren), len(children))
 			}
 		})
+	}
+}
+
+// TestIterDependentsMissingLeasesStillErrors pins the named half of the
+// iterator's fallback: it admits exactly a missing optional wisp table. leases
+// is a core table every issue read joins, so a database without it is broken,
+// and the dependents stream must surface that rather than answer from the
+// durable leg alone (#3445).
+func TestIterDependentsMissingLeasesStillErrors(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	epic, _ := seedEpicWithChildren(t, ctx, store, "wps-no-leases", 1)
+	execOnOneConn(t, ctx, store, "DROP TABLE leases")
+
+	iter, err := store.IterDependentsWithMetadata(ctx, epic.ID)
+	if err == nil {
+		_ = iter.Close()
+		t.Fatal("IterDependentsWithMetadata over a database with no leases table answered, want the failure surfaced")
+	}
+	if !dberrors.IsMissingTable(err, "leases") {
+		t.Fatalf("IterDependentsWithMetadata error = %v, want it to name the missing leases table", err)
 	}
 }
 
