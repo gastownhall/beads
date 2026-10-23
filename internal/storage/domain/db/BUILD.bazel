@@ -42,6 +42,7 @@ go_library(
 go_test(
     name = "db_test",
     srcs = [
+        "batching_dedupe_test.go",
         "batching_test.go",
         "child_counter_test.go",
         "close_checked_usecase_test.go",

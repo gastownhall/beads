@@ -857,6 +857,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The batched bulk readers no longer return an issue's rows twice when the
+  same id is requested twice. Since the 200-id batching (#6444), an id that
+  appeared in two batches had its comments, labels, dependency records,
+  blocking edges and issue rows read once per batch. Ids are now
+  de-duplicated before batching, matching the single `IN (...)` list the
+  readers used before.
+
 - In proxied-server mode, `.beads/dolt/proxy.log` no longer grows with
   every `bd` command, and it and the default proxied `server.log` are
   rotated when the proxy starts. The proxy wrote about six lines to
