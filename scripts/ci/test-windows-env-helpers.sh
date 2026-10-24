@@ -7,7 +7,7 @@ cd "$root"
 # These environment helpers are pure Go; no C compiler is needed for this lane.
 export CGO_ENABLED=0
 # shellcheck source=../../.buildflags
-source .buildflags
+source "$root/.buildflags"
 
 go_bin=$(command -v go) || { echo 'Go is required for Windows environment tests' >&2; exit 1; }
 host=$("$go_bin" env GOHOSTOS GOOS) || exit $?
