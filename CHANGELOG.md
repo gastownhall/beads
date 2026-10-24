@@ -3789,6 +3789,186 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   override cannot reach them; only the module floor can. Re-derive rather
   than trusting this table: `govulncheck -scan module`.
 
+## [1.3.2] - 2026-10-23
+
+First stable release of the 1.3.2 patch line. It ships the same code as
+[1.3.2-rc.3]; the only change since that candidate is the version stamp. The
+full notes are in the [1.3.2-rc.3], [1.3.2-rc.2] and [1.3.2-rc.1] sections
+below, which together cover everything since [1.3.1].
+
+There is **no schema migration**, and the embedded Dolt engine is unchanged:
+upgrading from 1.3.1 or any 1.3.2 release candidate is a binary swap.
+
+### Upgrade notes
+
+- **Run `bd recompute-blocked` once per workspace whose store crossed
+  migration 0059 under bd 1.3.0 or later**
+  ([#7037](https://github.com/gastownhall/beads/issues/7037)). That includes a
+  workspace now on 1.3.1 that was first created by 1.2.x or earlier. The
+  [1.3.2-rc.1] upgrade notes explain why and who is affected; on an
+  unaffected workspace the command changes nothing.
+- Coming from 1.3.1, read the **Fixed** entries in [1.3.2-rc.3],
+  [1.3.2-rc.2] and [1.3.2-rc.1]. Three can change what a script sees:
+  `bd purge` keeps more closed beads (the whole closed chain above a live
+  bead), the `bd purge --limit N` confirmation now suggests a `--force`
+  command that keeps `--limit`, and `bd export` fails with
+  `failed to classify wisp-plane rows` when the `wisps` table exists but
+  cannot be read, instead of exporting without wisp markers.
+- Coming from 1.3.2-rc.3, nothing changes in behaviour.
+
+## [1.3.2-rc.3] - 2026-10-23
+
+Third release candidate for 1.3.2. Like rc.1 and rc.2 it has **no schema
+migration**, and the embedded Dolt engine is unchanged, so upgrading from 1.3.1,
+1.3.2-rc.1 or 1.3.2-rc.2 is a binary swap. It adds three fixes and a set of
+security bumps on top of rc.2. The rc.1 upgrade note (run `bd recompute-blocked`
+once per workspace after upgrading from bd ≤1.3.0,
+[#7037](https://github.com/gastownhall/beads/issues/7037)) still applies.
+
+### Fixed
+
+- **A least-privilege Dolt user can write again**
+  ([#7786](https://github.com/gastownhall/beads/pull/7786), backport of
+  [#7322](https://github.com/gastownhall/beads/pull/7322)). Two
+  fresh-connection paths ran `CALL DOLT_CHECKOUT` even when the session was
+  already on the requested branch: the fallback for the ignored-tables
+  transaction, and the pinned connection used by long-timeout versioned reads
+  and the blocked recompute. A server user granted EXECUTE on only
+  `dolt_add`/`dolt_commit` is denied even that no-op checkout, so
+  `bd create --graph`, `bd mol wisp`, `bd history` and `bd recompute-blocked`
+  failed with `command denied`. The checkout now runs only when the session is
+  on a different branch.
+- **`bd export --all` no longer stalls on workspaces with many wisps**
+  ([#7603](https://github.com/gastownhall/beads/pull/7603), backport of
+  [#6444](https://github.com/gastownhall/beads/pull/6444)). The bulk label,
+  comment, dependency and issue readers sent every id in one `IN (...)` list,
+  and Dolt's cost grows faster than linearly in the list length. One reported
+  workspace stopped completing exports past about 21k wisps. The readers now
+  read at most 200 ids per statement, and export reads the wisp-plane
+  relations only for ids that are wisps. A repeated id is read once, so
+  batching never duplicates or drops a row
+  ([#7785](https://github.com/gastownhall/beads/pull/7785)). Export now fails
+  with `failed to classify wisp-plane rows` when the `wisps` table exists but
+  its membership cannot be read, instead of silently exporting without wisp
+  markers; only a missing `wisps` table is tolerated.
+- **`bd purge --limit N` confirmation suggests the same selection it
+  previewed** ([#7784](https://github.com/gastownhall/beads/pull/7784),
+  backport of [#7540](https://github.com/gastownhall/beads/pull/7540), fixes
+  [#7534](https://github.com/gastownhall/beads/issues/7534) and
+  [#7524](https://github.com/gastownhall/beads/issues/7524)). Without
+  `--force`, the suggested `--force` command dropped `--limit`, so running it
+  as printed deleted every eligible row instead of N. Separately,
+  `--older-than` with a large negative day count overflowed into a small
+  positive age and purged; it is now refused.
+
+### Security
+
+- **Release binaries build with Go 1.26.10**
+  ([#7787](https://github.com/gastownhall/beads/pull/7787), backport of
+  [#7732](https://github.com/gastownhall/beads/pull/7732)), which distrusts
+  the compromised eMudhra intermediate CAs in `crypto/x509`. `release.yml`
+  uses uv 0.13.4, which ships the same distrust.
+- **Dependency floors raised** ([#7787](https://github.com/gastownhall/beads/pull/7787)):
+  `golang.org/x/net` v0.60.0 and `golang.org/x/crypto` v0.57.0 (backport of
+  [#6355](https://github.com/gastownhall/beads/pull/6355)), and
+  `google.golang.org/grpc` v1.83.2 and `github.com/apache/thrift` v0.24.0
+  (backport of [#7495](https://github.com/gastownhall/beads/pull/7495)).
+  `govulncheck` reported 16 reachable advisories on rc.2's module set and
+  none on rc.3's.
+
+## [1.3.2-rc.2] - 2026-10-10
+
+Second release candidate for 1.3.2. Like rc.1 it has **no schema migration**:
+upgrading from 1.3.1 or 1.3.2-rc.1 is a binary swap. It adds one fix on top of
+rc.1, the backport of [#6876](https://github.com/gastownhall/beads/pull/6876),
+which keeps the post-commit blocked-state recheck from reverting concurrent
+writes. The rc.1 upgrade note (run `bd recompute-blocked` once per workspace
+after upgrading from bd ≤1.3.0, [#7037](https://github.com/gastownhall/beads/issues/7037))
+still applies.
+
+### Fixed
+
+- **The post-commit blocked-state recheck no longer reverts concurrent
+  writes** ([#7146](https://github.com/gastownhall/beads/pull/7146), backport
+  of [#6876](https://github.com/gastownhall/beads/pull/6876), fixes
+  [#7030](https://github.com/gastownhall/beads/issues/7030)). The 1.3.1 line
+  carried the #6716 fan-in fix
+  ([#6719](https://github.com/gastownhall/beads/pull/6719)/[#6936](https://github.com/gastownhall/beads/pull/6936),
+  [#6942](https://github.com/gastownhall/beads/pull/6942)/[#6947](https://github.com/gastownhall/beads/pull/6947))
+  in the form #6876 later corrected on `main`: on the Dolt server backend the
+  recheck minted its Dolt commit while its own SQL transaction was still open.
+  `DOLT_ADD` stages the table from the session's BEGIN-time root, so that
+  commit could write `issues` rows that other sessions had just committed back
+  to their BEGIN-time values. The recheck runs only when unblocking writes
+  (closes, dependency removals, deletes) race on `issues`, which is exactly
+  when this matters. The recompute now runs alone in its own retried
+  transaction and the Dolt commit is published after it commits. A failed
+  trailing commit is counted as `post_tx_commit_dropped` and logged, instead
+  of being reported as a recheck failure, because the flag repair itself is
+  already committed.
+
+## [1.3.2-rc.1] - 2026-10-05
+
+First release candidate for 1.3.2, a patch on top of 1.3.1 with **no schema
+migration**: upgrading from 1.3.1 is a binary swap. It fixes `bd purge`
+deleting the closed root of a chain that still has live work under it, and an
+auto-backup watermark that could claim a commit the snapshot does not contain.
+It also carries an upgrade note for stores migrated by 1.3.0 or 1.3.1
+([#7037](https://github.com/gastownhall/beads/issues/7037)).
+
+### Upgrade notes
+
+- **After upgrading from bd ≤1.3.0, run `bd recompute-blocked` once per
+  workspace** ([#7037](https://github.com/gastownhall/beads/issues/7037)).
+  Migration 0059, first shipped in 1.3.0, recomputes the denormalized
+  `is_blocked` flag with a recursive query. On Dolt servers older than 2.4.0,
+  and on the embedded engine, a query-planner bug
+  ([dolthub/dolt#11886](https://github.com/dolthub/dolt/issues/11886), fixed
+  in Dolt 2.4.0) drops the query's `parent-child` edge filter. Blockedness then
+  spreads across every dependency type, including `relates-to`,
+  `discovered-from` and `tracks`. Beads that are not actually blocked are
+  marked blocked and silently disappear from `bd ready` and `bd list --ready`.
+  The flag is stored, so the damage persists until it is recomputed: nothing in
+  1.3.2 repairs it automatically.
+
+  `bd recompute-blocked` rebuilds the flag from the dependency graph. It is
+  idempotent and reports `rows_corrected`. It applies to every workspace whose
+  store crossed migration 0059 under bd 1.3.0 or later, which includes a
+  workspace now on 1.3.1 that was originally created by 1.2.x or earlier.
+  Running it on a workspace that was not affected changes nothing.
+
+### Fixed
+
+- **`bd purge` keeps the whole closed chain above a live bead, not just its
+  direct parent** ([#7041](https://github.com/gastownhall/beads/pull/7041),
+  fixes [#7031](https://github.com/gastownhall/beads/issues/7031)). The
+  live-dependent protection added in 1.3.1 only protected a closed candidate
+  that a not-done bead pointed at directly. Take a closed root R, a closed child
+  S1 and an open grandchild S2. S1 was protected because S2 is live, but R was
+  not, because its only dependent S1 is closed. Purge deleted R, which orphaned
+  S1 and S2, and `--dry-run` reported the same deletion. Protection now
+  propagates through closed candidates until nothing changes, on every backend
+  (dolt server, embedded, proxied/uow). An orchestrator retention sweep
+  (`bd purge --wisps-plane --older-than ...`) is the common way to hit this.
+- **The backup watermark no longer runs ahead of the snapshot**
+  ([#7044](https://github.com/gastownhall/beads/pull/7044), fixes
+  [#7032](https://github.com/gastownhall/beads/issues/7032)). Auto-backup read
+  Dolt HEAD *after* the sync and recorded that as the newest commit backed up.
+  A commit that landed during the sync was therefore recorded as backed up even
+  though the snapshot did not contain it, and auto-backup reported "no changes
+  since last backup" until HEAD moved again. HEAD is now read before the sync,
+  so such a commit stays pending for the next backup. Only opted-in auto-backup
+  (`backup.enabled: true`) was affected; `bd backup sync` does not record a
+  commit watermark.
+
+### CI
+
+- PRs into `hotfix/**` branches now run full CI, including the required
+  `CI Gate / Required` check
+  ([#7198](https://github.com/gastownhall/beads/pull/7198), fixes
+  [#7148](https://github.com/gastownhall/beads/issues/7148); ported to this
+  branch in [#7217](https://github.com/gastownhall/beads/pull/7217)).
+
 ## [1.3.0] - 2026-09-15
 
 The first tested release off `main` since the 1.1 line. [1.2.2] was a recovery
