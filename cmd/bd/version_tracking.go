@@ -398,7 +398,7 @@ func noticeSharedMigrateRefusal(err error) {
 	case "adopt", "adopt-ff":
 		// The remote is already migrated: migrating here would fork it, and
 		// the verb consent deliberately does not unlock this arm.
-		remedy = "Another clone has already migrated this database — adopt it with 'bd bootstrap' rather than migrating here; reads keep working meanwhile."
+		remedy = "Another clone has already migrated this database — adopt it rather than migrating here: bare 'bd bootstrap' reports \"Nothing to do.\" on an existing database, so follow the adoption steps at " + schema.AdoptionGuideURL + " (they move the database aside with no other bd process using it, re-clone, and restore unpushed work from a previous-version export; in server mode, the guide's server section applies)."
 	case "fork-skew":
 		remedy = "This database and its remote already applied different content for the same migration (#4259) — run 'bd doctor' and follow its migration-content-skew guidance; do not migrate."
 	default:
