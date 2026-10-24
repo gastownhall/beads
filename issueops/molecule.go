@@ -429,13 +429,53 @@ func AnalyzeMolecule(g *MoleculeGraph) *MoleculeAnalysis {
 		for blockedID := range blocks[issue.ID] {
 			info.Blocks = append(info.Blocks, blockedID)
 		}
-		info.IsReady = (issue.Status == types.StatusOpen || issue.Status == types.StatusInProgress) && len(info.BlockedBy) == 0
-		if info.IsReady {
-			analysis.ReadySteps++
-		}
+		info.IsReady = issue.ID != g.Root.ID && (issue.Status == types.StatusOpen || issue.Status == types.StatusInProgress) && len(info.BlockedBy) == 0
 		sort.Strings(info.BlockedBy)
 		sort.Strings(info.Blocks)
 		analysis.Steps[issue.ID] = info
+	}
+
+	// A step whose parent is itself blocked is blocked too, inherited down the
+	// parent-child hierarchy (BlockedStateInvariant), even though its own
+	// direct blocks/conditional-blocks/waits-for edges are clear. childParent
+	// inverts parentChildren; parentBlocked is memoized since a deep hierarchy
+	// would otherwise re-walk the same chain once per descendant.
+	childParent := make(map[string]string)
+	for parentID, children := range parentChildren {
+		for _, childID := range children {
+			childParent[childID] = parentID
+		}
+	}
+	parentBlocked := make(map[string]bool)
+	var isAncestorBlocked func(id string) bool
+	isAncestorBlocked = func(id string) bool {
+		parentID, ok := childParent[id]
+		if !ok {
+			return false
+		}
+		if blocked, cached := parentBlocked[parentID]; cached {
+			return blocked
+		}
+		parent := g.IssueMap[parentID]
+		blocked := false
+		// A closed or pinned parent is never itself blocked (the same two
+		// statuses the shared predicate withholds every other blocking rule
+		// for), so blockage does not inherit past one.
+		if parent != nil && parent.Status != types.StatusClosed && parent.Status != types.StatusPinned {
+			parentInfo := analysis.Steps[parentID]
+			blocked = (parentInfo != nil && len(parentInfo.BlockedBy) > 0) || isAncestorBlocked(parentID)
+		}
+		parentBlocked[parentID] = blocked
+		return blocked
+	}
+	for _, issue := range g.Issues {
+		info := analysis.Steps[issue.ID]
+		if info.IsReady && isAncestorBlocked(issue.ID) {
+			info.IsReady = false
+		}
+		if info.IsReady {
+			analysis.ReadySteps++
+		}
 	}
 
 	depths := blockingDepths(g, blockedBy)
@@ -581,9 +621,10 @@ type MoleculeView struct {
 	// several are); NextStep the first ready step.
 	CurrentStep *Issue
 	NextStep    *Issue
-	// Ready holds every node the analysis marks ready (open or in progress
-	// with no open blocker inside the molecule), root included, in graph
-	// order: `bd ready --mol`'s list, hydrated rows (assignee and all).
+	// Ready holds every STEP the analysis marks ready (open or in progress
+	// with no open blocker inside the molecule, root excluded — the root is
+	// the molecule itself, not a step a worker claims), in graph order:
+	// `bd ready --mol`'s list, hydrated rows (assignee and all).
 	Ready []*Issue
 }
 
