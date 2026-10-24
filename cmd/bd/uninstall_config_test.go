@@ -189,8 +189,29 @@ func TestResetConfigReportsReadFailure(t *testing.T) {
 			t.Errorf("reset error = %v, want %q", err, fragment)
 		}
 	}
+	if !strings.Contains(err.Error(), "read core.hooksPath:") || !strings.Contains(err.Error(), "(output: fatal: bad config") {
+		t.Errorf("reset error = %v, want core.hooksPath Git stderr", err)
+	}
 	if after, err := os.ReadFile(path); err != nil || string(after) != string(data) {
 		t.Errorf("failed read changed config: %q (%v)", after, err)
+	}
+}
+
+func TestResetConfigLaunchFailureOmitsEmptyOutput(t *testing.T) {
+	repo := newGitRepo(t)
+	common := filepath.Join(repo, ".git")
+	t.Setenv("PATH", t.TempDir())
+
+	err := resetHooksPathAt(repo, common, filepath.Join(repo, ".beads", "hooks"), os.Environ())
+	if err == nil {
+		t.Fatal("expected missing Git executable to fail")
+	}
+	parts := strings.Split(err.Error(), "; ")
+	if len(parts) != 2 || !strings.Contains(parts[0], "read core.hooksPath") || !strings.Contains(parts[1], "read beads.role") {
+		t.Fatalf("reset error = %v, want both read diagnostics", err)
+	}
+	if strings.Contains(parts[0], "(output: )") {
+		t.Errorf("core.hooksPath launch diagnostic has empty output suffix: %v", err)
 	}
 }
 
