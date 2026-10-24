@@ -4942,6 +4942,7 @@ func TestBazelRBEJobDecidesOnce(t *testing.T) {
 		"RBE_INPUT_CACHE": "${{ inputs.rbe == 'cache' }}",
 		"PULL_REQUEST":    prRiskPullRequestValue,
 		"FORK":            "${{ github.event.pull_request.head.repo.fork == true }}",
+		"FORK_REPO":       bazelForkRepoValue,
 		"DEPENDABOT":      prRiskDependabotValue,
 		"FORK_FARM":       bazelForkFarmValue,
 		"HAS_EXECUTOR":    bazelRBESecretValue,
@@ -4976,7 +4977,7 @@ func TestBazelRBEJobDecidesOnce(t *testing.T) {
 	}
 
 	// Nothing outside the decision step re-derives the condition.
-	rederive := regexp.MustCompile(`(?i)vars\.RBE_WEST_WORKERS|inputs\.rbe\b|inputs\.fork-farm|head\.repo\.fork|github\.actor|dependabot`)
+	rederive := regexp.MustCompile(`(?i)vars\.RBE_WEST_WORKERS|inputs\.rbe\b|inputs\.fork-farm|head\.repo\.fork|github\.repository_owner|github\.actor|dependabot`)
 	walkYAML(readYAMLNode(t, filepath.Join(".github", "workflows", bazelWorkflowName)), "", func(path string, key bool, value string) {
 		// The decision step itself (its env and, since rbe-fork, its run:
 		// the DEPENDABOT fact) is the one place that may.
@@ -5078,30 +5079,37 @@ func TestBazelRBEJobDecidesOnce(t *testing.T) {
 		// (pull_request_target without bazel-farm.yml's inputs) stays local.
 		{"fork, not authorized, secret", facts{"true", "", "grpcs://x", true, false, false, false, "ro"}, "cache", "false", ""},
 	}
+	caseEnv := func(in facts, forkRepo bool) map[string]string {
+		env := map[string]string{
+			"RBE_VAR_ON":      strconv.FormatBool(strings.EqualFold(in.rbeVar, "true")),
+			"RBE_INPUT_OFF":   strconv.FormatBool(strings.EqualFold(in.rbeInput, "off")),
+			"RBE_INPUT_CACHE": strconv.FormatBool(strings.EqualFold(in.rbeInput, "cache")),
+			"PULL_REQUEST":    strconv.FormatBool(in.pr),
+			"FORK":            strconv.FormatBool(in.fork),
+			"FORK_REPO":       strconv.FormatBool(forkRepo),
+			"DEPENDABOT":      strconv.FormatBool(in.dependabot),
+			"FORK_FARM":       strconv.FormatBool(in.farm),
+			"HAS_EXECUTOR":    strconv.FormatBool(in.secret != ""),
+			"PR_NUMBER":       "",
+			bazelTestMintEnv:  in.mint,
+		}
+		if in.pr || in.farm {
+			env["PR_NUMBER"] = "7123"
+		}
+		return env
+	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			env := map[string]string{
-				"RBE_VAR_ON":      strconv.FormatBool(strings.EqualFold(c.in.rbeVar, "true")),
-				"RBE_INPUT_OFF":   strconv.FormatBool(strings.EqualFold(c.in.rbeInput, "off")),
-				"RBE_INPUT_CACHE": strconv.FormatBool(strings.EqualFold(c.in.rbeInput, "cache")),
-				"PULL_REQUEST":    strconv.FormatBool(c.in.pr),
-				"FORK":            strconv.FormatBool(c.in.fork),
-				"DEPENDABOT":      strconv.FormatBool(c.in.dependabot),
-				"FORK_FARM":       strconv.FormatBool(c.in.farm),
-				"HAS_EXECUTOR":    strconv.FormatBool(c.in.secret != ""),
-				"PR_NUMBER":       "",
-				bazelTestMintEnv:  c.in.mint,
-			}
-			if c.in.pr || c.in.farm {
-				env["PR_NUMBER"] = "7123"
-			}
-			out, log, err := runBazelRBEDecisionLog(t, step.Run, env)
+			out, log, summary, err := runBazelRBEDecisionSummary(t, step.Run, caseEnv(c.in, false))
 			if err != nil {
 				t.Fatal(err)
 			}
 			want := map[string]string{"mode": c.mode, "enabled": c.enabled, "tier": c.tier}
 			if !reflect.DeepEqual(out, want) {
 				t.Errorf("outputs = %v, want %v", out, want)
+			}
+			if strings.Contains(summary, bazelForkRepoSummary) {
+				t.Errorf("summary says %q outside a fork repository:\n%s", bazelForkRepoSummary, summary)
 			}
 			// The mint is asked exactly for fork and Dependabot
 			// pull_request runs not forced local or cache, about this run.
@@ -5118,14 +5126,44 @@ func TestBazelRBEJobDecidesOnce(t *testing.T) {
 			}
 		})
 	}
+	// The same starts in a fork repository's own CI (github.repository's
+	// owner is not gastownhall: a push to the fork, a PR within it, a
+	// dispatch there): mode local whatever else holds, so no lane reads
+	// rbe-cache (mode cache's --config=fork-cache and its probes), the mint
+	// is never asked, and the summary says why. Fork PRs into beads run
+	// with github.repository gastownhall/beads (the table above).
+	for _, c := range cases {
+		t.Run("fork repository's own CI: "+c.name, func(t *testing.T) {
+			env := caseEnv(c.in, true)
+			env["GITHUB_REPOSITORY"] = bazelForkRepoName
+			out, log, summary, err := runBazelRBEDecisionSummary(t, step.Run, env)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := map[string]string{"mode": "local", "enabled": "false", "tier": ""}; !reflect.DeepEqual(out, want) {
+				t.Errorf("outputs = %v, want %v", out, want)
+			}
+			if log != "" {
+				t.Errorf("asked the mint from a fork repository's own CI:\n%s", log)
+			}
+			if !strings.Contains(summary, bazelForkRepoSummary) || !strings.Contains(summary, "fork repository: true") {
+				t.Errorf("summary does not say %q:\n%s", bazelForkRepoSummary, summary)
+			}
+		})
+	}
 	// A value that is not a boolean fails the job rather than picking a mode.
 	if out, err := runBazelRBEDecision(t, step.Run, map[string]string{
-		"RBE_VAR_ON": "true", "RBE_INPUT_OFF": "false", "RBE_INPUT_CACHE": "false", "PULL_REQUEST": "false", "FORK": "", "DEPENDABOT": "false", "FORK_FARM": "false", "HAS_EXECUTOR": "true",
+		"RBE_VAR_ON": "true", "RBE_INPUT_OFF": "false", "RBE_INPUT_CACHE": "false", "PULL_REQUEST": "false", "FORK": "", "FORK_REPO": "false", "DEPENDABOT": "false", "FORK_FARM": "false", "HAS_EXECUTOR": "true",
 	}); err == nil {
 		t.Errorf("decision with FORK='' succeeded with %v; want failure", out)
 	}
 	if out, err := runBazelRBEDecision(t, step.Run, map[string]string{
-		"RBE_VAR_ON": "true", "RBE_INPUT_OFF": "false", "PULL_REQUEST": "false", "FORK": "false", "DEPENDABOT": "false", "FORK_FARM": "false", "HAS_EXECUTOR": "true",
+		"RBE_VAR_ON": "true", "RBE_INPUT_OFF": "false", "RBE_INPUT_CACHE": "false", "PULL_REQUEST": "false", "FORK": "false", "DEPENDABOT": "false", "FORK_FARM": "false", "HAS_EXECUTOR": "true",
+	}); err == nil {
+		t.Errorf("decision without FORK_REPO succeeded with %v; want failure", out)
+	}
+	if out, err := runBazelRBEDecision(t, step.Run, map[string]string{
+		"RBE_VAR_ON": "true", "RBE_INPUT_OFF": "false", "PULL_REQUEST": "false", "FORK": "false", "FORK_REPO": "false", "DEPENDABOT": "false", "FORK_FARM": "false", "HAS_EXECUTOR": "true",
 	}); err == nil {
 		t.Errorf("decision without RBE_INPUT_CACHE succeeded with %v; want failure", out)
 	}
@@ -5133,7 +5171,7 @@ func TestBazelRBEJobDecidesOnce(t *testing.T) {
 	// asking the mint about something else.
 	for _, n := range []string{"", "0", "12a", "1&repo=gascity", "1234567890"} {
 		if out, err := runBazelRBEDecision(t, step.Run, map[string]string{
-			"RBE_VAR_ON": "false", "RBE_INPUT_OFF": "false", "RBE_INPUT_CACHE": "false", "PULL_REQUEST": "true", "FORK": "true", "DEPENDABOT": "false",
+			"RBE_VAR_ON": "false", "RBE_INPUT_OFF": "false", "RBE_INPUT_CACHE": "false", "PULL_REQUEST": "true", "FORK": "true", "FORK_REPO": "false", "DEPENDABOT": "false",
 			"FORK_FARM": "false", "HAS_EXECUTOR": "false", "PR_NUMBER": n, bazelTestMintEnv: "ro",
 		}); err == nil {
 			t.Errorf("decision with PR_NUMBER %q succeeded with %v; want failure", n, out)
@@ -5177,8 +5215,23 @@ func runBazelRBEDecision(t *testing.T, script string, env map[string]string) (ma
 	return out, err
 }
 
+// bazelForkRepoSummary: the decide step's step-summary reason for mode local
+// in a fork repository's own CI.
+// (bazelForkRepoName is the stand-in fork the tests run it in).
+const (
+	bazelForkRepoName    = "someone/beads"
+	bazelForkRepoSummary = "Fork repository's own CI (" + bazelForkRepoName + "): local, no rbe-cache"
+)
+
 // runBazelRBEDecisionLog: runBazelRBEDecision, plus the stub's curl log.
 func runBazelRBEDecisionLog(t *testing.T, script string, env map[string]string) (map[string]string, string, error) {
+	t.Helper()
+	out, log, _, err := runBazelRBEDecisionSummary(t, script, env)
+	return out, log, err
+}
+
+// runBazelRBEDecisionSummary: runBazelRBEDecisionLog, plus the step summary.
+func runBazelRBEDecisionSummary(t *testing.T, script string, env map[string]string) (map[string]string, string, string, error) {
 	t.Helper()
 	dir := t.TempDir()
 	output := filepath.Join(dir, "output")
@@ -5199,18 +5252,19 @@ func runBazelRBEDecisionLog(t *testing.T, script string, env map[string]string) 
 	b, err := cmd.CombinedOutput()
 	logData, _ := os.ReadFile(curlLog)
 	if err != nil {
-		return nil, string(logData), fmt.Errorf("%v: %s", err, b)
+		return nil, string(logData), "", fmt.Errorf("%v: %s", err, b)
 	}
 	data, err := os.ReadFile(output)
 	if err != nil {
-		return nil, string(logData), err
+		return nil, string(logData), "", err
 	}
 	out := map[string]string{}
 	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
 		k, v, _ := strings.Cut(line, "=")
 		out[k] = v
 	}
-	return out, string(logData), nil
+	summary, _ := os.ReadFile(filepath.Join(dir, "summary"))
+	return out, string(logData), string(summary), nil
 }
 
 // write-bazelrc.sh: no secrets means a local-only rc, plus --config=fork-cache

@@ -31,6 +31,7 @@ const (
 	bazelFreshRCLine  = "test:fresh --nocache_test_results"
 	mergeQueueActor   = "github-merge-queue[bot]"
 	mergeQueueOwnRepo = "gastownhall/beads"
+	mergeQueueOwner   = "gastownhall"
 )
 
 // mergeGroupCtx: an evalGHExpr context for a merge_group run of entry n
@@ -39,6 +40,7 @@ func mergeGroupCtx(n int, extra map[string]string) map[string]string {
 	ctx := map[string]string{
 		"github.event_name":                 "merge_group",
 		"github.repository":                 mergeQueueOwnRepo,
+		"github.repository_owner":           mergeQueueOwner,
 		"github.actor":                      mergeQueueActor,
 		"github.ref":                        fmt.Sprintf("refs/heads/gh-readonly-queue/main/pr-%d-%040d", 7000+n, n),
 		"github.run_attempt":                "1",
@@ -58,6 +60,7 @@ func pullRequestCtx(n int, extra map[string]string) map[string]string {
 	ctx := map[string]string{
 		"github.event_name":                             "pull_request",
 		"github.repository":                             mergeQueueOwnRepo,
+		"github.repository_owner":                       mergeQueueOwner,
 		"github.actor":                                  "alice",
 		"github.ref":                                    fmt.Sprintf("refs/pull/%d/merge", 7000+n),
 		"github.run_attempt":                            "1",

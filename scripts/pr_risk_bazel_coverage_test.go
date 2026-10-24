@@ -30,6 +30,9 @@ const (
 	prRiskDependabotValue = "${{ github.actor == 'dependabot[bot]' }}"
 	// pr.yml's gate id for "the Bazel lanes ran remotely".
 	bazelRemoteGateID = "BAZEL_REMOTE"
+	// The decision's fork-repository test: a fork repository's own CI
+	// (not a fork PR into beads) is mode local, so it never reads rbe-cache.
+	bazelForkRepoValue = "${{ github.repository_owner != 'gastownhall' }}"
 )
 
 // rbeFacts: what GitHub evaluates bazel.yml's rbe step's env expressions on.
@@ -43,11 +46,15 @@ type rbeFacts struct {
 	// What rbe-fork-mint's /v1/status answers this run (bazelTestMintEnv;
 	// "" = unreachable). Only fork and Dependabot pull_request runs ask.
 	mint string
+	// github.repository_owner is not gastownhall: the run is a fork
+	// repository's own CI (a push to the fork, a PR within it), never a
+	// fork PR into beads.
+	forkRepo bool
 }
 
 func (f rbeFacts) String() string {
-	return fmt.Sprintf("event=%s var=%q secret=%v fork=%v dependabot=%v mint=%q",
-		f.event, f.rbeVar, f.secret != "", f.fork, f.dependabot, f.mint)
+	return fmt.Sprintf("event=%s var=%q secret=%v fork=%v dependabot=%v mint=%q fork-repo=%v",
+		f.event, f.rbeVar, f.secret != "", f.fork, f.dependabot, f.mint, f.forkRepo)
 }
 
 // forkPR: a run that asks rbe-fork-mint (bazel.yml's rbe job).
@@ -73,7 +80,7 @@ func rbeGateFactsMatrix() []rbeFacts {
 			for _, secret := range rbeSecrets {
 				for _, fork := range []bool{false, true} {
 					for _, dependabot := range []bool{false, true} {
-						f := rbeFacts{event, v, secret, fork, dependabot, ""}
+						f := rbeFacts{event, v, secret, fork, dependabot, "", false}
 						if !f.forkPR() {
 							out = append(out, f)
 							continue
@@ -121,6 +128,8 @@ func evalRBEExpr(t *testing.T, expr string, f rbeFacts, with map[string]string) 
 		return strconv.FormatBool(strings.EqualFold(input("rbe", "on"), "cache"))
 	case "${{ github.event.pull_request.head.repo.fork == true }}":
 		return strconv.FormatBool(f.fork)
+	case bazelForkRepoValue:
+		return strconv.FormatBool(f.forkRepo)
 	case bazelForkFarmValue:
 		return strconv.FormatBool(strings.EqualFold(input("fork-farm", "off"), "authorized") &&
 			f.event == "pull_request_target" && input("checkout-sha", "") != "")
@@ -241,18 +250,22 @@ func TestPRGateRequiresRemoteBazelLanes(t *testing.T) {
 		mode string
 		pass bool
 	}{
-		{"same-repo PR, farm on", rbeFacts{"pull_request", "true", "x", false, false, ""}, "remote", true},
-		{"same-repo PR, kill switch (var unset)", rbeFacts{"pull_request", "", "x", false, false, ""}, "skip", false},
-		{"same-repo PR, executor secret missing", rbeFacts{"pull_request", "true", "", false, false, ""}, "cache", false},
-		{"fork PR, rbe-fork ro", rbeFacts{"pull_request", "true", "", true, false, "ro"}, "fork-ro", true},
-		{"fork PR, rbe-fork rw", rbeFacts{"pull_request", "", "", true, false, "rw"}, "fork-rw", true},
-		{"fork PR, rbe-fork closed", rbeFacts{"pull_request", "true", "", true, false, "closed"}, "cache", false},
-		{"fork PR, mint unreachable", rbeFacts{"pull_request", "true", "", true, false, ""}, "cache", false},
-		{"Dependabot PR, rbe-fork ro", rbeFacts{"pull_request", "true", "", false, true, "ro"}, "fork-ro", true},
-		{"Dependabot PR, rbe-fork closed", rbeFacts{"pull_request", "", "", false, true, "closed"}, "cache", false},
-		{"merge_group", rbeFacts{"merge_group", "true", "x", false, false, ""}, "remote", true},
-		{"merge_group, kill switch (var unset)", rbeFacts{"merge_group", "", "x", false, false, ""}, "skip", false},
-		{"merge_group, executor secret missing", rbeFacts{"merge_group", "true", "", false, false, ""}, "cache", false},
+		{"same-repo PR, farm on", rbeFacts{"pull_request", "true", "x", false, false, "", false}, "remote", true},
+		{"same-repo PR, kill switch (var unset)", rbeFacts{"pull_request", "", "x", false, false, "", false}, "skip", false},
+		{"same-repo PR, executor secret missing", rbeFacts{"pull_request", "true", "", false, false, "", false}, "cache", false},
+		{"fork PR, rbe-fork ro", rbeFacts{"pull_request", "true", "", true, false, "ro", false}, "fork-ro", true},
+		{"fork PR, rbe-fork rw", rbeFacts{"pull_request", "", "", true, false, "rw", false}, "fork-rw", true},
+		{"fork PR, rbe-fork closed", rbeFacts{"pull_request", "true", "", true, false, "closed", false}, "cache", false},
+		{"fork PR, mint unreachable", rbeFacts{"pull_request", "true", "", true, false, "", false}, "cache", false},
+		{"Dependabot PR, rbe-fork ro", rbeFacts{"pull_request", "true", "", false, true, "ro", false}, "fork-ro", true},
+		{"Dependabot PR, rbe-fork closed", rbeFacts{"pull_request", "", "", false, true, "closed", false}, "cache", false},
+		{"merge_group", rbeFacts{"merge_group", "true", "x", false, false, "", false}, "remote", true},
+		{"merge_group, kill switch (var unset)", rbeFacts{"merge_group", "", "x", false, false, "", false}, "skip", false},
+		{"merge_group, executor secret missing", rbeFacts{"merge_group", "true", "", false, false, "", false}, "cache", false},
+		// A fork repository's own CI: local, never rbe-cache or the mint
+		// (red, as mode cache was there).
+		{"fork repository's own PR, mint would say ro", rbeFacts{"pull_request", "", "", true, false, "ro", true}, "local", false},
+		{"fork repository's own PR, var and secret set", rbeFacts{"pull_request", "true", "x", false, false, "", true}, "local", false},
 	} {
 		out, err := runDecisionStep(t, rbeStep, c.f, call.With)
 		if err != nil {

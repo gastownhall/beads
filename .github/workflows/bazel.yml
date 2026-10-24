@@ -88,10 +88,16 @@
 #     already executed, no credentials, no uploads; and bazel-integration
 #     runs too (a warm run hits all but what the PR changed). The farm can
 #     close the cache at any time; Bazel then runs everything locally.
-#   local: rbe=off dispatches (fork simulation without the cache): local
-#     execution on ubuntu-latest, slower but the same results, for every job
-#     but the remote-only ones (bazel-embedded, bazel-proxied,
-#     bazel-server-storage) and bazel-integration, which are skipped.
+#   local: rbe=off dispatches (fork simulation without the cache), and every
+#     run in a fork repository's own CI (github.repository's owner is not
+#     gastownhall: a push to the fork, a PR within it, a dispatch there;
+#     never a fork PR into beads, whose runs have github.repository
+#     gastownhall/beads; nor a contributor's own --config=fork-cache):
+#     local execution on ubuntu-latest, slower but the same results, for
+#     every job but the remote-only ones (bazel-embedded, bazel-proxied,
+#     bazel-server-storage) and bazel-integration, which are skipped. A fork
+#     repository's runs have no secrets and would otherwise read rbe-cache
+#     (mode cache) on every push and PR within the fork, at the farm's cost.
 #   skip: same-repo runs while RBE_WEST_WORKERS is unset (the farm switch),
 #     and authorized fork-farm runs without it or without the secret. Fork
 #     and Dependabot pull_request runs cannot read the variable; rbe-fork's
@@ -452,6 +458,10 @@ jobs:
       # (setup-bazel, BAZEL_FORK_REMOTE) and fails if the tier changed. A
       # mint that is closed, refuses or cannot be reached leaves mode cache,
       # as before rbe-fork.
+      # FORK_REPO: the run is a fork repository's own CI (a push to the fork,
+      # a PR within it, a dispatch there): github.repository's owner is not
+      # gastownhall. Fork PRs into beads run here with github.repository
+      # gastownhall/beads, so FORK_REPO is false for them.
       - name: Decide remote execution
         id: decide
         env:
@@ -460,12 +470,13 @@ jobs:
           RBE_INPUT_CACHE: ${{ inputs.rbe == 'cache' }}
           PULL_REQUEST: ${{ github.event_name == 'pull_request' }}
           FORK: ${{ github.event.pull_request.head.repo.fork == true }}
+          FORK_REPO: ${{ github.repository_owner != 'gastownhall' }}
           DEPENDABOT: ${{ github.actor == 'dependabot[bot]' }}
           FORK_FARM: ${{ inputs.fork-farm == 'authorized' && github.event_name == 'pull_request_target' && inputs.checkout-sha != '' }}
           HAS_EXECUTOR: ${{ secrets.RBE_WEST_EXECUTOR != '' }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          for v in RBE_VAR_ON RBE_INPUT_OFF RBE_INPUT_CACHE PULL_REQUEST FORK DEPENDABOT FORK_FARM HAS_EXECUTOR; do
+          for v in RBE_VAR_ON RBE_INPUT_OFF RBE_INPUT_CACHE PULL_REQUEST FORK FORK_REPO DEPENDABOT FORK_FARM HAS_EXECUTOR; do
             case "${!v}" in
               true|false) ;;
               *) echo "::error::$v is '${!v}', want true or false"; exit 1 ;;
@@ -476,8 +487,15 @@ jobs:
           # the read-only cache. Any other fork run (pull_request_target)
           # stays local unless bazel-farm.yml authorized it; an authorized
           # fork run is remote or nothing (pr.yml's call already runs it).
+          # A fork repository's own CI is mode local, whatever else holds:
+          # no secrets, so it would otherwise read rbe-cache (mode cache) on
+          # every run, which the farm pays for (rbe-cache's daily request
+          # budget shut it on 2026-10-19, largely on fork CI runs). It never
+          # asks the mint either.
           tier=
-          if [ "$RBE_INPUT_OFF" = true ]; then
+          if [ "$FORK_REPO" = true ]; then
+            mode=local
+          elif [ "$RBE_INPUT_OFF" = true ]; then
             mode=local
           elif [ "$RBE_INPUT_CACHE" = true ]; then
             mode=cache
@@ -512,7 +530,10 @@ jobs:
             echo "enabled=$enabled"
             echo "tier=$tier"
           } >> "$GITHUB_OUTPUT"
-          echo "Bazel execution mode: **$mode** (RBE_WEST_WORKERS on: $RBE_VAR_ON, rbe=off: $RBE_INPUT_OFF, rbe=cache: $RBE_INPUT_CACHE, fork: $FORK, dependabot: $DEPENDABOT, fork farm: $FORK_FARM, executor secret: $HAS_EXECUTOR)" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "Bazel execution mode: **$mode** (RBE_WEST_WORKERS on: $RBE_VAR_ON, rbe=off: $RBE_INPUT_OFF, rbe=cache: $RBE_INPUT_CACHE, fork: $FORK, fork repository: $FORK_REPO, dependabot: $DEPENDABOT, fork farm: $FORK_FARM, executor secret: $HAS_EXECUTOR)" | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ "$FORK_REPO" = true ]; then
+            echo "Fork repository's own CI ($GITHUB_REPOSITORY): local, no rbe-cache" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
 
       # Bazel's remote repo contents cache on rbe-west (ga-vnycm2.29, ported
       # from gascity's bazel.yml; gascity

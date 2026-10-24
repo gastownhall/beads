@@ -50,7 +50,11 @@ Current PR-related workflow names:
   certificate (instance `oss-fork`, the fork pool; or `oss`, the OSS pool,
   for allowlisted authors), else `cache`: local execution plus rbe-west's
   anonymous read-only action cache, `.bazelrc`'s `fork-cache` config;
-  `local` for `rbe=off` dispatches; or `skip` while the `RBE_WEST_WORKERS`
+  `local` for `rbe=off` dispatches and for every run in a fork
+  repository's own CI (`github.repository_owner` is not `gastownhall`: a
+  push to the fork or a PR within it; fork PRs into beads run with
+  `github.repository` `gastownhall/beads` and are unaffected), so a fork's
+  CI never reads rbe-cache; or `skip` while the `RBE_WEST_WORKERS`
   repo variable is unset) and exports it as the `rbe-mode` / `rbe-enabled`
   outputs (`rbe-enabled` is `true` in `remote`, `fork-ro` and `fork-rw`);
   every lane exports its
@@ -71,7 +75,8 @@ Current PR-related workflow names:
   `fork-rw`. `.github/scripts/bazel-gate.sh` reads the exported mode, never
   the variable or the fork flag: mode `skip` allows every Bazel id to skip,
   mode `cache` the remote-only `BAZEL_EMBEDDED`, `BAZEL_PROXIED` and
-  `BAZEL_SERVER_STORAGE`, mode `local` (`rbe=off` dispatches) those and
+  `BAZEL_SERVER_STORAGE`, mode `local` (`rbe=off` dispatches, a fork
+  repository's own CI) those and
   `BAZEL_INTEGRATION`, and modes `remote`, `fork-ro` and `fork-rw` none;
   on `pr.yml` the first three are red anyway through `BAZEL_REMOTE`.
   A lane that should run and fails, is cancelled, or reports no result fails

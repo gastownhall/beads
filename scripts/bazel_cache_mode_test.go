@@ -173,6 +173,13 @@ func TestBazelCacheModeReachesTheRC(t *testing.T) {
 			start{"Dependabot PR, rbe-fork ro, " + v, prMint(false, true, false, "ro"), nil, false},
 			start{"fork PR that somehow has the secrets, rbe-fork ro, " + v, prMint(true, false, true, "ro"), nil, true},
 			start{"fork PR, rbe-fork ro, dispatch-style rbe=cache, " + v, prMint(true, false, false, "ro"), map[string]string{"rbe": "cache"}, false},
+			// A fork repository's own CI (github.repository's owner is not
+			// gastownhall): mode local whatever else holds, so its rc never
+			// names rbe-cache and setup-bazel never probes it.
+			start{"fork repository's own PR, rbe-fork ro, " + v, rbeFacts{event: "pull_request", rbeVar: rbeVar, fork: true, mint: "ro", forkRepo: true}, nil, false},
+			start{"fork repository's own push, " + v, rbeFacts{event: "push", rbeVar: rbeVar, forkRepo: true}, nil, false},
+			start{"fork repository's own dispatch rbe=cache, " + v, rbeFacts{event: "workflow_dispatch", rbeVar: rbeVar, forkRepo: true}, map[string]string{"rbe": "cache"}, false},
+			start{"fork repository with the secret somehow, " + v, rbeFacts{event: "push", rbeVar: rbeVar, secret: "x", forkRepo: true}, nil, true},
 		)
 	}
 
@@ -185,6 +192,7 @@ func TestBazelCacheModeReachesTheRC(t *testing.T) {
 			}
 			mode, enabled, tier := out["mode"], out["enabled"], out["tier"]
 			seen[mode] = true
+			// A fork repository's own CI: local, whatever else holds.
 			// Fork and Dependabot pull_request runs: fork-<tier> when the
 			// mint says open with tier ro or rw, else cache, whatever else
 			// holds (rbe=off: local). Other forks outside bazel-farm.yml's
@@ -193,6 +201,8 @@ func TestBazelCacheModeReachesTheRC(t *testing.T) {
 			forkPR := s.f.event == "pull_request" && (s.f.fork || s.f.dependabot)
 			want := ""
 			switch {
+			case s.f.forkRepo:
+				want = "local"
 			case s.with["rbe"] == "off":
 				want = "local"
 			case s.with["rbe"] == "cache":
