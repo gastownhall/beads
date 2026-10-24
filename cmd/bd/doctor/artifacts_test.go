@@ -515,38 +515,53 @@ func TestScanForArtifacts_DoesNotMigrateLegacyConfig(t *testing.T) {
 // metadata.json or a legacy config.json not yet migrated into one
 // (gastownhall/beads#4692), so the scan lists only the unrelated file, the
 // cleanup leaves the metadata byte-identical, and a second scan has nothing
-// left to report. Without a redirect the metadata is cruft like the rest.
+// left to report. Without a redirect, metadata that configures Dolt is the
+// workspace's own record of its database (a server-mode workspace keeps no
+// local store), so the directory is reported for review and left
+// byte-identical; stale pre-Dolt metadata is cruft like the rest.
 func TestScanForArtifacts_MetadataAlongsideRedirectIsNotCruft(t *testing.T) {
 	const metadata = `{"dolt_mode":"server","dolt_database":"lola","future_key":"keep-me"}`
+	const preDolt = `{"database":"beads.db","jsonl_export":"issues.jsonl"}`
 	const redirect = "../../mayor/rig/.beads\n"
+	const review = "should be redirect-only but its metadata configures Dolt and it has no redirect; review manually"
 	cases := []struct {
 		name  string
 		files map[string]string // the polecat's .beads
-		cruft string            // what the scan reports it contains
-		after map[string]string // the .beads after the cleanup
+		want  ArtifactFinding   // the scan's one finding, Path and Type aside
+		after map[string]string // the .beads after the cleanup; nil if unchanged
 	}{
 		{
 			name:  "metadata.json with redirect",
 			files: map[string]string{"redirect": redirect, configfile.ConfigFileName: metadata, "extra.txt": "cruft"},
-			cruft: "extra.txt",
+			want:  ArtifactFinding{Description: "should be redirect-only but contains: extra.txt", SafeDelete: true},
 			after: map[string]string{".": "/", "redirect": redirect, configfile.ConfigFileName: metadata},
 		},
 		{
 			name:  "legacy config.json with redirect",
 			files: map[string]string{"redirect": redirect, "config.json": metadata, "extra.txt": "cruft"},
-			cruft: "extra.txt",
+			want:  ArtifactFinding{Description: "should be redirect-only but contains: extra.txt", SafeDelete: true},
 			after: map[string]string{".": "/", "redirect": redirect, "config.json": metadata},
 		},
 		{
-			name:  "metadata.json without redirect",
+			name:  "metadata.json configuring Dolt without redirect",
 			files: map[string]string{configfile.ConfigFileName: metadata, "extra.txt": "cruft"},
-			cruft: "extra.txt, metadata.json",
+			want:  ArtifactFinding{Description: review},
+		},
+		{
+			name:  "legacy config.json configuring Dolt without redirect",
+			files: map[string]string{"config.json": metadata, "extra.txt": "cruft"},
+			want:  ArtifactFinding{Description: review},
+		},
+		{
+			name:  "pre-Dolt metadata.json without redirect",
+			files: map[string]string{configfile.ConfigFileName: preDolt, "extra.txt": "cruft"},
+			want:  ArtifactFinding{Description: "should be redirect-only but contains: extra.txt, metadata.json", SafeDelete: true},
 			after: map[string]string{".": "/"},
 		},
 		{
-			name:  "legacy config.json without redirect",
-			files: map[string]string{"config.json": metadata, "extra.txt": "cruft"},
-			cruft: "config.json, extra.txt",
+			name:  "pre-Dolt legacy config.json without redirect",
+			files: map[string]string{"config.json": preDolt, "extra.txt": "cruft"},
+			want:  ArtifactFinding{Description: "should be redirect-only but contains: config.json, extra.txt", SafeDelete: true},
 			after: map[string]string{".": "/"},
 		},
 	}
@@ -556,24 +571,35 @@ func TestScanForArtifacts_MetadataAlongsideRedirectIsNotCruft(t *testing.T) {
 			writeArtifactTree(t, filepath.Join(root, "mayor", "rig", ".beads"), map[string]string{configfile.ConfigFileName: `{"backend":"dolt"}`})
 			beadsDir := filepath.Join(root, "polecats", "p1", ".beads")
 			writeArtifactTree(t, beadsDir, tc.files)
+			after := tc.after
+			if after == nil {
+				after = snapshotBeadsDir(t, beadsDir)
+			}
 
 			report, err := ScanForArtifacts(root)
 			if err != nil {
 				t.Fatalf("ScanForArtifacts: %v", err)
 			}
-			want := []ArtifactFinding{{Path: beadsDir, Type: "cruft-beads", Description: "should be redirect-only but contains: " + tc.cruft, SafeDelete: true}}
-			if report.TotalCount != 1 || !reflect.DeepEqual(report.CruftBeadsDirs, want) {
+			want := tc.want
+			want.Path, want.Type = beadsDir, "cruft-beads"
+			if report.TotalCount != 1 || !reflect.DeepEqual(report.CruftBeadsDirs, []ArtifactFinding{want}) {
 				t.Fatalf("ScanForArtifacts = %+v, want only the cruft finding %+v", report, want)
 			}
 
 			if err := fix.ClassicArtifacts(root); err != nil {
 				t.Fatalf("fix.ClassicArtifacts: %v", err)
 			}
-			if got := snapshotBeadsDir(t, beadsDir); !reflect.DeepEqual(got, tc.after) {
-				t.Fatalf("fix.ClassicArtifacts left %s as\n %q\nwant %q", beadsDir, got, tc.after)
+			if got := snapshotBeadsDir(t, beadsDir); !reflect.DeepEqual(got, after) {
+				t.Fatalf("fix.ClassicArtifacts left %s as\n %q\nwant %q", beadsDir, got, after)
 			}
-			if report, err = ScanForArtifacts(root); err != nil || report.TotalCount != 0 {
-				t.Fatalf("ScanForArtifacts after the cleanup = %+v (err %v), want nothing to report", report, err)
+			// A removed finding leaves nothing to report; one kept for review
+			// is reported again.
+			left := 1
+			if want.SafeDelete {
+				left = 0
+			}
+			if report, err = ScanForArtifacts(root); err != nil || report.TotalCount != left {
+				t.Fatalf("ScanForArtifacts after the cleanup = %+v (err %v), want %d finding(s)", report, err, left)
 			}
 		})
 	}

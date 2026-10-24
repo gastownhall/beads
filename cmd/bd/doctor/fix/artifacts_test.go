@@ -228,8 +228,10 @@ func TestClassicArtifacts_CleansCruftWithoutRedirectFile(t *testing.T) {
 	for _, name := range cruftFiles {
 		content := "stale"
 		if name == "metadata.json" {
-			// Metadata that does not load leaves the stub for review.
-			content = doltMetadata
+			// Pre-Dolt metadata that configures nothing: metadata that does
+			// not load, or that configures Dolt with no redirect beside it,
+			// leaves the directory for review.
+			content = `{"database":"beads.db","jsonl_export":"issues.jsonl"}`
 		}
 		if err := os.WriteFile(filepath.Join(worktreeBeads, name), []byte(content), 0644); err != nil {
 			t.Fatal(err)
@@ -426,7 +428,8 @@ func TestClassicArtifacts_DoesNotMigrateLegacyConfig(t *testing.T) {
 // The walk no longer migrates it into a metadata.json the cleanup keeps, so
 // the cleanup keeps the config.json itself, byte-identical with its
 // dolt_database and keys bd does not know, while unrelated cruft beside it is
-// still removed. Without a redirect it is cruft like the rest.
+// still removed. Without a redirect, a config.json that configures Dolt is the
+// workspace's own, and the cleanup leaves the directory as it is.
 func TestClassicArtifacts_PreservesLegacyConfigJSONAlongsideRedirect(t *testing.T) {
 	const legacy = `{"dolt_mode":"server","dolt_database":"lola","future_key":"keep-me"}`
 	cases := []struct {
@@ -442,7 +445,7 @@ func TestClassicArtifacts_PreservesLegacyConfigJSONAlongsideRedirect(t *testing.
 		{
 			name:  "without redirect",
 			files: map[string]string{"config.json": legacy, "extra.txt": "cruft"},
-			want:  map[string]string{".": "/"},
+			want:  map[string]string{".": "/", "config.json": legacy, "extra.txt": "cruft"},
 		},
 	}
 	for _, tc := range cases {

@@ -15,7 +15,8 @@ import (
 // Classic Artifacts and Legacy MQ Files repairs -- over workspaces doctor
 // cannot positively claim: a nested .beads whose metadata does not load, a
 // metadata-less layout the historical classifier does not recognize, Beads
-// Classic and Dolt workspaces at paths that should hold only a redirect,
+// Classic and Dolt workspaces at paths that should hold only a redirect (a
+// server-mode one, with no local store and no redirect, included),
 // workspaces on other backends there whatever their database is named, stubs
 // holding a database under any name (a Dolt chunk-store backup included),
 // stubs whose metadata or symlink points at a Dolt store, a Dolt workspace
@@ -45,6 +46,9 @@ func TestDoctorCleanupEntryPointsDeleteOnlyWhatTheyOwn(t *testing.T) {
 		// A server-mode rig root that mayor/rig/.beads redirects to: no
 		// local store, but every checkout routes through it.
 		"town/rig/.beads": {"metadata.json": `{"backend":"dolt","dolt_mode":"server","dolt_database":"my_rig"}`, "config.yaml": "c", "routes.jsonl": "{}"},
+		// A server-mode workspace with no redirect: its metadata is its only
+		// record of the server database it opens.
+		"crew/hal/.beads": {"metadata.json": `{"backend":"dolt","dolt_mode":"server","dolt_database":"hal"}`, "config.yaml": "c", "routes.jsonl": "{}"},
 		// A Dolt database in the raw chunk-store layout of a file:// Dolt
 		// backup or remote (manifest, *.darc, LOCK, oldgen/, no .dolt), under
 		// a name that says nothing, in a stub and in a server-mode stub.

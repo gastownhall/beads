@@ -120,10 +120,13 @@ func isRedirectExpectedLocation(beadsDir string) bool {
 }
 
 // redirectResolvesTo reports whether the redirect file in fromBeadsDir names
-// target. It reads the redirect the way beads.FollowRedirect does (the first
-// line that is neither blank nor a # comment, relative to fromBeadsDir's
-// parent) but does not require the target to hold a database, so a target
-// bd would currently refuse is still recognized as the one redirected to.
+// target. It parses the redirect as beads.FollowRedirect does (the first line
+// that is neither blank nor a # comment, relative to fromBeadsDir's parent)
+// and compares the cleaned or symlink-resolved path. It does not apply
+// FollowRedirect's rewrite of a detached /refs/commits/<sha> checkout to the
+// branch worktree at that commit, and does not require the target to hold a
+// database, so a target bd would currently refuse is still recognized as the
+// one redirected to.
 func redirectResolvesTo(fromBeadsDir, target string) bool {
 	data, err := os.ReadFile(filepath.Join(fromBeadsDir, "redirect")) // #nosec G304 -- a .beads redirect file doctor is classifying
 	if err != nil {

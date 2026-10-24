@@ -13,7 +13,8 @@ import (
 // TestEmbeddedDoctorArtifactsCleanKeepsWorkspaceAtRedirectOnlyPath pins, end
 // to end, that bd doctor --check=artifacts --clean never deletes a live
 // embedded Dolt workspace because of where it lives (a server-mode workspace
-// there falls under the stub rule left for maintainer review). A workspace
+// there, kept by its metadata, is pinned by
+// TestDoctorCleanupEntryPointsDeleteOnlyWhatTheyOwn). A workspace
 // initialized at <dir>/crew/alice sits where an orchestrator expects a
 // redirect-only .beads, and the cleanup removed its embedded Dolt database,
 // its metadata and its config as "cruft", whether run inside it or from above

@@ -877,10 +877,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and, beside a redirect, its `metadata.json` or `config.json`, whatever it
   held: an embedded Dolt workspace initialized at such a path lost its
   database, `metadata.json` and `config.yaml`, even when doctor ran inside
-  it; a Beads Classic or `--backend=sqlite` workspace there lost its SQLite
-  database whatever the file was named; a Dolt backup or remote kept there
-  in Dolt's own file format lost the whole database; a workspace on another
-  backend (`http`, `postgres`, or one this build does not know) lost its
+  it; a server-mode workspace there with no `redirect` lost the
+  `metadata.json` and `config.yaml` that are its only local record of the
+  server database it opens; a Beads Classic or `--backend=sqlite`
+  workspace there lost its SQLite database whatever the file was named; a
+  Dolt backup or remote kept there in Dolt's own file format lost the whole
+  database; a workspace on another backend (`http`, `postgres`, or one this
+  build does not know) lost its
   metadata; and a server-mode rig root that `mayor/rig/.beads` redirects to
   lost the `metadata.json`, `config.yaml` and `routes.jsonl` every checkout
   routes through. It also removed the WAL, SHM and backups of a nested
@@ -888,16 +891,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recognize, reading either as Dolt. The check and the cleanup now share one
   classification of each `.beads`, and the cleanup removes only what the
   check reports as safe to delete: a `beads.db-wal` or `beads.db-shm` whose
-  `beads.db` is gone, in a `.beads` with positive Dolt evidence (`backend`
-  `dolt`, a `dolt_mode` or `dolt_database`, an embedded Dolt repository, or
-  its Dolt store directory), and the leftover files of a redirect-only
-  `.beads` that holds no database and whose metadata names no other backend
-  and no existing `dolt_data_dir`. The cleanup never removes database state:
+  `beads.db` is gone, in a `.beads` with positive Dolt evidence (metadata
+  that says `backend` `dolt` or sets any Dolt setting, even a lone
+  `dolt_server_host` or a `dolt_data_dir` that does not exist; an embedded
+  Dolt repository; or its Dolt store directory), and the leftover files of
+  a redirect-only `.beads` that holds no database and whose metadata names
+  no other backend and no existing `dolt_data_dir` and, unless a `redirect`
+  is beside it, does not configure Dolt. The cleanup never removes database
+  state:
   a `*.db`, `*.db3`, `*.sqlite` or `*.sqlite3` file in any letter case,
   including the `beads.backup-*.db` pre-migration backups it used to delete;
   any file that starts with the SQLite header, whatever its name; the WAL
-  and SHM of a database still beside them; a Dolt store, embedded Dolt or
-  `backup` directory; a Dolt chunk store in the layout a `file://` Dolt
+  and SHM of a database still beside them, or a link in their place
+  wherever it points; a Dolt store, embedded Dolt or `backup` directory; a
+  Dolt chunk store in the layout a `file://` Dolt
   backup or remote uses (a `manifest` starting `<n>:__DOLT__:`, `*.darc`,
   `journal.idx` or NBS table files); a directory holding any of those; or a
   symlink to any of those (the link is kept, and no removal follows a link).
@@ -909,14 +916,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   redirect-only path (`crew/*`, `polecats/*`, `refinery/rig`,
   `.git/beads-worktrees/*`, or a rig root that `mayor/rig/.beads` does not
   redirect to) that holds no database state, and whose metadata, if it has
-  any, loads and names no other backend and no existing `dolt_data_dir`, is
-  still treated as a redirect stub. It loses every entry except `redirect` and `.gitkeep`, plus
+  any, loads, names no other backend and no existing `dolt_data_dir` and,
+  unless a `redirect` is beside it, does not configure Dolt (`backend`
+  `dolt` or any Dolt setting, such as `dolt_mode`, `dolt_database`,
+  `dolt_server_host` or `dolt_data_dir`), is still treated as a redirect
+  stub. It loses every entry except `redirect` and `.gitkeep`, plus
   `metadata.json` or `config.json` when a `redirect` is present: that
-  includes `metadata.json` and `config.yaml` of a server-mode workspace there,
-  even when doctor runs inside it (its data, on the server, is untouched),
-  the opt-in audit log `interactions.jsonl`, `routes.jsonl`, `last-touched`,
-  `formulas/`, and any file bd cannot recognize as a database by its name or
-  header, such as an encrypted `beads.db.enc` or a compressed backup. A
+  includes `config.yaml`, the opt-in audit log `interactions.jsonl`,
+  `routes.jsonl`, `last-touched`, `formulas/`, metadata that configures no
+  Dolt (such as a pre-Dolt `metadata.json`) when no `redirect` is beside it,
+  and any file bd cannot recognize as a database by its name or header,
+  such as an encrypted `beads.db.enc` or a compressed backup. A
   `.beads` at such a path whose `metadata.json` does not load (for example
   merge-conflict markers in a tracked file) was cleaned like any stub; it is
   now left as it is, and reported for review when it holds more than its

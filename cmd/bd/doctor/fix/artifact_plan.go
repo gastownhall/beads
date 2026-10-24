@@ -48,7 +48,8 @@ const (
 	// directory cannot be listed.
 	ownerUnreadable
 	// ownerRedirectStub: a location that should hold only a redirect, and
-	// the directory holds no database state.
+	// the directory holds no database state, and no Dolt metadata without a
+	// redirect beside it.
 	ownerRedirectStub
 	// ownerOtherBackend: its metadata names a backend other than Dolt, or
 	// it is a historical SQLite workspace (historicalsqlite.IsWorkspace).
@@ -102,6 +103,13 @@ func classifyBeadsDir(beadsDir string) beadsDirClass {
 	case c.redirectExpected && len(c.databaseState) == 0 && namesLocalDoltStore(beadsDir, cfg):
 		c.owner = ownerDolt
 		c.reason = "its metadata points at a local Dolt store (dolt_data_dir)"
+	// Without a redirect, metadata that configures Dolt is a workspace's own
+	// record of the database it opens; a server-mode workspace keeps no
+	// local store. Beside a redirect the stub rule keeps that metadata
+	// (#4692), so a stub with a redirect is still cleaned.
+	case c.redirectExpected && len(c.databaseState) == 0 && !holdsRedirect(entries) && metadataNamesDolt(cfg):
+		c.owner = ownerDolt
+		c.reason = "its metadata configures Dolt and it has no redirect"
 	case c.redirectExpected && len(c.databaseState) == 0:
 		c.owner = ownerRedirectStub
 	case hasDoltEvidence(beadsDir, cfg):
@@ -114,28 +122,45 @@ func classifyBeadsDir(beadsDir string) beadsDirClass {
 }
 
 // hasDoltEvidence reports positive evidence that beadsDir is on Dolt: its
-// metadata says backend dolt, or names a dolt_mode or dolt_database, or the
-// directory holds an embedded Dolt repository or its Dolt store directory.
-// The store directory is the one the directory's own metadata names
-// (dolt_data_dir) or beadsDir/dolt; BEADS_DOLT_DATA_DIR configures the
-// workspace bd runs in, not every .beads the walk reaches, so it is not
-// evidence about them.
+// metadata configures Dolt (metadataNamesDolt), or the directory holds an
+// embedded Dolt repository or its Dolt store directory, beadsDir/dolt.
+// BEADS_DOLT_DATA_DIR configures the workspace bd runs in, not every .beads
+// the walk reaches, so it is not evidence about them.
 func hasDoltEvidence(beadsDir string, cfg *configfile.Config) bool {
-	if cfg != nil && (cfg.Backend == configfile.BackendDolt || cfg.DoltMode != "" || cfg.DoltDatabase != "") {
+	if metadataNamesDolt(cfg) || embeddeddolt.HasRepository(beadsDir) {
 		return true
 	}
-	if embeddeddolt.HasRepository(beadsDir) {
-		return true
+	info, err := os.Stat(filepath.Join(beadsDir, "dolt"))
+	return err == nil && info.IsDir()
+}
+
+// metadataNamesDolt reports whether cfg, a .beads directory's metadata (nil
+// when it has none), configures Dolt: it says backend dolt, or sets any of
+// its Dolt settings. Each of those configures only Dolt, so even one alone
+// is a workspace's record of the Dolt database it opens: a lone
+// dolt_server_host selects server mode (GH#3545), and a dolt_data_dir names
+// the store whether or not it exists.
+func metadataNamesDolt(cfg *configfile.Config) bool {
+	if cfg == nil {
+		return false
 	}
-	store := filepath.Join(beadsDir, "dolt")
-	if cfg != nil && cfg.DoltDataDir != "" {
-		store = cfg.DoltDataDir
-		if !filepath.IsAbs(store) {
-			store = filepath.Join(beadsDir, store)
+	for _, setting := range []string{cfg.DoltMode, cfg.DoltDatabase, cfg.DoltServerHost, cfg.DoltServerSocket, cfg.DoltServerUser, cfg.DoltDataDir, cfg.GlobalDoltDatabase} {
+		if setting != "" {
+			return true
 		}
 	}
-	info, err := os.Stat(store)
-	return err == nil && info.IsDir()
+	return cfg.Backend == configfile.BackendDolt || cfg.DoltServerPort != 0 || cfg.DoltRemotesAPIPort != 0 || cfg.DoltServerTLS || cfg.DoltTeamServer
+}
+
+// holdsRedirect reports whether entries, those of a .beads directory, include
+// its redirect file.
+func holdsRedirect(entries []os.DirEntry) bool {
+	for _, entry := range entries {
+		if entry.Name() == "redirect" {
+			return true
+		}
+	}
+	return false
 }
 
 // namesLocalDoltStore reports whether beadsDir's own metadata names a
@@ -183,7 +208,10 @@ const maxDatabaseScanLinks = 4
 //   - a SQLite database: *.db, *.db3, *.sqlite or *.sqlite3 (a backup
 //     included), or any regular file starting with the SQLite header,
 //     whatever its name;
-//   - the WAL, SHM or journal of a database that still exists beside it;
+//   - an entry named for the WAL, SHM or journal of a database that still
+//     exists beside it, whatever the entry is: SQLite opens a sidecar by
+//     that name, so a link there is the database's sidecar wherever it
+//     points;
 //   - a Dolt store: a dolt/, embeddeddolt/, backup/ or .dolt directory, or a
 //     chunk store in its raw layout (a manifest file starting
 //     "<n>:__DOLT__:", *.darc archives, journal.idx, or 32-character NBS
@@ -192,9 +220,10 @@ const maxDatabaseScanLinks = 4
 //   - a directory holding any of those at any depth, or a symlink to one.
 //
 // Symlinks are followed to classify, never to delete: a link to a database
-// keeps the link. A sidecar file whose database is gone is not database
-// state; a sidecar-named entry below the top level is. Names match
-// case-insensitively. What cannot be inspected counts as state.
+// keeps the link. A sidecar whose database is gone is classified like any
+// other entry, so an orphaned WAL file is not database state; a
+// sidecar-named entry below the top level is. Names match case-insensitively.
+// What cannot be inspected counts as state.
 func isDatabaseState(path string) (bool, string) {
 	in := &stateInspector{}
 	return in.entry(path, 0, true)
@@ -216,6 +245,14 @@ func (in *stateInspector) entry(path string, links int, top bool) (bool, string)
 		}
 		return true, "it cannot be inspected"
 	}
+	// Decided by the entry's own name and directory, before a link is
+	// followed: SQLite resolves a sidecar beside the database, not beside
+	// whatever a link there points to.
+	if top {
+		if db, ok := sidecarOfPresentDatabase(path); ok {
+			return true, "part of " + db
+		}
+	}
 	if info.Mode()&os.ModeSymlink != 0 {
 		if databaseDirNames[lower] {
 			return true, "a database directory"
@@ -223,7 +260,7 @@ func (in *stateInspector) entry(path string, links int, top bool) (bool, string)
 		return in.symlink(path, links)
 	}
 	if info.Mode().IsRegular() {
-		return regularFileState(path, top)
+		return regularFileState(path)
 	}
 	if !info.IsDir() {
 		return false, ""
@@ -279,19 +316,19 @@ func (in *stateInspector) dir(dir string, links int) (bool, string) {
 	return false, ""
 }
 
-// regularFileState classifies a regular file by its content and, for a
-// SQLite sidecar at the top level, by whether its database is still there.
-func regularFileState(path string, top bool) (bool, string) {
+// regularFileState classifies a regular file by its content.
+func regularFileState(path string) (bool, string) {
 	kind, err := databaseFileContent(path)
 	if err != nil {
 		return true, "it cannot be inspected"
 	}
-	if kind != "" {
-		return true, kind
-	}
-	if !top {
-		return false, ""
-	}
+	return kind != "", kind
+}
+
+// sidecarOfPresentDatabase reports whether path is named for the WAL, SHM or
+// journal of a database whose entry is beside path, and names that database.
+// A database entry that cannot be checked counts as there.
+func sidecarOfPresentDatabase(path string) (string, bool) {
 	name := filepath.Base(path)
 	for _, suffix := range sqliteSidecarSuffixes {
 		// The suffixes are ASCII, so cutting them from the original name by
@@ -304,12 +341,10 @@ func regularFileState(path string, top bool) (bool, string) {
 		if !hasDatabaseFileSuffix(strings.ToLower(db)) {
 			continue
 		}
-		if _, err := os.Lstat(filepath.Join(filepath.Dir(path), db)); err == nil || !os.IsNotExist(err) {
-			return true, "part of " + db
-		}
-		return false, ""
+		_, err := os.Lstat(filepath.Join(filepath.Dir(path), db))
+		return db, err == nil || !os.IsNotExist(err)
 	}
-	return false, ""
+	return "", false
 }
 
 // sqliteHeader is the first 16 bytes of every SQLite database file.
@@ -484,13 +519,7 @@ func stubCruftFinding(beadsDir string) (PlannedArtifact, bool) {
 	if err != nil {
 		return PlannedArtifact{}, false
 	}
-	hasRedirect := false
-	for _, entry := range entries {
-		if entry.Name() == "redirect" {
-			hasRedirect = true
-			break
-		}
-	}
+	hasRedirect := holdsRedirect(entries)
 	var names, remove []string
 	for _, entry := range entries {
 		name := entry.Name()

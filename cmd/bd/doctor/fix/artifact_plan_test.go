@@ -45,6 +45,11 @@ func TestPlanArtifacts_DeletesOnlyWithPositiveOwnership(t *testing.T) {
 		{name: "dolt_data_dir in legacy config.json", dir: "sub/.beads", files: map[string]string{"config.json": `{"dolt_data_dir":"custom"}`, "custom/": "", "beads.db-wal": "w"}, owner: ownerDolt, want: map[string]bool{"beads.db-wal": true}},
 		// On Dolt a database, its WAL and SHM, and a backup stay.
 		{name: "dolt beside beads.db", dir: "sub/.beads", files: map[string]string{configfile.ConfigFileName: `{"backend":"dolt"}`, "beads.db": sqliteDB, "beads.db-wal": "w", "beads.db-shm": "s", "beads.backup-20260204.db": "b"}, owner: ownerDolt, want: map[string]bool{"beads.db": false, "beads.db-wal": false, "beads.db-shm": false, "beads.backup-20260204.db": false}},
+		// SQLite opens beads.db-wal and beads.db-shm by name beside beads.db,
+		// so links there are its WAL and SHM wherever they point; without
+		// beads.db the link is an orphaned sidecar, and its target stays.
+		{name: "dolt beside beads.db, WAL and SHM linking to non-SQLite bytes", dir: "sub/.beads", files: map[string]string{configfile.ConfigFileName: `{"backend":"dolt"}`, "beads.db": sqliteDB}, extra: map[string]string{"elsewhere/wal": walHeader, "elsewhere/shm": "s"}, links: map[string]string{"sub/.beads/beads.db-wal": "elsewhere/wal", "sub/.beads/beads.db-shm": "elsewhere/shm"}, owner: ownerDolt, want: map[string]bool{"beads.db": false, "beads.db-wal": false, "beads.db-shm": false}},
+		{name: "dolt, orphaned WAL linking to non-SQLite bytes", dir: "sub/.beads", files: map[string]string{configfile.ConfigFileName: `{"backend":"dolt"}`}, extra: map[string]string{"elsewhere/wal": walHeader}, links: map[string]string{"sub/.beads/beads.db-wal": "elsewhere/wal"}, owner: ownerDolt, want: map[string]bool{"beads.db-wal": true}},
 		// No positive evidence: reported for review, nothing removed.
 		{name: "torn metadata.json", dir: "sub/.beads", files: map[string]string{configfile.ConfigFileName: torn, "beads.db": sqliteDB, "beads.db-wal": "w", "beads.db-shm": "s", "beads.backup-20260204.db": "b"}, owner: ownerUnreadable, want: map[string]bool{"beads.db": false, "beads.db-wal": false, "beads.db-shm": false, "beads.backup-20260204.db": false}},
 		{name: "torn config.json", dir: "sub/.beads", files: map[string]string{"config.json": torn, "beads.db-wal": "w"}, owner: ownerUnreadable, want: map[string]bool{"beads.db-wal": false}},
@@ -57,7 +62,17 @@ func TestPlanArtifacts_DeletesOnlyWithPositiveOwnership(t *testing.T) {
 		{name: "metadata-less sole SQLite database", dir: "sub/.beads", files: map[string]string{"beads.db": sqliteDB, "beads.db-wal": "w", "beads.db-shm": "s"}, owner: ownerOtherBackend, want: map[string]bool{}},
 		// Redirect-only locations: a stub's scaffolding goes, a workspace stays.
 		{name: "polecat stub", dir: "polecats/p1/.beads", files: map[string]string{"redirect": "../../mayor/rig/.beads\n", "config.yaml": "c", "README.md": "r", "formulas/x.toml": "f"}, owner: ownerRedirectStub, want: map[string]bool{".": true}},
-		{name: "crew stub without redirect", dir: "crew/alice/.beads", files: map[string]string{configfile.ConfigFileName: `{"dolt_mode":"server","dolt_database":"rig"}`, "config.yaml": "c"}, owner: ownerRedirectStub, want: map[string]bool{".": true}},
+		// Without a redirect, metadata that configures Dolt, even with one
+		// Dolt setting alone, is a workspace's own (a server-mode workspace
+		// keeps no local store): only an orphaned WAL or SHM goes. Beside a
+		// redirect it is a stub's, and stale pre-Dolt metadata configures
+		// nothing.
+		{name: "crew server-mode workspace, no redirect", dir: "crew/alice/.beads", files: map[string]string{configfile.ConfigFileName: `{"dolt_mode":"server","dolt_database":"rig"}`, "config.yaml": "c", "routes.jsonl": "{}", "beads.db-wal": "w"}, owner: ownerDolt, want: map[string]bool{".": false, "beads.db-wal": true}},
+		{name: "polecat metadata naming only backend dolt, no redirect", dir: "polecats/p7/.beads", files: map[string]string{configfile.ConfigFileName: `{"backend":"dolt"}`, "config.yaml": "c"}, owner: ownerDolt, want: map[string]bool{".": false}},
+		{name: "crew server-mode workspace whose metadata sets only dolt_server_host, no redirect", dir: "crew/alice/.beads", files: map[string]string{configfile.ConfigFileName: `{"dolt_server_host":"db.example.com"}`, "config.yaml": "c"}, owner: ownerDolt, want: map[string]bool{".": false}},
+		{name: "crew metadata naming only a missing dolt_data_dir, no redirect", dir: "crew/alice/.beads", files: map[string]string{configfile.ConfigFileName: `{"dolt_data_dir":"../../../store"}`, "config.yaml": "c"}, owner: ownerDolt, want: map[string]bool{".": false}},
+		{name: "polecat stub beside its redirect, Dolt server metadata", dir: "polecats/p8/.beads", files: map[string]string{"redirect": "../../mayor/rig/.beads\n", configfile.ConfigFileName: `{"backend":"dolt","dolt_mode":"server","dolt_database":"rig"}`, "config.yaml": "c", "README.md": "r"}, owner: ownerRedirectStub, want: map[string]bool{".": true}},
+		{name: "beads worktree with pre-Dolt metadata, no redirect", dir: ".git/beads-worktrees/wt/.beads", files: map[string]string{configfile.ConfigFileName: `{"database":"beads.db","jsonl_export":"issues.jsonl"}`, "config.yaml": "c", "issues.jsonl": "{}"}, owner: ownerRedirectStub, want: map[string]bool{".": true}},
 		{name: "crew classic SQLite workspace", dir: "crew/alice/.beads", files: map[string]string{configfile.ConfigFileName: `{"database":"beads.db","jsonl_export":"issues.jsonl"}`, "beads.db": sqliteDB, "beads.db-wal": "w", "beads.db-shm": "s"}, owner: ownerOtherBackend, want: map[string]bool{".": false}},
 		{name: "polecat legacy config.json workspace", dir: "polecats/p1/.beads", files: map[string]string{"config.json": `{"database":"beads.db"}`, "beads.db": sqliteDB, "beads.db-wal": "w"}, owner: ownerOtherBackend, want: map[string]bool{".": false}},
 		{name: "crew embedded Dolt workspace", dir: "crew/alice/.beads", files: map[string]string{configfile.ConfigFileName: `{"backend":"dolt","dolt_mode":"embedded"}`, "embeddeddolt/al/.dolt/noms/": "", "config.yaml": "c"}, owner: ownerDolt, want: map[string]bool{".": false}},
@@ -66,7 +81,7 @@ func TestPlanArtifacts_DeletesOnlyWithPositiveOwnership(t *testing.T) {
 		// with or without a local store.
 		{name: "rig root mayor/rig redirects to", dir: ".beads", files: map[string]string{configfile.ConfigFileName: `{"backend":"dolt"}`, "embeddeddolt/rg/.dolt/noms/": ""}, extra: map[string]string{"mayor/rig/.beads/redirect": "../../.beads\n"}, owner: ownerDolt, want: map[string]bool{}},
 		{name: "server-mode rig root mayor/rig redirects to", dir: "rig/.beads", files: map[string]string{configfile.ConfigFileName: `{"backend":"dolt","dolt_mode":"server","dolt_database":"my_rig"}`, "config.yaml": "c", "routes.jsonl": "{}"}, extra: map[string]string{"rig/mayor/rig/.beads/redirect": "# canonical\n../../.beads\n", "rig/polecats/": ""}, owner: ownerDolt, want: map[string]bool{}},
-		{name: "rig root mayor/rig does not redirect to", dir: "rig/.beads", files: map[string]string{configfile.ConfigFileName: `{"backend":"dolt","dolt_mode":"server","dolt_database":"my_rig"}`, "config.yaml": "c"}, extra: map[string]string{"rig/mayor/rig/.beads/redirect": "../../../elsewhere/.beads\n", "rig/polecats/": ""}, owner: ownerRedirectStub, want: map[string]bool{".": true}},
+		{name: "rig root mayor/rig does not redirect to", dir: "rig/.beads", files: map[string]string{configfile.ConfigFileName: `{"backend":"dolt","dolt_mode":"server","dolt_database":"my_rig"}`, "config.yaml": "c"}, extra: map[string]string{"rig/mayor/rig/.beads/redirect": "../../../elsewhere/.beads\n", "rig/polecats/": ""}, owner: ownerDolt, want: map[string]bool{".": false}},
 		// Positive evidence of another backend outranks the redirect-only
 		// path, whatever the database file is named.
 		{name: "crew sqlite_path not *.db", dir: "crew/alice/.beads", files: map[string]string{configfile.ConfigFileName: `{"backend":"sqlite","sqlite_path":"issues.sqlite3"}`, "issues.sqlite3": sqliteDB}, owner: ownerOtherBackend, want: map[string]bool{".": false}},
@@ -95,7 +110,7 @@ func TestPlanArtifacts_DeletesOnlyWithPositiveOwnership(t *testing.T) {
 		{name: "polecat stub linking to scaffolding", dir: "polecats/p9/.beads", files: map[string]string{"redirect": "../../mayor/rig/.beads\n"}, extra: map[string]string{"x/formulas/a.toml": "f"}, links: map[string]string{"polecats/p9/.beads/formulas": "x/formulas"}, owner: ownerRedirectStub, want: map[string]bool{".": true}},
 		// Metadata naming an existing local Dolt store points at a database.
 		{name: "crew metadata naming an existing dolt_data_dir", dir: "crew/yan/.beads", files: map[string]string{configfile.ConfigFileName: `{"backend":"dolt","dolt_data_dir":"../../../store"}`, "config.yaml": "c"}, extra: map[string]string{"store/yan/.dolt/": ""}, owner: ownerDolt, want: map[string]bool{".": false}},
-		{name: "crew metadata naming a missing dolt_data_dir", dir: "crew/yan/.beads", files: map[string]string{configfile.ConfigFileName: `{"backend":"dolt","dolt_data_dir":"../../../store"}`, "config.yaml": "c"}, owner: ownerRedirectStub, want: map[string]bool{".": true}},
+		{name: "crew stub beside its redirect, metadata naming a missing dolt_data_dir", dir: "crew/yan/.beads", files: map[string]string{"redirect": "../../mayor/rig/.beads\n", configfile.ConfigFileName: `{"backend":"dolt","dolt_data_dir":"../../../store"}`, "config.yaml": "c"}, owner: ownerRedirectStub, want: map[string]bool{".": true}},
 		// Lower-casing can lengthen a name in bytes (U+023A is 2 bytes,
 		// its lower case U+2C65 is 3); the sidecar check must not slice the
 		// original name by the lower-cased length.
@@ -204,7 +219,8 @@ func removedBy(removed map[string]bool, path string) bool {
 // bd doctor cleanup goes through: whatever its caller planned, it refuses a
 // SQLite database (a backup included, or any file with the SQLite header
 // whatever its name; names match case-insensitively), the WAL, SHM or journal
-// of a database still beside it, a Dolt store, embedded Dolt or bd backup directory, and a
+// of a database still beside it (or a link in its place, wherever it points),
+// a Dolt store, embedded Dolt or bd backup directory, and a
 // directory holding any of those at any depth, and it never follows a
 // symlink.
 func TestRemoveDisposable_RefusesDatabaseState(t *testing.T) {
@@ -274,10 +290,13 @@ func TestRemoveDisposable_RefusesDatabaseState(t *testing.T) {
 	}
 
 	// Symlinks are followed to classify, never to delete: a link to database
-	// state is kept, and removing any other link leaves its target alone.
+	// state is kept, and removing any other link leaves its target alone. A
+	// link named for a sidecar beside its database is that database's
+	// sidecar, wherever it points.
 	links := []struct {
 		name    string
 		files   map[string]string
+		link    string // the link's name; "" = "link"
 		target  string // the link's target, relative to the temp dir; "" = dangling
 		refused bool
 	}{
@@ -286,6 +305,9 @@ func TestRemoveDisposable_RefusesDatabaseState(t *testing.T) {
 		{name: "symlink to a SQLite file", files: map[string]string{"real.bin": "SQLite format 3\x00rest"}, target: "real.bin", refused: true},
 		{name: "symlink to scaffolding", files: map[string]string{"real/x.toml": "f"}, target: "real"},
 		{name: "dangling symlink"},
+		{name: "WAL symlink beside its database, to non-SQLite bytes", files: map[string]string{"beads.db": "x", "real/wal": walHeader}, link: "beads.db-wal", target: "real/wal", refused: true},
+		{name: "SHM symlink beside its database", files: map[string]string{"beads.db": "x", "real/shm": "s"}, link: "beads.db-shm", target: "real/shm", refused: true},
+		{name: "orphaned WAL symlink, to non-SQLite bytes", files: map[string]string{"real/wal": walHeader}, link: "beads.db-wal", target: "real/wal"},
 	}
 	for _, tc := range links {
 		t.Run(tc.name, func(t *testing.T) {
@@ -300,6 +322,9 @@ func TestRemoveDisposable_RefusesDatabaseState(t *testing.T) {
 				target = filepath.Join(dir, tc.target)
 			}
 			link := filepath.Join(dir, "link")
+			if tc.link != "" {
+				link = filepath.Join(dir, tc.link)
+			}
 			if err := os.Symlink(target, link); err != nil {
 				t.Fatal(err)
 			}
@@ -323,6 +348,10 @@ func TestRemoveDisposable_RefusesDatabaseState(t *testing.T) {
 
 // doltManifest starts like the manifest of a Dolt chunk store.
 const doltManifest = "5:__DOLT__:nqhvd2c4qe4m0hm9s3cqc5f6ilm1qv7a:abc"
+
+// walHeader starts like a SQLite WAL file: the WAL magic number and format
+// version 3007000, not the database header.
+const walHeader = "\x37\x7f\x06\x82\x00\x2d\xe2\x18"
 
 // nbsTableName is a Dolt NBS table file name: 32 base32 characters.
 const nbsTableName = "0123456789abcdefghijklmnopqrstuv"
@@ -393,5 +422,54 @@ func TestPlanArtifacts_ReviewFindingsNameWhatWasFound(t *testing.T) {
 	}
 	if got := descriptions(dolt); !reflect.DeepEqual(got, want) {
 		t.Errorf("Dolt findings = %q, want %q", got, want)
+	}
+}
+
+// TestMetadataNamesDolt_AnyDoltSettingAlone pins that metadata setting any
+// one Dolt setting of configfile.Config, and nothing else, configures Dolt (a
+// setting added later included): a .beads whose metadata records only its
+// server host, port, socket or data directory is a workspace, not a stub's
+// scaffolding. Metadata that sets none, such as a pre-Dolt metadata.json,
+// configures nothing.
+func TestMetadataNamesDolt_AnyDoltSettingAlone(t *testing.T) {
+	found := map[string]bool{}
+	typ := reflect.TypeOf(configfile.Config{})
+	for i := 0; i < typ.NumField(); i++ {
+		key, _, _ := strings.Cut(typ.Field(i).Tag.Get("json"), ",")
+		if !strings.Contains(key, "dolt") {
+			continue
+		}
+		found[key] = true
+		var cfg configfile.Config
+		switch field := reflect.ValueOf(&cfg).Elem().Field(i); field.Kind() {
+		case reflect.String:
+			field.SetString("x")
+		case reflect.Int:
+			field.SetInt(1)
+		case reflect.Bool:
+			field.SetBool(true)
+		default:
+			t.Fatalf("%s is a %s; set one in this test", key, field.Kind())
+		}
+		if !metadataNamesDolt(&cfg) {
+			t.Errorf("metadata setting only %s does not configure Dolt", key)
+		}
+	}
+	for _, key := range []string{"dolt_mode", "dolt_database", "dolt_server_host", "dolt_data_dir"} {
+		if !found[key] {
+			t.Errorf("configfile.Config has no %s setting for this test to cover", key)
+		}
+	}
+	if !metadataNamesDolt(&configfile.Config{Backend: configfile.BackendDolt}) {
+		t.Error("metadata naming backend dolt does not configure Dolt")
+	}
+	for name, cfg := range map[string]*configfile.Config{
+		"no metadata":       nil,
+		"pre-Dolt metadata": {Database: "beads.db"},
+		"sqlite backend":    {Backend: "sqlite", SQLitePath: "issues.sqlite3"},
+	} {
+		if metadataNamesDolt(cfg) {
+			t.Errorf("%s configures Dolt", name)
+		}
 	}
 }
