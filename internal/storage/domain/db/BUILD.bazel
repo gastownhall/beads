@@ -51,6 +51,7 @@ go_test(
         "comment_test.go",
         "comment_usecase_test.go",
         "config_test.go",
+        "ddl_test.go",
         "delete_repo_test.go",
         "dependency_event_consistency_test.go",
         "dependency_extras_test.go",
