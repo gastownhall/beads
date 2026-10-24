@@ -5587,9 +5587,10 @@ bd prime
     | agents from forgetting bd workflow after context compaction.
     |
     | Config options:
-    | - no-git-ops: When true, outputs stealth mode (no git commands in session close protocol).
+    | - no-git-ops: When true, outputs stealth mode for Beads Git/GitHub features only.
     |   Set via: bd config set no-git-ops true
-    |   Useful when you want to control when commits happen manually.
+    |   Omits Git commands from the Beads session close protocol. Ordinary project git
+    |   and gh CLI commands still follow active user, orchestrator, and repository instructions.
     | - agent.profile: Explicit policy profile for git/commit authority wording
     |   (conservative | minimal | team-maintainer; default conservative).
     |   Set via: bd config set agent.profile team-maintainer
@@ -5637,7 +5638,7 @@ bd prime
   flag --mcp type=bool default="false" usage="Force MCP mode (minimal output)"
   flag --memories-only type=bool default="false" usage="Output only persistent memories for compact hook contexts"
   flag --no-memories type=bool default="false" usage="Omit the persistent memories section (ignored when --memories-only is set, which wins)"
-  flag --stealth type=bool default="false" usage="Stealth mode (no git operations, flush only)"
+  flag --stealth type=bool default="false" usage="Stealth mode (Beads Git/GitHub features only; ordinary project git/gh authority unchanged)"
 
 bd priority
   use: "priority <id> <n>"

@@ -256,6 +256,9 @@ tmp/build/cli-docs/worktree.md
 tmp/docs/CLI_REFERENCE.md
 *.gate.lock*
 
+# Serena MCP rewrites this on every start; not a build input
+.serena/
+
 # Bazel: output symlinks and machine-local rc files (remote executor endpoint,
 # TLS credentials). Never commit these.
 /bazel-*
