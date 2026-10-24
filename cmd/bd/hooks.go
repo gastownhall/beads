@@ -49,7 +49,7 @@ func hookSectionEndLine() string {
 }
 
 // hookTimeoutSeconds is the soft deadline for a beads hook. GNU timeout sends
-// SIGTERM at the deadline, while Perl's alarm terminates the direct bd process.
+// SIGTERM at the deadline, while Perl supervises bd and sends it SIGTERM.
 // Neither backend promises containment of TERM-resistant descendant work. When
 // neither helper is available, the generated hook warns that it is unbounded.
 // The default is 300 seconds (5 minutes) to accommodate chained hooks — e.g.
@@ -114,7 +114,17 @@ func generateHookSection(hookName string) string {
 		"    fi\n" +
 		"  elif command -v perl >/dev/null 2>&1; then\n" +
 		"    _bd_timeout_backend=perl\n" +
-		"    if perl -e 'alarm shift; exec @ARGV' -- \"$_bd_timeout\" bd hooks run " + hookName + " \"$@\"; then\n" +
+		"    if perl -e '\n" +
+		"      my $timeout = shift;\n" +
+		"      my $pid = fork;\n" +
+		"      defined $pid or die \"beads: fork failed: $!\\n\";\n" +
+		"      if (!$pid) { exec { $ARGV[0] } @ARGV; exit 127 }\n" +
+		"      $SIG{ALRM} = sub { kill \"TERM\", $pid; waitpid $pid, 0; exit 142 };\n" +
+		"      alarm $timeout;\n" +
+		"      waitpid $pid, 0;\n" +
+		"      alarm 0;\n" +
+		"      exit($? & 127 ? 128 + ($? & 127) : $? >> 8);\n" +
+		"    ' -- \"$_bd_timeout\" bd hooks run " + hookName + " \"$@\"; then\n" +
 		"      _bd_exit=0\n" +
 		"    else\n" +
 		"      _bd_exit=$?\n" +

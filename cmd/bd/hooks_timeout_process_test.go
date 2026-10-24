@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -129,6 +130,7 @@ type hookProcessCase struct {
 	timeout     *string
 	pathTail    string
 	sleepPath   string
+	goBinary    string
 	args        []string
 }
 
@@ -146,6 +148,7 @@ func TestGeneratedHookTimeoutProcessBoundary(t *testing.T) {
 	t.Run("reserved statuses are backend scoped", testHookProcessReservedStatuses)
 	t.Run("real coreutils timeout expires a responsive child", testHookProcessRealTimeoutExpiry)
 	t.Run("real Perl alarm expires a responsive child", testHookProcessRealPerlExpiry)
+	t.Run("real Perl alarm stops a Go child", testHookProcessRealPerlGoExpiry)
 	t.Run("Windows checkout rejects System32 timeout", testHookProcessWindowsSystemTimeoutCheckout)
 }
 
@@ -403,6 +406,46 @@ func testHookProcessRealPerlExpiry(t *testing.T) {
 	}
 }
 
+func TestHookTimeoutGoChild(t *testing.T) {
+	if os.Getenv("BEADS_HOOK_TEST_GO_CHILD") != "1" {
+		return
+	}
+	// The test harness catches SIGTERM; this child models a responsive bd process.
+	signal.Reset()
+	fmt.Println("go-hook-child-started")
+	time.Sleep(30 * time.Second)
+	t.Fatal("Go child outlived the hook deadline")
+}
+
+func testHookProcessRealPerlGoExpiry(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the Perl timeout backend is exercised on Unix hosts")
+	}
+	perlDir := findHookProcessPerl(t)
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatalf("locate Go test executable: %v", err)
+	}
+	timeout := "3"
+	result := runGeneratedHookProcess(t, hookProcessCase{
+		fixtures: []hookProcessFixture{
+			{name: "timeout", body: hookProcessIncompatibleTimeoutStub},
+			{name: "gtimeout", body: hookProcessIncompatibleGtimeoutStub},
+		},
+		bdBody:   "#!/bin/sh\nexec \"$HOOK_TEST_GO_BINARY\" -test.run=^TestHookTimeoutGoChild$\n",
+		timeout:  &timeout,
+		pathTail: perlDir,
+		goBinary: executable,
+	})
+	if result.exitCode != 0 || !strings.Contains(result.output, "go-hook-child-started") ||
+		!strings.Contains(result.output, "timed out after 3s") {
+		t.Fatalf("Perl did not stop and normalize the Go child (exit %d):\n%s", result.exitCode, result.output)
+	}
+	if result.elapsed > 9*time.Second {
+		t.Errorf("Go child expiry took %s, want at most 9s", result.elapsed)
+	}
+}
+
 func testHookProcessWindowsSystemTimeoutCheckout(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("the System32 timeout boundary is Windows-specific")
@@ -534,6 +577,9 @@ shift
 	}
 	if tc.sleepPath != "" {
 		cmd.Env = append(cmd.Env, "HOOK_TEST_SLEEP="+tc.sleepPath)
+	}
+	if tc.goBinary != "" {
+		cmd.Env = append(cmd.Env, "HOOK_TEST_GO_BINARY="+tc.goBinary, "BEADS_HOOK_TEST_GO_CHILD=1")
 	}
 	started := time.Now()
 	output, err := cmd.CombinedOutput()
@@ -731,7 +777,9 @@ func hookProcessEnv() []string {
 		}
 		upper := strings.ToUpper(key)
 		if upper == "BASH_ENV" || upper == "BASHOPTS" || upper == "ENV" || upper == "SHELLOPTS" ||
-			upper == "BEADS_HOOK_TIMEOUT" || upper == "HOOK_TEST_BD_EXIT" || upper == "HOOK_TEST_SLEEP" {
+			upper == "BEADS_HOOK_TIMEOUT" || upper == "HOOK_TEST_BD_EXIT" || upper == "HOOK_TEST_SLEEP" ||
+			upper == "HOOK_TEST_GO_BINARY" || upper == "BEADS_HOOK_TEST_GO_CHILD" ||
+			upper == "TEST_SHARD_INDEX" || upper == "TEST_TOTAL_SHARDS" || upper == "TEST_SHARD_STATUS_FILE" {
 			continue
 		}
 		env = append(env, entry)
