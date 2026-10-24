@@ -21,6 +21,22 @@ import (
 // matches issueops.DepTargetExpr on main.
 const depTargetExpr = "COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external)"
 
+// depTargetEqualsOr is a SARGABLE target-equality predicate as an explicit
+// per-column OR, binding the target id once per typed column (three args,
+// in that column order): unlike depTargetExpr's COALESCE wrapper, which
+// wraps the columns in an expression no index can match, each disjunct is a
+// bare indexed column. Use this instead of depTargetExpr+" = ?" in any
+// count/filter WHERE clause: the COALESCE form forced a full table scan of
+// dependencies/wisp_dependencies that grows with total dependency rows
+// rather than with the matched set (GH#7666). This mirrors
+// issueops.depTargetEqualsOr() on main; see that function's comment for the
+// index-merge planner comparison.
+const depTargetEqualsOr = "(depends_on_issue_id = ? OR depends_on_wisp_id = ? OR depends_on_external = ?)"
+
+// depTargetEqualsOrD is depTargetEqualsOr qualified with the "d." alias
+// CountDependentsByStatus's two dependency-table joins use.
+const depTargetEqualsOrD = "(d.depends_on_issue_id = ? OR d.depends_on_wisp_id = ? OR d.depends_on_external = ?)"
+
 // CountIssues returns the number of issues matching query and filter.
 // Filter.Limit and Filter.Offset are ignored; all other fields apply.
 // Wisps-merge semantics follow SearchIssues: SkipWisps=true counts the
@@ -55,19 +71,22 @@ func (s *DoltStore) CountIssuesByGroup(ctx context.Context, filter types.IssueFi
 // a dependent may be a permanent issue (edge in `dependencies`) or a wisp
 // (edge in `wisp_dependencies`, routed there by WispTableRouting on the source).
 //
-// Both tables' targets are resolved via depTargetExpr (the split physical
-// columns) rather than the STORED generated depends_on_id, which a count(*)
-// can fail to resolve under the pure-Go GMS analyzer.
+// Both tables' targets are resolved via depTargetEqualsOr (the split
+// physical columns, matched directly so Dolt's index applies) rather than
+// the STORED generated depends_on_id, which a count(*) can fail to resolve
+// under the pure-Go GMS analyzer, and rather than depTargetExpr's COALESCE
+// form, which defeated the index and turned this into a full table scan
+// that grew with total dependency rows (GH#7666).
 func (s *DoltStore) CountDependents(ctx context.Context, issueID string) (int64, error) {
 	var n int64
 	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
 		var perm, wisp int64
 		if err := tx.QueryRowContext(ctx,
-			`SELECT count(*) FROM dependencies WHERE `+depTargetExpr+` = ?`, issueID).Scan(&perm); err != nil {
+			`SELECT count(*) FROM dependencies WHERE `+depTargetEqualsOr, issueID, issueID, issueID).Scan(&perm); err != nil {
 			return err
 		}
 		if err := tx.QueryRowContext(ctx,
-			`SELECT count(*) FROM wisp_dependencies WHERE `+depTargetExpr+` = ?`, issueID).Scan(&wisp); err != nil {
+			`SELECT count(*) FROM wisp_dependencies WHERE `+depTargetEqualsOr, issueID, issueID, issueID).Scan(&wisp); err != nil {
 			return err
 		}
 		n = perm + wisp
@@ -146,15 +165,15 @@ func (s *DoltStore) CountDependentsByStatus(ctx context.Context, issueID string,
 		if err := tx.QueryRowContext(ctx,
 			`SELECT count(*) FROM dependencies d
 			 JOIN issues i ON i.id = d.issue_id
-			 WHERE COALESCE(d.depends_on_issue_id, d.depends_on_wisp_id, d.depends_on_external) = ? AND i.status = ?`,
-			issueID, string(status)).Scan(&perm); err != nil {
+			 WHERE `+depTargetEqualsOrD+` AND i.status = ?`,
+			issueID, issueID, issueID, string(status)).Scan(&perm); err != nil {
 			return err
 		}
 		if err := tx.QueryRowContext(ctx,
 			`SELECT count(*) FROM wisp_dependencies d
 			 JOIN wisps w ON w.id = d.issue_id
-			 WHERE COALESCE(d.depends_on_issue_id, d.depends_on_wisp_id, d.depends_on_external) = ? AND w.status = ?`,
-			issueID, string(status)).Scan(&wisp); err != nil {
+			 WHERE `+depTargetEqualsOrD+` AND w.status = ?`,
+			issueID, issueID, issueID, string(status)).Scan(&wisp); err != nil {
 			return err
 		}
 		n = perm + wisp
