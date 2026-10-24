@@ -209,6 +209,144 @@ jobs:
           path: ${{ runner.temp }}/go-cache/non-race
           key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-${{ hashFiles('go.sum') }}-${{ steps.cache-date.outputs.today }}
 
+  # Toolchain saver for pr.yml's windows-make-shell, the only writer of its
+  # three caches, on the label that job runs on (Blacksmith cannot see
+  # caches saved elsewhere, and the MSYS2 packages are resolved against this
+  # image's own sync database). Each cache is looked up first and seeded and
+  # saved only on a miss, and only once its seed step has proved the content
+  # installs. The keys change with the pinned make binary, the image's MSYS2
+  # sync database and the UTC month (Cygwin), never per commit, so a push
+  # with all three present costs three lookups. Same push-to-main-only job
+  # guard (B2) as the savers above.
+  # - native: Chocolatey's make 4.4.1 binary (native-make.ps1 -Mode Seed
+  #   fetches the package and checks the pinned SHA-256).
+  # - MSYS2: the package files msys2-packages.sh downloads into the cache
+  #   directory while it installs git and make, the same script and command
+  #   as the PR job's install.
+  # - Cygwin: cygwin-install-action's online install, which
+  #   cygwin-offline.ps1 -Mode Seed turns into an offline package tree (the
+  #   mirror's signed setup.zst in place of setup's unsigned setup.ini) and
+  #   proves with an offline install into a scratch root.
+  # Pinned by TestWindowsMakeShellToolchainSaverMatchesPRJob and
+  # TestBlacksmithSaverJobsGuardedAgainstPullRequest.
+  windows-make-shell-toolchains:
+    name: Warm Windows Make shell toolchain caches
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'gastownhall/beads'
+    runs-on: ${{ 'blacksmith-4vcpu-windows-2025' }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+
+      # Records the image next to the caches it seeds.
+      - name: Check Windows tooling diagnostics
+        shell: pwsh
+        run: ./scripts/ci/windows-make-shell/diagnostics.ps1
+
+      - name: Compute toolchain cache keys
+        id: toolchain-keys
+        shell: pwsh
+        run: ./scripts/ci/windows-make-shell/cache-keys.ps1
+
+      - name: Look up cached native GNU Make
+        id: native-make-cache
+        if: ${{ !cancelled() }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/make-shell/native
+          key: beads-make-shell-native-v1-${{ runner.os }}-${{ runner.arch }}-make-4.4.1-cc6dc291113d
+          lookup-only: true
+
+      - name: Seed native GNU Make cache
+        id: seed-native
+        if: ${{ !cancelled() && steps.native-make-cache.outputs.cache-hit != 'true' }}
+        timeout-minutes: 5
+        shell: pwsh
+        env:
+          NATIVE_MAKE_CACHE: ${{ runner.temp }}/make-shell/native
+        run: ./scripts/ci/windows-make-shell/native-make.ps1 -Mode Seed -CacheDir $env:NATIVE_MAKE_CACHE
+
+      - name: Save native GNU Make cache
+        if: ${{ !cancelled() && steps.native-make-cache.outputs.cache-hit != 'true' && steps.seed-native.outcome == 'success' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/make-shell/native
+          key: beads-make-shell-native-v1-${{ runner.os }}-${{ runner.arch }}-make-4.4.1-cc6dc291113d
+
+      - name: Look up cached MSYS2 packages
+        id: msys2-cache
+        if: ${{ !cancelled() && steps.toolchain-keys.outputs.msys2-sync-db != '' }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/make-shell/msys2
+          key: beads-make-shell-msys2-v1-${{ runner.os }}-${{ runner.arch }}-git-make-${{ steps.toolchain-keys.outputs.msys2-sync-db }}
+          lookup-only: true
+
+      # The PR job's MSYS2 setup: the image's C:\msys64, setup-msys2's own
+      # cache off (this job saves explicitly).
+      - name: Set up preinstalled MSYS2
+        id: msys2-shell
+        if: ${{ !cancelled() && steps.toolchain-keys.outputs.msys2-sync-db != '' && steps.msys2-cache.outputs.cache-hit != 'true' }}
+        timeout-minutes: 3
+        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2.32.0
+        with:
+          msystem: MSYS
+          path-type: minimal
+          release: false
+          update: false
+          cache: false
+
+      - name: Seed MSYS2 package cache
+        id: seed-msys2
+        if: ${{ !cancelled() && steps.msys2-shell.outcome == 'success' }}
+        timeout-minutes: 8
+        shell: msys2 {0}
+        env:
+          MSYS2_PACKAGE_CACHE: ${{ runner.temp }}/make-shell/msys2
+        run: bash scripts/ci/windows-make-shell/msys2-packages.sh git make
+
+      - name: Save MSYS2 package cache
+        if: ${{ !cancelled() && steps.msys2-cache.outputs.cache-hit != 'true' && steps.seed-msys2.outcome == 'success' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/make-shell/msys2
+          key: beads-make-shell-msys2-v1-${{ runner.os }}-${{ runner.arch }}-git-make-${{ steps.toolchain-keys.outputs.msys2-sync-db }}
+
+      - name: Look up cached Cygwin packages
+        id: cygwin-cache
+        if: ${{ !cancelled() }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/make-shell/cygwin
+          key: beads-make-shell-cygwin-v1-${{ runner.os }}-${{ runner.arch }}-git-make-${{ steps.toolchain-keys.outputs.month }}
+          lookup-only: true
+
+      - name: Download Cygwin GNU Make
+        id: cygwin
+        if: ${{ !cancelled() && steps.cygwin-cache.outputs.cache-hit != 'true' }}
+        timeout-minutes: 10
+        uses: cygwin/cygwin-install-action@3f0a3f9f988f7e96b8c18098ae05eaec175f5b52 # v6
+        with:
+          packages: git make
+          add-to-path: 'false'
+
+      - name: Seed Cygwin package cache
+        id: seed-cygwin
+        if: ${{ !cancelled() && steps.cygwin.outcome == 'success' }}
+        timeout-minutes: 6
+        shell: pwsh
+        env:
+          CYGWIN_PACKAGE_CACHE: ${{ runner.temp }}/make-shell/cygwin
+          CYGWIN_SETUP: ${{ steps.cygwin.outputs.setup }}
+          CYGWIN_DOWNLOADS: ${{ steps.cygwin.outputs.package-cache }}
+        run: ./scripts/ci/windows-make-shell/cygwin-offline.ps1 -Mode Seed -CacheDir $env:CYGWIN_PACKAGE_CACHE -SetupExe $env:CYGWIN_SETUP -PackageDir $env:CYGWIN_DOWNLOADS
+
+      - name: Save Cygwin package cache
+        if: ${{ !cancelled() && steps.cygwin-cache.outputs.cache-hit != 'true' && steps.seed-cygwin.outcome == 'success' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/make-shell/cygwin
+          key: beads-make-shell-cygwin-v1-${{ runner.os }}-${{ runner.arch }}-git-make-${{ steps.toolchain-keys.outputs.month }}
+
   # macOS saver: pr.yml's pr-preflight-platforms and
   # check-doc-freshness-platforms macOS legs run on blacksmith-6vcpu-macos-26
   # for every PR, forks included (ga-96smfk.22). This job is their only
