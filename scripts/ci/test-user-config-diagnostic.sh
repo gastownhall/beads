@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Exercise the native config source label, including both XDG states.
+# Exercise both unsafe-path diagnostics, their shared grammar, and both XDG states.
 # Compatible with macOS Bash 3.2; run with linux, darwin, or windows.
 set -euo pipefail
 
@@ -28,12 +28,14 @@ host_info="$("$go_executable" env GOHOSTOS GOOS)"
     echo "Expected native $expected_os Go host and target" >&2; exit 1;
 }
 parent=TestUserConfigYamlPathNamesNativeEnvironmentSource
-expected=("$parent" "$parent/XDG_configured" "$parent/XDG_absent")
+grammar=TestUserConfigYamlCandidatesShareDiagnosticGrammar
+expected=("$parent" "$parent/XDG_configured" "$parent/XDG_absent"
+    "$grammar" "$grammar/relative_paths" "$grammar/resolver_errors")
 log="$(mktemp)"
 trap 'rm -f "$log"' EXIT
 status=0
 "$go_executable" test -tags "$BEADS_BUILD_TAGS" -v -count=1 -timeout 3m \
-    -run "^$parent$" ./internal/config >"$log" 2>&1 || status=$?
+    -run "^($parent|$grammar)$" ./internal/config >"$log" 2>&1 || status=$?
 cat "$log"
 [[ $status -eq 0 ]] || exit "$status"
 if grep -Eq -- '^[[:space:]]*--- (FAIL|SKIP):' "$log"; then
