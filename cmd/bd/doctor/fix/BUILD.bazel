@@ -76,6 +76,7 @@ go_test(
         "metadata_probe_test.go",
         "metadata_test.go",
         "migrate_import_test.go",
+        "remotes_dsn_test.go",
         "remotes_test.go",
         "repo_fingerprint_test.go",
         "suite_temp_test.go",

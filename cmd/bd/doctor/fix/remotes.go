@@ -13,14 +13,28 @@ import (
 	"github.com/steveyegge/beads/internal/storage/issueops"
 )
 
-func openFixDB(beadsDir string, cfg *configfile.Config) (*sql.DB, error) {
+// fixDBDSN builds the MySQL-protocol DSN for a fix-path connection: every
+// doctor --fix repair, plus the read-only checks that delegate into
+// openFixDB (Clone-Local FKs, Cross-Table Duplicates). Split out of
+// openFixDB so the port/password pairing is unit-testable without a live
+// server.
+func fixDBDSN(beadsDir string, cfg *configfile.Config) string {
 	host := cfg.GetDoltServerHost()
 	user := cfg.GetDoltServerUser()
 	database := cfg.GetDoltDatabase()
-	password := cfg.GetDoltServerPassword()
 	port := doltserver.DefaultConfig(beadsDir).Port
 
-	connStr := doltutil.ServerDSN{
+	// Resolve the password against the SAME port the DSN dials. The
+	// credentials file is keyed [host:port]; the deprecated
+	// cfg.GetDoltServerPassword() keys the lookup on the config port
+	// (DefaultDoltServerPort 3307 when metadata.json omits dolt_server_port)
+	// and so misses the section in shared-server mode (3308), yielding an
+	// empty password and an auth failure on every call. The store path and
+	// doctor/dolt.go already pair the lookup with the resolved port; see
+	// resolveDoltServerConnection in cmd/bd/main.go. Related: #5573.
+	password := cfg.GetDoltServerPasswordForPort(port)
+
+	return doltutil.ServerDSN{
 		Host:     host,
 		Port:     port,
 		User:     user,
@@ -28,7 +42,10 @@ func openFixDB(beadsDir string, cfg *configfile.Config) (*sql.DB, error) {
 		Database: database,
 		TLS:      cfg.GetDoltServerTLS(),
 	}.String()
-	return sql.Open("mysql", connStr)
+}
+
+func openFixDB(beadsDir string, cfg *configfile.Config) (*sql.DB, error) {
+	return sql.Open("mysql", fixDBDSN(beadsDir, cfg))
 }
 
 // errUnverifiableFixTarget marks a verifyFixTargetIdentity failure that is
