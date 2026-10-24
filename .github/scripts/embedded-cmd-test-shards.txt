@@ -205,6 +205,7 @@
 100 52 TestEmbeddedImportChunkedNoReadyWindowAtAnyFreezePoint
 100 52 TestEmbeddedSwarmConcurrent
 
+100 53 TestEmbeddedDoctorArtifactsCleanKeepsWorkspaceAtRedirectOnlyPath
 100 53 TestEmbeddedDoltLocalOnly_Push_JSON_DisabledStatus
 100 53 TestEmbeddedIfRevisionOrdinaryCAS
 100 53 TestEmbeddedImportChunkedMixedRegularWispCrossBucketEdgesWired

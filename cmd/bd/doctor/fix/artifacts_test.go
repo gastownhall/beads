@@ -12,6 +12,9 @@ import (
 	"github.com/steveyegge/beads/internal/storage/backendnames"
 )
 
+// doltMetadata is metadata with positive Dolt evidence.
+const doltMetadata = `{"database":"dolt","backend":"dolt"}`
+
 func TestClassicArtifacts_NoArtifacts(t *testing.T) {
 	dir := t.TempDir()
 	beadsDir := filepath.Join(dir, ".beads")
@@ -28,9 +31,8 @@ func TestClassicArtifacts_NoArtifacts(t *testing.T) {
 func TestClassicArtifacts_RemovesSQLiteWAL(t *testing.T) {
 	dir := t.TempDir()
 	beadsDir := filepath.Join(dir, ".beads")
-	if err := os.MkdirAll(beadsDir, 0755); err != nil {
-		t.Fatal(err)
-	}
+	// Positive Dolt evidence: an orphaned WAL/SHM is removed only there.
+	writeBeadsTree(t, beadsDir, map[string]string{configfile.ConfigFileName: doltMetadata})
 
 	// Create WAL/SHM files
 	for _, name := range []string{"beads.db-shm", "beads.db-wal"} {
@@ -75,68 +77,45 @@ func TestClassicArtifacts_SkipsBeadsDB(t *testing.T) {
 	}
 }
 
-func TestClassicArtifacts_RemovesBackupDBs(t *testing.T) {
+// TestClassicArtifacts_KeepsBackupDBs pins that a pre-migration backup, a
+// whole SQLite database, is never removed, even in a workspace on Dolt.
+func TestClassicArtifacts_KeepsBackupDBs(t *testing.T) {
 	dir := t.TempDir()
 	beadsDir := filepath.Join(dir, ".beads")
-	if err := os.MkdirAll(beadsDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-
 	backupName := "beads.backup-20260204.db"
-	if err := os.WriteFile(filepath.Join(beadsDir, backupName), []byte("data"), 0644); err != nil {
-		t.Fatal(err)
-	}
+	writeBeadsTree(t, beadsDir, map[string]string{configfile.ConfigFileName: doltMetadata, backupName: "data"})
 
 	err := ClassicArtifacts(dir)
 	if err != nil {
 		t.Errorf("expected no error, got: %v", err)
 	}
 
-	if _, err := os.Stat(filepath.Join(beadsDir, backupName)); !os.IsNotExist(err) {
-		t.Error("backup db should have been removed")
+	if _, err := os.Stat(filepath.Join(beadsDir, backupName)); err != nil {
+		t.Errorf("backup db should have been kept: %v", err)
 	}
 }
 
-func TestClassicArtifacts_CleansJSONLInDoltDir(t *testing.T) {
+// TestClassicArtifacts_LeavesJSONLFiles pins that the cleanup no longer
+// removes JSONL files: the scan stopped reporting them when JSONL artifact
+// scanning was removed (bd-9ni.2), so removing them deleted files no scan
+// listed.
+func TestClassicArtifacts_LeavesJSONLFiles(t *testing.T) {
 	dir := t.TempDir()
 	beadsDir := filepath.Join(dir, ".beads")
-	doltDir := filepath.Join(beadsDir, "dolt")
-	if err := os.MkdirAll(doltDir, 0755); err != nil {
-		t.Fatal(err)
-	}
+	writeBeadsTree(t, beadsDir, map[string]string{
+		configfile.ConfigFileName: doltMetadata,
+		"dolt/":                   "",
+		"issues.jsonl.new":        `{"id":"test"}`,
+		"interactions.jsonl":      "",
+		"issues.jsonl":            `{"id":"real"}`,
+	})
+	want := snapshotBeadsTree(t, beadsDir)
 
-	// Create safe-to-delete JSONL artifacts
-	for _, name := range []string{"issues.jsonl.new"} {
-		if err := os.WriteFile(filepath.Join(beadsDir, name), []byte(`{"id":"test"}`), 0644); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	// Create empty interactions.jsonl
-	if err := os.WriteFile(filepath.Join(beadsDir, "interactions.jsonl"), []byte{}, 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Create issues.jsonl (should be skipped)
-	if err := os.WriteFile(filepath.Join(beadsDir, "issues.jsonl"), []byte(`{"id":"real"}`), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	err := ClassicArtifacts(dir)
-	if err != nil {
+	if err := ClassicArtifacts(dir); err != nil {
 		t.Errorf("expected no error, got: %v", err)
 	}
-
-	// Safe files should be removed
-	for _, name := range []string{"issues.jsonl.new", "interactions.jsonl"} {
-		if _, err := os.Stat(filepath.Join(beadsDir, name)); !os.IsNotExist(err) {
-			t.Errorf("%s should have been removed", name)
-		}
-	}
-
-	// issues.jsonl should be kept
-	if _, err := os.Stat(filepath.Join(beadsDir, "issues.jsonl")); os.IsNotExist(err) {
-		t.Error("issues.jsonl should NOT have been removed")
+	if got := snapshotBeadsTree(t, beadsDir); !reflect.DeepEqual(got, want) {
+		t.Fatalf("ClassicArtifacts changed %s:\n got %q\nwant %q", beadsDir, got, want)
 	}
 }
 
@@ -247,7 +226,12 @@ func TestClassicArtifacts_CleansCruftWithoutRedirectFile(t *testing.T) {
 	// Add typical stale files (NO redirect file present)
 	cruftFiles := []string{"config.yaml", "metadata.json", "README.md", "issues.jsonl", ".gitignore", ".local_version"}
 	for _, name := range cruftFiles {
-		if err := os.WriteFile(filepath.Join(worktreeBeads, name), []byte("stale"), 0644); err != nil {
+		content := "stale"
+		if name == "metadata.json" {
+			// Metadata that does not load leaves the stub for review.
+			content = doltMetadata
+		}
+		if err := os.WriteFile(filepath.Join(worktreeBeads, name), []byte(content), 0644); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -276,6 +260,7 @@ func TestIsRedirectExpectedLocation(t *testing.T) {
 		{"refinery rig", "/foo/refinery/rig/.beads", true},
 		{"beads-worktrees", "/foo/.git/beads-worktrees/abc/.beads", true},
 		{"regular beads dir", "/foo/.beads", false},
+		{"nested project", "/foo/bar/.beads", false},
 	}
 
 	for _, tt := range tests {
@@ -326,6 +311,14 @@ func snapshotBeadsTree(t *testing.T, dir string) map[string]string {
 			snapshot[filepath.ToSlash(rel)] = "/"
 			return nil
 		}
+		if d.Type()&os.ModeSymlink != 0 {
+			target, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			snapshot[filepath.ToSlash(rel)] = "-> " + target
+			return nil
+		}
 		data, err := os.ReadFile(path) // #nosec G304 -- test-owned temp tree
 		if err != nil {
 			return err
@@ -368,7 +361,7 @@ func TestClassicArtifacts_SkipsUnsupportedWorkspaceFormat(t *testing.T) {
 		t.Run(layout.name, func(t *testing.T) {
 			root := t.TempDir()
 			rootWAL := filepath.Join(root, ".beads", "beads.db-wal")
-			writeBeadsTree(t, filepath.Dir(rootWAL), map[string]string{"beads.db-wal": "wal"})
+			writeBeadsTree(t, filepath.Dir(rootWAL), map[string]string{"beads.db-wal": "wal", configfile.ConfigFileName: doltMetadata})
 			beadsDir := filepath.Join(root, filepath.FromSlash(layout.dir))
 			entries := map[string]string{
 				"dolt/":                    "",
@@ -397,17 +390,15 @@ func TestClassicArtifacts_SkipsUnsupportedWorkspaceFormat(t *testing.T) {
 
 // TestClassicArtifacts_DoesNotMigrateLegacyConfig pins that the fix reads a
 // nested workspace's legacy config.json without migrating it into
-// metadata.json, and still cleans that workspace by what it says: the
-// dolt_data_dir it names is where the fix finds the Dolt directory that makes
-// a JSONL artifact removable.
+// metadata.json, and still cleans that workspace by what it says: its
+// backend dolt is the positive evidence that makes the orphaned WAL
+// removable. A JSONL file beside it, which no scan reports, stays.
 func TestClassicArtifacts_DoesNotMigrateLegacyConfig(t *testing.T) {
-	t.Setenv("BEADS_DOLT_DATA_DIR", "")
 	root := t.TempDir()
 	beadsDir := filepath.Join(root, "sub", ".beads")
-	const legacy = `{"database":"beads.db","backend":"dolt","dolt_data_dir":"custom-dolt","future_key":"keep-me"}`
+	const legacy = `{"database":"beads.db","backend":"dolt","future_key":"keep-me"}`
 	writeBeadsTree(t, beadsDir, map[string]string{
 		"config.json":      legacy,
-		"custom-dolt/":     "",
 		"beads.db-wal":     "wal",
 		"issues.jsonl.new": `{"id":"x"}`,
 	})
@@ -421,10 +412,11 @@ func TestClassicArtifacts_DoesNotMigrateLegacyConfig(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(beadsDir, configfile.ConfigFileName)); !os.IsNotExist(err) {
 		t.Fatalf("ClassicArtifacts wrote %s (stat err %v)", configfile.ConfigFileName, err)
 	}
-	for _, name := range []string{"beads.db-wal", "issues.jsonl.new"} {
-		if _, err := os.Stat(filepath.Join(beadsDir, name)); !os.IsNotExist(err) {
-			t.Errorf("%s should have been removed (stat err %v)", name, err)
-		}
+	if _, err := os.Stat(filepath.Join(beadsDir, "beads.db-wal")); !os.IsNotExist(err) {
+		t.Errorf("beads.db-wal should have been removed (stat err %v)", err)
+	}
+	if _, err := os.Stat(filepath.Join(beadsDir, "issues.jsonl.new")); err != nil {
+		t.Errorf("issues.jsonl.new, which no scan reports, should have been left in place: %v", err)
 	}
 }
 
@@ -470,8 +462,8 @@ func TestClassicArtifacts_PreservesLegacyConfigJSONAlongsideRedirect(t *testing.
 }
 
 // TestClassicArtifacts_LeavesOtherBackendsSQLiteFiles pins that the Classic
-// Artifacts fix removes SQLite files only in a .beads on Dolt (SelectsDolt),
-// the only place the scan (doctor.scanSQLiteArtifacts) reports them. The walk
+// Artifacts fix removes SQLite files only in a .beads classifyBeadsDir finds
+// positively on Dolt, where PlanArtifacts marks them safe to delete. The walk
 // reaches nested workspaces that command admission never checks, and the fix
 // removed beads.db-wal, beads.db-shm and every beads.backup-*.db in each of
 // them whatever its backend. In a workspace on a removed backend (sqlite,
@@ -484,7 +476,7 @@ func TestClassicArtifacts_PreservesLegacyConfigJSONAlongsideRedirect(t *testing.
 // recover. The root workspace's WAL, which the scan reports, is still removed.
 func TestClassicArtifacts_LeavesOtherBackendsSQLiteFiles(t *testing.T) {
 	// GetBackend returns a registered name unchanged, so this is the case
-	// only the SelectsDolt GetBackend check guards: IsSupportedBackend
+	// only classifyBeadsDir's GetBackend check guards: IsSupportedBackend
 	// accepts it.
 	const registered = "acme-artifacts-fix"
 	backendnames.Add(registered)
@@ -524,7 +516,7 @@ func TestClassicArtifacts_LeavesOtherBackendsSQLiteFiles(t *testing.T) {
 		t.Run(ws.name, func(t *testing.T) {
 			root := t.TempDir()
 			rootWAL := filepath.Join(root, ".beads", "beads.db-wal")
-			writeBeadsTree(t, filepath.Dir(rootWAL), map[string]string{"beads.db-wal": "wal"})
+			writeBeadsTree(t, filepath.Dir(rootWAL), map[string]string{"beads.db-wal": "wal", configfile.ConfigFileName: doltMetadata})
 			beadsDir := filepath.Join(root, "sub", ".beads")
 			writeBeadsTree(t, beadsDir, ws.files)
 			want := snapshotBeadsTree(t, beadsDir)

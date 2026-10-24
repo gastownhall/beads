@@ -868,6 +868,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   blocking edges and issue rows read once per batch. Ids are now
   de-duplicated before batching, matching the single `IN (...)` list the
   readers used before.
+- **`bd doctor`'s Classic Artifacts cleanup no longer deletes a database it
+  can recognize, or anything in a `.beads` it cannot positively claim.** The cleanup
+  (`bd doctor --fix` and `bd doctor --check=artifacts --clean`) emptied every
+  `.beads` whose path looks like an orchestrator worktree (`crew/*`,
+  `polecats/*`, `refinery/rig`, `.git/beads-worktrees/*`, or a rig root
+  beside `mayor/rig/.beads`) of everything but its `redirect`, `.gitkeep`
+  and, beside a redirect, its `metadata.json` or `config.json`, whatever it
+  held: an embedded Dolt workspace initialized at such a path lost its
+  database, `metadata.json` and `config.yaml`, even when doctor ran inside
+  it; a Beads Classic or `--backend=sqlite` workspace there lost its SQLite
+  database whatever the file was named; a Dolt backup or remote kept there
+  in Dolt's own file format lost the whole database; a workspace on another
+  backend (`http`, `postgres`, or one this build does not know) lost its
+  metadata; and a server-mode rig root that `mayor/rig/.beads` redirects to
+  lost the `metadata.json`, `config.yaml` and `routes.jsonl` every checkout
+  routes through. It also removed the WAL, SHM and backups of a nested
+  `.beads` whose metadata does not load or whose layout bd does not
+  recognize, reading either as Dolt. The check and the cleanup now share one
+  classification of each `.beads`, and the cleanup removes only what the
+  check reports as safe to delete: a `beads.db-wal` or `beads.db-shm` whose
+  `beads.db` is gone, in a `.beads` with positive Dolt evidence (`backend`
+  `dolt`, a `dolt_mode` or `dolt_database`, an embedded Dolt repository, or
+  its Dolt store directory), and the leftover files of a redirect-only
+  `.beads` that holds no database and whose metadata names no other backend
+  and no existing `dolt_data_dir`. The cleanup never removes database state:
+  a `*.db`, `*.db3`, `*.sqlite` or `*.sqlite3` file in any letter case,
+  including the `beads.backup-*.db` pre-migration backups it used to delete;
+  any file that starts with the SQLite header, whatever its name; the WAL
+  and SHM of a database still beside them; a Dolt store, embedded Dolt or
+  `backup` directory; a Dolt chunk store in the layout a `file://` Dolt
+  backup or remote uses (a `manifest` starting `<n>:__DOLT__:`, `*.darc`,
+  `journal.idx` or NBS table files); a directory holding any of those; or a
+  symlink to any of those (the link is kept, and no removal follows a link).
+  Everything else is left as it is. A `beads.db`, its WAL or SHM, or a
+  `beads.backup-*.db` outside another backend's `.beads`, and a
+  redirect-only `.beads` that is not a stub but holds anything the stub rule
+  below would remove, are reported for manual review. When nothing is safe to delete the check no longer offers
+  `bd doctor --fix`. One behavior is unchanged: a `.beads` at a
+  redirect-only path (`crew/*`, `polecats/*`, `refinery/rig`,
+  `.git/beads-worktrees/*`, or a rig root that `mayor/rig/.beads` does not
+  redirect to) that holds no database state, and whose metadata, if it has
+  any, loads and names no other backend and no existing `dolt_data_dir`, is
+  still treated as a redirect stub. It loses every entry except `redirect` and `.gitkeep`, plus
+  `metadata.json` or `config.json` when a `redirect` is present: that
+  includes `metadata.json` and `config.yaml` of a server-mode workspace there,
+  even when doctor runs inside it (its data, on the server, is untouched),
+  the opt-in audit log `interactions.jsonl`, `routes.jsonl`, `last-touched`,
+  `formulas/`, and any file bd cannot recognize as a database by its name or
+  header, such as an encrypted `beads.db.enc` or a compressed backup. A
+  `.beads` at such a path whose `metadata.json` does not load (for example
+  merge-conflict markers in a tracked file) was cleaned like any stub; it is
+  now left as it is, and reported for review when it holds more than its
+  `redirect`, `.gitkeep` and metadata. The cleanup also stops deleting files the check never listed:
+  `issues.jsonl.new` and an empty `interactions.jsonl` outside such a stub,
+  and anything in a `.beads` under `.git` outside `.git/beads-worktrees`.
+  The Legacy MQ Files repair removes only the `.beads/mq/*.json` files its
+  check counts, not the whole directory, and leaves a symlinked
+  `.beads/mq` alone: it no longer counts the files behind the link or
+  removes the link.
 - A Dolt server you run at an IPv6 address can now be configured bare
   (`::1`) or bracketed (`[::1]`) in `metadata.json` `dolt_server_host`,
   `BEADS_DOLT_SERVER_HOST`, `config.yaml` `dolt.host` or `bd init
