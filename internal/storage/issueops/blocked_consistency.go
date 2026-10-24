@@ -712,7 +712,8 @@ func allExplained(parents []parentRef, explained map[parentRef]bool) bool {
 // parent that is blocked. An edge lives in the child's dependency table and
 // names the parent in the column for the parent's kind, so this is one lookup
 // per child kind and parent kind, each keyed on the child's issue_id. The hints
-// pin that drive, as on the batched legs.
+// pin that drive, as on the batched legs. A closed or pinned parent is not
+// blocked, whatever its stored flag says, as on the union's parent-child legs.
 //
 //nolint:gosec // G201: table and column names are constants; the ids are ? placeholders.
 func blockedParentEdgesInTx(ctx context.Context, tx DBTX, children []parentRef) ([]parentEdge, error) {
@@ -750,6 +751,7 @@ func blockedParentEdgesInTx(ctx context.Context, tx DBTX, children []parentRef) 
 					WHERE d.issue_id IN (%[4]s)
 					  AND d.type = 'parent-child'
 					  AND p.is_blocked = 1
+					  AND p.status <> 'closed' AND p.status <> 'pinned'
 				`, side.depTable, parent.table, parent.col, placeholders), args, side.wisp, parent.wisp)
 				if err != nil {
 					return nil, fmt.Errorf("read blocked parents of explained parents: %w", err)
@@ -1036,6 +1038,11 @@ func shouldBeBlockedIDsUnionScopedPrecomputedSQL(
 // saying "unless this parent is explained by its own subtree", and the empty
 // string says "no parent is", which is what an empty set means.
 //
+// The parent-child legs refuse a closed or pinned parent whatever its stored
+// flag says: such a row is never blocked, but the flag can be stale (the merge
+// clause of BlockedStateInvariant), and a stale 1 must not mark the open rows
+// below it.
+//
 //nolint:gosec // G201: depTable and scope are constants; the conditions come from the two callers above.
 func shouldBeBlockedIDsUnionCoreSQL(depTable, scope, issueParentCond, wispParentCond string) string {
 	targetHint, parentHint := "", ""
@@ -1061,6 +1068,7 @@ func shouldBeBlockedIDsUnionCoreSQL(depTable, scope, issueParentCond, wispParent
 		WHERE d.issue_id IS NOT NULL %[3]s
 		  AND d.type = 'parent-child'
 		  AND p.is_blocked = 1
+		  AND p.status <> 'closed' AND p.status <> 'pinned'
 		  %[4]s
 		UNION
 		SELECT %[7]sd.issue_id FROM %[1]s d
@@ -1068,6 +1076,7 @@ func shouldBeBlockedIDsUnionCoreSQL(depTable, scope, issueParentCond, wispParent
 		WHERE d.issue_id IS NOT NULL %[3]s
 		  AND d.type = 'parent-child'
 		  AND p.is_blocked = 1
+		  AND p.status <> 'closed' AND p.status <> 'pinned'
 		  %[5]s
 		UNION
 		SELECT d.issue_id FROM (

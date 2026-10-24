@@ -433,6 +433,7 @@
 40 26 TestReclaimAnyReplicaOverride
 40 26 TestWithPeerAuth_EnvFallbackDoesNotObservePeerCredentials
 
+40 27 TestClosedParentWithStaleFlagDoesNotPropagate
 40 27 TestEmbeddedBatchCloserDurableHistoryNeverNamesAWisp
 40 27 TestEmbeddedBatchCloserRequestValidationReturnsZeroResultAndChangesNothing
 40 27 TestEmbeddedDependencyEditorAcceptsADiamond
@@ -536,6 +537,7 @@
 40 34 TestQuerierContract
 40 34 TestReadyWorkStatementBudget
 
+40 35 TestClosedParentWithStaleFlagDoesNotUnexplainAGate
 40 35 TestEmbeddedBatchCloserAllIdempotentBatchLandsNothing
 40 35 TestEmbeddedClaimIssueWrapperClaimsTheWispPlane
 40 35 TestEmbeddedDependencyEditorGateScopeFollowsTheEdgeType

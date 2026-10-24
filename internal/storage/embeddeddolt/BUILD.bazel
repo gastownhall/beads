@@ -112,6 +112,7 @@ go_test(
         "batch_closer_contract_test.go",
         "batch_creator_contract_test.go",
         "batch_getter_contract_test.go",
+        "blocked_closed_parent_test.go",
         "blocked_lister_contract_test.go",
         "blocked_recheck_internal_test.go",
         "blocked_recompute_test.go",

@@ -2064,6 +2064,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of treating it as a final unexplained ancestor; `bd doctor`'s
   Blocked State check counts the stale bit and `--fix` clears it.
 
+- **A closed or pinned parent no longer passes a stale `is_blocked` to its
+  children.** The parent-child legs of the blocked-state derivation read the
+  parent's stored flag without checking its status, so a closed parent left
+  flagged by a merge marked its open children blocked on the next recompute
+  that reached them, hiding them from `bd ready` until the parent itself was
+  repaired. The legs, and the walk that decides whether a close gate is
+  blocked from above (#6506), now treat a closed or pinned parent as not
+  blocked. `bd doctor` counts such a child in the same pass as its parent,
+  and `bd doctor --fix` clears both in one pass.
+
 - `bd show --current` over the HTTP backend no longer prints the wrong issue.
   Its in-progress/hooked lookup used the raw `SearchIssues` method, which
   the HTTP backend refuses; the refusal was swallowed and the command fell
