@@ -1255,9 +1255,41 @@ is shown as not running, and the next bd command launches it.`,
 		if err != nil {
 			return HandleError("%v", err)
 		}
+		// The PID-file path only sees bd-managed servers. A launchd/systemd/
+		// orchestrator-managed server on a local host in dolt_mode=server
+		// (auto-start NOT disabled, not shared-server mode) leaves no PID file
+		// under this workspace's serverDir, so IsRunning reports "not running"
+		// while CRUD works fine (GH#6017). Before declaring it down,
+		// probe the resolved endpoint; if something is actually serving there,
+		// describe it via the external/SQL-probe path instead.
+		if localStatusNeedsExternalFallback(state, serverDir, cfg.GetDoltServerHost(), testServerConnection) {
+			runExternalDoltStatus(beadsDir, cfg)
+			return nil
+		}
 		renderLocalDoltStatus(state, serverDir)
 		return nil
 	},
+}
+
+// serverProbe reports whether a Dolt SQL endpoint is reachable at host:port.
+// Injectable so localStatusNeedsExternalFallback is unit-testable without a
+// live server.
+type serverProbe func(host string, port int) bool
+
+// localStatusNeedsExternalFallback decides whether the PID-file "not running"
+// result should be overridden by the external/SQL-probe path. True only when
+// the local PID path found no running bd-managed server AND something is
+// actually serving on the resolved endpoint — the launchd/systemd-managed
+// local-server case where CRUD works but no workspace PID file exists.
+func localStatusNeedsExternalFallback(state *doltserver.State, serverDir, host string, probe serverProbe) bool {
+	if state != nil && state.Running {
+		return false
+	}
+	port := doltserver.DefaultConfig(serverDir).Port
+	if port <= 0 {
+		return false
+	}
+	return probe(host, port)
 }
 
 // renderLocalDoltStatus writes the bd-managed (local PID-file) status of
