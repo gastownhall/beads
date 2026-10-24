@@ -2258,6 +2258,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   *unbound* local copy can reappear and invert the output mode it was meant to
   select.
 
+- **`bd query` now matches non-ASCII values.** The query lexer read its input
+  one byte at a time, so a quoted value like `title="größe"` was re-encoded
+  and silently matched nothing, and a bare value like `label=fête` either
+  failed to parse or matched a mangled string. It now decodes UTF-8, and
+  invalid bytes inside a value pass through unchanged (#7539).
+
 - **`bd init --force` can no longer silently recreate a missing server-side
   database as empty** (be-5up5). `--force` is an alias for `--reinit-local`,
   which skips the existing-data guard entirely, and the reinit path's own typed

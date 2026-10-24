@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/steveyegge/beads/internal/timeparsing"
 )
@@ -111,8 +112,8 @@ func (l *Lexer) next() rune {
 		l.width = 0
 		return 0
 	}
-	r := rune(l.input[l.pos])
-	l.width = 1
+	r, w := utf8.DecodeRuneInString(l.input[l.pos:])
+	l.width = w
 	l.pos += l.width
 	return r
 }
@@ -122,7 +123,8 @@ func (l *Lexer) peek() rune {
 	if l.pos >= len(l.input) {
 		return 0
 	}
-	return rune(l.input[l.pos])
+	r, _ := utf8.DecodeRuneInString(l.input[l.pos:])
+	return r
 }
 
 // backup steps back one rune.
@@ -222,10 +224,11 @@ func (l *Lexer) readString(quote rune, startPos int) (Token, error) {
 			case 0:
 				return Token{}, fmt.Errorf("unterminated escape sequence at position %d", l.pos-1)
 			default:
-				sb.WriteRune(escaped)
+				sb.WriteString(l.input[l.pos-l.width : l.pos])
 			}
 		} else {
-			sb.WriteRune(r)
+			// Copy the consumed bytes so invalid UTF-8 round-trips unchanged.
+			sb.WriteString(l.input[l.pos-l.width : l.pos])
 		}
 	}
 }
@@ -310,7 +313,7 @@ func (l *Lexer) readIdent(startPos int) (Token, error) {
 			l.backup()
 			break
 		}
-		sb.WriteRune(r)
+		sb.WriteString(l.input[l.pos-l.width : l.pos])
 	}
 
 	value := sb.String()
@@ -371,8 +374,12 @@ func (l *Lexer) acceptDuration(number string) (string, bool) {
 	}
 	start := l.pos - l.width
 	end := start
-	for end < len(l.input) && isIdentChar(rune(l.input[end])) {
-		end++
+	for end < len(l.input) {
+		r, w := utf8.DecodeRuneInString(l.input[end:])
+		if !isIdentChar(r) {
+			break
+		}
+		end += w
 	}
 	lexeme := number + l.input[start:end]
 	if !timeparsing.IsCompactDuration(lexeme) {
