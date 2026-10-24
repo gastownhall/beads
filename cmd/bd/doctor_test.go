@@ -957,3 +957,51 @@ func TestDoctor_ExplicitPathOverridesBEADS_DIR(t *testing.T) {
 		t.Error("Expected to find explicit-marker in chosen path - wrong directory was selected")
 	}
 }
+
+// TestRunDiagnostics_ClassicArtifactsScanGated verifies that the recursive
+// classic-artifact filesystem scan (Check 33) is opt-in via --scan: it is
+// omitted from a bare doctor run (no whole-tree stat storm) and included
+// only when doctorScan is set. --check=artifacts exercises the standalone
+// scan path separately and is not asserted here.
+func TestRunDiagnostics_ClassicArtifactsScanGated(t *testing.T) {
+	setup := func(t *testing.T) string {
+		tmpDir := t.TempDir()
+		beadsDir := filepath.Join(tmpDir, ".beads")
+		if err := os.Mkdir(beadsDir, 0750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"backend":"sqlite"}`), 0644); err != nil {
+			t.Fatal(err)
+		}
+		return tmpDir
+	}
+
+	hasClassicArtifacts := func(result doctorResult) bool {
+		for _, c := range result.Checks {
+			if c.Name == "Classic Artifacts" {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Restore the global toggle after the test so other tests are unaffected.
+	prevScan := doctorScan
+	defer func() { doctorScan = prevScan }()
+
+	t.Run("default omits scan", func(t *testing.T) {
+		doctorScan = false
+		result := runDiagnostics(setup(t))
+		if hasClassicArtifacts(result) {
+			t.Error("bare doctor ran the recursive classic-artifact scan; it must be opt-in via --scan")
+		}
+	})
+
+	t.Run("--scan includes scan", func(t *testing.T) {
+		doctorScan = true
+		result := runDiagnostics(setup(t))
+		if !hasClassicArtifacts(result) {
+			t.Error("--scan did not include the Classic Artifacts check")
+		}
+	})
+}
