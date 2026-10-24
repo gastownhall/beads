@@ -245,7 +245,12 @@ func TestPRGateRequiresRemoteBazelLanes(t *testing.T) {
 			t.Errorf("%v: mode %s, every lane that runs in it passed: gate pass = %v, want %v", f, mode, pass, bazelRemoteModes[mode])
 		}
 	}
-	for _, mode := range []string{"remote", "fork-ro", "fork-rw", "cache", "skip"} {
+	// Never mode cache: rbe-cache refuses GitHub-hosted runners, so only an
+	// rbe=cache dispatch reaches it, never a pull_request or merge group.
+	if saw["cache"] {
+		t.Errorf("the fact matrix reached mode cache on a pull_request or merge group: %v", saw)
+	}
+	for _, mode := range []string{"remote", "fork-ro", "fork-rw", "local", "skip"} {
 		if !saw[mode] {
 			t.Errorf("the fact matrix never reached mode %s: %v", mode, saw)
 		}
@@ -260,18 +265,18 @@ func TestPRGateRequiresRemoteBazelLanes(t *testing.T) {
 	}{
 		{"same-repo PR, farm on", rbeFacts{"pull_request", "true", "x", false, false, "", false}, "remote", true},
 		{"same-repo PR, kill switch (var unset)", rbeFacts{"pull_request", "", "x", false, false, "", false}, "skip", false},
-		{"same-repo PR, executor secret missing", rbeFacts{"pull_request", "true", "", false, false, "", false}, "cache", false},
+		{"same-repo PR, executor secret missing", rbeFacts{"pull_request", "true", "", false, false, "", false}, "local", false},
 		{"fork PR, rbe-fork ro", rbeFacts{"pull_request", "true", "", true, false, "ro", false}, "fork-ro", true},
 		{"fork PR, rbe-fork rw", rbeFacts{"pull_request", "", "", true, false, "rw", false}, "fork-rw", true},
-		{"fork PR, rbe-fork closed", rbeFacts{"pull_request", "true", "", true, false, "closed", false}, "cache", false},
-		{"fork PR, mint unreachable", rbeFacts{"pull_request", "true", "", true, false, "", false}, "cache", false},
+		{"fork PR, rbe-fork closed", rbeFacts{"pull_request", "true", "", true, false, "closed", false}, "local", false},
+		{"fork PR, mint unreachable", rbeFacts{"pull_request", "true", "", true, false, "", false}, "local", false},
 		{"Dependabot PR, rbe-fork ro", rbeFacts{"pull_request", "true", "", false, true, "ro", false}, "fork-ro", true},
-		{"Dependabot PR, rbe-fork closed", rbeFacts{"pull_request", "", "", false, true, "closed", false}, "cache", false},
+		{"Dependabot PR, rbe-fork closed", rbeFacts{"pull_request", "", "", false, true, "closed", false}, "local", false},
 		{"merge_group", rbeFacts{"merge_group", "true", "x", false, false, "", false}, "remote", true},
 		{"merge_group, kill switch (var unset)", rbeFacts{"merge_group", "", "x", false, false, "", false}, "skip", false},
-		{"merge_group, executor secret missing", rbeFacts{"merge_group", "true", "", false, false, "", false}, "cache", false},
+		{"merge_group, executor secret missing", rbeFacts{"merge_group", "true", "", false, false, "", false}, "local", false},
 		// A fork repository's own CI: local, never rbe-cache or the mint
-		// (red, as mode cache was there).
+		// (red, as every non-remote mode is).
 		{"fork repository's own PR, mint would say ro", rbeFacts{"pull_request", "", "", true, false, "ro", true}, "local", false},
 		{"fork repository's own PR, var and secret set", rbeFacts{"pull_request", "true", "x", false, false, "", true}, "local", false},
 	} {

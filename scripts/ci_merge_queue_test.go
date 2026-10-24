@@ -263,7 +263,7 @@ func TestMergeQueuePullRequestFieldsHandleMergeGroup(t *testing.T) {
 // Merge groups: bazel.yml's rbe step, evaluated by evalGHExpr for a merge
 // group, takes mode remote with the CI secrets, so pr.yml's gate (which
 // requires every lane to have run remotely, BAZEL_REMOTE) can pass. Without
-// the secret or with the farm switch off the mode is cache or skip, and the
+// the secret or with the farm switch off the mode is local or skip, and the
 // gate is red (TestPRGateRequiresRemoteBazelLanes).
 func TestMergeQueueBazelRunsRemotely(t *testing.T) {
 	requireHostTool(t, "bash")
@@ -272,7 +272,7 @@ func TestMergeQueueBazelRunsRemotely(t *testing.T) {
 		name, varOn, secret, mode string
 	}{
 		{"farm on, secrets", "true", "grpcs://rbe.example:443", "remote"},
-		{"secret missing", "true", "", "cache"},
+		{"secret missing", "true", "", "local"},
 		{"farm switch off", "", "grpcs://rbe.example:443", "skip"},
 	} {
 		ctx := mergeGroupCtx(1, map[string]string{"vars.RBE_WEST_WORKERS": c.varOn, "secrets.RBE_WEST_EXECUTOR": c.secret, "inputs.rbe": "on", "inputs.fork-farm": "off"})

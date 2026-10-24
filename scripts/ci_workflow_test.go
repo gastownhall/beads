@@ -1852,10 +1852,10 @@ var bazelAdvisoryLanes = map[string]string{
 }
 
 // bazel-integration's if: remote (modes remote, fork-ro, fork-rw: enabled),
-// or local with the read-only cache (mode cache: fork and Dependabot PRs
-// while rbe-fork is closed, whose only PR-time integration run it is; a
-// warm run builds and tests only what the PR changed), never plain local
-// (rbe=off: a cold tagged race build of //... on one runner); and off when a
+// or local with the read-only cache (mode cache: rbe=cache dispatches, on
+// Blacksmith; a warm run builds and tests only what changed), never plain
+// local (rbe=off, and fork and Dependabot PRs while rbe-fork is closed: a
+// cold tagged race build of //... on one runner); and off when a
 // caller passes integration: "off" (pr.yml and bazel-farm.yml pass "on"). A
 // string input: on push and dispatch it is null, and null != 'off', so the
 // lane keeps running on main.
@@ -2065,10 +2065,11 @@ func TestBazelWorkflowJobsAndExecutionMode(t *testing.T) {
 	}
 	// Every lane needs the rbe job and takes its runner, skip rule and
 	// setup-bazel env from that job's outputs alone. Remote runs use the
-	// Blacksmith pool; fork modes (fork-ro/fork-rw: remote execution with an
-	// rbe-fork-mint certificate, the runner only a client), local and cache
-	// runs (forks while rbe-fork is closed, rbe=off/cache) the GitHub-hosted
-	// runner. Only mode remote gets the secrets; fork modes get
+	// Blacksmith pool, and so do cache runs (rbe=cache dispatches: rbe-cache
+	// refuses GitHub-hosted runners); fork modes (fork-ro/fork-rw: remote
+	// execution with an rbe-fork-mint certificate, the runner only a
+	// client) and local runs (forks while rbe-fork is closed, rbe=off) the
+	// GitHub-hosted runner. Only mode remote gets the secrets; fork modes get
 	// BAZEL_FORK_REMOTE (setup-bazel mints the certificate), cache runs
 	// BAZEL_FORK_CACHE.
 	wantRunsOn := bazelLaneRunsOn
@@ -4112,13 +4113,13 @@ func TestBazelIntegrationJob(t *testing.T) {
 	// GitHub run took 17 minutes end to end) followed by the longest test
 	// action, which .bazelrc caps at its test:integration --test_timeout
 	// (rbe-west's 1200s limit). The job adds setup and log upload. In mode
-	// cache it runs on a 4-CPU GitHub-hosted runner, and with the read-only
+	// cache it runs on a 4-CPU Blacksmith runner, and with the read-only
 	// cache closed (the farm's kill switch) the whole suite builds and runs
 	// there cold, about 30 minutes simulated: the step keeps twice that.
 	const coldCompileMinutes = 20
 	const cacheClosedMinutes = 30
 	if test.TimeoutMinutes < 2*cacheClosedMinutes {
-		t.Errorf("%s test step timeout-minutes = %d, want at least %d (mode cache with the cache closed: ~%d minutes cold on a GitHub-hosted runner)",
+		t.Errorf("%s test step timeout-minutes = %d, want at least %d (mode cache with the cache closed: ~%d minutes cold on a 4-CPU runner)",
 			bazelIntegJobName, test.TimeoutMinutes, 2*cacheClosedMinutes, cacheClosedMinutes)
 	}
 	actionCapMinutes := 0
@@ -5111,26 +5112,27 @@ func TestBazelRBEJobDecidesOnce(t *testing.T) {
 		{"var in other case", facts{"True", "on", "grpcs://x", false, false, false, false, ""}, "remote", "true", ""},
 		// Fork and Dependabot pull_request runs: rbe-fork decides. Open:
 		// remote execution with a mint certificate, tier ro or rw. Closed,
-		// refusing, unreachable or nonsense: local execution with the
-		// read-only cache, as before rbe-fork (rbe=cache simulates them);
-		// rbe=off drops the cache too.
+		// refusing, unreachable or nonsense: local execution, never the
+		// read-only cache (rbe-cache refuses GitHub-hosted runners, where
+		// these lanes run). rbe=cache, the only way into mode cache,
+		// simulates them with the cache, from Blacksmith; rbe=off without.
 		{"fork PR, mint ro", facts{"true", "", "", true, false, true, false, "ro"}, "fork-ro", "true", "ro"},
 		{"fork PR, mint rw", facts{"true", "", "", true, false, true, false, "rw"}, "fork-rw", "true", "rw"},
 		{"fork PR, mint ro, var unset (forks cannot read it)", facts{"", "", "", true, false, true, false, "ro"}, "fork-ro", "true", "ro"},
 		{"fork PR somehow with the secret, mint ro", facts{"true", "", "grpcs://x", true, false, true, false, "ro"}, "fork-ro", "true", "ro"},
 		{"Dependabot PR, mint ro", facts{"true", "", "", false, false, true, true, "ro"}, "fork-ro", "true", "ro"},
 		{"Dependabot PR, var unset, mint ro", facts{"", "", "", false, false, true, true, "ro"}, "fork-ro", "true", "ro"},
-		{"fork PR, mint unreachable", facts{"true", "", "", true, false, true, false, ""}, "cache", "false", ""},
-		{"fork PR, mint closed", facts{"true", "", "", true, false, true, false, "closed"}, "cache", "false", ""},
-		{"fork PR, rw tier closed", facts{"true", "", "", true, false, true, false, "rw-closed"}, "cache", "false", ""},
-		{"fork PR, canary refuses", facts{"true", "", "", true, false, true, false, "canary"}, "cache", "false", ""},
-		{"fork PR, mint busy", facts{"true", "", "", true, false, true, false, "busy"}, "cache", "false", ""},
-		{"fork PR, mint answers garbage", facts{"true", "", "", true, false, true, false, "garbage"}, "cache", "false", ""},
-		{"fork PR, mint answers an unknown tier", facts{"true", "", "", true, false, true, false, "evil"}, "cache", "false", ""},
-		{"fork PR, var unset, mint unreachable", facts{"", "", "", true, false, true, false, ""}, "cache", "false", ""},
-		{"fork PR, var false, mint unreachable", facts{"false", "", "", true, false, true, false, ""}, "cache", "false", ""},
-		{"Dependabot PR, mint unreachable", facts{"true", "", "", false, false, true, true, ""}, "cache", "false", ""},
-		{"Dependabot, var unset, mint unreachable", facts{"", "", "", false, false, true, true, ""}, "cache", "false", ""},
+		{"fork PR, mint unreachable", facts{"true", "", "", true, false, true, false, ""}, "local", "false", ""},
+		{"fork PR, mint closed", facts{"true", "", "", true, false, true, false, "closed"}, "local", "false", ""},
+		{"fork PR, rw tier closed", facts{"true", "", "", true, false, true, false, "rw-closed"}, "local", "false", ""},
+		{"fork PR, canary refuses", facts{"true", "", "", true, false, true, false, "canary"}, "local", "false", ""},
+		{"fork PR, mint busy", facts{"true", "", "", true, false, true, false, "busy"}, "local", "false", ""},
+		{"fork PR, mint answers garbage", facts{"true", "", "", true, false, true, false, "garbage"}, "local", "false", ""},
+		{"fork PR, mint answers an unknown tier", facts{"true", "", "", true, false, true, false, "evil"}, "local", "false", ""},
+		{"fork PR, var unset, mint unreachable", facts{"", "", "", true, false, true, false, ""}, "local", "false", ""},
+		{"fork PR, var false, mint unreachable", facts{"false", "", "", true, false, true, false, ""}, "local", "false", ""},
+		{"Dependabot PR, mint unreachable", facts{"true", "", "", false, false, true, true, ""}, "local", "false", ""},
+		{"Dependabot, var unset, mint unreachable", facts{"", "", "", false, false, true, true, ""}, "local", "false", ""},
 		{"dispatch rbe=cache", facts{"true", "cache", "grpcs://x", false, false, false, false, ""}, "cache", "false", ""},
 		{"dispatch rbe=cache, var unset", facts{"", "cache", "", false, false, false, false, ""}, "cache", "false", ""},
 		{"call rbe=CACHE", facts{"true", "CACHE", "grpcs://x", false, false, true, false, ""}, "cache", "false", ""},
@@ -5139,7 +5141,7 @@ func TestBazelRBEJobDecidesOnce(t *testing.T) {
 		{"call rbe=OFF", facts{"true", "OFF", "grpcs://x", false, false, true, false, ""}, "local", "false", ""},
 		{"fork PR rbe=off, mint ro", facts{"true", "off", "", true, false, true, false, "ro"}, "local", "false", ""},
 		{"same-repo, var unset", facts{"", "", "grpcs://x", false, false, true, false, ""}, "skip", "false", ""},
-		{"same-repo without the secret", facts{"true", "", "", false, false, true, false, ""}, "cache", "false", ""},
+		{"same-repo without the secret", facts{"true", "", "", false, false, true, false, ""}, "local", "false", ""},
 		{"var false", facts{"false", "on", "grpcs://x", false, false, false, false, ""}, "skip", "false", ""},
 		// bazel-farm.yml's authorized fork runs: remote or nothing, never
 		// a second local run (pr.yml already runs one). Not a pull_request
@@ -5150,7 +5152,7 @@ func TestBazelRBEJobDecidesOnce(t *testing.T) {
 		{"authorized fork farm, rbe=off", facts{"true", "off", "grpcs://x", true, true, false, false, ""}, "local", "false", ""},
 		// A fork run that is neither a pull_request nor authorized
 		// (pull_request_target without bazel-farm.yml's inputs) stays local.
-		{"fork, not authorized, secret", facts{"true", "", "grpcs://x", true, false, false, false, "ro"}, "cache", "false", ""},
+		{"fork, not authorized, secret", facts{"true", "", "grpcs://x", true, false, false, false, "ro"}, "local", "false", ""},
 	}
 	caseEnv := func(in facts, forkRepo bool) map[string]string {
 		env := map[string]string{
@@ -6214,7 +6216,7 @@ func TestBazelCmdDoltJob(t *testing.T) {
 	job := workflow.job(t, bazelCmdDoltJobName)
 	assertBazelTierStep(t, job, bazelCmdDoltJobName, config)
 	test := job.step(t, "bazel test //... --config="+config)
-	// Mode cache runs the shards on a 4-CPU GitHub-hosted runner; with the
+	// Mode cache runs the shards on a 4-CPU Blacksmith runner; with the
 	// read-only cache closed the cold tagged race build comes first (as in
 	// TestBazelIntegrationJob).
 	if test.TimeoutMinutes < 60 || job.TimeoutMinutes <= test.TimeoutMinutes || job.TimeoutMinutes > test.TimeoutMinutes+15 {

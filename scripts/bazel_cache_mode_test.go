@@ -23,14 +23,16 @@ import (
 // Mode cache, end to end, for every way a bazel.yml run can start: the rbe
 // job's real decision step, each lane's `if:` and setup-bazel env (GitHub's
 // expressions, evaluated) and the rc write-bazelrc.sh then writes. A cache
-// run (fork and Dependabot PRs while rbe-fork is closed or unreachable,
-// rbe=cache, a missing executor secret) must reach the rc with
-// --config=fork-cache and nothing else remote: no executor, no TLS
-// material, no instance, no upload. That holds even where the run could
-// read the secrets (an rbe=cache dispatch on the base repo, and,
-// adversarially, a fork PR whose secrets GitHub would never pass). Its
-// lanes are the local ones plus bazel-integration; the remote-only tiers
-// skip, and pr.yml's gate (bazel-gate.sh) accepts exactly those skips.
+// run (rbe=cache, and nothing else: rbe-cache refuses GitHub-hosted
+// runners, so fork and Dependabot PRs while rbe-fork is closed or
+// unreachable, unauthorized fork runs and a missing executor secret are
+// mode local) must reach the rc with --config=fork-cache and nothing else
+// remote: no executor, no TLS material, no instance, no upload. That holds
+// even where the run could read the secrets (an rbe=cache dispatch on the
+// base repo, and, adversarially, a fork PR whose secrets GitHub would never
+// pass). Its lanes are the local ones plus bazel-integration, every one on
+// a Blacksmith runner; the remote-only tiers skip, and pr.yml's gate
+// (bazel-gate.sh) accepts exactly those skips.
 //
 // The fork modes too (rbe-fork open, the mint answering ro or rw): every
 // lane runs, setup-bazel's fork steps (setupBazelForkSim: key, CSR
@@ -194,9 +196,10 @@ func TestBazelCacheModeReachesTheRC(t *testing.T) {
 			seen[mode] = true
 			// A fork repository's own CI: local, whatever else holds.
 			// Fork and Dependabot pull_request runs: fork-<tier> when the
-			// mint says open with tier ro or rw, else cache, whatever else
+			// mint says open with tier ro or rw, else local, whatever else
 			// holds (rbe=off: local). Other forks outside bazel-farm.yml's
-			// authorized call, and rbe=cache, are mode cache.
+			// authorized call are mode local; rbe=cache is mode cache, the
+			// only way into it (rbe-cache refuses GitHub-hosted runners).
 			authorized := s.f.event == "pull_request_target" && s.with["fork-farm"] == "authorized"
 			forkPR := s.f.event == "pull_request" && (s.f.fork || s.f.dependabot)
 			want := ""
@@ -210,10 +213,15 @@ func TestBazelCacheModeReachesTheRC(t *testing.T) {
 			case forkPR && (s.f.mint == "ro" || s.f.mint == "rw"):
 				want = "fork-" + s.f.mint
 			case forkPR, s.f.fork && !authorized:
-				want = "cache"
+				want = "local"
+			case !authorized && s.f.rbeVar != "" && !s.secret:
+				want = "local" // same-repo, the executor secret missing
 			}
 			if want != "" && mode != want {
 				t.Errorf("mode = %s, want %s", mode, want)
+			}
+			if mode == "cache" && s.with["rbe"] != "cache" {
+				t.Errorf("mode cache without rbe=cache: only the dispatch option may read rbe-cache")
 			}
 			if wantTier := strings.TrimPrefix(want, "fork-"); strings.HasPrefix(want, "fork-") && tier != wantTier || !strings.HasPrefix(mode, "fork-") && tier != "" {
 				t.Errorf("mode %s with tier %q", mode, tier)
@@ -250,6 +258,13 @@ func TestBazelCacheModeReachesTheRC(t *testing.T) {
 				}
 				if !runs {
 					continue
+				}
+				// rbe-cache refuses GitHub-hosted runners: every lane that
+				// runs in mode cache is on Blacksmith.
+				if mode == "cache" {
+					if got := mustEvalGHRunsOn(t, job.RunsOn, map[string]string{"needs.rbe.outputs.mode": mode}); !strings.HasPrefix(got, "blacksmith-") {
+						t.Errorf("%s runs in mode cache on %q, want a Blacksmith runner (rbe-cache refuses GitHub-hosted ones)", name, got)
+					}
 				}
 				lanes = append(lanes, name)
 				for _, step := range job.Steps {

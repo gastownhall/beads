@@ -586,8 +586,9 @@ func TestBazelRRCVerifyJob(t *testing.T) {
 	if strings.Contains(alert.Run, "${{") {
 		t.Errorf("alert step interpolates an expression into its script; pass it through env")
 	}
-	// The issue's containment: mode cache lanes see no repository
-	// variables, so the committed switches (both repositories) and
+	// The issue's containment: mode cache lanes do not follow the
+	// variable (the rbe job's rrc output is off outside mode remote), so the
+	// committed switches (both repositories) and
 	// rbe-cache-gate stop them. The mode remote readers read the same
 	// entries, so a mismatch sets the variable to seed (no reader, rrc-seed
 	// and this check keep running); off stops seeding and this check too.

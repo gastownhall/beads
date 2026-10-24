@@ -54,13 +54,19 @@ Current PR-related workflow names:
   `fork-ro` or `fork-rw` while it is open for the run, every lane executing
   remotely on `rbe-fork.ops.gascity.com:8444` with its own short-lived
   certificate (instance `oss-fork`, the fork pool; or `oss`, the OSS pool,
-  for allowlisted authors), else `cache`: local execution plus rbe-west's
-  anonymous read-only action cache, `.bazelrc`'s `fork-cache` config;
-  `local` for `rbe=off` dispatches and for every run in a fork
-  repository's own CI (`github.repository_owner` is not `gastownhall`: a
-  push to the fork or a PR within it; fork PRs into beads run with
-  `github.repository` `gastownhall/beads` and are unaffected), so a fork's
-  CI never reads rbe-cache; or `skip` while the `RBE_WEST_WORKERS`
+  for allowlisted authors), else `local`; `cache` only for `rbe=cache`
+  dispatches: local execution on the Blacksmith runner plus rbe-west's
+  anonymous read-only action cache (rbe-cache), `.bazelrc`'s `fork-cache`
+  config; `local` for `rbe=off` dispatches, fork and Dependabot PRs while
+  rbe-fork is closed or refuses the run, unauthorized
+  `pull_request_target` fork runs, same-repo runs without the executor
+  secret, and every run in a fork repository's own CI
+  (`github.repository_owner` is not `gastownhall`: a push to the fork or a
+  PR within it; fork PRs into beads run with `github.repository`
+  `gastownhall/beads`), so no run reads rbe-cache from a GitHub-hosted
+  runner, which rbe-cache refuses (infra `nativelink-cas/west` README
+  "rbe-cache", GitHub-hosted runners; every lane's `runs-on` is Blacksmith
+  in modes `remote` and `cache`); or `skip` while the `RBE_WEST_WORKERS`
   repo variable is unset) and exports it as the `rbe-mode` / `rbe-enabled`
   outputs (`rbe-enabled` is `true` in `remote`, `fork-ro` and `fork-rw`);
   every lane exports its
@@ -84,10 +90,10 @@ Current PR-related workflow names:
   requires `BAZEL_REMOTE`: the call's mode must be `remote`, `fork-ro` or
   `fork-rw`. `.github/scripts/bazel-gate.sh` reads the exported mode, never
   the variable or the fork flag: mode `skip` allows every Bazel id to skip,
-  mode `cache` the remote-only `BAZEL_EMBEDDED`, `BAZEL_PROXIED` and
-  `BAZEL_SERVER_STORAGE`, mode `local` (`rbe=off` dispatches, a fork
-  repository's own CI) those and
-  `BAZEL_INTEGRATION`, and modes `remote`, `fork-ro` and `fork-rw` none;
+  mode `cache` (`rbe=cache` dispatches) the remote-only `BAZEL_EMBEDDED`,
+  `BAZEL_PROXIED` and `BAZEL_SERVER_STORAGE`, mode `local` (`rbe=off`
+  dispatches, fork and Dependabot PRs while rbe-fork is closed, a fork
+  repository's own CI) those and `BAZEL_INTEGRATION`, and modes `remote`, `fork-ro` and `fork-rw` none;
   on `pr.yml` the first three are red anyway through `BAZEL_REMOTE`.
   A lane that should run and fails, is cancelled, or reports no result fails
   the gate, and so does a missing or invalid mode.
@@ -95,19 +101,19 @@ Current PR-related workflow names:
   successor of `main.yml`'s former Linux integration shards) is required on every PR:
   `pr.yml` passes `integration: "on"` (policy-pinned), so it runs in modes
   `remote` (same-repo PRs) and `fork-ro`/`fork-rw` (fork and Dependabot PRs
-  while rbe-fork is open), and in mode `cache` (fork and Dependabot PRs
-  while it is closed, locally on the GitHub-hosted runner with the
-  read-only cache), and a
+  while rbe-fork is open), and in mode `cache` (`rbe=cache` dispatches,
+  locally on the Blacksmith runner with the read-only cache), and a
   failure, cancellation or missing result turns the gate red. Its legacy
   twins still run only on push to `main`, so this lane is the only PR-time
   run of the full integration-tagged suite. In mode `cache` every action
   trusted CI already ran is a cache hit, so the runner builds and tests only
-  what the PR changed. Simulated on a 4-CPU runner (2026-10-02): about 2.5
+  what changed. Simulated on a 4-CPU runner (2026-10-02): about 2.5
   minutes warm, 3 to 5 for a `cmd/bd` change, and about 30 with the cache
   closed. Its step timeout (75 minutes) covers that cold local run with
   room to spare, and so also a remote cold compile plus the 1200 s
-  per-action cap (both policy-tested). Mode `local` (`rbe=off`) still
-  skips it.
+  per-action cap (both policy-tested). Mode `local` (`rbe=off`; fork and
+  Dependabot PRs while rbe-fork is closed, red anyway through
+  `BAZEL_REMOTE`) skips it.
   `scripts/ci_workflow_test.go` fails when a new `bazel.yml` job has neither
   a gate id nor an advisory entry.
   Runbook: if `main`'s Bazel BUILD files drift (every PR's Bazel lanes go
@@ -118,8 +124,8 @@ Current PR-related workflow names:
   to fall back to: unsetting the `RBE_WEST_WORKERS` repo variable (mode
   `skip`) turns `CI Gate / Required` red on every PR and merge group
   (`BAZEL_REMOTE`), by design. If rbe-west closes the read-only cache (the
-  farm's kill switch; the client has none), runs in mode `cache` execute
-  locally and are red through `BAZEL_REMOTE` as well. If it
+  farm's kill switch; the client has none), runs in mode `cache`
+  (`rbe=cache` dispatches) execute locally. If it
   is slow rather than closed, each lookup gives up after `fork-cache`'s
   15 s `--remote_timeout` (times its retries), and Bazel's failure circuit
   breaker (`--experimental_circuit_breaker_strategy=failure`) stops calling
@@ -233,9 +239,12 @@ enforced there.
 
 ## Trusted-Author Fork PRs (Bazel Farm)
 
-Fork PRs get no Actions secrets, so `pr.yml`'s Bazel call runs them in mode
-`cache` (local execution with the anonymous read-only cache, slower; the
-remote-only embedded, proxied-server and server-storage tiers skip). `bazel-farm.yml` gives the
+Fork PRs get no Actions secrets, so `pr.yml`'s Bazel call runs them
+through rbe-fork (modes `fork-ro`/`fork-rw`) or, while it is closed or
+refuses the run, in mode `local` (local execution on the GitHub-hosted
+runner, slower; the remote-only embedded, proxied-server and
+server-storage tiers and integration skip; never rbe-cache, which refuses
+GitHub-hosted runners). `bazel-farm.yml` gives the
 remote-execution farm to fork PRs from an allowlist of trusted authors
 (`.github/bazel-farm-allowlist.txt`: the numeric user ids of the same four
 people as gascity's `.github/blacksmith-allowlist.txt`). Everyone else's
@@ -401,7 +410,7 @@ What anyone else can do: nothing new.
   the base allowlist and says no. `farm` is skipped, and no secret or PR
   code is involved.
 - Fork `pull_request` runs still get no secrets, and `bazel.yml` keeps them
-  local (mode `cache`) even if the fork's `pr.yml` passes `fork-farm`,
+  local (mode `local`) even if the fork's `pr.yml` passes `fork-farm`,
   because the event is not `pull_request_target`.
 
 Attacks considered:
@@ -1020,8 +1029,10 @@ compared with the cached entries by `tools/bazel/rrc_verify.py`; a mismatch
 fails the job and opens an `rrc-verify` issue, which lists the containment
 steps below.
 
-Mode `cache` lanes (fork PRs while rbe-fork is closed, `rbe=cache`
-dispatches) see no repository variables. The jobs with a reader step above
+Mode `cache` lanes (`rbe=cache` dispatches; no fork or Dependabot PR
+reaches mode `cache`, since rbe-cache refuses GitHub-hosted runners) do
+not follow the variable (the rbe job's `rrc` output is `off` outside mode
+`remote`). The jobs with a reader step above
 pass `BAZEL_RRC_READ: 'true'` to setup-bazel, and only those: their configs
 are the ones `rrc-lane-commands.txt` seeds (`bazel-release-cross` builds for
 other platforms and does not opt in). In mode `cache` they read the same
@@ -1030,7 +1041,9 @@ adds the same two lines to its rc whenever
 `.github/actions/setup-bazel/cache-rrc-probe.sh` gets a GetCapabilities
 answer from rbe-cache, then NOT_FOUND for a GetActionResult key no action
 has and for a ByteStream Read of a blob the CAS does not hold. The reader
-lanes that run in mode `cache` use a pinned `ubuntu-24.04` runner there,
+lanes that run in mode `cache` run there on Blacksmith's `ubuntu-2404`
+image, the family `rrc-seed` writes from; their GitHub-hosted fallback (the
+other non-remote modes, which do not read) is a pinned `ubuntu-24.04`,
 not `ubuntu-latest`. Each job's step summary records whether it reads, and
 rbe-cache's TCP connect time (DNS lookup excluded). rbe-cache refuses every
 write, and fork-cache uploads nothing.
@@ -1462,7 +1475,7 @@ Required` requires them to have run remotely and passed.
   `gh-readonly-queue/*` branch with the CI secrets) `pr.yml`'s gate requires
   `BAZEL_REMOTE` (the call's mode is `remote`, `fork-ro` or `fork-rw`) and
   every lane's own id (a merge group every lane's but the Dolt tiers', which
-  main's push run runs: see [Merge Queue](#merge-queue)). Mode `skip` (the farm switch off) and mode `cache`
+  main's push run runs: see [Merge Queue](#merge-queue)). Mode `skip` (the farm switch off) and mode `local`
   (the executor secret missing, or rbe-fork closed or refusing a fork run)
   are red, never a silent pass with fewer tests.
   `scripts/pr_risk_bazel_coverage_test.go`
@@ -1910,7 +1923,7 @@ workflows run on that commit like a same-repo PR, but only the fast set.
   That decision is pending.
 - The gate requires the fast set's Bazel lanes to have run remotely and
   passed (`BAZEL_REMOTE`), exactly as on a PR: with the farm switch off
-  (mode `skip`) or a missing executor secret (mode `cache`) it is red.
+  (mode `skip`) or a missing executor secret (mode `local`) it is red.
   `bazel-integration` and the package gates run as on a PR. The Dolt-tier
   ids (`BAZEL_EMBEDDED`, `BAZEL_DOLTSERVER`, `BAZEL_PROXIED`,
   `BAZEL_SERVER_STORAGE`, `BAZEL_CMD_DOLT`) may skip only because
@@ -1997,8 +2010,8 @@ Caveats:
 - Mode `remote`. The complement assumes `bazel.yml`'s push run takes mode
   `remote`, as the merge group did (its gate requires it, `BAZEL_REMOTE`).
   A push run in mode `skip` (the farm switch turned off) runs no lane, and
-  one in mode `cache` (the executor secret gone) skips the remote-only
-  tiers; both stay green on what they skipped. Only a change of the switch
+  one in mode `local` (the executor secret gone) skips the remote-only
+  tiers and integration; both stay green on what they skipped. Only a change of the switch
   or the secret between a merge group and its push gets there.
 
 ### How a red main surfaces

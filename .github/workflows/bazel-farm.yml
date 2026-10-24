@@ -1,15 +1,17 @@
 # Bazel lanes on the remote-execution farm for fork PRs by trusted authors.
 #
-# Fork PRs get no Actions secrets, so pr.yml's Bazel call runs them locally
-# with rbe-west's anonymous read-only cache (mode cache: no embedded,
-# proxied-server or server-storage tier). This workflow gives the farm to
-# fork PRs whose
-# author AND triggering user are on .github/bazel-farm-allowlist.txt (by
-# numeric user id), by calling bazel.yml from pull_request_target, which has
-# the secrets.
+# Fork PRs get no Actions secrets, so pr.yml's Bazel call runs them
+# remotely through rbe-west's certificate mint (rbe-fork, modes
+# fork-ro/fork-rw) or, while it is closed or refuses the run, locally (mode
+# local: no embedded, proxied-server, server-storage or integration tier;
+# never rbe-west's anonymous read-only cache, which refuses GitHub-hosted
+# runners). This workflow gives the farm to fork PRs whose author AND
+# triggering user are on .github/bazel-farm-allowlist.txt (by numeric user
+# id), by calling bazel.yml from pull_request_target, which has the
+# secrets.
 #
-# ADVISORY. pr.yml is unchanged: every fork PR, listed or not, still runs the
-# cache-mode Bazel lanes (local execution, read-only cache) inside the
+# ADVISORY. pr.yml is unchanged: every fork PR, listed or not, still runs
+# pr.yml's Bazel lanes (the mint's fork modes, or local) inside the
 # enforced `CI Gate / Required`. This run adds a fast remote signal,
 # including the remote-only embedded, proxied-server and server-storage
 # tiers, that no required check and no privileged workflow
