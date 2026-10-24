@@ -56,6 +56,26 @@ func (s *testSuite) TestConfig_GetMissing() {
 	s.Empty(value)
 }
 
+// Regression guard: silent invalid-key rejection already appeared absent.
+func (s *testSuite) TestConfig_SilentInvalidKeyAppearsAbsent() {
+	s.gitInit()
+	s.run("git", "config", "core.hooksPath", ".git/hooks")
+	const key = "bad..key"
+	cmd := exec.CommandContext(s.Ctx(), "git", "config", "--get", key)
+	cmd.Dir = s.tmpDir
+	out, err := cmd.Output()
+	var exitErr *exec.ExitError
+	s.Require().ErrorAs(err, &exitErr)
+	s.Require().Equal(1, exitErr.ExitCode())
+	s.Require().Empty(exitErr.Stderr)
+	s.Empty(out)
+
+	value, found, err := s.repo.GetConfig(s.Ctx(), key)
+	s.Require().NoError(err)
+	s.False(found)
+	s.Empty(value)
+}
+
 func (s *testSuite) TestConfig_RoundTrip() {
 	s.gitInit()
 	s.Require().NoError(s.repo.SetConfig(s.Ctx(), "beads.role", "maintainer"))
