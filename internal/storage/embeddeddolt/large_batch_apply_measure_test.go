@@ -434,10 +434,18 @@ func TestLargeBatchApplyWallClock_Embedded(t *testing.T) {
 //
 // Net: classic +49 (seven distinct parent-child adds; the eighth repeats a
 // pair and is a no-op). 356 and 712 are unchanged.
+//
+// Re-pinned for #5738 (aggregate row_lock): each create reads its final
+// row_lock back (+1 per create: 102 / 204 / 10) and, in the PR's first shape,
+// each dependency add also touched the source's row_lock (+1 per edge: 238 /
+// 476 / 19). Round 5 conformed the PR to main's T4.10 contract (an edge never
+// remints the token), so the edge touches are gone again and only the
+// readbacks remain: 6396+102 = 6498, 12790+204 = 12994, 835+10 = 845,
+// measured 2026-10-22.
 var pinnedEmbeddedStatementCounts = map[string]int64{
-	"356 (mol 1x)":    6396,
-	large712ShapeName: 12790,
-	"40 (classic)":    835,
+	"356 (mol 1x)":    6498,
+	large712ShapeName: 12994,
+	"40 (classic)":    845,
 }
 
 // BenchmarkLargeBatchApply_Embedded benchmarks issueops.ApplyBatchInTx on

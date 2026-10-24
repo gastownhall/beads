@@ -9546,10 +9546,14 @@ components:
             pinned wants `dry_run` first.
 
 
-            IT GUARDS LIFECYCLE STATE, NOT THE GRAPH. The token is reminted by
-            status, assignee and started-at writes and deliberately not by
-            label, dependency or rename writes, so a match does not promise the
-            bead's edges are the ones you saw.
+            IT GUARDS THE NAMED AGGREGATE, NOT ITS TRANSITIVE CLOSURE. The token
+            is reminted by every supported user-authored mutation of the issues
+            row. Dependency edges in either direction (a parent change
+            included) are graph state, not a row write, and derived
+            blocked-state
+            recomputation is cache maintenance: neither remints, so a match
+            does not promise the dependency graph or the cascade closure is
+            unchanged.
 
 
             The token is the `revision` a lifecycle write answers with, and the

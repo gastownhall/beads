@@ -41,6 +41,13 @@ type BatchContext struct {
 	// Singular creates leave this false and mint in place — they never run
 	// the dependency pass.
 	DeferVersionMint bool
+	// SkipRowVersionReadback lets the batch entry point read every issue's
+	// row_lock back in one pass at the end instead of per issue (#5738). The
+	// readback exists because the upsert and multi-row insert paths do not
+	// hand the minted token back (see executeIssueInsert and
+	// insertIssueRowsIntoTable); nothing after the row insert remints it.
+	// Singular creates leave this false and read the token in place.
+	SkipRowVersionReadback bool
 	// cache, when set, answers the per-issue presence/label lookups from one
 	// up-front batch read and buffers the batch's audit events for one
 	// bulk write (see createBatchCache). CreateIssuesInTxWithContext sets it
@@ -271,6 +278,11 @@ func finishCreateIssueInTx(ctx context.Context, tx DBTX, bc *BatchContext, issue
 			return result, err
 		}
 	}
+	if !bc.SkipRowVersionReadback {
+		if err := tx.QueryRowContext(ctx, fmt.Sprintf("SELECT row_lock FROM %s WHERE id = ?", issueTable), issue.ID).Scan(&issue.RowVersion); err != nil {
+			return result, fmt.Errorf("read final row version for %s: %w", issue.ID, err)
+		}
+	}
 	return result, nil
 }
 
@@ -380,8 +392,10 @@ func CreateIssuesInTxWithContext(ctx context.Context, tx DBTX, bc *BatchContext,
 	// The per-issue create leaves the version mint to this function: the
 	// creation-time edges below land after the per-issue loop, and the first
 	// version of each issue must carry them (one version per issue at
-	// creation, minted last).
+	// creation, minted last). The final row_lock readback defers with it, for
+	// the same reason (#5738).
 	batch.DeferVersionMint = true
+	batch.SkipRowVersionReadback = true
 	if len(issues) >= createBatchCacheMinIssues && !createFastPathsDisabled.Load() {
 		cache, err := newCreateBatchCache(ctx, tx, issues)
 		if err != nil {
@@ -498,6 +512,23 @@ func CreateIssuesInTxWithContext(ctx context.Context, tx DBTX, bc *BatchContext,
 		}
 		if err := RecordVersionInTx(ctx, tx, dv.id, actor); err != nil {
 			return CreateIssuesResult{}, err
+		}
+	}
+	// The upsert and multi-row insert paths do not hand the minted token back
+	// (executeIssueInsert / insertIssueRowsIntoTable), so read it here. Nothing
+	// after the row insert remints it: creation-time labels and comments write
+	// their rows directly and dependency edges never touch row_lock (T4.10).
+	// Return the stored token on each caller-owned Issue so an immediate
+	// guarded mutation does not start stale (#5738; the per-issue readback was
+	// skipped by SkipRowVersionReadback).
+	for _, issue := range accepted {
+		if issue == nil {
+			continue
+		}
+		table, _ := TableRouting(issue)
+		//nolint:gosec // G201: table comes from TableRouting.
+		if err := tx.QueryRowContext(ctx, fmt.Sprintf("SELECT row_lock FROM %s WHERE id = ?", table), issue.ID).Scan(&issue.RowVersion); err != nil {
+			return CreateIssuesResult{}, fmt.Errorf("read final row version for %s: %w", issue.ID, err)
 		}
 	}
 	return result, nil

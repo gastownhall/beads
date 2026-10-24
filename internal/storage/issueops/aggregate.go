@@ -444,16 +444,23 @@ func applyLabelPatch(ctx context.Context, tx DBTX, current *types.Issue, patch p
 	// and is versioned once below, after the last row, so the version carries
 	// the complete post-patch set rather than one row per label.
 	for _, label := range stringSetDifference(existing, target) {
-		if err := removeLabelInTx(ctx, sqlTx, "", "", current.ID, label, actor, false); err != nil {
+		if _, err := removeLabelInTx(ctx, sqlTx, "", "", current.ID, label, actor, false); err != nil {
 			return false, err
 		}
 	}
 	for _, label := range stringSetDifference(target, existing) {
-		if err := addLabelInTx(ctx, sqlTx, "", "", current.ID, label, actor, false); err != nil {
+		if _, err := addLabelInTx(ctx, sqlTx, "", "", current.ID, label, actor, false); err != nil {
 			return false, err
 		}
 	}
 	if mintVersion {
+		// One touch and one version row for the whole patch, after the last
+		// label row, so the version carries the complete post-patch set and
+		// the aggregate row_lock advances exactly once (#5738).
+		table, _ := TableRouting(current)
+		if err := TouchRowVersionInTx(ctx, tx, table, current.ID); err != nil {
+			return false, err
+		}
 		if err := RecordVersionInTx(ctx, tx, current.ID, actor); err != nil {
 			return false, err
 		}
@@ -507,16 +514,20 @@ func applyParentPatch(ctx context.Context, tx DBTX, current *types.Issue, parent
 	// child's edge set and is versioned once below, after the last edge.
 	var recomputed RecomputeIsBlockedResult
 	for _, parentID := range stringSetDifference(existing, target) {
-		if _, err := removeDependencyInTx(ctx, sqlTx, current.ID, parentID, actor, false, &recomputed, false); err != nil {
+		if _, err := removeDependencyInTx(ctx, sqlTx, current.ID, parentID, actor, false, &recomputed, false, nil); err != nil {
 			return ParentPatchResult{}, err
 		}
 	}
 	for _, parentID := range stringSetDifference(target, existing) {
-		if _, err := addDependencyInTx(ctx, sqlTx, &types.Dependency{IssueID: current.ID, DependsOnID: parentID, Type: types.DepParentChild}, actor, AddDependencyOpts{}, &recomputed, false); err != nil {
+		if _, err := addDependencyInTx(ctx, sqlTx, &types.Dependency{IssueID: current.ID, DependsOnID: parentID, Type: types.DepParentChild}, actor, AddDependencyOpts{}, &recomputed, false, nil); err != nil {
 			return ParentPatchResult{}, err
 		}
 	}
 	if mintVersion {
+		// A parent change is a parent-child dependency edge: graph state, not
+		// an issues-row write, so the child's row_lock token is deliberately
+		// NOT reminted (T4.10). The version row is still minted once here so
+		// it carries the complete post-patch edge set.
 		if err := RecordVersionInTx(ctx, tx, current.ID, actor); err != nil {
 			return ParentPatchResult{}, err
 		}

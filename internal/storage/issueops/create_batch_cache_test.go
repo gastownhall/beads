@@ -190,7 +190,7 @@ func TestInsertIssueRowsReplaysAFailedStatement(t *testing.T) {
 
 // issueRowArgMatchers matches one single-row issue INSERT whose id is id.
 func issueRowArgMatchers(id string) []driver.Value {
-	args := make([]driver.Value, len(issueInsertArgs(&types.Issue{})))
+	args := make([]driver.Value, len(issueInsertArgs(&types.Issue{}, freshRowLock())))
 	for i := range args {
 		args[i] = sqlmock.AnyArg()
 	}

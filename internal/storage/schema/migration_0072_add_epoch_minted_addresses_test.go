@@ -18,10 +18,12 @@ import (
 // migration including this one, by TestBundleMigrationsWithPreparedALTERAreOverriddenOrJustified
 // and TestAllMigrationsSQLUsesDirectDDLForKnownCLIIncompatibilities).
 
-// TestLatestVersionIncludesMigration0072 pins the real next free slot this
-// phase claims, superseding 0071's own version of this test
-// (migration_0071_add_removed_restriction_test.go; only one such pin lives at
-// a time, the same way 0071's superseded 0070's).
+// TestLatestVersionIncludesMigration0072 (pinning LatestVersion() == 72) is
+// superseded by TestLatestVersionIncludesMigration0073
+// (migration_0073_backfill_aggregate_row_lock_test.go) now that 0073 claims
+// the next free slot -- only one such pin lives at a time, matching how this
+// test's own pin superseded 0071's. The renumber history below is kept
+// because it explains why THIS migration is 0072.
 //
 // This slice originally claimed 0069 too. It was renumbered because
 // R7.1's removed_restriction migration -- a PARALLEL SIBLING of this branch,
@@ -37,17 +39,6 @@ import (
 // version number panic checkNoDuplicateVersions at store open, before any
 // command's RunE, which bricks every bd invocation rather than merely
 // reddening a package -- see the same hazard on #6358 vs #6008.
-//
-// Deliberately a hardcoded literal for the same reason 0070's and 0071's
-// were: LatestVersion() drifting to 72 for the wrong reason (an unrelated
-// migration landing first) should still be caught by this test failing to
-// explain why 72 is epoch-minted-addresses-shaped.
-func TestLatestVersionIncludesMigration0072(t *testing.T) {
-	const want = 72
-	if got := LatestVersion(); got != want {
-		t.Fatalf("LatestVersion() = %d, want %d (epoch_minted_addresses migration slot claimed by gastownhall/beads#6664)", got, want)
-	}
-}
 
 const migration0072Up = "0072_add_epoch_minted_addresses.up.sql"
 const migration0072Down = "0072_add_epoch_minted_addresses.down.sql"
