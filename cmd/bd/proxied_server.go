@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/dolthub/dolt/go/libraries/doltcore/servercfg"
 	"github.com/dolthub/dolt/go/libraries/utils/filesys"
@@ -520,4 +521,24 @@ func proxiedServerCommitter() (string, string) {
 		}
 	}
 	return name, email
+}
+
+// validateEphemeralIdleTimeout rejects the combination of an ephemeral root
+// and an explicit --proxied-server-idle-timeout of 0 or negative: with
+// BEADS_EPHEMERAL_ROOT=1 the proxy must be able to idle-exit on its own, but
+// an explicit 0 means "never", and a negative value is rejected for the same
+// reason it always is — both are the flag asking for the opposite of what the
+// env var requires. Neither signal should be silently overridden by the
+// other, so this is a hard error naming both.
+//
+// init.go's RunE calls this with the flag's raw parsed value, before it
+// converts an explicit 0 to proxy.IdleTimeoutNever.
+func validateEphemeralIdleTimeout(ephemeralRoot, idleTimeoutSet bool, serverProxyIdleTimeout time.Duration) error {
+	if !ephemeralRoot || !idleTimeoutSet || serverProxyIdleTimeout > 0 {
+		return nil
+	}
+	return fmt.Errorf("BEADS_EPHEMERAL_ROOT=1 conflicts with --proxied-server-idle-timeout=%s: "+
+		"an ephemeral root needs the proxy able to idle-exit on its own, but that flag explicitly "+
+		"disables idle shutdown; omit --proxied-server-idle-timeout to keep the built-in idle "+
+		"default, or pass a positive duration", serverProxyIdleTimeout)
 }

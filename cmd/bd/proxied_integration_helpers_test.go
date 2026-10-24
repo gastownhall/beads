@@ -382,7 +382,7 @@ type proxiedProject struct {
 
 func bdProxiedInitWithHooks(t *testing.T, bd, prefix string, hooks map[string]string, extraInitArgs ...string) proxiedProject {
 	t.Helper()
-	p := bdProxiedInitInternal(t, bd, prefix, false, extraInitArgs...)
+	p := bdProxiedInitInternal(t, bd, prefix, false, nil, extraInitArgs...)
 	hooksDir := filepath.Join(p.beadsDir, "hooks")
 	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
 		t.Fatalf("mkdir hooks dir: %v", err)
@@ -398,10 +398,18 @@ func bdProxiedInitWithHooks(t *testing.T, bd, prefix string, hooks map[string]st
 
 func bdProxiedInit(t *testing.T, bd, prefix string, extraInitArgs ...string) proxiedProject {
 	t.Helper()
-	return bdProxiedInitInternal(t, bd, prefix, true, extraInitArgs...)
+	return bdProxiedInitInternal(t, bd, prefix, true, nil, extraInitArgs...)
 }
 
-func bdProxiedInitInternal(t *testing.T, bd, prefix string, skipHooks bool, extraInitArgs ...string) proxiedProject {
+// bdProxiedInitWithEnv is bdProxiedInit with extraEnv (KEY=VALUE entries)
+// appended to the init subprocess's environment. bdProxiedEnv drops every
+// inherited BEADS_* variable, so t.Setenv cannot reach init; pass it here.
+func bdProxiedInitWithEnv(t *testing.T, bd, prefix string, extraEnv []string, extraInitArgs ...string) proxiedProject {
+	t.Helper()
+	return bdProxiedInitInternal(t, bd, prefix, true, extraEnv, extraInitArgs...)
+}
+
+func bdProxiedInitInternal(t *testing.T, bd, prefix string, skipHooks bool, extraEnv []string, extraInitArgs ...string) proxiedProject {
 	t.Helper()
 
 	dir := t.TempDir()
@@ -430,7 +438,7 @@ func bdProxiedInitInternal(t *testing.T, bd, prefix string, skipHooks bool, extr
 
 	cmd := exec.Command(bd, args...)
 	cmd.Dir = dir
-	cmd.Env = bdProxiedEnv(dir)
+	cmd.Env = append(bdProxiedEnv(dir), extraEnv...)
 	stdout, stderr, err := runCommandBuffers(t, cmd)
 	if err != nil {
 		t.Fatalf("bd init --proxied-server failed: %v\nstdout:\n%s\nstderr:\n%s",
