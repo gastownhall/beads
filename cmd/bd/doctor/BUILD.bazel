@@ -106,6 +106,7 @@ go_test(
         "dolt_e2e_test.go",
         "dolt_phantom_test.go",
         "dolt_test.go",
+        "federation_probe_test.go",
         "federation_test.go",
         "fix_gate_assess_dolt_test.go",
         "fix_gate_assess_test.go",
