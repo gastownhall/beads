@@ -2093,6 +2093,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   id over http. The miss is now `not found: issue <id>`, wrapping
   `storage.ErrNotFound` exactly as `issueops.GetIssueInTx` does; the empty
   id never dials.
+- **`bd create --graph` no longer records a closed or in-progress node as
+  closed or started before it was created.** Each node's `closed_at` or
+  `started_at` was stamped while the plan was built, but `created_at` was
+  left for the insert to fill later, so on any load that crossed a second
+  boundary the stored `closed_at`/`started_at` predated `created_at`. The
+  node now takes `created_at` from the same instant (#7519).
+
 - **`bd list`, `bd children`, `bd show --json` counts, the default `bd dep
   tree`, `bd ready --claim` and `bd close` work on an http workspace.** The
   external-dependency decorator rebuilt its views from storage seams the
