@@ -16,11 +16,10 @@ the step's outputs. -CacheDir holds
                        x86_64\setup.zst.sig, and the package archives.
 
 setup runs with -L (install from the local package directory, no network).
-It reads setup.zst, which shadows any setup.ini beside it, and verifies it
-against setup.zst.sig with the key built into setup; it skips that check when
-no .sig file exists, which is why Get-SignedPackageTree insists on one. setup
-then checks every package archive against setup.zst's SHA-512 before it
-installs anything.
+Get-SignedPackageTree first makes sure the only index setup can read is
+setup.zst, which setup verifies against setup.zst.sig with the key built into
+it; setup then checks every package archive against setup.zst's SHA-512
+before it installs anything.
 
 Seed (main.yml's windows-make-shell-toolchains, on a cache miss) builds
 -CacheDir from cygwin-install-action's online install: -SetupExe is the
@@ -70,19 +69,47 @@ function Assert-CygwinSetup {
     }
 }
 
-# Returns the x86_64 directory of the only mirror under $PackageRoot, after
-# checking that it holds setup.zst together with its signature.
+# What setup trusts in a local package tree (-L -l <dir>), from its source: it
+# reads <dir>\setup.rc first, whose extrakeys entry adds keys it accepts index
+# signatures from; it takes the index from <dir>\x86_64 if that directory
+# exists, else from <dir>\<mirror>\x86_64; there it reads the first non-empty
+# file of setup.zst, setup.xz, setup.bz2 and setup.ini; and in local mode it
+# installs from an index that has no .sig file without verifying it. So a
+# cache is used only if its package root holds one mirror directory (not named
+# x86_64) and nothing else, and that mirror's index directory holds no setup.*
+# file but a non-empty setup.zst and its non-empty signature. -Force: setup
+# sees hidden files too.
+$SignedIndexFiles = @('setup.zst', 'setup.zst.sig')
+
+# Returns the index directory of the only mirror under $PackageRoot after
+# checking it, or throws.
 function Get-SignedPackageTree {
     param([Parameter(Mandatory)][string] $PackageRoot)
 
-    $mirrors = @(Get-ChildItem -LiteralPath $PackageRoot -Directory)
+    $rootFiles = @(Get-ChildItem -LiteralPath $PackageRoot -File -Force)
+    if ($rootFiles.Count -ne 0) {
+        throw "$PackageRoot holds $($rootFiles.Name -join ', ') beside its mirror directory; setup reads setup.rc from there, so nothing else may be there"
+    }
+    $mirrors = @(Get-ChildItem -LiteralPath $PackageRoot -Directory -Force)
     if ($mirrors.Count -ne 1) {
         throw "$PackageRoot holds $($mirrors.Count) mirror directories, want exactly 1"
     }
+    if ($mirrors[0].Name -eq 'x86_64') {
+        throw "$PackageRoot's mirror directory is named $($mirrors[0].Name), which setup would read as its index directory"
+    }
     $arch = Join-Path $mirrors[0].FullName 'x86_64'
-    foreach ($name in 'setup.zst', 'setup.zst.sig') {
-        if (-not (Test-Path -LiteralPath (Join-Path $arch $name) -PathType Leaf)) {
-            throw "$arch has no ${name}, so setup would install from unverified package metadata"
+    if (-not (Test-Path -LiteralPath $arch -PathType Container)) {
+        throw "$($mirrors[0].FullName) has no x86_64 index directory"
+    }
+    $indexFiles = @(Get-ChildItem -LiteralPath $arch -File -Force | Where-Object { $_.Name -like 'setup.*' })
+    $unexpected = @($indexFiles | Where-Object { $_.Name -notin $SignedIndexFiles })
+    if ($unexpected.Count -ne 0) {
+        throw "$arch holds $($unexpected.Name -join ', '), which setup could read instead of the signed setup.zst"
+    }
+    foreach ($name in $SignedIndexFiles) {
+        $file = @($indexFiles | Where-Object { $_.Name -eq $name })
+        if ($file.Count -ne 1 -or $file[0].Length -eq 0) {
+            throw "$arch must hold exactly one non-empty $name (it holds $($file.Count)), or setup would not verify the package index"
         }
     }
     return $arch
@@ -142,7 +169,7 @@ function Save-PackageCache {
     # setup names a mirror's directory after its escaped URL.
     $mirror = [Uri]::UnescapeDataString($mirrors[0].Name).TrimEnd('/')
     $arch = Join-Path (Join-Path $packageRoot $mirrors[0].Name) 'x86_64'
-    foreach ($name in 'setup.zst', 'setup.zst.sig') {
+    foreach ($name in $SignedIndexFiles) {
         Invoke-DownloadWithRetry -Uri "$mirror/x86_64/$name" -OutFile (Join-Path $arch $name)
     }
     Remove-Item -LiteralPath (Join-Path $arch 'setup.ini') -Force -ErrorAction SilentlyContinue

@@ -186,8 +186,8 @@ func assertWindowsMakeShellRestore(t *testing.T, step ciWorkflowStep, id, cond, 
 	t.Helper()
 	if step.ID != id || actionFamily(step.Uses) != cacheRestoreActionFamily || step.If != cond ||
 		step.With["path"] != path || step.With["key"] != key || step.With["restore-keys"] != restoreKeys ||
-		step.With["lookup-only"] != "" || step.Env["SEGMENT_DOWNLOAD_TIMEOUT_MINS"] != "2" {
-		t.Errorf("restore step %q = {id:%q uses:%q if:%q with:%v env:%v}, want {id:%q restore, if:%q path:%q key:%q restore-keys:%q, SEGMENT_DOWNLOAD_TIMEOUT_MINS=2}",
+		step.With["lookup-only"] != "" || step.Env["SEGMENT_DOWNLOAD_TIMEOUT_MINS"] != "1" {
+		t.Errorf("restore step %q = {id:%q uses:%q if:%q with:%v env:%v}, want {id:%q restore, if:%q path:%q key:%q restore-keys:%q, SEGMENT_DOWNLOAD_TIMEOUT_MINS=1}",
 			step.Name, step.ID, step.Uses, step.If, step.With, step.Env, id, cond, path, key, restoreKeys)
 	}
 }
@@ -394,6 +394,97 @@ func TestWindowsMakeShellScriptsVerifyWhatTheyRestore(t *testing.T) {
 	}
 }
 
+// cygwinSetupIndexFiles are the package indexes Cygwin's setup reads from a
+// local package tree (-L -l <dir>), in its order of preference (setup's
+// ini.cc). It looks for them in <dir>\x86_64 if that directory exists, else in
+// <dir>\<mirror>\x86_64 (fromcwd.cc); it skips an empty one; in local mode it
+// installs from an index that has no .sig file without verifying it (ini.cc,
+// check_ini_sig); and it reads <dir>\setup.rc before anything else, whose
+// extrakeys entry adds keys it then accepts index signatures from
+// (UserSettings.cc, KeysSetting.cc, crypto.cc).
+var cygwinSetupIndexFiles = []string{"setup.zst", "setup.xz", "setup.bz2", "setup.ini"}
+
+// TestCygwinOfflineLeavesSetupOnlyTheSignedIndex pins cygwin-offline.ps1's
+// package-tree check against what setup reads (cygwinSetupIndexFiles): a
+// restored cache is installed only if setup can read nothing in it but a
+// non-empty setup.zst with a non-empty signature. Otherwise a crafted cache
+// could put an empty setup.zst beside an unsigned setup.ini, an x86_64
+// directory at the root, or a setup.rc with its own key there, and setup would
+// install packages whose hashes nobody signed. A rejected tree fails the
+// offline install, and the job falls back to cygwin-install-action.
+func TestCygwinOfflineLeavesSetupOnlyTheSignedIndex(t *testing.T) {
+	script := readPolicyFile(t, sourceRepoRoot(t), windowsMakeShellScriptDir+"cygwin-offline.ps1")
+	check := powerShellFunctionBody(t, script, "Get-SignedPackageTree")
+
+	// setup lists directories with FindFirstFile, which returns hidden files.
+	for _, call := range regexp.MustCompile(`Get-ChildItem[^\n|)]*`).FindAllString(check, -1) {
+		if !strings.Contains(call, "-Force") {
+			t.Errorf("Get-SignedPackageTree lists %q without -Force; setup sees hidden files too", strings.TrimSpace(call))
+		}
+	}
+	for _, want := range []string{
+		// Nothing at the root but the one mirror directory: no setup.rc, no
+		// second mirror, no x86_64 index directory of its own.
+		"$rootFiles = @(Get-ChildItem -LiteralPath $PackageRoot -File -Force)",
+		"if ($rootFiles.Count -ne 0) {",
+		"$mirrors = @(Get-ChildItem -LiteralPath $PackageRoot -Directory -Force)",
+		"if ($mirrors.Count -ne 1) {",
+		"if ($mirrors[0].Name -eq 'x86_64') {",
+		// In the index directory, setup.* files other than the signed pair
+		// are rejected, and each of the pair is there once and not empty.
+		"Where-Object { $_.Name -like 'setup.*' }",
+		"Where-Object { $_.Name -notin $SignedIndexFiles }",
+		"if ($unexpected.Count -ne 0) {",
+		"if ($file.Count -ne 1 -or $file[0].Length -eq 0) {",
+	} {
+		if !strings.Contains(check, want) {
+			t.Errorf("Get-SignedPackageTree is missing %q", want)
+		}
+	}
+
+	m := regexp.MustCompile(`(?m)^\$SignedIndexFiles = @\(([^)\n]*)\)$`).FindStringSubmatch(script)
+	if m == nil {
+		t.Fatal("cygwin-offline.ps1 declares no $SignedIndexFiles = @(...)")
+	}
+	var allowed []string
+	for _, q := range regexp.MustCompile(`'([^']*)'`).FindAllStringSubmatch(m[1], -1) {
+		allowed = append(allowed, q[1])
+	}
+	if !equalStrings(allowed, []string{"setup.zst", "setup.zst.sig"}) {
+		t.Errorf("$SignedIndexFiles = %q, want exactly setup.zst and its signature", allowed)
+	}
+	for _, index := range cygwinSetupIndexFiles {
+		if !strings.HasPrefix(index, "setup.") {
+			t.Errorf("index %q escapes the check's setup.* filter", index)
+		}
+		if index != "setup.zst" && contains(allowed, index) {
+			t.Errorf("$SignedIndexFiles allows %s, an index setup reads without a signature check of its own", index)
+		}
+	}
+
+	install := powerShellFunctionBody(t, script, "Install-FromCache")
+	checkAt, setupAt := strings.Index(install, "Get-SignedPackageTree -PackageRoot $packageRoot"), strings.Index(install, "& $setup @(")
+	if checkAt < 0 || setupAt < 0 || checkAt > setupAt {
+		t.Errorf("Install-FromCache must run Get-SignedPackageTree (at %d) before setup (at %d)", checkAt, setupAt)
+	}
+}
+
+// powerShellFunctionBody returns the body of a top-level `function name {`
+// whose closing brace is the first `}` at the start of a line after it.
+func powerShellFunctionBody(t *testing.T, script, name string) string {
+	t.Helper()
+	start := strings.Index(script, "\nfunction "+name+" {\n")
+	if start < 0 {
+		t.Fatalf("no top-level function %s", name)
+	}
+	body := script[start+len("\nfunction "+name+" {\n"):]
+	end := strings.Index(body, "\n}\n")
+	if end < 0 {
+		t.Fatalf("function %s has no closing brace at the start of a line", name)
+	}
+	return body[:end]
+}
+
 // windowsMakeShellRetry is one retried network fallback: the attempts and
 // the per-attempt bound the script declares, the backoff between attempts,
 // and an allowance for the rest of the step. The step's timeout-minutes must
@@ -455,7 +546,33 @@ func TestWindowsMakeShellNetworkFallbacksAreBoundedAndRetried(t *testing.T) {
 			}
 		}
 	}
-	if pr.TimeoutMinutes != 30 {
-		t.Errorf("%s timeout-minutes = %d, want 30", windowsMakeShellJob, pr.TimeoutMinutes)
+
+	// Every capped step can run to its cap in one job (each leg's fallback
+	// fails on its own), so the job cap must hold all of them plus the
+	// uncapped steps, or the job is cancelled mid-leg and the later legs'
+	// exercises never run. The uncapped steps (checkout, diagnostics, cache
+	// keys, cache lookups and saves, and the exercises, about 30 s in all)
+	// get windowsMakeShellUncappedMinutes; a cache restore gives up on a
+	// stalled download after SEGMENT_DOWNLOAD_TIMEOUT_MINS (1 minute each).
+	for _, j := range []struct {
+		name string
+		job  ciWorkflowJob
+	}{{windowsMakeShellJob, pr}, {windowsMakeShellSaverJob, saver}} {
+		capped := 0
+		for _, step := range j.job.Steps {
+			capped += step.TimeoutMinutes
+		}
+		if capped+windowsMakeShellUncappedMinutes >= j.job.TimeoutMinutes {
+			t.Errorf("%s step caps sum to %d min; with %d min for the uncapped steps that is not below the job's timeout-minutes %d",
+				j.name, capped, windowsMakeShellUncappedMinutes, j.job.TimeoutMinutes)
+		}
+		if j.job.TimeoutMinutes != windowsMakeShellJobTimeoutMinutes {
+			t.Errorf("%s timeout-minutes = %d, want %d", j.name, j.job.TimeoutMinutes, windowsMakeShellJobTimeoutMinutes)
+		}
 	}
 }
+
+const (
+	windowsMakeShellUncappedMinutes   = 5
+	windowsMakeShellJobTimeoutMinutes = 40
+)

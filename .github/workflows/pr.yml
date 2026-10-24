@@ -917,7 +917,10 @@ jobs:
     needs: scope
     if: ${{ needs.scope.outputs.platforms == 'true' }}
     runs-on: ${{ 'blacksmith-4vcpu-windows-2025' }}
-    timeout-minutes: 30
+    # Above the step caps' sum (34) plus 5 minutes for the uncapped steps, so
+    # a fallback that runs to its cap fails its own step and the later legs
+    # still run (TestWindowsMakeShellNetworkFallbacksAreBoundedAndRetried).
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
@@ -936,13 +939,13 @@ jobs:
         run: ./scripts/ci/windows-make-shell/cache-keys.ps1
 
       # Restore-only, like every restore here: main.yml's saver writes it. A
-      # stalled cache download is abandoned after 2 minutes as a miss.
+      # stalled cache download is abandoned after a minute as a miss.
       - name: Restore cached native GNU Make
         id: native-make-cache
         if: ${{ !cancelled() }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         env:
-          SEGMENT_DOWNLOAD_TIMEOUT_MINS: "2"
+          SEGMENT_DOWNLOAD_TIMEOUT_MINS: "1"
         with:
           path: ${{ runner.temp }}/make-shell/native
           key: beads-make-shell-native-v1-${{ runner.os }}-${{ runner.arch }}-make-4.4.1-cc6dc291113d
@@ -979,7 +982,7 @@ jobs:
         if: ${{ !cancelled() && steps.toolchain-keys.outputs.msys2-sync-db != '' }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         env:
-          SEGMENT_DOWNLOAD_TIMEOUT_MINS: "2"
+          SEGMENT_DOWNLOAD_TIMEOUT_MINS: "1"
         with:
           path: ${{ runner.temp }}/make-shell/msys2
           key: beads-make-shell-msys2-v1-${{ runner.os }}-${{ runner.arch }}-git-make-${{ steps.toolchain-keys.outputs.msys2-sync-db }}
@@ -1003,7 +1006,7 @@ jobs:
         if: ${{ !cancelled() }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         env:
-          SEGMENT_DOWNLOAD_TIMEOUT_MINS: "2"
+          SEGMENT_DOWNLOAD_TIMEOUT_MINS: "1"
         with:
           path: ${{ runner.temp }}/make-shell/cygwin
           key: beads-make-shell-cygwin-v1-${{ runner.os }}-${{ runner.arch }}-git-make-${{ steps.toolchain-keys.outputs.month }}
