@@ -520,6 +520,19 @@ func isPathInSafeBoundary(path string) bool {
 		return resolvedPathWithinRoot(absPath, "/var/tmp")
 	}
 
+	// Non-root Unix service accounts commonly use a home below /var/lib
+	// (for example, /var/lib/my-service). Treat the home reported by os/user
+	// like an ordinary user home before the broad /var deny rule below.
+	// CGO Unix builds consult the account database; pure-Go os/user builds
+	// may use HOME and USER. This check does not assert filesystem ownership.
+	// Keep the exception narrow: /var/lib itself is never a home boundary, root
+	// never receives the exception, and both the configured home and requested
+	// path must remain below /var/lib after symlink resolution.
+	if u, err := user.Current(); err == nil &&
+		pathWithinNonRootHome(absPath, u.Uid, u.HomeDir, "/var/lib") {
+		return true
+	}
+
 	for _, prefix := range unsafePrefixes {
 		if strings.HasPrefix(absPath, prefix+"/") || absPath == prefix {
 			return false
@@ -539,11 +552,9 @@ func isPathInSafeBoundary(path string) bool {
 
 	// Also reject other users' home directories.
 	if strings.HasPrefix(absPath, "/Users/") || strings.HasPrefix(absPath, "/home/") || strings.HasPrefix(absPath, "/var/home/") {
-		// Resolve the current user's home from the account database, which is
-		// not affected by $HOME manipulation. Fall back to $HOME when that
-		// lookup is unavailable (e.g. CGO-free builds where the user is not in
-		// /etc/passwd); leaving homeDir empty here would skip the check and
-		// fail open, which is worse than trusting $HOME.
+		// Ask os/user for the current home. CGO Unix builds consult the
+		// account database; pure-Go builds may use HOME and USER. Fall back
+		// to os.UserHomeDir when unavailable rather than skipping the check.
 		homeDir := ""
 		if u, err := user.Current(); err == nil {
 			homeDir = u.HomeDir
@@ -561,6 +572,32 @@ func isPathInSafeBoundary(path string) bool {
 		}
 	}
 	return true
+}
+
+func pathWithinNonRootHome(absPath, uid, homeDir, root string) bool {
+	if uid == "" || uid == "0" || homeDir == "" {
+		return false
+	}
+
+	inside := func(path, root string) bool {
+		return path == root || strings.HasPrefix(path, root+string(filepath.Separator))
+	}
+
+	root = filepath.Clean(root)
+	home, err := filepath.Abs(homeDir)
+	if err != nil || home == root || !inside(home, root) {
+		return false
+	}
+	physicalRoot := resolveLongestExistingAncestor(root)
+	physicalHome := resolveLongestExistingAncestor(home)
+	if physicalHome == physicalRoot || !inside(physicalHome, physicalRoot) {
+		return false
+	}
+
+	if !inside(absPath, home) && !inside(absPath, physicalHome) {
+		return false
+	}
+	return resolvedPathWithinRoot(absPath, home)
 }
 
 // resolveLongestExistingAncestor canonicalizes path by resolving symlinks on its
