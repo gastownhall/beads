@@ -1036,7 +1036,7 @@ jobs:
         # regression still fails loudly, while a flaky download only skips
         # the leg with a warning. Review SF-2 (2026-10-03): a 10-minute step
         # timeout caps how long a hung download can block the exercise steps
-        # behind it, instead of consuming the whole 30-minute job timeout.
+        # behind it, instead of consuming the whole 40-minute job timeout.
         continue-on-error: true
         timeout-minutes: 10
         uses: cygwin/cygwin-install-action@3f0a3f9f988f7e96b8c18098ae05eaec175f5b52 # v6

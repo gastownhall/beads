@@ -16,8 +16,14 @@
 # partial upgrade. Then
 #   1. pacman -Sw downloads only what the cache directory lacks: up to
 #      $attempts attempts of at most $attempt_seconds each, backing off
-#      between them (nothing to do on a full cache hit);
-#   2. pacman -S installs from the cache directory alone.
+#      between them (nothing to do on a full cache hit). It runs without
+#      --needed, which would skip a PACKAGE the image already has installed
+#      and leave the saver an empty cache to store as this sync database's
+#      exact hit;
+#   2. every file that transaction resolves to must then be in the cache
+#      directory and not empty: the saver's proof that the cache holds the
+#      packages, which pacman -Q cannot give when the image has them;
+#   3. pacman -S installs from the cache directory alone.
 # pacman checks each package's signature against the image's keyring before
 # it installs it. The cache directory may come from actions/cache, so the
 # guard below fails unless pacman.conf makes that check mandatory.
@@ -60,7 +66,7 @@ cached="$(count_packages)"
 
 for ((attempt = 1; ; attempt++)); do
     if timeout --kill-after=10 "$attempt_seconds" \
-        pacman --noconfirm --noprogressbar -Sw --needed --cachedir "$cache_dir" "$@"; then
+        pacman --noconfirm --noprogressbar -Sw --cachedir "$cache_dir" "$@"; then
         break
     fi
     # A killed pacman leaves its lock behind; no other pacman runs in this job.
@@ -81,6 +87,20 @@ echo "MSYS2 packages: $cached in the cache before, $downloaded downloaded."
 if [[ "${MSYS2_PACKAGE_CACHE_HIT:-}" == true ]] && ((downloaded > 0)); then
     echo "::warning title=MSYS2 packages::The main-saved cache matched this image's sync database exactly but lacked $downloaded package file(s)."
 fi
+
+# Resolved before the install: afterwards the dependencies it installs are
+# satisfied and drop out of the transaction.
+package_files="$(pacman -Sp --print-format '%f' "$@")"
+if [[ -z "$package_files" ]]; then
+    echo "::error title=MSYS2 packages::pacman resolved no package files for $*."
+    exit 1
+fi
+while IFS= read -r file; do
+    if [[ ! -s "$cache_dir/$file" ]]; then
+        echo "::error title=MSYS2 packages::The package cache has no $file after the download; refusing to install from it."
+        exit 1
+    fi
+done <<<"$package_files"
 
 pacman --noconfirm --noprogressbar -S --needed --overwrite '*' --cachedir "$cache_dir" "$@"
 for package in "$@"; do

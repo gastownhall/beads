@@ -1758,7 +1758,8 @@ macOS jobs; `release.yml` stays on `macos-latest`.
 - **Toolchains.** `windows-make-shell` installs nothing from the network on
   the common path (`scripts/ci/windows-make-shell/`): native GNU Make is the
   image's MinGW-w64 `mingw32-make.exe` 4.4.1, else Chocolatey's make 4.4.1
-  binary from a cache (SHA-256 pinned), else `choco install` with retries;
+  binary from a cache, else `choco install` with retries, either one only
+  with its pinned SHA-256;
   MSYS2 is the image's `C:\msys64`, with `git` and `make` installed from
   cached, signature-checked package files resolved against the image's own
   sync database; Cygwin installs offline from a cached package tree (signed
@@ -1767,7 +1768,8 @@ macOS jobs; `release.yml` stays on `macos-latest`.
   is the only writer of those caches: same label, push-to-main-only guard,
   keys that change only with the pinned binary, the image's MSYS2 sync
   database and the UTC month, and a save only after its seed step proved
-  the content installs.
+  the cache holds what an install needs (for MSYS2, every package file the
+  install resolves to, even one the image already has installed).
 - **Pins.** `TestBlacksmithWindowsMacOSRunsOnEveryEvent`,
   `TestBlacksmithMacOSSaverMatchesPRLegs`,
   `TestWindowsMakeShellToolchainSaverMatchesPRJob`,

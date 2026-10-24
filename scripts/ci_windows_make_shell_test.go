@@ -162,6 +162,18 @@ func TestWindowsMakeShellProvisionsWithoutNetworkInstalls(t *testing.T) {
 		online.With["packages"] != "git make" || online.With["add-to-path"] != "false" {
 		t.Errorf("Cygwin online setup step id=%q uses=%q if=%q with=%v", online.ID, online.Uses, online.If, online.With)
 	}
+	// The offline install takes its packages from the script, the online one
+	// from the action's input. Once main's cache is warm every PR installs
+	// offline, with no fallback in the exercise, so the script and the cache
+	// key that names the packages must list the input's packages.
+	packages := strings.Fields(online.With["packages"])
+	cygwinOffline := readPolicyFile(t, sourceRepoRoot(t), windowsMakeShellScriptDir+"cygwin-offline.ps1")
+	if want := "\n$Packages = '" + strings.Join(packages, ",") + "'\n"; !strings.Contains(cygwinOffline, want) {
+		t.Errorf("cygwin-offline.ps1 does not declare %s, the online setup's packages %q", strings.TrimSpace(want), online.With["packages"])
+	}
+	if !strings.HasSuffix(cygwinCachePrefix, "-"+strings.Join(packages, "-")+"-") {
+		t.Errorf("Cygwin cache key prefix %q does not name the online setup's packages %q", cygwinCachePrefix, online.With["packages"])
+	}
 	if warn := pr.step(t, "Warn when Cygwin setup was skipped by a download failure"); warn.If != "${{ !cancelled() && steps.cygwin.outcome == 'failure' }}" {
 		t.Errorf("Cygwin warning if = %q", warn.If)
 	}
@@ -335,23 +347,52 @@ func TestWindowsMakeShellToolchainSaverMatchesPRJob(t *testing.T) {
 // TestWindowsMakeShellScriptsVerifyWhatTheyRestore pins the checks that make
 // a restored cache safe to execute and keep MSYS2 consistent with the
 // image: pacman's signature check (enforced, never weakened), no database
-// refresh, the native binary's pinned SHA-256, and Cygwin setup's signed
-// setup.zst plus Authenticode on setup itself.
+// refresh, an MSYS2 cache that holds every package file the install
+// resolves to, the pinned SHA-256 on every native binary that is not the
+// image's own, and Cygwin setup's signed setup.zst plus Authenticode on
+// setup itself.
 func TestWindowsMakeShellScriptsVerifyWhatTheyRestore(t *testing.T) {
 	root := sourceRepoRoot(t)
 	read := func(name string) string { return readPolicyFile(t, root, windowsMakeShellScriptDir+name) }
 
 	msys2 := read("msys2-packages.sh")
+	const (
+		msys2Download = `pacman --noconfirm --noprogressbar -Sw --cachedir "$cache_dir" "$@"`
+		msys2Resolve  = `package_files="$(pacman -Sp --print-format '%f' "$@")"`
+		msys2Install  = `pacman --noconfirm --noprogressbar -S --needed --overwrite '*' --cachedir "$cache_dir" "$@"`
+	)
 	for _, want := range []string{
 		`pacman-conf --repo=msys SigLevel`,
 		`grep -qx PackageRequired`,
 		`grep -qx PackageTrustedOnly`,
-		`pacman --noconfirm --noprogressbar -Sw --needed --cachedir "$cache_dir" "$@"`,
-		`pacman --noconfirm --noprogressbar -S --needed --overwrite '*' --cachedir "$cache_dir" "$@"`,
+		msys2Download,
+		msys2Resolve,
+		`if [[ -z "$package_files" ]]; then`,
+		`if [[ ! -s "$cache_dir/$file" ]]; then`,
+		msys2Install,
 	} {
 		if !strings.Contains(msys2, want) {
 			t.Errorf("msys2-packages.sh is missing %q", want)
 		}
+	}
+	// The saver stores the cache directory as the exact hit for the image's
+	// sync database, and pacman -Q passes whenever the image already has a
+	// package. So the download fetches the targets even when they are
+	// installed (--needed would skip them; pacman already skips files the
+	// cache holds), and the cache must hold every file the transaction
+	// resolves to before the install, after which the dependencies it
+	// installed drop out of that transaction.
+	pacmanDownload := regexp.MustCompile(`\bpacman\b.*(\s-S[a-z]*w|--downloadonly)`)
+	for _, line := range strings.Split(msys2, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "#") {
+			continue
+		}
+		if pacmanDownload.MatchString(line) && strings.Contains(line, "--needed") {
+			t.Errorf("msys2-packages.sh downloads with --needed (%q): a package the image has installed never reaches the cache", strings.TrimSpace(line))
+		}
+	}
+	if d, r, i := strings.Index(msys2, msys2Download), strings.Index(msys2, msys2Resolve), strings.Index(msys2, msys2Install); d < 0 || r < d || i < r {
+		t.Errorf("msys2-packages.sh must download (at %d), then check the cache holds every resolved file (at %d), then install (at %d)", d, r, i)
 	}
 	// -y refreshes the image's sync database and -u upgrades its base: both
 	// turn this into a partial upgrade against packages the cache never saw.
@@ -374,6 +415,16 @@ func TestWindowsMakeShellScriptsVerifyWhatTheyRestore(t *testing.T) {
 	image, cache, choco := strings.Index(native, "# Tier 1"), strings.Index(native, "# Tier 2"), strings.Index(native, "# Tier 3")
 	if image < 0 || cache < 0 || choco < 0 || image >= cache || cache >= choco {
 		t.Errorf("native-make.ps1 tiers out of order (image %d, cache %d, chocolatey %d): the image's make comes first and Chocolatey last", image, cache, choco)
+	}
+	// Tier 3 is the only native path that fetches make.exe over the network.
+	// Like tier 2 and Seed, it refuses a binary that is not the pin, and it
+	// does so before its copy check, so Install never adds that binary's
+	// directory to GITHUB_PATH.
+	_, tier3, _ := strings.Cut(powerShellFunctionBody(t, native, "Install-NativeMake"), "# Tier 3")
+	refuse := regexp.MustCompile(`if \(\$hash -ne \$ChocolateyMakeSha256\) \{\s+throw `).FindStringIndex(tier3)
+	copyCheck := strings.Index(tier3, "Test-CopiedNativeMake -Candidate $installed")
+	if refuse == nil || copyCheck < 0 || refuse[0] > copyCheck {
+		t.Errorf("native-make.ps1 tier 3 must throw on a make.exe whose SHA-256 is not %s before Test-CopiedNativeMake (throw at %v, copy check at %d)", chocolateyMake441SHA256, refuse, copyCheck)
 	}
 
 	cygwin := read("cygwin-offline.ps1")

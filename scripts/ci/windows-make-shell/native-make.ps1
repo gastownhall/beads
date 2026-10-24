@@ -17,6 +17,8 @@ prepends that directory to the job's PATH, so the native exercise step's
      used only if its SHA-256 is $ChocolateyMakeSha256. No network.
   3. choco install make --version=4.4.1: up to $ChocolateyAttempts attempts of
      at most $ChocolateyAttemptSeconds seconds each, $BackoffSeconds apart.
+     The make.exe it installs must have SHA-256 $ChocolateyMakeSha256 too, or
+     the leg fails before that binary reaches PATH.
 
 Seed (main.yml's windows-make-shell-toolchains, on a cache miss) downloads
 Chocolatey's make 4.4.1 package, checks its make.exe against the same pin and
@@ -133,7 +135,7 @@ function Install-NativeMake {
     }
     $hash = (Get-FileHash -LiteralPath $installed -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($hash -ne $ChocolateyMakeSha256) {
-        Write-Host "::warning title=Native GNU Make::Chocolatey installed make.exe with SHA-256 $hash, not the pinned $ChocolateyMakeSha256 the main-saved cache holds."
+        throw "Chocolatey installed make.exe with SHA-256 $hash, not the pinned $ChocolateyMakeSha256; not putting it on PATH"
     }
     if (-not (Test-CopiedNativeMake -Candidate $installed -Target $target -Source 'Chocolatey')) {
         throw "Chocolatey's make at $installed is not GNU Make 4.4.1 with a native Windows MAKE_HOST"

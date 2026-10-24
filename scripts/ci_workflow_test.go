@@ -2697,7 +2697,7 @@ func TestPRWindowsMakeShellLegsFailTheJob(t *testing.T) {
 // each leg's provisioning step can still reach the network on its fallback
 // path (Chocolatey, MSYS2's mirrors, cygwin.com); a step timeout bounds how
 // long a hang can block the later legs' exercise steps behind it, instead of
-// consuming the whole 30-minute job timeout (which would also lose the other
+// consuming the whole 40-minute job timeout (which would also lose the other
 // legs' coverage, since their exercise steps would never get a chance to run
 // before the job-level cancel). TestWindowsMakeShellNetworkFallbacksAreBoundedAndRetried
 // checks the retried ones' caps against their own retry budgets.
