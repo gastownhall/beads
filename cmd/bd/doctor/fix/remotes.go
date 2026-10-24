@@ -20,13 +20,18 @@ func openFixDB(beadsDir string, cfg *configfile.Config) (*sql.DB, error) {
 	password := cfg.GetDoltServerPassword()
 	port := doltserver.DefaultConfig(beadsDir).Port
 
+	allowCleartext, err := cfg.GetDoltServerAllowCleartextPasswordChecked()
+	if err != nil {
+		return nil, err
+	}
 	connStr := doltutil.ServerDSN{
-		Host:     host,
-		Port:     port,
-		User:     user,
-		Password: password,
-		Database: database,
-		TLS:      cfg.GetDoltServerTLS(),
+		Host:                    host,
+		Port:                    port,
+		User:                    user,
+		Password:                password,
+		Database:                database,
+		TLS:                     cfg.GetDoltServerTLS(),
+		AllowCleartextPasswords: allowCleartext,
 	}.String()
 	return sql.Open("mysql", connStr)
 }

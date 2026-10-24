@@ -45,24 +45,31 @@ func runCheckHealth(path string) error {
 
 	var issues []string
 
-	dsn := doltutil.ServerDSN{
-		Host:     host,
-		Port:     port,
-		User:     cfg.GetDoltServerUser(),
-		Password: cfg.GetDoltServerPasswordForPort(port),
-		Database: database,
-		Timeout:  2 * time.Second,
-		TLS:      cfg.GetDoltServerTLS(),
-	}.String()
-	db, err := sql.Open("mysql", dsn)
-	if err == nil {
-		defer db.Close()
-		if pingErr := db.Ping(); pingErr == nil {
-			if hintsDisabledDB(db) {
-				return nil
-			}
-			if issue := checkVersionMismatchDB(db); issue != "" {
-				issues = append(issues, issue)
+	// A refused auth config (cleartext without TLS) is treated the same as
+	// any other unreachable-DB case below: this is a best-effort hint check,
+	// not the path that opens the store, so it skips the probe silently
+	// rather than surfacing the refusal text here.
+	if allowCleartext, authErr := cfg.GetDoltServerAllowCleartextPasswordChecked(); authErr == nil {
+		dsn := doltutil.ServerDSN{
+			Host:                    host,
+			Port:                    port,
+			User:                    cfg.GetDoltServerUser(),
+			Password:                cfg.GetDoltServerPasswordForPort(port),
+			Database:                database,
+			Timeout:                 2 * time.Second,
+			TLS:                     cfg.GetDoltServerTLS(),
+			AllowCleartextPasswords: allowCleartext,
+		}.String()
+		db, err := sql.Open("mysql", dsn)
+		if err == nil {
+			defer db.Close()
+			if pingErr := db.Ping(); pingErr == nil {
+				if hintsDisabledDB(db) {
+					return nil
+				}
+				if issue := checkVersionMismatchDB(db); issue != "" {
+					issues = append(issues, issue)
+				}
 			}
 		}
 	}

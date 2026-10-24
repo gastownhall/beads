@@ -27,6 +27,15 @@ type ExternalDoltConfig struct {
 	TLSServerName   string        `json:"tls_server_name,omitempty"`
 	TLSSkipVerify   bool          `json:"tls_skip_verify,omitempty"`
 	KeepAlivePeriod time.Duration `json:"keep_alive_period,omitempty"`
+	// AllowCleartextPassword mirrors dolt_server_allow_cleartext_password for
+	// this external/proxied-server connection: the proxy in front of it is a
+	// byte relay, so a proxy that demands mysql_clear_password (e.g. a
+	// Warpgate MySQL listener) still needs this set on bd's own connection.
+	// Validate refuses it without TLSRequired, same reasoning as
+	// ValidateServerAuthConfig, and also refuses it with TLSRequired &&
+	// TLSSkipVerify: cleartext password over unverified TLS lets an active
+	// man-in-the-middle solicit the password with an auth-switch request.
+	AllowCleartextPassword bool `json:"allow_cleartext_password,omitempty"`
 }
 
 func (c ExternalDoltConfig) ResolvedUser() string {
@@ -92,6 +101,21 @@ func (c ExternalDoltConfig) Validate() error {
 
 	if c.TLSRequired && hasSocket && c.TLSServerName == "" && !c.TLSSkipVerify {
 		return errors.New("ExternalDoltConfig: TLSRequired over Socket needs TLSServerName or TLSSkipVerify")
+	}
+
+	if c.AllowCleartextPassword && !c.TLSRequired {
+		return errors.New(
+			"ExternalDoltConfig: AllowCleartextPassword is set without TLSRequired: " +
+				"refusing to send the MySQL password in the clear over this connection " +
+				"(set TLSRequired or unset AllowCleartextPassword)")
+	}
+
+	if c.AllowCleartextPassword && c.TLSRequired && c.TLSSkipVerify {
+		return errors.New(
+			"ExternalDoltConfig: AllowCleartextPassword is set with TLSRequired and TLSSkipVerify: " +
+				"refusing to send the MySQL password in the clear over an unverified TLS connection, " +
+				"where an active man-in-the-middle could solicit it " +
+				"(unset TLSSkipVerify so the server is verified, or unset AllowCleartextPassword)")
 	}
 
 	if c.KeepAlivePeriod < 0 {
