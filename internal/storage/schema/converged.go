@@ -96,12 +96,12 @@ func alreadyConverged(ctx context.Context, db DBConn, databaseName string, selec
 	// term that MigrateUp acts on but this function does not evaluate is
 	// silently unreachable in server mode — the fast path returns before
 	// MigrateUp ever runs — and the leftover it would have cleaned up is a
-	// deliberately non-ignored table that the next pull's auto-commit puts
-	// into HEAD and push replicates fleet-wide.
+	// scratch table that either keeps the resurrection hazard armed or sits
+	// at HEAD as tracked residue that dolt pull refuses.
 	//
-	// Two SHOW TABLES listings on the hot path, safe to issue because
-	// selectTargetDatabase has put the session on the target (see
-	// readIgnoredCursorState).
+	// Three SHOW TABLES listings on the hot path of a healthy database, safe
+	// to issue because selectTargetDatabase has put the session on the
+	// target (see readIgnoredCursorState).
 	state, err := readIgnoredCursorState(ctx, db, qualifier)
 	if err != nil {
 		return false, err
