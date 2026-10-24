@@ -135,6 +135,11 @@ func translateLegacyEnv() []string {
 // Defaults are merged with the host/process detectors and finally with the
 // FromEnv detector, so OTEL_SERVICE_NAME and OTEL_RESOURCE_ATTRIBUTES can
 // override anything set by the caller.
+//
+// The process detectors are listed one by one rather than through
+// resource.WithProcess, which also exports argv as process.command_args:
+// unbounded (a `bd dep list` over thousands of ids made a 96 KB attribute)
+// and full of untrusted issue titles (mc-vin7r).
 func buildResource(ctx context.Context, serviceName, version string) (*resource.Resource, error) {
 	return resource.New(ctx,
 		resource.WithAttributes(
@@ -142,7 +147,12 @@ func buildResource(ctx context.Context, serviceName, version string) (*resource.
 			semconv.ServiceVersionKey.String(version),
 		),
 		resource.WithHost(),
-		resource.WithProcess(),
+		resource.WithProcessPID(),
+		resource.WithProcessExecutableName(),
+		resource.WithProcessExecutablePath(),
+		resource.WithProcessRuntimeName(),
+		resource.WithProcessRuntimeVersion(),
+		resource.WithProcessRuntimeDescription(),
 		resource.WithFromEnv(),
 	)
 }
