@@ -10,9 +10,10 @@ import (
 )
 
 func TestUserConfigYamlPathNamesNativeEnvironmentSource(t *testing.T) {
-	t.Setenv("HOME", "~")
-	t.Setenv("USERPROFILE", "~")
-	t.Setenv("home", "~")
+	t.Setenv("home", "relative-plan9-home")
+	// HOME and home are the same environment key on Windows.
+	t.Setenv("HOME", "relative-home")
+	t.Setenv("USERPROFILE", "relative-userprofile")
 	t.Setenv("APPDATA", "relative-appdata")
 	for _, xdg := range []string{"relative-xdg", ""} {
 		name := "XDG configured"
@@ -30,6 +31,17 @@ func TestUserConfigYamlPathNamesNativeEnvironmentSource(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			t.Setenv("XDG_CONFIG_HOME", xdg)
+			nativeDir, nativeErr := os.UserConfigDir()
+			if nativeErr == nil {
+				// Check the real resolver, not just another copy of its GOOS table.
+				// The suffix below the environment root is the toolchain's choice.
+				source := nativeUserConfigValidationSource()
+				root := os.Getenv(source)
+				rel, relErr := filepath.Rel(root, nativeDir)
+				if root == "" || relErr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+					t.Fatalf("os.UserConfigDir() = %q, not rooted at reported %s=%q (relative path %q, err=%v)", nativeDir, source, root, rel, relErr)
+				}
+			}
 			path, err := UserConfigYamlPath()
 			if err == nil || path != "" {
 				t.Fatalf("unsafe roots produced path %q, err=%v", path, err)
