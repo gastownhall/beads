@@ -13,11 +13,15 @@ go_library(
 
 go_test(
     name = "routing_test",
-    srcs = ["routing_test.go"],
+    srcs = [
+        "routing_test.go",
+        "testmain_test.go",
+    ],
     embed = [":routing"],
     deps = [
         "//internal/git",
         "//internal/gitenv",
+        "//internal/testutil",
     ],
 )
 

@@ -17,6 +17,14 @@ const suiteRootPrefix = "beads-internal-tests-"
 var suiteTempRoot string
 
 func TestMain(m *testing.M) {
+	// A GIT_DIR/GIT_INDEX_FILE leaked in from the invoking shell or a git hook
+	// would route this suite's fixture git writes into that repository
+	// (gastownhall/beads#7706).
+	if err := testutil.UnsetGitRepoLocationEnv(); err != nil {
+		fmt.Fprintf(os.Stderr, "FATAL: %v\n", err)
+		os.Exit(1)
+	}
+
 	// Clear out the roots of earlier runs of this suite whose process is
 	// gone, before claiming one of our own. A `go test -timeout` panic skips
 	// every cleanup below AND the post-run sweep, so the servers such a run
