@@ -26,7 +26,7 @@ buildGoModule {
   # available.
   postPatch = ''
     goVer="$(go env GOVERSION | sed 's/^go//')"
-    go mod edit -go="$goVer"
+    go mod edit -go="$goVer" -toolchain=none
   '';
 
   env.GOTOOLCHAIN = "local";
