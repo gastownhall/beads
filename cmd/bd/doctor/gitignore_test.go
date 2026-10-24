@@ -369,6 +369,73 @@ daemon.log
 	}
 }
 
+func TestCheckGitignore_UnreadableFileIsNotReportedAsMissing(t *testing.T) {
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.Mkdir(beadsDir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	gitignorePath := filepath.Join(beadsDir, ".gitignore")
+	wantContent := []byte(GitignoreTemplate)
+	if err := os.WriteFile(gitignorePath, wantContent, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(gitignorePath, 0200); err != nil {
+		t.Skipf("cannot create an unreadable-file fixture: %v", err)
+	}
+	defer func() {
+		if err := os.Chmod(gitignorePath, 0600); err != nil {
+			t.Errorf("restore fixture permissions: %v", err)
+		}
+	}()
+
+	// Root and filesystems without POSIX owner-mode enforcement can still read
+	// 0200 files. Skip honestly instead of claiming permission-error coverage.
+	if _, err := os.ReadFile(gitignorePath); err == nil {
+		t.Skip("host does not enforce an unreadable 0200 owner mode")
+	}
+	before, err := os.Stat(gitignorePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	check := CheckGitignore(tmpDir)
+	if check.Status != StatusWarning {
+		t.Fatalf("Status = %q, want %q", check.Status, StatusWarning)
+	}
+	if check.Message != "Unable to inspect .beads/.gitignore" {
+		t.Fatalf("Message = %q, want unreadable-file diagnosis", check.Message)
+	}
+	if strings.Contains(check.Message, "not found") || strings.Contains(check.Fix, "bd doctor --fix") {
+		t.Fatalf("check advertises the missing-file repair: %+v", check)
+	}
+	if !strings.Contains(check.Detail, "Restore owner read access manually") ||
+		!strings.Contains(strings.ToLower(check.Detail), "permission denied") {
+		t.Fatalf("Detail = %q, want the read error and manual recovery guidance", check.Detail)
+	}
+	if check.Fix != "" {
+		t.Fatalf("Fix = %q, want no automatic repair", check.Fix)
+	}
+	after, err := os.Stat(gitignorePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Mode().Perm() != before.Mode().Perm() {
+		t.Fatalf("permissions changed from %04o to %04o", before.Mode().Perm(), after.Mode().Perm())
+	}
+
+	if err := os.Chmod(gitignorePath, 0600); err != nil {
+		t.Fatal(err)
+	}
+	gotContent, err := os.ReadFile(gitignorePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(gotContent, wantContent) {
+		t.Fatal("CheckGitignore changed the unreadable file's bytes")
+	}
+}
+
 func TestEnsureGitignoreForBeadsDir_AppendsMissingRuntimePatterns(t *testing.T) {
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
