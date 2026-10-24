@@ -98,7 +98,7 @@ func RunDoltPerformanceDiagnostics(path string, enableProfiling bool) (*DoltPerf
 
 	// Connect and run diagnostics via server
 	if !serverRunning {
-		addr := doltutil.ServerAddr(host, dsCfg.Port)
+		addr := doltutil.PrintedServerAddr(host, dsCfg.Port)
 		if advice := doltserver.UnreachableEndpointAdvice(beadsDir, host, dsCfg.Port, dsCfg.PortSource); advice != "" {
 			return metrics, fmt.Errorf("dolt sql-server is not running on %s.\n%s", addr, advice)
 		}

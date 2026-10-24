@@ -237,6 +237,7 @@ release_cross_build(
         "//internal/procid:procid",
         "//internal/query:query",
         "//internal/recipes:recipes",
+        "//internal/remedy:remedy",
         "//internal/remotecache:remotecache",
         "//internal/routing:routing",
         "//internal/storage/backendnames:backendnames",

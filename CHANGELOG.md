@@ -862,6 +862,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   wrong server. A padded value counted too. It now fills in only a port that
   no setting names, and is read untrimmed, as for a local server.
   `BEADS_DOLT_SERVER_PORT` still overrides a configured port.
+- bd no longer prints a value a cloned repository can set raw in its
+  remedies, hints, and the error lines printed beside them. These values are
+  the Dolt server's host, socket, user and database in `metadata.json`,
+  `sync.remote`, `dolt.host` and the routing repos in `config.yaml`, a routed
+  planning or target path, an issue's assignee, and the `formula` field of
+  a committed `.beads/formulas` file, which `bd cook --persist` uses as the
+  proto's ID, with the bond point IDs it prints beside it. Before, a carriage
+  return or terminal escape in one of them could erase bd's line and show
+  other text in its place. Such a value is now named escaped (Go-quoted,
+  with each control character spelled as an escape). Every message printed
+  through bd's error printers (`HandleError` and its family, `WarnError`,
+  cobra's `Error:` line) and every `bd doctor` check printed as text is
+  spelled so that a control character in it prints as an escape while bd's
+  own line breaks are kept. Warnings bd writes straight to stderr outside
+  those printers are not all covered. Several remedies also pasted a value
+  unquoted into the command they suggest: `bd bootstrap`'s `git ls-remote`
+  reproduce line, the socket-mode `dolt sql-server --socket` hint,
+  `bd doctor`'s `bd repo add`, `rm -rf`, stale `.legacy` hook `rm` and
+  `git push -u origin` fixes, the unreachable-server `nc`/`curl` check, the
+  `chmod` hints for `.beads`, a credentials file and a directory `bd init`
+  cannot write, `bd mol distill`'s `mkdir -p` hint, the corrupt-journal
+  `mv` recovery hint, the git-tracked secret refusal's `git rm --cached` and
+  `.gitignore` lines, the in-progress refusal's `bd mail <holder>`, the
+  embedded store's `bd federation add-peer` refusal and stored-peer
+  password warning (peer name, username and tier), and the
+  `bd ship`, `bd label add`, `bd mol wisp`, `bd cook --persist`'s
+  `bd mol pour`, `bd vc merge`,
+  `bd dolt remote add` (`bd init` and hooks), `bd dolt push --remote`,
+  `bd backup init` and `bd remember --key` hints. Each now takes the value as
+  one shell word, or, when no quoting passes it on unchanged or it starts
+  with `-`, a placeholder with the value named beside it. On Windows, the
+  GH#2118 cold-start refusal for a ref remote on a Dolt server bd does not
+  own printed `bd sql '<statement>'` in POSIX single quotes, which bd.exe
+  received as eight arguments and refused. It now names the
+  `CALL DOLT_REMOTE(...)` statement to run as `bd sql`'s one argument or in
+  a Dolt SQL shell. All of these go through one printer, `internal/remedy`.
+  An ordinary value and an ordinary message print as before, except that a
+  command now quotes a value it used to paste bare when the value holds
+  anything but ASCII letters, digits and `_ . / : + -`; that `bd doctor`'s
+  `bd repo add` and `bd init --prefix` fixes, the embedded store's
+  `bd federation add-peer` refusal and stored-peer password warning, the
+  reset-data `bd dolt push --force --remote` hint, and the `bd ship` and proxied
+  `bd backup init` hints put the command in backticks rather than single
+  quotes; that a value named with `EscapedValue` where bd used `%q`, such as
+  the repo in `bd doctor`'s `routing.contributor`/`routing.maintainer`
+  message, spells `'`, `"`, `$`, `` ` ``, `%`, `!`, `&`, `|`, `<`, `>`, `^`,
+  `;`, `,`, `=` and curly quotes as escapes (`\x27`), and the command beside
+  it takes a placeholder for a value no quoting passes on unchanged, such as
+  one holding `'` on POSIX; that on Windows a command takes a placeholder
+  for a value holding `"`, `$`, `` ` ``, `%`, `!`, `&`, `|`, `<`, `>`, `^`,
+  `;`, `,`, `=` or a curly double quote, such as each `--var key=value` in
+  the `bd mol wisp` hint, or one that ends in a backslash or holds `\\`,
+  such as a UNC path; and that the `⚠` that starts the
+  `bd init` and `bd bootstrap` missing-database refusals and `bd init`'s
+  already-initialized refusals, and the `bd list` example in the latter, are
+  no longer colored.
+
 
   **Compatibility:** a remote setup that exported `BEADS_DOLT_PORT` to send
   bd away from a pinned port now connects to the pinned port instead, as a

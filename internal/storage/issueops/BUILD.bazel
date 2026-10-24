@@ -115,6 +115,7 @@ go_library(
         "//internal/config",
         "//internal/debug",
         "//internal/idgen",
+        "//internal/remedy",
         "//internal/storage",
         "//internal/storage/dberrors",
         "//internal/storage/depid",

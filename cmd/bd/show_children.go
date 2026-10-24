@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -42,7 +43,7 @@ func showIssueChildren(ctx context.Context, args []string, jsonOut bool, shortMo
 	for _, id := range args {
 		result, err := resolveAndGetIssueWithRouting(ctx, store, id)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", id, err)
+			fmt.Fprintf(os.Stderr, "Error resolving %s: %s\n", id, remedy.PrintedMessage(err))
 			continue
 		}
 		if result == nil || result.Issue == nil {

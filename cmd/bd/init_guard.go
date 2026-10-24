@@ -5,13 +5,14 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
-	"github.com/steveyegge/beads/internal/ui"
 )
 
 // initGuardDBCheck holds the result of checking whether a database exists on a
@@ -86,7 +87,9 @@ func checkDatabaseOnServer(host string, port int, user, password, dbName string,
 // database.  Instead we guide the user toward safe diagnostic commands.
 func initGuardServerMessage(dbName, host string, port int, prefix, syncRemote string) error {
 	var b strings.Builder
-	fmt.Fprintf(&b, "\n%s Database %q not found on server at %s.\n", ui.RenderWarn("⚠"), dbName, doltutil.ServerAddr(host, port))
+	// An error's text, printed through bd's error printer, which spells any
+	// terminal escape in it (remedy.PrintedText): the sign is not styled.
+	fmt.Fprintf(&b, "\n⚠ Database %q not found on server at %s.\n", dbName, doltutil.PrintedServerAddr(host, port))
 	b.WriteString("The server is running but this database hasn't been created yet.\n")
 
 	b.WriteString("\nDiagnose with:\n")
@@ -98,11 +101,12 @@ func initGuardServerMessage(dbName, host string, port int, prefix, syncRemote st
 	b.WriteString("This is the safe entry point for existing-project recovery and may recover or initialize depending on detected state.\n")
 
 	if syncRemote != "" {
-		fmt.Fprintf(&b, "\nTip: sync.remote is configured (%s).\n", syncRemote)
+		fmt.Fprintf(&b, "\nTip: sync.remote is configured (%s).\n", remedy.PrintedValue(syncRemote))
 		b.WriteString("Run bd bootstrap to recover from the configured remote, or use --dry-run to inspect the plan first.\n")
 	} else {
 		b.WriteString("\nIf this is a brand-new project, create the database with:\n")
-		fmt.Fprintf(&b, "  bd init --prefix %s\n", prefix)
+		arg, note := remedy.CommandArg(runtime.GOOS, prefix, "<prefix>")
+		fmt.Fprintf(&b, "  bd init --prefix %s%s\n", arg, note)
 		b.WriteString("\nIf bd bootstrap cannot find the expected remote automatically, set sync.remote\n")
 		b.WriteString("in .beads/config.yaml and re-run bd bootstrap.\n")
 	}
@@ -152,7 +156,8 @@ var initAllowRecreateMissing bool
 // guard call sites stay unchanged.
 func initGuardMissingServerDBMessage(dbName, host string, port int, _ string, haveProjectID bool) error {
 	var b strings.Builder
-	fmt.Fprintf(&b, "\n%s Database %q not found on server at %s (or the server could not be reached to confirm).\n", ui.RenderWarn("⚠"), dbName, doltutil.ServerAddr(host, port))
+	// As in initGuardServerMessage, the sign is not styled.
+	fmt.Fprintf(&b, "\n⚠ Database %q not found on server at %s (or the server could not be reached to confirm).\n", dbName, doltutil.PrintedServerAddr(host, port))
 	if haveProjectID {
 		b.WriteString("This workspace was already initialized (metadata.json has a project_id from a prior\n")
 		b.WriteString("bd init), so this looks like a recovery situation, not a fresh clone: the configured\n")

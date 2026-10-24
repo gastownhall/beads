@@ -12,6 +12,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/remedy"
 
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
@@ -76,7 +77,9 @@ func openDoltDB(beadsDir string) (*sql.DB, *configfile.Config, error) {
 
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close() // Best effort cleanup
-		return nil, nil, fmt.Errorf("server not reachable: %w", err)
+		// The ping error repeats metadata.json's dolt_server_host, which a
+		// cloned repository commits.
+		return nil, nil, fmt.Errorf("server not reachable: %w", remedy.PrintedError(err))
 	}
 
 	return db, cfg, nil
@@ -234,7 +237,7 @@ func checkConnectionWithDB(conn *doltConn) DoctorCheck {
 	storageDetail := "Storage: Dolt (server mode)"
 	if conn.cfg != nil {
 		storageDetail = fmt.Sprintf("Storage: Dolt (server %s)",
-			doltutil.ServerAddr(conn.cfg.GetDoltServerHost(), conn.port))
+			doltutil.PrintedServerAddr(conn.cfg.GetDoltServerHost(), conn.port))
 	}
 
 	return DoctorCheck{
@@ -306,7 +309,7 @@ func checkSchemaWithDB(conn *doltConn) DoctorCheck {
 				Status:   StatusError,
 				Message:  fmt.Sprintf("Wrong database — tables found in %q, not in configured database", correctDB),
 				Detail:   "Pre-v0.56 migration created database without saving its name to metadata.json",
-				Fix:      fmt.Sprintf("Run 'bd doctor --fix' to set dolt_database=%s in metadata.json", correctDB),
+				Fix:      fmt.Sprintf("Run 'bd doctor --fix' to set dolt_database=%s in metadata.json", remedy.PrintedValue(correctDB)),
 				Category: CategoryCore,
 			}
 		}
@@ -801,7 +804,7 @@ func checkSharedServerHealth(beadsDir string) DoctorCheck {
 	return DoctorCheck{
 		Name:     "Shared Server",
 		Status:   StatusOK,
-		Message:  fmt.Sprintf("Running (PID %d, port %d), database: %s", state.PID, state.Port, dbName),
+		Message:  fmt.Sprintf("Running (PID %d, port %d), database: %s", state.PID, state.Port, remedy.PrintedValue(dbName)),
 		Detail:   fmt.Sprintf("Server directory: %s", sharedDir),
 		Category: CategoryRuntime,
 	}

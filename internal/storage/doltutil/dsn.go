@@ -8,6 +8,7 @@ import (
 	mysql "github.com/go-sql-driver/mysql"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/remedy"
 )
 
 // maxAllowedPacketBytes is the client-side packet ceiling pinned into every
@@ -39,6 +40,16 @@ const maxAllowedPacketBytes = 1 << 30
 // of those dials only one of the two spellings.
 func ServerAddr(host string, port int) string {
 	return net.JoinHostPort(configfile.UnbracketHost(host), strconv.Itoa(port))
+}
+
+// PrintedServerAddr is ServerAddr(host, port) as a message names it: through
+// the remedy printer (remedy.PrintedValue). host is the workspace's dolt.host
+// or metadata.json dolt_server_host, which a cloned repository commits, so
+// every message that names the Dolt server's address names it this way, and
+// a host holding a carriage return or terminal escape cannot redraw the
+// advice printed with it. Dial ServerAddr; print PrintedServerAddr.
+func PrintedServerAddr(host string, port int) string {
+	return remedy.PrintedValue(ServerAddr(host, port))
 }
 
 // ServerDSN holds connection parameters for building a MySQL DSN to a Dolt server.

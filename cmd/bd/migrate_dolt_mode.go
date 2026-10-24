@@ -18,6 +18,7 @@ import (
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/lockfile"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/server"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/util"
@@ -725,14 +726,14 @@ func runMigrateToProxiedServer(dryRun bool, idleTimeout time.Duration, shared bo
 		// switch from the remote data to an empty/stale local database.
 		host := cfg.GetDoltServerHost()
 		if !configfile.IsLocalHostString(host) {
-			return HandleError("the configured Dolt server host is remote (%s); this migration only re-points the proxy at the local Dolt root and would abandon the remote data.\nMigrate on the server host itself, or clear dolt_server_host / dolt.host / BEADS_DOLT_SERVER_HOST first", host)
+			return HandleError("the configured Dolt server host is remote (%s); this migration only re-points the proxy at the local Dolt root and would abandon the remote data.\nMigrate on the server host itself, or clear dolt_server_host / dolt.host / BEADS_DOLT_SERVER_HOST first", remedy.PrintedValue(host))
 		}
 		// Nor is the local root the data of a server at the IPv6 loopback:
 		// bd's own server listens on 127.0.0.1 only, so the server there is
 		// another one, and a root bd's own server left behind would replace
 		// its data just as silently.
 		if configfile.IsIPv6LoopbackHost(host) {
-			return HandleError("the configured Dolt server host is the IPv6 loopback (%s); this migration only re-points the proxy at the local Dolt root, which holds the data of bd's own server (it listens on 127.0.0.1 only), and would abandon the data of the server at [::1].\nTo migrate bd's own server instead, clear dolt_server_host / dolt.host / BEADS_DOLT_SERVER_HOST first", host)
+			return HandleError("the configured Dolt server host is the IPv6 loopback (%s); this migration only re-points the proxy at the local Dolt root, which holds the data of bd's own server (it listens on 127.0.0.1 only), and would abandon the data of the server at [::1].\nTo migrate bd's own server instead, clear dolt_server_host / dolt.host / BEADS_DOLT_SERVER_HOST first", remedy.PrintedValue(host))
 		}
 		if doltserver.IsSharedServerMode() {
 			return HandleErrorWithHint("repo is in shared-server mode", "use 'bd migrate from-shared-server-to-proxied-server'")

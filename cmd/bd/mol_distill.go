@@ -6,11 +6,13 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/formula"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
 )
@@ -183,11 +185,7 @@ func distillSubgraph(epicID string, subgraph *TemplateSubgraph, in molDistillInp
 	} else {
 		outputPath = findWritableFormulaDir(formulaName)
 		if outputPath == "" {
-			hint := "Try creating one of the formula search paths"
-			if searchPaths := getFormulaSearchPaths(); len(searchPaths) > 0 {
-				hint = fmt.Sprintf("Try: mkdir -p %s", searchPaths[0])
-			}
-			return HandleErrorWithHint("no writable formula directory found", hint)
+			return HandleErrorWithHint("no writable formula directory found", formulaDirHint(getFormulaSearchPaths()))
 		}
 	}
 
@@ -385,4 +383,17 @@ func init() {
 	molDistillCmd.Flags().String("output", "", "Output directory for formula file")
 
 	molCmd.AddCommand(molDistillCmd)
+}
+
+// formulaDirHint is the hint for a distill with no writable formula
+// directory: create the first search path. The path holds the workspace's
+// own directory, so it goes into the mkdir command through the remedy
+// printer: one shell word, or a <dir> placeholder with the path named
+// escaped beside it.
+func formulaDirHint(searchPaths []string) string {
+	if len(searchPaths) == 0 {
+		return "Try creating one of the formula search paths"
+	}
+	dir, note := remedy.CommandArg(runtime.GOOS, searchPaths[0], "<dir>")
+	return fmt.Sprintf("Try: mkdir -p %s%s", dir, note)
 }

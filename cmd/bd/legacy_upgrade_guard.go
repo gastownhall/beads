@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/historicalsqlite"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/utils"
 	"golang.org/x/mod/semver"
@@ -345,7 +346,7 @@ var legacyUpgradeWarnWriter io.Writer = os.Stderr
 func warnUnreadableVersionWitness(beadsDir, version string) {
 	fmt.Fprintf(legacyUpgradeWarnWriter,
 		"Warning: unreadable version witness %q in %s; assuming a current workspace. Run 'bd doctor' to reset version tracking.\n",
-		version, filepath.Join(beadsDir, localVersionFile))
+		version, remedy.PrintedValue(filepath.Join(beadsDir, localVersionFile)))
 }
 
 func legacyUpgradeRefusal(reason string) error {

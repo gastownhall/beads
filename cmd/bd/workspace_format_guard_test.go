@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 )
 
@@ -495,7 +496,7 @@ func TestEnsureBeadsDirForPathRefusesTargetsItWouldHide(t *testing.T) {
 	// cannot take it quoted (TestServerInitRemedy pins which, on both
 	// platforms).
 	remote := func(host string, port int) string {
-		quoted, ok := shellQuotedFor(runtime.GOOS, host)
+		quoted, ok := remedy.ShellQuotedFor(runtime.GOOS, host)
 		if !ok {
 			quoted = "<host>"
 		}
@@ -609,7 +610,7 @@ func TestServerInitRemedy(t *testing.T) {
 
 // TestRefuseUninitializableTargetEscapesItsPath pins that both server-mode
 // refusals name a target whose path holds a control character escaped
-// (printedValue), so the path printed ahead of the bd init remedy cannot
+// (remedy.PrintedValue), so the path printed ahead of the bd init remedy cannot
 // redraw it.
 func TestRefuseUninitializableTargetEscapesItsPath(t *testing.T) {
 	if runtime.GOOS == "windows" {

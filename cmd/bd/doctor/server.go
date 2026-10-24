@@ -12,6 +12,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
 
@@ -278,11 +279,12 @@ func checkServerReachable(host string, port int) DoctorCheck {
 	addr := doltutil.ServerAddr(host, port)
 	_, err := doltserver.ProbeSQLServer("tcp", addr, 5*time.Second)
 	if err != nil {
+		// The dial error repeats the host.
 		return DoctorCheck{
 			Name:     "Server Reachable",
 			Status:   StatusError,
-			Message:  fmt.Sprintf("Cannot connect to %s", addr),
-			Detail:   err.Error(),
+			Message:  fmt.Sprintf("Cannot connect to %s", remedy.PrintedValue(addr)),
+			Detail:   remedy.PrintedError(err).Error(),
 			Fix:      "Ensure dolt sql-server is running and accessible",
 			Category: CategoryFederation,
 		}
@@ -291,7 +293,7 @@ func checkServerReachable(host string, port int) DoctorCheck {
 	return DoctorCheck{
 		Name:     "Server Reachable",
 		Status:   StatusOK,
-		Message:  fmt.Sprintf("Connected to %s", addr),
+		Message:  fmt.Sprintf("Connected to %s", remedy.PrintedValue(addr)),
 		Category: CategoryFederation,
 	}
 }
@@ -401,7 +403,7 @@ func checkDatabaseExists(db *sql.DB, database string) DoctorCheck {
 			return DoctorCheck{
 				Name:     "Database Exists",
 				Status:   StatusError,
-				Message:  fmt.Sprintf("Invalid database name '%s'", database),
+				Message:  fmt.Sprintf("Invalid database name '%s'", remedy.PrintedValue(database)),
 				Detail:   "Database name must be alphanumeric with underscores only",
 				Category: CategoryFederation,
 			}
@@ -444,11 +446,13 @@ func checkDatabaseExists(db *sql.DB, database string) DoctorCheck {
 	}
 
 	if !found {
+		// The name is metadata.json's dolt_database, which a cloned
+		// repository commits.
 		return DoctorCheck{
 			Name:     "Database Exists",
 			Status:   StatusError,
-			Message:  fmt.Sprintf("Database '%s' not found", database),
-			Fix:      fmt.Sprintf("Run 'bd bootstrap' to recover the existing '%s' database safely. Use 'bd init' only for brand-new projects.", database),
+			Message:  fmt.Sprintf("Database '%s' not found", remedy.PrintedValue(database)),
+			Fix:      fmt.Sprintf("Run 'bd bootstrap' to recover the existing '%s' database safely. Use 'bd init' only for brand-new projects.", remedy.PrintedValue(database)),
 			Category: CategoryFederation,
 		}
 	}
@@ -461,7 +465,7 @@ func checkDatabaseExists(db *sql.DB, database string) DoctorCheck {
 		return DoctorCheck{
 			Name:     "Database Exists",
 			Status:   StatusError,
-			Message:  fmt.Sprintf("Cannot access database '%s'", database),
+			Message:  fmt.Sprintf("Cannot access database '%s'", remedy.PrintedValue(database)),
 			Detail:   err.Error(),
 			Category: CategoryFederation,
 		}
@@ -472,7 +476,7 @@ func checkDatabaseExists(db *sql.DB, database string) DoctorCheck {
 		return DoctorCheck{
 			Name:     "Database Exists",
 			Status:   StatusWarning,
-			Message:  fmt.Sprintf("Database '%s' uses hyphens (legacy naming)", database),
+			Message:  fmt.Sprintf("Database '%s' uses hyphens (legacy naming)", remedy.PrintedValue(database)),
 			Detail:   "New projects use underscores. To migrate: export data, run 'bd init --force', re-import.",
 			Category: CategoryFederation,
 		}
@@ -481,7 +485,7 @@ func checkDatabaseExists(db *sql.DB, database string) DoctorCheck {
 	return DoctorCheck{
 		Name:     "Database Exists",
 		Status:   StatusOK,
-		Message:  fmt.Sprintf("Database '%s' accessible", database),
+		Message:  fmt.Sprintf("Database '%s' accessible", remedy.PrintedValue(database)),
 		Category: CategoryFederation,
 	}
 }

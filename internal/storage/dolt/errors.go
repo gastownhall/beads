@@ -10,6 +10,7 @@ import (
 
 	mysql "github.com/go-sql-driver/mysql"
 
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
@@ -165,7 +166,7 @@ func wrapExecError(op string, err error) error {
 // for testability.
 func databaseNotFoundError(cfg *Config) error {
 	var b strings.Builder
-	fmt.Fprintf(&b, "database %q not found on Dolt server at %s\n\n", cfg.Database, doltutil.ServerAddr(cfg.ServerHost, cfg.ServerPort))
+	fmt.Fprintf(&b, "database %q not found on Dolt server at %s\n\n", cfg.Database, remedy.PrintedValue(doltutil.ServerAddr(cfg.ServerHost, cfg.ServerPort)))
 
 	// Check if backup files exist — strong signal this is a branch-switch or
 	// fresh-clone scenario rather than a server misconfiguration (GH#2327).
@@ -188,7 +189,7 @@ func databaseNotFoundError(cfg *Config) error {
 	b.WriteString("  bd dolt status             # Show which data directory the server is using")
 
 	if cfg.SyncRemote != "" {
-		fmt.Fprintf(&b, "\n\nTip: sync.remote is configured (%s).\nRun bd bootstrap to recover from the remote or confirm what bootstrap will do with --dry-run.", cfg.SyncRemote)
+		fmt.Fprintf(&b, "\n\nTip: sync.remote is configured (%s).\nRun bd bootstrap to recover from the remote or confirm what bootstrap will do with --dry-run.", remedy.PrintedValue(cfg.SyncRemote))
 	} else {
 		// be-5up5: no longer claims bootstrap is a safe first step "if this is an
 		// existing project" — bootstrap can silently create an empty database in

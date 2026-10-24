@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -732,12 +733,12 @@ func checkGateSatisfaction(issue *types.Issue, gateStore storage.DoltStorage) er
 		if resolved {
 			return nil
 		}
-		return fmt.Errorf("gate condition not satisfied: %s (use --force to override)", reason)
+		return fmt.Errorf("gate condition not satisfied: %s (use --force to override)", remedy.PrintedText(reason))
 	}
 
 	if err != nil {
 		// If we can't check the condition, allow close with a warning
-		fmt.Fprintf(os.Stderr, "Warning: could not evaluate gate condition: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Warning: could not evaluate gate condition: %s\n", remedy.PrintedMessage(err))
 		return nil
 	}
 
@@ -746,10 +747,10 @@ func checkGateSatisfaction(issue *types.Issue, gateStore storage.DoltStorage) er
 	}
 
 	if escalated {
-		return fmt.Errorf("gate condition not satisfied: %s (use --force to override)", reason)
+		return fmt.Errorf("gate condition not satisfied: %s (use --force to override)", remedy.PrintedText(reason))
 	}
 
-	return fmt.Errorf("gate condition not satisfied: %s (use --force to override)", reason)
+	return fmt.Errorf("gate condition not satisfied: %s (use --force to override)", remedy.PrintedText(reason))
 }
 
 // closeBeadGateGetter picks the bead-gate lookup the current route can serve.

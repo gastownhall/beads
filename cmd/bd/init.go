@@ -25,6 +25,7 @@ import (
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/gitenv"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/backends"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
@@ -289,7 +290,7 @@ func warnHalfIdentifiedSubstrate(found issueops.VerifyIdentityResult) {
 			"  others refuse to open with PROJECT IDENTITY MISMATCH.\n"+
 			"  Settle it deliberately: run `bd doctor --fix` from the clone whose identity should win, then\n"+
 			"  re-init the others.\n",
-			ui.RenderWarn("WARNING:"), found.Prefix)
+			ui.RenderWarn("WARNING:"), remedy.PrintedValue(found.Prefix))
 	case found.ProjectID != "" && found.Prefix == "":
 		fmt.Fprintf(os.Stderr, "%s the database has a project identity but no issue prefix.\n"+
 			"  bd will not complete a half-identified database, and a substrate with no prefix cannot name an\n"+
@@ -997,9 +998,11 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			envPort := os.Getenv("BEADS_DOLT_SERVER_PORT")
 
 			if conflict := detectInitRemoteHostConflict(configHost, envHost, configPort, envPort); conflict != nil {
-				detail := fmt.Sprintf("dolt.host (%s) is", conflict.host)
+				// dolt.host comes from config.yaml, which a cloned
+				// repository commits: it is named beside the remedy below.
+				detail := fmt.Sprintf("dolt.host (%s) is", remedy.PrintedValue(conflict.host))
 				if conflict.includesPort {
-					detail = fmt.Sprintf("dolt.host (%s) and dolt.port are", conflict.host)
+					detail = fmt.Sprintf("dolt.host (%s) and dolt.port are", remedy.PrintedValue(conflict.host))
 				}
 				return fmt.Errorf("%s set via %s but server mode is not enabled.\n"+
 					"  Embedded mode has no host/port — these settings require server mode.\n"+
@@ -1296,10 +1299,11 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 							"Ransomware protection > Allow an app through Controlled folder access\n"+
 							"and add bd.exe (typically %%USERPROFILE%%\\go\\bin\\bd.exe).", err)
 					} else {
+						dir, note := remedy.CommandArg(runtime.GOOS, filepath.Dir(beadsDir), "<dir>")
 						return fmt.Errorf("failed to create .beads directory: %v\n\n"+
 							"Permission denied. Check directory ownership and permissions:\n"+
 							"  ls -la %s\n"+
-							"  chmod 755 %s", err, filepath.Dir(beadsDir), filepath.Dir(beadsDir))
+							"  chmod 755 %s%s", err, dir, dir, note)
 					}
 				}
 				return fmt.Errorf("failed to create .beads directory: %v", err)
@@ -1569,7 +1573,10 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				return cloneFromRemoteWithMode(ctx, beadsDir, remoteURL, dbName, cloneCfg, initRemoteCloneMode(initServerMode, externalServer))
 			})
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: failed to clone remote %q: %v\n", syncURL, err)
+				// The clone error is bd's own and repeats sync.remote, which
+				// a cloned repository commits: it is spelled by the remedy
+				// printer's backstop, as bd's error printers spell theirs.
+				fmt.Fprintf(os.Stderr, "Error: failed to clone remote %q: %s\n", syncURL, remedy.PrintedText(err.Error()))
 				fmt.Fprintf(os.Stderr, "Hint: verify the URL is reachable and any credentials are valid, or omit --remote to initialize a fresh local database.\n")
 				return &exitError{Code: 1}
 			}
@@ -1590,7 +1597,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				// designated-migrator flows keep their exact behavior.
 				schema.SetLocalMigrateConsent(true)
 				if !quiet {
-					fmt.Printf("  %s Bootstrapped from remote: %s\n", ui.RenderPass("✓"), syncURL)
+					fmt.Printf("  %s Bootstrapped from remote: %s\n", ui.RenderPass("✓"), remedy.PrintedValue(syncURL))
 				}
 			}
 		}
@@ -1643,7 +1650,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 
 		initLock, err := acquireEmbeddedLock(beadsDir, initServerMode || initProxiedServer)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Error: %s\n", remedy.PrintedMessage(err))
 			return &exitError{Code: 1}
 		}
 		defer initLock.Unlock()
@@ -1723,7 +1730,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 					// `bd dolt push` can open the cloned database.
 					fcfg := initTimeCloneConfig(initServerMode, serverHost, serverPort, serverSocket, serverUser, dbName)
 					if ferr := finalizeSyncedBootstrap(beadsDir, syncURL, fcfg, dbName); ferr != nil {
-						fmt.Fprintf(os.Stderr, "Warning: failed to finalize bootstrapped workspace: %v\n", ferr)
+						fmt.Fprintf(os.Stderr, "Warning: failed to finalize bootstrapped workspace: %s\n", remedy.PrintedMessage(ferr))
 					}
 				}
 				if jsonOutput {
@@ -1742,7 +1749,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 					return &exitError{Code: 1}
 				}
 			}
-			fmt.Fprintf(os.Stderr, "Error: failed to open Dolt store: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Error: failed to open Dolt store: %s\n", remedy.PrintedMessage(err))
 			return &exitError{Code: 1}
 		}
 
@@ -2416,7 +2423,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				user = configfile.DefaultDoltServerUser
 			}
 			fmt.Printf("  Mode: %s\n", ui.RenderAccent("server"))
-			fmt.Printf("  Server: %s\n", ui.RenderAccent(fmt.Sprintf("%s@%s", user, doltutil.ServerAddr(host, port))))
+			fmt.Printf("  Server: %s\n", ui.RenderAccent(fmt.Sprintf("%s@%s", remedy.PrintedValue(user), doltutil.PrintedServerAddr(host, port))))
 			// Warn when using the default localhost — this is the #1 misconfiguration
 			// for setups where Dolt runs on a remote machine (e.g., over Tailscale).
 			if serverHost == "" && os.Getenv("BEADS_DOLT_SERVER_HOST") == "" {
@@ -2434,9 +2441,12 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		if dbIdentity.Prefix != "" {
 			effectivePrefix = dbIdentity.Prefix
 		}
-		fmt.Printf("  Database: %s\n", ui.RenderAccent(dbName))
-		fmt.Printf("  Issue prefix: %s\n", ui.RenderAccent(effectivePrefix))
-		fmt.Printf("  Issues will be named: %s\n\n", ui.RenderAccent(effectivePrefix+"-<hash> (e.g., "+effectivePrefix+"-a3f2dd)"))
+		fmt.Printf("  Database: %s\n", ui.RenderAccent(remedy.PrintedValue(dbName)))
+		// The prefix can be the database's own issue_prefix, which a clone
+		// or a shared database supplies.
+		printedPrefix := remedy.PrintedValue(effectivePrefix)
+		fmt.Printf("  Issue prefix: %s\n", ui.RenderAccent(printedPrefix))
+		fmt.Printf("  Issues will be named: %s\n\n", ui.RenderAccent(printedPrefix+"-<hash> (e.g., "+printedPrefix+"-a3f2dd)"))
 		fmt.Printf("Run %s to get started.\n\n", ui.RenderAccent("bd quickstart"))
 
 		// Detect backup files from a previous session (GH#2327).
@@ -2466,7 +2476,8 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				fmt.Printf("%s Setup incomplete. Some issues were detected:\n", ui.RenderWarn("⚠"))
 				for _, check := range doctorResult.Checks {
 					if check.Status != statusOK {
-						fmt.Printf("  • %s: %s\n", check.Name, check.Message)
+						shown := check.printed()
+						fmt.Printf("  • %s: %s\n", shown.Name, shown.Message)
 					}
 				}
 				fmt.Printf("\nRun %s to see details and fix these issues.\n\n", ui.RenderAccent("bd doctor --fix"))
@@ -2635,6 +2646,10 @@ func (e *workspaceExistsError) Is(target error) bool {
 }
 
 // alreadyInitialized builds a workspaceExistsError from a formatted message.
+//
+// The message is an error's text, printed through bd's error printer, which
+// spells any terminal escape in it (remedy.PrintedText), so it carries no
+// ui.Render styling: a styled sign or command would print as escape text.
 func alreadyInitialized(format string, args ...any) error {
 	return &workspaceExistsError{msg: fmt.Sprintf(format, args...)}
 }
@@ -2678,14 +2693,14 @@ func checkExistingBeadsDataAt(beadsDir string, prefix string) error {
 			}
 			if info, statErr := os.Stat(proxiedRoot); statErr == nil && info.IsDir() {
 				return alreadyInitialized(`
-%s Found existing Dolt database: %s
+⚠ Found existing Dolt database: %s
 
 This workspace is already initialized.
 
 To use the existing database:
-  Just run bd commands normally (e.g., %s)
+  Just run bd commands normally (e.g., bd list)
 
-Aborting.`, ui.RenderWarn("⚠"), proxiedRoot, ui.RenderAccent("bd list"))
+Aborting.`, proxiedRoot)
 			}
 			return nil
 		}
@@ -2710,18 +2725,18 @@ Aborting.`, ui.RenderWarn("⚠"), proxiedRoot, ui.RenderAccent("bd list"))
 				if info, statErr := os.Stat(filepath.Join(embeddedRoot, entry.Name(), ".dolt")); statErr == nil && info.IsDir() {
 					location := filepath.Join(embeddedRoot, entry.Name())
 					return alreadyInitialized(`
-%s Found existing Dolt database: %s
+⚠ Found existing Dolt database: %s
 
 This workspace is already initialized.
 
 To use the existing database:
-  Just run bd commands normally (e.g., %s)
+  Just run bd commands normally (e.g., bd list)
 
 If the database is genuinely corrupt and unrecoverable:
   bd export > issue-export.jsonl        # Export issue records first
   bd init --reinit-local --prefix %s    # Then reinitialize
 
-Aborting.`, ui.RenderWarn("⚠"), location, ui.RenderAccent("bd list"), prefix)
+Aborting.`, remedy.PrintedValue(location), prefix)
 				}
 			}
 			return nil
@@ -2859,21 +2874,21 @@ Aborting.`, ui.RenderWarn("⚠"), location, ui.RenderAccent("bd list"), prefix)
 			if cfg.IsDoltServerMode() {
 				host := cfg.GetDoltServerHost()
 				port := doltserver.DefaultConfig(beadsDir).Port
-				location = fmt.Sprintf("dolt server at %s", doltutil.ServerAddr(host, port))
+				location = fmt.Sprintf("dolt server at %s", doltutil.PrintedServerAddr(host, port))
 			}
 			return alreadyInitialized(`
-%s Found existing Dolt database: %s
+⚠ Found existing Dolt database: %s
 
 This workspace is already initialized.
 
 To use the existing database:
-  Just run bd commands normally (e.g., %s)
+  Just run bd commands normally (e.g., bd list)
 
 If the database is genuinely corrupt and unrecoverable:
   bd export > issue-export.jsonl        # Export issue records first
   bd init --reinit-local --prefix %s    # Then reinitialize
 
-Aborting.`, ui.RenderWarn("⚠"), location, ui.RenderAccent("bd list"), prefix)
+Aborting.`, remedy.PrintedValue(location), prefix)
 		}
 		// Backend is Dolt but no dolt directory exists yet — this is a fresh
 		// clone. Any beads.db file is a legacy SQLite artifact, not the active
@@ -2887,7 +2902,7 @@ Aborting.`, ui.RenderWarn("⚠"), location, ui.RenderAccent("bd list"), prefix)
 		targetDBPath := filepath.Join(redirectTarget, beads.CanonicalDatabaseName)
 		if _, err := os.Stat(targetDBPath); err == nil {
 			return alreadyInitialized(`
-%s Cannot init: redirect target already has database
+⚠ Cannot init: redirect target already has database
 
 Local .beads redirects to: %s
 That location already has: %s
@@ -2895,14 +2910,14 @@ That location already has: %s
 The redirect target is already initialized. Running init here would overwrite it.
 
 To use the existing database:
-  Just run bd commands normally (e.g., %s)
+  Just run bd commands normally (e.g., bd list)
   The redirect will route to the canonical database.
 
 If the database is genuinely corrupt and unrecoverable:
   bd export > issue-export.jsonl        # Export issue records first
   bd init --reinit-local --prefix %s    # Then reinitialize
 
-Aborting.`, ui.RenderWarn("⚠"), redirectTarget, targetDBPath, ui.RenderAccent("bd list"), prefix)
+Aborting.`, redirectTarget, targetDBPath, prefix)
 		}
 		return nil // Redirect target has no database - safe to init
 	}
@@ -2911,18 +2926,18 @@ Aborting.`, ui.RenderWarn("⚠"), redirectTarget, targetDBPath, ui.RenderAccent(
 	dbPath := filepath.Join(beadsDir, beads.CanonicalDatabaseName)
 	if _, err := os.Stat(dbPath); err == nil {
 		return alreadyInitialized(`
-%s Found existing database: %s
+⚠ Found existing database: %s
 
 This workspace is already initialized.
 
 To use the existing database:
-  Just run bd commands normally (e.g., %s)
+  Just run bd commands normally (e.g., bd list)
 
 If the database is genuinely corrupt and unrecoverable:
   bd export > issue-export.jsonl        # Export issue records first
   bd init --reinit-local --prefix %s    # Then reinitialize
 
-Aborting.`, ui.RenderWarn("⚠"), dbPath, ui.RenderAccent("bd list"), prefix)
+Aborting.`, dbPath, prefix)
 	}
 
 	return nil // No database found, safe to init
@@ -3540,7 +3555,7 @@ func shouldWriteInitDoltRemote(gateway bool, syncURL string, syncFromRemote, syn
 // failure (empty on success) so the caller can tell the user why.
 func resolveRemoteHasDoltDataProbe(syncURL string, hasData bool, err error) (bool, string) {
 	if err != nil {
-		return true, fmt.Sprintf("could not verify refs/dolt/data on %s (%v); treating remote as having Dolt history", syncURL, err)
+		return true, fmt.Sprintf("could not verify refs/dolt/data on %s (%s); treating remote as having Dolt history", remedy.PrintedValue(syncURL), remedy.PrintedText(err.Error()))
 	}
 	return hasData, ""
 }
@@ -3565,7 +3580,7 @@ func handleRemoteSafetyDecision(decision RemoteSafetyDecision, prefix, syncURL, 
 		if decision.Reason == "authorized-divergence" && term.IsTerminal(int(os.Stdin.Fd())) && destroyToken == "" && !*confirmed {
 			expected := FormatDestroyToken(prefix)
 			fmt.Fprintf(os.Stderr, "\n%s You are about to discard the remote's Dolt history.\n\n", ui.RenderWarn("WARNING:"))
-			fmt.Fprintf(os.Stderr, "  Remote: %s\n", syncURL)
+			fmt.Fprintf(os.Stderr, "  Remote: %s\n", remedy.PrintedValue(syncURL))
 			fmt.Fprintf(os.Stderr, "  Type %q to confirm: ", expected)
 			scanner := bufio.NewScanner(os.Stdin)
 			scanner.Scan()
@@ -3594,11 +3609,12 @@ func configureInitDoltRemote(ctx context.Context, store storage.DoltStorage, syn
 		return
 	}
 	if err := store.AddRemote(ctx, "origin", syncURL); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to add remote 'origin': %v\n", err)
+		// The error can repeat sync.remote, which a cloned repository commits.
+		fmt.Fprintf(os.Stderr, "Warning: failed to add remote 'origin': %s\n", remedy.PrintedMessage(err))
 		return
 	}
 	if !quiet {
-		fmt.Printf("  %s Configured Dolt remote: origin → %s\n", ui.RenderPass("✓"), syncURL)
+		fmt.Printf("  %s Configured Dolt remote: origin → %s\n", ui.RenderPass("✓"), remedy.PrintedValue(syncURL))
 	}
 }
 
@@ -3610,7 +3626,11 @@ func printInitNoDoltRemoteWarning(withExportNote bool) {
 	}
 	if originURL, err := gitOriginGetURL(); err == nil && originURL != "" {
 		fmt.Fprintln(os.Stderr, "  To use your git origin for durable sync, run:")
-		fmt.Fprintf(os.Stderr, "    %s\n", ui.RenderAccent("bd dolt remote add origin "+normalizeRemoteURL(originURL)))
+		// As in warnJSONLWithoutDoltRemote: the URL is the git origin, set
+		// by whoever cloned the repository, so it goes into the command only
+		// as one shell word.
+		url, note := remedy.CommandArg(runtime.GOOS, normalizeRemoteURL(originURL), "<url>")
+		fmt.Fprintf(os.Stderr, "    %s%s\n", ui.RenderAccent("bd dolt remote add origin "+url), note)
 		fmt.Fprintf(os.Stderr, "    %s\n\n", ui.RenderAccent("bd dolt push"))
 		return
 	}

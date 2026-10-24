@@ -9,6 +9,7 @@ import (
 
 	_ "github.com/go-sql-driver/mysql"
 
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
 
@@ -88,14 +89,14 @@ func freshCloneServerResult(dbExists bool, dbName, host string, port int, syncRe
 	}
 
 	var msg strings.Builder
-	fmt.Fprintf(&msg, "Fresh clone detected: database %q not found on server at %s.", dbName, doltutil.ServerAddr(host, port))
+	fmt.Fprintf(&msg, "Fresh clone detected: database %q not found on server at %s.", dbName, doltutil.PrintedServerAddr(host, port))
 
 	fix := "bd bootstrap"
 	if syncRemote == "" {
 		msg.WriteString(" Run bd bootstrap first as the safe recovery entry point. It may recover existing state or initialize if no prior state can be found. If bootstrap cannot find the expected remote automatically, then set sync.remote in .beads/config.yaml and rerun bd bootstrap.")
 		fix = "bd bootstrap"
 	} else {
-		fmt.Fprintf(&msg, " sync.remote is configured (%s) — run bd bootstrap to recover from the remote, or use --dry-run to inspect the plan first.", syncRemote)
+		fmt.Fprintf(&msg, " sync.remote is configured (%s) — run bd bootstrap to recover from the remote, or use --dry-run to inspect the plan first.", remedy.PrintedValue(syncRemote))
 	}
 
 	return DoctorCheck{
@@ -118,14 +119,15 @@ func freshCloneServerResult(dbExists bool, dbName, host string, port int, syncRe
 // won't help when the server itself is unreachable).
 func freshCloneServerUnreachableResult(dbName, host string, port int, connErr error) DoctorCheck {
 	var msg strings.Builder
-	fmt.Fprintf(&msg, "Dolt server unreachable at %s (database %q, server mode configured).", doltutil.ServerAddr(host, port), dbName)
+	fmt.Fprintf(&msg, "Dolt server unreachable at %s (database %q, server mode configured).", doltutil.PrintedServerAddr(host, port), dbName)
 	msg.WriteString(" The local database directory is not expected in server mode, so this is not a fresh clone — it's a connectivity or auth problem.")
 
 	var detail strings.Builder
 	detail.WriteString("dolt_mode=server is configured but the doctor check could not reach the server.\n")
 	detail.WriteString("  In server mode, beads stores data on the Dolt server, so no local .beads/dolt directory is expected.\n")
 	if connErr != nil {
-		fmt.Fprintf(&detail, "  Underlying error: %v\n", connErr)
+		// The connection error repeats the host.
+		fmt.Fprintf(&detail, "  Underlying error: %v\n", remedy.PrintedError(connErr))
 	}
 	detail.WriteString("  Common causes: server not running, wrong host/port, TLS misconfiguration, or invalid credentials.")
 

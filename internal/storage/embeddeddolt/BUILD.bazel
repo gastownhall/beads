@@ -73,6 +73,7 @@ go_library(
     deps = [
         "//internal/config",
         "//internal/memoryapi",
+        "//internal/remedy",
         "//internal/storage",
         "//internal/storage/domain",
         "//internal/storage/issueops",
@@ -227,6 +228,7 @@ go_test(
         "reject_stale_upsert_test.go",
         "relations_contract_test.go",
         "releaser_contract_test.go",
+        "remedy_printing_internal_test.go",
         "remote_git_ref_test.go",
         "remote_migrate_gate_test.go",
         "remote_peer_auth_test.go",
@@ -261,6 +263,7 @@ go_test(
         "//internal/debug",
         "//internal/eventsjournal",
         "//internal/hooks",
+        "//internal/remedy",
         "//internal/storage",
         "//internal/storage/batchbench",
         "//internal/storage/batchfixtures",

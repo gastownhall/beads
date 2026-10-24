@@ -16,6 +16,7 @@ go_library(
     deps = [
         "//internal/configfile",
         "//internal/doltremote",
+        "//internal/remedy",
         "//internal/remotecache",
         "//internal/storage",
         "@com_github_go_sql_driver_mysql//:mysql",

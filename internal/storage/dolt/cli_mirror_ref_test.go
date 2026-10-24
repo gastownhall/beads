@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -191,7 +192,7 @@ func TestPrepareCLIRouteForGitProtocolColdStartReaddsRefRemoteOverSQL(t *testing
 		// The remedy must be something that works at this commit and
 		// repairs the condition: the procedure call over bd's SQL
 		// connection to that server.
-		for _, want := range []string{"does not own", `bd sql 'CALL DOLT_REMOTE("add", "--ref", "` + ref + `", "origin", "` + url + `")'`} {
+		for _, want := range []string{"does not own", "re-add it on that server " + coldStartReaddRemedy(runtime.GOOS, "origin", url, ref)} {
 			if !strings.Contains(err.Error(), want) {
 				t.Errorf("error should contain %q: %v", want, err)
 			}
@@ -238,22 +239,48 @@ func TestPrepareCLIRouteForGitProtocolColdStartReaddsRefRemoteOverSQL(t *testing
 	})
 }
 
-// The remedy is pasted into a shell, so user data in it must not change the
-// command: an apostrophe in the URL is escaped for the shell, a dollar sign
-// and a backtick sit inside single quotes, and a double quote or backslash in
-// a value is escaped for the SQL literal.
-func TestColdStartReaddRemedyQuotes(t *testing.T) {
-	got := coldStartReaddRemedy("origin", "git+https://example.com/o'hare/$HOME/`id`/repo.git", "refs/heads/issue-data")
-	want := `bd sql 'CALL DOLT_REMOTE("add", "--ref", "refs/heads/issue-data", "origin", "git+https://example.com/o'\''hare/$HOME/` + "`id`" + `/repo.git")'`
-	if got != want {
-		t.Fatalf("coldStartReaddRemedy =\n%s\nwant\n%s", got, want)
-	}
-	if !strings.HasPrefix(got, "bd sql '") || !strings.HasSuffix(got, "'") {
-		t.Fatalf("the statement must be one single-quoted shell word: %s", got)
-	}
-	got = coldStartReaddRemedy("origin", `git+https://example.com/a"b\c.git`, "refs/dolt/units/team-12542")
-	if !strings.Contains(got, `"git+https://example.com/a\"b\\c.git"`) {
-		t.Fatalf("a double quote and a backslash must be escaped inside the SQL literal: %s", got)
+// TestColdStartReaddRemedy pins the GH#2118 cold-start remedy for each
+// platform, through the shared remedy printer (internal/remedy). On POSIX the
+// statement is one single-quoted bd sql argument, with a dollar sign and a
+// backtick in the URL literal inside it and a double quote or backslash
+// escaped for the SQL literal. On Windows no quoting passes the statement's
+// own double quotes and commas through cmd.exe or PowerShell to bd.exe as one
+// argument (the single-quoted form reached bd.exe as eight arguments, and bd
+// sql refused it), and on POSIX an apostrophe or backslash has no quoting
+// every shell there agrees on, so the remedy names the statement on its own,
+// never as a paste-ready bd sql command. A value holding a carriage return or
+// terminal escape is named escaped either way.
+func TestColdStartReaddRemedy(t *testing.T) {
+	const ref = "refs/dolt/units/team-1"
+	const url = "git+https://example.com/org/repo.git"
+	stmt := `CALL DOLT_REMOTE("add", "--ref", "` + ref + `", "origin", "` + url + `")`
+	const statementOnly = "by running this SQL statement there, as the one argument of bd sql (quoted for your shell) or in a Dolt SQL shell: "
+	for _, tc := range []struct {
+		name, goos, url, want string
+	}{
+		{"POSIX", "linux", url, "with: bd sql '" + stmt + "'"},
+		{"POSIX dollar and backtick", "darwin", "git+https://example.com/$HOME/`id`/repo.git",
+			`with: bd sql 'CALL DOLT_REMOTE("add", "--ref", "` + ref + `", "origin", "git+https://example.com/$HOME/` + "`id`" + `/repo.git")'`},
+		{"POSIX apostrophe", "linux", "git+https://example.com/o'hare/repo.git",
+			statementOnly + `CALL DOLT_REMOTE("add", "--ref", "` + ref + `", "origin", "git+https://example.com/o'hare/repo.git")`},
+		{"POSIX double quote and backslash", "linux", `git+https://example.com/a"b\c.git`,
+			statementOnly + `CALL DOLT_REMOTE("add", "--ref", "` + ref + `", "origin", "git+https://example.com/a\"b\\c.git")`},
+		{"Windows", "windows", url, statementOnly + stmt},
+		{"terminal escape", "linux", "git+https://example.com/r.git\r\x1b[2K", ""},
+		{"terminal escape on Windows", "windows", "git+https://example.com/r.git\r\x1b[2K", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := coldStartReaddRemedy(tc.goos, "origin", tc.url, ref)
+			if tc.want != "" && got != tc.want {
+				t.Fatalf("coldStartReaddRemedy(%q) =\n%s\nwant\n%s", tc.goos, got, tc.want)
+			}
+			if strings.ContainsAny(got, "\r\x1b") {
+				t.Fatalf("coldStartReaddRemedy(%q) prints a carriage return or terminal escape raw: %q", tc.goos, got)
+			}
+			if tc.goos == "windows" && strings.Contains(got, "bd sql '") {
+				t.Fatalf("coldStartReaddRemedy(windows) prints a POSIX-quoted bd sql command bd.exe splits: %s", got)
+			}
+		})
 	}
 }
 

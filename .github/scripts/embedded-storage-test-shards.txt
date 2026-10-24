@@ -442,6 +442,7 @@
 40 27 TestEmbeddedReaderGetOptionalRowListsAreOffByDefault
 40 27 TestEmbeddedRelationsRefusesATypeFilterOverTheColumnLength
 40 27 TestEventsJournalReadRefusesAnInteriorHole
+40 27 TestOpenReadOnlyNamesMissingDatabaseEscaped
 40 27 TestPartitionWispIDs
 40 27 TestRemoteGitDataRefOnEngine
 40 27 TestSweeperContract

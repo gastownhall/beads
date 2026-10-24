@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -22,13 +23,13 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
-	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
 	"golang.org/x/term"
 )
@@ -581,7 +582,7 @@ func planConfiguredSyncRemote(plan *BootstrapPlan, syncRemote string) (done bool
 		// remotesapi endpoint never classifies as a git code-repo URL.
 		plan.SyncRemote = syncRemote
 		plan.Action = "sync"
-		plan.Reason = "sync.remote configured — will clone from " + redactRemoteURL(syncRemote)
+		plan.Reason = "sync.remote configured — will clone from " + remedy.PrintedValue(redactRemoteURL(syncRemote))
 		return true, "", ""
 	}
 
@@ -597,8 +598,8 @@ func planConfiguredSyncRemote(plan *BootstrapPlan, syncRemote string) (done bool
 	case probeErr != nil:
 		// UNKNOWN, not "no data" — never clone something we could not verify
 		// (init's resolveRemoteHasDoltDataProbe convention).
-		reason := fmt.Sprintf("could not verify refs/dolt/data on sync.remote %q: %v",
-			redactRemoteURL(syncRemote), probeErr)
+		reason := fmt.Sprintf("could not verify refs/dolt/data on sync.remote %q: %s",
+			redactRemoteURL(syncRemote), remedy.PrintedMessage(probeErr))
 		// Said here as well as in the final verdict because a local backup may
 		// well rescue this run, and then this is the only place the user learns
 		// the remote could not be reached.
@@ -607,7 +608,7 @@ func planConfiguredSyncRemote(plan *BootstrapPlan, syncRemote string) (done bool
 	case hasData:
 		plan.SyncRemote = routed
 		plan.Action = "sync"
-		plan.Reason = "sync.remote git repo has Dolt data (refs/dolt/data) — will clone from " + redactRemoteURL(routed)
+		plan.Reason = "sync.remote git repo has Dolt data (refs/dolt/data) — will clone from " + remedy.PrintedValue(redactRemoteURL(routed))
 		return true, "", ""
 	default:
 		// Definitively no Dolt data: the repo was wired before the first `bd
@@ -645,7 +646,7 @@ func gitOriginSyncPlan(plan BootstrapPlan) (BootstrapPlan, bool) {
 	}
 	plan.SyncRemote = normalizeRemoteURL(originURL)
 	plan.Action = "sync"
-	plan.Reason = "Found Dolt data on git origin (refs/dolt/data) — will clone from " + redactRemoteURL(originURL)
+	plan.Reason = "Found Dolt data on git origin (refs/dolt/data) — will clone from " + remedy.PrintedValue(redactRemoteURL(originURL))
 	return plan, true
 }
 
@@ -766,7 +767,7 @@ func existingBootstrapDBPlan(beadsDir string, cfg *configfile.Config, isServer, 
 		if result.Exists {
 			plan.HasExisting = true
 			plan.Action = "none"
-			plan.Reason = fmt.Sprintf("Database %s already exists on server at %s", cfg.GetDoltDatabase(), doltutil.ServerAddr(ep.host, ep.port))
+			plan.Reason = fmt.Sprintf("Database %s already exists on server at %s", remedy.PrintedValue(cfg.GetDoltDatabase()), doltutil.PrintedServerAddr(ep.host, ep.port))
 			return plan, probe, true
 		}
 		// An unverifiable probe means UNKNOWN, never "exists". Answering
@@ -788,7 +789,7 @@ func existingBootstrapDBPlan(beadsDir string, cfg *configfile.Config, isServer, 
 		// and the #5743 non-zero exit rather than a false success tick.
 		if result.Err != nil && hasLocalShadowDir {
 			plan.Action = "none"
-			plan.Reason = fmt.Sprintf("Could not verify existing server database %s: %v", cfg.GetDoltDatabase(), result.Err)
+			plan.Reason = fmt.Sprintf("Could not verify existing server database %s: %v", remedy.PrintedValue(cfg.GetDoltDatabase()), remedy.PrintedError(result.Err))
 			return plan, probe, true
 		}
 		return BootstrapPlan{}, probe, false
@@ -837,7 +838,7 @@ func probeBootstrapServerDB(ep bootstrapServerProbeConfig, retryTransient bool) 
 			break
 		}
 		fmt.Fprintf(os.Stderr, "Database %s not found on reachable server (attempt %d/%d), retrying in %v (possible transient restart)\n",
-			ep.database, attempt+1, len(retryDelays), retryDelays[attempt])
+			remedy.PrintedValue(ep.database), attempt+1, len(retryDelays), retryDelays[attempt])
 		bootstrapRetryDelay(retryDelays[attempt])
 	}
 	return result
@@ -879,8 +880,12 @@ func printBootstrapPlan(plan BootstrapPlan) {
 				// origin probe on that path swallows its error, so for a
 				// credential failure the retry would "succeed" by creating a
 				// fresh database that has diverged from the team's history.
-				fmt.Fprintf(os.Stderr, "  Reproduce: git ls-remote %s refs/dolt/data\n",
-					gitRemoteURLForLsRemote(plan.BlockedRemote))
+				//
+				// sync.remote comes from the committed config.yaml, so it goes
+				// into the command through the remedy printer: one shell word,
+				// or a <url> placeholder with the URL named escaped beside it.
+				url, note := remedy.CommandArg(runtime.GOOS, gitRemoteURLForLsRemote(plan.BlockedRemote), "<url>")
+				fmt.Fprintf(os.Stderr, "  Reproduce: git ls-remote %s refs/dolt/data%s\n", url, note)
 				fmt.Fprintf(os.Stderr, "  If the remote is right, fix access (credentials, network, VPN) and re-run 'bd bootstrap'.\n")
 				fmt.Fprintf(os.Stderr, "  If it is wrong, point sync.remote at the Dolt remote: bd dolt remote add origin <url>\n")
 			}
@@ -894,18 +899,18 @@ func printBootstrapPlan(plan BootstrapPlan) {
 		}
 	case "sync":
 		fmt.Printf("Bootstrap plan: clone from remote\n")
-		fmt.Printf("  Remote: %s\n", redactRemoteURL(plan.SyncRemote))
-		fmt.Printf("  Database: %s\n", plan.Database)
+		fmt.Printf("  Remote: %s\n", remedy.PrintedValue(redactRemoteURL(plan.SyncRemote)))
+		fmt.Printf("  Database: %s\n", remedy.PrintedValue(plan.Database))
 	case "restore":
 		fmt.Printf("Bootstrap plan: restore from backup\n")
 		fmt.Printf("  Backup dir: %s\n", plan.BackupDir)
 	case "jsonl-import":
 		fmt.Printf("Bootstrap plan: import from git-tracked JSONL\n")
 		fmt.Printf("  JSONL file: %s\n", plan.JSONLFile)
-		fmt.Printf("  Database: %s\n", plan.Database)
+		fmt.Printf("  Database: %s\n", remedy.PrintedValue(plan.Database))
 	case "init":
 		fmt.Printf("Bootstrap plan: create fresh database\n")
-		fmt.Printf("  Database: %s\n", plan.Database)
+		fmt.Printf("  Database: %s\n", remedy.PrintedValue(plan.Database))
 	case "refuse":
 		// Deliberately the one-line summary, not refusalDetail: the full
 		// explanation is the error executeBootstrapPlan returns, and printing
@@ -919,7 +924,7 @@ func printBootstrapPlan(plan BootstrapPlan) {
 		// non-zero through executeBootstrapPlan, so nothing reads this as
 		// success.
 		fmt.Printf("Bootstrap plan: refuse — will NOT create a database\n")
-		fmt.Printf("  Database: %s\n", plan.Database)
+		fmt.Printf("  Database: %s\n", remedy.PrintedValue(plan.Database))
 		fmt.Printf("  Reason: %s\n", plan.Reason)
 	}
 }
@@ -1079,9 +1084,9 @@ func refuseServerModeInitForExistingProject(plan BootstrapPlan, cfg *configfile.
 // consumers get the explanation without ANSI escapes.
 func bootstrapMissingServerDBSummary(dbName, host string, port int, probeErr error) string {
 	if probeErr != nil {
-		return fmt.Sprintf("Could not verify database %q on Dolt server at %s (%v); workspace already initialized (project_id set) — refusing to create an empty database", dbName, doltutil.ServerAddr(host, port), probeErr)
+		return fmt.Sprintf("Could not verify database %q on Dolt server at %s (%v); workspace already initialized (project_id set) — refusing to create an empty database", dbName, doltutil.PrintedServerAddr(host, port), remedy.PrintedError(probeErr))
 	}
-	return fmt.Sprintf("Database %q not found on server at %s; workspace already initialized (project_id set) — refusing to create an empty database", dbName, doltutil.ServerAddr(host, port))
+	return fmt.Sprintf("Database %q not found on server at %s; workspace already initialized (project_id set) — refusing to create an empty database", dbName, doltutil.PrintedServerAddr(host, port))
 }
 
 // bootstrapMissingServerDBRefusal builds the refusal error shown when bd
@@ -1092,12 +1097,16 @@ func bootstrapMissingServerDBSummary(dbName, host string, port int, probeErr err
 // The equivalent `bd init` refusal is initGuardMissingServerDBMessage, from
 // PR #5791. This wording is kept deliberately close to it so the two can be
 // folded into one message.
+//
+// It is an error's text, printed through bd's error printer, which spells any
+// terminal escape in it (remedy.PrintedText), so the warning sign is not
+// styled here. The probe error repeats the host, which metadata.json sets.
 func bootstrapMissingServerDBRefusal(dbName, host string, port int, probeErr error) error {
 	var b strings.Builder
 	if probeErr != nil {
-		fmt.Fprintf(&b, "\n%s Could not verify database %q on Dolt server at %s: %v\n", ui.RenderWarn("⚠"), dbName, doltutil.ServerAddr(host, port), probeErr)
+		fmt.Fprintf(&b, "\n⚠ Could not verify database %q on Dolt server at %s: %v\n", dbName, doltutil.PrintedServerAddr(host, port), remedy.PrintedError(probeErr))
 	} else {
-		fmt.Fprintf(&b, "\n%s Database %q not found on server at %s.\n", ui.RenderWarn("⚠"), dbName, doltutil.ServerAddr(host, port))
+		fmt.Fprintf(&b, "\n⚠ Database %q not found on server at %s.\n", dbName, doltutil.PrintedServerAddr(host, port))
 	}
 	b.WriteString("This workspace was already initialized (metadata.json has a project_id from a prior\n")
 	b.WriteString("bd init/bootstrap), so this looks like a recovery situation, not a fresh clone.\n")
@@ -1265,7 +1274,7 @@ func executeSyncAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.
 				unit = "migration"
 			}
 			return fmt.Errorf("clone from %s succeeded, but the database needs %d schema %s (v%d -> v%d) that bd will not auto-apply to a remote-backed database (#4259)",
-				plan.SyncRemote, gateErr.Pending, unit, gateErr.CurrentVersion, gateErr.LatestVersion)
+				remedy.PrintedValue(plan.SyncRemote), gateErr.Pending, unit, gateErr.CurrentVersion, gateErr.LatestVersion)
 		}
 		// Non-fatal: wisp tables will be created on the next command that
 		// opens the store. Warn so the user knows to retry if they hit
@@ -1335,7 +1344,7 @@ func printBootstrapRemoteBehindGuidance(w io.Writer, e *schema.RemoteMigrateGate
 		unit = "migration"
 	}
 	fmt.Fprintf(w, "\nThe database cloned from %s needs %d schema %s (v%d -> v%d).\n",
-		syncRemote, e.Pending, unit, e.CurrentVersion, e.LatestVersion)
+		remedy.PrintedValue(syncRemote), e.Pending, unit, e.CurrentVersion, e.LatestVersion)
 	fmt.Fprint(w,
 		"  bd will not migrate it automatically: migrating clones independently forks\n"+
 			"  the schema so `bd dolt pull` can no longer merge (#4259).\n"+
@@ -1518,14 +1527,14 @@ func cloneViaServer(ctx context.Context, remoteURL, dbName string, ep bootstrapS
 
 	if err := db.PingContext(cloneCtx); err != nil {
 		return fmt.Errorf("dolt server unreachable at %s (is dolt sql-server running?): %w",
-			doltutil.ServerAddr(ep.host, ep.port), err)
+			doltutil.PrintedServerAddr(ep.host, ep.port), remedy.PrintedError(err))
 	}
 
 	if err := versioncontrolops.DoltClone(cloneCtx, db, remoteURL, dbName, os.Getenv("DOLT_REMOTE_USER")); err != nil {
 		return fmt.Errorf("clone from remote via server: %w", err)
 	}
 	fmt.Fprintf(os.Stderr, "Synced database from %s (via server at %s)\n",
-		remoteURL, doltutil.ServerAddr(ep.host, ep.port))
+		remedy.PrintedValue(remoteURL), doltutil.PrintedServerAddr(ep.host, ep.port))
 	return nil
 }
 
@@ -1643,7 +1652,7 @@ func cloneViaCLI(ctx context.Context, beadsDir, remoteURL, dbName string) error 
 		return fmt.Errorf("sync from remote: %w", err)
 	}
 	if synced {
-		fmt.Fprintf(os.Stderr, "Synced database from %s\n", remoteURL)
+		fmt.Fprintf(os.Stderr, "Synced database from %s\n", remedy.PrintedValue(remoteURL))
 	}
 	return nil
 }

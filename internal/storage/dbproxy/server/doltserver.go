@@ -24,6 +24,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/procid"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/identity"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/pidfile"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/util"
@@ -599,9 +600,9 @@ func (s *DoltServer) waitReady(ctx context.Context, watch *doltserver.StartupWat
 
 		if time.Now().After(deadline) {
 			if needReadyLine && !watch.IsReady() {
-				what := "and nothing answered on " + s.listenAddr()
+				what := "and nothing answered on " + remedy.PrintedValue(s.listenAddr())
 				if answered {
-					what = "although something answered on " + s.listenAddr()
+					what = "although something answered on " + remedy.PrintedValue(s.listenAddr())
 				}
 				return fmt.Errorf("dolt sql-server (pid %d) never logged %q within %s %s; readiness needs that line on dolt's own output: "+
 					"if a wrapper filters dolt's stdout/stderr or this dolt words it differently, set log_level to warning in %s to fall back to dial-only readiness",
@@ -637,7 +638,7 @@ func (s *DoltServer) listenAddr() string {
 // child wrote.
 func (s *DoltServer) exitedBeforeReady(watch *doltserver.StartupWatch) error {
 	if watch.SawPortInUse() {
-		return fmt.Errorf("%w: dolt sql-server could not bind %s and exited", ErrPortInUse, s.listenAddr())
+		return fmt.Errorf("%w: dolt sql-server could not bind %s and exited", ErrPortInUse, remedy.PrintedValue(s.listenAddr()))
 	}
 	return errors.New("dolt sql-server exited before listener became ready")
 }

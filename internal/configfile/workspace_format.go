@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/steveyegge/beads/internal/remedy"
 )
 
 // GraphFormatMarkerFile is the format sentinel graph-preview builds write in
@@ -33,13 +35,16 @@ type UnsupportedWorkspaceFormatError struct {
 	FormatMarker bool
 }
 
+// BeadsDir can be a routed planning or target repo a cloned repository's
+// committed routing config names, so Error names it through the remedy
+// printer (remedy.PrintedValue): it is printed beside Hint.
 func (e *UnsupportedWorkspaceFormatError) Error() string {
 	if e.FormatMarker {
 		return fmt.Sprintf("workspace %s has a %s marker, which this bd build does not support; %s",
-			e.BeadsDir, GraphFormatMarkerFile, BackendNotOpenedGuarantee)
+			remedy.PrintedValue(e.BeadsDir), GraphFormatMarkerFile, BackendNotOpenedGuarantee)
 	}
 	return fmt.Sprintf("workspace %s uses format graph_mode %q, which this bd build does not support; %s",
-		e.BeadsDir, e.GraphMode, BackendNotOpenedGuarantee)
+		remedy.PrintedValue(e.BeadsDir), e.GraphMode, BackendNotOpenedGuarantee)
 }
 
 // Hint names the remedy: a build that supports the format, with the

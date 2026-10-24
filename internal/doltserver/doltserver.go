@@ -1330,7 +1330,7 @@ func EnsureRunningDetailed(beadsDir string) (port int, startedByUs bool, err err
 				"start a local server because an external one is configured.\n\n"+
 				"%s\n"+
 				"  bd dolt status   # detailed external-server check",
-				doltutil.ServerAddr(host, cfg.Port), remoteServerAdvice(host, cfg.Port))}
+				doltutil.PrintedServerAddr(host, cfg.Port), remoteServerAdvice(host, cfg.Port))}
 		}
 		// A named port declares the server external: "bd dolt start" would
 		// start bd's own server on it instead of the one that belongs there.
@@ -1358,7 +1358,7 @@ func EnsureRunningDetailed(beadsDir string) (port int, startedByUs bool, err err
 				"This is an external server; bd will not start it. Verify it is running:\n"+
 				"  %s\n"+
 				"  bd dolt status   # detailed external-server check",
-				doltutil.ServerAddr(host, cfg.Port), ReachabilityCheck(host, cfg.Port))
+				doltutil.PrintedServerAddr(host, cfg.Port), ReachabilityCheck(host, cfg.Port))
 		}
 		return 0, false, fmt.Errorf("Dolt server unreachable (port %d) and auto-start is disabled "+
 			"(dolt.auto-start: false in config.yaml or BEADS_DOLT_AUTO_START=0).\n\n"+

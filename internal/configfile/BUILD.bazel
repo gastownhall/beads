@@ -18,6 +18,7 @@ go_library(
     visibility = ["//:__subpackages__"],
     deps = [
         "//internal/config",
+        "//internal/remedy",
         "//internal/storage/backendnames",
     ],
 )
@@ -29,8 +30,10 @@ go_test(
         "central_config_test.go",
         "configfile_test.go",
         "credentials_test.go",
+        "credentials_unix_remedy_test.go",
         "external_dolt_config_test.go",
         "graph_mode_test.go",
+        "remedy_printing_test.go",
         "workspace_format_test.go",
     ],
     embed = [":configfile"],

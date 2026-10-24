@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
 	"strconv"
@@ -44,6 +45,7 @@ import (
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/gittraceenv"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/storage/issueops"
@@ -1832,7 +1834,7 @@ func New(ctx context.Context, cfg *Config) (*DoltStore, error) {
 			"refusing to connect test database %q to server %s: "+
 				"set BEADS_TEST_SERVER=1 on a dedicated test server, "+
 				"or use test helpers in internal/storage/dolt/testserver",
-			cfg.Database, addr)
+			cfg.Database, remedy.PrintedValue(addr))
 	}
 
 	return newServerMode(ctx, cfg)
@@ -1925,7 +1927,7 @@ func buildTestModeProductionPortPanic(cfg *Config) string {
 			"%s",
 		cfg.Database,
 		cfg.Path,
-		addr,
+		remedy.PrintedValue(addr),
 		rules.String(),
 		fixLines.String(),
 	)
@@ -2048,6 +2050,11 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		conn, dialErr = net.DialTimeout("tcp", addr, 500*time.Millisecond)
 	}
 	if dialErr != nil {
+		// The endpoint comes from metadata.json (dolt_server_host,
+		// dolt_server_socket), which a cloned repository commits, and a
+		// dial error repeats it: each message below names both through
+		// the remedy printer, so neither can redraw the advice under it.
+		dialErr = remedy.PrintedError(dialErr)
 		// Auto-start: if enabled and connecting locally via TCP, start a server.
 		// Socket mode is excluded — auto-start creates a TCP listener, not a
 		// unix socket, so the DSN would still fail. Socket users are expected
@@ -2080,13 +2087,13 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 				// and "bd dolt start" describe a start bd must not make.
 				if errors.Is(startErr, doltserver.ErrExternallyManaged) {
 					if hint := externallyManagedPortHint(cfg, resolvedBeadsDir, addr); hint != "" {
-						return nil, fmt.Errorf("Dolt server unreachable at %s: %w\n\n%s", addr, dialErr, hint)
+						return nil, fmt.Errorf("Dolt server unreachable at %s: %w\n\n%s", remedy.PrintedValue(addr), dialErr, hint)
 					}
 				}
 				return nil, fmt.Errorf("Dolt server unreachable at %s and auto-start failed: %w\n\n"+
 					"To start manually: bd dolt start\n"+
 					"To disable auto-start: set dolt.auto-start: false in .beads/config.yaml",
-					addr, startErr)
+					remedy.PrintedValue(addr), remedy.PrintedTextError(startErr))
 			}
 			// Only tests should stop auto-started servers on Close(). In normal
 			// repo-local server mode, leaving the server up avoids endpoint churn
@@ -2171,7 +2178,7 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 					breaker.RecordFailure()
 				}
 				return nil, fmt.Errorf("Dolt server auto-started but still unreachable at %s: %w\n\n"+
-					"Check logs: %s", addr, dialErr, doltserver.LogPath(resolvedBeadsDir))
+					"Check logs: %s", remedy.PrintedValue(addr), remedy.PrintedError(dialErr), doltserver.LogPath(resolvedBeadsDir))
 			}
 		} else {
 			if breaker != nil {
@@ -2179,11 +2186,16 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 			}
 			var hint string
 			if cfg.ServerSocket != "" {
+				// The socket path is metadata.json's dolt_server_socket,
+				// which a cloned repository commits: it goes into the
+				// command as one shell word, or as a <path> placeholder
+				// with the path named escaped beside it.
+				socket, note := remedy.CommandArg(runtime.GOOS, cfg.ServerSocket, "<path>")
 				hint = fmt.Sprintf("The Dolt server is not listening on socket %s.\n"+
 					"Ensure the server is started with --socket:\n"+
-					"  dolt sql-server --socket %s\n"+
+					"  dolt sql-server --socket %s%s\n"+
 					"Auto-start is not supported in socket mode.",
-					cfg.ServerSocket, cfg.ServerSocket)
+					remedy.PrintedValue(cfg.ServerSocket), socket, note)
 			} else if isExternalServerHost(cfg.ServerHost) {
 				// External (non-localhost or IPv6 loopback) server: bd
 				// does not manage it; "bd dolt start" would be wrong
@@ -2194,7 +2206,7 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 				hint = fmt.Sprintf("Configured Dolt server at %s is unreachable.\n"+
 					"Verify the external server is running and reachable from this host:\n"+
 					"  %s",
-					addr, doltserver.ReachabilityCheck(cfg.ServerHost, cfg.ServerPort))
+					remedy.PrintedValue(addr), doltserver.ReachabilityCheck(cfg.ServerHost, cfg.ServerPort))
 			} else if named := externallyManagedPortHint(cfg, resolvedBeadsDir, addr); named != "" {
 				// A named port declares the server externally managed
 				// (BEADS_DOLT_SERVER_PORT, dolt_server_port), which is
@@ -2210,7 +2222,7 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 				hint = "The Dolt server may not be running. Try:\n  bd dolt start"
 			}
 			return nil, fmt.Errorf("Dolt server unreachable at %s: %w\n\n%s",
-				addr, dialErr, hint)
+				remedy.PrintedValue(addr), dialErr, hint)
 		}
 	}
 	// Drain the MySQL handshake before closing so Close() sends FIN, not RST
@@ -2711,7 +2723,8 @@ func isExternalServerHost(host string) bool {
 // in the dial-failure hint, only a server bd can start gets `bd dolt start`;
 // an external one, or one at the IPv6 loopback, gets the reachability check.
 func createDatabaseRefusedError(cfg *Config, err error) error {
-	addr := doltutil.ServerAddr(cfg.ServerHost, cfg.ServerPort)
+	addr := doltutil.PrintedServerAddr(cfg.ServerHost, cfg.ServerPort)
+	err = remedy.PrintedError(err)
 	if isExternalServerHost(cfg.ServerHost) {
 		return fmt.Errorf("failed to connect to Dolt server at %s: %w\n\n"+
 			"Verify the external server is running and reachable from this host:\n  %s",
@@ -2965,7 +2978,7 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, se
 	if cfg.Gateway {
 		if err := db.PingContext(ctx); err != nil {
 			return nil, "", serverConnFacts{}, fmt.Errorf("failed to connect to gateway server %s (database %q): %w",
-				doltutil.ServerAddr(cfg.ServerHost, cfg.ServerPort), cfg.Database, err)
+				doltutil.PrintedServerAddr(cfg.ServerHost, cfg.ServerPort), cfg.Database, remedy.PrintedError(err))
 		}
 		// A connect proves the gateway accepted the credential, NOT that it
 		// honored the database name. A gateway scopes connections by
@@ -3064,7 +3077,7 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, se
 	dbExists, checkErr := databaseExistsOnServer(ctx, initDB, cfg.Database)
 	if checkErr != nil {
 		return nil, "", serverConnFacts{}, fmt.Errorf("failed to check if database %q exists on server %s: %w",
-			cfg.Database, doltutil.ServerAddr(cfg.ServerHost, cfg.ServerPort), checkErr)
+			cfg.Database, doltutil.PrintedServerAddr(cfg.ServerHost, cfg.ServerPort), remedy.PrintedError(checkErr))
 	}
 
 	// created reports whether THIS call's CREATE DATABASE won the race and
@@ -4550,7 +4563,7 @@ func (s *DoltStore) prepareCLIRouteForGitProtocol(ctx context.Context, remote st
 			continue
 		}
 		if !doltutil.IsGitProtocolURL(r.URL) {
-			return false, fmt.Errorf("remote %q (%s) is persisted on disk but not yet visible to this sql-server (GH#2118 cold start); retry shortly, or restart the dolt sql-server if it persists", remote, r.URL)
+			return false, fmt.Errorf("remote %q (%s) is persisted on disk but not yet visible to this sql-server (GH#2118 cold start); retry shortly, or restart the dolt sql-server if it persists", remote, remedy.PrintedValue(r.URL))
 		}
 		if r.Ref != "" {
 			// The proxied CLI refuses remote parameters, so a ref remote is
@@ -4561,10 +4574,10 @@ func (s *DoltStore) prepareCLIRouteForGitProtocol(ctx context.Context, remote st
 			// the same --ref, and bd's own remote add finds the persisted
 			// remote and returns without a SQL add).
 			if s.localActiveDatabaseDir == "" || s.localActiveDatabaseDir != s.CLIDir() {
-				return false, fmt.Errorf("remote %q (%s on %s) is persisted on disk but not visible to this sql-server (GH#2118 cold start), and this bd does not own the server's data directory; re-add it on that server with: %s", remote, r.URL, r.Ref, coldStartReaddRemedy(remote, r.URL, r.Ref))
+				return false, fmt.Errorf("remote %q (%s on %s) is persisted on disk but not visible to this sql-server (GH#2118 cold start), and this bd does not own the server's data directory; re-add it on that server %s", remote, remedy.PrintedValue(r.URL), remedy.PrintedValue(r.Ref), coldStartReaddRemedy(runtime.GOOS, remote, r.URL, r.Ref))
 			}
 			if err := versioncontrolops.AddRemote(ctx, s.db, remote, r.URL, r.Ref); err != nil && !strings.Contains(strings.ToLower(err.Error()), "already exists") {
-				return false, fmt.Errorf("remote %q (%s on %s) is persisted on disk but not visible to this sql-server (GH#2118 cold start), and re-adding it over SQL failed: %w", remote, r.URL, r.Ref, err)
+				return false, fmt.Errorf("remote %q (%s on %s) is persisted on disk but not visible to this sql-server (GH#2118 cold start), and re-adding it over SQL failed: %w", remote, remedy.PrintedValue(r.URL), remedy.PrintedValue(r.Ref), err)
 			}
 		}
 		if err := s.ensureMatchingCLIRemote(remote, r.URL, r.Ref); err != nil {
@@ -4575,17 +4588,32 @@ func (s *DoltStore) prepareCLIRouteForGitProtocol(ctx context.Context, remote st
 	return false, nil
 }
 
-// coldStartReaddRemedy is the command an operator runs to register a ref
-// remote on a sql-server this bd does not own: bd sql with a DOLT_REMOTE call.
-// The values are user data that lands in a message meant to be pasted into a
-// shell, so the SQL literals are double-quoted with their escapes and the
-// whole statement is single-quoted for the shell, which keeps an apostrophe,
-// a dollar sign, or a backtick in a URL from changing the command.
-func coldStartReaddRemedy(remote, url, ref string) string {
+// coldStartReaddRemedy completes the refusal of a ref remote on a sql-server
+// this bd does not own ("re-add it on that server ..."): the DOLT_REMOTE call
+// that registers it there. The values are repository data (the persisted
+// remote's URL and ref), so the SQL literals are double-quoted with their
+// escapes, and the statement goes into a paste-ready bd sql command only as
+// the remedy printer quotes it for the shell on goos
+// (remedy.ShellQuotedFor): single-quoted on POSIX, which keeps a dollar sign
+// or a backtick in a URL from changing the command. On Windows the
+// statement's own double quotes and commas cannot be passed through cmd.exe or
+// PowerShell to bd.exe as one argument (Go's argument parsing split the
+// single-quoted form into eight). On POSIX the statement has no quoting
+// PowerShell and fish agree on when it holds an apostrophe or a backslash,
+// which a value's double quote becomes too (SQLDoubleQuoted spells it \"),
+// or one of ‘ ’ ‚ ‛ (U+2018 to U+201B), which end single quotes in
+// PowerShell, and none at all when a value does not print as itself. In
+// each of those cases the remedy names the statement on its own, spelled by
+// remedy.PrintedValue, to run as bd sql's one argument or in a Dolt SQL
+// shell, rather than a command that would run something else.
+func coldStartReaddRemedy(goos, remote, url, ref string) string {
 	stmt := fmt.Sprintf("CALL DOLT_REMOTE(%s, %s, %s, %s, %s)",
 		doltutil.SQLDoubleQuoted("add"), doltutil.SQLDoubleQuoted("--ref"),
 		doltutil.SQLDoubleQuoted(ref), doltutil.SQLDoubleQuoted(remote), doltutil.SQLDoubleQuoted(url))
-	return "bd sql " + doltutil.ShellQuote(stmt)
+	if quoted, ok := remedy.ShellQuotedFor(goos, stmt); ok {
+		return "with: bd sql " + quoted
+	}
+	return "by running this SQL statement there, as the one argument of bd sql (quoted for your shell) or in a Dolt SQL shell: " + remedy.PrintedValue(stmt)
 }
 
 // shouldUseCLIForGitProtocol is a compatibility wrapper for tests and older

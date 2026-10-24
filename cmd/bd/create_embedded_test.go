@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/types"
@@ -1379,9 +1380,9 @@ func TestEmbeddedCreateRepoMetadataLessTarget(t *testing.T) {
 	}
 
 	// db.example.com is quoted for this host's shell (TestShellQuotedFor).
-	quotedHost, ok := shellQuotedFor(runtime.GOOS, "db.example.com")
+	quotedHost, ok := remedy.ShellQuotedFor(runtime.GOOS, "db.example.com")
 	if !ok {
-		t.Fatalf("shellQuotedFor(%q, db.example.com) cannot quote it", runtime.GOOS)
+		t.Fatalf("remedy.ShellQuotedFor(%q, db.example.com) cannot quote it", runtime.GOOS)
 	}
 	for _, tc := range []struct {
 		name string

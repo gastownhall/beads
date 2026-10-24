@@ -14,6 +14,7 @@ import (
 	"os"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
@@ -145,7 +146,7 @@ func renderProxiedDoltStatus(status proxiedDoltStatus) {
 	fmt.Printf("  Root:       %s\n", status.Root)
 	switch {
 	case !status.BackendManaged:
-		fmt.Printf("  Backend:    external at %s (not managed by bd)\n", status.BackendEndpoint)
+		fmt.Printf("  Backend:    external at %s (not managed by bd)\n", remedy.PrintedValue(status.BackendEndpoint))
 	case status.BackendRunning:
 		fmt.Printf("  Backend:    running (dolt PID %d, port %d)\n", status.BackendPID, status.BackendPort)
 	default:

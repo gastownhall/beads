@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/types"
@@ -369,7 +370,7 @@ func resolveViaPrefixRoutingWithAccess(ctx context.Context, id string, writable 
 	result.closeFn = func() { _ = targetStore.Close() }
 
 	if os.Getenv("BD_DEBUG_ROUTING") != "" {
-		fmt.Fprintf(os.Stderr, "[routing] Resolved %s via prefix route to %s (database: %s)\n", id, matchedRoute.Path, targetDB)
+		fmt.Fprintf(os.Stderr, "[routing] Resolved %s via prefix route to %s (database: %s)\n", id, remedy.PrintedValue(matchedRoute.Path), remedy.PrintedValue(targetDB))
 	}
 
 	return result, nil
@@ -518,7 +519,7 @@ func loadDoltDatabase(beadsDir string) (string, error) {
 		DoltDatabase string `json:"dolt_database"`
 	}
 	if err := json.Unmarshal(data, &meta); err != nil {
-		return "", fmt.Errorf("parsing %s: %w", metadataPath, err)
+		return "", fmt.Errorf("parsing %s: %w", remedy.PrintedValue(metadataPath), remedy.PrintedError(err))
 	}
 	return meta.DoltDatabase, nil
 }
@@ -553,9 +554,10 @@ func autoRouteTargetDatabase(beadsDir string, writable bool) (string, error) {
 	case !writable:
 		return database, nil
 	case err != nil:
-		return "", err
+		// A read or parse error repeats the routed path as the OS spelled it.
+		return "", remedy.PrintedError(err)
 	case database == "":
-		return "", fmt.Errorf("%s has no dolt_database field", filepath.Join(beadsDir, "metadata.json"))
+		return "", fmt.Errorf("%s has no dolt_database field", remedy.PrintedValue(filepath.Join(beadsDir, "metadata.json")))
 	}
 	return database, nil
 }

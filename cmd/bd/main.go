@@ -35,6 +35,7 @@ import (
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/migration"
 	"github.com/steveyegge/beads/internal/molecules"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/remotecache"
 	"github.com/steveyegge/beads/internal/routing"
 	"github.com/steveyegge/beads/internal/storage"
@@ -2909,6 +2910,11 @@ func main() {
 	rootCmd.InitDefaultHelpCmd()
 	registerHelpAllFlag()
 
+	// Cobra prints a command's returned error itself ("Error: ...") unless
+	// the command silences it: that line goes through the same backstop as
+	// bd's own error printers (HandleError), since an error can repeat a value
+	// a cloned repository sets.
+	rootCmd.SetErr(remedy.TextWriter(os.Stderr))
 	executedCmd, err := rootCmd.ExecuteC()
 
 	// Let this command's fire-and-forget hooks finish, for the same
@@ -2929,7 +2935,7 @@ func main() {
 			os.Exit(code)
 		}
 		if executedCmd != nil && executedCmd.SilenceErrors {
-			fmt.Fprintf(os.Stderr, "Error: %s\n", err.Error())
+			fmt.Fprintf(os.Stderr, "Error: %s\n", remedy.PrintedText(err.Error()))
 		}
 		os.Exit(1)
 	}
