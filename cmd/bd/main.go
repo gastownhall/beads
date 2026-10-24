@@ -1962,7 +1962,8 @@ var rootCmd = &cobra.Command{
 			// Classification-only read (GH#804), never strict --readonly or a
 			// preview: the store is genuinely writable underneath, so the
 			// lazy defer-wake sweep may still run (be-vbhpf).
-			ClassifiedRead: policy.readOnly && !readonlyMode && !previewMode,
+			// A migration freeze also disqualifies it (dc-6jaq): the sweep is a write.
+			ClassifiedRead: classifiedReadOpen(policy.readOnly, readonlyMode, previewMode, commandFreeze.Frozen()),
 		}
 
 		// Load config to get database name and server connection settings.
