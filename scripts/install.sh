@@ -602,10 +602,28 @@ verify_installation() {
     # If multiple 'bd' binaries exist on PATH, warn the user before verification
     warn_if_multiple_bd || true
 
+    # Run the binary we just installed, not whichever 'bd' is first on PATH,
+    # and only claim success once it has actually run (#6739).
+    local bd_bin="${LAST_INSTALL_PATH:-bd}"
+    local version_output
+    if ! version_output=$("$bd_bin" version 2>&1); then
+        log_error "bd was installed to $bd_bin but fails to run:"
+        echo "$version_output" >&2
+        if [ -f /etc/alpine-release ] || ldd --version 2>&1 | grep -qi musl; then
+            echo "" >&2
+            echo "This system uses musl libc (e.g. Alpine); the prebuilt bd binary requires glibc." >&2
+            echo "Build bd for this system with Go 1.24+ instead:" >&2
+            echo "  Server-mode only: CGO_ENABLED=0 go install github.com/steveyegge/beads/cmd/bd@latest" >&2
+            echo "  Embedded-capable (needs a C compiler): CGO_ENABLED=1 GOFLAGS=-tags=gms_pure_go go install github.com/steveyegge/beads/cmd/bd@latest" >&2
+            echo "See https://github.com/gastownhall/beads/blob/main/docs/getting-started/installation.md" >&2
+        fi
+        return 1
+    fi
+
     if command -v bd &> /dev/null; then
         log_success "bd is installed and ready!"
         echo ""
-        bd version 2>/dev/null || echo "bd (development build)"
+        echo "$version_output"
         echo ""
         echo "You can use either 'bd' or 'beads' to run the command."
         echo ""
