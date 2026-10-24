@@ -121,6 +121,85 @@ func TestWorktreeCreateRejectsInvalidPathBeforeStoreOpen(t *testing.T) {
 	}
 }
 
+func TestWorktreeCommandsHonorGlobalChangeDirectory(t *testing.T) {
+	root := t.TempDir()
+	repoDir := filepath.Join(root, "repo")
+	outsideDir := filepath.Join(root, "outside")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatalf("mkdir repo: %v", err)
+	}
+	if err := os.MkdirAll(outsideDir, 0o755); err != nil {
+		t.Fatalf("mkdir outside: %v", err)
+	}
+
+	runGit := func(dir string, args ...string) string {
+		t.Helper()
+		command := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		output, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, output)
+		}
+		return string(output)
+	}
+	runGit(repoDir, "init", "-q")
+	runGit(repoDir, "config", "user.name", "fixture")
+	runGit(repoDir, "config", "user.email", "fixture@example.invalid")
+	runGit(repoDir, "config", "core.hooksPath", ".git/hooks")
+	if err := os.WriteFile(filepath.Join(repoDir, "tracked.txt"), []byte("fixture\n"), 0o644); err != nil {
+		t.Fatalf("write tracked file: %v", err)
+	}
+	runGit(repoDir, "add", "tracked.txt")
+	runGit(repoDir, "commit", "-qm", "fixture")
+
+	beadsDir := filepath.Join(repoDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"backend":"dolt"}`), 0o600); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+
+	oldChangeDir := changeDir
+	changeDir = repoDir
+	t.Cleanup(func() { changeDir = oldChangeDir })
+	t.Chdir(outsideDir)
+	beads.ResetCaches()
+	internalgit.ResetCaches()
+	t.Cleanup(func() {
+		beads.ResetCaches()
+		internalgit.ResetCaches()
+	})
+
+	workerDir := filepath.Join(repoDir, "worker")
+	worktreeBranch = "fixture-worker"
+	t.Cleanup(func() { worktreeBranch = "" })
+	if err := runWorktreeCreate(worktreeCreateCmd, []string{"worker"}); err != nil {
+		t.Fatalf("worktree create with -C selection: %v", err)
+	}
+	if _, err := os.Stat(workerDir); err != nil {
+		t.Fatalf("created worktree at selected repo path: %v", err)
+	}
+	registeredRoot := strings.TrimSpace(runGit(workerDir, "rev-parse", "--show-toplevel"))
+	if !sameWorktreePath(registeredRoot, workerDir) {
+		t.Fatalf("selected repository registered worktree root %q, want %q", registeredRoot, workerDir)
+	}
+
+	if err := runWorktreeList(worktreeListCmd, nil); err != nil {
+		t.Fatalf("worktree list with -C selection: %v", err)
+	}
+
+	options := &worktreeRemoveOptions{
+		force: singleWorktreeBoolFlag{name: "force", value: true, set: true},
+	}
+	worktreeRemoveCmd.SetContext(context.Background())
+	if err := runWorktreeRemove(worktreeRemoveCmd, []string{"worker"}, options, worktreeRemoveHooks{}); err != nil {
+		t.Fatalf("worktree remove with -C selection: %v", err)
+	}
+	if _, err := os.Stat(workerDir); !os.IsNotExist(err) {
+		t.Fatalf("removed worktree still exists or stat failed unexpectedly: %v", err)
+	}
+}
+
 // TestGetRedirectTarget tests that getRedirectTarget resolves redirect paths correctly.
 // This is the fix for GH#1266: relative paths must be resolved from the worktree root
 // (parent of .beads/), not from .beads/ itself, matching FollowRedirect behavior.
