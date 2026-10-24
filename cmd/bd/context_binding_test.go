@@ -774,8 +774,7 @@ func unsetRoutingConfigEnvForTest(t *testing.T) {
 // TestDetermineAutoRoutedRepoPathDetectsRoleOnlyWhenRoutingReadsIt pins role
 // detection to the fully resolved routing config. The fixture makes any
 // detection visible: the project is not a git repository, so its role path
-// warns, while a global beads.role gives `git config --get` something to fall
-// back on. Routing that cannot read the role must leave stderr clean, and the
+// warns, while a shared store repository supplies a local contributor role. Routing that cannot read the role must leave stderr clean, and the
 // legacy contributor.auto_route switch must still detect with routing.mode
 // empty.
 func TestDetermineAutoRoutedRepoPathDetectsRoleOnlyWhenRoutingReadsIt(t *testing.T) {
@@ -823,7 +822,14 @@ func TestDetermineAutoRoutedRepoPathDetectsRoleOnlyWhenRoutingReadsIt(t *testing
 			unsetRoutingConfigEnvForTest(t)
 
 			project := t.TempDir()
-			writeTestConfigYAML(t, filepath.Join(project, ".beads"), "")
+			store := newGitRepo(t)
+			writeTestConfigYAML(t, filepath.Join(store, ".beads"), "")
+			if err := gitCommand("-C", store, "config", "--local", "beads.role", "contributor").Run(); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(filepath.Join(store, ".beads"), filepath.Join(project, ".beads")); err != nil {
+				t.Fatal(err)
+			}
 			t.Chdir(project)
 			t.Setenv("BEADS_DIR", "")
 			setBeadsDirStartupProvenanceForTest(t, false)

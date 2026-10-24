@@ -92,6 +92,7 @@ Beads supports hierarchical IDs for epics:
 
 * **Contributors** (forked repos): Run `bd init --contributor` to route planning issues to a separate repo (e.g., `~/.beads-planning`). Keeps experimental work out of PRs.
 * **Maintainers** (write access): Beads auto-detects maintainer role via SSH URLs or HTTPS with credentials. Only need `git config beads.role maintainer` if using GitHub HTTPS without credentials but you have write access.
+* Outside Git, Beads discovers `.beads` in parent directories, follows a shared-store symlink, and reads `beads.role` from the store repository’s local Git config. Set it with `git -C /path/to/store-repo config --local beads.role maintainer` (or `contributor`). Inside Git, the current repository’s configuration still takes precedence.
 
 ## 📦 Installation
 
