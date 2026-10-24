@@ -1,6 +1,6 @@
 ---
 title: "bd edit"
-description: "Edit an issue field using your configured $EDITOR."
+description: "Edit an issue field in $EDITOR"
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
