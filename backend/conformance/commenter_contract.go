@@ -2,6 +2,7 @@ package conformance
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"slices"
@@ -545,23 +546,9 @@ func RunCommenterRecordsExactlyOneHistoryEntry(t *testing.T, ctx context.Context
 	assertCommenterRowCount(t, ctx, fixture, "comments", anchor, 1)
 }
 
-// RunCommenterLeavesTheAnchorIssueUntouched pins commenter.go:51-54, the clause
-// that makes Commenter a role rather than a Lifecycle verb: a comment appends a
-// row to a thread the issue owns and leaves every field of the issue untouched.
-//
-// It is the promise a caller leans on when it comments on work it is not
-// otherwise touching. An implementation that bumped the anchor's updated_at
-// would reorder every "recently updated" listing and re-dirty the row for every
-// federation sync, and nothing else in this file would notice: the thread would
-// still hold exactly one comment.
-//
-// updated_at is the load-bearing column, and not only because it is one field
-// among many. The issues table declares it ON UPDATE CURRENT_TIMESTAMP
-// (schema/migrations/0001_create_issues.up.sql), so any UPDATE that changes any
-// column at all moves it. Reading it therefore stands in for a whole-row check
-// that this seam has no way to spell exhaustively; the named columns beside it
-// are the ones a comment path could plausibly reach on purpose.
-func RunCommenterLeavesTheAnchorIssueUntouched(t *testing.T, ctx context.Context, fixture CommenterFixture) {
+// RunCommenterAdvancesIssueActivity verifies that live comments participate in
+// the issue's activity ordering while leaving unrelated issue fields alone.
+func RunCommenterAdvancesIssueActivity(t *testing.T, ctx context.Context, fixture CommenterFixture) {
 	t.Helper()
 	anchor := fixture.IssuePrefix + "-untouched"
 	seedCommenterIssue(t, ctx, fixture, anchor)
@@ -581,23 +568,65 @@ func RunCommenterLeavesTheAnchorIssueUntouched(t *testing.T, ctx context.Context
 	}
 	after := readCommenterAnchorRow(t, ctx, fixture, anchor)
 
-	if !after.UpdatedAt.Equal(before.UpdatedAt) {
-		t.Errorf("anchor %s updated_at moved %s -> %s across two comments: the column is ON UPDATE CURRENT_TIMESTAMP, so something wrote to the issue row",
-			anchor, before.UpdatedAt.UTC(), after.UpdatedAt.UTC())
-	}
 	if after.Status != before.Status {
 		t.Errorf("anchor %s status went %q -> %q across a comment", anchor, before.Status, after.Status)
 	}
 	if after.Assignee != before.Assignee {
 		t.Errorf("anchor %s assignee went %q -> %q across a comment", anchor, before.Assignee, after.Assignee)
 	}
-	if after.Fingerprint != before.Fingerprint {
-		t.Errorf("anchor %s changed across a comment:\nbefore %s\n after %s\na comment leaves every field of the issue untouched",
-			anchor, before.Fingerprint, after.Fingerprint)
+	var commentCreated, updated, lastActivity sql.NullTime
+	if err := fixture.QueryScalar(ctx, `SELECT c.created_at, i.updated_at, i.last_activity
+		FROM comments c JOIN issues i ON i.id = c.issue_id
+		WHERE c.issue_id = ? ORDER BY c.created_at DESC, c.id DESC LIMIT 1`, []any{anchor},
+		&commentCreated, &updated, &lastActivity); err != nil {
+		t.Fatalf("read activity timestamps for %s: %v", anchor, err)
+	}
+	if !commentCreated.Valid || !updated.Valid || updated.Time.Before(commentCreated.Time) {
+		t.Errorf("anchor %s updated_at = %v, comment created_at = %v; updated_at must be at least the comment activity time", anchor, updated, commentCreated)
+	}
+	if !lastActivity.Valid || lastActivity.Time.Before(commentCreated.Time) {
+		t.Errorf("anchor %s last_activity = %v, comment created_at = %v; last_activity must be at least the comment activity time", anchor, lastActivity, commentCreated)
 	}
 	// The append itself has to have happened, or every equality above is a
 	// statement about a call that did nothing.
 	assertCommenterRowCount(t, ctx, fixture, "comments", anchor, 2)
+}
+
+// RunCommenterDeletesComment verifies exact deletion, actor attribution, and
+// refusal of an unknown comment id.
+func RunCommenterDeletesComment(t *testing.T, ctx context.Context, fixture CommenterFixture) {
+	t.Helper()
+	anchor := fixture.IssuePrefix + "-delete"
+	seedCommenterIssue(t, ctx, fixture, anchor)
+	added, err := fixture.Commenter.AddComment(ctx, publicops.AddCommentRequest{
+		Author: "author", IssueID: anchor, Text: "remove me",
+	})
+	if err != nil {
+		t.Fatalf("AddComment: %v", err)
+	}
+	deleted, err := fixture.Commenter.DeleteComment(ctx, publicops.DeleteCommentRequest{
+		Actor: "deleter", IssueID: anchor, CommentID: added.Comment.ID,
+	})
+	if err != nil {
+		t.Fatalf("DeleteComment: %v", err)
+	}
+	if deleted.Comment == nil || deleted.Comment.ID != added.Comment.ID {
+		t.Fatalf("DeleteComment result = %#v, want deleted comment %q", deleted.Comment, added.Comment.ID)
+	}
+	assertCommenterRowCount(t, ctx, fixture, "comments", anchor, 0)
+	var actor, audit string
+	if err := fixture.QueryScalar(ctx, `SELECT actor, comment FROM events
+		WHERE issue_id = ? ORDER BY created_at DESC, id DESC LIMIT 1`, []any{anchor}, &actor, &audit); err != nil {
+		t.Fatalf("read delete audit event: %v", err)
+	}
+	if actor != "deleter" || audit != "Deleted comment "+added.Comment.ID {
+		t.Errorf("delete audit = actor %q comment %q, want actor %q and comment %q", actor, audit, "deleter", "Deleted comment "+added.Comment.ID)
+	}
+	if _, err := fixture.Commenter.DeleteComment(ctx, publicops.DeleteCommentRequest{
+		Actor: "deleter", IssueID: anchor, CommentID: added.Comment.ID,
+	}); !errors.Is(err, publicops.ErrNotFound) {
+		t.Errorf("DeleteComment of unknown id error = %v, want ErrNotFound", err)
+	}
 }
 
 // RunCommenterRefusesBlankText pins commenter.go:31-34 and :67 from the other
