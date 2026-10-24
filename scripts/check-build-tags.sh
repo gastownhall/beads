@@ -12,8 +12,11 @@
 # scanned file invokes Bazel, the script instead requires .bazelrc to set
 # `--@rules_go//go/config:tags=...gms_pure_go` for build (and so test/run).
 #
-# GitHub Actions `run` steps are no longer scanned here; they are checked
-# structurally by scripts/checkworkflowtags.
+# GitHub Actions `run` steps are no longer scanned here. The separate
+# scripts/checkworkflowtags guard reads only top-level workflow YAML files and
+# jobs.*.steps[*].run; it does not follow `uses:` targets or composite actions,
+# and it does no Bazel handling. Workflow files still feed this script's
+# separate Bazel-user census below.
 #
 # This is the source-time companion to scripts/verify-cgo.sh (which is a
 # runtime check on release binaries). See engdocs/ICU-POLICY.md.
