@@ -152,6 +152,80 @@ func TestEmbeddedBackup(t *testing.T) {
 			t.Errorf("expected 'already exists' error, got: %s", out)
 		}
 	})
+
+	// A file:// source restores, is echoed back verbatim under --json, and is
+	// registered as the workspace's backup destination. The "@" in the path
+	// is the discriminator: RedactBackupURL reads it as userinfo, so a
+	// redacted "source" would come back naming a different location. The
+	// restore runs in a workspace that never ran 'bd backup init', so the
+	// registered URL can only have come from the restore's own registration.
+	t.Run("restore_from_file_url", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "bkurlsrc")
+		id := bdCreateSilent(t, bd, dir, "restored through a file URL")
+
+		backupURL := "file://" + filepath.Join(t.TempDir(), "backups@2024", "dolt-backup")
+		bdBackup(t, bd, dir, "init", backupURL)
+		bdBackup(t, bd, dir, "sync")
+
+		dir2, _, _ := bdInit(t, bd, "--prefix", "bkurldst")
+		out := bdBackup(t, bd, dir2, "restore", backupURL, "--force", "--json")
+		var result struct {
+			Restored bool   `json:"restored"`
+			Source   string `json:"source"`
+		}
+		if err := json.Unmarshal([]byte(out), &result); err != nil {
+			t.Fatalf("parse restore JSON: %v\noutput: %s", err, out)
+		}
+		if !result.Restored || result.Source != backupURL {
+			t.Fatalf("restore JSON = %+v, want restored=true and source=%s verbatim", result, backupURL)
+		}
+
+		var status struct {
+			Dolt struct {
+				BackupURL string `json:"backup_url"`
+			} `json:"dolt"`
+		}
+		statusOut := bdBackup(t, bd, dir2, "status", "--json")
+		if err := json.Unmarshal([]byte(statusOut), &status); err != nil {
+			t.Fatalf("parse backup status JSON: %v\noutput: %s", err, statusOut)
+		}
+		if status.Dolt.BackupURL != backupURL {
+			t.Errorf("restore registered %q as the backup destination, want %q", status.Dolt.BackupURL, backupURL)
+		}
+
+		found := false
+		for _, issue := range bdListJSON(t, bd, dir2) {
+			found = found || issue.ID == id
+		}
+		if !found {
+			t.Errorf("restored workspace does not have %s, the issue the backup contained", id)
+		}
+	})
+
+	// A file:// source naming a missing directory is refused before Dolt sees
+	// it. DOLT_BACKUP would create the directory, open it as an empty backup
+	// and, under --force, drop the live database before the restore failed.
+	t.Run("restore_refuses_missing_file_url", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "bkmiss")
+		id := bdCreateSilent(t, bd, dir, "survives a mistyped restore source")
+		missing := filepath.Join(t.TempDir(), "no-such-backup")
+
+		out := bdBackupFail(t, bd, dir, "restore", "file://"+missing, "--force")
+		if !strings.Contains(out, "backup source does not exist") {
+			t.Errorf("expected 'backup source does not exist', got: %s", out)
+		}
+		if _, err := os.Stat(missing); !os.IsNotExist(err) {
+			t.Errorf("the refused restore created %s (stat: %v)", missing, err)
+		}
+
+		found := false
+		for _, issue := range bdListJSON(t, bd, dir) {
+			found = found || issue.ID == id
+		}
+		if !found {
+			t.Errorf("the refused restore lost %s from the live database", id)
+		}
+	})
 }
 
 func TestEmbeddedBackupConcurrent(t *testing.T) {
