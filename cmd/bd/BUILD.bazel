@@ -1329,6 +1329,7 @@ go_test(
         "wisp_gc_active_embedded_test.go",
         "wisp_gc_cascade_age_test.go",
         "wisp_gc_purge_closed_embedded_test.go",
+        "wisp_gc_purge_closed_preview_embedded_test.go",
         "wisp_proxied_integration_test.go",
         "wisp_test.go",
         "workspace_format_guard_test.go",
