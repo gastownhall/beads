@@ -33,6 +33,11 @@ type doltServerTx struct {
 	// transaction's unblocking writes record for the post-commit
 	// blocked-state recheck (gastownhall/beads#6716).
 	clearRecheckScope func()
+	// unlockJournal releases the journal writer lock BeginTx took on conn (a
+	// no-op when it took none). A successful commit runs it before the
+	// post-commit recheck; both connection-release paths run it too, before
+	// the connection leaves this tx.
+	unlockJournal func()
 }
 
 var _ Tx = (*doltServerTx)(nil)
@@ -61,11 +66,17 @@ func (t *doltServerTx) Commit(ctx context.Context, message string) error {
 	_, err = t.conn.ExecContext(ctx, stmt, args...)
 	if err == nil {
 		t.done = true
-		// The write is durable. Settle the dependents its unblocking writes
-		// recorded on a fresh snapshot before the pinned session goes back
-		// to the pool (gastownhall/beads#6716). A recheck failure is logged,
-		// never returned: the caller must not read a committed write as
-		// failed and replay it.
+		// The write is durable, so the journal writer lock has done its job:
+		// release it before the recheck, as the dolt store does, so no
+		// journaled writer queues behind the recheck's retries. A release
+		// that fails discards the session, and the recheck then fails and
+		// is reported like any other.
+		t.releaseJournalLock()
+		// Settle the dependents its unblocking writes recorded on a fresh
+		// snapshot before the pinned session goes back to the pool
+		// (gastownhall/beads#6716). A recheck failure is logged, never
+		// returned: the caller must not read a committed write as failed and
+		// replay it.
 		if t.recheckBlockedAfterCommit(ctx, issueops.TakeBlockedRecheck(t.conn)) {
 			t.releaseConn()
 		} else {
@@ -359,6 +370,7 @@ func (t *doltServerTx) releaseConn() {
 	t.releaseJournalScope()
 	t.releaseVersionScope()
 	t.releaseRecheckScope()
+	t.releaseJournalLock()
 	if t.conn != nil {
 		_ = t.conn.Close()
 		t.conn = nil
@@ -393,6 +405,18 @@ func (t *doltServerTx) releaseRecheckScope() {
 	}
 }
 
+// releaseJournalLock releases the journal writer lock, if BeginTx took one.
+// Idempotent for the same reason as releaseJournalScope. The release is
+// bounded, and when it fails or times out it discards the session itself
+// (issueops.LockJournalWriter), so a session still owning the lock never goes
+// back to the pool; closing the session releases its locks server-side.
+func (t *doltServerTx) releaseJournalLock() {
+	if t.unlockJournal != nil {
+		t.unlockJournal()
+		t.unlockJournal = nil
+	}
+}
+
 // poisonConn discards the pinned session instead of returning it to the pool.
 // A session whose transaction may still be open must never be reused: because
 // go-sql-driver's ResetSession only performs a liveness check (no
@@ -403,6 +427,7 @@ func (t *doltServerTx) poisonConn() {
 	t.releaseJournalScope()
 	t.releaseVersionScope()
 	t.releaseRecheckScope()
+	t.releaseJournalLock()
 	if t.conn == nil {
 		return
 	}

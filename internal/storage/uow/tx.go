@@ -140,7 +140,9 @@ func RunTxResultWithin[T any](ctx context.Context, p UnitOfWorkProvider, maxElap
 			return err
 		}
 
-		uw, err := p.NewUOW(ctx)
+		// A route that commits journaled writes: queue it behind the other
+		// journaled writers (lockJournalWriter).
+		uw, err := p.NewUOW(withJournalWriter(ctx))
 		if err != nil {
 			if isSerializationError(err) {
 				return fail(err)
@@ -283,6 +285,9 @@ type TxScopedFunc[T any] func(ctx context.Context, uw UnitOfWork) (result T, tab
 // would sweep other writers' uncommitted (batch-mode) changes to other tables
 // into this commit (a staged table is committed whole). Serialization losers
 // are replayed like RunTxEphemeral's.
+//
+// Unlike RunTxEphemeral it queues behind the journaled writers
+// (lockJournalWriter): a heartbeat re-arm records a journal event.
 func RunTxScoped[T any](ctx context.Context, p UnitOfWorkProvider, work TxScopedFunc[T]) (T, error) {
 	var result T
 	bo := backoff.NewExponentialBackOff()
@@ -290,7 +295,7 @@ func RunTxScoped[T any](ctx context.Context, p UnitOfWorkProvider, work TxScoped
 	bo.MaxElapsedTime = DefaultTxRetryMaxElapsed
 
 	err := backoff.Retry(func() error {
-		uw, err := p.NewUOW(ctx)
+		uw, err := p.NewUOW(withJournalWriter(ctx))
 		if err != nil {
 			if isSerializationError(err) {
 				return err
