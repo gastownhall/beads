@@ -11,7 +11,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/domain"
@@ -193,20 +192,6 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 	remoteURL := resolveProxiedInitRemoteURL(ctx, cwd, in)
 
 	// Unlike the origin lookup above, ComputeRepoID and GetCloneID still inherit
-	// Git routing: under an inherited GIT_DIR/GIT_WORK_TREE, repo_id and clone_id
-	// can describe a different repository than remoteURL, or fail to resolve.
-	var repoID, cloneID string
-	if id, err := beads.ComputeRepoID(); err == nil {
-		repoID = id
-	} else if !in.quiet {
-		fmt.Fprintf(os.Stderr, "Warning: could not compute repository ID: %v\n", err)
-	}
-	if id, err := beads.GetCloneID(); err == nil {
-		cloneID = id
-	} else if !in.quiet {
-		fmt.Fprintf(os.Stderr, "Warning: could not compute clone ID: %v\n", err)
-	}
-
 	// The order is VERIFY, then bootstrap or adopt: Bootstrapper REFUSES an
 	// already-identified substrate, and asking first is how a front door tells a
 	// re-init from the collision that guard exists for.
@@ -255,11 +240,12 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 			adoptedPrefix, adoptedProjectID = result.Prefix, result.ProjectID
 		}
 
-		// The per-clone tracking state is written on EVERY init, adopt or not,
-		// which is why it is not on the role: a fresh clone of an
-		// already-identified database needs its own fingerprints precisely
-		// because it bootstrapped nothing.
-		if err := recordProxiedInitTrackingState(ctx, initUOWProvider, repoID, cloneID); err != nil {
+		// The synced-at marker and recorded binary version are refreshed on
+		// EVERY init, adopt or not, which is why they are not on the role: a
+		// fresh clone of an already-identified database still needs them
+		// stamped, precisely because it bootstrapped nothing. repo_id and
+		// clone_id are not part of this call (see recordProxiedInitTrackingState).
+		if err := recordProxiedInitTrackingState(ctx, initUOWProvider); err != nil {
 			return HandleError("%v", err)
 		}
 
@@ -276,8 +262,12 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 
 	// metadata.json was written with a locally-minted project id before any
 	// DB connection existed; the adopted id must replace it before the tail
-	// git-commits .beads/.
-	if in.teamServer && adoptedProjectID != projectID {
+	// git-commits .beads/. This applies in BOTH modes: the plain proxied path
+	// above can adopt an existing database's identity exactly as team-server
+	// mode can, and until GH#7576 that adoption was never saved back to disk
+	// outside team-server mode, leaving every later clone with its own
+	// mismatched local project_id while the server kept the adopted one.
+	if adoptedProjectID != projectID {
 		fileCfg, err := configfile.Load(beadsDir)
 		if err != nil || fileCfg == nil {
 			return HandleError("failed to reload %s to adopt the provisioned project identity: %v", configfile.ConfigFileName, err)
@@ -363,30 +353,31 @@ func proxiedBootstrapper(provider uow.UnitOfWorkProvider) (issueops.Bootstrapper
 	return src.Bootstrapper()
 }
 
-// recordProxiedInitTrackingState seeds the per-clone bookkeeping: the
-// repository and clone fingerprints, the synced-at marker and the recorded
+// recordProxiedInitTrackingState seeds the per-clone bookkeeping that is safe
+// to refresh on a SHARED database: the synced-at marker and the recorded
 // binary version.
 //
+// repo_id and clone_id are deliberately NOT written here. They used to be,
+// but a proxied-server database has no local store of its own — every clone
+// that proxies to it shares the same row — so stamping a per-clone fingerprint
+// there on every init was last-init-wins: each clone's init silently
+// overwrote the fingerprint the clone before it had just recorded, corrupting
+// the exact cross-project mismatch diagnostics the fingerprint exists for
+// (GH#7577). That is also why `in.teamServer`'s branch above writes neither
+// identity nor tracking metadata at all; this plain path now matches it for
+// the two fields that have no safe destination in proxied mode. `bd doctor
+// --fix` already treats an empty repo_id/clone_id as a normal, repairable
+// state (cmd/bd/doctor/fix/metadata.go), so leaving them unset here is a
+// state the rest of the codebase already expects, not a new one.
+//
 // It is separate from the identity because its LIFETIME is: the identity is
-// written once and then adopted forever, while these four describe the clone
-// running init and are refreshed every time it runs. In the refusable one-time
-// write, a re-init on a shared database would silently stop recording them.
-func recordProxiedInitTrackingState(ctx context.Context, provider uow.UnitOfWorkProvider, repoID, cloneID string) error {
+// written once and then adopted forever, while these two describe the clone
+// running init and are refreshed every time it runs. In the refusable
+// one-time write, a re-init on a shared database would silently stop
+// recording them.
+func recordProxiedInitTrackingState(ctx context.Context, provider uow.UnitOfWorkProvider) error {
 	return uow.RunTx(ctx, provider, func(ctx context.Context, uw uow.UnitOfWork) (string, error) {
 		cfg := uw.ConfigUseCase()
-		// An absent fingerprint is recorded as nothing rather than as "": an
-		// empty row reads back to cross-project verification as a clone whose
-		// fingerprint failed to compute.
-		if repoID != "" {
-			if err := cfg.SetMetadata(ctx, "repo_id", repoID); err != nil {
-				return "", fmt.Errorf("record repo_id: %w", err)
-			}
-		}
-		if cloneID != "" {
-			if err := cfg.SetMetadata(ctx, "clone_id", cloneID); err != nil {
-				return "", fmt.Errorf("record clone_id: %w", err)
-			}
-		}
 		if err := cfg.SetMetadata(ctx, "last_import_time", time.Now().UTC().Format(time.RFC3339)); err != nil {
 			return "", fmt.Errorf("record last_import_time: %w", err)
 		}

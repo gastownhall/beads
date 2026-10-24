@@ -918,6 +918,8 @@ go_test(
         "init_noninteractive_test.go",
         "init_permissions_test.go",
         "init_policy_test.go",
+        "init_proxied_adopt_integration_test.go",
+        "init_proxied_fingerprints_integration_test.go",
         "init_proxied_if_missing_test.go",
         "init_proxied_server_test.go",
         "init_registered_backend_test.go",
