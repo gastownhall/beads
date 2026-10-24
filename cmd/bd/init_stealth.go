@@ -16,17 +16,13 @@ import (
 	"github.com/steveyegge/beads/internal/ui"
 )
 
-// setupStealthMode configures git settings for stealth operation.
+// setupStealthModeAt configures git settings for stealth operation.
 // Only configures git-level invisibility (.git/info/exclude).
 // Tool-specific setup (Claude, Cursor, etc.) is handled by `bd setup <tool>`.
 // Uses .git/info/exclude (per-repository) instead of global gitignore because:
 // - Global gitignore doesn't support absolute paths (GitHub #704)
 // - .git/info/exclude is designed for user-specific, repo-local ignores
 // - Patterns are relative to repo root, so ".beads/" works correctly
-func setupStealthMode(verbose bool) error {
-	return setupStealthModeAt("", verbose)
-}
-
 func setupStealthModeAt(repoPath string, verbose bool) error {
 	// Setup per-repository git exclude file (skip if not in a git repo)
 	if err := setupGitExcludeAt(repoPath, verbose); err != nil {
@@ -49,13 +45,9 @@ func setupStealthModeAt(repoPath string, verbose bool) error {
 	return nil
 }
 
-// setupGitExclude configures .git/info/exclude to ignore beads and claude files
+// setupGitExcludeAt configures .git/info/exclude to ignore beads and claude files
 // This is the correct approach for per-repository user-specific ignores (GitHub #704).
 // Unlike global gitignore, patterns here are relative to the repo root.
-func setupGitExclude(verbose bool) error {
-	return setupGitExcludeAt("", verbose)
-}
-
 func setupGitExcludeAt(repoPath string, verbose bool) error {
 	added, excludePath, err := addExcludePatterns(repoPath,
 		"# Beads stealth mode (added by bd init --stealth)",
@@ -93,7 +85,7 @@ func resolveGitExcludePath(repoPath string) (string, error) {
 	probe.Env = gitenv.ScrubRouting(os.Environ())
 	out, err := probe.Output()
 	if err != nil {
-		// "not a git repository" stays the prefix: setupStealthMode matches it with
+		// "not a git repository" stays the prefix: setupStealthModeAt matches it with
 		// strings.Contains to treat this as a skip rather than a failure. Because the probe
 		// deliberately ignores inherited routing, the operator needs to be told so — and
 		// git's own reason ("not a git repository (or any of the parent directories)",
@@ -346,14 +338,10 @@ func checkProjectExcludeStealth(repoPath string) doctor.DoctorCheck {
 	}
 }
 
-// setupForkExclude configures .git/info/exclude for fork workflows (GH#742)
+// setupForkExcludeAt configures .git/info/exclude for fork workflows (GH#742)
 // Adds beads files and Claude artifacts to keep PRs to upstream clean.
 // This is separate from stealth mode - fork protection is specifically about
 // preventing beads/Claude files from appearing in upstream PRs.
-func setupForkExclude(verbose bool) error {
-	return setupForkExcludeAt("", verbose)
-}
-
 func setupForkExcludeAt(repoPath string, verbose bool) error {
 	added, _, err := addExcludePatterns(repoPath,
 		"# Beads fork protection (bd init)",
