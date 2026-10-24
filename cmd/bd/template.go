@@ -33,8 +33,11 @@ type configReader interface {
 // (issueops.MoleculeTemplateLabel), so the two cannot drift apart.
 const BeadsTemplateLabel = publicops.MoleculeTemplateLabel
 
-// variablePattern matches {{variable}} placeholders
-var variablePattern = regexp.MustCompile(`\{\{([a-zA-Z_][a-zA-Z0-9_]*)\}\}`)
+// variablePattern matches {{variable}} placeholders. Whitespace inside the
+// braces ({{ var }}) is accepted and ignored: hand-written formulas commonly
+// pad the braces, and a padded placeholder that silently pours as literal
+// text is worse than one that is substituted like its tight form.
+var variablePattern = regexp.MustCompile(`\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}`)
 
 // TemplateSubgraph holds a template epic and all its descendants
 type TemplateSubgraph struct {
@@ -523,8 +526,14 @@ func applyVariableDefaults(vars map[string]string, subgraph *TemplateSubgraph) m
 // substituteVariables replaces {{variable}} with values
 func substituteVariables(text string, vars map[string]string) string {
 	return variablePattern.ReplaceAllStringFunc(text, func(match string) string {
-		// Extract variable name from {{name}}
-		name := match[2 : len(match)-2]
+		// Take the name from the capture group, not by slicing off the
+		// braces: the pattern allows inner whitespace ({{ name }}), so
+		// match[2:len-2] would keep the padding and miss the vars lookup.
+		sub := variablePattern.FindStringSubmatch(match)
+		if len(sub) < 2 {
+			return match
+		}
+		name := sub[1]
 		if val, ok := vars[name]; ok {
 			return val
 		}
