@@ -694,13 +694,21 @@ class BdCliClient(BdClientBase):
                 returncode=process.returncode or 1,
             )
 
-    async def _run_text_command(self, *args: str) -> str:
+    async def _run_text_command(self, command: str, *positional: str) -> str:
         """Run a bd command that returns plain text (not JSON) and return stdout.
 
         Used for subcommands like `comment`/`note` that print a confirmation
         line rather than JSON. Mirrors _run_command's env and error handling.
+
+        command is the bd subcommand name; positional (an issue id and a
+        caller-supplied text body) are placed after a "--" boundary, with
+        every global flag before it. Without that boundary, option-shaped
+        text (e.g. "--actor=x") can be parsed as a flag instead of literal
+        content, and a literal "--" in the text becomes the boundary itself,
+        turning the TRAILING global flags into positional text and silently
+        dropping the actor override (GH#7317).
         """
-        cmd = [self.bd_path, *args, *self._global_flags()]
+        cmd = [self.bd_path, command, *self._global_flags(), "--", *positional]
 
         env = os.environ.copy()
         if self.beads_dir:
@@ -723,7 +731,7 @@ class BdCliClient(BdClientBase):
 
         if process.returncode != 0:
             raise BdCommandError(
-                f"bd {args[0]} failed: {stderr.decode()}",
+                f"bd {command} failed: {stderr.decode()}",
                 stderr=stderr.decode(),
                 returncode=process.returncode or 1,
             )
