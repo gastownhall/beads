@@ -1,8 +1,12 @@
 package main
 
 import (
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -219,5 +223,70 @@ func TestGitRemoteHasDoltDataRefStatusSurfacesGitStderr(t *testing.T) {
 	}
 	if !strings.Contains(msg, "repository") && !strings.Contains(msg, "fatal") {
 		t.Errorf("error %q does not look like it carries git's stderr", msg)
+	}
+}
+
+// The probe is advisory and must not invoke inherited credential prompts.
+func TestGitRemoteHasDoltDataRefStatusDisablesAskpass(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fixture requires a POSIX shell")
+	}
+	dir := t.TempDir()
+	script := `#!/bin/sh
+if [ "$GIT_TERMINAL_PROMPT" != 0 ] || [ -n "$GIT_ASKPASS" ] || [ -n "$SSH_ASKPASS" ]; then
+    echo 'fatal: inherited credential prompt is enabled' >&2
+    exit 128
+fi
+printf '0123456789012345678901234567890123456789\trefs/dolt/data\n'
+`
+	if err := os.WriteFile(filepath.Join(dir, "git"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GIT_TERMINAL_PROMPT", "1")
+	t.Setenv("GIT_ASKPASS", "/inherited/git-askpass")
+	t.Setenv("SSH_ASKPASS", "/inherited/ssh-askpass")
+
+	hasData, err := gitRemoteHasDoltDataRefStatus("origin")
+	if err != nil || !hasData {
+		t.Fatalf("noninteractive probe = (%v, %v), want (true, nil)", hasData, err)
+	}
+}
+
+// A successful git process can leave a descendant holding its output pipes.
+// Incomplete output must remain UNKNOWN, even when stdout contains the ref.
+func TestGitRemoteHasDoltDataRefStatusRetainedPipes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fixture requires a POSIX shell")
+	}
+	dir := t.TempDir()
+	pidPath := filepath.Join(dir, "child.pid")
+	script := `#!/bin/sh
+/bin/sleep 6 &
+printf '%s\n' "$!" > "$PROBE_CHILD_PID"
+printf '0123456789012345678901234567890123456789\trefs/dolt/data\n'
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(dir, "git"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("PROBE_CHILD_PID", pidPath)
+	t.Cleanup(func() {
+		data, err := os.ReadFile(pidPath)
+		if err != nil {
+			return
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+		if err == nil {
+			if child, err := os.FindProcess(pid); err == nil {
+				_ = child.Kill()
+			}
+		}
+	})
+
+	hasData, err := gitRemoteHasDoltDataRefStatus("origin")
+	if hasData || !errors.Is(err, exec.ErrWaitDelay) {
+		t.Fatalf("probe with retained output pipes = (%v, %v), want UNKNOWN with ErrWaitDelay", hasData, err)
 	}
 }
