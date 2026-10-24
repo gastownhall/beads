@@ -698,11 +698,14 @@ func FindBeadsDirFrom(startDir string) string {
 
 	fallbackBeadsDir := ""
 	fallbackHasDB := false
+	fallbackHasProjectFiles := false
 	if repoRoot != "" {
 		fallbackBeadsDir = worktreeFallbackBeadsDirForRepo(repoRoot)
 		if fallbackBeadsDir != "" {
 			if fbInfo, err := os.Stat(fallbackBeadsDir); err == nil && fbInfo.IsDir() {
-				fallbackHasDB = hasBeadsDatabase(FollowRedirect(fallbackBeadsDir))
+				resolvedFallback := FollowRedirect(fallbackBeadsDir)
+				fallbackHasDB = hasBeadsDatabase(resolvedFallback)
+				fallbackHasProjectFiles = hasBeadsProjectFiles(resolvedFallback)
 			}
 		}
 	}
@@ -727,6 +730,17 @@ func FindBeadsDirFrom(startDir string) string {
 			}
 		}
 
+		// Once the worktree's own root has been checked (whether or not it had
+		// a usable .beads of its own), stop walking into ancestors outside this
+		// worktree's repo when a usable fallback (the main checkout's store) is
+		// known. Without this bound, an unrelated parent directory's .beads
+		// (e.g. a different project one level up) wins before the fallback
+		// below is ever consulted, which is backwards: the fallback is this
+		// worktree's own project, the ancestor is someone else's. Matches
+		// FindBeadsDir, whose cwd-based walk stops at the same boundary.
+		if repoRoot != "" && utils.PathsEqual(dir, repoRoot) && fallbackHasProjectFiles {
+			break
+		}
 	}
 
 	if fallbackBeadsDir != "" {
