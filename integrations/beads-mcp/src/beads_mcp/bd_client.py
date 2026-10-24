@@ -513,7 +513,10 @@ class BdCliClient(BdClientBase):
         if not isinstance(data, dict):
             raise BdCommandError(f"Invalid response for show {params.issue_id}")
 
-        return Issue.model_validate(data)
+        issue = Issue.model_validate(data)
+        if issue.comments and issue.comment_count != len(issue.comments):
+            return issue.model_copy(update={"comment_count": len(issue.comments)})
+        return issue
 
     async def create(self, params: CreateIssueParams) -> Issue:
         """Create a new issue.
