@@ -319,7 +319,12 @@ func printRelatedSection(relatedSeen map[string]*types.IssueWithDependencyMetada
 // Deciding that here from a raw closed count would make `bd show` contradict
 // `bd epic`, `bd doctor` and `epic_closeable`, which all read the shared
 // EpicStatus.EligibleForClose computed by GetEpicsEligibleForClosureInTx.
-func printEpicChildProgress(children []*types.IssueWithDependencyMetadata) {
+//
+// The verdict slot is also gated on the epic's OWN status (GH#6816): once the
+// parent is closed, "eligible for close" is an invitation to act on something
+// already actioned, so the slot says "already closed" instead. The progress
+// figures themselves stay untouched either way.
+func printEpicChildProgress(children []*types.IssueWithDependencyMetadata, parentStatus types.Status) {
 	if len(children) == 0 {
 		return
 	}
@@ -339,11 +344,14 @@ func printEpicChildProgress(children []*types.IssueWithDependencyMetadata) {
 	if closed == len(children) {
 		icon = ui.RenderPass("✓")
 	}
-	eligible := ""
-	if completing == len(children) {
-		eligible = " — eligible for close"
+	verdict := ""
+	switch {
+	case parentStatus == types.StatusClosed:
+		verdict = " — already closed"
+	case completing == len(children):
+		verdict = " — eligible for close"
 	}
-	fmt.Printf("  %s %d/%d complete (%d%%)%s\n", icon, closed, len(children), pct, eligible)
+	fmt.Printf("  %s %d/%d complete (%d%%)%s\n", icon, closed, len(children), pct, verdict)
 }
 
 // validateCommentsTail rejects a negative --comments-tail value the same way
