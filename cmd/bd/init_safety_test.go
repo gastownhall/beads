@@ -125,11 +125,6 @@ func TestInitFreshWithUnreachableGitOriginSucceeds(t *testing.T) {
 	}
 }
 
-// TestInitReinitLocalConfiguredRemoteWithDoltDataRefuses is the sibling case:
-// sync.remote (again via BD_SYNC_REMOTE, not --remote) points at a bare repo
-// that DOES have refs/dolt/data pushed to it. `bd init --reinit-local` must
-// still refuse with ExitRemoteDivergenceRefused (10) — this is the ADR-0002
-// invariant the GH#4861 fix must not weaken while closing the false positive.
 // TestInitReinitLocalWithUnreachableGitOriginSucceeds pins GH#7665: a git
 // origin whose refs/dolt/data probe cannot even authenticate (exit 128 — the
 // credential-less private-remote shape, same repro the plain-init sibling
@@ -181,6 +176,11 @@ func TestInitReinitLocalWithUnreachableGitOriginSucceeds(t *testing.T) {
 	}
 }
 
+// TestInitReinitLocalConfiguredRemoteWithDoltDataRefuses is the sibling case:
+// sync.remote (again via BD_SYNC_REMOTE, not --remote) points at a bare repo
+// that DOES have refs/dolt/data pushed to it. `bd init --reinit-local` must
+// still refuse with ExitRemoteDivergenceRefused (10) — this is the ADR-0002
+// invariant the GH#4861 fix must not weaken while closing the false positive.
 func TestInitReinitLocalConfiguredRemoteWithDoltDataRefuses(t *testing.T) {
 	bdBin := buildBDForInitTests(t)
 
@@ -208,6 +208,55 @@ func TestInitReinitLocalConfiguredRemoteWithDoltDataRefuses(t *testing.T) {
 	err := cmd.Run()
 	if err == nil {
 		t.Fatalf("bd init --reinit-local succeeded; expected refusal (sync.remote has Dolt history). stderr:\n%s", stderr.String())
+	}
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("non-exec-exit error: %v\nstderr:\n%s", err, stderr.String())
+	}
+	if code := exitErr.ExitCode(); code != ExitRemoteDivergenceRefused {
+		t.Errorf("exit code = %d, want %d (ExitRemoteDivergenceRefused)", code, ExitRemoteDivergenceRefused)
+	}
+
+	beadsDir := filepath.Join(workDir, ".beads")
+	if _, err := os.Stat(beadsDir); err == nil {
+		t.Errorf("refusal should not have created %s", beadsDir)
+	}
+}
+
+// TestInitReinitLocalConfiguredNonGitRemoteStaysFailClosed pins GH#7682
+// Finding 1: sync.remote (BD_SYNC_REMOTE) pointed at a URL the
+// refs/dolt/data probe (`git ls-remote <url> ...`) can never answer for —
+// here, a plain local directory with no git repository at all, the same
+// shape a DoltHub/aws://gs:// remote takes — must stay fail-CLOSED and
+// still refuse `bd init --reinit-local`. TestInitReinitLocalWithUnreachableGitOriginSucceeds
+// above pins the opposite outcome for the git-origin checkpoint; the two
+// checkpoints must not share the same UNKNOWN-is-safe-to-proceed answer,
+// because origin's URL is a git remote by construction and this
+// checkpoint's isn't. Before this fix both checkpoints shared one
+// RemoteProbeUnknown signal, so a probe error here (always, for a
+// non-git-ls-remote-able sync.remote) silently initialized a fresh local
+// database wired to a remote that may really hold history.
+func TestInitReinitLocalConfiguredNonGitRemoteStaysFailClosed(t *testing.T) {
+	bdBin := buildBDForInitTests(t)
+
+	// Not a git repository at all, so `git ls-remote <dir> refs/dolt/data`
+	// errors (exit 128) exactly as it does for a DoltHub/aws://gs:// URL —
+	// the probe has no way to tell "unreachable" from "really has data".
+	nonGitRemote := t.TempDir()
+
+	workDir := t.TempDir()
+	runGitForBootstrapTest(t, workDir, "init", "-b", "main")
+	runGitForBootstrapTest(t, workDir, "config", "core.hooksPath", ".git/hooks")
+	homeDir := t.TempDir() // see collision note above
+
+	cmd := exec.Command(bdBin, "init", "--reinit-local", "--prefix", "cfg", "--quiet", "--non-interactive", "--skip-hooks", "--skip-agents")
+	cmd.Dir = workDir
+	cmd.Env = hermeticInitEnv(homeDir, "BD_SYNC_REMOTE="+nonGitRemote)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err == nil {
+		t.Fatalf("bd init --reinit-local succeeded against an unverifiable sync.remote; expected fail-closed refusal. stderr:\n%s", stderr.String())
 	}
 	exitErr, ok := err.(*exec.ExitError)
 	if !ok {

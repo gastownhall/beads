@@ -1136,14 +1136,24 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 					fmt.Fprintf(os.Stderr, "%s %s\n", ui.RenderWarn("!"), earlyProbeNote)
 				}
 				earlyDecision := CheckRemoteSafety(RemoteSafetyInput{
-					Force:              force,
-					ReinitLocal:        reinitLocal,
-					FromJSONL:          fromJSONL,
-					DiscardRemote:      discardRemote,
-					DestroyToken:       destroyToken,
-					ExpectedToken:      FormatDestroyToken(prefix),
-					RemoteHasDoltData:  earlyRemoteHasDoltData,
-					RemoteProbeUnknown: earlyProbeNote != "",
+					Force:             force,
+					ReinitLocal:       reinitLocal,
+					FromJSONL:         fromJSONL,
+					DiscardRemote:     discardRemote,
+					DestroyToken:      destroyToken,
+					ExpectedToken:     FormatDestroyToken(prefix),
+					RemoteHasDoltData: earlyRemoteHasDoltData,
+					// The probe is `git ls-remote <url> refs/dolt/data`, which
+					// can only ever answer for a git remote. It always errors
+					// for a DoltHub, aws://, gs://, or file-based sync.remote,
+					// so UNKNOWN must not fail-open there (GH#7682 Finding 1):
+					// a non-git remote that really has history would get
+					// silently orphaned by --force/--reinit-local/--from-jsonl.
+					// The git-origin checkpoint is the one place a URL is a
+					// git remote by construction (resolveInitConfiguredSyncRemote
+					// returns initSyncRemoteNone only there) — GH#7665's
+					// unreachable-origin fix stays scoped to it alone.
+					RemoteProbeUnknown: earlyProbeNote != "" && earlyRemoteSource == initSyncRemoteNone,
 					IsInteractive:      term.IsTerminal(int(os.Stdin.Fd())),
 				})
 				if _, err := handleRemoteSafetyDecision(earlyDecision, prefix, earlySyncURL, destroyToken, func() (bool, error) {
@@ -1501,14 +1511,19 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			}
 			if !syncFromRemote {
 				decision := CheckRemoteSafety(RemoteSafetyInput{
-					Force:              force,
-					ReinitLocal:        reinitLocal,
-					FromJSONL:          fromJSONL,
-					DiscardRemote:      discardRemote,
-					DestroyToken:       destroyToken,
-					ExpectedToken:      FormatDestroyToken(prefix),
-					RemoteHasDoltData:  remoteHasDoltData,
-					RemoteProbeUnknown: lateProbeNote != "",
+					Force:             force,
+					ReinitLocal:       reinitLocal,
+					FromJSONL:         fromJSONL,
+					DiscardRemote:     discardRemote,
+					DestroyToken:      destroyToken,
+					ExpectedToken:     FormatDestroyToken(prefix),
+					RemoteHasDoltData: remoteHasDoltData,
+					// This is the configured/explicit sync.remote checkpoint,
+					// never the git-origin one — see the early checkpoint's
+					// comment on RemoteProbeUnknown (GH#7682 Finding 1).
+					// RemoteHasDoltData already stays fail-closed (true) on a
+					// probe error via resolveRemoteHasDoltDataProbe.
+					RemoteProbeUnknown: false,
 					IsInteractive:      term.IsTerminal(int(os.Stdin.Fd())),
 				})
 				bootstrap, err := handleRemoteSafetyDecision(decision, prefix, syncURL, destroyToken, func() (bool, error) {
