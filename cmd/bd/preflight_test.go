@@ -610,10 +610,11 @@ func writeBeadsVersionFixture(t *testing.T, version string) string {
 	// prerelease-stripped form.
 	base, _, _ := strings.Cut(version, "-")
 	files := map[string]string{
-		"go.mod":                                           "module github.com/steveyegge/beads\n\ngo 1.26.5\n",
-		"cmd/bd/version.go":                                "package main\n\nvar Version = \"" + version + "\"\n",
-		"scripts/update-versions.sh":                       "#!/bin/sh\n",
-		"integrations/beads-mcp/pyproject.toml":            "[project]\nversion = \"" + version + "\"\n",
+		"go.mod":                                "module github.com/steveyegge/beads\n\ngo 1.26.5\n",
+		"cmd/bd/version.go":                     "package main\n\nvar Version = \"" + version + "\"\n",
+		"default.nix":                           "{\n  version = \"" + version + "\";\n  vendorHash = \"sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\";\n}\n",
+		"scripts/update-versions.sh":            "#!/bin/sh\n",
+		"integrations/beads-mcp/pyproject.toml": "[project]\nversion = \"" + version + "\"\n",
 		"integrations/beads-mcp/src/beads_mcp/__init__.py": "__version__ = \"" + version + "\"\n",
 		"integrations/beads-mcp/uv.lock":                   "[[package]]\nname = \"beads-mcp\"\nversion = \"" + version + "\"\n",
 		"plugins/beads/.claude-plugin/plugin.json":         `{"version":"` + version + `"}`,
