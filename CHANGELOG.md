@@ -725,6 +725,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `issues.advanceMolecule`, or the handshake that would say so fails, `bd
   close --continue` refuses before closing anything, so the step is never
   left closed with the next step unclaimed.
+- **Closing an issue skips the union statements for the closed and pinned
+  rows below it** (#5427, #5939). A close settles `is_blocked` over the
+  closed row's whole parent-child subtree. A recompute of 32 or more rows
+  already sends rows with no dependency rows of their own to a plain
+  `is_blocked = 1 -> 0` update instead of the two union statements; closed
+  and pinned rows now take that path too, since the mark statement refuses
+  them and the unmark statement clears them whatever the union holds.
+  Closing a finished epic with hundreds of closed children no longer runs
+  each of them through the union statements. The same rows are recomputed,
+  and rechecked after commit, as before.
 - Every `bd` invocation used to start two git subprocesses before doing any
   work: `git rev-parse` to locate the repository and `git config user.name`
   to resolve the actor. On Linux the repository is now located in-process

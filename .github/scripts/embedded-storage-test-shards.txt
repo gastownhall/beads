@@ -276,6 +276,7 @@
 
 40 14 TestBatchCreatorContract
 40 14 TestBlockingAnnotatorContract
+40 14 TestCloseSendsClosedAndPinnedRowsToThePlainUnmark
 40 14 TestCountsIncludeWispDependencies
 40 14 TestEmbeddedIssueOperationsPersistenceRollbackWispAndDetachedResults
 40 14 TestEmbeddedOpenForRemoteSync_DataBehind

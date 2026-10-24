@@ -194,4 +194,31 @@ func TestGraphWalkPlansHonorJoinHints(t *testing.T) {
 			t.Fatalf("checked %d mark/unmark statements, want a mark and an unmark per fixpoint pass", checked)
 		}
 	})
+
+	// A recompute of 32 or more ids first probes which of
+	// them ride the union statements: a lookup from the edge rows into the
+	// item table, not a scan of either.
+	t.Run("recompute split probe", func(t *testing.T) {
+		rec := &statementRecorder{DBTX: tx}
+		var ids []string
+		for i := 100; i < 140; i++ {
+			ids = append(ids, id(i))
+		}
+		if err := issueops.RecomputeIsBlockedInTx(ctx, rec, ids, nil); err != nil {
+			t.Fatal(err)
+		}
+		probes := 0
+		for _, st := range rec.stmts {
+			if !strings.Contains(st.query, "*/ DISTINCT d.issue_id FROM") {
+				continue
+			}
+			probes++
+			if plan := explainPlan(t, tx, st); !strings.Contains(plan, "LookupJoin") || !strings.Contains(plan, "keys: d.issue_id") {
+				t.Errorf("split probe is not a lookup from the edge rows into the item table:\n%s", plan)
+			}
+		}
+		if probes != 1 {
+			t.Fatalf("recorded %d split probes, want 1", probes)
+		}
+	})
 }
