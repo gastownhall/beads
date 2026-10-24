@@ -251,6 +251,51 @@ func readEventsHeadInTx(ctx context.Context, tx DBTX) (int64, error) {
 	return head, nil
 }
 
+// readEventsFloorInTx returns the lowest seq still retained in
+// bd_events_journal. When every retained row has been pruned away but the
+// journal has been written to before (head > 0), nothing is retained and the
+// floor is head+1 — the same "nothing retained" convention
+// EventsJournalTruncatedError uses for an empty journal in
+// ComputeEventsTruncation. When the journal has never had a row at all
+// (head == 0), the floor is 0.
+func readEventsFloorInTx(ctx context.Context, tx DBTX, head int64) (int64, error) {
+	var floor int64
+	err := tx.QueryRowContext(ctx, "SELECT seq FROM bd_events_journal ORDER BY seq ASC LIMIT 1").Scan(&floor)
+	if errors.Is(err, sql.ErrNoRows) {
+		if head == 0 {
+			return 0, nil
+		}
+		return head + 1, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("journal: read floor: %w", err)
+	}
+	return floor, nil
+}
+
+// ReadEventsHeadAndFloorInTx returns the journal's head (the highest seq ever
+// assigned) and floor (the lowest seq still retained), without reading any
+// journal rows. It is the backing query for `bd events head` (#7084): a
+// consumer that wants to follow the journal "from now" otherwise has no cheap
+// way to learn where "now" is — --since past the head returns nothing without
+// saying where the head is, and --since 0 replays the whole retained window
+// just to learn the last seq.
+//
+// It runs in the caller's transaction, same as ReadEventsInTx /
+// ReadEventsPageInTx, so every store plumbing (embedded, server, proxied)
+// shares one query body.
+func ReadEventsHeadAndFloorInTx(ctx context.Context, tx DBTX) (head, floor int64, err error) {
+	head, err = readEventsHeadInTx(ctx, tx)
+	if err != nil {
+		return 0, 0, err
+	}
+	floor, err = readEventsFloorInTx(ctx, tx, head)
+	if err != nil {
+		return 0, 0, err
+	}
+	return head, floor, nil
+}
+
 func readEventsRowsInTx(ctx context.Context, tx DBTX, since int64, limit int) ([]storage.EventsJournalRow, error) {
 	// CAST(ts AS CHAR) normalizes the DATETIME to a stable string across drivers.
 	q := `SELECT seq, CAST(ts AS CHAR), op, issue_id, actor, issue_json, dep_json, comment_json

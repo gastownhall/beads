@@ -529,7 +529,7 @@ var proxyPermittedPaths = []string{
 	"version", "worktree create", "worktree info", "worktree list", "worktree remove",
 
 	// storage, history and migration paths that are already routed or store-free
-	"compact", "events export", "events prune", "events tail",
+	"compact", "events export", "events head", "events prune", "events tail",
 	"dolt clean-databases", "dolt killall", "dolt set", "dolt show", "dolt status",
 	"dolt start", "dolt stop", "dolt test",
 	"migrate from-proxied-server-to-server", "migrate from-proxied-server-to-shared-server",

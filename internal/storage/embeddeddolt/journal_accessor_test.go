@@ -30,6 +30,14 @@ func TestEventsJournalAccessor(t *testing.T) {
 		}
 	}
 
+	// JournalHead on a never-written journal: nothing assigned, nothing
+	// retained.
+	head, floor, err := store.JournalHead(ctx)
+	must(err, "head before any writes")
+	if head != 0 || floor != 0 {
+		t.Fatalf("JournalHead before writes = (%d, %d), want (0, 0)", head, floor)
+	}
+
 	must(store.CreateIssue(ctx, mk("jrn-1"), "actor"), "create 1")
 	must(store.CreateIssue(ctx, mk("jrn-2"), "actor"), "create 2")
 	must(store.UpdateIssue(ctx, "jrn-1", map[string]interface{}{"title": "renamed"}, "actor"), "update")
@@ -57,6 +65,14 @@ func TestEventsJournalAccessor(t *testing.T) {
 	}
 	if rows[0].IssueJSON == "" {
 		t.Errorf("create row must carry the issue snapshot json")
+	}
+
+	// JournalHead after the five writes, nothing pruned yet: head is the last
+	// row's seq, floor is the first row's (everything is still retained).
+	head, floor, err = store.JournalHead(ctx)
+	must(err, "head after writes")
+	if head != rows[len(rows)-1].Seq || floor != rows[0].Seq {
+		t.Fatalf("JournalHead after writes = (%d, %d), want (%d, %d)", head, floor, rows[len(rows)-1].Seq, rows[0].Seq)
 	}
 
 	// since filter: only rows past the 3rd seq (the close and the delete).
@@ -88,11 +104,26 @@ func TestEventsJournalAccessor(t *testing.T) {
 		t.Fatalf("after prune %d rows, want 2", len(after))
 	}
 
+	// JournalHead after the prune: head is unchanged (the counter never moves
+	// backward), floor advances to the oldest surviving row.
+	head, floor, err = store.JournalHead(ctx)
+	must(err, "head after prune")
+	if head != rows[len(rows)-1].Seq || floor != after[0].Seq {
+		t.Fatalf("JournalHead after prune = (%d, %d), want (%d, %d)", head, floor, rows[len(rows)-1].Seq, after[0].Seq)
+	}
+
 	// seq continuity: a fresh mutation lands above everything after a prune.
 	must(store.CreateIssue(ctx, mk("jrn-3"), "actor"), "create 3")
 	post, err := store.ReadEventsJournal(ctx, after[len(after)-1].Seq, 0)
 	must(err, "read post")
 	if len(post) != 1 || post[0].Op != "create" {
 		t.Fatalf("post-prune create not journaled above prior max seq: %+v", post)
+	}
+
+	// JournalHead tracks the fresh mutation too.
+	head, floor, err = store.JournalHead(ctx)
+	must(err, "head after post-prune create")
+	if head != post[0].Seq || floor != after[0].Seq {
+		t.Fatalf("JournalHead after post-prune create = (%d, %d), want (%d, %d)", head, floor, post[0].Seq, after[0].Seq)
 	}
 }
