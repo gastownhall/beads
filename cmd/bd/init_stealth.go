@@ -298,7 +298,7 @@ func checkProjectExcludeStealth(repoPath string) doctor.DoctorCheck {
 			Name:    "Project Gitignore",
 			Status:  doctor.StatusWarning,
 			Message: "Unable to read .git/info/exclude",
-			Detail:  err.Error(),
+			Detail:  err.Error() + "; check the exclude file's type and read permissions, then rerun bd doctor",
 		}
 		if trackedGitignoreHasBeadsSection(repoPath) {
 			// The leak is the privacy failure, and --fix strips it from the tracked
