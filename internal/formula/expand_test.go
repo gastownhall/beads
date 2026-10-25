@@ -1022,6 +1022,7 @@ func TestApplyInlineExpansionsCrossExpansionDeps(t *testing.T) {
 			}
 		}
 	})
+
 	t.Run("inline expand rewrites dependent depends_on to last expanded step", func(t *testing.T) {
 		steps := []*Step{
 			{ID: "setup", Title: "Setup"},
@@ -1110,6 +1111,75 @@ func TestApplyInlineExpansionsCrossExpansionDeps(t *testing.T) {
 				}
 				if len(dependent.Needs) != 1 || dependent.Needs[0] != "work.second" {
 					t.Errorf("%s.Needs = %v, want [work.second]", tc.dependent, dependent.Needs)
+				}
+			})
+		}
+	})
+
+	t.Run("inline expand rewrites needs between two expanded steps", func(t *testing.T) {
+		// Mirrors "expand two chained steps preserves cross-expansion deps"
+		// in TestApplyExpansionsCrossExpansionDeps, for both declaration
+		// orders.
+		for _, tc := range []struct {
+			name  string
+			steps []*Step
+		}{
+			{
+				name: "declaration order",
+				steps: []*Step{
+					{ID: "a", Title: "A", Expand: "inline-exp"},
+					{ID: "b", Title: "B", Needs: []string{"a"}, Expand: "inline-exp"},
+				},
+			},
+			{
+				name: "reverse declaration order",
+				steps: []*Step{
+					{ID: "b", Title: "B", Needs: []string{"a"}, Expand: "inline-exp"},
+					{ID: "a", Title: "A", Expand: "inline-exp"},
+				},
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				result, err := ApplyInlineExpansions(tc.steps, parser)
+				if err != nil {
+					t.Fatalf("ApplyInlineExpansions failed: %v", err)
+				}
+
+				if len(result) != 4 {
+					t.Fatalf("expected 4 steps, got %d", len(result))
+				}
+
+				byID := make(map[string]*Step)
+				var walk func([]*Step)
+				walk = func(steps []*Step) {
+					for _, s := range steps {
+						byID[s.ID] = s
+						walk(s.Children)
+					}
+				}
+				walk(result)
+
+				// The root of b's expansion needs the last step of a's
+				// expansion, and b's internal chain is preserved.
+				if got := byID["b.first"].Needs; len(got) != 1 || got[0] != "a.second" {
+					t.Errorf("b.first.Needs = %v, want [a.second]", got)
+				}
+				if got := byID["b.second"].Needs; len(got) != 1 || got[0] != "b.first" {
+					t.Errorf("b.second.Needs = %v, want [b.first]", got)
+				}
+
+				// No dependency may keep naming an expanded (replaced) step.
+				for id, s := range byID {
+					for _, n := range s.Needs {
+						if n == "a" || n == "b" {
+							t.Errorf("%s.Needs still names expanded step %q", id, n)
+						}
+					}
+					for _, d := range s.DependsOn {
+						if d == "a" || d == "b" {
+							t.Errorf("%s.DependsOn still names expanded step %q", id, d)
+						}
+					}
 				}
 			})
 		}
