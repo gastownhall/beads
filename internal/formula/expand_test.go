@@ -1014,6 +1014,27 @@ func TestApplyInlineExpansionsCrossExpansionDeps(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("inline expand rewrites depends_on on expanded step from other steps", func(t *testing.T) {
+		steps := []*Step{
+			{ID: "setup", Title: "Setup"},
+			{ID: "work", Title: "Work", Needs: []string{"setup"}, Expand: "inline-exp"},
+			{ID: "verify", Title: "Verify", DependsOn: []string{"work"}},
+		}
+
+		result, err := ApplyInlineExpansions(steps, parser)
+		if err != nil {
+			t.Fatalf("ApplyInlineExpansions failed: %v", err)
+		}
+
+		verify := buildStepMap(result)["verify"]
+		if verify == nil {
+			t.Fatalf("verify step missing from result")
+		}
+		if !reflect.DeepEqual(verify.DependsOn, []string{"work.second"}) {
+			t.Errorf("verify.DependsOn = %v, want [work.second]", verify.DependsOn)
+		}
+	})
 }
 
 func TestFindDuplicateStepIDs(t *testing.T) {
