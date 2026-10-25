@@ -3,6 +3,7 @@ package fix
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,20 +13,23 @@ import (
 // delete under path, and nothing else: both halves walk the same .beads
 // directories (WalkBeadsDirs) and act on the same plan (PlanArtifacts). That
 // is an orphaned SQLite WAL or SHM in a .beads positively on Dolt, and the
-// scaffolding of a redirect-only stub that holds no database state. Every
-// removal goes through RemoveDisposable, which refuses database state.
+// runtime leftovers of a redirect-only stub that holds no database state.
+// Every removal goes through RemoveDisposable, which refuses database state.
+// It reports each removal, each finding it keeps whole for review and a
+// summary on out; the entries a stub keeps beside its removed runtime
+// leftovers are named by the scan's finding, not here.
 //
 // It never migrates a .beads directory's metadata, and leaves a .beads
 // directory in a format this build cannot open, or one whose ownership it
 // cannot establish, untouched.
-func ClassicArtifacts(path string) error {
+func ClassicArtifacts(path string, out io.Writer) error {
 	var removed, skipped, errCount int
 
 	err := WalkBeadsDirs(path, func(beadsDir string) {
 		findings, _ := PlanArtifacts(beadsDir)
 		for _, f := range findings {
 			if !f.SafeDelete {
-				fmt.Printf("  Skip (needs review): %s: %s\n", f.Path, f.Description)
+				fmt.Fprintf(out, "  Skip (needs review): %s: %s\n", f.Path, f.Description)
 				skipped++
 				continue
 			}
@@ -34,13 +38,13 @@ func ClassicArtifacts(path string) error {
 				var refused *RefusedError
 				switch {
 				case errors.As(err, &refused):
-					fmt.Printf("  Skip (needs review): %s: %s\n", target, refused.Reason)
+					fmt.Fprintf(out, "  Skip (needs review): %s: %s\n", target, refused.Reason)
 					skipped++
 				case err != nil:
-					fmt.Printf("  Error removing %s: %v\n", target, err)
+					fmt.Fprintf(out, "  Error removing %s: %v\n", target, err)
 					errCount++
 				default:
-					fmt.Printf("  Removed: %s (%s)\n", target, removedLabel(f.Type))
+					fmt.Fprintf(out, "  Removed: %s (%s)\n", target, removedLabel(f.Type))
 					removed++
 				}
 			}
@@ -51,10 +55,10 @@ func ClassicArtifacts(path string) error {
 	}
 
 	// Report summary
-	fmt.Printf("  Artifact cleanup: %d removed, %d skipped, %d errors\n", removed, skipped, errCount)
+	fmt.Fprintf(out, "  Artifact cleanup: %d removed, %d skipped, %d errors\n", removed, skipped, errCount)
 
 	if skipped > 0 {
-		fmt.Println("  Skipped items need manual review: bd doctor never removes a database, or anything in a .beads it cannot classify")
+		fmt.Fprintln(out, "  Skipped items need manual review: bd doctor never removes a database, or anything in a .beads it cannot classify")
 	}
 
 	if errCount > 0 {

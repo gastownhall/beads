@@ -483,7 +483,7 @@ func applyFixList(path string, fixes []doctorCheck) {
 		case "Config Values":
 			err = fix.ConfigValues(path)
 		case "Classic Artifacts":
-			err = fix.ClassicArtifacts(path)
+			err = fix.ClassicArtifacts(path, os.Stdout)
 		case "Btrfs NoCOW (dolt)":
 			// Applies FS_NOCOW_FL to .beads/ and any existing dolt data
 			// subdirs. Prints the returned message (which includes the

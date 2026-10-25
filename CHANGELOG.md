@@ -980,9 +980,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   symlink to any of those (the link is kept, and no removal follows a link).
   Everything else is left as it is. A `beads.db`, its WAL or SHM, or a
   `beads.backup-*.db` outside another backend's `.beads`, and a
-  redirect-only `.beads` that is not a stub but holds anything the stub rule
-  below would remove, are reported for manual review. When nothing is safe to delete the check no longer offers
-  `bd doctor --fix`. One behavior is unchanged: a `.beads` at a
+  redirect-only `.beads` that is not a stub but holds more than a clean
+  stub does (its `redirect`, `.gitkeep` and, beside a `redirect`, its
+  metadata), are reported for manual review. When nothing is safe to delete the check no longer offers
+  `bd doctor --fix`. A `.beads` at a
   redirect-only path (`crew/*`, `polecats/*`, `refinery/rig`,
   `.git/beads-worktrees/*`, or a rig root that `mayor/rig/.beads` does not
   redirect to) that holds no database state, and whose metadata, if it has
@@ -990,13 +991,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unless a `redirect` is beside it, does not configure Dolt (`backend`
   `dolt` or any Dolt setting, such as `dolt_mode`, `dolt_database`,
   `dolt_server_host` or `dolt_data_dir`), is still treated as a redirect
-  stub. It loses every entry except `redirect` and `.gitkeep`, plus
-  `metadata.json` or `config.json` when a `redirect` is present: that
-  includes `config.yaml`, the opt-in audit log `interactions.jsonl`,
-  `routes.jsonl`, `last-touched`, `formulas/`, metadata that configures no
-  Dolt (such as a pre-Dolt `metadata.json`) when no `redirect` is beside it,
-  and any file bd cannot recognize as a database by its name or header,
-  such as an encrypted `beads.db.enc` or a compressed backup. A
+  stub; the next entry says what the cleanup removes from one. A
   `.beads` at such a path whose `metadata.json` does not load (for example
   merge-conflict markers in a tracked file) was cleaned like any stub; it is
   now left as it is, and reported for review when it holds more than its
@@ -1007,6 +1002,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   check counts, not the whole directory, and leaves a symlinked
   `.beads/mq` alone: it no longer counts the files behind the link or
   removes the link.
+- **`bd doctor`'s Classic Artifacts cleanup no longer deletes a worktree's
+  tracked `.beads` files (other than bd's own runtime leftovers), or
+  anything else bd did not leave in a redirect stub.** From a `.beads` it treats as a redirect stub, `bd doctor --fix`
+  and `bd doctor --check=artifacts --clean` removed every entry except
+  `redirect`, `.gitkeep` and, beside a `redirect`, the directory's
+  `metadata.json` or `config.json`. A crew, polecat or refinery worktree of
+  a repository that tracks `.beads` files lost its `formulas/`,
+  `config.yaml`, `README.md` and `.gitignore`, and any uncommitted edit to
+  them, so `git status` showed the clone's own files deleted and bd run
+  there lost the settings that `config.yaml` supplied. A stub also lost the
+  opt-in audit log `interactions.jsonl`, `routes.jsonl`, a `metadata.json`
+  or `config.yaml` with no `redirect` beside it, an `mq/` directory, and any
+  file bd cannot recognize as a database, such as an encrypted
+  `beads.db.enc`. The cleanup now removes from a stub only bd's own runtime
+  leftovers, each as bd writes it: `.local_version`, `last-touched`, and the
+  `daemon.lock`, `daemon.log`, `daemon.pid` and `bd.sock` of bd's former
+  daemon. Everything else a stub holds, a SQLite WAL or SHM whose database
+  is gone included, stays and is reported for manual review, and a stub
+  holding no runtime leftover no longer makes the check offer
+  `bd doctor --fix`.
+- `bd doctor --check=artifacts --clean --json` prints only its JSON document
+  on stdout. The cleanup's progress lines (each removal, each finding kept
+  for review, and the summary) were printed on stdout ahead of the document,
+  so stdout did not parse as JSON; they now go to stderr. Without `--json`,
+  `--clean` and `bd doctor --fix` still print them on stdout.
 - bd now decides whether it runs the Dolt server at a configured host in one
   place, and treats the server as its own only at `127.0.0.1`, the one
   address its own server binds, in any spelling (empty, `localhost` in any
