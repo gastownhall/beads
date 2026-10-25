@@ -134,7 +134,7 @@ func TestWorktreeCommandsHonorGlobalChangeDirectory(t *testing.T) {
 
 	runGit := func(dir string, args ...string) string {
 		t.Helper()
-		command := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		command := gitCommand(append([]string{"-C", dir}, args...)...)
 		output, err := command.CombinedOutput()
 		if err != nil {
 			t.Fatalf("git %v: %v\n%s", args, err, output)
@@ -219,7 +219,7 @@ func TestWorktreeCreateAndListHonorBEADSDirWithoutChangeDir(t *testing.T) {
 
 	runGit := func(dir string, args ...string) string {
 		t.Helper()
-		command := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		command := gitCommand(append([]string{"-C", dir}, args...)...)
 		output, err := command.CombinedOutput()
 		if err != nil {
 			t.Fatalf("git %v: %v\n%s", args, err, output)
