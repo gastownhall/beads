@@ -1035,6 +1035,60 @@ func TestApplyInlineExpansionsCrossExpansionDeps(t *testing.T) {
 			t.Errorf("verify.DependsOn = %v, want [work.second]", verify.DependsOn)
 		}
 	})
+
+	t.Run("inline expand rewrites needs from dependents that are not later siblings", func(t *testing.T) {
+		tests := []struct {
+			name      string
+			steps     []*Step
+			dependent string
+		}{
+			{
+				name: "dependent declared before expanded step",
+				steps: []*Step{
+					{ID: "report", Title: "Report", Needs: []string{"work"}},
+					{ID: "work", Title: "Work", Expand: "inline-exp"},
+				},
+				dependent: "report",
+			},
+			{
+				name: "nested expanded step, top-level dependent",
+				steps: []*Step{
+					{ID: "phase", Title: "Phase", Children: []*Step{
+						{ID: "work", Title: "Work", Expand: "inline-exp"},
+					}},
+					{ID: "final", Title: "Final", Needs: []string{"work"}},
+				},
+				dependent: "final",
+			},
+			{
+				name: "top-level expanded step, nested dependent",
+				steps: []*Step{
+					{ID: "work", Title: "Work", Expand: "inline-exp"},
+					{ID: "phase", Title: "Phase", Children: []*Step{
+						{ID: "check", Title: "Check", Needs: []string{"work"}},
+					}},
+				},
+				dependent: "check",
+			},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				result, err := ApplyInlineExpansions(tt.steps, parser)
+				if err != nil {
+					t.Fatalf("ApplyInlineExpansions failed: %v", err)
+				}
+
+				dep := buildStepMap(result)[tt.dependent]
+				if dep == nil {
+					t.Fatalf("%s step missing from result", tt.dependent)
+				}
+				if !reflect.DeepEqual(dep.Needs, []string{"work.second"}) {
+					t.Errorf("%s.Needs = %v, want [work.second]", tt.dependent, dep.Needs)
+				}
+			})
+		}
+	})
 }
 
 func TestFindDuplicateStepIDs(t *testing.T) {
