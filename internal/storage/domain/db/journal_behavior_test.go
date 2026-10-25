@@ -2,6 +2,7 @@ package db
 
 import (
 	"encoding/json"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/issueops"
@@ -484,4 +485,36 @@ func (s *testSuite) TestEventsJournal_ReplayFromZeroReconstructsLiveSet() {
 		s.ElementsMatchf(want.Labels, got.Labels, "%s labels", id)
 	}
 	s.NotContains(replay, "bd-rp-4", "a deleted bead must not survive replay")
+}
+
+// TestEventsJournal_RemoveLabelSnapshotCapturesBumpedUpdatedAt pins GH#5793:
+// removeLabelInTx must bump updated_at BEFORE the journal snapshot is taken,
+// the same ordering addLabelInTx already uses (labels.go's own comment there
+// says so explicitly). Before the fix, RecordEventInTx ran first and the
+// journaled issue_json carried the pre-removal updated_at -- a consumer
+// reading the journal would see a stale timestamp that disagrees with the row
+// it just read from the table.
+func (s *testSuite) TestEventsJournal_RemoveLabelSnapshotCapturesBumpedUpdatedAt() {
+	s.enableJournalForTest()
+	ctx := s.Ctx()
+	s.seedIssueRow("bd-lbl-journal-del")
+	r := s.labelRepo()
+	s.Require().NoError(r.Insert(ctx, "bd-lbl-journal-del", "temp", "tester", domain.LabelOpts{}))
+
+	s.clearJournal()
+
+	s.Require().NoError(r.Delete(ctx, "bd-lbl-journal-del", "temp", "tester", domain.LabelOpts{}))
+
+	var rowUpdatedAt time.Time
+	s.Require().NoError(s.Runner().QueryRowContext(ctx,
+		"SELECT updated_at FROM issues WHERE id = ?", "bd-lbl-journal-del",
+	).Scan(&rowUpdatedAt))
+
+	got := s.readJournal()
+	s.Require().Len(got, 1, "journal rows: %+v", got)
+	s.Equal("update", got[0].Op)
+	s.Require().True(got[0].HasIssue, "remove-label journal row must carry the post-mutation issue snapshot")
+	s.True(got[0].Issue.UpdatedAt.Equal(rowUpdatedAt),
+		"journaled snapshot updated_at = %s, want the row's own post-touch updated_at %s -- removeLabelInTx must bump updated_at before journaling, as addLabelInTx does",
+		got[0].Issue.UpdatedAt, rowUpdatedAt)
 }
