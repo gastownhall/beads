@@ -200,6 +200,77 @@ func TestWorktreeCommandsHonorGlobalChangeDirectory(t *testing.T) {
 	}
 }
 
+// TestWorktreeCreateAndListHonorBEADSDirWithoutChangeDir pins GH#6950: without
+// -C, worktree create/list must resolve .beads via the cached, BEADS_DIR-aware
+// GetRepoContext(), not GetRepoContextForWorkspace() (which ignores BEADS_DIR
+// by design -- the workspace path is explicit in that caller's case). Repo A
+// has no local .beads directory; its beads context comes only from BEADS_DIR
+// pointing into repo B.
+func TestWorktreeCreateAndListHonorBEADSDirWithoutChangeDir(t *testing.T) {
+	root := t.TempDir()
+	repoA := filepath.Join(root, "repoA")
+	repoB := filepath.Join(root, "repoB")
+	if err := os.MkdirAll(repoA, 0o755); err != nil {
+		t.Fatalf("mkdir repoA: %v", err)
+	}
+	if err := os.MkdirAll(repoB, 0o755); err != nil {
+		t.Fatalf("mkdir repoB: %v", err)
+	}
+
+	runGit := func(dir string, args ...string) string {
+		t.Helper()
+		command := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		output, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, output)
+		}
+		return string(output)
+	}
+	runGit(repoA, "init", "-q")
+	runGit(repoA, "config", "user.name", "fixture")
+	runGit(repoA, "config", "user.email", "fixture@example.invalid")
+	runGit(repoA, "config", "core.hooksPath", ".git/hooks")
+	if err := os.WriteFile(filepath.Join(repoA, "tracked.txt"), []byte("fixture\n"), 0o644); err != nil {
+		t.Fatalf("write tracked file: %v", err)
+	}
+	runGit(repoA, "add", "tracked.txt")
+	runGit(repoA, "commit", "-qm", "fixture")
+
+	externalBeadsDir := filepath.Join(repoB, ".beads")
+	if err := os.MkdirAll(externalBeadsDir, 0o700); err != nil {
+		t.Fatalf("mkdir external .beads: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(externalBeadsDir, "metadata.json"), []byte(`{"backend":"dolt"}`), 0o600); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+
+	oldChangeDir := changeDir
+	changeDir = ""
+	t.Cleanup(func() { changeDir = oldChangeDir })
+	t.Chdir(repoA)
+	t.Setenv("BEADS_DIR", externalBeadsDir)
+	beads.ResetCaches()
+	internalgit.ResetCaches()
+	t.Cleanup(func() {
+		beads.ResetCaches()
+		internalgit.ResetCaches()
+	})
+
+	workerDir := filepath.Join(repoA, "worker")
+	worktreeBranch = "fixture-worker"
+	t.Cleanup(func() { worktreeBranch = "" })
+	if err := runWorktreeCreate(worktreeCreateCmd, []string{"worker"}); err != nil {
+		t.Fatalf("worktree create with external BEADS_DIR and no -C: %v", err)
+	}
+	if _, err := os.Stat(workerDir); err != nil {
+		t.Fatalf("created worktree at repo A: %v", err)
+	}
+
+	if err := runWorktreeList(worktreeListCmd, nil); err != nil {
+		t.Fatalf("worktree list with external BEADS_DIR and no -C: %v", err)
+	}
+}
+
 // TestGetRedirectTarget tests that getRedirectTarget resolves redirect paths correctly.
 // This is the fix for GH#1266: relative paths must be resolved from the worktree root
 // (parent of .beads/), not from .beads/ itself, matching FollowRedirect behavior.

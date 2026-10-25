@@ -216,14 +216,20 @@ func runWorktreeCreate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("path already exists: %s", worktreePath)
 	}
 
-	// Get repository context for the selected workspace (validates .beads and
-	// resolves paths without falling back to the caller's process CWD).
-	commandDir, err := worktreeCommandDirectory()
-	if err != nil {
-		return err
-	}
-	_, err = beads.GetRepoContextForWorkspace(commandDir)
-	if err != nil {
+	// Validate .beads is reachable for the selected workspace. With -C, resolve
+	// explicitly for that workspace (GetRepoContextForWorkspace ignores
+	// BEADS_DIR by design, but -C already picked the target repo so that's
+	// fine). Without -C, use the cached, BEADS_DIR-aware context so external
+	// and redirected beads directories keep working (GH#6950).
+	if strings.TrimSpace(changeDir) != "" {
+		commandDir, err := worktreeCommandDirectory()
+		if err != nil {
+			return err
+		}
+		if _, err := beads.GetRepoContextForWorkspace(commandDir); err != nil {
+			return fmt.Errorf("%s; %s: %w", activeWorkspaceNotFoundError(), diagHint(), err)
+		}
+	} else if _, err := beads.GetRepoContext(); err != nil {
 		return fmt.Errorf("%s; %s: %w", activeWorkspaceNotFoundError(), diagHint(), err)
 	}
 
@@ -307,13 +313,23 @@ func runWorktreeList(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Get repository context for the selected workspace.
-	commandDir, err := worktreeCommandDirectory()
-	if err != nil {
-		return err
+	// Get repository context for the selected workspace. With -C, resolve
+	// explicitly for that workspace (ignores BEADS_DIR by design, but -C
+	// already picked the target repo). Without -C, use the cached,
+	// BEADS_DIR-aware context so external/redirected setups keep working
+	// (GH#6950).
+	var rc *beads.RepoContext
+	var rcErr error
+	if strings.TrimSpace(changeDir) != "" {
+		commandDir, err := worktreeCommandDirectory()
+		if err != nil {
+			return err
+		}
+		rc, rcErr = beads.GetRepoContextForWorkspace(commandDir)
+	} else {
+		rc, rcErr = beads.GetRepoContext()
 	}
-	rc, err := beads.GetRepoContextForWorkspace(commandDir)
-	if err != nil {
+	if rcErr != nil {
 		// Allow listing worktrees even without .beads (but no beads state info)
 		return listWorktreesWithoutBeads(ctx, repoRoot)
 	}
