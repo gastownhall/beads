@@ -22,9 +22,10 @@ package main
 // the whole point of this file: the refusal surface today mixes all three and
 // a reader cannot otherwise tell them apart.
 //
-// The `reason` column is the test's own authority. Production does not yet
-// carry a Reason field on its refusals; when it does, this test should assert
-// that the two agree.
+// The `reason` column is asserted against production: every typed refusal
+// carries a `reason` field (capability_registry.go's ProxyRefusalReason), and a
+// REFUSED_TYPED row fails unless the two agree. A refusal whose reason moves
+// from unimplemented to design (or back) is a policy change and must flip here.
 
 import (
 	"encoding/json"
@@ -104,6 +105,13 @@ type expectation struct {
 	// the regression a JSON consumer cannot classify and this column exists to
 	// catch.
 	allowTextFallback bool
+	// reasonMissing records, on a REFUSED_TYPED row, that production emits
+	// the typed code but no `reason` field — a refusal built outside the
+	// capability registry. It is a tracked defect, so the row must also carry
+	// a knownBad naming it, and the cell is marked ! in the report. The row
+	// fails the moment production starts sending a reason, which is the
+	// prompt to delete this flag and let the reason assertion pin it.
+	reasonMissing bool
 }
 
 // probe is one command exercised across every topology.
@@ -236,6 +244,11 @@ var capabilityProbes = []probe{
 			outcome: outcomeRefusedTyped, code: "proxy.dolt_start.conflict",
 			substr: "dolt start is not supported in proxied-server mode",
 			reason: reasonDesign,
+			// dolt_proxied_lifecycle.go builds this refusal by hand rather
+			// than through the capability registry, so its JSON has the code
+			// but no `reason` — a consumer cannot tell design from gap here.
+			reasonMissing: true,
+			knownBad:      "proxied `dolt start` refusal (proxy.dolt_start.conflict) omits the `reason` field every registry refusal carries",
 		},
 		override: map[string]expectation{
 			topoEmbedded: {
@@ -283,6 +296,13 @@ var capabilityProbes = []probe{
 	},
 
 	// --- backup family (consumer priority #1, slice S3) ---------------------
+	//
+	// The first topology-differentiated rule: routed over the proxied
+	// provider where bd owns the Dolt server (managed-local), refused BY
+	// DESIGN against a server bd does not own, because the backup remote is
+	// registered on the server and is global to every client of it
+	// (capability_registry.go backupRefusal). Managed-local therefore behaves
+	// exactly like the direct topologies, and that is what its override pins.
 	{
 		name: "backup status",
 		args: []string{"backup", "status"},
@@ -291,8 +311,13 @@ var capabilityProbes = []probe{
 		},
 		proxied: expectation{
 			outcome: outcomeRefusedTyped, code: "proxy.backup.unsupported",
-			substr: "backup status is not supported in proxied-server mode",
-			reason: reasonUnimplemented,
+			substr: "backup status is not supported in proxied-server mode against a Dolt server bd does not own",
+			reason: reasonDesign,
+		},
+		override: map[string]expectation{
+			topoProxiedLocal: {
+				outcome: outcomeHonored, substr: `"configured"`, reason: reasonNA,
+			},
 		},
 	},
 	{
@@ -303,22 +328,29 @@ var capabilityProbes = []probe{
 		},
 		proxied: expectation{
 			outcome: outcomeRefusedTyped, code: "proxy.backup.unsupported",
-			substr: "backup sync is not supported in proxied-server mode",
-			reason: reasonUnimplemented,
+			substr: "backup sync is not supported in proxied-server mode against a Dolt server bd does not own",
+			reason: reasonDesign,
+		},
+		override: map[string]expectation{
+			topoProxiedLocal: {
+				outcome: outcomeError, substr: "no backup destination configured", reason: reasonNA,
+			},
 		},
 	},
 
 	// --- version-control verbs (slice S4) -----------------------------------
 	{
+		// Routed over the proxied provider by runDoltCommitProxiedServer
+		// (GH#4995), so it is honored on every topology. The workspace has no
+		// uncommitted changes, so the honored answer is "Nothing to commit."
+		// everywhere; the row pins that the topology no longer stands in the way.
 		name: "dolt commit",
 		args: []string{"dolt", "commit", "-m", "matrix probe"},
 		direct: expectation{
 			outcome: outcomeHonored, reason: reasonNA,
 		},
 		proxied: expectation{
-			outcome: outcomeRefusedTyped, code: "proxy.dolt_commit.unsupported",
-			substr: "dolt commit is not supported in proxied-server mode",
-			reason: reasonUnimplemented,
+			outcome: outcomeHonored, reason: reasonNA,
 		},
 	},
 	{
@@ -461,7 +493,9 @@ var capabilityProbes = []probe{
 		name: "migrate schema",
 		args: []string{"migrate", "schema"},
 		direct: expectation{
-			outcome: outcomeHonored, substr: "Schema", reason: reasonNA,
+			// Under --json the direct path reports its schema state as a
+			// payload; a freshly initialized workspace is already current.
+			outcome: outcomeHonored, substr: `"status": "current"`, reason: reasonNA,
 		},
 		proxied: expectation{
 			outcome: outcomeDegraded, substr: "reconciled during provider open",
@@ -481,7 +515,8 @@ var deliberatelyNotProbed = map[string]string{
 	"restore": "`bd restore` restores an ISSUE, not a backup; the backup verb is `bd backup restore`, which is already " +
 		"covered by the backup rows. Probing it adds a row that says nothing about the backup family.",
 	"backup restore": "would need a real backup destination to distinguish a topology refusal from a missing-backup error. " +
-		"Covered indirectly by `backup status` / `backup sync`; revisit in slice S3 when the family gains a proxied route.",
+		"Covered indirectly by `backup status` / `backup sync`, which pin the family's per-topology policy " +
+		"(routed on managed-local by S3, refused by design off-host).",
 }
 
 // ---------------------------------------------------------------------------
@@ -752,6 +787,7 @@ type refusalPayload struct {
 	Code    string `json:"code"`
 	Error   string `json:"error"`
 	Mutates bool   `json:"mutates"`
+	Reason  string `json:"reason"`
 }
 
 // findRefusalJSON looks for a typed refusal payload across the streams in the
@@ -874,6 +910,19 @@ func assertCell(t *testing.T, w topologyWorkspace, bd string, p probe, want expe
 			}
 			if got.Mutates {
 				fail("refusal reported mutates=true; refusals must never mutate")
+			}
+			switch {
+			case want.reasonMissing:
+				if want.knownBad == "" {
+					t.Fatalf("[%s] probe %q sets reasonMissing but carries no knownBad; every bug this matrix records must name itself",
+						w.name, p.name)
+				}
+				if got.Reason != "" {
+					fail("refusal now carries reason %q; delete reasonMissing/knownBad so the reason is asserted", got.Reason)
+				}
+			case got.Reason != string(want.reason):
+				fail("refusal reason = %q, want %q; production and this table must agree on why it refuses",
+					got.Reason, want.reason)
 			}
 			if want.substr != "" && !strings.Contains(got.Error, want.substr) {
 				fail("refusal message %q does not contain %q", got.Error, want.substr)
