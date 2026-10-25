@@ -149,7 +149,12 @@ func TestMigrateDoltModeRefusesServerBdDoesNotRun(t *testing.T) {
 					assert.Contains(t, stderr, "the configured Dolt server host "+h.want)
 					// A resumed run names the journal the earlier run left,
 					// and how to resume it; a run without one names none.
-					journalNote := "left its journal at " + migrateJournalPath(beadsDir)
+					// bd finds the workspace from the canonical working
+					// directory, so the path has its symlinks resolved (on
+					// macOS the temp dir's /var is /private/var).
+					resolvedBeadsDir, evalErr := filepath.EvalSymlinks(beadsDir)
+					require.NoError(t, evalErr)
+					journalNote := "left its journal at " + migrateJournalPath(resolvedBeadsDir)
 					if variant == "resumed" {
 						assert.Contains(t, stderr, journalNote)
 						assert.Contains(t, stderr, "clearing the host resumes that migration")
