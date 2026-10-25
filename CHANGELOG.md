@@ -932,6 +932,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd cook` / `bd mol pour` now point a `needs`/`depends_on` on an
+  inline-`expand`ed step at the expansion's last step, as `[[compose.expand]]`
+  does. Before, the dependency was silently dropped and the dependent was
+  ready at pour (#7637).
 - The batched bulk readers no longer return an issue's rows twice when the
   same id is requested twice. Since the 200-id batching (#6444), an id that
   appeared in two batches had its comments, labels, dependency records,
