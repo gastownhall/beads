@@ -49,19 +49,16 @@ func doltServerConfig(beadsDir, doltPath string) *dolt.Config {
 }
 
 // federationServerProbe reports whether a Dolt SQL server answers at this
-// workspace's configured endpoint. The host and port are resolved the way
-// doltServerConfig resolves them, so the probe asks about the same server the
-// remotes check would open.
+// workspace's configured endpoint. The endpoint comes from
+// doltserver.ResolveEndpoint, the same resolver doltServerConfig's port and
+// doctor/dolt.go use, so the probe asks about the same server the remotes
+// check would open.
 func federationServerProbe(beadsDir string) bool {
-	host := configfile.DefaultDoltServerHost
-	if bcfg, err := configfile.Load(beadsDir); err == nil && bcfg != nil {
-		host = bcfg.GetDoltServerHost()
-	}
-	port := doltserver.DefaultConfig(beadsDir).Port
-	if port <= 0 {
+	ep := doltserver.ResolveEndpoint(beadsDir, nil)
+	if !ep.Resolved() {
 		return false
 	}
-	return isDoltServerRunning(host, port)
+	return isDoltServerRunning(ep.Host, ep.Port)
 }
 
 // serverRunningOrProbeable reports whether the federation checks should treat
