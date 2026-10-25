@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"fmt"
+	"runtime"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -107,18 +109,22 @@ func renderStaleResult(result *StaleResult, blockingOnly bool) {
 
 	for _, mol := range result.StaleMolecules {
 		progress := fmt.Sprintf("%d/%d", mol.ClosedChildren, mol.TotalChildren)
+		// The molecule ID is read from the store, which holds a
+		// collaborator's issues after bd dolt pull: it goes into the command
+		// as one shell word, or as a placeholder named escaped after it.
+		id, note := remedy.CommandArg(runtime.GOOS, mol.ID, "<molecule-id>")
 
 		if mol.BlockingCount > 0 {
 			fmt.Printf("  %s  %s  (%s) [blocking %d]\n",
 				ui.RenderID(mol.ID), mol.Title, progress, mol.BlockingCount)
-			fmt.Printf("       → Close with: bd close %s\n", mol.ID)
+			fmt.Printf("       → Close with: bd close %s%s\n", id, note)
 			if mol.BlockingCount <= 3 {
 				fmt.Printf("       → Blocking: %v\n", mol.BlockingIssues)
 			}
 		} else {
 			fmt.Printf("  %s  %s  (%s)\n",
 				ui.RenderID(mol.ID), mol.Title, progress)
-			fmt.Printf("       → Close with: bd close %s\n", mol.ID)
+			fmt.Printf("       → Close with: bd close %s%s\n", id, note)
 		}
 		fmt.Println()
 	}

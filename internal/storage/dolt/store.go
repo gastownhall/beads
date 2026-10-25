@@ -4585,9 +4585,9 @@ func (s *DoltStore) prepareCLIRouteForGitProtocol(ctx context.Context, remote st
 			// the same --ref, and bd's own remote add finds the persisted
 			// remote and returns without a SQL add). The remote, URL and ref
 			// are named escaped (remedy.EscapedValue), as the statement that
-			// re-adds them is when no quoting passes it on: a $( ) or a
-			// backtick in a persisted URL is not live on the line a user
-			// copies the remedy from.
+			// re-adds them is when one of them holds a character a shell
+			// acts on: a $( ) or a backtick in a persisted URL is not live on
+			// the line a user copies the remedy from.
 			if s.localActiveDatabaseDir == "" || s.localActiveDatabaseDir != s.CLIDir() {
 				return false, fmt.Errorf("remote %s (%s on %s) is persisted on disk but not visible to this sql-server (GH#2118 cold start), and this bd does not own the server's data directory; re-add it on that server %s", remedy.EscapedValue(remote), remedy.EscapedValue(r.URL), remedy.EscapedValue(r.Ref), coldStartReaddRemedy(runtime.GOOS, remote, r.URL, r.Ref))
 			}
@@ -4620,11 +4620,17 @@ func (s *DoltStore) prepareCLIRouteForGitProtocol(ctx context.Context, remote st
 // PowerShell, and none at all when a value does not print as itself. In
 // each of those cases the remedy names the statement on its own, to run as
 // bd sql's one argument or in a Dolt SQL shell, rather than a command that
-// would run something else, and escaped (remedy.EscapedValue), as a value no
-// quoting passes on is named beside a placeholder (remedy.CommandArg): printed
-// as it is, a $( ) or a backtick in the URL sits inside the statement's own
-// double quotes, where PowerShell and Git Bash run it for a user who pastes
-// the line.
+// would run something else. It names the statement as it is when the
+// remote, URL and ref are each a value the remedy printer quotes as a shell
+// argument on POSIX and on Windows alike (quotedOnEveryPlatform), such as an
+// ordinary git+https or git+ssh URL: then the statement prints as itself and
+// holds no shell syntax but its own double quotes, commas and parentheses, so
+// it runs as printed in a Dolt SQL shell, and nothing in it expands for a
+// user who pastes it into a shell. Otherwise it names the statement escaped
+// (remedy.EscapedValue), as a value no quoting passes on is named beside a
+// placeholder (remedy.CommandArg): printed as it is, a $( ) or a backtick in
+// the URL sits inside the statement's own double quotes, where PowerShell
+// and Git Bash run it for a user who pastes the line.
 func coldStartReaddRemedy(goos, remote, url, ref string) string {
 	stmt := fmt.Sprintf("CALL DOLT_REMOTE(%s, %s, %s, %s, %s)",
 		doltutil.SQLDoubleQuoted("add"), doltutil.SQLDoubleQuoted("--ref"),
@@ -4632,7 +4638,26 @@ func coldStartReaddRemedy(goos, remote, url, ref string) string {
 	if quoted, ok := remedy.ShellQuotedFor(goos, stmt); ok {
 		return "with: bd sql " + quoted
 	}
-	return "by running this SQL statement there, as the one argument of bd sql (quoted for your shell) or in a Dolt SQL shell: " + remedy.EscapedValue(stmt)
+	named := remedy.EscapedValue(stmt)
+	if quotedOnEveryPlatform(remote, url, ref) {
+		named = stmt
+	}
+	return "by running this SQL statement there, as the one argument of bd sql (quoted for your shell) or in a Dolt SQL shell: " + named
+}
+
+// quotedOnEveryPlatform reports whether the remedy printer quotes each of
+// values as a shell argument on POSIX and on Windows (remedy.ShellQuotedFor):
+// each prints as itself and holds no character a shell on either expands,
+// splits an argument at or ends its quotes at.
+func quotedOnEveryPlatform(values ...string) bool {
+	for _, value := range values {
+		for _, goos := range []string{"linux", "windows"} {
+			if _, ok := remedy.ShellQuotedFor(goos, value); !ok {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // shouldUseCLIForGitProtocol is a compatibility wrapper for tests and older

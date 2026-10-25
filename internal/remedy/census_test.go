@@ -71,7 +71,12 @@ import (
 // TestRemedyRefusalsDoNotInterpolateRawPaths covers the functions that print
 // one. Nor is a database config row (issue_prefix) a source:
 // warnHalfIdentifiedSubstrate, which prints one beside its remedy, is pinned
-// by TestRemedyValuesEscapeLineBreaks. bd doctor's text printers of checks
+// by TestRemedyValuesEscapeLineBreaks. Nor is an issue ID read from the
+// store: the bd duplicates, bd mol current, bd mol stale and bd close
+// --continue hints that paste one into a command are pinned by
+// TestStoreReadIDHintsQuoteIDs. Nor is a .beads/recipes.toml recipe: the
+// lines bd setup prints its name, description, type and paths on are pinned
+// by TestRunRecipeNamesRecipesTomlValuesEscaped. bd doctor's text printers of checks
 // spell each check they print (doctor.DoctorCheck.Printed and cmd/bd's
 // doctorCheck.printed), so a check's fields are not print calls here;
 // TestRemedyPrintersNameValuesEscaped's doctor rows pin several of them.

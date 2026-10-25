@@ -905,9 +905,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   own printed `bd sql '<statement>'` in POSIX single quotes, which bd.exe
   received as eight arguments and refused. It now names the
   `CALL DOLT_REMOTE(...)` statement to run as `bd sql`'s one argument or in
-  a Dolt SQL shell, escaped (`\x22` for each `"`, `\x2c` for each `,`), as
-  it does on POSIX when single quotes cannot carry the statement, and that
-  refusal names the remote's URL and ref Go-quoted and escaped too. All of
+  a Dolt SQL shell: as it is, so it runs as printed, when the remote, URL
+  and ref each pass the remedy printer's shell quoting on POSIX and on
+  Windows (no `$`, backtick, quote, backslash, `%`, `!`, `&`, `|`, `<`,
+  `>`, `^`, `;`, `,`, `=` or control character, and no leading `-`), such
+  as an ordinary `git+https` or `git+ssh` URL, and otherwise escaped
+  (`\x22` for each `"`, `\x2c` for each `,`), as it does on POSIX when
+  single quotes cannot carry the statement. That refusal names the remote's
+  URL and ref Go-quoted and escaped too. All of
   these go through one printer, `internal/remedy`.
   An ordinary value and an ordinary message print as before, except that a
   command now quotes a value it used to paste bare when the value holds
@@ -1316,6 +1321,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   initializes the planning repo by the same rule, so it now also refuses a
   server-mode planning repo instead of moving issues into a new embedded
   database there.
+- **A pasted `bd duplicates`, `bd mol current`, `bd mol stale` or
+  `bd close --continue` hint no longer runs part of an issue ID.** These
+  hints put issue IDs read from the database, which holds a collaborator's
+  issues after `bd dolt pull`, into the `bd close`, `bd dep add`,
+  `bd update --claim`, `bd show`, `bd mol current`, `bd mol progress` and
+  `bd mol squash` commands they suggest, and `bd duplicates --json` puts the
+  same command in `suggested_action` and (with `--dry-run` or
+  `--auto-merge`) `merge_commands`. An ID was pasted
+  bare, so one such as `bd-x$(curl ...|sh)` ran its command substitution
+  when the suggestion was pasted into a shell, and one holding a carriage
+  return or terminal escape could redraw the line. Each ID now goes into the
+  command as one shell word, quoted when it holds anything but ASCII
+  letters, digits and `_ . / : + -`, or, when no quoting passes it on
+  unchanged, as a placeholder (`<step-id>`, `<molecule-id>`,
+  `<duplicate-id>`, `<target-id>`) with the ID named escaped after the
+  command, through
+  `internal/remedy`. An ID bd mints prints as before.
+- **`bd setup` names a committed `.beads/recipes.toml` recipe's values
+  escaped.** `bd setup <recipe> --check` printed the recipe's name and each
+  missing path raw around its `Run: bd setup <recipe>` line, so a carriage
+  return, terminal escape or line feed in either, from a recipes.toml a
+  cloned repository commits, could redraw that line with another command.
+  `bd setup <recipe>` (with or without `--check` or `--remove`) and
+  `bd setup --list` now spell the recipe's name, description, type and
+  paths with `remedy.PrintedValue`: a value that holds such a character is
+  printed Go-quoted with it escaped, and every other value prints as before.
 - **A pasted `bd init` or `bd repo remove` remedy no longer runs part of a
   crafted value.** When `bd create --repo` (or `bd migrate-personal`)
   refuses a repository with no `metadata.json` whose own config names a

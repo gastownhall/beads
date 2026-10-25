@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"go/ast"
@@ -578,6 +579,174 @@ func TestPasteReadyCommandsQuoteValues(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestStoreReadIDHintsQuoteIDs pins the hints that paste an issue ID read
+// from the store, which holds a collaborator's issues after bd dolt pull,
+// into the bd command they suggest: bd duplicates (its Suggested line, and
+// --json's suggested_action and merge_commands), bd mol current (the next
+// step's claim, a step's bd show, and a large molecule's bd mol current and
+// bd mol progress), bd mol stale's bd close, and bd close --continue's claim
+// and bd mol squash. Each row spells the ID {id} and the note naming it
+// {note}: an ordinary ID prints as it did, an ID holding shell syntax goes
+// into the command single-quoted on POSIX, and one no quoting passes on (on
+// Windows, any with a $) takes the row's placeholder, named escaped after
+// the command (remedy.CommandArg).
+func TestStoreReadIDHintsQuoteIDs(t *testing.T) {
+	// pick returns the lines of out that hold one of markers: the hint
+	// lines, not the lines around them that name the ID for display.
+	pick := func(out string, markers ...string) string {
+		var picked []string
+		for _, line := range strings.Split(out, "\n") {
+			for _, marker := range markers {
+				if strings.Contains(line, marker) {
+					picked = append(picked, line)
+					break
+				}
+			}
+		}
+		return strings.Join(picked, "\n")
+	}
+	// duplicates is a duplicate group of target, the issue with dependents
+	// and so the merge target, and sources, in that order.
+	duplicates := func(target string, sources ...string) ([][]*types.Issue, map[string]*issueScore) {
+		group := []*types.Issue{{ID: target, Title: "Same", Status: types.StatusOpen}}
+		for _, id := range sources {
+			group = append(group, &types.Issue{ID: id, Title: "Same", Status: types.StatusOpen})
+		}
+		return [][]*types.Issue{group}, map[string]*issueScore{target: {dependentCount: 1}}
+	}
+	suggested := func(t *testing.T, groups [][]*types.Issue, scores map[string]*issueScore) string {
+		return pick(captureStdout(t, func() error {
+			return outputDuplicates(groups, map[string]int{}, scores, false, false, nil)
+		}), "Suggested:")
+	}
+	for _, tc := range []struct {
+		name, placeholder, want string
+		hint                    func(t *testing.T, id string) string
+	}{
+		{"bd duplicates", "<duplicate-id>", "  Suggested: bd close {id} && bd dep add {id} bd-1 --type related{note}",
+			func(t *testing.T, id string) string {
+				groups, scores := duplicates("bd-1", id)
+				return suggested(t, groups, scores)
+			}},
+		{"bd duplicates, several duplicates", "<duplicate-id-1>", "  Suggested: bd close {id} bd-3 && bd dep add {id} bd-3 bd-1 --type related{note}",
+			func(t *testing.T, id string) string {
+				groups, scores := duplicates("bd-1", id, "bd-3")
+				return suggested(t, groups, scores)
+			}},
+		{"bd duplicates, merge target", "<target-id>", "  Suggested: bd close bd-3 && bd dep add bd-3 {id} --type related{note}",
+			func(t *testing.T, id string) string {
+				groups, scores := duplicates(id, "bd-3")
+				return suggested(t, groups, scores)
+			}},
+		{"bd duplicates --json suggested_action", "<duplicate-id>", "bd close {id} && bd dep add {id} bd-1 --type related{note}",
+			func(t *testing.T, id string) string {
+				groups, scores := duplicates("bd-1", id)
+				return formatDuplicateGroupsJSON(groups, map[string]int{}, scores)[0]["suggested_action"].(string)
+			}},
+		{"bd duplicates --dry-run --json merge_commands", "<duplicate-id>", "# Suggested action: bd close {id} && bd dep add {id} bd-1 --type related{note}",
+			func(t *testing.T, id string) string {
+				groups, scores := duplicates("bd-1", id)
+				previous := jsonOutput
+				jsonOutput = true
+				t.Cleanup(func() { jsonOutput = previous })
+				out := captureStdout(t, func() error {
+					return outputDuplicates(groups, map[string]int{}, scores, false, true, nil)
+				})
+				var got struct {
+					MergeCommands []string `json:"merge_commands"`
+				}
+				if err := json.Unmarshal([]byte(out), &got); err != nil || len(got.MergeCommands) != 1 {
+					t.Fatalf("bd duplicates --dry-run --json printed %q: %v", out, err)
+				}
+				return pick(got.MergeCommands[0], "# Suggested action:")
+			}},
+		{"bd mol current, next step", "<step-id>", "  Start with: bd update {id} --claim{note}\n💡 Run `bd show {id}`{note} to see detailed instructions.",
+			func(t *testing.T, id string) string {
+				return pick(captureStdout(t, func() error {
+					printMoleculeProgress(&MoleculeProgress{MoleculeID: "bd-1", MoleculeTitle: "Mol", NextStep: &types.Issue{ID: id, Title: "Step"}})
+					return nil
+				}), "Start with:", "Run `bd show")
+			}},
+		{"bd mol current, current step", "<step-id>", "💡 Run `bd show {id}`{note} to see detailed instructions.",
+			func(t *testing.T, id string) string {
+				return pick(captureStdout(t, func() error {
+					printMoleculeProgress(&MoleculeProgress{MoleculeID: "bd-1", MoleculeTitle: "Mol", CurrentStep: &types.Issue{ID: id, Title: "Step"}})
+					return nil
+				}), "Start with:", "Run `bd show")
+			}},
+		{"bd mol current, large molecule", "<molecule-id>",
+			"  bd mol current {id} --limit 50        # First 50 steps\n" +
+				"  bd mol current {id} --range 1-50     # Steps 1-50\n" +
+				"  bd mol progress {id}                 # Efficient progress summary{noteline}",
+			func(t *testing.T, id string) string {
+				return pick(captureStdout(t, func() error {
+					printLargeMoleculeSummary(&types.MoleculeProgressStats{MoleculeID: id, MoleculeTitle: "Mol", Total: 150})
+					return nil
+				}), "  bd mol ", "  (<molecule-id>: ")
+			}},
+		{"bd mol current, large molecule's current step", "<step-id>", "💡 Run `bd show {id}`{note} to see detailed instructions.",
+			func(t *testing.T, id string) string {
+				return pick(captureStdout(t, func() error {
+					printLargeMoleculeSummary(&types.MoleculeProgressStats{MoleculeID: "bd-1", MoleculeTitle: "Mol", Total: 150, CurrentStepID: id})
+					return nil
+				}), "Run `bd show")
+			}},
+		{"bd mol stale", "<molecule-id>", "       → Close with: bd close {id}{note}",
+			func(t *testing.T, id string) string {
+				return pick(captureStdout(t, func() error {
+					renderStaleResult(&StaleResult{StaleMolecules: []*StaleMolecule{{ID: id, Title: "Mol", TotalChildren: 1, ClosedChildren: 1}}, TotalCount: 1}, false)
+					return nil
+				}), "Close with:")
+			}},
+		{"bd mol stale --blocking", "<molecule-id>", "       → Close with: bd close {id}{note}",
+			func(t *testing.T, id string) string {
+				return pick(captureStdout(t, func() error {
+					renderStaleResult(&StaleResult{StaleMolecules: []*StaleMolecule{{ID: id, Title: "Mol", TotalChildren: 1, ClosedChildren: 1,
+						BlockingIssues: []string{"bd-1"}, BlockingCount: 1}}, TotalCount: 1, BlockingCount: 1}, true)
+					return nil
+				}), "Close with:")
+			}},
+		{"bd close --continue, next step", "<step-id>", "Start with: bd update {id} --claim{note}",
+			func(t *testing.T, id string) string {
+				return pick(captureStdout(t, func() error {
+					PrintContinueResult(&ContinueResult{ClosedStep: &types.Issue{ID: "bd-1"}, NextStep: &types.Issue{ID: id, Title: "Step"}})
+					return nil
+				}), "Start with:")
+			}},
+		{"bd close --continue, molecule complete", "<molecule-id>", "Consider: bd mol squash {id} --summary '...'{note}",
+			func(t *testing.T, id string) string {
+				return pick(captureStdout(t, func() error {
+					PrintContinueResult(&ContinueResult{ClosedStep: &types.Issue{ID: "bd-1"}, MolComplete: true, MoleculeID: id})
+					return nil
+				}), "Consider:")
+			}},
+	} {
+		for _, id := range []string{"bd-2.1", "bd-x$(touch${IFS}pwned)", hostileName} {
+			t.Run(tc.name+"/"+strconv.Quote(id), func(t *testing.T) {
+				// On Windows no quoting passes a $ on unchanged, so the
+				// command takes the placeholder there too.
+				spelled, note := id, ""
+				switch {
+				case id == "bd-x$(touch${IFS}pwned)" && runtime.GOOS != "windows":
+					spelled = "'" + id + "'"
+				case id != "bd-2.1":
+					spelled, note = tc.placeholder, "  ("+tc.placeholder+": "+remedy.EscapedValue(id)+")"
+				}
+				noteLine := ""
+				if note != "" {
+					noteLine = "\n" + note
+				}
+				want := strings.NewReplacer("{id}", spelled, "{noteline}", noteLine, "{note}", note).Replace(tc.want)
+				got := tc.hint(t, id)
+				if got != want {
+					t.Errorf("%s prints\n%q\nwant\n%q", tc.name, got, want)
+				}
+				requireNoTerminalControl(t, tc.name, got)
+			})
+		}
 	}
 }
 

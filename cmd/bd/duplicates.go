@@ -3,10 +3,12 @@ package main
 import (
 	"fmt"
 	"regexp"
+	"runtime"
 	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -124,12 +126,10 @@ func outputDuplicates(duplicateGroups [][]*types.Issue, refCounts map[string]int
 				sources = append(sources, issue.ID)
 			}
 		}
-		cmd := fmt.Sprintf("# Duplicate: %s (same content as %s)\n# Suggested action: bd close %s && bd dep add %s %s --type related",
+		cmd := fmt.Sprintf("# Duplicate: %s (same content as %s)\n# Suggested action: %s",
 			strings.Join(sources, " "),
 			target.ID,
-			strings.Join(sources, " "),
-			strings.Join(sources, " "),
-			target.ID)
+			duplicateMergeCommand(sources, target.ID))
 		mergeCommands = append(mergeCommands, cmd)
 	}
 
@@ -170,8 +170,7 @@ func outputDuplicates(duplicateGroups [][]*types.Issue, refCounts map[string]int
 			}
 		}
 		fmt.Printf("  %s Duplicate: %s (same content as %s)\n", ui.RenderAccent("Note:"), strings.Join(sources, " "), target.ID)
-		fmt.Printf("  %s bd close %s && bd dep add %s %s --type related\n\n",
-			ui.RenderAccent("Suggested:"), strings.Join(sources, " "), strings.Join(sources, " "), target.ID)
+		fmt.Printf("  %s %s\n\n", ui.RenderAccent("Suggested:"), duplicateMergeCommand(sources, target.ID))
 	}
 	if autoMerge {
 		if dryRun {
@@ -183,6 +182,28 @@ func outputDuplicates(duplicateGroups [][]*types.Issue, refCounts map[string]int
 		fmt.Printf("%s Run with --auto-merge to execute all suggested merges\n", ui.RenderAccent("💡"))
 	}
 	return nil
+}
+
+// duplicateMergeCommand is the command bd duplicates suggests for merging
+// sources into target. The IDs are read from the store, which holds a
+// collaborator's issues after bd dolt pull, so each goes into the command as
+// one shell word, or as a placeholder with the ID named escaped after the
+// command (remedy.CommandArg).
+func duplicateMergeCommand(sources []string, target string) string {
+	args := make([]string, len(sources))
+	var notes string
+	for i, id := range sources {
+		placeholder := "<duplicate-id>"
+		if len(sources) > 1 {
+			placeholder = fmt.Sprintf("<duplicate-id-%d>", i+1)
+		}
+		var note string
+		args[i], note = remedy.CommandArg(runtime.GOOS, id, placeholder)
+		notes += note
+	}
+	targetArg, note := remedy.CommandArg(runtime.GOOS, target, "<target-id>")
+	ids := strings.Join(args, " ")
+	return fmt.Sprintf("bd close %s && bd dep add %s %s --type related%s", ids, ids, targetArg, notes+note)
 }
 
 func init() {
@@ -365,7 +386,7 @@ func formatDuplicateGroupsJSON(groups [][]*types.Issue, refCounts map[string]int
 			"issues":            issues,
 			"suggested_target":  target.ID,
 			"suggested_sources": sources,
-			"suggested_action":  fmt.Sprintf("bd close %s && bd dep add %s %s --type related", strings.Join(sources, " "), strings.Join(sources, " "), target.ID),
+			"suggested_action":  duplicateMergeCommand(sources, target.ID),
 			"note":              fmt.Sprintf("Duplicate: %s (same content as %s)", strings.Join(sources, " "), target.ID),
 		})
 	}
