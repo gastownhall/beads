@@ -103,7 +103,8 @@ func TestAdmitForeignWorkspaceRefusesLegacyDoltAsAdmissionDoes(t *testing.T) {
 
 // TestOpenForeignStoreLeavesPreDoltCloneUnchanged pins that no open of an
 // existing foreign workspace rewrites a fresh clone of a SQLite-era project
-// (config.json and issues.jsonl, no *.db): bd run inside it finds no
+// (config.json and issues.jsonl, no *.db), or of a project from before bd
+// wrote config.json (issues.jsonl, no *.db): bd run inside either finds no
 // workspace and writes nothing, so the open refuses it with that error. The
 // non-mutating factories under it read its config.json in place on every arm,
 // the server arm included, so it stays byte-identical even past the opener.
@@ -112,13 +113,33 @@ func TestAdmitForeignWorkspaceRefusesLegacyDoltAsAdmissionDoes(t *testing.T) {
 // planning target is initialized before it is opened, so the create access
 // is pinned at that initialization (ensureBeadsDirForPath, the dry-run's
 // checkRepoTargetInitializable, and migrate-personal's
-// refuseUninitializablePlanningRepo): each refuses the clone with the same
-// error. Before, bd create --repo and bd migrate-personal wrote an embedded
-// database and a metadata.json there, hiding its issues.jsonl from bd run
-// inside it behind an empty database.
+// refuseUninitializablePlanningRepo): each refuses either clone with the
+// same error, followed by its reason, and the issues.jsonl-only clone with
+// the bd init --from-jsonl that imports its issues. Before, bd create --repo
+// and bd migrate-personal wrote an embedded database and a metadata.json
+// there, hiding its issues.jsonl from bd run inside it: bd's upgrade
+// auto-import loads it only into an empty database.
 func TestOpenForeignStoreLeavesPreDoltCloneUnchanged(t *testing.T) {
 	isolateForeignWorkspaceSignals(t, "")
-	layout := legacyworkspace.PreDoltClone()
+	// reasons holds, per clone, the reason an initializer gives after the
+	// error openForeignStore returns for it, with <repo> standing for the
+	// clone's repository root. The pre-Dolt clone's is the one it has always
+	// given.
+	reasons := map[string]string{
+		legacyworkspace.PreDoltClone().Name:       "it has a legacy config.json but no database (a fresh clone of a SQLite-era project, say), so bd run there finds no workspace; not initializing it, which would hide what it holds behind an empty database",
+		legacyworkspace.PreConfigJSONClone().Name: "it has issues.jsonl but no database (a fresh clone of a project from before bd wrote config.json, say), so bd run there does not treat it as a workspace; not initializing it, which would hide what it holds behind an empty database. Run `bd init --from-jsonl` in <repo>, which imports it, then rerun",
+	}
+	for _, layout := range []legacyworkspace.Layout{legacyworkspace.PreDoltClone(), legacyworkspace.PreConfigJSONClone()} {
+		t.Run(layout.Name, func(t *testing.T) {
+			testOpenForeignStoreLeavesCloneUnchanged(t, layout, reasons[layout.Name])
+		})
+	}
+}
+
+// testOpenForeignStoreLeavesCloneUnchanged runs
+// TestOpenForeignStoreLeavesPreDoltCloneUnchanged's checks on one clone
+// layout, whose initializers refuse it with reason.
+func testOpenForeignStoreLeavesCloneUnchanged(t *testing.T, layout legacyworkspace.Layout, reason string) {
 	for _, name := range []string{"read", "preview", "write"} {
 		t.Run("openForeignStore/"+name, func(t *testing.T) {
 			beadsDir := filepath.Join(t.TempDir(), ".beads")
@@ -160,9 +181,9 @@ func TestOpenForeignStoreLeavesPreDoltCloneUnchanged(t *testing.T) {
 			if after := legacyworkspace.TreeDigest(t, beadsDir); !maps.Equal(after, before) {
 				t.Fatalf("%s changed the clone: before %v, after %v", name, slices.Sorted(maps.Keys(before)), slices.Sorted(maps.Keys(after)))
 			}
-			want := ErrNoBeadsDatabase.Error() + " at " + beadsDir + ": "
-			if !errors.Is(err, ErrNoBeadsDatabase) || !strings.HasPrefix(err.Error(), want) {
-				t.Fatalf("%s = %v, want the error openForeignStore returns (%q), with its reason", name, err, want)
+			want := ErrNoBeadsDatabase.Error() + " at " + beadsDir + ": " + strings.ReplaceAll(reason, "<repo>", filepath.Dir(beadsDir))
+			if !errors.Is(err, ErrNoBeadsDatabase) || err.Error() != want {
+				t.Fatalf("%s = %v, want the error openForeignStore returns, with its reason (%q)", name, err, want)
 			}
 		})
 	}

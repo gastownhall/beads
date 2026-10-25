@@ -1158,8 +1158,9 @@ func isAmbiguousRepoTarget(repoFlagChanged bool, repoOverride string) bool {
 //
 //   - a .beads refuseUninitializableTarget refuses (one whose own config selects
 //     Dolt server mode, one bd's own admission refuses, a fresh clone of a
-//     SQLite-era project bd run there finds no workspace in, one holding
-//     several databases) is refused, with nothing written;
+//     SQLite-era project, or of a project from before bd wrote config.json,
+//     bd run there finds no workspace in, one holding several databases) is
+//     refused, with nothing written;
 //   - one that holds exactly one embedded database keeps it
 //     (adoptTargetDatabase), the database fork setup creates among them,
 //     unless its working set already holds changes the create's commit would
@@ -1276,6 +1277,12 @@ func ensureBeadsDirForPath(ctx context.Context, targetPath string, sourceStore s
 //     returns (openForeignStore): bd run there finds no workspace and writes
 //     nothing, and the metadata.json written here would make it one that
 //     hides its config.json and issues.jsonl behind an empty database;
+//   - one holding a non-empty issues.jsonl beside nothing discovery treats
+//     as a workspace and no redirect, such as a fresh clone of a project from
+//     before bd wrote config.json, with the same error, naming
+//     bd init --from-jsonl: bd run there finds no workspace, and the issue
+//     written into the new database would keep bd's upgrade auto-import from
+//     ever loading issues.jsonl;
 //   - one holding several embedded databases: nothing records which one
 //     holds the issues (bd run there opens the default database).
 //
@@ -1354,6 +1361,21 @@ func refuseUninitializableTarget(beadsDir string) error {
 	// the reason.
 	if _, err := os.Lstat(filepath.Join(beadsDir, configfile.LegacyConfigFileName)); err == nil && !beads.HasProjectFiles(beadsDir) {
 		return fmt.Errorf("%w at %s: it has a legacy config.json but no database (a fresh clone of a SQLite-era project, say), so bd run there finds no workspace; not initializing it, which would hide what it holds behind an empty database", ErrNoBeadsDatabase, remedy.PrintedValue(beadsDir))
+	}
+	// So is an issues.jsonl beside nothing discovery treats as a workspace,
+	// most often a fresh clone of a project from before bd wrote config.json,
+	// which tracked only issues.jsonl and ignored its *.db. bd run there finds
+	// no workspace, and once bd init gives it a database, bd's upgrade
+	// auto-import (maybeAutoImportJSONL) loads issues.jsonl into it, but only
+	// while it is empty: the issue written here would keep it from ever
+	// loading. The file is the default import path, since the target has no
+	// config.yaml of its own to name another. bd init --from-jsonl in the
+	// repository imports it. An empty issues.jsonl holds nothing to hide (the
+	// size check is a cheap stand-in for "holds issues"), and a .beads that
+	// redirects elsewhere is not the one bd run there reads.
+	if info, err := os.Stat(filepath.Join(beadsDir, defaultImportJSONLPath)); err == nil && info.Mode().IsRegular() && info.Size() > 0 &&
+		!beads.HasProjectFiles(beadsDir) && beads.FollowRedirect(beadsDir) == beadsDir {
+		return fmt.Errorf("%w at %s: it has %s but no database (a fresh clone of a project from before bd wrote config.json, say), so bd run there does not treat it as a workspace; not initializing it, which would hide what it holds behind an empty database. Run `bd init --from-jsonl` in %s, which imports it, then rerun", ErrNoBeadsDatabase, remedy.PrintedValue(beadsDir), defaultImportJSONLPath, repo)
 	}
 	if databases := embeddeddolt.Databases(beadsDir); len(databases) > 1 {
 		return refuseTarget("%s has no metadata.json and holds several databases (%s); give it a metadata.json whose dolt_database names the one to use, then rerun", repo, remedy.PrintedList(databases, ", "))

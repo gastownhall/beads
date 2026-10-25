@@ -1217,6 +1217,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   workspace (`LegacyWorkspaceError`, admission's text) rather than with the
   removed-backend message.
 
+- **`bd create --repo`, an auto-routed `bd create` and `bd migrate-personal`
+  no longer hide the issues of a clone of a project from before bd wrote
+  `config.json`.** Such a clone's `.beads` holds only the `issues.jsonl` bd
+  before 0.17.7 committed (it ignored the `*.db` beside it), and bd run there
+  finds no workspace. The create, and `bd migrate-personal` for its planning
+  repo, gave it an embedded database and a `metadata.json` and wrote into
+  it. bd there then opened that database, and the upgrade auto-import, which
+  loads `issues.jsonl` only into an empty database, never loaded the clone's
+  issues; `bd create --dry-run` previewed that create. Run from another
+  workspace, they now refuse such a target, writing nothing, with `no beads
+  database found at <dir>/.beads: it has issues.jsonl but no database ...`
+  and the way forward: run `bd init --from-jsonl` in the clone, which
+  imports `issues.jsonl`, then rerun. An empty `issues.jsonl`, a `.beads`
+  that redirects elsewhere, and every other target are handled as before,
+  as is `bd create --repo` run from a directory with no workspace.
+
 - A Dolt server you run at an IPv6 address can now be configured bare
   (`::1`) or bracketed (`[::1]`) in `metadata.json` `dolt_server_host`,
   `BEADS_DOLT_SERVER_HOST`, `config.yaml` `dolt.host` or `bd init

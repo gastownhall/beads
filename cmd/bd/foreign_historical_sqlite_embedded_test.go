@@ -471,11 +471,14 @@ func TestEmbeddedCreateRepoRefusesRemovedBackendAsTheOpenDoes(t *testing.T) {
 // whose config.json does not load (malformed, not a JSON object, or
 // unreadable), with "loading config: ...", and a fresh clone of a SQLite-era
 // project (config.json and issues.jsonl, no database), with "no beads
-// database found". Without those checks the create made an embedded database
-// and a metadata.json there, after which bd inside the target opened the new
-// database instead of refusing it or finding no workspace (hiding the clone's
-// issues.jsonl behind it), and the dry-run previewed a create that bd inside
-// the target refuses.
+// database found". So is a fresh clone of a project from before bd wrote
+// config.json (issues.jsonl, no database), whose refusal names
+// bd init --from-jsonl. Without those checks the create made an embedded
+// database and a metadata.json there, after which bd inside the target opened
+// the new database instead of refusing it or finding no workspace (hiding the
+// clone's issues.jsonl behind it: bd's upgrade auto-import loads it only into
+// an empty database), and the dry-run previewed a create that bd inside the
+// target refuses.
 func TestEmbeddedCreateTargetRefusesLegacyConfigItWouldHide(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
@@ -491,8 +494,14 @@ func TestEmbeddedCreateTargetRefusesLegacyConfigItWouldHide(t *testing.T) {
 		// want is the part of the error bd run inside the target prints that
 		// names the cause.
 		want string
+		// remedy, when set, is the part of the refusal that names the way
+		// forward, with <repo> standing for the target.
+		remedy string
 	}
-	fixtures := []fixture{{layout: legacyworkspace.PreDoltClone(), want: ErrNoBeadsDatabase.Error()}}
+	fixtures := []fixture{
+		{layout: legacyworkspace.PreDoltClone(), want: ErrNoBeadsDatabase.Error()},
+		{layout: legacyworkspace.PreConfigJSONClone(), want: ErrNoBeadsDatabase.Error(), remedy: "Run `bd init --from-jsonl` in <repo>, which imports it, then rerun"},
+	}
 	for _, layout := range legacyworkspace.UnloadableLegacyConfigLayouts() {
 		fixtures = append(fixtures, fixture{layout: layout, want: "loading config: parsing config: "})
 	}
@@ -560,9 +569,10 @@ func TestEmbeddedCreateTargetRefusesLegacyConfigItWouldHide(t *testing.T) {
 					local.create(t, "Personal")
 				}
 				stdout, stderr, code := local.run(t, ep.args(repo)...)
-				if want := ep.prefix(repo) + fx.want; code == 0 || !strings.Contains(stderr, want) {
-					t.Fatalf("bd %s exit %d, want the refusal %q\nstdout:\n%s\nstderr:\n%s",
-						strings.Join(ep.args(repo), " "), code, want, stdout, stderr)
+				remedy := strings.ReplaceAll(fx.remedy, "<repo>", repo)
+				if want := ep.prefix(repo) + fx.want; code == 0 || !strings.Contains(stderr, want) || !strings.Contains(stderr, remedy) {
+					t.Fatalf("bd %s exit %d, want the refusal %q naming %q\nstdout:\n%s\nstderr:\n%s",
+						strings.Join(ep.args(repo), " "), code, want, remedy, stdout, stderr)
 				}
 				if _, stderr, code := inside.run(t, "list"); code == 0 || !strings.Contains(stderr, fx.want) {
 					t.Fatalf("after bd %s, bd list inside the target no longer refuses it (exit %d):\n%s",
@@ -580,4 +590,21 @@ func TestEmbeddedCreateTargetRefusesLegacyConfigItWouldHide(t *testing.T) {
 			})
 		}
 	}
+	// The way forward the issues.jsonl-only clone's refusal names keeps its
+	// issues: bd init --from-jsonl there imports issues.jsonl, and the rerun
+	// create then writes beside them.
+	t.Run(legacyworkspace.PreConfigJSONClone().Name+"/remedy", func(t *testing.T) {
+		repo := t.TempDir()
+		initGitRepoAt(t, repo)
+		legacyworkspace.PreConfigJSONClone().Write(t, filepath.Join(repo, ".beads"))
+		inside := crossModeEnv{mode: "embedded", bd: bd, dir: repo, env: bdEnv(repo)}
+		if stdout, stderr, code := inside.run(t, "init", "--from-jsonl", "--prefix", "old", "--quiet", "--non-interactive"); code != 0 {
+			t.Fatalf("bd init --from-jsonl inside the clone exit %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+		}
+		routed := local.create(t, "Routed after the remedy", "--repo", repo)
+		ids := listIssueIDs(bdListJSON(t, bd, repo, "--all"))
+		if !slices.Contains(ids, "old-1") || !slices.Contains(ids, routed) {
+			t.Fatalf("bd list inside the clone after the remedy and a rerun = %v, want old-1 and %s", ids, routed)
+		}
+	})
 }
