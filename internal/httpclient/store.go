@@ -46,6 +46,7 @@ type Store struct {
 	target Target
 	wire   WireClient
 	local  *localMetadata
+	policy *policyCache
 
 	// mu guards the lazily fetched handshake snapshot. D6 makes the context
 	// fetch lazy (first post-baseline dispatch) and cached for the process, so
@@ -97,7 +98,19 @@ var _ storage.RemoteBackendStore = (*Store)(nil)
 // specific true/false meaning but would still hide a transport failure behind
 // a policy decision) or to "yes, so skip" (which would be the actual bug this
 // interface exists to prevent — the policy must never be silently skipped).
+//
+// A store opened from a workspace answers a read from the policy cache
+// (policy_cache.go) while it is fresh, so a short-lived command whose own
+// requests need no handshake does not dial one just for this. A claim or a
+// close (storage.WithLivePolicyProbe) always asks the server: it handshakes
+// anyway, and a stale answer must not stand down its client-side refusal. A
+// handshake this process already holds wins over the cache and refreshes it.
 func (s *Store) ServerEnforcesExternalDependencyPolicy(ctx context.Context) (bool, error) {
+	if s.cachedSnapshot() == nil && !storage.LivePolicyProbe(ctx) {
+		if enforced, ok := s.policy.load(); ok {
+			return enforced, nil
+		}
+	}
 	snap, err := s.snapshot(ctx)
 	if err != nil {
 		return false, err
@@ -105,7 +118,9 @@ func (s *Store) ServerEnforcesExternalDependencyPolicy(ctx context.Context) (boo
 	if snap == nil {
 		return false, nil
 	}
-	return slices.Contains(snap.Capabilities, wire.CapExternalDependencies), nil
+	enforced := slices.Contains(snap.Capabilities, wire.CapExternalDependencies)
+	s.policy.store(enforced)
+	return enforced, nil
 }
 
 var _ storage.ExternalDependencyPolicyProber = (*Store)(nil)
@@ -181,12 +196,13 @@ func open(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
 	if dialer == nil {
 		return nil, fmt.Errorf("%w: cannot dial %s", ErrNoTransport, target)
 	}
-	wire, err := dialer(ctx, target)
+	wire, err := dialShared(ctx, dialer, beadsDir, target)
 	if err != nil {
 		return nil, err
 	}
 	s := New(target, wire, nil)
 	s.local = newLocalMetadata(beadsDir)
+	s.policy = newPolicyCache(target)
 	return s, nil
 }
 
@@ -249,3 +265,10 @@ func (s *Store) CommitAll(_ context.Context, _ string) (bool, error) { return fa
 // CommitPending reports nothing pending, for the same reason: write paths call
 // it opportunistically and must not error.
 func (s *Store) CommitPending(_ context.Context, _ string) (bool, error) { return false, nil }
+
+// CommitConfigOnly and CommitConfigUserKVOnly, the scoped commits after a
+// config or memory write (GH#4078), join the family for the same D3 reason:
+// the write is durable once the server answers, so there is nothing to flush,
+// and refusing would fail a command whose write already landed.
+func (s *Store) CommitConfigOnly(_ context.Context, _ string) error       { return nil }
+func (s *Store) CommitConfigUserKVOnly(_ context.Context, _ string) error { return nil }

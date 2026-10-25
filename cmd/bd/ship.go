@@ -3,9 +3,11 @@ package main
 import (
 	"fmt"
 	"os"
+	"runtime"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -69,7 +71,7 @@ func runShip(cmd *cobra.Command, args []string) error {
 	if len(issues) == 0 {
 		return HandleErrorWithHintRespectJSON(
 			fmt.Sprintf("no issue found with label '%s'", exportLabel),
-			fmt.Sprintf("add the label first: bd label add <issue-id> %s", exportLabel))
+			labelAddCommand(exportLabel))
 	}
 
 	if len(issues) > 1 {
@@ -154,4 +156,12 @@ func init() {
 	shipCmd.Flags().Bool("dry-run", false, "Preview without making changes")
 
 	rootCmd.AddCommand(shipCmd)
+}
+
+// labelAddCommand is the hint naming the bd label add command for label, the
+// label as one shell word or a placeholder named after the command. The label
+// holds the capability the user typed, as shipCommand's does.
+func labelAddCommand(label string) string {
+	arg, note := remedy.CommandArg(runtime.GOOS, label, "<label>")
+	return "add the label first: bd label add <issue-id> " + arg + note
 }

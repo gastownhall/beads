@@ -18,17 +18,22 @@ package schema
 // this limitation does not apply.
 //
 // Dolt 2.3.0 fixed #11345, and that fix MASKS a missing override here rather
-// than removing the need for one: on 2.3.x the CLI executes the prepared
+// than removing the need for one: a 2.3.0-or-newer CLI executes the prepared
 // ALTER, so a bundle that forgot the direct statement still lands the right
-// schema and TestCLIBundleMatchesRuntimeCommittedSchema goes green against a
-// 2.2.0 sql-server. So every override below must be justified against the
-// pre-2.3 behavior, and the string assertions in
-// TestAllMigrationsSQLUsesDirectDDLForKnownCLIIncompatibilities — which need
-// no Dolt binary at all — are the guard that survives a CLI version bump.
+// schema. Run through a 2.3.x CLI, TestCLIBundleMatchesRuntimeCommittedSchema
+// went green that way against the then-pinned 2.2.0 sql-server, and with the
+// CLI now pinned at 2.6.0 it cannot catch a dropped override on any run
+// (probed 2026-10-21: a prepared ADD COLUMN vanishes on the 2.2.0 CLI and
+// lands on 2.5.1). So every override below must be justified against the
+// pre-2.3 behavior, and the guards that still work need no Dolt binary at
+// all: the string assertions in
+// TestAllMigrationsSQLUsesDirectDDLForKnownCLIIncompatibilities and
+// TestBundleMigrationsWithPreparedALTERAreOverriddenOrJustified
+// (cli_prepared_ddl.go).
 //
-// The measurement that check stands in for: run AllMigrationsSQL() through
+// The measurement those checks stand in for: run AllMigrationsSQL() through
 // each CLI and diff information_schema. On 2026-08-21, with 0060's and 0065's
-// overrides both in place, dolt 2.1.8, 2.2.0 (the pinned CLI) and 2.3.1 agree
+// overrides both in place, dolt 2.1.8, 2.2.0 (the CLI pinned then) and 2.3.1 agree
 // on all 504 snapshot lines including the wisp_ tables the parity oracle
 // excludes — so no prepared statement the bundle still carries changes its
 // committed schema. Before that, 2.3.1 landed three extra columns (0060's
@@ -122,7 +127,7 @@ func cliCompatibleMigrationSQL(name, sqlText string) string {
 		// upgraded databases, and the 2.2.x CLI no-ops the prepared ALTER
 		// (measured 2026-08-20: AllMigrationsSQL() through dolt 2.2.0 lands
 		// bd_events_journal WITHOUT actor; 2.3.1 — and 2.2.3, which already
-		// carries the #11345 fix — land it; CI pins 2.2.0). The table
+		// carries the #11345 fix — land it; CI pinned 2.2.0 then). The table
 		// itself is always present here: 0064's prepared RENAME executes on
 		// 2.2.0 (same measurement), so a fresh bundle always needs the column.
 		return cliMigration0066AddEventsJournalActor
@@ -157,6 +162,26 @@ func cliCompatibleMigrationSQL(name, sqlText string) string {
 		// 0067 creates both as plain DATETIME and 0068 retypes only
 		// durable_state -- so both of 0069's MODIFYs always fire here too.
 		return cliMigration0069WidenIssueVersionsDatetimePrecision
+	case "0070_add_participation_generation.up.sql":
+		// Direct DDL for the same reason as 0067: the source migration's
+		// PREPARE guards (INFORMATION_SCHEMA probes) are what make the raw
+		// .up.sql idempotent when replayed onto an already-migrated store,
+		// and the 2.2.x CLI no-ops a prepared ADD COLUMN. issues and wisps
+		// both exist by this point in the series (0067 creates the versioned
+		// columns on both) and neither carries participation_generation yet,
+		// so both of 0070's ALTERs always fire on a fresh bundle -- this
+		// substitute ALTERs wisps directly, the same as 0067's, so it
+		// belongs on cliSubstituteAssumesWispTables too.
+		return cliMigration0070AddParticipationGeneration
+	case "0071_add_removed_restriction.up.sql":
+		// Direct DDL for the same reason as 0067/0068: the source migration's
+		// PREPARE guard (an INFORMATION_SCHEMA probe) is what makes the raw
+		// .up.sql idempotent when replayed onto an already-migrated store,
+		// and the 2.2.x CLI no-ops a prepared ADD COLUMN. issue_versions is
+		// always present here -- 0067 runs earlier in the same fresh-bundle
+		// series -- and never carries removed_restriction yet, so the column
+		// always needs adding on a fresh bundle.
+		return cliMigration0071AddRemovedRestriction
 	default:
 		return sqlText
 	}
@@ -192,6 +217,11 @@ func cliSubstituteAssumesWispTables(name string) bool {
 	case "0067_add_versioned_beads_schema.up.sql":
 		// cliMigration0067AddVersionedBeadsSchema drops the source's
 		// @wisps_cr_needs_add table-exists guard and ALTERs wisps directly.
+		return true
+	case "0070_add_participation_generation.up.sql":
+		// cliMigration0070AddParticipationGeneration drops the source's
+		// @wisps_pg_needs_add table-exists guard and ALTERs wisps directly,
+		// the same shape 0067's override already uses for current_revision.
 		return true
 	default:
 		return false
@@ -289,6 +319,24 @@ ALTER TABLE issue_versions MODIFY COLUMN durable_state LONGBLOB;`
 // twin exists for this table.
 const cliMigration0069WidenIssueVersionsDatetimePrecision = `ALTER TABLE issue_versions MODIFY COLUMN change_at DATETIME(6) NOT NULL;
 ALTER TABLE issue_versions MODIFY COLUMN removed_at DATETIME(6);`
+
+// cliMigration0070AddParticipationGeneration is 0070 with its two guarded
+// PREPARE blocks replaced by the direct ALTERs they would run on a fresh
+// database: participation_generation BIGINT NULL on issues, mirrored
+// inertly on wisps (design §16.3 steps 4-5, be-dt74u amendment, be-h89oq).
+// issues and wisps both exist by this point in the series (0067 creates the
+// versioned columns on both) and neither carries participation_generation
+// yet, so both ALTERs always fire on a fresh bundle -- this substitute
+// ALTERs wisps directly, the same as 0067's, so it belongs on
+// cliSubstituteAssumesWispTables too.
+const cliMigration0070AddParticipationGeneration = `ALTER TABLE issues ADD COLUMN participation_generation BIGINT NULL;
+ALTER TABLE wisps ADD COLUMN participation_generation BIGINT NULL;`
+
+// cliMigration0071AddRemovedRestriction is 0071 with its one guarded PREPARE
+// block replaced by the direct ALTER it would run on a fresh database.
+// issue_versions is created earlier in the same series by 0067 and never
+// carries removed_restriction yet, so the column always needs adding here.
+const cliMigration0071AddRemovedRestriction = `ALTER TABLE issue_versions ADD COLUMN removed_restriction VARCHAR(30);`
 
 const cliMigration0041SplitDependenciesTarget = `DELETE FROM dolt_nonlocal_tables;
 CALL DOLT_COMMIT('-Am', 'disable nonlocal tables for fk migrations');

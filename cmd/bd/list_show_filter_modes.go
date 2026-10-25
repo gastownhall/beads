@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
@@ -128,13 +129,6 @@ func findAllDescendants(ctx context.Context, store storage.DoltStorage, dbPath s
 	return nil
 }
 
-// watchIssues polls for changes and re-displays (GH#654)
-// Uses polling instead of fsnotify because Dolt stores data in a server-side
-// database, not files — file watchers never fire.
-type watchListDependencyStore interface {
-	GetAllDependencyRecords(ctx context.Context) (map[string][]*types.Dependency, error)
-}
-
 func loadWatchedIssues(ctx context.Context, store storage.DoltStorage, filter types.IssueFilter, ready bool, parentID string, sortBy string, reverse bool) ([]*types.Issue, error) {
 	if ready {
 		issues, err := store.GetReadyWork(ctx, workapi.ReadyFilterFromIssueFilter(workapi.WithFetchOneExtra(filter)))
@@ -168,10 +162,14 @@ func loadWatchedIssues(ctx context.Context, store storage.DoltStorage, filter ty
 // names its scope instead of asserting an in-progress count the ready filter
 // forced to zero. A watch loop is where a stale "0 in progress" is most likely
 // to be read as a live fact, so this is the path that most needs it.
-func displayWatchedIssueList(ctx context.Context, store watchListDependencyStore, issues []*types.Issue, truncated, readyFiltered bool, statusSelector, sortBy string, reverse bool) {
+//
+// The tree reads only the displayed issues' edges (listDependencyRecords), the
+// read the proxied watch makes too, so a redraw does not reload every edge in
+// the store.
+func displayWatchedIssueList(ctx context.Context, store listEdgeSource, issues []*types.Issue, truncated, readyFiltered bool, statusSelector, sortBy string, reverse bool) {
 	var allDeps map[string][]*types.Dependency
 	if store != nil {
-		deps, err := store.GetAllDependencyRecords(ctx)
+		deps, err := listDependencyRecords(ctx, store, issues)
 		if err == nil {
 			allDeps = deps
 		}
@@ -181,6 +179,10 @@ func displayWatchedIssueList(ctx context.Context, store watchListDependencyStore
 	displayPrettyListWithDepsMode(issues, true, allDeps, "", truncated, readyFiltered, statusSelector, sortBy, reverse, nil)
 }
 
+// watchIssues polls for changes and re-displays (GH#654)
+// Uses polling instead of fsnotify because Dolt stores data in a server-side
+// database, not files — file watchers never fire.
+//
 // watchIssues returns an error only for the initial query — a failure there
 // means bd list --watch never displayed anything, so (unlike a mid-poll
 // refresh failure, which just logs and keeps the last good snapshot on
@@ -221,7 +223,7 @@ func watchIssues(ctx context.Context, store storage.DoltStorage, filter types.Is
 		case <-ticker.C:
 			issues, err := loadWatchedIssues(ctx, store, filter, ready, parentID, sortBy, reverse)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error refreshing issues: %v\n", err)
+				fmt.Fprintf(os.Stderr, "Error refreshing issues: %s\n", remedy.PrintedMessage(err))
 				continue
 			}
 			issues, truncated := workapi.FinishPage(issues, "", false, effectiveLimit, false)
@@ -297,54 +299,4 @@ func gatherProxiedHierarchical(ctx context.Context, uw uow.UnitOfWork, parentID 
 	out = append(out, parent)
 	out = append(out, descendants...)
 	return out, nil
-}
-
-type currentIssueSearcher interface {
-	SearchIssues(context.Context, string, types.IssueFilter) ([]*types.Issue, error)
-}
-
-// resolveCurrentIssueID determines the current active issue for the agent.
-// Priority: in-progress assigned to actor > hooked > last touched.
-func resolveCurrentIssueID(ctx context.Context) string {
-	return resolveCurrentIssueIDFrom(ctx, store, getActorWithGit, GetLastTouchedID)
-}
-
-func resolveCurrentIssueIDFrom(ctx context.Context, searcher currentIssueSearcher, currentActor func() string, fallback func() string) string {
-	if searcher == nil {
-		return fallback()
-	}
-	actor := currentActor()
-	if actor == "" {
-		return fallback()
-	}
-
-	for _, status := range []types.Status{types.StatusInProgress, types.StatusHooked} {
-		status := status
-		filter := types.IssueFilter{
-			Status:   &status,
-			Assignee: &actor,
-		}
-		issues, err := searcher.SearchIssues(ctx, "", filter)
-		if err == nil && len(issues) > 0 {
-			return issues[0].ID
-		}
-	}
-
-	return fallback()
-}
-
-func resolveCurrentIssueIDProxied(ctx context.Context, uw uow.UnitOfWork) string {
-	currentActor := getActorWithGit()
-	if currentActor == "" {
-		return ""
-	}
-	for _, status := range []types.Status{types.StatusInProgress, types.StatusHooked} {
-		st := status
-		filter := types.IssueFilter{Status: &st, Assignee: &currentActor}
-		page, err := uw.IssueUseCase().SearchIssues(ctx, "", filter)
-		if err == nil && len(page.Items) > 0 {
-			return page.Items[0].ID
-		}
-	}
-	return ""
 }

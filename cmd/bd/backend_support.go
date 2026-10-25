@@ -12,9 +12,22 @@ import (
 // the rejection inspects it (read-only) so a workspace that already holds a Dolt
 // database is told to fix the stale "backend" value rather than to export and
 // reinitialize. Pass "" only where there is genuinely no workspace directory.
+//
+// It also refuses metadata that declares a workspace format this build cannot
+// open (checkWorkspaceFormat). Command admission refuses those first, and the
+// store factories check before their migrating configfile.Load
+// (checkDiscoveredBackend), so here it backs up any other caller that
+// validates metadata it loaded itself. It returns early for a nil cfg, so that
+// backstop covers the graph format marker only when metadata was loaded; a
+// caller that may have none must check beadsDir with
+// checkDiscoveredWorkspaceFormat or command admission first, as every caller
+// does today.
 func validateConfiguredBackend(cfg *configfile.Config, beadsDir string) error {
 	if cfg == nil {
 		return nil
+	}
+	if err := checkWorkspaceFormat(cfg, beadsDir); err != nil {
+		return err
 	}
 	if backends.Registered(cfg.Backend) {
 		return nil
@@ -27,6 +40,25 @@ func validateConfiguredBackend(cfg *configfile.Config, beadsDir string) error {
 	default:
 		return configfile.UnknownBackendErrorAt(cfg.Backend, beadsDir, cfg)
 	}
+}
+
+// checkDiscoveredBackend runs validateConfiguredBackend on beadsDir's metadata
+// as LoadForDiscovery reads it, which never rewrites the workspace. The store
+// factories run it before configfile.Load, which migrates a legacy config.json
+// into metadata.json, dropping the keys Config does not know and deleting
+// config.json, so a format or a removed or unrecognized backend they refuse is
+// refused before that rewrite rather than after it. Command admission makes
+// the same check, but only on the workspace bd runs in; the factories also
+// open others (an auto-routed target, an external project). A registered
+// backend passes, for the factory to dispatch. Metadata that does not load is
+// left to the caller's Load to report, unless the graph format marker sits
+// beside it (configfile.LoadDiscoveredForOpen); no metadata passes.
+func checkDiscoveredBackend(beadsDir string) error {
+	cfg, err := configfile.LoadDiscoveredForOpen(beadsDir)
+	if err != nil {
+		return err
+	}
+	return validateConfiguredBackend(cfg, beadsDir)
 }
 
 // registeredBackendWorkspaceIsBeadsDir reports whether metadata selects a
@@ -80,14 +112,16 @@ func openStoreError(backendName string, err error) error {
 	return fmt.Errorf("failed to open database: %w", err)
 }
 
-// backendNameForErrorFraming best-effort loads metadata.json to learn which
+// backendNameForErrorFraming best-effort reads metadata.json to learn which
 // backend a failed open was for, so a caller that does not already have cfg
 // in scope (for example direct mode's single-shot store-open) can still give
 // openStoreError the name it needs. A failure to even read the config
 // degrades to "" — openStoreError's default, Dolt-shaped framing — rather
-// than compounding one error with another.
+// than compounding one error with another. It reads with LoadForDiscovery:
+// the open it frames may have just refused the workspace, and
+// configfile.Load would migrate a legacy config.json into metadata.json.
 func backendNameForErrorFraming(beadsDir string) string {
-	cfg, err := configfile.Load(beadsDir)
+	cfg, err := configfile.LoadForDiscovery(beadsDir)
 	if err != nil || cfg == nil {
 		return ""
 	}
@@ -95,6 +129,12 @@ func backendNameForErrorFraming(beadsDir string) string {
 }
 
 func loadDoltBackendConfig(beadsDir string) (*configfile.Config, error) {
+	// Refuse a workspace format this build cannot open before configfile.Load,
+	// which would otherwise migrate a legacy config.json into metadata.json
+	// before requireDoltBackend's own format check could refuse it.
+	if err := checkDiscoveredWorkspaceFormat(beadsDir); err != nil {
+		return nil, err
+	}
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil {
 		return nil, fmt.Errorf("loading config: %w", err)

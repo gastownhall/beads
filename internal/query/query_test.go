@@ -1,6 +1,9 @@
 package query
 
 import (
+	"fmt"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -176,6 +179,39 @@ func TestLexer(t *testing.T) {
 			input:    "label=30MIN",
 			expected: []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenEOF},
 			values:   []string{"label", "=", "30MIN", ""},
+		},
+		// Units are lowercase in the shared grammar, so an uppercase one is
+		// not a duration: it reaches the evaluator as typed and fails there as
+		// an unparseable time instead of as a negated compact duration.
+		{
+			name:     "uppercase months unit stays an identifier",
+			input:    "updated>30M",
+			expected: []TokenType{TokenIdent, TokenGreater, TokenIdent, TokenEOF},
+			values:   []string{"updated", ">", "30M", ""},
+		},
+		{
+			name:     "uppercase hours unit stays an identifier",
+			input:    "updated>30H",
+			expected: []TokenType{TokenIdent, TokenGreater, TokenIdent, TokenEOF},
+			values:   []string{"updated", ">", "30H", ""},
+		},
+		{
+			name:     "uppercase days unit on a non-time field stays an identifier",
+			input:    "label=30D",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenEOF},
+			values:   []string{"label", "=", "30D", ""},
+		},
+		{
+			name:     "lowercase months unit is a duration",
+			input:    "updated>30m",
+			expected: []TokenType{TokenIdent, TokenGreater, TokenDuration, TokenEOF},
+			values:   []string{"updated", ">", "30m", ""},
+		},
+		{
+			name:     "signed lowercase days unit is a duration",
+			input:    "updated>+30d",
+			expected: []TokenType{TokenIdent, TokenGreater, TokenDuration, TokenEOF},
+			values:   []string{"updated", ">", "+30d", ""},
 		},
 	}
 
@@ -764,44 +800,207 @@ func TestQueryMinutesUnitResolvesAgo(t *testing.T) {
 	}
 }
 
+// TestQueryRejectsUppercaseDurationUnits pins how an uppercase duration unit
+// fails on a time field. Units are lowercase in the shared grammar, so "30M"
+// is not a duration: it reaches ParseRelativeTime as typed, fails there, and
+// the error quotes what the user wrote. It must never be the internal
+// "not a compact duration" error, which quoted the negated "-30M" the
+// evaluator builds for a duration token. "30MIN" and "30Min" always took the
+// ParseRelativeTime path; they are controls for the expected error.
+func TestQueryRejectsUppercaseDurationUnits(t *testing.T) {
+	now := time.Date(2025, 2, 4, 12, 0, 0, 0, time.UTC)
+
+	values := []string{"30M", "30D", "30W", "30Y", "30H", "1H", "30MIN", "30Min"}
+	shapes := []string{
+		"created>%s",
+		"updated<%s",
+		"closed>=%s",
+		"started<=%s",
+		"created>%s OR status=open",
+	}
+
+	for _, value := range values {
+		for _, shape := range shapes {
+			query := fmt.Sprintf(shape, value)
+			t.Run(query, func(t *testing.T) {
+				_, err := EvaluateAt(query, now)
+				if err == nil {
+					t.Fatalf("EvaluateAt(%q) succeeded, want an unparseable-time error", query)
+				}
+				msg := err.Error()
+				if want := "cannot parse time expression: " + strconv.Quote(value); !strings.Contains(msg, want) {
+					t.Errorf("EvaluateAt(%q) error = %q, want it to contain %q", query, msg, want)
+				}
+				if strings.Contains(msg, "not a compact duration") {
+					t.Errorf("EvaluateAt(%q) error = %q, want no internal compact-duration error", query, msg)
+				}
+				if negated := strconv.Quote("-" + value); strings.Contains(msg, negated) {
+					t.Errorf("EvaluateAt(%q) error = %q quotes %s, a value the user never typed", query, msg, negated)
+				}
+			})
+		}
+	}
+}
+
+// TestQuerySignedUppercaseDurationUnitStopsAtTheParser pins how a signed
+// uppercase unit fails. A signed digit run has no identifier fallback (the
+// user has to quote "-3-foo"), so with "M" not a unit, "+30M" lexes as the
+// number "+30" and then the identifier "M", and the parser rejects that stray
+// token as it already rejects the "x" of "+30x". It must not reach the
+// evaluator as a duration and fail there with the internal
+// "not a compact duration" error.
+func TestQuerySignedUppercaseDurationUnitStopsAtTheParser(t *testing.T) {
+	now := time.Date(2025, 2, 4, 12, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		query   string
+		wantErr string
+	}{
+		{"created>+30M", `unexpected token "M" at position 11 (expected end of query)`},
+		{"created>-30M", `unexpected token "M" at position 11 (expected end of query)`},
+		// Control: an unknown lowercase unit already fails this way.
+		{"created>+30x", `unexpected token "x" at position 11 (expected end of query)`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.query, func(t *testing.T) {
+			if _, err := Parse(tt.query); err == nil || err.Error() != tt.wantErr {
+				t.Errorf("Parse(%q) error = %v, want %q", tt.query, err, tt.wantErr)
+			}
+			if _, err := EvaluateAt(tt.query, now); err == nil || err.Error() != tt.wantErr {
+				t.Errorf("EvaluateAt(%q) error = %v, want %q", tt.query, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// TestQueryKeepsLowercaseUnitsAndLiteralValues pins, at a fixed now, what
+// rejecting uppercase units leaves alone: a signed lowercase unit still
+// resolves as N ago, a natural-language time still resolves through
+// ParseRelativeTime, and on a non-time field "30M" is still the literal string
+// it always was. TestQueryMinutesUnitResolvesAgo pins created>30m (30 months
+// ago) and created>30min (30 minutes ago).
+func TestQueryKeepsLowercaseUnitsAndLiteralValues(t *testing.T) {
+	now := time.Date(2025, 2, 4, 12, 0, 0, 0, time.UTC)
+
+	bounds := []struct {
+		query string
+		want  time.Time
+		bound func(*types.IssueFilter) *time.Time
+	}{
+		{
+			query: "created>+30d",
+			want:  now.AddDate(0, 0, -30),
+			bound: func(f *types.IssueFilter) *time.Time { return f.CreatedAfter },
+		},
+		{
+			query: "updated>5pm",
+			want:  time.Date(2025, 2, 4, 17, 0, 0, 0, time.UTC),
+			bound: func(f *types.IssueFilter) *time.Time { return f.UpdatedAfter },
+		},
+	}
+	for _, tt := range bounds {
+		t.Run(tt.query, func(t *testing.T) {
+			result, err := EvaluateAt(tt.query, now)
+			if err != nil {
+				t.Fatalf("EvaluateAt(%q) error = %v", tt.query, err)
+			}
+			got := tt.bound(&result.Filter)
+			if got == nil {
+				t.Fatalf("EvaluateAt(%q) left the time bound unset, filter=%+v", tt.query, result.Filter)
+			}
+			if !got.Equal(tt.want) {
+				t.Errorf("EvaluateAt(%q) = %s, want %s", tt.query, got.Format(time.RFC3339), tt.want.Format(time.RFC3339))
+			}
+		})
+	}
+
+	t.Run("label=30M", func(t *testing.T) {
+		result, err := EvaluateAt("label=30M", now)
+		if err != nil {
+			t.Fatalf("EvaluateAt(label=30M) error = %v", err)
+		}
+		if len(result.Filter.Labels) != 1 || result.Filter.Labels[0] != "30M" {
+			t.Errorf("EvaluateAt(label=30M) Labels = %v, want [%q]", result.Filter.Labels, "30M")
+		}
+	})
+	t.Run("title=30M", func(t *testing.T) {
+		result, err := EvaluateAt("title=30M", now)
+		if err != nil {
+			t.Fatalf("EvaluateAt(title=30M) error = %v", err)
+		}
+		if result.Filter.TitleContains != "30M" {
+			t.Errorf("EvaluateAt(title=30M) TitleContains = %q, want %q", result.Filter.TitleContains, "30M")
+		}
+	})
+}
+
 // TestCompactDurationGrammarReachesQueryPlane binds this package's duration
-// grammar to the shared one in internal/timeparsing, which owns it. The lexer
-// keeps a second copy of the unit set — isDurationSuffix for single runes,
-// durationWords for whole words — and nothing outside this test holds the two
-// in sync. A unit added to the shared grammar but missed here lexes as
-// TokenIdent, skips the evaluator's TokenDuration arm, and resolves through
-// ParseRelativeTime as a *future* offset: the "30min meant 30 minutes from now"
-// inversion this PR fixed, reproduced silently for the next unit.
+// grammar to the shared one in internal/timeparsing, which owns it, in both
+// directions. The lexer classifies a duration with
+// timeparsing.IsCompactDuration instead of keeping its own copy of the unit
+// set; this test holds it to that. A unit the shared grammar accepts but the
+// lexer types as TokenIdent skips the evaluator's TokenDuration arm and
+// resolves through ParseRelativeTime as a *future* offset: the "30min meant 30
+// minutes from now" inversion, reproduced silently for the next unit. A suffix
+// the shared grammar rejects but the lexer types as TokenDuration reaches
+// ParseCompactDuration in the evaluator and fails with that parser's internal
+// error about a negated value the user never typed: while the lexer took
+// "H D W M Y", "created>30M" failed with `not a compact duration: "-30M"`.
 //
-// The shared pattern is unexported, so ParseCompactDuration is the oracle:
-// whatever suffix it accepts must lex as a duration here. Candidates are
-// exhaustive over lowercase ASCII up to three runes, so plausible future
-// spellings ("sec", "hr", "mo", "yr") are covered alongside today's six.
-//
-// Only this direction is asserted. The reverse — everything the lexer accepts
-// being valid in the shared grammar — is already false at base: isDurationSuffix
-// also takes "H D W M Y", which the case-sensitive pattern rejects, so
-// "created>30M" lexes as a duration and then fails in ParseCompactDuration.
-// That asymmetry predates this PR and is not what this test is for.
+// ParseCompactDuration is the oracle: a suffix must lex as a duration here if
+// and only if it accepts it. Candidates are exhaustive over one- and
+// two-letter ASCII in either case and three-letter lowercase ASCII, plus every
+// case spelling of an accepted three-letter unit, so plausible future
+// spellings ("sec", "hr", "mo", "yr") are covered alongside today's six and
+// their uppercase forms.
 func TestCompactDurationGrammarReachesQueryPlane(t *testing.T) {
 	now := time.Date(2025, 2, 4, 12, 0, 0, 0, time.UTC)
 
-	const letters = "abcdefghijklmnopqrstuvwxyz"
+	accepts := func(unit string) bool {
+		_, err := timeparsing.ParseCompactDuration("1"+unit, now)
+		return err == nil
+	}
+
+	const lower = "abcdefghijklmnopqrstuvwxyz"
+	const letters = lower + "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 	var candidates []string
 	for _, a := range letters {
 		candidates = append(candidates, string(a))
 		for _, b := range letters {
 			candidates = append(candidates, string(a)+string(b))
-			for _, c := range letters {
-				candidates = append(candidates, string(a)+string(b)+string(c))
+		}
+	}
+	for _, a := range lower {
+		for _, b := range lower {
+			for _, c := range lower {
+				unit := string(a) + string(b) + string(c)
+				candidates = append(candidates, unit)
+				if !accepts(unit) {
+					continue
+				}
+				// The lowercase sweep reaches only this spelling of an
+				// accepted three-letter unit; add the others ("MIN", "Min", ...).
+				for mask := 1; mask < 1<<len(unit); mask++ {
+					var spelling strings.Builder
+					for i := 0; i < len(unit); i++ {
+						if mask&(1<<i) != 0 {
+							spelling.WriteString(strings.ToUpper(unit[i : i+1]))
+						} else {
+							spelling.WriteByte(unit[i])
+						}
+					}
+					candidates = append(candidates, spelling.String())
+				}
 			}
 		}
 	}
 
-	var accepted []string
+	var accepted, rejected []string
 	isAccepted := make(map[string]bool)
 	for _, unit := range candidates {
-		if _, err := timeparsing.ParseCompactDuration("1"+unit, now); err != nil {
+		if !accepts(unit) {
+			rejected = append(rejected, unit)
 			continue
 		}
 		accepted = append(accepted, unit)
@@ -829,7 +1028,7 @@ func TestCompactDurationGrammarReachesQueryPlane(t *testing.T) {
 			}
 			if tokens[2].Type != TokenDuration || tokens[2].Value != value {
 				t.Errorf("timeparsing accepts %q but the query lexer typed it %v(%q), want %v(%q); "+
-					"add the unit to durationWords/isDurationSuffix or it resolves as a future offset",
+					"classify durations with timeparsing.IsCompactDuration or the unit resolves as a future offset",
 					value, tokens[2].Type, tokens[2].Value, TokenDuration, value)
 			}
 
@@ -844,6 +1043,29 @@ func TestCompactDurationGrammarReachesQueryPlane(t *testing.T) {
 				t.Errorf("EvaluateAt(label=%s) Labels = %v, want [%q]", value, result.Filter.Labels, value)
 			}
 		})
+	}
+
+	// The reverse direction is one sweep with one report rather than a
+	// subtest per suffix: there are over 20,000 of them.
+	var typedDuration []string
+	for _, unit := range rejected {
+		value := "1" + unit
+		tokens, err := NewLexer("updated>" + value).Tokenize()
+		if err != nil {
+			t.Errorf("Tokenize(updated>%s) error = %v", value, err)
+			continue
+		}
+		for _, tok := range tokens {
+			if tok.Type == TokenDuration {
+				typedDuration = append(typedDuration, unit)
+				break
+			}
+		}
+	}
+	if len(typedDuration) > 0 {
+		t.Errorf("timeparsing rejects these suffixes but the query lexer typed them %v: %v; "+
+			"classify durations with timeparsing.IsCompactDuration or the evaluator fails on them "+
+			"with an internal error", TokenDuration, typedDuration)
 	}
 }
 

@@ -275,7 +275,10 @@ func runRecipe(name string) error {
 				return HandleError("%v", err)
 			}
 			removed = true
-			_ = os.Remove(filepath.Dir(path))
+			// Drop the file's directory if that left it empty, but never a
+			// symlinked one, which removing would unlink whatever its
+			// target holds (setup.RemoveEmptyDir).
+			_ = setup.RemoveEmptyDir(filepath.Dir(path))
 		}
 		if !removed {
 			fmt.Println("No integration files found")
@@ -428,7 +431,7 @@ func init() {
 	setupCmd.Flags().BoolVar(&setupCheck, "check", false, "Check if integration is installed")
 	setupCmd.Flags().BoolVar(&setupRemove, "remove", false, "Remove the integration")
 	setupCmd.Flags().BoolVar(&setupProject, "project", false, "Install for this project only (gemini/mux)")
-	setupCmd.Flags().BoolVar(&setupGlobal, "global", false, "Install globally (claude/codex/cursor/mux; writes to ~/.claude/settings.json, $CODEX_HOME/AGENTS.md or ~/.codex/AGENTS.md, ~/.cursor/hooks.json, or ~/.mux/AGENTS.md)")
+	setupCmd.Flags().BoolVar(&setupGlobal, "global", false, "Install globally (claude/codex/cursor/mux; writes to ~/.claude/settings.json and ~/.claude/CLAUDE.md, $CODEX_HOME/AGENTS.md or ~/.codex/AGENTS.md, ~/.cursor/hooks.json, or ~/.mux/AGENTS.md)")
 	setupCmd.Flags().BoolVar(&setupStealth, "stealth", false, "Use stealth mode (claude/gemini)")
 
 	rootCmd.AddCommand(setupCmd)

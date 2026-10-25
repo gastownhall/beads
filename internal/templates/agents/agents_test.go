@@ -139,3 +139,30 @@ func TestGoEmbedDefaultManagedMarkerIsCurrent(t *testing.T) {
 		t.Errorf("marker hash = %q, want %q", meta.Hash, CurrentHash(ProfileFull))
 	}
 }
+
+// TestEmbeddedDefaultWithOptsQuickReferenceFollowsRemote pins that the Quick
+// Reference bd init writes above the managed section lists `bd dolt push`
+// under the same rule as the managed section itself: only with a Dolt remote
+// configured and the workspace not declared no-push. Without it the template
+// loses exactly that line and nothing else.
+func TestEmbeddedDefaultWithOptsQuickReferenceFollowsRemote(t *testing.T) {
+	if !strings.Contains(EmbeddedDefault(), "\n"+quickReferencePushLine) {
+		t.Fatalf("test precondition: the template's Quick Reference no longer holds %q", quickReferencePushLine)
+	}
+	for _, opts := range []RenderOpts{
+		{HasRemote: true},
+		{},
+		{HasRemote: true, NoPush: true},
+		{NoPush: true},
+	} {
+		got := EmbeddedDefaultWithOpts(opts)
+		sectionPush := strings.Contains(RenderSectionWithOpts(ProfileMinimal, opts), "bd dolt push")
+		want := EmbeddedDefault()
+		if !sectionPush {
+			want = strings.ReplaceAll(want, "\n"+quickReferencePushLine, "\n")
+		}
+		if got != want {
+			t.Errorf("%+v: Quick Reference lists `bd dolt push` = %v, want %v (as the managed section)", opts, strings.Contains(got, "\n"+quickReferencePushLine), sectionPush)
+		}
+	}
+}

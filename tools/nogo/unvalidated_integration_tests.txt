@@ -16,6 +16,7 @@
 # _test.go files).
 cmd/bd/ado_roundtrip_test.go
 cmd/bd/cli_fast_test.go
+cmd/bd/config_commit_server_integration_test.go
 cmd/bd/contributor_routing_e2e_test.go
 cmd/bd/delete_test.go
 cmd/bd/doctor_health_integration_test.go

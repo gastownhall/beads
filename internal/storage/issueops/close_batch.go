@@ -59,8 +59,19 @@ func ValidateCloseBatchRequest(request publicops.CloseBatchRequest) error {
 func CloseBatchCommitMessage(result publicops.CloseBatchResult) string {
 	ids := make([]string, 0, len(result.Outcomes))
 	ephemeral := 0
+	var autoClosed []string
 	for _, outcome := range result.Outcomes {
-		if outcome.Err != nil || !outcome.Changed {
+		if outcome.Err != nil {
+			continue
+		}
+		if root := outcome.AutoClosedMolecule; root != nil {
+			if IsWisp(root) {
+				ephemeral++
+			} else {
+				autoClosed = append(autoClosed, root.ID)
+			}
+		}
+		if !outcome.Changed {
 			continue
 		}
 		if closeOutcomeIsEphemeral(outcome) {
@@ -78,6 +89,9 @@ func CloseBatchCommitMessage(result publicops.CloseBatchResult) string {
 		parts = append(parts, "close 1 ephemeral item")
 	case ephemeral > 1:
 		parts = append(parts, fmt.Sprintf("close %d ephemeral items", ephemeral))
+	}
+	if len(autoClosed) > 0 {
+		parts = append(parts, "auto-close "+strings.Join(autoClosed, ", "))
 	}
 	if result.ClaimedNext != nil {
 		parts = append(parts, "claim "+result.ClaimedNext.ID)
@@ -159,6 +173,25 @@ func ExecuteCloseBatchWithPolicy(ctx context.Context, tx *sql.Tx, request public
 			Issue:        closed.Issue,
 			Changed:      closed.Changed,
 			OpenChildren: closed.OpenChildren,
+		}
+	}
+
+	if request.AutoCloseMolecule {
+		closedAt := make([]int, 0, len(result.Outcomes))
+		stepIDs := make([]string, 0, len(result.Outcomes))
+		for i, outcome := range result.Outcomes {
+			if outcome.Err == nil {
+				closedAt = append(closedAt, i)
+				stepIDs = append(stepIDs, outcome.IssueID)
+			}
+		}
+		autos, autoTables, err := CloseCompletedMoleculesInTx(ctx, tx, stepIDs, request.Actor, request.Session)
+		if err != nil {
+			return publicops.CloseBatchResult{}, nil, err
+		}
+		tables.Merge(autoTables)
+		for j, i := range closedAt {
+			result.Outcomes[i].AutoClosedMolecule, result.Outcomes[i].MoleculeAutoCloseRefusal = autos[j].Root, autos[j].Refusal
 		}
 	}
 

@@ -931,6 +931,10 @@ func ValidMolTypeNames() string {
 	return joinNamesWithOr(validMolTypes)
 }
 
+// ValidMolTypes returns the accepted non-empty mol-type values, in canonical
+// order, as a copy the caller may keep.
+func ValidMolTypes() []MolType { return slices.Clone(validMolTypes) }
+
 // WispType categorizes ephemeral wisps for TTL-based compaction (gt-9br)
 type WispType string
 
@@ -969,6 +973,10 @@ func (w WispType) IsValid() bool {
 func ValidWispTypeNames() string {
 	return joinNamesWithOr(validWispTypes)
 }
+
+// ValidWispTypes returns the accepted non-empty wisp-type values, in canonical
+// order, as a copy the caller may keep.
+func ValidWispTypes() []WispType { return slices.Clone(validWispTypes) }
 
 // StorageClass is the create-selected marker for a record's history and
 // replication contract. Persistence plane transitions preserve the marker
@@ -1017,12 +1025,19 @@ func (m PersistenceMode) IsValid() bool {
 	return slices.Contains(validPersistenceModes, m)
 }
 
+// ErrUnversionedWispMove is NormalizePersistenceMode's refusal to move an
+// unversioned record to a wisp mode. The record is sound and the requested
+// move is what is refused, so callers can classify it apart from the
+// row-invariant errors the function also returns.
+var ErrUnversionedWispMove = errors.New("cannot move unversioned record")
+
 // NormalizePersistenceMode maps a requested mode from current to its exact
 // persistence fields without mutating an issue. The returned values are
 // Ephemeral, NoHistory, and StorageClass, respectively. Plane and retention
 // changes preserve the create-selected class. Promotion clears an explicit
 // ephemeral class marker to select normalized versioned storage. An
-// unversioned record may remain persistent but cannot move to a wisp mode.
+// unversioned record may remain persistent but cannot move to a wisp mode
+// (ErrUnversionedWispMove).
 func NormalizePersistenceMode(current Issue, mode PersistenceMode) (bool, bool, StorageClass, error) {
 	if !mode.IsValid() {
 		return false, false, "", fmt.Errorf("invalid persistence mode %q", mode)
@@ -1041,7 +1056,7 @@ func NormalizePersistenceMode(current Issue, mode PersistenceMode) (bool, bool, 
 		return false, false, "", fmt.Errorf("storage class ephemeral requires ephemeral or no_history")
 	}
 	if current.StorageClass == StorageClassUnversioned && mode != PersistenceModePersistent {
-		return false, false, "", fmt.Errorf("cannot move unversioned record to persistence mode %q", mode)
+		return false, false, "", fmt.Errorf("%w to persistence mode %q", ErrUnversionedWispMove, mode)
 	}
 	if persistenceMode(current) == mode {
 		return current.Ephemeral, current.NoHistory, current.StorageClass, nil
@@ -1230,7 +1245,8 @@ type IssueWithCounts struct {
 	// WHICH SURFACES SET IT, because this type is shared by more than the
 	// listing and an absent marker means different things on them. It is set
 	// by the page epilogue behind issueops.Reader.List — `bd list --json` on
-	// both routes, its --ready arm included, and GET /v0/beads/issues. It is
+	// both routes, its --ready arm included, `bd search --json` on every
+	// route, and GET /v0/beads/issues. It is
 	// NOT set by Reader.Ready (GET /v0/beads/ready) or by the claim response
 	// that returns this type, so on those an absent marker says nothing about
 	// whether a row's comments exist: read comment_count there. Extending the
@@ -1841,6 +1857,11 @@ const (
 	// EventLeaseReclaimed records that a stale lease was reverted to ready by
 	// bd reclaim (dead-worker recovery). old_value is the previous owner.
 	EventLeaseReclaimed EventType = "lease_reclaimed"
+	// EventLeaseRearmed records that a heartbeat re-armed a claim that held no
+	// lease row (a claim hand-doled through a generic update): the lease was
+	// granted and row_lock reminted. new_value is the holder. A plain lease
+	// refresh records no event.
+	EventLeaseRearmed EventType = "lease_rearmed"
 )
 
 // ProvenanceEvent is one entry in the append-only provenance log: a typed

@@ -2,13 +2,17 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/storage"
 )
 
 func TestCommandStartupRejectsRemovedBackendsBeforeLocalWrites(t *testing.T) {
@@ -391,6 +395,88 @@ func TestStoreFactoriesRemovedBackendsFailLoud(t *testing.T) {
 						}
 					}
 				})
+			}
+		})
+	}
+}
+
+// TestStoreFactoriesRefuseUnsupportedBackendInLegacyConfig pins that every
+// store factory refuses a legacy config.json naming a removed or unrecognized
+// backend before configfile.Load migrates it into metadata.json, dropping the
+// keys Config does not know and deleting config.json. Command admission checks
+// only the workspace bd runs in, and these factories also open others (an
+// auto-routed target, an external project). The workspace holds a Dolt
+// database, so the refusal offers the metadata heal, and it names config.json,
+// the file that holds the backend, rather than a metadata.json that does not
+// exist. A registered backend passes the check, is migrated as before, and
+// dispatches to the registry. It covers both builds' factories; the
+// CGO_ENABLED=0 ones run in CI only because bazel.yml's PURE_CMD_BD_TESTS
+// allowlists it by name.
+func TestStoreFactoriesRefuseUnsupportedBackendInLegacyConfig(t *testing.T) {
+	factories := map[string]func(context.Context, string) (storage.DoltStorage, error){
+		"read-write": newDoltStoreFromConfig,
+		"routed":     newExistingDoltStoreFromConfig,
+		"read-only":  newReadOnlyStoreFromConfig,
+		"preview":    newPreviewStoreFromConfig,
+	}
+	writeLegacyConfig := func(t *testing.T, backend string) (string, string) {
+		t.Helper()
+		beadsDir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(beadsDir, "dolt", ".dolt"), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		legacy := `{"backend":"` + backend + `","dolt_database":"beads_legacy","future_binding":"keep-me"}`
+		if err := os.WriteFile(filepath.Join(beadsDir, "config.json"), []byte(legacy), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return beadsDir, legacy
+	}
+	for _, backend := range []string{configfile.BackendPostgres, configfile.BackendMySQL, configfile.BackendSQLite, "mystery"} {
+		for name, open := range factories {
+			t.Run(backend+"/"+name, func(t *testing.T) {
+				beadsDir, legacy := writeLegacyConfig(t, backend)
+				store, err := open(t.Context(), beadsDir)
+				if err == nil {
+					_ = store.Close()
+					t.Fatalf("%s factory opened a workspace whose config.json names backend %q", name, backend)
+				}
+				// The workspace first: a regression that migrates config.json
+				// must report the rewrite, not just the file the error names.
+				entries, readErr := os.ReadDir(beadsDir)
+				names := make([]string, 0, len(entries))
+				for _, entry := range entries {
+					names = append(names, entry.Name())
+				}
+				if readErr != nil || !slices.Equal(names, []string{"config.json", "dolt"}) {
+					t.Fatalf("%s factory changed the workspace: %v, %v", name, names, readErr)
+				}
+				if got, readErr := os.ReadFile(filepath.Join(beadsDir, "config.json")); readErr != nil || string(got) != legacy {
+					t.Fatalf("%s factory rewrote config.json: %q, %v", name, got, readErr)
+				}
+				if !strings.Contains(err.Error(), strconv.Quote(backend)) || !strings.Contains(err.Error(), configfile.BackendNotOpenedGuarantee) {
+					t.Fatalf("%s factory error = %v, want the refusal of backend %q with the data-safety guarantee", name, err, backend)
+				}
+				if !strings.Contains(err.Error(), "config.json") || strings.Contains(err.Error(), "metadata.json") {
+					t.Fatalf("%s factory error = %v, want it to name config.json and not metadata.json", name, err)
+				}
+			})
+		}
+	}
+
+	const registered = "legacy-config-contract"
+	registerContractBackend(t, registered)
+	for name, open := range factories {
+		t.Run("registered/"+name, func(t *testing.T) {
+			beadsDir, _ := writeLegacyConfig(t, registered)
+			want := errRegistryReadWrite
+			if name == "read-only" || name == "preview" {
+				want = errRegistryReadOnly
+			}
+			if _, err := open(t.Context(), beadsDir); !errors.Is(err, want) {
+				t.Fatalf("%s factory error = %v, want the registry's %v", name, err, want)
+			}
+			if _, statErr := os.Stat(filepath.Join(beadsDir, "metadata.json")); statErr != nil {
+				t.Fatalf("%s factory did not migrate the admitted legacy config.json: %v", name, statErr)
 			}
 		})
 	}

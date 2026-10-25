@@ -80,7 +80,7 @@ func (s *sweeper) Sweep(ctx context.Context, req issueops.SweepRequest) (issueop
 		// and a staging list that carries the version tables on one and not the
 		// other is the asymmetry the wisp-arm scope comment refused: inert
 		// today, and silently wrong the day a sweep gains a surviving-row write.
-		for _, table := range s.store.withVersionedHistoryTables(sweptTables) {
+		for _, table := range s.store.withVersionedHistoryTables(ctx, tx, sweptTables) {
 			_ = schema.DrainCall(ctx, tx, "CALL DOLT_ADD(?)", table)
 		}
 		msg := fmt.Sprintf("bd: sweep %d %s bead(s)", result.Swept, req.Tier)

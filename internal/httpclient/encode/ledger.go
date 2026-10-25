@@ -521,6 +521,17 @@ func designRows() []Row {
 			// refuses without dialing.
 			PinnedBy: pinnedByS3Conformance,
 		},
+		{
+			ID: "L-read-memo", Kind: KindDegrade,
+			What: "inside one bd command, a repeated getIssue, getSetting or listSettings read of the same URL within ReadMemoTTL (5 s) of the server's answer is answered from that answer unless the command wrote in between; locally every re-read sees other writers at once",
+			Why: "a command resolves an id, fetches the row and reads it again for output, and over a gateway each read is a sequential round trip (bd show --json made three requests for one row). The memo (wire.Client.EnableReadMemo, httpclient.WithReadMemo) answers the repeats from the first response, so the command sees the row as of that one read, which is what a single fetch would show. " +
+				"IT IS BOUNDED, NOT A CACHE: it lives on one process's transport and dies with it; only one-shot commands opt in (never bd serve, --watch or --follow); any non-GET through the transport clears it before it is sent and after it returns, and a read that overlapped a write is not stored, so a command always re-reads what its own write could have changed; only a 2xx answer that decoded is kept; an entry ages from the server's answer and a hit never renews it. " +
+				"Other writers' changes reach a later read of the same command only after the TTL, which is the residue this row records. A guarded write built from a memoized row (an expected revision, a CAS) fails safely on a version mismatch rather than losing an update. BD_HTTP_READ_MEMO=0 turns the memo off. " +
+				"Further pins outside this package's scan: internal/httpclient/wire TestReadMemoIsDroppedByAnyWrite, TestReadMemoKeepsOnlySuccessesAndExpires and TestReadMemoAgesFromTheServersAnswerNotTheLastHit; backend/http TestE2E_ShowFetchesTheIssueOnce and TestE2E_CloseRereadsItsOwnWrite",
+			SpecRow: "mc-5dkzp, bts-xpw.3.14.6",
+			// The bound the row rests on: only a one-shot command memoizes.
+			PinnedBy: "TestOnlyOneShotCommandsMemoizeRemoteReads",
+		},
 	}
 }
 
@@ -546,7 +557,7 @@ func writeSideRows() []Row {
 			What: "a claim combined with a patch, a guard or a force override used to refuse",
 			Why: "RETIRED by the #7247 review port. The refusal stood on 'updateIssue cannot perform a claim, on this wire or on any other' — and upstream gastownhall/beads#6890, the capability the row itself named, had already published `claim` on updateIssue: the claim and the patch applied by the same role in one transaction, so PATCH claim was the server's shape and only this client's refusal. " +
 				"The body now sends `claim` as a pointer set true only on request, so a claim alone, a claim with a patch and a claim with a version guard are each ONE updateIssue call, answered with the post-write `revision` like every other update. " +
-				"The claimIssue route survives as the fallback for a claim ALONE against a server that predates the member, which refuses it as an unknown parameter before any database work; a combination against such a server returns that skew refusal rather than splitting into two calls",
+				"That is the route against a server advertising issues.update.claim. Against one without the token, which the client reads from the handshake before any dial, a claim ALONE goes to claimIssue after a template pre-read (claimIssue's role has no template guard) and a combination is refused before the dial with an unsupported error naming the token, rather than split into two calls",
 			SpecRow:  updateSpec,
 			PinnedBy: pinned,
 		},
@@ -561,7 +572,8 @@ func writeSideRows() []Row {
 			// current server claims a wisp through updateIssue, which resolves
 			// both planes exactly as the direct route's Lifecycle.Update does, so
 			// this row is reached ONLY on claimOnlyUpdate's fallback — a server
-			// that predates `claim` on updateIssue (upstream #6890), where the
+			// that does not advertise issues.update.claim (it predates `claim` on
+			// updateIssue, upstream #6890, or serves it untokened), where the
 			// claim is dialed as claimIssue instead. That operation
 			// (issueops.Claimer's own contract) answers a wisp id with ErrNotFound
 			// on every backend — the wisp plane is not claimable through that
@@ -575,7 +587,7 @@ func writeSideRows() []Row {
 			// pays the probe.
 			ID: "W-ClaimRequest.Wisp", Kind: KindRefuse,
 			What:     "claiming a wisp is not supported by this bd serve",
-			Why:      "the server predates claiming through its update operation, and its separate claim operation excludes the wisp plane; upgrade bd serve, or claim this issue from a local workspace",
+			Why:      "the server does not advertise issues.update.claim (claiming through its update operation, which reaches the wisp plane), and its separate claim operation excludes the wisp plane; upgrade bd serve to one that advertises it, or claim this issue from a local workspace",
 			SpecRow:  updateSpec,
 			PinnedBy: pinnedByS3Conformance,
 		},
@@ -709,18 +721,26 @@ func writeSideRows() []Row {
 			SpecRow:  "D8 refuse-not-drop",
 			PinnedBy: patchMemberPin,
 		},
+		{
+			ID: "W-IssuePatch.AwaitID", Kind: KindRetired,
+			What: "an await-id edit used to refuse",
+			Why: "RETIRED. IssuePatchBody and ApplyPatchBody publish await_id and waiters behind issues.update.gates, and both patch encoders now send them: await_id by presence (the empty string CLEARS it, as on assignee), waiters as a WHOLE-VALUE replacement whose empty or nil value travels as [] (neither member is nullable). " +
+				"They are gated on the token rather than dropped: against a server that does not advertise it, updateIssue and an issues:batchApply plan with any such update item refuse BEFORE the dial with the typed capability error naming issues.update.gates, so a gate's waiter is never silently lost and no partial plan is ever sent. " +
+				"The bounds (await_id <= 255 characters, the waiter list's JSON <= one TEXT column) are the role's (issueops.ValidateGatePatch) and arrive as a 400 naming the member. The waiters edit had its own refusal row only while the wire was being published, and it left with this one",
+			SpecRow:  "D8 refuse-not-drop",
+			PinnedBy: "TestUpdateRefusesTheGateMembersAgainstAServerWithoutTheToken",
+		},
 		// Four of these are refused by BOTH patch documents — updateIssue's and
 		// issues:batchApply's — so one row covers both operations rather than a
 		// second reason being minted for one fact. Owner is the exception and
 		// says so: ApplyPatchBody publishes it, and the batch's own encoder
 		// carries it.
 		patchRow("SpecID", "a spec-id edit refuses", "neither IssuePatchBody nor ApplyPatchBody publishes spec_id"),
-		patchRow("AwaitID", "an await-id edit refuses", "neither IssuePatchBody nor ApplyPatchBody publishes await_id"),
 		patchRow("Owner", "an owner edit refuses ON updateIssue",
 			"IssuePatchBody excludes owner — which the document itself calls an accident of order rather than a decision, since ApplyPatchBody DOES publish it and issues:batchApply's update item carries it"),
 		patchRow("ClosedBySession", "a closed-by-session edit refuses", "neither IssuePatchBody nor ApplyPatchBody publishes closed_by_session"),
-		patchRow("Persistence", "a persistence-mode edit refuses",
-			"neither body publishes persistence: moving a row between planes mid-plan is a different act from writing its fields"),
+		patchRow("Persistence", "a persistence-mode edit refuses ON issues:batchApply",
+			"ApplyPatchBody excludes persistence: moving a row between planes mid-plan is a different act from writing its fields. IssuePatchBody publishes it behind issues.update.persistence, and updateIssue's encoder carries it (refusing before the dial against a server without that token)"),
 		{
 			ID: "W-IssuePatch.ParentID", Kind: KindRetired,
 			What: "a parent re-hang through update used to refuse",
@@ -783,13 +803,22 @@ func writeSideRows() []Row {
 		{
 			ID: "W-CreateRequest.Issue", Kind: KindRefuse,
 			Type: tyCreateRequest, Field: "Issue",
-			What: "a create whose Issue populates any member outside the wire's twenty refuses, naming the member",
-			Why: "createIssue publishes the whole create VOCABULARY — id, title, description, design, acceptance_criteria, notes, status, issue_type, priority, assignee, owner, estimated_minutes, external_ref, due_at, defer_until, sender, metadata, labels, ephemeral, no_history — and deliberately not the rest of a types.Issue: the creation time (created_at), because a caller-supplied creation time makes the row disagree with the journal entry that records it and re-dating history is what an import is for; and spec_id, await_*, mol_type, wisp_type, work_type, storage_class, source_*, pinned, is_template and the event quartet, which this surface publishes on no operation, read or write. " +
+			What: "a create whose Issue populates any member outside the wire's twenty-four refuses, naming the member",
+			Why: "createIssue publishes the whole create VOCABULARY — id, title, description, design, acceptance_criteria, notes, status, issue_type, priority, assignee, owner, estimated_minutes, external_ref, due_at, defer_until, sender, metadata, labels, ephemeral, no_history, and the four gate members await_type, await_id, timeout and waiters behind issues.create.gates (W-CreateRequest.Gates) — and deliberately not the rest of a types.Issue: the creation time (created_at), because a caller-supplied creation time makes the row disagree with the journal entry that records it and re-dating history is what an import is for; and spec_id, mol_type, wisp_type, work_type, storage_class, source_*, pinned, is_template and the event quartet, which this surface accepts on no write. " +
 				"ONE row rather than one per member for W-BatchCreateItem.Issue's reason — the reason is one reason — and exhaustiveness is held by the same REFLECTION over types.Issue, sharing the role-ignored table with the batch so the two operations cannot disagree about what the ROLE drops. " +
 				"Issue.Comments and Issue.Dependencies are not in this population: the role itself refuses them, so a local create fails too and this is validation rather than divergence. " +
 				"created_by is published on no create shape either, but the create role behind every one of them defaults an empty created_by to the request's actor (issueops.PreparePublicCreateRequest), the same rule a local create gets. So an empty CreatedBy and one that names the actor both arrive as the actor, and only one naming someone else refuses: the default would silently replace it. A server older than either stamp (handler or role) stores an empty created_by for that one member",
 			SpecRow:  "D8 row 16 refuse-not-drop",
 			PinnedBy: createPin,
+		},
+		{
+			ID: "W-CreateRequest.Gates", Kind: KindRefuse, Capability: "issues.create.gates",
+			What: "a create, or an issues:batchApply plan with a create item, whose Issue populates a gate member (await_type, await_id, timeout, waiters) refuses against a server that does not advertise issues.create.gates",
+			Why: "createIssue and ApplyCreateItem publish the four gate members behind issues.create.gates, and this client sends them, verbatim, to a server that advertises it: timeout in NANOSECONDS, the encoding Issue.timeout reads back, and the waiter list as given, duplicates kept. " +
+				"A server without the token has never heard of the members, so the create is refused BEFORE the dial with the typed capability error naming the token rather than sent without them: a gate stored without its await_type is a gate nothing ever resolves, and one stored without its waiters wakes nobody. On issues:batchApply the whole plan is checked before the dial, so no partial plan is sent around the refused item. " +
+				"It is a LATE refusal, not a wire gap: the members are carried, and the one row covers both create shapes because one token does (the issues.create.defaultPriority precedent). The bounds (await_type <= 32, await_id <= 255, the waiter list's JSON <= one TEXT column, timeout >= 0) are the role's (issueops.ValidateGateFields) and arrive as a 400 naming the member. issues:batchCreate's item publishes none of them and keeps refusing them under W-BatchCreateItem.Issue",
+			SpecRow:  "D8 row 16 refuse-not-drop",
+			PinnedBy: "TestCreateRefusesTheGateMembersAgainstAServerWithoutTheToken",
 		},
 		{
 			ID: "L-create-notfound", Kind: KindDegrade,
@@ -810,7 +839,7 @@ func writeSideRows() []Row {
 		},
 		// The issues:batchApply population, from client wave ga-mijra. It is
 		// SMALL, and that is the operation rather than an oversight: the create
-		// item publishes createIssue's whole twenty, the close item maps whole,
+		// item publishes createIssue's whole twenty-four, the close item maps whole,
 		// the edge item maps whole but for the spawner flag and the thread the
 		// role gained after the wire was written, and the update item's patch
 		// is WIDER than updateIssue's in the two places that matter to a plan (a
@@ -819,8 +848,8 @@ func writeSideRows() []Row {
 		{
 			ID: "W-CreateItem.Issue", Kind: KindRefuse,
 			Type: tyApplyCreateItem, Field: "Issue",
-			What: "a create ITEM whose Issue populates any member outside the wire's twenty refuses, naming the member",
-			Why: "ApplyCreateItem publishes exactly createIssue's create vocabulary — id, title, description, design, acceptance_criteria, notes, status, issue_type, priority, assignee, owner, estimated_minutes, external_ref, due_at, defer_until, sender, metadata, labels, ephemeral, no_history — and deliberately not the rest of a types.Issue, for the reasons W-CreateRequest.Issue gives in full. " +
+			What: "a create ITEM whose Issue populates any member outside the wire's twenty-four refuses, naming the member",
+			Why: "ApplyCreateItem publishes exactly createIssue's create vocabulary — id, title, description, design, acceptance_criteria, notes, status, issue_type, priority, assignee, owner, estimated_minutes, external_ref, due_at, defer_until, sender, metadata, labels, ephemeral, no_history, and the four gate members behind issues.create.gates (W-CreateRequest.Gates) — and deliberately not the rest of a types.Issue, for the reasons W-CreateRequest.Issue gives in full. " +
 				"It is a row of its OWN rather than a citation of that one because the operations are different: a caller auditing why their PLAN refuses must not be sent to a row about a single create, and the two can diverge the day either vocabulary moves. The partition itself is SHARED — one carried table, one role-ignored table, held against types.Issue by the same reflection — so they cannot disagree about what the wire carries or about what the role drops. " +
 				"Issue.Comments and Issue.Dependencies are not in this population and are refused as validation on both sides: edges in this role are ITEMS, so a create item has nowhere to put one at all. " +
 				"Nor is a CreatedBy that names the request's actor: the server's create role defaults every create item's created_by to the actor (W-CreateRequest.Issue), so that value arrives as written and only a CreatedBy naming someone else refuses",
@@ -1084,8 +1113,16 @@ func commandRows() []Row {
 			"showIssueChildren's --json marshals the full GetDependentsWithMetadata rows, the same collectDependents shallow projection as --refs, so created_at/assignee/description come back zeroed over http. `bd children` is NOT this flag: it is a `bd list --parent` listing, served through the reader role (S6c)"),
 		row("F-mol-ready", "mol ready", "", "`bd mol ready` refuses",
 			"it is the same runMolReadyGatedCore body as `bd ready --gated`"),
-		row("F-blocked", "blocked", "", "`bd blocked` refuses",
-			"it is raw GetBlockedIssues, which is on the unsupported allowlist"),
+		{
+			ID: "F-blocked", Kind: KindRetired, Command: "blocked",
+			What:    "RETIRED — `bd blocked` is SERVED whole",
+			Why:     "it said the command refuses because \"it is raw GetBlockedIssues, which is on the unsupported allowlist\", and that is no longer so: bd serve publishes listBlockedIssues (GET /v0/beads/blocked) behind blocked.list, over the issueops.BlockedLister role every leg implements, and `bd blocked` takes that role on every route, so the http client dials the one operation and prints the server's answer. Every listing flag the command publishes (--parent, --label, --label-any, --exclude-label) is a parameter of that operation. THE RAW FLAG IS THE EXCEPTION. --flags is not the listing: it reads listBlockingAnnotations with is_blocked, behind dependencies.blocking.isBlocked, and --flags --raw refuses before that read against a server that advertises policy.external_dependencies, as bd serve does on both arms because it composes its roles through the policy. That server's flag already carries the policy, and the v0 wire has no member that asks it for the stored column, so answering would print the decorated flag as the raw one (refuseRawFlagsFromAPolicyServer, cmd/bd/blocked_flags.go); the refusal names --flags, the policy-aware flag. Against a server that does not apply the policy its flag IS the column, and --raw is served. Against a server that does not advertise blocked.list the role refuses before the dial, naming the token: a capability refusal, not a divergence. The listing is unpaged and is one response body: an answer over the client's 32 MiB response limit is refused (wire.ResponseTooLargeError), and one reporting has_more is refused (TruncatedListingError), never returned short",
+			SpecRow: "D7 (RETIRED)",
+			// The retirement's own evidence: the corpus replay and
+			// TestE2E_BlockedOverHTTP compare `bd blocked --json` over http
+			// against the same command over a local workspace.
+			PinnedBy: pinnedByS3Conformance,
+		},
 		{
 			ID: "F-count", Kind: KindRetired, Command: "count",
 			What: "RETIRED — `bd count` is SERVED whole",

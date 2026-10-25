@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
@@ -196,5 +197,85 @@ func TestNocgoFactoriesHonorSharedServer(t *testing.T) {
 				t.Fatalf("%s did not dial the shared server at the pinned port %s; got: %v", name, nocgoSharedServerPort, err)
 			}
 		})
+	}
+}
+
+// TestNocgoStoreFactoriesRefuseGraphWorkspace is the !cgo half of
+// TestStoreFactoriesRefuseGraphWorkspace. The CGO_ENABLED=0 binaries
+// .goreleaser.yml ships open routed, cross-repository and create --repo
+// targets through their own copies of these factories, so each must refuse a
+// graph workspace before its configfile.Load, which would otherwise migrate
+// one marked only by a legacy config.json into metadata.json first, and one
+// declared only by the graph-preview-format marker, whose metadata is lost or
+// stripped. It runs in CI only because bazel.yml's PURE_CMD_BD_TESTS
+// allowlists it by name.
+func TestNocgoStoreFactoriesRefuseGraphWorkspace(t *testing.T) {
+	isolateSharedServerSignals(t)
+	pinLegacyUpgradeGuardEnv(t)
+	const graphMetadata = `{"backend":"dolt","graph_mode":"link"}`
+	// What a bd that predates graph_mode leaves of a graph workspace's
+	// metadata: the database name still selects the graph database.
+	const strippedMetadata = `{"backend":"dolt","dolt_mode":"server","dolt_database":"beads_graph_0123456789abcdef0123456789abcdef"}`
+	factories := map[string]func(context.Context, string) (storage.DoltStorage, error){
+		"read-write": newDoltStoreFromConfig,
+		"routed":     newExistingDoltStoreFromConfig,
+		"read-only":  newReadOnlyStoreFromConfig,
+		"preview":    newPreviewStoreFromConfig,
+	}
+	layouts := []struct {
+		name string
+		// filename is the metadata file; "" lays down no metadata.
+		filename string
+		metadata string
+		// marker adds the graph-preview-format sentinel.
+		marker bool
+	}{
+		{name: "metadata.json", filename: "metadata.json", metadata: graphMetadata},
+		{name: "config.json", filename: "config.json", metadata: graphMetadata},
+		{name: "marker only", marker: true},
+		{name: "marker, metadata stripped", filename: "metadata.json", metadata: strippedMetadata, marker: true},
+	}
+	for _, layout := range layouts {
+		for name, open := range factories {
+			t.Run(layout.name+"/"+name, func(t *testing.T) {
+				beadsDir := t.TempDir()
+				want := map[string]bool{}
+				path := ""
+				if layout.filename != "" {
+					path = filepath.Join(beadsDir, layout.filename)
+					if err := os.WriteFile(path, []byte(layout.metadata), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					want[layout.filename] = true
+				}
+				if layout.marker {
+					if err := os.WriteFile(filepath.Join(beadsDir, "graph-preview-format"), []byte("link-preview-v9\n"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					want["graph-preview-format"] = true
+				}
+				store, err := open(t.Context(), beadsDir)
+				if err == nil {
+					_ = store.Close()
+				}
+				if !isUnsupportedWorkspaceFormat(err) {
+					t.Fatalf("%s open = %v, want unsupported workspace format refusal", name, err)
+				}
+				if path != "" {
+					if got, readErr := os.ReadFile(path); readErr != nil || string(got) != layout.metadata {
+						t.Fatalf("%s open rewrote %s: %q, %v", name, layout.filename, got, readErr)
+					}
+				}
+				entries, readErr := os.ReadDir(beadsDir)
+				if readErr != nil || len(entries) != len(want) {
+					t.Fatalf("%s open left %d entries in the workspace, want %d (%v)", name, len(entries), len(want), readErr)
+				}
+				for _, entry := range entries {
+					if !want[entry.Name()] {
+						t.Fatalf("%s open created %s in the workspace", name, entry.Name())
+					}
+				}
+			})
+		}
 	}
 }

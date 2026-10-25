@@ -30,7 +30,10 @@ type BatchCreateOptions struct {
 	// leave it false.
 	RejectStaleUpserts bool
 	// SkipDependencyValidationErrors skips dependency validation failures that
-	// legacy imports tolerated, such as cycles or self-dependencies.
+	// legacy imports tolerated: typed refusals of an edge (a cycle, a
+	// self-dependency, or a blocker in the issue's own hierarchy). An error
+	// from the validation queries themselves is still returned, never recorded
+	// as a skipped edge.
 	SkipDependencyValidationErrors bool
 	// OnSkippedDependency records dependency edges skipped during batch create.
 	OnSkippedDependency func(issueID, dependsOnID, reason string)

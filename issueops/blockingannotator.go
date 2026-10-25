@@ -28,6 +28,18 @@ type BlockingRequest struct {
 	// for EdgeReadRequest: the answer is keyed by id and a second entry for the
 	// same key carries no second fact.
 	IDs []string
+
+	// IncludeIsBlocked asks for each answered id's stored, TRANSITIVE
+	// is_blocked flag (IssueBlocking.IsBlocked) alongside the decoration. It
+	// is opt-in because the flag is a separate read and a listing that only
+	// prints the decoration has no use for it.
+	//
+	// It is the batched readiness projection a cache needs to answer Ready
+	// with the store's own predicate: the column GetReadyWork filters on,
+	// which propagates DOWN parent-child edges and reads waits-for and
+	// conditional-blocks gates, so BlockedBy (two edge types, direct only)
+	// cannot stand in for it. BlockedFlags is the one entry that asks for it.
+	IncludeIsBlocked bool
 }
 
 // IssueBlocking is one issue's blocking decoration.
@@ -62,6 +74,13 @@ type IssueBlocking struct {
 	// caller that needs every structural edge asks EdgeReader, which answers
 	// with the rows.
 	Parent string `json:"parent,omitempty"`
+	// IsBlocked is the issue's stored, transitive is_blocked flag — the same
+	// value storage's IsBlockedBatch answers and GetReadyWork filters on. It
+	// is set only when the request asked (BlockingRequest.IncludeIsBlocked)
+	// and the id names a row in either plane; it is nil otherwise, and nil
+	// never means "not blocked". An unsatisfied external blocker sets it,
+	// exactly as it does for storage's IsBlockedBatch.
+	IsBlocked *bool `json:"is_blocked,omitempty"`
 }
 
 // BlockingResult is the per-id answer.
@@ -157,4 +176,56 @@ type BlockingAnnotator interface {
 	// every entry is bare: there is no ErrNotFound on this role, for the reason
 	// there is no Missing flag on it.
 	AnnotateBlocking(ctx context.Context, req BlockingRequest) (BlockingResult, error)
+}
+
+// BlockedFlagsChunk is how many ids BlockedFlags names per AnnotateBlocking
+// call. It equals the served listBlockingAnnotations bound (100 issue_id
+// values; httpapi's maxDependencyAnchors, held equal by a test there), so a
+// call through any transport stays inside a question the server accepts.
+const BlockedFlagsChunk = 100
+
+// BlockedFlags answers the batched transitive is_blocked read (storage's
+// IsBlockedBatch: id -> flag, an id naming no row absent) through the
+// BlockingAnnotator role with IncludeIsBlocked, BlockedFlagsChunk ids per
+// call. It is the one library entry for that read on a role-served backend:
+// the http client's IsBlockedBatch is this function over its annotator.
+//
+// Repeats and blank entries are dropped before asking (a blank id names no
+// row, so it would be absent either way). An annotator that answers an item
+// without a flag for an id it reports is treated as "no row", matching the
+// absent-means-not-found contract; a failure of any chunk fails the call.
+func BlockedFlags(ctx context.Context, annotator BlockingAnnotator, ids []string) (map[string]bool, error) {
+	out := make(map[string]bool, len(ids))
+	distinct := make([]string, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		distinct = append(distinct, id)
+	}
+	for start := 0; start < len(distinct); start += BlockedFlagsChunk {
+		end := min(start+BlockedFlagsChunk, len(distinct))
+		result, err := annotator.AnnotateBlocking(ctx, BlockingRequest{
+			IDs:              distinct[start:end],
+			IncludeIsBlocked: true,
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, item := range result.Items {
+			if item.IsBlocked == nil {
+				continue
+			}
+			if _, asked := seen[item.ID]; !asked {
+				continue
+			}
+			out[item.ID] = *item.IsBlocked
+		}
+	}
+	return out, nil
 }

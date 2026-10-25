@@ -1971,6 +1971,12 @@ func TestAllMigrationsSQLUsesDirectDDLForKnownCLIIncompatibilities(t *testing.T)
 		// removed_at to DATETIME(6)), same shape as 0068's step 7.
 		"ALTER TABLE issue_versions MODIFY COLUMN change_at DATETIME(6) NOT NULL;",
 		"ALTER TABLE issue_versions MODIFY COLUMN removed_at DATETIME(6);",
+		// 0070: two-plane prepared ADD COLUMN, same shape as 0067.
+		"ALTER TABLE issues ADD COLUMN participation_generation BIGINT NULL;",
+		"ALTER TABLE wisps ADD COLUMN participation_generation BIGINT NULL;",
+		// 0071: single-plane prepared ADD COLUMN, same shape as 0068's
+		// attribution_status (no wisps twin -- issue_versions has none).
+		"ALTER TABLE issue_versions ADD COLUMN removed_restriction VARCHAR(30);",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("AllMigrationsSQL missing direct CLI DDL %q", want)
@@ -2004,6 +2010,12 @@ func TestAllMigrationsSQLUsesDirectDDLForKnownCLIIncompatibilities(t *testing.T)
 		// 0069 guards both of its MODIFYs the same way.
 		"@issue_versions_change_at_needs_widen",
 		"@issue_versions_removed_at_needs_widen",
+		// 0070 guards both planes' ALTERs the same way, mirroring 0067's pair.
+		"@issues_pg_needs_add",
+		"@wisps_pg_needs_add",
+		// 0071 guards its ALTER the same way; only its source text carries
+		// this probe.
+		"@issue_versions_rr_needs_add",
 	} {
 		if strings.Contains(got, forbidden) {
 			t.Fatalf("AllMigrationsSQL contains source prepared-DDL guard %q", forbidden)
@@ -2625,4 +2637,95 @@ DROP TABLE IF EXISTS wisps;
 	runDoltSQL(t, dir, string(migrationSQL))
 	requireDoltCount(t, dir,
 		`SELECT COUNT(*) AS c FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'wisps'`, "0")
+}
+
+// TestShowTableExistsMatchesInformationSchemaOnDolt proves the per-open table
+// probe (the unfiltered SHOW TABLES listing, names compared case-insensitively)
+// agrees with the INFORMATION_SCHEMA.TABLES count it replaced, on a real Dolt.
+// It covers every table the open path probes — both cursor tables, the
+// sentinel and floored-sentinel tables, the column sentinel's carrier and the
+// untrack scratch table — under bd's own dolt_ignore patterns, so all but
+// schema_migrations live only in the working set. It also covers a name whose
+// '_' LIKE-matches a different table, and a table stored in another case: Dolt
+// resolves and counts table names case-insensitively there, but its SHOW
+// TABLES LIKE filter does not.
+func TestShowTableExistsMatchesInformationSchemaOnDolt(t *testing.T) {
+	testutil.RequireDoltBinary(t)
+
+	dir := filepath.Join(t.TempDir(), "show-tables-probe")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("create probe dir: %v", err)
+	}
+	runDoltCommand(t, dir, "init", "--name", "test", "--email", "test@example.com")
+
+	infoSchemaHas := func(table string) bool {
+		rows := queryDoltCSV(t, dir, fmt.Sprintf(`
+SELECT COUNT(*) AS cnt
+FROM INFORMATION_SCHEMA.TABLES
+WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '%s'`, table))
+		return len(rows) == 1 && rows[0]["cnt"] == "1"
+	}
+	// The same listing and comparison showTableExists makes.
+	showTablesHas := func(table string) bool {
+		for _, r := range queryDoltCSV(t, dir, "SHOW TABLES") {
+			for _, v := range r {
+				if strings.EqualFold(v, table) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	agree := func(state, table string, want bool) {
+		t.Helper()
+		if got := showTablesHas(table); got != want {
+			t.Fatalf("%s: SHOW TABLES reported %s present=%v, want %v", state, table, got, want)
+		}
+		if got := infoSchemaHas(table); got != want {
+			t.Fatalf("%s: INFORMATION_SCHEMA reported %s present=%v, want %v", state, table, got, want)
+		}
+	}
+
+	probed := []string{mainSource.cursorTable, ignoredSource.cursorTable, ignoredCursorUntrackTempTable}
+	probed = append(probed, ignoredSource.sentinelTables...)
+	for _, st := range ignoredSource.sentinelFlooredTables {
+		probed = append(probed, st.table)
+	}
+	for _, sc := range ignoredSource.sentinelColumns {
+		probed = append(probed, sc.table)
+	}
+
+	for _, table := range probed {
+		agree("empty database", table, false)
+	}
+
+	for _, pattern := range doltIgnorePatterns {
+		runDoltSQL(t, dir, fmt.Sprintf("REPLACE INTO dolt_ignore VALUES ('%s', true)", pattern))
+	}
+	for _, gated := range versionGatedDoltIgnorePatterns {
+		runDoltSQL(t, dir, fmt.Sprintf("REPLACE INTO dolt_ignore VALUES ('%s', true)", gated.pattern))
+	}
+	runDoltSQL(t, dir, "CREATE TABLE "+mainSource.cursorTable+" (version INT PRIMARY KEY)")
+	runDoltSQL(t, dir, "CALL DOLT_COMMIT('-Am', 'committed cursor')")
+	for _, table := range probed {
+		if table == mainSource.cursorTable || table == ignoredCursorUntrackTempTable {
+			continue
+		}
+		runDoltSQL(t, dir, "CREATE TABLE "+table+" (id VARCHAR(64) PRIMARY KEY)")
+	}
+	requireDoltNoRows(t, dir, "SELECT table_name FROM dolt_status", "dolt_status after creating only dolt_ignored tables")
+	for _, table := range probed {
+		agree("migrated shape, dolt_ignored tables in the working set", table, table != ignoredCursorUntrackTempTable)
+	}
+
+	// 'schemaxmigrations' LIKE-matches 'schema_migrations'; only the name
+	// comparison keeps it from reading as the cursor table once that is gone.
+	runDoltSQL(t, dir, "CREATE TABLE schemaxmigrations (id INT PRIMARY KEY)")
+	runDoltSQL(t, dir, "DROP TABLE "+mainSource.cursorTable)
+	agree("LIKE wildcard lookalike", mainSource.cursorTable, false)
+
+	// A table stored in another case is the same table to Dolt.
+	runDoltSQL(t, dir, "RENAME TABLE bd_events_seq TO bd_events_seq_case")
+	runDoltSQL(t, dir, "RENAME TABLE bd_events_seq_case TO BD_EVENTS_SEQ")
+	agree("table stored in another case", "bd_events_seq", true)
 }

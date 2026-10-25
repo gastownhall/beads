@@ -162,6 +162,10 @@ func writeShapes() []writeShape {
 						"notes", "status", "priority", "issue_type", "assignee", "owner",
 						"estimated_minutes", "external_ref", "due_at", "defer_until",
 						"sender", "metadata", "labels", "ephemeral", "no_history",
+						// The gate members, behind issues.create.gates:
+						// carried to a server that
+						// advertises it, refused before the dial otherwise.
+						"await_type", "await_id", "timeout", "waiters",
 					},
 					// The members of a types.Issue this vocabulary does NOT
 					// spell — the creation stamp, the workflow and
@@ -177,6 +181,9 @@ func writeShapes() []writeShape {
 				// Issue spread drives is left out (wirePriority).
 				"DefaultPriority": absenceOf("priority"),
 			},
+			// The gate members sat in a pending set here while the wire
+			// published them and this client still refused them (the wire
+			// slice); the client slice moved them into the Issue spread above.
 		},
 		{
 			name:   "closeIssue",
@@ -192,6 +199,13 @@ func writeShapes() []writeShape {
 				// (#5506) and the client wave sends it (ga-jbuyf), so it left
 				// the pending set for this one.
 				"ExpectedVersion": member("expected_version"),
+				// Sent where issues.close.autoCloseMolecule is advertised.
+				// Against a server that does not advertise it, a close that
+				// asks for it is refused before dialing (the typed
+				// storage.ErrUnsupported naming the token), and bd close
+				// sends the close without it and prints the unserved
+				// notice instead (S16).
+				"AutoCloseMolecule": member("auto_close_molecule"),
 			},
 		},
 		{
@@ -267,10 +281,10 @@ func writeShapes() []writeShape {
 				// #7247 review port): each was published — the force pair by
 				// upstream #5484, `claim` by upstream #6890 — and refused only
 				// by this client. Their rows are RETIRED the same way. A claim
-				// ALONE against a server that predates `claim` still reaches
-				// claimIssue instead, as a fallback on that server's skew
-				// refusal (see claimOnlyUpdate); against a current one it is
-				// this body.
+				// ALONE against a server without issues.update.claim reaches
+				// claimIssue instead, decided from the handshake (see
+				// claimWithoutUpdateClaim); against one with it, it is this
+				// body.
 				"ForceAssigneeTransfer": member("force_assignee_transfer"),
 				"ForceClosePolicy":      member("force_close_policy"),
 				"Claim":                 member("claim"),
@@ -311,13 +325,25 @@ func writeShapes() []writeShape {
 				"Assignee": member("assignee"),
 				"ParentID": member("parent_id"),
 				"Metadata": member("metadata"),
+				// The plane move, carried since issues.update.persistence
+				// (S21b, `bd promote` over http). Only this shape: the batch
+				// item's ApplyPatchBody still excludes it, so
+				// W-IssuePatch.Persistence stays a refusal there — the Owner
+				// row's arrangement, the other way round.
+				"Persistence": member("persistence"),
+				// The gate members, behind issues.update.gates.
+				// They sat in the pending set while the
+				// wire published them under the W-IssuePatch.AwaitID and
+				// W-IssuePatch.Waiters refusals; the flip moved them here and
+				// retired the refusals.
+				"AwaitID": member("await_id"),
+				"Waiters": member("waiters"),
 			},
-			// NOTHING IS PENDING, and the set is empty rather than absent for the
-			// reason the second list in accessors.go was: it held the two
-			// incremental-label members #5510 published under an existing refusal,
-			// and client wave ga-jpywb moved both into `carried` — which is what
-			// the map documents a flip as. The next member upstream publishes
-			// under a live W- row starts it again.
+			// NOTHING IS PENDING. The set held the two incremental-label
+			// members #5510 published under an existing refusal until client
+			// wave ga-jpywb, and await_id and waiters until the gate
+			// members' client slice, each moved into `carried` — which is what the map
+			// documents a flip as.
 		},
 		{
 			// The nested metadata document, and the reason it is a shape of its
@@ -456,10 +482,11 @@ func writeShapes() []writeShape {
 			source: reflect.TypeOf(issueops.CloseBatchRequest{}),
 			body:   reflect.TypeOf(apigen.BatchCloseRequest{}),
 			carried: map[string]carriage{
-				"Actor":   member("actor"),
-				"Items":   member("items"),
-				"Session": member("session"),
-				"Force":   member("force"),
+				"Actor":             member("actor"),
+				"Items":             member("items"),
+				"Session":           member("session"),
+				"Force":             member("force"),
+				"AutoCloseMolecule": member("auto_close_molecule"),
 			},
 		},
 		{
@@ -520,6 +547,8 @@ func writeShapes() []writeShape {
 						"status", "priority", "issue_type", "assignee", "owner", "estimated_minutes",
 						"external_ref", "due_at", "defer_until", "sender", "metadata", "labels",
 						"ephemeral", "no_history",
+						// The gate members, behind issues.create.gates.
+						"await_type", "await_id", "timeout", "waiters",
 					},
 					partial: "W-CreateItem.Issue",
 				},
@@ -579,6 +608,10 @@ func writeShapes() []writeShape {
 				// expressible on this document.
 				"Labels":   member("labels"),
 				"Metadata": member("metadata"),
+				// The gate members, behind issues.update.gates,
+				// spelled as on updateIssue.
+				"AwaitID": member("await_id"),
+				"Waiters": member("waiters"),
 			},
 		},
 		{

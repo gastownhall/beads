@@ -128,6 +128,7 @@ func printServerHealthResult(result doctor.ServerHealthResult) {
 	var warnings []doctor.DoctorCheck
 
 	for _, check := range result.Checks {
+		check = check.Printed()
 		var statusIcon string
 		switch check.Status {
 		case statusOK:

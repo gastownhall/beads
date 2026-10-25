@@ -253,6 +253,7 @@ type remoteClaimer struct {
 // a server that applies the policy, externalBlockersFor reads nothing and the
 // claim goes through untouched.
 func (c *remoteClaimer) Claim(ctx context.Context, req issueops.ClaimRequest) (issueops.ClaimResult, error) {
+	ctx = storage.WithLivePolicyProbe(ctx)
 	blockers, err := c.policy.externalBlockersFor(ctx, []string{req.IssueID})
 	if err != nil {
 		return issueops.ClaimResult{}, err
@@ -286,6 +287,7 @@ type remoteReadyClaimer struct {
 // set, so the second pass reads the candidates behind them. Only a claim that
 // tried candidates and won none is an error.
 func (c *remoteReadyClaimer) ClaimNext(ctx context.Context, req issueops.ClaimNextRequest) (issueops.ClaimNextResult, error) {
+	ctx = storage.WithLivePolicyProbe(ctx)
 	// externallyBlockedIDs is empty against a server that applies the policy
 	// (loadBlockingState's probe), so that server's atomic claim answers.
 	blocked, err := c.policy.externallyBlockedIDs(ctx)
@@ -433,8 +435,33 @@ func (a *remoteBlockingAnnotator) AnnotateBlocking(ctx context.Context, req issu
 		for _, ref := range blockers[result.Items[i].ID] {
 			result.Items[i].BlockedBy = appendUnique(result.Items[i].BlockedBy, ref)
 		}
+		if req.IncludeIsBlocked && len(blockers[result.Items[i].ID]) > 0 {
+			result.Items[i].IsBlocked = boolPtr(true)
+		}
 	}
 	return result, nil
+}
+
+// remoteExternalBlocked adds the external-dependency invariant to a remote
+// store's IsBlockedBatch answer: an id with an unsatisfied external blocker
+// is blocked. A server that enforces the policy already folded it in.
+func (s *Store) remoteExternalBlocked(ctx context.Context, ids []string, blocked map[string]bool) (map[string]bool, error) {
+	if enforced, err := s.serverEnforcesPolicy(ctx); err != nil || enforced {
+		if err != nil {
+			return nil, err
+		}
+		return blocked, nil
+	}
+	external, err := s.externalBlockersFor(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	for id, refs := range external {
+		if len(refs) > 0 {
+			blocked[id] = true
+		}
+	}
+	return blocked, nil
 }
 
 // ── TreeWalker ──────────────────────────────────────────────────────
@@ -502,6 +529,7 @@ type remoteBatchCloser struct {
 // externalBlockersFor reads nothing and the whole request goes through
 // untouched.
 func (c *remoteBatchCloser) CloseBatch(ctx context.Context, request issueops.CloseBatchRequest) (issueops.CloseBatchResult, error) {
+	ctx = storage.WithLivePolicyProbe(ctx)
 	if request.ClaimNext != nil {
 		return c.closeAndClaimNext(ctx, request)
 	}

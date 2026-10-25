@@ -566,6 +566,18 @@ func checkChildParentDependenciesDB(db *sql.DB) DoctorCheck {
 	// Query for child→parent BLOCKING dependencies where issue_id starts with target id + "."
 	// Only matches blocking types (blocks, conditional-blocks, waits-for) that cause deadlock.
 	// Excludes 'parent-child' type which is a legitimate structural hierarchy relationship.
+	//
+	// The reverse shape, a parent that blocks on or waits for its own child
+	// (GH#4814), is deliberately not matched. Since gastownhall/beads#6506 the
+	// parent-child cascade propagates only exogenous blockedness, so that edge
+	// holds back the parent, not the child: it is a close gate, not a
+	// deadlock. That holds while every parent-child chain up from the child
+	// reaches the parent within the cascade's walk (issueops subtreeWalkDepth,
+	// four levels). A child that also has a parent outside the gating parent's
+	// subtree is still locked out of bd ready (bd-eoxqs0): a cascade defect,
+	// not a reason to delete the gate. The write path refuses the blocks form
+	// in favor of a waits-for gate, and checkParentBlocksOwnChildDB lists any
+	// blocks-form rows.
 	//nolint:gosec // G202: doctorDependencyUnionSQL returns a fixed internal SELECT fragment.
 	query := `
 		SELECT d.issue_id, d.depends_on_id

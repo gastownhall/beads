@@ -47,6 +47,12 @@ func ValidatePublicCreateRequest(request publicops.CreateRequest) error {
 	if err := types.CheckFieldLen("parent ID", request.ParentID); err != nil {
 		return publicCreateValidationError(fmt.Errorf("create: %w", err))
 	}
+	// The gate members, as a *publicops.GateFieldError naming the member so a
+	// front door can point at it. Here rather than in PreparePublicCreateRequest
+	// alone so the unit-of-work backend's early check refuses it too.
+	if err := ValidateGateFields(request.Issue); err != nil {
+		return err
+	}
 	if err := ValidateCreatePriority(request.Issue.Priority, request.DefaultPriority); err != nil {
 		return err
 	}

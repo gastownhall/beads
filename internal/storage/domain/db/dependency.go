@@ -608,6 +608,17 @@ func (r *dependencySQLRepositoryImpl) GetBlockingInfo(ctx context.Context, issue
 	return info, nil
 }
 
+// IsBlockedBatch reads the stored transitive is_blocked flag for ids from both
+// planes through the shared body (issueops.IsBlockedBatchInTx) every store
+// uses, so the unit-of-work answer cannot drift from the store's.
+func (r *dependencySQLRepositoryImpl) IsBlockedBatch(ctx context.Context, ids []string) (map[string]bool, error) {
+	out, err := issueops.IsBlockedBatchInTx(ctx, r.runner, ids)
+	if err != nil {
+		return nil, fmt.Errorf("db: DependencySQLRepository.IsBlockedBatch: %w", err)
+	}
+	return out, nil
+}
+
 func (r *dependencySQLRepositoryImpl) GetBlockingInfoAcrossIssuesAndWisps(ctx context.Context, issueIDs []string) (domain.BlockingInfo, error) {
 	perm, err := r.GetBlockingInfo(ctx, issueIDs, domain.DepListOpts{UseWispsTable: false})
 	if err != nil {

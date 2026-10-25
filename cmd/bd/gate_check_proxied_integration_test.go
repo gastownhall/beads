@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -257,6 +258,100 @@ func TestProxiedServerGateCheckB(t *testing.T) {
 		}
 		if strings.Contains(out, "ESCALATE") {
 			t.Errorf("timer gates never escalate; --escalate should be a no-op, got:\n%s", out)
+		}
+	})
+
+	// A persisted proto's gates are templates. The listing returns them, but no
+	// sweep evaluates them: neither the expired template timer nor the template
+	// bead gate, whose target is open, is closed or written.
+	t.Run("template_gates_are_not_checked", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "gck")
+		target := bdProxiedCreate(t, bd, p.dir, "Template bead gate target")
+		live := bdProxiedCreate(t, bd, p.dir, "Live timer gate", "--type", "gate")
+		tplTimer := bdProxiedCreate(t, bd, p.dir, "Template timer gate", "--type", "gate")
+		tplBead := bdProxiedCreate(t, bd, p.dir, "Template bead gate", "--type", "gate")
+		db := openProxiedDB(t, p)
+		seedGateAwait(t, db, live.ID, "timer", "", longAgo(), expiredTimeout)
+		seedGateAwait(t, db, tplTimer.ID, "timer", "", longAgo(), expiredTimeout)
+		seedGateAwait(t, db, tplBead.ID, "bead", target.ID, time.Now().UTC(), 0)
+		for _, id := range []string{tplTimer.ID, tplBead.ID} {
+			if _, err := db.ExecContext(context.Background(),
+				"UPDATE issues SET is_template = 1 WHERE id = ?", id); err != nil {
+				t.Fatalf("mark %s a template: %v", id, err)
+			}
+		}
+
+		out, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "gate", "check")
+		if err != nil {
+			t.Fatalf("gate check failed: %v\nstderr:\n%s", err, stderr)
+		}
+		if got := readStatus(t, db, live.ID); got != types.StatusClosed {
+			t.Errorf("the live expired timer gate should be closed, got %q", got)
+		}
+		if !strings.Contains(out, "Checked 1 gates: 1 resolved") {
+			t.Errorf("expected only the live gate checked, got:\n%s", out)
+		}
+		for _, id := range []string{tplTimer.ID, tplBead.ID} {
+			if got := readStatus(t, db, id); got != types.StatusOpen {
+				t.Errorf("template gate %s status = %q, want open", id, got)
+			}
+		}
+		var metadata string
+		if err := db.QueryRowContext(context.Background(),
+			"SELECT metadata FROM issues WHERE id = ?", tplBead.ID).Scan(&metadata); err != nil {
+			t.Fatalf("read template gate metadata: %v", err)
+		}
+		if strings.Contains(metadata, beadGateSeenKey) {
+			t.Errorf("template gate metadata %s records a sighting", metadata)
+		}
+	})
+
+	// The template gates, expired timers too, are newer than the live one, so
+	// they lead the listing. The query leaves them out before --limit cuts it:
+	// they used to fill the one row, and the sweep reported no open gates and
+	// exited 0 with the live gate unchecked.
+	t.Run("limit_counts_only_live_gates", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "gcv")
+		live := bdProxiedCreate(t, bd, p.dir, "Live timer gate", "--type", "gate")
+		tplA := bdProxiedCreate(t, bd, p.dir, "Template timer gate A", "--type", "gate")
+		tplB := bdProxiedCreate(t, bd, p.dir, "Template timer gate B", "--type", "gate")
+		db := openProxiedDB(t, p)
+		seedGateAwait(t, db, live.ID, "timer", "", longAgo(), expiredTimeout)
+		for _, id := range []string{tplA.ID, tplB.ID} {
+			seedGateAwait(t, db, id, "timer", "", time.Now().UTC().Add(-2*expiredTimeout), expiredTimeout)
+			if _, err := db.ExecContext(context.Background(),
+				"UPDATE issues SET is_template = 1 WHERE id = ?", id); err != nil {
+				t.Fatalf("mark %s a template: %v", id, err)
+			}
+		}
+		// bd gate list still lists templates: its first row is one, so a cut at
+		// one row taken before the template skip leaves the sweep nothing.
+		listed, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "gate", "list", "--limit", "1", "--json")
+		if err != nil {
+			t.Fatalf("gate list --limit 1 --json failed: %v\nstderr:\n%s", err, stderr)
+		}
+		var first []map[string]any
+		if start := strings.Index(listed, "["); start < 0 || json.Unmarshal([]byte(listed[start:]), &first) != nil ||
+			len(first) != 1 || (first[0]["id"] != tplA.ID && first[0]["id"] != tplB.ID) {
+			t.Fatalf("gate list --limit 1 --json = %s, want one of the template gates first", listed)
+		}
+
+		out, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "gate", "check", "--limit", "1")
+		if err != nil {
+			t.Fatalf("gate check --limit 1 failed: %v\nstderr:\n%s", err, stderr)
+		}
+		if got := readStatus(t, db, live.ID); got != types.StatusClosed {
+			t.Errorf("the live expired timer gate should be closed, got %q\noutput:\n%s", got, out)
+		}
+		if !strings.Contains(out, "Checked 1 gates: 1 resolved") {
+			t.Errorf("expected the live gate checked past the templates, got:\n%s", out)
+		}
+		for _, id := range []string{tplA.ID, tplB.ID} {
+			if got := readStatus(t, db, id); got != types.StatusOpen {
+				t.Errorf("template gate %s status = %q, want open", id, got)
+			}
 		}
 	})
 }

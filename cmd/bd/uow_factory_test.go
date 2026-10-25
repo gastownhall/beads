@@ -93,6 +93,51 @@ func TestProxiedProviderOptions(t *testing.T) {
 	}
 }
 
+// TestServerLogProviderOptions pins the ownership half of the proxy-start
+// rotation: an open of bd's default server log gains exactly one option on top
+// of the caller's, and an open of a log the operator chose gains none, so bd
+// never renames a log that proxiedLogAssets does not retire on migration. As
+// with TestProxiedProviderOptions, the options are opaque from here: uow's
+// TestApplyProviderOptions pins what WithServerLogRotation sets, and proxy's
+// TestForkExecChild_RotatesOversizedLogs what RotateLogFile does.
+func TestServerLogProviderOptions(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		in          []uow.ProviderOption
+		isCustomLog bool
+		want        int
+	}{
+		{name: "default log", want: 1},
+		{name: "default log, read-only", in: []uow.ProviderOption{uow.WithReadOnly()}, want: 2},
+		{name: "custom log", isCustomLog: true, want: 0},
+		{name: "custom log, read-only", in: []uow.ProviderOption{uow.WithReadOnly()}, isCustomLog: true, want: 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			out := serverLogProviderOptions(tt.in, tt.isCustomLog)
+			if len(out) != tt.want {
+				t.Fatalf("serverLogProviderOptions(%d options, custom=%t) len = %d, want %d", len(tt.in), tt.isCustomLog, len(out), tt.want)
+			}
+			for i, o := range out {
+				if o == nil {
+					t.Fatalf("serverLogProviderOptions(%d options, custom=%t)[%d] is nil", len(tt.in), tt.isCustomLog, i)
+				}
+			}
+		})
+	}
+
+	// The append must not land in the caller's backing array, as in
+	// TestProxiedProviderOptions.
+	in := make([]uow.ProviderOption, 1, 4)
+	in[0] = uow.WithReadOnly()
+	out := serverLogProviderOptions(in, false)
+	if &out[0] == &in[0] {
+		t.Fatal("serverLogProviderOptions returned the caller's backing array")
+	}
+	if in[:cap(in)][1] != nil {
+		t.Fatal("serverLogProviderOptions wrote into the caller's spare capacity")
+	}
+}
+
 func TestNewProxiedServerUOWProvider_RoutesExternalConfigToExternalProvider(t *testing.T) {
 	beadsDir := t.TempDir()
 	require.NoError(t, configfile.SaveProxiedServerClientInfo(beadsDir, &configfile.ProxiedServerClientInfo{
