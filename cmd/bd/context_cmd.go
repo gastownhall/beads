@@ -7,7 +7,9 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/httpclient"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/storage/domain"
 )
 
@@ -75,7 +77,7 @@ Examples:
 			prepareSelectedNoDBContext(selected)
 		}
 
-		rc, err := beads.GetRepoContext()
+		rc, err := beads.GetRepoContextAllowingNoGit()
 		if err != nil {
 			if jsonOutput {
 				if jerr := outputJSON(map[string]string{"error": fmt.Sprintf("cannot resolve repo context: %v", err)}); jerr != nil {
@@ -135,7 +137,19 @@ Examples:
 // while each held its own copy of `Backend: configfile.BackendDolt`.
 func applyContextBackend(snapshot *domain.ContextInfo, beadsDir string, cfg *configfile.Config) error {
 	snapshot.SetBackendIdentity(cfg.GetBackend(), cfg.GetDoltMode(), cfg.GetDoltDatabase())
-	snapshot.ProjectID = cfg.ProjectID
+	if cfg.GetBackend() == httpclient.Backend {
+		// The http backend's identity lives in the per-user, gitignored
+		// sidecar (`bd connect`'s MED-6 fix stopped mirroring it into the
+		// git-tracked metadata.json), so `bd context` must read it from
+		// there too. A missing sidecar (ErrNotConnected) or any other read
+		// failure just leaves ProjectID empty rather than failing this
+		// otherwise-degraded-state-tolerant command.
+		if target, err := httpclient.LoadTarget(beadsDir); err == nil {
+			snapshot.ProjectID = target.ExpectProjectID
+		}
+	} else {
+		snapshot.ProjectID = cfg.ProjectID
+	}
 
 	if cfg.IsDoltServerMode() {
 		snapshot.ServerHost = cfg.GetDoltServerHost()
@@ -164,6 +178,15 @@ func printContextText(info ContextInfo) {
 	fmt.Printf("  repo root:    %s\n", info.RepoRoot)
 	if info.CWDRepoRoot != "" && info.CWDRepoRoot != info.RepoRoot {
 		fmt.Printf("  cwd repo:     %s\n", info.CWDRepoRoot)
+	} else if info.CWDRepoRoot == "" {
+		// The one degraded state this command exists to report, and the one
+		// it used to swallow. An empty CWD repo root means git answered
+		// nothing for the working directory — usually "not inside a repo",
+		// but also a dangling gitfile, a dubious-ownership refusal, or no git
+		// on PATH. Printing nothing here left the text output with no hint
+		// that anything was unusual, while --json callers could still infer
+		// it from the omitted field.
+		fmt.Printf("  cwd repo:     %s\n", "git: unavailable")
 	}
 	if info.IsRedirected {
 		fmt.Printf("  redirected:   yes\n")
@@ -189,7 +212,7 @@ func printContextText(info ContextInfo) {
 		fmt.Printf("  database:     %s\n", info.Database)
 	}
 	if info.ServerHost != "" {
-		fmt.Printf("  server:       %s:%d\n", info.ServerHost, info.ServerPort)
+		fmt.Printf("  server:       %s\n", doltutil.ServerAddr(info.ServerHost, info.ServerPort))
 	}
 	if info.ProxiedDir != "" {
 		fmt.Printf("  proxied dir:  %s\n", info.ProxiedDir)

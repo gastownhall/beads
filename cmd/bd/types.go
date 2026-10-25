@@ -6,7 +6,9 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -26,14 +28,45 @@ var coreWorkTypes = []struct {
 	{types.TypeMilestone, "Marks completion of a set of related issues (contains no work itself)"},
 }
 
+// systemTypeDescriptions describes the built-in types that are not core work
+// types. bd's own commands create them (mail, molecules, gates, set-state), and
+// like the core types they validate without any types.custom entry.
+var systemTypeDescriptions = map[types.IssueType]string{
+	types.TypeMessage:  "Message between agents or users",
+	types.TypeMolecule: "Molecule root for swarm coordination (bd mol)",
+	types.TypeGate:     "Async coordination gate (bd gate, formula gates)",
+	types.TypeEvent:    "Audit-trail event (bd set-state)",
+}
+
+// systemWorkTypes lists every built-in type that is not a core work type, in
+// the types package's declaration order. Together with coreWorkTypes it covers
+// exactly the types IssueType.IsBuiltIn accepts.
+func systemWorkTypes() []typeInfo {
+	core := make(map[types.IssueType]bool, len(coreWorkTypes))
+	for _, t := range coreWorkTypes {
+		core[t.Type] = true
+	}
+	var out []typeInfo
+	for _, t := range append(append([]types.IssueType{}, types.AllIssueTypes...), types.TypeEvent) {
+		if core[t] {
+			continue
+		}
+		out = append(out, typeInfo{Name: string(t), Description: systemTypeDescriptions[t]})
+	}
+	return out
+}
+
 var typesCmd = &cobra.Command{
 	Use:     "types",
 	GroupID: "views",
 	Short:   "List valid issue types",
 	Long: `List all valid issue types that can be used with bd create --type.
 
-Core work types (bug, task, feature, chore, epic, decision, spike, story, milestone) are always valid.
-Additional types require configuration via types.custom in .beads/config.yaml.
+Core work types (bug, task, feature, chore, epic, decision, spike, story, milestone)
+and system types (message, molecule, gate, event) are always valid.
+Custom types are registered with 'bd config set types.custom' or declared under
+types.custom in .beads/config.yaml; the list shown is exactly the set that
+bd create --type accepts.
 
 Examples:
   bd types              # List all types with descriptions
@@ -55,32 +88,56 @@ Examples:
 			return printSections(jsonOutput)
 		}
 
-		if usesProxiedServer() {
-			return runTypesProxiedServer(rootCtx)
-		}
-
-		if err := ensureDirectMode("types command requires direct database access"); err != nil {
-			return HandleError("%v", err)
-		}
-
-		var customTypes []string
-		ctx := context.Background()
-		if store != nil {
-			if ct, err := store.GetCustomTypes(ctx); err == nil {
-				customTypes = ct
+		if !usesProxiedServer() {
+			if err := ensureDirectMode("types command requires direct database access"); err != nil {
+				return HandleError("%v", err)
 			}
 		}
 
+		customTypes, err := resolveWorkspaceCustomTypes(rootCtx)
+		if err != nil {
+			return HandleError("%v", err)
+		}
 		return renderTypes(customTypes)
 	},
+}
+
+// resolveWorkspaceCustomTypes returns the workspace's registered custom issue
+// types in either storage mode. Both routes end in issueops.ComposeCustomTypes,
+// the rule issue create/update validation also resolves through, so what
+// `bd types` lists is exactly what `bd create --type` accepts.
+func resolveWorkspaceCustomTypes(ctx context.Context) ([]string, error) {
+	if usesProxiedServer() {
+		uw, err := openProxiedListUOW(ctx)
+		if err != nil {
+			return nil, err
+		}
+		defer uw.Close(ctx)
+		customTypes, err := uw.ConfigUseCase().GetCustomTypes(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("reading custom types: %w", err)
+		}
+		return customTypes, nil
+	}
+	if store == nil {
+		// No database is open (e.g. a --dry-run plan check): the config.yaml
+		// layer is the only one available, composed by the same rule.
+		return issueops.ComposeCustomTypes(nil, "", config.GetCustomTypesFromYAML()), nil
+	}
+	customTypes, err := store.GetCustomTypes(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("reading custom types: %w", err)
+	}
+	return customTypes, nil
 }
 
 func renderTypes(customTypes []string) error {
 	if jsonOutput {
 		result := struct {
 			CoreTypes   []typeInfo `json:"core_types"`
+			SystemTypes []typeInfo `json:"system_types"`
 			CustomTypes []string   `json:"custom_types,omitempty"`
-		}{}
+		}{SystemTypes: systemWorkTypes()}
 
 		for _, t := range coreWorkTypes {
 			result.CoreTypes = append(result.CoreTypes, typeInfo{
@@ -95,6 +152,11 @@ func renderTypes(customTypes []string) error {
 	fmt.Println("Core work types (built-in):")
 	for _, t := range coreWorkTypes {
 		fmt.Printf("  %-14s %s\n", t.Type, t.Description)
+	}
+
+	fmt.Println("\nSystem types (built-in, created by bd commands):")
+	for _, t := range systemWorkTypes() {
+		fmt.Printf("  %-14s %s\n", t.Name, t.Description)
 	}
 
 	if len(customTypes) > 0 {

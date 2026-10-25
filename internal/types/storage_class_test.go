@@ -2,6 +2,8 @@ package types
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -277,8 +279,16 @@ func TestNormalizePersistenceModeRejectsPlaneClassIncoherence(t *testing.T) {
 		{"durable with explicit ephemeral", Issue{StorageClass: StorageClassEphemeral}, PersistenceModePersistent},
 	}
 	for _, tc := range cases {
-		if _, _, _, err := NormalizePersistenceMode(tc.current, tc.target); err == nil {
+		_, _, _, err := NormalizePersistenceMode(tc.current, tc.target)
+		if err == nil {
 			t.Errorf("%s: NormalizePersistenceMode succeeded, want error", tc.name)
+			continue
+		}
+		// A row that breaks its own invariants is not the request's refusal,
+		// even when its class is unversioned: callers classify only
+		// ErrUnversionedWispMove as validation.
+		if errors.Is(err, ErrUnversionedWispMove) {
+			t.Errorf("%s: NormalizePersistenceMode error %q matches ErrUnversionedWispMove, want the row-invariant error", tc.name, err)
 		}
 	}
 }
@@ -294,8 +304,13 @@ func TestNormalizePersistenceModeRejectsUnsetAndUnknown(t *testing.T) {
 func TestNormalizePersistenceModeRejectsUnversionedDemotion(t *testing.T) {
 	current := Issue{StorageClass: StorageClassUnversioned}
 	for _, target := range []PersistenceMode{PersistenceModeEphemeral, PersistenceModeNoHistory} {
-		if _, _, _, err := NormalizePersistenceMode(current, target); err == nil {
-			t.Errorf("NormalizePersistenceMode(unversioned, %q) succeeded, want error", target)
+		_, _, _, err := NormalizePersistenceMode(current, target)
+		if !errors.Is(err, ErrUnversionedWispMove) {
+			t.Errorf("NormalizePersistenceMode(unversioned, %q) error = %v, want ErrUnversionedWispMove", target, err)
+			continue
+		}
+		if want := fmt.Sprintf("cannot move unversioned record to persistence mode %q", target); err.Error() != want {
+			t.Errorf("NormalizePersistenceMode(unversioned, %q) error = %q, want %q", target, err, want)
 		}
 	}
 }

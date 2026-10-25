@@ -20,6 +20,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
+	"github.com/steveyegge/beads/internal/testutil/bazeltest"
 )
 
 func TestEffectiveRootStorePolicy(t *testing.T) {
@@ -63,26 +64,6 @@ func TestEffectiveRootStorePolicy(t *testing.T) {
 			}
 			if policy.runMaintenance != tc.wantMaintenance {
 				t.Fatalf("runMaintenance = %v, want %v", policy.runMaintenance, tc.wantMaintenance)
-			}
-		})
-	}
-}
-
-func TestStrictReadonlyBackendSupport(t *testing.T) {
-	tests := []struct {
-		name string
-		cfg  *configfile.Config
-		want bool
-	}{
-		{name: "fresh embedded default", cfg: nil, want: true},
-		{name: "dolt server", cfg: &configfile.Config{Backend: configfile.BackendDolt, DoltMode: configfile.DoltModeServer}, want: true},
-		{name: "proxied server", cfg: &configfile.Config{Backend: configfile.BackendDolt, DoltMode: configfile.DoltModeProxiedServer}, want: false},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := backendSupportsStrictReadonly(tc.cfg); got != tc.want {
-				t.Fatalf("backendSupportsStrictReadonly() = %v, want %v", got, tc.want)
 			}
 		})
 	}
@@ -338,15 +319,19 @@ func TestConfigValidateReadOnlyIsHermetic(t *testing.T) {
 		t.Fatalf("write isolated config: %v", err)
 	}
 
-	beforeBeads := snapshotReadonlyTree(t, beadsDir)
+	beforeBeads := withoutGateLockFiles(snapshotReadonlyTree(t, beadsDir))
 	beforeCircuit := snapshotReadonlyTree(t, circuitDir)
 	home := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(home, "xdg"), 0o755); err != nil {
 		t.Fatalf("create isolated XDG home: %v", err)
 	}
 	// The canary must execute the current worktree source, never a caller-provided
-	// prebuilt binary that may predate this candidate.
-	t.Setenv("BEADS_TEST_BD_BINARY", "")
+	// prebuilt binary that may predate this candidate. Under Bazel the injected
+	// binary (//cmd/bd:bd_for_tests) is built from this source tree, and there is
+	// no toolchain to build another one.
+	if !bazeltest.IsBazel() {
+		t.Setenv("BEADS_TEST_BD_BINARY", "")
+	}
 	bd := buildBDForTest(t)
 	cmd := exec.Command(bd, "config", "validate", "--readonly")
 	cmd.Dir = repoDir
@@ -356,7 +341,13 @@ func TestConfigValidateReadOnlyIsHermetic(t *testing.T) {
 		t.Fatalf("bd config validate --readonly: %v\n%s", err, output)
 	}
 
-	afterBeads := snapshotReadonlyTree(t, beadsDir)
+	// A store-opening command, readonly ones included, takes a SHARED
+	// workspace gate (cmd/bd/workspace_gate.go), and workspacegate creates
+	// each gate's lock file beside the directory it guards on first use and
+	// never removes it (.beads/dolt.gate.lock for the .beads/dolt root): an
+	// empty coordination file, not database, server or version state, so
+	// it is not a readonly side effect this canary guards against.
+	afterBeads := withoutGateLockFiles(snapshotReadonlyTree(t, beadsDir))
 	if !reflect.DeepEqual(afterBeads, beforeBeads) {
 		t.Fatalf("target .beads changed\nbefore: %#v\nafter:  %#v\noutput: %s", beforeBeads, afterBeads, output)
 	}
@@ -369,4 +360,18 @@ func TestConfigValidateReadOnlyIsHermetic(t *testing.T) {
 			t.Fatalf("strict readonly created server/version artifact %s (stat error: %v)", artifact, err)
 		}
 	}
+}
+
+// withoutGateLockFiles drops the physical-root gate a readonly command takes
+// (workspacegate.ForPhysicalRoot(.beads/dolt): .beads/dolt.gate.lock) and its
+// advisory holder-info sidecar from a snapshot. Any other new file, another
+// gate file included, still trips the canary.
+func withoutGateLockFiles(s readonlyTreeSnapshot) readonlyTreeSnapshot {
+	for rel := range s.Entries {
+		switch filepath.ToSlash(rel) {
+		case "dolt.gate.lock", "dolt.gate.lock.info":
+			delete(s.Entries, rel)
+		}
+	}
+	return s
 }

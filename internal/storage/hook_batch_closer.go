@@ -25,6 +25,14 @@ type hookBatchCloser struct {
 	hooks issueOperationHooks
 }
 
+func (h *HookFiringStore) BatchCloserWithPolicy(policy BatchClosePolicy) (issueops.BatchCloser, error) {
+	inner, err := BatchCloserWithPolicy(h.inner, policy)
+	if err != nil {
+		return nil, err
+	}
+	return &hookBatchCloser{inner: inner, hooks: h}, nil
+}
+
 // CloseBatch fires the close hook once PER LANDED ITEM, in request order, and
 // fires nothing for an item that refused. Per item rather than once for the
 // batch because a hook script is written against one issue: collapsing N
@@ -58,6 +66,9 @@ func (o *hookBatchCloser) CloseBatch(ctx context.Context, request issueops.Close
 	for _, outcome := range result.Outcomes {
 		if outcome.Changed {
 			o.hooks.CompleteIssueOperationClose(outcome.Issue)
+		}
+		if outcome.AutoClosedMolecule != nil {
+			o.hooks.CompleteIssueOperationClose(outcome.AutoClosedMolecule)
 		}
 	}
 	if result.ClaimedNext != nil {

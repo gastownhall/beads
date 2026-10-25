@@ -162,11 +162,10 @@ func (s *Server) handleGetMemory(w http.ResponseWriter, r *http.Request) {
 	// SilentExit), and the role answers Found rather than a bare value, so the
 	// status here reports a distinction that exists rather than inventing one.
 	//
-	// A row stored as the EMPTY STRING falls on the miss side of it, because
-	// that is where the role puts it — the storage seam cannot tell it from an
-	// absent row, and this handler will not claim to see what the role cannot.
-	// listMemories enumerates such a row, which is the one way a client tells
-	// the two apart.
+	// Found is ROW EXISTENCE, not value truthiness. A row stored as the EMPTY
+	// STRING is found: it comes back as a 200 with an empty `value`, exactly
+	// like `GET /v0/beads/memories` already enumerates it. Only a key nothing
+	// stored is a miss.
 	if !result.Found {
 		s.fail(w, r, MemoryNotFound())
 		return

@@ -125,18 +125,60 @@ func resolveMaxRows(cmd *cobra.Command) (int, string, error) {
 // closed here would break automation that has a global BEADS_MAX_ROWS set
 // but accidentally got a typo.
 func resolveMaxRowsEnvOnly() (int, string) {
-	raw, ok := os.LookupEnv(maxRowsEnvVar)
-	if !ok || raw == "" {
-		return 0, ""
-	}
-	n, err := strconv.Atoi(raw)
-	if err != nil || n < 0 {
+	n, source, raw, ok := parseMaxRowsEnv()
+	if !ok {
 		fmt.Fprintf(os.Stderr,
 			"Warning: %s=%q is not a non-negative integer; ignoring.\n",
 			maxRowsEnvVar, raw)
 		return 0, ""
 	}
-	return n, maxRowsEnvVar
+	return n, source
+}
+
+// parseMaxRowsEnv reads BEADS_MAX_ROWS without warning about a malformed
+// value. Returns (cap, source, raw, ok); ok is false only for a value that is
+// present but unusable, in which case the cap is disabled exactly as
+// resolveMaxRowsEnvOnly disables it. An unset or empty variable is a valid
+// "no cap" and reports ok.
+func parseMaxRowsEnv() (int, string, string, bool) {
+	raw, ok := os.LookupEnv(maxRowsEnvVar)
+	if !ok || raw == "" {
+		return 0, "", raw, true
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 0 {
+		return 0, "", raw, false
+	}
+	return n, maxRowsEnvVar, raw, true
+}
+
+// resolveMaxRowsQuiet resolves the effective cap like resolveMaxRows but never
+// emits the malformed-BEADS_MAX_ROWS advisory.
+//
+// It exists for the proxied capability front door, which resolves the cap in
+// PersistentPreRunE to decide a refusal before the provider is constructed.
+// Every command that reads the cap resolves it again in its own body, and the
+// advisory is a side effect of resolving, so warning in the front door too
+// would print one typo twice. The body's resolution stays the one that warns:
+// the message keeps appearing exactly once, at the same point in the output it
+// appeared at before the front door existed. A malformed value disables the
+// cap, so the front door reaching the same "no cap" conclusion silently is the
+// correct decision, not a suppressed one.
+//
+// An explicit --max-rows is still resolved through resolveMaxRows: that path
+// never reads the environment, and rejecting a negative flag before the
+// provider opens is the front door's job.
+//
+// No source string, unlike resolveMaxRows: the front door decides whether a
+// cap is set, not how to attribute one in a message. The command body resolves
+// the source for the message it prints.
+func resolveMaxRowsQuiet(cmd *cobra.Command) (int, error) {
+	if cmd != nil && cmd.Flags().Changed(maxRowsFlagName) {
+		n, _, err := resolveMaxRows(cmd)
+		return n, err
+	}
+	n, _, _, _ := parseMaxRowsEnv()
+	return n, nil
 }
 
 // handleMaxRowsError checks whether err is a *issueops.ErrTooManyRows from

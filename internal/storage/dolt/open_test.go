@@ -3,15 +3,20 @@ package dolt
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/storage/backendnames"
 )
 
 // TestResolveAutoStart verifies all conditions that govern the AutoStart decision.
@@ -207,6 +212,209 @@ func TestConfigConstructorsRejectNonDoltBackends(t *testing.T) {
 	}
 }
 
+// TestConfigConstructorsRefuseGraphWorkspace pins that every metadata-driven
+// constructor refuses a workspace whose metadata declares another data model,
+// before it resolves a server or writes anything into the workspace (a port
+// file, a Dolt root, or the metadata.json that Load would migrate a legacy
+// config.json into). The CLI's own store open does not come through here; the
+// public beads package's config opens and cmd/bd's direct NewFromConfig*
+// callers do.
+func TestConfigConstructorsRefuseGraphWorkspace(t *testing.T) {
+	// If the refusal were missing, the open must fail fast rather than reach
+	// the suite's shared test server.
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "127.0.0.1")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "1")
+	for _, mode := range []string{configfile.GraphModeLink, "future-format"} {
+		for _, doltMode := range []string{configfile.DoltModeEmbedded, configfile.DoltModeServer} {
+			// "config.json" is the legacy name Load migrates into metadata.json;
+			// a refused open must not run that migration either.
+			for _, fileName := range []string{configfile.ConfigFileName, "config.json"} {
+				t.Run(mode+"/"+doltMode+"/"+fileName, func(t *testing.T) {
+					beadsDir := t.TempDir()
+					metadata := `{"backend":"dolt","dolt_mode":"` + doltMode + `","dolt_database":"beads_graph_0123","graph_mode":"` + mode + `","graph_future_binding":"keep-me"}`
+					path := filepath.Join(beadsDir, fileName)
+					if err := os.WriteFile(path, []byte(metadata), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					constructors := map[string]func() (*DoltStore, error){
+						"default": func() (*DoltStore, error) {
+							return NewFromConfig(t.Context(), beadsDir)
+						},
+						"standard": func() (*DoltStore, error) {
+							return NewFromConfigWithOptions(t.Context(), beadsDir, &Config{DisableAutoStart: true, CreateIfMissing: true})
+						},
+						"cli": func() (*DoltStore, error) {
+							return NewFromConfigWithCLIOptions(t.Context(), beadsDir, &Config{DisableAutoStart: true, ReadOnly: true})
+						},
+					}
+					for name, construct := range constructors {
+						t.Run(name, func(t *testing.T) {
+							store, err := construct()
+							if err == nil {
+								_ = store.Close()
+								t.Fatalf("graph_mode %q workspace opened as Dolt", mode)
+							}
+							var formatErr *configfile.UnsupportedWorkspaceFormatError
+							if !errors.As(err, &formatErr) || formatErr.BeadsDir != beadsDir || formatErr.GraphMode != mode {
+								t.Fatalf("constructor error = %v, want UnsupportedWorkspaceFormatError for %s", err, beadsDir)
+							}
+							entries, readErr := os.ReadDir(beadsDir)
+							if readErr != nil || len(entries) != 1 {
+								t.Fatalf("refused open changed the workspace: %v, %v", entries, readErr)
+							}
+							if got, readErr := os.ReadFile(path); readErr != nil || string(got) != metadata {
+								t.Fatalf("refused open rewrote %s: %q, %v", fileName, got, readErr)
+							}
+						})
+					}
+				})
+			}
+		}
+	}
+}
+
+// TestConfigConstructorsRefuseGraphFormatMarker pins that every
+// metadata-driven constructor refuses a workspace holding the
+// graph-preview-format marker graph-preview builds write, whatever its
+// metadata says (none, stripped of graph_mode in either metadata file, an
+// explicit dependency, or unparseable), and leaves the workspace unchanged.
+func TestConfigConstructorsRefuseGraphFormatMarker(t *testing.T) {
+	// If the refusal were missing, the open must fail fast rather than reach
+	// the suite's shared test server.
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "127.0.0.1")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "1")
+	layouts := []struct {
+		name     string
+		fileName string // "" writes no metadata file
+		metadata string
+	}{
+		{name: "marker only"},
+		{name: "stripped embedded metadata", fileName: configfile.ConfigFileName, metadata: `{"backend":"dolt","dolt_mode":"embedded","dolt_database":"beads_graph_0123"}`},
+		{name: "stripped server metadata", fileName: configfile.ConfigFileName, metadata: `{"backend":"dolt","dolt_mode":"server","dolt_database":"beads_graph_0123"}`},
+		{name: "stripped legacy config.json", fileName: "config.json", metadata: `{"backend":"dolt","dolt_mode":"embedded","dolt_database":"beads_graph_0123"}`},
+		{name: "dependency metadata", fileName: configfile.ConfigFileName, metadata: `{"backend":"dolt","dolt_mode":"server","graph_mode":"dependency"}`},
+		{name: "unparseable metadata", fileName: configfile.ConfigFileName, metadata: `{"backend":"dolt",`},
+	}
+	for _, layout := range layouts {
+		t.Run(layout.name, func(t *testing.T) {
+			beadsDir := t.TempDir()
+			want := map[string]string{configfile.GraphFormatMarkerFile: "link-preview-v9\n"}
+			if layout.fileName != "" {
+				want[layout.fileName] = layout.metadata
+			}
+			for name, content := range want {
+				if err := os.WriteFile(filepath.Join(beadsDir, name), []byte(content), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			constructors := map[string]func() (*DoltStore, error){
+				"default": func() (*DoltStore, error) {
+					return NewFromConfig(t.Context(), beadsDir)
+				},
+				"standard": func() (*DoltStore, error) {
+					return NewFromConfigWithOptions(t.Context(), beadsDir, &Config{DisableAutoStart: true, CreateIfMissing: true})
+				},
+				"cli": func() (*DoltStore, error) {
+					return NewFromConfigWithCLIOptions(t.Context(), beadsDir, &Config{DisableAutoStart: true, ReadOnly: true})
+				},
+			}
+			for name, construct := range constructors {
+				t.Run(name, func(t *testing.T) {
+					store, err := construct()
+					if err == nil {
+						_ = store.Close()
+						t.Fatalf("workspace with a %s marker opened as Dolt", configfile.GraphFormatMarkerFile)
+					}
+					var formatErr *configfile.UnsupportedWorkspaceFormatError
+					if !errors.As(err, &formatErr) || formatErr.BeadsDir != beadsDir || !formatErr.FormatMarker {
+						t.Fatalf("constructor error = %v, want the format marker refusal for %s", err, beadsDir)
+					}
+					entries, readErr := os.ReadDir(beadsDir)
+					if readErr != nil || len(entries) != len(want) {
+						t.Fatalf("refused open changed the workspace: %v, %v", entries, readErr)
+					}
+					for fileName, content := range want {
+						if got, readErr := os.ReadFile(filepath.Join(beadsDir, fileName)); readErr != nil || string(got) != content {
+							t.Fatalf("refused open rewrote %s: %q, %v", fileName, got, readErr)
+						}
+					}
+				})
+			}
+		})
+	}
+}
+
+// TestConfigConstructorsRefuseNonDoltBackendInLegacyConfig pins that every
+// metadata-driven constructor refuses a legacy config.json naming a backend it
+// cannot open as Dolt (removed, unrecognized, or another binary's registered
+// backend) before configfile.Load migrates that file into metadata.json,
+// dropping the keys Config does not know. The workspace holds a Dolt database,
+// so a removed backend's refusal offers the metadata heal; it must not have
+// rewritten the metadata first, and it names config.json, the file that holds
+// the backend, rather than a metadata.json that does not exist.
+func TestConfigConstructorsRefuseNonDoltBackendInLegacyConfig(t *testing.T) {
+	// If the refusal were missing, the open must fail fast rather than reach
+	// the suite's shared test server.
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "127.0.0.1")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "1")
+	const registered = "legacy-config-registered-fixture"
+	backendnames.Add(registered)
+	t.Cleanup(func() { backendnames.Remove(registered) })
+	for _, backend := range []string{configfile.BackendSQLite, configfile.BackendPostgres, configfile.BackendMySQL, "mystery", registered} {
+		for _, doltMode := range []string{configfile.DoltModeEmbedded, configfile.DoltModeServer} {
+			t.Run(backend+"/"+doltMode, func(t *testing.T) {
+				beadsDir := t.TempDir()
+				if err := os.MkdirAll(filepath.Join(beadsDir, "dolt", ".dolt"), 0o750); err != nil {
+					t.Fatal(err)
+				}
+				legacy := `{"backend":"` + backend + `","dolt_mode":"` + doltMode + `","dolt_database":"beads_legacy","future_binding":"keep-me"}`
+				legacyPath := filepath.Join(beadsDir, "config.json")
+				if err := os.WriteFile(legacyPath, []byte(legacy), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				constructors := map[string]func() (*DoltStore, error){
+					"default": func() (*DoltStore, error) {
+						return NewFromConfig(t.Context(), beadsDir)
+					},
+					"standard": func() (*DoltStore, error) {
+						return NewFromConfigWithOptions(t.Context(), beadsDir, &Config{DisableAutoStart: true, CreateIfMissing: true})
+					},
+					"cli": func() (*DoltStore, error) {
+						return NewFromConfigWithCLIOptions(t.Context(), beadsDir, &Config{DisableAutoStart: true, ReadOnly: true})
+					},
+				}
+				for name, construct := range constructors {
+					t.Run(name, func(t *testing.T) {
+						store, err := construct()
+						if err == nil {
+							_ = store.Close()
+							t.Fatalf("backend %q opened as Dolt", backend)
+						}
+						if !strings.Contains(err.Error(), "cannot be opened as Dolt") || !strings.Contains(err.Error(), strconv.Quote(backend)) {
+							t.Fatalf("constructor error = %v, want the refusal of backend %q", err, backend)
+						}
+						// The registered backend's refusal names no file.
+						if backend != registered && (!strings.Contains(err.Error(), "config.json") || strings.Contains(err.Error(), "metadata.json")) {
+							t.Fatalf("constructor error = %v, want it to name config.json and not metadata.json", err)
+						}
+						entries, readErr := os.ReadDir(beadsDir)
+						names := make([]string, 0, len(entries))
+						for _, entry := range entries {
+							names = append(names, entry.Name())
+						}
+						if readErr != nil || !slices.Equal(names, []string{"config.json", "dolt"}) {
+							t.Fatalf("refused open changed the workspace: %v, %v", names, readErr)
+						}
+						if got, readErr := os.ReadFile(legacyPath); readErr != nil || string(got) != legacy {
+							t.Fatalf("refused open rewrote config.json: %q, %v", got, readErr)
+						}
+					})
+				}
+			})
+		}
+	}
+}
+
 func TestCLIDirUsesSharedDoltRootInSharedServerMode(t *testing.T) {
 	sharedRoot := t.TempDir()
 	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
@@ -243,6 +451,81 @@ func TestCLIDirUsesDbPathOutsideSharedServerMode(t *testing.T) {
 }
 
 func TestApplyResolvedConfig(t *testing.T) {
+	// The config.yaml rung of the pool-knob ladders, for library consumers.
+	// The config.GetString rungs read a package-global viper populated only
+	// by cmd/bd's config.Initialize(), so for a process that links beads as
+	// a library they always return "" and the project's configured values
+	// were silently ignored. applyResolvedConfig falls back to a direct read
+	// of <beadsDir>/config.yaml, the same pattern dolt.auto-start carries.
+	writeConfigYAML := func(t *testing.T, beadsDir, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(body), 0o644); err != nil {
+			t.Fatalf("writing config.yaml: %v", err)
+		}
+	}
+	ladderFileCfg := func() *configfile.Config {
+		return &configfile.Config{Backend: configfile.BackendDolt, DoltDatabase: "ladder"}
+	}
+
+	t.Run("config.yaml populates pool knobs with no env and no global viper", func(t *testing.T) {
+		// The premise is load-bearing: if this package ever initializes the
+		// global viper, the dir-fallback rung under test is no longer the one
+		// answering and the subtest would pass vacuously.
+		if config.GetString("dolt.pool-read-timeout") != "" || config.GetString("dolt.max-conns") != "" {
+			t.Fatal("global viper unexpectedly configured; this subtest's premise is broken")
+		}
+		t.Setenv("BEADS_DOLT_POOL_READ_TIMEOUT", "")
+		t.Setenv("BEADS_DOLT_POOL_WRITE_TIMEOUT", "")
+		t.Setenv("BEADS_DOLT_MAX_CONNS", "")
+		beadsDir := t.TempDir()
+		writeConfigYAML(t, beadsDir, "dolt:\n  pool-read-timeout: 120s\n  pool-write-timeout: 45\n  max-conns: 25\n")
+		cfg := &Config{}
+
+		if err := applyResolvedConfig(context.Background(), beadsDir, ladderFileCfg(), cfg); err != nil {
+			t.Fatalf("applyResolvedConfig: %v", err)
+		}
+
+		if cfg.PoolReadTimeout != 120*time.Second {
+			t.Fatalf("PoolReadTimeout = %v, want 120s from config.yaml", cfg.PoolReadTimeout)
+		}
+		if cfg.PoolWriteTimeout != 45*time.Second {
+			t.Fatalf("PoolWriteTimeout = %v, want 45s from config.yaml (bare number = seconds)", cfg.PoolWriteTimeout)
+		}
+		if cfg.MaxOpenConns != 25 {
+			t.Fatalf("MaxOpenConns = %d, want 25 from config.yaml", cfg.MaxOpenConns)
+		}
+	})
+
+	t.Run("env var wins over config.yaml for pool deadlines", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_POOL_READ_TIMEOUT", "90s")
+		t.Setenv("BEADS_DOLT_POOL_WRITE_TIMEOUT", "")
+		beadsDir := t.TempDir()
+		writeConfigYAML(t, beadsDir, "dolt:\n  pool-read-timeout: 120s\n")
+		cfg := &Config{}
+
+		if err := applyResolvedConfig(context.Background(), beadsDir, ladderFileCfg(), cfg); err != nil {
+			t.Fatalf("applyResolvedConfig: %v", err)
+		}
+
+		if cfg.PoolReadTimeout != 90*time.Second {
+			t.Fatalf("PoolReadTimeout = %v, want the env's 90s over the file's 120s", cfg.PoolReadTimeout)
+		}
+	})
+
+	t.Run("no config.yaml leaves the pool deadlines unset", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_POOL_READ_TIMEOUT", "")
+		t.Setenv("BEADS_DOLT_POOL_WRITE_TIMEOUT", "")
+		cfg := &Config{}
+
+		if err := applyResolvedConfig(context.Background(), t.TempDir(), ladderFileCfg(), cfg); err != nil {
+			t.Fatalf("applyResolvedConfig: %v", err)
+		}
+
+		if cfg.PoolReadTimeout != 0 || cfg.PoolWriteTimeout != 0 {
+			t.Fatalf("pool deadlines = %v/%v, want 0/0 so buildServerDSN applies its default", cfg.PoolReadTimeout, cfg.PoolWriteTimeout)
+		}
+	})
+
 	t.Run("fills server config for legacy metadata without dolt_mode", func(t *testing.T) {
 		beadsDir := t.TempDir()
 		fileCfg := &configfile.Config{

@@ -125,7 +125,15 @@ type IssuePatch struct {
 	// AppendNotes appends to the notes and is mutually exclusive with Notes.
 	AppendNotes Field[string]
 	SpecID      Field[string]
-	AwaitID     Field[string]
+	// AwaitID replaces the gate's condition identifier; the empty string
+	// clears it. Its bounds are ValidateGateFields' (GateFieldError).
+	AwaitID Field[string]
+	// Waiters is a WHOLE-VALUE replacement of the gate's waiter list; a set
+	// nil or empty Value clears it. The role stores the list as given:
+	// duplicates are kept, as local storage always has, and deduplication is
+	// the caller's (bd gate add-waiter dedups before it writes). Its bounds
+	// are the column's (GateFieldError naming GateFieldWaiters).
+	Waiters Field[[]string]
 	// Status sets the issue's status. A status that crosses from outside the
 	// configured done category into it answers to close policy: the update
 	// refuses with CloseOpenChildrenError or ErrCloseBlocked unless
@@ -195,7 +203,8 @@ type CreateRequest struct {
 	// ignores ContentHash, RowVersion, lease state, compaction state, routing
 	// overrides, hydration flags, and derived fields. Labels are authoritative.
 	// Issue.Comments and Issue.Dependencies must be empty; supply edges through
-	// the request's own Dependencies field.
+	// the request's own Dependencies field. An empty Issue.CreatedBy defaults to
+	// Actor (the same rule for every create shape, batch items included).
 	Issue *Issue
 	// ParentID creates a typed DepParentChild edge. It must not duplicate an
 	// explicit edge in Dependencies.
@@ -224,7 +233,22 @@ type CreateRequest struct {
 	// is handed. Without it the two `bd create` routes disagree about which
 	// ids a workspace may mint.
 	IDPrefix string
+	// DefaultPriority says the caller has no priority for the issue, and the
+	// create stores DefaultCreatePriority. It exists because Issue.Priority
+	// cannot say "absent": its zero value is P0, a real and urgent priority, so
+	// a caller that leaves it unset asks for critical work. The default is
+	// applied here, once, for every route — the CLI's `bd create` without
+	// --priority and an HTTP create without `priority` both set this rather
+	// than spelling the number themselves.
+	//
+	// Issue.Priority must be zero when it is set; a request that sets both is
+	// ErrValidation, because the two would disagree about what was asked for.
+	DefaultPriority bool
 }
+
+// DefaultCreatePriority is the priority a create stores when its request sets
+// DefaultPriority (CreateRequest, BatchCreateItem, CreateItem): P2, medium.
+const DefaultCreatePriority = 2
 
 // UpdateRequest describes an issue update.
 type UpdateRequest struct {
@@ -252,6 +276,19 @@ type UpdateRequest struct {
 	// therefore maps that flag to both fields, conditioning this one on an
 	// assignee edit.
 	ForceAssigneeTransfer bool
+	// ForceNotesOverwrite bypasses only the refusal on a Patch.Notes that is a
+	// NotesReplacement of the existing notes — replacing non-empty notes with
+	// different non-empty content; an explicit clear is not fenced. The zero
+	// value enforces the fence. It has no effect without such a Patch.Notes edit, and
+	// a request that sets it with no Patch.Notes is invalid. It is independent
+	// of ForceAssigneeTransfer and ForceClosePolicy — neither bypasses this, nor
+	// does this bypass either of them — and, deliberately, of ExpectedAssignee
+	// too: a caller pairing a notes edit with an assignee compare-and-set still
+	// needs this bit to overwrite notes, and setting it never touches the
+	// assignee guard. A command adapter with a single --force flag therefore
+	// maps that flag to all three fields, conditioning this one on a
+	// Patch.Notes edit.
+	ForceNotesOverwrite bool
 	// ForceClosePolicy bypasses only close policy — the open-children refusal
 	// and the live-direct-blocker refusal — for a Patch.Status that crosses into
 	// the done category. The zero value enforces the policy. It has no effect
@@ -260,6 +297,14 @@ type UpdateRequest struct {
 	// It is the update-side spelling of CloseRequest.Force; a command adapter
 	// that maps one flag to both spells both.
 	ForceClosePolicy bool
+	// AllowTemplate says the caller edits a template deliberately, so the
+	// template read-only refusal (*TemplateReadOnlyError) stands down for this
+	// request. bd label and bd set-state set it to keep their pre-guard
+	// behavior: they have always written to templates. The zero value
+	// enforces the guard. It bypasses nothing else — validation, the
+	// preconditions, the assignee and notes fences and close policy still
+	// apply — and has no effect on an issue that is not a template.
+	AllowTemplate bool
 	// The three Expected* guards below are this package's FOUNDING spelling of
 	// the compare-and-set family, and the family's rules are stated once, at
 	// length, on DeleteRequest.ExpectedVersion (deleter.go) and
@@ -341,8 +386,10 @@ type CloseRequest struct {
 	// and read back on CloseResult.Issue.ClosedBySession, under the same
 	// first-close-wins rule as Reason.
 	Session string
-	// Force bypasses only blocker and open-child close policy. It never bypasses
-	// validation, ExpectedVersion, or lifecycle rules.
+	// Force bypasses blocker and open-child close policy and the two close
+	// guards a force has always waived in bd: the pin, and the assignee
+	// authority fence. It never bypasses the template guard, validation,
+	// ExpectedVersion, or lifecycle rules.
 	Force bool
 	// ExpectedVersion requires the current row version to match, and is checked
 	// BEFORE the idempotent close — so a re-close of an already-closed issue
@@ -356,6 +403,47 @@ type CloseRequest struct {
 	// a miss refuses with ErrVersionMismatch having written nothing. Force
 	// bypasses close policy and never this guard.
 	ExpectedVersion *int64
+	// AutoCloseMolecule closes the issue's molecule root IN THE SAME
+	// TRANSACTION when this close completed it: the root closes itself when
+	// complete (AutoClosesWhenComplete), it is open, and every step under it
+	// is now closed (CompletedMolecule). The root close is unforced, guarded
+	// on the root revision read inside that transaction, and records
+	// MoleculeAutoCloseReason and this request's Session.
+	//
+	// It runs for an idempotent re-close too: the rule is state-derived, so a
+	// replayed close of the last step heals a root a crash left open.
+	//
+	// IT IS OPT-IN because an orchestrator may run its own molecule
+	// lifecycle (gc closes molecule roots itself); the zero value never
+	// touches a root. A root close its close policy refuses (a live blocker
+	// on the root, open children) or a close guard refuses (a template root, a
+	// pinned root, a root assigned to someone other than Actor — the root
+	// close is unforced, so each guard holds as it does for a direct close)
+	// leaves the root open and is reported on
+	// CloseResult.MoleculeAutoCloseRefusal (IsMoleculeAutoCloseRefusal); it
+	// never fails the step close.
+	//
+	// ANY OTHER FAILURE OF THE ROOT CLOSE FAILS THE STEP'S CLOSE. A storage
+	// error is returned and rolls the step's close back with it, so a retry
+	// re-runs both. (The CLI used to close the root after the step's close had
+	// committed and only warned when that failed, leaving a complete
+	// molecule's root open.) A write to the root that races this close is not
+	// such a failure: the two conflict at commit, and the backend's retry
+	// decides the root again (MoleculeRootClose).
+	//
+	// Two closes that finish a molecule's last steps concurrently do not
+	// strand its root: each close that decides a root first rewrites one
+	// coordination cell for it, so their transactions conflict at commit and
+	// the one that retries reads the other's close and closes the root.
+	//
+	// THE CELL SERIALIZES SIBLING CLOSES. Every close under an open
+	// auto-closing root rewrites it, whether or not that close completes the
+	// molecule, so any two concurrent closes of steps under the same root
+	// conflict and one of them retries. Under heavy fan-out a close can spend
+	// its whole retry budget conflicting and then fails with the
+	// serialization error. Closes under different roots contend only when
+	// their roots hash to the same cell.
+	AutoCloseMolecule bool
 }
 
 // ReopenRequest describes an issue reopening.
@@ -418,6 +506,15 @@ type CloseResult struct {
 	// OpenChildren is the number of open children observed by a forced close.
 	// It is reported even for an idempotent re-close.
 	OpenChildren int
+	// AutoClosedMolecule is the molecule root CloseRequest.AutoCloseMolecule
+	// closed in this close's transaction, as a post-close snapshot with
+	// labels. Nil when nothing was auto-closed.
+	AutoClosedMolecule *Issue
+	// MoleculeAutoCloseRefusal says why a completed molecule's root stayed
+	// open: its close policy or a close guard refused it
+	// (IsMoleculeAutoCloseRefusal), in that refusal's own message, the same on
+	// every backend. Empty otherwise.
+	MoleculeAutoCloseRefusal string
 }
 
 // ReopenResult reports the post-reopen issue as a detached post-state snapshot
@@ -465,15 +562,26 @@ type Lifecycle interface {
 	// returns ErrCloseBlocked, both without mutation. ForceClosePolicy bypasses
 	// those two refusals and nothing else. A Claim that loses its
 	// compare-and-set returns *ClaimConflictError carrying the state that beat
-	// it. A refusal or validation error leaves persistent state unchanged.
+	// it. An update of a template returns *TemplateReadOnlyError whatever its
+	// patch and force flags, unless it sets AllowTemplate — templates are
+	// read-only — checked after the
+	// compare-and-set preconditions, so a stale guard still reports the
+	// mismatch. A refusal or validation error leaves persistent state
+	// unchanged.
 	Update(context.Context, UpdateRequest) (UpdateResult, error)
 	// Close validates guards and commits the complete request as one atomic
 	// mutation. It moves the issue to literal StatusClosed, including from a
 	// configured done status. ExpectedVersion is checked first, including for an
-	// idempotent close. An unforced close with open children returns
-	// CloseOpenChildrenError without mutation. Force bypasses blocker and
-	// open-child policy and reports OpenChildren, including for an idempotent
-	// re-close. A refusal or validation error leaves persistent state unchanged.
+	// idempotent close. A close of an issue that is not already closed answers
+	// to the close guards before close policy: a template returns
+	// *TemplateReadOnlyError, forced or not; unforced, a pinned issue returns
+	// *PinnedError and one assigned to someone other than Actor (compared
+	// separator-insensitively) returns *CloseNotAssigneeError, matching
+	// ErrNotOwner. An unforced close with open children returns
+	// CloseOpenChildrenError without mutation. Force bypasses the pin, the
+	// assignee fence, and blocker and open-child policy, and reports
+	// OpenChildren, including for an idempotent re-close. A refusal or
+	// validation error leaves persistent state unchanged.
 	Close(context.Context, CloseRequest) (CloseResult, error)
 	// Reopen validates guards and commits the complete request as one atomic
 	// mutation. It moves literal StatusClosed and configured done statuses to

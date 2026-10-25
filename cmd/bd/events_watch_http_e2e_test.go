@@ -124,11 +124,11 @@ func (wc *watchConn) record(t *testing.T) (int64, map[string]any) {
 	return id, rec
 }
 
-// TestServeStreamsTheJournalItIsWriting: hold a stream open on one connection,
+// TestProxiedServerServeStreamsTheJournalItIsWriting: hold a stream open on one connection,
 // mutate on another, and require the records to arrive without anybody asking
 // for them — then drop the stream and resume it with Last-Event-ID, which is
 // the whole reconnection contract.
-func TestServeStreamsTheJournalItIsWriting(t *testing.T) {
+func TestProxiedServerServeStreamsTheJournalItIsWriting(t *testing.T) {
 	requireSharedProxiedServer(t)
 	t.Parallel()
 	bd := buildEmbeddedBD(t)
@@ -225,11 +225,11 @@ func TestServeStreamsTheJournalItIsWriting(t *testing.T) {
 	}
 }
 
-// TestServeRefusesAStreamOnADisabledJournal: the connect-time refusals are
+// TestProxiedServerServeRefusesAStreamOnADisabledJournal: the connect-time refusals are
 // ordinary problem+json responses on this operation too, and the stream is
 // never opened. A consumer that got a 200 here would hold a connection open
 // against a workspace that will never emit a record.
-func TestServeRefusesAStreamOnADisabledJournal(t *testing.T) {
+func TestProxiedServerServeRefusesAStreamOnADisabledJournal(t *testing.T) {
 	requireSharedProxiedServer(t)
 	t.Parallel()
 	bd := buildEmbeddedBD(t)

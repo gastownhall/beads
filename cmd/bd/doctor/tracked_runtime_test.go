@@ -2,7 +2,6 @@ package doctor
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
 )
@@ -10,7 +9,7 @@ import (
 func disableGlobalGitIgnore(t *testing.T, repoDir string) {
 	t.Helper()
 
-	cmd := exec.Command("git", "config", "core.excludesFile", "")
+	cmd := gitCommand("config", "core.excludesFile", "")
 	cmd.Dir = repoDir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git config core.excludesFile failed: %v\n%s", err, out)
@@ -58,12 +57,12 @@ func TestCheckTrackedRuntimeFiles_WorktreeFallbackUsesSharedBeads(t *testing.T) 
 		t.Fatalf("failed to write last-touched: %v", err)
 	}
 
-	add := exec.Command("git", "add", "-f", ".beads/last-touched")
+	add := gitCommand("add", "-f", ".beads/last-touched")
 	add.Dir = mainRepoDir
 	if out, err := add.CombinedOutput(); err != nil {
 		t.Fatalf("git add failed: %v\n%s", err, out)
 	}
-	commit := exec.Command("git", "commit", "-m", "Track runtime artifact for test")
+	commit := gitCommand("commit", "-m", "Track runtime artifact for test")
 	commit.Dir = mainRepoDir
 	if out, err := commit.CombinedOutput(); err != nil {
 		t.Fatalf("git commit failed: %v\n%s", err, out)
@@ -93,12 +92,12 @@ func TestFixTrackedRuntimeFiles_WorktreeFallbackUsesSharedBeads(t *testing.T) {
 		t.Fatalf("failed to write last-touched: %v", err)
 	}
 
-	add := exec.Command("git", "add", "-f", ".beads/last-touched")
+	add := gitCommand("add", "-f", ".beads/last-touched")
 	add.Dir = mainRepoDir
 	if out, err := add.CombinedOutput(); err != nil {
 		t.Fatalf("git add failed: %v\n%s", err, out)
 	}
-	commit := exec.Command("git", "commit", "-m", "Track runtime artifact for fix test")
+	commit := gitCommand("commit", "-m", "Track runtime artifact for fix test")
 	commit.Dir = mainRepoDir
 	if out, err := commit.CombinedOutput(); err != nil {
 		t.Fatalf("git commit failed: %v\n%s", err, out)
@@ -110,7 +109,7 @@ func TestFixTrackedRuntimeFiles_WorktreeFallbackUsesSharedBeads(t *testing.T) {
 		t.Fatalf("FixTrackedRuntimeFiles() error = %v", err)
 	}
 
-	status := exec.Command("git", "status", "--short", "--", ".beads/last-touched")
+	status := gitCommand("status", "--short", "--", ".beads/last-touched")
 	status.Dir = mainRepoDir
 	out, err := status.CombinedOutput()
 	if err != nil {

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/beads/cmd/bd/doctor/fix"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
@@ -126,8 +127,10 @@ func checkStaleClosedIssuesDB(db *sql.DB, thresholdDays int) DoctorCheck {
 	}
 }
 
-// CheckStaleMolecules detects complete-but-unclosed molecules.
-// A molecule is stale if all children are closed but the root is still open.
+// CheckStaleMolecules detects molecules whose children are all closed but
+// whose root issue is still open. Closes on children that redirect or
+// abandon the work (duplicate/wontfix/superseded/…) do not count as
+// completing, so a molecule with such a close is not reported here (GH#5026).
 func CheckStaleMolecules(path string) DoctorCheck {
 	_, beadsDir := getBackendAndBeadsDir(path)
 
@@ -183,11 +186,13 @@ func CheckStaleMolecules(path string) DoctorCheck {
 	}
 
 	return DoctorCheck{
-		Name:     "Stale Molecules",
-		Status:   StatusWarning,
-		Message:  fmt.Sprintf("%d complete-but-unclosed molecule(s)", staleCount),
+		Name:   "Stale Molecules",
+		Status: StatusWarning,
+		// Wording: all children closed with completing reasons — still review
+		// before close (scope may exceed the child set). GH#5026.
+		Message:  fmt.Sprintf("%d molecule(s) with all children closed (review scope before closing)", staleCount),
 		Detail:   detail,
-		Fix:      "Run 'bd mol stale' to review, then 'bd close <id>' for each",
+		Fix:      "Run 'bd mol stale' to review whether epic scope is actually done, then 'bd close <id>' if so",
 		Category: CategoryMaintenance,
 	}
 }
@@ -258,20 +263,8 @@ func checkPersistentMolIssuesForIssues(issues []*types.Issue) DoctorCheck {
 // entries from the old mrqueue implementation. They are safe to delete since
 // gt done already creates merge-request wisps in beads.
 func CheckStaleMQFiles(path string) DoctorCheck {
-	beadsDir := ResolveBeadsDirForRepo(path)
-	mqDir := filepath.Join(beadsDir, "mq")
-
-	if _, err := os.Stat(mqDir); os.IsNotExist(err) {
-		return DoctorCheck{
-			Name:     "Legacy MQ Files",
-			Status:   StatusOK,
-			Message:  "No legacy merge queue files",
-			Category: CategoryMaintenance,
-		}
-	}
-
-	files, err := filepath.Glob(filepath.Join(mqDir, "*.json"))
-	if err != nil || len(files) == 0 {
+	files := legacyMQFiles(filepath.Join(ResolveBeadsDirForRepo(path), "mq"))
+	if len(files) == 0 {
 		return DoctorCheck{
 			Name:     "Legacy MQ Files",
 			Status:   StatusOK,
@@ -285,24 +278,57 @@ func CheckStaleMQFiles(path string) DoctorCheck {
 		Status:   StatusWarning,
 		Message:  fmt.Sprintf("%d stale .beads/mq/*.json file(s)", len(files)),
 		Detail:   "Legacy orchestrator merge queue files (local only, safe to delete)",
-		Fix:      "Run 'bd doctor --fix' to delete, or 'rm -rf .beads/mq/'",
+		Fix:      "Run 'bd doctor --fix' to delete, or 'rm .beads/mq/*.json'",
 		Category: CategoryMaintenance,
 	}
 }
 
-// FixStaleMQFiles removes the legacy .beads/mq/ directory and all its contents.
+// legacyMQFiles returns what CheckStaleMQFiles reports and FixStaleMQFiles
+// removes: the regular *.json files directly in mqDir. A .beads/mq that is a
+// symlink, or not a directory, is not the orchestrator's local queue and is
+// neither reported nor followed.
+func legacyMQFiles(mqDir string) []string {
+	if !isRealDir(mqDir) {
+		return nil
+	}
+	entries, err := os.ReadDir(mqDir)
+	if err != nil {
+		return nil
+	}
+	var files []string
+	for _, entry := range entries {
+		if entry.Type().IsRegular() && strings.HasSuffix(entry.Name(), ".json") {
+			files = append(files, filepath.Join(mqDir, entry.Name()))
+		}
+	}
+	return files
+}
+
+// isRealDir reports whether path is a directory itself, not a symlink to one.
+func isRealDir(path string) bool {
+	info, err := os.Lstat(path)
+	return err == nil && info.IsDir()
+}
+
+// FixStaleMQFiles removes the legacy merge queue files CheckStaleMQFiles
+// reports, and .beads/mq itself once nothing else is left in it.
 func FixStaleMQFiles(path string) error {
-	beadsDir := ResolveBeadsDirForRepo(path)
-	mqDir := filepath.Join(beadsDir, "mq")
-
-	if _, err := os.Stat(mqDir); os.IsNotExist(err) {
-		return nil // Nothing to do
+	mqDir := filepath.Join(ResolveBeadsDirForRepo(path), "mq")
+	for _, file := range legacyMQFiles(mqDir) {
+		if err := fix.RemoveDisposable(file); err != nil {
+			return fmt.Errorf("failed to remove %s: %w", file, err)
+		}
 	}
-
-	if err := os.RemoveAll(mqDir); err != nil {
-		return fmt.Errorf("failed to remove %s: %w", mqDir, err)
+	if !isRealDir(mqDir) {
+		return nil
 	}
-
+	if entries, err := os.ReadDir(mqDir); err == nil && len(entries) == 0 {
+		if err := fix.RemoveDisposable(mqDir); err != nil {
+			return fmt.Errorf("failed to remove %s: %w", mqDir, err)
+		}
+	} else if err == nil {
+		fmt.Printf("  Kept %s: it holds files other than legacy merge queue entries\n", mqDir)
+	}
 	return nil
 }
 

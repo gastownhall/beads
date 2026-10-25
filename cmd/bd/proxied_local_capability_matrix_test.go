@@ -6,15 +6,16 @@ package main
 //
 // Why this exists as a second entry point rather than a topology of the
 // primary one: the managed-local fixture is gated on BEADS_TEST_PROXIED_LOCAL,
-// and the only lane that sets it is .github/workflows/proxied-local-smoke.yml,
-// which selects tests with -test.run "^TestManagedLocalProxied". The primary
-// matrix runs in the proxied shard, which does not set that gate, so
-// managed-local would be silently skipped there and nowhere else.
+// and the only lane that sets it is //cmd/bd:bd_managed_local_test, which runs
+// exactly the TestManagedLocalProxied* tests its shard manifest
+// (cmd/bd/managed_local_shards.txt) lists. The primary matrix runs in the
+// proxied-server tier, which does not set that gate, so managed-local would be
+// silently skipped there and nowhere else.
 //
-// Both the file name (matching the lane's `cmd/bd/proxied_local_*` path
-// filter) and the test name are load-bearing. The smoke lane runs inside a
-// loopback-only network namespace, so this entry point must build only
-// topologies that need no Docker: embedded and managed-local.
+// The test name is load-bearing: scripts/managed_local_lane_test.go requires
+// every TestManagedLocalProxied* test to be listed in that manifest. The lane
+// runs inside a loopback-only network namespace, so this entry point must
+// build only topologies that need no Docker: embedded and managed-local.
 //
 // The table itself lives in topology_capability_matrix_test.go. This file
 // adds no expectations of its own.

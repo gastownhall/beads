@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"net"
 	"strings"
 	"time"
 
@@ -83,10 +82,25 @@ func RunServerHealthChecks(path string) ServerHealthResult {
 
 	// Server mode is configured - run health checks
 	host := cfg.GetDoltServerHost()
-	// Use doltserver.DefaultConfig for port resolution (env > port file > config.yaml).
+	// Use doltserver.DialConfig for port resolution (env > port file >
+	// config.yaml, plus the legacy BEADS_DOLT_PORT the store dials).
 	// Port 0 means server not yet started — report that clearly.
-	port := doltserver.DefaultConfig(beadsDir).Port
+	port := doltserver.DialConfig(beadsDir).Port
 	if port == 0 {
+		// No bd command starts, and so resolves a port for, a server bd does
+		// not run, at the IPv6 loopback or on another machine: every store
+		// open there refuses until the port is pinned, with this advice.
+		if advice := doltserver.UnresolvedPortAdvice(host); advice != "" {
+			result.Checks = append(result.Checks, DoctorCheck{
+				Name:     "Server port",
+				Status:   StatusError,
+				Message:  "No Dolt server port configured",
+				Fix:      advice,
+				Category: CategoryFederation,
+			})
+			result.OverallOK = false
+			return result
+		}
 		result.Checks = append(result.Checks, DoctorCheck{
 			Name:     "Server port",
 			Status:   StatusWarning,
@@ -261,7 +275,7 @@ func checkStaleDatabases(db *sql.DB) DoctorCheck {
 
 // checkServerReachable checks if the server is reachable via TCP
 func checkServerReachable(host string, port int) DoctorCheck {
-	addr := net.JoinHostPort(host, fmt.Sprintf("%d", port))
+	addr := doltutil.ServerAddr(host, port)
 	_, err := doltserver.ProbeSQLServer("tcp", addr, 5*time.Second)
 	if err != nil {
 		return DoctorCheck{
@@ -286,7 +300,7 @@ func checkServerReachable(host string, port int) DoctorCheck {
 // Returns the DoctorCheck and an open database connection (caller must close)
 func checkDoltVersion(cfg *configfile.Config, beadsDir string) (DoctorCheck, *sql.DB) {
 	host := cfg.GetDoltServerHost()
-	port := doltserver.DefaultConfig(beadsDir).Port
+	port := doltserver.DialConfig(beadsDir).Port
 	user := cfg.GetDoltServerUser()
 
 	// Resolve password the same way the CRUD path does: BEADS_DOLT_PASSWORD env

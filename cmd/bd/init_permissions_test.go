@@ -37,7 +37,7 @@ func buildBDForInitPermissionTests(t *testing.T) string {
 			return
 		}
 		initPermissionTestBD = filepath.Join(tmpDir, "bd")
-		cmd := exec.Command("go", "build", "-tags", "gms_pure_go", "-o", initPermissionTestBD, ".")
+		cmd := goBuildBDCommand(initPermissionTestBD)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			initPermissionTestBDErr = fmt.Errorf("go build failed: %v\n%s", err, out)
 		}

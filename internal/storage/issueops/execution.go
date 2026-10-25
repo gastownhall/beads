@@ -87,12 +87,17 @@ func ExecuteCreate(ctx context.Context, tx *sql.Tx, request publicops.CreateRequ
 	}
 	issue.Dependencies = storage.CreatePublicCreateDependencies(issue.ID, attempt)
 	var skipped []skippedDependency
-	created, err := CreateIssuesInTxWithResult(ctx, tx, []*types.Issue{issue}, attempt.Actor, storage.BatchCreateOptions{
+	// Reuse the context read above: same transaction, same options, and
+	// nothing since has written config, so re-reading it (as
+	// CreateIssuesInTxWithResult would) only repeats the same reads.
+	createContext := *batch
+	createContext.Opts = storage.BatchCreateOptions{
 		CreateOnly: true, SkipPrefixValidation: attempt.ForceIDPrefix,
 		OnSkippedDependency: func(issueID, dependsOnID, reason string) {
 			skipped = append(skipped, skippedDependency{issueID: issueID, dependsOnID: dependsOnID, reason: reason})
 		},
-	})
+	}
+	created, err := CreateIssuesInTxWithContext(ctx, tx, &createContext, []*types.Issue{issue}, attempt.Actor)
 	if err != nil {
 		return publicops.CreateResult{}, nil, ClassifyPublicCreateError(err)
 	}
@@ -131,6 +136,15 @@ func skippedDependencyError(skipped []skippedDependency) error {
 
 // ExecuteUpdate applies a guarded update in tx and reports durable tables changed.
 func ExecuteUpdate(ctx context.Context, tx *sql.Tx, request publicops.UpdateRequest) (publicops.UpdateResult, ChangedTables, error) {
+	return executeUpdate(ctx, tx, request, true)
+}
+
+// executeUpdate is ExecuteUpdate with the template guard made optional, for the
+// one caller that is not an update of an existing row: the batch apply's
+// metadata splice, which finishes a CREATE item of the same request — a
+// template the request itself is creating is still being written, not
+// modified.
+func executeUpdate(ctx context.Context, tx *sql.Tx, request publicops.UpdateRequest, guardTemplate bool) (publicops.UpdateResult, ChangedTables, error) {
 	attempt := CloneUpdateRequest(request)
 	if attempt.Actor == "" || attempt.IssueID == "" {
 		return publicops.UpdateResult{}, nil, fmt.Errorf("%w: update requires actor and issue ID", storage.ErrValidation)
@@ -166,12 +180,25 @@ func ExecuteUpdate(ctx context.Context, tx *sql.Tx, request publicops.UpdateRequ
 	} else if err := CheckExpectedFieldsInTx(ctx, tx, attempt.IssueID, attempt.ExpectedAssignee, nil); err != nil {
 		return publicops.UpdateResult{}, nil, err
 	}
+	if guardTemplate {
+		if err := AuthorizeTemplateUpdate(before, attempt); err != nil {
+			return publicops.UpdateResult{}, nil, err
+		}
+	}
 	if err := AuthorizeAssigneeTransfer(ctx, tx, before, attempt); err != nil {
 		return publicops.UpdateResult{}, nil, err
 	}
+	if err := AuthorizeNotesOverwrite(before, attempt); err != nil {
+		return publicops.UpdateResult{}, nil, err
+	}
+	// Every constituent below runs its no-mint variant: one guarded update is
+	// one caller-visible mutation, and its version is minted exactly once at
+	// the end, after the last patch, so durable_state carries the final row,
+	// label set and edge set rather than whichever write happened to run
+	// first.
 	changedAny := false
 	if attempt.Claim {
-		claimed, err := ClaimIssueInTx(ctx, tx, attempt.IssueID, attempt.Actor)
+		claimed, err := claimIssueInTx(ctx, tx, attempt.IssueID, attempt.Actor, false)
 		if err != nil {
 			return publicops.UpdateResult{}, nil, err
 		}
@@ -209,7 +236,7 @@ func ExecuteUpdate(ctx context.Context, tx *sql.Tx, request publicops.UpdateRequ
 		updates[OpForceClosePolicy] = true
 	}
 	if len(updates) > 0 {
-		updated, err := UpdateIssueInTx(ctx, tx, attempt.IssueID, updates, attempt.Actor)
+		updated, err := updateIssueInTx(ctx, tx, attempt.IssueID, updates, attempt.Actor, true, false)
 		if err != nil {
 			return publicops.UpdateResult{}, nil, err
 		}
@@ -222,7 +249,7 @@ func ExecuteUpdate(ctx context.Context, tx *sql.Tx, request publicops.UpdateRequ
 			}
 		}
 	}
-	labelsChanged, err := ApplyLabelPatch(ctx, tx, current, attempt.Patch.Labels, attempt.Actor)
+	labelsChanged, err := applyLabelPatch(ctx, tx, current, attempt.Patch.Labels, attempt.Actor, false)
 	if err != nil {
 		return publicops.UpdateResult{}, nil, err
 	}
@@ -231,7 +258,7 @@ func ExecuteUpdate(ctx context.Context, tx *sql.Tx, request publicops.UpdateRequ
 		_, labelTable, eventTable, _ := WispTableRouting(IsActiveWispInTx(ctx, tx, attempt.IssueID))
 		tables.Add(labelTable, eventTable)
 	}
-	parentResult, err := ApplyParentPatch(ctx, tx, current, attempt.Patch.ParentID, attempt.Actor)
+	parentResult, err := applyParentPatch(ctx, tx, current, attempt.Patch.ParentID, attempt.Actor, false)
 	if err != nil {
 		return publicops.UpdateResult{}, nil, err
 	}
@@ -243,18 +270,38 @@ func ExecuteUpdate(ctx context.Context, tx *sql.Tx, request publicops.UpdateRequ
 			tables.Add("issues")
 		}
 	}
+	beginsHistory := false
 	if attempt.Patch.Persistence.Set {
 		current, err := GetIssueInTx(ctx, tx, attempt.IssueID)
 		if err != nil {
 			return publicops.UpdateResult{}, nil, err
 		}
-		moved, err := MoveIssuePersistenceInTx(ctx, tx, current, attempt.Patch.Persistence.Value, attempt.Actor)
+		moved, err := moveIssuePersistenceInTx(ctx, tx, current, attempt.Patch.Persistence.Value, attempt.Actor, false)
 		if err != nil {
 			return publicops.UpdateResult{}, nil, err
 		}
 		if moved.Changed {
 			changedAny = true
 			tables.Merge(moved.ChangedTables)
+		}
+		beginsHistory = moved.BeginsHistory()
+	}
+	// The one mint for this guarded update, LAST: after the claim, the row
+	// write, the label and parent patches and the persistence move. Nothing
+	// changed means nothing to version (the FR-2 no-op case), and a row that
+	// moved to the wisp plane is excluded by the seam itself. A persistence
+	// move that brought onto the issues plane a row carrying no participation
+	// makes this the record's first version, so it mints create-shaped
+	// (design §16.2b), the same as MoveIssuePersistenceInTx's own mint for
+	// that move; a row whose participation the move restored mints
+	// update-shaped, so a legacy row stays legacy (R2.3).
+	if changedAny {
+		if beginsHistory {
+			if err := RecordVersionForCreateInTx(ctx, tx, attempt.IssueID, attempt.Actor); err != nil {
+				return publicops.UpdateResult{}, nil, err
+			}
+		} else if err := RecordVersionInTx(ctx, tx, attempt.IssueID, attempt.Actor); err != nil {
+			return publicops.UpdateResult{}, nil, err
 		}
 	}
 	hydrated, err := HydrateIssueOperationResult(ctx, tx, attempt.IssueID, false)
@@ -300,7 +347,16 @@ func ExecuteClose(ctx context.Context, tx *sql.Tx, request publicops.CloseReques
 	if err != nil {
 		return publicops.CloseResult{}, nil, err
 	}
-	return publicops.CloseResult{Issue: hydrated, Changed: changed, OpenChildren: closed.OpenChildren}, tables, nil
+	result := publicops.CloseResult{Issue: hydrated, Changed: changed, OpenChildren: closed.OpenChildren}
+	if attempt.AutoCloseMolecule {
+		auto, autoTables, err := CloseCompletedMoleculeInTx(ctx, tx, attempt.IssueID, attempt.Actor, attempt.Session)
+		if err != nil {
+			return publicops.CloseResult{}, nil, err
+		}
+		tables.Merge(autoTables)
+		result.AutoClosedMolecule, result.MoleculeAutoCloseRefusal = auto.Root, auto.Refusal
+	}
+	return result, tables, nil
 }
 
 // ExecuteReopen applies a guarded reopen in tx and reports durable tables changed.

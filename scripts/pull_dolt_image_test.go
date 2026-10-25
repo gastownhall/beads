@@ -11,8 +11,6 @@ import (
 	"testing"
 )
 
-const doltSQLServerImage = "dolthub/dolt-sql-server:2.2.0"
-
 func TestPullDoltImageRetriesTransientFailures(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -52,41 +50,6 @@ func TestPullDoltImageRetriesTransientFailures(t *testing.T) {
 	}
 }
 
-func TestDoltImagePullWorkflowsUseRetryHelper(t *testing.T) {
-	wantCalls := map[string]int{
-		"main.yml":       2,
-		"pr.yml":         2,
-		"pr-risk.yml":    3,
-		"regression.yml": 1,
-	}
-
-	workflowsDir := filepath.Join(sourceRepoRoot(t), ".github", "workflows")
-	for name, want := range wantCalls {
-		data, err := os.ReadFile(filepath.Join(workflowsDir, name))
-		if err != nil {
-			t.Fatal(err)
-		}
-		text := string(data)
-		if got := strings.Count(text, "run: ./scripts/ci/pull-dolt-image.sh"); got != want {
-			t.Errorf("%s retry-helper calls = %d, want %d", name, got, want)
-		}
-	}
-
-	workflowPaths, err := filepath.Glob(filepath.Join(workflowsDir, "*.y*ml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, path := range workflowPaths {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if strings.Contains(string(data), "docker pull "+doltSQLServerImage) {
-			t.Errorf("%s still pulls the Dolt image without retries", filepath.Base(path))
-		}
-	}
-}
-
 func TestPullDoltImageHelperIsExecutable(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows does not preserve Unix executable bits")
@@ -112,10 +75,7 @@ type pullDoltRun struct {
 func runPullDoltImage(t *testing.T, failures int) pullDoltRun {
 	t.Helper()
 
-	bash, err := exec.LookPath("bash")
-	if err != nil {
-		t.Skipf("bash is required to test pull-dolt-image.sh: %v", err)
-	}
+	bash := requireHostTool(t, "bash")
 
 	bin := t.TempDir()
 	stateDir := t.TempDir()

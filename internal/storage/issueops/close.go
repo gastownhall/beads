@@ -11,6 +11,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
+	publicops "github.com/steveyegge/beads/issueops"
 )
 
 const closeCheckedSavepointPrefix = "issueops_close_checked_"
@@ -53,6 +54,12 @@ func CloseIssueWithoutEventInTx(ctx context.Context, tx DBTX, id string, reason,
 // is_blocked column whose direct blockers have since closed. Reading the live
 // blocker list self-heals against a stale column instead of acting on it.
 //
+// Before close policy it applies the close guards (enforceCloseGuardsInTx) to a
+// target that is not already closed: a template refuses with
+// *TemplateReadOnlyError whatever force says, and unless force is set a pinned
+// issue refuses with *PinnedError and one assigned to someone other than actor
+// with *CloseNotAssigneeError.
+//
 // When expectedVersion is non-nil it adds an ORTHOGONAL optimistic-concurrency
 // precondition: the row's current RowVersion (row_lock) must still equal
 // *expectedVersion or the close refuses with storage.ErrVersionMismatch. This
@@ -78,6 +85,14 @@ func CloseIssueCheckedInTx(ctx context.Context, tx DBTX, id, reason, actor, sess
 	}
 	if !found {
 		return nil, fmt.Errorf("%w: issue %s", storage.ErrNotFound, id)
+	}
+	// The close guards run before close policy, so a target that trips both
+	// reads the guard's refusal, as `bd close` always printed it. They only
+	// read, so they need no savepoint.
+	if !closed {
+		if err := enforceCloseGuardsInTx(ctx, tx, id, targetColumn, actor, force); err != nil {
+			return nil, err
+		}
 	}
 	// domain/db also supplies a *sql.DB Runner, whose independently pooled
 	// statements cannot retain a savepoint. The shared UOW uses a pinned
@@ -151,12 +166,12 @@ func enforceClosePolicyForTargetInTx(ctx context.Context, tx DBTX, id, targetCol
 		return 0, &storage.CloseOpenChildrenError{IssueID: id, OpenChildren: openChildren}
 	}
 	if !force && !closed {
-		blocked, blockers, err := IsBlockedInTx(ctx, tx, id)
+		blocked, blockers, err := isBlockedByInTx(ctx, tx, id)
 		if err != nil {
 			return 0, err
 		}
 		if blocked && len(blockers) > 0 {
-			return 0, fmt.Errorf("%w: %s is blocked by %v", storage.ErrCloseBlocked, id, blockers)
+			return 0, &publicops.BlockedError{IssueID: id, Blockers: blockers, Err: storage.ErrCloseBlocked}
 		}
 	}
 	return openChildren, nil
@@ -381,10 +396,18 @@ func closeIssueInTx(ctx context.Context, tx DBTX, id string, reason, actor, sess
 	if err != nil {
 		return nil, fmt.Errorf("recompute is_blocked after close for %s: %w", id, err)
 	}
+	NoteStatusChangeBlockedRecheck(tx, id, string(types.StatusClosed), affectedIssues, affectedWisps)
 
 	// Snapshot only after all derived blocked-state maintenance has completed.
-	// recordEvent gates the human audit event, never the journal.
+	// recordEvent gates the human audit event, never the journal — nor the
+	// version row: a close changes status, closed_at, close_reason and
+	// closed_by_session, all durable state, so it mints whether or not the
+	// audit event was suppressed (as update.go already does). The rows == 0
+	// return above (already closed) wrote nothing and mints nothing.
 	if err := RecordEventInTx(ctx, tx, EventClose, id, actor); err != nil {
+		return nil, err
+	}
+	if err := RecordVersionInTx(ctx, tx, id, actor); err != nil {
 		return nil, err
 	}
 

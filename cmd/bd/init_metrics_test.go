@@ -8,10 +8,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/testutil"
 )
 
 type metricsEvent struct {
@@ -95,7 +97,7 @@ func metricsTestEnv(home string, extra ...string) []string {
 	return append(out, extra...)
 }
 
-func runBdInitForMetrics(t *testing.T, home string, args ...string) {
+func runBdInitForMetrics(t *testing.T, home string, extraEnv []string, args ...string) {
 	t.Helper()
 	bd := buildEmbeddedBD(t)
 	repo, err := testTempDir("bd-metrics-repo-*")
@@ -104,10 +106,20 @@ func runBdInitForMetrics(t *testing.T, home string, args ...string) {
 	}
 	initGitRepoAt(t, repo)
 
+	// `bd init --shared-server` daemonizes a dolt sql-server under
+	// <home>/.beads/shared-server — <home> being the HOME this fixture gives
+	// ONLY to the subprocess, so the in-process SharedServerPath would look in
+	// the wrong tree — and `--proxied-server` leaves a proxy plus its backend
+	// server under <repo>/.beads/dolt. Neither was ever stopped; the post-run
+	// sweep named this fixture by both cwds (wy-j2zc8q). Registered before
+	// the subprocess so the t.Fatalf paths are covered too.
+	stopDoltServerCleanup(t, filepath.Join(home, ".beads", "shared-server"))
+	stopProxiedServerCleanup(t, filepath.Join(repo, ".beads", "dolt"))
+
 	full := append([]string{"init", "--non-interactive", "--quiet"}, args...)
 	cmd := exec.Command(bd, full...)
 	cmd.Dir = repo
-	cmd.Env = metricsTestEnv(home)
+	cmd.Env = metricsTestEnv(home, extraEnv...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -120,6 +132,7 @@ func TestInitMetricsEmittedPerDoltMode(t *testing.T) {
 		extraArgs       []string
 		extraEnv        []string
 		expectedCommand string
+		freeServerPort  bool
 	}{
 		{
 			name:            "embedded_default",
@@ -134,6 +147,11 @@ func TestInitMetricsEmittedPerDoltMode(t *testing.T) {
 			name:            "shared_server_via_flag",
 			extraArgs:       []string{"--shared-server"},
 			expectedCommand: "init-shared-server",
+			// The shared server binds the default port unless told
+			// otherwise; on a box where 3308 is already someone's dolt the
+			// init fails before it starts anything, and this case would
+			// silently stop exercising the shared path.
+			freeServerPort: true,
 		},
 		{
 			name:            "proxied_server_via_flag",
@@ -149,7 +167,15 @@ func TestInitMetricsEmittedPerDoltMode(t *testing.T) {
 			if err != nil {
 				t.Fatalf("temp home: %v", err)
 			}
-			runBdInitForMetrics(t, home, tc.extraArgs...)
+			env := tc.extraEnv
+			if tc.freeServerPort {
+				port, err := testutil.FindFreePort()
+				if err != nil {
+					t.Fatalf("find free port: %v", err)
+				}
+				env = append(env, "BEADS_DOLT_SERVER_PORT="+strconv.Itoa(port))
+			}
+			runBdInitForMetrics(t, home, env, tc.extraArgs...)
 			evt := readInitEvent(t, home, tc.expectedCommand)
 
 			if evt.AppName != "beads" {

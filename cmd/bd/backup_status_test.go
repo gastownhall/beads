@@ -8,8 +8,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/configfile"
 )
 
 func TestBackupStatusSizeErrorRespectsOutputMode(t *testing.T) {
@@ -159,25 +161,207 @@ func TestBackupStatusIncludesAvailableDatabaseSize(t *testing.T) {
 	})
 }
 
-func TestBackupStatusProxiedGuardDoesNotMeasureSize(t *testing.T) {
+// TestBackupStatusShowsSizeCapPaused pins the PR #6071 review's second
+// major point: `bd --json` / `--quiet` callers never saw the size-cap
+// pause — the warning is stderr-only and throttled, and status previously
+// said nothing about the cap, so an agent/CI caller saw a reassuring
+// "Last backup" line while auto-backup was silently, permanently paused.
+func TestBackupStatusShowsSizeCapPaused(t *testing.T) {
+	t.Setenv("BD_BACKUP_SIZE_CAP_MB", "1")
 	prepareBackupStatusTest(t)
-	proxiedServerMode = true
-	called := false
-	sizeDatabase := func(context.Context) (int64, bool, error) {
-		called = true
-		return 1, true, nil
+	sizeDatabase := func(context.Context) (int64, bool, error) { return 0, false, nil }
+
+	dir, err := backupDir()
+	if err != nil {
+		t.Fatalf("backupDir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "filler"), make([]byte, 2*1024*1024), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	seeded := &backupState{Timestamp: time.Now().UTC().Add(-time.Hour), LastDoltCommit: "deadbeef"}
+	if err := saveBackupState(dir, seeded); err != nil {
+		t.Fatal(err)
 	}
 
-	cmd := newBackupStatusTestRoot(sizeDatabase)
-	cmd.SetArgs([]string{"backup", "status"})
-	_, _, err := executeBackupStatusCommand(t, cmd)
-	assertExitCode(t, err, 1)
-	if called {
-		t.Fatal("proxied-server guard called database size provider")
+	t.Run("json", func(t *testing.T) {
+		cmd := newBackupStatusTestRoot(sizeDatabase)
+		cmd.SetArgs([]string{"backup", "status", "--json"})
+		stdout, stderr, err := executeBackupStatusCommand(t, cmd)
+		if err != nil {
+			t.Fatalf("backup status: %v", err)
+		}
+		if stderr != "" {
+			t.Errorf("stderr = %q, want empty", stderr)
+		}
+		var response struct {
+			SizeCap struct {
+				Enabled      bool  `json:"enabled"`
+				CapMB        int   `json:"cap_mb"`
+				CurrentBytes int64 `json:"current_bytes"`
+				Exceeded     bool  `json:"exceeded"`
+			} `json:"size_cap"`
+		}
+		if err := json.Unmarshal([]byte(stdout), &response); err != nil {
+			t.Fatalf("stdout is not valid JSON: %v\nstdout: %s", err, stdout)
+		}
+		if !response.SizeCap.Enabled {
+			t.Errorf("size_cap.enabled = false, want true: %s", stdout)
+		}
+		if !response.SizeCap.Exceeded {
+			t.Errorf("size_cap.exceeded = false, want true: %s", stdout)
+		}
+		if response.SizeCap.CapMB != 1 {
+			t.Errorf("size_cap.cap_mb = %d, want 1: %s", response.SizeCap.CapMB, stdout)
+		}
+		if response.SizeCap.CurrentBytes < 2*1024*1024 {
+			t.Errorf("size_cap.current_bytes = %d, want >= 2MB: %s", response.SizeCap.CurrentBytes, stdout)
+		}
+	})
+
+	t.Run("human", func(t *testing.T) {
+		cmd := newBackupStatusTestRoot(sizeDatabase)
+		cmd.SetArgs([]string{"backup", "status"})
+		stdout, stderr, err := executeBackupStatusCommand(t, cmd)
+		if err != nil {
+			t.Fatalf("backup status: %v", err)
+		}
+		if stderr != "" {
+			t.Errorf("stderr = %q, want empty", stderr)
+		}
+		var pausedLine string
+		for _, line := range strings.Split(stdout, "\n") {
+			if strings.Contains(line, "PAUSED (cap exceeded)") {
+				pausedLine = line
+			}
+		}
+		if pausedLine == "" {
+			t.Fatalf("status text missing PAUSED indicator: %s", stdout)
+		}
+		// Same levers as the pause warning — see
+		// TestPauseAutoBackupForSizeCap_RemediationAdvice.
+		for _, want := range []string{"backup.size-cap-mb", "backup.git-repo"} {
+			if !strings.Contains(pausedLine, want) {
+				t.Errorf("PAUSED line missing %s pointer: %q", want, pausedLine)
+			}
+		}
+		if strings.Contains(pausedLine, "bd backup init") {
+			t.Errorf("PAUSED line points at `bd backup init`, which does not move the auto-backup destination: %q", pausedLine)
+		}
+	})
+}
+
+// TestBackupStatusShowsSizeCapDisabled pins the PR #6071 review's first
+// major point from the status side: backup.size-cap-mb: 0 must render as
+// disabled in status, not silently report the legacy 2048MB default.
+func TestBackupStatusShowsSizeCapDisabled(t *testing.T) {
+	t.Setenv("BD_BACKUP_SIZE_CAP_MB", "0")
+	prepareBackupStatusTest(t)
+	sizeDatabase := func(context.Context) (int64, bool, error) { return 0, false, nil }
+
+	dir, err := backupDir()
+	if err != nil {
+		t.Fatalf("backupDir: %v", err)
+	}
+	seeded := &backupState{Timestamp: time.Now().UTC().Add(-time.Hour), LastDoltCommit: "deadbeef"}
+	if err := saveBackupState(dir, seeded); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("json", func(t *testing.T) {
+		cmd := newBackupStatusTestRoot(sizeDatabase)
+		cmd.SetArgs([]string{"backup", "status", "--json"})
+		stdout, _, err := executeBackupStatusCommand(t, cmd)
+		if err != nil {
+			t.Fatalf("backup status: %v", err)
+		}
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(stdout), &raw); err != nil {
+			t.Fatalf("stdout is not valid JSON: %v\nstdout: %s", err, stdout)
+		}
+		sizeCapRaw, ok := raw["size_cap"]
+		if !ok {
+			t.Fatalf("size_cap key missing from status JSON: %s", stdout)
+		}
+		var sizeCap struct {
+			Enabled bool `json:"enabled"`
+		}
+		if err := json.Unmarshal(sizeCapRaw, &sizeCap); err != nil {
+			t.Fatalf("size_cap is not valid JSON: %v\nraw: %s", err, sizeCapRaw)
+		}
+		if sizeCap.Enabled {
+			t.Errorf("size_cap.enabled = true with backup.size-cap-mb=0, want false: %s", stdout)
+		}
+	})
+
+	t.Run("human", func(t *testing.T) {
+		cmd := newBackupStatusTestRoot(sizeDatabase)
+		cmd.SetArgs([]string{"backup", "status"})
+		stdout, _, err := executeBackupStatusCommand(t, cmd)
+		if err != nil {
+			t.Fatalf("backup status: %v", err)
+		}
+		if !strings.Contains(stdout, "Size cap: disabled") {
+			t.Errorf("status text missing disabled size-cap line: %s", stdout)
+		}
+	})
+}
+
+// TestBackupStatusProxiedGuardFollowsLocality replaces a test that asserted a
+// blanket proxied refusal. Since slice S3 the guard is scoped to locality: bd
+// owns the dolt process on a managed-local workspace and can honor the command
+// there, while an external one is still refused — and a refused command must
+// not go on to measure anything, because the directory it would measure belongs
+// to a server on another host.
+func TestBackupStatusProxiedGuardFollowsLocality(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		sidecar     string
+		wantMeasure bool
+	}{
+		{
+			name:        "external topology is refused without measuring",
+			sidecar:     `{"external":{"host":"db.example.com","port":3306}}`,
+			wantMeasure: false,
+		},
+		{
+			name:        "managed local is honored and measures",
+			sidecar:     `{}`,
+			wantMeasure: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			beadsDir := prepareBackupStatusTest(t)
+			proxiedServerMode = true
+			if err := os.WriteFile(configfile.ProxiedServerClientInfoPath(beadsDir), []byte(tc.sidecar), 0o600); err != nil {
+				t.Fatalf("write proxied sidecar: %v", err)
+			}
+
+			measured := false
+			sizeDatabase := func(context.Context) (int64, bool, error) {
+				measured = true
+				return 1, true, nil
+			}
+
+			cmd := newBackupStatusTestRoot(sizeDatabase)
+			cmd.SetArgs([]string{"backup", "status"})
+			_, _, err := executeBackupStatusCommand(t, cmd)
+			if tc.wantMeasure {
+				if err != nil {
+					t.Fatalf("backup status on managed-local: %v", err)
+				}
+			} else {
+				assertExitCode(t, err, 1)
+			}
+			if measured != tc.wantMeasure {
+				t.Fatalf("size provider called = %v, want %v", measured, tc.wantMeasure)
+			}
+		})
 	}
 }
 
-func prepareBackupStatusTest(t *testing.T) {
+// prepareBackupStatusTest builds a throwaway workspace and returns its .beads
+// directory, so a caller can drop workspace files (the proxied sidecar) into it.
+func prepareBackupStatusTest(t *testing.T) string {
 	t.Helper()
 
 	beadsDir := filepath.Join(t.TempDir(), ".beads")
@@ -198,6 +382,7 @@ func prepareBackupStatusTest(t *testing.T) {
 		proxiedServerMode = oldProxiedServerMode
 		resetCommandContext()
 	})
+	return beadsDir
 }
 
 func newBackupStatusTestRoot(sizeDatabase backupSizeFunc) *cobra.Command {

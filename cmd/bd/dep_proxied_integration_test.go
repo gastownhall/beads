@@ -224,7 +224,18 @@ func TestProxiedServerDep(t *testing.T) {
 				t.Errorf("expected 'cycle' error: %s", out)
 			}
 		})
+	})
+}
 
+// TestProxiedServerDepB holds more of TestProxiedServerDep's Add cases, split
+// off so the bd_proxied_test shard manifest can place them on another shard.
+func TestProxiedServerDepB(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+
+	t.Run("Add", func(t *testing.T) {
+		t.Parallel()
 		t.Run("child_parent_antipattern", func(t *testing.T) {
 			t.Parallel()
 			p := newSharedProxiedProject(t, bd, "dpa8")
@@ -379,7 +390,6 @@ func TestProxiedServerDep(t *testing.T) {
 			}
 		})
 	})
-
 }
 
 func TestProxiedServerDep2(t *testing.T) {
@@ -550,6 +560,15 @@ func TestProxiedServerDep2(t *testing.T) {
 			}
 		})
 	})
+}
+
+// TestProxiedServerDep2B is the next slice of TestProxiedServerDep2's cases, a
+// separate top-level test so the bd_proxied_test shard manifest can place it
+// on its own shard.
+func TestProxiedServerDep2B(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
 
 	t.Run("Tree", func(t *testing.T) {
 		t.Parallel()
@@ -635,7 +654,18 @@ func TestProxiedServerDep2(t *testing.T) {
 			bdProxiedDep(t, bd, p.dir, "add", root.ID, dep.ID)
 			_ = bdProxiedDep(t, bd, p.dir, "tree", root.ID, "--status", "open")
 		})
+	})
+}
 
+// TestProxiedServerDep2C holds more of TestProxiedServerDep2's cases, split
+// off so the bd_proxied_test shard manifest can place them on another shard.
+func TestProxiedServerDep2C(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+
+	t.Run("Tree", func(t *testing.T) {
+		t.Parallel()
 		t.Run("format_mermaid", func(t *testing.T) {
 			t.Parallel()
 			p := newSharedProxiedProject(t, bd, "dpt7")

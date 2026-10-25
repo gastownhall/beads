@@ -192,6 +192,37 @@ func TestProxiedServerServeBatchClose(t *testing.T) {
 		}
 	})
 
+	// The per-item twin of the single close's blocker-naming proof: the refused
+	// item carries its blockers, and its detail opens with the sentence `bd
+	// close` records for the same refusal.
+	t.Run("a blocked item names its blockers as the CLI does", func(t *testing.T) {
+		blocker := bdProxiedCreate(t, bd, p.dir, "a batch blocker", "-p", "1")
+		blocked := bdProxiedCreate(t, bd, p.dir, "a blocked batch item", "-p", "1")
+		if out, err := bdProxiedRun(t, bd, p.dir, "dep", "add", blocked.ID, blocker.ID); err != nil {
+			t.Fatalf("bd dep add: %v\n%s", err, out)
+		}
+
+		status, body := sp.batchClose(t, `{"actor":"http-agent","items":[{"id":"`+blocked.ID+`"}]}`)
+		if status != http.StatusOK {
+			t.Fatalf("status = %d, want 200: %v", status, body)
+		}
+		outcome := batchCloseOutcomes(t, body)[0]
+		if outcome["code"] != "not_closable" {
+			t.Fatalf("code = %v, want not_closable: %v", outcome["code"], outcome)
+		}
+		got, err := json.Marshal(outcome["blockers"])
+		if err != nil {
+			t.Fatalf("re-encode blockers: %v", err)
+		}
+		if want := `[{"id":"` + blocker.ID + `","kind":"local","type":"blocks"}]`; string(got) != want {
+			t.Errorf("blockers = %s, want %s", got, want)
+		}
+		cli := bdProxiedCloseFailedError(t, bd, p.dir, blocked.ID)
+		if want := cli + "; clear the blocker, or send `force`"; outcome["detail"] != want {
+			t.Errorf("detail = %q, want the CLI's failed[].error %q plus the HTTP hint", outcome["detail"], cli)
+		}
+	})
+
 	// A refused BODY means the batch never ran, which is the other half of the
 	// contract: nothing may be written by a request that earned a problem
 	// document.

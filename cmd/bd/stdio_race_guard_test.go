@@ -20,6 +20,9 @@ var cobraParallelUnsafeMethods = []string{
 	".Help(",
 	".InheritedFlags(",
 	".Execute(",
+	".ExecuteC(",
+	".ExecuteContext(",
+	".ExecuteContextC(",
 	".Print(",
 	".Printf(",
 	".Println(",
@@ -28,6 +31,17 @@ var cobraParallelUnsafeMethods = []string{
 	".PrintErrln(",
 	".Usage(",
 	".UsageString(",
+}
+
+// cobraParallelUnsafeHelpers lists this package's test helpers that execute
+// the shared rootCmd tree in-process: they chdir, swap os.Stdout/os.Stderr,
+// set process env and re-initialize the global config, all under
+// inProcessMutex, which serializes them only against each other. Any other
+// parallel test (a store-backed suite reading config, a test globbing its
+// own source files) races with them, so a parallel test must not call them.
+var cobraParallelUnsafeHelpers = []string{
+	"runBDInProcess(",
+	"runBDInProcessAllowError(",
 }
 
 // TestCobraParallelPolicyGuard scans test source files and fails if any
@@ -91,7 +105,7 @@ func TestCobraParallelPolicyGuard(t *testing.T) {
 			// guard scans itself, so its string constants would match).
 			strippedStrings := stripStringLiterals(stripped)
 
-			for _, method := range cobraParallelUnsafeMethods {
+			for _, method := range append(append([]string{}, cobraParallelUnsafeMethods...), cobraParallelUnsafeHelpers...) {
 				if strings.Contains(strippedStrings, method) {
 					t.Errorf("%s:%s is t.Parallel() and calls method name %s — "+
 						"this can race with stdio capture or shared command flag caches. "+

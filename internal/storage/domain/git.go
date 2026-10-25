@@ -76,7 +76,11 @@ type CommitInitArtifactsResult struct {
 	DidCommit   bool
 }
 
-const beadsRoleConfigKey = "beads.role"
+// BeadsRoleConfigKey is the git config key that carries role authority.
+// It is exported because the GitRepository adapters select the strict
+// role-authority environment on this key, so the two sides must not drift into
+// separate spellings of one contract.
+const BeadsRoleConfigKey = "beads.role"
 
 func NewGitUseCase(workDir string, repo GitRepository) GitUseCase {
 	return &gitUseCaseImpl{workDir: workDir, repo: repo}
@@ -149,14 +153,14 @@ func (u *gitUseCaseImpl) DetectFork(ctx context.Context) (bool, string, error) {
 }
 
 func (u *gitUseCaseImpl) BeadsRole(ctx context.Context) (string, bool, error) {
-	return u.repo.GetConfig(ctx, beadsRoleConfigKey)
+	return u.repo.GetConfig(ctx, BeadsRoleConfigKey)
 }
 
 func (u *gitUseCaseImpl) SetBeadsRole(ctx context.Context, role string) error {
 	if role == "" {
 		return fmt.Errorf("SetBeadsRole: role must not be empty")
 	}
-	return u.repo.SetConfig(ctx, beadsRoleConfigKey, role)
+	return u.repo.SetConfig(ctx, BeadsRoleConfigKey, role)
 }
 
 func (u *gitUseCaseImpl) HasAnyRemotes(ctx context.Context) bool {

@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
+	"github.com/steveyegge/beads/issueops"
 )
 
 var todoCmd = &cobra.Command{
@@ -254,7 +255,7 @@ func init() {
 	todoCmd.AddCommand(doneTodoCmd)
 
 	// Add flags
-	addTodoCmd.Flags().IntP("priority", "p", 2, "Priority (0-4, default 2)")
+	addTodoCmd.Flags().IntP("priority", "p", issueops.DefaultCreatePriority, "Priority (0-4, default 2)")
 	addTodoCmd.Flags().StringP("description", "d", "", "Description")
 
 	listTodosCmd.Flags().Bool("all", false, "Show all TODOs including completed")

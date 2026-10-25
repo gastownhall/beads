@@ -27,8 +27,17 @@ import (
 // what is stored is byte-for-byte what was digested.
 
 // AuxTimeLayout renders a UTC timestamp exactly as Dolt renders
-// CAST(created_at AS CHAR) for a DATETIME(0) column. It is part of the id
-// derivation and frozen with the column lists.
+// DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') for a DATETIME(0) column — the
+// rendering the digest column lists pin explicitly server-side (see
+// auxRekeyTables in internal/storage/schema), asserted byte-for-byte against
+// this layout by TestAuxTimeDateFormatMatchesGoRendering in
+// internal/storage/dolt. It is part of the id derivation and frozen with the
+// column lists.
+//
+// Historically the SQL side read these columns back as CAST(created_at AS CHAR),
+// which renders identically for a DATETIME(0) column — but that equality was an
+// engine default rather than a pinned contract, which is why the derivation no
+// longer names CAST.
 const AuxTimeLayout = "2006-01-02 15:04:05"
 
 // NowAuxTime returns the current UTC time in AuxTimeLayout.
@@ -79,6 +88,36 @@ func firstFreeDerivedID(table, digest string, taken map[string]bool) string {
 	}
 }
 
+// normalizeAuxEvent applies the insert-time defaults every events-plane mint
+// site shares: a missing created_at is stamped now, and on wisp_events unset
+// value columns are stored as "" rather than NULL.
+func normalizeAuxEvent(table string, e AuxEvent) AuxEvent {
+	if e.CreatedAt == "" {
+		e.CreatedAt = NowAuxTime()
+	}
+	if table == "wisp_events" {
+		// wisp_events value columns DEFAULT '' (0021) where events defaults
+		// them NULL; the pre-derivation mint sites omitted unset columns and
+		// stored the default. Keep storing "" so the row — and its digest —
+		// matches legacy wisp rows and the rekey pass's re-derivation.
+		for _, p := range []*sql.NullString{&e.OldValue, &e.NewValue, &e.Comment} {
+			if !p.Valid {
+				*p = str("")
+			}
+		}
+	}
+	return e
+}
+
+// auxEventDigest is the content digest of a normalized events-plane row, in
+// the frozen digest column order.
+func auxEventDigest(e AuxEvent) string {
+	return rowid.Digest([]sql.NullString{
+		str(e.IssueID), str(string(e.EventType)), str(e.Actor),
+		e.OldValue, e.NewValue, e.Comment, str(e.CreatedAt),
+	})
+}
+
 // InsertDerivedEvent inserts one events-plane row under its content-derived
 // id. Exact-duplicate rows already in table (same digest) push the new row to
 // the next free ordinal, preserving local multiplicity; across replicas an
@@ -108,24 +147,8 @@ func InsertDerivedEvent(ctx context.Context, tx DBTX, table string, e AuxEvent) 
 //
 //nolint:gosec // G201: table is a hardcoded routing constant at every call site.
 func InsertDerivedEventReturningID(ctx context.Context, tx DBTX, table string, e AuxEvent) (string, error) {
-	if e.CreatedAt == "" {
-		e.CreatedAt = NowAuxTime()
-	}
-	if table == "wisp_events" {
-		// wisp_events value columns DEFAULT '' (0021) where events defaults
-		// them NULL; the pre-derivation mint sites omitted unset columns and
-		// stored the default. Keep storing "" so the row — and its digest —
-		// matches legacy wisp rows and the rekey pass's re-derivation.
-		for _, p := range []*sql.NullString{&e.OldValue, &e.NewValue, &e.Comment} {
-			if !p.Valid {
-				*p = str("")
-			}
-		}
-	}
-	digest := rowid.Digest([]sql.NullString{
-		str(e.IssueID), str(string(e.EventType)), str(e.Actor),
-		e.OldValue, e.NewValue, e.Comment, str(e.CreatedAt),
-	})
+	e = normalizeAuxEvent(table, e)
+	digest := auxEventDigest(e)
 	taken := make(map[string]bool)
 	rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
 		SELECT id FROM %s

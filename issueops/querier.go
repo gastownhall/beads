@@ -60,6 +60,22 @@ type QueryRequest struct {
 	// constant serve both surfaces. A negative Limit is ErrValidation rather
 	// than a synonym for unlimited: two spellings of "no bound" is one more
 	// than a caller can check for.
+	//
+	// NOTHING BACKSTOPS IT on any backend but http (below). ListRequest pairs
+	// its Limit with MaxRows, a circuit breaker that refuses an oversized
+	// answer outright; this request has no twin to it by design, and neither
+	// knob that sets that one (`--max-rows`, BEADS_MAX_ROWS) is read anywhere
+	// on the query path. So an unlimited query is unbounded in the plain sense:
+	// it reads every row the expression matches, however many that is, and a
+	// caller who asked for one gets it rather than an ErrTooManyRows. The
+	// ceiling here is Limit itself. This is reachable without asking: a piped
+	// `bd query` resolves its unflagged limit to 0 before the request, the same
+	// policy `bd list` has applied to piped output since GH#4094.
+	//
+	// The http backend is the one exception, because its whole answer is one
+	// response: it bounds an unlimited query at BEADS_HTTP_UNLIMITED_READ_CAP
+	// rows and refuses a larger answer with httpclient.ErrUnlimitedReadCap
+	// rather than truncating it.
 	Limit *int
 
 	// Offset skips the first N MATCHING rows, on EVERY implementation and for

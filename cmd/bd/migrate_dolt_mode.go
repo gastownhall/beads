@@ -199,12 +199,17 @@ func migrateFault(phase migratePhase) error {
 	return nil
 }
 
+// externalMigrationRefusal is a policy refusal rather than a registry row: it
+// depends on the workspace's endpoint, not on which command was typed. The
+// reason is design because someone else owns that endpoint and its schema —
+// no amount of plumbing on this side makes migrating it bd's business.
 func externalMigrationRefusal(message string) error {
 	return HandleProxyCapabilityError(&ProxyCapabilityError{
 		Code:     "proxy.migrate.external_endpoint",
 		Message:  message,
 		ExitCode: 1,
 		Mutates:  false,
+		Reason:   ProxyReasonDesign,
 	})
 }
 
@@ -265,10 +270,13 @@ func migrationSidecarsEquivalent(beadsDir string, a, b *configfile.ProxiedServer
 	if a == nil || b == nil {
 		return a == b
 	}
+	// Compare effective idle timeouts: a journal written by an older bd records
+	// a defaulted timeout as the zero sentinel, which Load now resolves.
 	return a.ResolvedRootPath(beadsDir) == b.ResolvedRootPath(beadsDir) &&
 		a.ResolvedConfigPath(beadsDir) == b.ResolvedConfigPath(beadsDir) &&
 		a.ResolvedLogPath(beadsDir) == b.ResolvedLogPath(beadsDir) &&
-		a.Port == b.Port && a.IdleTimeout == b.IdleTimeout &&
+		a.Port == b.Port &&
+		configfile.EffectiveProxyIdleTimeout(a.IdleTimeout) == configfile.EffectiveProxyIdleTimeout(b.IdleTimeout) &&
 		reflect.DeepEqual(a.External, b.External)
 }
 
@@ -715,8 +723,16 @@ func runMigrateToProxiedServer(dryRun bool, idleTimeout time.Duration, shared bo
 		// it does not copy data. A workspace whose server mode comes from a
 		// remote host (GH#3545 inference or explicit config) would silently
 		// switch from the remote data to an empty/stale local database.
-		if host := cfg.GetDoltServerHost(); !configfile.IsLocalHostString(host) {
+		host := cfg.GetDoltServerHost()
+		if !configfile.IsLocalHostString(host) {
 			return HandleError("the configured Dolt server host is remote (%s); this migration only re-points the proxy at the local Dolt root and would abandon the remote data.\nMigrate on the server host itself, or clear dolt_server_host / dolt.host / BEADS_DOLT_SERVER_HOST first", host)
+		}
+		// Nor is the local root the data of a server at the IPv6 loopback:
+		// bd's own server listens on 127.0.0.1 only, so the server there is
+		// another one, and a root bd's own server left behind would replace
+		// its data just as silently.
+		if configfile.IsIPv6LoopbackHost(host) {
+			return HandleError("the configured Dolt server host is the IPv6 loopback (%s); this migration only re-points the proxy at the local Dolt root, which holds the data of bd's own server (it listens on 127.0.0.1 only), and would abandon the data of the server at [::1].\nTo migrate bd's own server instead, clear dolt_server_host / dolt.host / BEADS_DOLT_SERVER_HOST first", host)
 		}
 		if doltserver.IsSharedServerMode() {
 			return HandleErrorWithHint("repo is in shared-server mode", "use 'bd migrate from-shared-server-to-proxied-server'")
@@ -831,6 +847,12 @@ func runMigrateToProxiedServer(dryRun bool, idleTimeout time.Duration, shared bo
 		}
 	}
 	if j.Phase == migrateTargetConfigured {
+		// A journal written by an older bd records a defaulted timeout as the
+		// zero sentinel, which Load now resolves. Resolve the plan the same way
+		// Save does on the uninterrupted path so the comparison below holds.
+		if j.Sidecar != nil {
+			j.Sidecar.IdleTimeout = configfile.EffectiveProxyIdleTimeout(j.Sidecar.IdleTimeout)
+		}
 		if info, e := configfile.LoadProxiedServerClientInfo(beadsDir); e != nil {
 			return HandleError("migration sidecar is unreadable: %v", e)
 		} else if info == nil && j.Sidecar != nil {
@@ -1252,7 +1274,8 @@ func proxiedLogAssets(beadsDir string) ([]string, error) {
 	if isCustomLog {
 		return nil, nil
 	}
-	return []string{logPath}, nil
+	// The proxy start rotates an oversized server.log to its single .1 slot.
+	return []string{logPath, logPath + ".1"}, nil
 }
 
 func removeMigrateAssets(paths []string) []error {

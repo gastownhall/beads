@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/backend/conformance"
+	"github.com/steveyegge/beads/internal/storage"
 )
 
 // TestUOWDependencyEditorContract runs the shared DependencyEditor contract
@@ -29,6 +30,9 @@ func TestUOWDependencyEditorContract(t *testing.T) {
 		{name: "RefusesCrossPlaneCycle", run: conformance.RunDependencyEditorRefusesCrossPlaneCycle},
 		{name: "AddedEchoesTheRequestOrder", run: conformance.RunDependencyEditorAddedEchoesTheRequestOrder},
 		{name: "SameTypeReAddIsIdempotent", run: conformance.RunDependencyEditorSameTypeReAddIsIdempotent},
+		{name: "SameTypeReAddWithChangedMetadataMintsOneVersion", run: conformance.RunDependencyEditorSameTypeReAddWithChangedMetadataMintsOneVersion},
+		{name: "SameTypeReAddWithIdenticalMetadataIsANoOp", run: conformance.RunDependencyEditorSameTypeReAddWithIdenticalMetadataIsANoOp},
+		{name: "SameTypeReAddWithChangedThreadMintsOneVersion", run: conformance.RunDependencyEditorSameTypeReAddWithChangedThreadMintsOneVersion},
 		{name: "RepeatsWithinOneRequestCollapse", run: conformance.RunDependencyEditorRepeatsWithinOneRequestCollapse},
 		{name: "AttributesItsEventsToTheActor", run: conformance.RunDependencyEditorAttributesItsEventsToTheActor},
 		{name: "RetypeRefusalLeavesTheOriginalEdge", run: conformance.RunDependencyEditorRetypeRefusalLeavesTheOriginalEdge},
@@ -62,6 +66,7 @@ func TestUOWDependencyEditorContract(t *testing.T) {
 		{name: "AcceptsADiamond", run: conformance.RunDependencyEditorAcceptsADiamond},
 		{name: "GateScopeFollowsTheEdgeType", run: conformance.RunDependencyEditorGateScopeFollowsTheEdgeType},
 		{name: "AcceptsBlockingAcrossIssueTypes", run: conformance.RunDependencyEditorAcceptsBlockingAcrossIssueTypes},
+		{name: "RefusesADottedChildGatedOnItsOwnParent", run: conformance.RunDependencyEditorRefusesADottedChildGatedOnItsOwnParent},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			test.run(t, ctx, fixture)
@@ -79,14 +84,24 @@ func newUOWDependencyEditorFixture(t *testing.T, ctx context.Context) conformanc
 	if err != nil {
 		t.Fatalf("NewDependencyEditor: %v", err)
 	}
+	configurer, ok := provider.(storage.EventsJournalConfigurer)
+	if !ok {
+		t.Fatalf("provider %T does not implement storage.EventsJournalConfigurer", provider)
+	}
+	versionConfigurer, ok := provider.(storage.VersionedHistoryConfigurer)
+	if !ok {
+		t.Fatalf("provider %T does not implement storage.VersionedHistoryConfigurer", provider)
+	}
 	kit := newUOWRoleFixtureKit(provider, "bd")
 	return conformance.DependencyEditorFixture{
-		IssuePrefix:   kit.IssuePrefix,
-		Editor:        editor,
-		CreateIssue:   kit.CreateIssue,
-		CreateWisp:    kit.CreateWisp,
-		AddDependency: kit.AddDependency,
-		QueryScalar:   kit.QueryScalar,
-		CountHistory:  kit.CountHistory,
+		IssuePrefix:                kit.IssuePrefix,
+		Editor:                     editor,
+		CreateIssue:                kit.CreateIssue,
+		CreateWisp:                 kit.CreateWisp,
+		AddDependency:              kit.AddDependency,
+		QueryScalar:                kit.QueryScalar,
+		CountHistory:               kit.CountHistory,
+		SetJournalEnabled:          configurer.SetEventsJournalEnabled,
+		SetVersionedHistoryEnabled: versionConfigurer.SetVersionedHistoryEnabled,
 	}
 }

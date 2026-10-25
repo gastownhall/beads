@@ -125,6 +125,45 @@ $ bd dolt push
 | `IsRedirected` | True if BEADS_DIR points to different repo than CWD |
 | `IsWorktree` | True if CWD is in a git worktree |
 
+## Resolving Without Git
+
+`GetRepoContext()` requires a git repository: it finds `.beads/`, validates the
+path boundary, and only then asks git for a repository root. A workspace that
+is located and boundary-checked but has no resolvable git root is therefore a
+*known* workspace, not an unknown one — which is why it is the one failure that
+is safe to recover from.
+
+`GetRepoContextAllowingNoGit()` is that recovery, for callers that only read
+config files and are documented to answer in degraded states: `bd context` and
+the `domain/fs` context provider behind the proxied route (which `bd serve`
+also resolves through). Anything that actually runs git commands must keep
+using `GetRepoContext()`, so a missing repository stays an error where it
+matters.
+
+The selection is typed, deliberately. `buildRepoContext()` can fail three ways
+— no `.beads/`, the SEC-003 unsafe-location rejection, and no git root — and
+the unsafe-location message embeds the offending path verbatim. A substring
+test over the message would therefore be a *path-controlled* discriminator: a
+workspace under a path containing the probe phrase would take the fallback and
+have its security rejection silently cleared. Only the third failure returns
+`*NoRepoRootError`, and `errors.As` selects it.
+
+The synthesized context differs from a normal one in what it can know:
+
+| Field | Value without git | Why |
+|-------|-------------------|-----|
+| `RepoRoot` | the repository containing `.beads`, else the `.beads` parent | the missing git root is the **CWD's**, not the `.beads`'s, so git is still asked from the `.beads` side (`repoRootForBeadsDir`); only when that cannot answer either does it fall back to the parent |
+| `CWDRepoRoot` | `""` | known-empty, not merely unanswered: `GetMainRepoRoot`, `GetRepoRoot` and `IsWorktree` share one cached git context, and reaching this path means that lookup already failed |
+| `IsRedirected` | true iff discovery standing in the CWD would not have found the resolved `.beads` | `isExternalBeadsDir` compares git *common dirs* and the CWD side needs a repository, so externality is decided **positionally** instead. This covers all four caller-directed channels (`BEADS_DIR`, `--db`, `BEADS_DB`/`BD_DB`, `-C`) uniformly, where an environment inventory could not: bd rewrites `BEADS_DIR` for itself before resolving, so the variable cannot distinguish a workspace the caller named from one bd just discovered. A store reachable only by being named is a redirect — including one in a *sibling* directory of the CWD — which is what `Role()` means by "external repo mode" |
+| `IsWorktree` | false | nothing to be a worktree of |
+
+`*NoRepoRootError` means "git could not tell us a root", which is broader than
+"there is no repo": a dangling gitfile, a dubious-ownership refusal, or git
+missing from `PATH` all arrive the same way. Recovery is equally safe in all of
+them, but a caller reporting on the workspace should not claim to know which it
+was — `bd context` prints `cwd repo: git: unavailable` rather than inventing a
+reason.
+
 ## Security
 
 ### Git Hooks Disabled

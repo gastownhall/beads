@@ -5,13 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/steveyegge/beads/internal/audit"
 	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/domain"
+	storeissueops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -39,11 +38,22 @@ type closeProxiedInput struct {
 // errors is indexed by ARGUMENT position, not by item, so a refusal reported
 // here and one reported by the batch still print in the order the caller typed
 // the ids.
+//
+// failureErrors is the same list at the same indices, but carries what a --json
+// consumer reads instead of what a person reads: the TYPED error for an engine
+// refusal, where errors holds closeProxiedRefusal's decorated display line. The
+// direct route makes exactly this split (close.go records res.Err.Error() in
+// closeIDFailure while printing closeDirectRefusal), and keeping the decorated
+// line in the machine-readable field made the same refusal answer differently
+// per route — which is the drift this whole close rewire exists to remove. A
+// policy refusal decided here has no separate display form, so both slots hold
+// the one sentence closeProxiedCheckOne returned.
 type closeProxiedPreflight struct {
-	items    []issueops.BatchCloseItem
-	itemArgs []int
-	before   map[string]*types.Issue
-	errors   []string
+	items         []issueops.BatchCloseItem
+	itemArgs      []int
+	before        map[string]*types.Issue
+	errors        []string
+	failureErrors []string
 }
 
 type closeProxiedOutcome struct {
@@ -53,14 +63,18 @@ type closeProxiedOutcome struct {
 	closed      bool
 	auditOld    string
 	auditReason string
+	// autoClosedMol and autoCloseRefusal are what the library's molecule
+	// auto-close did inside the batch's transaction for this item.
+	autoClosedMol    *types.Issue
+	autoCloseRefusal string
 }
 
 // closeProxiedPostClose is the work `bd close` does AFTER the closes have
-// landed: molecule auto-close, --suggest-next and --continue.
+// landed: --suggest-next and --continue. (The molecule auto-close is not here:
+// the library runs it inside the batch's transaction.)
 type closeProxiedPostClose struct {
 	unblocked      []*types.Issue
 	continueResult *ContinueResult
-	autoClosedMol  *types.Issue
 	warnings       []string
 }
 
@@ -79,6 +93,27 @@ func runCloseProxiedServer(cmd *cobra.Command, ctx context.Context, args []strin
 	}
 
 	in := gatherCloseProxiedInput(cmd)
+
+	// A8 (beads#4682): a single-id compare-and-swap close bypasses the batch
+	// below entirely -- see close_if_revision.go for why BatchCloseItem
+	// cannot carry this guard.
+	ifRevision, err := parseIfRevisionFlag(cmd)
+	if err != nil {
+		return err
+	}
+	if err := requireSingleIfRevisionID(ifRevision, args); err != nil {
+		return err
+	}
+	if ifRevision != nil {
+		// The bypass below never looks at these three post-close flags, so
+		// honoring them would mean silently dropping what the caller asked
+		// for. Refuse instead of guessing, the same way --continue and
+		// --suggest-next already refuse a multi-id batch below.
+		if in.continueOn || in.suggestNext || in.claimNext {
+			return HandleErrorRespectJSON("--if-revision does not support --continue, --suggest-next, or --claim-next")
+		}
+		return runCloseProxiedIfRevision(ctx, args[0], reasonForCloseIndex(reasons, 0), in.force, in.session, *ifRevision)
+	}
 
 	if in.continueOn && len(args) > 1 {
 		return HandleErrorRespectJSON("--continue only works when closing a single issue")
@@ -108,11 +143,14 @@ func runCloseProxiedServer(cmd *cobra.Command, ctx context.Context, args []strin
 			return HandleErrorRespectJSON("%v", cerr)
 		}
 		result, err = closer.CloseBatch(ctx, issueops.CloseBatchRequest{
-			Actor:     actor,
+			Actor:     currentActor(),
 			Items:     pre.items,
 			Session:   in.session,
 			Force:     in.force,
 			ClaimNext: closeClaimNextRequest(in.claimNext, in.continueOn),
+			// The library closes a molecule root its last step's close
+			// completes, inside this batch's transaction.
+			AutoCloseMolecule: true,
 		})
 		if err != nil {
 			return HandleErrorRespectJSON("%v", err)
@@ -127,13 +165,14 @@ func runCloseProxiedServer(cmd *cobra.Command, ctx context.Context, args []strin
 			fmt.Fprintln(os.Stderr, e)
 		}
 	}
+	failures := closeProxiedFailures(&pre, args)
 	for _, w := range post.warnings {
 		fmt.Fprintf(os.Stderr, "Warning: %s\n", w)
 	}
 
 	for i, o := range outcomes {
 		if o.closed {
-			audit.LogFieldChange(o.id, "status", o.auditOld, "closed", actor, o.auditReason)
+			audit.LogFieldChange(o.id, "status", o.auditOld, "closed", currentActor(), o.auditReason)
 		}
 		if !in.jsonOut {
 			fmt.Printf("%s Closed %s: %s\n", ui.RenderPass("✓"), formatFeedbackID(o.after.ID, o.after.Title), closeReasons[i])
@@ -145,9 +184,17 @@ func runCloseProxiedServer(cmd *cobra.Command, ctx context.Context, args []strin
 		claimedNextIssue = result.ClaimedNext.Issue
 	}
 
+	for _, o := range outcomes {
+		if o.autoCloseRefusal != "" {
+			fmt.Fprintf(os.Stderr, "Warning: could not auto-close completed molecule: %s\n", o.autoCloseRefusal)
+		}
+	}
+
 	if !in.jsonOut {
-		if post.autoClosedMol != nil {
-			fmt.Printf("%s Auto-closed completed molecule %s\n", ui.RenderPass("✓"), formatFeedbackID(post.autoClosedMol.ID, post.autoClosedMol.Title))
+		for _, o := range outcomes {
+			if o.autoClosedMol != nil {
+				fmt.Printf("%s Auto-closed completed molecule %s\n", ui.RenderPass("✓"), formatFeedbackID(o.autoClosedMol.ID, o.autoClosedMol.Title))
+			}
 		}
 		if len(post.unblocked) > 0 {
 			fmt.Printf("\nNewly unblocked:\n")
@@ -166,9 +213,9 @@ func runCloseProxiedServer(cmd *cobra.Command, ctx context.Context, args []strin
 	}
 
 	if in.jsonOut && len(outcomes) > 0 {
-		closedIssues := make([]*types.Issue, len(outcomes))
+		closedIssues := make([]closedIssueJSON, len(outcomes))
 		for i, o := range outcomes {
-			closedIssues[i] = o.after
+			closedIssues[i] = newClosedIssueJSON(o.after, o.autoClosedMol, o.autoCloseRefusal)
 		}
 		switch {
 		case len(post.unblocked) > 0:
@@ -182,6 +229,9 @@ func runCloseProxiedServer(cmd *cobra.Command, ctx context.Context, args []strin
 		}
 	}
 
+	if len(failures) > 0 {
+		return reportCloseFailures(failures, len(args), closeClaimedID(claimedNextIssue), in.jsonOut)
+	}
 	if len(args) > 0 && len(outcomes) == 0 {
 		return SilentExit()
 	}
@@ -223,14 +273,19 @@ func proxiedBatchCloser() (issueops.BatchCloser, error) {
 // close policy to it, in one read-only unit of work.
 func closeProxiedRunPreflight(ctx context.Context, args, reasons []string, in closeProxiedInput) (closeProxiedPreflight, error) {
 	pre := closeProxiedPreflight{
-		errors: make([]string, len(args)),
-		before: make(map[string]*types.Issue, len(args)),
+		errors:        make([]string, len(args)),
+		failureErrors: make([]string, len(args)),
+		before:        make(map[string]*types.Issue, len(args)),
 	}
 	_, err := uow.RunTxRead(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (struct{}, error) {
 		for i, id := range args {
 			refusal, current := closeProxiedCheckOne(ctx, uw, id, in)
 			if refusal != "" {
 				pre.errors[i] = refusal
+				// A policy refusal is already the bare sentence, so the human
+				// and machine fields agree; only the engine refusals below have
+				// a decorated display form to strip.
+				pre.failureErrors[i] = refusal
 				continue
 			}
 			pre.before[id] = current
@@ -253,13 +308,12 @@ func closeProxiedCheckOne(ctx context.Context, uw uow.UnitOfWork, id string, in 
 		return fmt.Sprintf("Error resolving %s: %v", id, err), nil
 	}
 
-	// Mirrors the ordering in closeDirectCheckOne (ga-ktn9pe.4.8): a row already at
-	// literal StatusClosed has no state change for close validation to guard, so
-	// the re-close skips it and reaches the engine as the idempotent no-op it has
-	// always been. Both close paths must agree here — diverging is the defect
-	// class #5217 closed.
+	// The close guards' own rule, ahead of gate satisfaction and under the same
+	// already-closed skip as closeDirectCheckOne (ga-ktn9pe.4.8); both close
+	// paths must agree here (#5217). The role re-applies it inside the close
+	// transaction, which stays the authority.
 	if current.Status != types.StatusClosed {
-		if err := validateIssueClosable(id, current, actor, in.force); err != nil {
+		if err := storeissueops.CheckClosable(id, current, currentActor(), in.force); err != nil {
 			return err.Error(), nil
 		}
 	}
@@ -273,7 +327,7 @@ func closeProxiedCheckOne(ctx context.Context, uw uow.UnitOfWork, id string, in 
 	// unprefixed, so both routes now spell one refusal one way.
 
 	if !in.force {
-		if err := checkGateSatisfaction(current); err != nil {
+		if err := checkGateSatisfaction(current, nil); err != nil {
 			return fmt.Sprintf("cannot close %s: %s", id, err), nil
 		}
 	}
@@ -292,6 +346,10 @@ func closeProxiedOutcomes(pre *closeProxiedPreflight, result issueops.CloseBatch
 		item := pre.items[j]
 		if outcome.Err != nil {
 			pre.errors[pre.itemArgs[j]] = closeProxiedRefusal(item.IssueID, outcome.Err)
+			// The typed error, not the decorated display line: the --force hint
+			// closeProxiedRefusal appends is advice for a human reader, and the
+			// id already has its own field. Same split as the direct route.
+			pre.failureErrors[pre.itemArgs[j]] = closeProxiedTypedRefusal(outcome.Err)
 			continue
 		}
 		before := pre.before[item.IssueID]
@@ -307,16 +365,97 @@ func closeProxiedOutcomes(pre *closeProxiedPreflight, result issueops.CloseBatch
 			after.Dependencies = nil
 		}
 		outcomes = append(outcomes, closeProxiedOutcome{
-			id:          item.IssueID,
-			before:      before,
-			after:       after,
-			closed:      outcome.Changed,
-			auditOld:    oldStatus,
-			auditReason: item.Reason,
+			id:               item.IssueID,
+			before:           before,
+			after:            after,
+			closed:           outcome.Changed,
+			auditOld:         oldStatus,
+			auditReason:      item.Reason,
+			autoClosedMol:    outcome.AutoClosedMolecule,
+			autoCloseRefusal: outcome.MoleculeAutoCloseRefusal,
 		})
 		reasons = append(reasons, item.Reason)
 	}
 	return outcomes, reasons
+}
+
+// closeProxiedFailures pairs every refused argument with the id it belongs to,
+// for the machine-readable half of the partial-failure report.
+//
+// Both slices are indexed by ARGUMENT position, so args[i] is the id that earned
+// pre.errors[i], and the failures come back in the order the caller typed the
+// ids. errors decides WHICH arguments failed — it is the slot the stderr print
+// consults too, so the two halves of the report can never disagree about that —
+// while failureErrors supplies the reason, because that is the field where the
+// typed error belongs.
+//
+// Every writer of an errors slot fills its failureErrors twin, so the fallback
+// below is unreachable today. It is here because the cost of getting that wrong
+// is asymmetric: a caller that asked why an id failed is better served by the
+// decorated line than by an empty string, so a future writer that forgets the
+// twin degrades the wording instead of dropping the reason.
+func closeProxiedFailures(pre *closeProxiedPreflight, args []string) []closeIDFailure {
+	var failures []closeIDFailure
+	for i, e := range pre.errors {
+		if e == "" {
+			continue
+		}
+		reason := pre.failureErrors[i]
+		if reason == "" {
+			reason = e
+		}
+		failures = append(failures, closeIDFailure{ID: args[i], Error: reason})
+	}
+	return failures
+}
+
+// closeProxiedTypedRefusal is the reason a --json consumer reads for one
+// refused id: the typed error, spelled the way the direct route spells it.
+//
+// Stripping closeProxiedRefusal's decoration is not enough on its own to make
+// the two routes agree, because a refusal reaching this route has also been
+// wrapped by the layers it traveled through — the use case adds "close <id>: "
+// (storage/domain/issue.go) and the SQL repository adds
+// "db: IssueSQLRepository.CloseChecked <id>: " (storage/domain/db/issue.go) —
+// while the direct route hands back the refusal exactly as the engine minted
+// it. So the same blocked id reads
+//
+//	cannot close blocked issue: x-1 is blocked by [x-2]                        (direct)
+//	close x-1: db: IssueSQLRepository.CloseChecked x-1: cannot close blocked …  (proxied)
+//
+// For the refusal classes the CLI already names by sentinel, we report the
+// outermost error that the sentinel itself explains: that is the sentence the
+// engine wrote, and it is byte-identical to the direct route's. Neither wrap
+// tells a caller anything it does not know — it asked to close that id — and
+// one of them leaks an internal repository type name into an operator-facing
+// field.
+//
+// Anything outside those classes keeps its whole chain. There the wrapping is
+// not noise, it is the only thing that says where an unexpected failure came
+// from, and there is no engine sentence to converge on.
+func closeProxiedTypedRefusal(err error) string {
+	if guard, ok := closeGuardRefusal(err); ok {
+		return guard
+	}
+	for _, sentinel := range []error{storage.ErrCloseBlocked, storage.ErrCloseOpenChildren} {
+		if !errors.Is(err, sentinel) {
+			continue
+		}
+		// Walk in until the next link IS the bare sentinel: that link's parent
+		// is the refusal with its subject filled in ("… x-1 is blocked by
+		// [x-2]"), where the sentinel alone would say only "cannot close
+		// blocked issue".
+		refusal := err
+		for {
+			next := errors.Unwrap(refusal)
+			if next == nil || next == sentinel || !errors.Is(next, sentinel) {
+				break
+			}
+			refusal = next
+		}
+		return refusal.Error()
+	}
+	return err.Error()
 }
 
 // closeProxiedRefusal spells one item's typed refusal the way this route has
@@ -324,6 +463,9 @@ func closeProxiedOutcomes(pre *closeProxiedPreflight, result issueops.CloseBatch
 // reading the message, which is the point of the outcome carrying a typed
 // error at all.
 func closeProxiedRefusal(id string, err error) string {
+	if guard, ok := closeGuardRefusal(err); ok {
+		return guard
+	}
 	switch {
 	case errors.Is(err, storage.ErrCloseBlocked):
 		return fmt.Sprintf("%v (use --force to override)", err)
@@ -342,61 +484,38 @@ func closeProxiedRefusal(id string, err error) string {
 	}
 }
 
-// closeProxiedRunPostClose runs molecule auto-close, --suggest-next and
-// --continue once the closes have committed.
-//
-// They are outside the batch's transaction because they are outside its
-// contract, and outside is where the direct route has always run them: it
-// calls autoCloseCompletedMolecule and AdvanceToNextStep after ops.Close
-// returns, each in its own write. The visible consequence is a SECOND Dolt
-// commit when a molecule actually auto-closes or --continue actually advances.
-// A plain close writes nothing in this pass, names no commit message, and
-// therefore still produces exactly one commit for the command.
+// closeProxiedRunPostClose runs --suggest-next and --continue once the closes
+// have committed. --suggest-next is a read in a unit of work of its own;
+// --continue is the provider's MoleculeStepper role, which claims in its own
+// transaction exactly as the direct route's does.
 func closeProxiedRunPostClose(ctx context.Context, args []string, in closeProxiedInput, outcomes []closeProxiedOutcome) closeProxiedPostClose {
+	var out closeProxiedPostClose
 	if len(outcomes) == 0 {
-		return closeProxiedPostClose{}
+		return out
 	}
 
-	post, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (closeProxiedPostClose, string, error) {
-		var out closeProxiedPostClose
-		var wrote []string
-
-		for _, o := range outcomes {
-			mol := autoCloseProxiedCompletedMolecule(ctx, uw, o.id, actor, in.session, &out.warnings)
-			if mol != nil {
-				out.autoClosedMol = mol
-				wrote = append(wrote, "auto-close "+mol.ID)
-			}
-		}
-
-		if in.suggestNext && len(args) == 1 {
+	if in.suggestNext && len(args) == 1 {
+		_, err := uow.RunTxRead(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (struct{}, error) {
 			unblocked, warn := closeProxiedSuggestNext(ctx, uw, args[0])
 			out.unblocked = unblocked
 			if warn != "" {
 				out.warnings = append(out.warnings, warn)
 			}
+			return struct{}{}, nil
+		})
+		if err != nil {
+			out.warnings = append(out.warnings, fmt.Sprintf("post-close work failed: %v", err))
 		}
-
-		if in.continueOn && len(args) == 1 {
-			cont, warn := closeProxiedContinue(ctx, uw, args[0], !in.noAuto)
-			out.continueResult = cont
-			if warn != "" {
-				out.warnings = append(out.warnings, warn)
-			}
-			if cont != nil && cont.AutoAdvanced && cont.NextStep != nil {
-				wrote = append(wrote, "advance to "+cont.NextStep.ID)
-			}
-		}
-
-		if len(wrote) == 0 {
-			return out, "", nil
-		}
-		return out, "bd: " + strings.Join(wrote, "; "), nil
-	})
-	if err != nil {
-		post.warnings = append(post.warnings, fmt.Sprintf("post-close work failed: %v", err))
 	}
-	return post
+
+	if in.continueOn && len(args) == 1 {
+		cont, warn := closeProxiedContinue(ctx, args[0], !in.noAuto)
+		out.continueResult = cont
+		if warn != "" {
+			out.warnings = append(out.warnings, warn)
+		}
+	}
+	return out
 }
 
 func closeProxiedSuggestNext(ctx context.Context, uw uow.UnitOfWork, closedID string) ([]*types.Issue, string) {
@@ -407,52 +526,14 @@ func closeProxiedSuggestNext(ctx context.Context, uw uow.UnitOfWork, closedID st
 	return unblocked, ""
 }
 
-func closeProxiedContinue(ctx context.Context, uw uow.UnitOfWork, closedID string, autoClaim bool) (*ContinueResult, string) {
-	result, err := AdvanceToNextStep(ctx, newUOWMolWriter(uw), closedID, autoClaim, actor)
+func closeProxiedContinue(ctx context.Context, closedID string, autoClaim bool) (*ContinueResult, string) {
+	roles, err := proxiedMoleculeRoles()
+	if err != nil {
+		return nil, fmt.Sprintf("could not advance to next step: %v", err)
+	}
+	result, err := advanceMolecule(ctx, roles, closedID, autoClaim)
 	if err != nil {
 		return nil, fmt.Sprintf("could not advance to next step: %v", err)
 	}
 	return result, ""
-}
-
-func autoCloseProxiedCompletedMolecule(ctx context.Context, uw uow.UnitOfWork, closedStepID string, actorName, session string, warnings *[]string) *types.Issue {
-	moleculeID := proxiedFindParentMolecule(ctx, uw, closedStepID)
-	if moleculeID == "" {
-		return nil
-	}
-
-	root, err := uw.IssueUseCase().GetIssue(ctx, moleculeID)
-	if err != nil || root == nil || root.Status == types.StatusClosed {
-		return nil
-	}
-	// A READ, and one that has to see this transaction. The auto-close decision
-	// is made from labels written earlier in the same unit of work, and
-	// issueops.Reader opens a transaction of its own, so it would answer from
-	// the last committed state instead. The follow-up is a reader role bound to
-	// a caller's transaction; until one exists this stays (ga-2ltro.12).
-	if labels, err := uw.LabelUseCase().GetLabels(ctx, moleculeID); err == nil { //nolint:forbidigo // in-transaction read; issueops.Reader would open its own
-		root.Labels = labels
-	}
-	if !shouldAutoCloseCompletedRoot(root) {
-		return nil
-	}
-
-	progress, err := getMoleculeProgress(ctx, uowMolReader{uw: uw}, moleculeID)
-	if err != nil {
-		return nil
-	}
-	if progress.Completed < progress.Total {
-		return nil
-	}
-
-	params := domain.CloseIssueParams{Reason: "all steps complete", Session: session}
-	if _, err := uw.IssueUseCase().CloseIssue(ctx, moleculeID, params, actorName); err != nil {
-		*warnings = append(*warnings, fmt.Sprintf("could not auto-close completed molecule %s: %v", moleculeID, err))
-		return nil
-	}
-	return root
-}
-
-func proxiedFindParentMolecule(ctx context.Context, uw uow.UnitOfWork, issueID string) string {
-	return findParentMolecule(ctx, uowMolReader{uw: uw}, issueID)
 }

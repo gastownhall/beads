@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/testutil"
+	"github.com/steveyegge/beads/internal/testutil/bazeltest"
 )
 
 func setupIntegrationTestMain(root string) (func(), error) {
@@ -26,8 +27,27 @@ func setupIntegrationTestMain(root string) (func(), error) {
 	os.Setenv("BEADS_TEST_SERVER", "1")
 
 	if err := testutil.EnsureDoltContainerForTestMain(); err != nil {
-		fmt.Fprintf(os.Stderr, "WARN: %v, skipping Dolt tests\n", err)
+		if testutil.DoltUnavailableForTestMain(err) {
+			cleanup()
+			return nil, err
+		}
 		return cleanup, nil
+	}
+
+	// Under Bazel the binary is injected (//cmd/bd:bd_for_tests); there is no
+	// toolchain or module tree to build from. Plain go test is unchanged.
+	if bazeltest.IsBazel() {
+		testBDBinary, err := bazeltest.PrebuiltBD()
+		if err != nil {
+			testutil.TerminateDoltContainer()
+			cleanup()
+			return nil, err
+		}
+		os.Setenv("BEADS_TEST_BD_BINARY", testBDBinary)
+		return func() {
+			testutil.TerminateDoltContainer()
+			cleanup()
+		}, nil
 	}
 
 	binName := "bd"

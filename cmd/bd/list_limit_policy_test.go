@@ -91,3 +91,62 @@ func TestListLimitPolicyIsResolvedBeforeTheRequest(t *testing.T) {
 		})
 	}
 }
+
+// GH#6069: the --limit flag help must describe the switch pinned above, in
+// the switch's own order, not claim an unconditional "default 50". The whole
+// usage string is pinned verbatim: a substring check would accept a clause
+// scoped wider than its arm (an earlier draft's "--all is always unlimited"
+// contained every needle and was still false, because an explicit --limit
+// outranks --all). The cases below tie the three claims a reader is most
+// likely to get wrong back to the switch, each with list.limit configured.
+func TestListLimitHelpDescribesPipedBehavior(t *testing.T) {
+	flag := listCmd.Flags().Lookup("limit")
+	if flag == nil {
+		t.Fatal("listCmd has no --limit flag registered")
+	}
+	const want = "Limit results (an explicit --limit always wins, 0 meaning unlimited; otherwise --all is unlimited; otherwise a configured list.limit applies; otherwise unlimited when piped, else 20 in agent mode at a terminal, else 50)"
+	if flag.Usage != want {
+		t.Errorf("--limit help = %q\nwant %q", flag.Usage, want)
+	}
+
+	t.Chdir(t.TempDir())
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+	config.Set("list.limit", 7)
+	if got := config.GetValueSource("list.limit"); got == config.SourceDefault {
+		t.Fatal("precondition: config.Set did not make list.limit count as configured")
+	}
+	for _, tc := range []struct {
+		name      string
+		args      []string
+		want      int
+		needsPipe bool
+	}{
+		// limitChanged is the first arm, so --all does not make an explicit
+		// --limit unlimited. Holds at a terminal or a pipe alike.
+		{"an explicit --limit outranks --all", []string{"--all", "--limit", "5"}, 5, false},
+		// The AllFlag arm precedes listLimitConfigured and !IsTerminal, so
+		// this holds at a terminal too and never needs to skip.
+		{"--all is unlimited even with list.limit configured", []string{"--all"}, 0, false},
+		// listLimitConfigured precedes the !IsTerminal arm. Only a piped
+		// stdout can show that ordering; at a terminal the same 7 would
+		// prove nothing about the piped arm.
+		{"piped output takes a configured list.limit", nil, 7, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.needsPipe && ui.IsTerminal() {
+				t.Skip("this case shows a configured list.limit outranking the piped-stdout arm, so stdout must be a pipe; go test's is, this run's is not")
+			}
+			in, err := gatherListInput(newListLimitCommand(t, tc.args...))
+			if err != nil {
+				t.Fatalf("gatherListInput(%v): %v", tc.args, err)
+			}
+			if in.effectiveLimit != tc.want {
+				t.Errorf("effectiveLimit = %d, want %d", in.effectiveLimit, tc.want)
+			}
+		})
+	}
+}

@@ -80,9 +80,9 @@ type EdgeCountRequest struct {
 	// be a limit invented for a caller that is not the one that needs it. The
 	// bound belongs to the WIRE operation, where the request arrives from
 	// somewhere else and the cost of an unbounded one is a stranger's — the
-	// split ApplyBatchRequest.Items makes explicitly by bounding at 100. The
-	// graph-counts wire slice set it: GET /v0/beads/dependencies:count bounds
-	// `issue_id` at minItems 1, maxItems 100.
+	// split ApplyBatchRequest.Items makes explicitly with MaxApplyBatchItems.
+	// The graph-counts wire slice set it: GET /v0/beads/dependencies:count
+	// bounds `issue_id` at minItems 1, maxItems 100.
 	IDs []string
 
 	// Direction is which edges the count is over, and it is REQUIRED. An empty

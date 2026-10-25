@@ -41,7 +41,7 @@ primitives are wired, not just that fixtures parse.
 Run with `make test`, or in isolation:
 
 ```sh
-go test -tags gms_pure_go -run TestFormulaPrimitiveExamples ./cmd/bd/
+bazel test //cmd/bd:bd_test --config=ci --test_filter='^TestFormulaPrimitiveExamples$'
 ```
 
 ## What's NOT here

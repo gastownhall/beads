@@ -49,17 +49,6 @@ func (b aptStepBudget) loopHeader() string {
 func aptStepBudgets() []aptStepBudget {
 	return []aptStepBudget{
 		{
-			workflow:       "migration-test.yml",
-			job:            "historical-upgrades",
-			step:           "Install test dependencies",
-			updateAttempts: 3,
-			updateTimeout:  120,
-			backoff:        10,
-			installTimeout: 180,
-			installPkgs:    "jq libicu74",
-			capMinutes:     11,
-		},
-		{
 			workflow:       "release.yml",
 			job:            "goreleaser",
 			step:           "Install cross-compilation toolchains and signing tools",

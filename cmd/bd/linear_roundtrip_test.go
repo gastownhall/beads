@@ -66,6 +66,11 @@ func (m *mockLinearServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		data, err = m.handleCreate(req)
 	case strings.Contains(req.Query, "issueUpdate"):
 		data, err = m.handleUpdate(req)
+	case strings.Contains(req.Query, "issueBatchCreate"):
+		data, err = m.handleBatchCreate(req)
+	case strings.Contains(req.Query, "TeamLabels"):
+		// Batch push builds a label cache first; the mock team has none.
+		data = m.handleTeamLabels()
 	case strings.Contains(req.Query, "TeamStates") || strings.Contains(req.Query, "team(id:") || (strings.Contains(req.Query, "team(") && strings.Contains(req.Query, "states")):
 		data = m.handleTeamStates()
 	case strings.Contains(req.Query, "issues"):
@@ -100,6 +105,45 @@ func (m *mockLinearServer) handleCreate(req linear.GraphQLRequest) (interface{},
 		return nil, fmt.Errorf("input is not a map")
 	}
 
+	return map[string]interface{}{
+		"issueCreate": map[string]interface{}{
+			"success": true,
+			"issue":   m.createLocked(input),
+		},
+	}, nil
+}
+
+// handleBatchCreate serves issueBatchCreate, which batch push uses.
+func (m *mockLinearServer) handleBatchCreate(req linear.GraphQLRequest) (interface{}, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	input, ok := req.Variables["input"].(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("missing input")
+	}
+	rawIssues, ok := input["issues"].([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("input.issues is not a list")
+	}
+	created := make([]*linear.Issue, 0, len(rawIssues))
+	for _, raw := range rawIssues {
+		one, ok := raw.(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf("input.issues entry is not a map")
+		}
+		created = append(created, m.createLocked(one))
+	}
+	return map[string]interface{}{
+		"issueBatchCreate": map[string]interface{}{
+			"success": true,
+			"issues":  created,
+		},
+	}, nil
+}
+
+// createLocked records one created issue; m.mu must be held.
+func (m *mockLinearServer) createLocked(input map[string]interface{}) *linear.Issue {
 	m.nextSeq++
 	id := fmt.Sprintf("uuid-%d", m.nextSeq)
 	identifier := fmt.Sprintf("%s-%d", m.teamKey, m.nextSeq)
@@ -131,13 +175,7 @@ func (m *mockLinearServer) handleCreate(req linear.GraphQLRequest) (interface{},
 	}
 
 	m.issues[id] = issue
-
-	return map[string]interface{}{
-		"issueCreate": map[string]interface{}{
-			"success": true,
-			"issue":   issue,
-		},
-	}, nil
+	return issue
 }
 
 func (m *mockLinearServer) handleUpdate(req linear.GraphQLRequest) (interface{}, error) {
@@ -199,6 +237,17 @@ func (m *mockLinearServer) handleTeamStates() interface{} {
 			"id": m.teamID,
 			"states": map[string]interface{}{
 				"nodes": m.states,
+			},
+		},
+	}
+}
+
+func (m *mockLinearServer) handleTeamLabels() interface{} {
+	return map[string]interface{}{
+		"team": map[string]interface{}{
+			"labels": map[string]interface{}{
+				"nodes":    []interface{}{},
+				"pageInfo": map[string]interface{}{"hasNextPage": false, "endCursor": ""},
 			},
 		},
 	}
@@ -276,14 +325,21 @@ func TestLinearRoundTripCoreFields(t *testing.T) {
 	teamID := "test-team-uuid"
 
 	// --- 1. Setup source DB ---
+	// linear.api_key is a secret, read from config.yaml or LINEAR_API_KEY
+	// and never from the database (config.IsYamlOnlyKey).
+	t.Setenv("LINEAR_API_KEY", "test-api-key")
 	sourceStore, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	// Configure Linear settings in source store
+	// Push refuses without an explicit linear.state_map (it no longer
+	// guesses from defaults); map the mock team's states by name.
 	for k, v := range map[string]string{
-		"linear.api_key": "test-api-key",
-		"linear.team_id": teamID,
-		"issue_prefix":   "bd",
+		"linear.team_id":               teamID,
+		"issue_prefix":                 "bd",
+		"linear.state_map.todo":        "open",
+		"linear.state_map.in progress": "in_progress",
+		"linear.state_map.done":        "closed",
 	} {
 		if err := sourceStore.SetConfig(ctx, k, v); err != nil {
 			t.Fatalf("SetConfig(%s): %v", k, err)
@@ -371,7 +427,6 @@ func TestLinearRoundTripCoreFields(t *testing.T) {
 	defer cleanup2()
 
 	for k, v := range map[string]string{
-		"linear.api_key":      "test-api-key",
 		"linear.team_id":      teamID,
 		"linear.api_endpoint": server.URL,
 		"issue_prefix":        "bd",
@@ -466,6 +521,9 @@ func TestLinearPullMilestonesCreatesEpicHierarchy(t *testing.T) {
 	ctx := context.Background()
 	teamID := "test-team-uuid"
 
+	// linear.api_key is a secret, read from config.yaml or LINEAR_API_KEY
+	// and never from the database (config.IsYamlOnlyKey).
+	t.Setenv("LINEAR_API_KEY", "test-api-key")
 	targetStore, cleanup := setupTestDB(t)
 	defer cleanup()
 
@@ -474,7 +532,6 @@ func TestLinearPullMilestonesCreatesEpicHierarchy(t *testing.T) {
 	defer server.Close()
 
 	for k, v := range map[string]string{
-		"linear.api_key":      "test-api-key",
 		"linear.team_id":      teamID,
 		"linear.api_endpoint": server.URL,
 		"issue_prefix":        "bd",

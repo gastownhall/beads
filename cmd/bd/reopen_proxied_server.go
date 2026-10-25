@@ -40,15 +40,20 @@ type reopenProxiedTarget struct {
 // ONE CALL PER ID, so one transaction and one history entry per id, where this
 // route used to run every id in one unit of work under a hand-composed
 // "bd: reopen a, b" message.
-func runReopenProxiedServer(cmd *cobra.Command, ctx context.Context, args []string) error {
+func runReopenProxiedServer(cmd *cobra.Command, ctx context.Context, args []string, ifRevision *int64) error {
 	if len(args) == 0 {
 		return HandleErrorRespectJSON("no issue ID provided")
 	}
 	reason, _ := cmd.Flags().GetString("reason")
 	jsonOut, _ := cmd.Flags().GetBool("json")
 
-	targets, hasError, err := reopenProxiedResolve(ctx, args)
+	targets, hasError, err := reopenProxiedResolve(ctx, args, ifRevision)
 	if err != nil {
+		if isReportedExit(err) {
+			// The --if-revision guard outcome reopenProxiedResolve has
+			// already reported; re-wrapping would print a second Error line.
+			return err
+		}
 		return HandleErrorRespectJSON("%v", err)
 	}
 	if len(targets) == 0 {
@@ -66,14 +71,22 @@ func runReopenProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 	reopenedIssues := []*types.Issue{}
 	for _, target := range targets {
 		result, err := lifecycle.Reopen(ctx, issueops.ReopenRequest{
-			Actor:   actor,
-			IssueID: target.id,
-			Reason:  reason,
+			Actor:           currentActor(),
+			IssueID:         target.id,
+			Reason:          reason,
+			ExpectedVersion: ifRevision,
 			// The label the direct route spells, so one reopen reads the same
 			// in `bd dolt log` whichever route served it.
 			Provenance: "bd: reopen " + target.id,
 		})
 		if err != nil {
+			// Guarded only, as on the direct route: an unguarded reopen that
+			// loses a race with a delete is a lookup failure, not a refusal.
+			if ifRevision != nil {
+				if reported, ok := reportIfRevisionFailure("reopening", target.id, err, ifRevision); ok {
+					return reported
+				}
+			}
 			reportIssueLookupFailure("reopening", target.id, err)
 			hasError = true
 			continue
@@ -86,7 +99,7 @@ func runReopenProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 			continue
 		}
 
-		audit.LogFieldChange(target.id, "status", string(target.status), string(types.StatusOpen), actor, reason)
+		audit.LogFieldChange(target.id, "status", string(target.status), string(types.StatusOpen), currentActor(), reason)
 		if jsonOut {
 			if issue := result.Issue; issue != nil {
 				// `bd reopen` has never printed dependency records, on either
@@ -123,8 +136,12 @@ func runReopenProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 //
 // It decides NOTHING about the reopen. A resolved id goes to the role whatever
 // status it is at, including a status this route used to refuse; every guard
-// that matters is inside the role's own transaction.
-func reopenProxiedResolve(ctx context.Context, ids []string) ([]reopenProxiedTarget, bool, error) {
+// that matters is inside the role's own transaction. The one outcome it reports
+// on the role's behalf is a guarded id that is already gone: that is the lost
+// delete race the role would otherwise classify, so the error is then the
+// --if-revision guard outcome it has already reported, which the caller
+// returns as the command's exit error.
+func reopenProxiedResolve(ctx context.Context, ids []string, ifRevision *int64) ([]reopenProxiedTarget, bool, error) {
 	var targets []reopenProxiedTarget
 	failed := false
 	_, err := uow.RunTxRead(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (struct{}, error) {
@@ -132,6 +149,14 @@ func reopenProxiedResolve(ctx context.Context, ids []string) ([]reopenProxiedTar
 		for _, id := range ids {
 			issue, _, err := workapi.GetIssueOrWisp(ctx, source, id)
 			if err != nil {
+				// A guarded reopen that lost to a concurrent `bd delete`
+				// committing before this read is the same lost race as one
+				// committing inside lifecycle.Reopen: report it through the
+				// guard envelope. requireSingleIfRevisionID guarantees this
+				// is the only id, so nothing is pending.
+				if reported, ok := reportIfRevisionTargetGone("reopening", id, err, ifRevision); ok {
+					return struct{}{}, reported
+				}
 				reportIssueLookupFailure("resolving", id, err)
 				failed = true
 				continue

@@ -221,6 +221,19 @@ func TestFreshCloneServerUnreachableResult(t *testing.T) {
 		t.Errorf("server-unreachable fix should not suggest 'bd bootstrap'; got: %s", check.Fix)
 	}
 
+	// An IPv6 host, configured bare or bracketed, is named as [host]:port in
+	// both the unreachable and the missing-database message.
+	for _, host := range []string{"::1", "[::1]"} {
+		for name, msg := range map[string]string{
+			"unreachable": freshCloneServerUnreachableResult("acf_beads", host, 3309, nil).Message,
+			"missing db":  freshCloneServerResult(false, "acf_beads", host, 3309, "").Message,
+		} {
+			if !strings.Contains(msg, "[::1]:3309") || strings.Contains(msg, "[[::1]]") || strings.Contains(msg, " ::1:3309") {
+				t.Errorf("%s message for host %q must name the server as [::1]:3309, got: %s", name, host, msg)
+			}
+		}
+	}
+
 	// Nil error path should still produce a usable message and not panic.
 	checkNil := freshCloneServerUnreachableResult("beads", "127.0.0.1", 3307, nil)
 	if checkNil.Status != StatusWarning {

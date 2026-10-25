@@ -23,21 +23,22 @@ import (
 const (
 	modulePath          = "github.com/steveyegge/beads"
 	minimumVersion      = "v0.9.1"
-	maximumVersion      = "v1.1.2"
+	maximumVersion      = "v1.3.1"
 	proxyURL            = "https://proxy.golang.org"
 	githubRepository    = "gastownhall/beads"
-	expectedVersions    = 122
+	expectedVersions    = 127
 	expectedRepoOnly    = 49
 	expectedRepoPre     = 3
-	expectedReleases    = 92
-	expectedLinuxAssets = 89
+	expectedProxyPre    = 7
+	expectedReleases    = 95
+	expectedLinuxAssets = 92
 	expectedTagDrift    = 13
 	expectedDriftAssets = 11
 
 	// This pins the complete reviewed catalog identity. A generator run may
 	// expose upstream drift, but offline validation rejects even well-formed
 	// substitutions until this digest is deliberately updated.
-	expectedCatalogSHA256 = "298dd489a6274d80ac42e1fb14c993444159f3193a290f8da37afcb3e2eaf10d"
+	expectedCatalogSHA256 = "edd01ba3352ec38260a87637d8ec4abb6689df7b2b57f100b18b06842024f858"
 )
 
 var (
@@ -511,7 +512,7 @@ func validateSourceRelations(versions []Entry, driftSet map[string]bool) error {
 // validateExclusions checks the proxy-prerelease and repository-only exclusion
 // lists against the included version set.
 func validateExclusions(ex Exclusions, seen map[string]bool) error {
-	if err := validateExcluded("proxy prereleases", ex.ProxyPrereleases, 2, isPrerelease, seen); err != nil {
+	if err := validateExcluded("proxy prereleases", ex.ProxyPrereleases, expectedProxyPre, isPrerelease, seen); err != nil {
 		return err
 	}
 	if err := validateExcluded("repository-only stable tags", ex.RepositoryOnlyStable, expectedRepoOnly, isStable, seen); err != nil {

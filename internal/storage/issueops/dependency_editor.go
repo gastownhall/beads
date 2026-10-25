@@ -21,6 +21,12 @@ import (
 // self-edge otherwise trips the cycle check and reports the wrong refusal, and
 // SkipPerEdgeCycleCheck would skip it entirely.
 //
+// The dotted-id hierarchy rule (publicops.CheckDottedChildDependency) is here
+// for the same reason: it is decided from the request alone, and putting it in
+// the shared validator is what makes every leg — dolt, embedded, the unit of
+// work and the server behind httpapi — refuse a child gated on its own dotted
+// parent, not only the CLI that used to check it before calling the role.
+//
 // The type check is that there IS a type — non-empty, within the column's
 // length. It is deliberately not a membership test: the vocabulary is an open,
 // workspace-configurable set (see the Dep* constants), so refusing an unlisted
@@ -42,6 +48,9 @@ func ValidateAddDependenciesRequest(request publicops.AddDependenciesRequest) er
 		}
 		if edge.IssueID == edge.DependsOnID {
 			return fmt.Errorf("%w: %s cannot depend on itself", domain.ErrSelfDependency, edge.IssueID)
+		}
+		if err := publicops.CheckDottedChildDependency(edge.IssueID, edge.DependsOnID, edge.Type); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -173,6 +182,11 @@ func addDependencyEdgeInTx(ctx context.Context, tx *sql.Tx, request publicops.Ad
 	if err != nil {
 		return nil, err
 	}
+	// The edge's referencing (source) issue is versioned by AddDependencyInTx
+	// itself, at the row write — once, and only for a genuinely inserted row
+	// (the idempotent re-add mints nothing, the same exemption eventWritten
+	// draws for the events table below) — so every leg that reaches that
+	// helper versions identically and this role adds no second mint.
 	// Stage the source's dependency table always and its events table only
 	// when a row was recorded — the same selective staging the stores' own
 	// AddDependencyWithOptions does, so an idempotent re-add cannot sweep
@@ -258,6 +272,9 @@ func ExecuteRemoveDependency(ctx context.Context, tx *sql.Tx, request publicops.
 	if !eventWritten {
 		return publicops.RemoveDependencyResult{Removed: false}, nil, nil
 	}
+	// A removal that actually happened versioned the referencing issue inside
+	// RemoveDependencyInTx, at the row delete; an absent edge returned above
+	// without ever reaching that seam.
 	tables := ChangedTables{}
 	tables.Add(depTable, eventTable)
 	return publicops.RemoveDependencyResult{Removed: true}, tables, nil

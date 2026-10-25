@@ -5,6 +5,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"os/exec"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -80,6 +83,73 @@ func TestProxiedServerLabel(t *testing.T) {
 		bdProxiedLabel(t, bd, p.dir, "remove", issue.ID, "alpha")
 		if got := bdProxiedLabelListJSON(t, bd, p.dir, issue.ID); len(got) != 1 || got[0] != "beta" {
 			t.Fatalf("labels after remove = %v, want [beta]", got)
+		}
+	})
+
+	t.Run("remove_prefix", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "lp")
+		issue := bdProxiedCreate(t, bd, p.dir, "Prefix remove target")
+		bdProxiedLabel(t, bd, p.dir, "add", issue.ID, "pool:refused:reason-a,pool:refused:reason-b,needs-human")
+
+		bdProxiedLabel(t, bd, p.dir, "remove", issue.ID, "--prefix", "pool:refused:")
+
+		got := bdProxiedLabelListJSON(t, bd, p.dir, issue.ID)
+		if len(got) != 1 || got[0] != "needs-human" {
+			t.Fatalf("labels after remove --prefix = %v, want [needs-human]", got)
+		}
+	})
+
+	// rename is the end-to-end regression test for the finding that
+	// runLabelRenameProxiedServer used to fan a rename out into a per-issue
+	// AddLabel + RemoveLabel pair (journaling label_added/label_removed)
+	// instead of calling domain.LabelUseCase.RenameLabel, which emits one
+	// label_renamed event. internal/storage/domain/db's
+	// TestLabelUseCase/RenameLabel/EmitsOneRenamedEventPerIssue exercises the
+	// same use case directly against dolt; this closes the gap through the
+	// actual `bd label rename` CLI + proxied server wiring.
+	t.Run("rename", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "lr")
+		issue := bdProxiedCreate(t, bd, p.dir, "Rename target")
+		bdProxiedLabel(t, bd, p.dir, "add", issue.ID, "old-name")
+
+		out := bdProxiedLabel(t, bd, p.dir, "rename", "old-name", "new-name")
+		if !strings.Contains(out, "Renamed label 'old-name' to 'new-name': 1 issue") {
+			t.Errorf("expected the rename confirmation, got:\n%s", out)
+		}
+
+		if got := bdProxiedLabelListJSON(t, bd, p.dir, issue.ID); len(got) != 1 || got[0] != "new-name" {
+			t.Fatalf("labels after rename = %v, want [new-name]", got)
+		}
+
+		db := openProxiedDB(t, p)
+		var renamedCount int
+		if err := db.QueryRowContext(context.Background(),
+			"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = 'label_renamed' AND old_value = 'old-name' AND new_value = 'new-name'",
+			issue.ID).Scan(&renamedCount); err != nil {
+			t.Fatalf("count label_renamed events: %v", err)
+		}
+		if renamedCount != 1 {
+			t.Errorf("label_renamed events = %d, want 1", renamedCount)
+		}
+
+		var addedCount, removedCount int
+		if err := db.QueryRowContext(context.Background(),
+			"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = 'label_added'",
+			issue.ID).Scan(&addedCount); err != nil {
+			t.Fatalf("count label_added events: %v", err)
+		}
+		if err := db.QueryRowContext(context.Background(),
+			"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = 'label_removed'",
+			issue.ID).Scan(&removedCount); err != nil {
+			t.Fatalf("count label_removed events: %v", err)
+		}
+		if addedCount != 1 {
+			t.Errorf("label_added events = %d, want 1 (only the initial `label add`, not a second one from a rename-as-add)", addedCount)
+		}
+		if removedCount != 0 {
+			t.Errorf("label_removed events = %d, want 0 (the rename must not journal label_removed)", removedCount)
 		}
 	})
 
@@ -163,6 +233,15 @@ func TestProxiedServerLabel(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestProxiedServerLabelB holds more of TestProxiedServerLabel's cases, split
+// off so the bd_proxied_test shard manifest can place them on another shard.
+func TestProxiedServerLabelB(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
 
 	t.Run("propagate_no_children", func(t *testing.T) {
 		t.Parallel()
@@ -243,6 +322,40 @@ func TestProxiedServerLabel(t *testing.T) {
 		}
 	})
 
+	// GH#5988: a no-op edit reports itself on this route exactly as on the
+	// direct one, text and JSON, and still exits 0.
+	t.Run("noop_edit_reports_unchanged", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "no")
+		issue := bdProxiedCreate(t, bd, p.dir, "No-op label")
+		bdProxiedLabel(t, bd, p.dir, "add", issue.ID, "have")
+
+		if out := bdProxiedLabel(t, bd, p.dir, "remove", issue.ID, "never"); !strings.Contains(out, "Label 'never' was not on "+issue.ID) {
+			t.Errorf("remove of an absent label text = %s", out)
+		}
+		if out := bdProxiedLabel(t, bd, p.dir, "add", issue.ID, "have"); !strings.Contains(out, issue.ID+" already has label 'have'") {
+			t.Errorf("add of a present label text = %s", out)
+		}
+		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "label", "remove", issue.ID, "have,never", "--json")
+		if err != nil {
+			t.Fatalf("label remove --json failed: %v\nstderr:\n%s", err, stderr)
+		}
+		start := strings.Index(stdout, "[")
+		if start < 0 {
+			t.Fatalf("no JSON array in remove output:\n%s", stdout)
+		}
+		var rows []struct {
+			Status string `json:"status"`
+			Label  string `json:"label"`
+		}
+		if err := json.Unmarshal([]byte(stdout[start:]), &rows); err != nil {
+			t.Fatalf("parse remove JSON: %v\nraw: %s", err, stdout[start:])
+		}
+		if len(rows) != 2 || rows[0].Label != "have" || rows[0].Status != "removed" || rows[1].Label != "never" || rows[1].Status != "unchanged" {
+			t.Fatalf("mixed remove rows = %+v, want have=removed never=unchanged", rows)
+		}
+	})
+
 	t.Run("remove_comma_separated_multi", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "rm")
@@ -281,6 +394,15 @@ func TestProxiedServerLabel(t *testing.T) {
 			t.Errorf("expected both labels in text list, got:\n%s", out)
 		}
 	})
+}
+
+// TestProxiedServerLabelC holds more of TestProxiedServerLabel's cases, split
+// off so the bd_proxied_test shard manifest can place them on another shard.
+func TestProxiedServerLabelC(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
 
 	t.Run("propagate_json", func(t *testing.T) {
 		t.Parallel()
@@ -460,6 +582,55 @@ func TestProxiedServerLabel(t *testing.T) {
 		}
 		if permCount != 0 {
 			t.Errorf("labels (permanent) count = %d, want 0 — propagated wisp label must not leak into the permanent table", permCount)
+		}
+	})
+
+	// The proxied twin of TestEmbeddedLabelEditReports'
+	// template_label_edits_pass_update_and_assign_refuse, over the unit-of-work
+	// leg: bd label and bd set-state stand the template guard down
+	// (UpdateRequest.AllowTemplate), bd update and bd assign are refused with
+	// the CLI's sentence and exit 1.
+	t.Run("template_label_edits_pass_update_and_assign_refuse", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "lt")
+		tpl := bdProxiedCreate(t, bd, p.dir, "Template under edit", "--type", "task",
+			"--label", "pool:refused:reason-a")
+		res, err := openProxiedDB(t, p).Exec("UPDATE issues SET is_template = 1 WHERE id = ?", tpl.ID)
+		if err != nil {
+			t.Fatalf("mark %s a template: %v", tpl.ID, err)
+		}
+		if n, err := res.RowsAffected(); err != nil || n != 1 {
+			t.Fatalf("mark %s a template: %d rows affected (err %v), want 1", tpl.ID, n, err)
+		}
+
+		for _, args := range [][]string{
+			{"label", "add", tpl.ID, "tpl-added"},
+			{"label", "remove", tpl.ID, "--prefix", "pool:refused:"},
+			{"set-state", tpl.ID, "phase=planning"},
+		} {
+			if stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, args...); err != nil {
+				t.Errorf("bd %s on a template: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout, stderr)
+			}
+		}
+		if got, want := bdProxiedLabelListJSON(t, bd, p.dir, tpl.ID), []string{"phase:planning", "tpl-added"}; !slices.Equal(got, want) {
+			t.Errorf("template labels after label add, label remove --prefix and set-state = %v, want %v", got, want)
+		}
+
+		want := "cannot modify template " + tpl.ID + ": templates are read-only; use 'bd mol pour' to create a work item"
+		for _, args := range [][]string{
+			{"update", tpl.ID, "--title", "Edited template"},
+			{"assign", tpl.ID, "someone-else"},
+		} {
+			stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, args...)
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 || !strings.Contains(stdout+stderr, want) {
+				t.Errorf("bd %s on a template: err %v\nstdout:\n%s\nstderr:\n%s\nwant exit 1 and %q",
+					strings.Join(args, " "), err, stdout, stderr, want)
+			}
+		}
+		if got := bdProxiedShow(t, bd, p.dir, tpl.ID); got.Title != "Template under edit" || got.Assignee != "" || !got.IsTemplate {
+			t.Errorf("the refused update and assign changed the template: title=%q assignee=%q is_template=%v",
+				got.Title, got.Assignee, got.IsTemplate)
 		}
 	})
 }

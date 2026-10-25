@@ -2,6 +2,7 @@ package doltserver
 
 import (
 	"net"
+	"os"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -12,7 +13,19 @@ import (
 // payload bytes) used by these tests to simulate a dolt sql-server greeting.
 var fakeMySQLGreeting = []byte{0x08, 0x00, 0x00, 0x00, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a}
 
-// TestWaitForReadyEmitsRST proves waitForReady connects exactly once against
+// awaitGreeting runs awaitOwnedListener's greeting probe against host:port
+// with ownership taken as proven, for the tests below that exercise only the
+// probe (greeting required, FIN not RST, re-polling). The "child" is this
+// process, which never exits during the test.
+func awaitGreeting(host string, port int, timeout time.Duration) error {
+	srv := &startedServer{pid: os.Getpid(), exited: make(chan struct{})}
+	return awaitOwnedListener(srv, startupProbe{
+		host: host, port: port, timeout: timeout,
+		owner: func(int, int) (bool, bool) { return true, true },
+	})
+}
+
+// TestWaitForReadyEmitsRST proves the readiness probe (awaitOwnedListener) connects exactly once against
 // a server that greets immediately, and that the probe connection is drained
 // before Close() (so the TCP stack sends FIN, not RST). See
 // gastownhall/beads#4132, #4133.
@@ -42,22 +55,22 @@ func TestWaitForReadyEmitsRST(t *testing.T) {
 
 	time.Sleep(50 * time.Millisecond) // let goroutine bind
 
-	if err := waitForReady("127.0.0.1", port, 5*time.Second); err != nil {
-		t.Fatalf("waitForReady: %v", err)
+	if err := awaitGreeting("127.0.0.1", port, 5*time.Second); err != nil {
+		t.Fatalf("the readiness probe: %v", err)
 	}
 
 	time.Sleep(100 * time.Millisecond) // let the accept goroutine finish counting
 
 	got := connects.Load()
 	if got != 1 {
-		t.Errorf("waitForReady made %d TCP connections (expected 1)", got)
+		t.Errorf("the readiness probe made %d TCP connections (expected 1)", got)
 	}
-	t.Logf("waitForReady made %d TCP connections (drained, no RST)", got)
+	t.Logf("the readiness probe made %d TCP connections (drained, no RST)", got)
 }
 
 // TestWaitForReadyRepollsUntilGreeted is the F7 regression test: a listener
 // that accepts TCP connections but never writes anything is a "TCP-accepting
-// but mute" server — not ready. waitForReady must not treat dial success
+// but mute" server — not ready. the readiness probe must not treat dial success
 // alone as readiness; it must keep polling until a greeting arrives or the
 // deadline passes.
 func TestWaitForReadyRepollsUntilGreeted(t *testing.T) {
@@ -85,12 +98,12 @@ func TestWaitForReadyRepollsUntilGreeted(t *testing.T) {
 			}
 		}()
 
-		err = waitForReady("127.0.0.1", port, 700*time.Millisecond)
+		err = awaitGreeting("127.0.0.1", port, 700*time.Millisecond)
 		if err == nil {
-			t.Fatalf("waitForReady returned nil for a mute (accepting, never-greeting) server; want a timeout error")
+			t.Fatalf("the readiness probe returned nil for a mute (accepting, never-greeting) server; want a timeout error")
 		}
 		if got := accepts.Load(); got < 2 {
-			t.Errorf("waitForReady accepted only %d connection(s) before giving up; want re-polling (>=2) since dial-success-without-greeting must not be treated as ready", got)
+			t.Errorf("the readiness probe accepted only %d connection(s) before giving up; want re-polling (>=2) since dial-success-without-greeting must not be treated as ready", got)
 		}
 	})
 
@@ -114,7 +127,7 @@ func TestWaitForReadyRepollsUntilGreeted(t *testing.T) {
 					defer c.Close()
 					if attempt < 2 {
 						// First accept(s): mute, so the probe times out its read
-						// and waitForReady must re-poll instead of declaring victory.
+						// and the readiness probe must re-poll instead of declaring victory.
 						time.Sleep(600 * time.Millisecond)
 						return
 					}
@@ -124,11 +137,11 @@ func TestWaitForReadyRepollsUntilGreeted(t *testing.T) {
 			}
 		}()
 
-		if err := waitForReady("127.0.0.1", port, 5*time.Second); err != nil {
-			t.Fatalf("waitForReady: %v", err)
+		if err := awaitGreeting("127.0.0.1", port, 5*time.Second); err != nil {
+			t.Fatalf("the readiness probe: %v", err)
 		}
 		if got := callCount.Load(); got < 2 {
-			t.Errorf("expected waitForReady to re-poll past the mute accept, got only %d accept(s)", got)
+			t.Errorf("expected the readiness probe to re-poll past the mute accept, got only %d accept(s)", got)
 		}
 	})
 }

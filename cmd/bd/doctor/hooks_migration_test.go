@@ -2,7 +2,6 @@ package doctor
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
 )
@@ -214,7 +213,7 @@ func findHookPlan(plan HookMigrationPlan, name string) (HookMigrationHookPlan, b
 
 func forceRepoHooksPath(t *testing.T, repoPath string) {
 	t.Helper()
-	cmd := exec.Command("git", "config", "core.hooksPath", ".git/hooks")
+	cmd := gitCommand("config", "core.hooksPath", ".git/hooks")
 	cmd.Dir = repoPath
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("failed to set core.hooksPath for test repo: %v", err)

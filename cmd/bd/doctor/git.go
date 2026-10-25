@@ -212,7 +212,7 @@ func findOutdatedBDHookVersions(
 			// No version comment found. If this is a bd hook (has shim marker,
 			// inline marker, or calls bd hooks run), treat it as outdated since
 			// all current hook templates include a version comment. (GH#1466)
-			if isBdHookContent(contentStr) {
+			if IsBdHookContent(contentStr) {
 				outdated = append(outdated, fmt.Sprintf("%s@unknown", hookName))
 				if oldest == "" {
 					oldest = "0.0.0"
@@ -230,8 +230,11 @@ func findOutdatedBDHookVersions(
 	return outdated, oldest
 }
 
-// isBdHookContent checks if hook content is a bd hook (shim, inline, section-marker, or calls bd hooks run).
-func isBdHookContent(content string) bool {
+// IsBdHookContent checks if hook content is a bd hook (shim, inline, section-marker, or calls bd hooks run).
+// It is exported because cmd/bd's getHookVersion classifies the same files for
+// bd hooks list / bd info / bd config drift; sharing one predicate is what keeps
+// those surfaces from disagreeing with bd doctor about the same hook (GH#6084).
+func IsBdHookContent(content string) bool {
 	return strings.Contains(content, bdShimMarker) ||
 		strings.Contains(content, bdInlineHookMarker) ||
 		strings.Contains(content, bdSectionMarkerPrefix) ||
@@ -639,7 +642,7 @@ func CheckHooksPath() DoctorCheck {
 		}
 	}
 
-	managed := IsBeadsManagedHooksPath(repoRoot, hooksPath)
+	managed := IsBeadsManagedHooksPath(repoRoot, BeadsManagedStorageHooksDir(), hooksPath)
 	var fix string
 	if managed {
 		fix = "Run 'bd doctor --fix' to unset core.hooksPath, or: git config --unset core.hooksPath"
@@ -675,7 +678,7 @@ func FixHooksPath() error {
 		return nil // nothing set
 	}
 
-	if !IsBeadsManagedHooksPath(repoRoot, hooksPath) {
+	if !IsBeadsManagedHooksPath(repoRoot, BeadsManagedStorageHooksDir(), hooksPath) {
 		return nil // never touch a third-party hooksPath
 	}
 
@@ -709,8 +712,12 @@ func getConfiguredHooksPath(repoRoot string) (string, bool) {
 
 // IsBeadsManagedHooksPath reports whether hooksPath is one of the values bd
 // itself writes to core.hooksPath (.beads/hooks or .beads-hooks, relative or
-// absolute under repoRoot). It is the single matcher for that question;
-// resetHooksPathIfBeadsManaged (cmd/bd/hooks.go) calls it too, so the two
+// absolute under repoRoot, or storageHooksDir — the <effective .beads>/hooks
+// directory that `bd hooks install --beads` configures, which BEADS_DIR or a
+// .beads/redirect can place outside repoRoot). Callers pass
+// BeadsManagedStorageHooksDir() for storageHooksDir, or "" when no storage
+// applies. It is the single matcher for that question;
+// resetHooksPathAt (cmd/bd/hooks.go) calls it too, so the two
 // paths cannot drift apart.
 //
 // Absolute values are compared after symlink resolution. repoRoot comes from
@@ -721,7 +728,7 @@ func getConfiguredHooksPath(repoRoot string) (string, bool) {
 // is a symlink to /private/var, including all of t.TempDir()) hits this. The
 // false negative is not cosmetic: CheckHooksPath then reports the dangling
 // path as third-party and FixHooksPath deliberately refuses to unset it.
-func IsBeadsManagedHooksPath(repoRoot, hooksPath string) bool {
+func IsBeadsManagedHooksPath(repoRoot, storageHooksDir, hooksPath string) bool {
 	if hooksPath == ".beads/hooks" || hooksPath == ".beads-hooks" {
 		return true
 	}
@@ -730,8 +737,14 @@ func IsBeadsManagedHooksPath(repoRoot, hooksPath string) bool {
 	}
 	root := resolveExistingPrefix(repoRoot)
 	candidate := resolveExistingPrefix(hooksPath)
-	return candidate == filepath.Join(root, ".beads", "hooks") ||
-		candidate == filepath.Join(root, ".beads-hooks")
+	if candidate == filepath.Join(root, ".beads", "hooks") ||
+		candidate == filepath.Join(root, ".beads-hooks") {
+		return true
+	}
+	// The out-of-repo storage arm is gated on a resolved storage directory, so
+	// it recognizes only the directory bd would itself configure right now —
+	// never an arbitrary absolute hooksPath that happens to be named "hooks".
+	return storageHooksDir != "" && candidate == resolveExistingPrefix(storageHooksDir)
 }
 
 // resolveExistingPrefix returns path with its longest existing ancestor

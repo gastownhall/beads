@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"testing"
 
 	"github.com/steveyegge/beads/internal/beads"
 )
@@ -38,9 +39,8 @@ func getBdBinary() (string, error) {
 		}
 
 		// Check if we're running as a test binary - this prevents fork bombs
-		// when tests call functions that execute bd subcommands
-		baseName := filepath.Base(exe)
-		if strings.HasSuffix(baseName, ".test") || strings.Contains(baseName, ".test.") {
+		// when tests call functions that execute bd subcommands.
+		if isTestBinary(exe) {
 			return "", ErrTestBinary
 		}
 
@@ -54,6 +54,18 @@ func getBdBinary() (string, error) {
 	}
 
 	return bdPath, nil
+}
+
+// isTestBinary reports whether exe is a Go test binary. testing.Testing() is
+// the authoritative signal: both `go test` and rules_go link test binaries with
+// it set, whatever the file is called (Bazel names them <target>_test, not
+// <pkg>.test). The name check is kept for binaries built by other means.
+func isTestBinary(exe string) bool {
+	if testing.Testing() {
+		return true
+	}
+	baseName := filepath.Base(exe)
+	return strings.HasSuffix(baseName, ".test") || strings.Contains(baseName, ".test.")
 }
 
 // validateBeadsWorkspace ensures the path is a valid beads workspace before

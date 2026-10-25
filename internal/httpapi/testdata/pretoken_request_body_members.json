@@ -1,0 +1,123 @@
+{
+  "addComment": [
+    "author",
+    "text"
+  ],
+  "addDependencies": [
+    "actor",
+    "edges"
+  ],
+  "applyBatch": [
+    "actor",
+    "force_id_prefix",
+    "items",
+    "provenance",
+    "skip_per_edge_cycle_check"
+  ],
+  "batchCloseIssues": [
+    "actor",
+    "force",
+    "items",
+    "session"
+  ],
+  "batchCreateIssues": [
+    "actor",
+    "items"
+  ],
+  "claimIssue": [
+    "actor"
+  ],
+  "claimNextIssue": [
+    "actor"
+  ],
+  "closeIssue": [
+    "actor",
+    "expected_version",
+    "force",
+    "reason",
+    "session"
+  ],
+  "compareAndSetMetadata": [
+    "actor",
+    "expected",
+    "key",
+    "value"
+  ],
+  "createIssue": [
+    "acceptance_criteria",
+    "actor",
+    "assignee",
+    "defer_until",
+    "dependencies",
+    "description",
+    "design",
+    "due_at",
+    "ephemeral",
+    "estimated_minutes",
+    "external_ref",
+    "force_id_prefix",
+    "id",
+    "inherit_labels_from_parent",
+    "issue_type",
+    "labels",
+    "metadata",
+    "no_history",
+    "notes",
+    "owner",
+    "parent_id",
+    "priority",
+    "sender",
+    "status",
+    "title",
+    "waits_for"
+  ],
+  "deleteIssues": [
+    "actor",
+    "cascade",
+    "dry_run",
+    "expected_version",
+    "force",
+    "ids"
+  ],
+  "releaseIssue": [
+    "actor",
+    "expected_assignee",
+    "force"
+  ],
+  "rememberMemory": [
+    "content",
+    "key"
+  ],
+  "removeDependency": [
+    "actor",
+    "depends_on_id",
+    "issue_id"
+  ],
+  "reopenIssue": [
+    "actor",
+    "expected_version",
+    "reason"
+  ],
+  "setSetting": [
+    "value"
+  ],
+  "sweepIssues": [
+    "actor",
+    "closed_before",
+    "dry_run",
+    "pattern",
+    "protect_referenced",
+    "tier"
+  ],
+  "updateIssue": [
+    "actor",
+    "claim",
+    "expected_assignee",
+    "expected_status",
+    "expected_version",
+    "force_assignee_transfer",
+    "force_close_policy",
+    "force_notes_overwrite",
+    "patch"
+  ]
+}

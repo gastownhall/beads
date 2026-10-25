@@ -19,6 +19,8 @@ func isGitWorktree() bool {
 // gitRevParse runs git rev-parse with the given flag and returns the trimmed output.
 // This is a helper for CLI utilities that need git command execution.
 func gitRevParse(flag string) string {
+	// #nosec G702 - fixed "git" command; flag is a constant rev-parse switch chosen by
+	// the caller in this package, never attacker-controlled input.
 	out, err := exec.Command("git", "rev-parse", flag).Output()
 	if err != nil {
 		return ""

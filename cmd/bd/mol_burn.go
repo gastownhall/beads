@@ -190,7 +190,7 @@ func burnMultipleMolecules(ctx context.Context, moleculeIDs []string, dryRun, fo
 
 	// Batch delete all wisps in one call
 	if len(wispIDs) > 0 {
-		result, err := burnWisps(ctx, store, wispIDs, actor)
+		result, err := burnWisps(ctx, store, wispIDs, currentActor())
 		if err != nil {
 			if !jsonOutput {
 				fmt.Fprintf(os.Stderr, "Error burning wisps: %v\n", err)
@@ -217,7 +217,7 @@ func burnMultipleMolecules(ctx context.Context, moleculeIDs []string, dryRun, fo
 			issueIDs = append(issueIDs, issue.ID)
 		}
 
-		if err := deleteBatch(nil, issueIDs, true, false, false, false, false, "mol burn"); err != nil {
+		if err := deleteBatch(nil, issueIDs, true, false, false, false, false, nil, "mol burn"); err != nil {
 			return HandleErrorRespectJSON("%v", err)
 		}
 		batchResult.TotalDeleted += len(issueIDs)
@@ -296,7 +296,7 @@ func burnWispMolecule(ctx context.Context, resolvedID string, dryRun, force bool
 		}
 	}
 
-	result, err := burnWisps(ctx, store, wispIDs, actor)
+	result, err := burnWisps(ctx, store, wispIDs, currentActor())
 	if err != nil {
 		return HandleErrorRespectJSON("burning wisp: %v", err)
 	}
@@ -366,7 +366,7 @@ func burnPersistentMolecule(ctx context.Context, resolvedID string, dryRun, forc
 		}
 	}
 
-	if err := deleteBatch(nil, issueIDs, true, false, false, jsonOutput, false, "mol burn"); err != nil {
+	if err := deleteBatch(nil, issueIDs, true, false, false, jsonOutput, false, nil, "mol burn"); err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}
 	return nil

@@ -3,7 +3,6 @@
 package utils
 
 import (
-	"fmt"
 	"os"
 	"testing"
 
@@ -24,7 +23,9 @@ func testMainInner(m *testing.M) int {
 	// AD-01 (be-c5p): allow utils tests to connect to the test container.
 	os.Setenv("BEADS_TEST_SERVER", "1")
 	if err := testutil.EnsureDoltContainerForTestMain(); err != nil {
-		fmt.Fprintf(os.Stderr, "WARN: %v, skipping Dolt tests\n", err)
+		if testutil.DoltUnavailableForTestMain(err) {
+			return 1
+		}
 	} else {
 		defer testutil.TerminateDoltContainer()
 		DoltTestServerPort = testutil.DoltContainerPortInt()

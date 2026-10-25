@@ -130,6 +130,17 @@ func TestDatabaseNotFoundHint(t *testing.T) {
 		ServerPort: 3309,
 	}
 
+	t.Run("an IPv6 host is named bracketed with its port", func(t *testing.T) {
+		for _, host := range []string{"::1", "[::1]"} {
+			cfg := baseCfg
+			cfg.ServerHost = host
+			msg := databaseNotFoundError(&cfg).Error()
+			if !strings.Contains(msg, "on Dolt server at [::1]:3309\n") {
+				t.Errorf("host %q: want the server named as [::1]:3309, got:\n%s", host, msg)
+			}
+		}
+	})
+
 	t.Run("hint suggests setting sync.remote when empty", func(t *testing.T) {
 		cfg := baseCfg // SyncRemote is empty by default
 		err := databaseNotFoundError(&cfg)

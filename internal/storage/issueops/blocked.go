@@ -166,37 +166,9 @@ func GetDescendantIDsInTx(ctx context.Context, tx DBTX, rootID string, maxDepth 
 	}
 
 	queryDescendants := func(includeWisps bool) ([]string, bool, error) {
-		edgeQuery := fmt.Sprintf(`
-			SELECT issue_id, %s FROM dependencies WHERE type = 'parent-child'
-		`, DepTargetExpr)
-		if includeWisps {
-			edgeQuery += fmt.Sprintf(`
-			UNION ALL
-			SELECT issue_id, %s FROM wisp_dependencies WHERE type = 'parent-child'
-		`, DepTargetExpr)
-		}
-
-		//nolint:gosec // G201: edgeQuery is built from hardcoded SQL plus DepTargetExpr (no user input)
-		query := fmt.Sprintf(`
-			WITH RECURSIVE
-			parent_edges(issue_id, depends_on_id) AS (
-				%s
-			),
-			descendants(id, depth, path) AS (
-				SELECT issue_id, 1, CONCAT(',', ?, ',', issue_id, ',')
-				FROM parent_edges
-				WHERE depends_on_id = ?
-				UNION ALL
-				SELECT e.issue_id, d.depth + 1, CONCAT(d.path, e.issue_id, ',')
-				FROM parent_edges e
-				JOIN descendants d ON e.depends_on_id = d.id
-				WHERE (? <= 0 OR d.depth < ?)
-				  AND LOCATE(CONCAT(',', e.issue_id, ','), d.path) = 0
-			)
-			SELECT id, depth FROM descendants WHERE id <> ?
-		`, edgeQuery)
-
-		rows, err := tx.QueryContext(ctx, query, rootID, rootID, maxDepth, maxDepth, rootID)
+		rows, err := tx.QueryContext(ctx,
+			sqlbuild.DescendantWalkQuery(includeWisps),
+			sqlbuild.DescendantWalkArgs(rootID, maxDepth, includeWisps)...)
 		if err != nil {
 			return nil, false, err
 		}

@@ -4,6 +4,13 @@ This script generates a weekly Beads newsletter based on the changelog, git comm
 
 ## Setup
 
+### Requirements
+
+- **git >= 2.37** (2022-06). The commit range is collected with `git log
+  --since-as-filter`, which older git does not support. On older git the script
+  fails with `git log failed (--since-as-filter needs git >= 2.37): ...` instead
+  of generating a newsletter that silently omits commits.
+
 ### Environment Variables
 
 Set the appropriate API key for your chosen model:

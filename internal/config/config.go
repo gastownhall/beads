@@ -9,8 +9,26 @@ import (
 	"time"
 
 	"github.com/spf13/viper"
+	"github.com/steveyegge/beads/internal/ceiling"
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/gitenv"
 	"gopkg.in/yaml.v3"
+)
+
+const (
+	// ProjectConfigFileName is the tracked per-workspace config file, read from
+	// a .beads directory.
+	ProjectConfigFileName = "config.yaml"
+	// LocalConfigFileName sits beside ProjectConfigFileName and is merged LAST
+	// by Initialize, so it overrides the tracked file. It is the documented
+	// place for machine-specific settings that must not be committed
+	// (docs/reference/configuration.md). Named here so Initialize's own local
+	// merge (in the file-loading block at the end of Initialize) and the
+	// workspace-scoped reader in WorkspaceYamlValueStrictWithLocal cannot
+	// drift onto different files. ProjectConfigFileName binds the two
+	// workspace-scoped strict readers to each other; Initialize still spells
+	// config.yaml literally in the several places it probes for one.
+	LocalConfigFileName = "config.local.yaml"
 )
 
 var v *viper.Viper
@@ -54,6 +72,33 @@ func ignoredConfigKey(path string) string {
 // Initialize sets up the viper configuration singleton
 // Should be called once at application startup
 func Initialize() error {
+	return initialize(os.Getenv("BEADS_DIR"))
+}
+
+// WithBeadsDir runs fn with the configuration Initialize loads when BEADS_DIR
+// is beadsDir, which is how the bd CLI loads it for every command in a
+// workspace it found, and then puts the loaded configuration back. A command
+// about to create beadsDir uses it to read what every later command there
+// will read: beadsDir's own config.yaml over the user config files, with the
+// BD_* variables on top, and never an enclosing workspace's config.yaml that
+// the directory walk loaded at startup. The process environment is not
+// changed.
+//
+// fn runs even when loading fails, with what did load, as a command runs
+// after a failed Initialize; the error is returned. Like Initialize, it
+// replaces the process-wide configuration while fn runs, so nothing may read
+// configuration concurrently.
+func WithBeadsDir(beadsDir string, fn func()) error {
+	saved, savedOverrides := v, overriddenKeys
+	defer func() { v, overriddenKeys = saved, savedOverrides }()
+	overriddenKeys = map[string]bool{}
+	err := initialize(beadsDir)
+	fn()
+	return err
+}
+
+// initialize is Initialize for a process whose BEADS_DIR is beadsDirSetting.
+func initialize(beadsDirSetting string) error {
 	v = viper.New()
 
 	// Set config type to yaml (we only load config.yaml, not config.json)
@@ -97,7 +142,7 @@ func Initialize() error {
 	appendExistingUserConfig(userConfigPaths.documented)
 
 	// 1. Project: walk up from CWD to find .beads/config.yaml
-	beadsDirEnv := strings.TrimSpace(os.Getenv("BEADS_DIR"))
+	beadsDirEnv := strings.TrimSpace(beadsDirSetting)
 	beadsEnvConfigPath := ""
 	if beadsDirEnv != "" {
 		beadsEnvConfigPath = filepath.Clean(filepath.Join(beadsDirEnv, "config.yaml"))
@@ -122,10 +167,12 @@ func Initialize() error {
 
 	cwd, err := os.Getwd()
 	if err == nil {
+		// BEADS_CEILING_DIRECTORIES bounds both upward walks below.
+		bound := ceiling.For(cwd)
 		var moduleRoot string
 		if ignoreRepoConfig {
 			// Find module root by walking up to go.mod.
-			for dir := cwd; dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
+			for dir := cwd; dir != filepath.Dir(dir) && !bound.Excludes(dir); dir = filepath.Dir(dir) {
 				if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
 					moduleRoot = dir
 					break
@@ -155,7 +202,7 @@ func Initialize() error {
 		}
 
 		// Walk up parent directories to find .beads/config.yaml.
-		for dir := cwd; dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
+		for dir := cwd; dir != filepath.Dir(dir) && !bound.Excludes(dir); dir = filepath.Dir(dir) {
 			p := filepath.Join(dir, ".beads", "config.yaml")
 			if _, err := os.Stat(p); err == nil {
 				// When BEADS_DIR points at a different runtime workspace, do not
@@ -186,7 +233,7 @@ func Initialize() error {
 	}
 
 	// 0. BEADS_DIR: highest priority
-	if beadsDir := os.Getenv("BEADS_DIR"); beadsDir != "" {
+	if beadsDir := beadsDirSetting; beadsDir != "" {
 		p := filepath.Join(beadsDir, "config.yaml")
 		// Honor the test ignore set here too, and skip primaryConfigPath along with
 		// the merge so ConfigFileUsed does not name the ignored repo config. This
@@ -243,6 +290,18 @@ func Initialize() error {
 	// own deletion itself. Env: BD_EVENTS_JOURNAL_AUTO_PRUNE.
 	v.SetDefault("events-journal-auto-prune", true)
 	v.SetDefault("audit.enabled", false)
+	// versioned-history.enabled activates the dual-write issue-version history
+	// (issue_versions, issues.current_revision) that migrations 0067+ provision.
+	// Default OFF: with it off the writer short-circuits and a store is
+	// byte-identical to one built without the feature, which is the contract
+	// gastownhall/beads#6135 ships under. Env: BD_VERSIONED_HISTORY_ENABLED.
+	//
+	// The flag is single-writer-only until the version_id primary key lands
+	// (design section 16.3 steps 1-5): issue_versions.revision and
+	// issues.current_revision are per-store ordinals, so two disconnected
+	// clones can both mint revision 8 for the same issue. Do not enable it on
+	// a store that more than one writer mutates.
+	v.SetDefault("versioned-history.enabled", false)
 	v.SetDefault("no-db", false)
 	v.SetDefault("no-hooks", false)
 	v.SetDefault("db", "")
@@ -321,6 +380,17 @@ func Initialize() error {
 	// Backup configuration defaults (JSONL export to .beads/backup/)
 	v.SetDefault("backup.enabled", false)
 	v.SetDefault("backup.interval", "15m")
+	// size-cap-mb pauses auto-backup once the destination exceeds this size
+	// (ga-y6gjv). BackupSync only ever transfers new chunks — it never
+	// prunes ones that became unreachable on the source DB — and Dolt
+	// exposes no way to GC a backup destination in place (it is a bare
+	// chunk-store directory with no .dolt repo-root marker, so neither the
+	// standalone dolt CLI nor CALL DOLT_GC can operate on it directly), so
+	// without a hard cap the directory can only grow forever. Default
+	// 2048MB; size-warn-interval throttles how often the pause is
+	// re-announced once the cap is hit, so it doesn't spam every command.
+	v.SetDefault("backup.size-cap-mb", 2048)
+	v.SetDefault("backup.size-warn-interval", "24h")
 	v.SetDefault("backup.git-push", false)
 	v.SetDefault("backup.git-repo", "")
 
@@ -376,7 +446,7 @@ func Initialize() error {
 
 		// Merge local config overrides if present (config.local.yaml)
 		// This allows machine-specific settings without polluting tracked config
-		localConfigPath := filepath.Join(filepath.Dir(primaryConfigPath), "config.local.yaml")
+		localConfigPath := filepath.Join(filepath.Dir(primaryConfigPath), LocalConfigFileName)
 		if _, err := os.Stat(localConfigPath); err == nil {
 			v.SetConfigFile(localConfigPath)
 			if err := v.MergeInConfig(); err != nil {
@@ -417,6 +487,17 @@ func worktreeFallbackConfigPath(repoPath string) string {
 
 func gitDirsForRepo(repoPath string) (gitDir, commonDir string, ok bool) {
 	cmd := exec.Command("git", "-C", repoPath, "rev-parse", "--git-dir", "--git-common-dir")
+	// repoPath is the authority for this probe. Inherited Git routing such as
+	// GIT_DIR overrides -C and can make startup read another repository's
+	// shared-worktree config before command dispatch has begun. Scrubbing also
+	// drops an inherited GIT_CEILING_DIRECTORIES, which widens rather than
+	// narrows discovery: -C repoPath fixes where the search starts, not where it
+	// stops, so dropping discovery ceilings can select a containing parent
+	// repository above repoPath. That is the intended trade, and it applies here
+	// too -- repoPath is the process working directory, not a proven repository
+	// root. An explicit BEADS_CEILING_DIRECTORIES is the exception: it is
+	// reapplied as the git ceiling (a no-op when unset).
+	cmd.Env = ceiling.GitEnv(gitenv.ScrubRouting(os.Environ()))
 	output, err := cmd.Output()
 	if err != nil {
 		return "", "", false
@@ -700,6 +781,11 @@ func GetStringFromDir(beadsDir, key string) string {
 	if err := yaml.Unmarshal(data, &root); err != nil {
 		return ""
 	}
+	// Match Viper's precedence: an exact top-level key wins over dotted-path
+	// descent when a file contains both spellings.
+	if val, ok := root[key]; ok {
+		return configValueString(val)
+	}
 	parts := strings.SplitN(key, ".", 2)
 	node := root
 	for len(parts) == 2 {
@@ -718,6 +804,10 @@ func GetStringFromDir(beadsDir, key string) string {
 	if !ok {
 		return ""
 	}
+	return configValueString(val)
+}
+
+func configValueString(val interface{}) string {
 	switch s := val.(type) {
 	case string:
 		return s
@@ -1001,7 +1091,9 @@ func ResolveExternalProjectPath(projectName string) string {
 //  3. git config user.name
 //  4. hostname
 //
-// This is used as the sender field in bd mail commands.
+// The Git lookup discards custom GIT_CONFIG_GLOBAL paths and other routing
+// overrides, while retaining explicit config suppression. Set user.name in
+// the default global config location when global config is enabled.
 func GetIdentity(flagValue string) string {
 	// 1. Command-line flag takes precedence
 	if flagValue != "" {
@@ -1015,6 +1107,7 @@ func GetIdentity(flagValue string) string {
 
 	// 3. git config user.name
 	cmd := exec.Command("git", "config", "user.name")
+	cmd.Env = gitenv.ScrubRouting(os.Environ())
 	if output, err := cmd.Output(); err == nil {
 		if gitUser := strings.TrimSpace(string(output)); gitUser != "" {
 			return gitUser

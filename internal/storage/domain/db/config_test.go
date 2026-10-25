@@ -41,6 +41,10 @@ func (s *testSuite) TestConfigSQLRepository() {
 		s.Run("EmptyReturnsEmptyMap", s.configGetAllConfigEmpty)
 		s.Run("ReturnsAllRows", s.configGetAllConfigAllRows)
 	})
+	s.Run("GetConfigByPrefix", func() {
+		s.Run("ReturnsOnlyPrefixedRows", s.configGetConfigByPrefixOnlyPrefixed)
+		s.Run("EscapesLikeMetacharacters", s.configGetConfigByPrefixEscapesLike)
+	})
 	s.Run("LocalMetadata", func() {
 		s.Run("SetThenGetRoundTrips", s.configLocalMetadataRoundTrip)
 		s.Run("SetOverwrites", s.configLocalMetadataOverwrite)
@@ -54,6 +58,7 @@ func (s *testSuite) TestConfigSQLRepository() {
 		s.Run("DeleteConfigMissingKeyIsNoop", s.configUseCaseDeleteConfigMissing)
 		s.Run("GetAllConfigEmpty", s.configUseCaseGetAllConfigEmpty)
 		s.Run("GetAllConfigReturnsAllRows", s.configUseCaseGetAllConfigAllRows)
+		s.Run("GetConfigByPrefixReturnsOnlyPrefixedRows", s.configUseCaseGetConfigByPrefixOnlyPrefixed)
 	})
 	s.Run("GetCustomTypes", func() {
 		s.Run("MissingKeyReturnsNil", s.configGetCustomTypesMissing)
@@ -589,6 +594,47 @@ func (s *testSuite) configUseCaseDeleteConfigMissing() {
 	s.Require().NoError(s.configUC().DeleteConfig(s.Ctx(), "no_such_key"))
 }
 
+func (s *testSuite) configGetConfigByPrefixOnlyPrefixed() {
+	_, err := s.Runner().ExecContext(s.Ctx(), "DELETE FROM config")
+	s.Require().NoError(err)
+	r := s.configRepo()
+	s.Require().NoError(r.SetConfig(s.Ctx(), "kv.mail.dog.m1", "a"))
+	s.Require().NoError(r.SetConfig(s.Ctx(), "kv.mail.dog.m2", "b"))
+	s.Require().NoError(r.SetConfig(s.Ctx(), "kv.mail.doggerel.m3", "c"))
+	s.Require().NoError(r.SetConfig(s.Ctx(), "kv.mail.hare.m1", "d"))
+	s.Require().NoError(r.SetConfig(s.Ctx(), "jira.url", "https://example.atlassian.net"))
+
+	pr, ok := interface{}(r).(domain.ConfigPrefixReader)
+	s.Require().True(ok, "configSQLRepositoryImpl must implement domain.ConfigPrefixReader")
+	got, err := pr.GetConfigByPrefix(s.Ctx(), "kv.mail.dog.")
+	s.Require().NoError(err)
+	s.Equal(map[string]string{
+		"kv.mail.dog.m1": "a",
+		"kv.mail.dog.m2": "b",
+	}, got)
+}
+
+func (s *testSuite) configGetConfigByPrefixEscapesLike() {
+	_, err := s.Runner().ExecContext(s.Ctx(), "DELETE FROM config")
+	s.Require().NoError(err)
+	r := s.configRepo()
+	// `_` and `%` are LIKE metacharacters: an unescaped prefix "kv.a_." would
+	// also match "kv.axb"-shaped keys. The literal-prefix contract must hold.
+	s.Require().NoError(r.SetConfig(s.Ctx(), "kv.a_.one", "underscore"))
+	s.Require().NoError(r.SetConfig(s.Ctx(), "kv.ax.one", "letter"))
+	s.Require().NoError(r.SetConfig(s.Ctx(), "kv.a%.one", "percent"))
+
+	pr, ok := interface{}(r).(domain.ConfigPrefixReader)
+	s.Require().True(ok)
+	got, err := pr.GetConfigByPrefix(s.Ctx(), "kv.a_.")
+	s.Require().NoError(err)
+	s.Equal(map[string]string{"kv.a_.one": "underscore"}, got)
+
+	got, err = pr.GetConfigByPrefix(s.Ctx(), "kv.a%.")
+	s.Require().NoError(err)
+	s.Equal(map[string]string{"kv.a%.one": "percent"}, got)
+}
+
 func (s *testSuite) configUseCaseGetAllConfigEmpty() {
 	_, err := s.Runner().ExecContext(s.Ctx(), "DELETE FROM config")
 	s.Require().NoError(err)
@@ -610,6 +656,20 @@ func (s *testSuite) configUseCaseGetAllConfigAllRows() {
 		"jira.url":     "https://example.atlassian.net",
 		"jira.project": "PROJ",
 	}, got)
+}
+
+func (s *testSuite) configUseCaseGetConfigByPrefixOnlyPrefixed() {
+	_, err := s.Runner().ExecContext(s.Ctx(), "DELETE FROM config")
+	s.Require().NoError(err)
+	uc := s.configUC()
+	s.Require().NoError(uc.SetConfig(s.Ctx(), "kv.mail.dog.m1", "a"))
+	s.Require().NoError(uc.SetConfig(s.Ctx(), "kv.mail.hare.m1", "b"))
+
+	pr, ok := interface{}(uc).(domain.ConfigPrefixReader)
+	s.Require().True(ok, "configUseCaseImpl must implement domain.ConfigPrefixReader")
+	got, err := pr.GetConfigByPrefix(s.Ctx(), "kv.mail.dog.")
+	s.Require().NoError(err)
+	s.Equal(map[string]string{"kv.mail.dog.m1": "a"}, got)
 }
 
 func (s *testSuite) configGetCustomTypesTablePrecedence() {

@@ -51,14 +51,22 @@ func bdShowFail(t *testing.T, bd, dir, id string) string {
 	return string(out)
 }
 
-func TestEmbeddedDelete(t *testing.T) {
+// setupEmbeddedDelete is the TestEmbeddedDelete* tests' workspace (prefix td).
+func setupEmbeddedDelete(t *testing.T) (string, string) {
+	t.Helper()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "td")
+	return bd, dir
+}
+
+func TestEmbeddedDeleteBasic(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
 	t.Parallel()
 
-	bd := buildEmbeddedBD(t)
-	dir, _, _ := bdInit(t, bd, "--prefix", "td")
+	bd, dir := setupEmbeddedDelete(t)
 
 	t.Run("delete_single_issue", func(t *testing.T) {
 		issue := bdCreate(t, bd, dir, "Delete me", "--type", "task")
@@ -79,6 +87,19 @@ func TestEmbeddedDelete(t *testing.T) {
 			t.Error("expected parent to still be open")
 		}
 	})
+
+	t.Run("delete_nonexistent", func(t *testing.T) {
+		bdDeleteFail(t, bd, dir, "td-nonexistent999", "--force")
+	})
+}
+
+func TestEmbeddedDeletePreviewAndGuards(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd, dir := setupEmbeddedDelete(t)
 
 	t.Run("delete_without_force_shows_preview", func(t *testing.T) {
 		target := bdCreate(t, bd, dir, "Lonely", "--type", "task")
@@ -158,6 +179,15 @@ func TestEmbeddedDelete(t *testing.T) {
 			t.Fatalf("forced dry-run removed dependent: got %v, want %q", got["id"], child.ID)
 		}
 	})
+}
+
+func TestEmbeddedDeleteForceAndBatch(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd, dir := setupEmbeddedDelete(t)
 
 	t.Run("delete_force_orphans_dependents", func(t *testing.T) {
 		parent := bdCreate(t, bd, dir, "Force parent", "--type", "task")
@@ -182,10 +212,6 @@ func TestEmbeddedDelete(t *testing.T) {
 		bdShowFail(t, bd, dir, issue1.ID)
 		bdShowFail(t, bd, dir, issue2.ID)
 		bdShowFail(t, bd, dir, issue3.ID)
-	})
-
-	t.Run("delete_nonexistent", func(t *testing.T) {
-		bdDeleteFail(t, bd, dir, "td-nonexistent999", "--force")
 	})
 }
 

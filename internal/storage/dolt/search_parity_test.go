@@ -2,6 +2,7 @@ package dolt
 
 import (
 	"context"
+	"slices"
 	"sort"
 	"testing"
 
@@ -63,6 +64,249 @@ func TestSearchIssuesAndSearchIssueIDs_Parity(t *testing.T) {
 					fromIssues, ids)
 			}
 		})
+	}
+}
+
+// TestSearchIssuesAndSearchIssueSummaries_Parity asserts that SearchIssues and
+// SearchIssueSummaries return the same ID set, in the same order, across the
+// same representative filters TestSearchIssuesAndSearchIssueIDs_Parity checks
+// above. SearchIssueSummaries shares the same generic searchInTx core
+// (summaryProjection, internal/storage/issueops/search.go) as SearchIssues and
+// SearchIssueIDs; this is that contract's third leg.
+func TestSearchIssuesAndSearchIssueSummaries_Parity(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	seedSearchParityFixture(ctx, t, store)
+
+	cases := []struct {
+		name   string
+		query  string
+		filter types.IssueFilter
+	}{
+		{name: "no filter, full set"},
+		{name: "open status only", filter: types.IssueFilter{Statuses: []types.Status{types.StatusOpen}}},
+		{name: "priority filter", filter: types.IssueFilter{Priority: ptr(1)}},
+		{name: "substring search (id_parser fallback)", query: "search-parity"},
+		{name: "substring search no match", query: "no-such-prefix-anywhere"},
+		{name: "label-driven (DISTINCT join)", filter: types.IssueFilter{Labels: []string{"alpha"}}},
+		{name: "ephemeral only", filter: types.IssueFilter{Ephemeral: ptr(true)}},
+		{name: "non-ephemeral only", filter: types.IssueFilter{Ephemeral: ptr(false)}},
+		{name: "limit applied", filter: types.IssueFilter{Limit: 2}},
+		// SortBy-varying rows. Without these the SQL ORDER BY that
+		// sqlbuild.LessSummary mirrors is only ever exercised at its default
+		// (priority ASC), so LessSummary-vs-SQL agreement on every other key
+		// is proven by unit test alone (TestLessSummaryMatchesLessAcrossSortKeys)
+		// and never against a real database. Each key is covered in both
+		// directions, and each is paired with a Limit so the merge's
+		// sort-before-trim actually decides which rows survive.
+		{name: "sort created asc + limit", filter: types.IssueFilter{SortBy: "created", Limit: 3}},
+		{name: "sort created desc + limit", filter: types.IssueFilter{SortBy: "created", SortDesc: true, Limit: 3}},
+		{name: "sort title asc + limit", filter: types.IssueFilter{SortBy: "title", Limit: 3}},
+		{name: "sort title desc + limit", filter: types.IssueFilter{SortBy: "title", SortDesc: true, Limit: 3}},
+		{name: "sort status asc + limit", filter: types.IssueFilter{SortBy: "status", Limit: 3}},
+		{name: "sort updated desc + limit", filter: types.IssueFilter{SortBy: "updated", SortDesc: true, Limit: 3}},
+		{name: "sort assignee asc + limit", filter: types.IssueFilter{SortBy: "assignee", Limit: 3}},
+		// "id" is the one Go-side key (sqlbuild.IsGoSideSort): SQL emits no
+		// ORDER BY for it, so this row pins that both paths still agree on the
+		// order the merge comparator produces.
+		{name: "sort id asc + limit", filter: types.IssueFilter{SortBy: "id", Limit: 3}},
+		{name: "sort id desc + limit", filter: types.IssueFilter{SortBy: "id", SortDesc: true, Limit: 3}},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			issues, err := store.SearchIssues(ctx, tc.query, tc.filter)
+			if err != nil {
+				t.Fatalf("SearchIssues: %v", err)
+			}
+			summaries, err := store.SearchIssueSummaries(ctx, tc.query, tc.filter)
+			if err != nil {
+				t.Fatalf("SearchIssueSummaries: %v", err)
+			}
+
+			fromIssues := make([]string, len(issues))
+			for i, issue := range issues {
+				fromIssues[i] = issue.ID
+			}
+			fromSummaries := make([]string, len(summaries))
+			for i, s := range summaries {
+				fromSummaries[i] = s.ID
+			}
+
+			// Order-sensitive: both paths share the same ORDER BY, so unlike
+			// equalStringSlices (which sorts before comparing and only proves
+			// the same ID set), this must also catch drift in relative row order.
+			if !slices.Equal(fromIssues, fromSummaries) {
+				t.Errorf("SearchIssues vs SearchIssueSummaries disagree:\n  SearchIssues:         %v\n  SearchIssueSummaries: %v",
+					fromIssues, fromSummaries)
+			}
+		})
+	}
+}
+
+// TestSearchIssueSummaries_FieldsMatchSearchIssues asserts that every field
+// types.IssueSummary carries agrees with the corresponding types.Issue field
+// for the same row, including the nullable/derived fields most likely to
+// silently drift from ScanIssueFrom if ScanIssueSummaryFrom's column list or
+// scan order falls out of sync: Pinned, Labels, Assignee, and ClosedAt.
+//
+// The fixture seeds wisps as well as durable beads, because the wisp-plane
+// markers are the fields with the most room to drift: they are read from a
+// second table (searchInTx merges wisps into every non-SkipWisps result) and
+// they are the newest columns in IssueSummaryColumns. A durable-only fixture
+// would leave all four at their zero values and pass whether or not the
+// summary path reads them at all.
+func TestSearchIssueSummaries_FieldsMatchSearchIssues(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	pinned := &types.Issue{
+		ID:        "search-summary-pinned",
+		Title:     "pinned reference issue",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+		Assignee:  "alice",
+		Pinned:    true,
+	}
+	if err := store.CreateIssue(ctx, pinned, "tester"); err != nil {
+		t.Fatalf("CreateIssue (pinned): %v", err)
+	}
+	if err := store.AddLabel(ctx, pinned.ID, "needs-summary-field", "tester"); err != nil {
+		t.Fatalf("AddLabel: %v", err)
+	}
+
+	const closedID = "search-summary-closed"
+	closedIssue := &types.Issue{
+		ID:        closedID,
+		Title:     "closed reference issue",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeBug,
+	}
+	if err := store.CreateIssue(ctx, closedIssue, "tester"); err != nil {
+		t.Fatalf("CreateIssue (closed): %v", err)
+	}
+	if err := store.CloseIssue(ctx, closedID, "done", "tester", "s1"); err != nil {
+		t.Fatalf("CloseIssue: %v", err)
+	}
+
+	// Wisp-plane rows. Ephemeral and NoHistory are mutually exclusive
+	// (types.Issue.Validate), so they need one row each; both carry a WispType
+	// so a dropped wisp_type column cannot pass as an empty-string match.
+	ephemeralWisp := &types.Issue{
+		Title:     "ephemeral summary wisp",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+		Ephemeral: true,
+		WispType:  types.WispTypeHeartbeat,
+	}
+	if err := store.CreateIssue(ctx, ephemeralWisp, "tester"); err != nil {
+		t.Fatalf("CreateIssue (ephemeral wisp): %v", err)
+	}
+	noHistoryWisp := &types.Issue{
+		Title:     "no-history summary wisp",
+		Status:    types.StatusOpen,
+		Priority:  3,
+		IssueType: types.TypeTask,
+		NoHistory: true,
+		WispType:  types.WispTypeEscalation,
+	}
+	if err := store.CreateIssue(ctx, noHistoryWisp, "tester"); err != nil {
+		t.Fatalf("CreateIssue (no-history wisp): %v", err)
+	}
+
+	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
+	if err != nil {
+		t.Fatalf("SearchIssues: %v", err)
+	}
+	summaries, err := store.SearchIssueSummaries(ctx, "", types.IssueFilter{})
+	if err != nil {
+		t.Fatalf("SearchIssueSummaries: %v", err)
+	}
+	if len(summaries) != len(issues) {
+		t.Fatalf("SearchIssueSummaries returned %d rows, SearchIssues returned %d", len(summaries), len(issues))
+	}
+
+	byID := make(map[string]*types.Issue, len(issues))
+	for _, issue := range issues {
+		byID[issue.ID] = issue
+	}
+
+	// Guard against a vacuous pass: if the wisp merge stopped returning wisps,
+	// every marker assertion below would compare zero to zero and succeed.
+	wispRows := 0
+	for _, s := range summaries {
+		if s.Ephemeral || s.NoHistory {
+			wispRows++
+		}
+	}
+	if wispRows < 2 {
+		t.Fatalf("expected both seeded wisps in the summary result, got %d wisp rows out of %d; "+
+			"the marker assertions below would be vacuous", wispRows, len(summaries))
+	}
+
+	for _, s := range summaries {
+		issue, ok := byID[s.ID]
+		if !ok {
+			t.Fatalf("SearchIssueSummaries returned %q, not present in SearchIssues result", s.ID)
+		}
+		if s.Title != issue.Title {
+			t.Errorf("%s: Title = %q, want %q", s.ID, s.Title, issue.Title)
+		}
+		if s.Status != issue.Status {
+			t.Errorf("%s: Status = %q, want %q", s.ID, s.Status, issue.Status)
+		}
+		if s.Priority != issue.Priority {
+			t.Errorf("%s: Priority = %d, want %d", s.ID, s.Priority, issue.Priority)
+		}
+		if s.IssueType != issue.IssueType {
+			t.Errorf("%s: IssueType = %q, want %q", s.ID, s.IssueType, issue.IssueType)
+		}
+		if s.Assignee != issue.Assignee {
+			t.Errorf("%s: Assignee = %q, want %q", s.ID, s.Assignee, issue.Assignee)
+		}
+		if s.Pinned != issue.Pinned {
+			t.Errorf("%s: Pinned = %v, want %v", s.ID, s.Pinned, issue.Pinned)
+		}
+		if !equalStringSlices(s.Labels, issue.Labels) {
+			t.Errorf("%s: Labels = %v, want %v", s.ID, s.Labels, issue.Labels)
+		}
+		if !s.CreatedAt.Equal(issue.CreatedAt) {
+			t.Errorf("%s: CreatedAt = %v, want %v", s.ID, s.CreatedAt, issue.CreatedAt)
+		}
+		if !s.UpdatedAt.Equal(issue.UpdatedAt) {
+			t.Errorf("%s: UpdatedAt = %v, want %v", s.ID, s.UpdatedAt, issue.UpdatedAt)
+		}
+		switch {
+		case s.ClosedAt == nil && issue.ClosedAt == nil:
+			// both nil: fine
+		case s.ClosedAt == nil || issue.ClosedAt == nil:
+			t.Errorf("%s: ClosedAt nil-ness mismatch: summary=%v issue=%v", s.ID, s.ClosedAt, issue.ClosedAt)
+		case !s.ClosedAt.Equal(*issue.ClosedAt):
+			t.Errorf("%s: ClosedAt = %v, want %v", s.ID, *s.ClosedAt, *issue.ClosedAt)
+		}
+		if s.Ephemeral != issue.Ephemeral {
+			t.Errorf("%s: Ephemeral = %v, want %v", s.ID, s.Ephemeral, issue.Ephemeral)
+		}
+		if s.NoHistory != issue.NoHistory {
+			t.Errorf("%s: NoHistory = %v, want %v", s.ID, s.NoHistory, issue.NoHistory)
+		}
+		if s.WispType != issue.WispType {
+			t.Errorf("%s: WispType = %q, want %q", s.ID, s.WispType, issue.WispType)
+		}
+		if s.StorageClass != issue.StorageClass {
+			t.Errorf("%s: StorageClass = %q, want %q", s.ID, s.StorageClass, issue.StorageClass)
+		}
 	}
 }
 

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/issueops"
 )
 
 func bdProxiedClose(t *testing.T, bd, dir string, args ...string) string {
@@ -40,6 +41,19 @@ func bdProxiedCloseFail(t *testing.T, bd, dir string, args ...string) string {
 			strings.Join(args, " "), stdout, stderr)
 	}
 	return stdout + stderr
+}
+
+// lastJSONObjectLine returns the last line of s that looks like a compact JSON
+// object, or "". Partial-failure stderr is the per-id refusal prose followed by
+// the machine-readable summary, so the report is the last such line.
+func lastJSONObjectLine(s string) string {
+	lines := strings.Split(strings.TrimSpace(s), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if line := strings.TrimSpace(lines[i]); strings.HasPrefix(line, "{") {
+			return line
+		}
+	}
+	return ""
 }
 
 func bdProxiedCloseJSON(t *testing.T, bd, dir string, args ...string) []*types.Issue {
@@ -270,6 +284,14 @@ func TestProxiedServerClose(t *testing.T) {
 			t.Errorf("close_reason: got %q, want %q", got, "wontfix")
 		}
 	})
+}
+
+// TestProxiedServerCloseB holds more of TestProxiedServerClose's cases, split
+// off so the bd_proxied_test shard manifest can place them on another shard.
+func TestProxiedServerCloseB(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
 
 	t.Run("close_with_comment_alias", func(t *testing.T) {
 		t.Parallel()
@@ -335,6 +357,20 @@ func TestProxiedServerClose(t *testing.T) {
 			t.Errorf("expected 'not found' error, got: %s", out)
 		}
 	})
+}
+
+// TestProxiedServerClose3 was split off TestProxiedServerClose in
+// gastownhall/beads#7173 (as TestProxiedServerClose2 was before it) so that
+// no single top-level suite carries 23 bd-init subtests: that one parent
+// alone cost ~2060 slot-seconds under -test.parallel=4 and pushed its shard
+// of the since-retired 15-shard legacy jobs past go test's 15m timeout on
+// every run. Those 23 now sit in TestProxiedServerClose,
+// TestProxiedServerCloseB, TestProxiedServerClose3 and
+// TestProxiedServerClose4. Its own second half is TestProxiedServerClose4.
+func TestProxiedServerClose3(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
 
 	t.Run("close_blocked_refuses_without_force", func(t *testing.T) {
 		t.Parallel()
@@ -363,6 +399,90 @@ func TestProxiedServerClose(t *testing.T) {
 		}
 	})
 
+	t.Run("close_partial_failure_exits_nonzero", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "cpf")
+		closable := bdProxiedCreate(t, bd, p.dir, "Closable")
+		blocker := bdProxiedCreate(t, bd, p.dir, "Blocker")
+		blocked := bdProxiedCreate(t, bd, p.dir, "Blocked", "--deps", "depends-on:"+blocker.ID)
+		out := bdProxiedCloseFail(t, bd, p.dir, closable.ID, blocked.ID)
+		if !strings.Contains(out, "1 of 2 issues failed to close") {
+			t.Errorf("expected partial-failure summary, got: %s", out)
+		}
+		db := openProxiedDB(t, p)
+		if got := readStatus(t, db, closable.ID); got != types.StatusClosed {
+			t.Errorf("closable issue status = %q, want closed despite the refused sibling", got)
+		}
+		if got := readStatus(t, db, blocked.ID); got == types.StatusClosed {
+			t.Error("blocked issue should remain open without --force")
+		}
+	})
+
+	// The machine-readable half of the #6648 contract. A JSON consumer is
+	// exactly the caller the issue was filed for, so exit 1 must come with a
+	// payload naming the failed ids instead of prose it would have to scrape —
+	// while stdout keeps the success-shaped closed-issues array, the way
+	// bd update's reportUpdateFailures already splits them.
+	t.Run("close_partial_failure_json_names_the_failed_ids", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "cpj")
+		closable := bdProxiedCreate(t, bd, p.dir, "JSON closable")
+		blocker := bdProxiedCreate(t, bd, p.dir, "JSON blocker")
+		blocked := bdProxiedCreate(t, bd, p.dir, "JSON blocked", "--deps", "depends-on:"+blocker.ID)
+
+		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "close", "--json", closable.ID, blocked.ID)
+		if err == nil {
+			t.Fatalf("expected a partial batch close to exit nonzero\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+
+		// stdout keeps the success shape: just the survivor.
+		start := strings.Index(stdout, "[")
+		if start < 0 {
+			t.Fatalf("expected the closed-issues array on stdout, got:\n%s", stdout)
+		}
+		var closed []*types.Issue
+		if jsonErr := json.Unmarshal([]byte(stdout[start:]), &closed); jsonErr != nil {
+			t.Fatalf("parse closed array: %v\nraw: %s", jsonErr, stdout[start:])
+		}
+		if len(closed) != 1 || closed[0].ID != closable.ID {
+			t.Fatalf("stdout closed array = %d issue(s) %v, want only the survivor %s", len(closed), closed, closable.ID)
+		}
+
+		// stderr's last line is the failure report.
+		line := lastJSONObjectLine(stderr)
+		if line == "" {
+			t.Fatalf("expected a compact JSON failure line on stderr, got:\n%s", stderr)
+		}
+		var report struct {
+			Error  string `json:"error"`
+			Failed []struct {
+				ID    string `json:"id"`
+				Error string `json:"error"`
+			} `json:"failed"`
+		}
+		if jsonErr := json.Unmarshal([]byte(line), &report); jsonErr != nil {
+			t.Fatalf("parse failure report: %v\nraw: %s", jsonErr, line)
+		}
+		if report.Error != "1 of 2 issues failed to close" {
+			t.Errorf("failure report error = %q, want the N of M summary", report.Error)
+		}
+		if len(report.Failed) != 1 || report.Failed[0].ID != blocked.ID {
+			t.Fatalf("failure report named %+v, want exactly the refused id %s", report.Failed, blocked.ID)
+		}
+		if report.Failed[0].Error == "" {
+			t.Errorf("failure report for %s carried no reason", blocked.ID)
+		}
+
+		// failed[].error is the TYPED error, the same on this route as on the
+		// direct one — see the twin assertions in TestEmbeddedCloseBasic/
+		// close_partial_failure_json_names_the_failed_ids. The --force hint is
+		// advice for a human reader, so it belongs on the stderr line above and
+		// not in the field a --json consumer keys off; recording the decorated
+		// display line here gave the identical refusal two spellings depending
+		// on which route the caller was on.
+		assertCloseFailedErrorIsTyped(t, report.Failed[0].Error, stderr)
+	})
+
 	t.Run("close_pinned_refuses_without_force", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "cpr")
@@ -386,10 +506,26 @@ func TestProxiedServerClose(t *testing.T) {
 			t.Errorf("status: got %q, want closed", got)
 		}
 	})
+}
 
-	// ga-ktn9pe.4.8: twin of TestEmbeddedClose/close_boolean_pinned_reclose_is_idempotent.
-	// Both close paths must agree — a fix on one only is the divergence class #5217
-	// just closed.
+// TestProxiedServerClose4 is the second half of TestProxiedServerClose3. With
+// all 12 of its bd-init subtests in one parent, whichever 15-shard legacy
+// shard hosted Close3 timed out in turn (6, then 1) while shard 5 dropped to
+// 5m, so the remaining weight is carried as two parents of six on two shards
+// (gastownhall/beads#7173).
+func TestProxiedServerClose4(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+
+	// ga-ktn9pe.4.8: this used to have an embedded twin
+	// (TestEmbeddedClose/close_boolean_pinned_reclose_is_idempotent), but
+	// bd-1rh.1 (#5287) trimmed it along with the embedded suite's other
+	// pinned-close subtests as redundant with this proxied coverage, so this
+	// is now the sole owner of the boolean-pinned-reclose contract. Both
+	// close paths had to agree before the trim — a fix on one only was the
+	// divergence class #5217 just closed — so treat any future embedded
+	// pinned-close test as needing to stay consistent with this one.
 	t.Run("close_boolean_pinned_reclose_is_idempotent", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "cbpr")
@@ -629,6 +765,14 @@ func TestProxiedServerClose2(t *testing.T) {
 			t.Errorf("expected single-issue error, got: %s", out)
 		}
 	})
+}
+
+// TestProxiedServerClose2B holds more of TestProxiedServerClose2's cases, split
+// off so the bd_proxied_test shard manifest can place them on another shard.
+func TestProxiedServerClose2B(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
 
 	t.Run("close_suggest_next_multiple_ids_fails", func(t *testing.T) {
 		t.Parallel()
@@ -771,6 +915,31 @@ func TestProxiedServerClose2(t *testing.T) {
 		}
 	})
 
+	t.Run("json_reports_auto_closed_molecule", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "jacm")
+		root := bdProxiedCreate(t, bd, p.dir, "Molecule root", "-t", "epic", "--labels", "template")
+		s1 := bdProxiedCreate(t, bd, p.dir, "Step 1", "--parent", root.ID)
+		s2 := bdProxiedCreate(t, bd, p.dir, "Step 2", "--parent", root.ID)
+		s3 := bdProxiedCreate(t, bd, p.dir, "Step 3", "--parent", root.ID)
+		bdProxiedClose(t, bd, p.dir, s1.ID)
+		out := bdProxiedClose(t, bd, p.dir, "--json", s2.ID, s3.ID)
+		requireCloseJSONReportsAutoClosedMolecule(t, out, []string{s2.ID, s3.ID}, root.ID)
+	})
+
+	t.Run("json_reports_molecule_auto_close_refusal", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "jmar")
+		root := bdProxiedCreate(t, bd, p.dir, "Molecule root", "-t", "epic", "--labels", "template", "--assignee", "someone-else")
+		s1 := bdProxiedCreate(t, bd, p.dir, "Step 1", "--parent", root.ID)
+		out := bdProxiedClose(t, bd, p.dir, "--actor", "json-closer", "--json", s1.ID)
+		requireCloseJSONReportsMoleculeRefusal(t, out, s1.ID, root.ID,
+			&issueops.CloseNotAssigneeError{IssueID: root.ID, Assignee: "someone-else", Actor: "json-closer"})
+		if got := readStatus(t, openProxiedDB(t, p), root.ID); got != types.StatusOpen {
+			t.Errorf("a root assigned to another actor must stay open, got %q", got)
+		}
+	})
+
 	t.Run("hooks_fire_on_close", func(t *testing.T) {
 		t.Parallel()
 		marker := filepath.Join(t.TempDir(), "on_close_marker")
@@ -884,4 +1053,72 @@ func TestProxiedServerCloseConcurrent(t *testing.T) {
 	if openCount != 0 {
 		t.Errorf("open issues remain after concurrent close: %d", openCount)
 	}
+}
+
+// bd close on a bead gate evaluates the awaited bead through the proxied read
+// path. Before #5861 item 1 was fixed this route refused every bead gate with
+// "no local store available", closed target or not, while bd gate check
+// resolved the same gate.
+func TestProxiedServerCloseBeadGate(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+
+	createBeadGate := func(t *testing.T, p proxiedProject) (gateID string, awaited *types.Issue) {
+		t.Helper()
+		parked := bdProxiedCreate(t, bd, p.dir, "Parked bead")
+		awaited = bdProxiedCreate(t, bd, p.dir, "Awaited bead")
+		out, stderr, err := bdProxiedRunBuffers(t, bd, p.dir,
+			"gate", "create", "--type=bead", "--blocks", parked.ID, "--await-id", awaited.ID, "--reason", "waiting on "+awaited.ID)
+		if err != nil {
+			t.Fatalf("bead gate create failed: %v\nstderr:\n%s", err, stderr)
+		}
+		return parseCreatedGateID(t, out), awaited
+	}
+
+	t.Run("awaited_open_refuses_with_its_status", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "cbgo")
+		gateID, awaited := createBeadGate(t, p)
+
+		out := bdProxiedCloseFail(t, bd, p.dir, gateID)
+		if strings.Contains(out, "no local store available") {
+			t.Errorf("close read the gate through a store-less getter:\n%s", out)
+		}
+		if !strings.Contains(out, "gate condition not satisfied") || !strings.Contains(out, "bead "+awaited.ID+" is open") {
+			t.Errorf("expected the awaited bead's status in the refusal, got:\n%s", out)
+		}
+		db := openProxiedDB(t, p)
+		if got := readStatus(t, db, gateID); got != types.StatusOpen {
+			t.Errorf("refused gate should stay open, got %q", got)
+		}
+	})
+
+	t.Run("awaited_closed_closes", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "cbgc")
+		gateID, awaited := createBeadGate(t, p)
+
+		bdProxiedClose(t, bd, p.dir, awaited.ID)
+		bdProxiedClose(t, bd, p.dir, gateID, "-r", "awaited bead closed")
+		db := openProxiedDB(t, p)
+		if got := readStatus(t, db, gateID); got != types.StatusClosed {
+			t.Errorf("gate should close once its awaited bead is closed, got %q", got)
+		}
+		if got := readCloseReason(t, db, gateID); got != "awaited bead closed" {
+			t.Errorf("close_reason: got %q, want %q", got, "awaited bead closed")
+		}
+	})
+
+	t.Run("force_skips_the_check", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "cbgf")
+		gateID, _ := createBeadGate(t, p)
+
+		bdProxiedClose(t, bd, p.dir, gateID, "--force")
+		db := openProxiedDB(t, p)
+		if got := readStatus(t, db, gateID); got != types.StatusClosed {
+			t.Errorf("--force should close the gate regardless, got %q", got)
+		}
+	})
 }

@@ -13,7 +13,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 )
 
-// TestEventsJournalProxiedServer is the end-to-end guard for bd's SECOND write
+// TestProxiedServerEventsJournal is the end-to-end guard for bd's SECOND write
 // plumbing. In proxied-server mode no store is ever opened: commands dispatch
 // through the unit-of-work provider, whose repositories reach the same issueops
 // emit helpers over their own pinned transactions.
@@ -24,7 +24,7 @@ import (
 // outside: every command succeeds, every write lands, and the journal is simply
 // empty. Only an end-to-end read can see it, which is why this test drives the
 // real binary against a real proxied server rather than asserting on wiring.
-func TestEventsJournalProxiedServer(t *testing.T) {
+func TestProxiedServerEventsJournal(t *testing.T) {
 	requireProxiedServerEnv(t)
 	t.Parallel()
 
@@ -114,10 +114,10 @@ func TestEventsJournalProxiedServer(t *testing.T) {
 	}
 }
 
-// TestEventsJournalProxiedServerOffByDefault pins the default: a proxied
+// TestProxiedServerEventsJournalOffByDefault pins the default: a proxied
 // workspace that never asked for the journal writes no rows, so the feature
 // costs an ordinary team nothing.
-func TestEventsJournalProxiedServerOffByDefault(t *testing.T) {
+func TestProxiedServerEventsJournalOffByDefault(t *testing.T) {
 	requireProxiedServerEnv(t)
 	t.Parallel()
 

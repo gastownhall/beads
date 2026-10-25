@@ -6,6 +6,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/spf13/viper"
 )
 
 // envSnapshot saves and clears BD_/BEADS_ environment variables.
@@ -277,6 +279,46 @@ func TestInitialize_IgnoresModuleRootConfigWhenRequested(t *testing.T) {
 	}
 	if got := ConfigFileUsed(); got != "" {
 		t.Fatalf("ConfigFileUsed() = %q, want empty when repo config is ignored", got)
+	}
+}
+
+// TestInitialize_StopsAtBeadsCeiling pins that BEADS_CEILING_DIRECTORIES keeps
+// the config.yaml walk from reaching a .beads at or above the ceiling — here
+// an unparseable one that would fail Initialize if it were read.
+func TestInitialize_StopsAtBeadsCeiling(t *testing.T) {
+	restore := envSnapshot(t)
+	defer restore()
+
+	tmpDir := t.TempDir()
+	homeDir := filepath.Join(tmpDir, "home")
+	configDir := filepath.Join(tmpDir, "xdg-config")
+	ceilingDir := filepath.Join(tmpDir, "ceiling")
+	workDir := filepath.Join(ceilingDir, "work")
+	for _, dir := range []string{homeDir, configDir, workDir, filepath.Join(tmpDir, ".beads"), filepath.Join(ceilingDir, ".beads")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, dir := range []string{tmpDir, ceilingDir} {
+		if err := os.WriteFile(filepath.Join(dir, ".beads", "config.yaml"), []byte("json: [unclosed\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Setenv("HOME", homeDir)
+	t.Setenv("XDG_CONFIG_HOME", configDir)
+	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "")
+	t.Setenv("BEADS_CEILING_DIRECTORIES", ceilingDir)
+	t.Chdir(workDir)
+
+	ResetForTesting()
+	defer ResetForTesting()
+
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() read config at or above the ceiling: %v", err)
+	}
+	if got := ConfigFileUsed(); got != "" {
+		t.Fatalf("ConfigFileUsed() = %q, want none below the ceiling", got)
 	}
 }
 
@@ -1688,6 +1730,34 @@ func TestGetStringFromDir(t *testing.T) {
 		}
 	})
 
+	t.Run("literal flat dotted key", func(t *testing.T) {
+		dir := t.TempDir()
+		writeConfig(t, dir, "dolt.host: 127.0.0.1\n")
+		if got := GetStringFromDir(dir, "dolt.host"); got != "127.0.0.1" {
+			t.Errorf("got %q, want %q", got, "127.0.0.1")
+		}
+	})
+
+	t.Run("literal flat dotted key wins over nested spelling", func(t *testing.T) {
+		dir := t.TempDir()
+		writeConfig(t, dir, "dolt.host: 127.0.0.1\ndolt:\n  host: 10.0.0.1\n")
+		got := GetStringFromDir(dir, "dolt.host")
+		if got != "127.0.0.1" {
+			t.Errorf("got %q, want the literal-key value %q", got, "127.0.0.1")
+		}
+
+		savedV := v
+		v = viper.New()
+		t.Cleanup(func() { v = savedV })
+		v.SetConfigFile(filepath.Join(dir, "config.yaml"))
+		if err := v.ReadInConfig(); err != nil {
+			t.Fatalf("ReadInConfig: %v", err)
+		}
+		if viperGot := GetString("dolt.host"); viperGot != got {
+			t.Errorf("readers disagree: GetString = %q, GetStringFromDir = %q", viperGot, got)
+		}
+	})
+
 	t.Run("non-existent file returns empty string", func(t *testing.T) {
 		dir := t.TempDir()
 		if got := GetStringFromDir(dir, "dolt.auto-start"); got != "" {
@@ -1893,6 +1963,74 @@ func TestInitialize_ExternalBEADSDirDoesNotMergeCallerProjectConfig(t *testing.T
 	}
 	if got := GetBool("json"); got {
 		t.Fatalf("GetBool(json) = %v, want false", got)
+	}
+}
+
+// TestWithBeadsDirLoadsTheBoundWorkspacesConfig covers a command about to
+// create a workspace inside another one (bd bootstrap for a fresh rig): the
+// process loaded the enclosing workspace's config.yaml, and fn must see what a
+// command bound to the new workspace loads, its own config.yaml once it has
+// one over the user config files, never the enclosing file. The loaded
+// configuration, a runtime Set included, comes back afterwards, and BEADS_DIR
+// is never touched.
+func TestWithBeadsDirLoadsTheBoundWorkspacesConfig(t *testing.T) {
+	restore := envSnapshot(t)
+	defer restore()
+	ResetForTesting()
+	t.Cleanup(ResetForTesting)
+
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("APPDATA", filepath.Join(root, "appdata"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "xdg-config"))
+	writeConfigActor(t, filepath.Join(home, ".beads", "config.yaml"), "legacy")
+	town := filepath.Join(root, "town")
+	writeConfigActor(t, filepath.Join(town, ".beads", "config.yaml"), "town")
+	rig := filepath.Join(town, "rig")
+	if err := os.MkdirAll(rig, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rigBeadsDir := filepath.Join(rig, ".beads")
+	t.Chdir(rig)
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+	Set("json", true)
+	if got := GetString("actor"); got != "town" {
+		t.Fatalf("precondition: actor = %q, want the enclosing workspace's %q", got, "town")
+	}
+
+	for _, step := range []struct{ name, want string }{
+		{name: "no config.yaml of its own", want: "legacy"},
+		{name: "its own config.yaml", want: "rig"},
+	} {
+		if step.want == "rig" {
+			writeConfigActor(t, filepath.Join(rigBeadsDir, "config.yaml"), "rig")
+		}
+		var actor string
+		var jsonSet bool
+		if err := WithBeadsDir(rigBeadsDir, func() {
+			actor, jsonSet = GetString("actor"), GetBool("json")
+		}); err != nil {
+			t.Fatalf("%s: WithBeadsDir: %v", step.name, err)
+		}
+		if actor != step.want {
+			t.Errorf("%s: actor inside = %q, want %q", step.name, actor, step.want)
+		}
+		if jsonSet {
+			t.Errorf("%s: a Set on the loaded configuration leaked into fn", step.name)
+		}
+		if got := GetString("actor"); got != "town" {
+			t.Errorf("%s: actor after = %q, want the loaded %q back", step.name, got, "town")
+		}
+		if !GetBool("json") {
+			t.Errorf("%s: the loaded configuration's Set was not restored", step.name)
+		}
+		if got, ok := os.LookupEnv("BEADS_DIR"); ok {
+			t.Errorf("%s: BEADS_DIR = %q, want it left unset", step.name, got)
+		}
 	}
 }
 

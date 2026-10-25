@@ -22,6 +22,15 @@ import (
 
 func runListProxiedServer(cmd *cobra.Command, ctx context.Context, out io.Writer, in listInput) error {
 	if in.repoOverrideSet {
+		// Unreachable from the CLI: listCmd registers no --repo flag, so
+		// gatherListInput's Changed("repo") is always false. Kept as a
+		// defensive guard for the day one is added, and deliberately NOT keyed
+		// on proxyCommandCapabilities["list"] -- that row reads
+		// notApplicable() precisely because the flag is absent, so a
+		// command-keyed assert would resolve it to "allowed" and let a repo
+		// override through. The mode-wide rule is the one that still means
+		// something here, and it renders the same typed code/mutates on stdout
+		// under --json.
 		return HandleProxyCapabilityError(AssertProxyCapability(ProxyModeProxied, ProxyCapRepo))
 	}
 	switch {
@@ -92,6 +101,8 @@ func runListProxiedPage(ctx context.Context, out io.Writer, in listInput) error 
 	// none.
 	textRequest := in.ListRequest
 	textRequest.SkipCounts = true
+	// And no comment hydration, for the reason the direct route drops it.
+	textRequest.IncludeComments = false
 	page, err := rd.List(ctx, textRequest)
 	if err != nil {
 		return err
@@ -101,10 +112,7 @@ func runListProxiedPage(ctx context.Context, out io.Writer, in listInput) error 
 }
 
 func runListProxiedWatch(_ *cobra.Command, ctx context.Context, in listInput) error {
-	if in.formatStr != "" {
-		return errors.New("--format under --proxied-server --watch is not supported")
-	}
-
+	// --format with --watch is refused in gatherListInput, on both routes.
 	uw, filter, err := openAndPrepare(ctx, in)
 	if err != nil {
 		return err
@@ -156,7 +164,12 @@ func runListProxiedWatch(_ *cobra.Command, ctx context.Context, in listInput) er
 	if err != nil {
 		return fmt.Errorf("initial query: %w", err)
 	}
-	displayPrettyListWithDeps(issues, true, deps, hasMore, in.ReadyFlag, in.Status)
+	// --watch renders no gate (the nil gated map), here and on the direct route
+	// in displayWatchedIssueList: a bead the one-shot listing marks ⊘ keeps its
+	// plain status glyph while watched, and no refresh tick pays for the gate
+	// reads. Deliberate, not a forgotten argument — decorating watch means
+	// computing the map on every refresh.
+	displayPrettyListWithDepsMode(issues, true, deps, "", hasMore, in.ReadyFlag, in.Status, in.SortBy, in.Reverse, nil)
 	printTruncationHint(hasMore, in.effectiveLimit)
 	lastSnapshot := issueSnapshot(issues)
 
@@ -183,7 +196,8 @@ func runListProxiedWatch(_ *cobra.Command, ctx context.Context, in listInput) er
 			snap := issueSnapshot(issues)
 			if snap != lastSnapshot {
 				lastSnapshot = snap
-				displayPrettyListWithDeps(issues, true, deps, hasMore, in.ReadyFlag, in.Status)
+				// Undecorated, as the initial render above.
+				displayPrettyListWithDepsMode(issues, true, deps, "", hasMore, in.ReadyFlag, in.Status, in.SortBy, in.Reverse, nil)
 				printTruncationHint(hasMore, in.effectiveLimit)
 				fmt.Fprintf(os.Stderr, "\nWatching for changes... (Press Ctrl+C to exit)\n")
 			}
@@ -239,7 +253,10 @@ func renderProxiedListText(ctx context.Context, out io.Writer, issues []*types.I
 			printTruncationHint(truncated, in.effectiveLimit)
 			return nil
 		}
-		displayPrettyListWithDepsMode(issues, false, depsByIssueID, in.depsMode, truncated, in.ReadyFlag, in.Status)
+		// The gate decoration rides the edge map this route just read, so the
+		// proxied pretty listing says what the direct one says (wy-j2upyy).
+		displayPrettyListWithDepsMode(issues, false, depsByIssueID, in.depsMode, truncated, in.ReadyFlag, in.Status, in.SortBy, in.Reverse,
+			proxiedGatedIssueIDs(ctx, uw, issues, depsByIssueID))
 		printTruncationHint(truncated, in.effectiveLimit)
 		printSkipLabelsFooter(in.SkipLabels)
 		return nil
@@ -268,13 +285,21 @@ func renderProxiedListText(ctx context.Context, out io.Writer, issues []*types.I
 	}
 	blocking := newListBlocking(result)
 
+	// The proxied --json routes get gated_by from workapi.BuildIssueDetails;
+	// without this the proxied TEXT routes would render a plain OPEN row for
+	// the same bead (wy-j2upyy). --long renders no gate, so it pays nothing.
+	var gated map[string][]string
+	if ui.IsAgentMode() || !in.longFormat {
+		gated = proxiedGatedIssueIDsOwnUOW(ctx, issues)
+	}
+
 	var buf strings.Builder
 	switch {
 	case ui.IsAgentMode():
 		for _, issue := range issues {
-			formatAgentIssue(&buf, issue, blocking.blockedBy[issue.ID], blocking.blocks[issue.ID], blocking.parent[issue.ID])
+			formatAgentIssue(&buf, issue, blocking.blockedBy[issue.ID], blocking.blocks[issue.ID], blocking.parent[issue.ID], gated[issue.ID])
 		}
-		fmt.Print(buf.String())
+		fmt.Print(buf.String()) //nolint:forbidigo // Agent output is outside the --format contract.
 		printTruncationHint(truncated, in.effectiveLimit)
 		return nil
 	case in.longFormat:
@@ -284,7 +309,7 @@ func renderProxiedListText(ctx context.Context, out io.Writer, issues []*types.I
 		}
 	default:
 		for _, issue := range issues {
-			formatIssueCompact(&buf, issue, labelsMap[issue.ID], blocking.blockedBy[issue.ID], blocking.blocks[issue.ID], blocking.parent[issue.ID])
+			formatIssueCompact(&buf, issue, labelsMap[issue.ID], blocking.blockedBy[issue.ID], blocking.blocks[issue.ID], blocking.parent[issue.ID], gated[issue.ID])
 		}
 	}
 
@@ -293,7 +318,7 @@ func renderProxiedListText(ctx context.Context, out io.Writer, issues []*types.I
 	}
 
 	if err := ui.ToPager(buf.String(), ui.PagerOptions{NoPager: in.noPager}); err != nil {
-		if _, werr := fmt.Fprint(os.Stdout, buf.String()); werr != nil {
+		if _, werr := fmt.Fprint(os.Stdout, buf.String()); werr != nil { //nolint:forbidigo // Pager fallback is outside the --format contract.
 			fmt.Fprintf(os.Stderr, "Error writing output: %v\n", werr)
 		}
 	}

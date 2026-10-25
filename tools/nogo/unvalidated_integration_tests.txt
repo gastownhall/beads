@@ -1,0 +1,73 @@
+# F5 S2 Variant A: integration-tagged _test.go files no longer analyzed by
+# nogo (vet or golangci-lint) in any Bazel lane.
+#
+# test:integration, test:doltserver-integration and test:doltserver-cmd all
+# pass --norun_validations (.bazelrc); the one lane that used to validate
+# the integration configuration now runs a narrow nogo-only step
+# (bazel-integration's "Nogo: integration library files") that builds only
+# //internal/testutil/integration, not these test binaries. See
+# engdocs/LINTING.md and f5-spec.md §3/§5 S2 for the accepted trade-off
+# (about 15-22 farm worker-h/day saved).
+#
+# One repo-relative path per line, sorted, derived from source by
+# scripts/nogo_lint_policy_test.go's TestNogoIntegrationStepCoversItsConfiguration
+# (go/build tag matching: files that MatchFile selects with the
+# "integration" build tag but are not selected without it, restricted to
+# _test.go files).
+cmd/bd/ado_roundtrip_test.go
+cmd/bd/cli_fast_test.go
+cmd/bd/config_commit_server_integration_test.go
+cmd/bd/contributor_routing_e2e_test.go
+cmd/bd/delete_test.go
+cmd/bd/doctor_health_integration_test.go
+cmd/bd/dolt_autocommit_integration_test.go
+cmd/bd/dolt_autostart_lifecycle_integration_test.go
+cmd/bd/dolt_doctor_integration_test.go
+cmd/bd/dolt_metadata_e2e_test.go
+cmd/bd/gitlab_integration_test.go
+cmd/bd/import_missing_config_prefix_test.go
+cmd/bd/import_prefix_test.go
+cmd/bd/init_cancel_e2e_test.go
+cmd/bd/linear_roundtrip_test.go
+cmd/bd/migrate_dolt_mode_frontdoor_integration_test.go
+cmd/bd/reopen_defer_test.go
+cmd/bd/reparent_test.go
+cmd/bd/show_test.go
+cmd/bd/test_helpers_integration_test.go
+internal/beads/beads_hash_multiclone_test.go
+internal/beads/beads_integration_test.go
+internal/beads/beads_multidb_test.go
+internal/beads/beads_symlink_test.go
+internal/beads/routing_integration_test.go
+internal/beads/testmain_integration_test.go
+internal/compact/compactor_test.go
+internal/doltserver/dirty_state_test.go
+internal/doltserver/fdleak_integration_test.go
+internal/doltserver/lifecycle_integration_test.go
+internal/doltserver/port_race_test.go
+internal/doltserver/socket_integration_test.go
+internal/doltserver/testmain_integration_test.go
+internal/storage/dolt/federation_test.go
+internal/storage/dolt/fresh_bootstrap_heal_integration_test.go
+internal/storage/dolt/git_remote_shared_server_test.go
+internal/storage/dolt/git_remote_test.go
+internal/storage/dolt/initschema_0067_versioned_beads_replay_test.go
+internal/storage/dolt/initschema_0069_datetime_precision_replay_test.go
+internal/storage/dolt/initschema_idempotent_test.go
+internal/storage/dolt/initschema_multiprocess_test.go
+internal/storage/dolt/lenient_open_dirty_tables_integration_test.go
+internal/storage/dolt/multistore_multiprocess_test.go
+internal/storage/dolt/post_migration_pool_heal_integration_test.go
+internal/storage/dolt/pull_branch_tracking_integration_test.go
+internal/storage/dolt/route_logging_integration_test.go
+internal/storage/dolt/schema_cli_parity_integration_test.go
+internal/storage/dolt/wisp_delete_cascade_integration_test.go
+internal/storage/dolt/wisp_delete_cascade_tx_integration_test.go
+internal/testutil/fixtures/fixtures_test.go
+internal/testutil/integration/harness_test.go
+scripts/check_doc_freshness_test.go
+scripts/pr_preflight_test.go
+test/conformance/e2e_test.go
+test/conformance/roundtrip_test.go
+tests/regression/regression_test.go
+tests/regression/scenarios_test.go

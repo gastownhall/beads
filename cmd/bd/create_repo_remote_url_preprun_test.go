@@ -6,6 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/git"
 )
 
 // TestCreateRemoteRepoSkipsLocalDatabaseGuard is a regression test for a gap
@@ -54,6 +57,18 @@ func TestCreateRemoteRepoSkipsLocalDatabaseGuard(t *testing.T) {
 		t.Fatalf("chdir(%q): %v", noBeadsCwd, err)
 	}
 	t.Cleanup(func() { _ = os.Chdir(originalWD) })
+	// git and beads cache the cwd's repository and workspace process-wide. Start
+	// from caches that describe noBeadsCwd: a cache an earlier test filled from
+	// the package directory (a checkout, or a worktree whose main repository has
+	// a .beads) would hand create that workspace instead. Reset again on the
+	// way out, before the cwd is restored, so the next test does not inherit
+	// this directory's answers.
+	git.ResetCaches()
+	beads.ResetCaches()
+	t.Cleanup(func() {
+		git.ResetCaches()
+		beads.ResetCaches()
+	})
 
 	// Hide the `dolt` CLI so remotecache.Ensure fails fast and
 	// deterministically in CGO-enabled builds, without attempting a real network

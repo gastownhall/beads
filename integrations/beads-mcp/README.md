@@ -266,7 +266,7 @@ message.
 Run MCP inspector:
 ```bash
 # inside beads-mcp dir
-uv run fastmcp dev src/beads_mcp/server.py
+uv run fastmcp dev inspector src/beads_mcp/server.py
 ```
 
 Type checking (source maintenance, not part of baseline validation yet):

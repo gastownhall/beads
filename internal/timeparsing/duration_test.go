@@ -42,6 +42,28 @@ func TestParseCompactDuration(t *testing.T) {
 			want:  time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC),
 		},
 
+		// "min" is the unambiguous minute unit; bare "m" stays months (GH #6609)
+		{
+			name:  "+30min adds 30 minutes",
+			input: "+30min",
+			want:  time.Date(2025, 6, 15, 12, 30, 0, 0, time.UTC),
+		},
+		{
+			name:  "-15min subtracts 15 minutes",
+			input: "-15min",
+			want:  time.Date(2025, 6, 15, 11, 45, 0, 0, time.UTC),
+		},
+		{
+			name:  "90min without sign adds 90 minutes",
+			input: "90min",
+			want:  time.Date(2025, 6, 15, 13, 30, 0, 0, time.UTC),
+		},
+		{
+			name:  "+30m still adds 30 months",
+			input: "+30m",
+			want:  time.Date(2027, 12, 15, 12, 0, 0, 0, time.UTC),
+		},
+
 		// Valid negative durations (past)
 		{
 			name:  "-1d subtracts 1 day",
@@ -100,6 +122,16 @@ func TestParseCompactDuration(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name:    "30mins (plural) is invalid",
+			input:   "+30mins",
+			wantErr: true,
+		},
+		{
+			name:    "30minutes is invalid",
+			input:   "+30minutes",
+			wantErr: true,
+		},
+		{
 			name:    "1x (unknown unit) is invalid",
 			input:   "1x",
 			wantErr: true,
@@ -151,6 +183,8 @@ func TestParseCompactDuration(t *testing.T) {
 }
 
 func TestIsCompactDuration(t *testing.T) {
+	now := time.Date(2025, 6, 15, 12, 0, 0, 0, time.UTC)
+
 	tests := []struct {
 		input string
 		want  bool
@@ -159,21 +193,41 @@ func TestIsCompactDuration(t *testing.T) {
 		{"-1d", true},
 		{"+2w", true},
 		{"3m", true},
+		{"30m", true},
 		{"1y", true},
 		{"+24h", true},
+		{"+30min", true},
+		{"30min", true},
+		{"+30mins", false},
 		{"", false},
 		{"tomorrow", false},
 		{"2025-01-15", false},
 		{"6h+", false},
 		{"++1d", false},
 		{"1x", false},
+
+		// Units are lowercase. Folding case would make "30M" mean 30 months,
+		// the ambiguity "min" exists to avoid, so uppercase spellings are not
+		// compact durations.
+		{"30M", false},
+		{"+6H", false},
+		{"1D", false},
+		{"2W", false},
+		{"1Y", false},
+		{"30MIN", false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
-			got := isCompactDuration(tt.input)
+			got := IsCompactDuration(tt.input)
 			if got != tt.want {
-				t.Errorf("isCompactDuration(%q) = %v, want %v", tt.input, got, tt.want)
+				t.Errorf("IsCompactDuration(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+			// Callers classify with IsCompactDuration and then parse, so the
+			// two must agree on every row here.
+			_, err := ParseCompactDuration(tt.input, now)
+			if parsed := err == nil; parsed != got {
+				t.Errorf("IsCompactDuration(%q) = %v, but ParseCompactDuration error = %v", tt.input, got, err)
 			}
 		})
 	}

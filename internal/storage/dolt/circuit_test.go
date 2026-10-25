@@ -394,9 +394,9 @@ func TestCleanStaleCircuitBreakerFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Call the cleanup function with the test directory, in live-directory
-	// mode (closed files are left alone — they reflect an in-use breaker).
-	cleanStaleCircuitBreakerFilesIn(dir, false)
+	// Call the cleanup function with the test directory. The closed file was
+	// just written, so it reflects an in-use breaker and is left alone.
+	cleanStaleCircuitBreakerFilesIn(dir)
 
 	// Legacy port-0 file should be removed
 	if _, err := os.Stat(port0File); !os.IsNotExist(err) {
@@ -419,17 +419,16 @@ func TestCleanStaleCircuitBreakerFiles(t *testing.T) {
 	}
 }
 
-// TestCleanStaleCircuitBreakerFilesIn_LegacyRemovesClosed verifies that, in
-// legacy-directory mode (removeClosed=true), closed breaker files ARE swept —
-// unlike the live directory — but only past the legacyClosedSweepTTL mtime
-// threshold. The legacy "/tmp/beads-circuit" location (GH#4636) is not fully
-// abandoned: TMPDIR-less processes (launchd, cron, bare ssh) resolve
-// os.TempDir() to /tmp and rewrite live closed state there on every success,
-// and the old unconditional remove churned against them forever — recreate,
+// TestCleanStaleCircuitBreakerFilesIn_AgesOutClosed verifies that closed
+// breaker files ARE swept, but only past the closedSweepTTL mtime threshold.
+// Every directory the sweep visits has live writers — the live one by
+// definition, and the legacy "/tmp/beads-circuit" location (GH#4636) wherever
+// TMPDIR-less processes (launchd, cron, bare ssh) resolve os.TempDir() to /tmp
+// — and an unconditional remove churned against them forever: recreate,
 // delete, log, on every TMPDIR-set invocation (bd-uann8). A fresh closed file
 // is a live writer's state and must survive; an aged one is the GH#4636
 // ephemeral-port accumulation and must go.
-func TestCleanStaleCircuitBreakerFilesIn_LegacyRemovesClosed(t *testing.T) {
+func TestCleanStaleCircuitBreakerFilesIn_AgesOutClosed(t *testing.T) {
 	dir := t.TempDir()
 
 	// A closed file no writer has touched past the TTL: the true GH#4636 case.
@@ -438,35 +437,93 @@ func TestCleanStaleCircuitBreakerFilesIn_LegacyRemovesClosed(t *testing.T) {
 	if err := os.WriteFile(agedClosedFile, closedData, 0600); err != nil {
 		t.Fatal(err)
 	}
-	aged := time.Now().Add(-legacyClosedSweepTTL - time.Hour)
+	aged := time.Now().Add(-closedSweepTTL - time.Hour)
 	if err := os.Chtimes(agedClosedFile, aged, aged); err != nil {
 		t.Fatal(err)
 	}
 
-	// A freshly-written closed file: a live TMPDIR-less writer's state.
+	// A freshly-written closed file: a live writer's state.
 	freshClosedFile := filepath.Join(dir, "beads-dolt-circuit-127-0-0-1-8888.json")
 	if err := os.WriteFile(freshClosedFile, closedData, 0600); err != nil {
 		t.Fatal(err)
 	}
 
-	// Fresh open file should still survive the legacy sweep (age-based rule
-	// still applies to open/half-open state).
+	// Fresh open file should still survive the sweep (the age-based rule for
+	// open/half-open state is the TrippedAt one).
 	freshFile := filepath.Join(dir, "beads-dolt-circuit-127-0-0-1-5555.json")
 	freshData, _ := json.Marshal(circuitState{State: circuitOpen, TrippedAt: time.Now()})
 	if err := os.WriteFile(freshFile, freshData, 0600); err != nil {
 		t.Fatal(err)
 	}
 
-	cleanStaleCircuitBreakerFilesIn(dir, true)
+	cleanStaleCircuitBreakerFilesIn(dir)
 
 	if _, err := os.Stat(agedClosedFile); !os.IsNotExist(err) {
-		t.Errorf("aged legacy closed breaker file should have been removed: %s", agedClosedFile)
+		t.Errorf("aged closed breaker file should have been removed: %s", agedClosedFile)
 	}
 	if _, err := os.Stat(freshClosedFile); err != nil {
-		t.Errorf("fresh closed breaker file (live TMPDIR-less writer) should NOT have been removed: %s", freshClosedFile)
+		t.Errorf("fresh closed breaker file (live writer) should NOT have been removed: %s", freshClosedFile)
 	}
 	if _, err := os.Stat(freshFile); err != nil {
 		t.Errorf("fresh open breaker file should NOT have been removed: %s", freshFile)
+	}
+}
+
+// TestCleanStaleCircuitBreakerFiles_AgesOutClosedLiveFiles is the live
+// directory's half of the GH#4636 cleanup. Every host:port:db a process opens
+// leaves a closed-state file behind, and ephemeral test-server ports mint a
+// new name each time, so the live directory only ever grew: a dev host
+// accumulated 2335 closed files, and every store open read every one of them.
+// A closed file nobody has written for the TTL says nothing an absent file
+// does not (readState reads absent as closed, and a closed state's failure
+// count only matters inside circuitFailureWindow), so it goes. A recently
+// written one is a breaker some process is using, whatever its failure
+// count, and stays.
+func TestCleanStaleCircuitBreakerFiles_AgesOutClosedLiveFiles(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(testCircuitBreakerDirEnv, dir)
+
+	write := func(name string, state circuitState, mtime time.Time) string {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		data, err := json.Marshal(state)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, mtime, mtime); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	now := time.Now()
+	// Literal ages, not ones derived from closedSweepTTL, so the test pins the
+	// TTL's width: a writer that runs once a day keeps its state, and a file
+	// idle for more than a day goes.
+	aged := write("beads-dolt-circuit-127-0-0-1-41869-mtxdl.json",
+		circuitState{State: circuitClosed}, now.Add(-25*time.Hour))
+	daily := write("beads-dolt-circuit-127-0-0-1-3307-gb.json",
+		circuitState{State: circuitClosed}, now.Add(-23*time.Hour))
+	fresh := write("beads-dolt-circuit-127-0-0-1-3307-ga.json",
+		circuitState{State: circuitClosed}, now)
+	counting := write("beads-dolt-circuit-127-0-0-1-3307-gc.json",
+		circuitState{State: circuitClosed, Failures: 2, FirstFailure: now, LastFailure: now}, now)
+
+	CleanStaleCircuitBreakerFiles()
+
+	if _, err := os.Stat(aged); !os.IsNotExist(err) {
+		t.Errorf("closed live breaker file untouched past the TTL should have been removed: %s (stat err %v)", aged, err)
+	}
+	if _, err := os.Stat(daily); err != nil {
+		t.Errorf("closed live breaker file written within the last day should NOT have been removed: %v", err)
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Errorf("recently written closed live breaker file should NOT have been removed: %v", err)
+	}
+	if _, err := os.Stat(counting); err != nil {
+		t.Errorf("closed live breaker file counting failures should NOT have been removed: %v", err)
 	}
 }
 

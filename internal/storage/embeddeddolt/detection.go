@@ -10,16 +10,24 @@ import (
 // non-symlink directory with at least one entry, but entry names and private
 // repository files are never interpreted or opened.
 func HasRepository(beadsDir string) bool {
+	return len(Databases(beadsDir)) > 0
+}
+
+// Databases names, sorted, the databases of beadsDir's embedded Dolt
+// repository: the non-symlink directories under embeddeddolt that pass
+// HasRepository's .dolt marker probe. It is empty when beadsDir holds none.
+func Databases(beadsDir string) []string {
 	root := filepath.Join(beadsDir, "embeddeddolt")
 	info, err := os.Lstat(root)
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return false
+		return nil
 	}
-	databases, err := os.ReadDir(root)
+	entries, err := os.ReadDir(root)
 	if err != nil {
-		return false
+		return nil
 	}
-	for _, database := range databases {
+	var databases []string
+	for _, database := range entries {
 		if !database.IsDir() || database.Type()&os.ModeSymlink != 0 {
 			continue
 		}
@@ -27,10 +35,10 @@ func HasRepository(beadsDir string) bool {
 		if err != nil || !marker.IsDir() || marker.Mode()&os.ModeSymlink != 0 {
 			continue
 		}
-		entries, err := os.ReadDir(filepath.Join(root, database.Name(), ".dolt"))
-		if err == nil && len(entries) > 0 {
-			return true
+		markerEntries, err := os.ReadDir(filepath.Join(root, database.Name(), ".dolt"))
+		if err == nil && len(markerEntries) > 0 {
+			databases = append(databases, database.Name())
 		}
 	}
-	return false
+	return databases
 }

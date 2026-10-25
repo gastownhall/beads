@@ -39,7 +39,7 @@ type BeadsDirFSUseCase interface {
 	InstallGitHooks(ctx context.Context, params HooksInstallParams) error
 	InstallJJHooks(ctx context.Context) error
 	AddAgentsInstructions(ctx context.Context, params AgentsFileParams) error
-	InstallClaudeProject(ctx context.Context, stealth bool) error
+	InstallClaudeProject(ctx context.Context, stealth, quiet bool) error
 	SetYAMLConfig(ctx context.Context, key, value string) error
 }
 
@@ -110,7 +110,7 @@ type BeadsDirFSAdapters struct {
 	InstallGitHooks       func(params HooksInstallParams) error
 	InstallJJHooks        func() error
 	AddAgentsInstructions func(params AgentsFileParams)
-	InstallClaudeProject  func(stealth bool) error
+	InstallClaudeProject  func(stealth, quiet bool) error
 	SetYAMLConfig         func(key, value string) error
 }
 
@@ -248,11 +248,11 @@ func (u *beadsDirFSUseCaseImpl) AddAgentsInstructions(ctx context.Context, param
 	return nil
 }
 
-func (u *beadsDirFSUseCaseImpl) InstallClaudeProject(ctx context.Context, stealth bool) error {
+func (u *beadsDirFSUseCaseImpl) InstallClaudeProject(ctx context.Context, stealth, quiet bool) error {
 	if u.adapters.InstallClaudeProject == nil {
 		return fmt.Errorf("InstallClaudeProject: adapter not configured")
 	}
-	return u.adapters.InstallClaudeProject(stealth)
+	return u.adapters.InstallClaudeProject(stealth, quiet)
 }
 
 func (u *beadsDirFSUseCaseImpl) SetYAMLConfig(ctx context.Context, key, value string) error {

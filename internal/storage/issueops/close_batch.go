@@ -59,8 +59,19 @@ func ValidateCloseBatchRequest(request publicops.CloseBatchRequest) error {
 func CloseBatchCommitMessage(result publicops.CloseBatchResult) string {
 	ids := make([]string, 0, len(result.Outcomes))
 	ephemeral := 0
+	var autoClosed []string
 	for _, outcome := range result.Outcomes {
-		if outcome.Err != nil || !outcome.Changed {
+		if outcome.Err != nil {
+			continue
+		}
+		if root := outcome.AutoClosedMolecule; root != nil {
+			if IsWisp(root) {
+				ephemeral++
+			} else {
+				autoClosed = append(autoClosed, root.ID)
+			}
+		}
+		if !outcome.Changed {
 			continue
 		}
 		if closeOutcomeIsEphemeral(outcome) {
@@ -78,6 +89,9 @@ func CloseBatchCommitMessage(result publicops.CloseBatchResult) string {
 		parts = append(parts, "close 1 ephemeral item")
 	case ephemeral > 1:
 		parts = append(parts, fmt.Sprintf("close %d ephemeral items", ephemeral))
+	}
+	if len(autoClosed) > 0 {
+		parts = append(parts, "auto-close "+strings.Join(autoClosed, ", "))
 	}
 	if result.ClaimedNext != nil {
 		parts = append(parts, "claim "+result.ClaimedNext.ID)
@@ -115,11 +129,30 @@ func closeOutcomeIsEphemeral(outcome publicops.CloseOutcome) bool {
 // claim, and so does a batch in which nothing landed — landed meaning an item
 // that CHANGED, so a batch whose items were all already closed earns no claim.
 func ExecuteCloseBatch(ctx context.Context, tx *sql.Tx, request publicops.CloseBatchRequest, claimFilter *types.WorkFilter) (publicops.CloseBatchResult, ChangedTables, error) {
+	return ExecuteCloseBatchWithPolicy(ctx, tx, request, claimFilter, storage.BatchClosePolicy{})
+}
+
+// ExecuteCloseBatchWithPolicy applies an externally resolved snapshot without
+// splitting the closes and next claim into separate transactions.
+func ExecuteCloseBatchWithPolicy(ctx context.Context, tx *sql.Tx, request publicops.CloseBatchRequest, claimFilter *types.WorkFilter, policy storage.BatchClosePolicy) (publicops.CloseBatchResult, ChangedTables, error) {
 	result := publicops.CloseBatchResult{Outcomes: make([]publicops.CloseOutcome, len(request.Items))}
 	tables := ChangedTables{}
 	landed := 0
 
 	for i, item := range request.Items {
+		if err := policy.CheckClose(item.IssueID, request.Force); err != nil {
+			// Preserve idempotent re-closes and not-found precedence. Only
+			// a live target can be refused by the external close policy.
+			closed, _, found, readErr := isClosedInTx(ctx, tx, item.IssueID)
+			if readErr != nil {
+				result.Outcomes[i] = publicops.CloseOutcome{IssueID: item.IssueID, Err: readErr}
+				continue
+			}
+			if found && !closed {
+				result.Outcomes[i] = publicops.CloseOutcome{IssueID: item.IssueID, Err: err}
+				continue
+			}
+		}
 		closed, changedTables, err := ExecuteClose(ctx, tx, publicops.CloseRequest{
 			Actor:   request.Actor,
 			IssueID: item.IssueID,
@@ -143,8 +176,27 @@ func ExecuteCloseBatch(ctx context.Context, tx *sql.Tx, request publicops.CloseB
 		}
 	}
 
+	if request.AutoCloseMolecule {
+		closedAt := make([]int, 0, len(result.Outcomes))
+		stepIDs := make([]string, 0, len(result.Outcomes))
+		for i, outcome := range result.Outcomes {
+			if outcome.Err == nil {
+				closedAt = append(closedAt, i)
+				stepIDs = append(stepIDs, outcome.IssueID)
+			}
+		}
+		autos, autoTables, err := CloseCompletedMoleculesInTx(ctx, tx, stepIDs, request.Actor, request.Session)
+		if err != nil {
+			return publicops.CloseBatchResult{}, nil, err
+		}
+		tables.Merge(autoTables)
+		for j, i := range closedAt {
+			result.Outcomes[i].AutoClosedMolecule, result.Outcomes[i].MoleculeAutoCloseRefusal = autos[j].Root, autos[j].Refusal
+		}
+	}
+
 	if claimFilter != nil && landed > 0 {
-		claim, claimTables, err := ExecuteClaimNext(ctx, tx, request.Actor, *claimFilter)
+		claim, claimTables, err := ExecuteClaimNext(ctx, tx, request.Actor, policy.FilterClaim(*claimFilter))
 		if err != nil {
 			return publicops.CloseBatchResult{}, nil, err
 		}

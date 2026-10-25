@@ -96,6 +96,7 @@ func runEditProxiedServer(cmd *cobra.Command, ctx context.Context, args []string
 	editorParts := strings.Fields(editor)
 	editorArgs := append(editorParts[1:], tmpPath)
 	editorCmd := exec.Command(editorParts[0], editorArgs...) //nolint:gosec // G204: editor from trusted $EDITOR/$VISUAL env or known defaults
+	editorCmd.Env = envWithoutSharedHoldMarker()
 	editorCmd.Stdin = os.Stdin
 	editorCmd.Stdout = os.Stdout
 	editorCmd.Stderr = os.Stderr

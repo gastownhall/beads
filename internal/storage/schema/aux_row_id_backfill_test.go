@@ -22,7 +22,7 @@ func commentDigest(issueID, author, text, createdAt string) string {
 
 func expectCommentsSelect(mock sqlmock.Sqlmock) *sqlmock.ExpectedQuery {
 	return mock.ExpectQuery(regexp.QuoteMeta(
-		"SELECT id, issue_id, author, text, CAST(created_at AS CHAR) FROM comments"))
+		"SELECT id, issue_id, author, text, DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') FROM comments"))
 }
 
 // TestRekeyAuxRowTableConvergesRandomIDs verifies the core convergence: rows

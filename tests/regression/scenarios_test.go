@@ -1,4 +1,4 @@
-//go:build regression
+//go:build regression || integration
 
 package regression
 
@@ -1069,7 +1069,11 @@ func TestNotesOverwriteSemantics(t *testing.T) {
 	compareExports(t, func(w *workspace) {
 		id := w.create("--title", "Notes overwrite test", "--type", "task",
 			"--notes", "Original notes content")
-		w.run("update", id, "--notes", "Completely replaced notes")
+		args := []string{"update", id, "--notes", "Completely replaced notes"}
+		if w.requiresNotesOverwriteForce() {
+			args = append(args, "--force")
+		}
+		w.run(args...)
 		w.run("update", id, "--title", "Notes overwrite test (updated)")
 	})
 }

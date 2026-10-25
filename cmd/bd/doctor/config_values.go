@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/dolt"
+	"gopkg.in/yaml.v3"
 )
 
 // validRoutingModes are the allowed values for routing.mode
@@ -188,6 +189,9 @@ func checkYAMLConfigValues(repoPath string) []string {
 		issues = append(issues, fmt.Sprintf("config.yaml: failed to parse: %v", err))
 		return issues
 	}
+	if data, err := os.ReadFile(configPath); err == nil { //nolint:gosec // resolved workspace config
+		issues = append(issues, findDualSpelledConfigKeys(data)...)
+	}
 
 	// Validate issue-prefix (should be alphanumeric with dashes/underscores, reasonably short)
 	if v.IsSet("issue-prefix") {
@@ -294,6 +298,59 @@ func checkYAMLConfigValues(repoPath string) []string {
 	issues = append(issues, validateRepoPaths(v)...)
 
 	return issues
+}
+
+func findDualSpelledConfigKeys(data []byte) []string {
+	var root yaml.Node
+	if err := yaml.Unmarshal(data, &root); err != nil || len(root.Content) == 0 {
+		return nil
+	}
+	mapping := root.Content[0]
+	if mapping.Kind != yaml.MappingNode {
+		return nil
+	}
+
+	var issues []string
+	for i := 0; i+1 < len(mapping.Content); i += 2 {
+		key := mapping.Content[i].Value
+		parts := strings.Split(key, ".")
+		if len(parts) < 2 || !yamlPathExists(mapping, parts) {
+			continue
+		}
+		issues = append(issues, fmt.Sprintf(
+			"config.yaml: %q is present in both flat and nested spelling; remove one spelling so all readers use the same value",
+			key,
+		))
+	}
+	return issues
+}
+
+func yamlPathExists(mapping *yaml.Node, parts []string) bool {
+	current := mapping
+	for i, part := range parts {
+		if current.Kind != yaml.MappingNode {
+			return false
+		}
+		idx := yamlMappingChild(current, part)
+		if idx == -1 {
+			return false
+		}
+		if i == len(parts)-1 {
+			return true
+		}
+		current = current.Content[idx+1]
+	}
+	return false
+}
+
+func yamlMappingChild(mapping *yaml.Node, name string) int {
+	for i := 0; i+1 < len(mapping.Content); i += 2 {
+		key := mapping.Content[i]
+		if key.Kind == yaml.ScalarNode && key.Value == name {
+			return i
+		}
+	}
+	return -1
 }
 
 // isValidBoolString checks if a string represents a valid boolean value

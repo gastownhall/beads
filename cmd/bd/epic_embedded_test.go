@@ -52,7 +52,11 @@ func bdEpicJSON(t *testing.T, bd, dir string, args ...string) interface{} {
 	return result
 }
 
-func TestEmbeddedEpic(t *testing.T) {
+// TestEmbeddedEpicStatus was split from TestEmbeddedEpic (originally ~362s,
+// measured under --config=embedded) into 3 top-level tests over disjoint
+// subtest groups, for CI shard balance (see scripts/ci/embedded_cmd_test_durations.json and
+// engdocs/TESTING.md). Every original subtest is preserved exactly once.
+func TestEmbeddedEpicStatus(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -113,6 +117,37 @@ func TestEmbeddedEpic(t *testing.T) {
 			t.Errorf("expected 'No open epics': %s", out)
 		}
 	})
+}
+
+// TestEmbeddedEpicCloseEligible* was split from TestEmbeddedEpic (originally
+// ~362s, measured under --config=embedded) into 3 top-level tests over
+// disjoint subtest groups, for CI shard balance (see
+// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every original
+// subtest is preserved exactly once. It is split again in two:
+// TestEmbeddedEpicCloseEligibleNotEligible keeps the shared not-eligible epic
+// fixture and the two subtests that read it, and
+// TestEmbeddedEpicCloseEligibleClosesEpics the two that build their own.
+func TestEmbeddedEpicCloseEligibleNotEligible(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "ep")
+
+	// Create an epic with children — some closed, some open.
+	// Use 3 children so closing one doesn't auto-close the epic.
+	epic1 := bdCreate(t, bd, dir, "Epic partially done", "--type", "epic")
+	c1 := bdCreate(t, bd, dir, "Epic1 child 1", "--type", "task")
+	c2 := bdCreate(t, bd, dir, "Epic1 child 2", "--type", "task")
+	c2b := bdCreate(t, bd, dir, "Epic1 child 3", "--type", "task")
+	bdDep(t, bd, dir, "add", c1.ID, epic1.ID, "--type", "parent-child")
+	bdDep(t, bd, dir, "add", c2.ID, epic1.ID, "--type", "parent-child")
+	bdDep(t, bd, dir, "add", c2b.ID, epic1.ID, "--type", "parent-child")
+	bdClose(t, bd, dir, c1.ID)
+	// c2, c2b still open — epic1 is NOT eligible
+	_ = c2b
 
 	// ===== epic close-eligible =====
 
@@ -123,6 +158,23 @@ func TestEmbeddedEpic(t *testing.T) {
 			t.Errorf("epic1 (not eligible) should not appear in dry-run: %s", out)
 		}
 	})
+
+	t.Run("close_eligible_none", func(t *testing.T) {
+		// epic1 has open children — should not be closeable
+		out := bdEpic(t, bd, dir, "close-eligible")
+		if strings.Contains(out, epic1.ID) {
+			t.Errorf("epic1 should not be closed: %s", out)
+		}
+	})
+}
+
+func TestEmbeddedEpicCloseEligibleClosesEpics(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
 
 	t.Run("close_eligible_closes_epics", func(t *testing.T) {
 		dir3, _, _ := bdInit(t, bd, "--prefix", "ep3")
@@ -170,14 +222,33 @@ func TestEmbeddedEpic(t *testing.T) {
 			t.Fatalf("no JSON: %s", s)
 		}
 	})
+}
 
-	t.Run("close_eligible_none", func(t *testing.T) {
-		// epic1 has open children — should not be closeable
-		out := bdEpic(t, bd, dir, "close-eligible")
-		if strings.Contains(out, epic1.ID) {
-			t.Errorf("epic1 should not be closed: %s", out)
-		}
-	})
+// TestEmbeddedEpicCloseEligibleReason was split from TestEmbeddedEpic
+// (originally ~362s, measured under --config=embedded) into 3 top-level
+// tests over disjoint subtest groups, for CI shard balance (see
+// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every
+// original subtest is preserved exactly once. The split originally carried
+// over an epic1/c1/c2/c2b "some closed, some open" fixture from its parent
+// that none of these particular subtests (all self-contained, each building
+// its own dirN/e/ch fixture) ever reference; removed as dead setup cost
+// (F1 CI-speed review N6).
+//
+// F1 review S1: this combined piece still measured ~283s under real CI-like
+// load (several shards running concurrently, -test.parallel=4) — over the
+// ~240s per-isolated-test ceiling even alone on its own shard. Its 5
+// subtests are mutually independent (each builds its own dirN/e/ch fixture,
+// none shares state with a sibling), so it splits cleanly again into two
+// top-level tests below: TestEmbeddedEpicCloseEligibleReasonFlag keeps the
+// first 3 (flag persistence/default/dry-run), TestEmbeddedEpicCloseEligibleReasonOutput
+// keeps the remaining 2 (JSON and human-output rendering of the reason).
+func TestEmbeddedEpicCloseEligibleReasonFlag(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
 
 	// ===== epic close-eligible --reason (GH#4817) =====
 
@@ -230,6 +301,17 @@ func TestEmbeddedEpic(t *testing.T) {
 			t.Errorf("dry-run must not close the epic, got %s", got.Status)
 		}
 	})
+}
+
+// TestEmbeddedEpicCloseEligibleReasonOutput is the second half of the split
+// described on TestEmbeddedEpicCloseEligibleReasonFlag above.
+func TestEmbeddedEpicCloseEligibleReasonOutput(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
 
 	t.Run("close_eligible_json_includes_reason", func(t *testing.T) {
 		dir8, _, _ := bdInit(t, bd, "--prefix", "ep8")

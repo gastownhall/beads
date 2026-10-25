@@ -880,9 +880,15 @@ var migrateSchemaCmd = &cobra.Command{
 	Short: "Apply pending schema migrations (idempotent)",
 	Long: `Apply pending schema migrations idempotently.
 
-Schema migrations also run automatically on store open, so this subcommand
-is typically a no-op. It exists to make migration explicit and observable
-in CI, release gates, and recovery scenarios.
+bd does not apply pending schema migrations to an existing database without
+the operator's consent, and running this command is that consent
+(BD_ALLOW_MIGRATE=1 is the scripted form). On a remote-backed database the
+remote-migrate gate still applies: --force confirms you are the single
+designated migrator. Migrating is one-way: bd releases built for an older
+schema refuse the migrated database.
+
+On an up-to-date database this is a no-op, so it is safe to run in CI,
+release gates, and recovery scenarios.
 
 Example:
   bd migrate schema
@@ -917,22 +923,18 @@ func init() {
 	migrateCmd.Flags().Bool("dry-run", false, "Show what would be done without making changes")
 	migrateCmd.Flags().Bool("update-repo-id", false, "Update repository ID (use after changing git remote)")
 	migrateCmd.Flags().Bool("inspect", false, "Show migration plan and database state for AI agent analysis")
-	migrateCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output migration statistics in JSON format")
 	// --force bypasses the remote-migrate gate (#4259) as the single designated
 	// migrator. No -f shorthand: deliberate typing for a fork-risk bypass.
 	migrateCmd.Flags().Bool("force", false, "Bypass the remote-migrate gate as the single designated migrator (equivalent to BD_ALLOW_REMOTE_MIGRATE=1)")
 
 	migrateSyncCmd.Flags().Bool("dry-run", false, "Show what would be done without making changes")
-	migrateSyncCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
 	migrateCmd.AddCommand(migrateSyncCmd)
 
 	migrateHooksCmd.Flags().Bool("dry-run", false, "Show what would be done without making changes")
 	migrateHooksCmd.Flags().Bool("apply", false, "Apply planned hook migration changes")
 	migrateHooksCmd.Flags().Bool("yes", false, "Skip confirmation prompt for --apply")
-	migrateHooksCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
 	migrateCmd.AddCommand(migrateHooksCmd)
 
-	migrateSchemaCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
 	// --force on migrate schema mirrors the parent command's flag; both trip the
 	// same isForcedMigrate check in main.go's PersistentPreRunE.
 	migrateSchemaCmd.Flags().Bool("force", false, "Bypass the remote-migrate gate as the single designated migrator (equivalent to BD_ALLOW_REMOTE_MIGRATE=1)")

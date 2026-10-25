@@ -53,6 +53,43 @@ func GetAllConfigInTx(ctx context.Context, tx DBTX) (map[string]string, error) {
 	return result, rows.Err()
 }
 
+// ConfigPrefixLikeQuery is the one SELECT for prefix-scoped config reads.
+// Its explicit ESCAPE character pairs with ConfigPrefixPattern's escaping
+// ('!' rather than backslash: the engine does not treat backslash as the
+// default LIKE escape, and '!' avoids literal-vs-placeholder ambiguity);
+// keeping query and pattern builder side by side is what stops them drifting.
+const ConfigPrefixLikeQuery = "SELECT `key`, value FROM config WHERE `key` LIKE ? ESCAPE '!'"
+
+// ConfigPrefixPattern builds the LIKE pattern that matches config keys
+// starting with the given literal prefix, escaping LIKE metacharacters
+// (%, _) and the escape character itself so the prefix always matches
+// literally. Use only with ConfigPrefixLikeQuery.
+func ConfigPrefixPattern(prefix string) string {
+	return strings.NewReplacer(`!`, `!!`, `%`, `!%`, `_`, `!_`).Replace(prefix) + "%"
+}
+
+// GetConfigByPrefixInTx retrieves the configuration pairs whose key starts
+// with prefix, within an existing transaction. The filter runs in SQL so a
+// scoped read of a large config/kv store (e.g. one mailbox out of thousands
+// of kv mail envelopes) does not serialize the whole table.
+func GetConfigByPrefixInTx(ctx context.Context, tx DBTX, prefix string) (map[string]string, error) {
+	rows, err := tx.QueryContext(ctx, ConfigPrefixLikeQuery, ConfigPrefixPattern(prefix))
+	if err != nil {
+		return nil, fmt.Errorf("get config by prefix %s: %w", prefix, err)
+	}
+	defer rows.Close()
+
+	result := make(map[string]string)
+	for rows.Next() {
+		var k, v string
+		if err := rows.Scan(&k, &v); err != nil {
+			return nil, fmt.Errorf("get config by prefix %s: scan: %w", prefix, err)
+		}
+		result[k] = v
+	}
+	return result, rows.Err()
+}
+
 // SetMetadataInTx sets a metadata value within an existing transaction.
 func SetMetadataInTx(ctx context.Context, tx DBTX, key, value string) error {
 	_, err := tx.ExecContext(ctx, "REPLACE INTO metadata (`key`, value) VALUES (?, ?)", key, value)

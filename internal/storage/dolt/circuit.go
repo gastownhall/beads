@@ -45,20 +45,26 @@ const (
 	// (or LastFailure if TrippedAt is zero).
 	circuitStaleTTL = 5 * time.Minute
 
-	// legacyClosedSweepTTL is how long a CLOSED breaker file in the legacy
-	// "/tmp/beads-circuit" directory must sit unmodified before the legacy
-	// sweep removes it. The sweep's original premise — that the directory is
-	// abandoned, with "no live process left to reuse or clean" its files
-	// (GH#4636) — is false wherever os.TempDir() still resolves to /tmp: any
-	// TMPDIR-less process (launchd, cron, a bare ssh command) uses the legacy
-	// path as its LIVE directory and rewrites its closed file on every
-	// successful connection. An unconditional remove therefore fought those
-	// writers forever — recreate, delete, log, on every alternation of
-	// TMPDIR-set and TMPDIR-less invocations. A live writer keeps its file's
-	// mtime fresh, so an mtime TTL preserves the GH#4636 cleanup (a genuinely
-	// abandoned file only ages) without the churn. Generous on purpose: a
-	// writer that runs even once a day keeps its state.
-	legacyClosedSweepTTL = 24 * time.Hour
+	// closedSweepTTL is how long a CLOSED breaker file must sit unmodified
+	// before the sweep removes it, in the live directory and the legacy
+	// "/tmp/beads-circuit" one alike. Every host:port:db a process opens
+	// leaves a closed file behind, and ephemeral ports (test servers above
+	// all) mint a distinct name each time that nothing ever reuses, so
+	// without an age-out both directories only grow (GH#4636) — and the sweep
+	// reads every file on every run. A closed file nobody has written for
+	// this long is indistinguishable from no file: readState reads an absent
+	// file as closed, and a closed state's failure count only matters inside
+	// circuitFailureWindow. A breaker in use is rewritten on every successful
+	// open, so its mtime stays fresh and it is never swept.
+	//
+	// The age-out is by mtime, never unconditional: the legacy directory is
+	// not abandoned wherever os.TempDir() still resolves to /tmp — any
+	// TMPDIR-less process (launchd, cron, a bare ssh command) uses it as its
+	// LIVE directory — and an unconditional remove fought those writers
+	// forever: recreate, delete, log, on every alternation of TMPDIR-set and
+	// TMPDIR-less invocations. Generous on purpose: a writer that runs even
+	// once a day keeps its state.
+	closedSweepTTL = 24 * time.Hour
 )
 
 // circuitState is the shared file-based circuit breaker state.
@@ -364,7 +370,18 @@ func (cb *circuitBreaker) writeState(state circuitState) {
 //   - Legacy port-0 files (beads-dolt-circuit-0.json) from before the port-0 fix
 //   - Any breaker file whose open/half-open state is older than circuitStaleTTL
 //
-// Called during init to ensure a clean starting state (GH#2598).
+// It also removes files that would otherwise only accumulate (GH#4636):
+//   - Closed-state files no writer has modified in closedSweepTTL
+//   - Corrupt files that do not parse as breaker state
+//
+// The same rules apply in the live directory and the legacy
+// "/tmp/beads-circuit" one; setting BEADS_TEST_CIRCUIT_DIR (tests) skips the
+// legacy directory.
+//
+// Called during init to ensure a clean starting state (GH#2598). Store open
+// reaches it at most once per process, through
+// cleanStaleCircuitBreakerFilesOnce; bd doctor --fix calls it directly and
+// still sweeps on demand.
 func CleanStaleCircuitBreakerFiles() {
 	dir, legacyFile := circuitBreakerPaths()
 
@@ -378,42 +395,56 @@ func CleanStaleCircuitBreakerFiles() {
 		_ = os.Remove(filepath.Join("/tmp", "beads-dolt-circuit-0.json"))
 	}
 
-	// Clean stale files in the dedicated subdirectory (fast — typically 0-2
-	// files). Only open/half-open state past circuitStaleTTL is removed here;
-	// closed files are left alone since a live server keeps writing them.
+	// Clean stale files in the dedicated subdirectory: open/half-open state
+	// past circuitStaleTTL, and closed files no writer has touched in
+	// closedSweepTTL. A recently written closed file is a breaker some
+	// process is using and is left alone.
 	_ = os.MkdirAll(dir, 0755)
-	cleanStaleCircuitBreakerFilesIn(dir, false)
+	cleanStaleCircuitBreakerFilesIn(dir)
 
 	// Also sweep the legacy hardcoded "/tmp/beads-circuit" location
 	// (C:\tmp\beads-circuit on Windows) where older builds accumulated files
-	// before the os.TempDir() fix (GH#4636). Unlike the live directory above,
-	// remove *closed* files here too — but only past an mtime TTL: this
-	// directory is NOT fully abandoned. Any TMPDIR-less process (launchd,
-	// cron, a bare ssh command) resolves os.TempDir() to /tmp and uses it as
-	// its live directory, rewriting closed state on every success; only
-	// files no writer has touched in legacyClosedSweepTTL are the GH#4636
-	// accumulation this sweep exists for (ephemeral ports minting a distinct
-	// filename each time, never reused).
+	// before the os.TempDir() fix (GH#4636), by the same rules: any
+	// TMPDIR-less process (launchd, cron, a bare ssh command) still resolves
+	// os.TempDir() to /tmp and uses it as its live directory, so its closed
+	// files age out by mtime here too (see closedSweepTTL).
 	if os.Getenv(testCircuitBreakerDirEnv) == "" {
 		if legacy := filepath.Join("/tmp", "beads-circuit"); legacy != dir {
-			cleanStaleCircuitBreakerFilesIn(legacy, true)
+			cleanStaleCircuitBreakerFilesIn(legacy)
 		}
 	}
+}
+
+// staleCircuitSweep gates the store-open sweep; see
+// cleanStaleCircuitBreakerFilesOnce. A pointer so a test can start a fresh one.
+var staleCircuitSweep = new(sync.Once)
+
+// cleanStaleCircuitBreakerFilesOnce is the store-open entry point to
+// CleanStaleCircuitBreakerFiles, and makes it the init-time cleanup its doc
+// describes: at most one sweep per process. A process opens stores more than
+// once — every write command opens a non-mutating preview store for the
+// workspace-identity check before its writable store (be-0gfcs), and a
+// long-lived embedder opens one per request — and the sweep reads every
+// breaker file in the directory each time it runs. Nothing it could find
+// changes meaningfully between two opens of one process, and correctness never
+// waited on it anyway: readState auto-expires a stale open state on the one
+// file a breaker reads. bd doctor --fix calls CleanStaleCircuitBreakerFiles
+// directly and still sweeps on demand.
+func cleanStaleCircuitBreakerFilesOnce() {
+	staleCircuitSweep.Do(CleanStaleCircuitBreakerFiles)
 }
 
 // cleanStaleCircuitBreakerFilesIn is the testable implementation of
 // CleanStaleCircuitBreakerFiles that accepts a directory parameter.
 //
-// removeClosed additionally removes closed-state files whose mtime is older
-// than legacyClosedSweepTTL. It exists for the legacy "/tmp/beads-circuit"
-// directory (GH#4636): a closed state file is written on every successful
-// RecordSuccess, and since ephemeral ports mint a distinct filename per
-// connection, closed sidecars accumulate there with no other cleanup path.
-// The TTL is what makes it safe alongside the directory's remaining LIVE
-// writers (TMPDIR-less processes, whose os.TempDir() is /tmp — they keep
-// their file's mtime fresh). The live directory must not pass true here —
-// a closed file there reflects a healthy, currently-in-use breaker.
-func cleanStaleCircuitBreakerFilesIn(dir string, removeClosed bool) {
+// Besides stale open/half-open state, it removes closed-state files whose
+// mtime is older than closedSweepTTL (GH#4636): a closed state file is written
+// on every successful RecordSuccess, and since ephemeral ports mint a distinct
+// filename per server, closed sidecars accumulate with no other cleanup path.
+// The TTL is what makes that safe alongside live writers, which keep their
+// file's mtime fresh: a recently written closed file reflects a healthy,
+// currently-in-use breaker and is left alone.
+func cleanStaleCircuitBreakerFilesIn(dir string) {
 	pattern := filepath.Join(dir, "beads-dolt-circuit-*.json")
 	matches, err := filepath.Glob(pattern)
 	if err != nil {
@@ -441,16 +472,12 @@ func cleanStaleCircuitBreakerFilesIn(dir string, removeClosed bool) {
 			continue
 		}
 		if state.State == circuitClosed {
-			// Legacy-directory mode only — and only past an mtime TTL: the
-			// legacy dir has LIVE writers wherever os.TempDir() is /tmp
-			// (TMPDIR-less launchd/cron/ssh processes), so an unconditional
-			// remove churned against them forever (see legacyClosedSweepTTL).
-			// Silent on purpose: removing routine closed-state hygiene is not
-			// worth a stderr line per file per invocation.
-			if removeClosed {
-				if info, statErr := os.Stat(path); statErr == nil && time.Since(info.ModTime()) > legacyClosedSweepTTL {
-					_ = os.Remove(path)
-				}
+			// Only past an mtime TTL: both directories have LIVE writers, so
+			// an unconditional remove would churn against them forever (see
+			// closedSweepTTL). Silent on purpose: removing routine closed-state
+			// hygiene is not worth a stderr line per file per invocation.
+			if info, statErr := os.Stat(path); statErr == nil && time.Since(info.ModTime()) > closedSweepTTL {
+				_ = os.Remove(path)
 			}
 			continue
 		}

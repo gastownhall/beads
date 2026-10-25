@@ -51,6 +51,13 @@ Second body.
 		if !strings.Contains(out, "Created 2 issues from") {
 			t.Errorf("create --file output = %q, want the two-issue summary", out)
 		}
+		// The second template names no priority, so it asks the role for the
+		// default rather than spelling 2; a role that missed the ask stores P0.
+		for _, want := range []string{"First from file [P1, bug]", "Second from file [P2, task]"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("create --file output = %q, want %q", out, want)
+			}
+		}
 		titles := createDepsIssueTitles(t, bd, dir)
 		for _, title := range []string{"First from file", "Second from file"} {
 			if !titles[title] {

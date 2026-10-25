@@ -179,7 +179,10 @@ Examples:
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if usesProxiedServer() {
-			return HandleErrorRespectJSON("vc commit is not supported in proxied-server mode")
+			// There IS a commit point on this route now — `bd dolt commit`
+			// is the proxied flush point dolt.auto-commit=batch/off defers
+			// to (GH#4995) — so name it rather than leaving a dead end.
+			return HandleErrorRespectJSON("vc commit is not supported in proxied-server mode; use 'bd dolt commit' instead")
 		}
 		evt := metrics.NewCommandEvent("vc-commit")
 		defer func() {

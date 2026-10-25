@@ -8,7 +8,7 @@ Run these before considering docs work complete. Ordered cheapest-first.
 # 1. Docs sync: docs.json nav <-> file consistency, link conventions
 #    (root-relative extensionless in docs/, exact paths in engdocs/ and
 #    curated root files), orphan detection (only CLI_REFERENCE.md is exempt).
-go test ./test/docsync
+bazel test //test/docsync:docsync_test --config=ci
 
 # 2. Generated CLI docs freshness: regenerates from the live command tree
 #    and diffs docs/CLI_REFERENCE.md, docs/cli-reference/, and the CLI
@@ -55,7 +55,7 @@ all of:
 1. **Redirect** — add an entry to the `redirects` array in `docs/docs.json`
    from the old route to the new one.
 2. **Rewrite inbound links** — grep the whole repo, not just `docs/`:
-   README.md, AGENTS.md, AGENT_INSTRUCTIONS.md, engdocs/, examples/,
+   README.md, every AGENTS.md (root and nested), engdocs/, examples/,
    npm-package/, plugins/, integrations/, scripts, and Go comments.
 3. **Check bd's printed output** — if `bd` prints the old path (grep `cmd/`
    and `internal/templates/` for it), fix the Go source to print the new

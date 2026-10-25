@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -226,6 +225,9 @@ func TestGenerateHookSection_Timeout(t *testing.T) {
 	if !strings.Contains(section, `"timeout (GNU coreutils) "*`) {
 		t.Error("section missing GNU coreutils identity check")
 	}
+	if !strings.Contains(section, `"timeout (uutils coreutils) "*`) {
+		t.Error("section missing uutils coreutils identity check")
+	}
 	if !strings.Contains(section, `"$_bd_timeout_command" -- "$_bd_timeout"`) {
 		t.Error("section missing GNU timeout argv separator")
 	}
@@ -265,22 +267,48 @@ func TestTrackedManagedHookSectionsMatchGenerator(t *testing.T) {
 			}
 
 			tracked := string(content)
-			begin := strings.Index(tracked, hookSectionBeginLine())
-			if begin < 0 {
-				t.Fatalf("tracked hook missing %q", hookSectionBeginLine())
-			}
-			endMarker := hookSectionEndLine() + "\n"
-			relativeEnd := strings.Index(tracked[begin:], endMarker)
-			if relativeEnd < 0 {
-				t.Fatalf("tracked hook missing %q", hookSectionEndLine())
-			}
-			end := begin + relativeEnd + len(endMarker)
-
-			if got, want := tracked[begin:end], generateHookSection(hookName); got != want {
-				t.Fatalf("tracked managed section drifted from generator\nwant:\n%s\ngot:\n%s", want, got)
-			}
 			if strings.Count(tracked, hookSectionBeginPrefix) != 1 || strings.Count(tracked, hookSectionEndPrefix) != 1 {
 				t.Fatal("tracked hook must contain exactly one managed section")
+			}
+			// Locate the section by marker PREFIX, not by the versioned marker
+			// line. Tracked hooks drift for two reasons — generator content and
+			// the release version stamp — and a prefix scan makes the second one
+			// ordinary drift that the byte compare below reports and the regen
+			// arm repairs. Matching hookSectionBeginLine() here would instead
+			// fail with "missing marker" after a Version bump, before the regen
+			// arm is reachable. The versioned markers are still verified: they
+			// are part of `want`.
+			begin := strings.Index(tracked, hookSectionBeginPrefix)
+			if begin < 0 {
+				t.Fatalf("tracked hook missing %q", hookSectionBeginPrefix)
+			}
+			relativeEnd := strings.Index(tracked[begin:], hookSectionEndPrefix)
+			if relativeEnd < 0 {
+				t.Fatalf("tracked hook missing %q", hookSectionEndPrefix)
+			}
+			end := begin + relativeEnd
+			newline := strings.IndexByte(tracked[end:], '\n')
+			if newline < 0 {
+				t.Fatalf("tracked hook %q line is not newline-terminated", hookSectionEndPrefix)
+			}
+			end += newline + 1
+			got, want := tracked[begin:end], generateHookSection(hookName)
+			// A dedicated variable, not the package's shared BD_UPDATE_GOLDEN:
+			// this arm rewrites tracked SOURCE files, so an unscoped
+			// `BD_UPDATE_GOLDEN=1 go test ./cmd/bd/` must not silently convert
+			// real hook drift into a working-tree mutation that reports PASS.
+			if os.Getenv("BD_UPDATE_HOOKS_GOLDEN") == "1" {
+				if got == want {
+					return
+				}
+				if err := os.WriteFile(path, []byte(tracked[:begin]+want+tracked[end:]), 0o755); err != nil {
+					t.Fatalf("write tracked hook: %v", err)
+				}
+				t.Logf("regenerated managed section in %s", path)
+				return
+			}
+			if got != want {
+				t.Fatalf("tracked managed section drifted from generator (regenerate with `make githooks-regen`)\nwant:\n%s\ngot:\n%s", want, got)
 			}
 		})
 	}
@@ -766,7 +794,7 @@ func TestConfigureBeadsHooksPath_AbsolutePath(t *testing.T) {
 		}
 
 		// Read back core.hooksPath
-		out, err := exec.Command("git", "config", "--get", "core.hooksPath").Output()
+		out, err := gitCommand("config", "--get", "core.hooksPath").Output()
 		if err != nil {
 			t.Fatalf("git config --get core.hooksPath failed: %v", err)
 		}
@@ -798,7 +826,7 @@ func TestInstallHooksBeads_WorktreeAccess(t *testing.T) {
 			t.Fatalf("Failed to create metadata.json: %v", err)
 		}
 
-		cmd := exec.Command("git", "commit", "--allow-empty", "--no-verify", "-m", "init")
+		cmd := gitCommand("commit", "--allow-empty", "--no-verify", "-m", "init")
 		cmd.Dir = tmpDir
 		if output, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("git commit failed: %v\n%s", err, string(output))
@@ -818,7 +846,7 @@ func TestInstallHooksBeads_WorktreeAccess(t *testing.T) {
 		}
 
 		// Read core.hooksPath and verify it's absolute
-		out, err := exec.Command("git", "config", "--get", "core.hooksPath").Output()
+		out, err := gitCommand("config", "--get", "core.hooksPath").Output()
 		if err != nil {
 			t.Fatalf("core.hooksPath not set after --beads install: %v", err)
 		}
@@ -829,17 +857,17 @@ func TestInstallHooksBeads_WorktreeAccess(t *testing.T) {
 
 		// Create a worktree and verify hooks are accessible from it
 		worktreeDir := filepath.Join(t.TempDir(), "worktree")
-		cmd = exec.Command("git", "worktree", "add", worktreeDir, "-b", "test-worktree")
+		cmd = gitCommand("worktree", "add", worktreeDir, "-b", "test-worktree")
 		cmd.Dir = tmpDir
 		if output, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("git worktree add failed: %v\n%s", err, string(output))
 		}
 		defer func() {
-			exec.Command("git", "worktree", "remove", worktreeDir).Run()
+			gitCommand("worktree", "remove", worktreeDir).Run()
 		}()
 
 		// From the worktree, core.hooksPath should resolve to the same hooks
-		cmd = exec.Command("git", "config", "--get", "core.hooksPath")
+		cmd = gitCommand("config", "--get", "core.hooksPath")
 		cmd.Dir = worktreeDir
 		wtOut, err := cmd.Output()
 		if err != nil {
@@ -895,14 +923,14 @@ func TestInstallHooksBeads_PreservesGlobalHooks(t *testing.T) {
 		t.Fatalf("failed to write global pre-commit hook: %v", err)
 	}
 
-	setGlobal := exec.Command("git", "config", "--global", "core.hooksPath", globalHooksDir)
+	setGlobal := gitCommand("config", "--global", "core.hooksPath", globalHooksDir)
 	if out, err := setGlobal.CombinedOutput(); err != nil {
 		t.Fatalf("failed to set global core.hooksPath: %v (%s)", err, strings.TrimSpace(string(out)))
 	}
 
 	// Manual repo init (can't use newGitRepo which sets a local core.hooksPath).
 	repoDir := t.TempDir()
-	initCmd := exec.Command("git", "init", "--initial-branch=main")
+	initCmd := gitCommand("init", "--initial-branch=main")
 	initCmd.Dir = repoDir
 	if err := initCmd.Run(); err != nil {
 		t.Fatalf("git init failed: %v", err)
@@ -911,7 +939,7 @@ func TestInstallHooksBeads_PreservesGlobalHooks(t *testing.T) {
 		{"config", "user.email", "test@test.com"},
 		{"config", "user.name", "Test User"},
 	} {
-		cmd := exec.Command("git", args...)
+		cmd := gitCommand(args...)
 		cmd.Dir = repoDir
 		if err := cmd.Run(); err != nil {
 			t.Fatalf("git config %v failed: %v", args, err)
@@ -958,7 +986,7 @@ func TestInstallHooksBeads_PreservesDefaultGitHooks(t *testing.T) {
 		}
 
 		// Unset the local core.hooksPath that newGitRepo sets so git falls back to .git/hooks/.
-		exec.Command("git", "config", "--unset", "core.hooksPath").Run()
+		gitCommand("config", "--unset", "core.hooksPath").Run()
 
 		beadsDir := setupBeadsDir(t, repoDir)
 
@@ -1173,13 +1201,13 @@ func TestInstallHooksBeads_HuskyV8Helper(t *testing.T) {
 	}
 
 	// Set as global hooks path (simulating husky v8)
-	setGlobal := exec.Command("git", "config", "--global", "core.hooksPath", huskyDir)
+	setGlobal := gitCommand("config", "--global", "core.hooksPath", huskyDir)
 	if out, err := setGlobal.CombinedOutput(); err != nil {
 		t.Fatalf("set global core.hooksPath: %v (%s)", err, strings.TrimSpace(string(out)))
 	}
 
 	repoDir := t.TempDir()
-	initCmd := exec.Command("git", "init", "--initial-branch=main")
+	initCmd := gitCommand("init", "--initial-branch=main")
 	initCmd.Dir = repoDir
 	if err := initCmd.Run(); err != nil {
 		t.Fatalf("git init: %v", err)
@@ -1188,7 +1216,7 @@ func TestInstallHooksBeads_HuskyV8Helper(t *testing.T) {
 		{"config", "user.email", "test@test.com"},
 		{"config", "user.name", "Test"},
 	} {
-		cmd := exec.Command("git", args...)
+		cmd := gitCommand(args...)
 		cmd.Dir = repoDir
 		if err := cmd.Run(); err != nil {
 			t.Fatalf("git config %v: %v", args, err)
@@ -1279,13 +1307,13 @@ s=$(dirname "$(dirname "$0")")/$n
 	}
 
 	// Set core.hooksPath to .husky/_/ (husky v9 style)
-	setGlobal := exec.Command("git", "config", "--global", "core.hooksPath", huskyInner)
+	setGlobal := gitCommand("config", "--global", "core.hooksPath", huskyInner)
 	if out, err := setGlobal.CombinedOutput(); err != nil {
 		t.Fatalf("set global core.hooksPath: %v (%s)", err, strings.TrimSpace(string(out)))
 	}
 
 	repoDir := t.TempDir()
-	initCmd := exec.Command("git", "init", "--initial-branch=main")
+	initCmd := gitCommand("init", "--initial-branch=main")
 	initCmd.Dir = repoDir
 	if err := initCmd.Run(); err != nil {
 		t.Fatalf("git init: %v", err)
@@ -1294,7 +1322,7 @@ s=$(dirname "$(dirname "$0")")/$n
 		{"config", "user.email", "test@test.com"},
 		{"config", "user.name", "Test"},
 	} {
-		cmd := exec.Command("git", args...)
+		cmd := gitCommand(args...)
 		cmd.Dir = repoDir
 		if err := cmd.Run(); err != nil {
 			t.Fatalf("git config %v: %v", args, err)
@@ -1366,5 +1394,123 @@ func TestFixHuskyHookLayout_NoHusky(t *testing.T) {
 	// No h file to remove
 	if _, err := os.Stat(filepath.Join(targetDir, "h")); !os.IsNotExist(err) {
 		t.Error("h should not exist")
+	}
+}
+
+// TestCheckGitHooks_ForeignHookNotInstalled reproduces GH#6084.
+// A hook file that beads never wrote must not be reported as installed by
+// bd hooks list. Previously CheckGitHooks set Installed=true whenever
+// getHookVersion returned without error, but getHookVersion returns a zero-
+// value hookVersionInfo (IsBdHook=false) with a nil error when the file is
+// readable but contains no beads markers.
+func TestCheckGitHooks_ForeignHookNotInstalled(t *testing.T) {
+	tmpDir := newGitRepo(t)
+	runInDir(t, tmpDir, func() {
+		hooksDir := filepath.Join(tmpDir, ".git", "hooks")
+		if err := os.MkdirAll(hooksDir, 0750); err != nil {
+			t.Fatalf("failed to create hooks dir: %v", err)
+		}
+
+		// Write a hook that contains no beads markers whatsoever — exactly
+		// the script from the issue report.
+		foreignHook := "#!/bin/sh\necho hello\nexit 0\n"
+		hookPath := filepath.Join(hooksDir, "pre-commit")
+		if err := os.WriteFile(hookPath, []byte(foreignHook), 0755); err != nil {
+			t.Fatalf("failed to write foreign hook: %v", err)
+		}
+
+		statuses := CheckGitHooks()
+
+		for _, s := range statuses {
+			if s.Name != "pre-commit" {
+				continue
+			}
+			if s.Installed {
+				t.Errorf("pre-commit: got Installed=true for a foreign hook file that beads never wrote; want Installed=false (GH#6084)")
+			}
+			return
+		}
+		t.Error("pre-commit hook status not found in CheckGitHooks result")
+	})
+}
+
+// TestCheckGitHooks_BeadsHookIsInstalled verifies that the IsBdHook gate added
+// in GH#6084 does not regress recognition of genuine beads-managed hooks.
+// Each variant that getHookVersion can recognise must produce Installed=true.
+func TestCheckGitHooks_BeadsHookIsInstalled(t *testing.T) {
+	cases := []struct {
+		name          string
+		body          string
+		wantInstalled bool
+		wantOutdated  bool
+	}{
+		{
+			name: "section-marker",
+			// Minimal hook with a BEGIN BEADS INTEGRATION section marker.
+			body:          "#!/bin/sh\n" + hookSectionBeginPrefix + " v" + Version + " ---\nbd hooks run pre-commit \"$@\"\n" + hookSectionEndPrefix + " v" + Version + " ---\n",
+			wantInstalled: true,
+		},
+		{
+			name:          "legacy-version-marker",
+			body:          "#!/bin/sh\n" + hookVersionPrefix + Version + "\n# bd (beads) pre-commit hook\nbd sync --flush-only\n",
+			wantInstalled: true,
+		},
+		{
+			name:          "shim-marker",
+			body:          "#!/bin/sh\n" + shimVersionPrefix + Version + "\nexec bd hooks run pre-commit \"$@\"\n",
+			wantInstalled: true,
+		},
+		{
+			name: "inline-marker",
+			// Old bd init style: no version line, just the inline comment.
+			// bd wrote this template, so a missing version still means
+			// "re-install me": Outdated stays true (GH#1120).
+			body:          "#!/bin/sh\n# bd (beads) pre-commit hook\nbd sync --flush-only\n",
+			wantInstalled: true,
+			wantOutdated:  true,
+		},
+		{
+			name: "bd-hooks-run-no-marker",
+			// The GH#946 integration: an external hook manager's own hook that
+			// calls bd hooks run and carries no beads marker. bd doctor counts
+			// it as a bd hook (doctor.IsBdHookContent), so bd hooks list must
+			// too, or bd config drift exits 1 on a supported setup. It is not
+			// outdated: bd itself supplies the behavior, and "run bd hooks
+			// install" would overwrite the manager's hook.
+			body:          "#!/bin/sh\nlefthook run pre-commit\nbd hooks run pre-commit \"$@\"\n",
+			wantInstalled: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpDir := newGitRepo(t)
+			runInDir(t, tmpDir, func() {
+				hooksDir := filepath.Join(tmpDir, ".git", "hooks")
+				if err := os.MkdirAll(hooksDir, 0750); err != nil {
+					t.Fatalf("failed to create hooks dir: %v", err)
+				}
+				hookPath := filepath.Join(hooksDir, "pre-commit")
+				if err := os.WriteFile(hookPath, []byte(tc.body), 0755); err != nil {
+					t.Fatalf("failed to write hook: %v", err)
+				}
+
+				statuses := CheckGitHooks()
+
+				for _, s := range statuses {
+					if s.Name != "pre-commit" {
+						continue
+					}
+					if s.Installed != tc.wantInstalled {
+						t.Errorf("pre-commit (%s): got Installed=%v, want %v", tc.name, s.Installed, tc.wantInstalled)
+					}
+					if s.Outdated != tc.wantOutdated {
+						t.Errorf("pre-commit (%s): got Outdated=%v, want %v", tc.name, s.Outdated, tc.wantOutdated)
+					}
+					return
+				}
+				t.Error("pre-commit hook status not found in CheckGitHooks result")
+			})
+		})
 	}
 }

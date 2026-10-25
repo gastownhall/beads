@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/lockfile"
+	"github.com/steveyegge/beads/internal/testutil/bazeltest"
 	"golang.org/x/sys/windows"
 )
 
@@ -756,7 +757,7 @@ type syncLockHelperProcess struct {
 func startSyncLockHelper(t *testing.T, dir, mode string) *syncLockHelperProcess {
 	t.Helper()
 	cmd := exec.Command(os.Args[0], "-test.run=^TestSyncLockWindowsSubprocessHelper$")
-	cmd.Env = append(os.Environ(),
+	cmd.Env = append(bazeltest.ShardFreeEnv(os.Environ()),
 		syncLockHelperModeEnv+"="+mode,
 		syncLockHelperDirEnv+"="+dir,
 	)

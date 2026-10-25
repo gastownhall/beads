@@ -18,6 +18,53 @@ import (
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
 
+func TestSyncFailureTextDistinguishesSSHDialTimeoutFromAuth(t *testing.T) {
+	const timeoutLine = "ssh: connect to host blackhole.example port 22: Operation timed out"
+	gitText := timeoutLine + "\nfatal: Could not read from remote repository.\nPlease make sure you have the correct access rights and the repository exists.\nhint: run `ssh-add <key>` to pre-load your key for SSH remotes"
+	timeout := fmt.Errorf("pull: %w", errors.New(gitText))
+	if !strings.Contains(timeout.Error(), "ssh-add") {
+		t.Fatal("fixture did not reproduce Dolt's misleading auth hint")
+	}
+	got := syncFailureText(timeout)
+	if !strings.Contains(got, timeoutLine) || !strings.Contains(got, "could not be reached") {
+		t.Fatalf("dial timeout not explained: %q", got)
+	}
+	for _, misleading := range []string{"access rights", "ssh-add", "fatal: Could not read"} {
+		if strings.Contains(got, misleading) {
+			t.Errorf("dial timeout retained auth hint %q: %q", misleading, got)
+		}
+	}
+	// The rewrite must keep runSyncLoop's step: pull vs push is what tells an
+	// operator whether local work already reached the remote. A wrap segment
+	// that itself embeds git's output (cliTransferError's shape) is not a step
+	// and must not come back, auth hints and all.
+	explained := "SSH remote could not be reached (dial timed out): " + timeoutLine
+	cliTransfer := fmt.Errorf("dolt push failed: %s: %w", gitText, errors.New("exit status 1"))
+	for _, tc := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"pull step", timeout, "pull: " + explained},
+		{"push step over a CLI transfer", fmt.Errorf("push: %w", cliTransfer), "push: " + explained},
+		{"bare CLI transfer", cliTransfer, explained},
+		{"credentialed remote in the step is scrubbed", fmt.Errorf("pull https://u:secret@remote.example/org/db: %w", errors.New(gitText)), "pull https://remote.example/org/db: " + explained},
+	} {
+		if got := syncFailureText(tc.err); got != tc.want {
+			t.Errorf("%s: got %q, want %q", tc.name, got, tc.want)
+		}
+	}
+
+	auth := fmt.Errorf("pull: %w", errors.New("git@host: Permission denied (publickey).\nhint: run `ssh-add <key>` to pre-load your key for SSH remotes"))
+	if got := syncFailureText(auth); got != auth.Error() {
+		t.Errorf("real auth failure changed: got %q, want %q", got, auth.Error())
+	}
+	plainTimeout := errors.New("database query: Operation timed out")
+	if got := syncFailureText(plainTimeout); got != plainTimeout.Error() {
+		t.Errorf("non-SSH timeout changed: got %q, want %q", got, plainTimeout.Error())
+	}
+}
+
 // syncOpsRecorder builds a syncOps whose steps are scripted per attempt and
 // which records how many times each step ran. Scripts are indexed by call
 // number; a call past the end of a script reuses the script's last entry, so a
@@ -302,8 +349,10 @@ func TestRunSyncLoopConflictWinsOverPullError(t *testing.T) {
 // `merged` empty — the conflict branch still fires (from the live check), and
 // the unrelated error must not vanish silently.
 func TestRunSyncLoopDiscardedPullErrorOnLiveConflict(t *testing.T) {
+	const timeoutLine = "ssh: connect to host blackhole.example port 22: Operation timed out"
+	pullErr := errors.New(timeoutLine + "\nfatal: Could not read from remote repository.\nPlease make sure you have the correct access rights and the repository exists.\nhint: run `ssh-add <key>` to pre-load your key for SSH remotes")
 	r := &syncOpsRecorder{
-		pullErrs:     []error{errors.New("dial tcp: connection refused")},
+		pullErrs:     []error{pullErr},
 		conflictsSeq: [][]string{nil, {"issues"}},
 	}
 	out, err := runSyncLoop(context.Background(), r.ops(), defaultSyncAttempts)
@@ -313,8 +362,13 @@ func TestRunSyncLoopDiscardedPullErrorOnLiveConflict(t *testing.T) {
 	if out.Status != syncStatusConflict {
 		t.Fatalf("status = %q, want %q", out.Status, syncStatusConflict)
 	}
-	if out.DiscardedPullError != "dial tcp: connection refused" {
-		t.Errorf("DiscardedPullError = %q, want the unrelated pull error preserved", out.DiscardedPullError)
+	if !strings.Contains(out.DiscardedPullError, "could not be reached") || !strings.Contains(out.DiscardedPullError, timeoutLine) {
+		t.Errorf("DiscardedPullError does not explain the dial timeout: %q", out.DiscardedPullError)
+	}
+	for _, misleading := range []string{"access rights", "ssh-add", "fatal: Could not read"} {
+		if strings.Contains(out.DiscardedPullError, misleading) {
+			t.Errorf("DiscardedPullError retained auth hint %q: %q", misleading, out.DiscardedPullError)
+		}
 	}
 }
 

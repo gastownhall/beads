@@ -35,6 +35,8 @@ type issueOperationHooks interface {
 	CompleteIssueOperationComment(ctx context.Context, issueID string)
 	CompleteIssueOperationMetadata(ctx context.Context, issueID string)
 	CompleteIssueOperationRelease(ctx context.Context, issueID string)
+	CompleteIssueOperationReclaim(ctx context.Context, issueID string)
+	CompleteIssueOperationUpdateByID(ctx context.Context, issueID string)
 }
 
 var _ issueOperationHooks = (*HookFiringStore)(nil)
@@ -69,6 +71,11 @@ func (o *hookIssueOperations) Close(ctx context.Context, request issueops.CloseR
 	result, err := o.inner.Close(ctx, request)
 	if err == nil {
 		o.hooks.CompleteIssueOperationClose(result.Issue)
+		// A molecule root the close also closed in its transaction is a
+		// close of its own, and announces as one.
+		if result.AutoClosedMolecule != nil {
+			o.hooks.CompleteIssueOperationClose(result.AutoClosedMolecule)
+		}
 	}
 	return result, err
 }

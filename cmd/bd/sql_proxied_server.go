@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/storage/domain"
+	"github.com/steveyegge/beads/internal/storage/sqlclass"
 	"github.com/steveyegge/beads/internal/storage/uow"
 )
 
@@ -16,9 +17,16 @@ func runSQLProxiedServer(ctx context.Context, query string, csvOutput bool) erro
 		return HandleError("proxied-server UOW provider not initialized")
 	}
 
-	multiStatement := isMultiStatementSQL(query)
+	if isMultiStatementSQL(query) {
+		CheckReadonly("sql")
+		if _, err := runSQLProxiedExec(ctx, query); err != nil {
+			return err
+		}
+		return printSQLStatusOK()
+	}
 
-	if !multiStatement && sqlQueryIsRead(query) {
+	switch sqlclass.Classify(query) {
+	case sqlclass.Read:
 		result, err := uow.RunTxRead(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (*domain.RawSQLResult, error) {
 			return uw.RawSQLUseCase().Query(ctx, query)
 		})
@@ -26,10 +34,45 @@ func runSQLProxiedServer(ctx context.Context, query string, csvOutput bool) erro
 			return HandleErrorRespectJSON("query error: %v", err)
 		}
 		return renderRawSQLResult(result, csvOutput)
+
+	case sqlclass.Write:
+		CheckReadonly("sql")
+		affected, err := runSQLProxiedExec(ctx, query)
+		if err != nil {
+			return err
+		}
+		if jsonOutput {
+			return outputJSON(map[string]interface{}{
+				"rows_affected": affected,
+			})
+		}
+		fmt.Printf("OK, %d rows affected\n", affected)
+		return nil
+
+	default:
+		// The statement may write and may return rows. Run it through Query
+		// inside a committing transaction so a result set is rendered rather
+		// than silently discarded, and any write is committed rather than
+		// rolled back with a read transaction.
+		CheckReadonly("sql")
+		result, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (*domain.RawSQLResult, string, error) {
+			result, err := uw.RawSQLUseCase().Query(ctx, query)
+			if err != nil {
+				return nil, "", err
+			}
+			return result, "bd sql: " + query, nil
+		})
+		if err != nil {
+			return HandleErrorRespectJSON("query error: %v", err)
+		}
+		if len(result.Columns) == 0 {
+			return printSQLStatusOK()
+		}
+		return renderRawSQLResult(result, csvOutput)
 	}
+}
 
-	CheckReadonly("sql")
-
+func runSQLProxiedExec(ctx context.Context, query string) (int64, error) {
 	affected, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (int64, string, error) {
 		affected, err := uw.RawSQLUseCase().Exec(ctx, query)
 		if err != nil {
@@ -38,26 +81,18 @@ func runSQLProxiedServer(ctx context.Context, query string, csvOutput bool) erro
 		return affected, "bd sql: " + query, nil
 	})
 	if err != nil {
-		return HandleErrorRespectJSON("exec error: %v", err)
+		return 0, HandleErrorRespectJSON("exec error: %v", err)
 	}
+	return affected, nil
+}
 
-	if multiStatement {
-		if jsonOutput {
-			return outputJSON(map[string]interface{}{
-				"status": "ok",
-			})
-		}
-		fmt.Println("OK")
-		return nil
-	}
-
+func printSQLStatusOK() error {
 	if jsonOutput {
 		return outputJSON(map[string]interface{}{
-			"rows_affected": affected,
+			"status": "ok",
 		})
 	}
-
-	fmt.Printf("OK, %d rows affected\n", affected)
+	fmt.Println("OK")
 	return nil
 }
 
@@ -132,59 +167,6 @@ func topLevelStatementCount(query string) int {
 		count++
 	}
 	return count
-}
-
-func sqlQueryIsRead(query string) bool {
-	trimmed := strings.TrimSpace(strings.ToUpper(query))
-	switch {
-	case strings.HasPrefix(trimmed, "SELECT"),
-		strings.HasPrefix(trimmed, "EXPLAIN"),
-		strings.HasPrefix(trimmed, "PRAGMA"),
-		strings.HasPrefix(trimmed, "SHOW"),
-		strings.HasPrefix(trimmed, "DESCRIBE"):
-		return true
-	case strings.HasPrefix(trimmed, "WITH"):
-		return withOuterStatementIsRead(trimmed)
-	default:
-		return false
-	}
-}
-
-func withOuterStatementIsRead(upperTrimmed string) bool {
-	depth := 0
-	var quote byte
-	closedCTE := false
-	for i := 0; i < len(upperTrimmed); i++ {
-		c := upperTrimmed[i]
-		if quote != 0 {
-			if c == quote {
-				quote = 0
-			}
-			continue
-		}
-		switch c {
-		case '\'', '"', '`':
-			quote = c
-		case '(':
-			depth++
-		case ')':
-			depth--
-			if depth == 0 {
-				closedCTE = true
-			}
-		case ' ', '\t', '\n', '\r', ',':
-			if c == ',' && depth == 0 {
-				closedCTE = false
-			}
-		default:
-			if depth == 0 && closedCTE {
-				rest := strings.TrimLeft(upperTrimmed[i:], " \t\n\r")
-				return strings.HasPrefix(rest, "SELECT") ||
-					strings.HasPrefix(rest, "EXPLAIN")
-			}
-		}
-	}
-	return true
 }
 
 func renderRawSQLResult(result *domain.RawSQLResult, csvOutput bool) error {

@@ -27,6 +27,21 @@ const (
 	// it — carries the require-a-filter refusal SweepRequest.ClosedBefore
 	// describes.
 	SweepDurable SweepTier = "durable"
+	// SweepWispsPlane clears CLOSED rows by STORAGE PLANE rather than by
+	// tier: every closed row stored in the wisps table, whatever its flags —
+	// ephemeral wisps and no-history beads alike. `bd purge --wisps-plane`.
+	//
+	// It is the one tier that is NOT disjoint from the other two, and that is
+	// the point of it. A no-history bead lives in the wisps plane but is
+	// durable-tier (it is not ephemeral and carries no wisp_type), so neither
+	// SweepEphemeral nor SweepDurable can say "the wisps table" — the unit an
+	// orchestrator's retention policy is written in. Conversely a legacy
+	// typed wisp stored in the issues table is ephemeral-tier and NOT in this
+	// plane.
+	//
+	// Because it reaches durable-tier rows, it carries the durable tier's
+	// require-a-filter gate (SweepRequest.ClosedBefore).
+	SweepWispsPlane SweepTier = "wisps-plane"
 )
 
 // SweepRequest describes one bulk clearance of closed rows: which tier, which
@@ -68,6 +83,9 @@ type SweepRequest struct {
 	// says so with IDPattern "*", which is a deliberate keystroke rather than
 	// an omitted one.
 	//
+	// SweepWispsPlane carries the same gate, because the wisps plane holds
+	// no-history beads, which are durable-tier.
+	//
 	// The EPHEMERAL tier carries no such gate: an unfiltered sweep of closed
 	// wisps is the ordinary use of `bd purge`, and the tier is transient by
 	// definition.
@@ -108,6 +126,33 @@ type SweepRequest struct {
 	// `bd purge` does not, because a wisp's citations are as transient as the
 	// wisp.
 	ProtectReferenced bool
+	// ProtectLiveDependents skips candidates that a LIVE row depends on
+	// through a structural edge — a closed parent whose child is still open,
+	// a closed bead a live convoy tracks, a closed blocker of a live bead —
+	// so a sweep never deletes the root, container or gate of work that is
+	// still in progress.
+	//
+	// WHICH EDGES are SweepLiveDependentEdgeTypes: parent-child, tracks and
+	// blocks, from either plane's dependency table. Other edge types (related,
+	// discovered-from, ...) are links rather than structure and do not protect.
+	//
+	// WHICH ROWS ARE LIVE is the same not-done set ProtectReferenced asks: the
+	// built-in active statuses (open, in_progress, blocked, deferred, pinned,
+	// hooked) plus every configured custom status whose category is not
+	// "done", with the same REQUIRED read of the custom statuses.
+	//
+	// Unlike ProtectReferenced it is a stored-edge lookup, not a text scan, so
+	// it costs one read of the edges pointing at the candidates and one of
+	// their sources. `bd purge` always asks for it; `bd prune` does not.
+	ProtectLiveDependents bool
+	// Limit, when positive, caps how many rows ONE sweep deletes, taking the
+	// OLDEST-CLOSED first (closed_at ascending, then id). The rest are left
+	// for the next call and counted in SweepResult.Remaining, so a caller can
+	// drain a large backlog in bounded transactions instead of one that grows
+	// with the backlog and can outlive the caller's deadline. It applies after
+	// every protection, so it caps rows that would actually go. Zero means no
+	// cap; a negative value is ErrValidation.
+	Limit int
 	// DryRun reports what the sweep WOULD do and deletes nothing. The result
 	// is otherwise the same result — the same counts, the same skips, the same
 	// refusals — computed against the same snapshot the real sweep would have
@@ -132,6 +177,9 @@ type SweepSkips struct {
 	// 0 when that field is false; a caller that reads a 0 without having asked
 	// for the protection has learned nothing about whether rows are cited.
 	Referenced int
+	// LiveDependent counts candidates skipped by ProtectLiveDependents, under
+	// the same always-0-when-not-asked rule as Referenced.
+	LiveDependent int
 	// NotClosed, UnknownClosedAt and ClosedAtOrAfterCutoff count candidates
 	// the tier's own query returned and the sweep rechecked and rejected: a
 	// status that is not closed, a closed row with no closed_at stamp at all,
@@ -173,6 +221,10 @@ type SweepResult struct {
 	Events       int
 	// Skipped reports the candidates the sweep held back and why.
 	Skipped SweepSkips
+	// Remaining is how many rows the sweep WOULD also have deleted but left
+	// because of SweepRequest.Limit. Zero when there is no limit or the
+	// backlog fit; a caller loops while it is non-zero.
+	Remaining int
 	// ReferencedIDs is a BOUNDED SAMPLE of the ids Skipped.Referenced counts —
 	// at most SweepReferencedSampleLimit of them, in the order the candidate
 	// query returned them. It is a sample and not the set: a caller that needs
@@ -183,6 +235,11 @@ type SweepResult struct {
 	// beside it.
 	ReferencedIDs []string
 }
+
+// SweepLiveDependentEdgeTypes are the edge types through which a live row
+// protects a closed candidate under SweepRequest.ProtectLiveDependents. It is
+// published so a caller can state the same policy without copying the list.
+var SweepLiveDependentEdgeTypes = []DependencyType{DepParentChild, DepTracks, DepBlocks}
 
 // SweepReferencedSampleLimit bounds SweepResult.ReferencedIDs. It is published
 // so a caller can tell a truncated sample from a complete one by comparing the
@@ -255,17 +312,20 @@ type Sweeper interface {
 	//
 	// THE ORDER THE NARROWING HAPPENS IN IS PART OF THE ANSWER, because the
 	// skip counters are counted along the way: the tier's closed rows, then
-	// IDPattern, then the pinned and closed_at rechecks, then the reference
-	// protection. A pinned row excluded by the pattern is therefore NOT
-	// counted in Skipped.Pinned — it was never a candidate — and the counters
-	// describe the set the request actually reached.
+	// IDPattern, then the pinned and closed_at rechecks, then the
+	// live-dependent protection, then the reference protection, then Limit
+	// (oldest-closed first). A pinned row
+	// excluded by the pattern is therefore NOT counted in Skipped.Pinned — it
+	// was never a candidate — and the counters describe the set the request
+	// actually reached.
 	//
 	// REFUSALS, all ErrValidation and all before anything is read:
 	//
 	//   - an unset or unrecognized Tier;
-	//   - a SweepDurable request with neither ClosedBefore nor IDPattern (see
-	//     SweepRequest.ClosedBefore for why this lives here);
-	//   - an IDPattern that is not a well-formed glob.
+	//   - a SweepDurable or SweepWispsPlane request with neither ClosedBefore
+	//     nor IDPattern (see SweepRequest.ClosedBefore for why this lives here);
+	//   - an IDPattern that is not a well-formed glob;
+	//   - a negative Limit.
 	//
 	// A REQUEST THAT MATCHES NOTHING IS A ZERO RESULT AND A NIL ERROR, not a
 	// not-found: an empty set of closed rows is the steady state of a swept

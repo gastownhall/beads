@@ -335,17 +335,24 @@ type UpdateResult struct {
 //
 //nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
 func UpdateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string]interface{}, actor string) (*UpdateResult, error) {
-	return updateIssueInTx(ctx, tx, id, updates, actor, true)
+	return updateIssueInTx(ctx, tx, id, updates, actor, true, true)
 }
 
 // UpdateIssueWithoutEventInTx applies normal update semantics without recording
 // an intermediate event. Demotion uses this to preserve the historical event
 // stream: create/update history is copied, then a single demotion event is added.
 func UpdateIssueWithoutEventInTx(ctx context.Context, tx DBTX, id string, updates map[string]interface{}, actor string) (*UpdateResult, error) {
-	return updateIssueInTx(ctx, tx, id, updates, actor, false)
+	return updateIssueInTx(ctx, tx, id, updates, actor, false, true)
 }
 
-func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string]interface{}, actor string, recordEvent bool) (*UpdateResult, error) {
+// updateIssueInTx is the body behind both exported update entry points.
+// recordEvent gates the human-facing audit event only. mintVersion controls
+// whether an accepted update mints its own version row: both exported entry
+// points always do, while ExecuteUpdate — which applies label, parent and
+// persistence patches AFTER the row write in the same call — passes false and
+// mints once after the last patch, so the version's durable_state carries the
+// patched labels and edges rather than the pre-patch row.
+func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string]interface{}, actor string, recordEvent bool, mintVersion bool) (*UpdateResult, error) {
 	updates = cloneUpdateFields(updates)
 	// Pop the override before anything reads the map as a set of columns. It
 	// has to come out ahead of the no-op filter too: the filter keeps every key
@@ -399,10 +406,17 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 	// A status update that crosses into the done category is a close by another
 	// name, so it answers to close policy. Running after the no-op filter keeps
 	// a done-to-done restatement policy-free, and running after the callers'
-	// version and assignee preconditions keeps force away from those: it
-	// bypasses the two close refusals and nothing else, exactly as it does for
-	// `bd close`. A refusal returns here, before any write, and aborts the
-	// caller's transaction.
+	// version and assignee preconditions keeps force away from those: here it
+	// bypasses the two close-policy refusals and nothing else. A refusal
+	// returns here, before any write, and aborts the caller's transaction.
+	//
+	// Close policy is ALL it answers to. The pin guard and the assignee
+	// authority fence, which CloseIssueCheckedInTx applies to the close verbs,
+	// are deliberately not run here: a crossing still closes a pinned issue or
+	// a bead another actor holds on every update leg (`bd update -s closed`,
+	// PATCH, batchApply), as it always has. Refusing those would change what
+	// the update legs admit, which is its own decision and not part of putting
+	// the close verbs' guards in the role.
 	crossing, err := CrossesIntoDoneCategoryInTx(ctx, tx, oldIssue.Status, updates)
 	if err != nil {
 		return nil, err
@@ -534,6 +548,9 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 			}
 			updateResult.IssueRowsChanged = !isWisp || recompute.IssueRowsChanged
 			updateResult.WispRowsChanged = isWisp || recompute.WispRowsChanged
+			if !newActive {
+				NoteStatusChangeBlockedRecheck(tx, id, newStatus, affectedIssues, affectedWisps)
+			}
 		}
 	}
 
@@ -543,6 +560,11 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 	// must never have a hole punched in it by an audit-suppressing caller.
 	if err := RecordEventInTx(ctx, tx, EventUpdate, id, actor); err != nil {
 		return nil, err
+	}
+	if mintVersion {
+		if err := RecordVersionInTx(ctx, tx, id, actor); err != nil {
+			return nil, err
+		}
 	}
 	return updateResult, nil
 }

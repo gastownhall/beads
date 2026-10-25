@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/testutil/bazeltest"
 	"github.com/steveyegge/beads/issueops"
 	"github.com/steveyegge/beads/journalops"
 	"github.com/steveyegge/beads/memoryops"
@@ -59,6 +60,9 @@ var errorType = reflect.TypeOf((*error)(nil)).Elem()
 // repoRoot locates the module root from this file's own path, so the gate
 // finds the facade packages without depending on the working directory.
 func repoRoot() (string, error) {
+	if root := bazeltest.OverrideRoot(); root != "" {
+		return root, nil
+	}
 	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {
 		return "", errors.New("runtime.Caller failed")

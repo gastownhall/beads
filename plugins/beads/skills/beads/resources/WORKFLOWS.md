@@ -66,7 +66,7 @@ After Compaction:
 
 **Good note (enables recovery):**
 ```
-bd update issue-42 --notes "COMPLETED: User authentication - added JWT token
+bd update issue-42 --append-notes "COMPLETED: User authentication - added JWT token
 generation with 1hr expiry, implemented refresh token endpoint using rotating
 tokens pattern. IN PROGRESS: Password reset flow. Email service integration
 working. NEXT: Need to add rate limiting to reset endpoint (currently unlimited
@@ -76,7 +76,7 @@ recommendations, tech lead concerned about response time but benchmarks show <10
 
 **Bad note (insufficient for recovery):**
 ```
-bd update issue-42 --notes "Working on auth feature. Made some progress.
+bd update issue-42 --append-notes "Working on auth feature. Made some progress.
 More to do later."
 ```
 
@@ -342,7 +342,7 @@ Session End Handoff:
 - [ ] Prompt user: "We just completed X and started Y on <issue-id>.
        Should I update the beads notes for next session?"
 - [ ] If yes, suggest command:
-       bd update <issue-id> --notes "COMPLETED: X. IN PROGRESS: Y. NEXT: Z"
+       bd update <issue-id> --append-notes "COMPLETED: X. IN PROGRESS: Y. NEXT: Z"
 - [ ] User reviews and confirms
 - [ ] Claude executes the update
 - [ ] Notes saved for next session's resumption
@@ -404,7 +404,7 @@ User Tips:
 
 **At End of Session 1:**
 ```bash
-bd update workspace-mcp-server-2 --notes "COMPLETED: Set up skeleton with Docs
+bd update workspace-mcp-server-2 --append-notes "COMPLETED: Set up skeleton with Docs
 API connection verified. Markdown parsing logic 80% done (handles *, _ modifiers).
 IN PROGRESS: Testing edge cases for nested formatting. NEXT: Implement
 batchUpdate call structure for text insertion. REFERENCE: Reference pattern at

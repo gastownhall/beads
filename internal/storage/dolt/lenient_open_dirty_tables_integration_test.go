@@ -122,6 +122,71 @@ func TestServerModeLenientOpenDirtyTableGate(t *testing.T) {
 		}
 	})
 
+	// The migration-consent refusal fires before the dirty guard, so on a
+	// database that is both behind and dirty the unconsented commit the
+	// guard prescribes would rebuild this deadlock one check earlier.
+	t.Run("behind and dirty database without consent recovers through a lenient open", func(t *testing.T) {
+		const database = "lenient_consent"
+		admin := prepareLenientOpenDatabaseAtV51(t, ctx, state.Port, database)
+		defer admin.Close()
+
+		if _, err := admin.ExecContext(ctx,
+			"INSERT INTO issues (id, title, description, design, acceptance_criteria, notes) VALUES (?, ?, '', '', '', '')",
+			database+"-1", "uncommitted issue",
+		); err != nil {
+			t.Fatalf("dirty issues table: %v", err)
+		}
+
+		schema.SetLocalMigrateConsent(false)
+		t.Cleanup(func() { schema.SetLocalMigrateConsent(true) })
+		t.Setenv(schema.AllowMigrateEnv, "")
+		t.Setenv(schema.AllowRemoteMigrateEnv, "")
+
+		refuses := func(name string, cfg *Config) {
+			t.Helper()
+			s, err := New(ctx, cfg)
+			if err == nil {
+				s.Close()
+				t.Fatalf("New (%s) = nil, want *schema.MigrateConsentError", name)
+			}
+			if !schema.IsMigrateConsentError(err) {
+				t.Fatalf("New (%s) error = %T (%v), want *schema.MigrateConsentError", name, err, err)
+			}
+		}
+		refuses("plain writable open", lenientOpenConfig(beadsDir, state.Port, database))
+		syncCfg := lenientOpenConfig(beadsDir, state.Port, database)
+		syncCfg.RemoteSyncOpen = true
+		refuses("RemoteSyncOpen", syncCfg)
+
+		lenientCfg := lenientOpenConfig(beadsDir, state.Port, database)
+		lenientCfg.LenientOpen = true
+		store, err := New(ctx, lenientCfg)
+		if err != nil {
+			t.Fatalf("New (LenientOpen) = %v, want it to continue past the consent refusal", err)
+		}
+		defer store.Close()
+		if got := lenientOpenSchemaVersion(t, ctx, store.db); got != 51 {
+			t.Fatalf("schema version after lenient open = %d, want 51 (no consent, so no migration)", got)
+		}
+		if err := store.Commit(ctx, "checkpoint before migration"); err != nil {
+			t.Fatalf("Commit: %v", err)
+		}
+		if got := lenientOpenDirtyCount(t, ctx, store.db); got != 0 {
+			t.Fatalf("dolt_status rows after commit = %d, want 0", got)
+		}
+		store.Close()
+
+		schema.SetLocalMigrateConsent(true)
+		migrated, err := New(ctx, lenientOpenConfig(beadsDir, state.Port, database))
+		if err != nil {
+			t.Fatalf("New (consented, post-commit): %v", err)
+		}
+		defer migrated.Close()
+		if got := lenientOpenSchemaVersion(t, ctx, migrated.db); got != schema.LatestVersion() {
+			t.Fatalf("schema version after consented open = %d, want latest %d", got, schema.LatestVersion())
+		}
+	})
+
 	t.Run("clean database still migrates through a lenient open", func(t *testing.T) {
 		const database = "lenient_clean"
 		admin := prepareLenientOpenDatabaseAtV51(t, ctx, state.Port, database)

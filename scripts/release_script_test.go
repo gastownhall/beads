@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/formula"
+	"github.com/steveyegge/beads/internal/testutil/bazeltest"
 )
 
 func TestReleaseScriptUsesVerifiedInstalledBDBeforeStaleRepoBD(t *testing.T) {
@@ -84,8 +85,7 @@ echo '{"source":"/tmp/stale.formula.toml"}'
 }
 
 func TestReleaseFormulaCleanupStaleDoltOrphansHandlesLocalModeWithoutJQ(t *testing.T) {
-	repoRoot := sourceRepoRoot(t)
-	formulaPath := filepath.Join(repoRoot, ".beads", "formulas", "beads-release.formula.toml")
+	formulaPath := releaseFormulaPath(t)
 	if _, err := formula.NewParser().ParseFile(formulaPath); err != nil {
 		t.Fatalf("beads-release formula does not parse: %v", err)
 	}
@@ -117,8 +117,7 @@ func TestReleaseFormulaCleanupStaleDoltOrphansHandlesLocalModeWithoutJQ(t *testi
 }
 
 func TestReleaseFormulaHomebrewCoreProcedureCoversTemplateAndBottles(t *testing.T) {
-	repoRoot := sourceRepoRoot(t)
-	formulaPath := filepath.Join(repoRoot, ".beads", "formulas", "beads-release.formula.toml")
+	formulaPath := releaseFormulaPath(t)
 	if _, err := formula.NewParser().ParseFile(formulaPath); err != nil {
 		t.Fatalf("beads-release formula does not parse: %v", err)
 	}
@@ -203,13 +202,20 @@ func releaseTestTempDir(t *testing.T) string {
 	return t.TempDir()
 }
 
-func sourceRepoRoot(t *testing.T) string {
+// releaseFormulaPath returns the checked-in beads-release formula. Under
+// Bazel it comes from BEADS_TEST_RELEASE_FORMULA: .beads/ also holds live bd
+// data and is in .bazelignore, so the formula is not under //:repo_files but
+// in its own local repository (@beads_formulas, MODULE.bazel).
+func releaseFormulaPath(t *testing.T) string {
 	t.Helper()
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
+	if bazeltest.IsBazel() {
+		path, err := bazeltest.RunfileEnv("BEADS_TEST_RELEASE_FORMULA")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return path
 	}
-	return filepath.Dir(filepath.Dir(file))
+	return filepath.Join(sourceRepoRoot(t), ".beads", "formulas", "beads-release.formula.toml")
 }
 
 func runReleaseDryRun(t *testing.T, repo, bin string) (string, error) {
@@ -240,15 +246,6 @@ func runReleaseDryRunWithEnv(t *testing.T, repo, bin string, extraEnv ...string)
 	cmd.Dir = repo
 	out, err := cmd.CombinedOutput()
 	return string(out), err
-}
-
-func msysPath(path string) string {
-	path = filepath.Clean(path)
-	path = filepath.ToSlash(path)
-	if len(path) >= 3 && path[1] == ':' && path[2] == '/' {
-		return "/" + strings.ToLower(path[:1]) + path[2:]
-	}
-	return path
 }
 
 func shellPath(t *testing.T, path string) string {

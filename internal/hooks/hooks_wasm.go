@@ -4,7 +4,6 @@ package hooks
 
 import (
 	"context"
-	"errors"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -13,8 +12,6 @@ import (
 
 	"github.com/steveyegge/beads/internal/types"
 )
-
-var errHookExecutionUnsupported = errors.New("hook execution is not supported on js/wasm")
 
 func (*Runner) runHook(hookPath, event string, issue *types.Issue) (retErr error) {
 	// Hooks are fire-and-forget so they have no parent span; create the same

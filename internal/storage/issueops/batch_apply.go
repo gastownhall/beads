@@ -238,9 +238,10 @@ func (r *applyBatchRun) applyItem(ctx context.Context, tx *sql.Tx, index int) er
 // cap. Revisit it with a measurement, not with a copy of ExecuteCreateBatch.
 func (r *applyBatchRun) applyCreate(ctx context.Context, tx *sql.Tx, index int, item *publicops.CreateItem) error {
 	created, tables, err := ExecuteCreate(ctx, tx, publicops.CreateRequest{
-		Actor:         r.plan.Actor,
-		Issue:         item.Issue,
-		ForceIDPrefix: r.plan.ForceIDPrefix,
+		Actor:           r.plan.Actor,
+		Issue:           item.Issue,
+		ForceIDPrefix:   r.plan.ForceIDPrefix,
+		DefaultPriority: item.DefaultPriority,
 	})
 	if err != nil {
 		return &publicops.ItemError{Index: index, Kind: publicops.ItemCreate, Key: item.Key, Err: err}
@@ -279,6 +280,7 @@ func (r *applyBatchRun) applyUpdate(ctx context.Context, tx *sql.Tx, index int, 
 		ExpectedAssignee:      item.ExpectedAssignee,
 		ForceClosePolicy:      item.ForceClosePolicy,
 		ForceAssigneeTransfer: item.ForceAssigneeTransfer,
+		ForceNotesOverwrite:   item.ForceNotesOverwrite,
 	})
 	if err != nil {
 		return &publicops.ItemError{Index: index, Kind: publicops.ItemUpdate, Key: item.Target.Key, IssueID: id, Err: err}
@@ -351,6 +353,12 @@ func (r *applyBatchRun) applyDepAdd(ctx context.Context, tx *sql.Tx, index int, 
 		// bound to. The planner catches only the syntactically identical pair.
 		return itemErr(fmt.Errorf("%w: %s", publicops.ErrSelfDependency, source))
 	}
+	// The dotted-id hierarchy rule DependencyEditor applies, on the RESOLVED
+	// ids: a key can name a row whose minted id is a dotted child, so the planner
+	// cannot decide this before the creates ran.
+	if err := publicops.CheckDottedChildDependency(source, target, item.Type); err != nil {
+		return itemErr(err)
+	}
 	// THE CROSS-PLANE REFUSAL IS ABOUT ROWS THIS REQUEST CREATED, and only
 	// those. The two planes hold their edges in different tables, so an edge
 	// between a durable row and a wisp the same batch minted is one the batch
@@ -369,11 +377,20 @@ func (r *applyBatchRun) applyDepAdd(ctx context.Context, tx *sql.Tx, index int, 
 	}
 	sourceTable, _, eventTable, depTable := WispTableRouting(sourceWisp)
 
+	metadata := item.Metadata
+	if item.HasSpawner {
+		metadata, err = StampWaitsForSpawnerID(item.Type, item.Metadata, target)
+		if err != nil {
+			return itemErr(fmt.Errorf("%w: %v", publicops.ErrValidation, err))
+		}
+	}
+
 	dep := &types.Dependency{
 		IssueID:     source,
 		DependsOnID: target,
 		Type:        item.Type,
-		Metadata:    item.Metadata,
+		Metadata:    metadata,
+		ThreadID:    item.ThreadID,
 	}
 	eventWritten, err := AddDependencyInTx(ctx, tx, dep, r.plan.Actor, AddDependencyOpts{
 		SourceTable:    sourceTable,
@@ -410,6 +427,43 @@ func (r *applyBatchRun) applyDepAdd(ctx context.Context, tx *sql.Tx, index int, 
 	return nil
 }
 
+// StampWaitsForSpawnerID fills a waits-for edge's metadata with the spawner id
+// this item resolved, AFTER every id this request mints exists.
+//
+// A GRAPH PLAN'S SPAWNER IS ALWAYS THE EDGE'S OWN TARGET — the caller cannot
+// spell a waits-for item any other way, since the planner above this role
+// forces spawner_key/spawner_id to match to_key/to_id before the request ever
+// reaches a transaction. So the resolved target this item just computed IS the
+// spawner id, known or not at the time the caller built the request: a
+// plan-local Ref.Key names a row this very request is minting, and its id does
+// not exist until the create item ahead of this one in Items runs. Stamping it
+// here, after resolve, is what lets a waits-for edge name a same-batch spawner
+// by key at all — item.Metadata alone has no way to carry an id nothing had
+// minted yet.
+//
+// metadata.spawner_id is otherwise redundant with dependencies.depends_on_id
+// (NewGraphEdgeDependency's doc states gate evaluation reads the column, never
+// the blob) and this keeps it from drifting from that column regardless of
+// what a caller's Metadata happened to say.
+func StampWaitsForSpawnerID(depType types.DependencyType, metadata, target string) (string, error) {
+	if depType != types.DepWaitsFor {
+		return metadata, nil
+	}
+	meta := types.WaitsForMeta{}
+	trimmed := strings.TrimSpace(metadata)
+	if trimmed != "" {
+		if err := json.Unmarshal([]byte(trimmed), &meta); err != nil {
+			return "", fmt.Errorf("waits-for metadata is not a well-formed gate object: %w", err)
+		}
+	}
+	meta.SpawnerID = target
+	raw, err := json.Marshal(meta)
+	if err != nil {
+		return "", fmt.Errorf("serializing waits-for metadata: %w", err)
+	}
+	return string(raw), nil
+}
+
 // spliceMetadataRefs writes the resolved ids into the metadata of the create
 // items that asked for them, AFTER every id in the request exists.
 //
@@ -434,11 +488,13 @@ func (r *applyBatchRun) spliceMetadataRefs(ctx context.Context, tx *sql.Tx) erro
 			return err
 		}
 		id := r.result.Items[index].IssueID
-		updated, tables, err := ExecuteUpdate(ctx, tx, publicops.UpdateRequest{
+		// Unguarded for templates: the splice finishes this request's own
+		// create, so a template it creates is not being modified.
+		updated, tables, err := executeUpdate(ctx, tx, publicops.UpdateRequest{
 			Actor:   r.plan.Actor,
 			IssueID: id,
 			Patch:   publicops.IssuePatch{Metadata: publicops.MetadataPatch{Set: set}},
-		})
+		}, false)
 		if err != nil {
 			return &publicops.ItemError{
 				Index: index, Kind: publicops.ItemCreate, Key: item.Create.Key, IssueID: id, Err: err,

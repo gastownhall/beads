@@ -2,7 +2,7 @@
   description = "beads (bd) - An issue tracker designed for AI-supervised coding workflows";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
   };
 
   outputs =
@@ -38,6 +38,7 @@
 
       packages = forAllSystems (import ./packages.nix);
 
+
       apps = nixpkgs.lib.genAttrs systems (
         system:
         rec {
@@ -54,7 +55,7 @@
         {
           default = pkgs.mkShell {
             buildInputs = with pkgs; [
-              go_1_26
+              go_1_27
               git
               gopls
               gotools

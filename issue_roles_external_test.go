@@ -238,6 +238,39 @@ func TestReleaserExposesTypedUnsupportedError(t *testing.T) {
 	}
 }
 
+// TestLeaseReclaimerLayersHooksOutsideTelemetry is the same pin for the
+// lease-sweep role. It gives the same answer the release does and for the
+// same reason: a reclaim moves assignee and status per reverted row, which
+// is on_update — a hook the vocabulary publishes and a row a script can
+// still read back — so this decorator wraps rather than recursing the way
+// Sweeper and Deleter do.
+func TestLeaseReclaimerLayersHooksOutsideTelemetry(t *testing.T) {
+	t.Setenv("BD_OTEL_STDOUT", "true")
+	instrumented, ok := telemetry.WrapStorage(&dolt.DoltStore{}).(*telemetry.InstrumentedStorage)
+	if !ok {
+		t.Fatal("WrapStorage() did not create InstrumentedStorage")
+	}
+
+	reclaimer, err := storage.NewHookFiringStore(instrumented, nil).LeaseReclaimer()
+	if err != nil {
+		t.Fatalf("LeaseReclaimer() error = %v", err)
+	}
+	if got := reflect.TypeOf(reclaimer).String(); got != "*storage.hookLeaseReclaimer" {
+		t.Fatalf("outer layer = %s, want the hook wrapper", got)
+	}
+}
+
+func TestLeaseReclaimerExposesTypedUnsupportedError(t *testing.T) {
+	reclaimer, err := (*dolt.DoltStore)(nil).LeaseReclaimer()
+	if reclaimer != nil {
+		t.Fatalf("LeaseReclaimer() reclaimer = %T, want nil", reclaimer)
+	}
+	var unsupported *beads.ErrUnsupported
+	if !errors.As(err, &unsupported) {
+		t.Fatalf("LeaseReclaimer() error = %v, want *beads.ErrUnsupported", err)
+	}
+}
+
 // TestIssueRelationsKeepsTelemetryOutermost is the READ role's version of the
 // pin, and it is deliberately the other answer: the hook decorator adds no
 // layer to a read, so the outermost thing a caller gets is the instrumented
@@ -654,6 +687,35 @@ func TestGraphCounterExposesTypedUnsupportedError(t *testing.T) {
 	}
 }
 
+// TestBatchGetterKeepsTelemetryOutermost is the READ answer again: reading
+// issues by id fires no completion hooks, so the hook decorator adds no layer.
+func TestBatchGetterKeepsTelemetryOutermost(t *testing.T) {
+	t.Setenv("BD_OTEL_STDOUT", "true")
+	instrumented, ok := telemetry.WrapStorage(&dolt.DoltStore{}).(*telemetry.InstrumentedStorage)
+	if !ok {
+		t.Fatal("WrapStorage() did not create InstrumentedStorage")
+	}
+
+	getter, err := storage.NewHookFiringStore(instrumented, nil).BatchGetter()
+	if err != nil {
+		t.Fatalf("BatchGetter() error = %v", err)
+	}
+	if got := reflect.TypeOf(getter).String(); got != "*telemetry.instrumentedBatchGetter" {
+		t.Fatalf("outer layer = %s, want the telemetry wrapper unwrapped by the hook decorator", got)
+	}
+}
+
+func TestBatchGetterExposesTypedUnsupportedError(t *testing.T) {
+	getter, err := (*dolt.DoltStore)(nil).BatchGetter()
+	if getter != nil {
+		t.Fatalf("BatchGetter() getter = %T, want nil", getter)
+	}
+	var unsupported *beads.ErrUnsupported
+	if !errors.As(err, &unsupported) {
+		t.Fatalf("BatchGetter() error = %v, want *beads.ErrUnsupported", err)
+	}
+}
+
 func TestCounterExposesTypedUnsupportedError(t *testing.T) {
 	counter, err := (*dolt.DoltStore)(nil).Counter()
 	if counter != nil {
@@ -691,6 +753,36 @@ func TestReadyCounterExposesTypedUnsupportedError(t *testing.T) {
 	var unsupported *beads.ErrUnsupported
 	if !errors.As(err, &unsupported) {
 		t.Fatalf("ReadyCounter() error = %v, want *beads.ErrUnsupported", err)
+	}
+}
+
+// TestBlockedListerKeepsTelemetryOutermost is the READ answer again: listing
+// the blocked set fires no completion hooks, so the hook decorator adds no
+// layer.
+func TestBlockedListerKeepsTelemetryOutermost(t *testing.T) {
+	t.Setenv("BD_OTEL_STDOUT", "true")
+	instrumented, ok := telemetry.WrapStorage(&dolt.DoltStore{}).(*telemetry.InstrumentedStorage)
+	if !ok {
+		t.Fatal("WrapStorage() did not create InstrumentedStorage")
+	}
+
+	lister, err := storage.NewHookFiringStore(instrumented, nil).BlockedLister()
+	if err != nil {
+		t.Fatalf("BlockedLister() error = %v", err)
+	}
+	if got := reflect.TypeOf(lister).String(); got != "*telemetry.instrumentedBlockedLister" {
+		t.Fatalf("outer layer = %s, want the telemetry wrapper unwrapped by the hook decorator", got)
+	}
+}
+
+func TestBlockedListerExposesTypedUnsupportedError(t *testing.T) {
+	lister, err := (*dolt.DoltStore)(nil).BlockedLister()
+	if lister != nil {
+		t.Fatalf("BlockedLister() lister = %T, want nil", lister)
+	}
+	var unsupported *beads.ErrUnsupported
+	if !errors.As(err, &unsupported) {
+		t.Fatalf("BlockedLister() error = %v, want *beads.ErrUnsupported", err)
 	}
 }
 
@@ -782,5 +874,37 @@ func TestDeleterExposesTypedUnsupportedError(t *testing.T) {
 	var unsupported *beads.ErrUnsupported
 	if !errors.As(err, &unsupported) {
 		t.Fatalf("Deleter() error = %v, want *beads.ErrUnsupported", err)
+	}
+}
+
+// TestHeartbeaterLayersHooksOutsideTelemetry is the same pin for the lease
+// refresh. It gives the release's answer: a refresh fires nothing, but a
+// re-arm is recorded as a mutation and fires on_update
+// (internal/storage/hook_heartbeater.go), so this decorator wraps rather than
+// recursing the way Sweeper and Deleter do.
+func TestHeartbeaterLayersHooksOutsideTelemetry(t *testing.T) {
+	t.Setenv("BD_OTEL_STDOUT", "true")
+	instrumented, ok := telemetry.WrapStorage(&dolt.DoltStore{}).(*telemetry.InstrumentedStorage)
+	if !ok {
+		t.Fatal("WrapStorage() did not create InstrumentedStorage")
+	}
+
+	heartbeater, err := storage.NewHookFiringStore(instrumented, nil).Heartbeater()
+	if err != nil {
+		t.Fatalf("Heartbeater() error = %v", err)
+	}
+	if got := reflect.TypeOf(heartbeater).String(); got != "*storage.hookHeartbeater" {
+		t.Fatalf("outer layer = %s, want the hook wrapper", got)
+	}
+}
+
+func TestHeartbeaterExposesTypedUnsupportedError(t *testing.T) {
+	heartbeater, err := (*dolt.DoltStore)(nil).Heartbeater()
+	if heartbeater != nil {
+		t.Fatalf("Heartbeater() heartbeater = %T, want nil", heartbeater)
+	}
+	var unsupported *beads.ErrUnsupported
+	if !errors.As(err, &unsupported) {
+		t.Fatalf("Heartbeater() error = %v, want *beads.ErrUnsupported", err)
 	}
 }

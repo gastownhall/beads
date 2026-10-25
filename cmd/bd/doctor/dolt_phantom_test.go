@@ -11,6 +11,7 @@ import (
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/testutil"
 )
@@ -206,5 +207,133 @@ func TestCheckPhantomDatabases_NilConfig(t *testing.T) {
 	// Verify the function doesn't panic or error with nil config
 	if check.Name != "Phantom Databases" {
 		t.Errorf("expected check name 'Phantom Databases', got %q", check.Name)
+	}
+}
+
+func TestCheckPhantomDatabases_GlobalDBNotPhantom(t *testing.T) {
+	db := openSharedDoltForPhantom(t)
+
+	// Clean up any pre-existing phantom databases from other tests. The shared
+	// test container is bootstrapped with a beads_test database, so without this
+	// sweep the aggregate-status assertion below is red under -run isolation,
+	// -shuffle, or sharding, and green in a package run only because
+	// TestCheckPhantomDatabases_OK happens to sweep first.
+	cleanupAllPhantomDBs(t, db)
+
+	// Shared-server mode creates a global routing database (beads_global) that
+	// matches the beads_ prefix but is intentional, not a phantom.
+	//nolint:gosec // G202: test-only database name, not user input
+	_, err := db.Exec("CREATE DATABASE IF NOT EXISTS beads_global")
+	if err != nil {
+		t.Fatalf("failed to create test database: %v", err)
+	}
+	cleanupPhantomDB(t, db, "beads_global")
+
+	conn := &doltConn{
+		db:  db,
+		cfg: &configfile.Config{GlobalDoltDatabase: "beads_global"},
+	}
+	check := checkPhantomDatabases(conn)
+
+	// Containment pins this test's own subject and cannot be perturbed by an
+	// unrelated database appearing on the shared server; the status assertion
+	// then adds that nothing else was flagged either.
+	if strings.Contains(check.Message, "beads_global") {
+		t.Errorf("global DB must not be reported as a phantom, got %s: %s", check.Status, check.Message)
+	}
+	if check.Status != StatusOK {
+		t.Errorf("expected StatusOK (global DB should not be flagged), got %s: %s", check.Status, check.Message)
+	}
+}
+
+// TestCheckPhantomDatabases_GlobalDBNoStamp covers the population that reported
+// GH#6599: an existing checkout whose metadata.json carries no
+// global_dolt_database stamp, because bd init only writes that field when the
+// workspace is initialized under shared-server mode and nothing back-fills it.
+func TestCheckPhantomDatabases_GlobalDBNoStamp(t *testing.T) {
+	db := openSharedDoltForPhantom(t)
+	cleanupAllPhantomDBs(t, db)
+
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+
+	//nolint:gosec // G202: test-only database name, not user input
+	_, err := db.Exec("CREATE DATABASE IF NOT EXISTS beads_global")
+	if err != nil {
+		t.Fatalf("failed to create test database: %v", err)
+	}
+	cleanupPhantomDB(t, db, "beads_global")
+
+	conn := &doltConn{db: db, cfg: &configfile.Config{}}
+	check := checkPhantomDatabases(conn)
+
+	if strings.Contains(check.Message, "beads_global") {
+		t.Errorf("unstamped global DB must not be flagged in shared-server mode, got %s: %s", check.Status, check.Message)
+	}
+	if check.Status != StatusOK {
+		t.Errorf("expected StatusOK for an unstamped global DB in shared-server mode, got %s: %s", check.Status, check.Message)
+	}
+}
+
+// TestCheckPhantomDatabases_GlobalDBNoStampPerProject pins the other arm of the
+// fallback: with neither the init stamp nor active shared-server mode there is
+// no evidence this workspace routes through a global database, so a stray
+// beads_global on a per-project server is still reported. This covers unstamped
+// workspaces only — the stamp is read ahead of the mode gate, so a workspace
+// stamped under shared-server mode keeps skipping beads_global after the mode is
+// turned off. That is deliberate (bd init writes the same constant the fallback
+// returns, so the two can only diverge on a hand-edited metadata.json).
+func TestCheckPhantomDatabases_GlobalDBNoStampPerProject(t *testing.T) {
+	db := openSharedDoltForPhantom(t)
+	cleanupAllPhantomDBs(t, db)
+
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "0")
+	if doltserver.IsSharedServerMode() {
+		t.Skip("shared-server mode enabled via config.yaml; cannot exercise the per-project arm")
+	}
+
+	//nolint:gosec // G202: test-only database name, not user input
+	_, err := db.Exec("CREATE DATABASE IF NOT EXISTS beads_global")
+	if err != nil {
+		t.Fatalf("failed to create test database: %v", err)
+	}
+	cleanupPhantomDB(t, db, "beads_global")
+
+	conn := &doltConn{db: db, cfg: &configfile.Config{}}
+	check := checkPhantomDatabases(conn)
+
+	if !strings.Contains(check.Message, "beads_global") {
+		t.Errorf("expected beads_global to be flagged without a stamp outside shared-server mode, got %s: %s", check.Status, check.Message)
+	}
+}
+
+// TestProbeForCorrectDatabase_SkipsGlobalDB covers the adjacent exit of the same
+// fix. The global routing database is schema-initialized, so it answers the
+// probe's issues-table query and would otherwise be suggested as the project's
+// real database.
+func TestProbeForCorrectDatabase_SkipsGlobalDB(t *testing.T) {
+	db := openSharedDoltForPhantom(t)
+	cleanupAllPhantomDBs(t, db)
+
+	//nolint:gosec // G202: test-only database name, not user input
+	_, err := db.Exec("CREATE DATABASE IF NOT EXISTS beads_global")
+	if err != nil {
+		t.Fatalf("failed to create test database: %v", err)
+	}
+	cleanupPhantomDB(t, db, "beads_global")
+	//nolint:gosec // G202: test-only database name, not user input
+	_, err = db.Exec("CREATE TABLE IF NOT EXISTS `beads_global`.issues (id VARCHAR(64) PRIMARY KEY)")
+	if err != nil {
+		t.Fatalf("failed to create issues table: %v", err)
+	}
+
+	// The configured database ("beads") is skipped by the probe, so beads_global
+	// is the first candidate it reaches.
+	conn := &doltConn{
+		db:  db,
+		cfg: &configfile.Config{DoltDatabase: "beads", GlobalDoltDatabase: "beads_global"},
+	}
+
+	if got := probeForCorrectDatabase(conn); got == "beads_global" {
+		t.Errorf("probeForCorrectDatabase returned the shared-server global database %q", got)
 	}
 }

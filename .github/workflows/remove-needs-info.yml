@@ -1,0 +1,65 @@
+name: Remove needs-info on author response
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_target:
+    types: [synchronize]
+
+permissions: {}
+
+jobs:
+  # pull_request_target is safe here because this job never checks out or runs
+  # pull request code; it only removes labels from the issue/PR metadata.
+  remove-label:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Remove needs-info / needs-repro on author response
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const labels = ['status/needs-info', 'status/needs-repro'];
+
+            let number, author;
+            if (context.eventName === 'issue_comment') {
+              number = context.payload.issue.number;
+              author = context.payload.issue.user.login;
+              if (context.payload.comment.user.login !== author) return;
+            } else {
+              number = context.payload.pull_request.number;
+              author = context.payload.pull_request.user.login;
+              if (context.payload.sender.login !== author) return;
+            }
+
+            const current = await github.rest.issues.listLabelsOnIssue({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: number,
+            });
+            const currentNames = current.data.map(l => l.name);
+
+            for (const label of labels) {
+              if (!currentNames.includes(label)) continue;
+              // Idempotent removal: concurrent triggers can race to remove the
+              // same label, leaving the loser with a 404 "Label does not
+              // exist". Treat an already-absent label as success rather than
+              // failing the job.
+              try {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: number,
+                  name: label,
+                });
+                console.log(`Removed '${label}' from #${number}`);
+              } catch (err) {
+                if (err.status === 404) {
+                  console.log(`'${label}' already absent from #${number} (concurrent removal); nothing to do`);
+                  continue;
+                }
+                throw err;
+              }
+            }

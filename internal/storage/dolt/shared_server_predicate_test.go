@@ -128,6 +128,10 @@ func TestSharedServerDatabase(t *testing.T) {
 		cfg  Config
 	}{
 		{name: "remote host", cfg: Config{ServerHost: "db.example.com", ServerPort: 3307}},
+		// bd's own server listens on 127.0.0.1 only, so a live one tracked on
+		// the same port is not the server at the IPv6 loopback.
+		{name: "IPv6 loopback", cfg: Config{ServerHost: "::1", ServerPort: 3307}},
+		{name: "bracketed IPv6 loopback", cfg: Config{ServerHost: "[::1]", ServerPort: 3307}},
 		{name: "TLS endpoint", cfg: Config{ServerHost: "127.0.0.1", ServerPort: 3307, ServerTLS: true}},
 		{name: "unix socket", cfg: Config{ServerHost: "127.0.0.1", ServerSocket: "/tmp/dolt.sock"}},
 	} {
@@ -285,6 +289,28 @@ func TestSharedServerDatabaseOwnershipProof(t *testing.T) {
 		}
 		if !sharedServerDatabase(cfg) {
 			t.Fatal("nothing in bd writes dolt's config.yaml as proof of ownership")
+		}
+	})
+
+	// GH#6169 regression guard, the other direction from "env port that bd
+	// itself bound still migrates" above: that fix must not be over-applied.
+	// ResolveServerModeIgnoringPortEnv skips check 2c entirely, so taken
+	// alone on an unmanagedWorkspace it now falls through to its own default
+	// of ServerModeOwned -- it is the ManagesLiveServerOnPort proof gate
+	// earlier in sharedServerDatabase that must still catch this case. Mirrors
+	// "dolt config.yaml port without a live bd server is shared" immediately
+	// above, for the env source instead of the config.yaml one.
+	t.Run("env port at a workspace bd does not manage is still shared", func(t *testing.T) {
+		clearPredicateEnv(t)
+		t.Setenv("BEADS_DOLT_SERVER_PORT", strconv.Itoa(port))
+		cfg := &Config{
+			BeadsDir:         unmanagedWorkspace(t),
+			ServerHost:       "127.0.0.1",
+			ServerPort:       port,
+			ServerPortSource: doltserver.PortSourceEnv,
+		}
+		if !sharedServerDatabase(cfg) {
+			t.Fatal("no bd-managed server proof for this workspace; ignoring the port env var must not turn an external server into 'owned'")
 		}
 	})
 }

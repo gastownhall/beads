@@ -1,0 +1,115 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "utils",
+    srcs = [
+        "id_parser.go",
+        "issue_id.go",
+        "path.go",
+        "path_case_darwin.go",
+        "path_case_other.go",
+        "strings.go",
+    ],
+    importpath = "github.com/steveyegge/beads/internal/utils",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//beadserrors",
+        "//internal/debug",
+        "//internal/types",
+    ] + select({
+        "@rules_go//go/platform:darwin": [
+            "@org_golang_x_sys//unix",
+        ],
+        "@rules_go//go/platform:ios": [
+            "@org_golang_x_sys//unix",
+        ],
+        "//conditions:default": [],
+    }),
+)
+
+go_test(
+    name = "utils_test",
+    srcs = [
+        "id_parser_exact_only_test.go",
+        "id_parser_exact_test.go",
+        "id_parser_fake_test.go",
+        "id_parser_prefix_test.go",
+        "id_parser_sentinel_test.go",
+        "id_parser_test.go",
+        "id_parser_unit_test.go",
+        "issue_446_test.go",
+        "issue_id_test.go",
+        "path_case_test.go",
+        "path_test.go",
+        "strings_test.go",
+        "testmain_test.go",
+    ],
+    embed = [":utils"],
+    deps = [
+        "//beadserrors",
+        "//internal/storage/dolt",
+        "//internal/testutil",
+        "//internal/types",
+    ],
+)
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_doc_files",
+    srcs = glob(
+        [
+            "**/*.md",
+            "**/*.mdx",
+        ],
+        allow_empty = True,
+        exclude = ["**/node_modules/**"],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = [
+            "**/*_test.go",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+        exclude = ["**/node_modules/**"],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_other_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.go",
+            "**/*.md",
+            "**/*.mdx",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+# --- end repo_files ---

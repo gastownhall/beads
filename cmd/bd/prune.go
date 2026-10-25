@@ -73,7 +73,7 @@ func init() {
 	pruneCmd.Flags().BoolP("force", "f", false, "Actually prune (without this, shows preview)")
 	pruneCmd.Flags().Bool("ignore-references", false, "Delete closed beads even when referenced by open beads (use with care; see --help for details)")
 	pruneCmd.Flags().Bool("dry-run", false, "Preview what would be pruned with stats")
-	pruneCmd.Flags().String("older-than", "", "Only prune beads closed more than N ago (e.g., 30d, 2w, 60)")
+	pruneCmd.Flags().String("older-than", "", "Only prune beads closed more than N ago (e.g., 30d, 2w, 60, 36h)")
 	pruneCmd.Flags().String("pattern", "", "Only prune beads matching ID glob pattern (e.g., 'gm-old-*')")
 	rootCmd.AddCommand(pruneCmd)
 }

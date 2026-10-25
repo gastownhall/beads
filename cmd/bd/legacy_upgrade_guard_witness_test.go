@@ -84,7 +84,8 @@ func TestLegacyServerVersionSpansHistoricalServerEra(t *testing.T) {
 }
 
 // writeSelectedServerWorkspace lays down the ambiguous shape the guard has to
-// classify: a selected Dolt server workspace that still owns a local Dolt root.
+// classify: a selected Dolt server workspace that still owns a populated local
+// Dolt root.
 func writeSelectedServerWorkspace(t *testing.T, version string) string {
 	t.Helper()
 	beadsDir := t.TempDir()
@@ -97,9 +98,7 @@ func writeSelectedServerWorkspace(t *testing.T, version string) string {
 			t.Fatal(err)
 		}
 	}
-	if err := os.Mkdir(filepath.Join(beadsDir, "dolt"), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	populateLegacyDoltRoot(t, beadsDir)
 	return beadsDir
 }
 

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"path/filepath"
 
-	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 	publicops "github.com/steveyegge/beads/issueops"
@@ -128,17 +127,34 @@ func runImportRecordsProxied(ctx context.Context, issues []*types.Issue, memorie
 		return err
 	}
 
+	// The ONE resolver both import paths share for config.yaml's issue_prefix
+	// (importSyncPrefix, import.go): the --global exclusion, the single trim,
+	// validatePrefix, the warning that names BOTH effects, and "" meaning
+	// "reconcile nothing". Calling it instead of restating its rules here is
+	// what keeps the two modes from drifting — a second hand-maintained copy
+	// of this policy is the very divergence one resolver exists to prevent,
+	// and the resolver's table test then covers this route too.
+	//
+	// Accepted boundary: a --global import against an externally-provisioned
+	// GLOBAL database that is itself missing config.issue_prefix stays
+	// unseedable and still fails with "issue_prefix config is missing" — that
+	// row is `bd init --global`'s to write, and config.yaml cannot speak for
+	// the shared store.
+	syncPrefix := importSyncPrefix()
+
 	// THE BATCH: rows, memories and the issue_prefix reconciliation in one
 	// transaction, one history entry. The prefix sync runs even when the
 	// batch is otherwise empty, exactly as the classic path's post-commit
-	// sync does (be-llaf; config.yaml is authoritative, not a rename).
+	// sync does (be-llaf; config.yaml is authoritative, not a rename) — and
+	// so does the seed, which reports itself through the same PrefixSynced
+	// result so an otherwise-empty batch still commits it.
 	batch, err := importer.ImportBatch(ctx, publicops.ImportBatchRequest{
 		Actor:                getActorWithGit(),
 		Issues:               issues,
 		Memories:             memoryEntries,
 		AllowStale:           importAllowStale,
 		SkipPrefixValidation: true,
-		SyncIssuePrefix:      config.GetString("issue-prefix"),
+		SyncIssuePrefix:      syncPrefix,
 		Source:               filepath.Base(source),
 	})
 	if err != nil {

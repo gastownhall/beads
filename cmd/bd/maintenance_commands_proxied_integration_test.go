@@ -173,7 +173,7 @@ func TestProxiedServerCompactDolt(t *testing.T) {
 		if err == nil {
 			t.Fatalf("bd admin compact --stats should be rejected in proxied mode\nstdout:\n%s", stdout)
 		}
-		if !strings.Contains(stdout+stderr, "only 'compact --dolt' is supported") {
+		if !strings.Contains(stdout+stderr, "only 'bd admin compact --dolt' is supported in proxied-server mode") {
 			t.Errorf("expected scoped rejection message, got:\n%s\n%s", stdout, stderr)
 		}
 	})
@@ -183,7 +183,7 @@ func TestProxiedServerCompactHistory(t *testing.T) {
 	requireSharedProxiedServer(t)
 	t.Parallel()
 	bd := buildEmbeddedBD(t)
-	p := newSharedProxiedProject(t, bd, "cphist")
+	p := newSharedProxiedRootProject(t, bd, "cphist")
 
 	for _, title := range []string{"keep-alpha", "keep-beta", "keep-gamma"} {
 		bdProxiedCreate(t, bd, p.dir, title, "--type", "task")

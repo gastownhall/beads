@@ -35,6 +35,11 @@ The decorator:
 - rejects `parent-child` external edges: hierarchy has no foreign lifecycle
   semantics, while scheduling edges have an explicit capability predicate;
 - applies the same guard to checked close and batch blocked-state reads.
+- guards explicit lifecycle claims (including `bd update --claim`) before any
+  accompanying edits, and carries external blockers into `bd close` batches.
+  Eligible items still close together in one local transaction; refused items
+  retain their positions in the results. `--force` waives close policy, but
+  never makes blocked work eligible for `--claim-next`.
 - leaves non-blocking external relationships visible without allowing them to
   gate readiness.
 
@@ -53,6 +58,18 @@ decorator resolves a foreign snapshot, then passes the exclusions into the
 existing atomic local `ClaimReadyIssue` operation. A concurrent foreign change
 may therefore take effect on the next query, matching the historical SQLite
 behavior without weakening local ready-selection or claim safety.
+
+Direct batch closes pass an immutable external-blocker snapshot through an
+internal policy-aware batch accessor. Hooks and telemetry forward that policy
+to the existing batch executor, which applies both per-item refusals and claim
+exclusions inside its one transaction. An unsupported decorator fails closed
+instead of silently discarding the policy. The proxied UOW applies the same
+guards through its decorated issue use case. Neither path adds a public request
+field or persists foreign status locally.
+
+Every non-forced batch close, and every batch close with a next claim, scans all
+external blocking edges and resolves their foreign capabilities before the
+local transaction. This shares the lookup-cost concern tracked in GH#6156.
 
 ## Verification
 

@@ -5,6 +5,10 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
+	"runtime"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -12,9 +16,11 @@ import (
 // TestProxiedServerPromote is the promote-family journey on the shared
 // proxied server. The downstream contract (wyvern wheelhouse portcullis
 // salvage) is that promote REWRITES THE ROW IN PLACE: same id, wisp_type
-// retained, labels/deps/events/comments preserved, still visible to
-// `bd list --include-infra --wisp-type <t>`, no longer purge-reclaimable,
-// same --json shape and error contract as classic.
+// retained, labels/deps/events/comments and the child counter preserved,
+// still visible to `bd list --include-infra --wisp-type <t>`, no longer
+// purge-reclaimable, same --json shape and error contract as classic. The
+// route runs issueops.Promote, the direct route's entry, so it also fires
+// on_update for the move and for the promotion comment.
 func TestProxiedServerPromote(t *testing.T) {
 	requireSharedProxiedServer(t)
 	t.Parallel()
@@ -56,16 +62,12 @@ func TestProxiedServerPromote(t *testing.T) {
 			t.Errorf("expected promote success line, got: %s", stdout)
 		}
 
-		// Exactly one Dolt commit, carrying the classic commit message.
-		if n := proxiedDoltCommitCountSince(t, db, head); n != 1 {
-			t.Errorf("expected exactly 1 Dolt commit for promote, got %d", n)
-		}
-		var msg string
-		if err := db.QueryRow("SELECT message FROM DOLT_LOG('HEAD', '--not', ?)", head).Scan(&msg); err != nil {
-			t.Fatalf("read promote commit message: %v", err)
-		}
-		if msg != "bd: promote "+wisp.ID {
-			t.Errorf("commit message = %q, want %q", msg, "bd: promote "+wisp.ID)
+		// Two Dolt commits, one per role transaction: the move under the
+		// classic message, then the promotion comment under the comment's.
+		messages := readDoltLogMessagesSince(t, db, head)
+		sort.Strings(messages)
+		if want := []string{"bd: comment " + wisp.ID, "bd: promote " + wisp.ID}; !slices.Equal(messages, want) {
+			t.Errorf("commits since promote = %q, want %q", messages, want)
 		}
 
 		// The row moved planes in place: same id, flag cleared, type retained.
@@ -128,6 +130,57 @@ func TestProxiedServerPromote(t *testing.T) {
 		if !containsID(listed, wisp.ID) {
 			t.Errorf("expected promoted %s in list --include-infra --wisp-type patrol, got %d rows", wisp.ID, len(listed))
 		}
+	})
+
+	// The move carries the child counter, so a promoted wisp parent's next
+	// child is minted past the children it had as a wisp. The old engine left
+	// the counter in wisp_child_counters, and the next `bd create --parent`
+	// minted <parent>.1 again and failed on the wisp child holding that id.
+	t.Run("promoted_parent_keeps_its_child_counter", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "pmc")
+		parent := bdProxiedCreate(t, bd, p.dir, "Promoted wisp parent", "--ephemeral")
+		for i := 1; i <= 2; i++ {
+			child := bdProxiedCreate(t, bd, p.dir, fmt.Sprintf("Wisp child %d", i), "--ephemeral", "--parent", parent.ID)
+			if want := fmt.Sprintf("%s.%d", parent.ID, i); child.ID != want {
+				t.Fatalf("wisp child %d is %s, want %s", i, child.ID, want)
+			}
+		}
+
+		if out, err := bdProxiedRun(t, bd, p.dir, "promote", parent.ID); err != nil {
+			t.Fatalf("bd promote: %v\n%s", err, out)
+		}
+
+		db := openProxiedDB(t, p)
+		if n := countRows(t, db, "SELECT COUNT(*) FROM child_counters WHERE parent_id = ? AND last_child = 2", parent.ID); n != 1 {
+			t.Errorf("expected the counter (last_child 2) in child_counters, got %d rows", n)
+		}
+		if n := countRows(t, db, "SELECT COUNT(*) FROM wisp_child_counters WHERE parent_id = ?", parent.ID); n != 0 {
+			t.Errorf("expected wisp_child_counters emptied, got %d", n)
+		}
+		next := bdProxiedCreate(t, bd, p.dir, "Child after promote", "--parent", parent.ID)
+		if want := parent.ID + ".3"; next.ID != want {
+			t.Errorf("next child of the promoted parent is %s, want %s", next.ID, want)
+		}
+	})
+
+	// on_update fires twice, from the notifying provider: once for the move
+	// and once for the promotion comment. The old engine fired it only for
+	// the comment.
+	t.Run("hooks_fire_on_update_for_the_move_and_the_comment", func(t *testing.T) {
+		t.Parallel()
+		if runtime.GOOS == "windows" {
+			t.Skip("hook script form is POSIX shell")
+		}
+		p := newSharedProxiedProject(t, bd, "pmh")
+		wisp := bdProxiedCreate(t, bd, p.dir, "Promote hook wisp", "--ephemeral")
+		// Planted after the setup, so every line it logs is the promote's.
+		hookLog := plantCountingHook(t, p.beadsDir, "on_update")
+
+		if out, err := bdProxiedRun(t, bd, p.dir, "promote", wisp.ID, "--reason", "hooked"); err != nil {
+			t.Fatalf("bd promote: %v\n%s", err, out)
+		}
+		waitForHookLines(t, hookLog, wisp.ID, 2)
 	})
 
 	t.Run("json_shape_matches_classic", func(t *testing.T) {

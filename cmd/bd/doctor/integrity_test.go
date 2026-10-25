@@ -66,7 +66,10 @@ func TestIntegrityChecks_EmptyBeadsDir(t *testing.T) {
 // TestCheckDeletionsManifest_LegacyFile tests the specific case where a legacy
 // deletions.jsonl file exists and should trigger a warning.
 func TestCheckDeletionsManifest_LegacyFile(t *testing.T) {
-	tmpDir := t.TempDir()
+	// The check only warns inside a git repository, and it asks git about the
+	// working directory, so the fixture is a repository and the check runs in
+	// it (not in whatever checkout the test binary happens to start in).
+	tmpDir := newGitRepo(t)
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	if err := os.Mkdir(beadsDir, 0755); err != nil {
 		t.Fatal(err)
@@ -78,7 +81,8 @@ func TestCheckDeletionsManifest_LegacyFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	check := CheckDeletionsManifest(tmpDir)
+	var check DoctorCheck
+	runInDir(t, tmpDir, func() { check = CheckDeletionsManifest(tmpDir) })
 
 	// Should warn about legacy deletions file
 	if check.Status != StatusWarning {

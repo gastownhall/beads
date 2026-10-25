@@ -88,7 +88,7 @@ func freshCloneServerResult(dbExists bool, dbName, host string, port int, syncRe
 	}
 
 	var msg strings.Builder
-	fmt.Fprintf(&msg, "Fresh clone detected: database %q not found on server at %s:%d.", dbName, host, port)
+	fmt.Fprintf(&msg, "Fresh clone detected: database %q not found on server at %s.", dbName, doltutil.ServerAddr(host, port))
 
 	fix := "bd bootstrap"
 	if syncRemote == "" {
@@ -118,7 +118,7 @@ func freshCloneServerResult(dbExists bool, dbName, host string, port int, syncRe
 // won't help when the server itself is unreachable).
 func freshCloneServerUnreachableResult(dbName, host string, port int, connErr error) DoctorCheck {
 	var msg strings.Builder
-	fmt.Fprintf(&msg, "Dolt server unreachable at %s:%d (database %q, server mode configured).", host, port, dbName)
+	fmt.Fprintf(&msg, "Dolt server unreachable at %s (database %q, server mode configured).", doltutil.ServerAddr(host, port), dbName)
 	msg.WriteString(" The local database directory is not expected in server mode, so this is not a fresh clone — it's a connectivity or auth problem.")
 
 	var detail strings.Builder

@@ -9,10 +9,15 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/gitenv"
 )
 
+// Role detection is an authority lookup, so it also discards inherited config
+// suppression: detectFromURL below answers a missed read with Maintainer, which
+// would let a caller escalate by blinding the lookup rather than forging it.
 var gitCommandRunner = func(repoPath string, args ...string) ([]byte, error) {
 	cmd := exec.Command("git", args...)
+	cmd.Env = gitenv.ScrubRoutingAndSuppression(os.Environ())
 	if repoPath != "" {
 		cmd.Dir = repoPath
 	}
@@ -211,7 +216,8 @@ func DetermineTargetRepoWithRule(config *RoutingConfig, userRole UserRole, repoP
 		return config.ExplicitOverride, RuleExplicitOverride
 	}
 
-	// Auto mode: route based on user role
+	// Auto mode: route based on user role. UsesUserRole mirrors this clause;
+	// change the two together.
 	if config.Mode == "auto" {
 		if userRole == Maintainer && config.MaintainerRepo != "" {
 			return config.MaintainerRepo, RuleMaintainer
@@ -228,6 +234,16 @@ func DetermineTargetRepoWithRule(config *RoutingConfig, userRole UserRole, repoP
 
 	// No routing configured - use current repo
 	return ".", RuleNone
+}
+
+// UsesUserRole reports whether DetermineTargetRepoWithRule's answer for c can
+// depend on the user role: only auto mode consults it, only when no explicit
+// override wins first, and only when a role-specific repo is configured.
+// Callers use it to skip role detection, which runs git and can print
+// diagnostics, when the detected role would be discarded.
+func (c *RoutingConfig) UsesUserRole() bool {
+	return c.ExplicitOverride == "" && c.Mode == "auto" &&
+		(c.MaintainerRepo != "" || c.ContributorRepo != "")
 }
 
 // ExpandPath expands ~ to home directory and resolves relative paths to absolute.

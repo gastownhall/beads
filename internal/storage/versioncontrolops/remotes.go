@@ -2,14 +2,19 @@ package versioncontrolops
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
+	"strings"
 
 	"github.com/steveyegge/beads/internal/storage"
 )
 
-// ListRemotes returns all configured Dolt remotes (name and URL).
+// ListRemotes returns all configured Dolt remotes: name, URL, and the git ref
+// a git-backed remote keeps its data on when one was set. The ref is the
+// git_ref key of the dolt_remotes params column, a JSON object of the
+// remote's parameters; a remote without the key lists an empty Ref.
 func ListRemotes(ctx context.Context, db DBConn) ([]storage.RemoteInfo, error) {
-	rows, err := db.QueryContext(ctx, "SELECT name, url FROM dolt_remotes")
+	rows, err := db.QueryContext(ctx, "SELECT name, url, params FROM dolt_remotes")
 	if err != nil {
 		return nil, fmt.Errorf("list remotes: %w", err)
 	}
@@ -18,12 +23,33 @@ func ListRemotes(ctx context.Context, db DBConn) ([]storage.RemoteInfo, error) {
 	var remotes []storage.RemoteInfo
 	for rows.Next() {
 		var r storage.RemoteInfo
-		if err := rows.Scan(&r.Name, &r.URL); err != nil {
+		var params sql.NullString
+		if err := rows.Scan(&r.Name, &r.URL, &params); err != nil {
 			return nil, fmt.Errorf("scan remote: %w", err)
+		}
+		if params.Valid {
+			ref, err := storage.GitRefFromParamsJSON(params.String)
+			if err != nil {
+				return nil, fmt.Errorf("remote %s: %w", r.Name, err)
+			}
+			r.Ref = ref
 		}
 		remotes = append(remotes, r)
 	}
 	return remotes, rows.Err()
+}
+
+// AddRemote adds a Dolt remote. A non-empty ref is passed as DOLT_REMOTE's
+// --ref option, which Dolt records as the remote's git_ref parameter and
+// accepts for git-backed remotes only; for any other scheme Dolt's own
+// refusal is returned unchanged.
+func AddRemote(ctx context.Context, db DBConn, name, url, ref string) error {
+	if ref = strings.TrimSpace(ref); ref == "" {
+		_, err := db.ExecContext(ctx, "CALL DOLT_REMOTE('add', ?, ?)", name, url)
+		return err
+	}
+	_, err := db.ExecContext(ctx, "CALL DOLT_REMOTE('add', '--ref', ?, ?, ?)", ref, name, url)
+	return err
 }
 
 // RemoveRemote removes a configured Dolt remote.

@@ -9,6 +9,7 @@ import (
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // GatedMolecule represents a molecule ready for gate-resume dispatch
@@ -113,9 +114,34 @@ func renderGatedReadyMolecules(molecules []*GatedMolecule) error {
 		fmt.Println()
 	}
 
-	fmt.Println("To dispatch a molecule:")
-	fmt.Println("  bd sling <agent> --mol <molecule-id>")
+	stepID, listPos := firstReadyStepID(molecules)
+	if len(molecules) > 1 && listPos > 0 {
+		// The example can only name one molecule's step, so point at the entry
+		// it came from rather than letting it read as the single thing to
+		// dispatch. Naming the position instead of "the first one" keeps the
+		// header and the printed ID from ever disagreeing: the first listed
+		// molecule is not necessarily the one the example belongs to.
+		fmt.Printf("To dispatch a molecule, assign its ready step to an agent - for #%d above:\n", listPos)
+	} else {
+		fmt.Println("To dispatch a molecule, assign its ready step to an agent:")
+	}
+	fmt.Printf("  bd assign %s <agent>\n", stepID)
 	return nil
+}
+
+// firstReadyStepID names the ready step of the first listed molecule that has
+// one, for use as the example in the dispatch hint, along with that molecule's
+// 1-based position in the listing above. The position is 0 when no listed
+// molecule has a ready step, in which case the returned ID is a placeholder and
+// there is no entry for the hint to point at. Every molecule's own ready step is
+// printed in the listing above the hint.
+func firstReadyStepID(molecules []*GatedMolecule) (string, int) {
+	for i, mol := range molecules {
+		if mol.ReadyStep != nil && mol.ReadyStep.ID != "" {
+			return mol.ReadyStep.ID, i + 1
+		}
+	}
+	return "<ready-step-id>", 0
 }
 
 // findGateReadyMolecules finds molecules where a gate has closed and work can resume.
@@ -172,7 +198,10 @@ func findGateReadyMolecules(ctx context.Context, s molReader) ([]*GatedMolecule,
 			hookedIDs[i] = issue.ID
 			hookedMolecules[issue.ID] = true // Mark hooked issue itself
 		}
-		hookedRoots := findParentMolecules(ctx, s, hookedIDs)
+		hookedRoots, err := issueops.MoleculeRoots(ctx, rawMoleculeReader{s: s}.moleculeReader(), hookedIDs)
+		if err != nil {
+			return nil, fmt.Errorf("finding molecules of hooked issues: %w", err)
+		}
 		for _, molID := range hookedRoots {
 			hookedMolecules[molID] = true
 		}
@@ -201,7 +230,10 @@ func findGateReadyMolecules(ctx context.Context, s molReader) ([]*GatedMolecule,
 	}
 
 	// Batch-find molecule roots for all ready dependents
-	depMolRoots := findParentMolecules(ctx, s, readyDepIDs)
+	depMolRoots, err := issueops.MoleculeRoots(ctx, rawMoleculeReader{s: s}.moleculeReader(), readyDepIDs)
+	if err != nil {
+		return nil, fmt.Errorf("finding molecules of ready steps: %w", err)
+	}
 
 	moleculeMap := make(map[string]*GatedMolecule)
 	for _, gd := range readyDependents {

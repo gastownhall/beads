@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -19,7 +20,10 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/execenv"
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/gitenv"
+	"github.com/steveyegge/beads/internal/gitignore"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/worktreeremove"
@@ -469,7 +473,7 @@ func gitCmdInDir(ctx context.Context, dir string, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, "git", gitArgs...)
 	cmd.Dir = dir
 	// Security: Disable git hooks and templates (SEC-001, SEC-002)
-	cmd.Env = append(os.Environ(),
+	cmd.Env = append(scrubWorktreeGitRoutingEnv(os.Environ()),
 		"GIT_TEMPLATE_DIR=",
 	)
 	return cmd
@@ -664,47 +668,99 @@ func newWorktreeRemovalGit() (*worktreeRemovalGit, error) {
 	}, nil
 }
 
-func scrubWorktreeRemovalGitEnv(env []string) []string {
-	exactKeys := map[string]struct{}{
-		"GIT_ALTERNATE_OBJECT_DIRECTORIES": {},
-		"GIT_CEILING_DIRECTORIES":          {},
-		"GIT_COMMON_DIR":                   {},
-		"GIT_DIR":                          {},
-		"GIT_DISCOVERY_ACROSS_FILESYSTEM":  {},
-		"GIT_EXEC_PATH":                    {},
-		"GIT_GRAFT_FILE":                   {},
-		"GIT_IMPLICIT_WORK_TREE":           {},
-		"GIT_INDEX_FILE":                   {},
-		"GIT_INTERNAL_SUPER_PREFIX":        {},
-		"GIT_NAMESPACE":                    {},
-		"GIT_NO_REPLACE_OBJECTS":           {},
-		"GIT_OBJECT_DIRECTORY":             {},
-		"GIT_OPTIONAL_LOCKS":               {},
-		"GIT_PREFIX":                       {},
-		"GIT_QUARANTINE_PATH":              {},
-		"GIT_REPLACE_REF_BASE":             {},
-		"GIT_SHALLOW_FILE":                 {},
-		"GIT_SUPER_PREFIX":                 {},
-		"GIT_TEMPLATE_DIR":                 {},
-		"GIT_WORK_TREE":                    {},
-	}
+func scrubWorktreeGitRoutingEnv(env []string) []string {
+	return scrubWorktreeGitRoutingEnvForOS(env, runtime.GOOS)
+}
 
-	cleaned := make([]string, 0, len(env))
-	for _, entry := range env {
-		key := entry
-		if separator := strings.IndexByte(entry, '='); separator >= 0 {
-			key = entry[:separator]
-		}
-		upperKey := strings.ToUpper(key)
-		if strings.HasPrefix(upperKey, "GIT_CONFIG") {
+// scrubWorktreeGitRoutingEnvForOS removes inherited Git repository, index,
+// object, namespace, executable, template, and custom config routing. It keeps
+// explicit null config suppression, GIT_CONFIG_NOSYSTEM and non-routing controls
+// such as GIT_OPTIONAL_LOCKS; the removal runner applies its stricter policy separately.
+func scrubWorktreeGitRoutingEnvForOS(env []string, goos string) []string {
+	return gitenv.ScrubRoutingForOS(env, goos)
+}
+
+func scrubWorktreeRemovalGitEnv(env []string) []string {
+	return scrubWorktreeRemovalGitEnvForOS(env, runtime.GOOS)
+}
+
+func scrubWorktreeRemovalGitEnvForOS(env []string, goos string) []string {
+	cleaned := scrubWorktreeGitRoutingEnvForOS(env, goos)
+	// ScrubRoutingForOS returns a fresh slice, so filtering it in place is safe.
+	result := cleaned[:0]
+	for _, entry := range cleaned {
+		// One shared subprocess key identity: execenv mirrors os/exec's fold, so
+		// this drops exactly the entries a child process would treat as these two
+		// variables -- an independent fold here would diverge from that rule.
+		// ToUpper is not that rule; the two disagree in both directions for
+		// non-ASCII keys on Windows: ToUpper leaves GİT_OPTIONAL_LOCKS unmatched
+		// although Git honors it, and folds GIT_OPTIONAL_LOCKſ onto the literal
+		// although os/exec keeps it distinct.
+		key := worktreeGitEnvKey(entry)
+		if execenv.KeyEqualForOS(key, "GIT_NO_REPLACE_OBJECTS", goos) ||
+			execenv.KeyEqualForOS(key, "GIT_OPTIONAL_LOCKS", goos) {
 			continue
 		}
-		if _, blocked := exactKeys[upperKey]; blocked {
-			continue
-		}
-		cleaned = append(cleaned, entry)
+		result = append(result, entry)
 	}
-	return cleaned
+	return result
+}
+
+func worktreeGitEnvKey(entry string) string {
+	return gitenv.EntryKey(entry)
+}
+
+// clearWorktreeGitRoutingEnv establishes the command working directory as the
+// repository-selection boundary without changing process identity or signal
+// semantics. Startup config discovery applies the same boundary to its one
+// pre-hook Git probe, and the .beads discovery probes that run against an
+// already selected path share it too (beads.selectedBeadsGitOutput and
+// ResolveBeadsDirForRepo). The generic internal/beads gitOutput probes and
+// internal/git/gitdir.go still honor inherited routing, so those planes can
+// still resolve a different repository than this one (bd-p4che).
+//
+// Unlike the child-process scrubs elsewhere in this package, ClearRouting
+// unsets the variables on the bd process itself, so bd's own discovery —
+// getGitContext, GetMainRepoRoot, FindBeadsDir and startup config discovery —
+// runs under the cleared environment for the whole command. The boundary
+// removes inherited discovery redirects, but it is not a floor: the
+// discovery-scope controls go with the redirection ones, and they do not all
+// move discovery the same way:
+//
+//   - GIT_CEILING_DIRECTORIES is a stop, so clearing it widens the walk: a
+//     stale inherited ceiling can no longer hide the repository the command is
+//     standing in, but with no repository at or below the working directory the
+//     walk can now reach a containing parent that ceiling excluded (init's role
+//     probe records the same trade-off).
+//   - GIT_DISCOVERY_ACROSS_FILESYSTEM only ever permits — git stops at a
+//     filesystem boundary unless this is true — so clearing it narrows the
+//     walk: a repository reachable from the working directory only by crossing
+//     a mount point is no longer found by any bd worktree verb, and there is no
+//     opt-out.
+//   - ClearRouting matches GIT_CONFIG by prefix, so the redirecting members of
+//     the GIT_CONFIG* family — a custom GIT_CONFIG_GLOBAL or GIT_CONFIG_SYSTEM
+//     path, GIT_CONFIG_COUNT and its numbered key/value pairs — are dropped for
+//     the command's lifetime rather than for one child probe. The explicit
+//     suppression forms are the exception: ClearRouting keeps
+//     GIT_CONFIG_NOSYSTEM and the /dev/null spellings of GIT_CONFIG_GLOBAL and
+//     GIT_CONFIG_SYSTEM, which can blind a read but cannot redirect one.
+func clearWorktreeGitRoutingEnv(cmd *cobra.Command) error {
+	if !hasWorktreeCommandAncestor(cmd) {
+		return nil
+	}
+	if _, err := gitenv.ClearRouting(); err != nil {
+		return fmt.Errorf("clear inherited Git routing for worktree command: %w", err)
+	}
+	return nil
+}
+
+func hasWorktreeCommandAncestor(cmd *cobra.Command) bool {
+	for current := cmd; current != nil; current = current.Parent() {
+		if current == worktreeCmd {
+			return true
+		}
+	}
+	return false
 }
 
 func (git *worktreeRemovalGit) command(ctx context.Context, dir string, args ...string) *exec.Cmd {
@@ -2085,15 +2141,12 @@ func addToGitignore(ctx context.Context, repoRoot, entry string) error {
 	}
 	defer f.Close()
 
-	// Add newline if file doesn't end with one
-	if len(content) > 0 && content[len(content)-1] != '\n' {
-		if _, err := f.WriteString("\n"); err != nil {
-			return err
-		}
-	}
-
-	// Add comment and entry
-	if _, err := f.WriteString(fmt.Sprintf("# bd worktree\n%s/\n", entry)); err != nil {
+	// AppendLines owns the line-ending and final-line completion policy and
+	// leaves existing bytes unchanged, so everything past len(content) is the
+	// append. Writing only that suffix keeps this an O_APPEND write rather than
+	// a rewrite of the user's file.
+	appended := gitignore.AppendLines(content, []string{"# bd worktree", entry + "/"})
+	if _, err := f.Write(appended[len(content):]); err != nil {
 		return err
 	}
 

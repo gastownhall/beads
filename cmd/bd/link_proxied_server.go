@@ -10,6 +10,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/issueops"
 )
 
 func runLinkProxiedServer(cmd *cobra.Command, ctx context.Context, args []string) error {
@@ -18,8 +19,8 @@ func runLinkProxiedServer(cmd *cobra.Command, ctx context.Context, args []string
 	depType, _ := cmd.Flags().GetString("type")
 
 	dt := types.DependencyType(depType)
-	if isDisallowedHierarchicalDependency(id1, id2, dt) {
-		return HandleErrorRespectJSON("cannot add dependency: %s is already a child of %s. Children inherit dependency on parent completion via hierarchy. Adding an explicit dependency would create a deadlock", id1, id2)
+	if err := issueops.CheckDottedChildDependency(id1, id2, dt); err != nil {
+		return HandleErrorRespectJSON("%v", err)
 	}
 
 	if !dt.IsValid() {
@@ -35,7 +36,7 @@ func runLinkProxiedServer(cmd *cobra.Command, ctx context.Context, args []string
 		// Source-routed, like the direct twin's store.AddDependencyWithOptions:
 		// `bd link` takes whatever id the caller names, and a wisp source has no
 		// row in the issues plane for the edge to hang off.
-		if _, err := uw.DependencyUseCase().AddDependencies(ctx, []*types.Dependency{dep}, actor, domain.BulkAddDepsOpts{}); err != nil {
+		if _, err := uw.DependencyUseCase().AddDependencies(ctx, []*types.Dependency{dep}, currentActor(), domain.BulkAddDepsOpts{}); err != nil {
 			return "", err
 		}
 		return fmt.Sprintf("bd: link %s %s", id1, id2), nil

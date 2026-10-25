@@ -73,6 +73,7 @@ and each has an environment equivalent: `BD_EVENTS_JOURNAL`,
 bd events tail --since 0                # every retained record, oldest first
 bd events tail --since 4211             # resume from a checkpoint
 bd events tail --since 4211 --follow    # ...and keep printing as writes commit (polls once a second; Ctrl-C to stop)
+bd events tail --since 4211 --follow --exit-on-stdin-eof # also stop when a caller-owned stdin pipe closes
 bd events tail --since 4211 --limit 100 # cap one batch
 bd events export                        # the whole journal from seq 1 — same as --since 0
 ```
@@ -87,6 +88,12 @@ Output is JSON Lines, one record per line, in sequence order:
 
 A consumer advances its checkpoint to the highest `seq` it has durably
 processed, and passes that as the next `--since`.
+
+Desktop and editor integrations whose own process lifetime is not guaranteed
+to clean up child processes can combine `--follow --exit-on-stdin-eof` and pass
+the follower a pipe as stdin. Closing the parent side makes the follower exit
+even when the workspace is quiet. Without the opt-in flag, stdin is ignored and
+the existing Ctrl-C/output-error behavior is unchanged.
 
 ### Over HTTP
 
@@ -346,14 +353,20 @@ forward, and the engine takes neither on your behalf:
 `bd events export` refuses the same way rather than present a pruned journal's
 surviving suffix as a complete history.
 
-Mid-`--follow`, the same failure arrives as **one line of JSON on the stream it
-interrupts** — same code, same `since` / `floor` / `head`, same exit status,
-compact and without the envelope, because the consumer on the other end is a
-line reader:
+Under `--follow`, the same failure arrives as **one line of JSON on the stream
+it interrupts**, whether the follower's first read finds the checkpoint pruned
+or a later poll does — same code, same `since` / `floor` / `head`, same exit
+status, compact and without the envelope, because the consumer on the other end
+is a line reader:
 
 ```json
 {"code":"events_journal_truncated","error":"events journal truncated: checkpoint 12 is below the retained window [41..980]; records 13..40 were pruned","floor":41,"head":980,"since":12}
 ```
+
+Any other failure that ends a running follower — a lost server connection, say
+— is one line too: bd's usual `--json` error object, compact
+(`{"error":"reading events journal: …","schema_version":1}`, inside `data` under
+`BD_JSON_ENVELOPE=1`).
 
 A hole in the *middle* of the retained window refuses the same way, with
 `since` reporting the last sequence number the read could serve contiguously

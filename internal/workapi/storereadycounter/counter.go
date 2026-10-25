@@ -5,9 +5,16 @@
 // It is a package of its own for the reason internal/workapi/storereader and
 // internal/workapi/storecounter are: a constructor sitting in internal/workapi
 // would be a one-line drop-in for store.ReadyCounter() that silently skips the
-// decorators. Down here the only importers are the two Dolt store packages, and
-// the cmd-bd-role-constructors depguard rule in .golangci.yml makes a front
-// door importing it a lint failure rather than a review comment.
+// decorators. Down here the importers are the two Dolt store packages and
+// internal/storage/externaldeps, and the cmd-bd-role-constructors depguard rule
+// in .golangci.yml makes a front door importing it a lint failure rather than a
+// review comment.
+//
+// The external-dependency decorator needs its own construction site because its
+// exclusions live on the decorator, not beneath it: recursing into the inner
+// store's counter the way its other accessors do would count externally blocked
+// issues as ready. It hands the counter it builds to the inner store's
+// WrapReadyCounter so the layers below still get their turn.
 package storereadycounter
 
 import (

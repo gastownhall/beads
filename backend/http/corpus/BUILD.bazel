@@ -1,0 +1,146 @@
+load("@rules_go//go:def.bzl", "go_test")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+go_test(
+    name = "corpus_test",
+    # The corpus runs every shape through the real bd (bazeltest.PrebuiltBD),
+    # served and embedded, under BEADS_TEST_EMBEDDED_DOLT=1 (corpus_served_test
+    # below); it skips otherwise.
+    size = "large",
+    timeout = "long",
+    srcs = [
+        "corpus_parts_test.go",
+        "corpus_test.go",
+        "gate_check_served_test.go",
+        "harness_test.go",
+        "reference_proxy_test.go",
+        "required_corpus_tier_test.go",
+    ],
+    data = glob(["testdata/**"]) + ["//cmd/bd:bd_for_tests"],
+    env = {"BEADS_TEST_BD_BINARY": "$(rlocationpath //cmd/bd:bd_for_tests)"},
+    deps = [
+        "//internal/httpapi",
+        "//internal/httpapi/apigen",
+        "//internal/storage",
+        "//internal/storage/domain",
+        "//internal/storage/embeddeddolt",
+        "//internal/testutil/bazeltest",
+        "//internal/types",
+        "@in_gopkg_yaml_v3//:yaml_v3",
+    ],
+)
+
+# corpus_test again, with the corpus tier on: BEADS_TEST_EMBEDDED_DOLT=1 runs
+# TestServedCorpusPart1..N and BEADS_HTTP_TEST_REQUIRED=1 turns a skip of
+# them into a failure. corpus_test alone skips them in every lane, because no
+# lane sets those variables for it. It repeats corpus_test's `env`
+# (go_test_pinned_shard.sh, like go_test_variant.sh, does not inherit it).
+#
+# Shard count: as one shard (one TestServedCorpus over every shape) the
+# target ran 292-597s on the lane's executors (2026-10-11..13), the embedded
+# lane's longest action in most runs where it executed. About 100s of that
+# is the per-process server and seed, the rest the ~130 shapes (~1.9s each,
+# serial, ~242s together). The shapes are now dealt round robin across
+# corpusParts = 4 parts (corpus_test.go), each a top-level test with its own
+# server and seed, and served_pinned_shards.txt pins part k to shard k; the
+# 5th shard runs the package's other tests through the binary's
+# round-robin (the engine-free ones, plus
+# TestServedGateCheckOverAwaitTypedGates, which seeds its own small served
+# store). Each part pays the setup again, though it seeds the served
+# and embedded sides concurrently (~62-76s on the lane's executors), so a
+# part's shard is that plus ~60s of shapes: 114-146s measured. Three parts
+# ran 170-180s each; they save one setup (~75 test-seconds a run) but
+# lengthen the lane's served long pole, which is on the gate's critical
+# path, by ~34s.
+#
+# Tags:
+#   embedded: the embedded-Dolt tier; excluded from --config=prcore/ci,
+#     selected by --config=embedded.
+sh_test(
+    name = "corpus_served_test",
+    size = "large",
+    # -test.timeout=19m fires (with a goroutine dump) before Bazel's 1200s
+    # action limit (eternal under --config=embedded).
+    timeout = "eternal",
+    srcs = ["//tools/bazel:go_test_pinned_shard.sh"],
+    args = [
+        "$(rootpath :served_pinned_shards.txt)",
+        "$(rootpath :corpus_test)",
+        "-test.v",
+        "-test.count=1",
+        "-test.timeout=19m",
+    ],
+    data = [
+        "served_pinned_shards.txt",
+        ":corpus_test",
+        "//cmd/bd:bd_for_tests",
+    ],
+    env = {
+        "BEADS_HTTP_TEST_REQUIRED": "1",
+        "BEADS_TEST_BD_BINARY": "$(rlocationpath //cmd/bd:bd_for_tests)",
+        "BEADS_TEST_EMBEDDED_DOLT": "1",
+    },
+    shard_count = 5,
+    tags = ["embedded"],
+)
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_doc_files",
+    srcs = glob(
+        [
+            "**/*.md",
+            "**/*.mdx",
+        ],
+        allow_empty = True,
+        exclude = ["**/node_modules/**"],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = [
+            "**/*_test.go",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+        exclude = ["**/node_modules/**"],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_other_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.go",
+            "**/*.md",
+            "**/*.mdx",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+# --- end repo_files ---

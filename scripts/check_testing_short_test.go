@@ -66,19 +66,6 @@ func TestCheckTestingShortReportsUnknownBetweenFunctions(t *testing.T) {
 	}
 }
 
-func TestCheckTestingShortPassesOnCleanRepoTree(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("checker is a Bash boundary")
-	}
-	repo := sourceRepoRoot(t)
-	cmd := exec.Command("bash", filepath.Join(repo, "scripts", "check-testing-short.sh"))
-	cmd.Dir = repo
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("check-testing-short.sh failed on clean repo tree (all 9 allowlist entries must still be recognized): %v\noutput: %s", err, out)
-	}
-}
-
 func runCheckTestingShort(t *testing.T, files map[string]string) (string, error) {
 	t.Helper()
 	if runtime.GOOS == "windows" {

@@ -43,6 +43,24 @@ func TestDependencyEditorSameTypeReAddIsIdempotent(t *testing.T) {
 	conformance.RunDependencyEditorSameTypeReAddIsIdempotent(t, ctx, fixture)
 }
 
+func TestDependencyEditorSameTypeReAddWithChangedMetadataMintsOneVersion(t *testing.T) {
+	fixture, ctx, cleanup := newDoltDependencyEditorFixture(t, "idemmeta")
+	defer cleanup()
+	conformance.RunDependencyEditorSameTypeReAddWithChangedMetadataMintsOneVersion(t, ctx, fixture)
+}
+
+func TestDependencyEditorSameTypeReAddWithIdenticalMetadataIsANoOp(t *testing.T) {
+	fixture, ctx, cleanup := newDoltDependencyEditorFixture(t, "idemmetasame")
+	defer cleanup()
+	conformance.RunDependencyEditorSameTypeReAddWithIdenticalMetadataIsANoOp(t, ctx, fixture)
+}
+
+func TestDependencyEditorSameTypeReAddWithChangedThreadMintsOneVersion(t *testing.T) {
+	fixture, ctx, cleanup := newDoltDependencyEditorFixture(t, "idemthread")
+	defer cleanup()
+	conformance.RunDependencyEditorSameTypeReAddWithChangedThreadMintsOneVersion(t, ctx, fixture)
+}
+
 func TestDependencyEditorRepeatsWithinOneRequestCollapse(t *testing.T) {
 	fixture, ctx, cleanup := newDoltDependencyEditorFixture(t, "repeat")
 	defer cleanup()
@@ -241,6 +259,12 @@ func TestDependencyEditorAcceptsBlockingAcrossIssueTypes(t *testing.T) {
 	conformance.RunDependencyEditorAcceptsBlockingAcrossIssueTypes(t, ctx, fixture)
 }
 
+func TestDependencyEditorRefusesADottedChildGatedOnItsOwnParent(t *testing.T) {
+	fixture, ctx, cleanup := newDoltDependencyEditorFixture(t, "dotted")
+	defer cleanup()
+	conformance.RunDependencyEditorRefusesADottedChildGatedOnItsOwnParent(t, ctx, fixture)
+}
+
 // newDoltDependencyEditorFixture composes the backend's role fixture kit with
 // the accessor under test. Every hook but the accessor comes from the kit, so
 // the seeding and scalar-query plumbing stays identical to the other roles'.
@@ -256,13 +280,15 @@ func newDoltDependencyEditorFixture(t *testing.T, prefix string) (conformance.De
 	}
 	kit := newDoltRoleFixtureKit(store, prefix)
 	fixture := conformance.DependencyEditorFixture{
-		IssuePrefix:   kit.IssuePrefix,
-		Editor:        editor,
-		CreateIssue:   kit.CreateIssue,
-		CreateWisp:    kit.CreateWisp,
-		AddDependency: kit.AddDependency,
-		QueryScalar:   kit.QueryScalar,
-		CountHistory:  kit.CountHistory,
+		IssuePrefix:                kit.IssuePrefix,
+		Editor:                     editor,
+		CreateIssue:                kit.CreateIssue,
+		CreateWisp:                 kit.CreateWisp,
+		AddDependency:              kit.AddDependency,
+		QueryScalar:                kit.QueryScalar,
+		CountHistory:               kit.CountHistory,
+		SetJournalEnabled:          store.SetEventsJournalEnabled,
+		SetVersionedHistoryEnabled: store.SetVersionedHistoryEnabled,
 	}
 	return fixture, ctx, func() {
 		cancel()

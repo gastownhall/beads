@@ -10,7 +10,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -29,18 +28,36 @@ import (
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
+	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/internal/utils"
 	"golang.org/x/term"
 )
 
 var resolveBootstrapAuthoritativeMetadata = fix.ResolveAuthoritativeServerMetadata
 
+// bootstrapServerProbeConfig is the endpoint bd bootstrap dials on a Dolt
+// server: the existence probe dials it, and so does the server clone.
 type bootstrapServerProbeConfig struct {
+	socket   string
 	host     string
 	port     int
 	user     string
 	pass     string
 	database string
 	tls      bool
+}
+
+// dsn is the connection string for ep with no database selected: the probe
+// lists the server's databases, and DOLT_CLONE creates one.
+func (ep bootstrapServerProbeConfig) dsn() string {
+	return doltutil.ServerDSN{
+		Socket:   ep.socket,
+		Host:     ep.host,
+		Port:     ep.port,
+		User:     ep.user,
+		Password: ep.pass,
+		TLS:      ep.tls,
+	}.String()
 }
 
 type bootstrapServerDBCheck struct {
@@ -60,18 +77,8 @@ var bootstrapRetryDelay = func(d time.Duration) { time.Sleep(d) }
 var probeGitRemoteDoltData = gitRemoteHasDoltDataRefStatus
 
 var checkBootstrapServerDB = func(probeCfg bootstrapServerProbeConfig) bootstrapServerDBCheck {
-	host := probeCfg.host
-	port := probeCfg.port
 	dbName := probeCfg.database
-	dsn := doltutil.ServerDSN{
-		Host:     host,
-		Port:     port,
-		User:     probeCfg.user,
-		Password: probeCfg.pass,
-		TLS:      probeCfg.tls,
-	}.String()
-
-	db, err := sql.Open("mysql", dsn)
+	db, err := sql.Open("mysql", probeCfg.dsn())
 	if err != nil {
 		return bootstrapServerDBCheck{Reachable: false, Err: err}
 	}
@@ -118,7 +125,9 @@ Bootstrap auto-detects the right action:
   • If git origin has Dolt data (refs/dolt/data): clones from git and wires origin for future push/pull
   • If .beads/backup/*.jsonl exists: restores from backup
   • If .beads/issues.jsonl exists: imports from git-tracked JSONL
-  • If no database exists: creates a fresh one
+  • If no database exists: creates a fresh one — unless the workspace was already
+    initialized (metadata.json has a project_id) and its server-mode database is
+    missing, in which case bootstrap refuses rather than strand the existing data
   • If database already exists: validates and reports status
 
 If sync.remote points at a git repository, bootstrap verifies refs/dolt/data
@@ -186,7 +195,9 @@ Examples:
 			if isGitRepo() && !isBareGitRepo() {
 				if originURL, err := gitOriginGetURL(); err == nil && originURL != "" {
 					if gitOriginHasDoltDataRef() {
-						if fallbackDir := beads.GetWorktreeFallbackBeadsDir(); fallbackDir != "" {
+						if explicitDir := beads.ExplicitBeadsDir(); explicitDir != "" {
+							beadsDir = explicitDir
+						} else if fallbackDir := beads.GetWorktreeFallbackBeadsDir(); fallbackDir != "" {
 							beadsDir = fallbackDir
 						} else {
 							cwd, err := os.Getwd()
@@ -201,6 +212,12 @@ Examples:
 		}
 
 		if beadsDir == "" {
+			// Discovery passes over a .beads marked only by a legacy
+			// config.json. One in a format this build cannot open is refused
+			// as that, not reported as no workspace.
+			if err := checkUndiscoveredWorkspaceFormat(); err != nil {
+				return handleWorkspaceGuardError(err)
+			}
 			if jsonOutput {
 				if err := outputJSON(noWorkspaceBootstrapPayload()); err != nil {
 					return err
@@ -213,7 +230,7 @@ Examples:
 		}
 
 		if err := guardLegacyUpgradeWorkspace(beadsDir); err != nil {
-			return HandleError("%v", err)
+			return handleWorkspaceGuardError(err)
 		}
 
 		// Load config from .beads/metadata.json. When the beadsDir was
@@ -228,7 +245,9 @@ Examples:
 		}
 		if cfg == nil {
 			cfg, err = findParentConfig(beadsDir)
-			if err != nil {
+			if isUnsupportedWorkspaceFormat(err) {
+				return handleWorkspaceGuardError(err)
+			} else if err != nil {
 				return HandleError("failed to load ancestor storage metadata: %v; no storage database was opened or modified; fix or restore metadata.json and retry", err)
 			}
 		}
@@ -268,7 +287,11 @@ Examples:
 		}
 
 		if err := executeBootstrapPlan(plan, cfg, nonInteractive); err != nil {
-			return HandleError("Bootstrap failed: %v", err)
+			// The error can carry sync.remote verbatim, credentials and all:
+			// sanitizeURL passes through a URL net/url cannot parse (a
+			// password with an unencoded "#" or "?"), and Dolt's "invalid
+			// remote url:" repeats it. Scrub it where it is printed.
+			return HandleError("Bootstrap failed: %s", scrubURLCredentials(err.Error()))
 		}
 		return nil
 	},
@@ -293,7 +316,7 @@ func applyBootstrapMetadataRepair(beadsDir string, cfg *configfile.Config, apply
 
 // BootstrapPlan describes what bootstrap will do.
 type BootstrapPlan struct {
-	Action   string `json:"action"` // "sync", "restore", "jsonl-import", "init", "none"
+	Action   string `json:"action"` // "sync", "restore", "jsonl-import", "init", "none", "refuse"
 	Reason   string `json:"reason"` // Human-readable explanation
 	BeadsDir string `json:"beads_dir"`
 	Database string `json:"database"`
@@ -314,14 +337,28 @@ type BootstrapPlan struct {
 	// Blocked marks a plan that took no action and found no database. It is
 	// derived in detectBootstrapAction from Action+HasExisting, never set by a
 	// detection branch, and it is the single discriminator the exit code and
-	// the printed output both switch on. Additive on purpose: JSON consumers
-	// switch on "action", so a new action value would break them, while
-	// "none" + "blocked" + a non-zero exit code is backwards compatible.
+	// the printed output both switch on.
+	//
+	// "blocked" is the stable, script-facing signal and must be set for EVERY
+	// no-database outcome, so a consumer that only understands "none" is never
+	// told a run succeeded when it did not. A new "action" value is acceptable
+	// only for a state that must not be conflated with an existing one — the
+	// refusal is one, because "none" also covers the benign "a database
+	// already exists, nothing to do" — and only when it is accompanied by
+	// "blocked" and, outside --dry-run, a non-zero exit code. That is the
+	// contract to preserve when extending this enum: not "never add an action",
+	// but "never add an action that is the only signal of what happened".
 	Blocked bool `json:"blocked,omitempty"`
 	// BlockedRemote is the credential-free remote URL a Blocked plan could not
 	// verify, carried only so the diagnostic can name it.
 	BlockedRemote string `json:"blocked_remote,omitempty"`
 	HasExisting   bool   `json:"has_existing"`
+
+	// refusalDetail is the full operator-facing explanation for
+	// Action=="refuse". It is unexported so the ANSI styling it carries never
+	// leaks into --json output; JSON consumers read the plain-text one-liner
+	// in Reason instead.
+	refusalDetail string
 }
 
 // MarshalJSON renders the plan for `bd bootstrap --json` (and `--dry-run --json`)
@@ -393,8 +430,24 @@ func requireBootstrapDoltBackend(cfg *configfile.Config, beadsDir string) error 
 // branch can leave a stale flag behind for a later branch to inherit.
 func detectBootstrapAction(beadsDir string, cfg *configfile.Config) BootstrapPlan {
 	plan := detectBootstrapPlan(beadsDir, cfg)
-	plan.Blocked = plan.Action == "none" && !plan.HasExisting
-	if !plan.Blocked {
+	// "refuse" is a no-database outcome too, so it carries the same flag as
+	// "none": the action string says WHY bootstrap stopped, Blocked says THAT
+	// it stopped, and only the latter is the contract scripts switch on. This
+	// changes no exit code — RunE routes Action=="refuse" through
+	// executeBootstrapPlan, which errors, and --dry-run is contractually
+	// exit 0 either way (see bootstrapPlanOutcome) — it only stops a refusal
+	// from being the one bootstrap outcome that produced nothing yet reported
+	// "blocked" absent.
+	plan.Blocked = (plan.Action == "none" || plan.Action == "refuse") && !plan.HasExisting
+	if plan.Blocked {
+		// Keep SyncRemote's documented "empty on a Blocked plan" invariant
+		// true now that refusals are Blocked: a refusal can be reached with a
+		// forge SyncRemote already recorded (planConfiguredSyncRemote keeps it
+		// for the workspace it expected to create), and no Blocked plan wires
+		// up, clones from, or pushes to a remote. Inert for execution — every
+		// consumer of plan.SyncRemote runs on a sync/provisioning action.
+		plan.SyncRemote = ""
+	} else {
 		plan.BlockedRemote = ""
 	}
 	return plan
@@ -435,8 +488,22 @@ func detectBootstrapPlan(beadsDir string, cfg *configfile.Config) BootstrapPlan 
 	// probe-error branch, which then inherited HasExisting=true and printed the
 	// #5743 success tick again.
 	var deferredExistingPlan *BootstrapPlan
-	if dbAction, ok := existingBootstrapDBPlan(beadsDir, cfg, isServer, isSharedServer); ok {
-		if beadsDirExists || dbAction.Action != "none" {
+	dbAction, dbProbe, hasExistingDB := existingBootstrapDBPlan(beadsDir, cfg, isServer, isSharedServer)
+	// The same masking hazard applies to a server-side hit with no local
+	// evidence. Probing on ProjectID alone (see existingBootstrapDBPlan) means
+	// a shadow-dir-less workspace now reaches the Exists arm, where the only
+	// thing matched is the database NAME — nothing checks that the database on
+	// the server holds this project's data. Such a workspace previously
+	// skipped the probe entirely and always fell through to sync.remote, so
+	// settling here would let a stale or unrelated same-named database (including
+	// one left behind by the very bug this guard fixes) silently suppress the
+	// configured recovery path. Defer it exactly as a missing beadsDir is
+	// deferred: sync.remote / refs/dolt/data / local files get their turn, and
+	// the name match survives as the fallback verdict rather than becoming the
+	// verdict.
+	settledOnNameAlone := dbProbe.Ran && !dbProbe.LocalEvidence
+	if hasExistingDB {
+		if dbAction.Action != "none" || (beadsDirExists && !settledOnNameAlone) {
 			return dbAction
 		}
 		deferredExistingPlan = &dbAction
@@ -481,6 +548,16 @@ func detectBootstrapPlan(beadsDir string, cfg *configfile.Config) BootstrapPlan 
 		plan.Reason = unusableRemoteReason
 		plan.BlockedRemote = unusableRemoteURL
 		return plan
+	}
+
+	// Every recovery source has now been ruled out, so the fall-through below
+	// is a fresh, empty database. Decide the refusal HERE rather than inside
+	// executeInitAction: at plan time the answer reaches --dry-run and --json,
+	// printBootstrapPlan never advertises "will create fresh database" for a
+	// plan that cannot run, and confirmPrompt never asks the operator to
+	// approve one. The probe result is reused, so no second dial is needed.
+	if refusal, refused := refuseServerModeInitPlan(plan, cfg, isServer, dbProbe); refused {
+		return refusal
 	}
 
 	// Fresh setup
@@ -599,77 +676,171 @@ func localFileRecoveryPlan(plan BootstrapPlan, beadsDir string) (BootstrapPlan, 
 	return BootstrapPlan{}, false
 }
 
-func existingBootstrapDBPlan(beadsDir string, cfg *configfile.Config, isServer, isSharedServer bool) (BootstrapPlan, bool) {
+// refuseServerModeInitPlan turns a would-be fresh "init" into an explicit
+// "refuse" plan when metadata.json proves this workspace was already
+// initialized (ProjectID set) and the configured server-mode database could
+// not be confirmed to exist. Creating one here would strand the existing issue
+// data behind a new, empty database of the same name — the same root cause
+// the be-5up5 guards in init.go address for bd init (PR #5791).
+//
+// Reaching the init fall-through already implies the database was not
+// confirmed: existingBootstrapDBPlan returns a settled "none" plan whenever a
+// probe found it. The probe is passed in rather than re-run so the refusal
+// costs no extra round-trip and can quote why the check failed.
+func refuseServerModeInitPlan(plan BootstrapPlan, cfg *configfile.Config, isServer bool, probe serverDBProbe) (BootstrapPlan, bool) {
+	if !isServer || cfg.ProjectID == "" || !probe.Ran || probe.Exists {
+		return BootstrapPlan{}, false
+	}
+	plan.Action = "refuse"
+	plan.Reason = bootstrapMissingServerDBSummary(plan.Database, probe.Host, probe.Port, probe.Err)
+	plan.refusalDetail = bootstrapMissingServerDBRefusal(plan.Database, probe.Host, probe.Port, probe.Err).Error()
+	return plan, true
+}
+
+// serverDBProbe records what a server-mode existence probe concluded, so the
+// answer can be reused by the init fall-through instead of dialing the server
+// a second time.
+type serverDBProbe struct {
+	Ran bool // a probe was actually performed
+	// Host and Port are where it dialed: bootstrapServerEndpoint, which the
+	// clone dials too.
+	Host   string
+	Port   int
+	Exists bool  // the server confirmed the database exists
+	Err    error // the probe could not reach or question the server
+	// LocalEvidence records whether anything on this machine ties this
+	// workspace to the database the probe asked about — in practice a
+	// populated local shadow directory. Without it the probe can only match
+	// on the database NAME, which is why the caller refuses to let an
+	// Exists verdict settle the plan ahead of the real recovery sources.
+	LocalEvidence bool
+}
+
+// existingBootstrapDBPlan reports whether an existing database already settles
+// the bootstrap plan. The returned serverDBProbe carries the server-mode
+// probe result — including on the false path, where the caller needs it to
+// decide whether a fall-through to "init" is safe.
+func existingBootstrapDBPlan(beadsDir string, cfg *configfile.Config, isServer, isSharedServer bool) (BootstrapPlan, serverDBProbe, bool) {
 	plan := BootstrapPlan{
 		BeadsDir: beadsDir,
 		Database: cfg.GetDoltDatabase(),
 	}
 
-	var dbPath string
 	if isServer {
-		dbPath = bootstrapServerDoltDir(beadsDir, cfg, isSharedServer)
-	} else {
-		dbPath = filepath.Join(beadsDir, "embeddeddolt")
+		// Scope note: this is per-workspace evidence in locally-managed server
+		// mode only. In shared-server mode bootstrapServerDoltDir resolves to
+		// doltserver.SharedDoltDir() — ~/.beads/shared-server/dolt/, one
+		// directory for EVERY shared-server database on the machine — so a
+		// fresh clone of project B reads a populated directory belonging to
+		// projects A and C. Everything below that calls this "local evidence"
+		// is therefore only sound for the locally-managed case; the
+		// shared-server granularity gap is pre-existing (main probes on the
+		// same signal) and is tracked separately rather than narrowed here,
+		// because keying on the database-named subdirectory would also change
+		// the locally-managed verdict for a data dir holding only .doltcfg.
+		dbPath := bootstrapServerDoltDir(beadsDir, cfg, isSharedServer)
+		hasLocalShadowDir := false
+		if info, err := os.Stat(dbPath); err == nil && info.IsDir() {
+			if entries, _ := os.ReadDir(dbPath); len(entries) > 0 {
+				hasLocalShadowDir = true
+			}
+		}
+		// A missing/empty local shadow directory normally means no database
+		// exists yet. But when metadata.json carries a ProjectID, this
+		// workspace was already initialized somewhere — most likely a fresh
+		// clone of an already-bootstrapped server-mode project, which has no
+		// local shadow directory by design. In that case, skip the local-dir
+		// short-circuit and live-probe the server directly rather than
+		// concluding "no database" from local-disk state alone.
+		if !hasLocalShadowDir && cfg.ProjectID == "" {
+			return BootstrapPlan{}, serverDBProbe{}, false
+		}
+
+		// Retry the reachable-but-absent window only when the local shadow
+		// directory says this database really does live here; see
+		// probeBootstrapServerDB for why a fresh clone must not pay 70s.
+		ep := bootstrapServerEndpoint(beadsDir, cfg)
+		result := probeBootstrapServerDB(ep, hasLocalShadowDir)
+		probe := serverDBProbe{Ran: true, Host: ep.host, Port: ep.port, Exists: result.Exists, Err: result.Err, LocalEvidence: hasLocalShadowDir}
+
+		if result.Exists {
+			plan.HasExisting = true
+			plan.Action = "none"
+			plan.Reason = fmt.Sprintf("Database %s already exists on server at %s", cfg.GetDoltDatabase(), doltutil.ServerAddr(ep.host, ep.port))
+			return plan, probe, true
+		}
+		// An unverifiable probe means UNKNOWN, never "exists". Answering
+		// "nothing to do" for it is only defensible with local evidence that
+		// the database lives here — a populated shadow directory (in
+		// locally-managed server mode; see the scope note above, it is not
+		// per-database in shared-server mode), where a down server is a live
+		// database we simply cannot see right now.
+		// Without that evidence the very same error describes a fresh clone
+		// whose server has not been started yet, which is the normal state of
+		// every locally-managed server-mode clone before its first sync. Such
+		// a clone must stay eligible for sync.remote, refs/dolt/data,
+		// .beads/backup/ and issues.jsonl, so report "not found" and let
+		// detectBootstrapAction consult them.
+		//
+		// When it does settle here, Blocked is still not hand-set:
+		// detectBootstrapAction derives it from Action=="none" && !HasExisting
+		// (HasExisting is false on this branch), keeping one owner for the flag
+		// and the #5743 non-zero exit rather than a false success tick.
+		if result.Err != nil && hasLocalShadowDir {
+			plan.Action = "none"
+			plan.Reason = fmt.Sprintf("Could not verify existing server database %s: %v", cfg.GetDoltDatabase(), result.Err)
+			return plan, probe, true
+		}
+		return BootstrapPlan{}, probe, false
 	}
+
+	dbPath := filepath.Join(beadsDir, "embeddeddolt")
 	if info, err := os.Stat(dbPath); err != nil || !info.IsDir() {
-		return BootstrapPlan{}, false
+		return BootstrapPlan{}, serverDBProbe{}, false
 	}
 
 	entries, _ := os.ReadDir(dbPath)
 	if len(entries) == 0 {
-		return BootstrapPlan{}, false
-	}
-
-	if isServer {
-		probeCfg := bootstrapServerProbeConfig{
-			host:     cfg.GetDoltServerHost(),
-			port:     bootstrapServerPort(beadsDir, cfg, isSharedServer),
-			user:     cfg.GetDoltServerUser(),
-			pass:     cfg.GetDoltServerPassword(),
-			database: cfg.GetDoltDatabase(),
-			tls:      cfg.GetDoltServerTLS(),
-		}
-		// When the server is reachable but the DB appears absent, retry with
-		// exponential backoff before concluding the DB is genuinely missing.
-		// A managed Dolt restart completes in <30 s; three retries over 70 s
-		// cover all observed restart windows.
-		retryDelays := []time.Duration{10 * time.Second, 20 * time.Second, 40 * time.Second}
-		var result bootstrapServerDBCheck
-		for attempt := 0; ; attempt++ {
-			result = checkBootstrapServerDB(probeCfg)
-			if result.Err != nil || result.Exists || !result.Reachable {
-				break
-			}
-			if attempt >= len(retryDelays) {
-				break
-			}
-			fmt.Fprintf(os.Stderr, "Database %s not found on reachable server (attempt %d/%d), retrying in %v (possible transient restart)\n",
-				cfg.GetDoltDatabase(), attempt+1, len(retryDelays), retryDelays[attempt])
-			bootstrapRetryDelay(retryDelays[attempt])
-		}
-		if result.Err != nil {
-			// Same "declined, and no database was confirmed" class as a
-			// failed remote probe: report it and exit non-zero rather than
-			// printing a success tick (#5743). Blocked is not hand-set here —
-			// detectBootstrapAction derives it from Action=="none" && !HasExisting
-			// (HasExisting is false on this branch), keeping one owner for the flag.
-			plan.Action = "none"
-			plan.Reason = fmt.Sprintf("Could not verify existing server database %s: %v", cfg.GetDoltDatabase(), result.Err)
-			return plan, true
-		}
-		if result.Exists {
-			plan.HasExisting = true
-			plan.Action = "none"
-			plan.Reason = fmt.Sprintf("Database %s already exists on server at %s:%d", probeCfg.database, probeCfg.host, probeCfg.port)
-			return plan, true
-		}
-		return BootstrapPlan{}, false
+		return BootstrapPlan{}, serverDBProbe{}, false
 	}
 
 	plan.HasExisting = true
 	plan.Action = "none"
 	plan.Reason = "Database already exists at " + dbPath
-	return plan, true
+	return plan, serverDBProbe{}, true
+}
+
+// probeBootstrapServerDB checks whether the configured database exists on
+// the Dolt server at ep (bootstrapServerEndpoint, where the clone would land).
+//
+// When retryTransient is set, a reachable server that reports the database
+// absent is retried with backoff, because a managed Dolt restart can
+// transiently look like a missing database for up to ~30s. That budget costs
+// 70s, so it is only worth paying when something independent says the
+// database really is supposed to be here — in practice, a populated local
+// shadow directory. A caller with no such evidence (a fresh clone, which by
+// design has no shadow directory) is not watching a database disappear; it is
+// simply ahead of its first sync, and must pass retryTransient=false so the
+// answer costs one round-trip instead of 70s.
+func probeBootstrapServerDB(ep bootstrapServerProbeConfig, retryTransient bool) bootstrapServerDBCheck {
+	if !retryTransient {
+		return checkBootstrapServerDB(ep)
+	}
+	retryDelays := []time.Duration{10 * time.Second, 20 * time.Second, 40 * time.Second}
+	var result bootstrapServerDBCheck
+	for attempt := 0; ; attempt++ {
+		result = checkBootstrapServerDB(ep)
+		if result.Err != nil || result.Exists || !result.Reachable {
+			break
+		}
+		if attempt >= len(retryDelays) {
+			break
+		}
+		fmt.Fprintf(os.Stderr, "Database %s not found on reachable server (attempt %d/%d), retrying in %v (possible transient restart)\n",
+			ep.database, attempt+1, len(retryDelays), retryDelays[attempt])
+		bootstrapRetryDelay(retryDelays[attempt])
+	}
+	return result
 }
 
 func bootstrapSharedServerMode(beadsDir string) bool {
@@ -694,39 +865,6 @@ func bootstrapServerDoltDir(beadsDir string, cfg *configfile.Config, isSharedSer
 	}
 
 	return filepath.Join(beadsDir, "dolt")
-}
-
-func bootstrapServerPort(beadsDir string, cfg *configfile.Config, isSharedServer bool) int {
-	if p := os.Getenv("BEADS_DOLT_SERVER_PORT"); p != "" {
-		if port, err := strconv.Atoi(p); err == nil && port > 0 {
-			return port
-		}
-	}
-
-	if isSharedServer {
-		if sharedDir, err := doltserver.SharedServerDir(); err == nil {
-			if port := doltserver.ReadPortFile(sharedDir); port > 0 {
-				return port
-			}
-		}
-		return doltserver.DefaultSharedServerPort
-	}
-
-	if port := doltserver.ReadPortFile(beadsDir); port > 0 {
-		return port
-	}
-
-	if p := config.GetStringFromDir(beadsDir, "dolt.port"); p != "" {
-		if port, err := strconv.Atoi(p); err == nil && port > 0 {
-			return port
-		}
-	}
-
-	if cfg.DoltServerPort > 0 {
-		return cfg.DoltServerPort
-	}
-
-	return configfile.DefaultDoltServerPort
 }
 
 func printBootstrapPlan(plan BootstrapPlan) {
@@ -768,6 +906,21 @@ func printBootstrapPlan(plan BootstrapPlan) {
 	case "init":
 		fmt.Printf("Bootstrap plan: create fresh database\n")
 		fmt.Printf("  Database: %s\n", plan.Database)
+	case "refuse":
+		// Deliberately the one-line summary, not refusalDetail: the full
+		// explanation is the error executeBootstrapPlan returns, and printing
+		// both would render it twice.
+		//
+		// Deliberately stdout, unlike the "none"+Blocked arm above: this is the
+		// plan the command was asked to compute, and the one-line Reason rides
+		// with it (pinned by TestPrintBootstrapPlan_RefusePrintsSummaryNotDetail)
+		// so a stdout-only consumer is never left with a bare "refuse". It is
+		// not the #5743 false-success class either — a real refuse run exits
+		// non-zero through executeBootstrapPlan, so nothing reads this as
+		// success.
+		fmt.Printf("Bootstrap plan: refuse — will NOT create a database\n")
+		fmt.Printf("  Database: %s\n", plan.Database)
+		fmt.Printf("  Reason: %s\n", plan.Reason)
 	}
 }
 
@@ -790,6 +943,16 @@ func confirmPrompt(message string, nonInteractive bool) bool {
 func executeBootstrapPlan(plan BootstrapPlan, cfg *configfile.Config, nonInteractive bool) error {
 	if err := requireBootstrapDoltBackend(cfg, plan.BeadsDir); err != nil {
 		return err
+	}
+	// A refusal is a decision, not an action awaiting approval: surface it
+	// before confirmPrompt so the operator is never asked to approve it, and
+	// before the workspace gates below so no state is touched.
+	if plan.Action == "refuse" {
+		detail := plan.refusalDetail
+		if detail == "" {
+			detail = plan.Reason
+		}
+		return errors.New(detail)
 	}
 	if !confirmPrompt("Proceed?", nonInteractive) {
 		fmt.Fprintf(os.Stderr, "Aborted.\n")
@@ -835,6 +998,10 @@ func executeBootstrapPlan(plan BootstrapPlan, cfg *configfile.Config, nonInterac
 }
 
 func executeInitAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.Config) error {
+	if err := refuseServerModeInitForExistingProject(plan, cfg); err != nil {
+		return err
+	}
+
 	prefix := inferPrefix(cfg)
 	dbName := cfg.GetDoltDatabase()
 
@@ -881,6 +1048,85 @@ func wireBootstrapDoltRemote(ctx context.Context, s storage.DoltStorage, plan Bo
 		return
 	}
 	configureInitDoltRemote(ctx, s, doltRemoteURL(plan.SyncRemote), false)
+}
+
+// refuseServerModeInitForExistingProject is the belt-and-braces half of the
+// guard whose real decision is made at plan time by refuseServerModeInitPlan.
+// It re-checks, at the last moment before a database would actually be
+// created, that this workspace is not an already-initialized project
+// (ProjectID set) whose server-mode database cannot be confirmed to exist —
+// covering any caller that reaches executeInitAction with a plan that did not
+// come from detectBootstrapAction.
+//
+// It deliberately probes ONCE. The transient-restart backoff belongs to the
+// plan-time probe; repeating it here would charge a second 70s to a decision
+// that has already been made, and refusing is the safe direction anyway.
+func refuseServerModeInitForExistingProject(plan BootstrapPlan, cfg *configfile.Config) error {
+	isSharedServer := bootstrapSharedServerMode(plan.BeadsDir)
+	if (!cfg.IsDoltServerMode() && !isSharedServer) || cfg.ProjectID == "" {
+		return nil
+	}
+	ep := bootstrapServerEndpoint(plan.BeadsDir, cfg)
+	result := probeBootstrapServerDB(ep, false)
+	if result.Exists {
+		return nil
+	}
+	return bootstrapMissingServerDBRefusal(cfg.GetDoltDatabase(), ep.host, ep.port, result.Err)
+}
+
+// bootstrapMissingServerDBSummary is the single-line, unstyled form of
+// bootstrapMissingServerDBRefusal, used as BootstrapPlan.Reason so --json
+// consumers get the explanation without ANSI escapes.
+func bootstrapMissingServerDBSummary(dbName, host string, port int, probeErr error) string {
+	if probeErr != nil {
+		return fmt.Sprintf("Could not verify database %q on Dolt server at %s (%v); workspace already initialized (project_id set) — refusing to create an empty database", dbName, doltutil.ServerAddr(host, port), probeErr)
+	}
+	return fmt.Sprintf("Database %q not found on server at %s; workspace already initialized (project_id set) — refusing to create an empty database", dbName, doltutil.ServerAddr(host, port))
+}
+
+// bootstrapMissingServerDBRefusal builds the refusal error shown when bd
+// bootstrap would otherwise create a fresh, empty server-mode database for a
+// workspace that was already initialized elsewhere. Per GH#2363, this must
+// never suggest a destructive "recreate" action as an actionable next step.
+//
+// The equivalent `bd init` refusal is initGuardMissingServerDBMessage, from
+// PR #5791. This wording is kept deliberately close to it so the two can be
+// folded into one message.
+func bootstrapMissingServerDBRefusal(dbName, host string, port int, probeErr error) error {
+	var b strings.Builder
+	if probeErr != nil {
+		fmt.Fprintf(&b, "\n%s Could not verify database %q on Dolt server at %s: %v\n", ui.RenderWarn("⚠"), dbName, doltutil.ServerAddr(host, port), probeErr)
+	} else {
+		fmt.Fprintf(&b, "\n%s Database %q not found on server at %s.\n", ui.RenderWarn("⚠"), dbName, doltutil.ServerAddr(host, port))
+	}
+	b.WriteString("This workspace was already initialized (metadata.json has a project_id from a prior\n")
+	b.WriteString("bd init/bootstrap), so this looks like a recovery situation, not a fresh clone.\n")
+
+	b.WriteString("\nbd bootstrap will NOT create an empty database here — that would strand any existing\n")
+	b.WriteString("issue data behind a new, empty database of the same name.\n")
+
+	b.WriteString("\nDiagnose with:\n")
+	b.WriteString("  bd doctor          # check project health\n")
+	b.WriteString("  bd dolt status     # inspect Dolt server state\n")
+
+	// Every route here must be followable FROM this state. `bd backup restore`
+	// alone is not: it restores a Dolt-native snapshot, not a `bd export`
+	// JSONL, and it requires an initialized database — so it silently routes
+	// the operator back through `bd init`, the door this refusal exists to
+	// keep shut (PR #5791). Name that precondition instead
+	// of implying it, and lead with the routes that need no init at all.
+	b.WriteString("\nTo recover existing data, repopulate the database rather than creating fresh.\n")
+	b.WriteString("Routes that work from this state:\n")
+	b.WriteString("  bd dolt push                     # from another clone that still has the data\n")
+	b.WriteString("  bd config set sync.remote <url>  # then re-run bd bootstrap to clone from it\n")
+	b.WriteString("  bd init && bd backup restore     # ONLY with a Dolt-native backup snapshot:\n")
+	b.WriteString("                                   # bd backup restore needs an initialized\n")
+	b.WriteString("                                   # database and will not read a bd export JSONL\n")
+	b.WriteString("\nbd bootstrap only auto-restores .beads/backup/issues.jsonl, so a timestamped or\n")
+	b.WriteString("otherwise-named export under .beads/backup/ is still yours to import by hand.\n")
+
+	b.WriteString("\nAborting.")
+	return errors.New(b.String())
 }
 
 func executeRestoreAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.Config) error {
@@ -961,29 +1207,47 @@ func executeSyncAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.
 	}
 
 	dbName := cfg.GetDoltDatabase()
-	if err := cloneFromRemote(ctx, plan.BeadsDir, plan.SyncRemote, dbName, cfg); err != nil {
-		return err
+	// Clone and finalize under the configuration the next command in
+	// plan.BeadsDir loads (config.WithBeadsDir), as serverClonePort and the
+	// warmup below do: the clone's mode (a server or the embedded engine),
+	// the server it dials and the dolt_mode finalizeSyncedBootstrap records
+	// are then the ones that command uses. Bootstrap can have started with an
+	// enclosing workspace's config.yaml loaded, whose dolt.shared-server,
+	// dolt.mode and dolt.host a fresh rig's later commands never read.
+	var cloneErr error
+	_ = config.WithBeadsDir(plan.BeadsDir, func() {
+		if cloneErr = cloneFromRemote(ctx, plan.BeadsDir, plan.SyncRemote, dbName, cfg); cloneErr != nil {
+			return
+		}
+		// Finalize the bootstrapped workspace so subsequent bd commands can
+		// open the cloned database. Without metadata.json and config.yaml,
+		// configfile.Load() returns nil, callers fall back to the default
+		// dolt_database name, and bd loses track of the cloned database —
+		// producing "no beads configuration found" and "Error 1105: no
+		// database selected" on bd status / bd dolt push in fresh clones.
+		// Every other bootstrap action (init, restore, jsonl-import) writes
+		// these files via newDoltStore + createConfigYaml; the sync path
+		// historically did not. (GH#3201)
+		cloneErr = finalizeSyncedBootstrap(plan.BeadsDir, plan.SyncRemote, cfg, dbName)
+	})
+	if cloneErr != nil {
+		return cloneErr
 	}
 
-	// Finalize the bootstrapped workspace so subsequent bd commands can open
-	// the cloned database. Without metadata.json and config.yaml,
-	// configfile.Load() returns nil, callers fall back to the default
-	// dolt_database name, and bd loses track of the cloned database —
-	// producing "no beads configuration found" and "Error 1105: no database
-	// selected" on bd status / bd dolt push in fresh clones. Every other
-	// bootstrap action (init, restore, jsonl-import) writes these files via
-	// newDoltStore + createConfigYaml; the sync path historically did not.
-	// (GH#3201)
-	if err := finalizeSyncedBootstrap(plan.BeadsDir, plan.SyncRemote, cfg, dbName); err != nil {
-		return err
-	}
+	// Creation-consent for the migration-consent gate
+	// (schema/migrate_consent.go): this sync action just CLONED the database
+	// fresh, so the operator's explicit bootstrap is consent for its schema —
+	// the same principle that exempts a fresh `bd init`. The #4259
+	// remote-migrate gate below is unaffected (consent is not its
+	// designated-migrator override), so the behind-remote refusal keeps its
+	// exact bd-6dnrw.31 behavior.
+	schema.SetLocalMigrateConsent(true)
 
 	// Open and close the store to ensure dolt_ignore'd wisp tables are
 	// created in the working set. Clone does not include these tables
 	// (they are never committed), so they must be recreated after clone.
 	// Both embedded and server mode handle this in their store init paths.
-	warmupStore, err := newDoltStoreFromConfig(ctx, plan.BeadsDir)
-	if err != nil {
+	if err := warmUpSyncedStore(ctx, plan); err != nil {
 		// #4259: the cloned remote is behind this binary, so the remote-migrate
 		// gate held migration for an explicit operator decision. Surface that
 		// now with bootstrap-specific guidance and a non-zero exit. Returning
@@ -1009,10 +1273,31 @@ func executeSyncAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.
 		fmt.Fprintf(os.Stderr, "Warning: post-clone store init failed (wisp tables may be missing): %v\n", err)
 		return nil
 	}
-	configureInitDoltRemote(ctx, warmupStore, plan.SyncRemote, false)
-	_ = warmupStore.Close()
 
 	return nil
+}
+
+// openSyncedWarmupStore opens the store warmUpSyncedStore warms up.
+// Injectable for testing.
+var openSyncedWarmupStore = newDoltStoreFromConfig
+
+// warmUpSyncedStore opens and closes the cloned store, which creates its wisp
+// tables, and wires origin to plan.SyncRemote. It opens under the
+// configuration the next command in plan.BeadsDir loads (config.WithBeadsDir),
+// the one serverClonePort cloned through: bootstrap can have started with an
+// enclosing workspace's config.yaml loaded, whose dolt.port names another
+// server.
+func warmUpSyncedStore(ctx context.Context, plan BootstrapPlan) error {
+	var err error
+	_ = config.WithBeadsDir(plan.BeadsDir, func() {
+		var s storage.DoltStorage
+		if s, err = openSyncedWarmupStore(ctx, plan.BeadsDir); err != nil {
+			return
+		}
+		configureInitDoltRemote(ctx, s, plan.SyncRemote, false)
+		_ = s.Close()
+	})
+	return err
 }
 
 // printInitJoinGuidance corrects the one thing the gate's shared-store block
@@ -1133,12 +1418,19 @@ func cloneFromRemote(ctx context.Context, beadsDir, remoteURL, dbName string, cf
 	return cloneFromRemoteWithMode(ctx, beadsDir, remoteURL, dbName, cfg, remoteCloneAuto)
 }
 
+// remoteCloneViaEmbedded and remoteCloneViaServer run the embedded-engine and
+// the server clone cloneFromRemoteWithMode picks. Injectable for testing.
+var (
+	remoteCloneViaEmbedded = cloneViaEmbedded
+	remoteCloneViaServer   = cloneViaServer
+)
+
 func cloneFromRemoteWithMode(ctx context.Context, beadsDir, remoteURL, dbName string, cfg *configfile.Config, cloneMode remoteCloneMode) error {
 	mode := resolveRemoteCloneMode(beadsDir, cfg, cloneMode)
 
 	switch mode {
 	case remoteCloneEmbedded:
-		return cloneViaEmbedded(ctx, beadsDir, remoteURL, dbName)
+		return remoteCloneViaEmbedded(ctx, beadsDir, remoteURL, dbName)
 
 	case remoteCloneExternalServer:
 		if cfg == nil {
@@ -1148,7 +1440,17 @@ func cloneFromRemoteWithMode(ctx context.Context, beadsDir, remoteURL, dbName st
 			}
 		}
 		if cfg != nil {
-			return cloneViaServer(ctx, beadsDir, remoteURL, dbName, cfg)
+			// bd bootstrap lets the workspace pick the mode and clones into
+			// it, so it dials the endpoint every later command dials there.
+			// bd init picks the mode itself and opens its own store with the
+			// environment first, so its clone keeps that port order.
+			var ep bootstrapServerProbeConfig
+			if cloneMode == remoteCloneAuto {
+				ep = bootstrapServerEndpoint(beadsDir, cfg)
+			} else {
+				ep = serverDialEndpoint(cfg, initServerClonePort(beadsDir, cfg))
+			}
+			return remoteCloneViaServer(ctx, remoteURL, dbName, ep)
 		}
 		// No config available — fall through to CLI clone.
 		fmt.Fprintf(os.Stderr, "Warning: server mode detected but no config available, falling back to CLI clone\n")
@@ -1200,23 +1502,12 @@ func cloneViaEmbedded(ctx context.Context, beadsDir, remoteURL, dbName string) e
 	return nil
 }
 
-// cloneViaServer clones by connecting to the external Dolt server and
+// cloneViaServer clones by connecting to the external Dolt server at ep and
 // executing CALL DOLT_CLONE. The server places the database in its own
 // data directory, which is the correct behavior for externally managed
 // servers where bd does not know the filesystem layout.
-func cloneViaServer(ctx context.Context, beadsDir, remoteURL, dbName string, cfg *configfile.Config) error {
-	port := serverClonePort(beadsDir, cfg)
-	dsn := doltutil.ServerDSN{
-		Socket:   cfg.GetDoltServerSocket(),
-		Host:     cfg.GetDoltServerHost(),
-		Port:     port,
-		User:     cfg.GetDoltServerUser(),
-		Password: cfg.GetDoltServerPasswordForPort(port),
-		TLS:      cfg.GetDoltServerTLS(),
-		// No Database — DOLT_CLONE creates the database.
-	}.String()
-
-	db, err := sql.Open("mysql", dsn)
+func cloneViaServer(ctx context.Context, remoteURL, dbName string, ep bootstrapServerProbeConfig) error {
+	db, err := sql.Open("mysql", ep.dsn())
 	if err != nil {
 		return fmt.Errorf("connect to dolt server for clone: %w", err)
 	}
@@ -1226,34 +1517,116 @@ func cloneViaServer(ctx context.Context, beadsDir, remoteURL, dbName string, cfg
 	defer cancel()
 
 	if err := db.PingContext(cloneCtx); err != nil {
-		return fmt.Errorf("dolt server unreachable at %s:%d (is dolt sql-server running?): %w",
-			cfg.GetDoltServerHost(), port, err)
+		return fmt.Errorf("dolt server unreachable at %s (is dolt sql-server running?): %w",
+			doltutil.ServerAddr(ep.host, ep.port), err)
 	}
 
 	if err := versioncontrolops.DoltClone(cloneCtx, db, remoteURL, dbName, os.Getenv("DOLT_REMOTE_USER")); err != nil {
 		return fmt.Errorf("clone from remote via server: %w", err)
 	}
-	fmt.Fprintf(os.Stderr, "Synced database from %s (via server at %s:%d)\n",
-		remoteURL, cfg.GetDoltServerHost(), port)
+	fmt.Fprintf(os.Stderr, "Synced database from %s (via server at %s)\n",
+		remoteURL, doltutil.ServerAddr(ep.host, ep.port))
 	return nil
 }
 
+// bootstrapServerEndpoint is the endpoint bd bootstrap dials on an external
+// Dolt server, both to probe for the database and to clone it: serverClonePort's
+// port, and the host, socket, user and password the store pairs with it. Like
+// the port, they are read under the configuration a later command in beadsDir
+// loads (config.WithBeadsDir): for a fresh rig, an enclosing workspace's
+// config.yaml dolt.host picks neither the host nor, through it, the
+// credentials-file entry the password comes from.
+func bootstrapServerEndpoint(beadsDir string, cfg *configfile.Config) bootstrapServerProbeConfig {
+	port := serverClonePort(beadsDir, cfg)
+	var ep bootstrapServerProbeConfig
+	_ = config.WithBeadsDir(beadsDir, func() { ep = serverDialEndpoint(cfg, port) })
+	return ep
+}
+
+// serverDialEndpoint is the endpoint cfg names for its server on port, under
+// the configuration loaded now. The password is the one for that host and
+// port (GetDoltServerPasswordForPort), as the store looks it up.
+func serverDialEndpoint(cfg *configfile.Config, port int) bootstrapServerProbeConfig {
+	return bootstrapServerProbeConfig{
+		socket:   cfg.GetDoltServerSocket(),
+		host:     cfg.GetDoltServerHost(),
+		port:     port,
+		user:     cfg.GetDoltServerUser(),
+		pass:     cfg.GetDoltServerPasswordForPort(port),
+		database: cfg.GetDoltDatabase(),
+		tls:      cfg.GetDoltServerTLS(),
+	}
+}
+
+// serverClonePort is the port bd bootstrap dials on an external Dolt server,
+// both to probe for the database and to clone it: the port the store dials in
+// this workspace once metadata.json holds cfg, so the clone lands where every
+// later command looks for it and the probe looks there too. That is
+// doltserver.DialConfig's port, by the store's rule (#5835, #7767):
+// BEADS_DOLT_SERVER_PORT first, and the legacy BEADS_DOLT_PORT only where no
+// listener.port, dolt.port or metadata.json dolt_server_port names one.
+//
+// DialConfig runs under the configuration a later command in beadsDir loads
+// (config.WithBeadsDir): beadsDir's own config.yaml, which
+// finalizeSyncedBootstrap writes after a fresh clone and which names no port,
+// over the user config files, with the BD_* variables on top. Bootstrap can
+// have started with another file loaded as the project config: for a fresh
+// rig or clone with no .beads yet, whose own git repository bounds discovery
+// (GH#3029, GH#2792), an enclosing workspace's config.yaml, or for a
+// repository under HOME the legacy ~/.beads/config.yaml, which later commands
+// read only as the lowest user layer.
+//
+// A fresh clone has no metadata.json yet: cfg comes from a parent workspace
+// or the defaults, and finalizeSyncedBootstrap writes it after the clone.
+// DialConfig cannot see it, so cfg's dolt_server_port takes the rank the
+// file's will have. A shared server reads no port from the workspace's file.
 func serverClonePort(beadsDir string, cfg *configfile.Config) int {
+	var dial *doltserver.Config
+	// A config file that does not load fails the same way for later
+	// commands, which run with what did load.
+	_ = config.WithBeadsDir(beadsDir, func() { dial = doltserver.DialConfig(beadsDir) })
+	if cfg != nil && cfg.DoltServerPort > 0 && !dial.PortSharedServer && !outranksMetadataPort(dial) {
+		if _, err := os.Stat(configfile.ConfigPath(beadsDir)); errors.Is(err, os.ErrNotExist) {
+			return cfg.DoltServerPort
+		}
+	}
+	if dial.Port > 0 {
+		return dial.Port
+	}
+	return configfile.DefaultDoltServerPort
+}
+
+// outranksMetadataPort reports whether DialConfig took its port from a source
+// the store ranks above metadata.json's dolt_server_port. DialConfig reports
+// the legacy BEADS_DOLT_PORT as PortSourceEnv too, but it ranks below.
+func outranksMetadataPort(dial *doltserver.Config) bool {
+	switch dial.PortSource {
+	case doltserver.PortSourceEnv:
+		return os.Getenv("BEADS_DOLT_SERVER_PORT") != ""
+	case doltserver.PortSourcePortFile, doltserver.PortSourceDoltConfigYaml,
+		doltserver.PortSourceConfigYaml, doltserver.PortSourceMetadataJSON:
+		return true
+	}
+	return false
+}
+
+// initServerClonePort is the port bd init --server --external clones through:
+// the port of the store init opens right after the clone, so init's own reads
+// and writes find the clone. That store starts from --server-port, or else
+// initStoreServerPort (BEADS_DOLT_SERVER_PORT, the port file, and the shared
+// default in shared-server mode, never config.yaml dolt.port), and the store
+// applies its rule to that (dolt.ResolveServerPort): the legacy BEADS_DOLT_PORT
+// replaces a port bd chose, and DefaultConfig fills in a port nothing named.
+func initServerClonePort(beadsDir string, cfg *configfile.Config) int {
+	storeCfg := &dolt.Config{BeadsDir: beadsDir}
 	if cfg != nil && cfg.DoltServerPort > 0 {
-		return cfg.DoltServerPort
+		storeCfg.ServerPort, storeCfg.ServerPortSource = cfg.DoltServerPort, doltserver.PortSourceCallerExplicit
+	} else {
+		storeCfg.ServerPort, storeCfg.ServerPortSource, storeCfg.ServerPortSharedServer = initStoreServerPort(beadsDir)
 	}
-	if p := os.Getenv("BEADS_DOLT_SERVER_PORT"); p != "" {
-		if port, err := strconv.Atoi(p); err == nil && port > 0 {
-			return port
-		}
-	}
-	if p := os.Getenv("BEADS_DOLT_PORT"); p != "" {
-		if port, err := strconv.Atoi(p); err == nil && port > 0 {
-			return port
-		}
-	}
-	if resolved := doltserver.DefaultConfig(beadsDir); resolved.Port > 0 {
-		return resolved.Port
+	dolt.ResolveServerPort(storeCfg)
+	if storeCfg.ServerPort > 0 {
+		return storeCfg.ServerPort
 	}
 	if cfg != nil {
 		return cfg.GetDoltServerPort()
@@ -1305,15 +1678,29 @@ func isNonInteractiveBootstrap(flagValue bool) bool {
 // parent workspace does. Returns nil if no parent config is found. A malformed
 // or unreadable ancestor metadata file is authoritative and returned as an error;
 // bootstrap must not skip it and select a more distant workspace or defaults.
+// An ancestor holding the graph format marker without metadata it can read is
+// a graph workspace, refused like one whose metadata declares graph_mode,
+// rather than skipped or reported as a metadata load failure.
 func findParentConfig(beadsDir string) (*configfile.Config, error) {
 	// Start from the parent of beadsDir's enclosing directory.
 	// beadsDir is typically "<project>/.beads", so we start from <project>'s parent.
-	start := filepath.Dir(filepath.Dir(beadsDir))
-	homeDir, _ := os.UserHomeDir()
-
-	for dir := start; dir != "/" && dir != "."; {
+	start := utils.CanonicalizePath(filepath.Dir(filepath.Dir(beadsDir)))
+	// Canonicalize the $HOME boundary only when there is one. An unset HOME
+	// makes os.UserHomeDir fail, and CanonicalizePath("") resolves to the
+	// current working directory, which would silently turn "don't search above
+	// $HOME" into "stop at the CWD". Keep "" meaning "no boundary".
+	homeDir := ""
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		homeDir = utils.CanonicalizePath(home)
+	}
+	origin := utils.CanonicalizePath(filepath.Dir(beadsDir))
+	walk := beads.NewAncestorDirWalk(start, origin)
+	for dir, ok := walk.Next(); ok; dir, ok = walk.Next() {
 		candidate := filepath.Join(dir, ".beads")
 		cfg, err := configfile.LoadForDiscovery(candidate)
+		if (err != nil || cfg == nil) && hasGraphFormatMarker(candidate) {
+			return nil, &configfile.UnsupportedWorkspaceFormatError{BeadsDir: candidate, FormatMarker: true}
+		}
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", configfile.ConfigPath(candidate), err)
 		}
@@ -1329,11 +1716,6 @@ func findParentConfig(beadsDir string) (*configfile.Config, error) {
 			break
 		}
 
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			break
-		}
-		dir = parent
 	}
 	return nil, nil
 }
@@ -1376,14 +1758,21 @@ func isGitCodeRepoURL(rawURL string) bool {
 
 // urlHostname extracts the lowercase hostname from a URL without importing
 // net/url. Handles scheme://[user@]host[:port]/path and SCP git@host:path.
+//
+// The host part is cut out before userinfo is stripped through its last "@",
+// so an "@" in a path, query or fragment never selects the host (mc-gcmer).
+// For a scheme URL the host part is the authority, which ends at the first
+// "/", "?" or "#" — the host net/url, and so Dolt, would dial. For SCP it is
+// everything before the first ":", unless a "/" comes first, which makes it a
+// local path (the split doltremote.FromGitURL makes).
 func urlHostname(rawURL string) string {
 	if sep := strings.Index(rawURL, "://"); sep >= 0 {
 		rest := rawURL[sep+3:]
-		if at := strings.Index(rest, "@"); at >= 0 {
-			rest = rest[at+1:]
+		if end := strings.IndexAny(rest, "/?#"); end >= 0 {
+			rest = rest[:end]
 		}
-		if slash := strings.Index(rest, "/"); slash >= 0 {
-			rest = rest[:slash]
+		if at := strings.LastIndex(rest, "@"); at >= 0 {
+			rest = rest[at+1:]
 		}
 		if colon := strings.Index(rest, ":"); colon >= 0 {
 			rest = rest[:colon]
@@ -1391,10 +1780,9 @@ func urlHostname(rawURL string) string {
 		return strings.ToLower(rest)
 	}
 	// SCP-style: git@github.com:org/repo
-	if at := strings.Index(rawURL, "@"); at >= 0 {
-		rest := rawURL[at+1:]
-		if colon := strings.Index(rest, ":"); colon >= 0 {
-			return strings.ToLower(rest[:colon])
+	if colon := strings.Index(rawURL, ":"); colon >= 0 && !strings.Contains(rawURL[:colon], "/") {
+		if at := strings.LastIndex(rawURL[:colon], "@"); at >= 0 {
+			return strings.ToLower(rawURL[at+1 : colon])
 		}
 	}
 	return ""

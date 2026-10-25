@@ -634,13 +634,14 @@ func proxiedExternalTCPTopology() topologySpec {
 
 // TestProxiedServerTopologyCapabilityMatrix is the primary entry point.
 //
-// Named TestProxiedServer* so .github/scripts/proxied-test-shard.sh discovers
-// it, which puts it in pr-risk.yml's `test-proxied-cmd` lane — a lane that
-// runs on pull_request, not only on push-to-main.
+// Named TestProxiedServer* so scripts/ci/gen_proxied_shard_manifest.py
+// discovers it and .github/scripts/proxied-cmd-test-shards.txt assigns it a
+// shard of //cmd/bd:bd_proxied_test — bazel.yml's proxied-server tier, which
+// runs on every pull_request and merge group, not only on push-to-main.
 //
 // It covers four of the five topologies. managed-local is gated on
 // BEADS_TEST_PROXIED_LOCAL, which that lane does not set; it is covered by
-// TestManagedLocalProxiedCapabilityMatrix in the proxied-local smoke lane
+// TestManagedLocalProxiedCapabilityMatrix in //cmd/bd:bd_managed_local_test
 // instead. Both entry points share this table.
 func TestProxiedServerTopologyCapabilityMatrix(t *testing.T) {
 	runCapabilityMatrix(t, []topologySpec{

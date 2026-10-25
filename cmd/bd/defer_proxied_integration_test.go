@@ -92,6 +92,37 @@ func TestProxiedServerDeferUndefer(t *testing.T) {
 		}
 	})
 
+	t.Run("undefer_clears_stray_defer_until_when_status_not_deferred", func(t *testing.T) {
+		// Mirrors TestEmbeddedUndefer's ga-bq3w5 coverage on the proxied-server
+		// route (runUndeferProxiedServer): a status that is neither "open" nor
+		// "deferred" makes the conditional status write observable — writing
+		// status=open here would be a real change, not a no-op.
+		j := bdProxiedCreate(t, bd, p.dir, "Stray future defer on in_progress issue", "--type", "task")
+		if out, err := bdProxiedRun(t, bd, p.dir, "update", j.ID, "--status", "in_progress", "--defer", "2099-01-01"); err != nil {
+			t.Fatalf("update --status in_progress --defer: %v\n%s", err, out)
+		}
+		status, deferUntil := showStatus(t, j.ID)
+		if status != string(types.StatusInProgress) || deferUntil == nil {
+			t.Fatalf("precondition: expected status=in_progress with defer_until set, got status=%q defer_until=%v", status, deferUntil)
+		}
+
+		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "undefer", j.ID)
+		if err != nil {
+			t.Fatalf("undefer: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+		}
+		if strings.Contains(stdout+stderr, "is not deferred") {
+			t.Errorf("undefer refused instead of clearing the stray defer_until: stdout=%s stderr=%s", stdout, stderr)
+		}
+
+		status, deferUntil = showStatus(t, j.ID)
+		if status != string(types.StatusInProgress) {
+			t.Errorf("expected status to stay in_progress (not clobbered to open), got %q", status)
+		}
+		if deferUntil != nil {
+			t.Errorf("expected defer_until cleared after undefer, got %v", deferUntil)
+		}
+	})
+
 	t.Run("defer_is_idempotent", func(t *testing.T) {
 		d := bdProxiedCreate(t, bd, p.dir, "Idempotent defer", "--type", "task")
 		if out, err := bdProxiedRun(t, bd, p.dir, "defer", d.ID); err != nil {

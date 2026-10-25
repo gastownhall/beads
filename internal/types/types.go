@@ -192,6 +192,51 @@ type Issue struct {
 	IsLitePartial bool `json:"-"`
 }
 
+// IssueSummary is a read-only narrow projection of Issue for list-shaped
+// rendering paths that don't dereference TEXT/JSON columns. Populated by
+// storage.SearchIssueSummaries, which SELECTs only the columns listed here.
+// Shape ratified by be-nu4.3.1 addendum: Pinned IS included, Metadata is NOT
+// — adding Metadata would re-introduce the JSON parse cost D3 exists to
+// eliminate.
+//
+// IssueSummary is read-only. No write methods accept it.
+//
+// The JSON tags mirror the same-named fields on Issue exactly (name, casing,
+// and omitempty), because this type backs list-shaped rendering and `bd list
+// --json` is one of that command's primary modes: a summary-backed list must
+// serialize to the same wire shape a full-Issue-backed one does, or every
+// consumer parsing bd output breaks silently. Keep them in sync with Issue.
+//
+// That promise covers wisp rows, not only durable ones: issueops.searchInTx
+// merges the wisps table into every result whose filter does not set
+// SkipWisps, so the four wisp-plane markers below are part of the projection
+// rather than an optional extra. They are narrow scalar columns (two
+// TINYINT(1), two short VARCHARs), so carrying them costs none of the
+// TEXT/JSON hydration D3 exists to eliminate.
+type IssueSummary struct {
+	ID        string     `json:"id"`
+	Title     string     `json:"title"`
+	Status    Status     `json:"status,omitempty"`
+	Priority  int        `json:"priority"` // No omitempty: 0 is valid (P0/critical)
+	IssueType IssueType  `json:"issue_type,omitempty"`
+	Assignee  string     `json:"assignee,omitempty"`
+	Pinned    bool       `json:"pinned,omitempty"`
+	Labels    []string   `json:"labels,omitempty"`
+	CreatedAt time.Time  `json:"created_at"`
+	UpdatedAt time.Time  `json:"updated_at"`
+	ClosedAt  *time.Time `json:"closed_at,omitempty"`
+
+	// ===== Wisp-plane markers =====
+	// A summary-backed list renders wisps as well as durable beads (see the
+	// doc comment above), and these four are what distinguish one. Dropping
+	// them would make a wisp indistinguishable from a durable bead in
+	// `bd list --json` while every other key stayed identical.
+	Ephemeral    bool         `json:"ephemeral,omitempty"`
+	NoHistory    bool         `json:"no_history,omitempty"`
+	WispType     WispType     `json:"wisp_type,omitempty"`
+	StorageClass StorageClass `json:"storage_class,omitempty"`
+}
+
 // ComputeContentHash creates a deterministic hash of the issue's content.
 // Uses all substantive fields (excluding ID, timestamps, and compaction metadata)
 // to ensure that identical content produces identical hashes across all clones.
@@ -501,6 +546,27 @@ func (i *Issue) SetDefaults() {
 	// Priority default of 2 only applies to new issues via Create, not import.
 	if i.IssueType == "" {
 		i.IssueType = TypeTask
+	}
+}
+
+// NormalizeOptionalTimestampsToUTC converts every set optional timestamp to UTC
+// in place. CreatedAt and UpdatedAt are value fields normalized separately by
+// the insert paths; the optional pointer timestamps below were previously left
+// in their original location. An offset-bearing value imported from JSONL — for
+// example a closed_at carrying a -04:00 offset from an older SQLite-era export —
+// was therefore stored with its local wall-clock digits relabeled UTC, shifting
+// the recorded instant by the offset. Normalizing to UTC here matches how
+// CreatedAt/UpdatedAt are already handled and keeps every timestamp on a row
+// referring to the same absolute instant. Fixes #5765.
+func (i *Issue) NormalizeOptionalTimestampsToUTC() {
+	for _, ts := range []**time.Time{
+		&i.StartedAt, &i.ClosedAt, &i.CompactedAt,
+		&i.DueAt, &i.DeferUntil, &i.LeaseExpiresAt, &i.HeartbeatAt,
+	} {
+		if *ts != nil {
+			utc := (*ts).UTC()
+			*ts = &utc
+		}
 	}
 }
 
@@ -865,6 +931,10 @@ func ValidMolTypeNames() string {
 	return joinNamesWithOr(validMolTypes)
 }
 
+// ValidMolTypes returns the accepted non-empty mol-type values, in canonical
+// order, as a copy the caller may keep.
+func ValidMolTypes() []MolType { return slices.Clone(validMolTypes) }
+
 // WispType categorizes ephemeral wisps for TTL-based compaction (gt-9br)
 type WispType string
 
@@ -903,6 +973,10 @@ func (w WispType) IsValid() bool {
 func ValidWispTypeNames() string {
 	return joinNamesWithOr(validWispTypes)
 }
+
+// ValidWispTypes returns the accepted non-empty wisp-type values, in canonical
+// order, as a copy the caller may keep.
+func ValidWispTypes() []WispType { return slices.Clone(validWispTypes) }
 
 // StorageClass is the create-selected marker for a record's history and
 // replication contract. Persistence plane transitions preserve the marker
@@ -951,12 +1025,19 @@ func (m PersistenceMode) IsValid() bool {
 	return slices.Contains(validPersistenceModes, m)
 }
 
+// ErrUnversionedWispMove is NormalizePersistenceMode's refusal to move an
+// unversioned record to a wisp mode. The record is sound and the requested
+// move is what is refused, so callers can classify it apart from the
+// row-invariant errors the function also returns.
+var ErrUnversionedWispMove = errors.New("cannot move unversioned record")
+
 // NormalizePersistenceMode maps a requested mode from current to its exact
 // persistence fields without mutating an issue. The returned values are
 // Ephemeral, NoHistory, and StorageClass, respectively. Plane and retention
 // changes preserve the create-selected class. Promotion clears an explicit
 // ephemeral class marker to select normalized versioned storage. An
-// unversioned record may remain persistent but cannot move to a wisp mode.
+// unversioned record may remain persistent but cannot move to a wisp mode
+// (ErrUnversionedWispMove).
 func NormalizePersistenceMode(current Issue, mode PersistenceMode) (bool, bool, StorageClass, error) {
 	if !mode.IsValid() {
 		return false, false, "", fmt.Errorf("invalid persistence mode %q", mode)
@@ -975,7 +1056,7 @@ func NormalizePersistenceMode(current Issue, mode PersistenceMode) (bool, bool, 
 		return false, false, "", fmt.Errorf("storage class ephemeral requires ephemeral or no_history")
 	}
 	if current.StorageClass == StorageClassUnversioned && mode != PersistenceModePersistent {
-		return false, false, "", fmt.Errorf("cannot move unversioned record to persistence mode %q", mode)
+		return false, false, "", fmt.Errorf("%w to persistence mode %q", ErrUnversionedWispMove, mode)
 	}
 	if persistenceMode(current) == mode {
 		return current.Ephemeral, current.NoHistory, current.StorageClass, nil
@@ -1142,6 +1223,35 @@ type IssueWithCounts struct {
 	DependentCount  int     `json:"dependent_count"`
 	CommentCount    int     `json:"comment_count"`
 	Parent          *string `json:"parent,omitempty"` // Computed parent from parent-child dep (bd-ym8c)
+
+	// CommentsOmitted is the list row's half of the ga-clgh contract
+	// IssueDetails.CommentsOmitted states for the detail view, and it is set
+	// under exactly the same rule: true only when CommentCount is nonzero AND
+	// the embedded Issue.Comments was left nil, never alongside a populated
+	// slice and never on a zero count.
+	//
+	// A LIST ROW NEEDS IT MORE THAN A DETAIL VIEW DOES (be-73x). A caller
+	// grepping a whole listing for a phrase that lives in a comment gets a
+	// plausible NON-ZERO answer with the matching rows missing — the shape
+	// that invites no suspicion at all, unlike an empty result. Without this
+	// marker nothing in the page says the text was never in scope.
+	//
+	// The comment BODIES ride on the embedded Issue.Comments, which already
+	// carries the `comments` key for export/import; this type adds only the
+	// marker, so a row that was hydrated and a row that was not are told
+	// apart by a field rather than by the caller remembering what it asked
+	// for.
+	//
+	// WHICH SURFACES SET IT, because this type is shared by more than the
+	// listing and an absent marker means different things on them. It is set
+	// by the page epilogue behind issueops.Reader.List — `bd list --json` on
+	// both routes, its --ready arm included, `bd search --json` on every
+	// route, and GET /v0/beads/issues. It is
+	// NOT set by Reader.Ready (GET /v0/beads/ready) or by the claim response
+	// that returns this type, so on those an absent marker says nothing about
+	// whether a row's comments exist: read comment_count there. Extending the
+	// marker to them is be-ozp.
+	CommentsOmitted *bool `json:"comments_omitted,omitempty"`
 }
 
 // IssueDetails extends Issue with labels, dependencies, dependents, and comments.
@@ -1168,6 +1278,51 @@ type IssueDetails struct {
 	// "no comments" — both wrong (ga-clgh). Never set alongside a populated
 	// Comments slice or a zero count: a true empty stays plain omission.
 	CommentsOmitted *bool `json:"comments_omitted,omitempty"`
+
+	// GatedBy names the gates actively blocking this issue — the derived
+	// GATED decoration `bd show` renders in its header, as data. ADDITIVE and
+	// omitted when empty: nothing else on this view changes shape, and the
+	// stored status stays whatever it is (an open issue an open gate blocks
+	// still reads "open" here). The rule is types.GatesHolding — the gate
+	// clause of the readiness query's is_blocked column, subject half
+	// included — so a nonempty list means `bd ready` withholds the issue on a
+	// gate's account, and a closed or pinned issue carries no gated_by at all.
+	// The converse does not hold: only the issue's own edges count, so a child
+	// of a gated parent, which `bd ready` withholds through the parent-child
+	// leg, carries no gated_by.
+	GatedBy []GateRef `json:"gated_by,omitempty"`
+
+	// UnresolvableDependencies / UnresolvableDependents count the edges
+	// DependencyCount / DependentCount include that the Dependencies /
+	// Dependents slices could not represent, because the issue on the far
+	// end has no row in this database: a cross-repo id or an `external:`
+	// reference, both of which live in the one dependency target column
+	// carrying no foreign key into issues (issueops.IsExternalDepTarget).
+	// The edge is real and correctly stored; only its far end is
+	// unreachable from here, so the enumeration drops it while the count
+	// keeps it.
+	//
+	// Without these, the count is a number with no referent (be-lpi): a
+	// caller reads `dependency_count: 1` beside `dependencies: null`,
+	// finds nothing in `bd dep list`, and concludes the count is phantom.
+	// It is not — `bd dep list <id> <id>` shows the raw edge record.
+	//
+	// Set only when the slice was actually READ and came back short. A
+	// failed or skipped read leaves them unset, because "could not be
+	// represented" and "was never fetched" must not collapse into one
+	// signal — the same distinction CommentsOmitted draws above.
+	// UnresolvableDependents is therefore set only under
+	// DetailOptions.IncludeDependents, where the rows are collected.
+	//
+	// That gate is on this field only, and the two planes disagree because of
+	// it: `bd show` in text mode reads dependents unconditionally, so a human
+	// always sees the inbound notice, while a --json caller sees this field
+	// only with --include-dependents (itself --json only). Recorded rather
+	// than fixed — the per-field restriction above is the correct half, and
+	// suppressing the text notice to match would lose a disclosure that is
+	// already sound.
+	UnresolvableDependencies *int64 `json:"unresolvable_dependencies,omitempty"`
+	UnresolvableDependents   *int64 `json:"unresolvable_dependents,omitempty"`
 
 	// Epic progress fields (populated only for issue_type=epic with children)
 	EpicTotalChildren  *int  `json:"epic_total_children,omitempty"`
@@ -1221,11 +1376,29 @@ func RevisionToken(v int64) string {
 
 // ParseRevisionToken reads a wire revision token back to the internal int64.
 //
-// It accepts exactly what RevisionToken emits. A caller must echo the token a
-// response carried rather than compose one, so anything else is a client that
-// invented a value, and reporting that as a parse failure is more useful than
-// guessing at it.
+// It accepts exactly what RevisionToken emits — the exact inverse of
+// strconv.FormatInt — and nothing strconv.ParseInt alone would additionally
+// tolerate: no leading "+" (FormatInt never emits one), no leading zero on
+// any digit string longer than one character (FormatInt never pads "7" out
+// to "007", positive or negative), and never "-0" (FormatInt(0, 10) is "0",
+// never "-0"). A caller must echo the token a response carried rather than
+// compose one, so anything else is a client that invented a value, and
+// reporting that as a parse failure is more useful than guessing at it.
 func ParseRevisionToken(s string) (int64, error) {
+	if strings.HasPrefix(s, "+") {
+		return 0, fmt.Errorf("revision token %q: leading \"+\" is not a token RevisionToken ever emits", s)
+	}
+	digits := s
+	negative := strings.HasPrefix(s, "-")
+	if negative {
+		digits = s[1:]
+	}
+	if negative && digits == "0" {
+		return 0, fmt.Errorf("revision token %q: \"-0\" is not a token RevisionToken ever emits", s)
+	}
+	if len(digits) > 1 && digits[0] == '0' {
+		return 0, fmt.Errorf("revision token %q: a leading zero is not a token RevisionToken ever emits", s)
+	}
 	return strconv.ParseInt(s, 10, 64)
 }
 
@@ -1238,6 +1411,27 @@ func ParseRevisionToken(s string) (int64, error) {
 // from a right one. The caller fills in labels, edges and counts afterwards.
 func NewIssueDetails(issue Issue) *IssueDetails {
 	return &IssueDetails{Issue: issue, Revision: RevisionToken(issue.RowVersion)}
+}
+
+// BatchGetIssue is one entry of BatchGetIssuesResult.issues: a resolved issue
+// plus its current revision token, projected the same way IssueDetails
+// projects one off the embedded Issue's RowVersion (RowVersion is json:"-",
+// so the Issue body alone cannot carry it). Hydration for a batch-get issue
+// is LABELS ONLY — no dependencies, dependents or comments; a caller wanting
+// those reads GET /v0/beads/issues/{id} (IssueDetails) instead.
+//
+// NewBatchGetIssue is the only door, for the same reason NewIssueDetails is:
+// a struct literal with an unset Revision serializes a "0" indistinguishable
+// from a legacy migration-0054 row.
+type BatchGetIssue struct {
+	Issue
+	Revision string `json:"revision"`
+}
+
+// NewBatchGetIssue projects issue with its wire-visible revision token, the
+// BatchGetIssuesResult.issues counterpart of NewIssueDetails.
+func NewBatchGetIssue(issue Issue) BatchGetIssue {
+	return BatchGetIssue{Issue: issue, Revision: RevisionToken(issue.RowVersion)}
 }
 
 // DependencyType categorizes the relationship
@@ -1654,10 +1848,20 @@ const (
 	EventDependencyRemoved EventType = "dependency_removed"
 	EventLabelAdded        EventType = "label_added"
 	EventLabelRemoved      EventType = "label_removed"
-	EventCompacted         EventType = "compacted"
+	// EventLabelRenamed records a bulk `bd label rename` sweep landing on one
+	// issue or wisp. old_value/new_value hold the old and new label strings.
+	// Unlike EventLabelAdded/EventLabelRemoved, one rename produces exactly
+	// one of these per touched row, never a paired add+remove.
+	EventLabelRenamed EventType = "label_renamed"
+	EventCompacted    EventType = "compacted"
 	// EventLeaseReclaimed records that a stale lease was reverted to ready by
 	// bd reclaim (dead-worker recovery). old_value is the previous owner.
 	EventLeaseReclaimed EventType = "lease_reclaimed"
+	// EventLeaseRearmed records that a heartbeat re-armed a claim that held no
+	// lease row (a claim hand-doled through a generic update): the lease was
+	// granted and row_lock reminted. new_value is the holder. A plain lease
+	// refresh records no event.
+	EventLeaseRearmed EventType = "lease_rearmed"
 )
 
 // ProvenanceEvent is one entry in the append-only provenance log: a typed
@@ -1717,13 +1921,26 @@ type ReadyExplanation struct {
 }
 
 // ReadyItem explains why a specific issue is ready for work.
+//
+// The issue's blocking dependencies (blocks, conditional-blocks, waits-for)
+// are sorted by the target's status as the caller supplied it in blockerMap:
+// ResolvedBlockers holds closed targets, PinnedDependencies holds pinned ones
+// (a pinned bead never blocks, so a dependency on one never fenced this
+// issue — it is reported as what it is, not as a blocker that was resolved),
+// and OpenDependencies holds targets in any other status — a blocks edge
+// here means the ready set and the edge disagree (foreign-prefix ids, #6066);
+// a waits-for edge here is the ordinary spawner-still-open case. A target the
+// caller did not supply a status for is counted under ResolvedBlockers, the
+// ready set's own verdict being the only word available.
 type ReadyItem struct {
 	*Issue
-	Reason           string   `json:"reason"`
-	ResolvedBlockers []string `json:"resolved_blockers"`
-	DependencyCount  int      `json:"dependency_count"`
-	DependentCount   int      `json:"dependent_count"`
-	Parent           *string  `json:"parent,omitempty"`
+	Reason             string   `json:"reason"`
+	ResolvedBlockers   []string `json:"resolved_blockers"`
+	PinnedDependencies []string `json:"pinned_dependencies,omitempty"`
+	OpenDependencies   []string `json:"open_dependencies,omitempty"`
+	DependencyCount    int      `json:"dependency_count"`
+	DependentCount     int      `json:"dependent_count"`
+	Parent             *string  `json:"parent,omitempty"`
 }
 
 // BlockedItem explains why a specific issue is blocked.
@@ -1766,18 +1983,29 @@ func BuildReadyExplanation(
 			counts = &DependencyCounts{}
 		}
 
-		// Find resolved blockers (closed issues that this depended on)
-		var resolvedBlockers []string
-		reason := "no blocking dependencies"
+		// Sort the blocking dependencies by the target's status. Before this
+		// every blocking edge of a ready issue was printed as a resolved
+		// blocker, which is wrong for a pinned target: the ready query skips
+		// pinned targets exactly as it skips closed ones, so a dependency on
+		// a pinned bead never blocked anything and nothing about it was
+		// resolved. --explain is the one place a reader can see that.
+		var resolvedBlockers, pinnedDeps, openDeps []string
 		deps := allDeps[issue.ID]
 		for _, dep := range deps {
-			if dep.Type == DepBlocks || dep.Type == DepConditionalBlocks || dep.Type == DepWaitsFor {
+			if dep.Type != DepBlocks && dep.Type != DepConditionalBlocks && dep.Type != DepWaitsFor {
+				continue
+			}
+			target, known := blockerMap[dep.DependsOnID]
+			switch {
+			case !known || target == nil || target.Status == StatusClosed:
 				resolvedBlockers = append(resolvedBlockers, dep.DependsOnID)
+			case target.Status == StatusPinned:
+				pinnedDeps = append(pinnedDeps, dep.DependsOnID)
+			default:
+				openDeps = append(openDeps, dep.DependsOnID)
 			}
 		}
-		if len(resolvedBlockers) > 0 {
-			reason = fmt.Sprintf("%d blocker(s) resolved", len(resolvedBlockers))
-		}
+		reason := readyReason(len(resolvedBlockers), len(pinnedDeps), len(openDeps))
 
 		// Compute parent
 		var parent *string
@@ -1789,12 +2017,14 @@ func BuildReadyExplanation(
 		}
 
 		readyItems = append(readyItems, ReadyItem{
-			Issue:            issue,
-			Reason:           reason,
-			ResolvedBlockers: resolvedBlockers,
-			DependencyCount:  counts.DependencyCount,
-			DependentCount:   counts.DependentCount,
-			Parent:           parent,
+			Issue:              issue,
+			Reason:             reason,
+			ResolvedBlockers:   resolvedBlockers,
+			PinnedDependencies: pinnedDeps,
+			OpenDependencies:   openDeps,
+			DependencyCount:    counts.DependencyCount,
+			DependentCount:     counts.DependentCount,
+			Parent:             parent,
 		})
 	}
 
@@ -1840,6 +2070,28 @@ func BuildReadyExplanation(
 	}
 }
 
+// readyReason words a ReadyItem's Reason from the three dependency counts.
+// "no blocking dependencies" is kept verbatim for the no-edge case; a resolved
+// count keeps the historical "N blocker(s) resolved" lead so scripts that
+// match on it still do; pinned and open counts are appended as clauses rather
+// than folded into the resolved count.
+func readyReason(resolved, pinned, open int) string {
+	var parts []string
+	if resolved > 0 {
+		parts = append(parts, fmt.Sprintf("%d blocker(s) resolved", resolved))
+	}
+	if pinned > 0 {
+		parts = append(parts, fmt.Sprintf("%d pinned dependency(ies), never blocking", pinned))
+	}
+	if open > 0 {
+		parts = append(parts, fmt.Sprintf("%d open dependency(ies), not blocking", open))
+	}
+	if len(parts) == 0 {
+		return "no blocking dependencies"
+	}
+	return strings.Join(parts, "; ")
+}
+
 // TreeNode represents a node in a dependency tree
 type TreeNode struct {
 	Issue
@@ -1882,6 +2134,21 @@ type Statistics struct {
 	PinnedIssues            int     `json:"pinned_issues"`   // Persistent issues
 	EpicsEligibleForClosure int     `json:"epics_eligible_for_closure"`
 	AverageLeadTime         float64 `json:"average_lead_time_hours"`
+
+	// GateIssues and TemplateIssues count rows the default `bd list` suppresses
+	// on account of what they are. They are already part of TotalIssues, which
+	// counts the database rather than the listing; they are broken out so the
+	// two commands can be reconciled instead of silently disagreeing.
+	//
+	// THE POPULATION IS EVERY STATUS, exactly TotalIssues': a CLOSED gate is
+	// counted in GateIssues, and the two overlap the status buckets the way
+	// PinnedIssues does rather than partitioning them. They are not scoped to
+	// the rows a default listing shows. That is why `bd status` prints --all
+	// beside the type flag - the listing's status exclusion is independent of
+	// its type exclusions, so the type flag alone would not reveal every row
+	// counted here (cmd/bd/status.go).
+	GateIssues     int `json:"gate_issues"`
+	TemplateIssues int `json:"template_issues"`
 }
 
 // IssueFilter is used to filter issue queries
@@ -2051,7 +2318,12 @@ type IssueFilter struct {
 	SkipWisps  bool // Q2: skip wisps table merge entirely (for callers that never return ephemeral results)
 	NoIDShrink bool // Q3: force Pattern A (full 47-col scan) even when Limit > 0
 
-	Offset   int
+	Offset int
+	// SortBy and SortDesc are honored by SearchIssues, SearchIssueIDs, and
+	// SearchIssueSummaries alike. All three sort implementations (SQL ORDER BY
+	// and the Go-side merge comparators) must order identically for a given
+	// SortBy value, or a post-merge limit cut can keep a different row set
+	// than SQL selected.
 	SortBy   string
 	SortDesc bool
 
@@ -2129,6 +2401,13 @@ func (s SortPolicy) IsValid() bool {
 type ReclaimedLease struct {
 	ID            string `json:"id"`
 	PreviousOwner string `json:"previous_owner"`
+
+	// Revision is the fresh RevisionToken minted for this issue's row by the
+	// same UPDATE that reverted its lease — the one this package's
+	// RevisionToken/ParseRevisionToken pair encodes, the same wire shape as
+	// IssueDetails.Revision. A caller that re-fetches after a reclaim sees a
+	// different token than one that raced it.
+	Revision string `json:"revision"`
 }
 
 // ReclaimFilter scopes which stale-lease issues bd reclaim may revert. The

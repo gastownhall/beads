@@ -468,7 +468,7 @@ func TestLegacyGuardUsesSelectedTargetSharedServerConfig(t *testing.T) {
 					"BD_DISABLE_METRICS=1",
 					"BD_DISABLE_EVENT_FLUSH=1",
 					"BEADS_DOLT_AUTO_START=0",
-					"BEADS_DOLT_SERVER_PORT=59999",
+					"BEADS_DOLT_SERVER_PORT="+strconv.Itoa(closedLoopbackPort(t)),
 					"BEADS_DOLT_SHARED_SERVER=0",
 					"HOME="+t.TempDir(),
 				)
@@ -490,7 +490,7 @@ func TestLegacyGuardUsesSelectedTargetSharedServerConfig(t *testing.T) {
 
 // TestLegacyGuardAdmitsConfigYamlServerWorkspace runs the real binary against
 // the workspace shape gc provisions — `dolt.mode: server` in
-// .beads/config.yaml, a local .beads/dolt root, a metadata.json that names no
+// .beads/config.yaml, a populated local .beads/dolt root, a metadata.json that names no
 // dolt_mode — and pins that the guard no longer calls it legacy. The in-process
 // guard tests bind the workspace config themselves; only a subprocess proves
 // that PersistentPreRunE's own binding puts the selected workspace's
@@ -518,9 +518,7 @@ func TestLegacyGuardAdmitsConfigYamlServerWorkspace(t *testing.T) {
 			repoDir := t.TempDir()
 			initGitRepo(t, repoDir)
 			beadsDir := filepath.Join(repoDir, ".beads")
-			if err := os.MkdirAll(filepath.Join(beadsDir, "dolt"), 0o700); err != nil {
-				t.Fatal(err)
-			}
+			populateLegacyDoltRoot(t, beadsDir)
 			writeFile(t, filepath.Join(beadsDir, "metadata.json"), []byte(`{"backend":"dolt","dolt_database":"hq"}`))
 			writeFile(t, filepath.Join(beadsDir, "config.yaml"), []byte("dolt:\n  mode: server\n  auto-start: false\n"))
 			if tt.version != "" {
@@ -535,7 +533,7 @@ func TestLegacyGuardAdmitsConfigYamlServerWorkspace(t *testing.T) {
 				"BD_DISABLE_METRICS=1",
 				"BD_DISABLE_EVENT_FLUSH=1",
 				"BEADS_DOLT_AUTO_START=0",
-				"BEADS_DOLT_SERVER_PORT=59999",
+				"BEADS_DOLT_SERVER_PORT="+strconv.Itoa(closedLoopbackPort(t)),
 				"BEADS_DOLT_SHARED_SERVER=0",
 				"HOME="+t.TempDir(),
 			)

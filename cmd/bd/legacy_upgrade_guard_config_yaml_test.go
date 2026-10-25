@@ -31,7 +31,7 @@ func bindSelectedWorkspaceConfig(t *testing.T, beadsDir string) {
 }
 
 // writeDoltRootWorkspace lays down the ambiguous shape the guard classifies: a
-// .beads directory that owns a local Dolt root, plus whatever metadata.json,
+// .beads directory that owns a populated local Dolt root, plus whatever metadata.json,
 // config.yaml and version witness the case needs. An empty string means "do not
 // write this file at all".
 func writeDoltRootWorkspace(t *testing.T, metadata, configYaml, version string) string {
@@ -52,9 +52,7 @@ func writeDoltRootWorkspace(t *testing.T, metadata, configYaml, version string) 
 			t.Fatal(err)
 		}
 	}
-	if err := os.Mkdir(filepath.Join(beadsDir, "dolt"), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	populateLegacyDoltRoot(t, beadsDir)
 	bindSelectedWorkspaceConfig(t, beadsDir)
 	return beadsDir
 }

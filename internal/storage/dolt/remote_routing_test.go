@@ -19,7 +19,7 @@ func TestEnsureMatchingCLIRemoteSurfacesValidationErrors(t *testing.T) {
 		database: "beads",
 	}
 
-	err := store.ensureMatchingCLIRemote("origin", "ftp://server/path")
+	err := store.ensureMatchingCLIRemote("origin", "ftp://server/path", "")
 	if err == nil {
 		t.Fatal("expected invalid remote URL to be returned as an error")
 	}
@@ -201,8 +201,8 @@ func TestPrepareCLIRouteForGitProtocolColdStartWindow(t *testing.T) {
 		// dolt_remotes.
 		mock.MatchExpectationsInOrder(false)
 		for i := 0; i < 4; i++ {
-			mock.ExpectQuery("SELECT name, url FROM dolt_remotes").
-				WillReturnRows(sqlmock.NewRows([]string{"name", "url"}))
+			mock.ExpectQuery("SELECT name, url, params FROM dolt_remotes").
+				WillReturnRows(sqlmock.NewRows([]string{"name", "url", "params"}))
 		}
 		store := &DoltStore{
 			serverMode: true,

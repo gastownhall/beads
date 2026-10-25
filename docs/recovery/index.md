@@ -10,6 +10,7 @@ This section provides step-by-step recovery procedures for common Beads issues. 
 | Issue | Symptoms | Runbook |
 |-------|----------|---------|
 | Schema Version Mismatch | `bd` refuses with `schema version mismatch: database is at vNN, binary knows up to vNN` | [Accidental v1.2.1 Release](/recovery/accidental-1-2-1-release) |
+| Going Back from v65 | A database bd 1.2.x migrated to v65 has to work with bd 1.1.2 again, rebuilt from a full export | [Un-migrate from Schema v65](/recovery/unmigrate-schema-v65) |
 | Init Safety Refusals | `bd init` or `bd dolt` refuses with a pattern code like `pk-fork-refused` | [Recovery Playbooks](/recovery/init-safety) |
 | Database Corruption | Database errors, missing data | [Database Corruption](/recovery/database-corruption) |
 | Merge Conflicts | Dolt conflicts during sync | [Merge Conflicts](/recovery/merge-conflicts) |

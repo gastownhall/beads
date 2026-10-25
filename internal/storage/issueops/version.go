@@ -42,7 +42,7 @@ func CheckVersionInTx(ctx context.Context, tx DBTX, id string, expected int64) e
 		return fmt.Errorf("failed to read row version for %s: %w", id, err)
 	}
 	if current.Int64 != expected {
-		return fmt.Errorf("%w: expected %d, got %d", storage.ErrVersionMismatch, expected, current.Int64)
+		return &storage.VersionMismatchError{Expected: expected, Current: current.Int64}
 	}
 	return nil
 }

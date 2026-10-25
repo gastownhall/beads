@@ -25,11 +25,43 @@ func newBlockedStateResultMock(t *testing.T) (sqlmock.Sqlmock, DBTX) {
 	return mock, db
 }
 
+// expectBatchExogeneityRead is the batch-scoped exogeneity read every batched
+// pass now runs before its statements: first the parent-kind guard, and then
+// one read per kind the batch actually names. Answering the guard with no
+// parents of either kind is also the pin on the guard itself — a batch with no
+// parent-child row must not run either read.
+//
+// Ordered before the execs because sqlmock is ordered and the runner reads
+// once per batch, then binds the ids into both statements.
+func expectBatchExogeneityRead(mock sqlmock.Sqlmock, depTable string) {
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(d.depends_on_issue_id), COUNT(d.depends_on_wisp_id)")).
+		WillReturnRows(sqlmock.NewRows([]string{"issue_parents", "wisp_parents"}).AddRow(0, 0))
+}
+
+// expectOwnEdgesProbe expects planRecomputeInTx's probe of depTable and
+// answers that every id in withEdges has a dependency row of its own.
+func expectOwnEdgesProbe(mock sqlmock.Sqlmock, depTable string, withEdges ...string) {
+	rows := sqlmock.NewRows([]string{"issue_id"})
+	for _, id := range withEdges {
+		rows.AddRow(id)
+	}
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT DISTINCT issue_id FROM " + depTable + " WHERE issue_id IN")).
+		WillReturnRows(rows)
+}
+
 func expectBlockedStatePass(mock sqlmock.Sqlmock, table, alias string, mark, unmark driver.Result) {
+	expectBatchExogeneityRead(mock, blockedSpecFor(table).depTable)
 	mock.ExpectExec(regexp.QuoteMeta("UPDATE " + table + " " + alias + " SET " + alias + ".is_blocked = 1")).
 		WillReturnResult(mark)
 	mock.ExpectExec(regexp.QuoteMeta("UPDATE " + table + " " + alias + " SET " + alias + ".is_blocked = 0")).
 		WillReturnResult(unmark)
+}
+
+func blockedSpecFor(table string) blockedTableSpec {
+	if table == "wisps" {
+		return wispsBlockedSpec
+	}
+	return issuesBlockedSpec
 }
 
 func TestRecomputeIsBlockedInTxWithResult(t *testing.T) {
@@ -83,6 +115,7 @@ func TestRunMarkUnmarkBatchedInTxPropagatesRowsAffectedErrors(t *testing.T) {
 	for _, phase := range []string{"mark", "unmark"} {
 		t.Run(phase, func(t *testing.T) {
 			mock, db := newBlockedStateResultMock(t)
+			expectBatchExogeneityRead(mock, "dependencies")
 			if phase == "mark" {
 				mock.ExpectExec(regexp.QuoteMeta("UPDATE issues i SET i.is_blocked = 1")).
 					WillReturnResult(sqlmock.NewErrorResult(sentinel))
@@ -94,11 +127,47 @@ func TestRunMarkUnmarkBatchedInTxPropagatesRowsAffectedErrors(t *testing.T) {
 			}
 
 			_, err := runMarkUnmarkBatchedInTx(
-				context.Background(), db, markBlockedTemplateForIssues(), unmarkBlockedTemplateForIssues(), []string{"issue-1"},
+				context.Background(), db, issuesBlockedSpec, []string{"issue-1"},
 			)
 			if !errors.Is(err, sentinel) {
 				t.Fatalf("err = %v, want rows-affected error", err)
 			}
 		})
+	}
+}
+
+// TestRecomputeIsBlockedSkipsUnionForIDsWithoutEdges pins the no-edge
+// shortcut a create asks for (the single-id cases above pin that nobody else
+// pays its probe): an id with no dependency row of its own cannot be in the scoped
+// should-be-blocked union, so it never reaches the union statements. It is
+// cleared by one plain unmark on the first pass, after the chunk's union
+// statements (which must see its pre-pass is_blocked, as the chunk's own
+// unmark once did), and not revisited on later passes.
+func TestRecomputeIsBlockedSkipsUnionForIDsWithoutEdges(t *testing.T) {
+	mock, db := newBlockedStateResultMock(t)
+	expectOwnEdgesProbe(mock, "dependencies", "issue-2")
+	// Pass 1: the union statements over the id with edges, then the plain
+	// unmark over the edgeless ids.
+	expectBatchExogeneityRead(mock, "dependencies")
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE issues i SET i.is_blocked = 1")).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE issues i SET i.is_blocked = 0")).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE issues t SET t.is_blocked = 0, t.updated_at = t.updated_at")).
+		WithArgs("issue-1", "issue-3").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	// Pass 2: only the id with edges.
+	expectBatchExogeneityRead(mock, "dependencies")
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE issues i SET i.is_blocked = 1")).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE issues i SET i.is_blocked = 0")).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	result, err := recomputeIsBlockedInTxWithResult(context.Background(), db, []string{"issue-1", "issue-2", "issue-3"}, nil, true)
+	if err != nil {
+		t.Fatalf("RecomputeIsBlockedInTxWithResult: %v", err)
+	}
+	if !result.IssueRowsChanged || result.WispRowsChanged {
+		t.Fatalf("result = %+v, want issue change only", result)
 	}
 }

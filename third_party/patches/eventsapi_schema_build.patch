@@ -1,0 +1,120 @@
+diff -ruN a/BUILD.bazel b/BUILD.bazel
+--- a/BUILD.bazel	2026-09-21 23:58:53.884394811 +0000
++++ b/BUILD.bazel	2026-09-21 23:58:53.894171166 +0000
+@@ -1,50 +1 @@
+-load("@npm//:defs.bzl", "npm_link_all_packages")
+-load("@npm//:ts-protoc-gen/package_json.bzl", "bin")
+-load("@rules_pkg//:pkg.bzl", "pkg_tar")
+-load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
+-load(":defs.bzl", "is_windows")
+-
+-is_windows(name = "is_windows")
+-
+-npm_link_all_packages(
+-    name = "node_modules",
+-)
+-
+-bin.protoc_gen_ts_binary(
+-    name = "protoc-gen-ts",
+-)
+-
+-filegroup(
+-    name = "go_srcs_files",
+-    srcs = [
+-        "//dolt/services/eventsapi/v1alpha1:eventsapi_go_proto",
+-    ],
+-    output_group = "go_generated_srcs",
+-)
+-
+-pkg_tar(
+-    name = "srcs",
+-    srcs = [
+-        ":go_srcs_files",
+-        "//dolt/services/eventsapi/v1alpha1:eventsapi_ts_proto",
+-    ],
+-    mode = "0644",
+-    remap_paths = {
+-        "dolt/services/eventsapi/v1alpha1/eventsapi_go_proto_/github.com/dolthub/eventsapi_schema": "/",
+-    },
+-    strip_prefix = "./",
+-)
+-
+-sh_binary(
+-    name = "update",
+-    srcs = ["update.sh"],
+-    args = [
+-        "$(rlocationpath :srcs)",
+-    ],
+-    data = [
+-        ":srcs",
+-    ],
+-    deps = [
+-        "@bazel_tools//tools/bash/runfiles",
+-    ],
+-)
++package(default_visibility = ["//visibility:public"])
+diff -ruN a/dolt/services/eventsapi/v1alpha1/BUILD.bazel b/dolt/services/eventsapi/v1alpha1/BUILD.bazel
+--- a/dolt/services/eventsapi/v1alpha1/BUILD.bazel	2026-09-21 23:58:53.889887856 +0000
++++ b/dolt/services/eventsapi/v1alpha1/BUILD.bazel	2026-09-22 00:00:59.862349475 +0000
+@@ -1,26 +1,32 @@
+-load("@rules_go//proto:def.bzl", "go_proto_library")
+-load("@protobuf//bazel:proto_library.bzl", "proto_library")
+-load("//:defs.bzl", "typescript_proto_library")
++load("@io_bazel_rules_go//go:def.bzl", "go_library")
+ 
+ package(default_visibility = ["//visibility:public"])
+ 
+-proto_library(
+-    name = "eventsapi_proto",
+-    srcs = glob(["*.proto"]),
+-    deps = [
+-        "@protobuf//:duration_proto",
+-        "@protobuf//:timestamp_proto",
+-    ],
+-)
+-
+-go_proto_library(
++# Patched for Bazel (Bzlmod): the shipped proto/BUILD files reference
++# WORKSPACE-era apparent names (@rules_go, @protobuf, @npm) that are not
++# visible from go_deps extension repos under Bzlmod. The repo ships
++# pre-generated *.pb.go files, so a plain go_library replaces the
++# proto toolchain entirely.
++go_library(
+     name = "eventsapi_go_proto",
+-    compilers = ["@rules_go//proto:go_grpc"],
++    srcs = [
++        "client_event.pb.go",
++        "event_constants.pb.go",
++    ],
+     importpath = "github.com/dolthub/eventsapi_schema/dolt/services/eventsapi/v1alpha1",
+-    proto = ":eventsapi_proto",
++    visibility = ["//visibility:public"],
++    deps = [
++        "@org_golang_google_grpc//:grpc",
++        "@org_golang_google_grpc//codes:codes",
++        "@org_golang_google_grpc//status:status",
++        "@org_golang_google_protobuf//reflect/protoreflect:protoreflect",
++        "@org_golang_google_protobuf//runtime/protoimpl:protoimpl",
++        "@org_golang_google_protobuf//types/known/durationpb:durationpb",
++        "@org_golang_google_protobuf//types/known/timestamppb:timestamppb",
++    ],
+ )
+ 
+-typescript_proto_library(
+-    name = "eventsapi_ts_proto",
+-    proto = ":eventsapi_proto",
++alias(
++    name = "v1alpha1",
++    actual = ":eventsapi_go_proto",
+ )
+diff -ruN a/tools/BUILD.bazel b/tools/BUILD.bazel
+--- a/tools/BUILD.bazel	2026-09-21 23:58:53.892261249 +0000
++++ b/tools/BUILD.bazel	2026-09-21 23:58:53.898171172 +0000
+@@ -1,6 +1 @@
+-load("@bazelrc-preset.bzl", "bazelrc_preset")
+-
+-bazelrc_preset(
+-    name = "preset",
+-    strict = True,
+-)
++package(default_visibility = ["//visibility:public"])

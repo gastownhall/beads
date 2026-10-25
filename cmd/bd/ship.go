@@ -127,7 +127,7 @@ func runShip(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	if err := store.AddLabel(ctx, issue.ID, providesLabel, actor); err != nil {
+	if err := store.AddLabel(ctx, issue.ID, providesLabel, currentActor()); err != nil {
 		return HandleErrorRespectJSON("adding label: %v", err)
 	}
 

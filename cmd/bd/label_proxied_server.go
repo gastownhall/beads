@@ -132,6 +132,34 @@ func runLabelListAllProxiedServer(ctx context.Context) error {
 	return nil
 }
 
+// runLabelRenameProxiedServer is the proxied-server counterpart of
+// DoltStore/EmbeddedDoltStore.RenameLabel. It calls the same
+// domain.LabelUseCase.RenameLabel every proxied write reaches through
+// uw.LabelUseCase(), which in turn delegates to issueops.RenameLabelInTx -
+// the identical merge semantics, same-name refusal and one EventLabelRenamed
+// per touched issue that the direct route produces. A prior version of this
+// route fanned each issue out into a per-issue AddLabel-then-RemoveLabel
+// pair, journaling label_added/label_removed instead of label_renamed; that
+// divergence is what this delegation replaces.
+func runLabelRenameProxiedServer(ctx context.Context, oldLabel, newLabel string) (renamed, merged int, err error) {
+	if uowProvider == nil {
+		return 0, 0, HandleError("proxied-server UOW provider not initialized")
+	}
+
+	err = uow.RunTx(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (string, error) {
+		var rerr error
+		renamed, merged, _, rerr = uw.LabelUseCase().RenameLabel(ctx, oldLabel, newLabel, currentActor()) //nolint:forbidigo // bulk rename; no role serves it, and Patch.Labels would reintroduce the per-issue add/remove event divergence this delegation replaced
+		if rerr != nil {
+			return "", fmt.Errorf("rename label '%s' -> '%s': %w", oldLabel, newLabel, rerr)
+		}
+		if renamed == 0 {
+			return "", nil
+		}
+		return fmt.Sprintf("bd: label rename '%s' -> '%s' (%d issues)", oldLabel, newLabel, renamed), nil
+	})
+	return renamed, merged, err
+}
+
 func runLabelPropagateProxiedServer(ctx context.Context, args []string) error {
 	label := strings.TrimSpace(args[1])
 	if label == "" {
@@ -177,13 +205,16 @@ func runLabelPropagateProxiedServer(ctx context.Context, args []string) error {
 		// keeps both is issueops.BatchApplier.ApplyBatch with one ItemUpdate per
 		// child carrying this same label patch, and it is blocked on a cmd/bd
 		// accessor for that role. That is the follow-up this waiver names
-		// (ga-2ltro.12); it is the last one on this list that WRITES.
+		// (ga-2ltro.12); it is the last one on this list that WRITES. It also
+		// needs a template stand-down first: UpdateItem has no AllowTemplate, so
+		// an ItemUpdate refuses the template children this loop labels today
+		// (bd-jkp9v3).
 		for _, child := range children {
 			var e error
 			if child.Ephemeral {
-				e = uw.LabelUseCase().AddWispLabel(ctx, child.ID, label, actor) //nolint:forbidigo // atomic N-child fan-out; awaits a BatchApplier accessor
+				e = uw.LabelUseCase().AddWispLabel(ctx, child.ID, label, currentActor()) //nolint:forbidigo // atomic N-child fan-out; awaits a BatchApplier accessor
 			} else {
-				e = uw.LabelUseCase().AddLabel(ctx, child.ID, label, actor) //nolint:forbidigo // atomic N-child fan-out; awaits a BatchApplier accessor
+				e = uw.LabelUseCase().AddLabel(ctx, child.ID, label, currentActor()) //nolint:forbidigo // atomic N-child fan-out; awaits a BatchApplier accessor
 			}
 			if e != nil {
 				return "", fmt.Errorf("add label '%s' on %s: %w", label, child.ID, e)

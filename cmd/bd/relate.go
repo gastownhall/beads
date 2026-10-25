@@ -111,7 +111,7 @@ func runRelate(cmd *cobra.Command, args []string) error {
 	}
 	// bd relate is an explicit dependency verb, so it records history like
 	// bd link / bd dep add (EmitEvent); only structural edge wiring stays silent.
-	if err := store.AddDependencyWithOptions(ctx, dep1, actor, storage.DependencyAddOptions{EmitEvent: true}); err != nil {
+	if err := store.AddDependencyWithOptions(ctx, dep1, currentActor(), storage.DependencyAddOptions{EmitEvent: true}); err != nil {
 		return fmt.Errorf("failed to add relates-to %s -> %s: %w", id1, id2, err)
 	}
 	// Add id2 -> id1 (bidirectional)
@@ -120,7 +120,7 @@ func runRelate(cmd *cobra.Command, args []string) error {
 		DependsOnID: id1,
 		Type:        types.DepRelatesTo,
 	}
-	if err := store.AddDependencyWithOptions(ctx, dep2, actor, storage.DependencyAddOptions{EmitEvent: true}); err != nil {
+	if err := store.AddDependencyWithOptions(ctx, dep2, currentActor(), storage.DependencyAddOptions{EmitEvent: true}); err != nil {
 		return fmt.Errorf("failed to add relates-to %s -> %s: %w", id2, id1, err)
 	}
 
@@ -190,11 +190,11 @@ func runUnrelate(cmd *cobra.Command, args []string) error {
 	// bd unrelate is an explicit dependency verb, so it records history
 	// (EmitEvent) like bd dep remove; only structural teardown stays silent.
 	// Remove id1 -> id2
-	if err := store.RemoveDependencyWithOptions(ctx, id1, id2, actor, storage.DependencyRemoveOptions{EmitEvent: true}); err != nil {
+	if err := store.RemoveDependencyWithOptions(ctx, id1, id2, currentActor(), storage.DependencyRemoveOptions{EmitEvent: true}); err != nil {
 		return fmt.Errorf("failed to remove relates-to %s -> %s: %w", id1, id2, err)
 	}
 	// Remove id2 -> id1 (bidirectional)
-	if err := store.RemoveDependencyWithOptions(ctx, id2, id1, actor, storage.DependencyRemoveOptions{EmitEvent: true}); err != nil {
+	if err := store.RemoveDependencyWithOptions(ctx, id2, id1, currentActor(), storage.DependencyRemoveOptions{EmitEvent: true}); err != nil {
 		return fmt.Errorf("failed to remove relates-to %s -> %s: %w", id2, id1, err)
 	}
 

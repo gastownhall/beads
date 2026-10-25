@@ -2,14 +2,19 @@ package dolt
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	sqlmock "github.com/DATA-DOG/go-sqlmock"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
@@ -69,6 +74,68 @@ func TestApplyS3ChecksumEnvToCmd(t *testing.T) {
 	}
 }
 
+func TestSetCmdEnvUsesHostKeySemantics(t *testing.T) {
+	nearCollision := "DOLT_REMOTE_PAſSWORD=near-collision"
+	cmd := exec.Command("dolt", "push") // #nosec G204 -- test command is not executed
+	cmd.Env = []string{
+		"dolt_remote_password=mixed-stale",
+		"DOLT_REMOTE_PASSWORD=canonical-stale",
+		nearCollision,
+		"MALFORMED",
+		`=C:=C:\work`,
+	}
+
+	setCmdEnv(cmd, "DOLT_REMOTE_PASSWORD", "fresh")
+	want := []string{
+		"dolt_remote_password=mixed-stale",
+		nearCollision,
+		"MALFORMED",
+		`=C:=C:\work`,
+		"DOLT_REMOTE_PASSWORD=fresh",
+	}
+	if runtime.GOOS == "windows" {
+		want = want[1:]
+	}
+	if !slices.Equal(cmd.Env, want) {
+		t.Fatalf("setCmdEnv() = %q, want %q on %s", cmd.Env, want, runtime.GOOS)
+	}
+}
+
+func TestRemoteCredentialsChildEnvUsesHostKeySemantics(t *testing.T) {
+	nearCollision := "DOLT_REMOTE_PAſSWORD=near-collision"
+	base := []string{
+		"dolt_remote_user=mixed-stale-user",
+		"DOLT_REMOTE_USER=canonical-stale-user",
+		"dolt_remote_password=mixed-stale-password",
+		"DOLT_REMOTE_PASSWORD=canonical-stale-password",
+		nearCollision,
+		"MALFORMED",
+		`=C:=C:\work`,
+	}
+	original := slices.Clone(base)
+	creds := &remoteCredentials{username: "fresh-user", password: "fresh-password"}
+
+	got := creds.childEnv(base)
+	want := []string{
+		"dolt_remote_user=mixed-stale-user",
+		"dolt_remote_password=mixed-stale-password",
+		nearCollision,
+		"MALFORMED",
+		`=C:=C:\work`,
+		"DOLT_REMOTE_USER=fresh-user",
+		"DOLT_REMOTE_PASSWORD=fresh-password",
+	}
+	if runtime.GOOS == "windows" {
+		want = want[2:]
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("childEnv() = %q, want %q on %s", got, want, runtime.GOOS)
+	}
+	if !slices.Equal(base, original) {
+		t.Fatal("childEnv modified its input")
+	}
+}
+
 func TestPrepareDoltCLITransferCommandAppliesCredentialsAndS3Env(t *testing.T) {
 	t.Setenv(awsResponseChecksumValidationEnv, "when_supported")
 	creds := &remoteCredentials{username: "user", password: "pass"}
@@ -97,6 +164,57 @@ func TestPrepareDoltCLITransferCommandAppliesCredentialsAndS3Env(t *testing.T) {
 	}
 	if gotUser != "user" || gotPassword != "pass" {
 		t.Fatalf("credential env = user:%q password:%q", gotUser, gotPassword)
+	}
+}
+
+func TestPrepareDoltCLITransferCommandAddsRemoteUserFlag(t *testing.T) {
+	tests := []struct {
+		name  string
+		creds *remoteCredentials
+		args  []string
+		want  []string
+	}{
+		{
+			name:  "fetch",
+			creds: &remoteCredentials{username: "alice", password: "secret"},
+			args:  []string{"fetch", "peer"},
+			want:  []string{"dolt", "fetch", "--user", "alice", "peer"},
+		},
+		{
+			name:  "pull",
+			creds: &remoteCredentials{username: "alice", password: "secret"},
+			args:  []string{"pull", "peer", "main"},
+			want:  []string{"dolt", "pull", "--user", "alice", "peer", "main"},
+		},
+		{
+			name:  "push preserves flags",
+			creds: &remoteCredentials{username: "alice", password: "secret"},
+			args:  []string{"push", "--force", "peer", "main"},
+			want:  []string{"dolt", "push", "--user", "alice", "--force", "peer", "main"},
+		},
+		{
+			name:  "no credentials",
+			creds: nil,
+			args:  []string{"fetch", "peer"},
+			want:  []string{"dolt", "fetch", "peer"},
+		},
+		{
+			name:  "password only",
+			creds: &remoteCredentials{password: "secret"},
+			args:  []string{"fetch", "peer"},
+			want:  []string{"dolt", "fetch", "peer"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd, _, cancel := prepareDoltCLITransferCommand(context.Background(), t.TempDir(), tt.creds, false, tt.args...)
+			defer cancel()
+
+			if got := cmd.Args; !slices.Equal(got, tt.want) {
+				t.Fatalf("command args = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -755,6 +873,138 @@ func TestFederationPeerCredentialLifecycleLazyKeyInit(t *testing.T) {
 	}
 }
 
+// A federation_peers row travels with the database; the credential key file
+// does not. A database opened on a second machine therefore holds a peer
+// password this machine's key cannot read, and both server-mode read paths
+// must say so with the remediation instead of surfacing a bare
+// "cipher: message authentication failed" (GH#5085 review). sqlmock stands in
+// for the server, following draincall_regression_test.go, so the branch is
+// pinned without a live Dolt.
+func TestFederationPeerDecryptKeyMismatchNamesTheLocalKey(t *testing.T) {
+	writerKey := make([]byte, 32)
+	for i := range writerKey {
+		writerKey[i] = byte(i)
+	}
+	localKey := make([]byte, 32)
+	for i := range localKey {
+		localKey[i] = byte(i + 1)
+	}
+
+	encrypted, err := encryptWithKey("peerpass", writerKey)
+	if err != nil {
+		t.Fatalf("encryptWithKey() error = %v", err)
+	}
+
+	// beadsDir is set only so the enrichment can resolve the key path it names;
+	// credentialKey is preset, so initCredentialKey never runs and no test
+	// writes a key file. Leaving it empty would make the resolved-path fragment
+	// below vacuous, because filepath.Join("", credentialKeyFile) is the bare
+	// basename the fix replaced (GH#5214 review).
+	beadsDir := t.TempDir()
+	newStore := func(t *testing.T) (*DoltStore, sqlmock.Sqlmock) {
+		t.Helper()
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("sqlmock: %v", err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+		return &DoltStore{db: db, credentialKey: localKey, beadsDir: beadsDir}, mock
+	}
+
+	peerRows := func() *sqlmock.Rows {
+		now := time.Now()
+		return sqlmock.NewRows([]string{
+			"name", "remote_url", "username", "password_encrypted",
+			"sovereignty", "last_sync", "created_at", "updated_at",
+		}).AddRow("team", "https://peer.example/peerdb", "peeruser", encrypted, "T2", nil, now, now)
+	}
+
+	wantFragments := []string{
+		// Both paths name the peer, so the operator knows which one to re-add.
+		"failed to decrypt password for peer team",
+		// The shared enrichment, pinned verbatim. The machine-local key file is
+		// context in a parenthetical, not an asserted cause: an AES-GCM open also
+		// fails on a tampered blob and on a row still under the legacy key, and
+		// re-adding the peer is the fix in all three cases. The key file is named
+		// by its resolved path, because this basename is also looked up under the
+		// legacy dbPath and the bare name would not say which file is meant.
+		"stored peer credentials cannot be decrypted with this machine's credential key " +
+			"(the key file " + filepath.Join(beadsDir, credentialKeyFile) + " is machine-local and does not replicate with the database); " +
+			"re-run 'bd federation add-peer <name> <url> --user <user>' on this machine",
+		// The cipher error stays wrapped, so the raw cause is still readable.
+		"cipher: message authentication failed",
+	}
+
+	assertMismatch := func(t *testing.T, err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatal("read succeeded, want decrypt failure")
+		}
+		if !errors.Is(err, storage.ErrCredentialKeyMismatch) {
+			t.Errorf("error = %v, want errors.Is storage.ErrCredentialKeyMismatch", err)
+		}
+		for _, want := range wantFragments {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not mention %q", err, want)
+			}
+		}
+	}
+
+	t.Run("GetFederationPeer", func(t *testing.T) {
+		store, mock := newStore(t)
+		mock.ExpectQuery(regexp.QuoteMeta("FROM federation_peers WHERE name = ?")).
+			WithArgs("team").
+			WillReturnRows(peerRows())
+
+		_, err := store.GetFederationPeer(t.Context(), "team")
+		assertMismatch(t, err)
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet sqlmock expectations: %v", err)
+		}
+	})
+
+	t.Run("ListFederationPeers", func(t *testing.T) {
+		store, mock := newStore(t)
+		mock.ExpectQuery(regexp.QuoteMeta("FROM federation_peers ORDER BY name")).
+			WillReturnRows(peerRows())
+
+		_, err := store.ListFederationPeers(t.Context())
+		assertMismatch(t, err)
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet sqlmock expectations: %v", err)
+		}
+	})
+
+	// withPeerCredentials is the seam that carries the sentinel into
+	// `bd federation status` on this backend, mirroring embeddeddolt's
+	// TestWithPeerAuth_KeyMismatchFailsClosed: it must fail closed rather than
+	// invoke the operation with no credentials, which would present the wrong
+	// identity to the peer and re-blame the network (GH#5214 review).
+	t.Run("withPeerCredentials", func(t *testing.T) {
+		store, mock := newStore(t)
+		mock.ExpectQuery(regexp.QuoteMeta("FROM federation_peers WHERE name = ?")).
+			WithArgs("team").
+			WillReturnRows(peerRows())
+
+		called := false
+		err := store.withPeerCredentials(t.Context(), "team", func(*remoteCredentials) error {
+			called = true
+			return nil
+		})
+		if called {
+			t.Error("withPeerCredentials ran the operation, want fail-closed")
+		}
+		assertMismatch(t, err)
+		// The seam's own wrap, so the sentinel survives the extra hop.
+		if want := "failed to get peer credentials:"; !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet sqlmock expectations: %v", err)
+		}
+	})
+}
+
 // openCloudAuthTestStore opens a DoltStore against the shared test Dolt server
 // for cloud-auth routing tests. The returned store has serverMode=true and a
 // fresh empty database; callers should AddRemote to seed the SQL surface.
@@ -836,6 +1086,9 @@ func clearCloudAuthEnv(t *testing.T) {
 }
 
 func TestCloudAuthCLIRouting(t *testing.T) {
+	if realDoltTestServerRequired() && testServerPort == 0 {
+		t.Fatal("Dolt server required for cloud-auth routing coverage")
+	}
 	skipIfNoServer(t)
 	clearCloudAuthEnv(t)
 	start := time.Now()
@@ -870,11 +1123,12 @@ func TestCloudAuthCLIRouting(t *testing.T) {
 		{"no cloud env", "az://account.blob.core.windows.net/container", "", "", false},
 	}
 	// Shared store: creating one Dolt database per case (16 total) is what
-	// made this test slow (see the regression guard below). Each case gets
+	// made this test slow (see the shared-store guard below). Each case gets
 	// its own remote name (origin_0..origin_15) against a single store,
 	// since shouldUseCLIForCloudAuth's routing decision is keyed purely by
 	// remote name — distinct names are enough to keep cases isolated.
 	store := openCloudAuthTestStore(t, "route")
+	casesRun := 0
 	for i, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -882,6 +1136,7 @@ func TestCloudAuthCLIRouting(t *testing.T) {
 			if err := store.AddRemote(ctx, remote, tt.remoteURL); err != nil {
 				t.Fatalf("AddRemote: %v", err)
 			}
+			casesRun++
 			addCloudAuthCLIRemote(t, store, remote, tt.remoteURL)
 			if tt.envKey != "" {
 				t.Setenv(tt.envKey, tt.envValue)
@@ -893,16 +1148,17 @@ func TestCloudAuthCLIRouting(t *testing.T) {
 		})
 	}
 
-	// Regression guard: this test previously created one Dolt database per
-	// case (16 total), each slower than the last as server load grew,
-	// pushing wall time into the hundreds of seconds for a test that only
-	// exercises a pure routing predicate. 90s sits below every measured
-	// unfixed run and comfortably above the shared-store fix's expected
-	// time, so it fails on the old per-case-store shape without flaking
-	// under normal CI load.
-	if elapsed := time.Since(start); elapsed > 90*time.Second {
-		t.Fatalf("TestCloudAuthCLIRouting took %s, want < 90s (regression: are per-case Dolt databases being created again instead of a shared store?)", elapsed)
+	// Every registered case must leave its distinct remote in the shared store.
+	// This verifies remote writes use that store; it cannot detect unused stores.
+	// Count only selected children so focused -run invocations still work.
+	remotes, err := store.ListRemotes(context.Background())
+	if err != nil {
+		t.Fatalf("ListRemotes: %v", err)
 	}
+	if len(remotes) != casesRun {
+		t.Errorf("shared store has %d remotes, want %d executed cases", len(remotes), casesRun)
+	}
+	t.Logf("%d cloud auth routing cases took %s", casesRun, time.Since(start))
 }
 
 func TestCloudAuthCLIRoutingStructural(t *testing.T) {
@@ -1021,5 +1277,95 @@ func TestEnvPrefixesForRemoteURL(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// An uninitialized credential key is not a key mismatch, and the distinction
+// is reachable from the peer readers: initCredentialKey returns nil without
+// setting a key when beadsDir is empty, so ensureCredentialKey succeeds and
+// decryptPassword still finds no key. Wrapping at the callers labeled that
+// error a mismatch and told the operator to re-add the peer, which does
+// nothing when the key was never created; the fix there is init or file
+// permissions. The wrap therefore lives at the decrypt funnel instead.
+func TestFederationPeerUninitializedKeyIsNotAMismatch(t *testing.T) {
+	// beadsDir empty and credentialKey nil: ensureCredentialKey is a no-op
+	// that reports success, which is the edge the caller-side wrap mislabeled.
+	newStore := func(t *testing.T) (*DoltStore, sqlmock.Sqlmock) {
+		t.Helper()
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("sqlmock: %v", err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+		return &DoltStore{db: db}, mock
+	}
+
+	peerRows := func() *sqlmock.Rows {
+		now := time.Now()
+		return sqlmock.NewRows([]string{
+			"name", "remote_url", "username", "password_encrypted",
+			"sovereignty", "last_sync", "created_at", "updated_at",
+		}).AddRow("team", "https://peer.example/peerdb", "peeruser",
+			[]byte("stored ciphertext"), "T2", nil, now, now)
+	}
+
+	assertNotMismatch := func(t *testing.T, err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatal("read succeeded, want a decrypt failure")
+		}
+		if errors.Is(err, storage.ErrCredentialKeyMismatch) {
+			t.Errorf("error = %v, want NOT errors.Is storage.ErrCredentialKeyMismatch", err)
+		}
+		if !strings.Contains(err.Error(), "credential encryption key not initialized") {
+			t.Errorf("error = %v, want it to name the uninitialized key", err)
+		}
+		if strings.Contains(err.Error(), "re-run 'bd federation add-peer") {
+			t.Errorf("error = %v, must not prescribe re-adding the peer for an uninitialized key", err)
+		}
+	}
+
+	t.Run("GetFederationPeer", func(t *testing.T) {
+		store, mock := newStore(t)
+		mock.ExpectQuery(regexp.QuoteMeta("FROM federation_peers WHERE name = ?")).
+			WithArgs("team").
+			WillReturnRows(peerRows())
+
+		_, err := store.GetFederationPeer(t.Context(), "team")
+		assertNotMismatch(t, err)
+	})
+
+	t.Run("ListFederationPeers", func(t *testing.T) {
+		store, mock := newStore(t)
+		mock.ExpectQuery(regexp.QuoteMeta("FROM federation_peers ORDER BY name")).
+			WillReturnRows(peerRows())
+
+		_, err := store.ListFederationPeers(t.Context())
+		assertNotMismatch(t, err)
+	})
+}
+
+// The key-rotation reader passes an old key to decryptWithKey on purpose, so
+// that helper must stay unwrapped: a rotation miss is not a mismatch.
+func TestDecryptWithKeyStaysUnwrappedForRotation(t *testing.T) {
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i)
+	}
+	other := make([]byte, 32)
+	for i := range other {
+		other[i] = byte(255 - i)
+	}
+	encrypted, err := encryptWithKey("secret", key)
+	if err != nil {
+		t.Fatalf("encryptWithKey() error = %v", err)
+	}
+
+	_, err = decryptWithKey(encrypted, other)
+	if err == nil {
+		t.Fatal("decryptWithKey with the wrong key succeeded, want an error")
+	}
+	if errors.Is(err, storage.ErrCredentialKeyMismatch) {
+		t.Errorf("error = %v, want the bare cipher error; classification belongs to decryptPassword", err)
 	}
 }
