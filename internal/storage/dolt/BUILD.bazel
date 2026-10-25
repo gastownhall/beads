@@ -416,6 +416,7 @@ go_test(
         "//internal/doltserver",
         "//internal/doltversion",
         "//internal/githooksenv",
+        "//internal/remedy",
         "//internal/storage",
         "//internal/storage/backendnames",
         "//internal/storage/batchbench",
