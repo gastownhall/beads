@@ -590,7 +590,7 @@ func TestIgnoredCursorHealNeverResurrectsRolledBackVersions(t *testing.T) {
 				rolledBack, appliedAt)
 		}
 		if tablePresent(t, ctx, conn, untrackScratchTable) {
-			t.Errorf("%s survived; it is not dolt_ignore'd, so the next pull's auto-commit would replicate it fleet-wide", untrackScratchTable)
+			t.Errorf("%s survived; it is dolt_ignore'd under __temp__%%, so a straggler sits in the working set invisibly to dolt_status until something commits it", untrackScratchTable)
 		}
 		if dirty := dirtyTableNames(t, ctx, conn); len(dirty) > 0 {
 			t.Errorf("working set is dirty after the reconcile: %v", dirty)
@@ -602,6 +602,15 @@ func TestIgnoredCursorHealNeverResurrectsRolledBackVersions(t *testing.T) {
 // open crashed: someone who resolved a crashed repair by deliberately
 // versioning the cursor table must not have stale rows pushed back into it.
 // The scratch is still cleaned up — it is bd's own junk either way.
+//
+// This is also the file's only arm that puts the scratch table at HEAD, so it
+// is the only one that reaches the sweep's forced-staging branch. The fixture
+// has to force its own staging to get there: the '-Am' below used to sweep the
+// scratch in, but "__temp__%" is seeded by the fixture's real MigrateUp, and a
+// blanket commit's ignore filter is hardcoded on (no '-f' form of '-Am'
+// exists). Without the explicit forced add the scratch would never reach HEAD,
+// the branch would go unexercised, and the weaker "it is gone from the working
+// set" assertion below would pass on the local DROP alone.
 func TestIgnoredCursorHealResumeRespectsOperatorOverride(t *testing.T) {
 	ctx := t.Context()
 	f := newLegacyTrackedFixture(t, "resumeoverride")
@@ -609,7 +618,14 @@ func TestIgnoredCursorHealResumeRespectsOperatorOverride(t *testing.T) {
 	f.withRawConn(t, func(conn *sql.Conn) {
 		untrackCursorInPlace(t, ctx, conn)
 		mustExecOn(t, ctx, conn, "REPLACE INTO dolt_ignore VALUES ('ignored_schema_migrations', false)")
+		mustExecOn(t, ctx, conn, "CALL DOLT_ADD('-f', ?)", untrackScratchTable)
 		mustExecOn(t, ctx, conn, "CALL DOLT_COMMIT('-Am', 'operator: version the cursor table on purpose')")
+		// The precondition the rest of this test rests on. Assert it, or a
+		// future change to the staging above silently turns everything below
+		// into a test of the ordinary untracked-scratch path.
+		if !trackedAtHead(t, ctx, conn, untrackScratchTable) {
+			t.Fatalf("%s is not committed at HEAD after the operator's blanket commit; the tracked-scratch sweep would not be exercised", untrackScratchTable)
+		}
 	})
 
 	f.reopenAndClose(t)
@@ -617,6 +633,17 @@ func TestIgnoredCursorHealResumeRespectsOperatorOverride(t *testing.T) {
 	f.withRawConn(t, func(conn *sql.Conn) {
 		if tablePresent(t, ctx, conn, untrackScratchTable) {
 			t.Errorf("%s survived an override-suppressed resume; the cleanup is always correct", untrackScratchTable)
+		}
+		// Positive proof the sweep COMMIT landed, not just the local DROP:
+		// nothing but a commit can take the table back out of HEAD. An
+		// unforced stage makes the sweep a silent no-op that --skip-empty
+		// reports as success, leaving the table at HEAD and a permanent
+		// delete delta that wedges every later pull.
+		if trackedAtHead(t, ctx, conn, untrackScratchTable) {
+			t.Errorf("%s is still committed at HEAD; the sweep staged nothing and --skip-empty committed nothing", untrackScratchTable)
+		}
+		if dirty := dirtyTableNames(t, ctx, conn); len(dirty) > 0 {
+			t.Errorf("working set is dirty after the override-suppressed resume: %v", dirty)
 		}
 		if got := len(cursorRows(t, ctx, conn)); got != len(f.cursorRows) {
 			t.Errorf("cursor rows = %d, want %d", got, len(f.cursorRows))

@@ -1,9 +1,87 @@
 # Testing Guide
 
 `TESTING.md` is the single authority for test commands, test selection, and
-test design in this repository. Use the commands here for local work. For the
-exact command behind a current CI check, inspect its workflow and corresponding
-`Makefile` target; the CI audit and cleanup plan are dated maintainer context.
+test design in this repository. Use the commands here for local work.
+
+## Building and Testing: Bazel Is the Gate
+
+Bazel is beads' build and test system. CI gates every pull request on the
+`bazel test` lanes in `.github/workflows/bazel.yml`, and several checks exist
+only as Bazel targets: nogo (go test's vet checks plus the golangci-lint
+linters, `tools/nogo`), gofmt (`//scripts/repochecks:fmt_test`) and the
+repository guards under `scripts/repochecks`. A plain `go test` runs none of
+them, so it is an inner-loop convenience CI does not enforce; a change is
+ready when its Bazel lanes pass.
+
+Install [Bazelisk](https://github.com/bazelbuild/bazelisk) as `bazel`; it
+reads `.bazelversion`. The pre-commit hook (nogo on staged packages) and the
+pre-push hook (the test lane) both need it.
+
+Where actions run is per machine, never committed:
+
+- **Contributors** read rbe-west's anonymous, read-only cache with
+  `--config=fork-cache`: everything CI already executed is a cache hit, misses
+  run on your machine, and nothing is uploaded. Make it the default with
+  `build --config=fork-cache` in your gitignored `.bazelrc.local`, or pass it
+  per command (`make test BAZEL_FLAGS=--config=fork-cache`).
+- **Maintainers** with an rbe-west client certificate execute remotely with
+  `--config=remote-exec`; the executor endpoint and TLS lines go in the
+  gitignored `user.bazelrc` or `.bazelrc.local` (see the `.bazelrc` comments).
+- **Agent hosts** whose `~/.bazelrc` names the executor need neither flag.
+
+Each lane, as bazel.yml runs it (add your `--config=fork-cache` or
+`--config=remote-exec` when it is not your default):
+
+| Lane (bazel.yml job) | Command | Notes |
+|---|---|---|
+| Test (`bazel-test`) | `make test`, i.e. `bazel test //... --config=ci` | PR Core's selection: race, `-short`, skips. Includes nogo, gofmt and the repository guards. The default gate for every Go change. |
+| Lint, all platforms | `make ci-pr-lint` | nogo natively plus the windows/amd64 and darwin/arm64 passes. `make lint-changed` covers only your changed packages. |
+| Pure-Go (`bazel-pure`) | `bazel build --config=pure //cmd/bd:bd //cmd/bd:bd_test` | cgo off. The job's cmd/bd test subset (`PURE_CMD_BD_TESTS`) and js/wasm step are in bazel.yml. |
+| Release cross-compile (`bazel-release-cross`) | `./scripts/ci/bazel-release-cross-compile.sh` | Every `go_library`/`go_binary` for each row of `scripts/ci/release-targets.txt`, cgo off, with nogo. |
+| Integration (`bazel-integration`) | `bazel test //... --config=integration` | The `integration`-tagged build. Runs with the read-only cache too. |
+| Dolt server (`bazel-doltserver`) | `bazel test //... --config=doltserver` | Starts its own `dolt sql-server` from the pinned binary; no docker. |
+| cmd/bd Dolt server (`bazel-cmd-dolt`) | `bazel test //cmd/bd:bd_dolt_server_test --config=doltserver-cmd` | 32 shards of the integration-tagged cmd/bd suite (the slowest tests pinned to 16 of them). |
+| Embedded Dolt (`bazel-embedded`) | `bazel test //... --config=embedded` | Remote execution only in CI; locally it is slow. Also runs the served http tiers with `BEADS_HTTP_TEST_REQUIRED=1`: `//backend/http:http_served_test`, `//internal/httpclient:httpclient_served_test` and the command corpus `//backend/http/corpus:corpus_served_test`, each sharded through `tools/bazel/go_test_pinned_shard.sh`. |
+| Proxied server (`bazel-proxied`) | `bazel test //... --config=doltserver-proxied` | Remote execution only: 34 shards, each with a Dolt server. |
+| Dolt server + proxied (`bazel-dolt-race`) | `bazel test //... --config=dolt-race` | Both rows above in one invocation; CI runs this instead of them in mode `remote`. |
+| Server-Dolt storage (`bazel-server-storage`) | `bazel test //... --config=doltserver-integration` | Remote execution only. |
+| Server storage + cmd/bd Dolt server (`bazel-dolt-int`) | `bazel test //... --config=dolt-int` | The two rows above in one invocation; CI runs this instead of them in mode `remote`. No job-level `continue-on-error`: it reports a `server_storage_result` output (plain-gated, like `bazel-server-storage`) and a `cmd_dolt_result` output (advisory unless `BAZEL_CMD_DOLT_REQUIRED` is `true`, like `bazel-cmd-dolt`) separately, via a per-tier classify step over the BEP, since its members have different gating categories. |
+| Docs | `make check-docs` | `//test/docsync:docsync_test` and `//scripts/repochecks:doc_freshness_test` in the test lane's configuration, then `scripts/check-doc-flags.sh` against the pinned release. |
+
+`make check` runs the testing.Short policy, `make ci-pr-lint` and
+`make test`. After adding, removing or renaming Go files or changing imports
+or `go.mod`, run `make bazel-sync` (gazelle, the `go_srcs` filegroups and
+`MODULE.bazel`).
+
+The Makefile keeps plain-Go twins under explicit `-go` names: `make test-go`
+(`./scripts/test.sh`), `make check-go` and `make check-docs-go`. They work
+offline and without Bazel, but they are not what CI enforces. GitHub Actions
+jobs that still run Go-native suites call the `-go` names, never `make test`
+(`TestWorkflowsNameTheirTestEngine`).
+
+### Native macOS C/C++ toolchain
+
+Bazel uses pinned LLVM 22.1.8 Clang on macOS, with the installed Apple SDK
+and its native linker (`xcrun --find ld`). `MODULE.bazel` selects
+`linker = "auto"` only for Darwin arm64 and x86_64. The macOS 27 SDK contains
+`arm64e.x1` TAPI targets that the bundled LLVM 22.1.8 `ld64.lld` cannot parse;
+pairing the SDK with Apple's linker avoids that incompatibility without
+changing the shared SDK, Xcode selection, or installed compiler. Darwin's
+SDK/linker are host dependencies, so this is not a hermetic macOS build.
+
+Linux x86_64 still uses the SHA-pinned LLVM compiler and bundled LLD with
+the pinned Ubuntu 24.04 sysroot. Host C/C++ toolchain detection stays disabled
+on every platform; the Darwin override does not select `local_config_cc`.
+`scripts/bazel_hermetic_cc_test.go` guards both contracts. A focused local
+race build exercises the native cgo link through Go's race standard library:
+
+```bash
+bazel test //scripts:scripts_test --config=ci --test_filter='^TestBazelHermetic'
+```
+
+This link check is separate from full macOS gate portability: the Linux-only
+timeout test backends remain tracked in upstream issue #7362. Run the full
+`make test` gate on its supported Linux platform as well.
 
 ## Choose the Smallest Useful Test
 
@@ -17,23 +95,136 @@ a unit test: use the real boundary when the defect could live there.
 
 | Need | Run | When |
 |---|---|---|
-| Docs-only validation | `git diff --check`, `go test -tags=gms_pure_go ./test/docsync`, and `./scripts/check-doc-freshness.sh` | For prose-only changes; add any generated-doc or surface-specific link check the changed paths require. Do not run the full Go suite merely because a Markdown file changed. |
-| Focused red/green loop | `./scripts/test.sh -run '^TestExactName$' ./path/to/package/...` | While writing or fixing one behavior. |
-| Affected-package confidence | `./scripts/test.sh ./path/to/package/...` | After the focused test passes; include directly affected neighbors when their contract changed. |
-| Final Go baseline | `make test` | Once after focused work on Go code is green. It applies the normal local build flags, coverage, and local skip handling. |
-| Named CI wrapper | `make ci-pr-core`, `make ci-pr-policy`, or `make ci-pr-lint` | Run the wrapper whose risk or surface is affected, or use it to reproduce that CI check. Do not run all three routinely for every edit. |
-| Hook shims against real timeout implementations | `nix flake check -L` (or `nix build .#checks.<system>.hook-timeout-backends -L`) | After changing the hook generator in `cmd/bd/hooks.go` (then `make githooks-regen`) or anything under `.githooks/`. Runs the tracked managed sections against GNU coreutils, uutils, busybox and toybox `timeout` — the multicalls also installed as `gtimeout` alone — with and without Perl, under dash, bash and busybox ash. About one deadline of wall time; needs no Go build. |
+| Docs-only validation | `git diff --check` and `make check-docs` | For prose-only changes; add any generated-doc or surface-specific link check the changed paths require. Do not run the full suite merely because a Markdown file changed. |
+| Focused red/green loop | `bazel test //path/to/package:package_test --config=ci --test_filter='^TestExactName$' --test_output=all` | While writing or fixing one behavior. Agents use only this form; an unchanged target returns its cached result. The run counts only when its log shows `--- PASS: TestExactName` and no `--- SKIP` for it or a subtest (see "Check That the Test Ran" below). Humans working offline may use the plain-Go `./scripts/test.sh -run '^TestExactName$' ./path/to/package/...`, which is not the gate. |
+| Affected-package confidence | `bazel test //path/to/package/... --config=ci` | After the focused test passes; include directly affected neighbors when their contract changed. |
+| Final gate | `make test` | Once after focused work on Go code is green: the whole test lane, mostly cache hits. |
+| Another lane's risk | that lane's command from the table above | When the change touches what that lane covers (integration-tagged files, the Dolt server path, embedded Dolt, pure-Go builds). |
+| Named CI wrapper | `make ci-pr-lint`, or `make ci-pr-core` (plain `go test`, so not for agents: `make test` runs PR Core's selection) | Run the wrapper whose risk or surface is affected, or use it to reproduce that CI check. Do not run them routinely for every edit. |
+| Hook shims against real timeout implementations | `bazel test //tests/hook_timeout_backends:hook_timeout_backends_test` | After changing the hook generator in `cmd/bd/hooks.go` (then `make githooks-regen`) or anything under `.githooks/`. Runs the tracked managed sections against GNU coreutils, uutils, busybox and toybox `timeout` — the multicalls also installed as `gtimeout` alone — with and without Perl, under dash, bash and busybox ash (240 cases). About one deadline of wall time; needs no Go build. The PR-core lane runs it on every PR. |
 
 Do not replace the focused loop with repeated full-suite runs. Run the final
-`make test` once the affected Go tests are green. For docs-only changes, use
+`make test` once the affected tests are green. For docs-only changes, use
 the docs, link, and diff checks instead.
 
-## Commands and Local Environment
+### Check That the Test Ran
 
-`./scripts/test.sh` is the normal runner. It sources `.buildflags`, creates an
-isolated test environment, applies `.test-skip`, and defaults to a **25m
-per-package** Go-test timeout. The timeout is a hang backstop, not a target
-runtime. Override it only when diagnosing a legitimate slow path:
+Bazel reports a target as passed when the test it was asked for never ran:
+a `--test_filter` that matches nothing, a test that skips, and a test file
+the configuration does not compile all end in `1 test passes`. With
+`--test_output=all` the log lists each test and subtest (the lane configs set
+`GO_TEST_WRAP_TESTV=1`, and a cached result prints its log too), so count a
+run only when it shows `--- PASS: TestExactName` and no `--- SKIP` for the
+test or a `TestExactName/...` subtest: Go prints `--- PASS` for a test whose
+every subtest skipped. When a subtest skips by design (one for another
+platform, say), filter on the subtests that cover your change
+(`--test_filter='^TestExactName$/^SubtestName$'`). A sharded target runs the
+test in one shard, and its other shards print `testing: warning: no tests to
+run`; that warning from every shard means the test did not run. Under
+`--config=ci` these tests do not run:
+
+- **Dolt-backed tests** skip (`BEADS_TEST_SKIP=dolt`). Clear the skip and
+  select the `local` backend, or run the test's Dolt lane from the table
+  above:
+
+  ```bash
+  bazel test //internal/storage/dolt:dolt_test --config=ci --test_filter='^TestExactName$' --test_output=all \
+    --test_env=BEADS_TEST_SKIP= --test_env=BEADS_TEST_DOLT_SERVER=local --test_env=BEADS_TEST_REQUIRE_DOLT_CONTAINER=1
+  ```
+
+- **Tests gated on `testing.Short()`** skip (`-test.short`). Add
+  `--test_arg=-test.short=false`.
+- **Tests in `integration`-tagged files** are not compiled. Use
+  `--config=integration` in place of `--config=ci`; it skips Dolt-backed
+  tests too. An integration-tagged Dolt test of cmd/bd, tests/regression or
+  internal/storage/dolt runs in that package's Dolt-server lane, whose target
+  sets the environment the suite needs: `//cmd/bd:bd_dolt_server_test` and
+  `//tests/regression:regression_test` with `--config=doltserver-cmd`,
+  `//internal/storage/dolt:dolt_server_full_test` with
+  `--config=doltserver-integration`; select the test as described below. In
+  any other package no lane runs such a test with Dolt: add the Dolt flags
+  above to `--config=integration`, and when it fails, check whether it fails
+  the same way on the base commit before you blame your change.
+- **`TestEmbedded*` and embedded-Dolt tests**: `--config=ci` skips
+  `TestEmbedded*` by name (`-test.skip=^TestEmbedded`), so add
+  `--test_arg=-test.skip=`. A test that needs embedded Dolt, whatever its
+  name, still skips unless `BEADS_TEST_EMBEDDED_DOLT=1` (its `--- SKIP` says
+  so), which only the embedded lane's targets set: run it in its package's
+  `embedded`-tagged target with `--config=embedded`. For one cmd/bd test:
+
+  ```bash
+  bazel test //cmd/bd:bd_embedded_test --config=embedded --test_sharding_strategy=disabled \
+    --test_arg='-test.run=^TestEmbeddedExactName$' --test_output=all
+  ```
+
+  For one internal/storage/embeddeddolt test, name
+  `//internal/storage/embeddeddolt:embeddeddolt_embedded_test` instead.
+- **Tests in a file `BUILD.bazel` does not list** are not compiled. Run
+  `make bazel-sync` after adding a test file.
+
+Lane targets that are `sh_test`s run the test binary through a wrapper or
+shard script, which can pass its own `-test.run` and so override
+`--test_filter`. Select the test with a trailing
+`--test_arg='-test.run=^TestExactName$'` instead (the last one wins), with
+`--test_sharding_strategy=disabled` so that it runs once. The exception is
+`//cmd/bd:bd_managed_local_test`: `cmd/bd/managed_local_shards.txt` is its
+whole selection, and its wrapper (`tools/bazel/go_test_offline.sh
+--shard-manifest`) refuses a `-test.run`; narrow it with
+`--test_arg='-test.skip=...'`.
+
+A test can need more than one of these (a `-short`-gated Dolt test needs the
+Dolt flags and `--test_arg=-test.short=false`); combine them and check the
+log again. A package's main test target is `//<dir>:<last dir element>_test`
+(the root package's is `//:beads_test`). A package can split its test files
+over more targets (`//scripts` does), so run the target whose `srcs` in
+`BUILD.bazel` list the test's file; the lanes in the table above add variants
+of some targets. One `--test_filter` applies to every target an invocation
+names.
+
+### Regenerating Golden Files
+
+Golden-file tests compare output with files checked into the repository and
+rewrite them in an update mode:
+
+- `make corpus-regen`: the `--json` contract corpus under
+  `cmd/bd/protocol/testdata/corpus/`.
+- `make githooks-regen`: the managed sections of the tracked `.githooks/*`.
+- The `BD_UPDATE_GOLDEN=1 … go test` command in `cmd/bd/AGENTS.md`: the
+  command-tree and `--help` goldens.
+- Any other golden test: a `go test` run of its package and test with the
+  update switch its failure message names (`BD_UPDATE_GOLDEN=1`,
+  `-update-ledger-doc`).
+
+These are plain `go test` runs, and the one place agents run `go test`:
+under Bazel a test runs from its runfiles tree, not your checkout, so it
+cannot rewrite the files, and `bazel test` of the same test only reports the
+drift. Review the regenerated diff, then confirm with `bazel test`. Where an
+agent host refuses `go test` even for these, leave the regeneration to a
+maintainer and say so in the PR.
+
+### Git Hooks
+
+`make install` points `core.hooksPath` at `.githooks`. The pre-commit hook
+formats staged Go files and runs nogo on their packages
+(`make lint-changed LINT_CHANGED_SCOPE=staged`). The pre-push hook runs
+`scripts/pre-push-suite.sh` for branch pushes whose commits change Go or
+Bazel inputs: `bazel test //... --config=ci`, with `--config=remote-exec`
+when some rc file names an executor and `--config=fork-cache` otherwise.
+`BD_PREPUSH_SUITE=rbe|cache|go` picks the mode; `go` (and the fallback when
+bazel is not installed) runs `make test-go` under a banner saying it is not
+the suite CI gates on.
+
+## Plain `go test` (Inner Loop)
+
+`./scripts/test.sh` is the plain-Go runner behind `make test-go`. It and
+this section's other plain-`go test` targets are for humans working offline;
+agents run `bazel test` (see "Choose the Smallest Useful Test" above). The
+rules in "Test Environment and Readiness" below (the Dolt backends and their
+Bazel lanes, test fixtures, `testing.Short()`) apply to every test run. The
+runner sources `.buildflags`, creates an isolated test environment, applies
+`.test-skip`, and defaults to a **25m per-package** Go-test timeout. The
+timeout is a hang backstop, not a target runtime. Override it only when
+diagnosing a legitimate slow path:
 
 ```bash
 TEST_TIMEOUT=30m ./scripts/test.sh ./cmd/bd/...
@@ -63,9 +254,9 @@ make test-cross-version
 make test-migration
 ```
 
-For a failing GitHub Actions check, follow the current workflow and its
-`Makefile` target when exact reproduction matters. The local runner and CI
-intentionally have different contracts in some cases.
+For a failing GitHub Actions check, run the command of its bazel.yml lane
+from the table above; for the jobs that are not Bazel lanes, follow the
+workflow and its `Makefile` target.
 
 ### Test Environment and Readiness
 
@@ -74,6 +265,17 @@ test environment adds `dolt` to `BEADS_TEST_SKIP`; set
 `BEADS_TEST_ENV_RUN_DOLT=1` only when deliberately exercising the Dolt path
 and its prerequisites are available. Do not make ordinary tests depend on a
 developer's database, daemon, global Git configuration, or filesystem state.
+
+System-wide files are not isolated. `bd setup claude`, the `bd init` that runs
+it, `bd doctor`'s Claude Integration check and the `bd setup claude` tip read
+Claude Code's managed settings from `/etc/claude-code`
+(`/Library/Application Support/ClaudeCode` on macOS). On a host whose managed
+settings enable or turn off the beads plugin, the tests that run `bd init`,
+`bd setup claude` or `bd doctor` there, such as the
+`cmd/bd/testdata/agent_artifacts/` goldens, see that policy. The
+`cmd/bd/setup` unit tests are unaffected: they read no managed settings, or a
+managed directory of their own. Tests in other packages that check the plugin
+give themselves one with `setup.SetClaudeManagedSettingsDirForTest`.
 
 To skip an optional service explicitly, use the existing skip mechanism:
 
@@ -97,22 +299,95 @@ sit behind that API, selected by `BEADS_TEST_DOLT_SERVER`:
 
 `BEADS_TEST_REQUIRE_DOLT_CONTAINER=1` turns an unavailable backend into a
 failure (per test and in every `TestMain`) instead of a skip; lanes that
-exist to run the Dolt suites set it.
+exist to run the Dolt suites set it. `BEADS_TEST_REQUIRE_SOCAT=1` does the
+same for the proxied subtests that bridge an external endpoint with `socat`
+(external-unix, the outage/reconnect matrix); `//cmd/bd:bd_proxied_test`
+sets it; the legacy GitHub proxied jobs retired in #7353 had no `socat`
+and left it unset.
 
 Under Bazel, `bazel test //... --config=doltserver` runs the Dolt-backed
-suites of pr.yml's "Test (storage domain + uow)" and "Contract corpus" jobs
-on the `local` backend (the `dolt-server` targets); they need no docker and
-execute remotely with `--config=remote-exec`. `--config=docker` runs the same
-suites on the `container` backend (host docker) as the A/B control.
+domain, uow, tracker, doctor/fix, protocol and testutil suites on the `local`
+backend (the `dolt-server` targets); they need no docker and execute
+remotely with `--config=remote-exec`. No Bazel target uses the `container`
+backend; only a human's plain `go test` with docker and the pulled image
+exercises it.
 PR Risk's heavier server tiers have configs of their own, run by bazel.yml
 only with remote execution, each in a job of its own (`bazel-proxied`,
-`bazel-server-storage`): `--config=doltserver-proxied` is the
+which in mode `remote` is folded with `bazel-doltserver` into
+`bazel-dolt-race`, and `bazel-server-storage`, which in mode `remote` is
+folded with `bazel-cmd-dolt` into `bazel-dolt-int`):
+`--config=doltserver-proxied` is the
 proxied-server cmd/bd tier ("Test (Proxied Dolt Cmd N/15)",
 `//cmd/bd:bd_proxied_test`), and `--config=doltserver-integration` the
 server-Dolt storage tier ("Test (Server Dolt Conformance)", "Test (Server
 Dolt Full Suite N/16)", `//internal/storage/dolt:dolt_server_*_test`), which
-builds with the integration tag like `--config=integration`. Each shard
-runs its CI job's shard script, so Bazel shard k runs the tests of job k+1.
+builds with the integration tag like `--config=integration`. Each shard runs
+its CI job's shard script, so for `--config=doltserver-integration` Bazel
+shard k runs the tests of job k+1 (both split the manifest's 16-shard block
+the same way). `--config=doltserver-proxied`'s `bd_proxied_test` instead
+runs the manifest's own 34-shard block, bin-packed by measured duration (the
+manifest's legacy 15-shard, bd-init-cost-proxy block, once read by PR Risk's
+retired fork/push jobs, has been deleted; those jobs no longer exist).
+
+`--config=doltserver-cmd` (`//cmd/bd:bd_dolt_server_test`, bazel.yml's
+advisory `bazel-cmd-dolt` job) runs the whole integration-tagged cmd/bd
+suite on the `local` backend: the Dolt-gated cmd/bd tests (`TestCLI_*`, the
+init and store-backed suites) that every other lane skips with
+`BEADS_TEST_SKIP=dolt` or leaves out of its manifest. It shares
+`--config=integration`'s build and runs it in 32 shards: 16 run the slowest
+tests `cmd/bd/dolt_server_pinned_shards.txt` pins to them, and 16 are the Go
+binary's own round-robin shards over every other top-level test
+(`tools/bazel/go_test_pinned_shard.sh`; `//tests/regression:regression_test`
+splits the same way). After a change that moves test durations, regenerate the
+manifest from a run of the lane with `tools/bazel/pin_shards.py` (see its
+usage); a stale manifest only costs balance, never coverage. It runs where
+the integration lane runs (remote, or with the read-only cache). pr.yml's
+gate requires it once `BAZEL_CMD_DOLT_REQUIRED` is `"true"`; pr.yml then
+also passes bazel.yml `cmd-dolt-required: true`, and the PR's
+`bazel-integration` lane runs `//... -//cmd/bd:bd_test`, so each cmd/bd
+integration-build test runs once (push, nightly and bazel-farm runs keep
+`bd_test` in the integration lane). Locally:
+`bazel test //cmd/bd:bd_dolt_server_test --config=doltserver-cmd`.
+
+A pinned-shard manifest written with `pin_shards.py --record-measured`
+(`backend/http/served_pinned_shards.txt`) also lists every other test it
+measured, as `rr <TestName>`, so `//scripts:go_test_sources_test` can tell
+the tests added since: they all land in the round-robin shards, and once
+there are more than 2 per round-robin shard the test fails and prints the
+regeneration command (for `http_served_test`, one `pin_shards.py` run over
+the CI test.xml `tools/bazel/fetch_served_testxml.sh` downloads, with
+`--tests-in` keeping only the tests the checkout defines). An rr name that is
+no longer a test is only logged. Every
+pinned-shard target but `corpus_served_test` keeps at least 3 round-robin
+shards.
+
+An ambient `BEADS_DOLT_SERVER_PORT` or `BEADS_DOLT_PORT` is never honored by
+the suites that call `testutil.EnsureDoltContainerForTestMain`. When a test
+container is started, that container's port overwrites both variables; when one
+cannot be started -- for any reason, including `BEADS_TEST_SKIP=dolt` -- both
+are cleared, so no environment-named server can be resolved. Point a test run
+at a specific Dolt server by starting a container for it, not by exporting a
+port.
+
+The one sanctioned way to hand these suites a server you started yourself is
+`./scripts/test.sh` with `BEADS_TEST_SHARED_SERVER=1`: it starts one
+`dolt sql-server`, exports its port as `BEADS_DOLT_PORT`, and marks it by
+exporting `BEADS_TEST_SHARED_DOLT_SERVER` set to that same port number. It
+starts nothing if either port variable is still set when it gets there. The
+runner's test environment clears both first, so that only happens when that
+isolation is skipped (for example `BEADS_TEST_ENV_DISABLE=1`), and the script
+then says so on stderr. The marker -- set only by that script, only for a
+port it allocated -- is what the helper treats as container-equivalent, and
+only for a variable holding exactly the port it names: that variable survives
+the clearing above, and any other port variable is still cleared. A container
+still wins where one can be started; the shared server is the Docker-less path.
+
+Clearing the environment variables closes the channel the ambient port
+travelled on; it does not make a port unresolvable in general. Resolution
+continues into the file chain (`.beads/dolt-server.port`, `config.yaml`,
+`metadata.json`), and `internal/storage/dolt`'s production-port detection is
+narrower than that resolution -- see `be-rl6tm`, which tracks the remaining
+gap.
 
 Tests that need a temporary repository or store should use `t.TempDir()` and
 `t.Cleanup()`. Temporary repositories must set a repository-local hooks path;
@@ -144,12 +419,77 @@ rm -rf -- "$beads_manual_dir"
 itself redirect `bd init` workspace setup. Never run a manual `bd init` from a
 production workspace merely because `BEADS_DB` points elsewhere.
 
+**Tmpfs hosts:** the `cmd/bd` test suite creates an isolated `$HOME` and several
+test binaries under `$TMPDIR`. They are normally cleaned by the test process,
+but a SIGKILLed or OOMed run can leave orphans behind. On hosts where `/tmp`
+is tmpfs (e.g. Fedora Atomic / Bluefin), run `make clean-test-tmp` between
+test runs if `du -sh /tmp/beads-* /tmp/bd-*` shows accumulation. See bd-3q2u.
+
 `testing.Short()` is for genuine runtime, stress, or large-fixture skips. It
 is not a substitute for declaring an integration, end-to-end, API, Docker, or
 external-dependency boundary. Keep new uses within the repository policy:
 
 ```bash
 make check-testing-short
+```
+
+### Dolt Container Tests (podman-rootless)
+
+Anything that does not carry `BEADS_TEST_SKIP=dolt` — including
+`BEADS_TEST_ENV_RUN_DOLT=1` and a bare `go test` — reaches a real
+`dolt sql-server`: by default through testcontainers-go where a container
+runtime and the pinned image are present (otherwise those suites self-skip),
+and from the local `dolt` CLI in the suites that use
+`testutil.RequireDoltBinary`. Lanes that set
+`BEADS_TEST_REQUIRE_DOLT_CONTAINER=1` fail instead of skipping. Two limitations
+of the containerized path are worth recognizing before reading a failure as a
+product bug. Neither failure mode manifests in production or on GitHub Actions:
+CI exercises this same containerized path green on every risk-tier PR, and
+`.github/workflows/pr-risk.yml` pulls the pinned image precisely to defeat the
+self-skip. A hang there is a real bug, not this section's subject.
+
+**Migration 0032 hangs over the wire protocol.** Migration `0032`
+(`drop_schema_migrations_applied_at`) hangs indefinitely when applied through
+the containerized sql-server. How it surfaces depends on the caller's context.
+A `go test ./internal/storage/uow/... -count=1` with no `BEADS_TEST_SKIP`
+passes `context.Background()`, so it sits in `initSchema` until the package
+timeout rather than failing — that is the shape you will normally see, with no
+deadline to cut it short. A caller that does supply one gets the hang reported
+by the server-mode store open (`newServerMode` in
+`internal/storage/dolt/store.go`) instead:
+
+```
+failed to initialize schema: context deadline exceeded
+```
+
+The cause is the podman-rootless container port-forwarding path, not migration
+0032's SQL: the identical statement completes normally through the embedded/CLI
+engine, and against a bare-host-process `dolt sql-server` matching the deployed
+shape. Evidence chain in `be-j3szz`. Use `BEADS_TEST_SKIP=dolt` unless the
+container path is what you are testing.
+
+**Disabling Ryuk removes the container safety net.** This repository sets no
+`TESTCONTAINERS_RYUK_DISABLED`, so CI runs with Ryuk — testcontainers-go's
+orphan-reaper sidecar — enabled. The podman-rootless flow generally requires
+turning it off by hand (`TESTCONTAINERS_RYUK_DISABLED=true`), because under
+rootless podman Ryuk frequently cannot start: it wants the runtime socket. See
+`be-w3n2m`. With Ryuk off, nothing reaps a container whose test process exited
+without running its cleanup — `os.Exit` reached before a deferred
+`TerminateDoltContainer`, for instance. `be-5kkk6` records the cost: 101 leaked
+containers, and an exhausted swap. When running with Ryuk disabled, keep
+teardown on the normal return path using the `testMainInner` pattern
+(`beads_test.go`), and check for strays afterwards. Carry the rootless socket
+this flow runs on — a bare `docker ps` talks to the CLI's default endpoint and
+reports a false all-clear — and read the tag from the pin rather than copying
+it, so the command cannot drift when the pin moves. An empty read would be the
+same false all-clear (`ancestor=` matches nothing), so the command refuses to
+run without a tag:
+
+```bash
+dolt_image=$(sed -n 's/.*DoltDockerImage = "\(.*\)".*/\1/p' \
+  "$(git rev-parse --show-toplevel)/internal/testutil/testdoltcommon.go")
+DOCKER_HOST=unix:///run/user/$(id -u)/podman/podman.sock \
+  docker ps -a --filter "ancestor=${dolt_image:?could not read the Dolt image pin}"
 ```
 
 ## Test Design
@@ -223,9 +563,10 @@ underlying failure is fixed.
 Before opening a PR:
 
 1. For docs-only changes, run the applicable docs, link, freshness, and diff
-   checks; do not run the full Go suite by default.
+   checks; do not run the full suite by default.
 2. For Go code, keep the focused and affected-package tests green, then run one
-   final `make test`.
+   final `make test` (the Bazel test lane), plus the lane of any other tier
+   the change touches.
 3. Run only the named CI wrapper, specialized target, or risk gate required by
    the changed surface, or the one needed to reproduce a CI result.
 

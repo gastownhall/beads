@@ -5,9 +5,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/gitignore"
+	"github.com/steveyegge/beads/internal/remedy"
 )
 
 // GitignoreTemplate is the canonical .beads/.gitignore content
@@ -39,6 +41,13 @@ push-state.json
 .local_version
 
 proxied_server_client_info.json
+
+# HTTP backend activation sidecar and per-user local metadata (per-user state,
+# never tracked — the server URL and any ca_file path are machine-specific,
+# and the local metadata sidecar mirrors proxied_server_client_info.json's
+# per-user precedent). Written by bd connect.
+http_target.json
+http_local_metadata.json
 
 # Worktree redirect file (contains relative path to main repo's .beads/)
 # Must not be committed as paths would be wrong in other clones
@@ -138,6 +147,8 @@ var requiredPatterns = []string{
 	"*.corrupt.backup/",
 	".beads-credential-key",
 	"proxied_server_client_info.json",
+	"http_target.json",
+	"http_local_metadata.json",
 	".local_version",
 	"backup/",
 }
@@ -154,7 +165,7 @@ func CheckGitignore(repoPath string) DoctorCheck {
 			Name:    "Gitignore",
 			Status:  "warning",
 			Message: ".beads/.gitignore not found",
-			Fix:     "Run: bd init (safe to re-run) or bd doctor --fix",
+			Fix:     "Run: bd doctor --fix",
 		}
 	}
 
@@ -167,7 +178,22 @@ func CheckGitignore(repoPath string) DoctorCheck {
 			Status:  "warning",
 			Message: "Outdated .beads/.gitignore (missing required patterns)",
 			Detail:  "Missing: " + strings.Join(missing, ", "),
-			Fix:     "Run: bd doctor --fix or bd init (safe to re-run)",
+			Fix:     "Run: bd doctor --fix",
+		}
+	}
+
+	// A pattern-complete file with loose permissions must still surface as a
+	// warning: doctor --fix only schedules FixGitignore for non-ok checks, so
+	// an ok here would leave the permission repair unreachable.
+	if runtime.GOOS != "windows" {
+		if info, err := os.Stat(gitignorePath); err == nil && info.Mode().Perm() != 0600 {
+			return DoctorCheck{
+				Name:    "Gitignore",
+				Status:  "warning",
+				Message: "Unexpected permissions on .beads/.gitignore",
+				Detail:  fmt.Sprintf("Mode is %04o, want 0600", info.Mode().Perm()),
+				Fix:     "Run: bd doctor --fix",
+			}
 		}
 	}
 
@@ -193,17 +219,20 @@ func EnsureGitignoreForBeadsDir(beadsDir string) error {
 		return fmt.Errorf("read .beads/.gitignore: %w", err)
 	}
 
-	missing := missingGitignorePatterns(string(content))
-	if len(missing) == 0 {
-		return nil
-	}
-
+	// Tighten permissions before the pattern check so a pattern-complete
+	// file with loose perms (e.g. 0644) still gets locked down; the
+	// early return below must not skip this (flagged post-#5285).
 	if info, err := os.Stat(gitignorePath); err == nil {
-		if info.Mode().Perm()&0200 == 0 {
+		if info.Mode().Perm() != 0600 {
 			if err := os.Chmod(gitignorePath, 0600); err != nil {
 				return fmt.Errorf("chmod .beads/.gitignore: %w", err)
 			}
 		}
+	}
+
+	missing := missingGitignorePatterns(string(content))
+	if len(missing) == 0 {
+		return nil
 	}
 
 	existingContent := string(content)
@@ -221,8 +250,11 @@ func EnsureGitignoreForBeadsDir(beadsDir string) error {
 		return fmt.Errorf("ensure .beads/.gitignore: %w", err)
 	}
 
-	// Tighten permissions on pre-existing files: os.WriteFile's mode argument
-	// only applies at creation, and the file may predate the 0600 policy.
+	// Residual guard for the one case the hoisted block above cannot cover: if
+	// its os.Stat failed, no chmod ran. Either the file was removed between the
+	// ReadFile and that Stat -- os.WriteFile then creates it, and its 0600 mode
+	// argument is filtered by umask -- or it still exists at its old mode, which
+	// os.WriteFile leaves untouched. Both converge to 0600 here.
 	if err := os.Chmod(gitignorePath, 0600); err != nil {
 		return fmt.Errorf("chmod .beads/.gitignore: %w", err)
 	}
@@ -628,13 +660,16 @@ func CheckNoVestigialSyncWorktrees(repoPath string) DoctorCheck {
 		}
 	}
 
-	// Found a local .beads-sync but we have a redirect - this is vestigial
+	// Found a local .beads-sync but we have a redirect - this is vestigial.
+	// The path goes into the rm -rf command as one shell word: unquoted, a
+	// checkout path with a space in it would delete two other paths.
+	arg, note := remedy.CommandArg(runtime.GOOS, syncWorktreePath, "<path>")
 	return DoctorCheck{
 		Name:    "Vestigial Sync Worktrees",
 		Status:  StatusWarning,
 		Message: "Vestigial .beads-sync worktree found",
-		Detail:  fmt.Sprintf("This repo uses redirect but has unused worktree at: %s", syncWorktreePath),
-		Fix:     fmt.Sprintf("Remove with: rm -rf %s", syncWorktreePath),
+		Detail:  fmt.Sprintf("This repo uses redirect but has unused worktree at: %s", remedy.PrintedValue(syncWorktreePath)),
+		Fix:     fmt.Sprintf("Remove with: rm -rf %s%s", arg, note),
 	}
 }
 
@@ -727,7 +762,7 @@ func CheckProjectGitignore(repoPath string) DoctorCheck {
 				Name:    "Project Gitignore",
 				Status:  StatusWarning,
 				Message: "No project .gitignore found — Dolt/credential files may be committed accidentally",
-				Fix:     "Run: bd init (safe to re-run) or bd doctor --fix",
+				Fix:     "Run: bd doctor --fix",
 			}
 		}
 		return DoctorCheck{
@@ -751,7 +786,7 @@ func CheckProjectGitignore(repoPath string) DoctorCheck {
 			Status:  StatusWarning,
 			Message: "Project .gitignore missing required exclusion patterns",
 			Detail:  "Missing: " + strings.Join(missing, ", "),
-			Fix:     "Run: bd doctor --fix or bd init (safe to re-run)",
+			Fix:     "Run: bd doctor --fix",
 		}
 	}
 
@@ -790,6 +825,8 @@ func EnsureProjectGitignore(repoPath string) error {
 		return nil // All patterns already present
 	}
 
+	// A fresh .gitignore must not start with a blank line; the separator only
+	// belongs between existing content and the appended block.
 	lines := make([]string, 0, len(toAdd)+2)
 	if len(content) > 0 {
 		lines = append(lines, "")

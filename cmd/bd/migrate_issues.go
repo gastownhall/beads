@@ -600,7 +600,7 @@ func executeMigration(ctx context.Context, s storage.DoltStorage, migrationSet [
 		for _, id := range migrationSet {
 			if err := tx.UpdateIssue(ctx, id, map[string]interface{}{
 				"source_repo": to,
-			}, actor); err != nil {
+			}, currentActor()); err != nil {
 				return fmt.Errorf("failed to update issue %s: %w", id, err)
 			}
 		}

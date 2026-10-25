@@ -11,8 +11,11 @@ go_library(
         "audit_molecule_wisp_batch_iter.go",
         "audit_search-counts-stats.go",
         "batch_apply_contract.go",
+        "batch_apply_gate_contract.go",
         "batch_closer_contract.go",
         "batch_creator_contract.go",
+        "batch_getter_contract.go",
+        "blocked_lister_contract.go",
         "blocked_state.go",
         "blocking_annotator_contract.go",
         "bootstrapper_contract.go",
@@ -26,19 +29,25 @@ go_library(
         "deleter_contract.go",
         "dependency_editor_contract.go",
         "dualwrite_history_contract.go",
+        "dualwrite_participation_generation_contract.go",
         "edge_reader_contract.go",
         "expected_revision_contract.go",
         "graph_counter_contract.go",
+        "heartbeater_contract.go",
         "history_matching.go",
         "importer_contract.go",
         "issue_operations_contract.go",
         "issue_operations_staging.go",
         "journal_contract.go",
+        "lease_reclaimer_contract.go",
         "lifecycle_close_reopen_contract.go",
         "lifecycle_create_contract.go",
+        "lifecycle_create_gate_contract.go",
         "lifecycle_update_contract.go",
+        "lifecycle_update_gate_contract.go",
         "memories_contract.go",
         "metadata_cas_contract.go",
+        "molecule_contract.go",
         "portable.go",
         "querier_contract.go",
         "reader_contract.go",
@@ -56,11 +65,13 @@ go_library(
         "transaction_parity.go",
         "tree_walker_contract.go",
         "version_reconciler_contract.go",
+        "versioned_read_contract.go",
         "workspaceconfig_contract.go",
     ],
     importpath = "github.com/steveyegge/beads/backend/conformance",
     visibility = ["//visibility:public"],
     deps = [
+        "//internal/hooks",
         "//internal/storage",
         "//internal/storage/issueops",
         "//internal/storage/kvkeys",
@@ -110,3 +121,64 @@ filegroup(
 )
 
 # --- end go_srcs ---
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_doc_files",
+    srcs = glob(
+        [
+            "**/*.md",
+            "**/*.mdx",
+        ],
+        allow_empty = True,
+        exclude = ["**/node_modules/**"],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = [
+            "**/*_test.go",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+        exclude = ["**/node_modules/**"],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_other_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.go",
+            "**/*.md",
+            "**/*.mdx",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+# --- end repo_files ---

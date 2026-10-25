@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -44,6 +45,96 @@ func TestRootProviderOptions(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestProxiedProviderOptions pins the proxied-only half of the open posture:
+// every proxied open gains exactly one option on top of the caller's, the
+// proxied-server marker the data-behind refusal reads to say where `bd dolt
+// pull` can be run. Dropping that append would put a proxied workspace back on
+// the runnable-here remedy its own front door refuses. As with
+// TestRootProviderOptions, the options are opaque from here: uow's
+// TestApplyProviderOptions pins what WithProxiedServerMode sets, and
+// TestNewDoltServerUOWProvider_CarriesProxiedServerMode that the open carries
+// it to the gate.
+func TestProxiedProviderOptions(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		in   []uow.ProviderOption
+	}{
+		{name: "no caller options"},
+		{name: "preview", in: []uow.ProviderOption{uow.WithPreview()}},
+		{name: "read-only", in: []uow.ProviderOption{uow.WithReadOnly()}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			out := proxiedProviderOptions(tt.in)
+			if len(out) != len(tt.in)+1 {
+				t.Fatalf("proxiedProviderOptions(%d options) len = %d, want %d", len(tt.in), len(out), len(tt.in)+1)
+			}
+			for i, o := range out {
+				if o == nil {
+					t.Fatalf("proxiedProviderOptions(%d options)[%d] is nil", len(tt.in), i)
+				}
+			}
+		})
+	}
+
+	// The append must not land in the caller's backing array: with spare
+	// capacity an in-place append would write the marker into a slice the
+	// caller still owns.
+	in := make([]uow.ProviderOption, 1, 4)
+	in[0] = uow.WithPreview()
+	out := proxiedProviderOptions(in)
+	if &out[0] == &in[0] {
+		t.Fatal("proxiedProviderOptions returned the caller's backing array")
+	}
+	if in[:cap(in)][1] != nil {
+		t.Fatal("proxiedProviderOptions wrote into the caller's spare capacity")
+	}
+}
+
+// TestServerLogProviderOptions pins the ownership half of the proxy-start
+// rotation: an open of bd's default server log gains exactly one option on top
+// of the caller's, and an open of a log the operator chose gains none, so bd
+// never renames a log that proxiedLogAssets does not retire on migration. As
+// with TestProxiedProviderOptions, the options are opaque from here: uow's
+// TestApplyProviderOptions pins what WithServerLogRotation sets, and proxy's
+// TestForkExecChild_RotatesOversizedLogs what RotateLogFile does.
+func TestServerLogProviderOptions(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		in          []uow.ProviderOption
+		isCustomLog bool
+		want        int
+	}{
+		{name: "default log", want: 1},
+		{name: "default log, read-only", in: []uow.ProviderOption{uow.WithReadOnly()}, want: 2},
+		{name: "custom log", isCustomLog: true, want: 0},
+		{name: "custom log, read-only", in: []uow.ProviderOption{uow.WithReadOnly()}, isCustomLog: true, want: 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			out := serverLogProviderOptions(tt.in, tt.isCustomLog)
+			if len(out) != tt.want {
+				t.Fatalf("serverLogProviderOptions(%d options, custom=%t) len = %d, want %d", len(tt.in), tt.isCustomLog, len(out), tt.want)
+			}
+			for i, o := range out {
+				if o == nil {
+					t.Fatalf("serverLogProviderOptions(%d options, custom=%t)[%d] is nil", len(tt.in), tt.isCustomLog, i)
+				}
+			}
+		})
+	}
+
+	// The append must not land in the caller's backing array, as in
+	// TestProxiedProviderOptions.
+	in := make([]uow.ProviderOption, 1, 4)
+	in[0] = uow.WithReadOnly()
+	out := serverLogProviderOptions(in, false)
+	if &out[0] == &in[0] {
+		t.Fatal("serverLogProviderOptions returned the caller's backing array")
+	}
+	if in[:cap(in)][1] != nil {
+		t.Fatal("serverLogProviderOptions wrote into the caller's spare capacity")
 	}
 }
 

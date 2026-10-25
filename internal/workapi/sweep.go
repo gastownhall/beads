@@ -332,16 +332,35 @@ func SweepLiveDependentSources(incoming map[string][]*types.Dependency) []string
 	return ids
 }
 
-// SweepLiveDependentTargets returns the candidates a live row depends on: the
-// targets of protecting edges whose source is in live.
+// SweepLiveDependentTargets returns the candidates a live row depends on,
+// directly or through other candidates. A protected closed candidate must act
+// as live for the next edge up the chain; otherwise an open grandchild keeps
+// its closed parent while the same sweep deletes the closed grandparent.
 func SweepLiveDependentTargets(incoming map[string][]*types.Dependency, live map[string]bool) map[string]bool {
-	protected := make(map[string]bool)
+	targetsBySource := make(map[string][]string)
 	for target, deps := range incoming {
 		for _, dep := range deps {
-			if dep != nil && isSweepProtectingEdge(dep.Type) && live[dep.IssueID] {
-				protected[target] = true
-				break
+			if dep != nil && isSweepProtectingEdge(dep.Type) {
+				targetsBySource[dep.IssueID] = append(targetsBySource[dep.IssueID], target)
 			}
+		}
+	}
+
+	protected := make(map[string]bool)
+	queue := make([]string, 0, len(live))
+	for id, isLive := range live {
+		if isLive {
+			queue = append(queue, id)
+		}
+	}
+	for next := 0; next < len(queue); next++ {
+		source := queue[next]
+		for _, target := range targetsBySource[source] {
+			if protected[target] {
+				continue
+			}
+			protected[target] = true
+			queue = append(queue, target)
 		}
 	}
 	return protected

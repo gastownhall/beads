@@ -18,12 +18,14 @@ import (
 // sharper reason: a narrowing term the server silently ignored would widen
 // what is erased.
 const (
-	sweepTierMember              = "tier"
-	sweepActorMember             = "actor"
-	sweepClosedBeforeMember      = "closed_before"
-	sweepPatternMember           = "pattern"
-	sweepProtectReferencedMember = "protect_referenced"
-	sweepDryRunMember            = "dry_run"
+	sweepTierMember                  = "tier"
+	sweepActorMember                 = "actor"
+	sweepClosedBeforeMember          = "closed_before"
+	sweepPatternMember               = "pattern"
+	sweepProtectReferencedMember     = "protect_referenced"
+	sweepDryRunMember                = "dry_run"
+	sweepProtectLiveDependentsMember = "protect_live_dependents"
+	sweepLimitMember                 = "limit"
 )
 
 // sweepMembers is the whole vocabulary, in one place, so the unknown-member
@@ -36,6 +38,8 @@ var sweepMembers = []string{
 	sweepPatternMember,
 	sweepProtectReferencedMember,
 	sweepDryRunMember,
+	sweepProtectLiveDependentsMember,
+	sweepLimitMember,
 }
 
 // handleSweep answers POST /v0/beads/issues:sweep — one of the two DESTRUCTIVE
@@ -51,7 +55,7 @@ var sweepMembers = []string{
 // would be one handler away from an unguarded mass delete.
 //
 // Everything above the role here is argument validation: the media type, the
-// body shape, and the six members the document publishes.
+// body shape, and the eight members the document publishes.
 //
 // NO ACTOR IS INFERRED, for the reason the claim gives: the server's own
 // identity is meaningless to a remote caller. Unlike the claim, the actor is
@@ -148,7 +152,7 @@ func (s *Server) sweepRequest(w http.ResponseWriter, r *http.Request) (issueops.
 	// name the member.
 	if !apigen.SweepRequestTier(*tier).Valid() {
 		s.fail(w, r, InvalidArgument(sweepTierMember, ReasonInvalidValue,
-			"`"+sweepTierMember+"` must be \"ephemeral\" or \"durable\""))
+			"`"+sweepTierMember+"` must be \"ephemeral\", \"durable\", or \"wisps-plane\""))
 		return issueops.SweepRequest{}, false
 	}
 	request.Tier = issueops.SweepTier(*tier)
@@ -200,6 +204,7 @@ func (s *Server) sweepRequest(w http.ResponseWriter, r *http.Request) (issueops.
 	}{
 		{sweepProtectReferencedMember, &request.ProtectReferenced},
 		{sweepDryRunMember, &request.DryRun},
+		{sweepProtectLiveDependentsMember, &request.ProtectLiveDependents},
 	} {
 		raw, ok := members[flag.member]
 		if !ok {
@@ -212,6 +217,20 @@ func (s *Server) sweepRequest(w http.ResponseWriter, r *http.Request) (issueops.
 			return issueops.SweepRequest{}, false
 		}
 		*flag.dest = *value
+	}
+
+	if raw, ok := members[sweepLimitMember]; ok {
+		var value *int64
+		if err := json.Unmarshal(raw, &value); err != nil || value == nil {
+			s.fail(w, r, InvalidArgument(sweepLimitMember, ReasonInvalidValue,
+				"`"+sweepLimitMember+"` must be an integer"))
+			return issueops.SweepRequest{}, false
+		}
+		// A negative value is NOT refused here. The role refuses it
+		// (issueops.ErrValidation), and routing it through the role is what
+		// keeps one definition of what a valid limit is, the same way a
+		// malformed pattern is left to the role above.
+		request.Limit = int(*value)
 	}
 
 	return request, true
@@ -267,8 +286,11 @@ func sweepResponse(result issueops.SweepResult) apigen.SweepResult {
 			UnknownClosedAt:       result.Skipped.UnknownClosedAt,
 			ClosedAtOrAfterCutoff: result.Skipped.ClosedAtOrAfterCutoff,
 			Unreadable:            result.Skipped.Unreadable,
+			LiveDependent:         &result.Skipped.LiveDependent,
 		},
 	}
+	remaining := int64(result.Remaining)
+	body.Remaining = &remaining
 	if len(result.ReferencedIDs) > 0 {
 		ids := append([]string(nil), result.ReferencedIDs...)
 		body.ReferencedIds = &ids

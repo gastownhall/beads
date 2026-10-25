@@ -7,6 +7,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/issueops"
 )
 
 var assignCmd = &cobra.Command{
@@ -40,8 +41,16 @@ Examples:
 
 		force, _ := cmd.Flags().GetBool("force")
 
+		// A8 (beads#4682): assign takes exactly two positional args (id, name),
+		// so "one id only" always holds; no separate check is needed the way
+		// update/close/delete need one.
+		ifRevision, err := parseIfRevisionFlag(cmd)
+		if err != nil {
+			return err
+		}
+
 		if usesProxiedServer() {
-			return runAssignProxiedServer(rootCtx, args, force)
+			return runAssignProxiedServer(rootCtx, args, force, ifRevision)
 		}
 
 		id := args[0]
@@ -53,6 +62,12 @@ Examples:
 		if err != nil {
 			if result != nil {
 				result.Close()
+			}
+			// A concurrent `bd delete` that commits before this resolution
+			// is the same lost race as one that commits inside the guarded
+			// write below.
+			if reported, ok := reportIfRevisionTargetGone("assigning", id, err, ifRevision); ok {
+				return reported
 			}
 			return HandleErrorRespectJSON("resolving %s: %v", id, err)
 		}
@@ -66,25 +81,55 @@ Examples:
 
 		issueStore := result.Store
 
-		if err := validateIssueUpdatable(id, result.Issue); err != nil {
-			return HandleErrorRespectJSON("%s", err)
-		}
+		// The template guard is the role's (issueops.Lifecycle.Update); its
+		// refusal is printed below as this command always printed it.
 
 		// bd-98s5c: bd assign is shorthand for an unguarded assignee update —
-		// same live-claim fence as bd update -a.
-		if err := validateIssueReassignable(id, result.Issue, actor, assignee,
-			storeClaimPoolAliases(ctx, issueStore), force); err != nil {
-			return HandleErrorRespectJSON("%s", err)
+		// same live-claim fence as bd update -a. mc-zndi7.74: skipped when this
+		// pre-read is already stale against an active --if-revision guard, so a
+		// lost race reports precondition_failed from the guarded write below
+		// instead of this policy refusal — see ifRevisionAlreadyStale's doc.
+		if !ifRevisionAlreadyStale(result.Issue, ifRevision) {
+			if err := validateIssueReassignable(id, result.Issue, currentActor(), assignee,
+				storeClaimPoolAliases(ctx, issueStore), force); err != nil {
+				return HandleErrorRespectJSON("%s", err)
+			}
 		}
 
-		updates := map[string]interface{}{
-			"assignee": assignee,
+		// A8 (beads#4682): routed through issueops.Lifecycle.Update (via the
+		// shared commandUpdateMutation helper update.go uses) rather than the
+		// store's raw UpdateIssue, so --if-revision has a checked write to
+		// guard — bd assign had no compare-and-set surface at all before this.
+		ops, err := writeOps(issueStore)
+		if err != nil {
+			return HandleErrorRespectJSON("updating %s: %v", id, err)
 		}
-		if err := issueStore.UpdateIssue(ctx, result.ResolvedID, updates, actor); err != nil {
+		opsCtx, err := issueOpsContext(ctx)
+		if err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
+		mutationResult, err := runCommandUpdateMutation(opsCtx, ops, commandUpdateMutation{
+			actor:   currentActor(),
+			issueID: result.ResolvedID,
+			patch: issueops.IssuePatch{
+				Assignee: issueops.Field[string]{Set: true, Value: assignee},
+			},
+			force:           force,
+			expectedVersion: ifRevision,
+		})
+		if err != nil {
+			if ifRevision != nil {
+				if reported, ok := reportIfRevisionFailure("assigning", id, err, ifRevision); ok {
+					return reported
+				}
+			}
+			if refusal, ok := templateReadOnlyRefusal(id, err); ok {
+				return HandleErrorRespectJSON("%s", refusal)
+			}
 			return HandleErrorRespectJSON("updating %s: %v", id, err)
 		}
 
-		if err := commitPendingIfEmbedded(ctx, issueStore, actor, doltAutoCommitParams{
+		if err := commitPendingIfEmbedded(ctx, issueStore, currentActor(), doltAutoCommitParams{
 			Command:  "assign",
 			IssueIDs: []string{result.ResolvedID},
 		}); err != nil {
@@ -93,7 +138,7 @@ Examples:
 
 		SetLastTouchedID(result.ResolvedID)
 
-		updatedIssue, _ := issueStore.GetIssue(ctx, result.ResolvedID)
+		updatedIssue := mutationResult.Issue
 		title := ""
 		if updatedIssue != nil {
 			title = updatedIssue.Title
@@ -117,6 +162,8 @@ Examples:
 
 func init() {
 	assignCmd.Flags().Bool("force", false, "Allow overwriting another actor's live in_progress claim (use only for abandoned claims — crashed agent, expired lease; prefer bd reclaim)")
+	// A8 (beads#4682)
+	assignCmd.Flags().String("if-revision", "", ifRevisionFlagHelp)
 	assignCmd.ValidArgsFunction = issueIDCompletion
 	rootCmd.AddCommand(assignCmd)
 }

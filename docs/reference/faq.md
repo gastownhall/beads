@@ -46,6 +46,25 @@ Nothing specific — it's a metaphor for linked work items, like beads on a stri
 
 Beads is a 1.x product used in production for AI-assisted development. The core functionality — create, update, dependencies, ready work, Dolt-backed sync — is stable, and releases follow semantic versioning. Data stays portable: `bd export` produces human-readable JSONL, and `bd backup` pushes Dolt-native backups. As with any tracker holding work you care about, keep normal backup hygiene (a Dolt remote or a `bd backup` destination).
 
+### Does bd collect usage metrics?
+
+`bd` collects anonymous command-usage metrics. Each event is a `cli_command`
+record carrying only the command name; each batch also carries the bd version
+and OS platform, keyed by a machine-derived, HMAC-protected distinct ID. No
+email, repo path, remote URL, issue content, or user-supplied strings are
+collected. Events are written under `~/.beads/eventsData` and POSTed to
+`https://gastownhall-eventsapi.com/mp/collect`.
+
+Metrics are enabled by default (opt-out). The friendliest way to see or change
+them is `bd metrics` (`bd metrics on` / `bd metrics off` / `bd metrics example`),
+which takes effect on the next command with no restart. `BD_DISABLE_METRICS=1`
+still works as a one-off, shell-scoped override. The cross-tool
+[`DO_NOT_TRACK`](https://donottrack.sh/) standard is honored as a disable-only
+opt-out: `DO_NOT_TRACK=1` opts out, while a falsey or empty value
+(`DO_NOT_TRACK=0`, `false`, or unset-but-present) falls through to your saved
+`bd metrics` preference instead of forcing metrics back on. `BD_DISABLE_METRICS`
+is the bidirectional override and takes precedence when both are set.
+
 ## Architecture
 
 ### Why Dolt instead of plain SQLite or flat files?

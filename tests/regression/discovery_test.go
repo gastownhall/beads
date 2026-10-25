@@ -589,7 +589,7 @@ func TestProtocol_NotesAppendVsOverwrite(t *testing.T) {
 		t.Errorf("notes should be 'Original', got: %v", data[0]["notes"])
 	}
 
-	w.run("update", a, "--notes", "Replaced")
+	w.run("update", a, "--notes", "Replaced", "--force")
 	data = parseJSON(t, w.run("show", a, "--json"))
 	if data[0]["notes"] != "Replaced" {
 		t.Errorf("notes should be 'Replaced', got: %v", data[0]["notes"])
@@ -2792,7 +2792,7 @@ func TestDiscovery_BlockedNonexistentParentSilentEmpty(t *testing.T) {
 // test's assertions describe the fixed behavior and stay as a discovery-suite
 // regression check — this file is `//go:build regression && discovery` and no
 // CI lane passes the discovery tag, so the CI lock for the fix is
-// TestEmbeddedLabel/TestProxiedServerLabel in cmd/bd, not this test. Same
+// TestEmbeddedLabelAddRemove/TestProxiedServerLabel in cmd/bd, not this test. Same
 // class as BUG-42 (dep rm nonexistent says "Removed").
 //
 // Classification: BUG (fixed) — false positive confirmation.
@@ -2835,7 +2835,7 @@ func TestDiscovery_LabelRemoveNonexistentSilentSuccess(t *testing.T) {
 // duplicate row); the message now says "<id> already has label 'x'" and the
 // command still exits 0. Like the test above this stays as a discovery-suite
 // regression check and is not a CI gate; the CI lock is
-// TestEmbeddedLabel/TestProxiedServerLabel in cmd/bd.
+// TestEmbeddedLabelAddRemove/TestProxiedServerLabel in cmd/bd.
 //
 // Classification: BUG (fixed) — misleading success message.
 func TestDiscovery_LabelAddDuplicateReportsAdded(t *testing.T) {

@@ -189,7 +189,12 @@ func maybeAutoBackup(ctx context.Context) {
 		return
 	}
 
-	// Throttle: skip if we backed up recently
+	// Throttle: skip if we backed up recently. Checked before the size-cap
+	// walk below so the common case — the majority of bd invocations,
+	// still inside the interval — pays zero directory-walk cost (ga-y6gjv
+	// PR #6071 review: getDirSize's filepath.Walk cost 65-100ms per
+	// invocation at 20k files when the cap check ran unconditionally,
+	// before this throttle, on every single command).
 	interval := config.GetDuration("backup.interval")
 	if interval == 0 {
 		interval = 15 * time.Minute
@@ -208,6 +213,32 @@ func maybeAutoBackup(ctx context.Context) {
 	}
 	if currentCommit == state.LastDoltCommit && state.LastDoltCommit != "" {
 		debug.Logf("backup: no changes since last backup\n")
+		return
+	}
+
+	// Size cap: skip entirely once the destination has grown past
+	// backup.size-cap-mb (ga-y6gjv) — see backupSizeCapExceeded for why a
+	// cap, not an in-place prune, is the safe fix here.
+	//
+	// Placed AFTER change detection, which is the order
+	// docs/reference/configuration.md:"How it works" documents. Ahead of
+	// it, the walk ran on EVERY bd invocation indefinitely in an idle
+	// workspace: nothing on the idle path advances state.Timestamp, so the
+	// interval throttle above can never re-arm while nothing is changing
+	// (ga-y6gjv PR #6071 review). Keep it above any lock acquisition —
+	// a skip should not first take a lock it is about to release.
+	if exceeded, size, err := backupSizeCapExceeded(dir); err != nil {
+		warnBackupSizeCapUnavailable(err)
+		// Re-arm the interval throttle before proceeding uncapped: not
+		// every runBackupExport exit persists state.Timestamp (see
+		// warnBackupSizeCapUnavailable), and without this the walk and
+		// its warning would repeat on every bd command.
+		state.Timestamp = time.Now().UTC()
+		if saveErr := saveBackupState(dir, state); saveErr != nil {
+			debug.Logf("backup: failed to persist throttle state after size cap error: %v\n", saveErr)
+		}
+	} else if exceeded {
+		pauseAutoBackupForSizeCap(dir, state, size)
 		return
 	}
 

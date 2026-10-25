@@ -531,6 +531,96 @@ func RunDependencyEditorSameTypeReAddWithIdenticalMetadataIsANoOp(t *testing.T, 
 	}
 }
 
+// RunDependencyEditorSameTypeReAddWithChangedThreadMintsOneVersion is the
+// thread_id twin of
+// RunDependencyEditorSameTypeReAddWithChangedMetadataMintsOneVersion. The row
+// carries a thread as well as metadata, and the source issue's version snapshot
+// carries each edge's thread_id, so a same-type re-add naming a thread the row
+// does not carry is a real mutation on the same terms as a metadata change:
+// the leaf updates the row in place, journals the replacement edge, and mints
+// EXACTLY ONE version (#5898 leg 2). The re-add arm once compared metadata
+// alone, which read that re-add as change-free and dropped the thread.
+//
+// The metadata is identical across every write, so the thread is the only
+// thing that moves. A last re-add names no thread, and is the change-free
+// no-op: an empty thread names none rather than asking for none, which is
+// what keeps the callers that never carry a thread from erasing one.
+//
+// It drives the writes through fixture.AddDependency for the reason the
+// metadata case gives: publicops.DependencyEdge carries no thread either.
+func RunDependencyEditorSameTypeReAddWithChangedThreadMintsOneVersion(t *testing.T, ctx context.Context, fixture DependencyEditorFixture) {
+	t.Helper()
+	if fixture.AddDependency == nil {
+		t.Skip("fixture has no AddDependency hook: a thread is not settable through publicops.DependencyEdge")
+	}
+	fixture.SetJournalEnabled(true)
+	t.Cleanup(func() { fixture.SetJournalEnabled(false) })
+	fixture.SetVersionedHistoryEnabled(true)
+	t.Cleanup(func() { fixture.SetVersionedHistoryEnabled(false) })
+	source := fixture.IssuePrefix + "-idemthread-source"
+	target := fixture.IssuePrefix + "-idemthread-target"
+	seedDependencyEditorIssue(t, ctx, fixture, source)
+	seedDependencyEditorIssue(t, ctx, fixture, target)
+
+	const metadata = `{"note":"v1"}`
+	add := func(thread, refusal string) {
+		t.Helper()
+		dep := &types.Dependency{IssueID: source, DependsOnID: target, Type: types.DepBlocks, Metadata: metadata, ThreadID: thread}
+		if err := fixture.AddDependency(ctx, dep, "writer"); err != nil {
+			t.Fatalf("%s: %v", refusal, err)
+		}
+		assertDependencyEdgeTypedCount(t, ctx, fixture, "dependencies", source, target, string(types.DepBlocks), 1)
+		assertDependencyEditorEventCount(t, ctx, fixture, "events", source, types.EventDependencyAdded, 1)
+	}
+	storedThread := func() string {
+		t.Helper()
+		var thread string
+		if err := fixture.QueryScalar(ctx,
+			"SELECT COALESCE(thread_id, '') FROM dependencies WHERE issue_id = ? AND COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) = ?",
+			[]any{source, target}, &thread); err != nil {
+			t.Fatalf("read stored thread_id for %s -> %s: %v", source, target, err)
+		}
+		return thread
+	}
+	journalCount := func() int {
+		t.Helper()
+		var count int
+		if err := fixture.QueryScalar(ctx,
+			"SELECT COUNT(*) FROM bd_events_journal WHERE issue_id = ? AND op = ?",
+			[]any{source, string(storeops.EventDepAdd)}, &count); err != nil {
+			t.Fatalf("count bd_events_journal dep_add rows for %s: %v", source, err)
+		}
+		return count
+	}
+
+	add("", "AddDependency first")
+	assertDependencyEditorJournalCountIsOne(t, ctx, fixture, source, string(storeops.EventDepAdd))
+
+	versionsBefore := countDependencyEditorIssueVersions(t, ctx, fixture, source)
+	add("thread-conv-1", "re-adding the same edge with a new thread refused")
+	if got := storedThread(); got != "thread-conv-1" {
+		t.Errorf("stored thread_id = %q, want %q: the re-add must persist the new thread, not keep the old", got, "thread-conv-1")
+	}
+	if got := journalCount(); got != 2 {
+		t.Errorf("bd_events_journal dep_add rows for %s = %d, want 2: the thread-changed re-add must journal its own replacement-edge entry", source, got)
+	}
+	if delta := countDependencyEditorIssueVersions(t, ctx, fixture, source) - versionsBefore; delta != 1 {
+		t.Errorf("issue_versions rows for %s went %d -> %d (delta %d), want a delta of 1: the thread genuinely changed, so the re-add is a real mutation of the source issue and must mint exactly one version (#5898 leg 2)", source, versionsBefore, versionsBefore+delta, delta)
+	}
+
+	versionsBefore = countDependencyEditorIssueVersions(t, ctx, fixture, source)
+	add("", "re-adding the same edge naming no thread refused")
+	if got := storedThread(); got != "thread-conv-1" {
+		t.Errorf("stored thread_id after a re-add naming no thread = %q, want %q kept", got, "thread-conv-1")
+	}
+	if got := journalCount(); got != 2 {
+		t.Errorf("bd_events_journal dep_add rows for %s = %d after a change-free re-add, want 2 still", source, got)
+	}
+	if delta := countDependencyEditorIssueVersions(t, ctx, fixture, source) - versionsBefore; delta != 0 {
+		t.Errorf("issue_versions rows for %s went %d -> %d (delta %d) on a re-add naming no thread, want a delta of 0: it keeps the stored thread, so nothing changed (#5898 R3)", source, versionsBefore, versionsBefore+delta, delta)
+	}
+}
+
 // RunDependencyEditorRepeatsWithinOneRequestCollapse pins the clause that
 // answers a request naming ONE PAIR TWICE. The same-type re-add rule is stated
 // for the pair rather than for the call, so the second occurrence inside a
@@ -2540,4 +2630,83 @@ func dependencyEditorHistoryProbe(t *testing.T, ctx context.Context, fixture Dep
 		t.Helper()
 		assertDependencyEditorHistoryDelta(t, ctx, fixture, before, want, why)
 	}
+}
+
+// RunDependencyEditorRefusesADottedChildGatedOnItsOwnParent pins
+// publicops.CheckDottedChildDependency on the role: an explicit edge from a
+// dotted-id child to its own ancestor is refused as a
+// *DottedChildDependencyError (ErrValidation) on every leg, and nothing is
+// written. (It is decided before any per-edge probe, so the probe-skipped
+// spelling, which the wire does not publish, adds nothing here.) It used to be
+// enforced only by the CLI ahead of the role, so an HTTP or embedded caller
+// could gate bd-abc.1 on bd-abc.
+//
+// POSITIVE HALF: the hierarchy itself — a parent-child edge to the IMMEDIATE
+// dotted parent — is allowed, and so is an edge between siblings. A body that
+// refused every edge touching a dotted id would satisfy the refusals alone.
+//
+// WITH THE HIERARCHY STORED: once that parent-child edge exists (the shape
+// `bd create --parent` leaves), a blocking edge on the same pair is still this
+// refusal, not the type or hierarchy conflict the stored edge would raise — the
+// rule reads nothing, so it answers first — and the stored edge survives.
+func RunDependencyEditorRefusesADottedChildGatedOnItsOwnParent(t *testing.T, ctx context.Context, fixture DependencyEditorFixture) {
+	t.Helper()
+	parent := fixture.IssuePrefix + "-dotted"
+	child := parent + ".1"
+	grandchild := child + ".2"
+	sibling := parent + ".3"
+	for _, id := range []string{parent, child, grandchild, sibling} {
+		seedDependencyEditorIssue(t, ctx, fixture, id)
+	}
+
+	for _, refused := range []struct {
+		name string
+		edge publicops.DependencyEdge
+	}{
+		{"child blocks on its parent", publicops.DependencyEdge{IssueID: child, DependsOnID: parent, Type: publicops.DepBlocks}},
+		{"grandchild blocks on its grandparent", publicops.DependencyEdge{IssueID: grandchild, DependsOnID: parent, Type: publicops.DepBlocks}},
+		{"grandchild parent-child to its grandparent", publicops.DependencyEdge{IssueID: grandchild, DependsOnID: parent, Type: publicops.DepParentChild}},
+		{"child relates to its parent", publicops.DependencyEdge{IssueID: child, DependsOnID: parent, Type: publicops.DepRelated}},
+	} {
+		_, err := fixture.Editor.AddDependencies(ctx, publicops.AddDependenciesRequest{
+			Actor: "writer",
+			Edges: []publicops.DependencyEdge{refused.edge},
+		})
+		var dotted *publicops.DottedChildDependencyError
+		if !errors.As(err, &dotted) {
+			t.Errorf("%s: error = %v, want *DottedChildDependencyError", refused.name, err)
+			continue
+		}
+		if !errors.Is(err, publicops.ErrValidation) {
+			t.Errorf("%s: error = %v, want it to match ErrValidation", refused.name, err)
+		}
+		if dotted.IssueID != refused.edge.IssueID || dotted.DependsOnID != refused.edge.DependsOnID {
+			t.Errorf("%s: refusal names %s -> %s, want %s -> %s", refused.name,
+				dotted.IssueID, dotted.DependsOnID, refused.edge.IssueID, refused.edge.DependsOnID)
+		}
+	}
+	assertDependencyEditorNoEdgesFrom(t, ctx, fixture, child, grandchild)
+
+	if _, err := fixture.Editor.AddDependencies(ctx, publicops.AddDependenciesRequest{
+		Actor: "writer",
+		Edges: []publicops.DependencyEdge{
+			{IssueID: grandchild, DependsOnID: child, Type: publicops.DepParentChild},
+			{IssueID: sibling, DependsOnID: child, Type: publicops.DepBlocks},
+		},
+	}); err != nil {
+		t.Fatalf("the immediate parent-child edge and a sibling edge: %v", err)
+	}
+	assertDependencyEdgeTypedCount(t, ctx, fixture, "dependencies", grandchild, child, string(publicops.DepParentChild), 1)
+	assertDependencyEdgeCount(t, ctx, fixture, "dependencies", sibling, child, 1)
+
+	_, err := fixture.Editor.AddDependencies(ctx, publicops.AddDependenciesRequest{
+		Actor: "writer",
+		Edges: []publicops.DependencyEdge{{IssueID: grandchild, DependsOnID: child, Type: publicops.DepBlocks}},
+	})
+	var dotted *publicops.DottedChildDependencyError
+	if !errors.As(err, &dotted) || !errors.Is(err, publicops.ErrValidation) {
+		t.Errorf("blocks on a parent whose parent-child edge is stored: error = %v, want *DottedChildDependencyError matching ErrValidation", err)
+	}
+	assertDependencyEdgeTypedCount(t, ctx, fixture, "dependencies", grandchild, child, string(publicops.DepParentChild), 1)
+	assertDependencyEdgeCount(t, ctx, fixture, "dependencies", grandchild, child, 1)
 }

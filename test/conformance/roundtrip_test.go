@@ -1,4 +1,7 @@
-//go:build e2e
+//go:build e2e || integration
+
+// Built under e2e (scripts/conformance.sh) or integration (Bazel's
+// --config=integration lane, //test/conformance:conformance_test).
 
 package conformance
 

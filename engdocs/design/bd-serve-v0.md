@@ -529,3 +529,127 @@ it cannot discover before connecting. Refusing keeps the published surface a
 property of the build, and matches how `bd` already answers this question one
 layer down, where a backend that cannot guarantee mutation-free access is turned
 away rather than opened anyway.
+
+## The wire-shape signal
+
+`capabilities` answers which OPERATIONS a build serves. Nothing answered
+whether an operation's response SHAPE had changed underneath a client already
+built against it — a client decoding a strict schema against a future server
+that renamed or retyped a field it depends on would fail wherever it happened
+to read that field, with no single place to check first. `wire_revision` and
+`min_client_wire_revision`, both on `GET /v0/beads/context`, are that single
+place.
+
+`wire_revision` is a counter, not a semver: it bumps only for a NON-ADDITIVE
+change to an existing response member's JSON name or type (a new, purely
+additive member needs no bump). The full history is the `wire_revision`
+property's description in `openapi.v0.yaml` — `0` for every build before this
+field existed (an integer `revision`, pre-#6053), `1` for the brief
+string-typed `revision` (#6053), `2` for the first build carrying
+`wire_revision` itself. A client talking to a build too old to answer this
+field at all may use `bd_version` as an ADVISORY hint, never proof: compare it
+as semver with pre-release identifiers and treat `>= 1.3.0-rc.1` (not the
+release cutoff `1.3.0` — a `1.3.0-rc.N` build already carries the string shape
+and sorts below `1.3.0`) as a hint toward `1`, else a hint toward `0`. Two
+known builds defeat even that corrected hint: `main` up to commit
+`b3ef65c85` reports `bd_version: "1.2.2"` while already sending strings, and
+the bd-enterprise compatibility line at `d3ab32773462` reports `"1.1.0"` while
+also sending strings. A client therefore MUST accept `revision` and
+`expected_version` as either a string or a number whenever `wire_revision` is
+absent (or probe the shape directly) rather than let the inferred value
+choose a decoder, and MUST NEVER refuse solely because the inferred revision
+is `0` — see the `wire_revision` property's description for the exact
+language.
+
+`min_client_wire_revision` is the other half: the oldest revision a build
+still answers correctly. A client that knows the revision it was compiled
+against may assert it on ANY request via the optional `Bd-Wire-Revision`
+header — not only the handshake — and `checkWireRevision` refuses a request
+naming a revision below the floor with `400 invalid_argument`/
+`reason: "wire_revision_unsupported"` and a `min_wire_revision` field pinning
+the floor that was violated, before the server does any work building a body
+shaped for a revision the client has already said it cannot decode. The header
+is optional and absent by default, which is what keeps this additive: an older
+client that never sends it is served exactly as before. A malformed value
+(not a non-negative integer) is a different mistake — `reason: "invalid_value"`
+— and must never disclose `min_wire_revision`, which is reserved for a
+revision the server actually read and understood to be too old.
+
+The check runs on every route but `GET /healthz` (`wireRevisionExempt`,
+`routes.go`) — including the identity handshake itself, unlike the
+`Bd-Project-Id` stamp, which exempts the handshake because that is how a
+client LEARNS the id it must stamp with. A client that already knows the wire
+revision it was built for has no equivalent reason to omit it on the very
+first request, and the handshake is where a floor violation is cheapest to
+catch: before the client has acted on anything shaped for a revision it
+cannot decode. Liveness is exempt for the same reason `Bd-Project-Id` is: a
+probe carries no notion of either header, and refusing it for one it never
+had a reason to send would make `/healthz` lie about the process being alive.
+
+**The golden digest.** A revision bump is a promise a human makes; nothing
+enforced that the promise was kept, or that it was even necessary. CI pins
+one against the other with a golden digest, `internal/httpapi/wireshape`:
+`wireshape.Compute` walks every response's AND every request body's every
+content-type schema across the whole spec — not only `application/json`, so
+`application/problem+json` and therefore `Problem` itself is covered too —
+recursing through `$ref` and through a schema's own `allOf` or `oneOf`, and
+recording, keyed by schema and member name, each member's JSON name, type,
+format, enum values, required-ness, and nullability, plus the scalar shape of
+array items and of `additionalProperties` map values. It records every
+operation parameter (query, path, and header) as well, keyed by
+`operationId`, location, and name rather than by schema — two operations'
+same-named parameters are independent contracts — with its type, item shape,
+enum values, required-ness, style, explode, and default; style and explode
+are the effective values, OpenAPI's defaults filled in where the document
+leaves them unset, so spelling a default out changes nothing while flipping
+one does. The digest is a boundary, not the whole wire: value constraints
+such as `maxLength` or `pattern` (on members and parameters alike) and a
+composition keyword on a single member's own value are outside it, an
+object-typed or `content`-described parameter is recorded only as its
+container, and a new member or parameter always counts as additive — even a
+required one an old client will not send — so each of those needs its own
+review against `wire_revision`. `TestWireShapeDigest` fails on any
+disagreement between golden and spec, and the failure names the fix: a
+changed or removed entry without a `wire_revision` bump is drift nobody
+signed off on; a `wire_revision` LOWER than the golden's means the constant
+itself is wrong, since the revision table only ever grows; any other
+difference — a bumped `wire_revision`, or entries only added — means the
+golden is simply stale. Drift and staleness share one explicit fix,
+`go run ./internal/httpapi/wireshape/cmd/gendigest` — never run to make a
+failing test pass on an accidental shape change, only after the revision
+bump and the `openapi.v0.yaml` history entry it belongs beside; the command
+itself refuses to write a changed or removed entry unless `wire_revision`
+has moved past what the existing golden recorded, and refuses any write at a
+lowered `wire_revision`, so running it cannot silently launder drift into
+the baseline. A purely additive diff — new members or parameters, with no
+existing entry changed or removed — writes at the golden's own
+`wire_revision` or any later one.
+
+**The new-parameter and new-request-body-member token rule.** `capabilities`
+already required a `resource.verb` token for a new OPERATION; nothing
+required one for a new PARAMETER, or new JSON request body member, on an
+EXISTING operation, so a client had no single place to learn that, say, `GET
+/v0/beads/issues`'s `sort` parameter had started accepting a value.
+`issues.list.sort` is the first deliberate use of the same convention one
+level down: the token lives in the parameter's (or body member's) own
+description, exactly as `capabilities` members carry theirs, enforced by
+`TestNewParameterOnExistingOperationHasABehaviorToken` against three frozen
+baselines (`internal/httpapi/testdata/pretoken_parameters.json`,
+`pretoken_request_body_members.json`, `pretoken_operations.json`) describing
+every parameter, body member, and operation the document already had the day
+the rule was written — written once and pinned never to grow
+(`TestPretokenBaselinesNeverGrow`), since only something pre-existing and
+untokened ever belongs on them, and a brand-new operation is permanently
+exempt from the rule: its own review decides its capability story, not a
+baseline written before it existed. A backticked `a.b`(`.c`)-shaped span in a
+description is not enough on its own: the rule also checks the token against
+`Capabilities()`'s own served list, so Go identifiers or example values that
+merely look like a token (`workapi.DefaultReadyLimit`, `status.custom`) do not
+satisfy it. `TestUntokenedParameterRuleFires` and
+`TestUntokenedRequestBodyMemberRuleFires` prove the checker itself still
+distinguishes tokened, grandfathered, and untokened parameters and body
+members — including a real-but-unrelated token, which correctly passes, since
+`Capabilities()` has no per-parameter binding to check a token's relevance
+against, only its existence — against synthetic fixtures rather than the real
+spec, so the rule's own logic is covered independently of whether the current
+document happens to exercise every branch.

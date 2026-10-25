@@ -16,7 +16,7 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-func TestEmbeddedReady(t *testing.T) {
+func TestEmbeddedReadyDefaultJSONAndFlags(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -193,125 +193,6 @@ func TestEmbeddedReady(t *testing.T) {
 		}
 	})
 
-	// ===== With Blockers =====
-
-	t.Run("ready_excludes_blocked", func(t *testing.T) {
-		blocker := bdCreate(t, bd, dir, "Blocker issue", "--type", "task")
-		blocked := bdCreate(t, bd, dir, "Blocked by blocker", "--type", "task")
-
-		// Add blocking dependency: blocked depends on blocker
-		cmd := exec.Command(bd, "dep", "add", blocked.ID, blocker.ID)
-		cmd.Dir = dir
-		cmd.Env = bdEnv(dir)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("dep add failed: %v\n%s", err, out)
-		}
-
-		cmd = exec.Command(bd, "ready")
-		cmd.Dir = dir
-		cmd.Env = bdEnv(dir)
-		stdout, stderr, err := runCommandBuffers(t, cmd)
-		if err != nil {
-			t.Fatalf("bd ready failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
-		}
-		// The blocked issue should not appear in ready output
-		if strings.Contains(stdout.String(), "Blocked by blocker") {
-			t.Errorf("blocked issue should not appear in ready output: %s", stdout.String())
-		}
-	})
-
-	// ===== Exclude Label =====
-
-	t.Run("ready_exclude_label", func(t *testing.T) {
-		bdCreate(t, bd, dir, "Triage pending item", "--type", "task", "--label", "triage:pending")
-		bdCreate(t, bd, dir, "Normal ready item", "--type", "task")
-
-		cmd := exec.Command(bd, "ready", "--exclude-label", "triage:pending")
-		cmd.Dir = dir
-		cmd.Env = bdEnv(dir)
-		stdout, stderr, err := runCommandBuffers(t, cmd)
-		if err != nil {
-			t.Fatalf("bd ready --exclude-label failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
-		}
-		if strings.Contains(stdout.String(), "Triage pending item") {
-			t.Errorf("triage:pending issue should not appear with --exclude-label: %s", stdout.String())
-		}
-		if !strings.Contains(stdout.String(), "Normal ready item") {
-			t.Errorf("normal issue should still appear with --exclude-label: %s", stdout.String())
-		}
-	})
-
-	// ===== Label Any =====
-
-	readyIDs := func(t *testing.T, args ...string) ([]string, string) {
-		t.Helper()
-		cmd := exec.Command(bd, args...)
-		cmd.Dir = dir
-		cmd.Env = bdEnv(dir)
-		stdout, stderr, err := runCommandBuffers(t, cmd)
-		if err != nil {
-			t.Fatalf("bd %s failed: %v\nstdout:\n%s\nstderr:\n%s",
-				strings.Join(args, " "), err, stdout.String(), stderr.String())
-		}
-		var issues []types.IssueWithCounts
-		if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &issues); err != nil {
-			t.Fatalf("parse JSON: %v\n%s", err, stdout.String())
-		}
-		ids := make([]string, 0, len(issues))
-		for _, issue := range issues {
-			ids = append(ids, issue.ID)
-		}
-		return ids, stdout.String()
-	}
-
-	t.Run("ready_label_any", func(t *testing.T) {
-		laneA := bdCreate(t, bd, dir, "Lane A work", "--type", "task", "--label", "lany:lane-a")
-		bdCreate(t, bd, dir, "Lane B work", "--type", "task", "--label", "lany:lane-b")
-		laneC := bdCreate(t, bd, dir, "Lane C work", "--type", "task", "--label", "lany:lane-c")
-
-		ids, raw := readyIDs(t, "ready", "--json", "--label-any", "lany:lane-a,lany:lane-c")
-
-		want := map[string]bool{laneA.ID: true, laneC.ID: true}
-		if len(ids) != len(want) {
-			t.Fatalf("--label-any returned %d issues, want %d — an unfiltered ready set means the OR-set clause was dropped: %s",
-				len(ids), len(want), raw)
-		}
-		for _, id := range ids {
-			if !want[id] {
-				t.Fatalf("--label-any returned %s, which carries neither requested label: %s", id, raw)
-			}
-		}
-	})
-
-	t.Run("ready_label_any_intersects_with_label", func(t *testing.T) {
-		both := bdCreate(t, bd, dir, "Tiered lane A work", "--type", "task",
-			"--label", "lmix:tier", "--label", "lmix:lane-a")
-		bdCreate(t, bd, dir, "Untiered lane A work", "--type", "task", "--label", "lmix:lane-a")
-		bdCreate(t, bd, dir, "Tiered lane B work", "--type", "task",
-			"--label", "lmix:tier", "--label", "lmix:lane-b")
-
-		ids, raw := readyIDs(t, "ready", "--json",
-			"--label", "lmix:tier", "--label-any", "lmix:lane-a,lmix:lane-c")
-
-		if len(ids) != 1 || ids[0] != both.ID {
-			t.Fatalf("--label with --label-any returned %v, want only %s (AND-set and OR-set must both apply): %s",
-				ids, both.ID, raw)
-		}
-	})
-
-	t.Run("ready_claim_label_any_fences_to_its_lane", func(t *testing.T) {
-		// An exhausted lane must claim nothing. If --label-any is dropped here
-		// the claim silently takes unfenced work while the caller believes it
-		// is fenced to its own lane.
-		bdCreate(t, bd, dir, "Fence lane B work", "--type", "task", "--label", "lfence:lane-b")
-
-		ids, raw := readyIDs(t, "ready", "--claim", "--json", "--label-any", "lfence:lane-a")
-
-		if len(ids) != 0 {
-			t.Fatalf("--claim --label-any on an empty lane claimed %v, want nothing: %s", ids, raw)
-		}
-	})
-
 	// ===== -C flag =====
 
 	t.Run("ready_with_C_flag", func(t *testing.T) {
@@ -420,6 +301,134 @@ func TestEmbeddedReady(t *testing.T) {
 		}
 		if !strings.Contains(stdout.String(), "Ready test issue") {
 			t.Errorf("expected ready work in output, got: %s", stdout.String())
+		}
+	})
+}
+
+func TestEmbeddedReadyBlockersAndLabels(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "rd")
+	bdCreate(t, bd, dir, "Ready test issue", "--type", "task")
+
+	// ===== With Blockers =====
+
+	t.Run("ready_excludes_blocked", func(t *testing.T) {
+		blocker := bdCreate(t, bd, dir, "Blocker issue", "--type", "task")
+		blocked := bdCreate(t, bd, dir, "Blocked by blocker", "--type", "task")
+
+		// Add blocking dependency: blocked depends on blocker
+		cmd := exec.Command(bd, "dep", "add", blocked.ID, blocker.ID)
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("dep add failed: %v\n%s", err, out)
+		}
+
+		cmd = exec.Command(bd, "ready")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err != nil {
+			t.Fatalf("bd ready failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+		}
+		// The blocked issue should not appear in ready output
+		if strings.Contains(stdout.String(), "Blocked by blocker") {
+			t.Errorf("blocked issue should not appear in ready output: %s", stdout.String())
+		}
+	})
+
+	// ===== Exclude Label =====
+
+	t.Run("ready_exclude_label", func(t *testing.T) {
+		bdCreate(t, bd, dir, "Triage pending item", "--type", "task", "--label", "triage:pending")
+		bdCreate(t, bd, dir, "Normal ready item", "--type", "task")
+
+		cmd := exec.Command(bd, "ready", "--exclude-label", "triage:pending")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err != nil {
+			t.Fatalf("bd ready --exclude-label failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+		}
+		if strings.Contains(stdout.String(), "Triage pending item") {
+			t.Errorf("triage:pending issue should not appear with --exclude-label: %s", stdout.String())
+		}
+		if !strings.Contains(stdout.String(), "Normal ready item") {
+			t.Errorf("normal issue should still appear with --exclude-label: %s", stdout.String())
+		}
+	})
+
+	readyIDs := func(t *testing.T, args ...string) ([]string, string) {
+		t.Helper()
+		cmd := exec.Command(bd, args...)
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err != nil {
+			t.Fatalf("bd %s failed: %v\nstdout:\n%s\nstderr:\n%s",
+				strings.Join(args, " "), err, stdout.String(), stderr.String())
+		}
+		var issues []types.IssueWithCounts
+		if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &issues); err != nil {
+			t.Fatalf("parse JSON: %v\n%s", err, stdout.String())
+		}
+		ids := make([]string, 0, len(issues))
+		for _, issue := range issues {
+			ids = append(ids, issue.ID)
+		}
+		return ids, stdout.String()
+	}
+
+	t.Run("ready_label_any", func(t *testing.T) {
+		laneA := bdCreate(t, bd, dir, "Lane A work", "--type", "task", "--label", "lany:lane-a")
+		bdCreate(t, bd, dir, "Lane B work", "--type", "task", "--label", "lany:lane-b")
+		laneC := bdCreate(t, bd, dir, "Lane C work", "--type", "task", "--label", "lany:lane-c")
+
+		ids, raw := readyIDs(t, "ready", "--json", "--label-any", "lany:lane-a,lany:lane-c")
+
+		want := map[string]bool{laneA.ID: true, laneC.ID: true}
+		if len(ids) != len(want) {
+			t.Fatalf("--label-any returned %d issues, want %d — an unfiltered ready set means the OR-set clause was dropped: %s",
+				len(ids), len(want), raw)
+		}
+		for _, id := range ids {
+			if !want[id] {
+				t.Fatalf("--label-any returned %s, which carries neither requested label: %s", id, raw)
+			}
+		}
+	})
+
+	t.Run("ready_label_any_intersects_with_label", func(t *testing.T) {
+		both := bdCreate(t, bd, dir, "Tiered lane A work", "--type", "task",
+			"--label", "lmix:tier", "--label", "lmix:lane-a")
+		bdCreate(t, bd, dir, "Untiered lane A work", "--type", "task", "--label", "lmix:lane-a")
+		bdCreate(t, bd, dir, "Tiered lane B work", "--type", "task",
+			"--label", "lmix:tier", "--label", "lmix:lane-b")
+
+		ids, raw := readyIDs(t, "ready", "--json",
+			"--label", "lmix:tier", "--label-any", "lmix:lane-a,lmix:lane-c")
+
+		if len(ids) != 1 || ids[0] != both.ID {
+			t.Fatalf("--label with --label-any returned %v, want only %s (AND-set and OR-set must both apply): %s",
+				ids, both.ID, raw)
+		}
+	})
+
+	t.Run("ready_claim_label_any_fences_to_its_lane", func(t *testing.T) {
+		// An exhausted lane must claim nothing. If --label-any is dropped here
+		// the claim silently takes unfenced work while the caller believes it
+		// is fenced to its own lane.
+		bdCreate(t, bd, dir, "Fence lane B work", "--type", "task", "--label", "lfence:lane-b")
+
+		ids, raw := readyIDs(t, "ready", "--claim", "--json", "--label-any", "lfence:lane-a")
+
+		if len(ids) != 0 {
+			t.Fatalf("--claim --label-any on an empty lane claimed %v, want nothing: %s", ids, raw)
 		}
 	})
 }

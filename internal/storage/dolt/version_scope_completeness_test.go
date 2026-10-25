@@ -98,7 +98,7 @@ func TestEveryRawTxVersionScopeIsScopedOrExempt(t *testing.T) {
 	for key, f := range doltFns {
 		// In scope: a function that mints its own transaction AND hands it to a
 		// versioning mutator IN ITS OWN BODY. A function given a tx by
-		// withWriteTx/runDoltTransactionRecording inherits their scoping, and those two
+		// commitWriteTx/runDoltTransactionRecording inherits their scoping, and those two
 		// are covered by TestTxMintingWrappersScopeVersionedHistory below.
 		// Reachability is deliberately DIRECT, for the reasons the journal
 		// guard documents at length.
@@ -148,7 +148,15 @@ func TestEveryRawTxVersionScopeIsScopedOrExempt(t *testing.T) {
 // this second arm exists rather than being folded into the first.
 var txMintingWrappers = []string{
 	"DoltStore.runDoltTransactionRecording",
-	"DoltStore.commitWriteTx",
+	// withWriteTx and withRetryTx delegate transaction creation and scoping to
+	// commitWriteTx, which itself only delegates to commitWriteTxOn(ctx, s.db,
+	// fn) — the mc-zndi7.73 delete-fence split moved the actual BeginTx call
+	// (and the scope calls beside it) down into commitWriteTxOn so a caller
+	// holding a session-scoped resource (withDeleteFence's GET_LOCK'd
+	// *sql.Conn) could mint the retried transaction on THAT connection
+	// instead of the pool. commitWriteTxOn is therefore the real tx-minting
+	// wrapper now; list it, not its thin commitWriteTx delegate.
+	"DoltStore.commitWriteTxOn",
 }
 
 // TestTxMintingWrappersScopeVersionedHistory covers the half

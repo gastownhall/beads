@@ -200,6 +200,54 @@ func TestOpenChildrenCloseContractShape(t *testing.T) {
 	}
 }
 
+// TestBlockedErrorKeepsTheHistoricalSentence pins the compatibility half of the
+// typed refusal: its message is byte-identical to the fmt.Errorf every producer
+// used before it, so the direct and proxied CLI lines and `failed[].error` do
+// not move, while the list it prints is now typed.
+func TestBlockedErrorKeepsTheHistoricalSentence(t *testing.T) {
+	blockers := []string{"bd-2", "bd-3 (waits-for)", "bd-4 (conditional-blocks)", "external:remote:payments", "external:remote:pay (beta)"}
+	err := issueops.NewCloseBlockedError("bd-1", blockers)
+
+	legacy := fmt.Errorf("%w: %s is blocked by %v", issueops.ErrCloseBlocked, "bd-1", blockers)
+	if err.Error() != legacy.Error() {
+		t.Errorf("BlockedError = %q, want the historical %q", err.Error(), legacy.Error())
+	}
+	if !errors.Is(err, issueops.ErrCloseBlocked) {
+		t.Errorf("BlockedError does not match ErrCloseBlocked: %v", err)
+	}
+	var typed *issueops.BlockedError
+	if !errors.As(fmt.Errorf("close bd-1: %w", err), &typed) || typed.IssueID != "bd-1" {
+		t.Fatalf("errors.As through a wrap = %+v", typed)
+	}
+
+	want := []issueops.Blocker{
+		{ID: "bd-2", Type: "blocks"},
+		{ID: "bd-3", Type: "waits-for"},
+		{ID: "bd-4", Type: "conditional-blocks"},
+		{ID: "external:remote:payments"},
+		// A capability may end in a parenthesized suffix. The whole
+		// reference is the ID, and the external guard reports no type.
+		{ID: "external:remote:pay (beta)"},
+	}
+	// %#v, not %+v: Blocker implements String(), so the default verbs print
+	// the reassembled spelling — which round-trips even when the parse split
+	// an external reference wrongly, making got and want look identical.
+	if !reflect.DeepEqual(typed.Blockers, want) {
+		t.Errorf("Blockers = %#v, want %#v", typed.Blockers, want)
+	}
+	for i, blocker := range typed.Blockers {
+		if got := blocker.String(); got != blockers[i] {
+			t.Errorf("Blockers[%d].String() = %q, want the IsBlocked spelling %q", i, got, blockers[i])
+		}
+		if parsed := issueops.ParseBlocker(blocker.String()); parsed != blocker {
+			t.Errorf("ParseBlocker(String(%+v)) = %+v; the two must be inverses", blocker, parsed)
+		}
+		if got, wantExternal := blocker.External(), i >= 3; got != wantExternal {
+			t.Errorf("Blockers[%d].External() = %v, want %v", i, got, wantExternal)
+		}
+	}
+}
+
 func TestPublicDependencyConflictTypesRemainCanonical(t *testing.T) {
 	var typeConflict error = &issueops.DependencyTypeConflictError{}
 	var hierarchyConflict error = &issueops.DependencyHierarchyConflictError{}
@@ -291,4 +339,59 @@ func (operationsProbe) Close(context.Context, issueops.CloseRequest) (issueops.C
 }
 func (operationsProbe) Reopen(context.Context, issueops.ReopenRequest) (issueops.ReopenResult, error) {
 	return issueops.ReopenResult{}, nil
+}
+
+// TestCheckDottedChildDependency pins the dotted-id hierarchy rule every
+// DependencyEditor and BatchApplier enforces. It absorbs the CLI's former
+// isChildOf / isDisallowedHierarchicalDependency tables.
+func TestCheckDottedChildDependency(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		from    string
+		to      string
+		depType issueops.DependencyType
+		want    bool
+	}{
+		{"direct child blocks on parent", "bd-abc.1", "bd-abc", issueops.DepBlocks, true},
+		{"grandchild blocks on grandparent", "bd-abc.1.2", "bd-abc", issueops.DepBlocks, true},
+		{"grandchild blocks on immediate parent", "bd-abc.1.2", "bd-abc.1", issueops.DepBlocks, true},
+		{"deeply nested child blocks on root", "bd-abc.1.2.3", "bd-abc", issueops.DepBlocks, true},
+		{"child relates to parent", "bd-abc.1", "bd-abc", issueops.DepRelated, true},
+		{"grandchild parent-child to grandparent", "bd-root.1.2", "bd-root", issueops.DepParentChild, true},
+		{"immediate parent-child allowed", "bd-root.1.2", "bd-root.1", issueops.DepParentChild, false},
+		{"same id", "bd-abc", "bd-abc", issueops.DepBlocks, false},
+		{"unrelated ids", "bd-xyz", "bd-abc", issueops.DepBlocks, false},
+		{"unrelated target from a dotted child", "bd-root.1.2", "bd-other", issueops.DepBlocks, false},
+		{"sibling", "bd-abc.2", "bd-abc.1", issueops.DepBlocks, false},
+		{"parent on its child", "bd-abc", "bd-abc.1", issueops.DepBlocks, false},
+		{"prefix but not hierarchical", "bd-abcd", "bd-abc", issueops.DepBlocks, false},
+		{"textual prefix of a dotted id is not an ancestor", "bd-abc.10", "bd-abc.1", issueops.DepBlocks, false},
+		{"external target", "bd-abc.1", "external:bd-abc", issueops.DepBlocks, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := issueops.IsDottedChildDependency(tt.from, tt.to, tt.depType); got != tt.want {
+				t.Fatalf("IsDottedChildDependency(%q, %q, %q) = %v, want %v", tt.from, tt.to, tt.depType, got, tt.want)
+			}
+			err := issueops.CheckDottedChildDependency(tt.from, tt.to, tt.depType)
+			if !tt.want {
+				if err != nil {
+					t.Fatalf("CheckDottedChildDependency = %v, want nil", err)
+				}
+				return
+			}
+			var dotted *issueops.DottedChildDependencyError
+			if !errors.As(err, &dotted) || !errors.Is(err, issueops.ErrValidation) {
+				t.Fatalf("CheckDottedChildDependency = %v, want *DottedChildDependencyError matching ErrValidation", err)
+			}
+			if dotted.IssueID != tt.from || dotted.DependsOnID != tt.to || dotted.Type != tt.depType {
+				t.Fatalf("refusal = %#v, want the edge it refused", dotted)
+			}
+			// The CLI prints this sentence verbatim, so it is behaviour.
+			want := "cannot add dependency: " + tt.from + " is already a child of " + tt.to +
+				". Children inherit dependency on parent completion via hierarchy. Adding an explicit dependency would create a deadlock"
+			if err.Error() != want {
+				t.Fatalf("message = %q, want %q", err.Error(), want)
+			}
+		})
+	}
 }

@@ -365,6 +365,17 @@ func GetRedirectInfo() RedirectInfo {
 	return redirectInfoFor(findLocalBdsDirInRepo(), findLocalBeadsDir)
 }
 
+// GetDiscoveredRedirectInfo is GetRedirectInfo without the BEADS_DIR override:
+// it reports the redirect that discovery finds from the cwd, the one the cwd's
+// own workspace holds. GetRedirectInfo cannot answer that once BEADS_DIR is
+// set, because when the repo root's .beads holds no redirect it checks
+// BEADS_DIR itself. A workspace redirect nested below the repo root or
+// inherited by a git worktree is then masked, and a BEADS_DIR naming another
+// workspace's redirected .beads reports that redirect as if the cwd held it.
+func GetDiscoveredRedirectInfo() RedirectInfo {
+	return redirectInfoFor(findLocalBdsDirInRepo(), findDiscoveredLocalBeadsDir)
+}
+
 // GetRedirectInfoFrom is GetRedirectInfo for the workspace at dir rather than
 // the process cwd: the .beads directory at dir's git repository root is
 // checked for a redirect first, then the nearest .beads walking up from dir.
@@ -475,7 +486,12 @@ func findLocalBeadsDir() string {
 	if beadsDir := os.Getenv("BEADS_DIR"); beadsDir != "" {
 		return canonicalizeBeadsDirPath(beadsDir)
 	}
+	return findDiscoveredLocalBeadsDir()
+}
 
+// findDiscoveredLocalBeadsDir is findLocalBeadsDir without the BEADS_DIR
+// override: the local .beads directory discovery finds from the cwd.
+func findDiscoveredLocalBeadsDir() string {
 	// For worktrees, check worktree-local redirect first (per-worktree override).
 	// Returns the raw worktree .beads dir (not the resolved target) since
 	// findLocalBeadsDir doesn't follow redirects — callers use FollowRedirect.
@@ -531,8 +547,10 @@ func findBeadsDirUpward(start string) string {
 // Embedded Dolt checks both embeddeddolt/ and the legacy dolt/ path. Returns
 // empty string if no database is configured or found.
 func findDatabaseInBeadsDir(beadsDir string, _ bool) string {
-	// Check for metadata.json first (single source of truth)
-	cfg, err := configfile.Load(beadsDir)
+	// Check for metadata.json first (single source of truth). Discovery reads
+	// it without migrating a legacy config.json: callers locate a workspace
+	// here before admission has decided whether this build may touch it.
+	cfg, err := configfile.LoadForDiscovery(beadsDir)
 	if err != nil {
 		// A present but unreadable/invalid metadata file is authoritative. Do
 		// not bypass it by discovering a leftover local Dolt directory; callers
@@ -725,6 +743,15 @@ func FindBeadsDirFrom(startDir string) string {
 	}
 
 	return ""
+}
+
+// HasProjectFiles reports whether discovery treats beadsDir as a beads
+// workspace (hasBeadsProjectFiles). bd run in a directory whose .beads it
+// does not treat as one finds no workspace there ("no beads database
+// found"), so a path that reaches such a .beads from another workspace
+// treats it the same way rather than opening it.
+func HasProjectFiles(beadsDir string) bool {
+	return hasBeadsProjectFiles(beadsDir)
 }
 
 // hasBeadsProjectFiles checks if a .beads directory contains actual project files.

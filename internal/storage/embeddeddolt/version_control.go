@@ -197,6 +197,21 @@ func (s *EmbeddedDoltStore) CommitMergeResolution(ctx context.Context, message s
 	return err
 }
 
+// CommitConfigOnly commits the config table (GH#4078). Embedded mode is
+// single-process, so the '-Am' Commit cannot sweep a concurrent operation's
+// working set — the scoped-staging concern that exists in server mode
+// (GH#2455) does not apply here, and this aliases Commit for the same
+// reason CommitWithConfig does.
+func (s *EmbeddedDoltStore) CommitConfigOnly(ctx context.Context, message string) error {
+	return s.Commit(ctx, message)
+}
+
+// CommitConfigUserKVOnly aliases Commit for the reason CommitConfigOnly does:
+// with no concurrent writer, there is no other writer's config row to screen out.
+func (s *EmbeddedDoltStore) CommitConfigUserKVOnly(ctx context.Context, message string) error {
+	return s.Commit(ctx, message)
+}
+
 func (s *EmbeddedDoltStore) AddRemote(ctx context.Context, name, url string) error {
 	return s.AddRemoteWithRef(ctx, name, url, "")
 }
@@ -538,6 +553,14 @@ func (s *EmbeddedDoltStore) ListRemotes(ctx context.Context) ([]storage.RemoteIn
 // where before it read it holding no lock at all.
 
 func (s *EmbeddedDoltStore) Push(ctx context.Context) error {
+	// GH#5433: every Pull variant below auto-commits pending changes first;
+	// push never did, so a working set with pending-but-uncommitted changes
+	// (auto-commit off, or a session that ended right after a write with no
+	// intervening commit) silently pushed nothing new and still reported
+	// success.
+	if _, err := s.CommitPending(ctx, "beads"); err != nil {
+		return fmt.Errorf("commit pending before push: %w", err)
+	}
 	return s.withPeerAuth(ctx, defaultRemote, func(user string) error {
 		return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
 			return vcPush(ctx, db, defaultRemote, s.branch, user)
@@ -603,6 +626,10 @@ func (s *EmbeddedDoltStore) PullRemoteWithStrategy(ctx context.Context, remote, 
 }
 
 func (s *EmbeddedDoltStore) ForcePush(ctx context.Context) error {
+	// GH#5433: see Push.
+	if _, err := s.CommitPending(ctx, "beads"); err != nil {
+		return fmt.Errorf("commit pending before push: %w", err)
+	}
 	return s.withPeerAuth(ctx, defaultRemote, func(user string) error {
 		return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
 			return vcForcePush(ctx, db, defaultRemote, s.branch, user)
@@ -611,6 +638,10 @@ func (s *EmbeddedDoltStore) ForcePush(ctx context.Context) error {
 }
 
 func (s *EmbeddedDoltStore) PushRemote(ctx context.Context, remote string, force bool) error {
+	// GH#5433: see Push.
+	if _, err := s.CommitPending(ctx, "beads"); err != nil {
+		return fmt.Errorf("commit pending before push: %w", err)
+	}
 	return s.withPeerAuth(ctx, remote, func(user string) error {
 		return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
 			if force {
@@ -647,6 +678,10 @@ func (s *EmbeddedDoltStore) Fetch(ctx context.Context, peer string) error {
 }
 
 func (s *EmbeddedDoltStore) PushTo(ctx context.Context, peer string) error {
+	// GH#5433: see Push.
+	if _, err := s.CommitPending(ctx, "beads"); err != nil {
+		return fmt.Errorf("commit pending before push: %w", err)
+	}
 	return s.withPeerAuth(ctx, peer, func(user string) error {
 		return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
 			return versioncontrolops.Push(ctx, db, peer, s.branch, user)

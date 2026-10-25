@@ -1,0 +1,539 @@
+{
+  "recorded_from": "4a67d0d028",
+  "steps": [
+    "create a",
+    "create b blocked by a",
+    "create epic",
+    "create epic.1 under epic",
+    "create wisp w1",
+    "create no-history nh",
+    "create c",
+    "create d",
+    "create e",
+    "update a fields labels metadata",
+    "update a no-op",
+    "update w1 to persistent",
+    "update c to ephemeral",
+    "update d parent epic",
+    "add dependencies",
+    "remove dependency b-\u003ea",
+    "comment on a and nh",
+    "claim heartbeat release b",
+    "claim e and reclaim no lease",
+    "metadata compare-and-set on a",
+    "close reopen close epic.1",
+    "close batch b and refused epic",
+    "force close blocked no-history nh",
+    "create batch",
+    "apply batch",
+    "defer f1 into the past and wake it",
+    "delete f2",
+    "create wisps x y z",
+    "update wisp x fields labels metadata",
+    "update wisp x no-op",
+    "claim and heartbeat refuse wisps",
+    "reclaim sweep scoped to in-progress wisp x",
+    "release wisp x",
+    "add and remove wisp dependencies",
+    "comment on wisp x",
+    "metadata compare-and-set on wisp x",
+    "close reopen wisp x",
+    "apply batch on the wisps plane",
+    "close batch wisps x and nh",
+    "defer wisp z into the past and wake it",
+    "delete wisp y",
+    "store create s1",
+    "store create issues s2 s3",
+    "store import upsert s1 and new s4",
+    "store update s2",
+    "store update s2 no-op",
+    "store labels",
+    "store dependencies",
+    "store comment",
+    "store claim s3",
+    "store close and reopen s2",
+    "store promote wisp sw",
+    "store transaction",
+    "store delete s3"
+  ],
+  "tables": {
+    "@dolt_log": {
+      "columns": [
+        "seq",
+        "message"
+      ],
+      "rows": 28,
+      "sha256": "df2b8cf059f646557d21be3a0eca54f8561525f3d7e7ee714cfb65962d31012f"
+    },
+    "@dolt_status": {
+      "columns": [
+        "table_name",
+        "staged",
+        "status"
+      ],
+      "rows": 3,
+      "sha256": "ee3e710041f54216c2ae7e45bc7774cfcaa42aff3f4d96f5996fc4a7cc419f31"
+    },
+    "bd_events_journal": {
+      "columns": [
+        "seq",
+        "ts",
+        "op",
+        "issue_id",
+        "issue_json",
+        "dep_json",
+        "comment_json",
+        "actor"
+      ],
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "bd_events_seq": {
+      "columns": [
+        "id",
+        "next_seq"
+      ],
+      "rows": 1,
+      "sha256": "13751b39fe07c3673f53b4f2c5ef7f2a28b26c0daed72eb7332c93c1fe520618"
+    },
+    "child_counters": {
+      "columns": [
+        "parent_id",
+        "last_child"
+      ],
+      "rows": 1,
+      "sha256": "753b8feea7bdc0fc74468faa597a32984edc501e9873e9f4ee1df7b59d56d0a6"
+    },
+    "comments": {
+      "columns": [
+        "id",
+        "issue_id",
+        "author",
+        "text",
+        "created_at"
+      ],
+      "rows": 2,
+      "sha256": "d5870471fe72b8e50fe898978f24a80a23e07750ab538d47353acfabfb0e9aed"
+    },
+    "compaction_snapshots": {
+      "columns": [
+        "id",
+        "issue_id",
+        "compaction_level",
+        "snapshot_json",
+        "created_at"
+      ],
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "config": {
+      "columns": [
+        "key",
+        "value"
+      ],
+      "rows": 10,
+      "sha256": "671b33231eb47e4ad897051f4e8d86d3cca88685eeaa9ced537fe24c927fdea9"
+    },
+    "custom_statuses": {
+      "columns": [
+        "name",
+        "category"
+      ],
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "custom_types": {
+      "columns": [
+        "name"
+      ],
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "dependencies": {
+      "columns": [
+        "id",
+        "issue_id",
+        "type",
+        "created_at",
+        "created_by",
+        "metadata",
+        "thread_id",
+        "depends_on_issue_id",
+        "depends_on_wisp_id",
+        "depends_on_external"
+      ],
+      "rows": 6,
+      "sha256": "90f7dcd9895000df82d3b062d71a4c8ca81e7d5c9912f60d76515cb3eeee40d6"
+    },
+    "events": {
+      "columns": [
+        "issue_id",
+        "event_type",
+        "actor",
+        "old_value",
+        "new_value",
+        "comment",
+        "created_at",
+        "id"
+      ],
+      "rows": 51,
+      "sha256": "898f31694ce12dcd693f374634aea358b68239f6954fdcaae3b6342c1242f2bd"
+    },
+    "federation_peers": {
+      "columns": [
+        "name",
+        "remote_url",
+        "username",
+        "password_encrypted",
+        "sovereignty",
+        "last_sync",
+        "created_at",
+        "updated_at"
+      ],
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "ignored_schema_migrations": {
+      "columns": [
+        "version",
+        "applied_at",
+        "content_hash"
+      ],
+      "rows": 27,
+      "sha256": "7164db2c129cbaafbd9c426d27e809d043cafc77e8aef1f68d1760905a685acb"
+    },
+    "interactions": {
+      "columns": [
+        "id",
+        "kind",
+        "created_at",
+        "actor",
+        "issue_id",
+        "model",
+        "prompt",
+        "response",
+        "error",
+        "tool_name",
+        "exit_code",
+        "parent_id",
+        "label",
+        "reason",
+        "extra"
+      ],
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "issue_counter": {
+      "columns": [
+        "prefix",
+        "last_id"
+      ],
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "issue_snapshots": {
+      "columns": [
+        "id",
+        "issue_id",
+        "snapshot_time",
+        "compaction_level",
+        "original_size",
+        "compressed_size",
+        "original_content",
+        "archived_events"
+      ],
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "issue_versions": {
+      "columns": [
+        "issue_id",
+        "revision",
+        "epoch",
+        "durable_state",
+        "change_actor",
+        "change_agent",
+        "change_message",
+        "change_at",
+        "removed_at",
+        "removed_reason",
+        "attribution_status"
+      ],
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "issues": {
+      "columns": [
+        "id",
+        "content_hash",
+        "title",
+        "description",
+        "design",
+        "acceptance_criteria",
+        "notes",
+        "status",
+        "priority",
+        "issue_type",
+        "assignee",
+        "estimated_minutes",
+        "created_at",
+        "created_by",
+        "owner",
+        "updated_at",
+        "closed_at",
+        "closed_by_session",
+        "external_ref",
+        "spec_id",
+        "compaction_level",
+        "compacted_at",
+        "compacted_at_commit",
+        "original_size",
+        "sender",
+        "ephemeral",
+        "wisp_type",
+        "pinned",
+        "is_template",
+        "mol_type",
+        "work_type",
+        "source_system",
+        "metadata",
+        "source_repo",
+        "close_reason",
+        "event_kind",
+        "actor",
+        "target",
+        "payload",
+        "await_type",
+        "await_id",
+        "timeout_ns",
+        "waiters",
+        "hook_bead",
+        "role_bead",
+        "agent_state",
+        "last_activity",
+        "role_type",
+        "rig",
+        "due_at",
+        "defer_until",
+        "no_history",
+        "started_at",
+        "is_blocked",
+        "row_lock",
+        "storage_class",
+        "current_revision"
+      ],
+      "rows": 15,
+      "sha256": "1f81df40f4c4d458f20cfb6535ca13468fa03fbd10276c44752977813a4b7e20"
+    },
+    "labels": {
+      "columns": [
+        "issue_id",
+        "label"
+      ],
+      "rows": 8,
+      "sha256": "0102293e23eec630b67542f93c5d8da6eef5ca627cff8662970e7cb211b013ef"
+    },
+    "leases": {
+      "columns": [
+        "issue_id",
+        "holder",
+        "granted_at",
+        "lease_expires_at",
+        "heartbeat_at",
+        "granted_node"
+      ],
+      "rows": 1,
+      "sha256": "1eca894450e8e801850ed2cbf1c746775ad50868acaaf17e033a5da1e4be10aa"
+    },
+    "local_metadata": {
+      "columns": [
+        "key",
+        "value"
+      ],
+      "rows": 31,
+      "sha256": "c1d1cbc41ca9968c5c7dd380609c28126c4024868dbade26575ce105b8931fb3"
+    },
+    "metadata": {
+      "columns": [
+        "key",
+        "value"
+      ],
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "provenance_events": {
+      "columns": [
+        "id",
+        "issue_id",
+        "kind",
+        "actor",
+        "ref",
+        "ref_kind",
+        "payload",
+        "source",
+        "occurred_at",
+        "created_at"
+      ],
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "repo_mtimes": {
+      "columns": [
+        "repo_path",
+        "jsonl_path",
+        "mtime_ns",
+        "last_checked"
+      ],
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "routes": {
+      "columns": [
+        "prefix",
+        "path",
+        "created_at",
+        "updated_at"
+      ],
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "schema_migrations": {
+      "columns": [
+        "version",
+        "content_hash"
+      ],
+      "rows": 69,
+      "sha256": "1d7a6ae809f330f8b4c3516af50ce7604c1db3cd4c1177af3e5c2f1991d74e14"
+    },
+    "store_epoch": {
+      "columns": [
+        "id",
+        "epoch",
+        "bumped_at",
+        "bumped_reason"
+      ],
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "wisp_child_counters": {
+      "columns": [
+        "parent_id",
+        "last_child"
+      ],
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "wisp_comments": {
+      "columns": [
+        "id",
+        "issue_id",
+        "author",
+        "text",
+        "created_at"
+      ],
+      "rows": 2,
+      "sha256": "3c5f1e3eac9ff32fb1158c4421909ddd49c9131edff756c4a0e184114da93350"
+    },
+    "wisp_dependencies": {
+      "columns": [
+        "id",
+        "issue_id",
+        "depends_on_issue_id",
+        "depends_on_wisp_id",
+        "depends_on_external",
+        "type",
+        "created_at",
+        "created_by",
+        "metadata",
+        "thread_id"
+      ],
+      "rows": 2,
+      "sha256": "80f14f79545a236513ea88f0e873f3dd477f7763aaa8cbfaa8f659a517c2a909"
+    },
+    "wisp_events": {
+      "columns": [
+        "id",
+        "issue_id",
+        "event_type",
+        "actor",
+        "old_value",
+        "new_value",
+        "comment",
+        "created_at"
+      ],
+      "rows": 25,
+      "sha256": "1ee25446153c51b39c4de60d7f03bb56172a84e72d28df2dd44ff79aa5fc3b23"
+    },
+    "wisp_labels": {
+      "columns": [
+        "issue_id",
+        "label"
+      ],
+      "rows": 4,
+      "sha256": "f9c2698a90ceb3bf0ee8c4034af2845b54d65cc7bdd7638965a4682ecd104c37"
+    },
+    "wisps": {
+      "columns": [
+        "id",
+        "content_hash",
+        "title",
+        "description",
+        "design",
+        "acceptance_criteria",
+        "notes",
+        "status",
+        "priority",
+        "issue_type",
+        "assignee",
+        "estimated_minutes",
+        "created_at",
+        "created_by",
+        "owner",
+        "updated_at",
+        "closed_at",
+        "closed_by_session",
+        "external_ref",
+        "spec_id",
+        "compaction_level",
+        "compacted_at",
+        "compacted_at_commit",
+        "original_size",
+        "sender",
+        "ephemeral",
+        "wisp_type",
+        "pinned",
+        "is_template",
+        "mol_type",
+        "work_type",
+        "source_system",
+        "metadata",
+        "source_repo",
+        "close_reason",
+        "event_kind",
+        "actor",
+        "target",
+        "payload",
+        "await_type",
+        "await_id",
+        "timeout_ns",
+        "waiters",
+        "hook_bead",
+        "role_bead",
+        "agent_state",
+        "last_activity",
+        "role_type",
+        "rig",
+        "due_at",
+        "defer_until",
+        "no_history",
+        "started_at",
+        "row_lock",
+        "storage_class",
+        "current_revision",
+        "is_blocked"
+      ],
+      "rows": 6,
+      "sha256": "f28b157579dedd4373778dc6050b2d1995e1fe30e545e5c70c6b6ccf08ed75bf"
+    }
+  }
+}

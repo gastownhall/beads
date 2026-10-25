@@ -161,17 +161,6 @@ func writeRawPatch(t *testing.T, body string) string {
 	return file
 }
 
-// requireAutofixBash skips when bash cannot run the autofix scripts: they run
-// on Linux runners and use bash 4 associative arrays, and macOS runners ship
-// /bin/bash 3.2.
-func requireAutofixBash(t *testing.T) {
-	t.Helper()
-	requireHostTool(t, "bash")
-	if err := exec.Command("bash", "-c", "declare -A probe=()").Run(); err != nil {
-		t.Skip("bash lacks associative arrays (bash >= 4 required)")
-	}
-}
-
 func runAutofixCheck(t *testing.T, script, dir, patch string) (string, error) {
 	t.Helper()
 	requireAutofixBash(t)
@@ -528,7 +517,7 @@ func TestBazelAutofixPushFlow(t *testing.T) {
 			t.Errorf("subject = %q", subject)
 		}
 		if !strings.Contains(res.log, "<!-- bazel-sync-autofix -->") || !strings.Contains(res.log, "Pushed `") ||
-			!strings.Contains(res.log, "DOCS_AUTOFIX_TOKEN") {
+			!strings.Contains(res.log, "gastownhall-autofix App token") {
 			t.Errorf("want a pushed-commit comment with the token note:\n%s", res.log)
 		}
 		if strings.Contains(res.log, "push-token") {

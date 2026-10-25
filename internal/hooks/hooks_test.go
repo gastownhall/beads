@@ -1,6 +1,7 @@
 package hooks
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -419,6 +420,63 @@ func TestRun_Async(t *testing.T) {
 	expected := "async\n"
 	if string(output) != expected {
 		t.Errorf("Hook output = %q, want %q", string(output), expected)
+	}
+}
+
+// TestRunAsync_SilentOnHookFailure pins the polarity the wasm test cannot:
+// runAsync warns for a platform capability refusal and stays silent for every
+// other error, including a hook that really ran and exited non-zero.
+//
+// It has to live on a native platform. On js/wasm runHook is an unconditional
+// stub whose only return is errHookExecutionUnsupported, so there
+// errors.Is(err, errHookExecutionUnsupported) and a bare err != nil agree for
+// every input and no wasm test can tell them apart. Here they disagree: widening
+// the guard in runAsync makes this test print
+// `warning: hook "…" was not run: exit status 1` for a hook that did run — a
+// false statement, and a break of the fire-and-forget silence the same function
+// documents.
+func TestRunAsync_SilentOnHookFailure(t *testing.T) {
+	switch runtime.GOOS {
+	case "windows":
+		// Same limitation TestRun_Async skips for: Windows executes hook
+		// files directly via CreateProcess with no shebang dispatch, so an
+		// extensionless /bin/sh script never reaches a non-zero exit.
+		t.Skip("hook script execution not supported on Windows - see GH#3800")
+	case "js":
+		// The stub above; the js/wasm contract is pinned by
+		// TestRunHookReportsUnsupportedExecution in hooks_wasm_test.go.
+		t.Skip("js/wasm cannot execute hooks, so it has no failed-hook outcome to observe")
+	}
+
+	tmpDir := t.TempDir()
+	hookPath := filepath.Join(tmpDir, HookOnCreate)
+	markerPath := filepath.Join(tmpDir, "hook_ran.txt")
+
+	// The marker is what makes the empty-stderr assertion non-vacuous: it
+	// separates "executed and exited 1" from "never executed", which would also
+	// produce no warning and would pass for the wrong reason.
+	hookScript := "#!/bin/sh\n" +
+		"echo \"ran\" > \"" + markerPath + "\"\n" +
+		"exit 1\n"
+	if err := os.WriteFile(hookPath, []byte(hookScript), 0755); err != nil {
+		t.Fatalf("Failed to create hook file: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	runner := NewRunner(tmpDir)
+	issue := &types.Issue{ID: "bd-test", Title: "Test"}
+
+	runner.runAsync(hookPath, EventCreate, issue, &stderr)
+	if !runner.Wait(runner.Timeout()) {
+		t.Fatal("asynchronous hook did not finish within the runner timeout")
+	}
+
+	if _, err := os.Stat(markerPath); err != nil {
+		t.Fatalf("hook did not execute (marker %s: %v); the silence below would prove nothing", markerPath, err)
+	}
+
+	if got := stderr.String(); got != "" {
+		t.Errorf("stderr = %q, want %q: a hook that ran and exited non-zero must not be reported as not run", got, "")
 	}
 }
 

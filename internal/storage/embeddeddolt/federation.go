@@ -13,10 +13,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
@@ -95,12 +97,23 @@ func (s *EmbeddedDoltStore) decryptPassword(encrypted []byte) (string, error) {
 	}
 	nonceSize := gcm.NonceSize()
 	if len(encrypted) < nonceSize {
-		return "", fmt.Errorf("ciphertext too short")
+		// A blob too short to carry its nonce is the same local-corruption
+		// class as the failed GCM open below: the stored credential cannot be
+		// decrypted on this machine, and re-adding the peer is the fix.
+		// Classify it through the same sentinel so federation status reports
+		// the credential problem rather than an unreachable peer.
+		return "", storage.CredentialKeyMismatchError(filepath.Join(s.beadsDir, credentialKeyFile), fmt.Errorf("ciphertext too short"))
 	}
 	nonce, ciphertext := encrypted[:nonceSize], encrypted[nonceSize:]
 	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
 	if err != nil {
-		return "", err
+		// The common shape: the peer row replicated with the database but the key
+		// file did not, so machine B pulls the row, ensureCredentialKey generates
+		// a fresh key, and every decrypt fails authentication. Enrich at the
+		// single decrypt funnel so every reader reports it: peer resolution for
+		// the remote verbs, GetFederationPeer, ListFederationPeers. The wording
+		// is shared with package dolt, which enriches its own two read paths.
+		return "", storage.CredentialKeyMismatchError(filepath.Join(s.beadsDir, credentialKeyFile), err)
 	}
 	return string(plaintext), nil
 }
@@ -141,7 +154,7 @@ func (s *EmbeddedDoltStore) GetFederationPeer(ctx context.Context, name string) 
 	if len(row.EncryptedPwd) > 0 {
 		row.Peer.Password, err = s.decryptPassword(row.EncryptedPwd)
 		if err != nil {
-			return nil, fmt.Errorf("decrypt password: %w", err)
+			return nil, fmt.Errorf("decrypt password for peer %s: %w", name, err)
 		}
 	}
 	return &row.Peer, nil
@@ -186,6 +199,8 @@ func (s *EmbeddedDoltStore) withPeerAuth(ctx context.Context, peer string, fn fu
 	federationEnvMutex.Lock()
 	defer federationEnvMutex.Unlock()
 
+	warnStoredPeerSuppressesAmbientPassword(peer, p)
+
 	restoreUser := overrideEnv("DOLT_REMOTE_USER", p.Username)
 	restorePassword := overrideEnv("DOLT_REMOTE_PASSWORD", p.Password)
 	defer func() {
@@ -194,6 +209,54 @@ func (s *EmbeddedDoltStore) withPeerAuth(ctx context.Context, peer string, fn fu
 	}()
 
 	return fn(p.Username)
+}
+
+// federationWarnWriter receives the peer-credential diagnostics. Defaults to
+// os.Stderr, matching the unconditional warnings this package writes from
+// store.go; overridable in tests.
+var federationWarnWriter io.Writer = os.Stderr
+
+// warnStoredPeerSuppressesAmbientPassword emits one line when a peer stores a
+// username but no password while DOLT_REMOTE_PASSWORD is set. Suppressing the
+// ambient password is the intended security default, but a setup that used to
+// authenticate off the environment then fails with no hint about why (GH#5085
+// review). Call with federationEnvMutex held and before overrideEnv rewrites
+// the pair, so the value read is the ambient one and not another peer's
+// installed password.
+func warnStoredPeerSuppressesAmbientPassword(peer string, p *storage.FederationPeer) {
+	// Defensive: withPeerAuth returns before this guard when both fields are empty.
+	if p.Username == "" || p.Password != "" {
+		return
+	}
+	// An ambient empty value is treated as no ambient password: unsetting it
+	// changes nothing the user could be puzzled by.
+	if os.Getenv("DOLT_REMOTE_PASSWORD") == "" {
+		return
+	}
+	// add-peer upserts the whole row, so a re-run without --sovereignty
+	// clears a stored tier (GH#5213): carry the stored tier into the
+	// suggested command. The password is left to add-peer's no-echo prompt
+	// rather than suggested as an argument that lands in shell history.
+	//
+	// The peer name, username and tier are fields of a federation_peers row,
+	// which travels with a pull, and this line is written straight to stderr,
+	// past bd's error printers. So the prose spells the name with %q, and
+	// the command takes each value through CommandArg: a value that is not
+	// one shell word becomes a placeholder, named escaped after the command.
+	peerArg, peerNote := remedy.CommandArg(runtime.GOOS, peer, "<peer>")
+	userArg, userNote := remedy.CommandArg(runtime.GOOS, p.Username, "<user>")
+	sovereignty, tierNote := "", ""
+	if p.Sovereignty != "" {
+		var tierArg string
+		tierArg, tierNote = remedy.CommandArg(runtime.GOOS, p.Sovereignty, "<tier>")
+		sovereignty = " --sovereignty " + tierArg
+	}
+	fmt.Fprintf(federationWarnWriter,
+		"Warning: peer %q stores a username with an empty password, "+
+			"which overrides the ambient DOLT_REMOTE_PASSWORD for this operation; "+
+			"store a password by re-running `bd federation add-peer %s <url> "+
+			"--user %s%s`%s and entering it at the prompt.\n",
+		peer, peerArg, userArg, sovereignty, peerNote+userNote+tierNote)
 }
 
 // verifyPeerRemoteURL fails closed when the live remote named peer does not
@@ -209,13 +272,16 @@ func (s *EmbeddedDoltStore) verifyPeerRemoteURL(ctx context.Context, peer, store
 		return tx.QueryRowContext(ctx, "SELECT url FROM dolt_remotes WHERE name = ?", peer).Scan(&liveURL)
 	})
 	if errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("federation peer %s has stored credentials but no remote named %s exists; re-run 'bd federation add-peer %s <url> --user <user>' to restore it", peer, peer, peer)
+		// The peer name is a row of the database, which travels with a
+		// pull, so it is named and pasted through the remedy printer.
+		arg, note := remedy.CommandArg(runtime.GOOS, peer, "<peer>")
+		return fmt.Errorf("federation peer %s has stored credentials but no remote named %s exists; re-run `bd federation add-peer %s <url> --user <user>`%s to restore it", remedy.PrintedValue(peer), remedy.PrintedValue(peer), arg, note)
 	}
 	if err != nil {
-		return fmt.Errorf("resolve remote URL for peer %s: %w", peer, err)
+		return fmt.Errorf("resolve remote URL for peer %s: %w", remedy.PrintedValue(peer), err)
 	}
 	if liveURL != storedURL {
-		return fmt.Errorf("remote %s points at %q but federation peer %s stored its credentials for %q; refusing to send stored credentials to a diverged URL. Remove and re-add the peer to rebind it", peer, liveURL, peer, storedURL)
+		return fmt.Errorf("remote %s points at %q but federation peer %s stored its credentials for %q; refusing to send stored credentials to a diverged URL. Remove and re-add the peer to rebind it", remedy.PrintedValue(peer), liveURL, remedy.PrintedValue(peer), storedURL)
 	}
 	return nil
 }

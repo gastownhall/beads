@@ -177,17 +177,33 @@ type testSeedData struct {
 	readyTask     string // P0, labels: backend, no blockers
 }
 
-func TestEmbeddedList(t *testing.T) {
+// seededListWorkspace is the TestEmbeddedList* tests' shared setup: an
+// initialized workspace seeded by seedTestData.
+func seededListWorkspace(t *testing.T) (bd, dir string, seed testSeedData) {
+	t.Helper()
+	bd = buildEmbeddedBD(t)
+	dir, _, _ = bdInit(t, bd, "--prefix", "tl")
+
+	// Seed test data
+	seed = seedTestData(t, bd, dir)
+	return bd, dir, seed
+}
+
+// The TestEmbeddedListFiltering* and TestEmbeddedListSearchAndOutput* tests
+// were split from TestEmbeddedList (originally ~298s, measured under
+// --config=embedded) into top-level tests over disjoint subtest groups, each
+// on its own seeded workspace, for CI shard balance (see
+// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every
+// original subtest is preserved exactly once, in its original order within
+// its group; each group ran on the unmodified seed in the original too (the
+// subtests before each split point create no issues).
+func TestEmbeddedListFilteringBasicAndLabels(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
 	t.Parallel()
 
-	bd := buildEmbeddedBD(t)
-	dir, _, _ := bdInit(t, bd, "--prefix", "tl")
-
-	// Seed test data
-	seed := seedTestData(t, bd, dir)
+	bd, dir, seed := seededListWorkspace(t)
 
 	// --- A. Basic filtering ---
 
@@ -449,6 +465,15 @@ func TestEmbeddedList(t *testing.T) {
 			t.Fatalf("--skip-labels JSON leaked labels: %v", out.Issues[0].Labels)
 		}
 	})
+}
+
+func TestEmbeddedListFilteringStatusAndHierarchy(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd, dir, seed := seededListWorkspace(t)
 
 	// --- C. Status/special filtering ---
 	// Note: --ready, --pinned, --status closed/deferred/in_progress tests are
@@ -500,6 +525,29 @@ func TestEmbeddedList(t *testing.T) {
 		}
 		if !containsID(issues, seed.childTaskB) {
 			t.Errorf("child B should appear with --parent, got %v", ids)
+		}
+	})
+
+	t.Run("parent_filter_short_id", func(t *testing.T) {
+		// Regression for #5440: a --parent value without its project prefix
+		// (e.g. "c7v" instead of "tl-c7v") must resolve the same way
+		// `bd history <shortid>` already does (GH#4868), not error "not found".
+		// Uses the plain (non-JSON) render, matching the issue's own repro and
+		// tree_parent above -- --json --parent takes a different code path
+		// (reader.List's own filter, not getHierarchicalChildren) that this
+		// fix does not touch; see the relay notes for that separate finding.
+		idParts := strings.Split(seed.epic, "-")
+		shortID := idParts[len(idParts)-1]
+		if shortID == seed.epic {
+			t.Fatalf("test setup: seed.epic %q has no prefix to strip", seed.epic)
+		}
+
+		out := bdList(t, bd, dir, "--parent", shortID)
+		if !strings.Contains(out, seed.childTaskA) {
+			t.Errorf("child A %s should appear with --parent %s (short id):\n%s", seed.childTaskA, shortID, out)
+		}
+		if !strings.Contains(out, seed.childTaskB) {
+			t.Errorf("child B %s should appear with --parent %s (short id):\n%s", seed.childTaskB, shortID, out)
 		}
 	})
 
@@ -582,6 +630,15 @@ func TestEmbeddedList(t *testing.T) {
 			t.Error("--flat should not contain tree characters")
 		}
 	})
+}
+
+func TestEmbeddedListSearchAndOutputSearchAndSort(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd, dir, seed := seededListWorkspace(t)
 
 	// --- E. Content search ---
 
@@ -684,6 +741,15 @@ func TestEmbeddedList(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestEmbeddedListSearchAndOutputFormats(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd, dir, seed := seededListWorkspace(t)
 
 	// --- I. Output formats ---
 
@@ -745,6 +811,7 @@ func TestEmbeddedList(t *testing.T) {
 		if !strings.Contains(out, "digraph") {
 			t.Errorf("dot output should contain 'digraph' header, got: %s", out)
 		}
+		assertDotCanonicalOrder(t, out)
 	})
 
 	t.Run("format_dot_output_error", func(t *testing.T) {

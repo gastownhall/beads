@@ -175,6 +175,10 @@ func assertServedCapabilities(t *testing.T, body map[string]any) {
 	if len(want) == 0 {
 		t.Fatal("this build derives no capabilities; the assertion below would pass against a server that advertises nothing")
 	}
+	// Every bd serve topology composes its roles through the external-dependency
+	// policy, so every one advertises the conditional policy token too.
+	want = append(want, httpapi.CapExternalDependencies)
+	slices.Sort(want)
 	if !slices.Equal(got, want) {
 		t.Errorf("capabilities = %v, want %v", got, want)
 	}

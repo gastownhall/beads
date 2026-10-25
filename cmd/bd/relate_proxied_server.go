@@ -66,7 +66,7 @@ func runRelateProxiedServer(ctx context.Context, args []string) error {
 		}
 		// bd relate is an explicit dependency verb, so the bulk path's
 		// EmitEvent trail matches the direct route's history behavior.
-		if _, err := uw.DependencyUseCase().AddDependencies(ctx, deps, actor, domain.BulkAddDepsOpts{}); err != nil {
+		if _, err := uw.DependencyUseCase().AddDependencies(ctx, deps, currentActor(), domain.BulkAddDepsOpts{}); err != nil {
 			return "", err
 		}
 		return fmt.Sprintf("bd: relate %s %s", id1, id2), nil
@@ -111,11 +111,11 @@ func runUnrelateProxiedServer(ctx context.Context, args []string) error {
 				return "", fmt.Errorf("issue not found: %s", id)
 			}
 		}
-		removed1, err := uw.DependencyUseCase().RemoveDependencyBySource(ctx, id1, id2, actor)
+		removed1, err := uw.DependencyUseCase().RemoveDependencyBySource(ctx, id1, id2, currentActor())
 		if err != nil {
 			return "", fmt.Errorf("failed to remove relates-to %s -> %s: %w", id1, id2, err)
 		}
-		removed2, err := uw.DependencyUseCase().RemoveDependencyBySource(ctx, id2, id1, actor)
+		removed2, err := uw.DependencyUseCase().RemoveDependencyBySource(ctx, id2, id1, currentActor())
 		if err != nil {
 			return "", fmt.Errorf("failed to remove relates-to %s -> %s: %w", id2, id1, err)
 		}

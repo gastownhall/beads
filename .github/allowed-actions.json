@@ -1,0 +1,17 @@
+{
+  "github_owned_allowed": true,
+  "verified_allowed": false,
+  "patterns_allowed": [
+    "DeterminateSystems/determinate-nix-action@*",
+    "DeterminateSystems/nix-installer-action@*",
+    "anchore/sbom-action@*",
+    "codecov/codecov-action@*",
+    "cygwin/cygwin-install-action@*",
+    "docker/setup-buildx-action@*",
+    "dorny/paths-filter@*",
+    "goreleaser/goreleaser-action@*",
+    "msys2/setup-msys2@*",
+    "ossf/scorecard-action@*",
+    "peter-evans/create-pull-request@*"
+  ]
+}

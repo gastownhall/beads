@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# worker-env-sync-issue: open or update the "out of step" issue.
+#
+#   tools/rbe/worker-env-sync-issue REPORT RUN_URL
+#
+# nightly.yml's rbe-worker-env-sync job runs this when tools/rbe/worker-env-sync
+# exits 1 (beads' worker-env pin differs from gascity main's, so beads' remote
+# actions queue on rbe-west). REPORT is the markdown report worker-env-sync
+# wrote (WORKER_ENV_SYNC_REPORT): the diff and the pin to commit. With an open
+# issue of the same title labelled ci/infra, the issue's body becomes the
+# latest report and a comment links this run (so watchers hear about it every
+# night until it is fixed); otherwise a new issue is opened with the label.
+# Close the issue once the copy is synced.
+#
+# Env: GITHUB_REPOSITORY (owner/repo), GH_TOKEN (issues: write).
+set -euo pipefail
+
+report=${1:?usage: worker-env-sync-issue REPORT RUN_URL}
+run_url=${2:?usage: worker-env-sync-issue REPORT RUN_URL}
+repo=${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is unset}
+title="rbe worker-env out of step with gascity main"
+label="ci/infra"
+
+body=$(mktemp)
+trap 'rm -f "$body"' EXIT
+{
+	cat "$report"
+	printf '\nReported by %s. Close this issue once tools/rbe/worker-env.txt and the platforms/BUILD.bazel pin match gascity main (tools/rbe/worker-env-sync passes).\n' "$run_url"
+} >"$body"
+
+# The label may not exist yet; an existing one is left as it is.
+gh label create "$label" --repo "$repo" --color d93f0b \
+	--description "CI infrastructure (rbe-west, runners, cross-repo pins)" >/dev/null 2>&1 || true
+
+# Exact-title match among the open ci/infra issues (no search index lag).
+number=$(gh issue list --repo "$repo" --state open --label "$label" --limit 100 \
+	--json number,title --jq ".[] | select(.title == \"$title\") | .number" | head -n 1)
+if [ -n "$number" ]; then
+	gh issue edit "$number" --repo "$repo" --body-file "$body"
+	gh issue comment "$number" --repo "$repo" --body "Still out of step with gascity main: $run_url"
+	echo "worker-env-sync-issue: updated #$number"
+else
+	gh issue create --repo "$repo" --title "$title" --label "$label" --body-file "$body"
+fi

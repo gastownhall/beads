@@ -1298,7 +1298,7 @@ func initGitRepoWithCommit(dir string) error {
 	if err := addCmd.Run(); err != nil {
 		return err
 	}
-	commitCmd := exec.Command("git", "commit", "-m", "Initial commit")
+	commitCmd := gitCommand("commit", "-m", "Initial commit")
 	commitCmd.Dir = dir
 	return commitCmd.Run()
 }

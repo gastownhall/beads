@@ -67,7 +67,7 @@ echo "=== Check 1: Removed commands ==="
 SYNC_REFS=$(grep -rn 'bd sync\b' \
     "$PROJECT_ROOT"/docs/*.md \
     "$PROJECT_ROOT"/docs/*/*.md \
-    "$PROJECT_ROOT"/AGENT_INSTRUCTIONS.md \
+    "$PROJECT_ROOT"/cmd/bd/AGENTS.md \
     "$PROJECT_ROOT"/AGENTS.md \
     "$PROJECT_ROOT"/README.md \
     "$PROJECT_ROOT"/npm-package/*.md \
@@ -108,7 +108,7 @@ fi
 BRANCH_REFS=$(grep -rn 'bd init.*--branch' \
     "$PROJECT_ROOT"/docs/*.md \
     "$PROJECT_ROOT"/docs/*/*.md \
-    "$PROJECT_ROOT"/AGENT_INSTRUCTIONS.md \
+    "$PROJECT_ROOT"/cmd/bd/AGENTS.md \
     "$PROJECT_ROOT"/AGENTS.md \
     "$PROJECT_ROOT"/README.md \
     2>/dev/null \
@@ -135,7 +135,7 @@ echo "=== Check 3: Legacy storage references ==="
 SQLITE_REFS=$(grep -rn 'beads\.db\|default\.db\|sqlite3.*\.beads\|\.beads/.*\.db' \
     "$PROJECT_ROOT"/docs/*.md \
     "$PROJECT_ROOT"/docs/*/*.md \
-    "$PROJECT_ROOT"/AGENT_INSTRUCTIONS.md \
+    "$PROJECT_ROOT"/cmd/bd/AGENTS.md \
     "$PROJECT_ROOT"/AGENTS.md \
     "$PROJECT_ROOT"/README.md \
     2>/dev/null \

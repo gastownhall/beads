@@ -85,7 +85,7 @@ func TestWorktreeRemoveProcessHelper(t *testing.T) {
 }
 
 func runWorktreeRemoveHookGit(dir string, args ...string) error {
-	command := exec.Command("git", args...)
+	command := gitCommand(args...)
 	command.Dir = dir
 	command.Env = append(scrubWorktreeGitRoutingEnv(os.Environ()), "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_SYSTEM="+os.DevNull, "GIT_CONFIG_NOSYSTEM=1", "GIT_NO_REPLACE_OBJECTS=1")
 	output, err := command.CombinedOutput()
@@ -444,7 +444,7 @@ func (fixture *worktreeRemovalFixture) assertRemovedAndCleaned(t *testing.T) {
 }
 func (fixture *worktreeRemovalFixture) git(t *testing.T, directory string, args ...string) string {
 	t.Helper()
-	command := exec.Command("git", args...)
+	command := gitCommand(args...)
 	command.Dir = directory
 	command.Env = append(scrubWorktreeGitRoutingEnv(os.Environ()), "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_SYSTEM="+os.DevNull, "GIT_CONFIG_NOSYSTEM=1", "GIT_NO_REPLACE_OBJECTS=1")
 	output, err := command.CombinedOutput()

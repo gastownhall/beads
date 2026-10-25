@@ -19,6 +19,7 @@ import (
 type backupState struct {
 	LastDoltCommit string    `json:"last_dolt_commit"`
 	Timestamp      time.Time `json:"timestamp"`
+	LastCapWarnAt  time.Time `json:"last_cap_warn_at"`
 }
 
 // backupDir returns the backup directory path, creating it if needed.
@@ -161,12 +162,16 @@ func runBackupExport(ctx context.Context, backend localBackupBackend, force bool
 		return nil, err
 	}
 
+	// Read the watermark before the sync. A concurrent commit may land while
+	// BackupToDir is running; recording a later HEAD would claim that commit is
+	// present in a snapshot that started before it existed.
+	currentCommit, err := backend.CurrentCommit(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get current commit: %w", err)
+	}
+
 	// Change detection: skip if nothing changed (unless forced)
 	if !force {
-		currentCommit, err := backend.CurrentCommit(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get current commit: %w", err)
-		}
 		if currentCommit == state.LastDoltCommit && state.LastDoltCommit != "" {
 			debug.Logf("backup: no changes since last backup (commit %s)\n", truncateHash(currentCommit))
 			return state, nil
@@ -190,11 +195,8 @@ func runBackupExport(ctx context.Context, backend localBackupBackend, force bool
 		return nil, err
 	}
 
-	// Update watermarks
-	currentCommit, err := backend.CurrentCommit(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get current commit for state: %w", err)
-	}
+	// The pre-sync commit is the newest commit this backup is guaranteed to
+	// contain. If HEAD moved during the sync, the next backup must see it.
 	state.LastDoltCommit = currentCommit
 	state.Timestamp = time.Now().UTC()
 

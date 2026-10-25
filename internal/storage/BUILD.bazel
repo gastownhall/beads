@@ -7,6 +7,8 @@ go_library(
         "annotation_queries.go",
         "batch.go",
         "batch_apply.go",
+        "batch_close_policy.go",
+        "blocked_recomputer.go",
         "bulk_issues.go",
         "child_counter_reservation.go",
         "compaction.go",
@@ -22,6 +24,8 @@ go_library(
         "hook_batch_applier.go",
         "hook_batch_closer.go",
         "hook_batch_creator.go",
+        "hook_batch_getter.go",
+        "hook_blocked_lister.go",
         "hook_blockingannotator.go",
         "hook_bootstrapper.go",
         "hook_commenter.go",
@@ -32,12 +36,15 @@ go_library(
         "hook_dependency_editor.go",
         "hook_edgereader.go",
         "hook_graph_counter.go",
+        "hook_heartbeater.go",
         "hook_init_verifier.go",
         "hook_issue_claimer.go",
         "hook_issue_operations.go",
         "hook_issue_reader.go",
+        "hook_lease_reclaimer.go",
         "hook_memories.go",
         "hook_metadata_cas.go",
+        "hook_molecule_stepper.go",
         "hook_querier.go",
         "hook_ready_claimer.go",
         "hook_ready_counter.go",
@@ -58,6 +65,7 @@ go_library(
         "storage.go",
         "sync.go",
         "version_control.go",
+        "version_lister.go",
         "versioned.go",
         "wake_defers.go",
     ],
@@ -65,6 +73,7 @@ go_library(
     visibility = ["//:__subpackages__"],
     deps = [
         "//internal/hooks",
+        "//internal/storage/kvkeys",
         "//internal/types",
         "//issueops",
         "//journalops",
@@ -76,6 +85,8 @@ go_test(
     name = "storage_test",
     srcs = [
         "batch_apply_test.go",
+        "batch_close_policy_test.go",
+        "blocked_recomputer_test.go",
         "contract_leg_registry_test.go",
         "directory_size_test.go",
         "hook_batch_applier_test.go",
@@ -84,9 +95,11 @@ go_test(
         "hook_decorator_internal_test.go",
         "hook_decorator_test.go",
         "hook_dependency_editor_test.go",
+        "hook_heartbeater_test.go",
         "hook_issue_claimer_test.go",
         "hook_issue_operations_test.go",
         "hook_issue_reader_test.go",
+        "hook_lease_reclaimer_test.go",
         "hook_metadata_cas_test.go",
         "hook_ready_claimer_test.go",
         "hook_relations_test.go",
@@ -105,6 +118,7 @@ go_test(
     data = [
         ":tree_go_srcs",
         "//backend/conformance:go_srcs",
+        "//internal/httpclient:go_srcs",
     ],
     embed = [":storage"],
     deps = [
@@ -134,7 +148,10 @@ filegroup(
         ":go_srcs",
         "//internal/storage/backendnames:go_srcs",
         "//internal/storage/backends:go_srcs",
+        "//internal/storage/batchbench:go_srcs",
+        "//internal/storage/batchfixtures:go_srcs",
         "//internal/storage/contextinfo:go_srcs",
+        "//internal/storage/createbatchequiv:go_srcs",
         "//internal/storage/dberrors:go_srcs",
         "//internal/storage/dbproxy/identity:go_srcs",
         "//internal/storage/dbproxy/pidfile:go_srcs",
@@ -153,6 +170,7 @@ filegroup(
         "//internal/storage/externaldeps:go_srcs",
         "//internal/storage/fs:go_srcs",
         "//internal/storage/git:go_srcs",
+        "//internal/storage/historyoffequiv:go_srcs",
         "//internal/storage/issueops:go_srcs",
         "//internal/storage/journalscan:go_srcs",
         "//internal/storage/kvkeys:go_srcs",
@@ -161,7 +179,9 @@ filegroup(
         "//internal/storage/schema:go_srcs",
         "//internal/storage/sqlbuild:go_srcs",
         "//internal/storage/sqlclass:go_srcs",
+        "//internal/storage/sqlcount:go_srcs",
         "//internal/storage/storagecontract:go_srcs",
+        "//internal/storage/unsupportedgen:go_srcs",
         "//internal/storage/uow:go_srcs",
         "//internal/storage/versioncontrolops:go_srcs",
     ],
@@ -169,3 +189,64 @@ filegroup(
 )
 
 # --- end go_srcs ---
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_doc_files",
+    srcs = glob(
+        [
+            "**/*.md",
+            "**/*.mdx",
+        ],
+        allow_empty = True,
+        exclude = ["**/node_modules/**"],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = [
+            "**/*_test.go",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+        exclude = ["**/node_modules/**"],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_other_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.go",
+            "**/*.md",
+            "**/*.mdx",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+# --- end repo_files ---

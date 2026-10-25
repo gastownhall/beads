@@ -1,17 +1,62 @@
 package doltutil
 
 import (
-	"fmt"
+	"net"
+	"strconv"
 	"time"
 
 	mysql "github.com/go-sql-driver/mysql"
+
+	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/remedy"
 )
+
+// maxAllowedPacketBytes is the client-side packet ceiling pinned into every
+// server DSN. See the field comment in ServerDSN.String for why it must be set
+// explicitly at all.
+//
+// The value is 1 GiB, deliberately NOT go-sql-driver/mysql's own 64 MiB
+// default. It matches what the server we actually talk to reports: Dolt's SQL
+// engine defines max_allowed_packet with Default 1073741824, and its type
+// (NewSystemUintType("max_allowed_packet", 1024, 1073741824)) caps the sysvar
+// at that same 1 GiB, so no Dolt server can report a larger value than this.
+// Pinning the driver default instead would have lowered the client's ceiling
+// from ~1 GiB to 64 MiB and made the driver reject oversized statements
+// locally with ErrPktTooLarge — a real regression for large imports and base64
+// content, which is why this is not simply mysql.NewConfig()'s value.
+//
+// Trade-off worth stating: the probe this replaces set the ceiling from the
+// server's *configured* value, so an operator who lowers max_allowed_packet
+// below 1 GiB no longer gets a client-side rejection. Nor does the server
+// reject the statement instead: Dolt's engine does not enforce the sysvar for
+// ordinary query packets (go-mysql-server reads it only in LOAD_FILE), so a
+// lowered setting is no longer honored anywhere on the statement path.
+const maxAllowedPacketBytes = 1 << 30
+
+// ServerAddr is the TCP address of the Dolt server at host and port, as
+// net.JoinHostPort joins them. An IPv6 literal host may be configured bare
+// ("::1") or bracketed ("[::1]"): both name the server at "[::1]:port". Join a
+// configured Dolt server host with this, not net.JoinHostPort or "%s:%d": each
+// of those dials only one of the two spellings.
+func ServerAddr(host string, port int) string {
+	return net.JoinHostPort(configfile.UnbracketHost(host), strconv.Itoa(port))
+}
+
+// PrintedServerAddr is ServerAddr(host, port) as a message names it: through
+// the remedy printer (remedy.PrintedValue). host is the workspace's dolt.host
+// or metadata.json dolt_server_host, which a cloned repository commits, so
+// every message that names the Dolt server's address names it this way, and
+// a host holding a carriage return or terminal escape cannot redraw the
+// advice printed with it. Dial ServerAddr; print PrintedServerAddr.
+func PrintedServerAddr(host string, port int) string {
+	return remedy.PrintedValue(ServerAddr(host, port))
+}
 
 // ServerDSN holds connection parameters for building a MySQL DSN to a Dolt server.
 // All DSNs built with this struct set parseTime=true and multiStatements=true.
 type ServerDSN struct {
 	Socket   string // Unix domain socket path; when set, Net="unix" and Host/Port are ignored
-	Host     string
+	Host     string // an IPv6 literal bare or bracketed; see ServerAddr
 	Port     int
 	User     string
 	Password string        //nolint:gosec // G117: MySQL DSN password field; required by the connection-string builder, not serialized as JSON
@@ -28,17 +73,17 @@ func (d ServerDSN) String() string {
 		timeout = 5 * time.Second
 	}
 
-	net := "tcp"
-	addr := fmt.Sprintf("%s:%d", d.Host, d.Port)
+	network := "tcp"
+	addr := ServerAddr(d.Host, d.Port)
 	if d.Socket != "" {
-		net = "unix"
+		network = "unix"
 		addr = d.Socket
 	}
 
 	cfg := mysql.Config{
 		User:            d.User,
 		Passwd:          d.Password,
-		Net:             net,
+		Net:             network,
 		Addr:            addr,
 		DBName:          d.Database,
 		ParseTime:       true,
@@ -55,7 +100,22 @@ func (d ServerDSN) String() string {
 		// extra round-trip when interpolation is safe. Independent of
 		// MultiStatements. The driver rejects it only with custom unsafe
 		// collations, which this DSN never sets.
-		InterpolateParams:    true,
+		InterpolateParams: true,
+		// MaxAllowedPacket must be set explicitly because this config is built
+		// as a composite literal rather than via mysql.NewConfig(), which is
+		// what normally supplies the driver's defaults. Left at the zero value,
+		// FormatDSN emits maxAllowedPacket=0, and the driver then runs
+		// "SELECT @@max_allowed_packet" while establishing every new connection
+		// (connector.go: the probe is taken whenever cfg.MaxAllowedPacket <= 0).
+		// That is an extra round-trip per connection, paid on every pool
+		// expansion — the cost that matters against a high-latency remote Dolt
+		// server, where connections are opened far more often than the packet
+		// limit ever changes.
+		//
+		// See maxAllowedPacketBytes for why the value is the Dolt server's own
+		// 1 GiB ceiling rather than the driver's 64 MiB default: pinning must
+		// not shrink what the client is willing to send.
+		MaxAllowedPacket:     maxAllowedPacketBytes,
 		Timeout:              timeout,
 		AllowNativePasswords: true,
 	}

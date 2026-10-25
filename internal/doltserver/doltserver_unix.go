@@ -160,3 +160,12 @@ func gracefulStop(pid int, timeout time.Duration) error {
 	time.Sleep(100 * time.Millisecond)
 	return nil
 }
+
+// killProcessGroup SIGKILLs the process group pgid leads. Start launches
+// each dolt sql-server as a group leader (Setpgid), so this reaches a dolt
+// that a non-exec wrapper started, too.
+func killProcessGroup(pgid int) {
+	if pgid > 0 {
+		_ = syscall.Kill(-pgid, syscall.SIGKILL)
+	}
+}

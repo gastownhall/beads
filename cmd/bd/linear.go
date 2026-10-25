@@ -338,14 +338,14 @@ func runLinearSync(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	engine := tracker.NewEngine(lt, trackerStore, actor)
+	engine := tracker.NewEngine(lt, trackerStore, currentActor())
 	engine.OnMessage = func(msg string) { fmt.Println("  " + msg) }
 	engine.OnWarning = func(msg string) { fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }
 
 	engine.PullHooks = buildLinearPullHooksForStore(ctx, trackerStore, linearPullHookOptions{
 		Milestones: milestones,
 		DryRun:     dryRun,
-		Actor:      actor,
+		Actor:      currentActor(),
 	})
 
 	opts := tracker.SyncOptions{
@@ -488,7 +488,7 @@ func buildLinearPullHooksForStore(ctx context.Context, st tracker.Store, opts li
 	hooks := &tracker.PullHooks{}
 	hookActor := opts.Actor
 	if hookActor == "" {
-		hookActor = actor
+		hookActor = currentActor()
 	}
 
 	var generateID func(context.Context, *types.Issue) error

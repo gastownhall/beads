@@ -104,6 +104,7 @@ func printValidateChecks(checks []validateCheckResult) {
 
 	var passCount, warnCount, failCount int
 	for _, cr := range checks {
+		cr.check = cr.check.printed()
 		var statusIcon string
 		switch cr.check.Status {
 		case statusOK:
@@ -164,7 +165,8 @@ func applyValidateFixes(path string, checks []validateCheckResult) {
 
 		fmt.Println("\nFixable issues:")
 		for i, check := range fixable {
-			fmt.Printf("  %d. %s: %s\n", i+1, check.Name, check.Message)
+			shown := check.printed()
+			fmt.Printf("  %d. %s: %s\n", i+1, shown.Name, shown.Message)
 		}
 		fmt.Printf("\nThis will attempt to fix %d issue(s). Continue? (Y/n): ", len(fixable))
 		reader := bufio.NewReader(os.Stdin)

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -169,6 +170,12 @@ func RunBatchApplyAppliesEveryItemInDeclarationOrder(t *testing.T, ctx context.C
 	}
 	if got := batchApplyColumn(t, ctx, fixture, "status", blocked); got == string(types.StatusClosed) {
 		t.Errorf("%s was closed by a request that only asked to close %s", blocked, blocker)
+	}
+	// Neither create item names a creator, so each defaults to the request's actor.
+	for _, id := range []string{blocked, blocker} {
+		if got := batchApplyColumn(t, ctx, fixture, "created_by", id); got != "apply-writer" {
+			t.Errorf("%s created_by = %q, want the request's actor %q", id, got, "apply-writer")
+		}
 	}
 }
 
@@ -881,9 +888,12 @@ func RunBatchApplyEvaluatesExpectedAssigneeAsModified(t *testing.T, ctx context.
 // close it. The refusal is the assertion; the rollback of the parent it created
 // is what says the refusal took the request with it.
 //
-// POSITIVE HALF: the identical request with Force lands, which is the whole of
-// what Force does ("bypasses blocker and open-child close policy, and nothing
-// else") and the proof that the refusal was the policy rather than the shape.
+// POSITIVE HALF: the identical request with Force lands, and that is the proof
+// the refusal was the policy rather than the shape. Force "bypasses blocker and
+// open-child close policy, the pin and the assignee fence, and never the
+// template guard" (batchapplier.go), and the parent trips no guard — the
+// unforced half reached the policy, which the guards run before — so the
+// policy is the only refusal Force had to waive.
 func RunBatchApplyClosePolicyEvaluatesAtTheCloseItem(t *testing.T, ctx context.Context, fixture BatchApplyFixture) {
 	t.Helper()
 	parent := fixture.IssuePrefix + "-closepolicy-parent"
@@ -923,7 +933,7 @@ func RunBatchApplyClosePolicyEvaluatesAtTheCloseItem(t *testing.T, ctx context.C
 		t.Errorf("%s status = %q under Force, want %q", parent, got, types.StatusClosed)
 	}
 	if got := batchApplyColumn(t, ctx, fixture, "status", child); got != string(types.StatusOpen) {
-		t.Errorf("%s status = %q, want %q: Force bypasses the close policy and nothing else", child, got, types.StatusOpen)
+		t.Errorf("%s status = %q, want %q: Force waives the parent's close policy, it does not close the child", child, got, types.StatusOpen)
 	}
 	assertBatchApplyTypedEdgeCount(t, ctx, fixture, child, parent, string(publicops.DepParentChild), 1)
 }
@@ -1521,6 +1531,215 @@ func RunBatchApplyNormalizesTheWaitsForGate(t *testing.T, ctx context.Context, f
 	})
 }
 
+// RunBatchApplyStampsSpawnerIDOnlyWhenNamed is the S11 review fix-up
+// regression for HIGH-2: a waits-for DepAddItem must only acquire
+// metadata.spawner_id when the caller explicitly named a spawner
+// (HasSpawner=true, which bd create --graph sets when the plan declares
+// edges[].spawner_key/spawner_id, as does an embedder lowering such a plan
+// onto this role). An edge with no named spawner must keep its gate-only
+// metadata untouched — stamping it unconditionally from the resolved target
+// caused unnecessary rewrite/version churn when gc re-applies the same edge
+// (see CHANGELOG.md).
+func RunBatchApplyStampsSpawnerIDOnlyWhenNamed(t *testing.T, ctx context.Context, fixture BatchApplyFixture) {
+	t.Helper()
+	spawner := fixture.IssuePrefix + "-spawner-named"
+	waiter := fixture.IssuePrefix + "-waiter-named"
+	batchApplySeedIssue(t, ctx, fixture, spawner, types.StatusOpen)
+	batchApplySeedIssue(t, ctx, fixture, waiter, types.StatusOpen)
+
+	batchApplyMust(t, ctx, fixture, publicops.ApplyBatchRequest{
+		Actor: "apply-writer",
+		Items: []publicops.ApplyItem{
+			{Kind: publicops.ItemDepAdd, DepAdd: &publicops.DepAddItem{
+				Source:     publicops.Ref{ID: waiter},
+				Target:     publicops.Ref{ID: spawner},
+				Type:       publicops.DepWaitsFor,
+				Metadata:   `{"gate":"any-children"}`,
+				HasSpawner: true,
+			}},
+		},
+	})
+	stored := batchApplyEdgeMetadata(t, ctx, fixture, waiter, spawner)
+	var meta types.WaitsForMeta
+	if err := json.Unmarshal([]byte(stored), &meta); err != nil {
+		t.Fatalf("stored named-spawner metadata %q: %v", stored, err)
+	}
+	if meta.SpawnerID != spawner {
+		t.Errorf("named-spawner edge spawner_id = %q, want %q (metadata %q)", meta.SpawnerID, spawner, stored)
+	}
+
+	spawner2 := fixture.IssuePrefix + "-spawner-unnamed"
+	waiter2 := fixture.IssuePrefix + "-waiter-unnamed"
+	batchApplySeedIssue(t, ctx, fixture, spawner2, types.StatusOpen)
+	batchApplySeedIssue(t, ctx, fixture, waiter2, types.StatusOpen)
+
+	batchApplyMust(t, ctx, fixture, publicops.ApplyBatchRequest{
+		Actor: "apply-writer",
+		Items: []publicops.ApplyItem{
+			batchApplyDepAdd(publicops.Ref{ID: waiter2}, publicops.Ref{ID: spawner2}, publicops.DepWaitsFor, `{"gate":"any-children"}`),
+		},
+	})
+	stored2 := batchApplyEdgeMetadata(t, ctx, fixture, waiter2, spawner2)
+	var meta2 types.WaitsForMeta
+	if err := json.Unmarshal([]byte(stored2), &meta2); err != nil {
+		t.Fatalf("stored unnamed-spawner metadata %q: %v", stored2, err)
+	}
+	if meta2.SpawnerID != "" {
+		t.Errorf("unnamed-spawner edge must not stamp spawner_id, got %q (metadata %q)", meta2.SpawnerID, stored2)
+	}
+}
+
+// RunBatchApplyCarriesThreadIDOntoTheStoredEdge pins DepAddItem.ThreadID
+// (the 2026-10 Opus-review HIGH-2 finding): a conversation-threading id named
+// on a dep_add item must land on the stored dependency row's own thread_id
+// column, and an item that names none must store none. ThreadID is a plain
+// column read independently of HasSpawner/Metadata, so this is its own case
+// rather than a clause folded onto the spawner one above.
+//
+// Wired onto the http leg this exercises BOTH halves of the wire at once: the
+// client's applyDepAddItemBody encode (batchapplier.go) and the server's
+// applyDepAddItemMembers decode (internal/httpapi/batch_apply.go) must each
+// carry the field, because either one silently dropping it leaves the stored
+// column blank and fails the assertion below.
+func RunBatchApplyCarriesThreadIDOntoTheStoredEdge(t *testing.T, ctx context.Context, fixture BatchApplyFixture) {
+	t.Helper()
+	source := fixture.IssuePrefix + "-thread-source"
+	target := fixture.IssuePrefix + "-thread-target"
+	batchApplySeedIssue(t, ctx, fixture, source, types.StatusOpen)
+	batchApplySeedIssue(t, ctx, fixture, target, types.StatusOpen)
+
+	const thread = "thread-conv-1"
+	batchApplyMust(t, ctx, fixture, publicops.ApplyBatchRequest{
+		Actor: "apply-writer",
+		Items: []publicops.ApplyItem{
+			{Kind: publicops.ItemDepAdd, DepAdd: &publicops.DepAddItem{
+				Source: publicops.Ref{ID: source}, Target: publicops.Ref{ID: target},
+				Type: publicops.DepBlocks, ThreadID: thread,
+			}},
+		},
+	})
+	if got := batchApplyEdgeThreadID(t, ctx, fixture, source, target); got != thread {
+		t.Errorf("stored edge thread_id = %q, want %q", got, thread)
+	}
+
+	source2 := fixture.IssuePrefix + "-thread-none-source"
+	target2 := fixture.IssuePrefix + "-thread-none-target"
+	batchApplySeedIssue(t, ctx, fixture, source2, types.StatusOpen)
+	batchApplySeedIssue(t, ctx, fixture, target2, types.StatusOpen)
+	batchApplyMust(t, ctx, fixture, publicops.ApplyBatchRequest{
+		Actor: "apply-writer",
+		Items: []publicops.ApplyItem{
+			batchApplyDepAdd(publicops.Ref{ID: source2}, publicops.Ref{ID: target2}, publicops.DepBlocks, ""),
+		},
+	})
+	if got := batchApplyEdgeThreadID(t, ctx, fixture, source2, target2); got != "" {
+		t.Errorf("an edge naming no thread must not stamp thread_id, got %q", got)
+	}
+}
+
+// RunBatchApplyCarriesThreadIDOntoAnExistingEdge pins DepAddItem.ThreadID on
+// the re-add arm: a dep_add naming an edge that already exists with the same
+// type is the idempotent re-add, and a thread it names still has to reach the
+// stored row. That arm once compared and rewrote metadata alone, so a
+// thread-only re-add was a silent no-op and a re-add moving both landed the
+// metadata and dropped the thread — on the very path gc re-applies its plans
+// through.
+//
+// The steps run on ONE edge, each from the state the step before it left: a
+// thread-only re-add puts a thread on an edge that had none, a re-add moving
+// the gate and the thread lands both, and a re-add naming no thread keeps the
+// stored one, because an empty ThreadID names no thread rather than asking for
+// none.
+func RunBatchApplyCarriesThreadIDOntoAnExistingEdge(t *testing.T, ctx context.Context, fixture BatchApplyFixture) {
+	t.Helper()
+	source := fixture.IssuePrefix + "-rethread-source"
+	spawner := fixture.IssuePrefix + "-rethread-spawner"
+	batchApplySeedIssue(t, ctx, fixture, source, types.StatusOpen)
+	batchApplySeedIssue(t, ctx, fixture, spawner, types.StatusOpen)
+
+	add := func(gate, thread string) {
+		t.Helper()
+		batchApplyMust(t, ctx, fixture, publicops.ApplyBatchRequest{
+			Actor: "apply-writer",
+			Items: []publicops.ApplyItem{
+				{Kind: publicops.ItemDepAdd, DepAdd: &publicops.DepAddItem{
+					Source: publicops.Ref{ID: source}, Target: publicops.Ref{ID: spawner},
+					Type: publicops.DepWaitsFor, Metadata: `{"gate":"` + gate + `"}`, ThreadID: thread,
+				}},
+			},
+		})
+	}
+	assertEdge := func(step, wantGate, wantThread string) {
+		t.Helper()
+		assertBatchApplyEdgeCount(t, ctx, fixture, source, spawner, 1)
+		stored := batchApplyEdgeMetadata(t, ctx, fixture, source, spawner)
+		var meta types.WaitsForMeta
+		if err := json.Unmarshal([]byte(stored), &meta); err != nil {
+			t.Fatalf("%s: stored waits-for metadata %q is not a gate object: %v", step, stored, err)
+		}
+		if meta.Gate != wantGate {
+			t.Errorf("%s: stored gate = %q (metadata %q), want %q", step, meta.Gate, stored, wantGate)
+		}
+		if got := batchApplyEdgeThreadID(t, ctx, fixture, source, spawner); got != wantThread {
+			t.Errorf("%s: stored edge thread_id = %q, want %q", step, got, wantThread)
+		}
+	}
+
+	add(types.WaitsForAllChildren, "")
+	assertEdge("the first add, naming no thread", types.WaitsForAllChildren, "")
+
+	add(types.WaitsForAllChildren, "thread-conv-1")
+	assertEdge("a re-add moving the thread alone", types.WaitsForAllChildren, "thread-conv-1")
+
+	add(types.WaitsForAnyChildren, "thread-conv-2")
+	assertEdge("a re-add moving the gate and the thread", types.WaitsForAnyChildren, "thread-conv-2")
+
+	add(types.WaitsForAnyChildren, "")
+	assertEdge("a re-add naming no thread", types.WaitsForAnyChildren, "thread-conv-2")
+}
+
+// RunBatchApplyRefusesAThreadIDLongerThanItsColumn pins the bound on
+// DepAddItem.ThreadID: one longer than the thread_id column holds is
+// ErrValidation and writes no edge, on every leg alike. The http leg's decode
+// refused it as a typed 400 while the local legs carried it to the write, where
+// it failed as whatever storage error the column raised, mid-transaction — two
+// error classes for one request. The shared plan bounds it now, before any
+// database work.
+//
+// The positive half is the same edge with a thread exactly at the bound, which
+// lands whole; without it, a role refusing every thread id satisfies the
+// refusal.
+func RunBatchApplyRefusesAThreadIDLongerThanItsColumn(t *testing.T, ctx context.Context, fixture BatchApplyFixture) {
+	t.Helper()
+	source := fixture.IssuePrefix + "-longthread-source"
+	target := fixture.IssuePrefix + "-longthread-target"
+	batchApplySeedIssue(t, ctx, fixture, source, types.StatusOpen)
+	batchApplySeedIssue(t, ctx, fixture, target, types.StatusOpen)
+
+	request := func(thread string) publicops.ApplyBatchRequest {
+		return publicops.ApplyBatchRequest{
+			Actor: "apply-writer",
+			Items: []publicops.ApplyItem{
+				{Kind: publicops.ItemDepAdd, DepAdd: &publicops.DepAddItem{
+					Source: publicops.Ref{ID: source}, Target: publicops.Ref{ID: target},
+					Type: publicops.DepBlocks, ThreadID: thread,
+				}},
+			},
+		}
+	}
+	tooLong := strings.Repeat("t", types.MaxFieldLen+1)
+	if _, err := fixture.BatchApplier.ApplyBatch(ctx, request(tooLong)); !errors.Is(err, publicops.ErrValidation) {
+		t.Fatalf("a %d-character thread_id: error = %v, want ErrValidation", len(tooLong), err)
+	}
+	assertBatchApplyEdgeCount(t, ctx, fixture, source, target, 0)
+
+	atBound := strings.Repeat("t", types.MaxFieldLen)
+	batchApplyMust(t, ctx, fixture, request(atBound))
+	if got := batchApplyEdgeThreadID(t, ctx, fixture, source, target); got != atBound {
+		t.Errorf("a %d-character thread_id stored as %d characters, want it whole", len(atBound), len(got))
+	}
+}
+
 // RunBatchApplySplicesAForwardMetadataRef pins the one exception to the
 // backward-only rule (CreateItem.MetadataRefs): "IT IS THE ONE PLACE A KEY MAY
 // REACH FORWARD … Every id is minted before any splice is applied, so the
@@ -1782,21 +2001,56 @@ func RunBatchApplyLandsAnIdempotencyRecordWithItsWork(t *testing.T, ctx context.
 // alone is satisfied by a bound one step away.
 func RunBatchApplyBoundsTheItemCount(t *testing.T, ctx context.Context, fixture BatchApplyFixture) {
 	t.Helper()
+	RunBatchApplyBoundsTheItemCountAtScale(t, ctx, fixture, publicops.MaxApplyBatchItems)
+}
+
+// RunBatchApplyBoundsTheItemCountAtScale is RunBatchApplyBoundsTheItemCount
+// with the "at bound" half's REAL applied count overridable to fewer than
+// issueops.MaxApplyBatchItems, for a backend whose real engine makes
+// applying a full MaxApplyBatchItems batch prohibitively slow in one CI
+// configuration (embedded-dolt under the race detector: this subtest alone
+// measured 903-945s there, because the in-process Dolt engine's own
+// goroutine/lock machinery runs inside the instrumented binary).
+//
+// This does NOT weaken the boundary this contract pins. The production
+// bound itself — exactly issueops.MaxApplyBatchItems accepted, one more
+// refused — is independent of atBoundItems and is NOT re-derived from a
+// real apply here: every backend's ApplyBatch calls the SAME
+// storage.PlanApplyBatch to decide accept-vs-refuse, before touching
+// storage at all (batch_applier.go: "VALIDATION HAPPENS BEFORE THE
+// TRANSACTION"), and that shared function's own boundary is independently
+// pinned, for real, pure and sub-millisecond, by
+// TestPlanApplyBatchAcceptsTheBoundary and its "too many items" sibling in
+// internal/storage/batch_apply_test.go — run on every `go test`, every
+// backend, every PR, unaffected by atBoundItems. The refusing half below is
+// UNCHANGED regardless of atBoundItems: it still sends the true
+// MaxApplyBatchItems+1 count, because that half is already O(1) (the same
+// pre-transaction length check, no backend ever reaches a write). Only the
+// "at bound" half's REAL applied count is adjustable, to prove a backend's
+// own write body does not drop, double or truncate a large accepted batch
+// without paying for the full MaxApplyBatchItems every time one backend's
+// real engine makes that unusually expensive.
+func RunBatchApplyBoundsTheItemCountAtScale(t *testing.T, ctx context.Context, fixture BatchApplyFixture, atBoundItems int) {
+	t.Helper()
+	if atBoundItems < 1 || atBoundItems > publicops.MaxApplyBatchItems {
+		t.Fatalf("atBoundItems = %d, want 1..%d (the production bound this contract pins)", atBoundItems, publicops.MaxApplyBatchItems)
+	}
 	const accepted = "batch apply at the item bound"
 	const refused = "batch apply over the item bound"
 
-	atBound := make([]publicops.ApplyItem, publicops.MaxApplyBatchItems)
+	atBound := make([]publicops.ApplyItem, atBoundItems)
 	for i := range atBound {
 		atBound[i] = batchApplyCreate("", batchApplyMintedIssue(accepted))
 	}
 	result := batchApplyMust(t, ctx, fixture, publicops.ApplyBatchRequest{Actor: "apply-writer", Items: atBound})
-	if len(result.Items) != publicops.MaxApplyBatchItems {
-		t.Fatalf("a request of exactly MaxApplyBatchItems returned %d item results, want %d", len(result.Items), publicops.MaxApplyBatchItems)
+	if len(result.Items) != atBoundItems {
+		t.Fatalf("a request of %d items returned %d item results, want %d", atBoundItems, len(result.Items), atBoundItems)
 	}
-	if got := batchApplyCount(t, ctx, fixture, "SELECT COUNT(*) FROM issues WHERE title = ?", []any{accepted}); got != publicops.MaxApplyBatchItems {
-		t.Errorf("%d row(s) landed for a request of exactly MaxApplyBatchItems, want %d", got, publicops.MaxApplyBatchItems)
+	if got := batchApplyCount(t, ctx, fixture, "SELECT COUNT(*) FROM issues WHERE title = ?", []any{accepted}); got != atBoundItems {
+		t.Errorf("%d row(s) landed for a request of %d items, want %d", got, atBoundItems, atBoundItems)
 	}
 
+	// Unchanged: the true production bound, regardless of atBoundItems.
 	overBound := make([]publicops.ApplyItem, publicops.MaxApplyBatchItems+1)
 	for i := range overBound {
 		overBound[i] = batchApplyCreate("", batchApplyMintedIssue(refused))
@@ -2149,6 +2403,20 @@ func batchApplyEdgeMetadata(t *testing.T, ctx context.Context, fixture BatchAppl
 	return blob
 }
 
+// batchApplyEdgeThreadID reads the stored thread_id column of one edge, which
+// is where DepAddItem.ThreadID has to be visible — a plain column, independent
+// of the type-specific Metadata blob batchApplyEdgeMetadata reads.
+func batchApplyEdgeThreadID(t *testing.T, ctx context.Context, fixture BatchApplyFixture, source, target string) string {
+	t.Helper()
+	var value string
+	const query = "SELECT COALESCE(thread_id, '') FROM dependencies WHERE issue_id = ?" +
+		" AND COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) = ?"
+	if err := fixture.QueryScalar(ctx, query, []any{source, target}, &value); err != nil {
+		t.Fatalf("reading edge thread_id for %s -> %s: %v", source, target, err)
+	}
+	return value
+}
+
 // batchApplyMetadataKey reads the WHOLE metadata blob off a row and reports one
 // key's raw bytes. The whole blob is read rather than a JSON path extract,
 // because that is what lets a case see an absent key and a null one as the
@@ -2232,4 +2500,288 @@ func batchApplyHistoryMatching(t *testing.T, ctx context.Context, fixture BatchA
 		t.Fatalf("CountHistoryMatching(%q): %v", pattern, err)
 	}
 	return count
+}
+
+// RunBatchApplyUpdateItemsRefuseATemplate pins that an update item answers to
+// Lifecycle.Update's template guard: an item targeting a template refuses with
+// an *ItemError carrying *TemplateReadOnlyError, whatever force flags it
+// carries, and the request is all or nothing, so the create ahead of it does
+// not land and the template is untouched.
+func RunBatchApplyUpdateItemsRefuseATemplate(t *testing.T, ctx context.Context, fixture BatchApplyFixture) {
+	t.Helper()
+	template := fixture.IssuePrefix + "-tmplupd-template"
+	bystander := fixture.IssuePrefix + "-tmplupd-bystander"
+	seeded := batchApplyIssue(template, "a template")
+	seeded.IsTemplate = true
+	if err := fixture.CreateIssue(ctx, seeded, "seed"); err != nil {
+		t.Fatalf("seed %s: %v", template, err)
+	}
+
+	update := batchApplyUpdate(publicops.Ref{ID: template}, publicops.IssuePatch{
+		Title:  publicops.Field[string]{Set: true, Value: "edited"},
+		Status: publicops.Field[publicops.Status]{Set: true, Value: types.StatusClosed},
+	})
+	update.Update.ForceClosePolicy = true
+	_, err := fixture.BatchApplier.ApplyBatch(ctx, publicops.ApplyBatchRequest{
+		Actor:         "apply-writer",
+		ForceIDPrefix: true,
+		Items: []publicops.ApplyItem{
+			batchApplyCreate("bystander", batchApplyIssue(bystander, "must not land beside a refusal")),
+			update,
+		},
+	})
+	var itemErr *publicops.ItemError
+	if !errors.As(err, &itemErr) {
+		t.Fatalf("an update item on template %s: error = %v, want an *ItemError", template, err)
+	}
+	if itemErr.Kind != publicops.ItemUpdate || itemErr.Index != 1 {
+		t.Errorf("ItemError = %#v, want the update item at index 1", itemErr)
+	}
+	var refusal *publicops.TemplateReadOnlyError
+	if !errors.As(err, &refusal) || refusal.IssueID != template {
+		t.Errorf("update item on template = %v, want *TemplateReadOnlyError naming %s", err, template)
+	}
+	assertBatchApplyRowCount(t, ctx, fixture, "issues", bystander, 0)
+	if got := batchApplyColumn(t, ctx, fixture, "title", template); got != "a template" {
+		t.Errorf("%s title after the refusal = %q, want it untouched", template, got)
+	}
+	if got := batchApplyColumn(t, ctx, fixture, "status", template); got != string(types.StatusOpen) {
+		t.Errorf("%s status after the refusal = %q, want it untouched", template, got)
+	}
+}
+
+// RunBatchApplySplicesTheMetadataOfATemplateItCreates is the template guard's
+// boundary: the one write a template legitimately takes inside a batch is a
+// CREATE item that makes it and asks for a metadata splice. The splice runs as
+// an update of the row the request itself is creating, after every id exists,
+// and it must land — the template is being written, not modified — so a guard
+// placed where the splice reaches it would refuse a template's own creation.
+func RunBatchApplySplicesTheMetadataOfATemplateItCreates(t *testing.T, ctx context.Context, fixture BatchApplyFixture) {
+	t.Helper()
+	created := fixture.IssuePrefix + "-tmplsplice-created"
+	fresh := batchApplyIssue(created, "a template this request creates")
+	fresh.IsTemplate = true
+	item := batchApplyCreate("created", fresh)
+	item.Create.MetadataRefs = map[string]publicops.Ref{"gc.self": {Key: "created"}}
+	batchApplyMust(t, ctx, fixture, publicops.ApplyBatchRequest{
+		Actor: "apply-writer", ForceIDPrefix: true, Items: []publicops.ApplyItem{item},
+	})
+	if _, ok := batchApplyMetadataKey(t, ctx, fixture, created, "gc.self"); !ok {
+		t.Errorf("%s carries no gc.self key: the splice that finishes a template's own create must land", created)
+	}
+}
+
+// RunBatchApplyCloseItemsAnswerToTheCloseGuards pins that a close item answers
+// to the close guards Lifecycle.Close states, under CloseRequest's rules: a
+// template refuses forced or not, a pin and another actor's bead refuse unless
+// the item's Force is set. A refusal is the item's *ItemError carrying the
+// guard's typed error, and the request is all or nothing, so the create item
+// ahead of it does not land.
+//
+// The assignee case is AS-MODIFIED: the holder is set by an update item of the
+// same request, so a guard that read the row before the request began — or not
+// at all — closes it.
+func RunBatchApplyCloseItemsAnswerToTheCloseGuards(t *testing.T, ctx context.Context, fixture BatchApplyFixture) {
+	t.Helper()
+	template := fixture.IssuePrefix + "-closeguard-template"
+	pinned := fixture.IssuePrefix + "-closeguard-pinned"
+	held := fixture.IssuePrefix + "-closeguard-held"
+	bystander := fixture.IssuePrefix + "-closeguard-bystander"
+	for _, issue := range []*types.Issue{
+		{ID: template, IsTemplate: true},
+		{ID: pinned, Pinned: true},
+		{ID: held},
+	} {
+		issue.Title, issue.Status, issue.Priority, issue.IssueType = issue.ID, types.StatusOpen, 2, types.TypeTask
+		if err := fixture.CreateIssue(ctx, issue, "seed"); err != nil {
+			t.Fatalf("seed %s: %v", issue.ID, err)
+		}
+	}
+
+	plan := func(target string, force bool, extra ...publicops.ApplyItem) publicops.ApplyBatchRequest {
+		closeItem := batchApplyClose(publicops.Ref{ID: target})
+		closeItem.Close.Force = force
+		items := []publicops.ApplyItem{batchApplyCreate("bystander", batchApplyIssue(bystander, "must not land beside a refusal"))}
+		items = append(items, extra...)
+		return publicops.ApplyBatchRequest{Actor: "apply-closer", ForceIDPrefix: true, Items: append(items, closeItem)}
+	}
+	refused := func(label string, request publicops.ApplyBatchRequest, check func(error)) {
+		t.Helper()
+		_, err := fixture.BatchApplier.ApplyBatch(ctx, request)
+		var itemErr *publicops.ItemError
+		if !errors.As(err, &itemErr) {
+			t.Fatalf("%s: error = %v, want an *ItemError", label, err)
+		}
+		if itemErr.Kind != publicops.ItemClose || itemErr.Index != len(request.Items)-1 {
+			t.Errorf("%s: ItemError = %#v, want the close item at index %d", label, itemErr, len(request.Items)-1)
+		}
+		check(err)
+		assertBatchApplyRowCount(t, ctx, fixture, "issues", bystander, 0)
+	}
+
+	for _, force := range []bool{false, true} {
+		refused("template close item", plan(template, force), func(err error) {
+			var refusal *publicops.TemplateReadOnlyError
+			if !errors.As(err, &refusal) || refusal.IssueID != template {
+				t.Errorf("template close item (force=%v) = %v, want *TemplateReadOnlyError naming %s", force, err, template)
+			}
+		})
+	}
+	refused("pinned close item", plan(pinned, false), func(err error) {
+		var refusal *publicops.PinnedError
+		if !errors.As(err, &refusal) || refusal.IssueID != pinned {
+			t.Errorf("pinned close item = %v, want *PinnedError naming %s", err, pinned)
+		}
+	})
+	assign := batchApplyUpdate(publicops.Ref{ID: held}, publicops.IssuePatch{Assignee: publicops.Field[string]{Set: true, Value: "holder"}})
+	refused("held close item", plan(held, false, assign), func(err error) {
+		var refusal *publicops.CloseNotAssigneeError
+		if !errors.As(err, &refusal) {
+			t.Errorf("close item on a bead an earlier item assigned away = %v, want *CloseNotAssigneeError", err)
+			return
+		}
+		if refusal.IssueID != held || refusal.Assignee != "holder" || refusal.Actor != "apply-closer" {
+			t.Errorf("assignee refusal = %#v, want IssueID %q, Assignee holder, Actor apply-closer", refusal, held)
+		}
+	})
+	for _, id := range []string{template, pinned, held} {
+		if got := batchApplyColumn(t, ctx, fixture, "status", id); got != string(types.StatusOpen) {
+			t.Errorf("%s status after the refusals = %q, want it still open", id, got)
+		}
+	}
+
+	// The item's Force waives the pin and the assignee fence.
+	forcedPin := plan(pinned, true)
+	forcedPin.Items = forcedPin.Items[1:]
+	batchApplyMust(t, ctx, fixture, forcedPin)
+	forcedHeld := plan(held, true, assign)
+	forcedHeld.Items = forcedHeld.Items[1:]
+	batchApplyMust(t, ctx, fixture, forcedHeld)
+	for _, id := range []string{pinned, held} {
+		if got := batchApplyColumn(t, ctx, fixture, "status", id); got != string(types.StatusClosed) {
+			t.Errorf("%s status under the item's Force = %q, want %q", id, got, types.StatusClosed)
+		}
+	}
+}
+
+// RunBatchApplyRefusesADottedChildGatedOnItsOwnParent pins the dotted-id
+// hierarchy rule (publicops.CheckDottedChildDependency) on a dep_add item: an
+// edge from a dotted-id child to its own ancestor is refused with an
+// *ItemError naming the edge, and the whole request rolls back. The rule is
+// applied to the RESOLVED ids, so a key bound to a dotted child this request
+// creates — the `bd create --graph` shape — is refused like a stored id.
+//
+// POSITIVE HALF: the parent-child edge to the immediate dotted parent lands.
+//
+// WITH THE HIERARCHY STORED: once that edge exists (the shape `bd create
+// --parent` leaves), a blocking edge on the same pair is still this validation
+// refusal, not the hierarchy conflict the stored edge would raise (which does
+// not match ErrValidation) — the rule reads only the resolved ids, so it
+// answers first — and the stored edge survives.
+func RunBatchApplyRefusesADottedChildGatedOnItsOwnParent(t *testing.T, ctx context.Context, fixture BatchApplyFixture) {
+	t.Helper()
+	parent := fixture.IssuePrefix + "-dotted"
+	child := parent + ".1"
+	minted := parent + ".2"
+	batchApplySeedIssue(t, ctx, fixture, parent, types.StatusOpen)
+	batchApplySeedIssue(t, ctx, fixture, child, types.StatusOpen)
+
+	for _, refused := range []struct {
+		name  string
+		items []publicops.ApplyItem
+		index int
+	}{
+		{"a stored child blocking on its parent", []publicops.ApplyItem{
+			batchApplyDepAdd(publicops.Ref{ID: child}, publicops.Ref{ID: parent}, publicops.DepBlocks, ""),
+		}, 0},
+		{"a child this request creates blocking on its parent", []publicops.ApplyItem{
+			batchApplyCreate("child", batchApplyIssue(minted, "the new child")),
+			batchApplyDepAdd(publicops.Ref{Key: "child"}, publicops.Ref{ID: parent}, publicops.DepBlocks, ""),
+		}, 1},
+	} {
+		_, err := fixture.BatchApplier.ApplyBatch(ctx, publicops.ApplyBatchRequest{
+			Actor:         "apply-writer",
+			ForceIDPrefix: true,
+			Items:         refused.items,
+		})
+		if !errors.Is(err, publicops.ErrValidation) {
+			t.Errorf("%s: error = %v, want ErrValidation", refused.name, err)
+			continue
+		}
+		var itemErr *publicops.ItemError
+		if !errors.As(err, &itemErr) {
+			t.Errorf("%s: error = %v, want an *ItemError naming the edge item", refused.name, err)
+			continue
+		}
+		if itemErr.Index != refused.index || itemErr.Kind != publicops.ItemDepAdd {
+			t.Errorf("%s: ItemError = %#v, want Index %d and Kind %q", refused.name, itemErr, refused.index, publicops.ItemDepAdd)
+		}
+	}
+	assertBatchApplyEdgeCount(t, ctx, fixture, child, parent, 0)
+	assertBatchApplyRowCount(t, ctx, fixture, "issues", minted, 0)
+
+	batchApplyMust(t, ctx, fixture, publicops.ApplyBatchRequest{
+		Actor: "apply-writer",
+		Items: []publicops.ApplyItem{
+			batchApplyDepAdd(publicops.Ref{ID: child}, publicops.Ref{ID: parent}, publicops.DepParentChild, ""),
+		},
+	})
+	assertBatchApplyEdgeCount(t, ctx, fixture, child, parent, 1)
+
+	_, err := fixture.BatchApplier.ApplyBatch(ctx, publicops.ApplyBatchRequest{
+		Actor: "apply-writer",
+		Items: []publicops.ApplyItem{
+			batchApplyDepAdd(publicops.Ref{ID: child}, publicops.Ref{ID: parent}, publicops.DepBlocks, ""),
+		},
+	})
+	var itemErr *publicops.ItemError
+	if !errors.Is(err, publicops.ErrValidation) || !errors.As(err, &itemErr) {
+		t.Errorf("blocks on a parent whose parent-child edge is stored: error = %v, want an *ItemError matching ErrValidation", err)
+	}
+	assertBatchApplyEdgeCount(t, ctx, fixture, child, parent, 1)
+}
+
+// RunBatchApplyAppliesTheDefaultPriority pins CreateItem.DefaultPriority: a
+// create item that asks for the default stores publicops.DefaultCreatePriority,
+// and one naming priority 0 stores P0. `bd create --graph` sends a node without
+// a priority this way, and so does an HTTP batch apply create item without one.
+// A create item asking for the default while naming a priority is
+// ErrValidation and writes nothing, as it is for Lifecycle.Create.
+func RunBatchApplyAppliesTheDefaultPriority(t *testing.T, ctx context.Context, fixture BatchApplyFixture) {
+	t.Helper()
+	unset := batchApplyMintedIssue("defaulted")
+	unset.Priority = 0
+	zero := batchApplyMintedIssue("critical")
+	zero.Priority = 0
+	result := batchApplyMust(t, ctx, fixture, publicops.ApplyBatchRequest{
+		Actor: "apply-writer",
+		Items: []publicops.ApplyItem{
+			{Kind: publicops.ItemCreate, Create: &publicops.CreateItem{Key: "d", Issue: unset, DefaultPriority: true}},
+			{Kind: publicops.ItemCreate, Create: &publicops.CreateItem{Key: "z", Issue: zero}},
+		},
+	})
+	for key, want := range map[string]int{"d": publicops.DefaultCreatePriority, "z": 0} {
+		id := result.Keys[key]
+		if id == "" {
+			t.Fatalf("key %q bound no id: %v", key, result.Keys)
+		}
+		if got := batchApplyCount(t, ctx, fixture, "SELECT priority FROM issues WHERE id = ?", []any{id}); got != want {
+			t.Errorf("stored priority of %s (%s) = %d, want %d", key, id, got, want)
+		}
+	}
+
+	conflict := fixture.IssuePrefix + "-prio-conflict"
+	clash := batchApplyIssue(conflict, conflict)
+	clash.Priority = 3
+	_, err := fixture.BatchApplier.ApplyBatch(ctx, publicops.ApplyBatchRequest{
+		Actor:         "apply-writer",
+		ForceIDPrefix: true,
+		Items: []publicops.ApplyItem{
+			{Kind: publicops.ItemCreate, Create: &publicops.CreateItem{Key: "c", Issue: clash, DefaultPriority: true}},
+		},
+	})
+	if !errors.Is(err, publicops.ErrValidation) {
+		t.Fatalf("DefaultPriority with priority 3: err = %v, want ErrValidation", err)
+	}
+	assertBatchApplyRowCount(t, ctx, fixture, "issues", conflict, 0)
 }

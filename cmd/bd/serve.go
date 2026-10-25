@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/backends"
 	"github.com/steveyegge/beads/internal/storage/contextinfo"
 	"github.com/steveyegge/beads/internal/storage/domain"
+	"github.com/steveyegge/beads/internal/storage/externaldeps"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/issueops"
 	"github.com/steveyegge/beads/memoryops"
@@ -47,11 +48,12 @@ const (
 )
 
 var (
-	serveAddr             string
-	serveAllowNonLoopback bool
-	serveAuthTokenFile    string
-	serveInsecureNoAuth   bool
-	serveAllowedHosts     []string
+	serveAddr              string
+	serveAllowNonLoopback  bool
+	serveAuthTokenFile     string
+	serveInsecureNoAuth    bool
+	serveAllowedHosts      []string
+	serveLargeApplyCeiling time.Duration
 )
 
 var serveCmd = &cobra.Command{
@@ -175,6 +177,8 @@ func registerServeFlags(cmd *cobra.Command) {
 		"Serve a non-loopback bind with NO authentication. Every peer that can reach the address gets full read and claim access")
 	cmd.Flags().StringArrayVar(&serveAllowedHosts, "allowed-host", nil,
 		"Additional Host header value to answer to, e.g. a service DNS name. Repeatable; matched exactly, with no wildcards")
+	cmd.Flags().DurationVar(&serveLargeApplyCeiling, "large-apply-ceiling", httpapi.DefaultLargeApplyCeiling,
+		"Whole-run budget for a POST issues:batchApply request over 100 items (a ceiling, not a target; requests at or under 100 items are unaffected). Must be positive. The orchestrator's stop grace must be at least this long plus 5s, or an external SIGKILL can cut off an in-flight large apply a graceful drain would otherwise have waited out; see engdocs/SERVE_RUNBOOK.md")
 }
 
 // serveOptions is the part of a server's configuration that depends on NEITHER
@@ -187,11 +191,12 @@ func registerServeFlags(cmd *cobra.Command) {
 // server configuration that cannot yet describe a server. The field names match
 // Config's because they become those fields verbatim, in applyTo.
 type serveOptions struct {
-	Addr             string
-	AllowNonLoopback bool
-	InsecureNoAuth   bool
-	AllowedHosts     []string
-	Auth             *httpapi.TokenFileAuth
+	Addr              string
+	AllowNonLoopback  bool
+	InsecureNoAuth    bool
+	AllowedHosts      []string
+	Auth              *httpapi.TokenFileAuth
+	LargeApplyCeiling time.Duration
 }
 
 // applyTo writes the operator's choices onto the configuration a database arm
@@ -203,6 +208,7 @@ func (o serveOptions) applyTo(cfg *httpapi.Config) {
 	cfg.InsecureNoAuth = o.InsecureNoAuth
 	cfg.AllowedHosts = o.AllowedHosts
 	cfg.Auth = o.Auth
+	cfg.LargeApplyCeiling = o.LargeApplyCeiling
 }
 
 // resolveServeConfig turns the flags and their environment fallbacks into the
@@ -215,13 +221,17 @@ func (o serveOptions) applyTo(cfg *httpapi.Config) {
 // standing in, and must not arrive after a database has been opened.
 func resolveServeConfig() (serveOptions, error) {
 	cfg := serveOptions{
-		Addr:             serveAddr,
-		AllowNonLoopback: serveAllowNonLoopback,
-		InsecureNoAuth:   serveInsecureNoAuth,
-		AllowedHosts:     serveAllowedHosts,
+		Addr:              serveAddr,
+		AllowNonLoopback:  serveAllowNonLoopback,
+		InsecureNoAuth:    serveInsecureNoAuth,
+		AllowedHosts:      serveAllowedHosts,
+		LargeApplyCeiling: serveLargeApplyCeiling,
 	}
 	if _, err := httpapi.ValidateBindAddr(serveAddr, serveAllowNonLoopback); err != nil {
 		return cfg, err
+	}
+	if serveLargeApplyCeiling <= 0 {
+		return cfg, fmt.Errorf("--large-apply-ceiling must be positive, got %s", serveLargeApplyCeiling)
 	}
 
 	tokenFile := serveAuthTokenFile
@@ -308,6 +318,10 @@ func runServe() error {
 			CycleDetector:     roles.cycles,
 			EdgeReader:        roles.edges,
 			GraphCounter:      roles.edgeCounter,
+			BatchGetter:       roles.batchGetter,
+			LeaseReclaimer:    roles.leaseReclaimer,
+			Heartbeater:       roles.heartbeater,
+			BlockedLister:     roles.blockedLister,
 			Relations:         roles.relations,
 			Commenter:         roles.commenter,
 			BlockingAnnotator: roles.blocking,
@@ -332,9 +346,13 @@ func runServe() error {
 			// extraction, this flag and the maintenance ticker cannot disagree
 			// about whether this workspace journals.
 			EventsJournalEnabled: journalEnabled,
-			Workspace:            info,
-			SchemaVersion:        JSONSchemaVersion,
-			Mode:                 serveResolvedMode(info, db),
+			// The roles above come from the storage chain, which interposes
+			// the external-dependency policy (wireStorageDecorators); the
+			// handshake advertises it only if that layer is really there.
+			ExternalDependencyPolicy: externaldeps.Applied(store),
+			Workspace:                info,
+			SchemaVersion:            JSONSchemaVersion,
+			Mode:                     serveResolvedMode(info, db),
 		})
 	}
 
@@ -408,10 +426,11 @@ func runServe() error {
 		// is still the workspace's answer and still has to be handed in — the
 		// provider knows how to READ the journal, not whether this workspace has
 		// one.
-		EventsJournalEnabled: eventsjournal.EnabledFor(info.BeadsDir),
-		Workspace:            info,
-		SchemaVersion:        JSONSchemaVersion,
-		Mode:                 serveResolvedMode(info, db),
+		EventsJournalEnabled:     eventsjournal.EnabledFor(info.BeadsDir),
+		ExternalDependencyPolicy: externaldeps.AppliedToProvider(provider),
+		Workspace:                info,
+		SchemaVersion:            JSONSchemaVersion,
+		Mode:                     serveResolvedMode(info, db),
 	})
 }
 
@@ -663,6 +682,10 @@ type serveRoleSource interface {
 	CycleDetector() (issueops.CycleDetector, error)
 	EdgeReader() (issueops.EdgeReader, error)
 	GraphCounter() (issueops.GraphCounter, error)
+	BatchGetter() (issueops.BatchGetter, error)
+	LeaseReclaimer() (issueops.LeaseReclaimer, error)
+	Heartbeater() (issueops.Heartbeater, error)
+	BlockedLister() (issueops.BlockedLister, error)
 	IssueRelations() (issueops.Relations, error)
 	Commenter() (issueops.Commenter, error)
 	BlockingAnnotator() (issueops.BlockingAnnotator, error)
@@ -729,6 +752,10 @@ func serveIssueRoles(src serveRoleSource, journalEnabled bool) (serveRoles, erro
 		{"cycle detector", func() (err error) { roles.cycles, err = src.CycleDetector(); return }},
 		{"edge reader", func() (err error) { roles.edges, err = src.EdgeReader(); return }},
 		{"graph counter", func() (err error) { roles.edgeCounter, err = src.GraphCounter(); return }},
+		{"batch getter", func() (err error) { roles.batchGetter, err = src.BatchGetter(); return }},
+		{"lease reclaimer", func() (err error) { roles.leaseReclaimer, err = src.LeaseReclaimer(); return }},
+		{"heartbeater", func() (err error) { roles.heartbeater, err = src.Heartbeater(); return }},
+		{"blocked lister", func() (err error) { roles.blockedLister, err = src.BlockedLister(); return }},
 		{"issue relations", func() (err error) { roles.relations, err = src.IssueRelations(); return }},
 		{"commenter", func() (err error) { roles.commenter, err = src.Commenter(); return }},
 		{"blocking annotator", func() (err error) { roles.blocking, err = src.BlockingAnnotator(); return }},
@@ -829,23 +856,39 @@ type serveRoles struct {
 	// hook decorator like the two below it — a release is an update, so
 	// HookFiringStore.Releaser fires the workspace's on_update script — which
 	// is why it comes off the PEELED store with the rest.
-	releaser     issueops.Releaser
-	lifecycle    issueops.Lifecycle
-	settings     issueops.WorkspaceConfig
-	stats        issueops.StatsReporter
-	cycles       issueops.CycleDetector
-	edges        issueops.EdgeReader
-	edgeCounter  issueops.GraphCounter
-	relations    issueops.Relations
-	commenter    issueops.Commenter
-	blocking     issueops.BlockingAnnotator
-	tree         issueops.TreeWalker
-	readyCounter issueops.ReadyCounter
-	counter      issueops.Counter
-	querier      issueops.Querier
-	sweeper      issueops.Sweeper
-	deleter      issueops.Deleter
-	batchCreator issueops.BatchCreator
+	releaser    issueops.Releaser
+	lifecycle   issueops.Lifecycle
+	settings    issueops.WorkspaceConfig
+	stats       issueops.StatsReporter
+	cycles      issueops.CycleDetector
+	edges       issueops.EdgeReader
+	edgeCounter issueops.GraphCounter
+	// batchGetter is the one-snapshot, many-ids read behind
+	// POST /v0/beads/issues:batchGet. Its hook decorator recurses to the inner
+	// getter WITHOUT wrapping it — a read fires no completion hooks — so it is
+	// taken off the peeled store with the rest for uniformity rather than out
+	// of necessity.
+	batchGetter issueops.BatchGetter
+	// leaseReclaimer is the stale-lease sweep behind
+	// POST /v0/beads/issues:reclaim. Its hook decorator WRAPS (a reclaim is an
+	// update per reverted row), which is why it comes off the peeled store with
+	// the releaser: bd serve runs no hooks. heartbeater, the lease refresh
+	// behind POST /v0/beads/issues/{id}:heartbeat, comes off the same store
+	// for the same reason: its decorator WRAPS too, firing on_update for a
+	// re-arm (a refresh fires nothing).
+	leaseReclaimer issueops.LeaseReclaimer
+	heartbeater    issueops.Heartbeater
+	blockedLister  issueops.BlockedLister
+	relations      issueops.Relations
+	commenter      issueops.Commenter
+	blocking       issueops.BlockingAnnotator
+	tree           issueops.TreeWalker
+	readyCounter   issueops.ReadyCounter
+	counter        issueops.Counter
+	querier        issueops.Querier
+	sweeper        issueops.Sweeper
+	deleter        issueops.Deleter
+	batchCreator   issueops.BatchCreator
 	// dependencyEditor is the second role here whose accessor recurses through
 	// the hook decorator, so taking it off the peeled store is not optional:
 	// HookFiringStore.DependencyEditor fires the workspace's update hook per

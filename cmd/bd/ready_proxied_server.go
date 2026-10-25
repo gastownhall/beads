@@ -53,6 +53,12 @@ func runReadyProxiedServer(cmd *cobra.Command, ctx context.Context) error {
 	// same sweep from its role (uow.readyClaimer.ClaimNext).
 	uow.WakeExpiredDefersAdvisory(ctx, uowProvider)
 
+	// --mol reads through the provider's roles, each in a unit of work of its
+	// own, so it runs before this route opens the one it holds below.
+	if in.molID != "" {
+		return runMoleculeReady(ctx, nil, proxiedResolvePartialID, in.molID)
+	}
+
 	uw, err := uowProvider.NewUOW(ctx)
 	if err != nil {
 		return HandleErrorRespectJSON("open unit of work: %v", err)
@@ -62,8 +68,6 @@ func runReadyProxiedServer(cmd *cobra.Command, ctx context.Context) error {
 	switch {
 	case in.gated:
 		return runReadyProxiedGated(ctx, uw, in)
-	case in.molID != "":
-		return runReadyProxiedMolecule(ctx, uw, in)
 	case in.explain:
 		return runReadyProxiedExplain(ctx, uw, in)
 	default:
@@ -71,48 +75,19 @@ func runReadyProxiedServer(cmd *cobra.Command, ctx context.Context) error {
 	}
 }
 
-func runBlockedProxiedServer(cmd *cobra.Command, ctx context.Context) error {
+// proxiedBlockedLister hands back the blocked-listing surface for the
+// proxied-server provider, through the provider's OWN capability accessor:
+// the accessor is where each layer (the external-dependency decoration among
+// them) is added.
+func proxiedBlockedLister() (issueops.BlockedLister, error) {
 	if uowProvider == nil {
-		return HandleError("proxied-server UOW provider not initialized")
+		return nil, errors.New("proxied-server UOW provider not initialized")
 	}
-	uw, err := uowProvider.NewUOW(ctx)
-	if err != nil {
-		return HandleErrorRespectJSON("open unit of work: %v", err)
+	src, ok := uowProvider.(uow.BlockedListerSource)
+	if !ok {
+		return nil, fmt.Errorf("proxied-server provider %T does not offer the blocked-listing surface", uowProvider)
 	}
-	defer uw.Close(ctx)
-
-	filter := blockedFilterFromFlags(cmd)
-
-	blocked, err := uw.IssueUseCase().GetBlockedIssues(ctx, filter)
-	if err != nil {
-		return HandleErrorRespectJSON("%v", err)
-	}
-
-	if jsonOutput {
-		if blocked == nil {
-			blocked = []*types.BlockedIssue{}
-		}
-		_ = outputJSON(blocked)
-		return nil
-	}
-	if len(blocked) == 0 {
-		fmt.Printf("\n%s No blocked issues\n\n", ui.RenderPass("✨"))
-		return nil
-	}
-	fmt.Printf("\n%s Blocked issues (%d):\n\n", ui.RenderFail("🚫"), len(blocked))
-	for _, issue := range blocked {
-		fmt.Printf("[%s] %s: %s\n",
-			ui.RenderPriority(issue.Priority),
-			ui.RenderID(issue.ID), issue.Title)
-		blockedBy := issue.BlockedBy
-		if blockedBy == nil {
-			blockedBy = []string{}
-		}
-		fmt.Printf("  Blocked by %d open dependencies: %v\n",
-			issue.BlockedByCount, blockedBy)
-		fmt.Println()
-	}
-	return nil
+	return src.BlockedLister()
 }
 
 func runReadyProxiedList(ctx context.Context, uw uow.UnitOfWork, in readyInput) error {
@@ -149,7 +124,7 @@ func runReadyProxiedList(ctx context.Context, uw uow.UnitOfWork, in readyInput) 
 		}
 		_ = outputJSONWithPagination(results, pag)
 		if truncated {
-			fmt.Fprintf(os.Stderr, "Showing %d ready issues; more matched but were hidden by --limit. Use --limit 0 for all, or --limit N to raise the cap.\n", len(results))
+			fmt.Fprintf(os.Stderr, "%s Use --limit 0 for all, or --limit N to raise the cap.\n", readyHiddenHint(len(results)))
 		}
 		return nil
 	}
@@ -199,7 +174,7 @@ func runReadyProxiedList(ctx context.Context, uw uow.UnitOfWork, in readyInput) 
 	}
 
 	if truncated {
-		fmt.Printf("%s\n\n", ui.RenderMuted(fmt.Sprintf("Showing %d ready issues; more matched but were hidden by --limit. Use --limit 0 for all, or --limit N to raise the cap.", len(issues))))
+		fmt.Printf("%s\n\n", ui.RenderMuted(readyHiddenHint(len(issues))+" Use --limit 0 for all, or --limit N to raise the cap."))
 	}
 	return nil
 }
@@ -320,16 +295,10 @@ func runReadyProxiedExplain(ctx context.Context, uw uow.UnitOfWork, _ readyInput
 		debug.Logf("warning: failed to detect cycles: %v", err)
 	}
 
-	allBlockerIDs := make(map[string]bool)
-	for _, bi := range blockedIssues {
-		for _, blockerID := range bi.BlockedBy {
-			allBlockerIDs[blockerID] = true
-		}
-	}
-	blockerIDList := make([]string, 0, len(allBlockerIDs))
-	for id := range allBlockerIDs {
-		blockerIDList = append(blockerIDList, id)
-	}
+	blockerIDList := explainBlockerIDs(blockedIssues, readyIssues, allDeps)
+	// TODO(batchgetter): unbounded id list; see issueops.BatchGetter's doc and
+	// the importIssueLookup TODO in import_shared.go for why this is not yet
+	// routed through GetMany.
 	blockerIssues, err := uw.IssueUseCase().GetIssuesByIDs(ctx, blockerIDList)
 	if err != nil {
 		debug.Logf("warning: failed to get blocker issues: %v", err)
@@ -362,9 +331,7 @@ func runReadyProxiedExplain(ctx context.Context, uw uow.UnitOfWork, _ readyInput
 				ui.RenderPriority(item.Priority),
 				item.Title)
 			fmt.Printf("    Reason: %s\n", item.Reason)
-			if len(item.ResolvedBlockers) > 0 {
-				fmt.Printf("    Resolved blockers: %s\n", strings.Join(item.ResolvedBlockers, ", "))
-			}
+			printReadyItemDependencies(item)
 			if item.DependentCount > 0 {
 				fmt.Printf("    Unblocks: %d issue(s)\n", item.DependentCount)
 			}
@@ -402,89 +369,6 @@ func runReadyProxiedExplain(ctx context.Context, uw uow.UnitOfWork, _ readyInput
 		fmt.Printf(", %d cycle(s)", explanation.Summary.CycleCount)
 	}
 	fmt.Printf("\n\n")
-	return nil
-}
-
-func runReadyProxiedMolecule(ctx context.Context, uw uow.UnitOfWork, in readyInput) error {
-	moleculeID := in.molID
-	subgraph, err := loadTemplateSubgraph(ctx, uowMolReader{uw: uw}, moleculeID)
-	if err != nil {
-		return HandleError("loading molecule: %v", err)
-	}
-
-	analysis := analyzeMoleculeParallel(subgraph)
-
-	var readySteps []*MoleculeReadyStep
-	for _, issue := range subgraph.Issues {
-		info := analysis.Steps[issue.ID]
-		if info != nil && info.IsReady {
-			readySteps = append(readySteps, &MoleculeReadyStep{
-				Issue:         issue,
-				ParallelInfo:  info,
-				ParallelGroup: info.ParallelGroup,
-			})
-		}
-	}
-
-	if in.jsonOut {
-		output := MoleculeReadyOutput{
-			MoleculeID:     moleculeID,
-			MoleculeTitle:  subgraph.Root.Title,
-			TotalSteps:     analysis.TotalSteps,
-			ReadySteps:     len(readySteps),
-			Steps:          readySteps,
-			ParallelGroups: analysis.ParallelGroups,
-		}
-		_ = outputJSON(output)
-		return nil
-	}
-
-	fmt.Printf("\n%s Ready steps in molecule: %s\n", ui.RenderAccent("🧪"), subgraph.Root.Title)
-	fmt.Printf("   ID: %s\n", moleculeID)
-	fmt.Printf("   Total: %d steps, %d ready\n", analysis.TotalSteps, len(readySteps))
-	if len(readySteps) == 0 {
-		fmt.Printf("\n%s No ready steps (all blocked or completed)\n\n", ui.RenderWarn("✨"))
-		return nil
-	}
-	if len(analysis.ParallelGroups) > 0 {
-		fmt.Printf("\n%s Parallel Groups:\n", ui.RenderPass("⚡"))
-		for groupName, members := range analysis.ParallelGroups {
-			readyInGroup := 0
-			for _, id := range members {
-				if info := analysis.Steps[id]; info != nil && info.IsReady {
-					readyInGroup++
-				}
-			}
-			if readyInGroup > 0 {
-				fmt.Printf("   %s: %d ready\n", groupName, readyInGroup)
-			}
-		}
-	}
-	fmt.Printf("\n%s Ready steps:\n\n", ui.RenderPass("📋"))
-	for i, step := range readySteps {
-		groupAnnotation := ""
-		if step.ParallelGroup != "" {
-			groupAnnotation = fmt.Sprintf(" [%s]", ui.RenderAccent(step.ParallelGroup))
-		}
-		fmt.Printf("%d. [%s] [%s] %s: %s%s\n", i+1,
-			ui.RenderPriority(step.Issue.Priority),
-			ui.RenderType(string(step.Issue.IssueType)),
-			ui.RenderID(step.Issue.ID),
-			step.Issue.Title,
-			groupAnnotation)
-		if len(step.ParallelInfo.CanParallel) > 0 {
-			readyParallel := []string{}
-			for _, pID := range step.ParallelInfo.CanParallel {
-				if pInfo := analysis.Steps[pID]; pInfo != nil && pInfo.IsReady {
-					readyParallel = append(readyParallel, pID)
-				}
-			}
-			if len(readyParallel) > 0 {
-				fmt.Printf("   Can run with: %v\n", readyParallel)
-			}
-		}
-	}
-	fmt.Println()
 	return nil
 }
 

@@ -53,6 +53,8 @@ After adding, run 'bd backup sync' to push your data.`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		CheckReadonly("backup init")
+
 		evt := metrics.NewCommandEvent("backup-init")
 		defer func() {
 			if c := metrics.Global(); c != nil {
@@ -134,6 +136,8 @@ Run 'bd backup init <path>' first to configure a destination.`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		CheckReadonly("backup sync")
+
 		evt := metrics.NewCommandEvent("backup-sync")
 		defer func() {
 			if c := metrics.Global(); c != nil {
@@ -439,6 +443,8 @@ backup configuration. The backup data at the destination is not deleted.`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		CheckReadonly("backup remove")
+
 		evt := metrics.NewCommandEvent("backup-remove")
 		defer func() {
 			if c := metrics.Global(); c != nil {

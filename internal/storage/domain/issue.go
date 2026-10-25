@@ -66,6 +66,12 @@ type IssueSQLRepository interface {
 	Get(ctx context.Context, id string, opts IssueTableOpts) (*types.Issue, error)
 	AsOf(ctx context.Context, id, ref string) (*types.Issue, error)
 	GetByIDs(ctx context.Context, ids []string, opts IssueTableOpts) ([]*types.Issue, error)
+	// GetMany runs the SHARED batch-read body (issueops.ExecuteGetMany) on this
+	// repository's transaction, which is how the unit-of-work provider reaches
+	// the same function the two store backends wrap. It takes no table option:
+	// the body routes both planes itself, the way CompareAndSetMetadataKey's
+	// does.
+	GetMany(ctx context.Context, request publicops.GetManyRequest) (publicops.GetManyResult, error)
 	Exists(ctx context.Context, id string, opts IssueTableOpts) (bool, error)
 	CountForPrefix(ctx context.Context, prefix string, opts IssueTableOpts) (int, error)
 	NextCounterID(ctx context.Context, prefix string) (int, error)
@@ -111,7 +117,23 @@ type IssueSQLRepository interface {
 	UnclaimIssueIfAssignee(ctx context.Context, id, actor, expectedAssignee string) error
 	HeartbeatIssue(ctx context.Context, id, actor string) error
 	ReclaimExpiredLeases(ctx context.Context, olderThan time.Duration, filter types.ReclaimFilter, actor string) ([]types.ReclaimedLease, error)
+	// Reclaim runs the SHARED sweep body (issueops.ExecuteReclaimInTx) on this
+	// repository's transaction, which is how the unit-of-work provider reaches
+	// the same function the two store backends wrap. It is the publicops-typed
+	// counterpart to ReclaimExpiredLeases above, the way GetMany is to GetByIDs.
+	Reclaim(ctx context.Context, request publicops.ReclaimRequest) (publicops.ReclaimResult, error)
+	// RenewLease runs the SHARED heartbeat body (issueops.ExecuteHeartbeatInTx)
+	// on this repository's transaction, which is how the unit-of-work provider
+	// reaches the same function the two store backends wrap. It is the
+	// publicops-typed counterpart to HeartbeatIssue above, the way Reclaim is
+	// to ReclaimExpiredLeases.
+	RenewLease(ctx context.Context, request publicops.HeartbeatRequest) (publicops.HeartbeatResult, error)
 	WakeExpiredDefers(ctx context.Context) (issues, wisps int, err error)
+	// ParticipatingIssueIDs runs issueops.ParticipatingIssueIDsInTx on this
+	// repository's transaction: which of ids name an issues-table row whose
+	// participation_generation is set. It is the unit-of-work route's answer to
+	// storage.HistoryParticipation, which the two store backends implement.
+	ParticipatingIssueIDs(ctx context.Context, ids []string) (map[string]struct{}, error)
 }
 
 type CloseRowParams struct {
@@ -311,6 +333,9 @@ type UpdateSpec struct {
 type IssueUseCase interface {
 	GetIssue(ctx context.Context, id string) (*types.Issue, error)
 	GetIssuesByIDs(ctx context.Context, ids []string) ([]*types.Issue, error)
+	// GetMany is the shape issueops.BatchGetter publishes; see
+	// IssueSQLRepository.GetMany for why it takes no table option.
+	GetMany(ctx context.Context, request publicops.GetManyRequest) (publicops.GetManyResult, error)
 	FindWispDependentsRecursive(ctx context.Context, ids []string) (map[string]bool, error)
 	SearchIssues(ctx context.Context, query string, filter types.IssueFilter) (SearchPage, error)
 	SearchIssuesWithCounts(ctx context.Context, query string, filter types.IssueFilter) (SearchCountsPage, error)
@@ -335,7 +360,22 @@ type IssueUseCase interface {
 	UnclaimIfAssignee(ctx context.Context, id, actor, expectedAssignee string) error
 	Heartbeat(ctx context.Context, id, actor string) error
 	ReclaimExpiredLeases(ctx context.Context, olderThan time.Duration, filter types.ReclaimFilter, actor string) ([]types.ReclaimedLease, error)
+	// Reclaim is the shape issueops.LeaseReclaimer publishes; see
+	// IssueRepository.Reclaim for why it is a separate method from
+	// ReclaimExpiredLeases rather than a replacement for it.
+	Reclaim(ctx context.Context, request publicops.ReclaimRequest) (publicops.ReclaimResult, error)
+	// RenewLease is the shape issueops.Heartbeater publishes; see
+	// IssueSQLRepository.RenewLease for why it is a separate method from
+	// Heartbeat rather than a replacement for it. A refresh writes only the
+	// ephemeral leases table, but a re-arm (HeartbeatResult.Rearmed) writes
+	// versioned rows, so the caller commits with uow.RunTxScoped and the
+	// tables issueops.LeaseRearmVersionCommit names, as the uow Heartbeater
+	// does — never with uow.RunTxEphemeral.
+	RenewLease(ctx context.Context, request publicops.HeartbeatRequest) (publicops.HeartbeatResult, error)
 	WakeExpiredDefers(ctx context.Context) (issues, wisps int, err error)
+	// ParticipatingIssueIDs is IssueSQLRepository.ParticipatingIssueIDs: the
+	// pre-enable scan's participation read on the unit-of-work route.
+	ParticipatingIssueIDs(ctx context.Context, ids []string) (map[string]struct{}, error)
 
 	CreateIssue(ctx context.Context, params CreateIssueParams, actor string) (CreateIssueResult, error)
 	CreateIssues(ctx context.Context, params []CreateIssueParams, actor string) (CreateIssuesResult, error)
@@ -472,8 +512,22 @@ func (u *issueUseCaseImpl) GetIssuesByIDs(ctx context.Context, ids []string) ([]
 	return u.getByIDs(ctx, ids, false)
 }
 
+// GetMany passes straight through to the repository with no pre-check and no
+// error wrapping, CountEdges's reason: the request's whole vocabulary is
+// validated inside the shared body (issueops.ExecuteGetMany), and there is no
+// second implementation for a wrapper here to protect.
+func (u *issueUseCaseImpl) GetMany(ctx context.Context, request publicops.GetManyRequest) (publicops.GetManyResult, error) {
+	return u.issueRepo.GetMany(ctx, request)
+}
+
 func (u *issueUseCaseImpl) FindWispDependentsRecursive(ctx context.Context, ids []string) (map[string]bool, error) {
 	return u.issueRepo.FindWispDependentsRecursive(ctx, ids)
+}
+
+// ParticipatingIssueIDs passes straight through, FindWispDependentsRecursive's
+// shape: an empty request reads nothing, and there is no vocabulary to check.
+func (u *issueUseCaseImpl) ParticipatingIssueIDs(ctx context.Context, ids []string) (map[string]struct{}, error) {
+	return u.issueRepo.ParticipatingIssueIDs(ctx, ids)
 }
 
 func (u *issueUseCaseImpl) GetWispsByIDs(ctx context.Context, ids []string) ([]*types.Issue, error) {
@@ -708,7 +762,7 @@ func (u *issueUseCaseImpl) ApplyUpdate(ctx context.Context, id string, spec Upda
 			return nil, fmt.Errorf("%w: issue %s", storage.ErrNotFound, id)
 		}
 		if spec.ExpectedVersion != nil && current.RowVersion != *spec.ExpectedVersion {
-			return nil, fmt.Errorf("%w: expected %d, got %d", storage.ErrVersionMismatch, *spec.ExpectedVersion, current.RowVersion)
+			return nil, &storage.VersionMismatchError{Expected: *spec.ExpectedVersion, Current: current.RowVersion}
 		}
 		if spec.ExpectedAssignee != nil && !validation.ActorMatches(current.Assignee, *spec.ExpectedAssignee) {
 			return nil, fmt.Errorf("%w: %s is held by %q, expected %q",
@@ -837,8 +891,10 @@ func (u *issueUseCaseImpl) isWispID(ctx context.Context, id string) (bool, error
 // PromoteWisp moves an active wisp to the Dolt-versioned issues plane,
 // preserving its id, wisp_type, labels, dependencies, events, and comments.
 // One-way: the promoted row is no longer ephemeral, so purge won't reclaim
-// it. The repository error passes through unwrapped — the CLI surfaces it
-// verbatim and its text is part of the classic error contract.
+// it. The repository error passes through unwrapped. `bd promote` does not
+// call it: the proxied-server route runs issueops.Promote, whose move is
+// ApplyUpdate's persistence branch (MovePersistence), which also carries the
+// child counter.
 func (u *issueUseCaseImpl) PromoteWisp(ctx context.Context, id, actor string) error {
 	if id == "" {
 		return fmt.Errorf("promote wisp: id must not be empty")
@@ -1926,10 +1982,13 @@ func (u *issueUseCaseImpl) UnclaimIfAssignee(ctx context.Context, id, actor, exp
 	return nil
 }
 
-// Heartbeat refreshes the lease on an issue actor holds in_progress. The
-// write touches ONLY the ephemeral leases table (bd-lrgn1), so the caller
-// must run it under uow.RunTxEphemeral's no-Dolt-commit form — a heartbeat
-// mints no Dolt commit and no history in any mode (bd-aq0ql).
+// Heartbeat refreshes the lease on an issue actor holds in_progress. A
+// refresh touches ONLY the ephemeral leases table (bd-lrgn1) and needs no Dolt
+// commit. A re-arm (a live claim with no lease row the caller holds) is
+// recorded as a mutation in versioned tables, and this method cannot report
+// one, so never commit it with uow.RunTxEphemeral: take RenewLease, which
+// reports the re-arm, and commit as the Heartbeater role does
+// (uow.RunTxScoped with issueops.LeaseRearmVersionCommit).
 func (u *issueUseCaseImpl) Heartbeat(ctx context.Context, id, actor string) error {
 	if id == "" {
 		return fmt.Errorf("Heartbeat: id must not be empty")
@@ -1960,4 +2019,20 @@ func (u *issueUseCaseImpl) ReclaimExpiredLeases(ctx context.Context, olderThan t
 		return nil, fmt.Errorf("ReclaimExpiredLeases: %w", err)
 	}
 	return out, nil
+}
+
+// Reclaim passes straight through to the repository with no pre-check and no
+// error-wrapping, matching GetMany's reasoning: the request is fully
+// validated inside the shared body (issueops.ExecuteReclaimInTx), and there is
+// no use-case-level concern layered on top of it.
+func (u *issueUseCaseImpl) Reclaim(ctx context.Context, request publicops.ReclaimRequest) (publicops.ReclaimResult, error) {
+	return u.issueRepo.Reclaim(ctx, request)
+}
+
+// RenewLease passes straight through to the repository with no pre-check and
+// no error-wrapping, Reclaim's reasoning: the request is fully validated inside
+// the shared body (issueops.ExecuteHeartbeatInTx), and the role's typed
+// refusals must reach the caller as the body built them.
+func (u *issueUseCaseImpl) RenewLease(ctx context.Context, request publicops.HeartbeatRequest) (publicops.HeartbeatResult, error) {
+	return u.issueRepo.RenewLease(ctx, request)
 }

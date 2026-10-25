@@ -1,9 +1,15 @@
 repos:
-  - repo: https://github.com/golangci/golangci-lint
-    rev: v2.10.1
+  # Lint and vet: nogo (//tools/nogo) over the changed files' Bazel packages,
+  # the analyzers CI gates on (go test's vet checks plus the golangci-lint
+  # linters .golangci.yml enables). Needs bazel or bazelisk on PATH.
+  - repo: local
     hooks:
-      - id: golangci-lint
-        args: [--timeout=5m]
+      - id: nogo
+        name: nogo (bazel)
+        entry: make lint-changed LINT_CHANGED_SCOPE=staged
+        language: system
+        types: [go]
+        pass_filenames: false
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0

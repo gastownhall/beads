@@ -14,9 +14,11 @@ go_library(
         "//internal/configfile",
         "//internal/doltserver",
         "//internal/procid",
+        "//internal/remedy",
         "//internal/storage/dbproxy/identity",
         "//internal/storage/dbproxy/pidfile",
         "//internal/storage/dbproxy/util",
+        "//internal/storage/doltutil",
         "//internal/storage/versioncontrolops",
         "@com_github_cenkalti_backoff_v4//:backoff",
         "@com_github_dolthub_dolt_go//libraries/doltcore/servercfg",
@@ -30,6 +32,7 @@ go_test(
     name = "server_test",
     srcs = [
         "doltserver_exit_unix_test.go",
+        "doltserver_internal_test.go",
         "doltserver_test.go",
         "external_dolt_server_test.go",
         "testmain_test.go",
@@ -61,3 +64,64 @@ filegroup(
 )
 
 # --- end go_srcs ---
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_doc_files",
+    srcs = glob(
+        [
+            "**/*.md",
+            "**/*.mdx",
+        ],
+        allow_empty = True,
+        exclude = ["**/node_modules/**"],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = [
+            "**/*_test.go",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+        exclude = ["**/node_modules/**"],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_other_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.go",
+            "**/*.md",
+            "**/*.mdx",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+# --- end repo_files ---

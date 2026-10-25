@@ -4,6 +4,7 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -63,6 +64,40 @@ func TestEmbeddedCreateRepoFromNonBeadsCwd(t *testing.T) {
 		out := bdCreateFail(t, bd, noBeadsCwd, "should fail")
 		if !strings.Contains(out, "no beads database found") {
 			t.Errorf("expected 'no beads database found' error, got:\n%s", out)
+		}
+	})
+
+	t.Run("gate_create_repo_flag_is_not_a_workspace", func(t *testing.T) {
+		// The --repo bypass is for top-level create only. `bd gate create
+		// --repo` names the GitHub repository a gh:run/gh:pr gate is checked
+		// in, so outside a workspace it must fail like any other command.
+		// While the bypass matched the leaf name "create", the slug form
+		// opened a stray ./owner/repo/.beads workspace under the cwd and the
+		// URL form panicked on the nil store.
+		for _, tc := range []struct{ name, repo string }{
+			{"slug", "owner/repo"},
+			{"url", "https://github.com/owner/repo"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				noBeadsCwd := t.TempDir()
+				cmd := exec.Command(bd, "gate", "create", "--type=gh:pr", "--blocks", "bd-abc", "--await-id=42", "--repo", tc.repo)
+				cmd.Dir = noBeadsCwd
+				cmd.Env = bdEnv(t.TempDir())
+				out, err := cmd.CombinedOutput()
+				if err == nil {
+					t.Fatalf("bd gate create --repo %s succeeded outside a workspace:\n%s", tc.repo, out)
+				}
+				if !strings.Contains(string(out), "no beads database found") || strings.Contains(string(out), "panic") {
+					t.Errorf("expected 'no beads database found' error, got:\n%s", out)
+				}
+				entries, readErr := os.ReadDir(noBeadsCwd)
+				if readErr != nil {
+					t.Fatal(readErr)
+				}
+				if len(entries) != 0 {
+					t.Errorf("bd gate create wrote into the cwd: %d entries, first %q", len(entries), entries[0].Name())
+				}
+			})
 		}
 	})
 }

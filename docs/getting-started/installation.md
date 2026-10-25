@@ -448,7 +448,7 @@ Upgrade checklist:
    `bd version`
 5. If crossing a schema migration on a remote-backed database, only the
    designated migrator runs:
-   `bd migrate`
+   `bd migrate schema`
    `bd dolt push`
 
 Other clones should install the new binary and run `bd bootstrap`, not

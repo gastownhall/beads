@@ -104,14 +104,22 @@ func createSwarmableEpic(t *testing.T, bd, dir, prefix string) (epicID string, c
 	return epicID, childIDs
 }
 
-func TestEmbeddedSwarm(t *testing.T) {
+// setupEmbeddedSwarm is the TestEmbeddedSwarm* tests' workspace (prefix sw).
+func setupEmbeddedSwarm(t *testing.T) (string, string) {
+	t.Helper()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "sw")
+	return bd, dir
+}
+
+func TestEmbeddedSwarmValidate(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
 	t.Parallel()
 
-	bd := buildEmbeddedBD(t)
-	dir, _, _ := bdInit(t, bd, "--prefix", "sw")
+	bd, dir := setupEmbeddedSwarm(t)
 
 	epicID, _ := createSwarmableEpic(t, bd, dir, "Swarm")
 
@@ -149,6 +157,15 @@ func TestEmbeddedSwarm(t *testing.T) {
 			t.Errorf("expected warning about no children: %s", out)
 		}
 	})
+}
+
+func TestEmbeddedSwarmCreate(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd, dir := setupEmbeddedSwarm(t)
 
 	// ===== swarm create =====
 
@@ -176,6 +193,15 @@ func TestEmbeddedSwarm(t *testing.T) {
 			t.Errorf("expected coordinator=alice, got %v", m["coordinator"])
 		}
 	})
+}
+
+func TestEmbeddedSwarmCreateForceAndErrors(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd, dir := setupEmbeddedSwarm(t)
 
 	t.Run("create_force", func(t *testing.T) {
 		eID, _ := createSwarmableEpic(t, bd, dir, "Force")
@@ -202,6 +228,15 @@ func TestEmbeddedSwarm(t *testing.T) {
 		bdSwarm(t, bd, dir, "create", eID)
 		bdSwarmFail(t, bd, dir, "create", eID)
 	})
+}
+
+func TestEmbeddedSwarmStatusList(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd, dir := setupEmbeddedSwarm(t)
 
 	// ===== swarm status =====
 

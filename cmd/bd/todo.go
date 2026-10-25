@@ -9,9 +9,11 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
+	"github.com/steveyegge/beads/issueops"
 )
 
 var todoCmd = &cobra.Command{
@@ -210,7 +212,7 @@ var doneTodoCmd = &cobra.Command{
 		for _, issueID := range args {
 			issue, err := getStore().GetIssue(ctx, issueID)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: failed to get issue %s: %v\n", issueID, err)
+				fmt.Fprintf(os.Stderr, "Error: failed to get issue %s: %s\n", issueID, remedy.PrintedMessage(err))
 				continue
 			}
 			if issue == nil {
@@ -254,7 +256,7 @@ func init() {
 	todoCmd.AddCommand(doneTodoCmd)
 
 	// Add flags
-	addTodoCmd.Flags().IntP("priority", "p", 2, "Priority (0-4, default 2)")
+	addTodoCmd.Flags().IntP("priority", "p", issueops.DefaultCreatePriority, "Priority (0-4, default 2)")
 	addTodoCmd.Flags().StringP("description", "d", "", "Description")
 
 	listTodosCmd.Flags().Bool("all", false, "Show all TODOs including completed")

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
 	"github.com/steveyegge/beads/internal/storage"
@@ -49,11 +50,12 @@ const (
 // DisallowUnknownFields reports the offender only inside an error string.
 var (
 	createRequestMembers = []string{
-		"acceptance_criteria", "actor", "assignee", "defer_until", "dependencies",
+		"acceptance_criteria", "actor", "assignee", "await_id", "await_type",
+		"defer_until", "dependencies",
 		"description", "design", "due_at", "ephemeral", "estimated_minutes",
 		"external_ref", "force_id_prefix", "id", "inherit_labels_from_parent",
 		"issue_type", "labels", createMetadataMember, "no_history", "notes", "owner",
-		"parent_id", "priority", "sender", "status", "title", "waits_for",
+		"parent_id", "priority", "sender", "status", "timeout", "title", "waiters", "waits_for",
 	}
 	createDependencyMembers = []string{"metadata", "reverse", "target_id", "type"}
 	createWaitsForMembers   = []string{"gate", "spawner_id"}
@@ -202,6 +204,9 @@ func (s *Server) createIssueRequest(w http.ResponseWriter, r *http.Request) (iss
 		Sender:             derefString(wire.Sender),
 		Ephemeral:          derefBool(wire.Ephemeral),
 		NoHistory:          derefBool(wire.NoHistory),
+		// No CreatedBy: the wire publishes none, and the role defaults it to
+		// the request's actor (issueops.PreparePublicCreateRequest), the same
+		// rule every front door and library caller gets.
 	}
 	if wire.Priority != nil {
 		issue.Priority = *wire.Priority
@@ -214,6 +219,7 @@ func (s *Server) createIssueRequest(w http.ResponseWriter, r *http.Request) (iss
 		// can be surprised by the request buffer's lifetime.
 		issue.Metadata = applyRawCopy(raw)
 	}
+	createGateMembers(issue, wire.AwaitType, wire.AwaitId, wire.Timeout, wire.Waiters)
 
 	request := issueops.CreateRequest{
 		Actor:                   actor,
@@ -221,6 +227,10 @@ func (s *Server) createIssueRequest(w http.ResponseWriter, r *http.Request) (iss
 		ParentID:                derefString(wire.ParentId),
 		InheritLabelsFromParent: derefBool(wire.InheritLabelsFromParent),
 		ForceIDPrefix:           derefBool(wire.ForceIdPrefix),
+		// An absent `priority` is the role's default, never a 0 this handler
+		// would have to make up: 0 is P0, and the document says absent means
+		// the default (CreateRequest.DefaultPriority).
+		DefaultPriority: wire.Priority == nil,
 	}
 	// IDPrefix stays ZERO, and its absence is a decision rather than an
 	// omission. It exists because a workspace's own config.yaml prefix wins over
@@ -351,6 +361,35 @@ func createWaitsFor(raw map[string]json.RawMessage, wire *apigen.CreateIssueWait
 	return &issueops.WaitsFor{SpawnerID: wire.SpawnerId, Gate: derefString(wire.Gate)}, nil
 }
 
+// createGateMembers projects the four gate members (CapIssuesCreateGates) onto
+// the issue, for createIssue and for issues:batchApply's create item alike.
+// It checks NOTHING: every bound is the role's (issueops.GateFieldError, run by
+// the create role on every create shape), so the wire refuses exactly what a
+// local create refuses and no more. `timeout` is nanoseconds, the encoding the
+// Issue's own `timeout` reads back.
+func createGateMembers(issue *types.Issue, awaitType, awaitID *string, timeout *int64, waiters *[]string) {
+	issue.AwaitType = derefString(awaitType)
+	issue.AwaitID = derefString(awaitID)
+	if timeout != nil {
+		issue.Timeout = time.Duration(*timeout)
+	}
+	if waiters != nil {
+		issue.Waiters = append([]string{}, *waiters...)
+	}
+}
+
+// gateFieldParam reports the member a role's *issueops.GateFieldError names,
+// if err carries one. The error's detail is built from the request's own
+// values (a length, a count, a negative duration), never server internals, so
+// a refusal may quote it.
+func gateFieldParam(err error) (string, string, bool) {
+	var fieldErr *issueops.GateFieldError
+	if !errors.As(err, &fieldErr) {
+		return "", "", false
+	}
+	return fieldErr.Field, fieldErr.Detail, true
+}
+
 // failCreateIssue answers a refused create, mapping the role's TYPED refusals
 // onto the frozen codes.
 //
@@ -367,7 +406,9 @@ func createWaitsFor(raw map[string]json.RawMessage, wire *apigen.CreateIssueWait
 // vocabulary arrives as prose about statuses and types, and a refused edge
 // arrives as a driver error naming tables and constraints; 4xx details on this
 // surface reflect the caller's own input back rather than server internals. The
-// real error goes to the log with the request id.
+// real error goes to the log with the request id. The one exception is a
+// *issueops.GateFieldError, whose detail is made of the caller's own input
+// only (gateFieldParam).
 func (s *Server) failCreateIssue(w http.ResponseWriter, r *http.Request, err error) {
 	var hierarchy *issueops.DependencyHierarchyConflictError
 	// The 409 constructors take no param, and the document promises one on
@@ -407,6 +448,12 @@ func (s *Server) failCreateIssue(w http.ResponseWriter, r *http.Request, err err
 	case !errors.Is(err, storage.ErrValidation):
 		s.failErr(w, r, err)
 
+	// A gate member past the role's bound (CapIssuesCreateGates), named.
+	case isGateFieldError(err):
+		field, detail, _ := gateFieldParam(err)
+		s.refusedCreateIssue(r, err)
+		s.fail(w, r, InvalidArgument(field, ReasonInvalidValue, detail+"; nothing was created"))
+
 	// The 4xx path does not log by default, so the branches below are the one
 	// place the real refusal is recorded for the operator.
 	case errors.Is(err, storage.ErrNotFound):
@@ -432,6 +479,13 @@ func (s *Server) failCreateIssue(w http.ResponseWriter, r *http.Request, err err
 		s.fail(w, r, InvalidArgument("", ReasonInvalidValue,
 			"the request was refused by this workspace's own validation; nothing was created"))
 	}
+}
+
+// isGateFieldError reports whether err carries the role's
+// *issueops.GateFieldError.
+func isGateFieldError(err error) bool {
+	_, _, ok := gateFieldParam(err)
+	return ok
 }
 
 // refusedCreateIssue records the real refusal for the operator, since the 4xx

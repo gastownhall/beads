@@ -21,6 +21,12 @@ import (
 // self-edge otherwise trips the cycle check and reports the wrong refusal, and
 // SkipPerEdgeCycleCheck would skip it entirely.
 //
+// The dotted-id hierarchy rule (publicops.CheckDottedChildDependency) is here
+// for the same reason: it is decided from the request alone, and putting it in
+// the shared validator is what makes every leg — dolt, embedded, the unit of
+// work and the server behind httpapi — refuse a child gated on its own dotted
+// parent, not only the CLI that used to check it before calling the role.
+//
 // The type check is that there IS a type — non-empty, within the column's
 // length. It is deliberately not a membership test: the vocabulary is an open,
 // workspace-configurable set (see the Dep* constants), so refusing an unlisted
@@ -42,6 +48,9 @@ func ValidateAddDependenciesRequest(request publicops.AddDependenciesRequest) er
 		}
 		if edge.IssueID == edge.DependsOnID {
 			return fmt.Errorf("%w: %s cannot depend on itself", domain.ErrSelfDependency, edge.IssueID)
+		}
+		if err := publicops.CheckDottedChildDependency(edge.IssueID, edge.DependsOnID, edge.Type); err != nil {
+			return err
 		}
 	}
 	return nil

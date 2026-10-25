@@ -400,13 +400,24 @@ func ExtractVariables(formula *Formula) []string {
 	// Extract from formula fields
 	extract(formula.Description)
 
-	// Extract from steps
+	// Extract from steps. The fields scanned here must stay in sync with the
+	// fields substituteStepVars (cook) and cloneSubgraphInto (pour) resolve -
+	// a scanned-but-unresolved field demands a variable it then ignores, and a
+	// resolved-but-unscanned field ships a literal placeholder (GH#5110,
+	// GH#5754).
 	var extractFromStep func(*Step)
 	extractFromStep = func(step *Step) {
 		extract(step.Title)
 		extract(step.Description)
+		extract(step.Notes)
 		extract(step.Assignee)
 		extract(step.Condition)
+		for _, label := range step.Labels {
+			extract(label)
+		}
+		for _, s := range metadataStrings(step.Metadata, 0) {
+			extract(s)
+		}
 		if step.Gate != nil {
 			extract(step.Gate.Type)
 			extract(step.Gate.ID)
@@ -424,6 +435,37 @@ func ExtractVariables(formula *Formula) []string {
 	}
 
 	return vars
+}
+
+// maxMetadataScanDepth bounds metadataStrings' recursion into decoded step
+// metadata, which is arbitrary user-supplied TOML/JSON.
+const maxMetadataScanDepth = 32
+
+// metadataStrings returns every string leaf of a decoded step metadata value,
+// at any nesting depth. Map keys are excluded: substitution does not rewrite
+// them, so scanning them would surface a variable that never resolves.
+func metadataStrings(v interface{}, depth int) []string {
+	if depth >= maxMetadataScanDepth {
+		return nil
+	}
+	switch val := v.(type) {
+	case string:
+		return []string{val}
+	case map[string]interface{}:
+		var out []string
+		for _, elem := range val {
+			out = append(out, metadataStrings(elem, depth+1)...)
+		}
+		return out
+	case []interface{}:
+		var out []string
+		for _, elem := range val {
+			out = append(out, metadataStrings(elem, depth+1)...)
+		}
+		return out
+	default:
+		return nil
+	}
 }
 
 // Substitute replaces {{variable}} placeholders with values.

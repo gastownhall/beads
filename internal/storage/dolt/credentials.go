@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -257,9 +258,27 @@ func (s *DoltStore) decryptPassword(encrypted []byte) (string, error) {
 	key := s.credentialKey
 	s.mu.RUnlock()
 	if key == nil {
+		// Deliberately not a key mismatch: the key was never initialized on
+		// this store, so the fix is init or file permissions, not re-adding
+		// the peer. Labeling it a mismatch would prescribe the wrong action.
 		return "", fmt.Errorf("credential encryption key not initialized")
 	}
-	return decryptWithKey(encrypted, key)
+	plaintext, err := decryptWithKey(encrypted, key)
+	if err != nil {
+		// federation_peers rows travel with the database, the key file does
+		// not, so a database opened on a second machine reaches here with a
+		// key that cannot read the stored password. Enrich at this single
+		// decrypt funnel, as embeddeddolt does, so every reader reports the
+		// credential problem rather than a bare cipher error. decryptWithKey
+		// stays unwrapped for the key-rotation path, which reads old keys on
+		// purpose and must not report a rotation miss as a mismatch. Name the
+		// resolved path rather than the bare filename: initCredentialKey looks
+		// this same basename up under both beadsDir and the legacy dbPath, so
+		// during the migration window two files carrying different keys can
+		// share the name and the bare one does not say which is meant.
+		return "", storage.CredentialKeyMismatchError(filepath.Join(s.beadsDir, credentialKeyFile), err)
+	}
+	return plaintext, nil
 }
 
 // AddFederationPeer adds or updates a federation peer with credentials.
@@ -354,7 +373,9 @@ func (s *DoltStore) GetFederationPeer(ctx context.Context, name string) (*storag
 		}
 		peer.Password, err = s.decryptPassword(encryptedPwd)
 		if err != nil {
-			return nil, fmt.Errorf("failed to decrypt password: %w", err)
+			// decryptPassword already classifies the local-key case; name the
+			// peer and preserve the sentinel for errors.Is/As.
+			return nil, fmt.Errorf("failed to decrypt password for peer %s: %w", name, err)
 		}
 	}
 
@@ -397,7 +418,9 @@ func (s *DoltStore) ListFederationPeers(ctx context.Context) ([]*storage.Federat
 			}
 			peer.Password, err = s.decryptPassword(encryptedPwd)
 			if err != nil {
-				return nil, fmt.Errorf("failed to decrypt password: %w", err)
+				// Same as GetFederationPeer: the funnel classified it, the
+				// caller only names which peer failed.
+				return nil, fmt.Errorf("failed to decrypt password for peer %s: %w", peer.Name, err)
 			}
 		}
 
@@ -592,14 +615,36 @@ func withEnvCredentials(creds *remoteCredentials, fn func() error) error {
 	return withRemoteOperationEnv(creds, false, fn)
 }
 
+// isMissingFederationPeer reports whether err means no federation_peers row
+// exists for the name (credential-free remote). Other errors remain fatal.
+func isMissingFederationPeer(err error) bool {
+	return err != nil && errors.Is(err, storage.ErrNotFound)
+}
+
 // withPeerCredentials looks up credentials for a federation peer and passes
 // them to fn. The callback receives the credentials and is responsible for
 // applying them appropriately: CLI operations use creds.applyToCmd for
 // subprocess isolation; SQL operations use withEnvCredentials for mutex-protected
 // process env access.
+//
+// A missing federation_peers row (storage.ErrNotFound) is treated as empty
+// credentials, not a hard failure. Credential-free Dolt remotes (add-peer
+// without --user, or bootstrap via sync.remote) never create a peer row, but
+// still need status/fetch/pull/push via normal Dolt credential discovery
+// (GH#4837). Malformed, decryption, and database errors remain fatal.
+//
+// An unknown peer name (a mistyped --peer) is therefore passed through too:
+// without a row it looks the same as a credential-free remote, so Dolt rejects
+// it with its own remote error. A name check added in front of this must
+// consult PersistedRemoteInfos as well as ListRemotes, or it rejects a remote
+// persisted on disk that a cold sql-server does not list yet (GH#2118).
 func (s *DoltStore) withPeerCredentials(ctx context.Context, peerName string, fn func(creds *remoteCredentials) error) error {
 	peer, err := s.GetFederationPeer(ctx, peerName)
 	if err != nil {
+		if isMissingFederationPeer(err) {
+			// No peer-specific SQL credentials stored — proceed without them.
+			return fn(nil)
+		}
 		return fmt.Errorf("failed to get peer credentials: %w", err)
 	}
 

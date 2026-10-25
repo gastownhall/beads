@@ -1,0 +1,34 @@
+diff -ruN a/go/analysis/passes/ctrlflow/ctrlflow.go b/go/analysis/passes/ctrlflow/ctrlflow.go
+--- a/go/analysis/passes/ctrlflow/ctrlflow.go	2026-10-06 23:27:28.576172198 +0000
++++ b/go/analysis/passes/ctrlflow/ctrlflow.go	2026-10-06 23:27:28.604645688 +0000
+@@ -222,6 +222,16 @@
+ 	}
+ 
+ 	// Not declared in this package.
++	// Known intrinsically? (gascity third_party/patches: Bazel's nogo does
++	// not analyze the standard library, so its no-return functions, listed
++	// in knownIntrinsic, have no facts to import.)
++	if noreturn, known := knownIntrinsic(fn); known {
++		if noreturn {
++			c.noReturn[fn] = true
++		}
++		return !noreturn
++	}
++
+ 	// Is there a fact from another package?
+ 	if c.pass.ImportObjectFact(fn, new(noReturn)) {
+ 		c.noReturn[fn] = true
+@@ -245,6 +255,13 @@
+ 	// Functions known intrinsically never to return.
+ 	if typesinternal.IsFunctionNamed(fn, "syscall", "Exit", "ExitProcess", "ExitThread") ||
+ 		typesinternal.IsFunctionNamed(fn, "runtime", "Goexit", "fatalthrow", "fatalpanic", "exit") ||
++		// Standard-library functions that never return. Analysis of the
++		// standard library normally derives these as facts; Bazel's nogo
++		// does not analyze it (gascity third_party/patches).
++		typesinternal.IsFunctionNamed(fn, "os", "Exit") ||
++		typesinternal.IsFunctionNamed(fn, "log", "Fatal", "Fatalf", "Fatalln", "Panic", "Panicf", "Panicln") ||
++		typesinternal.IsMethodNamed(fn, "log", "Logger", "Fatal", "Fatalf", "Fatalln", "Panic", "Panicf", "Panicln") ||
++		typesinternal.IsMethodNamed(fn, "testing", "common", "FailNow", "Fatal", "Fatalf", "SkipNow", "Skip", "Skipf") ||
+ 		// Following staticcheck (see go/ir/exits.go) we include functions
+ 		// in several popular logging packages whose no-return status is
+ 		// beyond the analysis to infer.

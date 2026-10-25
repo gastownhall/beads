@@ -286,6 +286,23 @@ func newParityEnv(t *testing.T) *parityEnv {
 	// the ambient git identity. Pin it: CI commonly sets GIT_AUTHOR_EMAIL, a developer
 	// shell usually does not, and the suite must render the same verdict in both.
 	t.Setenv("GIT_AUTHOR_EMAIL", parityOwnerEmail)
+	// bd create auto-routes by routing.DetectUserRole("."), which reads
+	// `git config beads.role` in the process's working directory and, when it
+	// is unset, prints a "beads.role not configured" warning to stderr before
+	// falling back to a URL heuristic. The pinned stderr contract is the
+	// configured case, so configure the role (maintainer: route to ".") in a
+	// global git config of this test's own, whatever repository, if any, the
+	// test binary runs in. Not GIT_CONFIG_*: the role lookup scrubs every
+	// GIT_CONFIG variable (gitenv.ScrubRoutingAndSuppression), but git also
+	// reads $XDG_CONFIG_HOME/git/config as global config.
+	xdg := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(xdg, "git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(xdg, "git", "config"), []byte("[beads]\n\trole = maintainer\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", xdg)
 	t.Setenv("BEADS_DIR", beadsDir)
 
 	// Pin every config key the write verbs read. config.Initialize() merges
@@ -1142,7 +1159,7 @@ func TestParityUpdateGuardsRequireFieldUpdate(t *testing.T) {
 	if res.exitCode != 1 {
 		t.Fatalf("exit = %d, want 1; stderr=%s", res.exitCode, res.stderr)
 	}
-	const want = "Error: --if-assignee/--if-status require at least one field update (e.g. -a, -s); label and parent edits are not covered by the guard\n"
+	const want = "Error: --if-assignee/--if-status/--if-revision require at least one field update (e.g. -a, -s); label and parent edits are not covered by the guard\n"
 	if res.stderr != want {
 		t.Errorf("stderr = %q, want %q", res.stderr, want)
 	}
@@ -1167,7 +1184,7 @@ func TestParityUpdateGuardsRejectClaim(t *testing.T) {
 	if res.exitCode != 1 {
 		t.Fatalf("exit = %d, want 1; stderr=%s", res.exitCode, res.stderr)
 	}
-	const want = "Error: cannot combine --if-assignee/--if-status with --claim (--claim is already an atomic compare-and-set)\n"
+	const want = "Error: cannot combine --if-assignee/--if-status/--if-revision with --claim (--claim is already an atomic compare-and-set)\n"
 	if res.stderr != want {
 		t.Errorf("stderr = %q, want %q", res.stderr, want)
 	}
@@ -1641,14 +1658,73 @@ func TestParityCloseNothingSettledExits1(t *testing.T) {
 	if res.stdout != "" {
 		t.Errorf("stdout = %q, want empty (SilentExit prints nothing itself)", res.stdout)
 	}
-	// The batch summary is multi-id ONLY. A single refused id already names
-	// itself on stderr, so adding `N of M issues failed to close` to it would
-	// be noise — and this is the sole assertion pinning that suppression.
+	// The text batch summary is multi-id ONLY. A single refused id already
+	// names itself on stderr, so adding `N of M issues failed to close` to it
+	// would be noise — and this is the sole assertion pinning that
+	// suppression. --json is different: TestParityCloseJSONFailureReport.
 	if strings.Contains(res.stderr, "issues failed to close") {
 		t.Errorf("stderr = %q, want no batch summary for a single id", res.stderr)
 	}
 	if got := env.lastTouched(); got != "" {
 		t.Errorf("last-touched = %q, want it untouched when nothing settled", got)
+	}
+}
+
+// TestParityCloseJSONFailureReport pins the --json failure report for a
+// single refused id, the close twin of TestParityUpdateJSONFailureReport: a
+// consumer closing one id at a time must get a parseable reason, as it does
+// from `bd update --json`. stdout stays empty because nothing closed, the
+// inline refusal is unchanged, and the LAST stderr line is the compact JSON
+// report — with no text summary beside it. Source: cmd/bd/close.go
+// reportCloseFailures.
+func TestParityCloseJSONFailureReport(t *testing.T) {
+	env := newParityEnv(t)
+	env.seed("test-clsjf", "Owned by another actor", func(i *types.Issue) {
+		i.Assignee = "someone-else"
+	})
+
+	jsonOutput = true
+	env.setFlags(closeCmd, nil)
+	res := env.run(closeCmd, "test-clsjf")
+
+	if res.exitCode != 1 {
+		t.Fatalf("exit = %d, want 1\nstderr:\n%s", res.exitCode, res.stderr)
+	}
+	if res.stdout != "" {
+		t.Errorf("stdout = %q, want empty (no issue was closed)", res.stdout)
+	}
+	if env.get("test-clsjf").Status == types.StatusClosed {
+		t.Error("the refused ID must not have been closed")
+	}
+
+	refusal := fmt.Sprintf("cannot close %s: assignee is %q, actor is %q; reclaim or use --force to override",
+		"test-clsjf", "someone-else", actor)
+	lines := strings.Split(strings.TrimRight(res.stderr, "\n"), "\n")
+	if len(lines) != 2 || lines[0] != refusal {
+		t.Fatalf("stderr = %q, want the inline refusal %q and then one JSON report line", res.stderr, refusal)
+	}
+	var payload struct {
+		Error         string `json:"error"`
+		SchemaVersion int    `json:"schema_version"`
+		Failed        []struct {
+			ID    string `json:"id"`
+			Error string `json:"error"`
+		} `json:"failed"`
+	}
+	if err := json.Unmarshal([]byte(lines[1]), &payload); err != nil {
+		t.Fatalf("last stderr line is not the JSON failure report: %v\nline: %s", err, lines[1])
+	}
+	if payload.Error != "1 of 1 issues failed to close" {
+		t.Errorf("error = %q, want %q", payload.Error, "1 of 1 issues failed to close")
+	}
+	if payload.SchemaVersion != JSONSchemaVersion {
+		t.Errorf("schema_version = %d, want %d", payload.SchemaVersion, JSONSchemaVersion)
+	}
+	if len(payload.Failed) != 1 {
+		t.Fatalf("failed entries = %d, want 1", len(payload.Failed))
+	}
+	if payload.Failed[0].ID != "test-clsjf" || payload.Failed[0].Error != refusal {
+		t.Errorf("failed[0] = %+v, want {ID:%s Error:%s}", payload.Failed[0], "test-clsjf", refusal)
 	}
 }
 
@@ -1679,6 +1755,42 @@ func TestParityCloseAlreadyClosedIsIdempotentSuccess(t *testing.T) {
 	}
 	if n := countOf(env.eventTypes("test-cls7"), string(types.EventClosed)); n != closedEventsAfterFirst {
 		t.Errorf("closed events = %d, want %d (a re-close must add none)", n, closedEventsAfterFirst)
+	}
+}
+
+// TestParityCloseIfRevisionRejectsContinueSuggestNextClaimNext pins
+// mc-zndi7.76 (gap 4 / mutant ML): --if-revision's single-id compare-and-swap
+// bypass (cmd/bd/close.go:109-117) never looks at --continue, --suggest-next
+// or --claim-next, so honoring any of them would silently drop what the
+// caller asked for instead of reporting it. Each of the three flags is
+// refused independently, before any write.
+func TestParityCloseIfRevisionRejectsContinueSuggestNextClaimNext(t *testing.T) {
+	for _, flag := range []string{"continue", "suggest-next", "claim-next"} {
+		t.Run(flag, func(t *testing.T) {
+			env := newParityEnv(t)
+			seeded := env.seed("test-clsifr-"+flag, "Guarded close vs "+flag, nil)
+			rev := env.get(seeded.ID).RowVersion
+
+			env.setFlags(closeCmd, map[string]string{
+				"if-revision": fmt.Sprintf("%d", rev),
+				flag:          "true",
+			})
+			res := env.run(closeCmd, seeded.ID)
+
+			if res.exitCode != 1 {
+				t.Fatalf("exit = %d, want 1\nstderr:\n%s", res.exitCode, res.stderr)
+			}
+			const want = "Error: --if-revision does not support --continue, --suggest-next, or --claim-next\n"
+			if res.stderr != want {
+				t.Errorf("stderr = %q, want %q", res.stderr, want)
+			}
+			if got := env.get(seeded.ID); got.Status == types.StatusClosed {
+				t.Error("the issue must not have been closed")
+			}
+			if got := env.store.mutations(); len(got) != 0 {
+				t.Errorf("store mutations = %v, want none (rejected pre-write)", got)
+			}
+		})
 	}
 }
 

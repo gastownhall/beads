@@ -19,13 +19,13 @@ import (
 // that nothing was recorded. Nothing short of mutating and then reading back
 // can tell the difference.
 
-// TestServeActivatesTheEventsJournal covers `bd serve` against a SERVER-MODE
+// TestProxiedServerServeActivatesTheEventsJournal covers `bd serve` against a SERVER-MODE
 // workspace, where PersistentPreRunE builds a DoltStore and no unit-of-work
 // provider at all — so serve constructs its own, from the workspace's Dolt
 // connection settings. That provider was never activated: every mutation the
 // HTTP surface accepted committed with an empty journal while /healthz stayed
 // green and every response looked normal.
-func TestServeActivatesTheEventsJournal(t *testing.T) {
+func TestProxiedServerServeActivatesTheEventsJournal(t *testing.T) {
 	requireSharedProxiedServer(t)
 	t.Parallel()
 	bd := buildEmbeddedBD(t)
@@ -57,7 +57,7 @@ func TestServeActivatesTheEventsJournal(t *testing.T) {
 	}
 }
 
-// TestRoutedCreateJournalsIntoTheTargetWorkspace covers the cross-workspace
+// TestEmbeddedRoutedCreateJournalsIntoTheTargetWorkspace covers the cross-workspace
 // store: `bd create --repo <other>` opens a SECOND store for another workspace
 // and writes the bead there.
 //
@@ -65,7 +65,7 @@ func TestServeActivatesTheEventsJournal(t *testing.T) {
 // TARGET's own config.yaml, so a workspace that enabled the journal gets its
 // mutations recorded no matter which directory bd was launched from — and the
 // launching workspace, which enabled nothing, records nothing of its own.
-func TestRoutedCreateJournalsIntoTheTargetWorkspace(t *testing.T) {
+func TestEmbeddedRoutedCreateJournalsIntoTheTargetWorkspace(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -120,13 +120,13 @@ func TestRoutedCreateJournalsIntoTheTargetWorkspace(t *testing.T) {
 	}
 }
 
-// TestRoutedCreateHonorsTheEnvOverrideOverTheTargetsConfig is the precedence
+// TestEmbeddedRoutedCreateHonorsTheEnvOverrideOverTheTargetsConfig is the precedence
 // half. BD_EVENTS_JOURNAL is the documented way to turn the journal on for a
 // process without editing a workspace, and a routed write is exactly where an
 // operator reaches for it — so a target whose config.yaml says false must not
 // be able to veto it. Getting this backwards makes the env var a suggestion,
 // and the operator finds out by discovering an empty journal later.
-func TestRoutedCreateHonorsTheEnvOverrideOverTheTargetsConfig(t *testing.T) {
+func TestEmbeddedRoutedCreateHonorsTheEnvOverrideOverTheTargetsConfig(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}

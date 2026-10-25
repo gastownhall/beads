@@ -89,6 +89,46 @@ func TestDetermineTargetRepo(t *testing.T) {
 	}
 }
 
+// TestUsesUserRoleMatchesDetermineTargetRepo holds UsesUserRole to the rules
+// DetermineTargetRepoWithRule actually applies, in both directions: where it
+// reports false, every role (an undetected one included) must route the same
+// way, so callers may skip detection; where it reports true, some role must
+// change the answer, so detection is never skipped while routing would use it.
+func TestUsesUserRoleMatchesDetermineTargetRepo(t *testing.T) {
+	type answer struct {
+		repo string
+		rule RoutingRule
+	}
+	for _, mode := range []string{"", "auto", "explicit"} {
+		for mask := 0; mask < 1<<4; mask++ {
+			config := &RoutingConfig{Mode: mode}
+			if mask&1 != 0 {
+				config.ExplicitOverride = "override-repo"
+			}
+			if mask&2 != 0 {
+				config.MaintainerRepo = "maintainer-repo"
+			}
+			if mask&4 != 0 {
+				config.ContributorRepo = "contributor-repo"
+			}
+			if mask&8 != 0 {
+				config.DefaultRepo = "default-repo"
+			}
+
+			answers := map[answer]bool{}
+			for _, role := range []UserRole{"", Maintainer, Contributor} {
+				repo, rule := DetermineTargetRepoWithRule(config, role, ".")
+				answers[answer{repo, rule}] = true
+			}
+			roleChangesAnswer := len(answers) > 1
+			if got := config.UsesUserRole(); got != roleChangesAnswer {
+				t.Errorf("UsesUserRole() = %v for %+v, want %v (answers by role: %v)",
+					got, *config, roleChangesAnswer, answers)
+			}
+		}
+	}
+}
+
 func TestDetectUserRole_Fallback(t *testing.T) {
 	// Test fallback behavior when git is not available - local projects default to maintainer
 	role, err := DetectUserRole("/nonexistent/path/that/does/not/exist")

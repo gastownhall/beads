@@ -5,7 +5,6 @@ package fix
 import (
 	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -38,7 +37,7 @@ func setupDoltWorkspace(t *testing.T) string {
 	if err := copyGitDir(gitTemplateDir, dir); err != nil {
 		t.Fatalf("failed to copy git template: %v", err)
 	}
-	cmd := exec.Command("git", "config", "remote.origin.url", "https://github.com/test/dolt-metadata-fix.git")
+	cmd := gitCommand("config", "remote.origin.url", "https://github.com/test/dolt-metadata-fix.git")
 	cmd.Dir = dir
 	_ = cmd.Run()
 

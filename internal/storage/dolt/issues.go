@@ -445,20 +445,41 @@ func (s *DoltStore) verifiedReadyClaim(ctx context.Context, actor string, write 
 
 // HeartbeatIssue refreshes the lease on an issue actor holds in_progress,
 // pushing lease_expires_at forward on its row in the ephemeral leases table
-// (see issueops.lease). Deliberately NO DOLT_ADD/DOLT_COMMIT: the leases
-// table is dolt_ignored, so a heartbeat mints no commit and no history — this
-// is the whole point of bd-lrgn1 (fleet heartbeats were the dominant source
-// of unbounded reachable history). Wrapped in withRetryTx so a heartbeat that
-// loses Dolt's optimistic merge to a concurrent reclaim/close on the same
-// lease row is replayed against a fresh snapshot rather than surfaced.
+// (see issueops.lease). A REFRESH stages nothing: the leases table is
+// dolt_ignored, so it mints no Dolt commit and no history — the whole point of
+// bd-lrgn1 (fleet heartbeats were the dominant source of unbounded reachable
+// history). A RE-ARM (a live claim with no lease row the caller holds) is
+// recorded as a mutation and gets the one version-control commit
+// issueops.LeaseRearmVersionCommit names. Wrapped in withRetryTx so a
+// heartbeat that loses Dolt's optimistic merge to a concurrent reclaim/close
+// on the same lease row is replayed against a fresh snapshot rather than
+// surfaced.
 func (s *DoltStore) HeartbeatIssue(ctx context.Context, id, actor string) error {
 	if s.isActiveWisp(ctx, id) {
 		// Wisps are ephemeral and never leased; nothing to heartbeat.
 		return fmt.Errorf("%w: %s is ephemeral", storage.ErrNotClaimable, id)
 	}
-	return s.withRetryTx(ctx, func(tx *sql.Tx) error {
-		return issueops.HeartbeatIssueInTx(ctx, tx, id, actor)
-	})
+	// A refusal that read the issue row COMMITS (it may have deleted the
+	// caller's orphaned lease row) and is returned after; one whose issue read
+	// failed is returned from the callback, so its transaction rolls back
+	// (issueops.LeaseRenewalRefusalCommits).
+	var refusal error
+	if err := s.runIssueOperationTxWithMessage(ctx, func(tx *sql.Tx) (issueops.ChangedTables, string, error) {
+		renewal, err := issueops.RenewLeaseInTx(ctx, tx, id, actor)
+		refusal = nil
+		if issueops.LeaseRenewalRefusalCommits(err) {
+			refusal = err
+			return nil, "", nil
+		}
+		if err != nil {
+			return nil, "", err
+		}
+		tables, msg := issueops.LeaseRearmVersionCommit(id, renewal.Rearmed)
+		return tables, msg, nil
+	}); err != nil {
+		return err
+	}
+	return refusal
 }
 
 // ReclaimExpiredLeases reverts in_progress issues whose lease expired more than
@@ -606,8 +627,10 @@ func (s *DoltStore) closeIssue(ctx context.Context, id string, reason string, ac
 // when it has a live direct blocker unless opts.Force is set, and — when
 // opts.ExpectedVersion is non-nil — with storage.ErrVersionMismatch when the
 // row's current RowVersion no longer matches (an orthogonal CAS that Force does
-// not bypass). Both checks and the close share one transaction, so they are
-// atomic (no TOCTOU). Mirrors CloseIssue's Dolt-specific concerns (wisp routing,
+// not bypass). The close guards (template, pin, assignee; see
+// issueops.CloseIssueCheckedInTx) refuse first, the template whatever Force
+// says. Every check and the close share one transaction, so they are atomic
+// (no TOCTOU). Mirrors CloseIssue's Dolt-specific concerns (wisp routing,
 // DOLT_ADD/COMMIT).
 func (s *DoltStore) CloseIssueChecked(ctx context.Context, id string, actor string, opts storage.CloseIssueOptions) (storage.CloseIssueResult, error) {
 	var result storage.CloseIssueResult

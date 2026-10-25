@@ -540,7 +540,7 @@ func runADOSync(cmd *cobra.Command, _ []string) error {
 	}
 
 	// Create the sync engine
-	engine := tracker.NewEngine(at, store, actor)
+	engine := tracker.NewEngine(at, store, currentActor())
 	var warnings []string
 	if !jsonOutput {
 		engine.OnMessage = func(msg string) { _, _ = fmt.Fprintln(out, "  "+msg) }
@@ -641,7 +641,7 @@ func runADOSync(cmd *cobra.Command, _ []string) error {
 								continue
 							}
 							reason := fmt.Sprintf("ADO work item %s deleted", idStr)
-							if cerr := store.CloseIssue(ctx, localID, reason, actor, ""); cerr != nil {
+							if cerr := store.CloseIssue(ctx, localID, reason, currentActor(), ""); cerr != nil {
 								msg := fmt.Sprintf("Failed to close %s for deleted ADO #%s: %v", localID, idStr, cerr)
 								warnings = append(warnings, msg)
 								if !jsonOutput {
@@ -915,7 +915,7 @@ func buildADOPullHooks(ctx context.Context, at *ado.Tracker, bootstrapMatch, noC
 						"external_ref":  ref,
 						"source_system": "ado:" + extIssue.ID,
 					}
-					if err := store.UpdateIssue(ctx, result.BeadsID, updates, actor); err == nil {
+					if err := store.UpdateIssue(ctx, result.BeadsID, updates, currentActor()); err == nil {
 						*matchCount++
 						if warn != nil {
 							warn(fmt.Sprintf("Bootstrap matched ADO #%s → %s (%s)", extIssue.ID, result.BeadsID, result.MatchType))

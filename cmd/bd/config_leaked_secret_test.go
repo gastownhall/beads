@@ -238,16 +238,26 @@ func TestNotionStatusWarnsOnlyForTheLeakedSource(t *testing.T) {
 	}
 }
 
-// leakedRowStore is the production store reduced to the one accessor the
-// cleanup reaches through. Its nil embedded storage makes any other call panic,
-// so these tests cannot silently exercise more of the store than the seam.
+// leakedRowStore is the production store reduced to the two calls the cleanup
+// makes: the config-plane accessor, and the scoped commit of a delete that
+// landed (on the SQL-server route only; elsewhere commitConfigWrite is a no-op
+// before it reaches the store). Its nil embedded storage makes any other call
+// panic, so these tests cannot silently exercise more of the store than that.
 type leakedRowStore struct {
 	storage.DoltStorage
 	settings *recordingWorkspaceConfig
+
+	commits   []string
+	commitErr error
 }
 
 func (s *leakedRowStore) WorkspaceConfig() (issueops.WorkspaceConfig, error) {
 	return s.settings, nil
+}
+
+func (s *leakedRowStore) CommitConfigOnly(_ context.Context, message string) error {
+	s.commits = append(s.commits, message)
+	return s.commitErr
 }
 
 // newLeakedSecretWorkspace builds the workspace shapes GH#6676 produced: a

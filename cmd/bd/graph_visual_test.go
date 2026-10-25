@@ -13,7 +13,9 @@ func TestRenderGraphVisual(t *testing.T) {
 	subgraph, layout := makeTestSubgraph()
 
 	var output bytes.Buffer
-	renderGraphVisualTo(&output, layout, subgraph)
+	if err := renderGraphVisual(&output, layout, subgraph); err != nil {
+		t.Fatalf("renderGraphVisual: %v", err)
+	}
 	got := output.String()
 
 	// Verify layer headers
@@ -68,7 +70,9 @@ func TestRenderGraphVisual_Empty(t *testing.T) {
 	}
 
 	var output bytes.Buffer
-	renderGraphVisualTo(&output, layout, emptySubgraph)
+	if err := renderGraphVisual(&output, layout, emptySubgraph); err != nil {
+		t.Fatalf("renderGraphVisual: %v", err)
+	}
 
 	if !strings.Contains(output.String(), "Empty graph") {
 		t.Error("Empty visual output should say 'Empty graph'")
@@ -89,7 +93,9 @@ func TestRenderGraphVisual_SingleNode(t *testing.T) {
 	layout := computeLayout(subgraph)
 
 	var output bytes.Buffer
-	renderGraphVisualTo(&output, layout, subgraph)
+	if err := renderGraphVisual(&output, layout, subgraph); err != nil {
+		t.Fatalf("renderGraphVisual: %v", err)
+	}
 	got := output.String()
 
 	if !strings.Contains(got, "solo-1") {

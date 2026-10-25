@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -18,7 +17,7 @@ import (
 
 func initRoleFixtureGit(t *testing.T, repo string, args ...string) string {
 	t.Helper()
-	cmd := exec.Command("git", args...)
+	cmd := gitCommand(args...)
 	cmd.Dir = repo
 	cmd.Env = gitenv.ScrubRouting(os.Environ())
 	out, err := cmd.CombinedOutput()
@@ -483,7 +482,7 @@ func TestContributorPlanningGitIgnoresInheritedRouting(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				cmd := exec.Command("git", "show", "HEAD:README.md")
+				cmd := gitCommand("show", "HEAD:README.md")
 				cmd.Dir, cmd.Env = planning, gitenv.ScrubRouting(os.Environ())
 				if committed, err := cmd.Output(); err != nil || string(committed) != string(readme) {
 					t.Errorf("planning README commit differs from created bytes: %v", err)
@@ -597,7 +596,7 @@ func TestInitArtifactGitRouting(t *testing.T) {
 			if err := os.WriteFile(foreignIndex, index, 0600); err != nil {
 				t.Fatal(err)
 			}
-			stage := exec.Command("git", "add", ".beads/fixture")
+			stage := gitCommand("add", ".beads/fixture")
 			stage.Dir, stage.Env = decoy, append(gitenv.ScrubRouting(os.Environ()), "GIT_INDEX_FILE="+foreignIndex)
 			if out, err := stage.CombinedOutput(); err != nil {
 				t.Fatalf("prepare actual foreign index: %v: %s", err, out)

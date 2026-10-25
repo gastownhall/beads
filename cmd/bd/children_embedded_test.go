@@ -26,7 +26,7 @@ func bdChildren(t *testing.T, bd, dir string, args ...string) string {
 	return stdout.String()
 }
 
-func TestEmbeddedChildren(t *testing.T) {
+func TestEmbeddedChildrenBasicAndEmpty(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -50,6 +50,33 @@ func TestEmbeddedChildren(t *testing.T) {
 			t.Errorf("expected child2 %s in output: %s", child2.ID, out)
 		}
 	})
+
+	t.Run("children_empty", func(t *testing.T) {
+		parent := bdCreate(t, bd, dir, "No children parent", "--type", "task")
+		out := bdChildren(t, bd, dir, parent.ID)
+		// Should not error, may show empty message
+		_ = out
+	})
+
+	t.Run("children_nonexistent_parent", func(t *testing.T) {
+		cmd := exec.Command(bd, "children", "ch-nonexistent999")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected children of nonexistent to fail, got: %s", out)
+		}
+	})
+}
+
+func TestEmbeddedChildrenJSONAndAllStatuses(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "ch")
 
 	t.Run("children_json", func(t *testing.T) {
 		parent := bdCreate(t, bd, dir, "JSON parent", "--type", "epic")
@@ -76,13 +103,6 @@ func TestEmbeddedChildren(t *testing.T) {
 		}
 	})
 
-	t.Run("children_empty", func(t *testing.T) {
-		parent := bdCreate(t, bd, dir, "No children parent", "--type", "task")
-		out := bdChildren(t, bd, dir, parent.ID)
-		// Should not error, may show empty message
-		_ = out
-	})
-
 	t.Run("children_includes_all_statuses", func(t *testing.T) {
 		parent := bdCreate(t, bd, dir, "All status parent", "--type", "epic")
 		openChild := bdCreate(t, bd, dir, "Open child", "--type", "task")
@@ -97,16 +117,6 @@ func TestEmbeddedChildren(t *testing.T) {
 		}
 		if !strings.Contains(out, closedChild.ID) {
 			t.Errorf("expected closed child in output (--all implied): %s", out)
-		}
-	})
-
-	t.Run("children_nonexistent_parent", func(t *testing.T) {
-		cmd := exec.Command(bd, "children", "ch-nonexistent999")
-		cmd.Dir = dir
-		cmd.Env = bdEnv(dir)
-		out, err := cmd.CombinedOutput()
-		if err == nil {
-			t.Fatalf("expected children of nonexistent to fail, got: %s", out)
 		}
 	})
 }

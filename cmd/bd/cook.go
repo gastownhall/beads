@@ -4,15 +4,19 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"runtime"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/formula"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // stepTypeToIssueType converts a formula step type string to a types.IssueType.
@@ -314,7 +318,7 @@ func persistCookFormula(ctx context.Context, resolved *formula.Formula, protoID 
 	existingProto, err := store.GetIssue(ctx, protoID)
 	if err == nil && existingProto != nil {
 		if !force {
-			return fmt.Errorf("proto %s already exists (use --force to replace)", protoID)
+			return fmt.Errorf("proto %s already exists (use --force to replace)", remedy.PrintedValue(protoID))
 		}
 		// Delete existing proto and its children
 		if err := deleteProtoSubgraph(ctx, store, protoID); err != nil {
@@ -338,16 +342,27 @@ func persistCookFormula(ctx context.Context, resolved *formula.Formula, protoID 
 		})
 	}
 
-	fmt.Printf("%s Cooked proto: %s\n", ui.RenderPass("✓"), result.ProtoID)
-	fmt.Printf("  Created %d issues\n", result.Created)
+	printCookedProto(result.ProtoID, result.Created, vars, bondPoints)
+	return nil
+}
+
+// printCookedProto prints bd cook --persist's summary and its bd mol pour
+// hint. The proto ID is the formula file's own formula field, which a
+// committed .beads/formulas file sets: it is named escaped, and goes into
+// the hint as one shell word or a placeholder named beside it. The bond
+// point IDs printed above the hint come from the same file and are named
+// escaped too.
+func printCookedProto(protoID string, created int, vars, bondPoints []string) {
+	fmt.Printf("%s Cooked proto: %s\n", ui.RenderPass("✓"), remedy.PrintedValue(protoID))
+	fmt.Printf("  Created %d issues\n", created)
 	if len(vars) > 0 {
 		fmt.Printf("  Variables: %s\n", strings.Join(vars, ", "))
 	}
 	if len(bondPoints) > 0 {
-		fmt.Printf("  Bond points: %s\n", strings.Join(bondPoints, ", "))
+		fmt.Printf("  Bond points: %s\n", remedy.PrintedList(bondPoints, ", "))
 	}
-	fmt.Printf("\nTo use: bd mol pour %s --var <name>=<value>\n", result.ProtoID)
-	return nil
+	proto, note := remedy.CommandArg(runtime.GOOS, protoID, "<proto>")
+	fmt.Printf("\nTo use: bd mol pour %s --var <name>=<value>%s\n", proto, note)
 }
 
 func runCook(cmd *cobra.Command, args []string) error {
@@ -453,7 +468,7 @@ func cookFormulaToSubgraph(f *formula.Formula, protoID string) (*TemplateSubgrap
 		Title:       rootTitle,
 		Description: rootDesc,
 		Status:      types.StatusOpen,
-		Priority:    2,
+		Priority:    issueops.DefaultCreatePriority,
 		IssueType:   types.TypeMolecule,
 		IsTemplate:  true,
 		CreatedAt:   time.Now(),
@@ -511,7 +526,7 @@ func createGateIssue(step *formula.Step, parentID string) *types.Issue {
 		Title:       title,
 		Description: fmt.Sprintf("Async gate for step %s", step.ID),
 		Status:      types.StatusOpen,
-		Priority:    2,
+		Priority:    issueops.DefaultCreatePriority,
 		IssueType:   "gate",
 		AwaitType:   step.Gate.Type,
 		AwaitID:     awaitID,
@@ -567,7 +582,7 @@ func processStepToIssue(step *formula.Step, parentID string) *types.Issue {
 	}
 
 	// Determine priority
-	priority := 2
+	priority := issueops.DefaultCreatePriority
 	if step.Priority != nil {
 		priority = *step.Priority
 	}
@@ -774,6 +789,20 @@ func resolveAndCookFormulaWithVars(formulaName string, searchPaths []string, con
 		}
 	}
 
+	// Record which variables the formula's steps reference, before the filter
+	// below removes steps. Both a condition var and a handlebar that lives only
+	// inside a dropped step leave no trace in the cooked subgraph, so this is
+	// the only point at which those names are still visible. Collected
+	// unconditionally: the names are a property of the formula, not of this
+	// pour's --var values.
+	formulaVarNames := formulaVarRefs(resolved.Steps)
+	// A standalone expansion formula's steps are materialized from its template
+	// below, against this synthetic target, and that substitutes --var values
+	// into the template's {name} placeholders as it builds them: a name used
+	// only there is consumed without leaving a trace either.
+	const expansionTarget = "main"
+	formulaVarNames = append(formulaVarNames, formula.ExpansionVarRefs(resolved, expansionTarget)...)
+
 	// Apply step condition filtering if vars provided (bd-7zka.1)
 	// This filters out steps whose conditions evaluate to false
 	if conditionVars != nil {
@@ -811,13 +840,83 @@ func resolveAndCookFormulaWithVars(formulaName string, searchPaths []string, con
 				expansionVars[k] = v
 			}
 		}
-		if err := formula.MaterializeExpansion(resolved, "main", expansionVars); err != nil {
+		if err := formula.MaterializeExpansion(resolved, expansionTarget, expansionVars); err != nil {
 			return nil, fmt.Errorf("standalone expansion %q: %w", formulaName, err)
 		}
 	}
 
 	// Cook to in-memory subgraph, including variable definitions for default handling
-	return cookFormulaToSubgraphWithVars(resolved, resolved.Formula, resolved.Vars)
+	subgraph, err := cookFormulaToSubgraphWithVars(resolved, resolved.Formula, resolved.Vars)
+	if err != nil {
+		return nil, err
+	}
+	subgraph.FormulaVarRefs = formulaVarNames
+	return subgraph, nil
+}
+
+// formulaVarRefs returns the variable names the steps reference, walking
+// children, deduplicated and sorted. Call it on the UNFILTERED steps: every
+// name it finds can be erased by formula.FilterStepsByCondition.
+//
+// Two kinds of reference are collected, and both are consumable:
+//
+//   - step conditions, which the filter consumes and never copies to an issue
+//     field. These are handlebar expressions - `{{spike}}`, `!{{spike}}`,
+//     `{{env}} == "prod"` (internal/formula/stepcondition.go) - so the same
+//     extractor the substitutable fields use finds their names.
+//   - the substitutable fields of the steps themselves - prose, assignee,
+//     labels and metadata values - which vanish when the filter drops the
+//     step. Without them, `--var deploy=false --var deploy_target=prod` would
+//     reject deploy_target while `deploy=true` accepted it, making one name's
+//     validity depend on another name's value.
+//
+// The step fields read here are the ones processStepToIssue copies into a
+// substituted issue field, plus the gate fields createGateIssue derives from
+// step.Gate; keep them in sync with those two functions and with
+// substitutedIssueFields, which is the same question asked of a cooked issue.
+func formulaVarRefs(steps []*formula.Step) []string {
+	seen := make(map[string]bool)
+	var walk func([]*formula.Step)
+	walk = func(ss []*formula.Step) {
+		for _, step := range ss {
+			if step == nil {
+				continue
+			}
+			texts := []string{step.Condition, step.Title, step.Description, step.Notes, step.Assignee}
+			texts = append(texts, step.Labels...)
+			// processStepToIssue carries the metadata onto the issue as JSON,
+			// and the pour substitutes every string value in it but never a
+			// key, so read it back the way substitutedIssueFields does.
+			if len(step.Metadata) > 0 {
+				if metaJSON, err := json.Marshal(step.Metadata); err == nil {
+					texts = append(texts, metadataVarStrings(metaJSON)...)
+				}
+			}
+			if step.Gate != nil {
+				// createGateIssue mirrors the awaitID into the gate issue's
+				// Title and AwaitID, and writes Repo to metadata.repo only for
+				// gh:* gate types.
+				texts = append(texts, gateAwaitID(step.Gate))
+				if isGitHubGateType(step.Gate.Type) {
+					texts = append(texts, step.Gate.Repo)
+				}
+			}
+			for _, text := range texts {
+				for _, name := range extractVariables(text) {
+					seen[name] = true
+				}
+			}
+			walk(step.Children)
+		}
+	}
+	walk(steps)
+
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // cookFormulaToSubgraphWithVars creates an in-memory subgraph with variable info attached
@@ -826,6 +925,13 @@ func cookFormulaToSubgraphWithVars(f *formula.Formula, protoID string, vars map[
 	if err != nil {
 		return nil, err
 	}
+	// The formula is in hand here, so whatever VarDefs ends up being IS its
+	// complete declared-variable set - including the nil map a formula with no
+	// [vars] section produces. Persistence is what loses the declarations, so
+	// only this path may claim they are known (see TemplateSubgraph.
+	// DeclaredVarsKnown).
+	subgraph.DeclaredVarsKnown = true
+
 	// Attach variable definitions to the subgraph for default handling during pour
 	// Convert from *VarDef to VarDef for simpler handling
 	if vars != nil {
@@ -877,7 +983,7 @@ func cookFormula(ctx context.Context, s storage.DoltStorage, f *formula.Formula,
 		Title:       rootTitle,
 		Description: rootDesc,
 		Status:      types.StatusOpen,
-		Priority:    2,
+		Priority:    issueops.DefaultCreatePriority,
 		IssueType:   types.TypeMolecule,
 		IsTemplate:  true,
 		CreatedAt:   time.Now(),
@@ -909,20 +1015,20 @@ func cookFormula(ctx context.Context, s storage.DoltStorage, f *formula.Formula,
 		}
 
 		// Create all issues
-		if err := tx.CreateIssues(ctx, issues, actor); err != nil {
+		if err := tx.CreateIssues(ctx, issues, currentActor()); err != nil {
 			return fmt.Errorf("failed to create issues: %w", err)
 		}
 
 		// Add labels
 		for _, l := range labels {
-			if err := tx.AddLabel(ctx, l.issueID, l.label, actor); err != nil {
+			if err := tx.AddLabel(ctx, l.issueID, l.label, currentActor()); err != nil {
 				return fmt.Errorf("failed to add label %s to %s: %w", l.label, l.issueID, err)
 			}
 		}
 
 		// Add dependencies
 		for _, dep := range deps {
-			if err := tx.AddDependency(ctx, dep, actor); err != nil {
+			if err := tx.AddDependency(ctx, dep, currentActor()); err != nil {
 				return fmt.Errorf("failed to create dependency: %w", err)
 			}
 		}
@@ -1119,11 +1225,23 @@ func substituteFormulaVars(f *formula.Formula, vars map[string]string) {
 }
 
 // substituteStepVars recursively substitutes variables in step fields.
+//
+// The fields covered here must stay in sync with cloneSubgraphInto (pour):
+// runtime-mode cook feeds the proto that pour later clones, so a field left
+// literal in one path is a literal placeholder on the created bead either way
+// (GH#5110 labels/metadata, GH#5754 assignee).
 func substituteStepVars(steps []*formula.Step, vars map[string]string) {
 	for _, step := range steps {
 		step.Title = substituteVariables(step.Title, vars)
 		step.Description = substituteVariables(step.Description, vars)
 		step.Notes = substituteVariables(step.Notes, vars)
+		step.Assignee = substituteVariables(step.Assignee, vars)
+		for i, label := range step.Labels {
+			step.Labels[i] = substituteVariables(label, vars)
+		}
+		for k, v := range step.Metadata {
+			step.Metadata[k] = substituteMetadataValue(v, vars)
+		}
 		if step.Gate != nil {
 			step.Gate.Type = substituteVariables(step.Gate.Type, vars)
 			step.Gate.ID = substituteVariables(step.Gate.ID, vars)
@@ -1134,6 +1252,36 @@ func substituteStepVars(steps []*formula.Step, vars map[string]string) {
 		if len(step.Children) > 0 {
 			substituteStepVars(step.Children, vars)
 		}
+	}
+}
+
+// substituteMetadataValue substitutes variables in the string leaves of a
+// decoded step metadata value (`[steps.metadata]` from TOML/JSON), at any
+// nesting depth. Non-string scalars are returned untouched, and map keys are
+// left alone so a rewritten key can never collide with a sibling.
+func substituteMetadataValue(v interface{}, vars map[string]string) interface{} {
+	return substituteMetadataValueDepth(v, vars, 0)
+}
+
+func substituteMetadataValueDepth(v interface{}, vars map[string]string, depth int) interface{} {
+	if depth >= maxMetadataSubstitutionDepth {
+		return v
+	}
+	switch val := v.(type) {
+	case string:
+		return substituteVariables(val, vars)
+	case map[string]interface{}:
+		for k, elem := range val {
+			val[k] = substituteMetadataValueDepth(elem, vars, depth+1)
+		}
+		return val
+	case []interface{}:
+		for i, elem := range val {
+			val[i] = substituteMetadataValueDepth(elem, vars, depth+1)
+		}
+		return val
+	default:
+		return v
 	}
 }
 

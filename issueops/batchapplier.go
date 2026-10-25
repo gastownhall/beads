@@ -100,11 +100,16 @@ type CreateItem struct {
 	// A caller reading the event stream sees a create and then an update, not
 	// one create carrying values nothing could have known yet.
 	MetadataRefs map[string]Ref
+	// DefaultPriority is CreateRequest.DefaultPriority for this item: the item
+	// has no priority, and the create stores DefaultCreatePriority.
+	DefaultPriority bool
 }
 
 // UpdateItem patches one existing issue, under UpdateRequest's rules.
 type UpdateItem struct {
-	// Target names the issue to patch and must resolve BACKWARD — see Ref.
+	// Target names the issue to patch and must resolve BACKWARD — see Ref. A
+	// template target refuses with *TemplateReadOnlyError, exactly as
+	// Lifecycle.Update does: templates are read-only.
 	Target Ref
 	// Patch is the edit, read exactly as UpdateRequest.Patch is — including
 	// that Patch.Labels is the whole LabelPatch, so a label REMOVAL is
@@ -149,11 +154,13 @@ type UpdateItem struct {
 	ExpectedVersion  *int64
 	ExpectedStatus   *Status
 	ExpectedAssignee *string
-	// ForceClosePolicy and ForceAssigneeTransfer are UpdateRequest's, per item,
-	// with UpdateRequest's rules — including that ForceAssigneeTransfer without
-	// a Patch.Assignee is invalid.
+	// ForceClosePolicy, ForceAssigneeTransfer and ForceNotesOverwrite are
+	// UpdateRequest's, per item, with UpdateRequest's rules — including that
+	// ForceAssigneeTransfer without a Patch.Assignee, and ForceNotesOverwrite
+	// without a Patch.Notes, are each invalid.
 	ForceClosePolicy      bool
 	ForceAssigneeTransfer bool
+	ForceNotesOverwrite   bool
 }
 
 // CloseItem closes one existing issue, under CloseRequest's rules.
@@ -163,7 +170,8 @@ type CloseItem struct {
 	// Reason and Session are CloseRequest's, under its first-close-wins rule.
 	Reason  string
 	Session string
-	// Force bypasses blocker and open-child close policy, and nothing else.
+	// Force is CloseRequest.Force: it bypasses blocker and open-child close
+	// policy, the pin and the assignee fence, and never the template guard.
 	//
 	// CLOSE POLICY EVALUATES AT THIS ITEM, against the row as this request has
 	// already changed it — the same as-modified rule the update guards take. A
@@ -217,6 +225,37 @@ type DepAddItem struct {
 	// members — a spawner, an also-blocks flag — a two-field typed member could
 	// not express. One spelling, and it is this one.
 	Metadata string
+	// HasSpawner marks a DepWaitsFor edge whose caller explicitly named a
+	// spawner: a graph plan's edges[].spawner_key/spawner_id, which bd create
+	// --graph's plan validator forces to equal the edge's own Target. It has
+	// two producers: bd create --graph itself, which sets it from those
+	// members on the embedded and proxied legs alike (cmd/bd's
+	// buildGraphApplyBatchRequest), and an embedder lowering such a plan onto
+	// this role (gc's ApplyGraphPlan mapping, on BatchApplier below). Only
+	// when it is set does the role stamp Metadata's spawner_id from the
+	// resolved Target, once every id in the batch exists (see
+	// StampWaitsForSpawnerID) — a plan-local spawner key cannot be resolved
+	// any earlier than that.
+	//
+	// AN EDGE WITH NO NAMED SPAWNER MUST KEEP ITS GATE-ONLY METADATA. Stamping
+	// one in regardless of this flag — the 2026-10 Opus-review HIGH-2 finding
+	// — produces metadata an unspawnered edge's caller never asked for, which
+	// is a stored row a later re-apply of the same plan (e.g. by gc) will see
+	// disagree with what it sent, causing a spurious rewrite and version
+	// churn the role must not manufacture on its own. Ignored for every other
+	// Type.
+	HasSpawner bool
+	// ThreadID carries conversation-threading metadata (e.g. a replies-to
+	// edge's originating thread) onto the dependency row. Empty means the edge
+	// carries none; it is a plain column, not part of Metadata's type-specific
+	// blob, and one longer than the column holds is ErrValidation.
+	//
+	// A RE-ADD OF AN EDGE THAT ALREADY EXISTS WITH THE SAME TYPE CARRIES IT
+	// TOO. A thread the stored row does not already carry replaces it, and
+	// versions the source on the same terms as a Metadata change; an empty
+	// ThreadID keeps the stored thread rather than clearing it, so a re-apply
+	// that names none cannot erase one.
+	ThreadID string
 }
 
 // ApplyItem is ONE item of a batch: a kind plus exactly one member matching it.
@@ -410,11 +449,65 @@ func (e *RefError) Error() string {
 func (e *RefError) Unwrap() error { return ErrValidation }
 
 // MaxApplyBatchItems is the largest request this role accepts. It is a FLAT
-// bound rather than a cost model, and it is the bound the sibling batch roles
-// already run under: a hundred creates and a hundred edges both land inside the
-// server's ordinary request deadline today, so a per-item deadline extension
-// would be new machinery answering a question nothing has asked.
-const MaxApplyBatchItems = 100
+// bound rather than a cost model: ApplyBatchInTx issues roughly one round
+// trip per item resolution plus a handful more per item's own writes, so the
+// bound is really a bound on how long one request may hold a single write
+// transaction open, not on batch semantics (which have no size in them).
+//
+// Raised from 100 to 1000: measured real-world plans —
+// mol-normalized-issue-pr-work-v1, the largest observed shape at 356 items —
+// already exceed the old 100-item bound, and 1000 is roughly 2.8x that
+// measured max. The old doc comment claimed a hundred items "land inside the
+// server's ordinary request deadline"; that is no longer the bound above 100
+// items. Instead, the HTTP edge (internal/httpapi) grants a request over 100
+// items a separate, EXTENDED whole-run budget (an operator-configured
+// ceiling, `bd serve --large-apply-ceiling`, 5 minutes by default) rather
+// than a value scaled by item count, takes a one-wide "large write" semaphore
+// once a request exceeds the old 100-item threshold (so at most one
+// oversized transaction holds a write connection at a time), and advertises
+// all of this via the issues.batchApplyLarge capability token so a caller
+// can tell whether the server it is talking to supports the raised cap
+// before sending a request that size.
+//
+// The role itself still enforces no per-item cost model and still runs the
+// WHOLE plan as ONE transaction no matter its size — raising this bound does
+// not, and must never, change ApplyBatchInTx into something that chunks a
+// plan into multiple transactions. A request either commits in full or
+// changes nothing.
+const MaxApplyBatchItems = 1000
+
+// extendedRetryBudgetKey is the unexported key WithExtendedRetryBudget and
+// HasExtendedRetryBudget share.
+type extendedRetryBudgetKey struct{}
+
+// WithExtendedRetryBudget marks ctx as belonging to a large batch-apply whose
+// commit-retry loop should be allowed to scale with the request's own
+// extended run budget, instead of the ordinary fixed retry ceiling every
+// other write uses.
+//
+// This exists because a BatchApplier implementation's commit-retry budget
+// (internal/storage/uow's DefaultTxRetryMaxElapsed, 15s) must NOT change for
+// an ordinary request just because deriving it from "whatever's left on
+// ctx.Deadline()" would be simpler: an ordinary request's context also
+// carries a real deadline (internal/httpapi's requestDeadline, 60s), and
+// naively extending the retry budget to match ANY sufficiently long
+// remaining deadline silently changed ordinary requests from a 15s retry
+// ceiling to up to 60s — a regression an earlier version of this fix
+// introduced. Marking the context explicitly, only on the one path
+// (internal/httpapi's admitLargeApply) that intentionally grants a request an
+// extended run budget, keeps the two concerns independent: an implementation
+// reads HasExtendedRetryBudget to decide WHETHER to look at the deadline at
+// all, rather than inferring intent from the deadline's mere size.
+func WithExtendedRetryBudget(ctx context.Context) context.Context {
+	return context.WithValue(ctx, extendedRetryBudgetKey{}, true)
+}
+
+// HasExtendedRetryBudget reports whether ctx was marked by
+// WithExtendedRetryBudget.
+func HasExtendedRetryBudget(ctx context.Context) bool {
+	marked, _ := ctx.Value(extendedRetryBudgetKey{}).(bool)
+	return marked
+}
 
 // BatchApplier describes applying a HETEROGENEOUS list of graph mutations as
 // ONE durable act, and — like Lifecycle, BatchCreator, BatchCloser and
@@ -480,6 +573,29 @@ const MaxApplyBatchItems = 100
 // with the wire's. The measured callers already speak HTTP or hold the role
 // directly. `bd create --file` and `bd dep add --file` remain the file-shaped
 // front doors for the two homogeneous cases they already serve.
+//
+// TWO EMBEDDER OPERATIONS MAP ONTO THIS ROLE RATHER THAN EARNING THEIR OWN
+// (DESIGN §3.8, "Guarded writes: NO NEW ROLES"). Neither needs a new role or a
+// new wire member; both are a SHAPE of ApplyBatchRequest, pinned by an
+// http-leg conformance case so the shape does not drift under either side
+// independently:
+//
+//   - CloseWithMetadataIfMatch is an update item carrying a Metadata patch and
+//     ExpectedVersion, followed by a close item on the SAME target, in ONE
+//     request: []ApplyItem{{Kind: ItemUpdate, Update: &UpdateItem{Target: t,
+//     Patch: IssuePatch{Metadata: ...}, ExpectedVersion: &v}}, {Kind: ItemClose,
+//     Close: &CloseItem{Target: t}}}. It is atomic because the whole request is:
+//     a stale ExpectedVersion refuses the update, which refuses the request, and
+//     the close never runs — zero rows change. CloseItem itself carries no
+//     metadata member; this composition is the only way to land a metadata
+//     write and a close as one guarded act.
+//   - ApplyGraphPlan is a create item per node (Key, the issue's Labels and
+//     Metadata, Ephemeral, NoHistory, and MetadataRefs for a value only the
+//     plan's own later ids can supply), dep_add items for every edge the plan
+//     names — parent-child included, since a parent is a dep_add item of type
+//     parent-child like any other edge — and trailing update items for an
+//     AssignAfterCreate step, which patches a just-created row's Assignee by
+//     its backward Key reference. One request, declaration order, one outcome.
 //
 // Implementations never mutate caller-owned request values, snapshot the
 // request at method entry, and apply validation and normalization only to

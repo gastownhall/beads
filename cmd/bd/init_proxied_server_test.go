@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -22,6 +21,134 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestProxiedInitRemoteURLUsesSelectedProject(t *testing.T) {
+	// Serial: each fixture owns the process directory, environment and loaded config.
+	for _, entry := range os.Environ() {
+		key := gitenv.EntryKey(entry)
+		if gitenv.IsRoutingKeyForOS(key, runtime.GOOS) {
+			t.Setenv(key, "")
+			require.NoError(t, os.Unsetenv(key))
+		}
+	}
+	runGit := func(t *testing.T, dir string, args ...string) string {
+		t.Helper()
+		cmd := gitCommand(args...)
+		cmd.Dir, cmd.Env = dir, gitenv.ScrubRouting(os.Environ())
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "fixture git %v: %s", args, out)
+		return strings.TrimSpace(string(out))
+	}
+	for _, name := range []string{"ordinary", "decoy", "invalid", "inline", "scp", "missing", "nonrepo", "bare", "stealth", "keep_home_clean", "explicit", "explicit_empty", "configured", "configured_stealth", "configured_keep_home_clean", "legacy", "canceled"} {
+		t.Run(name, func(t *testing.T) {
+			home := t.TempDir()
+			for _, key := range []string{"HOME", "USERPROFILE", "XDG_CONFIG_HOME"} {
+				t.Setenv(key, home)
+			}
+			target, decoy := newGitRepo(t), newGitRepo(t)
+			t.Chdir(target)
+			global := filepath.Join(home, ".gitconfig")
+			require.NoError(t, os.WriteFile(global, []byte("[user]\n\tname = fixture\n"), 0600))
+			const selectedURL = "file:///selected-origin"
+			if name != "missing" {
+				origin := selectedURL
+				if name == "scp" {
+					origin = "git@github.com:fixture/selected.git"
+				}
+				runGit(t, target, "remote", "add", "origin", origin)
+			}
+			runGit(t, decoy, "remote", "add", "origin", "file:///decoy-origin")
+			selected := target
+			if name == "nonrepo" || name == "bare" {
+				selected = t.TempDir()
+				if name == "bare" {
+					runGit(t, home, "init", "--bare", selected)
+					runGit(t, home, "--git-dir", selected, "remote", "add", "origin", selectedURL)
+				}
+			}
+			storage := t.TempDir()
+			t.Setenv("BEADS_DIR", storage)
+			for _, key := range []string{"BD_SYNC_REMOTE", "BEADS_SYNC_REMOTE", "BD_SYNC_GIT_REMOTE", "BEADS_SYNC_GIT_REMOTE"} {
+				t.Setenv(key, "")
+			}
+			in := initProxiedServerInput{}
+			want := selectedURL
+			switch name {
+			case "missing", "nonrepo", "bare", "canceled":
+				want = ""
+			case "scp":
+				want = "git+ssh://git@github.com/fixture/selected.git"
+			case "stealth":
+				in.stealth, want = true, ""
+			case "keep_home_clean":
+				// The opt-out from a home inside another repository: its origin is not this workspace's remote.
+				in.keepHomeClean, want = true, ""
+			case "explicit", "explicit_empty":
+				in.initRemoteChanged = true
+				in.initRemote = "dolthub://fixture/explicit"
+				if name == "explicit_empty" {
+					in.initRemote = ""
+				}
+				want = in.initRemote
+				t.Setenv("BD_SYNC_REMOTE", "dolthub://fixture/configured")
+			case "configured", "configured_stealth", "configured_keep_home_clean", "legacy":
+				want = "dolthub://fixture/configured"
+				key := "BD_SYNC_REMOTE"
+				if name == "legacy" {
+					key = "BD_SYNC_GIT_REMOTE"
+				}
+				t.Setenv(key, want)
+				in.stealth = name == "configured_stealth"
+				in.keepHomeClean = name == "configured_keep_home_clean"
+			}
+			initConfigForTest(t)
+			if name != "ordinary" {
+				t.Chdir(decoy)
+				if name == "inline" {
+					t.Setenv("GIT_CONFIG_COUNT", "1")
+					t.Setenv("GIT_CONFIG_KEY_0", "url.file:///inline-origin.insteadOf")
+					t.Setenv("GIT_CONFIG_VALUE_0", selectedURL)
+					probe := gitCommand("remote", "get-url", "origin")
+					probe.Dir = target // Prove this row distinguishes inherited inline config.
+					out, err := probe.CombinedOutput()
+					require.NoError(t, err, "%s", out)
+					require.Equal(t, "file:///inline-origin", strings.TrimSpace(string(out)))
+				} else {
+					t.Setenv("GIT_DIR", filepath.Join(decoy, ".git"))
+					t.Setenv("GIT_WORK_TREE", decoy)
+				}
+			}
+			if name == "invalid" {
+				t.Setenv("GIT_DIR", filepath.Join(home, "missing.git"))
+			}
+			preserved := map[string][]byte{}
+			for _, path := range []string{filepath.Join(target, ".git", "config"), filepath.Join(decoy, ".git", "config"), global} {
+				data, err := os.ReadFile(path)
+				require.NoError(t, err)
+				preserved[path] = data
+			}
+			env := os.Environ()
+			ctx := t.Context()
+			if name == "canceled" {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			}
+			if got := resolveProxiedInitRemoteURL(ctx, selected, in); got != want {
+				t.Errorf("selected origin = %q, want %q", got, want)
+			}
+			if entries, err := os.ReadDir(storage); err != nil || len(entries) != 0 {
+				t.Errorf("remote lookup changed separate storage: %v, %v", entries, err)
+			}
+			for path, before := range preserved {
+				after, err := os.ReadFile(path)
+				require.NoError(t, err)
+				require.Equal(t, before, after, "remote lookup changed %s", path)
+			}
+			require.True(t, slices.Equal(env, os.Environ()), "remote lookup changed parent environment")
+		})
+	}
+}
 
 func TestBuildProxiedServerClientInfo(t *testing.T) {
 	t.Run("all empty returns nil", func(t *testing.T) {
@@ -255,7 +382,7 @@ func TestProxiedInitTailRoleIgnoresInheritedGitRouting(t *testing.T) {
 	require.NoError(t, os.WriteFile(globalPath, nil, 0600))
 	runGit := func(t *testing.T, dir string, args ...string) string {
 		t.Helper()
-		cmd := exec.Command("git", args...)
+		cmd := gitCommand(args...)
 		cmd.Dir, cmd.Env = dir, gitenv.ScrubRouting(os.Environ())
 		out, err := cmd.CombinedOutput()
 		require.NoError(t, err, "fixture git %v: %s", args, out)
@@ -331,7 +458,7 @@ func TestProxiedInitTailRoleProbeUsesSelectedDirectory(t *testing.T) {
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 	runGit := func(t *testing.T, dir string, args ...string) string {
 		t.Helper()
-		cmd := exec.Command("git", args...)
+		cmd := gitCommand(args...)
 		cmd.Dir, cmd.Env = dir, gitenv.ScrubRouting(os.Environ())
 		out, err := cmd.CombinedOutput()
 		require.NoError(t, err, "fixture git %v: %s", args, out)
@@ -372,7 +499,7 @@ func TestProxiedInitTailRoleProbeUsesSelectedDirectory(t *testing.T) {
 			if tc.initial != "" {
 				runGit(t, target, "config", "--local", "beads.role", tc.initial)
 			}
-			probe := exec.Command("git", "rev-parse", "--git-dir")
+			probe := gitCommand("rev-parse", "--git-dir")
 			probe.Dir, probe.Env = target, gitenv.ScrubRouting(os.Environ())
 			require.Equal(t, tc.kind != "nonrepo", probe.Run() == nil, "owned target repository precondition")
 			if tc.kind == "nonrepo" {
@@ -443,7 +570,7 @@ func TestProxiedInitTailGitUsesSelectedDirectory(t *testing.T) {
 	}
 	runGit := func(dir string, args ...string) string {
 		t.Helper()
-		cmd := exec.Command("git", args...)
+		cmd := gitCommand(args...)
 		cmd.Dir, cmd.Env = dir, gitenv.ScrubRouting(os.Environ())
 		out, err := cmd.CombinedOutput()
 		require.NoError(t, err, "fixture git %v: %s", args, out)
@@ -515,6 +642,65 @@ func TestProxiedInitTailGitUsesSelectedDirectory(t *testing.T) {
 			require.True(t, slices.Equal(env, os.Environ()), "tail changed inherited environment")
 		})
 	}
+}
+
+// TestProxiedInitTailKeepHomeCleanLeavesEnclosingRepoAlone runs the tail for
+// the home-directory opt-out from a home inside another repository, as a
+// dotfiles or monorepo checkout above it is. That repository is not the
+// project's (see guardInitInHomeDir), so the tail must not give it a role, a
+// fork exclude, upstream advice or a bootstrap commit of the home's legacy
+// .beads and agent files.
+func TestProxiedInitTailKeepHomeCleanLeavesEnclosingRepoAlone(t *testing.T) {
+	for _, entry := range os.Environ() {
+		key := gitenv.EntryKey(entry)
+		if gitenv.IsRoutingKeyForOS(key, runtime.GOOS) {
+			t.Setenv(key, "")
+			require.NoError(t, os.Unsetenv(key))
+		}
+	}
+	enclosing := t.TempDir()
+	home := filepath.Join(enclosing, "home")
+	require.NoError(t, os.MkdirAll(filepath.Join(home, ".beads"), 0755))
+	for _, key := range []string{"HOME", "USERPROFILE", "XDG_CONFIG_HOME"} {
+		t.Setenv(key, home)
+	}
+	runGit := func(args ...string) string {
+		t.Helper()
+		cmd := gitCommand(args...)
+		cmd.Dir, cmd.Env = enclosing, gitenv.ScrubRouting(os.Environ())
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "fixture git %v: %s", args, out)
+		return strings.TrimSpace(string(out))
+	}
+	runGit("init", "--quiet")
+	for key, value := range map[string]string{"user.name": "Fixture", "user.email": "fixture@example.test", "commit.gpgSign": "false", "core.hooksPath": ".git/hooks"} {
+		runGit("config", "--local", key, value)
+	}
+	runGit("-c", "core.hooksPath=", "commit", "--allow-empty", "--quiet", "-m", "dotfiles")
+	runGit("remote", "add", "origin", "https://example.test/dotfiles.git")
+	runGit("remote", "add", "upstream", "https://example.test/upstream.git")
+	require.NoError(t, os.WriteFile(filepath.Join(home, ".beads", "config.yaml"), []byte("# legacy\n"), 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(home, "CLAUDE.md"), []byte("mine\n"), 0600))
+	configPath := filepath.Join(enclosing, ".git", "config")
+	configBefore, err := os.ReadFile(configPath)
+	require.NoError(t, err)
+	head := runGit("rev-parse", "HEAD")
+	t.Chdir(home)
+	cmd := &cobra.Command{}
+	cmd.Flags().Bool("setup-exclude", false, "")
+	fs := &initTailForkObservation{}
+	// What RunE hands the tail for the opt-out, with the workspace under the home.
+	in := initProxiedServerInput{keepHomeClean: true, skipHooks: true, skipAgents: true, nonInteractive: true}
+	stderr := captureStderr(t, func() {
+		require.NoError(t, runInitProxiedServerTail(cmd, t.Context(), in, runInitTailContext{workDir: home, beadsDir: filepath.Join(home, "notes", ".beads"), useLocalBeads: true, fsUseCase: fs, gitUC: storagegit.NewGitProvider(home).GitUseCase()}))
+	})
+	require.Zero(t, fs.calls, "fork exclude written for the enclosing repository")
+	require.NotContains(t, stderr, "Git upstream not configured", "upstream advice given for the enclosing repository")
+	require.Equal(t, head, runGit("rev-parse", "HEAD"), "bootstrap commit made to the enclosing repository")
+	require.Empty(t, runGit("diff", "--cached", "--name-only"), "home staged into the enclosing repository")
+	configAfter, err := os.ReadFile(configPath)
+	require.NoError(t, err)
+	require.Equal(t, string(configBefore), string(configAfter), "enclosing repository config changed")
 }
 
 func TestProxiedInitExcludeUsesSelectedDirectory(t *testing.T) {

@@ -32,6 +32,19 @@ func DependencyMetadataEqual(a, b string) bool {
 	return bytes.Equal(aCanon, bCanon)
 }
 
+// ReAddedDependencyThread returns the thread_id a same-type re-add leaves on an
+// existing edge and whether that differs from the stored one. A named thread
+// the row does not already carry replaces it; an empty one names no thread
+// rather than asking for none, so the stored value — NULL included — is kept.
+// Both dependency re-add idempotency checks share this, alongside
+// DependencyMetadataEqual, so they can't drift.
+func ReAddedDependencyThread(stored sql.NullString, requested string) (sql.NullString, bool) {
+	if requested == "" || requested == stored.String {
+		return stored, false
+	}
+	return sql.NullString{String: requested, Valid: true}, true
+}
+
 type DepTargetKind int
 
 const (
@@ -178,8 +191,9 @@ type DepTargetPrecheck struct {
 //   - Source/target existence validation
 //   - Hierarchy deadlock validation for blocking deps (GH#1495, bd-wg7ve)
 //   - Cycle detection via recursive CTE across both dependency tables
-//   - Idempotent same-type re-adds: a metadata change updates it, a
-//     change-free re-add writes and journals nothing (#5898 R3)
+//   - Idempotent same-type re-adds: a metadata or thread change updates it
+//     (an empty ThreadID keeps the stored thread), a change-free re-add
+//     writes and journals nothing (#5898 R3)
 //   - Type conflict detection
 //
 // The caller is responsible for transaction lifecycle, dolt commits, and
@@ -195,9 +209,9 @@ type DepTargetPrecheck struct {
 // state, so it mints one version row for the source — on EVERY leg that reaches
 // this helper (the dependency editor, the legacy store verbs, batch apply),
 // whether or not an audit event was requested. A same-type re-add that changes
-// metadata is the same kind of durable-state change and mints on the same
-// terms; only a genuinely change-free re-add (identical type and metadata)
-// mints nothing.
+// metadata or thread is the same kind of durable-state change and mints on the
+// same terms; only a genuinely change-free re-add (identical type and metadata,
+// no new thread) mints nothing.
 func AddDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, actor string, opts AddDependencyOpts) (bool, error) {
 	return addDependencyInTx(ctx, tx, dep, actor, opts, nil, true)
 }
@@ -295,38 +309,46 @@ func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 	// target expression defensively so stale/reclassified rows in another typed
 	// target column cannot bypass the idempotency/conflict check.
 	var existingType string
-	var existingMetadataNS sql.NullString
+	var existingMetadataNS, existingThreadNS sql.NullString
 	//nolint:gosec // G201: writeTable from WispTableRouting; depTargetEquals has no user input.
-	err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT type, metadata FROM %s WHERE issue_id = ? AND %s`, writeTable, depTargetEquals("")),
-		dep.IssueID, dep.DependsOnID).Scan(&existingType, &existingMetadataNS)
+	err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT type, metadata, thread_id FROM %s WHERE issue_id = ? AND %s`, writeTable, depTargetEquals("")),
+		dep.IssueID, dep.DependsOnID).Scan(&existingType, &existingMetadataNS, &existingThreadNS)
 	if err == nil {
 		existingMetadata := existingMetadataNS.String
 		if !existingMetadataNS.Valid {
 			existingMetadata = "{}"
 		}
 		if existingType == string(dep.Type) {
-			if DependencyMetadataEqual(existingMetadata, metadata) {
-				// Same type, same metadata: a change-free write. Nothing is
-				// written and nothing is journaled (#5898 R3).
+			// A re-add naming a thread the row does not carry moves it. One
+			// naming none keeps the stored thread rather than clearing it, so
+			// the callers that never carry a thread cannot erase one.
+			thread, threadChanged := ReAddedDependencyThread(existingThreadNS, dep.ThreadID)
+			if !threadChanged && DependencyMetadataEqual(existingMetadata, metadata) {
+				// Same type, same metadata, same thread: a change-free write.
+				// Nothing is written and nothing is journaled (#5898 R3).
 				return false, nil
 			}
-			// Same type, different metadata — idempotent; update metadata. No
-			// event is written, so the caller must not stage the events table
-			// for this re-add.
+			// Same type, different metadata or thread — idempotent; update the
+			// row in place. No event is written, so the caller must not stage
+			// the events table for this re-add.
 			//nolint:gosec // G201: writeTable from WispTableRouting; depTargetEquals has no user input.
-			if _, err := tx.ExecContext(ctx, fmt.Sprintf(`UPDATE %s SET metadata = ? WHERE issue_id = ? AND %s`, writeTable, depTargetEquals("")),
-				metadata, dep.IssueID, dep.DependsOnID); err != nil {
+			if _, err := tx.ExecContext(ctx, fmt.Sprintf(`UPDATE %s SET metadata = ?, thread_id = ? WHERE issue_id = ? AND %s`, writeTable, depTargetEquals("")),
+				metadata, thread, dep.IssueID, dep.DependsOnID); err != nil {
 				return false, fmt.Errorf("failed to update dependency metadata: %w", err)
 			}
-			// A same-type add refreshes edge metadata. It is an observable graph
-			// mutation, so emit the complete replacement edge for replay even
-			// though no audit event is written.
+			// A same-type add refreshes the edge's metadata or thread. It is an
+			// observable graph mutation, so journal the replacement edge for
+			// replay even though no audit event is written. EventDep has no
+			// thread member, so a thread-only change journals the same payload
+			// as the original add; the source's version snapshot is what
+			// records the new thread.
 			if err := RecordDepEventInTx(ctx, tx, EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor); err != nil {
 				return false, err
 			}
-			// The metadata genuinely changed, so — unlike the change-free
-			// branch above — this re-add is a real durable-state mutation of
-			// the source issue and mints on the same terms as a new edge
+			// The metadata or thread genuinely changed, so — unlike the
+			// change-free branch above — this re-add is a real durable-state
+			// mutation of the source issue (its version snapshot carries each
+			// edge's thread_id) and mints on the same terms as a new edge
 			// (#5898 leg 2: "a same-type re-add whose metadata actually
 			// changed mints EXACTLY ONE version carrying the new state").
 			return false, mintDependencyVersion(ctx, tx, dep.IssueID, actor, mintVersion)
@@ -421,11 +443,11 @@ func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 }
 
 // mintDependencyVersion versions the referencing (source) issue of an edge that
-// was actually inserted, deleted, or had its metadata refreshed by a same-type
-// re-add: the version-history seam for every dependency write path, reached
-// from addDependencyInTx and removeDependencyInTx only past a real row write —
-// never from a genuinely change-free re-add or the absent-edge return, which
-// mint nothing. mint false defers to a caller that mints once for a
+// was actually inserted, deleted, or had its metadata or thread refreshed by a
+// same-type re-add: the version-history seam for every dependency write path,
+// reached from addDependencyInTx and removeDependencyInTx only past a real row
+// write — never from a genuinely change-free re-add or the absent-edge return,
+// which mint nothing. mint false defers to a caller that mints once for a
 // multi-edge mutation. A wisp source is excluded by the seam itself.
 func mintDependencyVersion(ctx context.Context, tx DBTX, issueID, actor string, mint bool) error {
 	if !mint {
@@ -556,34 +578,66 @@ func WouldCreateSchedulingCycleInTx(ctx context.Context, tx DBTX, issueID, depen
 // ready-work computation, so a chain mixing blocks and parent-child edges
 // can form a logical livelock that prevents anything from being ready.
 func cycleReachabilityQuery(depTables []string) string {
-	if len(depTables) == 1 {
-		return fmt.Sprintf(`
-			WITH RECURSIVE reachable(node) AS (
-				SELECT ?
-				UNION
-				SELECT %s
-				FROM reachable r
-				JOIN %s d ON d.issue_id = r.node AND d.type IN ('blocks', 'conditional-blocks', 'parent-child')
-			)
-			SELECT COUNT(*) FROM reachable WHERE node = ?
-		`, DepTargetExpr, depTables[0])
-	}
+	return reachabilityQuery("reachable", depTables, "d.type IN ('blocks', 'conditional-blocks', 'parent-child')")
+}
 
-	var unions []string
-	for _, t := range depTables {
-		unions = append(unions, fmt.Sprintf("SELECT issue_id, %s AS depends_on_id FROM %s WHERE type IN ('blocks', 'conditional-blocks', 'parent-child')", DepTargetExpr, t))
-	}
-	unionQuery := strings.Join(unions, " UNION ")
+// reachabilityQuery builds a recursive walk (CTE named cte) from the first
+// placeholder along outgoing dependency rows matching typeFilter, counting
+// whether the second placeholder is reached (the anchor included). Callers
+// pass constants for cte, depTables and typeFilter, which are spliced in
+// verbatim.
+//
+// Each dependency table gets its own recursive member joined directly on
+// d.issue_id, so every recursion step is an index lookup on issue_id. Joining
+// a UNION of the tables instead (the earlier shape) leaves Dolt nothing to
+// index: it rescans every matching edge per step, which on a 100k-edge graph
+// is minutes for one check.
+//
+// The join hints and the filter placement are both load-bearing, and
+// TestGraphWalkPlansHonorJoinHints (embedded) pins the resulting plans:
+//
+//   - JOIN_ORDER(r, d) LOOKUP_JOIN(r, d) pins the frontier as the outer side
+//     with an index probe into the edge table (as sqlbuild.DescendantWalkQuery
+//     does). Without them the Dolt sql-server's cost-based planner picks a
+//     type-index scan join when table statistics are not yet available (e.g.
+//     right after a commit), and the embedded engine does so for a member
+//     whose table has no statistics, with the same minutes-long result. On
+//     MySQL, JOIN_ORDER is honored (the order it forces is the one wanted) and
+//     the unknown LOOKUP_JOIN hint is ignored with a warning.
+//   - typeFilter is applied in the projection, not the join condition: a row
+//     of another type yields a NULL node, which joins no row and never equals
+//     the goal, so the reachable set is unchanged. Left in the ON clause, a
+//     single-type filter ("d.type = 'parent-child'") is an equality the
+//     planner can satisfy through a type-leading index instead, keyed by the
+//     constant — a lookup that returns every parent-child row of the table
+//     for each frontier node.
+//
+// The reachable set is the same as the single-member walk over the UNION:
+// UNION distinct merges what every member produces per step.
+func reachabilityQuery(cte string, depTables []string, typeFilter string) string {
 	return fmt.Sprintf(`
-		WITH RECURSIVE reachable(node) AS (
+		WITH RECURSIVE %s(node) AS (
 			SELECT ?
 			UNION
-			SELECT d.depends_on_id
-			FROM reachable r
-			JOIN (%s) d ON d.issue_id = r.node
+			%s
 		)
-		SELECT COUNT(*) FROM reachable WHERE node = ?
-	`, unionQuery)
+		SELECT COUNT(*) FROM %s WHERE node = ?
+	`, cte, reachabilityMembers(cte, depTables, typeFilter), cte)
+}
+
+// reachabilityMembers is reachabilityQuery's recursive members, one per
+// dependency table and joined by UNION, for any walk over the same edges
+// (ancestorChainInTx in blocked_state.go shares them). A NULL node, which is
+// what a row of another type projects, is the caller's to filter out of a
+// walk's result.
+func reachabilityMembers(cte string, depTables []string, typeFilter string) string {
+	members := make([]string, 0, len(depTables))
+	for _, t := range depTables {
+		members = append(members, fmt.Sprintf(
+			"SELECT /*+ JOIN_ORDER(r, d) LOOKUP_JOIN(r, d) */ CASE WHEN %s THEN %s END FROM %s r JOIN %s d ON d.issue_id = r.node",
+			typeFilter, depTargetExpr("d"), cte, t))
+	}
+	return strings.Join(members, "\n\t\t\tUNION\n\t\t\t")
 }
 
 func cycleDetectionTables() []string {
@@ -629,21 +683,7 @@ func CheckBlockingHierarchyInTx(ctx context.Context, tx DBTX, dep *types.Depende
 // and cousins in the same hierarchy do not match). Uses UNION distinct
 // recursion so diamond/cyclic parentage terminates by unique reachable node.
 func isAncestorInTx(ctx context.Context, tx DBTX, node, candidate string, depTables []string) (bool, error) {
-	var unions []string
-	for _, t := range depTables {
-		unions = append(unions, fmt.Sprintf("SELECT issue_id, %s AS parent_id FROM %s WHERE type = 'parent-child'", DepTargetExpr, t))
-	}
-	//nolint:gosec // G201: depTables are fixed dependency table names from cycleDetectionTables/opts.
-	query := fmt.Sprintf(`
-		WITH RECURSIVE ancestors(node) AS (
-			SELECT ?
-			UNION
-			SELECT d.parent_id
-			FROM ancestors a
-			JOIN (%s) d ON d.issue_id = a.node
-		)
-		SELECT COUNT(*) FROM ancestors WHERE node = ?
-	`, strings.Join(unions, " UNION "))
+	query := reachabilityQuery("ancestors", depTables, "d.type = 'parent-child'")
 	var n int
 	if err := tx.QueryRowContext(ctx, query, node, candidate).Scan(&n); err != nil {
 		return false, err

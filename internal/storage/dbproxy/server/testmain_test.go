@@ -2,7 +2,10 @@ package server_test
 
 import (
 	"fmt"
+	"net"
 	"os"
+	"regexp"
+	"slices"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/doltserver"
@@ -37,7 +40,76 @@ var suiteTempRoot string
 //     t.TempDir's RemoveAll. A root-scoped post-run sweep detects that leak
 //     and fails this package without consuming another live suite's evidence.
 func TestMain(m *testing.M) {
+	if mode := os.Getenv(fakeDoltEnv); mode != "" {
+		os.Exit(fakeDolt(mode, os.Args[1:]))
+	}
 	os.Exit(testMainInner(m))
+}
+
+// fakeDoltEnv, when set, makes this test binary act as a stand-in `dolt`
+// (see fakeDolt) so tests can drive DoltServer through startup behaviors a
+// real dolt cannot be made to show on demand. The internal tests set it and
+// pass os.Args[0] as the dolt binary.
+const fakeDoltEnv = "BEADS_TEST_FAKE_DOLT"
+
+var fakeDoltPortRe = regexp.MustCompile(`(?m)^\s+port:\s*(\d+)`)
+
+// fakeDolt answers the dolt invocations DoltServer.Start makes. For
+// `sql-server --config <file>` it reads listener.port from the file and, by
+// mode:
+//   - "inuse": reports dolt's own port-in-use error and exits 1;
+//   - "silent": listens but never logs the ready line;
+//   - "ready": listens and logs the ready line.
+func fakeDolt(mode string, args []string) int {
+	if len(args) == 0 {
+		return 2
+	}
+	switch args[0] {
+	case "config":
+		fmt.Println("fake")
+		return 0
+	case "init":
+		return 0
+	case "sql-server":
+	default:
+		return 2
+	}
+	var cfgPath string
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "--config" {
+			cfgPath = args[i+1]
+		}
+	}
+	body, err := os.ReadFile(cfgPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	m := fakeDoltPortRe.FindSubmatch(body)
+	if m == nil {
+		fmt.Fprintln(os.Stderr, "no listener.port in", cfgPath)
+		return 1
+	}
+	port := string(m[1])
+	if mode == "inuse" {
+		fmt.Fprintf(os.Stderr, "Port %s already in use.\n", port)
+		return 1
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:"+port)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	if mode == "ready" {
+		fmt.Fprintln(os.Stderr, `level=info msg="Server ready. Accepting connections."`)
+	}
+	for {
+		c, err := ln.Accept()
+		if err != nil {
+			return 0
+		}
+		defer c.Close()
+	}
 }
 
 func testMainInner(m *testing.M) int {
@@ -46,6 +118,16 @@ func testMainInner(m *testing.M) int {
 	// roots whose owner is still running (a parallel package under
 	// scripts/test.sh, a second `go test`), are left untouched.
 	doltserver.SweepDeadSuiteRoots(os.TempDir(), suiteRootPrefix)
+
+	// Stop every dolt this suite runs (each inherits the environment) from
+	// forking a detached `dolt send-metrics` child on exit; that child
+	// outlives the test and races t.TempDir's RemoveAll of HOME. See
+	// TestSuiteDisablesDoltEventFlush. tools/bazel/test_env.sh exports the
+	// same for Bazel; this covers plain `go test` (macOS CI, local runs).
+	if err := os.Setenv("DOLT_DISABLE_EVENT_FLUSH", "1"); err != nil {
+		fmt.Fprintf(os.Stderr, "FATAL: set DOLT_DISABLE_EVENT_FLUSH: %v\n", err)
+		return 1
+	}
 
 	// Pin TMPDIR under a suite-owned root so every t.TempDir() — including
 	// each server's rootDir, which is its working directory — is nested under
@@ -82,5 +164,20 @@ func TestTempDirLandsUnderSuiteSweepRoot(t *testing.T) {
 	dir := t.TempDir()
 	if !testutil.PathUnderSuiteRoot(dir, suiteTempRoot) {
 		t.Fatalf("t.TempDir() %q is not under suiteTempRoot %q", dir, suiteTempRoot)
+	}
+}
+
+// TestSuiteDisablesDoltEventFlush guards the DOLT_DISABLE_EVENT_FLUSH export
+// in testMainInner. Without it, every `dolt sql-server` this suite stops
+// cleanly (SIGTERM) forks a detached `dolt send-metrics` child on exit. That
+// child outlives the test, re-creates and rewrites <HOME>/.dolt/eventsData
+// (HOME is a t.TempDir()), and races t.TempDir's RemoveAll, which fails the
+// test with "TempDir RemoveAll cleanup: ... directory not empty". Plain
+// `go test` on macOS (main.yml's Test (macOS) job) hit it on roughly half the
+// pushes to main; Bazel never did only because tools/bazel/test_env.sh
+// exports the same variable.
+func TestSuiteDisablesDoltEventFlush(t *testing.T) {
+	if !slices.Contains(doltserver.ServerSpawnEnv(), "DOLT_DISABLE_EVENT_FLUSH=1") {
+		t.Fatal("dolt sql-server would be spawned without DOLT_DISABLE_EVENT_FLUSH=1; its detached send-metrics child races t.TempDir cleanup")
 	}
 }

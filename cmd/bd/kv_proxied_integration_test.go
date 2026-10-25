@@ -4,6 +4,7 @@ package main
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -30,17 +31,19 @@ func bdProxiedKVFail(t *testing.T, bd, dir string, args ...string) string {
 	return stdout + stderr
 }
 
-// kvListJSONRaw runs `bd kv list --json` and returns the raw JSON object
-// text plus the parsed pairs. It pins the wire shape the wyvern wheelhouse
-// mail transport parses: a flat JSON object whose only non-string member is
-// the outputJSON-injected numeric "schema_version" (present in classic mode
-// too — see bdKVListJSON in kv_embedded_test.go); every kv pair is a plain
-// string-to-string entry with no envelope.
-func kvListJSONRaw(t *testing.T, bd, dir string) (string, map[string]string) {
+// kvListJSONRaw runs `bd kv list --json` plus any extra args (such as
+// --prefix) and returns the raw JSON object text plus the parsed pairs. It
+// pins the wire shape the wyvern wheelhouse mail transport parses: a flat
+// JSON object whose only non-string member is the outputJSON-injected numeric
+// "schema_version" (present in classic mode too — see bdKVListJSON in
+// kv_embedded_test.go); every kv pair is a plain string-to-string entry with
+// no envelope.
+func kvListJSONRaw(t *testing.T, bd, dir string, extraArgs ...string) (string, map[string]string) {
 	t.Helper()
-	stdout, stderr, err := bdProxiedRunBuffers(t, bd, dir, "kv", "list", "--json")
+	args := append([]string{"kv", "list", "--json"}, extraArgs...)
+	stdout, stderr, err := bdProxiedRunBuffers(t, bd, dir, args...)
 	if err != nil {
-		t.Fatalf("bd kv list --json failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		t.Fatalf("bd %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout, stderr)
 	}
 	s := strings.TrimSpace(stdout)
 	start := strings.Index(s, "{")
@@ -143,6 +146,32 @@ func TestProxiedServerKV(t *testing.T) {
 			if strings.HasPrefix(k, "kv.") {
 				t.Errorf("list --json leaked storage prefix on key %q", k)
 			}
+		}
+	})
+
+	t.Run("list_prefix_json", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "pkvp")
+
+		// mail.doggerel.* shares mail.dog.'s leading characters, so a match
+		// that dropped the prefix's trailing dot would leak it.
+		for _, kvp := range [][2]string{
+			{"mail.dog.m1", "first"},
+			{"mail.dog.m2", "second"},
+			{"mail.doggerel.m3", "sibling"},
+			{"other", "unrelated"},
+		} {
+			bdProxiedKV(t, bd, p.dir, "set", kvp[0], kvp[1])
+		}
+
+		raw, m := kvListJSONRaw(t, bd, p.dir, "--prefix", "mail.dog.")
+		if want := map[string]string{"mail.dog.m1": "first", "mail.dog.m2": "second"}; !reflect.DeepEqual(m, want) {
+			t.Errorf("list --prefix mail.dog. --json = %v; want %v\n%s", m, want, raw)
+		}
+
+		raw, m = kvListJSONRaw(t, bd, p.dir, "--prefix", "mail.owl.")
+		if len(m) != 0 {
+			t.Errorf("list --prefix mail.owl. --json = %v; want no pairs\n%s", m, raw)
 		}
 	})
 

@@ -312,7 +312,7 @@ In server mode, data is managed by the external `dolt sql-server`.
 
 ## Migrating databases
 
-After upgrading bd, use `bd migrate` to check for and migrate old database files:
+After upgrading bd, check for pending database migrations and apply them:
 
 ```bash
 # Inspect migration plan (AI agents)
@@ -324,8 +324,8 @@ bd info --schema --json
 # Preview migration changes
 bd migrate --dry-run
 
-# Migrate old databases to beads.db
-bd migrate
+# Apply pending schema migrations
+bd migrate schema
 
 # Migrate and clean up old files
 bd migrate --yes

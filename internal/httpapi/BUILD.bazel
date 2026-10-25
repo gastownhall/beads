@@ -3,10 +3,13 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "httpapi",
     srcs = [
+        "advance_molecule.go",
         "auth.go",
         "batch_apply.go",
         "batch_close.go",
         "batch_create.go",
+        "batch_get.go",
+        "blocked.go",
         "blocking.go",
         "claim.go",
         "claim_next.go",
@@ -22,12 +25,14 @@ go_library(
         "events.go",
         "events_watch.go",
         "handlers.go",
+        "heartbeat.go",
         "memories.go",
         "metadata_cas.go",
         "pinning.go",
         "problem.go",
         "query.go",
         "reads.go",
+        "reclaim.go",
         "related.go",
         "release.go",
         "reopen.go",
@@ -39,6 +44,7 @@ go_library(
         "sweep.go",
         "tree.go",
         "update.go",
+        "wire_revision.go",
     ],
     importpath = "github.com/steveyegge/beads/internal/httpapi",
     visibility = ["//:__subpackages__"],
@@ -60,18 +66,23 @@ go_library(
 go_test(
     name = "httpapi_test",
     srcs = [
+        "advance_molecule_test.go",
         "auth_test.go",
         "batch_apply_test.go",
         "batch_close_test.go",
         "batch_create_test.go",
+        "batch_get_test.go",
+        "blocked_test.go",
         "blocking_test.go",
         "brief_projection_test.go",
         "claim_next_test.go",
         "claim_test.go",
+        "close_guards_test.go",
         "close_test.go",
         "comments_test.go",
         "context_test.go",
         "count_test.go",
+        "create_priority_test.go",
         "create_test.go",
         "cycles_test.go",
         "delete_test.go",
@@ -80,8 +91,14 @@ go_test(
         "edges_test.go",
         "events_test.go",
         "events_watch_test.go",
+        "gate_fields_test.go",
         "get_issue_test.go",
+        "heartbeat_test.go",
+        "large_apply_client_budget_test.go",
+        "large_batch_apply_test.go",
         "list_comments_omitted_test.go",
+        "list_filters_test.go",
+        "list_ids_test.go",
         "list_sort_test.go",
         "memories_test.go",
         "metadata_cas_test.go",
@@ -89,6 +106,7 @@ go_test(
         "project_stamp_test.go",
         "reads_test.go",
         "ready_count_test.go",
+        "reclaim_test.go",
         "related_test.go",
         "release_test.go",
         "reopen_test.go",
@@ -100,20 +118,23 @@ go_test(
         "sweep_test.go",
         "timed_provider_binding_test.go",
         "tree_test.go",
+        "update_template_test.go",
         "update_test.go",
         "wire_bijection_test.go",
+        "wire_revision_test.go",
     ],
     data = [
         "claim.go",
         "//cmd/bd:list.go",
         "//cmd/bd:ready.go",
-    ],
+    ] + glob(["testdata/**"]),
     embed = [":httpapi"],
     deps = [
         "//internal/config",
         "//internal/eventsjournal",
         "//internal/httpapi/apigen",
         "//internal/httpapi/spec",
+        "//internal/httpclient/wire",
         "//internal/storage",
         "//internal/storage/domain",
         "//internal/storage/uow",
@@ -125,3 +146,64 @@ go_test(
         "@in_gopkg_yaml_v3//:yaml_v3",
     ],
 )
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_doc_files",
+    srcs = glob(
+        [
+            "**/*.md",
+            "**/*.mdx",
+        ],
+        allow_empty = True,
+        exclude = ["**/node_modules/**"],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = [
+            "**/*_test.go",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+        exclude = ["**/node_modules/**"],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_other_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.go",
+            "**/*.md",
+            "**/*.mdx",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+# --- end repo_files ---

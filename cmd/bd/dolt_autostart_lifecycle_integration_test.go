@@ -12,18 +12,24 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/beads/internal/testutil"
 )
 
 func TestE2E_AutoStartedRepoLocalServerPersistsAcrossCommands(t *testing.T) {
-	if !usesSQLServer() {
-		t.Skip("skipping: bd dolt status not supported in embedded mode")
-	}
+	// Every bd here is a subprocess on a workspace initialized with
+	// --server, so this process's own storage mode (embedded by default)
+	// does not matter; the subprocess needs the dolt binary.
+	testutil.RequireDoltBinary(t)
 	if runtime.GOOS == windowsOS {
 		t.Skip("repo-local dolt lifecycle integration test not supported on windows")
 	}
 
 	bdBinary := buildLifecycleTestBinary(t)
 	tmpDir := t.TempDir()
+	// Stops the auto-started repo-local server if an assertion fails
+	// before the test's own final stop.
+	stopDoltServerCleanup(t, filepath.Join(tmpDir, ".beads"))
 	if err := runCommandInDir(tmpDir, "git", "init"); err != nil {
 		t.Fatalf("git init failed: %v", err)
 	}

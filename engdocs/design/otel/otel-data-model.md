@@ -172,7 +172,7 @@ are inventoried here rather than repeated.
 There are two families.
 
 **Direct storage operations** — `storage.<Method>`, one per storage method
-(73 spans):
+(74 spans):
 
 ```
 AddDependency AddIssueComment AddLabel CloseIssue CloseIssueChecked
@@ -190,9 +190,9 @@ IterEvents IterIssueComments IterIssues IterReadyWork IterWisps ListWisps
 MergeMetadata MergeSlotAcquire MergeSlotCheck MergeSlotCreate MergeSlotRelease
 RecordProvenanceEvent RemoveDependency RemoveLabel ReopenIssue
 RunInIssueLifecycleTransaction RunInTransaction SearchIssueIDs SearchIssues
-SearchIssuesWithCounts SetConfig SetLocalMetadata SlotClear SlotGet SlotSet
-UnclaimIssue UnclaimIssueIfAssignee UpdateIssue UpdateIssueChecked
-UpdateIssueType
+SearchIssueSummaries SearchIssuesWithCounts SetConfig SetLocalMetadata
+SlotClear SlotGet SlotSet UnclaimIssue UnclaimIssueIfAssignee UpdateIssue
+UpdateIssueChecked UpdateIssueType
 ```
 
 **Issueops role operations** — `storage.<Role>.<Method>`, emitted when a caller

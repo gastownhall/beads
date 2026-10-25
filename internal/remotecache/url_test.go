@@ -47,6 +47,39 @@ func TestIsRemoteURL(t *testing.T) {
 	}
 }
 
+// TestIsRemoteURLRejectsUserlessDottedHost pins this package's side of the one
+// intentional disagreement with doltremote.scpStyleGitURLPattern, whose first
+// alternative is byte-identical to gitSSHPattern but which additionally accepts
+// the user-less dotted-host form. doltremote.Normalize converts that form to
+// git+ssh://; IsRemoteURL treats it as a local path. Changing this behavior
+// means reconciling both files, not just this one.
+func TestIsRemoteURLRejectsUserlessDottedHost(t *testing.T) {
+	userless := []string{
+		"github.com:org/repo.git",
+		"myserver.com:beads/data",
+	}
+	for _, raw := range userless {
+		t.Run(raw, func(t *testing.T) {
+			if IsRemoteURL(raw) {
+				t.Errorf("IsRemoteURL(%q) = true, want false", raw)
+			}
+		})
+	}
+
+	// The shared alternative: identical charset, and both packages accept it.
+	withUser := []string{
+		"git@github.com:org/repo.git",
+		"deploy@myserver.com:beads/data",
+	}
+	for _, raw := range withUser {
+		t.Run(raw, func(t *testing.T) {
+			if !IsRemoteURL(raw) {
+				t.Errorf("IsRemoteURL(%q) = false, want true", raw)
+			}
+		})
+	}
+}
+
 func TestValidateRemoteURL(t *testing.T) {
 	tests := []struct {
 		name    string

@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -454,7 +453,7 @@ func TestCollectGitConfigEntriesIgnoresInheritedRouting(t *testing.T) {
 	pinJSONOutput(t, false)
 	runGit := func(t *testing.T, repo string, args ...string) {
 		t.Helper()
-		cmd := exec.Command("git", args...)
+		cmd := gitCommand(args...)
 		cmd.Dir = repo
 		cmd.Env = gitenv.ScrubRouting(os.Environ())
 		if out, err := cmd.CombinedOutput(); err != nil {

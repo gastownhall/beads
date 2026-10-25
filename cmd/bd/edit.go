@@ -119,6 +119,7 @@ Examples:
 		editorParts := strings.Fields(editor)
 		editorArgs := append(editorParts[1:], tmpPath)
 		editorCmd := exec.Command(editorParts[0], editorArgs...) //nolint:gosec // G204: editor from trusted $EDITOR/$VISUAL env or known defaults
+		editorCmd.Env = envWithoutSharedHoldMarker()
 		editorCmd.Stdin = os.Stdin
 		editorCmd.Stdout = os.Stdout
 		editorCmd.Stderr = os.Stderr
@@ -149,7 +150,7 @@ Examples:
 			fieldToEdit: newValue,
 		}
 
-		err = issueStore.UpdateIssue(ctx, id, updates, actor)
+		err = issueStore.UpdateIssue(ctx, id, updates, currentActor())
 		if err != nil {
 			if accessor, ok := storage.UnwrapStore(issueStore).(storage.RawDBAccessor); ok {
 				if pingErr := accessor.DB().PingContext(ctx); pingErr != nil {
@@ -157,14 +158,14 @@ Examples:
 					_ = accessor.DB().PingContext(ctx)
 				}
 			}
-			err = issueStore.UpdateIssue(ctx, id, updates, actor)
+			err = issueStore.UpdateIssue(ctx, id, updates, currentActor())
 		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Your edits are preserved in: %s\n", tmpPath)
 			return HandleErrorRespectJSON("updating issue: %v", err)
 		}
 		editSaved = true
-		if err := commitPendingIfEmbedded(ctx, issueStore, actor, doltAutoCommitParams{
+		if err := commitPendingIfEmbedded(ctx, issueStore, currentActor(), doltAutoCommitParams{
 			Command:  "edit",
 			IssueIDs: []string{id},
 		}); err != nil {

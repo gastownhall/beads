@@ -26,6 +26,7 @@ type createInput struct {
 	issueType          string
 	status             string
 	priority           int
+	priorityDefault    bool // no --priority: the role's default applies
 	assignee           string
 	externalRef        string
 	specID             string
@@ -180,6 +181,7 @@ func gatherCreateInput(cmd *cobra.Command, args []string) (createInput, error) {
 		return in, HandleError("%v", err)
 	}
 	in.priority = priority
+	in.priorityDefault = !cmd.Flags().Changed("priority")
 
 	in.issueType, _ = cmd.Flags().GetString("type")
 
@@ -252,7 +254,7 @@ func gatherCreateInput(cmd *cobra.Command, args []string) (createInput, error) {
 	if dueStr, _ := cmd.Flags().GetString("due"); dueStr != "" {
 		t, err := timeparsing.ParseRelativeTime(dueStr, time.Now())
 		if err != nil {
-			return in, HandleError("invalid --due format %q. Examples: +6h, tomorrow, next monday, 2025-01-15", dueStr)
+			return in, HandleError("invalid --due format %q. %s", dueStr, deferUntilFormatHint)
 		}
 		in.dueAt = &t
 	}
@@ -260,7 +262,7 @@ func gatherCreateInput(cmd *cobra.Command, args []string) (createInput, error) {
 	if deferStr, _ := cmd.Flags().GetString("defer"); deferStr != "" {
 		t, err := timeparsing.ParseRelativeTime(deferStr, time.Now())
 		if err != nil {
-			return in, HandleError("invalid --defer format %q. Examples: +1h, tomorrow, next monday, 2025-01-15", deferStr)
+			return in, HandleError("invalid --defer format %q. %s", deferStr, deferUntilFormatHint)
 		}
 		if t.Before(time.Now()) && !in.silent && !debug.IsQuiet() {
 			fmt.Fprintf(os.Stderr, "%s Defer date %q is in the past. Issue will appear in bd ready immediately.\n",

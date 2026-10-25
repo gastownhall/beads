@@ -46,6 +46,34 @@ func TestPreparePublicCreateRequestCarriesSourceRepo(t *testing.T) {
 	}
 }
 
+// TestPreparePublicCreateRequestDefaultsCreatedByToTheActor pins the library
+// default every create shape shares (Lifecycle.Create, BatchCreator items,
+// batch-apply create items): an empty CreatedBy becomes the request's actor,
+// and an explicit CreatedBy is kept. Neither the CLI nor an HTTP handler
+// stamps it any more, so without this rule a library or wire create stores "".
+func TestPreparePublicCreateRequestDefaultsCreatedByToTheActor(t *testing.T) {
+	for _, tc := range []struct{ name, createdBy, want string }{
+		{"empty defaults to the actor", "", "actor"},
+		{"explicit is kept", "someone-else", "someone-else"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			request := publicops.CreateRequest{Actor: "actor", Issue: &publicops.Issue{
+				ID: "bd-created-by", Title: "title", IssueType: types.TypeTask, Priority: 2, CreatedBy: tc.createdBy,
+			}}
+			prepared, err := PreparePublicCreateRequest(request, PublicCreateContext{IssuePrefix: "bd"})
+			if err != nil {
+				t.Fatalf("PreparePublicCreateRequest() error = %v", err)
+			}
+			if prepared.Issue.CreatedBy != tc.want {
+				t.Fatalf("prepared CreatedBy = %q, want %q", prepared.Issue.CreatedBy, tc.want)
+			}
+			if request.Issue.CreatedBy != tc.createdBy {
+				t.Fatalf("the caller's request was mutated: CreatedBy = %q, want %q", request.Issue.CreatedBy, tc.createdBy)
+			}
+		})
+	}
+}
+
 func TestPublicCreateIssueFieldClassificationIsComplete(t *testing.T) {
 	accepted := map[string]bool{
 		"ID": true, "Title": true, "Description": true, "Design": true, "AcceptanceCriteria": true, "Notes": true, "SpecID": true,

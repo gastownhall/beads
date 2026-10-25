@@ -32,6 +32,7 @@ func TestUOWDependencyEditorContract(t *testing.T) {
 		{name: "SameTypeReAddIsIdempotent", run: conformance.RunDependencyEditorSameTypeReAddIsIdempotent},
 		{name: "SameTypeReAddWithChangedMetadataMintsOneVersion", run: conformance.RunDependencyEditorSameTypeReAddWithChangedMetadataMintsOneVersion},
 		{name: "SameTypeReAddWithIdenticalMetadataIsANoOp", run: conformance.RunDependencyEditorSameTypeReAddWithIdenticalMetadataIsANoOp},
+		{name: "SameTypeReAddWithChangedThreadMintsOneVersion", run: conformance.RunDependencyEditorSameTypeReAddWithChangedThreadMintsOneVersion},
 		{name: "RepeatsWithinOneRequestCollapse", run: conformance.RunDependencyEditorRepeatsWithinOneRequestCollapse},
 		{name: "AttributesItsEventsToTheActor", run: conformance.RunDependencyEditorAttributesItsEventsToTheActor},
 		{name: "RetypeRefusalLeavesTheOriginalEdge", run: conformance.RunDependencyEditorRetypeRefusalLeavesTheOriginalEdge},
@@ -65,6 +66,7 @@ func TestUOWDependencyEditorContract(t *testing.T) {
 		{name: "AcceptsADiamond", run: conformance.RunDependencyEditorAcceptsADiamond},
 		{name: "GateScopeFollowsTheEdgeType", run: conformance.RunDependencyEditorGateScopeFollowsTheEdgeType},
 		{name: "AcceptsBlockingAcrossIssueTypes", run: conformance.RunDependencyEditorAcceptsBlockingAcrossIssueTypes},
+		{name: "RefusesADottedChildGatedOnItsOwnParent", run: conformance.RunDependencyEditorRefusesADottedChildGatedOnItsOwnParent},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			test.run(t, ctx, fixture)

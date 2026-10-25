@@ -16,13 +16,12 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/dolt"
-	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 )
 
-// TestNewDoltStoreFromConfig_NoMetadata verifies that newDoltStoreFromConfig
+// TestEmbeddedNewDoltStoreFromConfig_NoMetadata verifies that newDoltStoreFromConfig
 // succeeds when the beads directory has no metadata.json (fresh project).
 // Regression test for GH#2988: "no database selected" error.
-func TestNewDoltStoreFromConfig_NoMetadata(t *testing.T) {
+func TestEmbeddedNewDoltStoreFromConfig_NoMetadata(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt tests")
 	}
@@ -308,25 +307,11 @@ func TestOpenNonMutatingStoreHonorsSharedServerConfig(t *testing.T) {
 // a correct implementation.
 const readOnlySharedServerPort = "19998"
 
-// TestEmbeddedOpen_EmptyDatabaseRejected verifies that embeddeddolt.Open fails
-// with a clear error when called with an empty database name, rather than
-// deferring to a confusing "no database selected" SQL error.
-// Belt-and-suspenders defense for be-sy8 / GH#2988.
-func TestEmbeddedOpen_EmptyDatabaseRejected(t *testing.T) {
-	_, err := embeddeddolt.Open(t.Context(), t.TempDir(), "", "main")
-	if err == nil {
-		t.Fatal("expected error for empty database name")
-	}
-	if !strings.Contains(err.Error(), "database name must not be empty") {
-		t.Errorf("unexpected error: %v", err)
-	}
-}
-
-// TestNewDoltStoreFromConfig_HyphenatedDBName verifies that
+// TestEmbeddedNewDoltStoreFromConfig_HyphenatedDBName verifies that
 // newDoltStoreFromConfig auto-sanitizes hyphenated database names for embedded
 // mode and persists the fix to metadata.json.
 // Regression test for GH#3231: pre-#2142 projects break on embedded upgrade.
-func TestNewDoltStoreFromConfig_HyphenatedDBName(t *testing.T) {
+func TestEmbeddedNewDoltStoreFromConfig_HyphenatedDBName(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt tests")
 	}
@@ -480,9 +465,9 @@ func TestMigrateHyphenatedDB_NoOldDir(t *testing.T) {
 	}
 }
 
-// TestNewDoltStoreFromConfig_DottedDBName verifies that dots are also
+// TestEmbeddedNewDoltStoreFromConfig_DottedDBName verifies that dots are also
 // auto-sanitized, not just hyphens (GH#3231).
-func TestNewDoltStoreFromConfig_DottedDBName(t *testing.T) {
+func TestEmbeddedNewDoltStoreFromConfig_DottedDBName(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt tests")
 	}
@@ -513,7 +498,7 @@ func TestNewDoltStoreFromConfig_DottedDBName(t *testing.T) {
 	}
 }
 
-// TestNewDoltStore_StrictReadOnlyRefusesWritesOnFreshDatabase covers Blocker 2
+// TestEmbeddedNewDoltStore_StrictReadOnlyRefusesWritesOnFreshDatabase covers Blocker 2
 // of the 2026-07-23 maintainer review on gastownhall/beads#4930: cfg.ReadOnly
 // alone (an ordinary classified-read command) must route through
 // OpenForReadOnlyCommand, which creates the embedded data directory on first
@@ -521,7 +506,7 @@ func TestNewDoltStoreFromConfig_DottedDBName(t *testing.T) {
 // --readonly signal) must route through the genuinely write-refusing
 // OpenReadOnly instead, which fails rather than create anything for a fresh
 // database.
-func TestNewDoltStore_StrictReadOnlyRefusesWritesOnFreshDatabase(t *testing.T) {
+func TestEmbeddedNewDoltStore_StrictReadOnlyRefusesWritesOnFreshDatabase(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt tests")
 	}

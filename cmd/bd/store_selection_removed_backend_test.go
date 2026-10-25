@@ -2,13 +2,19 @@ package main
 
 import (
 	"context"
+	"errors"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/testutil/legacyworkspace"
 )
 
 func TestCommandStartupRejectsRemovedBackendsBeforeLocalWrites(t *testing.T) {
@@ -391,6 +397,176 @@ func TestStoreFactoriesRemovedBackendsFailLoud(t *testing.T) {
 						}
 					}
 				})
+			}
+		})
+	}
+}
+
+// TestStoreFactoriesRefuseUnsupportedBackendInLegacyConfig pins that every
+// store factory refuses a legacy config.json naming a removed or unrecognized
+// backend before configfile.Load migrates it into metadata.json, dropping the
+// keys Config does not know and deleting config.json. Command admission checks
+// only the workspace bd runs in, and these factories also open others (an
+// auto-routed target, an external project). The workspace holds a Dolt
+// database, so the refusal offers the metadata heal, and it names config.json,
+// the file that holds the backend, rather than a metadata.json that does not
+// exist. A registered backend passes the check, is migrated as before, and
+// dispatches to the registry. Every historical SQLite layout admission
+// refuses is refused by every factory with admission's own text and left
+// byte-identical, and a routed write to a workspace with no embedded database
+// refuses before it migrates a legacy config.json. The read-only and preview
+// factories never migrate a legacy config.json, so they also leave a pre-Dolt
+// clone byte-identical, as the routed-write one does. It covers both builds' factories; the
+// CGO_ENABLED=0 ones run in CI only because bazel.yml's PURE_CMD_BD_TESTS
+// allowlists it by name.
+func TestStoreFactoriesRefuseUnsupportedBackendInLegacyConfig(t *testing.T) {
+	factories := map[string]func(context.Context, string) (storage.DoltStorage, error){
+		"read-write": newDoltStoreFromConfig,
+		"routed":     newExistingDoltStoreFromConfig,
+		"read-only":  newReadOnlyStoreFromConfig,
+		"preview":    newPreviewStoreFromConfig,
+	}
+	writeLegacyConfig := func(t *testing.T, backend string) (string, string) {
+		t.Helper()
+		beadsDir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(beadsDir, "dolt", ".dolt"), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		legacy := `{"backend":"` + backend + `","dolt_database":"beads_legacy","future_binding":"keep-me"}`
+		if err := os.WriteFile(filepath.Join(beadsDir, "config.json"), []byte(legacy), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return beadsDir, legacy
+	}
+	for _, backend := range []string{configfile.BackendPostgres, configfile.BackendMySQL, configfile.BackendSQLite, "mystery"} {
+		for name, open := range factories {
+			t.Run(backend+"/"+name, func(t *testing.T) {
+				beadsDir, legacy := writeLegacyConfig(t, backend)
+				store, err := open(t.Context(), beadsDir)
+				if err == nil {
+					_ = store.Close()
+					t.Fatalf("%s factory opened a workspace whose config.json names backend %q", name, backend)
+				}
+				// The workspace first: a regression that migrates config.json
+				// must report the rewrite, not just the file the error names.
+				entries, readErr := os.ReadDir(beadsDir)
+				names := make([]string, 0, len(entries))
+				for _, entry := range entries {
+					names = append(names, entry.Name())
+				}
+				if readErr != nil || !slices.Equal(names, []string{"config.json", "dolt"}) {
+					t.Fatalf("%s factory changed the workspace: %v, %v", name, names, readErr)
+				}
+				if got, readErr := os.ReadFile(filepath.Join(beadsDir, "config.json")); readErr != nil || string(got) != legacy {
+					t.Fatalf("%s factory rewrote config.json: %q, %v", name, got, readErr)
+				}
+				if !strings.Contains(err.Error(), strconv.Quote(backend)) || !strings.Contains(err.Error(), configfile.BackendNotOpenedGuarantee) {
+					t.Fatalf("%s factory error = %v, want the refusal of backend %q with the data-safety guarantee", name, err, backend)
+				}
+				if !strings.Contains(err.Error(), "config.json") || strings.Contains(err.Error(), "metadata.json") {
+					t.Fatalf("%s factory error = %v, want it to name config.json and not metadata.json", name, err)
+				}
+			})
+		}
+	}
+
+	// Every historical SQLite layout admission refuses is refused by every
+	// factory with admission's own text, and left byte-identical: no
+	// config.json migrated, no embedded database created beside beads.db. The
+	// factories open workspaces bd was not launched in (an external project,
+	// an auto-routed or routed target), which admission never checked.
+	for _, layout := range legacyworkspace.HistoricalSQLiteLayouts() {
+		for name, open := range factories {
+			t.Run("historical SQLite/"+layout.Name+"/"+name, func(t *testing.T) {
+				beadsDir := filepath.Join(t.TempDir(), ".beads")
+				layout.Write(t, beadsDir)
+				want := guardLegacyUpgradeWorkspace(beadsDir)
+				if want == nil {
+					t.Fatalf("admission admits layout %s; the fixture is not a historical SQLite workspace", layout.Name)
+				}
+				before := legacyworkspace.TreeDigest(t, beadsDir)
+				store, err := open(t.Context(), beadsDir)
+				if err == nil {
+					_ = store.Close()
+				}
+				if after := legacyworkspace.TreeDigest(t, beadsDir); !maps.Equal(after, before) {
+					t.Fatalf("%s factory changed the workspace: before %v, after %v", name, slices.Sorted(maps.Keys(before)), slices.Sorted(maps.Keys(after)))
+				}
+				if err == nil || err.Error() != want.Error() {
+					t.Fatalf("%s factory error = %v, want admission's refusal %q", name, err, want)
+				}
+			})
+		}
+	}
+
+	// A routed write refuses a workspace with no embedded database before
+	// Load, so an admitted legacy config.json is not migrated by an open that
+	// then refuses (the CGO_ENABLED=0 build refuses every embedded open there).
+	t.Run("routed write without a database", func(t *testing.T) {
+		beadsDir := filepath.Join(t.TempDir(), ".beads")
+		if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		legacy := `{"backend":"dolt","database":"dolt","jsonl_export":"issues.jsonl"}`
+		if err := os.WriteFile(filepath.Join(beadsDir, "config.json"), []byte(legacy), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		before := legacyworkspace.TreeDigest(t, beadsDir)
+		store, err := newExistingDoltStoreFromConfig(t.Context(), beadsDir)
+		if err == nil {
+			_ = store.Close()
+		}
+		if after := legacyworkspace.TreeDigest(t, beadsDir); !maps.Equal(after, before) {
+			t.Fatalf("routed factory changed the workspace it refused: before %v, after %v", before, after)
+		}
+		if err == nil || !(strings.Contains(err.Error(), "a routed write does not create one") || strings.Contains(err.Error(), "requires a CGO build")) {
+			t.Fatalf("routed factory error = %v, want the no-database refusal", err)
+		}
+	})
+
+	const registered = "legacy-config-contract"
+	registerContractBackend(t, registered)
+	for name, open := range factories {
+		t.Run("registered/"+name, func(t *testing.T) {
+			beadsDir, _ := writeLegacyConfig(t, registered)
+			want := errRegistryReadWrite
+			if name == "read-only" || name == "preview" {
+				want = errRegistryReadOnly
+			}
+			if _, err := open(t.Context(), beadsDir); !errors.Is(err, want) {
+				t.Fatalf("%s factory error = %v, want the registry's %v", name, err, want)
+			}
+			_, statErr := os.Stat(filepath.Join(beadsDir, "metadata.json"))
+			if name == "read-only" || name == "preview" {
+				// A non-mutating open reads config.json in place.
+				if !os.IsNotExist(statErr) {
+					t.Fatalf("%s factory migrated the legacy config.json: %v", name, statErr)
+				}
+				return
+			}
+			if statErr != nil {
+				t.Fatalf("%s factory did not migrate the admitted legacy config.json: %v", name, statErr)
+			}
+		})
+	}
+
+	// A fresh clone of a SQLite-era project (config.json and issues.jsonl,
+	// no *.db) is not a workspace bd run inside it opens, and the historical
+	// SQLite check does not refuse it. The non-mutating factories and the
+	// routed-write one leave it byte-identical: they read config.json in
+	// place, or refuse before Load.
+	for _, name := range []string{"routed", "read-only", "preview"} {
+		t.Run("pre-Dolt clone/"+name, func(t *testing.T) {
+			beadsDir := filepath.Join(t.TempDir(), ".beads")
+			legacyworkspace.PreDoltClone().Write(t, beadsDir)
+			before := legacyworkspace.TreeDigest(t, beadsDir)
+			store, err := factories[name](t.Context(), beadsDir)
+			if err == nil {
+				_ = store.Close()
+				t.Fatalf("%s factory opened a pre-Dolt clone that holds no database", name)
+			}
+			if after := legacyworkspace.TreeDigest(t, beadsDir); !maps.Equal(after, before) {
+				t.Fatalf("%s factory changed the clone: before %v, after %v", name, slices.Sorted(maps.Keys(before)), slices.Sorted(maps.Keys(after)))
 			}
 		})
 	}

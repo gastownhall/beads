@@ -249,8 +249,17 @@ func (s *DoltStore) runDoltTransactionRecording(ctx context.Context, commitMsg s
 	// CLI transact wrappers — commits durably while minting no version row, so
 	// the bead has no creation version and the first later mutation that does
 	// run scoped is minted as revision 1: the history then asserts that the
-	// update IS the creation.
-	clearVersionScope := issueops.ScopeVersionedHistoryTransaction(regularTx, s.versionedHistoryEnabled.Load())
+	// update IS the creation. A switch read that fails here fails the operation
+	// before fn runs, for the same reason (VersionedHistorySwitch.ResolveIn).
+	versioned, err := s.versionedHistory.ResolveIn(ctx, regularTx)
+	if err != nil {
+		_ = regularTx.Rollback()
+		if !journalEnabled {
+			_ = ignoredTx.Rollback()
+		}
+		return issueops.BlockedRecheck{}, err
+	}
+	clearVersionScope := issueops.ScopeVersionedHistoryTransaction(regularTx, versioned)
 	defer clearVersionScope()
 	// Unblocking writes record their dependents on whichever transaction they
 	// ran in: the regular one, or the ignored one wisps use when the journal
@@ -331,7 +340,7 @@ func (s *DoltStore) finishDoltTransaction(ctx context.Context, conn *sql.Conn, t
 	// regularTx (see runDoltTransaction), so anything they minted has to be
 	// staged with them or the version rows never reach this operation's Dolt
 	// commit. Marked here, once, rather than at each MarkDirty call site.
-	tx.dirty.MarkVersionedHistoryDirty(s.versionedHistoryEnabled.Load())
+	tx.dirty.MarkVersionedHistoryDirty(s.versionedHistory.Enabled())
 
 	if err := versioncontrolops.StageAndCommit(ctx, conn, tx.dirty.DirtyTables(), commitMsg, s.commitAuthorString()); err != nil {
 		rollbackIgnored()
@@ -464,14 +473,17 @@ func beginBorrowedTx(ctx context.Context, conn *sql.Conn, branch string) (*sql.T
 	return tx, nil
 }
 
-// beginTxOnConn checks a connection out to branch and begins a transaction on
-// it. Only the fallback path uses it: the fallback owns a dedicated
+// beginTxOnConn puts a connection on branch and begins a transaction on it.
+// Only the fallback path uses it: the fallback owns a dedicated
 // single-connection pool, so checking its session out is safe. Every Dolt SQL
-// session has its own active branch, so the explicit checkout is required on
-// a fresh dial.
+// session has its own active branch, and a fresh dial lands on the database's
+// default branch — usually already the requested one. DOLT_CHECKOUT is issued
+// only when the session is on a different branch: a capped operator user may
+// be granted EXECUTE on dolt_add/dolt_commit alone, and an unconditional no-op
+// checkout would be denied and fail every wisp write on the fallback path.
 func beginTxOnConn(ctx context.Context, conn *sql.Conn, branch string) (*sql.Tx, error) {
-	if _, err := conn.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", branch); err != nil {
-		return nil, fmt.Errorf("failed to checkout ignored tx branch %s: %w", branch, err)
+	if err := checkoutBranchIfNeeded(ctx, conn, branch); err != nil {
+		return nil, fmt.Errorf("failed to put ignored tx conn on branch %s: %w", branch, err)
 	}
 	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {

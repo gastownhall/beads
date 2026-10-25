@@ -175,3 +175,47 @@ func TestABlockingRoleRefusalIsTheDocumentedBadRequest(t *testing.T) {
 		t.Errorf("status = %d for an opaque role failure, want 500: %s", resp.StatusCode, readAll(t, resp))
 	}
 }
+
+// TestBlockingAnnotationsCarryTheTransitiveFlagWhenAsked pins the
+// dependencies.blocking.isBlocked parameter: `is_blocked=true` reaches the
+// role as IncludeIsBlocked, the role's flag is shipped as `is_blocked`, an
+// item without one omits the member, and a request without the parameter
+// asks for nothing.
+func TestBlockingAnnotationsCarryTheTransitiveFlagWhenAsked(t *testing.T) {
+	blocked := true
+	annotator := &roleBlockingAnnotator{result: issueops.BlockingResult{Items: []issueops.IssueBlocking{
+		{ID: "bd-1", BlockedBy: []string{}, Blocks: []string{}, IsBlocked: &blocked},
+		{ID: "bd-ghost", BlockedBy: []string{}, Blocks: []string{}},
+	}}}
+	ts := newBlockingServer(t, annotator)
+
+	body := decodeBody(t, ts.get(t, "/v0/beads/dependencies/blocking?issue_id=bd-1&issue_id=bd-ghost&is_blocked=true"))
+	reads := annotator.blockingRequests()
+	if len(reads) != 1 || !reads[0].IncludeIsBlocked {
+		t.Fatalf("role saw %+v, want one request with IncludeIsBlocked", reads)
+	}
+	items, _ := body["items"].([]any)
+	if len(items) != 2 {
+		t.Fatalf("items = %v", body["items"])
+	}
+	if first, _ := items[0].(map[string]any); first["is_blocked"] != true {
+		t.Errorf("items[0].is_blocked = %v, want true", first["is_blocked"])
+	}
+	if second, _ := items[1].(map[string]any); second["is_blocked"] != nil {
+		t.Errorf("items[1] carries is_blocked %v; an item with no flag omits it", second["is_blocked"])
+	}
+
+	ts.get(t, "/v0/beads/dependencies/blocking?issue_id=bd-1")
+	if reads := annotator.blockingRequests(); len(reads) != 2 || reads[1].IncludeIsBlocked {
+		t.Errorf("a request without is_blocked asked for the flag: %+v", reads)
+	}
+}
+
+// TestBlockedFlagsChunkIsTheServedAnchorBound holds issueops.BlockedFlagsChunk
+// to this operation's issue_id bound, so the library entry never asks a
+// question the served operation refuses.
+func TestBlockedFlagsChunkIsTheServedAnchorBound(t *testing.T) {
+	if issueops.BlockedFlagsChunk != maxDependencyAnchors {
+		t.Errorf("issueops.BlockedFlagsChunk = %d, maxDependencyAnchors = %d; they must be equal", issueops.BlockedFlagsChunk, maxDependencyAnchors)
+	}
+}

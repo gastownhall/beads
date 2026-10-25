@@ -18,25 +18,33 @@ import (
 //
 // It only sees tests that ran before it in this process. TestMain repeats the
 // check after m.Run (checkStdioAfterRun), which covers every test in the
-// process, including each Bazel shard, where this test runs in one shard only.
+// process, including each Bazel shard.
+//
+// Where TestAAAStdioBaseline did not run in this process (a -run filter, or a
+// Bazel shard that holds this test but not that one), the baseline is the
+// streams TestMain saw before m.Run, with checkStdioAfterRun's one allowance:
+// the framework's own -json swap, os.Stderr = os.Stdout.
 func TestZZStdioNotLeaked(t *testing.T) {
-	if baselineStdout == nil || baselineStderr == nil {
-		// TestAAAStdioBaseline did not run in this process (-run filtered it
-		// out, or Bazel sharding put it in another shard); TestMain's check
-		// after m.Run still applies.
-		t.Skip("no baseline in this process; checkStdioAfterRun covers it")
+	wantStdout, wantStderr := baselineStdout, baselineStderr
+	frameworkSwapAllowed := false
+	if wantStdout == nil || wantStderr == nil {
+		if preRunStdout == nil || preRunStderr == nil {
+			t.Fatal("neither TestAAAStdioBaseline nor TestMain recorded the streams; TestMain must run the suite through runTestsAndSweep")
+		}
+		wantStdout, wantStderr = preRunStdout, preRunStderr
+		frameworkSwapAllowed = true
 	}
-	if os.Stdout != baselineStdout {
+	if os.Stdout != wantStdout {
 		t.Errorf("os.Stdout was leaked by an earlier test (now fd=%d name=%q); "+
 			"a capture helper restored it on the happy path only - move the restore into a defer",
 			os.Stdout.Fd(), os.Stdout.Name())
-		os.Stdout = baselineStdout
+		os.Stdout = wantStdout
 	}
-	if os.Stderr != baselineStderr {
+	if os.Stderr != wantStderr && (!frameworkSwapAllowed || os.Stderr != wantStdout) {
 		t.Errorf("os.Stderr was leaked by an earlier test (now fd=%d name=%q); "+
 			"a capture helper restored it on the happy path only - move the restore into a defer",
 			os.Stderr.Fd(), os.Stderr.Name())
-		os.Stderr = baselineStderr
+		os.Stderr = wantStderr
 	}
 }
 

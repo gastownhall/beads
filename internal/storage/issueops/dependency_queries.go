@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/types"
+	publicops "github.com/steveyegge/beads/issueops"
 )
 
 // GetAllDependencyRecordsInTx returns all dependency records from permanent and
@@ -943,10 +944,25 @@ func GetNewlyUnblockedByCloseInTx(ctx context.Context, tx DBTX, closedIssueID st
 
 // IsBlockedInTx checks if an issue is blocked by active dependencies within
 // an existing transaction. Returns whether the issue is blocked and, if so,
-// a list of blocker descriptions for display.
+// a list of blocker descriptions for display, each spelled by
+// publicops.Blocker.String.
+func IsBlockedInTx(ctx context.Context, tx DBTX, issueID string) (bool, []string, error) {
+	blocked, blockers, err := isBlockedByInTx(ctx, tx, issueID)
+	if err != nil || len(blockers) == 0 {
+		return blocked, nil, err
+	}
+	names := make([]string, 0, len(blockers))
+	for _, blocker := range blockers {
+		names = append(names, blocker.String())
+	}
+	return blocked, names, nil
+}
+
+// isBlockedByInTx is IsBlockedInTx with the live direct blockers kept typed, so
+// a refusal can carry them without re-reading its own display strings.
 //
 //nolint:gosec // G201: table names are hardcoded constants.
-func IsBlockedInTx(ctx context.Context, tx DBTX, issueID string) (bool, []string, error) {
+func isBlockedByInTx(ctx context.Context, tx DBTX, issueID string) (bool, []publicops.Blocker, error) {
 	var blocked bool
 	found := false
 	for _, table := range []string{"issues", "wisps"} {
@@ -969,14 +985,12 @@ func IsBlockedInTx(ctx context.Context, tx DBTX, issueID string) (bool, []string
 		return false, nil, nil
 	}
 
-	type depEdge struct {
-		dependsOnID, depType string
-	}
-	var edges []depEdge
+	var edges []blockerEdge
 	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
 		rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
 			SELECT %s AS depends_on_id, type FROM %s
 			WHERE issue_id = ? AND type IN ('blocks', 'waits-for', 'conditional-blocks')
+			ORDER BY depends_on_id, type
 		`, DepTargetExpr, depTable), issueID)
 		if err != nil {
 			if optionalBlockedTable(depTable) && isTableNotExistError(err) {
@@ -985,7 +999,7 @@ func IsBlockedInTx(ctx context.Context, tx DBTX, issueID string) (bool, []string
 			return false, nil, fmt.Errorf("check blockers from %s: %w", depTable, err)
 		}
 		for rows.Next() {
-			var e depEdge
+			var e blockerEdge
 			if err := rows.Scan(&e.dependsOnID, &e.depType); err != nil {
 				_ = rows.Close()
 				return false, nil, fmt.Errorf("scan blocker edge: %w", err)
@@ -1010,7 +1024,21 @@ func IsBlockedInTx(ctx context.Context, tx DBTX, issueID string) (bool, []string
 	if err != nil {
 		return false, nil, fmt.Errorf("check blocker status: %w", err)
 	}
-	var blockers []string
+	return true, liveBlockers(edges, statusByID), nil
+}
+
+// blockerEdge is one blocking-type outbound edge of a stored-blocked issue, as
+// IsBlockedInTx and IsBlockedWithBlockersBatchInTx read it.
+type blockerEdge struct {
+	dependsOnID, depType string
+}
+
+// liveBlockers keeps the edges whose target is a row that is neither closed nor
+// pinned, in edge order. An edge naming no row (an `external:` reference, a
+// dangling id) is dropped: the external-dependency policy reports those itself.
+// It is the one filter both the single and the batch read apply.
+func liveBlockers(edges []blockerEdge, statusByID map[string]types.Status) []publicops.Blocker {
+	var blockers []publicops.Blocker
 	for _, e := range edges {
 		status, ok := statusByID[e.dependsOnID]
 		if !ok {
@@ -1019,14 +1047,113 @@ func IsBlockedInTx(ctx context.Context, tx DBTX, issueID string) (bool, []string
 		if status == types.StatusClosed || status == types.StatusPinned {
 			continue
 		}
-		if e.depType != "blocks" {
-			blockers = append(blockers, e.dependsOnID+" ("+e.depType+")")
-		} else {
-			blockers = append(blockers, e.dependsOnID)
+		blockers = append(blockers, publicops.Blocker{ID: e.dependsOnID, Type: types.DependencyType(e.depType)})
+	}
+	return blockers
+}
+
+// IsBlockedWithBlockersBatchInTx is IsBlockedInTx for many ids in a bounded
+// number of reads rather than several per id: the stored is_blocked flags
+// (IsBlockedBatchInTx), the blocking-type outbound edges of the ids that flag
+// marks blocked from both dependency tables, and one status read of every
+// target those edges name. The answer holds exactly the ids IsBlockedInTx
+// reports blocked, each mapped to the blocker list IsBlockedInTx returns for
+// it (nil when it has none, as for an issue held only by its parent chain);
+// an id it reports unblocked, or that names no row, is absent.
+//
+// The per-id answers are the single read's: the same issues-first flag, the
+// same tables in the same order, the same edge order (depends_on_id, type) and
+// the same live-blocker filter. Every status is read once for the whole set,
+// which is the same row a per-id read would see in the same transaction.
+func IsBlockedWithBlockersBatchInTx(ctx context.Context, tx DBTX, ids []string) (map[string][]string, error) {
+	flags, err := IsBlockedBatchInTx(ctx, tx, ids)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string][]string)
+	blockedIDs := make([]string, 0, len(flags))
+	for _, id := range ids {
+		if !flags[id] {
+			continue
 		}
+		if _, dup := out[id]; dup {
+			continue
+		}
+		out[id] = nil
+		blockedIDs = append(blockedIDs, id)
+	}
+	if len(blockedIDs) == 0 {
+		return out, nil
 	}
 
-	return true, blockers, nil
+	edges := make(map[string][]blockerEdge, len(blockedIDs))
+	var targets []string
+	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
+		read, err := readBlockerEdgesFromTable(ctx, tx, depTable, blockedIDs, edges)
+		if err != nil {
+			if optionalBlockedTable(depTable) && isTableNotExistError(err) {
+				continue
+			}
+			return nil, err
+		}
+		targets = append(targets, read...)
+	}
+	if len(targets) == 0 {
+		return out, nil
+	}
+	statusByID, err := loadStatusByIDInTx(ctx, tx, targets)
+	if err != nil {
+		return nil, fmt.Errorf("check blocker status: %w", err)
+	}
+	for _, id := range blockedIDs {
+		blockers := liveBlockers(edges[id], statusByID)
+		if len(blockers) == 0 {
+			continue
+		}
+		names := make([]string, 0, len(blockers))
+		for _, blocker := range blockers {
+			names = append(names, blocker.String())
+		}
+		out[id] = names
+	}
+	return out, nil
+}
+
+// readBlockerEdgesFromTable appends depTable's blocking-type outbound edges of
+// ids to edges, per source in (depends_on_id, type) order, and returns every
+// target it read. It batches at queryBatchSize. A missing table's error is
+// returned unwrapped enough for the caller's isTableNotExistError.
+//
+//nolint:gosec // G201: depTable is a hardcoded "dependencies" or "wisp_dependencies".
+func readBlockerEdgesFromTable(ctx context.Context, tx DBTX, depTable string, ids []string, edges map[string][]blockerEdge) ([]string, error) {
+	var targets []string
+	for start := 0; start < len(ids); start += queryBatchSize {
+		end := min(start+queryBatchSize, len(ids))
+		placeholders, args := buildSQLInClause(ids[start:end])
+		rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
+			SELECT issue_id, %s AS depends_on_id, type FROM %s
+			WHERE issue_id IN (%s) AND type IN ('blocks', 'waits-for', 'conditional-blocks')
+			ORDER BY issue_id, depends_on_id, type
+		`, DepTargetExpr, depTable, placeholders), args...)
+		if err != nil {
+			return nil, fmt.Errorf("check blockers from %s: %w", depTable, err)
+		}
+		for rows.Next() {
+			var source string
+			var e blockerEdge
+			if err := rows.Scan(&source, &e.dependsOnID, &e.depType); err != nil {
+				_ = rows.Close()
+				return nil, fmt.Errorf("scan blocker edge: %w", err)
+			}
+			edges[source] = append(edges[source], e)
+			targets = append(targets, e.dependsOnID)
+		}
+		_ = rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("blocker edge rows from %s: %w", depTable, err)
+		}
+	}
+	return targets, nil
 }
 
 // IsBlockedBatchInTx returns the denormalized, TRANSITIVE is_blocked flag for

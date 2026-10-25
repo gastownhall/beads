@@ -256,25 +256,37 @@ before removing the stale directory.
 
 ### Configured server unreachable (auto-start disabled)
 
-**Symptom (server mode):** `bd` returns "database not found on Dolt server"
-when the configured server is down.
+**Symptom (server mode):** commands fail with "Dolt server unreachable at
+127.0.0.1:3307", and bd says that `dolt_server_port` (or
+`BEADS_DOLT_SERVER_PORT`, or the legacy `BEADS_DOLT_PORT`) declares that
+server externally managed, so it did not start one.
 
-**Cause:** When `metadata.json` has an explicit `dolt_server_port`, bd treats
-the server as externally managed and intentionally disables auto-start —
-spawning a different server would create a shadow database.
+**Cause:** When `metadata.json` has an explicit `dolt_server_port`, or the
+environment sets `BEADS_DOLT_SERVER_PORT` or `BEADS_DOLT_PORT`, bd treats the
+server as externally managed and intentionally disables auto-start — spawning a different server
+would create a shadow database. A `dolt_server_port` does so even when
+`config.yaml`'s `dolt.port` chose the port; bd then says the setting declares
+this workspace's server externally managed without claiming it names the
+endpoint. After a command reaches the server, bd records its port in
+`.beads/dolt-server.port`, which outranks `dolt_server_port`. `bd dolt set
+port` leaves that file alone, so when the file chose the port bd names it:
+remove it and bd falls back to the next configured port: `dolt_server_port`,
+unless `config.yaml`'s `dolt.port` or the data directory's `listener.port`
+names another. When one of those names the file's own port, removing the
+file changes nothing, so bd does not name it.
 
-**Fix:**
+**Fix:** start the server that should be listening there, with its own data
+directory. Unless that server is bd's own over `.beads/dolt` (for example one
+you started with `bd dolt start` after `bd dolt set port`), `bd dolt start` is
+not it: it would start one of bd's own over `.beads/dolt` on the same port.
 
 ```bash
-# Start your configured Dolt server
-bd dolt start
-
-# Or start manually with the correct data directory
 dolt sql-server --host 127.0.0.1 --port 3307 --data-dir /path/to/your/dolt/data
 ```
 
 If you want auto-start behavior, remove `dolt_server_port` from
-`.beads/metadata.json`.
+`.beads/metadata.json`, and unset `BEADS_DOLT_SERVER_MODE` or a port variable
+if one also declares the server externally managed.
 
 ### Port conflicts with multiple projects
 
@@ -395,20 +407,36 @@ Managed proxied-server mode spawns an external `dolt` CLI it finds via
 clone-local sidecar setting will slot between the two when the sidecar
 reader lands in contract part 2). On
 startup it probes that binary with `dolt version` and recommends
-**dolt >= 2.0.0**: the 2026-07-25 cross-version compatibility matrix found
-that cross-reading storage written by the beads Dolt Go module (as opposed
-to writing it, which older dolt CLIs can also do) requires dolt >= 2.0.0 —
-dolt 1.85 can *serve* proxied mode but cannot *read* storage the module
-wrote, and dolt 1.52.1 fails at both serving and reading.
+**dolt >= 2.5.0** (the embedded engine `bd` links, and the release CI pins, is
+2.6.0). Older releases have known problems:
+
+- Dolt 2.4.0 through 2.4.2 return no row for an ungrouped `MAX` or `MIN` over
+  an unmatched primary-key prefix (dolthub/dolt#12093).
+- Dolt before 2.4.0 has a join bug that returns wrong results
+  (dolthub/dolt#11886).
+- Dolt before 2.3.3 cannot write to a database holding a descending index
+  column (dolthub/dolt#11746). Every database `bd` creates in embedded mode
+  holds one, and so does any database whose schema a `dolt sql-server` 2.3.3
+  or newer created. On such a database an `UPDATE` or `DELETE` on `issues`,
+  which `bd create` and `bd update` both run, fails with
+  `cannot add or update a child row: a foreign key constraint fails` on
+  `fk_comp_snap_issue`. Other writes and `information_schema` queries fail
+  with `table has unknown fields`.
+
+[Which Dolt version to install](/architecture/dolt#which-dolt-version-to-install)
+records the dated measurements. (Earlier, the 2026-07-25 cross-version
+matrix had found that dolt < 2.0.0 cannot even *read* storage the module
+wrote.)
 
 This is a warning, not a hard failure — there is deliberately no hard
 version floor, so an older dolt can still be used at your own risk. To
 resolve it, install the pinned dolt version — see
 [Which Dolt version to install](/architecture/dolt#which-dolt-version-to-install)
 — and either update PATH or set `BEADS_DOLT_BIN` to the new binary's path.
-Install that specific version rather than `latest`: 2.3.x is a newer release
-that satisfies this warning but carries a
-[separate data-operation defect](/architecture/dolt#which-dolt-version-to-install).
+Install that specific version rather than `latest`: the pin is the release
+measured clean for a
+[separate data-operation defect](/architecture/dolt#which-dolt-version-to-install),
+and `releases/latest` can move to an unmeasured release.
 
 The advisory repeats at most once per day, not on every command: the probe
 result and the warning timestamp are cached (keyed by the binary's path,
@@ -422,27 +450,6 @@ proxied-server mode still starts, since an unparseable version means "we
 don't know", not "this is definitely broken". A genuinely missing or
 broken `dolt` binary (not found, not executable, or the probe itself
 fails/times out) is a hard error, not a warning.
-
-### Proxied-server mode: closing a bead gate fails with "no local store available"
-
-```
-gate condition not satisfied: bead gate "bd-a1b2": no local store available (use --force to override)
-```
-
-`bd close` on a bead gate refuses this way in proxied-server mode even when
-the awaited bead is closed. Proxied-server commands run against a shared
-`dolt sql-server` and never open a local store, so the close path has
-nothing to read the awaited bead's status from.
-
-`bd gate check` does evaluate bead gates in proxied-server mode, and closes
-the ones whose target has closed:
-
-```bash
-bd gate check --type=bead      # closes bead gates whose awaited bead is closed
-bd close <gate-id> --force     # or close without verifying the condition
-```
-
-Tracked in [#5861](https://github.com/gastownhall/beads/issues/5861).
 
 ### Prefix routing: "proxy server store needs to be uow provider"
 

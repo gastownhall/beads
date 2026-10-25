@@ -76,6 +76,13 @@ an import is visible. To deliberately restore an older snapshot, pass
 --allow-stale, which imports every row even when it overwrites newer
 local state.
 
+The staleness guard is import's ONLY overwrite guard: the per-field
+fences that bd update enforces (notes overwrite, live-claim reassign,
+close policy) do not apply to imported rows. Import replaces rows
+wholesale by design — a restore must not fail field-by-field — so
+--allow-stale is the single deliberate-overwrite opt-in, and
+updated_issues is where to look for what an import rewrote.
+
 Large imports are written in bounded transactions (a few hundred issues
 each, with a short pause between commits) with progress on stderr, so
 concurrent bd commands keep working while the import runs instead of
@@ -140,14 +147,20 @@ func bulkLoadPoolReadTimeout(cmd *cobra.Command) time.Duration {
 }
 
 func runImport(cmd *cobra.Command, args []string) error {
-	// Explicit call, not inherited from CheckReadonly: runImport doesn't call
-	// CheckReadonly at all (a separate, pre-existing gap — readonlyMode
-	// doesn't gate bd import either), so it can't pick up the freeze check
-	// folded into CheckReadonly the way create/update/close/remember do.
-	// The path that makes this call load-bearing rather than redundant is
-	// `bd import --dry-run`: a preview sets useReadOnly, so it skips the early
-	// gate in PersistentPreRunE, and runImport is the only chokepoint left.
-	// Plain `bd import` is already stopped by that early gate.
+	// Strict --readonly refuses import, a --dry-run preview included (it
+	// refuses create --dry-run too). Guarded, unlike the write commands'
+	// unconditional call, because CheckReadonly also answers a migration freeze
+	// and does it by exiting the process. The freeze is answered below instead,
+	// by returning the error, so that cleanup still runs.
+	if readonlyMode {
+		CheckReadonly("import")
+	}
+
+	// The freeze check, not inherited from CheckReadonly for the reason above.
+	// It is load-bearing rather than redundant on `bd import --dry-run`: a
+	// preview sets useReadOnly, so it skips the early gate in
+	// PersistentPreRunE, and runImport is the only chokepoint left. Plain
+	// `bd import` is already stopped by that early gate.
 	if err := migrationFreezeGateFor(cmd, "import"); err != nil {
 		return err
 	}

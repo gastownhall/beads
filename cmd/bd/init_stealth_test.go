@@ -3,7 +3,6 @@ package main
 import (
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -26,10 +25,10 @@ func TestSetupGitExclude_Worktree(t *testing.T) {
 	if err := os.WriteFile(dummyFile, []byte("# Test\n"), 0644); err != nil {
 		t.Fatalf("failed to create dummy file: %v", err)
 	}
-	cmd := exec.Command("git", "add", ".")
+	cmd := gitCommand("add", ".")
 	cmd.Dir = mainDir
 	_ = cmd.Run()
-	cmd = exec.Command("git", "commit", "-m", "initial")
+	cmd = gitCommand("commit", "-m", "initial")
 	cmd.Dir = mainDir
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("failed to create initial commit: %v", err)
@@ -37,7 +36,7 @@ func TestSetupGitExclude_Worktree(t *testing.T) {
 
 	// Create worktree
 	worktreeDir := filepath.Join(t.TempDir(), "worktree")
-	cmd = exec.Command("git", "worktree", "add", worktreeDir, "-b", "feature")
+	cmd = gitCommand("worktree", "add", worktreeDir, "-b", "feature")
 	cmd.Dir = mainDir
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("failed to create worktree: %v", err)
@@ -70,7 +69,7 @@ func TestSetupGitExclude_Worktree(t *testing.T) {
 
 	// Verify: worktree's .git/worktrees/<name>/info/exclude should NOT exist
 	// (or should not have the patterns if it exists)
-	worktreeGitDir, err := exec.Command("git", "-C", worktreeDir, "rev-parse", "--git-dir").Output()
+	worktreeGitDir, err := gitCommand("-C", worktreeDir, "rev-parse", "--git-dir").Output()
 	if err != nil {
 		t.Fatalf("failed to get worktree git dir: %v", err)
 	}
@@ -95,10 +94,10 @@ func TestSetupForkExclude_Worktree(t *testing.T) {
 	if err := os.WriteFile(dummyFile, []byte("# Test\n"), 0644); err != nil {
 		t.Fatalf("failed to create dummy file: %v", err)
 	}
-	cmd := exec.Command("git", "add", ".")
+	cmd := gitCommand("add", ".")
 	cmd.Dir = mainDir
 	_ = cmd.Run()
-	cmd = exec.Command("git", "commit", "-m", "initial")
+	cmd = gitCommand("commit", "-m", "initial")
 	cmd.Dir = mainDir
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("failed to create initial commit: %v", err)
@@ -106,7 +105,7 @@ func TestSetupForkExclude_Worktree(t *testing.T) {
 
 	// Create worktree
 	worktreeDir := filepath.Join(t.TempDir(), "worktree")
-	cmd = exec.Command("git", "worktree", "add", worktreeDir, "-b", "feature")
+	cmd = gitCommand("worktree", "add", worktreeDir, "-b", "feature")
 	cmd.Dir = mainDir
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("failed to create worktree: %v", err)
@@ -136,7 +135,7 @@ func TestSetupForkExclude_Worktree(t *testing.T) {
 
 	// Verify: worktree's .git/worktrees/<name>/info/exclude should NOT exist
 	// (or should not have the patterns if it exists)
-	worktreeGitDir, err := exec.Command("git", "-C", worktreeDir, "rev-parse", "--git-dir").Output()
+	worktreeGitDir, err := gitCommand("-C", worktreeDir, "rev-parse", "--git-dir").Output()
 	if err != nil {
 		t.Fatalf("failed to get worktree git dir: %v", err)
 	}
@@ -518,7 +517,7 @@ func TestAddExcludePatternsPreservesAppendLineEndings(t *testing.T) {
 			if err := os.WriteFile(gitignorePath, []byte(tracked), 0600); err != nil {
 				t.Fatal(err)
 			}
-			if out, err := exec.Command("git", "-C", dir, "add", "--", ".gitignore").CombinedOutput(); err != nil {
+			if out, err := gitCommand("-C", dir, "add", "--", ".gitignore").CombinedOutput(); err != nil {
 				t.Fatalf("track .gitignore: %v: %s", err, out)
 			}
 			path, err := resolveGitExcludePath(dir)
@@ -624,7 +623,7 @@ func TestAddExcludePatternsCreatesMissingFile(t *testing.T) {
 
 func initExcludeGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()
-	cmd := exec.Command("git", args...)
+	cmd := gitCommand(args...)
 	cmd.Dir, cmd.Env = dir, gitenv.ScrubRouting(os.Environ())
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, "fixture git %v: %s", args, out)

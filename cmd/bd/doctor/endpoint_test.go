@@ -1,0 +1,142 @@
+package doctor
+
+import (
+	"net"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"testing"
+
+	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/configfile"
+)
+
+// doctorEndpointWorkspace is a server-mode workspace with no local data
+// directory and every Dolt endpoint setting cleared, plus its repo path.
+func doctorEndpointWorkspace(t *testing.T) (repo, beadsDir string) {
+	t.Helper()
+	for _, name := range []string{
+		"BEADS_DOLT_SHARED_SERVER", "BEADS_DOLT_SERVER_MODE", "BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_PORT",
+		"BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_PASSWORD", "BEADS_DOLT_AUTO_START", "BEADS_DOLT_SERVER_USER",
+		"BEADS_DOLT_SERVER_SOCKET", "BEADS_DOLT_CREDENTIAL_COMMAND", "BEADS_DIR",
+	} {
+		t.Setenv(name, "")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("BEADS_CREDENTIALS_FILE", filepath.Join(home, "no-credentials"))
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+	repo = t.TempDir()
+	beadsDir = filepath.Join(repo, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &configfile.Config{Backend: configfile.BackendDolt, DoltMode: configfile.DoltModeServer, DoltDatabase: "doctor_endpoint"}
+	if err := cfg.Save(beadsDir); err != nil {
+		t.Fatal(err)
+	}
+	// A tracked issues.jsonl makes the Fresh Clone check look for the
+	// database, on the server in server mode.
+	if err := os.WriteFile(filepath.Join(beadsDir, "issues.jsonl"), []byte(`{"id":"t-1","title":"x"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return repo, beadsDir
+}
+
+func closedLocalPort(t *testing.T) int {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := l.Addr().(*net.TCPAddr).Port
+	_ = l.Close()
+	return port
+}
+
+// doctorEndpointReports is what each bd doctor entry point that reaches the
+// Dolt server reports for the workspace at repo.
+func doctorEndpointReports(t *testing.T, repo, beadsDir string) map[string]string {
+	t.Helper()
+	reports := map[string]string{}
+	if _, _, err := openDoltDB(beadsDir); err != nil {
+		reports["Dolt Connection (openDoltDB)"] = err.Error()
+	} else {
+		reports["Dolt Connection (openDoltDB)"] = "connected"
+	}
+	for _, c := range RunDoltHealthChecks(repo) {
+		if c.Name == "Dolt Connection" {
+			reports["bd doctor Dolt Connection"] = c.Message + "\n" + c.Detail + "\n" + c.Fix
+		}
+	}
+	fresh := CheckFreshClone(repo)
+	reports["bd doctor Fresh Clone"] = fresh.Message + "\n" + fresh.Detail + "\n" + fresh.Fix
+	var server strings.Builder
+	for _, c := range RunServerHealthChecks(repo).Checks {
+		server.WriteString(string(c.Status) + " " + c.Name + ": " + c.Message + "\n" + c.Detail + "\n" + c.Fix + "\n")
+	}
+	reports["bd doctor --server"] = server.String()
+	return reports
+}
+
+// TestDoctorChecksDialTheEndpointTheStoreDials pins the invariant at bd
+// doctor's entry points: with only the legacy BEADS_DOLT_PORT naming the
+// server, every check that reaches it names the port the store dials. Plain
+// bd doctor used to report "no Dolt server port configured and no server
+// running; run any bd command to auto-start" and its Fresh Clone check
+// probed 127.0.0.1:0, while bd doctor --server and bd list reached the
+// server (#7803 review).
+func TestDoctorChecksDialTheEndpointTheStoreDials(t *testing.T) {
+	repo, beadsDir := doctorEndpointWorkspace(t)
+	port := strconv.Itoa(closedLocalPort(t))
+	t.Setenv("BEADS_DOLT_PORT", port)
+	for name, report := range doctorEndpointReports(t, repo, beadsDir) {
+		if !strings.Contains(report, "127.0.0.1:"+port) {
+			t.Errorf("%s does not name 127.0.0.1:%s, the endpoint the store dials:\n%s", name, port, report)
+		}
+		for _, banned := range []string{"127.0.0.1:0", "no Dolt server port", "auto-start"} {
+			if strings.Contains(report, banned) {
+				t.Errorf("%s contains %q:\n%s", name, banned, report)
+			}
+		}
+	}
+}
+
+// TestDoctorChecksNeverDialAnUnresolvedPort pins the invariant at bd
+// doctor's entry points for a fresh clone of a `bd init --server` project
+// before any server runs: no port is named, and no check dials 127.0.0.1:0.
+// When the next bd command starts the workspace's own server, the Fresh Clone
+// check reports the fresh clone and points at bd bootstrap, which clones into
+// that server's data directory; otherwise it gives the store's advice, which
+// bd bootstrap and every store open refuse with too. The check used to probe
+// 127.0.0.1:0 and report "Dolt server unreachable at 127.0.0.1:0 ... this is
+// not a fresh clone — it's a connectivity or auth problem" (#7841 review).
+func TestDoctorChecksNeverDialAnUnresolvedPort(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		autoStart string
+		wantFresh string
+	}{
+		{name: "bd starts its own server", wantFresh: "Run 'bd bootstrap'"},
+		{name: "auto-start off", autoStart: "0", wantFresh: "dolt.auto-start is off, so bd does not start this workspace's Dolt server."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo, beadsDir := doctorEndpointWorkspace(t)
+			t.Setenv("BEADS_DOLT_AUTO_START", tc.autoStart)
+			reports := doctorEndpointReports(t, repo, beadsDir)
+			if fresh := reports["bd doctor Fresh Clone"]; !strings.Contains(fresh, tc.wantFresh) {
+				t.Errorf("bd doctor Fresh Clone does not say %q:\n%s", tc.wantFresh, fresh)
+			}
+			for name, report := range reports {
+				for _, banned := range []string{"127.0.0.1:0", "connection refused", "connectivity or auth problem"} {
+					if strings.Contains(report, banned) {
+						t.Errorf("%s contains %q: it dialed a port nothing resolved:\n%s", name, banned, report)
+					}
+				}
+			}
+		})
+	}
+}

@@ -43,7 +43,15 @@ func ssEnvInt(key string, def int) int {
 // Multiple clients may share a directory (and therefore a database),
 // exercising concurrent multi-writer access to the same Dolt database.
 //
-// Requires BEADS_TEST_SHARED_SERVER=1 to run (skipped by default).
+// Skipped by default. It runs when either variable below is set:
+//
+//	BEADS_TEST_SHARED_SERVER=1            — the original manual stress run
+//	BEADS_TEST_SHARED_SERVER_CONCURRENT=1 — what //cmd/bd:bd_dolt_server_test
+//	                                         sets, together with small
+//	                                         BEADS_TEST_SS_DIRS/CLIENTS, so
+//	                                         --config=doltserver-cmd runs a
+//	                                         bounded smoke of it against the
+//	                                         lane's hermetic dolt sql-server
 //
 // Configuration via environment variables:
 //
@@ -54,8 +62,8 @@ func ssEnvInt(key string, def int) int {
 // Recommended: set BEADS_TEST_EMBEDDED_DOLT=1 to skip the unrelated
 // singleton Dolt container that TestMain starts for other tests in this package.
 func TestSharedServerConcurrent(t *testing.T) {
-	if os.Getenv("BEADS_TEST_SHARED_SERVER") == "" {
-		t.Skip("skipping: set BEADS_TEST_SHARED_SERVER=1 to run")
+	if os.Getenv("BEADS_TEST_SHARED_SERVER") == "" && os.Getenv("BEADS_TEST_SHARED_SERVER_CONCURRENT") != "1" {
+		t.Skip("skipping: set BEADS_TEST_SHARED_SERVER=1 (or BEADS_TEST_SHARED_SERVER_CONCURRENT=1) to run")
 	}
 	if runtime.GOOS == "windows" {
 		t.Skip("not supported on Windows")
@@ -77,6 +85,11 @@ func TestSharedServerConcurrent(t *testing.T) {
 	phase = time.Now()
 	cp, err := testutil.NewContainerProvider()
 	if err != nil {
+		// A lane that exists to run the Dolt server suites must not pass
+		// green having skipped this test.
+		if os.Getenv(testutil.EnvRequireDoltContainer) == "1" {
+			t.Fatalf("cannot start Dolt server, but %s=1: %v", testutil.EnvRequireDoltContainer, err)
+		}
 		t.Skipf("cannot start Dolt container: %v", err)
 	}
 	containerPort := cp.Port()
@@ -117,6 +130,20 @@ func TestSharedServerConcurrent(t *testing.T) {
 	}
 
 	// ── Init project directories ────────────────────────────────────────
+	// All at once: in shared-server mode every project's physical root is
+	// the one shared dolt dir, and bd init holds that root's gate
+	// EXCLUSIVELY (acquireInitMutationGate), so concurrent inits of
+	// different projects serialize on it. Each waits up to
+	// initGateWaitDefault (60s) for the others, which covers the lane's
+	// small BEADS_TEST_SS_DIRS at ~8s per init. Larger manual runs queue
+	// numDirs inits behind one gate, so raise the bound to match rather
+	// than reintroduce client-side serialization.
+	initEnv := baseEnv
+	if perInit := 15 * time.Second; time.Duration(numDirs)*perInit > initGateWaitDefault {
+		bound := time.Duration(numDirs) * perInit
+		initEnv = append(append([]string{}, baseEnv...), initGateTimeoutEnv+"="+bound.String())
+		t.Logf("init: %d concurrent inits; %s=%s", numDirs, initGateTimeoutEnv, bound)
+	}
 	phase = time.Now()
 	type project struct {
 		dir, prefix string
@@ -124,7 +151,6 @@ func TestSharedServerConcurrent(t *testing.T) {
 	projects := make([]project, numDirs)
 
 	eg, egCtx := errgroup.WithContext(ctx)
-	eg.SetLimit(maxProcs)
 	for i := range numDirs {
 		i := i
 		eg.Go(func() error {
@@ -136,7 +162,7 @@ func TestSharedServerConcurrent(t *testing.T) {
 			if err := gitInit(egCtx, dir); err != nil {
 				return fmt.Errorf("project %d git init: %w", i, err)
 			}
-			out, err := ssExec(egCtx, bdBinary, dir, baseEnv,
+			out, err := ssExec(egCtx, bdBinary, dir, initEnv,
 				"init", "--shared-server", "--external",
 				"--prefix", prefix, "--quiet", "--non-interactive")
 			if err != nil {
@@ -152,9 +178,46 @@ func TestSharedServerConcurrent(t *testing.T) {
 	t.Logf("init %d dirs: %s", numDirs, time.Since(phase))
 
 	// ── Fan out client workloads ────────────────────────────────────────
+	// Plus one late `bd init` of a fresh project that starts while the
+	// workloads are running. It holds the shared physical root's gate
+	// EXCLUSIVELY for its whole run, so this exercises both directions of
+	// the gate wait: every client command that lands during the init waits
+	// for it (BEADS_GATE_WAIT_TIMEOUT, default 30s) instead of failing, and
+	// the init gets the gate despite the steady stream of short client
+	// commands (workspacegate writer fairness: once the init is queued, new
+	// shared acquirers wait behind it). Its bound is pinned to 30s, half the
+	// 60s default, rather than initEnv's raised one: a generous bound would
+	// mask a fairness regression.
 	phase = time.Now()
 	eg, egCtx = errgroup.WithContext(ctx)
-	eg.SetLimit(maxProcs)
+	eg.SetLimit(maxProcs + 1) // +1: the late init below must not take a client's slot
+	eg.Go(func() error {
+		select {
+		case <-time.After(time.Second): // let the workloads get going
+		case <-egCtx.Done():
+			return egCtx.Err()
+		}
+		dir := filepath.Join(t.TempDir(), "projlate")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("late project mkdir: %w", err)
+		}
+		if err := gitInit(egCtx, dir); err != nil {
+			return fmt.Errorf("late project git init: %w", err)
+		}
+		start := time.Now()
+		lateEnv := append(append([]string{}, baseEnv...), initGateTimeoutEnv+"=30s")
+		out, err := ssExec(egCtx, bdBinary, dir, lateEnv,
+			"init", "--shared-server", "--external",
+			"--prefix", "projlate", "--quiet", "--non-interactive")
+		if err != nil {
+			return fmt.Errorf("late init during client workloads: %s: %w", out, err)
+		}
+		t.Logf("late init during client workloads: %s", time.Since(start))
+		if out, err := ssExec(egCtx, bdBinary, dir, baseEnv, "list", "--json", "--flat"); err != nil {
+			return fmt.Errorf("list in late project: %s: %w", out, err)
+		}
+		return nil
+	})
 	for c := range numClients {
 		c := c
 		eg.Go(func() error {
@@ -611,19 +674,13 @@ func buildSharedServerTestBinary(t *testing.T) string {
 			sharedServerBdBinary = prebuilt
 			return
 		}
-		pkgDir, err := os.Getwd()
-		if err != nil {
-			sharedServerBuildErr = fmt.Errorf("getwd: %w", err)
-			return
-		}
 		buildDir, err := testTempDir("beads-shared-server-bd-*")
 		if err != nil {
 			sharedServerBuildErr = fmt.Errorf("mkdirtemp: %w", err)
 			return
 		}
 		bdBin := filepath.Join(buildDir, "bd")
-		cmd := exec.Command("go", "build", "-tags", "gms_pure_go", "-o", bdBin, ".")
-		cmd.Dir = pkgDir
+		cmd := goBuildBDCommand(bdBin)
 		cmd.Env = append(os.Environ(), "CGO_ENABLED=1")
 		out, err := cmd.CombinedOutput()
 		if err != nil {

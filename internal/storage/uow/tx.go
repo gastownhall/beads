@@ -8,6 +8,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage/domain/db"
 	"github.com/steveyegge/beads/internal/storage/issueops"
+	publicops "github.com/steveyegge/beads/issueops"
 )
 
 type Tx interface {
@@ -86,11 +87,63 @@ func RunTxResultWithin[T any](ctx context.Context, p UnitOfWorkProvider, maxElap
 	bo.InitialInterval = txRetryInitialInterval
 	bo.MaxElapsedTime = maxElapsed
 
+	// lastAttemptDuration and lastErr let the loop decide, BEFORE starting a
+	// new attempt, whether there is realistically enough time left to finish
+	// one. maxElapsed is a BUDGET fixed once at the top of the call; it says
+	// nothing about how long any individual attempt actually takes. A slow
+	// attempt (a large apply's commit can run well past a minute) can lose
+	// the race against ctx's own absolute deadline mid-transaction: the retry
+	// loop would start another attempt because elapsed-so-far is still under
+	// maxElapsed, that attempt gets killed by ctx cancellation partway
+	// through, and the caller sees context.DeadlineExceeded — classified a
+	// generic 500 — instead of the exhausted-write-conflict outcome this loop
+	// already reports correctly when it gives up for its own reasons
+	// (classified a retryable 503). Comparing the time left to the PREVIOUS
+	// attempt's own duration is a cheap, evidence-based stand-in for
+	// predicting the next one, since a Dolt commit's cost is driven by the
+	// same plan on every attempt.
+	//
+	// This look-ahead is gated on publicops.HasExtendedRetryBudget(ctx), the
+	// same marker retryTxBudget itself checks, and for the same reason: an
+	// ordinary (unmarked) caller's attempts are cheap, and its ctx deadline
+	// is meant to be the thing that ends the loop — see
+	// TestApplyBatchHonorsAnExtendedRetryBudgetFromContext's "unmarked"
+	// case. Applying this check unconditionally would fire for those callers
+	// too: retryTxAttemptHeadroom is sized for a large apply's multi-minute
+	// commits, so for a near-instant failing attempt it would treat almost
+	// any ctx with less than retryTxAttemptHeadroom left as too tight,
+	// cutting the loop short well before ctx's own deadline and turning what
+	// should be ctx's DeadlineExceeded into a serialization error instead.
+	// Scoping this to the extended-budget (large apply) path keeps ordinary
+	// callers' retry-until-ctx-ends-it behavior exactly as before.
+	var lastAttemptDuration time.Duration
+	var lastErr error
+	haveAttempted := false
+	lookAhead := publicops.HasExtendedRetryBudget(ctx)
+
 	err := backoff.Retry(func() error {
+		if haveAttempted && lookAhead {
+			if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < lastAttemptDuration+retryTxAttemptHeadroom {
+				// A retry this long would almost certainly be cut off by
+				// ctx's own deadline rather than finish and report its own
+				// outcome. Stop now and surface the LAST attempt's real
+				// error — still a retryable conflict — rather than start a
+				// doomed attempt that ends in ctx.Err().
+				return backoff.Permanent(lastErr)
+			}
+		}
+		attemptStart := time.Now()
+		fail := func(err error) error {
+			lastAttemptDuration = time.Since(attemptStart)
+			lastErr = err
+			haveAttempted = true
+			return err
+		}
+
 		uw, err := p.NewUOW(ctx)
 		if err != nil {
 			if isSerializationError(err) {
-				return err
+				return fail(err)
 			}
 			return backoff.Permanent(err)
 		}
@@ -99,7 +152,7 @@ func RunTxResultWithin[T any](ctx context.Context, p UnitOfWorkProvider, maxElap
 		r, commitMsg, err := work(ctx, uw)
 		if err != nil {
 			if isSerializationError(err) {
-				return err
+				return fail(err)
 			}
 			return backoff.Permanent(err)
 		}
@@ -115,7 +168,7 @@ func RunTxResultWithin[T any](ctx context.Context, p UnitOfWorkProvider, maxElap
 				return nil
 			}
 			if isSerializationError(err) {
-				return err
+				return fail(err)
 			}
 			return backoff.Permanent(err)
 		}
@@ -128,19 +181,20 @@ func RunTxResultWithin[T any](ctx context.Context, p UnitOfWorkProvider, maxElap
 }
 
 // RunTxEphemeral is RunTxResult for work whose writes touch ONLY ephemeral
-// (dolt_ignored) state — today the leases table, whose writes must mint no
-// Dolt commit and no history (bd-lrgn1; ported to proxied mode by bd-aq0ql).
-// On success the attempt is committed with the SQL-only form (Tx.Commit with
-// an empty message ⇒ plain COMMIT, no DOLT_COMMIT), which persists the
-// working set but records nothing in dolt_log — the proxied analog of the
-// classic DoltStore.withRetryTx commit discipline that HeartbeatIssue relies
-// on. A serialization loser (heartbeat and reclaim/close contend on the same
-// lease row by design) is replayed against a fresh unit of work, exactly like
-// RunTxResult.
+// (dolt_ignored) state, which must mint no Dolt commit and no history
+// (bd-aq0ql) — today local metadata and the events-journal prune. On success
+// the attempt is committed with the SQL-only form (Tx.Commit with an empty
+// message ⇒ plain COMMIT, no DOLT_COMMIT), which persists the working set but
+// records nothing in dolt_log. A serialization loser is replayed against a
+// fresh unit of work, exactly like RunTxResult.
 //
 // Do NOT use this for work that writes versioned tables: those writes would
 // persist while silently bypassing Dolt history. Every versioned write goes
-// through RunTx/RunTxResult with a real commit message.
+// through RunTx/RunTxResult with a real commit message. A heartbeat is NOT
+// ephemeral work: a lease refresh writes only the dolt_ignored leases table
+// (bd-lrgn1), but a re-arm writes versioned rows, so the Heartbeater commits
+// through RunTxScoped, whose attempt that names no tables takes this same
+// plain COMMIT.
 func RunTxEphemeral[T any](ctx context.Context, p UnitOfWorkProvider, work TxReadFunc[T]) (T, error) {
 	var result T
 	bo := backoff.NewExponentialBackOff()
@@ -166,6 +220,99 @@ func RunTxEphemeral[T any](ctx context.Context, p UnitOfWorkProvider, work TxRea
 		}
 
 		if err := uw.Commit(ctx, ""); err != nil {
+			if isSerializationError(err) {
+				return err
+			}
+			return backoff.Permanent(err)
+		}
+
+		result = r
+		return nil
+	}, backoff.WithContext(bo, ctx))
+
+	return result, err
+}
+
+// ScopedCommitter is the optional commit a unit of work offers for a write
+// whose versioned tables are KNOWN: it commits the SQL transaction, then
+// stages exactly tables (plus the versioned-history tables when the
+// transaction could have minted) and makes a Dolt commit named message from
+// that staged set alone, leaving another writer's uncommitted change to any
+// other table in the working set where it was. A staged table is committed
+// whole, so another writer's uncommitted change to one of those tables rides
+// in this commit, as it does in the DoltStore funnel. With nothing staged, or
+// under a deferred version commit, there is no Dolt commit. It is the uow
+// twin of the DoltStore funnel's post-transaction DOLT_ADD-per-table commit,
+// in the same order — the Dolt commit after the SQL COMMIT, never inside the
+// transaction, where it would be built from the transaction's start snapshot
+// (LatentLabsSpace/NEXUS#92) — and what a mutation that mostly touches
+// dolt_ignored state (a heartbeat re-arm) commits through instead of
+// DOLT_COMMIT('-Am'). An error means the SQL transaction did not commit; a
+// Dolt commit that fails after it is logged, never returned.
+type ScopedCommitter interface {
+	CommitScoped(ctx context.Context, tables []string, message string) error
+}
+
+// commitScoped commits uw through the first ScopedCommitter on its decorator
+// chain. A backend whose unit of work has none (a non-Dolt engine) gets the
+// plain SQL COMMIT: there is no version control to scope.
+func commitScoped(ctx context.Context, uw UnitOfWork, tables []string, message string) error {
+	for u := uw; u != nil; {
+		if scoped, ok := u.(ScopedCommitter); ok {
+			return scoped.CommitScoped(ctx, tables, message)
+		}
+		unwrapper, ok := u.(unitOfWorkUnwrapper)
+		if !ok {
+			break
+		}
+		u = unwrapper.Unwrap()
+	}
+	return uw.Commit(ctx, "")
+}
+
+// TxScopedFunc is the work RunTxScoped runs: its result, and the versioned
+// tables the attempt changed with the commit message naming them. No tables
+// means the attempt wrote only dolt_ignored state (or nothing).
+type TxScopedFunc[T any] func(ctx context.Context, uw UnitOfWork) (result T, tables []string, commitMsg string, err error)
+
+// RunTxScoped is RunTxEphemeral for work that is USUALLY ephemeral but
+// sometimes writes versioned rows it can name: an attempt that reports no
+// tables commits with the plain SQL COMMIT (no working-set scan, no Dolt
+// commit, nothing swept); one that reports tables commits through
+// ScopedCommitter, staging exactly those. Never DOLT_COMMIT('-Am'): that
+// would sweep other writers' uncommitted (batch-mode) changes to other tables
+// into this commit (a staged table is committed whole). Serialization losers
+// are replayed like RunTxEphemeral's.
+func RunTxScoped[T any](ctx context.Context, p UnitOfWorkProvider, work TxScopedFunc[T]) (T, error) {
+	var result T
+	bo := backoff.NewExponentialBackOff()
+	bo.InitialInterval = txRetryInitialInterval
+	bo.MaxElapsedTime = DefaultTxRetryMaxElapsed
+
+	err := backoff.Retry(func() error {
+		uw, err := p.NewUOW(ctx)
+		if err != nil {
+			if isSerializationError(err) {
+				return err
+			}
+			return backoff.Permanent(err)
+		}
+		defer closeAttempt(ctx, uw)
+
+		r, tables, msg, err := work(ctx, uw)
+		if err != nil {
+			if isSerializationError(err) {
+				return err
+			}
+			return backoff.Permanent(err)
+		}
+
+		if len(tables) == 0 || msg == "" {
+			err = uw.Commit(ctx, "")
+		} else {
+			err = commitScoped(ctx, uw, tables, msg)
+		}
+		if err != nil {
 			if isSerializationError(err) {
 				return err
 			}

@@ -25,6 +25,19 @@ func (tables ChangedTables) Add(names ...string) {
 	}
 }
 
+// Sorted returns the recorded tables in name order (nil when empty).
+func (tables ChangedTables) Sorted() []string {
+	if len(tables) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(tables))
+	for table := range tables {
+		out = append(out, table)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // Merge records every table in other.
 func (tables ChangedTables) Merge(other map[string]bool) {
 	for table := range other {
@@ -45,9 +58,10 @@ func UpdateFields(patch publicops.IssuePatch) map[string]interface{} {
 		{patch.Design.Set, "design", patch.Design.Value},
 		{patch.AcceptanceCriteria.Set, "acceptance_criteria", patch.AcceptanceCriteria.Value},
 		{patch.Notes.Set, "notes", patch.Notes.Value},
-		{patch.AppendNotes.Set, "append_notes", patch.AppendNotes.Value},
+		{patch.AppendNotes.Set, OpAppendNotes, patch.AppendNotes.Value},
 		{patch.SpecID.Set, "spec_id", patch.SpecID.Value},
 		{patch.AwaitID.Set, "await_id", patch.AwaitID.Value},
+		{patch.Waiters.Set, "waiters", PatchWaiters(patch.Waiters)},
 		{patch.Status.Set, "status", patch.Status.Value},
 		{patch.Priority.Set, "priority", patch.Priority.Value},
 		{patch.IssueType.Set, "issue_type", patch.IssueType.Value},
@@ -66,6 +80,17 @@ func UpdateFields(patch publicops.IssuePatch) map[string]interface{} {
 	return updates
 }
 
+// PatchWaiters is the storage value a set IssuePatch.Waiters writes: a copy of
+// the list, with a nil list spelled empty so a clear stores the empty JSON
+// array rather than JSON null. Both the issueops and the unit-of-work update
+// bodies write through it.
+func PatchWaiters(field publicops.Field[[]string]) []string {
+	if len(field.Value) == 0 {
+		return []string{}
+	}
+	return append([]string(nil), field.Value...)
+}
+
 // ValidateUpdateRequest checks mutually exclusive guarded-update options and
 // the canonical field values every backend must reject identically. Backends
 // call it before touching the row so an invalid patch cannot half-apply.
@@ -75,6 +100,18 @@ func ValidateUpdateRequest(request publicops.UpdateRequest) error {
 	}
 	if request.ForceAssigneeTransfer && (request.Claim || !request.Patch.Assignee.Set || request.ExpectedAssignee != nil) {
 		return fmt.Errorf("%w: invalid forced assignee transfer", storage.ErrValidation)
+	}
+	if request.ForceNotesOverwrite && !request.Patch.Notes.Set {
+		return fmt.Errorf("%w: invalid forced notes overwrite", storage.ErrValidation)
+	}
+	// Checked HERE, ahead of the notes-overwrite fence in ExecuteUpdate: a
+	// patch setting both Notes and AppendNotes is an invalid REQUEST, not a
+	// refused overwrite, and must report ErrValidation even when the notes
+	// fence would independently refuse the same Notes value. The uow backend
+	// reaches this same check through validateUpdateRequest, which both of
+	// its update paths run before their own fence calls, for the same reason.
+	if request.Patch.Notes.Set && request.Patch.AppendNotes.Set {
+		return fmt.Errorf("%w: cannot combine a notes replacement with %s", storage.ErrValidation, OpAppendNotes)
 	}
 	patch := request.Patch
 	if patch.Title.Set {
@@ -91,6 +128,9 @@ func ValidateUpdateRequest(request publicops.UpdateRequest) error {
 		if err := types.ValidateIssueEstimatedMinutes(patch.EstimatedMinutes.Value); err != nil {
 			return fmt.Errorf("%w: update estimated_minutes: %w", storage.ErrValidation, err)
 		}
+	}
+	if err := ValidateGatePatch(patch); err != nil {
+		return err
 	}
 	if patch.Persistence.Set && !patch.Persistence.Value.IsValid() {
 		return fmt.Errorf("%w: invalid persistence mode %q", storage.ErrValidation, patch.Persistence.Value)
@@ -183,6 +223,63 @@ func AuthorizeAssigneeTransfer(ctx context.Context, tx DBTX, before *types.Issue
 		return err
 	}
 	return AuthorizeAssigneeTransferWithPools(before, request, pools)
+}
+
+// AuthorizeNotesOverwrite protects existing non-empty notes from an unforced
+// replacement. It refuses when the patch sets Notes to a
+// publicops.NotesReplacement of before.Notes (which exempts an explicit
+// clear) and request.ForceNotesOverwrite is false.
+//
+// It applies REGARDLESS of request.ExpectedAssignee, deliberately: unlike the
+// assignee fence, there is no compare-and-set that authorizes a notes
+// overwrite the way a matching ExpectedAssignee authorizes an assignee
+// transfer, so pairing a notes edit with an assignee guard does not exempt it.
+// A STALE guard still outranks it, though — both backends check the
+// compare-and-set preconditions before calling here, so a mismatch reports as
+// the mismatch, never as this refusal.
+//
+// Enforcement boundary: this fences the issueops-contract surfaces
+// (ExecuteUpdate, the uow update and batch legs). The map-based
+// UpdateIssueInTx funnel does not consult it, and it has several
+// notes-replacing callers, not one. They fall into classes that are all
+// sighted or derived rather than blind: editor pre-fill that starts from the
+// current notes (`bd edit`), read-combine-write that appends to them
+// (`bd note`, `bd defer --reason`), mechanical ID rewrites of existing text
+// (`bd rename`, delete-tombstoning), and explicit clears (`bd compact`). Each
+// derives its new value from the current notes, so none is the blind clobber
+// this fence exists to stop. `bd import` is exempt BY DESIGN (GH#6190), along with every
+// other live-state fence: its contract is row replacement, guarded by its own
+// staleness check (only strictly-newer rows rewrite local state; deliberate
+// overwrites of newer state require --allow-stale) and reported field-by-field
+// in updated_issues — the bulk-path analog of this fence's per-field --force.
+func AuthorizeNotesOverwrite(before *types.Issue, request publicops.UpdateRequest) error {
+	if !request.Patch.Notes.Set || !publicops.NotesReplacement(before.Notes, request.Patch.Notes.Value) || request.ForceNotesOverwrite {
+		return nil
+	}
+	return fmt.Errorf("%w: issue %s", storage.ErrNotesOverwrite, before.ID)
+}
+
+// AuthorizeTemplateUpdate refuses an update of a template with
+// *publicops.TemplateReadOnlyError. Templates are read-only — work comes out of
+// one by pouring it — so every update naming one refuses, whatever its patch
+// and whatever force flags it carries: no force flag waives it (only the
+// caller's explicit AllowTemplate does).
+//
+// It is the guard `bd update` (and assign, and the proxied mutations) used to
+// apply as a pre-read in cmd/bd, which left bd serve, BatchApplier update items
+// and library callers writing to templates bd refused. It sits beside the
+// other update fences and is called from the same three places — ExecuteUpdate,
+// and the unit-of-work update and batch legs — over the same-transaction
+// pre-image, after the compare-and-set preconditions, so a stale guard still
+// reports as the mismatch.
+//
+// request.AllowTemplate is the caller saying it edits a template deliberately
+// (bd label, bd set-state); the guard stands down for that request only.
+func AuthorizeTemplateUpdate(before *types.Issue, request publicops.UpdateRequest) error {
+	if before != nil && before.IsTemplate && !request.AllowTemplate {
+		return &publicops.TemplateReadOnlyError{IssueID: before.ID}
+	}
+	return nil
 }
 
 // ApplyMetadataPatch returns the canonical metadata value and whether it changes.

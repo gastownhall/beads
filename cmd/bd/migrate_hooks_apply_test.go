@@ -2,7 +2,6 @@ package main
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -333,7 +332,7 @@ func setupHookMigrationRepo(t *testing.T) (repoDir string, hooksDir string) {
 	repoDir = newGitRepo(t)
 
 	runInDir(t, repoDir, func() {
-		cmd := exec.Command("git", "config", "core.hooksPath", ".git/hooks")
+		cmd := gitCommand("config", "core.hooksPath", ".git/hooks")
 		if err := cmd.Run(); err != nil {
 			t.Fatalf("failed to set core.hooksPath: %v", err)
 		}
