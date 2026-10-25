@@ -317,3 +317,28 @@ func TestCollectResetItems_KeepsSectionedPrepareCommitMsg(t *testing.T) {
 		t.Errorf("preserved entry for %s says %q; it should say the hook is kept", sectioned, keptDesc)
 	}
 }
+
+// A prepare-commit-msg that mentions beads and calls bd, but that bd never
+// wrote, is neither ours to remove nor ours to mention.
+func TestCollectResetItems_LeavesForeignPrepareCommitMsgUnmentioned(t *testing.T) {
+	gitCommonDir := t.TempDir()
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	hooksDir := filepath.Join(gitCommonDir, "hooks")
+
+	foreign := writeHook(t, hooksDir, "prepare-commit-msg", `#!/usr/bin/env bash
+# prepare-commit-msg — team hook. Adds the ticket prefix, then lets beads
+# add its trailers. bd did not write this file and must not remove it.
+set -euo pipefail
+
+./scripts/add-ticket-prefix "$1"
+bd hooks run prepare-commit-msg "$@"
+`)
+
+	items, preserved := collectResetItems(gitCommonDir, beadsDir)
+
+	for _, it := range append(items, preserved...) {
+		if it.Path == foreign {
+			t.Errorf("hook %s carries no bd marker; it is neither ours to remove nor ours to mention (%q)", foreign, it.Description)
+		}
+	}
+}
