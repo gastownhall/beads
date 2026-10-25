@@ -390,6 +390,14 @@ func TestEmbeddedDepBTreeAndCycles(t *testing.T) {
 		if !strings.Contains(out, "flowchart") && !strings.Contains(out, "graph") {
 			t.Errorf("expected mermaid flowchart/graph syntax: %s", out)
 		}
+		// Mixed-case pins case-folding at the runDepTree dispatch site.
+		// TestDepTreeFormatMermaidCaseInsensitive calls isMermaidTreeFormat
+		// directly and would stay green if the call site went back to
+		// formatStr == "mermaid" (the PR #6646 bug).
+		mixed := bdDep(t, bd, dir, "tree", epic.ID, "--format", "Mermaid")
+		if !strings.Contains(mixed, "flowchart") && !strings.Contains(mixed, "graph") {
+			t.Errorf("expected mermaid flowchart/graph syntax for --format Mermaid: %s", mixed)
+		}
 	})
 
 	t.Run("tree_json_output", func(t *testing.T) {

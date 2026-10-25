@@ -25,6 +25,7 @@ See also: `bd help init-safety`, and
 - [init-force-refused — `bd init --force`/`--reinit-local` refused because origin has Dolt history](#init-force-refused)
 - [init-token-missing — a destructive re-init refused because `--destroy-token` is missing or wrong](#init-token-missing)
 - [init-local-exists — `bd init --reinit-local` refused because local data already exists](#init-local-exists)
+- [init-home-refused — `bd init` refused because the working directory is your home directory](#init-home-refused)
 - [init-missing-server-db — `bd init` refused because the configured server-side database is missing](#init-missing-server-db)
 - [pk-fork-refused — `bd dolt pull`/`push` refused because a table has different primary keys in its common ancestor](#pk-fork-refused)
 - [re-clone-gotchas — two gotchas hit during manual re-clone recovery: damaged stores left inside `data_dir`, and a fresh clone missing clone-local tables](#re-clone-gotchas)
@@ -208,6 +209,107 @@ enough to create a restorable backup before reinitializing.
 If you did NOT expect `bd init` to be the right command here, run
 `bd doctor` first — you may be looking at a server config issue that a
 re-init won't fix.
+
+---
+
+## init-home-refused
+
+**Exit code:** `15` (`ExitHomeDirRefused`)
+
+**Symptom**
+
+```
+bd init refuses: /Users/you is your home directory, and it is not itself a git repository.
+  Why: init sets up the directory it runs in as a project: it runs
+       'git init' there unless it finds a repository, and installs agent
+       files ...
+```
+
+**Why this happens**
+
+`bd init` sets up the directory it runs in as a project: it creates a git
+repository there unless it finds one, then writes agent scaffolding next to it:
+`CLAUDE.md`, `AGENTS.md`, `.gitignore`, `.claude/`, `.codex/`, `.cursor/`,
+`.agents/`. Run in your home directory, that turns everything you own into one
+git working tree, and most of those agent files are your agents' user-wide
+settings there: `~/.claude/settings.json` is the file Claude Code reads in every
+project, so bd's hooks would run everywhere. A project is virtually never the
+home directory itself, so `bd init` refuses rather than ask.
+
+The refusal is deliberately narrow. It fires only when **all** of these hold:
+
+- the working directory is exactly your home directory (a subdirectory of home
+  is an ordinary project and is never refused);
+- your home directory is not itself a git repository — if you deliberately
+  track your dotfiles in a repository at your home directory, nothing changes.
+  A home that only sits inside some enclosing repository, or a `GIT_DIR`
+  inherited from the environment, does not count, because init would still
+  write its files into your home;
+- you did not name a beads directory yourself by exporting `BEADS_DIR`. A
+  `BEADS_DIR` that bd reads from a `.beads/.env` it discovered does not count:
+  from your home directory that file is the legacy `~/.beads/.env`.
+
+`--force` and `--reinit-local` do **not** override it. They bypass the local
+data-safety guard, which is a different question from "is this the right
+directory".
+
+**Recovery paths**
+
+Pick the one that matches your intent.
+
+*You meant to initialize a project.* This is almost always the case — the
+working directory was simply not what you thought:
+
+```bash
+cd ~/some-project
+bd init
+```
+
+*You want a beads workspace in a directory you name, without setting up your
+home directory as a project.* Name the beads directory explicitly. Its parent
+directory has to exist first:
+
+```bash
+mkdir -p ~/workspaces/notes
+BEADS_DIR=~/workspaces/notes/.beads bd init
+```
+
+Note this is a **different** init, not the refused one with the guard lifted.
+An explicit `BEADS_DIR` skips the `git init`, and from your home directory
+`bd init` also skips the agent files and the `.gitignore` it would otherwise
+write there (it prints a note saying so). It also treats your home directory
+as outside every repository. If your home sits inside one, such as a dotfiles
+or monorepo checkout above it, init installs no hooks in it, records no
+`beads.role` there, takes no Dolt remote from its origin, and makes no
+bootstrap commit to it. Flags that ask for a change there still make it:
+`--stealth` and `--setup-exclude` add their patterns to that repository's
+`.git/info/exclude`, the interactive `--contributor` wizard records
+`beads.role` in it, and the interactive `--team` wizard can create a sync
+branch in it. Your home directory is not set up as
+a project; the workspace lives in `~/workspaces/notes`. That is the point, but
+it also means you get no agent integration. To install one for every project
+on purpose, use the global form of `bd setup`, for example
+`bd setup claude --global`.
+
+*You really do want your home directory tracked by git and scaffolded.* Make it
+a git repository first, deliberately, and the guard stands aside:
+
+```bash
+cd ~
+git init
+bd init
+```
+
+**How to detect this in a script**
+
+The refusal exits `15` and prints to stderr, so branch on the code rather than
+the text:
+
+```bash
+bd init || case $? in
+  15) echo "wrong directory — cd into the project first" ;;
+esac
+```
 
 ---
 

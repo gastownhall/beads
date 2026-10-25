@@ -459,6 +459,7 @@ func ParseTypesConfigValue(value string) []string {
 // path must keep the projection in step with the string value or stale
 // table rows win forever. Returns the name of the synced table ("" when
 // the key has no projection) so transactional callers can mark it dirty.
+// ConfigProjectionTables must list every table it can return.
 func SyncConfigTables(ctx context.Context, tx DBTX, key, value string) (string, error) {
 	switch key {
 	case "status.custom":
@@ -473,6 +474,14 @@ func SyncConfigTables(ctx context.Context, tx DBTX, key, value string) (string, 
 		return "custom_types", nil
 	}
 	return "", nil
+}
+
+// ConfigProjectionTables lists every table SyncConfigTables can write, for a
+// caller that commits config writes without knowing which keys they touched:
+// a config row committed without its projection is the split the projection
+// exists to prevent.
+func ConfigProjectionTables() []string {
+	return []string{"custom_statuses", "custom_types"}
 }
 
 // ResolveInfraTypesInTx reads infrastructure types from the database,

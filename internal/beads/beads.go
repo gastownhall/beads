@@ -547,8 +547,10 @@ func findBeadsDirUpward(start string) string {
 // Embedded Dolt checks both embeddeddolt/ and the legacy dolt/ path. Returns
 // empty string if no database is configured or found.
 func findDatabaseInBeadsDir(beadsDir string, _ bool) string {
-	// Check for metadata.json first (single source of truth)
-	cfg, err := configfile.Load(beadsDir)
+	// Check for metadata.json first (single source of truth). Discovery reads
+	// it without migrating a legacy config.json: callers locate a workspace
+	// here before admission has decided whether this build may touch it.
+	cfg, err := configfile.LoadForDiscovery(beadsDir)
 	if err != nil {
 		// A present but unreadable/invalid metadata file is authoritative. Do
 		// not bypass it by discovering a leftover local Dolt directory; callers

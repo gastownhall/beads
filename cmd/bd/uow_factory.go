@@ -227,6 +227,18 @@ func proxiedProviderOptions(opts []uow.ProviderOption) []uow.ProviderOption {
 	return append(append([]uow.ProviderOption{}, opts...), uow.WithProxiedServerMode())
 }
 
+// serverLogProviderOptions is opts plus uow.WithServerLogRotation() when the
+// server log is bd's default one, built on a fresh slice like
+// proxiedProviderOptions. A custom log (BEADS_PROXIED_SERVER_LOG or the
+// sidecar's log path) is the operator's: bd neither rotates it at proxy start
+// nor retires it on migration (proxiedLogAssets), so both follow isCustomLog.
+func serverLogProviderOptions(opts []uow.ProviderOption, isCustomLog bool) []uow.ProviderOption {
+	if isCustomLog {
+		return opts
+	}
+	return append(append([]uow.ProviderOption{}, opts...), uow.WithServerLogRotation())
+}
+
 // newSQLServerUOWProvider is the single funnel every unit-of-work provider bd
 // builds passes through — the proxied CLI path AND `bd serve`'s own provider
 // for server-mode workspaces. Activation is applied by the two constructors it
@@ -463,6 +475,7 @@ func resolveServerModeUOWTopologyWithTransportResolver(ctx context.Context, bead
 // the paths it resolves (root, log) are the same ones proxied mode uses because
 // both modes root their server at the same directory.
 func newExternalProxiedServerUOWProvider(ctx context.Context, beadsDir string, topology sqlServerUOWTopology, opts ...uow.ProviderOption) (p uow.UnitOfWorkProvider, err error) {
+	defer func() { p, err = activateVersionedHistoryProvider(ctx, p, err) }()
 	defer func() { p, err = activateEventsJournalProvider(ctx, beadsDir, p, err) }()
 	rootPath, err := resolveProxiedServerRootPath(beadsDir)
 	if err != nil {
@@ -481,6 +494,7 @@ func newExternalProxiedServerUOWProvider(ctx context.Context, beadsDir string, t
 			return nil, fmt.Errorf("newExternalProxiedServerUOWProvider: proxied server log (from env or %s): %w", configfile.ProxiedServerClientInfoFileName, err)
 		}
 	}
+	opts = serverLogProviderOptions(opts, isCustomLog)
 
 	if err := os.MkdirAll(rootPath, config.BeadsDirPerm); err != nil {
 		return nil, fmt.Errorf("newExternalProxiedServerUOWProvider: mkdir %s: %w", rootPath, err)
@@ -503,6 +517,7 @@ func newExternalProxiedServerUOWProvider(ctx context.Context, beadsDir string, t
 }
 
 func newManagedProxiedServerUOWProvider(ctx context.Context, beadsDir string, topology sqlServerUOWTopology, opts ...uow.ProviderOption) (p uow.UnitOfWorkProvider, err error) {
+	defer func() { p, err = activateVersionedHistoryProvider(ctx, p, err) }()
 	defer func() { p, err = activateEventsJournalProvider(ctx, beadsDir, p, err) }()
 	// Resolve and hardened-probe the external dolt binary before spawning
 	// it: an env/sidecar override that is explicitly named but broken
@@ -543,6 +558,7 @@ func newManagedProxiedServerUOWProvider(ctx context.Context, beadsDir string, to
 			return nil, fmt.Errorf("newProxiedServerUOWProvider: proxied server log (from env or %s): %w", configfile.ProxiedServerClientInfoFileName, err)
 		}
 	}
+	opts = serverLogProviderOptions(opts, isCustomLog)
 
 	return uow.NewDoltServerUOWProvider(
 		ctx,

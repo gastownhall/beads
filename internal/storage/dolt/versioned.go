@@ -33,6 +33,43 @@ func (s *DoltStore) History(ctx context.Context, issueID string) ([]*storage.His
 	return result, err
 }
 
+// ListVersions implements storage.VersionLister over issue_versions.
+//
+// Plain withReadTx, not the long-timeout variant History needs: this reads an
+// ordinary user table by its composite primary key prefix, not the
+// dolt_history_issues scan whose cost History has to budget for.
+func (s *DoltStore) ListVersions(ctx context.Context, issueID string) ([]storage.IssueVersion, error) {
+	var result []storage.IssueVersion
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.ListVersionsInTx(ctx, tx, issueID)
+		if err != nil {
+			return wrapQueryError("list issue versions", err)
+		}
+		return nil
+	})
+	return result, err
+}
+
+// ParticipatingIssueIDs implements storage.HistoryParticipation: which of ids
+// name an issues-table row whose participation_generation is set. Plain
+// withReadTx, as ListVersions: it reads an ordinary user table by its primary
+// key.
+func (s *DoltStore) ParticipatingIssueIDs(ctx context.Context, ids []string) (map[string]struct{}, error) {
+	var participating map[string]struct{}
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		participating, err = issueops.ParticipatingIssueIDsInTx(ctx, tx, ids)
+		if err != nil {
+			return wrapQueryError("read history participation", err)
+		}
+		return nil
+	})
+	return participating, err
+}
+
+var _ storage.HistoryParticipation = (*DoltStore)(nil)
+
 // HistoricalIssueIDs reports which of ids appear in HEAD's committed history
 // of the issues table. Implements storage.HistoryPresence.
 //
@@ -278,3 +315,9 @@ func isSafeCommitRef(s string) bool {
 	}
 	return true
 }
+
+// Compile-time proof that this leg serves versions. It lives here rather than
+// in package storage because storage cannot import the legs. Dropping
+// ListVersions is then a build failure rather than a silent demotion to
+// "this backend cannot serve version history" at runtime.
+var _ storage.VersionLister = (*DoltStore)(nil)

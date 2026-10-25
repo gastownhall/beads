@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"testing"
 	"time"
@@ -30,14 +31,22 @@ type fakeStore struct {
 	batch       *fakeBatchCloser
 	enforced    bool
 	enforcedErr error
+	// liveProbes records storage.LivePolicyProbe for every policy probe, in
+	// order.
+	liveProbes []bool
 
 	excludeIDsUnsupported bool
 	// defaultPage, when positive, is how many rows a zero-Limit ready listing
 	// returns, while GetReadyWorkWithCountsAndTotal's total still counts the
-	// whole set: httpclient.Store's shape, whose wire omits a zero limit so
-	// the server answers with its default page. Zero keeps the SQL stores'
-	// meaning, every row.
+	// whole set: the shape httpclient.Store had while its wire omitted a zero
+	// limit and the server answered with its default page. That store now
+	// bounds an unlimited read itself, but the decorator still judges a window
+	// by the rows that came back, which this keeps pinned. Zero keeps the SQL
+	// stores' meaning, every row.
 	defaultPage int
+	// readyFilters records every GetReadyWorkWithCountsAndTotal filter, in
+	// order.
+	readyFilters []types.WorkFilter
 }
 
 func (f *fakeStore) IssueLifecycle() (publicops.Lifecycle, error) { return f.lifecycle, nil }
@@ -47,7 +56,8 @@ func (f *fakeStore) IssueLifecycle() (publicops.Lifecycle, error) { return f.lif
 // every existing test's raw store on today's client-side-enforcement path
 // unchanged; enforced:true is set explicitly only by the test below that
 // pins loadBlockingState's skip branch.
-func (f *fakeStore) ServerEnforcesExternalDependencyPolicy(_ context.Context) (bool, error) {
+func (f *fakeStore) ServerEnforcesExternalDependencyPolicy(ctx context.Context) (bool, error) {
+	f.liveProbes = append(f.liveProbes, storage.LivePolicyProbe(ctx))
 	return f.enforced, f.enforcedErr
 }
 
@@ -124,6 +134,7 @@ func (f *fakeStore) GetReadyWorkWithCounts(ctx context.Context, filter types.Wor
 }
 
 func (f *fakeStore) GetReadyWorkWithCountsAndTotal(ctx context.Context, filter types.WorkFilter) ([]*types.IssueWithCounts, int, error) {
+	f.readyFilters = append(f.readyFilters, filter)
 	items, err := f.GetReadyWorkWithCounts(ctx, filter)
 	if err != nil {
 		return nil, 0, err
@@ -149,6 +160,27 @@ func (f *fakeStore) IsBlockedBatch(_ context.Context, ids []string) (map[string]
 		result[id] = f.isBlocked
 	}
 	return result, nil
+}
+
+// BlockingAnnotator serves the decoration a local backend derives for these
+// rows: no local blockers, and when asked, isBlocked as each row's stored
+// flag.
+func (f *fakeStore) BlockingAnnotator() (publicops.BlockingAnnotator, error) {
+	return localAnnotator{f}, nil
+}
+
+type localAnnotator struct{ f *fakeStore }
+
+func (a localAnnotator) AnnotateBlocking(ctx context.Context, req publicops.BlockingRequest) (publicops.BlockingResult, error) {
+	items := make([]publicops.IssueBlocking, 0, len(req.IDs))
+	for _, id := range req.IDs {
+		item := publicops.IssueBlocking{ID: id}
+		if issue, _ := a.f.GetIssue(ctx, id); issue != nil && req.IncludeIsBlocked {
+			item.IsBlocked = boolPtr(a.f.isBlocked)
+		}
+		items = append(items, item)
+	}
+	return publicops.BlockingResult{Items: items}, nil
 }
 
 func (f *fakeStore) CloseIssueChecked(ctx context.Context, id, _ string, _ storage.CloseIssueOptions) (storage.CloseIssueResult, error) {
@@ -606,13 +638,64 @@ func TestReadyTotalsWhenStoreCannotExpressExcludeIDs(t *testing.T) {
 	}
 }
 
+// TestCountReadyWorkFallbackFetchesABoundedPage pins what CountReadyWork asks
+// of a store with no ReadyWorkCounter: a one-row Lite page whose total is the
+// store's own count, never a zero Limit. Over http a zero Limit is an
+// unlimited read, which would download every ready row to report one number
+// and be refused past BEADS_HTTP_UNLIMITED_READ_CAP.
+func TestCountReadyWorkFallbackFetchesABoundedPage(t *testing.T) {
+	a, b, c := issue("be-a"), issue("be-b"), issue("be-c")
+	for _, tc := range []struct {
+		name string
+		deps map[string][]*types.Dependency
+		want int
+		// wantFirst is the first fetch's Limit: the one-row page, bumped by
+		// every externally blocked id, since this store drops them itself.
+		wantFirst int
+	}{
+		{name: "nothing externally blocked", want: 3, wantFirst: 1},
+		{
+			name: "one issue externally blocked",
+			deps: map[string][]*types.Dependency{
+				a.ID: {externalDep(a.ID, "external:remote:payments", types.DepBlocks)},
+			},
+			want:      2,
+			wantFirst: 2,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := &fakeStore{ready: []*types.Issue{a, b, c}, deps: tc.deps, excludeIDsUnsupported: true}
+			got, err := testStore(raw, &fakeStore{}, true).CountReadyWork(t.Context(), types.WorkFilter{})
+			if err != nil {
+				t.Fatalf("CountReadyWork: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("ready count = %d, want %d", got, tc.want)
+			}
+			if len(raw.readyFilters) == 0 {
+				t.Fatal("CountReadyWork fetched nothing; the fallback is not on the path")
+			}
+			if first := raw.readyFilters[0]; first.Limit != tc.wantFirst || !first.Lite {
+				t.Errorf("first fetch: Limit %d, Lite %v; want Limit %d, Lite true", first.Limit, first.Lite, tc.wantFirst)
+			}
+			for i, f := range raw.readyFilters {
+				if f.Limit <= 0 {
+					t.Errorf("fetch %d asked for every row (Limit %d)", i, f.Limit)
+				}
+			}
+		})
+	}
+}
+
 // TestReadyTotalsWhenAnUnlimitedFetchComesBackAsOnePage pins the shape
-// httpclient.Store has and an every-row Limit==0 fake hid: the wire omits a
-// zero Limit, the server answers with its default page, and the total still
-// counts the whole ready set. CountReadyWork, text-mode bd ready's total,
-// always fetches with Limit 0, so be-z (ready, externally blocked, and past
-// that page) once stayed in its total because the decorator took a zero Limit
-// for a window that held every row.
+// httpclient.Store once had and an every-row Limit==0 fake hid: the wire
+// omitted a zero Limit, the server answered with its default page, and the
+// total still counted the whole ready set. CountReadyWork, text-mode bd
+// ready's total, fetched with Limit 0 then, so be-z (ready, externally
+// blocked, and past that page) stayed in its total because the decorator took
+// a zero Limit for a window that held every row. The count now asks for a
+// one-row page and the JSON total below still asks with Limit 0: both must
+// leave be-z out.
 func TestReadyTotalsWhenAnUnlimitedFetchComesBackAsOnePage(t *testing.T) {
 	const defaultPage = 100 // workapi.DefaultReadyLimit, the server's page for an omitted limit
 	ready := make([]*types.Issue, 0, defaultPage+2)
@@ -951,6 +1034,29 @@ func TestIsBlockedBatchIncludesUnsatisfiedExternalRef(t *testing.T) {
 	}
 }
 
+// TestBlockingAnnotatorFlagsUnsatisfiedExternalRef: the annotation's
+// is_blocked flag keeps IsBlockedBatch's invariant, so a row the stored column
+// calls unblocked reads blocked while an external ref still blocks it.
+func TestBlockingAnnotatorFlagsUnsatisfiedExternalRef(t *testing.T) {
+	a, b := issue("be-a"), issue("be-b")
+	ref := "external:remote:payments"
+	raw := &fakeStore{ready: []*types.Issue{a, b}, deps: map[string][]*types.Dependency{
+		a.ID: {externalDep(a.ID, ref, types.DepBlocks)},
+	}}
+	annotator, err := testStore(raw, &fakeStore{}, true).BlockingAnnotator()
+	if err != nil {
+		t.Fatalf("BlockingAnnotator: %v", err)
+	}
+
+	result, err := annotator.AnnotateBlocking(t.Context(), publicops.BlockingRequest{IDs: []string{a.ID, b.ID}, IncludeIsBlocked: true})
+	if err != nil {
+		t.Fatalf("AnnotateBlocking: %v", err)
+	}
+	if got, want := blockedFlags(result), map[string]string{a.ID: "true", b.ID: "false"}; !maps.Equal(got, want) {
+		t.Fatalf("AnnotateBlocking is_blocked = %v, want %v", got, want)
+	}
+}
+
 func TestCloseIssueCheckedRefusesUnsatisfiedExternalRef(t *testing.T) {
 	a := issue("be-a")
 	ref := "external:remote:payments"
@@ -1060,5 +1166,71 @@ func assertExternalCloseBlockers(t *testing.T, err error, issueID, ref string) {
 	}
 	if wantText := "cannot close blocked issue: " + issueID + " is blocked by [" + ref + "]"; err.Error() != wantText {
 		t.Errorf("refusal = %q, want %q", err.Error(), wantText)
+	}
+}
+
+// TestIsBlockedBatchHonorsShippedExternalRef (bd-yewju3 store half): as
+// GetReadyWork does, the flag leaves a row unblocked when its external ref's
+// project has shipped it.
+func TestIsBlockedBatchHonorsShippedExternalRef(t *testing.T) {
+	a := issue("be-a")
+	raw := &fakeStore{ready: []*types.Issue{a}, deps: map[string][]*types.Dependency{
+		a.ID: {externalDep(a.ID, "external:remote:payments", types.DepBlocks)},
+	}}
+	foreign := &fakeStore{labels: map[string][]*types.Issue{
+		"provides:payments": {{ID: "remote-done", Status: types.StatusClosed}},
+	}}
+
+	got, err := testStore(raw, foreign, true).IsBlockedBatch(t.Context(), []string{a.ID})
+	if err != nil {
+		t.Fatalf("IsBlockedBatch: %v", err)
+	}
+	if want := map[string]bool{a.ID: false}; !maps.Equal(got, want) {
+		t.Fatalf("IsBlockedBatch = %v, want %v", got, want)
+	}
+}
+
+// TestBlockingAnnotatorLeavesShippedExternalRefUnblocked: the store arm's
+// served flag reads IsBlocked, so a shipped ref leaves the row unblocked.
+func TestBlockingAnnotatorLeavesShippedExternalRefUnblocked(t *testing.T) {
+	a := issue("be-a")
+	raw := &fakeStore{ready: []*types.Issue{a}, deps: map[string][]*types.Dependency{
+		a.ID: {externalDep(a.ID, "external:remote:payments", types.DepBlocks)},
+	}}
+	foreign := &fakeStore{labels: map[string][]*types.Issue{
+		"provides:payments": {{ID: "remote-done", Status: types.StatusClosed}},
+	}}
+	annotator, err := testStore(raw, foreign, true).BlockingAnnotator()
+	if err != nil {
+		t.Fatalf("BlockingAnnotator: %v", err)
+	}
+
+	result, err := annotator.AnnotateBlocking(t.Context(), publicops.BlockingRequest{IDs: []string{a.ID}, IncludeIsBlocked: true})
+	if err != nil {
+		t.Fatalf("AnnotateBlocking: %v", err)
+	}
+	if got, want := blockedFlags(result), map[string]string{a.ID: "false"}; !maps.Equal(got, want) {
+		t.Fatalf("AnnotateBlocking is_blocked = %v, want %v", got, want)
+	}
+}
+
+// TestBlockingAnnotatorAddsNoFlagUnasked: a request that did not ask for
+// is_blocked answers exactly as before, even for an externally blocked row.
+func TestBlockingAnnotatorAddsNoFlagUnasked(t *testing.T) {
+	a := issue("be-a")
+	raw := &fakeStore{ready: []*types.Issue{a}, deps: map[string][]*types.Dependency{
+		a.ID: {externalDep(a.ID, "external:remote:payments", types.DepBlocks)},
+	}}
+	annotator, err := testStore(raw, &fakeStore{}, true).BlockingAnnotator()
+	if err != nil {
+		t.Fatalf("BlockingAnnotator: %v", err)
+	}
+
+	result, err := annotator.AnnotateBlocking(t.Context(), publicops.BlockingRequest{IDs: []string{a.ID}})
+	if err != nil {
+		t.Fatalf("AnnotateBlocking: %v", err)
+	}
+	if got, want := blockedFlags(result), map[string]string{a.ID: "absent"}; !maps.Equal(got, want) {
+		t.Fatalf("AnnotateBlocking is_blocked = %v, want %v", got, want)
 	}
 }

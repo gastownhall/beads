@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/issueops"
 )
 
 var exportCmd = &cobra.Command{
@@ -100,6 +101,11 @@ func runExport(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	if storeIsRemoteBackend(store) {
+		// A remote backend serves no raw search or bulk relation read; its
+		// export is composed from served role reads (issueops.ReadExport).
+		return runExportFromSource(ctx, &roleExportSource{})
+	}
 	return runExportFromSource(ctx, storeExportSource{})
 }
 
@@ -129,49 +135,9 @@ func runExportFromSource(ctx context.Context, src exportSource) error {
 		w = os.Stdout
 	}
 
-	// Build filter for issues table. Export all statuses by default.
-	// Opt out of BEADS_MAX_ROWS (designer §4.1) — export is a data-integrity
-	// path and must never abort partway through an export run.
-	filter := types.IssueFilter{
-		Limit:         0,
-		MaxRows:       0,
-		MaxRowsSource: "",
-	}
-
-	// Exclude infra types by default (agents, roles, messages).
-	if !exportAll && !exportIncludeInfra {
-		var infraTypes []string
-		infraSet := src.GetInfraTypes(ctx)
-		if len(infraSet) > 0 {
-			for t := range infraSet {
-				infraTypes = append(infraTypes, t)
-			}
-		}
-		if len(infraTypes) == 0 {
-			infraTypes = domain.DefaultInfraTypes()
-		}
-		for _, t := range infraTypes {
-			filter.ExcludeTypes = append(filter.ExcludeTypes, types.IssueType(t))
-		}
-	}
-
-	// Exclude templates by default
-	if !exportAll {
-		isTemplate := false
-		filter.IsTemplate = &isTemplate
-	}
-
-	// Exclude ephemeral wisps by default — they are private/transient and
-	// must not reach git history or external integrations (GH#3649).
-	// --all overrides to include everything.
-	if !exportAll {
-		persistentOnly := false
-		filter.Ephemeral = &persistentOnly
-	}
-
-	issues, err := src.SearchIssues(ctx, "", filter)
+	issues, err := src.ExportIssues(ctx, issueops.ExportRequest{All: exportAll, IncludeInfra: exportIncludeInfra})
 	if err != nil {
-		return HandleErrorRespectJSON("failed to search issues: %v", err)
+		return HandleErrorRespectJSON("failed to read the export set: %v", err)
 	}
 
 	// Scrub test/pollution records if requested
@@ -271,26 +237,21 @@ func runExportFromSource(ctx context.Context, src exportSource) error {
 	// Memories may contain sensitive agent context and are excluded by default.
 	memoryCount := 0
 	if (exportIncludeMemories || exportAll) && !exportNoMemories {
-		allConfig, err := src.GetAllConfig(ctx)
+		memories, err := src.ExportMemories(ctx)
 		if err != nil {
-			return HandleErrorRespectJSON("failed to read config for memories: %v", err)
+			return HandleErrorRespectJSON("failed to read memories: %v", err)
 		}
-		fullPrefix := kvPrefix + memoryPrefix
 		// Sort keys for deterministic output order (GH#3474).
-		var memKeys []string
-		for k := range allConfig {
-			if strings.HasPrefix(k, fullPrefix) {
-				memKeys = append(memKeys, k)
-			}
+		memKeys := make([]string, 0, len(memories))
+		for userKey := range memories {
+			memKeys = append(memKeys, userKey)
 		}
 		sort.Strings(memKeys)
-		for _, k := range memKeys {
-			v := allConfig[k]
-			userKey := strings.TrimPrefix(k, fullPrefix)
+		for _, userKey := range memKeys {
 			record := map[string]string{
 				"_type": "memory",
 				"key":   userKey,
-				"value": v,
+				"value": memories[userKey],
 			}
 			data, err := json.Marshal(record)
 			if err != nil {
@@ -326,6 +287,54 @@ func runExportFromSource(ctx context.Context, src exportSource) error {
 	}
 
 	return nil
+}
+
+// exportIssueFilter is the storage filter the store-shaped export sources
+// search with: every status, infra types excluded unless --all or
+// --include-infra, templates and true wisps excluded unless --all. The
+// role-backed source asks the same question through issueops.ReadExport.
+func exportIssueFilter(ctx context.Context, src exportSource, req issueops.ExportRequest) types.IssueFilter {
+	// Build filter for issues table. Export all statuses by default.
+	// Opt out of BEADS_MAX_ROWS (designer §4.1) — export is a data-integrity
+	// path and must never abort partway through an export run.
+	filter := types.IssueFilter{
+		Limit:         0,
+		MaxRows:       0,
+		MaxRowsSource: "",
+	}
+
+	// Exclude infra types by default (agents, roles, messages).
+	if !req.All && !req.IncludeInfra {
+		var infraTypes []string
+		infraSet := src.GetInfraTypes(ctx)
+		if len(infraSet) > 0 {
+			for t := range infraSet {
+				infraTypes = append(infraTypes, t)
+			}
+		}
+		if len(infraTypes) == 0 {
+			infraTypes = domain.DefaultInfraTypes()
+		}
+		for _, t := range infraTypes {
+			filter.ExcludeTypes = append(filter.ExcludeTypes, types.IssueType(t))
+		}
+	}
+
+	// Exclude templates by default
+	if !req.All {
+		isTemplate := false
+		filter.IsTemplate = &isTemplate
+	}
+
+	// Exclude ephemeral wisps by default — they are private/transient and
+	// must not reach git history or external integrations (GH#3649).
+	// --all overrides to include everything.
+	if !req.All {
+		persistentOnly := false
+		filter.Ephemeral = &persistentOnly
+	}
+
+	return filter
 }
 
 // exportIssueRecord wraps IssueWithCounts with a _type discriminator so that

@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -37,7 +38,16 @@ the fallback anywhere, or =0 to disable it entirely.
 When closing multiple issues, provide one --reason for all IDs or repeat
 --reason once per ID. Reasons map positionally: the first --reason applies
 to the first ID, the second --reason to the second ID, regardless of where
-the flags appear in the command line.`,
+the flags appear in the command line.
+
+Closing a molecule's last open step also closes the molecule's root, with
+the reason "all steps complete", when the root is a poured molecule, a wisp,
+or an epic labeled "template"; any other epic stays open as close-eligible
+work. A root that would refuse its own close (an open blocker, a pin, another
+assignee) stays open with a warning, and the step's close stands. Under
+--json, the step's entry names the closed root (auto_closed_molecule) or the
+refusal (molecule_auto_close_refusal). --continue claims the next ready step
+in the molecule for you; add --no-auto to only show it.`,
 	// Refuse a missing ID in argument validation, before root's
 	// PersistentPreRunE can open the store, migrate, or auto-import
 	// (bd-m00pb); see updateCmd for the full rationale.
@@ -153,6 +163,21 @@ the flags appear in the command line.`,
 			postCloseStore = results[0].Store
 		}
 
+		// --continue is a second operation after the close commits. Against a
+		// server that cannot run it (no issues.advanceMolecule), or whose
+		// handshake cannot be read, refuse BEFORE closing: refusing only at the
+		// advance would leave the step closed and the next step unclaimed, the
+		// half-done state --continue exists to avoid.
+		if continueFlag {
+			served, err := storage.ServesMoleculeAdvance(ctx, postCloseStore)
+			if err != nil {
+				return HandleErrorRespectJSON("--continue could not read whether the server serves issues.advanceMolecule: %v; nothing was closed", err)
+			}
+			if !served {
+				return HandleErrorRespectJSON("--continue needs the server's issues.advanceMolecule operation, which this server does not advertise; nothing was closed (close without --continue, then claim the next step with bd update --claim)")
+			}
+		}
+
 		// THE BATCH. The CLI's own close policy runs first and read-only, then
 		// every id it passed goes to the BatchCloser role as one request per
 		// store: one transaction, one Dolt commit over N ids, and an id the
@@ -165,11 +190,14 @@ the flags appear in the command line.`,
 			session, force, postCloseStore, closeClaimNextRequest(claimNext, continueFlag))
 
 		// Report and follow up on every argument, in the order it was typed.
-		closedIssues := []*types.Issue{}
+		closedIssues := []closedIssueJSON{}
 		closedCount := 0
 		alreadyClosed := 0
 		var failures []closeIDFailure
 		firstSettledID := ""
+		// The roots noticeUnservedMoleculeAutoClose already named, so a batch
+		// that closes several steps of one molecule names it once.
+		unservedRoots := map[string]bool{}
 
 		for i, id := range resolvedIDs {
 			res := outcomes[i]
@@ -215,21 +243,9 @@ the flags appear in the command line.`,
 				// Exit stays 0.
 				alreadyClosed++
 
-				// Molecule auto-close is itself a retry-safe, fully state-derived
-				// post-close contract, so it must replay on an already-closed re-close
-				// just like the contracts above. If the final step's real close
-				// persisted but its molecule auto-close did not (a crash between the two
-				// commits, or the root CloseIssue failing with only a warning), this
-				// idempotent re-close is the ONLY thing that re-drives it — otherwise the
-				// molecule root is stranded open forever. autoCloseCompletedMolecule
-				// early-returns unless the root is genuinely open, auto-close-eligible,
-				// and complete, so it heals only that case and reintroduces none of the
-				// suppressed real-close side effects (no audit, no closed→closed on the
-				// step). Register the store when it actually closed the root so the
-				// pending-commit sweep persists it — closedCount==0 would not commit.
-				if molID := autoCloseCompletedMolecule(ctx, activeStore, id, currentActor(), session); molID != "" {
-					mutatedStores[activeStore] = append(mutatedStores[activeStore], molID)
-				}
+				// The molecule auto-close is state-derived, so the library
+				// replays it on an already-closed re-close too (healing a root a
+				// crash left open); reportMoleculeAutoClose below covers both arms.
 			} else {
 				mutatedStores[activeStore] = append(mutatedStores[activeStore], id)
 
@@ -241,11 +257,16 @@ the flags appear in the command line.`,
 				audit.LogFieldChange(id, "status", oldStatus, "closed", currentActor(), reason)
 
 				closedCount++
-
-				// Auto-close parent molecule if all steps are now complete.
-				// Runs against the same store the step was closed in.
-				autoCloseCompletedMolecule(ctx, activeStore, id, currentActor(), session)
 			}
+
+			// The molecule root this close completed, closed by the library in
+			// the batch's own transaction. Register its store so the
+			// pending-commit sweep persists it even when the step itself was
+			// an already-closed no-op.
+			if molID := reportMoleculeAutoClose(res.AutoClosedMolecule, res.MoleculeAutoCloseRefusal); molID != "" {
+				mutatedStores[activeStore] = append(mutatedStores[activeStore], molID)
+			}
+			noticeUnservedMoleculeAutoClose(ctx, activeStore, id, unservedRoots)
 
 			// First id this command settled as closed — a real close or an
 			// already-closed no-op both "touch" it. Drives the retry-safe last-touched
@@ -266,7 +287,7 @@ the flags appear in the command line.`,
 
 			if jsonOutput {
 				if closedIssue != nil {
-					closedIssues = append(closedIssues, closedIssue)
+					closedIssues = append(closedIssues, newClosedIssueJSON(closedIssue, res.AutoClosedMolecule, res.MoleculeAutoCloseRefusal))
 				}
 			} else {
 				debug.PrintNormal("%s Closed %s: %s\n", ui.RenderPass("✓"), formatFeedbackID(id, issueTitleOrEmpty(issue)), reason)
@@ -313,11 +334,11 @@ the flags appear in the command line.`,
 
 		if continueFlag && len(resolvedIDs) == 1 && closedForCommand {
 			autoClaim := !noAuto
-			result, err := AdvanceToNextStep(ctx, newStandaloneStoreMolWriter(postCloseStore), resolvedIDs[0], autoClaim, currentActor())
+			result, err := advanceMoleculeDirect(ctx, postCloseStore, resolvedIDs[0], autoClaim)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: could not advance to next step: %v\n", err)
 			} else if result != nil {
-				// Mirror --claim-next: when AdvanceToNextStep auto-claims the
+				// Mirror --claim-next: when the molecule advance auto-claims the
 				// next step, update .beads/last-touched so subsequent default-
 				// target commands (e.g. bare `bd update`, `bd close`) target
 				// it. Without this, last-touched stays pointed at the just-
@@ -448,25 +469,28 @@ func closeClaimedID(claimed *types.Issue) string {
 // denominator, because only it knows what it attempted — the direct route
 // counts resolved ids, the proxied one counts arguments.
 //
-// The summary is suppressed for a single-id batch deliberately: one inline
-// refusal is already unambiguous about which id failed, and suppressing it
-// keeps single-id stderr byte-identical to what it was before close learned to
-// fail a partial batch.
+// The text summary is suppressed for a single-id batch deliberately: one
+// inline refusal is already unambiguous about which id failed, and suppressing
+// it keeps single-id stderr byte-identical to what it was before close learned
+// to fail a partial batch.
 //
 // In --json mode the summary is one compact JSON line on stderr — the shape
 // reportUpdateFailures established — so a consumer that sees exit 1 can read
 // WHICH ids failed instead of scraping English prose, while stdout keeps the
-// plain closed-issues array a successful close emits. claimedNextID names the
-// issue --claim-next claimed on this run, if any: that claim is committed
-// inside the batch's own transaction and a sibling's refusal does not roll it
-// back, so the report names it rather than pretending it did not happen.
+// plain closed-issues array a successful close emits. It is emitted for a
+// single id too, as reportUpdateFailures' is: a consumer closing one id at a
+// time needs a parseable reason as much as one closing a batch. claimedNextID
+// names the issue --claim-next claimed on this run, if any: that claim is
+// committed inside the batch's own transaction and a sibling's refusal does
+// not roll it back, so the report names it rather than pretending it did not
+// happen.
 func reportCloseFailures(failures []closeIDFailure, total int, claimedNextID string, jsonOut bool) error {
-	if total <= 1 {
-		return SilentExit()
-	}
 	msg := fmt.Sprintf("%d of %d issues failed to close", len(failures), total)
 
 	if !jsonOut {
+		if total <= 1 {
+			return SilentExit()
+		}
 		fmt.Fprintf(os.Stderr, "Error: %s\n", msg)
 		if claimedNextID != "" {
 			fmt.Fprintf(os.Stderr, "Note: --claim-next already claimed %s; it stays assigned to you.\n", claimedNextID)
@@ -709,12 +733,12 @@ func checkGateSatisfaction(issue *types.Issue, gateStore storage.DoltStorage) er
 		if resolved {
 			return nil
 		}
-		return fmt.Errorf("gate condition not satisfied: %s (use --force to override)", reason)
+		return fmt.Errorf("gate condition not satisfied: %s (use --force to override)", remedy.PrintedText(reason))
 	}
 
 	if err != nil {
 		// If we can't check the condition, allow close with a warning
-		fmt.Fprintf(os.Stderr, "Warning: could not evaluate gate condition: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Warning: could not evaluate gate condition: %s\n", remedy.PrintedMessage(err))
 		return nil
 	}
 
@@ -723,10 +747,10 @@ func checkGateSatisfaction(issue *types.Issue, gateStore storage.DoltStorage) er
 	}
 
 	if escalated {
-		return fmt.Errorf("gate condition not satisfied: %s (use --force to override)", reason)
+		return fmt.Errorf("gate condition not satisfied: %s (use --force to override)", remedy.PrintedText(reason))
 	}
 
-	return fmt.Errorf("gate condition not satisfied: %s (use --force to override)", reason)
+	return fmt.Errorf("gate condition not satisfied: %s (use --force to override)", remedy.PrintedText(reason))
 }
 
 // closeBeadGateGetter picks the bead-gate lookup the current route can serve.
@@ -742,74 +766,88 @@ func closeBeadGateGetter(gateStore storage.DoltStorage) issueGetter {
 	return routedBeadGateGetter{localStore: gateStore}
 }
 
-// autoCloseCompletedMolecule checks if closing a step completed an auto-closing
-// parent molecule, and if so, closes the molecule root. Ordinary epics remain
-// open when all children finish so they can become explicitly close-eligible
-// instead of being closed as a side effect of the final child close. It returns
-// the molecule root ID when it actually closed the root (and "" otherwise) so a
-// caller that did not otherwise mutate the store — an already-closed re-close in
-// particular — can register the store for the pending-commit sweep. The check is
-// fully state-derived and idempotent: it early-returns unless the root is open,
-// auto-close-eligible, and has all steps complete, so re-invoking it never
-// double-closes or reintroduces side effects.
-func autoCloseCompletedMolecule(ctx context.Context, s storage.DoltStorage, closedStepID, actorName, session string) string {
-	moleculeID := findParentMolecule(ctx, s, closedStepID)
-	if moleculeID == "" {
-		return "" // Not part of a molecule
+// reportMoleculeAutoClose presents what the library's molecule auto-close did
+// for one close (issueops.CloseRequest.AutoCloseMolecule): the root it closed,
+// or why a completed root stayed open. It returns the closed root's id, or "".
+func reportMoleculeAutoClose(root *types.Issue, refusal string) string {
+	if refusal != "" {
+		fmt.Fprintf(os.Stderr, "Warning: could not auto-close completed molecule: %s\n", refusal)
 	}
-
-	// Check if molecule root is already closed
-	root, err := s.GetIssue(ctx, moleculeID)
-	if err != nil || root == nil || root.Status == types.StatusClosed || !shouldAutoCloseCompletedRoot(root) {
+	if root == nil {
 		return ""
 	}
-
-	// Load progress to check completion
-	progress, err := getMoleculeProgress(ctx, s, moleculeID)
-	if err != nil {
-		return "" // Best effort — don't fail the close
-	}
-
-	if progress.Completed < progress.Total {
-		return "" // Not all steps complete yet
-	}
-
-	// All steps complete — auto-close the molecule root
-	if err := s.CloseIssue(ctx, moleculeID, "all steps complete", actorName, session); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: could not auto-close completed molecule %s: %v\n", moleculeID, err)
-		return ""
-	}
-
 	if !jsonOutput {
-		debug.PrintNormal("%s Auto-closed completed molecule %s\n", ui.RenderPass("✓"), formatFeedbackID(moleculeID, root.Title))
+		debug.PrintNormal("%s Auto-closed completed molecule %s\n", ui.RenderPass("✓"), formatFeedbackID(root.ID, root.Title))
 	}
-	return moleculeID
+	return root.ID
 }
 
-// shouldAutoCloseCompletedRoot returns true for molecule roots that should
-// auto-close when their final step closes. Regular epics stay open and become
-// explicit close-eligible work, while ephemeral wisps, template-driven
-// molecules, and molecule-type coordination roots keep their cleanup behavior.
-func shouldAutoCloseCompletedRoot(root *types.Issue) bool {
-	if root == nil {
-		return false
-	}
+// closedIssueJSON is one entry of `bd close --json`'s list of closed issues:
+// the closed issue's own members, and beside them what its close did to the
+// molecule it completed (issueops.CloseResult.AutoClosedMolecule and
+// MoleculeAutoCloseRefusal, under the HTTP API's BatchCloseOutcome names).
+// Beside, not around: every entry still decodes as the issue it always was,
+// and both members are absent unless the close completed a molecule. A batch
+// reports each root once, on the first entry under it.
+type closedIssueJSON struct {
+	*types.Issue
+	AutoClosedMolecule       *types.Issue `json:"auto_closed_molecule,omitempty"`
+	MoleculeAutoCloseRefusal string       `json:"molecule_auto_close_refusal,omitempty"`
+}
 
-	if root.IssueType == types.TypeMolecule || root.Ephemeral {
-		return true
+// newClosedIssueJSON is closed's entry. The auto-closed root drops its
+// dependency records, as the closed issue does: `bd close` never prints them.
+func newClosedIssueJSON(closed, autoClosedMolecule *types.Issue, refusal string) closedIssueJSON {
+	if autoClosedMolecule != nil {
+		autoClosedMolecule.Dependencies = nil
 	}
+	return closedIssueJSON{Issue: closed, AutoClosedMolecule: autoClosedMolecule, MoleculeAutoCloseRefusal: refusal}
+}
 
-	if root.IssueType != types.TypeEpic {
-		return false
+// noticeUnservedMoleculeAutoClose names, on stderr, the molecule a close left
+// complete but could not ask to auto-close. Against a server that does not
+// advertise issues.close.autoCloseMolecule (an older bd serve, or one whose
+// orchestrator owns the molecule lifecycle) the close goes out without the
+// request (storage.ServesMoleculeAutoClose), so a close after which
+// issueops.CompletedMolecule answers a root must say so: the root's auto-close
+// is that server's to run, never silently skipped. A step under an ordinary
+// epic, under a molecule with a step still open, or under a root already
+// closed prints nothing. An already-closed step whose molecule is complete
+// with its root open names the root again, as the served route replays its
+// auto-close. noted, when not nil, holds the roots this command already
+// named, so a batch names each once. A store that serves the auto-close prints
+// nothing.
+func noticeUnservedMoleculeAutoClose(ctx context.Context, s storage.DoltStorage, stepID string, noted map[string]bool) {
+	if s == nil || storage.ServesMoleculeAutoClose(ctx, s) {
+		return
 	}
-
-	for _, label := range root.Labels {
-		if label == BeadsTemplateLabel {
-			return true
-		}
+	const token = "issues.close.autoCloseMolecule"
+	reader, err := issueops.NewMoleculeReader(s)
+	var root *types.Issue
+	if err == nil {
+		root, err = issueops.CompletedMolecule(ctx, reader, stepID)
 	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "note: %s was closed without its molecule auto-close (the server does not advertise %s), and its molecule could not be read: %v\n", stepID, token, err)
+		return
+	}
+	if root == nil || noted[root.ID] {
+		return
+	}
+	if noted != nil {
+		noted[root.ID] = true
+	}
+	fmt.Fprintf(os.Stderr, "note: closing %s completed molecule %s, which this close did not auto-close: the server does not advertise %s, so the molecule's auto-close is the server's to run (bd close %s closes it)\n", stepID, root.ID, token, root.ID)
+}
 
-	return false
+// advanceMoleculeDirect runs `bd close --continue` on the direct route through
+// the store's MoleculeStepper role.
+func advanceMoleculeDirect(ctx context.Context, s storage.DoltStorage, closedStepID string, autoClaim bool) (*ContinueResult, error) {
+	roles, err := directMoleculeRoles(s)
+	if err != nil {
+		return nil, err
+	}
+	return advanceMolecule(ctx, roles, closedStepID, autoClaim)
 }
 
 // resolveReasonFile resolves the --reason-file flag for `bd close`.
@@ -838,10 +876,12 @@ func resolveReasonFile(cmd *cobra.Command, hasExistingReason bool) (string, bool
 
 // resolveCloseTargets resolves a batch of partial issue IDs for `bd close`,
 // preserving input order. For each ID it tries the local store first, then
-// explicit prefix routing via routes.jsonl, then a shared contributor-routed
-// store. This matches resolveAndGetIssueWithRouting's routing precedence.
+// explicit prefix routing via routes.jsonl, then a shared auto-routed store.
+// This matches resolveAndGetIssueForMutation's routing precedence and write
+// intent, and like it returns a routing failure (an unreadable routes.jsonl, a
+// routed store that fails to open) as itself rather than as a not-found.
 //
-// The contributor-routed handle is shared across the batch so bulk close does
+// The auto-routed handle is shared across the batch so bulk close does
 // not repeatedly open the same planning store and every result has a clear store
 // owner for subsequent close-time checks and writes.
 //
@@ -850,60 +890,102 @@ func resolveReasonFile(cmd *cobra.Command, hasExistingReason bool) (string, bool
 // no-op for routed-via-shared-handle entries because they don't own the handle.
 func resolveCloseTargets(ctx context.Context, localStore storage.DoltStorage, ids []string) ([]*RoutedResult, func(), error) {
 	results := make([]*RoutedResult, 0, len(ids))
-	var sharedRouted storage.DoltStorage
-	var sharedRoutedTried bool
+	shared := &closeAutoRoute{localStore: localStore}
 	cleanup := func() {
 		for _, r := range results {
 			r.Close()
 		}
-		if sharedRouted != nil {
-			_ = sharedRouted.Close()
-		}
-	}
-	ensureShared := func() (storage.DoltStorage, error) {
-		if sharedRouted != nil {
-			return sharedRouted, nil
-		}
-		if sharedRoutedTried {
-			return nil, fmt.Errorf("no auto-routed store available")
-		}
-		sharedRoutedTried = true
-		rs, routed, _, err := openRoutedReadStore(ctx, localStore)
-		if err != nil {
-			return nil, err
-		}
-		if !routed {
-			return nil, fmt.Errorf("no auto-routed store available")
-		}
-		sharedRouted = rs
-		return rs, nil
+		shared.Close()
 	}
 	for _, id := range ids {
-		// Local first.
-		if r, err := resolveAndGetFromStore(ctx, localStore, id, false); err == nil {
-			results = append(results, r)
-			continue
-		} else if !isNotFoundErr(err) {
+		r, err := resolveCloseTarget(ctx, localStore, shared, id)
+		if err != nil {
 			cleanup()
-			return nil, func() {}, fmt.Errorf("resolving ID %s: %w", id, err)
+			return nil, func() {}, err
 		}
-		// Write-intent: a prefix-routed target opens writable so the close
-		// commits on the target head (#4141). Contributor auto-routing below
-		// stays read-only: it hydrates foreign projects that must not be mutated.
-		if r, err := resolveViaPrefixRoutingWithAccess(ctx, id, true, false); err == nil {
-			results = append(results, r)
-			continue
-		}
-		// Contributor auto-routing uses one shared store for the whole batch.
-		if rs, rerr := ensureShared(); rerr == nil {
-			if r, err := resolveAndGetFromStore(ctx, rs, id, true); err == nil {
-				// Per-id RoutedResult does not own the shared handle; cleanup() does.
-				results = append(results, r)
-				continue
-			}
-		}
-		cleanup()
-		return nil, func() {}, fmt.Errorf("resolving ID %s: no issue found matching %q", id, id)
+		results = append(results, r)
 	}
 	return results, cleanup, nil
+}
+
+// resolveCloseTarget resolves one ID of a bd close batch: the local store,
+// then a prefix route, then the batch's shared auto-routed store.
+func resolveCloseTarget(ctx context.Context, localStore storage.DoltStorage, shared *closeAutoRoute, id string) (*RoutedResult, error) {
+	// Local first.
+	r, err := resolveAndGetFromStore(ctx, localStore, id, false)
+	if err == nil {
+		return r, nil
+	}
+	if !isNotFoundErr(err) {
+		return nil, fmt.Errorf("resolving ID %s: %w", id, err)
+	}
+	// The first routed tier that refuses the id answers instead of the
+	// not-found below (isRoutedResolutionRefusal). The refusal is checked
+	// before isRoutingFailure, which it would also satisfy, so the shared
+	// auto-routed store still gets its chance.
+	var refusal error
+	// Write-intent: a prefix-routed target opens writable so the close
+	// commits on the target head (#4141).
+	r, err = resolveViaPrefixRoutingWithAccess(ctx, id, true, false)
+	if err == nil {
+		return r, nil
+	}
+	if isRoutedResolutionRefusal(err) {
+		refusal = err
+	} else if isRoutingFailure(err) {
+		return nil, fmt.Errorf("resolving ID %s: %w", id, err)
+	}
+	r, err = shared.resolve(ctx, id)
+	if err == nil {
+		return r, nil
+	}
+	if refusal != nil {
+		return nil, fmt.Errorf("resolving ID %s: %w", id, refusal)
+	}
+	if isRoutingFailure(err) {
+		return nil, fmt.Errorf("resolving ID %s: %w", id, err)
+	}
+	return nil, fmt.Errorf("resolving ID %s: no issue found matching %q", id, id)
+}
+
+// closeAutoRoute is the auto-routed store a bd close batch shares. It opens on
+// first use and is closed once, by the batch's cleanup.
+type closeAutoRoute struct {
+	localStore storage.DoltStorage
+	store      storage.DoltStorage
+	err        error
+	tried      bool
+}
+
+// resolve looks id up in the shared auto-routed store, opening it on the first
+// call with write intent, as resolveAndGetIssueForMutation does: the target
+// opens writable, whichever rule selected it, so the close commits where the
+// issue lives. The outcome of that open, failure included, holds for the rest
+// of the batch.
+func (a *closeAutoRoute) resolve(ctx context.Context, id string) (*RoutedResult, error) {
+	if !a.tried {
+		a.tried = true
+		rs, routed, _, err := openAutoRoutedStore(ctx, a.localStore, true)
+		switch {
+		case err != nil:
+			a.err = err
+		case !routed:
+			a.err = fmt.Errorf("%w: no auto-routed store available", errRoutingUnavailable)
+		default:
+			a.store = rs
+		}
+	}
+	if a.err != nil {
+		return nil, a.err
+	}
+	// Per-id RoutedResult does not own the shared handle; Close does.
+	return resolveAndGetFromStore(ctx, a.store, id, true)
+}
+
+// Close closes the shared auto-routed store, if one was opened.
+func (a *closeAutoRoute) Close() {
+	if a.store != nil {
+		_ = a.store.Close()
+		a.store = nil
+	}
 }

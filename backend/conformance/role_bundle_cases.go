@@ -63,6 +63,7 @@ var roleContractCases = []roleContract{
 		RunBatchApplyCloseItemsAnswerToTheCloseGuards,
 		RunBatchApplyRefusesADottedChildGatedOnItsOwnParent,
 		RunBatchApplyAppliesTheDefaultPriority,
+		RunBatchApplyCarriesTheGateMembers,
 	),
 
 	roleCases("BatchCloser", "BatchCloser()", oncePerRole,
@@ -127,6 +128,7 @@ var roleContractCases = []roleContract{
 		RunBlockingAnnotatorRefusesAnEmptyID,
 		RunBlockingAnnotatorLeavesTheRequestAlone,
 		RunBlockingAnnotatorWritesNothing,
+		RunBlockingAnnotatorReportsTheTransitiveBlockedFlag,
 	),
 
 	// One contract file covers both halves of workspace identity: the eight
@@ -462,6 +464,8 @@ var roleContractCases = []roleContract{
 		RunLifecycleCreateWritesEveryScalarField,
 		RunLifecycleCreateEchoesSubSecondTimestamps,
 		RunLifecycleCreateAppliesTheDefaultPriority,
+		RunLifecycleCreateWritesTheGateMembers,
+		RunLifecycleCreateBoundsTheGateMembers,
 	),
 
 	roleCases("LifecycleUpdate", "IssueLifecycle()", oncePerRole,
@@ -488,9 +492,13 @@ var roleContractCases = []roleContract{
 		RunLifecycleUpdateParentIDReplacesTheParentEdge,
 		RunLifecycleUpdateParentIDReplacesEveryParent,
 		RunLifecycleUpdatePersistentPreservesUnversionedClass,
+		RunLifecycleUpdateWispModesRefuseAnUnversionedRow,
+		RunLifecycleUpdatePersistentPromotesAWisp,
 		RunLifecycleUpdateProvenanceLabelsHistory,
 		RunLifecycleUpdateRefusesATemplate,
 		RunLifecycleUpdateAllowTemplateEditsATemplate,
+		RunLifecycleUpdatePatchesTheGateMembers,
+		RunLifecycleUpdateBoundsTheGateMembers,
 	),
 
 	roleCases("Memories", "Memories()", oncePerRole,
@@ -505,7 +513,7 @@ var roleContractCases = []roleContract{
 		RunMemoriesRememberRefusesAnUnderivableKey,
 		RunMemoriesRecallAnswersTheStoredValue,
 		RunMemoriesRecallReportsAMissAsNotFoundNotAnError,
-		RunMemoriesRecallConflatesStoredEmptyWithAbsent,
+		RunMemoriesEmptyRowIsPresentUntilForgotten,
 		RunMemoriesForgetRemovesExactlyTheNamedRow,
 		RunMemoriesForgetNeverTouchesTheSettingsPlane,
 		RunMemoriesForgetReportsTheForgottenValue,
@@ -568,6 +576,7 @@ var roleContractCases = []roleContract{
 		RunReaderListKeysetPositionResumesTheCreatedDescIDAscOrder,
 		RunReaderListReadyFlagAnswersTheBlockerAwareSet,
 		RunReaderListReadyFlagRefusesAFilterItCannotCarry,
+		RunReaderListQueryMatchesTheTitleOrTheID,
 		RunReaderListEmptyPageIsWellFormed,
 		RunReaderListMaxRowsIsHonored,
 		RunReaderListMaxRowsBoundaryIsLimitPlusOffset,
@@ -595,6 +604,8 @@ var roleContractCases = []roleContract{
 		RunReaderListWispTypeNarrowsTheAdmittedPlaneRatherThanAdmittingIt,
 		RunReaderListBriefDropsTheFreeFormTextAndNothingElse,
 		RunReaderReadyBriefDropsTheFreeFormTextAndNothingElse,
+		RunReaderListTimeBoundsAreStrictAndWholeSecond,
+		RunReaderListFilterFamiliesNarrowToTheirRows,
 	),
 
 	roleCases("ReadyClaimer", "ReadyClaimer() and IssueReader()", oncePerRole,

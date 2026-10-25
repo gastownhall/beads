@@ -13,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -470,6 +471,15 @@ Examples:
 		if err != nil {
 			return HandleErrorRespectJSON("%v", err)
 		}
+		// The confirmation line names both issues by title. Adding an edge
+		// changes neither title, so read them now, while the resolution's
+		// reads above are still fresh: over http those two lookups are then
+		// answered without a round trip, where after the write they would be
+		// two more (bts-xpw.3.14.6).
+		var fromTitle, toTitle string
+		if !jsonOutput {
+			fromTitle, toTitle = lookupTitle(fromID), lookupTitle(toID)
+		}
 		edge := issueops.DependencyEdge{IssueID: fromID, DependsOnID: toID, Type: dt}
 		if err := addDependencyEdgesDirect(opsCtx, fromStore, []issueops.DependencyEdge{edge}, false); err != nil {
 			return HandleErrorRespectJSON("%v", err)
@@ -500,7 +510,7 @@ Examples:
 		}
 
 		fmt.Printf("%s Added dependency: %s %s %s (%s)\n",
-			ui.RenderPass("✓"), formatFeedbackIDParen(fromID, lookupTitle(fromID)), depRelationFor(dt).phrase, formatFeedbackIDParen(toID, lookupTitle(toID)), dt)
+			ui.RenderPass("✓"), formatFeedbackIDParen(fromID, fromTitle), depRelationFor(dt).phrase, formatFeedbackIDParen(toID, toTitle), dt)
 		return nil
 	},
 }
@@ -1009,7 +1019,7 @@ Examples:
 			routedResult, err := resolveAndGetIssueWithRouting(ctx, store, arg)
 			if err != nil {
 				if batchMode {
-					fmt.Fprintf(os.Stderr, "warning: resolving %s: %v (skipped)\n", arg, err)
+					fmt.Fprintf(os.Stderr, "warning: resolving %s: %s (skipped)\n", arg, remedy.PrintedMessage(err))
 					continue
 				}
 				return HandleErrorRespectJSON("resolving %s: %v", arg, err)

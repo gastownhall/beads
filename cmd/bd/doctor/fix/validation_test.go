@@ -331,3 +331,162 @@ func TestChildParentDependencies_PreservesParentChildType(t *testing.T) {
 		t.Errorf("Expected 1 'parent-child' dependency preserved, got %d", parentChildCount)
 	}
 }
+
+// TestChildParentDependencies_PreservesParentGateOnOwnChild verifies the fix
+// leaves a parent's gate on its own child alone, in both forms: the waits-for
+// gate the write path recommends and a legacy blocks row it now refuses.
+// Since gastownhall/beads#6506 neither holds back the child, so deleting them
+// would only let the parent close before its children. The parent stays
+// blocked and the children stay ready through the whole --fix-child-parent
+// pass, including the blocked-state recompute that runs last (adapted from
+// PR#5131's reversed-direction test).
+func TestChildParentDependencies_PreservesParentGateOnOwnChild(t *testing.T) {
+	dir := t.TempDir()
+	store := newFixTestStore(t, dir, "bd")
+	ctx := context.Background()
+
+	for _, id := range []string{"bd-gate", "bd-gate.1", "bd-gate.1.1", "bd-gate.2"} {
+		issue := &types.Issue{
+			ID:        id,
+			Title:     "Issue " + id,
+			Status:    types.StatusOpen,
+			IssueType: types.TypeTask,
+			CreatedAt: time.Now(),
+		}
+		if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Real parent-child edges, and a live waits-for gate: bd-gate.1 has an
+	// open child of its own.
+	for _, dep := range []*types.Dependency{
+		{IssueID: "bd-gate.1", DependsOnID: "bd-gate", Type: types.DepParentChild},
+		{IssueID: "bd-gate.1.1", DependsOnID: "bd-gate.1", Type: types.DepParentChild},
+		{IssueID: "bd-gate.2", DependsOnID: "bd-gate", Type: types.DepParentChild},
+		{IssueID: "bd-gate", DependsOnID: "bd-gate.1", Type: types.DepWaitsFor},
+	} {
+		dep.CreatedAt = time.Now()
+		dep.CreatedBy = "test"
+		if err := store.AddDependency(ctx, dep, "test"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// The legacy blocks row goes in raw because the write path refuses it.
+	// The derived flags are then inverted, so the flag and ready-work checks
+	// below pass only if the recompute really ran and derived them from these
+	// edges.
+	db := store.UnderlyingDB()
+	for _, stmt := range []string{
+		"INSERT INTO dependencies (id, issue_id, depends_on_issue_id, type, created_at, created_by) VALUES (UUID(), 'bd-gate', 'bd-gate.2', 'blocks', NOW(), 'test')",
+		"UPDATE issues SET is_blocked = CASE WHEN id = 'bd-gate' THEN 0 ELSE 1 END WHERE id LIKE 'bd-gate%'",
+		"CALL DOLT_COMMIT('-Am', 'test: seed parent close gates')",
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+
+	// The --fix --fix-child-parent pass: this fix, then the blocked-state
+	// recompute that orderDoctorFixes runs last.
+	if err := ChildParentDependencies(dir, false); err != nil {
+		t.Fatalf("ChildParentDependencies failed: %v", err)
+	}
+	if err := RecomputeBlocked(dir); err != nil {
+		t.Fatalf("RecomputeBlocked failed: %v", err)
+	}
+
+	for depType, want := range map[string]int{"waits-for": 1, "blocks": 1, "parent-child": 3} {
+		var got int
+		if err := db.QueryRow("SELECT COUNT(*) FROM dependencies WHERE type = ?", depType).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got != want {
+			t.Errorf("%s dependencies after fix = %d, want %d", depType, got, want)
+		}
+	}
+
+	// The recompute's own output: every seeded flag inverted back.
+	for id, want := range map[string]bool{"bd-gate": true, "bd-gate.1": false, "bd-gate.1.1": false, "bd-gate.2": false} {
+		var got bool
+		if err := db.QueryRow("SELECT is_blocked FROM issues WHERE id = ?", id).Scan(&got); err != nil {
+			t.Fatalf("read is_blocked of %s: %v", id, err)
+		}
+		if got != want {
+			t.Errorf("%s is_blocked after the fix = %v, want %v", id, got, want)
+		}
+	}
+
+	ready, err := store.GetReadyWork(ctx, types.WorkFilter{Status: types.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inReady := map[string]bool{}
+	for _, issue := range ready {
+		inReady[issue.ID] = true
+	}
+	for _, id := range []string{"bd-gate.1", "bd-gate.1.1", "bd-gate.2"} {
+		if !inReady[id] {
+			t.Errorf("%s missing from ready work after the fix", id)
+		}
+	}
+	if inReady["bd-gate"] {
+		t.Error("bd-gate is ready after the fix, but it still waits for and blocks on open children")
+	}
+}
+
+// TestChildParentDependencies_PreservesDottedEdgeWithoutRealParentChildLink
+// verifies a dotted-ID coincidence alone never removes an issue's edge onto
+// its dotted look-alike child; the fix matches on the dotted prefix alone only
+// in the child→parent direction. An orphaned-dotted subtask (dotted ID
+// surviving a reparent or import, with no --parent edge) that its "epic"
+// blocks on is an ordinary "epic waits for its subtask" shape, not a
+// deadlock, and must survive the fix (bee-ghosttrack review, PR#5131).
+func TestChildParentDependencies_PreservesDottedEdgeWithoutRealParentChildLink(t *testing.T) {
+	dir := t.TempDir()
+	store := newFixTestStore(t, dir, "bd")
+	ctx := context.Background()
+
+	for _, id := range []string{"bd-abc", "bd-abc.1"} {
+		issue := &types.Issue{
+			ID:        id,
+			Title:     "Issue " + id,
+			Status:    types.StatusOpen,
+			IssueType: types.TypeTask,
+			CreatedAt: time.Now(),
+		}
+		if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// No parent-child edge is added: bd-abc.1's dotted ID is coincidental
+	// (e.g. it survives a reparent or import), not a structural child of
+	// bd-abc.
+	blockDep := &types.Dependency{
+		IssueID:     "bd-abc",
+		DependsOnID: "bd-abc.1",
+		Type:        types.DepBlocks,
+		CreatedAt:   time.Now(),
+		CreatedBy:   "test",
+	}
+	if err := store.AddDependency(ctx, blockDep, "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Run fix
+	if err := ChildParentDependencies(dir, false); err != nil {
+		t.Errorf("ChildParentDependencies failed: %v", err)
+	}
+
+	// The healthy edge (no real parent-child link) must survive.
+	db := store.UnderlyingDB()
+	var count int
+	if err := db.QueryRow("SELECT COUNT(*) FROM dependencies WHERE type = 'blocks'").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Errorf("Expected the healthy dotted-ID edge (no real parent-child link) to survive, got %d", count)
+	}
+}

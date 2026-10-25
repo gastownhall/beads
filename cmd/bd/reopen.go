@@ -6,6 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -76,7 +77,7 @@ another actor won the race, so retrying the same guard is pointless).`,
 				if reported, ok := reportIfRevisionTargetGone("reopening", id, err, ifRevision); ok {
 					return reported
 				}
-				fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", id, err)
+				fmt.Fprintf(os.Stderr, "Error resolving %s: %s\n", id, remedy.PrintedMessage(err))
 				hasError = true
 				continue
 			}
@@ -97,7 +98,7 @@ another actor won the race, so retrying the same guard is pointless).`,
 			}
 			ops, err := writeOps(issueStore)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error reopening %s: %v\n", fullID, err)
+				fmt.Fprintf(os.Stderr, "Error reopening %s: %s\n", fullID, remedy.PrintedMessage(err))
 				hasError = true
 				result.Close()
 				continue
@@ -124,7 +125,7 @@ another actor won the race, so retrying the same guard is pointless).`,
 						return reported
 					}
 				}
-				fmt.Fprintf(os.Stderr, "Error reopening %s: %v\n", fullID, err)
+				fmt.Fprintf(os.Stderr, "Error reopening %s: %s\n", fullID, remedy.PrintedMessage(err))
 				hasError = true
 				result.Close()
 				continue

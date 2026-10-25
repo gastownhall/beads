@@ -10,6 +10,7 @@ import (
 	"maps"
 	"reflect"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
@@ -40,11 +41,15 @@ var _ issueops.Lifecycle = (*httpLifecycle)(nil)
 // The whole request maps but for two members, and both refuse rather than
 // dropping: IDPrefix where it would act on an explicit, unforced id, which the
 // server publishes no member for on purpose (W-CreateRequest.IDPrefix), and
-// every member of the issue outside the wire's twenty (W-CreateRequest.Issue)
+// every member of the issue outside the wire's twenty-four (W-CreateRequest.Issue)
 // — save a CreatedBy that names the actor, which the server's create role
 // defaults to on its own (issueops.PreparePublicCreateRequest). A create that reported success having silently dropped the
 // storage class, the molecule type or the creation time is a row the caller
 // believes they wrote and did not.
+//
+// The four gate members of those twenty-four are carried only to a server
+// advertising issues.create.gates; against any other the create refuses
+// before the dial naming the token (Store.requireCapabilityBeforeDial).
 //
 // The RESPONSE is the row as stored — the minted id, the defaulted status, the
 // persisted timestamps — so nothing here echoes the request back.
@@ -64,12 +69,18 @@ func (l *httpLifecycle) Create(ctx context.Context, req issueops.CreateRequest) 
 	if err != nil {
 		return issueops.CreateResult{}, err
 	}
+	if issueCarriesGates(req.Issue) {
+		if err := l.store.requireCapabilityBeforeDial(ctx, wire.OpCreateIssue, wire.CapIssuesCreateGates); err != nil {
+			return issueops.CreateResult{}, err
+		}
+	}
 	if err := l.store.pinCreateDefaultPriority(ctx, &body.Priority); err != nil {
 		return issueops.CreateResult{}, err
 	}
 
 	issue, err := l.wire.CreateIssue(ctx, body)
 	if err != nil {
+		err = gateFieldRefusal(err)
 		// The wire's already_exists carries `param: "id"` and no id, because the
 		// request already said it — the same argument the problem mapper's
 		// target makes for the conflicts it rebuilds. Putting the caller's own
@@ -172,6 +183,7 @@ func createBody(req issueops.CreateRequest) (apigen.CreateIssueRequest, error) {
 	// explicit trues would.
 	setItemBool(&body.Ephemeral, issue.Ephemeral)
 	setItemBool(&body.NoHistory, issue.NoHistory)
+	setGateMembers(issue, &body.AwaitType, &body.AwaitId, &body.Timeout, &body.Waiters)
 	setItemBool(&body.InheritLabelsFromParent, req.InheritLabelsFromParent)
 	setItemBool(&body.ForceIdPrefix, req.ForceIDPrefix)
 
@@ -233,12 +245,18 @@ func requireJSON(member string, raw []byte) error {
 	return nil
 }
 
-// createCarriedIssueMembers is the wire's create vocabulary: the twenty members
-// of apigen.CreateIssueRequest that describe the issue itself, keyed by the
-// types.Issue field each one carries.
+// createCarriedIssueMembers is the wire's create vocabulary: the twenty-four
+// members of apigen.CreateIssueRequest that describe the issue itself, keyed by
+// the types.Issue field each one carries.
 //
 // It is the ALLOWLIST half of refuse-not-drop for this operation. What it does
 // not name is refused, and there is no third arm — see refuseUnwirableIssueMembers.
+//
+// The last four, the gate members, are carried only to a server that
+// advertises issues.create.gates. Against any other the
+// create refuses before the dial naming the token (issueCarriesGates and
+// Store.requireCapabilityBeforeDial), so they are never dropped: they are
+// carried or the request does not leave.
 var createCarriedIssueMembers = map[string]string{
 	"ID":                 "id",
 	"Title":              "title",
@@ -260,6 +278,40 @@ var createCarriedIssueMembers = map[string]string{
 	"Labels":             "labels",
 	"Ephemeral":          "ephemeral",
 	"NoHistory":          "no_history",
+	"AwaitType":          "await_type",
+	"AwaitID":            "await_id",
+	"Timeout":            "timeout",
+	"Waiters":            "waiters",
+}
+
+// issueCarriesGates reports whether a create names any gate member, in the
+// same terms setGateMembers sends them: the request needs
+// issues.create.gates exactly when the body would carry one.
+func issueCarriesGates(issue *issueops.Issue) bool {
+	return issue != nil && (issue.AwaitType != "" || issue.AwaitID != "" || issue.Timeout != 0 || len(issue.Waiters) > 0)
+}
+
+// setGateMembers writes the four gate members of a create body, each only
+// when populated, so an empty waiter list is absent rather than []: a create
+// has no list to clear, while a patch must spell its clear (setGatePatch).
+// The values travel as given: the bounds (await_type <= 32,
+// await_id <= 255, the waiter list's JSON <= one TEXT column, timeout >= 0)
+// are the role's (issueops.ValidateGateFields) and the server answers a
+// breach with a 400 naming the member, so a second copy of them here would
+// only be a second definition. Timeout travels in NANOSECONDS, the encoding
+// Issue.timeout reads back, and the waiter list verbatim (duplicates kept:
+// deduplicating is the caller's).
+func setGateMembers(issue *issueops.Issue, awaitType, awaitID **string, timeout **int64, waiters **[]string) {
+	setItemString(awaitType, issue.AwaitType)
+	setItemString(awaitID, issue.AwaitID)
+	if issue.Timeout != 0 {
+		nanos := int64(issue.Timeout)
+		*timeout = &nanos
+	}
+	if len(issue.Waiters) > 0 {
+		list := append([]string(nil), issue.Waiters...)
+		*waiters = &list
+	}
 }
 
 // setItemBool writes an optional wire boolean, leaving it absent when the caller
@@ -300,10 +352,13 @@ func copyTime(value *time.Time) *time.Time {
 // A CLAIM rides the same request (upstream #6890): `claim` is a top-level
 // member beside the patch, so a claim alone, a claim with a patch and a claim
 // with a version guard are each ONE updateIssue call, claimed and patched in
-// one transaction by the same role the direct route runs, and answered with the
-// post-write `revision` like every other update. The one claim that goes
-// anywhere else is a claim ALONE to a server that predates the member — see
-// serverPredatesUpdateClaim.
+// one transaction by the same role the direct route runs, resolved on both
+// planes (a wisp included), and answered with the post-write `revision` like
+// every other update. That is what a server advertising
+// wire.CapIssuesUpdateClaim serves, and the token is read from the cached
+// handshake BEFORE the dial (claimWithoutUpdateClaim): against a server without
+// it a claim alone goes to claimIssue (claimOnlyUpdate) and a claim beside
+// anything else is refused, naming the token, without a dial.
 func (l *httpLifecycle) Update(ctx context.Context, req issueops.UpdateRequest) (result issueops.UpdateResult, err error) {
 	// Write-side parity with reads: decorates a bare *encode.RefusedError —
 	// however deeply refuseUnwirableUpdateMembers/encodeIssuePatch/
@@ -335,6 +390,24 @@ func (l *httpLifecycle) Update(ctx context.Context, req issueops.UpdateRequest) 
 		return issueops.UpdateResult{}, invalid("update names no field to write")
 	}
 
+	if err := l.requirePersistenceMove(ctx, req); err != nil {
+		return issueops.UpdateResult{}, err
+	}
+	if patchCarriesGates(req.Patch) {
+		if err := l.store.requireCapabilityBeforeDial(ctx, wire.OpUpdateIssue, wire.CapIssuesUpdateGates); err != nil {
+			return issueops.UpdateResult{}, err
+		}
+	}
+	if req.Claim {
+		served, err := l.store.servesCapability(ctx, wire.CapIssuesUpdateClaim)
+		if err != nil {
+			return issueops.UpdateResult{}, err
+		}
+		if !served {
+			return l.claimWithoutUpdateClaim(ctx, req)
+		}
+	}
+
 	req, err = l.applyTemplateGuardForServer(ctx, req)
 	if err != nil {
 		return issueops.UpdateResult{}, err
@@ -342,10 +415,7 @@ func (l *httpLifecycle) Update(ctx context.Context, req issueops.UpdateRequest) 
 
 	res, err := l.wire.UpdateIssue(ctx, req.IssueID, req.Actor, patch, updateGuards(req), updateFlags(req))
 	if err != nil {
-		if req.Claim && isClaimOnlyUpdate(req) && serverPredatesUpdateClaim(err) {
-			return l.claimOnlyUpdate(ctx, req)
-		}
-		return issueops.UpdateResult{}, err
+		return issueops.UpdateResult{}, gateFieldRefusal(err)
 	}
 	// The stitch releaser.go documents: types.Issue.RowVersion is `json:"-"`, so
 	// the decoded row carries no token and updateIssue publishes the post-write
@@ -398,23 +468,148 @@ func updateFlags(req issueops.UpdateRequest) wire.UpdateFlags {
 	}
 }
 
-// serverPredatesUpdateClaim reports whether err is a server that predates
-// `claim` on updateIssue (upstream #6890) refusing the member: the version-skew
-// 400 — `unknown_parameter`, naming `claim` itself. Such a server checks body
-// members before it reads anything else, so the refusal arrives before any
-// database work and nothing the request asked for was written.
+// claimWithoutUpdateClaim is the claim against a server that does not
+// advertise wire.CapIssuesUpdateClaim — one that predates `claim` on
+// updateIssue (upstream #6890) and answers the member with the skew 400, or a
+// build that serves it untokened. The handshake decides; the client never
+// dials updateIssue with a claim to find out.
 //
-// It is the SKEW signal, not the capability list, because no capability token
-// announces the member — it is additive, so it bumped no wire revision either —
-// and the reason is what dispatches, never the code alone: `invalid_value`
-// naming `claim` is a current server refusing a claim beside a member it may
-// not ride with, which is the caller's error to see, not a server to route
-// around.
-func serverPredatesUpdateClaim(err error) bool {
+// A claim ALONE is exactly claimIssue's request (isClaimOnlyUpdate), so it
+// goes there (claimOnlyUpdate): an ordinary issue is claimed as before, and a
+// wisp, which claimIssue's role excludes, refuses by name
+// (W-ClaimRequest.Wisp). A claim beside a patch, a guard, a force override or
+// AllowTemplate is refused before the dial with ErrUnsupported naming the
+// token, rather than split into claimIssue then updateIssue (a caller could
+// observe the issue claimed but not patched) or sent to a server that would
+// 400 it.
+//
+// The template read-only guard runs HERE, on a pre-read, whatever the
+// handshake says about wire.CapIssuesUpdateAllowTemplate: that token means
+// updateIssue guards templates, and this route never dials updateIssue.
+// claimIssue's role has no template check (bd-jkp9v3), so without this read
+// a claim alone would claim a template, which Update refuses on every other
+// route. Any other row goes on to claimIssue as before (a wisp to its refusal
+// by name), and so does an id the pre-read cannot find: claimIssue's
+// not-found is the one to report.
+func (l *httpLifecycle) claimWithoutUpdateClaim(ctx context.Context, req issueops.UpdateRequest) (issueops.UpdateResult, error) {
+	if !isClaimOnlyUpdate(req) {
+		return issueops.UpdateResult{}, l.store.unsupportedCapability("Lifecycle.Update", wire.CapIssuesUpdateClaim)
+	}
+	before, err := l.store.GetIssue(ctx, req.IssueID)
+	switch {
+	case errors.Is(err, storage.ErrNotFound):
+	case err != nil:
+		return issueops.UpdateResult{}, err
+	default:
+		if err := storageops.AuthorizeTemplateUpdate(before, req); err != nil {
+			return issueops.UpdateResult{}, err
+		}
+	}
+	return l.claimOnlyUpdate(ctx, req)
+}
+
+// requirePersistenceMove refuses, before anything is dialed, an update that
+// moves the row between planes (IssuePatch.Persistence: `bd promote`, `bd
+// update --persistent`) against a server that does not advertise
+// wire.CapIssuesUpdatePersistence. Such a server refuses `patch.persistence`
+// as an unknown parameter, and the move is one transaction on the server, so
+// there is no client-side fallback: the refusal is the typed capability error
+// naming the token (*wire.CapabilityError, which unwraps to
+// *storage.ErrUnsupported with Capability set), never a dropped member and a
+// "no change" answer.
+func (l *httpLifecycle) requirePersistenceMove(ctx context.Context, req issueops.UpdateRequest) error {
+	if !req.Patch.Persistence.Set {
+		return nil
+	}
+	// The case-2 text names the server and the token, so `bd promote`
+	// against an older server says what to upgrade rather than only that the
+	// operation is unsupported. It unwraps to *storage.ErrUnsupported with
+	// Capability set, like every other capability refusal.
+	return l.store.requireCapabilityBeforeDial(ctx, wire.OpUpdateIssue, wire.CapIssuesUpdatePersistence)
+}
+
+// requireCapabilityBeforeDial refuses, before anything is dialed, a write
+// that needs a behavior token the cached handshake does not advertise. The
+// refusal is the typed capability error naming the token
+// (*wire.CapabilityError, which unwraps to *storage.ErrUnsupported with
+// Capability set), never a dropped member: a server without the token answers
+// the member as an unknown parameter at best.
+func (s *Store) requireCapabilityBeforeDial(ctx context.Context, op, token string) error {
+	snap, err := s.snapshot(ctx)
+	if err != nil {
+		return err
+	}
+	if snap != nil && slices.Contains(snap.Capabilities, token) {
+		return nil
+	}
+	return wire.NewCapabilityError(op, token, s.target.String(), snap)
+}
+
+// patchCarriesGates reports whether a patch names a gate member (await_id,
+// waiters), which both patch documents carry only to a server advertising
+// issues.update.gates.
+func patchCarriesGates(patch issueops.IssuePatch) bool {
+	return patch.AwaitID.Set || patch.Waiters.Set
+}
+
+// gateFieldRefusal rebuilds the role's *issueops.GateFieldError from the 400
+// a gate member past its bound earns. The server answers the role's refusal
+// as invalid_argument / invalid_value with `param` naming the member at its
+// level (await_type, patch.waiters, items[2].create.timeout,
+// items[0].update.patch.await_id), so the member is read off that typed
+// coordinate and never off the prose. The problem itself stays in the chain,
+// so errors.Is still reaches its sentinel and a batch refusal still becomes
+// its *issueops.ItemError (applyBatchRefusal reads through the wrapper).
+func gateFieldRefusal(err error) error {
 	var problem *wire.ProblemError
-	return errors.As(err, &problem) &&
-		problem.Reason == encode.UnknownParameterReason &&
-		problem.Param == "claim"
+	if !errors.As(err, &problem) || problem.Code != "invalid_argument" || problem.Reason != "invalid_value" {
+		return err
+	}
+	param := problem.Param
+	if rest, ok := strings.CutPrefix(param, "items["); ok {
+		end := strings.Index(rest, "].")
+		if end < 0 {
+			return err
+		}
+		param = rest[end+2:]
+	}
+	for _, level := range []string{"create.", "update.patch.", "patch."} {
+		if rest, ok := strings.CutPrefix(param, level); ok {
+			param = rest
+			break
+		}
+	}
+	switch param {
+	case issueops.GateFieldAwaitType, issueops.GateFieldAwaitID, issueops.GateFieldTimeout, issueops.GateFieldWaiters:
+	default:
+		return err
+	}
+	return &gateFieldProblem{
+		field:   &issueops.GateFieldError{Field: param, Detail: problem.Detail},
+		problem: err,
+	}
+}
+
+// gateFieldProblem carries both the rebuilt *issueops.GateFieldError and the
+// problem it was read from, and reads as the problem.
+type gateFieldProblem struct {
+	field   *issueops.GateFieldError
+	problem error
+}
+
+func (e *gateFieldProblem) Error() string   { return e.problem.Error() }
+func (e *gateFieldProblem) Unwrap() []error { return []error{e.field, e.problem} }
+
+// setGatePatch writes the two gate members of a patch document. Presence
+// alone decides, as on assignee: an empty await_id CLEARS it, and a set
+// waiter list is a WHOLE-VALUE replacement whose nil or empty value clears
+// it. The clear travels as the empty array, because neither member is
+// nullable and a nil []string marshals to null.
+func setGatePatch(out map[string]any, patch issueops.IssuePatch) {
+	setString(out, "await_id", patch.AwaitID)
+	if patch.Waiters.Set {
+		out["waiters"] = append([]string{}, patch.Waiters.Value...)
+	}
 }
 
 // applyTemplateGuardForServer decides, BEFORE the dial and from the cached
@@ -464,6 +659,15 @@ func (l *httpLifecycle) Close(ctx context.Context, req issueops.CloseRequest) (i
 
 	body := closeBody(req.Actor, req.Reason, req.Session, req.Force)
 	body.ExpectedVersion = revisionGuard(req.ExpectedVersion)
+	// AutoCloseMolecule rides the member only where the server advertises it;
+	// elsewhere the close is refused before it is dialed (molecule.go).
+	if err := l.store.requireAutoCloseMolecule(ctx, "IssueLifecycle.Close", req.AutoCloseMolecule); err != nil {
+		return issueops.CloseResult{}, err
+	}
+	if req.AutoCloseMolecule {
+		autoClose := true
+		body.AutoCloseMolecule = &autoClose
+	}
 	res, err := l.wire.CloseIssue(ctx, req.IssueID, body)
 	if err != nil {
 		return issueops.CloseResult{}, err
@@ -474,11 +678,16 @@ func (l *httpLifecycle) Close(ctx context.Context, req issueops.CloseRequest) (i
 	if issue.RowVersion, err = parseRevision("closeIssue", res.Revision); err != nil {
 		return issueops.CloseResult{}, err
 	}
-	return issueops.CloseResult{
-		Issue:        &issue,
-		Changed:      !res.AlreadyClosed,
-		OpenChildren: res.OpenChildren,
-	}, nil
+	result := issueops.CloseResult{
+		Issue:              &issue,
+		Changed:            !res.AlreadyClosed,
+		OpenChildren:       res.OpenChildren,
+		AutoClosedMolecule: res.AutoClosedMolecule,
+	}
+	if res.MoleculeAutoCloseRefusal != nil {
+		result.MoleculeAutoCloseRefusal = *res.MoleculeAutoCloseRefusal
+	}
+	return result, nil
 }
 
 // Reopen dials POST issues/{id}:reopen.
@@ -573,17 +782,12 @@ func closeBody(actor, reason, session string, force bool) apigen.CloseIssueReque
 	return body
 }
 
-// claimOnlyUpdate is the claim a server that predates `claim` on updateIssue
+// claimOnlyUpdate is the claim a server without wire.CapIssuesUpdateClaim
 // can still serve: a claim and nothing else, dialed as claimIssue through the
-// Claimer role. Update reaches it only after such a server refused the member
-// as unknown (serverPredatesUpdateClaim) and only for a claim-only request
-// (isClaimOnlyUpdate) — claimIssue's own request is `{actor}` alone (see
-// apigen.ClaimRequest), so a claim-only UpdateRequest IS that request, and
-// anything beside the claim would be dropped by it. A claim combined with a
-// patch, a guard or a force override is therefore NOT retried here: the skew
-// refusal is returned as it came, rather than synthesized as two calls
-// (claimIssue then updateIssue), which would let a caller observe an issue
-// claimed but not yet patched.
+// Claimer role. Update reaches it only through claimWithoutUpdateClaim, and
+// only for a claim-only request (isClaimOnlyUpdate) — claimIssue's own request
+// is `{actor}` alone (see apigen.ClaimRequest), so a claim-only UpdateRequest
+// IS that request, and anything beside the claim would be dropped by it.
 //
 // That keeps `bd update <id> --claim --json` — gc's exclusive claim path —
 // working against an older bd serve. The two roles' result shapes line up
@@ -645,7 +849,8 @@ func (l *httpLifecycle) claimOnlyUpdate(ctx context.Context, req issueops.Update
 	// caller re-reads), where a borrowed one could pass over a write this claim
 	// never saw. Against a current server the claim rides updateIssue instead,
 	// whose `revision` Update stitches as it does for any patch, so the real
-	// token is missing only on this pre-#6890 fallback.
+	// token is missing only on this fallback, against a server without
+	// issues.update.claim.
 	if issue != nil {
 		if hydrated, hydrateErr := l.store.GetIssue(ctx, req.IssueID); hydrateErr == nil && hydrated != nil {
 			withLabels := *issue
@@ -765,6 +970,16 @@ func encodeIssuePatch(patch issueops.IssuePatch) (map[string]any, error) {
 	}
 	setString(out, "assignee", patch.Assignee)
 	setString(out, "parent_id", patch.ParentID)
+	// The gate members (issues.update.gates). Update has already refused them,
+	// before the dial, against a server that does not advertise the token;
+	// this only spells them.
+	setGatePatch(out, patch)
+	// The plane move (issues.update.persistence). Update has already refused
+	// it, before the dial, against a server that does not advertise the token;
+	// this only spells it.
+	if patch.Persistence.Set {
+		out["persistence"] = string(patch.Persistence.Value)
+	}
 	if metadataPatched(patch.Metadata) {
 		document, err := encodeMetadataPatch(patch.Metadata)
 		if err != nil {
@@ -894,10 +1109,6 @@ func refuseExcludedPatchMembers(patch issueops.IssuePatch) error {
 		return refuse(encode.OpUpdateIssue, "W-IssuePatch.ClosedBySession")
 	case patch.SpecID.Set:
 		return refuse(encode.OpUpdateIssue, "W-IssuePatch.SpecID")
-	case patch.AwaitID.Set:
-		return refuse(encode.OpUpdateIssue, "W-IssuePatch.AwaitID")
-	case patch.Persistence.Set:
-		return refuse(encode.OpUpdateIssue, "W-IssuePatch.Persistence")
 	}
 	return nil
 }

@@ -387,6 +387,32 @@ type Storage interface {
 	// assignee and status per reverted row, which is on_update, the same
 	// event Releaser fires. See hook_lease_reclaimer.go.
 	LeaseReclaimer() (issueops.LeaseReclaimer, error)
+	// Heartbeater returns the lease-refresh surface for this store: push the
+	// lease the caller holds on one issue forward by the store's TTL.
+	//
+	// It is a WRITE role and its hook decorator WRAPS: a refresh writes only
+	// the ephemeral lease row and fires nothing, but a re-arm (a live claim
+	// with no lease row, HeartbeatResult.Rearmed) is recorded as a mutation
+	// and fires on_update once. That is why RoleFiresHooks answers true for
+	// it, and a server must take it off a peeled store. See
+	// hook_heartbeater.go.
+	Heartbeater() (issueops.Heartbeater, error)
+	// BlockedLister returns the blocked-listing surface for this store: what
+	// `bd blocked` prints. It is a READ role and its hook decorator passes it
+	// through (hook_blocked_lister.go); the external-dependency decorator
+	// overrides it so the listing names unsatisfied external blockers, as its
+	// GetBlockedIssues does.
+	BlockedLister() (issueops.BlockedLister, error)
+
+	// MoleculeStepper returns the advance-a-molecule surface for this store:
+	// find a molecule's next ready step after one closed and, on request,
+	// claim it — the operation behind `bd close --continue`. Every local
+	// backend answers issueops.NewMoleculeStepper composed over its own
+	// roles; a remote backend serves it over its wire.
+	//
+	// It is a WRITE role and its hook decorator WRAPS: a claimed step fires
+	// on_update, as every claim does.
+	MoleculeStepper() (issueops.MoleculeStepper, error)
 
 	// Issue CRUD
 	CreateIssue(ctx context.Context, issue *types.Issue, actor string) error
@@ -964,6 +990,38 @@ type VersionedHistoryConfigurer interface {
 	SetVersionedHistoryEnabled(enabled bool)
 }
 
+// VersionedHistoryDeferrer is a VersionedHistoryConfigurer that can take the
+// store-plane half of the switch as a read to make later instead of an
+// answer now (internal/versionedhistory's ActivateStore and
+// ActivateProvider).
+//
+// It calls resolve inside the first write transaction it begins (a
+// unit-of-work provider: its first unit of work, read or write), before that
+// transaction's body runs, and then behaves as if
+// SetVersionedHistoryEnabled(answer) had been called at that point. The answer
+// is the row as that transaction reads it, not as it stood at open.
+// Until then it records nothing, which is all a plumbing that has not written
+// can have recorded. Asked this way, a plumbing that never writes never reads
+// the row, and one that does pays one statement inside a transaction it
+// opened anyway, rather than a transaction (on the embedded store, an engine
+// open) of its own at every open.
+//
+// A resolve that returns an error has not answered: the transaction it ran in
+// fails with that error before its body runs, so it writes nothing, and the
+// next write asks again. Like Apply, DeferVersionedHistory never turns an
+// enabled instance off; SetVersionedHistoryEnabled after it replaces the
+// pending read.
+type VersionedHistoryDeferrer interface {
+	VersionedHistoryConfigurer
+	DeferVersionedHistory(resolve VersionedHistoryResolver)
+}
+
+// VersionedHistoryResolver answers the versioned-history switch from the
+// plumbing's own config table. readConfig reads one config row inside the
+// transaction the answer first governs, returning "" and a nil error for a
+// row that is not there.
+type VersionedHistoryResolver func(ctx context.Context, readConfig func(ctx context.Context, key string) (string, error)) (enabled bool, err error)
+
 // LifecycleManager provides lifecycle inspection beyond Close().
 type LifecycleManager interface {
 	IsClosed() bool
@@ -1020,6 +1078,20 @@ type ReadyWorkCounter interface {
 // edge on each ready-work query.
 type ExternalDependencyQueryStore interface {
 	GetExternalBlockingDependencyRecords(ctx context.Context) (map[string][]*types.Dependency, error)
+}
+
+// BlockersBatchStore is IsBlocked for many ids in a bounded number of reads.
+// The answer holds exactly the ids IsBlocked reports blocked, each mapped to
+// the blocker list IsBlocked returns for it (nil when it has none); an id
+// IsBlocked reports unblocked, or that names no row, is absent. Decorators
+// that annotate a page of ids (the external-dependency policy's
+// BlockingAnnotator) use it instead of one IsBlocked per id, and fall back to
+// that loop on a store without it. It answers for the raw store alone, with no
+// external-dependency policy applied (no `external:` blocker is ever in it), so
+// it is meant to be called from inside that policy's decorator, not probed
+// through UnwrapStore by a caller holding the decorated store.
+type BlockersBatchStore interface {
+	IsBlockedWithBlockersBatch(ctx context.Context, ids []string) (map[string][]string, error)
 }
 
 // RemoteBackendStore is implemented by a DoltStorage that is a pure network
@@ -1080,6 +1152,79 @@ type Pinger interface {
 // is remote.
 type ExternalDependencyPolicyProber interface {
 	ServerEnforcesExternalDependencyPolicy(ctx context.Context) (bool, error)
+}
+
+type livePolicyProbeKey struct{}
+
+// WithLivePolicyProbe marks ctx as carrying a claim or a close: an
+// ExternalDependencyPolicyProber asked under it must answer from the server,
+// never from a cache another process wrote. A read can tolerate a cached
+// answer for its TTL; a write guard cannot, since a stale "the server
+// enforces it" would skip the client-side refusal of externally blocked work.
+func WithLivePolicyProbe(ctx context.Context) context.Context {
+	return context.WithValue(ctx, livePolicyProbeKey{}, true)
+}
+
+// LivePolicyProbe reports whether ctx was marked by WithLivePolicyProbe.
+func LivePolicyProbe(ctx context.Context) bool {
+	live, _ := ctx.Value(livePolicyProbeKey{}).(bool)
+	return live
+}
+
+// MoleculeAutoCloseProber is implemented by a DoltStorage whose closes may not
+// accept issueops.CloseRequest.AutoCloseMolecule — today exactly
+// httpclient.Store, whose server advertises it with
+// issues.close.autoCloseMolecule. Every local backend runs the auto-close in
+// the close's own transaction and does not implement this.
+//
+// A server that does not advertise it (an older bd serve, or a server whose
+// orchestrator owns the molecule lifecycle, as gc does) is answered false, and
+// the caller closes WITHOUT the flag: asking for it there is refused before
+// dialing, and the molecule's auto-close is that server's to run.
+type MoleculeAutoCloseProber interface {
+	ServesMoleculeAutoClose(ctx context.Context) (bool, error)
+}
+
+// ServesMoleculeAutoClose reports whether closes through s may set
+// issueops.CloseRequest.AutoCloseMolecule (MoleculeAutoCloseProber, looked up
+// through every decorator). A store that does not implement the prober runs
+// the auto-close itself and is answered true. A probe that fails is answered
+// true as well: the close dials the same handshake and reports its failure,
+// so nothing is hidden by asking for the auto-close.
+func ServesMoleculeAutoClose(ctx context.Context, s DoltStorage) bool {
+	prober, ok := UnwrapStore(s).(MoleculeAutoCloseProber)
+	if !ok {
+		return true
+	}
+	served, err := prober.ServesMoleculeAutoClose(ctx)
+	return err != nil || served
+}
+
+// MoleculeAdvanceProber is implemented by a DoltStorage whose MoleculeStepper
+// may not be served — today exactly httpclient.Store, whose server advertises
+// it with issues.advanceMolecule. Every local backend composes the stepper
+// over its own roles and does not implement this.
+type MoleculeAdvanceProber interface {
+	ServesMoleculeAdvance(ctx context.Context) (bool, error)
+}
+
+// ServesMoleculeAdvance reports whether s's MoleculeStepper can run
+// (MoleculeAdvanceProber, looked up through every decorator). A store that
+// does not implement the prober runs the advance itself and is answered true.
+// A probe that fails returns its error.
+//
+// `bd close --continue` asks BEFORE it closes: the advance is a second
+// operation after the close commits, so refusing it only then would leave
+// the step closed and the next step unclaimed. That is also why a failed
+// probe is not answered true, as ServesMoleculeAutoClose answers it: the
+// close would commit and only the advance, dialing the same handshake, would
+// fail — the half-done state the question exists to avoid.
+func ServesMoleculeAdvance(ctx context.Context, s DoltStorage) (bool, error) {
+	prober, ok := UnwrapStore(s).(MoleculeAdvanceProber)
+	if !ok {
+		return true, nil
+	}
+	return prober.ServesMoleculeAdvance(ctx)
 }
 
 // ExcludeIDsUnsupportedStore is implemented by a DoltStorage whose ready-work

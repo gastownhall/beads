@@ -663,7 +663,7 @@ func CheckDoltServerModeMismatch(path string) DoctorCheck {
 	if cfg != nil {
 		host := cfg.GetDoltServerHost()
 		port := doltserver.DefaultConfig(beadsDir).Port
-		addr := net.JoinHostPort(host, fmt.Sprintf("%d", port))
+		addr := doltutil.ServerAddr(host, port)
 		if _, err := doltserver.ProbeSQLServer("tcp", addr, 2*time.Second); err == nil {
 			serverReachable = true
 		}

@@ -58,6 +58,9 @@ type servedEnv struct {
 	dataDir   string
 	database  string
 	prefix    string
+	// base is the in-process server's URL, for a case that dials its own
+	// client the way the product does rather than through subject.
+	base *url.URL
 }
 
 const servedDatabase = "httpconf"
@@ -185,6 +188,7 @@ func newServedEnvExpecting(t *testing.T, prefix, expectID string, opts ...func(*
 		dataDir:  filepath.Join(beadsDir, "embeddeddolt"),
 		database: servedDatabase,
 		prefix:   prefix,
+		base:     base,
 	}
 }
 
@@ -299,6 +303,10 @@ func serveConfig(t *testing.T, s storage.DoltStorage) httpapi.Config {
 	fail("BatchGetter")
 	cfg.LeaseReclaimer, err = s.LeaseReclaimer()
 	fail("LeaseReclaimer")
+	cfg.Heartbeater, err = s.Heartbeater()
+	fail("Heartbeater")
+	cfg.BlockedLister, err = s.BlockedLister()
+	fail("BlockedLister")
 
 	// THE JOURNAL IS NOT AN ACCESSOR, alone among the roles above: it is reached
 	// by TYPE ASSERTION, because it is not on storage.DoltStorage and a backend

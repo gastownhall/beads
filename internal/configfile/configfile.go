@@ -20,6 +20,25 @@ type Config struct {
 	Database string `json:"database"`
 	Backend  string `json:"backend,omitempty"` // Storage backend: "dolt" (default), a registered extension, or a legacy rejection tombstone. Read via GetBackend().
 
+	// GraphMode identifies the workspace's data model, independently of its
+	// storage backend. An absent marker preserves existing Issue workspaces.
+	// This build opens only GraphModeDependency workspaces (see GetGraphMode);
+	// the marker is carried so a Save never strips it from a workspace this
+	// build must refuse.
+	GraphMode string `json:"graph_mode,omitempty"`
+
+	// Graph workspace binding, written by builds that create graph_mode
+	// workspaces. This build never reads them, and missing or mismatched
+	// values never authorize implicit bootstrap or migration. A Save carries
+	// these known fields only, with the tags graph-preview builds declare: a
+	// zero graph_schema_version and a false graph_ready are omitted, as those
+	// builds omit them, and a graph_* key outside this set is not kept.
+	GraphScopeURL      string `json:"graph_scope_url,omitempty"`
+	GraphAuthorityID   string `json:"graph_authority_id,omitempty"`
+	GraphWorkspace     string `json:"graph_workspace,omitempty"`
+	GraphSchemaVersion int    `json:"graph_schema_version,omitempty"`
+	GraphReady         bool   `json:"graph_ready,omitempty"`
+
 	// Deletions configuration
 	DeletionsRetentionDays int `json:"deletions_retention_days,omitempty"` // 0 means use default (3 days)
 
@@ -79,13 +98,39 @@ func ConfigPath(beadsDir string) string {
 	return filepath.Join(beadsDir, ConfigFileName)
 }
 
+// LegacyConfigFileName is the pre-metadata.json name of a workspace's
+// metadata file. Load migrates it into metadata.json; LoadForDiscovery reads
+// it in place.
+const LegacyConfigFileName = "config.json"
+
+// MetadataFilePath returns the path of the file beadsDir's metadata is read
+// from: the legacy config.json when metadata.json is absent and config.json
+// exists (the file LoadForDiscovery reads, and Load would migrate), and
+// ConfigPath otherwise. Messages that name the file holding a setting use it,
+// so a refusal made before any migration names the file the user must edit.
+// It only stats; an empty beadsDir returns ConfigPath("").
+func MetadataFilePath(beadsDir string) string {
+	path := ConfigPath(beadsDir)
+	if beadsDir == "" {
+		return path
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		return path
+	}
+	legacyPath := filepath.Join(beadsDir, LegacyConfigFileName)
+	if _, err := os.Stat(legacyPath); err == nil {
+		return legacyPath
+	}
+	return path
+}
+
 func Load(beadsDir string) (*Config, error) {
 	configPath := ConfigPath(beadsDir)
 
 	data, err := os.ReadFile(configPath) // #nosec G304 - controlled path from config
 	if os.IsNotExist(err) {
 		// Try legacy config.json location (migration path)
-		legacyPath := filepath.Join(beadsDir, "config.json")
+		legacyPath := filepath.Join(beadsDir, LegacyConfigFileName)
 		data, err = os.ReadFile(legacyPath) // #nosec G304 - controlled path from config
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -133,7 +178,7 @@ func Load(beadsDir string) (*Config, error) {
 func LoadForDiscovery(beadsDir string) (*Config, error) {
 	data, err := os.ReadFile(ConfigPath(beadsDir)) // #nosec G304 -- beadsDir is caller-selected workspace state
 	if os.IsNotExist(err) {
-		data, err = os.ReadFile(filepath.Join(beadsDir, "config.json")) // #nosec G304 -- legacy workspace state
+		data, err = os.ReadFile(filepath.Join(beadsDir, LegacyConfigFileName)) // #nosec G304 -- legacy workspace state
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
@@ -503,6 +548,16 @@ func IsLocalHostString(host string) bool {
 		return true
 	}
 	return false
+}
+
+// IsIPv6LoopbackHost reports whether host is the IPv6 loopback in either
+// spelling, "::1" or "[::1]". IsLocalHostString counts it as this machine, but
+// bd's own Dolt server listens on 127.0.0.1 only, so a server there is never
+// one bd started or can start. A caller that decides whether bd manages the
+// server at host, auto-starts it, or advises `bd dolt start` for it excludes
+// this host.
+func IsIPv6LoopbackHost(host string) bool {
+	return UnbracketHost(host) == "::1"
 }
 
 func (c *Config) IsDoltProxiedServerMode() bool {

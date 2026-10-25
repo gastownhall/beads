@@ -126,9 +126,29 @@ make install       # build and install bd to ~/.local/bin (canonical)
   certificate `--config=remote-exec`, agent hosts whose `~/.bazelrc` names the
   executor neither. Make yours the default with a `build --config=...` line in
   the gitignored `.bazelrc.local`, or pass `BAZEL_FLAGS=...` to make.
-- `go test` (`./scripts/test.sh`, `make test-go`) is an inner-loop
-  convenience only. CI does not enforce it, and it skips nogo, gofmt and the
-  guards; finish with `make test`.
+- Agents run tests only with `bazel test`, also while iterating on one
+  behavior:
+
+  ```bash
+  bazel test //cmd/bd:bd_test --config=ci --test_filter='^TestName$' --test_output=all
+  ```
+
+  A target also passes when the test never ran (a filter that matches
+  nothing, a skip, a file the configuration does not compile), so count a run
+  only when its log shows `--- PASS: TestName` and no `--- SKIP` for the test
+  or a `TestName/...` subtest: Go prints `--- PASS` for a test whose every
+  subtest skipped. "Check That the Test Ran" in
+  [engdocs/TESTING.md](engdocs/TESTING.md) names the tests `--config=ci` does
+  not run (Dolt-backed, `-short`-gated, integration-tagged, `TestEmbedded*`
+  and embedded-Dolt, files `BUILD.bazel` does not list) and the way into
+  each. An unchanged target returns its cached result, which is the same
+  evidence. Finish with `make test`.
+- Agents do not run `go test` (`./scripts/test.sh`, `make test-go`): CI does
+  not enforce it, it skips nogo, gofmt and the guards, and agent hosts may
+  refuse it. It stays a convenience for humans working offline. The exception
+  is regenerating golden files (`make corpus-regen`, `make githooks-regen`,
+  `BD_UPDATE_GOLDEN=1`), which Bazel cannot do: see "Regenerating Golden
+  Files" in [engdocs/TESTING.md](engdocs/TESTING.md).
 - **Do NOT** use `go build -o bd ./cmd/bd`, `go install ./cmd/bd`, or raw
   `go run ./cmd/bd ...`: they bypass the canonical build path, leave stale
   binaries, and raw `go run` misses the `gms_pure_go` tag. Use `make install`,

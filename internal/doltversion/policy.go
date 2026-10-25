@@ -7,19 +7,31 @@ import (
 )
 
 // RecommendedMin is the dolt version this package recommends for managed
-// proxied-server mode, based on the cross-version compatibility matrix run
-// 2026-07-25: it showed that cross-reading storage written by the beads
-// Dolt Go module (as opposed to writing it, which older dolt CLIs can also
-// do) requires an external dolt >= 2.0.0 — dolt 1.85 can *serve* proxied
-// mode but cannot *read* storage the module wrote, and dolt 1.52.1 fails at
-// both serving and reading. This is deliberately a recommendation, not a
-// hard floor (see CheckRecommended): an earlier design that hard-failed
-// startup below a version floor was rejected in adversarial review as
-// "policy without evidence" — the matrix only establishes an empirical
-// compatibility boundary for the read path, not a product decision to
-// refuse older binaries outright, and rollout should be allowed to proceed
-// on a warning while that policy question is settled.
-var RecommendedMin = MustParse("2.0.0")
+// proxied-server mode. 2.5.0 is the first release whose engine answers an
+// ungrouped MAX or MIN over an unmatched primary-key prefix with one NULL row:
+// 2.4.0 through 2.4.2 return no row (dolthub/dolt#12093) and panic on an
+// ungrouped MAX of a non-key column under a fully bound primary key
+// (dolthub/go-mysql-server#4037). Three older boundaries sit below it.
+// Releases before 2.4.0 mis-plan a join (dolthub/dolt#11886). 2.3.0 and 2.3.1
+// regressed CALL DOLT_RESET('--hard') (dolthub/dolt#11581, fixed in 2.3.2 by
+// dolthub/dolt#11652). Releases before 2.3.3 cannot write to a database
+// holding a descending index column (2.3.3 is the first release that stores
+// one, dolthub/dolt#11746): an UPDATE or DELETE on issues fails on
+// fk_comp_snap_issue, and other writes and information_schema queries fail
+// with "table has unknown fields". Every database bd creates in embedded mode
+// holds one, and so does any database whose schema a dolt sql-server 2.3.3 or
+// newer created. The embedded engine bd links and the CI pin are both 2.6.0
+// (scripts/ci/install-dolt.sh), which TestPinnedDoltCLIAtLeastRecommendedMin
+// keeps at or above this value; docs/architecture/dolt.md ("Which Dolt version
+// to install") records the dated measurements.
+//
+// This is deliberately a recommendation, not a hard floor (see
+// CheckRecommended): an earlier design that hard-failed startup below a
+// version floor was rejected in adversarial review as "policy without
+// evidence", and rollout should be allowed to proceed on a warning while that
+// policy question is settled. Older binaries produce a warning rather than
+// preventing startup.
+var RecommendedMin = MustParse("2.5.0")
 
 // warningKind distinguishes the two situations ProbeWithPolicy can warn
 // about, so Warning.Message can render the right wording for each without
@@ -80,8 +92,14 @@ func (w *Warning) Message() string {
 		)
 	default:
 		return fmt.Sprintf(
-			"dolt %s is older than the recommended minimum %s for proxied-server mode; "+
-				"cross-reading storage written by newer dolt Go modules may fail (see gastownhall/beads doltversion package docs)",
+			"dolt %s is older than the recommended minimum %s for proxied-server mode: "+
+				"dolt 2.4.0 through 2.4.2 return no row for an ungrouped MAX or MIN over an unmatched primary-key prefix (dolthub/dolt#12093), "+
+				"dolt before 2.4.0 can return wrong join results (dolthub/dolt#11886), "+
+				"dolt 2.3.0 and 2.3.1 can leave CALL DOLT_RESET('--hard') failing with \"context canceled\" on a freshly created database, "+
+				"and dolt before 2.3.3 cannot write to a database holding a descending index "+
+				"(every database bd creates in embedded mode, and any database whose schema a dolt sql-server 2.3.3 or newer created): "+
+				"an UPDATE or DELETE on issues fails on fk_comp_snap_issue, other writes with \"table has unknown fields\" "+
+				"(see gastownhall/beads doltversion package docs)",
 			w.Probed, w.Recommended,
 		)
 	}

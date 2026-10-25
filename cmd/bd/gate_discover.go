@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // GHWorkflowRun represents a GitHub workflow run from `gh run list --json`
@@ -91,7 +92,7 @@ func runGateDiscover(cmd *cobra.Command, args []string) error {
 
 	ctx := rootCtx
 
-	gates, err := findPendingGates()
+	gates, err := findPendingGates(ctx)
 	if err != nil {
 		return HandleError("finding gates: %v", err)
 	}
@@ -124,7 +125,11 @@ func runGateDiscover(cmd *cobra.Command, args []string) error {
 	})
 
 	// Step 3/4: report matches (and, outside dry-run, persist them)
+	// matchCount counts the gates whose run ID was recorded (or, under
+	// --dry-run, would be); updateFailures the matched gates whose write
+	// failed, which fail the command after the summary.
 	matchCount := 0
+	updateFailures := 0
 	for _, m := range matches {
 		if m.err != nil {
 			fmt.Fprintf(os.Stderr, "  %s %s - %v\n",
@@ -140,20 +145,22 @@ func runGateDiscover(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
-		matchCount++
 		runIDStr := strconv.FormatInt(m.run.DatabaseID, 10)
 
 		if dryRun {
+			matchCount++
 			fmt.Printf("  %s %s → run %s (%s) [dry-run]\n",
 				ui.RenderPass("✓"), ui.RenderID(m.gate.ID), runIDStr, m.run.Status)
 			continue
 		}
 
 		if err := updateGateAwaitID(ctx, m.gate.ID, runIDStr); err != nil {
+			updateFailures++
 			fmt.Fprintf(os.Stderr, "  %s %s - update failed: %v\n",
 				ui.RenderFail("✗"), ui.RenderID(m.gate.ID), err)
 			continue
 		}
+		matchCount++
 
 		fmt.Printf("  %s %s → run %s (%s)\n",
 			ui.RenderPass("✓"), ui.RenderID(m.gate.ID), runIDStr, m.run.Status)
@@ -186,6 +193,9 @@ func runGateDiscover(cmd *cobra.Command, args []string) error {
 			details = append(details, fmt.Sprintf("%s: %v", label, failures[repo]))
 		}
 		return HandleError("querying GitHub runs failed for %d repo(s): %s", len(failures), strings.Join(details, "; "))
+	}
+	if updateFailures > 0 {
+		return HandleError("recording the discovered run ID failed for %d gate(s)", updateFailures)
 	}
 
 	return nil
@@ -374,21 +384,32 @@ func workflowNameMatches(hint, workflowName, runName string) bool {
 
 // findPendingGates returns open gh:run gates that need run ID discovery.
 // This includes gates with empty AwaitID OR non-numeric AwaitID (workflow name hint).
-func findPendingGates() ([]*types.Issue, error) {
-	var gates []*types.Issue
-
-	gateType := types.IssueType("gate")
-	filter := types.IssueFilter{
-		IssueType:     &gateType,
-		ExcludeStatus: []types.Status{types.StatusClosed},
+//
+// The open gates come from issueops.ListGates over the route's Querier, the
+// entry `bd gate list` and `bd gate check` use, so a connected HTTP workspace
+// answers it with queryIssues rather than refusing the raw storage filter.
+func findPendingGates(ctx context.Context) ([]*types.Issue, error) {
+	querier, err := openQuerier()
+	if err != nil {
+		return nil, err
 	}
+	return findPendingGatesWith(ctx, querier)
+}
 
-	allGates, err := store.SearchIssues(rootCtx, "", filter)
+// findPendingGatesWith is findPendingGates over a given Querier. Template
+// gates are skipped: a template is read-only (work is poured from it), so its
+// await_id is never a run to discover.
+func findPendingGatesWith(ctx context.Context, querier issueops.Querier) ([]*types.Issue, error) {
+	allGates, err := issueops.ListGates(ctx, querier, issueops.GateListRequest{})
 	if err != nil {
 		return nil, fmt.Errorf("search gates: %w", err)
 	}
 
+	var gates []*types.Issue
 	for _, g := range allGates {
+		if g.IsTemplate {
+			continue
+		}
 		if needsDiscovery(g) {
 			gates = append(gates, g)
 		}
@@ -576,13 +597,11 @@ func matchGateToRun(gate *types.Issue, runs []GHWorkflowRun, maxAge time.Duratio
 	return nil
 }
 
-// updateGateAwaitID updates a gate's await_id field
+// updateGateAwaitID records a discovered run ID as a gate's await_id through
+// the Lifecycle role (persistGateCheckAwaitID), the write `bd gate check` and
+// `bd close` make for the same discovery. A connected HTTP workspace sends it
+// as updateIssue behind issues.update.gates, and a server that does not
+// advertise that token refuses it before any request is sent.
 func updateGateAwaitID(_ interface{}, gateID, runID string) error {
-	updates := map[string]interface{}{
-		"await_id": runID,
-	}
-	if err := store.UpdateIssue(rootCtx, gateID, updates, currentActor()); err != nil {
-		return err
-	}
-	return nil
+	return persistGateCheckAwaitID(rootCtx, gateID, runID)
 }

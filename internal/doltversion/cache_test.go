@@ -38,7 +38,8 @@ func forkCount(t *testing.T, countFile string) int {
 func TestCachedProbeHitSkipsFork(t *testing.T) {
 	dir := t.TempDir()
 	countFile := filepath.Join(dir, "count")
-	stub := writeCountingVersionStub(t, dir, "dolt", "dolt version 2.1.0", countFile)
+	recent := RecommendedMin.String()
+	stub := writeCountingVersionStub(t, dir, "dolt", "dolt version "+recent, countFile)
 	cachePath := filepath.Join(dir, "cache", "dolt-probe.json")
 	now := time.Date(2026, 8, 11, 12, 0, 0, 0, time.UTC)
 
@@ -63,8 +64,8 @@ func TestCachedProbeHitSkipsFork(t *testing.T) {
 	if got := forkCount(t, countFile); got != 1 {
 		t.Errorf("after second probe: fork count = %d, want still 1 (cache hit must not fork)", got)
 	}
-	if second.Identity.Version.String() != "2.1.0" {
-		t.Errorf("cached Version = %v, want 2.1.0", second.Identity.Version)
+	if second.Identity.Version.String() != recent {
+		t.Errorf("cached Version = %v, want %s", second.Identity.Version, recent)
 	}
 	if second.Warning != nil {
 		t.Errorf("cached Warning = %v, want nil for a recent version", second.Warning)
@@ -74,7 +75,8 @@ func TestCachedProbeHitSkipsFork(t *testing.T) {
 func TestCachedProbeMissOnBinaryChange(t *testing.T) {
 	dir := t.TempDir()
 	countFile := filepath.Join(dir, "count")
-	stub := writeCountingVersionStub(t, dir, "dolt", "dolt version 2.1.0", countFile)
+	recent := RecommendedMin.String()
+	stub := writeCountingVersionStub(t, dir, "dolt", "dolt version "+recent, countFile)
 	cachePath := filepath.Join(dir, "dolt-probe.json")
 	now := time.Date(2026, 8, 11, 12, 0, 0, 0, time.UTC)
 
@@ -107,7 +109,8 @@ func TestCachedProbeMissOnBinaryChange(t *testing.T) {
 func TestCachedProbeCorruptCacheFailsOpen(t *testing.T) {
 	dir := t.TempDir()
 	countFile := filepath.Join(dir, "count")
-	stub := writeCountingVersionStub(t, dir, "dolt", "dolt version 2.1.0", countFile)
+	recent := RecommendedMin.String()
+	stub := writeCountingVersionStub(t, dir, "dolt", "dolt version "+recent, countFile)
 	cachePath := filepath.Join(dir, "dolt-probe.json")
 	if err := os.WriteFile(cachePath, []byte("{not json"), 0o600); err != nil {
 		t.Fatalf("write corrupt cache: %v", err)
@@ -120,8 +123,8 @@ func TestCachedProbeCorruptCacheFailsOpen(t *testing.T) {
 	if res.FromCache {
 		t.Error("FromCache = true, want false (corrupt cache must be ignored)")
 	}
-	if res.Identity.Version.String() != "2.1.0" {
-		t.Errorf("Version = %v, want 2.1.0", res.Identity.Version)
+	if res.Identity.Version.String() != recent {
+		t.Errorf("Version = %v, want %s", res.Identity.Version, recent)
 	}
 	// The successful probe must have repaired the cache file.
 	if _, ok := loadCacheEntry(cachePath); !ok {

@@ -98,7 +98,16 @@ var mutationEntryPoints = []string{
 	"ClaimReadyIssueInTx",
 	"UnclaimIssueInTx",
 	"UnclaimIssueIfAssigneeInTx",
-	// HeartbeatIssueInTx is deliberately absent — see journalExemptMutations.
+	// The heartbeat family journals on its RE-ARM path only (a live claim
+	// with no lease row the caller holds: row_lock reminted, a lease granted,
+	// recorded as a mutation). Its REFRESH path writes only the clone-local
+	// leases table and still records nothing; the fast-path return in
+	// RenewLeaseInTx says why. The ruling that exempted the whole family
+	// changed when the re-arm became a mutation (it must collide with a racing
+	// release or close on row_lock), so the family is listed here.
+	"RenewLeaseInTx",
+	"HeartbeatIssueInTx",
+	"ExecuteHeartbeatInTx",
 	"ReclaimExpiredLeasesInTx",
 	// plane moves, graph edges, labels, comments, renames
 	"PromoteFromEphemeralInTx",
@@ -194,12 +203,38 @@ var beadDMLExemptions = map[string]string{
 	// equivalents used by the uow leg — version_completeness_test.go pins the
 	// set) immediately after those callers already invoke RecordEventInTx, so the
 	// mutation itself is already journaled by the time RecordVersionInTx runs.
-	// Its own UPDATE issues SET current_revision = ? only advances a
-	// denormalized pointer to match the snapshot row it just inserted into
-	// issue_versions (not a bead table, so it can't anchor the exemption on
-	// its own) — bookkeeping for an already-journaled mutation, not a second
-	// mutation that needs its own emit.
+	// Its own UPDATE issues SET current_revision = ?, updated_at = updated_at
+	// only advances a denormalized pointer to match the snapshot row it just
+	// inserted into issue_versions (not a bead table, so it can't anchor the
+	// exemption on its own), leaving updated_at where the mutation put it —
+	// bookkeeping for an already-journaled mutation, not a second mutation
+	// that needs its own emit.
 	"RecordVersionInTx": "advances the denormalized current_revision pointer to match a snapshot just inserted into issue_versions (not a bead table); called from the same entry points that already journal the mutation via RecordEventInTx, so this is bookkeeping for an already-journaled mutation, not a second one",
+	// RecordVersionForCreateInTx is RecordVersionInTx's create-shaped sibling
+	// (design §16.2b write-fence, be-h89oq): same entry points, same
+	// already-journaled-by-the-caller bookkeeping, plus stamping
+	// participation_generation on the row it just inserted into issue_versions.
+	"RecordVersionForCreateInTx": "advances the denormalized current_revision pointer and stamps participation_generation to match a snapshot just inserted into issue_versions (not a bead table); called from the same create entry points that already journal the mutation via RecordEventInTx, so this is bookkeeping for an already-journaled mutation, not a second one",
+	// CarryParticipationToWispInTx is the demotion half of a plane round
+	// trip's participation carry (carryParticipationInTx): it writes only the
+	// participation_generation bookkeeping column of the wisps row the demotion
+	// just inserted, and the demoting caller (DoltStore.demoteToWispInTx)
+	// journals the move itself.
+	"CarryParticipationToWispInTx": "writes only the participation_generation bookkeeping column of the wisps row a demotion just inserted; the demoting caller journals the move, so this is bookkeeping for an already-journaled mutation, not a second one",
+
+	// RecordVersionAtInTx (R7.1 as-of read, gastownhall/beads#5898 rev 9,
+	// gastownhall/beads#6136) is RecordVersionInTx's test-support
+	// twin: it shares RecordVersionInTx's body (recordVersionAtInTx) but skips
+	// the versionedHistoryEnabled gate and takes an explicit historical
+	// timestamp, so an as-of-read conformance fixture can mint a version row
+	// dated in the past. It has no production caller and is not part of any
+	// mutationEntryPoints flow — only per-leg AsOfReadFixture.MintAt
+	// implementations call it, always directly, never from inside a journaled
+	// mutation. There is no separate bead mutation here for it to double-journal:
+	// the same "UPDATE issues SET current_revision only advances a pointer to
+	// a issue_versions snapshot, not a bead table" reasoning as RecordVersionInTx
+	// applies verbatim.
+	"RecordVersionAtInTx": "test-support twin of RecordVersionInTx (R7.1 as-of read); mints a historical-timestamped snapshot directly for conformance fixtures, with no production caller and no mutation of its own to journal — its UPDATE issues SET current_revision only advances a pointer to the issue_versions row it just inserted (not a bead table)",
 }
 
 // journalExemptMutations are mutation paths that deliberately do NOT journal
@@ -209,13 +244,7 @@ var beadDMLExemptions = map[string]string{
 // never are. TestExemptMutationsDoNotJournal pins the decision from the other
 // side — each must exist and must NOT emit — so re-adding an emit fails loudly
 // instead of silently reversing the ruling.
-var journalExemptMutations = map[string]string{
-	"HeartbeatIssueInTx": "high-frequency lease keepalive: writes only the clone-local `leases` table " +
-		"(lease-liveness state), never a durable bead field. Journaling it would put a full-snapshot " +
-		"write plus the shared seq-counter serialization on the hottest write in the fleet, and a replay " +
-		"consumer gains nothing — lease state is working-set-plane and expires on its own. Lease RECLAIM " +
-		"is the opposite case and does journal: it clears assignee and reverts status, which is durable.",
-}
+var journalExemptMutations = map[string]string{}
 
 // TestEveryMutationFunctionJournals parses this package's source, builds the
 // intra-package call graph, and asserts every mutation entry point either

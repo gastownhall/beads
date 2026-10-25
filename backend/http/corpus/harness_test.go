@@ -142,6 +142,10 @@ func corpusServeConfig(t *testing.T, s storage.DoltStorage) httpapi.Config {
 	must("BatchGetter")
 	cfg.LeaseReclaimer, err = s.LeaseReclaimer()
 	must("LeaseReclaimer")
+	cfg.Heartbeater, err = s.Heartbeater()
+	must("Heartbeater")
+	cfg.BlockedLister, err = s.BlockedLister()
+	must("BlockedLister")
 	cfg.Relations, err = s.IssueRelations()
 	must("IssueRelations")
 	cfg.Commenter, err = s.Commenter()
@@ -209,7 +213,22 @@ func clip(s string, n int) string {
 // runBD runs the built bd binary in dir with a hermetic environment.
 func runBD(t *testing.T, bin, dir string, env []string, stdin string, args ...string) bdResult {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), bdTimeout)
+	r, err := execBD(context.Background(), bin, dir, env, stdin, args...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+// execBD is runBD without the testing.T: it returns an error, rather than
+// failing a test, when bd could not be run at all or ctx was cancelled, so it
+// is safe on a goroutine that is not the test's. A bd that runs and fails is
+// a bdResult with its exit code, as in runBD.
+func execBD(ctx context.Context, bin, dir string, env []string, stdin string, args ...string) (bdResult, error) {
+	if err := ctx.Err(); err != nil {
+		return bdResult{}, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, bdTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Dir = dir
@@ -224,16 +243,18 @@ func runBD(t *testing.T, bin, dir string, env []string, stdin string, args ...st
 	if err != nil {
 		var ee *exec.ExitError
 		switch {
-		case ctx.Err() != nil:
+		case errors.Is(ctx.Err(), context.DeadlineExceeded):
 			code = -1
 			e.WriteString(fmt.Sprintf("\n[corpus harness] bd timed out after %s", bdTimeout))
+		case ctx.Err() != nil:
+			return bdResult{}, fmt.Errorf("bd %s: %w", strings.Join(args, " "), ctx.Err())
 		case errors.As(err, &ee):
 			code = ee.ExitCode()
 		default:
-			t.Fatalf("running bd %s: %v", strings.Join(args, " "), err)
+			return bdResult{}, fmt.Errorf("running bd %s: %v", strings.Join(args, " "), err)
 		}
 	}
-	return bdResult{stdout: o.String(), stderr: e.String(), code: code}
+	return bdResult{stdout: o.String(), stderr: e.String(), code: code}, nil
 }
 
 // minimalBDEnv is backend/http's hermetic bd environment: PATH and the few

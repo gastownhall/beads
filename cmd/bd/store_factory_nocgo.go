@@ -22,6 +22,12 @@ func isEmbeddedMode() bool {
 	return false
 }
 
+// isEmbeddedStore reports whether st is an embedded Dolt store, which a
+// non-CGO build never opens.
+func isEmbeddedStore(storage.DoltStorage) bool {
+	return false
+}
+
 func usesProxiedServer() bool {
 	if shouldUseGlobals() {
 		return proxiedServerMode
@@ -34,6 +40,7 @@ func usesProxiedServer() bool {
 // exists here too so the root pre-run's registry arm has one activating
 // construction path in both builds.
 func newRegisteredBackendStore(ctx context.Context, name, beadsDir string, readOnly bool) (s storage.DoltStorage, err error) {
+	defer func() { s, err = activateVersionedHistoryStore(ctx, s, err) }()
 	defer func() { s, err = activateEventsJournalStore(beadsDir, s, err) }()
 	backend, ok := backends.Lookup(name)
 	if !ok {
@@ -48,6 +55,7 @@ func newRegisteredBackendStore(ctx context.Context, name, beadsDir string, readO
 // newDoltStore applies events-journal activation for the same reason its CGO
 // twin does — see the note at the top of events_journal.go.
 func newDoltStore(ctx context.Context, cfg *dolt.Config) (s storage.DoltStorage, err error) {
+	defer func() { s, err = activateVersionedHistoryStore(ctx, s, err) }()
 	defer func() { s, err = activateEventsJournalStore(cfg.BeadsDir, s, err) }()
 	if cfg.ProxiedServer {
 		return nil, errProxiedStoreUnrouted()
@@ -65,7 +73,13 @@ func acquireEmbeddedLock(_ string, _ bool) (util.Unlocker, error) {
 
 // newDoltStoreFromConfig creates a SQL-server-backed storage backend from config.
 func newDoltStoreFromConfig(ctx context.Context, beadsDir string) (s storage.DoltStorage, err error) {
+	defer func() { s, err = activateVersionedHistoryStore(ctx, s, err) }()
 	defer func() { s, err = activateEventsJournalStore(beadsDir, s, err) }()
+	// Before Load can migrate a legacy config.json; validateConfiguredBackend
+	// below re-checks the loaded config.
+	if err := checkDiscoveredBackend(beadsDir); err != nil {
+		return nil, err
+	}
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil {
 		// Name the real cause: without this, a present-but-unloadable
@@ -89,12 +103,25 @@ func newDoltStoreFromConfig(ctx context.Context, beadsDir string) (s storage.Dol
 	return nil, fmt.Errorf("%s", nocgoEmbeddedErrMsg)
 }
 
+// newExistingDoltStoreFromConfig is the non-CGO twin of the CGO build's
+// routed-write factory. That one differs from newDoltStoreFromConfig only by
+// refusing to create a missing EMBEDDED database, and this build has no
+// embedded store; a server-mode open never creates a missing database.
+func newExistingDoltStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
+	return newDoltStoreFromConfig(ctx, beadsDir)
+}
+
 // newReadOnlyStoreFromConfig creates a read-only SQL-server-backed storage
 // backend. It does not activate the events journal: the store refuses writes,
 // so there is no mutation for a journal row to accompany (exemption is recorded
 // in the construction guard). The registry arm is the exception the cgo
 // twin, openNonMutatingStoreFromConfig, describes.
 func newReadOnlyStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
+	// Before Load can migrate a legacy config.json; validateConfiguredBackend
+	// below re-checks the loaded config.
+	if err := checkDiscoveredBackend(beadsDir); err != nil {
+		return nil, err
+	}
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil {
 		return nil, fmt.Errorf("load %s: %w", configfile.ConfigPath(beadsDir), err)

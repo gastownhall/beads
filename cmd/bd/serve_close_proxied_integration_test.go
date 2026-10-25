@@ -523,8 +523,8 @@ func TestProxiedServerServeClose(t *testing.T) {
 // bdProxiedCloseFailedError runs an unforced `bd close --json` of id that must
 // be refused and returns the failed[].error it reports for id — the
 // route-independent spelling of the refusal (see assertCloseFailedErrorIsTyped).
-// A closable companion rides along because the failure report is the
-// partial-batch shape: a lone refused id prints no failed[] array.
+// A closable companion rides along, so the report read here is the
+// partial-batch shape, whose failed[] must name id alone.
 func bdProxiedCloseFailedError(t *testing.T, bd, dir, id string) string {
 	t.Helper()
 	companion := bdProxiedCreate(t, bd, dir, "closable companion", "-p", "2")

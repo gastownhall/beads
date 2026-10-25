@@ -128,6 +128,10 @@ func TestSharedServerDatabase(t *testing.T) {
 		cfg  Config
 	}{
 		{name: "remote host", cfg: Config{ServerHost: "db.example.com", ServerPort: 3307}},
+		// bd's own server listens on 127.0.0.1 only, so a live one tracked on
+		// the same port is not the server at the IPv6 loopback.
+		{name: "IPv6 loopback", cfg: Config{ServerHost: "::1", ServerPort: 3307}},
+		{name: "bracketed IPv6 loopback", cfg: Config{ServerHost: "[::1]", ServerPort: 3307}},
 		{name: "TLS endpoint", cfg: Config{ServerHost: "127.0.0.1", ServerPort: 3307, ServerTLS: true}},
 		{name: "unix socket", cfg: Config{ServerHost: "127.0.0.1", ServerSocket: "/tmp/dolt.sock"}},
 	} {

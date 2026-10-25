@@ -11,6 +11,7 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/lockfile"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/backends"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/util"
@@ -37,6 +38,15 @@ func isEmbeddedMode() bool {
 	return !usesSQLServer()
 }
 
+// isEmbeddedStore reports whether st is an embedded Dolt store. Unlike
+// isEmbeddedMode it answers for the store, not the command: a store opened in
+// another workspace takes that workspace's backend (openDoltStoreFromConfig),
+// so a server-mode command can hold an embedded one.
+func isEmbeddedStore(st storage.DoltStorage) bool {
+	_, ok := storage.UnwrapStore(st).(*embeddeddolt.EmbeddedDoltStore)
+	return ok
+}
+
 func usesProxiedServer() bool {
 	if shouldUseGlobals() {
 		return proxiedServerMode
@@ -56,6 +66,7 @@ func usesProxiedServer() bool {
 // registered backend decides for itself what read-only means, and refusing to
 // offer it the setting would be this factory guessing on its behalf.
 func newRegisteredBackendStore(ctx context.Context, name, beadsDir string, readOnly bool) (s storage.DoltStorage, err error) {
+	defer func() { s, err = activateVersionedHistoryStore(ctx, s, err) }()
 	defer func() { s, err = activateEventsJournalStore(beadsDir, s, err) }()
 	backend, ok := backends.Lookup(name)
 	if !ok {
@@ -68,6 +79,7 @@ func newRegisteredBackendStore(ctx context.Context, name, beadsDir string, readO
 }
 
 func newDoltStore(ctx context.Context, cfg *dolt.Config) (s storage.DoltStorage, err error) {
+	defer func() { s, err = activateVersionedHistoryStore(ctx, s, err) }()
 	defer func() { s, err = activateEventsJournalStore(cfg.BeadsDir, s, err) }()
 	if cfg.ProxiedServer {
 		return nil, errProxiedStoreUnrouted()
@@ -155,8 +167,34 @@ func acquireEmbeddedLock(beadsDir string, serverMode bool) (util.Unlocker, error
 // keeps that true for the dolt.shared-server layer; the one deliberate
 // exception is BEADS_DOLT_SHARED_SERVER, which is machine-global in every
 // resolver in the tree (see sharedServerModeForWorkspace).
-func newDoltStoreFromConfig(ctx context.Context, beadsDir string) (s storage.DoltStorage, err error) {
+func newDoltStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
+	return openDoltStoreFromConfig(ctx, beadsDir, false)
+}
+
+// newExistingDoltStoreFromConfig is newDoltStoreFromConfig for a write routed
+// to another workspace (a prefix route or an auto-route, see
+// openRoutedTargetStore): it opens that workspace's database writable, but
+// refuses an embedded workspace that holds no database yet instead of creating
+// one there. The routed open runs before the lookup it serves, so a created
+// database would outlive an id that misses, and `bd bootstrap` would then take
+// the empty database for the real one and skip the clone from sync.remote. The
+// probe is embeddeddolt.HasRepository, the adapter's own marker check. A
+// server-mode open already refuses a missing database: it does not set
+// CreateIfMissing.
+func newExistingDoltStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
+	return openDoltStoreFromConfig(ctx, beadsDir, true)
+}
+
+// openDoltStoreFromConfig is the body of newDoltStoreFromConfig and
+// newExistingDoltStoreFromConfig; requireExisting selects the latter.
+func openDoltStoreFromConfig(ctx context.Context, beadsDir string, requireExisting bool) (s storage.DoltStorage, err error) {
+	defer func() { s, err = activateVersionedHistoryStore(ctx, s, err) }()
 	defer func() { s, err = activateEventsJournalStore(beadsDir, s, err) }()
+	// Before Load can migrate a legacy config.json; validateConfiguredBackend
+	// below re-checks the loaded config.
+	if err := checkDiscoveredBackend(beadsDir); err != nil {
+		return nil, err
+	}
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil {
 		// A present-but-unloadable metadata.json must not degrade to the
@@ -164,7 +202,7 @@ func newDoltStoreFromConfig(ctx context.Context, beadsDir string) (s storage.Dol
 		// directory is an empty relic, and opening it silently turns every
 		// query into an empty result set with exit 0 (false-empty). Absent
 		// metadata.json (cfg == nil, err == nil) keeps the embedded default.
-		return nil, fmt.Errorf("load %s: %w (refusing to fall back to the embedded store)", configfile.ConfigPath(beadsDir), err)
+		return nil, fmt.Errorf("load %s: %w (refusing to fall back to the embedded store)", remedy.PrintedValue(configfile.ConfigPath(beadsDir)), remedy.PrintedError(err))
 	}
 	if err := validateConfiguredBackend(cfg, beadsDir); err != nil {
 		return nil, err
@@ -178,6 +216,12 @@ func newDoltStoreFromConfig(ctx context.Context, beadsDir string) (s storage.Dol
 	}
 	if effectiveServerMode(beadsDir, cfg) {
 		return dolt.NewFromConfig(ctx, beadsDir)
+	}
+	// Refuse before the sanitize migration below, which renames the legacy
+	// directory and rewrites metadata.json: a refused open writes nothing.
+	if requireExisting && !embeddeddolt.HasRepository(beadsDir) {
+		return nil, fmt.Errorf("embeddeddolt: no embedded database at %s; a routed write does not create one (run 'bd bootstrap' in that repository first)",
+			remedy.PrintedValue(filepath.Join(beadsDir, "embeddeddolt")))
 	}
 	database := configfile.DefaultDoltDatabase
 	if cfg != nil {
@@ -211,7 +255,7 @@ func migrateHyphenatedDB(beadsDir string, cfg *configfile.Config, oldName, newNa
 		switch {
 		case newErr == nil:
 			return fmt.Errorf("cannot auto-migrate database: both %q and %q exist under %s; remove one manually and retry",
-				oldName, newName, dataDir)
+				oldName, newName, remedy.PrintedValue(dataDir))
 		case !os.IsNotExist(newErr):
 			return fmt.Errorf("checking target directory %q: %w", newDir, newErr)
 		default:
@@ -270,13 +314,18 @@ func newPreviewStoreFromConfig(ctx context.Context, beadsDir string) (storage.Do
 // OpenNonMutating hook on backends.Backend, which this function would call
 // instead, is the follow-up that closes the exception.
 func openNonMutatingStoreFromConfig(ctx context.Context, beadsDir string, preview bool) (storage.DoltStorage, error) {
+	// Before Load can migrate a legacy config.json; validateConfiguredBackend
+	// below re-checks the loaded config.
+	if err := checkDiscoveredBackend(beadsDir); err != nil {
+		return nil, err
+	}
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil {
 		// Same contract as newDoltStoreFromConfig: a present-but-unloadable
 		// metadata.json is a hard error, not a silent embedded fallback —
 		// and the error must name the real cause rather than the downstream
 		// "database not found" the embedded open would produce.
-		return nil, fmt.Errorf("load %s: %w (refusing to fall back to the embedded store)", configfile.ConfigPath(beadsDir), err)
+		return nil, fmt.Errorf("load %s: %w (refusing to fall back to the embedded store)", remedy.PrintedValue(configfile.ConfigPath(beadsDir)), remedy.PrintedError(err))
 	}
 	if err := validateConfiguredBackend(cfg, beadsDir); err != nil {
 		return nil, err

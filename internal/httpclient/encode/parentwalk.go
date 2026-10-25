@@ -19,8 +19,12 @@ import (
 // findAllDescendants), and workapi.BuildListFilter populates ExcludeStatus,
 // Pinned, IsTemplate, ExcludeTypes, Ephemeral and SkipWisps on EVERY default
 // listing. So the "ParentID-only shape" D4 originally named can never occur, and
-// encoding those members verbatim is impossible anyway: listIssues publishes no
-// exclude_status, no exclude_type and no is_template.
+// encoding those members verbatim was impossible when D4 was written: listIssues
+// published no exclude_status, no exclude_type and no is_template. It still
+// publishes no is_template. `issues.list.filters` has since published the other
+// two, but as the caller's own exclusions, which the server appends to the
+// defaults it derives, so a derived list sent verbatim would still not say what
+// the intents say. The walk sends intents and does not consult that token.
 //
 // THE RESOLUTION (escalation ga-2ieek, spec revision 6b428bf63). The wire
 // publishes INTENTS — `all`, `include_templates`, `include_gates`,
@@ -212,12 +216,21 @@ func recognizeIntents(f types.IssueFilter, cfg ListConfig) (walkIntents, error) 
 	}
 	// The same rule for the plane, and it has TWO suppressors rather than one:
 	// `--include-infra` admits the wisp plane as well as the infra types, and an
-	// infra `--type` routes to the plane on its own. Either one leaves SkipWisps
-	// false whatever the ephemeral flag was, so under either of them the pair is
-	// the same question as the infra intent alone — `--all --no-pinned` and
-	// `--status all` again — and inventing the second parameter would be a
-	// distinction the re-derivation cannot see.
-	if intents.IncludeInfra || cfg.IsInfra(issueType) {
+	// infra `--type` admits it on its own. Either one leaves SkipWisps false
+	// whatever the ephemeral flag was, so SkipWisps cannot carry the intent
+	// under either of them.
+	//
+	// Under `--include-infra` alone the pair is the same question as the infra
+	// intent — `--all --no-pinned` and `--status all` again — and inventing the
+	// second parameter would be a distinction the re-derivation cannot see. An
+	// infra `--type` is different: it also narrows the read to that type's
+	// ephemeral rows, and the ephemeral flag LIFTS that narrowing (so durable
+	// rows of the type come back too), so there the plane intent leaves its
+	// trace in Ephemeral instead — present without the flag, absent with it.
+	switch {
+	case cfg.IsInfra(issueType):
+		intents.IncludeEphemeral = f.Ephemeral == nil
+	case intents.IncludeInfra:
 		intents.IncludeEphemeral = false
 	}
 

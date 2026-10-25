@@ -410,9 +410,9 @@ var nogoConfigurations = []nogoConfigurationRow{
 	},
 	{
 		name:                "integ",
-		configs:             []string{"integration", "doltserver-integration", "doltserver-cmd"},
+		configs:             []string{"integration", "doltserver-integration", "doltserver-cmd", "dolt-int"},
 		owner:               bazelIntegJobName,
-		nonOwners:           []string{bazelServerJobName, bazelCmdDoltJobName},
+		nonOwners:           []string{bazelServerJobName, bazelCmdDoltJobName, bazelDoltIntJobName},
 		ownerIsNogoOnlyStep: true,
 		nogoOnlyStepTargets: []string{"//internal/testutil/integration:integration"},
 	},

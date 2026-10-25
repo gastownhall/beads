@@ -11,23 +11,87 @@
 # queue on a pin no worker serves. This compares the manifest and the pin
 # with gascity's at REF (default main) and, if either differs, prints the
 # diff and what to commit (stdout and $GITHUB_STEP_SUMMARY) and exits 1.
+# REF is read at the commit it names (worker-env-sync-ref: a branch through
+# git ls-remote, a 40-hex REF as is), never through the raw CDN's branch
+# URL, which can serve the previous pin for minutes after a re-pin.
 # If it cannot compare (gascity unreachable, a missing REF, any other
 # failure) it warns and exits 2: callers that must not block on GitHub's
 # availability (bazel.yml's rbe job) proceed on 2 and fail only on 1.
-# Run from the repository root.
+# Run from the root of the checkout to compare (it reads
+# tools/rbe/worker-env.txt and platforms/BUILD.bazel there); the script
+# itself may live elsewhere (worker-env-sync-verify runs this trusted copy
+# on a PR head's two files).
+#
+# gascity's grace window, only with WORKER_ENV_SYNC_GRACE=1. A push to
+# gascity's main that moves the pin publishes a record (gascity
+# tools/rbe/worker-env-grace), worker-env-grace.txt alone at the root of
+# gascity's rbe/worker-env-grace branch, and for a re-pin it can roll back
+# (a Go release) beads may keep the previous pin for the record's window
+# (two hours) while rbe-west serves it (an hour longer), so beads keeps
+# building until its copy catches up. The record is read like gascity's
+# two files, at the commit worker-env-sync-ref resolves the branch to. A
+# copy found out of step is covered when the record is for gascity's pin
+# at REF, beads pins the record's previous pin, gascity's manifest at REF
+# with the record's Go is beads' copy (only the go line differs, and that
+# rolled-back manifest hashes to the previous pin: the check rbe-west's
+# previous-pin worker makes, so a record cannot make beads accept a pin
+# across an image, dolt or measurement change), and the window is open:
+# this then prints a notice saying until when (stdout and
+# $GITHUB_STEP_SUMMARY), writes no report and exits 3. gascity publishes
+# the record about a minute after the re-pin lands on its main, so a record
+# for another pin, or one that could not be read, is read again every 15
+# seconds, a line saying so each time, for up to WORKER_ENV_SYNC_GRACE_WAIT
+# seconds from this script's start; no branch, a malformed record, or one
+# for gascity's pin is decided at once. Anything else is out of step as
+# without the variable, exit 1 (after any waiting lines), plus one line
+# (stdout, and the summary in a code span) saying why the window does not
+# apply; a record it cannot read is no window, never "unknown". The record
+# is at most 64 KiB of printable ASCII and newlines (comments too), one
+# "key value" per line (the key, one space, the rest of the line), '#'
+# lines and empty lines ignored, each key at most once, no other key; unix
+# seconds have no leading zero (gascity's tools/rbe/worker-env-grace and
+# rbe-west's scaler read it by the same rules):
+#   version 1
+#   pin sha256:<hex>        gascity main's pin after the re-pin
+#   sha <commit>            the gascity main commit that moved it
+#   previous sha256:<hex>   the pin before, or "none": no window
+#   go <version>            with a previous pin: the previous host's Go
+#   since <unix seconds>    with a previous pin: the window opens (it is
+#                           open from 300 seconds before, for clock skew)
+#   until <unix seconds>    with a previous pin: the window closes; at most
+#                           7200 seconds after since, or it is refused
+#   serve-until <unix seconds>  with a previous pin: rbe-west's drain, at
+#                           most 3600 seconds after until
+#   reason <text>           with "none": why there is no window
+# Anything else is a malformed record, which covers nothing.
+#
+# Exit 0 in step, 1 out of step, 2 unknown, 3 (only with
+# WORKER_ENV_SYNC_GRACE=1) out of step inside gascity's grace window.
 #
 # Callers: bazel.yml's rbe job, before any lane of a remote-execution run
-# (fails the run fast instead of letting the lanes queue), and nightly.yml's
+# (fails the run fast instead of letting the lanes queue; in mode remote,
+# while the repository variable RBE_WORKER_ENV_GRACE is true, it sets
+# WORKER_ENV_SYNC_GRACE=1 and proceeds on 3); nightly.yml's
 # rbe-worker-env-sync job (opens or updates a ci/infra issue,
-# tools/rbe/worker-env-sync-issue).
+# tools/rbe/worker-env-sync-issue); worker-env-autosync.yml (opens the sync
+# PR); worker-env-sync-verify (worker-env-sync-automerge.yml's check of
+# that PR). The last three never ask for the window: a copy at gascity's
+# previous pin is still out of step for them, theirs to sync.
 #
 # Env: WORKER_ENV_SYNC_REPORT, a file to also write the out-of-step report
-# (markdown) to. Tests only: WORKER_ENV_SYNC_URL, gascity's raw-content base
-# (default https://raw.githubusercontent.com/gastownhall/gascity).
+# (markdown) to; WORKER_ENV_SYNC_GRACE, 1 to accept gascity's previous pin
+# inside its grace window (anything else: strict); WORKER_ENV_SYNC_GRACE_WAIT,
+# how long to wait for gascity's record of its pin (seconds, default 150:
+# bazel.yml's rbe job has 5 minutes; tests set 0 or a few). Tests only:
+# WORKER_ENV_SYNC_URL, gascity's raw-content base (default
+# https://raw.githubusercontent.com/gastownhall/gascity),
+# WORKER_ENV_SYNC_NOW, the time the window is judged at (unix seconds;
+# default date +%s), and worker-env-sync-ref's WORKER_ENV_SYNC_GIT_URL.
 set -Eeuo pipefail
 
 ref=${1:-main}
-base=${WORKER_ENV_SYNC_URL:-https://raw.githubusercontent.com/gastownhall/gascity}/$ref
+raw=${WORKER_ENV_SYNC_URL:-https://raw.githubusercontent.com/gastownhall/gascity}
+here=$(dirname "${BASH_SOURCE[0]}")
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 # Anything that fails before the comparison is "unknown", never "in step"
@@ -45,23 +109,294 @@ pin_of() {
 	echo "${pin:-none}"
 }
 
-curl -fsSL --connect-timeout 5 --max-time 15 --retry 2 -o "$tmp/worker-env.txt" "$base/tools/rbe/worker-env.txt"
-curl -fsSL --connect-timeout 5 --max-time 15 --retry 2 -o "$tmp/BUILD.bazel" "$base/platforms/BUILD.bazel"
+# The grace record (see above).
+grace_branch=rbe/worker-env-grace
+grace_file=worker-env-grace.txt
+grace_max_s=7200
+grace_drain_s=3600
+grace_max_bytes=65536
+grace_skew_s=300
+grace_poll_s=15
+pin_re='^sha256:[0-9a-f]{64}$'
+# No leading zero: bash arithmetic would read one as octal.
+unix_re='^(0|[1-9][0-9]{0,11})$'
+go_re='^[0-9]+\.[0-9]+(\.[0-9]+)?((rc|beta)[0-9]+)?$'
+
+# sha256_hex: the hex SHA-256 of stdin (macOS ships shasum, not sha256sum).
+sha256_hex() {
+	if command -v sha256sum >/dev/null 2>&1; then sha256sum | cut -d' ' -f1; else shasum -a 256 | cut -d' ' -f1; fi
+}
+
+# iso T: unix time T in UTC ISO 8601 (GNU date, else BSD date).
+iso() {
+	date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -r "$1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "unix time $1"
+}
+
+# clean TEXT: TEXT from gascity's record, safe on one line of this log:
+# control characters dropped, and the openers of the runner's workflow
+# commands (:: at a line's start, ##[ anywhere) broken up.
+clean() {
+	local s open='##[' broken='# #['
+	s=$(printf '%s' "$1" | tr -d '\000-\037\177' | tr '`' "'")
+	while [[ $s == *::* ]]; do s=${s//::/: :}; done
+	while [[ $s == *"$open"* ]]; do s=${s//"$open"/$broken}; done
+	printf '%s' "$s"
+}
+
+# grace_read: resolve gascity's rbe/worker-env-grace and read its record
+# into r_*: 0; 1 with why saying why there is none to judge (no branch, a
+# malformed record); or 2 with why when the record could not be read (a
+# lookup or download that failed or timed out: worth reading again). Like
+# grace, it runs where errexit is off and checks every step that can fail
+# itself. Its lookups are short (10 s each) so the preflight's wait for the
+# record stays inside the job's 5 minutes.
+grace_read() {
+	local tip rc=0 line key value seen=' ' k
+	r_version='' r_pin='' r_sha='' r_previous='' r_go='' r_since='' r_until='' r_serve='' r_reason=''
+	tip=$(WORKER_ENV_SYNC_GIT_TIMEOUT=10 "$here/worker-env-sync-ref" "$grace_branch" 2>/dev/null) || rc=$?
+	case $rc in
+	0) ;;
+	1)
+		why="no record: gascity has no branch $grace_branch"
+		return 1
+		;;
+	*)
+		why="unreadable: could not resolve gascity's branch $grace_branch (exit $rc)"
+		return 2
+		;;
+	esac
+	curl -fsSL --connect-timeout 5 --max-time 10 --retry 1 --max-filesize $((grace_max_bytes + 1)) \
+		-o "$tmp/$grace_file" "$raw/$tip/$grace_file" 2>/dev/null || rc=$?
+	if [ "$rc" = 63 ]; then
+		why="malformed: over 64 KiB"
+		return 1
+	fi
+	if [ "$rc" != 0 ]; then
+		why="unreadable: could not fetch $grace_file at gascity commit $tip (curl exit $rc)"
+		return 2
+	fi
+	if [ "$(wc -c <"$tmp/$grace_file")" -gt "$grace_max_bytes" ]; then
+		why="malformed: over 64 KiB"
+		return 1
+	fi
+	# -a: GNU grep reads a NUL as a line break and would let it through.
+	if LC_ALL=C grep -a -q '[^[:print:]]' "$tmp/$grace_file"; then
+		why="malformed: not printable ASCII"
+		return 1
+	fi
+
+	while IFS= read -r line || [ -n "$line" ]; do
+		case $line in '' | '#'*) continue ;; esac
+		key=${line%% *} value=${line#* }
+		if [ "$key" = "$line" ] || [ -z "$value" ]; then
+			why="malformed: line '$(clean "$line")' is not \"key value\""
+			return 1
+		fi
+		case $seen in *" $key "*)
+			why="malformed: repeated key '$(clean "$key")'"
+			return 1
+			;;
+		esac
+		seen="$seen$key "
+		case $key in
+		version) r_version=$value ;;
+		pin) r_pin=$value ;;
+		sha) r_sha=$value ;;
+		previous) r_previous=$value ;;
+		go) r_go=$value ;;
+		since) r_since=$value ;;
+		until) r_until=$value ;;
+		serve-until) r_serve=$value ;;
+		reason) r_reason=$value ;;
+		*)
+			why="malformed: unknown key '$(clean "$key")'"
+			return 1
+			;;
+		esac
+	done <"$tmp/$grace_file"
+	for k in version pin sha previous; do
+		case $seen in *" $k "*) ;; *)
+			why="malformed: no $k"
+			return 1
+			;;
+		esac
+	done
+	if [ "$r_version" != 1 ]; then
+		why="malformed: version '$(clean "$r_version")', want 1"
+		return 1
+	fi
+	if ! [[ $r_pin =~ $pin_re ]]; then
+		why="malformed: pin '$(clean "$r_pin")' is not a sha256 pin"
+		return 1
+	fi
+	if ! [[ $r_sha =~ ^[0-9a-f]{40}$ ]]; then
+		why="malformed: sha '$(clean "$r_sha")' is not a commit"
+		return 1
+	fi
+	if [ "$r_previous" = none ]; then
+		for k in go since until serve-until; do
+			case $seen in *" $k "*)
+				why="malformed: $k with previous none"
+				return 1
+				;;
+			esac
+		done
+		if [ -z "$r_reason" ]; then
+			why="malformed: previous none without a reason"
+			return 1
+		fi
+		return 0
+	fi
+	if ! [[ $r_previous =~ $pin_re ]]; then
+		why="malformed: previous '$(clean "$r_previous")' is not a sha256 pin or none"
+		return 1
+	fi
+	if [ "$r_previous" = "$r_pin" ]; then
+		why="malformed: previous is the pin"
+		return 1
+	fi
+	case $seen in *" reason "*)
+		why="malformed: reason with a previous pin"
+		return 1
+		;;
+	esac
+	for k in go since until serve-until; do
+		case $seen in *" $k "*) ;; *)
+			why="malformed: no $k"
+			return 1
+			;;
+		esac
+	done
+	for k in "since:$r_since" "until:$r_until" "serve-until:$r_serve"; do
+		if ! [[ ${k#*:} =~ $unix_re ]]; then
+			why="malformed: ${k%%:*} '$(clean "${k#*:}")' is not unix seconds"
+			return 1
+		fi
+	done
+	if ! [[ $r_go =~ $go_re ]]; then
+		why="malformed: go '$(clean "$r_go")' is not a Go version"
+		return 1
+	fi
+	if [ "$r_serve" -lt "$r_until" ] || [ $((r_serve - r_until)) -gt "$grace_drain_s" ]; then
+		why="malformed: serve-until - until is $((r_serve - r_until))s, want 0 to $grace_drain_s"
+		return 1
+	fi
+	if [ $((r_until - r_since)) -le 0 ] || [ $((r_until - r_since)) -gt "$grace_max_s" ]; then
+		why="refused: until - since is $((r_until - r_since))s, want 1 to $grace_max_s"
+		return 1
+	fi
+}
+
+# grace: whether gascity's grace window covers this out-of-step copy (see
+# above): 0 with the record in r_*, or 1 with why saying why not. It runs
+# as an if condition, where errexit is off, so it checks every step that
+# can fail itself: a record it cannot read or parse is no window.
+grace() {
+	local wait=${WORKER_ENV_SYNC_GRACE_WAIT:-150} slept=0 nap now ours_go rc=0 seen_pin='' rolled
+	if ! [[ $wait =~ ^[0-9]{1,4}$ ]]; then
+		why="WORKER_ENV_SYNC_GRACE_WAIT '$(clean "$wait")' is not seconds"
+		return 1
+	fi
+	wait=$((10#$wait))
+	grace_read || rc=$?
+	[ "$rc" != 1 ] || return 1
+	[ "$rc" != 0 ] || seen_pin=$r_pin
+	# gascity publishes a re-pin's record about a minute after the re-pin
+	# lands on its main, and until then the branch holds an earlier
+	# re-pin's: wait for the record of gascity's pin, re-reading it. A read
+	# that fails is read again, until the wait is over; a malformed record
+	# or no branch is decided at once. The wait counts from this script's
+	# start (SECONDS), so it ends inside the job's 5 minutes however long
+	# gascity's main took to read.
+	while [ "$rc" != 0 ] || [ "$r_pin" != "$theirs" ]; do
+		if [ "$slept" -ge "$wait" ] || [ "$SECONDS" -ge "$wait" ]; then
+			if [ "$rc" != 0 ]; then
+				return 1
+			fi
+			why="other pin: gascity has not published a grace record for $theirs (its record is for $r_pin; waited ${slept}s)"
+			return 1
+		fi
+		nap=$((wait - slept < grace_poll_s ? wait - slept : grace_poll_s))
+		echo "worker-env: waiting for gascity's grace record for $theirs, its record is for ${seen_pin:-none read yet} (${slept}s of ${wait}s; again in ${nap}s)"
+		sleep "$nap"
+		slept=$((slept + nap))
+		rc=0
+		grace_read || rc=$?
+		[ "$rc" != 1 ] || return 1
+		[ "$rc" != 0 ] || seen_pin=$r_pin
+	done
+	if [ "$r_previous" = none ]; then
+		why="previous none: $(clean "${r_reason:0:300}")"
+		return 1
+	fi
+	if [ "$r_previous" != "$ours" ]; then
+		why="other pin: the record's previous pin is $r_previous, but beads pins $ours"
+		return 1
+	fi
+	# beads' copy must be gascity's manifest at REF with only the go line
+	# rolled back to the record's: that is the host rbe-west rebuilds.
+	if ! cmp -s <(grep -v '^go ' tools/rbe/worker-env.txt || true) <(grep -v '^go ' "$tmp/worker-env.txt" || true); then
+		why="other re-pin: gascity's manifest at $ref moved more than the go line, so no previous-pin worker can be rebuilt for beads' pin"
+		return 1
+	fi
+	ours_go=$(sed -n 's/^go go version go\([^ ]*\) linux\/amd64$/\1/p' tools/rbe/worker-env.txt)
+	if [ "$ours_go" != "$r_go" ]; then
+		why="other Go: beads' manifest has Go '$(clean "$ours_go")', the record's previous host Go $r_go"
+		return 1
+	fi
+	# The check rbe-west's previous-pin worker makes (gascity
+	# tools/rbe/worker-env-grace host): gascity's manifest with the record's
+	# Go hashes to the record's previous pin.
+	rolled=$(sed "s/^go go version go[^ ]* linux\/amd64\$/go go version go$r_go linux\/amd64/" "$tmp/worker-env.txt" | sha256_hex)
+	if [ "sha256:$rolled" != "$r_previous" ]; then
+		why="other host: gascity's manifest with Go $r_go hashes to sha256:$rolled, not the record's previous pin"
+		return 1
+	fi
+	now=${WORKER_ENV_SYNC_NOW:-$(date +%s)}
+	if ! [[ $now =~ $unix_re ]]; then
+		why="no clock: the time is '$(clean "$now")', not unix seconds"
+		return 1
+	fi
+	if [ $((10#$r_since)) -gt $((10#$now + grace_skew_s)) ]; then
+		why="not open yet: it opens at $(iso $((10#$r_since)))"
+		return 1
+	fi
+	if [ $((10#$now)) -ge $((10#$r_until)) ]; then
+		why="closed at $(iso $((10#$r_until)))"
+		return 1
+	fi
+}
+
+sha=$("$(dirname "${BASH_SOURCE[0]}")/worker-env-sync-ref" "$ref")
+curl -fsSL --connect-timeout 5 --max-time 15 --retry 2 -o "$tmp/worker-env.txt" "$raw/$sha/tools/rbe/worker-env.txt"
+curl -fsSL --connect-timeout 5 --max-time 15 --retry 2 -o "$tmp/BUILD.bazel" "$raw/$sha/platforms/BUILD.bazel"
 ours=$(pin_of platforms/BUILD.bazel)
 theirs=$(pin_of "$tmp/BUILD.bazel")
 if cmp -s tools/rbe/worker-env.txt "$tmp/worker-env.txt" && [ "$ours" = "$theirs" ]; then
-	echo "worker-env: in step with gascity $ref ($ours)"
+	echo "worker-env: in step with gascity $ref ($ours) at gascity commit $sha"
 	exit 0
 fi
 
 # Out of step is known from here on: no failure below turns it into "unknown".
 trap - ERR
+why=''
+if [ "${WORKER_ENV_SYNC_GRACE:-}" = 1 ] && grace; then
+	end=$(iso $((10#$r_until))) served=$(iso $((10#$r_serve)))
+	echo "worker-env: inside gascity's grace window: beads pins gascity's previous pin ($ours), gascity $ref pins $theirs (commit $sha) since commit $r_sha re-pinned it; beads may pin the previous pin until $end, and rbe-west serves it until $served"
+	echo "::notice title=rbe worker-env grace::beads pins gascity's previous worker-env pin ($ours): gascity re-pinned at commit $r_sha; beads may pin the previous pin until $end, and rbe-west serves it until $served. beads' worker-env sync PR must land before $end (see tools/rbe/worker-env-sync)."
+	summary <<-EOF
+		### rbe worker-env in gascity's grace window
+
+		beads pins \`worker-env=$ours\`, gascity's previous pin: gascity re-pinned to \`$theirs\` at commit \`$r_sha\`. beads may pin the previous pin until $end and rbe-west serves it until $served, so this run's remote actions still have workers. beads' worker-env sync PR must land before $end.
+	EOF
+	exit 3
+fi
 diff -u --label beads --label "gascity $ref" tools/rbe/worker-env.txt "$tmp/worker-env.txt" >"$tmp/diff" || true
 {
 	cat <<-EOF
 		### rbe worker-env out of step with gascity
 
-		beads pins \`worker-env=$ours\`; gascity \`$ref\` pins \`$theirs\`. rbe-west's pool workers advertise gascity's, so beads' remote actions on another pin only queue. Copy gascity's \`tools/rbe/worker-env.txt\` here byte for byte, and in \`platforms/BUILD.bazel\` set:
+		beads pins \`worker-env=$ours\`; gascity \`$ref\` (commit \`$sha\`) pins \`$theirs\`. rbe-west's pool workers advertise gascity's, so beads' remote actions on another pin only queue. Copy gascity's \`tools/rbe/worker-env.txt\` here byte for byte, and in \`platforms/BUILD.bazel\` set:
 
 		\`\`\`
 		        "worker-env": "$theirs",
@@ -79,4 +414,9 @@ cat "$tmp/report.md"
 summary <"$tmp/report.md"
 if [ -n "${WORKER_ENV_SYNC_REPORT:-}" ]; then cp "$tmp/report.md" "$WORKER_ENV_SYNC_REPORT"; fi
 echo "::error title=rbe worker-env out of step::beads pins worker-env=$ours, gascity $ref pins $theirs: beads' worker-env pin is out of step with gascity $ref, so no rbe-west pool worker serves beads' remote actions. Copy gascity's tools/rbe/worker-env.txt byte for byte and its platforms/BUILD.bazel pin (the step summary has the diff; see tools/rbe/worker-env-sync)."
+if [ -n "$why" ]; then
+	echo "worker-env grace window does not apply: $why"
+	# A code span: the reason is gascity's text, never markup here.
+	printf '\n%s\n' "worker-env grace window does not apply: \`$why\`" | summary
+fi
 exit 1
