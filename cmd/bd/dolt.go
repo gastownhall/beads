@@ -1193,7 +1193,7 @@ is shown as not running, and the next bd command launches it.`,
 		}
 		// A workspace in a format this build cannot open is refused before
 		// configfile.Load, which would first migrate a legacy config.json.
-		if err := checkDiscoveredWorkspaceFormat(beadsDir); err != nil {
+		if err := checkDiscoveredForOpen(beadsDir); err != nil {
 			return handleWorkspaceGuardError(err)
 		}
 		cfg, cfgErr := configfile.Load(beadsDir)
@@ -2079,7 +2079,7 @@ func showDoltConfig(testConnection bool) error {
 
 	// A workspace in a format this build cannot open is refused before
 	// configfile.Load, which would first migrate a legacy config.json.
-	if err := checkDiscoveredWorkspaceFormat(beadsDir); err != nil {
+	if err := checkDiscoveredForOpen(beadsDir); err != nil {
 		return handleWorkspaceGuardError(err)
 	}
 	cfg, err := configfile.Load(beadsDir)

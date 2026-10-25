@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/beads"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/backends"
+	"github.com/steveyegge/beads/internal/testutil/legacyworkspace"
 )
 
 var errRegistryBackendOpen = errors.New("registry backend open sentinel")
@@ -508,8 +509,12 @@ const graphWorkspaceMetadataStripped = `{
 }`
 
 // publicOpens are the public entry points that open a workspace from its
-// metadata.
+// metadata, and Open, which opens a database path inside one and refuses
+// what the others refuse from the workspace's contents.
 var publicOpens = map[string]func(context.Context, string) (beads.Storage, error){
+	"Open": func(ctx context.Context, beadsDir string) (beads.Storage, error) {
+		return beads.Open(ctx, filepath.Join(beadsDir, "beads.db"))
+	},
 	"OpenBestAvailable": beads.OpenBestAvailable,
 	"OpenBestAvailableWith": func(ctx context.Context, beadsDir string) (beads.Storage, error) {
 		return beads.OpenBestAvailableWith(ctx, beadsDir, beads.OpenOptions{})
@@ -803,8 +808,61 @@ func TestPublicOpensAdmitSupportedBackendInLegacyConfig(t *testing.T) {
 				if !strings.Contains(err.Error(), "unreachable") {
 					t.Fatalf("%s error = %v, want the backend's unreachable-server error", name, err)
 				}
-				if _, statErr := os.Stat(filepath.Join(beadsDir, "metadata.json")); statErr != nil {
+				_, statErr := os.Stat(filepath.Join(beadsDir, "metadata.json"))
+				if name == "Open" {
+					// Open opens a database path, not the workspace's
+					// metadata, so it has nothing to migrate: the
+					// config.json stays as it is (port resolution reads it
+					// in place).
+					if data, readErr := os.ReadFile(filepath.Join(beadsDir, "config.json")); readErr != nil || string(data) != legacy || !os.IsNotExist(statErr) {
+						t.Fatalf("Open rewrote the legacy config.json (config.json %q, %v; metadata.json stat %v)", data, readErr, statErr)
+					}
+					return
+				}
+				if statErr != nil {
 					t.Fatalf("%s did not migrate the admitted legacy config.json: %v", name, statErr)
+				}
+			})
+		}
+	}
+}
+
+// TestPublicOpensRefuseHistoricalSQLiteWorkspace pins the library half of the
+// historical SQLite refusal command admission makes: every public open of a
+// pre-Dolt workspace refuses it with admission's text before it writes
+// anything, in the workspace or beside it. Without it OpenBestAvailable
+// migrated a pre-Dolt config.json into metadata.json, dropping the keys Config
+// does not know, and created an empty embedded database beside beads.db, and
+// OpenGated left its gate files behind.
+func TestPublicOpensRefuseHistoricalSQLiteWorkspace(t *testing.T) {
+	// If the refusal were missing, a server-mode open must fail fast rather
+	// than reach TestMain's shared test server.
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "127.0.0.1")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "1")
+	for _, layout := range legacyworkspace.HistoricalSQLiteLayouts() {
+		for name, open := range publicOpens {
+			t.Run(layout.Name+"/"+name, func(t *testing.T) {
+				root := t.TempDir()
+				beadsDir := filepath.Join(root, ".beads")
+				layout.Write(t, beadsDir)
+				before := legacyworkspace.TreeDigest(t, root)
+
+				store, err := open(t.Context(), beadsDir)
+				if err == nil {
+					_ = store.Close()
+				}
+				if after := legacyworkspace.TreeDigest(t, root); !maps.Equal(after, before) {
+					t.Fatalf("%s changed the workspace: before %v, after %v", name, slices.Sorted(maps.Keys(before)), slices.Sorted(maps.Keys(after)))
+				}
+				if err == nil || err.Error() != legacyworkspace.HistoricalSQLiteRefusal {
+					t.Fatalf("%s error = %v, want admission's refusal %q", name, err, legacyworkspace.HistoricalSQLiteRefusal)
+				}
+				var legacyErr *beads.LegacyWorkspaceError
+				if !errors.As(err, &legacyErr) {
+					t.Fatalf("%s error = %#v, want *beads.LegacyWorkspaceError", name, err)
+				}
+				if store != nil {
+					t.Fatalf("%s returned a non-nil %T with its refusal", name, store)
 				}
 			})
 		}

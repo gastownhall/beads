@@ -11,6 +11,7 @@ go_library(
         "credentials_windows.go",
         "external_dolt_config.go",
         "graph_mode.go",
+        "historical_sqlite.go",
         "proxied_server_client_info.go",
         "workspace_format.go",
     ],
@@ -33,11 +34,15 @@ go_test(
         "credentials_unix_remedy_test.go",
         "external_dolt_config_test.go",
         "graph_mode_test.go",
+        "historical_sqlite_test.go",
         "remedy_printing_test.go",
         "workspace_format_test.go",
     ],
     embed = [":configfile"],
-    deps = ["//internal/config"],
+    deps = [
+        "//internal/config",
+        "//internal/testutil/legacyworkspace",
+    ],
 )
 
 # --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---

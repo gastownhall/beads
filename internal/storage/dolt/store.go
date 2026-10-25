@@ -2599,8 +2599,9 @@ func (s *DoltStore) verifyProjectIdentity(ctx context.Context, beadsDir string, 
 		return nil // can't verify without knowing beadsDir
 	}
 
-	// Load local project ID from metadata.json
-	metaCfg, err := configfile.Load(beadsDir)
+	// Load local project ID from metadata.json. A read: LoadForDiscovery
+	// never migrates a legacy config.json, which a read-only open must not.
+	metaCfg, err := configfile.LoadForDiscovery(beadsDir)
 	if err != nil || metaCfg == nil {
 		return nil // no local config — skip verification
 	}
@@ -2673,7 +2674,8 @@ func (s *DoltStore) verifyGlobalProjectIdentity(ctx context.Context, beadsDir st
 		return nil
 	}
 
-	metaCfg, err := configfile.Load(beadsDir)
+	// A read, as in verifyProjectIdentity.
+	metaCfg, err := configfile.LoadForDiscovery(beadsDir)
 	if err != nil || metaCfg == nil {
 		return nil
 	}

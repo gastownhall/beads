@@ -69,6 +69,7 @@ go_test(
         "//internal/storage/embeddeddolt",
         "//internal/storage/issueops",
         "//internal/testutil/bazeltest",
+        "//internal/testutil/legacyworkspace",
     ],
 )
 

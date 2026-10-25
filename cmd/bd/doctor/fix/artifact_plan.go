@@ -11,7 +11,6 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/historicalsqlite"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 )
 
@@ -52,7 +51,7 @@ const (
 	// redirect beside it.
 	ownerRedirectStub
 	// ownerOtherBackend: its metadata names a backend other than Dolt, or
-	// it is a historical SQLite workspace (historicalsqlite.IsWorkspace).
+	// it is a historical SQLite workspace (configfile.IsHistoricalSQLiteWorkspace).
 	ownerOtherBackend
 	// ownerDolt: positive Dolt evidence (hasDoltEvidence).
 	ownerDolt
@@ -97,7 +96,7 @@ func classifyBeadsDir(beadsDir string) beadsDirClass {
 	case cfg != nil && (!configfile.IsSupportedBackend(cfg.Backend) || cfg.GetBackend() != configfile.BackendDolt):
 		c.owner = ownerOtherBackend
 		c.reason = "its metadata names another backend"
-	case historicalsqlite.IsWorkspace(beadsDir, cfg):
+	case configfile.IsHistoricalSQLiteWorkspace(beadsDir, cfg):
 		c.owner = ownerOtherBackend
 		c.reason = "it is a historical SQLite workspace"
 	case c.redirectExpected && len(c.databaseState) == 0 && namesLocalDoltStore(beadsDir, cfg):

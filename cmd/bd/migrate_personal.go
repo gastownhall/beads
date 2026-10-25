@@ -43,8 +43,10 @@ import (
 // (refuseUninitializablePlanningRepo, refuseUninitializableTarget): a planning
 // repo whose own config selects Dolt server mode, whose server data an
 // embedded metadata.json would hide; any workspace bd's own command admission
-// refuses there (guardLegacyUpgradeWorkspace), such as a SQLite-era repo,
-// whose data a fresh database beside it would hide; and one holding several
+// refuses there (admitForeignWorkspace, classifying the planning repo from its
+// own config, plus the "loading config" refusal of a legacy config.json that
+// does not load), such as a SQLite-era repo or a legacy Dolt root, whose data
+// a fresh database beside it would hide; and one holding several
 // databases, where nothing records which one bd uses. A redirect stub is
 // refused whether or not it has a metadata.json of its own: bd run in the
 // planning repo follows the redirect, so it never reads a database inside the
@@ -171,15 +173,37 @@ func uncommittedTables(ctx context.Context, st storage.DoltStorage) ([]string, e
 // its own config selects Dolt server mode, bd's own admission refuses it, or
 // it holds several databases). Every other metadata-less .beads is left to
 // initializePlanningRepo. It writes nothing. A .beads that has a metadata.json
-// is left to the open, which refuses what it cannot use. A targetRefusal is
+// is refused here for what bd's admission refuses from its contents (a format
+// this build cannot open, a historical SQLite workspace, a legacy Dolt
+// workspace) and, as a routed create refuses it (refuseExistingCreateTarget),
+// when its own config selects Dolt server mode while its metadata names no
+// dolt_mode and this process would open it embedded; it is otherwise left to
+// the open, which refuses what it cannot use. A targetRefusal is
 // raised as a planningRepoRefusal naming the planning repo; bd's admission
 // refusals are returned as they are, for planningOpenError to render.
 func refuseUninitializablePlanningRepo(planningBeadsDir string) error {
 	if redirect := beads.ResolveRedirect(planningBeadsDir); utils.CanonicalizePath(redirect.TargetDir) != utils.CanonicalizePath(planningBeadsDir) {
 		return redirectedPlanningRepoError(planningBeadsDir, redirect.TargetDir, redirect.SourceDatabase)
 	}
+	// What admission refuses from the planning repo's own contents is refused
+	// as admission refuses it, whether or not it has a metadata.json: a
+	// historical SQLite planning repo whose metadata.json names its database
+	// would otherwise reach the open, and be refused there for the
+	// dolt_database it lacks.
+	if err := checkDiscoveredForOpen(planningBeadsDir); err != nil {
+		return err
+	}
+	// So is a planning repo a routed bd create refuses although it has a
+	// metadata.json (refuseExistingCreateTarget): a legacy Dolt planning
+	// repo, or a server workspace the writable open would give an embedded
+	// database.
 	if _, err := os.Stat(filepath.Join(planningBeadsDir, "metadata.json")); err == nil {
-		return nil
+		err := refuseExistingCreateTarget(planningBeadsDir)
+		var existing *existingTargetRefusal
+		if errors.As(err, &existing) {
+			return refusePlanningRepo("planning repo %s: %s", printedValue(filepath.Dir(planningBeadsDir)), existing.msg)
+		}
+		return err
 	}
 	err := refuseUninitializableTarget(planningBeadsDir)
 	var refusal *targetRefusal

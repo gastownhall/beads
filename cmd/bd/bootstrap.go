@@ -214,8 +214,9 @@ Examples:
 
 		if beadsDir == "" {
 			// Discovery passes over a .beads marked only by a legacy
-			// config.json. One in a format this build cannot open is refused
-			// as that, not reported as no workspace.
+			// config.json or holding only a SQLite database. One in a format
+			// this build cannot open, or a historical SQLite workspace, is
+			// refused as that, not reported as no workspace.
 			if err := checkUndiscoveredWorkspaceFormat(); err != nil {
 				return handleWorkspaceGuardError(err)
 			}
@@ -246,7 +247,9 @@ Examples:
 		}
 		if cfg == nil {
 			cfg, err = findParentConfig(beadsDir)
-			if isUnsupportedWorkspaceFormat(err) {
+			if isUnsupportedWorkspaceFormat(err) || isLegacyUpgradeRefusal(err) {
+				// Admission's refusal of the ancestor, as bd prints it there:
+				// its metadata loaded, so there is nothing to fix or restore.
 				return handleWorkspaceGuardError(err)
 			} else if err != nil {
 				return HandleError("failed to load ancestor storage metadata: %v; no storage database was opened or modified; fix or restore metadata.json and retry", err)
@@ -1714,8 +1717,11 @@ func findParentConfig(beadsDir string) (*configfile.Config, error) {
 			return nil, fmt.Errorf("%s: %w", configfile.ConfigPath(candidate), err)
 		}
 		if cfg != nil {
-			if err := guardLegacyUpgradeWorkspace(candidate); err != nil {
-				return nil, err
+			// The ancestor is not the workspace admission checked, so it is
+			// classified from its own config (admitForeignWorkspace), and its
+			// refusal names it.
+			if _, err := admitForeignWorkspace(candidate); err != nil {
+				return nil, fmt.Errorf("ancestor workspace %s: %w", candidate, err)
 			}
 			return cfg, nil
 		}

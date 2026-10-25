@@ -212,11 +212,13 @@ func IsAutoStartDisabled() bool {
 //
 // Falls back to a zero Config when no metadata.json exists in beadsDir
 // so env-only configurations (BEADS_DOLT_SERVER_HOST set, no on-disk
-// config) are still detected. configfile.Load error returns are treated
-// as "not external" — the existing local-flavored error message is the
-// safer fallback and the configfile error will surface elsewhere.
+// config) are still detected. Metadata read errors are treated as "not
+// external" — the existing local-flavored error message is the safer
+// fallback and the configfile error will surface elsewhere. The metadata is
+// read without migrating it (LoadForDiscovery): an error message must not
+// rewrite a legacy config.json, in a workspace bd may not have admitted.
 func externalNonLocalhostHost(beadsDir string) (string, bool) {
-	cfg, err := configfile.Load(beadsDir)
+	cfg, err := configfile.LoadForDiscovery(beadsDir)
 	if err != nil {
 		return "", false
 	}
@@ -909,7 +911,10 @@ var portSources = []portSource{
 		label:  "metadata.json dolt_server_port (deprecated fallback)",
 		source: PortSourceMetadataJSON,
 		resolve: func(beadsDir string) (int, bool) {
-			metaCfg, err := configfile.Load(beadsDir)
+			// Read in place, never migrated: port resolution (DefaultConfig)
+			// runs for workspaces bd was not launched in, such as a library
+			// open of another path, before anything has admitted them.
+			metaCfg, err := configfile.LoadForDiscovery(beadsDir)
 			if err != nil || metaCfg == nil || metaCfg.DoltServerPort <= 0 {
 				return 0, false
 			}
@@ -970,7 +975,9 @@ func resolveServerPortForMode(workspaceBeadsDir, serverDir string, sharedMode, s
 	if sharedMode {
 		metadataDir = serverDir
 	}
-	if cfg, err := configfile.Load(metadataDir); err == nil && cfg != nil && cfg.DoltServerPort > 0 {
+	// Read in place, never migrated: DefaultConfigForMode resolves ports for
+	// a workspace other than the active one.
+	if cfg, err := configfile.LoadForDiscovery(metadataDir); err == nil && cfg != nil && cfg.DoltServerPort > 0 {
 		return cfg.DoltServerPort, PortSourceMetadataJSON
 	}
 	return 0, PortSourceUnset
@@ -1069,6 +1076,9 @@ func parseOptionalPort(raw string) (int, bool) {
 //
 // The port file (dolt-server.port) is written by Start() with the actual
 // listening port, so already-running-server connections use the right port.
+//
+// It never writes beadsDir: a legacy config.json is read in place, not
+// migrated, since callers resolve workspaces bd was not launched in.
 func DefaultConfig(beadsDir string) *Config {
 	return defaultConfigForMode(beadsDir, IsSharedServerMode(), resolveServerPortFromActiveSources)
 }

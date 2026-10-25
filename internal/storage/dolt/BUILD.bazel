@@ -432,6 +432,7 @@ go_test(
         "//internal/storage/versioncontrolops",
         "//internal/testutil",
         "//internal/testutil/credentialcmd",
+        "//internal/testutil/legacyworkspace",
         "//internal/types",
         "//internal/utils",
         "//internal/versionedhistory",

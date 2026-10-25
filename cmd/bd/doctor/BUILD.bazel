@@ -172,6 +172,7 @@ go_test(
         "//internal/storage/issueops",
         "//internal/testutil",
         "//internal/testutil/bazeltest",
+        "//internal/testutil/legacyworkspace",
         "//internal/types",
         "//internal/utils",
         "//schema",

@@ -98,7 +98,11 @@ Examples:
 		// this one: in a linked worktree with no .beads of its own, discovery
 		// passes over a main-checkout .beads that only the graph format
 		// marker or a legacy config.json declares, and connect still attaches
-		// it. Refuse it here, before the handshake dials and before
+		// it. Refuse here what admission refuses from that workspace's own
+		// contents (a format this build cannot open, a historical SQLite
+		// workspace, a removed or unrecognized backend, a legacy Dolt
+		// workspace; admitForeignWorkspace), with admission's text and the
+		// .beads it refuses, before the handshake dials and before
 		// configfile.Load migrates that config.json.
 		//
 		// --clear is refused too, even for an attach a bd without this check
@@ -106,8 +110,8 @@ Examples:
 		// workspace in a format it cannot open. Such an attach is undone by
 		// hand: delete .beads/http_target.json and restore metadata.json's
 		// "backend".
-		if err := checkDiscoveredWorkspaceFormat(beadsDir); err != nil {
-			return handleWorkspaceGuardError(err)
+		if _, err := admitForeignWorkspace(beadsDir); err != nil {
+			return handleWorkspaceGuardError(fmt.Errorf("%s: %w", beadsDir, err))
 		}
 
 		if connectClear {
@@ -266,13 +270,12 @@ Examples:
 		if err != nil {
 			return HandleError("connecting to %s: %v", redactedURL, err)
 		}
-		// The format check at the top of RunE ran before the dial, and a
-		// graph build can declare the format while the handshake is in
-		// flight. Check again before anything below writes the workspace:
-		// the .gitignore would otherwise land in it before Attach's own check
-		// refused it.
-		if err := checkDiscoveredWorkspaceFormat(beadsDir); err != nil {
-			return handleWorkspaceGuardError(err)
+		// The check at the top of RunE ran before the dial, and a graph build
+		// can declare the format while the handshake is in flight. Check
+		// again before anything below writes the workspace: the .gitignore
+		// would otherwise land in it before Attach's own check refused it.
+		if _, err := admitForeignWorkspace(beadsDir); err != nil {
+			return handleWorkspaceGuardError(fmt.Errorf("%s: %w", beadsDir, err))
 		}
 		if target.ExpectProjectID == "" {
 			// Nothing was pinned (a genuine first connect, or --force

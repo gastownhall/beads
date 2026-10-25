@@ -117,8 +117,10 @@ func requireDoltBackend(fileCfg *configfile.Config, beadsDir string) error {
 // as configfile.LoadForDiscovery reads it, which never rewrites the workspace.
 // The metadata-driven constructors run it before configfile.Load, which
 // migrates a legacy config.json into metadata.json and drops the keys Config
-// does not know, so a workspace they refuse (another data model, or a backend
-// other than Dolt) is refused before that rewrite rather than after it. A
+// does not know, so a workspace they refuse (another data model, a
+// historical SQLite workspace, or a backend other than Dolt) is refused before
+// that rewrite rather than after it, with the text command admission prints
+// for it (configfile.LoadDiscoveredForOpen). A
 // caller that writes into the workspace before it reaches a constructor
 // (beads.OpenGated's gates) runs it first too. Metadata that does not load is
 // left to Load to report, unless the graph format marker sits beside it
@@ -133,6 +135,20 @@ func RequireDiscoveredDoltBackend(beadsDir string) error {
 		return nil
 	}
 	return requireDoltBackend(fileCfg, beadsDir)
+}
+
+// loadFileConfig reads beadsDir's metadata for a metadata-driven constructor.
+// A read-only store (cfg.ReadOnly) reads it as discovery does
+// (configfile.LoadForDiscovery), which never migrates a legacy config.json
+// into metadata.json: a read-only open writes nothing into the workspace it
+// reads, which is often one bd was not launched in (an external project, a
+// routed read, doctor's additional repos). Every other open loads it with
+// configfile.Load, migrating it as before.
+func loadFileConfig(beadsDir string, cfg *Config) (*configfile.Config, error) {
+	if cfg != nil && cfg.ReadOnly {
+		return configfile.LoadForDiscovery(beadsDir)
+	}
+	return configfile.Load(beadsDir)
 }
 
 // NewFromConfig creates a DoltStore based on the metadata.json configuration.
@@ -151,7 +167,7 @@ func NewFromConfigWithCLIOptions(ctx context.Context, beadsDir string, cfg *Conf
 	if err := RequireDiscoveredDoltBackend(beadsDir); err != nil {
 		return nil, err
 	}
-	fileCfg, err := configfile.Load(beadsDir)
+	fileCfg, err := loadFileConfig(beadsDir, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("loading config: %w", err)
 	}
@@ -186,7 +202,7 @@ func NewFromConfigWithOptions(ctx context.Context, beadsDir string, cfg *Config)
 	if err := RequireDiscoveredDoltBackend(beadsDir); err != nil {
 		return nil, err
 	}
-	fileCfg, err := configfile.Load(beadsDir)
+	fileCfg, err := loadFileConfig(beadsDir, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("loading config: %w", err)
 	}

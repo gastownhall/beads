@@ -659,7 +659,7 @@ func TestScanForArtifacts_LeavesWorkspaceWithUnloadableMetadataForReview(t *test
 // which configfile.Config.GetBackend reads as Dolt, is not Dolt to either
 // half. Nor is a Beads Classic SQLite workspace, whose metadata predates the
 // backend key and so reads as Dolt to GetBackend too: command admission
-// refuses it as historical SQLite (historicalsqlite.IsWorkspace), and its WAL
+// refuses it as historical SQLite (configfile.IsHistoricalSQLiteWorkspace), and its WAL
 // can hold transactions not yet checkpointed into beads.db.
 func TestScanForArtifacts_CleanupRemovesOnlyReportedSQLiteFiles(t *testing.T) {
 	const registered = "acme-artifacts-doctor"

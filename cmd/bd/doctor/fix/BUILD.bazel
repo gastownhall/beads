@@ -37,7 +37,6 @@ go_library(
         "//internal/configfile",
         "//internal/doltserver",
         "//internal/eventsjournal",
-        "//internal/historicalsqlite",
         "//internal/storage",
         "//internal/storage/depid",
         "//internal/storage/dolt",

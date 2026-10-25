@@ -192,8 +192,17 @@ func openDoltStoreFromConfig(ctx context.Context, beadsDir string, requireExisti
 	defer func() { s, err = activateEventsJournalStore(beadsDir, s, err) }()
 	// Before Load can migrate a legacy config.json; validateConfiguredBackend
 	// below re-checks the loaded config.
-	if err := checkDiscoveredBackend(beadsDir); err != nil {
+	discovered, err := checkDiscoveredBackend(beadsDir)
+	if err != nil {
 		return nil, err
+	}
+	// A routed write that would find no embedded database is refused on the
+	// discovered metadata, before Load migrates a legacy config.json: a
+	// refused open writes nothing. Without metadata Load writes nothing
+	// either, so that case, and unloadable metadata, are left to the check
+	// after Load.
+	if requireExisting && discovered != nil && selectsEmbeddedStore(beadsDir, discovered) && !embeddeddolt.HasRepository(beadsDir) {
+		return nil, errNoRoutedEmbeddedDatabase(beadsDir)
 	}
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil {
@@ -220,8 +229,7 @@ func openDoltStoreFromConfig(ctx context.Context, beadsDir string, requireExisti
 	// Refuse before the sanitize migration below, which renames the legacy
 	// directory and rewrites metadata.json: a refused open writes nothing.
 	if requireExisting && !embeddeddolt.HasRepository(beadsDir) {
-		return nil, fmt.Errorf("embeddeddolt: no embedded database at %s; a routed write does not create one (run 'bd bootstrap' in that repository first)",
-			remedy.PrintedValue(filepath.Join(beadsDir, "embeddeddolt")))
+		return nil, errNoRoutedEmbeddedDatabase(beadsDir)
 	}
 	database := configfile.DefaultDoltDatabase
 	if cfg != nil {
@@ -234,6 +242,13 @@ func openDoltStoreFromConfig(ctx context.Context, beadsDir string, requireExisti
 		database = sanitized
 	}
 	return embeddeddolt.Open(ctx, beadsDir, database, "main")
+}
+
+// errNoRoutedEmbeddedDatabase refuses a routed write to beadsDir, an embedded
+// workspace that holds no database (newExistingDoltStoreFromConfig).
+func errNoRoutedEmbeddedDatabase(beadsDir string) error {
+	return fmt.Errorf("embeddeddolt: no embedded database at %s; a routed write does not create one (run 'bd bootstrap' in that repository first)",
+		remedy.PrintedValue(filepath.Join(beadsDir, "embeddeddolt")))
 }
 
 // migrateHyphenatedDB renames a legacy hyphenated database directory and
@@ -314,18 +329,25 @@ func newPreviewStoreFromConfig(ctx context.Context, beadsDir string) (storage.Do
 // OpenNonMutating hook on backends.Backend, which this function would call
 // instead, is the follow-up that closes the exception.
 func openNonMutatingStoreFromConfig(ctx context.Context, beadsDir string, preview bool) (storage.DoltStorage, error) {
-	// Before Load can migrate a legacy config.json; validateConfiguredBackend
-	// below re-checks the loaded config.
-	if err := checkDiscoveredBackend(beadsDir); err != nil {
+	if _, err := checkDiscoveredBackend(beadsDir); err != nil {
 		return nil, err
 	}
-	cfg, err := configfile.Load(beadsDir)
+	// A non-mutating open writes nothing into the workspace, its metadata
+	// included: it reads a legacy config.json in place (LoadForDiscovery)
+	// rather than migrating it into metadata.json, which drops the keys
+	// Config does not know and deletes config.json. These factories serve
+	// workspaces bd was not launched in (an external project, a routed or
+	// auto-routed read), and such a workspace may be one bd run inside it
+	// does not treat as a workspace at all: a clone of a SQLite-era project
+	// keeps its tracked config.json and issues.jsonl, but not the ignored
+	// *.db the historical SQLite check needs.
+	cfg, err := configfile.LoadForDiscovery(beadsDir)
 	if err != nil {
 		// Same contract as newDoltStoreFromConfig: a present-but-unloadable
 		// metadata.json is a hard error, not a silent embedded fallback —
 		// and the error must name the real cause rather than the downstream
 		// "database not found" the embedded open would produce.
-		return nil, fmt.Errorf("load %s: %w (refusing to fall back to the embedded store)", remedy.PrintedValue(configfile.ConfigPath(beadsDir)), remedy.PrintedError(err))
+		return nil, fmt.Errorf("load %s: %w (refusing to fall back to the embedded store)", remedy.PrintedValue(configfile.MetadataFilePath(beadsDir)), remedy.PrintedError(err))
 	}
 	if err := validateConfiguredBackend(cfg, beadsDir); err != nil {
 		return nil, err

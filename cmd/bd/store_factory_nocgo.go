@@ -77,8 +77,15 @@ func newDoltStoreFromConfig(ctx context.Context, beadsDir string) (s storage.Dol
 	defer func() { s, err = activateEventsJournalStore(beadsDir, s, err) }()
 	// Before Load can migrate a legacy config.json; validateConfiguredBackend
 	// below re-checks the loaded config.
-	if err := checkDiscoveredBackend(beadsDir); err != nil {
+	discovered, err := checkDiscoveredBackend(beadsDir)
+	if err != nil {
 		return nil, err
+	}
+	// This build refuses every embedded open; decide it on the discovered
+	// metadata, before Load migrates a legacy config.json, so the refused
+	// open writes nothing. Without metadata Load writes nothing either.
+	if discovered != nil && selectsEmbeddedStore(beadsDir, discovered) {
+		return nil, fmt.Errorf("%s", nocgoEmbeddedErrMsg)
 	}
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil {
@@ -119,12 +126,21 @@ func newExistingDoltStoreFromConfig(ctx context.Context, beadsDir string) (stora
 func newReadOnlyStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
 	// Before Load can migrate a legacy config.json; validateConfiguredBackend
 	// below re-checks the loaded config.
-	if err := checkDiscoveredBackend(beadsDir); err != nil {
+	discovered, err := checkDiscoveredBackend(beadsDir)
+	if err != nil {
 		return nil, err
 	}
-	cfg, err := configfile.Load(beadsDir)
+	// This build refuses every embedded open; decide it on the discovered
+	// metadata, before Load migrates a legacy config.json, so the refused
+	// open writes nothing. Without metadata Load writes nothing either.
+	if discovered != nil && selectsEmbeddedStore(beadsDir, discovered) {
+		return nil, fmt.Errorf("%s", nocgoEmbeddedErrMsg)
+	}
+	// Read in place, never migrated: see the cgo twin,
+	// openNonMutatingStoreFromConfig.
+	cfg, err := configfile.LoadForDiscovery(beadsDir)
 	if err != nil {
-		return nil, fmt.Errorf("load %s: %w", configfile.ConfigPath(beadsDir), err)
+		return nil, fmt.Errorf("load %s: %w", configfile.MetadataFilePath(beadsDir), err)
 	}
 	if err := validateConfiguredBackend(cfg, beadsDir); err != nil {
 		return nil, err

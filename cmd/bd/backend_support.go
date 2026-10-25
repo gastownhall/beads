@@ -20,7 +20,7 @@ import (
 // validates metadata it loaded itself. It returns early for a nil cfg, so that
 // backstop covers the graph format marker only when metadata was loaded; a
 // caller that may have none must check beadsDir with
-// checkDiscoveredWorkspaceFormat or command admission first, as every caller
+// checkDiscoveredForOpen or command admission first, as every caller
 // does today.
 func validateConfiguredBackend(cfg *configfile.Config, beadsDir string) error {
 	if cfg == nil {
@@ -42,23 +42,49 @@ func validateConfiguredBackend(cfg *configfile.Config, beadsDir string) error {
 	}
 }
 
-// checkDiscoveredBackend runs validateConfiguredBackend on beadsDir's metadata
-// as LoadForDiscovery reads it, which never rewrites the workspace. The store
-// factories run it before configfile.Load, which migrates a legacy config.json
+// checkDiscoveredBackend refuses, before configfile.Load, every workspace the
+// store factories refuse from its own contents: it runs
+// configfile.LoadDiscoveredForOpen (a workspace format this build cannot open,
+// a historical SQLite workspace) and then validateConfiguredBackend (a removed
+// or unrecognized backend) on beadsDir's metadata as LoadForDiscovery reads
+// it, which never rewrites the workspace. Load migrates a legacy config.json
 // into metadata.json, dropping the keys Config does not know and deleting
-// config.json, so a format or a removed or unrecognized backend they refuse is
-// refused before that rewrite rather than after it. Command admission makes
-// the same check, but only on the workspace bd runs in; the factories also
-// open others (an auto-routed target, an external project). A registered
-// backend passes, for the factory to dispatch. Metadata that does not load is
-// left to the caller's Load to report, unless the graph format marker sits
-// beside it (configfile.LoadDiscoveredForOpen); no metadata passes.
-func checkDiscoveredBackend(beadsDir string) error {
+// config.json, so each refusal comes before that rewrite rather than after
+// it. Command admission makes the same checks, in the same order and with the
+// same text, but only on the workspace bd runs in; the factories also open
+// others (an auto-routed or routed target, an external project). A registered
+// backend passes, for the factory to dispatch. It returns the metadata it
+// read, for a factory that decides another refusal before Load
+// (selectsEmbeddedStore): nil when there is none, or when it does not load and
+// is left to the caller's Load to report.
+func checkDiscoveredBackend(beadsDir string) (*configfile.Config, error) {
 	cfg, err := configfile.LoadDiscoveredForOpen(beadsDir)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return validateConfiguredBackend(cfg, beadsDir)
+	if err := validateConfiguredBackend(cfg, beadsDir); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+// selectsEmbeddedStore reports whether the store factories open beadsDir,
+// whose metadata is cfg (nil for none), as an embedded store: its backend is
+// not a registered one, it is not a proxied-server workspace, and it is not in
+// server mode. It mirrors the factories' dispatch after Load so that a
+// refusal of the embedded arm (a routed write to a workspace with no embedded
+// database, or a CGO_ENABLED=0 build) can be decided on the discovered
+// metadata, before Load migrates a legacy config.json: a refused open writes
+// nothing.
+func selectsEmbeddedStore(beadsDir string, cfg *configfile.Config) bool {
+	cfg = normalizeLoadedConfig(cfg)
+	if backends.Registered(cfg.GetBackend()) {
+		return false
+	}
+	if cfg.IsDoltProxiedServerMode() {
+		return false
+	}
+	return !effectiveServerMode(beadsDir, cfg)
 }
 
 // registeredBackendWorkspaceIsBeadsDir reports whether metadata selects a
@@ -132,7 +158,7 @@ func loadDoltBackendConfig(beadsDir string) (*configfile.Config, error) {
 	// Refuse a workspace format this build cannot open before configfile.Load,
 	// which would otherwise migrate a legacy config.json into metadata.json
 	// before requireDoltBackend's own format check could refuse it.
-	if err := checkDiscoveredWorkspaceFormat(beadsDir); err != nil {
+	if err := checkDiscoveredForOpen(beadsDir); err != nil {
 		return nil, err
 	}
 	cfg, err := configfile.Load(beadsDir)
