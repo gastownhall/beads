@@ -152,6 +152,18 @@ func (t *Tracker) CreateIssue(ctx context.Context, issue *types.Issue) (*tracker
 		return nil, err
 	}
 
+	// GitHub's POST /issues cannot set state, so a closed bead is created
+	// "open". Close it with a follow-up update so the state carries. On failure
+	// we keep the created issue and its external_ref (returning an error here
+	// would strand the issue and re-create a duplicate on the next push).
+	if issue.Status == types.StatusClosed {
+		if closed, err := t.client.UpdateIssue(ctx, created.Number, map[string]interface{}{
+			"state": "closed",
+		}); err == nil {
+			created = closed
+		}
+	}
+
 	ti := githubToTrackerIssue(created)
 	return &ti, nil
 }

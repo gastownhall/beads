@@ -2,9 +2,14 @@ package github
 
 import (
 	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -375,5 +380,95 @@ func TestValidate(t *testing.T) {
 	tr.client = &Client{} // Set client
 	if err := tr.Validate(); err != nil {
 		t.Errorf("Validate() on initialized tracker returned error: %v", err)
+	}
+}
+
+// capturedRequest records a single API call the tracker made.
+type capturedRequest struct {
+	method string
+	path   string
+	body   map[string]interface{}
+}
+
+// newRecordingTracker returns a Tracker whose client points at a test server
+// that records every request and replies with the JSON bodies keyed by
+// "METHOD path". A key whose value is prefixed "!<status> " replies with that
+// HTTP status and the rest of the value as the body. Any other request fails
+// the test.
+func newRecordingTracker(t *testing.T, responses map[string]string) (*Tracker, *[]capturedRequest) {
+	t.Helper()
+	var reqs []capturedRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]interface{}
+		if raw, _ := io.ReadAll(r.Body); len(raw) > 0 {
+			_ = json.Unmarshal(raw, &body)
+		}
+		reqs = append(reqs, capturedRequest{method: r.Method, path: r.URL.Path, body: body})
+		key := r.Method + " " + r.URL.Path
+		resp, ok := responses[key]
+		if !ok {
+			t.Errorf("unexpected request: %s", key)
+			http.Error(w, "unexpected", http.StatusNotFound)
+			return
+		}
+		status := http.StatusOK
+		if strings.HasPrefix(resp, "!") {
+			code, rest, _ := strings.Cut(resp[1:], " ")
+			status, _ = strconv.Atoi(code)
+			resp = rest
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = io.WriteString(w, resp)
+	}))
+	t.Cleanup(srv.Close)
+
+	tr := &Tracker{
+		client: NewClient("token", "owner", "repo").WithBaseURL(srv.URL),
+		config: DefaultMappingConfig(),
+	}
+	return tr, &reqs
+}
+
+const createdIssueURL = "https://github.com/owner/repo/issues/42"
+
+// TestCreateIssue_ClosedCarriesState verifies a closed bead is created and then
+// closed with a follow-up PATCH carrying only state=closed (GitHub's create
+// endpoint has no state field).
+func TestCreateIssue_ClosedCarriesState(t *testing.T) {
+	tr, reqs := newRecordingTracker(t, map[string]string{
+		"POST /repos/owner/repo/issues":     `{"id":100,"number":42,"state":"open","html_url":"` + createdIssueURL + `"}`,
+		"PATCH /repos/owner/repo/issues/42": `{"id":100,"number":42,"state":"closed","html_url":"` + createdIssueURL + `"}`,
+	})
+
+	ti, err := tr.CreateIssue(context.Background(), &types.Issue{
+		ID:        "bd-1",
+		Title:     "done",
+		IssueType: types.TypeTask,
+		Status:    types.StatusClosed,
+	})
+	if err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+
+	if len(*reqs) != 2 ||
+		(*reqs)[0].method != http.MethodPost || (*reqs)[0].path != "/repos/owner/repo/issues" ||
+		(*reqs)[1].method != http.MethodPatch || (*reqs)[1].path != "/repos/owner/repo/issues/42" {
+		t.Fatalf("requests = %+v, want [POST /repos/owner/repo/issues, PATCH /repos/owner/repo/issues/42]", *reqs)
+	}
+	if body := (*reqs)[1].body; len(body) != 1 || body["state"] != "closed" {
+		t.Errorf("close PATCH body = %v, want exactly {\"state\":\"closed\"}", body)
+	}
+	if ti.State != "closed" {
+		t.Errorf("returned State = %v, want closed", ti.State)
+	}
+	if ti.Identifier != "42" {
+		t.Errorf("returned Identifier = %q, want 42", ti.Identifier)
+	}
+	if ti.URL != createdIssueURL {
+		t.Errorf("returned URL = %q, want %q", ti.URL, createdIssueURL)
+	}
+	if len(ti.Warnings) != 0 {
+		t.Errorf("returned Warnings = %q, want none", ti.Warnings)
 	}
 }
