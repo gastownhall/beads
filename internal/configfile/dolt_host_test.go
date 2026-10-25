@@ -103,17 +103,3 @@ func TestHostImpliesServerMode_CanonicalSpellings(t *testing.T) {
 		})
 	}
 }
-
-// TestIsShortIPv6LoopbackSpelling pins the two spellings bd checked before
-// the classifier, which owned server mode's port-file handling still uses.
-func TestIsShortIPv6LoopbackSpelling(t *testing.T) {
-	for host, want := range map[string]bool{
-		"::1": true, "[::1]": true, " ::1 ": true,
-		"0:0:0:0:0:0:0:1": false, "::": false, "[::]": false,
-		"127.0.0.1": false, "localhost": false, "": false, "db.example.com": false,
-	} {
-		if got := IsShortIPv6LoopbackSpelling(host); got != want {
-			t.Errorf("IsShortIPv6LoopbackSpelling(%q) = %v, want %v", host, got, want)
-		}
-	}
-}

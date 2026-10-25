@@ -55,60 +55,78 @@ func TestResolvePhysicalRootsHostOwnership(t *testing.T) {
 }
 
 // TestDefaultConfigHostOwnershipPortFile pins when bd's port file, which
-// records the port of bd's own server on 127.0.0.1, names a port. In external
-// mode it does only for a host bd runs its server at. In owned mode it does
-// for every host except ::1 and [::1], as on main: dropping it for the other
-// IPv6-loopback spellings (0:0:0:0:0:0:0:1, ::, [::]) made a nested bd init
-// under a configuration naming one print port 0 in its summary. Where it is
-// dropped the precedence chain resumes, and in external mode a host no
-// setting gives a port gets the documented default.
+// records the port of bd's own server on 127.0.0.1, names a port: only for a
+// host bd runs its server at, in owned and external mode alike, whether the
+// host comes from metadata.json or BEADS_DOLT_SERVER_HOST. Paired with any
+// other host (the IPv6 loopback in every spelling, 127.0.0.2, another
+// machine) it would dial that host on a stale port. Where it is dropped, or
+// absent, the precedence chain resumes: a host bd does not run its server at
+// gets the documented default in external mode and no port in owned mode,
+// where the store then asks for one to be pinned.
+//
+// The mode is pinned too. dolt_mode: server keeps a metadata.json host from
+// inferring server mode, and BEADS_DOLT_SERVER_HOST decides alone
+// (configfile.HostImpliesServerMode), so an environment host spelled
+// 0:0:0:0:0:0:0:1, :: or [::] is owned mode, as ::1 is, not external mode
+// with the default port.
 func TestDefaultConfigHostOwnershipPortFile(t *testing.T) {
-	ownedDrops := map[string]bool{"::1": true, "[::1]": true}
 	hosts := append(append([]string{}, doltserverHostSpellings...), "::", "[::]")
 	const stale = 14444
 	for _, external := range []bool{false, true} {
-		for _, host := range hosts {
-			name := host + "/owned"
-			if external {
-				name = host + "/external"
+		for _, fromEnv := range []bool{false, true} {
+			for _, portFile := range []bool{true, false} {
+				for _, host := range hosts {
+					source, setting, file := "metadata", "dolt_mode", "port file"
+					if fromEnv {
+						source = "env"
+					}
+					if external {
+						setting = "BEADS_DOLT_SERVER_MODE"
+					}
+					if !portFile {
+						file = "no port file"
+					}
+					t.Run(host+"/"+source+"/"+setting+"/"+file, func(t *testing.T) {
+						namedPortRefusalEnv(t)
+						if external {
+							t.Setenv("BEADS_DOLT_SERVER_MODE", "1")
+						}
+						beadsDir := t.TempDir()
+						if fromEnv {
+							writeServerHostMetadata(t, beadsDir, "")
+							t.Setenv("BEADS_DOLT_SERVER_HOST", host)
+						} else {
+							writeServerHostMetadata(t, beadsDir, host)
+						}
+						if portFile {
+							if err := writePortFile(beadsDir, stale); err != nil {
+								t.Fatal(err)
+							}
+						}
+						bd := configfile.BdRunsServerAt(host)
+						wantMode := ServerModeOwned
+						if external || (fromEnv && !configfile.IsLocalHostString(host)) {
+							wantMode = ServerModeExternal
+						}
+						wantPort, wantSource := 0, PortSourceUnset
+						switch {
+						case portFile && bd:
+							wantPort, wantSource = stale, PortSourcePortFile
+						case wantMode == ServerModeExternal && !bd:
+							wantPort, wantSource = configfile.DefaultDoltServerPort, PortSourceExternalHostDefault
+						}
+						for _, got := range []struct {
+							name string
+							cfg  *Config
+						}{{"DefaultConfig", DefaultConfig(beadsDir)}, {"DialConfig", DialConfig(beadsDir)}} {
+							if got.cfg.Mode != wantMode || got.cfg.Port != wantPort || got.cfg.PortSource != wantSource {
+								t.Errorf("%s(host %q): mode %v, port %d from %q; want mode %v, port %d from %q",
+									got.name, host, got.cfg.Mode, got.cfg.Port, got.cfg.PortSource, wantMode, wantPort, wantSource)
+							}
+						}
+					})
+				}
 			}
-			t.Run(name, func(t *testing.T) {
-				namedPortRefusalEnv(t)
-				if external {
-					t.Setenv("BEADS_DOLT_SERVER_MODE", "1")
-				}
-				beadsDir := t.TempDir()
-				writeServerHostMetadata(t, beadsDir, host)
-				if err := writePortFile(beadsDir, stale); err != nil {
-					t.Fatal(err)
-				}
-				for _, got := range []struct {
-					name string
-					cfg  *Config
-				}{{"DefaultConfig", DefaultConfig(beadsDir)}, {"DialConfig", DialConfig(beadsDir)}} {
-					usesFile := got.cfg.PortSource == PortSourcePortFile || got.cfg.Port == stale
-					wantFile := configfile.BdRunsServerAt(host)
-					if !external {
-						wantFile = !ownedDrops[host]
-					}
-					if usesFile != wantFile {
-						t.Errorf("%s(host %q): port %d from %q; port file used = %v, want %v",
-							got.name, host, got.cfg.Port, got.cfg.PortSource, usesFile, wantFile)
-						continue
-					}
-					if wantFile {
-						continue
-					}
-					wantPort, wantSource := 0, PortSourceUnset
-					if got.cfg.Mode == ServerModeExternal {
-						wantPort, wantSource = configfile.DefaultDoltServerPort, PortSourceExternalHostDefault
-					}
-					if got.cfg.Port != wantPort || got.cfg.PortSource != wantSource {
-						t.Errorf("%s(host %q, mode %v): port %d from %q, want %d from %q",
-							got.name, host, got.cfg.Mode, got.cfg.Port, got.cfg.PortSource, wantPort, wantSource)
-					}
-				}
-			})
 		}
 	}
 }

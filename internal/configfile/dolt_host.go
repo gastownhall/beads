@@ -15,15 +15,17 @@ const (
 	// DoltHostBdServer is the address bd's own Dolt server binds,
 	// 127.0.0.1 (doltserver.DefaultConfig), in any spelling a client dial
 	// reaches it by: empty (the default host), 127.0.0.1, ::ffff:127.0.0.1,
-	// localhost, or 0.0.0.0, which a Linux or macOS dial connects to
-	// 127.0.0.1's listener. On Windows a dial to 0.0.0.0 fails, so there
-	// a 0.0.0.0 host reaches no server, bd's included; it is still classed
-	// here, and bd may auto-start its server for it.
+	// localhost, or 0.0.0.0. A Linux or macOS dial to 0.0.0.0 connects to
+	// 127.0.0.1's listener, and on Windows, FreeBSD, OpenBSD and AIX Go
+	// itself dials 127.0.0.1 for it.
 	DoltHostBdServer DoltHostKind = iota
 	// DoltHostIPv6Loopback is the IPv6 loopback, ::1 in any spelling, or the
-	// IPv6 unspecified address ::, which a dial sends to ::1. It is this
-	// machine, but bd's own server, which listens on 127.0.0.1 only, never
-	// answers there.
+	// IPv6 unspecified address ::, which a Linux or macOS dial sends to ::1.
+	// It is this machine, but bd's own server, which listens on 127.0.0.1
+	// only, never answers at ::1. On Windows, FreeBSD, OpenBSD and AIX Go
+	// dials 127.0.0.1 for ::, which can reach bd's server; :: is classed
+	// here on every platform all the same, so a host gets one answer
+	// wherever bd runs.
 	DoltHostIPv6Loopback
 	// DoltHostOtherLoopback is an IPv4 loopback address other than
 	// 127.0.0.1, such as 127.0.0.2. It is on this machine, but bd's own
@@ -89,14 +91,4 @@ func IsLocalHostString(host string) bool {
 		return true
 	}
 	return false
-}
-
-// IsShortIPv6LoopbackSpelling reports whether host is the IPv6 loopback
-// written ::1 or [::1], the two spellings bd checked before ClassifyDoltHost.
-// It is not an ownership or locality test: ClassifyDoltHost answers those for
-// every spelling. It keeps owned server mode's port-file handling
-// (doltserver.DefaultConfig) as it was, because bd init's summary prints
-// that port for a workspace nested under a configuration naming such a host.
-func IsShortIPv6LoopbackSpelling(host string) bool {
-	return UnbracketHost(host) == "::1"
 }

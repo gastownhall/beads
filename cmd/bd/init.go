@@ -1627,7 +1627,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// AutoStart is enabled during init — we need a server to initialize the database —
 		// except under --external: that server is managed outside bd, so bd must not start
 		// one of its own on the endpoint the caller named.
-		initPort, initPortSource, initPortShared := initStoreServerPort(beadsDir)
+		initPort, initPortSource, initPortShared, initPortResolved := initStoreServerPort(beadsDir, initStoreServerHost(serverHost))
 		doltCfg := &dolt.Config{
 			Path:                   storagePath,
 			BeadsDir:               beadsDir,
@@ -1635,6 +1635,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			ServerPort:             initPort,
 			ServerPortSource:       initPortSource,
 			ServerPortSharedServer: initPortShared,
+			ServerPortResolved:     initPortResolved,
 			ServerMode:             initServerMode,
 			ProxiedServer:          initProxiedServer,
 			CreateIfMissing:        true, // bd init is the only path that should create databases
@@ -2431,20 +2432,12 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		if !usesSQLServer() {
 			fmt.Printf("  Mode: %s\n", ui.RenderAccent("embedded"))
 		} else {
-			host := serverHost
-			if host == "" {
-				host = configfile.DefaultDoltServerHost
-			}
-			port := serverPort
-			if port == 0 {
-				port = doltserver.DefaultConfig(beadsDir).Port
-			}
 			user := serverUser
 			if user == "" {
 				user = configfile.DefaultDoltServerUser
 			}
 			fmt.Printf("  Mode: %s\n", ui.RenderAccent("server"))
-			fmt.Printf("  Server: %s\n", ui.RenderAccent(fmt.Sprintf("%s@%s", remedy.PrintedValue(user), doltutil.PrintedServerAddr(host, port))))
+			fmt.Printf("  Server: %s\n", ui.RenderAccent(fmt.Sprintf("%s@%s", remedy.PrintedValue(user), initSummaryServerAddr(beadsDir, serverHost, serverPort))))
 			// Warn when using the default localhost — this is the #1 misconfiguration
 			// for setups where Dolt runs on a remote machine (e.g., over Tailscale).
 			if serverHost == "" && os.Getenv("BEADS_DOLT_SERVER_HOST") == "" {
@@ -3945,9 +3938,24 @@ func initTimeCloneConfig(serverMode bool, serverHost string, serverPort int, ser
 	return cfg
 }
 
+// initStoreServerHost is the host the store bd init opens dials:
+// --server-host, or else the store's own default, BEADS_DOLT_SERVER_HOST and
+// then 127.0.0.1.
+func initStoreServerHost(serverHost string) string {
+	if serverHost != "" {
+		return serverHost
+	}
+	if h := os.Getenv("BEADS_DOLT_SERVER_HOST"); h != "" {
+		return h
+	}
+	return configfile.DefaultDoltServerHost
+}
+
 // initStoreServerPort is the server port, and its source, that bd init puts on
-// the store config it opens unless --server-port names one; the store then
-// applies its own rule to it (dolt.ResolveServerPort).
+// the store config it opens for the server at host (initStoreServerHost)
+// unless --server-port names one; the store then applies its own rule to it
+// (dolt.ResolveServerPort). The two flags it also returns are the config's
+// ServerPortSharedServer and ServerPortResolved.
 //
 // Port resolution for init: use ONLY project-local sources (env var, port file)
 // to prevent cross-project data leakage (GH#2336). DefaultConfig falls through
@@ -3959,14 +3967,29 @@ func initTimeCloneConfig(serverMode bool, serverHost string, serverPort int, ser
 // of the three resolutions below is one: they are an ambient env var and
 // two pieces of bd's own bookkeeping. Mislabeling them makes auto-start
 // refuse to retarget a stale port the user never chose (GH#4052).
-func initStoreServerPort(beadsDir string) (int, doltserver.PortSource, bool) {
+//
+// The port file records the port of bd's own server on 127.0.0.1, so, as in
+// doltserver.DefaultConfig, it names a port only for a host bd runs its
+// server at (configfile.BdRunsServerAt). At any other host it is a stale
+// local port, and whatever listens there may belong to another project
+// (GH#2098, GH#2372). Nor does bd start a server there, so outside shared
+// mode the port is the one every later command in beadsDir resolves:
+// doltserver.DialConfig under beadsDir's own configuration
+// (config.WithBeadsDir), not the configuration init loaded before beadsDir
+// existed, which for a workspace nested in another is the enclosing
+// workspace's config.yaml, whose dolt.port names that workspace's server.
+// That port is resolved: when it is 0 the store fills in none, so an
+// IPv6-loopback host that nothing names a port for gets the store's advice
+// to pin one.
+func initStoreServerPort(beadsDir, host string) (int, doltserver.PortSource, bool, bool) {
 	if p := os.Getenv("BEADS_DOLT_SERVER_PORT"); p != "" {
 		if port, err := strconv.Atoi(p); err == nil && port > 0 {
-			return port, doltserver.PortSourceEnv, false
+			return port, doltserver.PortSourceEnv, false, false
 		}
 	}
-	if port := doltserver.ReadPortFile(beadsDir); port > 0 {
-		return port, doltserver.PortSourcePortFile, false
+	bdServer := configfile.BdRunsServerAt(host)
+	if port := doltserver.ReadPortFile(beadsDir); port > 0 && bdServer {
+		return port, doltserver.PortSourcePortFile, false, false
 	}
 	// Shared server mode intentionally uses a common port for all projects.
 	if doltserver.IsSharedServerMode() {
@@ -3974,9 +3997,41 @@ func initStoreServerPort(beadsDir string) (int, doltserver.PortSource, bool) {
 		// makes newServerMode fail closed if the shared server is down and
 		// auto-start brings up a repo-local one instead — a different
 		// database, never a benign port refresh (GH#4052).
-		return doltserver.DefaultSharedServerPort, doltserver.PortSourceSharedServerDefault, true
+		return doltserver.DefaultSharedServerPort, doltserver.PortSourceSharedServerDefault, true, false
 	}
-	return 0, doltserver.PortSourceUnset, false
+	if !bdServer {
+		var dial *doltserver.Config
+		// A config file that does not load fails the same way for later
+		// commands, which run with what did load.
+		_ = config.WithBeadsDir(beadsDir, func() { dial = doltserver.DialConfig(beadsDir) })
+		return dial.Port, dial.PortSource, dial.PortSharedServer, true
+	}
+	return 0, doltserver.PortSourceUnset, false, false
+}
+
+// initSummaryServerAddr is the server address bd init's summary prints, the
+// endpoint init's store dialed: the host initStoreServerHost names for
+// --server-host, with --server-port, or else with doltserver.DialConfig's
+// port for beadsDir under the configuration every later command there loads
+// (config.WithBeadsDir), as bootstrap's serverClonePort reads it. DialConfig,
+// unlike DefaultConfig, applies the legacy BEADS_DOLT_PORT by the store's
+// rule. Init loaded its configuration before beadsDir existed, so for a
+// workspace nested in another that is the enclosing workspace's config.yaml,
+// and its dolt.host would decide whether bd's port file, which names the port
+// init's store just reached, counts. When nothing names a port it says so,
+// rather than print port 0.
+func initSummaryServerAddr(beadsDir, serverHost string, serverPort int) string {
+	host := initStoreServerHost(serverHost)
+	port := serverPort
+	if port == 0 {
+		// A config file that does not load fails the same way for later
+		// commands, which run with what did load.
+		_ = config.WithBeadsDir(beadsDir, func() { port = doltserver.DialConfig(beadsDir).Port })
+	}
+	if port == 0 {
+		return remedy.PrintedValue(host) + " (no port pinned)"
+	}
+	return doltutil.PrintedServerAddr(host, port)
 }
 
 func persistInitSyncRemote(beadsDir, initRemote, syncURL string, syncFromRemote, syncURLFromConfig, syncURLFromGitOrigin bool) error {

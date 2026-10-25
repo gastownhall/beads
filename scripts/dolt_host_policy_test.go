@@ -70,14 +70,16 @@ var hostListFiles = map[string]string{
 }
 
 // isLoopbackHostLiteral reports whether e is a string literal naming a
-// loopback host or bd's own address in some spelling.
+// loopback host or bd's own address in some spelling. A literal that is empty
+// once unbracketed, such as "" or the JSON empty array "[]", names no host,
+// although ClassifyDoltHost reads an empty host as bd's default.
 func isLoopbackHostLiteral(e ast.Expr) (string, bool) {
 	lit, ok := e.(*ast.BasicLit)
 	if !ok || lit.Kind != token.STRING {
 		return "", false
 	}
 	v, err := strconv.Unquote(lit.Value)
-	if err != nil || strings.TrimSpace(v) == "" {
+	if err != nil || strings.TrimSpace(configfile.UnbracketHost(v)) == "" {
 		return "", false
 	}
 	return v, configfile.ClassifyDoltHost(v) != configfile.DoltHostRemote
@@ -252,6 +254,8 @@ func TestDoltHostPolicyScanCatchesEveryShape(t *testing.T) {
 		{"0.0.0.0 single case", "cmd/bd/p.go", "func f(h string) bool {\n\tswitch h {\n\tcase \"0.0.0.0\":\n\t\treturn true\n\t}\n\treturn false\n}\n", true},
 		{"host-list file", "internal/ado/client.go", "func f(h string) bool { return h == \"localhost\" }\n", false},
 		{"one literal", "cmd/bd/p.go", "var host = \"127.0.0.1\"\n", false},
+		{"empty JSON array ==", "cmd/bd/p.go", "// dials localhost by default\nfunc isEmptyJSON(s string) bool { return s == \"[]\" }\n", false},
+		{"empty JSON array case", "cmd/bd/p.go", "// dials localhost by default\nfunc isEmptyJSON(s string) bool {\n\tswitch s {\n\tcase \"[]\", \"{}\":\n\t\treturn true\n\t}\n\treturn false\n}\n", false},
 		{"remote ==", "cmd/bd/p.go", "func f(h string) bool { return h == \"db.example.com\" }\n", false},
 		{"predicate call", "cmd/bd/p.go", "func f(h string) bool { return configfile.BdRunsServerAt(h) }\n", false},
 		{"remote literals", "cmd/bd/p.go", "var hosts = []string{\"db.example.com\", \"10.0.0.1\"}\n", false},

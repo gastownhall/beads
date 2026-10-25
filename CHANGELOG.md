@@ -1023,6 +1023,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     checked the host. All four now refuse such a host, fresh, dry run or
     resumed, until the run switches `dolt_mode`; a resumed refusal names
     the journal and says that clearing the host resumes the migration.
+  - In server mode with no port setting (owned mode), bd's port file
+    (`.beads/dolt-server.port`), which records the port of its own server
+    on `127.0.0.1`, no longer names the port of a server bd does not run.
+    It was ignored only for a host spelled `::1` or `[::1]`, so
+    `0:0:0:0:0:0:0:1`, `::`, `127.0.0.2` or another machine was dialed on
+    the stale port of bd's last server; an external server already ignored
+    it. Such a workspace now gets the "pin its port" advice until
+    `BEADS_DOLT_SERVER_PORT` or `dolt.port` names the port. `bd init
+    --server`, whose store and `--external` clone took the file's port for
+    every host, now ignores it for such a host (`--server-host` or
+    `BEADS_DOLT_SERVER_HOST`) too. It resolves that host's port from the new
+    workspace's own configuration, as later commands there do, rather than
+    from the `dolt.port` of a workspace it is nested in: an IPv6-loopback
+    host gets the same advice, and another loopback address or another
+    machine, which select the external server, the documented port 3307.
+  - `bd init`'s summary names the port of the new workspace's server as
+    later commands there resolve it, from that workspace's own
+    configuration rather than an enclosing workspace's `config.yaml`, which
+    made it print port 0 under an enclosing `dolt.host` of `::1` or
+    `[::1]`. When nothing names a port it says so rather than print port 0.
+    It also names the port the legacy `BEADS_DOLT_PORT` sets, which init's
+    store dials, and the host `BEADS_DOLT_SERVER_HOST` sets, rather than
+    `127.0.0.1`.
   - `bd dolt show` no longer lists a leftover `.beads/dolt`'s remotes for
     a workspace whose server is at the IPv6 loopback.
   - A `localhost` host in another case, and `0.0.0.0`, now auto-start bd's
@@ -1042,8 +1065,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `BEADS_DOLT_SERVER_HOST`, `dolt_server_host` or `dolt.host` no longer
     select server mode by themselves, as `::1` already did not (#7803),
     and those guards accept them as loopback. A workspace that relied on
-    one of them to select server mode sets `dolt_mode: server` in
-    `metadata.json` or `BEADS_DOLT_SERVER_MODE=1`.
+    one of them to select server mode, including one whose
+    `BEADS_DOLT_SERVER_HOST` overrode `dolt_mode: server`, names the
+    server's port in `BEADS_DOLT_SERVER_PORT` or `metadata.json`'s
+    `dolt_server_port`. For `::`, `[::]` or `0:0:0:0:0:0:0:1`,
+    `BEADS_DOLT_SERVER_MODE=1` works too and keeps the external server on
+    the documented port 3307. `[127.0.0.1]` and `::ffff:127.0.0.1` are now
+    bd's own address, where, as at `127.0.0.1`, an external server gets no
+    default port, so with `BEADS_DOLT_SERVER_MODE=1` they still need the
+    port pinned (`BEADS_DOLT_SERVER_PORT`, `dolt.port` or
+    `dolt_server_port`). `dolt_mode: server` alone does not restore it:
+    bd then refuses an IPv6-loopback host until a port is pinned, and
+    treats `[127.0.0.1]` and `::ffff:127.0.0.1` as its own server, which
+    it may start.
 - With only the legacy `BEADS_DOLT_PORT` naming a workspace's Dolt server,
   bd now presents the credentials-file password for that port
   (`[127.0.0.1:<port>]`). The store looked the password up for the port it

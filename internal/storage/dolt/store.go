@@ -445,6 +445,19 @@ type Config struct {
 	// ServerPortSource.IsAuthoritative() (GH#4052).
 	ServerPortSharedServer bool
 
+	// ServerPortResolved records that the caller already resolved ServerPort
+	// by the store's port chain (doltserver.DialConfig) under the
+	// configuration of the workspace being opened, which need not be the one
+	// the process loaded. A zero ServerPort then means that nothing there
+	// names a port: ResolveServerPort still applies the port environment
+	// variables, and New its test-mode guard (applyTestModePortGuard), but
+	// ResolveServerPort does not fill the port from
+	// doltserver.DefaultConfig, which reads the process's configuration. bd
+	// init sets it for a workspace it is creating, whose process
+	// configuration can be an enclosing workspace's config.yaml naming
+	// another project's server (GH#2336).
+	ServerPortResolved bool
+
 	// Remote auth for Hosted Dolt push/pull (optional)
 	// When set, Push/Pull use the --user flag and set DOLT_REMOTE_PASSWORD env var.
 	RemoteUser     string // Hosted Dolt remote user (set via DOLT_REMOTE_USER env var)
@@ -1769,11 +1782,12 @@ func ResolveServerPort(cfg *Config) {
 		}
 	}
 	// If env var didn't provide a port, consult the full resolution chain:
-	// port file > config.yaml > metadata.json (GH#2590).
+	// port file > config.yaml > metadata.json (GH#2590), unless the caller
+	// already did (ServerPortResolved).
 	// Resolve from the owning .beads dir when available; cfg.Path is the Dolt
 	// data path, not the config directory, and using it directly can miss the
 	// repo-local port file or metadata.
-	if cfg.ServerPort == 0 {
+	if cfg.ServerPort == 0 && !cfg.ServerPortResolved {
 		resolveDir := cfg.BeadsDir
 		if resolveDir == "" && cfg.Path != "" {
 			resolveDir = filepath.Dir(cfg.Path)

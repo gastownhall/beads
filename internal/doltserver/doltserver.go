@@ -1151,8 +1151,8 @@ func defaultConfigForMode(beadsDir string, sharedMode bool, resolvePort serverPo
 	// machine (host-inferred external config, GH#3545), or one at the IPv6
 	// loopback or another loopback address, where bd's own server, which
 	// listens on 127.0.0.1 only, never runs. Such a host is external only
-	// when a setting makes it so; in owned mode only the IPv6 loopback
-	// spelled ::1 or [::1] still never takes bd's port file.
+	// when a setting makes it so, but in any mode it never takes bd's port
+	// file.
 	if !sharedMode && (cfg.Mode == ServerModeExternal || cfg.PortSource == PortSourcePortFile) {
 		fc := &configfile.Config{}
 		if _, err := os.Stat(configfile.ConfigPath(workspaceBeadsDir)); err == nil {
@@ -1160,16 +1160,15 @@ func defaultConfigForMode(beadsDir string, sharedMode bool, resolvePort serverPo
 				fc = loaded
 			}
 		}
-		host := fc.GetDoltServerHost()
-		ipv6Loopback := configfile.IsShortIPv6LoopbackSpelling(host)
-		external := cfg.Mode == ServerModeExternal && !configfile.BdRunsServerAt(host)
+		bdServer := configfile.BdRunsServerAt(fc.GetDoltServerHost())
+		external := cfg.Mode == ServerModeExternal && !bdServer
 		// The gitignored port file is bd's bookkeeping for a bd-owned
-		// server on 127.0.0.1; pairing it with either host dials that
-		// host on a stale local ephemeral port. Discard it and resume
-		// the precedence chain so lower-priority authoritative sources
-		// (listener.port, dolt.port, metadata dolt_server_port) still
-		// apply.
-		if (external || ipv6Loopback) && cfg.PortSource == PortSourcePortFile {
+		// server on 127.0.0.1; pairing it with any other host dials that
+		// host on a stale local ephemeral port (GH#2098, GH#2372). Discard
+		// it and resume the precedence chain so lower-priority
+		// authoritative sources (listener.port, dolt.port, metadata
+		// dolt_server_port) still apply.
+		if !bdServer && cfg.PortSource == PortSourcePortFile {
 			cfg.Port, cfg.PortSource = resolvePort(workspaceBeadsDir, beadsDir, false, true)
 			cfg.PortSharedServer = false
 		}
