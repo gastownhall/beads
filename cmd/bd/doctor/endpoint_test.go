@@ -104,3 +104,39 @@ func TestDoctorChecksDialTheEndpointTheStoreDials(t *testing.T) {
 		}
 	}
 }
+
+// TestDoctorChecksNeverDialAnUnresolvedPort pins the invariant at bd
+// doctor's entry points for a fresh clone of a `bd init --server` project
+// before any server runs: no port is named, and no check dials 127.0.0.1:0.
+// When the next bd command starts the workspace's own server, the Fresh Clone
+// check reports the fresh clone and points at bd bootstrap, which clones into
+// that server's data directory; otherwise it gives the store's advice, which
+// bd bootstrap and every store open refuse with too. The check used to probe
+// 127.0.0.1:0 and report "Dolt server unreachable at 127.0.0.1:0 ... this is
+// not a fresh clone — it's a connectivity or auth problem" (#7841 review).
+func TestDoctorChecksNeverDialAnUnresolvedPort(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		autoStart string
+		wantFresh string
+	}{
+		{name: "bd starts its own server", wantFresh: "Run 'bd bootstrap'"},
+		{name: "auto-start off", autoStart: "0", wantFresh: "dolt.auto-start is off, so bd does not start this workspace's Dolt server."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo, beadsDir := doctorEndpointWorkspace(t)
+			t.Setenv("BEADS_DOLT_AUTO_START", tc.autoStart)
+			reports := doctorEndpointReports(t, repo, beadsDir)
+			if fresh := reports["bd doctor Fresh Clone"]; !strings.Contains(fresh, tc.wantFresh) {
+				t.Errorf("bd doctor Fresh Clone does not say %q:\n%s", tc.wantFresh, fresh)
+			}
+			for name, report := range reports {
+				for _, banned := range []string{"127.0.0.1:0", "connection refused", "connectivity or auth problem"} {
+					if strings.Contains(report, banned) {
+						t.Errorf("%s contains %q: it dialed a port nothing resolved:\n%s", name, banned, report)
+					}
+				}
+			}
+		})
+	}
+}

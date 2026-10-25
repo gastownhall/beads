@@ -63,13 +63,16 @@ func TestInitExplicitRemoteDrivesCloneAndPersistence(t *testing.T) {
 // where a CLI clone into .beads/dolt was stranded while init's store created
 // an empty database on that server; with the dolt CLI into .beads/dolt
 // otherwise, as on main. A gateway (BEADS_DOLT_CREDENTIAL_COMMAND) keeps
-// main's CLI clone on any host.
+// main's CLI clone on any host, unless --server-user names the user: init's
+// store then presents that user, not the command's token, and opens the
+// server as any other.
 func TestInitServerExternalRemoteUsesServerCloneMode(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		server     bool
 		external   bool
 		serverHost string // --server-host
+		serverUser string // --server-user
 		env        map[string]string
 		want       remoteCloneMode
 	}{
@@ -90,14 +93,20 @@ func TestInitServerExternalRemoteUsesServerCloneMode(t *testing.T) {
 		{name: "gateway at ::1", server: true, serverHost: "::1", env: map[string]string{"BEADS_DOLT_CREDENTIAL_COMMAND": "echo tok"}, want: remoteCloneCLI},
 		{name: "gateway at [::1]", server: true, serverHost: "[::1]", env: map[string]string{"BEADS_DOLT_CREDENTIAL_COMMAND": "echo tok"}, want: remoteCloneCLI},
 		{name: "gateway under --external", server: true, external: true, serverHost: "db.example.com", env: map[string]string{"BEADS_DOLT_CREDENTIAL_COMMAND": "echo tok"}, want: remoteCloneExternalServer},
+		// --server-user wins over the command's token in init's store
+		// (dolt.ApplyGatewayCredential leaves a preset user alone), so the
+		// server is no gateway to it: a CLI clone would be stranded.
+		{name: "credential command and --server-user on a remote host", server: true, serverHost: "db.example.com", serverUser: "alice", env: map[string]string{"BEADS_DOLT_CREDENTIAL_COMMAND": "echo tok"}, want: remoteCloneExternalServer},
+		{name: "credential command and --server-user at ::1", server: true, serverHost: "::1", serverUser: "alice", env: map[string]string{"BEADS_DOLT_CREDENTIAL_COMMAND": "echo tok"}, want: remoteCloneExternalServer},
+		{name: "credential command and --server-user on bd's own server", server: true, serverUser: "alice", env: map[string]string{"BEADS_DOLT_CREDENTIAL_COMMAND": "echo tok"}, want: remoteCloneCLI},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			endpointCredentialsEnv(t, nil)
 			for k, v := range tc.env {
 				t.Setenv(k, v)
 			}
-			cloneCfg := initTimeCloneConfig(tc.server, tc.serverHost, 0, "", "", "init_clone_mode")
-			if got := initRemoteCloneMode(tc.server, tc.external, cloneCfg.GetDoltServerHost(), cloneCfg.GetDoltCredentialCommand() != ""); got != tc.want {
+			cloneCfg := initTimeCloneConfig(tc.server, tc.serverHost, 0, "", tc.serverUser, "init_clone_mode")
+			if got := initRemoteCloneMode(tc.server, tc.external, cloneCfg.GetDoltServerHost(), initCloneGateway(cloneCfg, tc.serverUser)); got != tc.want {
 				t.Errorf("initRemoteCloneMode = %v, want %v", got, tc.want)
 			}
 		})

@@ -423,6 +423,9 @@ func reconcileAuthoritativeServerMetadata(cfg *configfile.Config, databases []se
 }
 
 func inspectServerMetadataDatabases(beadsDir string, cfg *configfile.Config) ([]serverDatabaseMetadata, error) {
+	// The catalog read is of the server the store dials, so the guard below
+	// and the dial take one endpoint (doltserver.ResolveEndpoint).
+	ep := doltserver.ResolveEndpoint(beadsDir, cfg)
 	// With no address there is no server catalog to read: never dial
 	// 127.0.0.1:0. When a bd command will start the workspace's own server,
 	// its databases are the ones in the data directory that server will
@@ -430,7 +433,7 @@ func inspectServerMetadataDatabases(beadsDir string, cfg *configfile.Config) ([]
 	// before its first open) there is nothing to reconcile. Otherwise the
 	// reconcile cannot run, and says why: every store open refuses too, with
 	// this advice, or the server is merely stopped over existing databases.
-	if ep := doltserver.ResolveEndpoint(beadsDir, cfg); !ep.Dialable() {
+	if !ep.Dialable() {
 		if !ep.BDStartsServer() {
 			return nil, ep.UnresolvedError()
 		}
@@ -441,7 +444,7 @@ func inspectServerMetadataDatabases(beadsDir string, cfg *configfile.Config) ([]
 		return nil, fmt.Errorf("this workspace's Dolt server is not running, so the databases in %s could not be read to reconcile metadata.json; "+
 			"start the server with 'bd dolt start' (or any bd command), then re-run this command", remedy.PrintedValue(dataDir))
 	}
-	db, err := openServerCatalogDB(beadsDir, cfg)
+	db, err := openServerCatalogDB(ep)
 	if err != nil {
 		return nil, fmt.Errorf("server metadata probe failed: %w", err)
 	}
@@ -540,14 +543,18 @@ func isExpectedProbeError(err error) bool {
 	return false
 }
 
-func openServerCatalogDB(beadsDir string, cfg *configfile.Config) (*sql.DB, error) {
-	port := doltserver.DefaultConfig(beadsDir).Port
+// openServerCatalogDB opens the catalog of the server at ep, the endpoint the
+// store dials: its port (DialConfig's, the legacy BEADS_DOLT_PORT included,
+// which DefaultConfig leaves out) and the password keyed to that port. With
+// DefaultConfig's port a workspace only BEADS_DOLT_PORT names had its catalog
+// read at 127.0.0.1:0, or at a port file's server no store open dials.
+func openServerCatalogDB(ep doltserver.Endpoint) (*sql.DB, error) {
 	connStr := doltutil.ServerDSN{
-		Host:     cfg.GetDoltServerHost(),
-		Port:     port,
-		User:     cfg.GetDoltServerUser(),
-		Password: cfg.GetDoltServerPasswordForPort(port),
-		TLS:      cfg.GetDoltServerTLS(),
+		Host:     ep.Host,
+		Port:     ep.Port,
+		User:     ep.User,
+		Password: ep.Password(),
+		TLS:      ep.TLS,
 	}.String()
 	return sql.Open("mysql", connStr)
 }

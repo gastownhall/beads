@@ -193,6 +193,35 @@ func TestDoltDiagnosticsNameTheEndpointTheStoreDials(t *testing.T) {
 	}
 }
 
+// TestDoltDiagnosticsNeverDialAnUnresolvedPort drives bd dolt status (text
+// and --json) and bd doctor through the binary for a server-mode workspace
+// on 127.0.0.1 with auto-start off and no port named. No bd command starts
+// its server, and every store open refuses with the advice to publish or pin
+// its port: status gives that advice, where it dialed 127.0.0.1:0 and
+// reported "dial tcp 127.0.0.1:0: connect: connection refused" (#7841
+// review), and no diagnostic dials that port.
+func TestDoltDiagnosticsNeverDialAnUnresolvedPort(t *testing.T) {
+	bd := buildBDForInitTests(t)
+	root, _, env := externallyManagedStartWorkspace(t, "false")
+	const advice = "dolt.auto-start is off, so bd does not start this workspace's Dolt server."
+	for _, args := range endpointDiagnosticCommands {
+		cmd := exec.Command(bd, args...)
+		cmd.Dir = root
+		cmd.Env = env
+		outBytes, _ := cmd.CombinedOutput()
+		out := string(outBytes)
+		name := "bd " + strings.Join(args, " ")
+		if args[0] == "dolt" && !strings.Contains(out, advice) {
+			t.Errorf("%s does not give the store's advice %q:\n%s", name, advice, out)
+		}
+		for _, banned := range []string{"127.0.0.1:0", "connection refused"} {
+			if strings.Contains(out, banned) {
+				t.Errorf("%s contains %q: it dialed a port nothing resolved:\n%s", name, banned, out)
+			}
+		}
+	}
+}
+
 // credentialEntryPointCommands are the bd commands that log in to a
 // workspace's Dolt server, each of which must present the password the store
 // presents there.
@@ -202,6 +231,9 @@ var credentialEntryPointCommands = [][]string{
 	{"doctor"},
 	// The lightweight check git hooks run.
 	{"doctor", "--check-health"},
+	// Its first step, the metadata reconcile, reads the server's catalog
+	// (bd doctor --fix runs the same reconcile).
+	{"bootstrap", "--dry-run"},
 }
 
 // shOnlyPath is a PATH holding only sh, so dolt stays unfound and no bd
@@ -227,8 +259,9 @@ func shOnlyPath(t *testing.T) string {
 // BEADS_DOLT_SERVER_USER with that entry's password. On main the store
 // looked up the password before BEADS_DOLT_PORT replaced the port (#7804
 // review), so bd list and bd doctor's store checks presented none, and bd
-// dolt status, bd doctor's direct SQL checks and bd doctor --check-health
-// resolved port 0 without BEADS_DOLT_PORT and never logged in.
+// dolt status, bd doctor's direct SQL checks, bd doctor --check-health and
+// bd bootstrap's metadata reconcile resolved port 0 without BEADS_DOLT_PORT
+// and never logged in.
 func TestDoltEntryPointsPresentTheStoresCredentials(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("the PATH fixture is a POSIX shell")

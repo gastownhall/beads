@@ -1017,7 +1017,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `dolt.auto-start` off), plain `bd doctor` (its Dolt checks and the Fresh
   Clone check) and `bd doctor --check-health` now check that port too,
   where they reported port 0 or "no Dolt server port configured" for a
-  server `bd list` reached.
+  server `bd list` reached. So does the metadata reconcile `bd bootstrap`
+  and `bd doctor --fix` run, which read the server's databases at
+  `127.0.0.1:0`, or at a port file's server no other command dials.
 
 - `bd bootstrap` of a fresh clone of a `bd init --server` project that
   names no port no longer fails at its metadata reconcile with
@@ -1028,9 +1030,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   through at `3307`, the port later commands dial there, as before.
   Otherwise (`dolt.auto-start` off, a host bd does not run, a
   `BEADS_DOLT_CREDENTIAL_COMMAND` gateway) it refuses with the store's advice
-  for a server with no port. `bd init --server --external --remote` with no
-  port named for a server on this machine refuses before cloning, with the
-  advice to name the port, rather than clone into `127.0.0.1:3307`.
+  for a server with no port. `bd doctor`'s Fresh Clone check on such a clone
+  says the same: it points at `bd bootstrap`, or gives that advice, where it
+  probed `127.0.0.1:0` and reported a connectivity problem, and `bd dolt
+  status` gives that advice rather than dial `127.0.0.1:0`. `bd init
+  --server --external --remote` with no port named for a server on this
+  machine refuses before cloning, with the advice to name the port, rather
+  than clone into `127.0.0.1:3307`.
 
 - `bd init --server --remote` without `--external`, for a Dolt server at a
   host bd's own server never runs at (another machine, `::1` or `[::1]`),
@@ -1041,7 +1047,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no port named for `::1` or `[::1]`, where the store resolves no port for
   it, init refuses before cloning, with the advice to pin the port. A
   `BEADS_DOLT_CREDENTIAL_COMMAND` gateway keeps the previous clone on any
-  host.
+  host, unless `--server-user` names the user, which init's store then
+  presents instead of the gateway's token.
 
 - **bd no longer rewrites, or creates a database or server in, a legacy
   repository it reaches from another one.** Command admission refuses a

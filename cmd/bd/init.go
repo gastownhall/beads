@@ -1573,7 +1573,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			// the git remote factory. Non-forge URLs are untouched (GH#3339).
 			syncURL = doltRemoteURL(syncURL)
 			cloneCfg := initTimeCloneConfig(initServerMode, serverHost, serverPort, serverSocket, serverUser, dbName)
-			disposition, err := initCloneFromRemote(ctx, beadsDir, syncURL, dbName, cloneCfg, initServerMode, externalServer)
+			disposition, err := initCloneFromRemote(ctx, beadsDir, syncURL, dbName, cloneCfg, initServerMode, externalServer, serverUser)
 			var held *initCloneTargetHeldError
 			if errors.As(err, &held) {
 				// Nothing to clone: the server already holds the database,
@@ -3686,10 +3686,11 @@ func resolveInitConfiguredSyncRemote(initRemote string, initRemoteChanged bool, 
 // .beads/dolt would be stranded there, and init's store would create an
 // empty database on that server instead.
 //
-// A gateway (a credential command is configured) keeps the CLI clone
-// whatever its host: the server clone would log in as the static user the
-// gateway refuses, where init's store presents the command's token and opens
-// the database the gateway already holds.
+// A gateway (a credential command is configured and no --server-user names
+// the user, initCloneGateway) keeps the CLI clone whatever its host: the
+// server clone would log in as the static user the gateway refuses, where
+// init's store presents the command's token and opens the database the
+// gateway already holds.
 func initRemoteCloneMode(initServerMode, externalServer bool, host string, gateway bool) remoteCloneMode {
 	if !initServerMode {
 		return remoteCloneEmbedded
@@ -3700,15 +3701,26 @@ func initRemoteCloneMode(initServerMode, externalServer bool, host string, gatew
 	return remoteCloneCLI
 }
 
+// initCloneGateway reports whether the server bd init clones into is a
+// gateway to init's store: a credential command is configured and no
+// --server-user (serverUser) names the user. The store presents a named user
+// over the command's token, as dolt.ApplyGatewayCredential leaves a preset
+// user alone, and opens that server as any other.
+func initCloneGateway(cloneCfg *configfile.Config, serverUser string) bool {
+	return cloneCfg.GetDoltCredentialCommand() != "" && serverUser == ""
+}
+
 // initCloneFromRemote is bd init's clone of remoteURL into the workspace
-// (runInitRemoteClone), by initRemoteCloneMode. When that clone goes
-// through a server only because bd does not run the server at its host (no
-// --external), the server may already hold the database: init then clones
-// nothing and returns initCloneTargetHeldError, and its store opens that
-// database, as it did when init cloned into .beads/dolt there. DOLT_CLONE
-// would fail instead ("database exists").
-func initCloneFromRemote(ctx context.Context, beadsDir, remoteURL, dbName string, cloneCfg *configfile.Config, initServerMode, externalServer bool) (initRemoteCloneDisposition, error) {
-	cloneMode := initRemoteCloneMode(initServerMode, externalServer, cloneCfg.GetDoltServerHost(), cloneCfg.GetDoltCredentialCommand() != "")
+// (runInitRemoteClone), by initRemoteCloneMode. serverUser is --server-user,
+// which decides whether the server init's store opens is a gateway to it
+// (initCloneGateway). When that clone goes through a server only because bd
+// does not run the server at its host (no --external), the server may
+// already hold the database: init then clones nothing and returns
+// initCloneTargetHeldError, and its store opens that database, as it did
+// when init cloned into .beads/dolt there. DOLT_CLONE would fail instead
+// ("database exists").
+func initCloneFromRemote(ctx context.Context, beadsDir, remoteURL, dbName string, cloneCfg *configfile.Config, initServerMode, externalServer bool, serverUser string) (initRemoteCloneDisposition, error) {
+	cloneMode := initRemoteCloneMode(initServerMode, externalServer, cloneCfg.GetDoltServerHost(), initCloneGateway(cloneCfg, serverUser))
 	return runInitRemoteClone(remoteURL, func(remoteURL string) error {
 		if cloneMode == remoteCloneExternalServer && !externalServer {
 			if location, held := initCloneTargetHoldsDatabase(beadsDir, cloneCfg); held {
@@ -3750,10 +3762,12 @@ func (e *initCloneTargetHeldError) Error() string {
 }
 
 // initCloneTargetHeldLine is bd init's line for a database it found already
-// on the server it would have cloned syncURL into (held), which it uses.
+// on the server it would have cloned syncURL into (held), which it uses. The
+// database name can come from a cloned metadata.json, so it is spelled by
+// the remedy printer, as the server and the remote are.
 func initCloneTargetHeldLine(dbName string, held *initCloneTargetHeldError, syncURL string) string {
-	return fmt.Sprintf("  %s Database %q already exists on the Dolt server at %s; using it rather than cloning %s\n",
-		ui.RenderPass("✓"), dbName, remedy.PrintedValue(held.location), remedy.PrintedValue(syncURL))
+	return fmt.Sprintf("  %s Database %s already exists on the Dolt server at %s; using it rather than cloning %s\n",
+		ui.RenderPass("✓"), remedy.PrintedValue(dbName), remedy.PrintedValue(held.location), remedy.PrintedValue(syncURL))
 }
 
 // initCloneTargetHoldsDatabase reports whether the server bd init clones

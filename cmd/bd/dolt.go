@@ -1396,8 +1396,13 @@ func runExternalDoltStatus(beadsDir string, cfg *configfile.Config) {
 	var version string
 	var connErr error
 
-	if advice := unresolvedServerPortAdvice(host, port); advice != "" {
-		// Nothing to dial: give the store's advice, not a dial of port 0.
+	if unresolved := ep.UnresolvedError(); unresolved != nil {
+		// No port resolved and no socket: nothing to dial. Give the store's
+		// advice for this server, not a dial of 127.0.0.1:0.
+		connErr = unresolved
+	} else if advice := unresolvedServerPortAdvice(host, port); advice != "" {
+		// Only a socket names this server, at a host bd does not run: the
+		// probe below dials TCP, and has no port to dial there either.
 		connErr = fmt.Errorf("no Dolt server port configured; %s", advice)
 	} else if db, openErr := sql.Open("mysql", dsn); openErr == nil {
 		defer db.Close()
@@ -1442,7 +1447,12 @@ func runExternalDoltStatus(beadsDir string, cfg *configfile.Config) {
 	if version != "" {
 		fmt.Printf("  Version:  %s\n", version)
 	}
-	if connErr != nil {
+	switch {
+	case errors.Is(connErr, doltserver.ErrUnresolvedPort):
+		// bd's own refusal, its values spelled where they are formatted in:
+		// its advice keeps its lines, under the field.
+		fmt.Printf("  Error:    %s\n", strings.ReplaceAll(remedy.PrintedMessage(connErr), "\n", "\n            "))
+	case connErr != nil:
 		// The connection error repeats the host.
 		fmt.Printf("  Error:    %v\n", remedy.PrintedError(connErr))
 	}

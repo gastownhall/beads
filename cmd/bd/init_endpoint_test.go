@@ -64,7 +64,9 @@ func TestInitCloneKeepsTheTestModeGuard(t *testing.T) {
 // (BEADS_DOLT_CREDENTIAL_COMMAND) on any host: init neither asks the server
 // nor clones through it, since both would log in as the static user the
 // gateway refuses, and init's store opens the gateway's database with the
-// token.
+// token. A --server-user beside the command is the user init's store
+// presents instead of the token, so that server is no gateway: the clone
+// goes through it as that user.
 func TestInitRemoteCloneGoesWhereTheStoreOpens(t *testing.T) {
 	const port = "13451"
 	for _, tc := range []struct {
@@ -72,6 +74,7 @@ func TestInitRemoteCloneGoesWhereTheStoreOpens(t *testing.T) {
 		host       string
 		external   bool
 		gateway    bool
+		serverUser string // --server-user
 		serverHas  bool
 		wantClone  string // host:port the server clone dials; "" for none
 		wantHeldAt string // the server init found holding the database
@@ -84,6 +87,8 @@ func TestInitRemoteCloneGoesWhereTheStoreOpens(t *testing.T) {
 		{name: "gateway on a remote host", host: "db.example.com", gateway: true, serverHas: true},
 		{name: "gateway at ::1", host: "::1", gateway: true, serverHas: true},
 		{name: "gateway at [::1]", host: "[::1]", gateway: true, serverHas: true},
+		{name: "credential command and --server-user on a remote host", host: "db.example.com", gateway: true, serverUser: "alice", wantClone: "db.example.com:" + port},
+		{name: "credential command and --server-user, server already holding the database", host: "db.example.com", gateway: true, serverUser: "alice", serverHas: true, wantHeldAt: "db.example.com:" + port},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			endpointCredentialsEnv(t, nil)
@@ -94,26 +99,41 @@ func TestInitRemoteCloneGoesWhereTheStoreOpens(t *testing.T) {
 			if tc.gateway {
 				t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", "echo tok123")
 			}
+			if tc.serverUser != "" {
+				// As promoteExplicitServerConnFlags exports --server-user.
+				t.Setenv("BEADS_DOLT_SERVER_USER", tc.serverUser)
+			}
 
 			origServer, origCheck := remoteCloneViaServer, checkBootstrapServerDB
 			t.Cleanup(func() { remoteCloneViaServer, checkBootstrapServerDB = origServer, origCheck })
-			var cloned []string
+			var cloned, users []string
 			probes := 0
 			remoteCloneViaServer = func(_ context.Context, _, _ string, ep bootstrapServerProbeConfig) error {
 				cloned = append(cloned, ep.serverLocation())
+				users = append(users, ep.user)
 				return nil
 			}
-			checkBootstrapServerDB = func(bootstrapServerProbeConfig) bootstrapServerDBCheck {
+			checkBootstrapServerDB = func(ep bootstrapServerProbeConfig) bootstrapServerDBCheck {
 				probes++
+				users = append(users, ep.user)
 				return bootstrapServerDBCheck{Reachable: true, Exists: tc.serverHas}
 			}
 
 			beadsDir := filepath.Join(t.TempDir(), ".beads")
-			cloneCfg := initTimeCloneConfig(true, tc.host, 0, "", "", "init_remote_clone")
-			disposition, err := initCloneFromRemote(t.Context(), beadsDir, "file:///nonexistent/remote", "init_remote_clone", cloneCfg, true, tc.external)
+			cloneCfg := initTimeCloneConfig(true, tc.host, 0, "", tc.serverUser, "init_remote_clone")
+			disposition, err := initCloneFromRemote(t.Context(), beadsDir, "file:///nonexistent/remote", "init_remote_clone", cloneCfg, true, tc.external, tc.serverUser)
 
+			if tc.serverUser != "" {
+				// The probe and the clone log in as the user init's store
+				// presents.
+				for _, user := range users {
+					if user != tc.serverUser {
+						t.Errorf("the server probe or clone logged in as %q, want %q, the user init's store presents", user, tc.serverUser)
+					}
+				}
+			}
 			var held *initCloneTargetHeldError
-			if tc.gateway {
+			if tc.gateway && tc.serverUser == "" {
 				// main's CLI clone into .beads/dolt; its outcome here (no
 				// dolt binary, no remote) is beside the point.
 				if errors.As(err, &held) || probes != 0 || len(cloned) != 0 {

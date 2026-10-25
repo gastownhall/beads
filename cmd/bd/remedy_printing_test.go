@@ -436,7 +436,15 @@ func TestRemedyValuesEscapeLineBreaks(t *testing.T) {
 		}},
 		{"bd init database held by the clone target", func(t *testing.T) string {
 			held := &initCloneTargetHeldError{location: bootstrapServerProbeConfig{host: hostileLine, port: 3307}.serverLocation()}
-			return initCloneTargetHeldLine("beads", held, "https://example.com/r.git")
+			// The database name can come from a cloned metadata.json. It is
+			// spelled as PrintedValue spells it, not as %q does, which
+			// leaves the quote and the shell's $ and & as they are.
+			dbName := "beads$(id)&" + hostileLine
+			line := initCloneTargetHeldLine(dbName, held, "https://example.com/r.git")
+			if !strings.Contains(line, remedy.PrintedValue(dbName)) {
+				t.Errorf("held-database line does not spell the database name by the remedy printer, %s:\n%q", remedy.PrintedValue(dbName), line)
+			}
+			return line
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
