@@ -463,16 +463,20 @@ func TestEmbeddedCreateRepoRefusesRemovedBackendAsTheOpenDoes(t *testing.T) {
 	}
 }
 
-// TestEmbeddedCreateTargetRefusesUnloadableLegacyConfig pins, at each entry
+// TestEmbeddedCreateTargetRefusesLegacyConfigItWouldHide pins, at each entry
 // point that initializes a metadata-less target .beads (bd create --repo, its
 // dry-run, an auto-routed create, and migrate-personal's planning repo), that
-// a target whose legacy config.json does not load (malformed, not a JSON
-// object, or unreadable) is refused with the "loading config: ..." error bd
-// prints when run inside it, and is left byte-identical. Without that check
-// the create made an embedded database and a metadata.json there, after which
-// bd inside the target opened the new database instead of refusing, and the
-// dry-run previewed a create that bd inside the target refuses.
-func TestEmbeddedCreateTargetRefusesUnloadableLegacyConfig(t *testing.T) {
+// a target holding a legacy config.json that bd run inside it rejects is
+// refused with the error bd prints there, and is left byte-identical: one
+// whose config.json does not load (malformed, not a JSON object, or
+// unreadable), with "loading config: ...", and a fresh clone of a SQLite-era
+// project (config.json and issues.jsonl, no database), with "no beads
+// database found". Without those checks the create made an embedded database
+// and a metadata.json there, after which bd inside the target opened the new
+// database instead of refusing it or finding no workspace (hiding the clone's
+// issues.jsonl behind it), and the dry-run previewed a create that bd inside
+// the target refuses.
+func TestEmbeddedCreateTargetRefusesLegacyConfigItWouldHide(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -484,10 +488,11 @@ func TestEmbeddedCreateTargetRefusesUnloadableLegacyConfig(t *testing.T) {
 	type fixture struct {
 		layout     legacyworkspace.Layout
 		unreadable bool
-		// want is the part of admission's error that names the cause.
+		// want is the part of the error bd run inside the target prints that
+		// names the cause.
 		want string
 	}
-	fixtures := []fixture{}
+	fixtures := []fixture{{layout: legacyworkspace.PreDoltClone(), want: ErrNoBeadsDatabase.Error()}}
 	for _, layout := range legacyworkspace.UnloadableLegacyConfigLayouts() {
 		fixtures = append(fixtures, fixture{layout: layout, want: "loading config: parsing config: "})
 	}

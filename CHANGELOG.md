@@ -1028,7 +1028,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `bd create --repo` and an auto-routed create created an empty embedded
   database beside a historical SQLite or legacy Dolt target, after which bd
   run there no longer refused it and listed no issues, and `bd create
-  --dry-run` previewed a target the create refused.
+  --dry-run` previewed a target the create refused. They, and `bd
+  migrate-personal` for its planning repo, also initialized such a fresh
+  SQLite-era clone, after which bd run there opened the empty database
+  instead of finding no workspace, its `issues.jsonl` hidden behind it.
   `bd connect` from a linked worktree could attach the main checkout's
   metadata-less SQLite `.beads`. The library opens (`Open`,
   `OpenBestAvailable`, `OpenBestAvailableWith`, `OpenFromConfig`,
@@ -1049,12 +1052,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   doctor says it did not read such a repository's database, and why. An
   auto-routed read or write of a `.beads` bd run inside would not treat as a
   workspace (such as that clone) now fails with `no beads database found at
-  X/.beads`, and no read-only open of another repository (an `external:`
-  dependency, a routed or auto-routed read, doctor's additional-repo read)
-  migrates its legacy `config.json` any more (the read-only store factories
-  and the read-only `dolt.NewFromConfig*` constructors read it in place); bd
-  still migrates the legacy `config.json` of the workspace it runs in, as
-  before. Library callers can match the refusal with `errors.As` on the new
+  X/.beads`, and `bd create --repo`, its dry-run, an auto-routed create and
+  `bd migrate-personal` refuse to initialize that clone with the same error,
+  followed by the reason. No read-only open of another repository (an
+  `external:` dependency, a routed or auto-routed read, doctor's
+  additional-repo read) migrates its legacy `config.json` any more (the
+  read-only store factories and the read-only `dolt.NewFromConfig*`
+  constructors read it in place); bd still migrates the legacy `config.json`
+  of the workspace it runs in, as before. Library callers can match the
+  refusal with `errors.As` on the new
   `beads.LegacyWorkspaceError` (also `bdhttp.LegacyWorkspaceError`); the
   library opens refuse historical SQLite workspaces but do not classify
   legacy Dolt ones. A launcher that enables `dolt.shared-server` still

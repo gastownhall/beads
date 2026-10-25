@@ -200,7 +200,7 @@
 100 50 TestEmbeddedRemedyPrinting_unclaim
 100 50 TestEmbeddedVersionOutputShape
 
-100 51 TestEmbeddedCreateTargetRefusesUnloadableLegacyConfig
+100 51 TestEmbeddedCreateTargetRefusesLegacyConfigItWouldHide
 100 51 TestEmbeddedDoltRemoteAdd_AllowGitOrigin_Exits0
 100 51 TestEmbeddedHistoryAndShowAsOfReadDoltCommits
 100 51 TestEmbeddedImportChunkedStaleRejectedRowKeepsDeferredDepsOut

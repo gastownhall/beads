@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/debug"
@@ -1131,7 +1132,7 @@ func handleRepoTargetInitError(targetPath string, err error) error {
 	}
 	var existing *existingTargetRefusal
 	if errors.As(err, &existing) {
-		return HandleError("target repo %s: %s", printedValue(targetPath), existing.msg)
+		return HandleError("target repo %s: %s", remedy.PrintedValue(targetPath), existing.msg)
 	}
 	return HandleError("failed to initialize target repo: %v", err)
 }
@@ -1156,8 +1157,9 @@ func isAmbiguousRepoTarget(repoFlagChanged bool, repoOverride string) bool {
 // already holds rather than hide it:
 //
 //   - a .beads refuseUninitializableTarget refuses (one whose own config selects
-//     Dolt server mode, one bd's own admission refuses, one holding several
-//     databases) is refused, with nothing written;
+//     Dolt server mode, one bd's own admission refuses, a fresh clone of a
+//     SQLite-era project bd run there finds no workspace in, one holding
+//     several databases) is refused, with nothing written;
 //   - one that holds exactly one embedded database keeps it
 //     (adoptTargetDatabase), the database fork setup creates among them,
 //     unless its working set already holds changes the create's commit would
@@ -1250,9 +1252,9 @@ func ensureBeadsDirForPath(ctx context.Context, targetPath string, sourceStore s
 }
 
 // refuseUninitializableTarget refuses a .beads with no metadata.json that
-// ensureBeadsDirForPath must not initialize, because bd run in that repository
-// already reads something there that the metadata.json it writes would hide.
-// It writes nothing. Refused are:
+// ensureBeadsDirForPath must not initialize, because the metadata.json it
+// writes would hide what the .beads already holds from bd run in that
+// repository. It writes nothing. Refused are:
 //
 //   - one whose own config.yaml (or the config.local.yaml beside it) selects
 //     Dolt server mode, by dolt.mode: server (the shape gc provisions) or, with
@@ -1268,6 +1270,12 @@ func ensureBeadsDirForPath(ctx context.Context, targetPath string, sourceStore s
 //     object, or unreadable), with admission's "loading config: ..." error:
 //     bd run there refuses it, and the metadata.json written here would
 //     replace it as the workspace's pointer;
+//   - one holding a legacy config.json beside nothing discovery treats as a
+//     workspace (beads.HasProjectFiles), such as a fresh clone of a SQLite-era
+//     project, with the "no beads database found" error a foreign open of it
+//     returns (openForeignStore): bd run there finds no workspace and writes
+//     nothing, and the metadata.json written here would make it one that
+//     hides its config.json and issues.jsonl behind an empty database;
 //   - one holding several embedded databases: nothing records which one
 //     holds the issues (bd run there opens the default database).
 //
@@ -1275,7 +1283,8 @@ func ensureBeadsDirForPath(ctx context.Context, targetPath string, sourceStore s
 // .beads in a format this build cannot open is refused as that first, as bd's
 // admission refuses it (checkDiscoveredForOpen). Its own refusals are
 // targetRefusals; bd's admission refusals are returned as that admission
-// returns them.
+// returns them, and the no-workspace one wraps ErrNoBeadsDatabase, as
+// openForeignStore's does.
 func refuseUninitializableTarget(beadsDir string) error {
 	// A workspace in a format this build cannot open is refused as that,
 	// before its config is read: the format fence's refusal (and its exit
@@ -1328,6 +1337,18 @@ func refuseUninitializableTarget(beadsDir string) error {
 	}
 	if _, err := admitForeignWorkspace(beadsDir); err != nil {
 		return err
+	}
+	// A legacy config.json beside nothing discovery treats as a workspace
+	// (beads.HasProjectFiles) is most often a fresh clone of a SQLite-era
+	// project, which keeps its tracked config.json and issues.jsonl but not
+	// the ignored *.db. bd run there finds no workspace and writes nothing,
+	// and the historical SQLite check above needs the database to refuse it.
+	// The metadata.json and database written here would make it a workspace
+	// that hides those files behind an empty database, so it is refused with
+	// the error a foreign open of it returns (openForeignStore), followed by
+	// the reason.
+	if _, err := os.Lstat(filepath.Join(beadsDir, configfile.LegacyConfigFileName)); err == nil && !beads.HasProjectFiles(beadsDir) {
+		return fmt.Errorf("%w at %s: it has a legacy config.json but no database (a fresh clone of a SQLite-era project, say), so bd run there finds no workspace; not initializing it, which would hide what it holds behind an empty database", ErrNoBeadsDatabase, remedy.PrintedValue(beadsDir))
 	}
 	if databases := embeddeddolt.Databases(beadsDir); len(databases) > 1 {
 		return refuseTarget("%s has no metadata.json and holds several databases (%s); give it a metadata.json whose dolt_database names the one to use, then rerun", repo, remedy.PrintedList(databases, ", "))

@@ -74,7 +74,9 @@ func HistoricalSQLiteLayouts() []Layout {
 // does not refuse it either (it needs the database file). Every entry point
 // that only reads a workspace bd was not launched in must leave it
 // byte-identical: its config.json carries keys configfile.Config has no field
-// for, which a migrating load would drop.
+// for, which a migrating load would drop. So must every entry point that
+// would initialize it as a create or planning target: a metadata.json and a
+// database written there would make it a workspace that hides its files.
 func PreDoltClone() Layout {
 	return Layout{Name: "pre-Dolt clone", Files: map[string]string{
 		"config.json":  `{"database":"beads.db","version":"0.20.1","jsonl_export":"issues.jsonl"}`,

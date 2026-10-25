@@ -202,7 +202,7 @@ func openAutoRoutedStore(ctx context.Context, store storage.DoltStorage, writabl
 	// report a historical SQLite or legacy Dolt target as a missing
 	// dolt_database field.
 	if _, err := admitForeignWorkspace(targetBeadsDir); err != nil {
-		return nil, false, rule, fmt.Errorf("failed to open routed store at %s: %w", targetRepoPath, err)
+		return nil, false, rule, fmt.Errorf("failed to open routed store at %s: %w", remedy.PrintedValue(targetRepoPath), err)
 	}
 	database, err := autoRouteTargetDatabase(targetBeadsDir, writable)
 	if err != nil {

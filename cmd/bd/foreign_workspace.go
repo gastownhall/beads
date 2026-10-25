@@ -10,6 +10,7 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 )
 
@@ -33,9 +34,13 @@ import (
 // fallback at guardForeignLegacyDoltWorkspace, and server intent set in a
 // layer the foreign classification does not resolve for the target
 // (user-level config, the BD_ environment, either workspace's .beads/.env; see
-// targetSelectsServerMode). foreign_workspace_census_test.go pins that the
-// store factories are reached from a foreign path only through
-// openForeignStore.
+// targetSelectsServerMode). An open of an existing workspace refuses a .beads
+// bd run inside finds no workspace in (openForeignStore); a create or
+// planning target is initialized there instead, unless it holds a legacy
+// config.json (a fresh clone of a SQLite-era project), which
+// refuseUninitializableTarget refuses with the error openForeignStore returns
+// for it. foreign_workspace_census_test.go pins that the store factories are
+// reached from a foreign path only through openForeignStore.
 
 // admitForeignWorkspace refuses, without writing anything, the layouts bd
 // run inside beadsDir refuses from its contents: a workspace format this build
@@ -211,10 +216,12 @@ func openForeignStore(ctx context.Context, beadsDir string, access foreignAccess
 	// keeps its tracked config.json and issues.jsonl but not the ignored
 	// *.db: bd there finds no workspace and writes nothing, and the
 	// historical SQLite check, which needs the database, does not refuse it.
-	// A create initializes its target (ensureBeadsDirForPath) before it
-	// opens it, so it is not refused here.
+	// A create's target has passed ensureBeadsDirForPath before it is opened,
+	// which refuses that clone too (refuseUninitializableTarget) and may
+	// leave an empty .beads for this open to initialize, so it is not
+	// refused here.
 	if access != foreignCreate && !beads.HasProjectFiles(beadsDir) {
-		return nil, fmt.Errorf("%w at %s", ErrNoBeadsDatabase, beadsDir)
+		return nil, fmt.Errorf("%w at %s", ErrNoBeadsDatabase, remedy.PrintedValue(beadsDir))
 	}
 	switch access {
 	case foreignRead:

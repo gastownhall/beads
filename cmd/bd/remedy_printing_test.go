@@ -335,7 +335,7 @@ func TestRemedyPrintersNameValuesEscaped(t *testing.T) {
 		{"migrate-personal planning repo in a graph format", func(t *testing.T) string {
 			beadsDir := graphMarked(t)
 			return captureStderr(t, func() {
-				_ = planningOpenError(filepath.Dir(beadsDir), checkDiscoveredWorkspaceFormat(beadsDir))
+				_ = planningOpenError(filepath.Dir(beadsDir), checkDiscoveredForOpen(beadsDir))
 			})
 		}},
 		{"bd create --repo target in a graph format", func(t *testing.T) string {
@@ -602,7 +602,7 @@ var remedyGuardedFuncs = map[string][]string{
 	},
 	// The open of a routed planning or target store (bd migrate-personal,
 	// bd create --repo, auto-routing).
-	"store_factory.go":          {"openDoltStoreFromConfig"},
+	"store_factory.go":          {"openDoltStoreFromConfig", "errNoRoutedEmbeddedDatabase"},
 	"workspace_format_guard.go": {"handleWorkspaceGuardError"},
 }
 

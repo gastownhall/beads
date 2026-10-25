@@ -108,7 +108,14 @@ func TestAdmitForeignWorkspaceRefusesLegacyDoltAsAdmissionDoes(t *testing.T) {
 // non-mutating factories under it read its config.json in place on every arm,
 // the server arm included, so it stays byte-identical even past the opener.
 // Before, the read-only and preview factories migrated config.json into a
-// metadata.json that dropped its version and jsonl_export.
+// metadata.json that dropped its version and jsonl_export. A create or
+// planning target is initialized before it is opened, so the create access
+// is pinned at that initialization (ensureBeadsDirForPath, the dry-run's
+// checkRepoTargetInitializable, and migrate-personal's
+// refuseUninitializablePlanningRepo): each refuses the clone with the same
+// error. Before, bd create --repo and bd migrate-personal wrote an embedded
+// database and a metadata.json there, hiding its issues.jsonl from bd run
+// inside it behind an empty database.
 func TestOpenForeignStoreLeavesPreDoltCloneUnchanged(t *testing.T) {
 	isolateForeignWorkspaceSignals(t, "")
 	layout := legacyworkspace.PreDoltClone()
@@ -126,6 +133,36 @@ func TestOpenForeignStoreLeavesPreDoltCloneUnchanged(t *testing.T) {
 			}
 			if !errors.Is(err, ErrNoBeadsDatabase) {
 				t.Fatalf("openForeignStore(%s) = %v, want %v", name, err, ErrNoBeadsDatabase)
+			}
+		})
+	}
+	// A nil source store initializes nothing past the refusals, as in
+	// TestEnsureBeadsDirForPathRefusesTargetsItWouldHide; the error is what
+	// shows the clone was refused rather than initialized.
+	initializers := map[string]func(*testing.T, string) error{
+		"create": func(t *testing.T, beadsDir string) error {
+			return ensureBeadsDirForPath(t.Context(), filepath.Dir(beadsDir), nil, true)
+		},
+		"create --dry-run": func(_ *testing.T, beadsDir string) error {
+			_, err := checkRepoTargetInitializable(filepath.Dir(beadsDir), true)
+			return err
+		},
+		"migrate-personal": func(_ *testing.T, beadsDir string) error {
+			return refuseUninitializablePlanningRepo(beadsDir)
+		},
+	}
+	for name, initialize := range initializers {
+		t.Run("initialize/"+name, func(t *testing.T) {
+			beadsDir := filepath.Join(t.TempDir(), ".beads")
+			layout.Write(t, beadsDir)
+			before := legacyworkspace.TreeDigest(t, beadsDir)
+			err := initialize(t, beadsDir)
+			if after := legacyworkspace.TreeDigest(t, beadsDir); !maps.Equal(after, before) {
+				t.Fatalf("%s changed the clone: before %v, after %v", name, slices.Sorted(maps.Keys(before)), slices.Sorted(maps.Keys(after)))
+			}
+			want := ErrNoBeadsDatabase.Error() + " at " + beadsDir + ": "
+			if !errors.Is(err, ErrNoBeadsDatabase) || !strings.HasPrefix(err.Error(), want) {
+				t.Fatalf("%s = %v, want the error openForeignStore returns (%q), with its reason", name, err, want)
 			}
 		})
 	}
@@ -172,7 +209,12 @@ func TestOpenForeignStoreLeavesPreDoltCloneUnchanged(t *testing.T) {
 
 // TestTargetSelectsServerMode pins that a foreign workspace's server intent
 // is read from its own metadata and config.yaml, in IsDoltServerMode's
-// precedence, and never from the launching workspace's config.yaml.
+// precedence, and never from the launching workspace's config.yaml. It also
+// binds targetSelectsServerMode, a copy of that precedence, to the resolver it
+// copies: on every fixture, IsDoltServerMode with the configuration bd run
+// inside the target loads (config.WithBeadsDir, workspaceSelectsServerMode)
+// answers the same, so a change to IsDoltServerMode or HostImpliesServerMode
+// that the copy does not carry fails here.
 func TestTargetSelectsServerMode(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -222,8 +264,22 @@ func TestTargetSelectsServerMode(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if got := targetSelectsServerMode(beadsDir, cfg); got != tc.want {
+				got := targetSelectsServerMode(beadsDir, cfg)
+				if got != tc.want {
 					t.Fatalf("targetSelectsServerMode = %v, want %v (launcher config.yaml %q)", got, tc.want, launcherYAML)
+				}
+				// The layers the copy omits (the user-level config.yaml files
+				// and viper's BD_ environment) are empty here: HOME is a fresh
+				// directory, and the BD_ values set empty read as unset. A
+				// config.yaml Initialize cannot load leaves nothing loaded,
+				// which selects nothing, as the copy reads it.
+				t.Setenv("XDG_CONFIG_HOME", "")
+				t.Setenv("BD_DOLT_MODE", "")
+				t.Setenv("BD_DOLT_HOST", "")
+				var inside bool
+				_ = config.WithBeadsDir(beadsDir, func() { inside = workspaceSelectsServerMode(cfg) })
+				if inside != got {
+					t.Fatalf("targetSelectsServerMode = %v, but IsDoltServerMode with the target's own config loaded = %v", got, inside)
 				}
 			})
 		}
@@ -328,19 +384,22 @@ func TestDoctorMultiRepoTypesRefusesLegacyDoltRepo(t *testing.T) {
 
 // metadataLessTargetFixture is one metadata-less .beads a create or planning
 // target can hold: its layout, whether its config.json is made unreadable
-// after it is written, and whether that config.json does not load, which
-// admission refuses with "loading config: ...".
+// after it is written, whether that config.json does not load, which
+// admission refuses with "loading config: ...", and whether admission refuses
+// it as a legacy Dolt workspace.
 type metadataLessTargetFixture struct {
 	layout     legacyworkspace.Layout
 	unreadable bool
 	unloadable bool
+	legacyDolt bool
 }
 
 // metadataLessTargetFixtures lists the metadata-less .beads layouts command
 // admission refuses or admits from their contents: the historical SQLite
 // layouts that keep their pointer in config.json or none, the pre-Dolt
-// clone, and the config.json layouts that do not load, including one bd
-// cannot read (skipped where a permission change does not stop a read).
+// clone, a legacy Dolt root, and the config.json layouts that do not load,
+// including one bd cannot read (skipped where a permission change does not
+// stop a read).
 func metadataLessTargetFixtures(t *testing.T) []metadataLessTargetFixture {
 	t.Helper()
 	var fixtures []metadataLessTargetFixture
@@ -350,6 +409,15 @@ func metadataLessTargetFixtures(t *testing.T) []metadataLessTargetFixture {
 		}
 	}
 	fixtures = append(fixtures, metadataLessTargetFixture{layout: legacyworkspace.PreDoltClone()})
+	// A non-empty .beads/dolt root with no metadata.json, which admission
+	// refuses as a legacy Dolt workspace. Every LegacyDoltLayouts entry has a
+	// metadata.json, so this is the one fixture that reaches the
+	// admitForeignWorkspace call in refuseUninitializableTarget, where nothing
+	// else refuses it.
+	fixtures = append(fixtures, metadataLessTargetFixture{layout: legacyworkspace.Layout{
+		Name:  "metadata-less legacy Dolt",
+		Files: map[string]string{"dolt/beads/.dolt/noms/manifest": "legacy manifest"},
+	}, legacyDolt: true})
 	for _, layout := range legacyworkspace.UnloadableLegacyConfigLayouts() {
 		fixtures = append(fixtures, metadataLessTargetFixture{layout: layout, unloadable: true})
 	}
@@ -414,6 +482,9 @@ func TestRefuseUninitializableTargetRefusesWhatAdmissionRefuses(t *testing.T) {
 			}
 			if fixture.unloadable && (admission == nil || !strings.HasPrefix(admission.Error(), "loading config: ")) {
 				t.Fatalf("guardLegacyUpgradeWorkspace = %v, want a \"loading config:\" refusal", admission)
+			}
+			if want := legacyworkspace.LegacyDoltRefusal("legacy Dolt workspace"); fixture.legacyDolt && (admission == nil || admission.Error() != want) {
+				t.Fatalf("guardLegacyUpgradeWorkspace = %v, want %q", admission, want)
 			}
 			restore()
 			if after := legacyworkspace.TreeDigest(t, beadsDir); !maps.Equal(after, before) {
