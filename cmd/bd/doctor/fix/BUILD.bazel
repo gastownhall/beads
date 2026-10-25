@@ -37,6 +37,7 @@ go_library(
         "//internal/configfile",
         "//internal/doltserver",
         "//internal/eventsjournal",
+        "//internal/remedy",
         "//internal/storage",
         "//internal/storage/depid",
         "//internal/storage/dolt",
@@ -64,6 +65,7 @@ go_test(
         "dep_keys_test.go",
         "dependency_sql_test.go",
         "e2e_test.go",
+        "endpoint_test.go",
         "fix_edge_cases_test.go",
         "fix_test.go",
         "fs_test.go",
@@ -92,6 +94,7 @@ go_test(
     data = ["store.go"],
     embed = [":fix"],
     deps = [
+        "//internal/config",
         "//internal/configfile",
         "//internal/doltserver",
         "//internal/storage/backendnames",

@@ -289,9 +289,10 @@ func TestRemedyPrintersNameValuesEscaped(t *testing.T) {
 		}},
 		{"bootstrap missing server database refusal", func(t *testing.T) string {
 			dialErr := hostileDialError(t)
-			return bootstrapMissingServerDBRefusal("beads", hostileName, 3307, nil).Error() +
-				bootstrapMissingServerDBRefusal("beads", hostileName, 3307, dialErr).Error() +
-				bootstrapMissingServerDBSummary("beads", hostileName, 3307, dialErr)
+			location := bootstrapServerProbeConfig{host: hostileName, port: 3307}.location()
+			return bootstrapMissingServerDBRefusal("beads", location, nil).Error() +
+				bootstrapMissingServerDBRefusal("beads", location, dialErr).Error() +
+				bootstrapMissingServerDBSummary("beads", location, dialErr)
 		}},
 		{"bd init sync.remote probe note", func(t *testing.T) string {
 			remote := "https://127.0.0.1:9/team/repo" + hostileName + ".git"

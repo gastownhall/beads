@@ -1364,11 +1364,15 @@ func isLocalHost(host string) bool {
 // user-relevant signals.
 func runExternalDoltStatus(beadsDir string, cfg *configfile.Config) {
 	host := cfg.GetDoltServerHost()
-	port := doltserver.DefaultConfig(beadsDir).Port
+	// The port the store dials (doltserver.ResolveEndpoint): its rule,
+	// the legacy BEADS_DOLT_PORT included, not DefaultConfig's, which leaves
+	// that variable out. The password is the one keyed to that port.
+	ep := doltserver.ResolveEndpoint(beadsDir, cfg)
+	port := ep.Port
 	user := cfg.GetDoltServerUser()
 	database := cfg.GetDoltDatabase()
 	tls := cfg.GetDoltServerTLS()
-	password := cfg.GetDoltServerPasswordForPort(port)
+	password := ep.Password()
 
 	dsn := doltutil.ServerDSN{
 		Host:     host,

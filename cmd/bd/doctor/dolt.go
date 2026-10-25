@@ -32,10 +32,11 @@ func openDoltDB(beadsDir string) (*sql.DB, *configfile.Config, error) {
 	user := cfg.GetDoltServerUser()
 	database := cfg.GetDoltDatabase()
 
-	// Use doltserver.DefaultConfig for port resolution (env > port file > config.yaml).
-	// Port 0 means no server running yet.
-	dsCfg := doltserver.DefaultConfig(beadsDir)
-	port := dsCfg.Port
+	// The port the store dials (doltserver.ResolveEndpoint): its rule, the
+	// legacy BEADS_DOLT_PORT included, not DefaultConfig's, which leaves that
+	// variable out. Port 0 means no server running yet.
+	ep := doltserver.ResolveEndpoint(beadsDir, cfg)
+	port := ep.Port
 	if port == 0 {
 		// No bd command starts, and so resolves a port for, a server bd does
 		// not run.
@@ -51,7 +52,7 @@ func openDoltDB(beadsDir string) (*sql.DB, *configfile.Config, error) {
 	// externally-hosted Dolt servers that keep credentials in
 	// ~/.config/beads/credentials fail doctor checks with "Access denied" while
 	// regular CRUD commands succeed (bd-h5k7).
-	password := cfg.GetDoltServerPasswordForPort(port)
+	password := ep.Password()
 
 	connStr := doltutil.ServerDSN{
 		Host:     host,
@@ -101,7 +102,7 @@ func bdRunsServer(cfg *configfile.Config, host string) bool {
 type doltConn struct {
 	db   *sql.DB
 	cfg  *configfile.Config // config for server detail (host:port)
-	port int                // resolved port (from doltserver.DefaultConfig, not cfg fallback)
+	port int                // resolved port (openDoltDB's: the store's, not cfg fallback)
 }
 
 // Close releases the database connection.
@@ -116,7 +117,8 @@ func openDoltConn(beadsDir string) (*doltConn, error) {
 		return nil, err
 	}
 
-	port := doltserver.DefaultConfig(beadsDir).Port
+	// The port openDoltDB dialed, by the same rule.
+	port := doltserver.ResolveEndpoint(beadsDir, cfg).Port
 	return &doltConn{db: db, cfg: cfg, port: port}, nil
 }
 

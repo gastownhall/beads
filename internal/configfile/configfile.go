@@ -710,14 +710,18 @@ func (c *Config) GetDoltServerPassword() string {
 // doltserver port file says 3307 (local), causing the credentials file lookup
 // to use the wrong [host:port] section.
 func (c *Config) GetDoltServerPasswordForPort(port int) string {
+	return ServerPasswordFor(c.GetDoltServerHost(), port)
+}
+
+// ServerPasswordFor is the password for the Dolt server at host and port:
+// BEADS_DOLT_PASSWORD when set, else the credentials-file entry for exactly
+// [host:port] (either spelling of an IPv6 host, see CredentialsSectionKeys),
+// else "". doltserver.Endpoint.Password calls it once the port is final.
+func ServerPasswordFor(host string, port int) string {
 	if p := os.Getenv("BEADS_DOLT_PASSWORD"); p != "" {
 		return p
 	}
-	host := c.GetDoltServerHost()
-	if p := LookupCredentialsPassword(host, port); p != "" {
-		return p
-	}
-	return ""
+	return LookupCredentialsPassword(host, port)
 }
 
 // GetDoltServerTLS returns whether TLS is enabled for server connections.

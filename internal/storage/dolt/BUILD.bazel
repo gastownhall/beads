@@ -84,7 +84,6 @@ go_library(
     deps = [
         "//internal/config",
         "//internal/configfile",
-        "//internal/creds",
         "//internal/debug",
         "//internal/doltserver",
         "//internal/execenv",
@@ -223,6 +222,7 @@ go_test(
         "dualwrite_participation_generation_contract_test.go",
         "edge_reader_contract_test.go",
         "empty_commit_test.go",
+        "endpoint_credentials_test.go",
         "ephemeral_routing_test.go",
         "epoch_cas_publish_test.go",
         "errors_test.go",

@@ -248,8 +248,7 @@ func shouldInitSharedGlobalDB(sharedServer, sharedServerMode, gateway bool) bool
 // offers no default, since on a shared machine whatever listens on a default
 // port may belong to another project (GH#2098, GH#2372).
 func externalServerUnreachableMessage(err error) string {
-	const noPortNamed = "--external declares the Dolt server externally managed, so bd did not start one, and no port was named for it.\n" +
-		"Name the server's port with --server-port or BEADS_DOLT_SERVER_PORT.\n"
+	const noPortNamed = externalNoPortNamedAdvice
 	if errors.Is(err, dolt.ErrUnresolvedServerPort) {
 		return fmt.Sprintf("Error: failed to open Dolt store: %v\n\n%s", dolt.ErrUnresolvedServerPort, noPortNamed)
 	}
@@ -268,6 +267,11 @@ func externalServerUnreachableMessage(err error) string {
 		"--external declares the Dolt server at %s externally managed, so bd did not start one.\n"+
 		"Start that server, or point init at the right endpoint.\n", opErr, endpoint)
 }
+
+// externalNoPortNamedAdvice is the advice for bd init --external when no
+// port names the server, for its store open and its clone alike.
+const externalNoPortNamedAdvice = "--external declares the Dolt server externally managed, so bd did not start one, and no port was named for it.\n" +
+	"Name the server's port with --server-port or BEADS_DOLT_SERVER_PORT.\n"
 
 // warnHalfIdentifiedSubstrate reports a substrate carrying one identity marker
 // and not the other.
@@ -1569,18 +1573,27 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			// the git remote factory. Non-forge URLs are untouched (GH#3339).
 			syncURL = doltRemoteURL(syncURL)
 			cloneCfg := initTimeCloneConfig(initServerMode, serverHost, serverPort, serverSocket, serverUser, dbName)
-			disposition, err := runInitRemoteClone(syncURL, func(remoteURL string) error {
-				return cloneFromRemoteWithMode(ctx, beadsDir, remoteURL, dbName, cloneCfg, initRemoteCloneMode(initServerMode, externalServer))
-			})
-			if err != nil {
+			disposition, err := initCloneFromRemote(ctx, beadsDir, syncURL, dbName, cloneCfg, initServerMode, externalServer)
+			var held *initCloneTargetHeldError
+			if errors.As(err, &held) {
+				// Nothing to clone: the server already holds the database,
+				// which init's store opens (see below).
+				err, disposition = nil, initRemoteCloneBootstrapped
+			}
+			if advice := initUnresolvedClonePortAdvice(err, externalServer, cloneCfg.GetDoltServerHost()); advice != "" {
+				// Nothing was dialed: no port names the server to clone
+				// into, and the store would refuse it too. The advice is
+				// the store open's for that server: name the port.
+				fmt.Fprintf(os.Stderr, "Error: failed to clone remote %q: %v\n\n%s", syncURL, dolt.ErrUnresolvedServerPort, advice)
+				return &exitError{Code: 1}
+			} else if err != nil {
 				// The clone error is bd's own and repeats sync.remote, which
 				// a cloned repository commits: it is spelled by the remedy
 				// printer's backstop, as bd's error printers spell theirs.
 				fmt.Fprintf(os.Stderr, "Error: failed to clone remote %q: %s\n", syncURL, remedy.PrintedText(err.Error()))
 				fmt.Fprintf(os.Stderr, "Hint: verify the URL is reachable and any credentials are valid, or omit --remote to initialize a fresh local database.\n")
 				return &exitError{Code: 1}
-			}
-			if disposition == initRemoteCloneFresh {
+			} else if disposition == initRemoteCloneFresh {
 				if !quiet {
 					fmt.Printf("  %s Remote has no Dolt data yet; initialized a fresh local database\n", ui.RenderWarn("!"))
 				}
@@ -1594,10 +1607,19 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				// the same principle that exempts a fresh `bd init`. The
 				// #4259 remote-migrate gate is unaffected (consent is not its
 				// designated-migrator override), so the smart-gate /
-				// designated-migrator flows keep their exact behavior.
+				// designated-migrator flows keep their exact behavior. A
+				// database found already on the server init would have
+				// cloned into (held) is treated the same: init cloned into
+				// .beads/dolt there before, and its store then opened, and
+				// adopted the identity of, that database.
 				schema.SetLocalMigrateConsent(true)
 				if !quiet {
-					fmt.Printf("  %s Bootstrapped from remote: %s\n", ui.RenderPass("✓"), remedy.PrintedValue(syncURL))
+					if held != nil {
+						fmt.Printf("  %s Database %q already exists on the Dolt server at %s; using it rather than cloning %s\n",
+							ui.RenderPass("✓"), dbName, remedy.PrintedValue(held.location), remedy.PrintedValue(syncURL))
+					} else {
+						fmt.Printf("  %s Bootstrapped from remote: %s\n", ui.RenderPass("✓"), remedy.PrintedValue(syncURL))
+					}
 				}
 			}
 		}
@@ -3656,14 +3678,89 @@ func resolveInitConfiguredSyncRemote(initRemote string, initRemoteChanged bool, 
 	return "", initSyncRemoteNone
 }
 
-func initRemoteCloneMode(initServerMode, externalServer bool) remoteCloneMode {
+// initRemoteCloneMode is how bd init --remote clones: into the embedded
+// engine, with the dolt CLI into .beads/dolt (the data directory bd's own
+// server serves), or through the server init's store dials. Under
+// --external, and for a host bd's own server never runs at
+// (doltserver.HostRunsBDServer: another machine, or the IPv6 loopback ::1
+// or [::1]), that server is one some other process runs: a CLI clone into
+// .beads/dolt would be stranded there, and init's store would create an
+// empty database on that server instead.
+//
+// A gateway (a credential command is configured) keeps the CLI clone
+// whatever its host: the server clone would log in as the static user the
+// gateway refuses, where init's store presents the command's token and opens
+// the database the gateway already holds.
+func initRemoteCloneMode(initServerMode, externalServer bool, host string, gateway bool) remoteCloneMode {
 	if !initServerMode {
 		return remoteCloneEmbedded
 	}
-	if externalServer {
+	if externalServer || (!gateway && !doltserver.HostRunsBDServer(host)) {
 		return remoteCloneExternalServer
 	}
 	return remoteCloneCLI
+}
+
+// initCloneFromRemote is bd init's clone of remoteURL into the workspace
+// (runInitRemoteClone), by initRemoteCloneMode. When that clone goes
+// through a server only because bd does not run the server at its host (no
+// --external), the server may already hold the database: init then clones
+// nothing and returns initCloneTargetHeldError, and its store opens that
+// database, as it did when init cloned into .beads/dolt there. DOLT_CLONE
+// would fail instead ("database exists").
+func initCloneFromRemote(ctx context.Context, beadsDir, remoteURL, dbName string, cloneCfg *configfile.Config, initServerMode, externalServer bool) (initRemoteCloneDisposition, error) {
+	cloneMode := initRemoteCloneMode(initServerMode, externalServer, cloneCfg.GetDoltServerHost(), cloneCfg.GetDoltCredentialCommand() != "")
+	return runInitRemoteClone(remoteURL, func(remoteURL string) error {
+		if cloneMode == remoteCloneExternalServer && !externalServer {
+			if location, held := initCloneTargetHoldsDatabase(beadsDir, cloneCfg); held {
+				return &initCloneTargetHeldError{location: location}
+			}
+		}
+		return cloneFromRemoteWithMode(ctx, beadsDir, remoteURL, dbName, cloneCfg, cloneMode)
+	})
+}
+
+// initUnresolvedClonePortAdvice is the advice for an init clone that
+// refused because no port names the server it would clone into (err wraps
+// dolt.ErrUnresolvedServerPort), or "" for any other err: the advice init's
+// store open gives that server. Under --external that is to name the port
+// (externalServerUnreachableMessage); for a host bd does not run, it is the
+// store's for that host (doltserver.UnresolvedPortAdvice).
+func initUnresolvedClonePortAdvice(err error, externalServer bool, host string) string {
+	if !errors.Is(err, dolt.ErrUnresolvedServerPort) {
+		return ""
+	}
+	if externalServer {
+		return externalNoPortNamedAdvice
+	}
+	if advice := doltserver.UnresolvedPortAdvice(host); advice != "" {
+		return advice + "\n"
+	}
+	return ""
+}
+
+// initCloneTargetHeldError reports that the server init would clone into
+// already holds the database (initCloneTargetHoldsDatabase): there is
+// nothing to clone, and init's store opens that database.
+type initCloneTargetHeldError struct {
+	location string
+}
+
+func (e *initCloneTargetHeldError) Error() string {
+	return "the database already exists on the Dolt server at " + e.location
+}
+
+// initCloneTargetHoldsDatabase reports whether the server bd init clones
+// into through a server (initServerCloneEndpoint) is reachable and already
+// holds cfg's database, and names that server. DOLT_CLONE fails on an
+// existing database ("database exists"), where init's store opens it.
+func initCloneTargetHoldsDatabase(beadsDir string, cfg *configfile.Config) (string, bool) {
+	ep, err := initServerCloneEndpoint(beadsDir, cfg)
+	if err != nil {
+		return "", false
+	}
+	result := checkBootstrapServerDB(ep)
+	return ep.location(), result.Reachable && result.Exists && result.Err == nil
 }
 
 // serverConnEnvMutation is one pending change to the process environment.

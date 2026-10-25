@@ -1007,6 +1007,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   check counts, not the whole directory, and leaves a symlinked
   `.beads/mq` alone: it no longer counts the files behind the link or
   removes the link.
+- With only the legacy `BEADS_DOLT_PORT` naming a workspace's Dolt server,
+  bd now presents the credentials-file password for that port
+  (`[127.0.0.1:<port>]`). The store looked the password up for the port it
+  had before `BEADS_DOLT_PORT` replaced it, so every command was refused
+  with "Access denied" while the same port named by `BEADS_DOLT_SERVER_PORT`
+  worked, and `bd serve` refused with "cannot determine the Dolt server
+  port". `bd dolt status` (where it probes the server over SQL, as with
+  `dolt.auto-start` off), plain `bd doctor` (its Dolt checks and the Fresh
+  Clone check) and `bd doctor --check-health` now check that port too,
+  where they reported port 0 or "no Dolt server port configured" for a
+  server `bd list` reached.
+
+- `bd bootstrap` of a fresh clone of a `bd init --server` project that
+  names no port no longer fails at its metadata reconcile with
+  `dial tcp 127.0.0.1:0`, nor probes and clones into `127.0.0.1:3307`, a
+  port no later command dials. When the next bd command starts bd's own
+  server, bootstrap clones into the data directory that server serves.
+  Under `BEADS_DOLT_SERVER_MODE=1`, a host bd does not run is cloned
+  through at `3307`, the port later commands dial there, as before.
+  Otherwise (`dolt.auto-start` off, a host bd does not run, a
+  `BEADS_DOLT_CREDENTIAL_COMMAND` gateway) it refuses with the store's advice
+  for a server with no port. `bd init --server --external --remote` with no
+  port named for a server on this machine refuses before cloning, with the
+  advice to name the port, rather than clone into `127.0.0.1:3307`.
+
+- `bd init --server --remote` without `--external`, for a Dolt server at a
+  host bd's own server never runs at (another machine, `::1` or `[::1]`),
+  now clones through that server. It cloned into `.beads/dolt`, which
+  nothing serves there, and its store then created an empty database on
+  the server, so `bd list` showed none of the remote's issues. When that
+  server already holds the database, init clones nothing and uses it. With
+  no port named for `::1` or `[::1]`, where the store resolves no port for
+  it, init refuses before cloning, with the advice to pin the port. A
+  `BEADS_DOLT_CREDENTIAL_COMMAND` gateway keeps the previous clone on any
+  host.
+
 - **bd no longer rewrites, or creates a database or server in, a legacy
   repository it reaches from another one.** Command admission refuses a
   historical SQLite workspace (a `.beads` whose `config.json` or
@@ -1366,7 +1402,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   #7767), so when two of those settings named different ports the clone
   landed on one server, `bd bootstrap` still exited 0, and the next command
   reported the database missing on the other. It now clones through the port
-  those commands connect to, and looks for an existing database there too:
+  those commands connect to when one resolves (when none does, it
+  clones into the data directory bd's own server will serve, or refuses
+  with the advice to pin the port; see the `bd bootstrap` entry above),
+  and looks for an existing database there too:
   that check, which decides whether to clone at all, read neither
   `listener.port` nor, in shared-server mode, `BEADS_DOLT_PORT`, so it could
   find the database on a server those commands never use. That check now

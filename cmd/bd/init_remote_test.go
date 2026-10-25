@@ -57,9 +57,50 @@ func TestInitExplicitRemoteDrivesCloneAndPersistence(t *testing.T) {
 	}
 }
 
+// TestInitServerExternalRemoteUsesServerCloneMode pins where bd init --remote
+// clones a server-mode workspace: through the server under --external, and
+// for a host bd's own server never runs at (another machine, ::1 or [::1]),
+// where a CLI clone into .beads/dolt was stranded while init's store created
+// an empty database on that server; with the dolt CLI into .beads/dolt
+// otherwise, as on main. A gateway (BEADS_DOLT_CREDENTIAL_COMMAND) keeps
+// main's CLI clone on any host.
 func TestInitServerExternalRemoteUsesServerCloneMode(t *testing.T) {
-	if got := initRemoteCloneMode(true, true); got != remoteCloneExternalServer {
-		t.Fatalf("initRemoteCloneMode(server=true, external=true) = %v, want external server clone mode", got)
+	for _, tc := range []struct {
+		name       string
+		server     bool
+		external   bool
+		serverHost string // --server-host
+		env        map[string]string
+		want       remoteCloneMode
+	}{
+		{name: "embedded", want: remoteCloneEmbedded},
+		{name: "--external", server: true, external: true, want: remoteCloneExternalServer},
+		{name: "bd's own server", server: true, want: remoteCloneCLI},
+		{name: "shared server", server: true, env: map[string]string{"BEADS_DOLT_SHARED_SERVER": "1"}, want: remoteCloneCLI},
+		{name: "localhost", server: true, serverHost: "localhost", want: remoteCloneCLI},
+		// A port variable alone keeps main's CLI clone (see Remaining).
+		{name: "BEADS_DOLT_SERVER_PORT", server: true, env: map[string]string{"BEADS_DOLT_SERVER_PORT": "13400"}, want: remoteCloneCLI},
+		{name: "remote --server-host", server: true, serverHost: "db.example.com", want: remoteCloneExternalServer},
+		{name: "remote BEADS_DOLT_SERVER_HOST", server: true, env: map[string]string{"BEADS_DOLT_SERVER_HOST": "db.example.com"}, want: remoteCloneExternalServer},
+		{name: "IPv6 loopback ::1", server: true, serverHost: "::1", want: remoteCloneExternalServer},
+		{name: "IPv6 loopback [::1]", server: true, serverHost: "[::1]", want: remoteCloneExternalServer},
+		// A gateway keeps main's CLI clone on any host: the server clone
+		// would log in as the static user the gateway refuses.
+		{name: "gateway on a remote host", server: true, serverHost: "db.example.com", env: map[string]string{"BEADS_DOLT_CREDENTIAL_COMMAND": "echo tok"}, want: remoteCloneCLI},
+		{name: "gateway at ::1", server: true, serverHost: "::1", env: map[string]string{"BEADS_DOLT_CREDENTIAL_COMMAND": "echo tok"}, want: remoteCloneCLI},
+		{name: "gateway at [::1]", server: true, serverHost: "[::1]", env: map[string]string{"BEADS_DOLT_CREDENTIAL_COMMAND": "echo tok"}, want: remoteCloneCLI},
+		{name: "gateway under --external", server: true, external: true, serverHost: "db.example.com", env: map[string]string{"BEADS_DOLT_CREDENTIAL_COMMAND": "echo tok"}, want: remoteCloneExternalServer},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			endpointCredentialsEnv(t, nil)
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			cloneCfg := initTimeCloneConfig(tc.server, tc.serverHost, 0, "", "", "init_clone_mode")
+			if got := initRemoteCloneMode(tc.server, tc.external, cloneCfg.GetDoltServerHost(), cloneCfg.GetDoltCredentialCommand() != ""); got != tc.want {
+				t.Errorf("initRemoteCloneMode = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 

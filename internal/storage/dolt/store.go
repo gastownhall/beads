@@ -1709,6 +1709,7 @@ func applyConfigDefaults(cfg *Config) {
 		}
 	}
 	ResolveServerPort(cfg)
+	applyTestModePortGuard(cfg)
 	if cfg.ServerUser == "" {
 		cfg.ServerUser = "root"
 	}
@@ -1733,15 +1734,13 @@ func applyConfigDefaults(cfg *Config) {
 // ResolveServerPort applies the store's port rule to cfg, as New does before
 // it connects. Callers that dial the store's server without opening it
 // first, like bd init's clone into an external server, use it to dial the
-// port New will.
+// port New will. It leaves a port nothing resolved at 0: such an endpoint has
+// no address to dial. The BEADS_TEST_MODE guard New applies after it
+// (applyTestModePortGuard) is not part of the rule, so a dial target computed
+// outside New never carries its port 1.
 func ResolveServerPort(cfg *Config) {
 	// Port resolution: caller-preset explicit ServerPort > BEADS_DOLT_SERVER_PORT
-	// env (or legacy BEADS_DOLT_PORT) > BEADS_TEST_MODE guard > metadata config > default.
-	// CRITICAL: BEADS_TEST_MODE=1 forces port 1 (immediate fail) if the resolved port
-	// is the production port (DefaultSQLPort). This prevents test databases from leaking
-	// onto production even when the port env var is set to 3307 by the orchestrator's beads module.
-	// Only an explicit non-production port (e.g., 43211 for a test server)
-	// overrides test mode — that's a deliberate test server assignment.
+	// env (or legacy BEADS_DOLT_PORT) > metadata config > default.
 	if cfg.ServerPort != 0 && cfg.ServerPortSource == doltserver.PortSourceUnset {
 		// The caller (e.g. `bd init --server-port`, or initGlobalDatabaseConfig's
 		// copy-forward of it) already set an explicit port before this function
@@ -1790,17 +1789,42 @@ func ResolveServerPort(cfg *Config) {
 	// Port 0 means "not yet resolved" — auto-start (EnsureRunning) will
 	// allocate an ephemeral port. Don't default to 3307 as that caused
 	// cross-project data leakage (GH#2098, GH#2372).
-	//
-	// Test mode guard: force port 1 (immediate fail) if we'd hit production
-	// or have no port, to prevent test databases leaking onto production.
-	// Production-port detection is generalized via isProductionPort so cities
-	// using non-3307 ports (BEADS_PRODUCTION_PORT or dolt-server.port) are
-	// covered too.
+}
+
+// applyTestModePortGuard is New's BEADS_TEST_MODE guard, applied after the
+// store's port rule (ResolveServerPort): it forces port 1 (immediate fail)
+// when the resolved port is a production port or there is none, so test
+// databases never leak onto production, even when the orchestrator's beads
+// module sets the port env var to 3307. Only an explicit non-production port
+// (e.g. 43211 for a test server) overrides it. Production-port detection is
+// generalized via isProductionPort so cities using non-3307 ports
+// (BEADS_PRODUCTION_PORT or dolt-server.port) are covered too.
+func applyTestModePortGuard(cfg *Config) {
 	if os.Getenv("BEADS_TEST_MODE") == "1" {
 		if cfg.ServerPort == 0 || isProductionPort(cfg) {
 			cfg.ServerPort = 1
 		}
 	}
+}
+
+// ErrTestModeProductionPort is wrapped by TestModeRefusesPort's refusal.
+var ErrTestModeProductionPort = errors.New("BEADS_TEST_MODE=1 refuses to dial a production Dolt server port")
+
+// TestModeRefusesPort is New's BEADS_TEST_MODE guard (applyTestModePortGuard)
+// for a caller that dials beadsDir's server at port without New, such as
+// bd init's clone into its store's server: under
+// BEADS_TEST_MODE=1 it refuses a production port (isProductionPort), so a
+// test never writes to production through a dial New would have stopped.
+// It returns nil outside test mode and for a non-production port. A port of
+// 0 is the caller's to refuse: there is nothing to dial.
+func TestModeRefusesPort(beadsDir string, port int) error {
+	if os.Getenv("BEADS_TEST_MODE") != "1" || port <= 0 {
+		return nil
+	}
+	if reasons := productionPortReasons(&Config{BeadsDir: beadsDir, ServerPort: port}); len(reasons) > 0 {
+		return fmt.Errorf("%w %d (%s)", ErrTestModeProductionPort, port, strings.Join(reasons, "; "))
+	}
+	return nil
 }
 
 // New creates a new Dolt storage backend.
@@ -1966,18 +1990,12 @@ var dialProbe = func(network, addr string, timeout time.Duration) error {
 // a unit-of-work provider against the same server from the same connection
 // settings, and a transport policy that only one of them applies is a workspace
 // where CLI commands work and the HTTP server cannot connect.
+//
+// The policy is doltserver.SocketTransport's, which a dial through the
+// endpoint (doltserver.Endpoint.DialDSN) uses too, so it picks the
+// transport the store does.
 func ResolveSocketTransport(socket, host string, port int, timeout time.Duration) string {
-	if socket == "" {
-		return ""
-	}
-	if dialProbe("unix", socket, timeout) == nil {
-		return socket // socket is live — keep using it
-	}
-	if port > 0 && dialProbe("tcp", doltutil.ServerAddr(host, port), timeout) == nil {
-		debug.Logf("dolt: socket %s unreachable, falling back to TCP %s\n", socket, doltutil.ServerAddr(host, port))
-		return "" // socket down but TCP up — transparently fall back to TCP
-	}
-	return socket // both down (or no TCP port) — keep socket for the error path
+	return doltserver.SocketTransportWith(dialProbe, socket, host, port, timeout)
 }
 
 // ensureRunningDetailed starts (or reuses) the repo-local auto-started dolt
@@ -2488,13 +2506,15 @@ func initializeServerCircuitBreaker(cfg *Config) *circuitBreaker {
 // also set cfg.ReadOnly but must still be able to auto-start a stopped
 // managed server, per dolt_autostart_lifecycle_integration_test.go.
 //
-// The IPv6 loopback is a local host that never auto-starts: the server bd
-// would start listens on 127.0.0.1 only, so the retry would still find
-// nothing at [::1]:port and leave that server running.
+// The dial must be one the started server answers
+// (doltserver.AutoStartReaches, which doltserver.Endpoint.BDStartsServer asks
+// too): TCP, since that server never listens on a unix socket, to a host on
+// this machine other than the IPv6 loopback, since it listens on 127.0.0.1
+// only, so a retry at [::1]:port would still find nothing and leave that
+// server running.
 func serverOpenCanAutoStart(cfg *Config) bool {
 	return !cfg.DisableAutoStart && cfg.AutoStart && cfg.Path != "" &&
-		cfg.ServerSocket == "" && isLocalHost(cfg.ServerHost) &&
-		!configfile.IsIPv6LoopbackHost(cfg.ServerHost)
+		doltserver.AutoStartReaches(cfg.ServerHost, cfg.ServerSocket)
 }
 
 // ErrUnresolvedServerPort is wrapped by the error an open returns when it has
@@ -2502,7 +2522,7 @@ func serverOpenCanAutoStart(cfg *Config) bool {
 // unresolvedServerPortError). A caller with its own advice for that case,
 // such as `bd init --external` asking for --server-port, tests for it with
 // errors.Is.
-var ErrUnresolvedServerPort = errors.New("no Dolt server port resolved")
+var ErrUnresolvedServerPort = doltserver.ErrUnresolvedPort
 
 // unresolvedServerPortError explains an open that has no server address: no
 // socket, and no port source resolved a port. It returns nil when cfg has
@@ -2535,22 +2555,10 @@ func unresolvedServerPortError(cfg *Config, beadsDir, serverDir string) error {
 	}
 	b.WriteString("\n")
 
-	const pinPort = "BEADS_DOLT_SERVER_PORT or dolt.port in .beads/config.yaml"
-	switch {
-	case isExternalServerHost(cfg.ServerHost):
-		b.WriteString(doltserver.UnresolvedPortAdvice(cfg.ServerHost))
-	case doltserver.IsAutoStartDisabled() || !cfg.AutoStart:
-		if doltserver.IsAutoStartDisabled() {
-			b.WriteString("dolt.auto-start is off, so bd does not start this workspace's Dolt server.\n")
-		} else {
-			b.WriteString("This workspace's Dolt server is externally managed, so bd does not start it.\n")
-		}
-		fmt.Fprintf(&b, "Whatever manages the server must publish its port again (normally by writing %s), "+
-			"or pin the port with %s.", portFile, pinPort)
-	default:
-		b.WriteString("This command does not start a Dolt server. Run a bd command that can start one, " +
-			"or start it with:\n  bd dolt start")
-	}
+	// The remedy paragraph is the one an endpoint with no port gives
+	// (doltserver.Endpoint.UnresolvedAdvice).
+	b.WriteString(doltserver.UnresolvedPortRemedy(cfg.ServerHost, portFile,
+		doltserver.IsAutoStartDisabled(), !cfg.AutoStart))
 	return fmt.Errorf("%w for %s\n\n%s", ErrUnresolvedServerPort, beadsDir, b.String())
 }
 
@@ -2717,7 +2725,7 @@ func isLocalHost(host string) bool {
 // hint), or the IPv6 loopback in either spelling: bd's own server listens
 // on 127.0.0.1 only, so "bd dolt start" cannot bring up a server there.
 func isExternalServerHost(host string) bool {
-	return !configfile.IsLocalHostString(host) || configfile.IsIPv6LoopbackHost(host)
+	return !doltserver.HostRunsBDServer(host)
 }
 
 // createDatabaseRefusedError is the error for a CREATE DATABASE whose

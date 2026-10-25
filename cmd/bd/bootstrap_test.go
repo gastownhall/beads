@@ -267,6 +267,11 @@ func TestDetectBootstrapAction_ServerModeProbeErrorStopsWithReason(t *testing.T)
 	cfg.DoltMode = configfile.DoltModeServer
 	cfg.DoltDatabase = "project_missing"
 	cfg.DoltDataDir = sharedDir
+	// The workspace names its server's port, never inheriting one: the Dolt
+	// test server exports BEADS_DOLT_PORT/BEADS_DOLT_SERVER_PORT when it is
+	// up, and with no port named bootstrap probes nothing.
+	cfg.DoltServerPort = 13307
+	t.Setenv("BEADS_DOLT_PORT", "")
 	t.Setenv("BEADS_DOLT_DATA_DIR", sharedDir)
 
 	origCheck := checkBootstrapServerDB
@@ -698,6 +703,11 @@ func TestDetectBootstrapAction_ServerModePlanUsesConfiguredDatabaseName(t *testi
 	cfg.DoltMode = configfile.DoltModeServer
 	cfg.DoltDatabase = "myrig"
 	cfg.DoltDataDir = doltDataDir
+	// The workspace names its server's port, never inheriting one: the Dolt
+	// test server exports BEADS_DOLT_PORT/BEADS_DOLT_SERVER_PORT when it is
+	// up, and with no port named bootstrap probes nothing.
+	cfg.DoltServerPort = 13307
+	t.Setenv("BEADS_DOLT_PORT", "")
 
 	var probedDBName string
 	origCheck := checkBootstrapServerDB
@@ -1888,6 +1898,11 @@ func TestDetectBootstrapAction_NoLocalShadowDirStillLiveChecksExisting(t *testin
 	cfg.DoltMode = configfile.DoltModeServer
 	cfg.DoltDatabase = "project_exists"
 	cfg.DoltDataDir = doltDataDir
+	// The workspace names its server's port, never inheriting one: the Dolt
+	// test server exports BEADS_DOLT_PORT/BEADS_DOLT_SERVER_PORT when it is
+	// up, and with no port named bootstrap probes nothing.
+	cfg.DoltServerPort = 13307
+	t.Setenv("BEADS_DOLT_PORT", "")
 	cfg.ProjectID = "proj-already-initialized-456"
 	t.Setenv("BEADS_DOLT_DATA_DIR", doltDataDir)
 
@@ -2011,6 +2026,10 @@ func freshServerModeCloneFixture(t *testing.T) (beadsDir string, cfg *configfile
 	cfg.DoltDatabase = "mydb"
 	cfg.DoltDataDir = filepath.Join(tmpDir, "dolt-data") // never created: fresh clone
 	cfg.ProjectID = "proj-fresh-clone-789"
+	// The workspace names its server's port, so there is a server to probe.
+	// With none named, bootstrap probes nothing (no 127.0.0.1:0, no 3307):
+	// see TestBootstrapNeverDialsAnUnresolvedServerPort.
+	cfg.DoltServerPort = 13307
 	t.Setenv("BEADS_DOLT_DATA_DIR", cfg.DoltDataDir)
 	return beadsDir, cfg
 }
@@ -2128,6 +2147,9 @@ func TestDetectBootstrapAction_ExistingProjectMissingServerDBRefusesAtPlanTime(t
 	cfg.DoltDatabase = "mydb"
 	cfg.DoltDataDir = filepath.Join(tmpDir, "dolt-data")
 	cfg.ProjectID = "proj-already-initialized-456"
+	// A named port gives the plan a server to probe; with none, the refusal
+	// comes from the data directory (TestBootstrapNeverDialsAnUnresolvedServerPort).
+	cfg.DoltServerPort = 13307
 	t.Setenv("BEADS_DOLT_DATA_DIR", cfg.DoltDataDir)
 
 	probes := 0
@@ -2489,7 +2511,8 @@ func TestServerClonePortIsTheStorePort(t *testing.T) {
 		{name: "dolt_server_port over BEADS_DOLT_PORT", legacyPort: legacy, metaPort: metadata, want: metadata},
 		{name: "config.yaml dolt.port over dolt_server_port", metaPort: metadata, setup: doltPort, want: configured},
 		{name: "BEADS_DOLT_PORT alone", legacyPort: legacy, want: legacy},
-		{name: "nothing named", want: configfile.DefaultDoltServerPort},
+		// No default 3307 stands in: later commands dial no such port.
+		{name: "nothing named", want: 0},
 		{name: "fresh clone/inherited dolt_server_port over BEADS_DOLT_PORT", fresh: true, legacyPort: legacy, metaPort: metadata, want: metadata},
 		{name: "fresh clone/inherited dolt_server_port alone", fresh: true, metaPort: metadata, want: metadata},
 		{name: "fresh clone/BEADS_DOLT_SERVER_PORT over inherited dolt_server_port", fresh: true, serverPort: serverEnv, metaPort: metadata, want: serverEnv},
@@ -2540,7 +2563,7 @@ func TestServerClonePortIsTheStorePort(t *testing.T) {
 			if got != tc.want {
 				t.Errorf("serverClonePort = %d, want %d", got, tc.want)
 			}
-			if tc.want != configfile.DefaultDoltServerPort && got != dial.Port {
+			if got != dial.Port {
 				t.Errorf("serverClonePort = %d, but the store dials %d (%s)", got, dial.Port, dial.PortSource)
 			}
 		})
@@ -2762,7 +2785,7 @@ func TestServerClonePortReadsTheUserLayers(t *testing.T) {
 	}{
 		{name: "BD_DOLT_SHARED_SERVER", setup: []func(*testing.T, string){bdShared("1")}, want: shared},
 		{name: "BD_DOLT_SHARED_SERVER/local host", setup: []func(*testing.T, string){bdShared("1")}, localHost: true, want: shared},
-		{name: "BD_DOLT_SHARED_SERVER=false over the user config", setup: []func(*testing.T, string){documentedShared, bdShared("false")}, want: configfile.DefaultDoltServerPort},
+		{name: "BD_DOLT_SHARED_SERVER=false over the user config", setup: []func(*testing.T, string){documentedShared, bdShared("false")}, want: 0},
 		{name: "legacy dolt.port", setup: []func(*testing.T, string){legacyPort}, want: port},
 		{name: "legacy dolt.port over dolt_server_port", setup: []func(*testing.T, string){legacyPort}, metaPort: metadata, want: port},
 		{name: "legacy dolt.shared-server", setup: []func(*testing.T, string){legacyShared}, want: shared},
@@ -2823,7 +2846,7 @@ func TestServerClonePortReadsTheUserLayers(t *testing.T) {
 			if got != tc.want {
 				t.Errorf("serverClonePort = %d, want %d", got, tc.want)
 			}
-			if tc.want != configfile.DefaultDoltServerPort && got != dial.Port {
+			if got != dial.Port {
 				t.Errorf("serverClonePort = %d, but later commands dial %d (%s)", got, dial.Port, dial.PortSource)
 			}
 		})
@@ -2953,6 +2976,10 @@ func TestInitServerClonePortIsInitsStorePort(t *testing.T) {
 		{name: "BEADS_DOLT_PORT over dolt.port", doltPort: true, legacyPort: legacy, want: legacy},
 		{name: "BEADS_DOLT_PORT over the port file", portFile: true, legacyPort: legacy, want: legacy},
 		{name: "dolt.port when nothing else names one", doltPort: true, want: configured},
+		// Nothing names a port: the store refuses the unresolved port (or
+		// starts bd's own server), and dials no default 3307, so neither
+		// does the clone.
+		{name: "nothing names a port", want: 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			clonePortTestEnv(t)
@@ -3075,7 +3102,7 @@ func warmupStoreEndpoint(t *testing.T, dir string) (string, int) {
 // the existence probe (bootstrapServerEndpoint) must look where the clone
 // lands.
 func TestSyncActionClonesWhereTheRigsCommandsLook(t *testing.T) {
-	const townHost, userHost, townPort, metadata = "db.town.example", "db.user.example", 15555, 14444
+	const townHost, userHost, rigHost, townPort, metadata = "db.town.example", "db.user.example", "db.rig.example", 15555, 14444
 	townShared := "dolt.shared-server: true\n"
 	townServer := fmt.Sprintf("dolt.host: %s\ndolt.port: %d\n", townHost, townPort)
 	server := func(port int) *configfile.Config {
@@ -3089,28 +3116,58 @@ func TestSyncActionClonesWhereTheRigsCommandsLook(t *testing.T) {
 		userHost string // dolt.host in the user config
 		cfg      *configfile.Config
 		// wantHost and wantPort name the server the clone dials; empty for
-		// a clone into the embedded engine.
+		// a clone into the embedded engine or into bd's own data directory.
 		wantHost string
 		wantPort int
+		// wantDataDir is a clone with the dolt CLI into the data directory
+		// bd's own server serves: no port is named, so the next command
+		// starts that server, which no clone could dial before.
+		wantDataDir bool
+		// wantRefuse is the advice the clone refuses with, the store's for
+		// the endpoint later commands resolve.
+		wantRefuse string
+		// serverModeEnv sets BEADS_DOLT_SERVER_MODE=1 for bootstrap and
+		// the rig's later commands.
+		serverModeEnv bool
 	}{
 		{name: "town shared-server/default config", town: townShared, townKey: "dolt.shared-server", cfg: configfile.DefaultConfig()},
 		{name: "town shared-server/embedded config", town: townShared, townKey: "dolt.shared-server", cfg: embedded},
-		// Nothing the rig reads names a port, so the clone dials the default,
-		// as for any workspace whose settings name none, and not the town's
-		// shared server (3308).
-		{name: "town shared-server/server config naming no port", town: townShared, townKey: "dolt.shared-server", cfg: server(0), wantHost: "127.0.0.1", wantPort: configfile.DefaultDoltServerPort},
+		// Nothing the rig reads names a port, so the next command starts
+		// bd's own server over the rig's data directory: the clone goes
+		// there, not to the default 3307 nor the town's shared server
+		// (3308), neither of which any later command dials.
+		{name: "town shared-server/server config naming no port", town: townShared, townKey: "dolt.shared-server", cfg: server(0), wantDataDir: true},
 		{name: "town dolt.mode server/default config", town: "dolt.mode: server\n", townKey: "dolt.mode", cfg: configfile.DefaultConfig()},
-		{name: "town dolt.host/server config naming no host or port", town: townServer, townKey: "dolt.host", cfg: server(0), wantHost: "127.0.0.1", wantPort: configfile.DefaultDoltServerPort},
+		{name: "town dolt.host/server config naming no host or port", town: townServer, townKey: "dolt.host", cfg: server(0), wantDataDir: true},
 		{name: "town dolt.host/inherited dolt_server_port", town: townServer, townKey: "dolt.host", cfg: server(metadata), wantHost: "127.0.0.1", wantPort: metadata},
 		{name: "town dolt.host/user dolt.host", town: townServer, townKey: "dolt.host", userHost: userHost, cfg: server(metadata), wantHost: userHost, wantPort: metadata},
+		// An inherited metadata.json naming a remote host with no port and
+		// no dolt_mode (GH#3545 host inference). finalize records
+		// dolt_mode: server, which turns host inference and its 3307
+		// default off, so later commands resolve no port and refuse to
+		// dial; the clone refuses with their advice rather than clone
+		// into db.rig.example:3307, which no later command dials.
+		{name: "town dolt.mode server/inherited remote host naming no port", town: "dolt.mode: server\n", townKey: "dolt.mode",
+			cfg: &configfile.Config{Backend: configfile.BackendDolt, DoltServerHost: rigHost}, wantRefuse: "bd does not manage the Dolt server at " + rigHost + "; pin its port"},
+		// The same, under BEADS_DOLT_SERVER_MODE=1: the store's
+		// external-host default fills 3307 for a host bd does not run once
+		// finalize writes it, so later commands dial host:3307, and the
+		// clone goes there as on main.
+		{name: "town dolt.mode server/inherited remote host naming no port, server mode env", town: "dolt.mode: server\n", townKey: "dolt.mode", serverModeEnv: true,
+			cfg: &configfile.Config{Backend: configfile.BackendDolt, DoltServerHost: rigHost}, wantHost: rigHost, wantPort: configfile.DefaultDoltServerPort},
+		{name: "town dolt.mode server/inherited ::1 naming no port, server mode env", town: "dolt.mode: server\n", townKey: "dolt.mode", serverModeEnv: true,
+			cfg: &configfile.Config{Backend: configfile.BackendDolt, DoltServerHost: "::1"}, wantHost: "::1", wantPort: configfile.DefaultDoltServerPort},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			clonePortTestEnv(t)
 			t.Setenv("BEADS_CEILING_DIRECTORIES", "")
+			if tc.serverModeEnv {
+				t.Setenv("BEADS_DOLT_SERVER_MODE", "1")
+			}
 			if tc.userHost != "" {
 				writeClonePortFile(t, filepath.Join(os.Getenv("HOME"), ".config", "bd", "config.yaml"), "dolt.host: "+tc.userHost+"\n")
 			}
-			writeClonePortCredentials(t, []string{"127.0.0.1", townHost, userHost}, []int{metadata, townPort, configfile.DefaultDoltServerPort})
+			writeClonePortCredentials(t, []string{"127.0.0.1", townHost, userHost, rigHost, "::1"}, []int{metadata, townPort, configfile.DefaultDoltServerPort})
 			town := t.TempDir()
 			writeClonePortFile(t, filepath.Join(town, ".beads", "config.yaml"), tc.town)
 			rig := filepath.Join(town, "rig")
@@ -3133,11 +3190,16 @@ func TestSyncActionClonesWhereTheRigsCommandsLook(t *testing.T) {
 
 			var cloned *bootstrapServerProbeConfig
 			clonedEmbedded := false
-			origServer, origEmbedded, origOpen := remoteCloneViaServer, remoteCloneViaEmbedded, openSyncedWarmupStore
+			clonedDataDir := ""
+			origServer, origEmbedded, origDataDir, origOpen := remoteCloneViaServer, remoteCloneViaEmbedded, remoteCloneIntoDataDir, openSyncedWarmupStore
 			t.Cleanup(func() {
-				remoteCloneViaServer, remoteCloneViaEmbedded, openSyncedWarmupStore = origServer, origEmbedded, origOpen
+				remoteCloneViaServer, remoteCloneViaEmbedded, remoteCloneIntoDataDir, openSyncedWarmupStore = origServer, origEmbedded, origDataDir, origOpen
 				schema.SetLocalMigrateConsent(false)
 			})
+			remoteCloneIntoDataDir = func(_ context.Context, doltDir, _, _ string) error {
+				clonedDataDir = doltDir
+				return nil
+			}
 			remoteCloneViaServer = func(_ context.Context, _, _ string, ep bootstrapServerProbeConfig) error {
 				cloned = &ep
 				return nil
@@ -3153,6 +3215,30 @@ func TestSyncActionClonesWhereTheRigsCommandsLook(t *testing.T) {
 			}
 
 			plan := BootstrapPlan{Action: "sync", BeadsDir: beadsDir, Database: "rig_sync", SyncRemote: "file:///nonexistent/remote"}
+			if tc.wantRefuse != "" {
+				err := executeSyncAction(t.Context(), plan, &cfg)
+				if err == nil || !strings.Contains(err.Error(), tc.wantRefuse) {
+					t.Fatalf("executeSyncAction = %v, want a refusal with %q", err, tc.wantRefuse)
+				}
+				if cloned != nil || clonedDataDir != "" || clonedEmbedded {
+					t.Errorf("cloned (server %v, data dir %q, embedded %v) after refusing", cloned, clonedDataDir, clonedEmbedded)
+				}
+				if probe.port != 0 {
+					t.Errorf("the existence probe dials port %d, but later commands resolve none", probe.port)
+				}
+				// The metadata.json finalize would write (dolt_mode: server):
+				// later commands resolve no port for it either.
+				saved := cfg
+				saved.DoltMode = configfile.DoltModeServer
+				if err := saved.Save(beadsDir); err != nil {
+					t.Fatal(err)
+				}
+				loadClonePortConfig(t, beadsDir)
+				if laterEP := doltserver.ResolveEndpoint(beadsDir, &saved); laterEP.Dialable() {
+					t.Errorf("later commands dial %s, but the clone refused", laterEP.Location())
+				}
+				return
+			}
 			if err := executeSyncAction(t.Context(), plan, &cfg); err != nil {
 				t.Fatalf("executeSyncAction: %v", err)
 			}
@@ -3164,9 +3250,28 @@ func TestSyncActionClonesWhereTheRigsCommandsLook(t *testing.T) {
 			if err != nil || later == nil {
 				t.Fatalf("finalize wrote no metadata.json: %v", err)
 			}
-			wantServer := tc.wantHost != ""
+			wantServer := tc.wantHost != "" || tc.wantDataDir
 			if laterServer := effectiveServerMode(beadsDir, later); laterServer != wantServer {
 				t.Errorf("later commands use a server: %v (dolt_mode %q), want %v", laterServer, later.DoltMode, wantServer)
+			}
+			if tc.wantDataDir {
+				if cloned != nil {
+					t.Errorf("cloned through a server at %s:%d, but no later command dials it", cloned.host, cloned.port)
+				}
+				if probe.port != 0 {
+					t.Errorf("the existence probe dials port %d, but later commands resolve none", probe.port)
+				}
+				if laterPort := doltserver.ResolveEndpoint(beadsDir, later).Port; laterPort != 0 {
+					t.Fatalf("precondition: later commands resolve port %d, want none (bd starts its own server)", laterPort)
+				}
+				// The data directory bd's own server serves for the rig.
+				if want := doltserver.ResolveDoltDir(beadsDir); clonedDataDir != want {
+					t.Errorf("cloned into data directory %q, want %q, the one bd's server for the rig serves", clonedDataDir, want)
+				}
+				return
+			}
+			if clonedDataDir != "" {
+				t.Errorf("cloned into data directory %s, want a clone through a server or the embedded engine", clonedDataDir)
 			}
 			if !wantServer {
 				if cloned != nil {
@@ -3180,14 +3285,15 @@ func TestSyncActionClonesWhereTheRigsCommandsLook(t *testing.T) {
 			if cloned == nil {
 				t.Fatalf("no server clone (embedded: %v), want one through %s:%d", clonedEmbedded, tc.wantHost, tc.wantPort)
 			}
-			laterHost, laterPort := later.GetDoltServerHost(), doltserver.DialConfig(beadsDir).Port
+			laterEP := doltserver.ResolveEndpoint(beadsDir, later)
+			laterHost, laterPort := laterEP.Host, laterEP.Port
 			if cloned.host != tc.wantHost || cloned.port != tc.wantPort {
 				t.Errorf("clone dialed %s:%d, want %s:%d", cloned.host, cloned.port, tc.wantHost, tc.wantPort)
 			}
-			if cloned.host != laterHost || (laterPort > 0 && cloned.port != laterPort) {
+			if cloned.host != laterHost || cloned.port != laterPort {
 				t.Errorf("clone dialed %s:%d, but later commands dial %s:%d", cloned.host, cloned.port, laterHost, laterPort)
 			}
-			if want := later.GetDoltServerPasswordForPort(cloned.port); want == "" || cloned.pass != want {
+			if want := laterEP.Password(); want == "" || cloned.pass != want {
 				t.Errorf("clone password = %q, want %q, the one later commands present there", cloned.pass, want)
 			}
 			if *cloned != probe {

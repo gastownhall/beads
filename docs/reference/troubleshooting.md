@@ -258,12 +258,12 @@ before removing the stale directory.
 
 **Symptom (server mode):** commands fail with "Dolt server unreachable at
 127.0.0.1:3307", and bd says that `dolt_server_port` (or
-`BEADS_DOLT_SERVER_PORT`) declares that server externally managed, so it did
-not start one.
+`BEADS_DOLT_SERVER_PORT`, or the legacy `BEADS_DOLT_PORT`) declares that
+server externally managed, so it did not start one.
 
 **Cause:** When `metadata.json` has an explicit `dolt_server_port`, or the
-environment sets `BEADS_DOLT_SERVER_PORT`, bd treats the server as externally
-managed and intentionally disables auto-start — spawning a different server
+environment sets `BEADS_DOLT_SERVER_PORT` or `BEADS_DOLT_PORT`, bd treats the
+server as externally managed and intentionally disables auto-start — spawning a different server
 would create a shadow database. A `dolt_server_port` does so even when
 `config.yaml`'s `dolt.port` chose the port; bd then says the setting declares
 this workspace's server externally managed without claiming it names the

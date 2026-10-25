@@ -34,7 +34,10 @@ func runCheckHealth(path string) error {
 	}
 
 	host := cfg.GetDoltServerHost()
-	port := doltserver.DefaultConfig(beadsDir).Port
+	// The port the store dials (doltserver.ResolveEndpoint): its rule, the
+	// legacy BEADS_DOLT_PORT included, which DefaultConfig leaves out.
+	ep := doltserver.ResolveEndpoint(beadsDir, cfg)
+	port := ep.Port
 	if port == 0 {
 		if issue := doctor.CheckHooksQuick(Version); issue != "" {
 			return printCheckHealthHint([]string{issue})
@@ -49,7 +52,7 @@ func runCheckHealth(path string) error {
 		Host:     host,
 		Port:     port,
 		User:     cfg.GetDoltServerUser(),
-		Password: cfg.GetDoltServerPasswordForPort(port),
+		Password: ep.Password(),
 		Database: database,
 		Timeout:  2 * time.Second,
 		TLS:      cfg.GetDoltServerTLS(),

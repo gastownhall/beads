@@ -6,6 +6,7 @@ go_library(
         "doltserver.go",
         "doltserver_unix.go",
         "doltserver_windows.go",
+        "endpoint.go",
         "gc_config.go",
         "listenerowner_darwin.go",
         "listenerowner_linux.go",
@@ -33,6 +34,7 @@ go_library(
     deps = [
         "//internal/config",
         "//internal/configfile",
+        "//internal/creds",
         "//internal/debug",
         "//internal/fdhygiene",
         "//internal/githooksenv",
@@ -61,6 +63,7 @@ go_test(
         "doltserver_test.go",
         "doltserver_unix_test.go",
         "doltserver_windows_test.go",
+        "endpoint_test.go",
         "fakedolt_test.go",
         "fdleak_integration_test.go",
         "gc_config_test.go",
