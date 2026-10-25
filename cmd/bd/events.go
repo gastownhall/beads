@@ -343,6 +343,7 @@ func runEventsTail(ctx context.Context, since int64, limit int, follow bool) err
 // — see eventsHeadCmd's help for why a consumer needs this instead of
 // bisecting 'tail' or replaying from seq 0.
 func runEventsHead(ctx context.Context) error {
+	noticeEventsJournalDisabled(beads.FindBeadsDir())
 	head, floor, err := journalHead(ctx)
 	if err != nil {
 		return HandleErrorRespectJSON("reading events journal head: %v", err)
