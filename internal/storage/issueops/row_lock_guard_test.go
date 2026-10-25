@@ -167,6 +167,15 @@ var funcNameExemptions = map[string]string{
 	// cause a legitimate subsequent CAS check to fail as a spurious lost
 	// update.
 	"recordVersionAtInTx": "runs after the primary mutation (or, for RecordVersionAtInTx's fixture-only callers, a bare-create) already minted a fresh row_lock in the same transaction; reminting here would double-bump the token and invalidate the RowVersion/CAS value already returned to that mutation's caller — covers all three of its UPDATE issues statements (the update-shaped and create-shaped current_revision advances and the no-history participation_generation stamp), since all three public entry points delegate to this one shared body",
+
+	// carryParticipationInTx (version_history.go) carries a row's
+	// versioned-history participation across a plane move: it writes only the
+	// participation_generation bookkeeping column, of the wisps row a demotion
+	// just inserted or the issues row a move back out just inserted, both with
+	// a fresh row_lock in the same transaction. Reminting here would bump the
+	// token a second time within one transaction for no content change, the
+	// same reason recordVersionAtInTx above leaves it alone.
+	"carryParticipationInTx": "writes only participation_generation on a row the same plane move just inserted with a fresh row_lock in this transaction; reminting would double-bump the token for no content change",
 }
 
 // TestAllIssueRowWritesStampRowLock is the load-bearing completeness guard for

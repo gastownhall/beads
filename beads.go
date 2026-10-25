@@ -99,6 +99,49 @@ func configuredBackendUnavailable(backend, beadsDir string, cfg *configfile.Conf
 	}
 }
 
+// checkDiscoveredBackend refuses a workspace that OpenBestAvailableWith cannot
+// open, reading its metadata as configfile.LoadForDiscovery does, which never
+// rewrites the workspace: a format this build does not support or a historical
+// SQLite workspace (configfile.LoadDiscoveredForOpen), or a removed or
+// unrecognized backend (configuredBackendUnavailable). It runs before
+// configfile.Load, which migrates a legacy config.json into metadata.json and
+// drops the keys Config does not know, and before anything that creates a
+// database or gate file, as the CLI's command admission checks the same read
+// before any Load. Metadata that does not load is left to Load to report,
+// unless the graph format marker sits beside it; no metadata at all (and no
+// format marker or SQLite database) selects Dolt.
+func checkDiscoveredBackend(beadsDir string) error {
+	cfg, err := configfile.LoadDiscoveredForOpen(beadsDir)
+	if err != nil {
+		return err
+	}
+	if cfg != nil && !configfile.IsSupportedBackend(cfg.Backend) {
+		return configuredBackendUnavailable(cfg.Backend, beadsDir, cfg)
+	}
+	return nil
+}
+
+// UnsupportedWorkspaceFormatError is returned by Open, OpenBestAvailable,
+// OpenBestAvailableWith, OpenFromConfig and OpenGated when the workspace
+// declares a data model this build cannot open: a metadata.json graph_mode
+// other than "dependency", such as the "link" workspaces graph-preview builds
+// of bd write, or the .beads/graph-preview-format marker those builds write
+// beside it (FormatMarker), whatever the metadata says. Nothing was opened,
+// created or modified. Match it with errors.As to read BeadsDir, GraphMode and
+// FormatMarker; the bd CLI refuses the same workspaces with exit code 16.
+// Aliased here because internal/configfile is unimportable outside this
+// module.
+type UnsupportedWorkspaceFormatError = configfile.UnsupportedWorkspaceFormatError
+
+// LegacyWorkspaceError is returned by Open, OpenBestAvailable,
+// OpenBestAvailableWith, OpenFromConfig and OpenGated for a workspace a
+// pre-Dolt bd left behind: a historical SQLite workspace, whose SQLite
+// database is still the only copy of its data. Nothing was opened, created or
+// modified, and its text is the refusal the bd CLI prints when run inside that
+// workspace: migrate it explicitly first. Match it with errors.As. Aliased
+// here because internal/configfile is unimportable outside this module.
+type LegacyWorkspaceError = configfile.LegacyWorkspaceError
+
 // Transaction provides atomic multi-operation support within a database transaction.
 // Use Storage.RunInTransaction() to obtain a Transaction instance.
 type Transaction = beads.Transaction
@@ -360,8 +403,22 @@ func AllowSharedSchemaMigration(allow bool) {
 // Open opens a Dolt-backed beads database at the given path.
 // This always opens in embedded mode. Use OpenFromConfig to respect
 // server mode settings from metadata.json.
+//
+// The workspace holding dbPath (its parent directory) is refused, before
+// anything is written there, when bd run in it would refuse it from its
+// contents (checkDiscoveredBackend): a format this build cannot open
+// (*UnsupportedWorkspaceFormatError), a historical SQLite workspace
+// (*LegacyWorkspaceError), or a removed or unknown backend.
 func Open(ctx context.Context, dbPath string) (Storage, error) {
-	return dolt.New(ctx, &dolt.Config{Path: dbPath, CreateIfMissing: true})
+	if err := checkDiscoveredBackend(filepath.Dir(dbPath)); err != nil {
+		return nil, err
+	}
+	st, err := dolt.New(ctx, &dolt.Config{Path: dbPath, CreateIfMissing: true})
+	if err != nil {
+		// An untyped nil, as the other public opens return.
+		return nil, err
+	}
+	return st, nil
 }
 
 // OpenFromConfig opens the Dolt implementation using configuration from
@@ -369,7 +426,17 @@ func Open(ctx context.Context, dbPath string) (Storage, error) {
 // name configuration.
 // beadsDir is the path to the .beads directory.
 func OpenFromConfig(ctx context.Context, beadsDir string) (Storage, error) {
-	return dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{CreateIfMissing: true})
+	// NewFromConfigWithOptions refuses an unsupported format or backend
+	// (dolt.RequireDiscoveredDoltBackend) before its Load can migrate a
+	// legacy config.json.
+	st, err := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{CreateIfMissing: true})
+	if err != nil {
+		// An untyped nil, as the other public opens return: a nil
+		// *DoltStore in the Storage interface is non-nil, and Close on it
+		// panics.
+		return nil, err
+	}
+	return st, nil
 }
 
 // OpenGated is OpenFromConfig plus participation in the workspace
@@ -403,6 +470,12 @@ func OpenFromConfig(ctx context.Context, beadsDir string) (Storage, error) {
 // operation holds one exclusively; zero means fail fast. A busy gate is
 // reported as ErrGateBusy (match with errors.Is).
 func OpenGated(ctx context.Context, beadsDir string, wait time.Duration) (Storage, error) {
+	// Before the gates: taking them creates gate files in and beside a
+	// workspace this build must leave untouched. This is the refusal the
+	// Dolt open below makes before its own Load.
+	if err := dolt.RequireDiscoveredDoltBackend(beadsDir); err != nil {
+		return nil, err
+	}
 	wsGate, err := workspacegate.ForWorkspace(beadsDir)
 	if err != nil {
 		return nil, err

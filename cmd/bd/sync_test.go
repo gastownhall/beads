@@ -34,6 +34,26 @@ func TestSyncFailureTextDistinguishesSSHDialTimeoutFromAuth(t *testing.T) {
 			t.Errorf("dial timeout retained auth hint %q: %q", misleading, got)
 		}
 	}
+	// The rewrite must keep runSyncLoop's step: pull vs push is what tells an
+	// operator whether local work already reached the remote. A wrap segment
+	// that itself embeds git's output (cliTransferError's shape) is not a step
+	// and must not come back, auth hints and all.
+	explained := "SSH remote could not be reached (dial timed out): " + timeoutLine
+	cliTransfer := fmt.Errorf("dolt push failed: %s: %w", gitText, errors.New("exit status 1"))
+	for _, tc := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"pull step", timeout, "pull: " + explained},
+		{"push step over a CLI transfer", fmt.Errorf("push: %w", cliTransfer), "push: " + explained},
+		{"bare CLI transfer", cliTransfer, explained},
+		{"credentialed remote in the step is scrubbed", fmt.Errorf("pull https://u:secret@remote.example/org/db: %w", errors.New(gitText)), "pull https://remote.example/org/db: " + explained},
+	} {
+		if got := syncFailureText(tc.err); got != tc.want {
+			t.Errorf("%s: got %q, want %q", tc.name, got, tc.want)
+		}
+	}
 
 	auth := fmt.Errorf("pull: %w", errors.New("git@host: Permission denied (publickey).\nhint: run `ssh-add <key>` to pre-load your key for SSH remotes"))
 	if got := syncFailureText(auth); got != auth.Error() {

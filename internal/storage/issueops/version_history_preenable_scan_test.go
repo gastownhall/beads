@@ -81,7 +81,7 @@ func TestRecordVersionInTxRefusesANumberOutsideTheRangeAndWritesNothing(t *testi
 				WillReturnRows(sqlmock.NewRows([]string{"issue_id", "depends_on_id", "type", "created_at", "created_by", "metadata", "thread_id"}))
 			mock.ExpectQuery(regexp.QuoteMeta("SELECT epoch FROM store_epoch WHERE id = 1")).
 				WillReturnRows(sqlmock.NewRows([]string{"epoch"}).AddRow(1))
-			mock.ExpectQuery(regexp.QuoteMeta("SELECT COALESCE(MAX(revision), 0) + 1 FROM issue_versions WHERE issue_id = ?")).
+			mock.ExpectQuery(regexp.QuoteMeta("SELECT COALESCE((SELECT MAX(revision) FROM issue_versions WHERE issue_id = ?), 0) + 1")).
 				WithArgs(id).
 				WillReturnRows(sqlmock.NewRows([]string{"next"}).AddRow(1))
 			mock.ExpectRollback()
@@ -237,7 +237,7 @@ func TestRecordVersionAtInTxKeepsThePlaneRuleButNotTheFence(t *testing.T) {
 			WillReturnRows(sqlmock.NewRows([]string{"issue_id", "depends_on_id", "type", "created_at", "created_by", "metadata", "thread_id"}))
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT epoch FROM store_epoch WHERE id = 1")).
 			WillReturnRows(sqlmock.NewRows([]string{"epoch"}).AddRow(1))
-		mock.ExpectQuery(regexp.QuoteMeta("SELECT COALESCE(MAX(revision), 0) + 1 FROM issue_versions WHERE issue_id = ?")).
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT COALESCE((SELECT MAX(revision) FROM issue_versions WHERE issue_id = ?), 0) + 1")).
 			WithArgs(id).
 			WillReturnRows(sqlmock.NewRows([]string{"next"}).AddRow(1))
 		mock.ExpectExec(`INSERT INTO issue_versions`).
@@ -421,6 +421,80 @@ func TestFindUnversionableFindsWhatTheMintWouldRefuse(t *testing.T) {
 	if found := FindUnversionable(nil); len(found) != 0 {
 		t.Fatalf("no issues reported %v", unversionableIDs(found))
 	}
+}
+
+// The switch narrows what FindUnversionable returns to the rows that participate,
+// because design §16.2b's write fence skips a legacy row before the mint looks at it.
+// ParticipatingIssueIDsInTx is that read, and these pin its shape: it reads the
+// column the fence reads (participation_generation) from the table the fence reads it
+// from (issues, never wisps), only for the ids it is asked about, deduplicated, in
+// batches of queryBatchSize, and it reads nothing for no ids, which is the clean
+// store's whole cost. A first enable of a store whose every row holds a nanosecond
+// timestamp asks about all of them, so the batches are what keep that one statement
+// from carrying thousands of placeholders.
+func TestParticipatingIssueIDsInTxReadsTheFenceColumnForTheIdsAlone(t *testing.T) {
+	read := func(n int) string {
+		return regexp.QuoteMeta("SELECT id FROM issues WHERE participation_generation IS NOT NULL AND id IN (" +
+			strings.TrimSuffix(strings.Repeat("?,", n), ",") + ")")
+	}
+
+	t.Run("no ids reads nothing", func(t *testing.T) {
+		_, mock, tx := beginMockTx(t)
+		mock.ExpectRollback()
+		got, err := ParticipatingIssueIDsInTx(context.Background(), tx, []string{"", ""})
+		if err != nil || len(got) != 0 {
+			t.Fatalf("ParticipatingIssueIDsInTx(no ids) = %v, %v; want an empty set and no error", got, err)
+		}
+		if err := tx.Rollback(); err != nil {
+			t.Fatalf("rollback: %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("it read something for no ids: %v", err)
+		}
+	})
+
+	t.Run("each id once, in batches, and only what the read returns", func(t *testing.T) {
+		_, mock, tx := beginMockTx(t)
+		ids := make([]string, 0, queryBatchSize+2)
+		args := make([]driver.Value, 0, queryBatchSize)
+		for i := 0; i < queryBatchSize+1; i++ {
+			id := fmt.Sprintf("bd-%d", i)
+			ids = append(ids, id)
+			if i < queryBatchSize {
+				args = append(args, id)
+			}
+		}
+		ids = append(ids, "bd-0") // a repeat is asked about once
+		mock.ExpectQuery(read(queryBatchSize)).WithArgs(args...).
+			WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("bd-3").AddRow("bd-7"))
+		mock.ExpectQuery(read(1)).WithArgs(fmt.Sprintf("bd-%d", queryBatchSize)).
+			WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(fmt.Sprintf("bd-%d", queryBatchSize)))
+		mock.ExpectRollback()
+
+		got, err := ParticipatingIssueIDsInTx(context.Background(), tx, ids)
+		if err != nil {
+			t.Fatalf("ParticipatingIssueIDsInTx: %v", err)
+		}
+		want := map[string]struct{}{"bd-3": {}, "bd-7": {}, fmt.Sprintf("bd-%d", queryBatchSize): {}}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("ParticipatingIssueIDsInTx = %v, want %v", got, want)
+		}
+		if err := tx.Rollback(); err != nil {
+			t.Fatalf("rollback: %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("the read did not ask about each id once, in batches of %d: %v", queryBatchSize, err)
+		}
+	})
+
+	t.Run("a failed read is an error, not an empty answer", func(t *testing.T) {
+		_, mock, tx := beginMockTx(t)
+		mock.ExpectQuery(read(1)).WithArgs("bd-1").WillReturnError(errors.New("unknown column 'participation_generation'"))
+		mock.ExpectRollback()
+		if got, err := ParticipatingIssueIDsInTx(context.Background(), tx, []string{"bd-1"}); err == nil {
+			t.Fatalf("ParticipatingIssueIDsInTx over a failed read = %v, nil; want the error, so the switch refuses rather than passing", got)
+		}
+	})
 }
 
 func unversionableIDs(found []UnversionableIssue) []string {

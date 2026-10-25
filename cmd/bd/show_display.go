@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/uimd"
@@ -147,7 +148,7 @@ func displayShowIssueReturn(ctx context.Context, issueID string, commentsTail in
 		defer result.Close()
 	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error fetching issue: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error fetching issue: %s\n", remedy.PrintedMessage(err))
 		return nil
 	}
 	if result == nil || result.Issue == nil {

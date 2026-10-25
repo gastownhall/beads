@@ -151,6 +151,7 @@ go_library(
         "find_duplicates_proxied_server.go",
         "flags.go",
         "flatten.go",
+        "foreign_workspace.go",
         "formula.go",
         "formula_schema.go",
         "fs_adapters.go",
@@ -434,6 +435,7 @@ go_library(
         "//internal/notion",
         "//internal/query",
         "//internal/recipes",
+        "//internal/remedy",
         "//internal/remotecache",
         "//internal/routing",
         "//internal/storage",
@@ -580,6 +582,7 @@ go_test(
         "blocked_proxied_integration_test.go",
         "bootstrap_backend_guard_test.go",
         "bootstrap_embedded_test.go",
+        "bootstrap_endpoint_test.go",
         "bootstrap_guard_test.go",
         "bootstrap_noninteractive_test.go",
         "bootstrap_registered_backend_test.go",
@@ -720,10 +723,13 @@ go_test(
         "directory_flag_test.go",
         "discovery_refusal_pins_embedded_test.go",
         "discovery_refusal_pins_test.go",
+        "doctor_artifacts_embedded_test.go",
         "doctor_backend_guard_test.go",
         "doctor_check_gate_test.go",
+        "doctor_cleanup_entry_test.go",
         "doctor_context_test.go",
         "doctor_conventions_test.go",
+        "doctor_delete_guard_test.go",
         "doctor_embedded_test.go",
         "doctor_fix_gate_wiring_test.go",
         "doctor_fix_order_test.go",
@@ -752,6 +758,8 @@ go_test(
         "dolt_commit_proxied_server_test.go",
         "dolt_doctor_integration_test.go",
         "dolt_embedded_test.go",
+        "dolt_endpoint_resolution_test.go",
+        "dolt_handshake_fake_test.go",
         "dolt_help_auth_test.go",
         "dolt_lifecycle_proxied_server_test.go",
         "dolt_local_only_embedded_test.go",
@@ -811,6 +819,9 @@ go_test(
         "find_duplicates_test.go",
         "flags_test.go",
         "flatten_embedded_test.go",
+        "foreign_historical_sqlite_embedded_test.go",
+        "foreign_workspace_census_test.go",
+        "foreign_workspace_test.go",
         "format_json_alias_embedded_test.go",
         "formula_fixture_proxied_test.go",
         "formula_help_test.go",
@@ -902,6 +913,7 @@ go_test(
         "init_cancel_e2e_test.go",
         "init_commit_test.go",
         "init_embedded_test.go",
+        "init_endpoint_test.go",
         "init_explicit_beads_dir_embedded_test.go",
         "init_external_autostart_test.go",
         "init_external_message_test.go",
@@ -1009,6 +1021,7 @@ go_test(
         "migrate_hooks_apply_test.go",
         "migrate_hooks_test.go",
         "migrate_issues_max_rows_gate_test.go",
+        "migrate_personal_server_test.go",
         "migrate_personal_test.go",
         "migrate_repo_id_notice_test.go",
         "migrate_schema_identity_order_test.go",
@@ -1075,6 +1088,7 @@ go_test(
         "proxied_direct_only_refusal_frontdoor_test.go",
         "proxied_integration_helpers_test.go",
         "proxied_local_backend_exit_test.go",
+        "proxied_local_capability_matrix_test.go",
         "proxied_local_dolt_lifecycle_test.go",
         "proxied_local_helpers_test.go",
         "proxied_local_identity_lifecycle_linux_test.go",
@@ -1120,6 +1134,7 @@ go_test(
         "relate_proxied_integration_test.go",
         "relate_test.go",
         "relational_proxied_integration_test.go",
+        "remedy_printing_test.go",
         "remote_migrate_gate_test.go",
         "remote_sync_open_test.go",
         "removed_backend_heal_embedded_test.go",
@@ -1271,6 +1286,8 @@ go_test(
         "tips_example_test.go",
         "tips_test.go",
         "todo_embedded_test.go",
+        "topology_capability_matrix_direct_local_test.go",
+        "topology_capability_matrix_test.go",
         "tracker_frontdoor_proxy_test.go",
         "tracker_proxy_uow_conformance_integration_test.go",
         "types_builtin_test.go",
@@ -1367,6 +1384,7 @@ go_test(
     deps = [
         "//:beads",
         "//cmd/bd/doctor",
+        "//cmd/bd/setup",
         "//internal/ado",
         "//internal/beads",
         "//internal/ceiling",
@@ -1394,6 +1412,7 @@ go_test(
         "//internal/notion",
         "//internal/procid",
         "//internal/recipes",
+        "//internal/remedy",
         "//internal/routing",
         "//internal/storage",
         "//internal/storage/backends",
@@ -1422,6 +1441,7 @@ go_test(
         "//internal/testutil",
         "//internal/testutil/bazeltest",
         "//internal/testutil/credentialcmd",
+        "//internal/testutil/legacyworkspace",
         "//internal/timeparsing",
         "//internal/tracker",
         "//internal/types",
@@ -1662,11 +1682,21 @@ sh_test(
 # this configuration's (race) bd_test, with the non-race bd_for_tests as the
 # bd under test; BEADS_TEST_SKIP=dolt as in the job (no shared test server:
 # every test supervises its own; BEADS_TEST_DOLT_SERVER/REQUIRE are the
-# dolt-server lanes' convention and start nothing here). Unsharded: Go's
-# sharding counts every test in the binary, not the -test.run matches, so
-# most shards would run none. scripts/managed_local_lane_test.go fails if a
-# test the job pinned is no longer compiled into a linux cgo build. It repeats
-# bd_test's `env`.
+# dolt-server lanes' convention and start nothing here). It repeats bd_test's
+# `env`.
+#
+# Shards: managed_local_shards.txt is the target's whole selection
+# (go_test_offline.sh --shard-manifest): Go's own sharding deals out every
+# test in bd_test, not the TestManagedLocalProxied* ones, so most of its
+# shards would run none. Unsharded, the 21 tests took 140-250s in CI, the
+# dolt-race lane's last action; 3 shards of ~63s measured each leave
+# uow_dolt_test's slowest shard (~130-160s) the lane's tail. They put
+# --config=dolt-race at 64 test actions, exactly its --jobs=64, so the union
+# has no headroom: a 4th shard, or any new dolt-server or dolt-server-proxied
+# test action, needs a --jobs or shard-count change first
+# (scripts/bazel_dolt_race_test.go). scripts/managed_local_lane_test.go fails
+# unless the manifest lists exactly the TestManagedLocalProxied* tests a
+# linux cgo build of bd_test compiles, on shard_count shards.
 #
 # Tags:
 #   dolt-server-proxied: the proxied-server tier; starts dolt sql-servers;
@@ -1681,8 +1711,8 @@ sh_test(
     timeout = "eternal",
     srcs = ["//tools/bazel:go_test_offline.sh"],
     args = [
+        "--shard-manifest=$(rootpath :managed_local_shards.txt)",
         "$(rootpath :bd_test)",
-        "-test.run=^TestManagedLocalProxied",
         "-test.timeout=15m",
     ],
     data = [
@@ -1690,6 +1720,7 @@ sh_test(
         ":bd_test",
         ":compact_gc_fixture",
         ":go_srcs",
+        ":managed_local_shards.txt",
         ":preflight_go_fixture",
         "@go_sdk//:bin/gofmt",
     ],
@@ -1703,6 +1734,7 @@ sh_test(
         "BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1",
         "BEADS_TEST_SKIP": "dolt",
     },
+    shard_count = 3,
     tags = ["dolt-server-proxied"],
 )
 

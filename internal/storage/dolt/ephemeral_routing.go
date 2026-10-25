@@ -251,6 +251,12 @@ func (s *DoltStore) demoteToWispInTx(ctx context.Context, tx *sql.Tx, id string,
 	if err := insertIssueTxIntoTable(ctx, tx, "wisps", issue); err != nil {
 		return fmt.Errorf("failed to insert issue into wisps: %w", err)
 	}
+	// Carry the row's versioned-history participation onto the wisps row
+	// while the issues row still exists, so a move back out restores it
+	// rather than starting history for a legacy row (R2.3).
+	if err := issueops.CarryParticipationToWispInTx(ctx, tx, id); err != nil {
+		return err
+	}
 
 	if _, err := tx.ExecContext(ctx, `
 		INSERT IGNORE INTO wisp_labels (issue_id, label)
@@ -381,7 +387,7 @@ func (s *DoltStore) doltAddAndCommitInTx(ctx context.Context, tx *sql.Tx, tables
 	if issueops.VersionCommitDeferred(ctx) {
 		return nil
 	}
-	for _, table := range s.withVersionedHistoryTables(tables) {
+	for _, table := range s.withVersionedHistoryTables(ctx, tx, tables) {
 		if err := schema.DrainCall(ctx, tx, "CALL DOLT_ADD(?)", table); err != nil {
 			return fmt.Errorf("dolt add %s: %w", table, err)
 		}

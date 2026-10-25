@@ -136,6 +136,40 @@ func TestResolveServerModeUOWTopology_FallsBackToTCPWhenTheSocketIsDead(t *testi
 	assert.Equal(t, "127.0.0.1", topology.external.Host)
 }
 
+// An IPv6 host may be configured bracketed ("[::1]") as well as bare, in
+// metadata.json or BEADS_DOLT_SERVER_HOST, and the CLI store dials both. Serve
+// shares this resolution, so it must hand its proxy the bare host:
+// ExternalDoltServer joins it with net.JoinHostPort, which turned a bracketed
+// host into "[[::1]]:P" and left serve unable to reach a server the CLI used.
+func TestResolveServerModeUOWTopology_UnbracketsAnIPv6Host(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		metadata string
+		env      string
+	}{
+		{name: "metadata bracketed", metadata: "[::1]"},
+		{name: "metadata bare", metadata: "::1"},
+		{name: "env bracketed", metadata: "127.0.0.1", env: "[::1]"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			beadsDir := serverModeBeadsDir(t, &configfile.Config{
+				DoltServerHost: tc.metadata,
+				DoltServerPort: 3521,
+				DoltDatabase:   "beads_serve",
+			})
+			if tc.env != "" {
+				t.Setenv("BEADS_DOLT_SERVER_HOST", tc.env)
+			}
+
+			topology, err := resolveServerModeUOWTopology(context.Background(), beadsDir)
+			require.NoError(t, err)
+			assert.Empty(t, topology.external.Socket)
+			assert.Equal(t, "::1", topology.external.Host)
+			assert.Equal(t, 3521, topology.external.Port)
+		})
+	}
+}
+
 // Socket selection belongs to the Dolt transport policy. The UOW topology
 // must preserve the policy's answer, even when that answer is a socket that
 // cannot be probed by this test.

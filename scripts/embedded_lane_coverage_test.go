@@ -33,7 +33,10 @@ func TestEmbeddedGatedTestsRunInTheEmbeddedLane(t *testing.T) {
 		t.Fatalf("found only %d cmd/bd tests gated on %s; did the gate helpers change shape?", len(gated), embeddedDoltEnv)
 	}
 
-	listed := laneListedTests(t, root, ".github/scripts/embedded-test-shard.sh", bazelEmbeddedCmdShardCount(t))
+	listed, err := laneListedTests(root, ".github/scripts/embedded-test-shard.sh", bazelEmbeddedCmdShardCount(t))
+	if err != nil {
+		t.Fatal(err)
+	}
 	var missing []string
 	for _, name := range gated {
 		if !listed[name] {
@@ -41,7 +44,7 @@ func TestEmbeddedGatedTestsRunInTheEmbeddedLane(t *testing.T) {
 		}
 	}
 	if len(missing) > 0 {
-		t.Errorf("%d cmd/bd test(s) skip unless %s=1 but .github/scripts/embedded-test-shard.sh never selects them, so no CI lane runs them; rename them into the TestEmbedded* prefix and place them with scripts/ci/gen_embedded_cmd_shard_manifest.py --write:\n  %s",
+		t.Errorf("%d cmd/bd test(s) skip unless %s=1 but .github/scripts/embedded-test-shard.sh never selects them, so no CI lane runs them; rename them into the TestEmbedded* prefix (for a test gated in only some of its subtests, move those subtests into a TestEmbedded* test of their own instead, so the rest keep running in the other lanes) and place them with scripts/ci/gen_embedded_cmd_shard_manifest.py --write:\n  %s",
 			len(missing), embeddedDoltEnv, strings.Join(missing, "\n  "))
 	}
 }

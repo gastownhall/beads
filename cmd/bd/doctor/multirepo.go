@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -42,11 +43,17 @@ func CheckMultiRepoTypes(repoPath string) DoctorCheck {
 
 	// Discover types from each child repo
 	for _, repoPathStr := range multiRepo.Additional {
-		childTypes := discoverChildTypes(repoPathStr)
+		childTypes, refused := discoverChildTypes(repoPathStr)
 		if len(childTypes) > 0 {
 			details = append(details, fmt.Sprintf("  %s: %s", repoPathStr, strings.Join(childTypes, ", ")))
 		} else {
 			details = append(details, fmt.Sprintf("  %s: (no custom types)", repoPathStr))
+		}
+		if refused != nil {
+			// Types that repo's database declares are missing from the line
+			// above, and from the known types the unknown-type warning below
+			// checks against, so say why.
+			details = append(details, fmt.Sprintf("    database not read, so only config.yaml types are listed: %v", refused))
 		}
 	}
 
@@ -77,8 +84,12 @@ func CheckMultiRepoTypes(repoPath string) DoctorCheck {
 }
 
 // discoverChildTypes reads custom types from a child repo's config or database.
-// Returns nil if no custom types are found (not an error - child may not have any).
-func discoverChildTypes(repoPath string) []string {
+// Returns nil types if no custom types are found (not an error - child may not
+// have any). refused is set when bd's admission refuses the child's workspace
+// from its own contents (a format this build cannot open, a historical SQLite
+// workspace; configfile.LoadDiscoveredForOpen): its database was not read, so
+// the types come from its config.yaml alone.
+func discoverChildTypes(repoPath string) (childTypes []string, refused error) {
 	// Expand tilde
 	if strings.HasPrefix(repoPath, "~") {
 		if home, err := os.UserHomeDir(); err == nil {
@@ -91,32 +102,78 @@ func discoverChildTypes(repoPath string) []string {
 	// First try reading from database config table
 	types, err := readTypesFromDB(beadsDir)
 	if err == nil && len(types) > 0 {
-		return types
+		return types, nil
+	}
+	var formatErr *configfile.UnsupportedWorkspaceFormatError
+	var legacyErr *configfile.LegacyWorkspaceError
+	if errors.As(err, &formatErr) || errors.As(err, &legacyErr) {
+		refused = err
 	}
 
 	// Fall back to reading from config.yaml
 	types, err = readTypesFromYAML(beadsDir)
 	if err == nil {
-		return types
+		return types, refused
 	}
 
 	// No custom types found
-	return nil
+	return nil, refused
 }
 
-// readTypesFromDB reads types.custom from the database config table
+// AdmitAdditionalRepo, when set, refuses an additional repository's .beads
+// that bd's foreign-workspace admission refuses, before readTypesFromDB opens
+// its database (that admission admits some legacy Dolt layouts bd run inside
+// the repository refuses; see admitForeignWorkspace):
+// the open would otherwise start a Dolt server in a legacy Dolt workspace
+// (ApplyCLIAutoStart) or create one beside its root. bd sets it to its own
+// foreign-workspace admission (admitForeignWorkspace in package main), which
+// classifies the legacy Dolt layouts this package cannot; a refusal it
+// returns as a *configfile.LegacyWorkspaceError is reported beside the
+// repository's types, as the discovery refusals are. Unset, only those
+// discovery refusals apply.
+var AdmitAdditionalRepo func(beadsDir string) error
+
+// readTypesFromDB reads types.custom from the database config table of an
+// additional repository's workspace.
+//
+// Command admission checked only the workspace doctor runs in, so beadsDir's
+// metadata is read here as discovery reads it, without migrating a legacy
+// config.json, and a workspace admission would refuse from its own contents
+// (a format this build cannot open, a historical SQLite workspace) is refused
+// before anything else touches it, with admission's text
+// (configfile.LoadDiscoveredForOpen). configfile.Load (getDatabasePath included)
+// would migrate that config.json into metadata.json, dropping graph_* keys it
+// does not know, before the store constructor could refuse a graph workspace
+// it marks; an ordinary legacy workspace is migrated only by that
+// constructor, when there is a database to open. Metadata naming a backend
+// this build does not recognize is refused before the open too, with doctor's
+// own message; the constructor would also refuse it before its Load.
 func readTypesFromDB(beadsDir string) ([]string, error) {
-	cfg, err := configfile.Load(beadsDir)
-	if err != nil || cfg == nil {
+	cfg, err := configfile.LoadDiscoveredForOpen(beadsDir)
+	if err != nil {
+		return nil, err
+	}
+	if cfg == nil {
+		// No metadata, or metadata that does not load: either way there is
+		// no database to read here, and the caller falls back to config.yaml.
 		return nil, fmt.Errorf("no config")
 	}
 	if cfg.GetBackend() != configfile.BackendDolt {
 		return nil, fmt.Errorf("not dolt backend")
 	}
+	// GetBackend reads a backend this build does not recognize as Dolt.
+	if !configfile.IsSupportedBackend(cfg.Backend) {
+		return nil, fmt.Errorf("unrecognized backend %q", cfg.Backend)
+	}
 
-	doltPath := getDatabasePath(beadsDir)
+	doltPath := cfg.DatabasePath(beadsDir)
 	if _, err := os.Stat(doltPath); os.IsNotExist(err) {
 		return nil, err
+	}
+	if AdmitAdditionalRepo != nil {
+		if err := AdmitAdditionalRepo(beadsDir); err != nil {
+			return nil, err
+		}
 	}
 
 	ctx := context.Background()
@@ -193,9 +250,10 @@ func findUnknownTypesInHydratedIssues(repoPath string, multiRepo *config.MultiRe
 		}
 	}
 
-	// Add child types
+	// Add child types. A refused child's config.yaml types are all there is
+	// to add; CheckMultiRepoTypes reports the refusal beside its types.
 	for _, repoPathStr := range multiRepo.Additional {
-		childTypes := discoverChildTypes(repoPathStr)
+		childTypes, _ := discoverChildTypes(repoPathStr)
 		for _, t := range childTypes {
 			knownTypes[t] = true
 		}

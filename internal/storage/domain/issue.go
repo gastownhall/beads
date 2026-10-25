@@ -129,6 +129,11 @@ type IssueSQLRepository interface {
 	// to ReclaimExpiredLeases.
 	RenewLease(ctx context.Context, request publicops.HeartbeatRequest) (publicops.HeartbeatResult, error)
 	WakeExpiredDefers(ctx context.Context) (issues, wisps int, err error)
+	// ParticipatingIssueIDs runs issueops.ParticipatingIssueIDsInTx on this
+	// repository's transaction: which of ids name an issues-table row whose
+	// participation_generation is set. It is the unit-of-work route's answer to
+	// storage.HistoryParticipation, which the two store backends implement.
+	ParticipatingIssueIDs(ctx context.Context, ids []string) (map[string]struct{}, error)
 }
 
 type CloseRowParams struct {
@@ -368,6 +373,9 @@ type IssueUseCase interface {
 	// does — never with uow.RunTxEphemeral.
 	RenewLease(ctx context.Context, request publicops.HeartbeatRequest) (publicops.HeartbeatResult, error)
 	WakeExpiredDefers(ctx context.Context) (issues, wisps int, err error)
+	// ParticipatingIssueIDs is IssueSQLRepository.ParticipatingIssueIDs: the
+	// pre-enable scan's participation read on the unit-of-work route.
+	ParticipatingIssueIDs(ctx context.Context, ids []string) (map[string]struct{}, error)
 
 	CreateIssue(ctx context.Context, params CreateIssueParams, actor string) (CreateIssueResult, error)
 	CreateIssues(ctx context.Context, params []CreateIssueParams, actor string) (CreateIssuesResult, error)
@@ -514,6 +522,12 @@ func (u *issueUseCaseImpl) GetMany(ctx context.Context, request publicops.GetMan
 
 func (u *issueUseCaseImpl) FindWispDependentsRecursive(ctx context.Context, ids []string) (map[string]bool, error) {
 	return u.issueRepo.FindWispDependentsRecursive(ctx, ids)
+}
+
+// ParticipatingIssueIDs passes straight through, FindWispDependentsRecursive's
+// shape: an empty request reads nothing, and there is no vocabulary to check.
+func (u *issueUseCaseImpl) ParticipatingIssueIDs(ctx context.Context, ids []string) (map[string]struct{}, error) {
+	return u.issueRepo.ParticipatingIssueIDs(ctx, ids)
 }
 
 func (u *issueUseCaseImpl) GetWispsByIDs(ctx context.Context, ids []string) ([]*types.Issue, error) {

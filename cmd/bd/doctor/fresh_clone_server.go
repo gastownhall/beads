@@ -9,6 +9,8 @@ import (
 
 	_ "github.com/go-sql-driver/mysql"
 
+	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
 
@@ -88,14 +90,14 @@ func freshCloneServerResult(dbExists bool, dbName, host string, port int, syncRe
 	}
 
 	var msg strings.Builder
-	fmt.Fprintf(&msg, "Fresh clone detected: database %q not found on server at %s:%d.", dbName, host, port)
+	fmt.Fprintf(&msg, "Fresh clone detected: database %q not found on server at %s.", dbName, doltutil.PrintedServerAddr(host, port))
 
 	fix := "bd bootstrap"
 	if syncRemote == "" {
 		msg.WriteString(" Run bd bootstrap first as the safe recovery entry point. It may recover existing state or initialize if no prior state can be found. If bootstrap cannot find the expected remote automatically, then set sync.remote in .beads/config.yaml and rerun bd bootstrap.")
 		fix = "bd bootstrap"
 	} else {
-		fmt.Fprintf(&msg, " sync.remote is configured (%s) — run bd bootstrap to recover from the remote, or use --dry-run to inspect the plan first.", syncRemote)
+		fmt.Fprintf(&msg, " sync.remote is configured (%s) — run bd bootstrap to recover from the remote, or use --dry-run to inspect the plan first.", remedy.PrintedValue(syncRemote))
 	}
 
 	return DoctorCheck{
@@ -118,14 +120,15 @@ func freshCloneServerResult(dbExists bool, dbName, host string, port int, syncRe
 // won't help when the server itself is unreachable).
 func freshCloneServerUnreachableResult(dbName, host string, port int, connErr error) DoctorCheck {
 	var msg strings.Builder
-	fmt.Fprintf(&msg, "Dolt server unreachable at %s:%d (database %q, server mode configured).", host, port, dbName)
+	fmt.Fprintf(&msg, "Dolt server unreachable at %s (database %q, server mode configured).", doltutil.PrintedServerAddr(host, port), dbName)
 	msg.WriteString(" The local database directory is not expected in server mode, so this is not a fresh clone — it's a connectivity or auth problem.")
 
 	var detail strings.Builder
 	detail.WriteString("dolt_mode=server is configured but the doctor check could not reach the server.\n")
 	detail.WriteString("  In server mode, beads stores data on the Dolt server, so no local .beads/dolt directory is expected.\n")
 	if connErr != nil {
-		fmt.Fprintf(&detail, "  Underlying error: %v\n", connErr)
+		// The connection error repeats the host.
+		fmt.Fprintf(&detail, "  Underlying error: %v\n", remedy.PrintedError(connErr))
 	}
 	detail.WriteString("  Common causes: server not running, wrong host/port, TLS misconfiguration, or invalid credentials.")
 
@@ -140,5 +143,23 @@ func freshCloneServerUnreachableResult(dbName, host string, port int, connErr er
 			"  3. Verify credentials in ~/.config/beads/credentials (or BEADS_DOLT_PASSWORD)\n" +
 			"  4. Try a CRUD command (e.g. 'bd ready') to confirm the server is usable\n" +
 			"  5. Re-run 'bd doctor' once connectivity is restored",
+	}
+}
+
+// freshCloneServerUnresolvedResult builds the DoctorCheck for a server-mode
+// workspace whose server has no address (no port resolved and no socket) and
+// that no bd command starts (doltserver.Endpoint.BDStartsServer). There is no
+// server to look for the database on, and every store open refuses until a
+// port resolves, bd bootstrap included, so the check gives the store's advice
+// (Endpoint.UnresolvedAdvice) rather than probe 127.0.0.1:0 and report a
+// connectivity problem.
+func freshCloneServerUnresolvedResult(dbName string, ep doltserver.Endpoint) DoctorCheck {
+	return DoctorCheck{
+		Name:   "Fresh Clone",
+		Status: StatusWarning,
+		Message: fmt.Sprintf("No Dolt server port resolved for host %s (database %q, server mode configured), so the database was not looked for.",
+			remedy.PrintedValue(ep.Host), dbName),
+		Detail: "bd bootstrap and every bd command that opens this workspace's store refuse until a port resolves.",
+		Fix:    ep.UnresolvedAdvice(),
 	}
 }
