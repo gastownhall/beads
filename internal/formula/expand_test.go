@@ -959,6 +959,69 @@ func TestApplyInlineExpansionsCrossExpansionDeps(t *testing.T) {
 			t.Errorf("work.second.Needs = %v, want [work.first]", workSecond.Needs)
 		}
 	})
+
+	t.Run("inline expand rewrites dependent needs to last expanded step", func(t *testing.T) {
+		steps := []*Step{
+			{ID: "setup", Title: "Setup"},
+			{ID: "work", Title: "Work", Needs: []string{"setup"}, Expand: "inline-exp"},
+			{ID: "verify", Title: "Verify", Needs: []string{"work"}},
+		}
+
+		result, err := ApplyInlineExpansions(steps, parser)
+		if err != nil {
+			t.Fatalf("ApplyInlineExpansions failed: %v", err)
+		}
+
+		if len(result) != 4 {
+			t.Fatalf("expected 4 steps, got %d", len(result))
+		}
+
+		// verify must need work.second, the last step of work's expansion -
+		// the same rewrite [[compose.expand]] performs (issue #7637).
+		verify := result[3]
+		if verify.ID != "verify" {
+			t.Fatalf("result[3].ID = %q, want verify", verify.ID)
+		}
+		if len(verify.Needs) != 1 || verify.Needs[0] != "work.second" {
+			t.Errorf("verify.Needs = %v, want [work.second]", verify.Needs)
+		}
+
+		// The propagate direction is unchanged: work.first still needs setup.
+		if got := result[1].Needs; len(got) != 1 || got[0] != "setup" {
+			t.Errorf("work.first.Needs = %v, want [setup]", got)
+		}
+
+		// The caller's input is not modified.
+		if got := steps[2].Needs; len(got) != 1 || got[0] != "work" {
+			t.Errorf("input verify.Needs = %v, want [work] (caller's slice must stay untouched)", got)
+		}
+
+		// Compose parity: the same steps through [[compose.expand]] give the
+		// same step IDs and the same Needs for every step.
+		composeResult, err := ApplyExpansions(
+			[]*Step{
+				{ID: "setup", Title: "Setup"},
+				{ID: "work", Title: "Work", Needs: []string{"setup"}},
+				{ID: "verify", Title: "Verify", Needs: []string{"work"}},
+			},
+			&ComposeRules{Expand: []*ExpandRule{{Target: "work", With: "inline-exp"}}},
+			parser,
+		)
+		if err != nil {
+			t.Fatalf("ApplyExpansions failed: %v", err)
+		}
+		if len(composeResult) != len(result) {
+			t.Fatalf("compose expansion gave %d steps, inline gave %d", len(composeResult), len(result))
+		}
+		for i := range result {
+			if result[i].ID != composeResult[i].ID {
+				t.Errorf("step %d: inline ID = %q, compose ID = %q", i, result[i].ID, composeResult[i].ID)
+			}
+			if fmt.Sprint(result[i].Needs) != fmt.Sprint(composeResult[i].Needs) {
+				t.Errorf("%s: inline Needs = %v, compose Needs = %v", result[i].ID, result[i].Needs, composeResult[i].Needs)
+			}
+		}
+	})
 }
 
 func TestFindDuplicateStepIDs(t *testing.T) {
@@ -1270,4 +1333,48 @@ func TestExpansionVarRefs(t *testing.T) {
 			t.Errorf("expansion without a template: ExpansionVarRefs() = %v, want nil", got)
 		}
 	})
+}
+
+// TestApplyInlineExpansionsRewritesDependentNeeds pins issue #7637: another
+// step's needs on an inline-expanded step must point at the expansion's last
+// step, as the [[compose.expand]] path does.
+func TestApplyInlineExpansionsRewritesDependentNeeds(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	expansion := `{
+		"formula": "round",
+		"type": "expansion",
+		"version": 1,
+		"template": [
+			{"id": "implement", "title": "Implement"},
+			{"id": "triage", "title": "Triage", "needs": ["implement"]}
+		]
+	}`
+	if err := os.WriteFile(filepath.Join(tmpDir, "round.formula.json"), []byte(expansion), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	steps := []*Step{
+		{ID: "brief", Title: "Brief"},
+		{ID: "round", Title: "Round", Needs: []string{"brief"}, Expand: "round"},
+		{ID: "land", Title: "Land", Needs: []string{"round"}},
+	}
+
+	result, err := ApplyInlineExpansions(steps, NewParser(tmpDir))
+	if err != nil {
+		t.Fatalf("ApplyInlineExpansions failed: %v", err)
+	}
+
+	var land *Step
+	for _, s := range result {
+		if s.ID == "land" {
+			land = s
+		}
+	}
+	if land == nil {
+		t.Fatalf("land step missing from result")
+	}
+	if len(land.Needs) != 1 || land.Needs[0] != "triage" {
+		t.Errorf("land.Needs = %v, want [triage] (the expansion's last step)", land.Needs)
+	}
 }
