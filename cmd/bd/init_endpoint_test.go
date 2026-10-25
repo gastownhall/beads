@@ -100,7 +100,7 @@ func TestInitRemoteCloneGoesWhereTheStoreOpens(t *testing.T) {
 			var cloned []string
 			probes := 0
 			remoteCloneViaServer = func(_ context.Context, _, _ string, ep bootstrapServerProbeConfig) error {
-				cloned = append(cloned, ep.location())
+				cloned = append(cloned, ep.serverLocation())
 				return nil
 			}
 			checkBootstrapServerDB = func(bootstrapServerProbeConfig) bootstrapServerDBCheck {

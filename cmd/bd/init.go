@@ -1615,8 +1615,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				schema.SetLocalMigrateConsent(true)
 				if !quiet {
 					if held != nil {
-						fmt.Printf("  %s Database %q already exists on the Dolt server at %s; using it rather than cloning %s\n",
-							ui.RenderPass("✓"), dbName, remedy.PrintedValue(held.location), remedy.PrintedValue(syncURL))
+						fmt.Print(initCloneTargetHeldLine(dbName, held, syncURL))
 					} else {
 						fmt.Printf("  %s Bootstrapped from remote: %s\n", ui.RenderPass("✓"), remedy.PrintedValue(syncURL))
 					}
@@ -3750,6 +3749,13 @@ func (e *initCloneTargetHeldError) Error() string {
 	return "the database already exists on the Dolt server at " + e.location
 }
 
+// initCloneTargetHeldLine is bd init's line for a database it found already
+// on the server it would have cloned syncURL into (held), which it uses.
+func initCloneTargetHeldLine(dbName string, held *initCloneTargetHeldError, syncURL string) string {
+	return fmt.Sprintf("  %s Database %q already exists on the Dolt server at %s; using it rather than cloning %s\n",
+		ui.RenderPass("✓"), dbName, remedy.PrintedValue(held.location), remedy.PrintedValue(syncURL))
+}
+
 // initCloneTargetHoldsDatabase reports whether the server bd init clones
 // into through a server (initServerCloneEndpoint) is reachable and already
 // holds cfg's database, and names that server. DOLT_CLONE fails on an
@@ -3760,7 +3766,7 @@ func initCloneTargetHoldsDatabase(beadsDir string, cfg *configfile.Config) (stri
 		return "", false
 	}
 	result := checkBootstrapServerDB(ep)
-	return ep.location(), result.Reachable && result.Exists && result.Err == nil
+	return ep.serverLocation(), result.Reachable && result.Exists && result.Err == nil
 }
 
 // serverConnEnvMutation is one pending change to the process environment.

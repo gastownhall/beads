@@ -43,7 +43,7 @@ func TestBootstrapNeverDialsAnUnresolvedServerPort(t *testing.T) {
 		wantRefuse string // the advice every step refuses with
 	}{
 		{name: "bd starts its own server", wantClone: true},
-		{name: "auto-start off", autoStart: "0", wantRefuse: "dolt.auto-start is off"},
+		{name: "auto-start off", autoStart: "0", wantRefuse: "dolt.auto-start is off, so bd does not start this workspace's Dolt server."},
 		{name: "remote host", host: "db.example.com", wantRefuse: "bd does not manage the Dolt server at db.example.com; pin its port"},
 		// The store turns auto-start off for a gateway, so no bd command
 		// serves a clone into .beads/dolt (the store refuses as externally
@@ -166,6 +166,27 @@ func TestBootstrapNeverDialsAnUnresolvedServerPort(t *testing.T) {
 			checkRefusal("reconcile", reconcileErr)
 			checkRefusal("probe", probe.Err)
 			checkRefusal("clone", cloneErr)
+			// The refusal of an already-initialized workspace quotes the
+			// probe's advice as bd composed it, line breaks and all, and its
+			// one-line summary as one readable line: neither spells it as one
+			// escaped value (\n, \x2c).
+			if probe.Err != nil {
+				refusal, refused := refuseServerModeInitPlan(BootstrapPlan{Database: "unresolved_db"}, cfg, true, probe)
+				if !refused {
+					t.Fatalf("refuseServerModeInitPlan did not refuse for probe %+v", probe)
+				}
+				if !strings.Contains(refusal.refusalDetail, probe.Err.Error()) || !strings.Contains(refusal.refusalDetail, tc.wantRefuse) {
+					t.Errorf("refusal detail = %q, want the probe's advice %q verbatim", refusal.refusalDetail, probe.Err.Error())
+				}
+				if oneLine := strings.ReplaceAll(probe.Err.Error(), "\n", " "); !strings.Contains(refusal.Reason, oneLine) || strings.Contains(refusal.Reason, "\n") {
+					t.Errorf("refusal summary = %q, want the probe's advice on one readable line, %q", refusal.Reason, oneLine)
+				}
+				for _, text := range []string{refusal.refusalDetail, refusal.Reason} {
+					if strings.Contains(text, `\x2c`) || strings.Contains(text, `\n`) {
+						t.Errorf("refusal %q spells the advice as an escaped value", text)
+					}
+				}
+			}
 			if !errors.Is(cloneErr, dolt.ErrUnresolvedServerPort) {
 				t.Errorf("clone error %v does not wrap ErrUnresolvedServerPort", cloneErr)
 			}

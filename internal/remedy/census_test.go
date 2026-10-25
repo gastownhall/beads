@@ -22,9 +22,12 @@ import (
 // TestRemedyPrintersNameValuesEscaped, TestRemedyPrintersKeepBdsOwnLines,
 // TestRemedyValuesEscapeLineBreaks, TestErrorPrintersSpellMessages,
 // TestPasteReadyCommandsQuoteValues and the TestEmbeddedRemedyPrinting_*
-// tests; TestDoctorChecksNameConfiguredValuesEscaped (cmd/bd/doctor); TestNewServerModeNamesConfiguredEndpointEscaped and
+// tests; TestDoctorChecksNameConfiguredValuesEscaped (cmd/bd/doctor);
+// TestInspectServerMetadataDatabasesNamesTheDataDirectoryEscaped
+// (cmd/bd/doctor/fix); TestNewServerModeNamesConfiguredEndpointEscaped and
 // TestNewServerModeKeepsBdsOwnLines (internal/storage/dolt);
-// TestEnsureRunningNamesExternalHostEscaped and
+// TestEnsureRunningNamesExternalHostEscaped,
+// TestUnresolvedErrorNamesTheHostEscaped and
 // TestCorruptJournalRecoveryHintQuotesPaths (internal/doltserver);
 // TestCheckSecretGitTracked_QuotesThePathInTheRemedy (internal/config);
 // TestWorkspaceMessagesNameBeadsDirEscaped and
@@ -75,6 +78,7 @@ import (
 var (
 	censusSourceCalls = map[string]bool{
 		"ServerAddr":                  true,
+		"serverLocation":              true, // cmd/bd's name for the server a bootstrap or init probe dials
 		"GetDoltServerHost":           true,
 		"GetDoltServerSocket":         true,
 		"GetDoltServerUser":           true,

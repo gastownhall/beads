@@ -61,16 +61,16 @@ func (ep bootstrapServerProbeConfig) dsn() string {
 	}.String()
 }
 
-// location names the server ep dials for a message
+// serverLocation names the server ep dials for a message
 // (doltserver.Endpoint.Location): host:port, else its socket when it has no
 // port, never host:0.
-func (ep bootstrapServerProbeConfig) location() string {
+func (ep bootstrapServerProbeConfig) serverLocation() string {
 	return doltserver.Endpoint{Host: ep.host, Port: ep.port, Socket: ep.socket}.Location()
 }
 
-// location names the server the probe dialed, as
-// bootstrapServerProbeConfig.location does.
-func (p serverDBProbe) location() string {
+// serverLocation names the server the probe dialed, as
+// bootstrapServerProbeConfig.serverLocation does.
+func (p serverDBProbe) serverLocation() string {
 	return doltserver.Endpoint{Host: p.Host, Port: p.Port, Socket: p.Socket}.Location()
 }
 
@@ -709,8 +709,8 @@ func refuseServerModeInitPlan(plan BootstrapPlan, cfg *configfile.Config, isServ
 		return BootstrapPlan{}, false
 	}
 	plan.Action = "refuse"
-	plan.Reason = bootstrapMissingServerDBSummary(plan.Database, probe.location(), probe.Err)
-	plan.refusalDetail = bootstrapMissingServerDBRefusal(plan.Database, probe.location(), probe.Err).Error()
+	plan.Reason = bootstrapMissingServerDBSummary(plan.Database, probe.serverLocation(), probe.Err)
+	plan.refusalDetail = bootstrapMissingServerDBRefusal(plan.Database, probe.serverLocation(), probe.Err).Error()
 	return plan, true
 }
 
@@ -789,7 +789,7 @@ func existingBootstrapDBPlan(beadsDir string, cfg *configfile.Config, isServer, 
 		if result.Exists {
 			plan.HasExisting = true
 			plan.Action = "none"
-			plan.Reason = fmt.Sprintf("Database %s already exists on server at %s", remedy.PrintedValue(cfg.GetDoltDatabase()), remedy.PrintedValue(ep.location()))
+			plan.Reason = fmt.Sprintf("Database %s already exists on server at %s", remedy.PrintedValue(cfg.GetDoltDatabase()), remedy.PrintedValue(ep.serverLocation()))
 			return plan, probe, true
 		}
 		// An unverifiable probe means UNKNOWN, never "exists". Answering
@@ -833,6 +833,11 @@ func existingBootstrapDBPlan(beadsDir string, cfg *configfile.Config, isServer, 
 	return plan, serverDBProbe{}, true
 }
 
+// errNoOwnedServerDatabase is wrapped by unresolvedBootstrapDBPlan's probe
+// error when the data directory of the server bd would start holds no
+// database.
+var errNoOwnedServerDatabase = errors.New("no Dolt server is running for this workspace, and its data directory holds no database")
+
 // unresolvedBootstrapDBPlan is existingBootstrapDBPlan's verdict for a
 // server-mode workspace whose endpoint resolves no port and no socket
 // (bootstrapUnresolvedServer). When bd starts the workspace's own server on
@@ -856,7 +861,7 @@ func unresolvedBootstrapDBPlan(plan BootstrapPlan, beadsDir string, cfg *configf
 		plan.Reason = "Database already exists at " + remedy.PrintedValue(dbDir)
 		return plan, probe, true
 	}
-	probe.Err = fmt.Errorf("no Dolt server is running for this workspace, and its data directory holds no database at %s", remedy.PrintedValue(dbDir))
+	probe.Err = fmt.Errorf("%w at %s", errNoOwnedServerDatabase, remedy.PrintedValue(dbDir))
 	return BootstrapPlan{}, probe, false
 }
 
@@ -1149,13 +1154,13 @@ func refuseServerModeInitForExistingProject(plan BootstrapPlan, cfg *configfile.
 		if probe.Exists {
 			return nil
 		}
-		return bootstrapMissingServerDBRefusal(cfg.GetDoltDatabase(), probe.location(), probe.Err)
+		return bootstrapMissingServerDBRefusal(cfg.GetDoltDatabase(), probe.serverLocation(), probe.Err)
 	}
 	result := probeBootstrapServerDB(ep, false)
 	if result.Exists {
 		return nil
 	}
-	return bootstrapMissingServerDBRefusal(cfg.GetDoltDatabase(), ep.location(), result.Err)
+	return bootstrapMissingServerDBRefusal(cfg.GetDoltDatabase(), ep.serverLocation(), result.Err)
 }
 
 // bootstrapMissingServerDBSummary is the single-line, unstyled form of
@@ -1163,9 +1168,23 @@ func refuseServerModeInitForExistingProject(plan BootstrapPlan, cfg *configfile.
 // consumers get the explanation without ANSI escapes.
 func bootstrapMissingServerDBSummary(dbName, location string, probeErr error) string {
 	if probeErr != nil {
-		return fmt.Sprintf("Could not verify database %q on Dolt server at %s (%v); workspace already initialized (project_id set) — refusing to create an empty database", dbName, remedy.PrintedValue(location), remedy.PrintedError(probeErr))
+		return fmt.Sprintf("Could not verify database %q on Dolt server at %s (%s); workspace already initialized (project_id set) — refusing to create an empty database", dbName, remedy.PrintedValue(location), strings.ReplaceAll(printedProbeError(probeErr).Error(), "\n", " "))
 	}
 	return fmt.Sprintf("Database %q not found on server at %s; workspace already initialized (project_id set) — refusing to create an empty database", dbName, remedy.PrintedValue(location))
+}
+
+// printedProbeError is a serverDBProbe's error as the refusal names it. A
+// leaf error from the dial or the driver (checkBootstrapServerDB) can repeat
+// a clone-supplied host on its one line, so it is spelled by
+// remedy.PrintedError. An error bd composed with its values already spelled
+// (Endpoint.UnresolvedError, whose advice spans lines, and
+// errNoOwnedServerDatabase) keeps its line breaks: it is spelled by
+// remedy.PrintedText instead.
+func printedProbeError(err error) error {
+	if errors.Is(err, doltserver.ErrUnresolvedPort) || errors.Is(err, errNoOwnedServerDatabase) {
+		return remedy.PrintedTextError(err)
+	}
+	return remedy.PrintedError(err)
 }
 
 // bootstrapMissingServerDBRefusal builds the refusal error shown when bd
@@ -1176,7 +1195,7 @@ func bootstrapMissingServerDBSummary(dbName, location string, probeErr error) st
 // The equivalent `bd init` refusal is initGuardMissingServerDBMessage, from
 // PR #5791. This wording is kept deliberately close to it so the two can be
 // folded into one message. location names the server
-// (bootstrapServerProbeConfig.location): host:port, or the socket of a
+// (bootstrapServerProbeConfig.serverLocation): host:port, or the socket of a
 // socket-only workspace, never host:0.
 //
 // It is an error's text, printed through bd's error printer, which spells any
@@ -1185,7 +1204,7 @@ func bootstrapMissingServerDBSummary(dbName, location string, probeErr error) st
 func bootstrapMissingServerDBRefusal(dbName, location string, probeErr error) error {
 	var b strings.Builder
 	if probeErr != nil {
-		fmt.Fprintf(&b, "\n⚠ Could not verify database %q on Dolt server at %s: %v\n", dbName, remedy.PrintedValue(location), remedy.PrintedError(probeErr))
+		fmt.Fprintf(&b, "\n⚠ Could not verify database %q on Dolt server at %s: %v\n", dbName, remedy.PrintedValue(location), printedProbeError(probeErr))
 	} else {
 		fmt.Fprintf(&b, "\n⚠ Database %q not found on server at %s.\n", dbName, remedy.PrintedValue(location))
 	}
@@ -1628,14 +1647,14 @@ func cloneViaServer(ctx context.Context, remoteURL, dbName string, ep bootstrapS
 
 	if err := db.PingContext(cloneCtx); err != nil {
 		return fmt.Errorf("dolt server unreachable at %s (is dolt sql-server running?): %w",
-			remedy.PrintedValue(ep.location()), remedy.PrintedError(err))
+			remedy.PrintedValue(ep.serverLocation()), remedy.PrintedError(err))
 	}
 
 	if err := versioncontrolops.DoltClone(cloneCtx, db, remoteURL, dbName, os.Getenv("DOLT_REMOTE_USER")); err != nil {
 		return fmt.Errorf("clone from remote via server: %w", err)
 	}
 	fmt.Fprintf(os.Stderr, "Synced database from %s (via server at %s)\n",
-		remedy.PrintedValue(remoteURL), remedy.PrintedValue(ep.location()))
+		remedy.PrintedValue(remoteURL), remedy.PrintedValue(ep.serverLocation()))
 	return nil
 }
 

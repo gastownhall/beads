@@ -289,7 +289,7 @@ func TestRemedyPrintersNameValuesEscaped(t *testing.T) {
 		}},
 		{"bootstrap missing server database refusal", func(t *testing.T) string {
 			dialErr := hostileDialError(t)
-			location := bootstrapServerProbeConfig{host: hostileName, port: 3307}.location()
+			location := bootstrapServerProbeConfig{host: hostileName, port: 3307}.serverLocation()
 			return bootstrapMissingServerDBRefusal("beads", location, nil).Error() +
 				bootstrapMissingServerDBRefusal("beads", location, dialErr).Error() +
 				bootstrapMissingServerDBSummary("beads", location, dialErr)
@@ -408,6 +408,35 @@ func TestRemedyValuesEscapeLineBreaks(t *testing.T) {
 	}{
 		{"bd init half-identified substrate warning", func(t *testing.T) string {
 			return captureStderr(t, func() { warnHalfIdentifiedSubstrate(issueops.VerifyIdentityResult{Prefix: hostileLine}) })
+		}},
+		// The servers bootstrap and init name: a host with no port, a
+		// socket, and a host:port, where serverLocation's census entry does
+		// not reach (the probe's stored location, a held database's server).
+		{"bootstrap refusal for a server with no port or a socket", func(t *testing.T) string {
+			var b strings.Builder
+			for _, location := range []string{
+				serverDBProbe{Host: hostileLine}.serverLocation(),
+				bootstrapServerProbeConfig{host: "127.0.0.1", socket: "/tmp/" + hostileLine + ".sock"}.serverLocation(),
+			} {
+				b.WriteString(bootstrapMissingServerDBRefusal("beads", location, nil).Error())
+				b.WriteString(bootstrapMissingServerDBSummary("beads", location, nil))
+			}
+			return b.String()
+		}},
+		{"bootstrap clone into an occupied data directory", func(t *testing.T) string {
+			doltDir := filepath.Join(t.TempDir(), "dolt")
+			if err := os.MkdirAll(filepath.Join(doltDir, "beads", ".dolt"), 0o750); err != nil {
+				t.Fatal(err)
+			}
+			err := cloneIntoOwnedDataDir(context.Background(), doltDir, "https://example.com/r"+hostileLine+".git", "beads")
+			if err == nil {
+				t.Fatal("cloneIntoOwnedDataDir cloned into a data directory that holds a database")
+			}
+			return err.Error()
+		}},
+		{"bd init database held by the clone target", func(t *testing.T) string {
+			held := &initCloneTargetHeldError{location: bootstrapServerProbeConfig{host: hostileLine, port: 3307}.serverLocation()}
+			return initCloneTargetHeldLine("beads", held, "https://example.com/r.git")
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
