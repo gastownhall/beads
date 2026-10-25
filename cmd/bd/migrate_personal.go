@@ -207,7 +207,7 @@ func refuseUninitializablePlanningRepo(planningBeadsDir string) error {
 		err := refuseExistingCreateTarget(planningBeadsDir)
 		var existing *existingTargetRefusal
 		if errors.As(err, &existing) {
-			return refusePlanningRepo("planning repo %s: %s", remedy.PrintedValue(filepath.Dir(planningBeadsDir)), existing.msg)
+			return refusePlanningRepo("planning repo %s: %s", remedy.PrintedValue(filepath.Dir(planningBeadsDir)), existing.planningMsg)
 		}
 		return err
 	}

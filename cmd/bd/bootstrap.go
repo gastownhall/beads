@@ -1815,6 +1815,13 @@ func outranksMetadataPort(dial *doltserver.Config) bool {
 // When nothing names one it is 0, never 3307: the store opens no such port
 // either, and refuses the unresolved port instead (initServerCloneEndpoint).
 func initServerClonePort(beadsDir string, cfg *configfile.Config) int {
+	port, _ := initServerClonePortAndSource(beadsDir, cfg)
+	return port
+}
+
+// initServerClonePortAndSource is initServerClonePort with the source the
+// store records for that port.
+func initServerClonePortAndSource(beadsDir string, cfg *configfile.Config) (int, doltserver.PortSource) {
 	host := configfile.DefaultDoltServerHost
 	if cfg != nil {
 		host = cfg.GetDoltServerHost()
@@ -1826,7 +1833,7 @@ func initServerClonePort(beadsDir string, cfg *configfile.Config) int {
 		storeCfg.ServerPort, storeCfg.ServerPortSource, storeCfg.ServerPortSharedServer, storeCfg.ServerPortResolved = initStoreServerPort(beadsDir, host)
 	}
 	dolt.ResolveServerPort(storeCfg)
-	return storeCfg.ServerPort
+	return storeCfg.ServerPort, storeCfg.ServerPortSource
 }
 
 // initServerCloneEndpoint is the endpoint bd init clones into when it clones

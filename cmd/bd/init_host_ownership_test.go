@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -364,6 +365,102 @@ func TestInitStoreServerPortReadsTheNewWorkspace(t *testing.T) {
 	}
 }
 
+// TestInitStoreServerPortAtBDHostIgnoresTheEnclosingPort pins the port bd
+// init's store dials at 127.0.0.1, bd's own host, for a workspace nested in
+// one whose config.yaml names dolt.port, the port of that workspace's server.
+// Init loads that file before its own .beads exists, and on main the store
+// filled the port nothing else named from it (dolt.ResolveServerPort), so the
+// new database was created on the enclosing workspace's server, and its port
+// pinned in the new workspace's port file. Now that port is resolved from the
+// new workspace's own configuration: with none named it is 0, which init
+// starts a server of the workspace's own for (initStartOwnServer), and its
+// --external clone refuses the unresolved port. A port the new workspace
+// names, or that the caller names (BEADS_DOLT_SERVER_PORT, which
+// --server-port sets, or the legacy BEADS_DOLT_PORT), is dialed as on main,
+// and so is a dolt.port that is the new workspace's own: a re-init, or one
+// in the user-level config.yaml.
+func TestInitStoreServerPortAtBDHostIgnoresTheEnclosingPort(t *testing.T) {
+	const enclosingPort, ownPort, userPort, envPort = 13999, 14555, 14666, 42003
+	for _, tc := range []struct {
+		name         string
+		nested       bool              // the workspace is nested in one whose config.yaml names enclosingPort
+		ownConfig    string            // the new workspace's own config.yaml, "" for none
+		userConfig   string            // the user-level config.yaml, "" for none
+		env          map[string]string // the caller's environment
+		want         int
+		wantResolved bool // the store fills in no port
+	}{
+		{name: "nested, no port of its own", nested: true, want: 0, wantResolved: true},
+		{name: "nested, user-level dolt.port", nested: true, userConfig: fmt.Sprintf("dolt:\n  port: %d\n", userPort), want: userPort, wantResolved: true},
+		{name: "nested, BEADS_DOLT_SERVER_PORT", nested: true, env: map[string]string{"BEADS_DOLT_SERVER_PORT": strconv.Itoa(enclosingPort)}, want: enclosingPort},
+		{name: "nested, legacy BEADS_DOLT_PORT", nested: true, env: map[string]string{"BEADS_DOLT_PORT": strconv.Itoa(enclosingPort)}, want: enclosingPort},
+		{name: "nested, a dolt.port of its own", nested: true, ownConfig: fmt.Sprintf("dolt:\n  port: %d\n", ownPort), want: ownPort},
+		{name: "not nested, a dolt.port of its own", ownConfig: fmt.Sprintf("dolt:\n  port: %d\n", ownPort), want: ownPort},
+		{name: "not nested, user-level dolt.port", userConfig: fmt.Sprintf("dolt:\n  port: %d\n", userPort), want: userPort},
+		{name: "not nested, no port", want: 0},
+	} {
+		for _, hostFlag := range []bool{true, false} {
+			name := tc.name
+			if hostFlag {
+				name += "/--server-host 127.0.0.1"
+			}
+			t.Run(name, func(t *testing.T) {
+				clonePortTestEnv(t)
+				t.Setenv("BEADS_CEILING_DIRECTORIES", "")
+				t.Setenv("BEADS_TEST_MODE", "")
+				for k, v := range tc.env {
+					t.Setenv(k, v)
+				}
+				if tc.userConfig != "" {
+					writeClonePortFile(t, filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "bd", "config.yaml"), tc.userConfig)
+				}
+				town := t.TempDir()
+				dir := town
+				if tc.nested {
+					writeClonePortFile(t, filepath.Join(town, ".beads", "config.yaml"), fmt.Sprintf("dolt:\n  port: %d\n", enclosingPort))
+					dir = filepath.Join(town, "rig")
+				}
+				beadsDir := filepath.Join(dir, ".beads")
+				if err := os.MkdirAll(dir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if tc.ownConfig != "" {
+					writeClonePortFile(t, filepath.Join(beadsDir, "config.yaml"), tc.ownConfig)
+				}
+				// What init loads before it creates the workspace's .beads.
+				t.Chdir(dir)
+				t.Setenv("BEADS_DIR", "")
+				config.ResetForTesting()
+				if err := config.Initialize(); err != nil {
+					t.Fatalf("config.Initialize: %v", err)
+				}
+				flagHost := ""
+				if hostFlag {
+					flagHost = "127.0.0.1"
+					// What promoteExplicitServerConnFlags does with --server-host.
+					t.Setenv("BEADS_DOLT_SERVER_HOST", flagHost)
+				}
+
+				storeCfg := initStorePortConfig(beadsDir, initStoreServerHost(flagHost))
+				dolt.ResolveServerPort(storeCfg)
+				if storeCfg.ServerPort != tc.want {
+					t.Errorf("init's store dials port %d, want %d", storeCfg.ServerPort, tc.want)
+				}
+				if storeCfg.ServerPortResolved != tc.wantResolved {
+					t.Errorf("init's store port resolved = %v, want %v", storeCfg.ServerPortResolved, tc.wantResolved)
+				}
+				clone, err := initServerCloneEndpoint(beadsDir, initTimeCloneConfig(true, flagHost, 0, "", "", "rig"))
+				switch {
+				case tc.want == 0 && !errors.Is(err, dolt.ErrUnresolvedServerPort):
+					t.Errorf("--external clone: port %d, err %v; want the unresolved-port refusal", clone.port, err)
+				case tc.want > 0 && (err != nil || clone.port != tc.want):
+					t.Errorf("--external clone: port %d, err %v; want port %d", clone.port, err, tc.want)
+				}
+			})
+		}
+	}
+}
+
 // TestInitServerAtIPv6LoopbackDialsNoStalePort runs the real bd binary and
 // checks the port bd init's own store dials at a host bd does not run its
 // server at: the IPv6 loopback, named by --server-host or by
@@ -608,5 +705,52 @@ func TestInitSummaryServerAddrNamesTheStorePort(t *testing.T) {
 				t.Errorf("initSummaryServerAddr = %q, want %q", got, want)
 			}
 		})
+	}
+}
+
+// TestInitStartOwnServerJoinsAServerOnItsOwnPort pins initStartOwnServer's
+// check before it starts a nested workspace's own server: when a server
+// already answers on the port the workspace's own configuration names (here
+// a user-level dolt.port), it starts nothing, and init's store dials that
+// server, as it would for a workspace nested in nothing. With auto-start off
+// it starts nothing either.
+func TestInitStartOwnServerJoinsAServerOnItsOwnPort(t *testing.T) {
+	clonePortTestEnv(t)
+	t.Setenv("BEADS_TEST_MODE", "")
+	t.Setenv("BEADS_DOLT_AUTO_START", "")
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
+	port := ln.Addr().(*net.TCPAddr).Port
+	writeClonePortFile(t, filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "bd", "config.yaml"), fmt.Sprintf("dolt:\n  port: %d\n", port))
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	var ep doltserver.Endpoint
+	_ = config.WithBeadsDir(beadsDir, func() { ep = doltserver.ResolveEndpoint(beadsDir, nil).WithHost("127.0.0.1") })
+	if ep.Port != port || !ep.BDStartsServer() {
+		t.Fatalf("the workspace's own endpoint is port %d, BDStartsServer %v; want port %d that bd would start", ep.Port, ep.BDStartsServer(), port)
+	}
+	for _, autoStart := range []bool{true, false} {
+		started, err := initStartOwnServer(beadsDir, "127.0.0.1", "", autoStart)
+		if started || err != nil {
+			t.Errorf("initStartOwnServer(autoStart %v) = (%v, %v), want (false, nil): a server answers on %d", autoStart, started, err, port)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(beadsDir, doltserver.PortFileName)); err == nil {
+		t.Errorf("initStartOwnServer started a server beside the one answering on %d", port)
 	}
 }

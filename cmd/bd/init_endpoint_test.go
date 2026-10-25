@@ -66,20 +66,41 @@ func TestInitCloneKeepsTheTestModeGuard(t *testing.T) {
 // gateway refuses, and init's store opens the gateway's database with the
 // token. A --server-user beside the command is the user init's store
 // presents instead of the token, so that server is no gateway: the clone
-// goes through it as that user.
+// goes through it as that user. At 127.0.0.1 the same holds for a server some
+// other process runs there, on a live unix socket or on the port
+// BEADS_DOLT_SERVER_PORT names (which --server-port sets): bd's own server
+// does not serve it, so main's CLI clone into .beads/dolt was stranded too.
+// A socket nothing answers on keeps main's CLI clone, as does a server at
+// 127.0.0.1 that does not answer, so the store reports it in its own words.
 func TestInitRemoteCloneGoesWhereTheStoreOpens(t *testing.T) {
 	const port = "13451"
+	socket := filepath.Join(t.TempDir(), "dolt.sock")
 	for _, tc := range []struct {
 		name       string
 		host       string
+		socket     string // --server-socket, with no port named
 		external   bool
 		gateway    bool
 		serverUser string // --server-user
 		serverHas  bool
+		deadSocket bool   // the socket does not answer: main's CLI clone
+		serverDown bool   // the server does not answer the database probe
 		wantClone  string // host:port the server clone dials; "" for none
 		wantHeldAt string // the server init found holding the database
 	}{
 		{name: "remote host", host: "db.example.com", wantClone: "db.example.com:" + port},
+		{name: "BEADS_DOLT_SERVER_PORT at 127.0.0.1", host: "127.0.0.1", wantClone: "127.0.0.1:" + port},
+		{name: "BEADS_DOLT_SERVER_PORT at 127.0.0.1 already holding the database", host: "127.0.0.1", serverHas: true, wantHeldAt: "127.0.0.1:" + port},
+		{name: "unix socket at 127.0.0.1", host: "127.0.0.1", socket: socket, wantClone: "unix:" + socket},
+		{name: "unix socket already holding the database", host: "127.0.0.1", socket: socket, serverHas: true, wantHeldAt: "unix:" + socket},
+		{name: "dead unix socket at 127.0.0.1", host: "127.0.0.1", socket: socket, deadSocket: true, serverHas: true},
+		// Nothing answers on the port BEADS_DOLT_SERVER_PORT names at bd's
+		// host: main's CLI clone, so init's store open then reports the
+		// server that is down with its externally-managed advice.
+		{name: "BEADS_DOLT_SERVER_PORT at 127.0.0.1 with nothing listening", host: "127.0.0.1", serverDown: true},
+		// At a host bd does not run its server at, the clone still goes
+		// through that server, as on main.
+		{name: "remote host with nothing listening", host: "db.example.com", serverDown: true, wantClone: "db.example.com:" + port},
 		{name: "IPv6 loopback ::1", host: "::1", wantClone: "[::1]:" + port},
 		{name: "IPv6 loopback [::1]", host: "[::1]", wantClone: "[::1]:" + port},
 		{name: "remote host already holding the database", host: "db.example.com", serverHas: true, wantHeldAt: "db.example.com:" + port},
@@ -95,7 +116,12 @@ func TestInitRemoteCloneGoesWhereTheStoreOpens(t *testing.T) {
 			// As promoteExplicitServerConnFlags exports --server-host and
 			// --server-port for the rest of init's run.
 			t.Setenv("BEADS_DOLT_SERVER_HOST", tc.host)
-			t.Setenv("BEADS_DOLT_SERVER_PORT", port)
+			if tc.socket != "" {
+				// As promoteExplicitServerConnFlags exports --server-socket.
+				t.Setenv("BEADS_DOLT_SERVER_SOCKET", tc.socket)
+			} else {
+				t.Setenv("BEADS_DOLT_SERVER_PORT", port)
+			}
 			if tc.gateway {
 				t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", "echo tok123")
 			}
@@ -104,9 +130,17 @@ func TestInitRemoteCloneGoesWhereTheStoreOpens(t *testing.T) {
 				t.Setenv("BEADS_DOLT_SERVER_USER", tc.serverUser)
 			}
 
-			origServer, origCheck := remoteCloneViaServer, checkBootstrapServerDB
-			t.Cleanup(func() { remoteCloneViaServer, checkBootstrapServerDB = origServer, origCheck })
+			stubInitCloneSocketDead(t, tc.deadSocket)
+			origServer, origCLI, origCheck := remoteCloneViaServer, remoteCloneViaCLI, checkBootstrapServerDB
+			t.Cleanup(func() {
+				remoteCloneViaServer, remoteCloneViaCLI, checkBootstrapServerDB = origServer, origCLI, origCheck
+			})
 			var cloned, users []string
+			cli := false
+			remoteCloneViaCLI = func(context.Context, string, string, string) error {
+				cli = true
+				return nil
+			}
 			probes := 0
 			remoteCloneViaServer = func(_ context.Context, _, _ string, ep bootstrapServerProbeConfig) error {
 				cloned = append(cloned, ep.serverLocation())
@@ -116,11 +150,14 @@ func TestInitRemoteCloneGoesWhereTheStoreOpens(t *testing.T) {
 			checkBootstrapServerDB = func(ep bootstrapServerProbeConfig) bootstrapServerDBCheck {
 				probes++
 				users = append(users, ep.user)
+				if tc.serverDown {
+					return bootstrapServerDBCheck{Err: errors.New("connection refused")}
+				}
 				return bootstrapServerDBCheck{Reachable: true, Exists: tc.serverHas}
 			}
 
 			beadsDir := filepath.Join(t.TempDir(), ".beads")
-			cloneCfg := initTimeCloneConfig(true, tc.host, 0, "", tc.serverUser, "init_remote_clone")
+			cloneCfg := initTimeCloneConfig(true, tc.host, 0, tc.socket, tc.serverUser, "init_remote_clone")
 			disposition, err := initCloneFromRemote(t.Context(), beadsDir, "file:///nonexistent/remote", "init_remote_clone", cloneCfg, true, tc.external, tc.serverUser)
 
 			if tc.serverUser != "" {
@@ -133,11 +170,17 @@ func TestInitRemoteCloneGoesWhereTheStoreOpens(t *testing.T) {
 				}
 			}
 			var held *initCloneTargetHeldError
-			if tc.gateway && tc.serverUser == "" {
+			if (tc.gateway && tc.serverUser == "") || tc.deadSocket {
 				// main's CLI clone into .beads/dolt; its outcome here (no
 				// dolt binary, no remote) is beside the point.
-				if errors.As(err, &held) || probes != 0 || len(cloned) != 0 {
-					t.Fatalf("gateway: err %v, %d server probes, server clones %v; want main's CLI clone, with neither", err, probes, cloned)
+				if errors.As(err, &held) || probes != 0 || len(cloned) != 0 || !cli {
+					t.Fatalf("%s: err %v, %d server probes, server clones %v, CLI clone %v; want main's CLI clone, with neither", tc.name, err, probes, cloned, cli)
+				}
+				return
+			}
+			if tc.serverDown && tc.wantClone == "" {
+				if errors.As(err, &held) || len(cloned) != 0 || !cli {
+					t.Fatalf("%s: err %v, server clones %v, CLI clone %v; want main's CLI clone into .beads/dolt only", tc.name, err, cloned, cli)
 				}
 				return
 			}
