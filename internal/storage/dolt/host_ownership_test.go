@@ -1,6 +1,7 @@
 package dolt
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -19,11 +20,11 @@ var storeHostSpellings = []string{
 
 // TestStoreHostOwnershipDecisionsAgree pins every store decision about
 // whether bd runs the Dolt server at a host to configfile.BdRunsServerAt:
-// auto-start, the local data directory, the shared-database consent gate,
-// the port file, and the advice that names `bd dolt start`. They must agree
-// for every spelling; before one predicate decided them all, LOCALHOST and
-// 0.0.0.0 got bd-start advice but no auto-start, and ::1 the reverse in
-// places.
+// auto-start, the local data directory, the directory push, pull and fetch
+// run the dolt CLI in, the shared-database consent gate, the port file, and
+// the advice that names `bd dolt start`. They must agree for every spelling;
+// before one predicate decided them all, LOCALHOST and 0.0.0.0 got bd-start
+// advice but no auto-start, and ::1 the reverse in places.
 func TestStoreHostOwnershipDecisionsAgree(t *testing.T) {
 	originalEnsure := ensureResolvedPortFile
 	t.Cleanup(func() { ensureResolvedPortFile = originalEnsure })
@@ -51,6 +52,17 @@ func TestStoreHostOwnershipDecisionsAgree(t *testing.T) {
 			})
 			if got := dataDir != ""; got != bd {
 				t.Errorf("resolveLocalActiveDatabaseDir(host %q) = %q; a local data dir must be counted only for a server bd runs (want %v)", host, dataDir, bd)
+			}
+
+			// A Dolt database left in .beads/dolt/<db> is the server's only
+			// where bd runs the server; elsewhere the CLI routes must not
+			// push or pull it in the server's place.
+			cliStore := &DoltStore{serverMode: true, dbPath: root, database: "active", cfg: &Config{ServerHost: host}}
+			if err := os.MkdirAll(filepath.Join(cliStore.CLIDir(), ".dolt"), 0o755); err != nil {
+				t.Fatalf("create a Dolt database in %s: %v", cliStore.CLIDir(), err)
+			}
+			if got := cliStore.hasCLIDatabase(); got != bd {
+				t.Errorf("hasCLIDatabase(host %q) = %v; the dolt CLI may move %s as the server's data only for a server bd runs (want %v)", host, got, cliStore.CLIDir(), bd)
 			}
 
 			cfg := &Config{BeadsDir: managedWorkspace(t, 3307), ServerHost: host, ServerPort: 3307}

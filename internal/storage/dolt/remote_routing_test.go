@@ -2,13 +2,17 @@ package dolt
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/testutil"
 )
@@ -259,4 +263,188 @@ func TestPrepareCLIRouteForGitProtocolColdStartWindow(t *testing.T) {
 			t.Fatal("no remote anywhere should keep the SQL fallback, not invent a CLI route")
 		}
 	})
+}
+
+// leftoverRemoteRows lists, as the server's dolt_remotes does, the remotes
+// the CLI-route tests below route: a git-protocol default remote, a
+// git-protocol federation peer, and an Azure remote for the cloud-auth route.
+func leftoverRemoteRows(gitURL, azURL string) *sqlmock.Rows {
+	return sqlmock.NewRows([]string{"name", "url", "params"}).
+		AddRow("origin", gitURL, nil).
+		AddRow("peer", gitURL, nil).
+		AddRow("cloud", azURL, nil)
+}
+
+// TestCLIRoutesUseALeftoverDatabaseOnlyWhereBdRunsTheServer pins every CLI
+// route of push, pull and fetch (default remote and federation peer) to the
+// server's host. CLIDir holds a Dolt database whose remotes match the
+// server's, as a clone bd init used to leave in .beads/dolt/<db> does. That
+// database is the server's only where bd runs the server
+// (configfile.BdRunsServerAt), where every route keeps taking the dolt CLI
+// there. At any other host it is at best a stale copy, and pushing it would
+// report success without the server's commits, so every route falls back to
+// SQL, which the server runs on its own data.
+func TestCLIRoutesUseALeftoverDatabaseOnlyWhereBdRunsTheServer(t *testing.T) {
+	testutil.RequireDoltBinary(t)
+	clearCloudAuthEnv(t)
+	t.Setenv("AZURE_STORAGE_ACCOUNT", "account")
+	ctx := context.Background()
+	creds := &remoteCredentials{username: "user", password: "pass"}
+	const gitURL = "git+ssh://git@example.com/org/repo.git"
+	const azURL = "az://account.blob.core.windows.net/container"
+
+	routes := []struct {
+		name  string
+		route func(*DoltStore) (bool, error)
+	}{
+		{"git protocol", func(s *DoltStore) (bool, error) { return s.prepareCLIRouteForGitProtocol(ctx, "origin") }},
+		{"credential remote", func(s *DoltStore) (bool, error) { return s.prepareCLIRouteForCredentials(ctx, "origin", creds) }},
+		{"cloud auth remote", func(s *DoltStore) (bool, error) { return s.prepareCLIRouteForCloudAuth(ctx, "cloud") }},
+		{"local remote", func(s *DoltStore) (bool, error) { return s.shouldUseCLIForLocalRemoteWithError(ctx, "origin") }},
+		{"peer git protocol", func(s *DoltStore) (bool, error) { return s.prepareCLIRouteForPeerGitProtocol(ctx, "peer") }},
+		{"peer credential remote", func(s *DoltStore) (bool, error) { return s.prepareCLIRouteForPeerCredentials(ctx, "peer", creds) }},
+	}
+
+	for _, host := range []string{"127.0.0.1", "::1", "127.0.0.2", "db.example.com"} {
+		t.Run("host="+host, func(t *testing.T) {
+			dbPath := t.TempDir()
+			cliDir := filepath.Join(dbPath, "beads")
+			initLocalDoltRepoForRemote(t, cliDir)
+			for name, url := range map[string]string{"origin": gitURL, "peer": gitURL, "cloud": azURL} {
+				if err := doltutil.AddCLIRemote(cliDir, name, url); err != nil {
+					t.Fatalf("AddCLIRemote(%s): %v", name, err)
+				}
+			}
+			wantCLI := configfile.BdRunsServerAt(host)
+
+			for _, tt := range routes {
+				t.Run(tt.name, func(t *testing.T) {
+					db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+					if err != nil {
+						t.Fatalf("sqlmock: %v", err)
+					}
+					t.Cleanup(func() { _ = db.Close() })
+					mock.MatchExpectationsInOrder(false)
+					for i := 0; i < 3; i++ {
+						mock.ExpectQuery("SELECT name, url, params FROM dolt_remotes").
+							WillReturnRows(leftoverRemoteRows(gitURL, azURL))
+					}
+					store := &DoltStore{
+						serverMode: true,
+						dbPath:     dbPath,
+						database:   "beads",
+						remote:     "origin",
+						db:         db,
+						cfg:        &Config{ServerHost: host},
+					}
+
+					useCLI, err := tt.route(store)
+					if err != nil {
+						t.Fatalf("route returned error: %v", err)
+					}
+					if useCLI != wantCLI {
+						t.Fatalf("route through the dolt CLI in %s = %v at host %q, want %v (only bd's own server serves that directory)", cliDir, useCLI, host, wantCLI)
+					}
+				})
+			}
+		})
+	}
+}
+
+// TestPushAtAHostBdDoesNotRunRunsNoDoltInTheLeftoverDatabase is the push end
+// of that gate, with a dolt on PATH that records every call. A server-mode
+// store at the IPv6 loopback whose .beads/dolt/<db> holds a Dolt database
+// with the git-protocol remote runs no dolt there (no fsck, no push, no
+// remote listing), forced or not, and pushes with CALL DOLT_PUSH on the
+// server instead. The same store at 127.0.0.1 keeps fsck-ing and pushing that
+// directory through the dolt CLI.
+func TestPushAtAHostBdDoesNotRunRunsNoDoltInTheLeftoverDatabase(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell fake")
+	}
+	const gitURL = "git+ssh://git@example.com/org/repo.git"
+	binDir := t.TempDir()
+	callLog := filepath.Join(binDir, "calls.log")
+	script := fmt.Sprintf("#!/bin/sh\necho \"$(pwd -P)|$*\" >> '%s'\nif [ \"$1 $2\" = \"remote -v\" ]; then echo 'origin %s'; fi\nexit 0\n", callLog, gitURL)
+	if err := os.WriteFile(filepath.Join(binDir, "dolt"), []byte(script), 0o755); err != nil { // #nosec G306 -- test fixture must be executable
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	for _, tc := range []struct {
+		host    string
+		force   bool
+		wantCLI bool
+	}{
+		{host: "127.0.0.1", wantCLI: true},
+		{host: "127.0.0.1", force: true, wantCLI: true},
+		{host: "::1"},
+		{host: "::1", force: true},
+	} {
+		t.Run(fmt.Sprintf("host=%s/force=%v", tc.host, tc.force), func(t *testing.T) {
+			_ = os.Remove(callLog)
+			db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+			if err != nil {
+				t.Fatalf("sqlmock: %v", err)
+			}
+			t.Cleanup(func() { _ = db.Close() })
+			mock.MatchExpectationsInOrder(false)
+			for i := 0; i < 8; i++ {
+				mock.ExpectQuery("SELECT name, url, params FROM dolt_remotes").
+					WillReturnRows(sqlmock.NewRows([]string{"name", "url", "params"}).AddRow("origin", gitURL, nil))
+			}
+			store := &DoltStore{
+				serverMode: true,
+				dbPath:     t.TempDir(),
+				database:   "beads",
+				remote:     "origin",
+				branch:     "main",
+				db:         db,
+				cfg:        &Config{ServerHost: tc.host},
+				// The SQL route's own connection fails at once, which is how
+				// this test tells it was taken.
+				connStr: unroutableConnStr,
+			}
+			if err := os.MkdirAll(filepath.Join(store.CLIDir(), ".dolt", "noms"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			push := store.Push
+			if tc.force {
+				push = store.ForcePush
+			}
+			pushErr := push(context.Background())
+
+			raw, err := os.ReadFile(callLog)
+			if err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+			calls := strings.TrimSpace(string(raw))
+			if !tc.wantCLI {
+				if calls != "" {
+					t.Fatalf("push at host %q ran dolt in the leftover database:\n%s", tc.host, calls)
+				}
+				if pushErr == nil || !strings.Contains(pushErr.Error(), "push to origin/main") {
+					t.Fatalf("push at host %q = %v, want the SQL route's CALL DOLT_PUSH failure", tc.host, pushErr)
+				}
+				return
+			}
+			if pushErr != nil {
+				t.Fatalf("push at host %q: %v", tc.host, pushErr)
+			}
+			cliDir, err := filepath.EvalSymlinks(store.CLIDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := cliDir + "|push origin main"
+			if tc.force {
+				want = cliDir + "|push --force origin main"
+			}
+			for _, w := range []string{cliDir + "|fsck --quiet", want} {
+				if !strings.Contains(calls, w) {
+					t.Fatalf("push at host %q: dolt calls %q lack %q", tc.host, calls, w)
+				}
+			}
+		})
+	}
 }

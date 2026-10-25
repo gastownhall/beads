@@ -4474,16 +4474,38 @@ func persistedCLIRemote(cliDir, remote string) (storage.RemoteInfo, bool) {
 	return storage.RemoteInfo{}, false
 }
 
-// hasCLIDatabase reports whether CLIDir points at an initialized Dolt database.
+// hasCLIDatabase reports whether CLIDir points at an initialized Dolt database
+// that can be the one the store's server serves (cliDirServesServer).
 // SQL-capable routes use this as a CLI availability check and fall back to SQL
-// when an external-server client has only a placeholder local directory.
+// when an external-server client has only a placeholder local directory, or a
+// database there that is not its server's.
 func (s *DoltStore) hasCLIDatabase() bool {
 	cliDir := s.CLIDir()
-	if cliDir == "" {
+	if cliDir == "" || !s.cliDirServesServer() {
 		return false
 	}
 	info, err := os.Stat(filepath.Join(cliDir, ".dolt"))
 	return err == nil && info.IsDir()
+}
+
+// cliDirServesServer reports whether CLIDir can be the database this store's
+// server serves, so that a dolt CLI subprocess run there (push, pull, fetch,
+// and the fsck before a push) moves that server's data. As for every decision
+// that counts the workspace's Dolt root as a server's data, that holds only
+// at a host bd runs its server at (configfile.BdRunsServerAt). bd does not
+// know where a server at any other host (the IPv6 loopback, another loopback
+// address, another machine) keeps its data, and a database in CLIDir is then
+// at best a copy, such as the clone bd init used to leave in .beads/dolt or
+// the database from when bd ran the workspace's server: pushing it would
+// report success without the server's commits, and a pull into it would
+// never reach the server. A store opened without a Config reads as bd's
+// default host.
+func (s *DoltStore) cliDirServesServer() bool {
+	host := ""
+	if s.cfg != nil {
+		host = s.cfg.ServerHost
+	}
+	return configfile.BdRunsServerAt(host)
 }
 
 // ensureMatchingCLIRemote materializes the local CLI remote needed before
