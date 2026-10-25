@@ -1022,6 +1022,36 @@ func TestApplyInlineExpansionsCrossExpansionDeps(t *testing.T) {
 			}
 		}
 	})
+	t.Run("inline expand rewrites dependent depends_on to last expanded step", func(t *testing.T) {
+		steps := []*Step{
+			{ID: "setup", Title: "Setup"},
+			{ID: "work", Title: "Work", DependsOn: []string{"setup"}, Expand: "inline-exp"},
+			{ID: "verify", Title: "Verify", DependsOn: []string{"work"}},
+		}
+
+		result, err := ApplyInlineExpansions(steps, parser)
+		if err != nil {
+			t.Fatalf("ApplyInlineExpansions failed: %v", err)
+		}
+
+		if len(result) != 4 {
+			t.Fatalf("expected 4 steps, got %d", len(result))
+		}
+
+		verify := result[3]
+		if verify.ID != "verify" {
+			t.Fatalf("result[3].ID = %q, want verify", verify.ID)
+		}
+		if len(verify.DependsOn) != 1 || verify.DependsOn[0] != "work.second" {
+			t.Errorf("verify.DependsOn = %v, want [work.second]", verify.DependsOn)
+		}
+
+		// The propagate direction is unchanged: work.first inherits the
+		// target's DependsOn.
+		if got := result[1].DependsOn; len(got) != 1 || got[0] != "setup" {
+			t.Errorf("work.first.DependsOn = %v, want [setup]", got)
+		}
+	})
 }
 
 func TestFindDuplicateStepIDs(t *testing.T) {
