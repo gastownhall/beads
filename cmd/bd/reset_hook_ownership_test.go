@@ -251,3 +251,32 @@ func TestCollectResetItems_OnlyRemovesHooksBdOwns(t *testing.T) {
 		t.Errorf("beads dir %s missing from removal list", beadsDir)
 	}
 }
+
+// Every hook bd installs must be considered by reset, or a bd-owned hook
+// survives `bd admin reset` (GH#5566: prepare-commit-msg was left behind).
+func TestCollectResetItems_ScansEveryManagedHook(t *testing.T) {
+	gitCommonDir := t.TempDir()
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	hooksDir := filepath.Join(gitCommonDir, "hooks")
+
+	want := map[string]string{}
+	for _, name := range managedHookNames {
+		want[name] = writeHook(t, hooksDir, name, "#!/bin/sh\n# bd-hooks-version: 0.40.0\n# bd (beads) "+name+" hook\nbd hooks run "+name+"\n")
+	}
+
+	items, _ := collectResetItems(gitCommonDir, beadsDir)
+	inItems := map[string]bool{}
+	for _, it := range items {
+		if it.Type == "hook" {
+			inItems[it.Path] = true
+		}
+	}
+	for name, path := range want {
+		if classifyResetHook(path) != hookBdOwned {
+			t.Fatalf("fixture %s is not classified bd-owned; the test would prove nothing", name)
+		}
+		if !inItems[path] {
+			t.Errorf("bd-owned managed hook %s missing from reset's removal list", name)
+		}
+	}
+}
