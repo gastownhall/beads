@@ -95,11 +95,11 @@ case "${1:-}" in
         if is_row; then
             if [[ "$SCOPE_PLATFORMS" == false ]]; then
                 read -ra ids <<<"${CI_SCOPE_PLATFORMS_IDS:-}"
-                skips+=("${ids[@]}")
+                skips+=(${ids[@]+"${ids[@]}"})
             fi
             if [[ "$SCOPE_LINUX" == false ]]; then
                 read -ra ids <<<"${CI_SCOPE_LINUX_IDS:-}"
-                skips+=("${ids[@]}")
+                skips+=(${ids[@]+"${ids[@]}"})
             fi
         fi
         echo "${skips[*]-}"

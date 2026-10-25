@@ -207,7 +207,9 @@ if [[ "$conclusion" != success ]]; then
 	if [[ "${prev_sha:-}" =~ ^[0-9a-f]{40}$ ]] &&
 		compare=$(gh api "repos/$repo/compare/$prev_sha...$sha?per_page=100") &&
 		[[ "$(jq -r 'if .status == "ahead" and (.total_commits | type) == "number" and .total_commits <= 100 then "ok" else "no" end' <<<"$compare" 2>/dev/null)" == ok ]]; then
-		mapfile -t prs < <(jq -r '[.commits[].commit.message | split("\n")[0] | capture("\\(#(?<n>[0-9]+)\\)$").n]
+		while IFS= read -r pr; do
+			prs+=("$pr")
+		done < <(jq -r '[.commits[].commit.message | split("\n")[0] | capture("\\(#(?<n>[0-9]+)\\)$").n]
 			| reduce .[] as $n ([]; if index([$n]) then . else . + [$n] end) | .[]' <<<"$compare")
 		range="every PR in https://github.com/$repo/compare/${prev_sha:0:12}...${sha:0:12}, since $workflow's previous decided push run on main: $prev_url"
 	elif [[ -n "$head_pr" ]]; then
@@ -235,7 +237,7 @@ if [[ "$conclusion" != success ]]; then
 		notify=false
 		quiet="This is attempt $RUN_ATTEMPT of this run, so the candidates were not notified again."
 	fi
-	notified=("${prs[@]}")
+	notified=(${prs[@]+"${prs[@]}"})
 	if ((${#notified[@]} > 10)); then
 		notified=("${notified[@]: -10}")
 	fi
