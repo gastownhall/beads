@@ -235,12 +235,13 @@ func TestFKCascadeViolationRepairOnCLIPull(t *testing.T) {
 		t.Fatalf("commit violated working set: %v", err)
 	}
 
-	resolved, err := store.autoResolveConflictsAfterCLIPull(ctx)
-	if err != nil {
-		t.Fatalf("autoResolveConflictsAfterCLIPull: %v", err)
-	}
-	if !resolved {
-		t.Fatal("expected the CLI-pull resolver to repair the FK cascade violations")
+	// pullErr nil, preMergeClean true: the forced merge above ran with no CLI
+	// pull error of its own, and this test's starting working set was clean
+	// before it, matching the fixture's real-world preconditions. Neither
+	// value is exercised by this test's success path (no abort), but
+	// autoResolveConflictsAfterCLIPull now needs both threaded through #7839.
+	if err := store.autoResolveConflictsAfterCLIPull(ctx, nil, true); err != nil {
+		t.Fatalf("autoResolveConflictsAfterCLIPull: expected the CLI-pull resolver to repair the FK cascade violations, got: %v", err)
 	}
 
 	var orphans int

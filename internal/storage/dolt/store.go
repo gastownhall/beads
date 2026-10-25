@@ -5623,8 +5623,12 @@ func (s *DoltStore) pullTransportReporting(ctx context.Context, remote string) (
 		logRouteDecision("pull", remote, true)
 		// CLI pull leaves any conflicts in the working set; run the auto-resolver so
 		// git-protocol remotes get the same audit-only dependency / metadata repair
-		// as the SQL DOLT_PULL path (#4259).
-		return pullReport{}, s.finishCLIPull(ctx, s.doltCLIPull(ctx, remote, creds))
+		// as the SQL DOLT_PULL path (#4259). preMergeClean must be read before the
+		// CLI subprocess runs — it gates the merge-abort fallback on a declined
+		// conflict (#7839).
+		preMergeClean := s.workingSetCleanBeforeCLIPull(ctx)
+		pullErr := s.doltCLIPull(ctx, remote, creds)
+		return pullReport{}, s.finishCLIPull(ctx, pullErr, preMergeClean)
 	}
 	// Credential CLI routing: mirrors git-protocol path, including post-pull
 	// auto-resolution.
@@ -5632,14 +5636,18 @@ func (s *DoltStore) pullTransportReporting(ctx context.Context, remote string) (
 		return pullReport{}, err
 	} else if useCLI {
 		logRouteDecision("pull", remote, true)
-		return pullReport{}, s.finishCLIPull(ctx, s.doltCLIPull(ctx, remote, creds))
+		preMergeClean := s.workingSetCleanBeforeCLIPull(ctx)
+		pullErr := s.doltCLIPull(ctx, remote, creds)
+		return pullReport{}, s.finishCLIPull(ctx, pullErr, preMergeClean)
 	}
 	// Cloud auth CLI routing (GH#6), including post-pull auto-resolution.
 	if useCLI, err := s.prepareCLIRouteForCloudAuth(ctx, remote); err != nil {
 		return pullReport{}, err
 	} else if useCLI {
 		logRouteDecision("pull", remote, true)
-		return pullReport{}, s.finishCLIPull(ctx, s.doltCLIPull(ctx, remote, creds))
+		preMergeClean := s.workingSetCleanBeforeCLIPull(ctx)
+		pullErr := s.doltCLIPull(ctx, remote, creds)
+		return pullReport{}, s.finishCLIPull(ctx, pullErr, preMergeClean)
 	}
 	// Local file:// pulls intentionally stay on the SQL path. The matching CLI
 	// guard is a push-only optimization; SQL pull keeps pullWithAutoResolve in
@@ -6073,24 +6081,14 @@ func (s *DoltStore) markBlockedRecomputePending(ctx context.Context, fromCommit 
 // same resolver as the SQL path. pullErr is what doltCLIPull returned: a pull that
 // fails *because* of conflicts is recoverable once they resolve, so we inspect the
 // working set regardless and only surface pullErr when nothing was resolved.
-func (s *DoltStore) finishCLIPull(ctx context.Context, pullErr error) error {
+// preMergeClean reports whether the working set was clean immediately before the
+// CLI pull ran; see autoResolveConflictsAfterCLIPull for why it matters (#7839).
+func (s *DoltStore) finishCLIPull(ctx context.Context, pullErr error, preMergeClean bool) error {
 	if s.readOnly {
 		// A read-only store cannot resolve or commit; surface the pull result as-is.
 		return pullErr
 	}
-	resolved, resolveErr := s.autoResolveConflictsAfterCLIPull(ctx)
-	if resolveErr != nil {
-		if pullErr != nil {
-			return pullErr
-		}
-		return resolveErr
-	}
-	if pullErr != nil && !resolved {
-		// Pull failed for a non-conflict reason, or conflicts are not auto-resolvable;
-		// leave them in the working set for the operator.
-		return pullErr
-	}
-	return nil
+	return s.autoResolveConflictsAfterCLIPull(ctx, pullErr, preMergeClean)
 }
 
 // autoResolveConflictsAfterCLIPull inspects the working set and auto-resolves the
@@ -6101,17 +6099,37 @@ func (s *DoltStore) finishCLIPull(ctx context.Context, pullErr error) error {
 // whereas a separately opened connection would default to the base branch and never
 // see the conflicts. The pull's
 // network transfer already completed in the subprocess, so no long-timeout connection
-// is needed for the local resolve. Returns (true, nil) only if all conflicts were
-// resolved and committed; (false, nil) when there is nothing to resolve or a conflict
-// needs the operator, leaving the working set untouched for manual resolution.
-func (s *DoltStore) autoResolveConflictsAfterCLIPull(ctx context.Context) (bool, error) {
+// is needed for the local resolve.
+//
+// Unlike the SQL DOLT_PULL path, the CLI `dolt pull` subprocess commits its merge
+// (or its declined conflicts) directly onto the server's working set from its own
+// connection — there is no wrapping transaction here whose rollback could undo it.
+// So when a conflict is declined, or an FK-cascade violation cannot be repaired,
+// this function must explicitly abort the merge (CALL DOLT_MERGE('--abort'),
+// mirroring versioncontrolops.SettleMerge/abortMerge) before returning; otherwise
+// the merge stays open on the branch and every later write and pull fails until an
+// operator aborts it by hand (#7839). preMergeClean must report whether the working
+// set was clean immediately before doltCLIPull ran — it gates the hard-reset
+// fallback the exact same way SettleMerge's preMergeClean does.
+//
+// Returns nil only if all conflicts were resolved and committed (or there was
+// nothing to resolve and pullErr was nil); a *versioncontrolops.MergeConflictsError
+// when a declined conflict required aborting the merge; or pullErr/an infra error
+// otherwise.
+func (s *DoltStore) autoResolveConflictsAfterCLIPull(ctx context.Context, pullErr error, preMergeClean bool) error {
 	// Pin a single connection: @@dolt_allow_commit_conflicts is session-scoped,
 	// and setting it through a pooled transaction leaks it to whichever caller
 	// drains that connection next. Reset it before releasing the connection; if
 	// the reset cannot run, discard the connection rather than return it dirty.
+	// It also doubles as the connection the merge abort below runs on, since
+	// CALL DOLT_MERGE('--abort') must reach the same branch the CLI pull merged
+	// into, which only a pool connection — not a fresh one — is guaranteed to be.
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
-		return false, fmt.Errorf("failed to acquire connection: %w", err)
+		if pullErr != nil {
+			return pullErr
+		}
+		return fmt.Errorf("failed to acquire connection: %w", err)
 	}
 	varSet := false
 	defer func() {
@@ -6124,48 +6142,106 @@ func (s *DoltStore) autoResolveConflictsAfterCLIPull(ctx context.Context) (bool,
 	}()
 	// Allow committing while conflicts exist so we can inspect and resolve them.
 	if _, err := conn.ExecContext(ctx, "SET @@dolt_allow_commit_conflicts = 1"); err != nil {
-		return false, fmt.Errorf("failed to set dolt_allow_commit_conflicts: %w", err)
+		if pullErr != nil {
+			return pullErr
+		}
+		return fmt.Errorf("failed to set dolt_allow_commit_conflicts: %w", err)
 	}
 	varSet = true
 	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
-		return false, fmt.Errorf("failed to begin transaction: %w", err)
+		if pullErr != nil {
+			return pullErr
+		}
+		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	resolved, err := s.tryAutoResolveMergeConflicts(ctx, tx)
 	if err != nil {
 		_ = tx.Rollback()
-		return false, err
+		versioncontrolops.AbortMerge(ctx, conn, preMergeClean)
+		if pullErr != nil {
+			return pullErr
+		}
+		return err
+	}
+	// bd-578h9.15 / #7839: conflicts the resolver declined are the operator's.
+	// Capture them BEFORE the abort wipes merge state — a post-abort
+	// GetConflicts on a fresh transaction sees an empty set, same reasoning as
+	// settleMergeInTx's SQL-route twin.
+	if !resolved {
+		if conflicts, cErr := versioncontrolops.GetConflicts(ctx, tx); cErr == nil && len(conflicts) > 0 {
+			_ = tx.Rollback()
+			versioncontrolops.AbortMerge(ctx, conn, preMergeClean)
+			return &versioncontrolops.MergeConflictsError{Conflicts: conflicts, MergeErr: pullErr}
+		}
 	}
 	// bd-6dnrw.4: a CLI pull can also leave FK cascade violations in the
 	// shared working set (child rows whose parent issue was deleted on the
 	// other clone). Repair them like the SQL route does; unrepaired
-	// violations roll back untouched for the operator.
+	// violations abort the merge, same as a declined content conflict.
 	repairedViol, hadViol, violErr := s.tryRepairFKCascadeViolations(ctx, tx)
 	if violErr != nil {
 		_ = tx.Rollback()
-		return false, violErr
+		versioncontrolops.AbortMerge(ctx, conn, preMergeClean)
+		if pullErr != nil {
+			return pullErr
+		}
+		return violErr
 	}
 	if hadViol && !repairedViol {
 		_ = tx.Rollback()
-		return false, nil
+		versioncontrolops.AbortMerge(ctx, conn, preMergeClean)
+		if pullErr != nil {
+			return pullErr
+		}
+		return fmt.Errorf("pull merge left constraint violations bd cannot auto-repair; inspect dolt_constraint_violations and resolve before retrying")
 	}
 	if !resolved && !repairedViol {
+		// Neither branch above found anything to capture or abort for (no
+		// conflicts, no violations) yet nothing was resolved either — nothing
+		// for the merge-abort machinery to act on; leave pullErr (if any) as
+		// the caller's answer.
 		_ = tx.Rollback()
-		return false, nil
+		return pullErr
 	}
 	// Conclude the merge for resolved conflicts only now, after the FK repair:
 	// DOLT_COMMIT refuses a violated working set, so a merge carrying both
 	// classes could never settle when the resolver committed first (bd-578h9.14).
+	//
+	// Deliberately NOT aborted below: both remaining failures are a DOLT_COMMIT
+	// (or its transaction ack) that may have landed despite the error the client
+	// saw — an indeterminate commit response (see assertPublicCommitIndeterminate,
+	// wrapSQLCommitError). Calling DOLT_MERGE('--abort') against a merge that
+	// already concluded server-side would at best no-op and at worst, through
+	// the hard-reset fallback, discard a commit that actually succeeded. A
+	// declined conflict never reaches here (returned above before any commit
+	// was attempted), so this is purely the pre-existing ambiguous-commit
+	// territory, same as the SQL settleMergeInTx path never aborts here either.
 	if resolved {
 		if err := versioncontrolops.CommitResolvedConflicts(ctx, tx); err != nil {
 			_ = tx.Rollback()
-			return false, err
+			if pullErr != nil {
+				return pullErr
+			}
+			return err
 		}
 	}
 	if err := s.commitSQLTx(ctx, "commit resolved CLI pull conflicts", tx); err != nil {
-		return false, err
+		return err
 	}
-	return true, nil
+	return nil
+}
+
+// workingSetCleanBeforeCLIPull reports whether the branch's working set was
+// clean immediately before a CLI pull subprocess runs. The CLI pull connects
+// to the server as an ordinary client, so a pooled connection's view of
+// dolt_status reflects the same working set the subprocess is about to merge
+// into. It gates autoResolveConflictsAfterCLIPull's hard-reset fallback when a
+// declined conflict needs aborting (#7839); errors count as dirty, the same
+// conservative default versioncontrolops.SettleMerge uses.
+func (s *DoltStore) workingSetCleanBeforeCLIPull(ctx context.Context) bool {
+	clean, err := versioncontrolops.WorkingSetClean(ctx, s.db)
+	return err == nil && clean
 }
 
 // tryAutoResolveMergeConflicts auto-resolves merge conflicts that are safe to

@@ -234,12 +234,13 @@ func TestAutoResolveConflictsAfterCLIPull_DependencyAuditOnly(t *testing.T) {
 		t.Skip("merge auto-resolved without persisted conflicts — cannot exercise post-CLI-pull resolver")
 	}
 
-	resolved, err := store.autoResolveConflictsAfterCLIPull(ctx)
-	if err != nil {
-		t.Fatalf("autoResolveConflictsAfterCLIPull: %v", err)
-	}
-	if !resolved {
-		t.Fatal("expected audit-only dependency conflict to auto-resolve after a CLI pull")
+	// pullErr nil, preMergeClean true: this fixture forces the conflict
+	// directly at the SQL layer with no CLI pull of its own, and starts from
+	// a clean working set. Neither value is exercised by this success path
+	// (no abort), but autoResolveConflictsAfterCLIPull now needs both
+	// threaded through (#7839).
+	if err := store.autoResolveConflictsAfterCLIPull(ctx, nil, true); err != nil {
+		t.Fatalf("autoResolveConflictsAfterCLIPull: expected audit-only dependency conflict to auto-resolve after a CLI pull, got: %v", err)
 	}
 
 	var count int
