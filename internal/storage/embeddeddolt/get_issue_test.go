@@ -3,6 +3,7 @@
 package embeddeddolt_test
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -346,6 +347,79 @@ func TestAddLabel(t *testing.T) {
 		}
 		if !afterRemove.UpdatedAt.After(afterAdd.UpdatedAt) {
 			t.Fatalf("RemoveLabel must bump updated_at (#5442): before=%v after=%v", afterAdd.UpdatedAt, afterRemove.UpdatedAt)
+		}
+	})
+
+	// Regression for #5442, pinning the journal-ordering half of the fix:
+	// removeLabelInTx must bump updated_at BEFORE RecordEventInTx snapshots
+	// the row, so the journaled issue_json carries the post-removal value
+	// rather than a stale one. This exercises RemoveLabel through
+	// EmbeddedDoltStore, the path removeLabelInTx actually sits on — unlike
+	// the domain/db suite's labelSQLRepositoryImpl.Delete, which already
+	// touched before journaling and so does not pin this ordering.
+	t.Run("remove_label_journal_snapshot_has_bumped_updated_at", func(t *testing.T) {
+		te := newTestEnv(t, "lj")
+		ctx := t.Context()
+		te.store.SetEventsJournalEnabled(true)
+
+		issue := &types.Issue{
+			ID:        "lj-1",
+			Title:     "t",
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+		}
+		if err := te.store.CreateIssue(ctx, issue, "tester"); err != nil {
+			t.Fatalf("CreateIssue: %v", err)
+		}
+		if err := te.store.AddLabel(ctx, "lj-1", "alpha", "tester"); err != nil {
+			t.Fatalf("AddLabel: %v", err)
+		}
+		if err := te.store.Commit(ctx, "seed"); err != nil {
+			t.Fatalf("Commit (seed): %v", err)
+		}
+
+		rows, err := te.store.ReadEventsJournal(ctx, 0, 0)
+		if err != nil || len(rows) == 0 {
+			t.Fatalf("seed journal: %v (%d rows)", err, len(rows))
+		}
+		since := rows[len(rows)-1].Seq
+
+		// updated_at is second-granular.
+		time.Sleep(1100 * time.Millisecond)
+
+		if err := te.store.RemoveLabel(ctx, "lj-1", "alpha", "tester"); err != nil {
+			t.Fatalf("RemoveLabel: %v", err)
+		}
+		if err := te.store.Commit(ctx, "remove"); err != nil {
+			t.Fatalf("Commit (remove): %v", err)
+		}
+
+		row, err := te.store.GetIssue(ctx, "lj-1")
+		if err != nil {
+			t.Fatalf("GetIssue: %v", err)
+		}
+
+		all, err := te.store.ReadEventsJournal(ctx, 0, 0)
+		if err != nil {
+			t.Fatalf("ReadEventsJournal: %v", err)
+		}
+		found := 0
+		for _, r := range all {
+			if r.Seq <= since {
+				continue
+			}
+			found++
+			var snap types.Issue
+			if err := json.Unmarshal([]byte(r.IssueJSON), &snap); err != nil {
+				t.Fatalf("seq %d issue_json: %v", r.Seq, err)
+			}
+			if !snap.UpdatedAt.Equal(row.UpdatedAt) {
+				t.Fatalf("seq %d op=%s journaled updated_at %v != row updated_at %v: removeLabelInTx must touch before it journals", r.Seq, r.Op, snap.UpdatedAt, row.UpdatedAt)
+			}
+		}
+		if found != 1 {
+			t.Fatalf("journal rows after remove = %d, want 1", found)
 		}
 	})
 }
