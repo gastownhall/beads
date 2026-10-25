@@ -1100,3 +1100,74 @@ func TestStepTypeToIssueType(t *testing.T) {
 		}
 	}
 }
+
+// The issue #7637 formula: `land` needs `round`, which is inline-expanded.
+// Before the fix, no step named `round` was poured, so land's edge was
+// silently dropped (collectDependencies skips unknown IDs) and Land was ready
+// immediately. The [[compose.expand]] form of the same workflow already
+// pointed land at the expansion's last step; the cook pipeline must do the
+// same for the inline form.
+func TestResolveAndCookFormula_InlineExpandDependentBlocksOnLastStep(t *testing.T) {
+	dir := writePipelineFormula(t, "inline", `formula = "inline"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "brief"
+title = "Brief"
+
+[[steps]]
+id = "round"
+title = "Round"
+needs = ["brief"]
+expand = "round"
+
+[[steps]]
+id = "land"
+title = "Land"
+needs = ["round"]
+`)
+
+	// writePipelineFormula returns a fresh temp dir per call, so the expansion
+	// formula goes into the same directory by hand.
+	roundTOML := `formula = "round"
+version = 1
+type = "expansion"
+
+[[template]]
+id = "implement"
+title = "Implement"
+
+[[template]]
+id = "triage"
+title = "Triage"
+needs = ["implement"]
+`
+	if err := os.WriteFile(filepath.Join(dir, "round.formula.toml"), []byte(roundTOML), 0o644); err != nil {
+		t.Fatalf("write round formula: %v", err)
+	}
+
+	subgraph, err := resolveAndCookFormula("inline", []string{dir})
+	if err != nil {
+		t.Fatalf("cook: %v", err)
+	}
+
+	hasBlocksEdge := func(from, to string) bool {
+		for _, dep := range subgraph.Dependencies {
+			if dep.Type == types.DepBlocks && dep.IssueID == from && dep.DependsOnID == to {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Land blocks on Triage, the last step of the round expansion.
+	if !hasBlocksEdge("inline.land", "inline.triage") {
+		t.Errorf("missing blocks edge inline.land -> inline.triage")
+	}
+	// The propagate direction still holds: Implement, the expansion's root,
+	// blocks on Brief via round's own needs.
+	if !hasBlocksEdge("inline.implement", "inline.brief") {
+		t.Errorf("missing blocks edge inline.implement -> inline.brief")
+	}
+}
