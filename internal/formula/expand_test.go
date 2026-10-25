@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -957,6 +958,60 @@ func TestApplyInlineExpansionsCrossExpansionDeps(t *testing.T) {
 		workSecond := result[2]
 		if len(workSecond.Needs) != 1 || workSecond.Needs[0] != "work.first" {
 			t.Errorf("work.second.Needs = %v, want [work.first]", workSecond.Needs)
+		}
+	})
+
+	// Issue #7637: another step's needs on an inline-expanded step must point
+	// at the expansion's last step, as compose.expand does.
+	t.Run("inline expand rewrites needs on expanded step from other steps", func(t *testing.T) {
+		steps := []*Step{
+			{ID: "setup", Title: "Setup"},
+			{ID: "work", Title: "Work", Needs: []string{"setup"}, Expand: "inline-exp"},
+			{ID: "verify", Title: "Verify", Needs: []string{"work"}},
+		}
+
+		result, err := ApplyInlineExpansions(steps, parser)
+		if err != nil {
+			t.Fatalf("ApplyInlineExpansions failed: %v", err)
+		}
+
+		byID := buildStepMap(result)
+		verify := byID["verify"]
+		if verify == nil {
+			t.Fatalf("verify step missing from result")
+		}
+		if !reflect.DeepEqual(verify.Needs, []string{"work.second"}) {
+			t.Errorf("verify.Needs = %v, want [work.second]", verify.Needs)
+		}
+		if workFirst := byID["work.first"]; workFirst == nil || !reflect.DeepEqual(workFirst.Needs, []string{"setup"}) {
+			t.Errorf("work.first = %+v, want Needs [setup]", workFirst)
+		}
+
+		// The caller's slice is not modified.
+		if !reflect.DeepEqual(steps[2].Needs, []string{"work"}) {
+			t.Errorf("input verify.Needs = %v, want [work] (unmodified)", steps[2].Needs)
+		}
+
+		// Same steps through compose.expand give the same graph.
+		composeSteps := []*Step{
+			{ID: "setup", Title: "Setup"},
+			{ID: "work", Title: "Work", Needs: []string{"setup"}},
+			{ID: "verify", Title: "Verify", Needs: []string{"work"}},
+		}
+		composed, err := ApplyExpansions(composeSteps, &ComposeRules{
+			Expand: []*ExpandRule{{Target: "work", With: "inline-exp"}},
+		}, parser)
+		if err != nil {
+			t.Fatalf("ApplyExpansions failed: %v", err)
+		}
+		if len(composed) != len(result) {
+			t.Fatalf("compose gave %d steps, inline gave %d", len(composed), len(result))
+		}
+		for i := range composed {
+			if composed[i].ID != result[i].ID || !reflect.DeepEqual(composed[i].Needs, result[i].Needs) {
+				t.Errorf("step %d: compose %s needs %v, inline %s needs %v",
+					i, composed[i].ID, composed[i].Needs, result[i].ID, result[i].Needs)
+			}
 		}
 	})
 }
