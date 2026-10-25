@@ -202,9 +202,9 @@ func IsAutoStartDisabled() bool {
 }
 
 // externalNonLocalhostHost reports the configured Dolt server host when
-// it is set to a non-localhost value, indicating bd is talking to a
-// server it does not manage. Returns (host, true) when external,
-// ("", false) otherwise.
+// bd does not run its server there (configfile.BdRunsServerAt): another
+// machine, the IPv6 loopback, or another loopback address. Returns
+// (host, true) when external, ("", false) otherwise.
 //
 // Used to branch error messages in EnsureRunning so operators with a
 // non-localhost server are not told to "bd dolt start" — that command
@@ -229,8 +229,7 @@ func externalNonLocalhostHost(beadsDir string) (string, bool) {
 		return "", false
 	}
 	host := cfg.GetDoltServerHost()
-	switch strings.ToLower(strings.TrimSpace(host)) {
-	case "", "localhost", "127.0.0.1", "::1", "[::1]", "0.0.0.0":
+	if configfile.BdRunsServerAt(host) {
 		return "", false
 	}
 	return host, true
@@ -1130,7 +1129,7 @@ func defaultConfigForMode(beadsDir string, sharedMode bool, resolvePort serverPo
 	mode := ResolveServerModeForMode(workspaceBeadsDir, sharedMode)
 	cfg := &Config{
 		BeadsDir: beadsDir,
-		Host:     "127.0.0.1",
+		Host:     "127.0.0.1", // the one address configfile.BdRunsServerAt counts as bd's
 		Mode:     mode,
 	}
 	if sharedMode {
@@ -1148,11 +1147,12 @@ func defaultConfigForMode(beadsDir string, sharedMode bool, resolvePort serverPo
 		cfg.PortSharedServer = true
 	}
 
-	// A server bd does not run: one on another machine (host-inferred
-	// external config, GH#3545), or one at the IPv6 loopback, where bd's
-	// own server, which listens on 127.0.0.1 only, never runs. The IPv6
-	// loopback is external only when a setting makes it so; in owned mode
-	// it still never takes bd's port file.
+	// A server bd does not run (configfile.BdRunsServerAt): one on another
+	// machine (host-inferred external config, GH#3545), or one at the IPv6
+	// loopback or another loopback address, where bd's own server, which
+	// listens on 127.0.0.1 only, never runs. Such a host is external only
+	// when a setting makes it so; in owned mode only the IPv6 loopback
+	// spelled ::1 or [::1] still never takes bd's port file.
 	if !sharedMode && (cfg.Mode == ServerModeExternal || cfg.PortSource == PortSourcePortFile) {
 		fc := &configfile.Config{}
 		if _, err := os.Stat(configfile.ConfigPath(workspaceBeadsDir)); err == nil {
@@ -1161,8 +1161,8 @@ func defaultConfigForMode(beadsDir string, sharedMode bool, resolvePort serverPo
 			}
 		}
 		host := fc.GetDoltServerHost()
-		ipv6Loopback := configfile.IsIPv6LoopbackHost(host)
-		external := cfg.Mode == ServerModeExternal && (ipv6Loopback || !configfile.IsLocalHostString(host))
+		ipv6Loopback := configfile.IsShortIPv6LoopbackSpelling(host)
+		external := cfg.Mode == ServerModeExternal && !configfile.BdRunsServerAt(host)
 		// The gitignored port file is bd's bookkeeping for a bd-owned
 		// server on 127.0.0.1; pairing it with either host dials that
 		// host on a stale local ephemeral port. Discard it and resume

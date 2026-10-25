@@ -533,6 +533,18 @@ func TestEnsureBeadsDirForPathRefusesTargetsItWouldHide(t *testing.T) {
 		// left as a placeholder the refusal names, on every platform.
 		{name: "remote dolt.host no shell takes quoted", files: map[string]string{"config.yaml": "dolt:\n  host: \"x\\\\'; $(calc)\"\n"}, want: "(dolt.host: " + craftedName + "); not initializing it as an embedded workspace, which would hide its server data. Run `bd init --server --server-host <host> --server-port 3307 --database <name>` there with its dolt.host " + craftedName + " for <host>, naming the server database it uses"},
 		{name: "server mode with a remote dolt.host no shell takes quoted", files: map[string]string{"config.yaml": "dolt:\n  mode: server\n  host: \"x\\\\'; $(calc)\"\n"}, want: "Run `bd init --server-host <host> --server-port 3307 --database <name>` there with its dolt.host " + craftedName + " for <host>, naming the server database it uses"},
+		// The remedy names the target's dolt.host whenever bd does not run its
+		// server there (configfile.BdRunsServerAt): bd init dials 127.0.0.1
+		// otherwise and would initialize bd's own server instead of the one
+		// the target names. The IPv6 loopback and another loopback address
+		// are on this machine, but bd's own server never listens there.
+		{name: "server mode with an IPv6 loopback dolt.host", files: map[string]string{"config.yaml": "dolt:\n  mode: server\n  host: \"::1\"\n  port: 23417\n"}, want: "Run `bd init " + remote("::1", 23417) + " --database <name>` there"},
+		{name: "server mode with a bracketed IPv6 loopback dolt.host", files: map[string]string{"config.yaml": "dolt:\n  mode: server\n  host: \"[::1]\"\n  port: 23417\n"}, want: "Run `bd init " + remote("[::1]", 23417) + " --database <name>` there"},
+		{name: "server mode with a long-form IPv6 loopback dolt.host", files: map[string]string{"config.yaml": "dolt:\n  mode: server\n  host: \"0:0:0:0:0:0:0:1\"\n"}, want: "Run `bd init " + remote("0:0:0:0:0:0:0:1", 3307) + " --database <name>` there"},
+		{name: "server mode with another loopback dolt.host", files: map[string]string{"config.yaml": "dolt:\n  mode: server\n  host: 127.0.0.2\n"}, want: "Run `bd init " + remote("127.0.0.2", 3307) + " --database <name>` there"},
+		{name: "server mode with an upper-case localhost dolt.host", files: map[string]string{"config.yaml": "dolt:\n  mode: server\n  host: LOCALHOST\n"}, want: "Run `bd init --database <name>` there"},
+		{name: "IPv6 loopback dolt.host without dolt.mode", files: map[string]string{"config.yaml": "dolt:\n  host: \"::1\"\n"}},
+		{name: "another loopback dolt.host without dolt.mode", files: map[string]string{"config.yaml": "dolt:\n  host: 127.0.0.2\n"}, want: "Run `bd init --server " + remote("127.0.0.2", 3307) + " --database <name>` there"},
 		{name: "local dolt.host 127.0.0.1", files: map[string]string{"config.yaml": "dolt:\n  host: 127.0.0.1\n"}},
 		{name: "local dolt.host localhost", files: map[string]string{"config.yaml": "dolt.host: localhost\n"}},
 		{name: "remote dolt.host under embedded mode", files: map[string]string{"config.yaml": "dolt:\n  mode: embedded\n  host: db.example.com\n"}},

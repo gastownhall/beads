@@ -1301,12 +1301,14 @@ func refuseUninitializableTarget(beadsDir string) error {
 	if err != nil {
 		return refuseTarget("%s has no metadata.json and its dolt.mode cannot be read (%s); not initializing it, since it may select Dolt server mode", repo, remedy.PrintedValue(err.Error()))
 	}
-	// host is the target's own non-local dolt.host, if it has one. bd init
-	// does not read it from config.yaml (it takes the host from --server-host
-	// or BEADS_DOLT_SERVER_HOST and otherwise dials 127.0.0.1), so a remedy
-	// for a target that names a remote server must pass it.
+	// host is the target's own dolt.host when bd does not run its server
+	// there (configfile.BdRunsServerAt): another machine, the IPv6 loopback
+	// or another loopback address. bd init does not read it from config.yaml
+	// (it takes the host from --server-host or BEADS_DOLT_SERVER_HOST and
+	// otherwise dials 127.0.0.1, where it starts bd's own server), so a
+	// remedy for such a target must pass it.
 	host, _, hostErr := config.WorkspaceYamlSettingWithLocal(beadsDir, "dolt.host")
-	if hostErr != nil || configfile.IsLocalHostString(host) {
+	if hostErr != nil || configfile.BdRunsServerAt(host) {
 		host = ""
 	}
 	if strings.EqualFold(mode, configfile.DoltModeServer) {
@@ -1320,7 +1322,10 @@ func refuseUninitializableTarget(beadsDir string) error {
 		if hostErr != nil {
 			return refuseTarget("%s has no metadata.json and its dolt.host cannot be read (%s); not initializing it, since it may select Dolt server mode", repo, remedy.PrintedValue(hostErr.Error()))
 		}
-		if host != "" {
+		// Mode inference asks whether the host is this machine
+		// (configfile.IsLocalHostString), not whether bd runs its server
+		// there: the IPv6 loopback selects nothing here.
+		if host != "" && !configfile.IsLocalHostString(host) {
 			// The host is named escaped (remedy.EscapedValue), as hostNote
 			// names one the remedy leaves as a placeholder.
 			initCmd, hostNote := serverInitRemedy(runtime.GOOS, "bd init --server", beadsDir, host)

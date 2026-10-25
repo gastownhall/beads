@@ -155,7 +155,7 @@ func TestServerDSN_TLSEnabledWhenRequested(t *testing.T) {
 // TestServerDSNIPv6Host pins the address the driver dials for an IPv6 server
 // host: the bracketed host:port, whether the host is configured bare ("::1")
 // or bracketed ("[::1]"), and with surrounding whitespace, which
-// configfile.IsIPv6LoopbackHost trims when it classifies the host. A hostname
+// configfile.ClassifyDoltHost trims when it classifies the host. A hostname
 // or IPv4 address joins as it always has.
 func TestServerDSNIPv6Host(t *testing.T) {
 	for _, tc := range []struct{ host, want string }{

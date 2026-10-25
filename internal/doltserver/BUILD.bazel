@@ -67,6 +67,7 @@ go_test(
         "fakedolt_test.go",
         "fdleak_integration_test.go",
         "gc_config_test.go",
+        "host_ownership_test.go",
         "lifecycle_integration_test.go",
         "listenerowner_darwin_test.go",
         "listenerowner_linux_test.go",

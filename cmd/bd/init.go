@@ -3681,10 +3681,10 @@ func resolveInitConfiguredSyncRemote(initRemote string, initRemoteChanged bool, 
 // engine, with the dolt CLI into .beads/dolt (the data directory bd's own
 // server serves), or through the server init's store dials. Under
 // --external, and for a host bd's own server never runs at
-// (doltserver.HostRunsBDServer: another machine, or the IPv6 loopback ::1
-// or [::1]), that server is one some other process runs: a CLI clone into
-// .beads/dolt would be stranded there, and init's store would create an
-// empty database on that server instead.
+// (doltserver.HostRunsBDServer: another machine, another loopback address,
+// or the IPv6 loopback in any spelling), that server is one some other
+// process runs: a CLI clone into .beads/dolt would be stranded there, and
+// init's store would create an empty database on that server instead.
 //
 // A gateway (a credential command is configured and no --server-user names
 // the user, initCloneGateway) keeps the CLI clone whatever its host: the

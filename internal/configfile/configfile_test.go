@@ -648,33 +648,6 @@ func TestIsDoltServerMode_HostInference_GH3545(t *testing.T) {
 	})
 }
 
-// TestIsIPv6LoopbackHost pins the local hosts where bd's own server, which
-// listens on 127.0.0.1 only, never runs: the IPv6 loopback in both spellings
-// IsLocalHostString accepts, and nothing else it accepts.
-func TestIsIPv6LoopbackHost(t *testing.T) {
-	for _, tc := range []struct {
-		host string
-		want bool
-	}{
-		{"::1", true},
-		{"[::1]", true},
-		{" [::1] ", true},
-		{"", false},
-		{"localhost", false},
-		{"127.0.0.1", false},
-		{"0.0.0.0", false},
-		{"2001:db8::1", false},
-		{"[2001:db8::1]", false},
-	} {
-		if got := IsIPv6LoopbackHost(tc.host); got != tc.want {
-			t.Errorf("IsIPv6LoopbackHost(%q) = %v, want %v", tc.host, got, tc.want)
-		}
-		if tc.want && !IsLocalHostString(tc.host) {
-			t.Errorf("IsLocalHostString(%q) = false, want true: the IPv6 loopback is this machine", tc.host)
-		}
-	}
-}
-
 // TestDoltProxiedServerMode covers the IsDoltProxiedServerMode predicate and
 // the GetCapabilities branch that treats proxied-server as multi-process-safe
 // (the proxy daemon serializes writers).

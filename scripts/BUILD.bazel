@@ -87,6 +87,7 @@ go_test(
     # re-runs the rest of this suite too.
     env = {"BEADS_TEST_GO": "$(rlocationpath @go_sdk//:bin/go)"},
     deps = [
+        "//internal/configfile",
         "//internal/doltversion",
         "//internal/formula",
         "//internal/testutil/bazeltest",
@@ -227,7 +228,9 @@ go_test(
 
 # check-testing-short.sh over every Go file, test and non-test, plus the
 # Go-exec half of the host-go-under-Bazel policy (host_tool_exec_policy_test.go
-# scans //:repo_go_srcs and //:repo_go_test_srcs for a literal go/gofmt exec).
+# scans //:repo_go_srcs and //:repo_go_test_srcs for a literal go/gofmt exec),
+# plus the Dolt host policy (dolt_host_policy_test.go scans //:repo_go_srcs
+# for host spellings interpreted outside internal/configfile/dolt_host.go).
 # The shell-script half (host_tool_shell_policy_test.go) is its own
 # :shell_host_tool_policy_test below: it reads a fixed, narrow list of shell
 # scripts, not every Go source file, so it would otherwise pay this target's
@@ -235,6 +238,7 @@ go_test(
 go_test(
     name = "go_sources_test",
     srcs = [
+        "dolt_host_policy_test.go",
         "host_tool_exec_policy_test.go",
         "repo_helpers_test.go",
         "testing_short_tree_test.go",
@@ -244,7 +248,10 @@ go_test(
         "//:repo_go_srcs",
         "//:repo_go_test_srcs",
     ],
-    deps = ["//internal/testutil/bazeltest"],
+    deps = [
+        "//internal/configfile",
+        "//internal/testutil/bazeltest",
+    ],
 )
 
 # The shell-script half of the host-go-under-Bazel policy

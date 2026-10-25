@@ -113,6 +113,47 @@ func TestInitServerExternalRemoteUsesServerCloneMode(t *testing.T) {
 	}
 }
 
+// TestInitRemoteCloneModeFollowsHostOwnership pins bd init's clone mode to
+// configfile.BdRunsServerAt in every spelling of the host
+// (doltserver.HostRunsBDServer): a server-mode init without --external
+// clones with the dolt CLI into .beads/dolt only where bd runs its own
+// server, and through the server init's store opens at any other host, as
+// TestInitServerExternalRemoteUsesServerCloneMode pins for the canonical
+// spellings. --external clones through the server, and an embedded init
+// with the embedded engine, whatever the host.
+func TestInitRemoteCloneModeFollowsHostOwnership(t *testing.T) {
+	for _, tc := range []struct {
+		host string
+		want remoteCloneMode // a server-mode init without --external
+	}{
+		{host: "", want: remoteCloneCLI},
+		{host: "127.0.0.1", want: remoteCloneCLI},
+		{host: "localhost", want: remoteCloneCLI},
+		{host: "LOCALHOST", want: remoteCloneCLI},
+		{host: "0.0.0.0", want: remoteCloneCLI},
+		{host: "[127.0.0.1]", want: remoteCloneCLI},
+		{host: "::ffff:127.0.0.1", want: remoteCloneCLI},
+		{host: "::1", want: remoteCloneExternalServer},
+		{host: "[::1]", want: remoteCloneExternalServer},
+		{host: "0:0:0:0:0:0:0:1", want: remoteCloneExternalServer},
+		{host: "::", want: remoteCloneExternalServer},
+		{host: "127.0.0.2", want: remoteCloneExternalServer},
+		{host: "db.example.com", want: remoteCloneExternalServer},
+	} {
+		t.Run(tc.host, func(t *testing.T) {
+			if got := initRemoteCloneMode(true, false, tc.host, false); got != tc.want {
+				t.Errorf("initRemoteCloneMode(server, not external) for host %q = %v, want %v", tc.host, got, tc.want)
+			}
+			if got := initRemoteCloneMode(true, true, tc.host, false); got != remoteCloneExternalServer {
+				t.Errorf("initRemoteCloneMode(server, external) for host %q = %v, want the server clone", tc.host, got)
+			}
+			if got := initRemoteCloneMode(false, false, tc.host, false); got != remoteCloneEmbedded {
+				t.Errorf("initRemoteCloneMode(embedded) for host %q = %v, want embedded", tc.host, got)
+			}
+		})
+	}
+}
+
 func TestInitDoltServerTLSFromEnv(t *testing.T) {
 	tests := []struct {
 		name string

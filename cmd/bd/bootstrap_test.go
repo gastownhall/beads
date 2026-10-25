@@ -2413,6 +2413,49 @@ func TestDetectBootstrapAction_ShadowDirServerNameMatchSettlesNone(t *testing.T)
 	}
 }
 
+// TestDetectBootstrapAction_ShadowDirSettlesForEveryHost pins the settle gate
+// of the two tests above for every configured host, not only bd's own. A
+// populated local data directory is the evidence bd bootstrap has always used
+// to settle a re-run on an existing workspace (GH#5037), whatever host the
+// workspace dials: a team that moved from bd's own server to one it runs at
+// ::1 or on another machine, and kept .beads/dolt, re-runs bd bootstrap and
+// must get "nothing to do", not a DOLT_CLONE over the server's existing
+// database (Error 1007) or a JSONL import into a new embedded database beside
+// it. sync.remote is configured so a deferred verdict shows up as "sync".
+func TestDetectBootstrapAction_ShadowDirSettlesForEveryHost(t *testing.T) {
+	for _, host := range []string{"127.0.0.1", "::1", "[::1]", "127.0.0.2", "db.example.com"} {
+		for _, arm := range []string{"exists", "unreachable"} {
+			t.Run(host+"/"+arm, func(t *testing.T) {
+				beadsDir, cfg := freshServerModeCloneFixture(t)
+				cfg.DoltServerHost = host
+				t.Setenv("BEADS_DOLT_SERVER_PORT", "23417")
+				if err := os.MkdirAll(filepath.Join(cfg.DoltDataDir, "mydb", ".dolt"), 0o750); err != nil {
+					t.Fatal(err)
+				}
+				orig := checkBootstrapServerDB
+				checkBootstrapServerDB = func(bootstrapServerProbeConfig) bootstrapServerDBCheck {
+					if arm == "exists" {
+						return bootstrapServerDBCheck{Reachable: true, Exists: true}
+					}
+					return bootstrapServerDBCheck{Reachable: false, Err: errors.New("dial tcp: connect: connection refused")}
+				}
+				defer func() { checkBootstrapServerDB = orig }()
+				origDelay := bootstrapRetryDelay
+				bootstrapRetryDelay = func(time.Duration) {}
+				defer func() { bootstrapRetryDelay = origDelay }()
+
+				plan := detectBootstrapAction(beadsDir, cfg)
+				if plan.Action != "none" {
+					t.Fatalf("action = %q (reason %q), want none: the populated local data directory settles a re-run, as it does for bd's own host", plan.Action, plan.Reason)
+				}
+				if arm == "exists" && !plan.HasExisting {
+					t.Error("HasExisting = false on a confirmed server-side database with local evidence")
+				}
+			})
+		}
+	}
+}
+
 // clonePortTestEnv clears every variable that names a Dolt server endpoint,
 // its credentials or the mode, isolates HOME (the shared-server directory,
 // user config and credentials file live there) and resets the config package,

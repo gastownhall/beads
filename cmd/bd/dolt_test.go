@@ -1452,34 +1452,6 @@ func TestPrintAncestorPKMismatchGuidance(t *testing.T) {
 	}
 }
 
-func TestIsLocalHost(t *testing.T) {
-	tests := []struct {
-		name string
-		host string
-		want bool
-	}{
-		{"empty defaults to local", "", true},
-		{"localhost literal", "localhost", true},
-		{"uppercase Localhost", "Localhost", true},
-		{"IPv4 loopback", "127.0.0.1", true},
-		{"IPv6 loopback", "::1", true},
-		{"IPv6 loopback bracketed", "[::1]", true},
-		{"all-zeros bind", "0.0.0.0", true},
-		{"surrounding whitespace", "  127.0.0.1  ", true},
-		{"public IPv4", "20.150.139.92", false},
-		{"named remote", "dolt.example.com", false},
-		{"private LAN IPv4", "192.168.1.10", false},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := isLocalHost(tc.host); got != tc.want {
-				t.Errorf("isLocalHost(%q) = %v, want %v", tc.host, got, tc.want)
-			}
-		})
-	}
-}
-
 // TestRunExternalDoltStatus_Unreachable exercises the external-server
 // status path (bd-q35w) against an unreachable port. This covers the DSN
 // build, ping failure branch, and both output modes (text + JSON) without
@@ -1491,7 +1463,7 @@ func TestRunExternalDoltStatus_Unreachable(t *testing.T) {
 	beadsDir := t.TempDir()
 	// Use 127.0.0.1 so the OS RSTs the connect() fast (connection refused)
 	// rather than taking the 5s DSN timeout against a routable-but-silent
-	// host. runExternalDoltStatus does not consult isLocalHost itself.
+	// host. runExternalDoltStatus does not consult the host predicate itself.
 	cfg := &configfile.Config{
 		DoltMode:       "server",
 		DoltServerHost: "127.0.0.1",
@@ -2633,9 +2605,12 @@ func TestDoltStartRefusesIPv6LoopbackHost(t *testing.T) {
 		name  string
 		host  string
 		inEnv bool
+		want  string
 	}{
-		{"metadata.json bare", "::1", false},
-		{"BEADS_DOLT_SERVER_HOST bracketed", "[::1]", true},
+		{"metadata.json bare", "::1", false, "is the IPv6 loopback (::1)"},
+		{"BEADS_DOLT_SERVER_HOST bracketed", "[::1]", true, "is the IPv6 loopback ([::1])"},
+		{"metadata.json long form", "0:0:0:0:0:0:0:1", false, "is the IPv6 loopback (0:0:0:0:0:0:0:1)"},
+		{"metadata.json other loopback", "127.0.0.2", false, "is 127.0.0.2, a loopback address bd's own server does not listen on"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root, beadsDir, env := externallyManagedStartWorkspace(t, "true")
@@ -2645,7 +2620,7 @@ func TestDoltStartRefusesIPv6LoopbackHost(t *testing.T) {
 			if err == nil {
 				t.Fatalf("bd dolt start succeeded for the IPv6 loopback host %s:\n%s", tc.host, out)
 			}
-			if want := "the configured Dolt server host is the IPv6 loopback (" + tc.host + ")"; !strings.Contains(out, want) {
+			if want := "the configured Dolt server host " + tc.want; !strings.Contains(out, want) {
 				t.Errorf("refusal does not contain %q:\n%s", want, out)
 			}
 			if strings.Contains(out, "dolt is not installed") {
@@ -2676,9 +2651,12 @@ func TestDoltStopRefusesIPv6LoopbackHost(t *testing.T) {
 		name  string
 		host  string
 		inEnv bool
+		want  string
 	}{
-		{"metadata.json bare", "::1", false},
-		{"BEADS_DOLT_SERVER_HOST bracketed", "[::1]", true},
+		{"metadata.json bare", "::1", false, "is the IPv6 loopback (::1)"},
+		{"BEADS_DOLT_SERVER_HOST bracketed", "[::1]", true, "is the IPv6 loopback ([::1])"},
+		{"metadata.json long form", "0:0:0:0:0:0:0:1", false, "is the IPv6 loopback (0:0:0:0:0:0:0:1)"},
+		{"metadata.json other loopback", "127.0.0.2", false, "is 127.0.0.2, a loopback address bd's own server does not listen on"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root, beadsDir, env := externallyManagedStartWorkspace(t, "true")
@@ -2694,7 +2672,7 @@ func TestDoltStopRefusesIPv6LoopbackHost(t *testing.T) {
 			if err == nil {
 				t.Errorf("bd dolt stop succeeded for the IPv6 loopback host %s:\n%s", tc.host, out)
 			}
-			if want := "the configured Dolt server host is the IPv6 loopback (" + tc.host + ")"; !strings.Contains(out, want) {
+			if want := "the configured Dolt server host " + tc.want; !strings.Contains(out, want) {
 				t.Errorf("refusal does not contain %q:\n%s", want, out)
 			}
 			select {

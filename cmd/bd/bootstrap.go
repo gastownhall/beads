@@ -1527,13 +1527,15 @@ func cloneFromRemote(ctx context.Context, beadsDir, remoteURL, dbName string, cf
 	return cloneFromRemoteWithMode(ctx, beadsDir, remoteURL, dbName, cfg, remoteCloneAuto)
 }
 
-// remoteCloneViaEmbedded, remoteCloneViaServer and remoteCloneIntoDataDir run
-// the embedded-engine, the server and the owned data-directory clone
-// cloneFromRemoteWithMode picks. Injectable for testing.
+// remoteCloneViaEmbedded, remoteCloneViaServer, remoteCloneIntoDataDir and
+// remoteCloneViaCLI run the embedded-engine, the server, the owned
+// data-directory and the dolt CLI clone cloneFromRemoteWithMode picks.
+// Injectable for testing.
 var (
 	remoteCloneViaEmbedded = cloneViaEmbedded
 	remoteCloneViaServer   = cloneViaServer
 	remoteCloneIntoDataDir = cloneIntoOwnedDataDir
+	remoteCloneViaCLI      = cloneViaCLI
 )
 
 func cloneFromRemoteWithMode(ctx context.Context, beadsDir, remoteURL, dbName string, cfg *configfile.Config, cloneMode remoteCloneMode) error {
@@ -1583,10 +1585,10 @@ func cloneFromRemoteWithMode(ctx context.Context, beadsDir, remoteURL, dbName st
 		}
 		// No config available — fall through to CLI clone.
 		fmt.Fprintf(os.Stderr, "Warning: server mode detected but no config available, falling back to CLI clone\n")
-		return cloneViaCLI(ctx, beadsDir, remoteURL, dbName)
+		return remoteCloneViaCLI(ctx, beadsDir, remoteURL, dbName)
 
 	default:
-		return cloneViaCLI(ctx, beadsDir, remoteURL, dbName)
+		return remoteCloneViaCLI(ctx, beadsDir, remoteURL, dbName)
 	}
 }
 

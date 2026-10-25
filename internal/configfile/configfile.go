@@ -467,6 +467,11 @@ func (c *Config) IsDoltServerMode() bool {
 //     GetDoltServerHost precedence).
 //   - An explicit config.yaml dolt.mode disables inference from the
 //     config.yaml dolt.host.
+//
+// "Localhost" here is IsLocalHostString, the machine-locality question, not
+// the ownership one (BdRunsServerAt): the IPv6 loopback in any spelling is
+// this machine and infers nothing, while another loopback address such as
+// 127.0.0.2 infers server mode, as a host on another machine does.
 func (c *Config) HostImpliesServerMode() bool {
 	if strings.EqualFold(c.DoltMode, DoltModeProxiedServer) {
 		return false
@@ -535,29 +540,6 @@ func doltServerPortFromEnv() int {
 		}
 	}
 	return 0
-}
-
-// IsLocalHostString reports whether host refers to the local machine, for
-// the purposes of mode inference. Mirrors the helpers in cmd/bd/dolt.go
-// and internal/storage/dolt/store.go; kept private to this package to
-// limit the blast radius of GH#3545's fix — consolidating the (now four)
-// definitions is a separate cleanup.
-func IsLocalHostString(host string) bool {
-	switch strings.ToLower(strings.TrimSpace(host)) {
-	case "", "localhost", "127.0.0.1", "::1", "[::1]", "0.0.0.0":
-		return true
-	}
-	return false
-}
-
-// IsIPv6LoopbackHost reports whether host is the IPv6 loopback in either
-// spelling, "::1" or "[::1]". IsLocalHostString counts it as this machine, but
-// bd's own Dolt server listens on 127.0.0.1 only, so a server there is never
-// one bd started or can start. A caller that decides whether bd manages the
-// server at host, auto-starts it, or advises `bd dolt start` for it excludes
-// this host.
-func IsIPv6LoopbackHost(host string) bool {
-	return UnbracketHost(host) == "::1"
 }
 
 func (c *Config) IsDoltProxiedServerMode() bool {

@@ -116,17 +116,18 @@ func RunDoltPerformanceDiagnostics(path string, enableProfiling bool) (*DoltPerf
 
 // databaseSizeFor is the size of the database the Dolt server at host
 // serves, read from beadsDir's data directory. That directory holds it only
-// for a server bd runs: not one on another machine, nor one at the IPv6
-// loopback, where bd's own server, which listens on 127.0.0.1 only, never
-// runs.
+// for a server bd runs (configfile.BdRunsServerAt): not one on another
+// machine, nor one at the IPv6 loopback or another loopback address, where
+// bd's own server, which listens on 127.0.0.1 only, never runs.
 func databaseSizeFor(beadsDir, host string) string {
-	switch {
-	case !configfile.IsLocalHostString(host):
+	switch configfile.ClassifyDoltHost(host) {
+	case configfile.DoltHostBdServer:
+		return getDoltDatabaseSize(getDatabasePath(beadsDir))
+	case configfile.DoltHostRemote:
 		return "n/a (server on another machine)"
-	case configfile.IsIPv6LoopbackHost(host):
+	default:
 		return "n/a (server bd does not run)"
 	}
-	return getDoltDatabaseSize(getDatabasePath(beadsDir))
 }
 
 // loadServerConfig is beadsDir's metadata.json, or, when that is missing or

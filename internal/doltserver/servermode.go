@@ -355,16 +355,16 @@ func ExternallyManagedAdvice(setting, endpoint string) string {
 
 // UnreachableEndpointAdvice is the advice for a TCP dial of host:port, the
 // port resolved from source, that found no server, or "" when the caller's own
-// advice stands. A host off this machine gets the remote-host advice
-// (GH#3518): bd starts no server there, and `bd dolt start` refuses a remote
-// host. So does the IPv6 loopback, where bd's own server, which listens on
-// 127.0.0.1 only, never runs and `bd dolt start` refuses too. With no port
-// resolved (port 0), either gets UnresolvedPortAdvice instead, never a check
-// of port 0. Any other host on this machine gets the externally managed
-// advice when a setting declares the workspace's server so (see
+// advice stands. A host bd does not run its server at
+// (configfile.BdRunsServerAt) gets the remote-host advice (GH#3518): on
+// another machine, at the IPv6 loopback or at another loopback address bd
+// starts no server, and `bd dolt start` refuses the host. With no port
+// resolved (port 0), it gets UnresolvedPortAdvice instead, never a check of
+// port 0. The host bd runs its server at gets the externally managed advice
+// when a setting declares the workspace's server so (see
 // ExternalPortSetting).
 func UnreachableEndpointAdvice(beadsDir, host string, port int, source PortSource) string {
-	if !configfile.IsLocalHostString(host) || configfile.IsIPv6LoopbackHost(host) {
+	if !configfile.BdRunsServerAt(host) {
 		if port == 0 {
 			return UnresolvedPortAdvice(host)
 		}
@@ -374,12 +374,12 @@ func UnreachableEndpointAdvice(beadsDir, host string, port int, source PortSourc
 }
 
 // UnresolvedPortAdvice is the advice for a Dolt server at host for which no
-// port source resolved a port, or "" when bd runs the server there, whose
-// start resolves one. bd runs no server on another machine or at the IPv6
-// loopback, so no bd command publishes a port for one there, and the store
-// refuses to open until the port is pinned, with this advice.
+// port source resolved a port, or "" when bd runs the server there
+// (configfile.BdRunsServerAt), whose start resolves one. bd runs no server
+// anywhere else, so no bd command publishes a port for one there, and the
+// store refuses to open until the port is pinned, with this advice.
 func UnresolvedPortAdvice(host string) string {
-	if configfile.IsLocalHostString(host) && !configfile.IsIPv6LoopbackHost(host) {
+	if configfile.BdRunsServerAt(host) {
 		return ""
 	}
 	return fmt.Sprintf("bd does not manage the Dolt server at %s; pin its port with "+
@@ -387,8 +387,8 @@ func UnresolvedPortAdvice(host string) string {
 }
 
 // remoteServerAdvice is the advice for a Dolt server at host:port that bd
-// does not run, on another machine or at the IPv6 loopback, and could not
-// reach, in the words the store uses for one.
+// does not run (configfile.BdRunsServerAt) and could not reach, in the words
+// the store uses for one.
 func remoteServerAdvice(host string, port int) string {
 	return "Verify the external server is running and reachable from this host:\n  " +
 		ReachabilityCheck(host, port)

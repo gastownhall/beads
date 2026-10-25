@@ -331,14 +331,15 @@ func (e Endpoint) hostRunsBDServer() bool {
 	return HostRunsBDServer(e.Host)
 }
 
-// HostRunsBDServer reports whether a server bd runs could be at host: one on
-// this machine other than the IPv6 loopback, where bd's own server, which
-// listens on 127.0.0.1 only, never runs. A server at any other host (another
-// machine, ::1 or [::1]) is one some other process runs, whatever bd's mode
-// settings say. It is the store's own classification
-// (dolt.isExternalServerHost is its negation).
+// HostRunsBDServer reports whether a server bd runs could be at host:
+// configfile.BdRunsServerAt, 127.0.0.1, the one address bd's own server
+// listens on, in any spelling a dial reaches it by. A server at any other host
+// (another machine, the IPv6 loopback in any spelling, or another loopback
+// address) is one some other process runs, whatever bd's mode settings say.
+// It is the store's own classification (dolt.isExternalServerHost is its
+// negation).
 func HostRunsBDServer(host string) bool {
-	return configfile.IsLocalHostString(host) && !configfile.IsIPv6LoopbackHost(host)
+	return configfile.BdRunsServerAt(host)
 }
 
 // ManagedElsewhere reports a server that something other than bd runs,
@@ -378,21 +379,14 @@ func (e Endpoint) BDStartsServer() bool {
 
 // AutoStartReaches reports whether a server the store's auto-start starts
 // is one a dial to host over socket reaches: TCP only, since that server
-// listens on TCP and never on a unix socket, and a host on this machine
-// other than the IPv6 loopback, since it listens on 127.0.0.1 only. The
-// store's open (dolt.serverOpenCanAutoStart) and Endpoint.BDStartsServer
-// both ask it, so a caller that acts on "a bd command starts this server"
-// (bd bootstrap with no port resolved) never counts on an auto-start the
-// open will not make.
+// listens on TCP and never on a unix socket, and a host bd runs its server
+// at (HostRunsBDServer), since it listens on 127.0.0.1 only. The store's
+// open (dolt.serverOpenCanAutoStart) and Endpoint.BDStartsServer both ask
+// it, so a caller that acts on "a bd command starts this server" (bd
+// bootstrap with no port resolved) never counts on an auto-start the open
+// will not make.
 func AutoStartReaches(host, socket string) bool {
-	if socket != "" {
-		return false
-	}
-	switch host {
-	case "", "127.0.0.1", "localhost":
-		return true
-	}
-	return false
+	return socket == "" && HostRunsBDServer(host)
 }
 
 // UnresolvedAdvice is what to do about e when it has no address (no port
@@ -441,10 +435,11 @@ func (e Endpoint) UnresolvedError() error {
 // (unresolvedServerPortError) and Endpoint.UnresolvedAdvice. portFile is
 // the port file whatever runs the server publishes its port in.
 //
-// A server bd does not run, on another machine or at the IPv6 loopback, gets
-// UnresolvedPortAdvice: pin the port. One on this machine that bd will not
-// start, because auto-start is off or the server is externally managed, must
-// publish its port again or have it pinned. Otherwise bd starts the server:
+// A server bd does not run (HostRunsBDServer), on another machine or at the
+// IPv6 loopback, gets UnresolvedPortAdvice: pin the port. One on this
+// machine that bd will not start, because auto-start is off or the server is
+// externally managed, must publish its port again or have it pinned.
+// Otherwise bd starts the server:
 // a command that opens the store does, as does `bd dolt start`. It never
 // offers a default port, since on a shared machine whatever listens there may
 // belong to another project (GH#2098, GH#2372).
@@ -452,7 +447,7 @@ func UnresolvedPortRemedy(host, portFile string, autoStartDisabled, externallyMa
 	const pinPort = "BEADS_DOLT_SERVER_PORT or dolt.port in .beads/config.yaml"
 	var b strings.Builder
 	switch {
-	case !configfile.IsLocalHostString(host) || configfile.IsIPv6LoopbackHost(host):
+	case !HostRunsBDServer(host):
 		b.WriteString(UnresolvedPortAdvice(host))
 	case autoStartDisabled || externallyManaged:
 		if autoStartDisabled {

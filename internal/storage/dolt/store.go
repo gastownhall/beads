@@ -1868,13 +1868,13 @@ func New(ctx context.Context, cfg *Config) (*DoltStore, error) {
 // server configurations whose storage ownership is known. It deliberately
 // does not infer locality from Path, CLIDir, or filesystem existence: external
 // servers may leave unrelated client-local directories at those locations.
-// Nor is a server at the IPv6 loopback ever one whose data directory bd
-// knows: bd's own server, shared or not, listens on 127.0.0.1 only.
+// Nor is a server at a host bd does not run its server at
+// (configfile.BdRunsServerAt) ever one whose data directory bd knows: bd's
+// own server, shared or not, listens on 127.0.0.1 only.
 func resolveLocalActiveDatabaseDir(cfg *Config) string {
 	if cfg == nil || cfg.BeadsDir == "" || cfg.Database == "" ||
 		cfg.Gateway || cfg.ProxiedServer || cfg.ServerSocket != "" ||
-		cfg.ServerTLS || !isLocalHost(cfg.ServerHost) ||
-		configfile.IsIPv6LoopbackHost(cfg.ServerHost) {
+		cfg.ServerTLS || !configfile.BdRunsServerAt(cfg.ServerHost) {
 		return ""
 	}
 
@@ -2215,7 +2215,7 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 					"Auto-start is not supported in socket mode.",
 					remedy.PrintedValue(cfg.ServerSocket), socket, note)
 			} else if isExternalServerHost(cfg.ServerHost) {
-				// External (non-localhost or IPv6 loopback) server: bd
+				// A server bd does not run (configfile.BdRunsServerAt): bd
 				// does not manage it; "bd dolt start" would be wrong
 				// advice (GH#3518). Suggest verifying the external server
 				// instead. The endpoint is addr, which brackets an IPv6
@@ -2387,13 +2387,12 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		}
 	}
 
-	if isLocalHost(cfg.ServerHost) {
-		beadsDir := cfg.BeadsDir
-		if beadsDir == "" && cfg.Path != "" {
-			beadsDir = filepath.Dir(cfg.Path)
-		}
-		_ = persistResolvedPortFile(cfg, beadsDir)
+	// persistResolvedPortFile records the port only for a server bd runs.
+	portFileDir := cfg.BeadsDir
+	if portFileDir == "" && cfg.Path != "" {
+		portFileDir = filepath.Dir(cfg.Path)
 	}
+	_ = persistResolvedPortFile(cfg, portFileDir)
 
 	// All writers operate on main — transaction isolation via RunInTransaction
 	// replaces the former branch-per-worker approach (BD_BRANCH).
@@ -2508,10 +2507,10 @@ func initializeServerCircuitBreaker(cfg *Config) *circuitBreaker {
 //
 // The dial must be one the started server answers
 // (doltserver.AutoStartReaches, which doltserver.Endpoint.BDStartsServer asks
-// too): TCP, since that server never listens on a unix socket, to a host on
-// this machine other than the IPv6 loopback, since it listens on 127.0.0.1
-// only, so a retry at [::1]:port would still find nothing and leave that
-// server running.
+// too): TCP, since that server never listens on a unix socket, to a host bd
+// runs its server at (configfile.BdRunsServerAt), since it listens on
+// 127.0.0.1 only, so at any other host, the IPv6 loopback included, the
+// retry would still find nothing at host:port and leave bd's server running.
 func serverOpenCanAutoStart(cfg *Config) bool {
 	return !cfg.DisableAutoStart && cfg.AutoStart && cfg.Path != "" &&
 		doltserver.AutoStartReaches(cfg.ServerHost, cfg.ServerSocket)
@@ -2582,12 +2581,12 @@ func externallyManagedPortHint(cfg *Config, beadsDir, addr string) string {
 // persistResolvedPortFile records the port a successful local open reached in
 // bd's port file. It writes no pid file, so the record does not make the
 // server bd's own: doltserver.ExternalPortSetting still names the setting
-// that declared the port when a later open finds the server down. A server at
-// the IPv6 loopback gets no record: the port file names a port on 127.0.0.1,
-// where bd's own server listens, and doltserver.DefaultConfig ignores it for
-// that host.
+// that declared the port when a later open finds the server down. Only a
+// server at a host bd runs its server at (configfile.BdRunsServerAt) gets a
+// record: the port file names a port on 127.0.0.1, where bd's own server
+// listens, and doltserver.DefaultConfig ignores it for any other host.
 func persistResolvedPortFile(cfg *Config, beadsDir string) error {
-	if cfg.DisableAutoStart || !shouldPersistResolvedPortFile() || configfile.IsIPv6LoopbackHost(cfg.ServerHost) {
+	if cfg.DisableAutoStart || !shouldPersistResolvedPortFile() || !configfile.BdRunsServerAt(cfg.ServerHost) {
 		return nil
 	}
 	return ensureResolvedPortFile(beadsDir, cfg.ServerPort)
@@ -2707,23 +2706,11 @@ func (s *DoltStore) verifyGlobalProjectIdentity(ctx context.Context, beadsDir st
 	return nil
 }
 
-// isLocalHost returns true if the host refers to the local machine.
-func isLocalHost(host string) bool {
-	switch host {
-	case "", "127.0.0.1", "localhost", "::1", "[::1]":
-		return true
-	}
-	return false
-}
-
 // isExternalServerHost reports whether host names a server bd does not
-// manage, for the purposes of connect-failure hints (GH#3518). That is a
-// host off this machine by the mode-inference classification in
-// internal/configfile, which unlike isLocalHost normalizes case/whitespace
-// and treats 0.0.0.0 as local (the two must agree, or an unreachable local
-// server gets external-server advice with no "bd dolt start" recovery
-// hint), or the IPv6 loopback in either spelling: bd's own server listens
-// on 127.0.0.1 only, so "bd dolt start" cannot bring up a server there.
+// manage, for the purposes of connect-failure hints (GH#3518): any host but
+// the one bd runs its own server at (doltserver.HostRunsBDServer, which is
+// configfile.BdRunsServerAt), so "bd dolt start" is advised exactly where bd
+// would auto-start.
 func isExternalServerHost(host string) bool {
 	return !doltserver.HostRunsBDServer(host)
 }
@@ -3385,13 +3372,13 @@ func sharedServerDatabase(cfg *Config) bool {
 	if cfg == nil || cfg.BeadsDir == "" {
 		return true
 	}
-	// Somebody else's server by construction: a host that is not this
-	// machine, the IPv6 loopback, a TLS endpoint (Hosted Dolt), or a unix
-	// socket — bd's own auto-start only ever creates a TCP listener on
+	// Somebody else's server by construction: a host bd does not run its
+	// server at (configfile.BdRunsServerAt: another machine, the IPv6
+	// loopback, another loopback address), a TLS endpoint (Hosted Dolt), or
+	// a unix socket — bd's own auto-start only ever creates a TCP listener on
 	// 127.0.0.1. So state files a server bd started there left behind prove
 	// nothing about a server at [::1], even on the same port.
-	if !isLocalHost(cfg.ServerHost) || configfile.IsIPv6LoopbackHost(cfg.ServerHost) ||
-		cfg.ServerTLS || cfg.ServerSocket != "" {
+	if !configfile.BdRunsServerAt(cfg.ServerHost) || cfg.ServerTLS || cfg.ServerSocket != "" {
 		return true
 	}
 	// The one shared topology that is otherwise indistinguishable from an

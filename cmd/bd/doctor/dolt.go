@@ -87,14 +87,11 @@ func openDoltDB(beadsDir string) (*sql.DB, *configfile.Config, error) {
 }
 
 // bdRunsServer reports whether the Dolt server cfg names at host is one bd
-// runs, and so one the next bd command can start. bd runs none at the IPv6
-// loopback, where its own server, which listens on 127.0.0.1 only, never
-// runs, nor on another machine. A proxied-server workspace's server is bd's
-// own proxy, whatever host the environment names (see
-// configfile.Config.HostImpliesServerMode).
+// runs, and so one the next bd command can start: configfile.BdRunsServerAt.
+// A proxied-server workspace's server is bd's own proxy, whatever host the
+// environment names (see configfile.Config.HostImpliesServerMode).
 func bdRunsServer(cfg *configfile.Config, host string) bool {
-	return cfg.IsDoltProxiedServerMode() ||
-		(configfile.IsLocalHostString(host) && !configfile.IsIPv6LoopbackHost(host))
+	return cfg.IsDoltProxiedServerMode() || configfile.BdRunsServerAt(host)
 }
 
 // doltConn holds an open Dolt connection.

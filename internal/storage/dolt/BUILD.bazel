@@ -250,6 +250,7 @@ go_test(
         "history_off_differential_test.go",
         "history_presence_contract_test.go",
         "history_test.go",
+        "host_ownership_test.go",
         "identity_mismatch_message_test.go",
         "indeterminate_commit_test.go",
         "initschema_0067_versioned_beads_replay_test.go",
