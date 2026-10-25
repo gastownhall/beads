@@ -6,8 +6,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
+
+	"github.com/steveyegge/beads/internal/remedy"
 )
 
 const (
@@ -74,11 +77,15 @@ func corruptJournalRecoveryHint(beadsDir string) string {
 	ts := time.Now().UTC().Format("20060102T150405Z")
 	doltDir := filepath.Join(beadsDir, "dolt")
 	backupDir := filepath.Join(beadsDir, "dolt.corrupt."+ts)
+	// Both paths go into the mv command as one shell word each: bare, a
+	// workspace path with a space in it would move the wrong paths.
+	doltArg, doltNote := remedy.CommandArg(runtime.GOOS, doltDir, "<dolt-dir>")
+	backupArg, backupNote := remedy.CommandArg(runtime.GOOS, backupDir, "<backup-dir>")
 	return fmt.Sprintf(`Dolt journal corruption detected in %s.
 
 bd will not run automatic journal repair because Dolt's repair mode can discard data.
 Recommended recovery when your remote is current:
-  mv %s %s
+  mv %s %s%s%s
   bd bootstrap --dry-run
   bd bootstrap --yes
   bd stats
@@ -88,7 +95,7 @@ If the remote may be stale, snapshot %s first and inspect with:
   dolt fsck --revive-journal-with-data-loss
 
 Only use the fsck revive path after reviewing Dolt's data-loss warning.`,
-		logPath(beadsDir), doltDir, backupDir, doltDir)
+		remedy.PrintedValue(logPath(beadsDir)), doltArg, backupArg, doltNote, backupNote, remedy.PrintedValue(doltDir))
 }
 
 // findCorruptNomsDirs walks doltDir and returns the paths of every

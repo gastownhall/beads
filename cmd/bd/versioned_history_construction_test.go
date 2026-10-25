@@ -136,13 +136,14 @@ func TestVersionedHistoryGuardSeesTheFactoriesEveryWriteUses(t *testing.T) {
 var versionedHistoryFactoryKeys = []string{
 	"store_factory.go:newDoltStore",
 	// Both routed-open wrappers (newDoltStoreFromConfig and
-	// newExistingDoltStoreFromConfig) delegate to this activating body.
+	// newExistingDoltStoreFromConfig) delegate to this activating body, and so
+	// does bd migrate-personal's planning-store open
+	// (openMigrationPlanningStore -> openRoutedTargetStore).
 	"store_factory.go:openDoltStoreFromConfig",
 	"store_factory.go:newRegisteredBackendStore",
 	"store_factory_nocgo.go:newDoltStore",
 	"store_factory_nocgo.go:newDoltStoreFromConfig",
 	"store_factory_nocgo.go:newRegisteredBackendStore",
-	"migrate_personal.go:openMigrationPlanningStore",
 	"uow_factory.go:newExternalProxiedServerUOWProvider",
 	"uow_factory.go:newManagedProxiedServerUOWProvider",
 }

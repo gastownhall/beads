@@ -47,7 +47,8 @@ exports_files(
 )
 
 # sh_test src that runs an existing go_test binary with no network but
-# loopback (see the script header), e.g. //cmd/bd:bd_managed_local_test.
+# loopback, optionally sharded by a test manifest (see the script header),
+# e.g. //cmd/bd:bd_managed_local_test.
 exports_files(
     ["go_test_offline.sh"],
     visibility = ["//visibility:public"],
@@ -212,6 +213,7 @@ release_cross_build(
         "//internal/gitignore:gitignore",
         "//internal/gitlab:gitlab",
         "//internal/gittraceenv:gittraceenv",
+        "//internal/historicalsqlite:historicalsqlite",
         "//internal/hooks:hooks",
         "//internal/httpapi/apigen:apigen",
         "//internal/httpapi/spec:spec",
@@ -235,6 +237,7 @@ release_cross_build(
         "//internal/procid:procid",
         "//internal/query:query",
         "//internal/recipes:recipes",
+        "//internal/remedy:remedy",
         "//internal/remotecache:remotecache",
         "//internal/routing:routing",
         "//internal/storage/backendnames:backendnames",

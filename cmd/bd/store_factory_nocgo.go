@@ -22,6 +22,12 @@ func isEmbeddedMode() bool {
 	return false
 }
 
+// isEmbeddedStore reports whether st is an embedded Dolt store, which a
+// non-CGO build never opens.
+func isEmbeddedStore(storage.DoltStorage) bool {
+	return false
+}
+
 func usesProxiedServer() bool {
 	if shouldUseGlobals() {
 		return proxiedServerMode
@@ -69,7 +75,9 @@ func acquireEmbeddedLock(_ string, _ bool) (util.Unlocker, error) {
 func newDoltStoreFromConfig(ctx context.Context, beadsDir string) (s storage.DoltStorage, err error) {
 	defer func() { s, err = activateVersionedHistoryStore(ctx, s, err) }()
 	defer func() { s, err = activateEventsJournalStore(beadsDir, s, err) }()
-	if err := checkDiscoveredWorkspaceFormat(beadsDir); err != nil {
+	// Before Load can migrate a legacy config.json; validateConfiguredBackend
+	// below re-checks the loaded config.
+	if err := checkDiscoveredBackend(beadsDir); err != nil {
 		return nil, err
 	}
 	cfg, err := configfile.Load(beadsDir)
@@ -109,7 +117,9 @@ func newExistingDoltStoreFromConfig(ctx context.Context, beadsDir string) (stora
 // in the construction guard). The registry arm is the exception the cgo
 // twin, openNonMutatingStoreFromConfig, describes.
 func newReadOnlyStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
-	if err := checkDiscoveredWorkspaceFormat(beadsDir); err != nil {
+	// Before Load can migrate a legacy config.json; validateConfiguredBackend
+	// below re-checks the loaded config.
+	if err := checkDiscoveredBackend(beadsDir); err != nil {
 		return nil, err
 	}
 	cfg, err := configfile.Load(beadsDir)

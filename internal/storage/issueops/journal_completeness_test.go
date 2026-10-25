@@ -215,6 +215,12 @@ var beadDMLExemptions = map[string]string{
 	// already-journaled-by-the-caller bookkeeping, plus stamping
 	// participation_generation on the row it just inserted into issue_versions.
 	"RecordVersionForCreateInTx": "advances the denormalized current_revision pointer and stamps participation_generation to match a snapshot just inserted into issue_versions (not a bead table); called from the same create entry points that already journal the mutation via RecordEventInTx, so this is bookkeeping for an already-journaled mutation, not a second one",
+	// CarryParticipationToWispInTx is the demotion half of a plane round
+	// trip's participation carry (carryParticipationInTx): it writes only the
+	// participation_generation bookkeeping column of the wisps row the demotion
+	// just inserted, and the demoting caller (DoltStore.demoteToWispInTx)
+	// journals the move itself.
+	"CarryParticipationToWispInTx": "writes only the participation_generation bookkeeping column of the wisps row a demotion just inserted; the demoting caller journals the move, so this is bookkeeping for an already-journaled mutation, not a second one",
 
 	// RecordVersionAtInTx (R7.1 as-of read, gastownhall/beads#5898 rev 9,
 	// gastownhall/beads#6136) is RecordVersionInTx's test-support

@@ -9,21 +9,21 @@ import (
 )
 
 func TestCheckRecommended(t *testing.T) {
-	old := Identity{Version: MustParse("1.52.1")}
+	old := Identity{Version: MustParse("2.4.2")}
 	if w := CheckRecommended(old); w == nil {
-		t.Error("CheckRecommended(1.52.1) = nil, want warning (below RecommendedMin)")
-	} else if w.Probed.String() != "1.52.1" || w.Recommended.String() != RecommendedMin.String() {
+		t.Error("CheckRecommended(2.4.2) = nil, want warning (below RecommendedMin)")
+	} else if w.Probed.String() != "2.4.2" || w.Recommended.String() != RecommendedMin.String() {
 		t.Errorf("CheckRecommended warning fields = %+v", w)
 	}
 
-	newEnough := Identity{Version: MustParse("2.0.0")}
+	newEnough := Identity{Version: MustParse("2.5.0")}
 	if w := CheckRecommended(newEnough); w != nil {
-		t.Errorf("CheckRecommended(2.0.0) = %v, want nil", w)
+		t.Errorf("CheckRecommended(2.5.0) = %v, want nil", w)
 	}
 
-	newer := Identity{Version: MustParse("2.1.0")}
+	newer := Identity{Version: MustParse("2.5.1")}
 	if w := CheckRecommended(newer); w != nil {
-		t.Errorf("CheckRecommended(2.1.0) = %v, want nil", w)
+		t.Errorf("CheckRecommended(2.5.1) = %v, want nil", w)
 	}
 }
 
@@ -31,6 +31,24 @@ func TestWarningMessage(t *testing.T) {
 	old := &Warning{kind: warningOldVersion, Probed: MustParse("1.52.1"), Recommended: RecommendedMin}
 	if msg := old.Message(); msg == "" {
 		t.Error("Message() for old-version warning is empty")
+	} else {
+		// The advisory names what goes wrong below the recommendation, release
+		// range by release range, not just that something may. Below 2.3.3 it
+		// names both errors and both kinds of database that hold the
+		// descending index: the warning prints in proxied-server mode, where
+		// the probed dolt runs the sql-server that creates the schema.
+		for _, want := range []string{
+			"1.52.1", RecommendedMin.String(),
+			"2.4.0 through 2.4.2", "dolthub/dolt#12093",
+			"before 2.4.0", "dolthub/dolt#11886",
+			"2.3.0 and 2.3.1", "DOLT_RESET('--hard')",
+			"before 2.3.3", "table has unknown fields", "fk_comp_snap_issue",
+			"bd creates in embedded mode", "dolt sql-server 2.3.3 or newer created",
+		} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("Message() = %q, want it to mention %q", msg, want)
+			}
+		}
 	}
 
 	unverifiable := &Warning{kind: warningUnverifiable, RawOutput: "garbage output"}
@@ -111,7 +129,7 @@ func TestProbeWithPolicyRecommendedVersion(t *testing.T) {
 	dir := t.TempDir()
 
 	t.Run("recommended version produces no warning", func(t *testing.T) {
-		stub := writeVersionEchoStub(t, dir, "dolt-recent", "dolt version 2.0.0")
+		stub := writeVersionEchoStub(t, dir, "dolt-recent", "dolt version 2.5.0")
 		_, warn, err := ProbeWithPolicy(context.Background(), stub)
 		if err != nil {
 			t.Fatalf("ProbeWithPolicy: %v", err)

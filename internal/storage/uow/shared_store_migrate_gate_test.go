@@ -236,3 +236,137 @@ func TestInitSchemaSharedStoreGate(t *testing.T) {
 		}
 	})
 }
+
+// TestReadThroughRefusedMigrationWarning pins the composed stderr of the
+// proxied read-through (bd-mfsky, the uow leg of #6660). Every refusal the
+// smart gate shaped — a non-empty Decision, or the #6575 data-behind stop —
+// must lead with the gate's own UserMessage body, as embedded's
+// lenientGateWarningBody and server mode's warnLenientOpenRefusal render it.
+// Only the blunt fallback keeps the one-line summary plus the consent
+// sentence. It drives the real function, so it pins what an operator reads.
+func TestReadThroughRefusedMigrationWarning(t *testing.T) {
+	const modeLine = "  Read-only command: continuing on schema v65 without migrating.\n"
+	for _, tc := range []struct {
+		name    string
+		gateErr *schema.RemoteMigrateGateError
+		// marker is text only this refusal's own body produces, so a
+		// Decision literal that drifts from the schema constant lands on a
+		// different body and fails here instead of passing vacuously.
+		marker string
+		// shaped rows must render UserMessage; the blunt fallback keeps
+		// Error() and the consent sentence.
+		shaped bool
+		// consentVerbOK marks the rows whose text legitimately names the
+		// bare consent verb: shared-no-remote has no remote, so that verb is
+		// the consent there, and the blunt fallback's sentence is unchanged.
+		consentVerbOK bool
+		// forceOK marks data-behind, whose "Do NOT use `bd migrate --force`"
+		// paragraph names the command it forbids.
+		forceOK bool
+	}{
+		{
+			name: "fork-skew",
+			gateErr: &schema.RemoteMigrateGateError{
+				CurrentVersion: 65, LatestVersion: 70, Pending: 5,
+				Decision: "fork-skew", SkewVersions: []int{66}, Shared: true, Proxied: true,
+			},
+			marker: "cannot un-fork it",
+			shaped: true,
+		},
+		{
+			name: "adopt",
+			gateErr: &schema.RemoteMigrateGateError{
+				CurrentVersion: 65, LatestVersion: 70, Pending: 5,
+				Decision: "adopt", Shared: true, Proxied: true,
+			},
+			marker: "adopt the remote's migrated database instead",
+			shaped: true,
+		},
+		{
+			name: "shared-no-remote",
+			gateErr: &schema.RemoteMigrateGateError{
+				CurrentVersion: 65, LatestVersion: 70, Pending: 5,
+				Decision: "shared-no-remote", Shared: true, Proxied: true,
+			},
+			marker:        "Upgrade bd on every client of this server first",
+			shaped:        true,
+			consentVerbOK: true,
+		},
+		{
+			name: "data-behind",
+			gateErr: &schema.RemoteMigrateGateError{
+				CurrentVersion: 65, LatestVersion: 70, Pending: 5,
+				FallbackReason: "data-behind", DataDiverged: true, Shared: true, Proxied: true,
+			},
+			marker:  "Pull first",
+			shaped:  true,
+			forceOK: true,
+		},
+		{
+			name: "blunt shared-store fallback",
+			gateErr: &schema.RemoteMigrateGateError{
+				CurrentVersion: 65, LatestVersion: 70, Pending: 5,
+				FallbackReason: "shared-store", Shared: true, Proxied: true,
+			},
+			marker:        "Run '" + schema.SharedConsentCommand + "'",
+			consentVerbOK: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if want := tc.name == "data-behind"; tc.gateErr.IsDataBehind() != want {
+				t.Fatalf("IsDataBehind() = %v, want %v — the fixture's FallbackReason literal drifted", !want, want)
+			}
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("create sql mock: %v", err)
+			}
+			defer db.Close()
+			ctx := context.Background()
+			conn, err := db.Conn(ctx)
+			if err != nil {
+				t.Fatalf("pin connection: %v", err)
+			}
+			defer conn.Close()
+			mock.ExpectExec(regexp.QuoteMeta("USE `beads`")).
+				WillReturnResult(sqlmock.NewResult(0, 0))
+
+			var readErr error
+			stderr := captureStderr(t, func() {
+				readErr = readThroughRefusedMigration(ctx, conn, "beads", tc.gateErr)
+			})
+			if readErr != nil {
+				t.Fatalf("readThroughRefusedMigration() = %v, want nil — the read proceeds on the old schema", readErr)
+			}
+			if !strings.Contains(stderr, tc.marker) {
+				t.Errorf("warning missing %q:\n%s", tc.marker, stderr)
+			}
+			// Body first, then the mode line, as on embedded: the shaped body
+			// leads the warning rather than being replaced by the summary.
+			lead := "Warning: " + tc.gateErr.Error() + "\n" + modeLine
+			if tc.shaped {
+				lead = "Warning: " + tc.gateErr.UserMessage() + modeLine
+			}
+			if !strings.HasPrefix(stderr, lead) {
+				t.Errorf("warning does not open with\n%s\ngot:\n%s", lead, stderr)
+			}
+			if !strings.HasSuffix(stderr, "\n") {
+				t.Errorf("warning is unterminated:\n%q", stderr)
+			}
+			if !tc.forceOK && strings.Contains(stderr, "bd migrate --force") {
+				t.Errorf("warning prescribes `bd migrate --force`:\n%s", stderr)
+			}
+			// adopt and fork-skew are remote-backed, where the bare verb's
+			// consent is never read (schema.SharedConsentCommandForced), and
+			// their bodies say not to migrate at all. Scrub the forced forms
+			// first: each contains the bare verb.
+			scrubbed := strings.ReplaceAll(stderr, schema.SharedConsentCommandForcedGlobal, "")
+			scrubbed = strings.ReplaceAll(scrubbed, schema.SharedConsentCommandForced, "")
+			if !tc.consentVerbOK && strings.Contains(scrubbed, schema.SharedConsentCommand) {
+				t.Errorf("warning prescribes the bare consent verb %q:\n%s", schema.SharedConsentCommand, stderr)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("unmet SQL expectations: %v", err)
+			}
+		})
+	}
+}

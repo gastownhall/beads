@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -348,6 +349,224 @@ func TestHealthz(t *testing.T) {
 	}
 	if body := decodeBody(t, resp); body["status"] != "ok" {
 		t.Errorf("body = %v, want status ok", body)
+	}
+}
+
+// TestEveryResponseCarriesTheResponseWideHeaders holds what withRequestContext
+// sets before routing to every answer that passes through it, not only to the
+// liveness probe's. (net/http still answers a few requests itself, such as
+// `OPTIONS *` and an oversized header block, without reaching the middleware;
+// those are out of this test's reach.) TestHealthz pins Cache-Control on one
+// row, with Header.Get; every other row has it only because the middleware
+// wraps the whole mux, so the header narrowed into s.route (which the
+// catch-all, the custom-method dispatcher's refusal and the Host check never
+// reach), the events page or stream writer overwriting it, any success writer
+// appending to it, or the panic answer or a 401 or Retry-After problem dropping
+// it would each leave that test green. A row mounted outside the middleware is
+// caught only indirectly elsewhere (by the request_id its 401 lacks), and not
+// at all for an auth-exempt row; this test checks the header itself on every
+// row. A header set by one handler on its own success path is beyond the
+// refusal probe by design.
+//
+// THE PROBE IS AN UNKNOWN QUERY PARAMETER. The document promises every
+// operation refuses one at its own door with a 400, so each row answers with
+// no database work and no fake that has to answer every operation. Each case
+// asserts that refusal, naming the probe: a row that stopped refusing would
+// otherwise pass on the fake's panic answer, which carries the same headers,
+// or fail with a 200 that the request_id check blames on the middleware. The
+// request line naming the row's op is what proves the refusal is THAT row's:
+// a substitution that missed and landed on another row would draw that row's
+// identical refusal and pass for the wrong reason (one that landed on a 404
+// already fails the refusal check).
+func TestEveryResponseCarriesTheResponseWideHeaders(t *testing.T) {
+	// What every answer must carry. Cache-Control: no-store is the requirement
+	// itself (no client or intermediary may cache an answer about live work),
+	// not a copy of what the middleware sets today. If withRequestContext stops
+	// setting it, the remedy is to restore it there, not to drop it from this
+	// list or to set it in each writer: the checks below catch a drop only on
+	// the answers they sample. Values, not Get, so a second Cache-Control line
+	// appended beside no-store fails too.
+	responseWide := http.Header{"Cache-Control": {"no-store"}}
+	check := func(t *testing.T, resp *http.Response) {
+		t.Helper()
+		for name, want := range responseWide {
+			if got := resp.Header.Values(name); !slices.Equal(got, want) {
+				t.Errorf("%s = %q, want %q", name, got, want)
+			}
+		}
+	}
+
+	ts := newTestServer(t, Config{})
+	// The pin runs one way, so following it can only add coverage: a header the
+	// middleware sets fails here until responseWide lists it, and is then held,
+	// value and all, to every answer below. It never asks for a listed header to
+	// go or to change its value. Cache-Control: no-store is additionally required
+	// of the middleware itself, against a literal rather than responseWide, so no
+	// edit to the list satisfies it: answers no case below samples (net/http's
+	// own path-cleaning redirects, among others) carry it only from there.
+	{
+		rec := httptest.NewRecorder()
+		ts.Server.withRequestContext(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})).
+			ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+		for name, got := range rec.Header() {
+			if _, listed := responseWide[name]; !listed {
+				t.Errorf("withRequestContext sets %s = %q, which responseWide does not list; add it to responseWide so every answer below is held to it", name, got)
+			}
+		}
+		if got := rec.Header().Values("Cache-Control"); !slices.Equal(got, []string{"no-store"}) {
+			t.Errorf("withRequestContext sets Cache-Control = %q, want [\"no-store\"]: answers no case below samples (net/http's own redirects) carry it only from the middleware; restore it there", got)
+		}
+	}
+
+	const probe = "header_probe"
+	for _, rt := range routeTable {
+		path := strings.NewReplacer(
+			"{id}", "bd-1",
+			"{key}", "k",
+			"{"+customMethodPathValue+"}", "bd-1"+rt.customMethod,
+		).Replace(rt.pattern) + "?" + probe + "=1"
+		t.Run(rt.op, func(t *testing.T) {
+			resp := ts.do(t, rt.method, path, nil)
+			check(t, resp)
+			body := decodeBody(t, resp)
+			if resp.StatusCode != http.StatusBadRequest || body["code"] != string(CodeInvalidArgument) ||
+				body["reason"] != string(ReasonUnknownParameter) || body["param"] != probe {
+				t.Fatalf("%s %s = %d %v/%v naming %v, want %d %s/%s naming %s: the probe no longer reaches %s's own refusal",
+					rt.method, path, resp.StatusCode, body["code"], body["reason"], body["param"],
+					http.StatusBadRequest, CodeInvalidArgument, ReasonUnknownParameter, probe, rt.op)
+			}
+			id, _ := body["request_id"].(string)
+			if id == "" {
+				t.Fatalf("%s %s: no request_id, so the answer never passed through withRequestContext", rt.method, path)
+			}
+			line := findLogLine(t, ts.stderr.String(), "request_id="+id+" ")
+			if !strings.Contains(line, " op="+rt.op+" ") {
+				t.Errorf("%s %s was answered by another row, so this case says nothing about %s:\n%s",
+					rt.method, path, rt.op, line)
+			}
+		})
+	}
+
+	// The answers no row owns pass through withRequestContext and nothing else,
+	// so they are what fails if the header moves to a narrower layer. Each one
+	// asserts where it landed, mirroring the row loop's op guard: a case whose
+	// precondition drifted would otherwise quietly probe a row instead.
+	for _, tc := range []struct {
+		name, method, path, host string
+		status                   int
+		code                     Code
+	}{
+		// No API version can ever claim this path.
+		{"unrouted path", http.MethodGet, "/no-such-route", "", http.StatusNotFound, CodeNotFound},
+		{"unregistered custom method", http.MethodPost, "/v0/beads/issues/bd-1:nosuchverb", "", http.StatusNotFound, CodeNotFound},
+		{"refused Host", http.MethodGet, "/healthz", "rebind.example", http.StatusBadRequest, CodeInvalidArgument},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var header http.Header
+			if tc.host != "" {
+				header = http.Header{"Host": {tc.host}}
+			}
+			resp := ts.do(t, tc.method, tc.path, header)
+			check(t, resp)
+			body := decodeBody(t, resp)
+			if resp.StatusCode != tc.status || body["code"] != string(tc.code) {
+				t.Fatalf("%s %s = %d %v, want %d %s: the case no longer reaches the answer it exists to hold",
+					tc.method, tc.path, resp.StatusCode, body["code"], tc.status, tc.code)
+			}
+			id, _ := body["request_id"].(string)
+			if id == "" {
+				t.Fatalf("%s %s: no request_id, so the answer never passed through withRequestContext", tc.method, tc.path)
+			}
+			if line := findLogLine(t, ts.stderr.String(), "request_id="+id+" "); !strings.Contains(line, ` op="" `) {
+				t.Errorf("%s %s was answered by a row, so this case no longer holds the answers no row owns:\n%s",
+					tc.method, tc.path, line)
+			}
+		})
+	}
+
+	// ServeMux answers a non-canonical path itself with a redirect, inside
+	// withRequestContext but through none of the writers, so this answer carries
+	// the header only if the middleware sets it. ts.client follows redirects;
+	// this client stops at the first answer so the redirect itself is checked.
+	t.Run("mux path-cleaning redirect", func(t *testing.T) {
+		noFollow := *ts.client
+		noFollow.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+		req, err := http.NewRequest(http.MethodGet, ts.base+"//healthz", nil)
+		if err != nil {
+			t.Fatalf("new request: %v", err)
+		}
+		resp, err := noFollow.Do(req)
+		if err != nil {
+			t.Fatalf("GET //healthz: %v", err)
+		}
+		t.Cleanup(func() { _ = resp.Body.Close() })
+		if resp.StatusCode != http.StatusTemporaryRedirect || resp.Header.Get("Location") != "/healthz" {
+			t.Fatalf("GET //healthz = %d Location %q, want %d to /healthz: the case no longer reaches ServeMux's own redirect",
+				resp.StatusCode, resp.Header.Get("Location"), http.StatusTemporaryRedirect)
+		}
+		check(t, resp)
+	})
+
+	// A handler can still overwrite or append to the header on its own success
+	// path, which no refusal above reaches. There are three success writers:
+	// writeJSON (every row's 200 except the two event reads), writeEventsPage
+	// (listEvents' 200) and the events:watch stream, where the usual SSE idiom,
+	// `no-cache`, would replace no-store with something weaker;
+	// eventStream.open leaves Cache-Control alone on purpose.
+	t.Run("plain JSON success", func(t *testing.T) {
+		resp := ts.do(t, http.MethodGet, "/healthz", nil)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200", resp.StatusCode)
+		}
+		check(t, resp)
+	})
+	t.Run(OpListEvents+" page success", func(t *testing.T) {
+		resp := watchServer(t, &liveEventsJournal{}).do(t, http.MethodGet, "/v0/beads/events?since=0", nil)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200", resp.StatusCode)
+		}
+		check(t, resp)
+	})
+	t.Run(OpWatchEvents+" open stream", func(t *testing.T) {
+		ws := openWatch(t, watchServer(t, &liveEventsJournal{}), "/v0/beads/events:watch?since=0", nil)
+		check(t, ws.resp)
+	})
+
+	// The panic answer is written by the middleware's own recovery, after a
+	// handler may have half-set headers, so it has header handling of its own
+	// that no row's answer exercises.
+	t.Run("panic answer", func(t *testing.T) {
+		boom := route{op: "boom", bypassSemaphore: true, handler: func(*Server, http.ResponseWriter, *http.Request) {
+			panic("boom")
+		}}
+		rec := httptest.NewRecorder()
+		ts.Server.withRequestContext(ts.Server.route(boom)).
+			ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want 500", rec.Code)
+		}
+		check(t, rec.Result())
+	})
+
+	// Write has header handling that only some codes reach: the challenge on a
+	// 401 and Retry-After on the retryable 503s. The row probes above all answer
+	// 400, so every code in the vocabulary is written here through s.fail, the
+	// path every refusal takes, with Retry-After where the server sets it.
+	for _, code := range slices.Sorted(maps.Keys(codeStatus)) {
+		t.Run("problem "+string(code), func(t *testing.T) {
+			res := newResult(code, "header probe")
+			if code.Status() == http.StatusServiceUnavailable {
+				res.RetryAfterSeconds = 1
+			}
+			rec := httptest.NewRecorder()
+			ts.Server.withRequestContext(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				ts.Server.fail(w, r, res)
+			})).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+			if rec.Code != code.Status() {
+				t.Fatalf("status = %d, want %d", rec.Code, code.Status())
+			}
+			check(t, rec.Result())
+		})
 	}
 }
 

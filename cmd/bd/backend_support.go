@@ -16,7 +16,7 @@ import (
 // It also refuses metadata that declares a workspace format this build cannot
 // open (checkWorkspaceFormat). Command admission refuses those first, and the
 // store factories check before their migrating configfile.Load
-// (checkDiscoveredWorkspaceFormat), so here it backs up any other caller that
+// (checkDiscoveredBackend), so here it backs up any other caller that
 // validates metadata it loaded itself. It returns early for a nil cfg, so that
 // backstop covers the graph format marker only when metadata was loaded; a
 // caller that may have none must check beadsDir with
@@ -40,6 +40,25 @@ func validateConfiguredBackend(cfg *configfile.Config, beadsDir string) error {
 	default:
 		return configfile.UnknownBackendErrorAt(cfg.Backend, beadsDir, cfg)
 	}
+}
+
+// checkDiscoveredBackend runs validateConfiguredBackend on beadsDir's metadata
+// as LoadForDiscovery reads it, which never rewrites the workspace. The store
+// factories run it before configfile.Load, which migrates a legacy config.json
+// into metadata.json, dropping the keys Config does not know and deleting
+// config.json, so a format or a removed or unrecognized backend they refuse is
+// refused before that rewrite rather than after it. Command admission makes
+// the same check, but only on the workspace bd runs in; the factories also
+// open others (an auto-routed target, an external project). A registered
+// backend passes, for the factory to dispatch. Metadata that does not load is
+// left to the caller's Load to report, unless the graph format marker sits
+// beside it (configfile.LoadDiscoveredForOpen); no metadata passes.
+func checkDiscoveredBackend(beadsDir string) error {
+	cfg, err := configfile.LoadDiscoveredForOpen(beadsDir)
+	if err != nil {
+		return err
+	}
+	return validateConfiguredBackend(cfg, beadsDir)
 }
 
 // registeredBackendWorkspaceIsBeadsDir reports whether metadata selects a

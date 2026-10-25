@@ -217,6 +217,26 @@ func runCommandInDirWithOutput(dir string, name string, args ...string) (string,
 	return strings.TrimSpace(string(output)), nil
 }
 
+// runCommandBuffers runs cmd and returns its stdout and stderr apart.
+func runCommandBuffers(t *testing.T, cmd *exec.Cmd) (stdout, stderr bytes.Buffer, err error) {
+	t.Helper()
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err = cmd.Run()
+	return stdout, stderr, err
+}
+
+// firstLineWithPrefix returns the first line of s that starts with prefix
+// once trimmed, itself trimmed, or "" when no line does.
+func firstLineWithPrefix(s, prefix string) string {
+	for _, line := range strings.Split(s, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), prefix) {
+			return strings.TrimSpace(line)
+		}
+	}
+	return ""
+}
+
 // testEnvNoPrompt returns the current environment with git auth prompts
 // suppressed. Prevents ksshaskpass/SSH_ASKPASS popups during tests that
 // configure fake git remotes (e.g. github.com/test/repo.git).

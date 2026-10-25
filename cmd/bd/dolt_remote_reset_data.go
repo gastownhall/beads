@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/steveyegge/beads/internal/githooksenv"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
@@ -266,12 +268,15 @@ Examples:
 			return HandleError("%v", err)
 		}
 		if kind == resetDataUnsupported {
+			// The URL is the remote's, which a pull can carry; the name goes
+			// into the commands only as one shell word.
+			remote, note := remedy.CommandArg(runtime.GOOS, name, "<remote>")
 			return HandleErrorWithHint(
-				fmt.Sprintf("cannot clear stored data on remote %q (%s)", name, url),
+				fmt.Sprintf("cannot clear stored data on remote %q (%s)", name, remedy.PrintedValue(url)),
 				fmt.Sprintf("Replace the remote with a fresh URL or prefix instead:\n"+
 					"  bd dolt remote remove %s\n"+
 					"  bd dolt remote add %s <fresh-url>\n"+
-					"  bd dolt push --force", name, name))
+					"  bd dolt push --force%s", remote, remote, note))
 		}
 
 		if !doltRemoteResetDataYes {
@@ -327,7 +332,8 @@ Examples:
 
 		fmt.Printf("Force-pushing to remote %q...\n", name)
 		if perr := st.PushRemote(ctx, name, true); perr != nil {
-			return HandleError("push after reset failed (the remote's data refs were already removed — re-run 'bd dolt push --force --remote %s' once the cause is fixed): %v", name, perr)
+			remote, note := remedy.CommandArg(runtime.GOOS, name, "<remote>")
+			return HandleError("push after reset failed (the remote's data refs were already removed — re-run `bd dolt push --force --remote %s`%s once the cause is fixed): %v", remote, note, perr)
 		}
 
 		if jsonOutput {

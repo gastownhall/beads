@@ -14,6 +14,7 @@ go_library(
         "//internal/githooksenv",
         "//internal/gittraceenv",
         "//internal/lockfile",
+        "//internal/remedy",
         "//internal/storage",
     ],
 )

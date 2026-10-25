@@ -4,11 +4,13 @@ package main
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -695,7 +697,7 @@ var labelPropagateCmd = &cobra.Command{
 		}
 
 		if strings.HasPrefix(label, "provides:") {
-			return HandleErrorRespectJSON("'provides:' labels are reserved for cross-project capabilities. Hint: use 'bd ship %s' instead", strings.TrimPrefix(label, "provides:"))
+			return HandleErrorRespectJSON("'provides:' labels are reserved for cross-project capabilities. Hint: use %s instead", shipCommand(strings.TrimPrefix(label, "provides:")))
 		}
 
 		children, err := store.SearchIssues(ctx, "", types.IssueFilter{ParentID: &parentID})
@@ -1026,7 +1028,7 @@ func runLabelAdd(ctx context.Context, args []string) error {
 	// of the two answers rather than a new rule.
 	for _, label := range labels {
 		if strings.HasPrefix(label, "provides:") {
-			return HandleErrorRespectJSON("'provides:' labels are reserved for cross-project capabilities. Hint: use 'bd ship %s' instead", strings.TrimPrefix(label, "provides:"))
+			return HandleErrorRespectJSON("'provides:' labels are reserved for cross-project capabilities. Hint: use %s instead", shipCommand(strings.TrimPrefix(label, "provides:")))
 		}
 	}
 	// splitLabelArg already trims and drops empties, so this route never stored
@@ -1087,4 +1089,11 @@ func runLabelList(ctx context.Context, args []string) error {
 	}
 	fmt.Println()
 	return nil
+}
+
+// shipCommand is the bd ship command for capability, in backticks, the
+// capability as one shell word or a placeholder named after the command.
+func shipCommand(capability string) string {
+	arg, note := remedy.CommandArg(runtime.GOOS, capability, "<capability>")
+	return "`bd ship " + arg + "`" + note
 }

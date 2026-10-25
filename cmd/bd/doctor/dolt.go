@@ -12,6 +12,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/remedy"
 
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
@@ -36,6 +37,11 @@ func openDoltDB(beadsDir string) (*sql.DB, *configfile.Config, error) {
 	dsCfg := doltserver.DefaultConfig(beadsDir)
 	port := dsCfg.Port
 	if port == 0 {
+		// No bd command starts, and so resolves a port for, a server bd does
+		// not run.
+		if !bdRunsServer(cfg, host) {
+			return nil, nil, fmt.Errorf("no Dolt server port configured; %s", doltserver.UnresolvedPortAdvice(host))
+		}
 		return nil, nil, fmt.Errorf("no Dolt server port configured and no server running; run any bd command to auto-start")
 	}
 
@@ -71,10 +77,23 @@ func openDoltDB(beadsDir string) (*sql.DB, *configfile.Config, error) {
 
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close() // Best effort cleanup
-		return nil, nil, fmt.Errorf("server not reachable: %w", err)
+		// The ping error repeats metadata.json's dolt_server_host, which a
+		// cloned repository commits.
+		return nil, nil, fmt.Errorf("server not reachable: %w", remedy.PrintedError(err))
 	}
 
 	return db, cfg, nil
+}
+
+// bdRunsServer reports whether the Dolt server cfg names at host is one bd
+// runs, and so one the next bd command can start. bd runs none at the IPv6
+// loopback, where its own server, which listens on 127.0.0.1 only, never
+// runs, nor on another machine. A proxied-server workspace's server is bd's
+// own proxy, whatever host the environment names (see
+// configfile.Config.HostImpliesServerMode).
+func bdRunsServer(cfg *configfile.Config, host string) bool {
+	return cfg.IsDoltProxiedServerMode() ||
+		(configfile.IsLocalHostString(host) && !configfile.IsIPv6LoopbackHost(host))
 }
 
 // doltConn holds an open Dolt connection.
@@ -106,11 +125,18 @@ func openDoltConn(beadsDir string) (*doltConn, error) {
 // tombstones ("postgres", "mysql", "sqlite") are returned verbatim so callers
 // can label them without opening anything.
 // hq-3446fc.17: Use dolt.GetBackendFromConfig for consistent backend detection.
+//
+// It reads the metadata with configfile.Load, which migrates a legacy
+// config.json into metadata.json, so pass only the workspace doctor runs in,
+// which command admission has checked. Read a .beads that admission never saw,
+// such as a nested one the Classic Artifacts walk reaches, with
+// configfile.LoadAndCheckWorkspaceFormat instead.
 func GetBackend(beadsDir string) string {
 	return dolt.GetBackendFromConfig(beadsDir)
 }
 
-// IsDoltBackend returns true if the configured backend is Dolt.
+// IsDoltBackend returns true if the configured backend is Dolt. It goes through
+// GetBackend and so migrates a legacy config.json; the same caveat applies.
 func IsDoltBackend(beadsDir string) bool {
 	return GetBackend(beadsDir) == configfile.BackendDolt
 }
@@ -143,9 +169,12 @@ func runDoltHealthChecksInternal(path string) []DoctorCheck {
 		// (i.e., no expectation of a persistent server), skip server-dependent
 		// checks gracefully instead of reporting false errors. The SharedStore-
 		// based embedded checks already validate data integrity; the server
-		// will auto-start on the next bd command.
-		serverMode := doltserver.DefaultConfig(beadsDir).Mode
-		if serverMode != doltserver.ServerModeExternal {
+		// will auto-start on the next bd command. Not for a server bd does not
+		// run: no bd command starts one.
+		dsCfg := doltserver.DefaultConfig(beadsDir)
+		fileCfg := loadServerConfig(beadsDir)
+		host := fileCfg.GetDoltServerHost()
+		if dsCfg.Mode != doltserver.ServerModeExternal && bdRunsServer(fileCfg, host) {
 			skipMsg := "Skipped (no server running; will auto-start on next bd command)"
 			return []DoctorCheck{
 				{Name: "Dolt Connection", Status: StatusOK, Message: skipMsg, Category: CategoryCore},
@@ -158,11 +187,18 @@ func runDoltHealthChecksInternal(path string) []DoctorCheck {
 			}
 		}
 
-		// External/shared server mode: a server is expected to be running,
-		// so connection failure is a real error.
+		// External/shared server mode, or a server bd does not run: a server
+		// is expected to be running, so connection failure is a real error.
+		// Outside external mode it is a server bd does not run, and the fix
+		// is the store's advice for one: pin its port when none is
+		// configured, else check that server.
+		fix := "Ensure dolt sql-server is running, or check server host/port configuration"
+		if dsCfg.Mode != doltserver.ServerModeExternal {
+			fix = doltserver.UnreachableEndpointAdvice(beadsDir, host, dsCfg.Port, dsCfg.PortSource)
+		}
 		connErr := err.Error()
 		return []DoctorCheck{
-			{Name: "Dolt Connection", Status: StatusError, Message: "Failed to connect to Dolt server", Detail: connErr, Fix: "Ensure dolt sql-server is running, or check server host/port configuration", Category: CategoryCore},
+			{Name: "Dolt Connection", Status: StatusError, Message: "Failed to connect to Dolt server", Detail: connErr, Fix: fix, Category: CategoryCore},
 			{Name: "Dolt Schema", Status: StatusError, Message: "Skipped (no connection)", Detail: connErr, Category: CategoryCore},
 			{Name: "Dolt Issue Count", Status: StatusError, Message: "Skipped (no connection)", Detail: connErr, Category: CategoryData},
 			{Name: "Dolt Status", Status: StatusError, Message: "Skipped (no connection)", Detail: connErr, Category: CategoryData},
@@ -200,8 +236,8 @@ func checkConnectionWithDB(conn *doltConn) DoctorCheck {
 
 	storageDetail := "Storage: Dolt (server mode)"
 	if conn.cfg != nil {
-		storageDetail = fmt.Sprintf("Storage: Dolt (server %s:%d)",
-			conn.cfg.GetDoltServerHost(), conn.port)
+		storageDetail = fmt.Sprintf("Storage: Dolt (server %s)",
+			doltutil.PrintedServerAddr(conn.cfg.GetDoltServerHost(), conn.port))
 	}
 
 	return DoctorCheck{
@@ -273,7 +309,7 @@ func checkSchemaWithDB(conn *doltConn) DoctorCheck {
 				Status:   StatusError,
 				Message:  fmt.Sprintf("Wrong database — tables found in %q, not in configured database", correctDB),
 				Detail:   "Pre-v0.56 migration created database without saving its name to metadata.json",
-				Fix:      fmt.Sprintf("Run 'bd doctor --fix' to set dolt_database=%s in metadata.json", correctDB),
+				Fix:      fmt.Sprintf("Run 'bd doctor --fix' to set dolt_database=%s in metadata.json", remedy.PrintedValue(correctDB)),
 				Category: CategoryCore,
 			}
 		}
@@ -768,7 +804,7 @@ func checkSharedServerHealth(beadsDir string) DoctorCheck {
 	return DoctorCheck{
 		Name:     "Shared Server",
 		Status:   StatusOK,
-		Message:  fmt.Sprintf("Running (PID %d, port %d), database: %s", state.PID, state.Port, dbName),
+		Message:  fmt.Sprintf("Running (PID %d, port %d), database: %s", state.PID, state.Port, remedy.PrintedValue(dbName)),
 		Detail:   fmt.Sprintf("Server directory: %s", sharedDir),
 		Category: CategoryRuntime,
 	}

@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -468,25 +469,28 @@ func closeClaimedID(claimed *types.Issue) string {
 // denominator, because only it knows what it attempted — the direct route
 // counts resolved ids, the proxied one counts arguments.
 //
-// The summary is suppressed for a single-id batch deliberately: one inline
-// refusal is already unambiguous about which id failed, and suppressing it
-// keeps single-id stderr byte-identical to what it was before close learned to
-// fail a partial batch.
+// The text summary is suppressed for a single-id batch deliberately: one
+// inline refusal is already unambiguous about which id failed, and suppressing
+// it keeps single-id stderr byte-identical to what it was before close learned
+// to fail a partial batch.
 //
 // In --json mode the summary is one compact JSON line on stderr — the shape
 // reportUpdateFailures established — so a consumer that sees exit 1 can read
 // WHICH ids failed instead of scraping English prose, while stdout keeps the
-// plain closed-issues array a successful close emits. claimedNextID names the
-// issue --claim-next claimed on this run, if any: that claim is committed
-// inside the batch's own transaction and a sibling's refusal does not roll it
-// back, so the report names it rather than pretending it did not happen.
+// plain closed-issues array a successful close emits. It is emitted for a
+// single id too, as reportUpdateFailures' is: a consumer closing one id at a
+// time needs a parseable reason as much as one closing a batch. claimedNextID
+// names the issue --claim-next claimed on this run, if any: that claim is
+// committed inside the batch's own transaction and a sibling's refusal does
+// not roll it back, so the report names it rather than pretending it did not
+// happen.
 func reportCloseFailures(failures []closeIDFailure, total int, claimedNextID string, jsonOut bool) error {
-	if total <= 1 {
-		return SilentExit()
-	}
 	msg := fmt.Sprintf("%d of %d issues failed to close", len(failures), total)
 
 	if !jsonOut {
+		if total <= 1 {
+			return SilentExit()
+		}
 		fmt.Fprintf(os.Stderr, "Error: %s\n", msg)
 		if claimedNextID != "" {
 			fmt.Fprintf(os.Stderr, "Note: --claim-next already claimed %s; it stays assigned to you.\n", claimedNextID)
@@ -729,12 +733,12 @@ func checkGateSatisfaction(issue *types.Issue, gateStore storage.DoltStorage) er
 		if resolved {
 			return nil
 		}
-		return fmt.Errorf("gate condition not satisfied: %s (use --force to override)", reason)
+		return fmt.Errorf("gate condition not satisfied: %s (use --force to override)", remedy.PrintedText(reason))
 	}
 
 	if err != nil {
 		// If we can't check the condition, allow close with a warning
-		fmt.Fprintf(os.Stderr, "Warning: could not evaluate gate condition: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Warning: could not evaluate gate condition: %s\n", remedy.PrintedMessage(err))
 		return nil
 	}
 
@@ -743,10 +747,10 @@ func checkGateSatisfaction(issue *types.Issue, gateStore storage.DoltStorage) er
 	}
 
 	if escalated {
-		return fmt.Errorf("gate condition not satisfied: %s (use --force to override)", reason)
+		return fmt.Errorf("gate condition not satisfied: %s (use --force to override)", remedy.PrintedText(reason))
 	}
 
-	return fmt.Errorf("gate condition not satisfied: %s (use --force to override)", reason)
+	return fmt.Errorf("gate condition not satisfied: %s (use --force to override)", remedy.PrintedText(reason))
 }
 
 // closeBeadGateGetter picks the bead-gate lookup the current route can serve.
@@ -915,18 +919,28 @@ func resolveCloseTarget(ctx context.Context, localStore storage.DoltStorage, sha
 	if !isNotFoundErr(err) {
 		return nil, fmt.Errorf("resolving ID %s: %w", id, err)
 	}
+	// The first routed tier that refuses the id answers instead of the
+	// not-found below (isRoutedResolutionRefusal). The refusal is checked
+	// before isRoutingFailure, which it would also satisfy, so the shared
+	// auto-routed store still gets its chance.
+	var refusal error
 	// Write-intent: a prefix-routed target opens writable so the close
 	// commits on the target head (#4141).
 	r, err = resolveViaPrefixRoutingWithAccess(ctx, id, true, false)
 	if err == nil {
 		return r, nil
 	}
-	if isRoutingFailure(err) {
+	if isRoutedResolutionRefusal(err) {
+		refusal = err
+	} else if isRoutingFailure(err) {
 		return nil, fmt.Errorf("resolving ID %s: %w", id, err)
 	}
 	r, err = shared.resolve(ctx, id)
 	if err == nil {
 		return r, nil
+	}
+	if refusal != nil {
+		return nil, fmt.Errorf("resolving ID %s: %w", id, refusal)
 	}
 	if isRoutingFailure(err) {
 		return nil, fmt.Errorf("resolving ID %s: %w", id, err)

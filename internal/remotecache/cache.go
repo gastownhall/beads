@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/beads/internal/githooksenv"
 	"github.com/steveyegge/beads/internal/gittraceenv"
 	"github.com/steveyegge/beads/internal/lockfile"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 )
 
@@ -114,12 +115,12 @@ func (c *Cache) Ensure(ctx context.Context, remoteURL string) (string, error) {
 			}
 		}
 		if err := c.doltPull(ctx, target); err != nil {
-			return "", fmt.Errorf("dolt pull failed for %s: %w", remoteURL, err)
+			return "", fmt.Errorf("dolt pull failed for %s: %w", remedy.PrintedValue(remoteURL), err)
 		}
 	} else {
 		// Cold start: clone
 		if err := c.doltClone(ctx, remoteURL, target); err != nil {
-			return "", fmt.Errorf("dolt clone failed for %s: %w", remoteURL, err)
+			return "", fmt.Errorf("dolt clone failed for %s: %w", remedy.PrintedValue(remoteURL), err)
 		}
 	}
 

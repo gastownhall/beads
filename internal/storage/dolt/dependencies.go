@@ -108,7 +108,10 @@ func (s *DoltStore) RemoveDependencyWithOptions(ctx context.Context, issueID, de
 			// can mint nothing here: the two arms below share one mutator, and
 			// a scope that is present on one arm only is the asymmetry this
 			// method's own history is made of. Uniform beats clever.
-			clearVersionScope := s.scopeVersionedHistoryTransaction(tx)
+			clearVersionScope, err := s.scopeVersionedHistoryTransaction(ctx, tx)
+			if err != nil {
+				return err
+			}
 			defer clearVersionScope()
 			clearRecheckScope := issueops.ScopeBlockedRecheckTransaction(tx)
 			defer clearRecheckScope()
@@ -133,7 +136,10 @@ func (s *DoltStore) RemoveDependencyWithOptions(ctx context.Context, issueID, de
 		// referencing issue must be versioned with it. RemoveDependencyInTx
 		// calls RecordVersionInTx on the row delete, and that seam no-ops
 		// unless activation is bound to THIS transaction.
-		clearVersionScope := s.scopeVersionedHistoryTransaction(tx)
+		clearVersionScope, err := s.scopeVersionedHistoryTransaction(ctx, tx)
+		if err != nil {
+			return err
+		}
 		defer clearVersionScope()
 		clearRecheckScope := issueops.ScopeBlockedRecheckTransaction(tx)
 		defer clearRecheckScope()

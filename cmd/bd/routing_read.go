@@ -9,6 +9,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/routing"
 	"github.com/steveyegge/beads/internal/storage"
 )
@@ -198,11 +199,11 @@ func openAutoRoutedStore(ctx context.Context, store storage.DoltStorage, writabl
 	targetBeadsDir := filepath.Join(targetRepoPath, ".beads")
 	database, err := autoRouteTargetDatabase(targetBeadsDir, writable)
 	if err != nil {
-		return nil, false, rule, fmt.Errorf("failed to open routed store at %s: target has no dolt_database configured: %w", targetRepoPath, err)
+		return nil, false, rule, fmt.Errorf("failed to open routed store at %s: target has no dolt_database configured: %w", remedy.PrintedValue(targetRepoPath), err)
 	}
 	targetStore, err := openRoutedTargetStore(ctx, targetBeadsDir, database, writable)
 	if err != nil {
-		return nil, false, rule, fmt.Errorf("failed to open routed store at %s: %w", targetRepoPath, err)
+		return nil, false, rule, fmt.Errorf("failed to open routed store at %s: %w", remedy.PrintedValue(targetRepoPath), err)
 	}
 	return wireExternalDependencyPolicy(targetStore), true, rule, nil
 }

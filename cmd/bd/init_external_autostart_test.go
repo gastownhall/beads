@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/testutil"
 )
 
 // `bd init --external` declares that the Dolt server is managed outside bd, so
@@ -36,6 +37,7 @@ type externalInitFixture struct {
 	home     string
 	shimDir  string
 	launches string
+	env      []string // extra environment for every run, after the isolation above
 }
 
 type externalInitResult struct {
@@ -75,6 +77,7 @@ func (f *externalInitFixture) run(autoStart string, args ...string) externalInit
 	if autoStart != "" {
 		env = append(env, "BEADS_DOLT_AUTO_START="+autoStart)
 	}
+	env = append(env, f.env...)
 	out, err := runExternalServerBD(f.t, f.repoDir, env, args...)
 	var exitErr *exec.ExitError
 	if err != nil && !errors.As(err, &exitErr) {
@@ -262,6 +265,389 @@ func TestInitServerExternalNoPortStartsNoServer(t *testing.T) {
 	}
 	if strings.Contains(res.output, "bd dolt start") {
 		t.Errorf("output advises `bd dolt start`:\n%s", res.output)
+	}
+}
+
+// TestInitServerNamedPortDeadEndpointStartsNoServer is the same boundary
+// without --external: a port named with --server-port or
+// BEADS_DOLT_SERVER_PORT declares the server external on its own (rule 2c,
+// #5934), so init starts none, and its failure must say so instead of
+// advising the `bd dolt start` that would start one. Init leaves auto-start on
+// here, so the store reaches EnsureRunning, which refuses rather than starts.
+func TestInitServerNamedPortDeadEndpointStartsNoServer(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		viaEnv     bool
+		declaredBy string
+	}{
+		{"--server-port", false, "--server-port declares"},
+		{"BEADS_DOLT_SERVER_PORT", true, "BEADS_DOLT_SERVER_PORT declares"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newExternalInitFixture(t)
+			port := freeLoopbackPort(t)
+			ep := tcpEndpoint(port)
+			args := []string{"init", "--quiet", "--server", "--prefix", "x", "--skip-hooks", "--skip-agents"}
+			if tc.viaEnv {
+				f.env = append(f.env, "BEADS_DOLT_SERVER_PORT="+strconv.Itoa(port))
+			} else {
+				args = append(args, ep.flags...)
+			}
+
+			res := f.run("", args...)
+
+			if !res.failed {
+				t.Errorf("bd init succeeded against a dead endpoint %s:\n%s", ep.addr, res.output)
+			}
+			requireNoLaunch(t, res)
+			requireExternalUnreachableMessage(t, res.output, ep.addr)
+			if !strings.Contains(res.output, tc.declaredBy) {
+				t.Errorf("output does not contain %q:\n%s", tc.declaredBy, res.output)
+			}
+			requireNothingListening(t, ep.network, ep.addr)
+		})
+	}
+}
+
+// namedPortWorkspace writes a server-mode metadata.json into the fixture's
+// project, naming metadataPort as dolt_server_port when it is nonzero.
+func namedPortWorkspace(t *testing.T, f *externalInitFixture, metadataPort int) string {
+	t.Helper()
+	beadsDir := filepath.Join(f.repoDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	meta := configfile.DefaultConfig()
+	meta.Backend = configfile.BackendDolt
+	meta.DoltMode = configfile.DoltModeServer
+	meta.DoltDatabase = "named_port"
+	meta.DoltServerPort = metadataPort
+	if err := meta.Save(beadsDir); err != nil {
+		t.Fatal(err)
+	}
+	return beadsDir
+}
+
+// namedPortConfigYaml writes beadsDir's config.yaml with port as dolt.port.
+func namedPortConfigYaml(t *testing.T, beadsDir string, port int) {
+	t.Helper()
+	yaml := fmt.Sprintf("dolt:\n  port: %d\n", port)
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestNamedPortServerUnreachableAdvice covers every other command: an
+// ordinary command against a workspace whose named port (the environment, or
+// metadata.json's dolt_server_port) declares its server externally managed
+// starts no server and gives the same advice, naming the endpoint it dialed.
+// metadata.json's port declares the server external even when config.yaml's
+// dolt.port, which outranks it, chose the port: `bd dolt set port N
+// --update-config` writes both.
+func TestNamedPortServerUnreachableAdvice(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		setup      func(t *testing.T, f *externalInitFixture, port int)
+		declaredBy string
+	}{
+		{"BEADS_DOLT_SERVER_PORT", func(t *testing.T, f *externalInitFixture, port int) {
+			namedPortWorkspace(t, f, 0)
+			f.env = append(f.env, "BEADS_DOLT_SERVER_PORT="+strconv.Itoa(port))
+		}, "BEADS_DOLT_SERVER_PORT declares the Dolt server at"},
+		{"metadata.json dolt_server_port", func(t *testing.T, f *externalInitFixture, port int) {
+			namedPortWorkspace(t, f, port)
+		}, "metadata.json declares the Dolt server at"},
+		// Every successful command records the port it reached in bd's port
+		// file, which then outranks dolt_server_port. It writes no pid file:
+		// the server is still the one dolt_server_port declares.
+		{"metadata.json dolt_server_port beside the port file an open wrote", func(t *testing.T, f *externalInitFixture, port int) {
+			beadsDir := namedPortWorkspace(t, f, port)
+			if err := os.WriteFile(filepath.Join(beadsDir, "dolt-server.port"), []byte(strconv.Itoa(port)), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			// This package runs bd in test mode, which takes a port-file
+			// port for a production server and dials port 1 instead.
+			// BEADS_TEST_SERVER=1 is that heuristic's opt-out.
+			f.env = append(f.env, "BEADS_TEST_SERVER=1")
+		}, "metadata.json declares the Dolt server at"},
+		{"bd dolt set port --update-config", func(t *testing.T, f *externalInitFixture, port int) {
+			beadsDir := namedPortWorkspace(t, f, 0)
+			// --update-config writes dolt.port only into a config.yaml that exists.
+			if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if res := f.run("", "dolt", "set", "port", strconv.Itoa(port), "--update-config"); res.failed {
+				t.Fatalf("bd dolt set port failed:\n%s", res.output)
+			}
+			yaml, err := os.ReadFile(filepath.Join(beadsDir, "config.yaml"))
+			if err != nil || !strings.Contains(string(yaml), strconv.Itoa(port)) {
+				t.Fatalf("bd dolt set port --update-config left config.yaml without the port (%v):\n%s", err, yaml)
+			}
+		}, "metadata.json declares the Dolt server at"},
+		{"config.yaml dolt.port other than dolt_server_port", func(t *testing.T, f *externalInitFixture, port int) {
+			metadataPort := freeLoopbackPort(t)
+			for metadataPort == port {
+				metadataPort = freeLoopbackPort(t)
+			}
+			namedPortConfigYaml(t, namedPortWorkspace(t, f, metadataPort), port)
+		}, "metadata.json declares this workspace's Dolt server externally managed, so bd did not start one at"},
+		// config.yaml's dolt.port outranks the legacy BEADS_DOLT_PORT for the
+		// dial, and the env var naming the same port still declares the server
+		// external.
+		{"config.yaml dolt.port equal to BEADS_DOLT_PORT", func(t *testing.T, f *externalInitFixture, port int) {
+			namedPortConfigYaml(t, namedPortWorkspace(t, f, 0), port)
+			f.env = append(f.env, "BEADS_DOLT_PORT="+strconv.Itoa(port))
+		}, "BEADS_DOLT_PORT declares the Dolt server at"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newExternalInitFixture(t)
+			port := freeLoopbackPort(t)
+			ep := tcpEndpoint(port)
+			tc.setup(t, f, port)
+
+			res := f.run("", "list")
+
+			if !res.failed {
+				t.Errorf("bd list succeeded against a dead endpoint %s:\n%s", ep.addr, res.output)
+			}
+			requireNoLaunch(t, res)
+			requireExternalUnreachableMessage(t, res.output, ep.addr)
+			if !strings.Contains(res.output, tc.declaredBy) {
+				t.Errorf("output does not contain %q:\n%s", tc.declaredBy, res.output)
+			}
+		})
+	}
+	// `bd dolt set port N` rewrites dolt_server_port and leaves the port file
+	// an earlier command wrote, which outranks it, so bd still dials the old
+	// port. The advice names that file as where the port came from and says
+	// to remove it, not dolt_server_port, whose removal would not move the dial.
+	t.Run("bd dolt set port beside the port file an open wrote", func(t *testing.T) {
+		f := newExternalInitFixture(t)
+		port := freeLoopbackPort(t)
+		moved := freeLoopbackPort(t)
+		for moved == port {
+			moved = freeLoopbackPort(t)
+		}
+		ep := tcpEndpoint(port)
+		beadsDir := namedPortWorkspace(t, f, port)
+		if err := os.WriteFile(filepath.Join(beadsDir, "dolt-server.port"), []byte(strconv.Itoa(port)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		// Test mode takes a port-file port for a production server and dials
+		// port 1 instead; BEADS_TEST_SERVER=1 is that heuristic's opt-out.
+		f.env = append(f.env, "BEADS_TEST_SERVER=1")
+		if res := f.run("", "dolt", "set", "port", strconv.Itoa(moved)); res.failed {
+			t.Fatalf("bd dolt set port failed:\n%s", res.output)
+		}
+
+		res := f.run("", "list")
+
+		if !res.failed {
+			t.Errorf("bd list succeeded against a dead endpoint %s:\n%s", ep.addr, res.output)
+		}
+		requireNoLaunch(t, res)
+		requireExternalUnreachableMessage(t, res.output, ep.addr)
+		for _, want := range []string{
+			"metadata.json declares this workspace's Dolt server externally managed, so bd did not start one at " + ep.addr,
+			fmt.Sprintf("dolt-server.port, which records the port an earlier command reached and outranks dolt_server_port (%d). "+
+				"Start that server, or remove that file.", moved),
+		} {
+			if !strings.Contains(res.output, want) {
+				t.Errorf("output does not contain %q:\n%s", want, res.output)
+			}
+		}
+		if strings.Contains(res.output, "Removing dolt_server_port") {
+			t.Errorf("output suggests removing dolt_server_port, which does not move the dial off the port file:\n%s", res.output)
+		}
+	})
+}
+
+// TestNamedPortServerDiagnosticsAdvice covers the commands that dial the
+// server themselves instead of opening the store: they report a dead
+// named-port endpoint with the same advice, not `bd dolt start`. The legacy
+// BEADS_DOLT_PORT must make them dial its port, as the store does, rather
+// than 127.0.0.1:0 when it is alone, or a port-file port left over beside it.
+// A config.yaml dolt.port outranks it for the dial, as in the store, and the
+// advice still names it when both name the same port. A remote host gets the
+// remote-host advice. A host set only in the central server config is not
+// dialed: they dial what bd list dials.
+func TestNamedPortServerDiagnosticsAdvice(t *testing.T) {
+	diagnostics := [][]string{
+		{"dolt", "test"},
+		{"dolt", "clean-databases", "--dry-run"},
+		{"doctor", "--perf"},
+	}
+	for _, envName := range []string{"BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_PORT"} {
+		for _, args := range diagnostics {
+			t.Run(envName+"/"+strings.Join(args, " "), func(t *testing.T) {
+				runNamedPortDiagnostic(t, envName, "", args)
+			})
+		}
+	}
+	for _, args := range diagnostics {
+		t.Run("BEADS_DOLT_PORT beside a port file/"+strings.Join(args, " "), func(t *testing.T) {
+			runNamedPortDiagnostic(t, "BEADS_DOLT_PORT", "a port file", args)
+		})
+		t.Run("BEADS_DOLT_PORT equal to config.yaml dolt.port/"+strings.Join(args, " "), func(t *testing.T) {
+			runNamedPortDiagnostic(t, "BEADS_DOLT_PORT", "config.yaml", args)
+		})
+	}
+	for _, args := range diagnostics {
+		t.Run("remote host/"+strings.Join(args, " "), func(t *testing.T) {
+			runRemoteHostDiagnostic(t, args)
+		})
+		t.Run("host only in the central server config/"+strings.Join(args, " "), func(t *testing.T) {
+			runCentralConfigHostDiagnostic(t, args)
+		})
+		for _, host := range []string{"::1", "[::1]"} {
+			t.Run("IPv6 host "+host+"/"+strings.Join(args, " "), func(t *testing.T) {
+				runIPv6HostDiagnostic(t, host, args)
+			})
+		}
+	}
+}
+
+// runIPv6HostDiagnostic runs bd list and one diagnostic against a server at
+// an IPv6 host that BEADS_DOLT_SERVER_HOST names bare ("::1") or bracketed
+// ("[::1]"). The listener speaks no MySQL, so both fail, but both must reach
+// it, as they would a server at any other host: bd list with its fail-fast
+// probe and its connection, the diagnostic with its probe or connection. A
+// diagnostic that dials ::1:port or [[::1]]:port instead reports the running
+// server as not running.
+func runIPv6HostDiagnostic(t *testing.T, host string, args []string) {
+	t.Helper()
+	port, accepted := testutil.IPv6LoopbackListener(t)
+	f := newExternalInitFixture(t)
+	namedPortWorkspace(t, f, 0)
+	f.env = append(f.env, "BEADS_DOLT_SERVER_HOST="+host, "BEADS_DOLT_SERVER_PORT="+strconv.Itoa(port))
+
+	for _, cmdArgs := range [][]string{{"list"}, args} {
+		want := int64(1)
+		if cmdArgs[0] == "list" {
+			want = 2 // the fail-fast probe and the connection
+		}
+		before := accepted()
+		res := f.run("", cmdArgs...)
+
+		requireNoLaunch(t, res)
+		for deadline := time.Now().Add(2 * time.Second); accepted()-before < want && time.Now().Before(deadline); {
+			time.Sleep(10 * time.Millisecond)
+		}
+		if got := accepted() - before; got < want {
+			t.Errorf("bd %s made %d connections to the server at [::1]:%d, want at least %d:\n%s",
+				strings.Join(cmdArgs, " "), got, port, want, res.output)
+		}
+		for _, banned := range []string{"not running", "[[::1]]", "no such host", "too many colons", "missing port"} {
+			if strings.Contains(res.output, banned) {
+				t.Errorf("bd %s output contains %q:\n%s", strings.Join(cmdArgs, " "), banned, res.output)
+			}
+		}
+		if want := "Testing connection to " + net.JoinHostPort("::1", strconv.Itoa(port)); cmdArgs[0] == "dolt" &&
+			cmdArgs[1] == "test" && !strings.Contains(res.output, want) {
+			t.Errorf("bd dolt test output does not contain %q:\n%s", want, res.output)
+		}
+	}
+}
+
+// runCentralConfigHostDiagnostic runs bd list and one diagnostic against a
+// workspace whose metadata.json names a dead port and whose host only the
+// central server config (~/.config/beads/server.json) names. bd list's store
+// open never applies that file, so it dials 127.0.0.1, and the diagnostic must
+// dial the same endpoint: --perf times bd list, and the others check the
+// server it uses.
+func runCentralConfigHostDiagnostic(t *testing.T, args []string) {
+	t.Helper()
+	f := newExternalInitFixture(t)
+	port := freeLoopbackPort(t)
+	ep := tcpEndpoint(port)
+	namedPortWorkspace(t, f, port)
+	central := filepath.Join(f.home, "server.json")
+	if err := os.WriteFile(central, []byte(`{"dolt_server_host":"db.invalid"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.env = append(f.env, "BEADS_CENTRAL_CONFIG="+central)
+
+	for _, cmdArgs := range [][]string{{"list"}, args} {
+		res := f.run("", cmdArgs...)
+
+		requireNoLaunch(t, res)
+		if !res.failed {
+			t.Errorf("bd %s succeeded with no server:\n%s", strings.Join(cmdArgs, " "), res.output)
+		}
+		if !strings.Contains(res.output, ep.addr) {
+			t.Errorf("bd %s output does not contain %q:\n%s", strings.Join(cmdArgs, " "), ep.addr, res.output)
+		}
+		if strings.Contains(res.output, "db.invalid") {
+			t.Errorf("bd %s output names the central server config's host:\n%s", strings.Join(cmdArgs, " "), res.output)
+		}
+	}
+}
+
+// runRemoteHostDiagnostic runs one diagnostic against a server on another
+// machine whose port BEADS_DOLT_SERVER_PORT names. It must dial that host, not
+// 127.0.0.1, and give the remote-host advice: not `bd dolt start`, which
+// refuses a remote host, and not the local externally managed advice.
+func runRemoteHostDiagnostic(t *testing.T, args []string) {
+	t.Helper()
+	f := newExternalInitFixture(t)
+	port := freeLoopbackPort(t)
+	namedPortWorkspace(t, f, 0)
+	f.env = append(f.env, "BEADS_DOLT_SERVER_HOST=db.invalid", "BEADS_DOLT_SERVER_PORT="+strconv.Itoa(port))
+
+	res := f.run("", args...)
+
+	requireNoLaunch(t, res)
+	if !res.failed {
+		t.Errorf("bd %s succeeded with no server:\n%s", strings.Join(args, " "), res.output)
+	}
+	for _, want := range []string{net.JoinHostPort("db.invalid", strconv.Itoa(port)), fmt.Sprintf("nc -zv db.invalid %d", port)} {
+		if !strings.Contains(res.output, want) {
+			t.Errorf("output does not contain %q:\n%s", want, res.output)
+		}
+	}
+	// The loopback endpoint, not "127.0.0.1" alone: a resolver on 127.0.0.1
+	// can appear in the failed lookup of db.invalid.
+	for _, banned := range []string{net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), "bd dolt start", "externally managed"} {
+		if strings.Contains(res.output, banned) {
+			t.Errorf("output contains %q:\n%s", banned, res.output)
+		}
+	}
+}
+
+// runNamedPortDiagnostic runs one diagnostic against a dead port named by
+// envName and checks it dials that port and names envName. beside adds
+// another port source first: "a port file" leaves bd's port file behind on
+// another dead port, which the named port must outrank; "config.yaml" names
+// the same port as dolt.port, which outranks the legacy env var for the dial.
+func runNamedPortDiagnostic(t *testing.T, envName, beside string, args []string) {
+	t.Helper()
+	f := newExternalInitFixture(t)
+	port := freeLoopbackPort(t)
+	ep := tcpEndpoint(port)
+	beadsDir := namedPortWorkspace(t, f, 0)
+	switch beside {
+	case "":
+	case "a port file":
+		stale := freeLoopbackPort(t)
+		for stale == port {
+			stale = freeLoopbackPort(t)
+		}
+		if err := os.WriteFile(filepath.Join(beadsDir, "dolt-server.port"), []byte(strconv.Itoa(stale)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	case "config.yaml":
+		namedPortConfigYaml(t, beadsDir, port)
+	default:
+		t.Fatalf("unknown port source %q", beside)
+	}
+	f.env = append(f.env, envName+"="+strconv.Itoa(port))
+
+	res := f.run("", args...)
+
+	requireNoLaunch(t, res)
+	requireExternalUnreachableMessage(t, res.output, ep.addr)
+	if !strings.Contains(res.output, envName+" declares") {
+		t.Errorf("output does not name %s:\n%s", envName, res.output)
 	}
 }
 

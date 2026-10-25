@@ -2156,6 +2156,14 @@ bd dolt start
     | lifecycle and starts it on demand, so a server started here would be a second,
     | unsupervised one over the same data directory. Use 'bd dolt status' to see what
     | is running and 'bd dolt stop' to shut it down.
+    |
+    | With dolt.auto-start: false the server is expected to be managed outside bd, so
+    | a start that would create a new, empty Dolt database (the data directory is
+    | missing, empty, or holds no database) is refused before anything is written:
+    | it would publish its port and shadow the managed server's database. Starting
+    | over existing data, or adopting a server bd already tracks, is unaffected. Use
+    | --force to create the new database anyway.
+  flag --force type=bool default="false" usage="Start even when dolt.auto-start is off and this would create a new, empty Dolt database"
 
 bd dolt status
   use: "status"
@@ -2169,9 +2177,11 @@ bd dolt status
     | the on-disk data directory. For beads-managed (local) servers, displays
     | PID, port, and data directory from the local PID file. For externally-
     | managed servers — a shared server (dolt.shared-server: true), a remote
-    | dolt_server_host, or a local server managed outside bd (dolt.auto-start:
-    | false, e.g. an orchestrator-shared sql-server) — pings the configured
-    | endpoint via SQL and reports reachability, server version, and database.
+    | dolt_server_host, a server at the IPv6 loopback (::1, where bd's own
+    | server never listens), or a local server managed outside bd
+    | (dolt.auto-start: false, e.g. an orchestrator-shared sql-server) — pings
+    | the configured endpoint via SQL and reports reachability, server version,
+    | and database.
     |
     | In proxied-server mode, reports the proxy (the endpoint every bd command
     | connects through) and the dolt backend behind it separately, read from the
@@ -2439,6 +2449,7 @@ bd events tail
     | {"code":"events_journal_truncated","since":N,"floor":F,"head":H}: floor is the
     | oldest seq still retained, head the highest ever assigned. Resume from floor-1
     | to continue with a known gap, or rebuild from a full export.
+  flag --exit-on-stdin-eof type=bool default="false" usage="with --follow, exit when stdin closes (for parent-process lifecycle tracking)"
   flag --follow type=bool default="false" usage="keep printing new records as they are committed (Ctrl-C to stop)"
   flag --limit type=int default="0" usage="maximum number of records to return (0 = no limit)"
   flag --since type=int64 default="0" usage="return records with seq greater than this value"
@@ -6558,7 +6569,7 @@ bd setup
     | Use 'bd setup <recipe> --remove' to uninstall.
   flag --add type=string default="" usage="Add a custom recipe with given name"
   flag --check type=bool default="false" usage="Check if integration is installed"
-  flag --global type=bool default="false" usage="Install globally (claude/codex/cursor/mux; writes to ~/.claude/settings.json, $CODEX_HOME/AGENTS.md or ~/.codex/AGENTS.md, ~/.cursor/hooks.json, or ~/.mux/AGENTS.md)"
+  flag --global type=bool default="false" usage="Install globally (claude/codex/cursor/mux; writes to ~/.claude/settings.json and ~/.claude/CLAUDE.md, $CODEX_HOME/AGENTS.md or ~/.codex/AGENTS.md, ~/.cursor/hooks.json, or ~/.mux/AGENTS.md)"
   flag --list type=bool default="false" usage="List all available recipes"
   flag --output -o type=string default="" usage="Write template to custom path"
   flag --print type=bool default="false" usage="Print the template to stdout"

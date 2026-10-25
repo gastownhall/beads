@@ -648,6 +648,33 @@ func TestIsDoltServerMode_HostInference_GH3545(t *testing.T) {
 	})
 }
 
+// TestIsIPv6LoopbackHost pins the local hosts where bd's own server, which
+// listens on 127.0.0.1 only, never runs: the IPv6 loopback in both spellings
+// IsLocalHostString accepts, and nothing else it accepts.
+func TestIsIPv6LoopbackHost(t *testing.T) {
+	for _, tc := range []struct {
+		host string
+		want bool
+	}{
+		{"::1", true},
+		{"[::1]", true},
+		{" [::1] ", true},
+		{"", false},
+		{"localhost", false},
+		{"127.0.0.1", false},
+		{"0.0.0.0", false},
+		{"2001:db8::1", false},
+		{"[2001:db8::1]", false},
+	} {
+		if got := IsIPv6LoopbackHost(tc.host); got != tc.want {
+			t.Errorf("IsIPv6LoopbackHost(%q) = %v, want %v", tc.host, got, tc.want)
+		}
+		if tc.want && !IsLocalHostString(tc.host) {
+			t.Errorf("IsLocalHostString(%q) = false, want true: the IPv6 loopback is this machine", tc.host)
+		}
+	}
+}
+
 // TestDoltProxiedServerMode covers the IsDoltProxiedServerMode predicate and
 // the GetCapabilities branch that treats proxied-server as multi-process-safe
 // (the proxy daemon serializes writers).
@@ -907,6 +934,40 @@ func TestSaveProxiedServerClientInfo_WritesEffectiveIdleTimeout(t *testing.T) {
 			}
 			if info.IdleTimeout != tc.want {
 				t.Fatalf("caller plan IdleTimeout = %s, want effective %s", info.IdleTimeout, tc.want)
+			}
+		})
+	}
+}
+
+// TestLoadProxiedServerClientInfo_ResolvesEffectiveIdleTimeout pins the read
+// side of the same contract (bd-mnhq6). Sidecars written before the effective
+// value was persisted omit idle_timeout, and nothing rewrites them, so Load is
+// where a pre-upgrade workspace stops reporting an absent timeout that readers
+// cannot tell apart from "unset". A negative value is the "never" sentinel and
+// must survive the load rather than be swept into the default.
+func TestLoadProxiedServerClientInfo_ResolvesEffectiveIdleTimeout(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		sidecar string
+		want    time.Duration
+	}{
+		{name: "legacy absent key", sidecar: `{"root_path":"/var/lib/beads/proxieddb"}`, want: DefaultProxyIdleTimeout},
+		{name: "explicit zero", sidecar: `{"root_path":"/var/lib/beads/proxieddb","idle_timeout":0}`, want: DefaultProxyIdleTimeout},
+		{name: "never", sidecar: `{"root_path":"/var/lib/beads/proxieddb","idle_timeout":-1}`, want: -1},
+		{name: "other negative", sidecar: `{"root_path":"/var/lib/beads/proxieddb","idle_timeout":-5000000000}`, want: -5 * time.Second},
+		{name: "positive", sidecar: `{"root_path":"/var/lib/beads/proxieddb","idle_timeout":45000000000}`, want: 45 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(ProxiedServerClientInfoPath(dir), []byte(tc.sidecar), 0o600); err != nil {
+				t.Fatalf("seed sidecar: %v", err)
+			}
+			got, err := LoadProxiedServerClientInfo(dir)
+			if err != nil || got == nil {
+				t.Fatalf("Load: %v got=%v", err, got)
+			}
+			if got.IdleTimeout != tc.want {
+				t.Errorf("IdleTimeout = %s, want %s", got.IdleTimeout, tc.want)
 			}
 		})
 	}

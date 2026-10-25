@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -17,10 +18,12 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/remotecache"
 	"github.com/steveyegge/beads/internal/routing"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/timeparsing"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -374,9 +377,15 @@ var createCmd = &cobra.Command{
 
 		if dryRun && parentID == "" {
 			// The preview opens no target, but it refuses a local one in a
-			// format this build cannot open, as the create it previews would.
+			// format this build cannot open, as the create it previews would,
+			// and one with no metadata.json the create would refuse to
+			// initialize (refuseUninitializableTarget). Neither check writes.
 			if err := checkRepoTargetFormat(repoPath); err != nil {
 				return handleWorkspaceGuardError(err)
+			}
+			allowCreate := !isAmbiguousRepoTarget(cmd.Flags().Changed("repo"), repoOverride)
+			if targetBeadsDir, err := checkRepoTargetInitializable(repoPath, allowCreate); err != nil {
+				return handleRepoTargetInitError(targetBeadsDir, err)
 			}
 			return renderDryRun()
 		}
@@ -391,7 +400,7 @@ var createCmd = &cobra.Command{
 					return HandleError("failed to initialize remote cache: %v", err)
 				}
 				if _, err := remoteCache.Ensure(rootCtx, repoPath); err != nil {
-					return HandleError("failed to sync remote %s: %v", repoPath, err)
+					return HandleError("failed to sync remote %s: %v", remedy.PrintedValue(repoPath), err)
 				}
 				targetStore, err = remoteCache.OpenStore(rootCtx, repoPath, newDoltStoreFromConfig)
 				if err != nil {
@@ -407,10 +416,7 @@ var createCmd = &cobra.Command{
 				// flag value can be ambiguous.
 				allowCreate := !isAmbiguousRepoTarget(cmd.Flags().Changed("repo"), repoOverride)
 				if err := ensureBeadsDirForPath(rootCtx, targetBeadsDir, store, allowCreate); err != nil {
-					if isUnsupportedWorkspaceFormat(err) {
-						return handleWorkspaceGuardError(err)
-					}
-					return HandleError("failed to initialize target repo: %v", err)
+					return handleRepoTargetInitError(targetBeadsDir, err)
 				}
 
 				targetBeadsDirPath := filepath.Join(targetBeadsDir, ".beads")
@@ -640,7 +646,7 @@ var createCmd = &cobra.Command{
 
 		if remoteCache != nil {
 			if pushErr := remoteCache.Push(rootCtx, repoPath); pushErr != nil {
-				return HandleError("failed to push to %s: %v\nThe issue was created locally but not synced to the remote.", repoPath, pushErr)
+				return HandleError("failed to push to %s: %v\nThe issue was created locally but not synced to the remote.", remedy.PrintedValue(repoPath), pushErr)
 			}
 		}
 
@@ -985,13 +991,15 @@ func handleCreateTargetStoreError(err error, targetPath, fallbackFormat string) 
 	}
 	var capErr *ProxyCapabilityError
 	if !errors.As(err, &capErr) {
+		// HandleError spells the message through remedy.PrintedText, so an
+		// open error that repeats the target path cannot redraw the line.
 		return HandleError(fallbackFormat, err)
 	}
 
 	withContext := *capErr
-	withContext.Message = fmt.Sprintf("failed to open create target %q: %s", targetPath, capErr.Message)
+	withContext.Message = fmt.Sprintf("failed to open create target %s: %s", remedy.EscapedValue(targetPath), capErr.Message)
 	if capErr.Code == "proxy.store.unrouted" {
-		withContext.Message = fmt.Sprintf("create target %q is a proxied-server workspace; bd cannot open it as a direct store", targetPath)
+		withContext.Message = fmt.Sprintf("create target %s is a proxied-server workspace; bd cannot open it as a direct store", remedy.EscapedValue(targetPath))
 	}
 	return HandleProxyCapabilityError(&withContext)
 }
@@ -1025,7 +1033,7 @@ func openDryRunTargetStore(ctx context.Context, repoPath string) (storage.DoltSt
 		// Do not add writes here; dry-runs must not mutate cached remotes.
 		store, err := cache.OpenStore(ctx, repoPath, newPreviewStoreFromConfig)
 		if err != nil {
-			return nil, fmt.Errorf("dry-run parent lookup requires an existing cached remote store for %s: %w", repoPath, err)
+			return nil, fmt.Errorf("dry-run parent lookup requires an existing cached remote store for %s: %w", remedy.PrintedValue(repoPath), err)
 		}
 		return store, nil
 	}
@@ -1041,14 +1049,14 @@ func openDryRunTargetStore(ctx context.Context, repoPath string) (storage.DoltSt
 	metadataPath := filepath.Join(beadsDir, "metadata.json")
 	if _, err := os.Stat(metadataPath); err != nil {
 		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("target repo %s is not initialized; refusing to initialize it during dry-run", targetPath)
+			return nil, fmt.Errorf("target repo %s is not initialized; refusing to initialize it during dry-run", remedy.PrintedValue(targetPath))
 		}
-		return nil, fmt.Errorf("failed to inspect target repo %s: %w", targetPath, err)
+		return nil, fmt.Errorf("failed to inspect target repo %s: %w", remedy.PrintedValue(targetPath), remedy.PrintedError(err))
 	}
 
 	store, err := newPreviewStoreFromConfig(ctx, beadsDir)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open target store for dry-run: %w", err)
+		return nil, fmt.Errorf("failed to open target store for dry-run: %w", remedy.PrintedTextError(err))
 	}
 	return store, nil
 }
@@ -1064,6 +1072,41 @@ func checkRepoTargetFormat(repoPath string) error {
 	return checkDiscoveredWorkspaceFormat(filepath.Join(routing.ExpandPath(repoPath), ".beads"))
 }
 
+// checkRepoTargetInitializable runs, for a local create target whose .beads
+// has no metadata.json, the refusals ensureBeadsDirForPath applies before it
+// opens anything (refuseUninitializableTarget), so a dry-run preview refuses
+// what the create it previews would. It opens no database, so the refusal of
+// an adopted database's uncommitted changes (refuseUncommittedTargetChanges)
+// is left to the create. It writes nothing. A target with a
+// metadata.json, the command's own workspace, a remote target, and a target
+// the create would not initialize at all (allowCreate false) pass. It returns
+// the target path for handleRepoTargetInitError.
+func checkRepoTargetInitializable(repoPath string, allowCreate bool) (string, error) {
+	if repoPath == "." || remotecache.IsRemoteURL(repoPath) || !allowCreate {
+		return "", nil
+	}
+	targetPath := routing.ExpandPath(repoPath)
+	beadsDir := filepath.Join(targetPath, ".beads")
+	if _, err := os.Stat(filepath.Join(beadsDir, "metadata.json")); err == nil {
+		return targetPath, nil
+	}
+	return targetPath, refuseUninitializableTarget(beadsDir)
+}
+
+// handleRepoTargetInitError renders a create target's initialization failure
+// (ensureBeadsDirForPath, or the preview's checkRepoTargetInitializable).
+func handleRepoTargetInitError(targetPath string, err error) error {
+	if isUnsupportedWorkspaceFormat(err) {
+		return handleWorkspaceGuardError(err)
+	}
+	if isLegacyUpgradeRefusal(err) {
+		// bd's own admission refusal of the target, named, as bd renders it
+		// there: nothing was initialized.
+		return handleWorkspaceGuardError(fmt.Errorf("target repo %s: %w", remedy.PrintedValue(targetPath), err))
+	}
+	return HandleError("failed to initialize target repo: %v", err)
+}
+
 // isAmbiguousRepoTarget reports whether an explicit --repo value is a
 // bare/relative filesystem path (not absolute, not "~/"-prefixed). Such a
 // value silently resolves against the current working directory (see
@@ -1075,8 +1118,23 @@ func isAmbiguousRepoTarget(repoFlagChanged bool, repoOverride string) bool {
 }
 
 // ensureBeadsDirForPath ensures a beads directory exists at the target path.
-// If the .beads directory doesn't exist, it creates it and initializes with
-// the same prefix as the source store (T010, T012: prefix inheritance).
+// A .beads that already has a metadata.json is left as it is. Otherwise the
+// metadata.json written here decides what bd opens in the target from then on
+// (it outranks the target's config.yaml), so it must name what the .beads
+// already holds rather than hide it:
+//
+//   - a .beads refuseUninitializableTarget refuses (one whose own config selects
+//     Dolt server mode, one bd's own admission refuses, one holding several
+//     databases) is refused, with nothing written;
+//   - one that holds exactly one embedded database keeps it
+//     (adoptTargetDatabase), the database fork setup creates among them,
+//     unless its working set already holds changes the create's commit would
+//     publish (refuseUncommittedTargetChanges);
+//   - any other is given a new database with the same prefix as the source
+//     store (T010, T012: prefix inheritance).
+//
+// bd migrate-personal applies the same rule to the planning repo
+// (refuseUninitializablePlanningRepo, initializePlanningRepo).
 //
 // When allowCreate is false, a target with no existing workspace is refused
 // instead of fabricated — see isAmbiguousRepoTarget.
@@ -1099,7 +1157,16 @@ func ensureBeadsDirForPath(ctx context.Context, targetPath string, sourceStore s
 	}
 
 	if !allowCreate {
-		return fmt.Errorf("no beads workspace found at %s and --repo's value is a relative/bare path, so it won't be auto-created here (this is likely not the target you intended). Pass an absolute or \"~/\"-prefixed --repo path to an existing workspace instead", targetPath)
+		return fmt.Errorf("no beads workspace found at %s and --repo's value is a relative/bare path, so it won't be auto-created here (this is likely not the target you intended). Pass an absolute or \"~/\"-prefixed --repo path to an existing workspace instead", remedy.PrintedValue(targetPath))
+	}
+
+	if err := refuseUninitializableTarget(beadsDir); err != nil {
+		return err
+	}
+	if databases := embeddeddolt.Databases(beadsDir); len(databases) == 1 {
+		return adoptTargetDatabase(ctx, beadsDir, databases[0], sourceStore, func(target storage.DoltStorage) error {
+			return refuseUncommittedTargetChanges(ctx, target, beadsDir, databases[0])
+		})
 	}
 
 	// Create .beads directory
@@ -1136,16 +1203,235 @@ func ensureBeadsDirForPath(ctx context.Context, targetPath string, sourceStore s
 
 			// Write metadata.json so newDoltStoreFromConfig can find the
 			// correct database name on subsequent opens (GH#2988).
-			cfg := configfile.DefaultConfig()
-			cfg.Backend = configfile.BackendDolt
-			cfg.DoltDatabase = dbName
-			cfg.DoltMode = configfile.DoltModeEmbedded
-			cfg.ProjectID = configfile.GenerateProjectID()
-			if err := cfg.Save(beadsDir); err != nil {
-				return fmt.Errorf("failed to write metadata.json: %w", err)
-			}
+			return saveEmbeddedTargetMetadata(beadsDir, dbName, configfile.GenerateProjectID())
 		}
 	}
 
+	return nil
+}
+
+// refuseUninitializableTarget refuses a .beads with no metadata.json that
+// ensureBeadsDirForPath must not initialize, because bd run in that repository
+// already reads something there that the metadata.json it writes would hide.
+// It writes nothing. Refused are:
+//
+//   - one whose own config.yaml (or the config.local.yaml beside it) selects
+//     Dolt server mode, by dolt.mode: server (the shape gc provisions) or, with
+//     no dolt.mode, by a non-local dolt.host: bd there opens its server
+//     database, and a metadata.json pinning dolt_mode "embedded" outranks
+//     that file. A config it cannot read is refused too, since it may say
+//     the same; a null left by commenting a key out reads as unset, as bd
+//     reads it there. This runs before bd's admission below, which resolves the
+//     mode of a workspace that is not the bound target from the launching
+//     workspace's config (workspaceSelectsServerMode);
+//   - one bd's own command admission refuses (guardLegacyUpgradeWorkspace),
+//     such as a SQLite-era repo: a fresh database beside it would hide its
+//     data and silence that refusal;
+//   - one holding several embedded databases: nothing records which one
+//     holds the issues (bd run there opens the default database).
+//
+// A .beads holding one embedded database is left to adoptTargetDatabase. A
+// .beads in a format this build cannot open is refused as that first, as bd's
+// admission refuses it (checkDiscoveredWorkspaceFormat). Its own refusals are
+// targetRefusals; bd's admission refusals are returned as that admission
+// returns them.
+func refuseUninitializableTarget(beadsDir string) error {
+	// A workspace in a format this build cannot open is refused as that,
+	// before its config is read: the format fence's refusal (and its exit
+	// code) does not depend on the mode the config selects.
+	if err := checkDiscoveredWorkspaceFormat(beadsDir); err != nil {
+		return err
+	}
+	// repo is the target as its refusals name it (remedy.PrintedValue), so a
+	// path holding a control character cannot redraw the bd init remedy
+	// printed after it. A config read error names the config path, so it is
+	// spelled the same way.
+	repo := remedy.PrintedValue(filepath.Dir(beadsDir))
+	mode, _, err := config.WorkspaceYamlSettingWithLocal(beadsDir, "dolt.mode")
+	if err != nil {
+		return refuseTarget("%s has no metadata.json and its dolt.mode cannot be read (%s); not initializing it, since it may select Dolt server mode", repo, remedy.PrintedValue(err.Error()))
+	}
+	// host is the target's own non-local dolt.host, if it has one. bd init
+	// does not read it from config.yaml (it takes the host from --server-host
+	// or BEADS_DOLT_SERVER_HOST and otherwise dials 127.0.0.1), so a remedy
+	// for a target that names a remote server must pass it.
+	host, _, hostErr := config.WorkspaceYamlSettingWithLocal(beadsDir, "dolt.host")
+	if hostErr != nil || configfile.IsLocalHostString(host) {
+		host = ""
+	}
+	if strings.EqualFold(mode, configfile.DoltModeServer) {
+		initCmd, hostNote := serverInitRemedy(runtime.GOOS, "bd init", beadsDir, host)
+		return refuseTarget("%s has no metadata.json and its own config selects Dolt server mode (dolt.mode: server); not initializing it as an embedded workspace, which would hide its server data. Run `%s` there%s, naming the server database it uses (%q unless BEADS_DOLT_SERVER_DATABASE names another), then rerun", repo, initCmd, hostNote, configfile.DefaultDoltDatabase)
+	}
+	if mode == "" {
+		// With no dolt.mode, a non-local dolt.host selects server mode there
+		// too (HostImpliesServerMode's config.yaml tier), and the dolt_mode the
+		// metadata.json below pins switches that inference off.
+		if hostErr != nil {
+			return refuseTarget("%s has no metadata.json and its dolt.host cannot be read (%s); not initializing it, since it may select Dolt server mode", repo, remedy.PrintedValue(hostErr.Error()))
+		}
+		if host != "" {
+			// The host is named escaped (remedy.EscapedValue), as hostNote
+			// names one the remedy leaves as a placeholder.
+			initCmd, hostNote := serverInitRemedy(runtime.GOOS, "bd init --server", beadsDir, host)
+			return refuseTarget("%s has no metadata.json and its own config selects Dolt server mode (dolt.host: %s); not initializing it as an embedded workspace, which would hide its server data. Run `%s` there%s, naming the server database it uses (%q unless BEADS_DOLT_SERVER_DATABASE names another), then rerun", repo, remedy.EscapedValue(host), initCmd, hostNote, configfile.DefaultDoltDatabase)
+		}
+	}
+	if err := guardLegacyUpgradeWorkspace(beadsDir); err != nil {
+		return err
+	}
+	if databases := embeddeddolt.Databases(beadsDir); len(databases) > 1 {
+		return refuseTarget("%s has no metadata.json and holds several databases (%s); give it a metadata.json whose dolt_database names the one to use, then rerun", repo, remedy.PrintedList(databases, ", "))
+	}
+	return nil
+}
+
+// targetRefusal is refuseUninitializableTarget's own refusal of a target: a
+// shape it must not initialize, in a message that starts with the target's
+// path and names the remedy. bd migrate-personal raises it as a refusal of
+// the planning repo (refuseUninitializablePlanningRepo).
+type targetRefusal struct{ msg string }
+
+func (r *targetRefusal) Error() string { return r.msg }
+
+func refuseTarget(format string, args ...any) error {
+	return &targetRefusal{msg: fmt.Sprintf(format, args...)}
+}
+
+// serverInitRemedy completes the bd init command, initCmd ("bd init" or
+// "bd init --server"), that refuseUninitializableTarget tells the user to run
+// in a target, beadsDir, whose own config selects Dolt server mode. host is
+// the target's non-local dolt.host, or "" for none. bd init does not read
+// dolt.host from config.yaml, so a remote host is passed with --server-host,
+// quoted for the shell the command is pasted into on goos (remedy.ShellQuotedFor),
+// since it is the target repository's content. A host no quoting there passes
+// on unchanged is left as a <host> placeholder, and hostNote, which the
+// refusal prints after the command, names it escaped (remedy.EscapedValue), so
+// pasting that name in its place runs nothing either. Its port is passed
+// with it (remoteServerPort): bd init takes a .beads/dolt-server.port over
+// any configured port, and that file is a local server's bookkeeping, which
+// bd itself discards for a remote host (doltserver.DefaultConfig), so the
+// remote host would be dialed on a stale local port.
+func serverInitRemedy(goos, initCmd, beadsDir, host string) (command, hostNote string) {
+	if host != "" {
+		quoted, ok := remedy.ShellQuotedFor(goos, host)
+		if !ok {
+			quoted, hostNote = "<host>", fmt.Sprintf(" with its dolt.host %s for <host>", remedy.EscapedValue(host))
+		}
+		initCmd += fmt.Sprintf(" --server-host %s --server-port %d", quoted, remoteServerPort(beadsDir))
+	}
+	return initCmd + " --database <name>", hostNote
+}
+
+// remoteServerPort is the port of the remote server a target, beadsDir, names
+// by its dolt.host: its own dolt.port (config.local.yaml beside config.yaml
+// outranks it), else configfile.DefaultDoltServerPort, the port bd dials for a
+// remote host that has none configured.
+func remoteServerPort(beadsDir string) int {
+	value, _, err := config.WorkspaceYamlSettingWithLocal(beadsDir, "dolt.port")
+	if port, convErr := strconv.Atoi(value); err == nil && convErr == nil && port > 0 {
+		return port
+	}
+	return configfile.DefaultDoltServerPort
+}
+
+// adoptTargetDatabase gives a .beads with no metadata.json that holds one
+// embedded database, database, the metadata.json that names it, instead of
+// creating a database named after the source prefix beside it, which would
+// hide whatever it holds. It is the database fork setup creates
+// (autoConfigureForkContributor), and the one an auto-routed open uses until
+// a metadata.json names another (autoRouteTargetDatabase). The database keeps
+// its issue_prefix, or takes sourceStore's when it has none, and its project
+// identity (adoptedDatabaseSettings). check, when set, inspects the opened
+// database before anything is written and refuses the adoption by returning
+// an error.
+func adoptTargetDatabase(ctx context.Context, beadsDir, database string, sourceStore storage.DoltStorage, check func(storage.DoltStorage) error) error {
+	target, err := newDoltStore(ctx, &dolt.Config{BeadsDir: beadsDir, Database: database})
+	if err != nil {
+		// The open error is bd's own and can span lines: the printer spells
+		// what in it a terminal acts on, and keeps its lines.
+		return fmt.Errorf("failed to open %s's database %s: %w", remedy.PrintedValue(filepath.Dir(beadsDir)), remedy.EscapedValue(database), remedy.PrintedTextError(err))
+	}
+	if check != nil {
+		err = check(target)
+	}
+	var projectID string
+	if err == nil {
+		projectID, err = adoptedDatabaseSettings(ctx, target, sourceStore)
+	}
+	if closeErr := target.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	return saveEmbeddedTargetMetadata(beadsDir, database, projectID)
+}
+
+// refuseUncommittedTargetChanges is the check adoptTargetDatabase runs for a
+// routed bd create (ensureBeadsDirForPath): it refuses the adopted database,
+// database, when its working set already holds changes the create's commit
+// would publish under the create's message. With dolt.auto-commit on, the
+// create commits there: its write's own commit stages every table the write
+// touched (issueOpsContext), and from an embedded workspace the create then
+// commits the whole working set (DOLT_COMMIT('-Am'), commitPendingIfEmbedded).
+// bd migrate-personal refuses the same database for the same reason
+// (refuseUncommittedPlanningChanges). It writes nothing.
+func refuseUncommittedTargetChanges(ctx context.Context, target storage.DoltStorage, beadsDir, database string) error {
+	if commits, err := writesCommitNow(); err != nil || !commits {
+		return err
+	}
+	// The target, its database and its tables are named as
+	// refuseUninitializableTarget names the target (remedy.PrintedValue).
+	repo := remedy.PrintedValue(filepath.Dir(beadsDir))
+	tables, err := uncommittedTables(ctx, target)
+	if err != nil {
+		return fmt.Errorf("failed to read the uncommitted changes of %s's database %s: %w", repo, remedy.EscapedValue(database), err)
+	}
+	if len(tables) == 0 {
+		return nil
+	}
+	return fmt.Errorf("%s has no metadata.json and its database %s has uncommitted changes (%s), which bd create's commit would publish; commit them there with `bd dolt commit`, then rerun; nothing was created", repo, remedy.EscapedValue(database), remedy.PrintedList(tables, ", "))
+}
+
+// adoptedDatabaseSettings gives a database adoptTargetDatabase adopts
+// sourceStore's issue_prefix when it has none and a source store is given, as
+// ensureBeadsDirForPath gives the database it creates (a routed bd create into
+// it needs one), and returns the project_id its metadata.json is to carry: the
+// database's own _project_id when it has one, which bd's workspace identity
+// check compares that field with (validateWorkspaceIdentity), else a new one.
+func adoptedDatabaseSettings(ctx context.Context, target, sourceStore storage.DoltStorage) (string, error) {
+	prefix, err := target.GetConfig(ctx, "issue_prefix")
+	if err != nil {
+		return "", fmt.Errorf("failed to read the target database's issue_prefix: %w", err)
+	}
+	if prefix == "" && sourceStore != nil {
+		if sourcePrefix, err := sourceStore.GetConfig(ctx, "issue_prefix"); err == nil && sourcePrefix != "" {
+			if err := target.SetConfig(ctx, "issue_prefix", sourcePrefix); err != nil {
+				return "", fmt.Errorf("failed to set prefix in the target database: %w", err)
+			}
+		}
+	}
+	projectID, err := target.GetMetadata(ctx, "_project_id")
+	if err != nil {
+		return "", fmt.Errorf("failed to read the target database's project identity: %w", err)
+	}
+	if projectID == "" {
+		projectID = configfile.GenerateProjectID()
+	}
+	return projectID, nil
+}
+
+// saveEmbeddedTargetMetadata writes the metadata.json ensureBeadsDirForPath
+// gives a target: an embedded Dolt workspace using database under projectID.
+func saveEmbeddedTargetMetadata(beadsDir, database, projectID string) error {
+	cfg := configfile.DefaultConfig()
+	cfg.Backend = configfile.BackendDolt
+	cfg.DoltDatabase = database
+	cfg.DoltMode = configfile.DoltModeEmbedded
+	cfg.ProjectID = projectID
+	if err := cfg.Save(beadsDir); err != nil {
+		return fmt.Errorf("failed to write metadata.json: %w", err)
+	}
 	return nil
 }

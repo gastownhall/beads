@@ -13,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -1018,7 +1019,7 @@ Examples:
 			routedResult, err := resolveAndGetIssueWithRouting(ctx, store, arg)
 			if err != nil {
 				if batchMode {
-					fmt.Fprintf(os.Stderr, "warning: resolving %s: %v (skipped)\n", arg, err)
+					fmt.Fprintf(os.Stderr, "warning: resolving %s: %s (skipped)\n", arg, remedy.PrintedMessage(err))
 					continue
 				}
 				return HandleErrorRespectJSON("resolving %s: %v", arg, err)

@@ -7,12 +7,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
 	"github.com/steveyegge/beads/internal/storage/issueops"
@@ -393,6 +395,14 @@ func runBackupRestoreProxied(ctx context.Context, dir string, force bool) error 
 	return nil
 }
 
+// backupInitCommand is the bd backup init command for dir, in backticks, the
+// directory as one shell word or a placeholder named after the command: dir is
+// the restore directory the user typed, and a space in it would split it.
+func backupInitCommand(dir string) string {
+	arg, note := remedy.CommandArg(runtime.GOOS, dir, "<dir>")
+	return "`bd backup init " + arg + "`" + note
+}
+
 // proxiedRestoreFailureMessage renders what the operator is told when one of
 // the two quiesced steps fails.
 //
@@ -413,8 +423,8 @@ func proxiedRestoreFailureMessage(dir string, afterReconcile bool, err error) st
 				"the data is restored and reconciled — run 'bd dolt stop --force' before the next command", dir, teardown)
 		}
 		return fmt.Sprintf("restored from %s, but shutting the proxied server down afterwards failed: %v; "+
-			"the data is restored — run 'bd dolt stop --force', then 'bd backup init %s' to re-register the "+
-			"backup destination, which this run did not reach", dir, teardown, dir)
+			"the data is restored — run 'bd dolt stop --force', then %s to re-register the "+
+			"backup destination, which this run did not reach", dir, teardown, backupInitCommand(dir))
 	}
 	if afterReconcile {
 		return fmt.Sprintf("restored from %s, but the restored database did not reopen: %v", dir, err)

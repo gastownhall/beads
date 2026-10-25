@@ -30,6 +30,9 @@ const (
 	prRiskDependabotValue = "${{ github.actor == 'dependabot[bot]' }}"
 	// pr.yml's gate id for "the Bazel lanes ran remotely".
 	bazelRemoteGateID = "BAZEL_REMOTE"
+	// The decision's fork-repository test: a fork repository's own CI
+	// (not a fork PR into beads) is mode local, so it never reads rbe-cache.
+	bazelForkRepoValue = "${{ github.repository_owner != 'gastownhall' }}"
 )
 
 // rbeFacts: what GitHub evaluates bazel.yml's rbe step's env expressions on.
@@ -43,11 +46,15 @@ type rbeFacts struct {
 	// What rbe-fork-mint's /v1/status answers this run (bazelTestMintEnv;
 	// "" = unreachable). Only fork and Dependabot pull_request runs ask.
 	mint string
+	// github.repository_owner is not gastownhall: the run is a fork
+	// repository's own CI (a push to the fork, a PR within it), never a
+	// fork PR into beads.
+	forkRepo bool
 }
 
 func (f rbeFacts) String() string {
-	return fmt.Sprintf("event=%s var=%q secret=%v fork=%v dependabot=%v mint=%q",
-		f.event, f.rbeVar, f.secret != "", f.fork, f.dependabot, f.mint)
+	return fmt.Sprintf("event=%s var=%q secret=%v fork=%v dependabot=%v mint=%q fork-repo=%v",
+		f.event, f.rbeVar, f.secret != "", f.fork, f.dependabot, f.mint, f.forkRepo)
 }
 
 // forkPR: a run that asks rbe-fork-mint (bazel.yml's rbe job).
@@ -73,7 +80,7 @@ func rbeGateFactsMatrix() []rbeFacts {
 			for _, secret := range rbeSecrets {
 				for _, fork := range []bool{false, true} {
 					for _, dependabot := range []bool{false, true} {
-						f := rbeFacts{event, v, secret, fork, dependabot, ""}
+						f := rbeFacts{event, v, secret, fork, dependabot, "", false}
 						if !f.forkPR() {
 							out = append(out, f)
 							continue
@@ -121,6 +128,8 @@ func evalRBEExpr(t *testing.T, expr string, f rbeFacts, with map[string]string) 
 		return strconv.FormatBool(strings.EqualFold(input("rbe", "on"), "cache"))
 	case "${{ github.event.pull_request.head.repo.fork == true }}":
 		return strconv.FormatBool(f.fork)
+	case bazelForkRepoValue:
+		return strconv.FormatBool(f.forkRepo)
 	case bazelForkFarmValue:
 		return strconv.FormatBool(strings.EqualFold(input("fork-farm", "off"), "authorized") &&
 			f.event == "pull_request_target" && input("checkout-sha", "") != "")
@@ -142,8 +151,9 @@ func runDecisionStep(t *testing.T, step ciWorkflowStep, f rbeFacts, with map[str
 	return runBazelRBEDecision(t, step.Run, env)
 }
 
-// prGateFor: pr.yml's ci-gate scenario for one run whose Bazel call took
-// this mode with every lane that runs in it passing.
+// prGateFor: pr.yml's ci-gate scenario for one run on event whose Bazel call
+// took this mode with every lane that runs in it passing (lanes: the call's
+// on that event, bazelPRCallLanesFor).
 func prGateFor(t *testing.T, lanes map[string]map[string]bool, event, mode string) bazelGateScenario {
 	t.Helper()
 	outputs := map[string]string{}
@@ -155,11 +165,12 @@ func prGateFor(t *testing.T, lanes map[string]map[string]bool, event, mode strin
 	return bazelGateScenario{
 		name: fmt.Sprintf("%s mode %s", event, mode), event: event,
 		mode: mode, enabled: bazelModeEnabled(mode), call: "success",
-		outputs: outputs,
+		outputs: outputs, callWith: prCallWithFor(t, event),
 	}
 }
 
-// bazelPRCallLanes: the modes each bazel.yml lane runs in under pr.yml's call.
+// bazelPRCallLanes: the modes each bazel.yml lane runs in under a call with
+// these inputs (pr.yml's, the scope resolved: prCallWith).
 func bazelPRCallLanes(t *testing.T, with map[string]string) map[string]map[string]bool {
 	t.Helper()
 	lanes := map[string]map[string]bool{}
@@ -187,7 +198,13 @@ func TestPRGateRequiresRemoteBazelLanes(t *testing.T) {
 	}
 	rbeStep := readCIWorkflow(t, bazelWorkflowName).job(t, bazelRBEJobName).Steps[0]
 	gateStep := pr.job(t, "ci-gate").step(t, "Evaluate CI gate")
-	lanes := bazelPRCallLanes(t, call.With)
+	// The call's lanes on each event: a merge group's scope turns the
+	// Dolt-tier lanes off (TestCIScopePRGate).
+	lanesFor := map[string]map[string]map[string]bool{}
+	for _, event := range rbeGateEvents {
+		lanesFor[event] = bazelPRCallLanesFor(t, event)
+	}
+	lanes := lanesFor["pull_request"]
 
 	required := strings.Fields(gateStep.Env["CI_GATE_REQUIRED"])
 	if !contains(required, bazelRemoteGateID) {
@@ -218,7 +235,7 @@ func TestPRGateRequiresRemoteBazelLanes(t *testing.T) {
 		pass, ok := gateMemo[key]
 		if !ok {
 			var log string
-			pass, log = runPRGateStep(t, gateStep, prGateFor(t, lanes, f.event, mode))
+			pass, log = runPRGateStep(t, gateStep, prGateFor(t, lanesFor[f.event], f.event, mode))
 			gateMemo[key] = pass
 			if !pass && !regexp.MustCompile(`::error::`+bazelRemoteGateID+`\b`).MatchString(log) {
 				t.Errorf("%v (mode %s): red gate does not name %s:\n%s", f, mode, bazelRemoteGateID, log)
@@ -228,7 +245,12 @@ func TestPRGateRequiresRemoteBazelLanes(t *testing.T) {
 			t.Errorf("%v: mode %s, every lane that runs in it passed: gate pass = %v, want %v", f, mode, pass, bazelRemoteModes[mode])
 		}
 	}
-	for _, mode := range []string{"remote", "fork-ro", "fork-rw", "cache", "skip"} {
+	// Never mode cache: rbe-cache refuses GitHub-hosted runners, so only an
+	// rbe=cache dispatch reaches it, never a pull_request or merge group.
+	if saw["cache"] {
+		t.Errorf("the fact matrix reached mode cache on a pull_request or merge group: %v", saw)
+	}
+	for _, mode := range []string{"remote", "fork-ro", "fork-rw", "local", "skip"} {
 		if !saw[mode] {
 			t.Errorf("the fact matrix never reached mode %s: %v", mode, saw)
 		}
@@ -241,18 +263,22 @@ func TestPRGateRequiresRemoteBazelLanes(t *testing.T) {
 		mode string
 		pass bool
 	}{
-		{"same-repo PR, farm on", rbeFacts{"pull_request", "true", "x", false, false, ""}, "remote", true},
-		{"same-repo PR, kill switch (var unset)", rbeFacts{"pull_request", "", "x", false, false, ""}, "skip", false},
-		{"same-repo PR, executor secret missing", rbeFacts{"pull_request", "true", "", false, false, ""}, "cache", false},
-		{"fork PR, rbe-fork ro", rbeFacts{"pull_request", "true", "", true, false, "ro"}, "fork-ro", true},
-		{"fork PR, rbe-fork rw", rbeFacts{"pull_request", "", "", true, false, "rw"}, "fork-rw", true},
-		{"fork PR, rbe-fork closed", rbeFacts{"pull_request", "true", "", true, false, "closed"}, "cache", false},
-		{"fork PR, mint unreachable", rbeFacts{"pull_request", "true", "", true, false, ""}, "cache", false},
-		{"Dependabot PR, rbe-fork ro", rbeFacts{"pull_request", "true", "", false, true, "ro"}, "fork-ro", true},
-		{"Dependabot PR, rbe-fork closed", rbeFacts{"pull_request", "", "", false, true, "closed"}, "cache", false},
-		{"merge_group", rbeFacts{"merge_group", "true", "x", false, false, ""}, "remote", true},
-		{"merge_group, kill switch (var unset)", rbeFacts{"merge_group", "", "x", false, false, ""}, "skip", false},
-		{"merge_group, executor secret missing", rbeFacts{"merge_group", "true", "", false, false, ""}, "cache", false},
+		{"same-repo PR, farm on", rbeFacts{"pull_request", "true", "x", false, false, "", false}, "remote", true},
+		{"same-repo PR, kill switch (var unset)", rbeFacts{"pull_request", "", "x", false, false, "", false}, "skip", false},
+		{"same-repo PR, executor secret missing", rbeFacts{"pull_request", "true", "", false, false, "", false}, "local", false},
+		{"fork PR, rbe-fork ro", rbeFacts{"pull_request", "true", "", true, false, "ro", false}, "fork-ro", true},
+		{"fork PR, rbe-fork rw", rbeFacts{"pull_request", "", "", true, false, "rw", false}, "fork-rw", true},
+		{"fork PR, rbe-fork closed", rbeFacts{"pull_request", "true", "", true, false, "closed", false}, "local", false},
+		{"fork PR, mint unreachable", rbeFacts{"pull_request", "true", "", true, false, "", false}, "local", false},
+		{"Dependabot PR, rbe-fork ro", rbeFacts{"pull_request", "true", "", false, true, "ro", false}, "fork-ro", true},
+		{"Dependabot PR, rbe-fork closed", rbeFacts{"pull_request", "", "", false, true, "closed", false}, "local", false},
+		{"merge_group", rbeFacts{"merge_group", "true", "x", false, false, "", false}, "remote", true},
+		{"merge_group, kill switch (var unset)", rbeFacts{"merge_group", "", "x", false, false, "", false}, "skip", false},
+		{"merge_group, executor secret missing", rbeFacts{"merge_group", "true", "", false, false, "", false}, "local", false},
+		// A fork repository's own CI: local, never rbe-cache or the mint
+		// (red, as every non-remote mode is).
+		{"fork repository's own PR, mint would say ro", rbeFacts{"pull_request", "", "", true, false, "ro", true}, "local", false},
+		{"fork repository's own PR, var and secret set", rbeFacts{"pull_request", "true", "x", false, false, "", true}, "local", false},
 	} {
 		out, err := runDecisionStep(t, rbeStep, c.f, call.With)
 		if err != nil {
@@ -261,7 +287,7 @@ func TestPRGateRequiresRemoteBazelLanes(t *testing.T) {
 		if out["mode"] != c.mode {
 			t.Errorf("%s: mode = %q, want %s", c.name, out["mode"], c.mode)
 		}
-		if pass, log := runPRGateStep(t, gateStep, prGateFor(t, lanes, c.f.event, out["mode"])); pass != c.pass {
+		if pass, log := runPRGateStep(t, gateStep, prGateFor(t, lanesFor[c.f.event], c.f.event, out["mode"])); pass != c.pass {
 			t.Errorf("%s: pr.yml gate pass = %v, want %v\n%s", c.name, pass, c.pass, log)
 		}
 	}
@@ -801,7 +827,8 @@ func TestBazelRetiredLanesCannotBeNarrowed(t *testing.T) {
 
 	// The scripts every lane's test runs under or through, and the whole
 	// setup-bazel action (its generated rc applies to every command).
-	scriptNarrow := regexp.MustCompile(`-test\.(short|run|skip|list|bench)|BEADS_TEST_SKIP|BEADS_TEST_EMBEDDED_DOLT|BEADS_TEST_PROXIED_SERVER|BEADS_TEST_ENV_RUN_DOLT|BEADS_TEST_REQUIRE_DOLT_CONTAINER|BEADS_TEST_DOLT_SERVER\b|TESTBRIDGE_TEST_ONLY|test_filter|test_arg|_filters\b|cache_test_results|eviction_retries|flaky|runs_per_test|test_sharding_strategy`)
+	const narrowOther = `BEADS_TEST_SKIP|BEADS_TEST_EMBEDDED_DOLT|BEADS_TEST_PROXIED_SERVER|BEADS_TEST_ENV_RUN_DOLT|BEADS_TEST_REQUIRE_DOLT_CONTAINER|BEADS_TEST_DOLT_SERVER\b|TESTBRIDGE_TEST_ONLY|test_filter|test_arg|_filters\b|cache_test_results|eviction_retries|flaky|runs_per_test|test_sharding_strategy`
+	scriptNarrow := regexp.MustCompile(`-test\.(short|run|skip|list|bench)|` + narrowOther)
 	files, _ := filepath.Glob(filepath.Join(root, "tools", "bazel", "*.sh"))
 	action, _ := filepath.Glob(filepath.Join(root, setupBazelActionDir, "*"))
 	files = append(files, action...)
@@ -819,10 +846,22 @@ func TestBazelRetiredLanesCannotBeNarrowed(t *testing.T) {
 		// here for pinnedShardTargets only (the dolt-server-cmd targets and
 		// the embedded lane's served targets, whose args are pinned
 		// above); pinnedShardWrapperUsers fails if anything else runs
-		// through it.
-		exempt := filepath.ToSlash(rel) == pinnedShardWrapper
-		if exempt {
+		// through it. go_test_offline.sh's --shard-manifest selects with
+		// -test.run (each listed test in exactly one shard:
+		// TestOfflineWrapperShardManifest) and refuses a forwarded one; it
+		// may use -test.run and nothing else here, and is reviewed for
+		// offlineWrapperTargets only (bd_managed_local_test, args pinned
+		// above).
+		narrow := scriptNarrow
+		switch filepath.ToSlash(rel) {
+		case pinnedShardWrapper:
+			narrow = nil
 			for _, e := range pinnedShardWrapperUsers(t, root) {
+				t.Error(e)
+			}
+		case offlineWrapper:
+			narrow = regexp.MustCompile(`-test\.(short|skip|list|bench)|` + narrowOther)
+			for _, e := range shWrapperUsers(t, root, offlineWrapper, offlineWrapperTargets, "offlineWrapperTargets") {
 				t.Error(e)
 			}
 		}
@@ -831,7 +870,7 @@ func TestBazelRetiredLanesCannotBeNarrowed(t *testing.T) {
 			if strings.HasPrefix(code, "#") {
 				continue
 			}
-			if scriptNarrow.MatchString(code) && !exempt {
+			if narrow != nil && narrow.MatchString(code) {
 				t.Errorf("%s:%d %q can select, skip or re-run the retired tiers' lanes' tests", rel, i+1, code)
 			}
 			for _, m := range regexp.MustCompile(`--config=([A-Za-z0-9_-]+)`).FindAllStringSubmatch(code, -1) {
@@ -921,8 +960,12 @@ func TestBazelRetiredLanesCannotBeNarrowed(t *testing.T) {
 				"BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1", "BEADS_TEST_REQUIRE_SOCAT": "1", "GOMAXPROCS": "4",
 			},
 		},
+		// go_test_offline.sh runs exactly the manifest's tests, each in its
+		// shard (TestOfflineWrapperShardManifest), and the manifest lists
+		// exactly the TestManagedLocalProxied* tests bd_test compiles
+		// (TestManagedLocalShardManifest).
 		"//cmd/bd:bd_managed_local_test": {
-			[]string{"$(rootpath :bd_test)", "-test.run=^TestManagedLocalProxied", "-test.timeout=15m"},
+			[]string{"--shard-manifest=$(rootpath :managed_local_shards.txt)", "$(rootpath :bd_test)", "-test.timeout=15m"},
 			map[string]string{
 				"BEADS_TEST_BD_BINARY": "$(rlocationpath :bd_for_tests)", "BEADS_TEST_COMPACT_GC_FIXTURE": "$(rlocationpath :compact_gc_fixture)",
 				"BEADS_TEST_DOLT_SERVER": "local",

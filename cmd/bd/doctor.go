@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
@@ -31,6 +32,16 @@ type doctorCheck struct {
 	Detail   string `json:"detail,omitempty"` // Additional detail like storage type
 	Fix      string `json:"fix,omitempty"`
 	Category string `json:"category,omitempty"` // category for grouping in output
+}
+
+// printed returns c as every text printer of checks shows it, each text
+// field spelled by remedy.PrintedText (doctor.DoctorCheck.Printed).
+func (c doctorCheck) printed() doctorCheck {
+	c.Name = remedy.PrintedText(c.Name)
+	c.Message = remedy.PrintedText(c.Message)
+	c.Detail = remedy.PrintedText(c.Detail)
+	c.Fix = remedy.PrintedText(c.Fix)
+	return c
 }
 
 type doctorResult struct {
@@ -1302,6 +1313,7 @@ func printDiagnostics(result doctorResult, gate doctor.FixGate) {
 	hasIssues := false
 
 	for _, check := range result.Checks {
+		check = check.printed()
 		cat := check.Category
 		if cat == "" {
 			cat = "Other"
@@ -1549,7 +1561,9 @@ func runMigrationValidation(path string, phase string) error {
 		return nil
 	}
 
-	// Human-readable output
+	// Human-readable output, every check field and message spelled as the
+	// other check printers spell them (remedy.PrintedText).
+	check = check.printed()
 	fmt.Printf("\nbd doctor --migration=%s v%s\n\n", phase, Version)
 
 	// Print main status
@@ -1591,7 +1605,7 @@ func runMigrationValidation(path string, phase string) error {
 		fmt.Println()
 		fmt.Println(ui.RenderCategory("Warnings"))
 		for _, warn := range result.Warnings {
-			fmt.Printf("  %s  %s\n", ui.RenderWarnIcon(), warn)
+			fmt.Printf("  %s  %s\n", ui.RenderWarnIcon(), remedy.PrintedText(warn))
 		}
 	}
 
@@ -1600,7 +1614,7 @@ func runMigrationValidation(path string, phase string) error {
 		fmt.Println()
 		fmt.Println(ui.RenderCategory("Errors"))
 		for _, err := range result.Errors {
-			fmt.Printf("  %s  %s\n", ui.RenderFailIcon(), err)
+			fmt.Printf("  %s  %s\n", ui.RenderFailIcon(), remedy.PrintedText(err))
 		}
 	}
 

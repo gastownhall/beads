@@ -2,12 +2,15 @@ package doctor
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/testutil"
 )
 
 func TestIsValidIdentifier(t *testing.T) {
@@ -52,6 +55,20 @@ func TestCheckServerReachable_UnreachableHost(t *testing.T) {
 	}
 	if check.Category != CategoryFederation {
 		t.Errorf("Category = %q, want %q", check.Category, CategoryFederation)
+	}
+}
+
+// TestCheckServerReachableIPv6Host pins bd doctor --server's reachability
+// probe to the address the store dials for an IPv6 server host configured bare
+// ("::1") or bracketed ("[::1]"): [::1]:port, never [[::1]]:port.
+func TestCheckServerReachableIPv6Host(t *testing.T) {
+	port, _ := testutil.IPv6LoopbackListener(t)
+	want := "Connected to " + net.JoinHostPort("::1", strconv.Itoa(port))
+	for _, host := range []string{"::1", "[::1]"} {
+		check := checkServerReachable(host, port)
+		if check.Status != StatusOK || check.Message != want {
+			t.Errorf("checkServerReachable(%q) = %s %q (%s), want %s %q", host, check.Status, check.Message, check.Detail, StatusOK, want)
+		}
 	}
 }
 
@@ -199,9 +216,9 @@ func TestCheckDoltVersion_Unreachable(t *testing.T) {
 }
 
 // TestRunDoltServerDiagnostics_Unreachable exercises the credential-resolution
-// branch in runDoltServerDiagnostics (bd-h5k7). metadata.json is loaded so
-// that user / tls / password are pulled from configfile.Load before the DSN
-// is built and the ping fails against the unreachable port.
+// branch in runDoltServerDiagnostics (bd-h5k7): the loaded metadata.json's
+// user / tls / password build the DSN before the ping fails against the
+// unreachable port.
 func TestRunDoltServerDiagnostics_Unreachable(t *testing.T) {
 	beadsDir := t.TempDir()
 
@@ -218,8 +235,13 @@ func TestRunDoltServerDiagnostics_Unreachable(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil || cfg == nil {
+		t.Fatalf("load metadata.json: %v", err)
+	}
+
 	metrics := &DoltPerfMetrics{}
-	err := runDoltServerDiagnostics(metrics, "127.0.0.1", 1, "beads", beadsDir)
+	err = runDoltServerDiagnostics(metrics, cfg, "127.0.0.1", 1)
 	if err == nil {
 		t.Fatal("expected error connecting to unreachable server")
 	}
