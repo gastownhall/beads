@@ -1150,3 +1150,75 @@ func TestAutoMigrateStillRunsWithoutFreeze(t *testing.T) {
 		t.Errorf("expected autoMigrateOnVersionBump to run (an 'auto-migrate:' debug log line) when not frozen, got none:\nstderr:\n%s", stderr)
 	}
 }
+
+// TestDeferWakeSweepSkippedDuringMigrationFreeze pins the
+// `MigrationFrozen: commandFreeze.Frozen()` wire-up in main.go's doltCfg
+// construction (dc-6jaq review round 3, finding 3): an expired defer must
+// stay deferred while the workspace is frozen, because the lazy
+// defer-wake sweep (be-vbhpf, GH#7634) is a real write against the store and
+// must not run until the freeze lifts — even though the command reading it
+// ('bd ready') is itself classified read-only and must still exit 0.
+//
+// Hand-reproduced pre-fix: hardcoding MigrationFrozen to false wakes the
+// issue during the freeze; this test fails against that regression.
+func TestDeferWakeSweepSkippedDuringMigrationFreeze(t *testing.T) {
+	bd, dir := setupMigrationFreezeWorkspace(t)
+
+	stdout, stderr, code := runBDMigrationFreeze(t, bd, dir, "create", "defer me", "-p", "2", "--json")
+	if code != 0 {
+		t.Fatalf("setup bd create failed (exit %d):\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	var issue struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &issue); err != nil || issue.ID == "" {
+		t.Fatalf("parsing create --json output: %v\n%s", err, stdout)
+	}
+
+	// An already-past --until makes the defer immediately eligible for the
+	// wake sweep the moment any ready-work read runs.
+	_, stderr, code = runBDMigrationFreeze(t, bd, dir, "defer", issue.ID, "--until", "2020-01-01T00:00:00Z")
+	if code != 0 {
+		t.Fatalf("setup bd defer failed (exit %d):\nstderr:\n%s", code, stderr)
+	}
+
+	writeFreezeMarker(t, dir, "migrator", "dolt v2 migration")
+
+	stdout, stderr, code = runBDFrozen(t, bd, dir, "ready")
+	if code != 0 {
+		t.Fatalf("bd ready was refused during a freeze, but it is classified read-only (exit %d):\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+
+	readStatus := func() string {
+		out, _, c := runBDMigrationFreeze(t, bd, dir, "show", issue.ID, "--json")
+		if c != 0 {
+			t.Fatalf("bd show failed (exit %d):\n%s", c, out)
+		}
+		var shown []struct {
+			Status string `json:"status"`
+		}
+		if err := json.Unmarshal([]byte(out), &shown); err != nil || len(shown) != 1 {
+			t.Fatalf("parsing show --json output: %v\n%s", err, out)
+		}
+		return shown[0].Status
+	}
+
+	if got := readStatus(); got != "deferred" {
+		t.Errorf("status = %q after bd ready during a freeze, want %q — the defer-wake sweep ran despite the freeze marker",
+			got, "deferred")
+	}
+
+	// Thaw and confirm the sweep resumes normally — a guard that simply never
+	// wakes anything would also pass the assertion above, for the wrong
+	// reason.
+	if err := os.Remove(filepath.Join(dir, migration.FileName)); err != nil {
+		t.Fatalf("removing freeze marker: %v", err)
+	}
+	stdout, stderr, code = runBDMigrationFreeze(t, bd, dir, "ready")
+	if code != 0 {
+		t.Fatalf("bd ready failed after thaw (exit %d):\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	if got := readStatus(); got != "open" {
+		t.Errorf("status = %q after thaw + bd ready, want %q — the sweep never ran even unfrozen", got, "open")
+	}
+}
