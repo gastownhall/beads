@@ -3,6 +3,7 @@ package doltversion
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -267,7 +268,8 @@ func TestCachedProbeBelowMinimumRefusedFromCache(t *testing.T) {
 	if !second.FromCache {
 		t.Error("second probe: FromCache = false, want true")
 	}
-	if !strings.Contains(err.Error(), "2.5.1") || !strings.Contains(err.Error(), stub) {
+	// The message quotes the path (%q), which doubles Windows backslashes.
+	if !strings.Contains(err.Error(), "2.5.1") || !strings.Contains(err.Error(), fmt.Sprintf("%q", stub)) {
 		t.Errorf("cached refusal = %q, want it to name 2.5.1 and %s", err, stub)
 	}
 	if got := forkCount(t, countFile); got != 1 {

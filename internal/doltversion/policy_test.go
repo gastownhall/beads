@@ -3,6 +3,7 @@ package doltversion
 import (
 	"context"
 	"errors"
+	"fmt"
 	"regexp"
 	"strings"
 	"testing"
@@ -209,7 +210,8 @@ func TestProbeWithPolicyRequiredVersion(t *testing.T) {
 		if !errors.As(err, &below) {
 			t.Fatalf("ProbeWithPolicy err = %v, want *BelowMinimumError", err)
 		}
-		if below.Server || !strings.Contains(err.Error(), stub) {
+		// The message quotes the path (%q), which doubles Windows backslashes.
+		if below.Server || !strings.Contains(err.Error(), fmt.Sprintf("%q", stub)) {
 			t.Errorf("ProbeWithPolicy err = %q, want a binary error naming %s", err, stub)
 		}
 		if warn != nil {
