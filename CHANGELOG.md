@@ -862,6 +862,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   wrong server. A padded value counted too. It now fills in only a port that
   no setting names, and is read untrimmed, as for a local server.
   `BEADS_DOLT_SERVER_PORT` still overrides a configured port.
+
+  **Compatibility:** a remote setup that exported `BEADS_DOLT_PORT` to send
+  bd away from a pinned port now connects to the pinned port instead, as a
+  local one has since 1.3.0. That includes a tool that sets only
+  `BEADS_DOLT_PORT` for a remote server, and a `listener.port` left in the
+  local data directory's `config.yaml`, which now outranks the variable too.
+  Switch to `BEADS_DOLT_SERVER_PORT`, or change or remove the pinned value.
+
 - bd no longer prints a value a cloned repository can set raw in its
   remedies, hints, and the error lines printed beside them. These values are
   the Dolt server's host, socket, user and database in `metadata.json`,
@@ -897,7 +905,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   own printed `bd sql '<statement>'` in POSIX single quotes, which bd.exe
   received as eight arguments and refused. It now names the
   `CALL DOLT_REMOTE(...)` statement to run as `bd sql`'s one argument or in
-  a Dolt SQL shell. All of these go through one printer, `internal/remedy`.
+  a Dolt SQL shell, escaped (`\x22` for each `"`, `\x2c` for each `,`), as
+  it does on POSIX when single quotes cannot carry the statement, and that
+  refusal names the remote's URL and ref Go-quoted and escaped too. All of
+  these go through one printer, `internal/remedy`.
   An ordinary value and an ordinary message print as before, except that a
   command now quotes a value it used to paste bare when the value holds
   anything but ASCII letters, digits and `_ . / : + -`; that `bd doctor`'s
@@ -918,14 +929,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `bd init` and `bd bootstrap` missing-database refusals and `bd init`'s
   already-initialized refusals, and the `bd list` example in the latter, are
   no longer colored.
-
-
-  **Compatibility:** a remote setup that exported `BEADS_DOLT_PORT` to send
-  bd away from a pinned port now connects to the pinned port instead, as a
-  local one has since 1.3.0. That includes a tool that sets only
-  `BEADS_DOLT_PORT` for a remote server, and a `listener.port` left in the
-  local data directory's `config.yaml`, which now outranks the variable too.
-  Switch to `BEADS_DOLT_SERVER_PORT`, or change or remove the pinned value.
 
 ### Fixed
 

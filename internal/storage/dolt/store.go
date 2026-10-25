@@ -4572,9 +4572,13 @@ func (s *DoltStore) prepareCLIRouteForGitProtocol(ctx context.Context, remote st
 			// about an external server. The remedy names the procedure the
 			// server accepts (the proxied CLI in its directory would refuse
 			// the same --ref, and bd's own remote add finds the persisted
-			// remote and returns without a SQL add).
+			// remote and returns without a SQL add). The remote, URL and ref
+			// are named escaped (remedy.EscapedValue), as the statement that
+			// re-adds them is when no quoting passes it on: a $( ) or a
+			// backtick in a persisted URL is not live on the line a user
+			// copies the remedy from.
 			if s.localActiveDatabaseDir == "" || s.localActiveDatabaseDir != s.CLIDir() {
-				return false, fmt.Errorf("remote %q (%s on %s) is persisted on disk but not visible to this sql-server (GH#2118 cold start), and this bd does not own the server's data directory; re-add it on that server %s", remote, remedy.PrintedValue(r.URL), remedy.PrintedValue(r.Ref), coldStartReaddRemedy(runtime.GOOS, remote, r.URL, r.Ref))
+				return false, fmt.Errorf("remote %s (%s on %s) is persisted on disk but not visible to this sql-server (GH#2118 cold start), and this bd does not own the server's data directory; re-add it on that server %s", remedy.EscapedValue(remote), remedy.EscapedValue(r.URL), remedy.EscapedValue(r.Ref), coldStartReaddRemedy(runtime.GOOS, remote, r.URL, r.Ref))
 			}
 			if err := versioncontrolops.AddRemote(ctx, s.db, remote, r.URL, r.Ref); err != nil && !strings.Contains(strings.ToLower(err.Error()), "already exists") {
 				return false, fmt.Errorf("remote %q (%s on %s) is persisted on disk but not visible to this sql-server (GH#2118 cold start), and re-adding it over SQL failed: %w", remote, remedy.PrintedValue(r.URL), remedy.PrintedValue(r.Ref), err)
@@ -4603,9 +4607,13 @@ func (s *DoltStore) prepareCLIRouteForGitProtocol(ctx context.Context, remote st
 // which a value's double quote becomes too (SQLDoubleQuoted spells it \"),
 // or one of ‘ ’ ‚ ‛ (U+2018 to U+201B), which end single quotes in
 // PowerShell, and none at all when a value does not print as itself. In
-// each of those cases the remedy names the statement on its own, spelled by
-// remedy.PrintedValue, to run as bd sql's one argument or in a Dolt SQL
-// shell, rather than a command that would run something else.
+// each of those cases the remedy names the statement on its own, to run as
+// bd sql's one argument or in a Dolt SQL shell, rather than a command that
+// would run something else, and escaped (remedy.EscapedValue), as a value no
+// quoting passes on is named beside a placeholder (remedy.CommandArg): printed
+// as it is, a $( ) or a backtick in the URL sits inside the statement's own
+// double quotes, where PowerShell and Git Bash run it for a user who pastes
+// the line.
 func coldStartReaddRemedy(goos, remote, url, ref string) string {
 	stmt := fmt.Sprintf("CALL DOLT_REMOTE(%s, %s, %s, %s, %s)",
 		doltutil.SQLDoubleQuoted("add"), doltutil.SQLDoubleQuoted("--ref"),
@@ -4613,7 +4621,7 @@ func coldStartReaddRemedy(goos, remote, url, ref string) string {
 	if quoted, ok := remedy.ShellQuotedFor(goos, stmt); ok {
 		return "with: bd sql " + quoted
 	}
-	return "by running this SQL statement there, as the one argument of bd sql (quoted for your shell) or in a Dolt SQL shell: " + remedy.PrintedValue(stmt)
+	return "by running this SQL statement there, as the one argument of bd sql (quoted for your shell) or in a Dolt SQL shell: " + remedy.EscapedValue(stmt)
 }
 
 // shouldUseCLIForGitProtocol is a compatibility wrapper for tests and older

