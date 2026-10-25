@@ -31,8 +31,8 @@ func (s *rebaseCapableStore) RebaseRemote(_ context.Context, _ string, opts Reba
 	return &RebaseReport{Direction: direction, CountersSet: map[string]int{}, DryRun: opts.DryRun}, nil
 }
 
-// plainStore has no rebase capability at all.
-type plainStore struct{ DoltStorage }
+// rebaseIncapableStore has no rebase capability at all.
+type rebaseIncapableStore struct{ DoltStorage }
 
 func TestChildCollisionRebaserReachedThroughDecorator(t *testing.T) {
 	inner := &rebaseCapableStore{}
@@ -63,7 +63,7 @@ func TestChildCollisionRebaserReachedThroughDecorator(t *testing.T) {
 }
 
 func TestChildCollisionRebaserAbsentOnIncapableStore(t *testing.T) {
-	if _, ok := UnwrapStore(&plainStore{}).(ChildCollisionRebaser); ok {
+	if _, ok := UnwrapStore(&rebaseIncapableStore{}).(ChildCollisionRebaser); ok {
 		t.Fatal("a store without RebaseRemote must not report the capability")
 	}
 }
