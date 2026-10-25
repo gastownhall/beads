@@ -6464,3 +6464,28 @@ func TestDoltImagePullWorkflowsUseRetryHelper(t *testing.T) {
 		}
 	}
 }
+
+// The full macOS suite (main.yml's Test (macOS)) runs only after a merge, so
+// a PR that breaks ./scripts on macOS's /bin/bash 3.2 merged green and turned
+// main red (#7818: mapfile and empty "${arr[@]}" under set -u). The PR's
+// macOS leg runs the whole ./scripts package so the required CI gate sees
+// that break before the merge.
+func TestPRWorkflowRunsScriptsPackageOnMacOS(t *testing.T) {
+	const (
+		jobName  = "pr-preflight-platforms"
+		stepName = "Run the scripts package on macOS's Bash"
+	)
+	workflow := readCIWorkflow(t, "pr.yml")
+	job := workflow.job(t, jobName)
+	if job.If != ciScopePlatformsIf || job.ContinueOnError {
+		t.Fatalf("%s is bypassable: if=%q continue-on-error=%v", jobName, job.If, job.ContinueOnError)
+	}
+	step := job.step(t, stepName)
+	if step.If != "matrix.os == 'macos-latest'" || step.Shell != "bash" ||
+		step.Env["GOCACHE"] != goBuildCachePath("non-race") ||
+		(step.ContinueOnError != nil && step.ContinueOnError != false) {
+		t.Fatalf("macOS scripts step is conditional on the wrong host, optional, or misses the restored cache: %+v", step)
+	}
+	assertStepRunsExactly(t, job, stepName, "go test '-tags=gms_pure_go' -count=1 ./scripts")
+	assertStepsBefore(t, job, []string{"Set up Go", "Restore non-race Go build cache"}, []string{stepName})
+}

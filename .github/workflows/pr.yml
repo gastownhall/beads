@@ -626,6 +626,19 @@ jobs:
           GOCACHE: ${{ runner.temp }}/go-cache/non-race
         run: go test '-tags=integration,gms_pure_go' -count=1 -run '^TestPRPreflight' ./scripts
 
+      # The CI scripts' tests run them under the host's bash, and macOS's
+      # /bin/bash is 3.2 (no mapfile; an empty "${arr[@]}" trips set -u).
+      # main.yml's Test (macOS) runs this package only after a merge, so a
+      # PR that broke it on macOS merged green (#7818). Running it here puts
+      # that break behind the required CI gate.
+      # TestPRWorkflowRunsScriptsPackageOnMacOS pins this step.
+      - name: Run the scripts package on macOS's Bash
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        env:
+          GOCACHE: ${{ runner.temp }}/go-cache/non-race
+        run: go test '-tags=gms_pure_go' -count=1 ./scripts
+
       - name: Check native user config diagnostics
         shell: bash
         env:
