@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -278,5 +279,41 @@ func TestCollectResetItems_ScansEveryManagedHook(t *testing.T) {
 		if !inItems[path] {
 			t.Errorf("bd-owned managed hook %s missing from reset's removal list", name)
 		}
+	}
+}
+
+// prepare-commit-msg is commonly the user's own script — commitizen, a
+// ticket-prefix step — with bd's section injected below it. Widening reset's
+// scan to the name must not widen its licence to delete: the file is theirs,
+// and reset has no backup to restore, so it is reported and kept.
+func TestCollectResetItems_KeepsSectionedPrepareCommitMsg(t *testing.T) {
+	gitCommonDir := t.TempDir()
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	hooksDir := filepath.Join(gitCommonDir, "hooks")
+
+	sectioned := writeHook(t, hooksDir, "prepare-commit-msg",
+		"#!/bin/sh\n./scripts/add-ticket-prefix \"$1\"\n\n"+generateHookSection("prepare-commit-msg"))
+
+	items, preserved := collectResetItems(gitCommonDir, beadsDir)
+
+	inItems := map[string]bool{}
+	for _, it := range items {
+		inItems[it.Path] = true
+	}
+	keptDesc := ""
+	for _, it := range preserved {
+		if it.Path == sectioned {
+			keptDesc = it.Description
+		}
+	}
+
+	if inItems[sectioned] {
+		t.Errorf("hook %s is the user's file with a bd section in it; removing it takes their content too", sectioned)
+	}
+	if keptDesc == "" {
+		t.Fatalf("hook %s should be reported as left in place, not silently ignored", sectioned)
+	}
+	if !strings.Contains(keptDesc, "Keep git hook prepare-commit-msg") {
+		t.Errorf("preserved entry for %s says %q; it should say the hook is kept", sectioned, keptDesc)
 	}
 }
