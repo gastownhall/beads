@@ -1100,3 +1100,67 @@ func TestStepTypeToIssueType(t *testing.T) {
 		}
 	}
 }
+
+// TestResolveAndCookFormula_InlineExpandDependentBlocksOnLastStep pins issue
+// #7637 through the pour pipeline: a step that needs an inline-expanded step
+// blocks on the expansion's last step instead of losing the edge.
+func TestResolveAndCookFormula_InlineExpandDependentBlocksOnLastStep(t *testing.T) {
+	dir := writePipelineFormula(t, "inline", `formula = "inline"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "brief"
+title = "Brief"
+
+[[steps]]
+id = "round"
+title = "Round"
+needs = ["brief"]
+expand = "round"
+
+[[steps]]
+id = "land"
+title = "Land"
+needs = ["round"]
+`)
+	roundTOML := `formula = "round"
+version = 1
+type = "expansion"
+
+[[template]]
+id = "implement"
+title = "Implement"
+
+[[template]]
+id = "triage"
+title = "Triage"
+needs = ["implement"]
+`
+	if err := os.WriteFile(filepath.Join(dir, "round.formula.toml"), []byte(roundTOML), 0o644); err != nil {
+		t.Fatalf("write round formula: %v", err)
+	}
+
+	subgraph, err := resolveAndCookFormula("inline", []string{dir})
+	if err != nil {
+		t.Fatalf("resolveAndCookFormula: %v", err)
+	}
+
+	hasBlocks := func(from, to string) bool {
+		for _, dep := range subgraph.Dependencies {
+			if dep.IssueID == from && dep.DependsOnID == to && dep.Type == types.DepBlocks {
+				return true
+			}
+		}
+		return false
+	}
+	if !hasBlocks("inline.land", "inline.triage") {
+		for _, dep := range subgraph.Dependencies {
+			t.Logf("  %s -> %s (%s)", dep.IssueID, dep.DependsOnID, dep.Type)
+		}
+		t.Errorf("missing blocks dependency inline.land -> inline.triage")
+	}
+	if !hasBlocks("inline.implement", "inline.brief") {
+		t.Errorf("missing blocks dependency inline.implement -> inline.brief")
+	}
+}
