@@ -237,7 +237,7 @@ func (e Endpoint) DialDSN(ctx context.Context, database string) (doltutil.Server
 		return doltutil.ServerDSN{}, fmt.Errorf("resolving dolt credential command: %w", err)
 	}
 	return doltutil.ServerDSN{
-		Socket:   SocketTransport(e.Socket, e.Host, e.Port, socketProbeTimeout),
+		Socket:   e.Transport(),
 		Host:     e.Host,
 		Port:     e.Port,
 		User:     id.User,
@@ -245,6 +245,15 @@ func (e Endpoint) DialDSN(ctx context.Context, database string) (doltutil.Server
 		Database: database,
 		TLS:      e.TLS,
 	}, nil
+}
+
+// Transport is the unix socket the store dials e over, or "" for TCP: its
+// socket-first / TCP-fallback policy (SocketTransport) with its own probe
+// budget. It probes a configured socket, so resolve it only for a dial. A
+// caller that builds its own DSN, keeping an identity of its own, takes the
+// store's transport from it; DialDSN does.
+func (e Endpoint) Transport() string {
+	return SocketTransport(e.Socket, e.Host, e.Port, socketProbeTimeout)
 }
 
 // Probe reports whether e's server answers the MySQL handshake within

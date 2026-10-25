@@ -1267,7 +1267,12 @@ dolt_server_host, a server at the IPv6 loopback (::1, where bd's own
 server never listens), or a local server managed outside bd
 (dolt.auto-start: false, e.g. an orchestrator-shared sql-server) — pings
 the configured endpoint via SQL and reports reachability, server version,
-and database.
+and database. While no server of bd's own is running, it does the same for
+a local server bd does not start: one on a unix socket or behind a
+credential command, or one that BEADS_DOLT_SERVER_PORT, BEADS_DOLT_PORT,
+dolt_server_port or BEADS_DOLT_SERVER_MODE=1 declares externally managed.
+The probe logs in as the configured user; it does not present a credential
+command's token.
 
 In proxied-server mode, reports the proxy (the endpoint every bd command
 connects through) and the dolt backend behind it separately, read from the
@@ -1343,9 +1348,36 @@ is shown as not running, and the next bd command launches it.`,
 		if err != nil {
 			return HandleError("%v", err)
 		}
+		// bd's PID file shows no server of its own. When the endpoint the
+		// store dials is one bd does not serve, no bd command starts a server
+		// there and the PID file says nothing about it: probe that endpoint,
+		// as auto-start off does.
+		if !state.Running && cfg.IsDoltServerMode() {
+			if ep := doltserver.ResolveEndpoint(beadsDir, cfg); statusProbesEndpointBDDoesNotServe(cfg, state, ep) {
+				runExternalDoltStatusAt(ep, cfg)
+				return nil
+			}
+		}
 		renderLocalDoltStatus(state, serverDir)
 		return nil
 	},
+}
+
+// statusProbesEndpointBDDoesNotServe reports whether bd dolt status, having
+// found no server of bd's own running (state, from bd's PID file), probes ep,
+// the endpoint the store dials, instead of reporting bd's PID file: the
+// workspace is in server mode and bd does not serve ep
+// (doltserver.Endpoint.ServedByBD). That is a server on a unix socket or
+// behind a gateway, or one a setting declares externally managed:
+// BEADS_DOLT_SERVER_PORT or the legacy BEADS_DOLT_PORT, dolt_server_port, or
+// BEADS_DOLT_SERVER_MODE=1. bd list reaches such a server while no bd PID
+// file exists for it, so the PID-file path reported it not running. When bd's
+// own server is running, status reports it from the PID file, as before.
+func statusProbesEndpointBDDoesNotServe(cfg *configfile.Config, state *doltserver.State, ep doltserver.Endpoint) bool {
+	if cfg == nil || !cfg.IsDoltServerMode() || (state != nil && state.Running) {
+		return false
+	}
+	return !ep.ServedByBD()
 }
 
 // renderLocalDoltStatus writes the bd-managed (local PID-file) status of
@@ -1444,25 +1476,36 @@ func shouldUseExternalDoltStatus(cfg *configfile.Config, autoStartDisabled, shar
 // log file — reachability, version, host/port/database, and TLS mode are the
 // user-relevant signals.
 func runExternalDoltStatus(beadsDir string, cfg *configfile.Config) {
-	host := cfg.GetDoltServerHost()
 	// The port the store dials (doltserver.ResolveEndpoint): its rule,
 	// the legacy BEADS_DOLT_PORT included, not DefaultConfig's, which leaves
 	// that variable out. The password is the one keyed to that port.
-	ep := doltserver.ResolveEndpoint(beadsDir, cfg)
+	runExternalDoltStatusAt(doltserver.ResolveEndpoint(beadsDir, cfg), cfg)
+}
+
+// runExternalDoltStatusAt is runExternalDoltStatus for ep, an endpoint the
+// caller already resolved for cfg's workspace (doltserver.ResolveEndpoint).
+func runExternalDoltStatusAt(ep doltserver.Endpoint, cfg *configfile.Config) {
+	host := cfg.GetDoltServerHost()
 	port := ep.Port
 	user := cfg.GetDoltServerUser()
 	database := cfg.GetDoltDatabase()
 	tls := cfg.GetDoltServerTLS()
 	password := ep.Password()
 
-	dsn := doltutil.ServerDSN{
-		Host:     host,
-		Port:     port,
-		User:     user,
-		Password: password,
-		TLS:      tls,
-		Timeout:  5 * time.Second,
-	}.String()
+	// The connection the store makes, over its transport: a live unix socket
+	// first, else TCP (doltserver.Endpoint.Transport). Resolved only for the
+	// dial, since it probes the socket.
+	dsn := func() string {
+		return doltutil.ServerDSN{
+			Socket:   ep.Transport(),
+			Host:     host,
+			Port:     port,
+			User:     user,
+			Password: password,
+			TLS:      tls,
+			Timeout:  5 * time.Second,
+		}.String()
+	}
 
 	result := map[string]interface{}{
 		"mode":     "external",
@@ -1482,10 +1525,10 @@ func runExternalDoltStatus(beadsDir string, cfg *configfile.Config) {
 		// advice for this server, not a dial of 127.0.0.1:0.
 		connErr = unresolved
 	} else if advice := unresolvedServerPortAdvice(host, port); advice != "" {
-		// Only a socket names this server, at a host bd does not run: the
-		// probe below dials TCP, and has no port to dial there either.
+		// Only a socket names this server, at a host bd does not run: it
+		// keeps the advice to pin the port.
 		connErr = fmt.Errorf("no Dolt server port configured; %s", advice)
-	} else if db, openErr := sql.Open("mysql", dsn); openErr == nil {
+	} else if db, openErr := sql.Open("mysql", dsn()); openErr == nil {
 		defer db.Close()
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -2191,10 +2234,11 @@ func showDoltConfig(testConnection bool) error {
 	backend := cfg.GetBackend()
 	embedded := !usesSQLServer()
 
-	// Resolve actual server port for connection testing
+	// The port the store dials (doltserver.ResolveEndpoint): its rule, the
+	// legacy BEADS_DOLT_PORT included, which DefaultConfig leaves out. It is
+	// the port shown and the one the connection test probes.
 	showHost := cfg.GetDoltServerHost()
-	dsCfg := doltserver.DefaultConfig(beadsDir)
-	showPort := dsCfg.Port
+	showPort := doltserver.ResolveEndpoint(beadsDir, cfg).Port
 	embeddedDataDir := filepath.Join(beadsDir, "embeddeddolt")
 
 	if jsonOutput {

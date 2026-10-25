@@ -1074,6 +1074,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bd inside the target dials, except that `bd create`'s remedy is the write
   inside the target for a target whose own `config.yaml` or
   `config.local.yaml` names `dolt.port` and that has no `listener.port`.
+- **`bd dolt status`, `bd dolt show`, `bd context` and `bd doctor --fix`
+  now resolve the Dolt port, and some of them the unix socket, the way the
+  store does.** With `dolt.auto-start` on and no server of bd's own
+  running, `bd dolt status` read bd's PID file and reported as not running
+  a server bd does not start: one on a unix socket, or one that
+  `BEADS_DOLT_SERVER_PORT`, `BEADS_DOLT_PORT`, `dolt_server_port` or
+  `BEADS_DOLT_SERVER_MODE=1` declares externally managed. It now probes
+  that server over SQL, as it already did with auto-start off (`--json`
+  then reports the external shape). A server behind
+  `BEADS_DOLT_CREDENTIAL_COMMAND` is probed the same way, but as the
+  configured user rather than with the command's token, so there status
+  can still disagree with `bd list`. With only the legacy
+  `BEADS_DOLT_PORT` naming the server, `bd dolt show` printed `Port: 0`
+  and a failed connection test, `bd context` named `127.0.0.1:0`, and
+  `bd doctor --fix` skipped every SQL fix as unreachable at `127.0.0.1:0`
+  while `bd doctor` diagnosed that server; they now use the port the store
+  dials, and the fixes present the credentials-file password for that
+  port. A server only a unix socket names was dialed over TCP at
+  `127.0.0.1:0` by `bd doctor`'s Fresh Clone check and `bd dolt status`;
+  they now dial the socket first, as the store does. For a socket-only
+  server, `bd bootstrap` still stops at its metadata reconcile and writes
+  nothing, `bd dolt show` and `bd context` still print port 0, and
+  `bd doctor`'s own connection and `bd doctor --fix` still do not use the
+  socket, so the database fixes stay withheld there as before.
 - The batched bulk readers no longer return an issue's rows twice when the
   same id is requested twice. Since the 200-id batching (#6444), an id that
   appeared in two batches had its comments, labels, dependency records,

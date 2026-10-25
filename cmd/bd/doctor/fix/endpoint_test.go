@@ -78,12 +78,15 @@ func closedLocalPorts(t *testing.T, n int) []int {
 func TestServerMetadataReconcileNeverDialsAnUnresolvedPort(t *testing.T) {
 	ports := closedLocalPorts(t, 2)
 	legacyAddr, portFileAddr := "127.0.0.1:"+strconv.Itoa(ports[0]), "127.0.0.1:"+strconv.Itoa(ports[1])
+	deadSocket := filepath.Join(t.TempDir(), "dolt.sock")
 	for _, tc := range []struct {
 		name      string
 		autoStart string
 		stopped   bool // the data directory already holds a database
 		legacy    bool // BEADS_DOLT_PORT names the server at legacyAddr
 		portFile  bool // the port file names the server at portFileAddr
+		socket    bool // only a unix socket, which nothing listens on, names the server
+		refuse    bool // the reconcile must fail without dialing anything it resolved
 		wantErr   string
 	}{
 		{name: "fresh clone"},
@@ -95,6 +98,14 @@ func TestServerMetadataReconcileNeverDialsAnUnresolvedPort(t *testing.T) {
 		// one the reconcile dialed.
 		{name: "legacy BEADS_DOLT_PORT only", legacy: true, wantErr: legacyAddr},
 		{name: "legacy BEADS_DOLT_PORT over the port file", legacy: true, portFile: true, wantErr: legacyAddr},
+		// A socket-only server is deliberately still refused, as before: the
+		// catalog read stays TCP-only, so bd bootstrap stops at the reconcile
+		// and writes nothing. Its later steps cannot reach a socket-only
+		// server yet (the store's library open ignores metadata.json's
+		// dolt_server_socket, and the jsonl-import, init and restore actions
+		// open an embedded store), so letting the reconcile pass would report
+		// a bootstrap that left the workspace broken.
+		{name: "unix socket only, still refused", socket: true, refuse: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			beadsDir, _ := fixEndpointWorkspace(t)
@@ -112,7 +123,19 @@ func TestServerMetadataReconcileNeverDialsAnUnresolvedPort(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			if tc.socket {
+				t.Setenv("BEADS_DOLT_SERVER_SOCKET", deadSocket)
+			}
 			_, msg, err := ResolveAuthoritativeServerMetadata(filepath.Dir(beadsDir), false)
+			if tc.refuse {
+				if err == nil {
+					t.Fatalf("reconcile = %q, nil; want it to refuse a socket-only server", msg)
+				}
+				if strings.Contains(err.Error(), deadSocket) {
+					t.Errorf("reconcile error = %v: it dialed the socket %s; it must keep refusing a socket-only server", err, deadSocket)
+				}
+				return
+			}
 			if tc.wantErr == "" {
 				if err != nil || msg != "" {
 					t.Errorf("reconcile = %q, %v; want nothing to reconcile before bd's server first starts", msg, err)
@@ -124,6 +147,53 @@ func TestServerMetadataReconcileNeverDialsAnUnresolvedPort(t *testing.T) {
 			}
 			if err != nil && strings.Contains(err.Error(), portFileAddr) {
 				t.Errorf("reconcile error = %v: it read the catalog at the port file's %s, which no store open dials", err, portFileAddr)
+			}
+		})
+	}
+}
+
+// TestFixConnectionDialsTheEndpointTheStoreDials covers the connection every
+// bd doctor --fix SQL fix opens (openDoltDB, through openFixDB): it dials the
+// server the store dials, which plain bd doctor diagnoses. Nothing listens at
+// any address here, so the error names the one dialed. It took DefaultConfig's
+// port, which leaves the legacy BEADS_DOLT_PORT out, so with only that
+// variable naming the server every SQL fix was skipped as unreachable at
+// 127.0.0.1:0, or ran against a port file's server (#7841 review).
+// BEADS_DOLT_SERVER_PORT is the control. A socket-only server is deliberately
+// not dialed, as before (see openFixDB).
+func TestFixConnectionDialsTheEndpointTheStoreDials(t *testing.T) {
+	ports := closedLocalPorts(t, 3)
+	legacyAddr, portFileAddr, envAddr := "127.0.0.1:"+strconv.Itoa(ports[0]), "127.0.0.1:"+strconv.Itoa(ports[1]), "127.0.0.1:"+strconv.Itoa(ports[2])
+	for _, tc := range []struct {
+		name     string
+		env      map[string]string
+		portFile bool
+		want     string
+	}{
+		{name: "legacy BEADS_DOLT_PORT only", env: map[string]string{"BEADS_DOLT_PORT": strconv.Itoa(ports[0])}, want: legacyAddr},
+		{name: "legacy BEADS_DOLT_PORT over the port file", env: map[string]string{"BEADS_DOLT_PORT": strconv.Itoa(ports[0])}, portFile: true, want: legacyAddr},
+		{name: "BEADS_DOLT_SERVER_PORT", env: map[string]string{"BEADS_DOLT_SERVER_PORT": strconv.Itoa(ports[2])}, want: envAddr},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			beadsDir, _ := fixEndpointWorkspace(t)
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			if tc.portFile {
+				if err := doltserver.EnsurePortFile(beadsDir, ports[1]); err != nil {
+					t.Fatal(err)
+				}
+			}
+			db, _, err := openDoltDB(beadsDir)
+			if err == nil {
+				_ = db.Close()
+				t.Fatalf("openDoltDB connected; nothing listens at %s", tc.want)
+			}
+			if !strings.Contains(err.Error(), tc.want) || strings.Contains(err.Error(), "127.0.0.1:0") {
+				t.Errorf("fix connection error = %v, want it to name %s, the endpoint the store dials", err, tc.want)
+			}
+			if strings.Contains(err.Error(), portFileAddr) {
+				t.Errorf("fix connection error = %v: it dialed the port file's %s, which no store open dials", err, portFileAddr)
 			}
 		})
 	}

@@ -26,8 +26,13 @@ type freshCloneDBCheck struct {
 // whether the named database exists via SHOW DATABASES. The connection is
 // closed before returning. Returns Reachable=false when the server cannot be
 // reached, so the caller can skip the server-mode check (FR-030).
-func checkFreshCloneDB(host string, port int, user, password, dbName string, tls bool) freshCloneDBCheck {
+//
+// socket is the store's transport (doltserver.Endpoint.Transport): the unix
+// socket to dial, or "" for TCP at host:port. Over TCP alone a socket-only
+// server was probed at host:0.
+func checkFreshCloneDB(host string, port int, socket, user, password, dbName string, tls bool) freshCloneDBCheck {
 	dsn := doltutil.ServerDSN{
+		Socket:   socket,
 		Host:     host,
 		Port:     port,
 		User:     user,
@@ -80,7 +85,7 @@ func checkFreshCloneDB(host string, port int, user, password, dbName string, tls
 // suggesting the user set sync.remote (FR-020).
 // When dbExists is false and syncGitRemote is set, returns StatusWarning
 // suggesting bd init to bootstrap from the remote.
-func freshCloneServerResult(dbExists bool, dbName, host string, port int, syncRemote string) DoctorCheck {
+func freshCloneServerResult(dbExists bool, dbName, host string, port int, socket, syncRemote string) DoctorCheck {
 	if dbExists {
 		return DoctorCheck{
 			Name:    "Fresh Clone",
@@ -90,7 +95,7 @@ func freshCloneServerResult(dbExists bool, dbName, host string, port int, syncRe
 	}
 
 	var msg strings.Builder
-	fmt.Fprintf(&msg, "Fresh clone detected: database %q not found on server at %s.", dbName, doltutil.PrintedServerAddr(host, port))
+	fmt.Fprintf(&msg, "Fresh clone detected: database %q not found on server at %s.", dbName, freshCloneServerLocation(host, port, socket))
 
 	fix := "bd bootstrap"
 	if syncRemote == "" {
@@ -118,9 +123,9 @@ func freshCloneServerResult(dbExists bool, dbName, host string, port int, syncRe
 // host:port, surfaces the underlying connection error for diagnostics, and
 // suggests connectivity/credential checks rather than bd bootstrap (which
 // won't help when the server itself is unreachable).
-func freshCloneServerUnreachableResult(dbName, host string, port int, connErr error) DoctorCheck {
+func freshCloneServerUnreachableResult(dbName, host string, port int, socket string, connErr error) DoctorCheck {
 	var msg strings.Builder
-	fmt.Fprintf(&msg, "Dolt server unreachable at %s (database %q, server mode configured).", doltutil.PrintedServerAddr(host, port), dbName)
+	fmt.Fprintf(&msg, "Dolt server unreachable at %s (database %q, server mode configured).", freshCloneServerLocation(host, port, socket), dbName)
 	msg.WriteString(" The local database directory is not expected in server mode, so this is not a fresh clone — it's a connectivity or auth problem.")
 
 	var detail strings.Builder
@@ -144,6 +149,13 @@ func freshCloneServerUnreachableResult(dbName, host string, port int, connErr er
 			"  4. Try a CRUD command (e.g. 'bd ready') to confirm the server is usable\n" +
 			"  5. Re-run 'bd doctor' once connectivity is restored",
 	}
+}
+
+// freshCloneServerLocation names the server the Fresh Clone check dialed:
+// host:port, else the unix socket of a server with no port
+// (doltserver.Endpoint.Location), never host:0.
+func freshCloneServerLocation(host string, port int, socket string) string {
+	return remedy.PrintedValue(doltserver.Endpoint{Host: host, Port: port, Socket: socket}.Location())
 }
 
 // freshCloneServerUnresolvedResult builds the DoctorCheck for a server-mode

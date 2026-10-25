@@ -140,3 +140,34 @@ func TestDoctorChecksNeverDialAnUnresolvedPort(t *testing.T) {
 		})
 	}
 }
+
+// TestDoctorChecksDialAConfiguredSocket pins doctor's Fresh Clone check to the
+// transport the store dials for a server-mode workspace whose server only a
+// unix socket names: the socket. Nothing listens on it here, so the report
+// names the socket it dialed; it probed 127.0.0.1:0 (#7841 review).
+//
+// Plain doctor's connection (openDoltDB) still does not dial the socket, and
+// that is pinned here too: its failure keeps the schema fix gate withholding
+// the DB fixes for a socket-only server. Admitting them there waits on a
+// separate data-safety fix to the Database fix.
+func TestDoctorChecksDialAConfiguredSocket(t *testing.T) {
+	repo, beadsDir := doctorEndpointWorkspace(t)
+	socket := filepath.Join(t.TempDir(), "dolt.sock")
+	t.Setenv("BEADS_DOLT_SERVER_SOCKET", socket)
+	fresh := CheckFreshClone(repo)
+	report := fresh.Message + "\n" + fresh.Detail + "\n" + fresh.Fix
+	if !strings.Contains(report, socket) {
+		t.Errorf("Fresh Clone does not name the socket the store dials, %s:\n%s", socket, report)
+	}
+	if strings.Contains(report, "127.0.0.1:0") {
+		t.Errorf("Fresh Clone dialed 127.0.0.1:0:\n%s", report)
+	}
+	db, _, err := openDoltDB(beadsDir)
+	if err == nil {
+		_ = db.Close()
+		t.Fatal("openDoltDB opened a socket-only server; the schema fix gate would admit the DB fixes")
+	}
+	if strings.Contains(err.Error(), socket) {
+		t.Errorf("openDoltDB dialed the socket (%v); the schema fix gate would admit the DB fixes", err)
+	}
+}

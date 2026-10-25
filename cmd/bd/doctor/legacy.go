@@ -507,13 +507,15 @@ func CheckFreshClone(repoPath string) DoctorCheck {
 			// externally-hosted Dolt). That mismatch produced spurious
 			// "Fresh clone detected" warnings (bd-tzo9).
 			password := ep.Password()
-			result := checkFreshCloneDB(host, port, user, password, dbName, cfg.GetDoltServerTLS())
+			// The store's transport: a live unix socket first, else TCP.
+			socket := ep.Transport()
+			result := checkFreshCloneDB(host, port, socket, user, password, dbName, cfg.GetDoltServerTLS())
 			if result.Reachable {
 				syncRemote := config.GetStringFromDir(beadsDir, "sync.remote")
 				if syncRemote == "" {
 					syncRemote = config.GetStringFromDir(beadsDir, "sync.git-remote")
 				}
-				return freshCloneServerResult(result.Exists, dbName, host, port, syncRemote)
+				return freshCloneServerResult(result.Exists, dbName, host, port, socket, syncRemote)
 			}
 			// Server unreachable in server mode — emit a server-aware warning
 			// instead of falling through to the legacy "Fresh clone detected
@@ -521,7 +523,7 @@ func CheckFreshClone(repoPath string) DoctorCheck {
 			// dolt_mode=server (the local DB absence is expected). See GH#35.
 			// FR-030 only requires that we don't panic on unreachable; it does
 			// not mandate the misleading fall-through.
-			return freshCloneServerUnreachableResult(dbName, host, port, result.Err)
+			return freshCloneServerUnreachableResult(dbName, host, port, socket, result.Err)
 		}
 	default:
 		// Non-Dolt (legacy sqlite-era metadata): check configured .db file path.

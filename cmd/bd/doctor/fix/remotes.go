@@ -13,7 +13,17 @@ import (
 	"github.com/steveyegge/beads/internal/storage/issueops"
 )
 
-// openFixDB opens the workspace database for a bd doctor --fix repair.
+// openFixDB opens the server plain bd doctor diagnoses over TCP: the port the
+// store dials (doltserver.ResolveEndpoint), the legacy BEADS_DOLT_PORT
+// included, which DefaultConfig leaves out, and the password keyed to that
+// port. With DefaultConfig's port a workspace only BEADS_DOLT_PORT names had
+// every SQL fix skipped as unreachable at 127.0.0.1:0, or run against a port
+// file's server.
+//
+// It deliberately does not dial a configured unix socket, and neither does
+// plain doctor's openDoltDB, whose failure keeps the schema gate withholding
+// the DB fixes for a socket-only server. Admitting them there waits on a
+// separate data-safety fix to the Database fix.
 //
 // It deliberately does not check the server against
 // doltversion.RequiredMin, and neither does openServerCatalogDB: bd doctor
@@ -21,18 +31,13 @@ import (
 // minimum can still diagnose and repair the workspace before upgrading. bd
 // doctor --server reports the floor as its "Dolt Version" check.
 func openFixDB(beadsDir string, cfg *configfile.Config) (*sql.DB, error) {
-	host := cfg.GetDoltServerHost()
-	user := cfg.GetDoltServerUser()
-	database := cfg.GetDoltDatabase()
-	password := cfg.GetDoltServerPassword()
-	port := doltserver.DefaultConfig(beadsDir).Port
-
+	ep := doltserver.ResolveEndpoint(beadsDir, cfg)
 	connStr := doltutil.ServerDSN{
-		Host:     host,
-		Port:     port,
-		User:     user,
-		Password: password,
-		Database: database,
+		Host:     ep.Host,
+		Port:     ep.Port,
+		User:     cfg.GetDoltServerUser(),
+		Password: ep.Password(),
+		Database: cfg.GetDoltDatabase(),
 		TLS:      cfg.GetDoltServerTLS(),
 	}.String()
 	return sql.Open("mysql", connStr)
@@ -54,11 +59,11 @@ var errUnverifiableFixTarget = errors.New("cannot verify target database identit
 // silently redirecting DELETE/UPDATE statements at a different project's
 // database than the one doctor diagnosed (mybd-2qegi).
 //
-// openFixDB dials fresh on every fix call, re-resolving the port from
-// doltserver.DefaultConfig(beadsDir) independently of whatever connection
-// doctor's read-only checks used. Two different projects commonly share the
-// same database name ("beads" by default), so a stale port pointing at an
-// unrelated project's server would otherwise connect successfully and
+// openFixDB dials fresh on every fix call, re-resolving the port through
+// doltserver.ResolveEndpoint(beadsDir, cfg) independently of whatever
+// connection doctor's read-only checks used. Two different projects commonly
+// share the same database name ("beads" by default), so a stale port pointing
+// at an unrelated project's server would otherwise connect successfully and
 // destructively mutate the wrong data with no error.
 //
 // This compares the freshly-dialed connection's `_project_id` (from the

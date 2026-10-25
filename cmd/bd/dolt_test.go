@@ -1981,6 +1981,62 @@ func TestShouldUseExternalDoltStatus(t *testing.T) {
 	}
 }
 
+// TestStatusProbesEndpointBDDoesNotServe covers the second routing decision
+// of `bd dolt status`, taken when shouldUseExternalDoltStatus keeps the
+// PID-file path (auto-start on, a host bd runs its server at): with no server
+// of bd's own running, an endpoint bd does not serve is probed rather than
+// reported "not running" from bd's PID file, since no bd command starts a
+// server there (#7841 review). The endpoint is resolved as the store resolves
+// it, under each setting. bd's own server, running or not, keeps the PID-file
+// path.
+func TestStatusProbesEndpointBDDoesNotServe(t *testing.T) {
+	notRunning := &doltserver.State{Running: false}
+	running := &doltserver.State{Running: true, PID: 1, Port: 13306}
+	for _, tc := range []struct {
+		name  string
+		env   map[string]string
+		meta  func(*configfile.Config)
+		state *doltserver.State
+		want  bool
+	}{
+		{name: "bd's own server, not running", state: notRunning, want: false},
+		{name: "BEADS_DOLT_SERVER_PORT", env: map[string]string{"BEADS_DOLT_SERVER_PORT": "13306"}, state: notRunning, want: true},
+		{name: "legacy BEADS_DOLT_PORT", env: map[string]string{"BEADS_DOLT_PORT": "13306"}, state: notRunning, want: true},
+		{name: "BEADS_DOLT_SERVER_SOCKET", env: map[string]string{"BEADS_DOLT_SERVER_SOCKET": "/tmp/dolt.sock"}, state: notRunning, want: true},
+		{name: "metadata.json dolt_server_socket", meta: func(c *configfile.Config) { c.DoltServerSocket = "/tmp/dolt.sock" }, state: notRunning, want: true},
+		{name: "metadata.json dolt_server_port", meta: func(c *configfile.Config) { c.DoltServerPort = 13306 }, state: notRunning, want: true},
+		{name: "BEADS_DOLT_SERVER_MODE=1", env: map[string]string{"BEADS_DOLT_SERVER_MODE": "1"}, state: notRunning, want: true},
+		{name: "gateway credential command", env: map[string]string{"BEADS_DOLT_CREDENTIAL_COMMAND": "echo token"}, state: notRunning, want: true},
+		// `bd dolt start` runs bd's own server whatever declares the
+		// endpoint externally managed: its PID file describes it.
+		{name: "BEADS_DOLT_SERVER_PORT, bd's own server running", env: map[string]string{"BEADS_DOLT_SERVER_PORT": "13306"}, state: running, want: false},
+		{name: "embedded workspace", env: map[string]string{"BEADS_DOLT_SERVER_SOCKET": "/tmp/dolt.sock"},
+			meta: func(c *configfile.Config) { c.DoltMode = configfile.DoltModeEmbedded }, state: notRunning, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			endpointCredentialsEnv(t, nil)
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			beadsDir := t.TempDir()
+			cfg := &configfile.Config{Backend: configfile.BackendDolt, DoltMode: configfile.DoltModeServer, DoltDatabase: "status_route"}
+			if tc.meta != nil {
+				tc.meta(cfg)
+			}
+			if err := cfg.Save(beadsDir); err != nil {
+				t.Fatal(err)
+			}
+			ep := doltserver.ResolveEndpoint(beadsDir, cfg)
+			if got := statusProbesEndpointBDDoesNotServe(cfg, tc.state, ep); got != tc.want {
+				t.Errorf("statusProbesEndpointBDDoesNotServe = %v, want %v (endpoint %+v)", got, tc.want, ep)
+			}
+		})
+	}
+	if statusProbesEndpointBDDoesNotServe(nil, nil, doltserver.Endpoint{Socket: "/tmp/dolt.sock"}) {
+		t.Error("a nil config probes an endpoint; want the PID-file path")
+	}
+}
+
 // TestRenderLocalDoltStatus exercises the bd-managed (PID-file) output
 // path that doltStatusCmd takes when bd owns the server lifecycle. The
 // externally-managed path is covered by TestRunExternalDoltStatus_Unreachable;
