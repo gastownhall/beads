@@ -45,7 +45,7 @@ func fakeDolt(args []string) int {
 	}
 	switch args[0] {
 	case "version":
-		fmt.Println("dolt version 2.1.8")
+		fmt.Println("dolt version 2.6.0")
 		return 0
 	case "config":
 		fmt.Println("fake")

@@ -1709,6 +1709,13 @@ func startLocked(beadsDir string) (*State, error) {
 		return nil, fmt.Errorf("dolt is not installed (not found in PATH)\n\nInstall from: https://docs.dolthub.com/introduction/installation")
 	}
 
+	// Refuse a dolt older than the minimum bd requires before launching it:
+	// every server-mode open would refuse the server it starts anyway, and
+	// this says so once, naming the binary to upgrade.
+	if err := RequireDoltBinaryVersion(doltBin); err != nil {
+		return nil, err
+	}
+
 	// Prefer a generated YAML config (via --config) over plain CLI flags when
 	// the resolved external dolt is new enough to safely accept
 	// auto_gc_behavior.archive_level: 0. This is what keeps this managed

@@ -18,6 +18,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/doltversion"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/util"
@@ -889,6 +890,22 @@ func openPool(dsn string, prove func(*sql.DB) error) (*sql.DB, error) {
 	return conn, nil
 }
 
+// requireServerDoltVersion refuses a dolt sql-server older than
+// doltversion.RequiredMin before the provider runs schema work through q:
+// one SELECT dolt_version() on the pool the open already proved. It covers
+// managed proxied-server mode (whose binary resolveAndProbeDolt already
+// checked; this checks the server it actually reached), external
+// proxied-server mode, team-server opens and bd serve alike. A version that
+// cannot be determined is not refused (see doltversion.CheckServer); it is
+// logged under BD_DEBUG.
+func requireServerDoltVersion(ctx context.Context, q doltversion.RowQuerier, ep proxy.Endpoint) error {
+	subject := "the dolt sql-server behind the bd proxy at " + ep.Address()
+	return doltversion.CheckServer(ctx, q, subject, func(err error) {
+		debug.Logf("uow: could not determine the version of %s; not checking it against the required minimum %s: %v\n",
+			subject, doltversion.RequiredMin, err)
+	})
+}
+
 func openAndInitSchema(ctx context.Context, ep proxy.Endpoint, database, rootUser, rootPassword, tlsConfigName string, teamServer bool, expectedProjectID string, opts providerOptions) (UnitOfWorkProvider, error) {
 	newProvider := func(pool *sql.DB) *doltSQLProvider {
 		return &doltSQLProvider{
@@ -946,6 +963,9 @@ func openAndInitSchema(ctx context.Context, ep proxy.Endpoint, database, rootUse
 	// second full retry budget.
 	probeConn, probeErr := openDBProbe(ctx, buildDSN(ep, database, rootUser, rootPassword, tlsConfigName))
 	if probeErr == nil {
+		if err := requireServerDoltVersion(ctx, probeConn, ep); err != nil {
+			return nil, errors.Join(err, probeConn.Close())
+		}
 		provider := newProvider(probeConn)
 		if err := provider.initSchema(ctx, database); err != nil {
 			_ = probeConn.Close()
@@ -966,6 +986,11 @@ func openAndInitSchema(ctx context.Context, ep proxy.Endpoint, database, rootUse
 	initDB, err := openDB(ctx, buildDSN(ep, "", rootUser, rootPassword, tlsConfigName))
 	if err != nil {
 		return nil, err
+	}
+
+	// Refuse an old server before initSchema can CREATE DATABASE on it.
+	if err := requireServerDoltVersion(ctx, initDB, ep); err != nil {
+		return nil, errors.Join(err, initDB.Close())
 	}
 
 	initProvider := newProvider(initDB)

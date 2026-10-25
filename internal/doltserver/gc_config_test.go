@@ -1,12 +1,16 @@
 package doltserver
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/beads/internal/doltversion"
 )
 
 func TestDoltVersionAtLeast(t *testing.T) {
@@ -189,4 +193,52 @@ func TestSupportsArchiveLevelConfig_InvalidatesOnFileIdentityChange(t *testing.T
 	if got := probeCount(); got != 2 {
 		t.Errorf("expected a fresh probe (2 total) after the binary's file identity changed, got %d", got)
 	}
+}
+
+// TestRequireDoltBinaryVersion pins the floor Start applies before it
+// launches a sql-server: a binary below doltversion.RequiredMin is refused
+// with an error naming it; one whose version is unknown is launched as
+// before. It shares SupportsArchiveLevelConfig's memoized probe, so the
+// floor costs no second fork.
+func TestRequireDoltBinaryVersion(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("stub dolt binary is a POSIX shell script")
+	}
+	t.Cleanup(ResetArchiveLevelSupportCacheForTest)
+
+	for _, tc := range []struct {
+		line      string
+		wantBelow bool
+	}{
+		{"dolt version 2.6.0", false},
+		{"dolt version 2.7.0", false},
+		{"dolt version 2.5.1", true},
+		{"dolt version 1.40.0", true},
+		{"dolt version dev", false},
+	} {
+		t.Run(tc.line, func(t *testing.T) {
+			bin, _, probeCount := callCountingStub(t, t.TempDir(), tc.line)
+			err := RequireDoltBinaryVersion(bin)
+			if tc.wantBelow {
+				if !errors.Is(err, doltversion.ErrBelowRequiredMin) {
+					t.Fatalf("RequireDoltBinaryVersion = %v, want ErrBelowRequiredMin", err)
+				}
+				if !strings.Contains(err.Error(), bin) || !strings.Contains(err.Error(), doltversion.RequiredMin.String()) {
+					t.Errorf("error = %q, want it to name %s and %s", err, bin, doltversion.RequiredMin)
+				}
+			} else if err != nil {
+				t.Fatalf("RequireDoltBinaryVersion = %v, want nil", err)
+			}
+			_ = SupportsArchiveLevelConfig(bin)
+			if got := probeCount(); got != 1 {
+				t.Errorf("probe count = %d, want 1 (floor and archive-level share one probe)", got)
+			}
+		})
+	}
+
+	t.Run("probe failure is not refused", func(t *testing.T) {
+		if err := RequireDoltBinaryVersion(filepath.Join(t.TempDir(), "missing-dolt")); err != nil {
+			t.Fatalf("RequireDoltBinaryVersion(missing) = %v, want nil", err)
+		}
+	})
 }

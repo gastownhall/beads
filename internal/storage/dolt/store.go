@@ -44,6 +44,7 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/doltversion"
 	"github.com/steveyegge/beads/internal/gittraceenv"
 	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
@@ -2957,6 +2958,29 @@ func assertGatewaySessionDatabase(ctx context.Context, db *sql.DB, want string) 
 // openServerConnection connects to (and if needed creates) the target database
 // on a dolt sql-server via MySQL protocol. See serverConnFacts for what the
 // returned facts mean and why they are not a single bool.
+// requireServerDoltVersion refuses a dolt sql-server older than
+// doltversion.RequiredMin, before bd reads or writes anything through q.
+// It is one SELECT dolt_version() on the connection the open already made.
+// Every server-mode open reaches it, whether bd started the server
+// (auto-start, bd dolt start, shared server) or something else did
+// (external host, BEADS_DOLT_SERVER_PORT, gateway).
+//
+// A version that cannot be determined is not refused (see
+// doltversion.CheckServer): the query failing, which a gateway that does
+// not pass dolt_version() through would do, or an answer that is not a
+// version. It is logged under BD_DEBUG and the open goes on, so a failed
+// connection still reports itself through the open's own errors.
+func requireServerDoltVersion(ctx context.Context, q doltversion.RowQuerier, cfg *Config) error {
+	subject := "dolt sql-server at " + doltutil.ServerAddr(cfg.ServerHost, cfg.ServerPort)
+	if cfg.ServerSocket != "" {
+		subject = "dolt sql-server at " + cfg.ServerSocket
+	}
+	return doltversion.CheckServer(ctx, q, subject, func(err error) {
+		debug.Logf("dolt: could not determine the version of %s; not checking it against the required minimum %s: %v\n",
+			subject, doltversion.RequiredMin, err)
+	})
+}
+
 func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, serverConnFacts, error) {
 	connStr := buildServerDSN(cfg, cfg.Database)
 
@@ -2990,6 +3014,9 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, se
 		if err := db.PingContext(ctx); err != nil {
 			return nil, "", serverConnFacts{}, fmt.Errorf("failed to connect to gateway server %s (database %q): %w",
 				doltutil.PrintedServerAddr(cfg.ServerHost, cfg.ServerPort), cfg.Database, remedy.PrintedError(err))
+		}
+		if err := requireServerDoltVersion(ctx, db, cfg); err != nil {
+			return nil, "", serverConnFacts{}, err
 		}
 		// A connect proves the gateway accepted the credential, NOT that it
 		// honored the database name. A gateway scopes connections by
@@ -3051,6 +3078,9 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, se
 	// signal, databaseNotFoundError, and every error message callers match.
 	pingErr := db.PingContext(ctx)
 	if pingErr == nil {
+		if err := requireServerDoltVersion(ctx, db, cfg); err != nil {
+			return nil, "", serverConnFacts{}, err
+		}
 		connReady = true
 		return db, connStr, serverConnFacts{alreadyExisted: true}, nil
 	}
@@ -3072,6 +3102,11 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, se
 		return nil, "", serverConnFacts{}, fmt.Errorf("failed to open init connection: %w", err)
 	}
 	defer func() { _ = initDB.Close() }()
+
+	// Refuse an old server before this connection can CREATE DATABASE on it.
+	if err := requireServerDoltVersion(ctx, initDB, cfg); err != nil {
+		return nil, "", serverConnFacts{}, err
+	}
 
 	// Check if the database already exists before deciding whether to create it.
 	// This prevents the shadow database bug: without CreateIfMissing, connecting

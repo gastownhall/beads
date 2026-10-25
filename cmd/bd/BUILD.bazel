@@ -1397,6 +1397,7 @@ go_test(
         "//internal/debug",
         "//internal/doltremote",
         "//internal/doltserver",
+        "//internal/doltversion",
         "//internal/eventsjournal",
         "//internal/execenv",
         "//internal/formula",

@@ -1761,7 +1761,7 @@ bd doctor
     | Server Mode (--server):
     |   Run health checks for Dolt server mode connections (bd-dolt.2.3):
     |   - Server reachable: Can connect to configured host:port?
-    |   - Dolt version: Is it a Dolt server (not vanilla MySQL)?
+    |   - Dolt version: Is it a Dolt server (not vanilla MySQL) at 2.6.0 or newer?
     |   - Database exists: Does the 'beads' database exist?
     |   - Schema compatible: Can query beads tables?
     |   - Connection pool: Pool health metrics

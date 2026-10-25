@@ -36,6 +36,7 @@ go_library(
         "//internal/configfile",
         "//internal/creds",
         "//internal/debug",
+        "//internal/doltversion",
         "//internal/fdhygiene",
         "//internal/githooksenv",
         "//internal/gittraceenv",
@@ -95,6 +96,7 @@ go_test(
     deps = [
         "//internal/config",
         "//internal/configfile",
+        "//internal/doltversion",
         "//internal/githooksenv",
         "//internal/storage",
         "//internal/storage/backends",

@@ -53,9 +53,43 @@ proxied-server mode use. Embedded mode is unaffected either way: it links the
 Dolt 2.6.0 engine into `bd` (`dolthub/driver` v2.4.1 with
 `github.com/dolthub/dolt/go` at the v2.6.0 release, in `go.mod`), no matter
 which `dolt` CLI is on your PATH. The CLI pin tracks that engine, so every mode
-runs the same Dolt. `bd` recommends Dolt **2.5.0** or newer, the first release
-whose engine is correct on the query shape in the table below, and managed
-proxied-server mode warns below it.
+runs the same Dolt.
+
+**`bd` requires Dolt 2.6.0 or newer** outside embedded mode, and refuses to
+run against anything older:
+
+- `bd dolt start`, and the auto-start behind server mode, refuse to launch a
+  `dolt` binary older than 2.6.0.
+- Managed proxied-server mode (`bd init --proxied-server`, and every command
+  after it) refuses a `dolt` binary older than 2.6.0 before it launches it.
+- Every server-mode and proxied-server open asks the server it reached for
+  `SELECT dolt_version()` and refuses a server older than 2.6.0, whoever
+  started it, before it reads or writes anything. That includes an external
+  server and a shared one.
+- `bd doctor --server` reports a server older than 2.6.0 as an error.
+
+The error names what was checked (the binary's path or the server's
+address), the version it reported, the 2.6.0 minimum, and where to get Dolt.
+To fix it, install 2.6.0 with the steps above (or `brew upgrade dolt`, then
+check `dolt version`) and restart any `dolt sql-server` on the new binary;
+for a managed server, `bd dolt stop` and `bd dolt start`. There is no
+override. A version `bd` cannot determine is not refused: a `dolt` binary
+whose `dolt version` output does not parse runs with a warning (proxied-server
+mode) and a server that does not answer `dolt_version()` with a version is
+used without the check (logged under `BD_DEBUG`). The
+[Dolt 2.6.0 release notes](https://github.com/dolthub/dolt/releases/tag/v2.6.0)
+list what changed. Two changes matter to `bd` users moving a server up to
+2.6.0:
+
+- `dolt_merge()` walks the full commit graph when it picks a merge base, as
+  Git does (new in 2.6.0). A long-running branch that has merged several
+  times can now report a conflict on `bd dolt pull` or a federation sync that
+  2.5.x resolved silently by taking the newer change.
+- The default `sql_mode` is MySQL 8.0's strict default, which includes
+  `NO_ZERO_IN_DATE`, `NO_ZERO_DATE` and `ERROR_FOR_DIVISION_BY_ZERO` (since
+  Dolt 2.3.3, so new to a server coming from 2.2.x or older): a zero date or
+  a division by zero in your own `bd sql` or `dolt sql` queries is an error,
+  not a warning.
 
 Dolt 2.3.3 is the first release that stores a descending index column as
 descending (dolthub/dolt#11746), and older releases cannot read a table that

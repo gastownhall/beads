@@ -3,14 +3,16 @@ package doltversion
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"time"
 )
 
 // warnRepeatInterval is how long a shown advisory suppresses identical
-// advisories from later processes. One day keeps the warning present enough
-// that an operator on an old dolt is reminded it is still old, without
+// advisories from later processes. The only advisory is an unverifiable
+// version (a version below RequiredMin is an error on every command). One
+// day keeps it present enough that an operator is reminded, without
 // repeating on every single bd invocation, which review found trains
 // operators to ignore it entirely.
 const warnRepeatInterval = 24 * time.Hour
@@ -62,8 +64,9 @@ type CachedProbeResult struct {
 //
 // The cache is strictly best-effort and fails open in every direction: an
 // empty cachePath, an unreadable/corrupt cache file, or a failed write all
-// degrade to exactly the uncached ProbeWithPolicy behavior. Hard probe
-// errors are never cached — a broken binary is re-probed (and re-fails,
+// degrade to exactly the uncached ProbeWithPolicy behavior. A version below
+// RequiredMin is cached and refused on every hit. Hard probe errors are
+// never cached — a broken binary is re-probed (and re-fails,
 // loudly) on every command.
 func ProbeWithPolicyCached(ctx context.Context, path, cachePath string, now time.Time) (CachedProbeResult, error) {
 	if cachePath == "" {
@@ -86,7 +89,13 @@ func ProbeWithPolicyCached(ctx context.Context, path, cachePath string, now time
 				}
 				res.Identity.Version = ver
 				res.Identity.RawOutput = cached.RawOutput
-				res.Warning = CheckRecommended(res.Identity)
+				// The floor is applied on every hit, not cached: a binary
+				// below RequiredMin is refused for the cost of a stat, and
+				// a newer bd with a different floor judges the cached
+				// version by its own.
+				if err := CheckRequired(ver, probedSubject(res.Identity), false); err != nil {
+					return res, err
+				}
 			}
 			res.WarnDue = res.Warning != nil && warnDue(cached.LastWarnedUnix, now)
 			return res, nil
@@ -119,7 +128,10 @@ func MarkWarned(cachePath string, now time.Time) {
 func probeAndStore(ctx context.Context, path, cachePath string, lastWarned int64, now time.Time) (CachedProbeResult, error) {
 	id, warn, err := ProbeWithPolicy(ctx, path)
 	res := CachedProbeResult{Identity: id, Warning: warn}
-	if err != nil {
+	// A binary below RequiredMin ran and reported its version, so the
+	// result is cached like any other; the error still returns, and the
+	// cache-hit path re-applies the floor.
+	if err != nil && !errors.Is(err, ErrBelowRequiredMin) {
 		return res, err
 	}
 	entry := probeCacheFile{
@@ -136,7 +148,7 @@ func probeAndStore(ctx context.Context, path, cachePath string, lastWarned int64
 	}
 	writeCacheEntry(cachePath, entry)
 	res.WarnDue = warn != nil && warnDue(lastWarned, now)
-	return res, nil
+	return res, err
 }
 
 // fingerprintMatches stats path (following symlinks, the same resolution
