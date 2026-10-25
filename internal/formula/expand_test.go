@@ -1052,6 +1052,68 @@ func TestApplyInlineExpansionsCrossExpansionDeps(t *testing.T) {
 			t.Errorf("work.first.DependsOn = %v, want [setup]", got)
 		}
 	})
+
+	t.Run("inline expand rewrites dependents at other nesting levels", func(t *testing.T) {
+		// A dependent that is not a later sibling of the expanded step must
+		// still be rewritten: compose's dependency update walks the whole
+		// tree, and inline has to match it.
+		expanded := func() *Step {
+			return &Step{ID: "work", Title: "Work", Expand: "inline-exp"}
+		}
+		cases := []struct {
+			name      string
+			steps     []*Step
+			dependent string
+		}{
+			{
+				name:      "dependent declared before the expanded step",
+				steps:     []*Step{{ID: "report", Title: "Report", Needs: []string{"work"}}, expanded()},
+				dependent: "report",
+			},
+			{
+				name: "expanded step nested, dependent at top level",
+				steps: []*Step{
+					{ID: "phase", Title: "Phase", Children: []*Step{expanded()}},
+					{ID: "final", Title: "Final", Needs: []string{"work"}},
+				},
+				dependent: "final",
+			},
+			{
+				name: "expanded step at top level, dependent nested",
+				steps: []*Step{
+					expanded(),
+					{ID: "phase", Title: "Phase", Children: []*Step{{ID: "check", Title: "Check", Needs: []string{"work"}}}},
+				},
+				dependent: "check",
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				result, err := ApplyInlineExpansions(tc.steps, parser)
+				if err != nil {
+					t.Fatalf("ApplyInlineExpansions failed: %v", err)
+				}
+
+				var dependent *Step
+				var walk func([]*Step)
+				walk = func(steps []*Step) {
+					for _, s := range steps {
+						if s.ID == tc.dependent {
+							dependent = s
+						}
+						walk(s.Children)
+					}
+				}
+				walk(result)
+				if dependent == nil {
+					t.Fatalf("dependent step %q missing from result", tc.dependent)
+				}
+				if len(dependent.Needs) != 1 || dependent.Needs[0] != "work.second" {
+					t.Errorf("%s.Needs = %v, want [work.second]", tc.dependent, dependent.Needs)
+				}
+			})
+		}
+	})
 }
 
 func TestFindDuplicateStepIDs(t *testing.T) {
