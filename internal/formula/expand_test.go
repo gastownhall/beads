@@ -1089,6 +1089,52 @@ func TestApplyInlineExpansionsCrossExpansionDeps(t *testing.T) {
 			})
 		}
 	})
+
+	t.Run("inline expand two chained steps preserves cross-expansion deps", func(t *testing.T) {
+		tests := []struct {
+			name  string
+			steps []*Step
+		}{
+			{
+				name: "a declared first",
+				steps: []*Step{
+					{ID: "a", Title: "A", Expand: "inline-exp"},
+					{ID: "b", Title: "B", Needs: []string{"a"}, Expand: "inline-exp"},
+				},
+			},
+			{
+				name: "b declared first",
+				steps: []*Step{
+					{ID: "b", Title: "B", Needs: []string{"a"}, Expand: "inline-exp"},
+					{ID: "a", Title: "A", Expand: "inline-exp"},
+				},
+			},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				result, err := ApplyInlineExpansions(tt.steps, parser)
+				if err != nil {
+					t.Fatalf("ApplyInlineExpansions failed: %v", err)
+				}
+
+				byID := buildStepMap(result)
+				if bFirst := byID["b.first"]; bFirst == nil || !reflect.DeepEqual(bFirst.Needs, []string{"a.second"}) {
+					t.Errorf("b.first = %+v, want Needs [a.second]", bFirst)
+				}
+				if bSecond := byID["b.second"]; bSecond == nil || !reflect.DeepEqual(bSecond.Needs, []string{"b.first"}) {
+					t.Errorf("b.second = %+v, want Needs [b.first]", bSecond)
+				}
+				for id, s := range byID {
+					for _, ref := range append(append([]string{}, s.Needs...), s.DependsOn...) {
+						if ref == "a" || ref == "b" {
+							t.Errorf("%s still references expanded step %q", id, ref)
+						}
+					}
+				}
+			})
+		}
+	})
 }
 
 func TestFindDuplicateStepIDs(t *testing.T) {
