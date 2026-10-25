@@ -243,6 +243,8 @@ func displayPrettyListWithDeps(issues []*types.Issue, showHeader bool, allDeps m
 // construction, say what was excluded instead of asserting a count for it. This
 // is the same principle as the truncation arm below, which refuses to label a
 // cut-off page "Total" (GH#5362): a count is only honest alongside its scope.
+// GH#5924 applied this only under --ready; GH#7843 extends it to a plain
+// --status selector, which forces the same tautology without --ready set.
 func listFooterLine(total, open, inProgress int, truncated, readyFiltered bool, statusSelector string) string {
 	if readyFiltered {
 		// No status breakdown: --ready makes it vacuous. Name the scope instead.
@@ -252,6 +254,17 @@ func listFooterLine(total, open, inProgress int, truncated, readyFiltered bool, 
 		}
 		return fmt.Sprintf("Ready: %d issues with no active blockers (%s)", total, scope)
 	}
+	// An explicit --status selector is the same intersection as --ready's:
+	// the open/in-progress breakdown below is a count the filter forced, not
+	// a finding (GH#7843). Empty or "all" pins nothing, so the breakdown
+	// stays meaningful and falls through unchanged.
+	if parts := statusSelectorParts(statusSelector); len(parts) > 0 && !(len(parts) == 1 && parts[0] == "all") {
+		scope := strings.Join(parts, ",") + " only"
+		if truncated {
+			return fmt.Sprintf("Showing %d issues (%s); more match (truncated by --limit). Use --limit 0 for all.", total, scope)
+		}
+		return fmt.Sprintf("Total: %d issues (%s)", total, scope)
+	}
 	if truncated {
 		return fmt.Sprintf("Showing %d issues (%d open, %d in progress); more match (truncated by --limit). Use --limit 0 for all.",
 			total, open, inProgress)
@@ -259,10 +272,10 @@ func listFooterLine(total, open, inProgress int, truncated, readyFiltered bool, 
 	return fmt.Sprintf("Total: %d issues (%d open, %d in progress)", total, open, inProgress)
 }
 
-// readyFooterScope names the status pin a --ready listing actually used.
-// Empty / "all" still take the open default; an explicit selector is the
-// intersection and must not reuse "excludes in_progress" (GH#5832).
-func readyFooterScope(statusSelector string) string {
+// statusSelectorParts splits a --status selector into its comma-separated
+// parts, trimming whitespace and dropping empties. Shared by readyFooterScope
+// and listFooterLine's non-ready status-pinned path.
+func statusSelectorParts(statusSelector string) []string {
 	var parts []string
 	for _, part := range strings.Split(statusSelector, ",") {
 		part = strings.TrimSpace(part)
@@ -270,6 +283,14 @@ func readyFooterScope(statusSelector string) string {
 			parts = append(parts, part)
 		}
 	}
+	return parts
+}
+
+// readyFooterScope names the status pin a --ready listing actually used.
+// Empty / "all" still take the open default; an explicit selector is the
+// intersection and must not reuse "excludes in_progress" (GH#5832).
+func readyFooterScope(statusSelector string) string {
+	parts := statusSelectorParts(statusSelector)
 	if len(parts) == 0 || (len(parts) == 1 && parts[0] == "all") {
 		return "open only — --ready excludes in_progress"
 	}
