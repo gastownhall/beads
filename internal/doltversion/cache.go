@@ -3,7 +3,6 @@ package doltversion
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
 	"time"
@@ -64,9 +63,11 @@ type CachedProbeResult struct {
 //
 // The cache is strictly best-effort and fails open in every direction: an
 // empty cachePath, an unreadable/corrupt cache file, or a failed write all
-// degrade to exactly the uncached ProbeWithPolicy behavior. A version below
-// RequiredMin is cached and refused on every hit. Hard probe errors are
-// never cached — a broken binary is re-probed (and re-fails,
+// degrade to exactly the uncached ProbeWithPolicy behavior. A refusal is
+// never cached or replayed: a binary below RequiredMin is re-probed on every
+// command, so the command after an upgrade runs, even when the fingerprint
+// cannot see the upgrade (see the hit path below). Hard probe errors are
+// never cached either — a broken binary is re-probed (and re-fails,
 // loudly) on every command.
 func ProbeWithPolicyCached(ctx context.Context, path, cachePath string, now time.Time) (CachedProbeResult, error) {
 	if cachePath == "" {
@@ -87,15 +88,18 @@ func ProbeWithPolicyCached(ctx context.Context, path, cachePath string, now time
 					// different beads version) — treat as a miss.
 					return probeAndStore(ctx, path, cachePath, cached.LastWarnedUnix, now)
 				}
+				// Only a version the floor admits is replayed. One below it
+				// (cached by an older bd, which only warned, or judged by a
+				// newer bd's higher floor) is probed again, so a refusal
+				// always rests on a fresh `dolt version`: the fingerprint is
+				// the probed file's own, and a version manager's shim or a
+				// BEADS_DOLT_BIN wrapper script stays the same file when the
+				// dolt behind it is upgraded.
+				if !ver.AtLeast(RequiredMin) {
+					return probeAndStore(ctx, path, cachePath, cached.LastWarnedUnix, now)
+				}
 				res.Identity.Version = ver
 				res.Identity.RawOutput = cached.RawOutput
-				// The floor is applied on every hit, not cached: a binary
-				// below RequiredMin is refused for the cost of a stat, and
-				// a newer bd with a different floor judges the cached
-				// version by its own.
-				if err := CheckRequired(ver, probedSubject(res.Identity), false); err != nil {
-					return res, err
-				}
 			}
 			res.WarnDue = res.Warning != nil && warnDue(cached.LastWarnedUnix, now)
 			return res, nil
@@ -121,17 +125,16 @@ func MarkWarned(cachePath string, now time.Time) {
 }
 
 // probeAndStore runs the real fork-and-parse probe and, on a cacheable
-// outcome (parsed version or unverifiable-but-ran), persists it.
-// lastWarned carries an existing warn stamp forward across a re-probe of
-// what fingerprints as a changed binary at the same path — zero when there
-// is nothing to carry.
+// outcome (a version RequiredMin admits, or unverifiable-but-ran), persists
+// it. lastWarned carries an existing warn stamp forward across a re-probe
+// of a cache entry it does not replay — zero when there is nothing to
+// carry.
 func probeAndStore(ctx context.Context, path, cachePath string, lastWarned int64, now time.Time) (CachedProbeResult, error) {
 	id, warn, err := ProbeWithPolicy(ctx, path)
 	res := CachedProbeResult{Identity: id, Warning: warn}
-	// A binary below RequiredMin ran and reported its version, so the
-	// result is cached like any other; the error still returns, and the
-	// cache-hit path re-applies the floor.
-	if err != nil && !errors.Is(err, ErrBelowRequiredMin) {
+	// A refusal (a version below RequiredMin) is not stored, so the next
+	// command probes again: see ProbeWithPolicyCached.
+	if err != nil {
 		return res, err
 	}
 	entry := probeCacheFile{
@@ -148,7 +151,7 @@ func probeAndStore(ctx context.Context, path, cachePath string, lastWarned int64
 	}
 	writeCacheEntry(cachePath, entry)
 	res.WarnDue = warn != nil && warnDue(lastWarned, now)
-	return res, err
+	return res, nil
 }
 
 // fingerprintMatches stats path (following symlinks, the same resolution

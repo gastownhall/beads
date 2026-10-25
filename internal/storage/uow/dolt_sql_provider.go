@@ -19,6 +19,7 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/doltversion"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/util"
@@ -898,15 +899,28 @@ func openPool(dsn string, prove func(*sql.DB) error) (*sql.DB, error) {
 // proxied-server mode, team-server opens and bd serve alike. A version that
 // cannot be determined is not refused (see doltversion.CheckServer); it is
 // logged under BD_DEBUG.
-func requireServerDoltVersion(ctx context.Context, q doltversion.RowQuerier, ep proxy.Endpoint) error {
-	subject := "the dolt sql-server behind the bd proxy at " + ep.Address()
+//
+// backend names the server behind the proxy when bd does not run it
+// (external proxied-server mode): the server the operator has to upgrade,
+// which the proxy's loopback address ep does not name. It is empty when the
+// proxy runs its own server.
+func requireServerDoltVersion(ctx context.Context, q doltversion.RowQuerier, ep proxy.Endpoint, backend string) error {
+	// Both addresses are configuration, so they are printed the way every
+	// other remedy value is (internal/remedy).
+	subject := "the dolt sql-server behind the bd proxy at " + remedy.PrintedValue(ep.Address())
+	if backend != "" {
+		subject = "the dolt sql-server at " + remedy.PrintedValue(backend) + " (behind the bd proxy at " + remedy.PrintedValue(ep.Address()) + ")"
+	}
 	return doltversion.CheckServer(ctx, q, subject, func(err error) {
 		debug.Logf("uow: could not determine the version of %s; not checking it against the required minimum %s: %v\n",
 			subject, doltversion.RequiredMin, err)
 	})
 }
 
-func openAndInitSchema(ctx context.Context, ep proxy.Endpoint, database, rootUser, rootPassword, tlsConfigName string, teamServer bool, expectedProjectID string, opts providerOptions) (UnitOfWorkProvider, error) {
+// openAndInitSchema opens the provider through the proxy at ep. backend
+// names the server behind it when bd does not run that server (see
+// requireServerDoltVersion), and is empty otherwise.
+func openAndInitSchema(ctx context.Context, ep proxy.Endpoint, backend, database, rootUser, rootPassword, tlsConfigName string, teamServer bool, expectedProjectID string, opts providerOptions) (UnitOfWorkProvider, error) {
 	newProvider := func(pool *sql.DB) *doltSQLProvider {
 		return &doltSQLProvider{
 			defaultBranch:     defaultBranch,
@@ -963,7 +977,7 @@ func openAndInitSchema(ctx context.Context, ep proxy.Endpoint, database, rootUse
 	// second full retry budget.
 	probeConn, probeErr := openDBProbe(ctx, buildDSN(ep, database, rootUser, rootPassword, tlsConfigName))
 	if probeErr == nil {
-		if err := requireServerDoltVersion(ctx, probeConn, ep); err != nil {
+		if err := requireServerDoltVersion(ctx, probeConn, ep, backend); err != nil {
 			return nil, errors.Join(err, probeConn.Close())
 		}
 		provider := newProvider(probeConn)
@@ -989,7 +1003,7 @@ func openAndInitSchema(ctx context.Context, ep proxy.Endpoint, database, rootUse
 	}
 
 	// Refuse an old server before initSchema can CREATE DATABASE on it.
-	if err := requireServerDoltVersion(ctx, initDB, ep); err != nil {
+	if err := requireServerDoltVersion(ctx, initDB, ep, backend); err != nil {
 		return nil, errors.Join(err, initDB.Close())
 	}
 

@@ -416,10 +416,12 @@ dolt sql-server at 127.0.0.1:3307 is version 2.5.1, but bd requires dolt 2.6.0 o
   `BEADS_DOLT_BIN` at the new binary.
 - **`dolt sql-server at <address>`** (or **behind the bd proxy**): the
   server `bd` connected to is old, whether `bd` started it or not. Upgrade
-  the `dolt` binary that server runs and restart it (`bd dolt stop` then
-  `bd dolt start` for a server `bd` manages). For an external or shared
-  server, whoever runs it has to upgrade it; back it up first, since the
-  upgrade is one-way.
+  the `dolt` binary that server runs and restart it: `bd dolt stop` then
+  `bd dolt start` for a server `bd` manages, or `bd dolt stop` alone in a
+  managed proxied-server workspace, whose proxy starts its server again on
+  the next command (`bd dolt start` is refused there). For an external or
+  shared server, whoever runs it has to upgrade it; back it up first, since
+  the upgrade is one-way.
 
 Install the pinned version — see
 [Which Dolt version to install](/architecture/dolt#which-dolt-version-to-install)
@@ -443,10 +445,13 @@ measures:
   `fk_comp_snap_issue`. Other writes and `information_schema` queries fail
   with `table has unknown fields`.
 
-The managed proxied-server probe result is cached (keyed by the binary's
+Managed proxied-server mode caches a passing probe (keyed by the binary's
 path, size, and mtime, in the user cache directory), so day-to-day `bd` use
-does not fork `dolt version` on every command; upgrading or replacing the
-dolt binary re-probes immediately.
+does not fork `dolt version` on every command. A refusal is never cached:
+while the binary is refused, every command runs `dolt version` again, so the
+first command after an upgrade runs. That includes an upgrade behind a
+version manager's shim or a `BEADS_DOLT_BIN` wrapper script, whose own file
+does not change.
 
 A version `bd` cannot determine is not refused. If the probe can't parse
 `dolt version`'s output at all (most commonly a dev/custom build with

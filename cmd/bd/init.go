@@ -22,6 +22,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/doltversion"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/gitenv"
 	"github.com/steveyegge/beads/internal/metrics"
@@ -1591,7 +1592,10 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				// a cloned repository commits: it is spelled by the remedy
 				// printer's backstop, as bd's error printers spell theirs.
 				fmt.Fprintf(os.Stderr, "Error: failed to clone remote %q: %s\n", syncURL, remedy.PrintedText(err.Error()))
-				fmt.Fprintf(os.Stderr, "Hint: verify the URL is reachable and any credentials are valid, or omit --remote to initialize a fresh local database.\n")
+				// A refused Dolt names its own remedy; the URL is not at fault.
+				if !errors.Is(err, doltversion.ErrBelowRequiredMin) {
+					fmt.Fprintf(os.Stderr, "Hint: verify the URL is reachable and any credentials are valid, or omit --remote to initialize a fresh local database.\n")
+				}
 				return &exitError{Code: 1}
 			} else if disposition == initRemoteCloneFresh {
 				if !quiet {
@@ -1727,6 +1731,12 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				globalUser = serverUser
 			}
 			if err := doltserver.EnsureGlobalDatabase(globalHost, globalPort, globalUser, ""); err != nil {
+				// A server older than bd's minimum is refused by every open,
+				// the project store's below included, so init stops here.
+				if errors.Is(err, doltversion.ErrBelowRequiredMin) {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", remedy.PrintedMessage(err))
+					return &exitError{Code: 1}
+				}
 				fmt.Fprintf(os.Stderr, "Warning: failed to create global database: %v\n", err)
 				// Non-fatal — project init should succeed even if global DB creation fails
 			} else if !quiet {

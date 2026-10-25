@@ -529,14 +529,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it) refuses one before launching it; and every server-mode and
   proxied-server open asks the server it reached for `SELECT dolt_version()`
   and refuses one older than 2.6.0 before reading or writing anything,
-  including external and shared servers `bd` did not start. The error names
-  the binary or server, the version it reported, the 2.6.0 minimum, the
-  install steps and the 2.6.0 release notes. `bd doctor --server` reports an
-  older server as an error. There is no override. A version `bd` cannot
-  determine is still not refused: a binary whose `dolt version` does not
-  parse runs with the existing once-a-day warning, and a server that does not
-  answer `dolt_version()` with a version is used unchecked (logged under
-  `BD_DEBUG`). Embedded mode links the 2.6.0 engine and is unaffected.
+  including external and shared servers `bd` did not start. `bd bootstrap`
+  and `bd init --remote` check the server, or the `dolt` CLI, before they
+  clone, and `bd bootstrap` exits non-zero when the clone it made cannot be
+  opened for that reason. The error names the binary or server, the version
+  it reported, the 2.6.0 minimum, the install steps and the 2.6.0 release
+  notes. `bd doctor --server` reports an older server as an error. There is
+  no override. A version `bd` cannot determine is still not refused: a
+  binary whose `dolt version` does not parse runs with the existing
+  once-a-day warning, and a server that does not answer `dolt_version()`
+  with a version is used unchecked (logged under `BD_DEBUG`). Embedded mode
+  links the 2.6.0 engine and is unaffected.
   Upgrade every `dolt sql-server` `bd` talks to (back it up first; the
   storage upgrade is one-way), then upgrade `bd`. What a server moving to
   2.6.0 changes:

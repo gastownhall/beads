@@ -2123,6 +2123,14 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 						return nil, fmt.Errorf("Dolt server unreachable at %s: %w\n\n%s", remedy.PrintedValue(addr), dialErr, hint)
 					}
 				}
+				// Start refused a dolt older than bd's minimum. `bd dolt
+				// start` refuses the same binary, and turning auto-start
+				// off does not help, so the refusal's own upgrade advice is
+				// the whole remedy.
+				if errors.Is(startErr, doltversion.ErrBelowRequiredMin) {
+					return nil, fmt.Errorf("Dolt server unreachable at %s and auto-start refused to start it: %w",
+						remedy.PrintedValue(addr), remedy.PrintedTextError(startErr))
+				}
 				return nil, fmt.Errorf("Dolt server unreachable at %s and auto-start failed: %w\n\n"+
 					"To start manually: bd dolt start\n"+
 					"To disable auto-start: set dolt.auto-start: false in .beads/config.yaml",
@@ -2955,9 +2963,6 @@ func assertGatewaySessionDatabase(ctx context.Context, db *sql.DB, want string) 
 	}
 }
 
-// openServerConnection connects to (and if needed creates) the target database
-// on a dolt sql-server via MySQL protocol. See serverConnFacts for what the
-// returned facts mean and why they are not a single bool.
 // requireServerDoltVersion refuses a dolt sql-server older than
 // doltversion.RequiredMin, before bd reads or writes anything through q.
 // It is one SELECT dolt_version() on the connection the open already made.
@@ -2984,6 +2989,9 @@ func requireServerDoltVersion(ctx context.Context, q doltversion.RowQuerier, cfg
 	})
 }
 
+// openServerConnection connects to (and if needed creates) the target database
+// on a dolt sql-server via MySQL protocol. See serverConnFacts for what the
+// returned facts mean and why they are not a single bool.
 func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, serverConnFacts, error) {
 	connStr := buildServerDSN(cfg, cfg.Database)
 

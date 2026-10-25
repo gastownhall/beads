@@ -245,45 +245,129 @@ func TestCachedProbeEmptyCachePathUncached(t *testing.T) {
 	MarkWarned("", time.Now())
 }
 
-func TestCachedProbeBelowMinimumRefusedFromCache(t *testing.T) {
+func TestCachedProbeBelowMinimumIsReprobed(t *testing.T) {
 	dir := t.TempDir()
 	countFile := filepath.Join(dir, "count")
 	stub := writeCountingVersionStub(t, dir, "dolt-old", "dolt version 2.5.1", countFile)
 	cachePath := filepath.Join(dir, "dolt-probe.json")
 	now := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
 
-	first, err := ProbeWithPolicyCached(context.Background(), stub, cachePath, now)
-	if !errors.Is(err, ErrBelowRequiredMin) {
-		t.Fatalf("first probe: err = %v, want ErrBelowRequiredMin", err)
-	}
-	if first.FromCache {
-		t.Error("first probe: FromCache = true, want false")
-	}
-
-	// The refusal is replayed from the cache: no second fork, same error.
-	second, err := ProbeWithPolicyCached(context.Background(), stub, cachePath, now)
-	if !errors.Is(err, ErrBelowRequiredMin) {
-		t.Fatalf("second probe: err = %v, want ErrBelowRequiredMin", err)
-	}
-	if !second.FromCache {
-		t.Error("second probe: FromCache = false, want true")
-	}
-	// The message quotes the path (%q), which doubles Windows backslashes.
-	if !strings.Contains(err.Error(), "2.5.1") || !strings.Contains(err.Error(), fmt.Sprintf("%q", stub)) {
-		t.Errorf("cached refusal = %q, want it to name 2.5.1 and %s", err, stub)
-	}
-	if got := forkCount(t, countFile); got != 1 {
-		t.Errorf("fork count = %d, want 1 (below-minimum result is cached)", got)
+	// Every refused call forks: a refusal is never replayed from the cache.
+	for i := 1; i <= 2; i++ {
+		res, err := ProbeWithPolicyCached(context.Background(), stub, cachePath, now)
+		if !errors.Is(err, ErrBelowRequiredMin) {
+			t.Fatalf("call %d: err = %v, want ErrBelowRequiredMin", i, err)
+		}
+		if res.FromCache {
+			t.Errorf("call %d: FromCache = true, want a fresh probe", i)
+		}
+		// The message quotes the path (%q), which doubles Windows backslashes.
+		if !strings.Contains(err.Error(), "2.5.1") || !strings.Contains(err.Error(), fmt.Sprintf("%q", stub)) {
+			t.Errorf("call %d: refusal = %q, want it to name 2.5.1 and %s", i, err, stub)
+		}
+		if got := forkCount(t, countFile); got != i {
+			t.Errorf("call %d: fork count = %d, want %d (a refused binary is re-probed)", i, got, i)
+		}
 	}
 
-	// Upgrading the binary in place changes its fingerprint and lifts the
-	// refusal on the next command.
+	// Upgrading the binary in place lifts the refusal on the next command,
+	// and the passing result is then replayed without a fork.
 	writeCountingVersionStub(t, dir, "dolt-old", "dolt version 2.6.10", countFile)
-	third, err := ProbeWithPolicyCached(context.Background(), stub, cachePath, now)
+	upgraded, err := ProbeWithPolicyCached(context.Background(), stub, cachePath, now)
 	if err != nil {
 		t.Fatalf("probe after upgrade: %v", err)
 	}
-	if third.FromCache || third.Identity.Version.String() != "2.6.10" {
-		t.Errorf("probe after upgrade: FromCache=%v Version=%v, want a fresh 2.6.10", third.FromCache, third.Identity.Version)
+	if upgraded.FromCache || upgraded.Identity.Version.String() != "2.6.10" {
+		t.Errorf("probe after upgrade: FromCache=%v Version=%v, want a fresh 2.6.10", upgraded.FromCache, upgraded.Identity.Version)
+	}
+	replayed, err := ProbeWithPolicyCached(context.Background(), stub, cachePath, now)
+	if err != nil || !replayed.FromCache {
+		t.Errorf("probe after that: FromCache=%v err=%v, want the 2.6.10 result replayed", replayed.FromCache, err)
+	}
+	if got := forkCount(t, countFile); got != 3 {
+		t.Errorf("fork count = %d, want 3 (two refusals, one passing probe, one replay)", got)
+	}
+}
+
+// TestCachedProbeRefusalLiftsAfterUpgradeBehindWrapper: a dolt reached
+// through a version manager's shim or a BEADS_DOLT_BIN wrapper script is
+// upgraded without the wrapper's own file changing, so the fingerprint the
+// cache keys on cannot see the upgrade. The command after the upgrade must
+// still run.
+func TestCachedProbeRefusalLiftsAfterUpgradeBehindWrapper(t *testing.T) {
+	dir := t.TempDir()
+	countFile := filepath.Join(dir, "count")
+	versionFile := filepath.Join(dir, "version")
+	setVersion := func(line string) {
+		t.Helper()
+		if err := os.WriteFile(versionFile, []byte(line+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	setVersion("dolt version 2.5.1")
+	wrapper := writeExecStub(t, dir, "dolt-wrapper",
+		"#!/bin/sh\nprintf x >> '"+countFile+"'\ncat '"+versionFile+"'\n",
+		"@>>\""+countFile+"\" <nul set /p =x\r\n@type \""+versionFile+"\"\r\n")
+	cachePath := filepath.Join(dir, "dolt-probe.json")
+	now := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
+
+	if _, err := ProbeWithPolicyCached(context.Background(), wrapper, cachePath, now); !errors.Is(err, ErrBelowRequiredMin) {
+		t.Fatalf("before the upgrade: err = %v, want ErrBelowRequiredMin", err)
+	}
+	before, err := os.Stat(wrapper)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	setVersion("dolt version 2.6.0")
+	after, err := os.Stat(wrapper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.Size() != after.Size() || !before.ModTime().Equal(after.ModTime()) {
+		t.Fatal("precondition: the upgrade changed the wrapper's own file")
+	}
+	for _, at := range []time.Duration{0, 48 * time.Hour} {
+		res, err := ProbeWithPolicyCached(context.Background(), wrapper, cachePath, now.Add(at))
+		if err != nil {
+			t.Fatalf("after the upgrade (+%v): %v, want the upgraded dolt admitted", at, err)
+		}
+		if res.Identity.Version.String() != "2.6.0" {
+			t.Errorf("after the upgrade (+%v): Version = %v, want 2.6.0", at, res.Identity.Version)
+		}
+	}
+	if got := forkCount(t, countFile); got != 2 {
+		t.Errorf("fork count = %d, want 2 (the refusal, then one probe whose pass is replayed)", got)
+	}
+}
+
+// TestCachedProbeBelowMinimumEntryIsNotReplayed: a cache entry that records a
+// version below the floor, as an older bd wrote one (it only warned) or as
+// a floor raised since judges one, is probed again on a fingerprint hit
+// rather than replayed, refusal or not.
+func TestCachedProbeBelowMinimumEntryIsNotReplayed(t *testing.T) {
+	dir := t.TempDir()
+	countFile := filepath.Join(dir, "count")
+	stub := writeCountingVersionStub(t, dir, "dolt", "dolt version "+RequiredMin.String(), countFile)
+	cachePath := filepath.Join(dir, "dolt-probe.json")
+	now := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
+	id, _ := fingerprintMatches(stub, probeCacheFile{})
+	writeCacheEntry(cachePath, probeCacheFile{
+		RealPath:            id.RealPath,
+		FileSize:            id.FileSize,
+		FileModTimeUnixNano: id.FileModTime.UnixNano(),
+		RawOutput:           "dolt version 2.5.1",
+		Version:             "2.5.1",
+	})
+
+	res, err := ProbeWithPolicyCached(context.Background(), stub, cachePath, now)
+	if err != nil {
+		t.Fatalf("probe: %v, want the binary's own %s admitted", err, RequiredMin)
+	}
+	if res.FromCache || res.Identity.Version.String() != RequiredMin.String() {
+		t.Errorf("probe: FromCache=%v Version=%v, want a fresh %s", res.FromCache, res.Identity.Version, RequiredMin)
+	}
+	if got := forkCount(t, countFile); got != 1 {
+		t.Errorf("fork count = %d, want 1 (the below-floor entry is re-probed)", got)
 	}
 }

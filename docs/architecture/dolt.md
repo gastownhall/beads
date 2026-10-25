@@ -71,8 +71,10 @@ run against anything older:
 The error names what was checked (the binary's path or the server's
 address), the version it reported, the 2.6.0 minimum, and where to get Dolt.
 To fix it, install 2.6.0 with the steps above (or `brew upgrade dolt`, then
-check `dolt version`) and restart any `dolt sql-server` on the new binary;
-for a managed server, `bd dolt stop` and `bd dolt start`. There is no
+check `dolt version`) and restart any `dolt sql-server` on the new binary:
+for a server `bd` manages, `bd dolt stop` and `bd dolt start`; in a managed
+proxied-server workspace, `bd dolt stop` alone, since the proxy starts its
+server again on the next command and refuses `bd dolt start`. There is no
 override. A version `bd` cannot determine is not refused: a `dolt` binary
 whose `dolt version` output does not parse runs with a warning (proxied-server
 mode) and a server that does not answer `dolt_version()` with a version is

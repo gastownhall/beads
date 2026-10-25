@@ -36,6 +36,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/doltversion"
 	"github.com/steveyegge/beads/internal/fdhygiene"
 	"github.com/steveyegge/beads/internal/githooksenv"
 	"github.com/steveyegge/beads/internal/gittraceenv"
@@ -2012,7 +2013,9 @@ func startLocked(beadsDir string) (*State, error) {
 // seeding (issue prefix, project ID) are handled by the store layer when the
 // global database is first opened with CreateIfMissing=true.
 //
-// Returns nil if the database already exists or was successfully created.
+// Returns nil if the database already exists or was successfully created,
+// and an error wrapping doltversion.ErrBelowRequiredMin, before creating
+// anything, if the server is older than bd's minimum.
 func EnsureGlobalDatabase(host string, port int, user, password string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -2033,6 +2036,14 @@ func EnsureGlobalDatabase(host string, port int, user, password string) error {
 
 	if err := db.PingContext(ctx); err != nil {
 		return fmt.Errorf("ensure global db: server not reachable: %w", err)
+	}
+
+	// Refuse a server older than bd's minimum before creating a database on
+	// it: the store open that follows refuses it anyway, and would leave the
+	// empty database behind. A version it cannot determine is not refused
+	// (doltversion.CheckServer).
+	if err := doltversion.CheckServer(ctx, db, "dolt sql-server at "+doltutil.PrintedServerAddr(host, port), nil); err != nil {
+		return err
 	}
 
 	// CREATE DATABASE IF NOT EXISTS is idempotent — safe on every call.

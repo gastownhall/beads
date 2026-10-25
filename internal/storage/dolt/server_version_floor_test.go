@@ -3,6 +3,8 @@ package dolt
 import (
 	"context"
 	"errors"
+	"fmt"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -62,5 +64,86 @@ func TestRequireServerDoltVersion(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// raiseRequiredMin raises doltversion.RequiredMin above any Dolt the tests
+// run against, so the test server stands in for one below the floor, and
+// restores it when t ends. Its caller must not run in parallel.
+func raiseRequiredMin(t *testing.T) {
+	t.Helper()
+	prev := doltversion.RequiredMin
+	doltversion.RequiredMin = doltversion.MustParse("99.0.0")
+	t.Cleanup(func() { doltversion.RequiredMin = prev })
+}
+
+// TestOpenServerConnectionRefusesBelowRequiredMin pins requireServerDoltVersion
+// at openServerConnection's direct-connect path and its creating path against
+// a real server: with the floor raised above the test server's version, the
+// open of an existing database and the CreateIfMissing open of a missing one
+// are both refused, and the missing database is not created.
+func TestOpenServerConnectionRefusesBelowRequiredMin(t *testing.T) {
+	skipIfNoServer(t)
+	raiseRequiredMin(t)
+	existing := fmt.Sprintf("test_floor_existing_%d", testServerPort)
+	createTestDatabase(t, testServerPort, existing)
+	missing := fmt.Sprintf("test_floor_missing_%d", testServerPort)
+	assertDatabaseNotExists(t, testServerPort, missing)
+
+	for _, tc := range []struct {
+		name            string
+		database        string
+		createIfMissing bool
+	}{
+		{name: "existing database", database: existing},
+		{name: "missing database with CreateIfMissing", database: missing, createIfMissing: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &Config{
+				Path:            t.TempDir(),
+				ServerHost:      "127.0.0.1",
+				ServerPort:      testServerPort,
+				ServerUser:      "root",
+				Database:        tc.database,
+				CreateIfMissing: tc.createIfMissing,
+				MaxOpenConns:    1,
+			}
+			db, _, _, err := openServerConnection(context.Background(), cfg)
+			if db != nil {
+				_ = db.Close()
+				t.Error("openServerConnection returned a pool along with its refusal")
+			}
+			if !errors.Is(err, doltversion.ErrBelowRequiredMin) {
+				t.Fatalf("openServerConnection = %v, want ErrBelowRequiredMin", err)
+			}
+		})
+	}
+	assertDatabaseNotExists(t, testServerPort, missing)
+}
+
+// TestNewServerModeAutoStartRefusalHasNoStartAdvice: an auto-start that
+// refuses a dolt below doltversion.RequiredMin is reported with the refusal,
+// which names the binary and how to upgrade it, and without the advice an
+// auto-start failure otherwise gets: `bd dolt start` refuses the same binary,
+// and turning auto-start off does not help.
+func TestNewServerModeAutoStartRefusalHasNoStartAdvice(t *testing.T) {
+	isolateUnresolvedPortEnv(t)
+	refusal := doltversion.CheckRequired(doltversion.MustParse("2.5.1"), `dolt binary "/usr/local/bin/dolt"`, false)
+	orig := ensureRunningDetailed
+	t.Cleanup(func() { ensureRunningDetailed = orig })
+	ensureRunningDetailed = func(string) (int, bool, error) { return 0, false, refusal }
+	beadsDir := t.TempDir()
+	_, err := newServerMode(context.Background(), &Config{Database: "beads", BeadsDir: beadsDir,
+		Path: filepath.Join(beadsDir, "dolt"), ServerHost: "127.0.0.1", AutoStart: true})
+	if !errors.Is(err, doltversion.ErrBelowRequiredMin) {
+		t.Fatalf("newServerMode = %v, want the auto-start's ErrBelowRequiredMin", err)
+	}
+	if !strings.Contains(err.Error(), refusal.Error()) {
+		t.Errorf("newServerMode = %q, want it to carry the refusal %q", err, refusal)
+	}
+	for _, advice := range []string{"bd dolt start", "dolt.auto-start"} {
+		if strings.Contains(err.Error(), advice) {
+			t.Errorf("newServerMode = %q, want no %q advice for a refused dolt", err, advice)
+		}
 	}
 }

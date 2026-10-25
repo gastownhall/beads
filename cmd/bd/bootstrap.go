@@ -21,7 +21,9 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/doltversion"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
@@ -1376,6 +1378,13 @@ func executeSyncAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.
 			return fmt.Errorf("clone from %s succeeded, but the database needs %d schema %s (v%d -> v%d) that bd will not auto-apply to a remote-backed database (#4259)",
 				remedy.PrintedValue(plan.SyncRemote), gateErr.Pending, unit, gateErr.CurrentVersion, gateErr.LatestVersion)
 		}
+		// A Dolt below bd's minimum (the server the clone landed on, or the
+		// dolt binary the open would start one with) refuses every later
+		// command the same way, so this is no missing-wisp-table warning:
+		// report it rather than a usable workspace.
+		if errors.Is(err, doltversion.ErrBelowRequiredMin) {
+			return fmt.Errorf("open the database cloned from %s: %w", remedy.PrintedValue(plan.SyncRemote), err)
+		}
 		// Non-fatal: wisp tables will be created on the next command that
 		// opens the store. Warn so the user knows to retry if they hit
 		// "table not found: wisp_*" errors.
@@ -1650,6 +1659,17 @@ func cloneViaServer(ctx context.Context, remoteURL, dbName string, ep bootstrapS
 	if err := db.PingContext(cloneCtx); err != nil {
 		return fmt.Errorf("dolt server unreachable at %s (is dolt sql-server running?): %w",
 			remedy.PrintedValue(ep.serverLocation()), remedy.PrintedError(err))
+	}
+
+	// Refuse a server older than bd's minimum before DOLT_CLONE writes a
+	// database to it that every later open would refuse, as the store's own
+	// open checks before it reads or writes (dolt.requireServerDoltVersion).
+	subject := "dolt sql-server at " + remedy.PrintedValue(ep.serverLocation())
+	if err := doltversion.CheckServer(cloneCtx, db, subject, func(err error) {
+		debug.Logf("bootstrap: could not determine the version of %s; not checking it against the required minimum %s: %v\n",
+			subject, doltversion.RequiredMin, err)
+	}); err != nil {
+		return err
 	}
 
 	if err := versioncontrolops.DoltClone(cloneCtx, db, remoteURL, dbName, os.Getenv("DOLT_REMOTE_USER")); err != nil {
