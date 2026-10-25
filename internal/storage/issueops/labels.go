@@ -268,11 +268,16 @@ func removeLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issue
 	}); err != nil {
 		return fmt.Errorf("remove label: record event: %w", err)
 	}
-	if err := RecordEventInTx(ctx, tx, EventUpdate, issueID, actor); err != nil {
-		return err
-	}
+	// A label write bypasses UpdateIssueInTx entirely, so it must bump
+	// updated_at itself -- otherwise --updated-after filtering, stale-upsert
+	// rejection, and LWW merge are all blind to label-only churn (#5442).
+	// Must run before RecordEventInTx below so the journal snapshot below
+	// captures the bumped value, matching addLabelInTx's own ordering.
 	if err := TouchIssueUpdatedAtInTx(ctx, tx, issueID, useWisps); err != nil {
 		return fmt.Errorf("remove label: %w", err)
+	}
+	if err := RecordEventInTx(ctx, tx, EventUpdate, issueID, actor); err != nil {
+		return err
 	}
 	if !mintVersion {
 		return nil
