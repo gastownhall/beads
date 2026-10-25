@@ -64,6 +64,12 @@ func TestParseVersion(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			// A server or binary supplies the suffix, and refusals print it.
+			name:    "control character in prerelease is not a version",
+			input:   "dolt version 2.5.1-\x1b[2Jdev\n",
+			wantErr: true,
+		},
+		{
 			name:    "bare server answer",
 			input:   "2.6.0",
 			wantSeg: []int{2, 6, 0},

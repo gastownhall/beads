@@ -382,7 +382,7 @@ func checkDoltVersion(cfg *configfile.Config, beadsDir string) (DoctorCheck, *sq
 		}, nil
 	}
 
-	return doltVersionFloorCheck(version, "dolt sql-server at "+doltutil.ServerAddr(host, port)), db
+	return doltVersionFloorCheck(version, "dolt sql-server at "+remedy.PrintedValue(doltutil.ServerAddr(host, port))), db
 }
 
 // doltVersionFloorCheck judges the version a server's dolt_version()
@@ -394,10 +394,11 @@ func checkDoltVersion(cfg *configfile.Config, beadsDir string) (DoctorCheck, *sq
 func doltVersionFloorCheck(version, subject string) DoctorCheck {
 	v, err := doltversion.ParseVersion(version)
 	if err != nil {
+		// The server supplied this text, so it is printed escaped.
 		return DoctorCheck{
 			Name:     "Dolt Version",
 			Status:   StatusOK,
-			Message:  fmt.Sprintf("Dolt %s", version),
+			Message:  fmt.Sprintf("Dolt %s", remedy.PrintedValue(version)),
 			Detail:   fmt.Sprintf("not a version bd recognizes; not checked against the required minimum %s", doltversion.RequiredMin),
 			Category: CategoryFederation,
 		}
@@ -406,7 +407,7 @@ func doltVersionFloorCheck(version, subject string) DoctorCheck {
 		return DoctorCheck{
 			Name:     "Dolt Version",
 			Status:   StatusError,
-			Message:  fmt.Sprintf("Dolt %s is below the required minimum %s", version, doltversion.RequiredMin),
+			Message:  fmt.Sprintf("Dolt %s is below the required minimum %s", v, doltversion.RequiredMin),
 			Detail:   floorErr.Error(),
 			Fix:      fmt.Sprintf("Upgrade the dolt sql-server to %s or newer and restart it; bd refuses to open older servers", doltversion.RequiredMin),
 			Category: CategoryFederation,
@@ -415,7 +416,7 @@ func doltVersionFloorCheck(version, subject string) DoctorCheck {
 	return DoctorCheck{
 		Name:     "Dolt Version",
 		Status:   StatusOK,
-		Message:  fmt.Sprintf("Dolt %s", version),
+		Message:  fmt.Sprintf("Dolt %s", v),
 		Category: CategoryFederation,
 	}
 }

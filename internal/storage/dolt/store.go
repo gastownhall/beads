@@ -2971,10 +2971,13 @@ func assertGatewaySessionDatabase(ctx context.Context, db *sql.DB, want string) 
 // version. It is logged under BD_DEBUG and the open goes on, so a failed
 // connection still reports itself through the open's own errors.
 func requireServerDoltVersion(ctx context.Context, q doltversion.RowQuerier, cfg *Config) error {
-	subject := "dolt sql-server at " + doltutil.ServerAddr(cfg.ServerHost, cfg.ServerPort)
+	addr := doltutil.ServerAddr(cfg.ServerHost, cfg.ServerPort)
 	if cfg.ServerSocket != "" {
-		subject = "dolt sql-server at " + cfg.ServerSocket
+		addr = cfg.ServerSocket
 	}
+	// The address is configuration, so it is printed the way every other
+	// remedy value is (internal/remedy).
+	subject := "dolt sql-server at " + remedy.PrintedValue(addr)
 	return doltversion.CheckServer(ctx, q, subject, func(err error) {
 		debug.Logf("dolt: could not determine the version of %s; not checking it against the required minimum %s: %v\n",
 			subject, doltversion.RequiredMin, err)

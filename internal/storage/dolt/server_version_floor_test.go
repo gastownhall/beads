@@ -10,6 +10,7 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 
 	"github.com/steveyegge/beads/internal/doltversion"
+	"github.com/steveyegge/beads/internal/remedy"
 )
 
 // TestRequireServerDoltVersion pins the server-mode floor every
@@ -55,7 +56,7 @@ func TestRequireServerDoltVersion(t *testing.T) {
 			if !errors.Is(err, doltversion.ErrBelowRequiredMin) {
 				t.Fatalf("requireServerDoltVersion = %v, want ErrBelowRequiredMin", err)
 			}
-			for _, want := range []string{"dolt sql-server at " + tc.wantAddr, tc.answer, doltversion.RequiredMin.String(), "restart the server"} {
+			for _, want := range []string{"dolt sql-server at " + remedy.PrintedValue(tc.wantAddr), tc.answer, doltversion.RequiredMin.String(), "restart the server"} {
 				if !strings.Contains(err.Error(), want) {
 					t.Errorf("error = %q, want it to mention %q", err, want)
 				}

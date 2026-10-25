@@ -100,7 +100,22 @@ func parseToken(token string) (Version, error) {
 		segments = append(segments, n)
 	}
 
+	// The prerelease is printed in refusals and doctor output, and a server
+	// or binary supplies it, so it is limited to the characters a version
+	// suffix uses (semver's, plus "_" and "+"). Anything else makes the
+	// version unparseable, which the policy reports rather than prints.
+	for _, r := range prerelease {
+		if !isPrereleaseRune(r) {
+			return Version{}, fmt.Errorf("%w: %q", ErrUnparseableVersion, token)
+		}
+	}
+
 	return Version{Segments: segments, Prerelease: prerelease, Raw: token}, nil
+}
+
+func isPrereleaseRune(r rune) bool {
+	return r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' ||
+		r == '.' || r == '-' || r == '_' || r == '+'
 }
 
 // MustParse parses s (a bare version token, e.g. "2.0.0" — not full `dolt
