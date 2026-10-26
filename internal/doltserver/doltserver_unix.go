@@ -3,6 +3,7 @@
 package doltserver
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -132,7 +133,18 @@ func isProcessAlive(pid int) bool {
 	if err != nil {
 		return false
 	}
-	return process.Signal(syscall.Signal(0)) == nil
+	return aliveAfterSignalZero(process.Signal(syscall.Signal(0)))
+}
+
+// aliveAfterSignalZero classifies the error of a signal-0 probe. A nil error
+// means the process exists and this user may signal it; EPERM means it
+// exists but may not be signaled (another user's process — it arrives bare
+// or wrapped in *os.SyscallError, from kill and pidfd_send_signal alike),
+// so it counts as alive. Only ESRCH — bare or wrapped — and an
+// already-reaped process (os.ErrProcessDone) are dead. The same rule
+// processExists applies in listenerowner_darwin.go.
+func aliveAfterSignalZero(err error) bool {
+	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
 // gracefulStop sends SIGTERM, waits for the process to exit, then SIGKILL if needed.

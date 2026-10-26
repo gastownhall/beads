@@ -9,9 +9,48 @@ import (
 	"path/filepath"
 	"reflect"
 	"strconv"
+	"syscall"
 	"testing"
 	"time"
 )
+
+// TestAliveAfterSignalZero pins the classification of signal-0 errors:
+// EPERM means the process exists but this user may not signal it (kill and
+// pidfd_send_signal wrap it in *os.SyscallError alike), so it is alive; only
+// ESRCH — bare or wrapped — and an already-reaped process are dead. Mirrors
+// processExists in listenerowner_darwin.go. Table-driven on the error
+// because a real EPERM needs another user's process, and PID 1 is
+// skipped-as-root and false in a PID namespace.
+func TestAliveAfterSignalZero(t *testing.T) {
+	alive := []struct {
+		name string
+		err  error
+	}{
+		{"signalable", nil},
+		{"bare EPERM", syscall.EPERM},
+		{"EPERM from kill", os.NewSyscallError("kill", syscall.EPERM)},
+		{"EPERM from pidfd_send_signal", os.NewSyscallError("pidfd_send_signal", syscall.EPERM)},
+	}
+	for _, tc := range alive {
+		if !aliveAfterSignalZero(tc.err) {
+			t.Errorf("aliveAfterSignalZero(%s: %v) = false, want alive", tc.name, tc.err)
+		}
+	}
+	dead := []struct {
+		name string
+		err  error
+	}{
+		{"process already reaped", os.ErrProcessDone},
+		{"bare ESRCH", syscall.ESRCH},
+		{"ESRCH from kill", os.NewSyscallError("kill", syscall.ESRCH)},
+		{"ESRCH from pidfd_send_signal", os.NewSyscallError("pidfd_send_signal", syscall.ESRCH)},
+	}
+	for _, tc := range dead {
+		if aliveAfterSignalZero(tc.err) {
+			t.Errorf("aliveAfterSignalZero(%s: %v) = true, want dead", tc.name, tc.err)
+		}
+	}
+}
 
 // startStaleServerFiles writes a pid file naming an unrelated process (a
 // sleep child, as if the PID had been reused) and a port file. The returned

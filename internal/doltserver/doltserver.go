@@ -680,6 +680,9 @@ func ReadPortFile(beadsDir string) int {
 // server now answers on. It fails toward "owned" only when all three coincide.
 // Note that isDoltProcess here would close only this gap, not the adopted-server
 // one — reclaimPort already requires isDoltProcess before it will adopt.
+// The liveness leg counts a PID this user cannot signal as alive (EPERM;
+// see aliveAfterSignalZero), so it also holds for another user's process
+// sitting on the inherited PID.
 //
 // Callers needing certainty over latency should use IsRunning, or
 // IsTrackedServerRunning when they must not mutate the state files.
