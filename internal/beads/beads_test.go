@@ -2981,6 +2981,12 @@ func TestFindBeadsDirFromLinkedWorktreeBoundary(t *testing.T) {
 			},
 			wantMain: true,
 		},
+		{
+			name: "no main checkout store keeps walking to the parent store",
+			mutate: func(t *testing.T, mainStore, worktree string) {
+			},
+			wantMain: false,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			mainRepo, worktree := setupRegularWorktreeRepo(t)
@@ -3017,6 +3023,19 @@ func TestFindBeadsDirFromLinkedWorktreeBoundary(t *testing.T) {
 			for _, start := range []string{worktree, sub} {
 				if got := FindBeadsDirFrom(start); !utils.PathsEqual(got, want) {
 					t.Errorf("FindBeadsDirFrom(%q) = %q, want %q (what cd binds)", start, got, want)
+				}
+			}
+
+			if !tc.wantMain {
+				// A non-git directory under the parent still resolves the
+				// parent's store: the boundary only applies at worktree roots,
+				// and the walk stays unbounded when repoRoot is empty.
+				plain := filepath.Join(parent, "plain")
+				if err := os.Mkdir(plain, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if got := FindBeadsDirFrom(plain); !utils.PathsEqual(got, parentStore) {
+					t.Errorf("FindBeadsDirFrom(non-git %q) = %q, want parent store %q", plain, got, parentStore)
 				}
 			}
 		})
