@@ -1,8 +1,13 @@
 package main
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
+	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -259,5 +264,62 @@ func TestIssueText(t *testing.T) {
 	text2 := issueText(issue2)
 	if text2 != "Just title" {
 		t.Errorf("issueText() = %q, want %q", text2, "Just title")
+	}
+}
+
+// newStubAnthropicClient returns a client whose POST /v1/messages answers
+// with the given raw JSON reply.
+func newStubAnthropicClient(t *testing.T, reply string) anthropic.Client {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(reply))
+	}))
+	t.Cleanup(srv.Close)
+	return anthropic.NewClient(
+		option.WithAPIKey("test"),
+		option.WithBaseURL(srv.URL),
+		option.WithMaxRetries(0),
+	)
+}
+
+func stubMessageReply(content string) string {
+	return `{"id":"msg_1","type":"message","role":"assistant","model":"claude-haiku-5-5",` +
+		`"content":[` + content + `],` +
+		`"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":10}}`
+}
+
+func mechanicalCandidates() []duplicatePair {
+	return []duplicatePair{{
+		IssueA:     &types.Issue{ID: "bd-1", Title: "Login fails"},
+		IssueB:     &types.Issue{ID: "bd-2", Title: "Cannot sign in"},
+		Similarity: 0.3,
+		Method:     "mechanical",
+	}}
+}
+
+// Issue #7515: a reply whose first block is "thinking" still carries the
+// verdicts in a later "text" block, and find-duplicates must use them.
+func TestAnalyzeWithAI_ThinkingBlockFirst(t *testing.T) {
+	const verdicts = `{"type":"text","text":"[{\"pair_index\":0,\"is_duplicate\":true,\"confidence\":0.9,\"reason\":\"same\"}]"}`
+	tests := []struct {
+		name    string
+		content string
+	}{
+		{"thinking then text", `{"type":"thinking","thinking":"","signature":"c2ln"},` + verdicts},
+		{"redacted thinking, thinking, then text", `{"type":"redacted_thinking","data":"ZGF0YQ=="},` +
+			`{"type":"thinking","thinking":"","signature":"c2ln"},` + verdicts},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := newStubAnthropicClient(t, stubMessageReply(tt.content))
+			got := analyzeWithAI(context.Background(), client, "claude-haiku-5-5", mechanicalCandidates())
+			if len(got) != 1 {
+				t.Fatalf("got %d pairs, want 1: %+v", len(got), got)
+			}
+			if got[0].Method != "ai" || got[0].Similarity != 0.9 || got[0].Reason != "same" {
+				t.Fatalf("got %+v, want method ai, similarity 0.9, reason \"same\"", got[0])
+			}
+		})
 	}
 }
