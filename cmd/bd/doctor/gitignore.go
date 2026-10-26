@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -165,6 +166,12 @@ func beadsGitignoreTooLoose(info os.FileInfo) bool {
 // through; tests swap it to simulate a chmod-hostile mount.
 var chmodBeadsGitignore = os.Chmod
 
+// ErrGitignorePermissions reports that .beads/.gitignore could not be
+// tightened to 0600: group/other access is still set. Every required
+// pattern is already in place when it is returned, so callers may downgrade
+// this failure to a warning (#6225).
+var ErrGitignorePermissions = errors.New("could not restrict .beads/.gitignore to 0600")
+
 // CheckGitignore checks if .beads/.gitignore is up to date.
 // repoPath is the project root directory.
 func CheckGitignore(repoPath string) DoctorCheck {
@@ -223,7 +230,10 @@ func CheckGitignore(repoPath string) DoctorCheck {
 //
 // Permissions: group and other bits must be off. Owner bits stricter than
 // 0600 are preserved on files bd does not write; 0600 stays the canonical
-// mode for files bd creates or must append to (#6225).
+// mode for files bd creates or must append to. Tightening runs after the
+// append, and a tightening chmod that fails returns an error wrapping
+// ErrGitignorePermissions — by then the patterns are in place — while a
+// failed append or owner-write restore returns a plain error (#6225).
 func EnsureGitignoreForBeadsDir(beadsDir string) error {
 	gitignorePath := filepath.Join(beadsDir, ".gitignore")
 
@@ -273,7 +283,8 @@ func EnsureGitignoreForBeadsDir(beadsDir string) error {
 // tightenBeadsGitignore clears group/other access on .beads/.gitignore,
 // leaving owner bits — including modes stricter than 0600 — untouched. A
 // file that cannot be stat'd (raced away between the read and here) needs
-// no tightening.
+// no tightening; a chmod that fails wraps ErrGitignorePermissions, since
+// every required pattern is already in place by the time this runs.
 func tightenBeadsGitignore(gitignorePath string) error {
 	info, err := os.Stat(gitignorePath)
 	if err != nil {
@@ -283,7 +294,7 @@ func tightenBeadsGitignore(gitignorePath string) error {
 		return nil
 	}
 	if err := chmodBeadsGitignore(gitignorePath, 0600); err != nil {
-		return fmt.Errorf("chmod .beads/.gitignore: %w", err)
+		return fmt.Errorf("%w: %w", ErrGitignorePermissions, err)
 	}
 	return nil
 }
