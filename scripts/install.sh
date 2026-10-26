@@ -369,10 +369,14 @@ install_from_release() {
         mkdir -p "$install_dir"
     fi
 
-    # Install binary
+    # Install binary: stage the copy inside install_dir, then rename it over
+    # bd. Both mv operands sit on one filesystem, so the move onto the live
+    # path is a rename(2) and bd never holds a partial binary while ~200MB is
+    # copied — the same rc=137 window `make install` closed in #5611 (#5616).
+    local staged_bd="$install_dir/.bd.install.tmp.$$"
     log_info "Installing to $install_dir..."
     if [[ -w "$install_dir" ]]; then
-        if ! mv "$extracted_bd" "$install_dir/bd"; then
+        if ! { cp "$extracted_bd" "$staged_bd" && mv -f "$staged_bd" "$install_dir/bd"; }; then
             log_error "Failed to install bd to $install_dir"
             cd - > /dev/null || cd "$HOME"
             rm -rf "$tmp_dir"
