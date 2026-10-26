@@ -40,6 +40,7 @@ type pins struct {
 	Workspaces map[string]map[string]string `json:"workspaces"`
 }
 
+// MismatchError reports that a shared credential endpoint differs from the workspace's pinned origin.
 type MismatchError struct {
 	Kind   string
 	Key    string
@@ -53,6 +54,7 @@ func (e *MismatchError) Error() string {
 		e.Key, e.Pinned, e.Got, e.Kind, e.Hint)
 }
 
+// Origin normalizes an endpoint to a scheme/host/port origin or an absolute Unix socket origin.
 func Origin(endpoint string) (string, error) {
 	if strings.HasPrefix(endpoint, "unix:") {
 		path := strings.TrimPrefix(endpoint, "unix:")
@@ -97,6 +99,7 @@ func Origin(endpoint string) (string, error) {
 	return scheme + "://" + host, nil
 }
 
+// WorkspaceKey returns the canonical workspace key used for endpoint pins, or empty when unknown.
 func WorkspaceKey() string {
 	key := os.Getenv("BEADS_DIR")
 	if key != "" {
@@ -116,6 +119,7 @@ func WorkspaceKey() string {
 	return key
 }
 
+// PrivateMatch reports whether value matches a private environment or non-project config value.
 func PrivateMatch(key, envVar, value string) bool {
 	if value == "" {
 		return false
@@ -139,6 +143,8 @@ func PrivateMatch(key, envVar, value string) bool {
 	return false
 }
 
+// Check enforces workspace-scoped endpoint trust before a credential is sent.
+// Private sources can confirm a changed origin; shared changes return a MismatchError.
 func Check(workspaceKey, credKind, endpoint string, fromPrivateSource bool) error {
 	hint, ok := guidance[credKind]
 	if !ok {

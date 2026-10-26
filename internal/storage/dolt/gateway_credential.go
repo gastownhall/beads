@@ -51,6 +51,7 @@ func ApplyGatewayCredential(ctx context.Context, fileCfg *configfile.Config, cfg
 	return true, nil
 }
 
+// CheckServerEndpointTrust validates a Dolt server endpoint before gateway credentials are used.
 func CheckServerEndpointTrust(beadsDir string, fileCfg *configfile.Config, host string, port int, socket string) error {
 	return doltserver.CheckEndpointTrust(beadsDir, fileCfg, host, port, socket)
 }

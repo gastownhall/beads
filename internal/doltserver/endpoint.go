@@ -230,6 +230,7 @@ func (e Endpoint) WithIdentity(ctx context.Context) (Endpoint, error) {
 	return e, nil
 }
 
+// CheckEndpointTrust validates the Dolt socket and effective TCP endpoint against workspace pins.
 func CheckEndpointTrust(beadsDir string, fileCfg *configfile.Config, host string, port int, socket string) error {
 	if fileCfg == nil {
 		fileCfg = loadEndpointConfig(beadsDir)

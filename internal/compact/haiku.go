@@ -71,6 +71,7 @@ func newHaikuClient(apiKey string) (*haikuClient, error) {
 	}, nil
 }
 
+// NewAIClientOptions resolves the API key and validates its endpoint before returning SDK options.
 func NewAIClientOptions(explicitKey string) ([]option.RequestOption, config.AIAPIKeySource, string, error) {
 	apiKey, keySource := config.ResolveAIAPIKey(explicitKey)
 	if apiKey == "" {
