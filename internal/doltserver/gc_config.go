@@ -1,12 +1,14 @@
 package doltserver
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/steveyegge/beads/internal/doltversion"
 )
@@ -96,9 +98,22 @@ func RequireDoltBinaryVersion(doltBin string) error {
 	return doltversion.CheckRequired(v, fmt.Sprintf("dolt binary %q", doltBin), false)
 }
 
+// doltVersionProbeTimeout bounds probeDoltVersionOutput's `dolt version`,
+// as doltversion.Probe bounds its own: the probe gates Start and every CLI
+// clone and transfer, so a wedged binary or wrapper script must fail it
+// (and so go unrefused, the command itself then reporting the binary)
+// rather than hang the command past BEADS_CLI_TRANSFER_TIMEOUT, which only
+// starts after it. doltVersionProbeWaitDelay is the cleanup slop after the
+// kill. The timeout is a variable only so a test can shorten it.
+var doltVersionProbeTimeout = 10 * time.Second
+
+const doltVersionProbeWaitDelay = 2 * time.Second
+
 // probeDoltVersionOutput runs `doltBin version`, memoized per
-// archiveLevelCacheKey (see archiveLevelSupportCache). If os.Stat(doltBin)
-// fails the probe runs uncached: there is no stable identity to key on.
+// archiveLevelCacheKey (see archiveLevelSupportCache), within
+// doltVersionProbeTimeout. If os.Stat(doltBin) fails the probe runs
+// uncached: there is no stable identity to key on. A timed-out probe is
+// cached as failed, like any other failed probe.
 func probeDoltVersionOutput(doltBin string) (string, bool) {
 	key, hasKey := archiveLevelCacheKeyFor(doltBin)
 	if hasKey {
@@ -108,7 +123,13 @@ func probeDoltVersionOutput(doltBin string) (string, bool) {
 		}
 	}
 
-	out, err := exec.Command(doltBin, "version").Output() //nolint:gosec // G204: doltBin is caller-resolved (PATH lookup or config), not user-request input
+	ctx, cancel := context.WithTimeout(context.Background(), doltVersionProbeTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, doltBin, "version") //nolint:gosec // G204: doltBin is caller-resolved (PATH lookup or config), not user-request input
+	// WaitDelay keeps a grandchild holding the stdout pipe from blocking
+	// Output past the timeout after the kill.
+	cmd.WaitDelay = doltVersionProbeWaitDelay
+	out, err := cmd.Output()
 	res := doltVersionOutput{out: string(out), ok: err == nil}
 
 	if hasKey {

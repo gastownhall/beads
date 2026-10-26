@@ -4535,7 +4535,13 @@ func (s *DoltStore) hasCLIDatabase() bool {
 // ensureMatchingCLIRemote materializes the local CLI remote needed before
 // subprocess push/pull/fetch routing. SQL remains the source of truth; the CLI
 // remote is only the local transport surface that dolt subprocesses read.
+//
+// It refuses a dolt on PATH older than doltversion.RequiredMin first
+// (requireCLIDoltBinary), since every caller has chosen the CLI route.
 func (s *DoltStore) ensureMatchingCLIRemote(remote, expectedURL, expectedRef string) error {
+	if err := requireCLIDoltBinary(); err != nil {
+		return err
+	}
 	if s.hasMatchingCLIRemote(remote, expectedURL, expectedRef) {
 		return nil
 	}
@@ -4559,23 +4565,42 @@ func (s *DoltStore) prepareDoltCLITransfer(ctx context.Context, remote string, c
 	return prepareDoltCLITransferCommand(ctx, s.CLIDir(), creds, s.isS3Remote(ctx, remote), args...)
 }
 
+// requireCLIDoltBinary refuses the dolt binary on PATH that the CLI route
+// (git-protocol, credentialed, cloud-auth and local remotes) runs, when it
+// is older than doltversion.RequiredMin, like every other `dolt` bd runs.
+// When bd's own server holds the database, dolt hands the transfer to that
+// server; otherwise the binary's own engine runs it. The error is the one
+// Start gives (doltserver.RequireDoltBinaryVersion, memoized per binary, so
+// checking at several points of one route forks `dolt version` once). A
+// dolt that is not on PATH is left for the command itself to report, as
+// before.
+//
+// The route checks it as soon as it has chosen the CLI, before it runs
+// anything through the binary: ensureMatchingCLIRemote checks it before
+// `dolt remote` lists, adds or removes the CLI remote, the push routes
+// before prePushFSCK's `dolt fsck`, and prepareDoltCLITransferCommand before
+// the transfer itself. The local-remote route decides with a read-only
+// `dolt remote -v` (hasMatchingCLIRemote) before its first check.
+func requireCLIDoltBinary() error {
+	doltBin, err := exec.LookPath("dolt")
+	if err != nil {
+		return nil
+	}
+	return doltserver.RequireDoltBinaryVersion(doltBin)
+}
+
 // prepareDoltCLITransferCommand builds the `dolt push`/`pull`/`fetch` that
 // runs through the dolt binary on PATH: the route git-protocol,
 // credentialed, cloud-auth and local remotes take. It refuses that binary
 // when it is older than doltversion.RequiredMin, before the transfer runs
-// (a `dolt pull` merges with the binary's own engine, not the server's), with
-// the same error Start gives (doltserver.RequireDoltBinaryVersion, memoized
-// per binary). A dolt that is not on PATH is left for the command itself to
-// report, as before.
+// (see requireCLIDoltBinary).
 func prepareDoltCLITransferCommand(ctx context.Context, cliDir string, creds *remoteCredentials, s3Remote bool, args ...string) (*exec.Cmd, context.Context, context.CancelFunc, error) {
-	if doltBin, err := exec.LookPath("dolt"); err == nil {
-		if err := doltserver.RequireDoltBinaryVersion(doltBin); err != nil {
-			op := "dolt transfer"
-			if len(args) > 0 {
-				op = "dolt " + args[0]
-			}
-			return nil, nil, nil, fmt.Errorf("%s: %w", op, err)
+	if err := requireCLIDoltBinary(); err != nil {
+		op := "dolt transfer"
+		if len(args) > 0 {
+			op = "dolt " + args[0]
 		}
+		return nil, nil, nil, fmt.Errorf("%s: %w", op, err)
 	}
 	ctx, cancel := withCLIExecTimeout(ctx)
 	if len(args) > 0 && creds != nil && creds.username != "" {
@@ -4897,6 +4922,9 @@ func fsckOutputInterrupted(output string) bool {
 // If creds is non-nil, credentials are set on the subprocess environment only,
 // avoiding process-wide env var races with concurrent goroutines.
 func (s *DoltStore) doltCLIPush(ctx context.Context, remote string, force bool, creds *remoteCredentials) error {
+	if err := requireCLIDoltBinary(); err != nil {
+		return fmt.Errorf("dolt push: %w", err)
+	}
 	if err := s.prePushFSCK(ctx); err != nil {
 		return err
 	}

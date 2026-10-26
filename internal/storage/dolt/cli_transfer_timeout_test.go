@@ -144,8 +144,10 @@ func withNoDoltOnPath(t *testing.T) {
 // binary floor on the CLI transfer route (git-protocol, credentialed,
 // cloud-auth and local remotes): a dolt on PATH whose `dolt version` reports
 // a release below doltversion.RequiredMin is refused with the floor's error
-// before push, pull or fetch runs, so a `dolt pull` never merges with an
-// engine older than the minimum. A dolt at the minimum is let through.
+// before push, pull or fetch runs, like every other `dolt` bd runs (when
+// bd's own server holds the database, dolt hands the transfer to that
+// server; otherwise the binary's own engine runs it). A dolt at the minimum
+// is let through.
 func TestPrepareDoltCLITransferCommandRefusesDoltBelowRequiredMin(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("the dolt stub is a POSIX shell script")
@@ -199,4 +201,60 @@ func TestPrepareDoltCLITransferCommandRefusesDoltBelowRequiredMin(t *testing.T) 
 			t.Fatalf("stub calls = %q (%v), want the pull to have run", got, err)
 		}
 	})
+}
+
+// TestCLIRouteRefusesDoltBelowRequiredMinBeforeRunningIt pins where the CLI
+// route checks the dolt on PATH: as soon as it has chosen the CLI, so the
+// refusal is the first thing an old binary meets. The push routes refuse it
+// before prePushFSCK's `dolt fsck` (which would run here: the CLI directory
+// has a .dolt/noms), and ensureMatchingCLIRemote before `dolt remote` lists
+// or edits the CLI remote.
+func TestCLIRouteRefusesDoltBelowRequiredMinBeforeRunningIt(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the dolt stub is a POSIX shell script")
+	}
+	newStore := func(t *testing.T) *DoltStore {
+		t.Helper()
+		s := &DoltStore{dbPath: t.TempDir(), database: "beads", branch: "main"}
+		if err := os.MkdirAll(filepath.Join(s.CLIDir(), ".dolt", "noms"), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	for _, tc := range []struct {
+		name string
+		run  func(*DoltStore) error
+	}{
+		{"push", func(s *DoltStore) error { return s.doltCLIPush(context.Background(), "origin", false, nil) }},
+		{"push to peer", func(s *DoltStore) error {
+			return s.doltCLIPushRefToPeer(context.Background(), "peer", "main", nil)
+		}},
+		{"CLI remote", func(s *DoltStore) error { return s.ensureMatchingCLIRemote("origin", "file:///nonexistent/remote", "") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := stubDoltVersionOnPath(t, "2.5.1")
+			err := tc.run(newStore(t))
+			if !errors.Is(err, doltversion.ErrBelowRequiredMin) {
+				t.Fatalf("%s = %v, want ErrBelowRequiredMin", tc.name, err)
+			}
+			if got, err := os.ReadFile(calls); err == nil {
+				t.Fatalf("the dolt stub ran %q before the refusal, want only `dolt version`", got)
+			}
+		})
+	}
+}
+
+// stubDoltVersionOnPath puts a fake dolt first on PATH for t: it answers
+// `dolt version` with version and records every other invocation in the
+// returned calls file.
+func stubDoltVersionOnPath(t *testing.T, version string) (calls string) {
+	t.Helper()
+	binDir := t.TempDir()
+	calls = filepath.Join(t.TempDir(), "calls")
+	stub := "#!/bin/sh\nif [ \"$1\" = version ]; then echo 'dolt version " + version + "'; exit 0; fi\necho \"$@\" >> '" + calls + "'\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(binDir, "dolt"), []byte(stub), 0o755); err != nil { //nolint:gosec // G306: the stub must be executable
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return calls
 }

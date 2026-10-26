@@ -410,8 +410,9 @@ dolt sql-server at 127.0.0.1:3307 is version 2.5.1, but bd requires dolt 2.6.0 o
 
 - **`dolt binary "<path>"`**: `bd dolt start`, server-mode auto-start,
   managed proxied-server mode, a CLI clone (`bd bootstrap`, `bd init
-  --remote`) or a push, pull or fetch through the `dolt` CLI (prefixed
-  `dolt push:` and so on) found an old `dolt` CLI. Managed
+  --remote`), a push, pull or fetch through the `dolt` CLI (prefixed
+  `dolt push:` and so on) or the remote-repo cache (`bd create --repo
+  <url>`, `bd repo sync`) found an old `dolt` CLI. Managed
   proxied-server mode finds it via `BEADS_DOLT_BIN` or PATH (in that order —
   see [Environment Variables](/reference/configuration#environment-variables));
   the others use PATH. Install the pinned version and update PATH, or point
@@ -422,8 +423,8 @@ dolt sql-server at 127.0.0.1:3307 is version 2.5.1, but bd requires dolt 2.6.0 o
   `bd dolt start` for a server `bd` manages, or `bd dolt stop` alone in a
   managed proxied-server workspace, whose proxy starts its server again on
   the next command (`bd dolt start` is refused there). For an external or
-  shared server, whoever runs it has to upgrade it; back it up first, since
-  the upgrade is one-way.
+  shared server, whoever runs it has to upgrade it; back it up first, and
+  treat the upgrade as one-way.
 
 Install the pinned version — see
 [Which Dolt version to install](/architecture/dolt#which-dolt-version-to-install)
@@ -433,7 +434,11 @@ and `releases/latest` can move to an unmeasured release. There is no
 override. `bd doctor --server` reports the server's version against the
 same minimum. `bd doctor`, `bd doctor --fix` included, is exempt from it:
 its checks and repairs that use their own connection still run against an
-older server, and those that open the workspace's store report this error.
+older server. Its checks that open the workspace's store fail: the
+✖ Database and Permissions errors only point at `bd dolt status` (which
+shows a healthy server), and this error itself appears in the ⚠ checks
+further down (Peer Connectivity, Sync Staleness, Federation Conflicts,
+Dolt Mode).
 Releases before 2.6.0 also have known defects, which that page measures:
 
 - Dolt 2.4.0 through 2.4.2 return no row for an ungrouped `MAX` or `MIN` over

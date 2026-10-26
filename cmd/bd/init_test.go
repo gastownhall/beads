@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
@@ -2636,20 +2638,35 @@ func sharedServerTestEnv(t *testing.T) []string {
 // doltversion.RequiredMin raised above the test server's version,
 // doltserver.EnsureGlobalDatabase refuses the server with the floor's error
 // (which bd init stops on) where it would otherwise create the database and
-// return nil.
+// return nil, and beads_global does not exist afterwards. It runs against
+// its own server, so beads_global cannot already be there from another test.
 func TestEnsureGlobalDatabaseRefusesBelowRequiredMin(t *testing.T) {
-	if testDoltServerPort == 0 {
-		t.Skip("skipping: Dolt test server not running")
-	}
-	if testutil.DoltContainerCrashed() {
-		t.Skipf("Dolt test server crashed: %v", testutil.DoltContainerCrashError())
+	server := testutil.StartIsolatedDoltContainerHandle(t)
+	port, err := strconv.Atoi(server.Port)
+	if err != nil {
+		t.Fatal(err)
 	}
 	raiseRequiredMinForTest(t)
-	err := doltserver.EnsureGlobalDatabase("127.0.0.1", testDoltServerPort, "root", "")
+	err = doltserver.EnsureGlobalDatabase("127.0.0.1", port, "root", "")
 	if !errors.Is(err, doltversion.ErrBelowRequiredMin) {
 		t.Fatalf("EnsureGlobalDatabase = %v, want ErrBelowRequiredMin before CREATE DATABASE", err)
 	}
-	if want := "dolt sql-server at 127.0.0.1:" + strconv.Itoa(testDoltServerPort) + " is version"; !strings.Contains(err.Error(), want) {
+	if want := "dolt sql-server at 127.0.0.1:" + server.Port + " is version"; !strings.Contains(err.Error(), want) {
 		t.Errorf("EnsureGlobalDatabase = %q, want it to contain %q", err, want)
+	}
+
+	admin, err := sql.Open("mysql", fmt.Sprintf("root@tcp(127.0.0.1:%d)/", port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	var name string
+	switch err := admin.QueryRowContext(ctx, "SELECT schema_name FROM information_schema.schemata WHERE schema_name = ?", doltserver.GlobalDatabaseName).Scan(&name); {
+	case err == nil:
+		t.Errorf("%s exists after the refused EnsureGlobalDatabase", doltserver.GlobalDatabaseName)
+	case !errors.Is(err, sql.ErrNoRows):
+		t.Fatalf("look for %s: %v", doltserver.GlobalDatabaseName, err)
 	}
 }

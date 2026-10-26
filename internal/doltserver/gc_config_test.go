@@ -244,3 +244,30 @@ func TestRequireDoltBinaryVersion(t *testing.T) {
 		}
 	})
 }
+
+// TestRequireDoltBinaryVersionBoundsAWedgedProbe pins the timeout on the
+// `dolt version` fork that gates Start and every CLI clone and transfer: a
+// binary that never answers (here one whose backgrounded grandchild also
+// holds the stdout pipe) fails the probe within doltVersionProbeTimeout plus
+// the WaitDelay, and is not refused, instead of hanging the command.
+func TestRequireDoltBinaryVersionBoundsAWedgedProbe(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("stub dolt binary is a POSIX shell script")
+	}
+	t.Cleanup(ResetArchiveLevelSupportCacheForTest)
+	orig := doltVersionProbeTimeout
+	doltVersionProbeTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { doltVersionProbeTimeout = orig })
+
+	bin := filepath.Join(t.TempDir(), "dolt")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nsleep 60 &\nexec sleep 60\n"), 0o755); err != nil { //nolint:gosec // test fixture, intentionally executable
+		t.Fatal(err)
+	}
+	start := time.Now()
+	if err := RequireDoltBinaryVersion(bin); err != nil {
+		t.Fatalf("RequireDoltBinaryVersion(wedged) = %v, want nil (an undetermined version is not refused)", err)
+	}
+	if elapsed := time.Since(start); elapsed > doltVersionProbeTimeout+doltVersionProbeWaitDelay+5*time.Second {
+		t.Fatalf("RequireDoltBinaryVersion(wedged) took %s, want it bounded by the probe timeout", elapsed)
+	}
+}

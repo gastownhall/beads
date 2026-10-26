@@ -73,14 +73,31 @@ run against anything older:
 - A `bd dolt push`, `pull` or fetch (federation sync included) that runs
   through the `dolt` binary on your `PATH` (git-protocol, credentialed,
   cloud-auth and local remotes) refuses that binary when it is older than
-  2.6.0, since a `dolt pull` there merges with the binary's own engine.
+  2.6.0, like every other `dolt` `bd` runs. When `bd`'s own server holds the
+  database, dolt hands the transfer to that server; otherwise the binary's
+  own engine runs it. The check comes as soon as `bd` chooses the CLI route,
+  before it runs anything through the binary.
+- The remote-repo cache (`bd create --repo <url>`, `bd repo sync` for a
+  remote-URL repo) refuses the `dolt` on your `PATH` when it is older than
+  2.6.0, before it clones, pulls or pushes. No server holds the cache, so
+  that binary's own engine would run the transfer.
 - `bd doctor --server` reports a server older than 2.6.0 as an error.
 - `bd doctor`, `bd doctor --fix` included, is exempt, so you can still
   diagnose and repair a workspace on an older server: its own checks and
-  repairs connect without the floor, and those that open the workspace's
-  store report the refusal. Read-only probes (`bd dolt status`, `bd init`'s
-  existing-database check) and the working-set commit `bd dolt stop` makes
-  before it stops a server `bd` runs are not checked either.
+  repairs connect without the floor. Its checks that open the workspace's
+  store fail: the ✖ Database and Permissions errors only point at
+  `bd dolt status`, and the refusal itself is printed by the ⚠ checks
+  further down (Peer Connectivity, Sync Staleness, Federation Conflicts,
+  Dolt Mode). Run `bd doctor --server` to see the version.
+- `bd admin compact --dolt` is exempt: its `dolt gc` runs in an owned or
+  shared server's database, which the store open has already checked, and
+  dolt hands the GC to that running server. Read-only probes
+  (`bd dolt status`, `bd init`'s existing-database check) and the
+  working-set commit `bd dolt stop` makes before it stops a server `bd` runs
+  are not checked either.
+- Federation peers are not checked: `bd` checks only its own server and its
+  own `dolt` binary, so a peer on an older engine can still merge the same
+  criss-cross history differently (see below).
 
 The error names what was checked (the binary's path or the server's
 address), the version it reported, the 2.6.0 minimum, and where to get Dolt.
@@ -106,7 +123,7 @@ list what changed. Two changes matter to `bd` users moving a server up to
 - Dolt reports MySQL 8.0's strict default `sql_mode`, which includes
   `NO_ZERO_IN_DATE`, `NO_ZERO_DATE` and `ERROR_FOR_DIVISION_BY_ZERO`, so
   anything that reads `@@sql_mode` sees it. Dolt has done so since 2.3.3,
-  so this is new only to a server coming from 2.2.x or older.
+  so this is new only to a server coming from a release before 2.3.3.
 
 Dolt 2.3.3 is the first release that stores a descending index column as
 descending (dolthub/dolt#11746), and older releases cannot read a table that

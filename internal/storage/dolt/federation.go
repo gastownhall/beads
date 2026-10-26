@@ -652,6 +652,9 @@ func (s *DoltStore) shouldUseCLIForPeerGitProtocol(ctx context.Context, peer str
 // doltCLIPushRefToPeer shells out to `dolt push` with a specific refspec.
 // The refspec can be a branch name or a "local:remote" mapping.
 func (s *DoltStore) doltCLIPushRefToPeer(ctx context.Context, peer string, refspec string, creds *remoteCredentials) error {
+	if err := requireCLIDoltBinary(); err != nil {
+		return fmt.Errorf("dolt push: %w", err)
+	}
 	if err := s.prePushFSCK(ctx); err != nil {
 		return err
 	}
