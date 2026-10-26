@@ -830,6 +830,16 @@ func TestControlFilePathsIncludesSecretAndQuarantines(t *testing.T) {
 	assert.NoFileExists(t, rotatedLog)
 }
 
+func TestStopVerifiedPreMACProxyStopsVerifiedProcess(t *testing.T) {
+	root := t.TempDir()
+	helper := startHelperProcess(t)
+	pf := v2Record(t, root, pidfile.KindProxy, helper)
+	require.NoError(t, pidfile.Write(root, PIDFileName, pf))
+
+	require.NoError(t, stopVerifiedPreMACProxy(root, &pf))
+	assertHelperExited(t, helper)
+}
+
 // N-process cold-start convergence remains intentionally deferred to the
 // lifecycle-lane stage; this security suite covers single-spawner invariants.
 

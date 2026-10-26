@@ -127,7 +127,7 @@ func dialProxy(t *testing.T, port int) net.Conn {
 	require.True(t, ok)
 	secret, err := identity.ReadSecret(root)
 	require.NoError(t, err)
-	_, err = io.WriteString(c, "BDPROXY1 "+identity.DataAuthToken(secret)+"\n")
+	_, err = io.WriteString(c, "BDPROXY1 "+identity.DataAuthTokenForPort(secret, port)+"\n")
 	require.NoError(t, err)
 	return c
 }

@@ -300,6 +300,10 @@ func GetCreateDatabaseProxyServerEndpoint(rootDir string, opts OpenOpts) (Endpoi
 				recordPath,
 				recordPath,
 			)
+		case discovery.status == adoptionIdentityMismatch && errors.Is(discovery.err, identity.ErrIdentRefused):
+			if stopErr := stopVerifiedPreMACProxy(rootDir, discovery.pidfile); stopErr != nil {
+				return Endpoint{}, stopErr
+			}
 		}
 
 		select {
@@ -322,6 +326,26 @@ func adoptedEndpoint(rootDir, want string, discovery adoptionResult) (Endpoint, 
 		}
 	}
 	return discovery.endpoint, nil
+}
+
+func stopVerifiedPreMACProxy(rootDir string, pf *pidfile.PidFile) error {
+	if pf == nil {
+		return nil
+	}
+	if err := validateKillRecord(rootDir, pf, pidfile.KindProxy, killRecordChecks{VerifyRoot: true}); err != nil {
+		return nil
+	}
+	handle, dead, err := openRecordedProcess(pf)
+	if err != nil || dead {
+		return err
+	}
+	if err := handle.Kill(); err != nil {
+		_ = handle.Close()
+		return fmt.Errorf("stop pre-upgrade proxy pid %d: %w", pf.Pid, err)
+	}
+	_ = handle.Close()
+	_ = waitForRecordedProcessExit(pf, shutdownPostKillMinimum)
+	return nil
 }
 
 func spawnAndHandoff(

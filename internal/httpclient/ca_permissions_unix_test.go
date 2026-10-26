@@ -401,10 +401,12 @@ func TestIsUserPrivateGroupNameComparisonExercisedDirectly(t *testing.T) {
 	restoreUser := userLookupIDFn
 	restoreGroup := userLookupGroupIDFn
 	restoreMembers := groupHasNoSupplementaryMembersFn
+	restorePrimary := groupHasNoOtherPrimaryMembersFn
 	t.Cleanup(func() {
 		userLookupIDFn = restoreUser
 		userLookupGroupIDFn = restoreGroup
 		groupHasNoSupplementaryMembersFn = restoreMembers
+		groupHasNoOtherPrimaryMembersFn = restorePrimary
 	})
 
 	const fakeUID, fakeGID = 4242, 4242
@@ -416,18 +418,24 @@ func TestIsUserPrivateGroupNameComparisonExercisedDirectly(t *testing.T) {
 		}
 		return restoreUser(uid)
 	}
-	// Stubbed to always report "no supplementary members" for fakeGID, in
-	// BOTH arms below: membership is a separate check from the name
-	// comparison under test here, and the real, unstubbed
-	// groupHasNoSupplementaryMembers would fail closed (false) for a gid that
-	// does not exist in this host's real /etc/group regardless of the name
-	// comparison's outcome — masking a mutant that neuters the name check
-	// instead of actually exercising it.
+	// Stubbed to always report "no supplementary members" and "no other
+	// primary members" for fakeGID, in BOTH arms below: membership is a
+	// separate check from the name comparison under test here, and the real,
+	// unstubbed functions would fail closed (false) for a uid/gid that does
+	// not exist in this host's real /etc/group or /etc/passwd regardless of
+	// the name comparison's outcome — masking a mutant that neuters the name
+	// check instead of actually exercising it.
 	groupHasNoSupplementaryMembersFn = func(gid uint32) bool {
 		if gid == fakeGID {
 			return true
 		}
 		return restoreMembers(gid)
+	}
+	groupHasNoOtherPrimaryMembersFn = func(uid, gid uint32) bool {
+		if uid == fakeUID && gid == fakeGID {
+			return true
+		}
+		return restorePrimary(uid, gid)
 	}
 
 	// Arm 1: the group's name does NOT match the owner's username -> refused.

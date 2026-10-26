@@ -285,7 +285,7 @@ func (p *proxyServer) ListenAndServe(parentCtx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("write proxy secret: %w", err)
 	}
-	p.dataToken = identity.DataAuthToken(secret)
+	p.dataToken = identity.DataAuthTokenForPort(secret, dataPort.Port)
 
 	var identMu sync.RWMutex
 	identReply := identity.IdentReply{
@@ -494,11 +494,6 @@ func (p *proxyServer) acceptLoop(ctx context.Context) error {
 func (p *proxyServer) handleConn(ctx context.Context, client net.Conn) error {
 	addr := client.RemoteAddr()
 	p.connTracef("handleConn(%s) start", addr)
-	p.activeConns.Add(1)
-	defer func() {
-		p.activeConns.Add(-1)
-		p.connTracef("handleConn(%s) end (active=%d)", addr, p.activeConns.Load())
-	}()
 
 	expected := []byte(dataAuthPrefix + p.dataToken + "\n")
 	if err := client.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
@@ -520,6 +515,12 @@ func (p *proxyServer) handleConn(ctx context.Context, client net.Conn) error {
 		_ = client.Close()
 		return err
 	}
+
+	p.activeConns.Add(1)
+	defer func() {
+		p.activeConns.Add(-1)
+		p.connTracef("handleConn(%s) end (active=%d)", addr, p.activeConns.Load())
+	}()
 
 	p.stats.IncBackendDialAttempt()
 	dialCtx, cancelDial := context.WithTimeout(ctx, backendDialTimeout)

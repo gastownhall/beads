@@ -116,6 +116,7 @@ func TestDialDataAuthenticatesRegisteredAddress(t *testing.T) {
 	defer listener.Close()
 	tcpAddr := listener.Addr().(*net.TCPAddr)
 	endpoint := Endpoint{Host: "127.0.0.1", Port: tcpAddr.Port}
+	require.NoError(t, pidfile.Write(root, PIDFileName, pidfile.PidFile{Pid: 1, Port: endpoint.Port}))
 	registerDataAddress(root, endpoint)
 
 	gotLine := make(chan string, 1)
@@ -140,8 +141,17 @@ func TestDialDataAuthenticatesRegisteredAddress(t *testing.T) {
 	conn, err := dialData(context.Background(), addr)
 	require.NoError(t, err)
 	require.NoError(t, conn.Close())
-	assert.Equal(t, dataAuthPrefix+identity.DataAuthToken(secret)+"\n", <-gotLine)
+	assert.Equal(t, dataAuthPrefix+identity.DataAuthTokenForPort(secret, endpoint.Port)+"\n", <-gotLine)
 	assert.NoError(t, <-serverErr)
+
+	// If proxy.pid moves to a replacement port or is removed, dialData refuses before dialing the stale port.
+	require.NoError(t, pidfile.Write(root, PIDFileName, pidfile.PidFile{Pid: 1, Port: endpoint.Port + 1}))
+	_, err = dialData(context.Background(), addr)
+	require.ErrorContains(t, err, "stale data address")
+
+	require.NoError(t, pidfile.Remove(root, PIDFileName))
+	_, err = dialData(context.Background(), addr)
+	require.ErrorContains(t, err, "stale data address")
 
 	_, err = dialData(context.Background(), "127.0.0.1:65535")
 	require.ErrorContains(t, err, "unknown data address")

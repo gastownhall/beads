@@ -2,6 +2,9 @@ package identity
 
 import (
 	"bufio"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net"
 	"os"
@@ -59,6 +62,18 @@ func TestIdentRequestMACAuthenticatesNonce(t *testing.T) {
 	nonce := "0123456789abcdef0123456789abcdef"
 	mac, err := IdentRequestMAC(secret, nonce)
 	require.NoError(t, err)
+
+	nonceBytes, err := hex.DecodeString(nonce)
+	require.NoError(t, err)
+	wantH := hmac.New(sha256.New, []byte(secret))
+	_, _ = wantH.Write([]byte("bd-proxy-ident-request-v1\x00"))
+	_, _ = wantH.Write(nonceBytes)
+	assert.Equal(t, hex.EncodeToString(wantH.Sum(nil)), mac)
+
+	rawH := hmac.New(sha256.New, []byte(secret))
+	_, _ = rawH.Write(nonceBytes)
+	assert.NotEqual(t, hex.EncodeToString(rawH.Sum(nil)), mac)
+
 	assert.True(t, VerifyIdentRequest(secret, nonce, mac))
 	assert.False(t, VerifyIdentRequest("wrong secret", nonce, mac))
 	assert.False(t, VerifyIdentRequest(secret, "invalid", mac))
@@ -71,6 +86,11 @@ func TestDataAuthToken(t *testing.T) {
 	assert.Len(t, first, 64)
 	assert.Equal(t, first, DataAuthToken("shared secret"))
 	assert.NotEqual(t, first, DataAuthToken("different secret"))
+	portA := DataAuthTokenForPort("shared secret", 3306)
+	portB := DataAuthTokenForPort("shared secret", 3307)
+	assert.Len(t, portA, 64)
+	assert.NotEqual(t, first, portA)
+	assert.NotEqual(t, portA, portB)
 }
 
 func TestIdentifyRejectsUnauthenticatedReply(t *testing.T) {
