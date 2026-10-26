@@ -113,6 +113,62 @@ func TestCheckPrivateSourceRepinsAndLocalDoltDoesNotPin(t *testing.T) {
 	}
 }
 
+func TestPrivateSourceDoesNotRequireWritablePinStorage(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("read-only permission checks require a non-root user")
+	}
+
+	t.Run("matching pin", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		configDir := filepath.Join(home, ".config")
+		t.Setenv("XDG_CONFIG_HOME", configDir)
+		key := filepath.Join(t.TempDir(), ".beads")
+		if err := Check(key, "github", "https://same.example", false); err != nil {
+			t.Fatal(err)
+		}
+
+		pinDir := filepath.Join(configDir, "beads")
+		if err := os.Chmod(pinDir, 0500); err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = os.Chmod(pinDir, 0700) }()
+
+		if err := Check(key, "github", "https://same.example", true); err != nil {
+			t.Fatalf("matching private endpoint: %v", err)
+		}
+		info, err := os.Stat(pinDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0500 {
+			t.Fatalf("pin directory mode = %o, want unchanged 500", info.Mode().Perm())
+		}
+	})
+
+	t.Run("no pin", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		configDir := filepath.Join(home, ".config")
+		t.Setenv("XDG_CONFIG_HOME", configDir)
+		if err := os.Mkdir(configDir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(configDir, 0500); err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = os.Chmod(configDir, 0700) }()
+
+		key := filepath.Join(t.TempDir(), ".beads")
+		if err := Check(key, "github", "https://private.example", true); err != nil {
+			t.Fatalf("private endpoint without writable pin storage: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(configDir, "beads")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("unexpected pin directory: err=%v", err)
+		}
+	})
+}
+
 func TestCheckDefaultAndCorruptPins(t *testing.T) {
 	isolatePins(t)
 	if err := Check("", "github", "", false); err != nil {

@@ -169,11 +169,19 @@ func Check(workspaceKey, credKind, endpoint string, fromPrivateSource bool) erro
 
 	current, err := readPins()
 	if err != nil {
+		if fromPrivateSource {
+			_ = writePin(key, credKind, origin, false)
+			return nil
+		}
 		return err
 	}
 	pinned := current.Workspaces[key][credKind]
 	if fromPrivateSource {
-		return writePin(key, credKind, origin, false)
+		if pinned == origin {
+			return nil
+		}
+		_ = writePin(key, credKind, origin, false)
+		return nil
 	}
 	if pinned == "" {
 		if err := writePin(key, credKind, origin, true); err != nil {
