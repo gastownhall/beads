@@ -3630,7 +3630,7 @@ func shouldWriteInitDoltRemote(gateway bool, syncURL string, syncFromRemote, syn
 // --discard-remote still runs its destroy-token flow.
 func resolveRemoteHasDoltDataProbe(syncURL string, hasData bool, err error) (bool, string) {
 	if err != nil {
-		return true, fmt.Sprintf("could not verify refs/dolt/data on %s (%s); treating remote as having Dolt history", remedy.PrintedValue(syncURL), remedy.PrintedText(err.Error()))
+		return true, fmt.Sprintf("could not verify refs/dolt/data on %s (%s)", remedy.PrintedValue(syncURL), remedy.PrintedText(err.Error()))
 	}
 	return hasData, ""
 }
