@@ -191,6 +191,19 @@ func TestEmbeddedDepAAddAndList(t *testing.T) {
 			t.Errorf("expected dependency ID in JSON: %s", stdout.String())
 		}
 	})
+
+	t.Run("list_direction_refuses_unknown", func(t *testing.T) {
+		// #7842: a value the command does not answer must be refused, not
+		// silently answered with the default "down" set at exit 0. `both` is
+		// not a random typo: `dep tree` accepts it, so a careful caller
+		// reaches for it precisely to avoid this command's default.
+		for _, bad := range []string{"both", "banana", ""} {
+			out := bdDepFail(t, bd, dir, "list", issueC.ID, "--direction", bad)
+			if !strings.Contains(out, "--direction must be 'down' or 'up'") {
+				t.Errorf("--direction %q: expected the refusal, got: %s", bad, out)
+			}
+		}
+	})
 }
 
 func TestEmbeddedDepAAddTypesAndFlags(t *testing.T) {

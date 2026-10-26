@@ -1002,16 +1002,28 @@ Examples:
 			}
 		}()
 
+		// The flag vocabulary is checked HERE, at the front door, rather than
+		// in each route: both bodies used to read this flag as a bare string
+		// whose only comparison was == "up", so `both`, a typo or an explicit
+		// empty value silently answered "down" at exit 0 (#7842). Checking
+		// before the route is chosen also puts the refusal before any id is
+		// resolved or any role is opened. Empty is refused on purpose: the
+		// unset default is the visible "down" (see the flag registration), so
+		// "" can only arrive from an explicit --direction=. The wording
+		// matches `dep tree`, which names only the values it answers.
+		direction, _ := cmd.Flags().GetString("direction")
+		switch direction {
+		case "down", "up":
+		default:
+			return HandleErrorRespectJSON("--direction must be 'down' or 'up'")
+		}
+
 		if usesProxiedServer() {
 			return runDepListProxiedServer(cmd, rootCtx, args)
 		}
 
 		ctx := rootCtx
-		direction, _ := cmd.Flags().GetString("direction")
 		typeFilter, _ := cmd.Flags().GetString("type")
-		if direction == "" {
-			direction = "down"
-		}
 
 		var resolved []depListAnchor
 		batchMode := len(args) > 1

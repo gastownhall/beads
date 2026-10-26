@@ -755,6 +755,54 @@ func TestDepTreeDirectionFlag(t *testing.T) {
 	}
 }
 
+// TestDepListRefusesUnknownDirection pins #7842: `dep list --direction` used
+// to be read as a bare string whose only comparison was == "up", so `both`,
+// a typo or an explicit empty value silently answered with the "down" set at
+// exit 0 — on the direct route and on the proxied-server route alike. The
+// front door must refuse every value it does not answer, as `dep tree`
+// already does, before the route is chosen.
+//
+// The nil store and nil UOW provider are the proof of ordering: each stops
+// its route with its own exit-1 error ("storage is nil" on the direct route,
+// "proxied-server UOW provider not initialized" on the proxied one), so a
+// refusal that names the flag can only have come from a check that ran
+// before any id was resolved or any role was opened.
+func TestDepListRefusesUnknownDirection(t *testing.T) {
+	// No t.Parallel(): the test flips package globals.
+	oldStore, oldUOW, oldProxied, oldJSON, oldRoot := store, uowProvider, proxiedServerMode, jsonOutput, rootCtx
+	oldCmdCtx, oldGlobals := cmdCtx, testModeUseGlobals
+	enableTestModeGlobals() // usesProxiedServer() reads the proxiedServerMode global
+	t.Cleanup(func() {
+		store, uowProvider, proxiedServerMode, jsonOutput, rootCtx = oldStore, oldUOW, oldProxied, oldJSON, oldRoot
+		cmdCtx, testModeUseGlobals = oldCmdCtx, oldGlobals
+	})
+	t.Cleanup(func() { resetCommandFlags(depListCmd) })
+	store, uowProvider, rootCtx = nil, nil, context.Background()
+
+	for _, proxied := range []bool{false, true} {
+		for _, direction := range []string{"both", "banana", "UP", " up", ""} {
+			t.Run(fmt.Sprintf("proxied=%v/direction=%q", proxied, direction), func(t *testing.T) {
+				resetCommandFlags(depListCmd)
+				proxiedServerMode, jsonOutput = proxied, false
+				if err := depListCmd.ParseFlags([]string{"--direction=" + direction}); err != nil {
+					t.Fatal(err)
+				}
+				var err error
+				stderr := captureStderr(t, func() { err = depListCmd.RunE(depListCmd, []string{"bd-nosuch"}) })
+				if code, ok := exitCodeFromError(err); !ok || code != 1 {
+					t.Fatalf("RunE = %v, want exit 1\nstderr:\n%s", err, stderr)
+				}
+				if !strings.Contains(stderr, "--direction must be 'down' or 'up'") {
+					t.Errorf("the refusal does not name the accepted values:\n%s", stderr)
+				}
+				if strings.Contains(stderr, "storage is nil") || strings.Contains(stderr, "UOW provider not initialized") {
+					t.Errorf("the run reached the route's own failure instead of refusing the flag first:\n%s", stderr)
+				}
+			})
+		}
+	}
+}
+
 func TestDepTreeStatusFlag(t *testing.T) {
 	// Test that the --status flag exists on depTreeCmd
 	flag := depTreeCmd.Flags().Lookup("status")

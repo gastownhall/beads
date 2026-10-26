@@ -932,6 +932,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd dep list --direction` refuses any value other than `down` or `up`**
+  ([#7842](https://github.com/gastownhall/beads/issues/7842)). The flag was
+  read as a bare string whose only comparison was `== "up"`, so `both`, a
+  typo, or an explicit empty value silently returned the `down` set at exit 0,
+  on both the direct and the proxied-server routes. An unrecognized value now
+  exits 1 with `--direction must be 'down' or 'up'` (a JSON error object
+  under `--json`), before any issue id is resolved — the same refusal
+  `bd dep tree` already gives. Implementing `both` remains open as #5960.
 - The batched bulk readers no longer return an issue's rows twice when the
   same id is requested twice. Since the 200-id batching (#6444), an id that
   appeared in two batches had its comments, labels, dependency records,
