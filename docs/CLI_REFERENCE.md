@@ -32,6 +32,7 @@ Reference for bd Latest. Generated from `bd help --all`.
   - [bd label list-all](#bd-label-list-all) — List all unique labels in the database
   - [bd label propagate](#bd-label-propagate) — Propagate a label from a parent issue to all its children
   - [bd label remove](#bd-label-remove) — Remove one or more labels from one or more issues
+  - [bd label rename](#bd-label-rename) — Rename a label across every issue and wisp that carries it
 - [bd link](#bd-link) — Link two issues with a dependency
 - [bd list](#bd-list) — List issues
 - [bd merge-slot](#bd-merge-slot) — Manage merge-slot gates for serialized conflict resolution
@@ -74,6 +75,7 @@ Reference for bd Latest. Generated from `bd help --all`.
 - [bd status](#bd-status) — Show issue database overview and statistics
 - [bd statuses](#bd-statuses) — List valid issue statuses
 - [bd types](#bd-types) — List valid issue types
+- [bd versions](#bd-versions) — List the recorded versions of a bead
 
 ### Dependencies & Structure:
 
@@ -92,7 +94,7 @@ Reference for bd Latest. Generated from `bd help --all`.
   - [bd epic status](#bd-epic-status) — Show epic completion status
 - [bd graph](#bd-graph) — Display issue dependency graph
   - [bd graph check](#bd-graph-check) — Check dependency graph integrity
-- [bd supersede](#bd-supersede) — Mark an issue as superseded by a newer one
+- [bd supersede](#bd-supersede) — Mark an issue as superseded by a replacement issue
 - [bd swarm](#bd-swarm) — Swarm management for structured epics
   - [bd swarm create](#bd-swarm-create) — Create a swarm molecule from an epic
   - [bd swarm list](#bd-swarm-list) — List all swarm molecules
@@ -135,6 +137,7 @@ Reference for bd Latest. Generated from `bd help --all`.
   - [bd config show](#bd-config-show) — Show all effective configuration with provenance
   - [bd config unset](#bd-config-unset) — Delete a configuration value
   - [bd config validate](#bd-config-validate) — Validate sync-related configuration
+- [bd connect](#bd-connect) — Attach this workspace to a remote bd serve over HTTP
 - [bd context](#bd-context) — Show effective backend identity and repository context
 - [bd dolt](#bd-dolt) — Configure Dolt database settings
   - [bd dolt clean-databases](#bd-dolt-clean-databases) — Drop stale test databases from the Dolt server
@@ -296,7 +299,7 @@ Reference for bd Latest. Generated from `bd help --all`.
   - [bd mol seed](#bd-mol-seed) — Verify formula accessibility
   - [bd mol show](#bd-mol-show) — Show molecule details
   - [bd mol squash](#bd-mol-squash) — Compress molecule execution into a digest
-  - [bd mol stale](#bd-mol-stale) — Detect complete-but-unclosed molecules
+  - [bd mol stale](#bd-mol-stale) — Detect molecules with all children closed but root still open
   - [bd mol wisp](#bd-mol-wisp) — Create or manage wisps (ephemeral molecules)
 - [bd notion](#bd-notion) — Notion integration commands
   - [bd notion connect](#bd-notion-connect) — Connect bd to an existing Notion database or data source
@@ -364,7 +367,8 @@ bd assign <id> <name> [flags]
 **Flags:**
 
 ```
-      --force   Allow overwriting another actor's live in_progress claim (use only for abandoned claims — crashed agent, expired lease; prefer bd reclaim)
+      --force                        Allow overwriting another actor's live in_progress claim (use only for abandoned claims — crashed agent, expired lease; prefer bd reclaim)
+      --if-revision bd show --json   Apply the write only if the issue's current revision equals this value (the decimal int64 from bd show --json's "revision" field). One id only: refused before any write when combined with more than one issue id. A mismatch writes nothing and exits 13 (vs 1 for other failures).
 ```
 
 ### bd children
@@ -406,6 +410,15 @@ When closing multiple issues, provide one --reason for all IDs or repeat
 to the first ID, the second --reason to the second ID, regardless of where
 the flags appear in the command line.
 
+Closing a molecule's last open step also closes the molecule's root, with
+the reason "all steps complete", when the root is a poured molecule, a wisp,
+or an epic labeled "template"; any other epic stays open as close-eligible
+work. A root that would refuse its own close (an open blocker, a pin, another
+assignee) stays open with a warning, and the step's close stands. Under
+--json, the step's entry names the closed root (auto_closed_molecule) or the
+refusal (molecule_auto_close_refusal). --continue claims the next ready step
+in the molecule for you; add --no-auto to only show it.
+
 ```
 bd close [id...] [flags]
 ```
@@ -415,14 +428,15 @@ bd close [id...] [flags]
 **Flags:**
 
 ```
-      --claim-next           Automatically claim the next highest priority available issue
-      --continue             Auto-advance to next step in molecule
-  -f, --force                Force close pinned issues or unsatisfied gates
-      --no-auto              With --continue, show next step but don't claim it
-  -r, --reason string        Reason for closing
-      --reason-file string   Read close reason from file (use - for stdin)
-      --session string       Claude Code session ID (or set CLAUDE_SESSION_ID env var)
-      --suggest-next         Show newly unblocked issues after closing
+      --claim-next                   Automatically claim the next highest priority available issue
+      --continue                     Auto-advance to next step in molecule
+  -f, --force                        Force close pinned issues or unsatisfied gates
+      --if-revision bd show --json   Apply the write only if the issue's current revision equals this value (the decimal int64 from bd show --json's "revision" field). One id only: refused before any write when combined with more than one issue id. A mismatch writes nothing and exits 13 (vs 1 for other failures).
+      --no-auto                      With --continue, show next step but don't claim it
+  -r, --reason string                Reason for closing
+      --reason-file string           Read close reason from file (use - for stdin)
+      --session string               Claude Code session ID (or set CLAUDE_SESSION_ID env var)
+      --suggest-next                 Show newly unblocked issues after closing
 ```
 
 ### bd comment
@@ -547,11 +561,11 @@ bd create [title] [flags]
       --graph string              Create a graph of issues with dependencies from JSON plan file
       --id string                 Explicit issue ID (e.g., 'bd-42' for partitioning)
   -l, --labels strings            Labels (comma-separated)
-      --metadata string           Set custom metadata (JSON string or @file.json to read from file)
+      --metadata string           Set custom metadata (JSON object, or @file.json to read from file)
       --mol-type string           Molecule type: swarm (multi-agent), patrol (recurring ops), work (default)
       --no-history                Skip Dolt commit history without making GC-eligible (for permanent agent beads)
       --no-inherit-labels         Don't inherit labels from parent issue
-      --notes string              Additional notes
+      --notes string              Notes
       --parent string             Parent issue ID for hierarchical child (e.g., 'bd-a3f8e9')
   -p, --priority string           Priority (0-4 or P0-P4, 0=highest) (default "2")
       --repo string               Target repository for issue (overrides auto-routing)
@@ -722,10 +736,11 @@ bd delete <issue-id> [issue-id...] [flags]
 **Flags:**
 
 ```
-      --cascade            Recursively delete all dependent issues
-      --dry-run            Preview what would be deleted without making changes
-  -f, --force              Actually delete (without this flag, shows preview)
-      --from-file string   Read issue IDs from file (one per line)
+      --cascade                      Recursively delete all dependent issues
+      --dry-run                      Preview what would be deleted without making changes
+  -f, --force                        Actually delete (without this flag, shows preview)
+      --from-file string             Read issue IDs from file (one per line)
+      --if-revision bd show --json   Apply the write only if the issue's current revision equals this value (the decimal int64 from bd show --json's "revision" field). One id only: refused before any write when combined with more than one issue id. A mismatch writes nothing and exits 13 (vs 1 for other failures).
 ```
 
 ### bd edit
@@ -808,7 +823,7 @@ Gate types:
   gh:run   - Check GitHub Actions workflow runs
   gh:pr    - Check pull request merge status
   timer    - Check timer gates (auto-expire based on timeout)
-  bead     - Check cross-rig bead gates
+  bead     - Check bead gates
   all      - Check all gate types
 
 GitHub gates use the 'gh' CLI to query status:
@@ -819,7 +834,8 @@ A gate is resolved when:
   - gh:run: status=completed AND conclusion=success
   - gh:pr: state=MERGED
   - timer: current time &gt; created_at + timeout
-  - bead: target bead status=closed
+  - bead: target bead status=closed, or a bead an earlier check saw in
+    this rig no longer exists
 
 A gate is escalated when:
   - gh:run: status=completed AND conclusion in (failure, canceled)
@@ -830,7 +846,7 @@ Examples:
   bd gate check --type=gh    # Check only GitHub gates
   bd gate check --type=gh:run # Check only workflow run gates
   bd gate check --type=timer # Check only timer gates
-  bd gate check --type=bead  # Check only cross-rig bead gates
+  bd gate check --type=bead  # Check only bead gates
   bd gate check --dry-run    # Show what would happen without changes
   bd gate check --escalate   # Escalate expired/failed gates
 
@@ -860,11 +876,15 @@ Gate types:
   gh:run  - Waits for GitHub Actions workflow
   gh:pr   - Waits for PR merge
 
+gh:run and gh:pr gates are checked in the current Git repository unless
+--repo names another, or the blocked issue carries a metadata.repo value.
+
 Examples:
   bd gate create --blocks bd-abc
   bd gate create --type=human --blocks bd-abc --reason="Need design review"
   bd gate create --type=timer --blocks bd-abc --timeout=2h
   bd gate create --type=gh:pr --blocks bd-abc --await-id=42
+  bd gate create --type=gh:pr --blocks bd-abc --await-id=42 --repo=owner/other-repo
   bd gate create --blocks bd-abc --title="Gate: awaiting owner sign-off"
 
 ```
@@ -877,6 +897,7 @@ bd gate create [flags]
       --await-id string   Condition identifier (run ID, PR number, etc.)
       --blocks string     Issue ID to block (required)
   -r, --reason string     Reason for the gate
+      --repo string       GitHub repository the gh:run/gh:pr condition is checked in (OWNER/REPO or HOST/OWNER/REPO); default: the blocked issue's metadata.repo, else the current repository
       --timeout string    Timeout duration (e.g., 2h, 30m)
       --title string      Custom gate title (default: "Gate: <type>")
   -t, --type string       Gate type (human, timer, gh:run, gh:pr) (default "human")
@@ -977,10 +998,13 @@ it up. Heartbeat pushes lease_expires_at forward and stamps heartbeat_at = now.
 Only the current owner may heartbeat. If the lease has already been reclaimed or
 the issue closed, heartbeat fails so the worker learns to stop.
 
-Leases live in an ephemeral, node-local table: heartbeats write no Dolt commit
-and no history, so any cadence comfortably below the TTL is fine. Leases are
-only enforceable on the node that granted them; cross-machine claim visibility
-rides the issue's status and assignee, which do commit.
+Leases live in an ephemeral, node-local table: a heartbeat that refreshes your
+lease writes no Dolt commit and no history, so any cadence comfortably below
+the TTL is fine. Only a re-arm (the first heartbeat of a claim that has no
+lease, such as one set by a plain update) is recorded as a change to the issue
+and committed, once. Leases are only enforceable on the node that granted them;
+cross-machine claim visibility rides the issue's status and assignee, which do
+commit.
 
 Examples:
   bd heartbeat bd-123
@@ -1036,8 +1060,30 @@ bd label propagate [parent-id] [label]
 
 Remove labels from issues. Issue IDs come first; the final argument is the label. Pass multiple labels comma-separated: bd label remove bd-123 label1,label2
 
+With --prefix, no label argument is needed: every label on the given issue(s) starting with the prefix is removed, e.g. bd label remove bd-123 --prefix pool:refused:
+
 ```
-bd label remove [issue-id...] [label[,label...]]
+bd label remove [issue-id...] [label[,label...]] [flags]
+```
+
+**Flags:**
+
+```
+      --prefix bd label list <issue-id>   Remove every label matching this prefix instead of an exact label (e.g., 'pool:refused:' removes all pool:refused:* labels). No label positional argument is needed when set. CAUTION: a short prefix removes every match on an issue in a single edit, including labels you may not have meant to touch (e.g. --prefix t removes both 'tier:opus' and 'test-needed') — check bd label list <issue-id> first if unsure. State-dimension labels (e.g. 'launch:', 'scalegate:') should move via `bd set-state` instead, which this flag bypasses without its event-bead audit trail.
+```
+
+#### bd label rename
+
+Rename a label everywhere it appears. An issue that already carries the new label keeps it and drops the old one instead of erroring - a merge, reported honestly (the write path measures merged from what the insert actually affected, never from a snapshot check, so its count is correct under concurrent writes). Pass --dry-run to preview the blast radius (a count and the first issues) without writing anything; the preview's merged count is a plain snapshot intersection of two separate reads, so treat it as an estimate, not the number the rename itself will report.
+
+```
+bd label rename <old-label> <new-label> [flags]
+```
+
+**Flags:**
+
+```
+      --dry-run   Preview the blast radius without renaming anything (merged count is a snapshot intersection, not authoritative - see --help)
 ```
 
 ### bd link
@@ -1093,9 +1139,10 @@ bd list [flags]
       --external-contains string     Filter by external ref substring (case-insensitive)
       --external-ref string          Filter by exact external_ref value
       --flat                         Disable tree format and use legacy flat list output
-      --format string                Output format: 'digraph' (for golang.org/x/tools/cmd/digraph), 'dot' (Graphviz), or Go template
+      --format string                Export the dependency graph of the listed issues: 'digraph' (edge list for golang.org/x/tools/cmd/digraph), 'dot' (Graphviz), or a Go template rendered once per edge over .IssueID, .DependsOnID, .Type, .Issue, .Dependency. 'json' is the exception and does not export the graph: it is equivalent to --json, which also wins when both flags are given. 'digraph' and templates print nothing when no listed issue depends on another; 'dot' still prints the nodes
       --has-metadata-key string      Filter issues that have this metadata key set
-      --id string                    Filter by specific issue IDs (comma-separated, e.g., bd-1,bd-5,bd-10)
+      --id string                    Filter by specific issue IDs (comma-separated or repeated, e.g., bd-1,bd-5,bd-10)
+      --include-comments             Populate each row's comments field with full comment bodies in JSON output (--json only; costs one query per row that has comments). Without it, a row with comments carries comments_omitted=true, so an absent comments field is never mistaken for having none. Text output is unaffected either way.
       --include-ephemeral            Include ephemeral wisp-plane rows in output (normally hidden)
       --include-gates                Include gate issues in output (normally hidden)
       --include-infra                Include infrastructure beads (agent/role/message) in output
@@ -1104,7 +1151,7 @@ bd list [flags]
       --label-any strings            Filter by labels (OR: must have AT LEAST ONE). Can combine with --label
       --label-pattern string         Filter by label glob pattern (e.g., 'tech-*' matches tech-debt, tech-legacy)
       --label-regex string           Filter by label regex pattern (e.g., 'tech-(debt|legacy)')
-  -n, --limit int                    Limit results (default 50, use 0 for unlimited) (default 50)
+  -n, --limit int                    Limit results (an explicit --limit always wins, 0 meaning unlimited; otherwise --all is unlimited; otherwise a configured list.limit applies; otherwise unlimited when piped, else 20 in agent mode at a terminal, else 50) (default 50)
       --long                         Show detailed multi-line output for each issue
       --max-rows int                 Hard upper bound on rows returned. Returns a non-zero exit (code 2) and an error to stderr if exceeded. 0 disables (the default). Overrides BEADS_MAX_ROWS for this invocation. Useful in CI/agent rigs that want a circuit breaker against pathological queries. Honored on both the direct and the --proxied-server route.
       --metadata-field stringArray   Filter by metadata field (key=value, repeatable)
@@ -1124,11 +1171,11 @@ bd list [flags]
       --priority-max string          Filter by maximum priority (inclusive, 0-4 or P0-P4)
       --priority-min string          Filter by minimum priority (inclusive, 0-4 or P0-P4)
       --ready                        Show only ready issues (no active blockers, same semantics as bd ready)
-  -r, --reverse                      Reverse sort order
+  -r, --reverse                      Invert the sort field's default direction (created/updated/closed default to newest-first, so --sort updated --reverse is oldest-first)
       --skip-labels                  Skip label hydration. The labels field in output will be empty regardless of actual labels. Use only when the caller does not depend on label data. Cannot combine with --label, --label-any, --label-pattern, --label-regex, --exclude-label, or --no-labels.
       --sort string                  Sort by field: priority, created, updated, closed, status, id, title, type, assignee
       --spec string                  Filter by spec_id prefix
-  -s, --status string                Filter by stored status (open, in_progress, blocked, deferred, closed). Comma-separated for multiple: --status open,in_progress. Note: repeating -s/--status silently overwrites the previous value — always use the comma-separated form for multi-status filters.
+  -s, --status string                Filter by stored status (open, in_progress, blocked, deferred, closed). Comma-separated or repeated for multiple: --status open,in_progress
       --title string                 Filter by title text (case-insensitive substring match)
       --title-contains string        Filter by title substring (case-insensitive)
       --tree                         Hierarchical tree format (default: true; use --flat to disable) (default true)
@@ -1429,7 +1476,9 @@ Supported fields:
   mol_type          Molecule type (swarm, patrol, work)
 
 Date values:
-  Relative durations: 7d (7 days ago), 24h (24 hours ago), 2w (2 weeks ago)
+  Relative durations: 30min (30 minutes ago), 24h (24 hours ago),
+                      7d (7 days ago), 2w (2 weeks ago),
+                      6m (6 months ago), 1y (1 year ago)
   Absolute dates: 2025-01-15, 2025-01-15T10:00:00Z
   Natural language: tomorrow, "next monday", "in 3 days"
 
@@ -1456,7 +1505,7 @@ bd query [expression] [flags]
       --long          Show detailed multi-line output for each issue
       --offset int    Skip the first N matching results (0-based). Only supported under --proxied-server.
       --parse-only    Only parse the query and show the AST (for debugging)
-  -r, --reverse       Reverse sort order
+  -r, --reverse       Invert the sort field's default direction (created/updated/closed default to newest-first, so --sort updated --reverse is oldest-first)
       --sort string   Sort by field: priority, created, updated, closed, status, id, title, type, assignee
 ```
 
@@ -1543,6 +1592,10 @@ bd reclaim [flags]
 Reopen closed issues by setting status to 'open' and clearing the closed_at timestamp.
 This is more explicit than 'bd update --status open' and emits a Reopened event.
 
+Exit codes: 1 for general failures; 13 when the failure is a stale
+--if-revision guard (the precondition no longer held, nothing was written —
+another actor won the race, so retrying the same guard is pointless).
+
 ```
 bd reopen [id...] [flags]
 ```
@@ -1550,7 +1603,8 @@ bd reopen [id...] [flags]
 **Flags:**
 
 ```
-  -r, --reason string   Reason for reopening
+      --if-revision bd show --json   Apply the write only if the issue's current revision equals this value (the decimal int64 from bd show --json's "revision" field). One id only: refused before any write when combined with more than one issue id. A mismatch writes nothing and exits 13 (vs 1 for other failures).
+  -r, --reason string                Reason for reopening
 ```
 
 ### bd search
@@ -1605,10 +1659,10 @@ bd search [query] [flags]
       --priority-max string          Filter by maximum priority (inclusive, 0-4 or P0-P4)
       --priority-min string          Filter by minimum priority (inclusive, 0-4 or P0-P4)
       --query string                 Search query (alternative to positional argument)
-  -r, --reverse                      Reverse sort order
+  -r, --reverse                      Invert the sort field's default direction (created/updated/closed default to newest-first, so --sort updated --reverse is oldest-first)
       --sort string                  Sort by field: priority, created, updated, closed, status, id, title, type, assignee
   -s, --status string                Filter by stored status (comma-separated for OR; open, in_progress, blocked, deferred, closed, all). Default searches all statuses including closed. Note: dependency-blocked issues use 'bd blocked'
-  -t, --type string                  Filter by type (bug, feature, task, epic, chore, decision, merge-request, molecule, gate)
+  -t, --type string                  Filter by type (bug, feature, task, epic, chore, decision, message, molecule, gate, spike, story, milestone); custom types require types.custom config, and an unknown type is an error. Aliases: feat/enhancement→feature, mol→molecule, dec/adr→decision, mr→merge-request
       --updated-after string         Filter issues updated after date (YYYY-MM-DD or RFC3339)
       --updated-before string        Filter issues updated before date (YYYY-MM-DD or RFC3339)
 ```
@@ -1657,14 +1711,15 @@ bd show [id...] [--id=<id>...] [--current] [flags]
 **Flags:**
 
 ```
-      --as-of string         Show issue as it existed at a specific commit hash or branch (requires Dolt)
+      --as-of string         Show issue as it existed at a specific commit hash or branch (requires Dolt; commit hashes must be the full 32-character hash from 'bd history', not a prefix)
       --brief-deps           Reduce each dependency to its identity fields in JSON output (--json only; drops description, design, notes and acceptance criteria)
       --children             Show only the children of this issue
+      --comments-tail int    Render only the last N comments in text output, preceded by one elision line naming how many older ones were hidden (text output only; 0, the default, renders every comment unchanged; N must be >= 0)
       --current              Show the currently active issue (in-progress, hooked, or last touched)
       --id stringArray       Issue ID (use for IDs that look like flags, e.g., --id=gt--xyz)
-      --include-comments     Stream full comment bodies in JSON output (--json only; may be slow on issues with many comments)
+      --include-comments     Stream full comment bodies in JSON output (--json only; may be slow on issues with many comments). Without it the comments field is absent entirely, not truncated: an issue with comments carries comment_count and comments_omitted=true, so check those before reading an absent comments field as none.
       --include-dependents   Stream full dependent issues in JSON output (--json only; may be slow on hub beads)
-      --local-time           Show timestamps in local time instead of UTC
+      --local-time           Show timestamps in local time instead of UTC (date-only fields are always local)
       --long                 Show all available fields (extended metadata, agent identity, gate fields, etc.)
       --refs                 Show issues that reference this issue (reverse lookup)
       --short                Show compact one-line output per issue
@@ -1854,13 +1909,14 @@ bd update [id...] [flags]
 
 ```
       --acceptance string            Acceptance criteria
-      --add-label strings            Add labels (repeatable)
+  -l, --add-label strings            Add labels (repeatable); -l matches bd create -l
       --allow-empty-description      Allow empty description replacement when reading from stdin or file
       --append-notes string          Append to existing notes (with newline separator)
   -a, --assignee string              Assignee
       --await-id string              Set gate await_id (e.g., GitHub run ID for gh:run gates)
       --body-file string             Read description from file (use - for stdin)
       --claim                        Atomically claim the issue (sets assignee to you, status to in_progress; idempotent if already claimed by you; issues assigned to a pool alias listed in the claim.pools config are claimable too)
+      --clear-notes                  Clear the notes field (--notes "" is refused: an empty value is usually a dead command substitution)
       --defer string                 Defer until date (empty to clear). Issue hidden from bd ready until then, then auto-wakes to open
   -d, --description string           Issue description
       --design string                Design notes
@@ -1869,13 +1925,14 @@ bd update [id...] [flags]
       --ephemeral                    Mark issue as ephemeral (wisp) - not exported to JSONL
   -e, --estimate int                 Time estimate in minutes (e.g., 60 for 1 hour)
       --external-ref string          External reference (e.g., 'gh-9', 'jira-ABC', Linear URL)
-      --force                        Override two refusals: let -a/--assignee overwrite another actor's live in_progress claim (use only for abandoned claims — crashed agent, expired lease; prefer bd reclaim), and let -s/--status move the issue into closed (or a configured done status) despite open children or a live blocker (same as bd close --force)
+      --force                        Override refusals: let -a/--assignee overwrite another actor's live in_progress claim (use only for abandoned claims — crashed agent, expired lease; prefer bd reclaim), let -s/--status move the issue into closed (or a configured done status) despite open children or a live blocker (same as bd close --force), and let --notes overwrite existing non-empty notes (use --append-notes to preserve history instead)
       --history                      Clear no-history flag (re-enable Dolt commit history)
       --if-assignee string           Apply the update only if the current assignee equals this value (--if-assignee '' requires unassigned); a mismatch writes nothing and exits 13 (vs 1 for other failures). Requires a field update; cannot combine with --claim
+      --if-revision bd show --json   Apply the write only if the issue's current revision equals this value (the decimal int64 from bd show --json's "revision" field). One id only: refused before any write when combined with more than one issue id. A mismatch writes nothing and exits 13 (vs 1 for other failures). Composes with --if-assignee/--if-status: all guards present must hold.
       --if-status string             Apply the update only if the current status equals this value; a mismatch writes nothing and exits 13 (vs 1 for other failures). Requires a field update; cannot combine with --claim
-      --metadata string              Set custom metadata (JSON string or @file.json to read from file)
+      --metadata string              Set custom metadata (JSON object, or @file.json to read from file)
       --no-history                   Mark issue as no-history (skip Dolt commits, not GC-eligible)
-      --notes string                 Additional notes (replaces existing notes; use --append-notes to append)
+      --notes string                 Replace the notes field (requires --force over existing non-empty notes; --clear-notes clears; --append-notes appends instead)
       --parent string                New parent issue ID (reparents the issue, use empty string to remove parent)
       --persistent                   Mark issue as persistent (promote wisp to regular issue)
   -p, --priority string              Priority (0-4 or P0-P4, 0=highest)
@@ -1910,6 +1967,7 @@ Examples:
   bd count --by-label               # Group count by label
   bd count --assignee alice --by-status  # Count alice's issues by status
   bd count --include-infra          # Count issues + wisps tier (matches 'bd list --include-infra --all' cardinality)
+  bd count --type task --include-ephemeral  # Count tasks in the durable AND wisps tiers
 
 
 ```
@@ -1919,34 +1977,41 @@ bd count [flags]
 **Flags:**
 
 ```
-  -a, --assignee string         Filter by assignee
-      --by-assignee             Group count by assignee
-      --by-label                Group count by label
-      --by-priority             Group count by priority
-      --by-status               Group count by status
-      --by-type                 Group count by issue type
-      --closed-after string     Filter issues closed after date (YYYY-MM-DD or RFC3339)
-      --closed-before string    Filter issues closed before date (YYYY-MM-DD or RFC3339)
-      --created-after string    Filter issues created after date (YYYY-MM-DD or RFC3339)
-      --created-before string   Filter issues created before date (YYYY-MM-DD or RFC3339)
-      --desc-contains string    Filter by description substring
-      --empty-description       Filter issues with empty description
-      --id string               Filter by specific issue IDs (comma-separated)
-      --include-infra           Include infrastructure beads and the wisps tier (matches 'bd list --include-infra --all' cardinality)
-  -l, --label strings           Filter by labels (AND: must have ALL)
-      --label-any strings       Filter by labels (OR: must have AT LEAST ONE)
-      --no-assignee             Filter issues with no assignee
-      --no-labels               Filter issues with no labels
-      --notes-contains string   Filter by notes substring
-  -p, --priority int            Filter by priority (0-4: 0=critical, 1=high, 2=medium, 3=low, 4=backlog)
-      --priority-max int        Filter by maximum priority (inclusive)
-      --priority-min int        Filter by minimum priority (inclusive)
-  -s, --status string           Filter by stored status (open, in_progress, blocked, deferred, closed). Note: dependency-blocked issues use 'bd blocked'
-      --title string            Filter by title text (case-insensitive substring match)
-      --title-contains string   Filter by title substring
-  -t, --type string             Filter by type (bug, feature, task, epic, chore, decision, merge-request, molecule, gate)
-      --updated-after string    Filter issues updated after date (YYYY-MM-DD or RFC3339)
-      --updated-before string   Filter issues updated before date (YYYY-MM-DD or RFC3339)
+  -a, --assignee string              Filter by assignee
+      --by-assignee                  Group count by assignee
+      --by-label                     Group count by label
+      --by-priority                  Group count by priority
+      --by-status                    Group count by status
+      --by-type                      Group count by issue type
+      --closed-after string          Filter issues closed after date (YYYY-MM-DD or RFC3339)
+      --closed-before string         Filter issues closed before date (YYYY-MM-DD or RFC3339)
+      --created-after string         Filter issues created after date (YYYY-MM-DD or RFC3339)
+      --created-before string        Filter issues created before date (YYYY-MM-DD or RFC3339)
+      --desc-contains string         Filter by description substring
+      --empty-description            Filter issues with empty description
+      --exclude-status strings       Exclude statuses from the count (comma-separated or repeatable)
+      --exclude-type strings         Exclude issue types from the count (comma-separated or repeatable)
+      --has-metadata-key string      Filter issues that have this metadata key set
+      --id string                    Filter by specific issue IDs (comma-separated)
+      --include-ephemeral            Include ephemeral wisp-plane rows in the count (normally hidden), without lifting type exclusions
+      --include-infra                Include infrastructure beads and the wisps tier (matches 'bd list --include-infra --all' cardinality)
+  -l, --label strings                Filter by labels (AND: must have ALL)
+      --label-any strings            Filter by labels (OR: must have AT LEAST ONE)
+      --metadata-field stringArray   Filter by metadata field (key=value, repeatable)
+      --no-assignee                  Filter issues with no assignee
+      --no-labels                    Filter issues with no labels
+      --no-parent                    Count only top-level issues (exclude child issues)
+      --notes-contains string        Filter by notes substring
+      --parent string                Filter by parent issue ID (count children of specified issue)
+  -p, --priority int                 Filter by priority (0-4: 0=critical, 1=high, 2=medium, 3=low, 4=backlog)
+      --priority-max int             Filter by maximum priority (inclusive)
+      --priority-min int             Filter by minimum priority (inclusive)
+  -s, --status string                Filter by stored status (open, in_progress, blocked, deferred, closed). Note: dependency-blocked issues use 'bd blocked'
+      --title string                 Filter by title text (case-insensitive substring match)
+      --title-contains string        Filter by title substring
+  -t, --type string                  Filter by type (bug, feature, task, epic, chore, decision, merge-request, molecule, gate)
+      --updated-after string         Filter issues updated after date (YYYY-MM-DD or RFC3339)
+      --updated-before string        Filter issues updated before date (YYYY-MM-DD or RFC3339)
 ```
 
 ### bd diff
@@ -2187,6 +2252,50 @@ bd types [flags]
       --sections   Show required sections for each issue type
 ```
 
+### bd versions
+
+List the versions recorded for a bead by versioned history.
+
+Recording is off by default. Turn it on with:
+
+  bd config set versioned-history.enabled true
+
+That writes the setting into the store, so every client of that store agrees
+about whether a write is recorded, and it is the setting this command reports.
+BD_VERSIONED_HISTORY_ENABLED=1 (or a value in config.yaml) also turns recording
+on for the writes a process makes, but it says nothing about the store, and
+this command only reads, so it does not consult them.
+
+Either source turning it on is enough for a writer; neither can switch the
+other off. The consequence worth knowing: once the store setting says on,
+BD_VERSIONED_HISTORY_ENABLED=0 will not turn recording off for one run. Turn
+it off where it was turned on:
+
+  bd config set versioned-history.enabled false
+
+Only beads created while recording is on, or that enter the issues plane
+while it is on (a wisp promoted or made persistent), are versioned. A bead
+already on the issues plane when recording was turned on is legacy: editing
+it records nothing (the write fence, design §16.2b), and nothing is
+backfilled.
+
+Turning recording off does not hide what was already recorded — this command
+still lists it, and says that recording is currently off.
+
+A caution while the feature is young: keep recording ON for every writer of a
+shared store, or leave it off for all of them. A write from a client with
+recording off advances nothing, and the next recorded write mints a version
+that absorbs that unrecorded change under its own actor — the revisions stay
+contiguous and the listing looks gapless when it is not.
+
+Examples:
+  bd versions bd-123
+  bd versions bd-123 --json
+
+```
+bd versions <id>
+```
+
 ## Dependencies & Structure:
 
 ### bd dep
@@ -2212,7 +2321,7 @@ bd dep [command]
 
 ```
   -b, --blocks string    Issue ID that this issue blocks (shorthand for: bd dep add <blocked> <blocker>)
-      --no-cycle-check   Skip per-edge cycle checks for speed (bulk wiring); bulk --file adds still run one final whole-graph check before commit
+      --no-cycle-check   Skip the post-add cycle warning (the per-edge cycle check still runs)
 ```
 
 #### bd dep add
@@ -2249,7 +2358,7 @@ Examples:
   bd dep add bd-42 --blocked-by bd-41                 # Flag syntax (same effect)
   bd dep add bd-42 --depends-on bd-41                 # Alias (same effect)
   bd dep add gt-xyz external:beads:mol-run-assignee   # Cross-project dependency
-  bd dep add bd-42 bd-41 --no-cycle-check             # Skip cycle check (bulk wiring)
+  bd dep add bd-42 bd-41 --no-cycle-check             # Skip the post-add cycle warning
   bd dep add --file deps.jsonl                        # Bulk JSONL: &#123;"from":"bd-42","to":"bd-41"&#125;
 
 ```
@@ -2262,7 +2371,7 @@ bd dep add [issue-id] [depends-on-id] [flags]
       --blocked-by string   Issue ID that blocks the first issue (alternative to positional arg)
       --depends-on string   Issue ID that the first issue depends on (alias for --blocked-by)
       --file string         Read dependency edges from JSONL file, or '-' for stdin
-      --no-cycle-check      Skip per-edge cycle checks for speed (bulk wiring); bulk --file adds still run one final whole-graph check before commit
+      --no-cycle-check      On bulk --file adds, skip per-edge cycle checks and the post-add cycle warning (one final whole-graph check still runs before commit); on a single-edge add, skip only the post-add cycle warning
   -t, --type string         Dependency type (blocks|tracks|related|parent-child|discovered-from|until|caused-by|validates|relates-to|supersedes); 'blocked-by' and 'depends-on' are accepted as aliases for 'blocks' (default "blocks")
 ```
 
@@ -2271,7 +2380,14 @@ bd dep add [issue-id] [depends-on-id] [flags]
 Detect dependency cycles
 
 ```
-bd dep cycles
+bd dep cycles [flags]
+```
+
+**Flags:**
+
+```
+      --include-tracks   Also walk 'tracks' edges: reports every cycle the default walk finds plus cycles that close through a tracks edge, never a loop made only of tracks edges (diagnostic for molecule-root deadlocks hidden by tracks-only propagation)
+      --limit int        Maximum cycles to print (0 = no limit); the reported total is always the whole count, and --json is never truncated (default 50)
 ```
 
 #### bd dep list
@@ -2534,7 +2650,7 @@ bd graph check
 
 ### bd supersede
 
-Mark an issue as superseded by a newer version.
+Mark an issue as superseded by a different (replacement) issue.
 
 The superseded issue is automatically closed with a reference to the replacement.
 Useful for design docs, specs, and evolving artifacts.
@@ -3003,6 +3119,13 @@ an import is visible. To deliberately restore an older snapshot, pass
 --allow-stale, which imports every row even when it overwrites newer
 local state.
 
+The staleness guard is import's ONLY overwrite guard: the per-field
+fences that bd update enforces (notes overwrite, live-claim reassign,
+close policy) do not apply to imported rows. Import replaces rows
+wholesale by design — a restore must not fail field-by-field — so
+--allow-stale is the single deliberate-overwrite opt-in, and
+updated_issues is where to look for what an import rewrote.
+
 Large imports are written in bounded transactions (a few hundred issues
 each, with a short pause between commits) with progress on stderr, so
 concurrent bd commands keep working while the import runs instead of
@@ -3061,7 +3184,6 @@ bd restore <issue-id> [flags]
 
 ```
       --apply   Write the restored content back into the issue (default: display only)
-      --json    Output restore results in JSON format
 ```
 
 ### bd sync
@@ -3216,11 +3338,18 @@ Bootstrap auto-detects the right action:
   • If git origin has Dolt data (refs/dolt/data): clones from git and wires origin for future push/pull
   • If .beads/backup/*.jsonl exists: restores from backup
   • If .beads/issues.jsonl exists: imports from git-tracked JSONL
-  • If no database exists: creates a fresh one
+  • If no database exists: creates a fresh one — unless the workspace was already
+    initialized (metadata.json has a project_id) and its server-mode database is
+    missing, in which case bootstrap refuses rather than strand the existing data
   • If database already exists: validates and reports status
 
 If sync.remote points at a git repository, bootstrap verifies refs/dolt/data
 before cloning. Bootstrap exits non-zero when it cannot set up a database.
+
+Values starting with - in sync.remote or sync.git-remote are refused as invalid
+remote URLs: bd init returns an error naming the key; bd bootstrap restores a
+local backup or issues.jsonl when available, otherwise reports a blocked plan
+without contacting the remote.
 
 This is the recommended command for:
   • Setting up beads on a fresh clone
@@ -3501,6 +3630,54 @@ Checks:
 
 ```
 bd config validate
+```
+
+### bd connect
+
+Attach this workspace to a remote bd serve over HTTP.
+
+bd connect verifies the server first (a handshake: api_version, wire
+revision, and — when --expect-project-id is given — workspace identity) and
+writes nothing until that succeeds. On success it writes the per-user
+activation sidecar (.beads/http_target.json, never git-tracked) and sets this
+workspace's metadata.json to backend "http".
+
+A credential, if the server requires one, is never read from a flag or
+recorded on disk by this command. It comes from the same ladder every http
+request does: the BEADS_HTTP_TOKEN environment variable, then
+BEADS_HTTP_TOKEN_COMMAND (a helper that prints a token), then the credentials
+file's [host:port] section, then no credential at all — which the tip OSS
+server's loopback-trust posture answers legitimately, not as a failure. Both
+variables name the server they are for, host[:port]=value (for example
+BEADS_HTTP_TOKEN=bd.example.com=&lt;token&gt;); a bare value is refused, since it
+would be sent to whatever server the workspace's http_target.json names.
+
+--allow-plaintext IS recorded on disk, in the sidecar alongside the server
+url: once granted here, a credential may cross this one server in the clear
+on every later command too, not only this one, without re-passing the flag
+or setting BEADS_HTTP_ALLOW_INSECURE=1 yourself. A later connect to a
+DIFFERENT url starts that grant over; it is never carried forward to a
+server it was not given for.
+
+Examples:
+  bd connect http://127.0.0.1:8080                         # loopback, no TLS needed
+  bd connect https://bd.example.com --expect-project-id p1 # pin workspace identity
+  bd connect https://bd.example.com --ca-file ./ca.pem     # trust only this CA
+  bd connect --clear                                       # forget the server, restoring the previous backend
+
+
+```
+bd connect [url] [flags]
+```
+
+**Flags:**
+
+```
+      --allow-plaintext            allow a plain http connection to a non-loopback host; remembered in the sidecar for every later command against this server
+      --ca-file string             trust ONLY this PEM file for this server (resolved and recorded as an absolute path)
+      --clear                      remove this workspace's http activation sidecar and restore its previous backend selection in metadata.json
+      --expect-project-id string   pin the workspace identity the server must present at every handshake
+      --force                      allow switching a workspace that already selects a different backend
 ```
 
 ### bd context
@@ -3876,8 +4053,21 @@ lifecycle and starts it on demand, so a server started here would be a second,
 unsupervised one over the same data directory. Use 'bd dolt status' to see what
 is running and 'bd dolt stop' to shut it down.
 
+With dolt.auto-start: false the server is expected to be managed outside bd, so
+a start that would create a new, empty Dolt database (the data directory is
+missing, empty, or holds no database) is refused before anything is written:
+it would publish its port and shadow the managed server's database. Starting
+over existing data, or adopting a server bd already tracks, is unaffected. Use
+--force to create the new database anyway.
+
 ```
-bd dolt start
+bd dolt start [flags]
+```
+
+**Flags:**
+
+```
+      --force   Start even when dolt.auto-start is off and this would create a new, empty Dolt database
 ```
 
 #### bd dolt status
@@ -3888,9 +4078,11 @@ In embedded mode, reports that the Dolt engine runs in-process and shows
 the on-disk data directory. For beads-managed (local) servers, displays
 PID, port, and data directory from the local PID file. For externally-
 managed servers — a shared server (dolt.shared-server: true), a remote
-dolt_server_host, or a local server managed outside bd (dolt.auto-start:
-false, e.g. an orchestrator-shared sql-server) — pings the configured
-endpoint via SQL and reports reachability, server version, and database.
+dolt_server_host, a server at the IPv6 loopback (::1, where bd's own
+server never listens), or a local server managed outside bd
+(dolt.auto-start: false, e.g. an orchestrator-shared sql-server) — pings
+the configured endpoint via SQL and reports reachability, server version,
+and database.
 
 In proxied-server mode, reports the proxy (the endpoint every bd command
 connects through) and the dolt backend behind it separately, read from the
@@ -4225,7 +4417,7 @@ bd init [flags]
       --destroy-token string                              Explicit confirmation token for destructive re-init in non-interactive mode (format: 'DESTROY-<prefix>')
       --discard-remote                                    Authorize discarding the configured remote's Dolt history when re-initializing. Requires --destroy-token in non-interactive mode; see 'bd help init-safety'.
       --external                                          Server is externally managed (skip server startup); use with --shared-server or --server
-      --force                                             Deprecated alias for --reinit-local. Bypasses only the LOCAL data-safety guard; does NOT authorize remote divergence (see 'bd help init-safety').
+      --force                                             Deprecated alias for --reinit-local. Bypasses only the LOCAL data-safety guard; does NOT authorize remote divergence or recreating a missing server-mode database (see 'bd help init-safety').
       --from-jsonl                                        Import issues from configured import.path; refuses remote history unless --discard-remote authorizes replacement
       --init-if-missing                                   If the workspace is already initialized, skip init and exit 0 instead of failing (idempotent init for scaffolds)
       --non-interactive                                   Skip all interactive prompts (auto-detected in CI or non-TTY environments)
@@ -4248,7 +4440,8 @@ bd init [flags]
       --proxied-server-port int                           [EXPERIMENTAL] Fixed TCP port for the proxy's loopback listener (proxied-server mode only). Default 0 = an OS-assigned free port. Startup fails if the port is already in use.
       --proxied-server-root-path string                   [EXPERIMENTAL] Absolute directory holding the proxied dolt sql-server's lockfiles, pidfiles, and child .dolt repository (proxied-server mode only). Default: <beadsDir>/dolt. May not exist yet — bd will create it. Relative paths are rejected.
   -q, --quiet                                             Suppress output (quiet mode)
-      --reinit-local                                      Re-initialize local .beads/ over existing local data. Does NOT authorize remote divergence; see --discard-remote.
+      --recreate-missing                                  Explicitly authorize creating a fresh, empty database when this project's configured server-mode database is missing or unreachable. Opt-in per invocation only; never implied by --force, config, or env (see 'bd help init-safety').
+      --reinit-local                                      Re-initialize local .beads/ over existing local data. Does NOT authorize remote divergence (see --discard-remote) or recreating a missing server-mode database (see --recreate-missing).
       --remote string                                     Dolt remote URL to clone from and persist as sync.remote
       --role string                                       Set beads role without prompting: "maintainer" or "contributor"
       --server                                            Use external dolt sql-server instead of embedded engine
@@ -4261,7 +4454,7 @@ bd init [flags]
       --shared-server                                     Enable shared Dolt server mode (all projects share one server at ~/.beads/shared-server/)
       --skip-agents                                       Skip AGENTS.md and Claude/Codex/Cursor setup generation
       --skip-hooks                                        Skip git hooks installation
-      --stealth                                           Enable stealth mode: global gitattributes and gitignore, no local repo tracking
+      --stealth                                           Enable stealth mode: keep beads files out of git via .git/info/exclude (sets no-git-ops)
       --team                                              Run team workflow setup wizard
       --team-server                                       [EXPERIMENTAL] The shared database's schema is managed by beads-team-server (bts): bd never creates the database or runs schema migrations, only verifies the schema version (proxied-server mode only). Not related to --team.
 ```
@@ -4311,12 +4504,23 @@ bd kv get <key>
 
 List all key-value pairs in the beads key-value store.
 
+With --prefix, list only the keys starting with that prefix. The filter is
+pushed into SQL on stores that support it, so a scoped read of a large kv
+store does not serialize the whole table.
+
 Examples:
   bd kv list
   bd kv list --json
+  bd kv list --prefix mail.dog. --json
 
 ```
-bd kv list
+bd kv list [flags]
+```
+
+**Flags:**
+
+```
+      --prefix string   list only keys starting with this prefix (filtered in SQL where supported)
 ```
 
 #### bd kv set
@@ -4417,9 +4621,26 @@ Config options:
   Set via: bd config set agent.profile team-maintainer
   Or per-session: BD_AGENT_PROFILE=team-maintainer (env var takes precedence).
   See docs/getting-started/ide-setup.md#policy-profiles for what each profile means.
+- prime.disabled: When true, bd prime prints nothing, as it does outside a
+  workspace (an empty envelope under --hook-json), whatever its other flags.
+  For sessions whose host briefs the agent itself but that inherit a
+  project's bd prime hook, such as an orchestrator's agent sessions.
+  Set per-session: BD_PRIME_DISABLED=true. Or: bd config set prime.disabled true
 
 	Workflow customization:
-	- Place a .beads/PRIME.md file in the local clone or resolved workspace to override the default workflow text. Persistent memories (from bd remember) are still appended so memory injection keeps working under a custom template.
+	- Place a PRIME.md file to override the default workflow text. Checked in this
+	  order, once bd resolves a workspace (outside one, prime emits no content):
+	  (1) .beads/PRIME.md relative to the current directory (the -C target
+	      when -C is set);
+	  (2) PRIME.md in the .beads directory bd resolves for this workspace
+	      (honors $BEADS_DIR, which -C overrides; a redirected .beads is
+	      followed);
+	  (3) the global PRIME.md in bd's user config dir:
+	      ~/.config/beads/ on Linux ($XDG_CONFIG_HOME/beads/ if set),
+	      ~/Library/Application Support/beads/ on macOS,
+	      %AppData%\beads\ on Windows.
+	- Persistent memories (from bd remember) are still appended so memory
+	  injection keeps working under a custom template.
 	- Use --export to dump the default content for customization.
 	- Use --memories-only for hook contexts that should inject only persistent memories; this returns only the memories section even when a custom PRIME.md is present.
 	- Use --no-memories to omit the persistent memories section (useful when the memories section is large and would dominate a context budget). --memories-only takes precedence if both are set.
@@ -4485,6 +4706,14 @@ unless --key is given). As a convenience, if the arg is a bare key naming an
 existing memory, it is RECALLED instead of stored (same as 'bd recall');
 a bare key naming nothing is refused. Use --key to store slug-like content.
 
+Corpus budget (opt-in, off by default): set the memories.budget-chars config
+key to a byte ceiling for the whole memory corpus (sum of len(key)+len(content)).
+A write that would cross it is refused, and --force overrides; a write that
+lands at or above 80% of the budget warns. With the key unset nothing changes.
+bd prime's --max-memory-chars also counts bytes, but of each memory as
+injected, formatting included, so a budget equal to that cap does not
+guarantee prime injects every memory; set the budget below it for that.
+
 Examples:
   bd remember "always run tests with -race flag"
   bd remember "Dolt phantom DBs hide in three places" --key dolt-phantoms
@@ -4498,6 +4727,7 @@ bd remember "<insight>" [flags]
 **Flags:**
 
 ```
+      --force        Store even when the write would cross the memories.budget-chars corpus budget (no effect when the budget is unset)
       --key string   Explicit key for the memory (auto-generated from content if not set). If a memory with this key already exists, it will be updated in place
 ```
 
@@ -4535,7 +4765,7 @@ bd setup [recipe] [flags]
 ```
       --add string      Add a custom recipe with given name
       --check           Check if integration is installed
-      --global          Install globally (claude/codex/cursor/mux; writes to ~/.claude/settings.json, $CODEX_HOME/AGENTS.md or ~/.codex/AGENTS.md, ~/.cursor/hooks.json, or ~/.mux/AGENTS.md)
+      --global          Install globally (claude/codex/cursor/mux; writes to ~/.claude/settings.json and ~/.claude/CLAUDE.md, $CODEX_HOME/AGENTS.md or ~/.codex/AGENTS.md, ~/.cursor/hooks.json, or ~/.mux/AGENTS.md)
       --list            List all available recipes
   -o, --output string   Write template to custom path
       --print           Print the template to stdout
@@ -4719,7 +4949,8 @@ Deep Validation Mode (--deep):
   Additional checks:
   - Parent consistency: All parent-child deps point to existing issues
   - Dependency integrity: All deps reference valid issues
-  - Epic completeness: Find epics ready to close (all children closed)
+  - Epic completeness: Find epics ready to close (all children closed as
+    completed work; duplicate/wontfix/superseded closes do not count)
   - Agent bead integrity: Agent beads have valid state values
   - Mail thread integrity: Thread IDs reference existing issues
   - Molecule integrity: Molecules have valid parent-child structures
@@ -4974,9 +5205,10 @@ bd events tail [flags]
 **Flags:**
 
 ```
-      --follow      keep printing new records as they are committed (Ctrl-C to stop)
-      --limit int   maximum number of records to return (0 = no limit)
-      --since int   return records with seq greater than this value
+      --exit-on-stdin-eof   with --follow, exit when stdin closes (for parent-process lifecycle tracking)
+      --follow              keep printing new records as they are committed (Ctrl-C to stop)
+      --limit int           maximum number of records to return (0 = no limit)
+      --since int           return records with seq greater than this value
 ```
 
 ### bd flatten
@@ -5002,7 +5234,7 @@ This is irreversible — all commit history is lost. The resulting database
 has exactly one commit containing all current data.
 
 Use this when:
-  - Your .beads/dolt directory has grown very large
+  - Your active database has grown very large
   - You don't need commit-level history (time travel)
   - You want to start fresh with minimal storage
 
@@ -5099,7 +5331,6 @@ bd migrate [command]
       --dry-run          Show what would be done without making changes
       --force            Bypass the remote-migrate gate as the single designated migrator (equivalent to BD_ALLOW_REMOTE_MIGRATE=1)
       --inspect          Show migration plan and database state for AI agent analysis
-      --json             Output migration statistics in JSON format
       --update-repo-id   Update repository ID (use after changing git remote)
       --yes              Auto-confirm prompts
 ```
@@ -5213,7 +5444,6 @@ bd migrate hooks [path] [flags]
 ```
       --apply     Apply planned hook migration changes
       --dry-run   Show what would be done without making changes
-      --json      Output in JSON format
       --yes       Skip confirmation prompt for --apply
 ```
 
@@ -5280,9 +5510,15 @@ bd migrate legacy-sqlite --source-db PATH --output PATH|- [flags]
 
 Apply pending schema migrations idempotently.
 
-Schema migrations also run automatically on store open, so this subcommand
-is typically a no-op. It exists to make migration explicit and observable
-in CI, release gates, and recovery scenarios.
+bd does not apply pending schema migrations to an existing database without
+the operator's consent, and running this command is that consent
+(BD_ALLOW_MIGRATE=1 is the scripted form). On a remote-backed database the
+remote-migrate gate still applies: --force confirms you are the single
+designated migrator. Migrating is one-way: bd releases built for an older
+schema refuse the migrated database.
+
+On an up-to-date database this is a no-op, so it is safe to run in CI,
+release gates, and recovery scenarios.
 
 Example:
   bd migrate schema
@@ -5296,7 +5532,6 @@ bd migrate schema [flags]
 
 ```
       --force   Bypass the remote-migrate gate as the single designated migrator (equivalent to BD_ALLOW_REMOTE_MIGRATE=1)
-      --json    Output in JSON format
 ```
 
 #### bd migrate sync
@@ -5317,7 +5552,6 @@ bd migrate sync <branch> [flags]
 
 ```
       --dry-run   Show what would be done without making changes
-      --json      Output in JSON format
 ```
 
 ### bd ping
@@ -5327,7 +5561,8 @@ Lightweight health check that confirms bd can reach its database.
 Steps:
   1. Resolve the .beads workspace
   2. Open the store (embedded or server)
-  3. Run a trivial query (issue count)
+  3. Run a trivial query (one issue row; a remote backend reads its
+     authenticated server context instead)
   4. Report timing
 
 Exit 0 on success, exit 1 on failure.
@@ -5367,8 +5602,7 @@ bd preflight [flags]
 
 ```
       --check       Run checks automatically
-      --fix         Auto-fix issues where possible (vendorHash, version sync)
-      --json        Output results as JSON
+      --fix         Auto-fix issues where possible (vendorHash)
       --skip-lint   Skip lint check explicitly
 ```
 
@@ -5491,6 +5725,11 @@ This command runs the full recompute unconditionally and commits the result.
 It is idempotent: on a consistent database it changes nothing. Works in every
 storage mode — embedded, server, and proxied-server (unlike 'bd doctor', which
 is server-mode only).
+
+On a workspace connected to a bd serve backend ('bd connect') it is a no-op
+that exits 0: the server maintains is_blocked on every write, and the column
+lives in the server's database, so the repair is run there, by the server's
+operator. --json then reports &#123;"rows_corrected": 0, "maintained_by": "server"&#125;.
 
 Examples:
   bd recompute-blocked          # Repair stale is_blocked flags
@@ -5880,7 +6119,7 @@ Dolt Garbage Collection:
   With auto-commit per mutation, Dolt commit history grows over time. Use
   --dolt to run Dolt garbage collection and reclaim disk space.
 
-  --dolt: Run Dolt GC on .beads/dolt directory to free disk space.
+  --dolt: Run Dolt GC on the active database to free disk space.
           This removes unreachable commits and compacts storage.
 
 Examples:
@@ -5916,11 +6155,10 @@ bd admin compact [flags]
       --apply            Apply mode: accept agent-provided summary
       --auto             Auto mode: AI-powered compaction
       --batch-size int   Issues per batch (default 10)
-      --dolt             Dolt mode: run Dolt garbage collection on .beads/dolt
+      --dolt             Dolt mode: run Dolt garbage collection on the active database
       --dry-run          Preview without compacting
       --force            Force compact (bypass checks, requires --id)
       --id string        Compact specific issue
-      --json             Output JSON format
       --limit int        Limit number of candidates (0 = no limit)
       --stats            Show compaction statistics
       --summary string   Path to summary file (use '-' for stdin)
@@ -6322,13 +6560,7 @@ This modifies .beads/config.yaml, which is version-controlled and
 shared across all clones of this repository.
 
 ```
-bd repo add <path> [flags]
-```
-
-**Flags:**
-
-```
-      --json   Output JSON
+bd repo add <path>
 ```
 
 #### bd repo list
@@ -6339,13 +6571,7 @@ Shows the primary repository (always ".") and any additional
 repositories configured for hydration.
 
 ```
-bd repo list [flags]
-```
-
-**Flags:**
-
-```
-      --json   Output JSON
+bd repo list
 ```
 
 #### bd repo remove
@@ -6359,13 +6585,7 @@ This command also removes any previously-hydrated issues from the database
 that came from the removed repository.
 
 ```
-bd repo remove <path> [flags]
-```
-
-**Flags:**
-
-```
-      --json   Output JSON
+bd repo remove <path>
 ```
 
 #### bd repo sync
@@ -6385,7 +6605,6 @@ bd repo sync [flags]
 **Flags:**
 
 ```
-      --json      Output JSON
       --verbose   Show detailed sync progress
 ```
 
@@ -6568,9 +6787,11 @@ bd blocked [flags]
 
 ```
       --exclude-label strings   Exclude issues that have ANY of these labels
+      --flags                   Print the blocked flag for each id read from stdin (one per line) instead of the listing; with --json, [{"id","is_blocked"}]
   -l, --label strings           Filter by labels (AND: must have ALL). Can combine with --label-any
       --label-any strings       Filter by labels (OR: must have AT LEAST ONE). Can combine with --label
       --parent string           Filter to descendants of this bead/epic
+      --raw                     With --flags: the stored blocked column itself, without the external-dependency policy (an unsatisfied external: blocker does not set it)
 ```
 
 ### bd completion
@@ -7164,15 +7385,34 @@ FLAG SURFACE
                                 local data. Does NOT authorize discarding
                                 remote history. If origin has Dolt data
                                 this will refuse — pair with
-                                --discard-remote to override.
+                                --discard-remote to override. Nor does it
+                                authorize recreating a missing server-mode
+                                database; that takes --recreate-missing.
 
   bd init --reinit-local \      Discard the remote's Dolt history and
       --discard-remote          replace it with the local reinit. First
                                 bd dolt push after this will be a
                                 history-replacing force-push.
 
-  bd init --force               Deprecated alias for --reinit-local.
-                                Kept working for ≥2 releases.
+  bd init --force               Deprecated alias for --reinit-local, with
+                                the same limits. Kept working for ≥2
+                                releases.
+
+  bd init --recreate-missing    Authorize creating a fresh, empty database
+                                when this project's configured server-mode
+                                database is missing or unreachable. Opt-in
+                                per invocation only: never implied by
+                                --force/--reinit-local, config, or env.
+                                Without it, bd init REFUSES rather than
+                                silently recreating a lost database as
+                                empty (be-5up5). First rule out a stopped
+                                server or a wrong port or data dir, and
+                                restore if you can; the playbook is
+                                init-missing-server-db in
+                                docs/recovery/init-safety.md. Only when
+                                nothing is recoverable:
+
+                                  bd init --recreate-missing --prefix &lt;prefix&gt;
 
   bd init --from-jsonl          Import from configured import.path. If
                                 origin has Dolt data, this refuses unless
@@ -7215,11 +7455,29 @@ EXIT CODES
         over existing issues) without a valid --destroy-token
         (non-interactive mode); also returned when the interactive
         --discard-remote typed-token confirmation is declined
+  15    refused: run directly in your home directory, which is not itself
+        a git repository, with no BEADS_DIR named by the caller
 
 RECOVERY
 
   If you hit a refusal, see docs/recovery/init-safety.md for step-by-step recovery
   playbooks for each exit code.
+
+RE-CLONE GOTCHAS
+
+  Setting a damaged or superseded database directory aside by hand, or
+  relying on a fresh clone right away? Two gotchas from live recovery:
+
+  Crash-loop: a set-aside store left INSIDE data_dir makes the sql-server
+  treat it as a database and crash-loop with "root hash doesn't exist:
+  &lt;hash&gt;". Move it OUTSIDE data_dir instead.
+
+  Missing tables: a fresh clone lacks clone-local tables (leases, wisps,
+  events, ...) until you run "bd migrate schema" (no --force). You'll see
+  "table not found: leases" until then; "Schema already at v&lt;N&gt;" after
+  running it is expected, not an error.
+
+  See docs/recovery/init-safety.md#re-clone-gotchas for full detail.
 
 
 ```
@@ -7349,6 +7607,15 @@ Bond types:
   sequential (default) - B runs after A completes
   parallel            - B runs alongside A
   conditional         - B runs only if A fails
+
+  With --ref, the spawned proto arm is nested inside the molecule operand
+  rather than ordered against it - whichever side of the bond that is - so a
+  sequential --ref arm carries no ordering: it is ready as soon as it is
+  spawned. Ordering a nested arm against its own container is unsatisfiable
+  in both directions (the arm waits for the molecule to close; the molecule
+  cannot close while it holds an open arm). --ref is refused with --type
+  conditional, which has no safe degradation - omit --ref to bond a
+  conditional arm as a sibling.
 
 Phase control:
   By default, spawned protos follow the target's phase:
@@ -7565,7 +7832,7 @@ bd mol pour <proto-id> [flags]
       --attach strings       Proto to attach after spawning (repeatable)
       --attach-type string   Bond type for attachments: sequential, parallel, or conditional (default "sequential")
       --dry-run              Preview what would be created
-      --var stringArray      Variable substitution (key=value)
+      --var stringArray      Variable substitution (key=value); a name the proto cannot consume is an error
 ```
 
 #### bd mol progress
@@ -7649,6 +7916,10 @@ bd mol seed <formula-name> [flags]
 
 Show molecule structure and details.
 
+A molecule's steps are the issues linked to its root by parent-child
+dependencies (bd create --parent, bd mol pour); an id that merely looks
+hierarchical, like bd-xyz.4, does not make an issue a step.
+
 The --parallel flag highlights parallelizable steps:
   - Steps with no blocking dependencies can run in parallel
   - Shows which steps are ready to start now
@@ -7712,15 +7983,17 @@ bd mol squash <molecule-id> [flags]
 
 #### bd mol stale
 
-Detect molecules (epics with children) that are complete but still open.
+Detect molecules (epics with children) whose children are all closed
+with completing reasons, but the root is still open.
 
 A molecule is considered stale if:
-  1. All children are closed (Completed == Total)
+  1. Every child is closed with a completing reason (not duplicate/wontfix/superseded)
   2. Root issue is still open
   3. Not assigned to anyone (optional, use --unassigned)
   4. Is blocking other work (optional, use --blocking)
 
-By default, shows all complete-but-unclosed molecules.
+Review whether epic scope is actually finished before closing — child
+closure alone does not prove the epic's stated work is done (GH#5026).
 
 Examples:
   bd mol stale              # List all stale molecules
@@ -7792,7 +8065,7 @@ bd mol wisp [command]
 ```
       --dry-run           Preview what would be created
       --root-only         Create only the root issue (no child step issues)
-      --var stringArray   Variable substitution (key=value)
+      --var stringArray   Variable substitution (key=value); a name the proto cannot consume is an error
 ```
 
 ##### bd mol wisp create
@@ -7829,7 +8102,7 @@ bd mol wisp create <proto-id> [flags]
 ```
       --dry-run           Preview what would be created
       --root-only         Create only the root issue (no child step issues)
-      --var stringArray   Variable substitution (key=value)
+      --var stringArray   Variable substitution (key=value); a name the proto cannot consume is an error
 ```
 
 ##### bd mol wisp gc
@@ -7845,6 +8118,12 @@ A wisp is considered abandoned if:
     configured category, so only plain open (active) and closed (done) steps
     are age-reclaimable. If the blocked set or the custom-status list cannot be
     read, the GC aborts rather than risk reclaiming live steps.
+
+Wisps that depend on an abandoned wisp are deleted with it, closed ones
+included even without --all, but only if they too haven't been updated in
+--age duration and are not live work. A dependent that is too young is
+spared and loses its edge to the deleted wisp: an open one is collected once
+it ages out, a closed one only by --all, --closed or 'bd purge'.
 
 Abandoned wisps are deleted without creating a digest. Use 'bd mol squash'
 if you want to preserve a summary before garbage collection.
@@ -8079,6 +8358,7 @@ bd ready [flags]
       --exclude-label strings        Exclude issues that have ANY of these labels
       --exclude-type strings         Exclude issue types from results (comma-separated or repeatable, e.g., --exclude-type=convoy,epic)
       --explain                      Show dependency-aware reasoning for why issues are ready or blocked
+      --flat                         Alias for --plain, spelled the way bd list spells it
       --gated                        Find molecules ready for gate-resume dispatch
       --has-metadata-key string      Filter issues that have this metadata key set
       --include-deferred             Include issues with future defer_until timestamps
@@ -8238,11 +8518,12 @@ bd serve [flags]
 **Flags:**
 
 ```
-      --addr string                Address to bind as IP:PORT; the host must be a numeric IP literal, and port 0 takes an ephemeral port (default "127.0.0.1:0")
-      --allow-non-loopback         Permit a bind beyond loopback. Requires --auth-token-file, since reaching the address would otherwise be the whole authorization
-      --allowed-host stringArray   Additional Host header value to answer to, e.g. a service DNS name. Repeatable; matched exactly, with no wildcards
-      --auth-token-file string     Require an Authorization: Bearer token from this file, one token per line, all accepted. Re-read while running, so rewriting it rotates tokens without a restart (env BEADS_SERVE_TOKEN_FILE)
-      --insecure-no-auth           Serve a non-loopback bind with NO authentication. Every peer that can reach the address gets full read and claim access
+      --addr string                    Address to bind as IP:PORT; the host must be a numeric IP literal, and port 0 takes an ephemeral port (default "127.0.0.1:0")
+      --allow-non-loopback             Permit a bind beyond loopback. Requires --auth-token-file, since reaching the address would otherwise be the whole authorization
+      --allowed-host stringArray       Additional Host header value to answer to, e.g. a service DNS name. Repeatable; matched exactly, with no wildcards
+      --auth-token-file string         Require an Authorization: Bearer token from this file, one token per line, all accepted. Re-read while running, so rewriting it rotates tokens without a restart (env BEADS_SERVE_TOKEN_FILE)
+      --insecure-no-auth               Serve a non-loopback bind with NO authentication. Every peer that can reach the address gets full read and claim access
+      --large-apply-ceiling duration   Whole-run budget for a POST issues:batchApply request over 100 items (a ceiling, not a target; requests at or under 100 items are unaffected). Must be positive. The orchestrator's stop grace must be at least this long plus 5s, or an external SIGKILL can cut off an in-flight large apply a graceful drain would otherwise have waited out; see engdocs/SERVE_RUNBOOK.md (default 5m0s)
 ```
 
 ### bd ship
@@ -8282,6 +8563,10 @@ Undefer issues to restore them to open status.
 
 This brings issues back from the icebox so they can be worked on again.
 Issues will appear in 'bd ready' if they have no blockers.
+
+If an issue carries a defer_until timestamp but its status isn't
+"deferred" (e.g. after an explicit --status change), undefer clears
+the stray timestamp without touching status.
 
 Examples:
   bd undefer bd-abc        # Undefer a single issue

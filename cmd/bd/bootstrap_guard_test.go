@@ -866,3 +866,27 @@ func TestDetectBootstrapAction_OptionSyncRemoteBlocksWithoutProbe(t *testing.T) 
 		t.Errorf("Reason=%q SyncRemote=%q, want the key named and no remote wired", plan.Reason, plan.SyncRemote)
 	}
 }
+
+func TestDetectBootstrapAction_OptionSyncRemoteStillRestoresBackup(t *testing.T) {
+	beadsDir := newForgeSyncRemoteWorkspace(t, "--upload-pack=touch /tmp/pwned;false #.git")
+	backupDir := filepath.Join(beadsDir, "backup")
+	if err := os.MkdirAll(backupDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(backupDir, "issues.jsonl"), []byte(`{"id":"bd-1"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stubProbeGitRemoteDoltData(t, func(url string) (bool, error) {
+		t.Errorf("probe ran for %q; an option-shaped sync.remote must be refused first", url)
+		return false, nil
+	})
+
+	plan := detectBootstrapAction(beadsDir, configfile.DefaultConfig())
+
+	if plan.Action != "restore" {
+		t.Fatalf("action=%q reason=%q, want %q", plan.Action, plan.Reason, "restore")
+	}
+	if plan.SyncRemote != "" {
+		t.Errorf("SyncRemote=%q, want empty: a rejected remote must not be wired", plan.SyncRemote)
+	}
+}

@@ -12,7 +12,8 @@ Lightweight health check that confirms bd can reach its database.
 Steps:
   1. Resolve the .beads workspace
   2. Open the store (embedded or server)
-  3. Run a trivial query (issue count)
+  3. Run a trivial query (one issue row; a remote backend reads its
+     authenticated server context instead)
   4. Report timing
 
 Exit 0 on success, exit 1 on failure.

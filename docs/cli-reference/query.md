@@ -50,7 +50,9 @@ Supported fields:
   mol_type          Molecule type (swarm, patrol, work)
 
 Date values:
-  Relative durations: 7d (7 days ago), 24h (24 hours ago), 2w (2 weeks ago)
+  Relative durations: 30min (30 minutes ago), 24h (24 hours ago),
+                      7d (7 days ago), 2w (2 weeks ago),
+                      6m (6 months ago), 1y (1 year ago)
   Absolute dates: 2025-01-15, 2025-01-15T10:00:00Z
   Natural language: tomorrow, "next monday", "in 3 days"
 
@@ -77,6 +79,6 @@ bd query [expression] [flags]
       --long          Show detailed multi-line output for each issue
       --offset int    Skip the first N matching results (0-based). Only supported under --proxied-server.
       --parse-only    Only parse the query and show the AST (for debugging)
-  -r, --reverse       Reverse sort order
+  -r, --reverse       Invert the sort field's default direction (created/updated/closed default to newest-first, so --sort updated --reverse is oldest-first)
       --sort string   Sort by field: priority, created, updated, closed, status, id, title, type, assignee
 ```

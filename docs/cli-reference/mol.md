@@ -58,6 +58,15 @@ Bond types:
   parallel            - B runs alongside A
   conditional         - B runs only if A fails
 
+  With --ref, the spawned proto arm is nested inside the molecule operand
+  rather than ordered against it - whichever side of the bond that is - so a
+  sequential --ref arm carries no ordering: it is ready as soon as it is
+  spawned. Ordering a nested arm against its own container is unsatisfiable
+  in both directions (the arm waits for the molecule to close; the molecule
+  cannot close while it holds an open arm). --ref is refused with --type
+  conditional, which has no safe degradation - omit --ref to bond a
+  conditional arm as a sibling.
+
 Phase control:
   By default, spawned protos follow the target's phase:
   - Attaching to mol (Ephemeral=false) → spawns as persistent (Ephemeral=false)
@@ -273,7 +282,7 @@ bd mol pour <proto-id> [flags]
       --attach strings       Proto to attach after spawning (repeatable)
       --attach-type string   Bond type for attachments: sequential, parallel, or conditional (default "sequential")
       --dry-run              Preview what would be created
-      --var stringArray      Variable substitution (key=value)
+      --var stringArray      Variable substitution (key=value); a name the proto cannot consume is an error
 ```
 
 ## bd mol progress
@@ -357,6 +366,10 @@ bd mol seed <formula-name> [flags]
 
 Show molecule structure and details.
 
+A molecule's steps are the issues linked to its root by parent-child
+dependencies (bd create --parent, bd mol pour); an id that merely looks
+hierarchical, like bd-xyz.4, does not make an issue a step.
+
 The --parallel flag highlights parallelizable steps:
   - Steps with no blocking dependencies can run in parallel
   - Shows which steps are ready to start now
@@ -420,15 +433,17 @@ bd mol squash <molecule-id> [flags]
 
 ## bd mol stale
 
-Detect molecules (epics with children) that are complete but still open.
+Detect molecules (epics with children) whose children are all closed
+with completing reasons, but the root is still open.
 
 A molecule is considered stale if:
-  1. All children are closed (Completed == Total)
+  1. Every child is closed with a completing reason (not duplicate/wontfix/superseded)
   2. Root issue is still open
   3. Not assigned to anyone (optional, use --unassigned)
   4. Is blocking other work (optional, use --blocking)
 
-By default, shows all complete-but-unclosed molecules.
+Review whether epic scope is actually finished before closing — child
+closure alone does not prove the epic's stated work is done (GH#5026).
 
 Examples:
   bd mol stale              # List all stale molecules
@@ -500,7 +515,7 @@ bd mol wisp [command]
 ```
       --dry-run           Preview what would be created
       --root-only         Create only the root issue (no child step issues)
-      --var stringArray   Variable substitution (key=value)
+      --var stringArray   Variable substitution (key=value); a name the proto cannot consume is an error
 ```
 
 ### bd mol wisp create
@@ -537,7 +552,7 @@ bd mol wisp create <proto-id> [flags]
 ```
       --dry-run           Preview what would be created
       --root-only         Create only the root issue (no child step issues)
-      --var stringArray   Variable substitution (key=value)
+      --var stringArray   Variable substitution (key=value); a name the proto cannot consume is an error
 ```
 
 ### bd mol wisp gc
@@ -553,6 +568,12 @@ A wisp is considered abandoned if:
     configured category, so only plain open (active) and closed (done) steps
     are age-reclaimable. If the blocked set or the custom-status list cannot be
     read, the GC aborts rather than risk reclaiming live steps.
+
+Wisps that depend on an abandoned wisp are deleted with it, closed ones
+included even without --all, but only if they too haven't been updated in
+--age duration and are not live work. A dependent that is too young is
+spared and loses its edge to the deleted wisp: an open one is collected once
+it ages out, a closed one only by --all, --closed or 'bd purge'.
 
 Abandoned wisps are deleted without creating a digest. Use 'bd mol squash'
 if you want to preserve a summary before garbage collection.

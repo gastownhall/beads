@@ -17,10 +17,13 @@ it up. Heartbeat pushes lease_expires_at forward and stamps heartbeat_at = now.
 Only the current owner may heartbeat. If the lease has already been reclaimed or
 the issue closed, heartbeat fails so the worker learns to stop.
 
-Leases live in an ephemeral, node-local table: heartbeats write no Dolt commit
-and no history, so any cadence comfortably below the TTL is fine. Leases are
-only enforceable on the node that granted them; cross-machine claim visibility
-rides the issue's status and assignee, which do commit.
+Leases live in an ephemeral, node-local table: a heartbeat that refreshes your
+lease writes no Dolt commit and no history, so any cadence comfortably below
+the TTL is fine. Only a re-arm (the first heartbeat of a claim that has no
+lease, such as one set by a plain update) is recorded as a change to the issue
+and committed, once. Leases are only enforceable on the node that granted them;
+cross-machine claim visibility rides the issue's status and assignee, which do
+commit.
 
 Examples:
   bd heartbeat bd-123

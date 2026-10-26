@@ -43,11 +43,11 @@ bd create [title] [flags]
       --graph string              Create a graph of issues with dependencies from JSON plan file
       --id string                 Explicit issue ID (e.g., 'bd-42' for partitioning)
   -l, --labels strings            Labels (comma-separated)
-      --metadata string           Set custom metadata (JSON string or @file.json to read from file)
+      --metadata string           Set custom metadata (JSON object, or @file.json to read from file)
       --mol-type string           Molecule type: swarm (multi-agent), patrol (recurring ops), work (default)
       --no-history                Skip Dolt commit history without making GC-eligible (for permanent agent beads)
       --no-inherit-labels         Don't inherit labels from parent issue
-      --notes string              Additional notes
+      --notes string              Notes
       --parent string             Parent issue ID for hierarchical child (e.g., 'bd-a3f8e9')
   -p, --priority string           Priority (0-4 or P0-P4, 0=highest) (default "2")
       --repo string               Target repository for issue (overrides auto-routing)

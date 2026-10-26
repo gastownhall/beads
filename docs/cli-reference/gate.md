@@ -58,7 +58,7 @@ Gate types:
   gh:run   - Check GitHub Actions workflow runs
   gh:pr    - Check pull request merge status
   timer    - Check timer gates (auto-expire based on timeout)
-  bead     - Check cross-rig bead gates
+  bead     - Check bead gates
   all      - Check all gate types
 
 GitHub gates use the 'gh' CLI to query status:
@@ -69,7 +69,8 @@ A gate is resolved when:
   - gh:run: status=completed AND conclusion=success
   - gh:pr: state=MERGED
   - timer: current time &gt; created_at + timeout
-  - bead: target bead status=closed
+  - bead: target bead status=closed, or a bead an earlier check saw in
+    this rig no longer exists
 
 A gate is escalated when:
   - gh:run: status=completed AND conclusion in (failure, canceled)
@@ -80,7 +81,7 @@ Examples:
   bd gate check --type=gh    # Check only GitHub gates
   bd gate check --type=gh:run # Check only workflow run gates
   bd gate check --type=timer # Check only timer gates
-  bd gate check --type=bead  # Check only cross-rig bead gates
+  bd gate check --type=bead  # Check only bead gates
   bd gate check --dry-run    # Show what would happen without changes
   bd gate check --escalate   # Escalate expired/failed gates
 
@@ -110,11 +111,15 @@ Gate types:
   gh:run  - Waits for GitHub Actions workflow
   gh:pr   - Waits for PR merge
 
+gh:run and gh:pr gates are checked in the current Git repository unless
+--repo names another, or the blocked issue carries a metadata.repo value.
+
 Examples:
   bd gate create --blocks bd-abc
   bd gate create --type=human --blocks bd-abc --reason="Need design review"
   bd gate create --type=timer --blocks bd-abc --timeout=2h
   bd gate create --type=gh:pr --blocks bd-abc --await-id=42
+  bd gate create --type=gh:pr --blocks bd-abc --await-id=42 --repo=owner/other-repo
   bd gate create --blocks bd-abc --title="Gate: awaiting owner sign-off"
 
 ```
@@ -127,6 +132,7 @@ bd gate create [flags]
       --await-id string   Condition identifier (run ID, PR number, etc.)
       --blocks string     Issue ID to block (required)
   -r, --reason string     Reason for the gate
+      --repo string       GitHub repository the gh:run/gh:pr condition is checked in (OWNER/REPO or HOST/OWNER/REPO); default: the blocked issue's metadata.repo, else the current repository
       --timeout string    Timeout duration (e.g., 2h, 30m)
       --title string      Custom gate title (default: "Gate: <type>")
   -t, --type string       Gate type (human, timer, gh:run, gh:pr) (default "human")

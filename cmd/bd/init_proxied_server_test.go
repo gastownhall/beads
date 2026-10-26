@@ -150,6 +150,23 @@ func TestProxiedInitRemoteURLUsesSelectedProject(t *testing.T) {
 	}
 }
 
+func TestRunInitProxiedServerRejectsOptionSyncRemoteBeforeWrites(t *testing.T) {
+	beadsDir := newForgeSyncRemoteWorkspace(t, "--upload-pack=touch /tmp/pwned;false #.git")
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
+
+	err = runInitProxiedServer(&cobra.Command{}, t.Context(), initProxiedServerInput{
+		externalConfig: &configfile.ExternalDoltConfig{Host: "127.0.0.1", Port: 3306},
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "sync.remote")
+
+	_, err = os.Stat(filepath.Join(cwd, ".git"))
+	require.ErrorIs(t, err, os.ErrNotExist, "rejected sync.remote must not initialize a git repository")
+	_, err = os.Stat(filepath.Join(beadsDir, "metadata.json"))
+	require.ErrorIs(t, err, os.ErrNotExist, "rejected sync.remote must not write .beads metadata")
+}
+
 func TestBuildProxiedServerClientInfo(t *testing.T) {
 	t.Run("all empty returns nil", func(t *testing.T) {
 		info, err := buildProxiedServerClientInfo("", "", "", 0, 0, nil)

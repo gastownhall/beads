@@ -22,6 +22,11 @@ It is idempotent: on a consistent database it changes nothing. Works in every
 storage mode — embedded, server, and proxied-server (unlike 'bd doctor', which
 is server-mode only).
 
+On a workspace connected to a bd serve backend ('bd connect') it is a no-op
+that exits 0: the server maintains is_blocked on every write, and the column
+lives in the server's database, so the repair is run there, by the server's
+operator. --json then reports &#123;"rows_corrected": 0, "maintained_by": "server"&#125;.
+
 Examples:
   bd recompute-blocked          # Repair stale is_blocked flags
   bd recompute-blocked --json   # Machine-parseable &#123;"rows_corrected": N&#125;

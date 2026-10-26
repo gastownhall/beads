@@ -32,7 +32,6 @@ bd preflight [flags]
 
 ```
       --check       Run checks automatically
-      --fix         Auto-fix issues where possible (vendorHash, version sync)
-      --json        Output results as JSON
+      --fix         Auto-fix issues where possible (vendorHash)
       --skip-lint   Skip lint check explicitly
 ```

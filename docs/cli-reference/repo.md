@@ -45,12 +45,6 @@ shared across all clones of this repository.
 bd repo add <path> [flags]
 ```
 
-**Flags:**
-
-```
-      --json   Output JSON
-```
-
 ## bd repo list
 
 List all repositories configured in .beads/config.yaml.
@@ -60,12 +54,6 @@ repositories configured for hydration.
 
 ```
 bd repo list [flags]
-```
-
-**Flags:**
-
-```
-      --json   Output JSON
 ```
 
 ## bd repo remove
@@ -80,12 +68,6 @@ that came from the removed repository.
 
 ```
 bd repo remove <path> [flags]
-```
-
-**Flags:**
-
-```
-      --json   Output JSON
 ```
 
 ## bd repo sync
@@ -105,6 +87,5 @@ bd repo sync [flags]
 **Flags:**
 
 ```
-      --json      Output JSON
       --verbose   Show detailed sync progress
 ```

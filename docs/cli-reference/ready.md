@@ -38,6 +38,7 @@ bd ready [flags]
       --exclude-label strings        Exclude issues that have ANY of these labels
       --exclude-type strings         Exclude issue types from results (comma-separated or repeatable, e.g., --exclude-type=convoy,epic)
       --explain                      Show dependency-aware reasoning for why issues are ready or blocked
+      --flat                         Alias for --plain, spelled the way bd list spells it
       --gated                        Find molecules ready for gate-resume dispatch
       --has-metadata-key string      Filter issues that have this metadata key set
       --include-deferred             Include issues with future defer_until timestamps

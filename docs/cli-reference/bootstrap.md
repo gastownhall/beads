@@ -15,11 +15,18 @@ Bootstrap auto-detects the right action:
   • If git origin has Dolt data (refs/dolt/data): clones from git and wires origin for future push/pull
   • If .beads/backup/*.jsonl exists: restores from backup
   • If .beads/issues.jsonl exists: imports from git-tracked JSONL
-  • If no database exists: creates a fresh one
+  • If no database exists: creates a fresh one — unless the workspace was already
+    initialized (metadata.json has a project_id) and its server-mode database is
+    missing, in which case bootstrap refuses rather than strand the existing data
   • If database already exists: validates and reports status
 
 If sync.remote points at a git repository, bootstrap verifies refs/dolt/data
 before cloning. Bootstrap exits non-zero when it cannot set up a database.
+
+Values starting with - in sync.remote or sync.git-remote are refused as invalid
+remote URLs: bd init returns an error naming the key; bd bootstrap restores a
+local backup or issues.jsonl when available, otherwise reports a blocked plan
+without contacting the remote.
 
 This is the recommended command for:
   • Setting up beads on a fresh clone

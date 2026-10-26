@@ -89,6 +89,12 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 		fmt.Fprintf(os.Stderr, "Warning: failed to initialize config: %v\n", err)
 	}
 
+	if !in.initRemoteChanged {
+		if _, err := resolveSyncRemoteChecked(); err != nil {
+			return err
+		}
+	}
+
 	if err := checkExistingBeadsData(in.prefix); err != nil {
 		return err
 	}
@@ -195,11 +201,6 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 	}
 	defer func() { _ = initUOWProvider.Close(ctx) }()
 
-	if !in.initRemoteChanged {
-		if _, err := resolveSyncRemoteChecked(); err != nil {
-			return err
-		}
-	}
 	remoteURL := resolveProxiedInitRemoteURL(ctx, cwd, in)
 
 	// Unlike the origin lookup above, ComputeRepoID and GetCloneID still inherit

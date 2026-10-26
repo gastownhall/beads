@@ -105,9 +105,10 @@ bd serve [flags]
 **Flags:**
 
 ```
-      --addr string                Address to bind as IP:PORT; the host must be a numeric IP literal, and port 0 takes an ephemeral port (default "127.0.0.1:0")
-      --allow-non-loopback         Permit a bind beyond loopback. Requires --auth-token-file, since reaching the address would otherwise be the whole authorization
-      --allowed-host stringArray   Additional Host header value to answer to, e.g. a service DNS name. Repeatable; matched exactly, with no wildcards
-      --auth-token-file string     Require an Authorization: Bearer token from this file, one token per line, all accepted. Re-read while running, so rewriting it rotates tokens without a restart (env BEADS_SERVE_TOKEN_FILE)
-      --insecure-no-auth           Serve a non-loopback bind with NO authentication. Every peer that can reach the address gets full read and claim access
+      --addr string                    Address to bind as IP:PORT; the host must be a numeric IP literal, and port 0 takes an ephemeral port (default "127.0.0.1:0")
+      --allow-non-loopback             Permit a bind beyond loopback. Requires --auth-token-file, since reaching the address would otherwise be the whole authorization
+      --allowed-host stringArray       Additional Host header value to answer to, e.g. a service DNS name. Repeatable; matched exactly, with no wildcards
+      --auth-token-file string         Require an Authorization: Bearer token from this file, one token per line, all accepted. Re-read while running, so rewriting it rotates tokens without a restart (env BEADS_SERVE_TOKEN_FILE)
+      --insecure-no-auth               Serve a non-loopback bind with NO authentication. Every peer that can reach the address gets full read and claim access
+      --large-apply-ceiling duration   Whole-run budget for a POST issues:batchApply request over 100 items (a ceiling, not a target; requests at or under 100 items are unaffected). Must be positive. The orchestrator's stop grace must be at least this long plus 5s, or an external SIGKILL can cut off an in-flight large apply a graceful drain would otherwise have waited out; see engdocs/SERVE_RUNBOOK.md (default 5m0s)
 ```

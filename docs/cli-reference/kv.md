@@ -50,12 +50,23 @@ bd kv get <key> [flags]
 
 List all key-value pairs in the beads key-value store.
 
+With --prefix, list only the keys starting with that prefix. The filter is
+pushed into SQL on stores that support it, so a scoped read of a large kv
+store does not serialize the whole table.
+
 Examples:
   bd kv list
   bd kv list --json
+  bd kv list --prefix mail.dog. --json
 
 ```
 bd kv list [flags]
+```
+
+**Flags:**
+
+```
+      --prefix string   list only keys starting with this prefix (filtered in SQL where supported)
 ```
 
 ## bd kv set
