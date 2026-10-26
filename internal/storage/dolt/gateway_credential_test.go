@@ -131,7 +131,7 @@ func TestCheckServerEndpointTrust(t *testing.T) {
 	}{
 		{"127.0.0.1", ""},
 		{"::1", ""},
-		{"remote-c.example", "/tmp/dolt.sock"},
+		{"localhost", "/tmp/dolt.sock"},
 	} {
 		if err := CheckServerEndpointTrust(beadsDir, &configfile.Config{DoltServerHost: endpoint.host}, endpoint.host, 3307, endpoint.socket); err != nil {
 			t.Errorf("local/socket endpoint %q %q: %v", endpoint.host, endpoint.socket, err)
