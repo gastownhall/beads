@@ -4122,3 +4122,38 @@ func TestIsRunningDoesNotStopUnverifiedProcessWithoutPort(t *testing.T) {
 		t.Errorf("expected the PID file to be kept: %v", err)
 	}
 }
+
+// TestEnsureRunningDetailedAdoptsUnverifiedServer pins the store-open
+// contract of an unreadable process list (GH#7214): a recorded port must be
+// adopted, not auto-started over. Auto-start is disabled so a wrong
+// Running:false cannot hide behind a fresh start.
+func TestEnsureRunningDetailedAdoptsUnverifiedServer(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("GT_ROOT", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	t.Setenv("BEADS_DOLT_AUTO_START", "0")
+
+	pid := os.Getpid()
+	if err := os.WriteFile(pidPath(dir), []byte(strconv.Itoa(pid)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writePortFile(dir, 14567); err != nil {
+		t.Fatal(err)
+	}
+	orig := readDoltProcesses
+	readDoltProcesses = func() ([]int, error) { return nil, errors.New("listing processes: operation not permitted") }
+	t.Cleanup(func() { readDoltProcesses = orig })
+
+	port, startedByUs, err := EnsureRunningDetailed(dir)
+	if err != nil {
+		t.Fatalf("EnsureRunningDetailed error: %v", err)
+	}
+	if port != 14567 || startedByUs {
+		t.Errorf("expected to adopt port 14567 without starting a server, got (port=%d, startedByUs=%v)", port, startedByUs)
+	}
+	for _, path := range []string{pidPath(dir), portPath(dir)} {
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("expected %s to be kept: %v", filepath.Base(path), err)
+		}
+	}
+}
