@@ -32,9 +32,12 @@ func TestShouldFlagTrackedFile_RuntimeArtifacts(t *testing.T) {
 		{"sync-state.json", true},
 		{"daemon.pid", true},
 		{"bd.lock", true},
+		{"dolt-server-config.yaml", true}, // GH#6191: absolute cfg_dir + per-machine port
+		{"dolt-server.activity", true},    // GH#6191
 		{"dolt/noms/manifest", true},
 		{"issues.jsonl", false},
 		{"config.json", false},
+		{"config.yaml", false},   // user config, tracked on purpose
 		{"sub/last_pull", false}, // patterns apply to top-level .beads/ files only
 	}
 	for _, tc := range cases {
@@ -121,5 +124,17 @@ func TestFixTrackedRuntimeFiles_WorktreeFallbackUsesSharedBeads(t *testing.T) {
 
 	if _, err := os.Stat(lastTouched); err != nil {
 		t.Fatalf("expected runtime file to remain on disk after git rm --cached: %v", err)
+	}
+}
+
+// TestShouldFlagTrackedFile_DoltServerConfigAndActivity pins issue #6191:
+// dolt-server-config.yaml (absolute cfg_dir, per-machine port) and
+// dolt-server.activity are per-clone runtime files, so an already-committed
+// copy must be flagged for untracking by bd doctor --fix.
+func TestShouldFlagTrackedFile_DoltServerConfigAndActivity(t *testing.T) {
+	for _, rel := range []string{"dolt-server-config.yaml", "dolt-server.activity"} {
+		if !shouldFlagTrackedFile(rel) {
+			t.Errorf("shouldFlagTrackedFile(%q) = false, want true", rel)
+		}
 	}
 }
