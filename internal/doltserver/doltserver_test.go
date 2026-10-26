@@ -3985,3 +3985,78 @@ func TestReachabilityCheckRefusesAnOptionHost(t *testing.T) {
 		t.Errorf("ReachabilityCheck = %q, want a <host> placeholder with the host named beside it", got)
 	}
 }
+
+// GH#7214: when the process-listing command cannot run (macOS Seatbelt
+// refuses the setuid /bin/ps; an empty PATH fails ps and powershell.exe
+// alike), "could not list dolt processes" must not be read as "PID was
+// reused". IsRunning must keep the state files of a live process it cannot
+// classify and report the server as running on its recorded port.
+func TestIsRunningKeepsStateWhenPsCannotRun(t *testing.T) {
+	// Empty PATH: both the unix ps and the Windows powershell.exe fail to
+	// exec, so this exercises the platform reader's error path directly.
+	t.Setenv("PATH", t.TempDir())
+	t.Setenv("GT_ROOT", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+
+	dir := t.TempDir()
+	// The test process itself is alive, so kill(pid, 0) succeeds.
+	pid := os.Getpid()
+	if err := os.WriteFile(pidPath(dir), []byte(strconv.Itoa(pid)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writePortFile(dir, 14567); err != nil {
+		t.Fatal(err)
+	}
+
+	state, err := IsRunning(dir)
+	if err != nil {
+		t.Fatalf("IsRunning error: %v", err)
+	}
+	if !state.Running {
+		t.Error("expected Running=true when the tracked PID is alive but cannot be classified")
+	}
+	if state.PID != pid {
+		t.Errorf("PID = %d, want %d", state.PID, pid)
+	}
+	if state.Port != 14567 {
+		t.Errorf("Port = %d, want 14567 from the port file", state.Port)
+	}
+	for _, path := range []string{pidPath(dir), portPath(dir)} {
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("expected %s to be kept although ps could not run: %v", filepath.Base(path), err)
+		}
+	}
+}
+
+// TestIsRunningKeepsStateWhenProcessListUnreadable is the seam-driven form of
+// the check above: the listing itself fails, so no PATH trickery is needed.
+func TestIsRunningKeepsStateWhenProcessListUnreadable(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("GT_ROOT", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+
+	// This test process is alive, so only the process-list check could reject it.
+	pid := os.Getpid()
+	if err := os.WriteFile(pidPath(dir), []byte(strconv.Itoa(pid)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writePortFile(dir, 14567); err != nil {
+		t.Fatal(err)
+	}
+	orig := readDoltProcesses
+	readDoltProcesses = func() ([]int, error) { return nil, errors.New("listing processes: operation not permitted") }
+	t.Cleanup(func() { readDoltProcesses = orig })
+
+	state, err := IsRunning(dir)
+	if err != nil {
+		t.Fatalf("IsRunning error: %v", err)
+	}
+	if !state.Running || state.PID != pid || state.Port != 14567 {
+		t.Errorf("expected the tracked server to be kept, got %+v", state)
+	}
+	for _, path := range []string{pidPath(dir), portPath(dir)} {
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("expected %s to be kept: %v", filepath.Base(path), err)
+		}
+	}
+}

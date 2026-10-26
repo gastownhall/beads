@@ -504,17 +504,43 @@ func portConflictDiagnostics(port int) string {
 		fmt.Sprintf(portConflictHint, port), port)
 }
 
+// readDoltProcesses reads the dolt sql-server process list. It is a variable
+// so tests can simulate a process list that cannot be read.
+var readDoltProcesses = readDoltProcessPIDs
+
+// listDoltProcessPIDs returns PIDs of all running dolt sql-server processes,
+// or nil when the process list cannot be read. Callers derive count (len) and
+// membership (linear scan) from the returned slice.
+func listDoltProcessPIDs() []int {
+	pids, _ := readDoltProcesses()
+	return pids
+}
+
 // countDoltProcesses returns the number of running dolt sql-server processes.
 func countDoltProcesses() int { return len(listDoltProcessPIDs()) }
 
-// isDoltProcess checks if a PID belongs to a running dolt sql-server.
+// isDoltProcess checks if a PID belongs to a running dolt sql-server. It
+// returns false when the process list cannot be read; use doltProcessStatus
+// where that case needs to be handled separately.
 func isDoltProcess(pid int) bool {
-	for _, p := range listDoltProcessPIDs() {
+	isDolt, _ := doltProcessStatus(pid)
+	return isDolt
+}
+
+// doltProcessStatus reports whether pid belongs to a running dolt
+// sql-server. known is false when the process list could not be read, in
+// which case isDolt carries no information.
+func doltProcessStatus(pid int) (isDolt, known bool) {
+	pids, err := readDoltProcesses()
+	if err != nil {
+		return false, false
+	}
+	for _, p := range pids {
 		if p == pid {
-			return true
+			return true, true
 		}
 	}
-	return false
+	return false, true
 }
 
 // readPortFile reads the actual port from the port file, if it exists.
@@ -1221,8 +1247,16 @@ func IsRunning(beadsDir string) (*State, error) {
 		return &State{Running: false}, nil
 	}
 
-	// Verify it's actually a dolt sql-server process
-	if !isDoltProcess(pid) {
+	// Verify it's actually a dolt sql-server process. The identity check is
+	// tri-state: only a process list that was read and does not contain the
+	// PID proves the PID was reused by another process. A list that could not
+	// be read (ps is refused inside a macOS sandbox, say) may simply be unable
+	// to see a healthy server other bd processes share, so keep the state
+	// files and let the port resolution below speak for the tracked server
+	// (GH#7214). Removing the files here would make every bd sharing the
+	// directory auto-start a competitor that dies on the database lock.
+	isDolt, known := doltProcessStatus(pid)
+	if known && !isDolt {
 		// PID was reused by another process
 		_ = os.Remove(pidPath(beadsDir))
 		_ = os.Remove(portPath(beadsDir))
