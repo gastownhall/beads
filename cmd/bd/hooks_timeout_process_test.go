@@ -358,6 +358,29 @@ func testHookProcessReservedStatuses(t *testing.T) {
 			}
 		})
 	}
+
+	// The rows above pin status handling against the fake-perl argv stub; this
+	// smoke runs the real supervisor, whose waitpid/exit mapping must forward a
+	// normal status untouched now that fork/exec replaced alarm+exec (GH#7753).
+	t.Run("real Perl supervisor preserves a normal status", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("Git Bash normally selects its bundled GNU timeout; whether MSYS Perl can signal a native bd.exe is unverified")
+		}
+		result := runGeneratedHookProcess(t, hookProcessCase{
+			fixtures: []hookProcessFixture{
+				{name: "timeout", body: hookProcessIncompatibleTimeoutStub},
+				{name: "gtimeout", body: hookProcessIncompatibleGtimeoutStub},
+			},
+			pathTail: findHookProcessPerl(t),
+			bdExit:   37,
+		})
+		if result.exitCode != 37 {
+			t.Errorf("generated hook exit = %d, want bd exit 37\n%s", result.exitCode, result.output)
+		}
+		if strings.Contains(result.output, "timed out after") {
+			t.Errorf("normal bd status misreported as a timeout\n%s", result.output)
+		}
+	})
 }
 
 func testHookProcessRealTimeoutExpiry(t *testing.T) {
