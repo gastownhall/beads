@@ -635,6 +635,53 @@ func TestGitignorePerms_CheckAndEnsureAgree(t *testing.T) {
 	}
 }
 
+// TestFixGitignore_ReadOnlyFileWithMissingPatternsIsAppended pins the append
+// route for a read-only .beads/.gitignore: the hoisted tightening no longer
+// touches a private 0400 file (GH#6225), so the append route must still make
+// it writable, append the missing patterns after the original content, and
+// end at 0600.
+func TestFixGitignore_ReadOnlyFileWithMissingPatternsIsAppended(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Skipping file permissions test on Windows")
+	}
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.Mkdir(beadsDir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	gitignorePath := filepath.Join(beadsDir, ".gitignore")
+	original := "# local rules\n!keep-me.jsonl\n"
+	if err := os.WriteFile(gitignorePath, []byte(original), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(gitignorePath, 0400); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := FixGitignore(tmpDir); err != nil {
+		t.Fatalf("FixGitignore failed: %v", err)
+	}
+
+	content, err := os.ReadFile(gitignorePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(content), original) {
+		t.Errorf("original content not preserved as prefix.\nGot:\n%s", content)
+	}
+	if missing := missingGitignorePatterns(string(content)); len(missing) != 0 {
+		t.Errorf("patterns still missing after fix: %s", strings.Join(missing, ", "))
+	}
+	info, err := os.Stat(gitignorePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0600 {
+		t.Errorf("mode after append = %04o, want 0600", perm)
+	}
+}
+
 // TestFixGitignore_IdempotentNoDuplication ensures calling the fix twice in a
 // row does not append duplicate pattern blocks: content must be byte-identical
 // between the first and second invocation.

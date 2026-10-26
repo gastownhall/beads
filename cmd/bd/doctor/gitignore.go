@@ -251,6 +251,14 @@ func EnsureGitignoreForBeadsDir(beadsDir string) error {
 		newContent += pattern + "\n"
 	}
 
+	// The hoisted block leaves a private read-only file (e.g. 0400) alone, so
+	// add owner-write before appending; the residual chmod below ends at 0600.
+	if info, err := os.Stat(gitignorePath); err == nil && info.Mode().Perm()&0200 == 0 {
+		if err := os.Chmod(gitignorePath, 0600); err != nil {
+			return fmt.Errorf("chmod .beads/.gitignore: %w", err)
+		}
+	}
+
 	if err := os.WriteFile(gitignorePath, []byte(newContent), 0600); err != nil {
 		return fmt.Errorf("ensure .beads/.gitignore: %w", err)
 	}
