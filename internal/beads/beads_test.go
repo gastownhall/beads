@@ -3000,4 +3000,10 @@ func TestFindBeadsDirFromLinkedWorktreeBoundary(t *testing.T) {
 
 		assertFindBeadsDirFromMatchesCWD(t, worktree, mainBeadsDir)
 	})
+
+	t.Run("main checkout without store keeps walking to parent store", func(t *testing.T) {
+		parentBeadsDir, _, worktree := setupWorktreeUnderParentStore(t, false)
+
+		assertFindBeadsDirFromMatchesCWD(t, worktree, parentBeadsDir)
+	})
 }
