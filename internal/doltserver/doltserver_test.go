@@ -356,6 +356,29 @@ func TestIsRunningDoesNotStopUnverifiedProcessWithoutPort(t *testing.T) {
 	}
 }
 
+// GH#7214: EnsureRunningDetailed must adopt a tracked server it cannot verify
+// rather than start a competing one. Auto-start is disabled so a wrong
+// "not running" read surfaces as an error instead of a start.
+func TestEnsureRunningDetailedAdoptsUnverifiedServer(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_DOLT_AUTO_START", "0")
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+
+	dir := t.TempDir()
+	writeTrackedStateForLiveProcess(t, dir, 14567)
+	t.Setenv("PATH", t.TempDir())
+
+	port, startedByUs, err := EnsureRunningDetailed(dir)
+	if err != nil || port != 14567 || startedByUs {
+		t.Errorf("EnsureRunningDetailed = (%d, %v, %v), want (14567, false, nil)", port, startedByUs, err)
+	}
+	assertStateFilesKept(t, dir, 14567)
+}
+
 func TestIsRunningCorruptPIDRemovesPortFile(t *testing.T) {
 	dir := t.TempDir()
 
