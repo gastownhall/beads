@@ -25,16 +25,20 @@ exit "${HOOK_TEST_BD_EXIT:-0}"
 `
 
 // hookProcessLongRunningBDStub stands in for a bd that never returns, so the
-// expiry subtests can prove the timeout helper reaps it. It sleeps instead of
-// busy-looping and bounds itself: when a test run is killed before the helper
-// fires (the harness reaches the helper by pid before its child), the orphan
-// idles for at most a minute and exits on its own instead of spinning at 100%
-// CPU forever with ppid 1. Exit 97 is outside every code the hook normalizes,
-// so a run that outlives the helper still fails the test. The sleep runs with
-// its stdio detached: when the helper signals only the stub (Perl's alarm hits
-// the exec'd process, not a group), the orphaned sleep must not keep the test's
-// output pipe open past exec.Cmd.WaitDelay.
+// expiry subtests can prove the timeout helper reaps it. A real bd is a Go
+// binary whose runtime catches SIGALRM and takes no action, so the stub
+// ignores SIGALRM too: a stand-in that dies on SIGALRM hid GH#7753, where the
+// Perl backend's alarm was inherited across exec and never stopped bd. It
+// sleeps instead of busy-looping and bounds itself: when a test run is killed
+// before the helper fires (the harness reaches the helper by pid before its
+// child), the orphan idles for at most a minute and exits on its own instead
+// of spinning at 100% CPU forever with ppid 1. Exit 97 is outside every code
+// the hook normalizes, so a run that outlives the helper still fails the test.
+// The sleep runs with its stdio detached: when the helper signals only the
+// stub (the Perl supervisor TERMs its direct child, not a group), the orphaned
+// sleep must not keep the test's output pipe open past exec.Cmd.WaitDelay.
 const hookProcessLongRunningBDStub = `#!/bin/sh
+trap '' ALRM
 printf 'long-running-bd-started\n'
 _bd_test_tick=0
 while [ "$_bd_test_tick" -lt 60 ]; do
@@ -145,7 +149,7 @@ func TestGeneratedHookTimeoutProcessBoundary(t *testing.T) {
 	t.Run("POSIX sh preserves argv and status", testHookProcessPOSIXShell)
 	t.Run("reserved statuses are backend scoped", testHookProcessReservedStatuses)
 	t.Run("real coreutils timeout expires a responsive child", testHookProcessRealTimeoutExpiry)
-	t.Run("real Perl alarm expires a responsive child", testHookProcessRealPerlExpiry)
+	t.Run("real Perl supervisor expires an alarm-immune child", testHookProcessRealPerlExpiry)
 	t.Run("Windows checkout rejects System32 timeout", testHookProcessWindowsSystemTimeoutCheckout)
 }
 
@@ -378,7 +382,7 @@ func testHookProcessRealTimeoutExpiry(t *testing.T) {
 
 func testHookProcessRealPerlExpiry(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("Git for Windows Perl does not reliably preserve alarm across exec; GNU timeout is the normal Git Bash backend")
+		t.Skip("Git Bash normally selects its bundled GNU timeout; whether MSYS Perl can signal a native bd.exe is unverified")
 	}
 	perlDir := findHookProcessPerl(t)
 	timeout := "1"
@@ -393,10 +397,10 @@ func testHookProcessRealPerlExpiry(t *testing.T) {
 		sleepPath: findHookProcessSleep(t),
 	})
 	if result.exitCode != 0 {
-		t.Fatalf("generated hook exit = %d, want normalized Perl alarm success\n%s", result.exitCode, result.output)
+		t.Fatalf("generated hook exit = %d, want normalized Perl supervisor timeout success\n%s", result.exitCode, result.output)
 	}
 	if !strings.Contains(result.output, "long-running-bd-started") || !strings.Contains(result.output, "timed out after 1s") {
-		t.Fatalf("real Perl did not expire and normalize the responsive child\n%s", result.output)
+		t.Fatalf("real Perl did not expire and normalize the alarm-immune child\n%s", result.output)
 	}
 	if result.elapsed > 9*time.Second {
 		t.Errorf("Perl expiry took %s, want at most 9s", result.elapsed)

@@ -33,7 +33,17 @@ if command -v bd >/dev/null 2>&1; then
     fi
   elif command -v perl >/dev/null 2>&1; then
     _bd_timeout_backend=perl
-    if perl -e 'alarm shift; exec @ARGV' -- "$_bd_timeout" bd hooks run post-checkout "$@"; then
+    if perl -e '
+      my $t = shift;
+      my $pid = fork;
+      defined $pid or die "beads: fork failed: $!\n";
+      if (!$pid) { exec { $ARGV[0] } @ARGV; exit 127 }
+      $SIG{ALRM} = sub { kill "TERM", $pid; waitpid $pid, 0; exit 142 };
+      alarm $t;
+      waitpid $pid, 0;
+      alarm 0;
+      exit($? & 127 ? 128 + ($? & 127) : $? >> 8);
+    ' -- "$_bd_timeout" bd hooks run post-checkout "$@"; then
       _bd_exit=0
     else
       _bd_exit=$?
