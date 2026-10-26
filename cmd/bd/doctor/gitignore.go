@@ -245,6 +245,18 @@ func EnsureGitignoreForBeadsDir(beadsDir string) error {
 		return nil
 	}
 
+	// The hoisted block above no longer grants owner-write to a private file
+	// (0400, 0700), so restore it here, on the append route only: os.WriteFile
+	// below must be able to open a read-only file. The file ends at 0600
+	// regardless — the append always lands on the canonical mode (pre-#5634
+	// behavior, #6225). Not Windows-guarded: this is the write-enabler, not
+	// the loosen/tighten predicate.
+	if info, err := os.Stat(gitignorePath); err == nil && info.Mode().Perm()&0200 == 0 {
+		if err := os.Chmod(gitignorePath, 0600); err != nil {
+			return fmt.Errorf("chmod .beads/.gitignore: %w", err)
+		}
+	}
+
 	existingContent := string(content)
 	newContent := existingContent
 	if len(newContent) > 0 && !strings.HasSuffix(newContent, "\n") {
