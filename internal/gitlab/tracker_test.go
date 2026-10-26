@@ -175,6 +175,28 @@ func TestTrackerMatchKey(t *testing.T) {
 	if a, b := tr.MatchKey("https://gitlab.com/group/project/-/milestones/7"), tr.MatchKey("https://gitlab.com/group/project/-/issues/7"); a == b {
 		t.Errorf("milestone and issue share match key %q", a)
 	}
+
+	// The "gitlab:{iid}" shorthand carries no project of its own. With the
+	// configured project known without a network call (gitlab.project_path or
+	// a path-form gitlab.project_id), it is qualified to that project's
+	// namespace; otherwise it stays in a dedicated namespace no URL key can
+	// equal, so it can never fallback-match another project's URL.
+	shorthand := []struct {
+		name string
+		tr   *Tracker
+		want string
+	}{
+		{"project path configured", &Tracker{projectPath: "team/repo", client: NewClient("tok", "https://gitlab.example.com", "42")}, "gl://gitlab.example.com/team/repo#7"},
+		{"project path case ignored", &Tracker{projectPath: "Team/Repo", client: NewClient("tok", "https://gitlab.example.com", "42")}, "gl://gitlab.example.com/team/repo#7"},
+		{"path-form project id", &Tracker{client: NewClient("tok", "https://gitlab.com", "team/repo")}, "gl://gitlab.com/team/repo#7"},
+		{"numeric id without path", &Tracker{client: NewClient("tok", "https://gitlab.com", "42")}, "gitlab:7"},
+		{"uninitialized tracker", &Tracker{}, "gitlab:7"},
+	}
+	for _, tt := range shorthand {
+		if got := tt.tr.MatchKey("gitlab:7"); got != tt.want {
+			t.Errorf("%s: MatchKey(gitlab:7) = %q, want %q", tt.name, got, tt.want)
+		}
+	}
 }
 
 func TestBuildExternalRef(t *testing.T) {

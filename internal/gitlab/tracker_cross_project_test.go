@@ -252,6 +252,89 @@ func TestPull_GroupModeSameIIDStableAcrossProjects(t *testing.T) {
 	}
 }
 
+// TestPull_ShorthandRefScoping pins how the project-less "gitlab:{iid}"
+// shorthand interacts with the project-qualified fallback key. Without a
+// configured project identity the shorthand keeps its own namespace: pulling
+// another project's same-numbered issue must create a new bead, not rewrite
+// the shorthand bead. With the configured project known (gitlab.project_path,
+// or a path-form project id), the shorthand heals to that project's URL pull.
+func TestPull_ShorthandRefScoping(t *testing.T) {
+	t.Run("without project identity creates instead of overwriting", func(t *testing.T) {
+		result, store := pullProjectB7(t, "gitlab:7")
+		if result.PullStats.Created != 1 || result.PullStats.Updated != 0 {
+			t.Fatalf("pull stats: created=%d updated=%d, want created=1 updated=0",
+				result.PullStats.Created, result.PullStats.Updated)
+		}
+		bead := store.issues["bd-b7"]
+		if bead.Title != "Stale title" || bead.ExternalRef == nil || *bead.ExternalRef != "gitlab:7" {
+			t.Errorf("shorthand bead rewritten: title=%q external_ref=%q", bead.Title, derefRef(bead.ExternalRef))
+		}
+		if len(store.issues) != 2 {
+			t.Fatalf("store holds %d issues, want the shorthand bead plus one created", len(store.issues))
+		}
+	})
+
+	t.Run("with configured project path heals to that project", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// The web_url host is the configured instance's own host, the
+			// spelling a real GitLab returns for gitlab.url.
+			projectBRef := srv2Ref(r)
+			if strings.TrimPrefix(r.URL.Path, "/api/v4") != "/projects/200/issues/7" {
+				http.Error(w, "unexpected", http.StatusNotFound)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":9007,"iid":7,"project_id":200,"title":"Project B issue 7","state":"opened",` +
+				`"created_at":"2026-10-01T00:00:00Z","updated_at":"2026-10-02T00:00:00Z","web_url":"` + projectBRef + `"}`))
+		}))
+		t.Cleanup(srv.Close)
+
+		ref := "gitlab:7"
+		store := &crossProjectStore{issues: map[string]*types.Issue{
+			"bd-b7": {
+				ID:          "bd-b7",
+				Title:       "Shorthand bead",
+				Status:      types.StatusOpen,
+				IssueType:   types.TypeTask,
+				ExternalRef: &ref,
+			},
+		}}
+		tr := &Tracker{
+			client:      NewClient("token", srv.URL, "200"),
+			config:      DefaultMappingConfig(),
+			projectPath: "group-b/project-b",
+		}
+		engine := tracker.NewEngine(tr, store, "test")
+		result, err := engine.Sync(context.Background(), tracker.SyncOptions{Pull: true, IssueIDs: []string{"7"}})
+		if err != nil {
+			t.Fatalf("Sync: %v", err)
+		}
+		if result.PullStats.Updated != 1 || result.PullStats.Created != 0 {
+			t.Fatalf("pull stats: created=%d updated=%d, want created=0 updated=1",
+				result.PullStats.Created, result.PullStats.Updated)
+		}
+		bead := store.issues["bd-b7"]
+		if bead.Title != "Project B issue 7" || bead.ExternalRef == nil {
+			t.Fatalf("shorthand bead not healed: title=%q external_ref=%q", bead.Title, derefRef(bead.ExternalRef))
+		}
+		wantRef := srv.URL + "/group-b/project-b/-/issues/7"
+		if *bead.ExternalRef != wantRef {
+			t.Errorf("external_ref = %q, want the pulled web_url %q", *bead.ExternalRef, wantRef)
+		}
+	})
+}
+
+// srv2Ref builds the issue web_url on the host the request arrived at, so a
+// test's configured BaseURL host and its web_urls agree the way a real
+// instance's do.
+func srv2Ref(r *http.Request) string {
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	return scheme + "://" + r.Host + "/group-b/project-b/-/issues/7"
+}
+
 // TestPull_SameProjectRefVariantsUpdateInPlace pins the healing half of the
 // project-qualified fallback key: a bead linked to the configured project's
 // issue by any spelling GitLab has emitted must still be found on re-pull —

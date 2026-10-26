@@ -560,19 +560,44 @@ func (t *Tracker) onConfiguredHost(ref string) bool {
 // inside one project — MatchKey qualifies the identity with the host and the
 // full project path the ref itself carries, so a pull from one project can
 // never fall back onto a bead linked to another project's same-numbered
-// issue. Issue and work-item URL refs of one project share a key. Refs that
-// carry no project identity take no fallback match ("").
+// issue. Issue and work-item URL refs of one project share a key. The
+// project-less "gitlab:{iid}" shorthand is qualified to the configured
+// project when that is known without a network call, and otherwise keeps a
+// dedicated namespace no URL key can equal, so it is never fallback-matched
+// to another project's URL. Anything else takes no fallback match ("").
 func (t *Tracker) MatchKey(ref string) string {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
 		return ""
 	}
-	if glShorthandPattern.MatchString(ref) {
-		// The "gitlab:{iid}" shorthand carries no project; it cannot be
-		// qualified from the ref itself.
-		return ""
+	if m := glShorthandPattern.FindStringSubmatch(ref); len(m) >= 2 {
+		if host, path, ok := t.configuredProjectIdentity(); ok {
+			return fmt.Sprintf("gl://%s/%s#%s", host, path, m[1])
+		}
+		return "gitlab:" + m[1]
 	}
 	return gitLabURLMatchKey(ref)
+}
+
+// configuredProjectIdentity returns the canonical host and lowercase project
+// path of the configured project when both are known without a network call:
+// gitlab.project_path, or a gitlab.project_id that is itself a project path.
+// The host is the configured gitlab.url's, canonicalized the way URL match
+// keys are, so a qualified shorthand heals to that instance's URL pulls when
+// GitLab spells web_url hosts the same way gitlab.url does.
+func (t *Tracker) configuredProjectIdentity() (host, path string, ok bool) {
+	path = strings.ToLower(strings.TrimSpace(t.projectPath))
+	if path == "" && t.client != nil && strings.Contains(t.client.ProjectID, "/") {
+		path = strings.ToLower(strings.TrimSpace(t.client.ProjectID))
+	}
+	if path == "" || t.client == nil || t.client.BaseURL == "" {
+		return "", "", false
+	}
+	host, _, ok = parseGitLabURLRef(strings.TrimSpace(t.client.BaseURL))
+	if !ok || host == "" {
+		return "", "", false
+	}
+	return host, path, true
 }
 
 // ExtractIdentifier extracts the issue IID from a GitLab URL or shorthand ref.
