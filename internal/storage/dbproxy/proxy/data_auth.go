@@ -16,6 +16,12 @@ import (
 // DataNetwork is the MySQL driver network for authenticated proxy connections.
 const DataNetwork = "bdproxy"
 
+// dataAuthPrefix starts the first line every data-port connection sends.
+// Version note: a proxy started by an older bd does not accept this
+// handshake, and a client older than it does not send it, so a
+// mixed-version pair cannot connect. A still-running pre-upgrade proxy
+// holds proxy.lock, so after upgrading bd the old proxy must be stopped
+// (via proxy.pid) before a new managed proxy takes over.
 const dataAuthPrefix = "BDPROXY1 "
 
 var dataAddressRoots sync.Map
