@@ -8,6 +8,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/httpclient"
 	"github.com/steveyegge/beads/internal/testutil/legacyworkspace"
 )
 
@@ -262,6 +263,79 @@ func TestCurrentVersionWitnessVetoesLegacyVerdictInEveryMode(t *testing.T) {
 
 		if err := guardLegacyUpgradeWorkspace(beadsDir); !isLegacyUpgradeRefusal(err) {
 			t.Fatalf("guardLegacyUpgradeWorkspace() = %v, want migration refusal", err)
+		}
+	})
+}
+
+// TestCurrentVersionWitnessKeepsOwnedDoltRootsAdmitted pins the other side of
+// the unowned-root refusal: a current-era populated .beads/dolt that something
+// owns this run is still admitted. A server selection from metadata,
+// config.yaml or the environment, a shared server, a proxied-server or
+// registered backend, an embedded repository beside the root, or a root that
+// holds nothing each leave no empty embedded database to hide its data behind.
+func TestCurrentVersionWitnessKeepsOwnedDoltRootsAdmitted(t *testing.T) {
+	workspaces := []struct {
+		name       string
+		metadata   string
+		configYaml string
+	}{
+		{name: "metadata server mode", metadata: `{"backend":"dolt","dolt_mode":"server"}`},
+		{name: "config.yaml server mode", configYaml: configYamlServerMode},
+		{name: "config.yaml shared server", configYaml: "dolt.shared-server: true\n"},
+		{name: "metadata proxied-server mode", metadata: `{"backend":"dolt","dolt_mode":"proxied-server"}`},
+	}
+	for _, ws := range workspaces {
+		t.Run(ws.name, func(t *testing.T) {
+			captureLegacyUpgradeWarnings(t)
+			beadsDir := writeDoltRootWorkspace(t, ws.metadata, ws.configYaml, "1.3.0")
+
+			if err := guardLegacyUpgradeWorkspace(beadsDir); err != nil {
+				t.Fatalf("guardLegacyUpgradeWorkspace() = %v, want nil", err)
+			}
+		})
+	}
+
+	t.Run("server mode from the environment", func(t *testing.T) {
+		captureLegacyUpgradeWarnings(t)
+		beadsDir := writeDoltRootWorkspace(t, `{"backend":"dolt"}`, "", "1.3.0")
+		t.Setenv("BEADS_DOLT_SERVER_MODE", "1")
+
+		if err := guardLegacyUpgradeWorkspace(beadsDir); err != nil {
+			t.Fatalf("guardLegacyUpgradeWorkspace() = %v, want nil", err)
+		}
+	})
+
+	t.Run("embedded repository beside the root", func(t *testing.T) {
+		captureLegacyUpgradeWarnings(t)
+		beadsDir := writeDoltRootWorkspace(t, `{"backend":"dolt"}`, "", "1.3.0")
+		repo := filepath.Join(beadsDir, "embeddeddolt", "beads", ".dolt")
+		if err := os.MkdirAll(repo, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(repo, "repo-entry"), []byte("opaque"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := guardLegacyUpgradeWorkspace(beadsDir); err != nil {
+			t.Fatalf("guardLegacyUpgradeWorkspace() = %v, want nil", err)
+		}
+	})
+
+	t.Run("empty root", func(t *testing.T) {
+		captureLegacyUpgradeWarnings(t)
+		beadsDir := writeEmptyDoltRootServerWorkspace(t, `{"backend":"dolt"}`, "", "1.3.0")
+
+		if err := guardLegacyUpgradeWorkspace(beadsDir); err != nil {
+			t.Fatalf("guardLegacyUpgradeWorkspace() = %v, want nil", err)
+		}
+	})
+
+	t.Run("registered backend", func(t *testing.T) {
+		captureLegacyUpgradeWarnings(t)
+		beadsDir := writeDoltRootWorkspace(t, "", "", "1.3.0")
+
+		if err := classifyLegacyDoltWorkspace(beadsDir, &configfile.Config{Backend: httpclient.Backend}, legacyDoltModes{}); err != nil {
+			t.Fatalf("classifyLegacyDoltWorkspace(http backend) = %v, want nil", err)
 		}
 	})
 }
