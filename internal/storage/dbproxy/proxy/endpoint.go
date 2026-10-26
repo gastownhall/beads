@@ -239,7 +239,11 @@ func GetCreateDatabaseProxyServerEndpoint(rootDir string, opts OpenOpts) (Endpoi
 		discovery := readAndDial(rootDir)
 		switch discovery.status {
 		case adoptionAdopted:
-			return adoptedEndpoint(rootDir, want, discovery)
+			ep, err := adoptedEndpoint(rootDir, want, discovery)
+			if err == nil {
+				registerDataAddress(rootDir, ep)
+			}
+			return ep, err
 		case adoptionIOErr:
 			return Endpoint{}, fmt.Errorf("discover proxy from %s: %w", pidfile.Path(rootDir, PIDFileName), discovery.err)
 		}
@@ -252,7 +256,11 @@ func GetCreateDatabaseProxyServerEndpoint(rootDir string, opts OpenOpts) (Endpoi
 			discovery = readAndDial(rootDir)
 			if discovery.status == adoptionAdopted {
 				lock.Unlock()
-				return adoptedEndpoint(rootDir, want, discovery)
+				ep, err := adoptedEndpoint(rootDir, want, discovery)
+				if err == nil {
+					registerDataAddress(rootDir, ep)
+				}
+				return ep, err
 			}
 			if discovery.status == adoptionIOErr {
 				lock.Unlock()
@@ -275,6 +283,7 @@ func GetCreateDatabaseProxyServerEndpoint(rootDir string, opts OpenOpts) (Endpoi
 			var ep Endpoint
 			ep, lastSpawnErr = spawnAndHandoff(rootDir, opts, deadline, stopEpoch, lock, discovery)
 			if lastSpawnErr == nil {
+				registerDataAddress(rootDir, ep)
 				return ep, nil
 			}
 			if errors.Is(lastSpawnErr, errStartInterrupted) {

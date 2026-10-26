@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"io"
@@ -71,6 +72,7 @@ type proxyServer struct {
 	stopEpoch   string
 
 	traceConnections bool
+	dataToken        string
 
 	serverLogPath        string
 	logSizeCheckInterval time.Duration
@@ -279,9 +281,11 @@ func (p *proxyServer) ListenAndServe(parentCtx context.Context) error {
 		return fmt.Errorf("proxy: unexpected data listener address %T", ln.Addr())
 	}
 
-	if _, err := identity.WriteSecret(p.rootDir); err != nil {
+	secret, err := identity.WriteSecret(p.rootDir)
+	if err != nil {
 		return fmt.Errorf("write proxy secret: %w", err)
 	}
+	p.dataToken = identity.DataAuthToken(secret)
 
 	var identMu sync.RWMutex
 	identReply := identity.IdentReply{
@@ -376,6 +380,7 @@ func (p *proxyServer) ListenAndServe(parentCtx context.Context) error {
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error {
 		<-gctx.Done()
+		_ = pidfile.Remove(p.rootDir, PIDFileName)
 		_ = p.listener.Close()
 		_ = control.Close()
 		return nil
@@ -494,6 +499,27 @@ func (p *proxyServer) handleConn(ctx context.Context, client net.Conn) error {
 		p.activeConns.Add(-1)
 		p.connTracef("handleConn(%s) end (active=%d)", addr, p.activeConns.Load())
 	}()
+
+	expected := []byte(dataAuthPrefix + p.dataToken + "\n")
+	if err := client.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		_ = client.Close()
+		return err
+	}
+	got := make([]byte, len(expected))
+	if _, err := io.ReadFull(client, got); err != nil {
+		p.connTracef("handleConn(%s) data authentication failed", addr)
+		_ = client.Close()
+		return nil
+	}
+	if subtle.ConstantTimeCompare(got, expected) != 1 {
+		p.connTracef("handleConn(%s) data authentication failed", addr)
+		_ = client.Close()
+		return nil
+	}
+	if err := client.SetReadDeadline(time.Time{}); err != nil {
+		_ = client.Close()
+		return err
+	}
 
 	p.stats.IncBackendDialAttempt()
 	dialCtx, cancelDial := context.WithTimeout(ctx, backendDialTimeout)

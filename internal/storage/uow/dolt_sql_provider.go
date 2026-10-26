@@ -703,6 +703,7 @@ func (b *bootstrapPreparer) prepare(ctx context.Context, conn *sql.Conn) (*schem
 
 func buildDSN(ep proxy.Endpoint, database, user, password, tlsConfigName string) string {
 	return util.DoltServerDSN{
+		Net:             proxy.DataNetwork,
 		Host:            ep.Host,
 		Port:            ep.Port,
 		User:            user,

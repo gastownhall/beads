@@ -3,11 +3,11 @@ package identity
 import (
 	"bufio"
 	"encoding/json"
-	"fmt"
 	"net"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -54,6 +54,25 @@ func TestIdentReplyMACRejectsTampering(t *testing.T) {
 	require.ErrorContains(t, VerifyIdentReply(signed, secret, nonce), "authentication failed")
 }
 
+func TestIdentRequestMACAuthenticatesNonce(t *testing.T) {
+	secret := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	nonce := "0123456789abcdef0123456789abcdef"
+	mac, err := IdentRequestMAC(secret, nonce)
+	require.NoError(t, err)
+	assert.True(t, VerifyIdentRequest(secret, nonce, mac))
+	assert.False(t, VerifyIdentRequest("wrong secret", nonce, mac))
+	assert.False(t, VerifyIdentRequest(secret, "invalid", mac))
+	_, err = IdentRequestMAC(secret, "invalid")
+	require.Error(t, err)
+}
+
+func TestDataAuthToken(t *testing.T) {
+	first := DataAuthToken("shared secret")
+	assert.Len(t, first, 64)
+	assert.Equal(t, first, DataAuthToken("shared secret"))
+	assert.NotEqual(t, first, DataAuthToken("different secret"))
+}
+
 func TestIdentifyRejectsUnauthenticatedReply(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
@@ -83,7 +102,12 @@ func TestIdentifyRejectsUnauthenticatedReply(t *testing.T) {
 
 func TestIdentifyRequestCarriesFreshNonce(t *testing.T) {
 	secret := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-	nonces := make(chan string, 2)
+	type request struct {
+		line  string
+		mac   string
+		nonce string
+	}
+	requests := make(chan request, 2)
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	defer listener.Close()
@@ -100,12 +124,12 @@ func TestIdentifyRequestCarriesFreshNonce(t *testing.T) {
 			if readErr != nil {
 				return
 			}
-			var command, gotSecret, nonce string
-			if _, scanErr := fmt.Sscanf(line, "%s %s %s\n", &command, &gotSecret, &nonce); scanErr != nil {
+			fields := strings.Fields(strings.TrimSpace(line))
+			if len(fields) != 3 || fields[0] != "IDENT" {
 				return
 			}
-			nonces <- nonce
-			reply, signErr := SignIdentReply(IdentReply{Schema: 2, Role: "proxy"}, secret, nonce)
+			requests <- request{line: line, mac: fields[1], nonce: fields[2]}
+			reply, signErr := SignIdentReply(IdentReply{Schema: 2, Role: "proxy"}, secret, fields[2])
 			if signErr == nil {
 				_ = json.NewEncoder(conn).Encode(reply)
 			}
@@ -115,11 +139,15 @@ func TestIdentifyRequestCarriesFreshNonce(t *testing.T) {
 		_, err := Identify("127.0.0.1", port, secret, time.Second)
 		require.NoError(t, err)
 	}
-	first := <-nonces
-	second := <-nonces
-	assert.Len(t, first, identNonceBytes*2)
-	assert.Len(t, second, identNonceBytes*2)
-	assert.NotEqual(t, first, second)
+	first := <-requests
+	second := <-requests
+	assert.NotContains(t, first.line, secret)
+	assert.NotContains(t, second.line, secret)
+	assert.True(t, VerifyIdentRequest(secret, first.nonce, first.mac))
+	assert.True(t, VerifyIdentRequest(secret, second.nonce, second.mac))
+	assert.Len(t, first.nonce, identNonceBytes*2)
+	assert.Len(t, second.nonce, identNonceBytes*2)
+	assert.NotEqual(t, first.nonce, second.nonce)
 }
 
 func TestSecret_WriteReadAndRotate(t *testing.T) {

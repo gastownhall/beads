@@ -2,6 +2,7 @@
 package identity
 
 import (
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -65,4 +66,12 @@ func ReadSecret(rootDir string) (string, error) {
 		return "", errors.New("identity: invalid proxy secret")
 	}
 	return secret, nil
+}
+
+// DataAuthToken derives the fixed token used to authenticate proxy data-port
+// connections.
+func DataAuthToken(secret string) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write([]byte("bd-proxy-data-v1"))
+	return hex.EncodeToString(mac.Sum(nil))
 }
