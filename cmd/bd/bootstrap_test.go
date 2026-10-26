@@ -1516,6 +1516,64 @@ func TestFinalizeSyncedBootstrap_GitignorePermissionFailureWarns(t *testing.T) {
 	})
 }
 
+// TestEnsureBeadsGitignore_DowngradesOnlyPermissionFailures pins the split
+// bd connect's .gitignore step relies on (#6225 finding 2): a
+// permission-only failure prints the same warning bootstrap prints and
+// returns nil, while any other failure is returned unchanged so connect
+// still aborts with `ensuring <dir>/.gitignore: ...` before it writes
+// http_target.json.
+func TestEnsureBeadsGitignore_DowngradesOnlyPermissionFailures(t *testing.T) {
+	tests := []struct {
+		name        string
+		err         error
+		wantNil     bool
+		wantWarning bool
+	}{
+		{
+			name:        "permission-only failure warns and passes",
+			err:         fmt.Errorf("%w: %w", doctor.ErrGitignorePermissions, syscall.EPERM),
+			wantNil:     true,
+			wantWarning: true,
+		},
+		{
+			name:    "any other failure is returned unchanged",
+			err:     errors.New("read .beads/.gitignore: is a directory"),
+			wantNil: false,
+		},
+		{
+			name:    "success passes through",
+			err:     nil,
+			wantNil: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			orig := doctorEnsureGitignoreForBeadsDir
+			doctorEnsureGitignoreForBeadsDir = func(string) error { return tt.err }
+			t.Cleanup(func() { doctorEnsureGitignoreForBeadsDir = orig })
+
+			var err error
+			stderr := captureStderrDuring(t, func() {
+				err = ensureBeadsGitignore(filepath.Join(t.TempDir(), ".beads"))
+			})
+			if tt.wantNil {
+				if err != nil {
+					t.Errorf("err = %v, want nil", err)
+				}
+			} else if err != tt.err {
+				t.Errorf("err = %v, want the exact failure returned unchanged", err)
+			}
+			if tt.wantWarning {
+				if !strings.Contains(stderr, "Warning:") || !strings.Contains(stderr, doctor.ErrGitignorePermissions.Error()) {
+					t.Errorf("stderr = %q, want a Warning: line naming %q", stderr, doctor.ErrGitignorePermissions.Error())
+				}
+			} else if stderr != "" {
+				t.Errorf("stderr = %q, want no output", stderr)
+			}
+		})
+	}
+}
+
 func TestFinalizeSyncedBootstrap_WorktreeStubDoesNotShadowTargetConfig(t *testing.T) {
 	snapshotBootstrapEnv(t)
 
