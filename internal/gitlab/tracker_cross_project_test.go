@@ -125,3 +125,83 @@ func derefRef(s *string) string {
 	}
 	return *s
 }
+
+// newProjectBServer serves one issue (IID 7) of project B over the GitLab
+// REST API, with the canonical issues-spelled web_url.
+func newProjectBServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	const projectBRef = "https://gitlab.com/group-b/project-b/-/issues/7"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.TrimPrefix(r.URL.Path, "/api/v4") != "/projects/200/issues/7" {
+			http.Error(w, "unexpected", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":9007,"iid":7,"project_id":200,"title":"Project B issue 7","state":"opened",` +
+			`"created_at":"2026-10-01T00:00:00Z","updated_at":"2026-10-02T00:00:00Z","web_url":"` + projectBRef + `"}`))
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// pullProjectB7 runs a selective pull of issue 7 against a fresh project-B
+// tracker backed by one existing bead carrying ref, and returns the result
+// and the store.
+func pullProjectB7(t *testing.T, ref string) (*tracker.SyncResult, *crossProjectStore) {
+	t.Helper()
+	srv := newProjectBServer(t)
+	tr := &Tracker{client: NewClient("token", srv.URL, "200"), config: DefaultMappingConfig()}
+	store := &crossProjectStore{issues: map[string]*types.Issue{
+		"bd-b7": {
+			ID:          "bd-b7",
+			Title:       "Stale title",
+			Status:      types.StatusOpen,
+			IssueType:   types.TypeTask,
+			ExternalRef: &ref,
+		},
+	}}
+	engine := tracker.NewEngine(tr, store, "test")
+	result, err := engine.Sync(context.Background(), tracker.SyncOptions{Pull: true, IssueIDs: []string{"7"}})
+	if err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	return result, store
+}
+
+// TestPull_SameProjectRefVariantsUpdateInPlace pins the healing half of the
+// project-qualified fallback key: a bead linked to the configured project's
+// issue by any spelling GitLab has emitted must still be found on re-pull —
+// updated in place with its external_ref rewritten to the canonical web_url —
+// instead of duplicated.
+func TestPull_SameProjectRefVariantsUpdateInPlace(t *testing.T) {
+	const projectBRef = "https://gitlab.com/group-b/project-b/-/issues/7"
+	variants := []struct {
+		name string
+		ref  string
+	}{
+		{"work items spelling", "https://gitlab.com/group-b/project-b/-/work_items/7"},
+		{"legacy url without separator", "https://gitlab.com/group-b/project-b/issues/7"},
+		{"path case", "https://gitlab.com/Group-B/Project-B/-/issues/7"},
+		{"explicit default port", "https://gitlab.com:443/group-b/project-b/-/issues/7"},
+		{"trailing slash", "https://gitlab.com/group-b/project-b/-/issues/7/"},
+	}
+	for _, v := range variants {
+		t.Run(v.name, func(t *testing.T) {
+			result, store := pullProjectB7(t, v.ref)
+			if result.PullStats.Updated != 1 || result.PullStats.Created != 0 {
+				t.Fatalf("pull stats: created=%d updated=%d, want created=0 updated=1",
+					result.PullStats.Created, result.PullStats.Updated)
+			}
+			bead := store.issues["bd-b7"]
+			if len(store.issues) != 1 {
+				t.Fatalf("store holds %d issues, want the single existing bead", len(store.issues))
+			}
+			if bead.Title != "Project B issue 7" {
+				t.Errorf("title = %q, want updated from pull", bead.Title)
+			}
+			if bead.ExternalRef == nil || *bead.ExternalRef != projectBRef {
+				t.Errorf("external_ref = %v, want canonical web_url %q", derefRef(bead.ExternalRef), projectBRef)
+			}
+		})
+	}
+}

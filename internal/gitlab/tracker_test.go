@@ -130,6 +130,53 @@ func TestExtractIdentifier(t *testing.T) {
 	}
 }
 
+func TestTrackerMatchKey(t *testing.T) {
+	tr := &Tracker{}
+	tests := []struct {
+		name string
+		ref  string
+		want string
+	}{
+		{"issue url", "https://gitlab.com/group/project/-/issues/42", "gl://gitlab.com/group/project#42"},
+		{"work item shares issue key", "https://gitlab.com/group/project/-/work_items/42", "gl://gitlab.com/group/project#42"},
+		{"legacy issues url", "https://gitlab.com/group/project/issues/42", "gl://gitlab.com/group/project#42"},
+		{"legacy work item url", "https://gitlab.com/group/project/work_items/42", "gl://gitlab.com/group/project#42"},
+		{"host case ignored", "https://GITLAB.com/group/project/-/issues/42", "gl://gitlab.com/group/project#42"},
+		{"path case ignored", "https://gitlab.com/Group/Project/-/issues/42", "gl://gitlab.com/group/project#42"},
+		{"default https port dropped", "https://gitlab.com:443/group/project/-/issues/42", "gl://gitlab.com/group/project#42"},
+		{"default http port dropped", "http://gitlab.com:80/group/project/-/issues/42", "gl://gitlab.com/group/project#42"},
+		{"non-default port kept", "https://gitlab.com:8443/group/project/-/issues/42", "gl://gitlab.com:8443/group/project#42"},
+		{"trailing slash ignored", "https://gitlab.com/group/project/-/issues/42/", "gl://gitlab.com/group/project#42"},
+		{"repeated slashes collapse", "https://gitlab.com//group//project/-/issues/42", "gl://gitlab.com/group/project#42"},
+		{"query and fragment ignored", "https://gitlab.com/group/project/-/issues/42?utm=x#notes", "gl://gitlab.com/group/project#42"},
+		{"nested group path", "https://gitlab.com/group/sub/project/-/issues/7", "gl://gitlab.com/group/sub/project#7"},
+		{"sibling project full-path compared", "https://gitlab.com/group/b-other/-/issues/7", "gl://gitlab.com/group/b-other#7"},
+		{"self-hosted host kept", "https://my-gitlab.example.com/team/repo/-/issues/7", "gl://my-gitlab.example.com/team/repo#7"},
+		{"project milestone", "https://gitlab.com/group/project/-/milestones/5", "gl://gitlab.com/group/project#milestone:5"},
+		{"group milestone", "https://gitlab.com/groups/mygroup/-/milestones/5", "gl://gitlab.com/groups/mygroup#milestone:5"},
+		{"milestone namespaced away from issue iid", "https://gitlab.com/group/project/-/milestones/7", "gl://gitlab.com/group/project#milestone:7"},
+		{"merge request takes no fallback", "https://gitlab.com/group/project/-/merge_requests/7", ""},
+		{"iid zero rejected", "https://gitlab.com/group/project/-/issues/0", ""},
+		{"leading zero rejected", "https://gitlab.com/group/project/-/issues/07", ""},
+		{"no project path", "https://gitlab.com/-/issues/7", ""},
+		{"empty separator only", "https://gitlab.com/-/issues/7/", ""},
+		{"not a url", "not-a-url", ""},
+		{"empty ref", "", ""},
+	}
+	for _, tt := range tests {
+		if got := tr.MatchKey(tt.ref); got != tt.want {
+			t.Errorf("%s: MatchKey(%q) = %q, want %q", tt.name, tt.ref, got, tt.want)
+		}
+	}
+
+	if a, b := tr.MatchKey("https://gitlab.com/group/b/-/issues/7"), tr.MatchKey("https://gitlab.com/group/b-other/-/issues/7"); a == b {
+		t.Errorf("sibling projects share match key %q", a)
+	}
+	if a, b := tr.MatchKey("https://gitlab.com/group/project/-/milestones/7"), tr.MatchKey("https://gitlab.com/group/project/-/issues/7"); a == b {
+		t.Errorf("milestone and issue share match key %q", a)
+	}
+}
+
 func TestBuildExternalRef(t *testing.T) {
 	tr := &Tracker{}
 	ti := &tracker.TrackerIssue{

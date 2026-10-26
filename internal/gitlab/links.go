@@ -129,27 +129,46 @@ func positiveIID(s string) bool {
 
 // gitLabURLMatchKey returns the project-qualified fallback-dedup key for a
 // URL-shaped GitLab ref: "gl://{host}/{project-path}#{iid}" for issue and
-// work-item refs. Issues and work items in one project share an IID space, so
-// /-/issues/7 and /-/work_items/7 of the same project produce the same key
-// and a re-pull under the other spelling still matches. The full project path
-// (every segment before /-/) is the key's scope, so sibling projects such as
-// group/b and group/b-other never collide. Anything else — other resources,
-// URLs without a project path, non-URLs — returns "".
+// work-item refs — both the current /-/ HTML spelling and the legacy one
+// without the separator, since issues and work items in one project share an
+// IID space, so a re-pull under the other spelling still matches — and
+// "gl://{host}/{project-path}#milestone:{iid}" for milestone refs, whose
+// path segment set is the whole project (a group milestone's is
+// "groups/{group}"), keeping milestones namespaced away from issue IIDs. The
+// full project path before the resource is the key's scope, so sibling
+// projects such as group/b and group/b-other never collide. Anything else —
+// other resources, URLs without a project path, non-URLs — returns "".
 func gitLabURLMatchKey(ref string) string {
 	host, segments, ok := parseGitLabURLRef(ref)
-	if !ok || len(segments) < 4 {
+	if !ok || len(segments) < 3 {
 		return ""
 	}
 	kind, iid := segments[len(segments)-2], segments[len(segments)-1]
+	if !positiveIID(iid) {
+		return ""
+	}
 	project := segments[:len(segments)-2]
-	if kind != "issues" && kind != "work_items" {
-		return ""
-	}
-	if !positiveIID(iid) || project[len(project)-1] != "-" {
-		return ""
-	}
-	project = project[:len(project)-1]
 	if len(project) == 0 {
+		return ""
+	}
+	sep := false
+	if project[len(project)-1] == "-" {
+		project = project[:len(project)-1]
+		sep = true
+	}
+	if len(project) == 0 {
+		return ""
+	}
+	switch kind {
+	case "issues", "work_items":
+		// Current /-/ spelling or legacy without the separator.
+	case "milestones":
+		// Milestones only exist in the /-/ spelling (milestoneIDPattern).
+		if !sep {
+			return ""
+		}
+		return fmt.Sprintf("gl://%s/%s#milestone:%s", host, strings.Join(project, "/"), iid)
+	default:
 		return ""
 	}
 	return fmt.Sprintf("gl://%s/%s#%s", host, strings.Join(project, "/"), iid)
