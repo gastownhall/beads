@@ -371,3 +371,65 @@ func TestPull_GroupModeSameIIDAcrossProjects(t *testing.T) {
 		})
 	}
 }
+
+// TestPull_ProjectlessShorthandBead pins the legacy "gitlab:{iid}" ref, which
+// names no project: with no project path configured, a URL pull of another
+// project's issue 7 must not fall back onto it; once the configured project's
+// path is known, its issue 7 is the one that relinks the shorthand bead.
+func TestPull_ProjectlessShorthandBead(t *testing.T) {
+	tests := []struct {
+		name        string
+		projectID   string
+		projectPath string
+		wantCreated int
+		wantUpdated int
+	}{
+		{name: "numeric project id, no path", projectID: "200", wantCreated: 1},
+		{name: "project path matches the pulled project", projectID: "200", projectPath: "group-b/project-b", wantUpdated: 1},
+		{name: "path-form project id matches the pulled project", projectID: "group-b/project-b", wantUpdated: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var webURL string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if !strings.HasSuffix(r.URL.Path, "/issues/7") {
+					http.Error(w, "unexpected", http.StatusNotFound)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(gitLabIssueJSON(9007, 7, "Project B issue 7", webURL)))
+			}))
+			t.Cleanup(srv.Close)
+			webURL = srv.URL + "/group-b/project-b/-/issues/7"
+			tr := &Tracker{client: NewClient("token", srv.URL, tt.projectID), config: DefaultMappingConfig(), projectPath: tt.projectPath}
+
+			shorthand := "gitlab:7"
+			store := &crossProjectStore{issues: map[string]*types.Issue{
+				"bd-s7": {ID: "bd-s7", Title: "Shorthand issue 7", Status: types.StatusOpen, IssueType: types.TypeTask, ExternalRef: &shorthand},
+			}}
+			result, err := tracker.NewEngine(tr, store, "test").Sync(context.Background(), tracker.SyncOptions{Pull: true, IssueIDs: []string{"7"}})
+			if err != nil {
+				t.Fatalf("Sync: %v", err)
+			}
+			if result.PullStats.Created != tt.wantCreated || result.PullStats.Updated != tt.wantUpdated {
+				t.Errorf("created=%d updated=%d, want created=%d updated=%d",
+					result.PullStats.Created, result.PullStats.Updated, tt.wantCreated, tt.wantUpdated)
+			}
+			s := store.issues["bd-s7"]
+			wantTitle, wantRef := "Shorthand issue 7", shorthand
+			if tt.wantUpdated == 1 {
+				wantTitle, wantRef = "Project B issue 7", webURL
+			}
+			if s.Title != wantTitle || derefRef(s.ExternalRef) != wantRef {
+				t.Errorf("shorthand bead = {title:%q external_ref:%q}, want {title:%q external_ref:%q}",
+					s.Title, derefRef(s.ExternalRef), wantTitle, wantRef)
+			}
+		})
+	}
+	t.Run("unqualified shorthand key cannot equal a URL key", func(t *testing.T) {
+		tr := &Tracker{client: NewClient("token", "https://gitlab.com", "200")}
+		if got := tr.MatchKey("gitlab:7"); got != "gitlab:7" {
+			t.Errorf(`MatchKey("gitlab:7") = %q, want "gitlab:7"`, got)
+		}
+	})
+}

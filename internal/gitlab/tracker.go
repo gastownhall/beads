@@ -578,16 +578,18 @@ func (t *Tracker) ExtractIdentifier(ref string) string {
 // The "gitlab:{iid}" shorthand names no project. When the configured project
 // is known by path (gitlab.project_path, or a path-form gitlab.project_id) it
 // is keyed as that project's issue on the gitlab.url host, so it still
-// matches the issue's web_url; otherwise it takes no fallback match.
+// matches the issue's web_url. Otherwise it keeps the "gitlab:{iid}" key,
+// which no URL key can equal: such a bead is never matched to some project's
+// issue URL, at worst duplicated by the next pull.
 func (t *Tracker) MatchKey(ref string) string {
 	if m := glShorthandPattern.FindStringSubmatch(ref); len(m) >= 2 {
 		project := t.matchKeyProjectPath()
 		if project == "" || t.client == nil {
-			return ""
+			return ref
 		}
 		host, basePath, ok := canonicalGitLabURL(t.client.BaseURL)
 		if !ok {
-			return ""
+			return ref
 		}
 		return "gl://" + host + basePath + "/" + project + "#" + m[1]
 	}
