@@ -837,6 +837,45 @@ func TestDepListRefusesUnknownDirection(t *testing.T) {
 			}
 		})
 	}
+
+	// The controls: `down`, `up` and the unset flag (whose default is the
+	// visible "down") must get PAST the check and answer exactly as before.
+	// The nil store and nil UOW provider stop each route at its first real
+	// step, so "exactly as before" here means the route's own error — and
+	// never the refusal, which would mean the check is too wide.
+	for _, proxied := range []bool{false, true} {
+		for _, tc := range []struct {
+			name string
+			flag []string
+		}{
+			{name: "down", flag: []string{"--direction=down"}},
+			{name: "up", flag: []string{"--direction=up"}},
+			{name: "unset", flag: nil},
+		} {
+			t.Run(fmt.Sprintf("valid/proxied=%v/%s", proxied, tc.name), func(t *testing.T) {
+				resetCommandFlags(depListCmd)
+				proxiedServerMode, jsonOutput = proxied, false
+				if err := depListCmd.ParseFlags(tc.flag); err != nil {
+					t.Fatal(err)
+				}
+				routeErr := "storage is nil"
+				if proxied {
+					routeErr = "UOW provider not initialized"
+				}
+				var err error
+				stderr := captureStderr(t, func() { err = depListCmd.RunE(depListCmd, []string{"bd-nosuch"}) })
+				if code, ok := exitCodeFromError(err); !ok || code != 1 {
+					t.Fatalf("RunE = %v, want exit 1\nstderr:\n%s", err, stderr)
+				}
+				if strings.Contains(stderr, "--direction must be") {
+					t.Errorf("a valid direction was refused:\n%s", stderr)
+				}
+				if !strings.Contains(stderr, routeErr) {
+					t.Errorf("the run did not reach the route's own first step (%q):\n%s", routeErr, stderr)
+				}
+			})
+		}
+	}
 }
 
 func TestDepTreeStatusFlag(t *testing.T) {
