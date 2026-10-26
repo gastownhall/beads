@@ -504,7 +504,9 @@ func ExpansionVarRefs(f *Formula, targetID string) []string {
 // The original steps slice is not modified.
 //
 // Steps that depended on an expanded step depend on the last step of its
-// expansion, as with compose.expand.
+// expansion, as with compose.expand. It is an error for step IDs to repeat
+// after expansion, or for an expanded step's ID to remain on any step but the
+// last step of its own expansion; both errors wrap ErrValidation.
 func ApplyInlineExpansions(steps []*Step, parser *Parser) ([]*Step, error) {
 	if parser == nil {
 		return steps, nil
@@ -514,6 +516,34 @@ func ApplyInlineExpansions(steps []*Step, parser *Parser) ([]*Step, error) {
 	result, err := applyInlineExpansionsRecursive(steps, parser, 0, &replaced)
 	if err != nil {
 		return nil, err
+	}
+	// The checks below run only when a step was expanded, so a formula
+	// without inline expansions cooks as before.
+	if len(replaced) == 0 {
+		return result, nil
+	}
+
+	// Validate no duplicate step IDs after expansion, as ApplyExpansions does.
+	// A template whose step IDs do not use {target} yields the same IDs each
+	// time it is expanded, and cook cannot tell the copies apart: two such
+	// expansions chained by needs would cook into a dependency cycle.
+	if dups := findDuplicateStepIDs(result); len(dups) > 0 {
+		return nil, fmt.Errorf("%w: duplicate step IDs after expansion: %v", ErrValidation, dups)
+	}
+
+	// The rewrite below points every needs/depends_on naming an expanded
+	// step at the last step of its expansion, anywhere in the tree. A step
+	// that still has that ID after expansion would have its dependents
+	// retargeted as well, onto the wrong step, into a cycle or onto itself,
+	// so it is refused. The exception is the expansion's own last step
+	// keeping the ID ({target}): the rewrite then changes nothing.
+	counts := make(map[string]int)
+	countStepIDs(result, counts)
+	for _, r := range replaced {
+		if counts[r.targetID] > 0 && r.lastStepID != r.targetID {
+			return nil, fmt.Errorf("%w: inline expand on step %q: another step reuses its ID after expansion, but dependencies on %q point at %q, the last step of its expansion",
+				ErrValidation, r.targetID, r.targetID, r.lastStepID)
+		}
 	}
 
 	// Steps that depended on an expanded step now depend on the last step of

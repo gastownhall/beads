@@ -1721,22 +1721,7 @@ needs = ["round"]
 
 	// writePipelineFormula returns a fresh temp dir per call, so the expansion
 	// formula goes into the same directory by hand.
-	roundTOML := `formula = "round"
-version = 1
-type = "expansion"
-
-[[template]]
-id = "implement"
-title = "Implement"
-
-[[template]]
-id = "triage"
-title = "Triage"
-needs = ["implement"]
-`
-	if err := os.WriteFile(filepath.Join(dir, "round.formula.toml"), []byte(roundTOML), 0o644); err != nil {
-		t.Fatalf("write round formula: %v", err)
-	}
+	writeRoundExpansion(t, dir)
 
 	subgraph, err := resolveAndCookFormula("inline", []string{dir})
 	if err != nil {
@@ -1760,5 +1745,273 @@ needs = ["implement"]
 	// blocks on Brief via round's own needs.
 	if !hasBlocksEdge("inline.implement", "inline.brief") {
 		t.Errorf("missing blocks edge inline.implement -> inline.brief")
+	}
+}
+
+// The issue #7637 `round` template does not use {target} in its step IDs, so
+// expanding it twice yields implement and triage twice. Cook cannot tell the
+// copies apart: round2's root would need round1's triage, which is the same
+// issue as round2's own triage, so implement and triage would block on each
+// other. The cook must refuse the formula, as the [[compose.expand]] form of
+// the same workflow does.
+func TestResolveAndCookFormula_InlineExpandTwiceWithBareIDsFails(t *testing.T) {
+	dir := writePipelineFormula(t, "inline", `formula = "inline"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "round1"
+title = "Round 1"
+expand = "round"
+
+[[steps]]
+id = "round2"
+title = "Round 2"
+needs = ["round1"]
+expand = "round"
+`)
+	writeRoundExpansion(t, dir)
+
+	_, err := resolveAndCookFormula("inline", []string{dir})
+	if err == nil {
+		t.Fatal("cook succeeded, want a duplicate step IDs error")
+	}
+	for _, want := range []string{"duplicate step IDs", "implement", "triage"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("cook error = %v, want it to contain %q", err, want)
+		}
+	}
+	// bd mol pour and bd mol wisp report the cook error only when it wraps
+	// formula.ErrValidation; any other error sends them on to a proto lookup,
+	// which reports the formula as not found.
+	if !errors.Is(err, formula.ErrValidation) {
+		t.Errorf("cook error does not wrap formula.ErrValidation: %v", err)
+	}
+}
+
+// An inline-expanded step's ID must not survive on another step after
+// expansion. The expanded step's dependents are pointed at its expansion's
+// last step, and that rewrite would retarget the other step's dependents too.
+// Each formula below cooked without an error into a wrong graph: round's
+// implement no longer blocked its triage, verify blocked on itself (pour
+// refuses that edge), or done waited on triage while implement and triage
+// blocked on each other. The cook must refuse them.
+func TestResolveAndCookFormula_InlineExpandReusingExpandedIDFails(t *testing.T) {
+	expansions := map[string]string{
+		"split": `[[template]]
+id = "{target}.a"
+title = "A"
+
+[[template]]
+id = "{target}.b"
+title = "B"
+needs = ["{target}.a"]
+`,
+		"self-named": `[[template]]
+id = "design"
+title = "Design"
+
+[[template]]
+id = "implement"
+title = "Implement"
+needs = ["design"]
+
+[[template]]
+id = "verify"
+title = "Verify"
+needs = ["implement"]
+`,
+		"code-ship": `[[template]]
+id = "code"
+title = "Code"
+
+[[template]]
+id = "ship"
+title = "Ship"
+needs = ["code"]
+`,
+	}
+
+	for _, tc := range []struct {
+		name    string
+		formula string
+		want    string
+	}{
+		{
+			name: "another expansion has a step with the expanded step's ID",
+			formula: `formula = "inline"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "implement"
+title = "Implement"
+expand = "split"
+
+[[steps]]
+id = "round1"
+title = "Round 1"
+expand = "round"
+
+[[steps]]
+id = "land"
+title = "Land"
+needs = ["round1"]
+`,
+			want: `inline expand on step "implement": another step reuses its ID`,
+		},
+		{
+			name: "the expansion has a step with its own target's ID",
+			formula: `formula = "inline"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "implement"
+title = "Implement"
+expand = "self-named"
+
+[[steps]]
+id = "land"
+title = "Land"
+needs = ["implement"]
+`,
+			want: `inline expand on step "implement": another step reuses its ID`,
+		},
+		{
+			name: "an expansion's last step has another expanded step's ID",
+			formula: `formula = "inline"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "work"
+title = "Work"
+expand = "code-ship"
+
+[[steps]]
+id = "ship"
+title = "Ship"
+needs = ["work"]
+expand = "round"
+
+[[steps]]
+id = "done"
+title = "Done"
+needs = ["work"]
+`,
+			want: `inline expand on step "ship": another step reuses its ID`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := writePipelineFormula(t, "inline", tc.formula)
+			writeRoundExpansion(t, dir)
+			for name, template := range expansions {
+				writeExpansionFormula(t, dir, name, template)
+			}
+
+			_, err := resolveAndCookFormula("inline", []string{dir})
+			if err == nil {
+				t.Fatal("cook succeeded, want a reused step ID error")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("cook error = %v, want it to contain %q", err, tc.want)
+			}
+			// Otherwise bd mol pour and bd mol wisp report the formula as
+			// not found.
+			if !errors.Is(err, formula.ErrValidation) {
+				t.Errorf("cook error does not wrap formula.ErrValidation: %v", err)
+			}
+		})
+	}
+}
+
+// A template whose last step keeps the expanded step's ID ({target}) leaves
+// that ID on the step its dependents are pointed at, so the formula cooks as
+// it did before dependents were rewritten.
+func TestResolveAndCookFormula_InlineExpandKeepingTargetIDOnLastStep(t *testing.T) {
+	dir := writePipelineFormula(t, "inline", `formula = "inline"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "brief"
+title = "Brief"
+
+[[steps]]
+id = "implement"
+title = "Implement"
+needs = ["brief"]
+expand = "keep-last"
+
+[[steps]]
+id = "land"
+title = "Land"
+needs = ["implement"]
+`)
+	writeExpansionFormula(t, dir, "keep-last", `[[template]]
+id = "{target}.prep"
+title = "Prepare"
+
+[[template]]
+id = "{target}"
+title = "{target.title}"
+needs = ["{target}.prep"]
+`)
+
+	subgraph, err := resolveAndCookFormula("inline", []string{dir})
+	if err != nil {
+		t.Fatalf("cook: %v", err)
+	}
+
+	hasBlocksEdge := func(from, to string) bool {
+		for _, dep := range subgraph.Dependencies {
+			if dep.Type == types.DepBlocks && dep.IssueID == from && dep.DependsOnID == to {
+				return true
+			}
+		}
+		return false
+	}
+
+	for _, edge := range [][2]string{
+		{"inline.implement.prep", "inline.brief"},
+		{"inline.implement", "inline.implement.prep"},
+		{"inline.land", "inline.implement"},
+	} {
+		if !hasBlocksEdge(edge[0], edge[1]) {
+			t.Errorf("missing blocks edge %s -> %s", edge[0], edge[1])
+		}
+	}
+}
+
+// writeRoundExpansion writes the issue #7637 `round` expansion formula into
+// dir. Its template step IDs are bare: they do not use {target}.
+func writeRoundExpansion(t *testing.T, dir string) {
+	t.Helper()
+	roundTOML := `formula = "round"
+version = 1
+type = "expansion"
+
+[[template]]
+id = "implement"
+title = "Implement"
+
+[[template]]
+id = "triage"
+title = "Triage"
+needs = ["implement"]
+`
+	if err := os.WriteFile(filepath.Join(dir, "round.formula.toml"), []byte(roundTOML), 0o644); err != nil {
+		t.Fatalf("write round formula: %v", err)
+	}
+}
+
+// writeExpansionFormula writes an expansion formula named name into dir, with
+// template as its [[template]] tables.
+func writeExpansionFormula(t *testing.T, dir, name, template string) {
+	t.Helper()
+	body := "formula = \"" + name + "\"\nversion = 1\ntype = \"expansion\"\n\n" + template
+	if err := os.WriteFile(filepath.Join(dir, name+".formula.toml"), []byte(body), 0o644); err != nil {
+		t.Fatalf("write %s formula: %v", name, err)
 	}
 }
