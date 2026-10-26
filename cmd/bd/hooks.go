@@ -50,10 +50,16 @@ func hookSectionEndLine() string {
 	return fmt.Sprintf("%s v%s ---", hookSectionEndPrefix, Version)
 }
 
-// hookTimeoutSeconds is the soft deadline for a beads hook. GNU timeout sends
-// SIGTERM at the deadline, while Perl's alarm terminates the direct bd process.
-// Neither backend promises containment of TERM-resistant descendant work. When
-// neither helper is available, the generated hook warns that it is unbounded.
+// hookTimeoutSeconds is the soft deadline for a beads hook. Both backends send
+// SIGTERM at the deadline: GNU timeout signals bd and its process group, while
+// the Perl supervisor signals only its direct bd child. The Perl backend must
+// supervise bd with fork/waitpid rather than alarm+exec because a pending
+// alarm survives execve and the Go runtime catches SIGALRM without acting on
+// it (GH#7753). Neither backend promises containment of TERM-resistant
+// descendant work, and under Perl a chained .old hook that bd is waiting on
+// (runChainedHook uses exec.Command, not CommandContext) is not signaled at
+// all. When neither helper is available, the generated hook warns that it is
+// unbounded.
 // The default is 300 seconds (5 minutes) to accommodate chained hooks — e.g.
 // pre-commit framework pipelines that run linters, type-checkers, and builds
 // inside `bd hooks run` via the `.old` hook chain (GH#2732).
@@ -79,6 +85,10 @@ const hookTimeoutSeconds = 300
 //     coreutils) ..."), and the uutils multicall dispatches on the argv[0]
 //     suffix and then prints the canonical name ("timeout (uutils coreutils)
 //     ..." when invoked as gtimeout). checks.nix runs that case.
+//   - The Perl fallback supervises bd (fork/waitpid) and sends it SIGTERM at
+//     the deadline, exiting 142 so the shim can report the timeout; alarm+exec
+//     would deliver SIGALRM to bd, which the Go runtime catches but ignores
+//     (GH#7753).
 //   - If the beads database is not initialized (exit code 3), the hook exits
 //     successfully with a warning so that git operations are not blocked.
 func generateHookSection(hookName string) string {
@@ -116,7 +126,17 @@ func generateHookSection(hookName string) string {
 		"    fi\n" +
 		"  elif command -v perl >/dev/null 2>&1; then\n" +
 		"    _bd_timeout_backend=perl\n" +
-		"    if perl -e 'alarm shift; exec @ARGV' -- \"$_bd_timeout\" bd hooks run " + hookName + " \"$@\"; then\n" +
+		"    if perl -e '\n" +
+		"      my $t = shift;\n" +
+		"      my $pid = fork;\n" +
+		"      defined $pid or die \"beads: fork failed: $!\\n\";\n" +
+		"      if (!$pid) { exec { $ARGV[0] } @ARGV; exit 127 }\n" +
+		"      $SIG{ALRM} = sub { kill \"TERM\", $pid; waitpid $pid, 0; exit 142 };\n" +
+		"      alarm $t;\n" +
+		"      waitpid $pid, 0;\n" +
+		"      alarm 0;\n" +
+		"      exit($? & 127 ? 128 + ($? & 127) : $? >> 8);\n" +
+		"    ' -- \"$_bd_timeout\" bd hooks run " + hookName + " \"$@\"; then\n" +
 		"      _bd_exit=0\n" +
 		"    else\n" +
 		"      _bd_exit=$?\n" +

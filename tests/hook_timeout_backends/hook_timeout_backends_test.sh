@@ -19,7 +19,7 @@
 # records the signal that killed it, which is how the test asserts the backend
 # and not just "it finished":
 #   coreutils backend → TERM from timeout, shim reports the deadline, exit 0
-#   perl backend      → ALRM from perl's alarm, same report, exit 0
+#   perl backend      → TERM from the perl supervisor, same report, exit 0
 #   no backend        → the fake returns at once; shim warns it is running
 #                       without a deadline, exit 0
 # A non-zero hook exit blocks the user's push, so every case asserts exit 0.
@@ -99,14 +99,16 @@ for want in pre-commit post-merge pre-push post-checkout prepare-commit-msg; do
 done
 
 # 2. The fake bd the shim will find on its restricted PATH. It blocks until
-#    killed and records the signal, re-raising it so it dies the way a real bd
-#    would (143 / 142), not by a made-up exit code.
+#    killed and records the signal. It ignores ALRM the way a real bd does —
+#    the Go runtime catches SIGALRM and takes no action (GH#7753) — and
+#    re-raises TERM so it dies the way a real bd would (143), not by a
+#    made-up exit code.
 fake="$tmp/fakebin"
 mkdir -p "$fake"
 cat > "$fake/bd" <<'FAKE'
 #!/bin/sh
-trap 'echo TERM > "$FAKE_BD_SIGNAL"; trap - TERM; kill -TERM $$' TERM
-trap 'echo ALRM > "$FAKE_BD_SIGNAL"; trap - ALRM; kill -ALRM $$' ALRM
+trap 'echo TERM > "$FAKE_BD_SIGNAL"; trap - TERM; kill - TERM $$' TERM
+trap '' ALRM
 [ -n "$FAKE_BD_BLOCK" ] && read -r _
 exit 0
 FAKE
@@ -177,7 +179,7 @@ run_case() {
                 ;;
             perl)
                 [[ "$case_out" == *"timed out after 1s"* ]] || verdict="FAIL: no deadline report: $case_out"
-                [[ "$signal" == ALRM ]] || verdict="FAIL: expected perl alarm (ALRM), fake saw '$signal'"
+                [[ "$signal" == TERM ]] || verdict="FAIL: expected perl supervisor (TERM), fake saw '$signal'"
                 ;;
             none)
                 [[ "$case_out" == *"running without timeout"* ]] || verdict="FAIL: no unbounded warning: $case_out"
