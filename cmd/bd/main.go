@@ -27,6 +27,7 @@ import (
 	"github.com/steveyegge/beads/internal/ceiling"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/creds"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/hooks"
@@ -553,7 +554,7 @@ func applyNoColorFlag() {
 }
 
 // loadBeadsEnvFile loads .beads/.env into process environment for per-project
-// Dolt credentials (GH#2520). Uses gotenv.Load which is non-overriding —
+// Dolt credentials (GH#2520). Imports are non-overriding —
 // existing shell env vars always take precedence.
 // Safe to call with an empty beadsDir (no-op).
 func loadBeadsEnvFile(beadsDir string) {
@@ -572,7 +573,19 @@ func loadBeadsEnvFile(beadsDir string) {
 	// thing, instead of target-role or CWD-role depending on the caller's
 	// unrelated BEADS_DB export.
 	beadsDirWasSet := os.Getenv("BEADS_DIR") != ""
-	_ = gotenv.Load(envFile)
+	env, err := gotenv.Read(envFile)
+	if err != nil {
+		return
+	}
+	for key, value := range env {
+		if slices.Contains(creds.CommandEnvKeys, key) {
+			fmt.Fprintf(os.Stderr, "beads: ignoring %s from .beads/.env (command settings must come from your shell environment or user config)\n", key)
+			continue
+		}
+		if _, exists := os.LookupEnv(key); !exists {
+			_ = os.Setenv(key, value)
+		}
+	}
 	if !beadsDirWasSet && os.Getenv("BEADS_DIR") != "" {
 		beadsDirProvidedAtStartup = true
 	}

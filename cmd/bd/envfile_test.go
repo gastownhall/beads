@@ -3,8 +3,55 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/config"
 )
+
+func TestFindMailDelegateUsesYaml(t *testing.T) {
+	t.Setenv("BEADS_MAIL_DELEGATE", "")
+	t.Setenv("BD_MAIL_DELEGATE", "")
+	if err := config.WithBeadsDir(t.TempDir(), func() {
+		config.Set("mail.delegate", "trusted mail")
+		if got := findMailDelegate(); got != "trusted mail" {
+			t.Errorf("delegate = %q, want trusted mail", got)
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLoadBeadsEnvFileRejectsCommands(t *testing.T) {
+	for _, key := range []string{"BEADS_DOLT_CREDENTIAL_COMMAND", "BEADS_HTTP_TOKEN_COMMAND", "BEADS_MAIL_DELEGATE", "BD_MAIL_DELEGATE", "EDITOR", "VISUAL", "BD_PAGER", "PAGER", "BEADS_DOLT_BIN"} {
+		t.Run(key, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(key+"=untrusted\nBEADS_TEST_NORMAL=normal\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv(key, "")
+			os.Unsetenv(key)
+			t.Setenv("BEADS_TEST_NORMAL", "")
+			os.Unsetenv("BEADS_TEST_NORMAL")
+			warning := captureStderr(t, func() { loadBeadsEnvFile(dir) })
+			if _, ok := os.LookupEnv(key); ok {
+				t.Errorf("%s was imported", key)
+			}
+			if os.Getenv("BEADS_TEST_NORMAL") != "normal" {
+				t.Error("normal setting not imported")
+			}
+			want := "beads: ignoring " + key + " from .beads/.env (command settings must come from your shell environment or user config)\n"
+			if !strings.Contains(warning, want) {
+				t.Errorf("warning = %q, want %q", warning, want)
+			}
+			t.Setenv(key, "trusted")
+			captureStderr(t, func() { loadBeadsEnvFile(dir) })
+			if os.Getenv(key) != "trusted" {
+				t.Error("shell setting changed")
+			}
+		})
+	}
+}
 
 func TestLoadBeadsEnvFile(t *testing.T) {
 	t.Run("loads env vars from .env file", func(t *testing.T) {

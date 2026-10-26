@@ -116,6 +116,12 @@ or [docs/getting-started/installation.md](docs/getting-started/installation.md#u
 
 ### Security And Verification
 
+Command settings must come from your shell environment or user configuration,
+not `.beads/.env`. Beads ignores credential commands, mail delegates, editor,
+pager, and Dolt executable overrides in that file and prints a warning for each.
+`bd config set mail.delegate "gt mail"` writes to user-global YAML rather than
+the replicated database; the workspace settings API rejects `mail.delegate`.
+
 Before trusting any downloaded binary, verify its checksum against the release `checksums.txt`.
 
 The install scripts verify release checksums before install. For manual installs, do this verification yourself before first run.

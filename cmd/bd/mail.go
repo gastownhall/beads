@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/metrics"
 )
 
@@ -96,15 +97,7 @@ func findMailDelegate() string {
 		return delegate
 	}
 
-	// Check bd config (requires database)
-	// This works even without a database connection since we use direct mode
-	if store != nil {
-		if delegate, err := store.GetConfig(rootCtx, "mail.delegate"); err == nil && delegate != "" {
-			return delegate
-		}
-	}
-
-	return ""
+	return config.GetString("mail.delegate")
 }
 
 func init() {

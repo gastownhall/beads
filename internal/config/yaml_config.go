@@ -135,6 +135,9 @@ var YamlOnlyKeys = map[string]bool{
 // IsYamlOnlyKey returns true if the given key should be stored in config.yaml
 // rather than the Dolt database.
 func IsYamlOnlyKey(key string) bool {
+	if key == "mail.delegate" {
+		return true
+	}
 	// Check exact match
 	if YamlOnlyKeys[key] {
 		return true
@@ -379,6 +382,7 @@ var userGlobalKeyPrefixes = []string{"metrics."}
 // to ~/.config/bd/config.yaml keeps it per-machine; viper still merges that
 // file, so config.NodeID() reads it back.
 var userGlobalExactKeys = map[string]bool{
+	"mail.delegate":        true,
 	"dolt.remotesapi-port": true,
 	"node_id":              true,
 }

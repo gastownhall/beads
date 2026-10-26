@@ -10,8 +10,18 @@ import (
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/workapi"
 	"github.com/steveyegge/beads/issueops"
 )
+
+func TestSetSettingRefusesCommandSetting(t *testing.T) {
+	_, err := workapi.ValidateSettingWrite("mail.delegate", "gt mail")
+	ts := newSettingsServer(t, &roleSettings{writeErr: err})
+	resp := ts.setSetting(t, "/v0/beads/config/mail.delegate", `{"value":"gt mail"}`)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", resp.StatusCode, readAll(t, resp))
+	}
+}
 
 // The wire edge of the two settings WRITES, on a fake role.
 //

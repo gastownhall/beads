@@ -12,6 +12,19 @@ import (
 	"time"
 )
 
+// CommandEnvKeys names environment settings whose values bd executes.
+var CommandEnvKeys = []string{
+	"BEADS_DOLT_CREDENTIAL_COMMAND",
+	"BEADS_HTTP_TOKEN_COMMAND",
+	"BEADS_MAIL_DELEGATE",
+	"BD_MAIL_DELEGATE",
+	"EDITOR",
+	"VISUAL",
+	"BD_PAGER",
+	"PAGER",
+	"BEADS_DOLT_BIN",
+}
+
 // CommandSource runs a configured command and reads a credential from its stdout —
 // the external credential-process idiom (kubectl ExecCredential / AWS
 // credential_process / git credential helper). bd knows nothing of the issuer: the

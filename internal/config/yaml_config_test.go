@@ -77,6 +77,12 @@ func TestIsYamlOnlyKey(t *testing.T) {
 	}
 }
 
+func TestMailDelegateUsesUserConfig(t *testing.T) {
+	if !IsYamlOnlyKey("mail.delegate") || !IsUserGlobalKey("mail.delegate") {
+		t.Fatal("mail.delegate must be routed to user YAML, not the database or project YAML")
+	}
+}
+
 func TestUpdateYamlKey(t *testing.T) {
 	tests := []struct {
 		name     string
