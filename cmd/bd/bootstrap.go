@@ -1459,6 +1459,36 @@ func printBootstrapRemoteBehindGuidance(w io.Writer, e *schema.RemoteMigrateGate
 			"      re-run `bd bootstrap`, or keep using a bd version that matches the remote.\n\n")
 }
 
+// beadsGitignoreWriter writes .beads/.gitignore; tests replace
+// beadsGitignore to make the write fail. It is an interface rather than a
+// func(string) error variable because gosec's taint analysis resolves a call
+// through a func value to every function of that signature, including exec
+// wrappers such as gitAddFile and setBeadsRole (G702 false positives).
+type beadsGitignoreWriter interface {
+	EnsureGitignoreForBeadsDir(beadsDir string) error
+}
+
+type doctorBeadsGitignore struct{}
+
+func (doctorBeadsGitignore) EnsureGitignoreForBeadsDir(beadsDir string) error {
+	return doctor.EnsureGitignoreForBeadsDir(beadsDir)
+}
+
+var beadsGitignore beadsGitignoreWriter = doctorBeadsGitignore{}
+
+// ensureBeadsGitignore writes .beads/.gitignore and downgrades a failure that
+// only left its mode looser than 0600 (doctor.ErrGitignorePermissions: every
+// required pattern is in place) to a warning, as bd init does. Any other
+// failure may leave patterns missing and is returned for the caller to fail on.
+func ensureBeadsGitignore(beadsDir string) error {
+	err := beadsGitignore.EnsureGitignoreForBeadsDir(beadsDir)
+	if errors.Is(err, doctor.ErrGitignorePermissions) {
+		WarnError("%v", err)
+		return nil
+	}
+	return err
+}
+
 // finalizeSyncedBootstrap writes metadata.json and config.yaml after a
 // successful sync clone, matching the on-disk layout that bd init produces.
 // It is idempotent: re-running over an already-finalized workspace leaves
@@ -1492,7 +1522,7 @@ func finalizeSyncedBootstrap(beadsDir, syncRemote string, cfg *configfile.Config
 	if err := createConfigYaml(beadsDir, false, ""); err != nil {
 		return fmt.Errorf("create config.yaml: %w", err)
 	}
-	if err := doctor.EnsureGitignoreForBeadsDir(beadsDir); err != nil {
+	if err := ensureBeadsGitignore(beadsDir); err != nil {
 		return fmt.Errorf("ensure .beads/.gitignore: %w", err)
 	}
 

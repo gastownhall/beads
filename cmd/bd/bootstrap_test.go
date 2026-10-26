@@ -12,9 +12,11 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
@@ -1434,6 +1436,75 @@ func TestFinalizeSyncedBootstrapWritesConfigFiles(t *testing.T) {
 			t.Errorf(".beads/.gitignore missing runtime pattern %q:\n%s", pattern, gitignore)
 		}
 	}
+}
+
+// failingBeadsGitignore is a beadsGitignoreWriter that always returns err.
+type failingBeadsGitignore struct{ err error }
+
+func (f failingBeadsGitignore) EnsureGitignoreForBeadsDir(string) error { return f.err }
+
+// stubBeadsGitignore makes every .beads/.gitignore write return err for the
+// test's duration.
+func stubBeadsGitignore(t *testing.T, err error) {
+	t.Helper()
+	orig := beadsGitignore
+	beadsGitignore = failingBeadsGitignore{err: err}
+	t.Cleanup(func() { beadsGitignore = orig })
+}
+
+// TestFinalizeSyncedBootstrap_GitignorePermissionFailureWarns pins #6225
+// finding 2: a chmod that fails after .beads/.gitignore already holds every
+// required pattern (doctor.ErrGitignorePermissions) must not abort bootstrap
+// before sync.remote is persisted; it is a warning, as in bd init. Any other
+// Ensure failure still fails bootstrap.
+func TestFinalizeSyncedBootstrap_GitignorePermissionFailureWarns(t *testing.T) {
+	t.Setenv("BEADS_DOLT_DATA_DIR", "")
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+
+	const syncRemote = "file:///tmp/fake-origin.git"
+
+	setup := func(t *testing.T, ensureErr error) string {
+		t.Helper()
+		beadsDir := filepath.Join(t.TempDir(), ".beads")
+		if err := os.MkdirAll(filepath.Join(beadsDir, "embeddeddolt"), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("BEADS_DIR", beadsDir)
+		stubBeadsGitignore(t, ensureErr)
+		return beadsDir
+	}
+
+	t.Run("permission-only failure warns and continues", func(t *testing.T) {
+		beadsDir := setup(t, fmt.Errorf("%w: %w", doctor.ErrGitignorePermissions, syscall.EPERM))
+
+		var err error
+		stderr := captureStderr(t, func() {
+			err = finalizeSyncedBootstrap(beadsDir, syncRemote, configfile.DefaultConfig(), "beads_hq")
+		})
+		if err != nil {
+			t.Fatalf("finalizeSyncedBootstrap: %v", err)
+		}
+		if !strings.Contains(stderr, "Warning:") || !strings.Contains(stderr, doctor.ErrGitignorePermissions.Error()) {
+			t.Errorf("stderr = %q, want a Warning: line naming %q", stderr, doctor.ErrGitignorePermissions)
+		}
+		if got := config.GetStringFromDir(beadsDir, "sync.remote"); got != syncRemote {
+			t.Errorf("sync.remote = %q, want %q persisted after the warning", got, syncRemote)
+		}
+	})
+
+	t.Run("other failure still fails", func(t *testing.T) {
+		ensureErr := errors.New("read .beads/.gitignore: is a directory")
+		beadsDir := setup(t, ensureErr)
+
+		err := finalizeSyncedBootstrap(beadsDir, syncRemote, configfile.DefaultConfig(), "beads_hq")
+		if !errors.Is(err, ensureErr) || !strings.Contains(err.Error(), "ensure .beads/.gitignore: ") {
+			t.Fatalf("err = %v, want it to wrap %q as ensure .beads/.gitignore: …", err, ensureErr)
+		}
+	})
 }
 
 func TestFinalizeSyncedBootstrap_WorktreeStubDoesNotShadowTargetConfig(t *testing.T) {
