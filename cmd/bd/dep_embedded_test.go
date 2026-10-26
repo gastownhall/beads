@@ -191,6 +191,20 @@ func TestEmbeddedDepAAddAndList(t *testing.T) {
 			t.Errorf("expected dependency ID in JSON: %s", stdout.String())
 		}
 	})
+
+	// #7842: a direction dep list does not answer is refused, rather than
+	// answered with the down set at exit 0.
+	t.Run("list_direction_refuses_unknown", func(t *testing.T) {
+		for _, bad := range []string{"both", "banana", ""} {
+			out := bdDepFail(t, bd, dir, "list", issueC.ID, "--direction", bad)
+			if !strings.Contains(out, "--direction must be 'down' or 'up'") {
+				t.Errorf("--direction %q: expected the refusal: %s", bad, out)
+			}
+			if strings.Contains(out, issueD.ID) {
+				t.Errorf("--direction %q: listed a dependency anyway: %s", bad, out)
+			}
+		}
+	})
 }
 
 func TestEmbeddedDepAAddTypesAndFlags(t *testing.T) {
