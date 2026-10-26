@@ -231,20 +231,36 @@ func TestGenerateHookSection_Timeout(t *testing.T) {
 	if !strings.Contains(section, `"$_bd_timeout_command" -- "$_bd_timeout"`) {
 		t.Error("section missing GNU timeout argv separator")
 	}
-	if !strings.Contains(section, "perl -e 'alarm shift; exec @ARGV' --") {
-		t.Error("section missing perl alarm fallback for stock macOS")
+	// The Perl backend must supervise bd (fork/waitpid, TERM at the deadline)
+	// rather than alarm+exec: a pending alarm survives execve and the Go runtime
+	// catches SIGALRM without acting on it, so the one-liner never stopped a
+	// real bd (GH#7753).
+	if strings.Contains(section, "alarm shift; exec @ARGV") {
+		t.Error("section still uses the perl alarm+exec fallback, whose SIGALRM the Go runtime ignores (GH#7753)")
+	}
+	for _, fragment := range []string{
+		"fork",
+		"exec { $ARGV[0] } @ARGV",
+		`kill "TERM", $pid`,
+		"exit 142",
+		`' -- "$_bd_timeout" bd hooks run`,
+	} {
+		if !strings.Contains(section, fragment) {
+			t.Errorf("section missing perl supervisor fragment %q", fragment)
+		}
 	}
 	if !strings.Contains(section, "_bd_timeout_backend=perl") {
 		t.Error("section missing scoped perl backend marker")
 	}
 
-	// GNU deadline statuses and Perl SIGALRM are scoped to the backend that can
-	// synthesize them. The direct fallback must not swallow a natural 124/142.
+	// GNU deadline statuses and the Perl supervisor's 142 are scoped to the
+	// backend that can synthesize them. The direct fallback must not swallow a
+	// natural 124/142.
 	if !strings.Contains(section, `"$_bd_exit" -eq 124`) {
 		t.Error("section missing timeout exit code handling")
 	}
 	if !strings.Contains(section, `"$_bd_timeout_backend" = perl`) || !strings.Contains(section, `"$_bd_exit" -eq 142`) {
-		t.Error("section missing perl-scoped SIGALRM timeout exit code handling")
+		t.Error("section missing perl-scoped supervisor timeout exit code handling")
 	}
 	if !strings.Contains(section, "timed out") {
 		t.Error("section missing timeout warning message")
@@ -253,6 +269,22 @@ func TestGenerateHookSection_Timeout(t *testing.T) {
 	// Last-resort path is explicit when no timeout implementation is available.
 	if !strings.Contains(section, "running without timeout") {
 		t.Error("section missing clear fallback warning for systems without timeout support")
+	}
+
+	// The multi-line Perl program must not break the two invariants the
+	// injector relies on: removeOrphanedBeginBlock ends an orphaned section at
+	// the first blank line, and the exec-line rewriting treats a line starting
+	// with exec as the section's effective terminus.
+	for _, hookName := range managedHookNames {
+		for _, line := range strings.Split(strings.TrimSuffix(generateHookSection(hookName), "\n"), "\n") {
+			trimmed := strings.TrimSpace(line)
+			if trimmed == "" {
+				t.Errorf("%s section contains a blank line", hookName)
+			}
+			if isExecLine(trimmed) {
+				t.Errorf("%s section contains a line starting with exec", hookName)
+			}
+		}
 	}
 }
 

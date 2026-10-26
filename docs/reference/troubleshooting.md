@@ -547,15 +547,17 @@ native Windows `timeout.exe` is not compatible. If neither a coreutils timeout
 nor Perl is available, the hook warns that it is running directly without a
 deadline.
 
-The coreutils helper sends `TERM`; on POSIX hosts, Perl's alarm applies to the
-direct `bd` process. Git for Windows Perl does not guarantee that alarm across
-`exec`, so a coreutils `timeout` (GNU or uutils) is preferred there.
-TERM-resistant work and descendant processes are not guaranteed to stop.
+The coreutils helper sends `TERM`; on POSIX hosts, the Perl fallback runs `bd`
+as a child and sends it `TERM` at the deadline, signalling only that direct
+process, not its process group. A coreutils `timeout` (GNU or uutils) is
+preferred on Git for Windows. TERM-resistant work and descendant processes are
+not guaranteed to stop.
 
 Already-installed hook sections are not refreshed automatically. After upgrading
-to a version that changed the timeout probe — the name-only check, or the uutils
-coreutils banner — run `bd hooks install` once to refresh existing canonical
-sections.
+to a version that changed the timeout probe — the name-only check, the uutils
+coreutils banner, or the Perl fallback that could not stop `bd`
+([#7753](https://github.com/gastownhall/beads/issues/7753)) — run
+`bd hooks install` once to refresh existing canonical sections.
 
 ### Permission denied on git hooks
 

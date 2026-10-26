@@ -932,6 +932,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Generated git hooks' Perl fallback now stops `bd` at
+  `BEADS_HOOK_TIMEOUT`**
+  ([#7753](https://github.com/gastownhall/beads/issues/7753)). On hosts with
+  Perl and no coreutils `timeout` — stock macOS — the managed hook section
+  wrapped `bd hooks run` in `perl -e 'alarm shift; exec @ARGV'`. The pending
+  alarm survived the `exec`, so `SIGALRM` reached `bd`, and the Go runtime
+  catches that signal without acting on it: the deadline never fired, and a
+  hung hook silently blocked the git operation until it was killed by hand.
+  The Perl backend now runs `bd` as a child process and sends it `SIGTERM` at
+  the deadline, then waits for it; it signals only the direct `bd` process,
+  not its process group. The fix ships in the generated hook section, which
+  is rewritten only by `bd hooks install` — hosts that already installed
+  hooks must run it once to pick up the fix.
 - The batched bulk readers no longer return an issue's rows twice when the
   same id is requested twice. Since the 200-id batching (#6444), an id that
   appeared in two batches had its comments, labels, dependency records,
