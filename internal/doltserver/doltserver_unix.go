@@ -42,15 +42,16 @@ func findPIDOnPort(port int) int {
 	return 0
 }
 
-// listDoltProcessPIDs returns PIDs of all running dolt sql-server processes.
-// Excludes zombies and defunct processes. Callers derive count (len) and
-// membership (linear scan) from the returned slice.
-func listDoltProcessPIDs() []int {
+// readDoltProcessPIDs returns PIDs of all running dolt sql-server processes.
+// Excludes zombies and defunct processes. An error means the process list
+// could not be read (ps can be refused, e.g. inside a macOS sandbox), which
+// is not the same as there being no dolt processes.
+func readDoltProcessPIDs() ([]int, error) {
 	out, err := exec.Command("ps", "-axo", "pid=,state=,command=").Output()
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("listing processes: %w", err)
 	}
-	return parseDoltProcessPIDs(out)
+	return parseDoltProcessPIDs(out), nil
 }
 
 // parseDoltProcessPIDs returns matching, non-defunct Dolt server PIDs from a

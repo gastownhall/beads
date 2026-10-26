@@ -244,6 +244,81 @@ func TestIsRunningCorruptPID(t *testing.T) {
 	}
 }
 
+// writeTrackedStateForLiveProcess writes a pid file naming this test process,
+// which is alive, and a port file naming port, with no configured port.
+func writeTrackedStateForLiveProcess(t *testing.T, dir string, port int) {
+	t.Helper()
+	t.Setenv("GT_ROOT", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	if err := os.WriteFile(pidPath(dir), []byte(strconv.Itoa(os.Getpid())), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if port > 0 {
+		if err := writePortFile(dir, port); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// assertStateFilesKept fails unless both state files still hold what
+// writeTrackedStateForLiveProcess wrote.
+func assertStateFilesKept(t *testing.T, dir string, port int) {
+	t.Helper()
+	data, err := os.ReadFile(pidPath(dir))
+	if err != nil {
+		t.Errorf("pid file removed: %v", err)
+	} else if got := strings.TrimSpace(string(data)); got != strconv.Itoa(os.Getpid()) {
+		t.Errorf("pid file = %q, want %d", got, os.Getpid())
+	}
+	if got := readPortFile(dir); got != port {
+		t.Errorf("port file = %d, want %d", got, port)
+	}
+}
+
+// GH#7214: when the process list cannot be read (macOS Seatbelt refuses the
+// setuid /bin/ps), "could not list dolt processes" must not be read as "PID
+// was reused". An empty PATH makes both ps and powershell.exe fail to exec.
+func TestIsRunningKeepsStateWhenPsCannotRun(t *testing.T) {
+	dir := t.TempDir()
+	writeTrackedStateForLiveProcess(t, dir, 14567)
+	t.Setenv("PATH", t.TempDir())
+
+	state, err := IsRunning(dir)
+	if err != nil {
+		t.Fatalf("IsRunning error: %v", err)
+	}
+	if !state.Running || state.PID != os.Getpid() || state.Port != 14567 {
+		t.Errorf("IsRunning = %+v, want Running with PID %d and port 14567", state, os.Getpid())
+	}
+	assertStateFilesKept(t, dir, 14567)
+}
+
+// errProcessListUnreadable stands in for a process list that cannot be read.
+var errProcessListUnreadable = errors.New("listing processes: operation not permitted")
+
+// stubProcessList replaces the process-list reader for the test.
+func stubProcessList(t *testing.T, read func() ([]int, error)) {
+	t.Helper()
+	orig := readDoltProcesses
+	readDoltProcesses = read
+	t.Cleanup(func() { readDoltProcesses = orig })
+}
+
+func TestIsRunningKeepsStateWhenProcessListUnreadable(t *testing.T) {
+	dir := t.TempDir()
+	writeTrackedStateForLiveProcess(t, dir, 14567)
+	stubProcessList(t, func() ([]int, error) { return nil, errProcessListUnreadable })
+
+	state, err := IsRunning(dir)
+	if err != nil {
+		t.Fatalf("IsRunning error: %v", err)
+	}
+	if !state.Running || state.PID != os.Getpid() || state.Port != 14567 {
+		t.Errorf("IsRunning = %+v, want Running with PID %d and port 14567", state, os.Getpid())
+	}
+	assertStateFilesKept(t, dir, 14567)
+}
+
 func TestIsRunningCorruptPIDRemovesPortFile(t *testing.T) {
 	dir := t.TempDir()
 
