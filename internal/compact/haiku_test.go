@@ -227,6 +227,25 @@ func TestNewAIClientOptionsPinsBeforeSendingKey(t *testing.T) {
 	}
 }
 
+func TestNewAIClientOptionsIgnoresUnusedMiniMaxEndpoint(t *testing.T) {
+	t.Cleanup(func() { config.Set("ai.base_url", "") })
+	config.Set("ai.base_url", "")
+	t.Setenv("ANTHROPIC_API_KEY", "a")
+	t.Setenv("MINIMAX_API_KEY", "m")
+	t.Setenv("MINIMAX_BASE_URL", "::bad")
+
+	_, source, baseURL, err := NewAIClientOptions("")
+	if err != nil {
+		t.Fatalf("unused MiniMax endpoint caused an error: %v", err)
+	}
+	if source != config.AIAPIKeySourceAnthropicEnv {
+		t.Fatalf("key source = %q, want Anthropic environment", source)
+	}
+	if baseURL != "" {
+		t.Fatalf("base URL = %q, want SDK default", baseURL)
+	}
+}
+
 func TestRenderTier1Prompt(t *testing.T) {
 	client, err := newHaikuClient("test-key")
 	if err != nil {

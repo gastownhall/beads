@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"math"
 	"net"
-	"os"
 	"sync"
 	"text/template"
 	"time"
@@ -73,23 +72,23 @@ func newHaikuClient(apiKey string) (*haikuClient, error) {
 }
 
 func NewAIClientOptions(explicitKey string) ([]option.RequestOption, config.AIAPIKeySource, string, error) {
+	apiKey, keySource := config.ResolveAIAPIKey(explicitKey)
+	if apiKey == "" {
+		return nil, keySource, "", fmt.Errorf("%w: set ANTHROPIC_API_KEY, MINIMAX_API_KEY, or ai.api_key in config", errAPIKeyRequired)
+	}
+	baseURL := config.DefaultAIBaseURL(keySource)
 	configuredBaseURL := config.GetString("ai.base_url")
 	if configuredBaseURL != "" {
 		if err := endpointtrust.Check(endpointtrust.WorkspaceKey(), "ai", configuredBaseURL, !config.IsFromProjectConfig("ai.base_url")); err != nil {
 			return nil, config.AIAPIKeySourceNone, "", err
 		}
-	} else if baseURL := os.Getenv("MINIMAX_BASE_URL"); baseURL != "" && os.Getenv("MINIMAX_API_KEY") != "" {
+	} else if baseURL != "" && baseURL != config.MiniMaxDefaultBaseURL {
 		if err := endpointtrust.Check(endpointtrust.WorkspaceKey(), "ai", baseURL, true); err != nil {
 			return nil, config.AIAPIKeySourceNone, "", err
 		}
 	}
 
-	apiKey, keySource := config.ResolveAIAPIKey(explicitKey)
-	if apiKey == "" {
-		return nil, keySource, "", fmt.Errorf("%w: set ANTHROPIC_API_KEY, MINIMAX_API_KEY, or ai.api_key in config", errAPIKeyRequired)
-	}
 	clientOptions := []option.RequestOption{option.WithAPIKey(apiKey)}
-	baseURL := config.DefaultAIBaseURL(keySource)
 	if baseURL != "" {
 		clientOptions = append(clientOptions, option.WithBaseURL(baseURL))
 	}
