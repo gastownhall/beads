@@ -536,6 +536,8 @@ func (t *Tracker) IsExternalRef(ref string) bool {
 // substring arms. Scheme is not compared, so an http:// ref on an https://
 // instance is still claimed — leniency only, since the IID patterns below
 // still decide what is ultimately recognized.
+// Recognition stays host-scoped; pull fallback identity is project-qualified
+// by MatchKey.
 func (t *Tracker) onConfiguredHost(ref string) bool {
 	if t.client == nil || t.client.BaseURL == "" {
 		return false
@@ -566,6 +568,15 @@ func (t *Tracker) ExtractIdentifier(ref string) string {
 		return matches[1]
 	}
 	return ""
+}
+
+// MatchKey implements tracker.MatchKeyer. ExtractIdentifier returns the bare
+// IID that FetchIssue addresses in the configured project, but IIDs repeat
+// across projects, so pull fallback matching keys refs by host, project path
+// and IID parsed from the ref itself. Refs without a project take no
+// fallback match.
+func (t *Tracker) MatchKey(ref string) string {
+	return matchKeyFromURL(ref)
 }
 
 func parseMilestoneIdentifier(identifier string) (int, bool, error) {

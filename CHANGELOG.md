@@ -932,6 +932,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd gitlab pull` no longer overwrites a bead linked to another GitLab
+  project's issue with the same number. Issue IIDs are only unique within a
+  project, but a pull matched local beads by IID alone when the exact
+  `external_ref` lookup missed, so pulling project B's issue 7 into a
+  database holding project A's issue 7 updated (and relinked) project A's
+  bead. The fallback match is now keyed by host, project path and IID parsed
+  from the ref (#7795, reported by @NahumLitvin).
 - The batched bulk readers no longer return an issue's rows twice when the
   same id is requested twice. Since the 200-id batching (#6444), an id that
   appeared in two batches had its comments, labels, dependency records,

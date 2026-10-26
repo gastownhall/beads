@@ -368,7 +368,7 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 		if localRef == "" || !e.Tracker.IsExternalRef(localRef) {
 			continue
 		}
-		identifier := e.Tracker.ExtractIdentifier(localRef)
+		identifier := e.matchKey(localRef)
 		if identifier == "" {
 			continue
 		}
@@ -450,7 +450,7 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 		ref := e.Tracker.BuildExternalRef(&extIssue)
 		existing, _ := e.Store.GetIssueByExternalRef(ctx, ref)
 		if existing == nil && ref != "" {
-			identifier := e.Tracker.ExtractIdentifier(ref)
+			identifier := e.matchKey(ref)
 			if identifier != "" {
 				existing = localByExternalIdentifier[identifier]
 			}
@@ -674,6 +674,17 @@ func appendFilteredDependencies(dst []DependencyInfo, deps []DependencyInfo, all
 		dst = append(dst, dep)
 	}
 	return dst
+}
+
+// matchKey returns the key under which a pull matches ref to a local issue
+// when the exact external_ref lookup misses. Trackers whose identifiers are
+// not unique across a pull's namespace supply it via MatchKeyer; the rest
+// match by ExtractIdentifier.
+func (e *Engine) matchKey(ref string) string {
+	if mk, ok := e.Tracker.(MatchKeyer); ok {
+		return mk.MatchKey(ref)
+	}
+	return e.Tracker.ExtractIdentifier(ref)
 }
 
 func (e *Engine) fetchPrelinkedIssues(ctx context.Context, fetched []TrackerIssue, localIssues []*types.Issue, lastSync *time.Time) ([]TrackerIssue, map[string]bool, error) {

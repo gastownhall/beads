@@ -75,6 +75,14 @@ type PullStatsProvider interface {
 	LastPullStats() (queried int, candidates int)
 }
 
+// MatchKeyer is implemented by trackers whose ExtractIdentifier values are
+// not unique across the namespace a single pull can span (e.g. GitLab IIDs
+// are project-scoped). MatchKey returns the fallback-dedup key for an
+// external ref; "" means the ref takes no fallback match.
+type MatchKeyer interface {
+	MatchKey(ref string) string
+}
+
 // FieldMapper handles bidirectional conversion of issue fields between
 // an external tracker and beads. Each tracker provides its own mapper.
 type FieldMapper interface {

@@ -3,6 +3,8 @@ package gitlab
 import (
 	"context"
 	"fmt"
+	"net/url"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -60,6 +62,32 @@ type LinkResolver struct {
 // NewLinkResolver creates a GitLab dependency link resolver.
 func NewLinkResolver(client *Client) *LinkResolver {
 	return &LinkResolver{Client: client}
+}
+
+// matchKeyIssuePathPattern and matchKeyMilestonePathPattern split a GitLab
+// issue/work-item or milestone URL path into its project path and IID.
+var (
+	matchKeyIssuePathPattern     = regexp.MustCompile(`^/(.+)/-/issues/([1-9]\d*)$`)
+	matchKeyMilestonePathPattern = regexp.MustCompile(`^/(.+)/-/milestones/([1-9]\d*)$`)
+)
+
+// matchKeyFromURL returns the project-qualified pull match key for a GitLab
+// issue or milestone URL, or "" when ref is not one. IIDs are only unique
+// within a project, so the key carries the host and full project path:
+// gl://{host}/{project}#{iid} for issues and
+// gl://{host}/{project}#milestone:{iid} for milestones.
+func matchKeyFromURL(ref string) string {
+	u, err := url.Parse(strings.TrimSpace(ref))
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	if m := matchKeyMilestonePathPattern.FindStringSubmatch(u.Path); m != nil {
+		return "gl://" + u.Host + "/" + m[1] + "#" + gitLabMilestoneIdentifierPrefix + m[2]
+	}
+	if m := matchKeyIssuePathPattern.FindStringSubmatch(u.Path); m != nil {
+		return "gl://" + u.Host + "/" + m[1] + "#" + m[2]
+	}
+	return ""
 }
 
 // IssueIIDFromRef extracts a GitLab issue/work-item IID from a local external
