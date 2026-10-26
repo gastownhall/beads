@@ -836,6 +836,94 @@ func TestOpenRetryCancelAfterSuccessDrainsTheProbe(t *testing.T) {
 	}
 }
 
+// An open the caller ended reports that it was ended, however its dial failed.
+// newServerMode keeps such an open out of the circuit breaker by asking the
+// CONTEXT, so an open canceled while its dial failed non-retryably (an unknown
+// host) took that path, but the error it returned wrapped only the dial
+// failure: errors.Is could not see the cancellation a caller has to tell apart
+// from an outage. Both context errors are checked, on the first probe and on a
+// retry dial that fails non-retryably once the context has ended.
+func TestOpenRetryCanceledOpenKeepsItsContextCause(t *testing.T) {
+	errUnknownHost := errors.New("dial tcp: lookup nowhere.invalid: no such host")
+	for _, tc := range []struct {
+		name string
+		// ctx returns the open's context and the function that ends it.
+		ctx        func(t *testing.T) (context.Context, context.CancelFunc)
+		firstProbe error
+		// cancelInRetryDial ends the context inside the first retry dial,
+		// which then fails with errUnknownHost.
+		cancelInRetryDial bool
+		wantCause         error
+		wantRetryDials    int
+	}{
+		{
+			name: "already canceled, first probe fails non-retryably",
+			ctx: func(t *testing.T) (context.Context, context.CancelFunc) {
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				return ctx, cancel
+			},
+			firstProbe: errUnknownHost,
+			wantCause:  context.Canceled,
+		},
+		{
+			name: "deadline passed, first probe fails non-retryably",
+			ctx: func(t *testing.T) (context.Context, context.CancelFunc) {
+				return context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+			},
+			firstProbe: errUnknownHost,
+			wantCause:  context.DeadlineExceeded,
+		},
+		{
+			name: "canceled during a retry dial that fails non-retryably",
+			ctx: func(t *testing.T) (context.Context, context.CancelFunc) {
+				return context.WithCancel(context.Background())
+			},
+			firstProbe:        errStubRefused,
+			cancelInRetryDial: true,
+			wantCause:         context.Canceled,
+			wantRetryDials:    1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("BEADS_TEST_MODE", "1")
+			captureOpenRetryNotice(t)
+			ctx, cancel := tc.ctx(t)
+			t.Cleanup(cancel)
+			log := stubOpenRetryDials(t, tc.firstProbe, []error{errUnknownHost})
+			if tc.cancelInRetryDial {
+				stubbed := openProbeDialContext
+				openProbeDialContext = func(dialCtx context.Context, network, addr string, timeout time.Duration) (net.Conn, error) {
+					cancel()
+					return stubbed(dialCtx, network, addr, timeout)
+				}
+			}
+			cfg := externalOpenConfig(writeBudgetConfig(t, map[string]string{config.OpenRetryBudgetKey: "30s"}))
+
+			_, err := newServerMode(ctx, cfg)
+			if err == nil {
+				t.Fatal("expected the canceled open to fail")
+			}
+			legacy, ctxDials := log.counts()
+			if legacy != 1 || ctxDials != tc.wantRetryDials {
+				t.Fatalf("dials legacy=%d ctx=%d, want 1 and %d", legacy, ctxDials, tc.wantRetryDials)
+			}
+			assertFirstProbeTimeout(t, log)
+			if !errors.Is(err, tc.wantCause) {
+				t.Fatalf("canceled open lost its context cause: errors.Is(err, %v) = false for %q", tc.wantCause, err)
+			}
+			if !errors.Is(err, errUnknownHost) {
+				t.Fatalf("canceled open lost the dial failure it reports: %q", err)
+			}
+			// The canceled return omits the outage advice, as it omits the
+			// breaker failure: the caller ended this open, the server did not.
+			if strings.Contains(err.Error(), "bd dolt start") {
+				t.Fatalf("canceled open took the outage path, advice and breaker failure included: %q", err)
+			}
+		})
+	}
+}
+
 // --- dialer wiring ------------------------------------------------------
 
 // The per-attempt timeout must reach the dialer. Reading the field back is the

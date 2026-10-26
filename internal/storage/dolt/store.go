@@ -2169,8 +2169,9 @@ var newServerDialer = func(timeout time.Duration) *net.Dialer {
 //
 // A non-retryable failure returns immediately: the budget buys time for a
 // restarting or briefly unreachable server, not for a misconfigured one. On a
-// context that ends mid-loop the returned error wraps ctx.Err(), which is what
-// the caller tests to keep a caller-ended open out of the circuit breaker.
+// context that has ended, before the loop or during it, the returned error
+// wraps ctx.Err() whichever way the dial failed; that context is what the
+// caller tests to keep a caller-ended open out of the circuit breaker.
 // openRetryNotice is where the open-retry loop's one-line notice goes.
 // A package-level writer so a test can capture it; os.Stderr in production.
 //
@@ -2187,13 +2188,22 @@ func retryOpenProbe(ctx context.Context, network, addr string, timeout, budget t
 	deadline := time.Now().Add(budget)
 
 	lastErr := firstErr
+	attempts := 1 // the caller's first probe
+	// The context is asked before the error is classified, here and after
+	// each retry dial: an open the caller ended returns ctx.Err() however
+	// its dial failed. A non-retryable failure, such as an unknown host,
+	// would otherwise return without it, and the caller, which keeps a
+	// canceled open out of the circuit breaker by asking the context, would
+	// report a cancellation that errors.Is cannot see.
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, openRetryCanceled(ctxErr, lastErr, attempts, budget)
+	}
 	if !isRetryableError(lastErr) {
 		return nil, lastErr
 	}
 	debug.Logf("dolt: %s %s unreachable (%v); retrying open within %s=%s\n",
 		network, addr, lastErr, config.OpenRetryBudgetKey, budget)
 
-	attempts := 1 // the caller's first probe
 	notified := false
 	for {
 		if ctxErr := ctx.Err(); ctxErr != nil {
@@ -2247,6 +2257,9 @@ func retryOpenProbe(ctx context.Context, network, addr string, timeout, budget t
 		}
 		lastErr = err
 		if !isRetryableError(err) {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, openRetryCanceled(ctxErr, lastErr, attempts, budget)
+			}
 			return nil, err
 		}
 		debug.Logf("dolt: open attempt %d for %s %s failed: %v\n", attempts, network, addr, err)
