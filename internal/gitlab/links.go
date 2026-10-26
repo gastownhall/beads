@@ -64,30 +64,67 @@ func NewLinkResolver(client *Client) *LinkResolver {
 	return &LinkResolver{Client: client}
 }
 
-// matchKeyIssuePathPattern and matchKeyMilestonePathPattern split a GitLab
-// issue/work-item or milestone URL path into its project path and IID.
+// matchKeyIssuePathPattern and matchKeyMilestonePathPattern split a
+// canonical GitLab URL path into its project path and IID. Issues and work
+// items share a project's IID space, and GitLab still serves the legacy
+// issue path without "/-/". A group milestone's project path is
+// "groups/{group}".
 var (
-	matchKeyIssuePathPattern     = regexp.MustCompile(`^/(.+)/-/issues/([1-9]\d*)$`)
-	matchKeyMilestonePathPattern = regexp.MustCompile(`^/(.+)/-/milestones/([1-9]\d*)$`)
+	matchKeyIssuePathPattern     = regexp.MustCompile(`^/(.+?)(?:/-)?/(?:issues|work_items)/([1-9]\d*)$`)
+	matchKeyMilestonePathPattern = regexp.MustCompile(`^/(.+?)/-/milestones/([1-9]\d*)$`)
 )
 
 // matchKeyFromURL returns the project-qualified pull match key for a GitLab
-// issue or milestone URL, or "" when ref is not one. IIDs are only unique
-// within a project, so the key carries the host and full project path:
-// gl://{host}/{project}#{iid} for issues and
+// issue, work-item or milestone URL, or "" when ref is not one. IIDs are only
+// unique within a project, so the key carries the host and full project path:
+// gl://{host}/{project}#{iid} for issues and work items and
 // gl://{host}/{project}#milestone:{iid} for milestones.
 func matchKeyFromURL(ref string) string {
-	u, err := url.Parse(strings.TrimSpace(ref))
-	if err != nil || u.Host == "" {
+	host, path, ok := canonicalGitLabURL(ref)
+	if !ok {
 		return ""
 	}
-	if m := matchKeyMilestonePathPattern.FindStringSubmatch(u.Path); m != nil {
-		return "gl://" + u.Host + "/" + m[1] + "#" + gitLabMilestoneIdentifierPrefix + m[2]
+	if m := matchKeyMilestonePathPattern.FindStringSubmatch(path); m != nil && validMatchKeyProject(m[1]) {
+		return "gl://" + host + "/" + m[1] + "#" + gitLabMilestoneIdentifierPrefix + m[2]
 	}
-	if m := matchKeyIssuePathPattern.FindStringSubmatch(u.Path); m != nil {
-		return "gl://" + u.Host + "/" + m[1] + "#" + m[2]
+	if m := matchKeyIssuePathPattern.FindStringSubmatch(path); m != nil && validMatchKeyProject(m[1]) {
+		return "gl://" + host + "/" + m[1] + "#" + m[2]
 	}
 	return ""
+}
+
+// canonicalGitLabURL reduces a GitLab URL to the parts that identify a
+// resource: the lowercased host without a default port, and the lowercased
+// path without repeated or trailing slashes (GitLab routes are
+// case-insensitive). Scheme, query and fragment are ignored.
+func canonicalGitLabURL(raw string) (host, path string, ok bool) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Hostname() == "" {
+		return "", "", false
+	}
+	host = strings.ToLower(u.Hostname())
+	if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	if port := u.Port(); port != "" && port != "80" && port != "443" {
+		host += ":" + port
+	}
+	path = strings.ToLower(u.Path)
+	for strings.Contains(path, "//") {
+		path = strings.ReplaceAll(path, "//", "/")
+	}
+	return host, strings.TrimSuffix(path, "/"), true
+}
+
+// validMatchKeyProject rejects project paths with an empty or "-" segment,
+// which no GitLab project has.
+func validMatchKeyProject(project string) bool {
+	for _, seg := range strings.Split(project, "/") {
+		if seg == "" || seg == "-" {
+			return false
+		}
+	}
+	return true
 }
 
 // IssueIIDFromRef extracts a GitLab issue/work-item IID from a local external

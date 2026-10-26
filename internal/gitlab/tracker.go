@@ -573,10 +573,39 @@ func (t *Tracker) ExtractIdentifier(ref string) string {
 // MatchKey implements tracker.MatchKeyer. ExtractIdentifier returns the bare
 // IID that FetchIssue addresses in the configured project, but IIDs repeat
 // across projects, so pull fallback matching keys refs by host, project path
-// and IID parsed from the ref itself. Refs without a project take no
-// fallback match.
+// and IID parsed from the ref itself.
+//
+// The "gitlab:{iid}" shorthand names no project. When the configured project
+// is known by path (gitlab.project_path, or a path-form gitlab.project_id) it
+// is keyed as that project's issue on the gitlab.url host, so it still
+// matches the issue's web_url; otherwise it takes no fallback match.
 func (t *Tracker) MatchKey(ref string) string {
+	if m := glShorthandPattern.FindStringSubmatch(ref); len(m) >= 2 {
+		project := t.matchKeyProjectPath()
+		if project == "" || t.client == nil {
+			return ""
+		}
+		host, basePath, ok := canonicalGitLabURL(t.client.BaseURL)
+		if !ok {
+			return ""
+		}
+		return "gl://" + host + basePath + "/" + project + "#" + m[1]
+	}
 	return matchKeyFromURL(ref)
+}
+
+// matchKeyProjectPath returns the configured project's canonical path, or ""
+// when it is only known by numeric ID.
+func (t *Tracker) matchKeyProjectPath() string {
+	project := t.projectPath
+	if project == "" && t.client != nil && strings.Contains(t.client.ProjectID, "/") {
+		project = t.client.ProjectID
+	}
+	project = strings.Trim(strings.ToLower(strings.TrimSpace(project)), "/")
+	if !validMatchKeyProject(project) {
+		return ""
+	}
+	return project
 }
 
 func parseMilestoneIdentifier(identifier string) (int, bool, error) {
