@@ -340,3 +340,24 @@ func TestAnalyzeWithAI_ThinkingBlockFirst(t *testing.T) {
 		})
 	}
 }
+
+// Issue #7515: a reply with no text block at all keeps today's fallback to
+// the mechanical candidates.
+func TestAnalyzeWithAI_NoTextBlock(t *testing.T) {
+	client := newStubAnthropicClient(t, messagesReply(`[{"type":"thinking","thinking":"","signature":"c2ln"}]`))
+	candidates := []duplicatePair{{
+		IssueA:     &types.Issue{ID: "bd-001", Title: "Fix authentication bug in login flow"},
+		IssueB:     &types.Issue{ID: "bd-002", Title: "Authentication login bug fix"},
+		Similarity: 0.3,
+		Method:     "mechanical",
+	}}
+
+	got := analyzeWithAI(context.Background(), client, "claude-haiku-5-5", candidates)
+
+	if len(got) != 1 {
+		t.Fatalf("got %d pairs, want the one mechanical candidate back: %+v", len(got), got)
+	}
+	if got[0] != candidates[0] {
+		t.Errorf("pair = %+v, want the mechanical candidate back unchanged", got[0])
+	}
+}

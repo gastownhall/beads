@@ -421,3 +421,36 @@ func TestCallWithRetry_SkipsLeadingThinkingBlock(t *testing.T) {
 		})
 	}
 }
+
+// Issue #7515: a reply with no text block at all keeps today's fail-closed
+// error instead of being accepted.
+func TestCallWithRetry_NoTextBlock(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+	}{
+		{
+			name:    "thinking only",
+			content: `[{"type":"thinking","thinking":"","signature":"c2ln"}]`,
+		},
+		{
+			name:    "no content blocks",
+			content: `[]`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := newStubHaikuClient(t, stubMessagesReply(tt.content))
+
+			got, err := client.callWithRetry(context.Background(), "test prompt")
+
+			if err == nil {
+				t.Fatalf("got %q, want an error for a reply with no text block", got)
+			}
+			if !strings.Contains(err.Error(), "unexpected response format") {
+				t.Fatalf("error = %v, want it to contain %q", err, "unexpected response format")
+			}
+		})
+	}
+}
