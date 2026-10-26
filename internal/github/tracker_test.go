@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -485,6 +486,55 @@ func TestCreateIssue_NonClosedSkipsClose(t *testing.T) {
 				t.Errorf("%s issue should send only the create POST, got requests: %+v", status, *reqs)
 			}
 		})
+	}
+}
+
+// TestCreateIssue_FailedCloseSurfacesWarning verifies that when the follow-up
+// close fails, CreateIssue still returns the created issue (so the external_ref
+// is stored and the next push does not duplicate it) but records a warning on
+// the returned TrackerIssue so the sync engine can surface it. The PATCH fails
+// with 422: the client returns it as an APIError without retrying (403/429
+// rate-limit responses and 5xx would retry with backoff).
+func TestCreateIssue_FailedCloseSurfacesWarning(t *testing.T) {
+	var reqs []capturedRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqs = append(reqs, capturedRequest{method: r.Method, path: r.URL.Path})
+		if r.Method == http.MethodPost && r.URL.Path == "/repos/owner/repo/issues" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"id":100,"number":42,"state":"open","html_url":"https://github.com/owner/repo/issues/42"}`)
+			return
+		}
+		http.Error(w, `{"message":"Validation Failed"}`, http.StatusUnprocessableEntity)
+	}))
+	t.Cleanup(srv.Close)
+	tr := &Tracker{
+		client: NewClient("token", "owner", "repo").WithBaseURL(srv.URL),
+		config: DefaultMappingConfig(),
+	}
+
+	ti, err := tr.CreateIssue(context.Background(), &types.Issue{
+		Title: "already done", IssueType: types.TypeTask, Status: types.StatusClosed,
+	})
+	if err != nil {
+		t.Fatalf("CreateIssue should not error on a failed best-effort close: %v", err)
+	}
+	if len(reqs) != 2 {
+		t.Fatalf("expected one POST and one PATCH, got requests: %+v", reqs)
+	}
+	if ti == nil || ti.Identifier != "42" {
+		t.Fatalf("expected the created issue to be returned so external_ref is stored, got %+v", ti)
+	}
+	if ti.URL != "https://github.com/owner/repo/issues/42" {
+		t.Errorf("returned TrackerIssue.URL = %q, want the issue html_url", ti.URL)
+	}
+	if ti.State != "open" {
+		t.Errorf("returned TrackerIssue.State = %q, want %q (the close failed)", ti.State, "open")
+	}
+	if len(ti.Warnings) != 1 {
+		t.Fatalf("expected exactly one warning, got %v", ti.Warnings)
+	}
+	if !strings.Contains(ti.Warnings[0], "42") || !strings.Contains(ti.Warnings[0], "failed to close") {
+		t.Errorf("warning = %q, want it to name issue 42 and the failed close", ti.Warnings[0])
 	}
 }
 
