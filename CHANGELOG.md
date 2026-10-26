@@ -4147,6 +4147,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   override cannot reach them; only the module floor can. Re-derive rather
   than trusting this table: `govulncheck -scan module`.
 
+### Fixed
+
+- `bd github sync` and `bd github push` now close the GitHub issue they
+  create for an already-closed bead; GitHub's create endpoint cannot set
+  state, so the issue was left open and later syncs skipped it as unchanged
+  (#6773).
+
 ## [1.3.2] - 2026-10-23
 
 First stable release of the 1.3.2 patch line. It ships the same code as
