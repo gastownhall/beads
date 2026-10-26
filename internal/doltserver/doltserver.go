@@ -1563,8 +1563,20 @@ func EnsureRunningDetailed(beadsDir string) (port int, startedByUs bool, err err
 	return s.Port, true, nil
 }
 
-// doltServerLogLevel is the default for platforms where listener ownership
-// can be checked; serverLogLevel selects info when startup needs the ready line.
+// doltServerLogLevel is the --loglevel value passed to `dolt sql-server`.
+//
+// Dolt's sql-server logs every new connection and connection close at INFO
+// level (`msg=NewConnection` / `msg=ConnectionClosed`). Because beads opens
+// a fresh MySQL connection for each `bd` invocation, a busy project can
+// produce millions of lines of connection churn noise, which in one field
+// report filled dolt-server.log with ~380 MB of useless entries, generated
+// significant btrfs write pressure, and buried real error signals.
+//
+// Raising the floor to `warning` silences that chatter while still surfacing
+// warnings, errors, and fatal messages. Valid dolt levels are:
+// trace, debug, info, warning, error, fatal. Platforms without a listener
+// ownership check use info instead (serverLogLevel) so startup can require
+// Dolt's ready line.
 const doltServerLogLevel = "warning"
 
 func serverLogLevel(debug bool) string {
