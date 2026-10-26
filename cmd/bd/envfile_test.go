@@ -12,13 +12,43 @@ import (
 func TestFindMailDelegateUsesYaml(t *testing.T) {
 	t.Setenv("BEADS_MAIL_DELEGATE", "")
 	t.Setenv("BD_MAIL_DELEGATE", "")
-	if err := config.WithBeadsDir(t.TempDir(), func() {
-		config.Set("mail.delegate", "trusted mail")
-		if got := findMailDelegate(); got != "trusted mail" {
-			t.Errorf("delegate = %q, want trusted mail", got)
-		}
-	}); err != nil {
-		t.Fatal(err)
+	for _, tt := range []struct {
+		name    string
+		user    string
+		project string
+		want    string
+	}{
+		{name: "user config", user: "mail:\n  delegate: trusted mail\n", project: "mail:\n  delegate: untrusted mail\n", want: "trusted mail"},
+		{name: "project config ignored", project: "mail:\n  delegate: untrusted mail\n"},
+		{name: "no config"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("USERPROFILE", home)
+			t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+			userDir := filepath.Join(home, ".config", "bd")
+			if err := os.MkdirAll(userDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(userDir, "config.yaml"), []byte(tt.user), 0600); err != nil {
+				t.Fatal(err)
+			}
+			projectDir := filepath.Join(t.TempDir(), ".beads")
+			if err := os.MkdirAll(projectDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(projectDir, "config.yaml"), []byte(tt.project), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := config.WithBeadsDir(projectDir, func() {
+				if got := findMailDelegate(); got != tt.want {
+					t.Errorf("delegate = %q, want %q", got, tt.want)
+				}
+			}); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 

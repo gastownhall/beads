@@ -121,6 +121,8 @@ not `.beads/.env`. Beads ignores credential commands, mail delegates, editor,
 pager, and Dolt executable overrides in that file and prints a warning for each.
 `bd config set mail.delegate "gt mail"` writes to user-global YAML rather than
 the replicated database; the workspace settings API rejects `mail.delegate`.
+Mail delegation also ignores project `.beads/config.yaml`; only shell environment
+variables and user-global YAML can select the delegate.
 
 Before trusting any downloaded binary, verify its checksum against the release `checksums.txt`.
 
