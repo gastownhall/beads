@@ -2925,3 +2925,63 @@ func TestResolveBeadsDirForRepoIgnoresInheritedRouting(t *testing.T) {
 		})
 	}
 }
+
+// setupWorktreeUnderParentStore builds the GH#7782 layout: a parent folder
+// with its own store holding a main checkout and, beside it, a linked worktree
+// of that checkout. The main checkout gets a store with a database only when
+// mainStore is set. It returns the parent and main stores and the worktree.
+func setupWorktreeUnderParentStore(t *testing.T, mainStore bool) (parentBeadsDir, mainBeadsDir, worktree string) {
+	t.Helper()
+	t.Setenv("BEADS_DIR", "")
+	t.Setenv("BEADS_DB", "")
+
+	mainRepo, worktree := setupRegularWorktreeRepo(t)
+	parentBeadsDir = filepath.Join(filepath.Dir(mainRepo), ".beads")
+	mainBeadsDir = filepath.Join(mainRepo, ".beads")
+	stores := []string{parentBeadsDir}
+	if mainStore {
+		stores = append(stores, mainBeadsDir)
+	}
+	for _, store := range stores {
+		if err := os.MkdirAll(filepath.Join(store, "dolt"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(store, "metadata.json"), []byte(`{"database":"dolt"}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return parentBeadsDir, mainBeadsDir, worktree
+}
+
+// assertFindBeadsDirFromMatchesCWD checks that FindBeadsDirFrom(start) returns
+// want and that FindBeadsDir with the cwd at start agrees, so -C binds what cd
+// binds.
+func assertFindBeadsDirFromMatchesCWD(t *testing.T, start, want string) {
+	t.Helper()
+	if got := FindBeadsDirFrom(start); !utils.PathsEqual(got, want) {
+		t.Errorf("FindBeadsDirFrom(%q) = %q, want %q", start, got, want)
+	}
+
+	t.Chdir(start)
+	git.ResetCaches()
+	t.Cleanup(git.ResetCaches)
+	if got := FindBeadsDir(); !utils.PathsEqual(got, want) {
+		t.Errorf("FindBeadsDir() with cwd %q = %q, want %q", start, got, want)
+	}
+}
+
+// TestFindBeadsDirFromLinkedWorktreeBoundary pins GH#7782: bd -C <linked
+// worktree> must bind the same store as cd <linked worktree>, which is the
+// main checkout's store, not the store of a folder above the worktree.
+func TestFindBeadsDirFromLinkedWorktreeBoundary(t *testing.T) {
+	t.Run("worktree without .beads uses main checkout store", func(t *testing.T) {
+		_, mainBeadsDir, worktree := setupWorktreeUnderParentStore(t, true)
+		sub := filepath.Join(worktree, "sub")
+		if err := os.MkdirAll(sub, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		assertFindBeadsDirFromMatchesCWD(t, worktree, mainBeadsDir)
+		assertFindBeadsDirFromMatchesCWD(t, sub, mainBeadsDir)
+	})
+}
