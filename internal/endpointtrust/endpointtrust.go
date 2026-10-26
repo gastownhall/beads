@@ -14,6 +14,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/lockfile"
 )
 
 const pinsFileName = "trusted-endpoints.json"
@@ -167,6 +168,18 @@ func Check(workspaceKey, credKind, endpoint string, fromPrivateSource bool) erro
 	pinsMu.Lock()
 	defer pinsMu.Unlock()
 
+	lock, err := acquirePinsLock()
+	if err != nil {
+		if fromPrivateSource {
+			return nil
+		}
+		return fmt.Errorf("lock trusted endpoints: %w", err)
+	}
+	defer func() {
+		_ = lockfile.FlockUnlock(lock)
+		_ = lock.Close()
+	}()
+
 	current, err := readPins()
 	if err != nil {
 		if fromPrivateSource {
@@ -194,6 +207,31 @@ func Check(workspaceKey, credKind, endpoint string, fromPrivateSource bool) erro
 		return &MismatchError{Kind: credKind, Key: hint.key, Pinned: pinned, Got: origin, Hint: hint.hint}
 	}
 	return nil
+}
+
+func acquirePinsLock() (*os.File, error) {
+	path, err := pinsPath()
+	if err != nil {
+		return nil, err
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return nil, fmt.Errorf("create trusted endpoints directory: %w", err)
+	}
+	lockPath := path + ".lock"
+	lock, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600) // #nosec G304 -- path is under the user's config directory.
+	if err != nil {
+		return nil, fmt.Errorf("open trusted endpoints lock: %w", err)
+	}
+	if err := lock.Chmod(0600); err != nil {
+		_ = lock.Close()
+		return nil, fmt.Errorf("secure trusted endpoints lock: %w", err)
+	}
+	if err := lockfile.FlockExclusiveBlocking(lock); err != nil {
+		_ = lock.Close()
+		return nil, fmt.Errorf("acquire trusted endpoints lock: %w", err)
+	}
+	return lock, nil
 }
 
 func cleanWorkspaceKey(key string) (string, error) {

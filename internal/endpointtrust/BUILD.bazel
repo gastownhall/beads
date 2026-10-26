@@ -8,6 +8,7 @@ go_library(
     deps = [
         "//internal/config",
         "//internal/configfile",
+        "//internal/lockfile",
     ],
 )
 

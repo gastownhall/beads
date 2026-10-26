@@ -85,6 +85,13 @@ func TestCheckPinsAndRejectsChangedEndpoint(t *testing.T) {
 	if dirInfo.Mode().Perm() != 0700 {
 		t.Fatalf("pin directory mode = %o, want 700", dirInfo.Mode().Perm())
 	}
+	lockInfo, err := os.Stat(path + ".lock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lockInfo.Mode().Perm() != 0600 {
+		t.Fatalf("lock file mode = %o, want 600", lockInfo.Mode().Perm())
+	}
 }
 
 func TestCheckPrivateSourceRepinsAndLocalDoltDoesNotPin(t *testing.T) {
