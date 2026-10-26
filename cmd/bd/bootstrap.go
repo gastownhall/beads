@@ -533,7 +533,12 @@ func detectBootstrapPlan(beadsDir string, cfg *configfile.Config) BootstrapPlan 
 	// remember why so an unverifiable remote can become fatal only after local
 	// recovery is exhausted. With no sync.remote, auto-detect Dolt data on git
 	// origin instead.
-	syncRemote := resolveSyncRemote()
+	syncRemote, syncRemoteErr := resolveSyncRemoteChecked()
+	if syncRemoteErr != nil {
+		plan.Action = "none"
+		plan.Reason = syncRemoteErr.Error()
+		return plan
+	}
 	unusableRemoteReason, unusableRemoteURL := "", ""
 	if syncRemote != "" {
 		done, reason, url := planConfiguredSyncRemote(&plan, syncRemote)

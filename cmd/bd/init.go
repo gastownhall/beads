@@ -1103,6 +1103,11 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			earlyRemoteSource := initSyncRemoteNone
 			earlyRemoteHasDoltData := false
 			var earlyProbeNote string
+			if !initRemoteChanged {
+				if _, err := resolveSyncRemoteChecked(); err != nil {
+					return err
+				}
+			}
 			earlySyncURL, earlyRemoteSource = resolveInitConfiguredSyncRemote(initRemote, initRemoteChanged, resolveSyncRemote)
 			if earlyRemoteSource == initSyncRemoteExplicit {
 				// An explicit --remote is intent to bootstrap or wire that URL,
