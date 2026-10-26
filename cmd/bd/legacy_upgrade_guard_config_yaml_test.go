@@ -1,11 +1,15 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/httpclient"
+	"github.com/steveyegge/beads/internal/testutil/legacyworkspace"
 )
 
 // bindSelectedWorkspaceConfig loads beadsDir's config.yaml into the process
@@ -161,14 +165,25 @@ func TestLegacyUpgradeGuardStillRefusesLegacyConfigYamlServerWorkspace(t *testin
 // so it settles the era regardless of which mode the workspace resolves to. The
 // escape hatch used to live inside the server-mode arm, where a misclassified
 // workspace could never reach it.
+//
+// The witness settles the era, not who owns .beads/dolt. Where nothing selects
+// a server and metadata leaves the open to the embedded store, a root holding
+// anything is refused as unowned (GH#6259) instead of being admitted: the open
+// that followed created an empty embedded database beside it and answered from
+// that. The refusal names the ownership gap, never a legacy era.
 func TestCurrentVersionWitnessVetoesLegacyVerdictInEveryMode(t *testing.T) {
+	// A literal, so that editing the reason fails this test.
+	unowned := legacyworkspace.LegacyDoltRefusal("Dolt data root .beads/dolt without a server selection")
 	modes := []struct {
 		name     string
 		metadata string
+		// wantUnowned marks a mode that opens the embedded store, where a
+		// current witness over a populated root is refused as unowned.
+		wantUnowned bool
 	}{
-		{name: "metadata-less"},
-		{name: "blank mode", metadata: `{"backend":"dolt"}`},
-		{name: "explicit embedded mode", metadata: `{"backend":"dolt","dolt_mode":"embedded"}`},
+		{name: "metadata-less", wantUnowned: true},
+		{name: "blank mode", metadata: `{"backend":"dolt"}`, wantUnowned: true},
+		{name: "explicit embedded mode", metadata: `{"backend":"dolt","dolt_mode":"embedded"}`, wantUnowned: true},
 		{name: "explicit server mode", metadata: `{"backend":"dolt","dolt_mode":"server"}`},
 	}
 
@@ -177,9 +192,14 @@ func TestCurrentVersionWitnessVetoesLegacyVerdictInEveryMode(t *testing.T) {
 			captureLegacyUpgradeWarnings(t)
 			beadsDir := writeDoltRootWorkspace(t, mode.metadata, "", "1.3.0")
 
-			if err := guardLegacyUpgradeWorkspace(beadsDir); err != nil {
-				t.Fatalf("guardLegacyUpgradeWorkspace() = %v, want nil", err)
+			err := guardLegacyUpgradeWorkspace(beadsDir)
+			if !mode.wantUnowned {
+				if err != nil {
+					t.Fatalf("guardLegacyUpgradeWorkspace() = %v, want nil", err)
+				}
+				return
 			}
+			assertUnownedDoltRootRefusal(t, err, unowned)
 		})
 
 		t.Run(mode.name+"/pre-1.0 witness still refuses", func(t *testing.T) {
@@ -201,6 +221,37 @@ func TestCurrentVersionWitnessVetoesLegacyVerdictInEveryMode(t *testing.T) {
 		})
 	}
 
+	// The narrowing follows classifyVersionWitness, so every witness it reads
+	// as current era is refused over an unowned root, not only a release tag.
+	for _, version := range []string{"1.1.0-rc.1", "v1.1.1-0.20260805093327-bf97b73749ac", "  1.3.0  "} {
+		t.Run("current witness "+version+" over an unowned root", func(t *testing.T) {
+			captureLegacyUpgradeWarnings(t)
+			beadsDir := writeDoltRootWorkspace(t, `{"backend":"dolt"}`, "", "1.3.0")
+			if err := os.WriteFile(filepath.Join(beadsDir, localVersionFile), []byte(version+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			assertUnownedDoltRootRefusal(t, guardLegacyUpgradeWorkspace(beadsDir), unowned)
+		})
+	}
+
+	// isEmptyDirectory fails closed: a root the guard cannot list may hold
+	// data, so it is refused like a populated one.
+	t.Run("unreadable root over a current witness", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root reads a mode 000 directory")
+		}
+		captureLegacyUpgradeWarnings(t)
+		beadsDir := writeDoltRootWorkspace(t, `{"backend":"dolt"}`, "", "1.3.0")
+		root := filepath.Join(beadsDir, "dolt")
+		if err := os.Chmod(root, 0); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(root, 0o700) })
+
+		assertUnownedDoltRootRefusal(t, guardLegacyUpgradeWorkspace(beadsDir), unowned)
+	})
+
 	// The unreadable-witness admission is deliberately NOT hoisted: outside
 	// server mode a .beads/dolt root is itself strong legacy evidence, and
 	// TestLegacyUpgradeGuardRefusesOldDoltRootWithoutTrustingVersionWitness
@@ -212,6 +263,79 @@ func TestCurrentVersionWitnessVetoesLegacyVerdictInEveryMode(t *testing.T) {
 
 		if err := guardLegacyUpgradeWorkspace(beadsDir); !isLegacyUpgradeRefusal(err) {
 			t.Fatalf("guardLegacyUpgradeWorkspace() = %v, want migration refusal", err)
+		}
+	})
+}
+
+// TestCurrentVersionWitnessKeepsOwnedDoltRootsAdmitted pins the other side of
+// the unowned-root refusal: a current-era populated .beads/dolt that something
+// owns this run is still admitted. A server selection from metadata,
+// config.yaml or the environment, a shared server, a proxied-server or
+// registered backend, an embedded repository beside the root, or a root that
+// holds nothing each leave no empty embedded database to hide its data behind.
+func TestCurrentVersionWitnessKeepsOwnedDoltRootsAdmitted(t *testing.T) {
+	workspaces := []struct {
+		name       string
+		metadata   string
+		configYaml string
+	}{
+		{name: "metadata server mode", metadata: `{"backend":"dolt","dolt_mode":"server"}`},
+		{name: "config.yaml server mode", configYaml: configYamlServerMode},
+		{name: "config.yaml shared server", configYaml: "dolt.shared-server: true\n"},
+		{name: "metadata proxied-server mode", metadata: `{"backend":"dolt","dolt_mode":"proxied-server"}`},
+	}
+	for _, ws := range workspaces {
+		t.Run(ws.name, func(t *testing.T) {
+			captureLegacyUpgradeWarnings(t)
+			beadsDir := writeDoltRootWorkspace(t, ws.metadata, ws.configYaml, "1.3.0")
+
+			if err := guardLegacyUpgradeWorkspace(beadsDir); err != nil {
+				t.Fatalf("guardLegacyUpgradeWorkspace() = %v, want nil", err)
+			}
+		})
+	}
+
+	t.Run("server mode from the environment", func(t *testing.T) {
+		captureLegacyUpgradeWarnings(t)
+		beadsDir := writeDoltRootWorkspace(t, `{"backend":"dolt"}`, "", "1.3.0")
+		t.Setenv("BEADS_DOLT_SERVER_MODE", "1")
+
+		if err := guardLegacyUpgradeWorkspace(beadsDir); err != nil {
+			t.Fatalf("guardLegacyUpgradeWorkspace() = %v, want nil", err)
+		}
+	})
+
+	t.Run("embedded repository beside the root", func(t *testing.T) {
+		captureLegacyUpgradeWarnings(t)
+		beadsDir := writeDoltRootWorkspace(t, `{"backend":"dolt"}`, "", "1.3.0")
+		repo := filepath.Join(beadsDir, "embeddeddolt", "beads", ".dolt")
+		if err := os.MkdirAll(repo, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(repo, "repo-entry"), []byte("opaque"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := guardLegacyUpgradeWorkspace(beadsDir); err != nil {
+			t.Fatalf("guardLegacyUpgradeWorkspace() = %v, want nil", err)
+		}
+	})
+
+	t.Run("empty root", func(t *testing.T) {
+		captureLegacyUpgradeWarnings(t)
+		beadsDir := writeEmptyDoltRootServerWorkspace(t, `{"backend":"dolt"}`, "", "1.3.0")
+
+		if err := guardLegacyUpgradeWorkspace(beadsDir); err != nil {
+			t.Fatalf("guardLegacyUpgradeWorkspace() = %v, want nil", err)
+		}
+	})
+
+	t.Run("registered backend", func(t *testing.T) {
+		captureLegacyUpgradeWarnings(t)
+		beadsDir := writeDoltRootWorkspace(t, "", "", "1.3.0")
+
+		if err := classifyLegacyDoltWorkspace(beadsDir, &configfile.Config{Backend: httpclient.Backend}, legacyDoltModes{}); err != nil {
+			t.Fatalf("classifyLegacyDoltWorkspace(http backend) = %v, want nil", err)
 		}
 	})
 }
@@ -249,5 +373,18 @@ func TestLegacyUpgradeGuardSharedServerAdmissionSurvivesServerClassification(t *
 				t.Fatalf("guardLegacyUpgradeWorkspace() = %v, want nil", err)
 			}
 		})
+	}
+}
+
+// assertUnownedDoltRootRefusal requires err to be the guard's refusal of an
+// unowned .beads/dolt root, with exactly the text want.
+func assertUnownedDoltRootRefusal(t *testing.T, err error, want string) {
+	t.Helper()
+	var legacyErr *configfile.LegacyWorkspaceError
+	if !errors.As(err, &legacyErr) {
+		t.Fatalf("guardLegacyUpgradeWorkspace() = %v, want *configfile.LegacyWorkspaceError", err)
+	}
+	if got := err.Error(); got != want {
+		t.Fatalf("guardLegacyUpgradeWorkspace() = %q, want %q", got, want)
 	}
 }

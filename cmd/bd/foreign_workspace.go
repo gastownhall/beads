@@ -130,8 +130,10 @@ func guardForeignLegacyDoltWorkspace(beadsDir string, cfg *configfile.Config) er
 // they can also decide whether beadsDir is refused, in both directions. When
 // server mode comes only from the user-level or BD_ layers and the metadata
 // names no dolt_mode: a .beads/dolt root that is empty
-// with no version witness, or whose witness cannot be parsed, is admitted by
-// bd run inside it and refused here; nothing is written. Conversely, a target
+// with no version witness, or whose witness cannot be parsed, or that holds
+// anything beside a current-era witness (refused here as a Dolt data root
+// without a server selection), is admitted by bd run inside it and refused
+// here; nothing is written. Conversely, a target
 // bd run inside refuses as a legacy Dolt server workspace is admitted here: a
 // .local_version naming bd 0.55-0.62 with no .beads/dolt root or beside an
 // embedded repository, or an embedded repository beside a .beads/dolt root bd

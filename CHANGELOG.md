@@ -932,6 +932,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A workspace whose `.beads/dolt/` holds data, with a version witness from bd
+  1.0 or newer, no `.beads/embeddeddolt/` repository, and nothing selecting a
+  Dolt server this run, is refused instead of opened. Since v1.3.0 the witness
+  admitted it, and the open created an empty embedded database beside the root
+  and answered from it: `bd list` printed no issues and exited 0. bd now
+  refuses with `Dolt data root .beads/dolt without a server selection` and
+  changes nothing; restoring the server selection reaches the data again
+  (`docs/getting-started/upgrading.md#current-era-dolt-root-without-a-server-selection`)
+  (GH#6259).
 - The batched bulk readers no longer return an issue's rows twice when the
   same id is requested twice. Since the 200-id batching (#6444), an id that
   appeared in two batches had its comments, labels, dependency records,
