@@ -202,8 +202,9 @@ func TestEmbeddedForeignHistoricalSQLiteWorkspaceLeftUnchanged(t *testing.T) {
 // repository and no current-era version witness) is refused as bd refuses it
 // when run inside it, with that text and the entry point's own context, or
 // skipped where the entry point skips, and is left byte-identical. Every row
-// runs every legacy Dolt layout, including one whose server mode comes only
-// from its own config.yaml and a bd 0.62.0 server workspace. Before, a routed
+// runs every layout in legacyworkspace.LegacyDoltLayouts, including one whose
+// server mode comes only from its own config.yaml, a bd 0.62.0 server
+// workspace, and a current-era root nothing selects a server for (GH#6259). Before, a routed
 // create created an embedded database beside the legacy root, which hid its
 // data and turned the refusal bd prints there into an empty workspace;
 // migrate-personal reported a missing database; a create --dry-run previewed
