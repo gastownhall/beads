@@ -117,6 +117,19 @@ func classifyLegacyDoltWorkspace(beadsDir string, cfg *configfile.Config, modes 
 		// release could have produced it. Reading it as proof only in server
 		// mode left the escape hatch unreachable for a workspace the running
 		// binary demonstrably created itself.
+		//
+		// The witness dates the workspace; it does not say what owns .beads/dolt.
+		// bd writes it for server workspaces too, and their sql-server owns that
+		// root. When nothing selects a server this run and metadata leaves the open
+		// to the embedded store, opening would create an empty embedded database
+		// beside the root and hide its data (GH#3817, GH#6259), so a root holding
+		// anything is refused. An empty root has nothing to hide and is admitted,
+		// as the server arm below admits it.
+		if !serverMode && !modes.sharedServer &&
+			metadataSelectsEmbeddedDolt(cfg) &&
+			!isEmptyDirectory(filepath.Join(beadsDir, "dolt")) {
+			return legacyUpgradeRefusal(unownedDoltRootReason)
+		}
 		return nil
 	}
 	if modes.sharedServer && !(present && legacyServerVersion(version)) {
@@ -178,6 +191,28 @@ func classifyLegacyDoltWorkspace(beadsDir string, cfg *configfile.Config, modes 
 		return legacyUpgradeRefusal(reason)
 	}
 	return nil
+}
+
+// unownedDoltRootReason names a current-era workspace whose non-empty
+// .beads/dolt root nothing selected this run would open.
+const unownedDoltRootReason = "Dolt data root .beads/dolt without a server selection"
+
+// metadataSelectsEmbeddedDolt reports whether metadata cfg (nil for none)
+// leaves the open to the embedded store when no server mode is selected: a
+// Dolt workspace whose dolt_mode is blank or embedded. A registered backend
+// or a proxied-server workspace never opens embedded. It is the metadata
+// half of selectsEmbeddedStore; the server half comes from modes, which
+// each caller already resolves (admission: workspaceSelectsServerMode and
+// doltserver.IsSharedServerMode; foreign: targetSelectsServerMode and
+// sharedServerModeForWorkspace).
+func metadataSelectsEmbeddedDolt(cfg *configfile.Config) bool {
+	if cfg == nil {
+		return true
+	}
+	if cfg.GetBackend() != configfile.BackendDolt {
+		return false
+	}
+	return cfg.DoltMode == "" || strings.EqualFold(cfg.DoltMode, configfile.DoltModeEmbedded)
 }
 
 // workspaceSelectsServerMode reports whether bd will open beadsDir through a

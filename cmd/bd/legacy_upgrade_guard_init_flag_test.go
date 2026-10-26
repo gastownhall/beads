@@ -76,6 +76,21 @@ func TestLegacyUpgradeGuardForInitAdmissionStaysNarrow(t *testing.T) {
 		})
 	}
 
+	t.Run("current witness over a non-empty root", func(t *testing.T) {
+		captureLegacyUpgradeWarnings(t)
+		beadsDir := writeEmptyDoltRootServerWorkspace(t, "", "", "1.3.0")
+		if err := os.Mkdir(filepath.Join(beadsDir, "dolt", "beads"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+
+		// A current witness settles the era, not who owns the root, and init's
+		// intent does not unlock a populated one: a retry that got as far as
+		// the witness had already persisted dolt_mode: server.
+		if err := guardLegacyUpgradeWorkspaceForInit(beadsDir, true); !isLegacyUpgradeRefusal(err) {
+			t.Fatalf("guardLegacyUpgradeWorkspaceForInit(dir, true) = %v, want migration refusal", err)
+		}
+	})
+
 	t.Run("blank witness over a non-empty root", func(t *testing.T) {
 		warnings := captureLegacyUpgradeWarnings(t)
 		beadsDir := writeEmptyDoltRootServerWorkspace(t, "", "", "")
