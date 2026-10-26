@@ -402,3 +402,23 @@ func TestCallWithRetry_SkipsLeadingThinkingBlock(t *testing.T) {
 		})
 	}
 }
+
+// A reply with no text block is still a format error.
+func TestCallWithRetry_NoTextBlock(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+	}{
+		{"thinking only", `{"type":"thinking","thinking":"","signature":"c2ln"}`},
+		{"no content blocks", ``},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := newStubHaikuClient(t, tt.content)
+			got, err := client.callWithRetry(context.Background(), "test prompt")
+			if err == nil || !strings.Contains(err.Error(), "unexpected response format") {
+				t.Fatalf("got (%q, %v), want an unexpected response format error", got, err)
+			}
+		})
+	}
+}

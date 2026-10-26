@@ -323,3 +323,24 @@ func TestAnalyzeWithAI_ThinkingBlockFirst(t *testing.T) {
 		})
 	}
 }
+
+// A reply with no text block keeps the mechanical candidates.
+func TestAnalyzeWithAI_NoTextBlock(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+	}{
+		{"thinking only", `{"type":"thinking","thinking":"","signature":"c2ln"}`},
+		{"no content blocks", ``},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := newStubAnthropicClient(t, stubMessageReply(tt.content))
+			candidates := mechanicalCandidates()
+			got := analyzeWithAI(context.Background(), client, "claude-haiku-5-5", candidates)
+			if len(got) != 1 || got[0] != candidates[0] {
+				t.Fatalf("got %+v, want the mechanical candidates unchanged: %+v", got, candidates)
+			}
+		})
+	}
+}
