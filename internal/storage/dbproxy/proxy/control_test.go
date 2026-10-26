@@ -121,37 +121,52 @@ func TestDialDataAuthenticatesRegisteredAddress(t *testing.T) {
 
 	gotLine := make(chan string, 1)
 	serverErr := make(chan error, 1)
-	go func() {
-		conn, err := listener.Accept()
-		if err != nil {
-			serverErr <- err
-			return
-		}
-		defer conn.Close()
-		line, err := bufio.NewReader(conn).ReadString('\n')
-		if err != nil {
-			serverErr <- err
-			return
-		}
-		gotLine <- line
-		serverErr <- nil
-	}()
+	acceptOne := func() {
+		go func() {
+			conn, err := listener.Accept()
+			if err != nil {
+				serverErr <- err
+				return
+			}
+			defer conn.Close()
+			line, err := bufio.NewReader(conn).ReadString('\n')
+			if err != nil {
+				serverErr <- err
+				return
+			}
+			gotLine <- line
+			serverErr <- nil
+		}()
+	}
 
 	addr := net.JoinHostPort(endpoint.Host, strconv.Itoa(endpoint.Port))
+	acceptOne()
 	conn, err := dialData(context.Background(), addr)
 	require.NoError(t, err)
 	require.NoError(t, conn.Close())
 	assert.Equal(t, dataAuthPrefix+identity.DataAuthTokenForPort(secret, endpoint.Port)+"\n", <-gotLine)
 	assert.NoError(t, <-serverErr)
 
-	// If proxy.pid moves to a replacement port or is removed, dialData refuses before dialing the stale port.
+	// The pidfile is consulted at registration, not on every pool dial: the
+	// proxy removes proxy.pid first at shutdown and a pooled dial must not
+	// race the removal into a bogus refusal, so a moved or missing pidfile
+	// leaves the verified registration — and its port-bound token — in
+	// effect.
 	require.NoError(t, pidfile.Write(root, PIDFileName, pidfile.PidFile{Pid: 1, Port: endpoint.Port + 1}))
-	_, err = dialData(context.Background(), addr)
-	require.ErrorContains(t, err, "stale data address")
+	acceptOne()
+	conn, err = dialData(context.Background(), addr)
+	require.NoError(t, err)
+	require.NoError(t, conn.Close())
+	assert.Equal(t, dataAuthPrefix+identity.DataAuthTokenForPort(secret, endpoint.Port)+"\n", <-gotLine)
+	assert.NoError(t, <-serverErr)
 
 	require.NoError(t, pidfile.Remove(root, PIDFileName))
-	_, err = dialData(context.Background(), addr)
-	require.ErrorContains(t, err, "stale data address")
+	acceptOne()
+	conn, err = dialData(context.Background(), addr)
+	require.NoError(t, err)
+	require.NoError(t, conn.Close())
+	assert.Equal(t, dataAuthPrefix+identity.DataAuthTokenForPort(secret, endpoint.Port)+"\n", <-gotLine)
+	assert.NoError(t, <-serverErr)
 
 	_, err = dialData(context.Background(), "127.0.0.1:65535")
 	require.ErrorContains(t, err, "unknown data address")

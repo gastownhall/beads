@@ -11,7 +11,6 @@ import (
 	mysql "github.com/go-sql-driver/mysql"
 
 	"github.com/steveyegge/beads/internal/storage/dbproxy/identity"
-	"github.com/steveyegge/beads/internal/storage/dbproxy/pidfile"
 )
 
 // DataNetwork is the MySQL driver network for authenticated proxy connections.
@@ -60,13 +59,12 @@ func dialData(ctx context.Context, addr string) (net.Conn, error) {
 	if err != nil || port <= 0 {
 		return nil, fmt.Errorf("dbproxy: invalid data port in %q", addr)
 	}
-	pf, err := pidfile.Read(rootDir, PIDFileName)
-	if err != nil {
-		return nil, fmt.Errorf("dbproxy: read proxy pidfile for %q: %w", addr, err)
-	}
-	if pf == nil || pf.Port != port {
-		return nil, fmt.Errorf("dbproxy: stale data address %q", addr)
-	}
+	// The address was registered only after readAndDial or spawn verified
+	// the proxy that owns it, so the pidfile is not re-read on every pool
+	// dial — the proxy removes proxy.pid first at shutdown, and a dial in
+	// flight would otherwise race the removal into a bogus permanent
+	// refusal. A token minted for this port is useless to a listener that
+	// cannot answer the handshake, so a stale registration is still safe.
 	secret, err := identity.ReadSecret(rootDir)
 	if err != nil {
 		return nil, fmt.Errorf("dbproxy: read data authentication secret: %w", err)
