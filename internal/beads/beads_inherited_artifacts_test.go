@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/utils"
 )
 
 // TestFindBeadsDir_WorktreeWithInheritedArtifacts covers the case where a
@@ -869,5 +870,88 @@ func TestFindDatabasePath_WorktreeServerModeFromSubdir(t *testing.T) {
 
 	if resultResolved != mainDoltResolved {
 		t.Errorf("FindDatabasePath() from subdir = %q, want main repo dolt dir %q", result, mainDoltDir)
+	}
+}
+
+// TestFindBeadsDirFromJJSecondaryBesidePrimary pins the jj sibling analogue of
+// GH#7782: a jj secondary workspace created beside (not inside) its primary,
+// under a parent folder that owns its own store, must resolve from an explicit
+// start dir to the primary's .beads — the same store cwd discovery binds — not
+// to the parent folder's store.
+func TestFindBeadsDirFromJJSecondaryBesidePrimary(t *testing.T) {
+	t.Setenv("BEADS_DIR", "")
+	t.Setenv("BEADS_DB", "")
+
+	tmpDir := t.TempDir()
+	tmpDir, _ = filepath.EvalSymlinks(tmpDir)
+
+	// Parent folder with its own store above both workspaces.
+	parentBeadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(parentBeadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(parentBeadsDir, "metadata.json"), []byte(`{"database":"dolt"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Primary workspace: colocated jj+git with a real database in .beads/.
+	primaryDir := filepath.Join(tmpDir, "primary")
+	if err := os.MkdirAll(filepath.Join(primaryDir, ".jj", "repo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := func() error {
+		cmd := exec.Command("git", "init")
+		cmd.Dir = primaryDir
+		return cmd.Run()
+	}(); err != nil {
+		t.Skipf("git not available: %v", err)
+	}
+	runGit := func(dir string, args ...string) {
+		t.Helper()
+		cmd := gitCommand(args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)
+		}
+	}
+	runGit(primaryDir, "config", "user.email", "test@example.com")
+	runGit(primaryDir, "config", "user.name", "Test User")
+
+	primaryBeadsDir := filepath.Join(primaryDir, ".beads")
+	if err := os.MkdirAll(primaryBeadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(primaryBeadsDir, "metadata.json"), []byte(`{"database":"dolt"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(primaryBeadsDir, "beads.db"), []byte{}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Secondary workspace beside the primary, like `jj workspace add ../secondary`:
+	// .jj/repo is a file pointing at the primary's .jj/repo directory.
+	secondaryDir := filepath.Join(tmpDir, "secondary")
+	if err := os.MkdirAll(filepath.Join(secondaryDir, ".jj"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(secondaryDir, ".jj", "repo"), []byte(filepath.Join(primaryDir, ".jj", "repo")+"\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Cleanup(func() { git.ResetCaches() })
+
+	// Reference: cd into the secondary binds the primary's store.
+	t.Chdir(secondaryDir)
+	git.ResetCaches()
+	if got := FindBeadsDir(); !utils.PathsEqual(got, primaryBeadsDir) {
+		t.Fatalf("reference: FindBeadsDir() from secondary = %q, want primary .beads %q", got, primaryBeadsDir)
+	}
+
+	// Under test: explicit discovery, as bd -C resolves it from an
+	// unrelated cwd.
+	t.Chdir(t.TempDir())
+	git.ResetCaches()
+	if got := FindBeadsDirFrom(secondaryDir); !utils.PathsEqual(got, primaryBeadsDir) {
+		t.Errorf("FindBeadsDirFrom(secondary) = %q, want primary .beads %q (what cd binds)", got, primaryBeadsDir)
 	}
 }

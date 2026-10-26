@@ -728,13 +728,16 @@ func FindBeadsDirFrom(startDir string) string {
 			}
 		}
 
-		// Don't walk past a linked worktree root while its main checkout has a
-		// store: FindBeadsDir stops its cwd walk here and returns that store
-		// (step 3c) before any ancestor's, and -C must bind what cd binds.
-		// Without one, keep walking, as FindBeadsDir's extended walk (step 4)
-		// does.
+		// Don't walk past a linked worktree (or jj secondary workspace) root
+		// while its main checkout (primary workspace) has a store: FindBeadsDir
+		// stops its cwd walk here and returns that store (steps 3c and 3'c)
+		// before any ancestor's, and -C must bind what cd binds. Without one,
+		// keep walking, as FindBeadsDir's extended walk (step 4) does.
 		if isWorktreeRoot && fallbackBeadsDir != "" {
 			return fallbackBeadsDir
+		}
+		if isJJSecondaryRoot && jjPrimaryBeadsDir != "" {
+			return jjPrimaryBeadsDir
 		}
 	}
 
