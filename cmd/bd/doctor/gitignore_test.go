@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -3098,5 +3099,63 @@ func TestCheckGitignore_WarnsOnLoosePermsWhenPatternComplete(t *testing.T) {
 	}
 	if check := CheckGitignore(tmpDir); check.Status != "ok" {
 		t.Fatalf("post-fix Status = %q, want ok", check.Status)
+	}
+}
+
+// TestCheckGitignore_PermissionPredicate pins #6225 finding 1: only group
+// and other access makes a pattern-complete .beads/.gitignore "loose". Owner
+// modes stricter than 0600 (0400, 0700) are secure and must report ok, or
+// doctor --fix would add owner-write to them. The warning branch keeps its
+// exact Message and still names the observed mode.
+func TestCheckGitignore_PermissionPredicate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Skipping file permissions test on Windows")
+	}
+
+	tests := []struct {
+		name           string
+		mode           os.FileMode
+		expectedStatus string
+	}{
+		{name: "0600 canonical mode is ok", mode: 0600, expectedStatus: "ok"},
+		{name: "0400 stricter than 0600 is ok", mode: 0400, expectedStatus: "ok"},
+		{name: "0700 owner-only execution bit is ok", mode: 0700, expectedStatus: "ok"},
+		{name: "0640 group read warns", mode: 0640, expectedStatus: "warning"},
+		{name: "0604 other read warns", mode: 0604, expectedStatus: "warning"},
+		{name: "0644 group and other read warn", mode: 0644, expectedStatus: "warning"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			beadsDir := filepath.Join(tmpDir, ".beads")
+			if err := os.Mkdir(beadsDir, 0750); err != nil {
+				t.Fatal(err)
+			}
+			gitignorePath := filepath.Join(beadsDir, ".gitignore")
+			if err := os.WriteFile(gitignorePath, []byte(GitignoreTemplate), 0600); err != nil {
+				t.Fatal(err)
+			}
+			// WriteFile's mode is filtered by umask; force the mode under
+			// test explicitly so the scenario holds under any umask.
+			if err := os.Chmod(gitignorePath, tt.mode); err != nil {
+				t.Fatal(err)
+			}
+
+			check := CheckGitignore(tmpDir)
+			if check.Status != tt.expectedStatus {
+				t.Errorf("mode %04o: Status = %q, want %q (%s: %s)",
+					tt.mode, check.Status, tt.expectedStatus, check.Message, check.Detail)
+			}
+			if tt.expectedStatus == "warning" {
+				if check.Message != "Unexpected permissions on .beads/.gitignore" {
+					t.Errorf("mode %04o: Message = %q, want the permission-branch warning",
+						tt.mode, check.Message)
+				}
+				if want := fmt.Sprintf("%04o", tt.mode); !strings.Contains(check.Detail, want) {
+					t.Errorf("mode %04o: Detail = %q, want it to name the observed mode", tt.mode, check.Detail)
+				}
+			}
+		})
 	}
 }

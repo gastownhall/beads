@@ -153,6 +153,14 @@ var requiredPatterns = []string{
 	"backup/",
 }
 
+// beadsGitignoreTooLoose reports whether .beads/.gitignore grants group or
+// other access — the only permission problem bd repairs. Owner modes
+// stricter than 0600 (e.g. 0400) are secure and are never loosened (#6225).
+// Windows is exempt: its permission bits are synthetic.
+func beadsGitignoreTooLoose(info os.FileInfo) bool {
+	return runtime.GOOS != "windows" && info.Mode().Perm()&0077 != 0
+}
+
 // CheckGitignore checks if .beads/.gitignore is up to date.
 // repoPath is the project root directory.
 func CheckGitignore(repoPath string) DoctorCheck {
@@ -182,18 +190,18 @@ func CheckGitignore(repoPath string) DoctorCheck {
 		}
 	}
 
-	// A pattern-complete file with loose permissions must still surface as a
-	// warning: doctor --fix only schedules FixGitignore for non-ok checks, so
-	// an ok here would leave the permission repair unreachable.
-	if runtime.GOOS != "windows" {
-		if info, err := os.Stat(gitignorePath); err == nil && info.Mode().Perm() != 0600 {
-			return DoctorCheck{
-				Name:    "Gitignore",
-				Status:  "warning",
-				Message: "Unexpected permissions on .beads/.gitignore",
-				Detail:  fmt.Sprintf("Mode is %04o, want 0600", info.Mode().Perm()),
-				Fix:     "Run: bd doctor --fix",
-			}
+	// A pattern-complete file with group/other access must still surface as
+	// a warning: doctor --fix only schedules FixGitignore for non-ok checks,
+	// so an ok here would leave the permission repair unreachable. Owner
+	// modes stricter than 0600 (0400) are secure and must not warn, or the
+	// fix would add owner-write to them (#6225).
+	if info, err := os.Stat(gitignorePath); err == nil && beadsGitignoreTooLoose(info) {
+		return DoctorCheck{
+			Name:    "Gitignore",
+			Status:  "warning",
+			Message: "Unexpected permissions on .beads/.gitignore",
+			Detail:  fmt.Sprintf("Mode is %04o; group and other access must be off (e.g. 0600)", info.Mode().Perm()),
+			Fix:     "Run: bd doctor --fix",
 		}
 	}
 
