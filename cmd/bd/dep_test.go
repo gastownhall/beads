@@ -1425,3 +1425,23 @@ func TestDepListRefusesUnknownDirectionJSON(t *testing.T) {
 		})
 	}
 }
+
+// TestDepListAcceptsKnownDirections guards the #7842 check against being too
+// wide: `down`, `up` and the unset flag get through to the route on both
+// routes. What each answers is pinned by TestEmbeddedDepAAddAndList and the
+// proxied dep list integration tests.
+func TestDepListAcceptsKnownDirections(t *testing.T) {
+	for _, proxied := range []bool{false, true} {
+		for _, flagArgs := range [][]string{{"--direction=down"}, {"--direction=up"}, nil} {
+			t.Run(fmt.Sprintf("proxied=%v/%q", proxied, flagArgs), func(t *testing.T) {
+				code, stderr := runDepListRoute(t, proxied, false, flagArgs...)
+				if code != 1 || !strings.Contains(stderr, depListRouteError(proxied)) {
+					t.Errorf("exit %d, want the route's own error %q:\n%s", code, depListRouteError(proxied), stderr)
+				}
+				if strings.Contains(stderr, depListRefusal) {
+					t.Errorf("a direction dep list answers was refused:\n%s", stderr)
+				}
+			})
+		}
+	}
+}
