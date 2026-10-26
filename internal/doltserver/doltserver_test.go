@@ -4093,3 +4093,32 @@ func TestIsRunningRemovesStateWhenPIDIsNotDolt(t *testing.T) {
 		}
 	}
 }
+
+// TestIsRunningDoesNotStopUnverifiedProcessWithoutPort covers the
+// no-port-file case of an unreadable process list: neither the PID's
+// identity nor its port can be confirmed, so IsRunning must not signal the
+// PID (the orphan-stop path would kill it) and must keep the pid file.
+func TestIsRunningDoesNotStopUnverifiedProcessWithoutPort(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("GT_ROOT", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+
+	// The PID is this test process: the orphan-stop path would kill the test.
+	if err := os.WriteFile(pidPath(dir), []byte(strconv.Itoa(os.Getpid())), 0600); err != nil {
+		t.Fatal(err)
+	}
+	orig := readDoltProcesses
+	readDoltProcesses = func() ([]int, error) { return nil, errors.New("listing processes: operation not permitted") }
+	t.Cleanup(func() { readDoltProcesses = orig })
+
+	state, err := IsRunning(dir)
+	if err != nil {
+		t.Fatalf("IsRunning error: %v", err)
+	}
+	if state.Running {
+		t.Error("expected Running=false when neither the process nor its port can be confirmed")
+	}
+	if _, err := os.Stat(pidPath(dir)); err != nil {
+		t.Errorf("expected the PID file to be kept: %v", err)
+	}
+}
