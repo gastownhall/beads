@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -427,8 +428,15 @@ func TestMailDelegateIgnoresStoreConfig(t *testing.T) {
 	}()
 
 	if err := config.WithBeadsDir(t.TempDir(), func() {
-		if got := findMailDelegate(); got != "" {
+		var got string
+		warning := captureStderr(t, func() {
+			got = findMailDelegate()
+		})
+		if got != "" {
 			t.Errorf("findMailDelegate() = %q, want DB value ignored", got)
+		}
+		if !strings.Contains(warning, "ignoring mail.delegate from workspace database") {
+			t.Errorf("warning = %q, want migration notice for DB mail.delegate", warning)
 		}
 	}); err != nil {
 		t.Fatal(err)

@@ -53,30 +53,59 @@ func TestFindMailDelegateUsesYaml(t *testing.T) {
 }
 
 func TestLoadBeadsEnvFileRejectsCommands(t *testing.T) {
-	for _, key := range []string{"BEADS_DOLT_CREDENTIAL_COMMAND", "BEADS_HTTP_TOKEN_COMMAND", "BEADS_MAIL_DELEGATE", "BD_MAIL_DELEGATE", "EDITOR", "VISUAL", "BD_PAGER", "PAGER", "BEADS_DOLT_BIN"} {
-		t.Run(key, func(t *testing.T) {
+	for _, tc := range []struct {
+		key    string
+		reason string
+	}{
+		{"BEADS_DOLT_CREDENTIAL_COMMAND", "command settings must come from your shell environment or user config"},
+		{"beads_dolt_credential_command", "command settings must come from your shell environment or user config"},
+		{"BEADS_HTTP_TOKEN_COMMAND", "command settings must come from your shell environment or user config"},
+		{"BEADS_MAIL_DELEGATE", "command settings must come from your shell environment or user config"},
+		{"Beads_Mail_Delegate", "command settings must come from your shell environment or user config"},
+		{"BD_MAIL_DELEGATE", "command settings must come from your shell environment or user config"},
+		{"EDITOR", "command settings must come from your shell environment or user config"},
+		{"VISUAL", "command settings must come from your shell environment or user config"},
+		{"BD_PAGER", "command settings must come from your shell environment or user config"},
+		{"PAGER", "command settings must come from your shell environment or user config"},
+		{"BEADS_DOLT_BIN", "command settings must come from your shell environment or user config"},
+		{"BEADS_DOLT_SERVER_HOST", "credential target settings must come from your shell environment or user config"},
+		{"BEADS_CREDENTIALS_FILE", "credential target settings must come from your shell environment or user config"},
+		{"GIT_CONFIG_COUNT", "only BEADS_*, BD_*, and DOLT_* variables are allowed in .beads/.env"},
+		{"GIT_SSH_COMMAND", "only BEADS_*, BD_*, and DOLT_* variables are allowed in .beads/.env"},
+		{"GIT_ASKPASS", "only BEADS_*, BD_*, and DOLT_* variables are allowed in .beads/.env"},
+		{"SSH_ASKPASS", "only BEADS_*, BD_*, and DOLT_* variables are allowed in .beads/.env"},
+		{"LD_PRELOAD", "only BEADS_*, BD_*, and DOLT_* variables are allowed in .beads/.env"},
+		{"DYLD_INSERT_LIBRARIES", "only BEADS_*, BD_*, and DOLT_* variables are allowed in .beads/.env"},
+	} {
+		t.Run(tc.key, func(t *testing.T) {
 			dir := t.TempDir()
-			if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(key+"=untrusted\nBEADS_TEST_NORMAL=normal\n"), 0600); err != nil {
+			if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(tc.key+"=untrusted\nBEADS_TEST_NORMAL=normal\n"), 0600); err != nil {
 				t.Fatal(err)
 			}
-			t.Setenv(key, "")
-			os.Unsetenv(key)
+			upper := strings.ToUpper(tc.key)
+			t.Setenv(tc.key, "")
+			os.Unsetenv(tc.key)
+			t.Setenv(upper, "")
+			os.Unsetenv(upper)
 			t.Setenv("BEADS_TEST_NORMAL", "")
 			os.Unsetenv("BEADS_TEST_NORMAL")
 			warning := captureStderr(t, func() { loadBeadsEnvFile(dir) })
-			if _, ok := os.LookupEnv(key); ok {
-				t.Errorf("%s was imported", key)
+			if _, ok := os.LookupEnv(tc.key); ok {
+				t.Errorf("%s was imported", tc.key)
+			}
+			if _, ok := os.LookupEnv(upper); ok {
+				t.Errorf("%s was imported as %s", tc.key, upper)
 			}
 			if os.Getenv("BEADS_TEST_NORMAL") != "normal" {
 				t.Error("normal setting not imported")
 			}
-			want := "beads: ignoring " + key + " from .beads/.env (command settings must come from your shell environment or user config)\n"
+			want := "beads: ignoring " + tc.key + " from .beads/.env (" + tc.reason + ")\n"
 			if !strings.Contains(warning, want) {
 				t.Errorf("warning = %q, want %q", warning, want)
 			}
-			t.Setenv(key, "trusted")
+			t.Setenv(upper, "trusted")
 			captureStderr(t, func() { loadBeadsEnvFile(dir) })
-			if os.Getenv(key) != "trusted" {
+			if os.Getenv(upper) != "trusted" {
 				t.Error("shell setting changed")
 			}
 		})

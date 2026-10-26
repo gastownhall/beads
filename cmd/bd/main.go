@@ -577,13 +577,22 @@ func loadBeadsEnvFile(beadsDir string) {
 	if err != nil {
 		return
 	}
-	for key, value := range env {
-		if slices.Contains(creds.CommandEnvKeys, key) {
-			fmt.Fprintf(os.Stderr, "beads: ignoring %s from .beads/.env (command settings must come from your shell environment or user config)\n", key)
+	keys := make([]string, 0, len(env))
+	for key := range env {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	for _, key := range keys {
+		value := env[key]
+		if ok, reason := creds.AllowedProjectEnvKey(key); !ok {
+			fmt.Fprintf(os.Stderr, "beads: ignoring %s from .beads/.env (%s)\n", key, reason)
 			continue
 		}
+		upper := strings.ToUpper(strings.TrimSpace(key))
 		if _, exists := os.LookupEnv(key); !exists {
-			_ = os.Setenv(key, value)
+			if _, upperExists := os.LookupEnv(upper); !upperExists {
+				_ = os.Setenv(upper, value)
+			}
 		}
 	}
 	if !beadsDirWasSet && os.Getenv("BEADS_DIR") != "" {

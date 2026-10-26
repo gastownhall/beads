@@ -26,6 +26,26 @@ import (
 // not.
 var ErrNoProjectConfigYaml = errors.New("no project config.yaml in this workspace")
 
+// CommandSettingKeys names configuration keys whose values bd executes. They
+// must be supplied from user-global YAML or shell environment variables, never
+// from project .beads/config.yaml or replicated database settings.
+var CommandSettingKeys = []string{
+	"mail.delegate",
+}
+
+// IsCommandSettingKey reports whether key names an executable command setting
+// (matched case-insensitively and normalizing underscores/hyphens to dots).
+func IsCommandSettingKey(key string) bool {
+	replacer := strings.NewReplacer("_", ".", "-", ".")
+	norm := replacer.Replace(strings.ToLower(strings.TrimSpace(key)))
+	for _, k := range CommandSettingKeys {
+		if norm == replacer.Replace(strings.ToLower(k)) {
+			return true
+		}
+	}
+	return false
+}
+
 // YamlOnlyKeys are configuration keys that must be stored in config.yaml
 // rather than the database. These are "startup" settings that are
 // read before the database is opened.

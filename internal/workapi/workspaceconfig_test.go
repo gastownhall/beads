@@ -10,9 +10,11 @@ import (
 )
 
 func TestValidateSettingWriteRefusesCommandSettings(t *testing.T) {
-	for _, value := range []string{"gt mail", ""} {
-		if _, err := ValidateSettingWrite("mail.delegate", value); !errors.Is(err, issueops.ErrValidation) {
-			t.Fatalf("mail.delegate error = %v, want ErrValidation", err)
+	for _, key := range []string{"mail.delegate", "MAIL.DELEGATE", "mail_delegate"} {
+		for _, value := range []string{"gt mail", ""} {
+			if _, err := ValidateSettingWrite(key, value); !errors.Is(err, issueops.ErrValidation) {
+				t.Fatalf("%s (%q) error = %v, want ErrValidation", key, value, err)
+			}
 		}
 	}
 }

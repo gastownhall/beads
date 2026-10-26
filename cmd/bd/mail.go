@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"strings"
@@ -25,10 +26,11 @@ by delegating to the configured mail provider.
 
 Configuration (checked in order):
   1. BEADS_MAIL_DELEGATE or BD_MAIL_DELEGATE environment variable
-  2. 'mail.delegate' config setting (bd config set mail.delegate "gt mail")
+  2. 'mail.delegate' in user-global config (~/.config/bd/config.yaml;
+     project .beads/config.yaml and workspace database settings are ignored)
 
 Examples:
-  # Configure delegation (one-time setup)
+  # Configure delegation (one-time setup in ~/.config/bd/config.yaml)
   export BEADS_MAIL_DELEGATE="gt mail"
   # or
   bd config set mail.delegate "gt mail"
@@ -87,7 +89,7 @@ Examples:
 }
 
 // findMailDelegate checks for mail delegation configuration
-// Priority: env vars > bd config
+// Priority: env vars > user-global bd config
 func findMailDelegate() string {
 	// Check environment variables first
 	if delegate := os.Getenv("BEADS_MAIL_DELEGATE"); delegate != "" {
@@ -97,7 +99,15 @@ func findMailDelegate() string {
 		return delegate
 	}
 
-	return config.GetUserYamlConfig("mail.delegate")
+	if delegate := config.GetUserYamlConfig("mail.delegate"); delegate != "" {
+		return delegate
+	}
+	if store != nil && rootCtx != nil {
+		if dbVal, err := store.GetConfig(rootCtx, "mail.delegate"); err == nil && strings.TrimSpace(dbVal) != "" {
+			fmt.Fprintln(os.Stderr, "beads: ignoring mail.delegate from workspace database (re-run 'bd config set mail.delegate <cmd>' to save it to your user config)")
+		}
+	}
+	return ""
 }
 
 func init() {

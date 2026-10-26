@@ -116,9 +116,12 @@ or [docs/getting-started/installation.md](docs/getting-started/installation.md#u
 
 ### Security And Verification
 
-Command settings must come from your shell environment or user configuration,
-not `.beads/.env`. Beads ignores credential commands, mail delegates, editor,
-pager, and Dolt executable overrides in that file and prints a warning for each.
+Command and credential-target settings must come from your shell environment or
+user configuration, not `.beads/.env`. `.beads/.env` only admits non-command
+`BEADS_*`, `BD_*`, and `DOLT_*` variables; Beads ignores credential commands,
+mail delegates, editor, pager, Dolt executable/host/credential-file overrides,
+and non-Beads process variables (such as `GIT_*`, `SSH_*`, `LD_*`, and `DYLD_*`)
+in that file and prints a warning for each.
 `bd config set mail.delegate "gt mail"` writes to user-global YAML rather than
 the replicated database; the workspace settings API rejects `mail.delegate`.
 Mail delegation also ignores project `.beads/config.yaml`; only shell environment
