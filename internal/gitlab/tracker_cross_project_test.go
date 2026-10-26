@@ -315,3 +315,59 @@ func TestPull_SameProjectRespellingUpdatesExistingBead(t *testing.T) {
 		})
 	}
 }
+
+// TestPull_GroupModeSameIIDAcrossProjects pins group mode (gitlab.group_id),
+// where one pull spans every project in the group: two projects' issue 7 must
+// each land on their own bead, and a second pull must neither create again
+// nor relink either bead to the other project's URL.
+func TestPull_GroupModeSameIIDAcrossProjects(t *testing.T) {
+	const (
+		refC = "https://gitlab.com/group/project-c/-/issues/7"
+		refD = "https://gitlab.com/group/project-d/-/issues/7"
+	)
+	tests := []struct {
+		name   string
+		linked map[string]string // bead ID -> external_ref before the first pull
+	}{
+		{name: "both projects linked", linked: map[string]string{"bd-c7": refC, "bd-d7": refD}},
+		{name: "only one project linked", linked: map[string]string{"bd-c7": refC}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := newIssueListServer(t, "/groups/group/issues",
+				gitLabIssueJSON(9107, 7, "Project C issue 7", refC),
+				gitLabIssueJSON(9207, 7, "Project D issue 7", refD))
+			tr := &Tracker{client: NewClient("token", srv.URL, "").WithGroupID("group"), config: DefaultMappingConfig()}
+
+			store := &crossProjectStore{issues: map[string]*types.Issue{}}
+			for id, ref := range tt.linked {
+				ref := ref
+				store.issues[id] = &types.Issue{ID: id, Title: "local " + id, Status: types.StatusOpen, IssueType: types.TypeTask, ExternalRef: &ref}
+			}
+			wantCreated := 2 - len(tt.linked)
+
+			engine := tracker.NewEngine(tr, store, "test")
+			for pull, wantNew := range []int{wantCreated, 0} {
+				result, err := engine.Sync(context.Background(), tracker.SyncOptions{Pull: true})
+				if err != nil {
+					t.Fatalf("pull %d: Sync: %v", pull+1, err)
+				}
+				if result.PullStats.Created != wantNew {
+					t.Errorf("pull %d: created=%d, want %d", pull+1, result.PullStats.Created, wantNew)
+				}
+				for id, ref := range tt.linked {
+					if got := derefRef(store.issues[id].ExternalRef); got != ref {
+						t.Errorf("pull %d: bead %s external_ref = %q, want %q", pull+1, id, got, ref)
+					}
+				}
+				byRef := map[string]int{}
+				for _, iss := range store.issues {
+					byRef[derefRef(iss.ExternalRef)]++
+				}
+				if len(store.issues) != 2 || byRef[refC] != 1 || byRef[refD] != 1 {
+					t.Errorf("pull %d: beads by external_ref = %v, want one each for project C and D", pull+1, byRef)
+				}
+			}
+		})
+	}
+}
