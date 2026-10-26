@@ -324,6 +324,17 @@ func (e *Engine) DetectConflicts(ctx context.Context) ([]Conflict, error) {
 // doPull imports tracker issues. IDs of issues it creates or updates are
 // added to pulledIDs so a bidirectional sync's push phase does not echo the
 // freshly pulled content straight back to the tracker.
+// matchKey returns the pull fallback identity for an external ref: the
+// tracker's MatchKey when it implements MatchKeyer (its ExtractIdentifier
+// values are not unique across the pull's namespace), ExtractIdentifier
+// otherwise.
+func (e *Engine) matchKey(ref string) string {
+	if mk, ok := e.Tracker.(MatchKeyer); ok {
+		return mk.MatchKey(ref)
+	}
+	return e.Tracker.ExtractIdentifier(ref)
+}
+
 func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs, pulledIDs map[string]bool) (*PullStats, error) {
 	ctx, span := syncTracer.Start(ctx, "tracker.pull",
 		trace.WithAttributes(
@@ -368,7 +379,7 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 		if localRef == "" || !e.Tracker.IsExternalRef(localRef) {
 			continue
 		}
-		identifier := e.Tracker.ExtractIdentifier(localRef)
+		identifier := e.matchKey(localRef)
 		if identifier == "" {
 			continue
 		}
@@ -450,7 +461,7 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 		ref := e.Tracker.BuildExternalRef(&extIssue)
 		existing, _ := e.Store.GetIssueByExternalRef(ctx, ref)
 		if existing == nil && ref != "" {
-			identifier := e.Tracker.ExtractIdentifier(ref)
+			identifier := e.matchKey(ref)
 			if identifier != "" {
 				existing = localByExternalIdentifier[identifier]
 			}

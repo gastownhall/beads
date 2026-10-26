@@ -529,6 +529,8 @@ func (t *Tracker) IsExternalRef(ref string) bool {
 // That is what the "gitlab" substring arm already does for gitlab.com, and
 // keying on the project would silently stop recognizing self-hosted refs,
 // since gitlab.project_path is optional and Init discards its load error.
+// Recognition being host-scoped does not make pull matching host-scoped:
+// MatchKey qualifies pull fallback identity by project.
 //
 // Hosts are compared literally, so gitlab.url must name the host the way
 // GitLab spells it in the web_url values it returns: an explicit default port
@@ -550,6 +552,27 @@ func (t *Tracker) onConfiguredHost(ref string) bool {
 	}
 	basePath := strings.TrimRight(base.Path, "/")
 	return basePath == "" || u.Path == basePath || strings.HasPrefix(u.Path, basePath+"/")
+}
+
+// MatchKey returns the pull fallback-dedup key for a GitLab external ref,
+// implementing tracker.MatchKeyer. Where ExtractIdentifier collapses every
+// project's issue #N to the bare IID "N" — an address that is only unique
+// inside one project — MatchKey qualifies the identity with the host and the
+// full project path the ref itself carries, so a pull from one project can
+// never fall back onto a bead linked to another project's same-numbered
+// issue. Issue and work-item URL refs of one project share a key. Refs that
+// carry no project identity take no fallback match ("").
+func (t *Tracker) MatchKey(ref string) string {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return ""
+	}
+	if glShorthandPattern.MatchString(ref) {
+		// The "gitlab:{iid}" shorthand carries no project; it cannot be
+		// qualified from the ref itself.
+		return ""
+	}
+	return gitLabURLMatchKey(ref)
 }
 
 // ExtractIdentifier extracts the issue IID from a GitLab URL or shorthand ref.

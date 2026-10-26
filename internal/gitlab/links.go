@@ -81,6 +81,80 @@ func IssueIIDFromRef(ref string) (int, bool) {
 	return 0, false
 }
 
+// parseGitLabURLRef splits a URL-shaped ref into its canonical host and
+// lowercase path segments: scheme, query, and fragment are ignored; the host
+// is lowercased with the default ports :80 and :443 dropped; repeated slashes
+// collapse and a trailing slash is dropped; the path is lowercased because
+// GitLab routes are case-insensitive. ok is false for refs without a scheme
+// or host (the "gitlab:{iid}" shorthand is not a URL).
+func parseGitLabURLRef(ref string) (host string, segments []string, ok bool) {
+	rest := strings.TrimSpace(ref)
+	scheme := strings.Index(rest, "://")
+	if scheme < 0 {
+		return "", nil, false
+	}
+	rest = rest[scheme+3:]
+	if i := strings.IndexAny(rest, "?#"); i >= 0 {
+		rest = rest[:i]
+	}
+	hostPart, pathPart, _ := strings.Cut(rest, "/")
+	host = strings.ToLower(hostPart)
+	host = strings.TrimSuffix(strings.TrimSuffix(host, ":80"), ":443")
+	if host == "" {
+		return "", nil, false
+	}
+	for _, seg := range strings.Split(pathPart, "/") {
+		if seg == "" {
+			continue
+		}
+		segments = append(segments, strings.ToLower(seg))
+	}
+	return host, segments, true
+}
+
+// positiveIID reports whether s is an IID as GitLab spells it in URLs: all
+// digits with no leading zero, so "0" is rejected just like the
+// glShorthandPattern already rejects "gitlab:0".
+func positiveIID(s string) bool {
+	if s == "" || s[0] < '1' || s[0] > '9' {
+		return false
+	}
+	for i := 1; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// gitLabURLMatchKey returns the project-qualified fallback-dedup key for a
+// URL-shaped GitLab ref: "gl://{host}/{project-path}#{iid}" for issue and
+// work-item refs. Issues and work items in one project share an IID space, so
+// /-/issues/7 and /-/work_items/7 of the same project produce the same key
+// and a re-pull under the other spelling still matches. The full project path
+// (every segment before /-/) is the key's scope, so sibling projects such as
+// group/b and group/b-other never collide. Anything else — other resources,
+// URLs without a project path, non-URLs — returns "".
+func gitLabURLMatchKey(ref string) string {
+	host, segments, ok := parseGitLabURLRef(ref)
+	if !ok || len(segments) < 4 {
+		return ""
+	}
+	kind, iid := segments[len(segments)-2], segments[len(segments)-1]
+	project := segments[:len(segments)-2]
+	if kind != "issues" && kind != "work_items" {
+		return ""
+	}
+	if !positiveIID(iid) || project[len(project)-1] != "-" {
+		return ""
+	}
+	project = project[:len(project)-1]
+	if len(project) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("gl://%s/%s#%s", host, strings.Join(project, "/"), iid)
+}
+
 // LinkFromBeadsDependency converts one local dependency record to the GitLab
 // issue-link direction. For a beads blocks edge A -> B, GitLab stores the
 // inverse API relation: B --blocks--> A.
