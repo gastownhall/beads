@@ -256,7 +256,7 @@ func checkYAMLConfigValues(repoPath string) []string {
 							arg, note := remedy.CommandArg(runtime.GOOS, contributorRepo, "<path>")
 							issues = append(issues, fmt.Sprintf(
 								"routing.contributor=%s is not in repos.additional. "+
-									"Run `bd repo add %s`%s to make routed issues visible.",
+									"Run bd repo add %s%s to make routed issues visible.",
 								remedy.EscapedValue(contributorRepo), arg, note))
 						}
 					}
@@ -267,7 +267,7 @@ func checkYAMLConfigValues(repoPath string) []string {
 							arg, note := remedy.CommandArg(runtime.GOOS, maintainerRepo, "<path>")
 							issues = append(issues, fmt.Sprintf(
 								"routing.maintainer=%s is not in repos.additional. "+
-									"Run `bd repo add %s`%s to make routed issues visible.",
+									"Run bd repo add %s%s to make routed issues visible.",
 								remedy.EscapedValue(maintainerRepo), arg, note))
 						}
 					}

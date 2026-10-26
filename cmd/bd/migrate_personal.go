@@ -593,7 +593,7 @@ func repoSyncMirrorRefusal(issue *types.Issue, planningPath, goos string) error 
 	if !ok {
 		sourceRepo, quoted, pathNote = remedy.EscapedValue(issue.SourceRepo), "<path>", ", with that path for <path>"
 	}
-	return fmt.Errorf("issue %s already exists in the planning repo %s; the project copy was imported from %s by `bd repo sync` (remove those copies with `bd repo remove %s`, then rerun, and run `bd repo add %s` again if you want them hydrated%s); nothing was moved",
+	return fmt.Errorf("issue %s already exists in the planning repo %s; the project copy was imported from %s by bd repo sync (remove those copies with bd repo remove %s, then rerun, and run bd repo add %s again if you want them hydrated%s); nothing was moved",
 		remedy.PrintedValue(issue.ID), remedy.PrintedValue(planningPath), sourceRepo, quoted, quoted, pathNote)
 }
 

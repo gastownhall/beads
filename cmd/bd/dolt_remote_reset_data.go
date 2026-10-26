@@ -333,7 +333,7 @@ Examples:
 		fmt.Printf("Force-pushing to remote %q...\n", name)
 		if perr := st.PushRemote(ctx, name, true); perr != nil {
 			remote, note := remedy.CommandArg(runtime.GOOS, name, "<remote>")
-			return HandleError("push after reset failed (the remote's data refs were already removed — re-run `bd dolt push --force --remote %s`%s once the cause is fixed): %v", remote, note, perr)
+			return HandleError("push after reset failed (the remote's data refs were already removed — re-run bd dolt push --force --remote %s%s once the cause is fixed): %v", remote, note, perr)
 		}
 
 		if jsonOutput {

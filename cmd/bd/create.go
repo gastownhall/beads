@@ -1321,7 +1321,7 @@ func refuseUninitializableTarget(beadsDir string) error {
 	}
 	if strings.EqualFold(mode, configfile.DoltModeServer) {
 		initCmd, hostNote := serverInitRemedy(runtime.GOOS, "bd init", beadsDir, host)
-		return refuseTarget("%s has no metadata.json and its own config selects Dolt server mode (dolt.mode: server); not initializing it as an embedded workspace, which would hide its server data. Run `%s` there%s, naming the server database it uses (%q unless BEADS_DOLT_SERVER_DATABASE names another), then rerun", repo, initCmd, hostNote, configfile.DefaultDoltDatabase)
+		return refuseTarget("%s has no metadata.json and its own config selects Dolt server mode (dolt.mode: server); not initializing it as an embedded workspace, which would hide its server data. Run: %s there%s, naming the server database it uses (%q unless BEADS_DOLT_SERVER_DATABASE names another), then rerun", repo, initCmd, hostNote, configfile.DefaultDoltDatabase)
 	}
 	if mode == "" {
 		// With no dolt.mode, a non-local dolt.host selects server mode there
@@ -1337,7 +1337,7 @@ func refuseUninitializableTarget(beadsDir string) error {
 			// The host is named escaped (remedy.EscapedValue), as hostNote
 			// names one the remedy leaves as a placeholder.
 			initCmd, hostNote := serverInitRemedy(runtime.GOOS, "bd init --server", beadsDir, host)
-			return refuseTarget("%s has no metadata.json and its own config selects Dolt server mode (dolt.host: %s); not initializing it as an embedded workspace, which would hide its server data. Run `%s` there%s, naming the server database it uses (%q unless BEADS_DOLT_SERVER_DATABASE names another), then rerun", repo, remedy.EscapedValue(host), initCmd, hostNote, configfile.DefaultDoltDatabase)
+			return refuseTarget("%s has no metadata.json and its own config selects Dolt server mode (dolt.host: %s); not initializing it as an embedded workspace, which would hide its server data. Run: %s there%s, naming the server database it uses (%q unless BEADS_DOLT_SERVER_DATABASE names another), then rerun", repo, remedy.EscapedValue(host), initCmd, hostNote, configfile.DefaultDoltDatabase)
 		}
 	}
 	// Metadata that does not load (a malformed, non-object or unreadable

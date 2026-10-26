@@ -235,7 +235,7 @@ func rememberBareKeyPath(key, insight, existing string, found bool) error {
 		}
 		keyArg, keyNote := remedy.CommandArg(runtime.GOOS, key, "<key>")
 		fmt.Fprintf(os.Stderr,
-			"(recalled %q -- a bare existing key READS. To overwrite: `bd remember \"<new content>\" --key %s`%s)\n",
+			"(recalled %q -- a bare existing key READS. To overwrite: bd remember \"<new content>\" --key %s%s)\n",
 			key, keyArg, keyNote)
 		fmt.Printf("%s\n", existing)
 		return nil
@@ -244,7 +244,7 @@ func rememberBareKeyPath(key, insight, existing string, found bool) error {
 	return HandleErrorRespectJSON(
 		"no memory named %q to recall -- and refusing to store a bare key-like token as its own content. "+
 			"`bd remember` WRITES (its positional arg is CONTENT, not a key). "+
-			"To store it anyway: `bd remember %q --key %s`%s. To browse keys: `bd memories`",
+			"To store it anyway: bd remember %q --key %s%s. To browse keys: `bd memories`",
 		key, insight, keyArg, keyNote)
 }
 

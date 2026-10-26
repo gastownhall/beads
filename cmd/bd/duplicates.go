@@ -221,10 +221,7 @@ func duplicateMergeCommand(sources []string, target string) string {
 // listing, so it is spelled by remedy.PrintedValue only, which keeps it from
 // redrawing the command.
 func printedIssueID(id string) string {
-	if remedy.IsPlainWord(id) {
-		return id
-	}
-	return remedy.EscapedValue(id)
+	return remedy.PrintedWord(id)
 }
 
 // printedIssueIDs spells each of ids by printedIssueID and joins them with

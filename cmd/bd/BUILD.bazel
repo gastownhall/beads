@@ -1144,6 +1144,7 @@ go_test(
         "relate_test.go",
         "relational_proxied_integration_test.go",
         "remedy_printing_test.go",
+        "remedy_store_hint_pure_test.go",
         "remote_migrate_gate_test.go",
         "remote_sync_open_test.go",
         "removed_backend_heal_embedded_test.go",

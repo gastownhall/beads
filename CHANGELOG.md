@@ -978,8 +978,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `bd repo add` and `bd init --prefix` fixes, the embedded store's
   `bd federation add-peer` refusal and stored-peer password warning, the
   reset-data `bd dolt push --force --remote` hint, and the `bd ship` and proxied
-  `bd backup init` hints put the command in backticks rather than single
-  quotes; that a value named with `EscapedValue` where bd used `%q`, such as
+  `bd backup init` hints print the command bare rather than in single
+  quotes, each value in it one shell word or a placeholder (as do
+  `bd create --repo`'s server-mode refusals, which now read
+  `Run: <command> there`, `bd migrate-personal`'s repo-sync refusal and
+  `bd remember`'s hints, none of them in backticks);
+  that a value named with `EscapedValue` where bd used `%q`, such as
   the repo in `bd doctor`'s `routing.contributor`/`routing.maintainer`
   message, spells `'`, `"`, `$`, `` ` ``, `%`, `!`, `&`, `|`, `<`, `>`, `^`,
   `;`, `,`, `=` and curly quotes as escapes (`\x27`), and the command beside
@@ -1037,6 +1041,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with no issues. A database already on the server with issues gets the
   local directory and its metadata update, and nothing is imported. The
   Schema Compatibility repair runs the same code and is fixed too.
+
+- **Pasted hints no longer run a store-read issue ID.** `bd find-duplicates`'
+  `Compare:` line, `bd mol ready --gated`'s `bd assign` line, `bd show`'s
+  comments-tail pointer, the `bd show` and `bd dep list` raw-edge pointers,
+  `bd dep add`'s refusal of a `<type>:<id>` target, and `bd close`'s note on
+  a molecule a `bd serve` that does not advertise molecule auto-close left
+  complete pasted an issue ID read from the store raw into the command they
+  suggest, so a pulled ID holding shell syntax ran when the line was pasted.
+  Each ID now goes in as one shell word (an ID bd mints prints as before), or
+  as a placeholder named escaped after the command, and the lines beside
+  those commands name it escaped when it is not a plain word, as do the
+  partial-ID notice every command that resolves an ID prefix prints and
+  `bd close --force`'s open-children warning, so no such ID can redraw a
+  line above a hint. `bd doctor --agent` shows a fix command that holds a
+  backtick in a code span fenced by a longer, even run of backticks, so the
+  command's own backtick no longer closes the span; this includes bd's own
+  advice while the fix gate withholds `bd doctor --fix`, which main printed
+  as a single-backtick span its quoted `bd doctor --fix` broke apart.
 
 - **`bd export` and auto-export no longer write JSONL with relations silently
   dropped** (GH#6870). When a label, dependency, comment or count read fails,

@@ -1456,8 +1456,8 @@ func TestEmbeddedMigratePersonal_repoSyncMirrorHint(t *testing.T) {
 	if !ok {
 		t.Fatalf("remedy.ShellQuotedFor(%q, %q) cannot quote the planning repo's path", runtime.GOOS, planningDir)
 	}
-	requireMigratePersonalRefused(t, bd, dir, "by `bd repo sync` (remove those copies with `bd repo remove "+quoted+
-		"`, then rerun, and run `bd repo add "+quoted+"` again if you want them hydrated); nothing was moved")
+	requireMigratePersonalRefused(t, bd, dir, "by bd repo sync (remove those copies with bd repo remove "+quoted+
+		", then rerun, and run bd repo add "+quoted+" again if you want them hydrated); nothing was moved")
 	requireStillInProject(t, beadsDir, "mps", personal.ID)
 
 	if out, err := bdRunWithFlockRetry(t, bd, dir, "repo", "remove", planningDir); err != nil {
@@ -1860,12 +1860,12 @@ func TestIsPlanningRepoMirror(t *testing.T) {
 func TestRepoSyncMirrorRefusal(t *testing.T) {
 	t.Parallel()
 	const prefix = "issue mps-1 already exists in the planning repo P; the project copy was imported from "
-	const placeholders = "`bd repo sync` (remove those copies with `bd repo remove <path>`, then rerun, and run `bd repo add <path>` again if you want them hydrated, with that path for <path>); nothing was moved"
+	const placeholders = "bd repo sync (remove those copies with bd repo remove <path>, then rerun, and run bd repo add <path> again if you want them hydrated, with that path for <path>); nothing was moved"
 	for _, tc := range []struct {
 		goos, sourceRepo, want string
 	}{
-		{"linux", "/home/me/planning", prefix + "/home/me/planning by `bd repo sync` (remove those copies with `bd repo remove '/home/me/planning'`, then rerun, and run `bd repo add '/home/me/planning'` again if you want them hydrated); nothing was moved"},
-		{"windows", `C:\planning`, prefix + `C:\planning by ` + "`bd repo sync` (remove those copies with `bd repo remove \"C:\\planning\"`, then rerun, and run `bd repo add \"C:\\planning\"` again if you want them hydrated); nothing was moved"},
+		{"linux", "/home/me/planning", prefix + "/home/me/planning by bd repo sync (remove those copies with bd repo remove '/home/me/planning', then rerun, and run bd repo add '/home/me/planning' again if you want them hydrated); nothing was moved"},
+		{"windows", `C:\planning`, prefix + `C:\planning by ` + "bd repo sync (remove those copies with bd repo remove \"C:\\planning\", then rerun, and run bd repo add \"C:\\planning\" again if you want them hydrated); nothing was moved"},
 		{"windows", `C:\planning\`, prefix + `"C:\\planning\\" by ` + placeholders},
 		{"windows", `C:\Users\me\$work\planning`, prefix + `"C:\\Users\\me\\\x24work\\planning" by ` + placeholders},
 		{"windows", `C:\x" & calc & "$(calc)`, prefix + `"C:\\x\x22 \x26 calc \x26 \x22\x24(calc)" by ` + placeholders},

@@ -395,12 +395,14 @@ func runBackupRestoreProxied(ctx context.Context, dir string, force bool) error 
 	return nil
 }
 
-// backupInitCommand is the bd backup init command for dir, in backticks, the
-// directory as one shell word or a placeholder named after the command: dir is
-// the restore directory the user typed, and a space in it would split it.
+// backupInitCommand is the bd backup init command for dir, the directory as
+// one shell word or a placeholder named after the command: dir is the restore
+// directory the user typed, and a space in it would split it. It is not
+// wrapped in backticks: sh, bash and zsh run a pasted `...` as a command
+// substitution, which a backtick in the single-quoted directory would end.
 func backupInitCommand(dir string) string {
 	arg, note := remedy.CommandArg(runtime.GOOS, dir, "<dir>")
-	return "`bd backup init " + arg + "`" + note
+	return "bd backup init " + arg + note
 }
 
 // proxiedRestoreFailureMessage renders what the operator is told when one of

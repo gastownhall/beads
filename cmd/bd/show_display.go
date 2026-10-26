@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -318,8 +319,10 @@ func warnUnresolvableDepEdges(issueID string, counts depCounts, deps, dependents
 		if missing <= 0 {
 			return false
 		}
+		// issueID is the store's, named as printedIssueID spells it so it
+		// cannot redraw the bd dep list pointer printed below.
 		fmt.Fprintf(os.Stderr, "warning: %s has %d %s edge(s) whose far end has no row in this database (cross-repo/external) and are not shown above\n",
-			issueID, missing, kind)
+			printedIssueID(issueID), missing, kind)
 		return true
 	}
 	outbound := report("dependency", counts.deps.n, counts.deps.err, deps)
@@ -337,7 +340,11 @@ func warnUnresolvableDepEdges(issueID string, counts depCounts, deps, dependents
 	if outbound {
 		// Named once, after both directions, so an issue short on each gets
 		// one pointer rather than two.
-		fmt.Fprintf(os.Stderr, "For raw edge records, run: bd dep list %s %s\n", issueID, issueID)
+		// issueID is the store's (a partial-id argument resolves to it), so it
+		// goes into the bd dep list command as one shell word, or as a
+		// placeholder named escaped after it (remedy.CommandArg).
+		arg, note := remedy.CommandArg(runtime.GOOS, issueID, "<issue-id>")
+		fmt.Fprintf(os.Stderr, "For raw edge records, run: bd dep list %s %s%s\n", arg, arg, note)
 	}
 	if inbound {
 		fmt.Fprintln(os.Stderr, "The unrenderable dependent edges have no raw CLI listing yet: bd dep list is outbound-only.")

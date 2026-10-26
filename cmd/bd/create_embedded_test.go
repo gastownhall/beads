@@ -1397,7 +1397,7 @@ func TestEmbeddedCreateRepoMetadataLessTarget(t *testing.T) {
 			writeServerModeWorkspace(t, beadsDir)
 			createForkSetupPlanningDatabase(t, beadsDir, nil)
 		}},
-		{name: "refuses server mode selected by a remote dolt.host", want: "selects Dolt server mode (dolt.host: \"db.example.com\"); not initializing it as an embedded workspace, which would hide its server data. Run `bd init --server --server-host " + quotedHost + " --server-port 3307 --database <name>` there", setup: func(t *testing.T, beadsDir string) {
+		{name: "refuses server mode selected by a remote dolt.host", want: "selects Dolt server mode (dolt.host: \"db.example.com\"); not initializing it as an embedded workspace, which would hide its server data. Run: bd init --server --server-host " + quotedHost + " --server-port 3307 --database <name> there", setup: func(t *testing.T, beadsDir string) {
 			// The port file a local server left is not the remote host's
 			// port, so the remedy names the one config.yaml does.
 			for name, content := range map[string]string{
