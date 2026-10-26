@@ -932,6 +932,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd find-duplicates --method ai` and `bd admin compact --auto` no longer
+  discard an AI reply whose first content block is a `thinking` block.
+  Claude models that think by default answer as `[thinking, text]`, and both
+  call sites read only the first block: `find-duplicates` printed
+  `Warning: unexpected AI response format` and fell back to the mechanical
+  scores, and compaction failed with
+  `unexpected response format: not a text block (type=thinking)`. Both now
+  use the first `text` block in the reply (#7515).
 - The batched bulk readers no longer return an issue's rows twice when the
   same id is requested twice. Since the 200-id batching (#6444), an id that
   appeared in two batches had its comments, labels, dependency records,
