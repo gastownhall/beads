@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -210,6 +211,13 @@ func beadsGitignoreTooLoose(info os.FileInfo) bool {
 	return runtime.GOOS != "windows" && info.Mode().Perm()&0077 != 0
 }
 
+// ErrGitignorePermissions marks an EnsureGitignoreForBeadsDir failure that left
+// every required pattern in place and only failed to restrict the file's mode
+// to 0600 (e.g. a file owned by another user, or a chmod-hostile mount).
+// Callers may downgrade it to a warning; any other error means patterns may
+// be missing.
+var ErrGitignorePermissions = errors.New("could not restrict .beads/.gitignore to 0600")
+
 // chmodBeadsGitignore is os.Chmod; tests replace it to make chmod fail without
 // a chmod-hostile mount.
 var chmodBeadsGitignore = os.Chmod
@@ -267,14 +275,16 @@ func EnsureGitignoreForBeadsDir(beadsDir string) error {
 }
 
 // tightenBeadsGitignore resets .beads/.gitignore to 0600 when it grants group
-// or other access, and leaves stricter modes alone.
+// or other access, and leaves stricter modes alone. Callers run it only once
+// the required patterns are in place, so a chmod failure here is reported as
+// ErrGitignorePermissions.
 func tightenBeadsGitignore(gitignorePath string) error {
 	info, err := os.Stat(gitignorePath)
 	if err != nil || !beadsGitignoreTooLoose(info) {
 		return nil
 	}
 	if err := chmodBeadsGitignore(gitignorePath, 0600); err != nil {
-		return fmt.Errorf("chmod .beads/.gitignore: %w", err)
+		return fmt.Errorf("%w: %w", ErrGitignorePermissions, err)
 	}
 	return nil
 }

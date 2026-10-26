@@ -2,11 +2,13 @@ package doctor
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -3288,4 +3290,148 @@ func TestEnsureGitignoreForBeadsDir_WindowsKeepsReadOnlyCompleteFile(t *testing.
 	if info.Mode().Perm()&0200 != 0 {
 		t.Errorf("read-only attribute cleared (mode %04o)", info.Mode().Perm())
 	}
+}
+
+// TestEnsureGitignoreForBeadsDir_TightenFailureIsPermissionOnly pins #6225
+// finding 2 at its source: when only the final tightening chmod fails, the
+// required patterns are already in place, so the error is classified as
+// ErrGitignorePermissions (callers may warn). Failures that leave patterns
+// unwritten must not carry that classification.
+func TestEnsureGitignoreForBeadsDir_TightenFailureIsPermissionOnly(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Skipping file permissions test on Windows")
+	}
+
+	failChmod := func(t *testing.T) *int {
+		calls := 0
+		stubChmodBeadsGitignore(t, func(name string, _ os.FileMode) error {
+			calls++
+			return &os.PathError{Op: "chmod", Path: name, Err: syscall.EPERM}
+		})
+		return &calls
+	}
+	isPermissionOnly := func(t *testing.T, err error) {
+		t.Helper()
+		if !errors.Is(err, ErrGitignorePermissions) {
+			t.Fatalf("err = %v, want ErrGitignorePermissions", err)
+		}
+		var pathErr *os.PathError
+		if !errors.As(err, &pathErr) || !errors.Is(err, syscall.EPERM) {
+			t.Errorf("err = %v, want it to wrap the chmod *os.PathError (EPERM)", err)
+		}
+	}
+	notPermissionOnly := func(t *testing.T, err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatal("err = nil, want a failure")
+		}
+		if errors.Is(err, ErrGitignorePermissions) {
+			t.Errorf("err = %v classified as permission-only, but patterns were not written", err)
+		}
+	}
+	setup := func(t *testing.T, content string, perm os.FileMode) (string, string) {
+		t.Helper()
+		beadsDir := filepath.Join(t.TempDir(), ".beads")
+		if err := os.Mkdir(beadsDir, 0750); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(beadsDir, ".gitignore")
+		if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, perm); err != nil {
+			t.Fatal(err)
+		}
+		return beadsDir, path
+	}
+
+	t.Run("incomplete 0644 appends then reports permissions", func(t *testing.T) {
+		beadsDir, path := setup(t, "old content\n", 0644)
+		failChmod(t)
+
+		isPermissionOnly(t, EnsureGitignoreForBeadsDir(beadsDir))
+
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.HasPrefix(string(got), "old content\n") {
+			t.Errorf("local content not preserved:\n%s", got)
+		}
+		if missing := missingGitignorePatterns(string(got)); len(missing) != 0 {
+			t.Errorf("patterns still missing after append: %v", missing)
+		}
+
+		// A rerun finds the patterns in place: same classification, no second block.
+		isPermissionOnly(t, EnsureGitignoreForBeadsDir(beadsDir))
+		got, err = os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n := strings.Count(string(got), "# Added by bd"); n != 1 {
+			t.Errorf("found %d '# Added by bd' blocks, want 1:\n%s", n, got)
+		}
+	})
+
+	t.Run("complete 0644 reports permissions and keeps bytes", func(t *testing.T) {
+		beadsDir, path := setup(t, GitignoreTemplate, 0644)
+		failChmod(t)
+
+		isPermissionOnly(t, EnsureGitignoreForBeadsDir(beadsDir))
+
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != GitignoreTemplate {
+			t.Errorf("content changed:\n%s", got)
+		}
+	})
+
+	t.Run("incomplete 0400 owner-write restore failure is not permission-only", func(t *testing.T) {
+		beadsDir, path := setup(t, "old content\n", 0400)
+		failChmod(t)
+
+		notPermissionOnly(t, EnsureGitignoreForBeadsDir(beadsDir))
+
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != "old content\n" {
+			t.Errorf("content changed after a failed restore:\n%s", got)
+		}
+	})
+
+	t.Run("unreadable .gitignore is not permission-only", func(t *testing.T) {
+		beadsDir := filepath.Join(t.TempDir(), ".beads")
+		if err := os.MkdirAll(filepath.Join(beadsDir, ".gitignore"), 0750); err != nil {
+			t.Fatal(err)
+		}
+		failChmod(t)
+
+		notPermissionOnly(t, EnsureGitignoreForBeadsDir(beadsDir))
+	})
+
+	t.Run("missing file is created without a chmod", func(t *testing.T) {
+		beadsDir := filepath.Join(t.TempDir(), ".beads")
+		if err := os.Mkdir(beadsDir, 0750); err != nil {
+			t.Fatal(err)
+		}
+		calls := failChmod(t)
+
+		if err := EnsureGitignoreForBeadsDir(beadsDir); err != nil {
+			t.Fatalf("EnsureGitignoreForBeadsDir: %v", err)
+		}
+		if *calls != 0 {
+			t.Errorf("chmod called %d times creating a 0600 file, want 0", *calls)
+		}
+		got, err := os.ReadFile(filepath.Join(beadsDir, ".gitignore"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != GitignoreTemplate {
+			t.Errorf("template not written:\n%s", got)
+		}
+	})
 }
