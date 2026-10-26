@@ -12,19 +12,24 @@ import (
 )
 
 // createBatchEquivalenceParts spreads createbatchequiv.Run's scenarios over
-// the two TestCreateBatchFastPathsMatchPerRow*_Embedded tests below: under
-// -race they took ~110s as one test, a whole CI shard on their own.
+// the TestCreateBatchFastPathsMatchPerRow*_Embedded tests below: under -race
+// the first four took ~110s as one test, a whole CI shard on their own.
+// settled applies its run both ways, including two closes that each recompute
+// a full 200-row chunk, and takes longer than any two of the others together,
+// so it runs alone.
 // TestCreateBatchEquivalencePartsCoverEveryScenario keeps the split exact.
 var createBatchEquivalenceParts = [][]string{
 	{"small", "depadd"},
 	{"apply", "waitsfor"},
+	{"settled"},
 }
 
-// TestCreateBatchFastPathsMatchPerRowSmallDepAdd_Embedded and
-// TestCreateBatchFastPathsMatchPerRowApplyWaitsFor_Embedded run the
-// batch-create equivalence scenarios (internal/storage/createbatchequiv) on
-// the embedded engine: the same import-shaped batch through the fast and
-// per-row bodies must store the same rows.
+// TestCreateBatchFastPathsMatchPerRowSmallDepAdd_Embedded,
+// TestCreateBatchFastPathsMatchPerRowApplyWaitsFor_Embedded and
+// TestCreateBatchFastPathsMatchPerRowSettled_Embedded run the batch-create
+// equivalence scenarios (internal/storage/createbatchequiv) on the embedded
+// engine: the same import-shaped batch, or the same run of closes and status
+// changes, through the fast and per-row bodies must store the same rows.
 func TestCreateBatchFastPathsMatchPerRowSmallDepAdd_Embedded(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 	createbatchequiv.RunNamed(t, openEquivalenceDB, createBatchEquivalenceParts[0]...)
@@ -33,6 +38,11 @@ func TestCreateBatchFastPathsMatchPerRowSmallDepAdd_Embedded(t *testing.T) {
 func TestCreateBatchFastPathsMatchPerRowApplyWaitsFor_Embedded(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 	createbatchequiv.RunNamed(t, openEquivalenceDB, createBatchEquivalenceParts[1]...)
+}
+
+func TestCreateBatchFastPathsMatchPerRowSettled_Embedded(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	createbatchequiv.RunNamed(t, openEquivalenceDB, createBatchEquivalenceParts[2]...)
 }
 
 // TestCreateBatchEquivalencePartsCoverEveryScenario fails unless the parts

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage"
@@ -481,5 +482,152 @@ func TestPersistenceRepairKeepsTheRowsOwnParticipation(t *testing.T) {
 					via, id, legacy, beforeVersions, afterVersions, wantVersions)
 			}
 		}
+	}
+}
+
+// participationState reads id's issues-plane participation_generation (nil for
+// NULL), its wisps-plane twin when the wisps table holds the row (nil for NULL
+// or no row), and its issue_versions count.
+func participationState(t *testing.T, ctx context.Context, store *DoltStore, id string) (issues, wisps *int64, versions int) {
+	t.Helper()
+	read := func(query string) *int64 {
+		var generation sql.NullInt64
+		err := store.db.QueryRowContext(ctx, query, id).Scan(&generation)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			t.Fatalf("%s for %s: %v", query, id, err)
+		}
+		if !generation.Valid {
+			return nil
+		}
+		return &generation.Int64
+	}
+	issues = read(`SELECT participation_generation FROM issues WHERE id = ?`)
+	wisps = read(`SELECT participation_generation FROM wisps WHERE id = ?`)
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM issue_versions WHERE issue_id = ?`, id).Scan(&versions); err != nil {
+		t.Fatal(err)
+	}
+	return issues, wisps, versions
+}
+
+func generationString(g *int64) string {
+	if g == nil {
+		return "NULL"
+	}
+	return fmt.Sprint(*g)
+}
+
+// TestPlaneRoundTripKeepsTheGenerationItCarried pins the encoding the
+// conformance round-trip cases observe only through the issues row: with
+// history on, a demotion records the row's participation on its wisps row
+// (its generation, or 0 for a legacy row), and the move back out restores
+// exactly that, not the epoch current at the time of the move. A demotion
+// made with history off records nothing (FR-7), so that row comes back as
+// any wisp does and begins history.
+func TestPlaneRoundTripKeepsTheGenerationItCarried(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	defer store.SetVersionedHistoryEnabled(false)
+	ctx := context.Background()
+	ops, err := NewIssueOperations(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	move := func(id string, mode publicops.PersistenceMode) {
+		t.Helper()
+		result, err := ops.Update(ctx, publicops.UpdateRequest{Actor: "mover", IssueID: id, Patch: publicops.IssuePatch{
+			Persistence: publicops.Field[publicops.PersistenceMode]{Set: true, Value: mode},
+		}})
+		if err != nil || !result.Changed {
+			t.Fatalf("moving %s to %s: changed=%v err=%v", id, mode, result.Changed, err)
+		}
+	}
+	create := func(id string) {
+		t.Helper()
+		if err := store.CreateIssue(ctx, &types.Issue{ID: id, Title: id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}, "tester"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	store.SetVersionedHistoryEnabled(false)
+	create("rt-legacy")
+	create("rt-off-demote")
+	move("rt-off-demote", publicops.PersistenceModeEphemeral)
+	store.SetVersionedHistoryEnabled(true)
+	create("rt-participating")
+	issuesGen, _, participatingVersions := participationState(t, ctx, store, "rt-participating")
+	if issuesGen == nil {
+		t.Fatal("rt-participating was created with history on but is not stamped")
+	}
+	declared := *issuesGen
+
+	move("rt-legacy", publicops.PersistenceModeEphemeral)
+	move("rt-participating", publicops.PersistenceModeEphemeral)
+	for id, want := range map[string]string{"rt-legacy": "0", "rt-participating": fmt.Sprint(declared), "rt-off-demote": "NULL"} {
+		if _, wisps, _ := participationState(t, ctx, store, id); generationString(wisps) != want {
+			t.Errorf("wisps.participation_generation for %s = %s while it is a wisp, want %s", id, generationString(wisps), want)
+		}
+	}
+
+	// A restore or a reinit bumps the epoch; the carried generation must not
+	// follow it.
+	if _, err := store.BumpEpoch(ctx, "rt", "restore"); err != nil {
+		t.Fatal(err)
+	}
+	move("rt-legacy", publicops.PersistenceModePersistent)
+	move("rt-participating", publicops.PersistenceModePersistent)
+	move("rt-off-demote", publicops.PersistenceModePersistent)
+
+	if issues, _, versions := participationState(t, ctx, store, "rt-legacy"); issues != nil || versions != 0 {
+		t.Errorf("rt-legacy after the round trip: participation_generation=%s, %d versions; want NULL and 0: it was legacy when it was demoted (R2.3)", generationString(issues), versions)
+	}
+	if issues, _, versions := participationState(t, ctx, store, "rt-participating"); generationString(issues) != fmt.Sprint(declared) || versions != participatingVersions+1 {
+		t.Errorf("rt-participating after the round trip: participation_generation=%s, %d versions; want %d (the generation it carried, not the bumped epoch) and %d", generationString(issues), versions, declared, participatingVersions+1)
+	}
+	if issues, _, versions := participationState(t, ctx, store, "rt-off-demote"); issues == nil || versions != 1 {
+		t.Errorf("rt-off-demote after the round trip: participation_generation=%s, %d versions; want stamped and 1: a demotion with history off carries nothing (FR-7), so the row arrives as a wisp does", generationString(issues), versions)
+	}
+}
+
+// TestDemoteToWispCarriesParticipation is the run-time half of
+// versionParticipationCarrySites for the one plane move outside issueops:
+// DoltStore.UpdateIssue's demotion ({"wisp": true} on an issues-plane row,
+// demoteToWispInTx). A legacy row it demotes stays legacy when it is promoted
+// back, and a participating row keeps its history.
+func TestDemoteToWispCarriesParticipation(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	defer store.SetVersionedHistoryEnabled(false)
+	ctx := context.Background()
+	create := func(id string) {
+		t.Helper()
+		if err := store.CreateIssue(ctx, &types.Issue{ID: id, Title: id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}, "tester"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store.SetVersionedHistoryEnabled(false)
+	create("dw-legacy")
+	store.SetVersionedHistoryEnabled(true)
+	create("dw-participating")
+	_, _, participatingVersions := participationState(t, ctx, store, "dw-participating")
+
+	for _, id := range []string{"dw-legacy", "dw-participating"} {
+		if err := store.UpdateIssue(ctx, id, map[string]any{"wisp": true}, "demoter"); err != nil {
+			t.Fatalf("demoting %s: %v", id, err)
+		}
+		if !store.isActiveWisp(ctx, id) {
+			t.Fatalf("%s is not a wisp after UpdateIssue's demotion", id)
+		}
+		if err := store.PromoteFromEphemeral(ctx, id, "promoter"); err != nil {
+			t.Fatalf("promoting %s: %v", id, err)
+		}
+	}
+	if issues, _, versions := participationState(t, ctx, store, "dw-legacy"); issues != nil || versions != 0 {
+		t.Errorf("dw-legacy after demote and promote: participation_generation=%s, %d versions; want NULL and 0 (R2.3)", generationString(issues), versions)
+	}
+	if issues, _, versions := participationState(t, ctx, store, "dw-participating"); issues == nil || versions != participatingVersions+1 {
+		t.Errorf("dw-participating after demote and promote: participation_generation=%s, %d versions; want stamped and %d", generationString(issues), versions, participatingVersions+1)
 	}
 }

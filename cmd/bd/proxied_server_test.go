@@ -1460,3 +1460,25 @@ exit 2
 	_, err = os.Stat(filepath.Join(root, server.RuntimeConfigFileName))
 	assert.True(t, os.IsNotExist(err), "a failed Start must not leave a runtime config")
 }
+
+// TestProxiedLogAssetsIncludesDefaultRotatedLog: the proxy start rotates the
+// default server.log to server.log.1, so a proxied→server migration retires
+// both. A custom log path is the operator's and stays untouched, rotated
+// generation included.
+func TestProxiedLogAssetsIncludesDefaultRotatedLog(t *testing.T) {
+	t.Run("default", func(t *testing.T) {
+		t.Setenv("BEADS_PROXIED_SERVER_LOG", "")
+		bd := t.TempDir()
+		assets, err := proxiedLogAssets(bd)
+		require.NoError(t, err)
+		assert.Equal(t, []string{proxiedServerLogPath(bd), proxiedServerLogPath(bd) + ".1"}, assets)
+	})
+	t.Run("custom", func(t *testing.T) {
+		t.Setenv("BEADS_PROXIED_SERVER_LOG", "")
+		bd := t.TempDir()
+		writeProxiedClientInfo(t, bd, &configfile.ProxiedServerClientInfo{LogPath: "logs/server.log"})
+		assets, err := proxiedLogAssets(bd)
+		require.NoError(t, err)
+		assert.Nil(t, assets)
+	})
+}

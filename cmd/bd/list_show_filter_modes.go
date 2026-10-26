@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
@@ -222,7 +223,7 @@ func watchIssues(ctx context.Context, store storage.DoltStorage, filter types.Is
 		case <-ticker.C:
 			issues, err := loadWatchedIssues(ctx, store, filter, ready, parentID, sortBy, reverse)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error refreshing issues: %v\n", err)
+				fmt.Fprintf(os.Stderr, "Error refreshing issues: %s\n", remedy.PrintedMessage(err))
 				continue
 			}
 			issues, truncated := workapi.FinishPage(issues, "", false, effectiveLimit, false)

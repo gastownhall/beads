@@ -18,7 +18,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/uow"
 )
 
-// doltVersionWarnOnce ensures the dolt-version advisory (old/unverifiable
+// doltVersionWarnOnce ensures the dolt-version advisory (unverifiable
 // version) is printed at most once per process, even though
 // resolveAndProbeDolt can run repeatedly against the same resolved binary
 // (retries, multiple UOW providers opened in one command, or bd init
@@ -42,8 +42,11 @@ func doltProbeCachePath() string {
 }
 
 // resolveAndProbeDolt resolves the external dolt binary (env override >
-// sidecar > PATH) and hardened-probes it, printing the version-recommendation
-// advisory (if any) at most once per process via doltVersionWarnOnce.
+// sidecar > PATH) and hardened-probes it. A binary below
+// doltversion.RequiredMin is refused with the probe's *BelowMinimumError,
+// which names the version, the minimum and how to upgrade; one whose version
+// does not parse prints an advisory at most once per process via
+// doltVersionWarnOnce and is used anyway.
 //
 // quiet suppresses the advisory (errors still return). It is a parameter
 // rather than a read of the global quietFlag because bd init defines its own
@@ -84,6 +87,12 @@ func resolveAndProbeDolt(ctx context.Context, errPrefix string, quiet bool) (dol
 	cachePath := doltProbeCachePath()
 	res, err := doltversion.ProbeWithPolicyCached(ctx, doltBin, cachePath, time.Now())
 	if err != nil {
+		if errors.Is(err, doltversion.ErrBelowRequiredMin) {
+			// The binary works; it is too old. The error carries its own
+			// upgrade advice, so the generic install hint would only
+			// repeat it less precisely.
+			return doltBin, fmt.Errorf("%s: %w (source: %s)", errPrefix, err, doltSrc)
+		}
 		if errors.Is(err, context.Canceled) {
 			// The probe was killed because OUR context was canceled (user
 			// hit Ctrl-C, outer operation gave up) — dolt itself was never
@@ -225,6 +234,18 @@ func openProxiedServerUOWProvider(ctx context.Context, beadsDir, databaseOverrid
 // wiring has something to unit test; see TestProxiedProviderOptions.
 func proxiedProviderOptions(opts []uow.ProviderOption) []uow.ProviderOption {
 	return append(append([]uow.ProviderOption{}, opts...), uow.WithProxiedServerMode())
+}
+
+// serverLogProviderOptions is opts plus uow.WithServerLogRotation() when the
+// server log is bd's default one, built on a fresh slice like
+// proxiedProviderOptions. A custom log (BEADS_PROXIED_SERVER_LOG or the
+// sidecar's log path) is the operator's: bd neither rotates it at proxy start
+// nor retires it on migration (proxiedLogAssets), so both follow isCustomLog.
+func serverLogProviderOptions(opts []uow.ProviderOption, isCustomLog bool) []uow.ProviderOption {
+	if isCustomLog {
+		return opts
+	}
+	return append(append([]uow.ProviderOption{}, opts...), uow.WithServerLogRotation())
 }
 
 // newSQLServerUOWProvider is the single funnel every unit-of-work provider bd
@@ -482,6 +503,7 @@ func newExternalProxiedServerUOWProvider(ctx context.Context, beadsDir string, t
 			return nil, fmt.Errorf("newExternalProxiedServerUOWProvider: proxied server log (from env or %s): %w", configfile.ProxiedServerClientInfoFileName, err)
 		}
 	}
+	opts = serverLogProviderOptions(opts, isCustomLog)
 
 	if err := os.MkdirAll(rootPath, config.BeadsDirPerm); err != nil {
 		return nil, fmt.Errorf("newExternalProxiedServerUOWProvider: mkdir %s: %w", rootPath, err)
@@ -545,6 +567,7 @@ func newManagedProxiedServerUOWProvider(ctx context.Context, beadsDir string, to
 			return nil, fmt.Errorf("newProxiedServerUOWProvider: proxied server log (from env or %s): %w", configfile.ProxiedServerClientInfoFileName, err)
 		}
 	}
+	opts = serverLogProviderOptions(opts, isCustomLog)
 
 	return uow.NewDoltServerUOWProvider(
 		ctx,

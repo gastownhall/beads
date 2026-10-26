@@ -1,8 +1,9 @@
 // Package createbatchequiv checks that the batch-create fast paths in
 // internal/storage/issueops (the createBatchCache, the dependency pass's batch
-// lookups and in-memory graph, and the blocked-state no-edge shortcut) store
-// exactly what the per-row bodies store. Each backend's test package runs Run
-// against its own engine; the scenario and the comparison live here once.
+// lookups and in-memory graph, and the blocked-state recompute's no-edge and
+// settled-row shortcuts) store exactly what the per-row bodies store. Each
+// backend's test package runs Run against its own engine; the scenario and the
+// comparison live here once.
 package createbatchequiv
 
 import (
@@ -56,11 +57,18 @@ type scenario struct {
 	opts      storage.BatchCreateOptions
 	apply     func() publicops.ApplyBatchRequest
 	// run, when set, replaces the batch: it drives tx itself and returns
-	// the lines to compare (kept in Outcome.Skipped). The create fast paths
-	// do not gate anything a run drives, so a run scenario is applied once
-	// and checked against its golden digest only — the pre-change code's
-	// answers — not fast against per-row.
+	// the lines to compare (kept in Outcome.Skipped). A run scenario is
+	// checked against its golden digest — the pre-change code's answers —
+	// and, when compare is set, also fast against per-row.
 	run func(ctx context.Context, tx *sql.Tx) ([]string, error)
+	// compare applies the run per-row as well and compares the two
+	// outcomes. A run's closes and status changes to closed or pinned take
+	// the settled-row shortcut the fast-path switch gates, so for the run
+	// that targets that shortcut (settled) the comparison names the rows a
+	// regression changes, on top of the golden digest. waitsfor's closes
+	// are held to their pre-change golden only, and depadd drives no gated
+	// path.
+	compare bool
 }
 
 // scenarios are the light ones Run drives on every lane.
@@ -73,6 +81,7 @@ func scenarios() []scenario {
 			stampParticipation(t, db)
 		}, run: runDepAdd},
 		{name: "waitsfor", seed: seedWaitsFor, afterSeed: stampParticipation, run: runWaitsFor},
+		{name: "settled", seed: seedSettled, afterSeed: afterSeedSettled, run: runSettled, compare: true},
 	}
 }
 
@@ -118,6 +127,11 @@ func largeScenarios() []scenario {
 // import source's for the in-batch duplicates eq-n2 (small) and eq-b3 and
 // eq-b250 (both import458 scenarios). apply and waitsfor did not move: their
 // re-minted rows take the wall clock from their other writes anyway.
+//
+// settled.json is younger than the rest: it was recorded from the code before
+// the blocked-state settled-row shortcut (fd54802bc8), on the embedded and the
+// server engine alike (byte-identical), so it holds the shortcut to that
+// code's answers.
 const GoldenDirEnv = "CREATEBATCHEQUIV_GOLDEN_DIR"
 
 // Run seeds fresh databases, applies each scenario's batch through the fast
@@ -185,6 +199,9 @@ func runScenarios(t *testing.T, open Open, list []scenario) {
 				if len(fast.Skipped) == 0 || len(fast.Tables["issue_versions"]) == 0 {
 					t.Fatalf("%s: run exercised nothing: lines=%d versions=%d", sc.name,
 						len(fast.Skipped), len(fast.Tables["issue_versions"]))
+				}
+				if sc.compare {
+					compareOutcomes(t, fast, applyScenario(t, open, sc, true))
 				}
 				checkGolden(t, sc.name, fast)
 				return

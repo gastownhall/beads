@@ -65,8 +65,8 @@ import (
 // steps follow as their own PR.
 //
 // "Single writer" means one writer AT A TIME per store, not merely one
-// clone. SELECT COALESCE(MAX(revision), 0) + 1 against PRIMARY KEY
-// (issue_id, revision) is not a safe allocator for two concurrent
+// clone. The MAX(revision) + 1 read against PRIMARY KEY (issue_id, revision)
+// in recordVersionAtInTx is not a safe allocator for two concurrent
 // transactions in one store either, and the label and dependency paths are
 // not serialized on the issue row the way the claim/close CAS is; the
 // RunDualWrite* contract cases exclude concurrent writers, so no test
@@ -115,18 +115,25 @@ import (
 // row, and so no content token, comes of it. A create-shaped mint never meets a
 // legacy row (its call site has just inserted the row), so it runs the gate
 // whenever it mints; a new row flagged no-history is stamped but not minted, so
-// nothing is canonicalized for it. The switch's check cannot see participation,
-// so it checks legacy rows too: an over-approximation that can only refuse more.
+// nothing is canonicalized for it. So a legacy row blocks no write to itself, and
+// the switch's check keeps the rows that participate (ParticipatingIssueIDsInTx)
+// and, of the legacy rows, only the templates: `bd mol pour` and `bd mol bond`
+// copy a proto's metadata and gate timeouts into every row they create, that
+// create-shaped mint runs the gate, and bd update, the in-place fix, refuses a
+// template. It warns of the other legacy issues of a proto, which can be fixed in
+// place. Where the store cannot say which rows participate, the check keeps legacy
+// rows too, an over-approximation that can only refuse more.
 //
 // That check ran once, at that moment. Nothing keeps a writer that does not mint
 // from adding such a row afterwards, even right after the switch is on; if the
 // row participates, the first write to it then fails with the same refusal, and
 // the same fix applies. Making the check and the write of the setting one
 // transaction would narrow that window, not close it. Turning history on through
-// the environment or config.yaml does not pass through that command at all; for
-// those planes this refusal is the control on the rows that participate, and
-// finding the rows ahead of time is a bd doctor check (gastownhall/beads#6379
-// item 3).
+// the environment or config.yaml does not pass through that command at all, and
+// nothing scans when a store is opened either (those planes are read on every open
+// of every process); for those planes this refusal is the control on the rows that
+// participate, and finding the rows ahead of time is a bd doctor check
+// (gastownhall/beads#6379 item 3).
 //
 // Duplicate keys are the exception to "the case to plan for". A Dolt JSON column
 // collapses duplicate keys when it stores a document, so on a Dolt store neither
@@ -519,8 +526,12 @@ func RecordVersionInTx(ctx context.Context, tx DBTX, issueID, actor string) erro
 // off, same as RecordVersionInTx), leaving the column NULL — indistinguishable
 // from a true legacy row (FR-7). A wisp arriving on the issues plane, by
 // promotion or a persistence move out of the wisps table, mints through here
-// too: its issues row is just as new, and a wisp never declares
-// participation (FR-8). A new issues-table row that carries NoHistory (or a
+// too when it carries no participation: its issues row is just as new, and a
+// row that began as a wisp never declares any (FR-8). A row a demotion took
+// off the issues plane while history was on is different: it carries the
+// participation it had (carryParticipationInTx), so its arrival restores that
+// and mints update-shaped, and a legacy row stays legacy (R2.3). A new
+// issues-table row that carries NoHistory (or a
 // stray Ephemeral) is stamped but not versioned: no-history keeps it out of
 // history for now, but it was created with the flag on, so it is not
 // legacy once that flag is repaired. A row the wisps table holds mints and
@@ -725,9 +736,19 @@ func recordVersionAtInTx(ctx context.Context, tx DBTX, issueID, actor string, at
 		return err
 	}
 
+	// The scalar-subquery form is deliberate. On Dolt 2.4.0 through 2.4.2,
+	// go-mysql-server's aggregate-over-index rewrite
+	// (dolthub/go-mysql-server#3907) returns zero rows, not one NULL row, for an
+	// ungrouped MAX over an empty primary-key prefix (dolthub/dolt#12093, fixed
+	// in 2.5.0), so "SELECT COALESCE(MAX(revision), 0) + 1 FROM issue_versions
+	// WHERE issue_id = ?" fails every first mint there. Embedded mode links a
+	// fixed engine, but server mode runs whatever dolt sql-server the user has.
+	// The outer SELECT has no FROM and yields exactly one row on every engine.
+	// Both forms pass the embedded tests on a fixed engine, so the sqlmock pins
+	// in version_history_preenable_scan_test.go are what hold this text.
 	var newRevision int64
 	if err := tx.QueryRowContext(ctx,
-		"SELECT COALESCE(MAX(revision), 0) + 1 FROM issue_versions WHERE issue_id = ?", issueID,
+		"SELECT COALESCE((SELECT MAX(revision) FROM issue_versions WHERE issue_id = ?), 0) + 1", issueID,
 	).Scan(&newRevision); err != nil {
 		return fmt.Errorf("versioned history: compute next revision for %s: %w", issueID, err)
 	}
@@ -801,4 +822,95 @@ func readStoreEpochInTx(ctx context.Context, tx DBTX) (int, error) {
 		return 0, fmt.Errorf("versioned history: read store epoch: %w", err)
 	}
 	return epoch, nil
+}
+
+// A PLANE ROUND TRIP KEEPS THE ROW'S PARTICIPATION (design §16.2b, R2.3).
+//
+// The fence reads participation off the issues row, and a plane move replaces
+// that row: a demotion deletes it, and the move back out inserts a new one,
+// which a wisp never declared anything for. Read off the new row alone, every
+// arrival looks brand new, so a legacy row made a wisp and then persistent
+// again would mint create-shaped and start being versioned through two
+// ordinary writes, which R2.3 forbids. So the demotion records the row's
+// participation in wisps.participation_generation (the column 0070 and
+// ignored/0028 added there for shape parity) and the arrival restores it:
+//
+//   - NULL: nothing was carried. The row began as a wisp, or it became one
+//     while history was off. Its arrival mints create-shaped and begins its
+//     history, as before.
+//   - carriedLegacyParticipation (0): the issues row was legacy. The arrival
+//     leaves the new issues row's column NULL, so its update-shaped mint is
+//     fenced and the row stays legacy.
+//   - a generation G (always >= 1): the issues row participated. The arrival
+//     writes G back, and its update-shaped mint continues the row's history.
+//
+// Both halves run only while versioned history is on for tx, like the seam
+// itself: with history off nothing here reads or writes either column (FR-7,
+// pinned by the historyoffequiv differential). So a move made with history off
+// carries nothing: a row demoted then comes back as a wisp does, and a row
+// that arrives then is legacy, as a create made then is.
+//
+// The writes keep updated_at (the column's ON UPDATE CURRENT_TIMESTAMP would
+// otherwise move it) and leave row_lock alone: the plane move inserted the
+// row with a fresh row_lock in this transaction, so reminting would only
+// double-bump it.
+
+// carriedLegacyParticipation is the value a demotion records in
+// wisps.participation_generation for a legacy row. store_epoch.epoch is
+// seeded at 1 and only grows (readStoreEpochInTx, BumpEpochInTx), so no
+// declared generation is 0, and NULL keeps meaning "nothing carried".
+const carriedLegacyParticipation = 0
+
+// CarryParticipationToWispInTx is the demotion half for a plane move outside
+// this package (the dolt leg's DemoteToWisp). Call it after the wisps row for
+// id is inserted and before its issues row is deleted.
+func CarryParticipationToWispInTx(ctx context.Context, tx DBTX, id string) error {
+	_, err := carryParticipationInTx(ctx, tx, id, true)
+	return err
+}
+
+// carryParticipationInTx carries id's participation across a plane move, in
+// the window where both of its rows exist: into the wisps row on a demotion
+// (toWisps), back onto the new issues row on an arrival. For an arrival it
+// reports whether the wisps row carried anything; a caller that mints for the
+// arrival mints create-shaped only when it did not.
+func carryParticipationInTx(ctx context.Context, tx DBTX, id string, toWisps bool) (restored bool, err error) {
+	if !versionedHistoryEnabled(tx) {
+		return false, nil
+	}
+	if toWisps {
+		var generation sql.NullInt64
+		if err := tx.QueryRowContext(ctx,
+			"SELECT participation_generation FROM issues WHERE id = ?", id,
+		).Scan(&generation); err != nil {
+			return false, fmt.Errorf("versioned history: read participation_generation of demoted %s: %w", id, err)
+		}
+		carried := int64(carriedLegacyParticipation)
+		if generation.Valid {
+			carried = generation.Int64
+		}
+		if _, err := tx.ExecContext(ctx,
+			"UPDATE wisps SET participation_generation = ?, updated_at = updated_at WHERE id = ?", carried, id,
+		); err != nil {
+			return false, fmt.Errorf("versioned history: carry participation_generation of demoted %s: %w", id, err)
+		}
+		return false, nil
+	}
+	var carried sql.NullInt64
+	if err := tx.QueryRowContext(ctx,
+		"SELECT participation_generation FROM wisps WHERE id = ?", id,
+	).Scan(&carried); err != nil {
+		return false, fmt.Errorf("versioned history: read carried participation_generation of %s: %w", id, err)
+	}
+	if !carried.Valid {
+		return false, nil
+	}
+	if carried.Int64 > carriedLegacyParticipation {
+		if _, err := tx.ExecContext(ctx,
+			"UPDATE issues SET participation_generation = ?, updated_at = updated_at WHERE id = ?", carried.Int64, id,
+		); err != nil {
+			return false, fmt.Errorf("versioned history: restore participation_generation of %s: %w", id, err)
+		}
+	}
+	return true, nil
 }

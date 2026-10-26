@@ -422,3 +422,66 @@ func TestEmbeddedGuardedUpdateMintsOnceAfterItsPatches(t *testing.T) {
 	p.revisionMatchesRows(child)
 	p.revisionMatchesRows(parent)
 }
+
+// TestEmbeddedFirstMintOnEmptyHistoryIsRevisionOne pins the next-revision
+// computation on an issue with no issue_versions rows yet. The ungrouped
+// MAX(revision) over the empty primary-key prefix (issue_id = ?) must still
+// yield one row so the first mint is revision 1. On the Dolt 2.4.0-2.4.2
+// engines, go-mysql-server's aggregate-over-index rewrite
+// (dolthub/go-mysql-server#3907) returned zero rows for that shape, which
+// failed every first mint with "sql: no rows in result set". The 2.5.x engine
+// embedded mode links answers the old flat query correctly too, so this test
+// pins the result, not the query form; the sqlmock pins in issueops'
+// version_history_preenable_scan_test.go hold the form. The second mint pins
+// that the computation still advances on a non-empty prefix, and a second
+// issue's first mint pins that it counts per issue: without the issue_id
+// filter it would continue the first issue's sequence.
+func TestEmbeddedFirstMintOnEmptyHistoryIsRevisionOne(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	te := newTestEnv(t, "verfirst")
+	ctx := t.Context()
+	p := newVersionProbe(t, te, "verfirst")
+
+	create := func(id string) {
+		t.Helper()
+		if err := p.kit.CreateIssue(ctx, &types.Issue{
+			ID: id, Title: id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+		}, "seed"); err != nil {
+			t.Fatalf("CreateIssue(%s) on empty history: %v", id, err)
+		}
+	}
+	maxRevision := func(id string) int {
+		t.Helper()
+		var rev int
+		if err := p.kit.QueryScalar(ctx,
+			"SELECT revision FROM issue_versions WHERE issue_id = ? ORDER BY revision DESC LIMIT 1",
+			[]any{id}, &rev); err != nil {
+			t.Fatalf("read latest revision for %s: %v", id, err)
+		}
+		return rev
+	}
+
+	id := p.kit.IssuePrefix + "-a"
+	create(id)
+	if got := maxRevision(id); got != 1 {
+		t.Fatalf("first mint revision = %d, want 1", got)
+	}
+	p.expect("first mint", id, 0, 1)
+	p.revisionMatchesRows(id)
+
+	if err := te.store.AddLabel(ctx, id, "l1", "actor"); err != nil {
+		t.Fatalf("AddLabel: %v", err)
+	}
+	if got := maxRevision(id); got != 2 {
+		t.Fatalf("second mint revision = %d, want 2", got)
+	}
+	p.revisionMatchesRows(id)
+
+	other := p.kit.IssuePrefix + "-b"
+	create(other)
+	if got := maxRevision(other); got != 1 {
+		t.Fatalf("first mint revision for a second issue = %d, want 1 (revisions count per issue)", got)
+	}
+	p.expect("second issue's first mint", other, 0, 1)
+	p.revisionMatchesRows(other)
+}

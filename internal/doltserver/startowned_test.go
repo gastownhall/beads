@@ -14,6 +14,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/beads/internal/doltversion"
 )
 
 // These names match fakedolt_test.go, which TestMain dispatches to.
@@ -24,6 +26,7 @@ const (
 	testFakeDoltExitEnv     = "BEADS_TEST_FAKE_DOLT_EXIT"
 	testFakeDoltReadyEnv    = "BEADS_TEST_FAKE_DOLT_READY"
 	testFakeDoltLaunchesEnv = "BEADS_TEST_FAKE_DOLT_LAUNCHES"
+	testFakeDoltVersionEnv  = "BEADS_TEST_FAKE_DOLT_VERSION"
 	// testFakeDoltDelay is the fake dolt's startup time. It is longer than
 	// the 200ms "did it exit immediately?" check Start used to rely on, which
 	// is the window that let a foreign listener's greeting pass as ready.
@@ -343,6 +346,27 @@ func assertNoStateFiles(t *testing.T, beadsDir string) {
 			t.Errorf("%s left behind after a failed start", filepath.Base(p))
 		}
 	}
+}
+
+// TestStart_RefusesDoltBelowRequiredMin drives the real Start with a fake
+// dolt that reports a release below doltversion.RequiredMin: Start refuses
+// the binary before it launches a sql-server on it, naming the binary and the
+// version, and leaves no server state behind.
+func TestStart_RefusesDoltBelowRequiredMin(t *testing.T) {
+	beadsDir, launches := fakeStartWorkspace(t)
+	t.Setenv(testFakeDoltVersionEnv, "2.5.1")
+
+	state, err := startForTest(t, beadsDir)
+	if !errors.Is(err, doltversion.ErrBelowRequiredMin) {
+		t.Fatalf("Start = (%+v, %v), want ErrBelowRequiredMin", state, err)
+	}
+	if !strings.Contains(err.Error(), "dolt binary") || !strings.Contains(err.Error(), "2.5.1") {
+		t.Errorf("Start = %q, want it to name the dolt binary and the version it reported", err)
+	}
+	if got := launchedPorts(t, launches); len(got) != 0 {
+		t.Errorf("launched a sql-server on %v, want none", got)
+	}
+	assertNoStateFiles(t, beadsDir)
 }
 
 // TestStart_RecoversWhenEphemeralPortIsTaken drives the real Start with a
