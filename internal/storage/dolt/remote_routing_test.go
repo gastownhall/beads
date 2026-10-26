@@ -292,10 +292,11 @@ func leftoverRemoteRows(gitURL, azURL string) *sqlmock.Rows {
 // server's, as a clone bd init left in .beads/dolt/<db> does. That database
 // is the server's only for a plain TCP server where bd runs its server
 // (configfile.BdRunsServerAt) and the environment names no port, or names
-// the port bd's state files show its own live server for the workspace on;
-// there every route keeps taking the dolt CLI. At any other host, for a
-// gateway, a TLS endpoint or a unix socket, or for another port
-// BEADS_DOLT_SERVER_PORT or BEADS_DOLT_PORT names, it is at best a stale
+// the port bd's state files show its own live dolt sql-server for the
+// workspace on; there every route keeps taking the dolt CLI. At any other
+// host, for a gateway, a TLS endpoint or a unix socket, or for another port
+// BEADS_DOLT_SERVER_PORT or BEADS_DOLT_PORT names, including one where the
+// recorded PID is now a process that is not dolt, it is at best a stale
 // copy, and pushing it would report success without the server's commits,
 // so every route falls back to SQL, which the server runs on its own data.
 func TestCLIRoutesUseALeftoverDatabaseOnlyWhereBdRunsTheServer(t *testing.T) {
@@ -325,8 +326,10 @@ func TestCLIRoutesUseALeftoverDatabaseOnlyWhereBdRunsTheServer(t *testing.T) {
 		cfg     Config
 		portVar string
 		// bdServerOnPort, when set, is the port bd's state files for the
-		// workspace show its own live server on.
+		// workspace show its own live server on; notDolt makes the process
+		// they record one that is not a dolt sql-server.
 		bdServerOnPort int
+		notDolt        bool
 		wantCLI        bool
 	}{
 		{name: "host=127.0.0.1", cfg: Config{ServerHost: "127.0.0.1"}, wantCLI: true},
@@ -335,6 +338,7 @@ func TestCLIRoutesUseALeftoverDatabaseOnlyWhereBdRunsTheServer(t *testing.T) {
 		{name: "host=127.0.0.1/BEADS_DOLT_SERVER_PORT/bd server on that port", cfg: Config{ServerHost: "127.0.0.1", ServerPort: 3310}, portVar: "BEADS_DOLT_SERVER_PORT", bdServerOnPort: 3310, wantCLI: true},
 		{name: "host=127.0.0.1/BEADS_DOLT_PORT/bd server on that port", cfg: Config{ServerHost: "127.0.0.1", ServerPort: 3310}, portVar: "BEADS_DOLT_PORT", bdServerOnPort: 3310, wantCLI: true},
 		{name: "host=127.0.0.1/BEADS_DOLT_SERVER_PORT/bd server on another port", cfg: Config{ServerHost: "127.0.0.1", ServerPort: 3310}, portVar: "BEADS_DOLT_SERVER_PORT", bdServerOnPort: 3311},
+		{name: "host=127.0.0.1/BEADS_DOLT_SERVER_PORT/a process that is not dolt on that port", cfg: Config{ServerHost: "127.0.0.1", ServerPort: 3310}, portVar: "BEADS_DOLT_SERVER_PORT", bdServerOnPort: 3310, notDolt: true},
 		{name: "host=127.0.0.1/gateway", cfg: Config{ServerHost: "127.0.0.1", Gateway: true}},
 		{name: "host=127.0.0.1/TLS", cfg: Config{ServerHost: "127.0.0.1", ServerTLS: true}},
 		{name: "host=127.0.0.1/unix socket", cfg: Config{ServerHost: "127.0.0.1", ServerSocket: "/tmp/dolt.sock"}},
@@ -347,8 +351,11 @@ func TestCLIRoutesUseALeftoverDatabaseOnlyWhereBdRunsTheServer(t *testing.T) {
 				t.Setenv(tc.portVar, "3310")
 			}
 			beadsDir := unmanagedWorkspace(t)
-			if tc.bdServerOnPort > 0 {
+			switch {
+			case tc.notDolt:
 				beadsDir = managedWorkspace(t, tc.bdServerOnPort)
+			case tc.bdServerOnPort > 0:
+				beadsDir = doltManagedWorkspace(t, tc.bdServerOnPort)
 			}
 			dbPath := filepath.Join(beadsDir, "dolt")
 			cliDir := filepath.Join(dbPath, "beads")
@@ -417,9 +424,10 @@ func fakeDoltOnPath(t *testing.T, remoteURL string) string {
 // remote listing), forced or not, and pushes with CALL DOLT_PUSH on the
 // server instead. So does the same store at 127.0.0.1 for a gateway, or when
 // BEADS_DOLT_SERVER_PORT or BEADS_DOLT_PORT names its port, unless that is
-// the port bd's state files show its own live server for the workspace on.
-// Otherwise the store at 127.0.0.1 keeps fsck-ing and pushing that directory
-// through the dolt CLI.
+// the port bd's state files show its own live dolt sql-server for the
+// workspace on: a recorded PID that is now a process that is not dolt does
+// not count. Otherwise the store at 127.0.0.1 keeps fsck-ing and pushing that
+// directory through the dolt CLI.
 func TestPushAtAHostBdDoesNotRunRunsNoDoltInTheLeftoverDatabase(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX shell fake")
@@ -433,14 +441,18 @@ func TestPushAtAHostBdDoesNotRunRunsNoDoltInTheLeftoverDatabase(t *testing.T) {
 		portVar        string
 		gateway        bool
 		bdServerOnPort bool
-		force          bool
-		wantCLI        bool
+		// notDolt makes the process bd's state files record on that port
+		// one that is not a dolt sql-server.
+		notDolt bool
+		force   bool
+		wantCLI bool
 	}{
 		{host: "127.0.0.1", wantCLI: true},
 		{host: "127.0.0.1", force: true, wantCLI: true},
 		{host: "127.0.0.1", portVar: "BEADS_DOLT_SERVER_PORT"},
 		{host: "127.0.0.1", portVar: "BEADS_DOLT_PORT", force: true},
 		{host: "127.0.0.1", portVar: "BEADS_DOLT_SERVER_PORT", bdServerOnPort: true, wantCLI: true},
+		{host: "127.0.0.1", portVar: "BEADS_DOLT_SERVER_PORT", bdServerOnPort: true, notDolt: true},
 		{host: "127.0.0.1", gateway: true},
 		{host: "::1"},
 		{host: "::1", force: true},
@@ -452,6 +464,9 @@ func TestPushAtAHostBdDoesNotRunRunsNoDoltInTheLeftoverDatabase(t *testing.T) {
 		if tc.bdServerOnPort {
 			name += "/bd server on that port"
 		}
+		if tc.notDolt {
+			name += "/not dolt"
+		}
 		if tc.gateway {
 			name += "/gateway"
 		}
@@ -460,8 +475,11 @@ func TestPushAtAHostBdDoesNotRunRunsNoDoltInTheLeftoverDatabase(t *testing.T) {
 				t.Setenv(tc.portVar, "3310")
 			}
 			beadsDir := unmanagedWorkspace(t)
-			if tc.bdServerOnPort {
+			switch {
+			case tc.notDolt:
 				beadsDir = managedWorkspace(t, 3310)
+			case tc.bdServerOnPort:
+				beadsDir = doltManagedWorkspace(t, 3310)
 			}
 			_ = os.Remove(callLog)
 			db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
@@ -535,9 +553,10 @@ func TestPushAtAHostBdDoesNotRunRunsNoDoltInTheLeftoverDatabase(t *testing.T) {
 // credential route of a push to a Hosted Dolt remote whose user and
 // DOLT_REMOTE_PASSWORD only this bd holds, from a store at 127.0.0.1 whose
 // port BEADS_DOLT_SERVER_PORT names. Where bd's state files show its own live
-// server for the workspace on that port, .beads/dolt/<db> is that server's
-// database: the push stays on the dolt CLI there, and the dolt child gets the
-// password. Otherwise the port may be any server's, so the push runs CALL
+// dolt sql-server for the workspace on that port, .beads/dolt/<db> is that
+// server's database: the push stays on the dolt CLI there, and the dolt child
+// gets the password. Otherwise, as when the recorded PID is now a process
+// that is not dolt, the port may be any server's, so the push runs CALL
 // DOLT_PUSH on it, which takes the password from the server process's own
 // environment, and its failure says so.
 func TestCredentialPushOnAnEnvNamedPortKeepsTheCLIOnlyForBdsOwnServer(t *testing.T) {
@@ -550,12 +569,19 @@ func TestCredentialPushOnAnEnvNamedPortKeepsTheCLIOnlyForBdsOwnServer(t *testing
 	callLog := fakeDoltOnPath(t, hostedURL)
 	t.Setenv("BEADS_DOLT_SERVER_PORT", "3310")
 
-	for _, bdServerOnPort := range []bool{true, false} {
-		t.Run(fmt.Sprintf("bd server on that port=%v", bdServerOnPort), func(t *testing.T) {
-			beadsDir := unmanagedWorkspace(t)
-			if bdServerOnPort {
-				beadsDir = managedWorkspace(t, 3310)
-			}
+	for _, tc := range []struct {
+		name string
+		// workspace makes the workspace whose server state files the store
+		// reads.
+		workspace func(*testing.T) string
+		wantCLI   bool
+	}{
+		{"bd server on that port", func(t *testing.T) string { return doltManagedWorkspace(t, 3310) }, true},
+		{"no server bd runs", unmanagedWorkspace, false},
+		{"a process that is not dolt on that port", func(t *testing.T) string { return managedWorkspace(t, 3310) }, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			beadsDir := tc.workspace(t)
 			_ = os.Remove(callLog)
 			db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
 			if err != nil {
@@ -591,7 +617,7 @@ func TestCredentialPushOnAnEnvNamedPortKeepsTheCLIOnlyForBdsOwnServer(t *testing
 				t.Fatal(err)
 			}
 			calls := strings.TrimSpace(string(raw))
-			if !bdServerOnPort {
+			if !tc.wantCLI {
 				if calls != "" {
 					t.Fatalf("push to a server the variable names ran dolt in the leftover database:\n%s", calls)
 				}

@@ -217,7 +217,8 @@ func (s *DoltStore) ListRemotes(ctx context.Context) ([]storage.RemoteInfo, erro
 // fails open (migration is not wedged on unrelated corruption) but is logged,
 // never swallowed (bd-6dnrw.33).
 func (s *DoltStore) hasPersistedCLIRemote() bool {
-	return len(s.persistedRemoteInfosOnDisk()) > 0
+	_, remotes := s.persistedRemotesOnDisk()
+	return len(remotes) > 0
 }
 
 // HasPersistedRemote is the exported on-disk probe for callers that must not
@@ -247,19 +248,36 @@ func (s *DoltStore) HasPersistedRemote() bool {
 // cannot tell from such a server, a database there is at best a copy whose
 // remotes say nothing about the server's, so none are returned: a copy that
 // lists origin must not make `bd dolt remote add` or `bd config apply` take
-// the remote as already configured on a server that lists none, nor veto the
-// push/pull no-remote skip there.
+// the remote as already configured on a server that lists none. LeftoverRemotes
+// returns such a copy's remotes instead.
 func (s *DoltStore) PersistedRemoteInfos() []storage.RemoteInfo {
 	if !s.cliDirServesServer() {
 		return nil
 	}
-	return s.persistedRemoteInfosOnDisk()
+	_, remotes := s.persistedRemotesOnDisk()
+	return remotes
 }
 
-// persistedRemoteInfosOnDisk is PersistedRemoteInfos for any server: the
-// remotes recorded in the database CLI directory, else in the dolt server
-// root.
-func (s *DoltStore) persistedRemoteInfosOnDisk() []storage.RemoteInfo {
+// LeftoverRemotes returns the remotes PersistedRemoteInfos leaves out, those
+// recorded where the workspace's Dolt root cannot be the server's data
+// (cliDirServesServer), and the directory that records them; none where it
+// can be. They are not the server's remotes, but they are the remotes the
+// operator set up, such as the origin of the clone bd init --server --remote
+// leaves for a gateway: a server that lists no remote beside them is not a
+// workspace without one, so the push/pull no-remote decision
+// (hasConfiguredRemote in cmd/bd) names them and the command that adds each
+// on the server instead of reporting that no remote is configured.
+func (s *DoltStore) LeftoverRemotes() (string, []storage.RemoteInfo) {
+	if s.cliDirServesServer() {
+		return "", nil
+	}
+	return s.persistedRemotesOnDisk()
+}
+
+// persistedRemotesOnDisk is PersistedRemoteInfos for any server: the remotes
+// recorded in the database CLI directory, else in the dolt server root, and
+// the directory that records them.
+func (s *DoltStore) persistedRemotesOnDisk() (string, []storage.RemoteInfo) {
 	cliDir := s.CLIDir()
 	dirs := []string{cliDir}
 	if s.dbPath != "" && s.dbPath != cliDir {
@@ -277,10 +295,10 @@ func (s *DoltStore) persistedRemoteInfosOnDisk() []storage.RemoteInfo {
 			continue
 		}
 		if len(remotes) > 0 {
-			return remotes
+			return dir, remotes
 		}
 	}
-	return nil
+	return "", nil
 }
 
 // RemoveRemote removes a configured remote.

@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -271,6 +272,16 @@ func hasNoRemoteConfigured(ctx context.Context, st remoteLister) bool {
 // different evidence is what left `bd dolt push` still trusting an empty
 // dolt_remotes after wy-xtv17 hardened the no-remote gate (wy-82hc5), so the
 // rule lives here once.
+//
+// Nor is a remote recorded only in a Dolt database the server does not serve
+// (leftoverRemotesFor), such as the clone `bd init --server --remote` leaves
+// for a gateway. It is not the server's, so the rig is not configured: push
+// and pull run on the server, which lacks it. But it is the remote the
+// operator set up, so the rig is not remote-less either: exiting 0 would
+// report a sync that never reached that remote, and adopting the git origin
+// would publish somewhere the operator never chose. That answer is a
+// remoteOnlyInLeftoverDatabaseError, which names the remote and the command
+// that adds it on the server.
 func hasConfiguredRemote(ctx context.Context, st remoteLister) (bool, error) {
 	remotes, listErr := st.ListRemotes(ctx)
 	if listErr != nil {
@@ -281,6 +292,9 @@ func hasConfiguredRemote(ctx context.Context, st remoteLister) (bool, error) {
 	}
 	if prober, ok := persistedRemoteProberFor(st); ok && prober.HasPersistedRemote() {
 		return true, nil
+	}
+	if dir, leftover := leftoverRemotesFor(st); len(leftover) > 0 {
+		return false, &remoteOnlyInLeftoverDatabaseError{dir: dir, remotes: leftover}
 	}
 	return false, nil
 }
@@ -350,6 +364,75 @@ func persistedRemoteInfosFor(st any) []storage.RemoteInfo {
 		}
 		st = inner
 	}
+}
+
+// leftoverRemoteLister is implemented by stores that can list the remotes
+// recorded in a Dolt database their server does not serve, with the directory
+// that records them (server-mode DoltStore): a copy in the workspace's Dolt
+// root, whose remotes persistedRemoteInfoLister leaves out.
+type leftoverRemoteLister interface {
+	LeftoverRemotes() (string, []storage.RemoteInfo)
+}
+
+// leftoverRemotesFor finds that listing behind any chain of storage
+// decorators, peeling exactly like persistedRemoteProberFor. Returns nothing
+// when no store in the chain can list them, as for embedded rigs.
+func leftoverRemotesFor(st any) (string, []storage.RemoteInfo) {
+	for {
+		if lister, ok := st.(leftoverRemoteLister); ok {
+			return lister.LeftoverRemotes()
+		}
+		u, ok := st.(storage.Unwrapper)
+		if !ok {
+			return "", nil
+		}
+		inner := u.Unwrap()
+		if inner == nil {
+			return "", nil
+		}
+		st = inner
+	}
+}
+
+// remoteOnlyInLeftoverDatabaseError is hasConfiguredRemote's answer for a
+// server that lists no remote while a Dolt database it does not serve, in dir,
+// records remotes. bd pushes and pulls on the server, so each has to be added
+// there; the error names the command that does it.
+type remoteOnlyInLeftoverDatabaseError struct {
+	dir     string
+	remotes []storage.RemoteInfo
+}
+
+func (e *remoteOnlyInLeftoverDatabaseError) Error() string {
+	named := make([]string, len(e.remotes))
+	for i, r := range e.remotes {
+		named[i] = remedy.PrintedValue(r.Name) + " (" + remedy.PrintedValue(r.URL) + ")"
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "the Dolt server lists no remote, but the Dolt database left in %s, which is not the server's data, records %s.\n",
+		remedy.PrintedValue(e.dir), strings.Join(named, ", "))
+	b.WriteString("Push and pull run on the server, so add the remote there:\n")
+	for _, r := range e.remotes {
+		b.WriteString("\n  " + serverRemoteAddCommand(runtime.GOOS, r))
+	}
+	return b.String()
+}
+
+// serverRemoteAddCommand is the command that adds r on the workspace's
+// server, for a user to paste into a shell on goos: bd dolt remote add, or,
+// for a remote that keeps its Dolt data on a git ref of its own, which that
+// command cannot name, its CALL DOLT_REMOTE statement through bd sql.
+func serverRemoteAddCommand(goos string, r storage.RemoteInfo) string {
+	if r.Ref == "" {
+		name, nameNote := remedy.CommandArg(goos, r.Name, "<name>")
+		url, urlNote := remedy.CommandArg(goos, r.URL, "<url>")
+		return "bd dolt remote add " + name + " " + url + nameNote + urlNote
+	}
+	stmt := fmt.Sprintf("CALL DOLT_REMOTE(%s, %s, %s, %s, %s)",
+		doltutil.SQLDoubleQuoted("add"), doltutil.SQLDoubleQuoted("--ref"),
+		doltutil.SQLDoubleQuoted(r.Ref), doltutil.SQLDoubleQuoted(r.Name), doltutil.SQLDoubleQuoted(r.URL))
+	arg, note := remedy.CommandArg(goos, stmt, "<statement>")
+	return "bd sql " + arg + note
 }
 
 // isDivergedHistoryErr checks whether the error indicates that local and remote
@@ -688,6 +771,14 @@ reports conflicts.`,
 			}
 			fmt.Println("Pull complete.")
 			return nil
+		}
+		// The check `bd dolt push` and `bd sync` make through
+		// adoptGitOriginRemoteForPush: a remote recorded only in a database the
+		// server does not serve is one this pull cannot reach, and the
+		// no-remote skip below must not report it as none.
+		var leftover *remoteOnlyInLeftoverDatabaseError
+		if _, err := hasConfiguredRemote(ctx, st); errors.As(err, &leftover) {
+			return HandleError("%v", err)
 		}
 		fmt.Println("Pulling from Dolt remote...")
 		var err error

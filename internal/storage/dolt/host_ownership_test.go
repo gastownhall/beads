@@ -37,7 +37,9 @@ func leftoverDatabaseStore(t *testing.T, beadsDir string, cfg *Config) *DoltStor
 // checkLeftoverDatabaseDecisions asserts that the CLI routes take the
 // leftover database as the server's (hasCLIDatabase), and that its recorded
 // remote counts as the server's (PersistedRemoteInfos, HasPersistedRemote),
-// exactly when want says the database can be the server's. The #4259
+// exactly when want says the database can be the server's; otherwise the
+// remote is the leftover database's (LeftoverRemotes), which the push/pull
+// no-remote decision names instead of reporting none. The #4259
 // remote-migrate gate reads that remote for every server.
 func checkLeftoverDatabaseDecisions(t *testing.T, store *DoltStore, want bool, what string) {
 	t.Helper()
@@ -49,6 +51,10 @@ func checkLeftoverDatabaseDecisions(t *testing.T, store *DoltStore, want bool, w
 	}
 	if got := store.HasPersistedRemote(); got != want {
 		t.Errorf("HasPersistedRemote(%s) = %v, want %v", what, got, want)
+	}
+	dir, leftover := store.LeftoverRemotes()
+	if listed := len(leftover) == 1 && leftover[0].Name == "origin" && dir == store.CLIDir(); listed == want {
+		t.Errorf("LeftoverRemotes(%s) = (%q, %+v), want the origin %s records = %v", what, dir, leftover, store.CLIDir(), !want)
 	}
 	if !store.hasPersistedCLIRemote() {
 		t.Errorf("hasPersistedCLIRemote(%s) = false: the remote-migrate gate must see the recorded remote whatever the server", what)
@@ -150,16 +156,22 @@ func TestStoreHostOwnershipDecisionsAgree(t *testing.T) {
 	// the recorded remotes accept the proof sharedServerDatabase accepts
 	// (GH#6169): bd's state files for the workspace name a live server on
 	// that very port, as when a multi-agent rig names the server bd started.
-	// The local data directory, which grants garbage collection, does not.
+	// Since a wrong answer runs the dolt CLI in that directory, the recorded
+	// process must also be a dolt sql-server: a process that took the PID of
+	// bd's server after it died is no proof. The local data directory, which
+	// grants garbage collection, accepts neither.
 	for _, portVar := range []string{"BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_PORT"} {
 		for _, tc := range []struct {
 			name           string
 			bdServerOnPort int
-			want           bool
+			// notDolt records a live process that is not a dolt sql-server.
+			notDolt bool
+			want    bool
 		}{
 			{name: "no server bd runs"},
 			{name: "bd server on that port", bdServerOnPort: 3310, want: true},
 			{name: "bd server on another port", bdServerOnPort: 3311},
+			{name: "a process that is not dolt on that port", bdServerOnPort: 3310, notDolt: true},
 		} {
 			t.Run(portVar+"/host=127.0.0.1/"+tc.name, func(t *testing.T) {
 				clearPredicateEnv(t)
@@ -167,8 +179,11 @@ func TestStoreHostOwnershipDecisionsAgree(t *testing.T) {
 				t.Setenv(portVar, "3310")
 
 				beadsDir := unmanagedWorkspace(t)
-				if tc.bdServerOnPort > 0 {
+				switch {
+				case tc.notDolt:
 					beadsDir = managedWorkspace(t, tc.bdServerOnPort)
+				case tc.bdServerOnPort > 0:
+					beadsDir = doltManagedWorkspace(t, tc.bdServerOnPort)
 				}
 				if dataDir := resolveLocalActiveDatabaseDir(&Config{
 					Path: filepath.Join(beadsDir, "dolt"), BeadsDir: beadsDir, Database: "active", ServerHost: "127.0.0.1", ServerPort: 3310, AutoStart: true,

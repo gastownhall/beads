@@ -4548,7 +4548,11 @@ func (s *DoltStore) hasCLIDatabase() bool {
 // counts only with the proof sharedServerDatabase accepts (GH#6169): bd's
 // state files for the workspace's server name a live server on that very port
 // (doltserver.ManagesLiveServerOnPort), as when a multi-agent rig names the
-// server bd started in those variables. (resolveLocalActiveDatabaseDir, which
+// server bd started in those variables. A wrong answer there only moves a SQL
+// connection; here it runs the dolt CLI in CLIDir, so the recorded process
+// must also be a dolt sql-server (doltserver.IsTrackedServerRunning): a live
+// PID the recorded server left behind, now another process's, is no proof.
+// That check runs ps, so it comes last. (resolveLocalActiveDatabaseDir, which
 // grants local garbage collection, refuses such a port even then.) bd does
 // not know where any other server keeps its data, and a database in CLIDir is
 // then at best a copy, such as a clone bd init left in .beads/dolt (it still
@@ -4567,7 +4571,11 @@ func (s *DoltStore) cliDirServesServer() bool {
 	if os.Getenv("BEADS_DOLT_SERVER_PORT") == "" && os.Getenv("BEADS_DOLT_PORT") == "" {
 		return true
 	}
-	return s.beadsDir != "" && doltserver.ManagesLiveServerOnPort(doltserver.ResolveServerDir(s.beadsDir), cfg.ServerPort)
+	if s.beadsDir == "" {
+		return false
+	}
+	serverDir := doltserver.ResolveServerDir(s.beadsDir)
+	return doltserver.ManagesLiveServerOnPort(serverDir, cfg.ServerPort) && doltserver.IsTrackedServerRunning(serverDir)
 }
 
 // ensureMatchingCLIRemote materializes the local CLI remote needed before
