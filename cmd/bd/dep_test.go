@@ -1313,3 +1313,135 @@ func TestDepListCrossRigRouting(t *testing.T) {
 
 	t.Log("Successfully resolved cross-rig dependencies via routing")
 }
+
+// depListRefusal is the message `bd dep list` gives for any --direction other
+// than the two it answers (#7842).
+const depListRefusal = "--direction must be 'down' or 'up'"
+
+// runDepListRoute runs depListCmd's RunE on one id with flagArgs parsed, on
+// the direct route or the proxied-server one, with no store and no provider.
+// Each route's first real step then fails with its own exit-1 error (direct:
+// "storage is nil" resolving the id; proxied: "UOW provider not
+// initialized"), so the output says whether the run got past the --direction
+// check and which route it reached. It returns the exit code and the captured
+// stream: stdout under --json, where HandleErrorRespectJSON writes, and
+// stderr otherwise.
+func runDepListRoute(t *testing.T, proxied, asJSON bool, flagArgs ...string) (int, string) {
+	t.Helper()
+	oldStore, oldProvider, oldProxied := store, uowProvider, proxiedServerMode
+	oldJSON, oldRootCtx, oldCmdCtx, oldTestMode := jsonOutput, rootCtx, cmdCtx, testModeUseGlobals
+	t.Cleanup(func() {
+		store, uowProvider, proxiedServerMode = oldStore, oldProvider, oldProxied
+		jsonOutput, rootCtx, cmdCtx, testModeUseGlobals = oldJSON, oldRootCtx, oldCmdCtx, oldTestMode
+	})
+	resetCommandFlags(depListCmd)
+	t.Cleanup(func() { resetCommandFlags(depListCmd) })
+	// usesProxiedServer and the stores read the globals only in test mode;
+	// resetCommandFlags resets jsonOutput with the flags, so set it after.
+	enableTestModeGlobals()
+	store, uowProvider, proxiedServerMode = nil, nil, proxied
+	jsonOutput, rootCtx = asJSON, context.Background()
+
+	if err := depListCmd.ParseFlags(flagArgs); err != nil {
+		t.Fatalf("parse %q: %v", flagArgs, err)
+	}
+	var runErr error
+	var out string
+	if asJSON {
+		// captureStdout fails the test on a returned error, and the refusal is
+		// one: keep it outside.
+		out = captureStdout(t, func() error {
+			runErr = depListCmd.RunE(depListCmd, []string{"bd-nosuch"})
+			return nil
+		})
+	} else {
+		out = captureStderr(t, func() { runErr = depListCmd.RunE(depListCmd, []string{"bd-nosuch"}) })
+	}
+	code, ok := exitCodeFromError(runErr)
+	if !ok {
+		t.Fatalf("dep list %q (proxied=%v): RunE = %v, want an exit error\noutput:\n%s", flagArgs, proxied, runErr, out)
+	}
+	return code, out
+}
+
+// depListRouteError is the message each route's own first step fails with in
+// runDepListRoute.
+func depListRouteError(proxied bool) string {
+	if proxied {
+		return "proxied-server UOW provider not initialized"
+	}
+	return "storage is nil"
+}
+
+// TestDepListRefusesUnknownDirection pins #7842: `dep list --direction`
+// answers only `down` and `up`, exactly and case-sensitively, and refuses
+// everything else on both routes before resolving an id or opening a role.
+// Before the fix every value here fell through to the down set at exit 0.
+func TestDepListRefusesUnknownDirection(t *testing.T) {
+	for _, proxied := range []bool{false, true} {
+		for _, v := range []string{"both", "banana", "UP", " up", ""} {
+			t.Run(fmt.Sprintf("proxied=%v/direction=%q", proxied, v), func(t *testing.T) {
+				code, stderr := runDepListRoute(t, proxied, false, "--direction="+v)
+				if code != 1 {
+					t.Errorf("exit code = %d, want 1\nstderr:\n%s", code, stderr)
+				}
+				if !strings.Contains(stderr, "Error: "+depListRefusal) {
+					t.Errorf("stderr does not carry the refusal %q:\n%s", depListRefusal, stderr)
+				}
+				for _, routeErr := range []string{depListRouteError(false), depListRouteError(true)} {
+					if strings.Contains(stderr, routeErr) {
+						t.Errorf("the run reached a route (%q) before refusing the flag:\n%s", routeErr, stderr)
+					}
+				}
+			})
+		}
+	}
+}
+
+// TestDepListRefusesUnknownDirectionJSON pins the --json half of #7842: the
+// refusal is bd's JSON error object on stdout, not a dependency array.
+func TestDepListRefusesUnknownDirectionJSON(t *testing.T) {
+	for _, proxied := range []bool{false, true} {
+		t.Run(fmt.Sprintf("proxied=%v", proxied), func(t *testing.T) {
+			code, stdout := runDepListRoute(t, proxied, true, "--direction=both")
+			if code != 1 {
+				t.Errorf("exit code = %d, want 1\nstdout:\n%s", code, stdout)
+			}
+			// Decoding into a map fails on an array, and on a second value.
+			var obj map[string]interface{}
+			dec := json.NewDecoder(strings.NewReader(stdout))
+			if err := dec.Decode(&obj); err != nil {
+				t.Fatalf("stdout is not one JSON object: %v\n%s", err, stdout)
+			}
+			if dec.More() {
+				t.Errorf("stdout carries more than the error object:\n%s", stdout)
+			}
+			if data, ok := obj["data"].(map[string]interface{}); ok {
+				obj = data
+			}
+			if got := obj["error"]; got != depListRefusal {
+				t.Errorf("error = %v, want %q\nstdout:\n%s", got, depListRefusal, stdout)
+			}
+		})
+	}
+}
+
+// TestDepListAcceptsKnownDirections guards the #7842 check against being too
+// wide: `down`, `up` and the unset flag get through to the route on both
+// routes. What each answers is pinned by TestEmbeddedDepAAddAndList and the
+// proxied dep list integration tests.
+func TestDepListAcceptsKnownDirections(t *testing.T) {
+	for _, proxied := range []bool{false, true} {
+		for _, flagArgs := range [][]string{{"--direction=down"}, {"--direction=up"}, nil} {
+			t.Run(fmt.Sprintf("proxied=%v/%q", proxied, flagArgs), func(t *testing.T) {
+				code, stderr := runDepListRoute(t, proxied, false, flagArgs...)
+				if code != 1 || !strings.Contains(stderr, depListRouteError(proxied)) {
+					t.Errorf("exit %d, want the route's own error %q:\n%s", code, depListRouteError(proxied), stderr)
+				}
+				if strings.Contains(stderr, depListRefusal) {
+					t.Errorf("a direction dep list answers was refused:\n%s", stderr)
+				}
+			})
+		}
+	}
+}

@@ -932,6 +932,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd dep list --direction` now refuses any value other than `down` or `up`
+  (exit 1, `--direction must be 'down' or 'up'`; a JSON error object under
+  `--json`). `both`, a typo, or an empty value used to return the `down` set
+  at exit 0, on both the direct and the proxied-server routes (#7842).
 - The batched bulk readers no longer return an issue's rows twice when the
   same id is requested twice. Since the 200-id batching (#6444), an id that
   appeared in two batches had its comments, labels, dependency records,

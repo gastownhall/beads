@@ -402,9 +402,6 @@ func runDepRemoveProxiedServer(_ *cobra.Command, ctx context.Context, args []str
 func runDepListProxiedServer(cmd *cobra.Command, ctx context.Context, args []string) error {
 	direction, _ := cmd.Flags().GetString("direction")
 	typeFilter, _ := cmd.Flags().GetString("type")
-	if direction == "" {
-		direction = "down"
-	}
 
 	// The multi-id edge listing is a different question with a different
 	// answer shape — raw edge records keyed by source — and it is on the

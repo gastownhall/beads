@@ -1002,16 +1002,24 @@ Examples:
 			}
 		}()
 
+		// The flag vocabulary is checked HERE, once, before a route is chosen:
+		// both routes map every value but "up" to the down set, so an unchecked
+		// typo, an empty value or the unimplemented "both" would be answered
+		// with dependencies at exit 0. Empty is refused too: the unset flag is
+		// already "down".
+		direction, _ := cmd.Flags().GetString("direction")
+		switch direction {
+		case "down", "up":
+		default:
+			return HandleErrorRespectJSON("--direction must be 'down' or 'up'")
+		}
+
 		if usesProxiedServer() {
 			return runDepListProxiedServer(cmd, rootCtx, args)
 		}
 
 		ctx := rootCtx
-		direction, _ := cmd.Flags().GetString("direction")
 		typeFilter, _ := cmd.Flags().GetString("type")
-		if direction == "" {
-			direction = "down"
-		}
 
 		var resolved []depListAnchor
 		batchMode := len(args) > 1
