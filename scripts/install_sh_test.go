@@ -365,3 +365,40 @@ func TestInstallShStagesAndRenamesIntoPlace(t *testing.T) {
 	run.requireBD(t, installShNewBD)
 	run.requireNoStagedLeftovers(t)
 }
+
+// TestInstallShSudoBranchStagesAndRenames covers an install dir the user
+// cannot write: the stage and the rename both run under sudo, with the same
+// same-filesystem rename as the writable branch.
+func TestInstallShSudoBranchStagesAndRenames(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("bash [[ -w ]] is true for root, so the sudo branch is never taken")
+	}
+	run := runInstallShRelease(t, installShOptions{readOnlyDir: true})
+	if run.status != 0 {
+		t.Fatalf("install_from_release returned %d\n%s", run.status, run.output)
+	}
+
+	target := filepath.Join(run.installDir, "bd")
+	staged := run.staged()
+	wantStage := strings.Join([]string{"sudo", "cp", run.extracted, staged}, "\t")
+	wantRename := strings.Join([]string{"sudo", "mv", "-f", staged, target}, "\t")
+	stage, rename := -1, -1
+	for i, call := range run.calls {
+		switch strings.Join(call, "\t") {
+		case wantStage:
+			stage = i
+		case wantRename:
+			rename = i
+		}
+	}
+	if stage < 0 || rename < stage {
+		t.Fatalf("want sudo cp to %s then sudo mv -f onto %s; calls:\n%s%s", staged, target, joinCalls(run.calls), run.output)
+	}
+	for _, call := range run.callsNaming(target) {
+		if call[len(call)-2] != staged {
+			t.Fatalf("call %q writes %s from somewhere other than %s", call, target, staged)
+		}
+	}
+	run.requireBD(t, installShNewBD)
+	run.requireNoStagedLeftovers(t)
+}

@@ -383,7 +383,7 @@ install_from_release() {
             return 1
         fi
     else
-        if ! sudo mv "$extracted_bd" "$install_dir/bd"; then
+        if ! { sudo cp "$extracted_bd" "$staged_bd" && sudo mv -f "$staged_bd" "$install_dir/bd"; }; then
             log_error "Failed to install bd to $install_dir"
             cd - > /dev/null || cd "$HOME"
             rm -rf "$tmp_dir"
