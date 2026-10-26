@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -276,6 +277,51 @@ func TestFixGitignore_DoesNotLoosenPermissions(t *testing.T) {
 	}
 
 	t.Logf("Permissions changed from %o to %o (both secure, 0600 is standard)", beforePerms, afterPerms)
+}
+
+// TestGitignoreModeIsLoose pins the shared never-loosen predicate: only
+// group/other bits make a mode loose, and Windows — which has no POSIX bits
+// to tighten — is never loose. A private mode stricter than the canonical
+// 0600 (0400, 0700) must not count as loose, or "fixing" it would grant
+// owner-write the file never had (GH#6225).
+func TestGitignoreModeIsLoose(t *testing.T) {
+	tests := []struct {
+		goos      string
+		perm      os.FileMode
+		wantLoose bool
+	}{
+		// Windows reports every file as 0666 or 0444; there is nothing to
+		// tighten, so the predicate must never fire there.
+		{goos: "windows", perm: 0666, wantLoose: false},
+		{goos: "windows", perm: 0644, wantLoose: false},
+		{goos: "windows", perm: 0444, wantLoose: false},
+		// POSIX: any group/other bit is loose, whatever the owner bits say.
+		{goos: "linux", perm: 0644, wantLoose: true},
+		{goos: "linux", perm: 0640, wantLoose: true},
+		{goos: "linux", perm: 0604, wantLoose: true},
+		{goos: "linux", perm: 0444, wantLoose: true},
+		{goos: "linux", perm: 0666, wantLoose: true},
+		{goos: "linux", perm: 0060, wantLoose: true},
+		{goos: "linux", perm: 0001, wantLoose: true},
+		{goos: "darwin", perm: 0644, wantLoose: true},
+		{goos: "darwin", perm: 0444, wantLoose: true},
+		// Private modes: no group/other access is never loose — including
+		// modes stricter than 0600 (0400) or carrying owner-execute (0700).
+		{goos: "linux", perm: 0600, wantLoose: false},
+		{goos: "linux", perm: 0400, wantLoose: false},
+		{goos: "linux", perm: 0700, wantLoose: false},
+		{goos: "linux", perm: 0200, wantLoose: false},
+		{goos: "linux", perm: 0000, wantLoose: false},
+		{goos: "darwin", perm: 0600, wantLoose: false},
+		{goos: "darwin", perm: 0400, wantLoose: false},
+	}
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("%s_%04o", tt.goos, tt.perm), func(t *testing.T) {
+			if got := gitignoreModeIsLoose(tt.goos, tt.perm); got != tt.wantLoose {
+				t.Errorf("gitignoreModeIsLoose(%q, %04o) = %v, want %v", tt.goos, tt.perm, got, tt.wantLoose)
+			}
+		})
+	}
 }
 
 func TestCheckGitignore(t *testing.T) {

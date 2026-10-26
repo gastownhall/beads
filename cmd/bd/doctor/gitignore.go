@@ -153,6 +153,14 @@ var requiredPatterns = []string{
 	"backup/",
 }
 
+// gitignoreModeIsLoose reports whether perm grants group or other users any
+// access to .beads/.gitignore. A stricter private mode (0400, 0700) is not
+// loose and must never be "fixed" by adding bits (#6225). Windows has no
+// POSIX bits to tighten: Go reports every file there as 0666 or 0444.
+func gitignoreModeIsLoose(goos string, perm os.FileMode) bool {
+	return goos != "windows" && perm&0077 != 0
+}
+
 // CheckGitignore checks if .beads/.gitignore is up to date.
 // repoPath is the project root directory.
 func CheckGitignore(repoPath string) DoctorCheck {
