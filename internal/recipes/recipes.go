@@ -38,6 +38,21 @@ type Recipe struct {
 	ProjectPath string            `toml:"project_path"` // Project settings path (for hooks)
 	Paths       []string          `toml:"paths"`        // Multiple paths (for multifile)
 	Contents    map[string]string `toml:"-"`            // Optional static contents for TypeMultiFile
+	// SharedPaths are the recipe's paths that live in files the user also owns.
+	// Beads manages a marked section inside them instead of overwriting the
+	// whole file. Paths not listed here are owned by beads outright.
+	SharedPaths []string `toml:"shared_paths"`
+}
+
+// IsSharedPath reports whether beads manages path as a marked section inside a
+// file the user also owns.
+func (r Recipe) IsSharedPath(path string) bool {
+	for _, shared := range r.SharedPaths {
+		if shared == path {
+			return true
+		}
+	}
+	return false
 }
 
 // BuiltinRecipes contains the default recipe definitions.
@@ -95,6 +110,10 @@ var BuiltinRecipes = map[string]Recipe{
 			".copilot-plugin/plugin.json",
 			".github/copilot-instructions.md",
 		},
+		// .github/copilot-instructions.md is the standard place for a repo's
+		// own Copilot instructions, so beads manages only a marked section in
+		// it. The plugin manifest is beads-owned.
+		SharedPaths: []string{".github/copilot-instructions.md"},
 		Contents: map[string]string{
 			".copilot-plugin/plugin.json":     beadsplugin.CopilotPluginManifest(),
 			".github/copilot-instructions.md": CopilotInstructionsTemplate,
