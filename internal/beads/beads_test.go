@@ -2984,4 +2984,20 @@ func TestFindBeadsDirFromLinkedWorktreeBoundary(t *testing.T) {
 		assertFindBeadsDirFromMatchesCWD(t, worktree, mainBeadsDir)
 		assertFindBeadsDirFromMatchesCWD(t, sub, mainBeadsDir)
 	})
+
+	t.Run("metadata-only worktree .beads uses main checkout store", func(t *testing.T) {
+		_, mainBeadsDir, worktree := setupWorktreeUnderParentStore(t, true)
+		worktreeBeadsDir := filepath.Join(worktree, ".beads")
+		if err := os.MkdirAll(worktreeBeadsDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(worktreeBeadsDir, "metadata.json"), []byte(`{"database":"dolt"}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(worktreeBeadsDir, "config.yaml"), []byte("issue-prefix: \"proj\"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		assertFindBeadsDirFromMatchesCWD(t, worktree, mainBeadsDir)
+	})
 }
