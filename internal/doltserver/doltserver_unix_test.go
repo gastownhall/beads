@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strconv"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -89,6 +90,29 @@ func TestStopDoesNotSignalReusedPIDWhenListBecomesReadable(t *testing.T) {
 		if _, err := os.Stat(path); !os.IsNotExist(err) {
 			t.Errorf("expected %s to be removed, stat err = %v", filepath.Base(path), err)
 		}
+	}
+}
+
+func TestAliveAfterSignalZero(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"signal delivered", nil, true},
+		{"bare EPERM", syscall.EPERM, true},
+		{"kill EPERM", os.NewSyscallError("kill", syscall.EPERM), true},
+		{"pidfd_send_signal EPERM", os.NewSyscallError("pidfd_send_signal", syscall.EPERM), true},
+		{"process done", os.ErrProcessDone, false},
+		{"kill ESRCH", os.NewSyscallError("kill", syscall.ESRCH), false},
+		{"bare ESRCH", syscall.ESRCH, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := aliveAfterSignalZero(tt.err); got != tt.want {
+				t.Errorf("aliveAfterSignalZero(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
 	}
 }
 

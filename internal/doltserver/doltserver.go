@@ -651,8 +651,8 @@ func ReadPortFile(beadsDir string) int {
 // ResolveServerMode still answers Owned (that is the bug being closed here), so
 // EnsureRunningDetailed's ServerModeExternal branch never fires and Start()
 // proceeds. Once the adopt branch has written the two files they stay:
-// IsRunning clears them only for a PID that is corrupt, dead, or not dolt, and
-// an adopted server is a live dolt process on all three counts. The workspace
+// IsRunning clears them only for a PID that is corrupt, dead, or missing from a
+// readable process list, and an adopted server is a live dolt process on all three counts. The workspace
 // then answers "owned" from that point on, so a single timed-out dial disarms
 // the gate permanently.
 //
@@ -679,7 +679,10 @@ func ReadPortFile(beadsDir string) int {
 // inherited its PID number, AND the port file still names the port some other
 // server now answers on. It fails toward "owned" only when all three coincide.
 // Note that isDoltProcess here would close only this gap, not the adopted-server
-// one — reclaimPort already requires isDoltProcess before it will adopt.
+// one — reclaimPort already requires isDoltProcess before it will adopt. On
+// unix the liveness check also counts a PID this user may not signal (EPERM)
+// as alive, so a recorded PID recycled to another account's process passes it
+// too.
 //
 // Callers needing certainty over latency should use IsRunning, or
 // IsTrackedServerRunning when they must not mutate the state files.

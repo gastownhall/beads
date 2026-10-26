@@ -3,6 +3,7 @@
 package doltserver
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -127,12 +128,21 @@ func isProcessInDir(pid int, dir string) bool {
 
 // isProcessAlive checks if a process with the given PID is running.
 // Uses signal 0 which doesn't send a signal but checks process existence.
+// A process this user may not signal still exists, so it counts as alive.
 func isProcessAlive(pid int) bool {
 	process, err := os.FindProcess(pid)
 	if err != nil {
 		return false
 	}
-	return process.Signal(syscall.Signal(0)) == nil
+	return aliveAfterSignalZero(process.Signal(syscall.Signal(0)))
+}
+
+// aliveAfterSignalZero classifies the error from signaling a process with
+// signal 0. EPERM (bare, or wrapped by kill and pidfd_send_signal) means the
+// process exists but belongs to someone else; only "no such process"
+// (ESRCH, os.ErrProcessDone) means dead. Same rule as processExists.
+func aliveAfterSignalZero(err error) bool {
+	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
 // gracefulStop sends SIGTERM, waits for the process to exit, then SIGKILL if needed.
