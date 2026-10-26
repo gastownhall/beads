@@ -377,6 +377,7 @@ install_from_release() {
     log_info "Installing to $install_dir..."
     if [[ -w "$install_dir" ]]; then
         if ! { cp "$extracted_bd" "$staged_bd" && mv -f "$staged_bd" "$install_dir/bd"; }; then
+            rm -f "$staged_bd"
             log_error "Failed to install bd to $install_dir"
             cd - > /dev/null || cd "$HOME"
             rm -rf "$tmp_dir"
@@ -384,6 +385,7 @@ install_from_release() {
         fi
     else
         if ! { sudo cp "$extracted_bd" "$staged_bd" && sudo mv -f "$staged_bd" "$install_dir/bd"; }; then
+            sudo rm -f "$staged_bd"
             log_error "Failed to install bd to $install_dir"
             cd - > /dev/null || cd "$HOME"
             rm -rf "$tmp_dir"

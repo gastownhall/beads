@@ -110,8 +110,10 @@ func installShSourcedLib(t *testing.T) string {
 // install_from_release linux_amd64 with the network, archive and platform
 // stubbed, and returns its exit status, combined output, and the shared
 // call log the cp/mv/sudo stubs append every command to. readOnlyDir seeds
-// the install dir at mode 0555 so the sudo branch is the one taken.
-func runInstallFromRelease(t *testing.T, readOnlyDir bool) installShRun {
+// the install dir at mode 0555 so the sudo branch is the one taken;
+// failStage makes the cp wrapper write a half file and exit 1 when its
+// destination is the staged temp, so the install fails mid-copy.
+func runInstallFromRelease(t *testing.T, readOnlyDir, failStage bool) installShRun {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("install.sh is the Unix installer; Windows installs via install.ps1")
@@ -200,9 +202,18 @@ esac
 `)
 	// cp and mv wrap (do not replace) the real tools: every call lands in
 	// one shared log so the tests can assert on the exact install recipe.
+	// With failStage, cp leaves a half-written staged temp and fails, the
+	// mid-install failure AC-3 covers.
 	writeExecutable(t, filepath.Join(binDir, "cp"), `#!/bin/sh
 set -eu
 printf '%s\n' "cp $*" >>"$INSTALL_SH_CALL_LOG"
+if [ "$INSTALL_SH_FAIL_STAGE" = 1 ]; then
+  for arg in "$@"; do
+    case $arg in
+      */.bd.install.tmp.*) printf 'partial\n' >"$arg"; exit 1 ;;
+    esac
+  done
+fi
 exec "$REAL_CP" "$@"
 `)
 	writeExecutable(t, filepath.Join(binDir, "mv"), `#!/bin/sh
@@ -267,6 +278,7 @@ exit 0
 		"INSTALL_TEST_DIR=" + installDir,
 		"REAL_CP=" + realCP,
 		"REAL_MV=" + realMV,
+		"INSTALL_SH_FAIL_STAGE=" + map[bool]string{true: "1", false: "0"}[failStage],
 	}
 	for _, name := range []string{"curl", "tar", "uname", "cp", "mv", "sudo"} {
 		requireShellCommandPath(t, bash, stateDir, env, name, binPath+"/"+name)
@@ -361,7 +373,7 @@ func stagedInstallPair(t *testing.T, log []string, prefix, installDir string) st
 // copy or move the mktemp-dir binary onto the live path, where a
 // cross-filesystem mv leaves bd partial for the whole copy window.
 func TestInstallShStagesAndRenamesIntoPlace(t *testing.T) {
-	run := runInstallFromRelease(t, false)
+	run := runInstallFromRelease(t, false, false)
 
 	if run.status != 0 {
 		t.Fatalf("install_from_release exited %d, want 0\n%s", run.status, run.output)
@@ -405,7 +417,7 @@ func TestInstallShSudoBranchStagesAndRenames(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("for euid 0 bash [[ -w ]] is true even at mode 0555, so the sudo branch cannot be taken")
 	}
-	run := runInstallFromRelease(t, true)
+	run := runInstallFromRelease(t, true, false)
 
 	if run.status != 0 {
 		t.Fatalf("install_from_release exited %d, want 0\n%s", run.status, run.output)
@@ -426,5 +438,32 @@ func TestInstallShSudoBranchStagesAndRenames(t *testing.T) {
 			continue
 		}
 		t.Errorf("command %q writes the live bd; only the staged rename\n  %s\nmay touch it", call, rename)
+	}
+}
+
+// TestInstallShFailedStageLeavesOldBinaryIntact is AC-3 of #5616: when the
+// staged copy fails midway, install_from_release must return non-zero, log
+// its existing failure message, leave the previous complete bd untouched at
+// the live path, and not leave the half-written staged temp behind. main is
+// never run, so this cannot fall through to the go-install fallback.
+func TestInstallShFailedStageLeavesOldBinaryIntact(t *testing.T) {
+	run := runInstallFromRelease(t, false, true)
+
+	if run.status == 0 {
+		t.Fatalf("install_from_release exited 0, want non-zero when the staged copy fails\n%s", run.output)
+	}
+	if !strings.Contains(run.output, "Failed to install bd to "+run.installDir) {
+		t.Errorf("output does not report the failed install;\n%s", run.output)
+	}
+	target := filepath.Join(run.installDir, "bd")
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("read bd after the failed install: %v", err)
+	}
+	if string(got) != installShOldPayload {
+		t.Errorf("bd after the failed install holds %q, want the previous binary %q", got, installShOldPayload)
+	}
+	if leftovers, _ := filepath.Glob(filepath.Join(run.installDir, ".bd.install.tmp.*")); len(leftovers) > 0 {
+		t.Errorf("failed install left staged temps behind: %v", leftovers)
 	}
 }
