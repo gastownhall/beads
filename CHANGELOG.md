@@ -932,6 +932,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd find-duplicates --method ai` and `bd admin compact --auto` accept a
+  reply that starts with a thinking block**
+  ([#7515](https://github.com/gastownhall/beads/issues/7515)). Both read only
+  the first content block of the model's reply, so when a model that thinks
+  by default answered with a `thinking` block before the `text` answer,
+  find-duplicates warned `unexpected AI response format` and kept the
+  mechanical scores, and compaction failed with `not a text block
+  (type=thinking)`. Both now use the first `text` block wherever it sits.
 - The batched bulk readers no longer return an issue's rows twice when the
   same id is requested twice. Since the 200-id batching (#6444), an id that
   appeared in two batches had its comments, labels, dependency records,

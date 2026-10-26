@@ -38,6 +38,7 @@ go_test(
         "//internal/testutil",
         "//internal/types",
         "@com_github_anthropics_anthropic_sdk_go//:anthropic-sdk-go",
+        "@com_github_anthropics_anthropic_sdk_go//option",
     ],
 )
 
