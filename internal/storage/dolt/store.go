@@ -2204,8 +2204,12 @@ func retryOpenProbe(ctx context.Context, network, addr string, timeout, budget t
 	if !isRetryableOpenProbeError(lastErr) {
 		return nil, lastErr
 	}
+	// The debug lines name the endpoint the notice names, and two of them
+	// repeat the dial error that names it again: debug.Logf writes to stderr
+	// unfiltered, so both go through the remedy printer here as they do in
+	// every other message.
 	debug.Logf("dolt: %s %s unreachable (%v); retrying open within %s=%s\n",
-		network, addr, lastErr, config.OpenRetryBudgetKey, budget)
+		network, remedy.PrintedValue(addr), remedy.PrintedError(lastErr), config.OpenRetryBudgetKey, budget)
 
 	notified := false
 	for {
@@ -2255,7 +2259,7 @@ func retryOpenProbe(ctx context.Context, network, addr string, timeout, budget t
 				doltserver.DrainAndCloseProbe(conn)
 				return nil, openRetryCanceled(ctxErr, lastErr, attempts, budget)
 			}
-			debug.Logf("dolt: %s %s reachable after %d open attempts\n", network, addr, attempts)
+			debug.Logf("dolt: %s %s reachable after %d open attempts\n", network, remedy.PrintedValue(addr), attempts)
 			return conn, nil
 		}
 		lastErr = err
@@ -2265,7 +2269,7 @@ func retryOpenProbe(ctx context.Context, network, addr string, timeout, budget t
 			}
 			return nil, err
 		}
-		debug.Logf("dolt: open attempt %d for %s %s failed: %v\n", attempts, network, addr, err)
+		debug.Logf("dolt: open attempt %d for %s %s failed: %v\n", attempts, network, remedy.PrintedValue(addr), remedy.PrintedError(err))
 	}
 	return nil, fmt.Errorf("%w (still unreachable after %d attempts within %s=%s)",
 		lastErr, attempts, config.OpenRetryBudgetKey, budget)

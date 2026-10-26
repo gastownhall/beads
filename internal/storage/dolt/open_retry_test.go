@@ -1577,3 +1577,42 @@ func TestOpenRetryNamesTheEndpointEscaped(t *testing.T) {
 		})
 	}
 }
+
+// The loop's per-attempt detail goes to debug.Logf, which BD_DEBUG and -v turn
+// on, and its three lines -- on entry, after each failed retry, and on the
+// retry that reaches the server -- name the endpoint the notice names, two of
+// them beside the dial error that repeats it. debug.Logf writes to stderr
+// unfiltered, so each line must spell both through the remedy printer itself.
+// retryOpenProbe is called directly, with the first error as the dialer wrote
+// it, because these lines are its own output; which opens reach it is the
+// question the newServerMode tests above answer. The capture swaps os.Stderr
+// and debug's verbose flag, so this test must never run in parallel.
+func TestOpenRetryDebugLinesNameTheEndpointEscaped(t *testing.T) {
+	_ = captureOpenRetryNotice(t)
+	addr := net.JoinHostPort(hostileEndpoint, "1")
+	refused := fmt.Errorf("dial tcp %s: connect: connection refused", addr)
+	stubOpenRetryDials(t, refused, []error{refused, nil})
+
+	var err error
+	out := captureRouteLog(t, func() {
+		_, err = retryOpenProbe(context.Background(), "tcp", addr, 500*time.Millisecond, 5*time.Second, refused)
+	})
+	if err != nil {
+		t.Fatalf("the retry that reached the server returned an error: %q", err)
+	}
+	for _, line := range []struct{ name, marker string }{
+		{"entry", " unreachable ("},
+		{"failed retry", "open attempt 2 for "},
+		{"server reached", " reachable after 3 open attempts"},
+	} {
+		t.Run(line.name, func(t *testing.T) {
+			for _, l := range strings.Split(out, "\n") {
+				if strings.Contains(l, line.marker) {
+					requireNoRawTerminalControl(t, l)
+					return
+				}
+			}
+			t.Fatalf("no %s line in the debug output, so this row proves nothing about it:\n%q", line.name, out)
+		})
+	}
+}
