@@ -241,16 +241,20 @@ func CheckEndpointTrust(beadsDir string, fileCfg *configfile.Config, host string
 	}
 	endpoint := ""
 	if socket != "" {
-		endpoint = "unix:" + socket
-	} else {
-		if host == "" {
-			host = fileCfg.GetDoltServerHost()
+		if err := endpointtrust.Check(beadsDir, "dolt-server", "unix:"+socket, fromPrivate); err != nil {
+			return err
 		}
-		if port <= 0 {
-			port = fileCfg.GetDoltServerPort()
-		}
-		endpoint = "mysql://" + net.JoinHostPort(configfile.UnbracketHost(host), strconv.Itoa(port))
 	}
+	if host == "" {
+		host = fileCfg.GetDoltServerHost()
+	}
+	if port <= 0 {
+		port = fileCfg.GetDoltServerPort()
+	}
+	if socket != "" && port <= 0 {
+		return nil
+	}
+	endpoint = "mysql://" + net.JoinHostPort(configfile.UnbracketHost(host), strconv.Itoa(port))
 	return endpointtrust.Check(beadsDir, "dolt-server", endpoint, fromPrivate)
 }
 

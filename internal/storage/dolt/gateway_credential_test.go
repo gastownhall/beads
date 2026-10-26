@@ -2,11 +2,13 @@ package dolt
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/endpointtrust"
 	"github.com/steveyegge/beads/internal/testutil/credentialcmd"
 )
 
@@ -134,6 +136,26 @@ func TestCheckServerEndpointTrust(t *testing.T) {
 		if err := CheckServerEndpointTrust(beadsDir, &configfile.Config{DoltServerHost: endpoint.host}, endpoint.host, 3307, endpoint.socket); err != nil {
 			t.Errorf("local/socket endpoint %q %q: %v", endpoint.host, endpoint.socket, err)
 		}
+	}
+}
+
+func TestCheckServerEndpointTrustChecksTCPFallbackWithSocket(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	beadsDir := t.TempDir()
+	socket := filepath.Join(t.TempDir(), "dolt.sock")
+	fileCfg := &configfile.Config{DoltServerHost: "remote-a.example"}
+
+	if err := CheckServerEndpointTrust(beadsDir, fileCfg, fileCfg.DoltServerHost, 3307, socket); err != nil {
+		t.Fatalf("initial socket and TCP endpoint: %v", err)
+	}
+	fileCfg.DoltServerHost = "remote-b.example"
+	err := CheckServerEndpointTrust(beadsDir, fileCfg, fileCfg.DoltServerHost, 3307, socket)
+	var mismatch *endpointtrust.MismatchError
+	if !errors.As(err, &mismatch) {
+		t.Fatalf("changed TCP fallback endpoint error = %v, want MismatchError", err)
 	}
 }
 

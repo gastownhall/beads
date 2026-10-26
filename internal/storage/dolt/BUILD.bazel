@@ -420,6 +420,7 @@ go_test(
         "//internal/debug",
         "//internal/doltserver",
         "//internal/doltversion",
+        "//internal/endpointtrust",
         "//internal/githooksenv",
         "//internal/remedy",
         "//internal/storage",
