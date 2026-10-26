@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/tracker"
 )
 
@@ -59,5 +61,51 @@ func TestJiraSyncResult(t *testing.T) {
 	}
 	if len(result.Warnings) != 0 {
 		t.Errorf("expected Warnings to be empty, got %v", result.Warnings)
+	}
+}
+
+// jira.api_token is a yaml-only key: `bd config set jira.api_token` writes it to
+// config.yaml, never to the database. Validation must accept a token found
+// there, as the Jira tracker itself does, rather than demand JIRA_API_TOKEN.
+func TestValidateJiraConfigForStoreAcceptsTokenFromConfigYaml(t *testing.T) {
+	old := rootCtx
+	rootCtx = context.Background()
+	t.Cleanup(func() { rootCtx = old })
+
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize(): %v", err)
+	}
+	t.Setenv("JIRA_API_TOKEN", "")
+	config.Set("jira.api_token", "yaml-token")
+
+	st := &configOnlyTrackerStore{config: map[string]string{
+		"jira.url":     "https://example.atlassian.net",
+		"jira.project": "GC",
+	}}
+	if err := validateJiraConfigForStore(st); err != nil {
+		t.Fatalf("validation rejected a token stored in config.yaml: %v", err)
+	}
+}
+
+func TestValidateJiraConfigForStoreRejectsMissingToken(t *testing.T) {
+	old := rootCtx
+	rootCtx = context.Background()
+	t.Cleanup(func() { rootCtx = old })
+
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize(): %v", err)
+	}
+	t.Setenv("JIRA_API_TOKEN", "")
+
+	st := &configOnlyTrackerStore{config: map[string]string{
+		"jira.url":     "https://example.atlassian.net",
+		"jira.project": "GC",
+	}}
+	if err := validateJiraConfigForStore(st); err == nil {
+		t.Fatal("validation accepted a configuration with no token anywhere")
 	}
 }

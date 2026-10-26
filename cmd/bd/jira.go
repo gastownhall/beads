@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/jira"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/tracker"
@@ -351,7 +352,12 @@ func validateJiraConfigForStore(st tracker.Store) error {
 		return fmt.Errorf("no Jira project configured\nRun: bd config set jira.project \"PROJ\"\nOr:  bd config set jira.projects \"PROJ1,PROJ2\"")
 	}
 
-	apiToken, _ := st.GetConfig(ctx, "jira.api_token")
+	// jira.api_token is yaml-only: `bd config set` writes it to config.yaml,
+	// which is where the Jira tracker reads it, so look there first.
+	apiToken := config.GetString("jira.api_token")
+	if apiToken == "" {
+		apiToken, _ = st.GetConfig(ctx, "jira.api_token")
+	}
 	if apiToken == "" && os.Getenv("JIRA_API_TOKEN") == "" {
 		return fmt.Errorf("Jira API token not configured\nRun: bd config set jira.api_token \"YOUR_TOKEN\"\nOr: export JIRA_API_TOKEN=YOUR_TOKEN")
 	}
