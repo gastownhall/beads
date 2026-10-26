@@ -2964,6 +2964,23 @@ func TestFindBeadsDirFromLinkedWorktreeBoundary(t *testing.T) {
 			},
 			wantMain: true,
 		},
+		{
+			name: "tracked metadata-only worktree .beads resolves to the main checkout store",
+			mutate: func(t *testing.T, mainStore, worktree string) {
+				newStore(t, mainStore)
+				worktreeBeads := filepath.Join(worktree, ".beads")
+				if err := os.MkdirAll(worktreeBeads, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(worktreeBeads, "metadata.json"), []byte(`{"database":"dolt"}`), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(worktreeBeads, "config.yaml"), []byte("issue-prefix: \"proj\"\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantMain: true,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			mainRepo, worktree := setupRegularWorktreeRepo(t)
