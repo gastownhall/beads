@@ -1397,3 +1397,31 @@ func TestDepListRefusesUnknownDirection(t *testing.T) {
 		}
 	}
 }
+
+// TestDepListRefusesUnknownDirectionJSON pins the --json half of #7842: the
+// refusal is bd's JSON error object on stdout, not a dependency array.
+func TestDepListRefusesUnknownDirectionJSON(t *testing.T) {
+	for _, proxied := range []bool{false, true} {
+		t.Run(fmt.Sprintf("proxied=%v", proxied), func(t *testing.T) {
+			code, stdout := runDepListRoute(t, proxied, true, "--direction=both")
+			if code != 1 {
+				t.Errorf("exit code = %d, want 1\nstdout:\n%s", code, stdout)
+			}
+			// Decoding into a map fails on an array, and on a second value.
+			var obj map[string]interface{}
+			dec := json.NewDecoder(strings.NewReader(stdout))
+			if err := dec.Decode(&obj); err != nil {
+				t.Fatalf("stdout is not one JSON object: %v\n%s", err, stdout)
+			}
+			if dec.More() {
+				t.Errorf("stdout carries more than the error object:\n%s", stdout)
+			}
+			if data, ok := obj["data"].(map[string]interface{}); ok {
+				obj = data
+			}
+			if got := obj["error"]; got != depListRefusal {
+				t.Errorf("error = %v, want %q\nstdout:\n%s", got, depListRefusal, stdout)
+			}
+		})
+	}
+}
