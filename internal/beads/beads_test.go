@@ -2925,3 +2925,104 @@ func TestResolveBeadsDirForRepoIgnoresInheritedRouting(t *testing.T) {
 		})
 	}
 }
+
+// TestFindBeadsDirFromLinkedWorktreeBoundary pins GH#7782: explicit discovery
+// (FindBeadsDirFrom, the bd -C path) must stop at a linked worktree's root and
+// bind the main checkout's shared store while one exists, exactly like cwd
+// discovery does, instead of walking past the worktree into an enclosing
+// parent folder's store. Each case cross-checks the expectation against
+// FindBeadsDir run with the cwd inside the worktree, so the wanted store is
+// what `cd <worktree> && bd` binds, not a hard-coded answer.
+func TestFindBeadsDirFromLinkedWorktreeBoundary(t *testing.T) {
+	t.Setenv("BEADS_DIR", "")
+	t.Setenv("BEADS_DB", "")
+
+	// newStore creates a .beads holding project files and a database (dolt/),
+	// the shape of a real initialized store.
+	newStore := func(t *testing.T, beadsDir string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Join(beadsDir, "dolt"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"database":"dolt"}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for _, tc := range []struct {
+		name     string
+		mutate   func(t *testing.T, mainStore, worktree string)
+		wantMain bool
+	}{
+		{
+			name: "worktree without .beads resolves to the main checkout store",
+			mutate: func(t *testing.T, mainStore, worktree string) {
+				newStore(t, mainStore)
+				if _, err := os.Stat(filepath.Join(worktree, ".beads")); !os.IsNotExist(err) {
+					t.Fatalf("fixture precondition: worktree must not carry a .beads, stat err: %v", err)
+				}
+			},
+			wantMain: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mainRepo, worktree := setupRegularWorktreeRepo(t)
+			parent := filepath.Dir(mainRepo)
+			parentStore := filepath.Join(parent, ".beads")
+			mainStore := filepath.Join(mainRepo, ".beads")
+			newStore(t, parentStore)
+			tc.mutate(t, mainStore, worktree)
+			want := parentStore
+			if tc.wantMain {
+				want = mainStore
+			}
+
+			sub := filepath.Join(worktree, "sub")
+			if err := os.Mkdir(sub, 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			// Reference: what `cd <dir> && bd` binds. The parity check keeps
+			// the expectation honest independently of the fix under test.
+			t.Cleanup(func() { git.ResetCaches() })
+			for _, start := range []string{worktree, sub} {
+				t.Chdir(start)
+				git.ResetCaches()
+				if got := FindBeadsDir(); !utils.PathsEqual(got, want) {
+					t.Fatalf("reference: FindBeadsDir() from %q = %q, want %q", start, got, want)
+				}
+			}
+
+			// Under test: explicit discovery, as bd -C resolves it from an
+			// unrelated cwd.
+			t.Chdir(t.TempDir())
+			git.ResetCaches()
+			for _, start := range []string{worktree, sub} {
+				if got := FindBeadsDirFrom(start); !utils.PathsEqual(got, want) {
+					t.Errorf("FindBeadsDirFrom(%q) = %q, want %q (what cd binds)", start, got, want)
+				}
+			}
+		})
+	}
+
+	// The no-worktree-.beads layout again on a bare parent, where the shared
+	// store lives in repo.git/.beads rather than beside the main checkout.
+	t.Run("bare parent shared store", func(t *testing.T) {
+		bareDir, worktree := setupBareParentWorktree(t)
+		newStore(t, filepath.Join(filepath.Dir(bareDir), ".beads"))
+		sharedStore := filepath.Join(bareDir, ".beads")
+		newStore(t, sharedStore)
+
+		t.Cleanup(func() { git.ResetCaches() })
+		t.Chdir(worktree)
+		git.ResetCaches()
+		if got := FindBeadsDir(); !utils.PathsEqual(got, sharedStore) {
+			t.Fatalf("reference: FindBeadsDir() from worktree = %q, want shared store %q", got, sharedStore)
+		}
+		t.Chdir(t.TempDir())
+		git.ResetCaches()
+		if got := FindBeadsDirFrom(worktree); !utils.PathsEqual(got, sharedStore) {
+			t.Errorf("FindBeadsDirFrom(worktree) = %q, want shared store %q (what cd binds)", got, sharedStore)
+		}
+	})
+}

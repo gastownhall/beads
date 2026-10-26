@@ -699,10 +699,11 @@ func FindBeadsDirFrom(startDir string) string {
 	fallbackBeadsDir := ""
 	fallbackHasDB := false
 	if repoRoot != "" {
-		fallbackBeadsDir = worktreeFallbackBeadsDirForRepo(repoRoot)
-		if fallbackBeadsDir != "" {
-			if fbInfo, err := os.Stat(fallbackBeadsDir); err == nil && fbInfo.IsDir() {
-				fallbackHasDB = hasBeadsDatabase(FollowRedirect(fallbackBeadsDir))
+		if candidate := worktreeFallbackBeadsDirForRepo(repoRoot); candidate != "" {
+			resolved := FollowRedirect(candidate)
+			if hasBeadsProjectFiles(resolved) {
+				fallbackBeadsDir = resolved
+				fallbackHasDB = hasBeadsDatabase(resolved)
 			}
 		}
 	}
@@ -710,10 +711,10 @@ func FindBeadsDirFrom(startDir string) string {
 	walk := NewAncestorDirWalk(startDir, startDir)
 	for dir, ok := walk.Next(); ok; dir, ok = walk.Next() {
 		beadsDir := filepath.Join(dir, ".beads")
+		isWorktreeRoot := repoRoot != "" && utils.PathsEqual(dir, repoRoot)
+		isJJSecondaryRoot := jjSecondaryRoot != "" && utils.PathsEqual(dir, jjSecondaryRoot)
 		if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
 			resolved := FollowRedirect(beadsDir)
-			isWorktreeRoot := repoRoot != "" && utils.PathsEqual(dir, repoRoot)
-			isJJSecondaryRoot := jjSecondaryRoot != "" && utils.PathsEqual(dir, jjSecondaryRoot)
 			if isWorktreeRoot && fallbackHasDB && !hasBeadsDatabase(resolved) {
 				// A worktree root can contain tracked .beads metadata without
 				// owning the ignored database directory. Match FindBeadsDir by
@@ -727,15 +728,20 @@ func FindBeadsDirFrom(startDir string) string {
 			}
 		}
 
+		// Don't walk past a linked worktree root while its main checkout has a
+		// store: FindBeadsDir stops its cwd walk here and returns that store
+		// (step 3c) before any ancestor's, and -C must bind what cd binds.
+		// Without one, keep walking, as FindBeadsDir's extended walk (step 4)
+		// does.
+		if isWorktreeRoot && fallbackBeadsDir != "" {
+			return fallbackBeadsDir
+		}
 	}
 
 	if fallbackBeadsDir != "" {
-		if info, err := os.Stat(fallbackBeadsDir); err == nil && info.IsDir() {
-			resolved := FollowRedirect(fallbackBeadsDir)
-			if hasBeadsProjectFiles(resolved) {
-				return resolved
-			}
-		}
+		// The walk ended below the worktree root (temp-root or ceiling); the
+		// shared store was validated when it was precomputed above.
+		return fallbackBeadsDir
 	}
 
 	if jjPrimaryBeadsDir != "" {

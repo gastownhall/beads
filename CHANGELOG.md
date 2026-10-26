@@ -932,6 +932,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd -C <linked worktree>` now binds the same store as `cd <linked worktree>`.** When the worktree had no store of its own (or only tracked metadata without a database), `-C` walked past the worktree root and took the first `.beads` above it. Reads came from that store, writes (`create`, `dolt commit`, `dolt push`) landed in it, and the `BEADS_DIR` that `-C` exports overrode one the caller had set. It now uses the main checkout's store, as discovery from the working directory does, and a jj secondary workspace likewise uses its primary's; without such a store, discovery continues upward as before. (#7782)
 - The batched bulk readers no longer return an issue's rows twice when the
   same id is requested twice. Since the 200-id batching (#6444), an id that
   appeared in two batches had its comments, labels, dependency records,

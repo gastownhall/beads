@@ -223,3 +223,48 @@ func TestIsPreviewCommand(t *testing.T) {
 		})
 	}
 }
+
+// TestResolveChangeDirBeadsDirLinkedWorktreeUsesMainCheckoutStore pins
+// GH#7782: `bd -C <linked worktree>` must bind the worktree's project store
+// (the main checkout's .beads via the git common dir), like `cd <worktree>`
+// does — not the store of a parent folder that happens to own one. BEADS_DIR
+// is pinned to the parent's store as a decoy: once -C resolves the right
+// directory it still wins over an exported BEADS_DIR by design.
+func TestResolveChangeDirBeadsDirLinkedWorktreeUsesMainCheckoutStore(t *testing.T) {
+	root := t.TempDir()
+	parent := filepath.Join(root, "parent")
+	proj := filepath.Join(parent, "proj")
+	initGitRepoForContextTest(t, proj)
+	runGitForWorktreeTest(t, proj, "config", "user.email", "test@example.com")
+	runGitForWorktreeTest(t, proj, "config", "user.name", "test")
+	runGitForWorktreeTest(t, proj, "commit", "-q", "--allow-empty", "-m", "init")
+	worktree := filepath.Join(parent, "wt-proj")
+	runGitForWorktreeTest(t, proj, "worktree", "add", "-q", "--detach", worktree)
+
+	parentStore := filepath.Join(parent, ".beads")
+	projStore := filepath.Join(proj, ".beads")
+	for _, store := range []string{parentStore, projStore} {
+		if err := os.MkdirAll(filepath.Join(store, "dolt"), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", store, err)
+		}
+		if err := os.WriteFile(filepath.Join(store, "metadata.json"), []byte(`{"backend":"dolt"}`), 0o644); err != nil {
+			t.Fatalf("write %s metadata: %v", store, err)
+		}
+	}
+
+	// From an unrelated cwd, like the reporter's script: BEADS_DIR pins the
+	// parent store, and -C must still select the worktree's own project.
+	t.Chdir(t.TempDir())
+	t.Setenv("BEADS_DIR", parentStore)
+
+	got, err := resolveChangeDirBeadsDir(worktree)
+	if err != nil {
+		t.Fatalf("resolveChangeDirBeadsDir(worktree): %v", err)
+	}
+	gotResolved, _ := filepath.EvalSymlinks(got)
+	wantResolved, _ := filepath.EvalSymlinks(projStore)
+	if gotResolved != wantResolved {
+		t.Fatalf("resolveChangeDirBeadsDir(worktree) = %q, want the project's store %q (what cd binds), not the parent's %q",
+			got, projStore, parentStore)
+	}
+}
