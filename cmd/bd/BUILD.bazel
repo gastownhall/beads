@@ -412,6 +412,7 @@ go_library(
         "//internal/doltremote",
         "//internal/doltserver",
         "//internal/doltversion",
+        "//internal/endpointtrust",
         "//internal/eventsjournal",
         "//internal/execenv",
         "//internal/formula",

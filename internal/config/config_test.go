@@ -50,6 +50,64 @@ func TestInitialize(t *testing.T) {
 	}
 }
 
+func TestIsFromProjectConfigTracksPrivateOverrides(t *testing.T) {
+	restore := envSnapshot(t)
+	defer restore()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("BEADS_DIR", "")
+
+	work := t.TempDir()
+	beadsDir := filepath.Join(work, ".beads")
+	if err := os.MkdirAll(beadsDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	projectPath := filepath.Join(beadsDir, "config.yaml")
+	if err := os.WriteFile(projectPath, []byte("ai:\n  base_url: https://project.example\ngithub:\n  url: https://project.example\nidentity: project\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(work)
+	t.Setenv("BD_AI_BASE_URL", "")
+	t.Setenv("BEADS_IDENTITY", "")
+	ResetForTesting()
+	t.Cleanup(ResetForTesting)
+
+	if err := Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	if !IsFromProjectConfig("AI.BASE_URL") || !IsFromProjectConfig("github.url") {
+		t.Fatal("project config keys were not classified")
+	}
+
+	localPath := filepath.Join(beadsDir, LocalConfigFileName)
+	if err := os.WriteFile(localPath, []byte("github:\n  url: https://private.example\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	if IsFromProjectConfig("github.url") {
+		t.Fatal("local config override was classified as project-controlled")
+	}
+
+	t.Setenv("BD_AI_BASE_URL", "https://private.example")
+	if err := Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	if IsFromProjectConfig("ai.base_url") {
+		t.Fatal("BD_ environment override was classified as project-controlled")
+	}
+
+	t.Setenv("BEADS_IDENTITY", "private")
+	if err := Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	if IsFromProjectConfig("identity") {
+		t.Fatal("explicit BindEnv override was classified as project-controlled")
+	}
+}
+
 func TestDefaults(t *testing.T) {
 	// Isolate from environment variables
 	restore := envSnapshot(t)

@@ -112,6 +112,7 @@ func TestTracker_InitFromConfig(t *testing.T) {
 }
 
 func TestTracker_InitWithCustomURL(t *testing.T) {
+	setupEndpointTrustWorkspace(t)
 	// ado.pat is yaml-only (secret), so set it via env var.
 	t.Setenv("AZURE_DEVOPS_PAT", "config-pat")
 	tr := &Tracker{}
@@ -1328,6 +1329,7 @@ func TestTracker_InitValidatesProject(t *testing.T) {
 }
 
 func TestTracker_InitRejectsHTTPURL(t *testing.T) {
+	setupEndpointTrustWorkspace(t)
 	// ado.pat is yaml-only (secret), so set it via env var.
 	t.Setenv("AZURE_DEVOPS_PAT", "some-pat")
 	tr := &Tracker{}
@@ -1342,6 +1344,21 @@ func TestTracker_InitRejectsHTTPURL(t *testing.T) {
 	if !strings.Contains(err.Error(), "HTTPS required") {
 		t.Errorf("error = %q, want mention of HTTPS required", err.Error())
 	}
+}
+
+func setupEndpointTrustWorkspace(t *testing.T) {
+	t.Helper()
+	root := t.TempDir()
+	beadsDir := filepath.Join(root, ".beads")
+	if err := os.MkdirAll(beadsDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("{}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DIR", beadsDir)
+	t.Setenv("HOME", root)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, ".config"))
 }
 
 // maskToken returns a partially masked version of a PAT for display.

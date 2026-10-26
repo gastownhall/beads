@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/ado"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/endpointtrust"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
@@ -266,6 +267,9 @@ func maskADOToken(token string) string {
 
 // getADOClient creates an Azure DevOps client from the current configuration.
 func getADOClient(cfg ADOConfig) (*ado.Client, error) {
+	if err := endpointtrust.Check(endpointtrust.WorkspaceKey(), "ado", cfg.URL, endpointtrust.PrivateMatch("ado.url", "AZURE_DEVOPS_URL", cfg.URL)); err != nil {
+		return nil, err
+	}
 	client := ado.NewClient(ado.NewSecretString(cfg.PAT), cfg.Org, cfg.Project)
 	if cfg.URL != "" {
 		var err error

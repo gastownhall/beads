@@ -5,9 +5,9 @@ description: Complete reference for bd configuration across config.yaml and data
 
 Complete configuration reference for beads.
 
-Last reviewed: 2026-09-10
+Last reviewed: 2026-10-26
 
-Freshness source: `cmd/bd/main.go`, `cmd/bd/config.go`, and `internal/configfile/`.
+Freshness source: `cmd/bd/main.go`, `cmd/bd/config.go`, `internal/config/`, `internal/configfile/`, and `internal/endpointtrust/`.
 
 beads has two complementary configuration systems:
 
@@ -39,6 +39,8 @@ For Viper-managed (YAML) keys, highest to lowest:
 4. **Built-in defaults**
 
 Project-level keys written via `bd config set` (Jira, Linear, GitHub, status maps, etc.) live in the Dolt database. They are read at command time and have no env var override.
+
+Non-default AI and tracker endpoints selected from project configuration or the synced database are pinned on first use in `trusted-endpoints.json` under your user config directory. If an endpoint changes, bd refuses to send credentials until you confirm it with the endpoint's environment variable or `.beads/config.local.yaml`.
 
 When a config.yaml value or environment variable shadows a database key, `bd config list` prints an override warning, and `bd config show` reports the source of every effective key.
 

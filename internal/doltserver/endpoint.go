@@ -4,14 +4,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/creds"
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/endpointtrust"
 	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
@@ -213,6 +217,9 @@ func (e Endpoint) WithIdentity(ctx context.Context) (Endpoint, error) {
 	if e.CredentialCommand == "" || e.Gateway {
 		return e, nil
 	}
+	if err := CheckEndpointTrust(e.BeadsDir, nil, e.Host, e.Port, e.Socket); err != nil {
+		return e, err
+	}
 	token, ok, err := GatewayIdentity(ctx, e.CredentialCommand)
 	if err != nil {
 		return e, err
@@ -221,6 +228,30 @@ func (e Endpoint) WithIdentity(ctx context.Context) (Endpoint, error) {
 		e.User, e.Gateway = token, true
 	}
 	return e, nil
+}
+
+func CheckEndpointTrust(beadsDir string, fileCfg *configfile.Config, host string, port int, socket string) error {
+	if fileCfg == nil {
+		fileCfg = loadEndpointConfig(beadsDir)
+	}
+	fromPrivate := os.Getenv("BEADS_DOLT_SERVER_HOST") != "" ||
+		(fileCfg.DoltServerHost == "" && !config.IsFromProjectConfig("dolt.host"))
+	if beadsDir == "" {
+		beadsDir = endpointtrust.WorkspaceKey()
+	}
+	endpoint := ""
+	if socket != "" {
+		endpoint = "unix:" + socket
+	} else {
+		if host == "" {
+			host = fileCfg.GetDoltServerHost()
+		}
+		if port <= 0 {
+			port = fileCfg.GetDoltServerPort()
+		}
+		endpoint = "mysql://" + net.JoinHostPort(configfile.UnbracketHost(host), strconv.Itoa(port))
+	}
+	return endpointtrust.Check(beadsDir, "dolt-server", endpoint, fromPrivate)
 }
 
 // DialDSN is the connection to e the store would make, on database ("" for

@@ -140,6 +140,7 @@ func TestRunLinearTeamsAPIOnlyDoesNotOpenLocalStore(t *testing.T) {
 }
 
 func TestBuildLinearClientAPIOnlyUsesProxiedEndpointConfig(t *testing.T) {
+	setupEndpointTrustWorkspaceForTest(t)
 	t.Setenv("LINEAR_API_KEY", "api-key")
 	st := &configOnlyTrackerStore{config: map[string]string{"linear.api_endpoint": "https://proxy.example/graphql"}}
 	oldTransport := http.DefaultTransport
@@ -165,6 +166,7 @@ func TestBuildLinearClientAPIOnlyUsesProxiedEndpointConfig(t *testing.T) {
 // silently ignores a configured custom endpoint whenever OAuth credentials are
 // present, which is the whole set of CI environments.
 func TestBuildLinearClientAPIOnlyUsesProxiedEndpointConfigOnOAuth(t *testing.T) {
+	setupEndpointTrustWorkspaceForTest(t)
 	t.Setenv("LINEAR_OAUTH_CLIENT_ID", "client")
 	t.Setenv("LINEAR_OAUTH_CLIENT_SECRET", "secret")
 	st := &configOnlyTrackerStore{config: map[string]string{"linear.api_endpoint": "https://proxy.example/graphql"}}

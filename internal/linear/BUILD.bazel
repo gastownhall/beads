@@ -24,6 +24,7 @@ go_library(
     deps = [
         "//internal/config",
         "//internal/debug",
+        "//internal/endpointtrust",
         "//internal/idgen",
         "//internal/lockfile",
         "//internal/tracker",

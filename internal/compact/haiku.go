@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"os"
 	"sync"
 	"text/template"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/steveyegge/beads/internal/audit"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/endpointtrust"
 	"github.com/steveyegge/beads/internal/telemetry"
 	"github.com/steveyegge/beads/internal/types"
 	"go.opentelemetry.io/otel/attribute"
@@ -46,17 +48,10 @@ type haikuClient struct {
 // newHaikuClient creates a new Haiku API client.
 // API key resolution order: ANTHROPIC_API_KEY env var > MINIMAX_API_KEY env var > ai.api_key config > explicit apiKey parameter.
 func newHaikuClient(apiKey string) (*haikuClient, error) {
-	apiKey, keySource := config.ResolveAIAPIKey(apiKey)
-	if apiKey == "" {
-		return nil, fmt.Errorf("%w: set ANTHROPIC_API_KEY, MINIMAX_API_KEY, or ai.api_key in config", errAPIKeyRequired)
+	clientOptions, keySource, baseURL, err := NewAIClientOptions(apiKey)
+	if err != nil {
+		return nil, err
 	}
-
-	clientOptions := []option.RequestOption{option.WithAPIKey(apiKey)}
-	baseURL := config.DefaultAIBaseURL(keySource)
-	if baseURL != "" {
-		clientOptions = append(clientOptions, option.WithBaseURL(baseURL))
-	}
-
 	client := anthropic.NewClient(clientOptions...)
 
 	tier1Tmpl, err := template.New("tier1").Parse(tier1PromptTemplate)
@@ -75,6 +70,30 @@ func newHaikuClient(apiKey string) (*haikuClient, error) {
 		maxRetries:     maxRetries,
 		initialBackoff: initialBackoff,
 	}, nil
+}
+
+func NewAIClientOptions(explicitKey string) ([]option.RequestOption, config.AIAPIKeySource, string, error) {
+	configuredBaseURL := config.GetString("ai.base_url")
+	if configuredBaseURL != "" {
+		if err := endpointtrust.Check(endpointtrust.WorkspaceKey(), "ai", configuredBaseURL, !config.IsFromProjectConfig("ai.base_url")); err != nil {
+			return nil, config.AIAPIKeySourceNone, "", err
+		}
+	} else if baseURL := os.Getenv("MINIMAX_BASE_URL"); baseURL != "" && os.Getenv("MINIMAX_API_KEY") != "" {
+		if err := endpointtrust.Check(endpointtrust.WorkspaceKey(), "ai", baseURL, true); err != nil {
+			return nil, config.AIAPIKeySourceNone, "", err
+		}
+	}
+
+	apiKey, keySource := config.ResolveAIAPIKey(explicitKey)
+	if apiKey == "" {
+		return nil, keySource, "", fmt.Errorf("%w: set ANTHROPIC_API_KEY, MINIMAX_API_KEY, or ai.api_key in config", errAPIKeyRequired)
+	}
+	clientOptions := []option.RequestOption{option.WithAPIKey(apiKey)}
+	baseURL := config.DefaultAIBaseURL(keySource)
+	if baseURL != "" {
+		clientOptions = append(clientOptions, option.WithBaseURL(baseURL))
+	}
+	return clientOptions, keySource, baseURL, nil
 }
 
 // SummarizeTier1 creates a structured summary of an issue (Summary, Key Decisions, Resolution).

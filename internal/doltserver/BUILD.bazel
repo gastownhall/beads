@@ -37,6 +37,7 @@ go_library(
         "//internal/creds",
         "//internal/debug",
         "//internal/doltversion",
+        "//internal/endpointtrust",
         "//internal/fdhygiene",
         "//internal/githooksenv",
         "//internal/gittraceenv",

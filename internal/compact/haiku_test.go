@@ -4,6 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -102,6 +106,18 @@ func TestNewHaikuClient_AnthropicKeyOverridesMiniMaxKey(t *testing.T) {
 }
 
 func TestNewHaikuClient_ConfigBaseURLOverridesMiniMaxDefault(t *testing.T) {
+	root := t.TempDir()
+	beadsDir := filepath.Join(root, ".beads")
+	if err := os.MkdirAll(beadsDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("{}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DIR", beadsDir)
+	t.Setenv("HOME", root)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, ".config"))
+	t.Cleanup(func() { config.Set("ai.base_url", "") })
 	t.Setenv("ANTHROPIC_API_KEY", "")
 	t.Setenv("MINIMAX_API_KEY", "test-minimax-key")
 	t.Setenv("MINIMAX_BASE_URL", "https://minimax.example/anthropic")
@@ -117,6 +133,97 @@ func TestNewHaikuClient_ConfigBaseURLOverridesMiniMaxDefault(t *testing.T) {
 	}
 	if client.baseURL != "https://proxy.example/anthropic" {
 		t.Fatalf("baseURL = %q, want config proxy URL", client.baseURL)
+	}
+}
+
+func TestNewAIClientOptionsPinsBeforeSendingKey(t *testing.T) {
+	t.Cleanup(func() { config.Set("ai.base_url", "") })
+	root := t.TempDir()
+	beadsDir := filepath.Join(root, ".beads")
+	if err := os.MkdirAll(beadsDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DIR", beadsDir)
+	t.Setenv("HOME", root)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, ".config"))
+	t.Setenv("BD_AI_BASE_URL", "")
+	t.Setenv("ANTHROPIC_API_KEY", "test-api-key")
+	t.Setenv("MINIMAX_API_KEY", "")
+
+	requestsA := 0
+	serverA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestsA++
+		if got := r.Header.Get("x-api-key"); got != "test-api-key" {
+			t.Errorf("server A x-api-key = %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":"msg_1","type":"message","role":"assistant","model":"claude-3-haiku-20240307","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":1}}`)
+	}))
+	defer serverA.Close()
+	requestsB := 0
+	serverB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestsB++
+		if got := r.Header.Get("x-api-key"); got != "test-api-key" {
+			t.Errorf("server B x-api-key = %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":"msg_2","type":"message","role":"assistant","model":"claude-3-haiku-20240307","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":1}}`)
+	}))
+	defer serverB.Close()
+
+	writeAIEndpoint := func(endpoint string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("ai:\n  base_url: "+endpoint+"\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeAIEndpoint(serverA.URL)
+	if err := config.Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	options, _, _, err := NewAIClientOptions("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := anthropic.NewClient(options...)
+	_, err = client.Messages.New(context.Background(), anthropic.MessageNewParams{
+		Model:     anthropic.Model("claude-3-haiku-20240307"),
+		MaxTokens: 8,
+		Messages:  []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("test"))},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requestsA != 1 {
+		t.Fatalf("server A requests = %d, want 1", requestsA)
+	}
+
+	writeAIEndpoint(serverB.URL)
+	if err := config.Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := NewAIClientOptions(""); err == nil || !strings.Contains(err.Error(), "credential was not sent") {
+		t.Fatalf("changed endpoint error = %v", err)
+	}
+	if requestsB != 0 {
+		t.Fatalf("server B received %d requests before confirmation", requestsB)
+	}
+
+	t.Setenv("BD_AI_BASE_URL", serverB.URL)
+	options, _, _, err = NewAIClientOptions("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client = anthropic.NewClient(options...)
+	if _, err := client.Messages.New(context.Background(), anthropic.MessageNewParams{
+		Model:     anthropic.Model("claude-3-haiku-20240307"),
+		MaxTokens: 8,
+		Messages:  []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("test"))},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if requestsB != 1 {
+		t.Fatalf("server B requests after confirmation = %d, want 1", requestsB)
 	}
 }
 

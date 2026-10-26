@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/endpointtrust"
 	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -55,12 +56,16 @@ func (t *Tracker) GitLabClient() *Client { return t.client }
 func (t *Tracker) Init(ctx context.Context, store tracker.Store) error {
 	t.store = store
 
+	baseURL, _ := t.getConfig(ctx, "gitlab.url", "GITLAB_URL")
+	if err := endpointtrust.Check(endpointtrust.WorkspaceKey(), "gitlab", baseURL, endpointtrust.PrivateMatch("gitlab.url", "GITLAB_URL", baseURL)); err != nil {
+		return err
+	}
+
 	token, err := t.getConfig(ctx, "gitlab.token", "GITLAB_TOKEN")
 	if err != nil || token == "" {
 		return fmt.Errorf("GitLab token not configured (set gitlab.token or GITLAB_TOKEN)")
 	}
 
-	baseURL, _ := t.getConfig(ctx, "gitlab.url", "GITLAB_URL")
 	if baseURL == "" {
 		baseURL = "https://gitlab.com"
 	}

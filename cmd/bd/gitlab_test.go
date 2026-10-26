@@ -394,6 +394,7 @@ func TestGitLabConfigEnvVar(t *testing.T) {
 
 // TestGitLabClientCreation verifies client is created with correct config.
 func TestGitLabClientCreation(t *testing.T) {
+	setupEndpointTrustWorkspaceForTest(t)
 	// Clear global state to avoid stale connections from prior tests
 	oldDBPath, oldStore := dbPath, store
 	dbPath, store = "", nil
@@ -404,7 +405,10 @@ func TestGitLabClientCreation(t *testing.T) {
 	t.Setenv("GITLAB_PROJECT_ID", "99")
 
 	config := getGitLabConfig()
-	client := getGitLabClient(config)
+	client, err := getGitLabClient(config)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if client.BaseURL != "https://gitlab.test.com" {
 		t.Errorf("client.BaseURL = %q, want %q", client.BaseURL, "https://gitlab.test.com")
@@ -440,6 +444,7 @@ func TestGitLabConfigFromEnv_GroupID(t *testing.T) {
 
 // TestGitLabClientCreation_WithGroupID verifies client is created with GroupID when configured.
 func TestGitLabClientCreation_WithGroupID(t *testing.T) {
+	setupEndpointTrustWorkspaceForTest(t)
 	oldDBPath, oldStore := dbPath, store
 	dbPath, store = "", nil
 	t.Cleanup(func() { dbPath, store = oldDBPath, oldStore })
@@ -450,7 +455,10 @@ func TestGitLabClientCreation_WithGroupID(t *testing.T) {
 	t.Setenv("GITLAB_GROUP_ID", "mygroup")
 
 	config := getGitLabConfig()
-	client := getGitLabClient(config)
+	client, err := getGitLabClient(config)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if client.GroupID != "mygroup" {
 		t.Errorf("client.GroupID = %q, want %q", client.GroupID, "mygroup")

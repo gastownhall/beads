@@ -36,6 +36,13 @@ var v *viper.Viper
 // overriddenKeys tracks keys explicitly set via Set() at runtime, so
 // GetValueSource can distinguish them from Viper defaults.
 var overriddenKeys = map[string]bool{}
+var projectConfigKeys = map[string]bool{}
+var localConfigKeys = map[string]bool{}
+
+var explicitEnvBindings = map[string][]string{
+	"identity": {"BEADS_IDENTITY"},
+	"node_id":  {"BEADS_NODE_ID", "BD_NODE_ID"},
+}
 
 // ignoredConfigKey normalizes a config path into the single form the
 // BEADS_TEST_IGNORE_REPO_CONFIG ignore set is keyed by, so that membership does
@@ -90,7 +97,11 @@ func Initialize() error {
 // configuration concurrently.
 func WithBeadsDir(beadsDir string, fn func()) error {
 	saved, savedOverrides := v, overriddenKeys
-	defer func() { v, overriddenKeys = saved, savedOverrides }()
+	savedProjectKeys, savedLocalKeys := projectConfigKeys, localConfigKeys
+	defer func() {
+		v, overriddenKeys = saved, savedOverrides
+		projectConfigKeys, localConfigKeys = savedProjectKeys, savedLocalKeys
+	}()
 	overriddenKeys = map[string]bool{}
 	err := initialize(beadsDir)
 	fn()
@@ -100,6 +111,8 @@ func WithBeadsDir(beadsDir string, fn func()) error {
 // initialize is Initialize for a process whose BEADS_DIR is beadsDirSetting.
 func initialize(beadsDirSetting string) error {
 	v = viper.New()
+	projectConfigKeys = map[string]bool{}
+	localConfigKeys = map[string]bool{}
 
 	// Set config type to yaml (we only load config.yaml, not config.json)
 	v.SetConfigType("yaml")
@@ -118,6 +131,7 @@ func initialize(beadsDirSetting string) error {
 	// config existed — e.g., the idle-monitor daemon with BEADS_DIR set (GH#2375).
 	var configPaths []string     // ordered lowest priority first
 	var primaryConfigPath string // project-level config (for config.local.yaml and SaveConfigValue)
+	var localConfigPath string
 
 	// User-level paths are built once through the same absolute-native-path
 	// gate used by direct reads and writes. Invalid roots are silently skipped
@@ -140,6 +154,7 @@ func initialize(beadsDirSetting string) error {
 	appendExistingUserConfig(userConfigPaths.legacy)
 	appendExistingUserConfig(userConfigPaths.native)
 	appendExistingUserConfig(userConfigPaths.documented)
+	userConfigPathCount := len(configPaths)
 
 	// 1. Project: walk up from CWD to find .beads/config.yaml
 	beadsDirEnv := strings.TrimSpace(beadsDirSetting)
@@ -446,7 +461,7 @@ func initialize(beadsDirSetting string) error {
 
 		// Merge local config overrides if present (config.local.yaml)
 		// This allows machine-specific settings without polluting tracked config
-		localConfigPath := filepath.Join(filepath.Dir(primaryConfigPath), LocalConfigFileName)
+		localConfigPath = filepath.Join(filepath.Dir(primaryConfigPath), LocalConfigFileName)
 		if _, err := os.Stat(localConfigPath); err == nil {
 			v.SetConfigFile(localConfigPath)
 			if err := v.MergeInConfig(); err != nil {
@@ -461,6 +476,8 @@ func initialize(beadsDirSetting string) error {
 		debug.Logf("Debug: no config.yaml found; using defaults and environment variables\n")
 	}
 
+	projectConfigKeys = configKeys(configPaths[userConfigPathCount:]...)
+	localConfigKeys = configKeys(localConfigPath)
 	return nil
 }
 
@@ -470,6 +487,48 @@ func initialize(beadsDirSetting string) error {
 func ResetForTesting() {
 	v = nil
 	overriddenKeys = map[string]bool{}
+	projectConfigKeys = map[string]bool{}
+	localConfigKeys = map[string]bool{}
+}
+
+func configKeys(paths ...string) map[string]bool {
+	keys := map[string]bool{}
+	for _, path := range paths {
+		if path == "" {
+			continue
+		}
+		if _, err := os.Stat(path); err != nil {
+			continue
+		}
+		fileConfig := viper.New()
+		fileConfig.SetConfigFile(path)
+		if err := fileConfig.ReadInConfig(); err != nil {
+			continue
+		}
+		for _, key := range fileConfig.AllKeys() {
+			keys[strings.ToLower(key)] = true
+		}
+	}
+	return keys
+}
+
+// IsFromProjectConfig reports whether key is defined only by a project config
+// file and has not been overridden by private local config or the environment.
+func IsFromProjectConfig(key string) bool {
+	key = strings.ToLower(key)
+	if !projectConfigKeys[key] || localConfigKeys[key] {
+		return false
+	}
+	envKey := "BD_" + strings.ToUpper(strings.NewReplacer(".", "_", "-", "_").Replace(key))
+	if value := os.Getenv(envKey); value != "" {
+		return false
+	}
+	for _, envKey := range explicitEnvBindings[key] {
+		if value := os.Getenv(envKey); value != "" {
+			return false
+		}
+	}
+	return true
 }
 
 func worktreeFallbackConfigPath(repoPath string) string {

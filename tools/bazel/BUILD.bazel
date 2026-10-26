@@ -200,6 +200,7 @@ release_cross_build(
         "//internal/doltremote:doltremote",
         "//internal/doltserver:doltserver",
         "//internal/doltversion:doltversion",
+        "//internal/endpointtrust:endpointtrust",
         "//internal/eventsjournal:eventsjournal",
         "//internal/execenv:execenv",
         "//internal/fdhygiene:fdhygiene",
