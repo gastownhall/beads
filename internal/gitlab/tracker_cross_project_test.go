@@ -168,6 +168,90 @@ func pullProjectB7(t *testing.T, ref string) (*tracker.SyncResult, *crossProject
 	return result, store
 }
 
+// TestPull_GroupModeSameIIDStableAcrossProjects pins group mode under the
+// project-qualified fallback key: one bulk pull spanning two group projects
+// that both have issue 7 must update each project's bead in place, and no
+// bead may be rewritten to the other project's URL. Beads are linked with
+// work_items-spelled web_urls while the pull returns issues-spelled ones, the
+// spelling drift the fallback exists to heal — and the drift that, keyed by
+// bare IID alone, made one bead capture both projects' updates.
+func TestPull_GroupModeSameIIDStableAcrossProjects(t *testing.T) {
+	const (
+		projectAIssuesRef = "https://gitlab.com/group-a/project-a/-/issues/7"
+		projectBIssuesRef = "https://gitlab.com/group-b/project-b/-/issues/7"
+	)
+	projectAWorkItemRef := "https://gitlab.com/group-a/project-a/-/work_items/7"
+	projectBWorkItemRef := "https://gitlab.com/group-b/project-b/-/work_items/7"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.TrimPrefix(r.URL.Path, "/api/v4") != "/groups/30/issues" {
+			// Issue-link enrichment is best-effort; its failure is tolerated.
+			http.Error(w, "unexpected", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[` +
+			`{"id":8007,"iid":7,"project_id":100,"title":"Project A issue 7","state":"opened",` +
+			`"created_at":"2026-10-01T00:00:00Z","updated_at":"2026-10-02T00:00:00Z",` +
+			`"web_url":"` + projectAIssuesRef + `"},` +
+			`{"id":9007,"iid":7,"project_id":200,"title":"Project B issue 7","state":"opened",` +
+			`"created_at":"2026-10-01T00:00:00Z","updated_at":"2026-10-02T00:00:00Z",` +
+			`"web_url":"` + projectBIssuesRef + `"}]`))
+	}))
+	t.Cleanup(srv.Close)
+
+	tr := &Tracker{client: NewClient("token", srv.URL, "").WithGroupID("30"), config: DefaultMappingConfig()}
+	store := &crossProjectStore{issues: map[string]*types.Issue{
+		"bd-a7": {
+			ID:          "bd-a7",
+			Title:       "Project A issue 7 stale",
+			Status:      types.StatusOpen,
+			IssueType:   types.TypeTask,
+			ExternalRef: &projectAWorkItemRef,
+		},
+		"bd-b7": {
+			ID:          "bd-b7",
+			Title:       "Project B issue 7 stale",
+			Status:      types.StatusOpen,
+			IssueType:   types.TypeTask,
+			ExternalRef: &projectBWorkItemRef,
+		},
+	}}
+	engine := tracker.NewEngine(tr, store, "test")
+
+	first, err := engine.Sync(context.Background(), tracker.SyncOptions{Pull: true})
+	if err != nil {
+		t.Fatalf("first Sync: %v", err)
+	}
+	if first.PullStats.Created != 0 || first.PullStats.Updated != 2 {
+		t.Fatalf("first pull stats: created=%d updated=%d, want created=0 updated=2 (each bead in place)",
+			first.PullStats.Created, first.PullStats.Updated)
+	}
+	// Assert per-bead state right after the first pull: keyed by bare IID,
+	// one bead absorbs both projects' updates (ending on whichever issue is
+	// processed last) and the other is never touched, so at least one bead
+	// holds neither its own issues url nor an updated title.
+	if len(store.issues) != 2 {
+		t.Fatalf("store holds %d issues, want the original two", len(store.issues))
+	}
+	for id, wantRef := range map[string]string{
+		"bd-a7": projectAIssuesRef,
+		"bd-b7": projectBIssuesRef,
+	} {
+		bead := store.issues[id]
+		if bead.ExternalRef == nil || *bead.ExternalRef != wantRef {
+			t.Errorf("%s external_ref = %v after first pull, want its own project's issues url %q", id, derefRef(bead.ExternalRef), wantRef)
+		}
+	}
+
+	second, err := engine.Sync(context.Background(), tracker.SyncOptions{Pull: true})
+	if err != nil {
+		t.Fatalf("second Sync: %v", err)
+	}
+	if second.PullStats.Created != 0 {
+		t.Fatalf("second pull created=%d, want 0", second.PullStats.Created)
+	}
+}
+
 // TestPull_SameProjectRefVariantsUpdateInPlace pins the healing half of the
 // project-qualified fallback key: a bead linked to the configured project's
 // issue by any spelling GitLab has emitted must still be found on re-pull —
