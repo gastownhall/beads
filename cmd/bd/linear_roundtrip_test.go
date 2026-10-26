@@ -328,6 +328,9 @@ func TestLinearRoundTripCoreFields(t *testing.T) {
 	// linear.api_key is a secret, read from config.yaml or LINEAR_API_KEY
 	// and never from the database (config.IsYamlOnlyKey).
 	t.Setenv("LINEAR_API_KEY", "test-api-key")
+	// The endpoint trust gate needs a workspace to key the pin on and
+	// isolated HOME/XDG to write it into.
+	setupEndpointTrustWorkspaceForTest(t)
 	sourceStore, cleanup := setupTestDB(t)
 	defer cleanup()
 
@@ -350,6 +353,9 @@ func TestLinearRoundTripCoreFields(t *testing.T) {
 	mock := newMockLinearServer(teamID, "MOCK")
 	server := httptest.NewServer(mock)
 	defer server.Close()
+	// The store-config linear.api_endpoint is shared configuration; a
+	// private source must confirm the endpoint before the key goes out.
+	t.Setenv("LINEAR_API_ENDPOINT", server.URL)
 
 	if err := sourceStore.SetConfig(ctx, "linear.api_endpoint", server.URL); err != nil {
 		t.Fatalf("SetConfig(endpoint): %v", err)
@@ -524,12 +530,18 @@ func TestLinearPullMilestonesCreatesEpicHierarchy(t *testing.T) {
 	// linear.api_key is a secret, read from config.yaml or LINEAR_API_KEY
 	// and never from the database (config.IsYamlOnlyKey).
 	t.Setenv("LINEAR_API_KEY", "test-api-key")
+	// The endpoint trust gate needs a workspace to key the pin on and
+	// isolated HOME/XDG to write it into.
+	setupEndpointTrustWorkspaceForTest(t)
 	targetStore, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	mock := newMockLinearServer(teamID, "MOCK")
 	server := httptest.NewServer(mock)
 	defer server.Close()
+	// The store-config linear.api_endpoint is shared configuration; a
+	// private source must confirm the endpoint before the key goes out.
+	t.Setenv("LINEAR_API_ENDPOINT", server.URL)
 
 	for k, v := range map[string]string{
 		"linear.team_id":      teamID,

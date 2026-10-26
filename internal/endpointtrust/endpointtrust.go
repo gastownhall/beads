@@ -63,6 +63,21 @@ func (e *MismatchError) Error() string {
 		e.Key, e.Pinned, e.Got, e.Kind, e.Hint, e.Key)
 }
 
+// FirstUseError reports a shared credential endpoint that has no pin for
+// this workspace yet: no private source has confirmed it, so the
+// credential is not sent until one does.
+type FirstUseError struct {
+	Kind string
+	Key  string
+	Got  string
+	Hint string
+}
+
+func (e *FirstUseError) Error() string {
+	return fmt.Sprintf("%s for this workspace is %s, which no private source has confirmed. Your %s credential was not sent. If this endpoint is intended, set %s in your environment or %s in ~/.config/bd/config.yaml.",
+		e.Key, e.Got, e.Kind, e.Hint, e.Key)
+}
+
 // Origin normalizes an endpoint to a scheme/host/port[/path] origin or an absolute Unix socket origin.
 func Origin(endpoint string) (string, error) {
 	if strings.HasPrefix(endpoint, "unix:") {
@@ -258,11 +273,10 @@ func Check(workspaceKey, credKind, endpoint string, fromPrivateSource bool) erro
 		return nil
 	}
 	if pinned == "" {
-		if err := writePin(key, credKind, origin, true); err != nil {
-			return err
-		}
-		fmt.Fprintf(os.Stderr, "beads: trusting %s endpoint %s for this workspace\n", credKind, origin)
-		return nil
+		// A shared endpoint that has never been privately confirmed is the
+		// scenario this gate exists for: pinning it silently on first use
+		// would trust whatever a committed config pointed at.
+		return &FirstUseError{Kind: credKind, Key: hint.key, Got: origin, Hint: hint.hint}
 	}
 	if pinned != origin {
 		return &MismatchError{Kind: credKind, Key: hint.key, Pinned: pinned, Got: origin, Hint: hint.hint}

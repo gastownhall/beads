@@ -798,6 +798,8 @@ func TestADOClientCreation(t *testing.T) {
 // TestADOClientCreationWithURL verifies client with custom base URL.
 func TestADOClientCreationWithURL(t *testing.T) {
 	setupEndpointTrustWorkspaceForTest(t)
+	// The configured ado.url is shared; confirm it privately via env.
+	t.Setenv("AZURE_DEVOPS_URL", "https://tfs.corp.com/DefaultCollection")
 	cfg := ADOConfig{
 		PAT:     "test-pat",
 		Org:     "",

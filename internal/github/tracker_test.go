@@ -64,6 +64,10 @@ func TestInitRejectsChangedEndpointBeforeRequest(t *testing.T) {
 		}
 	}))
 	defer serverB.Close()
+	// The store-config github.url is shared; private confirmation comes from
+	// the environment. The second Init's store endpoint does not match the
+	// env, so it reaches the gate as an unconfirmed change.
+	t.Setenv("GITHUB_API_URL", serverA.URL)
 	if err := (&Tracker{}).Init(context.Background(), endpointTestStore{endpoint: serverA.URL}); err != nil {
 		t.Fatal(err)
 	}

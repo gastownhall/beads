@@ -193,6 +193,8 @@ func TestNewAIClientOptionsPinsBeforeSendingKey(t *testing.T) {
 		}
 	}
 	writeAIEndpoint(serverA.URL)
+	// The committed-config endpoint is shared; confirm it privately via env.
+	t.Setenv("BD_AI_BASE_URL", serverA.URL)
 	if err := config.Initialize(); err != nil {
 		t.Fatal(err)
 	}
@@ -214,6 +216,8 @@ func TestNewAIClientOptionsPinsBeforeSendingKey(t *testing.T) {
 	}
 
 	writeAIEndpoint(serverB.URL)
+	// Drop the env confirmation so the file-config change reaches the gate.
+	t.Setenv("BD_AI_BASE_URL", "")
 	if err := config.Initialize(); err != nil {
 		t.Fatal(err)
 	}

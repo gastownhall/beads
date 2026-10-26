@@ -82,8 +82,10 @@ func TestIsFromProjectConfigTracksPrivateOverrides(t *testing.T) {
 
 	// .beads/config.local.yaml lives inside the repo tree and can be committed,
 	// so it must still be classified as project-controlled rather than private.
+	// jira.url is defined only here, so a regression that drops
+	// config.local.yaml from the project paths loses this key's classification.
 	localPath := filepath.Join(beadsDir, LocalConfigFileName)
-	if err := os.WriteFile(localPath, []byte("github:\n  url: https://local.example\n"), 0600); err != nil {
+	if err := os.WriteFile(localPath, []byte("github:\n  url: https://local.example\njira:\n  url: https://jira.local.example\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if err := Initialize(); err != nil {
@@ -91,6 +93,9 @@ func TestIsFromProjectConfigTracksPrivateOverrides(t *testing.T) {
 	}
 	if !IsFromProjectConfig("github.url") || PrivateConfigValue("github.url") != "" {
 		t.Fatal("local config override in .beads/config.local.yaml was treated as private")
+	}
+	if !IsFromProjectConfig("jira.url") || PrivateConfigValue("jira.url") != "" {
+		t.Fatal("key defined only in .beads/config.local.yaml was not classified as project-controlled")
 	}
 
 	// User-level global config (~/.config/bd/config.yaml) is private when it

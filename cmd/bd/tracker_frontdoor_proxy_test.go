@@ -142,6 +142,8 @@ func TestRunLinearTeamsAPIOnlyDoesNotOpenLocalStore(t *testing.T) {
 func TestBuildLinearClientAPIOnlyUsesProxiedEndpointConfig(t *testing.T) {
 	setupEndpointTrustWorkspaceForTest(t)
 	t.Setenv("LINEAR_API_KEY", "api-key")
+	// The store-config endpoint is shared; confirm it privately via env.
+	t.Setenv("LINEAR_API_ENDPOINT", "https://proxy.example/graphql")
 	st := &configOnlyTrackerStore{config: map[string]string{"linear.api_endpoint": "https://proxy.example/graphql"}}
 	oldTransport := http.DefaultTransport
 	t.Cleanup(func() { http.DefaultTransport = oldTransport })
@@ -169,6 +171,8 @@ func TestBuildLinearClientAPIOnlyUsesProxiedEndpointConfigOnOAuth(t *testing.T) 
 	setupEndpointTrustWorkspaceForTest(t)
 	t.Setenv("LINEAR_OAUTH_CLIENT_ID", "client")
 	t.Setenv("LINEAR_OAUTH_CLIENT_SECRET", "secret")
+	// The store-config endpoint is shared; confirm it privately via env.
+	t.Setenv("LINEAR_API_ENDPOINT", "https://proxy.example/graphql")
 	st := &configOnlyTrackerStore{config: map[string]string{"linear.api_endpoint": "https://proxy.example/graphql"}}
 	oldTransport := http.DefaultTransport
 	t.Cleanup(func() { http.DefaultTransport = oldTransport })

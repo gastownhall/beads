@@ -112,10 +112,13 @@ func TestCheckServerEndpointTrust(t *testing.T) {
 	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
 	beadsDir := t.TempDir()
 
+	// The file-config host is shared; a private env value confirms the pin.
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "remote-a.example")
 	cfg := &configfile.Config{DoltServerHost: "remote-a.example"}
 	if err := CheckServerEndpointTrust(beadsDir, cfg, cfg.DoltServerHost, 3307, ""); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
 	cfg.DoltServerHost = "remote-b.example"
 	err := CheckServerEndpointTrust(beadsDir, cfg, cfg.DoltServerHost, 3307, "")
 	if err == nil || !strings.Contains(err.Error(), "credential was not sent") {
@@ -148,9 +151,12 @@ func TestCheckServerEndpointTrustChecksTCPFallbackWithSocket(t *testing.T) {
 	socket := filepath.Join(t.TempDir(), "dolt.sock")
 	fileCfg := &configfile.Config{DoltServerHost: "remote-a.example"}
 
+	// The file-config host is shared; a private env value confirms the pin.
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "remote-a.example")
 	if err := CheckServerEndpointTrust(beadsDir, fileCfg, fileCfg.DoltServerHost, 3307, socket); err != nil {
 		t.Fatalf("initial socket and TCP endpoint: %v", err)
 	}
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
 	fileCfg.DoltServerHost = "remote-b.example"
 	err := CheckServerEndpointTrust(beadsDir, fileCfg, fileCfg.DoltServerHost, 3307, socket)
 	var mismatch *endpointtrust.MismatchError
@@ -168,10 +174,13 @@ func TestApplyGatewayCredentialStopsBeforeCommandOnTrustMismatch(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "credential-invoked")
 	t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", credentialcmd.Marker(t, marker))
 
+	// The file-config host is shared; a private env value confirms the pin.
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "remote-a.example")
 	fileCfg := &configfile.Config{DoltServerHost: "remote-a.example"}
 	if err := CheckServerEndpointTrust(beadsDir, fileCfg, fileCfg.DoltServerHost, 3307, ""); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
 	fileCfg.DoltServerHost = "remote-b.example"
 	cfg := &Config{BeadsDir: beadsDir, ServerHost: fileCfg.DoltServerHost, ServerPort: 3307}
 	applied, err := ApplyGatewayCredential(context.Background(), fileCfg, cfg)

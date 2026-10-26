@@ -1068,6 +1068,8 @@ func TestInitLoadsCustomStatusMapFromAllConfig(t *testing.T) {
 	setupEndpointTrustWorkspace(t)
 	// jira.api_token is yaml-only (secret), so set it via env var.
 	t.Setenv("JIRA_API_TOKEN", "token123")
+	// The store-config jira.url is shared; confirm it privately via env.
+	t.Setenv("JIRA_URL", "https://example.atlassian.net")
 	store := &configStore{
 		data: map[string]string{
 			"jira.url":                    "https://example.atlassian.net",
@@ -1107,6 +1109,8 @@ func TestInitLoadsCustomTypeMapFromAllConfig(t *testing.T) {
 	setupEndpointTrustWorkspace(t)
 	// jira.api_token is yaml-only (secret), so set it via env var.
 	t.Setenv("JIRA_API_TOKEN", "token123")
+	// The store-config jira.url is shared; confirm it privately via env.
+	t.Setenv("JIRA_URL", "https://example.atlassian.net")
 	store := &configStore{
 		data: map[string]string{
 			"jira.url":              "https://example.atlassian.net",
@@ -1158,6 +1162,8 @@ func TestInitLoadsCustomPriorityMapFromAllConfig(t *testing.T) {
 	setupEndpointTrustWorkspace(t)
 	// jira.api_token is yaml-only (secret), so set it via env var.
 	t.Setenv("JIRA_API_TOKEN", "token123")
+	// The store-config jira.url is shared; confirm it privately via env.
+	t.Setenv("JIRA_URL", "https://example.atlassian.net")
 	store := &configStore{
 		data: map[string]string{
 			"jira.url":            "https://example.atlassian.net",
@@ -1187,6 +1193,8 @@ func TestInitLoadsCustomFieldsFromAllConfig(t *testing.T) {
 	setupEndpointTrustWorkspace(t)
 	// jira.api_token is yaml-only (secret), so set it via env var.
 	t.Setenv("JIRA_API_TOKEN", "token123")
+	// The store-config jira.url is shared; confirm it privately via env.
+	t.Setenv("JIRA_URL", "https://example.atlassian.net")
 	store := &configStore{
 		data: map[string]string{
 			"jira.url":                                  "https://example.atlassian.net",
@@ -1269,6 +1277,8 @@ func TestInitRejectsInvalidCustomFieldJSON(t *testing.T) {
 	setupEndpointTrustWorkspace(t)
 	// jira.api_token is yaml-only (secret), so set it via env var.
 	t.Setenv("JIRA_API_TOKEN", "token123")
+	// The store-config jira.url is shared; confirm it privately via env.
+	t.Setenv("JIRA_URL", "https://example.atlassian.net")
 	store := &configStore{
 		data: map[string]string{
 			"jira.url":                             "https://example.atlassian.net",

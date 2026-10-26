@@ -115,6 +115,8 @@ func TestTracker_InitWithCustomURL(t *testing.T) {
 	setupEndpointTrustWorkspace(t)
 	// ado.pat is yaml-only (secret), so set it via env var.
 	t.Setenv("AZURE_DEVOPS_PAT", "config-pat")
+	// The store-config ado.url is shared; confirm it privately via env.
+	t.Setenv("AZURE_DEVOPS_URL", "https://tfs.corp.com/DefaultCollection")
 	tr := &Tracker{}
 	store := newMockStore(map[string]string{
 		"ado.project": "myproject",
@@ -1332,6 +1334,8 @@ func TestTracker_InitRejectsHTTPURL(t *testing.T) {
 	setupEndpointTrustWorkspace(t)
 	// ado.pat is yaml-only (secret), so set it via env var.
 	t.Setenv("AZURE_DEVOPS_PAT", "some-pat")
+	// The store-config ado.url is shared; confirm it privately via env.
+	t.Setenv("AZURE_DEVOPS_URL", "http://ado.example.com/collection")
 	tr := &Tracker{}
 	store := newMockStore(map[string]string{
 		"ado.project": "myproject",

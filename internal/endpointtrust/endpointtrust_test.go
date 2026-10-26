@@ -44,30 +44,15 @@ func TestOriginNormalizesOrigins(t *testing.T) {
 func TestCheckPinsAndRejectsChangedEndpoint(t *testing.T) {
 	isolatePins(t)
 	key := filepath.Join(t.TempDir(), ".beads")
-	var stderr strings.Builder
-	oldStderr := os.Stderr
-	r, w, err := os.Pipe()
-	if err != nil {
+	// The pin is established by a private source; a shared endpoint then
+	// matches it exactly or is refused.
+	if err := Check(key, "github", "https://one.example/api", true); err != nil {
 		t.Fatal(err)
-	}
-	os.Stderr = w
-	if err := Check(key, "github", "https://one.example/api", false); err != nil {
-		t.Fatal(err)
-	}
-	_ = w.Close()
-	os.Stderr = oldStderr
-	_, _ = r.Read(make([]byte, 0))
-	buf := make([]byte, 256)
-	n, _ := r.Read(buf)
-	_ = r.Close()
-	stderr.Write(buf[:n])
-	if !strings.Contains(stderr.String(), "beads: trusting github endpoint https://one.example:443/api") {
-		t.Fatalf("first-use notice = %q", stderr.String())
 	}
 	if err := Check(key, "github", "https://one.example/api/", false); err != nil {
 		t.Fatalf("same origin after path normalization: %v", err)
 	}
-	err = Check(key, "github", "https://one.example/other", false)
+	err := Check(key, "github", "https://one.example/other", false)
 	var mismatch *MismatchError
 	if !errors.As(err, &mismatch) {
 		t.Fatalf("changed path mismatch error = %v", err)
@@ -109,7 +94,7 @@ func TestCheckPinsAndRejectsChangedEndpoint(t *testing.T) {
 func TestCheckPrivateSourceRepinsAndLocalDoltPinsSentinel(t *testing.T) {
 	isolatePins(t)
 	key := filepath.Join(t.TempDir(), ".beads")
-	if err := Check(key, "jira", "https://old.example", false); err != nil {
+	if err := Check(key, "jira", "https://old.example", true); err != nil {
 		t.Fatal(err)
 	}
 	if err := Check(key, "jira", "https://new.example", true); err != nil {
@@ -177,7 +162,7 @@ func TestPrivateSourceDoesNotRequireWritablePinStorage(t *testing.T) {
 		configDir := filepath.Join(home, ".config")
 		t.Setenv("XDG_CONFIG_HOME", configDir)
 		key := filepath.Join(t.TempDir(), ".beads")
-		if err := Check(key, "github", "https://same.example", false); err != nil {
+		if err := Check(key, "github", "https://same.example", true); err != nil {
 			t.Fatal(err)
 		}
 
@@ -252,7 +237,13 @@ func TestCheckRequiresWorkspaceAndPinsJSON(t *testing.T) {
 		t.Fatalf("private endpoint without workspace: %v", err)
 	}
 	key := filepath.Join(t.TempDir(), ".beads")
-	if err := Check(key, "github", "https://example.com", false); err != nil {
+	// A shared first use is refused, then a private confirmation writes the pin.
+	err := Check(key, "github", "https://example.com", false)
+	var firstUse *FirstUseError
+	if !errors.As(err, &firstUse) {
+		t.Fatalf("shared first use = %v, want FirstUseError", err)
+	}
+	if err := Check(key, "github", "https://example.com", true); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "beads", pinsFileName))
@@ -262,6 +253,42 @@ func TestCheckRequiresWorkspaceAndPinsJSON(t *testing.T) {
 	var got pins
 	if err := json.Unmarshal(data, &got); err != nil || got.Version != 1 || got.Workspaces[key]["github"] != "https://example.com:443" {
 		t.Fatalf("pins = %#v, err %v", got, err)
+	}
+}
+
+// TestCheckSharedFirstUseRefusesUntilPrivatelyConfirmed pins the remaining
+// half of the committed-endpoint scenario: a workspace that has no pin at
+// all must not silently pin whatever shared config points at on first use,
+// or a fresh clone carrying a committed custom endpoint would send the
+// credential on the first bd command. The pin still comes from a private
+// confirmation, and the shared endpoint is then admitted.
+func TestCheckSharedFirstUseRefusesUntilPrivatelyConfirmed(t *testing.T) {
+	isolatePins(t)
+	key := filepath.Join(t.TempDir(), ".beads")
+
+	err := Check(key, "github", "https://evil.example", false)
+	var firstUse *FirstUseError
+	if !errors.As(err, &firstUse) {
+		t.Fatalf("shared first use = %v, want FirstUseError", err)
+	}
+	for _, part := range []string{"github.url", "https://evil.example:443", "credential was not sent", "GITHUB_API_URL"} {
+		if !strings.Contains(err.Error(), part) {
+			t.Errorf("error %q does not contain %q", err, part)
+		}
+	}
+	stored, err := readPins()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Workspaces[key]["github"] != "" {
+		t.Fatalf("refused first use still wrote a pin: %#v", stored.Workspaces[key])
+	}
+
+	if err := Check(key, "github", "https://evil.example", true); err != nil {
+		t.Fatalf("private confirmation: %v", err)
+	}
+	if err := Check(key, "github", "https://evil.example", false); err != nil {
+		t.Fatalf("shared endpoint matching the confirmed pin: %v", err)
 	}
 }
 
