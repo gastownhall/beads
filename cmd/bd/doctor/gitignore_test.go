@@ -271,7 +271,10 @@ func TestFixGitignore_DoesNotLoosenPermissions(t *testing.T) {
 		t.Errorf("File has too-permissive permissions after fix: %o", afterPerms)
 	}
 
-	// Document that we replace with 0600 (which is more permissive than 0400 but still secure)
+	// Document that we replace with 0600 (which is more permissive than 0400 but still secure).
+	// "old content" is pattern-incomplete, so this is the append path: the
+	// write needs owner-write. A pattern-complete 0400 file is left alone
+	// (TestEnsureGitignoreForBeadsDir_LeavesStricterCompleteFileAlone).
 	if afterPerms != 0600 {
 		t.Errorf("Expected 0600 permissions, got %o", afterPerms)
 	}
@@ -3162,5 +3165,127 @@ func TestCheckGitignore_PermissionPredicate(t *testing.T) {
 				t.Errorf("Detail = %q, want the observed mode %s", check.Detail, want)
 			}
 		})
+	}
+}
+
+// stubChmodBeadsGitignore replaces the chmod seam for the test's duration.
+func stubChmodBeadsGitignore(t *testing.T, fn func(string, os.FileMode) error) {
+	t.Helper()
+	orig := chmodBeadsGitignore
+	chmodBeadsGitignore = fn
+	t.Cleanup(func() { chmodBeadsGitignore = orig })
+}
+
+// TestGitignore_StricterThan0600IsNotLoose pins #6225 finding 1: a
+// pattern-complete .beads/.gitignore that is stricter than 0600 (0400) has no
+// group/other bits, so CheckGitignore must report it ok and
+// EnsureGitignoreForBeadsDir must not add owner-write to it.
+func TestGitignore_StricterThan0600IsNotLoose(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Skipping file permissions test on Windows")
+	}
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.Mkdir(beadsDir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	gitignorePath := filepath.Join(beadsDir, ".gitignore")
+	if err := os.WriteFile(gitignorePath, []byte(GitignoreTemplate), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(gitignorePath, 0400); err != nil {
+		t.Fatal(err)
+	}
+
+	if check := CheckGitignore(tmpDir); check.Status != "ok" {
+		t.Errorf("CheckGitignore on a 0400 file: status %q (%s: %s), want ok", check.Status, check.Message, check.Detail)
+	}
+
+	if err := EnsureGitignoreForBeadsDir(beadsDir); err != nil {
+		t.Fatalf("EnsureGitignoreForBeadsDir failed: %v", err)
+	}
+	info, err := os.Stat(gitignorePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0400 {
+		t.Errorf("EnsureGitignoreForBeadsDir loosened 0400 to %04o", perm)
+	}
+}
+
+// TestEnsureGitignoreForBeadsDir_LeavesStricterCompleteFileAlone pins #6225
+// finding 1 on the write side: a pattern-complete file with no group/other
+// bits needs nothing, so Ensure and FixGitignore must not even try to chmod
+// it (a chmod there is what could fail on a hostile mount, finding 2).
+func TestEnsureGitignoreForBeadsDir_LeavesStricterCompleteFileAlone(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Skipping file permissions test on Windows")
+	}
+
+	tmpDir, gitignorePath := writeCompleteBeadsGitignore(t, 0400)
+	beadsDir := filepath.Dir(gitignorePath)
+
+	calls := 0
+	stubChmodBeadsGitignore(t, func(name string, mode os.FileMode) error {
+		calls++
+		return os.Chmod(name, mode)
+	})
+
+	if err := EnsureGitignoreForBeadsDir(beadsDir); err != nil {
+		t.Fatalf("EnsureGitignoreForBeadsDir: %v", err)
+	}
+	if err := FixGitignore(tmpDir); err != nil {
+		t.Fatalf("FixGitignore: %v", err)
+	}
+	if calls != 0 {
+		t.Errorf("chmod called %d times on a complete 0400 file, want 0", calls)
+	}
+
+	info, err := os.Stat(gitignorePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0400 {
+		t.Errorf("mode = %04o, want 0400 kept", perm)
+	}
+	got, err := os.ReadFile(gitignorePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != GitignoreTemplate {
+		t.Errorf("content changed:\n%s", got)
+	}
+}
+
+// TestEnsureGitignoreForBeadsDir_WindowsKeepsReadOnlyCompleteFile pins #6225
+// finding 3: Windows modes are synthetic, so a pattern-complete file must not
+// be chmod'ed on every call (each call was one more way to fail bootstrap).
+func TestEnsureGitignoreForBeadsDir_WindowsKeepsReadOnlyCompleteFile(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows-only: synthetic file modes")
+	}
+
+	_, gitignorePath := writeCompleteBeadsGitignore(t, 0400) // sets the read-only attribute
+	t.Cleanup(func() { _ = os.Chmod(gitignorePath, 0600) })  // let TempDir cleanup remove it
+
+	calls := 0
+	stubChmodBeadsGitignore(t, func(name string, mode os.FileMode) error {
+		calls++
+		return os.Chmod(name, mode)
+	})
+
+	if err := EnsureGitignoreForBeadsDir(filepath.Dir(gitignorePath)); err != nil {
+		t.Fatalf("EnsureGitignoreForBeadsDir: %v", err)
+	}
+	if calls != 0 {
+		t.Errorf("chmod called %d times on a complete file, want 0", calls)
+	}
+	info, err := os.Stat(gitignorePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm()&0200 != 0 {
+		t.Errorf("read-only attribute cleared (mode %04o)", info.Mode().Perm())
 	}
 }
