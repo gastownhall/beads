@@ -185,15 +185,13 @@ func CheckGitignore(repoPath string) DoctorCheck {
 	// A pattern-complete file with loose permissions must still surface as a
 	// warning: doctor --fix only schedules FixGitignore for non-ok checks, so
 	// an ok here would leave the permission repair unreachable.
-	if runtime.GOOS != "windows" {
-		if info, err := os.Stat(gitignorePath); err == nil && info.Mode().Perm() != 0600 {
-			return DoctorCheck{
-				Name:    "Gitignore",
-				Status:  "warning",
-				Message: "Unexpected permissions on .beads/.gitignore",
-				Detail:  fmt.Sprintf("Mode is %04o, want 0600", info.Mode().Perm()),
-				Fix:     "Run: bd doctor --fix",
-			}
+	if info, err := os.Stat(gitignorePath); err == nil && beadsGitignoreTooLoose(info) {
+		return DoctorCheck{
+			Name:    "Gitignore",
+			Status:  "warning",
+			Message: "Unexpected permissions on .beads/.gitignore",
+			Detail:  fmt.Sprintf("Mode is %04o, want no group/other access (0600)", info.Mode().Perm()),
+			Fix:     "Run: bd doctor --fix",
 		}
 	}
 
@@ -202,6 +200,14 @@ func CheckGitignore(repoPath string) DoctorCheck {
 		Status:  "ok",
 		Message: "Up to date",
 	}
+}
+
+// beadsGitignoreTooLoose reports whether .beads/.gitignore grants any group or
+// other access. Owner bits stricter than 0600 (e.g. 0400) are not loose, so the
+// check never asks for, and the fix never makes, a change that adds access.
+// Windows modes are synthetic and never loose.
+func beadsGitignoreTooLoose(info os.FileInfo) bool {
+	return runtime.GOOS != "windows" && info.Mode().Perm()&0077 != 0
 }
 
 // EnsureGitignoreForBeadsDir writes the canonical .beads/.gitignore when it is
