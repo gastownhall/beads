@@ -2243,6 +2243,24 @@ func stopLocked(beadsDir string) error {
 		return errors.Join(ErrServerNotRunning, cleanupErr)
 	}
 
+	// IsRunning keeps the tracked state when the process list cannot be read
+	// (GH#7214), so the PID is not confirmed to be a dolt server and may be a
+	// stale PID reused by an unrelated process. Do not flush or signal it, and
+	// leave the files for a bd that can read the process list.
+	isDolt, known := doltProcessStatus(state.PID)
+	if !known {
+		return fmt.Errorf("not stopping PID %d: the process list could not be read, "+
+			"so it is not confirmed to be a dolt sql-server.\n"+
+			"Run 'bd dolt stop' where the process list can be read, or confirm PID %d "+
+			"is a dolt sql-server (%s) and stop it yourself", state.PID, state.PID, processListHint)
+	}
+	if !isDolt {
+		// The list is read again here, so it can be readable now even though it
+		// was not inside IsRunning. A readable list without the PID means the PID
+		// was reused and the server is gone: clean up as IsRunning would have.
+		return errors.Join(ErrServerNotRunning, cleanupStateFiles(beadsDir))
+	}
+
 	// Flush uncommitted working set changes before stopping the server.
 	// This prevents data loss when changes have been written but not yet committed.
 	cfg := DefaultConfig(beadsDir)

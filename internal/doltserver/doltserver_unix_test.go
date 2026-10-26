@@ -3,9 +3,94 @@
 package doltserver
 
 import (
+	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
+	"strconv"
 	"testing"
+	"time"
 )
+
+// startStaleServerFiles writes a pid file naming an unrelated process (a
+// sleep child, as if the PID had been reused) and a port file. The returned
+// channel receives the child's exit.
+func startStaleServerFiles(t *testing.T, dir string) chan error {
+	t.Helper()
+	t.Setenv("GT_ROOT", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+
+	child := exec.Command("sleep", "300")
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	exited := make(chan error, 1)
+	go func() { exited <- child.Wait() }()
+	t.Cleanup(func() {
+		_ = child.Process.Kill()
+		<-exited
+	})
+	if err := os.WriteFile(pidPath(dir), []byte(strconv.Itoa(child.Process.Pid)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writePortFile(dir, 14599); err != nil {
+		t.Fatal(err)
+	}
+	return exited
+}
+
+func expectNotSignaled(t *testing.T, exited chan error) {
+	t.Helper()
+	select {
+	case err := <-exited:
+		exited <- err // let the cleanup finish
+		t.Errorf("the unrelated process was signaled: %v", err)
+	case <-time.After(500 * time.Millisecond):
+	}
+}
+
+func TestStopDoesNotSignalUnverifiedProcess(t *testing.T) {
+	dir := t.TempDir()
+	exited := startStaleServerFiles(t, dir)
+	stubProcessList(t, func() ([]int, error) { return nil, errProcessListUnreadable })
+
+	err := Stop(dir)
+	if err == nil || errors.Is(err, ErrServerNotRunning) {
+		t.Errorf("Stop = %v, want an error refusing the unverified PID", err)
+	}
+	expectNotSignaled(t, exited)
+	for _, path := range []string{pidPath(dir), portPath(dir)} {
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("expected %s to be kept: %v", filepath.Base(path), err)
+		}
+	}
+}
+
+func TestStopDoesNotSignalReusedPIDWhenListBecomesReadable(t *testing.T) {
+	dir := t.TempDir()
+	exited := startStaleServerFiles(t, dir)
+	// The first read (inside IsRunning) fails, the second (in stopLocked) works
+	// and does not contain the PID.
+	calls := 0
+	stubProcessList(t, func() ([]int, error) {
+		calls++
+		if calls == 1 {
+			return nil, errProcessListUnreadable
+		}
+		return nil, nil
+	})
+
+	if err := Stop(dir); !errors.Is(err, ErrServerNotRunning) {
+		t.Errorf("Stop = %v, want ErrServerNotRunning for a reused PID", err)
+	}
+	expectNotSignaled(t, exited)
+	for _, path := range []string{pidPath(dir), portPath(dir)} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("expected %s to be removed, stat err = %v", filepath.Base(path), err)
+		}
+	}
+}
 
 func TestParseDoltProcessPIDs(t *testing.T) {
 	tests := []struct {
