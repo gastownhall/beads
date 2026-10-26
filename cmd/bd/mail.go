@@ -97,7 +97,7 @@ func findMailDelegate() string {
 		return delegate
 	}
 
-	return config.GetUserYamlConfig("mail.delegate")
+	return config.UserMailDelegate()
 }
 
 func init() {

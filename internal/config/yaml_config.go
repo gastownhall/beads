@@ -624,6 +624,27 @@ func GetUserYamlConfig(key string) string {
 	return strings.TrimSpace(raw)
 }
 
+// UserMailDelegate reads only user configuration, including the legacy user file.
+func UserMailDelegate() string {
+	if raw, present := readUserGlobalYamlValue("mail.delegate"); present {
+		return strings.TrimSpace(raw)
+	}
+	legacyPath := currentUserConfigYamlCandidates().legacy
+	legacyInfo, err := os.Stat(legacyPath)
+	if err != nil {
+		return ""
+	}
+	projectPath, err := findProjectConfigYamlWithFinder(findProjectBeadsDir)
+	if err == nil {
+		projectInfo, err := os.Stat(projectPath)
+		if err != nil || os.SameFile(legacyInfo, projectInfo) {
+			return ""
+		}
+	}
+	raw, _ := readYamlValueAtPath(legacyPath, "mail.delegate")
+	return strings.TrimSpace(raw)
+}
+
 // MetricsDisabledByUserConfig reports whether the user-global config.yaml sets
 // metrics.disabled: true. Project/BEADS_DIR config is intentionally ignored so a
 // repository can never re-enable metrics for a user who opted out globally.
