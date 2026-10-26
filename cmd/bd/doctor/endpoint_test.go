@@ -4,6 +4,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -170,4 +171,57 @@ func TestDoctorChecksDialAConfiguredSocket(t *testing.T) {
 	if strings.Contains(err.Error(), socket) {
 		t.Errorf("openDoltDB dialed the socket (%v); the schema fix gate would admit the DB fixes", err)
 	}
+}
+
+// TestDoctorFreshCloneNamesTheSocketItDialsBesideAPort pins the Fresh Clone
+// report to the transport the check dials when a live unix socket and a
+// resolved port both name the server: the store dials the socket, and so does
+// the check, so the report names the socket. It named host:port, which the
+// check never queried (#7874 review).
+func TestDoctorFreshCloneNamesTheSocketItDialsBesideAPort(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix socket fixture")
+	}
+	repo, _ := doctorEndpointWorkspace(t)
+	socket := liveUnixSocket(t)
+	port := strconv.Itoa(closedLocalPort(t))
+	t.Setenv("BEADS_DOLT_SERVER_SOCKET", socket)
+	t.Setenv("BEADS_DOLT_SERVER_PORT", port)
+	fresh := CheckFreshClone(repo)
+	report := fresh.Message + "\n" + fresh.Detail + "\n" + fresh.Fix
+	if !strings.Contains(fresh.Message, "unix:"+socket) {
+		t.Errorf("Fresh Clone does not name unix:%s, the socket it dialed:\n%s", socket, report)
+	}
+	if strings.Contains(report, "127.0.0.1:"+port) {
+		t.Errorf("Fresh Clone names 127.0.0.1:%s, which it did not dial:\n%s", port, report)
+	}
+}
+
+// liveUnixSocket is a unix socket whose listener closes every connection
+// unanswered: live to the store's socket probe, a failed login to a dial. Its
+// path is short enough to bind; t.TempDir() nests too deeply under some
+// runners.
+func liveUnixSocket(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "bds")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	path := filepath.Join(dir, "dolt.sock")
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
+	return path
 }

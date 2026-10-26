@@ -1484,6 +1484,9 @@ func runExternalDoltStatus(beadsDir string, cfg *configfile.Config) {
 
 // runExternalDoltStatusAt is runExternalDoltStatus for ep, an endpoint the
 // caller already resolved for cfg's workspace (doltserver.ResolveEndpoint).
+// It names the server it dialed: the unix socket when it dialed one (Socket,
+// and socket in --json, in place of host and port, which that dial does not
+// use), else host and port.
 func runExternalDoltStatusAt(ep doltserver.Endpoint, cfg *configfile.Config) {
 	host := cfg.GetDoltServerHost()
 	port := ep.Port
@@ -1492,66 +1495,55 @@ func runExternalDoltStatusAt(ep doltserver.Endpoint, cfg *configfile.Config) {
 	tls := cfg.GetDoltServerTLS()
 	password := ep.Password()
 
-	// The connection the store makes, over its transport: a live unix socket
-	// first, else TCP (doltserver.Endpoint.Transport). Resolved only for the
-	// dial, since it probes the socket.
-	dsn := func() string {
-		return doltutil.ServerDSN{
-			Socket:   ep.Transport(),
+	var running bool
+	var version string
+	var connErr error
+	// socket is the unix socket the probe dialed, or "" when it dialed TCP at
+	// host:port or did not dial.
+	var socket string
+
+	if unresolved := ep.UnresolvedError(); unresolved != nil {
+		// No port resolved and no socket: nothing to dial. Give the store's
+		// advice for this server, not a dial of 127.0.0.1:0.
+		connErr = unresolved
+	} else {
+		// The connection the store makes, over its transport: a live unix
+		// socket first, else TCP (doltserver.Endpoint.Transport). Resolved
+		// only for the dial, since it probes the socket. The store dials a
+		// socket-only server at any host, so status does too: at a host bd
+		// does not run, it advised pinning a port instead (#7874 review).
+		socket = ep.Transport()
+		running, version, connErr = pingExternalDoltServer(doltutil.ServerDSN{
+			Socket:   socket,
 			Host:     host,
 			Port:     port,
 			User:     user,
 			Password: password,
 			TLS:      tls,
 			Timeout:  5 * time.Second,
-		}.String()
-	}
-
-	result := map[string]interface{}{
-		"mode":     "external",
-		"host":     host,
-		"port":     port,
-		"user":     user,
-		"database": database,
-		"tls":      tls,
-	}
-
-	var running bool
-	var version string
-	var connErr error
-
-	if unresolved := ep.UnresolvedError(); unresolved != nil {
-		// No port resolved and no socket: nothing to dial. Give the store's
-		// advice for this server, not a dial of 127.0.0.1:0.
-		connErr = unresolved
-	} else if advice := unresolvedServerPortAdvice(host, port); advice != "" {
-		// Only a socket names this server, at a host bd does not run: it
-		// keeps the advice to pin the port.
-		connErr = fmt.Errorf("no Dolt server port configured; %s", advice)
-	} else if db, openErr := sql.Open("mysql", dsn()); openErr == nil {
-		defer db.Close()
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if pingErr := db.PingContext(ctx); pingErr != nil {
-			connErr = pingErr
-		} else {
-			running = true
-			// Best-effort version lookup; don't treat errors as fatal.
-			_ = db.QueryRowContext(ctx, "SELECT @@version").Scan(&version)
-		}
-	} else {
-		connErr = openErr
-	}
-
-	result["running"] = running
-	if version != "" {
-		result["version"] = version
-	}
-	if connErr != nil {
-		result["error"] = connErr.Error()
+		}.String())
 	}
 
 	if jsonOutput {
+		result := map[string]interface{}{
+			"mode":     "external",
+			"user":     user,
+			"database": database,
+			"tls":      tls,
+			"running":  running,
+		}
+		if socket != "" {
+			result["socket"] = socket
+		} else {
+			result["host"] = host
+			result["port"] = port
+		}
+		if version != "" {
+			result["version"] = version
+		}
+		if connErr != nil {
+			result["error"] = connErr.Error()
+		}
 		if err := outputJSON(result); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		}
@@ -1563,8 +1555,12 @@ func runExternalDoltStatusAt(ep doltserver.Endpoint, cfg *configfile.Config) {
 	} else {
 		fmt.Println("Dolt server: not reachable (external)")
 	}
-	fmt.Printf("  Host:     %s\n", remedy.PrintedValue(host))
-	fmt.Printf("  Port:     %d\n", port)
+	if socket != "" {
+		fmt.Printf("  Socket:   %s\n", remedy.PrintedValue("unix:"+socket))
+	} else {
+		fmt.Printf("  Host:     %s\n", remedy.PrintedValue(host))
+		fmt.Printf("  Port:     %d\n", port)
+	}
 	fmt.Printf("  Database: %s\n", remedy.PrintedValue(database))
 	fmt.Printf("  User:     %s\n", remedy.PrintedValue(user))
 	fmt.Printf("  TLS:      %t\n", tls)
@@ -1577,9 +1573,27 @@ func runExternalDoltStatusAt(ep doltserver.Endpoint, cfg *configfile.Config) {
 		// its advice keeps its lines, under the field.
 		fmt.Printf("  Error:    %s\n", strings.ReplaceAll(remedy.PrintedMessage(connErr), "\n", "\n            "))
 	case connErr != nil:
-		// The connection error repeats the host.
+		// The connection error repeats the host, or the socket it dialed.
 		fmt.Printf("  Error:    %v\n", remedy.PrintedError(connErr))
 	}
+}
+
+// pingExternalDoltServer logs in to the Dolt server dsn names: whether it
+// answered, its version (best effort), and why it did not answer.
+func pingExternalDoltServer(dsn string) (running bool, version string, err error) {
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		return false, "", err
+	}
+	defer db.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := db.PingContext(ctx); err != nil {
+		return false, "", err
+	}
+	// Best-effort version lookup; don't treat errors as fatal.
+	_ = db.QueryRowContext(ctx, "SELECT @@version").Scan(&version)
+	return true, version, nil
 }
 
 // showEmbeddedDoltStatus reports Dolt engine status when running in
@@ -2234,11 +2248,13 @@ func showDoltConfig(testConnection bool) error {
 	backend := cfg.GetBackend()
 	embedded := !usesSQLServer()
 
-	// The port the store dials (doltserver.ResolveEndpoint): its rule, the
-	// legacy BEADS_DOLT_PORT included, which DefaultConfig leaves out. It is
-	// the port shown and the one the connection test probes.
+	// The endpoint the store dials (doltserver.ResolveEndpoint): its port
+	// rule, the legacy BEADS_DOLT_PORT included, which DefaultConfig leaves
+	// out, and its socket. They are shown, and the connection test probes
+	// the server over the store's transport (doltserver.Endpoint.Probe).
+	showEP := doltserver.ResolveEndpoint(beadsDir, cfg)
 	showHost := cfg.GetDoltServerHost()
-	showPort := doltserver.ResolveEndpoint(beadsDir, cfg).Port
+	showPort := showEP.Port
 	embeddedDataDir := filepath.Join(beadsDir, "embeddeddolt")
 
 	if jsonOutput {
@@ -2253,12 +2269,14 @@ func showDoltConfig(testConnection bool) error {
 			} else {
 				result["host"] = showHost
 				result["port"] = showPort
+				if showEP.Socket != "" {
+					result["socket"] = showEP.Socket
+				}
 				result["user"] = cfg.GetDoltServerUser()
 				result["tls"] = cfg.GetDoltServerTLS()
 				result["shared_server"] = doltserver.IsSharedServerMode()
 				if testConnection {
-					result["connection_ok"] = unresolvedServerPortAdvice(showHost, showPort) == "" &&
-						testServerConnection(showHost, showPort)
+					result["connection_ok"] = showEP.Probe(serverDialTimeout) == nil
 				}
 			}
 		}
@@ -2282,6 +2300,9 @@ func showDoltConfig(testConnection bool) error {
 	} else {
 		fmt.Printf("  Host:     %s\n", remedy.PrintedValue(showHost))
 		fmt.Printf("  Port:     %d\n", showPort)
+		if showEP.Socket != "" {
+			fmt.Printf("  Socket:   %s\n", remedy.PrintedValue("unix:"+showEP.Socket))
+		}
 		fmt.Printf("  User:     %s\n", remedy.PrintedValue(cfg.GetDoltServerUser()))
 		fmt.Printf("  TLS:      %t\n", cfg.GetDoltServerTLS())
 		if doltserver.IsSharedServerMode() {
@@ -2295,7 +2316,7 @@ func showDoltConfig(testConnection bool) error {
 
 		if testConnection {
 			fmt.Println()
-			printDoltShowConnection(showHost, showPort)
+			printDoltShowConnection(showEP)
 		}
 	}
 
@@ -2313,14 +2334,17 @@ func showDoltConfig(testConnection bool) error {
 	return nil
 }
 
-// printDoltShowConnection prints bd dolt show's check of the Dolt server at
-// host:port: for a server bd does not run with no port resolved, the advice
-// to pin it, with no dial of port 0; else whether the server answered.
-func printDoltShowConnection(host string, port int) {
-	switch advice := unresolvedServerPortAdvice(host, port); {
-	case advice != "":
+// printDoltShowConnection prints bd dolt show's check of ep, the server the
+// store dials: for a server bd does not run with no port resolved and no
+// socket, the advice to pin the port, with no dial of port 0; else whether
+// the server answered over the store's transport, a live unix socket first,
+// else TCP (doltserver.Endpoint.Probe). Over TCP alone a socket-only server
+// was probed at host:0 and reported not reachable.
+func printDoltShowConnection(ep doltserver.Endpoint) {
+	switch advice := unresolvedServerPortAdvice(ep.Host, ep.Port); {
+	case advice != "" && !ep.Dialable():
 		fmt.Printf("  %s\n  %s\n", ui.RenderWarn("✗ No Dolt server port configured"), advice)
-	case testServerConnection(host, port):
+	case ep.Probe(serverDialTimeout) == nil:
 		fmt.Printf("  %s\n", ui.RenderPass("✓ Server connection OK"))
 	default:
 		fmt.Printf("  %s\n", ui.RenderWarn("✗ Server not reachable"))
@@ -2328,13 +2352,15 @@ func printDoltShowConnection(host string, port int) {
 }
 
 // printDoltShowConfigSources renders doltserver.PortSourceLabels(), the same
-// slice DefaultConfig resolves against, so this list can't drift from actual
-// resolution behavior (GH#4511).
+// slice DefaultConfig resolves against, then doltserver.LegacyPortEnvLabel,
+// the rule the port shown (the store's, DialConfig's) adds to it, so this list
+// can't drift from actual resolution behavior (GH#4511).
 func printDoltShowConfigSources(w io.Writer) {
 	fmt.Fprintln(w, "\nConfig sources for server port (priority order):")
 	for i, label := range doltserver.PortSourceLabels() {
 		fmt.Fprintf(w, "  %d. %s\n", i+1, label)
 	}
+	fmt.Fprintf(w, "  Also: %s\n", doltserver.LegacyPortEnvLabel)
 }
 
 func setDoltConfig(key, value string, updateConfig bool) error {
@@ -2755,7 +2781,10 @@ func unreachableServerAdvice(beadsDir, host string, dc *doltserver.Config) strin
 // source resolved a port for it (port 0), or "" otherwise. No bd command
 // starts, and so resolves a port for, such a server, so there is no address
 // to dial until the port is pinned. Callers print this advice instead of
-// dialing port 0; the store refuses to open with the same advice.
+// dialing port 0; the store refuses to open with the same advice. A unix
+// socket is an address the store dials at any host, so a caller that dials
+// the store's transport (bd dolt status, bd dolt show) probes a configured
+// socket instead.
 func unresolvedServerPortAdvice(host string, port int) string {
 	if port != 0 {
 		return ""

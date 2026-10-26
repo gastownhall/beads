@@ -444,6 +444,13 @@ func inspectServerMetadataDatabases(beadsDir string, cfg *configfile.Config) ([]
 		return nil, fmt.Errorf("this workspace's Dolt server is not running, so the databases in %s could not be read to reconcile metadata.json; "+
 			"start the server with 'bd dolt start' (or any bd command), then re-run this command", remedy.PrintedValue(dataDir))
 	}
+	// A server only a unix socket names has no port, and the catalog read
+	// stays TCP-only (openServerCatalogDB): refuse it here, never dial
+	// 127.0.0.1:0. bd bootstrap's later steps cannot reach such a server yet
+	// either, so bootstrap stops at this reconcile and writes nothing.
+	if !ep.Resolved() {
+		return nil, errors.New("only a unix socket names this workspace's Dolt server (no port resolved), and the metadata reconcile does not read a server's catalog over a socket yet")
+	}
 	db, err := openServerCatalogDB(ep)
 	if err != nil {
 		return nil, fmt.Errorf("server metadata probe failed: %w", err)
@@ -549,8 +556,9 @@ func isExpectedProbeError(err error) bool {
 // DefaultConfig's port a workspace only BEADS_DOLT_PORT names had its catalog
 // read at 127.0.0.1:0, or at a port file's server no store open dials.
 //
-// Like openFixDB, it does not check the server against
-// doltversion.RequiredMin: bd doctor --fix is exempt from the floor.
+// It dials TCP only; inspectServerMetadataDatabases refuses a socket-only
+// server before calling it. Like openFixDB, it does not check the server
+// against doltversion.RequiredMin: bd doctor --fix is exempt from the floor.
 func openServerCatalogDB(ep doltserver.Endpoint) (*sql.DB, error) {
 	connStr := doltutil.ServerDSN{
 		Host:     ep.Host,

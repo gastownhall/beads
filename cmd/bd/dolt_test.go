@@ -2547,6 +2547,9 @@ func TestResolveDoltShowRemotesCorruptStateWarns(t *testing.T) {
 // the same slice DefaultConfig resolves against, so it cannot drift out of sync.
 // The behavioral precedence itself (env > port file > dolt yaml > beads yaml >
 // metadata.json) is proven against DefaultConfig in internal/doltserver, not here.
+// Show prints the port the store dials, which the legacy BEADS_DOLT_PORT can
+// decide, so the banner names that rule too (doltserver.LegacyPortEnvLabel,
+// pinned against DialConfig by TestDialConfig_LegacyPortEnv) (#7874 review).
 func TestDoltShowConfigSourcesRendersPortSourceLabels(t *testing.T) {
 	var buf bytes.Buffer
 	printDoltShowConfigSources(&buf)
@@ -2557,6 +2560,9 @@ func TestDoltShowConfigSourcesRendersPortSourceLabels(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("printDoltShowConfigSources missing line %q in:\n%s", want, out)
 		}
+	}
+	if !strings.Contains(out, doltserver.LegacyPortEnvLabel) {
+		t.Errorf("printDoltShowConfigSources does not name the legacy BEADS_DOLT_PORT rule %q in:\n%s", doltserver.LegacyPortEnvLabel, out)
 	}
 }
 

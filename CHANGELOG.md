@@ -1090,14 +1090,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and a failed connection test, `bd context` named `127.0.0.1:0`, and
   `bd doctor --fix` skipped every SQL fix as unreachable at `127.0.0.1:0`
   while `bd doctor` diagnosed that server; they now use the port the store
-  dials, and the fixes present the credentials-file password for that
-  port. A server only a unix socket names was dialed over TCP at
-  `127.0.0.1:0` by `bd doctor`'s Fresh Clone check and `bd dolt status`;
-  they now dial the socket first, as the store does. For a socket-only
-  server, `bd bootstrap` still stops at its metadata reconcile and writes
-  nothing, `bd dolt show` and `bd context` still print port 0, and
-  `bd doctor`'s own connection and `bd doctor --fix` still do not use the
-  socket, so the database fixes stay withheld there as before.
+  dials, the fixes present the credentials-file password for that port,
+  and `bd dolt show` lists the variable's rule among its port sources. A
+  server only a unix socket names was dialed over TCP at `127.0.0.1:0` by
+  `bd doctor`'s Fresh Clone check, `bd dolt status` and `bd dolt show`'s
+  connection test, and `bd doctor`'s read-only Clone-Local FKs check and
+  `bd doctor --check=validate`'s Cross-Table Duplicates check reported
+  "N/A" without reading it; they now dial the socket first, as the store
+  does. Fresh Clone and `bd dolt status` name the socket they dialed, even
+  beside a resolved port (`bd dolt status --json` then reports `socket`
+  in place of `host` and `port`), and `bd dolt show` lists the configured
+  socket. For a socket-only server, `bd bootstrap` still stops at its
+  metadata reconcile and writes nothing (it now says so instead of
+  dialing `127.0.0.1:0`), `bd dolt show` and `bd context` still print
+  port 0, and `bd doctor`'s own connection and `bd doctor --fix` still do
+  not use the socket, so the database fixes stay withheld there as
+  before. Where the store dials a live socket beside a resolved port,
+  `bd doctor --fix` now skips its SQL fixes as well, rather than write
+  over TCP to that port, which may name another server; its Project
+  Identity and Dolt Schema repairs and `bd bootstrap` still reconcile
+  `metadata.json` against that port's catalog over TCP, as before.
+  `bd doctor`'s Clone-Local FKs and Cross-Table Duplicates checks, and the
+  `bd doctor --fix` repairs that open the same connection, now give up
+  after 5 seconds on a server that accepts the connection but never sends
+  the MySQL greeting, such as a stopped or paused `sql-server`, where they
+  waited forever.
 - The batched bulk readers no longer return an issue's rows twice when the
   same id is requested twice. Since the 200-id batching (#6444), an id that
   appeared in two batches had its comments, labels, dependency records,

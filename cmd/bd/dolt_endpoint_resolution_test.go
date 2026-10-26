@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -10,7 +11,9 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/cmd/bd/doctor/fix"
 	"github.com/steveyegge/beads/internal/config"
@@ -283,14 +286,17 @@ func TestDoltShowAndContextNameThePortTheStoreDials(t *testing.T) {
 }
 
 // TestDoltDiagnosticsDialAConfiguredSocket observes, on the wire, where bd
-// dolt status and bd doctor dial a server-mode workspace whose Dolt server
-// only a unix socket names, as docs/architecture/dolt.md documents (no port;
-// bd starts no server there). The store opens the socket, so each must reach
-// the listener on it. Status read bd's PID file with auto-start on ("not
-// running") and dialed TCP at 127.0.0.1:0 with it off; doctor's Fresh Clone
-// check dialed 127.0.0.1:0 (#7841 review). bd doctor reaches the socket
-// through its Fresh Clone check; its own connection still does not dial the
-// socket (see TestDoctorChecksDialAConfiguredSocket in cmd/bd/doctor).
+// dolt status, bd dolt show and bd doctor dial a server-mode workspace whose
+// Dolt server only a unix socket names, as docs/architecture/dolt.md
+// documents (no port; bd starts no server there). The store opens the
+// socket, so each must reach the listener on it. Status read bd's PID file
+// with auto-start on ("not running") and dialed TCP at 127.0.0.1:0 with it
+// off; doctor's Fresh Clone check dialed 127.0.0.1:0 (#7841 review). Status
+// then named host and port 0 for the socket it dialed, and show's connection
+// test still probed 127.0.0.1:0 and reported the server not reachable (#7874
+// review): each names the socket. bd doctor reaches the socket through its
+// Fresh Clone check; its own connection still does not dial the socket (see
+// TestDoctorChecksDialAConfiguredSocket in cmd/bd/doctor).
 //
 // bd bootstrap is deliberately still refused there, as before: its metadata
 // reconcile stays TCP-only and stops it before any step that cannot reach a
@@ -330,22 +336,40 @@ func TestDoltDiagnosticsDialAConfiguredSocket(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(beadsDir, "issues.jsonl"), []byte(`{"id":"t-1","title":"x"}`+"\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			for _, args := range [][]string{
-				{"dolt", "status"},
-				{"dolt", "status", "--json"},
-				{"doctor"},
+			for _, c := range []struct {
+				args []string
+				// login: the command logs in on the socket. bd dolt show's
+				// connection test only probes it for a greeting.
+				login bool
+				want  []string // the socket it dialed, as it names it
+				ban   []string // the host and port it did not dial
+			}{
+				{args: []string{"dolt", "status"}, login: true,
+					want: []string{"Socket:   unix:" + socket}, ban: []string{"Host:", "Port:"}},
+				{args: []string{"dolt", "status", "--json"}, login: true,
+					want: []string{`"socket": "` + socket + `"`}, ban: []string{`"host":`, `"port":`}},
+				{args: []string{"dolt", "show"},
+					want: []string{"Socket:   unix:" + socket, "Server connection OK"}, ban: []string{"not reachable"}},
+				{args: []string{"dolt", "show", "--json"},
+					want: []string{`"socket": "` + socket + `"`, `"connection_ok": true`}},
+				{args: []string{"doctor"}, login: true},
 			} {
 				before := len(fake.Logins())
-				cmd := exec.Command(bd, args...)
+				cmd := exec.Command(bd, c.args...)
 				cmd.Dir = root
 				cmd.Env = env
 				outBytes, _ := cmd.CombinedOutput()
 				out := string(outBytes)
-				name := "bd " + strings.Join(args, " ")
-				if len(fake.Logins()) == before {
+				name := "bd " + strings.Join(c.args, " ")
+				if c.login && len(fake.Logins()) == before {
 					t.Errorf("%s never reached the server on the socket the store dials, %s:\n%s", name, socket, out)
 				}
-				for _, banned := range []string{"127.0.0.1:0", "Dolt server: not running", "Expected port", `"pid":`} {
+				for _, want := range c.want {
+					if !strings.Contains(out, want) {
+						t.Errorf("%s does not contain %q: it does not name the socket it dialed:\n%s", name, want, out)
+					}
+				}
+				for _, banned := range append([]string{"127.0.0.1:0", "Dolt server: not running", "Expected port", `"pid":`}, c.ban...) {
 					if strings.Contains(out, banned) {
 						t.Errorf("%s contains %q: it did not dial the socket the store dials:\n%s", name, banned, out)
 					}
@@ -377,6 +401,118 @@ func TestDoltDiagnosticsDialAConfiguredSocket(t *testing.T) {
 	}
 }
 
+// TestDoltStatusNamesTheSocketItDialsBesideAPort pins bd dolt status's
+// report to the transport its probe dials when a live unix socket and a
+// resolved port both name the server: the store dials the socket, and so
+// does the probe, so status names the socket (Socket, and socket in --json),
+// not the host and port it never dialed. It named them as though the server
+// there had answered (#7874 review).
+func TestDoltStatusNamesTheSocketItDialsBesideAPort(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix socket fixture")
+	}
+	tcp := newFakeMySQLLogin(t)
+	socketServer := newFakeMySQLLoginOn(t, "unix", diagnosticSocketPath(t))
+	socket := socketServer.ln.Addr().String()
+	endpointCredentialsEnv(t, []string{"127.0.0.1"}, tcp.port())
+	t.Setenv("BEADS_DOLT_SERVER_PORT", strconv.Itoa(tcp.port()))
+	t.Setenv("BEADS_DOLT_SERVER_SOCKET", socket)
+	cfg := &configfile.Config{Backend: configfile.BackendDolt, DoltMode: configfile.DoltModeServer, DoltDatabase: "status_socket"}
+	ep := doltserver.ResolveEndpoint(t.TempDir(), cfg)
+
+	orig := jsonOutput
+	t.Cleanup(func() { jsonOutput = orig })
+	jsonOutput = false
+	text := captureStdout(t, func() error { runExternalDoltStatusAt(ep, cfg); return nil })
+	if !strings.Contains(text, "Socket:   unix:"+socket) {
+		t.Errorf("status does not name unix:%s, the socket it dialed:\n%s", socket, text)
+	}
+	for _, banned := range []string{"Host:", "Port:"} {
+		if strings.Contains(text, banned) {
+			t.Errorf("status prints %q beside the socket it dialed:\n%s", banned, text)
+		}
+	}
+
+	jsonOutput = true
+	out := captureStdout(t, func() error { runExternalDoltStatusAt(ep, cfg); return nil })
+	var result map[string]any
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("status --json: %v\n%s", err, out)
+	}
+	if result["socket"] != socket {
+		t.Errorf("status --json socket = %v, want %s, the socket it dialed:\n%s", result["socket"], socket, out)
+	}
+	for _, key := range []string{"host", "port"} {
+		if _, ok := result[key]; ok {
+			t.Errorf("status --json reports %q beside the socket it dialed:\n%s", key, out)
+		}
+	}
+
+	if n := len(socketServer.Logins()); n != 2 {
+		t.Errorf("status logged in on the socket %s %d time(s), want once per run", socket, n)
+	}
+	if n := len(tcp.Logins()); n != 0 {
+		t.Errorf("status logged in over TCP at %s %d time(s); the store dials the live socket %s", tcp.ln.Addr(), n, socket)
+	}
+}
+
+// TestDoltStatusAndShowDialASocketOnlyServerBdDoesNotRun drives bd dolt
+// status and bd dolt show through the binary for a server-mode workspace
+// whose server only a unix socket names, at a host bd does not run: the IPv6
+// loopback, another loopback address, another machine. The store dials that
+// socket at any host, so each command probes it, and status names it. They
+// advised pinning a port instead, which the store never needs, and probed
+// nothing (#7874 review). With no socket that advice stands (see
+// TestDoltCommandsAdviseAPortForAServerBdDoesNotRun).
+func TestDoltStatusAndShowDialASocketOnlyServerBdDoesNotRun(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix socket fixture")
+	}
+	bd := buildBDForInitTests(t)
+	for _, host := range []string{"::1", "127.0.0.2", "db.invalid"} {
+		t.Run(host, func(t *testing.T) {
+			root, beadsDir, env := externallyManagedStartWorkspace(t, "true")
+			env = configureDoltServerHost(t, beadsDir, env, host, false)
+			socket := diagnosticSocketPath(t)
+			fake := newFakeMySQLLoginOn(t, "unix", socket)
+			env = append(env, "BEADS_DOLT_SERVER_SOCKET="+socket)
+			for _, c := range []struct {
+				args []string
+				// login: the command logs in on the socket. bd dolt show's
+				// connection test only probes it for a greeting.
+				login bool
+				want  []string
+			}{
+				{args: []string{"dolt", "status"}, login: true, want: []string{"Socket:   unix:" + socket}},
+				{args: []string{"dolt", "status", "--json"}, login: true, want: []string{`"socket": "` + socket + `"`}},
+				{args: []string{"dolt", "show"}, want: []string{"Server connection OK"}},
+				{args: []string{"dolt", "show", "--json"}, want: []string{`"connection_ok": true`}},
+			} {
+				before := len(fake.Logins())
+				cmd := exec.Command(bd, c.args...)
+				cmd.Dir = root
+				cmd.Env = env
+				outBytes, _ := cmd.CombinedOutput()
+				out := string(outBytes)
+				name := "bd " + strings.Join(c.args, " ")
+				if c.login && len(fake.Logins()) == before {
+					t.Errorf("%s never logged in on the socket the store dials, %s:\n%s", name, socket, out)
+				}
+				for _, want := range c.want {
+					if !strings.Contains(out, want) {
+						t.Errorf("%s does not contain %q: it did not probe the socket the store dials:\n%s", name, want, out)
+					}
+				}
+				for _, banned := range []string{"pin its port", "port configured"} {
+					if strings.Contains(out, banned) {
+						t.Errorf("%s contains %q: it advised pinning a port for a server the store dials on its socket:\n%s", name, banned, out)
+					}
+				}
+			}
+		})
+	}
+}
+
 // TestDoctorFixDialsTheEndpointTheStoreDials observes, on the wire, the
 // connection bd doctor --fix's SQL fixes open for a server-mode workspace on
 // 127.0.0.1 (fix.RecomputeBlocked here; every SQL fix opens it the same way).
@@ -388,20 +524,27 @@ func TestDoltDiagnosticsDialAConfiguredSocket(t *testing.T) {
 // metadata.json's port (3307 when it names none), so at a port file's port
 // they presented another entry's password (#7841 review). A socket-only
 // server is deliberately still not dialed, as before: the fix connection and
-// doctor's schema gate keep withholding writes there (see openFixDB).
+// doctor's schema gate keep withholding writes there (see openFixDB). Nor is
+// a live socket beside a resolved port: the store dials the socket, so the
+// server at the port may be one bd list does not open, and the fixes wrote
+// there over TCP (#7874 review). With the socket down, the store falls back
+// to TCP at the port, and so do the fixes.
 func TestDoctorFixDialsTheEndpointTheStoreDials(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		network  string // "tcp", or "unix" for a socket-only server
 		legacy   bool   // BEADS_DOLT_PORT names the server
 		portFile bool   // the port file names the server
+		socket   string // BEADS_DOLT_SERVER_SOCKET beside the port: "live" (another server on it) or "dead"
 	}{
 		{name: "legacy BEADS_DOLT_PORT only", network: "tcp", legacy: true},
 		{name: "port file, password for its port", network: "tcp", portFile: true},
 		{name: "unix socket only, still skipped", network: "unix"},
+		{name: "live unix socket beside BEADS_DOLT_PORT, skipped", network: "tcp", legacy: true, socket: "live"},
+		{name: "dead unix socket beside BEADS_DOLT_PORT, TCP as the store", network: "tcp", legacy: true, socket: "dead"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.network == "unix" && runtime.GOOS == "windows" {
+			if (tc.network == "unix" || tc.socket != "") && runtime.GOOS == "windows" {
 				t.Skip("unix socket fixture")
 			}
 			var fake *fakeMySQLLogin
@@ -426,6 +569,14 @@ func TestDoctorFixDialsTheEndpointTheStoreDials(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			var socketServer *fakeMySQLLogin
+			switch tc.socket {
+			case "live":
+				socketServer = newFakeMySQLLoginOn(t, "unix", diagnosticSocketPath(t))
+				t.Setenv("BEADS_DOLT_SERVER_SOCKET", socketServer.ln.Addr().String())
+			case "dead":
+				t.Setenv("BEADS_DOLT_SERVER_SOCKET", diagnosticSocketPath(t))
+			}
 
 			if err := fix.RecomputeBlocked(repo); err != nil {
 				t.Fatalf("RecomputeBlocked: %v", err)
@@ -434,6 +585,15 @@ func TestDoctorFixDialsTheEndpointTheStoreDials(t *testing.T) {
 			if tc.network == "unix" {
 				if len(logins) != 0 {
 					t.Fatalf("the fix wrote through the socket-only server at %s; it must keep skipping it", fake.ln.Addr())
+				}
+				return
+			}
+			if socketServer != nil {
+				if len(logins) != 0 {
+					t.Fatalf("the fix logged in over TCP at %s while the store dials the live socket %s; it must skip", fake.ln.Addr(), socketServer.ln.Addr())
+				}
+				if len(socketServer.Logins()) != 0 {
+					t.Fatalf("the fix logged in on the socket %s; it does not dial a socket yet", socketServer.ln.Addr())
 				}
 				return
 			}
@@ -448,6 +608,102 @@ func TestDoctorFixDialsTheEndpointTheStoreDials(t *testing.T) {
 				if !fake.PresentsPassword(login, want) {
 					t.Errorf("the fix logged in as %q without the password the store presents there (%q)", login.User, want)
 				}
+			}
+		})
+	}
+}
+
+// TestDoctorScansReadTheServerTheStoreDials observes, on the wire, where bd
+// doctor's read-only SQL scans connect: the Clone-Local FKs check
+// (fix.ScanSeveredCloneLocalFKs) and --check=validate's Cross-Table
+// Duplicates check (fix.CountCrossTableDuplicates). They dial the server the
+// store dials, over its transport. They shared the SQL fixes' refusal of a
+// socket the store dials (openFixDB), so with a live socket beside a port
+// each returned an error that its check reports as "N/A", having queried no
+// server, where it had read the server at the port (#7874 review). A scan
+// writes nothing, so it dials the socket, as the store and the Fresh Clone
+// check do, socket-only or not; with the socket down it reads TCP at the
+// port, as the store does.
+//
+// A socket that accepts and never sends the MySQL greeting, as a stopped or
+// paused sql-server's does, is live to the store's probe, so the scans dial
+// it too, and each must give up on its own deadline. Their ping had none, so
+// bd doctor waited on that greeting forever at the Clone-Local FKs check,
+// where it had failed at once dialing 127.0.0.1:0 (#7874 review).
+func TestDoctorScansReadTheServerTheStoreDials(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix socket fixture")
+	}
+	// greetingWait bounds a scan on a mute socket: the scans' 5s ping
+	// deadline, with room for a loaded runner.
+	const greetingWait = 15 * time.Second
+	for _, tc := range []struct {
+		name   string
+		port   bool   // BEADS_DOLT_SERVER_PORT names the TCP server
+		socket string // BEADS_DOLT_SERVER_SOCKET: "live" (a server on it), "dead", or "mute" (accepts, never greets)
+	}{
+		{name: "live unix socket beside a port", port: true, socket: "live"},
+		{name: "live unix socket only", socket: "live"},
+		{name: "dead unix socket beside a port, TCP as the store", port: true, socket: "dead"},
+		{name: "mute unix socket only, the scans give up", socket: "mute"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tcp := newFakeMySQLLogin(t)
+			endpointCredentialsEnv(t, []string{"127.0.0.1"}, tcp.port())
+			repo := t.TempDir()
+			t.Setenv("BEADS_DIR", serverModeWorkspaceAt(t, repo))
+			if tc.port {
+				t.Setenv("BEADS_DOLT_SERVER_PORT", strconv.Itoa(tcp.port()))
+			}
+			// want is the server the store dials: the live socket's, else
+			// TCP's, and none on a mute socket, where no login is made.
+			// other, the TCP server beside a live socket, it does not.
+			want := tcp
+			var other *fakeMySQLLogin
+			switch tc.socket {
+			case "live":
+				socketServer := newFakeMySQLLoginOn(t, "unix", diagnosticSocketPath(t))
+				t.Setenv("BEADS_DOLT_SERVER_SOCKET", socketServer.ln.Addr().String())
+				want, other = socketServer, tcp
+			case "mute":
+				socket := diagnosticSocketPath(t)
+				newMuteListenerOn(t, "unix", socket)
+				t.Setenv("BEADS_DOLT_SERVER_SOCKET", socket)
+				want = nil
+			default:
+				t.Setenv("BEADS_DOLT_SERVER_SOCKET", diagnosticSocketPath(t))
+			}
+
+			// The fake refuses every login, so each scan fails once it has
+			// logged in; where it logged in is what this test observes.
+			for _, scan := range []struct {
+				name string
+				run  func() error
+			}{
+				{"fix.CountCrossTableDuplicates", func() error { _, err := fix.CountCrossTableDuplicates(repo); return err }},
+				{"fix.ScanSeveredCloneLocalFKs", func() error { _, err := fix.ScanSeveredCloneLocalFKs(repo); return err }},
+			} {
+				if want == nil {
+					done := make(chan error, 1)
+					go func() { done <- scan.run() }()
+					select {
+					case err := <-done:
+						if err == nil {
+							t.Errorf("%s succeeded on a socket that never sends the MySQL greeting", scan.name)
+						}
+					case <-time.After(greetingWait):
+						t.Errorf("%s still waits for the MySQL greeting after %s on a socket that never sends one; it must give up on its own deadline", scan.name, greetingWait)
+					}
+					continue
+				}
+				before := len(want.Logins())
+				err := scan.run()
+				if len(want.Logins()) == before {
+					t.Errorf("%s never logged in to the server the store dials (%s): %v", scan.name, want.ln.Addr(), err)
+				}
+			}
+			if other != nil && len(other.Logins()) != 0 {
+				t.Errorf("the scans logged in over TCP at %s while the store dials the live socket %s", other.ln.Addr(), want.ln.Addr())
 			}
 		})
 	}
@@ -479,6 +735,46 @@ func diagnosticSocketPath(t *testing.T) string {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	return filepath.Join(dir, "dolt.sock")
+}
+
+// newMuteListenerOn listens on network and addr (a unix socket path for
+// "unix") and accepts every connection without ever writing to it, as a
+// stopped or paused sql-server does: a dial succeeds and the MySQL greeting
+// never comes. The listener and every connection it accepted close with t,
+// which ends a read still waiting on one.
+func newMuteListenerOn(t *testing.T, network, addr string) {
+	t.Helper()
+	ln, err := net.Listen(network, addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var conns []net.Conn
+	closed := false
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			if closed {
+				_ = conn.Close()
+			} else {
+				conns = append(conns, conn)
+			}
+			mu.Unlock()
+		}
+	}()
+	t.Cleanup(func() {
+		_ = ln.Close()
+		mu.Lock()
+		defer mu.Unlock()
+		closed = true
+		for _, conn := range conns {
+			_ = conn.Close()
+		}
+	})
 }
 
 // credentialEntryPointCommands are the bd commands that log in to a

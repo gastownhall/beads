@@ -252,6 +252,29 @@ func TestFreshCloneServerUnreachableResult(t *testing.T) {
 	}
 }
 
+// TestFreshCloneServerResultsNameTheTransportDialed pins both server-mode
+// Fresh Clone messages to the transport the check dialed. With a live socket
+// beside a resolved port the store dials the socket, and so does the check, so
+// the message names unix:<socket>, not the host:port nothing queried, and the
+// unreachable checklist names the socket setting (#7874 review).
+func TestFreshCloneServerResultsNameTheTransportDialed(t *testing.T) {
+	const socket = "/tmp/bd-test/dolt.sock"
+	for name, check := range map[string]DoctorCheck{
+		"missing db":  freshCloneServerResult(false, "beads", "127.0.0.1", 3309, socket, ""),
+		"unreachable": freshCloneServerUnreachableResult("beads", "127.0.0.1", 3309, socket, nil),
+	} {
+		if !strings.Contains(check.Message, "unix:"+socket) || strings.Contains(check.Message, "127.0.0.1:3309") {
+			t.Errorf("%s message must name unix:%s, the socket dialed, not 127.0.0.1:3309: %s", name, socket, check.Message)
+		}
+	}
+	if fix := freshCloneServerUnreachableResult("beads", "127.0.0.1", 3309, socket, nil).Fix; !strings.Contains(fix, "dolt_server_socket") {
+		t.Errorf("unreachable fix after a socket dial must name dolt_server_socket: %s", fix)
+	}
+	if fix := freshCloneServerUnreachableResult("beads", "127.0.0.1", 3309, "", nil).Fix; strings.Contains(fix, "dolt_server_socket") {
+		t.Errorf("unreachable fix after a TCP dial names dolt_server_socket: %s", fix)
+	}
+}
+
 // errSentinelForTest is a minimal error type used to drive the server-unreachable
 // helper without depending on the network/MySQL driver. Local to this test file.
 type errSentinelForTest struct{ msg string }

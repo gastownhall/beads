@@ -9,6 +9,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 )
@@ -23,7 +24,11 @@ import (
 // It deliberately does not dial a configured unix socket, and neither does
 // plain doctor's openDoltDB, whose failure keeps the schema gate withholding
 // the DB fixes for a socket-only server. Admitting them there waits on a
-// separate data-safety fix to the Database fix.
+// separate data-safety fix to the Database fix. Wherever the store dials a
+// socket (doltserver.Endpoint.Transport: a live one, even beside a resolved
+// port), it refuses rather than dial TCP: the server at that port may not be
+// the one bd list opens, and every SQL fix would write there. Doctor's
+// read-only scans dial that socket instead (openScanDB).
 //
 // It deliberately does not check the server against
 // doltversion.RequiredMin, and neither does openServerCatalogDB: bd doctor
@@ -32,7 +37,30 @@ import (
 // doctor --server reports the floor as its "Dolt Version" check.
 func openFixDB(beadsDir string, cfg *configfile.Config) (*sql.DB, error) {
 	ep := doltserver.ResolveEndpoint(beadsDir, cfg)
+	if socket := ep.Transport(); socket != "" {
+		return nil, fmt.Errorf("the store dials this workspace's Dolt server on the unix socket %s, which bd doctor --fix does not dial yet", remedy.PrintedValue(socket))
+	}
+	return openWorkspaceDB(ep, cfg, "")
+}
+
+// openScanDB opens the server a read-only doctor scan reads
+// (CountCrossTableDuplicates, ScanSeveredCloneLocalFKs): the one the store
+// dials, over its transport, a live unix socket first, else TCP
+// (doltserver.Endpoint.Transport), as doctor's Fresh Clone check does. A scan
+// writes nothing, so where openFixDB refuses the socket a scan dials it:
+// sharing that refusal turned each scan into an "N/A" pass, with no query of
+// any server, wherever the store dials a socket.
+func openScanDB(beadsDir string, cfg *configfile.Config) (*sql.DB, error) {
+	ep := doltserver.ResolveEndpoint(beadsDir, cfg)
+	return openWorkspaceDB(ep, cfg, ep.Transport())
+}
+
+// openWorkspaceDB opens cfg's database on the server at ep: over socket when
+// it is set, else TCP at ep's host and port, as the configured user with the
+// password keyed to that port.
+func openWorkspaceDB(ep doltserver.Endpoint, cfg *configfile.Config, socket string) (*sql.DB, error) {
 	connStr := doltutil.ServerDSN{
+		Socket:   socket,
 		Host:     ep.Host,
 		Port:     ep.Port,
 		User:     cfg.GetDoltServerUser(),

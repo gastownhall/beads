@@ -119,10 +119,10 @@ func freshCloneServerResult(dbExists bool, dbName, host string, port int, socket
 // detected (no database)" warning is misleading in server mode because the
 // absence of a local database is expected — see GH#35.
 //
-// The message identifies that we're in server mode, points at the configured
-// host:port, surfaces the underlying connection error for diagnostics, and
-// suggests connectivity/credential checks rather than bd bootstrap (which
-// won't help when the server itself is unreachable).
+// The message identifies that we're in server mode, points at the server the
+// check dialed (freshCloneServerLocation), surfaces the underlying connection
+// error for diagnostics, and suggests connectivity/credential checks rather
+// than bd bootstrap (which won't help when the server itself is unreachable).
 func freshCloneServerUnreachableResult(dbName, host string, port int, socket string, connErr error) DoctorCheck {
 	var msg strings.Builder
 	fmt.Fprintf(&msg, "Dolt server unreachable at %s (database %q, server mode configured).", freshCloneServerLocation(host, port, socket), dbName)
@@ -137,6 +137,12 @@ func freshCloneServerUnreachableResult(dbName, host string, port int, socket str
 	}
 	detail.WriteString("  Common causes: server not running, wrong host/port, TLS misconfiguration, or invalid credentials.")
 
+	settings := "dolt_server_host, dolt_server_port, dolt_server_tls"
+	if socket != "" {
+		// The check dialed the socket, which these settings do not name.
+		settings = "dolt_server_socket (or BEADS_DOLT_SERVER_SOCKET), " + settings
+	}
+
 	return DoctorCheck{
 		Name:    "Fresh Clone",
 		Status:  StatusWarning,
@@ -144,7 +150,7 @@ func freshCloneServerUnreachableResult(dbName, host string, port int, socket str
 		Detail:  detail.String(),
 		Fix: "Verify Dolt server connectivity:\n" +
 			"  1. Confirm the server is running and reachable from this host\n" +
-			"  2. Check .beads/metadata.json: dolt_server_host, dolt_server_port, dolt_server_tls\n" +
+			"  2. Check .beads/metadata.json: " + settings + "\n" +
 			"  3. Verify credentials in ~/.config/beads/credentials (or BEADS_DOLT_PASSWORD)\n" +
 			"  4. Try a CRUD command (e.g. 'bd ready') to confirm the server is usable\n" +
 			"  5. Re-run 'bd doctor' once connectivity is restored",
@@ -152,10 +158,15 @@ func freshCloneServerUnreachableResult(dbName, host string, port int, socket str
 }
 
 // freshCloneServerLocation names the server the Fresh Clone check dialed:
-// host:port, else the unix socket of a server with no port
-// (doltserver.Endpoint.Location), never host:0.
+// unix:<socket> when it dialed the socket (socket, the store's transport from
+// doltserver.Endpoint.Transport), even beside a resolved port, else
+// host:port. A server with no port is always dialed on its socket, so it
+// never names host:0.
 func freshCloneServerLocation(host string, port int, socket string) string {
-	return remedy.PrintedValue(doltserver.Endpoint{Host: host, Port: port, Socket: socket}.Location())
+	if socket != "" {
+		return remedy.PrintedValue("unix:" + socket)
+	}
+	return doltutil.PrintedServerAddr(host, port)
 }
 
 // freshCloneServerUnresolvedResult builds the DoctorCheck for a server-mode

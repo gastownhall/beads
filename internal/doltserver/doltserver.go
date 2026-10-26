@@ -1123,6 +1123,13 @@ func applyLegacyPortEnv(cfg *Config) {
 	}
 }
 
+// LegacyPortEnvLabel is applyLegacyPortEnv's rule in an operator's words, for
+// a list of PortSourceLabels (bd dolt show). The legacy BEADS_DOLT_PORT is no
+// step of that order: it replaces only the ports some steps resolve, so the
+// list names it beside them rather than by a rank.
+const LegacyPortEnvLabel = "Legacy environment variable (BEADS_DOLT_PORT): when BEADS_DOLT_SERVER_PORT is unset, " +
+	"it overrides the port file and the default ports, not listener.port, dolt.port or dolt_server_port"
+
 // DefaultConfigForMode resolves server configuration for an already-classified
 // target. Diagnostics use this when inspecting a workspace other than the
 // active one so process-global mode cannot change its data/state/port paths.

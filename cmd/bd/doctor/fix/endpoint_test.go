@@ -134,6 +134,12 @@ func TestServerMetadataReconcileNeverDialsAnUnresolvedPort(t *testing.T) {
 				if strings.Contains(err.Error(), deadSocket) {
 					t.Errorf("reconcile error = %v: it dialed the socket %s; it must keep refusing a socket-only server", err, deadSocket)
 				}
+				// A socket-only endpoint is Dialable, so the TCP-only catalog
+				// read dialed 127.0.0.1:0, and that failed dial passed for the
+				// refusal.
+				if strings.Contains(err.Error(), "127.0.0.1:0") || !strings.Contains(err.Error(), "only a unix socket names") {
+					t.Errorf("reconcile error = %v, want the socket-only refusal and no dial of port 0", err)
+				}
 				return
 			}
 			if tc.wantErr == "" {
