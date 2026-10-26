@@ -107,6 +107,29 @@ func TestDataPortRejectsUnauthenticatedAndWrongTokenConnections(t *testing.T) {
 	}
 }
 
+func TestDataPortDoesNotCountUnauthenticatedConnectionsAsActive(t *testing.T) {
+	p := NewProxyServer(ProxyOpts{Stats: &Stats{}})
+	p.dataToken = "target"
+	client, peer := net.Pipe()
+	done := make(chan error, 1)
+	go func() { done <- p.handleConn(context.Background(), client) }()
+
+	// While the connection sits in the handshake read it must not count as
+	// active: an unauthenticated client that simply holds the port open
+	// would otherwise gate the idle watcher forever.
+	time.Sleep(100 * time.Millisecond)
+	assert.EqualValues(t, 0, p.activeConns.Load())
+
+	_ = peer.Close()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("unauthenticated connection was not closed after the peer hung up")
+	}
+	assert.EqualValues(t, 0, p.activeConns.Load())
+}
+
 func TestDialDataAuthenticatesRegisteredAddress(t *testing.T) {
 	root := t.TempDir()
 	secret, err := identity.WriteSecret(root)
