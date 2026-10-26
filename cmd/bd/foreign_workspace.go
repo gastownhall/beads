@@ -131,7 +131,12 @@ func guardForeignLegacyDoltWorkspace(beadsDir string, cfg *configfile.Config) er
 // server mode comes only from the user-level or BD_ layers and the metadata
 // names no dolt_mode: a .beads/dolt root that is empty
 // with no version witness, or whose witness cannot be parsed, is admitted by
-// bd run inside it and refused here; nothing is written. Conversely, a target
+// bd run inside it and refused here; nothing is written. So is a root under a
+// current-era witness that holds data with no embedded repository (GH#6259's
+// unowned root): bd run inside it reads the user-level server selection,
+// while this classification resolves none for the target and refuses it with
+// the unowned-root reason — the divergence #6119's hoisted witness veto had
+// removed for that shape. Conversely, a target
 // bd run inside refuses as a legacy Dolt server workspace is admitted here: a
 // .local_version naming bd 0.55-0.62 with no .beads/dolt root or beside an
 // embedded repository, or an embedded repository beside a .beads/dolt root bd

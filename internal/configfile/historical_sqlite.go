@@ -11,7 +11,12 @@ import (
 // LegacyWorkspaceError refuses a workspace a release before this one left in a
 // layout this bd must not open or modify until it is explicitly migrated: a
 // historical SQLite workspace (CheckHistoricalSQLiteWorkspace), or one of the
-// legacy Dolt layouts command admission recognizes. Command admission returns
+// legacy Dolt layouts command admission recognizes. It also refuses a
+// current-era workspace whose non-empty .beads/dolt root nothing selected this
+// run would open (the unowned Dolt root, GH#6259): the workspace itself is
+// current, but opening it embedded would hide the root's data behind an empty
+// database, so the refusal points at the same explicit-migration doc until a
+// server selection or a checked discard says otherwise. Command admission returns
 // it, for every such layout, for the workspace bd runs in. Every path that
 // opens or inspects a workspace bd was not launched in returns the same error,
 // with the same text, for a historical SQLite workspace before it writes

@@ -118,12 +118,14 @@ type LegacyDoltLayout struct {
 
 // LegacyDoltLayouts lists legacy Dolt layouts command admission refuses when
 // bd runs inside them, whatever the launching workspace's dolt.mode (a
-// launcher whose merged config enables dolt.shared-server admits the first
-// two, whose config.yaml sets no dolt.shared-server): a non-empty .beads/dolt
-// root with no embedded repository and no current-era version witness, whose
-// metadata names no dolt_mode; the same where the
-// workspace's own config.yaml selects server mode; and a server workspace
-// whose version witness names bd 0.62.0.
+// launcher whose merged config enables dolt.shared-server admits layouts 1,
+// 2 and 4, whose config.yaml sets no dolt.shared-server): a non-empty
+// .beads/dolt root with no embedded repository and no current-era version
+// witness, whose metadata names no dolt_mode; the same where the
+// workspace's own config.yaml selects server mode; a server workspace
+// whose version witness names bd 0.62.0; and a root under a current-era
+// witness that no server selection owns, whose metadata leaves the open to
+// the embedded store (GH#6259).
 func LegacyDoltLayouts() []LegacyDoltLayout {
 	manifest := "legacy manifest"
 	return []LegacyDoltLayout{
@@ -141,6 +143,11 @@ func LegacyDoltLayouts() []LegacyDoltLayout {
 			".local_version":                  "0.62.0\n",
 			"dolt/herald/.dolt/noms/manifest": manifest,
 		}}, Reason: "legacy Dolt server workspace from bd 0.62.0"},
+		{Layout: Layout{Name: "current-era Dolt root without a server selection", Files: map[string]string{
+			"metadata.json":               `{"backend":"dolt","dolt_database":"hq"}`,
+			".local_version":              "1.3.0\n",
+			"dolt/hq/.dolt/noms/manifest": manifest,
+		}}, Reason: "Dolt data root .beads/dolt without a server selection"},
 	}
 }
 
