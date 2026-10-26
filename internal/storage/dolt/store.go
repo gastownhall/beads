@@ -2136,13 +2136,15 @@ var newServerDialer = func(timeout time.Duration) *net.Dialer {
 // retryOpenProbe re-probes an unreachable sql-server that bd does not manage,
 // for at most budget.
 //
-// It is called from exactly one place: newServerMode's fail-fast branch, after
-// the first probe failed, after serverOpenCanAutoStart said bd cannot start a
-// server here, and under cfg.ServerMode. That call site IS the mode gate --
-// there is no separate classifier to keep in sync, because cfg.ServerMode is
-// the same field the CLI store factory routes on. A bd-managed localhost
-// server takes the auto-start branch above, which recovers by STARTING a
-// server rather than by waiting and keeps its bare dialServer.
+// It is called only through retryUnmanagedOpenProbe, under cfg.ServerMode,
+// after the first probe failed: from newServerMode's fail-fast branch, once
+// serverOpenCanAutoStart said bd cannot start a server here, and from its
+// auto-start branch, once EnsureRunning refused to start one because the
+// server is externally managed. Those call sites ARE the mode gate -- there is
+// no separate classifier to keep in sync, because cfg.ServerMode is the same
+// field the CLI store factory routes on. A bd-managed localhost server that
+// auto-start starts or adopts recovers by STARTING a server rather than by
+// waiting, and keeps its bare dialServer.
 //
 // The cfg.ServerMode term is load-bearing rather than belt-and-braces:
 // NewFromConfig and NewFromConfigWithOptions reach newServerMode for an
@@ -2293,6 +2295,49 @@ func isRetryableOpenProbeError(err error) bool {
 	return errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, windowsConnRefused) || isRetryableError(err)
 }
 
+// retryUnmanagedOpenProbe spends the open-retry budget on an open whose first
+// probe, at addr, failed with dialErr against a server bd does not manage. It
+// is newServerMode's one way into retryOpenProbe, from the two places such an
+// open is found: the branch for an open that cannot auto-start, and the
+// auto-start branch when EnsureRunning refuses to start an externally managed
+// server. Without cfg.ServerMode or a positive budget it makes no dial and
+// returns dialErr unchanged.
+//
+// It returns the connection a retry reached, or the error that ended the
+// retries. canceled reports that the caller's context ended the open: the
+// error, which then wraps ctx.Err(), is the open's whole error, to be returned
+// without a hint and without a circuit-breaker failure.
+func retryUnmanagedOpenProbe(ctx context.Context, cfg *Config, beadsDir, addr string, dialErr error) (net.Conn, bool, error) {
+	if !cfg.ServerMode {
+		return nil, false, dialErr
+	}
+	budget := openRetryBudget(beadsDir)
+	if budget <= 0 {
+		return nil, false, dialErr
+	}
+	network := "tcp"
+	if cfg.ServerSocket != "" {
+		network = "unix"
+	}
+	conn, err := retryOpenProbe(ctx, network, addr, 500*time.Millisecond, budget, dialErr)
+	// The first dial's error was spelled through the remedy printer before
+	// this call; a later dial's error comes back as the dialer wrote it and
+	// repeats the same endpoint, so it is spelled the same way.
+	err = remedy.PrintedError(err)
+	if err != nil && ctx.Err() != nil {
+		// The CALLER ended this open. That is evidence about the caller, not
+		// about the server, so it must not count towards the circuit
+		// breaker: five canceled opens inside the failure window would
+		// otherwise trip it against a healthy server and fail every open
+		// after them for the cooldown. The question is asked of the CONTEXT,
+		// never of the error: net's own timeoutError reports errors.Is(err,
+		// context.DeadlineExceeded) as true, so an error-identity test would
+		// stop counting ordinary server timeouts too.
+		return nil, true, fmt.Errorf("Dolt server unreachable at %s: %w", remedy.PrintedValue(addr), err)
+	}
+	return conn, false, err
+}
+
 // clampDialTimeout keeps a retry's per-attempt dial timeout inside what is
 // left of the budget. A dial that PLANS to run for longer than the deadline
 // has left would spend past the budget the operator set, which is the one
@@ -2392,7 +2437,11 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		// unix socket, so the DSN would still fail. Socket users are expected
 		// to manage their own server lifecycle.
 		canAutoStart := serverOpenCanAutoStart(cfg)
-		if canAutoStart {
+		// A switch rather than an if/else so that an auto-start refusal whose
+		// open retry reaches the server can break out to the shared probe tail
+		// below, as a first-probe success does.
+		switch {
+		case canAutoStart:
 			// Snapshot the port file's exact pre-call state before letting
 			// EnsureRunningDetailed write to it. Start() (and the
 			// adopt-existing-server path) write serverDir's port file with
@@ -2418,6 +2467,20 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 				// that cannot auto-start does (below): "auto-start failed"
 				// and "bd dolt start" describe a start bd must not make.
 				if errors.Is(startErr, doltserver.ErrExternallyManaged) {
+					// Nothing was started, so this open is against a server
+					// bd does not manage after all, and it gets the open-retry
+					// budget the branch below gives such an open. bd init
+					// arrives here: it builds its config with auto-start on,
+					// so `bd init --server --server-port N` asks to start the
+					// server its own port declares externally managed.
+					var canceled bool
+					conn, canceled, dialErr = retryUnmanagedOpenProbe(ctx, cfg, resolvedBeadsDir, addr, dialErr)
+					if canceled {
+						return nil, dialErr
+					}
+					if dialErr == nil {
+						break // a retry reached the server: on to the shared probe tail
+					}
 					if hint := externallyManagedPortHint(cfg, resolvedBeadsDir, addr); hint != "" {
 						return nil, fmt.Errorf("Dolt server unreachable at %s: %w\n\n%s", remedy.PrintedValue(addr), dialErr, hint)
 					}
@@ -2517,16 +2580,18 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 				recordDialFailure(breaker, dialErr)
 				return nil, autoStartRedialError(addr, dialErr, startedByUs, doltserver.LogPath(resolvedBeadsDir))
 			}
-		} else {
+		default:
 			// bd does not manage this server -- socket mode, a non-localhost
 			// host, or auto-start suppressed -- so starting one is not a
-			// remedy and waiting is. This branch, and only this branch, is
-			// where the config-gated open-retry budget applies; the gate is
-			// the CALL SITE, not a mode classifier that could disagree with
-			// serverOpenCanAutoStart above.
+			// remedy and waiting is. This branch is where the config-gated
+			// open-retry budget applies, with the auto-start branch's refusal
+			// above, the one other open that finds a server bd does not
+			// manage; the gate is those CALL SITES, not a mode classifier
+			// that could disagree with serverOpenCanAutoStart above.
 			//
-			// cfg.ServerMode narrows that call site to the opens bd already
-			// classifies as server-backed. It is the CLI store factory's own
+			// cfg.ServerMode, which retryUnmanagedOpenProbe tests, narrows
+			// the call sites to the opens bd already classifies as
+			// server-backed. It is the CLI store factory's own
 			// routing predicate -- newDoltStore dispatches to dolt.New under
 			// `if cfg.ServerMode` and sends every other workspace to the
 			// embedded backend -- so reusing it here cannot disagree with the
@@ -2545,33 +2610,10 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 			// config read that the sibling scope rule's directory fallback
 			// can perform; keeping it under the mode test spares the
 			// non-server opens that read as well.
-			if cfg.ServerMode {
-				if budget := openRetryBudget(resolvedBeadsDir); budget > 0 {
-					network := "tcp"
-					timeout := 500 * time.Millisecond
-					if cfg.ServerSocket != "" {
-						network = "unix"
-					}
-					conn, dialErr = retryOpenProbe(ctx, network, addr, timeout, budget, dialErr)
-					// The first dial's error was spelled through the remedy printer
-					// above; a later dial's error comes back as the dialer wrote it
-					// and repeats the same endpoint, so it is spelled the same way.
-					dialErr = remedy.PrintedError(dialErr)
-					if dialErr != nil && ctx.Err() != nil {
-						// The CALLER ended this open. That is evidence about
-						// the caller, not about the server, so it must not
-						// count towards the circuit breaker: five canceled
-						// opens inside the failure window would otherwise
-						// trip it against a healthy server and fail every
-						// open after them for the cooldown. The question is
-						// asked of the CONTEXT, never of the error: net's own
-						// timeoutError reports errors.Is(err,
-						// context.DeadlineExceeded) as true, so an
-						// error-identity test would stop counting ordinary
-						// server timeouts too.
-						return nil, fmt.Errorf("Dolt server unreachable at %s: %w", remedy.PrintedValue(addr), dialErr)
-					}
-				}
+			var canceled bool
+			conn, canceled, dialErr = retryUnmanagedOpenProbe(ctx, cfg, resolvedBeadsDir, addr, dialErr)
+			if canceled {
+				return nil, dialErr
 			}
 			// A successful retry falls through to the shared
 			// DrainAndCloseProbe + RecordSuccess below, exactly as a

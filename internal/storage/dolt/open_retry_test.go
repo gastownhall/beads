@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -21,10 +22,11 @@ import (
 // GH#4379). They stub dialServer / openProbeDialContext so they run without
 // a live Dolt server, in the style of socket_fallback_test.go.
 //
-// Every test here drives the REAL newServerMode. The budget's mode gate is a
-// call site inside it -- the branch taken when serverOpenCanAutoStart says bd
-// cannot start a server here -- so a test that called retryOpenProbe directly
-// would prove nothing about which opens reach it.
+// Every test here drives the REAL newServerMode. The budget's mode gate is its
+// call sites inside it -- the branch taken when serverOpenCanAutoStart says bd
+// cannot start a server here, and the auto-start branch when EnsureRunning
+// refuses to start an externally managed one -- so a test that called
+// retryOpenProbe directly would prove nothing about which opens reach it.
 
 // openRetryDialLog counts the two dial seams separately. Keeping them apart is
 // the whole point: "the default path is untouched" means the legacy,
@@ -202,8 +204,16 @@ func writeBudgetConfig(t *testing.T, kv map[string]string) string {
 	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
+	writeBudgetConfigIn(t, beadsDir, kv)
+	return beadsDir
+}
+
+// writeBudgetConfigIn is writeBudgetConfig for a .beads directory that already
+// exists, such as a workspace whose metadata.json a test wrote first.
+func writeBudgetConfigIn(t *testing.T, beadsDir string, kv map[string]string) {
+	t.Helper()
 	if len(kv) == 0 {
-		return beadsDir
+		return
 	}
 	var b strings.Builder
 	b.WriteString("dolt:\n")
@@ -213,7 +223,6 @@ func writeBudgetConfig(t *testing.T, kv map[string]string) string {
 	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(b.String()), 0o644); err != nil {
 		t.Fatalf("write config.yaml: %v", err)
 	}
-	return beadsDir
 }
 
 // externalOpenConfig is an open against a server bd does not manage: no data
@@ -476,7 +485,9 @@ func TestOpenRetryRetriesARefusalByItsErrno(t *testing.T) {
 // legacy one.
 //
 // The fixture carries ServerMode, because the exclusion under test is the
-// AUTO-START BRANCH and nothing else. Without it the config would fail the
+// AUTO-START BRANCH, where it starts or adopts a server, and nothing else (a
+// refused start is TestOpenRetryAppliesWhenAutoStartIsRefused's case). Without
+// it the config would fail the
 // budget's other term as well, and the test would report a zero retry count
 // whatever the auto-start dispatch did -- so moving the guarded retry block
 // ahead of that dispatch would leave this test green while managed opens
@@ -552,6 +563,176 @@ func TestOpenRetryNotEngagedForManagedLocalhostOpen(t *testing.T) {
 			}
 		})
 	}
+}
+
+// refusedAutoStartOpen is the open bd init makes for `bd init --server
+// --server-port N` against a port nothing listens on. init builds its config by
+// hand with auto-start on (cmd/bd/init.go), so the open takes the AUTO-START
+// branch, although the port, caller-explicit and promoted into
+// BEADS_DOLT_SERVER_PORT, declares the server externally managed and the real
+// EnsureRunning refuses to start one. budget "" leaves the key unset. It
+// returns the config and the endpoint it dials.
+func refusedAutoStartOpen(t *testing.T, budget string) (*Config, string) {
+	t.Helper()
+	externalPortAdviceEnv(t)
+	t.Setenv("BEADS_TEST_MODE", "1")
+	port := deadLoopbackPort(t)
+	t.Setenv("BEADS_DOLT_SERVER_PORT", strconv.Itoa(port))
+	beadsDir := externalPortAdviceWorkspace(t, 0)
+	if budget != "" {
+		writeBudgetConfigIn(t, beadsDir, map[string]string{config.OpenRetryBudgetKey: budget})
+	}
+	cfg := &Config{
+		Path:             filepath.Join(beadsDir, "dolt"),
+		BeadsDir:         beadsDir,
+		Database:         "advice",
+		ServerHost:       "127.0.0.1",
+		ServerPort:       port,
+		ServerPortSource: doltserver.PortSourceCallerExplicit,
+		AutoStart:        true,
+		OpenedByInit:     true,
+		ServerMode:       true,
+	}
+	if !serverOpenCanAutoStart(cfg) {
+		t.Fatal("the fixture does not take the auto-start branch, so it says nothing about that branch's refusal")
+	}
+	return cfg, net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+}
+
+// An open that takes the auto-start branch and is REFUSED a start, because the
+// workspace's server is externally managed, started nothing: it is an open
+// against a server bd does not manage, the open the budget is for, and it must
+// wait as the same workspace does with auto-start off. The named-port rows run
+// the real EnsureRunning, so they break if its refusal stops reaching the
+// budget for any reason. The spent-budget row keeps the advice the refusal gave
+// before the budget, which names the setting and never suggests `bd dolt
+// start`; the off row keeps the default, one probe and no retry. The last row
+// stands in a refusal no setting names, which bd reports in EnsureRunning's own
+// words.
+func TestOpenRetryAppliesWhenAutoStartIsRefused(t *testing.T) {
+	t.Run("named port, the retry reaches the server", func(t *testing.T) {
+		cfg, _ := refusedAutoStartOpen(t, "5s")
+		log := stubOpenRetryDials(t, errStubRefused, []error{errStubRefused, nil})
+
+		_, err := newServerMode(context.Background(), cfg)
+		if err != nil && strings.Contains(err.Error(), "Dolt server unreachable at") {
+			t.Fatalf("the refused auto-start ended the open without the budget: %v", err)
+		}
+		if legacy, ctxDials := log.counts(); legacy != 1 || ctxDials != 2 {
+			t.Fatalf("dials legacy=%d ctx=%d, want 1 and 2: the fail-fast probe, then a refused retry and the one that reached the server", legacy, ctxDials)
+		}
+		assertFirstProbeTimeout(t, log)
+	})
+
+	t.Run("named port, the budget is spent", func(t *testing.T) {
+		cfg, addr := refusedAutoStartOpen(t, "1500ms")
+		log := stubOpenRetryDials(t, errStubRefused, []error{errStubRefused})
+
+		_, err := newServerMode(context.Background(), cfg)
+		if err == nil {
+			t.Fatal("expected the open to fail once the budget was spent")
+		}
+		if _, ctxDials := log.counts(); ctxDials == 0 {
+			t.Fatalf("no retry dial: the refused auto-start skipped the budget:\n%v", err)
+		}
+		msg := err.Error()
+		for _, want := range []string{"--server-port declares the Dolt server at " + addr + " externally managed", "still unreachable after"} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("error does not contain %q:\n%s", want, msg)
+			}
+		}
+		for _, banned := range []string{"bd dolt start", "auto-start failed"} {
+			if strings.Contains(msg, banned) {
+				t.Errorf("error contains %q:\n%s", banned, msg)
+			}
+		}
+	})
+
+	t.Run("named port, budget off", func(t *testing.T) {
+		cfg, addr := refusedAutoStartOpen(t, "")
+		if got := openRetryBudget(cfg.BeadsDir); got != 0 {
+			t.Fatalf("openRetryBudget = %v, want 0: the row is about the default", got)
+		}
+		log := stubOpenRetryDials(t, errStubRefused, nil)
+
+		_, err := newServerMode(context.Background(), cfg)
+		if err == nil {
+			t.Fatal("expected the fail-fast unreachable error")
+		}
+		if legacy, ctxDials := log.counts(); legacy != 1 || ctxDials != 0 {
+			t.Fatalf("dials legacy=%d ctx=%d, want 1 and 0: without the key the refusal must stay the fail-fast open", legacy, ctxDials)
+		}
+		if want := "--server-port declares the Dolt server at " + addr + " externally managed"; !strings.Contains(err.Error(), want) {
+			t.Fatalf("error does not contain %q:\n%s", want, err)
+		}
+	})
+
+	t.Run("named port, the open is canceled during the wait", func(t *testing.T) {
+		cfg, _ := refusedAutoStartOpen(t, "5s")
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		log := stubOpenRetryDials(t, errStubRefused, []error{errStubRefused})
+		stubbed := openProbeDialContext
+		openProbeDialContext = func(dialCtx context.Context, network, addr string, timeout time.Duration) (net.Conn, error) {
+			cancel()
+			return stubbed(dialCtx, network, addr, timeout)
+		}
+
+		_, err := newServerMode(ctx, cfg)
+		if err == nil {
+			t.Fatal("expected the canceled open to fail")
+		}
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("canceled open lost its context cause:\n%v", err)
+		}
+		if _, ctxDials := log.counts(); ctxDials != 1 {
+			t.Fatalf("retry dials = %d, want 1: the open must end at the cancel, not dial on", ctxDials)
+		}
+		// A canceled open says nothing about the server, so it carries no
+		// advice about one.
+		if strings.Contains(err.Error(), "externally managed") {
+			t.Fatalf("canceled open carries advice about the server:\n%v", err)
+		}
+	})
+
+	t.Run("a refusal no setting names", func(t *testing.T) {
+		externalPortAdviceEnv(t)
+		t.Setenv("BEADS_TEST_MODE", "1")
+		port := deadLoopbackPort(t)
+		addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+		beadsDir := externalPortAdviceWorkspace(t, 0)
+		writeBudgetConfigIn(t, beadsDir, map[string]string{config.OpenRetryBudgetKey: "5s"})
+		origEnsure := ensureRunningDetailed
+		t.Cleanup(func() { ensureRunningDetailed = origEnsure })
+		ensureRunningDetailed = func(string) (int, bool, error) {
+			return 0, false, fmt.Errorf("Dolt server is not running on port %d: %w", port, doltserver.ErrExternallyManaged)
+		}
+		cfg := &Config{
+			Path:             filepath.Join(beadsDir, "dolt"),
+			BeadsDir:         beadsDir,
+			Database:         "advice",
+			ServerHost:       "127.0.0.1",
+			ServerPort:       port,
+			ServerPortSource: doltserver.PortSourceConfigYaml,
+			AutoStart:        true,
+			ServerMode:       true,
+		}
+		if !serverOpenCanAutoStart(cfg) {
+			t.Fatal("the fixture does not take the auto-start branch")
+		}
+		if hint := externallyManagedPortHint(cfg, beadsDir, addr); hint != "" {
+			t.Fatalf("a setting names this port (%q), so the row is not about a refusal no setting names", hint)
+		}
+		log := stubOpenRetryDials(t, errStubRefused, []error{nil})
+
+		_, err := newServerMode(context.Background(), cfg)
+		if err != nil && strings.Contains(err.Error(), "Dolt server unreachable at") {
+			t.Fatalf("the refused auto-start ended the open without the budget: %v", err)
+		}
+		if legacy, ctxDials := log.counts(); legacy != 1 || ctxDials != 1 {
+			t.Fatalf("dials legacy=%d ctx=%d, want 1 and 1", legacy, ctxDials)
+		}
+	})
 }
 
 // Embedded mode has no sql-server to dial and never reaches newServerMode: it

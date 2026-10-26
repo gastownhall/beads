@@ -295,8 +295,10 @@ dolt:
 What it does and does not cover:
 
 - **It applies only to a server `bd` does not manage** — a non-localhost host,
-  a unix socket, or a project whose configured server `bd` will not auto-start.
-  There, waiting is the only remedy `bd` has.
+  a unix socket, or a project whose configured server `bd` will not auto-start,
+  including an open that asks to start one and is refused because the server
+  is externally managed, as `bd init --server --server-port N` is for the port
+  it names. There, waiting is the only remedy `bd` has.
 - **The workspace must resolve to server-backed storage**, by the same test that
   routes the open to the server backend in the first place -- the workspace's own
   `dolt_mode` (plus shared-server mode), never the calling command. An embedded
