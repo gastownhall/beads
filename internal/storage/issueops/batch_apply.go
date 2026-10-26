@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -59,10 +60,12 @@ import (
 // rather than one.
 func ApplyBatchInTx(ctx context.Context, tx *sql.Tx, plan storage.ApplyBatchPlan) (publicops.ApplyBatchResult, BatchApplyWrite, error) {
 	run := &applyBatchRun{
-		plan:   plan,
-		keys:   make(map[string]string, len(plan.KeyIndex)),
-		planes: map[string]bool{},
-		write:  BatchApplyWrite{Tables: ChangedTables{}},
+		plan:      plan,
+		keys:      make(map[string]string, len(plan.KeyIndex)),
+		planes:    map[string]bool{},
+		hydrateAt: snapshotItems(plan),
+		snapshots: map[string]*types.Issue{},
+		write:     BatchApplyWrite{Tables: ChangedTables{}},
 		result: publicops.ApplyBatchResult{
 			Keys:  make(map[string]string, len(plan.KeyIndex)),
 			Items: make([]publicops.ItemResult, len(plan.Items)),
@@ -180,9 +183,110 @@ type applyBatchRun struct {
 	planes map[string]bool
 	// edges records every edge the request added, with the item each came from,
 	// so the end gate can name the item that refused.
-	edges  []appliedEdge
-	write  BatchApplyWrite
-	result publicops.ApplyBatchResult
+	edges []appliedEdge
+	// hydrateAt holds the items that hydrate their row's snapshot: the last
+	// row verb on each issue. Every other row item reads only its version, and
+	// finishSnapshots hands each item its issue's one snapshot, so N items on
+	// one issue cost one hydration rather than N.
+	hydrateAt map[int]bool
+	snapshots map[string]*types.Issue
+	write     BatchApplyWrite
+	result    publicops.ApplyBatchResult
+}
+
+// snapshotItems picks, for each issue the plan's creates, updates and closes
+// touch, the last of those items. An issue a create's metadata splice finishes
+// gets none: the splice runs after every item and hydrates it. Two refs that
+// name one issue without this seeing it (a key and the id it will mint) only
+// cost an extra hydration; finishSnapshots still hands both the last one.
+func snapshotItems(plan storage.ApplyBatchPlan) map[int]bool {
+	createIdentity := func(index int) string {
+		create := plan.Items[index].Create
+		switch {
+		case create.Issue != nil && create.Issue.ID != "":
+			return "id:" + create.Issue.ID
+		case create.Key != "":
+			return "key:" + create.Key
+		}
+		return fmt.Sprintf("item:%d", index)
+	}
+	refIdentity := func(ref publicops.Ref) string {
+		if ref.Key == "" {
+			return "id:" + ref.ID
+		}
+		if index, ok := plan.KeyIndex[ref.Key]; ok {
+			return createIdentity(index)
+		}
+		return "key:" + ref.Key
+	}
+	last := map[string]int{}
+	spliced := map[string]bool{}
+	for index, item := range plan.Items {
+		switch item.Kind {
+		case publicops.ItemCreate:
+			identity := createIdentity(index)
+			last[identity] = index
+			if len(item.Create.MetadataRefs) > 0 {
+				spliced[identity] = true
+			}
+		case publicops.ItemUpdate:
+			last[refIdentity(item.Update.Target)] = index
+		case publicops.ItemClose:
+			last[refIdentity(item.Close.Target)] = index
+		}
+	}
+	hydrateAt := make(map[int]bool, len(last))
+	for identity, index := range last {
+		if !spliced[identity] {
+			hydrateAt[index] = true
+		}
+	}
+	return hydrateAt
+}
+
+// rowState is what a row item reports about its issue: the snapshot when the
+// item hydrates it, otherwise only the version token after the item.
+func (r *applyBatchRun) rowState(ctx context.Context, tx *sql.Tx, id string, hydrated *types.Issue) (int64, *types.Issue, error) {
+	if hydrated != nil {
+		r.snapshots[id] = hydrated
+		return hydrated.RowVersion, hydrated, nil
+	}
+	isWisp, created := r.planes[id]
+	if !created {
+		isWisp = IsActiveWispInTx(ctx, tx, id)
+	}
+	version, err := readRowVersionInTx(ctx, tx, id, isWisp)
+	if created && errors.Is(err, storage.ErrNotFound) {
+		// A persistence update moved this request's row to the other plane.
+		version, err = readRowVersionInTx(ctx, tx, id, !isWisp)
+	}
+	return version, nil, err
+}
+
+// finishSnapshots points every create, update and close result at its issue's
+// one snapshot, the row as the request left it. An issue no item hydrated (a
+// ref snapshotItems could not tie to its create) is hydrated here, once.
+func (r *applyBatchRun) finishSnapshots(ctx context.Context, tx *sql.Tx) error {
+	for index := range r.result.Items {
+		item := &r.result.Items[index]
+		switch item.Kind {
+		case publicops.ItemCreate, publicops.ItemUpdate, publicops.ItemClose:
+		default:
+			continue
+		}
+		snapshot, ok := r.snapshots[item.IssueID]
+		if !ok {
+			_, created := r.planes[item.IssueID]
+			var err error
+			snapshot, err = HydrateIssueOperationResult(ctx, tx, item.IssueID, created)
+			if err != nil {
+				return &publicops.ItemError{Index: index, Kind: item.Kind, IssueID: item.IssueID, Err: err}
+			}
+			r.snapshots[item.IssueID] = snapshot
+		}
+		item.Issue = snapshot
+	}
+	return nil
 }
 
 // appliedEdge is one edge the request wrote, paired with its item's index.
@@ -202,7 +306,10 @@ func (r *applyBatchRun) apply(ctx context.Context, tx *sql.Tx) error {
 	if err := r.spliceMetadataRefs(ctx, tx); err != nil {
 		return err
 	}
-	return r.runEndGate(ctx, tx)
+	if err := r.runEndGate(ctx, tx); err != nil {
+		return err
+	}
+	return r.finishSnapshots(ctx, tx)
 }
 
 // applyItem applies one item and records its outcome at its own index.
@@ -237,12 +344,13 @@ func (r *applyBatchRun) applyItem(ctx context.Context, tx *sql.Tx, index int) er
 // role exists to avoid, and the cost is bounded by the request's hundred-item
 // cap. Revisit it with a measurement, not with a copy of ExecuteCreateBatch.
 func (r *applyBatchRun) applyCreate(ctx context.Context, tx *sql.Tx, index int, item *publicops.CreateItem) error {
-	created, tables, err := ExecuteCreate(ctx, tx, publicops.CreateRequest{
+	hydrate := r.hydrateAt[index]
+	created, tables, err := executeCreate(ctx, tx, publicops.CreateRequest{
 		Actor:           r.plan.Actor,
 		Issue:           item.Issue,
 		ForceIDPrefix:   r.plan.ForceIDPrefix,
 		DefaultPriority: item.DefaultPriority,
-	})
+	}, hydrate)
 	if err != nil {
 		return &publicops.ItemError{Index: index, Kind: publicops.ItemCreate, Key: item.Key, Err: err}
 	}
@@ -253,12 +361,20 @@ func (r *applyBatchRun) applyCreate(ctx context.Context, tx *sql.Tx, index int, 
 		r.result.Keys[item.Key] = created.Issue.ID
 	}
 	r.planes[created.Issue.ID] = IsWisp(created.Issue)
+	var hydrated *types.Issue
+	if hydrate {
+		hydrated = created.Issue
+	}
+	version, snapshot, err := r.rowState(ctx, tx, created.Issue.ID, hydrated)
+	if err != nil {
+		return &publicops.ItemError{Index: index, Kind: publicops.ItemCreate, Key: item.Key, IssueID: created.Issue.ID, Err: err}
+	}
 	r.result.Items[index] = publicops.ItemResult{
 		Kind:       publicops.ItemCreate,
 		IssueID:    created.Issue.ID,
 		Changed:    true,
-		RowVersion: created.Issue.RowVersion,
-		Issue:      created.Issue,
+		RowVersion: version,
+		Issue:      snapshot,
 	}
 	return nil
 }
@@ -271,7 +387,7 @@ func (r *applyBatchRun) applyUpdate(ctx context.Context, tx *sql.Tx, index int, 
 	if err != nil {
 		return err
 	}
-	updated, tables, err := ExecuteUpdate(ctx, tx, publicops.UpdateRequest{
+	updated, tables, err := executeUpdate(ctx, tx, publicops.UpdateRequest{
 		Actor:                 r.plan.Actor,
 		IssueID:               id,
 		Patch:                 item.Patch,
@@ -281,18 +397,22 @@ func (r *applyBatchRun) applyUpdate(ctx context.Context, tx *sql.Tx, index int, 
 		ForceClosePolicy:      item.ForceClosePolicy,
 		ForceAssigneeTransfer: item.ForceAssigneeTransfer,
 		ForceNotesOverwrite:   item.ForceNotesOverwrite,
-	})
+	}, true, r.hydrateAt[index])
 	if err != nil {
 		return &publicops.ItemError{Index: index, Kind: publicops.ItemUpdate, Key: item.Target.Key, IssueID: id, Err: err}
 	}
 	r.write.Tables.Merge(tables)
 	r.write.Changed = r.write.Changed || updated.Changed || len(tables) > 0
+	version, snapshot, err := r.rowState(ctx, tx, id, updated.Issue)
+	if err != nil {
+		return &publicops.ItemError{Index: index, Kind: publicops.ItemUpdate, Key: item.Target.Key, IssueID: id, Err: err}
+	}
 	r.result.Items[index] = publicops.ItemResult{
 		Kind:       publicops.ItemUpdate,
 		IssueID:    id,
 		Changed:    updated.Changed,
-		RowVersion: updated.Issue.RowVersion,
-		Issue:      updated.Issue,
+		RowVersion: version,
+		Issue:      snapshot,
 	}
 	return nil
 }
@@ -305,25 +425,29 @@ func (r *applyBatchRun) applyClose(ctx context.Context, tx *sql.Tx, index int, i
 	if err != nil {
 		return err
 	}
-	closed, tables, err := ExecuteClose(ctx, tx, publicops.CloseRequest{
+	closed, tables, err := executeClose(ctx, tx, publicops.CloseRequest{
 		Actor:           r.plan.Actor,
 		IssueID:         id,
 		Reason:          item.Reason,
 		Session:         item.Session,
 		Force:           item.Force,
 		ExpectedVersion: item.ExpectedVersion,
-	})
+	}, r.hydrateAt[index])
 	if err != nil {
 		return &publicops.ItemError{Index: index, Kind: publicops.ItemClose, Key: item.Target.Key, IssueID: id, Err: err}
 	}
 	r.write.Tables.Merge(tables)
 	r.write.Changed = r.write.Changed || closed.Changed || len(tables) > 0
+	version, snapshot, err := r.rowState(ctx, tx, id, closed.Issue)
+	if err != nil {
+		return &publicops.ItemError{Index: index, Kind: publicops.ItemClose, Key: item.Target.Key, IssueID: id, Err: err}
+	}
 	r.result.Items[index] = publicops.ItemResult{
 		Kind:       publicops.ItemClose,
 		IssueID:    id,
 		Changed:    closed.Changed,
-		RowVersion: closed.Issue.RowVersion,
-		Issue:      closed.Issue,
+		RowVersion: version,
+		Issue:      snapshot,
 	}
 	return nil
 }
@@ -494,7 +618,7 @@ func (r *applyBatchRun) spliceMetadataRefs(ctx context.Context, tx *sql.Tx) erro
 			Actor:   r.plan.Actor,
 			IssueID: id,
 			Patch:   publicops.IssuePatch{Metadata: publicops.MetadataPatch{Set: set}},
-		}, false)
+		}, false, true)
 		if err != nil {
 			return &publicops.ItemError{
 				Index: index, Kind: publicops.ItemCreate, Key: item.Create.Key, IssueID: id, Err: err,
@@ -504,7 +628,7 @@ func (r *applyBatchRun) spliceMetadataRefs(ctx context.Context, tx *sql.Tx) erro
 		// The create already reported Changed; the splice re-reads the row so
 		// the snapshot the caller is handed carries the spliced metadata and the
 		// version token the splice produced, rather than the ones from before it.
-		r.result.Items[index].Issue = updated.Issue
+		r.snapshots[id] = updated.Issue
 		r.result.Items[index].RowVersion = updated.Issue.RowVersion
 	}
 	return nil

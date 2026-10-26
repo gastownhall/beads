@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -1098,5 +1100,50 @@ func TestStepTypeToIssueType(t *testing.T) {
 		if got := stepTypeToIssueType(tt.stepType); got != tt.want {
 			t.Errorf("stepTypeToIssueType(%q) = %q, want %q", tt.stepType, got, tt.want)
 		}
+	}
+}
+
+func TestResolveAndCookFormula_AspectsShareExpansionBudget(t *testing.T) {
+	formulaDir := t.TempDir()
+	var aspects []string
+	for i := 0; i < 15; i++ {
+		name := fmt.Sprintf("double-%d", i)
+		aspects = append(aspects, fmt.Sprintf("%q", name))
+		aspectTOML := fmt.Sprintf(`formula = %q
+version = 1
+type = "aspect"
+
+[[advice]]
+target = "*"
+[advice.before]
+id = "pre-%d-{step.id}"
+title = "Pre %d {step.title}"
+`, name, i, i)
+		if err := os.WriteFile(filepath.Join(formulaDir, name+".formula.toml"), []byte(aspectTOML), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	workflowPath := filepath.Join(formulaDir, "aspect-bomb.formula.toml")
+	workflowTOML := fmt.Sprintf(`formula = "aspect-bomb"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "work"
+title = "Work"
+
+[compose]
+aspects = [%s]
+`, strings.Join(aspects, ", "))
+	if err := os.WriteFile(workflowPath, []byte(workflowTOML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := loadAndResolveFormula(workflowPath, []string{formulaDir}); !errors.Is(err, formula.ErrExpansionLimit) {
+		t.Fatalf("loadAndResolveFormula err = %v, want ErrExpansionLimit", err)
+	}
+	if _, err := resolveAndCookFormula("aspect-bomb", []string{formulaDir}); !errors.Is(err, formula.ErrExpansionLimit) {
+		t.Fatalf("resolveAndCookFormula err = %v, want ErrExpansionLimit", err)
 	}
 }

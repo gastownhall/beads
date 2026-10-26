@@ -421,6 +421,7 @@
 40 25 TestReadyWorkPageTotal
 40 25 TestWithPeerAuth_RestoresAbsentEnv
 
+40 26 TestBatchApplyPersistenceMoveBeforeLaterItem
 40 26 TestEmbeddedIssueOperationsCreateClosedDerivesTheClosedStamp
 40 26 TestEmbeddedMigration0058CleansOrphanedAndInvalidWispDependenciesRowsBeforeAddingConstraints
 40 26 TestEmbeddedOpenForReadOnlyCommand_LenientGate
@@ -538,6 +539,7 @@
 40 34 TestQuerierContract
 40 34 TestReadyWorkStatementBudget
 
+40 35 TestBatchApplyHydratesEachIssueOnce
 40 35 TestEmbeddedBatchCloserAllIdempotentBatchLandsNothing
 40 35 TestEmbeddedClaimIssueWrapperClaimsTheWispPlane
 40 35 TestEmbeddedDependencyEditorGateScopeFollowsTheEdgeType

@@ -35,6 +35,13 @@ func HistoryEntry(provenance, fallback string) string {
 
 // ExecuteCreate applies a guarded create in tx and reports durable tables changed.
 func ExecuteCreate(ctx context.Context, tx *sql.Tx, request publicops.CreateRequest) (publicops.CreateResult, ChangedTables, error) {
+	return executeCreate(ctx, tx, request, true)
+}
+
+// executeCreate is ExecuteCreate with the result snapshot made optional. Without
+// it the result's Issue is the row as written, not re-read: enough for its id
+// and plane, and nothing a caller should hand on as a snapshot.
+func executeCreate(ctx context.Context, tx *sql.Tx, request publicops.CreateRequest, hydrate bool) (publicops.CreateResult, ChangedTables, error) {
 	attempt := CloneCreateRequest(request)
 	if err := ValidatePublicCreateRequest(attempt); err != nil {
 		return publicops.CreateResult{}, nil, err
@@ -109,6 +116,9 @@ func ExecuteCreate(ctx context.Context, tx *sql.Tx, request publicops.CreateRequ
 	if childCounterChanged {
 		tables.Add("child_counters")
 	}
+	if !hydrate {
+		return publicops.CreateResult{Issue: issue}, tables, nil
+	}
 	hydrated, err := HydrateIssueOperationResult(ctx, tx, issue.ID, true)
 	if err != nil {
 		return publicops.CreateResult{}, nil, err
@@ -136,15 +146,15 @@ func skippedDependencyError(skipped []skippedDependency) error {
 
 // ExecuteUpdate applies a guarded update in tx and reports durable tables changed.
 func ExecuteUpdate(ctx context.Context, tx *sql.Tx, request publicops.UpdateRequest) (publicops.UpdateResult, ChangedTables, error) {
-	return executeUpdate(ctx, tx, request, true)
+	return executeUpdate(ctx, tx, request, true, true)
 }
 
 // executeUpdate is ExecuteUpdate with the template guard made optional, for the
 // one caller that is not an update of an existing row: the batch apply's
 // metadata splice, which finishes a CREATE item of the same request — a
 // template the request itself is creating is still being written, not
-// modified.
-func executeUpdate(ctx context.Context, tx *sql.Tx, request publicops.UpdateRequest, guardTemplate bool) (publicops.UpdateResult, ChangedTables, error) {
+// modified. Without hydrate the result carries no Issue.
+func executeUpdate(ctx context.Context, tx *sql.Tx, request publicops.UpdateRequest, guardTemplate, hydrate bool) (publicops.UpdateResult, ChangedTables, error) {
 	attempt := CloneUpdateRequest(request)
 	if attempt.Actor == "" || attempt.IssueID == "" {
 		return publicops.UpdateResult{}, nil, fmt.Errorf("%w: update requires actor and issue ID", storage.ErrValidation)
@@ -304,6 +314,9 @@ func executeUpdate(ctx context.Context, tx *sql.Tx, request publicops.UpdateRequ
 			return publicops.UpdateResult{}, nil, err
 		}
 	}
+	if !hydrate {
+		return publicops.UpdateResult{Changed: changedAny}, tables, nil
+	}
 	hydrated, err := HydrateIssueOperationResult(ctx, tx, attempt.IssueID, false)
 	if err != nil {
 		return publicops.UpdateResult{}, nil, err
@@ -326,6 +339,12 @@ func claimAdvancedTheRow(claimed *ClaimResult, actor string) bool {
 
 // ExecuteClose applies a guarded close in tx and reports durable tables changed.
 func ExecuteClose(ctx context.Context, tx *sql.Tx, request publicops.CloseRequest) (publicops.CloseResult, ChangedTables, error) {
+	return executeClose(ctx, tx, request, true)
+}
+
+// executeClose is ExecuteClose with the result snapshot made optional; without
+// it the result carries no Issue.
+func executeClose(ctx context.Context, tx *sql.Tx, request publicops.CloseRequest, hydrate bool) (publicops.CloseResult, ChangedTables, error) {
 	attempt := CloneCloseRequest(request)
 	if attempt.Actor == "" || attempt.IssueID == "" {
 		return publicops.CloseResult{}, nil, fmt.Errorf("%w: close requires actor and issue ID", storage.ErrValidation)
@@ -343,11 +362,14 @@ func ExecuteClose(ctx context.Context, tx *sql.Tx, request publicops.CloseReques
 	if closed.IssueRowsChanged {
 		tables.Add("issues")
 	}
-	hydrated, err := HydrateIssueOperationResult(ctx, tx, attempt.IssueID, false)
-	if err != nil {
-		return publicops.CloseResult{}, nil, err
+	result := publicops.CloseResult{Changed: changed, OpenChildren: closed.OpenChildren}
+	if hydrate {
+		hydrated, err := HydrateIssueOperationResult(ctx, tx, attempt.IssueID, false)
+		if err != nil {
+			return publicops.CloseResult{}, nil, err
+		}
+		result.Issue = hydrated
 	}
-	result := publicops.CloseResult{Issue: hydrated, Changed: changed, OpenChildren: closed.OpenChildren}
 	if attempt.AutoCloseMolecule {
 		auto, autoTables, err := CloseCompletedMoleculeInTx(ctx, tx, attempt.IssueID, attempt.Actor, attempt.Session)
 		if err != nil {

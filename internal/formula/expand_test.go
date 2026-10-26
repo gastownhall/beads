@@ -1,6 +1,8 @@
 package formula
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1270,4 +1272,63 @@ func TestExpansionVarRefs(t *testing.T) {
 			t.Errorf("expansion without a template: ExpansionVarRefs() = %v, want nil", got)
 		}
 	})
+}
+
+func writeFanOutExpansion(t *testing.T, width int) *Parser {
+	t.Helper()
+	template := make([]map[string]string, width)
+	for i := range template {
+		template[i] = map[string]string{"id": fmt.Sprintf("{target}.s%d", i), "title": "Step"}
+	}
+	fanout, err := json.Marshal(map[string]any{
+		"formula":  "fanout",
+		"type":     "expansion",
+		"version":  1,
+		"template": template,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "fanout.formula.json"), fanout, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return NewParser(dir)
+}
+
+func TestApplyExpansionsWithBudget_ChainedMapsOverLimit(t *testing.T) {
+	parser := writeFanOutExpansion(t, 100)
+	compose := &ComposeRules{}
+	for i := 0; i < 5; i++ {
+		compose.Map = append(compose.Map, &MapRule{Select: "*", With: "fanout"})
+	}
+
+	_, err := ApplyExpansionsWithBudget([]*Step{{ID: "seed", Title: "Seed"}}, compose, parser, NewExpansionBudget("chain"))
+	if !errors.Is(err, ErrExpansionLimit) {
+		t.Fatalf("err = %v, want ErrExpansionLimit", err)
+	}
+	if !strings.Contains(err.Error(), `formula "chain"`) || !strings.Contains(err.Error(), "10000") {
+		t.Errorf("err = %q, want it to name the formula and the limit", err)
+	}
+}
+
+func TestApplyExpansionsWithBudget_SharesBudgetWithLoops(t *testing.T) {
+	parser := writeFanOutExpansion(t, 2)
+	steps := []*Step{{
+		ID:   "batch",
+		Loop: &LoopSpec{Count: MaxExpandedSteps - 1, Body: []*Step{{ID: "item", Title: "Item"}}},
+	}}
+	compose := &ComposeRules{Map: []*MapRule{{Select: "batch.iter1.item", With: "fanout"}}}
+
+	budget := NewExpansionBudget("shared")
+	looped, err := ApplyControlFlowWithBudget(steps, compose, budget)
+	if err != nil {
+		t.Fatalf("ApplyControlFlowWithBudget: %v", err)
+	}
+	if _, err := ApplyExpansions(looped, compose, parser); err != nil {
+		t.Fatalf("a fresh budget should fit the map alone: %v", err)
+	}
+	if _, err := ApplyExpansionsWithBudget(looped, compose, parser, budget); !errors.Is(err, ErrExpansionLimit) {
+		t.Fatalf("err = %v, want ErrExpansionLimit from the shared budget", err)
+	}
 }

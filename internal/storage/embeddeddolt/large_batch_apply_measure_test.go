@@ -434,10 +434,19 @@ func TestLargeBatchApplyWallClock_Embedded(t *testing.T) {
 //
 // Net: classic +49 (seven distinct parent-child adds; the eighth repeats a
 // pair and is a no-op). 356 and 712 are unchanged.
+//
+// Re-pinned for hydrating each batch row once (was 6396 / 12790 / 835): an
+// update that is not the request's last write to its row reads only its row
+// version instead of the full snapshot, and the final snapshot is shared by
+// every item on the row. Each such update in these shapes is an assign that
+// follows its create: -7 per assign.
+//
+// Net: 356 -111 (incl. the documented 1-statement jitter), 712 -224,
+// classic -70.
 var pinnedEmbeddedStatementCounts = map[string]int64{
-	"356 (mol 1x)":    6396,
-	large712ShapeName: 12790,
-	"40 (classic)":    835,
+	"356 (mol 1x)":    6285,
+	large712ShapeName: 12566,
+	"40 (classic)":    765,
 }
 
 // BenchmarkLargeBatchApply_Embedded benchmarks issueops.ApplyBatchInTx on

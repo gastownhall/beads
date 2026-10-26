@@ -342,10 +342,13 @@ type ItemResult struct {
 	// without touching it. A caller needing complete change detection combines
 	// it with updated_at, status and the label set. See types.Issue.RowVersion.
 	RowVersion int64
-	// Issue is a detached post-item snapshot with labels and dependency
-	// records, hydrated inside the transaction that applied the item — the
-	// snapshot CreateResult.Issue and UpdateResult.Issue describe. It is nil
-	// for ItemDepAdd, which acts on a graph rather than on a row.
+	// Issue is a detached snapshot with labels and dependency records,
+	// hydrated inside the transaction that applied the item — the snapshot
+	// CreateResult.Issue and UpdateResult.Issue describe — of the row as the
+	// request's last create, update or close on it left it. Items on the same
+	// issue share that one snapshot, so a request touching one large row many
+	// times holds it once. It is nil for ItemDepAdd, which acts on a graph
+	// rather than on a row.
 	//
 	// IT IS NOT ON THE WIRE, and the split is deliberate rather than an
 	// oversight. The Go contract carries it because every decorator over this

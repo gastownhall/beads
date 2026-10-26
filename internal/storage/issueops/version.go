@@ -23,10 +23,21 @@ import (
 // withRetryTx replays; the replayed attempt then re-reads the new version here
 // and refuses. Together they close the read-then-write window that a bare
 // read-then-write would leave open.
+func CheckVersionInTx(ctx context.Context, tx DBTX, id string, expected int64) error {
+	current, err := readRowVersionInTx(ctx, tx, id, IsActiveWispInTx(ctx, tx, id))
+	if err != nil {
+		return err
+	}
+	if current != expected {
+		return &storage.VersionMismatchError{Expected: expected, Current: current}
+	}
+	return nil
+}
+
+// readRowVersionInTx reads id's row_lock from the plane isWisp names.
 //
 //nolint:gosec // G201: table name comes from WispTableRouting (hardcoded constants)
-func CheckVersionInTx(ctx context.Context, tx DBTX, id string, expected int64) error {
-	isWisp := IsActiveWispInTx(ctx, tx, id)
+func readRowVersionInTx(ctx context.Context, tx DBTX, id string, isWisp bool) (int64, error) {
 	issueTable, _, _, _ := WispTableRouting(isWisp)
 
 	// row_lock is NOT NULL DEFAULT 0, but scan defensively so a NULL maps to 0
@@ -36,13 +47,10 @@ func CheckVersionInTx(ctx context.Context, tx DBTX, id string, expected int64) e
 		fmt.Sprintf("SELECT row_lock FROM %s WHERE id = ?", issueTable), id,
 	).Scan(&current)
 	if errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("%w: issue %s", storage.ErrNotFound, id)
+		return 0, fmt.Errorf("%w: issue %s", storage.ErrNotFound, id)
 	}
 	if err != nil {
-		return fmt.Errorf("failed to read row version for %s: %w", id, err)
+		return 0, fmt.Errorf("failed to read row version for %s: %w", id, err)
 	}
-	if current.Int64 != expected {
-		return &storage.VersionMismatchError{Expected: expected, Current: current.Int64}
-	}
-	return nil
+	return current.Int64, nil
 }

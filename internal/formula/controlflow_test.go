@@ -1,6 +1,9 @@
 package formula
 
 import (
+	"errors"
+	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -976,5 +979,142 @@ func TestValidateLoopSpec_Range(t *testing.T) {
 				t.Errorf("validateLoopSpec() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestApplyControlFlowWithBudget_NestedLoopsOverLimitFailFast(t *testing.T) {
+	steps := []*Step{{
+		ID: "outer",
+		Loop: &LoopSpec{
+			Count: 1000,
+			Body: []*Step{{
+				ID: "inner",
+				Loop: &LoopSpec{
+					Count: 1000,
+					Body:  []*Step{{ID: "work", Title: "Work"}},
+				},
+			}},
+		},
+	}}
+
+	_, err := ApplyControlFlowWithBudget(steps, nil, NewExpansionBudget("bomb"))
+	if !errors.Is(err, ErrExpansionLimit) {
+		t.Fatalf("err = %v, want ErrExpansionLimit", err)
+	}
+	if !strings.Contains(err.Error(), `formula "bomb"`) || !strings.Contains(err.Error(), "10000") {
+		t.Errorf("err = %q, want it to name the formula and the limit", err)
+	}
+}
+
+func TestApplyLoops_NestedLoopBodyChargedBeforeCloning(t *testing.T) {
+	body := make([]*Step, 9000)
+	for i := range body {
+		body[i] = &Step{ID: fmt.Sprintf("work%d", i), Title: "Work"}
+	}
+	steps := []*Step{{
+		ID: "outer",
+		Loop: &LoopSpec{
+			Count: 1000,
+			Body:  []*Step{{ID: "inner", Loop: &LoopSpec{Count: 1, Body: body}}},
+		},
+	}}
+
+	budget := NewExpansionBudget("wide")
+	_, err := ApplyControlFlowWithBudget(steps, nil, budget)
+	if !errors.Is(err, ErrExpansionLimit) {
+		t.Fatalf("err = %v, want ErrExpansionLimit", err)
+	}
+	// If countSteps charges Loop.Body up front, the outer loop charges
+	// 1 + 9000 = 9001 on iteration 1 and refuses iteration 2 before cloning
+	// another 9000 steps. Without Loop.Body in countSteps, the outer loop
+	// clones all 1000 iterations (spending 1000) and fails later inside
+	// loop "outer.iter2.inner" with budget.used == 9998.
+	if !strings.Contains(err.Error(), `loop "outer":`) {
+		t.Errorf("err = %q, want outer loop refused before inner loop runs", err)
+	}
+	if budget.used != 9001 {
+		t.Errorf("budget spent %d, want 9001 (one outer iteration charged before refusing the second)", budget.used)
+	}
+}
+
+func TestApplyLoops_NestedLoopBodyNotChargedTwice(t *testing.T) {
+	body := make([]*Step, 3000)
+	for i := range body {
+		body[i] = &Step{ID: fmt.Sprintf("work%d", i), Title: "Work"}
+	}
+	steps := []*Step{{
+		ID: "outer",
+		Loop: &LoopSpec{
+			Count: 2,
+			Body:  []*Step{{ID: "inner", Loop: &LoopSpec{Count: 1, Body: body}}},
+		},
+	}}
+
+	got, err := ApplyControlFlowWithBudget(steps, nil, NewExpansionBudget("fits"))
+	if err != nil {
+		t.Fatalf("ApplyControlFlowWithBudget: %v", err)
+	}
+	if len(got) != 6000 {
+		t.Errorf("got %d steps, want 6000", len(got))
+	}
+}
+
+func TestApplyLoops_HugeRangeOverLimit(t *testing.T) {
+	steps := []*Step{{
+		ID: "sweep",
+		Loop: &LoopSpec{
+			Range: "1..1000000000",
+			Var:   "i",
+			Body:  []*Step{{ID: "visit", Title: "Visit {i}"}},
+		},
+	}}
+
+	if _, err := ApplyLoops(steps); !errors.Is(err, ErrExpansionLimit) {
+		t.Fatalf("err = %v, want ErrExpansionLimit", err)
+	}
+}
+
+func TestApplyControlFlowWithBudget_AtLimitStillCooks(t *testing.T) {
+	steps := []*Step{{
+		ID: "process",
+		Loop: &LoopSpec{
+			Count: MaxExpandedSteps / 2,
+			Body: []*Step{
+				{ID: "fetch", Title: "Fetch"},
+				{ID: "store", Title: "Store", Needs: []string{"fetch"}},
+			},
+		},
+	}}
+
+	result, err := ApplyControlFlowWithBudget(steps, nil, NewExpansionBudget("big"))
+	if err != nil {
+		t.Fatalf("ApplyControlFlowWithBudget: %v", err)
+	}
+	if len(result) != MaxExpandedSteps {
+		t.Fatalf("got %d steps, want %d", len(result), MaxExpandedSteps)
+	}
+	last := result[len(result)-2]
+	if want := []string{fmt.Sprintf("process.iter%d.store", MaxExpandedSteps/2-1)}; !reflect.DeepEqual(last.Needs, want) {
+		t.Errorf("last iteration's first step needs %v, want %v", last.Needs, want)
+	}
+}
+
+func TestChainExpandedIterations_DoesNotConfuseIterationPrefixes(t *testing.T) {
+	var steps []*Step
+	for i := 1; i <= 11; i++ {
+		steps = append(steps, &Step{ID: fmt.Sprintf("loop.iter%d.a", i)})
+	}
+	steps = append(steps, &Step{ID: "loop.iter01.x"}, &Step{ID: "other.iter2.a"})
+
+	chainExpandedIterations(steps, "loop", 11)
+
+	if want := []string{"loop.iter9.a"}; !reflect.DeepEqual(steps[9].Needs, want) {
+		t.Errorf("iter10 needs %v, want %v", steps[9].Needs, want)
+	}
+	if want := []string{"loop.iter10.a"}; !reflect.DeepEqual(steps[10].Needs, want) {
+		t.Errorf("iter11 needs %v, want %v", steps[10].Needs, want)
+	}
+	if steps[11].Needs != nil || steps[12].Needs != nil {
+		t.Errorf("non-iteration steps were chained: %v, %v", steps[11].Needs, steps[12].Needs)
 	}
 }

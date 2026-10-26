@@ -13,6 +13,7 @@
 package formula
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 )
@@ -60,20 +61,27 @@ func MatchGlob(pattern, stepID string) bool {
 // existed BEFORE this call. Steps inserted by advice (before/after/around)
 // are not matched, preventing infinite recursion.
 func ApplyAdvice(steps []*Step, advice []*AdviceRule) []*Step {
+	res, _ := ApplyAdviceWithBudget(steps, advice, nil)
+	return res
+}
+
+// ApplyAdviceWithBudget is ApplyAdvice charging every step that advice inserts
+// to budget. A nil budget applies no limit.
+func ApplyAdviceWithBudget(steps []*Step, advice []*AdviceRule, budget *ExpansionBudget) ([]*Step, error) {
 	if len(advice) == 0 {
-		return steps
+		return steps, nil
 	}
 
 	// Collect original step IDs to prevent self-matching
 	originalIDs := collectStepIDs(steps)
 
-	return applyAdviceWithGuard(steps, advice, originalIDs)
+	return applyAdviceWithGuard(steps, advice, originalIDs, budget)
 }
 
 // ApplyAdviceToOriginalOnly applies advice rules but only matches steps
 // whose IDs are in the originalIDs set. This prevents aspects from matching
 // steps they themselves inserted.
-func applyAdviceWithGuard(steps []*Step, advice []*AdviceRule, originalIDs map[string]bool) []*Step {
+func applyAdviceWithGuard(steps []*Step, advice []*AdviceRule, originalIDs map[string]bool, budget *ExpansionBudget) ([]*Step, error) {
 	result := make([]*Step, 0, len(steps)*2) // Pre-allocate for insertions
 
 	for _, step := range steps {
@@ -112,6 +120,12 @@ func applyAdviceWithGuard(steps []*Step, advice []*AdviceRule, originalIDs map[s
 			}
 		}
 
+		if added := len(beforeSteps) + len(afterSteps); added > 0 && budget != nil {
+			if err := budget.spend(added); err != nil {
+				return nil, fmt.Errorf("advice on %q: %w", step.ID, err)
+			}
+		}
+
 		// Insert before steps
 		for _, bs := range beforeSteps {
 			result = append(result, bs)
@@ -147,11 +161,15 @@ func applyAdviceWithGuard(steps []*Step, advice []*AdviceRule, originalIDs map[s
 
 		// Recursively apply advice to children
 		if len(step.Children) > 0 {
-			clonedStep.Children = ApplyAdvice(step.Children, advice)
+			children, err := applyAdviceWithGuard(step.Children, advice, originalIDs, budget)
+			if err != nil {
+				return nil, err
+			}
+			clonedStep.Children = children
 		}
 	}
 
-	return result
+	return result, nil
 }
 
 // adviceStepToStep converts an AdviceStep to a Step.

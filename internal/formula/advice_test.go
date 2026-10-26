@@ -1,6 +1,9 @@
 package formula
 
 import (
+	"errors"
+	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -372,4 +375,33 @@ func getStepIDs(steps []*Step) []string {
 		ids[i] = s.ID
 	}
 	return ids
+}
+
+func TestApplyAdviceWithBudget_ChainedAspectsRefusedPastLimit(t *testing.T) {
+	steps := []*Step{{ID: "work", Title: "Work"}}
+	budget := NewExpansionBudget("aspect-bomb")
+
+	var err error
+	for i := 0; i < 20; i++ {
+		advice := []*AdviceRule{{
+			Target: "*",
+			Before: &AdviceStep{
+				ID:    fmt.Sprintf("aspect%d-{step.id}", i),
+				Title: "Before {step.id}",
+			},
+		}}
+		steps, err = ApplyAdviceWithBudget(steps, advice, budget)
+		if err != nil {
+			break
+		}
+	}
+	if !errors.Is(err, ErrExpansionLimit) {
+		t.Fatalf("err = %v, want ErrExpansionLimit", err)
+	}
+	if !strings.Contains(err.Error(), `formula "aspect-bomb"`) {
+		t.Errorf("err = %q, want formula name", err)
+	}
+	if budget.used > MaxExpandedSteps {
+		t.Errorf("budget.used = %d, want <= %d", budget.used, MaxExpandedSteps)
+	}
 }

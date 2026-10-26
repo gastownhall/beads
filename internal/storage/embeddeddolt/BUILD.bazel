@@ -111,6 +111,7 @@ go_test(
     srcs = [
         "active_database_size_test.go",
         "batch_apply_contract_test.go",
+        "batch_apply_snapshot_test.go",
         "batch_closer_contract_test.go",
         "batch_creator_contract_test.go",
         "batch_getter_contract_test.go",

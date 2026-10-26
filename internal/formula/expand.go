@@ -16,6 +16,7 @@
 package formula
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -26,6 +27,52 @@ import (
 // generation. The limit applies to template children, not to expansion rules.
 const DefaultMaxExpansionDepth = 5
 
+// MaxExpandedSteps is the most steps one cook may generate across all loop,
+// range, advice, aspect, expand and map transformations together.
+const MaxExpandedSteps = 10000
+
+// ErrExpansionLimit is returned when a cook would generate more than
+// MaxExpandedSteps steps.
+var ErrExpansionLimit = errors.New("formula expansion limit exceeded")
+
+// ExpansionBudget counts the steps generated during one cook so that nested
+// loops and chained expansions cannot multiply without bound.
+type ExpansionBudget struct {
+	formula string
+	used    int
+}
+
+// NewExpansionBudget returns a budget of MaxExpandedSteps for the named formula.
+func NewExpansionBudget(formula string) *ExpansionBudget {
+	return &ExpansionBudget{formula: formula}
+}
+
+// spend reserves n steps, refusing before anything is allocated if the
+// cumulative total would exceed MaxExpandedSteps.
+func (b *ExpansionBudget) spend(n int) error {
+	if n <= MaxExpandedSteps-b.used {
+		b.used += n
+		return nil
+	}
+	if b.formula == "" {
+		return fmt.Errorf("%w: more than %d expanded steps", ErrExpansionLimit, MaxExpandedSteps)
+	}
+	return fmt.Errorf("%w: formula %q expands to more than %d steps", ErrExpansionLimit, b.formula, MaxExpandedSteps)
+}
+
+// countSteps counts the steps a clone of steps allocates: nested children and
+// the bodies of nested loops, which are cloned before they expand.
+func countSteps(steps []*Step) int {
+	n := len(steps)
+	for _, s := range steps {
+		n += countSteps(s.Children)
+		if s.Loop != nil {
+			n += countSteps(s.Loop.Body)
+		}
+	}
+	return n
+}
+
 // ApplyExpansions applies all expand and map rules to a formula's steps.
 // Returns a new steps slice with expansions applied.
 // The original steps slice is not modified.
@@ -33,6 +80,12 @@ const DefaultMaxExpansionDepth = 5
 // The parser is used to load referenced expansion formulas by name.
 // If parser is nil, no expansions are applied.
 func ApplyExpansions(steps []*Step, compose *ComposeRules, parser *Parser) ([]*Step, error) {
+	return ApplyExpansionsWithBudget(steps, compose, parser, NewExpansionBudget(""))
+}
+
+// ApplyExpansionsWithBudget is ApplyExpansions charging every generated step
+// to budget.
+func ApplyExpansionsWithBudget(steps []*Step, compose *ComposeRules, parser *Parser, budget *ExpansionBudget) ([]*Step, error) {
 	if compose == nil || parser == nil {
 		return steps, nil
 	}
@@ -75,6 +128,10 @@ func ApplyExpansions(steps []*Step, compose *ComposeRules, parser *Parser) ([]*S
 
 		// Merge formula default vars with rule overrides
 		vars := mergeVars(expFormula, rule.Vars)
+
+		if err := budget.spend(countSteps(expFormula.Template)); err != nil {
+			return nil, fmt.Errorf("expand %q: %w", rule.Target, err)
+		}
 
 		// Expand the target step (start at depth 0)
 		expandedSteps, err := expandStep(targetStep, expFormula.Template, vars)
@@ -132,7 +189,11 @@ func ApplyExpansions(steps []*Step, compose *ComposeRules, parser *Parser) ([]*S
 		}
 
 		// Expand each matching step
+		templateSize := countSteps(expFormula.Template)
 		for _, targetStep := range toExpand {
+			if err := budget.spend(templateSize); err != nil {
+				return nil, fmt.Errorf("map %q: %w", rule.Select, err)
+			}
 			expandedSteps, err := expandStep(targetStep, expFormula.Template, vars)
 			if err != nil {
 				return nil, fmt.Errorf("map %q -> %q: %w", rule.Select, targetStep.ID, err)
@@ -150,9 +211,6 @@ func ApplyExpansions(steps []*Step, compose *ComposeRules, parser *Parser) ([]*S
 				lastStepID := expandedSteps[len(expandedSteps)-1].ID
 				result = UpdateDependenciesForExpansion(result, targetStep.ID, lastStepID)
 			}
-
-			// Rebuild stepMap from result so subsequent iterations see resolved deps
-			stepMap = buildStepMap(result)
 		}
 	}
 
@@ -507,12 +565,22 @@ func ApplyInlineExpansions(steps []*Step, parser *Parser) ([]*Step, error) {
 		return steps, nil
 	}
 
-	return applyInlineExpansionsRecursive(steps, parser, 0)
+	return ApplyInlineExpansionsWithBudget(steps, parser, NewExpansionBudget(""))
+}
+
+// ApplyInlineExpansionsWithBudget is ApplyInlineExpansions charging every
+// generated step to budget.
+func ApplyInlineExpansionsWithBudget(steps []*Step, parser *Parser, budget *ExpansionBudget) ([]*Step, error) {
+	if parser == nil {
+		return steps, nil
+	}
+
+	return applyInlineExpansionsRecursive(steps, parser, 0, budget)
 }
 
 // applyInlineExpansionsRecursive handles inline expansions for a slice of steps.
 // depth tracks recursion to prevent infinite expansion loops.
-func applyInlineExpansionsRecursive(steps []*Step, parser *Parser, depth int) ([]*Step, error) {
+func applyInlineExpansionsRecursive(steps []*Step, parser *Parser, depth int, budget *ExpansionBudget) ([]*Step, error) {
 	if depth > DefaultMaxExpansionDepth {
 		return nil, fmt.Errorf("inline expansion depth limit exceeded: max %d levels", DefaultMaxExpansionDepth)
 	}
@@ -540,6 +608,10 @@ func applyInlineExpansionsRecursive(steps []*Step, parser *Parser, depth int) ([
 			// Merge formula default vars with step's ExpandVars overrides
 			vars := mergeVars(expFormula, step.ExpandVars)
 
+			if err := budget.spend(countSteps(expFormula.Template)); err != nil {
+				return nil, fmt.Errorf("inline expand on step %q: %w", step.ID, err)
+			}
+
 			// Expand the step using the template (reuse existing expandStep)
 			expandedSteps, err := expandStep(step, expFormula.Template, vars)
 			if err != nil {
@@ -550,7 +622,7 @@ func applyInlineExpansionsRecursive(steps []*Step, parser *Parser, depth int) ([
 			propagateTargetDeps(step, expandedSteps)
 
 			// Recursively process expanded steps for nested inline expansions
-			processedSteps, err := applyInlineExpansionsRecursive(expandedSteps, parser, depth+1)
+			processedSteps, err := applyInlineExpansionsRecursive(expandedSteps, parser, depth+1, budget)
 			if err != nil {
 				return nil, err
 			}
@@ -561,7 +633,7 @@ func applyInlineExpansionsRecursive(steps []*Step, parser *Parser, depth int) ([
 			clone := cloneStep(step)
 
 			if len(step.Children) > 0 {
-				processedChildren, err := applyInlineExpansionsRecursive(step.Children, parser, depth)
+				processedChildren, err := applyInlineExpansionsRecursive(step.Children, parser, depth, budget)
 				if err != nil {
 					return nil, err
 				}

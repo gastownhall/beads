@@ -12,6 +12,7 @@ package formula
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -20,6 +21,12 @@ import (
 // Conditional loops expand once and add a "loop:until" label for runtime evaluation.
 // Returns a new steps slice with loops expanded.
 func ApplyLoops(steps []*Step) ([]*Step, error) {
+	return applyLoops(steps, NewExpansionBudget(""), false)
+}
+
+// applyLoops expands the loops in steps. charged reports whether steps are
+// clones an outer loop already spent budget on.
+func applyLoops(steps []*Step, budget *ExpansionBudget, charged bool) ([]*Step, error) {
 	result := make([]*Step, 0, len(steps))
 
 	for _, step := range steps {
@@ -27,7 +34,7 @@ func ApplyLoops(steps []*Step) ([]*Step, error) {
 			// No loop - recursively process children
 			clone := cloneStep(step)
 			if len(step.Children) > 0 {
-				children, err := ApplyLoops(step.Children)
+				children, err := applyLoops(step.Children, budget, charged)
 				if err != nil {
 					return nil, err
 				}
@@ -42,8 +49,13 @@ func ApplyLoops(steps []*Step) ([]*Step, error) {
 			return nil, err
 		}
 
+		// The expansion replaces this charged clone, so stop counting it.
+		if charged {
+			budget.used -= countSteps([]*Step{step})
+		}
+
 		// Expand the loop
-		expanded, err := expandLoop(step)
+		expanded, err := expandLoopWithVars(step, nil, budget)
 		if err != nil {
 			return nil, err
 		}
@@ -107,19 +119,18 @@ func validateLoopSpec(loop *LoopSpec, stepID string) error {
 	return nil
 }
 
-// expandLoop expands a loop step into its constituent steps.
-func expandLoop(step *Step) ([]*Step, error) {
-	return expandLoopWithVars(step, nil)
-}
-
 // expandLoopWithVars expands a loop step using the given variable context.
 // The vars map is used to resolve range expressions with variables.
-func expandLoopWithVars(step *Step, vars map[string]string) ([]*Step, error) {
+func expandLoopWithVars(step *Step, vars map[string]string, budget *ExpansionBudget) ([]*Step, error) {
 	var result []*Step
+	bodySize := countSteps(step.Loop.Body)
 
 	if step.Loop.Count > 0 {
 		// Fixed-count loop: expand body N times
 		for i := 1; i <= step.Loop.Count; i++ {
+			if err := budget.spend(bodySize); err != nil {
+				return nil, fmt.Errorf("loop %q: %w", step.ID, err)
+			}
 			iterSteps, err := expandLoopIteration(step, i, nil)
 			if err != nil {
 				return nil, err
@@ -129,7 +140,7 @@ func expandLoopWithVars(step *Step, vars map[string]string) ([]*Step, error) {
 
 		// Recursively expand any nested loops FIRST
 		var err error
-		result, err = ApplyLoops(result)
+		result, err = applyLoops(result, budget, true)
 		if err != nil {
 			return nil, err
 		}
@@ -157,6 +168,9 @@ func expandLoopWithVars(step *Step, vars map[string]string) ([]*Step, error) {
 		iterNum := 0
 		for val := rangeSpec.Start; val <= rangeSpec.End; val++ {
 			iterNum++
+			if err := budget.spend(bodySize); err != nil {
+				return nil, fmt.Errorf("loop %q: %w", step.ID, err)
+			}
 			// Build iteration vars: include the loop variable if specified
 			iterVars := make(map[string]string)
 			if step.Loop.Var != "" {
@@ -170,7 +184,7 @@ func expandLoopWithVars(step *Step, vars map[string]string) ([]*Step, error) {
 		}
 
 		// Recursively expand any nested loops FIRST
-		result, err = ApplyLoops(result)
+		result, err = applyLoops(result, budget, true)
 		if err != nil {
 			return nil, err
 		}
@@ -182,6 +196,9 @@ func expandLoopWithVars(step *Step, vars map[string]string) ([]*Step, error) {
 	} else {
 		// Conditional loop: expand once with loop metadata
 		// The runtime executor will re-run until condition is met or max reached
+		if err := budget.spend(bodySize); err != nil {
+			return nil, fmt.Errorf("loop %q: %w", step.ID, err)
+		}
 		iterSteps, err := expandLoopIteration(step, 1, nil)
 		if err != nil {
 			return nil, err
@@ -200,7 +217,7 @@ func expandLoopWithVars(step *Step, vars map[string]string) ([]*Step, error) {
 		}
 
 		// Recursively expand any nested loops
-		result, err = ApplyLoops(iterSteps)
+		result, err = applyLoops(iterSteps, budget, true)
 		if err != nil {
 			return nil, err
 		}
@@ -382,17 +399,16 @@ func chainExpandedIterations(steps []*Step, loopID string, count int) []*Step {
 	iterFirstIdx := make(map[int]int) // iteration -> index of first step
 	iterLastIdx := make(map[int]int)  // iteration -> index of last step
 
+	prefix := loopID + ".iter"
 	for i, s := range steps {
-		for iter := 1; iter <= count; iter++ {
-			prefix := fmt.Sprintf("%s.iter%d.", loopID, iter)
-			if strings.HasPrefix(s.ID, prefix) {
-				if _, found := iterFirstIdx[iter]; !found {
-					iterFirstIdx[iter] = i
-				}
-				iterLastIdx[iter] = i
-				break
-			}
+		iter, ok := loopIterationOf(s.ID, prefix)
+		if !ok || iter < 1 || iter > count {
+			continue
 		}
+		if _, found := iterFirstIdx[iter]; !found {
+			iterFirstIdx[iter] = i
+		}
+		iterLastIdx[iter] = i
 	}
 
 	// Chain: first step of iteration N+1 depends on last step of iteration N
@@ -407,6 +423,23 @@ func chainExpandedIterations(steps []*Step, loopID string, count int) []*Step {
 	}
 
 	return steps
+}
+
+// loopIterationOf parses N from an ID of the form {prefix}N.{rest}.
+func loopIterationOf(id, prefix string) (int, bool) {
+	rest, ok := strings.CutPrefix(id, prefix)
+	if !ok {
+		return 0, false
+	}
+	digits, _, ok := strings.Cut(rest, ".")
+	if !ok {
+		return 0, false
+	}
+	iter, err := strconv.Atoi(digits)
+	if err != nil || strconv.Itoa(iter) != digits {
+		return 0, false
+	}
+	return iter, true
 }
 
 // ApplyBranches wires fork-join dependency patterns.
@@ -550,10 +583,16 @@ func applyGatesWithMap(stepMap map[string]*Step, compose *ComposeRules) error {
 //
 // Returns a new steps slice. The original steps slice is not modified.
 func ApplyControlFlow(steps []*Step, compose *ComposeRules) ([]*Step, error) {
+	return ApplyControlFlowWithBudget(steps, compose, NewExpansionBudget(""))
+}
+
+// ApplyControlFlowWithBudget is ApplyControlFlow charging every step loops
+// generate to budget.
+func ApplyControlFlowWithBudget(steps []*Step, compose *ComposeRules, budget *ExpansionBudget) ([]*Step, error) {
 	var err error
 
-	// Apply loops first (expands steps) - ApplyLoops already returns new slice
-	steps, err = ApplyLoops(steps)
+	// Apply loops first (expands steps) - applyLoops already returns new slice
+	steps, err = applyLoops(steps, budget, false)
 	if err != nil {
 		return nil, fmt.Errorf("applying loops: %w", err)
 	}

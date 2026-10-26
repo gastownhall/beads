@@ -1239,6 +1239,10 @@ bd cook
     |   - Composition rules for bonding formulas together
     |   - Inheritance via extends
     |
+    | One cook may generate at most 10000 steps across loops, ranges, advice,
+    | aspects, expand and map rules. A formula that expands past that fails
+    | with "formula expansion limit exceeded".
+    |
     | The --persist flag enables the legacy behavior of writing the proto
     | to the database. This is useful when you want to reuse the same
     | proto multiple times without re-cooking.
