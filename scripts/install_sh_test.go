@@ -109,8 +109,9 @@ func installShSourcedLib(t *testing.T) string {
 // runInstallFromRelease drives the sourced install.sh copy through
 // install_from_release linux_amd64 with the network, archive and platform
 // stubbed, and returns its exit status, combined output, and the shared
-// call log the cp/mv/sudo stubs append every command to.
-func runInstallFromRelease(t *testing.T) installShRun {
+// call log the cp/mv/sudo stubs append every command to. readOnlyDir seeds
+// the install dir at mode 0555 so the sudo branch is the one taken.
+func runInstallFromRelease(t *testing.T, readOnlyDir bool) installShRun {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("install.sh is the Unix installer; Windows installs via install.ps1")
@@ -131,6 +132,13 @@ func runInstallFromRelease(t *testing.T) installShRun {
 	}
 	if err := os.WriteFile(filepath.Join(installDir, "bd"), []byte(installShOldPayload), 0o755); err != nil {
 		t.Fatal(err)
+	}
+	if readOnlyDir {
+		if err := os.Chmod(installDir, 0o555); err != nil {
+			t.Fatal(err)
+		}
+		// Restore writability so TempDir cleanup can empty the directory.
+		t.Cleanup(func() { _ = os.Chmod(installDir, 0o755) })
 	}
 
 	// The fake archive never needs to be a real tarball: tar is stubbed to
@@ -202,6 +210,25 @@ set -eu
 printf '%s\n' "mv $*" >>"$INSTALL_SH_CALL_LOG"
 exec "$REAL_MV" "$@"
 `)
+	// sudo (reachable only when the install dir is not writable) logs its
+	// argv like cp/mv, then makes the test-owned install dir writable and
+	// execs the real tool: the [[ -w ]] branch decision already happened
+	// with the dir at 0555, so the sudo branch is what runs, while the
+	// unprivileged executor can still perform the staged copy for real.
+	// cp and mv need explicit arms: through PATH they would resolve back to
+	// the wrappers above.
+	writeExecutable(t, filepath.Join(binDir, "sudo"), `#!/bin/sh
+set -eu
+printf '%s\n' "sudo $*" >>"$INSTALL_SH_CALL_LOG"
+chmod u+w "$INSTALL_TEST_DIR"
+cmd=$1
+shift
+case $cmd in
+  cp) exec "$REAL_CP" "$@" ;;
+  mv) exec "$REAL_MV" "$@" ;;
+  *) exec "$cmd" "$@" ;;
+esac
+`)
 
 	// The driver sources the copy (so the file's own set -e applies), then
 	// calls install_from_release the way main does — inside a condition,
@@ -241,7 +268,7 @@ exit 0
 		"REAL_CP=" + realCP,
 		"REAL_MV=" + realMV,
 	}
-	for _, name := range []string{"curl", "tar", "uname", "cp", "mv"} {
+	for _, name := range []string{"curl", "tar", "uname", "cp", "mv", "sudo"} {
 		requireShellCommandPath(t, bash, stateDir, env, name, binPath+"/"+name)
 	}
 
@@ -334,7 +361,7 @@ func stagedInstallPair(t *testing.T, log []string, prefix, installDir string) st
 // copy or move the mktemp-dir binary onto the live path, where a
 // cross-filesystem mv leaves bd partial for the whole copy window.
 func TestInstallShStagesAndRenamesIntoPlace(t *testing.T) {
-	run := runInstallFromRelease(t)
+	run := runInstallFromRelease(t, false)
 
 	if run.status != 0 {
 		t.Fatalf("install_from_release exited %d, want 0\n%s", run.status, run.output)
@@ -367,5 +394,37 @@ func TestInstallShStagesAndRenamesIntoPlace(t *testing.T) {
 
 	if leftovers, _ := filepath.Glob(filepath.Join(run.installDir, ".bd.install.tmp.*")); len(leftovers) > 0 {
 		t.Errorf("successful install left staged temps behind: %v", leftovers)
+	}
+}
+
+// TestInstallShSudoBranchStagesAndRenames is AC-2 of #5616: when the install
+// dir is not writable by the invoking user, the staged copy and the rename
+// must both run under sudo, with the same same-filesystem rename as AC-1,
+// and the mktemp-dir binary must never be moved onto bd directly.
+func TestInstallShSudoBranchStagesAndRenames(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("for euid 0 bash [[ -w ]] is true even at mode 0555, so the sudo branch cannot be taken")
+	}
+	run := runInstallFromRelease(t, true)
+
+	if run.status != 0 {
+		t.Fatalf("install_from_release exited %d, want 0\n%s", run.status, run.output)
+	}
+	target := filepath.Join(run.installDir, "bd")
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("read installed bd: %v\n%s", err, run.output)
+	}
+	if string(got) != installShNewPayload {
+		t.Errorf("installed bd holds %q, want the extracted payload %q", got, installShNewPayload)
+	}
+
+	rename := stagedInstallPair(t, run.callLog, "sudo ", run.installDir)
+	for _, call := range run.callLog {
+		fields := strings.Fields(call)
+		if len(fields) < 2 || fields[len(fields)-1] != target || call == rename {
+			continue
+		}
+		t.Errorf("command %q writes the live bd; only the staged rename\n  %s\nmay touch it", call, rename)
 	}
 }
