@@ -92,6 +92,10 @@ func (s *stopOnReadStore) PruneEventsJournal(context.Context, int64, int, int) (
 	return 0, errors.New("stopOnReadStore does not prune")
 }
 
+func (s *stopOnReadStore) JournalHead(context.Context) (int64, int64, error) {
+	return 0, 0, errors.New("stopOnReadStore does not report a head")
+}
+
 // TestEventsTailFollowStopMidRead pins how a follower classifies a read that
 // fails on the same turn as its stop, in both of runEventsTail's read sites:
 // the catch-up read and the poll. A read the stop canceled is a clean stop,
