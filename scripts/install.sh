@@ -369,10 +369,14 @@ install_from_release() {
         mkdir -p "$install_dir"
     fi
 
-    # Install binary
+    # Install binary. Stage a copy inside $install_dir, then rename it over
+    # bd: the rename is same-filesystem, so the live path never holds a
+    # partial binary. A plain mv from $tmp_dir (often tmpfs) copies straight
+    # onto the live path instead (#5611, #5616).
+    local staged_bd="$install_dir/.bd.install.tmp.$$"
     log_info "Installing to $install_dir..."
     if [[ -w "$install_dir" ]]; then
-        if ! mv "$extracted_bd" "$install_dir/bd"; then
+        if ! { cp "$extracted_bd" "$staged_bd" && mv -f "$staged_bd" "$install_dir/bd"; }; then
             log_error "Failed to install bd to $install_dir"
             cd - > /dev/null || cd "$HOME"
             rm -rf "$tmp_dir"
