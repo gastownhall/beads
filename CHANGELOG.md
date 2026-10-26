@@ -932,6 +932,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd doctor` no longer reports a `.beads/.gitignore` stricter than 0600
+  (e.g. 0400) as having unexpected permissions, and `bd doctor --fix` no
+  longer adds owner-write to such a file when its patterns are complete; only
+  group or other access is loose. When tightening a looser file to 0600 fails
+  after every required pattern is in place (a file owned by another user, a
+  chmod-hostile mount), `bd bootstrap` and `bd connect` print a warning and
+  continue instead of failing, as `bd init` already did (#6225).
 - The batched bulk readers no longer return an issue's rows twice when the
   same id is requested twice. Since the 200-id batching (#6444), an id that
   appeared in two batches had its comments, labels, dependency records,

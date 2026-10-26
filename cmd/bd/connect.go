@@ -10,7 +10,6 @@ import (
 
 	"github.com/spf13/cobra"
 	bdhttp "github.com/steveyegge/beads/backend/http"
-	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/httpclient"
 	"github.com/steveyegge/beads/internal/metrics"
@@ -301,7 +300,9 @@ Examples:
 		// doctor --fix do, so http_target.json (which carries a bearer
 		// credential's host and, soon, DialOptions) is never a candidate for
 		// `git add .` in the first commit after connect.
-		if err := doctor.EnsureGitignoreForBeadsDir(beadsDir); err != nil {
+		// A chmod refused after the patterns are in place only warns
+		// (ensureBeadsGitignore); any other failure still aborts here.
+		if err := ensureBeadsGitignore(beadsDir); err != nil {
 			return HandleError("ensuring %s/.gitignore: %v", beadsDir, err)
 		}
 		// bdhttp.Attach writes both of this backend's files: the gitignored

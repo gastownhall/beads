@@ -1507,6 +1507,49 @@ func TestFinalizeSyncedBootstrap_GitignorePermissionFailureWarns(t *testing.T) {
 	})
 }
 
+// TestEnsureBeadsGitignore_DowngradesOnlyPermissionFailures pins the helper bd
+// connect and bd bootstrap share (#6225): only doctor.ErrGitignorePermissions,
+// which means every required pattern is in place, becomes a warning. Any other
+// failure is returned unchanged so connect aborts before writing
+// http_target.json into a .beads dir whose .gitignore may not cover it.
+func TestEnsureBeadsGitignore_DowngradesOnlyPermissionFailures(t *testing.T) {
+	permErr := fmt.Errorf("%w: %w", doctor.ErrGitignorePermissions, syscall.EPERM)
+	otherErr := errors.New("ensure .beads/.gitignore: read-only file system")
+
+	tests := []struct {
+		name        string
+		ensureErr   error
+		wantErr     error
+		wantWarning bool
+	}{
+		{"permission-only failure warns", permErr, nil, true},
+		{"other failure is returned unchanged", otherErr, otherErr, false},
+		{"success", nil, nil, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stubBeadsGitignore(t, tt.ensureErr)
+
+			var err error
+			stderr := captureStderr(t, func() {
+				err = ensureBeadsGitignore(t.TempDir())
+			})
+			if err != tt.wantErr {
+				t.Errorf("err = %v, want %v", err, tt.wantErr)
+			}
+			if !tt.wantWarning {
+				if stderr != "" {
+					t.Errorf("stderr = %q, want no output", stderr)
+				}
+				return
+			}
+			if n := strings.Count(stderr, "Warning:"); n != 1 || !strings.Contains(stderr, doctor.ErrGitignorePermissions.Error()) {
+				t.Errorf("stderr = %q, want one Warning: line naming %q", stderr, doctor.ErrGitignorePermissions)
+			}
+		})
+	}
+}
+
 func TestFinalizeSyncedBootstrap_WorktreeStubDoesNotShadowTargetConfig(t *testing.T) {
 	snapshotBootstrapEnv(t)
 
