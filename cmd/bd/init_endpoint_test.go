@@ -3,13 +3,18 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
+	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/go-sql-driver/mysql"
+	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
@@ -240,6 +245,130 @@ func TestInitRemoteCloneGoesWhereTheStoreOpens(t *testing.T) {
 			}
 			if cli {
 				t.Errorf("cloned into .beads/dolt as well, which the server init's store opens does not serve")
+			}
+		})
+	}
+}
+
+// TestInitRemoteCloneOnAConfigPort drives bd init's clone
+// (initCloneFromRemote) for `bd init --server --remote` where only a
+// config.yaml dolt.port, user-level or the workspace's own, names the port.
+// Such a port leaves the endpoint bd's own by its mode, yet the server that
+// answers there may be one you run over a data directory of your own. Main
+// cloned with the dolt CLI into .beads/dolt, which that server does not
+// serve, and init's store then created an empty database on it. Now the
+// clone goes through that server, and a database it already holds is used
+// without cloning. Main's CLI clone is kept when nothing answers on the port
+// (bd's own server will serve .beads/dolt), when bd's state files name a live
+// dolt sql-server of its own on that port, and in shared-server mode.
+func TestInitRemoteCloneOnAConfigPort(t *testing.T) {
+	const port = 13452
+	for _, tc := range []struct {
+		name      string
+		where     string // the config.yaml naming dolt.port: "user" or "project"
+		answers   bool   // something answers on the port
+		bdServer  bool   // bd's state files name a live dolt sql-server on the port
+		recycled  bool   // the state files name the port beside a live PID that is not dolt
+		shared    bool
+		autoOff   bool
+		serverHas bool
+		wantClone bool // one server clone through 127.0.0.1:port
+		wantHeld  bool
+	}{
+		{name: "user-level dolt.port, a server bd does not run answering", where: "user", answers: true, wantClone: true},
+		{name: "project dolt.port, a server bd does not run answering", where: "project", answers: true, wantClone: true},
+		{name: "user-level dolt.port, server already holding the database", where: "user", answers: true, serverHas: true, wantHeld: true},
+		{name: "project dolt.port, server already holding the database", where: "project", answers: true, serverHas: true, wantHeld: true},
+		{name: "user-level dolt.port, auto-start off, a server answering", where: "user", answers: true, autoOff: true, wantClone: true},
+		{name: "user-level dolt.port, stale state files with a recycled PID, a server answering", where: "user", answers: true, recycled: true, wantClone: true},
+		{name: "user-level dolt.port, nothing answering", where: "user"},
+		{name: "project dolt.port, nothing answering", where: "project"},
+		{name: "user-level dolt.port, auto-start off, nothing answering", where: "user", autoOff: true},
+		{name: "user-level dolt.port, bd's own server answering", where: "user", answers: true, bdServer: true},
+		{name: "shared server, user-level dolt.port, answering", where: "user", answers: true, shared: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			endpointCredentialsEnv(t, nil)
+			t.Setenv("BEADS_DIR", "")
+			t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "")
+			if tc.shared {
+				t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+				t.Setenv("BEADS_SHARED_SERVER_DIR", filepath.Join(t.TempDir(), "shared"))
+			}
+			if tc.autoOff {
+				t.Setenv("BEADS_DOLT_AUTO_START", "0")
+			}
+			root := t.TempDir()
+			beadsDir := filepath.Join(root, ".beads")
+			cfgPath := filepath.Join(os.Getenv("HOME"), ".config", "bd", "config.yaml")
+			if tc.where == "project" {
+				cfgPath = filepath.Join(beadsDir, "config.yaml")
+			}
+			for _, dir := range []string{beadsDir, filepath.Dir(cfgPath)} {
+				if err := os.MkdirAll(dir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(cfgPath, []byte(fmt.Sprintf("dolt:\n  port: %d\n", port)), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if tc.bdServer || tc.recycled {
+				pid := os.Getpid()
+				if tc.bdServer {
+					pid, _ = startStandInDoltServer(t)
+				}
+				if err := os.WriteFile(filepath.Join(beadsDir, doltserver.PortFileName), []byte(strconv.Itoa(port)+"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(beadsDir, doltserver.PIDFileName), []byte(strconv.Itoa(pid)+"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Chdir(root)
+			config.ResetForTesting()
+			t.Cleanup(config.ResetForTesting)
+			if err := config.Initialize(); err != nil {
+				t.Fatalf("config.Initialize: %v", err)
+			}
+
+			stubInitCloneProbe(t, false, tc.answers)
+			origServer, origCLI, origCheck := remoteCloneViaServer, remoteCloneViaCLI, checkBootstrapServerDB
+			t.Cleanup(func() {
+				remoteCloneViaServer, remoteCloneViaCLI, checkBootstrapServerDB = origServer, origCLI, origCheck
+			})
+			cli := false
+			var cloned []string
+			remoteCloneViaCLI = func(context.Context, string, string, string) error {
+				cli = true
+				return nil
+			}
+			remoteCloneViaServer = func(_ context.Context, _, _ string, ep bootstrapServerProbeConfig) error {
+				cloned = append(cloned, ep.serverLocation())
+				return nil
+			}
+			checkBootstrapServerDB = func(bootstrapServerProbeConfig) bootstrapServerDBCheck {
+				return bootstrapServerDBCheck{Reachable: true, Exists: tc.serverHas}
+			}
+
+			cloneCfg := initTimeCloneConfig(true, "", 0, "", "", "init_config_port")
+			_, err := initCloneFromRemote(t.Context(), beadsDir, "file:///nonexistent/remote", "init_config_port", cloneCfg, true, false, "")
+			want := fmt.Sprintf("127.0.0.1:%d", port)
+			var held *initCloneTargetHeldError
+			switch {
+			case tc.wantHeld:
+				if !errors.As(err, &held) || held.location != want || len(cloned) != 0 || cli {
+					t.Fatalf("err %v, server clones %v, CLI clone %v; want the database %s holds used, with no clone", err, cloned, cli, want)
+				}
+			case tc.wantClone:
+				if err != nil || len(cloned) != 1 || cloned[0] != want || cli {
+					t.Fatalf("err %v, server clones %v, CLI clone %v; want one server clone through %s and no clone into .beads/dolt", err, cloned, cli, want)
+				}
+			default:
+				// main's CLI clone into .beads/dolt; its outcome here (no
+				// dolt binary, no remote) is beside the point.
+				if errors.As(err, &held) || len(cloned) != 0 || !cli {
+					t.Fatalf("err %v, server clones %v, CLI clone %v; want main's CLI clone", err, cloned, cli)
+				}
 			}
 		})
 	}

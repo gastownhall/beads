@@ -3725,14 +3725,18 @@ func resolveInitConfiguredSyncRemote(initRemote string, initRemoteChanged bool, 
 // Otherwise the endpoint init's store opens, resolved by endpoint
 // (initCloneEndpoint) only now so the flows above resolve nothing more than
 // main did, decides. At a host bd runs its server at, the CLI
-// clone is kept for a server bd serves there (doltserver.Endpoint.ServedByBD:
-// bd's own server for the workspace, or the shared server) and for an
-// endpoint with no address to clone through (doltserver.Endpoint.Dialable),
-// where the store's auto-start or its refusal of the unresolved port follows.
-// A server some other process runs there, on a unix socket or on a port that
+// clone is kept for an endpoint with no address to clone through
+// (doltserver.Endpoint.Dialable), where the store's auto-start or its
+// refusal of the unresolved port follows, and for a server bd serves there
+// (doltserver.Endpoint.ServedByBD: bd's own server for the workspace, or the
+// shared server) unless some other process runs the server answering on its
+// port (initCloneServerOthersRun): with nothing answering, or bd's state
+// files proving the server is bd's own, .beads/dolt is what it serves. A
+// server some other process runs there, on a unix socket, on a port that
 // declares it externally managed (BEADS_DOLT_SERVER_PORT, --server-port, the
-// legacy BEADS_DOLT_PORT, BEADS_DOLT_SERVER_MODE=1), does not serve
-// .beads/dolt, so the clone goes through it, as for any other host. A
+// legacy BEADS_DOLT_PORT, BEADS_DOLT_SERVER_MODE=1), or on a port only a
+// config.yaml dolt.port names, does not serve .beads/dolt, so the clone goes
+// through it, as for any other host. A
 // configured unix socket nothing answers on (initCloneSocketDead) is not
 // the server the store opens: its transport (doltserver.SocketTransport)
 // falls back from that socket to TCP at the endpoint's host and port when
@@ -3760,10 +3764,34 @@ func initRemoteCloneMode(initServerMode, externalServer bool, endpoint func() do
 		}
 		ep.Socket = ""
 	}
-	if ep.ServedByBD() || !ep.Dialable() {
+	if !ep.Dialable() || (ep.ServedByBD() && !initCloneServerOthersRun(ep)) {
 		return remoteCloneCLI
 	}
 	return remoteCloneExternalServer
+}
+
+// initCloneServerOthersRun reports whether the server at ep, an endpoint bd
+// counts as its own by its host and mode (doltserver.Endpoint.ServedByBD), is
+// one some other process runs: something answers on its port (initCloneProbe,
+// the store's own probe), and bd's state files for the workspace do not name
+// a live dolt sql-server on that port (doltserver.ManagesLiveServerOnPort,
+// doltserver.IsTrackedServerRunning). That is a server you run on a port only
+// a config.yaml dolt.port names (user-level, or the workspace's own): the mode
+// of such an endpoint says nothing about who runs the server. init's store
+// joins it, as initStartOwnServer and the store's auto-start start nothing
+// where a server already answers, so it does not serve .beads/dolt either.
+// When nothing answers, the store starts bd's own server over .beads/dolt
+// (doltserver.Endpoint.BDStartsServer) or reports the server down, so main's
+// CLI clone is kept, as it is for the shared server and an endpoint with no
+// port.
+func initCloneServerOthersRun(ep doltserver.Endpoint) bool {
+	if ep.SharedServer || ep.PortSharedServer || !ep.Resolved() {
+		return false
+	}
+	if initCloneProbe("tcp", ep.Addr(), initCloneSocketProbeTimeout) != nil {
+		return false
+	}
+	return !doltserver.ManagesLiveServerOnPort(ep.BeadsDir, ep.Port) || !doltserver.IsTrackedServerRunning(ep.BeadsDir)
 }
 
 // initCloneProbe is the dial probe bd init's clone makes to find the

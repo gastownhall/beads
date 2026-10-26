@@ -15,6 +15,7 @@
 # "integration" build tag but are not selected without it, restricted to
 # _test.go files).
 cmd/bd/ado_roundtrip_test.go
+cmd/bd/bootstrap_server_store_integration_test.go
 cmd/bd/cli_fast_test.go
 cmd/bd/config_commit_server_integration_test.go
 cmd/bd/contributor_routing_e2e_test.go
