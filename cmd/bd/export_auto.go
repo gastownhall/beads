@@ -1030,6 +1030,11 @@ func gitAddFile(path string) error {
 	// failure. See GH#4351.
 	// Keep cmd.Dir = parent so GH#3311 hook worktree staging still resolves
 	// the index path under the repo root (not bare "issues.jsonl" at root).
+	// #nosec G702 -- no shell is involved: the binary is the literal "git"
+	// and the basename is its own argv element behind "--", so it cannot
+	// inject a command. gosec only reaches this line because the
+	// doctorEnsureGitignoreForBeadsDir seam's opaque indirect call widens
+	// taint propagation to package function parameters (#6225).
 	cmd := exec.CommandContext(ctx, "git", "add", "--", filepath.Base(path))
 	cmd.Dir = filepath.Dir(path)
 	cmd.Env = env

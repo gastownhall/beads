@@ -1459,6 +1459,27 @@ func printBootstrapRemoteBehindGuidance(w io.Writer, e *schema.RemoteMigrateGate
 			"      re-run `bd bootstrap`, or keep using a bd version that matches the remote.\n\n")
 }
 
+// doctorEnsureGitignoreForBeadsDir is the seam tests use to make the
+// .beads/.gitignore ensure step fail without a hostile mount (mirrors
+// doctorFindOrphanedIssues in orphans.go).
+var doctorEnsureGitignoreForBeadsDir = doctor.EnsureGitignoreForBeadsDir
+
+// ensureBeadsGitignore runs the .beads/.gitignore ensure step shared by
+// bootstrap and connect. A permission-only failure downgrades to a warning:
+// ErrGitignorePermissions means every required pattern is already in place
+// and only the 0600 tightening failed (chmod-hostile mount, file owned by
+// another user), which is not worth aborting over (#6225) — bd init already
+// treats this step as non-fatal. Any other failure — patterns that could
+// not be written, an unreadable file — is returned unchanged.
+func ensureBeadsGitignore(beadsDir string) error {
+	err := doctorEnsureGitignoreForBeadsDir(beadsDir)
+	if errors.Is(err, doctor.ErrGitignorePermissions) {
+		WarnError("%v", err)
+		return nil
+	}
+	return err
+}
+
 // finalizeSyncedBootstrap writes metadata.json and config.yaml after a
 // successful sync clone, matching the on-disk layout that bd init produces.
 // It is idempotent: re-running over an already-finalized workspace leaves
@@ -1492,7 +1513,7 @@ func finalizeSyncedBootstrap(beadsDir, syncRemote string, cfg *configfile.Config
 	if err := createConfigYaml(beadsDir, false, ""); err != nil {
 		return fmt.Errorf("create config.yaml: %w", err)
 	}
-	if err := doctor.EnsureGitignoreForBeadsDir(beadsDir); err != nil {
+	if err := ensureBeadsGitignore(beadsDir); err != nil {
 		return fmt.Errorf("ensure .beads/.gitignore: %w", err)
 	}
 
