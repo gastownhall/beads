@@ -1436,6 +1436,59 @@ func TestFinalizeSyncedBootstrapWritesConfigFiles(t *testing.T) {
 	}
 }
 
+// TestFinalizeSyncedBootstrapGitignoreFailureIsNonFatal pins that a
+// .beads/.gitignore that cannot be read or updated only warns, as in bd init
+// (GH#6225): the clone has already succeeded and a re-run plans no action, so
+// failing here would leave sync.remote unpersisted for good.
+func TestFinalizeSyncedBootstrapGitignoreFailureIsNonFatal(t *testing.T) {
+	t.Setenv("BEADS_DOLT_DATA_DIR", "")
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(filepath.Join(beadsDir, "embeddeddolt"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	// A directory at .beads/.gitignore makes EnsureGitignoreForBeadsDir fail
+	// on every OS and as root, with no production seam.
+	if err := os.Mkdir(filepath.Join(beadsDir, ".gitignore"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DIR", beadsDir)
+
+	const dbName = "beads_hq"
+	const syncRemote = "file:///tmp/fake-origin.git"
+
+	var finalizeErr error
+	stderr := captureStderr(t, func() {
+		finalizeErr = finalizeSyncedBootstrap(beadsDir, syncRemote, configfile.DefaultConfig(), dbName)
+	})
+	if finalizeErr != nil {
+		t.Fatalf("finalizeSyncedBootstrap failed: %v", finalizeErr)
+	}
+	if !strings.Contains(stderr, "Warning: failed to create/update .gitignore: ") {
+		t.Errorf("stderr missing .gitignore warning:\n%s", stderr)
+	}
+
+	loaded, err := configfile.Load(beadsDir)
+	if err != nil {
+		t.Fatalf("configfile.Load after finalize failed: %v", err)
+	}
+	if loaded == nil {
+		t.Fatal("configfile.Load returned nil; metadata.json was not written")
+	}
+	if loaded.GetDoltDatabase() != dbName {
+		t.Errorf("dolt_database = %q, want %q", loaded.GetDoltDatabase(), dbName)
+	}
+	if got := config.GetStringFromDir(beadsDir, "sync.remote"); got != syncRemote {
+		t.Errorf("config.GetStringFromDir(%q, \"sync.remote\") = %q, want %q", beadsDir, got, syncRemote)
+	}
+}
+
 func TestFinalizeSyncedBootstrap_WorktreeStubDoesNotShadowTargetConfig(t *testing.T) {
 	snapshotBootstrapEnv(t)
 
