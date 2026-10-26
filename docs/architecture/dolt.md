@@ -62,11 +62,25 @@ run against anything older:
   `dolt` binary older than 2.6.0.
 - Managed proxied-server mode (`bd init --proxied-server`, and every command
   after it) refuses a `dolt` binary older than 2.6.0 before it launches it.
-- Every server-mode and proxied-server open asks the server it reached for
-  `SELECT dolt_version()` and refuses a server older than 2.6.0, whoever
-  started it, before it reads or writes anything. That includes an external
-  server and a shared one.
+- Every server-mode and proxied-server store open asks the server it
+  reached for `SELECT dolt_version()` and refuses a server older than 2.6.0,
+  whoever started it, before it reads or writes through that open. That
+  includes an external server and a shared one.
+- `bd bootstrap` and `bd init --remote` check the server, or the `dolt`
+  CLI, before they clone; `bd init` checks a shared server before it
+  creates `beads_global` on it; and `bd dolt clean-databases` refuses an
+  older server before it drops anything.
+- A `bd dolt push`, `pull` or fetch (federation sync included) that runs
+  through the `dolt` binary on your `PATH` (git-protocol, credentialed,
+  cloud-auth and local remotes) refuses that binary when it is older than
+  2.6.0, since a `dolt pull` there merges with the binary's own engine.
 - `bd doctor --server` reports a server older than 2.6.0 as an error.
+- `bd doctor`, `bd doctor --fix` included, is exempt, so you can still
+  diagnose and repair a workspace on an older server: its own checks and
+  repairs connect without the floor, and those that open the workspace's
+  store report the refusal. Read-only probes (`bd dolt status`, `bd init`'s
+  existing-database check) and the working-set commit `bd dolt stop` makes
+  before it stops a server `bd` runs are not checked either.
 
 The error names what was checked (the binary's path or the server's
 address), the version it reported, the 2.6.0 minimum, and where to get Dolt.
@@ -87,11 +101,10 @@ list what changed. Two changes matter to `bd` users moving a server up to
   Git does (new in 2.6.0). A long-running branch that has merged several
   times can now report a conflict on `bd dolt pull` or a federation sync that
   2.5.x resolved silently by taking the newer change.
-- The default `sql_mode` is MySQL 8.0's strict default, which includes
-  `NO_ZERO_IN_DATE`, `NO_ZERO_DATE` and `ERROR_FOR_DIVISION_BY_ZERO` (since
-  Dolt 2.3.3, so new to a server coming from 2.2.x or older): a zero date or
-  a division by zero in your own `bd sql` or `dolt sql` queries is an error,
-  not a warning.
+- Dolt reports MySQL 8.0's strict default `sql_mode`, which includes
+  `NO_ZERO_IN_DATE`, `NO_ZERO_DATE` and `ERROR_FOR_DIVISION_BY_ZERO`, so
+  anything that reads `@@sql_mode` sees it. Dolt has done so since 2.3.3,
+  so this is new only to a server coming from 2.2.x or older.
 
 Dolt 2.3.3 is the first release that stores a descending index column as
 descending (dolthub/dolt#11746), and older releases cannot read a table that

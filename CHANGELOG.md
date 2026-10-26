@@ -527,19 +527,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   server-mode auto-start refuse to launch an older `dolt` binary; managed
   proxied-server mode (`bd init --proxied-server` and every command after
   it) refuses one before launching it; and every server-mode and
-  proxied-server open asks the server it reached for `SELECT dolt_version()`
-  and refuses one older than 2.6.0 before reading or writing anything,
-  including external and shared servers `bd` did not start. `bd bootstrap`
-  and `bd init --remote` check the server, or the `dolt` CLI, before they
-  clone, and `bd bootstrap` exits non-zero when the clone it made cannot be
-  opened for that reason. The error names the binary or server, the version
-  it reported, the 2.6.0 minimum, the install steps and the 2.6.0 release
-  notes. `bd doctor --server` reports an older server as an error. There is
-  no override. A version `bd` cannot determine is still not refused: a
-  binary whose `dolt version` does not parse runs with the existing
-  once-a-day warning, and a server that does not answer `dolt_version()`
-  with a version is used unchecked (logged under `BD_DEBUG`). Embedded mode
-  links the 2.6.0 engine and is unaffected.
+  proxied-server store open asks the server it reached for
+  `SELECT dolt_version()` and refuses one older than 2.6.0 before it reads
+  or writes through that open, including external and shared servers `bd`
+  did not start. `bd bootstrap` and `bd init --remote` check the server, or
+  the `dolt` CLI, before they clone, and `bd bootstrap` exits non-zero when
+  the clone it made cannot be opened for that reason. `bd init` checks a
+  shared server before it creates `beads_global` on it. `bd dolt
+  clean-databases` refuses an older server before it drops anything. A push,
+  pull or fetch that runs through the `dolt` binary on `PATH` (git-protocol,
+  credentialed, cloud-auth and local remotes) refuses that binary when it is
+  older than 2.6.0. The error names the binary or server, the version it
+  reported, the 2.6.0 minimum, the install steps and the 2.6.0 release
+  notes. There is no override. `bd doctor`, `bd doctor --fix` included, is
+  exempt so you can still diagnose and repair a workspace: its own checks
+  and repairs connect without the floor, while those that open the
+  workspace's store report the refusal, and `bd doctor --server` reports an
+  older server as an error. Read-only probes (`bd dolt status`, `bd init`'s
+  existing-database check) and the working-set commit `bd dolt stop` makes
+  before it stops a server `bd` runs are not checked either. A version `bd`
+  cannot determine is still not refused: a binary whose `dolt version` does
+  not parse runs with the existing once-a-day warning (proxied-server mode;
+  `bd dolt start` launches it without one), and a server that does not
+  answer `dolt_version()` with a version is used unchecked (logged under
+  `BD_DEBUG`). Embedded mode links the 2.6.0 engine and is unaffected.
   Upgrade every `dolt sql-server` `bd` talks to (back it up first; the
   storage upgrade is one-way), then upgrade `bd`. What a server moving to
   2.6.0 changes:
@@ -548,11 +559,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `bd dolt pull`, federation sync and other long-running branches that
     have merged several times may now raise conflicts that older servers
     resolved silently by taking the newer change.
-  - The default `sql_mode` is MySQL 8.0's strict default, which includes
-    `NO_ZERO_IN_DATE`, `NO_ZERO_DATE` and `ERROR_FOR_DIVISION_BY_ZERO` (Dolt
-    has had it since 2.3.3, so this is new for a server moving from 2.2.x or
-    older, such as 2.1.8): a zero date or a division by zero in your own
-    `bd sql` or `dolt sql` queries is an error rather than a warning.
+  - Dolt reports MySQL 8.0's strict default `sql_mode`, which includes
+    `NO_ZERO_IN_DATE`, `NO_ZERO_DATE` and `ERROR_FOR_DIVISION_BY_ZERO`, so
+    anything that reads `@@sql_mode` sees it. Dolt has done so since 2.3.3,
+    not 2.6.0, so this is new only for a server moving from 2.2.x or older,
+    such as 2.1.8.
 - **Embedded mode now runs the Dolt 2.6.0 engine, and the module needs Go
   1.27.3.** `bd` links `dolthub/dolt/go` at the v2.6.0 release (with
   `go-mysql-server` to match). Dolt's own `go.mod` declares `go 1.27.3`, so

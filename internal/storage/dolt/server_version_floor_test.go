@@ -78,10 +78,11 @@ func raiseRequiredMin(t *testing.T) {
 }
 
 // TestOpenServerConnectionRefusesBelowRequiredMin pins requireServerDoltVersion
-// at openServerConnection's direct-connect path and its creating path against
-// a real server: with the floor raised above the test server's version, the
-// open of an existing database and the CreateIfMissing open of a missing one
-// are both refused, and the missing database is not created.
+// at each of openServerConnection's three paths against a real server: with
+// the floor raised above the test server's version, the open of an existing
+// database, the CreateIfMissing open of a missing one, and a gateway open
+// (which skips the init connection) are all refused, and the missing
+// database is not created.
 func TestOpenServerConnectionRefusesBelowRequiredMin(t *testing.T) {
 	skipIfNoServer(t)
 	raiseRequiredMin(t)
@@ -94,9 +95,11 @@ func TestOpenServerConnectionRefusesBelowRequiredMin(t *testing.T) {
 		name            string
 		database        string
 		createIfMissing bool
+		gateway         bool
 	}{
 		{name: "existing database", database: existing},
 		{name: "missing database with CreateIfMissing", database: missing, createIfMissing: true},
+		{name: "gateway", database: existing, gateway: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := &Config{
@@ -106,6 +109,7 @@ func TestOpenServerConnectionRefusesBelowRequiredMin(t *testing.T) {
 				ServerUser:      "root",
 				Database:        tc.database,
 				CreateIfMissing: tc.createIfMissing,
+				Gateway:         tc.gateway,
 				MaxOpenConns:    1,
 			}
 			db, _, _, err := openServerConnection(context.Background(), cfg)

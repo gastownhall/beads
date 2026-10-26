@@ -913,7 +913,7 @@ func requireServerDoltVersion(ctx context.Context, q doltversion.RowQuerier, ep 
 	}
 	return doltversion.CheckServer(ctx, q, subject, func(err error) {
 		debug.Logf("uow: could not determine the version of %s; not checking it against the required minimum %s: %v\n",
-			subject, doltversion.RequiredMin, err)
+			subject, doltversion.RequiredMin, remedy.PrintedError(err))
 	})
 }
 

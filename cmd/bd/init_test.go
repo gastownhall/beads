@@ -17,6 +17,8 @@ import (
 
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/doltversion"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/testutil"
@@ -2627,4 +2629,27 @@ func sharedServerTestEnv(t *testing.T) []string {
 		"BEADS_DOLT_SHARED_SERVER=1",
 		"BEADS_DOLT_SERVER_PORT="+strconv.Itoa(port),
 	)
+}
+
+// TestEnsureGlobalDatabaseRefusesBelowRequiredMin pins the floor bd init
+// checks on a shared server before it creates beads_global there: with
+// doltversion.RequiredMin raised above the test server's version,
+// doltserver.EnsureGlobalDatabase refuses the server with the floor's error
+// (which bd init stops on) where it would otherwise create the database and
+// return nil.
+func TestEnsureGlobalDatabaseRefusesBelowRequiredMin(t *testing.T) {
+	if testDoltServerPort == 0 {
+		t.Skip("skipping: Dolt test server not running")
+	}
+	if testutil.DoltContainerCrashed() {
+		t.Skipf("Dolt test server crashed: %v", testutil.DoltContainerCrashError())
+	}
+	raiseRequiredMinForTest(t)
+	err := doltserver.EnsureGlobalDatabase("127.0.0.1", testDoltServerPort, "root", "")
+	if !errors.Is(err, doltversion.ErrBelowRequiredMin) {
+		t.Fatalf("EnsureGlobalDatabase = %v, want ErrBelowRequiredMin before CREATE DATABASE", err)
+	}
+	if want := "dolt sql-server at 127.0.0.1:" + strconv.Itoa(testDoltServerPort) + " is version"; !strings.Contains(err.Error(), want) {
+		t.Errorf("EnsureGlobalDatabase = %q, want it to contain %q", err, want)
+	}
 }

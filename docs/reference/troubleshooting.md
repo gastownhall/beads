@@ -408,8 +408,10 @@ The error names what it checked and the version it found, for example:
 dolt sql-server at 127.0.0.1:3307 is version 2.5.1, but bd requires dolt 2.6.0 or newer outside embedded mode. Upgrade dolt to 2.6.0 or newer, then restart the server on it: ...
 ```
 
-- **`dolt binary "<path>"`**: `bd dolt start`, server-mode auto-start, or
-  managed proxied-server mode found an old `dolt` CLI. Managed
+- **`dolt binary "<path>"`**: `bd dolt start`, server-mode auto-start,
+  managed proxied-server mode, a CLI clone (`bd bootstrap`, `bd init
+  --remote`) or a push, pull or fetch through the `dolt` CLI (prefixed
+  `dolt push:` and so on) found an old `dolt` CLI. Managed
   proxied-server mode finds it via `BEADS_DOLT_BIN` or PATH (in that order —
   see [Environment Variables](/reference/configuration#environment-variables));
   the others use PATH. Install the pinned version and update PATH, or point
@@ -429,8 +431,10 @@ Install the pinned version — see
 [separate data-operation defect](/architecture/dolt#which-dolt-version-to-install),
 and `releases/latest` can move to an unmeasured release. There is no
 override. `bd doctor --server` reports the server's version against the
-same minimum. Releases before 2.6.0 also have known defects, which that page
-measures:
+same minimum. `bd doctor`, `bd doctor --fix` included, is exempt from it:
+its checks and repairs that use their own connection still run against an
+older server, and those that open the workspace's store report this error.
+Releases before 2.6.0 also have known defects, which that page measures:
 
 - Dolt 2.4.0 through 2.4.2 return no row for an ungrouped `MAX` or `MIN` over
   an unmatched primary-key prefix (dolthub/dolt#12093).

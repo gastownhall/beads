@@ -223,8 +223,10 @@ func TestRequireDoltBinaryVersion(t *testing.T) {
 				if !errors.Is(err, doltversion.ErrBelowRequiredMin) {
 					t.Fatalf("RequireDoltBinaryVersion = %v, want ErrBelowRequiredMin", err)
 				}
-				if !strings.Contains(err.Error(), bin) || !strings.Contains(err.Error(), doltversion.RequiredMin.String()) {
-					t.Errorf("error = %q, want it to name %s and %s", err, bin, doltversion.RequiredMin)
+				// The refusal quotes the path with %q, which escapes a
+				// backslash (in TMPDIR, say), so match it quoted.
+				if quoted := fmt.Sprintf("%q", bin); !strings.Contains(err.Error(), quoted) || !strings.Contains(err.Error(), doltversion.RequiredMin.String()) {
+					t.Errorf("error = %q, want it to name %s and %s", err, quoted, doltversion.RequiredMin)
 				}
 			} else if err != nil {
 				t.Fatalf("RequireDoltBinaryVersion = %v, want nil", err)

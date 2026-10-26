@@ -1667,7 +1667,7 @@ func cloneViaServer(ctx context.Context, remoteURL, dbName string, ep bootstrapS
 	subject := "dolt sql-server at " + remedy.PrintedValue(ep.serverLocation())
 	if err := doltversion.CheckServer(cloneCtx, db, subject, func(err error) {
 		debug.Logf("bootstrap: could not determine the version of %s; not checking it against the required minimum %s: %v\n",
-			subject, doltversion.RequiredMin, err)
+			subject, doltversion.RequiredMin, remedy.PrintedError(err))
 	}); err != nil {
 		return err
 	}

@@ -2985,7 +2985,7 @@ func requireServerDoltVersion(ctx context.Context, q doltversion.RowQuerier, cfg
 	subject := "dolt sql-server at " + remedy.PrintedValue(addr)
 	return doltversion.CheckServer(ctx, q, subject, func(err error) {
 		debug.Logf("dolt: could not determine the version of %s; not checking it against the required minimum %s: %v\n",
-			subject, doltversion.RequiredMin, err)
+			subject, doltversion.RequiredMin, remedy.PrintedError(err))
 	})
 }
 
@@ -4555,11 +4555,28 @@ func (s *DoltStore) ensureMatchingCLIRemote(remote, expectedURL, expectedRef str
 	return nil
 }
 
-func (s *DoltStore) prepareDoltCLITransfer(ctx context.Context, remote string, creds *remoteCredentials, args ...string) (*exec.Cmd, context.Context, context.CancelFunc) {
+func (s *DoltStore) prepareDoltCLITransfer(ctx context.Context, remote string, creds *remoteCredentials, args ...string) (*exec.Cmd, context.Context, context.CancelFunc, error) {
 	return prepareDoltCLITransferCommand(ctx, s.CLIDir(), creds, s.isS3Remote(ctx, remote), args...)
 }
 
-func prepareDoltCLITransferCommand(ctx context.Context, cliDir string, creds *remoteCredentials, s3Remote bool, args ...string) (*exec.Cmd, context.Context, context.CancelFunc) {
+// prepareDoltCLITransferCommand builds the `dolt push`/`pull`/`fetch` that
+// runs through the dolt binary on PATH: the route git-protocol,
+// credentialed, cloud-auth and local remotes take. It refuses that binary
+// when it is older than doltversion.RequiredMin, before the transfer runs
+// (a `dolt pull` merges with the binary's own engine, not the server's), with
+// the same error Start gives (doltserver.RequireDoltBinaryVersion, memoized
+// per binary). A dolt that is not on PATH is left for the command itself to
+// report, as before.
+func prepareDoltCLITransferCommand(ctx context.Context, cliDir string, creds *remoteCredentials, s3Remote bool, args ...string) (*exec.Cmd, context.Context, context.CancelFunc, error) {
+	if doltBin, err := exec.LookPath("dolt"); err == nil {
+		if err := doltserver.RequireDoltBinaryVersion(doltBin); err != nil {
+			op := "dolt transfer"
+			if len(args) > 0 {
+				op = "dolt " + args[0]
+			}
+			return nil, nil, nil, fmt.Errorf("%s: %w", op, err)
+		}
+	}
 	ctx, cancel := withCLIExecTimeout(ctx)
 	if len(args) > 0 && creds != nil && creds.username != "" {
 		args = append([]string{args[0], "--user", creds.username}, args[1:]...)
@@ -4581,7 +4598,7 @@ func prepareDoltCLITransferCommand(ctx context.Context, cliDir string, creds *re
 		base = os.Environ()
 	}
 	cmd.Env = gittraceenv.ScrubEnv(base)
-	return cmd, ctx, cancel
+	return cmd, ctx, cancel, nil
 }
 
 // prepareCLIRouteForGitProtocol reports whether the SQL-visible remote uses
@@ -4888,7 +4905,10 @@ func (s *DoltStore) doltCLIPush(ctx context.Context, remote string, force bool, 
 		args = append(args, "--force")
 	}
 	args = append(args, remote, s.branch)
-	cmd, transferCtx, cancel := s.prepareDoltCLITransfer(ctx, remote, creds, args...)
+	cmd, transferCtx, cancel, err := s.prepareDoltCLITransfer(ctx, remote, creds, args...)
+	if err != nil {
+		return err
+	}
 	defer cancel()
 	applyNoGitHooksToCmd(cmd) // GH#3724
 	out, err := cmd.CombinedOutput()
@@ -4913,7 +4933,10 @@ func cliTransferError(op, remote string, transferCtx context.Context, out []byte
 // Used for git-protocol remotes where CALL DOLT_PULL times out through the SQL connection.
 // If creds is non-nil, credentials are set on the subprocess environment only.
 func (s *DoltStore) doltCLIPull(ctx context.Context, remote string, creds *remoteCredentials) error {
-	cmd, transferCtx, cancel := s.prepareDoltCLITransfer(ctx, remote, creds, "pull", remote, s.branch)
+	cmd, transferCtx, cancel, err := s.prepareDoltCLITransfer(ctx, remote, creds, "pull", remote, s.branch)
+	if err != nil {
+		return err
+	}
 	defer cancel()
 	out, err := cmd.CombinedOutput()
 	if err != nil {

@@ -137,10 +137,14 @@ func TestRemoteCredentialsChildEnvUsesHostKeySemantics(t *testing.T) {
 }
 
 func TestPrepareDoltCLITransferCommandAppliesCredentialsAndS3Env(t *testing.T) {
+	withNoDoltOnPath(t)
 	t.Setenv(awsResponseChecksumValidationEnv, "when_supported")
 	creds := &remoteCredentials{username: "user", password: "pass"}
 
-	cmd, _, cancel := prepareDoltCLITransferCommand(context.Background(), "/tmp/beads-cli", creds, true, "fetch", "peer")
+	cmd, _, cancel, err := prepareDoltCLITransferCommand(context.Background(), "/tmp/beads-cli", creds, true, "fetch", "peer")
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer cancel()
 
 	if cmd.Dir != "/tmp/beads-cli" {
@@ -168,6 +172,7 @@ func TestPrepareDoltCLITransferCommandAppliesCredentialsAndS3Env(t *testing.T) {
 }
 
 func TestPrepareDoltCLITransferCommandAddsRemoteUserFlag(t *testing.T) {
+	withNoDoltOnPath(t)
 	tests := []struct {
 		name  string
 		creds *remoteCredentials
@@ -208,7 +213,10 @@ func TestPrepareDoltCLITransferCommandAddsRemoteUserFlag(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cmd, _, cancel := prepareDoltCLITransferCommand(context.Background(), t.TempDir(), tt.creds, false, tt.args...)
+			cmd, _, cancel, err := prepareDoltCLITransferCommand(context.Background(), t.TempDir(), tt.creds, false, tt.args...)
+			if err != nil {
+				t.Fatal(err)
+			}
 			defer cancel()
 
 			if got := cmd.Args; !slices.Equal(got, tt.want) {

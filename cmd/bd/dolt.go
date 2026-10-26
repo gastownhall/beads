@@ -18,7 +18,9 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/doltversion"
 	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dberrors"
@@ -2534,6 +2536,12 @@ func testHTTPConnectivity(url string) bool {
 // using config from the beads directory. This bypasses getStore() which isn't
 // initialized for dolt subcommands (beads-9vt). Connects without selecting a
 // database so callers can operate on all databases (SHOW DATABASES, DROP DATABASE).
+//
+// It refuses a server older than doltversion.RequiredMin before returning
+// the connection, so bd dolt clean-databases drops and purges nothing on it,
+// as every store open refuses one before it reads or writes. bd doctor --fix
+// does not connect through here: it stays usable against such a server so
+// it can still diagnose and repair (see doctor/fix.openFixDB).
 func openDoltServerConnection() (*sql.DB, func(), error) {
 	beadsDir := selectedDoltBeadsDir()
 	if beadsDir == "" {
@@ -2580,6 +2588,15 @@ func openDoltServerConnection() (*sql.DB, func(), error) {
 		fmt.Fprintf(os.Stderr, "Error: cannot reach Dolt server at %s: %v\n", doltutil.PrintedServerAddr(host, port), remedy.PrintedError(err))
 		fmt.Fprintln(os.Stderr, unreachableServerAdvice(beadsDir, host, dc))
 		return nil, nil, SilentExit()
+	}
+
+	subject := "dolt sql-server at " + doltutil.PrintedServerAddr(host, port)
+	if err := doltversion.CheckServer(ctx, db, subject, func(err error) {
+		debug.Logf("dolt: could not determine the version of %s; not checking it against the required minimum %s: %v\n",
+			subject, doltversion.RequiredMin, remedy.PrintedError(err))
+	}); err != nil {
+		_ = db.Close()
+		return nil, nil, HandleError("%s", err.Error())
 	}
 
 	return db, func() { _ = db.Close() }, nil

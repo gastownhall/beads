@@ -548,6 +548,9 @@ func isExpectedProbeError(err error) bool {
 // which DefaultConfig leaves out) and the password keyed to that port. With
 // DefaultConfig's port a workspace only BEADS_DOLT_PORT names had its catalog
 // read at 127.0.0.1:0, or at a port file's server no store open dials.
+//
+// Like openFixDB, it does not check the server against
+// doltversion.RequiredMin: bd doctor --fix is exempt from the floor.
 func openServerCatalogDB(ep doltserver.Endpoint) (*sql.DB, error) {
 	connStr := doltutil.ServerDSN{
 		Host:     ep.Host,

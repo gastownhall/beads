@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -292,7 +293,9 @@ func TestResolveAndProbeDoltRefusesBinaryBelowRequiredMin(t *testing.T) {
 	t.Setenv(doltversion.DoltBinEnvVar, old)
 	_, err := resolveAndProbeDolt(context.Background(), "test", true)
 	require.ErrorIs(t, err, doltversion.ErrBelowRequiredMin)
-	for _, want := range []string{old, "2.5.1", "requires dolt " + doltversion.RequiredMin.String(), "Upgrade dolt"} {
+	// The refusal quotes the path with %q, which escapes a backslash (in
+	// TMPDIR, say), so match it quoted.
+	for _, want := range []string{fmt.Sprintf("%q", old), "2.5.1", "requires dolt " + doltversion.RequiredMin.String(), "Upgrade dolt"} {
 		assert.Contains(t, err.Error(), want)
 	}
 
