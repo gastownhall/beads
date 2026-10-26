@@ -769,6 +769,17 @@ func configYamlPort(beadsDir string) int {
 	return configYamlPortAtDoltDir(ResolveDoltDir(beadsDir))
 }
 
+// DoltConfigYamlPort is the port chain's step after the port file
+// (PortSourceDoltConfigYaml) on its own: the listener.port of the Dolt
+// server config.yaml in beadsDir's Dolt data directory, or 0 when there is
+// no such file or it does not parse. It resolves that directory without
+// creating it (DoltDirPath). A caller that ranks the chain's sources itself
+// reads it here: resolving the chain prints metadata.json
+// dolt_server_port's deprecation warning when it reaches that step.
+func DoltConfigYamlPort(beadsDir string) int {
+	return configYamlPortAtDoltDir(DoltDirPath(beadsDir))
+}
+
 func configYamlPortAtDoltDir(doltDir string) int {
 	path := filepath.Join(doltDir, "config.yaml")
 	if _, err := os.Stat(path); err != nil {

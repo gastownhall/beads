@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"errors"
+	"net"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/go-sql-driver/mysql"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
@@ -70,22 +72,31 @@ func TestInitCloneKeepsTheTestModeGuard(t *testing.T) {
 // other process runs there, on a live unix socket or on the port
 // BEADS_DOLT_SERVER_PORT names (which --server-port sets): bd's own server
 // does not serve it, so main's CLI clone into .beads/dolt was stranded too.
-// A socket nothing answers on keeps main's CLI clone, as does a server at
-// 127.0.0.1 that does not answer, so the store reports it in its own words.
+// A socket nothing answers on gives way to TCP at the port
+// BEADS_DOLT_SERVER_PORT names when TCP answers there, as the store's
+// transport does (doltserver.SocketTransport), so the probe and the clone
+// dial that port, never the socket; with no port, or nothing answering on
+// it, main's CLI clone is kept, as it is for a server at 127.0.0.1 that
+// cannot be dialed, so the store reports it in its own words. A server
+// there that answers and refuses the probe's login is up: the clone goes
+// through it, not into .beads/dolt, which that server does not serve.
 func TestInitRemoteCloneGoesWhereTheStoreOpens(t *testing.T) {
 	const port = "13451"
 	socket := filepath.Join(t.TempDir(), "dolt.sock")
 	for _, tc := range []struct {
 		name       string
 		host       string
-		socket     string // --server-socket, with no port named
+		socket     string // --server-socket
+		socketPort bool   // BEADS_DOLT_SERVER_PORT names a port beside the socket
 		external   bool
 		gateway    bool
 		serverUser string // --server-user
 		serverHas  bool
-		deadSocket bool   // the socket does not answer: main's CLI clone
-		serverDown bool   // the server does not answer the database probe
-		wantClone  string // host:port the server clone dials; "" for none
+		deadSocket bool   // the socket does not answer
+		tcpLive    bool   // TCP answers at the port, where the socket does not
+		serverDown bool   // the database probe cannot dial the server
+		authFailed bool   // the server answers and refuses the probe's login
+		wantClone  string // the transport the server clone dials; "" for none
 		wantHeldAt string // the server init found holding the database
 	}{
 		{name: "remote host", host: "db.example.com", wantClone: "db.example.com:" + port},
@@ -94,10 +105,20 @@ func TestInitRemoteCloneGoesWhereTheStoreOpens(t *testing.T) {
 		{name: "unix socket at 127.0.0.1", host: "127.0.0.1", socket: socket, wantClone: "unix:" + socket},
 		{name: "unix socket already holding the database", host: "127.0.0.1", socket: socket, serverHas: true, wantHeldAt: "unix:" + socket},
 		{name: "dead unix socket at 127.0.0.1", host: "127.0.0.1", socket: socket, deadSocket: true, serverHas: true},
+		{name: "dead unix socket at 127.0.0.1 on BEADS_DOLT_SERVER_PORT, nothing answering there", host: "127.0.0.1", socket: socket, socketPort: true, deadSocket: true, serverHas: true},
+		// The store opens the server on that port over TCP, which does not
+		// serve .beads/dolt.
+		{name: "dead unix socket at 127.0.0.1 on BEADS_DOLT_SERVER_PORT, TCP answering", host: "127.0.0.1", socket: socket, socketPort: true, deadSocket: true, tcpLive: true, wantClone: "127.0.0.1:" + port},
+		{name: "dead unix socket at 127.0.0.1 on BEADS_DOLT_SERVER_PORT, TCP answering and already holding the database", host: "127.0.0.1", socket: socket, socketPort: true, deadSocket: true, tcpLive: true, serverHas: true, wantHeldAt: "127.0.0.1:" + port},
+		{name: "--external, dead unix socket on BEADS_DOLT_SERVER_PORT, TCP answering", host: "127.0.0.1", socket: socket, socketPort: true, external: true, deadSocket: true, tcpLive: true, wantClone: "127.0.0.1:" + port},
 		// Nothing answers on the port BEADS_DOLT_SERVER_PORT names at bd's
 		// host: main's CLI clone, so init's store open then reports the
 		// server that is down with its externally-managed advice.
 		{name: "BEADS_DOLT_SERVER_PORT at 127.0.0.1 with nothing listening", host: "127.0.0.1", serverDown: true},
+		// A server that answers there is up even when it refuses the
+		// probe's login: the clone goes through it, as for any other
+		// server bd does not serve.
+		{name: "BEADS_DOLT_SERVER_PORT at 127.0.0.1 refusing the probe's login", host: "127.0.0.1", authFailed: true, wantClone: "127.0.0.1:" + port},
 		// At a host bd does not run its server at, the clone still goes
 		// through that server, as on main.
 		{name: "remote host with nothing listening", host: "db.example.com", serverDown: true, wantClone: "db.example.com:" + port},
@@ -119,7 +140,8 @@ func TestInitRemoteCloneGoesWhereTheStoreOpens(t *testing.T) {
 			if tc.socket != "" {
 				// As promoteExplicitServerConnFlags exports --server-socket.
 				t.Setenv("BEADS_DOLT_SERVER_SOCKET", tc.socket)
-			} else {
+			}
+			if tc.socket == "" || tc.socketPort {
 				t.Setenv("BEADS_DOLT_SERVER_PORT", port)
 			}
 			if tc.gateway {
@@ -130,7 +152,7 @@ func TestInitRemoteCloneGoesWhereTheStoreOpens(t *testing.T) {
 				t.Setenv("BEADS_DOLT_SERVER_USER", tc.serverUser)
 			}
 
-			stubInitCloneSocketDead(t, tc.deadSocket)
+			stubInitCloneProbe(t, tc.deadSocket, tc.tcpLive)
 			origServer, origCLI, origCheck := remoteCloneViaServer, remoteCloneViaCLI, checkBootstrapServerDB
 			t.Cleanup(func() {
 				remoteCloneViaServer, remoteCloneViaCLI, checkBootstrapServerDB = origServer, origCLI, origCheck
@@ -141,17 +163,31 @@ func TestInitRemoteCloneGoesWhereTheStoreOpens(t *testing.T) {
 				cli = true
 				return nil
 			}
+			// dialed names the transport ep's DSN dials: its socket when it
+			// names one, which the DSN dials alone, else host:port.
+			dialed := func(ep bootstrapServerProbeConfig) string {
+				if ep.socket != "" {
+					return "unix:" + ep.socket
+				}
+				return ep.serverLocation()
+			}
 			probes := 0
 			remoteCloneViaServer = func(_ context.Context, _, _ string, ep bootstrapServerProbeConfig) error {
-				cloned = append(cloned, ep.serverLocation())
+				cloned = append(cloned, dialed(ep))
 				users = append(users, ep.user)
 				return nil
 			}
 			checkBootstrapServerDB = func(ep bootstrapServerProbeConfig) bootstrapServerDBCheck {
 				probes++
 				users = append(users, ep.user)
+				if tc.deadSocket && ep.socket != "" {
+					t.Errorf("the database probe dialed %s, a socket nothing answers on", dialed(ep))
+				}
 				if tc.serverDown {
-					return bootstrapServerDBCheck{Err: errors.New("connection refused")}
+					return bootstrapServerDBCheck{Err: &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connect: connection refused")}}
+				}
+				if tc.authFailed {
+					return bootstrapServerDBCheck{Err: &mysql.MySQLError{Number: 1045, Message: "Access denied for user 'root'@'localhost' (using password: NO)"}}
 				}
 				return bootstrapServerDBCheck{Reachable: true, Exists: tc.serverHas}
 			}
@@ -170,7 +206,7 @@ func TestInitRemoteCloneGoesWhereTheStoreOpens(t *testing.T) {
 				}
 			}
 			var held *initCloneTargetHeldError
-			if (tc.gateway && tc.serverUser == "") || tc.deadSocket {
+			if (tc.gateway && tc.serverUser == "") || (tc.deadSocket && !tc.tcpLive) {
 				// main's CLI clone into .beads/dolt; its outcome here (no
 				// dolt binary, no remote) is beside the point.
 				if errors.As(err, &held) || probes != 0 || len(cloned) != 0 || !cli {
@@ -201,6 +237,9 @@ func TestInitRemoteCloneGoesWhereTheStoreOpens(t *testing.T) {
 			}
 			if len(cloned) != 1 || cloned[0] != tc.wantClone {
 				t.Errorf("server clones %v, want one through %s, the server init's store opens", cloned, tc.wantClone)
+			}
+			if cli {
+				t.Errorf("cloned into .beads/dolt as well, which the server init's store opens does not serve")
 			}
 		})
 	}

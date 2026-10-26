@@ -3733,10 +3733,13 @@ func resolveInitConfiguredSyncRemote(initRemote string, initRemoteChanged bool, 
 // declares it externally managed (BEADS_DOLT_SERVER_PORT, --server-port, the
 // legacy BEADS_DOLT_PORT, BEADS_DOLT_SERVER_MODE=1), does not serve
 // .beads/dolt, so the clone goes through it, as for any other host. A
-// configured unix socket counts only when it answers (initCloneSocketDead):
-// the store's own transport falls back from a dead socket to TCP
-// (doltserver.SocketTransport), where the server clone would dial that
-// socket strictly, so a dead socket keeps main's CLI clone.
+// configured unix socket nothing answers on (initCloneSocketDead) is not
+// the server the store opens: its transport (doltserver.SocketTransport)
+// falls back from that socket to TCP at the endpoint's host and port when
+// TCP answers there (initCloneSocketTransport), so the endpoint over TCP
+// decides, and the server clone dials TCP too (initServerCloneEndpoint).
+// When neither answers, main's CLI clone is kept, and the store's open
+// reports the socket.
 func initRemoteCloneMode(initServerMode, externalServer bool, endpoint func() doltserver.Endpoint, gateway bool) remoteCloneMode {
 	if !initServerMode {
 		return remoteCloneEmbedded
@@ -3748,25 +3751,45 @@ func initRemoteCloneMode(initServerMode, externalServer bool, endpoint func() do
 		return remoteCloneCLI
 	}
 	ep := endpoint()
-	if doltserver.HostRunsBDServer(ep.Host) && (ep.ServedByBD() || !ep.Dialable() || initCloneSocketDead(ep.Socket)) {
+	if !doltserver.HostRunsBDServer(ep.Host) {
+		return remoteCloneExternalServer
+	}
+	if initCloneSocketDead(ep.Socket) {
+		if initCloneSocketTransport(ep.Socket, ep.Host, ep.Port) != "" {
+			return remoteCloneCLI
+		}
+		ep.Socket = ""
+	}
+	if ep.ServedByBD() || !ep.Dialable() {
 		return remoteCloneCLI
 	}
 	return remoteCloneExternalServer
 }
 
-// initCloneSocketDead reports whether socket is a configured unix socket
-// nothing answers on, by the probe the store's transport makes
-// (doltserver.ProbeSQLServer, as doltserver.SocketTransport does). A var so
-// tests can stub connectivity.
-var initCloneSocketDead = func(socket string) bool {
-	if socket == "" {
-		return false
-	}
-	_, err := doltserver.ProbeSQLServer("unix", socket, initCloneSocketProbeTimeout)
-	return err != nil
+// initCloneProbe is the dial probe bd init's clone makes to find the
+// transport init's store dials: the store's own (doltserver.ProbeSQLServer,
+// as doltserver.SocketTransport probes). A var so tests can stub
+// connectivity.
+var initCloneProbe = func(network, addr string, timeout time.Duration) error {
+	_, err := doltserver.ProbeSQLServer(network, addr, timeout)
+	return err
 }
 
-// initCloneSocketProbeTimeout is initCloneSocketDead's probe budget, the
+// initCloneSocketDead reports whether socket is a configured unix socket
+// nothing answers on (initCloneProbe).
+func initCloneSocketDead(socket string) bool {
+	return socket != "" && initCloneProbe("unix", socket, initCloneSocketProbeTimeout) != nil
+}
+
+// initCloneSocketTransport is the unix socket init's store dials for a
+// server at socket, host and port, or "" for TCP: the store's transport
+// (doltserver.SocketTransport, by initCloneProbe). A socket nothing answers
+// on gives way to TCP at host:port when TCP answers there.
+func initCloneSocketTransport(socket, host string, port int) string {
+	return doltserver.SocketTransportWith(initCloneProbe, socket, host, port, initCloneSocketProbeTimeout)
+}
+
+// initCloneSocketProbeTimeout is initCloneProbe's budget per probe, the
 // store's own per-probe budget for its socket transport.
 const initCloneSocketProbeTimeout = 500 * time.Millisecond
 
@@ -3800,26 +3823,29 @@ func initCloneGateway(cloneCfg *configfile.Config, serverUser string) bool {
 // already hold the database: init then clones nothing and returns
 // initCloneTargetHeldError, and its store opens that database, as it did
 // when init cloned into .beads/dolt there. DOLT_CLONE would fail instead
-// ("database exists"). When that server, at a host bd runs its server at,
-// does not answer, init keeps main's dolt CLI clone into .beads/dolt, and
-// its store open then refuses the server that is down with the store's own
-// advice (the setting that declares it externally managed).
+// ("database exists"). When nothing accepts a connection at that server, at
+// a host bd runs its server at (initCloneDialFailed), init keeps main's dolt
+// CLI clone into .beads/dolt, and its store open then refuses the server
+// that is down with the store's own advice (the setting that declares it
+// externally managed). A server there that accepts the connection and fails
+// the probe, by refusing its login, say, is up: the clone goes through it.
 func initCloneFromRemote(ctx context.Context, beadsDir, remoteURL, dbName string, cloneCfg *configfile.Config, initServerMode, externalServer bool, serverUser string) (initRemoteCloneDisposition, error) {
 	endpoint := func() doltserver.Endpoint { return initCloneEndpoint(beadsDir, cloneCfg, serverUser) }
 	cloneMode := initRemoteCloneMode(initServerMode, externalServer, endpoint, initCloneGateway(cloneCfg, serverUser))
 	return runInitRemoteClone(remoteURL, func(remoteURL string) error {
 		mode := cloneMode
 		if cloneMode == remoteCloneExternalServer && !externalServer {
-			location, held, unreachable := initCloneTargetHoldsDatabase(beadsDir, cloneCfg)
+			location, held, down := initCloneTargetHoldsDatabase(beadsDir, cloneCfg)
 			if held {
 				return &initCloneTargetHeldError{location: location}
 			}
-			if unreachable && doltserver.HostRunsBDServer(cloneCfg.GetDoltServerHost()) {
-				// A server some other process runs at bd's host that does
-				// not answer: keep main's CLI clone, so init's store open
-				// reports that server in its own words (the setting that
-				// declares it externally managed, and that bd did not
-				// start one) instead of a clone error about the remote.
+			if down && doltserver.HostRunsBDServer(cloneCfg.GetDoltServerHost()) {
+				// A server some other process runs at bd's host that
+				// could not be dialed: keep main's CLI clone, so init's
+				// store open reports that server in its own words (the
+				// setting that declares it externally managed, and that bd
+				// did not start one) instead of a clone error about the
+				// remote.
 				mode = remoteCloneCLI
 			}
 		}
@@ -3870,14 +3896,26 @@ func initCloneTargetHeldLine(dbName string, held *initCloneTargetHeldError, sync
 // into through a server (initServerCloneEndpoint) is reachable and already
 // holds cfg's database, and names that server. DOLT_CLONE fails on an
 // existing database ("database exists"), where init's store opens it.
-// unreachable reports that the server did not answer the probe.
-func initCloneTargetHoldsDatabase(beadsDir string, cfg *configfile.Config) (location string, held, unreachable bool) {
+// down reports that the probe could not dial that server
+// (initCloneDialFailed); a server that accepted the connection and then
+// failed the probe, by refusing its login, say, is not down.
+func initCloneTargetHoldsDatabase(beadsDir string, cfg *configfile.Config) (location string, held, down bool) {
 	ep, err := initServerCloneEndpoint(beadsDir, cfg)
 	if err != nil {
 		return "", false, false
 	}
 	result := checkBootstrapServerDB(ep)
-	return ep.serverLocation(), result.Reachable && result.Exists && result.Err == nil, !result.Reachable
+	return ep.serverLocation(), result.Reachable && result.Exists && result.Err == nil, !result.Reachable && initCloneDialFailed(result.Err)
+}
+
+// initCloneDialFailed reports whether err, a failed server probe's error, is
+// a failure to dial the server, as externalServerUnreachableMessage reads one
+// (connection refused, a dial that timed out, no route): nothing accepted the
+// connection. checkBootstrapServerDB reports every failed ping unreachable,
+// a login the server refused among them.
+func initCloneDialFailed(err error) bool {
+	var opErr *net.OpError
+	return errors.As(err, &opErr) && opErr.Op == "dial"
 }
 
 // serverConnEnvMutation is one pending change to the process environment.

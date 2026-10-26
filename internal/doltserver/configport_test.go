@@ -21,10 +21,16 @@ func TestDefaultConfigReadsConfigYamlPort(t *testing.T) {
 	if got := DefaultConfig(beadsDir).Port; got != 51234 {
 		t.Fatalf("DefaultConfig port = %d, want 51234 (from config.yaml listener.port)", got)
 	}
+	if got := DoltConfigYamlPort(beadsDir); got != 51234 {
+		t.Fatalf("DoltConfigYamlPort = %d, want 51234 (from config.yaml listener.port)", got)
+	}
 }
 
 func TestConfigYamlPortAbsentReturnsZero(t *testing.T) {
 	if got := configYamlPort(t.TempDir()); got != 0 {
 		t.Fatalf("configYamlPort on dir without config.yaml = %d, want 0", got)
+	}
+	if got := DoltConfigYamlPort(t.TempDir()); got != 0 {
+		t.Fatalf("DoltConfigYamlPort on dir without config.yaml = %d, want 0", got)
 	}
 }

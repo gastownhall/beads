@@ -2458,32 +2458,6 @@ func TestDetectBootstrapAction_ShadowDirSettlesForEveryHost(t *testing.T) {
 	}
 }
 
-// clonePortTestEnv clears every variable that names a Dolt server endpoint,
-// its credentials or the mode, isolates HOME (the shared-server directory,
-// user config and credentials file live there) and resets the config package,
-// so only what a test writes chooses the endpoint.
-func clonePortTestEnv(t *testing.T) {
-	t.Helper()
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("BEADS_SHARED_SERVER_DIR", filepath.Join(home, "shared-server"))
-	for _, name := range []string{
-		"BEADS_DOLT_SERVER_MODE", "BEADS_DOLT_SHARED_SERVER", "BEADS_DOLT_SERVER_HOST",
-		"BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_PORT", "BEADS_DOLT_SERVER_SOCKET",
-		"BEADS_DOLT_DATA_DIR", "BEADS_DOLT_SERVER_DATABASE", "BEADS_DOLT_SERVER_USER",
-		"BEADS_DOLT_SERVER_TLS", "BEADS_DOLT_PASSWORD", "BEADS_CREDENTIALS_FILE",
-		// Config reports these as dolt.port, dolt.shared-server, dolt.host and
-		// dolt.mode.
-		"BD_DOLT_PORT", "BD_DOLT_SHARED_SERVER", "BD_DOLT_HOST", "BD_DOLT_MODE",
-	} {
-		t.Setenv(name, "")
-	}
-	config.ResetForTesting()
-	t.Cleanup(config.ResetForTesting)
-}
-
 // loadClonePortConfig makes beadsDir's config.yaml the one the store reads
 // dolt.port from.
 func loadClonePortConfig(t *testing.T, beadsDir string) {

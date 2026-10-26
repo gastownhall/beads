@@ -1,11 +1,13 @@
 package main
 
 import (
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
@@ -68,8 +70,10 @@ func TestInitExplicitRemoteDrivesCloneAndPersistence(t *testing.T) {
 // stranded while init's store created an empty database on that server; with
 // the dolt CLI into .beads/dolt for a server bd serves (its own, or the
 // shared server), for an endpoint with no address to clone through, and for
-// a configured unix socket nothing answers on (the store falls back to TCP
-// there), as on main. A gateway (BEADS_DOLT_CREDENTIAL_COMMAND) keeps main's CLI clone on
+// a configured unix socket nothing answers on with no TCP port answering
+// either, as on main. Where the store falls back from that socket to TCP
+// (doltserver.SocketTransport), the endpoint over TCP decides as above. A
+// gateway (BEADS_DOLT_CREDENTIAL_COMMAND) keeps main's CLI clone on
 // any host, unless --server-user names the user: init's store then presents
 // that user, not the command's token, and opens the server as any other.
 func TestInitServerExternalRemoteUsesServerCloneMode(t *testing.T) {
@@ -82,6 +86,7 @@ func TestInitServerExternalRemoteUsesServerCloneMode(t *testing.T) {
 		serverSocket string // --server-socket
 		serverUser   string // --server-user
 		deadSocket   bool   // the configured socket does not answer
+		tcpLive      bool   // TCP answers at every host and port
 		env          map[string]string
 		want         remoteCloneMode
 	}{
@@ -103,11 +108,19 @@ func TestInitServerExternalRemoteUsesServerCloneMode(t *testing.T) {
 		{name: "unix socket", server: true, serverSocket: "/tmp/bd-init-clone-mode.sock", env: map[string]string{"BEADS_DOLT_SERVER_SOCKET": "/tmp/bd-init-clone-mode.sock"}, want: remoteCloneExternalServer},
 		// bd's shared server never listens on a unix socket.
 		{name: "shared server on a unix socket", server: true, serverSocket: "/tmp/bd-init-clone-mode.sock", env: map[string]string{"BEADS_DOLT_SHARED_SERVER": "1", "BEADS_DOLT_SERVER_SOCKET": "/tmp/bd-init-clone-mode.sock"}, want: remoteCloneExternalServer},
-		// A socket nothing answers on: the store falls back to TCP
-		// (doltserver.SocketTransport), so main's CLI clone stays.
+		// A socket nothing answers on: the store falls back to TCP at the
+		// endpoint's port when TCP answers there
+		// (doltserver.SocketTransport), and that endpoint decides; with no
+		// port, or nothing answering on it, the store dials the socket and
+		// fails, so main's CLI clone stays.
 		{name: "dead unix socket", server: true, serverSocket: "/tmp/bd-init-clone-mode.sock", deadSocket: true, env: map[string]string{"BEADS_DOLT_SERVER_SOCKET": "/tmp/bd-init-clone-mode.sock"}, want: remoteCloneCLI},
+		{name: "dead unix socket and no port, TCP answering", server: true, serverSocket: "/tmp/bd-init-clone-mode.sock", deadSocket: true, tcpLive: true, env: map[string]string{"BEADS_DOLT_SERVER_SOCKET": "/tmp/bd-init-clone-mode.sock"}, want: remoteCloneCLI},
 		{name: "shared server on a dead unix socket", server: true, serverSocket: "/tmp/bd-init-clone-mode.sock", deadSocket: true, env: map[string]string{"BEADS_DOLT_SHARED_SERVER": "1", "BEADS_DOLT_SERVER_SOCKET": "/tmp/bd-init-clone-mode.sock"}, want: remoteCloneCLI},
-		{name: "dead unix socket on BEADS_DOLT_SERVER_PORT", server: true, serverSocket: "/tmp/bd-init-clone-mode.sock", deadSocket: true, env: map[string]string{"BEADS_DOLT_SERVER_PORT": "13400", "BEADS_DOLT_SERVER_SOCKET": "/tmp/bd-init-clone-mode.sock"}, want: remoteCloneCLI},
+		{name: "shared server on a dead unix socket, TCP answering", server: true, serverSocket: "/tmp/bd-init-clone-mode.sock", deadSocket: true, tcpLive: true, env: map[string]string{"BEADS_DOLT_SHARED_SERVER": "1", "BEADS_DOLT_SERVER_SOCKET": "/tmp/bd-init-clone-mode.sock"}, want: remoteCloneCLI},
+		{name: "dead unix socket on BEADS_DOLT_SERVER_PORT, nothing answering there", server: true, serverSocket: "/tmp/bd-init-clone-mode.sock", deadSocket: true, env: map[string]string{"BEADS_DOLT_SERVER_PORT": "13400", "BEADS_DOLT_SERVER_SOCKET": "/tmp/bd-init-clone-mode.sock"}, want: remoteCloneCLI},
+		// The store opens the server on that port over TCP, which does not
+		// serve .beads/dolt.
+		{name: "dead unix socket on BEADS_DOLT_SERVER_PORT, TCP answering", server: true, serverSocket: "/tmp/bd-init-clone-mode.sock", deadSocket: true, tcpLive: true, env: map[string]string{"BEADS_DOLT_SERVER_PORT": "13400", "BEADS_DOLT_SERVER_SOCKET": "/tmp/bd-init-clone-mode.sock"}, want: remoteCloneExternalServer},
 		{name: "dead unix socket on a remote host", server: true, serverHost: "db.example.com", serverSocket: "/tmp/bd-init-clone-mode.sock", deadSocket: true, env: map[string]string{"BEADS_DOLT_SERVER_SOCKET": "/tmp/bd-init-clone-mode.sock"}, want: remoteCloneExternalServer},
 		{name: "localhost on BEADS_DOLT_SERVER_PORT", server: true, serverHost: "localhost", env: map[string]string{"BEADS_DOLT_SERVER_PORT": "13400"}, want: remoteCloneExternalServer},
 		{name: "remote --server-host", server: true, serverHost: "db.example.com", want: remoteCloneExternalServer},
@@ -134,7 +147,7 @@ func TestInitServerExternalRemoteUsesServerCloneMode(t *testing.T) {
 			for k, v := range tc.env {
 				t.Setenv(k, v)
 			}
-			stubInitCloneSocketDead(t, tc.deadSocket)
+			stubInitCloneProbe(t, tc.deadSocket, tc.tcpLive)
 			beadsDir := filepath.Join(t.TempDir(), ".beads")
 			cloneCfg := initTimeCloneConfig(tc.server, tc.serverHost, tc.serverPort, tc.serverSocket, tc.serverUser, "init_clone_mode")
 			mode := remoteCloneEmbedded
@@ -149,17 +162,41 @@ func TestInitServerExternalRemoteUsesServerCloneMode(t *testing.T) {
 	}
 }
 
-// stubInitCloneSocketDead makes every configured socket answer, or none.
-func stubInitCloneSocketDead(t *testing.T, dead bool) {
+// stubInitCloneProbe makes every configured socket answer, or none
+// (socketDead), and TCP answer at every address, or at none (tcpLive).
+func stubInitCloneProbe(t *testing.T, socketDead, tcpLive bool) {
 	t.Helper()
-	orig := initCloneSocketDead
-	initCloneSocketDead = func(socket string) bool { return socket != "" && dead }
-	t.Cleanup(func() { initCloneSocketDead = orig })
+	orig := initCloneProbe
+	initCloneProbe = func(network, addr string, _ time.Duration) error {
+		if (network == "unix" && !socketDead) || (network == "tcp" && tcpLive) {
+			return nil
+		}
+		return fmt.Errorf("stub: nothing answers on %s %s", network, addr)
+	}
+	t.Cleanup(func() { initCloneProbe = orig })
+}
+
+// acceptAndClose accepts on ln, closing each connection at once, until ln
+// is closed.
+func acceptAndClose(t *testing.T, ln net.Listener) {
+	t.Helper()
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
 }
 
 // TestInitCloneSocketDeadProbesTheSocket pins initCloneSocketDead to the
 // store's socket probe: a socket something listens on is live, a path
-// nothing listens on is dead, and no socket is never dead.
+// nothing listens on is dead, and no socket is never dead. The transport
+// the clone dials (initCloneSocketTransport) is the store's: a live socket,
+// else TCP where TCP at the endpoint's port answers, else the socket.
 func TestInitCloneSocketDeadProbesTheSocket(t *testing.T) {
 	dir, err := os.MkdirTemp("", "bdsk")
 	if err != nil {
@@ -171,24 +208,45 @@ func TestInitCloneSocketDeadProbesTheSocket(t *testing.T) {
 	if err != nil {
 		t.Skipf("unix sockets unavailable: %v", err)
 	}
-	t.Cleanup(func() { _ = ln.Close() })
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			_ = conn.Close()
-		}
-	}()
+	acceptAndClose(t, ln)
+	dead := filepath.Join(dir, "dead.sock")
 	if initCloneSocketDead("") {
 		t.Error("no socket reported dead")
 	}
 	if initCloneSocketDead(live) {
 		t.Errorf("live socket %s reported dead", live)
 	}
-	if !initCloneSocketDead(filepath.Join(dir, "dead.sock")) {
+	if !initCloneSocketDead(dead) {
 		t.Error("socket nothing listens on reported live")
+	}
+
+	tcp, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("TCP loopback unavailable: %v", err)
+	}
+	acceptAndClose(t, tcp)
+	tcpPort := tcp.Addr().(*net.TCPAddr).Port
+	closed, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	closedPort := closed.Addr().(*net.TCPAddr).Port
+	_ = closed.Close()
+	for _, tc := range []struct {
+		name   string
+		socket string
+		port   int
+		want   string
+	}{
+		{name: "no socket", socket: "", port: tcpPort, want: ""},
+		{name: "live socket, TCP answering", socket: live, port: tcpPort, want: live},
+		{name: "dead socket, TCP answering", socket: dead, port: tcpPort, want: ""},
+		{name: "dead socket, nothing on TCP", socket: dead, port: closedPort, want: dead},
+		{name: "dead socket, no port", socket: dead, port: 0, want: dead},
+	} {
+		if got := initCloneSocketTransport(tc.socket, "127.0.0.1", tc.port); got != tc.want {
+			t.Errorf("%s: initCloneSocketTransport = %q, want %q", tc.name, got, tc.want)
+		}
 	}
 }
 
