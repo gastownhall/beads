@@ -150,6 +150,7 @@ func TestGeneratedHookTimeoutProcessBoundary(t *testing.T) {
 	t.Run("reserved statuses are backend scoped", testHookProcessReservedStatuses)
 	t.Run("real coreutils timeout expires a responsive child", testHookProcessRealTimeoutExpiry)
 	t.Run("real Perl supervisor expires an alarm-immune child", testHookProcessRealPerlExpiry)
+	t.Run("real Perl supervisor preserves argv and status", testHookProcessRealPerlStatuses)
 	t.Run("Windows checkout rejects System32 timeout", testHookProcessWindowsSystemTimeoutCheckout)
 }
 
@@ -404,6 +405,51 @@ func testHookProcessRealPerlExpiry(t *testing.T) {
 	}
 	if result.elapsed > 9*time.Second {
 		t.Errorf("Perl expiry took %s, want at most 9s", result.elapsed)
+	}
+}
+
+// testHookProcessRealPerlStatuses drives the generated Perl supervisor with a
+// bd that exits before the deadline: the supervisor's waitpid/exit mapping must
+// hand bd's argv through unchanged and forward its status to the same
+// normalization the other backends use.
+func testHookProcessRealPerlStatuses(t *testing.T) {
+	perlDir := findHookProcessPerl(t)
+	args := []string{"argument with space", "second-argument"}
+	tests := []struct {
+		name          string
+		bdExit        int
+		wantExit      int
+		wantWarning   bool
+		wantDBWarning bool
+	}{
+		{name: "success continues", bdExit: 0},
+		{name: "database-not-initialized is skipped", bdExit: 3, wantDBWarning: true},
+		{name: "other status is preserved", bdExit: 37, wantExit: 37},
+		{name: "124 is preserved", bdExit: 124, wantExit: 124},
+		{name: "142 is reported as a timeout", bdExit: 142, wantWarning: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := runGeneratedHookProcess(t, hookProcessCase{
+				fixtures: []hookProcessFixture{
+					{name: "timeout", body: hookProcessIncompatibleTimeoutStub},
+					{name: "gtimeout", body: hookProcessIncompatibleGtimeoutStub},
+				},
+				bdExit:   tt.bdExit,
+				pathTail: perlDir,
+				args:     args,
+			})
+			if result.exitCode != tt.wantExit {
+				t.Errorf("generated hook exit = %d, want %d\n%s", result.exitCode, tt.wantExit, result.output)
+			}
+			if got := strings.Contains(result.output, "timed out after"); got != tt.wantWarning {
+				t.Errorf("timeout warning presence = %v, want %v\n%s", got, tt.wantWarning, result.output)
+			}
+			if got := strings.Contains(result.output, "database not initialized"); got != tt.wantDBWarning {
+				t.Errorf("database warning presence = %v, want %v\n%s", got, tt.wantDBWarning, result.output)
+			}
+			assertHookProcessBDInvocation(t, result.output, "pre-push", args...)
+		})
 	}
 }
 
