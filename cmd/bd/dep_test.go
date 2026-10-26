@@ -801,6 +801,42 @@ func TestDepListRefusesUnknownDirection(t *testing.T) {
 			})
 		}
 	}
+
+	// Under --json the refusal is one JSON error object on stdout — not a
+	// dependency array — so a script parsing the stream sees the refusal,
+	// never a plausible complete answer. captureStdout fails the test when
+	// its function returns an error, and RunE returns the exit error, so the
+	// error is kept in an outer variable and the captured function returns
+	// nil. captureStdout and captureStderr are never nested: both lock
+	// stdioMutex.
+	for _, proxied := range []bool{false, true} {
+		t.Run(fmt.Sprintf("json/proxied=%v", proxied), func(t *testing.T) {
+			resetCommandFlags(depListCmd)
+			proxiedServerMode, jsonOutput = proxied, true
+			if err := depListCmd.ParseFlags([]string{"--direction=both"}); err != nil {
+				t.Fatal(err)
+			}
+			var err error
+			stdout := captureStdout(t, func() error {
+				err = depListCmd.RunE(depListCmd, []string{"bd-nosuch"})
+				return nil
+			})
+			if code, ok := exitCodeFromError(err); !ok || code != 1 {
+				t.Fatalf("RunE = %v, want exit 1\nstdout:\n%s", err, stdout)
+			}
+			var decoded map[string]interface{}
+			if jerr := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &decoded); jerr != nil {
+				t.Fatalf("stdout is not one JSON object (an array would be a dependency answer): %v\n%s", jerr, stdout)
+			}
+			obj := decoded
+			if data, ok := decoded["data"].(map[string]interface{}); ok { // BD_JSON_ENVELOPE=1
+				obj = data
+			}
+			if got, _ := obj["error"].(string); got != "--direction must be 'down' or 'up'" {
+				t.Errorf("error field = %q, want the refusal\n%s", got, stdout)
+			}
+		})
+	}
 }
 
 func TestDepTreeStatusFlag(t *testing.T) {
