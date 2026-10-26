@@ -1,8 +1,13 @@
 package main
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
+	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -259,5 +264,79 @@ func TestIssueText(t *testing.T) {
 	text2 := issueText(issue2)
 	if text2 != "Just title" {
 		t.Errorf("issueText() = %q, want %q", text2, "Just title")
+	}
+}
+
+// messagesReply wraps content blocks in a Messages API response body.
+func messagesReply(content string) string {
+	return `{"id":"msg_1","type":"message","role":"assistant","model":"claude-haiku-5-5",` +
+		`"content":` + content + `,"stop_reason":"end_turn",` +
+		`"usage":{"input_tokens":10,"output_tokens":10}}`
+}
+
+// newStubAnthropicClient returns an SDK client whose Messages API calls are
+// answered by an in-process server serving reply.
+func newStubAnthropicClient(t *testing.T, reply string) anthropic.Client {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(reply))
+	}))
+	t.Cleanup(srv.Close)
+	return anthropic.NewClient(
+		option.WithAPIKey("test"),
+		option.WithBaseURL(srv.URL),
+		option.WithMaxRetries(0),
+	)
+}
+
+// Issue #7515: a reply whose first block is a thinking block still carries
+// the answer in a later text block, and the AI verdicts must be used.
+func TestAnalyzeWithAI_ThinkingBlockFirst(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+	}{
+		{
+			name: "thinking then text",
+			content: `[{"type":"thinking","thinking":"","signature":"c2ln"},` +
+				`{"type":"text","text":"[{\"pair_index\":0,\"is_duplicate\":true,\"confidence\":0.9,\"reason\":\"same\"}]"}]`,
+		},
+		{
+			name: "redacted thinking, thinking, then text",
+			content: `[{"type":"redacted_thinking","data":"c2ln"},` +
+				`{"type":"thinking","thinking":"","signature":"c2ln"},` +
+				`{"type":"text","text":"[{\"pair_index\":0,\"is_duplicate\":true,\"confidence\":0.9,\"reason\":\"same\"}]"}]`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := newStubAnthropicClient(t, messagesReply(tt.content))
+			candidates := []duplicatePair{{
+				IssueA:     &types.Issue{ID: "bd-001", Title: "Fix authentication bug in login flow"},
+				IssueB:     &types.Issue{ID: "bd-002", Title: "Authentication login bug fix"},
+				Similarity: 0.3,
+				Method:     "mechanical",
+			}}
+
+			got := analyzeWithAI(context.Background(), client, "claude-haiku-5-5", candidates)
+
+			if len(got) != 1 {
+				t.Fatalf("got %d pairs, want 1: %+v", len(got), got)
+			}
+			if got[0].Method != "ai" {
+				t.Errorf("Method = %q, want %q", got[0].Method, "ai")
+			}
+			if got[0].Similarity != 0.9 {
+				t.Errorf("Similarity = %v, want 0.9 (the reply's confidence)", got[0].Similarity)
+			}
+			if got[0].Reason != "same" {
+				t.Errorf("Reason = %q, want %q", got[0].Reason, "same")
+			}
+			if got[0].IssueA.ID != "bd-001" || got[0].IssueB.ID != "bd-002" {
+				t.Errorf("pair issues = %s/%s, want bd-001/bd-002", got[0].IssueA.ID, got[0].IssueB.ID)
+			}
+		})
 	}
 }

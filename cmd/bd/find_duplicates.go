@@ -492,13 +492,21 @@ func analyzeWithAI(ctx context.Context, client anthropic.Client, model anthropic
 	)
 	aiSpan.End()
 
-	if len(message.Content) == 0 || message.Content[0].Type != "text" {
+	// The answer is the first text block, not necessarily the first block:
+	// Claude models that think by default reply [thinking, text] (#7515).
+	var responseText string
+	found := false
+	for _, block := range message.Content {
+		if block.Type == "text" {
+			responseText = block.Text
+			found = true
+			break
+		}
+	}
+	if !found {
 		fmt.Fprintf(os.Stderr, "Warning: unexpected AI response format\n")
 		return candidates
 	}
-
-	// Parse the JSON response
-	responseText := message.Content[0].Text
 
 	// Try to extract JSON from the response (handle markdown code blocks)
 	jsonText := responseText
