@@ -396,11 +396,12 @@ func applyResolvedConfig(ctx context.Context, beadsDir string, fileCfg *configfi
 		cfg.ServerPortSource = ep.PortSource
 		cfg.ServerPortSharedServer = ep.PortSharedServer
 	}
-	if cfg.ServerSocket == "" {
-		cfg.ServerSocket = ep.Socket
-	}
 	if os.Getenv("BEADS_DOLT_PASSWORD") != "" {
-		if err := CheckServerEndpointTrust(beadsDir, fileCfg, cfg.ServerHost, cfg.ServerPort, cfg.ServerSocket); err != nil {
+		socket := cfg.ServerSocket
+		if socket == "" {
+			socket = ep.Socket
+		}
+		if err := CheckServerEndpointTrust(beadsDir, fileCfg, cfg.ServerHost, cfg.ServerPort, socket); err != nil {
 			return err
 		}
 	}
