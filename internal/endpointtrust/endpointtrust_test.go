@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/config"
 )
 
 func isolatePins(t *testing.T) {
@@ -20,10 +22,16 @@ func TestOriginNormalizesOrigins(t *testing.T) {
 	for _, tc := range []struct {
 		in, want string
 	}{
-		{"https://Example.com/path", "https://example.com:443"},
-		{"https://example.com:443/other", "https://example.com:443"},
-		{"http://[::1]/path", "http://[::1]:80"},
-		{"mysql://[2001:DB8::1]:3306/db", "mysql://[2001:db8::1]:3306"},
+		{"https://Example.com", "https://example.com:443"},
+		{"https://Example.com/path", "https://example.com:443/path"},
+		{"https://example.com:443/other", "https://example.com:443/other"},
+		{"https://example.com/", "https://example.com:443"},
+		{"https://example.com/api/", "https://example.com:443/api"},
+		{"https://example.com/api/../v2", "https://example.com:443/v2"},
+		{"https://example.com/%2e%2e/v2", "https://example.com:443/v2"},
+		{"https://user:pass@example.com/graphql", "https://example.com:443/graphql"},
+		{"http://[::1]/path", "http://[::1]:80/path"},
+		{"mysql://[2001:DB8::1]:3306/db", "mysql://[2001:db8::1]:3306/db"},
 		{"unix:/tmp/dolt.sock", "unix:/tmp/dolt.sock"},
 	} {
 		got, err := Origin(tc.in)
@@ -53,18 +61,22 @@ func TestCheckPinsAndRejectsChangedEndpoint(t *testing.T) {
 	n, _ := r.Read(buf)
 	_ = r.Close()
 	stderr.Write(buf[:n])
-	if !strings.Contains(stderr.String(), "beads: trusting github endpoint https://one.example:443") {
+	if !strings.Contains(stderr.String(), "beads: trusting github endpoint https://one.example:443/api") {
 		t.Fatalf("first-use notice = %q", stderr.String())
 	}
-	if err := Check(key, "github", "https://one.example/other", false); err != nil {
-		t.Fatalf("same origin: %v", err)
+	if err := Check(key, "github", "https://one.example/api/", false); err != nil {
+		t.Fatalf("same origin after path normalization: %v", err)
+	}
+	err = Check(key, "github", "https://one.example/other", false)
+	var mismatch *MismatchError
+	if !errors.As(err, &mismatch) {
+		t.Fatalf("changed path mismatch error = %v", err)
 	}
 	err = Check(key, "github", "https://two.example/api", false)
-	var mismatch *MismatchError
 	if !errors.As(err, &mismatch) {
 		t.Fatalf("mismatch error = %v", err)
 	}
-	for _, part := range []string{"github.url", "https://one.example:443", "https://two.example:443", "credential was not sent"} {
+	for _, part := range []string{"github.url", "https://one.example:443/api", "https://two.example:443/api", "credential was not sent"} {
 		if !strings.Contains(err.Error(), part) {
 			t.Errorf("error %q does not contain %q", err, part)
 		}
@@ -94,7 +106,7 @@ func TestCheckPinsAndRejectsChangedEndpoint(t *testing.T) {
 	}
 }
 
-func TestCheckPrivateSourceRepinsAndLocalDoltDoesNotPin(t *testing.T) {
+func TestCheckPrivateSourceRepinsAndLocalDoltPinsSentinel(t *testing.T) {
 	isolatePins(t)
 	key := filepath.Join(t.TempDir(), ".beads")
 	if err := Check(key, "jira", "https://old.example", false); err != nil {
@@ -106,7 +118,11 @@ func TestCheckPrivateSourceRepinsAndLocalDoltDoesNotPin(t *testing.T) {
 	if err := Check(key, "jira", "https://old.example", false); err == nil {
 		t.Fatal("old pin was not replaced by private source")
 	}
-	for _, endpoint := range []string{"mysql://localhost:3306", "mysql://127.0.0.1:3306", "mysql://127.0.0.2:3306", "mysql://[::1]:3306", "unix:/tmp/dolt.sock"} {
+	sock := filepath.Join(t.TempDir(), "dolt.sock")
+	if err := os.WriteFile(sock, []byte{}, 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, endpoint := range []string{"mysql://localhost:3306", "mysql://127.0.0.1:3306", "mysql://127.0.0.2:3306", "mysql://[::1]:3306", "unix:" + sock} {
 		if err := Check(key, "dolt-server", endpoint, false); err != nil {
 			t.Errorf("local endpoint %q: %v", endpoint, err)
 		}
@@ -115,8 +131,38 @@ func TestCheckPrivateSourceRepinsAndLocalDoltDoesNotPin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(stored.Workspaces[key]) != 1 {
+	// Loopback endpoints record the sentinel so a later shared remote host is
+	// a pin change; a unix socket is ownership-checked but never pinned.
+	want := map[string]string{"jira": "https://new.example:443", "dolt-server": localDoltOrigin}
+	if len(stored.Workspaces[key]) != len(want) {
 		t.Fatalf("unexpected pins: %#v", stored.Workspaces[key])
+	}
+	for kind, origin := range want {
+		if stored.Workspaces[key][kind] != origin {
+			t.Errorf("pin[%s] = %q, want %q", kind, stored.Workspaces[key][kind], origin)
+		}
+	}
+}
+
+func TestCheckDoltServerPinsRemoteAndRejectsSharedChange(t *testing.T) {
+	isolatePins(t)
+	key := filepath.Join(t.TempDir(), ".beads")
+	if err := Check(key, "dolt-server", "mysql://localhost:3306", false); err != nil {
+		t.Fatal(err)
+	}
+	// A remote host shared via committed config replaces the local sentinel
+	// only when a private source confirms it.
+	err := Check(key, "dolt-server", "mysql://db.example:3306", false)
+	var mismatch *MismatchError
+	if !errors.As(err, &mismatch) {
+		t.Fatalf("local-to-remote change = %v, want MismatchError", err)
+	}
+	if err := Check(key, "dolt-server", "mysql://db.example:3306", true); err != nil {
+		t.Fatalf("private remote confirmation: %v", err)
+	}
+	err = Check(key, "dolt-server", "mysql://other.example:3306", false)
+	if !errors.As(err, &mismatch) {
+		t.Fatalf("remote-to-remote change = %v, want MismatchError", err)
 	}
 }
 
@@ -216,5 +262,87 @@ func TestCheckRequiresWorkspaceAndPinsJSON(t *testing.T) {
 	var got pins
 	if err := json.Unmarshal(data, &got); err != nil || got.Version != 1 || got.Workspaces[key]["github"] != "https://example.com:443" {
 		t.Fatalf("pins = %#v, err %v", got, err)
+	}
+}
+
+// TestCheckDefaultEndpointPinsAndBlocksSharedCustom pins the fix for the
+// default-to-custom bypass: a workspace on the vendor default records a pin,
+// so a custom endpoint arriving later through shared config is a pin change
+// that refuses the credential, not a silent first use.
+func TestCheckDefaultEndpointPinsAndBlocksSharedCustom(t *testing.T) {
+	isolatePins(t)
+	key := filepath.Join(t.TempDir(), ".beads")
+	if err := Check(key, "github", "", false); err != nil {
+		t.Fatalf("default endpoint: %v", err)
+	}
+	stored, err := readPins()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stored.Workspaces[key]["github"]; got != guidance["github"].defaultOrigin {
+		t.Fatalf("default pin = %q, want %q", got, guidance["github"].defaultOrigin)
+	}
+	err = Check(key, "github", "https://evil.example", false)
+	var mismatch *MismatchError
+	if !errors.As(err, &mismatch) {
+		t.Fatalf("shared custom after default = %v, want MismatchError", err)
+	}
+	if err := Check(key, "github", "https://evil.example", true); err != nil {
+		t.Fatalf("private confirmation of the new endpoint: %v", err)
+	}
+}
+
+// TestCheckDoltServerRejectsForeignOwnedSocket pins the shared-host check: a
+// unix socket owned by another uid must never receive the Dolt credential.
+func TestCheckDoltServerRejectsForeignOwnedSocket(t *testing.T) {
+	if os.Geteuid() < 0 {
+		t.Skip("no euid on this platform")
+	}
+	isolatePins(t)
+	sock := filepath.Join(t.TempDir(), "dolt.sock")
+	if err := os.WriteFile(sock, []byte{}, 0600); err != nil {
+		t.Fatal(err)
+	}
+	key := filepath.Join(t.TempDir(), ".beads")
+	if err := Check(key, "dolt-server", "unix:"+sock, false); err != nil {
+		t.Fatalf("own socket: %v", err)
+	}
+	orig := currentEUIDFn
+	currentEUIDFn = func() int { return os.Geteuid() + 1 }
+	defer func() { currentEUIDFn = orig }()
+	err := Check(key, "dolt-server", "unix:"+sock, false)
+	if err == nil || !strings.Contains(err.Error(), "owned by uid") {
+		t.Fatalf("foreign-owned socket error = %v", err)
+	}
+}
+
+// TestPrivateMatchIgnoresDotenvValues pins that a .beads/.env-imported
+// variable is shared configuration and cannot privately confirm an endpoint.
+func TestPrivateMatchIgnoresDotenvValues(t *testing.T) {
+	t.Setenv("GITHUB_API_URL", "https://same.example")
+	config.MarkDotenvValue("GITHUB_API_URL", "https://same.example")
+	t.Cleanup(config.ResetForTesting)
+	if PrivateMatch("github.url", "GITHUB_API_URL", "https://same.example") {
+		t.Fatal("dotenv-imported GITHUB_API_URL privately confirmed the endpoint")
+	}
+}
+
+// TestWorkspaceKeyPrefersDiscoveredWorkspaceAndIgnoresDotenvBeadsDir pins the
+// workspace key to the .beads directory bd discovered before applying
+// .beads/.env, so a committed BEADS_DIR cannot re-key the pins.
+func TestWorkspaceKeyPrefersDiscoveredWorkspaceAndIgnoresDotenvBeadsDir(t *testing.T) {
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+	discovered := t.TempDir()
+	dotenv := t.TempDir()
+	t.Setenv("BEADS_DIR", dotenv)
+	config.MarkDotenvValue("BEADS_DIR", dotenv)
+	config.RecordWorkspaceBeadsDir(discovered)
+	want, err := cleanWorkspaceKey(discovered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := WorkspaceKey(); got != want {
+		t.Fatalf("WorkspaceKey = %q, want the discovered workspace %q", got, want)
 	}
 }

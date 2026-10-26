@@ -107,6 +107,8 @@ func setupEndpointTrustWorkspaceForTest(t *testing.T) {
 	t.Setenv("BEADS_DIR", beadsDir)
 	t.Setenv("HOME", root)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, ".config"))
+	// An earlier in-process command may have recorded another workspace.
+	config.RecordWorkspaceBeadsDir(beadsDir)
 }
 
 // initConfigForTest initializes viper config for a test and ensures cleanup.

@@ -235,7 +235,7 @@ func CheckEndpointTrust(beadsDir string, fileCfg *configfile.Config, host string
 	if fileCfg == nil {
 		fileCfg = loadEndpointConfig(beadsDir)
 	}
-	fromPrivate := os.Getenv("BEADS_DOLT_SERVER_HOST") != "" ||
+	fromPrivate := config.PrivateGetenv("BEADS_DOLT_SERVER_HOST") != "" ||
 		(fileCfg.DoltServerHost == "" && !config.IsFromProjectConfig("dolt.host"))
 	if beadsDir == "" {
 		beadsDir = endpointtrust.WorkspaceKey()

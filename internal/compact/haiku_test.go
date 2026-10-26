@@ -23,6 +23,17 @@ func (timeoutErr) Error() string   { return "timeout" }
 func (timeoutErr) Timeout() bool   { return true }
 func (timeoutErr) Temporary() bool { return true }
 
+// isolateEndpointPins keeps trusted-endpoints.json writes inside the test's
+// temp dirs: newHaikuClient pins the AI endpoint for the workspace before the
+// key is sent, and without an isolated user config dir that pin file lands in
+// the developer's real ~/.config/beads.
+func isolateEndpointPins(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+}
+
 func TestNewHaikuClient_RequiresAPIKey(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "")
 	t.Setenv("MINIMAX_API_KEY", "")
@@ -40,6 +51,7 @@ func TestNewHaikuClient_RequiresAPIKey(t *testing.T) {
 }
 
 func TestNewHaikuClient_EnvVarUsedWhenNoExplicitKey(t *testing.T) {
+	isolateEndpointPins(t)
 	t.Setenv("ANTHROPIC_API_KEY", "test-key-from-env")
 
 	client, err := newHaikuClient("")
@@ -52,6 +64,7 @@ func TestNewHaikuClient_EnvVarUsedWhenNoExplicitKey(t *testing.T) {
 }
 
 func TestNewHaikuClient_EnvVarOverridesExplicitKey(t *testing.T) {
+	isolateEndpointPins(t)
 	t.Setenv("ANTHROPIC_API_KEY", "test-key-from-env")
 
 	client, err := newHaikuClient("test-key-explicit")
@@ -64,6 +77,7 @@ func TestNewHaikuClient_EnvVarOverridesExplicitKey(t *testing.T) {
 }
 
 func TestNewHaikuClient_MiniMaxKeyUsesMiniMaxBaseURL(t *testing.T) {
+	isolateEndpointPins(t)
 	t.Setenv("ANTHROPIC_API_KEY", "")
 	t.Setenv("MINIMAX_API_KEY", "test-minimax-key")
 	t.Setenv("MINIMAX_BASE_URL", "")
@@ -86,6 +100,7 @@ func TestNewHaikuClient_MiniMaxKeyUsesMiniMaxBaseURL(t *testing.T) {
 }
 
 func TestNewHaikuClient_AnthropicKeyOverridesMiniMaxKey(t *testing.T) {
+	isolateEndpointPins(t)
 	t.Setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
 	t.Setenv("MINIMAX_API_KEY", "test-minimax-key")
 	if err := config.Initialize(); err != nil {
@@ -228,6 +243,7 @@ func TestNewAIClientOptionsPinsBeforeSendingKey(t *testing.T) {
 }
 
 func TestNewAIClientOptionsIgnoresUnusedMiniMaxEndpoint(t *testing.T) {
+	isolateEndpointPins(t)
 	t.Cleanup(func() { config.Set("ai.base_url", "") })
 	config.Set("ai.base_url", "")
 	t.Setenv("ANTHROPIC_API_KEY", "a")
@@ -247,6 +263,7 @@ func TestNewAIClientOptionsIgnoresUnusedMiniMaxEndpoint(t *testing.T) {
 }
 
 func TestRenderTier1Prompt(t *testing.T) {
+	isolateEndpointPins(t)
 	client, err := newHaikuClient("test-key")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -288,6 +305,7 @@ func TestRenderTier1Prompt(t *testing.T) {
 }
 
 func TestRenderTier1Prompt_HandlesEmptyFields(t *testing.T) {
+	isolateEndpointPins(t)
 	client, err := newHaikuClient("test-key")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -314,6 +332,7 @@ func TestRenderTier1Prompt_HandlesEmptyFields(t *testing.T) {
 }
 
 func TestRenderTier1Prompt_UTF8(t *testing.T) {
+	isolateEndpointPins(t)
 	client, err := newHaikuClient("test-key")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -346,6 +365,7 @@ func TestRenderTier1Prompt_UTF8(t *testing.T) {
 }
 
 func TestCallWithRetry_ContextCancellation(t *testing.T) {
+	isolateEndpointPins(t)
 	client, err := newHaikuClient("test-key")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -393,6 +413,7 @@ func TestIsRetryable(t *testing.T) {
 }
 
 func TestSummarizeTier1_CancelledContext(t *testing.T) {
+	isolateEndpointPins(t)
 	t.Setenv("ANTHROPIC_API_KEY", "")
 	t.Setenv("MINIMAX_API_KEY", "")
 	client, err := newHaikuClient("test-key-fake")
@@ -416,6 +437,7 @@ func TestSummarizeTier1_CancelledContext(t *testing.T) {
 }
 
 func TestSummarizeTier1_WithAuditEnabled(t *testing.T) {
+	isolateEndpointPins(t)
 	t.Setenv("ANTHROPIC_API_KEY", "")
 	t.Setenv("MINIMAX_API_KEY", "")
 	client, err := newHaikuClient("test-key-fake")
@@ -441,6 +463,7 @@ func TestSummarizeTier1_WithAuditEnabled(t *testing.T) {
 }
 
 func TestCallWithRetry_ImmediateContextCancel(t *testing.T) {
+	isolateEndpointPins(t)
 	t.Setenv("ANTHROPIC_API_KEY", "")
 	t.Setenv("MINIMAX_API_KEY", "")
 	client, err := newHaikuClient("test-key-fake")

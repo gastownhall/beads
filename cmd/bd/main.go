@@ -566,9 +566,19 @@ func loadBeadsEnvFile(beadsDir string) {
 	if beadsDir == "" {
 		return
 	}
+	if !config.IsDotenvKey("BEADS_DIR") {
+		config.RecordWorkspaceBeadsDir(beadsDir)
+	}
 	envFile := filepath.Join(beadsDir, ".env")
 	if _, err := os.Stat(envFile); err != nil {
 		return
+	}
+	if pairs, err := gotenv.Read(envFile); err == nil {
+		for key, val := range pairs {
+			if os.Getenv(key) == "" && val != "" {
+				config.MarkDotenvValue(key, val)
+			}
+		}
 	}
 	// A .env-provided BEADS_DIR is user-authored selection wherever it is
 	// imported from, not only via loadBeadsSelectionEnvFile: that loader
@@ -605,6 +615,7 @@ func loadBeadsSelectionEnvFile(beadsDir string) {
 	if beadsDir == "" {
 		return
 	}
+	config.RecordWorkspaceBeadsDir(beadsDir)
 	envFile := filepath.Join(beadsDir, ".env")
 	pairs, err := gotenv.Read(envFile)
 	if err != nil {
@@ -616,6 +627,7 @@ func loadBeadsSelectionEnvFile(beadsDir string) {
 		}
 		if value, ok := pairs[key]; ok && strings.TrimSpace(value) != "" {
 			_ = os.Setenv(key, value)
+			config.MarkDotenvValue(key, value)
 			if key == "BEADS_DIR" {
 				// A .beads/.env that routes commands via BEADS_DIR is
 				// user-authored selection, same as exporting the variable

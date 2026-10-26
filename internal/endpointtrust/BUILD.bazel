@@ -16,6 +16,9 @@ go_test(
     name = "endpointtrust_test",
     srcs = ["endpointtrust_test.go"],
     embed = [":endpointtrust"],
+    deps = [
+        "//internal/config",
+    ],
 )
 
 # --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---

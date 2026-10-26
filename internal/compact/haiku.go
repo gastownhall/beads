@@ -79,14 +79,23 @@ func NewAIClientOptions(explicitKey string) ([]option.RequestOption, config.AIAP
 	}
 	baseURL := config.DefaultAIBaseURL(keySource)
 	configuredBaseURL := config.GetString("ai.base_url")
-	if configuredBaseURL != "" {
-		if err := endpointtrust.Check(endpointtrust.WorkspaceKey(), "ai", configuredBaseURL, !config.IsFromProjectConfig("ai.base_url")); err != nil {
-			return nil, config.AIAPIKeySourceNone, "", err
-		}
-	} else if baseURL != "" && baseURL != config.MiniMaxDefaultBaseURL {
-		if err := endpointtrust.Check(endpointtrust.WorkspaceKey(), "ai", baseURL, true); err != nil {
-			return nil, config.AIAPIKeySourceNone, "", err
-		}
+	var trustErr error
+	switch {
+	case configuredBaseURL != "":
+		// IsFromProjectConfig counts .beads/config.yaml, .beads/config.local.yaml
+		// and a .beads/.env BD_AI_BASE_URL as shared, not private.
+		trustErr = endpointtrust.Check(endpointtrust.WorkspaceKey(), "ai", configuredBaseURL, !config.IsFromProjectConfig("ai.base_url"))
+	case baseURL == "":
+		// The SDK default: pin it so a later shared ai.base_url is a change.
+		trustErr = endpointtrust.Check(endpointtrust.WorkspaceKey(), "ai", "", false)
+	case baseURL != config.MiniMaxDefaultBaseURL:
+		// MINIMAX_BASE_URL is private only when it is not from .beads/.env.
+		trustErr = endpointtrust.Check(endpointtrust.WorkspaceKey(), "ai", baseURL, !config.IsDotenvKey("MINIMAX_BASE_URL"))
+	default:
+		trustErr = endpointtrust.Check(endpointtrust.WorkspaceKey(), "ai", baseURL, true)
+	}
+	if trustErr != nil {
+		return nil, config.AIAPIKeySourceNone, "", trustErr
 	}
 
 	clientOptions := []option.RequestOption{option.WithAPIKey(apiKey)}

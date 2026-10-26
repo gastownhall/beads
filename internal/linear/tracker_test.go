@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -971,6 +972,11 @@ func TestTrackerInitOAuthOnly(t *testing.T) {
 // TestTrackerInitNoAuthFails verifies that Init() returns a clear error when neither
 // OAuth credentials nor an API key are present.
 func TestTrackerInitNoAuthFails(t *testing.T) {
+	// Keep trusted-endpoints.json writes inside temp dirs: Init pins the
+	// workspace's Linear endpoint before the key would be sent.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	// Ensure no credentials leak from environment or config.
 	t.Setenv("LINEAR_OAUTH_CLIENT_ID", "")
 	t.Setenv("LINEAR_OAUTH_CLIENT_SECRET", "")

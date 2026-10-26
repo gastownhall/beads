@@ -7,7 +7,10 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
+	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,21 +20,27 @@ import (
 	"github.com/steveyegge/beads/internal/lockfile"
 )
 
-const pinsFileName = "trusted-endpoints.json"
+const (
+	pinsFileName = "trusted-endpoints.json"
+	// localDoltOrigin is the pin recorded for bd's own loopback Dolt server.
+	localDoltOrigin = "local-dolt-server"
+)
 
 var (
-	pinsMu   sync.Mutex
-	guidance = map[string]struct {
-		key  string
-		hint string
+	pinsMu        sync.Mutex
+	currentEUIDFn = os.Geteuid
+	guidance      = map[string]struct {
+		key           string
+		hint          string
+		defaultOrigin string
 	}{
-		"ai":          {"ai.base_url", "BD_AI_BASE_URL"},
-		"github":      {"github.url", "GITHUB_API_URL"},
-		"gitlab":      {"gitlab.url", "GITLAB_URL"},
-		"ado":         {"ado.url", "AZURE_DEVOPS_URL"},
-		"jira":        {"jira.url", "JIRA_URL"},
-		"linear":      {"linear.api_endpoint", "LINEAR_API_ENDPOINT"},
-		"dolt-server": {"dolt_server_host", "BEADS_DOLT_SERVER_HOST"},
+		"ai":          {"ai.base_url", "BD_AI_BASE_URL", "https://api.anthropic.com:443"},
+		"github":      {"github.url", "GITHUB_API_URL", "https://api.github.com:443"},
+		"gitlab":      {"gitlab.url", "GITLAB_URL", "https://gitlab.com:443"},
+		"ado":         {"ado.url", "AZURE_DEVOPS_URL", "https://dev.azure.com:443"},
+		"jira":        {"jira.url", "JIRA_URL", ""},
+		"linear":      {"linear.api_endpoint", "LINEAR_API_ENDPOINT", "https://api.linear.app:443/graphql"},
+		"dolt-server": {"dolt_server_host", "BEADS_DOLT_SERVER_HOST", ""},
 	}
 )
 
@@ -50,18 +59,18 @@ type MismatchError struct {
 }
 
 func (e *MismatchError) Error() string {
-	return fmt.Sprintf("%s for this workspace changed from %s to %s. Your %s credential was not sent. If this change is intended, set %s in your environment or .beads/config.local.yaml.",
-		e.Key, e.Pinned, e.Got, e.Kind, e.Hint)
+	return fmt.Sprintf("%s for this workspace changed from %s to %s. Your %s credential was not sent. If this change is intended, set %s in your environment or %s in ~/.config/bd/config.yaml.",
+		e.Key, e.Pinned, e.Got, e.Kind, e.Hint, e.Key)
 }
 
-// Origin normalizes an endpoint to a scheme/host/port origin or an absolute Unix socket origin.
+// Origin normalizes an endpoint to a scheme/host/port[/path] origin or an absolute Unix socket origin.
 func Origin(endpoint string) (string, error) {
 	if strings.HasPrefix(endpoint, "unix:") {
-		path := strings.TrimPrefix(endpoint, "unix:")
-		if path == "" {
+		sockPath := strings.TrimPrefix(endpoint, "unix:")
+		if sockPath == "" {
 			return "", errors.New("unix endpoint has no path")
 		}
-		abs, err := filepath.Abs(path)
+		abs, err := filepath.Abs(sockPath)
 		if err != nil {
 			return "", fmt.Errorf("resolve unix endpoint %q: %w", endpoint, err)
 		}
@@ -86,29 +95,52 @@ func Origin(endpoint string) (string, error) {
 			port = "443"
 		}
 	}
+	var hostPort string
 	if port != "" {
 		n, err := strconv.Atoi(port)
 		if err != nil || n < 1 || n > 65535 {
 			return "", fmt.Errorf("endpoint %q has an invalid port", endpoint)
 		}
-		return scheme + "://" + net.JoinHostPort(host, strconv.Itoa(n)), nil
+		hostPort = net.JoinHostPort(host, strconv.Itoa(n))
+	} else {
+		if strings.Contains(host, ":") {
+			host = "[" + host + "]"
+		}
+		hostPort = host
 	}
-	if strings.Contains(host, ":") {
-		host = "[" + host + "]"
+	cleanPath := ""
+	if rawPath := u.EscapedPath(); rawPath != "" && rawPath != "/" {
+		decoded, err := url.PathUnescape(rawPath)
+		if err != nil {
+			return "", fmt.Errorf("unescape endpoint path %q: %w", endpoint, err)
+		}
+		cleaned := path.Clean("/" + strings.TrimPrefix(decoded, "/"))
+		if cleaned != "/" {
+			cleanPath = (&url.URL{Path: cleaned}).EscapedPath()
+		}
 	}
-	return scheme + "://" + host, nil
+	return scheme + "://" + hostPort + cleanPath, nil
 }
 
 // WorkspaceKey returns the canonical workspace key used for endpoint pins, or empty when unknown.
+//
+// The workspace bd discovered before applying .beads/.env wins, so a
+// BEADS_DIR line in a committed .env cannot move the pins to a fresh key.
+// A BEADS_DIR the caller exported comes next, then the project config.yaml
+// (never a user-level config file, which would share pins across workspaces).
 func WorkspaceKey() string {
-	key := os.Getenv("BEADS_DIR")
-	if key != "" {
-		if info, err := os.Stat(key); err != nil || !info.IsDir() {
-			key = ""
+	var key string
+	for _, candidate := range []string{config.WorkspaceBeadsDir(), config.PrivateGetenv("BEADS_DIR")} {
+		if candidate == "" {
+			continue
+		}
+		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+			key = candidate
+			break
 		}
 	}
 	if key == "" {
-		if path := config.ConfigFileUsed(); path != "" {
+		if path := config.ProjectConfigFileUsed(); path != "" {
 			key = filepath.Dir(path)
 		}
 	}
@@ -119,7 +151,8 @@ func WorkspaceKey() string {
 	return key
 }
 
-// PrivateMatch reports whether value matches a private environment or non-project config value.
+// PrivateMatch reports whether value matches a private environment variable
+// (excluding .beads/.env) or user-level global configuration.
 func PrivateMatch(key, envVar, value string) bool {
 	if value == "" {
 		return false
@@ -129,15 +162,17 @@ func PrivateMatch(key, envVar, value string) bool {
 		return false
 	}
 	if envVar != "" {
-		if envValue := os.Getenv(envVar); envValue != "" {
+		if envValue := config.PrivateGetenv(envVar); envValue != "" {
 			if got, err := Origin(envValue); err == nil && got == want {
 				return true
 			}
 		}
 	}
-	if configValue := config.GetString(key); configValue != "" && !config.IsFromProjectConfig(key) {
-		if got, err := Origin(configValue); err == nil && got == want {
-			return true
+	if key != "" {
+		if configValue := config.PrivateConfigValue(key); configValue != "" {
+			if got, err := Origin(configValue); err == nil && got == want {
+				return true
+			}
 		}
 	}
 	return false
@@ -150,22 +185,42 @@ func Check(workspaceKey, credKind, endpoint string, fromPrivateSource bool) erro
 	if !ok {
 		return fmt.Errorf("unsupported credential kind %q", credKind)
 	}
+	// The vendor default (an empty endpoint, or one naming the default origin)
+	// and bd's own loopback Dolt server are code-path values, not shared
+	// config, so they are trusted like a private source: they are pinned
+	// (re-pinned if needed) so a later shared custom endpoint is a pin change
+	// that needs private confirmation instead of a silent first use.
+	var origin string
 	if endpoint == "" {
-		return nil
+		if hint.defaultOrigin == "" {
+			return nil
+		}
+		origin = hint.defaultOrigin
+	} else {
+		var err error
+		origin, err = Origin(endpoint)
+		if err != nil {
+			return err
+		}
+		if credKind == "dolt-server" {
+			if strings.HasPrefix(origin, "unix:") {
+				// A socket is not pinned (it is checked beside its TCP
+				// fallback), but a socket another user owns must not
+				// receive the credential.
+				return checkUnixSocketOwnership(strings.TrimPrefix(origin, "unix:"))
+			}
+			if isLocalDoltEndpoint(endpoint) {
+				origin = localDoltOrigin
+			}
+		}
 	}
-	origin, err := Origin(endpoint)
-	if err != nil {
-		return err
-	}
-	if credKind == "dolt-server" && isLocalDoltEndpoint(endpoint) {
-		return nil
-	}
+	trusted := fromPrivateSource || origin == hint.defaultOrigin || origin == localDoltOrigin
 	key, err := cleanWorkspaceKey(workspaceKey)
 	if err != nil {
 		return err
 	}
 	if key == "" {
-		if fromPrivateSource {
+		if trusted {
 			return nil
 		}
 		return errors.New("cannot determine workspace")
@@ -176,7 +231,7 @@ func Check(workspaceKey, credKind, endpoint string, fromPrivateSource bool) erro
 
 	lock, err := acquirePinsLock()
 	if err != nil {
-		if fromPrivateSource {
+		if trusted {
 			return nil
 		}
 		return fmt.Errorf("lock trusted endpoints: %w", err)
@@ -188,14 +243,14 @@ func Check(workspaceKey, credKind, endpoint string, fromPrivateSource bool) erro
 
 	current, err := readPins()
 	if err != nil {
-		if fromPrivateSource {
+		if trusted {
 			_ = writePin(key, credKind, origin, false)
 			return nil
 		}
 		return err
 	}
 	pinned := current.Workspaces[key][credKind]
-	if fromPrivateSource {
+	if trusted {
 		if pinned == origin {
 			return nil
 		}
@@ -256,6 +311,30 @@ func cleanWorkspaceKey(key string) (string, error) {
 	return filepath.Clean(abs), nil
 }
 
+func checkUnixSocketOwnership(sockPath string) error {
+	euid := currentEUIDFn()
+	if euid < 0 {
+		return nil
+	}
+	info, err := os.Lstat(sockPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("stat unix socket %q: %w", sockPath, err)
+	}
+	sys := reflect.ValueOf(info.Sys())
+	if sys.Kind() == reflect.Ptr && !sys.IsNil() {
+		uidField := sys.Elem().FieldByName("Uid")
+		if uidField.IsValid() && uidField.CanUint() {
+			if uid := uidField.Uint(); uid != uint64(euid) {
+				return fmt.Errorf("unix socket %q is owned by uid %d, not current uid %d", sockPath, uid, euid)
+			}
+		}
+	}
+	return nil
+}
+
 func isLocalDoltEndpoint(endpoint string) bool {
 	if strings.HasPrefix(endpoint, "unix:") {
 		return true
@@ -273,6 +352,17 @@ func isLocalDoltEndpoint(endpoint string) bool {
 }
 
 func pinsPath() (string, error) {
+	if runtime.GOOS == "windows" {
+		if appdata := strings.TrimSpace(os.Getenv("APPDATA")); appdata != "" && filepath.IsAbs(appdata) {
+			return filepath.Join(filepath.Clean(appdata), "beads", pinsFileName), nil
+		}
+	}
+	if xdg := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")); xdg != "" && filepath.IsAbs(xdg) {
+		return filepath.Join(filepath.Clean(xdg), "beads", pinsFileName), nil
+	}
+	if home, err := os.UserHomeDir(); err == nil && filepath.IsAbs(home) {
+		return filepath.Join(filepath.Clean(home), ".config", "beads", pinsFileName), nil
+	}
 	configDir, err := os.UserConfigDir()
 	if err != nil {
 		return "", fmt.Errorf("find user config directory: %w", err)
