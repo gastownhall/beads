@@ -505,6 +505,43 @@ func TestEnsureGitignoreForBeadsDir_TightensPermsWhenPatternComplete(t *testing.
 	}
 }
 
+// TestGitignorePerms_StricterThan0600IsNotLoosened pins that a pattern-complete
+// .beads/.gitignore stricter than 0600 (e.g. 0400) is neither flagged by
+// CheckGitignore nor widened by EnsureGitignoreForBeadsDir (GH#6225).
+func TestGitignorePerms_StricterThan0600IsNotLoosened(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Skipping file permissions test on Windows")
+	}
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.Mkdir(beadsDir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	gitignorePath := filepath.Join(beadsDir, ".gitignore")
+	if err := os.WriteFile(gitignorePath, []byte(GitignoreTemplate), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(gitignorePath, 0400); err != nil {
+		t.Fatal(err)
+	}
+
+	if check := CheckGitignore(tmpDir); check.Status != "ok" {
+		t.Errorf("CheckGitignore on a 0400 pattern-complete file: status %q (%s: %s), want ok", check.Status, check.Message, check.Detail)
+	}
+
+	if err := EnsureGitignoreForBeadsDir(beadsDir); err != nil {
+		t.Fatalf("EnsureGitignoreForBeadsDir failed: %v", err)
+	}
+	info, err := os.Stat(gitignorePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0400 {
+		t.Errorf("EnsureGitignoreForBeadsDir changed mode of a stricter file to %04o, want 0400 unchanged", perm)
+	}
+}
+
 // TestFixGitignore_IdempotentNoDuplication ensures calling the fix twice in a
 // row does not append duplicate pattern blocks: content must be byte-identical
 // between the first and second invocation.
@@ -3203,6 +3240,31 @@ func TestGitignorePerms_CheckAndEnsureAgree(t *testing.T) {
 				if want := fmt.Sprintf("Mode is %04o, want 0600", tt.perm); check.Detail != want {
 					t.Errorf("Detail = %q, want %q", check.Detail, want)
 				}
+			}
+
+			if err := FixGitignore(tmpDir); err != nil {
+				t.Fatalf("FixGitignore on pattern-complete %04o: %v", tt.perm, err)
+			}
+			info, err := os.Stat(gitignorePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantPerm := tt.perm
+			if wantLoose {
+				wantPerm = 0600
+			}
+			if got := info.Mode().Perm(); got != wantPerm {
+				t.Errorf("FixGitignore on pattern-complete %04o: mode is %04o, want %04o (private modes must be left alone; loose modes tighten to 0600)", tt.perm, got, wantPerm)
+			}
+			after, err := os.ReadFile(gitignorePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(after, []byte(GitignoreTemplate)) {
+				t.Errorf("FixGitignore on pattern-complete %04o: content changed:\n%s", tt.perm, after)
+			}
+			if check := CheckGitignore(tmpDir); check.Status != "ok" {
+				t.Errorf("CheckGitignore after fix on %04o: status %q (%s: %s), want ok", tt.perm, check.Status, check.Message, check.Detail)
 			}
 		})
 	}
