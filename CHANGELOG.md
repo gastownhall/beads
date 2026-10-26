@@ -932,6 +932,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd doctor` no longer flags a private `.beads/.gitignore` (such as 0400),
+  and `--fix`, `bd init`, `bd bootstrap` and `bd connect` no longer add
+  owner-write to one; only group/other bits count as loose, and Windows is
+  skipped. `bd bootstrap` now warns instead of failing after a successful
+  clone when `.beads/.gitignore` cannot be updated (#6225).
 - The batched bulk readers no longer return an issue's rows twice when the
   same id is requested twice. Since the 200-id batching (#6444), an id that
   appeared in two batches had its comments, labels, dependency records,

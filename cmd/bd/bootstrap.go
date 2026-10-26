@@ -1492,8 +1492,11 @@ func finalizeSyncedBootstrap(beadsDir, syncRemote string, cfg *configfile.Config
 	if err := createConfigYaml(beadsDir, false, ""); err != nil {
 		return fmt.Errorf("create config.yaml: %w", err)
 	}
+	// Non-fatal, as in bd init: the clone above already succeeded, and a
+	// re-run plans no action, so failing here would leave sync.remote
+	// unpersisted (#6225).
 	if err := doctor.EnsureGitignoreForBeadsDir(beadsDir); err != nil {
-		return fmt.Errorf("ensure .beads/.gitignore: %w", err)
+		fmt.Fprintf(os.Stderr, "Warning: failed to create/update .gitignore: %s\n", remedy.PrintedMessage(err))
 	}
 
 	// Persist sync.remote so subsequent fresh clones (and bd bootstrap

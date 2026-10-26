@@ -1436,6 +1436,75 @@ func TestFinalizeSyncedBootstrapWritesConfigFiles(t *testing.T) {
 	}
 }
 
+// TestFinalizeSyncedBootstrapGitignoreFailureIsNonFatal pins that a
+// .beads/.gitignore Ensure failure after a successful clone does not fail
+// bd bootstrap: the clone already succeeded and a re-run plans no action
+// (existingBootstrapDBPlan), so a fatal return here would leave sync.remote
+// unpersisted forever (GH#6225). Mirrors bd init, which downgrades the same
+// error to a warning. A directory at .beads/.gitignore makes Ensure fail on
+// every OS — root included — with no production seam.
+func TestFinalizeSyncedBootstrapGitignoreFailureIsNonFatal(t *testing.T) {
+	t.Setenv("BEADS_DOLT_DATA_DIR", "")
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a post-clone workspace: cloneFromRemote created the
+	// embeddeddolt directory but no metadata.json / config.yaml exists.
+	if err := os.MkdirAll(filepath.Join(beadsDir, "embeddeddolt"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	// A directory where .beads/.gitignore should be: reading it fails with
+	// EISDIR, so EnsureGitignoreForBeadsDir errors for root and non-root
+	// alike, on every OS.
+	if err := os.Mkdir(filepath.Join(beadsDir, ".gitignore"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	// Point findProjectConfigYaml at the test workspace instead of walking
+	// up from CWD, so the sync.remote write lands in the right file even
+	// when the test runs from an unrelated directory.
+	t.Setenv("BEADS_DIR", beadsDir)
+
+	const dbName = "beads_hq"
+	const syncRemote = "file:///tmp/fake-origin.git"
+
+	cfg := configfile.DefaultConfig()
+	var finErr error
+	stderr := captureStderr(t, func() {
+		finErr = finalizeSyncedBootstrap(beadsDir, syncRemote, cfg, dbName)
+	})
+	if finErr != nil {
+		t.Fatalf("finalizeSyncedBootstrap failed: %v; the .gitignore failure must be non-fatal, as in bd init", finErr)
+	}
+	if !strings.Contains(stderr, "Warning: failed to create/update .gitignore") {
+		t.Errorf("stderr = %q, want it to contain %q", stderr, "Warning: failed to create/update .gitignore")
+	}
+
+	// The config writes must still happen: metadata.json records the
+	// database name, and sync.remote is persisted despite the warning.
+	loaded, err := configfile.Load(beadsDir)
+	if err != nil {
+		t.Fatalf("configfile.Load after finalize failed: %v", err)
+	}
+	if loaded == nil {
+		t.Fatal("configfile.Load returned nil; metadata.json was not written")
+	}
+	if loaded.GetDoltDatabase() != dbName {
+		t.Errorf("dolt_database = %q, want %q", loaded.GetDoltDatabase(), dbName)
+	}
+	if got := config.GetStringFromDir(beadsDir, "sync.remote"); got != syncRemote {
+		t.Errorf("config.GetStringFromDir(%q, \"sync.remote\") = %q, want %q", beadsDir, got, syncRemote)
+	}
+}
+
 func TestFinalizeSyncedBootstrap_WorktreeStubDoesNotShadowTargetConfig(t *testing.T) {
 	snapshotBootstrapEnv(t)
 
