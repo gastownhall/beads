@@ -461,6 +461,33 @@ func TestCreateIssue_ClosedCarriesState(t *testing.T) {
 	}
 }
 
+// TestCreateIssue_NonClosedSkipsClose verifies a bead whose status is not
+// closed is created without a follow-up close request. deferred is included
+// explicitly: it gets a status::deferred label but its mapped state stays
+// open. The recorder fails the test on any request but the POST, so this
+// guards the close-after-create follow-up against firing for open work.
+func TestCreateIssue_NonClosedSkipsClose(t *testing.T) {
+	for _, status := range []types.Status{types.StatusOpen, types.StatusInProgress, types.StatusBlocked, types.StatusDeferred} {
+		t.Run(string(status), func(t *testing.T) {
+			tr, reqs := newRecordingTracker(t, map[string]string{
+				"POST /repos/owner/repo/issues": `{"id":101,"number":43,"state":"open","html_url":"https://github.com/owner/repo/issues/43"}`,
+			})
+
+			if _, err := tr.CreateIssue(context.Background(), &types.Issue{
+				Title:     "todo",
+				IssueType: types.TypeTask,
+				Status:    status,
+			}); err != nil {
+				t.Fatalf("CreateIssue: %v", err)
+			}
+
+			if len(*reqs) != 1 {
+				t.Errorf("%s issue should send only the create POST, got requests: %+v", status, *reqs)
+			}
+		})
+	}
+}
+
 func TestValidate(t *testing.T) {
 	tr := &Tracker{}
 	if err := tr.Validate(); err == nil {
