@@ -402,3 +402,22 @@ func TestInstallShSudoBranchStagesAndRenames(t *testing.T) {
 	run.requireBD(t, installShNewBD)
 	run.requireNoStagedLeftovers(t)
 }
+
+// TestInstallShFailedStageLeavesOldBinaryIntact fails the staged copy (after
+// it wrote a partial file) or the rename: the install must fail, keep the
+// previous bd, and leave no staged temp behind.
+func TestInstallShFailedStageLeavesOldBinaryIntact(t *testing.T) {
+	for _, fail := range []string{"cp", "mv"} {
+		t.Run(fail, func(t *testing.T) {
+			run := runInstallShRelease(t, installShOptions{fail: fail})
+			if run.status == 0 {
+				t.Fatalf("install_from_release returned 0 with a failing %s; calls:\n%s%s", fail, joinCalls(run.calls), run.output)
+			}
+			if want := "Failed to install bd to " + run.installDir; !strings.Contains(run.output, want) {
+				t.Fatalf("output lacks %q\n%s", want, run.output)
+			}
+			run.requireBD(t, installShOldBD)
+			run.requireNoStagedLeftovers(t)
+		})
+	}
+}
