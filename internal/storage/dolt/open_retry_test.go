@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -413,6 +414,57 @@ func TestOpenRetryNonRetryableFailsImmediately(t *testing.T) {
 	}
 	if _, ctxDials := log.counts(); ctxDials != 0 {
 		t.Fatalf("retry dials = %d, want 0 for a non-retryable dial error", ctxDials)
+	}
+}
+
+// errnoBehindOpaqueText carries an errno behind a message that does not name
+// it, so only a classifier that reads the errno can tell what the dial hit.
+type errnoBehindOpaqueText struct{ errno syscall.Errno }
+
+func (e errnoBehindOpaqueText) Error() string { return "dial tcp 127.0.0.1:1: connect failed" }
+func (e errnoBehindOpaqueText) Unwrap() error { return e.errno }
+
+// A refusal is retried whatever words it arrives in. A Windows client is
+// refused with Winsock's WSAECONNREFUSED, errno 10061, which formats as "No
+// connection could be made because the target machine actively refused it."
+// there (or a localized form) and as "errno 10061" elsewhere: neither says
+// "connection refused", the only refusal the text classifier knows. The
+// Windows row is the error a Windows dial returns, built by hand with the
+// errno spelled as a number so that it runs on every platform.
+//
+// The first probe AND the first retry fail with the refusal, so the case
+// fails if either classification site reads only the text.
+func TestOpenRetryRetriesARefusalByItsErrno(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		refused error
+	}{
+		{"windows WSAECONNREFUSED", &net.OpError{
+			Op:   "dial",
+			Net:  "tcp",
+			Addr: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1},
+			Err:  os.NewSyscallError("connectex", syscall.Errno(10061)),
+		}},
+		{"ECONNREFUSED behind text that does not say so", errnoBehindOpaqueText{syscall.ECONNREFUSED}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if text := strings.ToLower(tc.refused.Error()); strings.Contains(text, "connection refused") {
+				t.Fatalf("fixture %q carries the POSIX wording, so it cannot show that the errno alone is recognized", text)
+			}
+			t.Setenv("BEADS_TEST_MODE", "1")
+			log := stubOpenRetryDials(t, tc.refused, []error{tc.refused, nil})
+			cfg := externalOpenConfig(writeBudgetConfig(t, map[string]string{config.OpenRetryBudgetKey: "5s"}))
+
+			_, err := newServerMode(context.Background(), cfg)
+			if err != nil && strings.Contains(err.Error(), "Dolt server unreachable at") {
+				t.Fatalf("a refused dial ended the open instead of being retried: %v", err)
+			}
+			legacy, ctxDials := log.counts()
+			if legacy != 1 || ctxDials != 2 {
+				t.Fatalf("dials legacy=%d ctx=%d, want 1 and 2: the refused first probe and the refused first retry must both be retried", legacy, ctxDials)
+			}
+			assertFirstProbeTimeout(t, log)
+		})
 	}
 }
 

@@ -331,13 +331,17 @@ What it does and does not cover:
   that accepts TCP while SQL is unresponsive still costs its SQL-level
   timeouts.
 - **Only transient network-level failures are retried**, using the same
-  `isRetryableError` classification the rest of the Dolt client uses. A
+  `isRetryableError` classification the rest of the Dolt client uses, plus a
+  refused connection recognized by its error code rather than its text: a
+  Windows refusal (WSAECONNREFUSED, "No connection could be made because the
+  target machine actively refused it", possibly localized) is retried like a
+  POSIX "connection refused". A
   misconfigured endpoint (an unknown host, and similar non-transient errors)
   fails immediately, exactly as it does with the budget off. In unix socket
   mode a server that has been stopped usually removes its socket file, and the
   resulting "no such file or directory" is not in that set — so a socket-mode
-  restart window is not covered by the budget today. TCP endpoints report
-  "connection refused" and are.
+  restart window is not covered by the budget today. A TCP endpoint with
+  nothing listening refuses the connection, on any platform, and is covered.
 - **It never applies to embedded mode or to a `bd`-managed localhost server.**
   Those recover by *starting* a server, which `bd` already does; a managed open
   that finds nothing listening goes straight to auto-start as before.

@@ -32,6 +32,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/cenkalti/backoff/v4"
@@ -2198,7 +2199,7 @@ func retryOpenProbe(ctx context.Context, network, addr string, timeout, budget t
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return nil, openRetryCanceled(ctxErr, lastErr, attempts, budget)
 	}
-	if !isRetryableError(lastErr) {
+	if !isRetryableOpenProbeError(lastErr) {
 		return nil, lastErr
 	}
 	debug.Logf("dolt: %s %s unreachable (%v); retrying open within %s=%s\n",
@@ -2256,7 +2257,7 @@ func retryOpenProbe(ctx context.Context, network, addr string, timeout, budget t
 			return conn, nil
 		}
 		lastErr = err
-		if !isRetryableError(err) {
+		if !isRetryableOpenProbeError(err) {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return nil, openRetryCanceled(ctxErr, lastErr, attempts, budget)
 			}
@@ -2266,6 +2267,30 @@ func retryOpenProbe(ctx context.Context, network, addr string, timeout, budget t
 	}
 	return nil, fmt.Errorf("%w (still unreachable after %d attempts within %s=%s)",
 		lastErr, attempts, config.OpenRetryBudgetKey, budget)
+}
+
+// windowsConnRefused is WSAECONNREFUSED, Windows's equivalent of
+// ECONNREFUSED: the errno a dial returns when nothing listens on the port.
+// The syscall package does not export it (its Windows ECONNREFUSED is an
+// invented value no dial returns), and it is named here rather than imported
+// from golang.org/x/sys/windows so the check needs no build tags. It is
+// matched on every platform -- no POSIX errno comes near 10061 -- so a test
+// can build the Windows error on any host.
+const windowsConnRefused = syscall.Errno(10061)
+
+// isRetryableOpenProbeError is isRetryableError for the open-retry loop's
+// dial failures, with a refused connection recognized by its errno as well
+// as by its text. The shared classifier knows a refusal only as "connection
+// refused", the POSIX wording; Windows words it "No connection could be made
+// because the target machine actively refused it.", or a localized form, so
+// on a Windows client a restarting server failed the open on the first probe
+// whatever budget was set.
+//
+// The errno check is kept to this loop rather than added to isRetryableError,
+// whose other callers retry queries, pings and schema setup: changing what
+// those retry is not the budget's business.
+func isRetryableOpenProbeError(err error) bool {
+	return errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, windowsConnRefused) || isRetryableError(err)
 }
 
 // clampDialTimeout keeps a retry's per-attempt dial timeout inside what is
