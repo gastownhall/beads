@@ -89,21 +89,6 @@ func TestIsGitCodeRepoURL(t *testing.T) {
 	}
 }
 
-// setupSyncRemoteConfig writes sync.remote to .beads/config.yaml and
-// initializes the config subsystem so resolveSyncRemote() can read it.
-// Returns a cleanup function that resets config state.
-func setupSyncRemoteConfig(t *testing.T, beadsDir, remote string) func() {
-	t.Helper()
-	seedSyncRemote(t, beadsDir, remote)
-	config.ResetForTesting()
-	t.Setenv("BEADS_DIR", beadsDir)
-	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
-	if err := config.Initialize(); err != nil {
-		t.Fatalf("config.Initialize: %v", err)
-	}
-	return func() { config.ResetForTesting() }
-}
-
 // stubProbeGitRemoteDoltData replaces the refs/dolt/data probe for the
 // duration of a test. Every test that configures a forge sync.remote must
 // install a stub: the real probe shells out to `git ls-remote` against
@@ -139,28 +124,6 @@ var forgeSyncRemoteForms = []struct {
 	// No .git suffix, so only the host can make it a forge: github.com, after
 	// the last "@" of the authority (mc-gcmer).
 	{"multi-@ userinfo", "https://a@b@github.com/org/repo", "git+https://a@b@github.com/org/repo"},
-}
-
-// newForgeSyncRemoteWorkspace builds a workspace whose config.yaml carries
-// remote as sync.remote and chdirs into it, returning the .beads path.
-func newForgeSyncRemoteWorkspace(t *testing.T, remote string) string {
-	t.Helper()
-	snapshotBootstrapEnv(t)
-
-	tmpDir := t.TempDir()
-	beadsDir := filepath.Join(tmpDir, ".beads")
-	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
-		t.Fatal(err)
-	}
-	cleanup := setupSyncRemoteConfig(t, beadsDir, remote)
-	t.Cleanup(cleanup)
-
-	oldWd, _ := os.Getwd()
-	t.Cleanup(func() { _ = os.Chdir(oldWd) })
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatal(err)
-	}
-	return beadsDir
 }
 
 // TestDetectBootstrapAction_GitForgeSyncRemote_ProbeRouting covers the #5743 /
