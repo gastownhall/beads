@@ -156,15 +156,22 @@ func (t *Tracker) CreateIssue(ctx context.Context, issue *types.Issue) (*tracker
 	// "open". Close it with a follow-up update so the state carries. On failure
 	// we keep the created issue and its external_ref (returning an error here
 	// would strand the issue and re-create a duplicate on the next push).
+	// The trade-off: the push skip-guard treats the just-created remote as
+	// up-to-date, so a failed close is not retried until the bead is next
+	// modified — hence the warning.
+	var warnings []string
 	if issue.Status == types.StatusClosed {
 		if closed, err := t.client.UpdateIssue(ctx, created.Number, map[string]interface{}{
 			"state": "closed",
 		}); err == nil {
 			created = closed
+		} else {
+			warnings = append(warnings, fmt.Sprintf("created GitHub issue %d but failed to close it (left open): %v", created.Number, err))
 		}
 	}
 
 	ti := githubToTrackerIssue(created)
+	ti.Warnings = warnings
 	return &ti, nil
 }
 

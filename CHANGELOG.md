@@ -935,6 +935,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `bd github sync` and `bd github push` now close the GitHub issue they
   create for a closed bead. GitHub's create endpoint cannot set state, so
   the issue was left open, and later pushes skipped it as unchanged (#6773).
+  If the follow-up close fails, the push keeps the created issue and prints
+  a warning.
 
 - The batched bulk readers no longer return an issue's rows twice when the
   same id is requested twice. Since the 200-id batching (#6444), an id that

@@ -498,3 +498,38 @@ func TestCreateIssue_NonClosedSkipsClose(t *testing.T) {
 		})
 	}
 }
+
+// TestCreateIssue_FailedCloseSurfacesWarning verifies that when the follow-up
+// close fails, CreateIssue still returns the created issue (so the external_ref
+// is stored and no duplicate is made) but records a warning on the returned
+// TrackerIssue so the sync engine can surface it instead of swallowing it.
+func TestCreateIssue_FailedCloseSurfacesWarning(t *testing.T) {
+	tr, _ := newRecordingTracker(t, map[string]string{
+		"POST /repos/owner/repo/issues": `{"id":100,"number":42,"state":"open","html_url":"` + createdIssueURL + `"}`,
+		// 422 is a plain APIError: no backoff retries (5xx) and no rate-limit
+		// classification (403/429).
+		"PATCH /repos/owner/repo/issues/42": `!422 {"message":"Validation Failed"}`,
+	})
+
+	ti, err := tr.CreateIssue(context.Background(), &types.Issue{
+		ID:        "bd-1",
+		Title:     "done",
+		IssueType: types.TypeTask,
+		Status:    types.StatusClosed,
+	})
+	if err != nil {
+		t.Fatalf("CreateIssue should not error on a failed best-effort close: %v", err)
+	}
+	if ti == nil || ti.Identifier != "42" || ti.URL != createdIssueURL {
+		t.Fatalf("expected the created issue to be returned so external_ref is stored, got %+v", ti)
+	}
+	if ti.State != "open" {
+		t.Errorf("returned State = %v, want open", ti.State)
+	}
+	if len(ti.Warnings) != 1 {
+		t.Fatalf("returned Warnings = %q, want exactly one", ti.Warnings)
+	}
+	if !strings.Contains(ti.Warnings[0], "42") || !strings.Contains(ti.Warnings[0], "failed to close") {
+		t.Errorf("warning = %q, want it to name issue 42 and the failed close", ti.Warnings[0])
+	}
+}
