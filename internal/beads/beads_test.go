@@ -3007,3 +3007,37 @@ func TestFindBeadsDirFromLinkedWorktreeBoundary(t *testing.T) {
 		assertFindBeadsDirFromMatchesCWD(t, worktree, parentBeadsDir)
 	})
 }
+
+// TestFindBeadsDirFromJJSecondaryBesidePrimary pins the jj side of GH#7782: a
+// jj secondary workspace created beside its primary, under a folder that has
+// its own store, must bind the primary's store from -C as it does from cd.
+func TestFindBeadsDirFromJJSecondaryBesidePrimary(t *testing.T) {
+	t.Setenv("BEADS_DIR", "")
+	t.Setenv("BEADS_DB", "")
+
+	parent := t.TempDir()
+	primary := filepath.Join(parent, "primary")
+	secondary := filepath.Join(parent, "secondary")
+	if err := os.MkdirAll(filepath.Join(primary, ".jj", "repo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(secondary, ".jj"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(secondary, ".jj", "repo"), []byte(filepath.Join(primary, ".jj", "repo")+"\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	parentBeadsDir := filepath.Join(parent, ".beads")
+	primaryBeadsDir := filepath.Join(primary, ".beads")
+	for _, store := range []string{parentBeadsDir, primaryBeadsDir} {
+		if err := os.MkdirAll(filepath.Join(store, "dolt"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(store, "metadata.json"), []byte(`{"database":"dolt"}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	assertFindBeadsDirFromMatchesCWD(t, secondary, primaryBeadsDir)
+}
