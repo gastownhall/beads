@@ -14,7 +14,7 @@ import (
 )
 
 func TestBuildDSNUsesAuthenticatedProxyNetwork(t *testing.T) {
-	dsn := buildDSN(proxy.Endpoint{Host: "127.0.0.1", Port: 12345}, "beads", "root", "secret", "")
+	dsn := buildDSN(proxy.DataNetwork, proxy.Endpoint{Host: "127.0.0.1", Port: 12345}, "beads", "root", "secret", "")
 	cfg, err := mysql.ParseDSN(dsn)
 	if err != nil {
 		t.Fatal(err)

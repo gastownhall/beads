@@ -20,9 +20,10 @@ const DataNetwork = "bdproxy"
 // Version note: a proxy started by an older bd does not accept this
 // handshake, and a client older than it does not send it, so a
 // mixed-version pair cannot connect. GetCreateDatabaseProxyServerEndpoint
-// detects a pre-upgrade v2 proxy that refuses the MAC'd IDENT handshake
-// while holding proxy.lock and stops it via its verified pidfile before
-// starting the upgraded proxy.
+// detects a pre-upgrade proxy — its pidfile predates the control_proto
+// marker — that refuses the MAC'd IDENT handshake while holding
+// proxy.lock, and stops it via its verified pidfile before starting the
+// upgraded proxy.
 const dataAuthPrefix = "BDPROXY1 "
 
 var dataAddressRoots sync.Map
