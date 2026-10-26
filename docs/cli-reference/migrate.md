@@ -40,6 +40,7 @@ bd migrate [command]
       --dry-run          Show what would be done without making changes
       --force            Bypass the remote-migrate gate as the single designated migrator (equivalent to BD_ALLOW_REMOTE_MIGRATE=1)
       --inspect          Show migration plan and database state for AI agent analysis
+      --json             Output migration statistics in JSON format
       --update-repo-id   Update repository ID (use after changing git remote)
       --yes              Auto-confirm prompts
 ```
@@ -153,6 +154,7 @@ bd migrate hooks [path] [flags]
 ```
       --apply     Apply planned hook migration changes
       --dry-run   Show what would be done without making changes
+      --json      Output in JSON format
       --yes       Skip confirmation prompt for --apply
 ```
 
@@ -219,15 +221,9 @@ bd migrate legacy-sqlite --source-db PATH --output PATH|- [flags]
 
 Apply pending schema migrations idempotently.
 
-bd does not apply pending schema migrations to an existing database without
-the operator's consent, and running this command is that consent
-(BD_ALLOW_MIGRATE=1 is the scripted form). On a remote-backed database the
-remote-migrate gate still applies: --force confirms you are the single
-designated migrator. Migrating is one-way: bd releases built for an older
-schema refuse the migrated database.
-
-On an up-to-date database this is a no-op, so it is safe to run in CI,
-release gates, and recovery scenarios.
+Schema migrations also run automatically on store open, so this subcommand
+is typically a no-op. It exists to make migration explicit and observable
+in CI, release gates, and recovery scenarios.
 
 Example:
   bd migrate schema
@@ -241,6 +237,7 @@ bd migrate schema [flags]
 
 ```
       --force   Bypass the remote-migrate gate as the single designated migrator (equivalent to BD_ALLOW_REMOTE_MIGRATE=1)
+      --json    Output in JSON format
 ```
 
 ## bd migrate sync
@@ -261,4 +258,5 @@ bd migrate sync <branch> [flags]
 
 ```
       --dry-run   Show what would be done without making changes
+      --json      Output in JSON format
 ```

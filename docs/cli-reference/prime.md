@@ -25,26 +25,9 @@ Config options:
   Set via: bd config set agent.profile team-maintainer
   Or per-session: BD_AGENT_PROFILE=team-maintainer (env var takes precedence).
   See docs/getting-started/ide-setup.md#policy-profiles for what each profile means.
-- prime.disabled: When true, bd prime prints nothing, as it does outside a
-  workspace (an empty envelope under --hook-json), whatever its other flags.
-  For sessions whose host briefs the agent itself but that inherit a
-  project's bd prime hook, such as an orchestrator's agent sessions.
-  Set per-session: BD_PRIME_DISABLED=true. Or: bd config set prime.disabled true
 
 	Workflow customization:
-	- Place a PRIME.md file to override the default workflow text. Checked in this
-	  order, once bd resolves a workspace (outside one, prime emits no content):
-	  (1) .beads/PRIME.md relative to the current directory (the -C target
-	      when -C is set);
-	  (2) PRIME.md in the .beads directory bd resolves for this workspace
-	      (honors $BEADS_DIR, which -C overrides; a redirected .beads is
-	      followed);
-	  (3) the global PRIME.md in bd's user config dir:
-	      ~/.config/beads/ on Linux ($XDG_CONFIG_HOME/beads/ if set),
-	      ~/Library/Application Support/beads/ on macOS,
-	      %AppData%\beads\ on Windows.
-	- Persistent memories (from bd remember) are still appended so memory
-	  injection keeps working under a custom template.
+	- Place a .beads/PRIME.md file in the local clone or resolved workspace to override the default workflow text. Persistent memories (from bd remember) are still appended so memory injection keeps working under a custom template.
 	- Use --export to dump the default content for customization.
 	- Use --memories-only for hook contexts that should inject only persistent memories; this returns only the memories section even when a custom PRIME.md is present.
 	- Use --no-memories to omit the persistent memories section (useful when the memories section is large and would dominate a context budget). --memories-only takes precedence if both are set.

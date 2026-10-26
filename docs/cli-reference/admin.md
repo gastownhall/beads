@@ -84,7 +84,7 @@ Dolt Garbage Collection:
   With auto-commit per mutation, Dolt commit history grows over time. Use
   --dolt to run Dolt garbage collection and reclaim disk space.
 
-  --dolt: Run Dolt GC on the active database to free disk space.
+  --dolt: Run Dolt GC on .beads/dolt directory to free disk space.
           This removes unreachable commits and compacts storage.
 
 Examples:
@@ -120,10 +120,11 @@ bd admin compact [flags]
       --apply            Apply mode: accept agent-provided summary
       --auto             Auto mode: AI-powered compaction
       --batch-size int   Issues per batch (default 10)
-      --dolt             Dolt mode: run Dolt garbage collection on the active database
+      --dolt             Dolt mode: run Dolt garbage collection on .beads/dolt
       --dry-run          Preview without compacting
       --force            Force compact (bypass checks, requires --id)
       --id string        Compact specific issue
+      --json             Output JSON format
       --limit int        Limit number of candidates (0 = no limit)
       --stats            Show compaction statistics
       --summary string   Path to summary file (use '-' for stdin)

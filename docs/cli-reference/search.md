@@ -57,10 +57,10 @@ bd search [query] [flags]
       --priority-max string          Filter by maximum priority (inclusive, 0-4 or P0-P4)
       --priority-min string          Filter by minimum priority (inclusive, 0-4 or P0-P4)
       --query string                 Search query (alternative to positional argument)
-  -r, --reverse                      Invert the sort field's default direction (created/updated/closed default to newest-first, so --sort updated --reverse is oldest-first)
+  -r, --reverse                      Reverse sort order
       --sort string                  Sort by field: priority, created, updated, closed, status, id, title, type, assignee
   -s, --status string                Filter by stored status (comma-separated for OR; open, in_progress, blocked, deferred, closed, all). Default searches all statuses including closed. Note: dependency-blocked issues use 'bd blocked'
-  -t, --type string                  Filter by type (bug, feature, task, epic, chore, decision, message, molecule, gate, spike, story, milestone); custom types require types.custom config, and an unknown type is an error. Aliases: feat/enhancement→feature, mol→molecule, dec/adr→decision, mr→merge-request
+  -t, --type string                  Filter by type (bug, feature, task, epic, chore, decision, merge-request, molecule, gate)
       --updated-after string         Filter issues updated after date (YYYY-MM-DD or RFC3339)
       --updated-before string        Filter issues updated before date (YYYY-MM-DD or RFC3339)
 ```

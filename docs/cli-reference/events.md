@@ -165,8 +165,7 @@ bd events tail [flags]
 **Flags:**
 
 ```
-      --exit-on-stdin-eof   with --follow, exit when stdin closes (for parent-process lifecycle tracking)
-      --follow              keep printing new records as they are committed (Ctrl-C to stop)
-      --limit int           maximum number of records to return (0 = no limit)
-      --since int           return records with seq greater than this value
+      --follow      keep printing new records as they are committed (Ctrl-C to stop)
+      --limit int   maximum number of records to return (0 = no limit)
+      --since int   return records with seq greater than this value
 ```

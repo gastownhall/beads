@@ -33,14 +33,13 @@ bd update [id...] [flags]
 
 ```
       --acceptance string            Acceptance criteria
-  -l, --add-label strings            Add labels (repeatable); -l matches bd create -l
+      --add-label strings            Add labels (repeatable)
       --allow-empty-description      Allow empty description replacement when reading from stdin or file
       --append-notes string          Append to existing notes (with newline separator)
   -a, --assignee string              Assignee
       --await-id string              Set gate await_id (e.g., GitHub run ID for gh:run gates)
       --body-file string             Read description from file (use - for stdin)
       --claim                        Atomically claim the issue (sets assignee to you, status to in_progress; idempotent if already claimed by you; issues assigned to a pool alias listed in the claim.pools config are claimable too)
-      --clear-notes                  Clear the notes field (--notes "" is refused: an empty value is usually a dead command substitution)
       --defer string                 Defer until date (empty to clear). Issue hidden from bd ready until then, then auto-wakes to open
   -d, --description string           Issue description
       --design string                Design notes
@@ -49,14 +48,13 @@ bd update [id...] [flags]
       --ephemeral                    Mark issue as ephemeral (wisp) - not exported to JSONL
   -e, --estimate int                 Time estimate in minutes (e.g., 60 for 1 hour)
       --external-ref string          External reference (e.g., 'gh-9', 'jira-ABC', Linear URL)
-      --force                        Override refusals: let -a/--assignee overwrite another actor's live in_progress claim (use only for abandoned claims — crashed agent, expired lease; prefer bd reclaim), let -s/--status move the issue into closed (or a configured done status) despite open children or a live blocker (same as bd close --force), and let --notes overwrite existing non-empty notes (use --append-notes to preserve history instead)
+      --force                        Override two refusals: let -a/--assignee overwrite another actor's live in_progress claim (use only for abandoned claims — crashed agent, expired lease; prefer bd reclaim), and let -s/--status move the issue into closed (or a configured done status) despite open children or a live blocker (same as bd close --force)
       --history                      Clear no-history flag (re-enable Dolt commit history)
       --if-assignee string           Apply the update only if the current assignee equals this value (--if-assignee '' requires unassigned); a mismatch writes nothing and exits 13 (vs 1 for other failures). Requires a field update; cannot combine with --claim
-      --if-revision bd show --json   Apply the write only if the issue's current revision equals this value (the decimal int64 from bd show --json's "revision" field). One id only: refused before any write when combined with more than one issue id. A mismatch writes nothing and exits 13 (vs 1 for other failures). Composes with --if-assignee/--if-status: all guards present must hold.
       --if-status string             Apply the update only if the current status equals this value; a mismatch writes nothing and exits 13 (vs 1 for other failures). Requires a field update; cannot combine with --claim
-      --metadata string              Set custom metadata (JSON object, or @file.json to read from file)
+      --metadata string              Set custom metadata (JSON string or @file.json to read from file)
       --no-history                   Mark issue as no-history (skip Dolt commits, not GC-eligible)
-      --notes string                 Replace the notes field (requires --force over existing non-empty notes; --clear-notes clears; --append-notes appends instead)
+      --notes string                 Additional notes (replaces existing notes; use --append-notes to append)
       --parent string                New parent issue ID (reparents the issue, use empty string to remove parent)
       --persistent                   Mark issue as persistent (promote wisp to regular issue)
   -p, --priority string              Priority (0-4 or P0-P4, 0=highest)

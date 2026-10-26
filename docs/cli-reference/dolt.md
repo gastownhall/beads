@@ -361,21 +361,8 @@ lifecycle and starts it on demand, so a server started here would be a second,
 unsupervised one over the same data directory. Use 'bd dolt status' to see what
 is running and 'bd dolt stop' to shut it down.
 
-With dolt.auto-start: false the server is expected to be managed outside bd, so
-a start that would create a new, empty Dolt database (the data directory is
-missing, empty, or holds no database) is refused before anything is written:
-it would publish its port and shadow the managed server's database. Starting
-over existing data, or adopting a server bd already tracks, is unaffected. Use
---force to create the new database anyway.
-
 ```
 bd dolt start [flags]
-```
-
-**Flags:**
-
-```
-      --force   Start even when dolt.auto-start is off and this would create a new, empty Dolt database
 ```
 
 ## bd dolt status
@@ -386,11 +373,9 @@ In embedded mode, reports that the Dolt engine runs in-process and shows
 the on-disk data directory. For beads-managed (local) servers, displays
 PID, port, and data directory from the local PID file. For externally-
 managed servers — a shared server (dolt.shared-server: true), a remote
-dolt_server_host, a server at the IPv6 loopback (::1, where bd's own
-server never listens), or a local server managed outside bd
-(dolt.auto-start: false, e.g. an orchestrator-shared sql-server) — pings
-the configured endpoint via SQL and reports reachability, server version,
-and database.
+dolt_server_host, or a local server managed outside bd (dolt.auto-start:
+false, e.g. an orchestrator-shared sql-server) — pings the configured
+endpoint via SQL and reports reachability, server version, and database.
 
 In proxied-server mode, reports the proxy (the endpoint every bd command
 connects through) and the dolt backend behind it separately, read from the

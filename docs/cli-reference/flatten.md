@@ -28,7 +28,7 @@ This is irreversible — all commit history is lost. The resulting database
 has exactly one commit containing all current data.
 
 Use this when:
-  - Your active database has grown very large
+  - Your .beads/dolt directory has grown very large
   - You don't need commit-level history (time travel)
   - You want to start fresh with minimal storage
 

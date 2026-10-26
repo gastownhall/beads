@@ -358,7 +358,6 @@
               "cli-reference/completion",
               "cli-reference/config",
               "cli-reference/conflicts",
-              "cli-reference/connect",
               "cli-reference/context",
               "cli-reference/cook",
               "cli-reference/count",
@@ -458,7 +457,6 @@
               "cli-reference/upgrade",
               "cli-reference/vc",
               "cli-reference/version",
-              "cli-reference/versions",
               "cli-reference/where",
               "cli-reference/worktree"
             ]

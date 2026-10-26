@@ -21,15 +21,6 @@ When closing multiple issues, provide one --reason for all IDs or repeat
 to the first ID, the second --reason to the second ID, regardless of where
 the flags appear in the command line.
 
-Closing a molecule's last open step also closes the molecule's root, with
-the reason "all steps complete", when the root is a poured molecule, a wisp,
-or an epic labeled "template"; any other epic stays open as close-eligible
-work. A root that would refuse its own close (an open blocker, a pin, another
-assignee) stays open with a warning, and the step's close stands. Under
---json, the step's entry names the closed root (auto_closed_molecule) or the
-refusal (molecule_auto_close_refusal). --continue claims the next ready step
-in the molecule for you; add --no-auto to only show it.
-
 ```
 bd close [id...] [flags]
 ```
@@ -39,13 +30,12 @@ bd close [id...] [flags]
 **Flags:**
 
 ```
-      --claim-next                   Automatically claim the next highest priority available issue
-      --continue                     Auto-advance to next step in molecule
-  -f, --force                        Force close pinned issues or unsatisfied gates
-      --if-revision bd show --json   Apply the write only if the issue's current revision equals this value (the decimal int64 from bd show --json's "revision" field). One id only: refused before any write when combined with more than one issue id. A mismatch writes nothing and exits 13 (vs 1 for other failures).
-      --no-auto                      With --continue, show next step but don't claim it
-  -r, --reason string                Reason for closing
-      --reason-file string           Read close reason from file (use - for stdin)
-      --session string               Claude Code session ID (or set CLAUDE_SESSION_ID env var)
-      --suggest-next                 Show newly unblocked issues after closing
+      --claim-next           Automatically claim the next highest priority available issue
+      --continue             Auto-advance to next step in molecule
+  -f, --force                Force close pinned issues or unsatisfied gates
+      --no-auto              With --continue, show next step but don't claim it
+  -r, --reason string        Reason for closing
+      --reason-file string   Read close reason from file (use - for stdin)
+      --session string       Claude Code session ID (or set CLAUDE_SESSION_ID env var)
+      --suggest-next         Show newly unblocked issues after closing
 ```

@@ -29,4 +29,5 @@ bd restore <issue-id> [flags]
 
 ```
       --apply   Write the restored content back into the issue (default: display only)
+      --json    Output restore results in JSON format
 ```
