@@ -319,6 +319,25 @@ func TestIsRunningKeepsStateWhenProcessListUnreadable(t *testing.T) {
 	assertStateFilesKept(t, dir, 14567)
 }
 
+func TestIsRunningRemovesStateWhenPIDIsNotDolt(t *testing.T) {
+	dir := t.TempDir()
+	writeTrackedStateForLiveProcess(t, dir, 14567)
+	stubProcessList(t, func() ([]int, error) { return nil, nil }) // read fine, no dolt processes
+
+	state, err := IsRunning(dir)
+	if err != nil {
+		t.Fatalf("IsRunning error: %v", err)
+	}
+	if state.Running {
+		t.Errorf("IsRunning = %+v, want Running=false for a PID that is not a dolt server", state)
+	}
+	for _, path := range []string{pidPath(dir), portPath(dir)} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("expected %s to be removed, stat err = %v", filepath.Base(path), err)
+		}
+	}
+}
+
 func TestIsRunningCorruptPIDRemovesPortFile(t *testing.T) {
 	dir := t.TempDir()
 
