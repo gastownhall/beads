@@ -4,11 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -343,5 +346,59 @@ func TestBytesWriterAppends(t *testing.T) {
 	}
 	if got := string(w.buf); got != "hello world" {
 		t.Fatalf("unexpected buffer content: %q", got)
+	}
+}
+
+// newStubHaikuClient returns a haikuClient whose POST /v1/messages answers
+// with a reply carrying the given raw JSON content blocks.
+func newStubHaikuClient(t *testing.T, content string) *haikuClient {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","role":"assistant","model":"claude-haiku-5-5",` +
+			`"content":[` + content + `],` +
+			`"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":10}}`))
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("ANTHROPIC_API_KEY", "test-key")
+	t.Setenv("MINIMAX_API_KEY", "")
+
+	client, err := newHaikuClient("")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	client.client = anthropic.NewClient(
+		option.WithAPIKey("test"),
+		option.WithBaseURL(srv.URL),
+		option.WithMaxRetries(0),
+	)
+	client.maxRetries = 0
+	return client
+}
+
+// Issue #7515: a reply whose first block is "thinking" still carries the
+// answer in a later "text" block, and compaction must use it.
+func TestCallWithRetry_SkipsLeadingThinkingBlock(t *testing.T) {
+	const text = `{"type":"text","text":"the summary"}`
+	const thinking = `{"type":"thinking","thinking":"","signature":"c2ln"}`
+	tests := []struct {
+		name    string
+		content string
+	}{
+		{"thinking then text", thinking + "," + text},
+		{"redacted thinking, thinking, then text", `{"type":"redacted_thinking","data":"ZGF0YQ=="},` + thinking + "," + text},
+		{"text only", text},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := newStubHaikuClient(t, tt.content)
+			got, err := client.callWithRetry(context.Background(), "test prompt")
+			if err != nil {
+				t.Fatalf("callWithRetry rejected a reply with a text block: %v", err)
+			}
+			if got != "the summary" {
+				t.Fatalf("got %q, want %q", got, "the summary")
+			}
+		})
 	}
 }

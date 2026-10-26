@@ -174,12 +174,15 @@ func (h *haikuClient) callWithRetry(ctx context.Context, prompt string) (string,
 				attribute.Int("bd.ai.attempts", attempt+1),
 			)
 
-			if len(message.Content) > 0 {
-				content := message.Content[0]
-				if content.Type == "text" {
-					return content.Text, nil
+			// Models that think may put thinking blocks before the text
+			// answer, so take the first text block wherever it sits.
+			for _, block := range message.Content {
+				if block.Type == "text" {
+					return block.Text, nil
 				}
-				return "", fmt.Errorf("unexpected response format: not a text block (type=%s)", content.Type)
+			}
+			if len(message.Content) > 0 {
+				return "", fmt.Errorf("unexpected response format: not a text block (type=%s)", message.Content[0].Type)
 			}
 			return "", fmt.Errorf("unexpected response format: no content blocks")
 		}
