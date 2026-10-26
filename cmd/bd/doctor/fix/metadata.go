@@ -226,8 +226,7 @@ func FixMissingDoltDatabase(path string) error {
 	// schema across the server, it does not delete or mutate anything.
 	db, _, err := openDoltDB(beadsDir)
 	if err != nil {
-		fmt.Printf("  dolt_database fix skipped (server not reachable: %v)\n", err)
-		return nil
+		return skipFix(err)
 	}
 	defer db.Close()
 

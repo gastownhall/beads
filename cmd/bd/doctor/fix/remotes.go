@@ -14,6 +14,25 @@ import (
 	"github.com/steveyegge/beads/internal/storage/issueops"
 )
 
+// ErrSkipped marks a bd doctor --fix repair that did not run: SkipError
+// wraps it with the reason. bd doctor --fix counts and reports such a fix as
+// skipped, never as fixed, and does not count it as an error either.
+var ErrSkipped = errors.New("fix skipped")
+
+// SkipError is a fix that did not run, and Reason why. It matches ErrSkipped
+// (errors.Is) and its reason.
+type SkipError struct {
+	Reason error
+}
+
+func (e *SkipError) Error() string { return "fix skipped: " + e.Reason.Error() }
+
+// Unwrap is ErrSkipped and the reason.
+func (e *SkipError) Unwrap() []error { return []error{ErrSkipped, e.Reason} }
+
+// skipFix reports a fix as skipped for reason (see ErrSkipped).
+func skipFix(reason error) error { return &SkipError{Reason: reason} }
+
 // openFixDB opens the server plain bd doctor diagnoses over TCP: the port the
 // store dials (doltserver.ResolveEndpoint), the legacy BEADS_DOLT_PORT
 // included, which DefaultConfig leaves out, and the password keyed to that
@@ -21,14 +40,15 @@ import (
 // every SQL fix skipped as unreachable at 127.0.0.1:0, or run against a port
 // file's server.
 //
-// It deliberately does not dial a configured unix socket, and neither does
-// plain doctor's openDoltDB, whose failure keeps the schema gate withholding
-// the DB fixes for a socket-only server. Admitting them there waits on a
-// separate data-safety fix to the Database fix. Wherever the store dials a
-// socket (doltserver.Endpoint.Transport: a live one, even beside a resolved
-// port), it refuses rather than dial TCP: the server at that port may not be
-// the one bd list opens, and every SQL fix would write there. Doctor's
-// read-only scans dial that socket instead (openScanDB).
+// It dials TCP at the resolved port even beside a live unix socket, as plain
+// doctor's openDoltDB and its schema gate do, and as base did: every
+// destructive fix then checks the server's project_id (guardFixTarget). It
+// does not dial a socket: a server only a unix socket names (no port
+// resolved) is refused, as base's failed dial of 127.0.0.1:0 refused it, and
+// doctor's schema gate keeps withholding the DB fixes there. Admitting them
+// waits on a separate data-safety fix to the Database fix. Each fix reports
+// that refusal as skipped (ErrSkipped). Doctor's read-only scans dial the
+// store's transport instead (openScanDB).
 //
 // It deliberately does not check the server against
 // doltversion.RequiredMin, and neither does openServerCatalogDB: bd doctor
@@ -37,8 +57,8 @@ import (
 // doctor --server reports the floor as its "Dolt Version" check.
 func openFixDB(beadsDir string, cfg *configfile.Config) (*sql.DB, error) {
 	ep := doltserver.ResolveEndpoint(beadsDir, cfg)
-	if socket := ep.Transport(); socket != "" {
-		return nil, fmt.Errorf("the store dials this workspace's Dolt server on the unix socket %s, which bd doctor --fix does not dial yet", remedy.PrintedValue(socket))
+	if !ep.Resolved() && ep.Socket != "" {
+		return nil, fmt.Errorf("only the unix socket %s names this workspace's Dolt server (no port resolved), and bd doctor --fix does not dial a socket yet", remedy.PrintedValue(ep.Socket))
 	}
 	return openWorkspaceDB(ep, cfg, "")
 }
@@ -47,9 +67,8 @@ func openFixDB(beadsDir string, cfg *configfile.Config) (*sql.DB, error) {
 // (CountCrossTableDuplicates, ScanSeveredCloneLocalFKs): the one the store
 // dials, over its transport, a live unix socket first, else TCP
 // (doltserver.Endpoint.Transport), as doctor's Fresh Clone check does. A scan
-// writes nothing, so where openFixDB refuses the socket a scan dials it:
-// sharing that refusal turned each scan into an "N/A" pass, with no query of
-// any server, wherever the store dials a socket.
+// writes nothing, so it dials the socket the store dials, where openFixDB
+// dials TCP at the port beside it or refuses a socket-only server.
 func openScanDB(beadsDir string, cfg *configfile.Config) (*sql.DB, error) {
 	ep := doltserver.ResolveEndpoint(beadsDir, cfg)
 	return openWorkspaceDB(ep, cfg, ep.Transport())
@@ -74,8 +93,8 @@ func openWorkspaceDB(ep doltserver.Endpoint, cfg *configfile.Config, socket stri
 // errUnverifiableFixTarget marks a verifyFixTargetIdentity failure that is
 // not a confirmed identity mismatch — the project_id needed to compare is
 // missing on one side, or couldn't be read. Callers treat this as a soft
-// skip (see guardFixTarget), the same convention already used for "database
-// unreachable" at each destructive fix's call site. It is deliberately not
+// skip, reported as skipped rather than fixed (see guardFixTarget). It is
+// deliberately not
 // a hard abort: shared-server-mode workspaces, projects that predate the
 // project_id metadata table, and workspaces where a user has declined the
 // interactive "Project Identity" fix are all real, common, and otherwise
@@ -152,9 +171,10 @@ func verifyFixTargetIdentity(db *sql.DB, beadsDir string, cfg *configfile.Config
 
 // guardFixTarget wraps verifyFixTargetIdentity with the convention every
 // destructive fix entry point must follow: an unverifiable target is a soft
-// skip (printed, then treated as "nothing to fix" — matching the existing
-// "database unreachable" convention at each call site), while a confirmed
-// PROJECT IDENTITY MISMATCH is a hard abort. Call sites use it as:
+// skip, reported as skipped (a SkipError, see ErrSkipped) with the reason and
+// how to backfill project identity, so bd doctor --fix counts it as neither
+// fixed nor an error; a confirmed PROJECT IDENTITY MISMATCH is a hard abort.
+// Call sites use it as:
 //
 //	if skip, err := guardFixTarget("<Fix Name>", db, beadsDir, cfg); skip {
 //		return err
@@ -165,8 +185,7 @@ func guardFixTarget(fixName string, db *sql.DB, beadsDir string, cfg *configfile
 		return false, nil
 	}
 	if errors.Is(verr, errUnverifiableFixTarget) {
-		fmt.Printf("  %s skipped: cannot verify target database identity (no project_id); run 'bd doctor --fix' to backfill project identity, then re-run\n", fixName)
-		return true, nil
+		return true, skipFix(fmt.Errorf("%s: %w; run 'bd doctor --fix' to backfill project identity, then re-run", fixName, verr))
 	}
 	return true, verr
 }

@@ -38,8 +38,7 @@ func OrphanedDependencies(path string, verbose bool) error {
 
 	db, cfg, err := openDoltDB(beadsDir)
 	if err != nil {
-		fmt.Printf("  Orphaned dependencies fix skipped (%v)\n", err)
-		return nil
+		return skipFix(err)
 	}
 	defer db.Close()
 
@@ -136,8 +135,7 @@ func ChildParentDependencies(path string, verbose bool) error {
 
 	db, cfg, err := openDoltDB(beadsDir)
 	if err != nil {
-		fmt.Printf("  Child-parent dependencies fix skipped (%v)\n", err)
-		return nil
+		return skipFix(err)
 	}
 	defer db.Close()
 
@@ -241,8 +239,7 @@ func CrossTableDuplicates(path string, verbose bool) error {
 
 	db, cfg, err := openDoltDB(beadsDir)
 	if err != nil {
-		fmt.Printf("  Cross-table duplicates fix skipped (%v)\n", err)
-		return nil
+		return skipFix(err)
 	}
 	defer db.Close()
 
@@ -341,7 +338,8 @@ func openDoltDB(beadsDir string) (*sql.DB, *configfile.Config, error) {
 }
 
 // openDoltScanDB is openDoltDB for a read-only scan: it opens through
-// openScanDB, which dials the store's unix socket where openFixDB refuses it.
+// openScanDB, which dials the store's transport, its live unix socket
+// first, where openFixDB dials TCP.
 func openDoltScanDB(beadsDir string) (*sql.DB, *configfile.Config, error) {
 	return openDoltDBWith(beadsDir, openScanDB)
 }

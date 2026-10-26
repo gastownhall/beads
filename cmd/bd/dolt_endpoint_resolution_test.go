@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -524,11 +525,10 @@ func TestDoltStatusAndShowDialASocketOnlyServerBdDoesNotRun(t *testing.T) {
 // metadata.json's port (3307 when it names none), so at a port file's port
 // they presented another entry's password (#7841 review). A socket-only
 // server is deliberately still not dialed, as before: the fix connection and
-// doctor's schema gate keep withholding writes there (see openFixDB). Nor is
-// a live socket beside a resolved port: the store dials the socket, so the
-// server at the port may be one bd list does not open, and the fixes wrote
-// there over TCP (#7874 review). With the socket down, the store falls back
-// to TCP at the port, and so do the fixes.
+// doctor's schema gate keep withholding writes there (see openFixDB), and the
+// fix reports itself skipped (fix.ErrSkipped). Beside a resolved port, live
+// socket or dead, the fixes dial TCP at that port, as base and plain doctor's
+// own connection do, behind the project-id guard.
 func TestDoctorFixDialsTheEndpointTheStoreDials(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -540,8 +540,8 @@ func TestDoctorFixDialsTheEndpointTheStoreDials(t *testing.T) {
 		{name: "legacy BEADS_DOLT_PORT only", network: "tcp", legacy: true},
 		{name: "port file, password for its port", network: "tcp", portFile: true},
 		{name: "unix socket only, still skipped", network: "unix"},
-		{name: "live unix socket beside BEADS_DOLT_PORT, skipped", network: "tcp", legacy: true, socket: "live"},
-		{name: "dead unix socket beside BEADS_DOLT_PORT, TCP as the store", network: "tcp", legacy: true, socket: "dead"},
+		{name: "live unix socket beside BEADS_DOLT_PORT, TCP at the port", network: "tcp", legacy: true, socket: "live"},
+		{name: "dead unix socket beside BEADS_DOLT_PORT, TCP at the port", network: "tcp", legacy: true, socket: "dead"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if (tc.network == "unix" || tc.socket != "") && runtime.GOOS == "windows" {
@@ -578,7 +578,10 @@ func TestDoctorFixDialsTheEndpointTheStoreDials(t *testing.T) {
 				t.Setenv("BEADS_DOLT_SERVER_SOCKET", diagnosticSocketPath(t))
 			}
 
-			if err := fix.RecomputeBlocked(repo); err != nil {
+			// The fake refuses every login, so the fix skips once it has
+			// logged in; where it logged in is what this test observes.
+			err := fix.RecomputeBlocked(repo)
+			if err != nil && !errors.Is(err, fix.ErrSkipped) {
 				t.Fatalf("RecomputeBlocked: %v", err)
 			}
 			logins := fake.Logins()
@@ -586,16 +589,13 @@ func TestDoctorFixDialsTheEndpointTheStoreDials(t *testing.T) {
 				if len(logins) != 0 {
 					t.Fatalf("the fix wrote through the socket-only server at %s; it must keep skipping it", fake.ln.Addr())
 				}
+				if !errors.Is(err, fix.ErrSkipped) {
+					t.Fatalf("RecomputeBlocked = %v on a socket-only server, want it reported skipped (fix.ErrSkipped)", err)
+				}
 				return
 			}
-			if socketServer != nil {
-				if len(logins) != 0 {
-					t.Fatalf("the fix logged in over TCP at %s while the store dials the live socket %s; it must skip", fake.ln.Addr(), socketServer.ln.Addr())
-				}
-				if len(socketServer.Logins()) != 0 {
-					t.Fatalf("the fix logged in on the socket %s; it does not dial a socket yet", socketServer.ln.Addr())
-				}
-				return
+			if socketServer != nil && len(socketServer.Logins()) != 0 {
+				t.Fatalf("the fix logged in on the socket %s; it does not dial a socket yet", socketServer.ln.Addr())
 			}
 			if len(logins) == 0 {
 				t.Fatalf("the fix never reached the server the store dials (%s)", fake.ln.Addr())
@@ -608,6 +608,58 @@ func TestDoctorFixDialsTheEndpointTheStoreDials(t *testing.T) {
 				if !fake.PresentsPassword(login, want) {
 					t.Errorf("the fix logged in as %q without the password the store presents there (%q)", login.User, want)
 				}
+			}
+		})
+	}
+}
+
+// TestDoctorFixReportsASkippedRepairAsSkipped pins what bd doctor --fix
+// prints for a SQL fix that did not run (fix.ErrSkipped). Each fix printed
+// "... fix skipped (...)" and returned nil, which applyFixList counted as
+// fixed: "✓ Fixed" and "1 fixed, 0 errors" for a repair that never ran, as
+// for a server only a unix socket names. Beside a live socket and a resolved
+// port the fix dials TCP at the port, as base did, and the fake there refuses
+// the login, so that fix is reported skipped as well (#7874 review).
+func TestDoctorFixReportsASkippedRepairAsSkipped(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix socket fixture")
+	}
+	for _, tc := range []struct {
+		name string
+		port bool // BEADS_DOLT_PORT names a TCP server beside the socket
+	}{
+		{name: "live unix socket only"},
+		{name: "live unix socket beside BEADS_DOLT_PORT", port: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tcp := newFakeMySQLLogin(t)
+			endpointCredentialsEnv(t, []string{"127.0.0.1"}, tcp.port())
+			repo := t.TempDir()
+			t.Setenv("BEADS_DIR", serverModeWorkspaceAt(t, repo))
+			socketServer := newFakeMySQLLoginOn(t, "unix", diagnosticSocketPath(t))
+			t.Setenv("BEADS_DOLT_SERVER_SOCKET", socketServer.ln.Addr().String())
+			if tc.port {
+				t.Setenv("BEADS_DOLT_PORT", strconv.Itoa(tcp.port()))
+			}
+
+			out := captureStdout(t, func() error {
+				applyFixList(repo, []doctorCheck{{Name: "Blocked State", Status: statusWarning, Message: "stale is_blocked", Fix: "bd doctor --fix"}})
+				return nil
+			})
+			if strings.Contains(out, " Fixed\n") || !strings.Contains(out, "Skipped: ") {
+				t.Errorf("bd doctor --fix reported a repair it skipped as fixed:\n%s", out)
+			}
+			if !strings.Contains(out, "Fix summary: 0 fixed, 1 skipped, 0 errors") {
+				t.Errorf("bd doctor --fix summary does not count the skip:\n%s", out)
+			}
+			if tc.port && len(tcp.Logins()) == 0 {
+				t.Errorf("the fix never dialed TCP at the resolved port %d beside the live socket:\n%s", tcp.port(), out)
+			}
+			if !tc.port && strings.Contains(out, "127.0.0.1:0") {
+				t.Errorf("the fix dialed 127.0.0.1:0 for a socket-only server:\n%s", out)
+			}
+			if len(socketServer.Logins()) != 0 {
+				t.Errorf("the fix logged in on the socket %s; it does not dial a socket yet", socketServer.ln.Addr())
 			}
 		})
 	}

@@ -225,3 +225,58 @@ func liveUnixSocket(t *testing.T) string {
 	}()
 	return path
 }
+
+// TestDoltModeCheckProbesTheEndpointTheStoreDials pins the "Dolt Mode"
+// check's reachability probe (doltModeServerReachable) to the server the store
+// dials. It probed DefaultConfig's port, which leaves the legacy
+// BEADS_DOLT_PORT out, so with only that variable naming a running server the
+// check read it as unreachable, and with federation peers configured warned
+// "Server not reachable" (#7874 review). A closed BEADS_DOLT_SERVER_PORT is
+// the control.
+func TestDoltModeCheckProbesTheEndpointTheStoreDials(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		env  string
+		live bool
+	}{
+		{name: "legacy BEADS_DOLT_PORT only, server running", env: "BEADS_DOLT_PORT", live: true},
+		{name: "BEADS_DOLT_SERVER_PORT, nothing listening", env: "BEADS_DOLT_SERVER_PORT"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, beadsDir := doctorEndpointWorkspace(t)
+			port := closedLocalPort(t)
+			if tc.live {
+				port = acceptingLocalPort(t)
+			}
+			t.Setenv(tc.env, strconv.Itoa(port))
+			cfg, err := configfile.Load(beadsDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := doltModeServerReachable(beadsDir, cfg); got != tc.live {
+				t.Errorf("Dolt Mode server reachable = %v with %s=%d, want %v: it did not probe the port the store dials", got, tc.env, port, tc.live)
+			}
+		})
+	}
+}
+
+// acceptingLocalPort is a 127.0.0.1 port whose listener accepts and closes
+// every connection: reachable to a probe.
+func acceptingLocalPort(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
+	return ln.Addr().(*net.TCPAddr).Port
+}

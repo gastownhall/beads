@@ -341,6 +341,7 @@ func applyFixList(path string, fixes []doctorCheck) {
 	orderDoctorFixes(fixes)
 
 	fixedCount := 0
+	skippedCount := 0
 	errorCount := 0
 
 	for _, check := range fixes {
@@ -519,18 +520,28 @@ func applyFixList(path string, fixes []doctorCheck) {
 			continue
 		}
 
-		if err != nil {
+		// A fix that did not run (fix.ErrSkipped: its server could not be
+		// opened, only a unix socket names it, or its project identity
+		// could not be verified) is reported as skipped, neither fixed nor
+		// an error.
+		var skip *fix.SkipError
+		switch {
+		case errors.As(err, &skip):
+			skippedCount++
+			fmt.Printf("  %s Skipped: %s\n", ui.RenderWarn("⚠"), remedy.PrintedMessage(skip.Reason))
+			fmt.Printf("  Manual fix: %s\n", shown.Fix)
+		case err != nil:
 			errorCount++
 			fmt.Printf("  %s Error: %s\n", ui.RenderFail("✗"), remedy.PrintedMessage(err))
 			fmt.Printf("  Manual fix: %s\n", shown.Fix)
-		} else {
+		default:
 			fixedCount++
 			fmt.Printf("  %s Fixed\n", ui.RenderPass("✓"))
 		}
 	}
 
 	// Summary
-	fmt.Printf("\nFix summary: %d fixed, %d errors\n", fixedCount, errorCount)
+	fmt.Printf("\nFix summary: %d fixed, %d skipped, %d errors\n", fixedCount, skippedCount, errorCount)
 	if errorCount > 0 {
 		fmt.Println("\nSome fixes failed. Please review the errors above and apply manual fixes as needed.")
 	}

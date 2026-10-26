@@ -1089,8 +1089,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `BEADS_DOLT_PORT` naming the server, `bd dolt show` printed `Port: 0`
   and a failed connection test, `bd context` named `127.0.0.1:0`, and
   `bd doctor --fix` skipped every SQL fix as unreachable at `127.0.0.1:0`
-  while `bd doctor` diagnosed that server; they now use the port the store
-  dials, the fixes present the credentials-file password for that port,
+  while `bd doctor` diagnosed that server, and `bd doctor`'s Dolt Mode
+  check found the server unreachable and, with federation peers
+  configured, warned so; they now use the port the store dials (Dolt Mode
+  probes over the store's transport), the fixes present the credentials-file password for that port,
   and `bd dolt show` lists the variable's rule among its port sources. A
   server only a unix socket names was dialed over TCP at `127.0.0.1:0` by
   `bd doctor`'s Fresh Clone check, `bd dolt status` and `bd dolt show`'s
@@ -1105,11 +1107,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dialing `127.0.0.1:0`), `bd dolt show` and `bd context` still print
   port 0, and `bd doctor`'s own connection and `bd doctor --fix` still do
   not use the socket, so the database fixes stay withheld there as
-  before. Where the store dials a live socket beside a resolved port,
-  `bd doctor --fix` now skips its SQL fixes as well, rather than write
-  over TCP to that port, which may name another server; its Project
-  Identity and Dolt Schema repairs and `bd bootstrap` still reconcile
-  `metadata.json` against that port's catalog over TCP, as before.
+  before. Beside a resolved port, `bd doctor --fix` runs its SQL fixes
+  over TCP at that port, as before, behind its project-identity check,
+  even where the store dials a live socket; its Project Identity and Dolt
+  Schema repairs and `bd bootstrap` likewise reconcile `metadata.json`
+  against that port's catalog over TCP. Beside a live socket one
+  `bd doctor` run can therefore read two servers: its own database checks
+  still dial TCP at the resolved port, while Fresh Clone and the
+  Clone-Local FKs and Cross-Table Duplicates scans dial the socket. A SQL
+  fix that does not run, because its server cannot be opened, only a
+  unix socket names it, or its project identity cannot be verified, is
+  now reported as `⚠ Skipped` with the reason and counted in a new
+  `skipped` total of the fix summary, where it printed `✓ Fixed` and
+  counted as fixed; a skip does not count as an error.
   `bd doctor`'s Clone-Local FKs and Cross-Table Duplicates checks, and the
   `bd doctor --fix` repairs that open the same connection, now give up
   after 5 seconds on a server that accepts the connection but never sends

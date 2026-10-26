@@ -659,15 +659,7 @@ func CheckDoltServerModeMismatch(path string) DoctorCheck {
 
 	// Check if server is reachable by trying to connect
 	cfg, _ := configfile.Load(beadsDir)
-	serverReachable := false
-	if cfg != nil {
-		host := cfg.GetDoltServerHost()
-		port := doltserver.DefaultConfig(beadsDir).Port
-		addr := doltutil.ServerAddr(host, port)
-		if _, err := doltserver.ProbeSQLServer("tcp", addr, 2*time.Second); err == nil {
-			serverReachable = true
-		}
-	}
+	serverReachable := doltModeServerReachable(beadsDir, cfg)
 
 	// Open storage to check for remotes
 	ctx := context.Background()
@@ -732,4 +724,16 @@ func CheckDoltServerModeMismatch(path string) DoctorCheck {
 		Detail:   "No federation peers configured",
 		Category: CategoryFederation,
 	}
+}
+
+// doltModeServerReachable reports whether the server beadsDir's store dials
+// accepts a connection: the endpoint doltserver.ResolveEndpoint resolves (its
+// port, the legacy BEADS_DOLT_PORT included, which DefaultConfig leaves out),
+// over the store's transport (Endpoint.Probe). It is false without a
+// metadata.json, and for an endpoint with neither a port nor a socket.
+func doltModeServerReachable(beadsDir string, cfg *configfile.Config) bool {
+	if cfg == nil {
+		return false
+	}
+	return doltserver.ResolveEndpoint(beadsDir, cfg).Probe(2*time.Second) == nil
 }

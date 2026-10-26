@@ -121,8 +121,7 @@ func CloneLocalFKEnforcement(path string, verbose bool) error {
 
 	db, cfg, err := openDoltDB(beadsDir)
 	if err != nil {
-		fmt.Printf("  Clone-local FK fix skipped (%v)\n", err)
-		return nil
+		return skipFix(err)
 	}
 	defer db.Close()
 
