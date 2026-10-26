@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -200,6 +201,13 @@ func addRecipe(name, path string) error {
 	if beadsDir == "" {
 		return setupWorkspaceError()
 	}
+	// bd setup refuses a recipe of .beads/recipes.toml whose path leaves the
+	// directory it runs in (recipes.PathInside), so --add does not save one.
+	if path != "" {
+		if err := recipes.PathInside(".", path); err != nil {
+			return fmt.Errorf("recipe path %s %s; %s", recipeRefusalWord(path), recipePathRefusal(err), recipePathRule)
+		}
+	}
 
 	if err := recipes.SaveUserRecipe(beadsDir, name, path); err != nil {
 		return err
@@ -223,6 +231,25 @@ func recipeRefusalWord(value string) string {
 		return "'" + value + "'"
 	}
 	return remedy.EscapedValue(value)
+}
+
+// recipePathRule is the rule bd setup holds a .beads/recipes.toml recipe's
+// paths to (recipes.PathInside), as its refusals state it.
+const recipePathRule = "a .beads/recipes.toml recipe can only name a relative path with no '..' or symbolic link leading out of the directory bd setup runs in, and no dangling or looping link along it"
+
+// recipePathRefusal says why recipes.PathInside refused a path: it is not
+// inside the directory bd setup runs in, or it runs through a link bd setup
+// cannot follow (a dangling or looping one), whose target may be inside, or
+// that directory itself could not be resolved (a deleted working directory),
+// whose OS error is spelled by remedy.PrintedError.
+func recipePathRefusal(err error) string {
+	switch {
+	case errors.Is(err, recipes.ErrPathUnfollowable):
+		return "runs through a symbolic link bd setup cannot follow"
+	case errors.Is(err, recipes.ErrPathOutside):
+		return "is not inside the directory bd setup runs in"
+	}
+	return fmt.Sprintf("cannot be checked: %v", remedy.PrintedError(err))
 }
 
 func runRecipe(name string) error {
@@ -268,6 +295,29 @@ func runRecipe(name string) error {
 	paths := recipe.Paths
 	if recipe.Type == recipes.TypeFile {
 		paths = []string{recipe.Path}
+	}
+
+	// A recipe from the workspace's .beads/recipes.toml, which a repository
+	// can commit, names the files --check reads, install writes and --remove
+	// deletes, and the directories install creates and --remove drops when
+	// empty: bd setup refuses it, touching none of them, unless each stays
+	// inside the directory it runs in (recipes.PathInside). The refusal
+	// names the key and the path by recipeRefusalWord, and says whether the
+	// path leads out or runs through a link bd setup cannot follow
+	// (recipePathRefusal). An empty path names
+	// no file, and fails or is skipped as before. A built-in recipe's paths
+	// are bd's own and are not checked.
+	if recipe.Workspace {
+		for _, path := range paths {
+			if path == "" {
+				continue
+			}
+			if err := recipes.PathInside(".", path); err != nil {
+				return HandleErrorWithHint(
+					fmt.Sprintf("recipe %s names %s, which %s", recipeRefusalWord(name), recipeRefusalWord(path), recipePathRefusal(err)),
+					recipePathRule)
+			}
+		}
 	}
 
 	if setupCheck {

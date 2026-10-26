@@ -354,6 +354,8 @@ path = ".myeditor/rules.md"
 type = "file"
 ```
 
+A recipe's `path` (or a `multifile` recipe's `paths`) must be a relative path inside the directory you run `bd setup` in: `bd setup` refuses a recipe, touching none of its files or directories, when a path is absolute, leaves that directory through `..`, leads out of it through a symbolic link (the directory holding the file included), or runs through a dangling or looping link, and `bd setup --add` does not save one. To write the template anywhere else, use `bd setup -o <path>`.
+
 For a one-off install without saving a recipe, write the template to any path — or inspect it first:
 
 ```bash
