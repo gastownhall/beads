@@ -1537,33 +1537,61 @@ func TestOpenRetryNoticePrintsOncePerWaitingOpen(t *testing.T) {
 // (TestNewServerModeNamesConfiguredEndpointEscaped). The stubbed dial errors
 // repeat the address, as a real dial error does, so a raw control character
 // in either output can only have come from a missed printer.
+//
+// The two rows end the open on its two different returns, and each asserts
+// the one it took: a spent budget's error, and a canceled open's, which
+// newServerMode builds on its own. The cancellation comes from the retry dial
+// itself rather than from a timer, so the canceled row cannot pass by
+// spending its budget before its deadline.
 func TestOpenRetryNamesTheEndpointEscaped(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		ctx  func(t *testing.T) context.Context
+		// cancelInRetryDial ends the open's context inside the first retry
+		// dial, which then fails with the refusal as every other dial does.
+		cancelInRetryDial bool
+		wantCanceled      bool
+		wantRetryDials    int // 0: any number, as a spent budget allows
+		wantText          string
 	}{
-		{"budget exhausted", func(*testing.T) context.Context { return context.Background() }},
-		{"open canceled mid-retry", func(t *testing.T) context.Context {
-			ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
-			t.Cleanup(cancel)
-			return ctx
-		}},
+		{name: "budget exhausted", wantText: "still unreachable after"},
+		{name: "open canceled mid-retry", cancelInRetryDial: true, wantCanceled: true, wantRetryDials: 1,
+			wantText: "open retry canceled after"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("BEADS_TEST_MODE", "1")
 			buf := captureOpenRetryNotice(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
 			cfg := externalOpenConfig(writeBudgetConfig(t, map[string]string{config.OpenRetryBudgetKey: "2s"}))
 			cfg.ServerHost = hostileEndpoint
 			refused := fmt.Errorf("dial tcp %s: connect: connection refused",
 				net.JoinHostPort(hostileEndpoint, "1"))
 			log := stubOpenRetryDials(t, refused, []error{refused})
+			if tc.cancelInRetryDial {
+				stubbed := openProbeDialContext
+				openProbeDialContext = func(dialCtx context.Context, network, addr string, timeout time.Duration) (net.Conn, error) {
+					cancel()
+					return stubbed(dialCtx, network, addr, timeout)
+				}
+			}
 
-			_, err := newServerMode(tc.ctx(t), cfg)
+			_, err := newServerMode(ctx, cfg)
 			if err == nil {
 				t.Fatal("open succeeded with no server at the configured endpoint")
 			}
-			if _, ctxDials := log.counts(); ctxDials == 0 {
+			_, ctxDials := log.counts()
+			if ctxDials == 0 {
 				t.Fatal("no retry dial happened, so this row proves nothing about the retry path")
+			}
+			if tc.wantRetryDials > 0 && ctxDials != tc.wantRetryDials {
+				t.Fatalf("retry dials = %d, want %d: the open must end on the dial that canceled it", ctxDials, tc.wantRetryDials)
+			}
+			if errors.Is(err, context.Canceled) != tc.wantCanceled {
+				t.Fatalf("errors.Is(err, context.Canceled) = %v, want %v: the open did not end on the return this row covers: %q",
+					!tc.wantCanceled, tc.wantCanceled, err)
+			}
+			if !strings.Contains(err.Error(), tc.wantText) {
+				t.Fatalf("the open's error is not the one this row covers, which says %q: %q", tc.wantText, err)
 			}
 			requireNoRawTerminalControl(t, err.Error())
 			if !strings.Contains(err.Error(), "connection refused") {
