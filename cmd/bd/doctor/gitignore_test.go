@@ -459,6 +459,43 @@ func TestEnsureGitignoreForBeadsDir_TightensPermsWhenPatternComplete(t *testing.
 	}
 }
 
+// TestGitignoreModeIsLoose pins the shared never-loosen predicate (GH#6225):
+// only group/other bits count as loose, so a private mode stricter than 0600
+// is never "fixed" by adding bits, and Windows (no POSIX bits) is never loose.
+func TestGitignoreModeIsLoose(t *testing.T) {
+	tests := []struct {
+		goos string
+		perm os.FileMode
+		want bool
+	}{
+		{"windows", 0666, false},
+		{"windows", 0444, false},
+		{"windows", 0644, false},
+	}
+	for _, goos := range []string{"linux", "darwin"} {
+		for _, perm := range []os.FileMode{0644, 0640, 0604, 0444, 0666, 0060, 0001} {
+			tests = append(tests, struct {
+				goos string
+				perm os.FileMode
+				want bool
+			}{goos, perm, true})
+		}
+		for _, perm := range []os.FileMode{0600, 0400, 0700, 0200, 0000} {
+			tests = append(tests, struct {
+				goos string
+				perm os.FileMode
+				want bool
+			}{goos, perm, false})
+		}
+	}
+
+	for _, tt := range tests {
+		if got := gitignoreModeIsLoose(tt.goos, tt.perm); got != tt.want {
+			t.Errorf("gitignoreModeIsLoose(%q, %04o) = %v, want %v", tt.goos, tt.perm, got, tt.want)
+		}
+	}
+}
+
 // TestFixGitignore_IdempotentNoDuplication ensures calling the fix twice in a
 // row does not append duplicate pattern blocks: content must be byte-identical
 // between the first and second invocation.
