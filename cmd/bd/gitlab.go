@@ -3,14 +3,11 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
 	"fmt"
 	"io"
 	"os"
 	"strconv"
 	"strings"
-	"sync/atomic"
-	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/config"
@@ -100,9 +97,6 @@ var (
 	gitlabNoEphemeral  bool
 )
 
-// issueIDCounter is used to generate unique issue IDs.
-var issueIDCounter uint64
-
 // ConflictStrategy defines how to resolve conflicts between local and GitLab versions.
 type ConflictStrategy string
 
@@ -141,16 +135,33 @@ func getConflictStrategy(preferLocal, preferGitLab, preferNewer bool) (ConflictS
 	return ConflictStrategyPreferNewer, nil
 }
 
-// generateIssueID creates a unique issue ID with the given prefix.
-// Uses atomic counter combined with timestamp and random bytes to ensure uniqueness
-// even when called rapidly or after process restart.
-func generateIssueID(prefix string) string {
-	counter := atomic.AddUint64(&issueIDCounter, 1)
-	timestamp := time.Now().UnixNano() / 1000000 // milliseconds
-	// Add random bytes to prevent collision on restart
-	randBytes := make([]byte, 4)
-	_, _ = rand.Read(randBytes)
-	return fmt.Sprintf("%s-%d-%d-%x", prefix, timestamp, counter, randBytes)
+// pullIssueIDHook returns the PullHooks.GenerateID hook shared by the GitHub,
+// GitLab, ADO and Notion pulls. It leaves a new issue's ID empty so the store
+// mints it exactly as `bd create` does: hash ID with adaptive length and
+// collision retry, or the next counter ID when issue_id_mode=counter.
+// Dependencies still link because the engine resolves them by external ref
+// after every pulled issue has been created.
+//
+// The store mints under the database's issue_prefix. config.yaml's
+// issue-prefix wins when it differs, since in shared-server mode the database
+// may belong to a different project (GH#2469).
+func pullIssueIDHook(ctx context.Context) func(context.Context, *types.Issue) error {
+	prefixOverride := ""
+	if p := strings.TrimSuffix(strings.TrimSpace(config.GetString("issue-prefix")), "-"); p != "" {
+		dbPrefix := ""
+		if store != nil {
+			dbPrefix, _ = store.GetConfig(ctx, "issue_prefix")
+		}
+		if p != strings.TrimSuffix(strings.TrimSpace(dbPrefix), "-") {
+			prefixOverride = p
+		}
+	}
+	return func(_ context.Context, issue *types.Issue) error {
+		if issue.ID == "" && prefixOverride != "" {
+			issue.PrefixOverride = prefixOverride
+		}
+		return nil
+	}
 }
 
 // parseGitLabSourceSystem parses a source system string like "gitlab:123:42"
@@ -849,24 +860,8 @@ func buildCLIFilter() *gitlab.IssueFilter {
 
 // buildGitLabPullHooks creates PullHooks for GitLab-specific pull behavior.
 func buildGitLabPullHooks(ctx context.Context) *tracker.PullHooks {
-	prefix := "bd"
-	// YAML config takes precedence — in shared-server mode the DB
-	// may belong to a different project (GH#2469).
-	if p := config.GetString("issue-prefix"); p != "" {
-		prefix = p
-	} else if store != nil {
-		if p, err := store.GetConfig(ctx, "issue_prefix"); err == nil && p != "" {
-			prefix = p
-		}
-	}
-
 	return &tracker.PullHooks{
-		GenerateID: func(_ context.Context, issue *types.Issue) error {
-			if issue.ID == "" {
-				issue.ID = generateIssueID(prefix)
-			}
-			return nil
-		},
+		GenerateID: pullIssueIDHook(ctx),
 	}
 }
 
