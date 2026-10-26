@@ -197,15 +197,11 @@ func addDependencyEdgeInTx(ctx context.Context, tx *sql.Tx, request publicops.Ad
 	// commits nothing, which is right — the wisp plane is dolt-ignored and has
 	// no version history to write.
 	//
-	// This is NOT every table the edge wrote. A blocking edge also flips the
-	// source's is_blocked (markDirectBlockingDependencySourceInTx, then
-	// MarkIsBlockedInTx over the affected ids), and neither `issues` nor any
-	// other issue-plane table is ever staged here. On an issue-sourced
-	// blocking add the flip therefore stays in the working set and is swept up
-	// by whatever command auto-commits next — including one that was REFUSED,
-	// which then shows up in history having changed nothing of its own. That
-	// predates this role: origin/main's dolt.AddDependencyWithOptions staged
-	// the same {dependencies, events} pair. Tracked as bd-2y9ke; fixing it
+	// The source's issue table is NOT staged here: an edge never remints the
+	// source's row_lock (T4.10), so the only issues-row write a dep add can
+	// make is the derived is_blocked recompute, and that torn-commit hole
+	// predates this role (origin/main's dolt.AddDependencyWithOptions staged
+	// the same {dependencies, events} pair). Tracked as bd-2y9ke; fixing it
 	// changes what every dep-add commit contains and belongs in its own change
 	// with its own tests, so do not widen the set here without reading that
 	// bead first.

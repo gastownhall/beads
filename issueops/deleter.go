@@ -85,11 +85,14 @@ type DeleteRequest struct {
 	// be doing the irreversible half of the operation on a row it no longer
 	// recognizes.
 	//
-	// IT GUARDS THE NAMED ROW'S LIFECYCLE STATE, NOT ITS GRAPH AND NOT ITS
-	// CLOSURE. RowVersion is reminted by status, assignee and started_at
-	// writes and deliberately not by label, dependency, rename or is_blocked
-	// writes, so a matching token does NOT promise that the row's edges are the
-	// ones the caller saw. Under Cascade that has a consequence worth saying
+	// IT GUARDS THE NAMED AGGREGATE, NOT ITS TRANSITIVE CLOSURE. RowVersion is
+	// reminted by every supported user-authored mutation of the issues row.
+	// Dependency edges in EITHER direction (a parent change included) are
+	// graph state, not an issues-row write, and derived is_blocked
+	// recomputation is
+	// cache maintenance: neither remints (T4.10). A matching token therefore
+	// does not promise the dependency graph, or the cascade closure, is
+	// unchanged. Under Cascade that has a consequence worth saying
 	// out loud: the closure is resolved inside the deleting transaction, so a
 	// caller whose named row is unchanged deletes the closure the graph has
 	// NOW, which an edge added since its read may have grown. A caller that

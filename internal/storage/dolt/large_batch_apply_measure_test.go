@@ -167,10 +167,13 @@ const statementCountToleranceDolt = 2
 // then for the parent-child cascade (classic was 786); see
 // pinnedEmbeddedStatementCounts in internal/storage/embeddeddolt for the
 // per-change breakdown. The two backends now agree to within the tolerance.
+// Re-pinned with the embedded values for #5738 round 5 (create row_lock
+// readback only; no per-edge touch): not re-measured against a server here,
+// the proxied CI tier is the check.
 var pinnedDoltStatementCounts = map[string]int64{
-	"356 (mol 1x)": 6396,
-	"712 (mol 2x)": 12791,
-	"40 (classic)": 835,
+	"356 (mol 1x)": 6498,
+	"712 (mol 2x)": 12994,
+	"40 (classic)": 845,
 }
 
 // BenchmarkLargeBatchApply_Dolt is gated by setupBenchStore's own

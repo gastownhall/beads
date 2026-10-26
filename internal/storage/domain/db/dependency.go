@@ -146,6 +146,9 @@ func (r *dependencySQLRepositoryImpl) Insert(ctx context.Context, dep *types.Dep
 			if err := issueops.RecordDepEventInTx(ctx, r.runner, issueops.EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor); err != nil {
 				return err
 			}
+			// The refresh is journaled above and versioned below, but a
+			// dependency edit is not an issues-row write and never remints the
+			// row_lock token (T4.10).
 			// The metadata or thread genuinely changed, so this re-add is a
 			// real durable-state mutation of the source issue (its version
 			// snapshot carries each edge's thread_id) and mints on the same
@@ -391,7 +394,6 @@ func (r *dependencySQLRepositoryImpl) Delete(ctx context.Context, issueID, depen
 	); err != nil {
 		return domain.DepDeleteResult{}, fmt.Errorf("db: DependencySQLRepository.Delete: %s -> %s: %w", issueID, dependsOnID, err)
 	}
-
 	// The type lookup above returned Found:false when no edge existed, so reaching
 	// here means a row was deleted — record the dependency_removed event on the
 	// source's event table, matching the embedded/issueops RemoveDependencyInTx path.

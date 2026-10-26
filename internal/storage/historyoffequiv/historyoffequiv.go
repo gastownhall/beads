@@ -171,6 +171,17 @@ var schemaAdditions = []schemaAddition{{
 		"schema_migrations":         {"70", "71", "72"},
 		"ignored_schema_migrations": {"28"},
 	},
+}, {
+	// The aggregate row_lock backfill (#5738, gc-yfkxj): migration 0073 and
+	// its dolt-ignored twin ignored/0029 are plain UPDATE ... WHERE row_lock
+	// = 0 backfills of legacy rows. A store these tests open has no legacy
+	// rows, so flag-off writes nothing new: no columns, no tables, only the
+	// two bookkeeping rows below.
+	By: "the aggregate row_lock backfill (#5738)",
+	Migrations: map[string][]string{
+		"schema_migrations":         {"73"},
+		"ignored_schema_migrations": {"29"},
+	},
 }}
 
 // runWindow widens the span of the run on each side to bound the wall-clock

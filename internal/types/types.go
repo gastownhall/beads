@@ -75,7 +75,7 @@ type Issue struct {
 	// ===== Concurrency (generic Issue JSON/JSONL omits this field) =====
 	// RowVersion is an opaque optimistic-concurrency token for the library's own
 	// Go call sites: the issues/wisps row_lock cell, a random non-zero value the
-	// engine rewrites on every status/ownership-mutating write. It is
+	// engine rewrites on every supported user-authored aggregate mutation. It is
 	// EQUALITY-ONLY — compare it, never order or interpret it — and a change
 	// signals the row was mutated since you read it. It is json:"-" on purpose:
 	// row_lock is random per write, so generic Issue serialization would break
@@ -86,16 +86,18 @@ type Issue struct {
 	// survive a JSON number in a JavaScript consumer. Go consumers read
 	// RowVersion directly and never see the string.
 	//
-	// Coverage is deliberately partial: it changes on claim/close/unclaim and the
-	// generic update path, but NOT on direct-UPDATE paths that rewrite text
-	// without touching row_lock (RestoreFromSnapshotInTx, the compaction
-	// text-truncation path). For a complete change-detection key, combine it with
-	// updated_at (which those paths DO bump), status, and the label set
-	// (label-only and reopen writes change those, not row_lock).
+	// Exact no-ops preserve the token. So do dependency edits in either
+	// direction (a parent change included; it is a parent-child edge) and the
+	// derived is_blocked projection they drive: an edge is graph state, not an
+	// issues-row write, and recomputation is cache maintenance, so neither is a
+	// mutation of this aggregate (T4.10, pinned by cmd/bd
+	// TestEmbeddedRevisionRemintMatrix). The direct label and comment writers
+	// (AddLabel/RemoveLabel/AddComment) remint; the composite update's
+	// label-only patch does not, which is the asymmetry #5738 leaves to the
+	// maintainer's ruling.
 	//
-	// 0 appears only on legacy rows backfilled by migration 0054 (DEFAULT 0) that
-	// have not been mutated since; any issue created by the current code path is
-	// non-zero (create stamps freshRowLock()).
+	// Migration 0073 (ignored/0029 for wisps) replaces legacy 0 tokens with a
+	// non-zero equality sentinel; current creates stamp a fresh random token.
 	RowVersion int64 `json:"-"`
 
 	// ===== Time-Based Scheduling (GH#820) =====
