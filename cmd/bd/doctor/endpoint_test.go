@@ -11,6 +11,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
 // doctorEndpointWorkspace is a server-mode workspace with no local data
@@ -173,27 +174,78 @@ func TestDoctorChecksDialAConfiguredSocket(t *testing.T) {
 	}
 }
 
-// TestDoctorFreshCloneNamesTheSocketItDialsBesideAPort pins the Fresh Clone
-// report to the transport the check dials when a live unix socket and a
-// resolved port both name the server: the store dials the socket, and so does
-// the check, so the report names the socket. It named host:port, which the
-// check never queried (#7874 review).
-func TestDoctorFreshCloneNamesTheSocketItDialsBesideAPort(t *testing.T) {
+// TestDoctorFreshCloneReadsTheServerItsRepairWritesBesideAPort pins the
+// Fresh Clone check, when a live unix socket and a resolved port both name
+// the server, to the server its repair (fix.FreshCloneImport) writes, and its
+// report to the server it dialed. That repair's store open dials
+// BEADS_DOLT_SERVER_SOCKET socket first and never reads metadata.json's
+// dolt_server_socket, so the check dials the socket only from the
+// environment, and TCP at the port beside metadata.json's. It dialed
+// metadata.json's socket too, while --fix imported issues.jsonl into the
+// server at the port over its live rows; before that it named host:port for
+// the socket it dialed (#7874 review). Nothing answers either address here,
+// so the report names the one dialed.
+func TestDoctorFreshCloneReadsTheServerItsRepairWritesBesideAPort(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("unix socket fixture")
 	}
+	for _, tc := range []struct {
+		name  string
+		inEnv bool // BEADS_DOLT_SERVER_SOCKET, else metadata.json dolt_server_socket
+	}{
+		{name: "BEADS_DOLT_SERVER_SOCKET, the socket", inEnv: true},
+		{name: "metadata.json dolt_server_socket, TCP at the port"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo, beadsDir := doctorEndpointWorkspace(t)
+			socket := liveUnixSocket(t)
+			port := strconv.Itoa(closedLocalPort(t))
+			t.Setenv("BEADS_DOLT_SERVER_PORT", port)
+			dialed, other := "unix:"+socket, "127.0.0.1:"+port
+			if tc.inEnv {
+				t.Setenv("BEADS_DOLT_SERVER_SOCKET", socket)
+			} else {
+				cfg, err := configfile.Load(beadsDir)
+				if err != nil || cfg == nil {
+					t.Fatalf("load metadata: %v", err)
+				}
+				cfg.DoltServerSocket = socket
+				if err := cfg.Save(beadsDir); err != nil {
+					t.Fatal(err)
+				}
+				dialed, other = other, socket
+			}
+			fresh := CheckFreshClone(repo)
+			report := fresh.Message + "\n" + fresh.Detail + "\n" + fresh.Fix
+			if !strings.Contains(fresh.Message, dialed) {
+				t.Errorf("Fresh Clone does not name %s, the server its repair writes:\n%s", dialed, report)
+			}
+			if strings.Contains(report, other) {
+				t.Errorf("Fresh Clone names %s, which its repair does not write:\n%s", other, report)
+			}
+		})
+	}
+}
+
+// TestDoctorFreshCloneFailsClosedOnAFailingCredentialCommand pins the Fresh
+// Clone check to the identity its repair presents (freshCloneRepairUser) when
+// BEADS_DOLT_CREDENTIAL_COMMAND fails: the repair's store open fails closed
+// and never falls back to the static user, and the check does too, reporting
+// the command's failure without dialing the server.
+func TestDoctorFreshCloneFailsClosedOnAFailingCredentialCommand(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the credential command is a POSIX shell command")
+	}
 	repo, _ := doctorEndpointWorkspace(t)
-	socket := liveUnixSocket(t)
-	port := strconv.Itoa(closedLocalPort(t))
-	t.Setenv("BEADS_DOLT_SERVER_SOCKET", socket)
-	t.Setenv("BEADS_DOLT_SERVER_PORT", port)
+	t.Setenv("BEADS_DOLT_SERVER_PORT", strconv.Itoa(closedLocalPort(t)))
+	t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", "exit 23")
 	fresh := CheckFreshClone(repo)
 	report := fresh.Message + "\n" + fresh.Detail + "\n" + fresh.Fix
-	if !strings.Contains(fresh.Message, "unix:"+socket) {
-		t.Errorf("Fresh Clone does not name unix:%s, the socket it dialed:\n%s", socket, report)
+	if fresh.Status != StatusWarning || !strings.Contains(fresh.Detail, "BEADS_DOLT_CREDENTIAL_COMMAND") {
+		t.Errorf("Fresh Clone does not report the failing BEADS_DOLT_CREDENTIAL_COMMAND:\n%s", report)
 	}
-	if strings.Contains(report, "127.0.0.1:"+port) {
-		t.Errorf("Fresh Clone names 127.0.0.1:%s, which it did not dial:\n%s", port, report)
+	if strings.Contains(report, "connection refused") {
+		t.Errorf("Fresh Clone dialed the server after its credential command failed:\n%s", report)
 	}
 }
 
@@ -279,4 +331,44 @@ func acceptingLocalPort(t *testing.T) int {
 		}
 	}()
 	return ln.Addr().(*net.TCPAddr).Port
+}
+
+// TestDoctorRepairScansReportARepairServerTheyCannotRead pins what the
+// Blocked State, Dependency Keys, Orphaned Dependencies and Child-Parent
+// Dependencies checks report when they cannot read the server their bd
+// doctor --fix repair writes (fix.OpenScanDB): their no-database result when
+// the shared store found no database either, and otherwise a warning naming
+// the failure. They read the store's server, which dials a live
+// BEADS_DOLT_SERVER_SOCKET beside a resolved port while the repair writes
+// the server at the port (#7874 review); that server can refuse a check the
+// shared store let in, as a stopped server at the port does here, and a
+// clean "No database yet" or "N/A (no database)" would hide a database the
+// check never read.
+func TestDoctorRepairScansReportARepairServerTheyCannotRead(t *testing.T) {
+	repo, _ := doctorEndpointWorkspace(t)
+	port := strconv.Itoa(closedLocalPort(t))
+	t.Setenv("BEADS_DOLT_SERVER_PORT", port)
+	// opened stands in for a shared store that opened the workspace's
+	// database; the checks only ask whether it did.
+	opened := &SharedStore{store: new(dolt.DoltStore)}
+	for _, tc := range []struct {
+		name       string
+		check      func(string, *SharedStore) DoctorCheck
+		noDatabase string // the message with no database at all
+	}{
+		{"Blocked State", CheckBlockedConsistencyWithStore, "No database yet"},
+		{"Dependency Keys", CheckDependencyKeysWithStore, "No database yet"},
+		{"Orphaned Dependencies", CheckOrphanedDependencies, "N/A (no database)"},
+		{"Child-Parent Dependencies", CheckChildParentDependencies, "N/A (no database)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if c := tc.check(repo, nil); c.Status != StatusOK || c.Message != tc.noDatabase {
+				t.Errorf("with no database: %s %q, want %s %q", c.Status, c.Message, StatusOK, tc.noDatabase)
+			}
+			c := tc.check(repo, opened)
+			if c.Status != StatusWarning || !strings.Contains(c.Detail, "127.0.0.1:"+port) {
+				t.Errorf("with a database whose repair server refuses the check: %s %q (%s), want a warning naming 127.0.0.1:%s", c.Status, c.Message, c.Detail, port)
+			}
+		})
+	}
 }

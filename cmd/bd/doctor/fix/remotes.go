@@ -47,8 +47,9 @@ func skipFix(reason error) error { return &SkipError{Reason: reason} }
 // resolved) is refused, as base's failed dial of 127.0.0.1:0 refused it, and
 // doctor's schema gate keeps withholding the DB fixes there. Admitting them
 // waits on a separate data-safety fix to the Database fix. Each fix reports
-// that refusal as skipped (ErrSkipped). Doctor's read-only scans dial the
-// store's transport instead (openScanDB).
+// that refusal as skipped (ErrSkipped). Doctor's read-only scans read the
+// server these fixes write, and only a socket-only server on its socket
+// (openScanDB).
 //
 // It deliberately does not check the server against
 // doltversion.RequiredMin, and neither does openServerCatalogDB: bd doctor
@@ -64,14 +65,26 @@ func openFixDB(beadsDir string, cfg *configfile.Config) (*sql.DB, error) {
 }
 
 // openScanDB opens the server a read-only doctor scan reads
-// (CountCrossTableDuplicates, ScanSeveredCloneLocalFKs): the one the store
-// dials, over its transport, a live unix socket first, else TCP
-// (doltserver.Endpoint.Transport), as doctor's Fresh Clone check does. A scan
-// writes nothing, so it dials the socket the store dials, where openFixDB
-// dials TCP at the port beside it or refuses a socket-only server.
+// (CountCrossTableDuplicates, ScanSeveredCloneLocalFKs, and the checks that
+// open OpenScanDB): the one its fix writes (openFixDB), TCP at the resolved
+// port, even beside a live unix socket, so bd doctor --fix never repairs a
+// server the scan did not read. The scans read the store's socket there, so a
+// fix ran, and reported "Fixed", on the server at the port while the problem
+// it was run for stayed on the socket's (#7874 review). A server only a unix
+// socket names (no port resolved), which openFixDB refuses, is read on the
+// store's transport, its socket: the scan writes nothing there, and its fix
+// reports itself skipped. An endpoint with neither a port nor a socket is
+// refused with the store's advice, never dialed at 127.0.0.1:0.
 func openScanDB(beadsDir string, cfg *configfile.Config) (*sql.DB, error) {
 	ep := doltserver.ResolveEndpoint(beadsDir, cfg)
-	return openWorkspaceDB(ep, cfg, ep.Transport())
+	if err := ep.UnresolvedError(); err != nil {
+		return nil, err
+	}
+	socket := ""
+	if !ep.Resolved() {
+		socket = ep.Transport()
+	}
+	return openWorkspaceDB(ep, cfg, socket)
 }
 
 // openWorkspaceDB opens cfg's database on the server at ep: over socket when

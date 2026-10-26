@@ -10,12 +10,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/cmd/bd/doctor/fix"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
@@ -665,24 +667,24 @@ func TestDoctorFixReportsASkippedRepairAsSkipped(t *testing.T) {
 	}
 }
 
-// TestDoctorScansReadTheServerTheStoreDials observes, on the wire, where bd
+// TestDoctorScansReadTheServerTheirFixesWrite observes, on the wire, where bd
 // doctor's read-only SQL scans connect: the Clone-Local FKs check
 // (fix.ScanSeveredCloneLocalFKs) and --check=validate's Cross-Table
-// Duplicates check (fix.CountCrossTableDuplicates). They dial the server the
-// store dials, over its transport. They shared the SQL fixes' refusal of a
-// socket the store dials (openFixDB), so with a live socket beside a port
-// each returned an error that its check reports as "N/A", having queried no
-// server, where it had read the server at the port (#7874 review). A scan
-// writes nothing, so it dials the socket, as the store and the Fresh Clone
-// check do, socket-only or not; with the socket down it reads TCP at the
-// port, as the store does.
+// Duplicates check (fix.CountCrossTableDuplicates). Beside a resolved port
+// they read the server their fixes write (openFixDB), TCP at the port, live
+// socket or dead. They dialed a live socket there, as the store does, so
+// --fix repaired the server at the port while the problem stayed on the
+// socket's (#7874 review). A server only a unix socket names, which the
+// fixes do not dial, they read on its socket; they had shared the fixes'
+// failed dial of 127.0.0.1:0 there, and each check reported "N/A", having
+// queried no server (#7874 review).
 //
 // A socket that accepts and never sends the MySQL greeting, as a stopped or
 // paused sql-server's does, is live to the store's probe, so the scans dial
 // it too, and each must give up on its own deadline. Their ping had none, so
 // bd doctor waited on that greeting forever at the Clone-Local FKs check,
 // where it had failed at once dialing 127.0.0.1:0 (#7874 review).
-func TestDoctorScansReadTheServerTheStoreDials(t *testing.T) {
+func TestDoctorScansReadTheServerTheirFixesWrite(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("unix socket fixture")
 	}
@@ -694,9 +696,9 @@ func TestDoctorScansReadTheServerTheStoreDials(t *testing.T) {
 		port   bool   // BEADS_DOLT_SERVER_PORT names the TCP server
 		socket string // BEADS_DOLT_SERVER_SOCKET: "live" (a server on it), "dead", or "mute" (accepts, never greets)
 	}{
-		{name: "live unix socket beside a port", port: true, socket: "live"},
+		{name: "live unix socket beside a port, TCP as the fixes", port: true, socket: "live"},
 		{name: "live unix socket only", socket: "live"},
-		{name: "dead unix socket beside a port, TCP as the store", port: true, socket: "dead"},
+		{name: "dead unix socket beside a port, TCP as the fixes", port: true, socket: "dead"},
 		{name: "mute unix socket only, the scans give up", socket: "mute"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -707,9 +709,9 @@ func TestDoctorScansReadTheServerTheStoreDials(t *testing.T) {
 			if tc.port {
 				t.Setenv("BEADS_DOLT_SERVER_PORT", strconv.Itoa(tcp.port()))
 			}
-			// want is the server the store dials: the live socket's, else
-			// TCP's, and none on a mute socket, where no login is made.
-			// other, the TCP server beside a live socket, it does not.
+			// want is the server the scans read: TCP's beside a port, the
+			// live socket's without one, and none on a mute socket, where no
+			// login is made. other, the server beside it, they do not.
 			want := tcp
 			var other *fakeMySQLLogin
 			switch tc.socket {
@@ -717,6 +719,9 @@ func TestDoctorScansReadTheServerTheStoreDials(t *testing.T) {
 				socketServer := newFakeMySQLLoginOn(t, "unix", diagnosticSocketPath(t))
 				t.Setenv("BEADS_DOLT_SERVER_SOCKET", socketServer.ln.Addr().String())
 				want, other = socketServer, tcp
+				if tc.port {
+					want, other = tcp, socketServer
+				}
 			case "mute":
 				socket := diagnosticSocketPath(t)
 				newMuteListenerOn(t, "unix", socket)
@@ -751,11 +756,281 @@ func TestDoctorScansReadTheServerTheStoreDials(t *testing.T) {
 				before := len(want.Logins())
 				err := scan.run()
 				if len(want.Logins()) == before {
-					t.Errorf("%s never logged in to the server the store dials (%s): %v", scan.name, want.ln.Addr(), err)
+					t.Errorf("%s never logged in to the server it reads here (%s): %v", scan.name, want.ln.Addr(), err)
 				}
 			}
 			if other != nil && len(other.Logins()) != 0 {
-				t.Errorf("the scans logged in over TCP at %s while the store dials the live socket %s", other.ln.Addr(), want.ln.Addr())
+				t.Errorf("the scans logged in to %s; here they read %s", other.ln.Addr(), want.ln.Addr())
+			}
+		})
+	}
+}
+
+// TestDoctorChecksReadTheServerTheirRepairsWrite observes, on the wire, that
+// each bd doctor check whose problem bd doctor --fix repairs over SQL reads
+// the server that repair writes when a live unix socket and a resolved port
+// name two servers: Fresh Clone and fix.FreshCloneImport, Cross-Table
+// Duplicates and fix.CrossTableDuplicates, Clone-Local FKs and
+// fix.CloneLocalFKEnforcement, Orphaned Dependencies and
+// fix.OrphanedDependencies, Child-Parent Dependencies and
+// fix.ChildParentDependencies, Dependency Keys and fix.DependencyKeys, and
+// Blocked State and fix.RecomputeBlocked. The SQL fixes dial TCP at the port
+// (openFixDB). The Fresh Clone repair opens the store through the library
+// open, which dials BEADS_DOLT_SERVER_SOCKET socket first and never reads
+// metadata.json's dolt_server_socket. The checks dialed the live socket the
+// CLI's store dials, so --fix repaired the server at the port while the
+// check had read the socket's, and Fresh Clone's repair imported
+// issues.jsonl over live rows there (#7874 review). Orphaned Dependencies,
+// Child-Parent Dependencies, Dependency Keys and Blocked State still read the
+// store's socket once the first three read the server their repairs write,
+// so their repairs deleted, re-keyed or recomputed rows at the port that the
+// check had not read (#7874 review).
+//
+// Each check also logs in as the user its repair presents. The library open
+// presents a BEADS_DOLT_CREDENTIAL_COMMAND token over the static user. The
+// Fresh Clone check presented the static user, which a gateway refuses, so
+// it reported the server unreachable while its repair imported issues.jsonl
+// through that gateway over live rows (#7874 review).
+func TestDoctorChecksReadTheServerTheirRepairsWrite(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix socket fixture")
+	}
+	const gatewayToken = "tok-gw"
+	for _, tc := range []struct {
+		name    string
+		inEnv   bool   // BEADS_DOLT_SERVER_SOCKET, else metadata.json dolt_server_socket
+		credCmd string // BEADS_DOLT_CREDENTIAL_COMMAND: a gateway
+	}{
+		{name: "BEADS_DOLT_SERVER_SOCKET beside a port", inEnv: true},
+		{name: "metadata.json dolt_server_socket beside a port"},
+		{name: "BEADS_DOLT_SERVER_SOCKET beside a port, gateway credential command", inEnv: true, credCmd: "printf " + gatewayToken},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tcp := newFakeMySQLLogin(t)
+			socketServer := newFakeMySQLLoginOn(t, "unix", diagnosticSocketPath(t))
+			socket := socketServer.ln.Addr().String()
+			endpointCredentialsEnv(t, []string{"127.0.0.1"}, tcp.port())
+			t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", tc.credCmd)
+			repo := t.TempDir()
+			beadsDir := serverModeWorkspaceAt(t, repo)
+			t.Setenv("BEADS_DIR", beadsDir)
+			t.Setenv("BEADS_DOLT_SERVER_PORT", strconv.Itoa(tcp.port()))
+			if tc.inEnv {
+				t.Setenv("BEADS_DOLT_SERVER_SOCKET", socket)
+			} else {
+				cfg, err := configfile.Load(beadsDir)
+				if err != nil || cfg == nil {
+					t.Fatalf("load metadata: %v", err)
+				}
+				cfg.DoltServerSocket = socket
+				if err := cfg.Save(beadsDir); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// A tracked issues.jsonl and no .beads/dolt make the Fresh Clone
+			// check look for the database on the server.
+			if err := os.WriteFile(filepath.Join(beadsDir, "issues.jsonl"), []byte(`{"id":"t-1","title":"x"}`+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			// The fakes refuse every login, so each check and repair fails
+			// once it has logged in; where, and as whom, it logged in is
+			// what this test observes.
+			for _, pair := range []struct {
+				name          string
+				check, repair func()
+				libraryOpen   bool // the repair opens the store through the library open
+			}{
+				{name: "Fresh Clone", libraryOpen: true,
+					check:  func() { doctor.CheckFreshClone(repo) },
+					repair: func() { _ = fix.FreshCloneImport(repo, "") }},
+				{name: "Cross-Table Duplicates",
+					check:  func() { _, _ = fix.CountCrossTableDuplicates(repo) },
+					repair: func() { _ = fix.CrossTableDuplicates(repo, false) }},
+				{name: "Clone-Local FKs",
+					check:  func() { _, _ = fix.ScanSeveredCloneLocalFKs(repo) },
+					repair: func() { _ = fix.CloneLocalFKEnforcement(repo, false) }},
+				{name: "Orphaned Dependencies",
+					check:  func() { doctor.CheckOrphanedDependencies(repo, nil) },
+					repair: func() { _ = fix.OrphanedDependencies(repo, false) }},
+				{name: "Child-Parent Dependencies",
+					check:  func() { doctor.CheckChildParentDependencies(repo, nil) },
+					repair: func() { _ = fix.ChildParentDependencies(repo, false) }},
+				{name: "Dependency Keys",
+					check:  func() { doctor.CheckDependencyKeysWithStore(repo, nil) },
+					repair: func() { _ = fix.DependencyKeys(repo, false) }},
+				{name: "Blocked State",
+					check:  func() { doctor.CheckBlockedConsistencyWithStore(repo, nil) },
+					repair: func() { _ = fix.RecomputeBlocked(repo) }},
+			} {
+				want, other := tcp, socketServer
+				if pair.libraryOpen && tc.inEnv {
+					want, other = socketServer, tcp
+				}
+				var users [2][]string // the users the check, then its repair, logged in as
+				for i, step := range []struct {
+					name string
+					run  func()
+				}{
+					{pair.name + " check", pair.check},
+					{pair.name + " repair", pair.repair},
+				} {
+					wantBefore, otherBefore := len(want.Logins()), len(other.Logins())
+					step.run()
+					logins := want.Logins()
+					if len(logins) == wantBefore {
+						t.Errorf("the %s never logged in to %s, the server the check and its repair must both reach", step.name, want.ln.Addr())
+					}
+					if len(other.Logins()) != otherBefore {
+						t.Errorf("the %s logged in to %s, the other server", step.name, other.ln.Addr())
+					}
+					for _, login := range logins[wantBefore:] {
+						if !slices.Contains(users[i], login.User) {
+							users[i] = append(users[i], login.User)
+						}
+					}
+				}
+				if !slices.Equal(users[0], users[1]) {
+					t.Errorf("the %s check logged in as %q and its repair as %q; the check must present the identity its repair presents", pair.name, users[0], users[1])
+				}
+				if tc.credCmd != "" && pair.libraryOpen && !slices.Equal(users[1], []string{gatewayToken}) {
+					t.Errorf("the %s repair logged in as %q; the library open presents the credential command's token %q", pair.name, users[1], gatewayToken)
+				}
+			}
+		})
+	}
+}
+
+// TestDoctorFixImportsOnlyAFreshCloneTheCheckFound pins bd doctor --fix's
+// Fresh Clone repair, the import of issues.jsonl (fix.FreshCloneImport), to a
+// check that found the database missing (doctor.FreshCloneDetected). The
+// check also warns when it could not log in to the server, and says that is
+// not a fresh clone; --fix imported there all the same, so any server or
+// identity the repair could reach and the check could not had its live rows
+// overwritten with the tracked copy (#7874 review). That repair is reported
+// skipped and never opens the server; a fresh clone the check found is
+// still imported.
+func TestDoctorFixImportsOnlyAFreshCloneTheCheckFound(t *testing.T) {
+	fake := newFakeMySQLLogin(t)
+	port := strconv.Itoa(fake.port())
+	endpointCredentialsEnv(t, []string{"127.0.0.1"}, fake.port())
+	repo := t.TempDir()
+	beadsDir := serverModeWorkspaceAt(t, repo)
+	t.Setenv("BEADS_DIR", beadsDir)
+	t.Setenv("BEADS_DOLT_SERVER_PORT", port)
+	if err := os.WriteFile(filepath.Join(beadsDir, "issues.jsonl"), []byte(`{"id":"t-1","title":"x"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The fake refuses every login, so the check reports the server
+	// unreachable, and an import that runs fails once it has logged in.
+	unreachable := convertDoctorCheck(doctor.CheckFreshClone(repo))
+	if doctor.FreshCloneDetected(unreachable.Message) {
+		t.Fatalf("Fresh Clone = %q against a server that refuses its login, want it reported unreachable", unreachable.Message)
+	}
+	for _, tc := range []struct {
+		name       string
+		check      doctorCheck
+		wantImport bool
+	}{
+		{name: "server unreachable, skipped", check: unreachable},
+		{name: "fresh clone detected, imported", wantImport: true, check: doctorCheck{
+			Name: "Fresh Clone", Status: statusWarning, Fix: "bd bootstrap",
+			Message: `Fresh clone detected: database "fix_endpoint" not found on server at 127.0.0.1:` + port + ".",
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before := len(fake.Logins())
+			out := captureStdout(t, func() error {
+				applyFixList(repo, []doctorCheck{tc.check})
+				return nil
+			})
+			if imported := len(fake.Logins()) != before; imported != tc.wantImport {
+				t.Errorf("Fresh Clone %q: the import opened the server: %v, want %v\n%s", tc.check.Message, imported, tc.wantImport, out)
+			}
+			if !tc.wantImport && !strings.Contains(out, "Fix summary: 0 fixed, 1 skipped, 0 errors") {
+				t.Errorf("bd doctor --fix does not report the Fresh Clone repair it did not run as skipped:\n%s", out)
+			}
+		})
+	}
+}
+
+// TestDoctorDoltModeListsRemotesOnTheServerItProbes observes, on the wire,
+// that bd doctor's Dolt Mode check (doctor.CheckDoltServerModeMismatch)
+// lists federation remotes on the server its reachability probe reached when
+// a live unix socket and a resolved port name two servers. The probe dials
+// the store's socket, BEADS_DOLT_SERVER_SOCKET else metadata.json's
+// dolt_server_socket, while the open that lists remotes (dolt.New) took its
+// socket from BEADS_DOLT_SERVER_SOCKET alone, so beside metadata.json's
+// socket the check reported that socket's server connected and counted the
+// federation peers of the server at the port (#7874 review).
+//
+// The other federation checks in the same bd doctor run (Dolt Remote
+// Migration, Federation remotesapi, Peer Connectivity, Sync Staleness and
+// Federation Conflicts) open the same server: they still read the server at
+// the port beside metadata.json's socket once Dolt Mode read the socket's
+// (#7874 review).
+func TestDoctorDoltModeListsRemotesOnTheServerItProbes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix socket fixture")
+	}
+	for _, tc := range []struct {
+		name  string
+		inEnv bool // BEADS_DOLT_SERVER_SOCKET, else metadata.json dolt_server_socket
+	}{
+		{name: "BEADS_DOLT_SERVER_SOCKET beside a port", inEnv: true},
+		{name: "metadata.json dolt_server_socket beside a port"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tcp := newFakeMySQLLogin(t)
+			socketServer := newFakeMySQLLoginOn(t, "unix", diagnosticSocketPath(t))
+			socket := socketServer.ln.Addr().String()
+			endpointCredentialsEnv(t, []string{"127.0.0.1"}, tcp.port())
+			t.Setenv("BEADS_DOLT_DATA_DIR", "")
+			repo := t.TempDir()
+			beadsDir := serverModeWorkspaceAt(t, repo)
+			// The check reads the server only for a workspace with a data
+			// directory.
+			if err := os.MkdirAll(filepath.Join(beadsDir, "dolt"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("BEADS_DIR", beadsDir)
+			t.Setenv("BEADS_DOLT_SERVER_PORT", strconv.Itoa(tcp.port()))
+			if tc.inEnv {
+				t.Setenv("BEADS_DOLT_SERVER_SOCKET", socket)
+			} else {
+				cfg, err := configfile.Load(beadsDir)
+				if err != nil || cfg == nil {
+					t.Fatalf("load metadata: %v", err)
+				}
+				cfg.DoltServerSocket = socket
+				if err := cfg.Save(beadsDir); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			// The fakes refuse every login, so each check's open fails once
+			// it has logged in. Dolt Mode's probe only reads the greeting,
+			// so the fakes count its connections and record no login.
+			for _, federation := range []struct {
+				name  string
+				check func(string) doctor.DoctorCheck
+			}{
+				{"Dolt Mode", doctor.CheckDoltServerModeMismatch},
+				{"Dolt Remote Migration", doctor.CheckLegacyCLIRemotes},
+				{"Federation remotesapi", doctor.CheckFederationRemotesAPI},
+				{"Peer Connectivity", doctor.CheckFederationPeerConnectivity},
+				{"Sync Staleness", doctor.CheckFederationSyncStaleness},
+				{"Federation Conflicts", doctor.CheckFederationConflicts},
+			} {
+				loginsBefore, connsBefore := len(socketServer.Logins()), tcp.Conns()
+				check := federation.check(repo)
+				report := fmt.Sprintf("%s: %s %s\n%s", federation.name, check.Status, check.Message, check.Detail)
+				if len(socketServer.Logins()) == loginsBefore {
+					t.Errorf("the %s check never opened %s, the server the Dolt Mode probe reached:\n%s", federation.name, socket, report)
+				}
+				if n := tcp.Conns() - connsBefore; n != 0 {
+					t.Errorf("the %s check made %d connection(s) to the server at port %d; the Dolt Mode probe reached the socket's server %s:\n%s", federation.name, n, tcp.port(), socket, report)
+				}
 			}
 		})
 	}

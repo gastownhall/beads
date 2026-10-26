@@ -50,7 +50,7 @@ type SeveredCloneLocalFK struct {
 }
 
 // ScanSeveredCloneLocalFKs reports which clone-local FKs are missing from the
-// live schema of the server the store dials (openScanDB). Used by
+// live schema of the server its fix writes (openScanDB). Used by
 // CheckCloneLocalFKs in the doctor package.
 func ScanSeveredCloneLocalFKs(path string) ([]SeveredCloneLocalFK, error) {
 	beadsDir, err := resolvedWorkspaceBeadsDir(path)

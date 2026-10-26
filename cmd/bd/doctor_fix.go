@@ -478,7 +478,7 @@ func applyFixList(path string, fixes []doctorCheck) {
 			dolt.CleanStaleCircuitBreakerFiles()
 			fmt.Printf("  %s Cleared stale circuit breaker files\n", ui.RenderPass("✓"))
 		case "Fresh Clone":
-			err = fix.FreshCloneImport(path, Version)
+			err = freshCloneImport(path, check)
 		case "Pending Migrations":
 			err = fixPendingMigrations(path)
 		case "Config Values":
@@ -545,6 +545,20 @@ func applyFixList(path string, fixes []doctorCheck) {
 	if errorCount > 0 {
 		fmt.Println("\nSome fixes failed. Please review the errors above and apply manual fixes as needed.")
 	}
+}
+
+// freshCloneImport is bd doctor --fix's Fresh Clone repair: it imports
+// issues.jsonl (fix.FreshCloneImport) only for a check that found the
+// database missing (doctor.FreshCloneDetected), and otherwise reports the
+// repair skipped. The check also warns when it could not log in to the
+// server, and says that is not a fresh clone; the import ran there all the
+// same, so any server or identity the repair could reach and the check could
+// not had its live rows overwritten with the tracked copy (#7874 review).
+func freshCloneImport(path string, check doctorCheck) error {
+	if !doctor.FreshCloneDetected(check.Message) {
+		return &fix.SkipError{Reason: errors.New("the Fresh Clone check did not find the database missing, so issues.jsonl is not imported over it")}
+	}
+	return fix.FreshCloneImport(path, Version)
 }
 
 func fixPendingMigrations(path string) error {

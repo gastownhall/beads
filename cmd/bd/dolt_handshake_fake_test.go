@@ -22,12 +22,13 @@ type handshakeLogin struct {
 // protocol to see who logs in: it sends a mysql_native_password handshake,
 // records the user and auth response a client answers with, and refuses the
 // login with "Access denied". A connection that reads the handshake and
-// closes (a reachability probe) records nothing.
+// closes (a reachability probe) records no login; Conns counts it.
 type fakeMySQLLogin struct {
 	ln       net.Listener
 	scramble [20]byte
 	mu       sync.Mutex
 	logins   []handshakeLogin
+	conns    int
 }
 
 // newFakeMySQLLogin starts a fakeMySQLLogin on 127.0.0.1, closed with t.
@@ -62,6 +63,14 @@ func (f *fakeMySQLLogin) Logins() []handshakeLogin {
 	return append([]handshakeLogin(nil), f.logins...)
 }
 
+// Conns is how many connections f has accepted so far, a reachability
+// probe's included.
+func (f *fakeMySQLLogin) Conns() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.conns
+}
+
 // PresentsPassword reports whether login's auth response is password's
 // mysql_native_password answer to f's scramble (empty for no password).
 func (f *fakeMySQLLogin) PresentsPassword(login handshakeLogin, password string) bool {
@@ -84,6 +93,9 @@ func (f *fakeMySQLLogin) serve() {
 		if err != nil {
 			return
 		}
+		f.mu.Lock()
+		f.conns++
+		f.mu.Unlock()
 		go f.handle(conn)
 	}
 }

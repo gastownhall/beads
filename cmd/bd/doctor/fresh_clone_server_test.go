@@ -11,6 +11,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
 
@@ -253,10 +254,11 @@ func TestFreshCloneServerUnreachableResult(t *testing.T) {
 }
 
 // TestFreshCloneServerResultsNameTheTransportDialed pins both server-mode
-// Fresh Clone messages to the transport the check dialed. With a live socket
-// beside a resolved port the store dials the socket, and so does the check, so
-// the message names unix:<socket>, not the host:port nothing queried, and the
-// unreachable checklist names the socket setting (#7874 review).
+// Fresh Clone messages to the transport the check dialed. When it dialed a
+// socket, as for a live BEADS_DOLT_SERVER_SOCKET beside a resolved port
+// (freshCloneRepairTransport), the message names unix:<socket>, not the
+// host:port nothing queried, and the unreachable checklist names the socket
+// setting (#7874 review).
 func TestFreshCloneServerResultsNameTheTransportDialed(t *testing.T) {
 	const socket = "/tmp/bd-test/dolt.sock"
 	for name, check := range map[string]DoctorCheck{
@@ -272,6 +274,45 @@ func TestFreshCloneServerResultsNameTheTransportDialed(t *testing.T) {
 	}
 	if fix := freshCloneServerUnreachableResult("beads", "127.0.0.1", 3309, "", nil).Fix; strings.Contains(fix, "dolt_server_socket") {
 		t.Errorf("unreachable fix after a TCP dial names dolt_server_socket: %s", fix)
+	}
+}
+
+// TestFreshCloneDetectedClassifiesEachResult pins which Fresh Clone results
+// bd doctor --fix repairs by importing issues.jsonl (FreshCloneDetected): the
+// ones that found the workspace's database missing, on the server or, outside
+// server mode, on disk. A check that could not log in to the server, or has
+// no address for it, says it is not a fresh clone, and --fix imported over
+// the live database there all the same (#7874 review).
+func TestFreshCloneDetectedClassifiesEachResult(t *testing.T) {
+	for name, tc := range map[string]struct {
+		check DoctorCheck
+		want  bool
+	}{
+		"database missing on the server":    {check: freshCloneServerResult(false, "beads", "127.0.0.1", 3309, "", ""), want: true},
+		"database missing, sync.remote set": {check: freshCloneServerResult(false, "beads", "127.0.0.1", 3309, "", "origin"), want: true},
+		"database exists on the server":     {check: freshCloneServerResult(true, "beads", "127.0.0.1", 3309, "", "")},
+		"server unreachable":                {check: freshCloneServerUnreachableResult("beads", "127.0.0.1", 3309, "", nil)},
+		"no server address":                 {check: freshCloneServerUnresolvedResult("beads", doltserver.Endpoint{Host: "127.0.0.1", AutoStartDisabled: true})},
+	} {
+		if got := FreshCloneDetected(tc.check.Message); got != tc.want {
+			t.Errorf("%s: FreshCloneDetected(%q) = %v, want %v", name, tc.check.Message, got, tc.want)
+		}
+	}
+
+	// Outside server mode the check finds the database missing on disk.
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "issues.jsonl"), []byte(`{"id":"test-1"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("backend: dolt\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if local := CheckFreshClone(tmpDir); local.Status != StatusWarning || !FreshCloneDetected(local.Message) {
+		t.Errorf("local fresh clone: FreshCloneDetected(%q) = false (status %s), want true", local.Message, local.Status)
 	}
 }
 

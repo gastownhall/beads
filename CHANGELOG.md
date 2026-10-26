@@ -1098,33 +1098,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `bd doctor`'s Fresh Clone check, `bd dolt status` and `bd dolt show`'s
   connection test, and `bd doctor`'s read-only Clone-Local FKs check and
   `bd doctor --check=validate`'s Cross-Table Duplicates check reported
-  "N/A" without reading it; they now dial the socket first, as the store
-  does. Fresh Clone and `bd dolt status` name the socket they dialed, even
-  beside a resolved port (`bd dolt status --json` then reports `socket`
-  in place of `host` and `port`), and `bd dolt show` lists the configured
-  socket. For a socket-only server, `bd bootstrap` still stops at its
-  metadata reconcile and writes nothing (it now says so instead of
-  dialing `127.0.0.1:0`), `bd dolt show` and `bd context` still print
-  port 0, and `bd doctor`'s own connection and `bd doctor --fix` still do
-  not use the socket, so the database fixes stay withheld there as
-  before. Beside a resolved port, `bd doctor --fix` runs its SQL fixes
+  "N/A" without reading it; they now dial the socket, as the store does.
+  `bd dolt status` names the socket it dialed, even beside a resolved port
+  (`bd dolt status --json` then reports `socket` in place of `host` and
+  `port`), Fresh Clone names the server it dialed, and `bd dolt show`
+  lists the configured socket. For a socket-only server, `bd bootstrap`
+  still stops at its metadata reconcile and writes nothing (it now says so
+  instead of dialing `127.0.0.1:0`), `bd dolt show` and `bd context` still
+  print port 0, and `bd doctor`'s own connection and `bd doctor --fix`
+  still do not use the socket, so the database fixes stay withheld there
+  as before. Beside a resolved port, `bd doctor --fix` runs its SQL fixes
   over TCP at that port, as before, behind its project-identity check,
   even where the store dials a live socket; its Project Identity and Dolt
   Schema repairs and `bd bootstrap` likewise reconcile `metadata.json`
-  against that port's catalog over TCP. Beside a live socket one
-  `bd doctor` run can therefore read two servers: its own database checks
-  still dial TCP at the resolved port, while Fresh Clone and the
-  Clone-Local FKs and Cross-Table Duplicates scans dial the socket. A SQL
-  fix that does not run, because its server cannot be opened, only a
-  unix socket names it, or its project identity cannot be verified, is
-  now reported as `⚠ Skipped` with the reason and counted in a new
-  `skipped` total of the fix summary, where it printed `✓ Fixed` and
-  counted as fixed; a skip does not count as an error.
+  against that port's catalog over TCP. There Fresh Clone and the
+  Clone-Local FKs and Cross-Table Duplicates checks read the server their
+  `bd doctor --fix` repairs write, so a repair never writes a server its
+  check did not read: TCP at the port, as before, even where
+  `metadata.json` names a live socket the store dials, so they can report
+  on a server `bd list` does not read. Fresh Clone now reads a live
+  `BEADS_DOLT_SERVER_SOCKET` there, which its repair dials too, where it
+  read TCP at the port. It also logs in as its repair does, with the
+  `BEADS_DOLT_CREDENTIAL_COMMAND` token where one is configured (a failing
+  command fails the check), and `bd doctor --fix` imports `issues.jsonl`
+  only for a fresh clone the check found: when the check could not reach
+  the server, that repair is reported skipped, where it imported over the
+  live rows of a database the check never read. The Orphaned Dependencies,
+  Child-Parent Dependencies, Dependency Keys and Blocked State checks now
+  read TCP at the port too, which their repairs write, where they read a
+  live `BEADS_DOLT_SERVER_SOCKET` while their repairs deleted, re-keyed or
+  recomputed rows at the port; each warns when that server cannot be read
+  while the store opens the database, where Orphaned Dependencies and
+  Child-Parent Dependencies reported no database and
+  `bd doctor --check=validate` passed. Like their repairs, they log in as
+  the configured user, never with a `BEADS_DOLT_CREDENTIAL_COMMAND` token,
+  so a gateway that refuses that user now draws the warning, which fails
+  validate. The
+  federation checks of `bd doctor` (Dolt Mode, Dolt Remote Migration,
+  Federation remotesapi, Peer Connectivity, Sync Staleness and Federation
+  Conflicts) read the server `bd list` reads, a live `metadata.json`
+  socket included, where they read TCP at the port, and Dolt Mode lists
+  federation remotes on the server its probe reached. A SQL fix that does
+  not run, because its server
+  cannot be opened, only a unix socket names it, or its project identity
+  cannot be verified, is now reported as `⚠ Skipped` with the reason and
+  counted in a new `skipped` total of the fix summary, where it printed
+  `✓ Fixed` and counted as fixed; a skip does not count as an error.
   `bd doctor`'s Clone-Local FKs and Cross-Table Duplicates checks, and the
-  `bd doctor --fix` repairs that open the same connection, now give up
-  after 5 seconds on a server that accepts the connection but never sends
-  the MySQL greeting, such as a stopped or paused `sql-server`, where they
-  waited forever.
+  `bd doctor --fix` repairs that open their connection the same way, now
+  give up after 5 seconds on a server that accepts the connection but
+  never sends the MySQL greeting, such as a stopped or paused
+  `sql-server`, where they waited forever.
 - The batched bulk readers no longer return an issue's rows twice when the
   same id is requested twice. Since the 200-id batching (#6444), an id that
   appeared in two batches had its comments, labels, dependency records,

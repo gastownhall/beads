@@ -735,6 +735,7 @@ go_test(
         "doctor_fix_gate_wiring_test.go",
         "doctor_fix_order_test.go",
         "doctor_fix_pending_migrations_test.go",
+        "doctor_fix_two_servers_test.go",
         "doctor_health_integration_test.go",
         "doctor_health_smoke_test.go",
         "doctor_health_test.go",

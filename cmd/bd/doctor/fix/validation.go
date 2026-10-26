@@ -306,7 +306,7 @@ func CrossTableDuplicates(path string, verbose bool) error {
 }
 
 // CountCrossTableDuplicates returns the number of IDs present in both the
-// issues and wisps tables, on the server the store dials (openScanDB).
+// issues and wisps tables, on the server its fix writes (openScanDB).
 // Returns 0 and an error if the database is unreachable. Used by
 // CheckCrossTableDuplicates in the doctor package.
 func CountCrossTableDuplicates(path string) (int, error) {
@@ -338,10 +338,24 @@ func openDoltDB(beadsDir string) (*sql.DB, *configfile.Config, error) {
 }
 
 // openDoltScanDB is openDoltDB for a read-only scan: it opens through
-// openScanDB, which dials the store's transport, its live unix socket
-// first, where openFixDB dials TCP.
+// openScanDB, which reads the server openFixDB writes and, where openFixDB
+// refuses a server only a unix socket names, that socket.
 func openDoltScanDB(beadsDir string) (*sql.DB, *configfile.Config, error) {
 	return openDoltDBWith(beadsDir, openScanDB)
+}
+
+// OpenScanDB opens, for a read-only bd doctor check of the workspace at path,
+// the server the check's bd doctor --fix repair writes (openDoltScanDB). The
+// Orphaned Dependencies, Child-Parent Dependencies, Blocked State and
+// Dependency Keys checks read through it, as CountCrossTableDuplicates and
+// ScanSeveredCloneLocalFKs do. The caller closes it.
+func OpenScanDB(path string) (*sql.DB, error) {
+	beadsDir, err := resolvedWorkspaceBeadsDir(path)
+	if err != nil {
+		return nil, err
+	}
+	db, _, err := openDoltScanDB(beadsDir)
+	return db, err
 }
 
 // openDoltDBWith is openDoltDB with open building the connection.

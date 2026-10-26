@@ -1,6 +1,7 @@
 package fix
 
 import (
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -202,5 +203,24 @@ func TestFixConnectionDialsTheEndpointTheStoreDials(t *testing.T) {
 				t.Errorf("fix connection error = %v: it dialed the port file's %s, which no store open dials", err, portFileAddr)
 			}
 		})
+	}
+}
+
+// TestScanConnectionNeverDialsAnUnresolvedPort covers the connection bd
+// doctor's read-only scans open (OpenScanDB, through openScanDB) for a
+// workspace whose server neither a port nor a socket names, as on a fresh
+// clone of a `bd init --server` project before any server runs: it is
+// refused with the store's advice (doltserver.ErrUnresolvedPort), never
+// dialed at 127.0.0.1:0. Six checks read through it; four of them read
+// through the store's open before, which refuses there too.
+func TestScanConnectionNeverDialsAnUnresolvedPort(t *testing.T) {
+	beadsDir, _ := fixEndpointWorkspace(t)
+	db, err := OpenScanDB(filepath.Dir(beadsDir))
+	if err == nil {
+		_ = db.Close()
+		t.Fatal("OpenScanDB connected; neither a port nor a socket names the server")
+	}
+	if !errors.Is(err, doltserver.ErrUnresolvedPort) || strings.Contains(err.Error(), "127.0.0.1:0") {
+		t.Errorf("OpenScanDB error = %v, want the store's unresolved-port refusal and no dial of 127.0.0.1:0", err)
 	}
 }
