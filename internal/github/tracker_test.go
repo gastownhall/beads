@@ -2,9 +2,14 @@ package github
 
 import (
 	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -375,5 +380,156 @@ func TestValidate(t *testing.T) {
 	tr.client = &Client{} // Set client
 	if err := tr.Validate(); err != nil {
 		t.Errorf("Validate() on initialized tracker returned error: %v", err)
+	}
+}
+
+// capturedRequest records a single API call the tracker made.
+type capturedRequest struct {
+	method string
+	path   string
+	body   map[string]interface{}
+}
+
+// newRecordingTracker returns a Tracker whose client points at a test server
+// that records every request and replies with the JSON bodies keyed by
+// "METHOD path". A key whose value is prefixed "!<status> " replies with that
+// HTTP status and the rest of the value as the body. Any other request fails
+// the test.
+func newRecordingTracker(t *testing.T, responses map[string]string) (*Tracker, *[]capturedRequest) {
+	t.Helper()
+	var reqs []capturedRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]interface{}
+		if raw, _ := io.ReadAll(r.Body); len(raw) > 0 {
+			_ = json.Unmarshal(raw, &body)
+		}
+		reqs = append(reqs, capturedRequest{method: r.Method, path: r.URL.Path, body: body})
+		key := r.Method + " " + r.URL.Path
+		resp, ok := responses[key]
+		if !ok {
+			t.Errorf("unexpected request: %s", key)
+			http.Error(w, "unexpected", http.StatusNotFound)
+			return
+		}
+		status := http.StatusOK
+		if strings.HasPrefix(resp, "!") {
+			code, rest, _ := strings.Cut(resp[1:], " ")
+			status, _ = strconv.Atoi(code)
+			resp = rest
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = io.WriteString(w, resp)
+	}))
+	t.Cleanup(srv.Close)
+
+	tr := &Tracker{
+		client: NewClient("token", "owner", "repo").WithBaseURL(srv.URL),
+		config: DefaultMappingConfig(),
+	}
+	return tr, &reqs
+}
+
+const createdIssueURL = "https://github.com/owner/repo/issues/42"
+
+// TestCreateIssue_ClosedCarriesState verifies a closed bead is created and then
+// closed with a follow-up PATCH carrying only state=closed (GitHub's create
+// endpoint has no state field).
+func TestCreateIssue_ClosedCarriesState(t *testing.T) {
+	tr, reqs := newRecordingTracker(t, map[string]string{
+		"POST /repos/owner/repo/issues":     `{"id":100,"number":42,"state":"open","html_url":"` + createdIssueURL + `"}`,
+		"PATCH /repos/owner/repo/issues/42": `{"id":100,"number":42,"state":"closed","html_url":"` + createdIssueURL + `"}`,
+	})
+
+	ti, err := tr.CreateIssue(context.Background(), &types.Issue{
+		ID:        "bd-1",
+		Title:     "done",
+		IssueType: types.TypeTask,
+		Status:    types.StatusClosed,
+	})
+	if err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+
+	if len(*reqs) != 2 ||
+		(*reqs)[0].method != http.MethodPost || (*reqs)[0].path != "/repos/owner/repo/issues" ||
+		(*reqs)[1].method != http.MethodPatch || (*reqs)[1].path != "/repos/owner/repo/issues/42" {
+		t.Fatalf("requests = %+v, want [POST /repos/owner/repo/issues, PATCH /repos/owner/repo/issues/42]", *reqs)
+	}
+	if body := (*reqs)[1].body; len(body) != 1 || body["state"] != "closed" {
+		t.Errorf("close PATCH body = %v, want exactly {\"state\":\"closed\"}", body)
+	}
+	if ti.State != "closed" {
+		t.Errorf("returned State = %v, want closed", ti.State)
+	}
+	if ti.Identifier != "42" {
+		t.Errorf("returned Identifier = %q, want 42", ti.Identifier)
+	}
+	if ti.URL != createdIssueURL {
+		t.Errorf("returned URL = %q, want %q", ti.URL, createdIssueURL)
+	}
+	if len(ti.Warnings) != 0 {
+		t.Errorf("returned Warnings = %q, want none", ti.Warnings)
+	}
+}
+
+// TestCreateIssue_NonClosedSkipsClose verifies a non-closed bead is created
+// with only the POST and no follow-up close. deferred is the interesting case:
+// it gets a status label but its mapped GitHub state stays open.
+func TestCreateIssue_NonClosedSkipsClose(t *testing.T) {
+	for _, status := range []types.Status{types.StatusOpen, types.StatusInProgress, types.StatusBlocked, types.StatusDeferred} {
+		t.Run(string(status), func(t *testing.T) {
+			tr, reqs := newRecordingTracker(t, map[string]string{
+				"POST /repos/owner/repo/issues": `{"id":100,"number":42,"state":"open","html_url":"` + createdIssueURL + `"}`,
+			})
+
+			if _, err := tr.CreateIssue(context.Background(), &types.Issue{
+				ID:        "bd-1",
+				Title:     "todo",
+				IssueType: types.TypeTask,
+				Status:    status,
+			}); err != nil {
+				t.Fatalf("CreateIssue: %v", err)
+			}
+
+			if len(*reqs) != 1 || (*reqs)[0].method != http.MethodPost {
+				t.Errorf("%s bead: requests = %+v, want only the create POST", status, *reqs)
+			}
+		})
+	}
+}
+
+// TestCreateIssue_FailedCloseSurfacesWarning verifies that when the follow-up
+// close fails, CreateIssue still returns the created issue (so the external_ref
+// is stored and no duplicate is made) but records a warning on the returned
+// TrackerIssue so the sync engine can surface it instead of swallowing it.
+func TestCreateIssue_FailedCloseSurfacesWarning(t *testing.T) {
+	tr, _ := newRecordingTracker(t, map[string]string{
+		"POST /repos/owner/repo/issues": `{"id":100,"number":42,"state":"open","html_url":"` + createdIssueURL + `"}`,
+		// 422 is a plain APIError: no backoff retries (5xx) and no rate-limit
+		// classification (403/429).
+		"PATCH /repos/owner/repo/issues/42": `!422 {"message":"Validation Failed"}`,
+	})
+
+	ti, err := tr.CreateIssue(context.Background(), &types.Issue{
+		ID:        "bd-1",
+		Title:     "done",
+		IssueType: types.TypeTask,
+		Status:    types.StatusClosed,
+	})
+	if err != nil {
+		t.Fatalf("CreateIssue should not error on a failed best-effort close: %v", err)
+	}
+	if ti == nil || ti.Identifier != "42" || ti.URL != createdIssueURL {
+		t.Fatalf("expected the created issue to be returned so external_ref is stored, got %+v", ti)
+	}
+	if ti.State != "open" {
+		t.Errorf("returned State = %v, want open", ti.State)
+	}
+	if len(ti.Warnings) != 1 {
+		t.Fatalf("returned Warnings = %q, want exactly one", ti.Warnings)
+	}
+	if !strings.Contains(ti.Warnings[0], "42") || !strings.Contains(ti.Warnings[0], "failed to close") {
+		t.Errorf("warning = %q, want it to name issue 42 and the failed close", ti.Warnings[0])
 	}
 }
