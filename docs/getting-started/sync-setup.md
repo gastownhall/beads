@@ -107,11 +107,6 @@ Commit and push that config file with your normal git workflow. Other clones can
 then run `bd bootstrap` if their database is missing/stale, or `bd dolt pull`
 when they already have the right database.
 
-Values starting with `-` in `sync.remote` or `sync.git-remote` are refused as
-invalid remote URLs: `bd init` returns an error naming the key; `bd bootstrap`
-restores a local backup or `issues.jsonl` when available, otherwise reports a
-blocked plan without contacting the remote.
-
 ## Cloning to a New Computer
 
 When you clone a repo that already has beads data on the remote, a standard `git clone` does **not** fetch `refs/dolt/data`. You need to bootstrap the Dolt database.

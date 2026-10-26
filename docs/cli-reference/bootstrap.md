@@ -21,11 +21,6 @@ Bootstrap auto-detects the right action:
 If sync.remote points at a git repository, bootstrap verifies refs/dolt/data
 before cloning. Bootstrap exits non-zero when it cannot set up a database.
 
-Values starting with - in sync.remote or sync.git-remote are refused as invalid
-remote URLs: bd init returns an error naming the key; bd bootstrap restores a
-local backup or issues.jsonl when available, otherwise reports a blocked plan
-without contacting the remote.
-
 This is the recommended command for:
   • Setting up beads on a fresh clone
   • Recovering after moving to a new machine
