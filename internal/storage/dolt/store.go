@@ -2212,7 +2212,7 @@ func retryOpenProbe(ctx context.Context, network, addr string, timeout, budget t
 		if !notified {
 			notified = true
 			fmt.Fprintf(openRetryNotice, "bd: Dolt server unreachable at %s; retrying for up to %s (%s)\n",
-				addr, budget, config.OpenRetryBudgetKey)
+				remedy.PrintedValue(addr), budget, config.OpenRetryBudgetKey)
 		}
 		timer := time.NewTimer(wait)
 		select {

@@ -1207,3 +1207,52 @@ func TestOpenRetryNoticePrintsOncePerWaitingOpen(t *testing.T) {
 		})
 	}
 }
+
+// The retry loop names the endpoint twice beyond the first probe: in its
+// stderr notice, and in the error a later dial returns, which repeats the
+// address the way the first dial's did. That address comes from
+// metadata.json, which a cloned repository commits, so both must go through
+// the remedy printer exactly as newServerMode's own messages do
+// (TestNewServerModeNamesConfiguredEndpointEscaped). The stubbed dial errors
+// repeat the address, as a real dial error does, so a raw control character
+// in either output can only have come from a missed printer.
+func TestOpenRetryNamesTheEndpointEscaped(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		ctx  func(t *testing.T) context.Context
+	}{
+		{"budget exhausted", func(*testing.T) context.Context { return context.Background() }},
+		{"open canceled mid-retry", func(t *testing.T) context.Context {
+			ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+			t.Cleanup(cancel)
+			return ctx
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("BEADS_TEST_MODE", "1")
+			buf := captureOpenRetryNotice(t)
+			cfg := externalOpenConfig(writeBudgetConfig(t, map[string]string{config.OpenRetryBudgetKey: "2s"}))
+			cfg.ServerHost = hostileEndpoint
+			refused := fmt.Errorf("dial tcp %s: connect: connection refused",
+				net.JoinHostPort(hostileEndpoint, "1"))
+			log := stubOpenRetryDials(t, refused, []error{refused})
+
+			_, err := newServerMode(tc.ctx(t), cfg)
+			if err == nil {
+				t.Fatal("open succeeded with no server at the configured endpoint")
+			}
+			if _, ctxDials := log.counts(); ctxDials == 0 {
+				t.Fatal("no retry dial happened, so this row proves nothing about the retry path")
+			}
+			requireNoRawTerminalControl(t, err.Error())
+			if !strings.Contains(err.Error(), "connection refused") {
+				t.Errorf("the open's error lost the dial failure: %q", err)
+			}
+			notice := buf.String()
+			if !strings.Contains(notice, "retrying for up to") {
+				t.Fatalf("no retry notice printed, so this row proves nothing about it: %q", notice)
+			}
+			requireNoRawTerminalControl(t, notice)
+		})
+	}
+}
