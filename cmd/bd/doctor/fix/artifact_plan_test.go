@@ -67,9 +67,13 @@ func TestPlanArtifacts_DeletesOnlyWithPositiveOwnership(t *testing.T) {
 		{name: "metadata-less sole SQLite database", dir: "sub/.beads", files: map[string]string{"beads.db": sqliteDB, "beads.db-wal": "w", "beads.db-shm": "s"}, owner: ownerOtherBackend, want: map[string]bool{}},
 		// Redirect-only locations: a stub's runtime leftovers go; anything
 		// else it holds, such as what the repository tracks there, stays for
-		// review, and a workspace stays.
+		// review, and a workspace stays. bd's own state files are left over
+		// only beside a redirect bd follows; beside one it ignores, the stub
+		// is what bd opens, and a stub that keeps anything is reported for
+		// review with each leftover a finding of its own.
 		{name: "polecat stub", dir: "polecats/p1/.beads", files: map[string]string{"redirect": "../../mayor/rig/.beads\n", "config.yaml": "c", "README.md": "r", "formulas/x.toml": "f"}, owner: ownerRedirectStub, want: map[string]bool{".": false}},
-		{name: "polecat stub holding bd runtime leftovers", dir: "polecats/p1/.beads", files: map[string]string{"redirect": "../../mayor/rig/.beads\n", ".local_version": "0.62.0\n", "last-touched": "rig-1\n", "daemon.lock": "", "daemon.log": "l", "daemon.pid": "1", "bd.sock": ""}, owner: ownerRedirectStub, want: map[string]bool{".": true}},
+		{name: "polecat stub holding bd runtime leftovers beside a redirect bd follows", dir: "polecats/p1/.beads", files: map[string]string{"redirect": "../../mayor/rig/.beads\n", ".local_version": "0.62.0\n", "last-touched": "rig-1\n", "daemon.lock": "", "daemon.log": "l", "daemon.pid": "1", "bd.sock": ""}, extra: map[string]string{"mayor/rig/.beads/metadata.json": `{"backend":"dolt"}`}, owner: ownerRedirectStub, want: map[string]bool{".": true}},
+		{name: "polecat stub holding bd runtime leftovers beside a redirect bd ignores", dir: "polecats/p1/.beads", files: map[string]string{"redirect": "../../mayor/rig/.beads\n", ".local_version": "0.62.0\n", "last-touched": "rig-1\n", "daemon.lock": "", "daemon.log": "l", "daemon.pid": "1", "bd.sock": ""}, owner: ownerRedirectStub, want: map[string]bool{".": false, "bd.sock": true, "daemon.lock": true, "daemon.log": true, "daemon.pid": true}},
 		// Without a redirect, metadata that configures Dolt, even with one
 		// Dolt setting alone, is a workspace's own (a server-mode workspace
 		// keeps no local store): only an orphaned WAL or SHM goes. Beside a
@@ -484,59 +488,80 @@ func TestMetadataNamesDolt_AnyDoltSettingAlone(t *testing.T) {
 
 // TestPlanArtifacts_StubRuleRemovesOnlyRuntimeLeftovers pins what the stub
 // rule removes from a redirect-only stub: only the runtime files bd leaves in
-// a .beads it opened directly (stubRuntimeLeftovers), each a file bd writes.
-// Everything else a stub holds stays byte-identical and is reported for
-// review: what the repository tracks there (formulas/, config.yaml,
-// README.md, .gitignore), metadata and a config.yaml with no redirect beside
-// them, the audit log, routes, a file bd cannot recognize as a database, and
-// a directory or symlink named like a leftover. The rule removed all of it.
+// a .beads it opened directly (stubRuntimeLeftovers), each a file bd writes,
+// and of those, bd's own state files (.local_version, last-touched) only
+// where bd does not open the stub (stubStateIsLeftover). Everything else a
+// stub holds stays byte-identical and is reported for review: what the
+// repository tracks there (formulas/, config.yaml, README.md, .gitignore),
+// metadata and a config.yaml with no redirect beside them, the audit log,
+// routes, a file bd cannot recognize as a database, and a directory or
+// symlink named like a leftover. The rule removed all of it. A stub holding
+// only leftovers is one finding, safe to delete; a stub that keeps anything
+// is a finding for review, and each leftover in it a finding of its own,
+// safe to delete, so no finding marked safe names a directory holding what
+// must stay.
 func TestPlanArtifacts_StubRuleRemovesOnlyRuntimeLeftovers(t *testing.T) {
 	const redirect = "../../mayor/rig/.beads\n"
 	cases := []struct {
-		name    string
-		dir     string            // the stub, relative to the walked root
-		files   map[string]string // its entries
-		links   map[string]string // symlinks in it: name -> target, relative to the root
-		safe    bool              // the stub finding's SafeDelete
-		removed []string          // the entries the cleanup removes, sorted
-		cleaned bool              // nothing is left to report after the cleanup
+		name     string
+		dir      string            // the stub, relative to the walked root
+		files    map[string]string // its entries
+		links    map[string]string // symlinks in it: name -> target, relative to the root
+		followed bool              // its redirect names a workspace, mayor/rig/.beads, that bd follows
+		removed  []string          // the entries the cleanup removes, sorted
+		cleaned  bool              // it holds only leftovers: one finding, safe to delete, and nothing left to report after the cleanup
 	}{
 		{
-			name:    "only runtime leftovers",
-			dir:     "polecats/p1/.beads",
-			files:   map[string]string{"redirect": redirect, ".gitkeep": "", ".local_version": "0.62.0\n", "last-touched": "rig-1\n", "daemon.lock": "", "daemon.log": "log", "daemon.pid": "1", "bd.sock": ""},
-			safe:    true,
-			removed: []string{".local_version", "bd.sock", "daemon.lock", "daemon.log", "daemon.pid", "last-touched"},
-			cleaned: true,
+			name:     "only runtime leftovers, beside a redirect bd follows",
+			dir:      "polecats/p1/.beads",
+			files:    map[string]string{"redirect": redirect, ".gitkeep": "", ".local_version": "0.62.0\n", "last-touched": "rig-1\n", "daemon.lock": "", "daemon.log": "log", "daemon.pid": "1", "bd.sock": ""},
+			followed: true,
+			removed:  []string{".local_version", "bd.sock", "daemon.lock", "daemon.log", "daemon.pid", "last-touched"},
+			cleaned:  true,
 		},
 		{
-			name: "crew worktree: what the clone tracks, user data and runtime leftovers beside its redirect",
+			// bd opens a stub whose redirect it ignores, and writes its
+			// state files there.
+			name:    "runtime leftovers beside a redirect bd ignores",
+			dir:     "polecats/p1/.beads",
+			files:   map[string]string{"redirect": redirect, ".local_version": "0.62.0\n", "last-touched": "rig-1\n", "daemon.pid": "1"},
+			removed: []string{"daemon.pid"},
+		},
+		{
+			// The clone's own config.yaml makes the stub a workspace bd
+			// opens once its redirect stops resolving, so bd's state files
+			// stay with it.
+			name: "crew worktree: what the clone tracks, user data and runtime leftovers beside a redirect bd follows",
 			dir:  "crew/alice/.beads",
 			files: map[string]string{
 				"redirect": redirect, ".gitignore": "redirect\n", "config.yaml": "issue-prefix: rig\n", "README.md": "# Beads\n",
 				"formulas/beads-release.formula.toml": "formula = \"beads-release\"\n", "interactions.jsonl": "{}\n", "routes.jsonl": "{}\n",
-				"beads.db.enc": "opaque", "mq/a.json": "{}", ".local_version": "0.62.0\n", "last-touched": "rig-1\n",
+				"beads.db.enc": "opaque", "mq/a.json": "{}", ".local_version": "0.62.0\n", "last-touched": "rig-1\n", "daemon.log": "log", "daemon.pid": "1",
 			},
-			safe:    true,
-			removed: []string{".local_version", "last-touched"},
+			followed: true,
+			removed:  []string{"daemon.log", "daemon.pid"},
 		},
 		{
-			name:  "what the clone tracks, no leftovers",
-			dir:   "refinery/rig/.beads",
-			files: map[string]string{"redirect": redirect, configfile.ConfigFileName: `{"backend":"dolt","dolt_mode":"server","dolt_database":"rig"}`, ".gitignore": "redirect\n", "config.yaml": "c", "README.md": "r", "formulas/x.toml": "f"},
+			name:     "what the clone tracks, no leftovers",
+			dir:      "refinery/rig/.beads",
+			files:    map[string]string{"redirect": redirect, configfile.ConfigFileName: `{"backend":"dolt","dolt_mode":"server","dolt_database":"rig"}`, ".gitignore": "redirect\n", "config.yaml": "c", "README.md": "r", "formulas/x.toml": "f"},
+			followed: true,
 		},
 		{
+			// With no redirect bd opens this .beads itself: its
+			// .local_version is the witness that makes bd refuse a pre-1.0
+			// Dolt server workspace.
 			name:    "no redirect: pre-Dolt metadata, a server-mode config.yaml and an export",
 			dir:     ".git/beads-worktrees/main/.beads",
-			files:   map[string]string{configfile.ConfigFileName: `{"database":"beads.db","jsonl_export":"issues.jsonl"}`, "config.yaml": "dolt:\n  mode: server\n", "README.md": "r", "issues.jsonl": "{}\n", ".gitignore": "*.db\n", ".local_version": "0.62.0\n"},
-			safe:    true,
-			removed: []string{".local_version"},
+			files:   map[string]string{configfile.ConfigFileName: `{"database":"beads.db","jsonl_export":"issues.jsonl"}`, "config.yaml": "dolt:\n  mode: server\n", "README.md": "r", "issues.jsonl": "{}\n", ".gitignore": "*.db\n", ".local_version": "0.62.0\n", "daemon.log": "log"},
+			removed: []string{"daemon.log"},
 		},
 		{
-			name:  "a directory and a symlink named like leftovers",
-			dir:   "polecats/p2/.beads",
-			files: map[string]string{"redirect": redirect, "last-touched/notes.txt": "mine"},
-			links: map[string]string{".local_version": "elsewhere/version"},
+			name:     "a directory and a symlink named like leftovers",
+			dir:      "polecats/p2/.beads",
+			files:    map[string]string{"redirect": redirect, "last-touched/notes.txt": "mine"},
+			links:    map[string]string{".local_version": "elsewhere/version"},
+			followed: true,
 		},
 	}
 	for _, tc := range cases {
@@ -544,6 +569,9 @@ func TestPlanArtifacts_StubRuleRemovesOnlyRuntimeLeftovers(t *testing.T) {
 			root := t.TempDir()
 			beadsDir := filepath.Join(root, filepath.FromSlash(tc.dir))
 			writeBeadsTree(t, beadsDir, tc.files)
+			if tc.followed {
+				writeBeadsTree(t, root, map[string]string{"mayor/rig/.beads/metadata.json": `{"backend":"dolt"}`})
+			}
 			if len(tc.links) > 0 {
 				if runtime.GOOS == "windows" {
 					t.Skip("symlinks need privileges on Windows")
@@ -561,20 +589,26 @@ func TestPlanArtifacts_StubRuleRemovesOnlyRuntimeLeftovers(t *testing.T) {
 				t.Fatalf("classifyBeadsDir owner = %d, want ownerRedirectStub", got)
 			}
 			findings, _ := PlanArtifacts(beadsDir)
-			if len(findings) != 1 || findings[0].Path != beadsDir {
-				t.Fatalf("PlanArtifacts = %+v, want one finding for %s", findings, beadsDir)
-			}
+			var stub []PlannedArtifact
 			var removed []string
-			for _, path := range findings[0].Remove {
-				rel, err := filepath.Rel(beadsDir, path)
-				if err != nil {
-					t.Fatal(err)
+			for _, f := range findings {
+				switch {
+				case f.Path == beadsDir:
+					stub = append(stub, f)
+				case !f.SafeDelete || filepath.Dir(f.Path) != beadsDir || !reflect.DeepEqual(f.Remove, []string{f.Path}):
+					t.Fatalf("PlanArtifacts reported %+v; beside the stub's own finding want only leftovers in it, each safe to delete and removing just itself", f)
 				}
-				removed = append(removed, filepath.ToSlash(rel))
+				for _, path := range f.Remove {
+					rel, err := filepath.Rel(beadsDir, path)
+					if err != nil {
+						t.Fatal(err)
+					}
+					removed = append(removed, filepath.ToSlash(rel))
+				}
 			}
 			sort.Strings(removed)
-			if findings[0].SafeDelete != tc.safe || !reflect.DeepEqual(removed, tc.removed) {
-				t.Fatalf("stub finding: SafeDelete %v, removes %q (%q); want SafeDelete %v, removes %q", findings[0].SafeDelete, removed, findings[0].Description, tc.safe, tc.removed)
+			if len(stub) != 1 || stub[0].SafeDelete != tc.cleaned || (tc.cleaned && len(findings) != 1) || !reflect.DeepEqual(removed, tc.removed) {
+				t.Fatalf("PlanArtifacts = %+v\nwant one finding for %s, safe to delete %v (the only finding if so), and removals %q (got %q)", findings, beadsDir, tc.cleaned, tc.removed, removed)
 			}
 
 			if err := ClassicArtifacts(root, io.Discard); err != nil {
@@ -597,6 +631,51 @@ func TestPlanArtifacts_StubRuleRemovesOnlyRuntimeLeftovers(t *testing.T) {
 				t.Fatalf("PlanArtifacts after the cleanup = %+v, want nothing left to report", findings)
 			case !tc.cleaned && (len(findings) != 1 || findings[0].SafeDelete || len(findings[0].Remove) != 0):
 				t.Fatalf("PlanArtifacts after the cleanup = %+v, want one finding, for review", findings)
+			}
+		})
+	}
+}
+
+// TestStubStateIsLeftover_OnlyWhereBdDoesNotOpenTheStub pins when bd's own
+// state files in a stub (.local_version, last-touched) are left over: only
+// beside a redirect beads.FollowRedirect honors, one naming a directory that
+// discovery treats as a workspace, and only while the stub holds no
+// configuration of its own, which makes it a workspace bd opens once the
+// redirect stops resolving. Anywhere else bd opens the stub and writes them
+// there, and .local_version is the witness its legacy-upgrade guard reads.
+func TestStubStateIsLeftover_OnlyWhereBdDoesNotOpenTheStub(t *testing.T) {
+	const redirect = "../../mayor/rig/.beads\n"
+	workspace := map[string]string{"mayor/rig/.beads/metadata.json": `{"backend":"dolt"}`}
+	cases := []struct {
+		name  string
+		files map[string]string // the stub's entries beside its .local_version
+		extra map[string]string // other paths under the root; the redirect names mayor/rig/.beads
+		want  bool
+	}{
+		{name: "redirect to a workspace with metadata", files: map[string]string{"redirect": redirect}, extra: workspace, want: true},
+		{name: "redirect to a workspace configured by config.yaml alone", files: map[string]string{"redirect": redirect}, extra: map[string]string{"mayor/rig/.beads/config.yaml": "dolt:\n  mode: server\n"}, want: true},
+		{name: "redirect to a Dolt store", files: map[string]string{"redirect": redirect}, extra: map[string]string{"mayor/rig/.beads/dolt/": ""}, want: true},
+		{name: "redirect after a comment", files: map[string]string{"redirect": "# the rig's database\n" + redirect}, extra: workspace, want: true},
+		{name: "no redirect", files: map[string]string{}, extra: workspace},
+		{name: "redirect to a missing directory", files: map[string]string{"redirect": redirect}},
+		{name: "redirect to a directory that is not a workspace", files: map[string]string{"redirect": redirect}, extra: map[string]string{"mayor/rig/.beads/README.md": "r"}},
+		{name: "redirect to a file", files: map[string]string{"redirect": redirect}, extra: map[string]string{"mayor/rig/.beads": "not a directory"}},
+		{name: "the stub's own config.yaml", files: map[string]string{"redirect": redirect, "config.yaml": "issue-prefix: rig\n"}, extra: workspace},
+		{name: "the stub's own metadata", files: map[string]string{"redirect": redirect, configfile.ConfigFileName: `{"dolt_mode":"server","dolt_database":"lola"}`}, extra: workspace},
+		{name: "the stub's own legacy config.json", files: map[string]string{"redirect": redirect, configfile.LegacyConfigFileName: `{"dolt_database":"lola"}`}, extra: workspace},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			beadsDir := filepath.Join(root, "polecats", "p1", ".beads")
+			writeBeadsTree(t, beadsDir, mergeTree(tc.files, map[string]string{".local_version": "0.62.0\n"}))
+			writeBeadsTree(t, root, tc.extra)
+			entries, err := os.ReadDir(beadsDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := stubStateIsLeftover(beadsDir, entries); got != tc.want {
+				t.Errorf("stubStateIsLeftover = %v, want %v", got, tc.want)
 			}
 		})
 	}

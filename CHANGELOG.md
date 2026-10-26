@@ -1016,12 +1016,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or `config.yaml` with no `redirect` beside it, an `mq/` directory, and any
   file bd cannot recognize as a database, such as an encrypted
   `beads.db.enc`. The cleanup now removes from a stub only bd's own runtime
-  leftovers, each as bd writes it: `.local_version`, `last-touched`, and the
-  `daemon.lock`, `daemon.log`, `daemon.pid` and `bd.sock` of bd's former
-  daemon. Everything else a stub holds, a SQLite WAL or SHM whose database
-  is gone included, stays and is reported for manual review, and a stub
-  holding no runtime leftover no longer makes the check offer
-  `bd doctor --fix`.
+  leftovers, each as bd writes it: the `daemon.lock`, `daemon.log`,
+  `daemon.pid` and `bd.sock` of bd's former daemon, and `.local_version`
+  and `last-touched` only beside a `redirect` bd follows, in a stub with no
+  `config.yaml`, `metadata.json` or `config.json` of its own. Anywhere else
+  bd opens the stub itself, and its `.local_version` is the witness that
+  makes bd refuse to open a Dolt server workspace from bd 0.55 to 0.62.
+  Everything else a stub holds, a SQLite WAL or SHM whose database is gone
+  included, stays and is reported for manual review. The check reports such
+  a stub for review and each runtime leftover in it as a finding of its own,
+  so `--json` no longer marks a `.beads` that holds files to keep
+  `safe_delete`, and a stub holding no runtime leftover no longer makes the
+  check offer `bd doctor --fix`.
 - `bd doctor --check=artifacts --clean --json` prints only its JSON document
   on stdout. The cleanup's progress lines (each removal, each finding kept
   for review, and the summary) were printed on stdout ahead of the document,

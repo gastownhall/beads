@@ -26,10 +26,13 @@ import (
 // server-mode) that mayor/rig/.beads redirects to, and redirect-only stubs
 // holding what is not a bd runtime leftover: an orchestrator worktree's
 // tracked formulas/, config.yaml, README.md and .gitignore beside its
-// redirect, the audit log, routes and an encrypted database, and a
-// server-mode config.yaml with no redirect. Each must stay byte-identical,
-// while what the scan reports as safe to delete beside them (an orphaned WAL
-// in a workspace on Dolt, a stub's runtime leftovers) is still removed.
+// redirect, the audit log, routes and an encrypted database, a server-mode
+// config.yaml with no redirect beside the .local_version witness of a pre-1.0
+// server workspace, and bd's state files beside a redirect bd ignores. Each
+// must stay byte-identical, and bd must still refuse to open that legacy
+// server workspace, while what the scan reports as safe to delete beside
+// them (an orphaned WAL in a workspace on Dolt, a stub's runtime leftovers)
+// is still removed.
 func TestDoctorCleanupEntryPointsDeleteOnlyWhatTheyOwn(t *testing.T) {
 	const sqliteDB = "SQLite format 3\x00rest"
 	protected := map[string]map[string]string{
@@ -71,10 +74,14 @@ func TestDoctorCleanupEntryPointsDeleteOnlyWhatTheyOwn(t *testing.T) {
 		// An orchestrator worktree of a repository that tracks .beads files
 		// keeps them beside the redirect it writes, and a stub with no
 		// redirect may be a server-mode workspace configured by config.yaml
-		// alone. None of it is a bd runtime leftover.
-		"crew/ivy/.beads":    {"redirect": "../../mayor/rig/.beads\n", ".gitignore": "redirect\n", "config.yaml": "issue-prefix: rig\n", "README.md": "# Beads\n", "formulas/beads-release.formula.toml": "formula = \"beads-release\"\n", "interactions.jsonl": "{}\n", "routes.jsonl": "{}\n", "beads.db.enc": "opaque", "mq/a.json": "{}"},
-		"crew/kim/.beads":    {"config.yaml": "dolt:\n  mode: server\n  host: db.example.com\n", "interactions.jsonl": "{}\n"},
-		"polecats/p8/.beads": {"redirect": "../../mayor/rig/.beads\n", "last-touched/notes.txt": "mine"},
+		// alone, whose .local_version is the witness that makes bd refuse a
+		// pre-1.0 server workspace. bd opens a stub whose redirect it
+		// ignores, so its state files are not leftovers either. None of it
+		// is a bd runtime leftover.
+		"crew/ivy/.beads":     {"redirect": "../../mayor/rig/.beads\n", ".gitignore": "redirect\n", "config.yaml": "issue-prefix: rig\n", "README.md": "# Beads\n", "formulas/beads-release.formula.toml": "formula = \"beads-release\"\n", "interactions.jsonl": "{}\n", "routes.jsonl": "{}\n", "beads.db.enc": "opaque", "mq/a.json": "{}"},
+		"crew/kim/.beads":     {"config.yaml": "dolt:\n  mode: server\n  host: db.example.com\n", "interactions.jsonl": "{}\n", ".local_version": "0.62.0\n"},
+		"polecats/p8/.beads":  {"redirect": "../../mayor/rig/.beads\n", "last-touched/notes.txt": "mine"},
+		"polecats/p11/.beads": {"redirect": "../../nowhere/.beads\n", ".local_version": "0.62.0\n", "last-touched": "rig-1\n"},
 	}
 	entryPoints := []struct {
 		name string
@@ -114,13 +121,16 @@ func TestDoctorCleanupEntryPointsDeleteOnlyWhatTheyOwn(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			// A stub holding only bd's runtime leftovers loses them.
+			// A stub holding only bd's runtime leftovers, beside a redirect
+			// bd follows, loses them.
 			leftovers := filepath.Join(root, "polecats", "p10", ".beads")
-			writeTreeForDoctorTest(t, leftovers, map[string]string{"redirect": "../../mayor/rig/.beads\n", ".local_version": "0.62.0\n", "last-touched": "rig-1\n", "daemon.pid": "1"})
+			writeTreeForDoctorTest(t, leftovers, map[string]string{"redirect": "../../rig/.beads\n", ".local_version": "0.62.0\n", "last-touched": "rig-1\n", "daemon.pid": "1"})
 			before := map[string]map[string]string{}
 			for dir := range protected {
 				before[dir] = snapshotTreeForDoctorTest(t, filepath.Join(root, dir))
 			}
+			legacyServer := filepath.Join(root, "crew", "kim", ".beads")
+			requireLegacyServerRefusal(t, legacyServer, "before the cleanup")
 
 			entry.run(t, root)
 
@@ -132,9 +142,10 @@ func TestDoctorCleanupEntryPointsDeleteOnlyWhatTheyOwn(t *testing.T) {
 			if _, err := os.Stat(rootWAL); !os.IsNotExist(err) {
 				t.Errorf("%s left the orphaned WAL it reports as safe to delete (stat err %v)", entry.name, err)
 			}
-			if got, want := snapshotTreeForDoctorTest(t, leftovers), map[string]string{".": "/", "redirect": "../../mayor/rig/.beads\n"}; !reflect.DeepEqual(got, want) {
+			if got, want := snapshotTreeForDoctorTest(t, leftovers), map[string]string{".": "/", "redirect": "../../rig/.beads\n"}; !reflect.DeepEqual(got, want) {
 				t.Errorf("%s left the stub's runtime leftovers it reports as safe to delete: %q, want %q", entry.name, got, want)
 			}
+			requireLegacyServerRefusal(t, legacyServer, "after the cleanup")
 		})
 	}
 
@@ -166,6 +177,20 @@ func TestDoctorCleanupEntryPointsDeleteOnlyWhatTheyOwn(t *testing.T) {
 		want := map[string]string{".": "/", "notes.txt": "mine", "sub": "/", "sub/keep.dat": "d"}
 		if got := snapshotTreeForDoctorTest(t, filepath.Join(beadsDir, "mq")); !reflect.DeepEqual(got, want) {
 			t.Fatalf("Legacy MQ Files fix left .beads/mq as\n %q\nwant only the reported *.json removed: %q", got, want)
+		}
+	})
+}
+
+// requireLegacyServerRefusal checks that guardLegacyUpgradeWorkspace refuses
+// beadsDir as a legacy Dolt server workspace. It runs in a subtest, so the
+// workspace config and environment it binds do not outlive the check.
+func requireLegacyServerRefusal(t *testing.T, beadsDir, when string) {
+	t.Helper()
+	t.Run("legacy server refused "+when, func(t *testing.T) {
+		captureLegacyUpgradeWarnings(t)
+		bindSelectedWorkspaceConfig(t, beadsDir)
+		if err := guardLegacyUpgradeWorkspace(beadsDir); !isLegacyUpgradeRefusal(err) {
+			t.Errorf("guardLegacyUpgradeWorkspace(%s) = %v, want the legacy server workspace refusal", beadsDir, err)
 		}
 	})
 }

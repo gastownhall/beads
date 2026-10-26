@@ -89,19 +89,25 @@ func TestScanForArtifacts_CruftBeadsDir(t *testing.T) {
 
 	// Add a runtime leftover, which is safe to delete, beside files that
 	// are not (a database would make it a workspace)
-	writeArtifactTree(t, beadsDir, map[string]string{".local_version": "0.62.0\n", "config.yaml": "data", "issues.jsonl": "data"})
+	writeArtifactTree(t, beadsDir, map[string]string{"daemon.log": "log", "config.yaml": "data", "issues.jsonl": "data"})
 
 	report, err := ScanForArtifacts(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if len(report.CruftBeadsDirs) != 1 {
-		t.Errorf("expected 1 cruft beads dir, got %d", len(report.CruftBeadsDirs))
+	// The directory keeps files that must stay, so it is reported for
+	// review, not as safe to delete; the leftover in it is a finding of its
+	// own, safe to delete.
+	want := []ArtifactFinding{
+		{Path: beadsDir, Type: fix.ArtifactCruft, Description: "should be redirect-only but contains files the stub cleanup does not remove: config.yaml, issues.jsonl; review manually"},
+		{Path: filepath.Join(beadsDir, "daemon.log"), Type: fix.ArtifactCruft, Description: "bd runtime leftover in a redirect-only .beads", SafeDelete: true},
 	}
-
-	if len(report.CruftBeadsDirs) > 0 && !report.CruftBeadsDirs[0].SafeDelete {
-		t.Error("cruft beads dir with a runtime leftover beside its redirect should be safe to delete")
+	if !reflect.DeepEqual(report.CruftBeadsDirs, want) {
+		t.Errorf("cruft findings = %+v, want %+v", report.CruftBeadsDirs, want)
+	}
+	if report.SafeDeleteCount != 1 {
+		t.Errorf("SafeDeleteCount = %d, want 1", report.SafeDeleteCount)
 	}
 }
 
@@ -530,14 +536,14 @@ func TestScanForArtifacts_MetadataAlongsideRedirectIsNotCruft(t *testing.T) {
 	}{
 		{
 			name:  "metadata.json with redirect",
-			files: map[string]string{"redirect": redirect, configfile.ConfigFileName: metadata, "last-touched": "rig-1\n"},
-			want:  ArtifactFinding{Description: "should be redirect-only but contains: last-touched", SafeDelete: true},
+			files: map[string]string{"redirect": redirect, configfile.ConfigFileName: metadata, "daemon.pid": "1"},
+			want:  ArtifactFinding{Description: "should be redirect-only but contains: daemon.pid", SafeDelete: true},
 			after: map[string]string{".": "/", "redirect": redirect, configfile.ConfigFileName: metadata},
 		},
 		{
 			name:  "legacy config.json with redirect",
-			files: map[string]string{"redirect": redirect, "config.json": metadata, "last-touched": "rig-1\n"},
-			want:  ArtifactFinding{Description: "should be redirect-only but contains: last-touched", SafeDelete: true},
+			files: map[string]string{"redirect": redirect, "config.json": metadata, "daemon.pid": "1"},
+			want:  ArtifactFinding{Description: "should be redirect-only but contains: daemon.pid", SafeDelete: true},
 			after: map[string]string{".": "/", "redirect": redirect, "config.json": metadata},
 		},
 		{
@@ -777,8 +783,11 @@ func TestCheckClassicArtifacts_OffersFixOnlyWhenSomethingIsSafe(t *testing.T) {
 		{name: "orphaned WAL on Dolt", files: map[string]string{configfile.ConfigFileName: `{"backend":"dolt"}`, "beads.db-wal": "w"}, wantFix: true},
 		{name: "database on Dolt", files: map[string]string{configfile.ConfigFileName: `{"backend":"dolt"}`, "beads.db": "d", "beads.db-wal": "w"}},
 		{name: "backend undetermined", files: map[string]string{"beads.db-wal": "w"}},
-		{name: "stub holding a runtime leftover", dir: "crew/alice/.beads", files: map[string]string{"redirect": "../../mayor/rig/.beads\n", ".local_version": "0.62.0\n", "README.md": "r"}, wantFix: true},
+		{name: "stub holding a runtime leftover", dir: "crew/alice/.beads", files: map[string]string{"redirect": "../../mayor/rig/.beads\n", "daemon.pid": "1", "README.md": "r"}, wantFix: true},
 		{name: "stub holding only what is not a runtime leftover", dir: "crew/alice/.beads", files: map[string]string{"redirect": "../../mayor/rig/.beads\n", "config.yaml": "c", "formulas/x.toml": "f"}},
+		// bd opens a stub whose redirect it ignores, so its state files are
+		// not leftovers.
+		{name: "stub holding bd's state files beside a redirect bd ignores", dir: "crew/alice/.beads", files: map[string]string{"redirect": "../../mayor/rig/.beads\n", ".local_version": "0.62.0\n", "last-touched": "rig-1\n"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

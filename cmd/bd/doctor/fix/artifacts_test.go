@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"slices"
 	"strings"
 	"testing"
 
@@ -130,10 +129,11 @@ func TestClassicArtifacts_CleansCruftBeadsDir(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Add redirect (expected)
+	// Add redirect (expected), to a workspace bd follows it to
 	if err := os.WriteFile(filepath.Join(beadsDir, "redirect"), []byte("../../mayor/rig/.beads"), 0644); err != nil {
 		t.Fatal(err)
 	}
+	writeBeadsTree(t, filepath.Join(dir, "mayor", "rig", ".beads"), map[string]string{"metadata.json": doltMetadata})
 
 	// Add .gitkeep (should be preserved)
 	if err := os.WriteFile(filepath.Join(beadsDir, ".gitkeep"), []byte{}, 0644); err != nil {
@@ -184,10 +184,10 @@ func TestClassicArtifacts_PreservesMetadataJSONAlongsideRedirect(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"dolt_mode":"server","dolt_database":"lola"}`), 0644); err != nil {
 		t.Fatal(err)
 	}
-	// Still remove a runtime leftover in the same pass.
-	if err := os.WriteFile(filepath.Join(beadsDir, "last-touched"), []byte("rig-1\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
+	// Still remove a runtime leftover in the same pass. bd's own state
+	// files stay: the stub's metadata makes it a workspace bd opens once
+	// the redirect stops resolving.
+	writeBeadsTree(t, beadsDir, map[string]string{"daemon.pid": "1", "last-touched": "rig-1\n"})
 
 	if err := ClassicArtifacts(dir, io.Discard); err != nil {
 		t.Fatalf("expected no error, got: %v", err)
@@ -199,8 +199,11 @@ func TestClassicArtifacts_PreservesMetadataJSONAlongsideRedirect(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(beadsDir, "metadata.json")); os.IsNotExist(err) {
 		t.Error("metadata.json should NOT have been removed while a redirect is present")
 	}
-	if _, err := os.Stat(filepath.Join(beadsDir, "last-touched")); !os.IsNotExist(err) {
-		t.Error("last-touched should have been removed")
+	if _, err := os.Stat(filepath.Join(beadsDir, "last-touched")); err != nil {
+		t.Errorf("last-touched should NOT have been removed beside the stub's own metadata: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(beadsDir, "daemon.pid")); !os.IsNotExist(err) {
+		t.Error("daemon.pid should have been removed")
 	}
 }
 
@@ -210,7 +213,9 @@ func TestClassicArtifacts_CleansCruftWithoutRedirectFile(t *testing.T) {
 	// Previously, the fix required both isRedirectExpected AND hasRedirect.
 	// The other files (config.yaml, metadata.json, README.md, issues.jsonl,
 	// .gitignore) are what a checkout tracks there, not bd's leftovers, and
-	// stay.
+	// stay. So does .local_version: with no redirect bd opens this .beads
+	// itself, and it is the witness that makes bd refuse a pre-1.0 Dolt
+	// server workspace.
 	dir := t.TempDir()
 
 	// Simulate .git/beads-worktrees/master/.beads/ (redirect-expected location)
@@ -220,7 +225,7 @@ func TestClassicArtifacts_CleansCruftWithoutRedirectFile(t *testing.T) {
 	}
 
 	// Add typical stale files (NO redirect file present)
-	cruftFiles := []string{"config.yaml", "metadata.json", "README.md", "issues.jsonl", ".gitignore", ".local_version"}
+	cruftFiles := []string{"config.yaml", "metadata.json", "README.md", "issues.jsonl", ".gitignore", ".local_version", "daemon.log"}
 	for _, name := range cruftFiles {
 		content := "stale"
 		if name == "metadata.json" {
@@ -239,10 +244,10 @@ func TestClassicArtifacts_CleansCruftWithoutRedirectFile(t *testing.T) {
 		t.Errorf("expected no error, got: %v", err)
 	}
 
-	// Only the runtime leftover is removed
+	// Only the former daemon's leftover is removed
 	for _, name := range cruftFiles {
 		_, err := os.Stat(filepath.Join(worktreeBeads, name))
-		if name == ".local_version" {
+		if name == "daemon.log" {
 			if !os.IsNotExist(err) {
 				t.Errorf("%s should have been removed (runtime leftover in redirect-expected dir without redirect file)", name)
 			}
@@ -440,7 +445,7 @@ func TestClassicArtifacts_PreservesLegacyConfigJSONAlongsideRedirect(t *testing.
 	}{
 		{
 			name:  "with redirect",
-			files: map[string]string{"redirect": "../../mayor/rig/.beads", "config.json": legacy, "last-touched": "rig-1\n", "extra.txt": "mine"},
+			files: map[string]string{"redirect": "../../mayor/rig/.beads", "config.json": legacy, "daemon.pid": "1", "extra.txt": "mine"},
 			want:  map[string]string{".": "/", "redirect": "../../mayor/rig/.beads", "config.json": legacy, "extra.txt": "mine"},
 		},
 		{
@@ -543,8 +548,10 @@ func TestClassicArtifacts_LeavesOtherBackendsSQLiteFiles(t *testing.T) {
 // worktree of a repository that tracks .beads files holds them beside the
 // redirect it writes, and the cleanup deleted every one of them (and an
 // uncommitted edit with it), so git status showed the clone's own files
-// deleted. Now it removes only the runtime leftovers bd's .gitignore keeps
-// out of git, and the worktree's status is what it was.
+// deleted. Now it removes only runtime leftovers bd's .gitignore keeps out
+// of git (here the former daemon's pid file: beside the clone's own
+// config.yaml bd's state files stay too), and the worktree's status is what
+// it was.
 func TestClassicArtifacts_KeepsWhatGitTracksInAStub(t *testing.T) {
 	root := t.TempDir()
 	clone := filepath.Join(root, "crew", "alice")
@@ -568,7 +575,7 @@ func TestClassicArtifacts_KeepsWhatGitTracksInAStub(t *testing.T) {
 	}
 	beadsDir := filepath.Join(clone, ".beads")
 	writeBeadsTree(t, beadsDir, map[string]string{
-		".gitignore":                          "redirect\n.local_version\nlast-touched\n",
+		".gitignore":                          "redirect\n.local_version\nlast-touched\ndaemon.pid\n",
 		"config.yaml":                         "issue-prefix: rig\n",
 		"README.md":                           "# Beads\n",
 		"formulas/beads-release.formula.toml": "formula = \"beads-release\"\n",
@@ -579,13 +586,14 @@ func TestClassicArtifacts_KeepsWhatGitTracksInAStub(t *testing.T) {
 		"redirect":       "../../mayor/rig/.beads\n",
 		".local_version": "0.62.0\n",
 		"last-touched":   "rig-1\n",
+		"daemon.pid":     "1",
 		"config.yaml":    "issue-prefix: rig\n# uncommitted edit\n",
 	})
 	status := git("status", "--porcelain")
-	tracked := map[string]string{}
+	kept := map[string]string{}
 	for rel, content := range snapshotBeadsTree(t, beadsDir) {
-		if !slices.Contains([]string{"redirect", ".local_version", "last-touched"}, rel) {
-			tracked[rel] = content
+		if rel != "daemon.pid" {
+			kept[rel] = content
 		}
 	}
 
@@ -595,11 +603,7 @@ func TestClassicArtifacts_KeepsWhatGitTracksInAStub(t *testing.T) {
 	if got := git("status", "--porcelain"); got != status {
 		t.Fatalf("git status after the cleanup:\n%s\nwant it unchanged:\n%s", got, status)
 	}
-	want := map[string]string{"redirect": "../../mayor/rig/.beads\n"}
-	for rel, content := range tracked {
-		want[rel] = content
-	}
-	if got := snapshotBeadsTree(t, beadsDir); !reflect.DeepEqual(got, want) {
-		t.Fatalf("ClassicArtifacts left %s as\n %q\nwant the tracked files and the redirect, without the runtime leftovers:\n %q", beadsDir, got, want)
+	if got := snapshotBeadsTree(t, beadsDir); !reflect.DeepEqual(got, kept) {
+		t.Fatalf("ClassicArtifacts left %s as\n %q\nwant everything but the daemon's leftover:\n %q", beadsDir, got, kept)
 	}
 }
