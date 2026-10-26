@@ -127,8 +127,8 @@ func outputDuplicates(duplicateGroups [][]*types.Issue, refCounts map[string]int
 			}
 		}
 		cmd := fmt.Sprintf("# Duplicate: %s (same content as %s)\n# Suggested action: %s",
-			strings.Join(sources, " "),
-			target.ID,
+			printedIssueIDs(sources),
+			printedIssueID(target.ID),
 			duplicateMergeCommand(sources, target.ID))
 		mergeCommands = append(mergeCommands, cmd)
 	}
@@ -147,9 +147,13 @@ func outputDuplicates(duplicateGroups [][]*types.Issue, refCounts map[string]int
 		return outputJSON(output)
 	}
 	fmt.Printf("%s Found %d duplicate group(s):\n\n", ui.RenderWarn("🔍"), len(duplicateGroups))
+	// Each value below is read from the store: the IDs are spelled by
+	// printedIssueID and the title and status by remedy.PrintedValue, so none
+	// can redraw a Suggested command, and no part of an ID runs when the
+	// lines around one are pasted with it.
 	for i, group := range duplicateGroups {
 		target := chooseMergeTarget(group, refCounts, structuralScores)
-		fmt.Printf("%s Group %d: %s\n", ui.RenderAccent("━━"), i+1, group[0].Title)
+		fmt.Printf("%s Group %d: %s\n", ui.RenderAccent("━━"), i+1, remedy.PrintedValue(group[0].Title))
 		for _, issue := range group {
 			refs := refCounts[issue.ID]
 			weight := 0
@@ -161,7 +165,7 @@ func outputDuplicates(duplicateGroups [][]*types.Issue, refCounts map[string]int
 				marker = ui.RenderPass("→ ")
 			}
 			fmt.Printf("%s%s (%s, P%d, weight=%d, %d refs)\n",
-				marker, issue.ID, issue.Status, issue.Priority, weight, refs)
+				marker, printedIssueID(issue.ID), remedy.PrintedValue(string(issue.Status)), issue.Priority, weight, refs)
 		}
 		sources := make([]string, 0, len(group)-1)
 		for _, issue := range group {
@@ -169,7 +173,7 @@ func outputDuplicates(duplicateGroups [][]*types.Issue, refCounts map[string]int
 				sources = append(sources, issue.ID)
 			}
 		}
-		fmt.Printf("  %s Duplicate: %s (same content as %s)\n", ui.RenderAccent("Note:"), strings.Join(sources, " "), target.ID)
+		fmt.Printf("  %s Duplicate: %s (same content as %s)\n", ui.RenderAccent("Note:"), printedIssueIDs(sources), printedIssueID(target.ID))
 		fmt.Printf("  %s %s\n\n", ui.RenderAccent("Suggested:"), duplicateMergeCommand(sources, target.ID))
 	}
 	if autoMerge {
@@ -204,6 +208,33 @@ func duplicateMergeCommand(sources []string, target string) string {
 	targetArg, note := remedy.CommandArg(runtime.GOOS, target, "<target-id>")
 	ids := strings.Join(args, " ")
 	return fmt.Sprintf("bd close %s && bd dep add %s %s --type related%s", ids, ids, targetArg, notes+note)
+}
+
+// printedIssueID spells an issue ID read from the store as a hint names it
+// on the lines around the command it suggests, which a user can paste with
+// the command: as it is when it is a plain word (remedy.IsPlainWord), as an
+// ID bd mints is, and otherwise escaped (remedy.EscapedValue), so no part of
+// it runs when those lines are pasted into a shell, a line break in it cannot
+// end the comment line of bd duplicates' merge_commands, and it cannot redraw
+// the command. remedy.PrintedValue alone would leave a $(...) as it is. The
+// title a hint names beside an ID is prose, which bd prints as it is in every
+// listing, so it is spelled by remedy.PrintedValue only, which keeps it from
+// redrawing the command.
+func printedIssueID(id string) string {
+	if remedy.IsPlainWord(id) {
+		return id
+	}
+	return remedy.EscapedValue(id)
+}
+
+// printedIssueIDs spells each of ids by printedIssueID and joins them with
+// spaces.
+func printedIssueIDs(ids []string) string {
+	printed := make([]string, len(ids))
+	for i, id := range ids {
+		printed[i] = printedIssueID(id)
+	}
+	return strings.Join(printed, " ")
 }
 
 func init() {

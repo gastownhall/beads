@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -211,6 +212,19 @@ func addRecipe(name, path string) error {
 	return nil
 }
 
+// recipeRefusalWord names a .beads/recipes.toml key or type in bd setup's
+// refusal of a recipe it cannot install: in the single quotes the refusal has
+// always put it in when it is a plain word (remedy.IsPlainWord), and
+// otherwise escaped (remedy.EscapedValue), which brings quotes of its own.
+// remedy.PrintedValue alone would keep an apostrophe, which ends the single
+// quotes, so the rest of the value ran when the refusal was pasted.
+func recipeRefusalWord(value string) string {
+	if remedy.IsPlainWord(value) {
+		return "'" + value + "'"
+	}
+	return remedy.EscapedValue(value)
+}
+
 func runRecipe(name string) error {
 	switch name {
 	case "claude":
@@ -238,12 +252,17 @@ func runRecipe(name string) error {
 		return HandleErrorWithHint(fmt.Sprintf("%v", err), "Use 'bd setup --list' to see available recipes.")
 	}
 
-	// A user recipe's name, type and paths come from .beads/recipes.toml,
+	// A user recipe's key, name, type and paths come from .beads/recipes.toml,
 	// which a repository can commit: each is spelled by the remedy printer
 	// (remedy.PrintedValue), so none can redraw or forge the line that tells
-	// the user what to run.
+	// the user what to run. So is an OS error that repeats a path
+	// (remedy.PrintedError): the error printers keep a message's line
+	// breaks, so a line feed in the path would start a line of its own. The
+	// command on that line takes the key as one shell word, or as a
+	// placeholder with the key named escaped after it (remedy.CommandArg),
+	// and the refusal below names the key and type by recipeRefusalWord.
 	if recipe.Type != recipes.TypeFile && recipe.Type != recipes.TypeMultiFile {
-		return HandleError("recipe '%s' has type '%s' which requires special handling", name, remedy.PrintedValue(string(recipe.Type)))
+		return HandleError("recipe %s has type %s which requires special handling", recipeRefusalWord(name), recipeRefusalWord(string(recipe.Type)))
 	}
 
 	paths := recipe.Paths
@@ -260,7 +279,8 @@ func runRecipe(name string) error {
 		}
 		if len(missing) > 0 {
 			fmt.Printf("✗ %s integration not installed\n", remedy.PrintedValue(recipe.Name))
-			fmt.Printf("  Run: bd setup %s\n", name)
+			key, note := remedy.CommandArg(runtime.GOOS, name, "<recipe>")
+			fmt.Printf("  Run: bd setup %s%s\n", key, note)
 			for _, path := range missing {
 				fmt.Printf("  Missing: %s\n", remedy.PrintedValue(path))
 			}
@@ -280,7 +300,7 @@ func runRecipe(name string) error {
 				if os.IsNotExist(err) {
 					continue
 				}
-				return HandleError("%v", err)
+				return HandleError("%v", remedy.PrintedError(err))
 			}
 			removed = true
 			// Drop the file's directory if that left it empty, but never a
@@ -302,7 +322,7 @@ func runRecipe(name string) error {
 		dir := filepath.Dir(path)
 		if dir != "." && dir != "" {
 			if err := os.MkdirAll(dir, 0o755); err != nil {
-				return HandleError("create directory: %v", err)
+				return HandleError("create directory: %v", remedy.PrintedError(err))
 			}
 		}
 
@@ -311,7 +331,7 @@ func runRecipe(name string) error {
 			return HandleError("%v", err)
 		}
 		if err := os.WriteFile(path, []byte(content), 0o644); err != nil { // #nosec G306 -- config files need to be readable
-			return HandleError("write file: %v", err)
+			return HandleError("write file: %v", remedy.PrintedError(err))
 		}
 	}
 

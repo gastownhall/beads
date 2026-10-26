@@ -193,6 +193,7 @@
 100 49 TestEmbeddedBackupRestoreStrictReadonly
 100 49 TestEmbeddedInitAPushConsentAndRemoteBootstrap
 100 49 TestEmbeddedMigratePersonal_abortOnNoConfirm
+100 49 TestEmbeddedRemedyPrinting_closeContinue
 
 100 50 TestEmbeddedDiffConcurrent
 100 50 TestEmbeddedDoltRemoteAdd_AllowGitOrigin_WarningOnStderr

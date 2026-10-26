@@ -1337,16 +1337,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unchanged, as a placeholder (`<step-id>`, `<molecule-id>`,
   `<duplicate-id>`, `<target-id>`) with the ID named escaped after the
   command, through
-  `internal/remedy`. An ID bd mints prints as before.
+  `internal/remedy`. `bd mol current`'s step hint no longer puts its
+  `bd show` command between backticks, which bash and zsh run as a command
+  substitution when the line is pasted, so a backtick in a quoted step ID
+  could end it and run the rest of the ID; the hint now reads
+  `Run bd show <id> to see detailed instructions.` The lines printed around
+  those commands, which a user
+  can paste with one (a duplicate group's issues and `Note:` line,
+  `merge_commands`' `# Duplicate:` comment, a molecule's steps and
+  `Next ready:` line, `bd mol stale`'s molecules and `Blocking:` list, and
+  the `Closed`, `Auto-closed completed molecule` and, with `--suggest-next`,
+  `Newly unblocked` lines `bd close` prints above its `--continue` hint, on
+  either route), name an ID that is not such a plain word escaped too, so
+  pasting them runs no part of it and a line feed in it cannot end
+  `merge_commands`' comment; the titles, assignee and status these hints
+  print are spelled so that none can redraw a suggested command. So is the
+  warning `bd close` prints above its hint when the molecule's root refuses
+  the auto-close (another assignee, a pin, a blocker), though a `$(...)` in
+  the root's ID, or a blocker's, is still printed as it is there and runs if
+  the warning is pasted. Apart from that hint's backticks, an ID bd mints
+  prints as before.
 - **`bd setup` names a committed `.beads/recipes.toml` recipe's values
   escaped.** `bd setup <recipe> --check` printed the recipe's name and each
   missing path raw around its `Run: bd setup <recipe>` line, so a carriage
   return, terminal escape or line feed in either, from a recipes.toml a
   cloned repository commits, could redraw that line with another command.
   `bd setup <recipe>` (with or without `--check` or `--remove`) and
-  `bd setup --list` now spell the recipe's name, description, type and
-  paths with `remedy.PrintedValue`: a value that holds such a character is
-  printed Go-quoted with it escaped, and every other value prints as before.
+  `bd setup --list` now spell the recipe's key, name, description, type and
+  paths with `remedy.PrintedValue`, and the error install or `--remove`
+  prints when the filesystem refuses a recipe path (such as a directory the
+  repository committed at it) with `remedy.PrintedError`: a value that holds
+  such a character is printed Go-quoted with it escaped, and every other
+  value prints as before. The `Run:` line's command takes the key as one
+  shell word, quoted when it holds shell syntax, or as a `<recipe>`
+  placeholder with the key named escaped after it. The refusal of a recipe
+  whose type needs special handling names a key or type that is not a
+  plain word escaped, rather than between single quotes, which an
+  apostrophe in it would end. A `$(...)` in a recipe's name, description or
+  path is still printed as it is.
 - **A pasted `bd init` or `bd repo remove` remedy no longer runs part of a
   crafted value.** When `bd create --repo` (or `bd migrate-personal`)
   refuses a repository with no `metadata.json` whose own config names a
