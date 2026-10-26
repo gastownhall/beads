@@ -223,19 +223,21 @@ func TestGitRemoteHasDoltDataRefStatusSurfacesGitStderr(t *testing.T) {
 }
 
 // A committed config.yaml can set sync.remote, so a value git would read as
-// --upload-pack must never reach `git ls-remote` as an option.
+// --upload-pack or -u must never reach `git ls-remote` as an option.
 func TestGitRemoteHasDoltDataRefStatusRejectsOptionRemote(t *testing.T) {
-	for _, prefix := range []string{"", "git+"} {
-		pwned := filepath.Join(t.TempDir(), "pwned")
-		remote := prefix + "--upload-pack=touch " + pwned + ";false #.git"
+	for _, prefix := range []string{"", "git+", "GIT+"} {
+		for _, opt := range []string{"--upload-pack=", "-u"} {
+			pwned := filepath.Join(t.TempDir(), "pwned")
+			remote := prefix + opt + "touch " + pwned + ";false #.git"
 
-		_, err := gitRemoteHasDoltDataRefStatus(remote)
+			_, err := gitRemoteHasDoltDataRefStatus(remote)
 
-		if err == nil || !strings.Contains(err.Error(), "must not start with '-'") {
-			t.Errorf("probe of %q: err = %v, want a leading-dash rejection", remote, err)
-		}
-		if _, statErr := os.Stat(pwned); statErr == nil {
-			t.Fatalf("probe of %q ran the injected --upload-pack command", remote)
+			if err == nil || !strings.Contains(err.Error(), "must not start with '-'") {
+				t.Errorf("probe of %q: err = %v, want a leading-dash rejection", remote, err)
+			}
+			if _, statErr := os.Stat(pwned); statErr == nil {
+				t.Fatalf("probe of %q ran the injected upload-pack command", remote)
+			}
 		}
 	}
 }

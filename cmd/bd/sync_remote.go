@@ -40,10 +40,16 @@ func resolveSyncRemoteChecked() (string, error) {
 	return v, nil
 }
 
-// checkRemoteNotOption rejects a remote URL that begins with "-", which git
-// and dolt would read as an option (e.g. --upload-pack=<command>).
+// checkRemoteNotOption rejects a remote URL that begins with "-", including
+// after a "git+" scheme prefix, which git and dolt would read as an option
+// (e.g. --upload-pack=<command> or -u<command>).
 func checkRemoteNotOption(source, remote string) error {
-	if strings.HasPrefix(strings.TrimSpace(remote), "-") {
+	trimmed := strings.TrimSpace(remote)
+	afterGitPlus := trimmed
+	if len(trimmed) >= 4 && strings.EqualFold(trimmed[:4], "git+") {
+		afterGitPlus = strings.TrimSpace(trimmed[4:])
+	}
+	if strings.HasPrefix(trimmed, "-") || strings.HasPrefix(afterGitPlus, "-") {
 		return fmt.Errorf("%s %q is not a valid remote URL: it must not start with '-'", source, redactRemoteURL(remote))
 	}
 	return nil
