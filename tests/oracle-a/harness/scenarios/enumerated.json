@@ -7702,7 +7702,7 @@
  },
  {
   "name": "init_proxied_server_not_implemented",
-  "purpose": "bd init --proxied-server fails '--proxied-server is not yet implemented', exit 1.",
+  "purpose": "Stale since 9cd0395110 (see notes): bd init --proxied-server fails '--proxied-server is not yet implemented', exit 1.",
   "prefix": "ini",
   "steps": [
    [
@@ -7713,9 +7713,9 @@
     "--proxied-server"
    ]
   ],
-  "pins": "init.go line 139 return fmt.Errorf('--proxied-server is not yet implemented'). Short-circuits before any FS work. exit 1.",
-  "deterministic": true,
-  "notes": "Stable. Confirms proxied-server mode is unreachable (relevant to the FatalError telemetry note)."
+  "pins": "Stale since 9cd0395110 (see notes): init.go line 139 return fmt.Errorf('--proxied-server is not yet implemented'). Short-circuits before any FS work. exit 1.",
+  "deterministic": false,
+  "notes": "Excluded: the premise is stale. --proxied-server init has been implemented since 9cd0395110, so in an empty workspace this step starts a managed dolt sql-server that outlives it (or fails the dolt preflight on a host without dolt), and Oracle A is embedded-only. It only ever passed because the harness pre-initialized the workspace, so the step hit 'already initialized'."
  },
  {
   "name": "init_unknown_backend",

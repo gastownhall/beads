@@ -2,6 +2,7 @@ package externaldeps
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"sort"
@@ -82,6 +83,7 @@ func (l *lifecycle) Create(ctx context.Context, request publicops.CreateRequest)
 }
 
 func (l *lifecycle) Update(ctx context.Context, request publicops.UpdateRequest) (publicops.UpdateResult, error) {
+	ctx = storage.WithLivePolicyProbe(ctx)
 	if request.Claim {
 		if err := l.policy.guardExternalClose(ctx, request.IssueID, false); err != nil {
 			return publicops.UpdateResult{}, err
@@ -96,6 +98,7 @@ func (l *lifecycle) Update(ctx context.Context, request publicops.UpdateRequest)
 }
 
 func (l *lifecycle) Close(ctx context.Context, request publicops.CloseRequest) (publicops.CloseResult, error) {
+	ctx = storage.WithLivePolicyProbe(ctx)
 	if err := l.policy.guardExternalClose(ctx, request.IssueID, request.Force); err != nil {
 		return publicops.CloseResult{}, err
 	}
@@ -226,7 +229,7 @@ func (s *Store) GetReadyWork(ctx context.Context, filter types.WorkFilter) ([]*t
 	queryFilter, blockedIDs := s.readyExclusion(filter, state.refsByIssue)
 	issues, err := s.inner.GetReadyWork(ctx, queryFilter)
 	if err != nil {
-		return nil, err
+		return nil, innerCapError(err, filter, blockedIDs)
 	}
 	kept := dropBlockedIssues(issues, blockedIDs, filter.Limit)
 	if err := capKeptRows(len(kept), filter, blockedIDs); err != nil {
@@ -251,7 +254,7 @@ func (s *Store) readyWorkWithCounts(ctx context.Context, filter types.WorkFilter
 	queryFilter, blockedIDs := s.readyExclusion(filter, state.refsByIssue)
 	rows, err := s.inner.GetReadyWorkWithCounts(ctx, queryFilter)
 	if err != nil {
-		return nil, err
+		return nil, innerCapError(err, filter, blockedIDs)
 	}
 	kept, _ := dropBlockedIssuesWithCounts(rows, blockedIDs, filter.Limit)
 	if err := capKeptRows(len(kept), filter, blockedIDs); err != nil {
@@ -291,13 +294,21 @@ func (s *Store) GetReadyWorkWithCountsAndTotal(ctx context.Context, filter types
 // decorator has to drop. Whichever path is taken, the policy itself is never
 // skipped — only where the exclusion happens differs.
 //
-// The client-side path also takes the MaxRows cap off the inner query. That
-// store caps the rows it fetched, which the bump lets outnumber Limit, so
+// The client-side path also takes the MaxRows cap off a limited inner query.
+// That store caps the rows it fetched, which the bump lets outnumber Limit, so
 // `--limit N --max-rows N` failed with exit 2 as soon as more than N issues
 // were ready, refusing a page that could never exceed N. The caller enforces
 // the cap on the rows it keeps instead (capKeptRows), after the Limit trim,
 // which is where issueops enforces it on the rows a SQL store delivers
 // (finishReadyWorkWithCounts).
+//
+// An unlimited inner query keeps its cap, bumped the same way to MaxRows plus
+// len(blockedIDs). Past that many rows, more than MaxRows of them are kept
+// whichever rows the drop takes, so the bump refuses nothing the caller's cap
+// would admit, and a store that sizes an unlimited request by MaxRows (the
+// http bridge, under its client read cap) asks for that bound and one row
+// more rather than the whole ready set. Its refusal reaches the caller as the
+// caller's own (innerCapError).
 func (s *Store) readyExclusion(filter types.WorkFilter, refsByIssue map[string][]string) (queryFilter types.WorkFilter, blockedIDs map[string]bool) {
 	if len(refsByIssue) == 0 {
 		return filter, nil
@@ -310,22 +321,42 @@ func (s *Store) readyExclusion(filter types.WorkFilter, refsByIssue map[string][
 		blockedIDs[issueID] = true
 	}
 	queryFilter = filter
-	if queryFilter.Limit > 0 {
+	switch {
+	case filter.Limit > 0:
 		queryFilter.Limit += len(blockedIDs)
+		queryFilter.MaxRows = 0
+		queryFilter.MaxRowsSource = ""
+	case filter.MaxRows > 0:
+		queryFilter.MaxRows += len(blockedIDs)
 	}
-	queryFilter.MaxRows = 0
-	queryFilter.MaxRowsSource = ""
 	return queryFilter, blockedIDs
 }
 
-// capKeptRows enforces the MaxRows cap readyExclusion took off the inner
-// query, on the kept rows the caller is handed. With nothing to drop
-// client-side the inner query kept the cap and has already enforced it.
+// capKeptRows enforces the caller's MaxRows cap on the kept rows it is
+// handed: readyExclusion took that cap off the inner query, or bumped it by
+// the rows the caller drops. With nothing to drop client-side the inner query
+// kept the cap and has already enforced it.
 func capKeptRows(kept int, filter types.WorkFilter, blockedIDs map[string]bool) error {
 	if len(blockedIDs) == 0 {
 		return nil
 	}
 	return issueops.EnforceMaxRowsCap(kept, filter.MaxRows, filter.MaxRowsSource)
+}
+
+// innerCapError hands the caller its own cap's refusal when the inner query
+// refused the MaxRows readyExclusion bumped: Found rows, more than MaxRows
+// plus len(blockedIDs), of which at least Found-len(blockedIDs), more than
+// MaxRows, would have been kept. Any other error is returned as it is.
+func innerCapError(err error, filter types.WorkFilter, blockedIDs map[string]bool) error {
+	var tooMany *issueops.ErrTooManyRows
+	if len(blockedIDs) == 0 || filter.Limit > 0 || filter.MaxRows <= 0 || !errors.As(err, &tooMany) {
+		return err
+	}
+	return &issueops.ErrTooManyRows{
+		Found:  tooMany.Found - len(blockedIDs),
+		Cap:    filter.MaxRows,
+		Source: filter.MaxRowsSource,
+	}
 }
 
 // dropBlockedIssues is readyExclusion's client-side half: it drops the rows
@@ -391,7 +422,7 @@ func (s *Store) readyWorkWithCountsAndTotal(ctx context.Context, filter types.Wo
 	queryFilter, blockedIDs := s.readyExclusion(filter, state.refsByIssue)
 	rows, total, err := s.inner.GetReadyWorkWithCountsAndTotal(ctx, queryFilter)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, innerCapError(err, filter, blockedIDs)
 	}
 	kept, blockedSeen := dropBlockedIssuesWithCounts(rows, blockedIDs, filter.Limit)
 	if len(blockedIDs) == 0 {
@@ -407,14 +438,14 @@ func (s *Store) readyWorkWithCountsAndTotal(ctx context.Context, filter types.Wo
 		// entire ready set, so every blocked row the window contains is every
 		// blocked row the ready set contains: the subtraction is exact. This
 		// is judged from the rows that came back, not from the Limit asked
-		// for: a zero Limit means every row to a SQL store, but the http wire
-		// omits it and the server answers with its default page
-		// (workapi.DefaultReadyLimit), so an unlimited fetch can come back
-		// truncated too.
+		// for, so it holds however a store reads a zero Limit: every row to a
+		// SQL store, and over http one request bounded at the client cap plus
+		// one, refused rather than truncated past it (an older http client
+		// sent no limit at all and got the server's default page back).
 		adjustedTotal = total - blockedSeen
 	} else {
 		// The ready set is bigger than the window that came back (the bumped
-		// window, or the server's default page for an unlimited fetch), so
+		// window: the caller's page, or CountReadyWork's one-row page), so
 		// the window cannot say how many of its unseen rows are blocked. Nor
 		// can refsByIssue: it names every workspace issue with an unsatisfied
 		// external blocker, closed ones and ones the filter excludes included,
@@ -471,8 +502,16 @@ func (s *Store) CountReadyWork(ctx context.Context, filter types.WorkFilter) (in
 	}
 	// s.inner has no indexed counter (httpclient.Store among others): reuse
 	// the counts-and-total path above, which already copes with a store whose
-	// transport cannot express ExcludeIDs at all, nor this zero Limit.
-	_, total, err := s.readyWorkWithCountsAndTotal(ctx, filter, state)
+	// transport cannot express ExcludeIDs at all. It asks for a ONE-ROW Lite
+	// page, never every row: the total is the inner store's own count of the
+	// whole ready set (over http, the server's countReadyWork beside that
+	// page), and refetchedReadyTotal sizes the externally blocked case. A zero
+	// Limit would download the whole ready set to report one number — over
+	// http, up to BEADS_HTTP_UNLIMITED_READ_CAP full rows, refused past it.
+	page := filter
+	page.Limit = 1
+	page.Lite = true
+	_, total, err := s.readyWorkWithCountsAndTotal(ctx, page, state)
 	return total, err
 }
 
@@ -524,6 +563,7 @@ type readyCounterWrapper interface {
 // compare-and-swap claim operation. Cross-project state cannot be atomic with
 // the local claim, but local claim ownership remains race-safe.
 func (s *Store) ClaimReadyIssue(ctx context.Context, filter types.WorkFilter, actor string) (*types.Issue, error) {
+	ctx = storage.WithLivePolicyProbe(ctx)
 	state, err := s.loadBlockingState(ctx)
 	if err != nil {
 		return nil, err
@@ -539,6 +579,33 @@ func (s *Store) GetBlockedIssues(ctx context.Context, filter types.WorkFilter) (
 	if err != nil {
 		return nil, err
 	}
+	// A served store refuses the two raw reads the decoration makes for the
+	// extra sources; over one they go through the roles it serves, as the
+	// remote blocked lister's do (blocked_lister.go). Against a server that
+	// applies the policy itself the decoration adds nothing (loadBlockingState
+	// stands down) and neither read is made.
+	dependencyRecords, issuesByIDs := s.inner.GetDependencyRecordsForIssues, s.inner.GetIssuesByIDs
+	if s.rolesAreRemote() {
+		dependencyRecords, issuesByIDs = s.remoteEdges, s.remoteIssuesByIDs
+	}
+	return s.decorateBlocked(ctx, filter, base, dependencyRecords, issuesByIDs)
+}
+
+// decorateBlocked is GetBlockedIssues' decoration of an undecorated blocked
+// listing (base): unsatisfied external refs are added to each row's blockers,
+// and the sources blocked only by such refs are listed too, narrowed by the
+// same parent and label filters the base listing was. The two reads it makes
+// for those extra sources (their parent edges, when the filter names a
+// parent, and the rows themselves, labels hydrated as GetIssuesByIDs and
+// GetMany both hydrate them) are passed in, so the remote blocked lister can
+// make them through roles a served store answers.
+func (s *Store) decorateBlocked(
+	ctx context.Context,
+	filter types.WorkFilter,
+	base []*types.BlockedIssue,
+	dependencyRecords func(context.Context, []string) (map[string][]*types.Dependency, error),
+	issuesByIDs func(context.Context, []string) ([]*types.Issue, error),
+) ([]*types.BlockedIssue, error) {
 	state, err := s.loadBlockingState(ctx)
 	if err != nil {
 		return nil, err
@@ -568,7 +635,7 @@ func (s *Store) GetBlockedIssues(ctx context.Context, filter types.WorkFilter) (
 	}
 	parentDeps := make(map[string][]*types.Dependency)
 	if filter.ParentID != nil && len(missingIDs) > 0 {
-		parentDeps, err = s.inner.GetDependencyRecordsForIssues(ctx, missingIDs)
+		parentDeps, err = dependencyRecords(ctx, missingIDs)
 		if err != nil {
 			return nil, fmt.Errorf("external dependencies: load blocked parent edges: %w", err)
 		}
@@ -579,12 +646,18 @@ func (s *Store) GetBlockedIssues(ctx context.Context, filter types.WorkFilter) (
 			filteredMissingIDs = append(filteredMissingIDs, issueID)
 		}
 	}
-	issues, err := s.inner.GetIssuesByIDs(ctx, filteredMissingIDs)
-	if err != nil {
-		return nil, fmt.Errorf("external dependencies: load blocked sources: %w", err)
+	var issues []*types.Issue
+	if len(filteredMissingIDs) > 0 {
+		issues, err = issuesByIDs(ctx, filteredMissingIDs)
+		if err != nil {
+			return nil, fmt.Errorf("external dependencies: load blocked sources: %w", err)
+		}
 	}
 	for _, issue := range issues {
 		if issue == nil || issue.Status == types.StatusClosed || issue.Status == types.StatusPinned {
+			continue
+		}
+		if !matchesLabelFilter(issue.Labels, filter) {
 			continue
 		}
 		refs := slices.Clone(state.refsByIssue[issue.ID])
@@ -650,6 +723,32 @@ func matchesParentFilter(issueID string, parentID *string, allDeps map[string][]
 	return false
 }
 
+// matchesLabelFilter is the label half of the blocked body's filter
+// (sqlbuild.LabelSetClauses in issueops.GetBlockedIssuesInTx), for a row the
+// decoration adds after that query ran: every Labels entry present, at least
+// one LabelsAny entry present when any is named, and no ExcludeLabels entry
+// present. It compares with Go string equality, which is the SQL comparison
+// under the collation every beads table is created with (utf8mb4_0900_bin;
+// see issueops' createBatchCache).
+func matchesLabelFilter(labels []string, filter types.WorkFilter) bool {
+	for _, label := range filter.Labels {
+		if !slices.Contains(labels, label) {
+			return false
+		}
+	}
+	if len(filter.LabelsAny) > 0 && !slices.ContainsFunc(filter.LabelsAny, func(label string) bool {
+		return slices.Contains(labels, label)
+	}) {
+		return false
+	}
+	for _, label := range filter.ExcludeLabels {
+		if slices.Contains(labels, label) {
+			return false
+		}
+	}
+	return true
+}
+
 // IsBlocked includes explicit unsatisfied external blockers in the close guard.
 // A store that serves its roles refuses the reads this makes, so over one the
 // per-issue roles in remote_roles.go answer instead.
@@ -680,15 +779,102 @@ func (s *Store) IsBlocked(ctx context.Context, issueID string) (bool, []string, 
 	return blocked || len(blockers) > 0, blockers, nil
 }
 
+// blockedState is one id's IsBlocked answer.
+type blockedState struct {
+	blocked  bool
+	blockers []string
+}
+
+// blockedStates answers IsBlocked for every one of ids with the same per-id
+// result, in a bounded number of reads: the local half through the inner
+// store's storage.BlockersBatchStore (one IsBlocked per id on a store without
+// it), and the external half from ONE read of the ids' own edges, whose refs
+// are resolved together, so each foreign project is opened at most once
+// however many ids name it.
+func (s *Store) blockedStates(ctx context.Context, ids []string) (map[string]blockedState, error) {
+	distinct := make([]string, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		distinct = append(distinct, id)
+	}
+	states, err := s.localBlockedStates(ctx, distinct)
+	if err != nil {
+		return nil, err
+	}
+	deps, err := s.inner.GetDependencyRecordsForIssues(ctx, distinct)
+	if err != nil {
+		return nil, err
+	}
+	refs := make([]reference, 0)
+	for _, id := range distinct {
+		for _, dep := range deps[id] {
+			if dep != nil && dep.Type.IsBlockingEdge() && isExternalReference(dep.DependsOnID) {
+				refs = append(refs, parseReference(dep.DependsOnID))
+			}
+		}
+	}
+	satisfied, err := s.resolveReferences(ctx, refs)
+	if err != nil {
+		return nil, err
+	}
+	for _, id := range distinct {
+		state := states[id]
+		for _, dep := range deps[id] {
+			if dep != nil && dep.Type.IsBlockingEdge() && isExternalReference(dep.DependsOnID) && !satisfied[dep.DependsOnID] {
+				state.blockers = appendUnique(state.blockers, dep.DependsOnID)
+			}
+		}
+		state.blocked = state.blocked || len(state.blockers) > 0
+		states[id] = state
+	}
+	return states, nil
+}
+
+// localBlockedStates is the inner store's IsBlocked for every one of ids.
+func (s *Store) localBlockedStates(ctx context.Context, ids []string) (map[string]blockedState, error) {
+	states := make(map[string]blockedState, len(ids))
+	if batch, ok := storage.UnwrapStore(s.inner).(storage.BlockersBatchStore); ok {
+		blocked, err := batch.IsBlockedWithBlockersBatch(ctx, ids)
+		if err != nil {
+			return nil, err
+		}
+		for id, blockers := range blocked {
+			states[id] = blockedState{blocked: true, blockers: blockers}
+		}
+		return states, nil
+	}
+	for _, id := range ids {
+		blocked, blockers, err := s.inner.IsBlocked(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		states[id] = blockedState{blocked: blocked, blockers: blockers}
+	}
+	return states, nil
+}
+
 // IsBlockedBatch preserves the external blocker invariant for batch callers.
 // The embedded Dolt implementation promotes this method from the wrapped
 // store, so it must be declared explicitly here rather than relying on
-// IsBlocked alone. Like IsBlocked, it refuses over a store that serves its
-// roles.
+// IsBlocked alone. Over a store that serves its roles the flag comes from the
+// server's annotator (dependencies.blocking.isBlocked), and
+// remoteExternalBlocked adds the invariant unless the server already applies
+// the policy; only IsBlocked still refuses there.
 func (s *Store) IsBlockedBatch(ctx context.Context, issueIDs []string) (map[string]bool, error) {
 	blocked, err := s.inner.IsBlockedBatch(ctx, issueIDs)
 	if err != nil {
 		return nil, err
+	}
+	if s.rolesAreRemote() {
+		// Over a store that serves its roles the raw edge read below is
+		// refused; the flag came from the server's annotator, and the
+		// external invariant is added from the edges of these rows only —
+		// unless the server already applies the policy itself.
+		return s.remoteExternalBlocked(ctx, issueIDs, blocked)
 	}
 	deps, err := s.inner.GetDependencyRecordsForIssues(ctx, issueIDs)
 	if err != nil {
@@ -722,6 +908,7 @@ func (s *Store) IsBlockedBatch(ctx context.Context, issueIDs []string) (map[stri
 // that serves its roles refuses this method; bd close goes through
 // remoteBatchCloser (remote_roles.go) there.
 func (s *Store) CloseIssueChecked(ctx context.Context, issueID, actor string, opts storage.CloseIssueOptions) (storage.CloseIssueResult, error) {
+	ctx = storage.WithLivePolicyProbe(ctx)
 	if !opts.Force {
 		issue, err := s.inner.GetIssue(ctx, issueID)
 		if err != nil {

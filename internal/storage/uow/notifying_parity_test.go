@@ -130,7 +130,9 @@ func TestRecordingIssueUseCaseCoversItsSurface(t *testing.T) {
 		"has no name for a deletion and the row is gone (hook_deleter.go, hookTrackingTransaction.DeleteIssue)"
 	leases := "lease and claim bookkeeping the DoltStorage plumbing fires no hook for: " +
 		"HookFiringStore overrides neither UnclaimIssue, UnclaimIssueIfAssignee, HeartbeatIssue nor " +
-		"ReclaimExpiredLeases, so `bd unclaim` and `bd heartbeat` run no script on either plumbing"
+		"ReclaimExpiredLeases, so `bd unclaim` runs no script on either plumbing, and neither does a " +
+		"heartbeat through these doors (`bd heartbeat` takes the Heartbeater role, whose re-arm records " +
+		"an update through RenewLease)"
 
 	assertPartition(t, "IssueUseCase", interfaceMethods(reflect.TypeOf((*domain.IssueUseCase)(nil)).Elem()),
 		reflect.TypeOf((*recordingIssueUC)(nil)), map[string]string{
@@ -157,6 +159,7 @@ func TestRecordingIssueUseCaseCoversItsSurface(t *testing.T) {
 			"History":                      reads,
 			"IterEvents":                   reads,
 			"PreviewDelete":                reads,
+			"ParticipatingIssueIDs":        reads,
 			"PreviewDeleteWisp":            reads,
 			"SearchIssueIDs":               reads,
 			"SearchIssues":                 reads,
@@ -172,8 +175,9 @@ func TestRecordingIssueUseCaseCoversItsSurface(t *testing.T) {
 			"ReclaimExpiredLeases":         leases,
 			"WakeExpiredDefers": "the deferred-work sweep is a clock crossing rather than a user's " +
 				"mutation, and the DoltStorage plumbing fires nothing for it",
-			"PromoteWisp": "moves a row between planes without changing the bead; the DoltStorage " +
-				"plumbing has no promote hook either",
+			"PromoteWisp": "no route calls it: bd promote moves the row with ApplyUpdate's " +
+				"persistence spec, which records the update, and its DoltStorage twin, " +
+				"PromoteFromEphemeral, fires no hook either",
 		})
 }
 
@@ -202,6 +206,7 @@ func TestRecordingDependencyUseCaseCoversItsSurface(t *testing.T) {
 			"GetIssueDependencyRecords":            reads,
 			"GetWispDependencyRecords":             reads,
 			"IsBlocked":                            reads,
+			"IsBlockedBatch":                       reads,
 			"IsWispBlocked":                        reads,
 			"IterWispWithIssueMetadata":            reads,
 			"IterWithIssueMetadata":                reads,
@@ -270,6 +275,11 @@ func TestNotifyingProviderAnswersTheWholeProviderSurface(t *testing.T) {
 		"BeginTx": "TxProvider hands out a bare transaction with no unit of work around it, so " +
 			"there is nothing to buffer and nothing to drain: the wrapper deliberately does not " +
 			"offer it, and only this package's own NewUOW asks a provider for one",
+		"DeferVersionedHistory": "asked of the RAW provider by versionedhistory.ActivateProvider in the " +
+			"factories, before any wrapper exists; a wrapper cannot answer it honestly, because forwarding " +
+			"to an inner provider that can only take SetVersionedHistoryEnabled would drop the activation. " +
+			"A wrapped provider is activated through the forwarded SetVersionedHistoryEnabled instead, " +
+			"by the eager read",
 		"initSchema":             "unexported provider setup, not a capability any caller can reach",
 		"initSchemaAttempt":      initBranch,
 		"verifyTeamServerSchema": initBranch,

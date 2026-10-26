@@ -55,6 +55,20 @@ func (u *baseUOW) Commit(ctx context.Context, message string) error {
 	return u.tx.Commit(ctx, message)
 }
 
+// CommitScoped commits through the transaction's scoped commit when it has
+// one (the Dolt server transaction), else with the plain SQL COMMIT.
+func (u *baseUOW) CommitScoped(ctx context.Context, tables []string, message string) error {
+	if scoped, ok := u.tx.(scopedCommitTx); ok {
+		return scoped.CommitScoped(ctx, tables, message)
+	}
+	return u.tx.Commit(ctx, "")
+}
+
+// scopedCommitTx is the optional Tx half of ScopedCommitter.
+type scopedCommitTx interface {
+	CommitScoped(ctx context.Context, tables []string, message string) error
+}
+
 func (u *baseUOW) Close(ctx context.Context) {
 	u.tx.RollbackUnlessCommitted(ctx)
 }

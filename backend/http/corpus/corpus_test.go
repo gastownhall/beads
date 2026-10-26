@@ -8,7 +8,9 @@
 package corpus_test
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -17,7 +19,9 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -81,6 +85,12 @@ type shape struct {
 	// Verify are reads run on both sides after the shape and compared as json:
 	// how a write is checked for having done the same thing on both backends.
 	Verify [][]string `yaml:"verify"`
+	// Requests, when set, is exactly how many requests the served run of Args
+	// makes through the reference proxy (not its setup or verify reads). Each
+	// is a sequential round trip, so the count is the shape's latency floor
+	// over a gateway: a change that adds one fails here, and one that saves
+	// one updates the pin.
+	Requests *int `yaml:"requests"`
 	// Pending marks a known failure and names the slice that fixes it.
 	Pending *pending `yaml:"pending"`
 }
@@ -195,6 +205,9 @@ func TestCorpusFileIsWellFormed(t *testing.T) {
 			if modeOf(s) != "exit" || len(s.Verify) > 0 {
 				t.Errorf("shape %s is allowlisted, so only its exit code and stderr are checked; give it compare: exit and no verify", s.ID)
 			}
+			if s.Requests != nil {
+				t.Errorf("shape %s is allowlisted, so its request count is not checked; drop requests", s.ID)
+			}
 		}
 		switch s.Compare {
 		case "", "json", "ids", "count", "text", "exit":
@@ -206,6 +219,9 @@ func TestCorpusFileIsWellFormed(t *testing.T) {
 		}
 		if _, err := regexp.Compile(s.ExpectStderr); err != nil {
 			t.Errorf("shape %s: expect_stderr: %v", s.ID, err)
+		}
+		if s.Requests != nil && *s.Requests < 0 {
+			t.Errorf("shape %s: requests %d is negative", s.ID, *s.Requests)
 		}
 	}
 	for id, entry := range allow {
@@ -237,20 +253,82 @@ type outcome struct {
 	requests           int64
 }
 
-// TestServedCorpus is the suite. Each shape is a subtest; a pending shape is
-// still RUN and then skipped with what it did, so a slice that fixes it sees
-// the subtest fail with "now passes; remove the pending mark".
-// BEADS_CORPUS_SKIP_PENDING=1 skips pending shapes without running them.
-// BEADS_CORPUS_REPORT=<path> writes a JSON summary.
-func TestServedCorpus(t *testing.T) {
+// corpusParts is how many parts the shapes are dealt across. Each part is a
+// top-level test of its own (TestServedCorpusPart1..N, servedCorpusParts)
+// that starts its own server and seeds its own pair of workspaces, so the
+// embedded lane runs each part in a Bazel shard of its own
+// (served_pinned_shards.txt pins part k to shard k). The parts can be split
+// because no shape depends on another's effects: every comparison is the
+// served side against the embedded side after the same commands, and each
+// part keeps corpus order, so its reads still run on the bare seed before
+// any of its writes (see testdata/corpus.yaml's header).
+//
+// Four parts, from the embedded lane's measured part times (PR #7538): each
+// part's server start and concurrent seed take ~62-76s and the 127 shapes
+// ~242s together, so four parts ran 114-146s each and three ran 170-180s.
+// Three would save one setup (~75 test-seconds a run), but the longest part
+// is the embedded lane's served long pole, on the gate's critical path
+// (forks' above all), so the ~34s it saves is worth more.
+const corpusParts = 4
+
+// servedCorpusParts are the parts' tests, one per part, in part order.
+var servedCorpusParts = []func(*testing.T){
+	TestServedCorpusPart1, TestServedCorpusPart2, TestServedCorpusPart3, TestServedCorpusPart4,
+}
+
+func TestServedCorpusPart1(t *testing.T) { testServedCorpus(t, 1) }
+func TestServedCorpusPart2(t *testing.T) { testServedCorpus(t, 2) }
+func TestServedCorpusPart3(t *testing.T) { testServedCorpus(t, 3) }
+func TestServedCorpusPart4(t *testing.T) { testServedCorpus(t, 4) }
+
+// corpusPartNameErr fails a part test whose name is not its part's: a
+// TestServedCorpusPart3 that ran part 2 would run part 2's shapes twice and
+// silently drop its own. A part outside 1..corpusParts (a stray
+// TestServedCorpusPart5 left after the parts shrink) would run no shapes.
+func corpusPartNameErr(name string, part int) error {
+	if part < 1 || part > corpusParts {
+		return fmt.Errorf("%s runs corpus part %d; there are parts 1..%d (corpusParts)", name, part, corpusParts)
+	}
+	if want := fmt.Sprintf("TestServedCorpusPart%d", part); name != want {
+		return fmt.Errorf("%s runs corpus part %d; only %s may (fix its testServedCorpus call)", name, part, want)
+	}
+	return nil
+}
+
+// corpusPart returns the shapes part (1..corpusParts) runs.
+func corpusPart(shapes []shape, part int) []shape {
+	return corpusPartOf(shapes, part, corpusParts)
+}
+
+// corpusPartOf deals shapes round robin, in corpus order, across parts parts
+// and returns part's (1-based) share: shapes part-1, part-1+parts, and so on.
+// Round robin keeps each part a mix of the corpus's reads and writes in
+// their original order.
+func corpusPartOf(shapes []shape, part, parts int) []shape {
+	var out []shape
+	for i := part - 1; i < len(shapes); i += parts {
+		out = append(out, shapes[i])
+	}
+	return out
+}
+
+// testServedCorpus is the suite, for one part of the corpus. Each shape is a
+// subtest; a pending shape is still RUN and then skipped with what it did, so
+// a slice that fixes it sees the subtest fail with "now passes; remove the
+// pending mark". BEADS_CORPUS_SKIP_PENDING=1 skips pending shapes without
+// running them. BEADS_CORPUS_REPORT=<path> writes a JSON summary of every
+// part this process has run.
+func testServedCorpus(t *testing.T, part int) {
+	// First, before the engine gate: a part test wired to the wrong part
+	// fails in every lane, not only where the corpus runs.
+	if err := corpusPartNameErr(t.Name(), part); err != nil {
+		t.Fatal(err)
+	}
 	skipUnlessEmbeddedDolt(t)
 	c, allow := loadCorpus(t)
+	shapes := corpusPart(c.Shapes, part)
 	profile := loadReferenceProfile(t)
 	bin := buildBD(t)
-
-	serverAddr := startCorpusServer(t)
-	proxy := newReferenceProxy(t, profile, serverAddr)
-	proxyAddr := startProxy(t, proxy)
 
 	common := []string{
 		"BEADS_ACTOR=worker",
@@ -258,32 +336,55 @@ func TestServedCorpus(t *testing.T) {
 		"BD_BACKUP_ENABLED=false",
 		"BD_EXPORT_AUTO=false",
 	}
+
+	// The embedded side needs no server: init and seed it on a goroutine
+	// while this one starts the server and seeds the served side. Each side
+	// has its own directories, env and bd processes (prepareSide), and each
+	// still runs the seed in order, so the seeded data is what it was when
+	// the two sides were seeded command by command in turn. The deferred
+	// cancel and Wait run on every exit, a t.Fatal included, so the goroutine
+	// never outlives the test or its TempDirs.
+	setupStart := time.Now()
+	ctx, cancel := context.WithCancel(context.Background())
+	var seeding sync.WaitGroup
+	defer seeding.Wait()
+	defer cancel()
+	local := &side{name: "embedded", dir: t.TempDir(), files: t.TempDir(), env: common}
+	var localErr error
+	seeding.Add(1)
+	go func() {
+		defer seeding.Done()
+		localErr = prepareSide(ctx, t, bin, c, local,
+			[]string{"init", "-p", corpusPrefix, "--non-interactive", "--skip-hooks", "--skip-agents", "-q"})
+		if localErr != nil {
+			cancel()
+		}
+	}()
+
+	serverAddr := startCorpusServer(t)
+	proxy := newReferenceProxy(t, profile, serverAddr)
+	proxyAddr := startProxy(t, proxy)
 	served := &side{name: "served", dir: t.TempDir(), files: t.TempDir(),
 		env: append([]string{"BEADS_HTTP_TOKEN=" + proxyAddr + "=" + corpusToken}, common...)}
-	local := &side{name: "embedded", dir: t.TempDir(), files: t.TempDir(), env: common}
-
-	if r := runBD(t, bin, served.dir, served.env, "", "connect", "http://"+proxyAddr, "--expect-project-id", corpusProjectID, "--json"); r.code != 0 {
-		t.Fatalf("bd connect: %s", r)
+	servedErr := prepareSide(ctx, t, bin, c, served,
+		[]string{"connect", "http://" + proxyAddr, "--expect-project-id", corpusProjectID, "--json"})
+	if servedErr != nil {
+		cancel()
 	}
-	if r := runBD(t, bin, local.dir, local.env, "", "init", "-p", corpusPrefix, "--non-interactive", "--skip-hooks", "--skip-agents", "-q"); r.code != 0 {
-		t.Fatalf("bd init (embedded): %s", r)
-	}
-	for _, sd := range []*side{served, local} {
-		writeAssets(t, c.Files, sd.files)
-	}
-	for _, args := range c.Seed {
-		for _, sd := range []*side{served, local} {
-			argv := expand(t, bin, sd, args)
-			if r := runBD(t, bin, sd.dir, sd.env, "", argv...); r.code != 0 {
-				t.Fatalf("seed %v on %s failed; the seed must use shapes that work on the reference profile: %s", args, sd.name, r)
-			}
+	seeding.Wait()
+	// The side that failed first is the one to report; the other may only
+	// have seen the cancel.
+	for _, err := range []error{servedErr, localErr} {
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Fatal(err)
 		}
 	}
+	t.Logf("part %d setup (server start and both sides seeded concurrently): %s", part, time.Since(setupStart).Round(100*time.Millisecond))
 	proxy.takeRefusals()
 
 	skipPending := os.Getenv("BEADS_CORPUS_SKIP_PENDING") == "1"
 	var outcomes []outcome
-	for _, s := range c.Shapes {
+	for _, s := range shapes {
 		s := s
 		t.Run(s.ID, func(t *testing.T) {
 			o := outcome{id: s.ID}
@@ -328,7 +429,7 @@ func TestServedCorpus(t *testing.T) {
 		})
 	}
 
-	summarize(t, outcomes)
+	summarize(t, part, len(c.Shapes), outcomes)
 }
 
 // runShape runs one shape on both sides and returns every way the served run
@@ -346,16 +447,19 @@ func runShape(t *testing.T, bin string, s shape, served, local *side, allow map[
 
 	for _, args := range s.Setup {
 		for _, sd := range []*side{served, local} {
-			if r := runBD(t, bin, sd.dir, sd.env, "", expand(t, bin, sd, args)...); r.code != 0 {
+			if r := runBD(t, bin, sd.dir, sd.env, "", expand(context.Background(), t, bin, sd, args)...); r.code != 0 {
 				failf("setup %v failed on %s: %s", args, sd.name, r)
 				return fails
 			}
 		}
 	}
 	proxy.takeRefusals()
-	sr := runBD(t, bin, served.dir, served.env, s.Stdin, expand(t, bin, served, s.Args)...)
+	args := expand(context.Background(), t, bin, served, s.Args)
+	before := proxy.requests.Load()
+	sr := runBD(t, bin, served.dir, served.env, s.Stdin, args...)
+	servedRequests := proxy.requests.Load() - before
 	wireRefusals := proxy.takeRefusals()
-	lr := runBD(t, bin, local.dir, local.env, s.Stdin, expand(t, bin, local, s.Args)...)
+	lr := runBD(t, bin, local.dir, local.env, s.Stdin, expand(context.Background(), t, bin, local, s.Args)...)
 	t.Logf("bd %s\nserved: %s\nembedded: exit=%d", strings.Join(s.Args, " "), sr, lr.code)
 	if len(wireRefusals) > 0 {
 		t.Logf("reference-profile refusals on the wire: %v", wireRefusals)
@@ -398,12 +502,15 @@ func runShape(t *testing.T, bin string, s shape, served, local *side, allow map[
 	if s.ExpectStderr != "" && !wantStderr.MatchString(sr.stderr) {
 		failf("served stderr does not match %q (embedded does): %s", s.ExpectStderr, sr)
 	}
+	if s.Requests != nil && servedRequests != int64(*s.Requests) {
+		failf("the served run made %d requests, want exactly %d (requests); a change that saves one updates the pin", servedRequests, *s.Requests)
+	}
 	if len(fails) > 0 {
 		return fails
 	}
 	if len(s.PrefixOf) > 0 {
-		vs := runBD(t, bin, served.dir, served.env, "", expand(t, bin, served, s.PrefixOf)...)
-		vl := runBD(t, bin, local.dir, local.env, "", expand(t, bin, local, s.PrefixOf)...)
+		vs := runBD(t, bin, served.dir, served.env, "", expand(context.Background(), t, bin, served, s.PrefixOf)...)
+		vl := runBD(t, bin, local.dir, local.env, "", expand(context.Background(), t, bin, local, s.PrefixOf)...)
 		if vs.code != 0 || vl.code != 0 {
 			failf("prefix_of %v: exit served %d, embedded %d: served %s", s.PrefixOf, vs.code, vl.code, vs)
 		} else if d := comparePrefix(sr.stdout, lr.stdout, vs.stdout, vl.stdout); d != "" {
@@ -413,8 +520,8 @@ func runShape(t *testing.T, bin string, s shape, served, local *side, allow map[
 		failf("output parity (%s): %s", modeOf(s), d)
 	}
 	for _, args := range s.Verify {
-		vs := runBD(t, bin, served.dir, served.env, "", expand(t, bin, served, args)...)
-		vl := runBD(t, bin, local.dir, local.env, "", expand(t, bin, local, args)...)
+		vs := runBD(t, bin, served.dir, served.env, "", expand(context.Background(), t, bin, served, args)...)
+		vl := runBD(t, bin, local.dir, local.env, "", expand(context.Background(), t, bin, local, args)...)
 		if vs.code != vl.code {
 			failf("verify %v: exit served %d, embedded %d: served %s", args, vs.code, vl.code, vs)
 			continue
@@ -706,8 +813,11 @@ func brief(v any) string {
 
 var placeholder = regexp.MustCompile(`\{(file|rev):([^}]+)\}`)
 
-// expand substitutes {file:NAME} and {rev:ID} in args for side sd.
-func expand(t *testing.T, bin string, sd *side, args []string) []string {
+// expand substitutes {file:NAME} and {rev:ID} in args for side sd. It never
+// fails t (a {rev:} it cannot read becomes "0"), so prepareSide may call it
+// off the test's goroutine; its {rev:} lookup runs under ctx, so a cancelled
+// prepareSide starts no further bd there either.
+func expand(ctx context.Context, t *testing.T, bin string, sd *side, args []string) []string {
 	t.Helper()
 	out := make([]string, len(args))
 	for i, a := range args {
@@ -717,7 +827,11 @@ func expand(t *testing.T, bin string, sd *side, args []string) []string {
 			case "file":
 				return filepath.Join(sd.files, parts[2])
 			default:
-				r := runBD(t, bin, sd.dir, sd.env, "", "show", parts[2], "--json")
+				r, err := execBD(ctx, bin, sd.dir, sd.env, "", "show", parts[2], "--json")
+				if err != nil {
+					t.Logf("{rev:%s} on %s: %v", parts[2], sd.name, err)
+					return "0"
+				}
 				if r.code != 0 {
 					t.Logf("{rev:%s} on %s: show failed: %s", parts[2], sd.name, r)
 					return "0"
@@ -741,17 +855,49 @@ func expand(t *testing.T, bin string, sd *side, args []string) []string {
 	return out
 }
 
-func writeAssets(t *testing.T, assets []corpusAsset, dir string) {
+// prepareSide attaches sd to its store with bd attach (connect or init),
+// writes the corpus's asset files into sd.files and runs the seed on sd, in
+// order. It touches only sd's own directories and bd processes and returns a
+// failure as an error instead of failing t, so testServedCorpus runs it for
+// the two sides at once; it stops before its next bd once ctx is done.
+func prepareSide(ctx context.Context, t *testing.T, bin string, c *corpusFile, sd *side, attach []string) error {
 	t.Helper()
+	r, err := execBD(ctx, bin, sd.dir, sd.env, "", attach...)
+	if err != nil {
+		return err
+	}
+	if r.code != 0 {
+		return fmt.Errorf("bd %s on %s: %s", strings.Join(attach, " "), sd.name, r)
+	}
+	if err := writeAssets(c.Files, sd.files); err != nil {
+		return fmt.Errorf("%s: %w", sd.name, err)
+	}
+	for _, args := range c.Seed {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		r, err := execBD(ctx, bin, sd.dir, sd.env, "", expand(ctx, t, bin, sd, args)...)
+		if err != nil {
+			return err
+		}
+		if r.code != 0 {
+			return fmt.Errorf("seed %v on %s failed; the seed must use shapes that work on the reference profile: %s", args, sd.name, r)
+		}
+	}
+	return nil
+}
+
+func writeAssets(assets []corpusAsset, dir string) error {
 	for _, a := range assets {
 		content := a.Content
 		if a.Bulk != nil {
 			content = bulkPlan(*a.Bulk)
 		}
 		if err := os.WriteFile(filepath.Join(dir, a.Name), []byte(content), 0o600); err != nil {
-			t.Fatalf("write asset %s: %v", a.Name, err)
+			return fmt.Errorf("write asset %s: %w", a.Name, err)
 		}
 	}
+	return nil
 }
 
 func bulkPlan(b bulkGraph) string {
@@ -777,7 +923,11 @@ func bulkPlan(b bulkGraph) string {
 	return string(raw)
 }
 
-func summarize(t *testing.T, outcomes []outcome) {
+// reported is every outcome of every part this process has run, in the order
+// the parts ran, for BEADS_CORPUS_REPORT.
+var reported []outcome
+
+func summarize(t *testing.T, part, total int, outcomes []outcome) {
 	t.Helper()
 	counts := map[string]int{}
 	var lines []string
@@ -789,7 +939,8 @@ func summarize(t *testing.T, outcomes []outcome) {
 		counts[key]++
 		lines = append(lines, fmt.Sprintf("%-26s %-48s req=%-3d %s", o.status, o.id, o.requests, firstLine(o.detail)))
 	}
-	t.Logf("corpus summary: %v\n%s", counts, strings.Join(lines, "\n"))
+	t.Logf("corpus summary, part %d of %d (%d of %d shapes): %v\n%s", part, corpusParts, len(outcomes), total, counts, strings.Join(lines, "\n"))
+	reported = append(reported, outcomes...)
 	if path := os.Getenv("BEADS_CORPUS_REPORT"); path != "" {
 		type row struct {
 			ID       string `json:"id"`
@@ -798,7 +949,7 @@ func summarize(t *testing.T, outcomes []outcome) {
 			Detail   string `json:"detail,omitempty"`
 		}
 		var out []row
-		for _, o := range outcomes {
+		for _, o := range reported {
 			out = append(out, row{o.id, o.status, o.requests, o.detail})
 		}
 		raw, _ := json.MarshalIndent(out, "", " ")

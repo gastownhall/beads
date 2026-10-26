@@ -84,20 +84,20 @@ var (
 	applyItemMembers         = []string{"close", "create", "dep_add", "kind", "update"}
 	applyRefMembers          = []string{"id", "key"}
 	applyCreateItemMembers   = []string{
-		"acceptance_criteria", "assignee", "defer_until", "description", "design",
+		"acceptance_criteria", "assignee", "await_id", "await_type", "defer_until", "description", "design",
 		"due_at", "ephemeral", "estimated_minutes", "external_ref", "id",
 		"issue_type", "key", "labels", "metadata", "metadata_refs", "no_history",
-		"notes", "owner", "priority", "sender", "status", "title",
+		"notes", "owner", "priority", "sender", "status", "timeout", "title", "waiters",
 	}
 	applyUpdateItemMembers = []string{
 		"expected_assignee", "expected_status", "expected_version",
 		"force_assignee_transfer", "force_close_policy", "force_notes_overwrite", "patch", "target",
 	}
 	applyPatchMembers = []string{
-		"acceptance_criteria", "append_notes", "assignee", "defer_until",
+		"acceptance_criteria", "append_notes", "assignee", "await_id", "defer_until",
 		"description", "design", "due_at", "estimated_minutes", "external_ref",
 		"issue_type", "labels", "metadata", "notes", "owner", "priority",
-		"status", "title",
+		"status", "title", "waiters",
 	}
 	applyLabelPatchMembers    = []string{"add", "remove", "replace"}
 	applyMetadataPatchMembers = []string{"merge", "replace", "set", "unset"}
@@ -426,6 +426,7 @@ func applyCreateItem(prefix string, encoded json.RawMessage, raw map[string]json
 	if wire.NoHistory != nil {
 		issue.NoHistory = *wire.NoHistory
 	}
+	createGateMembers(issue, wire.AwaitType, wire.AwaitId, wire.Timeout, wire.Waiters)
 
 	// An absent `priority` is the role's default (CreateItem.DefaultPriority),
 	// never a 0 — which is P0 — made up here.
@@ -635,6 +636,7 @@ func applyPatch(prefix string, encoded json.RawMessage, raw map[string]json.RawM
 	if set("defer_until") {
 		patch.DeferUntil = issueops.Field[*time.Time]{Set: true, Value: wire.DeferUntil}
 	}
+	patchGateMembers(&patch, set, wire.AwaitId, wire.Waiters)
 	if set("labels") {
 		labels, res := applyLabelPatch(prefix+"labels.", raw["labels"])
 		if res != nil {
@@ -1084,6 +1086,17 @@ func (s *Server) failApplyBatch(w http.ResponseWriter, r *http.Request, request 
 	// refusal's 400 above.
 	case errors.Is(err, storage.ErrNotFound):
 		s.fail(w, r, at(NotFound(), ""))
+
+	// A gate member past the role's bound (CapIssuesCreateGates on a create
+	// item, CapIssuesUpdateGates on an update item's patch), named at its own
+	// level. Its detail is the caller's own input only (gateFieldParam).
+	case isGateFieldError(err):
+		field, detail, _ := gateFieldParam(err)
+		s.refusedApplyBatch(r, err)
+		if itemErr != nil && itemErr.Kind == issueops.ItemUpdate {
+			field = "patch." + field
+		}
+		s.fail(w, r, at(InvalidArgument("", ReasonInvalidValue, detail+"; nothing was written"), field))
 
 	case errors.Is(err, storage.ErrValidation):
 		s.refusedApplyBatch(r, err)

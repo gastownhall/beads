@@ -251,6 +251,70 @@ credential would cross the network unencrypted) — pass `--allow-plaintext` to
 override, or use `https://`. Switching a workspace that already selects a
 different backend needs `--force`.
 
+Each read (a GET, or the POST batch get) gives its first attempt 15s, from
+when the request is sent, to get the server's response headers
+(`BEADS_HTTP_RESPONSE_HEADER_TIMEOUT`: a duration such as `30s`, a number of
+seconds, or `off`). A read whose headers do not arrive in time, or whose
+connection is reset, is retried once on another connection, and each retry
+is logged to stderr with its count. The retry has no header timer, but it
+runs on what is left of the 60s bound on the whole request, counted from
+when the first attempt was sent: a slow but healthy read still finishes if
+the retry's headers and body together fit in that remainder (about 45s after
+a header timeout), and one that needs longer now fails at 60s. The header
+timer never cuts off a body that is still streaming; the 60s bound still
+does. The events:watch stream's connect gets neither the header timer nor
+the retry. On Windows a reset connection is retried only when it surfaces as
+an early EOF, because the check matches the Unix reset error (`ECONNRESET`),
+which a Windows reset (`WSAECONNRESET`) is not. A write gets no
+header timer (the server answers a write only after it commits, so a large
+one can be slow and healthy) and is never retried; if the 60s bound expires
+after it was sent but before its headers, it fails with an error naming the
+server's host, because it may or may not have been applied. A batch apply of
+more than 100 items (a large `bd create --graph` plan, say) gets 6 minutes
+instead of 60s, because `bd serve` gives such a request its
+`--large-apply-ceiling` (5 minutes by default) and finishes it even after the
+client has given up. A server whose ceiling is raised past about 5m15s can
+still outlast the client. A dial or TLS timeout stays a plain connection
+error, since the server never saw the request, and a connect that fails says
+so: it names the address that refused the connection (nothing listening) or
+never answered (a filtered port or a down host, after the dialer's 30s), or
+the host name that did not resolve. `off` turns off only the
+header timer: a reset read is still retried, and a write's timeout is still
+reported as above.
+
+Whether the server applies bd's external-dependency policy itself (the
+`policy.external_dependencies` capability) is remembered for 5 minutes per
+server URL and pinned project, in `beads/http-policy/` under the user cache
+directory, so `bd ready` does not fetch the server's context before every
+listing just to learn it. `BEADS_HTTP_POLICY_CACHE_TTL` sets that window (a
+duration such as `1m`, a number of seconds, or `off`); a server restarted
+with a different composition is seen once it passes. Claims and closes never
+use the cached answer: they ask the server, since a stale one could skip the
+client-side refusal of externally blocked work. A workspace connected without
+a project pin is not cached.
+
+`bd search`, `bd show --current` and `bd recompute-blocked` work over HTTP
+too, each in its own way. `bd search` asks the server's listing with its text (`q`, behind the `issues.list.search` capability) and
+refuses before dialing against a server that does not advertise it. `bd list
+--no-assignee`, `--title` and `--id` likewise ride the listing's
+`no_assignee`, `title` and repeatable `id`, each behind its own capability
+(`issues.list.noAssignee`, `issues.list.title`, `issues.list.ids`), and the
+rest of `bd list`'s filters (`--updated-*`, `--closed-*`, `--defer-*`,
+`--due-*`, `--priority*`, the text and external-ref matches, `--spec`,
+`--label-pattern`/`--label-regex`, `--exclude-type`, `--no-parent`,
+`--no-labels`, `--empty-description`, `--pinned`/`--no-pinned`,
+`--deferred`, `--overdue`, `--mol-type`, `--wisp-type`) ride it behind one
+capability, `issues.list.filters`. Time bounds are resolved on the client as
+they are locally; `--overdue` compares against the server's clock. The
+default `--parent` tree view does not carry those filters yet and refuses one
+rather than drop it; `--flat` or `--json` applies them to the parent's direct
+children (not its whole subtree).
+`bd show --current` finds the actor's in-progress or hooked issue through the
+server's boolean query. `bd recompute-blocked` is a no-op that exits 0: the
+server maintains `is_blocked` on every write, and repairing a stale flag is
+done in the server's own workspace (`--json` reports
+`{"rows_corrected": 0, "maintained_by": "server"}`).
+
 An embedding program that links beads as a library rather than running
 `cmd/bd` registers this backend itself through the public
 [`backend/http`](backend/http) package (`bdhttp.Register`), and can open a

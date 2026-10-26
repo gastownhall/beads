@@ -140,6 +140,24 @@ class EvaluateTest(unittest.TestCase):
         })
         self.assertEqual([r.label for r in results], ["//b:t", "//a:t"])
 
+    def test_labels_restricts_to_exact_matches(self):
+        # item 5 A2's union BEP has both tiers' shards; a lane that owns
+        # only one target's budget must not be skewed by the other's.
+        shards = {
+            "//a:t": {1: 10_000, 2: 20_000},
+            "//b:t": {1: 80_000, 2: 900_000},
+        }
+        results = shard_budget.evaluate(shards, labels={"//a:t"})
+        self.assertEqual([r.label for r in results], ["//a:t"])
+
+    def test_labels_none_judges_every_sharded_target(self):
+        shards = {
+            "//a:t": {1: 10_000, 2: 20_000},
+            "//b:t": {1: 80_000, 2: 900_000},
+        }
+        results = shard_budget.evaluate(shards, labels=None)
+        self.assertEqual({r.label for r in results}, {"//a:t", "//b:t"})
+
 
 class MainTest(unittest.TestCase):
     def test_warn_only_exits_zero(self):
@@ -171,6 +189,67 @@ class MainTest(unittest.TestCase):
         path = write_bep(events)
         try:
             rc = shard_budget.main(["--bep", path, "--fail-on-imbalance"])
+        finally:
+            os.unlink(path)
+        self.assertEqual(rc, 0)
+
+    def test_label_scopes_to_exact_target_ignoring_others_imbalance(self):
+        # item 5 A2's bazel-dolt-int Shard balance step: --label scopes to
+        # server-storage's own target, so a wildly imbalanced cmd-dolt shard
+        # elsewhere in the same union BEP does not fail this invocation.
+        storage_shards = {i: 80_000 for i in range(1, 10)}
+        cmd_shards = {1: 10_000, 2: 900_000}  # would fail on its own
+        events = [test_result_event("//storage:t", i, ms) for i, ms in storage_shards.items()]
+        events += [test_result_event("//cmd:t", i, ms) for i, ms in cmd_shards.items()]
+        path = write_bep(events)
+        try:
+            rc = shard_budget.main(["--bep", path, "--fail-on-imbalance", "--label", "//storage:t"])
+        finally:
+            os.unlink(path)
+        self.assertEqual(rc, 0)
+
+    def test_unknown_label_fails_even_without_fail_on_imbalance(self):
+        # PR #7535 review, should-fix 3 (carried): a --label naming a target
+        # with no testResult event in the BEP at all is a workflow authoring
+        # error (a typo, or a renamed target), not a quiet "nothing to
+        # judge" success.
+        events = [test_result_event("//storage:t", i, 80_000) for i in range(1, 10)]
+        path = write_bep(events)
+        try:
+            rc = shard_budget.main(["--bep", path, "--label", "//nope:x"])
+        finally:
+            os.unlink(path)
+        self.assertEqual(rc, 1)
+
+    def test_label_present_with_one_shard_is_not_an_error(self):
+        # A label can legitimately have zero or one executed shard this run
+        # (the rest were cache hits): evaluate() already skips it as
+        # insufficient evidence, and that must stay a 0, not the unknown-
+        # label error above.
+        events = [test_result_event("//storage:t", 1, 80_000)]
+        path = write_bep(events)
+        try:
+            rc = shard_budget.main(["--bep", path, "--label", "//storage:t"])
+        finally:
+            os.unlink(path)
+        self.assertEqual(rc, 0)
+
+    def test_label_with_every_shard_cached_is_not_an_error(self):
+        # A fully cache-hit invocation of a sharded target is a legitimate
+        # outcome (nothing executed, so nothing to judge for balance), not a
+        # --label typo: read_shard_durations has zero entries for it, but
+        # read_tested_labels still sees it via its cached testResult events.
+        # This was a real CI regression (PR #7535's own dolt-int run went
+        # red here on a fully-cached //internal/storage/dolt:
+        # dolt_server_full_test) that the should-fix 3 fix above introduced
+        # and this test pins against recurring.
+        events = [
+            test_result_event("//storage:t", i, 80_000, cached=True)
+            for i in range(1, 10)
+        ]
+        path = write_bep(events)
+        try:
+            rc = shard_budget.main(["--bep", path, "--label", "//storage:t"])
         finally:
             os.unlink(path)
         self.assertEqual(rc, 0)

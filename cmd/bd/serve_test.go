@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
 	"github.com/steveyegge/beads/internal/configfile"
@@ -134,6 +135,98 @@ func TestServeSkipsPostCommandMaintenance(t *testing.T) {
 	// And strict readonly still wins over everything, serve included.
 	if runsPostCommandMaintenance("update", true) {
 		t.Error("strict readonly no longer suppresses post-command maintenance")
+	}
+}
+
+// TestOnlyOneShotCommandsMemoizeRemoteReads (bts-xpw.3.14.6): an http
+// transport's read memo answers a repeated row read from a response already
+// received, which is only right for a command that exits within seconds. bd
+// serve answering other clients, and a --watch or --follow poll, would show a
+// snapshot instead of the changes they exist to show.
+func TestOnlyOneShotCommandsMemoizeRemoteReads(t *testing.T) {
+	command := func(name string, args ...string) *cobra.Command {
+		t.Helper()
+		cmd := &cobra.Command{Use: name}
+		cmd.Flags().BoolP("watch", "w", false, "")
+		cmd.Flags().Bool("follow", false, "")
+		if err := cmd.ParseFlags(args); err != nil {
+			t.Fatalf("%s %v: %v", name, args, err)
+		}
+		return cmd
+	}
+	for _, tc := range []struct {
+		cmd  *cobra.Command
+		args string
+		want bool
+	}{
+		{command("show"), "show", true},
+		{command("list"), "list", true},
+		{command("update"), "update", true},
+		{command("show", "--watch"), "show --watch", false},
+		{command("list", "-w"), "list -w", false},
+		{command("show", "--watch=false"), "show --watch=false", true},
+		{command("tail", "--follow"), "events tail --follow", false},
+		{command(serveCmdName), "serve", false},
+		{&cobra.Command{Use: "close"}, "close (no watch flag at all)", true},
+	} {
+		if got := commandMemoizesReads(tc.cmd); got != tc.want {
+			t.Errorf("bd %s: commandMemoizesReads = %v, want %v", tc.args, got, tc.want)
+		}
+	}
+}
+
+// TestReadMemoOptInReadsTheRealPollingFlags (mc-5dkzp): the synthetic commands
+// above pin the denylist's logic; this pins it against the commands that really
+// poll. Renaming a polling flag, or giving it another spelling, must not quietly
+// memoize a poll.
+func TestReadMemoOptInReadsTheRealPollingFlags(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cmd  *cobra.Command
+		args []string
+	}{
+		{"show --watch", showCmd, []string{"--watch"}},
+		{"show -w", showCmd, []string{"-w"}},
+		{"list --watch", listCmd, []string{"--watch"}},
+		{"list -w", listCmd, []string{"-w"}},
+		{"events tail --follow", eventsTailCmd, []string{"--follow"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetCommandFlags(tc.cmd)
+			t.Cleanup(func() { resetCommandFlags(tc.cmd) })
+			if !commandMemoizesReads(tc.cmd) {
+				t.Fatalf("bd %s without the flag: commandMemoizesReads = false, want true (a one-shot read)", tc.cmd.Name())
+			}
+			if err := tc.cmd.ParseFlags(tc.args); err != nil {
+				t.Fatalf("parse %v: %v", tc.args, err)
+			}
+			if commandMemoizesReads(tc.cmd) {
+				t.Errorf("bd %s: commandMemoizesReads = true, want false (a poll must see other writers)", tc.name)
+			}
+		})
+	}
+	if commandMemoizesReads(serveCmd) {
+		t.Errorf("bd serve: commandMemoizesReads = true, want false (a server answers other clients)")
+	}
+}
+
+// TestReadMemoKillSwitchTurnsTheMemoOff (mc-5dkzp): BD_HTTP_READ_MEMO=0 takes
+// the memo away from every command, so an operator who suspects a stale read
+// can rule it out without a rebuild. Any other value leaves the default.
+func TestReadMemoKillSwitchTurnsTheMemoOff(t *testing.T) {
+	oneShot := &cobra.Command{Use: "show"}
+	for _, tc := range []struct {
+		value string
+		want  bool
+	}{
+		{"", true},
+		{"1", true},
+		{"0", false},
+	} {
+		t.Setenv(readMemoEnvVar, tc.value)
+		if got := commandMemoizesReads(oneShot); got != tc.want {
+			t.Errorf("%s=%q: commandMemoizesReads(show) = %v, want %v", readMemoEnvVar, tc.value, got, tc.want)
+		}
 	}
 }
 

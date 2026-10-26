@@ -12,6 +12,12 @@ import (
 // getDatabasePath returns the actual database directory path, respecting dolt_data_dir.
 // When dolt_data_dir is configured (e.g. ext4 redirect for WSL), the database lives
 // outside .beads/dolt/ — this function resolves the correct location.
+//
+// It reads the metadata with configfile.Load, which migrates a legacy
+// config.json into metadata.json, so pass only the workspace doctor runs in,
+// which command admission has checked. Read a .beads that admission never saw,
+// such as a nested one the Classic Artifacts walk reaches, with
+// configfile.LoadAndCheckWorkspaceFormat instead.
 func getDatabasePath(beadsDir string) string {
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil || cfg == nil {
@@ -140,6 +146,12 @@ func ChildParentDependencies(path string, verbose bool) error {
 	// Find child→parent BLOCKING dependencies where issue_id starts with depends_on_id + "."
 	// Only matches blocking types (blocks, conditional-blocks, waits-for) that cause deadlock.
 	// Excludes 'parent-child' type which is a legitimate structural hierarchy relationship.
+	// A parent's edge onto its own child (GH#4814) is not a target here: since
+	// gastownhall/beads#6506 it is a close gate. Where the cascade still locks
+	// the child out of ready work (a gate past its walk depth, or a child with
+	// a second parent, bd-eoxqs0), that is the cascade's limit, not a reason
+	// to drop the gate; see checkChildParentDependenciesDB in
+	// cmd/bd/doctor/validation.go.
 	//nolint:gosec // G202: fixDependencyUnionSQL returns a fixed internal SELECT fragment.
 	query := `
 		SELECT d.dep_table, d.issue_id, d.depends_on_id, d.type

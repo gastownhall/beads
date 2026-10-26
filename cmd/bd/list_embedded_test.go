@@ -811,6 +811,7 @@ func TestEmbeddedListSearchAndOutputFormats(t *testing.T) {
 		if !strings.Contains(out, "digraph") {
 			t.Errorf("dot output should contain 'digraph' header, got: %s", out)
 		}
+		assertDotCanonicalOrder(t, out)
 	})
 
 	t.Run("format_dot_output_error", func(t *testing.T) {

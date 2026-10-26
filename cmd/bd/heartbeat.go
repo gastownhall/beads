@@ -7,6 +7,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/issueops"
 )
 
 var heartbeatCmd = &cobra.Command{
@@ -24,10 +25,13 @@ it up. Heartbeat pushes lease_expires_at forward and stamps heartbeat_at = now.
 Only the current owner may heartbeat. If the lease has already been reclaimed or
 the issue closed, heartbeat fails so the worker learns to stop.
 
-Leases live in an ephemeral, node-local table: heartbeats write no Dolt commit
-and no history, so any cadence comfortably below the TTL is fine. Leases are
-only enforceable on the node that granted them; cross-machine claim visibility
-rides the issue's status and assignee, which do commit.
+Leases live in an ephemeral, node-local table: a heartbeat that refreshes your
+lease writes no Dolt commit and no history, so any cadence comfortably below
+the TTL is fine. Only a re-arm (the first heartbeat of a claim that has no
+lease, such as one set by a plain update) is recorded as a change to the issue
+and committed, once. Leases are only enforceable on the node that granted them;
+cross-machine claim visibility rides the issue's status and assignee, which do
+commit.
 
 Examples:
   bd heartbeat bd-123
@@ -48,8 +52,15 @@ Examples:
 		ctx := rootCtx
 		id := args[0]
 
+		// One role on every route: the store's own
+		// Heartbeater accessor on the direct routes — dolt, embedded dolt and
+		// a registered HTTP backend, where it dials issues.heartbeat and an
+		// older server is refused before the dial naming the token — and the
+		// proxied-server provider's on the proxied one. On every leg a refresh
+		// writes ONLY the lease row (no revision remint, no history, no Dolt
+		// commit); a re-arm is recorded as a mutation and committed once.
 		if usesProxiedServer() {
-			return runHeartbeatProxiedServer(ctx, id)
+			return runHeartbeatProxied(ctx, id)
 		}
 
 		result, err := resolveAndGetIssueForMutation(ctx, store, id)
@@ -68,7 +79,14 @@ Examples:
 		defer result.Close()
 
 		issueStore := result.Store
-		if err := issueStore.HeartbeatIssue(ctx, result.ResolvedID, currentActor()); err != nil {
+		heartbeater, err := issueStore.Heartbeater()
+		if err != nil {
+			return HandleErrorRespectJSON("heartbeat %s: %v", result.ResolvedID, err)
+		}
+		if _, err := heartbeater.Heartbeat(ctx, issueops.HeartbeatRequest{
+			Actor:   currentActor(),
+			IssueID: result.ResolvedID,
+		}); err != nil {
 			return HandleErrorRespectJSON("heartbeat %s: %v", result.ResolvedID, err)
 		}
 
@@ -85,9 +103,9 @@ Examples:
 	},
 }
 
-// renderHeartbeatSuccess prints the success shape both storage routes share —
-// the classic path and the proxied-server path (heartbeat_proxied_server.go)
-// call exactly this code, so the --json contract workers parse
+// renderHeartbeatSuccess prints the success shape every storage route shares —
+// the direct path and the proxied-server path (runHeartbeatProxied) call
+// exactly this code, so the --json contract workers parse
 // ({"id","status":"heartbeat","owner"}) cannot drift between modes.
 func renderHeartbeatSuccess(id, title string) error {
 	if jsonOutput {

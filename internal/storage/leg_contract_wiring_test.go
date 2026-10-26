@@ -33,6 +33,30 @@ var neverSatisfiedTags = map[string]bool{"ignore": true, "never": true}
 const importerOneAccessorWaiverReason = "Importer has one accessor (uow.ImporterSource); " +
 	"the store legs run bd import through the raw seam and implement no Importer role"
 
+// asOfReadNoHTTPWireWaiverReason covers the five R7.1 as-of read contracts
+// (backend/conformance/versioned_read_contract.go). Unlike the
+// participation-generation cases, which run on this leg because their subject
+// is a create or an update the client can send
+// (internal/httpclient/served_participation_generation_test.go), the subject
+// here is the read itself, AsOfReadFixture.Resolve, and it has no form on the
+// wire:
+//   - R7.1's read is issueops.AsOfReadInTx. No publicops role reaches it and no
+//     wire operation serves it, so there is nothing for the client to call.
+//   - The wire carries neither selector (an instant, or a previously served
+//     version address) nor the gone/unknown refusal the read answers with.
+//   - The client's only point-in-time read, storage.DoltStorage.AsOf, is a
+//     Dolt commit-ref read, not R7.1, and it is on the client's unsupported
+//     allowlist (D8: v0 publishes no history surface).
+//
+// Binding Resolve to the reference store behind the served env would run the
+// cases green, but as a property of that store, never of the client; the store
+// legs already pin it. The waiver stands until the wire publishes an as-of
+// read.
+const asOfReadNoHTTPWireWaiverReason = "the read under test has no form on the http wire: R7.1's as-of read " +
+	"(issueops.AsOfReadInTx) is reached by no publicops role and no wire operation, the wire carries neither an " +
+	"instant/version-address selector nor a gone/unknown refusal, and the client's only point-in-time read, " +
+	"DoltStorage.AsOf, is a Dolt commit-ref read on its unsupported allowlist (D8)"
+
 // The waivers of the three legs registered here. Each is registered beside its
 // leg rather than written into one literal, so a leg registered elsewhere
 // brings its waivers the same way; see unwiredContractEntrypoints.
@@ -57,6 +81,12 @@ func init() {
 		"RunIssueOperationsCreateParentChildRecomputesWaitsForClosure":   stagingWaiverReason,
 	})
 	registerContractLegWaivers("http", map[string]string{
+		"RunAsOfReadIsCompleteOnlyForTheAnsweringStoresHoldings":              asOfReadNoHTTPWireWaiverReason,
+		"RunAsOfReadRefusesAsGoneOrUnknownNeverSubstitutingAnotherVersion":    asOfReadNoHTTPWireWaiverReason,
+		"RunAsOfReadReportsTheAddressItServed":                                asOfReadNoHTTPWireWaiverReason,
+		"RunAsOfReadReturnsTheLatestVersionAtOrBeforeTStrictlyExcludingLater": asOfReadNoHTTPWireWaiverReason,
+		"RunAsOfReadSelectorAcceptsEitherAnInstantOrAVersionAddress":          asOfReadNoHTTPWireWaiverReason,
+
 		"RunCycleDetectorIncludeTracksFindsTheMoleculeRootShape":         cycleTracksWireGapWaiverReason,
 		"RunCycleDetectorIncludeTracksIgnoresAPureTracksLoop":            cycleTracksWireGapWaiverReason,
 		"RunCycleDetectorIncludeTracksWalksEachEdgeInItsStoredDirection": cycleTracksWireGapWaiverReason,
@@ -76,8 +106,10 @@ func init() {
 		"RunImporterWiresTheCrossPlaneEdgeBetweenItsRows": importerOneAccessorWaiverReason,
 		"RunImporterReportsTheCycleEdgeItDropped":         importerOneAccessorWaiverReason,
 
+		"RunACarriedAddressKeepsResolvingAcrossLaterBumps":             retentionEpochNoRoleWaiverReason,
 		"RunADestructiveOperationEnumeratesAffectedAddressesFirst":     retentionEpochNoRoleWaiverReason,
 		"RunAHoldPreventsRemovalAndReportsInRetainedBounds":            retentionEpochNoRoleWaiverReason,
+		"RunALostAddressStaysGoneAcrossASchemeChange":                  retentionEpochNoRoleWaiverReason,
 		"RunAStoreThatRemovesStateStillAnswersGoneDurably":             retentionEpochNoRoleWaiverReason,
 		"RunAStoreWithNoLineageKnowledgeAnswersUnknownNotGone":         retentionEpochNoRoleWaiverReason,
 		"RunAnAddressNeverResolvesToADifferentState":                   retentionEpochNoRoleWaiverReason,
@@ -91,6 +123,7 @@ func init() {
 		"RunRemovalNeverReassignsASurvivingAddress":                    retentionEpochNoRoleWaiverReason,
 		"RunRemovalReasonIsRetentionErasureOrReorganizationDistinctly": retentionEpochNoRoleWaiverReason,
 		"RunRemovalReportsTheSurvivingRetainedWindow":                  retentionEpochNoRoleWaiverReason,
+		"RunTokenSchemeChangeCarriesLiveAddressesAndOnlyThose":         retentionEpochNoRoleWaiverReason,
 
 		"RunAdvisoryLeaseAloneDoesNotPreventTheInvariantViolation":    crossRecordInvariantNoRoleWaiverReason,
 		"RunCrossRecordInvariantSurvivesTwoPassingPerRecordGuards":    crossRecordInvariantNoRoleWaiverReason,
@@ -120,6 +153,12 @@ func init() {
 
 		"RunLifecycleUpdateExpectedVersionSingleWinnerWithDisjointColumnsUnderConcurrency":  issuePatchFieldsNotOnUpdateWireWaiverReason,
 		"RunLifecycleUpdateExpectedVersionSingleWinnerAcrossUpdateAndCloseUnderConcurrency": issuePatchFieldsNotOnUpdateWireWaiverReason,
+
+		"RunParticipationGenerationNoHistoryIssueCreateDeclaresParticipation": participationGenerationWireGapWaiverReason,
+		"RunParticipationGenerationUnflaggedWispCreateMintsNothing":           participationGenerationWireGapWaiverReason,
+		"RunParticipationGenerationWispFlagClearMintsNothing":                 participationGenerationWireGapWaiverReason,
+		"RunParticipationGenerationWispRootSquashMintsNothing":                participationGenerationWireGapWaiverReason,
+		"RunParticipationGenerationReadReportsExactlyTheParticipatingRows":    participationReadNoHTTPWireWaiverReason,
 	})
 }
 
@@ -150,30 +189,44 @@ const cycleTracksWireGapWaiverReason = "issueops.DetectCyclesRequest.IncludeTrac
 	"\"L-cycles-tracks\" — rather than silently answering the narrower walk); no slice through S13 adds a wire " +
 	"parameter for it, so closing this is a new, not-yet-numbered slice rather than a missing test line"
 
-// retentionEpochNoRoleWaiverReason covers the fifteen RetentionFixture and
-// EpochFixture cases: PERMANENTLY unservable over HTTP, not merely unwired
-// yet.
+// retentionEpochNoRoleWaiverReason covers the eighteen RetentionFixture and
+// EpochFixture cases (backend/conformance/retention_epoch_contract.go).
+// All but four of the participation-generation cases run on this leg because
+// their subject is a create or an update the client can send
+// (internal/httpclient/served_participation_generation_test.go; those four
+// stay waived under participationGenerationWireGapWaiverReason). These
+// cases are different: every hook of these two fixtures IS the operation
+// under test, and none has a form on the wire:
+//   - EpochFixture's hooks (CurrentEpoch, BumpEpoch, MintUnderEpoch,
+//     StillServes, Resolve, CurrentAddressFor, LoseVersion) are the R20 epoch
+//     operations themselves: methods on the concrete *DoltStore and
+//     *EmbeddedDoltStore over issueops' *InTx bodies, on no storage
+//     interface, no publicops role and no wire operation. Every call path
+//     into them starts in a test: the methods are called only from each
+//     store leg's own _test.go files (its EpochFixture, which the
+//     backend/conformance contracts drive, and its epoch tests), and the
+//     *InTx bodies only from those methods, from each other and from tests
+//     (the uow leg's fixture, through a test-only type assertion, and
+//     issueops' and the dolt leg's own tests). No command, role or server
+//     handler reaches them, so no client mutation touches epoch state either.
+//   - RetentionFixture's hooks (Resolve, Remove, Hold, ForceRemove, Erase,
+//     Mint) are retention operations no backend implements yet: every
+//     store leg wires them nil and its cases skip, and the wire has no
+//     removal, hold, erasure or gone/unknown resolve to bind them to.
 //
-// Both fixtures are RAW STORAGE HOOKS, not a publicops role: RetentionFixture
-// and EpochFixture (backend/conformance/retention_epoch_contract.go) carry no
-// publicops.XXX field at all, only closures like Resolve, Remove, Hold,
-// Erase, Mint, CurrentEpoch, and BumpEpoch that reach past every role
-// straight at a backend's own address/epoch/retention bookkeeping — the same
-// bookkeeping a storage engine keeps about itself, not a capability it was
-// ever going to publish to a caller. dolt, embeddeddolt, and uow all wire
-// this contract because all three ARE storage engines with that bookkeeping
-// to show; the http leg is a REMOTE CLIENT of one, with no address table,
-// epoch counter, or retention window of its own to report — there is nothing
-// behind this door for a wire operation to open onto, now or in a later
-// slice, unless some future design gives retention/epoch state its own
-// publicops role and wire surface. That would be a new role, not a missing
-// test line, which is why this is a named waiver rather than a ceiling
-// entry.
-const retentionEpochNoRoleWaiverReason = "RetentionFixture and EpochFixture carry raw address/epoch/retention " +
-	"storage hooks (Resolve, Remove, Hold, Erase, Mint, CurrentEpoch, BumpEpoch, ...) with no publicops role " +
-	"behind them; dolt, embeddeddolt and uow wire this contract because they ARE the storage engine this " +
-	"bookkeeping belongs to, and the http leg is a remote client with no such bookkeeping of its own to report " +
-	"— there is no role or wire surface for this to ever route through unless one is designed from scratch"
+// Binding the hooks to the reference store behind the served env would run
+// the epoch cases green, but as a property of that store, never of the
+// client; the store legs already pin it. The waiver stands until retention or
+// epoch state gets a publicops role and a wire operation of its own, which
+// would be a new role, not a missing test line.
+const retentionEpochNoRoleWaiverReason = "every RetentionFixture/EpochFixture hook is the operation under test and " +
+	"none has a form on the http wire: the R20 epoch operations (CurrentEpoch, BumpEpoch, MintUnderEpoch, " +
+	"StillServes, Resolve, CurrentAddressFor, LoseVersion) are concrete-store methods on no storage interface, " +
+	"publicops role or wire operation, reached only from tests (each store leg's fixture and epoch tests call the " +
+	"methods, the uow fixture calls the issueops bodies through a test-only type assertion), and the retention " +
+	"hooks (Resolve, Remove, Hold, ForceRemove, Erase, Mint) are implemented by no backend and have no wire " +
+	"removal, hold, erasure or resolve; binding them to the served env's reference store would test that store, " +
+	"not the client"
 
 // crossRecordInvariantNoRoleWaiverReason covers the seven CrossRecordInvariantFixture
 // cases, for the same shape of reason as retentionEpochNoRoleWaiverReason.
@@ -311,23 +364,78 @@ const issueOperationsUpdateRawSeamWaiverReason = "these three cases take the unt
 // because SOME of their racers patch fields updateIssue refuses outright
 // rather than ever sending — not a race outcome, a refusal before any
 // request leaves the client. internal/httpclient/encode/ledger.go already
-// names this gap per field (W-IssuePatch.SpecID, W-IssuePatch.AwaitID,
-// W-IssuePatch.Owner, D8 refuse-not-drop): neither IssuePatchBody nor
-// ApplyPatchBody publishes spec_id or await_id at all, and Owner is excluded
+// names this gap per field (W-IssuePatch.SpecID, W-IssuePatch.Owner, D8
+// refuse-not-drop): neither IssuePatchBody nor
+// ApplyPatchBody publishes spec_id at all, and Owner is excluded
 // from IssuePatchBody specifically (ApplyPatchBody — issues:batchApply's body
 // — does carry it, which is a different operation from updateIssue). Closing
 // this gap means publishing those fields on IssuePatchBody, a wire change to
 // the write role itself, not a client-side wiring exercise — tracked as a
-// follow-up slice, S4b: publish owner/spec_id/await_id on the wire. Until
-// S4b lands, these two contracts stay off this leg rather than asserting a
-// race outcome against a request three of its own racers never send.
+// follow-up slice, S4b: publish owner/spec_id/await_id on the wire. await_id
+// is published on both patch bodies behind issues.update.gates and sent by
+// this client (W-IssuePatch.AwaitID retired), so only
+// spec_id and owner remain S4b's. Until they land, these two contracts stay
+// off this leg rather than asserting a race outcome against a request some of
+// its racers never send.
 const issuePatchFieldsNotOnUpdateWireWaiverReason = "PENDING, not permanent (tracked as S4b: publish " +
 	"owner/spec_id/await_id on the wire): two of the four ExpectedVersion concurrency contracts race " +
-	"IssuePatch.SpecID/.AwaitID/.Owner edits against updateIssue, and those three fields are refused outright by " +
-	"IssuePatchBody (W-IssuePatch.SpecID, W-IssuePatch.AwaitID, W-IssuePatch.Owner in " +
+	"IssuePatch.SpecID/.AwaitID/.Owner edits against updateIssue, and SpecID and Owner are refused outright by " +
+	"this client (W-IssuePatch.SpecID, W-IssuePatch.Owner in " +
 	"internal/httpclient/encode/ledger.go, D8 refuse-not-drop) rather than ever reaching the server, so the race " +
-	"never happens over this wire; closing the gap means publishing those fields on IssuePatchBody, which is a " +
-	"wire change to the write role (S4b), not something this leg's test wiring can bind around today"
+	"never happens over this wire; await_id is sent behind issues.update.gates, and " +
+	"closing the rest of the gap means publishing spec_id and owner on IssuePatchBody, which is a wire change " +
+	"to the write role (S4b), not something this leg's test wiring can bind around today"
+
+// participationReadNoHTTPWireWaiverReason covers the participation read's case
+// (RunParticipationGenerationReadReportsExactlyTheParticipatingRows), for the
+// reason the as-of read's cases are waived: the subject is the read itself, and
+// it has no form on the wire. issueops.ParticipatingIssueIDsInTx is reached by
+// storage.HistoryParticipation on the store legs and by the unit of work's
+// IssueUseCase on uow, by no publicops role, and no wire operation serves it, so
+// the client has nothing to call. Binding the closure to the reference store
+// behind the served env would run the case green as a property of that store,
+// never of the client. (The pre-enable scan does not reach it over HTTP either:
+// its listing is refused first, ListRequest.IncludeAllTypes having no form on the
+// v0 wire.)
+const participationReadNoHTTPWireWaiverReason = "the read under test has no form on the http wire: " +
+	"issueops.ParticipatingIssueIDsInTx is reached by storage.HistoryParticipation on the store legs and the " +
+	"unit of work's IssueUseCase on uow, by no publicops role and no wire operation, so the client has nothing " +
+	"to call"
+
+// participationGenerationWireGapWaiverReason covers the four
+// ParticipationGenerationFixture cases whose mutation has no form on this
+// wire. The other cases run on the http leg
+// (internal/httpclient/served_participation_generation_test.go): the client
+// creates and updates, and the fixture flips the reference store's flag and
+// reads its raw columns, as served_dualwrite_history_test.go does.
+//
+// Each waived case needs a mutation the client cannot send:
+//   - WispFlagClearMintsNothing clears a wisp's flag IN PLACE with the untyped
+//     UpdateIssue map {"wisp": false}. storage.UpdateIssue is on this client's
+//     unsupported allowlist (D8), and IssuePatch has no in-place flag member:
+//     its Persistence member moves the row between tables, which the
+//     wisp-arrival cases already run here.
+//   - WispRootSquashMintsNothing runs the close and that flag clear in ONE
+//     transaction. RunInTransaction is on the unsupported allowlist too, and
+//     the wire publishes no squash operation.
+//   - UnflaggedWispCreateMintsNothing creates an unflagged row in the wisps
+//     table through import's WispPlaneOverride = &true. The wire drops that
+//     member (roleIgnoredCreateIssueMembers in batchcreator.go), so an
+//     unflagged create lands in the issues table.
+//   - NoHistoryIssueCreateDeclaresParticipation has a no-history ISSUES-table
+//     create as its subject (WispPlaneOverride = &false). With that member
+//     dropped, a client create carrying no_history routes to the wisps table
+//     (TableRouting). Seeding the row through the reference store instead
+//     would make the create under test the store's own, a property of the
+//     store the server happens to share a process with, never of the client.
+const participationGenerationWireGapWaiverReason = "PENDING, not permanent (no slice tracks it yet; each case runs " +
+	"on this leg once the wire publishes its mutation: an in-place wisp flag clear, a squash operation, or a create " +
+	"that names its table plane the way import's WispPlaneOverride does): " +
+	"the mutation this case needs has no form on the http wire: " +
+	"an in-place wisp flag clear is an untyped UpdateIssue map and the squash a RunInTransaction, both on this " +
+	"client's unsupported allowlist (D8), and IssuePatch.Persistence moves the row rather than clearing the flag in " +
+	"place; an unflagged wisps-table create and a no-history issues-table create both need WispPlaneOverride, " +
+	"which the wire drops (roleIgnoredCreateIssueMembers), so the first lands in issues and the second in wisps"
 
 // TestEveryLegWiresEveryRoleContract fails when a backend leg skips a role
 // contract the conformance package exports.

@@ -128,6 +128,30 @@ func TestTheParentWalkInvertsTheDerivedDefaults(t *testing.T) {
 			want: url.Values{"parent": {"bd-root"}, "include_infra": {"true"}},
 		},
 		{
+			// An infra --type admits the plane on its own too, AND narrows the
+			// read to that type's ephemeral rows, so a bare one is no plane
+			// intent at all: the server re-derives the narrowing from the type.
+			name: "an infra --type alone does not invent an ephemeral intent",
+			in:   textListing(issueops.ListRequest{IssueType: "message"}),
+			want: url.Values{"parent": {"bd-root"}, "type": {"message"}},
+		},
+		{
+			// With an infra --type the ephemeral flag is NOT redundant: it lifts
+			// the type's ephemeral-only narrowing, so the durable rows of that
+			// type (a promoted wisp, a retyped issue) come back too. Dropping the
+			// parameter here would ask the server the narrower question.
+			name: "--include-ephemeral with an infra --type keeps the plane intent",
+			in:   textListing(issueops.ListRequest{IncludeEphemeral: true, IssueType: "message"}),
+			want: url.Values{"parent": {"bd-root"}, "type": {"message"}, "include_ephemeral": {"true"}},
+		},
+		{
+			// --include-infra is redundant beside an infra --type whatever the
+			// ephemeral flag says, so the pair still reads as the flag alone.
+			name: "--include-ephemeral --include-infra with an infra --type is the same question as --include-ephemeral",
+			in:   textListing(issueops.ListRequest{IncludeEphemeral: true, IncludeInfra: true, IssueType: "message"}),
+			want: url.Values{"parent": {"bd-root"}, "type": {"message"}, "include_ephemeral": {"true"}},
+		},
+		{
 			name: "an explicit status travels verbatim under its own parameter",
 			in:   textListing(issueops.ListRequest{Status: "in_progress"}),
 			want: url.Values{"parent": {"bd-root"}, "status": {"in_progress"}},
@@ -197,7 +221,8 @@ func TestTheParentWalkRefusesAResidualFilter(t *testing.T) {
 	}{
 		{
 			// The canonical residual: --exclude-type appends past the derived
-			// gate and infra members, and listIssues publishes no exclude_type.
+			// gate and infra members, and the walk does not send listIssues'
+			// exclude_type.
 			name: "--exclude-type",
 			in:   textListing(issueops.ListRequest{ExcludeTypes: []string{"chore"}}),
 			row:  "P-IssueFilter.ExcludeTypes",
@@ -212,8 +237,9 @@ func TestTheParentWalkRefusesAResidualFilter(t *testing.T) {
 		},
 		{
 			// A residual with a documented parameter is still a residual when
-			// the parameter is not this operation's: listIssues publishes no
-			// priority.
+			// the walk does not send it: listIssues takes `priority` only
+			// behind issues.list.filters, and the walk encodes none of that
+			// token's members.
 			name: "--priority",
 			in:   textListing(issueops.ListRequest{Priority: intPtr(1)}),
 			row:  "P-IssueFilter.Priority",
@@ -446,6 +472,8 @@ func TestTheParentWalkRoundTripsThroughTheServerDecoder(t *testing.T) {
 		{"--include-ephemeral alone", textListing(issueops.ListRequest{IncludeEphemeral: true})},
 		{"--include-ephemeral --include-infra", textListing(issueops.ListRequest{IncludeEphemeral: true, IncludeInfra: true})},
 		{"--include-ephemeral with an infra --type", textListing(issueops.ListRequest{IncludeEphemeral: true, IssueType: "agent"})},
+		{"--include-ephemeral --include-infra with an infra --type", textListing(issueops.ListRequest{IncludeEphemeral: true, IncludeInfra: true, IssueType: "agent"})},
+		{"--include-infra with an infra --type", textListing(issueops.ListRequest{IncludeInfra: true, IssueType: "agent"})},
 		{"--include-templates alone", textListing(issueops.ListRequest{IncludeTemplates: true})},
 		{"an explicit status", textListing(issueops.ListRequest{Status: "in_progress"})},
 		{"a multi-status filter", textListing(issueops.ListRequest{Status: "open,in_progress"})},

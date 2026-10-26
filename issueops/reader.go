@@ -93,7 +93,9 @@ type ReadyRequest struct {
 	// Limit bounds the page. Nil means the shared ready default; 0 means
 	// unlimited. It is a pointer so that "unset" and "explicitly unlimited"
 	// stay distinguishable, which is what lets one constant serve both
-	// surfaces.
+	// surfaces. Over the http backend an unlimited ready read is one
+	// response, bounded at BEADS_HTTP_UNLIMITED_READ_CAP rows and refused
+	// past it with httpclient.ErrUnlimitedReadCap, never truncated.
 	Limit *int
 	// Offset skips the first N matching rows, on EVERY implementation. The
 	// page a caller receives is the rows at positions [Offset, Offset+Limit)
@@ -142,6 +144,16 @@ type ListRequest struct {
 	// so `pinned` and `hooked` are the two spellings that also drop that
 	// predicate — every other status narrows to unflagged rows.
 	Status string
+	// ExcludeStatus names statuses to leave out, on top of whatever Status or
+	// the default exclusions select (it never re-admits a row they hide).
+	// Entries may be comma-separated, and each name is validated against the
+	// workspace vocabulary (built-in plus custom statuses) exactly as
+	// CountRequest.ExcludeStatus is: an unknown name is ErrValidation rather
+	// than excluding nothing, because a silently ignored exclusion answers a
+	// wider set. With AllFlag there are no default exclusions, so the
+	// listing keeps every status not named here, without the caller
+	// having to enumerate every status it wants.
+	ExcludeStatus []string
 	// IssueType is validated against the workspace vocabulary — unlike
 	// ReadyRequest.IssueType, which matches nothing rather than failing.
 	IssueType   string
@@ -150,6 +162,17 @@ type ListRequest struct {
 	SpecPrefix  string
 	// IDFilter is a comma-separated id set.
 	IDFilter string
+	// Query is `bd search`'s free text, with that command's meaning and not
+	// TitleSearch's: a row matches when its title contains the text or its id
+	// does, case-insensitively, and an id-shaped text also matches an exact
+	// id, an id prefix and the external ref. It is the `query` argument of the
+	// storage seam's SearchIssues, carried as a member so a backend that
+	// serves only roles can answer a search.
+	//
+	// It narrows; it lifts no default exclusion. A caller that wants search's
+	// "every status, every kind of row" answer asks for that with AllFlag and
+	// the Include* members, as for any other listing.
+	Query string
 
 	Labels        []string
 	LabelsAny     []string
@@ -271,6 +294,11 @@ type ListRequest struct {
 	// On the ReadyFlag arm neither applies: that set decides pinned for itself,
 	// which is why PinnedFlag is refused there and NoPinnedFlag merely accepted
 	// (see AllFlag).
+	//
+	// The two together are a contradiction and are refused with ErrValidation
+	// on every route, the way `bd list --pinned --no-pinned` refuses: no
+	// answer is both only-flagged and only-unflagged, and letting one win
+	// would answer a question the caller did not ask.
 	PinnedFlag       bool
 	NoPinnedFlag     bool
 	IncludeTemplates bool
@@ -308,6 +336,14 @@ type ListRequest struct {
 	// this. IncludeInfra does BOTH, which makes it strictly wider; what this
 	// field alone reaches is the ephemeral rows of the types a listing already
 	// shows.
+	//
+	// AN INFRA IssueType IS THE ONE NARROWING IT LIFTS. Naming a type the
+	// workspace calls infra reads only that type's EPHEMERAL rows, which is
+	// where creating one puts it; with this flag set the request reads the
+	// type's rows on both planes instead, because an infra-typed row can still
+	// be durable — a promoted wisp, an issue retyped after it was created, or
+	// one written before its type joined types.infra. That is the superset
+	// promise above applied to the narrowing; IncludeInfra alone keeps it.
 	//
 	// THE MERGED ANSWER IS ONE ORDER. Both planes are ordered together by
 	// SortBy as if they were a single table — not the durable rows followed by
@@ -370,6 +406,11 @@ type ListRequest struct {
 	// NoParent restricts to rows with no parent-child dependency edge. It has
 	// no dotted-id arm, so an edge-less "X.1" matches BOTH ParentID X and
 	// NoParent. The ReadyFlag arm refuses it; see that field.
+	//
+	// Setting both is refused with ErrValidation on every route, as
+	// CountRequest refuses it and in the sentence `bd list --parent X
+	// --no-parent` refuses with, rather than answered with only the edge-less
+	// rows under X's dotted id, which both clauses match.
 	ParentID string
 	NoParent bool
 	MolType  *MolType
@@ -416,7 +457,7 @@ type ListRequest struct {
 	// fields rather than answering a wider question than was asked. That is
 	// IDFilter, TitleSearch, SpecPrefix, the four *Contains fields,
 	// ExternalRef, every Created/Updated/Closed/Defer/Due bound, DeferredFlag,
-	// OverdueFlag, EmptyDesc, NoLabels, NoParent, PinnedFlag, PriorityMin,
+	// OverdueFlag, EmptyDesc, NoLabels, NoParent, PinnedFlag, ExcludeStatus, PriorityMin,
 	// PriorityMax, and the keyset position. There is no fallback: no
 	// combination of the two silently widens the answer.
 	//

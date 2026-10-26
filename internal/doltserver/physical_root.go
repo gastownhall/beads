@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage/backends"
 )
 
@@ -162,21 +162,6 @@ func applyCentralModeDefaults(cfg *configfile.Config) {
 	configfile.ApplyCentralDefaults(cfg, centralCfg)
 }
 
-// isRemoteServerHost reports whether a dolt server host points off-machine.
-// Local spellings (empty, localhost, loopback — including the bracketed
-// IPv6 form a host:port split leaves behind) mean bd may still manage local
-// files for the server; anything else means the data lives elsewhere and
-// there is no local physical root to gate. The local set mirrors the
-// storage layer's isLocalHost (internal/storage/dolt/store.go) so gate
-// planning and connection handling agree on what "local" means.
-func isRemoteServerHost(host string) bool {
-	switch strings.ToLower(strings.TrimSpace(host)) {
-	case "", "localhost", "127.0.0.1", "::1", "[::1]":
-		return false
-	}
-	return true
-}
-
 // ResolvePhysicalRoots computes, WITHOUT side effects, the physical database
 // root(s) that opening the given workspace would actually use, along with
 // the effective connection mode. It exists for gate planning: workspace-gate
@@ -324,9 +309,14 @@ func ResolvePhysicalRoots(beadsDir string) (PhysicalRoots, error) {
 	case cfg != nil && cfg.IsDoltServerMode():
 		pr.Mode = "server"
 		host := cfg.GetDoltServerHost()
-		if isRemoteServerHost(host) {
+		// Only bd's own server keeps its data in the workspace's local
+		// root; a server at any other host (configfile.BdRunsServerAt),
+		// the IPv6 loopback included, keeps it in its own data directory,
+		// so there is no local physical root to gate. The store decides
+		// the same way, so gate planning and connection handling agree.
+		if !configfile.BdRunsServerAt(host) {
 			pr.RemoteBackend = true
-			pr.Provenance = fmt.Sprintf("server mode with remote host %s; no local physical root", host)
+			pr.Provenance = fmt.Sprintf("server mode with host %s, a server bd does not run; no local physical root", remedy.PrintedValue(host))
 			break
 		}
 		root := cfg.DatabasePath(abs)

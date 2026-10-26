@@ -202,9 +202,9 @@ func IsAutoStartDisabled() bool {
 }
 
 // externalNonLocalhostHost reports the configured Dolt server host when
-// it is set to a non-localhost value, indicating bd is talking to a
-// server it does not manage. Returns (host, true) when external,
-// ("", false) otherwise.
+// bd does not run its server there (configfile.BdRunsServerAt): another
+// machine, the IPv6 loopback, or another loopback address. Returns
+// (host, true) when external, ("", false) otherwise.
 //
 // Used to branch error messages in EnsureRunning so operators with a
 // non-localhost server are not told to "bd dolt start" — that command
@@ -212,11 +212,13 @@ func IsAutoStartDisabled() bool {
 //
 // Falls back to a zero Config when no metadata.json exists in beadsDir
 // so env-only configurations (BEADS_DOLT_SERVER_HOST set, no on-disk
-// config) are still detected. configfile.Load error returns are treated
-// as "not external" — the existing local-flavored error message is the
-// safer fallback and the configfile error will surface elsewhere.
+// config) are still detected. Metadata read errors are treated as "not
+// external" — the existing local-flavored error message is the safer
+// fallback and the configfile error will surface elsewhere. The metadata is
+// read without migrating it (LoadForDiscovery): an error message must not
+// rewrite a legacy config.json, in a workspace bd may not have admitted.
 func externalNonLocalhostHost(beadsDir string) (string, bool) {
-	cfg, err := configfile.Load(beadsDir)
+	cfg, err := configfile.LoadForDiscovery(beadsDir)
 	if err != nil {
 		return "", false
 	}
@@ -227,8 +229,7 @@ func externalNonLocalhostHost(beadsDir string) (string, bool) {
 		return "", false
 	}
 	host := cfg.GetDoltServerHost()
-	switch strings.ToLower(strings.TrimSpace(host)) {
-	case "", "localhost", "127.0.0.1", "::1", "[::1]", "0.0.0.0":
+	if configfile.BdRunsServerAt(host) {
 		return "", false
 	}
 	return host, true
@@ -632,9 +633,10 @@ func ReadPortFile(beadsDir string) int {
 // One setting does suppress it: `dolt.auto-start: false` (or
 // BEADS_DOLT_AUTO_START=0) fails serverOpenCanAutoStart and IsAutoStartDisabled,
 // so a timed-out open errors instead of adopting. That closes the incidental
-// route only — `bd dolt start` never consults either check, so the deliberate
-// route above stays open. It is the one mitigation an operator has while #6123
-// is open.
+// route only. `bd dolt start` consults IsAutoStartDisabled solely to refuse
+// creating a new, empty database (bd-7pkvvd); a start over existing data still
+// adopts, so the deliberate route above stays open. It is the one mitigation an
+// operator has while #6123 is open.
 //
 // Closing it means recording adoption distinctly from launch (skip the write on
 // the adopt branch, or mark it so this helper declines it), which is a behavior
@@ -653,7 +655,8 @@ func ReadPortFile(beadsDir string) int {
 // Note that isDoltProcess here would close only this gap, not the adopted-server
 // one — reclaimPort already requires isDoltProcess before it will adopt.
 //
-// Callers needing certainty over latency should use IsRunning.
+// Callers needing certainty over latency should use IsRunning, or
+// IsTrackedServerRunning when they must not mutate the state files.
 func ManagesLiveServerOnPort(beadsDir string, port int) bool {
 	if beadsDir == "" || port <= 0 {
 		return false
@@ -672,6 +675,31 @@ func ManagesLiveServerOnPort(beadsDir string, port int) bool {
 		return false
 	}
 	return isProcessAlive(pid)
+}
+
+// IsTrackedServerRunning reports whether beadsDir's state files name a
+// running dolt sql-server: the port file holds a port, and the PID file a live
+// process that isDoltProcess accepts. With a port file present that is when
+// IsRunning reports Running, so Start reports the tracked server instead of
+// initializing the data dir and launching one.
+//
+// Read-only, unlike IsRunning, which deletes the state files of a PID that is
+// dead or not dolt and can stop a server whose port it cannot determine.
+// Unlike ManagesLiveServerOnPort it rejects a recycled PID, at the cost of a
+// `ps` call (PowerShell on Windows), so keep it off the every-open path.
+func IsTrackedServerRunning(beadsDir string) bool {
+	if readPortFile(beadsDir) <= 0 {
+		return false
+	}
+	data, err := os.ReadFile(pidPath(beadsDir))
+	if err != nil {
+		return false
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || pid <= 0 {
+		return false
+	}
+	return isProcessAlive(pid) && isDoltProcess(pid)
 }
 
 // PortFileSnapshot captures the exact prior contents of a project's port
@@ -882,7 +910,10 @@ var portSources = []portSource{
 		label:  "metadata.json dolt_server_port (deprecated fallback)",
 		source: PortSourceMetadataJSON,
 		resolve: func(beadsDir string) (int, bool) {
-			metaCfg, err := configfile.Load(beadsDir)
+			// Read in place, never migrated: port resolution (DefaultConfig)
+			// runs for workspaces bd was not launched in, such as a library
+			// open of another path, before anything has admitted them.
+			metaCfg, err := configfile.LoadForDiscovery(beadsDir)
 			if err != nil || metaCfg == nil || metaCfg.DoltServerPort <= 0 {
 				return 0, false
 			}
@@ -943,7 +974,9 @@ func resolveServerPortForMode(workspaceBeadsDir, serverDir string, sharedMode, s
 	if sharedMode {
 		metadataDir = serverDir
 	}
-	if cfg, err := configfile.Load(metadataDir); err == nil && cfg != nil && cfg.DoltServerPort > 0 {
+	// Read in place, never migrated: DefaultConfigForMode resolves ports for
+	// a workspace other than the active one.
+	if cfg, err := configfile.LoadForDiscovery(metadataDir); err == nil && cfg != nil && cfg.DoltServerPort > 0 {
 		return cfg.DoltServerPort, PortSourceMetadataJSON
 	}
 	return 0, PortSourceUnset
@@ -1042,8 +1075,40 @@ func parseOptionalPort(raw string) (int, bool) {
 //
 // The port file (dolt-server.port) is written by Start() with the actual
 // listening port, so already-running-server connections use the right port.
+//
+// It never writes beadsDir: a legacy config.json is read in place, not
+// migrated, since callers resolve workspaces bd was not launched in.
 func DefaultConfig(beadsDir string) *Config {
 	return defaultConfigForMode(beadsDir, IsSharedServerMode(), resolveServerPortFromActiveSources)
+}
+
+// DialConfig is DefaultConfig for a client that dials the server without
+// opening the store (`bd dolt test`, `bd dolt clean-databases`, `bd doctor
+// --perf`, `bd doctor --server`, EnsureRunning's externally managed refusal).
+// It applies the legacy BEADS_DOLT_PORT, which is not in portSources, the way
+// the store's applyConfigDefaults does: when BEADS_DOLT_SERVER_PORT is unset,
+// a valid BEADS_DOLT_PORT, parsed untrimmed as the store parses it, replaces
+// any port that is not authoritative (none, bd's own port file, or a
+// bd-chosen default). These clients then dial and name the endpoint the store
+// dials, not 127.0.0.1:0 or a leftover port-file port.
+func DialConfig(beadsDir string) *Config {
+	cfg := DefaultConfig(beadsDir)
+	applyLegacyPortEnv(cfg)
+	return cfg
+}
+
+// applyLegacyPortEnv applies the legacy BEADS_DOLT_PORT, which is not in
+// portSources, by the store's applyConfigDefaults rule: when
+// BEADS_DOLT_SERVER_PORT is unset, a valid BEADS_DOLT_PORT, parsed untrimmed,
+// replaces a port that is not authoritative. A port from config.yaml
+// dolt.port, listener.port or metadata.json dolt_server_port stays.
+func applyLegacyPortEnv(cfg *Config) {
+	if os.Getenv("BEADS_DOLT_SERVER_PORT") != "" || cfg.PortSource.IsAuthoritative() {
+		return
+	}
+	if p, err := strconv.Atoi(os.Getenv("BEADS_DOLT_PORT")); err == nil && p > 0 {
+		cfg.Port, cfg.PortSource = p, PortSourceEnv
+	}
 }
 
 // DefaultConfigForMode resolves server configuration for an already-classified
@@ -1064,7 +1129,7 @@ func defaultConfigForMode(beadsDir string, sharedMode bool, resolvePort serverPo
 	mode := ResolveServerModeForMode(workspaceBeadsDir, sharedMode)
 	cfg := &Config{
 		BeadsDir: beadsDir,
-		Host:     "127.0.0.1",
+		Host:     "127.0.0.1", // the one address configfile.BdRunsServerAt counts as bd's
 		Mode:     mode,
 	}
 	if sharedMode {
@@ -1082,41 +1147,43 @@ func defaultConfigForMode(beadsDir string, sharedMode bool, resolvePort serverPo
 		cfg.PortSharedServer = true
 	}
 
-	// Host-inferred external config (GH#3545): the server lives on
-	// another machine.
-	if cfg.Mode == ServerModeExternal && !sharedMode {
+	// A server bd does not run (configfile.BdRunsServerAt): one on another
+	// machine (host-inferred external config, GH#3545), or one at the IPv6
+	// loopback or another loopback address, where bd's own server, which
+	// listens on 127.0.0.1 only, never runs. Such a host is external only
+	// when a setting makes it so, but in any mode it never takes bd's port
+	// file.
+	if !sharedMode && (cfg.Mode == ServerModeExternal || cfg.PortSource == PortSourcePortFile) {
 		fc := &configfile.Config{}
 		if _, err := os.Stat(configfile.ConfigPath(workspaceBeadsDir)); err == nil {
 			if loaded, loadErr := configfile.Load(workspaceBeadsDir); loadErr == nil && loaded != nil {
 				fc = loaded
 			}
 		}
-		if !configfile.IsLocalHostString(fc.GetDoltServerHost()) {
-			// The legacy BEADS_DOLT_PORT override is not in
-			// portSources but the storage layer honors it ahead of
-			// persisted sources; resolve it the same way here so
-			// credentials/probes and the eventual connection agree
-			// on the port. BEADS_DOLT_SERVER_PORT (PortSourceEnv)
-			// still wins over the legacy spelling.
-			if cfg.PortSource != PortSourceEnv {
-				if p, err := strconv.Atoi(strings.TrimSpace(os.Getenv("BEADS_DOLT_PORT"))); err == nil && p > 0 {
-					cfg.Port = p
-					cfg.PortSource = PortSourceEnv
-				}
-			}
-			// The gitignored port file is bd's bookkeeping for a
-			// bd-owned LOCAL server; pairing it with a remote host
-			// dials the remote machine on a stale local ephemeral
-			// port. Discard it and resume the precedence chain so
-			// lower-priority authoritative sources (listener.port,
-			// dolt.port, metadata dolt_server_port) still apply.
-			if cfg.PortSource == PortSourcePortFile {
-				cfg.Port, cfg.PortSource = resolvePort(workspaceBeadsDir, beadsDir, false, true)
-				cfg.PortSharedServer = false
-			}
+		bdServer := configfile.BdRunsServerAt(fc.GetDoltServerHost())
+		external := cfg.Mode == ServerModeExternal && !bdServer
+		// The gitignored port file is bd's bookkeeping for a bd-owned
+		// server on 127.0.0.1; pairing it with any other host dials that
+		// host on a stale local ephemeral port (GH#2098, GH#2372). Discard
+		// it and resume the precedence chain so lower-priority
+		// authoritative sources (listener.port, dolt.port, metadata
+		// dolt_server_port) still apply.
+		if !bdServer && cfg.PortSource == PortSourcePortFile {
+			cfg.Port, cfg.PortSource = resolvePort(workspaceBeadsDir, beadsDir, false, true)
+			cfg.PortSharedServer = false
+		}
+		if external {
+			// The legacy BEADS_DOLT_PORT is not in portSources, and the
+			// store dials the port resolved here, so apply it by the
+			// rule the store applies to a local server (#5835), once the
+			// port file is gone: it fills in a port no setting names and
+			// never replaces listener.port, dolt.port or
+			// dolt_server_port. Credentials, probes and the connection
+			// then agree on the port.
+			applyLegacyPortEnv(cfg)
 			// With no configured port, dial the documented default
 			// 3307, not :0 — there is no local Start() to allocate
-			// an ephemeral port for a remote server.
+			// an ephemeral port for a server bd does not run.
 			if cfg.Port == 0 {
 				cfg.Port = configfile.DefaultDoltServerPort
 				cfg.PortSource = PortSourceExternalHostDefault
@@ -1264,22 +1331,29 @@ func EnsureRunningDetailed(beadsDir string) (port int, startedByUs bool, err err
 	// it would conflict with the external one.
 	mode := ResolveServerMode(beadsDir)
 	if mode == ServerModeExternal {
-		cfg := DefaultConfig(beadsDir)
+		cfg := DialConfig(beadsDir)
 		if host, ok := externalNonLocalhostHost(beadsDir); ok {
 			// Configured for a non-localhost external server:
 			// "bd dolt start" is not the right advice (GH#3518).
-			return 0, false, fmt.Errorf("Dolt server at %s:%d is unreachable, and bd will not "+
+			return 0, false, &externallyManagedError{fmt.Sprintf("Dolt server at %s is unreachable, and bd will not "+
 				"start a local server because an external one is configured.\n\n"+
-				"Verify the external server is running and reachable from this host:\n"+
-				"  nc -zv %s %d  # or curl %s:%d for an HTTP-style check\n"+
+				"%s\n"+
 				"  bd dolt status   # detailed external-server check",
-				host, cfg.Port, host, cfg.Port, host, cfg.Port)
+				doltutil.PrintedServerAddr(host, cfg.Port), remoteServerAdvice(host, cfg.Port))}
 		}
-		return 0, false, fmt.Errorf("Dolt server is not running on port %d, and auto-start is suppressed "+
+		// A named port declares the server external: "bd dolt start" would
+		// start bd's own server on it instead of the one that belongs there.
+		// DialConfig names the legacy BEADS_DOLT_PORT the way the store
+		// dials it.
+		if advice := UnreachableEndpointAdvice(beadsDir, cfg.Host, cfg.Port, cfg.PortSource); advice != "" {
+			return 0, false, &externallyManagedError{fmt.Sprintf("Dolt server is not running on port %d.\n\n%s",
+				cfg.Port, advice)}
+		}
+		return 0, false, &externallyManagedError{fmt.Sprintf("Dolt server is not running on port %d, and auto-start is suppressed "+
 			"because the server is externally managed (dolt.auto-start: false or explicit port configured).\n\n"+
 			"Start the external server, or enable auto-start to allow bd to manage the server.\n"+
 			"  To start manually: bd dolt start\n"+
-			"  To check status: bd dolt status", cfg.Port)
+			"  To check status: bd dolt status", cfg.Port)}
 	}
 
 	// Defense-in-depth: if dolt.auto-start is explicitly disabled in
@@ -1288,12 +1362,12 @@ func EnsureRunningDetailed(beadsDir string) (port int, startedByUs bool, err err
 	if IsAutoStartDisabled() {
 		cfg := DefaultConfig(beadsDir)
 		if host, ok := externalNonLocalhostHost(beadsDir); ok {
-			return 0, false, fmt.Errorf("Configured Dolt server at %s:%d is unreachable, and auto-start "+
+			return 0, false, fmt.Errorf("Configured Dolt server at %s is unreachable, and auto-start "+
 				"is disabled (dolt.auto-start: false in config.yaml or BEADS_DOLT_AUTO_START=0).\n\n"+
 				"This is an external server; bd will not start it. Verify it is running:\n"+
-				"  nc -zv %s %d  # or curl %s:%d for an HTTP-style check\n"+
+				"  %s\n"+
 				"  bd dolt status   # detailed external-server check",
-				host, cfg.Port, host, cfg.Port, host, cfg.Port)
+				doltutil.PrintedServerAddr(host, cfg.Port), ReachabilityCheck(host, cfg.Port))
 		}
 		return 0, false, fmt.Errorf("Dolt server unreachable (port %d) and auto-start is disabled "+
 			"(dolt.auto-start: false in config.yaml or BEADS_DOLT_AUTO_START=0).\n\n"+
@@ -2385,6 +2459,33 @@ func MarkDoltDirCompatible(doltDir string) error {
 		return fmt.Errorf("writing dolt compatibility marker %s: %w", markerPath, err)
 	}
 	return nil
+}
+
+// HasDoltDatabase reports whether doltDir already holds a Dolt database in
+// either layout `dolt sql-server` serves: doltDir/.dolt, or <child>/.dolt in
+// an immediate child. It is read-only (unlike ensureDoltInit it never creates
+// the directory or the compatibility marker). A missing doltDir is false; any
+// other read error is true, because it cannot prove that a start there would
+// create a fresh database.
+func HasDoltDatabase(doltDir string) bool {
+	if _, err := os.Stat(filepath.Join(doltDir, ".dolt")); err == nil {
+		return true
+	} else if !os.IsNotExist(err) {
+		return true
+	}
+	entries, err := os.ReadDir(doltDir)
+	if err != nil {
+		return !os.IsNotExist(err)
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(doltDir, entry.Name(), ".dolt")); err == nil || !os.IsNotExist(err) {
+			return true
+		}
+	}
+	return false
 }
 
 // ensureDoltInit initializes a dolt database directory if .dolt/ doesn't exist.

@@ -34,6 +34,7 @@
 34 1 TestProxiedServerReadyClaimConcurrent
 34 1 TestProxiedServerServeActivatesTheEventsJournal
 34 1 TestProxiedServerServeRelease
+34 1 TestProxiedServerVersionedHistorySwitchChecksTheLegacyProtosAPourCopies
 
 34 2 TestProxiedServerDepListSingleIDWarnsOnDroppedExternalEdge
 34 2 TestProxiedServerGateList
@@ -55,6 +56,7 @@
 34 4 TestProxiedServerServeRelatedIssues
 34 4 TestProxiedServerServeSettingsWrites
 34 4 TestProxiedServerShow2
+34 4 TestProxiedServerTopologyCapabilityMatrix
 34 4 TestServerModeServeSkipsPostRunMaintenance
 
 34 5 TestProxiedServerHistoryRemoteRefusalFrontDoorMatrix
@@ -69,6 +71,7 @@
 34 6 TestProxiedServerServeReadsTheJournalItJustWrote
 34 6 TestProxiedServerSwarm
 34 6 TestProxiedServerUpdate2B
+34 6 TestProxiedServerVersionedHistorySwitchRefusesAnUnrecordableGateTimeout
 34 6 TestProxiedServerWispList
 
 34 7 TestProxiedServerCloseConcurrent
@@ -78,6 +81,7 @@
 34 7 TestProxiedServerIfRevisionGuardDelete
 34 7 TestProxiedServerIfRevisionTargetGoneIsPreconditionFailed
 34 7 TestProxiedServerLabelC
+34 7 TestProxiedServerMoleculeLifecycleAgreesOnEveryRoute
 34 7 TestProxiedServerTypesAgreeWithCreate
 
 34 8 TestProxiedServerClose2
@@ -155,6 +159,7 @@
 34 17 TestProxiedServerPrime
 34 17 TestProxiedServerSQLDatabaseFlag
 34 17 TestProxiedServerServeModeGate
+34 17 TestServerModeServeIgnoresGraphModeDependency
 
 34 18 TestProxiedServerClose3
 34 18 TestProxiedServerCount
@@ -196,6 +201,7 @@
 34 23 TestProxiedServerIfRevisionGuardUpdate
 34 23 TestProxiedServerListWatchCountsTheOffsetIntoMaxRows
 34 23 TestProxiedServerMolBurn
+34 23 TestProxiedServerSearchRoutesAgree
 34 23 TestProxiedServerServeUpdate
 34 23 TestProxiedServerUpdateConcurrentClaim
 34 23 TestProxiedServerUpdateWisp
@@ -252,11 +258,13 @@
 34 30 TestProxiedServerStatus
 34 30 TestProxiedServerTodo
 34 30 TestProxiedServerUpdate2
+34 30 TestProxiedServerVersionedHistoryServeActivatesTheProviderFromItsOwnRow
 
 34 31 TestProxiedServerCloseBeadGate
 34 31 TestProxiedServerComment
 34 31 TestProxiedServerConfigB
 34 31 TestProxiedServerEventsJournal
+34 31 TestProxiedServerGateAddWaiterConvoy
 34 31 TestProxiedServerIfRevisionGuardClose
 34 31 TestProxiedServerMolBond
 

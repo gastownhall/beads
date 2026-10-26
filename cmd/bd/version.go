@@ -16,7 +16,7 @@ import (
 
 var (
 	// Version is the current version of bd (overridden by ldflags at build time)
-	Version = "1.3.0"
+	Version = "1.3.2"
 	// Build can be set via ldflags at compile time
 	Build = "dev"
 	// Commit and branch the git revision the binary was built from (optional ldflag)
@@ -29,6 +29,12 @@ var versionCmd = &cobra.Command{
 	Short:         "Print version information",
 	SilenceUsage:  true,
 	SilenceErrors: true,
+	// Accept args only so the "did you mean bd versions" guard below can see
+	// them. `bd version` names bd's own build; `bd versions <id>` lists a
+	// bead's recorded versions. One character apart, unrelated meanings --
+	// without this a mistyped `bd version bd-123` silently prints the build
+	// and looks like the bead simply has no versions.
+	Args: cobra.ArbitraryArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		evt := metrics.NewCommandEvent("version")
 		defer func() {
@@ -36,6 +42,12 @@ var versionCmd = &cobra.Command{
 				c.CloseEventAndAdd(evt)
 			}
 		}()
+
+		if len(args) > 0 {
+			return HandleErrorRespectJSON(
+				"bd version prints bd's own version information and takes no arguments.\n"+
+					"Did you mean:  bd versions %s", args[0])
+		}
 
 		commit := resolveCommitHash()
 		branch := resolveBranch()

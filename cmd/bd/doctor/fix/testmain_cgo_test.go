@@ -21,6 +21,14 @@ func TestMain(m *testing.M) {
 // exits — os.Exit skips deferred calls, so TestMain itself must never defer
 // anything (be-5kkk6).
 func testMainInner(m *testing.M) int {
+	// A GIT_DIR/GIT_WORK_TREE leaked in from the invoking shell or a git hook
+	// would route the fixture `git init`/`git config` writes in this suite
+	// into that repository: the host checkout in the r880 clobber (wy-qlvlmf).
+	if err := testutil.UnsetGitRepoLocationEnv(); err != nil {
+		fmt.Fprintf(os.Stderr, "FATAL: %v\n", err)
+		return 1
+	}
+
 	os.Setenv("BEADS_TEST_MODE", "1")
 	// AD-01 (be-c5p): allow doctor/fix tests through the dolt.New
 	// database-name firewall when they connect to the spawned test server.

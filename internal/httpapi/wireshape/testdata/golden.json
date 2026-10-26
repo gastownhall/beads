@@ -34,6 +34,48 @@
       "item_type": "object"
     },
     {
+      "schema": "AdvanceMoleculeRequest",
+      "member": "actor",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "AdvanceMoleculeRequest",
+      "member": "auto_claim",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "AdvanceMoleculeResponse",
+      "member": "claimed",
+      "type": "boolean",
+      "required": true
+    },
+    {
+      "schema": "AdvanceMoleculeResponse",
+      "member": "closed_step",
+      "type": "object",
+      "required": true
+    },
+    {
+      "schema": "AdvanceMoleculeResponse",
+      "member": "complete",
+      "type": "boolean",
+      "required": true
+    },
+    {
+      "schema": "AdvanceMoleculeResponse",
+      "member": "molecule_id",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "AdvanceMoleculeResponse",
+      "member": "next_step",
+      "type": "object",
+      "required": false
+    },
+    {
       "schema": "AnchorEdgeCount",
       "member": "count",
       "type": "integer",
@@ -136,6 +178,18 @@
     {
       "schema": "ApplyCreateItem",
       "member": "assignee",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyCreateItem",
+      "member": "await_id",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyCreateItem",
+      "member": "await_type",
       "type": "string",
       "required": false
     },
@@ -260,9 +314,23 @@
     },
     {
       "schema": "ApplyCreateItem",
+      "member": "timeout",
+      "type": "integer",
+      "format": "int64",
+      "required": false
+    },
+    {
+      "schema": "ApplyCreateItem",
       "member": "title",
       "type": "string",
       "required": true
+    },
+    {
+      "schema": "ApplyCreateItem",
+      "member": "waiters",
+      "type": "array",
+      "required": false,
+      "item_type": "string"
     },
     {
       "schema": "ApplyDepAddItem",
@@ -441,6 +509,12 @@
     },
     {
       "schema": "ApplyPatchBody",
+      "member": "await_id",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyPatchBody",
       "member": "defer_until",
       "type": "string",
       "format": "date-time",
@@ -530,6 +604,13 @@
       "required": false
     },
     {
+      "schema": "ApplyPatchBody",
+      "member": "waiters",
+      "type": "array",
+      "required": false,
+      "item_type": "string"
+    },
+    {
       "schema": "ApplyUpdateItem",
       "member": "expected_assignee",
       "type": "string",
@@ -594,6 +675,12 @@
       "member": "actor",
       "type": "string",
       "required": true
+    },
+    {
+      "schema": "BatchCloseRequest",
+      "member": "auto_close_molecule",
+      "type": "boolean",
+      "required": false
     },
     {
       "schema": "BatchCloseRequest",
@@ -1088,6 +1175,383 @@
       "item_type": "string"
     },
     {
+      "schema": "BlockedIssue",
+      "member": "acceptance_criteria",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BlockedIssue",
+      "member": "actor",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BlockedIssue",
+      "member": "assignee",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BlockedIssue",
+      "member": "await_id",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BlockedIssue",
+      "member": "await_type",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BlockedIssue",
+      "member": "blocked_by",
+      "type": "array",
+      "required": true,
+      "item_type": "string"
+    },
+    {
+      "schema": "BlockedIssue",
+      "member": "blocked_by_count",
+      "type": "integer",
+      "required": true
+    },
+    {
+      "schema": "BlockedIssue",
+      "member": "bonded_from",
+      "type": "array",
+      "required": false,
+      "item_type": "object"
+    },
+    {
+      "schema": "BlockedIssue",
+      "member": "close_reason",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BlockedIssue",
+      "member": "closed_at",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "BlockedIssue",
+      "member": "closed_by_session",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BlockedIssue",
+      "member": "comments",
+      "type": "array",
+      "required": false,
+      "item_type": "object"
+    },
+    {
+      "schema": "BlockedIssue",
+      "member": "compacted_at",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "BlockedIssue",
+      "member": "compacted_at_commit",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BlockedIssue",
+      "member": "compaction_level",
+      "type": "integer",
+      "required": false
+    },
+    {
+      "schema": "BlockedIssue",
+      "member": "created_at",
+      "type": "string",
+      "format": "date-time",
+      "required": true
+    },
+    {
+      "schema": "BlockedIssue",
+      "member": "created_by",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BlockedIssue",
+      "member": "defer_until",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "BlockedIssue",
+      "member": "dependencies",
+      "type": "array",
+      "required": false,
+      "item_type": "object"
+    },
+    {
+      "schema": "BlockedIssue",
+      "member": "description",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BlockedIssue",
+      "member": "design",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BlockedIssue",
+      "member": "due_at",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "BlockedIssue",
+      "member": "ephemeral",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "BlockedIssue",
+      "member": "estimated_minutes",
+      "type": "integer",
+      "required": false
+    },
+    {
+      "schema": "BlockedIssue",
+      "member": "event_kind",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BlockedIssue",
+      "member": "external_ref",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BlockedIssue",
+      "member": "heartbeat_at",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "BlockedIssue",
+      "member": "id",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "BlockedIssue",
+      "member": "is_blocked",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "BlockedIssue",
+      "member": "is_template",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "BlockedIssue",
+      "member": "issue_type",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BlockedIssue",
+      "member": "labels",
+      "type": "array",
+      "required": false,
+      "item_type": "string"
+    },
+    {
+      "schema": "BlockedIssue",
+      "member": "lease_expires_at",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "BlockedIssue",
+      "member": "lease_granted_node",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BlockedIssue",
+      "member": "metadata",
+      "type": "object",
+      "required": false
+    },
+    {
+      "schema": "BlockedIssue",
+      "member": "mol_type",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BlockedIssue",
+      "member": "no_history",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "BlockedIssue",
+      "member": "notes",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BlockedIssue",
+      "member": "original_size",
+      "type": "integer",
+      "required": false
+    },
+    {
+      "schema": "BlockedIssue",
+      "member": "owner",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BlockedIssue",
+      "member": "payload",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BlockedIssue",
+      "member": "pinned",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "BlockedIssue",
+      "member": "priority",
+      "type": "integer",
+      "required": true
+    },
+    {
+      "schema": "BlockedIssue",
+      "member": "sender",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BlockedIssue",
+      "member": "source_formula",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BlockedIssue",
+      "member": "source_location",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BlockedIssue",
+      "member": "source_system",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BlockedIssue",
+      "member": "spec_id",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BlockedIssue",
+      "member": "started_at",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "BlockedIssue",
+      "member": "status",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BlockedIssue",
+      "member": "storage_class",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BlockedIssue",
+      "member": "target",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BlockedIssue",
+      "member": "timeout",
+      "type": "integer",
+      "format": "int64",
+      "required": false
+    },
+    {
+      "schema": "BlockedIssue",
+      "member": "title",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "BlockedIssue",
+      "member": "updated_at",
+      "type": "string",
+      "format": "date-time",
+      "required": true
+    },
+    {
+      "schema": "BlockedIssue",
+      "member": "waiters",
+      "type": "array",
+      "required": false,
+      "item_type": "string"
+    },
+    {
+      "schema": "BlockedIssue",
+      "member": "wisp_type",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BlockedIssue",
+      "member": "work_type",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BlockedPage",
+      "member": "has_more",
+      "type": "boolean",
+      "required": true
+    },
+    {
+      "schema": "BlockedPage",
+      "member": "items",
+      "type": "array",
+      "required": true,
+      "item_type": "object"
+    },
+    {
       "schema": "Blocker",
       "member": "id",
       "type": "string",
@@ -1168,6 +1632,12 @@
     },
     {
       "schema": "CloseIssueRequest",
+      "member": "auto_close_molecule",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "CloseIssueRequest",
       "member": "expected_version",
       "type": "string",
       "required": false
@@ -1198,9 +1668,21 @@
     },
     {
       "schema": "CloseIssueResponse",
+      "member": "auto_closed_molecule",
+      "type": "object",
+      "required": false
+    },
+    {
+      "schema": "CloseIssueResponse",
       "member": "issue",
       "type": "object",
       "required": true
+    },
+    {
+      "schema": "CloseIssueResponse",
+      "member": "molecule_auto_close_refusal",
+      "type": "string",
+      "required": false
     },
     {
       "schema": "CloseIssueResponse",
@@ -1224,6 +1706,12 @@
       "schema": "CloseOutcome",
       "member": "assignee",
       "type": "string",
+      "required": false
+    },
+    {
+      "schema": "CloseOutcome",
+      "member": "auto_closed_molecule",
+      "type": "object",
       "required": false
     },
     {
@@ -1256,6 +1744,12 @@
       "member": "issue_id",
       "type": "string",
       "required": true
+    },
+    {
+      "schema": "CloseOutcome",
+      "member": "molecule_auto_close_refusal",
+      "type": "string",
+      "required": false
     },
     {
       "schema": "CloseOutcome",
@@ -1451,6 +1945,18 @@
     },
     {
       "schema": "CreateIssueRequest",
+      "member": "await_id",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "CreateIssueRequest",
+      "member": "await_type",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "CreateIssueRequest",
       "member": "defer_until",
       "type": "string",
       "format": "date-time",
@@ -1582,9 +2088,23 @@
     },
     {
       "schema": "CreateIssueRequest",
+      "member": "timeout",
+      "type": "integer",
+      "format": "int64",
+      "required": false
+    },
+    {
+      "schema": "CreateIssueRequest",
       "member": "title",
       "type": "string",
       "required": true
+    },
+    {
+      "schema": "CreateIssueRequest",
+      "member": "waiters",
+      "type": "array",
+      "required": false,
+      "item_type": "string"
     },
     {
       "schema": "CreateIssueRequest",
@@ -1894,6 +2414,44 @@
       "enum": [
         "ok"
       ],
+      "required": true
+    },
+    {
+      "schema": "HeartbeatIssueRequest",
+      "member": "actor",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "HeartbeatIssueResponse",
+      "member": "heartbeat_at",
+      "type": "string",
+      "format": "date-time",
+      "required": true
+    },
+    {
+      "schema": "HeartbeatIssueResponse",
+      "member": "holder",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "HeartbeatIssueResponse",
+      "member": "id",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "HeartbeatIssueResponse",
+      "member": "lease_expires_at",
+      "type": "string",
+      "format": "date-time",
+      "required": true
+    },
+    {
+      "schema": "HeartbeatIssueResponse",
+      "member": "rearmed",
+      "type": "boolean",
       "required": true
     },
     {
@@ -2266,6 +2824,12 @@
       "member": "id",
       "type": "string",
       "required": true
+    },
+    {
+      "schema": "IssueBlocking",
+      "member": "is_blocked",
+      "type": "boolean",
+      "required": false
     },
     {
       "schema": "IssueBlocking",
@@ -2768,6 +3332,12 @@
     },
     {
       "schema": "IssuePatchBody",
+      "member": "await_id",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssuePatchBody",
       "member": "defer_until",
       "type": "string",
       "format": "date-time",
@@ -2841,6 +3411,12 @@
     },
     {
       "schema": "IssuePatchBody",
+      "member": "persistence",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssuePatchBody",
       "member": "priority",
       "type": "integer",
       "required": false
@@ -2863,6 +3439,13 @@
       "member": "title",
       "type": "string",
       "required": false
+    },
+    {
+      "schema": "IssuePatchBody",
+      "member": "waiters",
+      "type": "array",
+      "required": false,
+      "item_type": "string"
     },
     {
       "schema": "IssueWithCounts",
@@ -4867,6 +5450,13 @@
       "style": "simple"
     },
     {
+      "schema": "param:advanceMolecule",
+      "member": "path:id",
+      "type": "string",
+      "required": true,
+      "style": "simple"
+    },
+    {
       "schema": "param:claimIssue",
       "member": "path:id",
       "type": "string",
@@ -5577,6 +6167,57 @@
       "default": "false"
     },
     {
+      "schema": "param:heartbeatIssue",
+      "member": "path:id",
+      "type": "string",
+      "required": true,
+      "style": "simple"
+    },
+    {
+      "schema": "param:listBlockedIssues",
+      "member": "query:exclude_label",
+      "type": "array",
+      "required": false,
+      "item_type": "string",
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listBlockedIssues",
+      "member": "query:label",
+      "type": "array",
+      "required": false,
+      "item_type": "string",
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listBlockedIssues",
+      "member": "query:label_any",
+      "type": "array",
+      "required": false,
+      "item_type": "string",
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listBlockedIssues",
+      "member": "query:parent",
+      "type": "string",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listBlockingAnnotations",
+      "member": "query:is_blocked",
+      "type": "boolean",
+      "required": false,
+      "style": "form",
+      "explode": true,
+      "default": "false"
+    },
+    {
       "schema": "param:listBlockingAnnotations",
       "member": "query:issue_id",
       "type": "array",
@@ -5649,6 +6290,24 @@
     },
     {
       "schema": "param:listIssues",
+      "member": "query:closed_after",
+      "type": "string",
+      "format": "date-time",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listIssues",
+      "member": "query:closed_before",
+      "type": "string",
+      "format": "date-time",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listIssues",
       "member": "query:created_after",
       "type": "string",
       "format": "date-time",
@@ -5675,6 +6334,68 @@
     },
     {
       "schema": "param:listIssues",
+      "member": "query:defer_after",
+      "type": "string",
+      "format": "date-time",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listIssues",
+      "member": "query:defer_before",
+      "type": "string",
+      "format": "date-time",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listIssues",
+      "member": "query:deferred",
+      "type": "boolean",
+      "required": false,
+      "style": "form",
+      "explode": true,
+      "default": "false"
+    },
+    {
+      "schema": "param:listIssues",
+      "member": "query:desc_contains",
+      "type": "string",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listIssues",
+      "member": "query:due_after",
+      "type": "string",
+      "format": "date-time",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listIssues",
+      "member": "query:due_before",
+      "type": "string",
+      "format": "date-time",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listIssues",
+      "member": "query:empty_description",
+      "type": "boolean",
+      "required": false,
+      "style": "form",
+      "explode": true,
+      "default": "false"
+    },
+    {
+      "schema": "param:listIssues",
       "member": "query:exclude_label",
       "type": "array",
       "required": false,
@@ -5684,9 +6405,52 @@
     },
     {
       "schema": "param:listIssues",
+      "member": "query:exclude_status",
+      "type": "array",
+      "required": false,
+      "item_type": "string",
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listIssues",
+      "member": "query:exclude_type",
+      "type": "array",
+      "required": false,
+      "item_type": "string",
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listIssues",
+      "member": "query:external_contains",
+      "type": "string",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listIssues",
+      "member": "query:external_ref",
+      "type": "string",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listIssues",
       "member": "query:has_metadata_key",
       "type": "string",
       "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listIssues",
+      "member": "query:id",
+      "type": "array",
+      "required": false,
+      "item_type": "string",
       "style": "form",
       "explode": true
     },
@@ -5746,6 +6510,22 @@
     },
     {
       "schema": "param:listIssues",
+      "member": "query:label_pattern",
+      "type": "string",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listIssues",
+      "member": "query:label_regex",
+      "type": "string",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listIssues",
       "member": "query:limit",
       "type": "integer",
       "required": false,
@@ -5764,7 +6544,114 @@
     },
     {
       "schema": "param:listIssues",
+      "member": "query:mol_type",
+      "type": "string",
+      "enum": [
+        "patrol",
+        "swarm",
+        "work"
+      ],
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listIssues",
+      "member": "query:no_assignee",
+      "type": "boolean",
+      "required": false,
+      "style": "form",
+      "explode": true,
+      "default": "false"
+    },
+    {
+      "schema": "param:listIssues",
+      "member": "query:no_labels",
+      "type": "boolean",
+      "required": false,
+      "style": "form",
+      "explode": true,
+      "default": "false"
+    },
+    {
+      "schema": "param:listIssues",
+      "member": "query:no_parent",
+      "type": "boolean",
+      "required": false,
+      "style": "form",
+      "explode": true,
+      "default": "false"
+    },
+    {
+      "schema": "param:listIssues",
+      "member": "query:no_pinned",
+      "type": "boolean",
+      "required": false,
+      "style": "form",
+      "explode": true,
+      "default": "false"
+    },
+    {
+      "schema": "param:listIssues",
+      "member": "query:notes_contains",
+      "type": "string",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listIssues",
+      "member": "query:overdue",
+      "type": "boolean",
+      "required": false,
+      "style": "form",
+      "explode": true,
+      "default": "false"
+    },
+    {
+      "schema": "param:listIssues",
       "member": "query:parent",
+      "type": "string",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listIssues",
+      "member": "query:pinned",
+      "type": "boolean",
+      "required": false,
+      "style": "form",
+      "explode": true,
+      "default": "false"
+    },
+    {
+      "schema": "param:listIssues",
+      "member": "query:priority",
+      "type": "integer",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listIssues",
+      "member": "query:priority_max",
+      "type": "integer",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listIssues",
+      "member": "query:priority_min",
+      "type": "integer",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listIssues",
+      "member": "query:q",
       "type": "string",
       "required": false,
       "style": "form",
@@ -5785,6 +6672,14 @@
     },
     {
       "schema": "param:listIssues",
+      "member": "query:spec",
+      "type": "string",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listIssues",
       "member": "query:status",
       "type": "array",
       "required": false,
@@ -5794,8 +6689,59 @@
     },
     {
       "schema": "param:listIssues",
+      "member": "query:title",
+      "type": "string",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listIssues",
+      "member": "query:title_contains",
+      "type": "string",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listIssues",
       "member": "query:type",
       "type": "string",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listIssues",
+      "member": "query:updated_after",
+      "type": "string",
+      "format": "date-time",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listIssues",
+      "member": "query:updated_before",
+      "type": "string",
+      "format": "date-time",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listIssues",
+      "member": "query:wisp_type",
+      "type": "string",
+      "enum": [
+        "error",
+        "escalation",
+        "gc_report",
+        "heartbeat",
+        "patrol",
+        "ping",
+        "recovery"
+      ],
       "required": false,
       "style": "form",
       "explode": true
@@ -6106,6 +7052,8 @@
     "AddCommentRequest": "request",
     "AddDependenciesRequest": "request",
     "AddDependenciesResponse": "response",
+    "AdvanceMoleculeRequest": "request",
+    "AdvanceMoleculeResponse": "response",
     "AnchorEdgeCount": "response",
     "ApplyBatchRequest": "request",
     "ApplyBatchResponse": "response",
@@ -6115,6 +7063,7 @@
     "ApplyCreateItem": "request",
     "ApplyCreateItem.labels[]": "request",
     "ApplyCreateItem.metadata_refs": "request",
+    "ApplyCreateItem.waiters[]": "request",
     "ApplyDepAddItem": "request",
     "ApplyItem": "request",
     "ApplyItemResult": "response",
@@ -6126,6 +7075,7 @@
     "ApplyMetadataPatch.set": "request",
     "ApplyMetadataPatch.unset[]": "request",
     "ApplyPatchBody": "request",
+    "ApplyPatchBody.waiters[]": "request",
     "ApplyUpdateItem": "request",
     "BatchCloseItem": "request",
     "BatchCloseRequest": "request",
@@ -6143,6 +7093,12 @@
     "BatchGetIssuesRequest.ids[]": "request",
     "BatchGetIssuesResult": "response",
     "BatchGetIssuesResult.missing[]": "response",
+    "BlockedIssue": "response",
+    "BlockedIssue.blocked_by[]": "response",
+    "BlockedIssue.labels[]": "response",
+    "BlockedIssue.metadata": "response",
+    "BlockedIssue.waiters[]": "response",
+    "BlockedPage": "response",
     "Blocker": "response",
     "BlockingAnnotations": "response",
     "BondRef": "response",
@@ -6161,6 +7117,7 @@
     "CreateIssueDependency": "request",
     "CreateIssueRequest": "request",
     "CreateIssueRequest.labels[]": "request",
+    "CreateIssueRequest.waiters[]": "request",
     "CreateIssueWaitsFor": "request",
     "Cycle": "response",
     "CycleMember": "response",
@@ -6181,6 +7138,8 @@
     "EventRecord.issue": "response",
     "EventsPage": "response",
     "Health": "response",
+    "HeartbeatIssueRequest": "request",
+    "HeartbeatIssueResponse": "response",
     "Issue": "response",
     "Issue.labels[]": "response",
     "Issue.metadata": "response",
@@ -6200,6 +7159,7 @@
     "IssuePatchBody.add_labels[]": "request",
     "IssuePatchBody.labels[]": "request",
     "IssuePatchBody.remove_labels[]": "request",
+    "IssuePatchBody.waiters[]": "request",
     "IssueWithCounts": "response",
     "IssueWithCounts.labels[]": "response",
     "IssueWithCounts.metadata": "response",

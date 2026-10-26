@@ -715,7 +715,7 @@ func TestAlreadyConvergedFailsClosedOnUnreadableState(t *testing.T) {
 		db, mock := newMockDB(t)
 
 		expectCurrentDatabase(mock, "testdb")
-		mock.ExpectQuery(`SELECT COUNT\(\*\) FROM information_schema\.tables`).
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = DATABASE()")).
 			WillReturnError(sql.ErrConnDone)
 
 		converged, err := alreadyConverged(context.Background(), db, "testdb", nil)

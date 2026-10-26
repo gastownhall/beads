@@ -202,7 +202,8 @@ func (s *DoltStore) PartitionWispIDs(ctx context.Context, ids []string) (wispIDs
 }
 
 // PromoteFromEphemeral copies an issue from the wisps table to the issues table,
-// clearing the Ephemeral flag. Used by bd promote and mol squash to crystallize wisps.
+// clearing the Ephemeral flag. No bd command calls it: bd promote runs
+// issueops.Promote, whose persistence move also carries the child counter.
 //
 // Uses direct SQL inserts to bypass IsEphemeralID routing, which would otherwise
 // redirect label/dependency/event writes back to wisp tables.
@@ -249,6 +250,12 @@ func (s *DoltStore) demoteToWispInTx(ctx context.Context, tx *sql.Tx, id string,
 
 	if err := insertIssueTxIntoTable(ctx, tx, "wisps", issue); err != nil {
 		return fmt.Errorf("failed to insert issue into wisps: %w", err)
+	}
+	// Carry the row's versioned-history participation onto the wisps row
+	// while the issues row still exists, so a move back out restores it
+	// rather than starting history for a legacy row (R2.3).
+	if err := issueops.CarryParticipationToWispInTx(ctx, tx, id); err != nil {
+		return err
 	}
 
 	if _, err := tx.ExecContext(ctx, `
@@ -380,7 +387,7 @@ func (s *DoltStore) doltAddAndCommitInTx(ctx context.Context, tx *sql.Tx, tables
 	if issueops.VersionCommitDeferred(ctx) {
 		return nil
 	}
-	for _, table := range s.withVersionedHistoryTables(tables) {
+	for _, table := range s.withVersionedHistoryTables(ctx, tx, tables) {
 		if err := schema.DrainCall(ctx, tx, "CALL DOLT_ADD(?)", table); err != nil {
 			return fmt.Errorf("dolt add %s: %w", table, err)
 		}

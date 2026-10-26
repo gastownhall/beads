@@ -324,34 +324,56 @@ func listTable() Table {
 		}},
 		Fields: []FieldEntry{
 			param("Status", "status"),
+			// Behind issues.list.filters with the rest of the filter
+			// vocabulary (encode.ListFiltersMembers).
+			paramTo("ExcludeStatus", "exclude_status", "ExcludeStatus"),
 			paramTo("IssueType", "type", "IssueType"),
 			param("Assignee", "assignee"),
-			refused("TitleSearch", "E-ListRequest.TitleSearch"),
-			refused("SpecPrefix", "E-ListRequest.SpecPrefix"),
-			refused("IDFilter", "E-ListRequest.IDFilter"),
+			// TitleSearch, IDFilter and NoAssignee (S15b) are each behind their own
+			// behavior token — issues.list.title, issues.list.ids,
+			// issues.list.noAssignee: httpReader.List refuses a request carrying
+			// one, before dialing, unless the handshake advertises its token
+			// (role_reader.go refuseUnservedListFilters). IDFilter is split the
+			// way the role splits it and sent as the repeatable `id`, one value
+			// per member (bd-enterprise's contract, adopted unchanged).
+			paramTo("TitleSearch", "title", "TitleSearch"),
+			// Every member below mapped as paramTo and named by the
+			// issues.list.filters gate (role_reader.go listFiltersSet) rides
+			// that one behavior token: the rest of `bd list`'s filter
+			// vocabulary, published together.
+			paramTo("SpecPrefix", "spec", "SpecPrefix"),
+			paramTo("IDFilter", "id", "IDFilter"),
+			// Behind issues.list.search: httpReader.List refuses a request
+			// carrying it, before dialing, unless the handshake advertises the
+			// token (role_reader.go refuseUnservedListFilters).
+			param("Query", "q"),
 			param("Labels", "label"),
 			param("LabelsAny", "label_any"),
 			param("ExcludeLabels", "exclude_label"),
-			refused("LabelPattern", "E-ListRequest.LabelPattern"),
-			refused("LabelRegex", "E-ListRequest.LabelRegex"),
-			refused("TitleContains", "E-ListRequest.TitleContains"),
-			refused("DescContains", "E-ListRequest.DescContains"),
-			refused("NotesContains", "E-ListRequest.NotesContains"),
-			refused("ExternalContains", "E-ListRequest.ExternalContains"),
-			refused("ExternalRef", "E-ListRequest.ExternalRef"),
+			paramTo("LabelPattern", "label_pattern", "LabelPattern"),
+			paramTo("LabelRegex", "label_regex", "LabelRegex"),
+			// A TitleContains alone, or equal to TitleSearch up to letter
+			// case, never reaches the encoder: httpReader.List folds it onto
+			// `title` first (FoldTitleContains). What is left is a pair that
+			// differs, sent as both `title` and `title_contains`.
+			paramTo("TitleContains", "title_contains", "TitleContains"),
+			paramTo("DescContains", "desc_contains", "DescContains"),
+			paramTo("NotesContains", "notes_contains", "NotesContains"),
+			paramTo("ExternalContains", "external_contains", "ExternalContains"),
+			paramTo("ExternalRef", "external_ref", "ExternalRef"),
 			paramTo("CreatedBefore", "created_before", "CreatedBefore"),
 			paramTo("CreatedAfter", "created_after", "CreatedAfter"),
-			refused("UpdatedAfter", "E-ListRequest.UpdatedAfter"),
-			refused("UpdatedBefore", "E-ListRequest.UpdatedBefore"),
-			refused("ClosedAfter", "E-ListRequest.ClosedAfter"),
-			refused("ClosedBefore", "E-ListRequest.ClosedBefore"),
-			refused("DeferAfter", "E-ListRequest.DeferAfter"),
-			refused("DeferBefore", "E-ListRequest.DeferBefore"),
-			refused("DueAfter", "E-ListRequest.DueAfter"),
-			refused("DueBefore", "E-ListRequest.DueBefore"),
-			refused("EmptyDesc", "E-ListRequest.EmptyDesc"),
-			refused("NoAssignee", "E-ListRequest.NoAssignee"),
-			refused("NoLabels", "E-ListRequest.NoLabels"),
+			paramTo("UpdatedAfter", "updated_after", "UpdatedAfter"),
+			paramTo("UpdatedBefore", "updated_before", "UpdatedBefore"),
+			paramTo("ClosedAfter", "closed_after", "ClosedAfter"),
+			paramTo("ClosedBefore", "closed_before", "ClosedBefore"),
+			paramTo("DeferAfter", "defer_after", "DeferAfter"),
+			paramTo("DeferBefore", "defer_before", "DeferBefore"),
+			paramTo("DueAfter", "due_after", "DueAfter"),
+			paramTo("DueBefore", "due_before", "DueBefore"),
+			paramTo("EmptyDesc", "empty_description", "EmptyDesc"),
+			paramTo("NoAssignee", "no_assignee", "NoAssignee"),
+			paramTo("NoLabels", "no_labels", "NoLabels"),
 			dropped("SkipLabels", "E-ListRequest.SkipLabels",
 				"the wire hydrates labels either way; dropping the opt-out costs a join and hands the caller more data, never less"),
 			dropped("SkipCounts", "E-ListRequest.SkipCounts",
@@ -359,22 +381,22 @@ func listTable() Table {
 			param("Brief", "brief"),
 			refused("IncludeComments", "E-ListRequest.IncludeComments"),
 			refused("IncludeAllTypes", "E-ListRequest.IncludeAllTypes"),
-			refused("Priority", "E-ListRequest.Priority"),
-			refused("PriorityMin", "E-ListRequest.PriorityMin"),
-			refused("PriorityMax", "E-ListRequest.PriorityMax"),
-			refused("PinnedFlag", "E-ListRequest.PinnedFlag"),
-			refused("NoPinnedFlag", "E-ListRequest.NoPinnedFlag"),
+			paramTo("Priority", "priority", "Priority"),
+			paramTo("PriorityMin", "priority_min", "PriorityMin"),
+			paramTo("PriorityMax", "priority_max", "PriorityMax"),
+			paramTo("PinnedFlag", "pinned", "PinnedFlag"),
+			paramTo("NoPinnedFlag", "no_pinned", "NoPinnedFlag"),
 			param("IncludeTemplates", "include_templates"),
 			param("IncludeGates", "include_gates"),
 			param("IncludeInfra", "include_infra"),
 			param("IncludeEphemeral", "include_ephemeral"),
-			refused("ExcludeTypes", "E-ListRequest.ExcludeTypes"),
+			paramTo("ExcludeTypes", "exclude_type", "ExcludeTypes"),
 			paramTo("ParentID", "parent", "ParentID"),
-			refused("NoParent", "E-ListRequest.NoParent"),
-			refused("MolType", "E-ListRequest.MolType"),
-			refused("WispType", "E-ListRequest.WispType"),
-			refused("DeferredFlag", "E-ListRequest.DeferredFlag"),
-			refused("OverdueFlag", "E-ListRequest.OverdueFlag"),
+			paramTo("NoParent", "no_parent", "NoParent"),
+			paramTo("MolType", "mol_type", "MolType"),
+			paramTo("WispType", "wisp_type", "WispType"),
+			paramTo("DeferredFlag", "deferred", "DeferredFlag"),
+			paramTo("OverdueFlag", "overdue", "OverdueFlag"),
 			paramTo("MetadataFields", "metadata_field", "MetadataFields"),
 			param("HasMetadataKey", "has_metadata_key"),
 			paramTo("AllFlag", "all", "AllFlag"),
@@ -628,8 +650,8 @@ func searchExactIDsTable() Table {
 // because this shape is where the two bridges stop agreeing: the walk carries
 // `bd list`'s whole built filter, so six of its members are DERIVED defaults
 // the server re-derives (DispInverted) and eleven more are explicit user filters
-// listIssues publishes parameters for. The exact-ids shape still refuses every
-// one of them, which is why the enumeration cannot be shared.
+// it sends under their listIssues parameters. The exact-ids shape still refuses
+// every one of them, which is why the enumeration cannot be shared.
 func searchParentWalkTable() Table {
 	const inversionWhy = "a derived default of workapi.BuildListFilter, re-derived server-side from the intent parameters the encoder sends in its place (D4 parent-walk inversion)"
 	inverted := func(name, ledger string) FieldEntry {

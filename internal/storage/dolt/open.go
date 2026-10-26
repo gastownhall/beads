@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -34,7 +35,13 @@ const (
 // starts the server in one shot, so subsequent commands find a running
 // server and don't need fallback auto-start. If the user explicitly
 // stops the server, External mode's "you manage the lifecycle" semantics
-// asks the user to run `bd dolt start`.
+// applies: a port named for the server (BEADS_DOLT_SERVER_PORT, the legacy
+// BEADS_DOLT_PORT, dolt_server_port) gets the externally managed advice, also
+// when it is read back from the port file a successful open wrote, while a
+// shared server, a port from the port file of a server bd started (bd's pid
+// file beside it), or an external workspace whose port no setting names (for
+// example BEADS_DOLT_SERVER_MODE=1 with only a config.yaml or default port)
+// still gets `bd dolt start`.
 func ApplyCLIAutoStart(beadsDir string, cfg *Config) {
 	if cfg.DisableAutoStart {
 		cfg.AutoStart = false
@@ -70,11 +77,46 @@ func ApplyCLIAutoStart(beadsDir string, cfg *Config) {
 // here rather than reaching for .Port. Callers that want to resolve only when
 // unset keep their own `if cfg.ServerPort == 0` guard; this function is
 // unconditional.
+//
+// The port is doltserver.ResolveEndpoint's (DialConfig's): the store's own
+// rule with the legacy BEADS_DOLT_PORT applied, not DefaultConfig's, which
+// leaves that variable for New to apply later. A caller that keys anything to
+// the port (the credentials-file password) must see the port New dials.
 func ApplyResolvedServerPort(beadsDir string, cfg *Config) {
-	resolved := doltserver.DefaultConfig(beadsDir)
+	resolved := doltserver.ResolveEndpoint(beadsDir, nil)
 	cfg.ServerPort = resolved.Port
 	cfg.ServerPortSource = resolved.PortSource
 	cfg.ServerPortSharedServer = resolved.PortSharedServer
+}
+
+// FillServerEndpoint fills cfg's server port and password from the endpoint
+// New will dial for it, and returns that endpoint (doltserver.ResolveEndpoint,
+// with fileCfg as beadsDir's metadata.json). The caller sets cfg.ServerHost
+// first when it dials a host of its own; FillServerEndpoint then keys the
+// password to that host. A port the caller set is kept, and the store's port
+// rule (ResolveServerPort) applied to it, as New will; otherwise the port is
+// the workspace's, with its source (see ApplyResolvedServerPort). Either way
+// the password is looked up only after the port is final, so the
+// credentials-file entry it comes from is the one for [host:port] New dials,
+// never the entry for a port that BEADS_DOLT_PORT later replaces. A password
+// the caller set is kept.
+func FillServerEndpoint(beadsDir string, fileCfg *configfile.Config, cfg *Config) doltserver.Endpoint {
+	ep := doltserver.ResolveEndpoint(beadsDir, fileCfg)
+	if cfg.ServerHost != "" {
+		ep = ep.WithHost(cfg.ServerHost)
+	}
+	if cfg.ServerPort == 0 {
+		cfg.ServerPort = ep.Port
+		cfg.ServerPortSource = ep.PortSource
+		cfg.ServerPortSharedServer = ep.PortSharedServer
+	} else {
+		ResolveServerPort(cfg)
+		ep = ep.AtPort(cfg.ServerPort, cfg.ServerPortSource)
+	}
+	if cfg.ServerPassword == "" {
+		cfg.ServerPassword = ep.Password()
+	}
+	return ep
 }
 
 // requireDoltBackend keeps metadata-driven callers from bypassing the storage
@@ -83,19 +125,65 @@ func ApplyResolvedServerPort(beadsDir string, cfg *Config) {
 // closed instead of opening a new, empty Dolt database. beadsDir is the workspace
 // the config came from, so the refusal can offer the metadata heal when that
 // workspace already holds a Dolt database.
+//
+// It first refuses a workspace whose metadata or graph format marker declares a
+// data model this build cannot open (configfile.CheckWorkspaceFormat): such a
+// workspace keeps another model's database behind an ordinary Dolt backend,
+// and opening it here would run Issue migrations into that database.
 func requireDoltBackend(fileCfg *configfile.Config, beadsDir string) error {
+	if err := configfile.CheckWorkspaceFormat(fileCfg, beadsDir); err != nil {
+		return err
+	}
 	switch fileCfg.Backend {
 	case configfile.BackendPostgres, configfile.BackendMySQL, configfile.BackendSQLite:
 		return fmt.Errorf("configured storage backend %q is no longer supported and cannot be opened as Dolt: %s", fileCfg.Backend, configfile.RemovedBackendDetailAt(fileCfg.Backend, beadsDir, fileCfg))
 	}
 	if !configfile.IsSupportedBackend(fileCfg.Backend) {
-		return fmt.Errorf("configured storage backend %q in metadata.json is not recognized and cannot be opened as Dolt; %s", fileCfg.Backend, configfile.BackendNotOpenedGuarantee)
+		return fmt.Errorf("configured storage backend %q in %s is not recognized and cannot be opened as Dolt; %s", fileCfg.Backend, filepath.Base(configfile.MetadataFilePath(beadsDir)), configfile.BackendNotOpenedGuarantee)
 	}
 	backend := fileCfg.GetBackend()
 	if backend != configfile.BackendDolt {
 		return fmt.Errorf("configured storage backend %q cannot be opened as Dolt", backend)
 	}
 	return nil
+}
+
+// RequireDiscoveredDoltBackend runs requireDoltBackend on beadsDir's metadata
+// as configfile.LoadForDiscovery reads it, which never rewrites the workspace.
+// The metadata-driven constructors run it before configfile.Load, which
+// migrates a legacy config.json into metadata.json and drops the keys Config
+// does not know, so a workspace they refuse (another data model, a
+// historical SQLite workspace, or a backend other than Dolt) is refused before
+// that rewrite rather than after it, with the text command admission prints
+// for it (configfile.LoadDiscoveredForOpen). A
+// caller that writes into the workspace before it reaches a constructor
+// (beads.OpenGated's gates) runs it first too. Metadata that does not load is
+// left to Load to report, unless the graph format marker sits beside it
+// (configfile.LoadDiscoveredForOpen); no metadata at all (and no format
+// marker) selects Dolt.
+func RequireDiscoveredDoltBackend(beadsDir string) error {
+	fileCfg, err := configfile.LoadDiscoveredForOpen(beadsDir)
+	if err != nil {
+		return err
+	}
+	if fileCfg == nil {
+		return nil
+	}
+	return requireDoltBackend(fileCfg, beadsDir)
+}
+
+// loadFileConfig reads beadsDir's metadata for a metadata-driven constructor.
+// A read-only store (cfg.ReadOnly) reads it as discovery does
+// (configfile.LoadForDiscovery), which never migrates a legacy config.json
+// into metadata.json: a read-only open writes nothing into the workspace it
+// reads, which is often one bd was not launched in (an external project, a
+// routed read, doctor's additional repos). Every other open loads it with
+// configfile.Load, migrating it as before.
+func loadFileConfig(beadsDir string, cfg *Config) (*configfile.Config, error) {
+	if cfg != nil && cfg.ReadOnly {
+		return configfile.LoadForDiscovery(beadsDir)
+	}
+	return configfile.Load(beadsDir)
 }
 
 // NewFromConfig creates a DoltStore based on the metadata.json configuration.
@@ -109,7 +197,12 @@ func NewFromConfig(ctx context.Context, beadsDir string) (*DoltStore, error) {
 // `bd doctor` that should behave the same way as normal top-level CLI commands
 // while still honoring externally managed server mode.
 func NewFromConfigWithCLIOptions(ctx context.Context, beadsDir string, cfg *Config) (*DoltStore, error) {
-	fileCfg, err := configfile.Load(beadsDir)
+	// Refuse before Load can migrate a legacy config.json into metadata.json;
+	// requireDoltBackend re-checks the loaded config.
+	if err := RequireDiscoveredDoltBackend(beadsDir); err != nil {
+		return nil, err
+	}
+	fileCfg, err := loadFileConfig(beadsDir, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("loading config: %w", err)
 	}
@@ -139,7 +232,12 @@ func NewFromConfigWithCLIOptions(ctx context.Context, beadsDir string, cfg *Conf
 // NewFromConfigWithOptions creates a DoltStore with options from metadata.json.
 // Options in cfg override those from the config file. Pass nil for default options.
 func NewFromConfigWithOptions(ctx context.Context, beadsDir string, cfg *Config) (*DoltStore, error) {
-	fileCfg, err := configfile.Load(beadsDir)
+	// Refuse before Load can migrate a legacy config.json into metadata.json;
+	// requireDoltBackend re-checks the loaded config.
+	if err := RequireDiscoveredDoltBackend(beadsDir); err != nil {
+		return nil, err
+	}
+	fileCfg, err := loadFileConfig(beadsDir, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("loading config: %w", err)
 	}
@@ -278,11 +376,25 @@ func applyResolvedConfig(ctx context.Context, beadsDir string, fileCfg *configfi
 	if cfg.ServerHost == "" {
 		cfg.ServerHost = fileCfg.GetDoltServerHost()
 	}
+	// The port and the password come from the endpoint New will dial
+	// (FillServerEndpoint): the store's port rule, the legacy BEADS_DOLT_PORT
+	// included, and the credentials-file entry for that host and port. The
+	// password is filled after the credential command below has had its say
+	// on the user, but keyed here, to the final port.
+	resolved := &Config{
+		ServerHost:             cfg.ServerHost,
+		ServerPort:             cfg.ServerPort,
+		ServerPortSource:       cfg.ServerPortSource,
+		ServerPortSharedServer: cfg.ServerPortSharedServer,
+		BeadsDir:               cfg.BeadsDir,
+		Path:                   cfg.Path,
+		ServerPassword:         cfg.ServerPassword,
+	}
+	ep := FillServerEndpoint(beadsDir, fileCfg, resolved)
 	if cfg.ServerPort == 0 {
-		// fileCfg.GetDoltServerPort() falls back to 3307, which is wrong for
-		// standalone repos; ApplyResolvedServerPort walks doltserver's real
-		// precedence chain and carries the source along with the port.
-		ApplyResolvedServerPort(beadsDir, cfg)
+		cfg.ServerPort = ep.Port
+		cfg.ServerPortSource = ep.PortSource
+		cfg.ServerPortSharedServer = ep.PortSharedServer
 	}
 	// Resolve the server-mode credential (the connection username). In server mode a
 	// configured credential command takes precedence over the static user; it fails
@@ -306,10 +418,12 @@ func applyResolvedConfig(ctx context.Context, beadsDir string, fileCfg *configfi
 	// this, callers that rely on NewFromConfigWithOptions (e.g. doctor's
 	// SharedStore) fail to reach externally-hosted Dolt servers that keep
 	// credentials in ~/.config/beads/credentials, while bd create/list/close
-	// succeed (bd-h5k7). GetDoltServerPasswordForPort checks BEADS_DOLT_PASSWORD
-	// env first, then credentials file keyed by [host:resolved-port].
+	// succeed (bd-h5k7). The endpoint's password is BEADS_DOLT_PASSWORD, else
+	// the credentials-file entry for the host and the port New dials, which
+	// FillServerEndpoint looked up once above: every read of that file checks
+	// its permissions and warns about a loose one.
 	if cfg.ServerPassword == "" {
-		cfg.ServerPassword = fileCfg.GetDoltServerPasswordForPort(cfg.ServerPort)
+		cfg.ServerPassword = resolved.ServerPassword
 	}
 	if !cfg.ServerTLS {
 		cfg.ServerTLS = fileCfg.GetDoltServerTLS()

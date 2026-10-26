@@ -125,7 +125,15 @@ type IssuePatch struct {
 	// AppendNotes appends to the notes and is mutually exclusive with Notes.
 	AppendNotes Field[string]
 	SpecID      Field[string]
-	AwaitID     Field[string]
+	// AwaitID replaces the gate's condition identifier; the empty string
+	// clears it. Its bounds are ValidateGateFields' (GateFieldError).
+	AwaitID Field[string]
+	// Waiters is a WHOLE-VALUE replacement of the gate's waiter list; a set
+	// nil or empty Value clears it. The role stores the list as given:
+	// duplicates are kept, as local storage always has, and deduplication is
+	// the caller's (bd gate add-waiter dedups before it writes). Its bounds
+	// are the column's (GateFieldError naming GateFieldWaiters).
+	Waiters Field[[]string]
 	// Status sets the issue's status. A status that crosses from outside the
 	// configured done category into it answers to close policy: the update
 	// refuses with CloseOpenChildrenError or ErrCloseBlocked unless
@@ -395,6 +403,47 @@ type CloseRequest struct {
 	// a miss refuses with ErrVersionMismatch having written nothing. Force
 	// bypasses close policy and never this guard.
 	ExpectedVersion *int64
+	// AutoCloseMolecule closes the issue's molecule root IN THE SAME
+	// TRANSACTION when this close completed it: the root closes itself when
+	// complete (AutoClosesWhenComplete), it is open, and every step under it
+	// is now closed (CompletedMolecule). The root close is unforced, guarded
+	// on the root revision read inside that transaction, and records
+	// MoleculeAutoCloseReason and this request's Session.
+	//
+	// It runs for an idempotent re-close too: the rule is state-derived, so a
+	// replayed close of the last step heals a root a crash left open.
+	//
+	// IT IS OPT-IN because an orchestrator may run its own molecule
+	// lifecycle (gc closes molecule roots itself); the zero value never
+	// touches a root. A root close its close policy refuses (a live blocker
+	// on the root, open children) or a close guard refuses (a template root, a
+	// pinned root, a root assigned to someone other than Actor — the root
+	// close is unforced, so each guard holds as it does for a direct close)
+	// leaves the root open and is reported on
+	// CloseResult.MoleculeAutoCloseRefusal (IsMoleculeAutoCloseRefusal); it
+	// never fails the step close.
+	//
+	// ANY OTHER FAILURE OF THE ROOT CLOSE FAILS THE STEP'S CLOSE. A storage
+	// error is returned and rolls the step's close back with it, so a retry
+	// re-runs both. (The CLI used to close the root after the step's close had
+	// committed and only warned when that failed, leaving a complete
+	// molecule's root open.) A write to the root that races this close is not
+	// such a failure: the two conflict at commit, and the backend's retry
+	// decides the root again (MoleculeRootClose).
+	//
+	// Two closes that finish a molecule's last steps concurrently do not
+	// strand its root: each close that decides a root first rewrites one
+	// coordination cell for it, so their transactions conflict at commit and
+	// the one that retries reads the other's close and closes the root.
+	//
+	// THE CELL SERIALIZES SIBLING CLOSES. Every close under an open
+	// auto-closing root rewrites it, whether or not that close completes the
+	// molecule, so any two concurrent closes of steps under the same root
+	// conflict and one of them retries. Under heavy fan-out a close can spend
+	// its whole retry budget conflicting and then fails with the
+	// serialization error. Closes under different roots contend only when
+	// their roots hash to the same cell.
+	AutoCloseMolecule bool
 }
 
 // ReopenRequest describes an issue reopening.
@@ -457,6 +506,15 @@ type CloseResult struct {
 	// OpenChildren is the number of open children observed by a forced close.
 	// It is reported even for an idempotent re-close.
 	OpenChildren int
+	// AutoClosedMolecule is the molecule root CloseRequest.AutoCloseMolecule
+	// closed in this close's transaction, as a post-close snapshot with
+	// labels. Nil when nothing was auto-closed.
+	AutoClosedMolecule *Issue
+	// MoleculeAutoCloseRefusal says why a completed molecule's root stayed
+	// open: its close policy or a close guard refused it
+	// (IsMoleculeAutoCloseRefusal), in that refusal's own message, the same on
+	// every backend. Empty otherwise.
+	MoleculeAutoCloseRefusal string
 }
 
 // ReopenResult reports the post-reopen issue as a detached post-state snapshot

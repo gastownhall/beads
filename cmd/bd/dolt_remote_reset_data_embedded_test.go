@@ -56,7 +56,7 @@ func lsRemoteRef(t *testing.T, remoteDir, ref string) string {
 	return fields[0]
 }
 
-func TestDoltRemoteResetData_GitBacked(t *testing.T) {
+func TestEmbeddedDoltRemoteResetData_GitBacked(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded integration tests")
 	}
@@ -112,7 +112,7 @@ func TestDoltRemoteResetData_GitBacked(t *testing.T) {
 	}
 }
 
-func TestDoltRemoteResetData_UnknownRemote(t *testing.T) {
+func TestEmbeddedDoltRemoteResetData_UnknownRemote(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded integration tests")
 	}
@@ -129,7 +129,7 @@ func TestDoltRemoteResetData_UnknownRemote(t *testing.T) {
 	}
 }
 
-func TestDoltRemoteResetData_CloudRemoteRefused(t *testing.T) {
+func TestEmbeddedDoltRemoteResetData_CloudRemoteRefused(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded integration tests")
 	}

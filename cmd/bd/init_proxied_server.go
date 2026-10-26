@@ -41,6 +41,7 @@ type initProxiedServerInput struct {
 	stealth                bool
 	skipHooks              bool
 	skipAgents             bool
+	keepHomeClean          bool // see guardInitInHomeDir
 	reinitLocal            bool
 	contributor            bool
 	team                   bool
@@ -166,7 +167,7 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 		ConfigYAMLBody:          configYAMLBody,
 		ProxiedServerClientInfo: clientInfo,
 		SetNoCOW:                true,
-		WriteProjectGitignore:   useLocalBeads && beadsDirIsLocal,
+		WriteProjectGitignore:   useLocalBeads && beadsDirIsLocal && !in.keepHomeClean,
 	}
 	if useLocalBeads {
 		fsParams.LocalVersion = Version
@@ -328,7 +329,9 @@ func resolveProxiedInitRemoteURL(ctx context.Context, workDir string, in initPro
 	if source != initSyncRemoteNone {
 		return ""
 	}
-	if !in.stealth {
+	// Under keepHomeClean the repository around the home is not the project's,
+	// so its origin is not this workspace's remote (see guardInitInHomeDir).
+	if !in.stealth && !in.keepHomeClean {
 		// Origin belongs to the selected project, independently of Beads storage.
 		gitUC := domain.NewGitUseCase(workDir, domaingit.NewInitGitRepository(workDir))
 		if originURL, err := gitUC.OriginRemoteURL(ctx); err == nil && originURL != "" {
@@ -537,7 +540,13 @@ func runInitProxiedServerTail(cmd *cobra.Command, ctx context.Context, in initPr
 	// One probe answers both the role gate and the artifact gates: gitUC is the
 	// scrubbed selected-directory repository whenever workDir is set, and the
 	// supplied use case otherwise, so a separate role probe could only repeat it.
-	isRepo := gitUC.IsGitRepo(ctx)
+	// Under keepHomeClean the repository it can find encloses the home instead
+	// of holding the project, so the tail treats the home as outside every
+	// repository: no role, no fork exclude, no upstream advice and no bootstrap
+	// commit, which would stage the legacy ~/.beads and the home's agent files
+	// into it (see guardInitInHomeDir). RunE sets skipHooks for the same case,
+	// which also covers a colocated jj repository.
+	isRepo := !in.keepHomeClean && gitUC.IsGitRepo(ctx)
 
 	if isRepo {
 		role := in.roleFlag

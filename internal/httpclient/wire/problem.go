@@ -299,6 +299,11 @@ const ReasonProjectMismatch = "project_mismatch"
 // tells this refusal apart from an ordinary malformed argument.
 const ReasonWireRevisionUnsupported = "wire_revision_unsupported"
 
+// ReasonEphemeral is the Problem `reason` that qualifies a lease_not_held: the
+// id names a wisp, which is never leased. Spelled exactly as the server's
+// httpapi.ReasonEphemeral (held to it by the vocabulary test).
+const ReasonEphemeral = "ephemeral"
+
 // ErrWireRevisionUnsupported reports that bd serve refused this client's
 // declared Bd-Wire-Revision header as older than the revision it now
 // requires. See WireRevisionUnsupportedError.
@@ -632,6 +637,31 @@ var codeSentinel = map[string]func(*ProblemError, target) error{
 	// them apart, so this maps to the STATUS sentinel — the wider of the two,
 	// and the one whose message does not assert a fact the wire never sent.
 	"not_releasable": func(*ProblemError, target) error { return issueops.ErrNotReleasable },
+
+	// lease_not_held is the HEARTBEAT's refusal: the actor holds no live claim
+	// (open, closed, released, reclaimed, moved off in_progress, or a wisp).
+	// httpclient's Heartbeater reaches it (heartbeater.go). The typed error is
+	// rebuilt whole from `issue_status` and `reason: ephemeral` (a wisp), and
+	// it wraps ErrLeaseNotHeld, which also matches ErrNotClaimable, in the
+	// native heartbeat's own words ("<id> status <status>", "<id> is
+	// ephemeral").
+	"lease_not_held": func(e *ProblemError, t target) error {
+		id := refusedIssueID(e, t)
+		status := deref(e.IssueStatus)
+		conflict := &issueops.LeaseConflictError{
+			IssueID:   id,
+			Status:    issueops.Status(status),
+			Ephemeral: e.Reason == ReasonEphemeral,
+			Err:       issueops.ErrLeaseNotHeld,
+		}
+		switch {
+		case conflict.Ephemeral:
+			conflict.Err = fmt.Errorf("%w: %s is ephemeral", issueops.ErrLeaseNotHeld, id)
+		case status != "":
+			conflict.Err = fmt.Errorf("%w: %s status %s", issueops.ErrLeaseNotHeld, id, status)
+		}
+		return conflict
+	},
 
 	// [Added: OSS publishes notes_overwrite_refused (internal/httpapi/problem.go
 	// CodeNotesOverwrite, status 409) for an update whose Patch.Notes would

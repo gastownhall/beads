@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -12,6 +13,8 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/memoryapi"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/remedy"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/kvkeys"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/memoryops"
@@ -217,9 +220,11 @@ func rememberBudgetVerdict(existing map[string]string, key, content string, budg
 // `bd remember <bare-slug>` (no --key): a bare slug naming an EXISTING memory
 // is recalled instead of stored; a bare slug naming nothing is refused. The
 // caller only invokes it when memoryKeyFlag == "" and the insight round-trips
-// through memoryapi.DeriveKey unchanged, having already read the key.
-func rememberBareKeyPath(key, insight, existing string) error {
-	if existing != "" {
+// through memoryapi.DeriveKey unchanged, having already read the key. As in
+// printRecallResult, presence is found (row existence), never existing != "":
+// a bare slug naming a memory stored as the empty string recalls it.
+func rememberBareKeyPath(key, insight, existing string, found bool) error {
+	if found {
 		if jsonOutput {
 			return outputJSON(map[string]interface{}{
 				"key":    key,
@@ -228,30 +233,60 @@ func rememberBareKeyPath(key, insight, existing string) error {
 				"action": "recalled",
 			})
 		}
+		keyArg, keyNote := remedy.CommandArg(runtime.GOOS, key, "<key>")
 		fmt.Fprintf(os.Stderr,
-			"(recalled %q -- a bare existing key READS. To overwrite: `bd remember \"<new content>\" --key %s`)\n",
-			key, key)
+			"(recalled %q -- a bare existing key READS. To overwrite: `bd remember \"<new content>\" --key %s`%s)\n",
+			key, keyArg, keyNote)
 		fmt.Printf("%s\n", existing)
 		return nil
 	}
+	keyArg, keyNote := remedy.CommandArg(runtime.GOOS, key, "<key>")
 	return HandleErrorRespectJSON(
 		"no memory named %q to recall -- and refusing to store a bare key-like token as its own content. "+
 			"`bd remember` WRITES (its positional arg is CONTENT, not a key). "+
-			"To store it anyway: `bd remember %q --key %s`. To browse keys: `bd memories`",
-		key, insight, key)
+			"To store it anyway: `bd remember %q --key %s`%s. To browse keys: `bd memories`",
+		key, insight, keyArg, keyNote)
 }
 
-// printRememberResult renders the `bd remember` success output.
-func printRememberResult(verb, key, insight string) error {
+// printRememberResult renders the `bd remember` success output. commitErr is
+// the memory commit's failure, if any; the memory is stored either way.
+func printRememberResult(verb, key, insight string, commitErr error) error {
 	if jsonOutput {
-		return outputJSON(map[string]string{
+		payload := map[string]interface{}{
 			"key":    key,
 			"value":  insight,
 			"action": strings.ToLower(verb),
-		})
+		}
+		memoryCommitFields(payload, commitErr)
+		return outputJSON(payload)
 	}
 	fmt.Printf("%s [%s]: %s\n", verb, key, truncateMemory(insight, 80))
 	return nil
+}
+
+// memoryCommitFields tells a `--json` consumer that the write landed but its
+// Dolt commit did not, which the exit code no longer says (see the commit
+// sites). The fields are added only then, so a committed write's payload keeps
+// its shipped shape. dirty_config_keys names the internal keys the kv.* screen
+// refused, which is what the user has to commit or revert. commit_indeterminate
+// marks an error after which the store cannot say whether the commit landed
+// (storage.ErrCommitIndeterminate, such as a connection lost during
+// DOLT_COMMIT). committed stays false beside it, so a consumer that reads only
+// committed never takes a memory that may be uncommitted for a committed one;
+// `bd dolt commit` settles it either way.
+func memoryCommitFields(payload map[string]interface{}, commitErr error) {
+	if commitErr == nil {
+		return
+	}
+	payload["committed"] = false
+	payload["commit_error"] = commitErr.Error()
+	if errors.Is(commitErr, storage.ErrCommitIndeterminate) {
+		payload["commit_indeterminate"] = true
+	}
+	var refused *storage.ConfigCommitRefusedError
+	if errors.As(commitErr, &refused) {
+		payload["dirty_config_keys"] = refused.Keys
+	}
 }
 
 // printMemoriesResult renders the `bd memories` output.
@@ -304,35 +339,40 @@ func printForgetNotFound(key string) error {
 	return SilentExit()
 }
 
-// printForgetResult renders the `bd forget` success output.
-func printForgetResult(key, existing string) error {
+// printForgetResult renders the `bd forget` success output. commitErr is as
+// for printRememberResult.
+func printForgetResult(key, existing string, commitErr error) error {
 	if jsonOutput {
-		return outputJSON(map[string]string{
+		payload := map[string]interface{}{
 			"key":     key,
 			"deleted": "true",
-		})
+		}
+		memoryCommitFields(payload, commitErr)
+		return outputJSON(payload)
 	}
 	fmt.Printf("Forgot [%s]: %s\n", key, truncateMemory(existing, 80))
 	return nil
 }
 
 // printRecallResult renders the `bd recall` output (including the not-found
-// SilentExit contract).
-func printRecallResult(key, value string) error {
+// SilentExit contract). Presence comes from found — ROW EXISTENCE, per the
+// role's RecallResult.Found — never from value != "": a memory stored as the
+// empty string is found and recalls as "", and only an absent key is a miss.
+func printRecallResult(key, value string, found bool) error {
 	if jsonOutput {
 		if jerr := outputJSON(map[string]interface{}{
 			"key":   key,
 			"value": value,
-			"found": value != "",
+			"found": found,
 		}); jerr != nil {
 			return jerr
 		}
-		if value == "" {
+		if !found {
 			return SilentExit()
 		}
 		return nil
 	}
-	if value == "" {
+	if !found {
 		fmt.Fprintf(os.Stderr, "No memory with key %q\n", key)
 		return SilentExit()
 	}
@@ -436,7 +476,7 @@ Examples:
 			if err != nil {
 				return HandleErrorRespectJSON("recalling memory: %v", err)
 			}
-			return rememberBareKeyPath(derived, insight, recalled.Value)
+			return rememberBareKeyPath(derived, insight, recalled.Value, recalled.Found)
 		}
 
 		// Corpus budget (memories.budget-chars, OPT-IN, 0 = off). The
@@ -514,6 +554,15 @@ Examples:
 			return HandleErrorRespectJSON("storing memory: %v", err)
 		}
 		noteDirectMemoryWrite()
+		// The memory is stored by now, so a commit the kv.* screen refuses (a
+		// dirty internal key such as `bd rename-prefix` leaves) or that fails
+		// is a warning, not the command's failure: exit 1 would report a write
+		// that landed as one that did not. v1.0.1 (#3052) warned and carried on
+		// the same way; --json gets the same news in memoryCommitFields.
+		commitErr := commitMemoryWrite(rootCtx, store, "remember")
+		if commitErr != nil {
+			WarnError("%v", commitErr)
+		}
 
 		if budgetLine != "" {
 			fmt.Fprintln(os.Stderr, budgetLine)
@@ -526,7 +575,7 @@ Examples:
 		if result.Replaced {
 			verb = "Updated"
 		}
-		return printRememberResult(verb, result.Key, result.Value)
+		return printRememberResult(verb, result.Key, result.Value, commitErr)
 	},
 }
 
@@ -618,8 +667,14 @@ Examples:
 			return printForgetNotFound(result.Key)
 		}
 		noteDirectMemoryWrite()
+		// As for remember: the delete landed, so a refused or failed commit
+		// warns and the command still succeeds.
+		commitErr := commitMemoryWrite(rootCtx, store, "forget")
+		if commitErr != nil {
+			WarnError("%v", commitErr)
+		}
 
-		return printForgetResult(result.Key, result.Value)
+		return printForgetResult(result.Key, result.Value, commitErr)
 	},
 }
 
@@ -653,7 +708,7 @@ Examples:
 			return HandleErrorRespectJSON("recalling memory: %v", err)
 		}
 
-		return printRecallResult(result.Key, result.Value)
+		return printRecallResult(result.Key, result.Value, result.Found)
 	},
 }
 
