@@ -11,13 +11,13 @@ import (
 	"testing"
 )
 
-// TestEventsHeadReportsHeadAndFloorWithoutReplayingRows is the bug as a
-// consumer meets it (#7084): a checkpoint past the head returns nothing
+// TestEmbeddedEventsHeadReportsHeadAndFloorWithoutReplayingRows is the bug as
+// a consumer meets it (#7084): a checkpoint past the head returns nothing
 // without saying where the head is, and the only other way to learn it is
 // replaying the whole retained window from --since 0 (or bisecting with
 // --limit 1 probes). `bd events head` answers both without reading a single
 // journal row.
-func TestEventsHeadReportsHeadAndFloorWithoutReplayingRows(t *testing.T) {
+func TestEmbeddedEventsHeadReportsHeadAndFloorWithoutReplayingRows(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
