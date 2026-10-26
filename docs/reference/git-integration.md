@@ -134,9 +134,9 @@ uses `timeout` or `gtimeout` only after a successful identity probe for GNU
 coreutils or uutils coreutils (same command line, same exit status), avoiding
 the incompatible `timeout.exe` that native Windows can place on `PATH`. The
 coreutils helper sends `TERM` at the configured deadline. On POSIX hosts,
-the Perl fallback uses `SIGALRM` on the direct `bd` process at the deadline.
-Git for Windows Perl does not guarantee that alarm across `exec`, so a
-coreutils `timeout` (GNU or uutils) is the preferred deadline backend there.
+the Perl fallback keeps the timer in a supervisor process and sends `TERM`
+to `bd` when the deadline expires. A coreutils `timeout` (GNU or uutils)
+remains the preferred deadline backend on Git for Windows.
 
 The default deadline is **300 seconds** (5 minutes), which accommodates chained
 pre-commit pipelines (eslint, prettier, TypeScript compilation). Override it
@@ -158,8 +158,8 @@ warns and runs directly without a deadline; that last-resort path can hang until
 the hook itself returns.
 
 Already-installed hook sections are not refreshed automatically. After upgrading
-to a release that changed the generated timeout probe — the name-only check, or
-the uutils coreutils banner — run `bd hooks install` once to refresh
+to a release that changed the generated timeout handling, run `bd hooks install`
+once to refresh
 already-installed canonical hook sections. Automatic generated-policy adoption is
 tracked separately.
 
