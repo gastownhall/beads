@@ -2,7 +2,9 @@ package dolt
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -545,5 +547,426 @@ func TestNewServerMode_SharedServerFixedPortFallback_FailsClosed(t *testing.T) {
 	}
 	if cfg.ServerPort != configuredPort {
 		t.Errorf("cfg.ServerPort mutated to %d on fail-closed path, want unchanged %d", cfg.ServerPort, configuredPort)
+	}
+}
+
+// --- Unresolved port (bd-7pkvvd) ---
+//
+// A port of 0 means "not yet resolved"; only auto-start resolves it. When an
+// open will not start a server, newServerMode must report the missing port
+// instead of dialing 127.0.0.1:0 and advising `bd dolt start`, which would
+// init an empty phantom database that shadows the managed one.
+
+// unresolvedPortForbidden are substrings the unresolved-port error must never
+// contain: the old misdiagnosis, the address bd never should have dialed, and
+// the banner Gas City's `gc bd` wrapper rewrites.
+var unresolvedPortForbidden = []string{
+	"unreachable",
+	"127.0.0.1:0",
+	"connection refused",
+	"auto-start is disabled",
+}
+
+// isolateUnresolvedPortEnv clears every env source that could resolve a port,
+// pick shared-server mode, or turn auto-start off behind the test's back.
+func isolateUnresolvedPortEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("BEADS_TEST_MODE", "1")
+	for _, key := range []string{
+		"BEADS_DOLT_AUTO_START",
+		"BEADS_DOLT_SERVER_PORT",
+		"BEADS_DOLT_PORT",
+		"BEADS_DOLT_SHARED_SERVER",
+		"BEADS_DOLT_SERVER_SOCKET",
+	} {
+		t.Setenv(key, "")
+	}
+}
+
+func assertUnresolvedPortError(t *testing.T, err error, beadsDir string, allowStartAdvice bool) string {
+	t.Helper()
+	if err == nil {
+		t.Fatal("expected the unresolved-port error, got nil")
+	}
+	if !errors.Is(err, ErrUnresolvedServerPort) {
+		t.Errorf("error does not wrap ErrUnresolvedServerPort, so callers cannot word this case themselves: %v", err)
+	}
+	msg := err.Error()
+	firstLine, _, _ := strings.Cut(msg, "\n")
+	if want := "no Dolt server port resolved for " + beadsDir; firstLine != want {
+		t.Errorf("first line = %q, want %q\nfull error:\n%s", firstLine, want, msg)
+	}
+	portFile := filepath.Join(doltserver.ResolveServerDir(beadsDir), doltserver.PortFileName)
+	if !filepath.IsAbs(portFile) || !strings.Contains(msg, portFile) {
+		t.Errorf("error does not name the absolute port file %s:\n%s", portFile, msg)
+	}
+	for _, label := range doltserver.PortSourceLabels() {
+		if !strings.Contains(msg, label) {
+			t.Errorf("error does not list port source %q:\n%s", label, msg)
+		}
+	}
+	for _, token := range []string{"BEADS_DOLT_SERVER_PORT", "listener.port", "dolt.port", "dolt_server_port"} {
+		if !strings.Contains(msg, token) {
+			t.Errorf("error does not name port source %q:\n%s", token, msg)
+		}
+	}
+	forbidden := unresolvedPortForbidden
+	if !allowStartAdvice {
+		forbidden = append([]string{"bd dolt start"}, forbidden...)
+	}
+	for _, bad := range forbidden {
+		if strings.Contains(msg, bad) {
+			t.Errorf("unresolved-port error contains %q:\n%s", bad, msg)
+		}
+	}
+	return msg
+}
+
+func TestUnresolvedServerPortError(t *testing.T) {
+	t.Run("socket resolves", func(t *testing.T) {
+		isolateUnresolvedPortEnv(t)
+		cfg := &Config{ServerSocket: "/tmp/dolt.sock", AutoStart: false}
+		if err := unresolvedServerPortError(cfg, t.TempDir(), t.TempDir()); err != nil {
+			t.Fatalf("socket configured: want nil, got %v", err)
+		}
+	})
+	t.Run("port resolves", func(t *testing.T) {
+		isolateUnresolvedPortEnv(t)
+		cfg := &Config{ServerHost: "127.0.0.1", ServerPort: 3307, AutoStart: false}
+		if err := unresolvedServerPortError(cfg, t.TempDir(), t.TempDir()); err != nil {
+			t.Fatalf("port resolved: want nil, got %v", err)
+		}
+	})
+
+	for _, spelling := range []string{"0", "false", "off"} {
+		t.Run("BEADS_DOLT_AUTO_START="+spelling, func(t *testing.T) {
+			isolateUnresolvedPortEnv(t)
+			t.Setenv("BEADS_DOLT_AUTO_START", spelling)
+			beadsDir := t.TempDir()
+			cfg := &Config{BeadsDir: beadsDir, Path: filepath.Join(beadsDir, "dolt"), ServerHost: "127.0.0.1", AutoStart: true}
+			err := unresolvedServerPortError(cfg, beadsDir, doltserver.ResolveServerDir(beadsDir))
+			msg := assertUnresolvedPortError(t, err, beadsDir, false)
+			if !strings.Contains(msg, "dolt.auto-start is off") {
+				t.Errorf("remedy does not say auto-start is off:\n%s", msg)
+			}
+		})
+	}
+
+	t.Run("externally managed", func(t *testing.T) {
+		isolateUnresolvedPortEnv(t)
+		beadsDir := t.TempDir()
+		cfg := &Config{BeadsDir: beadsDir, Path: filepath.Join(beadsDir, "dolt"), ServerHost: "127.0.0.1", AutoStart: false}
+		err := unresolvedServerPortError(cfg, beadsDir, doltserver.ResolveServerDir(beadsDir))
+		msg := assertUnresolvedPortError(t, err, beadsDir, false)
+		if !strings.Contains(msg, "externally managed") {
+			t.Errorf("remedy does not say the server is externally managed:\n%s", msg)
+		}
+		if strings.Contains(msg, "dolt.auto-start is off") {
+			t.Errorf("remedy blames dolt.auto-start, which is not off here:\n%s", msg)
+		}
+	})
+
+	t.Run("remote host", func(t *testing.T) {
+		isolateUnresolvedPortEnv(t)
+		beadsDir := t.TempDir()
+		cfg := &Config{BeadsDir: beadsDir, Path: filepath.Join(beadsDir, "dolt"), ServerHost: "db.example.com", AutoStart: true}
+		err := unresolvedServerPortError(cfg, beadsDir, doltserver.ResolveServerDir(beadsDir))
+		msg := assertUnresolvedPortError(t, err, beadsDir, false)
+		if !strings.Contains(msg, "db.example.com") {
+			t.Errorf("remedy does not name the remote host:\n%s", msg)
+		}
+	})
+
+	// bd manages this server, but this particular open may not start one.
+	// Only these rows may point at `bd dolt start`.
+	for name, cfgFor := range map[string]func(beadsDir string) *Config{
+		"strict readonly": func(beadsDir string) *Config {
+			return &Config{BeadsDir: beadsDir, Path: filepath.Join(beadsDir, "dolt"), ServerHost: "127.0.0.1", AutoStart: true, DisableAutoStart: true}
+		},
+		"no path": func(beadsDir string) *Config {
+			return &Config{BeadsDir: beadsDir, ServerHost: "127.0.0.1", AutoStart: true}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			isolateUnresolvedPortEnv(t)
+			beadsDir := t.TempDir()
+			err := unresolvedServerPortError(cfgFor(beadsDir), beadsDir, doltserver.ResolveServerDir(beadsDir))
+			msg := assertUnresolvedPortError(t, err, beadsDir, true)
+			if !strings.Contains(msg, "does not start a Dolt server") {
+				t.Errorf("remedy does not say this command cannot start the server:\n%s", msg)
+			}
+		})
+	}
+}
+
+// TestNewServerModeUnresolvedPort pins the call site: an open that will not
+// start a server returns the unresolved-port error before any dial or
+// auto-start attempt.
+func TestNewServerModeUnresolvedPort(t *testing.T) {
+	noAutoStart := func(t *testing.T) {
+		t.Helper()
+		orig := ensureRunningDetailed
+		t.Cleanup(func() { ensureRunningDetailed = orig })
+		ensureRunningDetailed = func(string) (int, bool, error) {
+			t.Fatal("ensureRunningDetailed must not run for an unresolved port with auto-start off")
+			return 0, false, nil
+		}
+	}
+
+	t.Run("auto-start off by env 0", func(t *testing.T) {
+		isolateUnresolvedPortEnv(t)
+		t.Setenv("BEADS_DOLT_AUTO_START", "0")
+		noAutoStart(t)
+		beadsDir := t.TempDir()
+		cfg := &Config{Database: "test_unresolved_port", BeadsDir: beadsDir, Path: filepath.Join(beadsDir, "dolt"), ServerHost: "127.0.0.1", AutoStart: false}
+		_, err := newServerMode(context.Background(), cfg)
+		assertUnresolvedPortError(t, err, beadsDir, false)
+	})
+
+	// resolveAutoStart honours only "0"; IsAutoStartDisabled also accepts
+	// "false". Before the fix this spelling reached EnsureRunningDetailed.
+	t.Run("auto-start off by env false spelling", func(t *testing.T) {
+		isolateUnresolvedPortEnv(t)
+		t.Setenv("BEADS_DOLT_AUTO_START", "false")
+		noAutoStart(t)
+		beadsDir := t.TempDir()
+		cfg := &Config{Database: "test_unresolved_port", BeadsDir: beadsDir, Path: filepath.Join(beadsDir, "dolt"), ServerHost: "127.0.0.1", AutoStart: true}
+		_, err := newServerMode(context.Background(), cfg)
+		assertUnresolvedPortError(t, err, beadsDir, false)
+	})
+
+	t.Run("externally managed, no path", func(t *testing.T) {
+		isolateUnresolvedPortEnv(t)
+		t.Setenv("BEADS_DOLT_AUTO_START", "0")
+		noAutoStart(t)
+		beadsDir := t.TempDir()
+		cfg := &Config{Database: "test_unresolved_port", BeadsDir: beadsDir, ServerHost: "127.0.0.1", AutoStart: false}
+		_, err := newServerMode(context.Background(), cfg)
+		assertUnresolvedPortError(t, err, beadsDir, false)
+	})
+}
+
+// TestNewServerModeResolvedAddressDialFailureUnchanged pins AC-2: with
+// auto-start off, an address that did resolve (a port, a socket, or a remote
+// host with a port) keeps today's dial error and hint. Only an unresolved
+// port gets the new error.
+func TestNewServerModeResolvedAddressDialFailureUnchanged(t *testing.T) {
+	closedPort := func(t *testing.T) int {
+		t.Helper()
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		port := ln.Addr().(*net.TCPAddr).Port
+		_ = ln.Close()
+		return port
+	}
+	offCfg := func(t *testing.T) (*Config, string) {
+		t.Helper()
+		isolateUnresolvedPortEnv(t)
+		t.Setenv("BEADS_DOLT_AUTO_START", "0")
+		beadsDir := t.TempDir()
+		return &Config{Database: "test_resolved_dial", BeadsDir: beadsDir, Path: filepath.Join(beadsDir, "dolt"), ServerHost: "127.0.0.1", AutoStart: false}, beadsDir
+	}
+
+	t.Run("local port", func(t *testing.T) {
+		cfg, _ := offCfg(t)
+		cfg.ServerPort = closedPort(t)
+		_, err := newServerMode(context.Background(), cfg)
+		if err == nil {
+			t.Fatal("expected a dial error for a closed port")
+		}
+		msg := err.Error()
+		if want := fmt.Sprintf("Dolt server unreachable at 127.0.0.1:%d: ", cfg.ServerPort); !strings.HasPrefix(msg, want) {
+			t.Errorf("error does not start with %q:\n%s", want, msg)
+		}
+		if want := "\n\nDolt server auto-start is disabled (dolt.auto-start: false).\nStart the server manually:\n  bd dolt start"; !strings.HasSuffix(msg, want) {
+			t.Errorf("error does not end with today's hint %q:\n%s", want, msg)
+		}
+	})
+
+	t.Run("socket without port", func(t *testing.T) {
+		cfg, _ := offCfg(t)
+		cfg.ServerSocket = filepath.Join(t.TempDir(), "missing.sock")
+		_, err := newServerMode(context.Background(), cfg)
+		if err == nil {
+			t.Fatal("expected a dial error for a missing socket")
+		}
+		msg := err.Error()
+		if want := "Dolt server unreachable at " + cfg.ServerSocket + ": "; !strings.HasPrefix(msg, want) {
+			t.Errorf("error does not start with %q:\n%s", want, msg)
+		}
+		if !strings.Contains(msg, "The Dolt server is not listening on socket "+cfg.ServerSocket) {
+			t.Errorf("error lacks today's socket hint:\n%s", msg)
+		}
+		if strings.Contains(msg, "no Dolt server port resolved") {
+			t.Errorf("a configured socket must not get the unresolved-port error:\n%s", msg)
+		}
+	})
+
+	t.Run("remote host with port", func(t *testing.T) {
+		cfg, _ := offCfg(t)
+		cfg.ServerHost = "192.0.2.1" // TEST-NET-1: never routable
+		cfg.ServerPort = 3307
+		_, err := newServerMode(context.Background(), cfg)
+		if err == nil {
+			t.Fatal("expected a dial error for an unroutable remote host")
+		}
+		msg := err.Error()
+		if want := "Dolt server unreachable at 192.0.2.1:3307: "; !strings.HasPrefix(msg, want) {
+			t.Errorf("error does not start with %q:\n%s", want, msg)
+		}
+		if !strings.Contains(msg, "Configured Dolt server at 192.0.2.1:3307 is unreachable.\nVerify the external server is running") {
+			t.Errorf("error lacks today's external-host hint (GH#3518):\n%s", msg)
+		}
+	})
+
+	// An IPv6 host, bare or bracketed, is dialed and named as [host]:port,
+	// and the hint's nc takes it bare while its curl takes [host]:port,
+	// quoted.
+	for _, host := range []string{"2001:db8::1", "[2001:db8::1]"} {
+		t.Run("remote IPv6 host "+host, func(t *testing.T) {
+			cfg, _ := offCfg(t)
+			cfg.ServerHost = host // RFC 3849 documentation prefix: never routable
+			cfg.ServerPort = 3307
+			_, err := newServerMode(context.Background(), cfg)
+			if err == nil {
+				t.Fatal("expected a dial error for an unroutable remote host")
+			}
+			msg := err.Error()
+			if want := "Dolt server unreachable at [2001:db8::1]:3307: "; !strings.HasPrefix(msg, want) {
+				t.Errorf("error does not start with %q:\n%s", want, msg)
+			}
+			if want := "Configured Dolt server at [2001:db8::1]:3307 is unreachable.\n" +
+				"Verify the external server is running and reachable from this host:\n" +
+				`  nc -zv 2001:db8::1 3307  # or curl "[2001:db8::1]:3307" for an HTTP-style check`; !strings.Contains(msg, want) {
+				t.Errorf("error lacks the external-host hint %q:\n%s", want, msg)
+			}
+		})
+	}
+}
+
+// TestNewServerModeUnresolvedPortAutoStartStillRuns pins AC-3: with auto-start
+// enabled, an unresolved port still goes to EnsureRunningDetailed (which
+// allocates the port) rather than returning the unresolved-port error.
+func TestNewServerModeUnresolvedPortAutoStartStillRuns(t *testing.T) {
+	isolateUnresolvedPortEnv(t)
+	beadsDir := t.TempDir()
+	cfg := &Config{Database: "test_unresolved_autostart", BeadsDir: beadsDir, Path: filepath.Join(beadsDir, "dolt"), ServerHost: "127.0.0.1", AutoStart: true}
+
+	calls := 0
+	orig := ensureRunningDetailed
+	t.Cleanup(func() { ensureRunningDetailed = orig })
+	ensureRunningDetailed = func(string) (int, bool, error) {
+		calls++
+		return 0, false, fmt.Errorf("simulated start failure")
+	}
+
+	_, err := newServerMode(context.Background(), cfg)
+	if calls != 1 {
+		t.Fatalf("ensureRunningDetailed called %d times, want 1", calls)
+	}
+	if err == nil {
+		t.Fatal("expected the auto-start failure to surface")
+	}
+	if !strings.Contains(err.Error(), "auto-start failed: simulated start failure") {
+		t.Errorf("error is not the auto-start failure wrap:\n%v", err)
+	}
+	if strings.Contains(err.Error(), "no Dolt server port resolved") {
+		t.Errorf("auto-start-capable open got the unresolved-port error:\n%v", err)
+	}
+}
+
+// TestNewServerModeIPv6LoopbackNeverAutoStarts pins an open of a server at the
+// IPv6 loopback, "::1" or "[::1]", that is not there. bd's own server listens
+// on 127.0.0.1 only, so the open starts none, even with auto-start on: the
+// retry would still find nothing at [::1]:port, and the server would be left
+// running. Its advice checks the server at [::1] instead of naming
+// `bd dolt start`, which cannot start one there.
+func TestNewServerModeIPv6LoopbackNeverAutoStarts(t *testing.T) {
+	ipv6LoopbackCfg := func(t *testing.T, host string, port int, autoStart bool) (*Config, string) {
+		t.Helper()
+		isolateUnresolvedPortEnv(t)
+		if !autoStart {
+			t.Setenv("BEADS_DOLT_AUTO_START", "0")
+		}
+		orig := ensureRunningDetailed
+		t.Cleanup(func() { ensureRunningDetailed = orig })
+		ensureRunningDetailed = func(string) (int, bool, error) {
+			t.Fatalf("ensureRunningDetailed ran for host %q, whose server it cannot start", host)
+			return 0, false, nil
+		}
+		beadsDir := t.TempDir()
+		return &Config{Database: "test_ipv6_loopback", BeadsDir: beadsDir, Path: filepath.Join(beadsDir, "dolt"),
+			ServerHost: host, ServerPort: port, AutoStart: autoStart}, beadsDir
+	}
+
+	for _, host := range []string{"::1", "[::1]"} {
+		for _, autoStart := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s closed port, auto-start %v", host, autoStart), func(t *testing.T) {
+				cfg, _ := ipv6LoopbackCfg(t, host, 1, autoStart) // nothing listens on port 1
+				_, err := newServerMode(context.Background(), cfg)
+				if err == nil {
+					t.Fatal("open succeeded with no server at [::1]:1")
+				}
+				msg := err.Error()
+				if want := "Configured Dolt server at [::1]:1 is unreachable.\n" +
+					"Verify the external server is running and reachable from this host:\n" +
+					`  nc -zv ::1 1  # or curl "[::1]:1" for an HTTP-style check`; !strings.Contains(msg, want) {
+					t.Errorf("error lacks the external-server hint %q:\n%s", want, msg)
+				}
+				if strings.Contains(msg, "bd dolt start") {
+					t.Errorf("error advises `bd dolt start`, which cannot start a server at [::1]:\n%s", msg)
+				}
+			})
+		}
+		// Only auto-start would have allocated a port, so the open names
+		// the settings that pin one.
+		t.Run(host+" unresolved port, auto-start true", func(t *testing.T) {
+			cfg, beadsDir := ipv6LoopbackCfg(t, host, 0, true)
+			_, err := newServerMode(context.Background(), cfg)
+			msg := assertUnresolvedPortError(t, err, beadsDir, false)
+			if want := "bd does not manage the Dolt server at ::1; pin its port with"; !strings.Contains(msg, want) {
+				t.Errorf("remedy does not contain %q:\n%s", want, msg)
+			}
+		})
+	}
+}
+
+// TestCreateDatabaseRefusedErrorAdvice pins the error for a server that
+// refused the CREATE DATABASE connection after the open had reached it. Only
+// a server bd can start gets `bd dolt start`. An external one, and one at the
+// IPv6 loopback, which bd's own 127.0.0.1 server never answers for, get the
+// reachability check, as in the dial-failure hint.
+func TestCreateDatabaseRefusedErrorAdvice(t *testing.T) {
+	refused := errors.New("dial tcp: connect: connection refused")
+	for _, tc := range []struct{ host, addr, check string }{
+		{"::1", "[::1]:3307", `nc -zv ::1 3307  # or curl "[::1]:3307" for an HTTP-style check`},
+		{"[::1]", "[::1]:3307", `nc -zv ::1 3307  # or curl "[::1]:3307" for an HTTP-style check`},
+		{"db.example.com", "db.example.com:3307", "nc -zv db.example.com 3307  # or curl db.example.com:3307 for an HTTP-style check"},
+		{"127.0.0.1", "127.0.0.1:3307", ""},
+	} {
+		t.Run(tc.host, func(t *testing.T) {
+			err := createDatabaseRefusedError(&Config{ServerHost: tc.host, ServerPort: 3307}, refused)
+			if !errors.Is(err, refused) {
+				t.Errorf("error does not wrap the driver error: %v", err)
+			}
+			msg := err.Error()
+			if want := "failed to connect to Dolt server at " + tc.addr + ": "; !strings.Contains(msg, want) {
+				t.Errorf("error does not contain %q:\n%s", want, msg)
+			}
+			if tc.check == "" {
+				if !strings.Contains(msg, "bd dolt start") {
+					t.Errorf("error for a server bd can start lacks `bd dolt start`:\n%s", msg)
+				}
+				return
+			}
+			if !strings.Contains(msg, tc.check) {
+				t.Errorf("error lacks the reachability check %q:\n%s", tc.check, msg)
+			}
+			if strings.Contains(msg, "bd dolt start") {
+				t.Errorf("error advises `bd dolt start`, which cannot start a server at %s:\n%s", tc.addr, msg)
+			}
+		})
 	}
 }

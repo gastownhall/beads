@@ -2,14 +2,14 @@ package main
 
 import (
 	"errors"
-	"fmt"
 
 	"github.com/steveyegge/beads/internal/configfile"
 )
 
 // ExitUnsupportedWorkspaceFormat is the exit code for a command refused
 // because its workspace declares a format this bd build cannot open: a
-// metadata.json graph_mode other than "dependency". Stable so a wrapper can
+// metadata.json graph_mode other than "dependency", or a graph workspace
+// format marker (configfile.GraphFormatMarkerFile). Stable so a wrapper can
 // tell "this workspace needs a different bd build" apart from a generic
 // failure (1) without grepping stderr.
 //
@@ -18,53 +18,47 @@ import (
 // §E3, which freezes 10/11/12/130.
 const ExitUnsupportedWorkspaceFormat = 16
 
-// unsupportedWorkspaceFormatError refuses a workspace whose metadata declares
-// a data model other than the Issue store this build opens. Graph-preview
-// builds persist graph_mode "link" plus graph_* binding fields beside an
-// ordinary Dolt backend, so nothing else in the metadata tells this build
-// that the database behind it is not an Issue store; opening it as one would
-// run Issue migrations into it.
-type unsupportedWorkspaceFormatError struct {
-	beadsDir  string
-	graphMode string
-}
-
-func (e *unsupportedWorkspaceFormatError) Error() string {
-	return fmt.Sprintf("workspace %s uses format graph_mode %q, which this bd build does not support; %s",
-		e.beadsDir, e.graphMode, configfile.BackendNotOpenedGuarantee)
-}
-
-func (e *unsupportedWorkspaceFormatError) hint() string {
-	return fmt.Sprintf("use a bd build that supports graph_mode %q workspaces; leave graph_mode and the graph_* fields in metadata.json unchanged", e.graphMode)
-}
-
 // checkWorkspaceFormat refuses metadata whose graph_mode marker names any
-// model but the default. An unknown marker is refused too: it may describe a
-// format newer than this build, so it must never fall back to the Issue store.
-// cfg may be nil (no metadata), which is an ordinary workspace.
+// model but the default, and a beadsDir holding the graph format marker file,
+// with a *configfile.UnsupportedWorkspaceFormatError. It is
+// configfile.CheckWorkspaceFormat, the check the public beads package and the
+// Dolt store's metadata-driven opens apply too, so the CLI and a library
+// caller refuse the same workspaces with the same error.
 func checkWorkspaceFormat(cfg *configfile.Config, beadsDir string) error {
-	if mode, err := cfg.GetGraphMode(); err == nil && mode == configfile.GraphModeDependency {
-		return nil
-	}
-	return &unsupportedWorkspaceFormatError{beadsDir: beadsDir, graphMode: cfg.GraphMode}
+	return configfile.CheckWorkspaceFormat(cfg, beadsDir)
 }
 
-// checkDiscoveredWorkspaceFormat runs checkWorkspaceFormat on beadsDir's
-// metadata as LoadForDiscovery reads it, which never rewrites the workspace.
-// A path that opens or initializes a workspace without passing through command
-// admission runs it first: configfile.Load would otherwise migrate a legacy
-// config.json into metadata.json before the format check could refuse it.
-// Metadata that does not load is left to the caller's own load to report.
-func checkDiscoveredWorkspaceFormat(beadsDir string) error {
-	cfg, err := configfile.LoadForDiscovery(beadsDir)
-	if err != nil {
-		return nil
-	}
-	return checkWorkspaceFormat(cfg, beadsDir)
+// loadAndCheckWorkspaceFormat reads beadsDir's discovery metadata without
+// migrating it and refuses a workspace in a format this build cannot open,
+// including unreadable metadata beside the graph format marker. It is
+// configfile.LoadAndCheckWorkspaceFormat.
+func loadAndCheckWorkspaceFormat(beadsDir string) (*configfile.Config, error) {
+	return configfile.LoadAndCheckWorkspaceFormat(beadsDir)
+}
+
+// hasGraphFormatMarker reports whether anything exists at beadsDir's graph
+// format marker path (configfile.HasGraphFormatMarker).
+func hasGraphFormatMarker(beadsDir string) bool {
+	return configfile.HasGraphFormatMarker(beadsDir)
+}
+
+// checkDiscoveredForOpen is configfile.CheckDiscoveredForOpen, the
+// non-mutating pre-check every path that opens, attaches or initializes a
+// workspace without passing through command admission runs before it writes
+// there: configfile.Load would otherwise migrate a legacy config.json into
+// metadata.json before the workspace could be refused. It refuses what
+// admission refuses from the workspace's own metadata and layout, with
+// admission's text: a format this build cannot open
+// (*configfile.UnsupportedWorkspaceFormatError) and a historical SQLite
+// workspace (*configfile.LegacyWorkspaceError). Metadata that does not load
+// is left to the caller's own load to report, unless the graph format marker
+// sits beside it. The public beads package's opens run the same check.
+func checkDiscoveredForOpen(beadsDir string) error {
+	return configfile.CheckDiscoveredForOpen(beadsDir)
 }
 
 func isUnsupportedWorkspaceFormat(err error) bool {
-	var formatErr *unsupportedWorkspaceFormatError
+	var formatErr *configfile.UnsupportedWorkspaceFormatError
 	return errors.As(err, &formatErr)
 }
 
@@ -76,10 +70,10 @@ func handleWorkspaceGuardError(err error) error {
 	if err == nil {
 		return nil
 	}
-	var formatErr *unsupportedWorkspaceFormatError
+	var formatErr *configfile.UnsupportedWorkspaceFormatError
 	if !errors.As(err, &formatErr) {
 		return HandleError("%v", err)
 	}
-	_ = HandleErrorWithHint(formatErr.Error(), formatErr.hint())
+	_ = HandleErrorWithHint(formatErr.Error(), formatErr.Hint())
 	return &exitError{Code: ExitUnsupportedWorkspaceFormat}
 }

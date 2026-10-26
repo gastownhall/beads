@@ -159,6 +159,7 @@ go_test(
         "migration_0071_add_removed_restriction_test.go",
         "migration_0072_add_epoch_minted_addresses_test.go",
         "migration_body_drain_test.go",
+        "migration_content_hashes_test.go",
         "migration_freeze_test.go",
         "migration_watchdog_test.go",
         "progress_test.go",

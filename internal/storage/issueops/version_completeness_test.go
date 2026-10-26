@@ -197,9 +197,9 @@ var versionCreateShapedMintSites = []string{}
 var versionDualShapeMintSites = map[string]string{
 	"finishCreateIssueInTx":       "a singular create mints create-shaped when it inserted the row and update-shaped when it resolved to an existing one",
 	"CreateIssuesInTxWithContext": "a batch create's deferred mint pass is create-shaped for a row the batch inserted and update-shaped for an existing row it resolved to",
-	"moveIssuePersistenceInTx":    "a move out of the wisps table is create-shaped; the same-plane normalize (bd update --persistent repairing an issues-plane row's flags in place) is update-shaped",
-	"executeUpdate":               "the guarded update's EnteredIssuesPlane branch is create-shaped; every other change it mints for is update-shaped",
-	"PromoteFromEphemeralInTx":    "a wisp promoted onto the issues plane mints create-shaped; when the issues plane already held the id (dual presence, GH#4455) the upsert resolved to that row and the mint is update-shaped",
+	"moveIssuePersistenceInTx":    "a move out of the wisps table is create-shaped for a row that carried no participation; it is update-shaped for a row whose participation the move restored (a demotion carried it while history was on), and for the same-plane normalize (bd update --persistent repairing an issues-plane row's flags in place)",
+	"executeUpdate":               "the guarded update's BeginsHistory branch (a move out of the wisps table of a row that carried no participation) is create-shaped; every other change it mints for, a move that restored a row's participation included, is update-shaped",
+	"PromoteFromEphemeralInTx":    "a wisp promoted onto the issues plane mints create-shaped when it carried no participation; it mints update-shaped when the promotion restored the participation a demotion carried, and when the issues plane already held the id (dual presence, GH#4455) so the upsert resolved to that row",
 }
 
 // versionCreateShapedEntryPoints are the entry points whose every mint is
@@ -487,8 +487,9 @@ var versionExemptions = map[string]string{
 
 	// the seam itself: its UPDATE issues SET current_revision is the
 	// bookkeeping half of the mint, not a mutation that needs its own.
-	"RecordVersionInTx":          "the seam itself; advances current_revision to match the row it just inserted",
-	"RecordVersionForCreateInTx": "the seam's create-shaped sibling; stamps participation_generation and advances current_revision to match the row it just inserted",
+	"RecordVersionInTx":            "the seam itself; advances current_revision to match the row it just inserted",
+	"RecordVersionForCreateInTx":   "the seam's create-shaped sibling; stamps participation_generation and advances current_revision to match the row it just inserted",
+	"CarryParticipationToWispInTx": "demotion bookkeeping: records on the wisps row the participation the issues row it replaces had; a wisp is never versioned (FR-8)",
 
 	// RecordVersionAtInTx (R7.1 as-of read, gastownhall/beads#5898 rev 9,
 	// gastownhall/beads#6136) shares RecordVersionInTx's body
@@ -525,6 +526,45 @@ var versionNeverMints = map[string]string{
 	"ApplyCompactionInTx":              "compaction bookkeeping: out of contract by design",
 	"RestoreFromSnapshotInTx":          "restore: Phase 3",
 	"BootstrapInTx":                    "bootstrap: config and metadata tables only, no issue-plane row",
+	"CarryParticipationToWispInTx":     "demotion bookkeeping for a row that becomes a wisp; a wisp is never versioned (FR-8)",
+	"carryParticipationInTx":           "plane-move bookkeeping: carries participation_generation across the move; the move's own entry point mints, once",
+}
+
+// versionParticipationCarrySites are the issueops plane moves, each of which
+// must carry the moved row's participation across the planes itself
+// (carryParticipationInTx): a move into the wisps table records it on the
+// wisps row, and a move back out restores it on the new issues row. A site
+// that stops carrying it makes every arrival look brand new, so a legacy row
+// made a wisp and then persistent again would start being versioned through
+// ordinary writes (R2.3). The dolt leg's DoltStore.demoteToWispInTx is the one
+// plane move outside this package; it calls CarryParticipationToWispInTx, and
+// the dolt leg's TestDemoteToWispCarriesParticipation holds it at run time.
+var versionParticipationCarrySites = map[string]string{
+	"moveIssuePersistenceInTx": "carries participation into the wisps row on a demotion and restores it on the move back out",
+	"PromoteFromEphemeralInTx": "restores the participation a demotion carried, before the wisps row is deleted",
+}
+
+// TestPlaneMovesCarryParticipation pins versionParticipationCarrySites: each
+// calls carryParticipationInTx itself.
+func TestPlaneMovesCarryParticipation(t *testing.T) {
+	fns, err := journalscan.ParsePackage(".")
+	if err != nil {
+		t.Fatalf("parse package: %v", err)
+	}
+	carry := map[string]bool{"carryParticipationInTx": true}
+	for _, site := range sortedShapeKeys(versionParticipationCarrySites) {
+		if versionParticipationCarrySites[site] == "" {
+			t.Errorf("participation-carry site %s has an empty reason", site)
+		}
+		f, defined := fns[site]
+		if !defined {
+			t.Errorf("participation-carry site %q not found in issueops — was it renamed? update versionParticipationCarrySites", site)
+			continue
+		}
+		if !f.CallsAnyOf(carry) {
+			t.Errorf("plane move %q no longer calls carryParticipationInTx (%s): a row's participation is lost across the move, and a legacy row made a wisp and then persistent again begins history through ordinary writes (R2.3)", site, versionParticipationCarrySites[site])
+		}
+	}
 }
 
 func versionMints(t *testing.T) (map[string]*journalscan.FuncInfo, map[string]bool) {

@@ -270,7 +270,7 @@ func executeUpdate(ctx context.Context, tx *sql.Tx, request publicops.UpdateRequ
 			tables.Add("issues")
 		}
 	}
-	enteredIssuesPlane := false
+	beginsHistory := false
 	if attempt.Patch.Persistence.Set {
 		current, err := GetIssueInTx(ctx, tx, attempt.IssueID)
 		if err != nil {
@@ -284,17 +284,19 @@ func executeUpdate(ctx context.Context, tx *sql.Tx, request publicops.UpdateRequ
 			changedAny = true
 			tables.Merge(moved.ChangedTables)
 		}
-		enteredIssuesPlane = moved.EnteredIssuesPlane
+		beginsHistory = moved.BeginsHistory()
 	}
 	// The one mint for this guarded update, LAST: after the claim, the row
 	// write, the label and parent patches and the persistence move. Nothing
 	// changed means nothing to version (the FR-2 no-op case), and a row that
 	// moved to the wisp plane is excluded by the seam itself. A persistence
-	// move that brought a wisp onto the issues plane makes this the record's
-	// first version, so it mints create-shaped (design §16.2b), the same as
-	// MoveIssuePersistenceInTx's own mint for that move.
+	// move that brought onto the issues plane a row carrying no participation
+	// makes this the record's first version, so it mints create-shaped
+	// (design §16.2b), the same as MoveIssuePersistenceInTx's own mint for
+	// that move; a row whose participation the move restored mints
+	// update-shaped, so a legacy row stays legacy (R2.3).
 	if changedAny {
-		if enteredIssuesPlane {
+		if beginsHistory {
 			if err := RecordVersionForCreateInTx(ctx, tx, attempt.IssueID, attempt.Actor); err != nil {
 				return publicops.UpdateResult{}, nil, err
 			}

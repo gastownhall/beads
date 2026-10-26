@@ -990,6 +990,38 @@ type VersionedHistoryConfigurer interface {
 	SetVersionedHistoryEnabled(enabled bool)
 }
 
+// VersionedHistoryDeferrer is a VersionedHistoryConfigurer that can take the
+// store-plane half of the switch as a read to make later instead of an
+// answer now (internal/versionedhistory's ActivateStore and
+// ActivateProvider).
+//
+// It calls resolve inside the first write transaction it begins (a
+// unit-of-work provider: its first unit of work, read or write), before that
+// transaction's body runs, and then behaves as if
+// SetVersionedHistoryEnabled(answer) had been called at that point. The answer
+// is the row as that transaction reads it, not as it stood at open.
+// Until then it records nothing, which is all a plumbing that has not written
+// can have recorded. Asked this way, a plumbing that never writes never reads
+// the row, and one that does pays one statement inside a transaction it
+// opened anyway, rather than a transaction (on the embedded store, an engine
+// open) of its own at every open.
+//
+// A resolve that returns an error has not answered: the transaction it ran in
+// fails with that error before its body runs, so it writes nothing, and the
+// next write asks again. Like Apply, DeferVersionedHistory never turns an
+// enabled instance off; SetVersionedHistoryEnabled after it replaces the
+// pending read.
+type VersionedHistoryDeferrer interface {
+	VersionedHistoryConfigurer
+	DeferVersionedHistory(resolve VersionedHistoryResolver)
+}
+
+// VersionedHistoryResolver answers the versioned-history switch from the
+// plumbing's own config table. readConfig reads one config row inside the
+// transaction the answer first governs, returning "" and a nil error for a
+// row that is not there.
+type VersionedHistoryResolver func(ctx context.Context, readConfig func(ctx context.Context, key string) (string, error)) (enabled bool, err error)
+
 // LifecycleManager provides lifecycle inspection beyond Close().
 type LifecycleManager interface {
 	IsClosed() bool

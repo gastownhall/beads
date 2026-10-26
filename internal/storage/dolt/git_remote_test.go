@@ -41,7 +41,8 @@ import (
 //     so we avoid it entirely and verify via `dolt sql -q ... -r csv`.
 //
 // Prerequisites:
-//   - dolt >= 2.2.0
+//   - dolt >= 2.6.0 (doltversion.RequiredMin, the oldest dolt bd runs against
+//     outside embedded mode)
 //   - git CLI available
 //
 // Run:

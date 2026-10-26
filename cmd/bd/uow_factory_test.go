@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/doltversion"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -90,6 +93,51 @@ func TestProxiedProviderOptions(t *testing.T) {
 	}
 	if in[:cap(in)][1] != nil {
 		t.Fatal("proxiedProviderOptions wrote into the caller's spare capacity")
+	}
+}
+
+// TestServerLogProviderOptions pins the ownership half of the proxy-start
+// rotation: an open of bd's default server log gains exactly one option on top
+// of the caller's, and an open of a log the operator chose gains none, so bd
+// never renames a log that proxiedLogAssets does not retire on migration. As
+// with TestProxiedProviderOptions, the options are opaque from here: uow's
+// TestApplyProviderOptions pins what WithServerLogRotation sets, and proxy's
+// TestForkExecChild_RotatesOversizedLogs what RotateLogFile does.
+func TestServerLogProviderOptions(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		in          []uow.ProviderOption
+		isCustomLog bool
+		want        int
+	}{
+		{name: "default log", want: 1},
+		{name: "default log, read-only", in: []uow.ProviderOption{uow.WithReadOnly()}, want: 2},
+		{name: "custom log", isCustomLog: true, want: 0},
+		{name: "custom log, read-only", in: []uow.ProviderOption{uow.WithReadOnly()}, isCustomLog: true, want: 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			out := serverLogProviderOptions(tt.in, tt.isCustomLog)
+			if len(out) != tt.want {
+				t.Fatalf("serverLogProviderOptions(%d options, custom=%t) len = %d, want %d", len(tt.in), tt.isCustomLog, len(out), tt.want)
+			}
+			for i, o := range out {
+				if o == nil {
+					t.Fatalf("serverLogProviderOptions(%d options, custom=%t)[%d] is nil", len(tt.in), tt.isCustomLog, i)
+				}
+			}
+		})
+	}
+
+	// The append must not land in the caller's backing array, as in
+	// TestProxiedProviderOptions.
+	in := make([]uow.ProviderOption, 1, 4)
+	in[0] = uow.WithReadOnly()
+	out := serverLogProviderOptions(in, false)
+	if &out[0] == &in[0] {
+		t.Fatal("serverLogProviderOptions returned the caller's backing array")
+	}
+	if in[:cap(in)][1] != nil {
+		t.Fatal("serverLogProviderOptions wrote into the caller's spare capacity")
 	}
 }
 
@@ -220,4 +268,40 @@ func TestNewExternalProxiedServerUOWProvider_HonorsCustomLogPath(t *testing.T) {
 	require.Error(t, err, "invalid external config must surface a validation error")
 	assert.Contains(t, err.Error(), "Host requires Port",
 		"external code path must be the one reached; got: %v", err)
+}
+
+// TestResolveAndProbeDoltRefusesBinaryBelowRequiredMin pins the managed
+// proxied-server floor: bd init --proxied-server's preflight and every
+// managed proxied-server open go through resolveAndProbeDolt, so a dolt
+// older than doltversion.RequiredMin must come back as an error that names
+// the binary, its version and the minimum, before bd launches it.
+func TestResolveAndProbeDoltRefusesBinaryBelowRequiredMin(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script dolt stub")
+	}
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(dir, "cache"))
+
+	write := func(name, version string) string {
+		path := filepath.Join(dir, name)
+		require.NoError(t, os.WriteFile(path, []byte("#!/bin/sh\necho 'dolt version "+version+"'\n"), 0o755))
+		return path
+	}
+
+	old := write("dolt-old", "2.5.1")
+	t.Setenv(doltversion.DoltBinEnvVar, old)
+	_, err := resolveAndProbeDolt(context.Background(), "test", true)
+	require.ErrorIs(t, err, doltversion.ErrBelowRequiredMin)
+	// The refusal quotes the path with %q, which escapes a backslash (in
+	// TMPDIR, say), so match it quoted.
+	for _, want := range []string{fmt.Sprintf("%q", old), "2.5.1", "requires dolt " + doltversion.RequiredMin.String(), "Upgrade dolt"} {
+		assert.Contains(t, err.Error(), want)
+	}
+
+	current := write("dolt-current", doltversion.RequiredMin.String())
+	t.Setenv(doltversion.DoltBinEnvVar, current)
+	got, err := resolveAndProbeDolt(context.Background(), "test", true)
+	require.NoError(t, err)
+	assert.Equal(t, current, got)
 }

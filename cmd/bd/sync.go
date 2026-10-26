@@ -915,9 +915,26 @@ func syncFailureText(err error) string {
 		return ""
 	}
 	if line := sshDialTimeoutLine.FindString(err.Error()); line != "" {
-		return "SSH remote could not be reached (dial timed out): " + scrubURLCredentials(strings.TrimSpace(line))
+		return syncFailureStep(err, line) + "SSH remote could not be reached (dial timed out): " + scrubURLCredentials(strings.TrimSpace(line))
 	}
 	return err.Error()
+}
+
+// syncFailureStep returns err's outermost wrap segment for the dial-timeout
+// rewrite to keep: runSyncLoop's "pull: " or "push: " step, which is how an
+// operator tells whether local work already reached the remote. A segment
+// that contains the dial line is git output folded into the wrap
+// (cliTransferError), auth hints and all, so it yields "" instead.
+func syncFailureStep(err error, line string) string {
+	inner := errors.Unwrap(err)
+	if inner == nil {
+		return ""
+	}
+	prefix, ok := strings.CutSuffix(err.Error(), inner.Error())
+	if !ok || strings.Contains(prefix, line) {
+		return ""
+	}
+	return scrubURLCredentials(prefix)
 }
 
 // mergeBlockersOp builds the loop's positive constraint-violation hook, or nil

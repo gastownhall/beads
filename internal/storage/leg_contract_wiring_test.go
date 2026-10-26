@@ -158,6 +158,7 @@ func init() {
 		"RunParticipationGenerationUnflaggedWispCreateMintsNothing":           participationGenerationWireGapWaiverReason,
 		"RunParticipationGenerationWispFlagClearMintsNothing":                 participationGenerationWireGapWaiverReason,
 		"RunParticipationGenerationWispRootSquashMintsNothing":                participationGenerationWireGapWaiverReason,
+		"RunParticipationGenerationReadReportsExactlyTheParticipatingRows":    participationReadNoHTTPWireWaiverReason,
 	})
 }
 
@@ -384,6 +385,22 @@ const issuePatchFieldsNotOnUpdateWireWaiverReason = "PENDING, not permanent (tra
 	"never happens over this wire; await_id is sent behind issues.update.gates, and " +
 	"closing the rest of the gap means publishing spec_id and owner on IssuePatchBody, which is a wire change " +
 	"to the write role (S4b), not something this leg's test wiring can bind around today"
+
+// participationReadNoHTTPWireWaiverReason covers the participation read's case
+// (RunParticipationGenerationReadReportsExactlyTheParticipatingRows), for the
+// reason the as-of read's cases are waived: the subject is the read itself, and
+// it has no form on the wire. issueops.ParticipatingIssueIDsInTx is reached by
+// storage.HistoryParticipation on the store legs and by the unit of work's
+// IssueUseCase on uow, by no publicops role, and no wire operation serves it, so
+// the client has nothing to call. Binding the closure to the reference store
+// behind the served env would run the case green as a property of that store,
+// never of the client. (The pre-enable scan does not reach it over HTTP either:
+// its listing is refused first, ListRequest.IncludeAllTypes having no form on the
+// v0 wire.)
+const participationReadNoHTTPWireWaiverReason = "the read under test has no form on the http wire: " +
+	"issueops.ParticipatingIssueIDsInTx is reached by storage.HistoryParticipation on the store legs and the " +
+	"unit of work's IssueUseCase on uow, by no publicops role and no wire operation, so the client has nothing " +
+	"to call"
 
 // participationGenerationWireGapWaiverReason covers the four
 // ParticipationGenerationFixture cases whose mutation has no form on this

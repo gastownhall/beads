@@ -104,6 +104,18 @@ func TestExternalDoltConfig_TLSClientConfig(t *testing.T) {
 		}
 	})
 
+	t.Run("server name defaults to an IPv6 host in either spelling, bare", func(t *testing.T) {
+		for _, host := range []string{"2001:db8::1", "[2001:db8::1]"} {
+			cfg, err := ExternalDoltConfig{Host: host, Port: 3306, TLSRequired: true}.TLSClientConfig()
+			if err != nil {
+				t.Fatalf("host %q: unexpected error: %v", host, err)
+			}
+			if cfg.ServerName != "2001:db8::1" {
+				t.Errorf("host %q: ServerName = %q, want 2001:db8::1", host, cfg.ServerName)
+			}
+		}
+	})
+
 	t.Run("server name override wins", func(t *testing.T) {
 		cfg, err := ExternalDoltConfig{Host: "127.0.0.1", Port: 3306, TLSRequired: true, TLSServerName: "real.host"}.TLSClientConfig()
 		if err != nil {

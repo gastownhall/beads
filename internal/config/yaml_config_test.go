@@ -626,6 +626,48 @@ func TestWorkspaceYamlValueStrictRejectsNullAndWrongParent(t *testing.T) {
 	}
 }
 
+// WorkspaceYamlSettingWithLocal reads a null at the key or at a parent of it
+// (every child of a section commented out) as unset in that layer, as bd's
+// merged reader does, and falls through to the next layer; every other shape
+// error is still returned.
+func TestWorkspaceYamlSettingWithLocalReadsNullAsUnset(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		files       map[string]string
+		wantValue   string
+		wantPresent bool
+		wantErr     bool
+	}{
+		{name: "commented-out section", files: map[string]string{"config.yaml": "dolt:\n  # mode: server\n"}},
+		{name: "null value", files: map[string]string{"config.yaml": "dolt:\n  mode: null\n"}},
+		{name: "null dotted value", files: map[string]string{"config.yaml": "dolt.mode: ~\n"}},
+		{name: "null local section falls through", files: map[string]string{"config.yaml": "dolt:\n  mode: server\n", LocalConfigFileName: "dolt:\n"}, wantValue: "server", wantPresent: true},
+		{name: "set value", files: map[string]string{"config.yaml": "dolt:\n  mode: server\n"}, wantValue: "server", wantPresent: true},
+		{name: "scalar parent", files: map[string]string{"config.yaml": "dolt: false\n"}, wantErr: true},
+		{name: "list value", files: map[string]string{"config.yaml": "dolt:\n  mode: []\n"}, wantErr: true},
+		{name: "unparseable", files: map[string]string{"config.yaml": "dolt: [unterminated\n"}, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			beadsDir := filepath.Join(t.TempDir(), ".beads")
+			if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			for name, body := range tc.files {
+				if err := os.WriteFile(filepath.Join(beadsDir, name), []byte(body), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			value, present, err := WorkspaceYamlSettingWithLocal(beadsDir, "dolt.mode")
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, want error %v", err, tc.wantErr)
+			}
+			if !tc.wantErr && (value != tc.wantValue || present != tc.wantPresent) {
+				t.Fatalf("= (%q, %v), want (%q, %v)", value, present, tc.wantValue, tc.wantPresent)
+			}
+		})
+	}
+}
+
 func TestSetYamlConfigInDir_ValidatesBeforeOpeningConfig(t *testing.T) {
 	beadsDir := filepath.Join(t.TempDir(), ".beads")
 
@@ -1873,5 +1915,49 @@ func TestCheckSecretKeyGitSafety_RoutedCheckout(t *testing.T) {
 func TestDoltRemotesAPIPortIsUserGlobal(t *testing.T) {
 	if !IsUserGlobalKey("dolt.remotesapi-port") {
 		t.Fatal("dolt.remotesapi-port must be machine-global; a project config cannot vary one shared server")
+	}
+}
+
+// TestCheckSecretGitTracked_QuotesThePathInTheRemedy pins the
+// remedy-printing invariant at the git-tracked secret refusal: its git rm and
+// echo commands take the config path, and the .gitignore beside it, as one
+// shell word each (quoted when the workspace path holds a space).
+func TestCheckSecretGitTracked_QuotesThePathInTheRemedy(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the want spells the POSIX quoting")
+	}
+	tmpDir := filepath.Join(t.TempDir(), "my project")
+	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitInit := exec.Command("git", "init")
+	gitInit.Dir = tmpDir
+	if out, err := gitInit.CombinedOutput(); err != nil {
+		t.Fatalf("git init failed: %v\n%s", err, out)
+	}
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(beadsDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("json: false\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitAdd := exec.Command("git", "add", configPath)
+	gitAdd.Dir = tmpDir
+	if out, err := gitAdd.CombinedOutput(); err != nil {
+		t.Fatalf("git add failed: %v\n%s", err, out)
+	}
+	err := checkSecretGitTracked(configPath, "linear.api_key")
+	if err == nil {
+		t.Fatal("expected the git-tracked secret refusal")
+	}
+	for _, want := range []string{
+		"git rm --cached '" + configPath + "'\n",
+		`echo "config.yaml" >> '` + filepath.Join(beadsDir, ".gitignore") + "'\n",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal = %q, want it to hold %q", err.Error(), want)
+		}
 	}
 }

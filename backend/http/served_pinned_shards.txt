@@ -3,27 +3,75 @@
 #
 # Every top-level test measured at >= 3s, bin-packed
 # longest-first onto these shards; every other test runs in the
-# binary's own round-robin shards. Measured seconds per pinned shard:
-# 135 125 126 134 124 123
-# Unpinned tests: 28, 0s in total.
+# binary's own round-robin shards. Measured seconds per pinned shard
+# (each test's maximum over 35 runs' test.xml):
+# 174 169 172 160 152 172 171 170 169 152
+# Unpinned tests: 30, 1s in total.
+# Only tests backend/http/*_test.go defines; other measured names were dropped.
+# rr <TestName>: an unpinned test these runs measured; it runs in the
+# round-robin shards like any test not listed. A test listed neither
+# way was added since (scripts/pinned_shards_sources_test.go).
 #
 # <pinned shard> <TestName>
-1 TestE2E_ClaimOfAbsentIDIsGCNotFound
-1 TestE2E_ExternalDependencyBlockingStillEnforced
-1 TestE2E_SwitchingBackToDoltLeavesOriginalIdentityIntact
-2 TestE2E_CloseAndReopenUnderClaudeSession
-2 TestE2E_ForceConnectWritesSucceedDespiteDifferingLocalProjectID
-2 TestE2E_ListWithGCFiltersMatchesEmbedded
-3 TestE2E_BDOverHTTP
-3 TestE2E_DefaultDepTreeOverHTTP
-3 TestE2E_ShowMissingIDIsNotFoundInOneLookup
-4 TestE2E_ConnectClearRestoresThePreviousBackend
-4 TestE2E_MoleculesOverHTTP
-4 TestE2E_SearchOverHTTP
-4 TestE2E_ShowCurrentOverHTTP
-5 TestE2E_RecomputeBlockedOverHTTP
-5 TestE2E_ReconnectRefusesADifferentProjectUnlessForced
-5 TestE2E_ShowJSONCountsMatchEmbedded
-6 TestE2E_AdvertisedExternalPolicyIsPassedThrough
-6 TestE2E_MoleculeCloseAgainstAnOlderServer
+1 TestE2E_BlockedFlagsOverHTTP
+2 TestE2E_CloseRereadsItsOwnWrite
+2 TestE2E_ExternalDependencyBlockingStillEnforced
+2 TestE2E_RecomputeBlockedOverHTTP
+3 TestE2E_ForceConnectWritesSucceedDespiteDifferingLocalProjectID
+3 TestE2E_GatesOverHTTP
+3 TestE2E_ShowFetchesTheIssueOnce
+4 TestE2E_ListWithGCFiltersMatchesEmbedded
+4 TestE2E_PromoteOverHTTP
+4 TestE2E_ReconnectRefusesADifferentProjectUnlessForced
+5 TestE2E_ClaimOfAbsentIDIsGCNotFound
+5 TestE2E_ListTextRenderingsReadOnlyTheListedIssuesEdges
+5 TestE2E_MoleculeCloseAgainstAnOlderServer
+6 TestE2E_BlockedOverHTTP
+6 TestE2E_MoleculesOverHTTP
+6 TestE2E_PerCommandRequestBudget
 6 TestE2E_PingOverHTTP
+7 TestE2E_ConnectClearRestoresThePreviousBackend
+7 TestE2E_HeartbeatOverHTTP
+7 TestE2E_LinkOverHTTP
+7 TestE2E_SwitchingBackToDoltLeavesOriginalIdentityIntact
+8 TestE2E_CloseAndReopenUnderClaudeSession
+8 TestE2E_ExportOverHTTP
+8 TestE2E_ListScopeFiltersOverHTTP
+8 TestE2E_ShowMissingIDIsNotFoundInOneLookup
+9 TestE2E_AdvertisedExternalPolicyIsPassedThrough
+9 TestE2E_BDOverHTTP
+9 TestE2E_DefaultDepTreeOverHTTP
+9 TestE2E_SearchOverHTTP
+10 TestE2E_ListFilterParityOverHTTP
+10 TestE2E_ShowCurrentOverHTTP
+10 TestE2E_ShowJSONCountsMatchEmbedded
+rr TestABearerProviderIsBuildableFromThePublicSurface
+rr TestAttachAndConnectAdmitADependencyWorkspace
+rr TestAttachConnectAndSaveTargetRefuseAGraphWorkspace
+rr TestAttachGitignoresBothPerUserFiles
+rr TestAttachHonorsACallerSuppliedPreviousBackend
+rr TestAttachOnAFreshWorkspaceRecordsTheImplicitDoltDefault
+rr TestAttachOnAReconnectKeepsTheEarlierPreviousBackend
+rr TestAttachRecordsThePriorBackendAsPreviousBackend
+rr TestE2E_ConnectRedactsCredentialsEverywhereItPrintsTheURL
+rr TestE2E_ConnectRefusesPlainHTTPToNonLoopback
+rr TestE2E_ConnectRefusesSwitchingBackendWithoutForce
+rr TestExplicitCredentialIgnoresTheEnvPlaintextGrant
+rr TestExplicitCredentialOverridesTheAmbientToken
+rr TestExplicitCredentialSurvivesBrokenAmbientEnv
+rr TestHandshakeReportsAWrongServer
+rr TestHandshakeUsesTheSameLadderOpenWouldUse
+rr TestHandshakeVerifiesBeforeAnythingIsWritten
+rr TestHandshakeWithACredential
+rr TestOpenNeedsNoWorkspaceOnDisk
+rr TestOpenWithFallsBackToTheAmbientLadderByDefault
+rr TestOpenWithHonorsAProvidedCredential
+rr TestOpenWithoutRegistrationStillDials
+rr TestRegisterInstallsTheTransport
+rr TestRegisterPutsHTTPInTheRegistryAnEmbedderSees
+rr TestRegisterRefusesAProcessWideCredential
+rr TestRegisterTwicePanics
+rr TestRequireCredentialRefusesAnOpenWithNone
+rr TestServerSnapshotExportsNoHostFacts
+rr TestTheActivationSidecarRoundTrips
+rr TestTwoStoresOnOneHostEachSendTheirOwnToken

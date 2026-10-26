@@ -44,6 +44,13 @@ func fixDBDSN(beadsDir string, cfg *configfile.Config) string {
 	}.String()
 }
 
+// openFixDB opens the workspace database for a bd doctor --fix repair.
+//
+// It deliberately does not check the server against
+// doltversion.RequiredMin, and neither does openServerCatalogDB: bd doctor
+// --fix is exempt from the floor, so a user on a Dolt older than bd's
+// minimum can still diagnose and repair the workspace before upgrading. bd
+// doctor --server reports the floor as its "Dolt Version" check.
 func openFixDB(beadsDir string, cfg *configfile.Config) (*sql.DB, error) {
 	return sql.Open("mysql", fixDBDSN(beadsDir, cfg))
 }

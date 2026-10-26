@@ -221,7 +221,7 @@ type HooksContext struct {
 // normalizeHooksWorkDir anchors workDir and normalizes its symlinks and case
 // once. Every HooksContext producer shares it so they cannot drift into emitting
 // different spellings of the same directory: worktree code string-compares these
-// paths (GH#880).
+// paths (GH#880). GetMainRepoRootFrom shares it for the same reason.
 // The caller-supplied directory must resolve before it can select a repo:
 // unlike the discovered repoRoot spelling in loadGitContext, it is an input
 // to Git.
@@ -499,6 +499,27 @@ func GetMainRepoRoot() (string, error) {
 	ctx, err := getGitContext()
 	if err != nil {
 		return "", err
+	}
+	return ctx.mainRepoRoot(), nil
+}
+
+// GetMainRepoRootFrom is the path-aware variant of GetMainRepoRoot: it
+// resolves the repository containing startDir rather than the current
+// working directory's, and neither reads nor changes the cached context.
+// startDir is anchored and symlink/case-normalized as ResolveHooksContext's
+// workDir is, and Git's environment is inherited. It errors outside a work
+// tree.
+func GetMainRepoRootFrom(startDir string) (string, error) {
+	if startDir == "" {
+		return "", fmt.Errorf("main repository root requires a working directory")
+	}
+	workDir, err := normalizeHooksWorkDir(startDir)
+	if err != nil {
+		return "", err
+	}
+	ctx := loadGitContext(workDir, nil)
+	if ctx.err != nil {
+		return "", ctx.err
 	}
 	return ctx.mainRepoRoot(), nil
 }

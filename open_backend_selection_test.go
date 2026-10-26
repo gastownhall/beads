@@ -3,15 +3,19 @@ package beads_test
 import (
 	"context"
 	"errors"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/backends"
+	"github.com/steveyegge/beads/internal/testutil/legacyworkspace"
 )
 
 var errRegistryBackendOpen = errors.New("registry backend open sentinel")
@@ -473,5 +477,394 @@ func TestOpenBestAvailableWithRefusesPerOpenOptionsOnPlainDolt(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// graphWorkspaceMetadata is the metadata.json a graph-preview build of bd
+// writes for a graph_mode "link" workspace: the marker and its binding beside
+// an ordinary embedded Dolt backend.
+const graphWorkspaceMetadata = `{
+  "database": "",
+  "backend": "dolt",
+  "graph_mode": "link",
+  "graph_scope_url": "https://example.test/scope",
+  "graph_authority_id": "0123456789abcdef0123456789abcdef",
+  "graph_workspace": "/work/repo/.beads",
+  "graph_schema_version": 7,
+  "graph_ready": true,
+  "dolt_mode": "embedded",
+  "dolt_database": "beads_graph_0123456789abcdef0123456789abcdef",
+  "project_id": "0123456789abcdef0123456789abcdef"
+}`
+
+// graphWorkspaceMetadataStripped is graphWorkspaceMetadata as a bd that
+// predates graph_mode rewrites it: the graph fields are gone, but the database
+// name still points at the graph database.
+const graphWorkspaceMetadataStripped = `{
+  "database": "",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "beads_graph_0123456789abcdef0123456789abcdef",
+  "project_id": "0123456789abcdef0123456789abcdef"
+}`
+
+// publicOpens are the public entry points that open a workspace from its
+// metadata, and Open, which opens a database path inside one and refuses
+// what the others refuse from the workspace's contents.
+var publicOpens = map[string]func(context.Context, string) (beads.Storage, error){
+	"Open": func(ctx context.Context, beadsDir string) (beads.Storage, error) {
+		return beads.Open(ctx, filepath.Join(beadsDir, "beads.db"))
+	},
+	"OpenBestAvailable": beads.OpenBestAvailable,
+	"OpenBestAvailableWith": func(ctx context.Context, beadsDir string) (beads.Storage, error) {
+		return beads.OpenBestAvailableWith(ctx, beadsDir, beads.OpenOptions{})
+	},
+	"OpenFromConfig": beads.OpenFromConfig,
+	"OpenGated": func(ctx context.Context, beadsDir string) (beads.Storage, error) {
+		return beads.OpenGated(ctx, beadsDir, 0)
+	},
+}
+
+// workspaceTreeDigest records every path under root with its kind and, for
+// files, its content, so a test can prove an open left a workspace untouched.
+func workspaceTreeDigest(t *testing.T, root string) map[string]string {
+	t.Helper()
+	digest := map[string]string{}
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			digest[rel] = "dir"
+			return nil
+		}
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		digest[rel] = "file:" + string(content)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("digest %s: %v", root, err)
+	}
+	return digest
+}
+
+// TestPublicOpensRefuseGraphWorkspace is the library half of the graph_mode
+// fence the CLI applies at admission: every public open of a workspace whose
+// metadata or graph-preview-format marker declares another data model refuses
+// it with the typed error before it opens, creates or modifies anything, in
+// the workspace or beside it (the workspace gate file OpenGated takes lives
+// beside .beads).
+func TestPublicOpensRefuseGraphWorkspace(t *testing.T) {
+	// If the fence were missing, a server-mode open must fail fast rather
+	// than reach TestMain's shared test server.
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "127.0.0.1")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "1")
+	layouts := []struct {
+		name     string
+		filename string // "" writes no metadata file
+		metadata string
+		mode     string
+		embedded bool
+		// marker writes the graph-preview-format marker graph-preview builds
+		// leave in .beads; the refusal then names the marker, not a mode.
+		marker bool
+	}{
+		{name: "link embedded", filename: "metadata.json", metadata: graphWorkspaceMetadata, mode: "link", embedded: true},
+		{name: "link server", filename: "metadata.json", metadata: `{"backend":"dolt","dolt_mode":"server","dolt_database":"beads_graph_0123","graph_mode":"link"}`, mode: "link"},
+		{name: "unknown marker", filename: "metadata.json", metadata: `{"backend":"dolt","graph_mode":"future-format"}`, mode: "future-format"},
+		// A refused open must not migrate a legacy config.json either.
+		{name: "link legacy config.json", filename: "config.json", metadata: graphWorkspaceMetadata, mode: "link", embedded: true},
+		// A graph workspace whose metadata was never written, was lost, or
+		// was rewritten without graph_mode is still declared by the marker.
+		{name: "marker only", marker: true},
+		{name: "marker beside stripped metadata", filename: "metadata.json", metadata: graphWorkspaceMetadataStripped, embedded: true, marker: true},
+		{name: "marker beside stripped legacy config.json", filename: "config.json", metadata: graphWorkspaceMetadataStripped, embedded: true, marker: true},
+		{name: "marker beside server metadata", filename: "metadata.json", metadata: `{"backend":"dolt","dolt_mode":"server","dolt_database":"beads_graph_0123"}`, marker: true},
+		{name: "marker beside dependency metadata", filename: "metadata.json", metadata: `{"backend":"dolt","dolt_mode":"server","graph_mode":"dependency"}`, marker: true},
+		{name: "marker beside unparseable metadata", filename: "metadata.json", metadata: `{"backend":"dolt",`, marker: true},
+	}
+	for _, layout := range layouts {
+		for name, open := range publicOpens {
+			t.Run(layout.name+"/"+name, func(t *testing.T) {
+				root := t.TempDir()
+				beadsDir := filepath.Join(root, ".beads")
+				if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+					t.Fatal(err)
+				}
+				if layout.filename != "" {
+					if err := os.WriteFile(filepath.Join(beadsDir, layout.filename), []byte(layout.metadata), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if layout.marker {
+					if err := os.WriteFile(filepath.Join(beadsDir, "graph-preview-format"), []byte("link-preview-v9\n"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if layout.embedded {
+					graphDB := filepath.Join(beadsDir, "embeddeddolt", "beads_graph_0123456789abcdef0123456789abcdef", ".dolt")
+					if err := os.MkdirAll(graphDB, 0o750); err != nil {
+						t.Fatal(err)
+					}
+				}
+				before := workspaceTreeDigest(t, root)
+
+				store, err := open(t.Context(), beadsDir)
+				if err == nil {
+					_ = store.Close()
+					t.Fatalf("%s opened a graph_mode %q workspace", name, layout.mode)
+				}
+				if store != nil {
+					t.Fatalf("%s returned a non-nil %T with its refusal; an embedder's `if store != nil { store.Close() }` would call Close on it", name, store)
+				}
+				var formatErr *beads.UnsupportedWorkspaceFormatError
+				if !errors.As(err, &formatErr) {
+					t.Fatalf("%s error = %v, want *beads.UnsupportedWorkspaceFormatError", name, err)
+				}
+				if formatErr.BeadsDir != beadsDir || formatErr.GraphMode != layout.mode || formatErr.FormatMarker != layout.marker {
+					t.Fatalf("refusal = %+v, want BeadsDir %q, GraphMode %q and FormatMarker %v", formatErr, beadsDir, layout.mode, layout.marker)
+				}
+				if layout.marker && !strings.Contains(err.Error(), "graph-preview-format marker") {
+					t.Fatalf("refusal does not name the format marker: %v", err)
+				}
+				if !strings.Contains(err.Error(), "no storage database was opened or modified") {
+					t.Fatalf("refusal lacks the data-safety guarantee: %v", err)
+				}
+				if after := workspaceTreeDigest(t, root); !maps.Equal(after, before) {
+					t.Fatalf("%s changed the workspace: before %v, after %v", name, slices.Sorted(maps.Keys(before)), slices.Sorted(maps.Keys(after)))
+				}
+			})
+		}
+	}
+}
+
+// TestPublicOpensAdmitDependencyWorkspace pins the other side of the fence: a
+// "dependency" marker is the ordinary Issue workspace, so the open proceeds to
+// its backend (here, a server nothing listens on) instead of being refused.
+func TestPublicOpensAdmitDependencyWorkspace(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "127.0.0.1")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "1")
+	for name, open := range publicOpens {
+		t.Run(name, func(t *testing.T) {
+			beadsDir := filepath.Join(t.TempDir(), ".beads")
+			if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+				t.Fatal(err)
+			}
+			metadata := `{"backend":"dolt","dolt_mode":"server","graph_mode":"dependency"}`
+			if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadata), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			store, err := open(t.Context(), beadsDir)
+			if err == nil {
+				_ = store.Close()
+				t.Fatalf("%s opened a store on an unreachable server", name)
+			}
+			var formatErr *beads.UnsupportedWorkspaceFormatError
+			if errors.As(err, &formatErr) || !strings.Contains(err.Error(), "unreachable") {
+				t.Fatalf("%s error = %v, want the backend's unreachable-server error", name, err)
+			}
+		})
+	}
+}
+
+// TestPublicOpensRefuseUnsupportedBackendBeforeWriting pins that every public
+// open refuses metadata naming a removed or unrecognized backend before it
+// writes anything, whichever file holds it. For a legacy config.json,
+// configfile.Load would migrate that file into metadata.json, dropping the
+// keys Config does not know; for either file, OpenGated's gates create files
+// in and beside .beads. The workspace holds a Dolt database, so the refusal
+// offers the metadata heal, and it must name the file that actually holds the
+// backend rather than one that does not exist.
+func TestPublicOpensRefuseUnsupportedBackendBeforeWriting(t *testing.T) {
+	// If the refusal were missing, a server-mode open must fail fast rather
+	// than reach TestMain's shared test server.
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "127.0.0.1")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "1")
+	layouts := []struct{ name, file, other string }{
+		{"legacy", "config.json", "metadata.json"},
+		{"metadata", "metadata.json", "config.json"},
+	}
+	for _, layout := range layouts {
+		for _, backend := range []string{"mystery", "postgres", "mysql", "sqlite"} {
+			for _, doltMode := range []string{"embedded", "server"} {
+				for name, open := range publicOpens {
+					t.Run(layout.name+"/"+backend+"/"+doltMode+"/"+name, func(t *testing.T) {
+						root := t.TempDir()
+						beadsDir := filepath.Join(root, ".beads")
+						if err := os.MkdirAll(filepath.Join(beadsDir, "dolt", ".dolt"), 0o750); err != nil {
+							t.Fatal(err)
+						}
+						metadata := `{"backend":"` + backend + `","dolt_mode":"` + doltMode + `","dolt_database":"beads_legacy","future_binding":"keep-me"}`
+						if err := os.WriteFile(filepath.Join(beadsDir, layout.file), []byte(metadata), 0o600); err != nil {
+							t.Fatal(err)
+						}
+						before := workspaceTreeDigest(t, root)
+
+						store, err := open(t.Context(), beadsDir)
+						if err == nil {
+							_ = store.Close()
+							t.Fatalf("%s opened a workspace whose %s names backend %q", name, layout.file, backend)
+						}
+						// The tree first: a regression that migrates config.json
+						// must report the rewrite, not just the file it names.
+						if after := workspaceTreeDigest(t, root); !maps.Equal(after, before) {
+							t.Fatalf("%s changed the workspace: before %v, after %v", name, before, after)
+						}
+						if store != nil {
+							t.Fatalf("%s returned a non-nil %T with its refusal", name, store)
+						}
+						if !strings.Contains(err.Error(), strconv.Quote(backend)) || !strings.Contains(err.Error(), "no storage database was opened or modified") {
+							t.Fatalf("%s error = %v, want the refusal of backend %q with the data-safety guarantee", name, err, backend)
+						}
+						if !strings.Contains(err.Error(), layout.file) || strings.Contains(err.Error(), layout.other) {
+							t.Fatalf("%s error = %v, want it to name %s, the file holding the backend, and not %s", name, err, layout.file, layout.other)
+						}
+					})
+				}
+			}
+		}
+	}
+}
+
+// TestDoltOnlyOpensRefuseRegisteredBackendBeforeWriting pins that the public
+// opens that only open Dolt (OpenFromConfig and OpenGated) refuse a
+// registered non-Dolt backend before they write anything, whichever file
+// names it: Load would migrate a legacy config.json, and OpenGated's gates
+// create files in and beside .beads. OpenBestAvailable* dispatch such a
+// backend to the registry instead
+// (TestOpenBestAvailableWithDispatchesRegisteredBackendAndPassesOptions).
+func TestDoltOnlyOpensRefuseRegisteredBackendBeforeWriting(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "127.0.0.1")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "1")
+	const backend = "fake-registered-dolt-only"
+	registerWorkspaceBackend(t, backend)
+	opens := map[string]func(context.Context, string) (beads.Storage, error){
+		"OpenFromConfig": publicOpens["OpenFromConfig"],
+		"OpenGated":      publicOpens["OpenGated"],
+	}
+	for _, file := range []string{"config.json", "metadata.json"} {
+		for name, open := range opens {
+			t.Run(file+"/"+name, func(t *testing.T) {
+				root := t.TempDir()
+				beadsDir := filepath.Join(root, ".beads")
+				if err := os.MkdirAll(filepath.Join(beadsDir, "dolt", ".dolt"), 0o750); err != nil {
+					t.Fatal(err)
+				}
+				metadata := `{"backend":"` + backend + `","dolt_mode":"server","dolt_database":"beads_legacy","future_binding":"keep-me"}`
+				if err := os.WriteFile(filepath.Join(beadsDir, file), []byte(metadata), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				before := workspaceTreeDigest(t, root)
+
+				store, err := open(t.Context(), beadsDir)
+				if err == nil {
+					_ = store.Close()
+					t.Fatalf("%s opened a workspace whose %s names registered backend %q", name, file, backend)
+				}
+				if after := workspaceTreeDigest(t, root); !maps.Equal(after, before) {
+					t.Fatalf("%s changed the workspace: before %v, after %v", name, before, after)
+				}
+				if store != nil {
+					t.Fatalf("%s returned a non-nil %T with its refusal", name, store)
+				}
+				if want := strconv.Quote(backend) + " cannot be opened as Dolt"; !strings.Contains(err.Error(), want) {
+					t.Fatalf("%s error = %v, want %q", name, err, want)
+				}
+			})
+		}
+	}
+}
+
+// TestPublicOpensAdmitSupportedBackendInLegacyConfig pins the admitted side
+// of the pre-Load backend refusal: a legacy config.json naming Dolt, or no
+// backend, passes it, is migrated into metadata.json as before, and the open
+// proceeds to the backend's own unreachable-server error.
+func TestPublicOpensAdmitSupportedBackendInLegacyConfig(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "127.0.0.1")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "1")
+	for _, backend := range []string{"dolt", ""} {
+		for name, open := range publicOpens {
+			t.Run("backend="+backend+"/"+name, func(t *testing.T) {
+				beadsDir := filepath.Join(t.TempDir(), ".beads")
+				if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+					t.Fatal(err)
+				}
+				legacy := `{"backend":"` + backend + `","dolt_mode":"server"}`
+				if err := os.WriteFile(filepath.Join(beadsDir, "config.json"), []byte(legacy), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				store, err := open(t.Context(), beadsDir)
+				if err == nil {
+					_ = store.Close()
+					t.Fatalf("%s opened a store on an unreachable server", name)
+				}
+				if !strings.Contains(err.Error(), "unreachable") {
+					t.Fatalf("%s error = %v, want the backend's unreachable-server error", name, err)
+				}
+				_, statErr := os.Stat(filepath.Join(beadsDir, "metadata.json"))
+				if name == "Open" {
+					// Open opens a database path, not the workspace's
+					// metadata, so it has nothing to migrate: the
+					// config.json stays as it is (port resolution reads it
+					// in place).
+					if data, readErr := os.ReadFile(filepath.Join(beadsDir, "config.json")); readErr != nil || string(data) != legacy || !os.IsNotExist(statErr) {
+						t.Fatalf("Open rewrote the legacy config.json (config.json %q, %v; metadata.json stat %v)", data, readErr, statErr)
+					}
+					return
+				}
+				if statErr != nil {
+					t.Fatalf("%s did not migrate the admitted legacy config.json: %v", name, statErr)
+				}
+			})
+		}
+	}
+}
+
+// TestPublicOpensRefuseHistoricalSQLiteWorkspace pins the library half of the
+// historical SQLite refusal command admission makes: every public open of a
+// pre-Dolt workspace refuses it with admission's text before it writes
+// anything, in the workspace or beside it. Without it OpenBestAvailable
+// migrated a pre-Dolt config.json into metadata.json, dropping the keys Config
+// does not know, and created an empty embedded database beside beads.db, and
+// OpenGated left its gate files behind.
+func TestPublicOpensRefuseHistoricalSQLiteWorkspace(t *testing.T) {
+	// If the refusal were missing, a server-mode open must fail fast rather
+	// than reach TestMain's shared test server.
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "127.0.0.1")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "1")
+	for _, layout := range legacyworkspace.HistoricalSQLiteLayouts() {
+		for name, open := range publicOpens {
+			t.Run(layout.Name+"/"+name, func(t *testing.T) {
+				root := t.TempDir()
+				beadsDir := filepath.Join(root, ".beads")
+				layout.Write(t, beadsDir)
+				before := legacyworkspace.TreeDigest(t, root)
+
+				store, err := open(t.Context(), beadsDir)
+				if err == nil {
+					_ = store.Close()
+				}
+				if after := legacyworkspace.TreeDigest(t, root); !maps.Equal(after, before) {
+					t.Fatalf("%s changed the workspace: before %v, after %v", name, slices.Sorted(maps.Keys(before)), slices.Sorted(maps.Keys(after)))
+				}
+				if err == nil || err.Error() != legacyworkspace.HistoricalSQLiteRefusal {
+					t.Fatalf("%s error = %v, want admission's refusal %q", name, err, legacyworkspace.HistoricalSQLiteRefusal)
+				}
+				var legacyErr *beads.LegacyWorkspaceError
+				if !errors.As(err, &legacyErr) {
+					t.Fatalf("%s error = %#v, want *beads.LegacyWorkspaceError", name, err)
+				}
+				if store != nil {
+					t.Fatalf("%s returned a non-nil %T with its refusal", name, store)
+				}
+			})
+		}
 	}
 }

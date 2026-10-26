@@ -1,6 +1,8 @@
 package scripts_test
 
 import (
+	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -45,7 +47,10 @@ func TestProxiedGatedTestsRunInTheProxiedLane(t *testing.T) {
 		t.Fatalf("found only %d cmd/bd tests gated on %s; did the gate helpers change shape?", len(gated), proxiedServerEnv)
 	}
 
-	listed := laneListedTests(t, root, ".github/scripts/proxied-test-shard.sh", bazelProxiedShardCount(t))
+	listed, err := laneListedTests(root, ".github/scripts/proxied-test-shard.sh", bazelProxiedShardCount(t))
+	if err != nil {
+		t.Fatal(err)
+	}
 	var missing []string
 	for _, name := range gated {
 		if !listed[name] {
@@ -115,6 +120,38 @@ func TestProxiedGatedTestsDetector(t *testing.T) {
 	want := []string{"TestDirect", "TestInSubtest", "TestInline", "TestMethod", "TestTransitive"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("gatedTests = %v, want %v", got, want)
+	}
+}
+
+// TestLaneListedTestsReportsShardScriptStderr pins that a shard script's
+// refusal reaches the lane guards' failure. The scripts explain every refusal
+// (a manifest entry naming no test, an invalid shard) only on stderr and exit
+// 1, so a failure that reported the exit status alone would not say what to
+// fix.
+func TestLaneListedTestsReportsShardScriptStderr(t *testing.T) {
+	requireHostTool(t, "bash")
+	root := t.TempDir()
+	const refusal = "Shard manifest entry does not match a discovered test: TestRenamedAway"
+	script := "echo \"Shard $1/$2: running 1 test(s)\"\n" +
+		"echo '  TestListed'\n" +
+		"if [ \"$1\" = 2 ]; then echo '" + refusal + "' >&2; exit 1; fi\n"
+	if err := os.WriteFile(filepath.Join(root, "shard.sh"), []byte(script), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := laneListedTests(root, "shard.sh", 2)
+	if err == nil {
+		t.Fatal("laneListedTests: want an error for the shard the script refused, got nil")
+	}
+	// The shard and the refusal are checked apart: bash can write to stderr
+	// before the script runs (a setlocale warning for an LC_ALL naming an
+	// uninstalled locale, or output from a BASH_ENV file), and that lands
+	// between the exit status and the refusal. The refusal is only on the
+	// script's stderr, never in the stdout the error also carries.
+	if !strings.Contains(err.Error(), "shard.sh 2 2: exit status 1") {
+		t.Errorf("laneListedTests error does not name the refusing shard and its exit status:\n%v", err)
+	}
+	if !strings.Contains(err.Error(), refusal) {
+		t.Errorf("laneListedTests error does not carry the script's stderr %q:\n%v", refusal, err)
 	}
 }
 
@@ -215,9 +252,10 @@ func isOnlyGate(cond ast.Expr, env string) bool {
 }
 
 // laneListedTests runs a lane's shard script list-only for every shard of the
-// Bazel lane's split and returns every test name any shard selects.
-func laneListedTests(t *testing.T, root, script string, shards int) map[string]bool {
-	t.Helper()
+// Bazel lane's split and returns every test name any shard selects. A shard
+// the script refuses is reported with what the script wrote to stderr, where
+// the shard scripts explain every refusal.
+func laneListedTests(root, script string, shards int) (map[string]bool, error) {
 	outs, errs := make([][]byte, shards+1), make([]error, shards+1)
 	var wg sync.WaitGroup
 	for k := 1; k <= shards; k++ {
@@ -233,8 +271,15 @@ func laneListedTests(t *testing.T, root, script string, shards int) map[string]b
 	wg.Wait()
 	listed := map[string]bool{}
 	for k := 1; k <= shards; k++ {
-		if errs[k] != nil {
-			t.Fatalf("%s %d %d: %v\n%s", script, k, shards, errs[k], outs[k])
+		if err := errs[k]; err != nil {
+			msg := err.Error()
+			var exitErr *exec.ExitError
+			if errors.As(err, &exitErr) {
+				if stderr := strings.TrimSpace(string(exitErr.Stderr)); stderr != "" {
+					msg += ": " + stderr
+				}
+			}
+			return nil, fmt.Errorf("%s %d %d: %s\n%s", script, k, shards, msg, outs[k])
 		}
 		for _, line := range strings.Split(string(outs[k]), "\n") {
 			name, ok := strings.CutPrefix(line, "  ")
@@ -243,5 +288,5 @@ func laneListedTests(t *testing.T, root, script string, shards int) map[string]b
 			}
 		}
 	}
-	return listed
+	return listed, nil
 }

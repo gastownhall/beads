@@ -193,7 +193,7 @@ func TestPRGateNonBazelNeeds(t *testing.T) {
 		t.Errorf("bazel-test packages bd with %q (continue-on-error %v)", pkgStep.Run, pkgStep.ContinueOnError)
 	}
 
-	lanes := bazelPRCallLanes(t, pr.job(t, "bazel").With)
+	lanes := bazelPRCallLanesFor(t, "pull_request")
 	if pass, out := runPRGateStep(t, gateStep, prGateFor(t, lanes, "pull_request", "remote")); !pass {
 		t.Errorf("remote, every lane and job passed: gate red\n%s", out)
 	}

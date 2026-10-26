@@ -156,7 +156,9 @@ var schemaAdditions = []schemaAddition{{
 		// A create with history off leaves it NULL, indistinguishable from
 		// a legacy row (design §16.2b, FR-7).
 		"issues": {"participation_generation"},
-		// Migration 0070 mirrors it, inert, on the wisps table (FR-8).
+		// Migration 0070 mirrors it on the wisps table, where only a
+		// demotion made with history on writes it, to carry the row's
+		// participation through the wisps plane (carryParticipationInTx).
 		"wisps": {"participation_generation"},
 		// Migration 0071 (#6661).
 		"issue_versions": {"removed_restriction"},

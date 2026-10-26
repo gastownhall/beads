@@ -100,6 +100,7 @@ func printAgentDiagnostics(ar agentDoctorResult) {
 }
 
 func printAgentDiagnostic(d doctor.AgentDiagnostic) {
+	d = d.Printed()
 	severity := strings.ToUpper(d.Status)
 	fmt.Printf("### %s: %s", severity, d.Name)
 	if d.Category != "" {

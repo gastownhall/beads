@@ -35,6 +35,7 @@ import (
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/migration"
 	"github.com/steveyegge/beads/internal/molecules"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/remotecache"
 	"github.com/steveyegge/beads/internal/routing"
 	"github.com/steveyegge/beads/internal/storage"
@@ -321,7 +322,12 @@ func commandMemoizesReads(cmd *cobra.Command) bool {
 // It mirrors dolt.applyResolvedConfig, which this hand-built doltCfg path
 // bypasses.
 func resolveDoltServerConnection(ctx context.Context, beadsDir string, fileCfg *configfile.Config, doltCfg *dolt.Config) error {
-	doltCfg.ServerHost = fileCfg.GetDoltServerHost()
+	// An IPv6 host may be configured bracketed ("[::1]") as well as bare. The
+	// store and `bd serve` (its socket-fallback probe and its proxy's
+	// ExternalDoltServer) both dial with doltutil.ServerAddr, which accepts
+	// either, but they also key, name and compare the server by this host, so
+	// hand them the bare form.
+	doltCfg.ServerHost = configfile.UnbracketHost(fileCfg.GetDoltServerHost())
 	// Port 0 is fine here — auto-start will resolve it. Use the shared helper
 	// rather than DefaultConfig(...).Port: this hand-built doltCfg is handed
 	// straight to dolt.New, and a port arriving there without its source is
@@ -857,10 +863,11 @@ func prepareSelectedCommandContext(beadsDir string, loadEnv bool) {
 	}
 	config.CheckBeadsDirPermissions(beadsDir)
 	if err := loadServerModeFromBeadsDir(beadsDir); err != nil {
-		// Warn, don't fatal: this context also serves no-DB commands —
-		// doctor, init, bootstrap, config — which are exactly the repair
-		// paths for a corrupt metadata.json. Data commands stay protected
-		// by the hard error at store init and in the store factories.
+		// Warn, don't fatal: the commands workspace admission exempts,
+		// such as bd version and help, still run. Admission
+		// (guardLegacyUpgradeWorkspace) then refuses every other command,
+		// doctor, init and bootstrap included, and the store factories
+		// refuse too, so the repair is fixing or restoring the file by hand.
 		fmt.Fprintf(os.Stderr, "warning: %v\n", err)
 	}
 }
@@ -1559,10 +1566,11 @@ var rootCmd = &cobra.Command{
 			if os.Getenv("BEADS_DIR") == "" {
 				loadEnvironment()
 				if err := loadServerModeFromConfig(); err != nil {
-					// Warn, don't fatal: skipsStoreInit commands (doctor,
-					// init, bootstrap, version, ...) never select a store,
-					// and several of them are the repair path for the very
-					// corruption being reported.
+					// Warn, don't fatal, as prepareSelectedCommandContext
+					// does: the commands admission exempts still run, and
+					// admission refuses the rest (guardLegacyNoStoreCommand
+					// below; doctor, init and bootstrap run the guard
+					// themselves).
 					fmt.Fprintf(os.Stderr, "warning: %v\n", err)
 				}
 			}
@@ -2753,8 +2761,14 @@ func flushBatchCommitOnShutdown() {
 // run, not a workspace problem. It must stay narrow: any other previewErr
 // (unreachable server, bad config, ...) has to refuse rather than silently
 // wave the real, mutating open through (be-3bt2e).
+//
+// So it matches the embedded store's own no-database error, and only when the
+// cause is a missing data dir — not any ENOENT. A dial to a configured unix
+// socket whose server is down satisfies errors.Is(err, os.ErrNotExist) too,
+// as does a data dir missing an internal file, and neither is a first run
+// (bd-wlygc).
 func isBootstrapPreviewErr(err error) bool {
-	return errors.Is(err, os.ErrNotExist)
+	return errors.Is(err, embeddeddolt.ErrNoEmbeddedDatabase) && errors.Is(err, os.ErrNotExist)
 }
 
 // refuseUnverifiablePreviewOpen renders the identity gate's refusal when the
@@ -2896,6 +2910,11 @@ func main() {
 	rootCmd.InitDefaultHelpCmd()
 	registerHelpAllFlag()
 
+	// Cobra prints a command's returned error itself ("Error: ...") unless
+	// the command silences it: that line goes through the same backstop as
+	// bd's own error printers (HandleError), since an error can repeat a value
+	// a cloned repository sets.
+	rootCmd.SetErr(remedy.TextWriter(os.Stderr))
 	executedCmd, err := rootCmd.ExecuteC()
 
 	// Let this command's fire-and-forget hooks finish, for the same
@@ -2916,7 +2935,7 @@ func main() {
 			os.Exit(code)
 		}
 		if executedCmd != nil && executedCmd.SilenceErrors {
-			fmt.Fprintf(os.Stderr, "Error: %s\n", err.Error())
+			fmt.Fprintf(os.Stderr, "Error: %s\n", remedy.PrintedText(err.Error()))
 		}
 		os.Exit(1)
 	}

@@ -774,3 +774,194 @@ func TestProviderEnvironmentIsProcessWideAndOnlyTurnsRecordingOn(t *testing.T) {
 		}
 	})
 }
+
+// --- the deferred read: activation hands the row to the first write ----------
+
+// deferringStore can take the row as a read to make later
+// (storage.VersionedHistoryDeferrer). Its settings plane panics if asked: the
+// deferred path must never ask it at activation time.
+type deferringStore struct {
+	storage.DoltStorage
+	resolve   storage.VersionedHistoryResolver
+	defers    int
+	sets      int
+	enabled   bool
+	planeHits int
+}
+
+func (s *deferringStore) WorkspaceConfig() (issueops.WorkspaceConfig, error) {
+	s.planeHits++
+	panic("activation read the settings plane of a store that could have read it in its first write")
+}
+
+func (s *deferringStore) SetVersionedHistoryEnabled(enabled bool) {
+	s.enabled = enabled
+	s.sets++
+}
+
+func (s *deferringStore) DeferVersionedHistory(resolve storage.VersionedHistoryResolver) {
+	s.resolve = resolve
+	s.defers++
+}
+
+// deferringProvider is the same for a unit-of-work provider.
+type deferringProvider struct {
+	uow.UnitOfWorkProvider
+	resolve  storage.VersionedHistoryResolver
+	defers   int
+	sets     int
+	enabled  bool
+	newCalls int
+}
+
+func (p *deferringProvider) NewUOW(context.Context) (uow.UnitOfWork, error) {
+	p.newCalls++
+	panic("activation opened a unit of work on a provider that could have read the row in its first one")
+}
+
+func (p *deferringProvider) SetVersionedHistoryEnabled(enabled bool) {
+	p.enabled = enabled
+	p.sets++
+}
+
+func (p *deferringProvider) DeferVersionedHistory(resolve storage.VersionedHistoryResolver) {
+	p.resolve = resolve
+	p.defers++
+}
+
+// TestActivateDefersTheRowReadToAPlumbingThatCanMakeIt is the cost claim at the
+// resolver's level: with the environment silent, activating a deferrer reads
+// nothing and answers nothing; it hands over the read, once.
+func TestActivateDefersTheRowReadToAPlumbingThatCanMakeIt(t *testing.T) {
+	viperEnv(t, "")
+	ctx := context.Background()
+
+	st := &deferringStore{}
+	if got, err := ActivateStore(ctx, st, nil); err != nil || got != storage.DoltStorage(st) {
+		t.Fatalf("ActivateStore = (%v, %v), want the store back and no error", got, err)
+	}
+	if st.planeHits != 0 || st.sets != 0 || st.defers != 1 || st.resolve == nil {
+		t.Errorf("store: %d settings read(s), %d answer(s), %d deferral(s); want 0, 0, 1", st.planeHits, st.sets, st.defers)
+	}
+
+	p := &deferringProvider{}
+	if got, err := ActivateProvider(ctx, p, nil); err != nil || got != uow.UnitOfWorkProvider(p) {
+		t.Fatalf("ActivateProvider = (%v, %v), want the provider back and no error", got, err)
+	}
+	if p.newCalls != 0 || p.sets != 0 || p.defers != 1 || p.resolve == nil {
+		t.Errorf("provider: %d unit(s) of work, %d answer(s), %d deferral(s); want 0, 0, 1", p.newCalls, p.sets, p.defers)
+	}
+}
+
+// TestEnvironmentActivatesADeferrerWithoutAnyRead: the process-wide plane has
+// answered, so there is no row to defer. The plumbing is switched on at once,
+// as before.
+func TestEnvironmentActivatesADeferrerWithoutAnyRead(t *testing.T) {
+	viperEnv(t, "1")
+	st := &deferringStore{}
+	p := &deferringProvider{}
+	_, _ = ActivateStore(context.Background(), st, nil)
+	_, _ = ActivateProvider(context.Background(), p, nil)
+	if !st.enabled || st.defers != 0 || st.planeHits != 0 {
+		t.Errorf("store: enabled=%v, %d deferral(s), %d read(s); want on with neither", st.enabled, st.defers, st.planeHits)
+	}
+	if !p.enabled || p.defers != 0 || p.newCalls != 0 {
+		t.Errorf("provider: enabled=%v, %d deferral(s), %d unit(s) of work; want on with neither", p.enabled, p.defers, p.newCalls)
+	}
+}
+
+// TestTheDeferredReadAppliesTheRuleTheEagerReadApplies drives the resolver a
+// deferrer is handed: the same key, the same parse, the same silence for an
+// absent row, and the same debug diagnosis for a failed read -- which, unlike
+// the eager read's, is handed back as "no answer yet".
+func TestTheDeferredReadAppliesTheRuleTheEagerReadApplies(t *testing.T) {
+	viperEnv(t, "")
+	st := &deferringStore{}
+	_, _ = ActivateStore(context.Background(), st, nil)
+	resolve := st.resolve
+	if resolve == nil {
+		t.Fatal("no resolver was handed over")
+	}
+	ctx := context.Background()
+	for _, tc := range []struct {
+		row  string
+		want bool
+	}{
+		{"", false}, {"false", false}, {"0", false}, {"on", false}, {"nonsense", false},
+		{"true", true}, {"1", true}, {" true\n", true},
+	} {
+		var asked []string
+		got, err := resolve(ctx, func(_ context.Context, key string) (string, error) {
+			asked = append(asked, key)
+			return tc.row, nil
+		})
+		if err != nil || got != tc.want {
+			t.Errorf("row %q: (%v, %v), want (%v, nil)", tc.row, got, err, tc.want)
+		}
+		if len(asked) != 1 || asked[0] != ConfigKey {
+			t.Errorf("row %q: read keys %v, want exactly [%s]", tc.row, asked, ConfigKey)
+		}
+	}
+
+	t.Run("an absent row is silent", func(t *testing.T) {
+		out := captureStderr(t, true, func() {
+			_, _ = resolve(ctx, func(context.Context, string) (string, error) { return "", nil })
+		})
+		if out != "" {
+			t.Errorf("an absent row was diagnosed: %q", out)
+		}
+	})
+	t.Run("a failed read is no answer, diagnosed at debug level", func(t *testing.T) {
+		readErr := errors.New("read failed: connection reset")
+		var got bool
+		var err error
+		out := captureStderr(t, true, func() {
+			got, err = resolve(ctx, func(context.Context, string) (string, error) { return "", readErr })
+		})
+		if got || !errors.Is(err, readErr) {
+			t.Errorf("(%v, %v), want (false, the read's error) so the next write asks again", got, err)
+		}
+		for _, want := range []string{ConfigKey, "connection reset"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("the diagnostic does not mention %q: %q", want, out)
+			}
+		}
+		if quiet := captureStderr(t, false, func() {
+			_, _ = resolve(ctx, func(context.Context, string) (string, error) { return "", readErr })
+		}); quiet != "" {
+			t.Errorf("the diagnostic must be silent unless debugging, got %q", quiet)
+		}
+	})
+	t.Run("a panic is answered off", func(t *testing.T) {
+		got, err := resolve(ctx, func(context.Context, string) (string, error) { panic("half-built settings plane") })
+		if got || err != nil {
+			t.Errorf("(%v, %v), want (false, nil): a panic settles the switch off, as StoreSetting's recover does", got, err)
+		}
+	})
+}
+
+// TestATypedNilDeferrerFallsBackToTheEagerRead: a deferrer whose method panics
+// is not a reason to take the process down; activation falls back to the eager
+// read, whose own recover answers off.
+func TestATypedNilDeferrerFallsBackToTheEagerRead(t *testing.T) {
+	viperEnv(t, "")
+	var typedNil *deferringNilStore
+	if _, err := ActivateStore(context.Background(), typedNil, nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// deferringNilStore dereferences its receiver in every method.
+type deferringNilStore struct {
+	storage.DoltStorage
+	n int
+}
+
+func (s *deferringNilStore) SetVersionedHistoryEnabled(bool) { s.n++ }
+func (s *deferringNilStore) DeferVersionedHistory(storage.VersionedHistoryResolver) {
+	s.n++
+}
+func (s *deferringNilStore) WorkspaceConfig() (issueops.WorkspaceConfig, error) {
+	s.n++
+	return nil, nil
+}

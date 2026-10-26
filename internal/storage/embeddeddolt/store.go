@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/schema"
@@ -33,6 +34,7 @@ var _ storage.Compactor = (*EmbeddedDoltStore)(nil)
 var _ storage.SchemaMigrator = (*EmbeddedDoltStore)(nil)
 var _ storage.EventsJournalConfigurer = (*EmbeddedDoltStore)(nil)
 var _ storage.VersionedHistoryConfigurer = (*EmbeddedDoltStore)(nil)
+var _ storage.VersionedHistoryDeferrer = (*EmbeddedDoltStore)(nil)
 var _ storage.ExternalRefHistoryQuerier = (*EmbeddedDoltStore)(nil)
 
 // EmbeddedDoltStore implements storage.DoltStorage backed by the embedded Dolt engine.
@@ -53,10 +55,12 @@ type EmbeddedDoltStore struct {
 	// eventsJournalEnabled activates the durable events journal for THIS store
 	// instance only (storage.EventsJournalConfigurer); never process-global.
 	eventsJournalEnabled atomic.Bool
-	// versionedHistoryEnabled activates dual-write issue-version history for
-	// THIS store instance only (storage.VersionedHistoryConfigurer); never
-	// process-global.
-	versionedHistoryEnabled atomic.Bool
+	// versionedHistory activates dual-write issue-version history for THIS
+	// store instance only (storage.VersionedHistoryConfigurer); never
+	// process-global. Activation usually leaves it pending
+	// (storage.VersionedHistoryDeferrer), for commitConn's first WRITE
+	// transaction to answer: a read never opens an engine to read the row.
+	versionedHistory issueops.VersionedHistorySwitch
 	// readOnly marks a store opened via OpenReadOnly or
 	// OpenForPreviewCommand: open-time mutations (CREATE DATABASE, schema
 	// migrations) were skipped and write transactions are refused
@@ -87,11 +91,16 @@ const lenientSharedGateGuidance = "  This is a coordination decision, not an aut
 // blunt gate refusals while allowing smart-gate decisions to explain their
 // narrower recovery. A non-empty Decision means UserMessage has a shaped body;
 // data-behind is the one shaped refusal deliberately represented as a fallback.
+// The blunt arm swaps only UserMessage's body for the shared guidance and keeps
+// the gate's Notes after it, where UserMessage (and so server mode) prints
+// them: the smart gate's fallback reason is what tells an unreadable remote
+// state apart from a below-floor database or a BD_SMART_GATE=0 opt-out, and
+// each calls for a different next step (bd-1z1pc).
 func lenientGateWarningBody(gateErr *schema.RemoteMigrateGateError) string {
 	if gateErr.Decision != "" || gateErr.IsDataBehind() {
 		return "Warning: " + gateErr.UserMessage()
 	}
-	return "Warning: " + gateErr.Error() + "\n" + lenientSharedGateGuidance
+	return "Warning: " + gateErr.Error() + "\n" + lenientSharedGateGuidance + gateErr.Notes()
 }
 
 // openIntent classifies why a store is being opened. openStrict fails the
@@ -356,7 +365,7 @@ func openReadOnly(ctx context.Context, beadsDir, database, branch string, checkB
 	}
 	dataDir := filepath.Join(absBeadsDir, "embeddeddolt")
 	if _, err := os.Stat(dataDir); err != nil {
-		return nil, fmt.Errorf("embeddeddolt: no embedded database at %s: %w", dataDir, err)
+		return nil, fmt.Errorf("%w at %s: %w", ErrNoEmbeddedDatabase, remedy.PrintedValue(dataDir), remedy.PrintedError(err))
 	}
 
 	s := &EmbeddedDoltStore{
@@ -483,7 +492,18 @@ func (s *EmbeddedDoltStore) commitConn(ctx context.Context, commit bool, fn func
 	}
 	clearJournalScope := issueops.ScopeEventsJournalTransaction(tx, s.eventsJournalEnabled.Load())
 	defer clearJournalScope()
-	clearVersionScope := issueops.ScopeVersionedHistoryTransaction(tx, s.versionedHistoryEnabled.Load())
+	// Only a transaction that commits answers a pending switch: a read rolls
+	// back whatever it does, so the row is read inside the first write and
+	// costs a read-only command nothing. A write whose read fails is rolled
+	// back before fn runs (issueops.VersionedHistorySwitch.ResolveIn).
+	versioned := s.versionedHistory.Enabled()
+	if commit {
+		if versioned, err = s.versionedHistory.ResolveIn(ctx, tx); err != nil {
+			err = errors.Join(err, tx.Rollback())
+			return
+		}
+	}
+	clearVersionScope := issueops.ScopeVersionedHistoryTransaction(tx, versioned)
 	defer clearVersionScope()
 	clearRecheckScope := issueops.ScopeBlockedRecheckTransaction(tx)
 	defer clearRecheckScope()
@@ -515,7 +535,13 @@ func (s *EmbeddedDoltStore) SetEventsJournalEnabled(enabled bool) {
 // SetVersionedHistoryEnabled activates dual-write issue-version history for
 // this store instance only.
 func (s *EmbeddedDoltStore) SetVersionedHistoryEnabled(enabled bool) {
-	s.versionedHistoryEnabled.Store(enabled)
+	s.versionedHistory.Set(enabled)
+}
+
+// DeferVersionedHistory leaves this store's switch to resolve, read by the
+// first write transaction (storage.VersionedHistoryDeferrer).
+func (s *EmbeddedDoltStore) DeferVersionedHistory(resolve storage.VersionedHistoryResolver) {
+	s.versionedHistory.Defer(resolve)
 }
 
 // commitEmbeddedTx classifies an unconfirmed SQL commit response as
@@ -1175,6 +1201,20 @@ func (s *EmbeddedDoltStore) ListVersions(ctx context.Context, issueID string) ([
 	})
 	return result, err
 }
+
+// ParticipatingIssueIDs implements storage.HistoryParticipation: which of ids
+// name an issues-table row whose participation_generation is set.
+func (s *EmbeddedDoltStore) ParticipatingIssueIDs(ctx context.Context, ids []string) (map[string]struct{}, error) {
+	var participating map[string]struct{}
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		participating, err = issueops.ParticipatingIssueIDsInTx(ctx, tx, ids)
+		return err
+	})
+	return participating, err
+}
+
+var _ storage.HistoryParticipation = (*EmbeddedDoltStore)(nil)
 
 func (s *EmbeddedDoltStore) AsOf(ctx context.Context, issueID string, ref string) (*types.Issue, error) {
 	var result *types.Issue
