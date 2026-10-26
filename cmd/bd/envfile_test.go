@@ -13,19 +13,14 @@ func TestFindMailDelegateUsesYaml(t *testing.T) {
 	t.Setenv("BEADS_MAIL_DELEGATE", "")
 	t.Setenv("BD_MAIL_DELEGATE", "")
 	for _, tt := range []struct {
-		name        string
-		user        string
-		project     string
-		legacy      string
-		homeProject bool
-		want        string
+		name    string
+		user    string
+		project string
+		want    string
 	}{
 		{name: "user config", user: "mail:\n  delegate: trusted mail\n", project: "mail:\n  delegate: untrusted mail\n", want: "trusted mail"},
 		{name: "project config ignored", project: "mail:\n  delegate: untrusted mail\n"},
 		{name: "no config"},
-		{name: "legacy user config", legacy: "mail:\n  delegate: legacy mail\n", want: "legacy mail"},
-		{name: "documented user config wins over legacy", user: "mail:\n  delegate: trusted mail\n", legacy: "mail:\n  delegate: legacy mail\n", want: "trusted mail"},
-		{name: "home project config ignored", homeProject: true, project: "mail:\n  delegate: untrusted mail\n"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			home := t.TempDir()
@@ -40,16 +35,6 @@ func TestFindMailDelegateUsesYaml(t *testing.T) {
 				t.Fatal(err)
 			}
 			projectDir := filepath.Join(t.TempDir(), ".beads")
-			legacyDir := filepath.Join(home, ".beads")
-			if err := os.MkdirAll(legacyDir, 0755); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(filepath.Join(legacyDir, "config.yaml"), []byte(tt.legacy), 0600); err != nil {
-				t.Fatal(err)
-			}
-			if tt.homeProject {
-				projectDir = legacyDir
-			}
 			if err := os.MkdirAll(projectDir, 0755); err != nil {
 				t.Fatal(err)
 			}
