@@ -37,6 +37,7 @@ func TestShouldFlagTrackedFile_RuntimeArtifacts(t *testing.T) {
 		{"dolt/noms/manifest", true},
 		{"issues.jsonl", false},
 		{"config.json", false},
+		{"config.yaml", false},   // user config, tracked on purpose
 		{"sub/last_pull", false}, // patterns apply to top-level .beads/ files only
 	}
 	for _, tc := range cases {
