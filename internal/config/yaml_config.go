@@ -34,6 +34,7 @@ var ErrNoProjectConfigYaml = errors.New("no project config.yaml in this workspac
 // appeared to succeed but had no effect (because no-db is read from yaml
 // at startup, not from the database).
 var YamlOnlyKeys = map[string]bool{
+	"mail.delegate": true,
 	// Bootstrap flags (affect how bd starts)
 	"no-db": true,
 	"json":  true,
@@ -135,9 +136,6 @@ var YamlOnlyKeys = map[string]bool{
 // IsYamlOnlyKey returns true if the given key should be stored in config.yaml
 // rather than the Dolt database.
 func IsYamlOnlyKey(key string) bool {
-	if key == "mail.delegate" {
-		return true
-	}
 	// Check exact match
 	if YamlOnlyKeys[key] {
 		return true
