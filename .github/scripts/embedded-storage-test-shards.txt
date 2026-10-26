@@ -538,6 +538,7 @@
 40 34 TestQuerierContract
 40 34 TestReadyWorkStatementBudget
 
+40 35 TestCreateBatchFastPathsMatchPerRowSettled_Embedded
 40 35 TestEmbeddedBatchCloserAllIdempotentBatchLandsNothing
 40 35 TestEmbeddedClaimIssueWrapperClaimsTheWispPlane
 40 35 TestEmbeddedDependencyEditorGateScopeFollowsTheEdgeType
