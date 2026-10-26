@@ -1033,6 +1033,9 @@ func openCloudAuthTestStore(t *testing.T, dbSuffix string) *DoltStore {
 func ensureCloudAuthCLIDatabase(t *testing.T, store *DoltStore) {
 	t.Helper()
 	testutil.RequireDoltBinary(t)
+	// The database created here stands in for the one the store's server
+	// serves, which no port variable may name (cliDirServesServer).
+	clearServerPortEnv(t)
 
 	cliDir := store.CLIDir()
 	if err := os.MkdirAll(cliDir, 0o755); err != nil {

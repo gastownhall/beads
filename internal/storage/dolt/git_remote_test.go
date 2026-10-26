@@ -1948,10 +1948,11 @@ func TestPullVerifyUsesBranchQualifiedPreHead(t *testing.T) {
 // for the CLI routes' host gate (cliDirServesServer). The workspace's Dolt
 // server listens on 127.0.0.2, an address bd's own server never binds, and
 // keeps its data in its own directory. The workspace's .beads/dolt/<db> holds
-// a clone of the git-protocol remote, as bd init used to leave there for such
-// a server. A push must deliver the server's commits to the remote, and a pull
-// must merge the remote's commits into the server: through that clone, the
-// push reported success with neither, and the pull landed in the clone.
+// a clone of the git-protocol remote, as bd init leaves there for a gateway
+// at such a host. A push must deliver the server's commits to the remote,
+// and a pull must merge the remote's commits into the server: through that
+// clone, the push reported success with neither, and the pull landed in the
+// clone.
 func TestPushPullAtAHostBdDoesNotRunMoveTheServersData(t *testing.T) {
 	testutil.RequireDoltBinary(t)
 	skipIfNoGit(t)

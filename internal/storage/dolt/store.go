@@ -4490,22 +4490,38 @@ func (s *DoltStore) hasCLIDatabase() bool {
 
 // cliDirServesServer reports whether CLIDir can be the database this store's
 // server serves, so that a dolt CLI subprocess run there (push, pull, fetch,
-// and the fsck before a push) moves that server's data. As for every decision
-// that counts the workspace's Dolt root as a server's data, that holds only
-// at a host bd runs its server at (configfile.BdRunsServerAt). bd does not
-// know where a server at any other host (the IPv6 loopback, another loopback
-// address, another machine) keeps its data, and a database in CLIDir is then
-// at best a copy, such as the clone bd init used to leave in .beads/dolt or
-// the database from when bd ran the workspace's server: pushing it would
-// report success without the server's commits, and a pull into it would
-// never reach the server. A store opened without a Config reads as bd's
-// default host.
+// and the fsck before a push) moves that server's data, and the remotes its
+// .dolt/repo_state.json records are that server's (PersistedRemoteInfos).
+// That holds only for a server bd may run for the workspace, as every
+// decision that counts the workspace's Dolt root as a server's data holds
+// (resolveLocalActiveDatabaseDir, sharedServerDatabase): a plain TCP server
+// at a host bd runs its server at (configfile.BdRunsServerAt), and not a
+// gateway, a TLS endpoint or a unix socket, none of which bd's own server
+// ever is. A port BEADS_DOLT_SERVER_PORT or the legacy BEADS_DOLT_PORT names
+// may be any server, such as a container or a tunnel on 127.0.0.1, so it
+// counts only with the proof sharedServerDatabase accepts (GH#6169): bd's
+// state files for the workspace's server name a live server on that very port
+// (doltserver.ManagesLiveServerOnPort), as when a multi-agent rig names the
+// server bd started in those variables. (resolveLocalActiveDatabaseDir, which
+// grants local garbage collection, refuses such a port even then.) bd does
+// not know where any other server keeps its data, and a database in CLIDir is
+// then at best a copy, such as a clone bd init left in .beads/dolt (it still
+// does for a gateway) or the database from when bd ran the workspace's
+// server: pushing it would report success without the server's commits, a
+// pull into it would never reach the server, and its remotes are not the
+// server's. A store opened without a Config reads as bd's default host.
 func (s *DoltStore) cliDirServesServer() bool {
-	host := ""
-	if s.cfg != nil {
-		host = s.cfg.ServerHost
+	cfg := s.cfg
+	if cfg == nil {
+		cfg = &Config{}
 	}
-	return configfile.BdRunsServerAt(host)
+	if cfg.Gateway || cfg.ServerTLS || cfg.ServerSocket != "" || !configfile.BdRunsServerAt(cfg.ServerHost) {
+		return false
+	}
+	if os.Getenv("BEADS_DOLT_SERVER_PORT") == "" && os.Getenv("BEADS_DOLT_PORT") == "" {
+		return true
+	}
+	return s.beadsDir != "" && doltserver.ManagesLiveServerOnPort(doltserver.ResolveServerDir(s.beadsDir), cfg.ServerPort)
 }
 
 // ensureMatchingCLIRemote materializes the local CLI remote needed before
@@ -4998,6 +5014,13 @@ func (s *DoltStore) pushToRemote(ctx context.Context, remote string, force bool)
 		return s.doltCLIPush(ctx, remote, force, creds)
 	}
 	logRouteDecision("push", remote, false)
+	defer func() {
+		if retErr != nil {
+			if note := s.serverEnvCredentialsNote(ctx, remote, creds); note != "" {
+				retErr = fmt.Errorf("%w%s", retErr, note)
+			}
+		}
+	}()
 	if s.remoteUser != "" && remote == s.remote {
 		return withRemoteOperationEnv(creds, s.isS3Remote(ctx, remote), func() error {
 			if force {

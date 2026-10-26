@@ -207,18 +207,23 @@ func (s *DoltStore) ListRemotes(ctx context.Context) ([]storage.RemoteInfo, erro
 // directly so a cold-start open cannot miss the remote and migrate the shared
 // database in place.
 //
+// Unlike HasPersistedRemote, it reads those directories whatever server the
+// store dials: for this gate a remote recorded there is a reason for caution,
+// not a claim about the server's remotes that a caller acts on.
+//
 // The probe reads repo_state.json itself (no dolt CLI subprocess), so a
 // missing dolt binary can no longer disable the gate. A directory that is not
 // a dolt repository is a definite "no remote here"; a read/parse failure still
 // fails open (migration is not wedged on unrelated corruption) but is logged,
 // never swallowed (bd-6dnrw.33).
 func (s *DoltStore) hasPersistedCLIRemote() bool {
-	return s.HasPersistedRemote()
+	return len(s.persistedRemoteInfosOnDisk()) > 0
 }
 
 // HasPersistedRemote is the exported on-disk probe for callers that must not
-// trust an empty dolt_remotes table at cold start: the remote-migrate gate
-// and the push/pull "no remote configured" exit-0 skip (bd-578h9.10).
+// trust an empty dolt_remotes table at cold start: the push/pull "no remote
+// configured" exit-0 skip (bd-578h9.10). Like PersistedRemoteInfos, it counts
+// only remotes that can be the store's server's.
 func (s *DoltStore) HasPersistedRemote() bool {
 	return len(s.PersistedRemoteInfos()) > 0
 }
@@ -236,7 +241,25 @@ func (s *DoltStore) HasPersistedRemote() bool {
 // (wy-6k7f7). Read/parse failures are logged and skipped, matching the old
 // HasPersistedRemote behavior — callers only consult this after a SUCCESSFUL
 // (empty) ListRemotes, so a read failure here never masquerades as evidence.
+//
+// Those are the server's remotes only where the workspace's Dolt root can be
+// its data (cliDirServesServer). For a server bd does not run, or one it
+// cannot tell from such a server, a database there is at best a copy whose
+// remotes say nothing about the server's, so none are returned: a copy that
+// lists origin must not make `bd dolt remote add` or `bd config apply` take
+// the remote as already configured on a server that lists none, nor veto the
+// push/pull no-remote skip there.
 func (s *DoltStore) PersistedRemoteInfos() []storage.RemoteInfo {
+	if !s.cliDirServesServer() {
+		return nil
+	}
+	return s.persistedRemoteInfosOnDisk()
+}
+
+// persistedRemoteInfosOnDisk is PersistedRemoteInfos for any server: the
+// remotes recorded in the database CLI directory, else in the dolt server
+// root.
+func (s *DoltStore) persistedRemoteInfosOnDisk() []storage.RemoteInfo {
 	cliDir := s.CLIDir()
 	dirs := []string{cliDir}
 	if s.dbPath != "" && s.dbPath != cliDir {

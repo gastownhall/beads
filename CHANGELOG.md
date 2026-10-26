@@ -1081,33 +1081,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `bd dolt push` and `bd dolt pull`, and the transfers of `bd sync`,
   auto-push, `bd dolt remote reset-data`, `bd federation sync` and
   `bd federation status`, no longer run the dolt CLI in a Dolt database
-  left in `.beads/dolt/<database>` when the workspace's Dolt server is at
-  a host bd's own server never runs at (the IPv6 loopback, another
-  loopback address such as `127.0.0.2`, or another machine). That
-  database is at best a copy, such as a clone `bd init --server` left
-  there or the database from when bd ran the workspace's server. A push
-  reported success with the copy's commits instead of the server's (with
-  `--force` it replaced the remote's branch with them), and a pull merged
-  into the copy, which the server never saw. The transfers now run on the
-  server (`CALL DOLT_PUSH`, `CALL DOLT_PULL`, `CALL DOLT_FETCH`), as they
-  already did when that directory was absent. A server you run at such a
-  host over `.beads/dolt` itself now gets them directly; through the dolt
+  left in `.beads/dolt/<database>` when the workspace's Dolt server cannot
+  be bd's own: a server at a host bd's own server never runs at (the IPv6
+  loopback, another loopback address such as `127.0.0.2`, or another
+  machine), a gateway (`BEADS_DOLT_CREDENTIAL_COMMAND`), a TLS endpoint
+  or a unix socket at any host, or a port `BEADS_DOLT_SERVER_PORT` or the
+  legacy `BEADS_DOLT_PORT` names, which may be any server, such as a
+  container or a tunnel on `127.0.0.1`, unless bd's own live server for
+  the workspace runs on that port (as when a multi-agent rig names it).
+  That database is at best a copy, such as a clone `bd init --server`
+  left there or the database from when bd ran the workspace's server. A
+  push reported success with the copy's commits instead of the server's
+  (with `--force` it replaced the remote's branch with them), and a pull
+  merged into the copy, which the server never saw. The transfers now run
+  on the server (`CALL DOLT_PUSH`, `CALL DOLT_PULL`, `CALL DOLT_FETCH`),
+  as they already did when that directory was absent, with the
+  credentials the server process holds: a push that fails there names
+  the ones bd holds for the remote (`DOLT_REMOTE_PASSWORD`, cloud storage
+  variables), which the server reads from its own environment instead. A
+  server you run over `.beads/dolt` itself at such a host, or on a port
+  one of those variables names, now gets them directly; through the dolt
   CLI they went to that server anyway, or failed where `localhost` does
-  not reach it (a server on `127.0.0.2`). bd's own server and embedded
-  mode are unchanged, and so is a server you run yourself on `127.0.0.1`,
-  which bd cannot tell apart from its own by host.
-  If the server lists no such remote while the copy does, push, pull and
-  `bd sync` now fail with the server's `remote 'origin' not found`
-  instead of exiting 0 without moving the server's data. A gateway
-  workspace (`BEADS_DOLT_CREDENTIAL_COMMAND`) set up with
-  `bd init --server --remote <url>` at such a host is in this state: init
-  still clones the remote into `.beads/dolt/<database>` and adds the
-  remote only there. While the copy is present, `bd dolt remote add`
-  takes the copy's remote as already configured and adds nothing to the
-  server. Move `.beads/dolt/<database>` aside: push and pull then report
+  not reach it (a server on `127.0.0.2`). Embedded mode is unchanged, and
+  so is a plain server on `127.0.0.1` whose port neither variable names,
+  bd's own or one you run yourself, which bd cannot tell apart from its
+  own by host.
+  Nor do the remotes recorded in such a copy count as the server's any
+  longer. Where the server lists no remote while the copy does, push,
+  pull and `bd sync` exited 0 having moved only the copy; they now report
   that no remote is configured and exit 0, as for such a workspace
-  without the copy, and `bd dolt remote add` adds the remote on the
-  server.
+  without the copy, and `bd dolt remote add` and `bd config apply` add the
+  remote on the server instead of taking the copy's as already
+  configured. A gateway workspace set up with
+  `bd init --server --remote <url>` is in this state: init still clones
+  the remote into `.beads/dolt/<database>` and adds the remote only
+  there, so run `bd dolt remote add origin <url>` once.
 - With only the legacy `BEADS_DOLT_PORT` naming a workspace's Dolt server,
   bd now presents the credentials-file password for that port
   (`[127.0.0.1:<port>]`). The store looked the password up for the port it
