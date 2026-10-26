@@ -333,49 +333,62 @@ func (s *DoltServer) Start(ctx context.Context) error {
 	if s.eg != nil || s.egCtx != nil {
 		return fmt.Errorf("server: DoltServer.Start: server already started")
 	}
+	if err := os.MkdirAll(s.rootDir, 0o755); err != nil {
+		return fmt.Errorf("server: DoltServer.Start: create root %q: %w", s.rootDir, err)
+	}
+	lock, err := util.TryLock(filepath.Join(s.rootDir, LockFileName))
+	if err != nil {
+		return fmt.Errorf("server: DoltServer.Start: acquire %s: %w", LockFileName, err)
+	}
 	// A runtime config left by an earlier run is stale: every Start begins
 	// from the operator config's own port and a fresh launch snapshot.
 	_ = os.Remove(s.runtimeConfigPath())
 	_ = os.Remove(s.launchSnapshotPath())
 	raw, err := os.ReadFile(s.configPath) //nolint:gosec // s.configPath is the operator-provided Dolt config
 	if err != nil {
+		lock.Unlock()
 		return fmt.Errorf("server: DoltServer.Start: read config %q: %w", s.configPath, err)
 	}
-	if err := os.MkdirAll(s.rootDir, 0o755); err != nil {
-		return fmt.Errorf("server: DoltServer.Start: create root %q: %w", s.rootDir, err)
-	}
 	if err := writeFileAtomic(s.launchSnapshotPath(), raw); err != nil {
+		lock.Unlock()
 		return fmt.Errorf("server: DoltServer.Start: snapshot config %q: %w", s.configPath, err)
 	}
 	cfg, err := servercfg.YamlConfigFromFile(filesys.LocalFS, s.launchSnapshotPath())
 	if err != nil {
 		_ = os.Remove(s.launchSnapshotPath())
+		lock.Unlock()
 		return fmt.Errorf("server: DoltServer.Start: parse config %q: %w", s.configPath, err)
 	}
 	if s.configValidator != nil {
 		if err := s.configValidator(cfg); err != nil {
 			_ = os.Remove(s.launchSnapshotPath())
+			lock.Unlock()
 			return fmt.Errorf("server: DoltServer.Start: validate config %q: %w", s.configPath, err)
 		}
 	}
 	s.configRaw = raw
 	s.config = cfg
 	s.launchConfigPath = s.launchSnapshotPath()
-	err = s.startWithPortRecovery(ctx)
+	err = s.startWithPortRecovery(ctx, lock)
 	if err != nil {
-		_ = os.Remove(s.runtimeConfigPath())
-		_ = os.Remove(s.launchSnapshotPath())
+		cleanupLock, lockErr := util.TryLock(filepath.Join(s.rootDir, LockFileName))
+		if lockErr == nil {
+			_ = os.Remove(s.runtimeConfigPath())
+			_ = os.Remove(s.launchSnapshotPath())
+			cleanupLock.Unlock()
+		}
 	}
 	return err
 }
 
-func (s *DoltServer) startWithPortRecovery(ctx context.Context) error {
+func (s *DoltServer) startWithPortRecovery(ctx context.Context, lock *util.Lock) error {
 	// The policy judges the operator config, so it is asked once, about the
 	// port that config names. Later conflicts are on ports Start picked
 	// itself, which are Start's to move again.
 	operatorPort := s.config.Port()
 	for attempt := 1; ; attempt++ {
-		err := s.startAttempt(ctx, attempt == 1)
+		keepLockOnPortConflict := s.portPolicy != nil && attempt < maxStartPortAttempts
+		err := s.startAttempt(ctx, attempt == 1, lock, keepLockOnPortConflict)
 		if err == nil || !errors.Is(err, ErrPortInUse) {
 			return err
 		}
@@ -388,10 +401,12 @@ func (s *DoltServer) startWithPortRecovery(ctx context.Context) error {
 		}
 		if attempt == 1 {
 			if perr := s.portPolicy(s.configPath, operatorPort); perr != nil {
+				lock.Unlock()
 				return fmt.Errorf("%w; not moving off port %d: %v", err, inUse, perr)
 			}
 		}
 		if rerr := s.useRuntimePort(inUse); rerr != nil {
+			lock.Unlock()
 			return fmt.Errorf("%w; could not move off port %d: %v", err, inUse, rerr)
 		}
 	}
@@ -472,12 +487,7 @@ func writeFileAtomic(path string, body []byte) error {
 // startAttempt launches dolt sql-server once and waits until it is ready.
 // Only the first attempt runs the dolt config/init preparation; a retry after
 // a port conflict reuses it.
-func (s *DoltServer) startAttempt(ctx context.Context, prepare bool) error {
-	lock, err := util.TryLock(filepath.Join(s.rootDir, LockFileName))
-	if err != nil {
-		return fmt.Errorf("server: DoltServer.Start: acquire %s: %w", LockFileName, err)
-	}
-
+func (s *DoltServer) startAttempt(ctx context.Context, prepare bool, lock *util.Lock, keepLockOnPortConflict bool) error {
 	if prepare {
 		if err := s.doltConfigure(ctx); err != nil {
 			lock.Unlock()
@@ -543,11 +553,14 @@ func (s *DoltServer) startAttempt(ctx context.Context, prepare bool) error {
 		_ = cmd.Wait()
 		s.eg, s.egCtx, s.cancel = nil, nil, nil
 		cancel()
-		lock.Unlock()
 		if watch.SawPortInUse() {
+			if !keepLockOnPortConflict {
+				lock.Unlock()
+			}
 			s.pid = 0
 			return fmt.Errorf("server: DoltServer.Start: %w", s.exitedBeforeReady(watch))
 		}
+		lock.Unlock()
 		if exitedOnItsOwn(cmd.ProcessState) {
 			code := cmd.ProcessState.ExitCode()
 			s.pid = 0
@@ -577,7 +590,11 @@ func (s *DoltServer) startAttempt(ctx context.Context, prepare bool) error {
 	}
 
 	eg.Go(func() error {
-		defer lock.Unlock()
+		defer func() {
+			if !keepLockOnPortConflict || !watch.SawPortInUse() {
+				lock.Unlock()
+			}
+		}()
 		if err := cmd.Wait(); err != nil {
 			return err
 		}
