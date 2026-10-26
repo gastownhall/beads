@@ -160,15 +160,22 @@ func TestLegacyUpgradeGuardStillRefusesLegacyConfigYamlServerWorkspace(t *testin
 // current-era binary, and only after this guard already admitted the workspace,
 // so it settles the era regardless of which mode the workspace resolves to. The
 // escape hatch used to live inside the server-mode arm, where a misclassified
-// workspace could never reach it.
+// workspace could never reach it. Settling the era is not settling ownership:
+// over a populated .beads/dolt root the modes whose metadata leaves the open to
+// the embedded store take the unowned-root refusal instead (GH#6259), while a
+// selected server keeps its admission.
 func TestCurrentVersionWitnessVetoesLegacyVerdictInEveryMode(t *testing.T) {
 	modes := []struct {
 		name     string
 		metadata string
+		// unownedRoot reports whether this metadata leaves a populated
+		// .beads/dolt root's open to the embedded store, so a current witness
+		// answers it with the unowned-root refusal rather than admission.
+		unownedRoot bool
 	}{
-		{name: "metadata-less"},
-		{name: "blank mode", metadata: `{"backend":"dolt"}`},
-		{name: "explicit embedded mode", metadata: `{"backend":"dolt","dolt_mode":"embedded"}`},
+		{name: "metadata-less", unownedRoot: true},
+		{name: "blank mode", metadata: `{"backend":"dolt"}`, unownedRoot: true},
+		{name: "explicit embedded mode", metadata: `{"backend":"dolt","dolt_mode":"embedded"}`, unownedRoot: true},
 		{name: "explicit server mode", metadata: `{"backend":"dolt","dolt_mode":"server"}`},
 	}
 
@@ -177,7 +184,12 @@ func TestCurrentVersionWitnessVetoesLegacyVerdictInEveryMode(t *testing.T) {
 			captureLegacyUpgradeWarnings(t)
 			beadsDir := writeDoltRootWorkspace(t, mode.metadata, "", "1.3.0")
 
-			if err := guardLegacyUpgradeWorkspace(beadsDir); err != nil {
+			err := guardLegacyUpgradeWorkspace(beadsDir)
+			if mode.unownedRoot {
+				if err == nil || err.Error() != unownedDoltRootRefusal {
+					t.Fatalf("guardLegacyUpgradeWorkspace() = %v, want the unowned-root refusal %q", err, unownedDoltRootRefusal)
+				}
+			} else if err != nil {
 				t.Fatalf("guardLegacyUpgradeWorkspace() = %v, want nil", err)
 			}
 		})

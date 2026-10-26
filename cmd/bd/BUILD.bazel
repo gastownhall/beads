@@ -971,6 +971,7 @@ go_test(
         "legacy_upgrade_guard_init_flag_e2e_test.go",
         "legacy_upgrade_guard_init_flag_test.go",
         "legacy_upgrade_guard_test.go",
+        "legacy_upgrade_guard_unowned_root_test.go",
         "legacy_upgrade_guard_witness_test.go",
         "linear_roundtrip_test.go",
         "linear_test.go",
