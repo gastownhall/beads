@@ -18,10 +18,13 @@ import (
 // (scripts/ci/install-dolt.sh, kept at or above this value by
 // TestPinnedDoltCLIAtLeastRequiredMin) and the servers bd is run against all
 // pin, so it is the only server release bd is tested with. It changes
-// behavior bd relies on: dolt_merge() walks the full commit graph when it
-// picks a merge base, as Git does, so a long-running branch that has merged
-// several times can report a conflict that 2.5.x resolved silently by taking
-// the newer change. Earlier releases also carry known defects, measured in
+// behavior bd relies on: when two histories have more than one merge base
+// (criss-cross merges, e.g. federation peers that pull from each other, or
+// branches merged into each other), dolt_merge() merges against a virtual
+// base like git's ORT strategy (dolthub/dolt#12125), so some merges that
+// 2.5.x completed silently now conflict and some spurious conflicts no
+// longer occur; pull/push through a single remote is unaffected. Earlier
+// releases also carry known defects, measured in
 // gastownhall/beads docs/architecture/dolt.md ("Which Dolt version to
 // install"):
 // 2.4.0 through 2.4.2 return no row for an ungrouped MAX or MIN over an

@@ -97,10 +97,12 @@ used without the check (logged under `BD_DEBUG`). The
 list what changed. Two changes matter to `bd` users moving a server up to
 2.6.0:
 
-- `dolt_merge()` walks the full commit graph when it picks a merge base, as
-  Git does (new in 2.6.0). A long-running branch that has merged several
-  times can now report a conflict on `bd dolt pull` or a federation sync that
-  2.5.x resolved silently by taking the newer change.
+- When two histories have more than one merge base (criss-cross merges,
+  e.g. federation peers that pull from each other, or branches merged into
+  each other), Dolt 2.6.0 merges against a virtual base like git's ORT
+  strategy (new in 2.6.0, dolthub/dolt#12125). Some merges that 2.5.x
+  completed silently now conflict, and some spurious conflicts no longer
+  occur. Pull/push through a single remote is unaffected.
 - Dolt reports MySQL 8.0's strict default `sql_mode`, which includes
   `NO_ZERO_IN_DATE`, `NO_ZERO_DATE` and `ERROR_FOR_DIVISION_BY_ZERO`, so
   anything that reads `@@sql_mode` sees it. Dolt has done so since 2.3.3,
@@ -165,10 +167,12 @@ reads of `issues` still succeed on the releases marked "no".
   server starts, so one long-running server under-reports it: that day 2.3.1,
   the positive control, measured 0 / 300 on one server but 31 / 600 across 30
   fresh servers of 20 databases each. Measure across fresh servers.
-- 2.6.0 changes `dolt_merge()` to walk the full commit graph when it picks a
-  merge base, as Git does. A long-running branch that has merged several times
-  can now report a conflict that 2.5.x resolved silently by taking the newer
-  change.
+- 2.6.0: when two histories have more than one merge base (criss-cross
+  merges, e.g. federation peers that pull from each other, or branches merged
+  into each other), it merges against a virtual base like git's ORT strategy
+  (dolthub/dolt#12125). Some merges that 2.5.x completed silently now
+  conflict, and some spurious conflicts no longer occur. Pull/push through a
+  single remote is unaffected.
 - The `MAX`/`MIN` column is bee-ghosttrack's reproduction from
   [#7646](https://github.com/gastownhall/beads/pull/7646), reproduced on
   linux/amd64 and darwin/arm64. `bd`'s one query of that shape, the

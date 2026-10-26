@@ -554,11 +554,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Upgrade every `dolt sql-server` `bd` talks to (back it up first; the
   storage upgrade is one-way), then upgrade `bd`. What a server moving to
   2.6.0 changes:
-  - `dolt_merge()` walks the full commit graph when it picks a merge base,
-    as Git does (new in 2.6.0, dolthub/dolt#12125). Auto-merges on
-    `bd dolt pull`, federation sync and other long-running branches that
-    have merged several times may now raise conflicts that older servers
-    resolved silently by taking the newer change.
+  - When two histories have more than one merge base (criss-cross merges,
+    e.g. federation peers that pull from each other, or branches merged
+    into each other), Dolt 2.6.0 merges against a virtual base like git's
+    ORT strategy (new in 2.6.0, dolthub/dolt#12125). Some merges that 2.5.x
+    completed silently now conflict, and some spurious conflicts no longer
+    occur. Pull/push through a single remote is unaffected.
   - Dolt reports MySQL 8.0's strict default `sql_mode`, which includes
     `NO_ZERO_IN_DATE`, `NO_ZERO_DATE` and `ERROR_FOR_DIVISION_BY_ZERO`, so
     anything that reads `@@sql_mode` sees it. Dolt has done so since 2.3.3,
@@ -570,10 +571,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the `go` line of beads' `go.mod` is now 1.27.3: a program that imports
   `github.com/steveyegge/beads` needs Go 1.27.3 or newer. CI, the test
   container and the hermetic Bazel Dolt now pin the `dolt` CLI and
-  `dolt sql-server` at 2.6.0. Dolt 2.6.0
-  makes `dolt_merge()` walk the full commit graph when it picks a merge base,
-  as Git does, so a long-running branch that has merged several times can now
-  report a conflict that 2.5.x resolved silently by taking the newer change.
+  `dolt sql-server` at 2.6.0. When two histories have more than one merge
+  base (criss-cross merges, e.g. federation peers that pull from each other,
+  or branches merged into each other), Dolt 2.6.0 merges against a virtual
+  base like git's ORT strategy (dolthub/dolt#12125). Some merges that 2.5.x
+  completed silently now conflict, and some spurious conflicts no longer
+  occur. Pull/push through a single remote is unaffected.
 - Over an HTTP workspace, `bd ready --json` without `BD_JSON_ENVELOPE` no
   longer sends `GET /v0/beads/ready:count` after a page the limit cut short:
   the total only went into the stderr hint. It lists one row past the limit
