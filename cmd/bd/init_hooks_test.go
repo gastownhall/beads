@@ -232,15 +232,19 @@ func TestGenerateHookSection_Timeout(t *testing.T) {
 		t.Error("section missing GNU timeout argv separator")
 	}
 	// The Perl fallback must supervise bd, not alarm+exec it: a pending alarm
-	// survives exec and the Go runtime ignores SIGALRM (GH#7753).
+	// survives exec and the Go runtime ignores SIGALRM (GH#7753). It signals
+	// bd's own process group, because bd catches the first SIGTERM and keeps
+	// waiting on its children. TestGeneratedHookTimeoutProcessBoundary drives
+	// this program on a real Perl.
 	if strings.Contains(section, "alarm shift; exec @ARGV") {
 		t.Error("section still execs bd under a pending perl alarm")
 	}
 	for _, want := range []string{
 		"my $pid = fork;",
-		"exec { $ARGV[0] } @ARGV",
-		`kill "TERM", $pid`,
-		"exit 142",
+		"setpgrp(0, 0); exec { $ARGV[0] } @ARGV",
+		"kill $sig, -$pid",
+		"for qw(HUP INT TERM)",
+		"exit 142 if $sent;",
 		`' -- "$_bd_timeout" bd hooks run pre-push "$@"; then`,
 	} {
 		if !strings.Contains(section, want) {

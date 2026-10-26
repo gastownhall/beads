@@ -567,11 +567,13 @@ native Windows `timeout.exe` is not compatible. If neither a coreutils timeout
 nor Perl is available, the hook warns that it is running directly without a
 deadline.
 
-The coreutils helper sends `TERM`. The Perl fallback runs `bd` as its child,
-sends it `TERM` at the deadline, and waits; unlike coreutils `timeout`, it
-signals only the direct `bd` process, not its process group. On Git for Windows
-a coreutils `timeout` (GNU or uutils) is preferred.
-TERM-resistant work and descendant processes are not guaranteed to stop.
+Both helpers send `TERM` to `bd` and its process group, so the deadline also
+stops your chained hook. The Perl fallback runs `bd` in a process group of its
+own and sends the group `KILL` if `bd` is still running two seconds after the
+`TERM`. On Git for Windows a coreutils `timeout` (GNU or uutils) is preferred.
+A process that ignores `TERM` can outlive the hook. Both helpers run `bd`
+outside the terminal's foreground process group, so a chained hook that reads
+from the terminal is stopped until the deadline ends it.
 
 Already-installed hook sections are not refreshed automatically. After upgrading
 to a version that changed the timeout probe — the name-only check, the uutils
