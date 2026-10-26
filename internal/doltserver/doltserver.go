@@ -1270,6 +1270,12 @@ func IsRunning(beadsDir string) (*State, error) {
 		cfg := DefaultConfig(beadsDir)
 		port = cfg.Port
 	}
+	if port == 0 && !known {
+		// Neither the process nor its port can be confirmed. Never signal a
+		// PID that may belong to an unrelated process, and keep the pid file
+		// for a bd that can read the process list.
+		return &State{Running: false}, nil
+	}
 	if port == 0 {
 		// Server is running but we can't determine its port (port file
 		// missing, no explicit config). Stop the orphan so that callers

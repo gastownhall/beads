@@ -338,6 +338,24 @@ func TestIsRunningRemovesStateWhenPIDIsNotDolt(t *testing.T) {
 	}
 }
 
+func TestIsRunningDoesNotStopUnverifiedProcessWithoutPort(t *testing.T) {
+	dir := t.TempDir()
+	// The PID is this test process: the orphan-stop path would kill the test.
+	writeTrackedStateForLiveProcess(t, dir, 0)
+	stubProcessList(t, func() ([]int, error) { return nil, errProcessListUnreadable })
+
+	state, err := IsRunning(dir)
+	if err != nil {
+		t.Fatalf("IsRunning error: %v", err)
+	}
+	if state.Running {
+		t.Errorf("IsRunning = %+v, want Running=false when neither the process nor its port can be confirmed", state)
+	}
+	if _, err := os.Stat(pidPath(dir)); err != nil {
+		t.Errorf("expected the pid file to be kept: %v", err)
+	}
+}
+
 func TestIsRunningCorruptPIDRemovesPortFile(t *testing.T) {
 	dir := t.TempDir()
 
