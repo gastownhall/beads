@@ -545,7 +545,9 @@ server selection is not overridden by a stale `.beads/embeddeddolt/` repository.
 | Explicit server metadata plus `.beads/dolt/` and a missing or pre-v1 witness | Explicit legacy Dolt export/import |
 | Explicit server metadata plus `.beads/dolt/` and a witness that is present but unreadable | Normal current server-mode upgrade, with a warning |
 | Explicit server metadata without `.beads/dolt/`, and a missing, malformed, or non-historical witness | Normal current server-mode compatibility path |
-| `.beads/dolt/` with missing metadata or persisted `dolt_mode` blank/`embedded` | Explicit legacy Dolt export/import, except for the configured shared-server compatibility path described below |
+| `.beads/dolt/` with missing metadata or persisted `dolt_mode` blank/`embedded`, and a missing, pre-v1 or unreadable witness | Explicit legacy Dolt export/import, except for the configured shared-server compatibility path described below |
+| The same with a witness whose major version is 1 or newer, and a `.beads/dolt/` that holds anything | Refused until a server is selected: [Current-era Dolt root without a server selection](#current-era-dolt-root-without-a-server-selection) |
+| The same with a witness whose major version is 1 or newer, and an empty `.beads/dolt/` | Direct current-era upgrade |
 | One `.beads/*.db` file, such as `beads.db` or `vc.db` | Sealed SQLite bridge |
 
 The witness is whatever `bd` held in its own version string when it last touched
@@ -621,6 +623,43 @@ prove that a workspace is modern. If you know it was created by v0.55.4 through
 v0.62.0, use this explicit bridge even when its witness was lost or damaged.
 Otherwise, follow the normal `bd migrate --dry-run` and `bd migrate schema`
 flow for an admitted server workspace.
+
+### Current-era Dolt root without a server selection
+
+A `.beads/dolt/` that holds data, a `.local_version` witness naming bd 1.0 or
+newer, no `.beads/embeddeddolt/` repository, and nothing that selects a Dolt
+server this run: the root belongs to a Dolt sql-server. bd creates and owns
+that root in server mode, and writes the same witness for those workspaces.
+When the selection is missing this run — the env var came from a shell,
+provisioner or agent session this run does not have, `dolt.mode` was removed
+from config.yaml, or the metadata was edited by hand — opening the workspace
+embedded would start an empty database beside the root and answer from it,
+which is what bd v1.3.0 through v1.3.2 did: every query returned the false
+empty of a brand-new store while the real data sat untouched. Current `bd`
+refuses the workspace instead, pointing here.
+
+Pick the remedy that matches how the workspace was used:
+
+- Run with the environment it was used with: `BEADS_DOLT_SERVER_MODE=1`,
+  `BEADS_DOLT_SHARED_SERVER=1`, or the `BEADS_DOLT_SERVER_HOST` it dials.
+- Persist the selection. When `metadata.json` names no `dolt_mode`, add
+  `dolt:` / `mode: server` (or `shared-server: true`) to
+  `.beads/config.yaml`; `BEADS_DOLT_SERVER_MODE=1 bd config set dolt.mode
+  server` does the same. A plain `bd config set` is itself refused until a
+  server is selected, so keep the env var on that one command.
+- When `metadata.json` says `dolt_mode: embedded`, set it to `server`:
+  metadata outranks config.yaml, so the config.yaml change alone is not
+  enough.
+- To move the data to embedded storage, export through the server and
+  import into a fresh workspace.
+- To discard a root you have checked, move `.beads/dolt/` out of `.beads/`.
+
+If bd v1.3.0 through v1.3.2 already ran in this workspace, it may have
+created a `.beads/embeddeddolt/` directory. The data never moved: it is
+still in `.beads/dolt/`, and restoring the server selection reaches it
+again, because an explicit server selection outranks a stale embedded
+repository. Issues that were written into the empty embedded database are
+not in `.beads/dolt/`; re-create them on the server.
 
 ### One `.beads/*.db` file: sealed SQLite bridge
 

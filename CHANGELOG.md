@@ -3318,6 +3318,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ACCEPTANCE CRITERIA, and comment bodies, direct and proxied alike — not
   just `bd show`'s DESCRIPTION field. An explicit `GLAMOUR_STYLE` override
   still takes priority over the detected background.
+- A `.beads` holding a `.beads/dolt` root with data, a bd-1.0-or-newer
+  `.local_version` witness, no embedded repository and no Dolt server
+  selection for the run is refused instead of opened as embedded storage.
+  bd writes that witness for a sql-server's data root too, and when the
+  selection is missing — a shell, provisioner or agent session without the
+  workspace's env vars, a removed `dolt.mode`, hand-edited metadata — the
+  open created a brand-new `.beads/embeddeddolt` beside the root and
+  answered every query from it, reporting a workspace with data as empty.
+  The refusal names the shape and points at the upgrade guide's remedies
+  (run with the workspace's server environment, persist a server selection,
+  or export/import to embedded); an empty root, a selected server, a
+  proxied-server workspace, a registered non-Dolt backend and an embedded
+  repository beside the root all stay admitted (GH#6259).
 
 ### Added
 
