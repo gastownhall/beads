@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -493,6 +494,47 @@ func TestGitignoreModeIsLoose(t *testing.T) {
 		if got := gitignoreModeIsLoose(tt.goos, tt.perm); got != tt.want {
 			t.Errorf("gitignoreModeIsLoose(%q, %04o) = %v, want %v", tt.goos, tt.perm, got, tt.want)
 		}
+	}
+}
+
+// TestCheckGitignore_LooseOnlyForGroupOtherBits pins that CheckGitignore flags
+// a pattern-complete .beads/.gitignore only when group or other users have
+// access; a private mode stricter than 0600 is up to date (GH#6225).
+func TestCheckGitignore_LooseOnlyForGroupOtherBits(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Skipping file permissions test on Windows")
+	}
+
+	for _, mode := range []os.FileMode{0400, 0600, 0700, 0644, 0640, 0604, 0444} {
+		t.Run(fmt.Sprintf("%04o", mode), func(t *testing.T) {
+			tmpDir := t.TempDir()
+			beadsDir := filepath.Join(tmpDir, ".beads")
+			if err := os.Mkdir(beadsDir, 0750); err != nil {
+				t.Fatal(err)
+			}
+			gitignorePath := filepath.Join(beadsDir, ".gitignore")
+			if err := os.WriteFile(gitignorePath, []byte(GitignoreTemplate), 0600); err != nil {
+				t.Fatal(err)
+			}
+			// WriteFile's mode is filtered by umask; set the row's mode explicitly.
+			if err := os.Chmod(gitignorePath, mode); err != nil {
+				t.Fatal(err)
+			}
+
+			check := CheckGitignore(tmpDir)
+			if mode&0077 == 0 {
+				if check.Status != "ok" || check.Message != "Up to date" {
+					t.Errorf("mode %04o: got %q %q (%s), want ok %q", mode, check.Status, check.Message, check.Detail, "Up to date")
+				}
+				return
+			}
+			if check.Status != "warning" || check.Message != "Unexpected permissions on .beads/.gitignore" {
+				t.Errorf("mode %04o: got %q %q, want warning %q", mode, check.Status, check.Message, "Unexpected permissions on .beads/.gitignore")
+			}
+			if want := fmt.Sprintf("Mode is %04o, want 0600", mode); check.Detail != want {
+				t.Errorf("mode %04o: Detail = %q, want %q", mode, check.Detail, want)
+			}
+		})
 	}
 }
 
