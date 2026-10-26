@@ -192,16 +192,16 @@ func CheckGitignore(repoPath string) DoctorCheck {
 
 	// A pattern-complete file with loose permissions must still surface as a
 	// warning: doctor --fix only schedules FixGitignore for non-ok checks, so
-	// an ok here would leave the permission repair unreachable.
-	if runtime.GOOS != "windows" {
-		if info, err := os.Stat(gitignorePath); err == nil && info.Mode().Perm() != 0600 {
-			return DoctorCheck{
-				Name:    "Gitignore",
-				Status:  "warning",
-				Message: "Unexpected permissions on .beads/.gitignore",
-				Detail:  fmt.Sprintf("Mode is %04o, want 0600", info.Mode().Perm()),
-				Fix:     "Run: bd doctor --fix",
-			}
+	// an ok here would leave the permission repair unreachable. Only
+	// group/other bits are loose — a private mode stricter than 0600 (0400,
+	// 0700) stays ok — and Windows has no POSIX bits to tighten (#6225).
+	if info, err := os.Stat(gitignorePath); err == nil && gitignoreModeIsLoose(runtime.GOOS, info.Mode().Perm()) {
+		return DoctorCheck{
+			Name:    "Gitignore",
+			Status:  "warning",
+			Message: "Unexpected permissions on .beads/.gitignore",
+			Detail:  fmt.Sprintf("Mode is %04o, want 0600", info.Mode().Perm()),
+			Fix:     "Run: bd doctor --fix",
 		}
 	}
 

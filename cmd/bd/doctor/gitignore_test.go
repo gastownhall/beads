@@ -3146,3 +3146,64 @@ func TestCheckGitignore_WarnsOnLoosePermsWhenPatternComplete(t *testing.T) {
 		t.Fatalf("post-fix Status = %q, want ok", check.Status)
 	}
 }
+
+// TestGitignorePerms_CheckAndEnsureAgree walks every .beads/.gitignore mode
+// CheckGitignore and EnsureGitignoreForBeadsDir must agree on: a mode with
+// no group/other bits (0600, 0400, 0700) is private — the check reports ok
+// and the fix leaves the file byte-identical — while any group/other bit
+// (0644, 0640, 0604, 0444, 0666) is loose — the check warns so doctor --fix
+// schedules FixGitignore, which tightens the file to 0600 without touching
+// content (GH#6225).
+func TestGitignorePerms_CheckAndEnsureAgree(t *testing.T) {
+	// Skip on Windows as it doesn't support Unix-style file permissions
+	if runtime.GOOS == "windows" {
+		t.Skip("Skipping file permissions test on Windows")
+	}
+
+	tests := []struct {
+		name string
+		perm os.FileMode
+	}{
+		{name: "canonical 0600", perm: 0600},
+		{name: "private 0400", perm: 0400},
+		{name: "private 0700", perm: 0700},
+		{name: "loose 0644", perm: 0644},
+		{name: "loose 0640", perm: 0640},
+		{name: "loose 0604", perm: 0604},
+		{name: "loose 0444", perm: 0444},
+		{name: "loose 0666", perm: 0666},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			beadsDir := filepath.Join(tmpDir, ".beads")
+			if err := os.Mkdir(beadsDir, 0750); err != nil {
+				t.Fatal(err)
+			}
+			gitignorePath := filepath.Join(beadsDir, ".gitignore")
+			if err := os.WriteFile(gitignorePath, []byte(GitignoreTemplate), 0600); err != nil {
+				t.Fatal(err)
+			}
+			// WriteFile's mode is filtered by umask; force the row's mode
+			// explicitly so the scenario holds under restrictive umasks.
+			if err := os.Chmod(gitignorePath, tt.perm); err != nil {
+				t.Fatal(err)
+			}
+
+			wantLoose := tt.perm&0077 != 0
+			check := CheckGitignore(tmpDir)
+			if !wantLoose {
+				if check.Status != "ok" || check.Message != "Up to date" {
+					t.Errorf("CheckGitignore on pattern-complete %04o: status %q (%s: %s), want ok %q", tt.perm, check.Status, check.Message, check.Detail, "Up to date")
+				}
+			} else {
+				if check.Status != "warning" || check.Message != "Unexpected permissions on .beads/.gitignore" {
+					t.Errorf("CheckGitignore on pattern-complete %04o: status %q (%s: %s), want the permission-branch warning", tt.perm, check.Status, check.Message, check.Detail)
+				}
+				if want := fmt.Sprintf("Mode is %04o, want 0600", tt.perm); check.Detail != want {
+					t.Errorf("Detail = %q, want %q", check.Detail, want)
+				}
+			}
+		})
+	}
+}
