@@ -211,3 +211,73 @@ func TestDatabaseVersionWithBdVersion_ImportsJSONL(t *testing.T) {
 		t.Errorf("store has %d issues, want 2", len(stored))
 	}
 }
+
+// TestDatabaseVersionWithBdVersion_LeavesAServerDatabaseItFindsAsIs runs the
+// Database repair in a server-mode workspace with no .beads/dolt, as in every
+// fresh clone and on every other machine, whose database is on the server
+// with rows newer than the tracked issues.jsonl. The repair took the missing
+// directory for a missing database, and imported issues.jsonl over the live
+// rows: it rewrote a row to its tracked copy and brought back one deleted
+// since. A database the repair's open finds is left as it is: the repair
+// records the directory and the version, and imports nothing.
+func TestDatabaseVersionWithBdVersion_LeavesAServerDatabaseItFindsAsIs(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	beadsDir := setupTestBeadsDir(t, tmpDir)
+
+	store, err := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{CreateIfMissing: true})
+	if err != nil {
+		t.Fatalf("dolt.NewFromConfigWithOptions against running test container: %v", err)
+	}
+	if err := store.SetConfig(ctx, "issue_prefix", "mdp"); err != nil {
+		t.Fatal(err)
+	}
+	live := &types.Issue{ID: "mdp-1", Title: "live title", Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2}
+	if err := store.CreateIssue(ctx, live, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetLocalMetadata(ctx, "bd_version", "0.0.1"); err != nil {
+		t.Fatal(err)
+	}
+	_ = store.Close()
+
+	// The tracked snapshot: mdp-1 as it was, and mdp-2, deleted since.
+	writeTestJSONL(t, beadsDir, []types.Issue{
+		{ID: "mdp-1", Title: "tracked title", Status: "open", IssueType: "task", Priority: 2},
+		{ID: "mdp-2", Title: "deleted since", Status: "open", IssueType: "task", Priority: 2},
+	})
+	dbPath := filepath.Join(beadsDir, "dolt")
+	if err := os.RemoveAll(dbPath); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := DatabaseVersionWithBdVersion(tmpDir, "0.56.1"); err != nil {
+		t.Fatalf("DatabaseVersionWithBdVersion failed: %v", err)
+	}
+
+	store, err = dolt.NewFromConfig(ctx, beadsDir)
+	if err != nil {
+		t.Fatalf("failed to open store: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+	stored, err := store.SearchIssues(ctx, "", types.IssueFilter{})
+	if err != nil {
+		t.Fatalf("SearchIssues failed: %v", err)
+	}
+	var titles []string
+	for _, issue := range stored {
+		titles = append(titles, issue.ID+": "+issue.Title)
+	}
+	if len(stored) != 1 || stored[0].Title != "live title" {
+		t.Errorf("the Database repair imported issues.jsonl over the server's database: issues %q, want only \"mdp-1: live title\"", titles)
+	}
+	if v, err := store.GetLocalMetadata(ctx, "bd_version"); err != nil || v != "0.56.1" {
+		t.Errorf("bd_version = %q (%v), want the repair to record 0.56.1", v, err)
+	}
+	if info, err := os.Stat(dbPath); err != nil || !info.IsDir() {
+		t.Errorf("the repair did not record the local database directory %s: %v", dbPath, err)
+	}
+}

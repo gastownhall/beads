@@ -1025,6 +1025,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   quietly when its endpoint is an ID, but an endpoint named by URL reached
   the database's not-found error and was reported as a failure. A lookup
   that fails for another reason is still reported.
+- **`bd doctor --fix` no longer imports the tracked `issues.jsonl` over a
+  server database.** Its Database repair took a missing `.beads/dolt`
+  directory for a missing database. A server-mode workspace has no such
+  directory in a fresh clone or on another machine. So whenever `bd doctor`
+  reported a Database problem it repairs there, such as a database last
+  stamped by another bd version, the repair opened the server's existing
+  database and imported `.beads/issues.jsonl` into it. That rewrote the
+  database's rows to the tracked copy and recreated issues deleted since.
+  The repair now imports only into a database its own open created. A
+  database already on the server gets the local directory and its metadata
+  update, and nothing is imported. The Schema Compatibility repair runs the
+  same code and is fixed too.
+
 - **`bd export` and auto-export no longer write JSONL with relations silently
   dropped** (GH#6870). When a label, dependency, comment or count read fails,
   `bd export` now exits non-zero and leaves the output file untouched, and

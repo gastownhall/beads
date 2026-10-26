@@ -377,6 +377,10 @@ type DoltStore struct {
 	// auto-start. Close() uses it to stop the server when the last store
 	// referencing it is closed (tracked via autoStartRefs).
 	autoStartedServerDir string
+
+	// createdDatabase reports whether this store's open created its database
+	// (serverConnFacts.created); see CreatedDatabase.
+	createdDatabase bool
 }
 
 // Config holds Dolt database configuration
@@ -2329,6 +2333,7 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		readOnly:               cfg.ReadOnly,
 		classifiedRead:         cfg.ClassifiedRead,
 		autoStartedServerDir:   autoStartedDir,
+		createdDatabase:        dbFacts.created,
 	}
 
 	// Forward-drift guard runs on read-only AND writable opens. A binary older
@@ -3686,6 +3691,19 @@ func (s *DoltStore) Path() string {
 // migrations into its history (bd-6dnrw.32, GH#3231).
 func (s *DoltStore) IsReadOnly() bool {
 	return s.readOnly
+}
+
+// CreatedDatabase reports whether opening this store created its database
+// on the server: its bare CREATE DATABASE won the server's arbitration
+// (serverConnFacts.created), so the database holds nothing bd did not just
+// put there. It is false for every open that found the database on the
+// server, by connecting to it, by SHOW DATABASES, or by losing the CREATE
+// DATABASE race to another open, and for a gateway server, on which bd never
+// creates a database. bd doctor --fix's Database repair imports issues.jsonl
+// only into a database its own open created, never into one a local
+// directory's absence merely suggested was missing.
+func (s *DoltStore) CreatedDatabase() bool {
+	return s.createdDatabase
 }
 
 // CLIDir returns the directory for dolt CLI operations (push/pull/remote/fetch).
