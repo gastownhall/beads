@@ -4060,3 +4060,36 @@ func TestIsRunningKeepsStateWhenProcessListUnreadable(t *testing.T) {
 		}
 	}
 }
+
+// TestIsRunningRemovesStateWhenPIDIsNotDolt pins the other half of the
+// tri-state contract: a process list that was read and does not contain the
+// PID still proves the PID was reused, and the state files must go.
+func TestIsRunningRemovesStateWhenPIDIsNotDolt(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("GT_ROOT", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+
+	// This test process is alive but is not a dolt sql-server.
+	if err := os.WriteFile(pidPath(dir), []byte(strconv.Itoa(os.Getpid())), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writePortFile(dir, 14567); err != nil {
+		t.Fatal(err)
+	}
+	orig := readDoltProcesses
+	readDoltProcesses = func() ([]int, error) { return nil, nil } // read fine, no dolt processes
+	t.Cleanup(func() { readDoltProcesses = orig })
+
+	state, err := IsRunning(dir)
+	if err != nil {
+		t.Fatalf("IsRunning error: %v", err)
+	}
+	if state.Running {
+		t.Error("expected Running=false for a PID that is not a dolt server")
+	}
+	for _, path := range []string{pidPath(dir), portPath(dir)} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("expected %s to be removed", filepath.Base(path))
+		}
+	}
+}
