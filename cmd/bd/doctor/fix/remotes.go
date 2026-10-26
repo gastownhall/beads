@@ -13,6 +13,37 @@ import (
 	"github.com/steveyegge/beads/internal/storage/issueops"
 )
 
+// fixDBDSN builds the MySQL-protocol DSN for a fix-path connection: every
+// doctor --fix repair, plus the read-only checks that delegate into
+// openFixDB (Clone-Local FKs, Cross-Table Duplicates). Split out of
+// openFixDB so the port/password pairing is unit-testable without a live
+// server.
+func fixDBDSN(beadsDir string, cfg *configfile.Config) string {
+	host := cfg.GetDoltServerHost()
+	user := cfg.GetDoltServerUser()
+	database := cfg.GetDoltDatabase()
+	port := doltserver.DefaultConfig(beadsDir).Port
+
+	// Resolve the password against the SAME port the DSN dials. The
+	// credentials file is keyed [host:port]; the deprecated
+	// cfg.GetDoltServerPassword() keys the lookup on the config port
+	// (DefaultDoltServerPort 3307 when metadata.json omits dolt_server_port)
+	// and so misses the section in shared-server mode (3308), yielding an
+	// empty password and an auth failure on every call. The store path and
+	// doctor/dolt.go already pair the lookup with the resolved port; see
+	// resolveDoltServerConnection in cmd/bd/main.go. Related: #5573.
+	password := cfg.GetDoltServerPasswordForPort(port)
+
+	return doltutil.ServerDSN{
+		Host:     host,
+		Port:     port,
+		User:     user,
+		Password: password,
+		Database: database,
+		TLS:      cfg.GetDoltServerTLS(),
+	}.String()
+}
+
 // openFixDB opens the workspace database for a bd doctor --fix repair.
 //
 // It deliberately does not check the server against
@@ -21,21 +52,7 @@ import (
 // minimum can still diagnose and repair the workspace before upgrading. bd
 // doctor --server reports the floor as its "Dolt Version" check.
 func openFixDB(beadsDir string, cfg *configfile.Config) (*sql.DB, error) {
-	host := cfg.GetDoltServerHost()
-	user := cfg.GetDoltServerUser()
-	database := cfg.GetDoltDatabase()
-	password := cfg.GetDoltServerPassword()
-	port := doltserver.DefaultConfig(beadsDir).Port
-
-	connStr := doltutil.ServerDSN{
-		Host:     host,
-		Port:     port,
-		User:     user,
-		Password: password,
-		Database: database,
-		TLS:      cfg.GetDoltServerTLS(),
-	}.String()
-	return sql.Open("mysql", connStr)
+	return sql.Open("mysql", fixDBDSN(beadsDir, cfg))
 }
 
 // errUnverifiableFixTarget marks a verifyFixTargetIdentity failure that is
