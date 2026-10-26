@@ -218,7 +218,8 @@ func (c *Cache) doltClone(ctx context.Context, remoteURL, target string) error {
 // holds a cache entry, so the binary's own engine runs the transfer, and a
 // pull's merge, there. It applies the same policy as
 // doltserver.RequireDoltBinaryVersion, which this package cannot call
-// (doltserver imports remotecache): a version that cannot be determined, or
+// (doltserver imports internal/storage/doltutil, which imports
+// remotecache): a version that cannot be determined, or
 // a probe that fails, is not refused, and the dolt command that follows
 // reports a missing or broken binary in its own words.
 func requireDoltCLIVersion(ctx context.Context, doltBin string) error {
