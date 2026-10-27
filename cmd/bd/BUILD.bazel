@@ -807,6 +807,7 @@ go_test(
         "export_auto_missing_store_test.go",
         "export_auto_test.go",
         "export_auto_wedge_heal_test.go",
+        "export_clone_local_test.go",
         "export_embedded_test.go",
         "export_exclude_owner_test.go",
         "export_max_rows_gate_test.go",

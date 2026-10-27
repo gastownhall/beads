@@ -424,6 +424,19 @@ var roleContractCases = []roleContract{
 		RunJournalLimitCapsRowsNotHead,
 		RunJournalTruncationIsTypedAndNamesTheWindow,
 		RunJournalHeadSurvivesAFullPrune,
+		// The arrival_seq cases (journal_arrival_contract.go). They rebaseline
+		// like every case here, and one of them prunes; they run before
+		// EveryMutationKindLandsARow, which stays LAST for the reason its own
+		// doc states.
+		RunJournalArrivalStampsAWispCreateWithItsRecordSeq,
+		RunJournalArrivalOrdersABatchByItem,
+		RunJournalArrivalIsOnEveryReadPath,
+		RunJournalArrivalNeverChanges,
+		RunJournalArrivalOnlyWhileJournaling,
+		RunJournalArrivalOnlyOnTheWispPlane,
+		RunJournalArrivalRecoversCreateOrderAfterTruncation,
+		RunJournalArrivalIsNeverReused,
+		RunJournalArrivalIgnoresSuppliedValues,
 		RunJournalEveryMutationKindLandsARow,
 	),
 

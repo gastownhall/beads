@@ -195,6 +195,22 @@ const CapListIDs = "issues.list.ids"
 // token, against a server that does not advertise it.
 const CapDependenciesBlockingIsBlocked = "dependencies.blocking.isBlocked"
 
+// CapIssuesArrivalSeq is the behavior capability announcing `arrival_seq` on
+// every Issue-shaped response: the commit-ordered create sequence storage
+// stamps on a wisp-plane row (types.Issue.ArrivalSeq) — the events-journal seq
+// of the row's create record, kept on the row so a consumer can recover create
+// order after those records are pruned. It names a MEMBER added to existing
+// response schemas, so it rides behaviorCapabilities: a client that sees it
+// knows an absent member means the row carries no stamp, not that the server
+// predates the member.
+//
+// It is BUILD-LEVEL, like every other behavior token: it says this server
+// knows the member, not that rows are being stamped right now. Rows are
+// stamped only while the workspace journals. A client learns that the way it
+// learns journal activation for any purpose: events.list answers 409
+// events_journal_disabled when the journal is off.
+const CapIssuesArrivalSeq = "issues.arrivalSeq"
+
 // CapIssuesSweepWispsPlane is the behavior capability that advertises the
 // `wisps-plane` value of SweepRequest.tier (sweep.go, spec SweepRequest.tier):
 // a third, wider tier that clears the whole wisps table plus any durable bead
@@ -1134,6 +1150,7 @@ var behaviorCapabilities = []string{
 	CapIssuesCloseAutoCloseMolecule, CapIssuesListSearch,
 	CapIssuesListNoAssignee, CapIssuesListTitle, CapListIDs, CapIssuesUpdatePersistence, CapDependenciesBlockingIsBlocked, CapIssuesUpdateClaim,
 	CapIssuesCreateGates, CapIssuesUpdateGates, CapIssuesListFilters,
+	CapIssuesArrivalSeq,
 }
 
 // Capabilities lists what this build advertises in ContextResponse.capabilities:

@@ -860,7 +860,7 @@ func TestCapabilitiesAdvertiseEveryImplementedOperation(t *testing.T) {
 		"issues.batchApply.depAddLineage", "issues.update.allowTemplate", "issues.create.defaultPriority",
 		"issues.close.autoCloseMolecule", "issues.list.search",
 		"issues.list.noAssignee", "issues.list.title", "issues.list.ids", "issues.update.persistence", "dependencies.blocking.isBlocked", "issues.update.claim",
-		"issues.create.gates", "issues.update.gates", "issues.list.filters")
+		"issues.create.gates", "issues.update.gates", "issues.list.filters", "issues.arrivalSeq")
 	slices.Sort(want)
 	if !slices.Equal(got, want) {
 		t.Errorf("capabilities = %v, want %v", got, want)

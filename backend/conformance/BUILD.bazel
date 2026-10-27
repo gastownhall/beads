@@ -38,6 +38,7 @@ go_library(
         "importer_contract.go",
         "issue_operations_contract.go",
         "issue_operations_staging.go",
+        "journal_arrival_contract.go",
         "journal_contract.go",
         "lease_reclaimer_contract.go",
         "lifecycle_close_reopen_contract.go",

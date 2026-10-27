@@ -110,7 +110,7 @@ type Issue struct {
 	// reused, never changed while the row stays on the wisp plane, and never
 	// client-settable: create, update and import all ignore a supplied value,
 	// and bd export never writes it.
-	ArrivalSeq int64 `json:"-"`
+	ArrivalSeq int64 `json:"arrival_seq,omitempty"`
 
 	// ===== Time-Based Scheduling (GH#820) =====
 	DueAt      *time.Time `json:"due_at,omitempty"`      // When this issue should be completed

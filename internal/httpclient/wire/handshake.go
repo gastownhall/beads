@@ -208,6 +208,13 @@ const CapListFilters = "issues.list.filters"
 // server that would answer `unknown_parameter`.
 const CapBlockingIsBlocked = "dependencies.blocking.isBlocked"
 
+// CapArrivalSeq is the behavior capability announcing `arrival_seq` on every
+// Issue-shaped response (types.Issue.ArrivalSeq), spelled exactly as httpapi's
+// CapIssuesArrivalSeq. It is build-level: whether rows are actually being
+// stamped follows the workspace's journal activation, which events.list's 409
+// events_journal_disabled reports.
+const CapArrivalSeq = "issues.arrivalSeq"
+
 // CapBatchApplyLarge is the behavior capability announcing that issues.batchApply
 // accepts a batch larger than the compiled-in floor (100 items), up to the
 // raised ceiling (1000), spelled exactly as httpapi's constant of the same name
@@ -470,6 +477,7 @@ var behaviorCapabilities = []string{
 	CapCloseAutoCloseMolecule, CapListSearch,
 	CapListNoAssignee, CapListTitle, CapListIDs, CapIssuesUpdatePersistence, CapBlockingIsBlocked, CapIssuesUpdateClaim,
 	CapIssuesCreateGates, CapIssuesUpdateGates, CapListFilters,
+	CapArrivalSeq,
 }
 
 // CapabilityFor reports the capability token gating op, and whether op is on

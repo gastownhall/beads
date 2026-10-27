@@ -787,6 +787,7 @@ func exportToFile(ctx context.Context, path string, includeMemories bool) (issue
 				counts = &types.DependencyCounts{}
 			}
 			sanitizeZeroTime(issue)
+			stripCloneLocalFields(issue)
 			record := &exportIssueRecord{
 				RecordType: "issue",
 				IssueWithCounts: &types.IssueWithCounts{
@@ -1541,6 +1542,7 @@ func encodeIssueRecords(ctx context.Context, issues []*types.Issue) (map[string]
 			counts = &types.DependencyCounts{}
 		}
 		sanitizeZeroTime(iss)
+		stripCloneLocalFields(iss)
 		rec := &exportIssueRecord{
 			RecordType: "issue",
 			IssueWithCounts: &types.IssueWithCounts{

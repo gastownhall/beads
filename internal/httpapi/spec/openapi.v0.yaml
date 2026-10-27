@@ -7781,6 +7781,26 @@ components:
             The record's history/replication contract. Empty means unset, which
             resolves to ephemeral for wisp-plane records and versioned
             otherwise.
+        arrival_seq:
+          type: integer
+          format: int64
+          description: >-
+            The row's commit-ordered create sequence: the events-journal `seq`
+            of the `create` record written by the transaction that inserted
+            the row, stamped on the row in that same transaction
+            (`issues.arrivalSeq`). Sorting rows by it reproduces the order
+            their creates committed in, also after those journal records are
+            pruned; read it from the row or a journal post-image, never infer
+            it from a record's `seq` (a rename or an import upsert journals a
+            synthetic create for a row that already exists). Only wisp-plane
+            records (ephemeral or no_history) carry one: a record created while
+            the workspace journals is stamped by its own insert, and one
+            created while it did not is stamped by the first create record
+            journaled for it later, so it sorts by that commit rather than its
+            insert's. Absent means none. Values are local to the
+            workspace that assigned them — unique, never reused, never changed
+            while the record stays on the wisp plane, never written to JSONL
+            interchange, and never settable by a client.
         pinned:
           type: boolean
         is_template:
@@ -7990,6 +8010,10 @@ components:
             The record's history/replication contract. Empty means unset, which
             resolves to ephemeral for wisp-plane records and versioned
             otherwise.
+        arrival_seq:
+          type: integer
+          format: int64
+          description: As on Issue.
         pinned:
           type: boolean
         is_template:
@@ -8112,6 +8136,7 @@ components:
         no_history: { type: boolean }
         wisp_type: { type: string }
         storage_class: { type: string }
+        arrival_seq: { type: integer, format: int64 }
         pinned: { type: boolean }
         is_template: { type: boolean }
         bonded_from:
@@ -8211,6 +8236,7 @@ components:
         no_history: { type: boolean }
         wisp_type: { type: string }
         storage_class: { type: string }
+        arrival_seq: { type: integer, format: int64 }
         pinned: { type: boolean }
         is_template: { type: boolean }
         bonded_from:
@@ -8456,6 +8482,7 @@ components:
         no_history: { type: boolean }
         wisp_type: { type: string }
         storage_class: { type: string }
+        arrival_seq: { type: integer, format: int64 }
         pinned: { type: boolean }
         is_template: { type: boolean }
         bonded_from:
@@ -8542,6 +8569,7 @@ components:
         no_history: { type: boolean }
         wisp_type: { type: string }
         storage_class: { type: string }
+        arrival_seq: { type: integer, format: int64 }
         pinned: { type: boolean }
         is_template: { type: boolean }
         bonded_from:
@@ -9132,7 +9160,13 @@ components:
             no-labels, no-parent, exclude-type, exclude-status, pinned,
             no-pinned, deferred, overdue, mol-type and wisp-type filters;
             see those parameters) rather than answering
-            `unknown_parameter`. One behavior token is
+            `unknown_parameter`, and `issues.arrivalSeq`, which announces that
+            every Issue-shaped schema carries `arrival_seq`, the
+            commit-ordered create sequence storage stamps on a wisp-plane
+            record (see `Issue.arrival_seq`; build-level like the others —
+            records are stamped only while the workspace journals, which
+            `GET /v0/beads/events` reports by answering `409
+            events_journal_disabled` when it does not). One behavior token is
             CONDITIONAL rather than build-level: `policy.external_dependencies`
             announces that this server's ready, blocked-listing, claim,
             claim-next, close, blocking and dependency-tree operations already
@@ -10092,6 +10126,7 @@ components:
         no_history: { type: boolean }
         wisp_type: { type: string }
         storage_class: { type: string }
+        arrival_seq: { type: integer, format: int64 }
         pinned: { type: boolean }
         is_template: { type: boolean }
         bonded_from:
@@ -10269,7 +10304,9 @@ components:
           nullable: true
           description: >-
             The full issue state after the mutation — the same object shape
-            `Issue` describes — or `null` on a delete. Always present.
+            `Issue` describes — or `null` on a delete. Always present. A
+            post-image of a wisp-plane record carries its `arrival_seq`, and
+            the `create` record that stamped it has `seq` equal to it.
         dep:
           type: object
           description: >-
