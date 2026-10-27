@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -723,6 +724,79 @@ func TestEmbeddedShowConcurrent(t *testing.T) {
 		}
 	})
 
+	t.Run("WatchParentTreeWithConcurrentCommandsAndLiveRedraw", func(t *testing.T) {
+		// A three-level graph, epic + 6 + 18 + 96 = 120 descendants. The
+		// size is the point: a pre-fix refresh's per-node engine opens run
+		// longer than the poll interval, so the ticker refires the instant
+		// one returns and the embedded flock never idles — a concurrent
+		// command spends its whole driver budget waiting (GH#3415). The
+		// post-fix walk holds one read for a few seconds and then ALWAYS
+		// waits the full interval, so a concurrent command only ever queues
+		// behind one walk.
+		var plan strings.Builder
+		plan.WriteString(`{"nodes":[{"key":"epic","title":"GH3415 epic","type":"epic"}`)
+		addNode := func(key, parent string) {
+			fmt.Fprintf(&plan, `,{"key":%q,"title":"GH3415 %s","type":"task","parent_key":%q}`, key, key, parent)
+		}
+		for i := 0; i < 6; i++ {
+			addNode(fmt.Sprintf("l1-%d", i), "epic")
+		}
+		for i := 0; i < 18; i++ {
+			addNode(fmt.Sprintf("l2-%d", i), fmt.Sprintf("l1-%d", i%6))
+		}
+		for i := 0; i < 96; i++ {
+			addNode(fmt.Sprintf("l3-%d", i), fmt.Sprintf("l2-%d", i%18))
+		}
+		plan.WriteString(`]}`)
+		planFile := filepath.Join(t.TempDir(), "gh3415-plan.json")
+		if err := os.WriteFile(planFile, []byte(plan.String()), 0o600); err != nil {
+			t.Fatalf("write graph plan: %v", err)
+		}
+		graph := bdCreateGraph(t, bd, dir, planFile)
+		epic := graph.IDs["epic"]
+		updateTarget := graph.IDs["l3-0"]
+		newTitle := "GH3415 renamed by watcher test"
+
+		// --limit above the tree size, so the renamed leaf is on the
+		// rendered page and a redraw must show its new title.
+		watcher := startBdListWatch(t, bd, dir, "--parent", epic, "--limit", "1000")
+		time.Sleep(1500 * time.Millisecond)
+
+		// Show a leaf child, not the epic: `bd show <epic> --json` gathers the
+		// whole 449-node subtree and is connection-heavy on its own account,
+		// which is not what the AC pins — an ordinary command must complete
+		// next to the watch, and a child of the watched tree is that command.
+		if err := bdRunWithTimeout(t, bd, dir, 30*time.Second, "show", graph.IDs["l3-1"], "--json"); err != nil {
+			stopErr := stopBdListWatch(t, watcher, 30*time.Second)
+			t.Fatalf("concurrent bd show --json under a --parent watch: %v\nwatcher stop: %v\nwatcher stderr:\n%s", err, stopErr, watcher.stderr.text())
+		}
+		if err := bdRunWithTimeout(t, bd, dir, 30*time.Second, "list", "--json", "--limit", "20"); err != nil {
+			stopErr := stopBdListWatch(t, watcher, 30*time.Second)
+			t.Fatalf("concurrent bd list --json under a --parent watch: %v\nwatcher stop: %v\nwatcher stderr:\n%s", err, stopErr, watcher.stderr.text())
+		}
+		if err := bdRunWithTimeout(t, bd, dir, 30*time.Second, "update", updateTarget, "--title", newTitle); err != nil {
+			stopErr := stopBdListWatch(t, watcher, 30*time.Second)
+			t.Fatalf("concurrent bd update under a --parent watch: %v\nwatcher stop: %v\nwatcher stderr:\n%s", err, stopErr, watcher.stderr.text())
+		}
+
+		// The watcher's next refresh redraws the tree with the new title.
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) && !strings.Contains(watcher.stdout.text(), newTitle) {
+			time.Sleep(250 * time.Millisecond)
+		}
+		if !strings.Contains(watcher.stdout.text(), newTitle) {
+			stopErr := stopBdListWatch(t, watcher, 30*time.Second)
+			t.Fatalf("watcher stdout never showed %q within 10s of the update\nwatcher stop: %v\nwatcher stderr:\n%s", newTitle, stopErr, watcher.stderr.text())
+		}
+
+		// The AC pins the concurrent commands' deadlines and the live redraw,
+		// not the stop's exit status: a --parent refresh runs for whole
+		// seconds, so the interrupt can land mid-refresh, and how the loop
+		// unwinds from there is its own contract. Collect but do not fail.
+		if err := stopBdListWatch(t, watcher, 30*time.Second); err != nil {
+			t.Logf("watcher stop after --parent watch: %v\nwatcher stderr:\n%s", err, watcher.stderr.text())
+		}
+	})
 }
 
 // watchOutput is a live view of one bd watch subprocess stream: lines
