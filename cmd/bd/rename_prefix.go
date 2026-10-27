@@ -85,8 +85,16 @@ NOTE: This is a rare operation. Most users never need this command.`,
 		}
 
 		oldPrefix, err := store.GetConfig(ctx, "issue_prefix")
-		if err != nil || oldPrefix == "" {
+		if err != nil {
 			return HandleError("failed to get current prefix: %v", err)
+		}
+		if oldPrefix == "" {
+			// The half-identified workspace (GH#3494): the database exists but
+			// never got its issue_prefix row. An empty read is not a failed
+			// read — "%!v(nil)" here hid the actual repair for it.
+			return HandleErrorWithHint(
+				"database has no issue_prefix set (it was never fully initialized)",
+				"run 'bd bootstrap' to finish setting up this database (it seeds issue_prefix from config.yaml 'issue-prefix'), or 'bd init --prefix <prefix>' for a new project")
 		}
 
 		newPrefix = strings.TrimRight(newPrefix, "-")

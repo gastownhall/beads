@@ -226,3 +226,36 @@ func TestEmbeddedRenamePrefixConcurrent(t *testing.T) {
 		}
 	}
 }
+
+// TestEmbeddedRenamePrefixWithoutPrefixNamesBootstrap pins the GH#3494
+// diagnostic on the half-identified workspace: the database exists but its
+// issue_prefix row was never seeded, so `bd rename-prefix <new> --dry-run`
+// must say the database has no issue_prefix set and name bd bootstrap —
+// not the base's "failed to get current prefix: <nil>", which prints the
+// (nil) error verb and hides the repair.
+func TestEmbeddedRenamePrefixWithoutPrefixNamesBootstrap(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "np")
+	dropEmbeddedIssuePrefixRow(t, bd, dir)
+
+	out := bdRenamePrefixFail(t, bd, dir, "la-", "--dry-run")
+	for _, want := range []string{
+		"database has no issue_prefix set",
+		"bd bootstrap",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("bd rename-prefix failure missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "failed to get current prefix") {
+		t.Errorf("bd rename-prefix must not fold the empty read into a failed read:\n%s", out)
+	}
+	if strings.Contains(out, "<nil>") {
+		t.Errorf("bd rename-prefix must not print the nil error verb:\n%s", out)
+	}
+}
