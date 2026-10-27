@@ -1509,6 +1509,18 @@ var rootCmd = &cobra.Command{
 			skipsStoreInit = true
 		}
 
+		// A `config get` whose key lives in config.yaml, git config or the
+		// user-global config never reads the store, so it must not open one
+		// just because a database exists. In server mode FindDatabasePath
+		// answers from metadata.json alone, and the store path below writes
+		// .local_version, can auto-migrate and auto-start, and refuses outright
+		// when the server is down (GH#5108). configCommandCanRunWithoutStore is
+		// otherwise consulted only on the no-database branch. Match the command
+		// path, not the leaf name.
+		if commandRegistryPath(cmd) == "config get" && configCommandCanRunWithoutStore(cmd, args) {
+			skipsStoreInit = true
+		}
+
 		// One-time friendly heads-up about anonymous usage metrics. Placed after
 		// the config-derived json/quiet rebind and command classification above so
 		// it can read the real output mode and command identity — that is how it
