@@ -745,6 +745,14 @@ func (s *DoltStore) shouldUseCLIForCredentialsWithError(ctx context.Context, rem
 	return s.prepareCLIRouteForCredentials(ctx, remote, creds)
 }
 
+// shouldUseCLIForLocalRemoteWithError reports whether the SQL route should
+// hand the named remote's push/pull to the dolt CLI because the remote's URL
+// matches a CLI-database remote. The route adds bd's local pre-push fsck
+// (prePushFSCK) but does NOT move the push off bd's sql-server: when the
+// server holds the database, `dolt push` forwards `call dolt_push(...)`
+// to it, so a remote-side "Found dangling references" refusal (GH#3358) is
+// reached identically on both routes. Do not reach for more CLI routing to
+// fix GH#3358; classify the refusal instead (dberrors.IsRemoteDanglingReference).
 func (s *DoltStore) shouldUseCLIForLocalRemoteWithError(ctx context.Context, remote string) (bool, error) {
 	if !s.serverMode {
 		return false, nil
