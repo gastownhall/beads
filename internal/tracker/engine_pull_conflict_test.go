@@ -84,6 +84,10 @@ func TestEnginePullOnlyConflictStrategy(t *testing.T) {
 		{"external newer", ConflictExternal, 20 * time.Minute, types.StatusInProgress, "keeping external version"},
 		{"external older than local edit", ConflictExternal, 5 * time.Minute, types.StatusInProgress, "keeping external version"},
 		{"local", ConflictLocal, 20 * time.Minute, types.StatusOpen, "keeping local version"},
+		{"timestamp external newer", ConflictTimestamp, 20 * time.Minute, types.StatusInProgress, "external is newer, importing"},
+		{"unset external newer", "", 20 * time.Minute, types.StatusInProgress, "external is newer, importing"},
+		{"timestamp local newer", ConflictTimestamp, 5 * time.Minute, types.StatusOpen, "local is newer, keeping local version"},
+		{"timestamp tie", ConflictTimestamp, 10 * time.Minute, types.StatusInProgress, "external is newer, importing"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			f := newPullConflictFixture(pullConflictLastSync.Add(test.remote))
@@ -130,4 +134,18 @@ func TestEnginePullOnlyConflictStrategy(t *testing.T) {
 			t.Errorf("conflict messages = %q, want one keeping external version", msgs)
 		}
 	})
+}
+
+// TestEnginePullOnlySelectiveConflict covers `bd <tracker> pull <id>`, which
+// fetches each issue with FetchIssue and passes no conflict strategy.
+func TestEnginePullOnlySelectiveConflict(t *testing.T) {
+	f := newPullConflictFixture(pullConflictLastSync.Add(20 * time.Minute))
+
+	result, err := f.engine.Sync(context.Background(), SyncOptions{Pull: true, IssueIDs: []string{"EXT-1"}})
+	if err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if f.local.Status != types.StatusInProgress || result.PullStats.Updated != 1 || result.PullStats.Conflicts != 1 {
+		t.Errorf("status=%q PullStats=%+v, want in_progress with Updated=1 Conflicts=1", f.local.Status, result.PullStats)
+	}
 }

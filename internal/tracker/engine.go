@@ -480,16 +480,21 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 					continue
 				}
 				stats.Conflicts++
-				if opts.ConflictResolution == ConflictLocal {
+				externalWins := externalWinsConflict(opts.ConflictResolution, existing.UpdatedAt, extIssue.UpdatedAt)
+				switch {
+				case opts.ConflictResolution == ConflictLocal:
 					e.msg("Conflict on %s: keeping local version", existing.ID)
+				case opts.ConflictResolution == ConflictExternal:
+					e.msg("Conflict on %s: keeping external version", existing.ID)
+				case externalWins:
+					e.msg("Conflict on %s: external is newer, importing", existing.ID)
+				default:
+					e.msg("Conflict on %s: local is newer, keeping local version", existing.ID)
+				}
+				if !externalWins {
 					stats.Skipped++
 					continue
 				}
-				if opts.ConflictResolution != ConflictExternal {
-					stats.Skipped++
-					continue
-				}
-				e.msg("Conflict on %s: keeping external version", existing.ID)
 			}
 		}
 
@@ -1433,6 +1438,19 @@ func (e *Engine) renderBatchDryRun(issues []*types.Issue, result *BatchPushResul
 	}
 }
 
+// externalWinsConflict reports whether strategy resolves a conflict (both
+// sides changed since the last sync) in favor of the external version.
+func externalWinsConflict(strategy ConflictResolution, localUpdated, externalUpdated time.Time) bool {
+	switch strategy {
+	case ConflictLocal:
+		return false
+	case ConflictExternal:
+		return true
+	default: // ConflictTimestamp or unset: newer wins, a tie goes to external
+		return !localUpdated.After(externalUpdated)
+	}
+}
+
 // resolveConflicts applies the configured conflict resolution strategy.
 func (e *Engine) resolveConflicts(opts SyncOptions, conflicts []Conflict, skipIDs, forceIDs, allowPullOverwriteIDs map[string]bool) {
 	for _, c := range conflicts {
@@ -1447,7 +1465,7 @@ func (e *Engine) resolveConflicts(opts SyncOptions, conflicts []Conflict, skipID
 			e.msg("Conflict on %s: keeping external version", c.IssueID)
 
 		default: // ConflictTimestamp or unset
-			if c.LocalUpdated.After(c.ExternalUpdated) {
+			if !externalWinsConflict(opts.ConflictResolution, c.LocalUpdated, c.ExternalUpdated) {
 				forceIDs[c.IssueID] = true
 				e.msg("Conflict on %s: local is newer, pushing", c.IssueID)
 			} else {
