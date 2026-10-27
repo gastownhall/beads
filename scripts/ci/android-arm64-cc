@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# android-arm64-cc - CC for the bd-android-arm64 goreleaser build (#3538).
+# cgo runs $CC from the directory of the package it is compiling, so
+# .goreleaser.yml sets CC to this script through an absolute
+# {{ .Env.PWD }}/scripts/ci/android-arm64-cc path; a repo-relative path
+# would miss every package but the root.
+#
+# Resolves the pinned Android NDK r30 (API 21) aarch64 clang:
+#   - BEADS_ANDROID_NDK_HOME, when its aarch64-linux-android21-clang is
+#     executable (scripts/ci/install-android-ndk.sh prints that root), else
+#   - scripts/ci/install-android-ndk.sh, which downloads the pinned NDK.
+# ANDROID_NDK_HOME is never read: runner images default it to NDK 27, whose
+# linker emits 4 KB ELF alignment -- a binary Android 15 devices with 16 KB
+# pages cannot load (scripts/verify-android-elf.sh enforces >= 0x4000).
+# The NDK prebuilt tree this resolves is linux-x86_64 only, so any other
+# host fails here, up front, instead of deep inside a cgo compile.
+set -euo pipefail
+
+clang_name=aarch64-linux-android21-clang
+if [[ "${BEADS_ANDROID_NDK_CXX:-}" == 1 ]]; then
+  clang_name=aarch64-linux-android21-clang++
+fi
+prebuilt=toolchains/llvm/prebuilt/linux-x86_64/bin
+
+os="$(uname -s)"
+arch="$(uname -m)"
+if [[ "$os" != Linux || "$arch" != x86_64 ]]; then
+  printf 'bd-android-arm64: the android CGO build is Linux x86_64 only (uname reports %s %s); the pinned NDK ships no toolchain for this host.\n' "$os" "$arch" >&2
+  exit 1
+fi
+
+clang=""
+if [[ -n "${BEADS_ANDROID_NDK_HOME:-}" ]]; then
+  candidate="${BEADS_ANDROID_NDK_HOME}/${prebuilt}/${clang_name}"
+  if [[ -x "$candidate" ]]; then
+    clang="$candidate"
+  fi
+fi
+
+if [[ -z "$clang" ]]; then
+  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  dest="${RUNNER_TEMP:-${HOME:-/tmp}/.cache/beads-ndk}"
+  line="$("$here/install-android-ndk.sh" "$dest")"
+  case "$line" in
+    BEADS_ANDROID_NDK_HOME=*)
+      if [[ "$line" == *$'\n'* ]]; then
+        printf 'bd-android-arm64: install-android-ndk.sh printed more than BEADS_ANDROID_NDK_HOME=<root>:\n%s\n' "$line" >&2
+        exit 1
+      fi
+      clang="${line#BEADS_ANDROID_NDK_HOME=}/${prebuilt}/${clang_name}"
+      ;;
+    *)
+      printf 'bd-android-arm64: install-android-ndk.sh did not print BEADS_ANDROID_NDK_HOME=<root>:\n%s\n' "$line" >&2
+      exit 1
+      ;;
+  esac
+fi
+
+if [[ ! -x "$clang" ]]; then
+  printf 'bd-android-arm64: NDK %s is not executable at %s\n' "$clang_name" "$clang" >&2
+  exit 1
+fi
+
+exec "$clang" "$@"

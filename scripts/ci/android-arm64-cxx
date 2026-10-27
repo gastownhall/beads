@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# android-arm64-cxx - CXX twin of android-arm64-cc: execs the NDK's
+# aarch64-linux-android21-clang++ (same pinned-NDK resolution, host check
+# and ANDROID_NDK_HOME refusal; see android-arm64-cc) so a C++ cgo
+# dependency cannot fall back to the host g++ and link glibc into the
+# android binary. Kept as a delegating one-liner so the resolution logic
+# lives in exactly one place.
+set -euo pipefail
+
+BEADS_ANDROID_NDK_CXX=1 exec "$(dirname "${BASH_SOURCE[0]}")/android-arm64-cc" "$@"
