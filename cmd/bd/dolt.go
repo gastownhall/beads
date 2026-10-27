@@ -694,6 +694,8 @@ The remote must already exist (see 'bd dolt remote add').`,
 					printAncestorPKMismatchGuidance(err)
 				} else if isDivergedHistoryErr(err) {
 					printDivergedHistoryGuidance("push --force")
+				} else if isRemoteDanglingReferenceErr(err) {
+					printRemoteDanglingReferenceGuidance()
 				}
 				return SilentExit()
 			}

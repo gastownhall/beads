@@ -96,4 +96,21 @@ func TestDoltPushPrintsRemoteDanglingReferenceGuidance(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("named remote, cli route", func(t *testing.T) {
+		pushErr := fmt.Errorf("dolt push failed: %s: %w", "Uploading...\n"+remoteDanglingRefusal, errors.New("exit status 1"))
+		stderr, err := runFailingDoltPush(t, pushErr, "backup")
+		requireSilentExit(t, err, stderr)
+		if errLine := "Error: " + pushErr.Error() + "\n"; !strings.HasPrefix(stderr, errLine) {
+			t.Errorf("stderr does not start with the unchanged Error: line %q:\n%s", errLine, stderr)
+		}
+		for _, want := range remoteDanglingGuidancePhrases {
+			if !strings.Contains(stderr, want) {
+				t.Errorf("stderr lacks %q:\n%s", want, stderr)
+			}
+		}
+		if unwanted := `Remote "backup" is not configured.`; strings.Contains(stderr, unwanted) {
+			t.Errorf("stderr has %q:\n%s", unwanted, stderr)
+		}
+	})
 }
