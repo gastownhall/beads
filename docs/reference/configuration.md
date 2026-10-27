@@ -104,7 +104,7 @@ Any key whose name contains `api_key`, `api-key`, `secret`, `token`, or `passwor
 | `identity` | `--identity` | `BEADS_IDENTITY` | (git user / hostname) | Sender identity for `bd mail` |
 | `no-db` | `--no-db` | `BD_NO_DAEMON` (related) | `false` | Run without opening the database |
 | `no-push` | `--no-push` | `BD_NO_PUSH` | `false` | Skip pushing to the remote in `bd dolt push` |
-| `no-git-ops` | — | — | `false` | Disable git ops in `bd prime` close protocol |
+| `no-git-ops` | — | — | `false` | Disable git ops in `bd prime` close protocol. Set by `bd init --stealth`. Does not affect Dolt remote sync or auto-push; use `dolt.local-only` to stop those |
 | `agent.profile` | — | `BD_AGENT_PROFILE` | `conservative` | Policy profile `bd prime` uses for git/commit authority: `conservative`, `minimal`, `team-maintainer`; invalid values fall back to `conservative` |
 | `prime.max-memories` | `--max-memories` | `BD_PRIME_MAX_MEMORIES` | `0` | Max persistent memories injected by `bd prime` (0 = unlimited) |
 | `prime.max-memory-chars` | `--max-memory-chars` | `BD_PRIME_MAX_MEMORY_CHARS` | `0` | Max total bytes of memory entries injected by `bd prime`, at whole-memory boundaries (0 = unlimited) |
@@ -114,6 +114,7 @@ Any key whose name contains `api_key`, `api-key`, `secret`, `token`, or `passwor
 | `dolt.auto-push` | — | `BD_DOLT_AUTO_PUSH` | `false` | Auto-push to Dolt remote after writes (opt-in; see [below](#auto-push)) |
 | `dolt.auto-push-interval` | — | `BD_DOLT_AUTO_PUSH_INTERVAL` | `5m` | Minimum time between auto-pushes |
 | `dolt.auto-push-timeout` | — | `BD_DOLT_AUTO_PUSH_TIMEOUT` | `30s` | Timeout for a single auto-push attempt |
+| `dolt.local-only` | — | `BD_DOLT_LOCAL_ONLY` | `false` | Disable Dolt remote sync for this project: `bd init` wires no sync remote, auto-push, `bd dolt push`/`pull` and `bd sync` are skipped, and `bd dolt remote add` refuses |
 | `dolt.shared-server` | `--shared-server` | `BEADS_DOLT_SHARED_SERVER` | `false` | Share one Dolt server at `~/.beads/shared-server/` |
 | `dolt.max-conns` | — | `BEADS_DOLT_MAX_CONNS` | `10` | Connection pool size |
 | `git.author` | — | `BD_GIT_AUTHOR` | (none) | Override commit author for beads commits |
@@ -270,6 +271,7 @@ How it works:
 - Change detection: skipped if the Dolt HEAD commit hasn't changed since the last push.
 - Push failures are warnings only (non-fatal), and failed attempts are throttled too.
 - Last push time and commit are tracked in `.beads/push-state.json`, a per-machine file (not in the database, to avoid merge conflicts across machines).
+- `no-git-ops` (set by `bd init --stealth`) does not disable auto-push; `dolt.local-only: true` does, even when `dolt.auto-push` is on.
 
 Before pushing, `bd` verifies the local chunk store with `dolt fsck --quiet`, bounded by a 30-second timeout. For large stores, raise it with the runtime-only `BEADS_FSCK_TIMEOUT` environment variable (accepts durations like `2m` or bare seconds like `90`).
 

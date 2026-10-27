@@ -348,7 +348,9 @@ bd close bd-a1b2 "Fixed"
 
 `BEADS_DIR` tells bd where to put the `.beads/` database directory,
 bypassing git repo discovery. `--stealth` sets `no-git-ops: true` in
-config, disabling all git hook installation and git operations.
+config and skips git hook installation, so bd itself runs no git
+commands. It does not stop Dolt remote sync; set `dolt.local-only: true`
+to keep the Dolt database from pushing or pulling.
 
 This is useful for:
 - **Non-git VCS** (Sapling, Jujutsu, Piper) — no `.git/` directory needed
