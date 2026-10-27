@@ -10,6 +10,7 @@ go_library(
         "lock_unix.go",
         "lock_wasm.go",
         "lock_windows.go",
+        "probe.go",
     ],
     importpath = "github.com/steveyegge/beads/internal/lockfile",
     visibility = ["//:__subpackages__"],
@@ -56,8 +57,52 @@ go_library(
 
 go_test(
     name = "lockfile_test",
-    srcs = ["lock_test.go"],
+    srcs = [
+        "lock_classify_unix_test.go",
+        "lock_classify_windows_test.go",
+        "lock_test.go",
+        "probe_test.go",
+    ],
     embed = [":lockfile"],
+    deps = select({
+        "@rules_go//go/platform:aix": [
+            "@org_golang_x_sys//unix",
+        ],
+        "@rules_go//go/platform:android": [
+            "@org_golang_x_sys//unix",
+        ],
+        "@rules_go//go/platform:darwin": [
+            "@org_golang_x_sys//unix",
+        ],
+        "@rules_go//go/platform:dragonfly": [
+            "@org_golang_x_sys//unix",
+        ],
+        "@rules_go//go/platform:freebsd": [
+            "@org_golang_x_sys//unix",
+        ],
+        "@rules_go//go/platform:illumos": [
+            "@org_golang_x_sys//unix",
+        ],
+        "@rules_go//go/platform:ios": [
+            "@org_golang_x_sys//unix",
+        ],
+        "@rules_go//go/platform:linux": [
+            "@org_golang_x_sys//unix",
+        ],
+        "@rules_go//go/platform:netbsd": [
+            "@org_golang_x_sys//unix",
+        ],
+        "@rules_go//go/platform:openbsd": [
+            "@org_golang_x_sys//unix",
+        ],
+        "@rules_go//go/platform:solaris": [
+            "@org_golang_x_sys//unix",
+        ],
+        "@rules_go//go/platform:windows": [
+            "@org_golang_x_sys//windows",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 # --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---

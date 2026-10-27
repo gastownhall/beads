@@ -907,6 +907,49 @@ execFile('bd.cmd', ['export', '-o', '/tmp/issues.jsonl'], { shell: true }, ...);
 `"$(cygpath -w /tmp)\issues.jsonl"` from Git Bash scripts. This applies to
 any path argument, including `--db` and config values.
 
+### Windows: workspace inside WSL or on a network share
+
+**Symptom:** Windows `bd.exe` run against a workspace inside WSL
+(`\\wsl.localhost\<distro>\…` or `\\wsl$\…`), or one on an SMB share or an
+NFS mount without a lock daemon, prints:
+
+```text
+warning: <dir> is on a filesystem that does not support file locking (...); continuing ungated, so bd init, migrate, bootstrap and backup restore cannot be fenced here
+```
+
+`<dir>` is the directory whose filesystem cannot lock: the project directory,
+or the database root's parent in shared-server mode or with a custom Dolt data
+directory. When the lock call answers `no locks available` (NFS without a
+lock daemon, or a system out of lock records), the warning says `file locking
+failed in <dir> (no locks available)` instead. `bd init`, `bd migrate`,
+`bd bootstrap` and `bd backup restore` refuse with `cannot run here: ...` and
+the same reason. The embedded Dolt engine may also fail to open with a lock
+error or `Incorrect function`.
+
+**Cause:** file locks on these filesystems do not work: Windows' 9P
+redirector for WSL paths does not pass `LockFileEx` through to Linux, and SMB
+and NFS without lockd either fail the call or report a lock as held when
+nobody holds it. bd checks a busy result once against a private file beside
+the gate, so it reports the filesystem instead of waiting for a maintenance
+operation that is not running. Ordinary commands then run ungated: they hold
+none of their gates, not even a shared server's gate on a local disk.
+Maintenance operations still refuse, because they cannot fence other bd
+processes there. Dolt's own engine lock relies on the same file locks, so
+beads cannot make embedded mode safe on these filesystems.
+
+**Solution:**
+
+- Run bd inside WSL (for example `wsl bd list`) or on a local disk.
+- Or use server mode with the Dolt server started inside WSL, and point
+  Windows `bd.exe` at it.
+- Never run Windows `bd.exe` and Linux bd on one embedded workspace at the
+  same time: nothing can fence the two from each other.
+
+Strict `--readonly` commands create no files, so they skip the private-file
+check: on such a filesystem, when the gate file already exists, a
+`--readonly` command still waits `BEADS_GATE_WAIT_TIMEOUT` and then reports
+that a maintenance operation is running.
+
 ### macOS: Gatekeeper blocking execution
 
 1. Verify the downloaded binary checksum matches the release `checksums.txt`.

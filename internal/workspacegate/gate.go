@@ -32,8 +32,20 @@
 // consumers using the ungated beads.Open, acquire nothing; operations
 // that need a hard quiescence guarantee must refuse when they cannot
 // assume sole cooperative ownership, rather than pretend this lock fences
-// strangers. Filesystems without advisory-lock support (some network
-// mounts) fail acquisition rather than degrade silently.
+// strangers.
+//
+// Filesystems whose advisory locks do not work (NFS without lockd, some SMB
+// and FUSE mounts, Windows' 9P redirector for \\wsl$ paths) fail acquisition
+// with an error matching lockfile.ErrUnsupported, never ErrBusy: whether the
+// lock call fails outright or reports busy with no holder (the first busy
+// result is checked once against a private probe file), so a caller never
+// waits out its budget for a holder that does not exist. The error's
+// *lockfile.UnsupportedError names the gate file in Path. SHARED callers may
+// treat it as "cannot gate here" and continue; EXCLUSIVE callers must refuse.
+// The one exception is a SHARED acquisition with Options.ReadOnly: it creates
+// no files, so it cannot run the probe, and a lock that reports busy with no
+// holder still waits out its budget and fails with ErrBusy. A lock call that
+// fails outright is ErrUnsupported there too.
 package workspacegate
 
 import (
@@ -514,9 +526,9 @@ func (g Gate) Acquire(ctx context.Context, mode Mode, opts Options) (*Handle, er
 		return nil, fmt.Errorf("workspacegate: open gate %s: %w", g.path, err)
 	}
 
-	try := lockfile.FlockSharedNonBlock
+	try := flockSharedNB
 	if mode == Exclusive {
-		try = lockfile.FlockExclusiveNonBlock
+		try = flockExclusiveNB
 	}
 	waiting := opts.Wait > 0
 	defersToIntent := waiting && mode == Shared && !opts.IgnoreQueuedExclusive
@@ -528,6 +540,23 @@ func (g Gate) Acquire(ctx context.Context, mode Mode, opts Options) (*Handle, er
 	// so a shared waiter never sees the gate unqueued-but-unclaimed.
 	var intent *os.File
 	defer func() { g.releaseIntent(intent) }()
+
+	// probed is set once this call has checked, on its first busy signal,
+	// whether the filesystem can lock at all (see lockfile.ProbeBusy). The
+	// probe creates a file, so strict readonly (which promises to create
+	// nothing) never runs it and keeps the plain busy behavior.
+	probed := readOnly
+	unsupported := func() error {
+		if probed {
+			return nil
+		}
+		probed = true
+		if perr := lockfile.ProbeBusy(g.path, try); perr != nil {
+			_ = f.Close()
+			return g.lockErr(perr)
+		}
+		return nil
+	}
 
 	notified := false
 	// finalAttempt is set once the budget ran out while this acquisition was
@@ -542,6 +571,11 @@ func (g Gate) Acquire(ctx context.Context, mode Mode, opts Options) (*Handle, er
 		var detail string
 		deferred := defersToIntent && !finalAttempt && time.Until(deadline) > 0 && g.ExclusiveQueued()
 		if deferred {
+			// A lock that reports busy for every file also makes the intent
+			// lock look held; tell that apart before deferring to it.
+			if err := unsupported(); err != nil {
+				return nil, err
+			}
 			detail = g.queuedDetail()
 			if testHookAfterIntentDefer != nil {
 				testHookAfterIntentDefer()
@@ -557,7 +591,10 @@ func (g Gate) Acquire(ctx context.Context, mode Mode, opts Options) (*Handle, er
 			}
 			if !errors.Is(err, lockfile.ErrLockBusy) && !lockfile.IsLocked(err) {
 				_ = f.Close()
-				return nil, fmt.Errorf("workspacegate: lock %s: %w", g.path, err)
+				return nil, g.lockErr(err)
+			}
+			if err := unsupported(); err != nil {
+				return nil, err
 			}
 			detail = g.busyDetail(mode)
 		}
@@ -606,6 +643,25 @@ func (g Gate) Acquire(ctx context.Context, mode Mode, opts Options) (*Handle, er
 	}
 }
 
+// lockErr wraps a failure to lock the gate file that is not contention. An
+// unsupported-filesystem failure gets the gate file as its Path, so a caller
+// can name the filesystem that cannot lock.
+func (g Gate) lockErr(err error) error {
+	var unsupported *lockfile.UnsupportedError
+	if errors.As(err, &unsupported) && unsupported.Path == "" {
+		err = &lockfile.UnsupportedError{Op: unsupported.Op, Path: g.path, Err: unsupported.Err}
+	}
+	return fmt.Errorf("workspacegate: lock %s: %w", g.path, err)
+}
+
+// flockSharedNB and flockExclusiveNB are the non-blocking lock primitives
+// the gate and its intent lock use. Vars so tests can stand in a filesystem
+// whose locks misbehave.
+var (
+	flockSharedNB    = lockfile.FlockSharedNonBlock
+	flockExclusiveNB = lockfile.FlockExclusiveNonBlock
+)
+
 // testHookAfterIntentDefer, when set (tests only), runs right after a
 // waiting shared acquisition decides to defer to queued intent, so tests can
 // stall it past its deadline at exactly the point a loaded machine might.
@@ -629,7 +685,7 @@ func (g Gate) ExclusiveQueued() bool {
 		return false
 	}
 	defer f.Close()
-	lerr := lockfile.FlockSharedNonBlock(f)
+	lerr := flockSharedNB(f)
 	if lerr == nil {
 		_ = lockfile.FlockUnlock(f)
 		return false
@@ -646,7 +702,7 @@ func (g Gate) tryTakeIntent(reason string) *os.File {
 	if err != nil {
 		return nil
 	}
-	if err := lockfile.FlockExclusiveNonBlock(f); err != nil {
+	if err := flockExclusiveNB(f); err != nil {
 		_ = f.Close()
 		return nil
 	}

@@ -201,6 +201,7 @@ go_library(
         "//internal/beads",
         "//internal/configfile",
         "//internal/doltserver",
+        "//internal/lockfile",
         "//internal/storage",
         "//internal/storage/backends",
         "//internal/storage/dolt",

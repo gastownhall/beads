@@ -12,19 +12,19 @@ import (
 // Multiple processes can hold shared locks concurrently.
 // Returns ErrLockBusy if an exclusive lock is already held.
 func FlockSharedNonBlock(f *os.File) error {
-	err := unix.Flock(int(f.Fd()), unix.LOCK_SH|unix.LOCK_NB)
+	err := flockSyscall(int(f.Fd()), unix.LOCK_SH|unix.LOCK_NB)
 	if err == unix.EWOULDBLOCK {
 		return ErrLockBusy
 	}
-	return err
+	return classifyLockErr(err)
 }
 
 // FlockExclusiveNonBlock acquires an exclusive non-blocking lock on the file.
 // Returns ErrLockBusy if any lock (shared or exclusive) is already held.
 func FlockExclusiveNonBlock(f *os.File) error {
-	err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB)
+	err := flockSyscall(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB)
 	if err == unix.EWOULDBLOCK {
 		return ErrLockBusy
 	}
-	return err
+	return classifyLockErr(err)
 }

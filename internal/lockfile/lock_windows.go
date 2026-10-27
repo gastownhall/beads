@@ -34,7 +34,7 @@ func flockExclusive(f *os.File) error {
 		return errProcessLocked
 	}
 
-	return err
+	return classifyLockErr(err)
 }
 
 // FlockExclusiveNonBlocking attempts to acquire an exclusive lock without blocking.
@@ -51,14 +51,26 @@ func FlockExclusiveBlocking(f *os.File) error {
 
 	ol := &windows.Overlapped{}
 
-	return windows.LockFileEx(
+	return classifyLockErr(windows.LockFileEx(
 		windows.Handle(f.Fd()),
 		flags,
 		0,
 		0xFFFFFFFF,
 		0xFFFFFFFF,
 		ol,
-	)
+	))
+}
+
+// classifyLockErr marks errors that mean the filesystem cannot lock at all
+// as *UnsupportedError: ERROR_INVALID_FUNCTION ("Incorrect function", what
+// the 9P redirector answers for \\wsl$ paths) and, via
+// errors.ErrUnsupported, ERROR_NOT_SUPPORTED and ERROR_CALL_NOT_IMPLEMENTED.
+// Every other error, nil included, is returned unchanged.
+func classifyLockErr(err error) error {
+	if err != nil && (errors.Is(err, windows.ERROR_INVALID_FUNCTION) || errors.Is(err, errors.ErrUnsupported)) {
+		return &UnsupportedError{Op: "LockFileEx", Err: err}
+	}
+	return err
 }
 
 // FlockUnlock releases a lock on the file.

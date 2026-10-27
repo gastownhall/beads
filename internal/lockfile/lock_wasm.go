@@ -27,6 +27,9 @@ func FlockExclusiveBlocking(f *os.File) error {
 	return nil
 }
 
+// classifyLockErr returns err unchanged: WASM locks are no-ops that never fail.
+func classifyLockErr(err error) error { return err }
+
 // FlockUnlock releases a lock on the file.
 // In WASM, this is a no-op.
 func FlockUnlock(f *os.File) error {

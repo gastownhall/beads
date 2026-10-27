@@ -995,6 +995,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- On a filesystem whose file locks do not work (a WSL workspace opened from
+  Windows `bd.exe` over `\\wsl.localhost\`, SMB shares, NFS without lockd),
+  an ordinary `bd` command no longer waits `BEADS_GATE_WAIT_TIMEOUT` and then
+  fails claiming "a maintenance operation is running". bd checks a busy
+  workspace gate once against a private file beside it; when that also
+  reports busy, or the lock call fails with an unsupported error, the command
+  prints one warning naming the filesystem and runs ungated. `bd init`,
+  `bd migrate`, `bd bootstrap` and `bd backup restore` still refuse there,
+  now naming the filesystem that cannot lock instead of blaming live bd
+  activity or saying to wait. Strict `--readonly` skips the check, since it
+  creates no files. Embedders can match the new `beads.ErrGateUnsupported`
+  from `OpenGated` (#3613).
 - **A nested `bd init --server` no longer creates its database on the
   enclosing workspace's Dolt server.** In a directory nested in a workspace
   whose `.beads/config.yaml` names `dolt.port`, `bd init --server` with no

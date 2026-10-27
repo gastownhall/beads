@@ -24,6 +24,7 @@ import (
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/doltversion"
+	"github.com/steveyegge/beads/internal/lockfile"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
@@ -1051,7 +1052,8 @@ func executeBootstrapPlan(plan BootstrapPlan, cfg *configfile.Config, nonInterac
 	// workspace is known and no state has been touched yet, so acquire the
 	// workspace + physical-root gates EXCLUSIVELY here for the rest of the
 	// plan execution. Exclusive failures are hard errors: bootstrap
-	// refuses to run over live bd activity rather than pretend.
+	// refuses to run over live bd activity rather than pretend, and on a
+	// filesystem that cannot lock it refuses naming the filesystem.
 	//
 	// The resolved PhysicalRoots for plan.BeadsDir do not necessarily cover
 	// the directory the actions below actually open — executeInitAction,
@@ -1063,6 +1065,9 @@ func executeBootstrapPlan(plan BootstrapPlan, cfg *configfile.Config, nonInterac
 	gateHandle, gateErr := acquireExclusiveWorkspaceGates(ctx, plan.BeadsDir, "bd bootstrap "+plan.Action,
 		doltserver.ResolveDoltDir(plan.BeadsDir))
 	if gateErr != nil {
+		if errors.Is(gateErr, lockfile.ErrUnsupported) {
+			return fmt.Errorf("%s: %w", gateLockUnsupportedRefusal("bd bootstrap", plan.BeadsDir, gateErr), gateErr)
+		}
 		return fmt.Errorf("bd bootstrap refuses to run over live bd activity on this workspace: %w", gateErr)
 	}
 	defer func() { _ = gateHandle.Release() }()
