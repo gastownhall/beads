@@ -302,6 +302,10 @@ func TestEndpointDialDSNIsTheStoresConnection(t *testing.T) {
 			if tc.ep.CredentialCommand != "" && tc.ep.WithUser("x").CredentialCommand != "" {
 				t.Error("WithUser kept the credential command")
 			}
+			// A caller that builds its own DSN takes the same transport.
+			if got := tc.ep.Transport(); got != tc.wantSocket {
+				t.Errorf("Transport = %q, want %q, DialDSN's", got, tc.wantSocket)
+			}
 		})
 	}
 }

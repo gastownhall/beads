@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -26,8 +27,13 @@ type freshCloneDBCheck struct {
 // whether the named database exists via SHOW DATABASES. The connection is
 // closed before returning. Returns Reachable=false when the server cannot be
 // reached, so the caller can skip the server-mode check (FR-030).
-func checkFreshCloneDB(host string, port int, user, password, dbName string, tls bool) freshCloneDBCheck {
+//
+// socket is the transport its repair writes (freshCloneRepairTransport): the
+// unix socket to dial, or "" for TCP at host:port. Over TCP alone a
+// socket-only server was probed at host:0.
+func checkFreshCloneDB(host string, port int, socket, user, password, dbName string, tls bool) freshCloneDBCheck {
 	dsn := doltutil.ServerDSN{
+		Socket:   socket,
 		Host:     host,
 		Port:     port,
 		User:     user,
@@ -80,7 +86,7 @@ func checkFreshCloneDB(host string, port int, user, password, dbName string, tls
 // suggesting the user set sync.remote (FR-020).
 // When dbExists is false and syncGitRemote is set, returns StatusWarning
 // suggesting bd init to bootstrap from the remote.
-func freshCloneServerResult(dbExists bool, dbName, host string, port int, syncRemote string) DoctorCheck {
+func freshCloneServerResult(dbExists bool, dbName, host string, port int, socket, syncRemote string) DoctorCheck {
 	if dbExists {
 		return DoctorCheck{
 			Name:    "Fresh Clone",
@@ -90,7 +96,7 @@ func freshCloneServerResult(dbExists bool, dbName, host string, port int, syncRe
 	}
 
 	var msg strings.Builder
-	fmt.Fprintf(&msg, "Fresh clone detected: database %q not found on server at %s.", dbName, doltutil.PrintedServerAddr(host, port))
+	fmt.Fprintf(&msg, "%s: database %q not found on server at %s.", freshCloneDetected, dbName, freshCloneServerLocation(host, port, socket))
 
 	fix := "bd bootstrap"
 	if syncRemote == "" {
@@ -114,13 +120,13 @@ func freshCloneServerResult(dbExists bool, dbName, host string, port int, syncRe
 // detected (no database)" warning is misleading in server mode because the
 // absence of a local database is expected — see GH#35.
 //
-// The message identifies that we're in server mode, points at the configured
-// host:port, surfaces the underlying connection error for diagnostics, and
-// suggests connectivity/credential checks rather than bd bootstrap (which
-// won't help when the server itself is unreachable).
-func freshCloneServerUnreachableResult(dbName, host string, port int, connErr error) DoctorCheck {
+// The message identifies that we're in server mode, points at the server the
+// check dialed (freshCloneServerLocation), surfaces the underlying connection
+// error for diagnostics, and suggests connectivity/credential checks rather
+// than bd bootstrap (which won't help when the server itself is unreachable).
+func freshCloneServerUnreachableResult(dbName, host string, port int, socket string, connErr error) DoctorCheck {
 	var msg strings.Builder
-	fmt.Fprintf(&msg, "Dolt server unreachable at %s (database %q, server mode configured).", doltutil.PrintedServerAddr(host, port), dbName)
+	fmt.Fprintf(&msg, "Dolt server unreachable at %s (database %q, server mode configured).", freshCloneServerLocation(host, port, socket), dbName)
 	msg.WriteString(" The local database directory is not expected in server mode, so this is not a fresh clone — it's a connectivity or auth problem.")
 
 	var detail strings.Builder
@@ -132,6 +138,12 @@ func freshCloneServerUnreachableResult(dbName, host string, port int, connErr er
 	}
 	detail.WriteString("  Common causes: server not running, wrong host/port, TLS misconfiguration, or invalid credentials.")
 
+	settings := "dolt_server_host, dolt_server_port, dolt_server_tls"
+	if socket != "" {
+		// The check dialed the socket, which these settings do not name.
+		settings = "dolt_server_socket (or BEADS_DOLT_SERVER_SOCKET), " + settings
+	}
+
 	return DoctorCheck{
 		Name:    "Fresh Clone",
 		Status:  StatusWarning,
@@ -139,11 +151,77 @@ func freshCloneServerUnreachableResult(dbName, host string, port int, connErr er
 		Detail:  detail.String(),
 		Fix: "Verify Dolt server connectivity:\n" +
 			"  1. Confirm the server is running and reachable from this host\n" +
-			"  2. Check .beads/metadata.json: dolt_server_host, dolt_server_port, dolt_server_tls\n" +
+			"  2. Check .beads/metadata.json: " + settings + "\n" +
 			"  3. Verify credentials in ~/.config/beads/credentials (or BEADS_DOLT_PASSWORD)\n" +
 			"  4. Try a CRUD command (e.g. 'bd ready') to confirm the server is usable\n" +
 			"  5. Re-run 'bd doctor' once connectivity is restored",
 	}
+}
+
+// freshCloneRepairTransport is the transport the Fresh Clone check dials ep
+// over, the unix socket or "" for TCP: the server its repair
+// (fix.FreshCloneImport) writes, so bd doctor --fix never imports
+// issues.jsonl into a server the check did not read. That repair opens the
+// store through the library open (dolt.NewFromConfigWithOptions), which takes
+// its socket from BEADS_DOLT_SERVER_SOCKET alone, not from metadata.json's
+// dolt_server_socket as the CLI's store does, and dials it socket first
+// (doltserver.SocketTransport). Beside a resolved port the check therefore
+// dials a live BEADS_DOLT_SERVER_SOCKET, else TCP at the port, even where
+// metadata.json names a live socket: it read that socket's server while the
+// repair wrote TCP at the port, so --fix overwrote live rows there with the
+// tracked copy (#7874 review). A server only a socket names (no port) is
+// read on its socket, the store's transport; bd doctor --fix withholds the
+// repair there, as the schema gate's connection (openDoltDB) does not dial a
+// socket.
+func freshCloneRepairTransport(ep doltserver.Endpoint) string {
+	if ep.Resolved() {
+		ep.Socket = os.Getenv("BEADS_DOLT_SERVER_SOCKET")
+	}
+	return ep.Transport()
+}
+
+// freshCloneRepairUser is the user the Fresh Clone check logs in to ep as:
+// the one its repair (fix.FreshCloneImport) presents there. That repair's
+// library store open presents a configured BEADS_DOLT_CREDENTIAL_COMMAND's
+// token over the static user (dolt.ApplyGatewayCredential), and a command
+// that fails fails the open, so it fails the check too, which never falls
+// back to the static user (Endpoint.WithIdentity). The check logged in as
+// the static user, which a gateway refuses: it reported the server
+// unreachable while bd doctor --fix imported issues.jsonl through that
+// gateway over the live rows (#7874 review).
+func freshCloneRepairUser(ep doltserver.Endpoint) (string, error) {
+	id, err := ep.WithIdentity(context.Background())
+	if err != nil {
+		return "", fmt.Errorf("resolving dolt credential command: %w", err)
+	}
+	return id.User, nil
+}
+
+// freshCloneDetected begins the message of each Fresh Clone result that
+// found the workspace's database missing (FreshCloneDetected).
+const freshCloneDetected = "Fresh clone detected"
+
+// FreshCloneDetected reports whether message, a Fresh Clone check's, is a
+// fresh-clone verdict: the check found the workspace's database missing, on
+// the server it reads or, outside server mode, on disk. That is the one
+// result bd doctor --fix repairs by importing issues.jsonl
+// (fix.FreshCloneImport). The check also warns when it could not log in to
+// the server, or has no address for it, and says that is not a fresh clone;
+// --fix ran the import there too, writing the tracked issues over the live
+// rows of a database the check never read (#7874 review).
+func FreshCloneDetected(message string) bool {
+	return strings.HasPrefix(message, freshCloneDetected)
+}
+
+// freshCloneServerLocation names the server the Fresh Clone check dialed:
+// unix:<socket> when it dialed the socket (freshCloneRepairTransport), else
+// host:port. A server with no port is always dialed on its socket, so it
+// never names host:0.
+func freshCloneServerLocation(host string, port int, socket string) string {
+	if socket != "" {
+		return remedy.PrintedValue("unix:" + socket)
+	}
+	return doltutil.PrintedServerAddr(host, port)
 }
 
 // freshCloneServerUnresolvedResult builds the DoctorCheck for a server-mode

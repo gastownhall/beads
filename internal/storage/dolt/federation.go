@@ -207,18 +207,24 @@ func (s *DoltStore) ListRemotes(ctx context.Context) ([]storage.RemoteInfo, erro
 // directly so a cold-start open cannot miss the remote and migrate the shared
 // database in place.
 //
+// Unlike HasPersistedRemote, it reads those directories whatever server the
+// store dials: for this gate a remote recorded there is a reason for caution,
+// not a claim about the server's remotes that a caller acts on.
+//
 // The probe reads repo_state.json itself (no dolt CLI subprocess), so a
 // missing dolt binary can no longer disable the gate. A directory that is not
 // a dolt repository is a definite "no remote here"; a read/parse failure still
 // fails open (migration is not wedged on unrelated corruption) but is logged,
 // never swallowed (bd-6dnrw.33).
 func (s *DoltStore) hasPersistedCLIRemote() bool {
-	return s.HasPersistedRemote()
+	_, remotes := s.persistedRemotesOnDisk()
+	return len(remotes) > 0
 }
 
 // HasPersistedRemote is the exported on-disk probe for callers that must not
-// trust an empty dolt_remotes table at cold start: the remote-migrate gate
-// and the push/pull "no remote configured" exit-0 skip (bd-578h9.10).
+// trust an empty dolt_remotes table at cold start: the push/pull "no remote
+// configured" exit-0 skip (bd-578h9.10). Like PersistedRemoteInfos, it counts
+// only remotes that can be the store's server's.
 func (s *DoltStore) HasPersistedRemote() bool {
 	return len(s.PersistedRemoteInfos()) > 0
 }
@@ -236,7 +242,42 @@ func (s *DoltStore) HasPersistedRemote() bool {
 // (wy-6k7f7). Read/parse failures are logged and skipped, matching the old
 // HasPersistedRemote behavior — callers only consult this after a SUCCESSFUL
 // (empty) ListRemotes, so a read failure here never masquerades as evidence.
+//
+// Those are the server's remotes only where the workspace's Dolt root can be
+// its data (cliDirServesServer). For a server bd does not run, or one it
+// cannot tell from such a server, a database there is at best a copy whose
+// remotes say nothing about the server's, so none are returned: a copy that
+// lists origin must not make `bd dolt remote add` or `bd config apply` take
+// the remote as already configured on a server that lists none. LeftoverRemotes
+// returns such a copy's remotes instead.
 func (s *DoltStore) PersistedRemoteInfos() []storage.RemoteInfo {
+	if !s.cliDirServesServer() {
+		return nil
+	}
+	_, remotes := s.persistedRemotesOnDisk()
+	return remotes
+}
+
+// LeftoverRemotes returns the remotes PersistedRemoteInfos leaves out, those
+// recorded where the workspace's Dolt root cannot be the server's data
+// (cliDirServesServer), and the directory that records them; none where it
+// can be. They are not the server's remotes, but they are the remotes the
+// operator set up, such as the origin of the clone bd init --server --remote
+// leaves for a gateway: a server that lists no remote beside them is not a
+// workspace without one, so the push/pull no-remote decision
+// (hasConfiguredRemote in cmd/bd) names them and the command that adds each
+// on the server instead of reporting that no remote is configured.
+func (s *DoltStore) LeftoverRemotes() (string, []storage.RemoteInfo) {
+	if s.cliDirServesServer() {
+		return "", nil
+	}
+	return s.persistedRemotesOnDisk()
+}
+
+// persistedRemotesOnDisk is PersistedRemoteInfos for any server: the remotes
+// recorded in the database CLI directory, else in the dolt server root, and
+// the directory that records them.
+func (s *DoltStore) persistedRemotesOnDisk() (string, []storage.RemoteInfo) {
 	cliDir := s.CLIDir()
 	dirs := []string{cliDir}
 	if s.dbPath != "" && s.dbPath != cliDir {
@@ -254,10 +295,10 @@ func (s *DoltStore) PersistedRemoteInfos() []storage.RemoteInfo {
 			continue
 		}
 		if len(remotes) > 0 {
-			return remotes
+			return dir, remotes
 		}
 	}
-	return nil
+	return "", nil
 }
 
 // RemoveRemote removes a configured remote.
@@ -652,10 +693,16 @@ func (s *DoltStore) shouldUseCLIForPeerGitProtocol(ctx context.Context, peer str
 // doltCLIPushRefToPeer shells out to `dolt push` with a specific refspec.
 // The refspec can be a branch name or a "local:remote" mapping.
 func (s *DoltStore) doltCLIPushRefToPeer(ctx context.Context, peer string, refspec string, creds *remoteCredentials) error {
+	if err := requireCLIDoltBinary(); err != nil {
+		return fmt.Errorf("dolt push: %w", err)
+	}
 	if err := s.prePushFSCK(ctx); err != nil {
 		return err
 	}
-	cmd, transferCtx, cancel := s.prepareDoltCLITransfer(ctx, peer, creds, "push", peer, refspec)
+	cmd, transferCtx, cancel, err := s.prepareDoltCLITransfer(ctx, peer, creds, "push", peer, refspec)
+	if err != nil {
+		return err
+	}
 	defer cancel()
 	applyNoGitHooksToCmd(cmd) // GH#3724
 	out, err := cmd.CombinedOutput()
@@ -669,7 +716,10 @@ func (s *DoltStore) doltCLIPushRefToPeer(ctx context.Context, peer string, refsp
 // Used for git-protocol remotes where CALL DOLT_PULL times out through the SQL connection.
 // Credentials are set on the subprocess environment only via cmd.Env.
 func (s *DoltStore) doltCLIPullFromPeer(ctx context.Context, peer string, creds *remoteCredentials) error {
-	cmd, transferCtx, cancel := s.prepareDoltCLITransfer(ctx, peer, creds, "pull", peer, s.branch)
+	cmd, transferCtx, cancel, err := s.prepareDoltCLITransfer(ctx, peer, creds, "pull", peer, s.branch)
+	if err != nil {
+		return err
+	}
 	defer cancel()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -682,7 +732,10 @@ func (s *DoltStore) doltCLIPullFromPeer(ctx context.Context, peer string, creds 
 // Used for git-protocol remotes where CALL DOLT_FETCH times out through the SQL connection.
 // Credentials are set on the subprocess environment only via cmd.Env.
 func (s *DoltStore) doltCLIFetchFromPeer(ctx context.Context, peer string, creds *remoteCredentials) error {
-	cmd, transferCtx, cancel := s.prepareDoltCLITransfer(ctx, peer, creds, "fetch", peer)
+	cmd, transferCtx, cancel, err := s.prepareDoltCLITransfer(ctx, peer, creds, "fetch", peer)
+	if err != nil {
+		return err
+	}
 	defer cancel()
 	out, err := cmd.CombinedOutput()
 	if err != nil {

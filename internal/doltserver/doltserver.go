@@ -36,6 +36,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/doltversion"
 	"github.com/steveyegge/beads/internal/fdhygiene"
 	"github.com/steveyegge/beads/internal/githooksenv"
 	"github.com/steveyegge/beads/internal/gittraceenv"
@@ -768,6 +769,17 @@ func configYamlPort(beadsDir string) int {
 	return configYamlPortAtDoltDir(ResolveDoltDir(beadsDir))
 }
 
+// DoltConfigYamlPort is the port chain's step after the port file
+// (PortSourceDoltConfigYaml) on its own: the listener.port of the Dolt
+// server config.yaml in beadsDir's Dolt data directory, or 0 when there is
+// no such file or it does not parse. It resolves that directory without
+// creating it (DoltDirPath). A caller that ranks the chain's sources itself
+// reads it here: resolving the chain prints metadata.json
+// dolt_server_port's deprecation warning when it reaches that step.
+func DoltConfigYamlPort(beadsDir string) int {
+	return configYamlPortAtDoltDir(DoltDirPath(beadsDir))
+}
+
 func configYamlPortAtDoltDir(doltDir string) int {
 	path := filepath.Join(doltDir, "config.yaml")
 	if _, err := os.Stat(path); err != nil {
@@ -1110,6 +1122,13 @@ func applyLegacyPortEnv(cfg *Config) {
 		cfg.Port, cfg.PortSource = p, PortSourceEnv
 	}
 }
+
+// LegacyPortEnvLabel is applyLegacyPortEnv's rule in an operator's words, for
+// a list of PortSourceLabels (bd dolt show). The legacy BEADS_DOLT_PORT is no
+// step of that order: it replaces only the ports some steps resolve, so the
+// list names it beside them rather than by a rank.
+const LegacyPortEnvLabel = "Legacy environment variable (BEADS_DOLT_PORT): when BEADS_DOLT_SERVER_PORT is unset, " +
+	"it overrides the port file and the default ports, not listener.port, dolt.port or dolt_server_port"
 
 // DefaultConfigForMode resolves server configuration for an already-classified
 // target. Diagnostics use this when inspecting a workspace other than the
@@ -1709,6 +1728,13 @@ func startLocked(beadsDir string) (*State, error) {
 		return nil, fmt.Errorf("dolt is not installed (not found in PATH)\n\nInstall from: https://docs.dolthub.com/introduction/installation")
 	}
 
+	// Refuse a dolt older than the minimum bd requires before launching it:
+	// every server-mode open would refuse the server it starts anyway, and
+	// this says so once, naming the binary to upgrade.
+	if err := RequireDoltBinaryVersion(doltBin); err != nil {
+		return nil, err
+	}
+
 	// Prefer a generated YAML config (via --config) over plain CLI flags when
 	// the resolved external dolt is new enough to safely accept
 	// auto_gc_behavior.archive_level: 0. This is what keeps this managed
@@ -2005,7 +2031,9 @@ func startLocked(beadsDir string) (*State, error) {
 // seeding (issue prefix, project ID) are handled by the store layer when the
 // global database is first opened with CreateIfMissing=true.
 //
-// Returns nil if the database already exists or was successfully created.
+// Returns nil if the database already exists or was successfully created,
+// and an error wrapping doltversion.ErrBelowRequiredMin, before creating
+// anything, if the server is older than bd's minimum.
 func EnsureGlobalDatabase(host string, port int, user, password string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -2026,6 +2054,14 @@ func EnsureGlobalDatabase(host string, port int, user, password string) error {
 
 	if err := db.PingContext(ctx); err != nil {
 		return fmt.Errorf("ensure global db: server not reachable: %w", err)
+	}
+
+	// Refuse a server older than bd's minimum before creating a database on
+	// it: the store open that follows refuses it anyway, and would leave the
+	// empty database behind. A version it cannot determine is not refused
+	// (doltversion.CheckServer).
+	if err := doltversion.CheckServer(ctx, db, "dolt sql-server at "+doltutil.PrintedServerAddr(host, port), nil); err != nil {
+		return err
 	}
 
 	// CREATE DATABASE IF NOT EXISTS is idempotent — safe on every call.

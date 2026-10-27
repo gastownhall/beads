@@ -62,6 +62,7 @@ go_library(
         "//internal/configfile",
         "//internal/doltremote",
         "//internal/doltserver",
+        "//internal/doltversion",
         "//internal/git",
         "//internal/gitenv",
         "//internal/gitignore",

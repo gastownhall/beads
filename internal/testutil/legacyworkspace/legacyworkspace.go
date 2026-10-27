@@ -1,6 +1,6 @@
 // Package legacyworkspace builds, for tests, the historical SQLite and legacy
-// Dolt .beads layouts command admission refuses, and a pre-Dolt clone it does
-// not treat as a workspace at all, and digests a directory tree so a test can
+// Dolt .beads layouts command admission refuses, and the pre-Dolt clones it
+// does not treat as a workspace at all, and digests a directory tree so a test can
 // assert that an entry point which refused or skipped one of them left it
 // byte-identical.
 //
@@ -81,6 +81,22 @@ func PreDoltClone() Layout {
 	return Layout{Name: "pre-Dolt clone", Files: map[string]string{
 		"config.json":  `{"database":"beads.db","version":"0.20.1","jsonl_export":"issues.jsonl"}`,
 		"issues.jsonl": `{"id":"old-1","title":"from the SQLite era"}` + "\n",
+	}}
+}
+
+// PreConfigJSONClone is a fresh clone of a project bd set up before it wrote
+// config.json (before v0.17.7): the issues.jsonl and .gitignore that era's
+// .beads kept tracked, and no *.db, which it ignored. bd run inside it does
+// not treat it as a workspace ("no beads database found") and writes nothing
+// there. Every entry point that would initialize it as a create or planning
+// target must leave it byte-identical: a database written there with the
+// create's issue in it would make it a workspace whose issues.jsonl the
+// upgrade auto-import, which imports only into an empty database, never
+// loads.
+func PreConfigJSONClone() Layout {
+	return Layout{Name: "pre-config.json clone", Files: map[string]string{
+		".gitignore":   "# SQLite databases\n*.db\n*.db-journal\n*.db-wal\n*.db-shm\n\n!*.jsonl\n",
+		"issues.jsonl": `{"id":"old-1","title":"from before config.json"}` + "\n",
 	}}
 }
 

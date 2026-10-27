@@ -25,7 +25,7 @@ const (
 // removes exactly the paths in Remove of each one marked SafeDelete, and
 // nothing else, so the two halves cannot disagree.
 type PlannedArtifact struct {
-	Path        string // the file, or the .beads directory of a cruft finding
+	Path        string // the file, or the .beads directory of a cruft finding about the whole directory
 	Type        string // ArtifactSQLite or ArtifactCruft
 	Description string
 	SafeDelete  bool
@@ -66,9 +66,9 @@ type beadsDirClass struct {
 
 // classifyBeadsDir is the one positive-ownership predicate behind every
 // Classic Artifacts deletion. Only two answers let the cleanup delete
-// anything: ownerDolt (orphaned SQLite sidecars) and ownerRedirectStub
-// (scaffolding beside, or instead of, a redirect). Every other answer leaves
-// the directory byte-identical.
+// anything: ownerDolt (orphaned SQLite sidecars) and ownerRedirectStub (bd's
+// runtime leftovers beside, or instead of, a redirect). Every other answer
+// leaves the directory byte-identical.
 func classifyBeadsDir(beadsDir string) beadsDirClass {
 	cfg, err := configfile.LoadAndCheckWorkspaceFormat(beadsDir)
 	var formatErr *configfile.UnsupportedWorkspaceFormatError
@@ -432,30 +432,28 @@ func databaseStateEntries(beadsDir string, entries []os.DirEntry) []string {
 // cleanup carries out for the .beads directory beadsDir. skip is true for a
 // directory in a format this build cannot open, which neither reports nor
 // touches. Only a .beads positively on Dolt (orphaned SQLite sidecars) and a
-// redirect-only stub holding no database state (its scaffolding) yield
-// findings marked SafeDelete. Everything else is left byte-identical; what is
-// reported for manual review is a database file or sidecar outside another
-// backend's .beads, and a redirect-only .beads that is not a stub but holds
-// something the stub rule would remove.
+// redirect-only stub holding no database state (bd's runtime leftovers in
+// it) yield findings marked SafeDelete. Everything else is left
+// byte-identical; what is reported for manual review is a database file or
+// sidecar outside another backend's .beads, what a stub holds beyond its
+// runtime leftovers, and a redirect-only .beads that is not a stub but holds
+// more than a clean stub does.
 func PlanArtifacts(beadsDir string) (findings []PlannedArtifact, skip bool) {
 	c := classifyBeadsDir(beadsDir)
 	if c.owner == ownerUnsupportedFormat {
 		return nil, true
 	}
 	if c.owner == ownerRedirectStub {
-		if f, ok := stubCruftFinding(beadsDir); ok {
-			findings = append(findings, f)
-		}
-		return findings, false
+		return stubCruftFindings(beadsDir), false
 	}
 	if c.owner != ownerOtherBackend {
 		findings = append(findings, sqliteFindings(beadsDir, c)...)
 	}
 	// A redirect-only .beads that is not a stub is reported for review only
-	// when it holds something the stub rule would remove (or database
-	// state). A clean stub, holding just its redirect, .gitkeep and the
-	// metadata kept beside a redirect, is not reported whatever that
-	// metadata says, as on main (#4692).
+	// when it holds more than a clean stub does (or database state). A clean
+	// stub, holding just its redirect, .gitkeep and the metadata kept beside
+	// a redirect, is not reported whatever that metadata says, as on main
+	// (#4692).
 	if c.redirectExpected && (len(c.databaseState) > 0 || holdsStubCruft(beadsDir)) {
 		desc := "should be redirect-only but " + c.reason + "; review manually"
 		if len(c.databaseState) > 0 {
@@ -507,19 +505,80 @@ func sqliteFindings(beadsDir string, c beadsDirClass) []PlannedArtifact {
 	return findings
 }
 
-// stubCruftFinding lists what a redirect-only stub holds beyond its redirect
-// file, .gitkeep and, beside a redirect, its own metadata: metadata.json, or
-// a legacy config.json, which this walk does not migrate
+// stubRuntimeLeftovers are the only entries the stub rule removes from a
+// redirect-only stub: per-machine runtime files bd writes in a .beads it
+// opens directly (bdStateFiles) or that bd's former daemon kept there
+// (daemon.lock, daemon.log, daemon.pid and bd.sock). bd's .beads/.gitignore
+// template ignores each of them, and they are what the orchestrator that
+// writes a stub's redirect clears from it. No bd writes the daemon's files
+// any more, so one in a stub is always left over; bdStateFiles are left over
+// only where bd does not open the stub (stubStateIsLeftover). Anything else
+// in a stub, such as files the repository tracks there (config.yaml,
+// README.md, .gitignore, formulas/), metadata without a redirect beside it,
+// the audit log or routes.jsonl, is kept and reported for review.
+var stubRuntimeLeftovers = map[string]bool{
+	".local_version": true,
+	"last-touched":   true,
+	"daemon.lock":    true,
+	"daemon.log":     true,
+	"daemon.pid":     true,
+	"bd.sock":        true,
+}
+
+// bdStateFiles are the stubRuntimeLeftovers bd writes in the .beads it opens
+// (beads.FindBeadsDir, which follows a redirect): its .local_version witness
+// and its last-touched issue.
+var bdStateFiles = map[string]bool{".local_version": true, "last-touched": true}
+
+// stubStateIsLeftover reports whether the bdStateFiles in beadsDir, a
+// redirect-only stub listing entries, are left over: only while bd does not
+// open the stub. That takes a redirect bd follows (redirectFollowed), since
+// without one, or beside one bd ignores, bd opens the stub and writes them
+// there; and no configuration of the stub's own (config.yaml, metadata.json
+// or config.json), which makes it a workspace bd opens itself once that
+// redirect stops resolving. In a workspace bd opens, .local_version is the
+// witness the legacy-upgrade guard reads to refuse a pre-1.0 Dolt server
+// workspace, so deleting it would lift that refusal.
+func stubStateIsLeftover(beadsDir string, entries []os.DirEntry) bool {
+	for _, entry := range entries {
+		switch entry.Name() {
+		case "config.yaml", configfile.ConfigFileName, configfile.LegacyConfigFileName:
+			return false
+		}
+	}
+	return redirectFollowed(beadsDir)
+}
+
+// isStubRuntimeLeftover reports whether entry, an entry of a redirect-only
+// stub, is one of stubRuntimeLeftovers as bd writes it: a regular file, or
+// for bd.sock the daemon's socket. A directory or symlink by one of those
+// names is not bd's.
+func isStubRuntimeLeftover(entry os.DirEntry) bool {
+	if !stubRuntimeLeftovers[entry.Name()] {
+		return false
+	}
+	return entry.Type().IsRegular() || (entry.Name() == "bd.sock" && entry.Type()&os.ModeSocket != 0)
+}
+
+// stubCruftFindings reports what a redirect-only stub holds beyond its
+// redirect file, .gitkeep and, beside a redirect, its own metadata:
+// metadata.json, or a legacy config.json, which this walk does not migrate
 // (gastownhall/beads#4692: a co-located redirect and metadata.json is a
-// supported topology). It is safe to delete only because the stub holds no
-// database state, which classifyBeadsDir established.
-func stubCruftFinding(beadsDir string) (PlannedArtifact, bool) {
+// supported topology). Only its runtime leftovers (stubRuntimeLeftovers) are
+// safe to delete, and only because the stub holds no database state, which
+// classifyBeadsDir established. A stub holding nothing else is one finding
+// for the directory, safe to delete as before. A stub that keeps anything
+// else is a finding for review, and each runtime leftover in it is a finding
+// of its own, safe to delete, as an orphaned WAL is: a finding marked
+// SafeDelete never names a directory holding entries that must stay.
+func stubCruftFindings(beadsDir string) []PlannedArtifact {
 	entries, err := os.ReadDir(beadsDir)
 	if err != nil {
-		return PlannedArtifact{}, false
+		return nil
 	}
 	hasRedirect := holdsRedirect(entries)
-	var names, remove []string
+	stateLeftOver := stubStateIsLeftover(beadsDir, entries)
+	var leftovers, kept []string
 	for _, entry := range entries {
 		name := entry.Name()
 		if name == "redirect" || name == ".gitkeep" {
@@ -528,24 +587,35 @@ func stubCruftFinding(beadsDir string) (PlannedArtifact, bool) {
 		if hasRedirect && (name == configfile.ConfigFileName || name == configfile.LegacyConfigFileName) {
 			continue
 		}
-		names = append(names, name)
-		remove = append(remove, filepath.Join(beadsDir, name))
+		if isStubRuntimeLeftover(entry) && (stateLeftOver || !bdStateFiles[name]) {
+			leftovers = append(leftovers, name)
+			continue
+		}
+		kept = append(kept, name)
 	}
-	if len(names) == 0 {
-		return PlannedArtifact{}, false
+	if len(kept) == 0 {
+		if len(leftovers) == 0 {
+			return nil
+		}
+		remove := make([]string, 0, len(leftovers))
+		for _, name := range leftovers {
+			remove = append(remove, filepath.Join(beadsDir, name))
+		}
+		return []PlannedArtifact{{Path: beadsDir, Type: ArtifactCruft, Description: "should be redirect-only but contains: " + strings.Join(leftovers, ", "), SafeDelete: true, Remove: remove}}
 	}
-	desc := "should be redirect-only but contains: " + strings.Join(names, ", ")
-	if len(names) > 5 {
-		desc = fmt.Sprintf("should be redirect-only but contains %d extra files", len(names))
+	findings := []PlannedArtifact{{Path: beadsDir, Type: ArtifactCruft, Description: "should be redirect-only but contains files the stub cleanup does not remove: " + summarizeNames(kept) + "; review manually"}}
+	for _, name := range leftovers {
+		path := filepath.Join(beadsDir, name)
+		findings = append(findings, PlannedArtifact{Path: path, Type: ArtifactCruft, Description: "bd runtime leftover in a redirect-only .beads", SafeDelete: true, Remove: []string{path}})
 	}
-	return PlannedArtifact{Path: beadsDir, Type: ArtifactCruft, Description: desc, SafeDelete: true, Remove: remove}, true
+	return findings
 }
 
-// holdsStubCruft reports whether beadsDir holds an entry the stub rule would
-// remove.
+// holdsStubCruft reports whether beadsDir holds more than a clean stub does:
+// an entry beyond its redirect, .gitkeep and the metadata kept beside a
+// redirect, which stubCruftFindings reports.
 func holdsStubCruft(beadsDir string) bool {
-	_, ok := stubCruftFinding(beadsDir)
-	return ok
+	return len(stubCruftFindings(beadsDir)) > 0
 }
 
 func summarizeNames(names []string) string {

@@ -3,29 +3,34 @@ package fix
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/steveyegge/beads/internal/beads"
 )
 
 // ClassicArtifacts removes what the Classic Artifacts scan reports as safe to
 // delete under path, and nothing else: both halves walk the same .beads
 // directories (WalkBeadsDirs) and act on the same plan (PlanArtifacts). That
 // is an orphaned SQLite WAL or SHM in a .beads positively on Dolt, and the
-// scaffolding of a redirect-only stub that holds no database state. Every
-// removal goes through RemoveDisposable, which refuses database state.
+// runtime leftovers of a redirect-only stub that holds no database state.
+// Every removal goes through RemoveDisposable, which refuses database state.
+// It reports each removal, each finding it leaves for review (what a stub
+// keeps beside its runtime leftovers included) and a summary on out.
 //
 // It never migrates a .beads directory's metadata, and leaves a .beads
 // directory in a format this build cannot open, or one whose ownership it
 // cannot establish, untouched.
-func ClassicArtifacts(path string) error {
+func ClassicArtifacts(path string, out io.Writer) error {
 	var removed, skipped, errCount int
 
 	err := WalkBeadsDirs(path, func(beadsDir string) {
 		findings, _ := PlanArtifacts(beadsDir)
 		for _, f := range findings {
 			if !f.SafeDelete {
-				fmt.Printf("  Skip (needs review): %s: %s\n", f.Path, f.Description)
+				fmt.Fprintf(out, "  Skip (needs review): %s: %s\n", f.Path, f.Description)
 				skipped++
 				continue
 			}
@@ -34,13 +39,13 @@ func ClassicArtifacts(path string) error {
 				var refused *RefusedError
 				switch {
 				case errors.As(err, &refused):
-					fmt.Printf("  Skip (needs review): %s: %s\n", target, refused.Reason)
+					fmt.Fprintf(out, "  Skip (needs review): %s: %s\n", target, refused.Reason)
 					skipped++
 				case err != nil:
-					fmt.Printf("  Error removing %s: %v\n", target, err)
+					fmt.Fprintf(out, "  Error removing %s: %v\n", target, err)
 					errCount++
 				default:
-					fmt.Printf("  Removed: %s (%s)\n", target, removedLabel(f.Type))
+					fmt.Fprintf(out, "  Removed: %s (%s)\n", target, removedLabel(f.Type))
 					removed++
 				}
 			}
@@ -51,10 +56,10 @@ func ClassicArtifacts(path string) error {
 	}
 
 	// Report summary
-	fmt.Printf("  Artifact cleanup: %d removed, %d skipped, %d errors\n", removed, skipped, errCount)
+	fmt.Fprintf(out, "  Artifact cleanup: %d removed, %d skipped, %d errors\n", removed, skipped, errCount)
 
 	if skipped > 0 {
-		fmt.Println("  Skipped items need manual review: bd doctor never removes a database, or anything in a .beads it cannot classify")
+		fmt.Fprintln(out, "  Skipped items need manual review: bd doctor never removes a database, anything in a .beads it cannot classify, or what a redirect-only .beads holds beyond bd's runtime leftovers")
 	}
 
 	if errCount > 0 {
@@ -120,30 +125,15 @@ func isRedirectExpectedLocation(beadsDir string) bool {
 }
 
 // redirectResolvesTo reports whether the redirect file in fromBeadsDir names
-// target. It parses the redirect as beads.FollowRedirect does (the first line
-// that is neither blank nor a # comment, relative to fromBeadsDir's parent)
-// and compares the cleaned or symlink-resolved path. It does not apply
-// FollowRedirect's rewrite of a detached /refs/commits/<sha> checkout to the
-// branch worktree at that commit, and does not require the target to hold a
-// database, so a target bd would currently refuse is still recognized as the
-// one redirected to.
+// target (redirectTarget), comparing the cleaned or symlink-resolved path. It
+// does not apply FollowRedirect's rewrite of a detached /refs/commits/<sha>
+// checkout to the branch worktree at that commit, and does not require the
+// target to hold a database, so a target bd would currently refuse is still
+// recognized as the one redirected to.
 func redirectResolvesTo(fromBeadsDir, target string) bool {
-	data, err := os.ReadFile(filepath.Join(fromBeadsDir, "redirect")) // #nosec G304 -- a .beads redirect file doctor is classifying
-	if err != nil {
-		return false
-	}
-	dest := ""
-	for _, line := range strings.Split(string(data), "\n") {
-		if line = strings.TrimSpace(line); line != "" && !strings.HasPrefix(line, "#") {
-			dest = line
-			break
-		}
-	}
+	dest := redirectTarget(fromBeadsDir)
 	if dest == "" {
 		return false
-	}
-	if !filepath.IsAbs(dest) {
-		dest = filepath.Join(filepath.Dir(fromBeadsDir), dest)
 	}
 	if filepath.Clean(dest) == filepath.Clean(target) {
 		return true
@@ -151,4 +141,34 @@ func redirectResolvesTo(fromBeadsDir, target string) bool {
 	a, errA := filepath.EvalSymlinks(dest)
 	b, errB := filepath.EvalSymlinks(target)
 	return errA == nil && errB == nil && a == b
+}
+
+// redirectFollowed reports whether bd opens the target of beadsDir's
+// redirect instead of beadsDir: beads.FollowRedirect honors a redirect only
+// when it names a directory that discovery treats as a workspace
+// (beads.HasProjectFiles). Like redirectResolvesTo, it does not apply
+// FollowRedirect's rewrite of a detached /refs/commits/<sha> checkout.
+func redirectFollowed(beadsDir string) bool {
+	target := redirectTarget(beadsDir)
+	return target != "" && beads.HasProjectFiles(target)
+}
+
+// redirectTarget is the path the redirect file in fromBeadsDir names, parsed
+// as beads.FollowRedirect does: the first line that is neither blank nor a #
+// comment, relative to fromBeadsDir's parent. It is "" when there is no
+// readable redirect, or it names nothing.
+func redirectTarget(fromBeadsDir string) string {
+	data, err := os.ReadFile(filepath.Join(fromBeadsDir, "redirect")) // #nosec G304 -- a .beads redirect file doctor is classifying
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if line = strings.TrimSpace(line); line != "" && !strings.HasPrefix(line, "#") {
+			if !filepath.IsAbs(line) {
+				line = filepath.Join(filepath.Dir(fromBeadsDir), line)
+			}
+			return line
+		}
+	}
+	return ""
 }

@@ -38,6 +38,8 @@ func newServedStoreForCLIMirror(t *testing.T) (*DoltStore, string) {
 	// not depend on what a real dolt binary does in a directory that holds
 	// only a state file, so no dolt is reachable from PATH here.
 	t.Setenv("PATH", t.TempDir())
+	// The directory is the served one: no port variable names the server.
+	clearServerPortEnv(t)
 	root := t.TempDir()
 	store := &DoltStore{serverMode: true, dbPath: root, database: "beads"}
 	cliDir := store.CLIDir()
@@ -280,7 +282,10 @@ func TestPrepareCLIRouteForGitProtocolColdStartReaddsRefRemoteOverSQL(t *testing
 // argument (the single-quoted form reached bd.exe as eight arguments, and bd
 // sql refused it), and on POSIX an apostrophe or backslash has no quoting
 // every shell there agrees on, so the remedy names the statement on its own,
-// never as a paste-ready bd sql command, and escaped (remedy.EscapedValue):
+// never as a paste-ready bd sql command. It names it as it is, to run as
+// printed in a Dolt SQL shell, when the remote, URL and ref are ordinary
+// values, such as a git+https or git+ssh URL: one the remedy printer quotes
+// on every platform. Otherwise it names it escaped (remedy.EscapedValue):
 // printed as it is, a $( ) or a backtick in the URL sat inside the
 // statement's double quotes, which PowerShell and Git Bash expand when the
 // line is pasted. The escaped name still reads back (strconv.Unquote) as the
@@ -289,14 +294,21 @@ func TestPrepareCLIRouteForGitProtocolColdStartReaddsRefRemoteOverSQL(t *testing
 func TestColdStartReaddRemedy(t *testing.T) {
 	const ref = "refs/dolt/units/team-1"
 	const url = "git+https://example.com/org/repo.git"
-	stmt := `CALL DOLT_REMOTE("add", "--ref", "` + ref + `", "origin", "` + url + `")`
+	// statement is the statement for a URL literal spelled url.
+	statement := func(url string) string {
+		return `CALL DOLT_REMOTE("add", "--ref", "` + ref + `", "origin", "` + url + `")`
+	}
+	// escapedFor is the statement for a remote, ref and URL literal spelled
+	// remote, ref and url, escaped as remedy.EscapedValue spells it.
+	escapedFor := func(remote, ref, url string) string {
+		return `"CALL DOLT_REMOTE(\x22add\x22\x2c \x22--ref\x22\x2c \x22` + ref + `\x22\x2c \x22` + remote + `\x22\x2c \x22` + url + `\x22)"`
+	}
+	stmt := statement(url)
 	const statementOnly = "by running this SQL statement there, as the one argument of bd sql (quoted for your shell) or in a Dolt SQL shell: "
 	// escapedStatement is the statement for a URL literal spelled url,
 	// escaped as remedy.EscapedValue spells it: \x22 for each double quote,
 	// \x2c for each comma.
-	escapedStatement := func(url string) string {
-		return `"CALL DOLT_REMOTE(\x22add\x22\x2c \x22--ref\x22\x2c \x22` + ref + `\x22\x2c \x22origin\x22\x2c \x22` + url + `\x22)"`
-	}
+	escapedStatement := func(url string) string { return escapedFor("origin", ref, url) }
 	for _, tc := range []struct {
 		name, goos, url, want string
 	}{
@@ -309,9 +321,17 @@ func TestColdStartReaddRemedy(t *testing.T) {
 			statementOnly + escapedStatement(`git+https://example.com/o\x27hare/\x24(id)/\x60id\x60/repo.git`)},
 		{"POSIX double quote and backslash", "linux", `git+https://example.com/a"b\c.git`,
 			statementOnly + escapedStatement(`git+https://example.com/a\\\x22b\\\\c.git`)},
-		{"Windows", "windows", url, statementOnly + escapedStatement(url)},
+		{"Windows", "windows", url, statementOnly + stmt},
+		{"Windows ssh URL", "windows", "git+ssh://git@example.com:2222/org/repo.git",
+			statementOnly + statement("git+ssh://git@example.com:2222/org/repo.git")},
 		{"Windows dollar and backtick", "windows", "git+https://example.com/$HOME/`id`/repo.git",
 			statementOnly + escapedStatement(`git+https://example.com/\x24HOME/\x60id\x60/repo.git`)},
+		{"Windows percent", "windows", "git+https://example.com/org%20name/repo.git",
+			statementOnly + escapedStatement(`git+https://example.com/org\x2520name/repo.git`)},
+		{"Windows apostrophe", "windows", "git+https://example.com/o'hare/repo.git",
+			statementOnly + escapedStatement(`git+https://example.com/o\x27hare/repo.git`)},
+		{"Windows backslash", "windows", `git+https://example.com/a\b.git`,
+			statementOnly + escapedStatement(`git+https://example.com/a\\\\b.git`)},
 		{"terminal escape", "linux", "git+https://example.com/r.git\r\x1b[2K", ""},
 		{"terminal escape on Windows", "windows", "git+https://example.com/r.git\r\x1b[2K", ""},
 	} {
@@ -333,11 +353,38 @@ func TestColdStartReaddRemedy(t *testing.T) {
 			if !ok {
 				t.Fatalf("coldStartReaddRemedy(%q) = %s, want the bd sql command or the statement on its own", tc.goos, got)
 			}
+			if named == statement(tc.url) {
+				// Named as it is: only for a URL every shell's quoting
+				// keeps literal, so nothing in it expands when pasted.
+				if strings.ContainsAny(tc.url, "$`%!\"'\\") {
+					t.Errorf("coldStartReaddRemedy(%q) names the statement as it is for a URL a shell acts on: %s", tc.goos, named)
+				}
+				return
+			}
 			if strings.ContainsAny(named, "$`") {
 				t.Errorf("coldStartReaddRemedy(%q) names the statement with a $ or backtick a shell expands: %s", tc.goos, named)
 			}
 			if unquoted, err := strconv.Unquote(named); err != nil || !strings.HasPrefix(unquoted, `CALL DOLT_REMOTE("add", "--ref", "`+ref+`", "origin", "`) {
 				t.Errorf("coldStartReaddRemedy(%q) names %s, which does not read back as the statement: %q, %v", tc.goos, named, unquoted, err)
+			}
+		})
+	}
+	// The ref and the remote name are repository data too: a shell-active
+	// character in either keeps the Windows statement escaped even with an
+	// ordinary URL.
+	for _, tc := range []struct {
+		name, remote, ref, want string
+	}{
+		{"Windows dollar in ref", "origin", "refs/dolt/$(id)",
+			statementOnly + escapedFor("origin", `refs/dolt/\x24(id)`, url)},
+		{"Windows backtick in ref", "origin", "refs/dolt/`id`",
+			statementOnly + escapedFor("origin", `refs/dolt/\x60id\x60`, url)},
+		{"Windows apostrophe in remote", "o'rigin", ref,
+			statementOnly + escapedFor(`o\x27rigin`, ref, url)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := coldStartReaddRemedy("windows", tc.remote, url, tc.ref); got != tc.want {
+				t.Fatalf("coldStartReaddRemedy(windows, %q, %q) =\n%s\nwant\n%s", tc.remote, tc.ref, got, tc.want)
 			}
 		})
 	}

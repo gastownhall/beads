@@ -16,6 +16,7 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/testutil/legacyworkspace"
 )
 
 // graphLinkWorkspaceMetadata is the metadata.json a graph_mode link workspace
@@ -552,10 +553,29 @@ func TestEnsureBeadsDirForPathRefusesTargetsItWouldHide(t *testing.T) {
 		{name: "server mode beside a legacy dolt root", files: map[string]string{"config.yaml": "dolt:\n  mode: server\n", "dolt/leftover": "x"}, want: "selects Dolt server mode"},
 		{name: "several databases", files: map[string]string{databaseMarker("beads"): "x", databaseMarker("other"): "x"}, want: "holds several databases (beads, other)"},
 		{name: "sqlite-era repo", files: map[string]string{"config.json": `{"database":"beads.db"}`, "beads.db": "SQLite format 3\x00" + strings.Repeat("\x00", 4080)}, want: "historical SQLite workspace"},
+		// A clone of a project from before bd wrote config.json holds only its
+		// tracked issues.jsonl: bd run there finds no workspace, and the
+		// database written here would keep bd's upgrade auto-import, which
+		// loads issues.jsonl only into an empty database, from ever loading it.
+		{name: "issues.jsonl and no database", files: legacyworkspace.PreConfigJSONClone().Files, want: "it has issues.jsonl but no database (a fresh clone of a project from before bd wrote config.json, say), so bd run there does not treat it as a workspace; not initializing it, which would hide what it holds behind an empty database. Run `bd init --from-jsonl` in "},
+		// An empty .beads (contributor setup leaves one), an empty
+		// issues.jsonl, which holds nothing to hide, and a redirect stub,
+		// whose own files bd run there never reads, are initialized as before.
+		{name: "empty .beads"},
+		{name: "empty issues.jsonl", files: map[string]string{"issues.jsonl": ""}},
+		// An issues.jsonl that is not a regular file is no tracked export.
+		{name: "issues.jsonl directory", files: map[string]string{"issues.jsonl/keep": ""}},
+		// A config.yaml beside issues.jsonl makes it a workspace to discovery
+		// (beads.HasProjectFiles), so it is initialized as before.
+		{name: "config.yaml beside issues.jsonl", files: map[string]string{"config.yaml": "dolt:\n  mode: embedded\n", "issues.jsonl": `{"id":"old-1"}` + "\n"}},
+		{name: "issues.jsonl in a redirect stub", files: map[string]string{"redirect": "shared/.beads\n", "issues.jsonl": `{"id":"old-1","title":"stub"}` + "\n", "../shared/.beads/metadata.json": `{"backend":"dolt"}`}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			targetDir := t.TempDir()
 			beadsDir := filepath.Join(targetDir, ".beads")
+			if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+				t.Fatal(err)
+			}
 			writeFiles(t, beadsDir, tc.files)
 			before := planningDirListing(t, beadsDir)
 

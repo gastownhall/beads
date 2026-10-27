@@ -252,3 +252,37 @@ func TestRunDoltServerDiagnostics_Unreachable(t *testing.T) {
 		t.Error("expected ServerMode=true")
 	}
 }
+
+// TestDoltVersionFloorCheck pins `bd doctor --server`'s Dolt Version check to
+// the floor every server-mode open enforces: below 2.6.0 is an error whose
+// fix is the upgrade; a version that does not parse is not refused.
+func TestDoltVersionFloorCheck(t *testing.T) {
+	for _, tc := range []struct {
+		version string
+		want    string
+	}{
+		{"2.6.0", StatusOK},
+		{"2.7.1", StatusOK},
+		{"2.5.1", StatusError},
+		{"2.1.8", StatusError},
+		{"SET_BY_INIT", StatusOK},
+	} {
+		t.Run(tc.version, func(t *testing.T) {
+			check := doltVersionFloorCheck(tc.version, "dolt sql-server at 127.0.0.1:3307")
+			if check.Status != tc.want {
+				t.Fatalf("doltVersionFloorCheck(%q).Status = %q, want %q (%+v)", tc.version, check.Status, tc.want, check)
+			}
+			if check.Status == StatusError {
+				for _, want := range []string{tc.version, "2.6.0"} {
+					if !strings.Contains(check.Message, want) {
+						t.Errorf("Message = %q, want it to mention %q", check.Message, want)
+					}
+				}
+				if !strings.Contains(check.Fix, "Upgrade") || !strings.Contains(check.Detail, "release notes") ||
+					!strings.Contains(check.Detail, "127.0.0.1:3307") {
+					t.Errorf("Fix/Detail = %q / %q, want upgrade advice and release notes", check.Fix, check.Detail)
+				}
+			}
+		})
+	}
+}

@@ -18,6 +18,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/remotecache"
@@ -1158,8 +1159,9 @@ func isAmbiguousRepoTarget(repoFlagChanged bool, repoOverride string) bool {
 //
 //   - a .beads refuseUninitializableTarget refuses (one whose own config selects
 //     Dolt server mode, one bd's own admission refuses, a fresh clone of a
-//     SQLite-era project bd run there finds no workspace in, one holding
-//     several databases) is refused, with nothing written;
+//     SQLite-era project, or of a project from before bd wrote config.json,
+//     bd run there finds no workspace in, one holding several databases) is
+//     refused, with nothing written;
 //   - one that holds exactly one embedded database keeps it
 //     (adoptTargetDatabase), the database fork setup creates among them,
 //     unless its working set already holds changes the create's commit would
@@ -1276,6 +1278,12 @@ func ensureBeadsDirForPath(ctx context.Context, targetPath string, sourceStore s
 //     returns (openForeignStore): bd run there finds no workspace and writes
 //     nothing, and the metadata.json written here would make it one that
 //     hides its config.json and issues.jsonl behind an empty database;
+//   - one holding a non-empty issues.jsonl beside nothing discovery treats
+//     as a workspace and no redirect, such as a fresh clone of a project from
+//     before bd wrote config.json, with the same error, naming
+//     bd init --from-jsonl: bd run there finds no workspace, and the issue
+//     written into the new database would keep bd's upgrade auto-import from
+//     ever loading issues.jsonl;
 //   - one holding several embedded databases: nothing records which one
 //     holds the issues (bd run there opens the default database).
 //
@@ -1355,6 +1363,21 @@ func refuseUninitializableTarget(beadsDir string) error {
 	if _, err := os.Lstat(filepath.Join(beadsDir, configfile.LegacyConfigFileName)); err == nil && !beads.HasProjectFiles(beadsDir) {
 		return fmt.Errorf("%w at %s: it has a legacy config.json but no database (a fresh clone of a SQLite-era project, say), so bd run there finds no workspace; not initializing it, which would hide what it holds behind an empty database", ErrNoBeadsDatabase, remedy.PrintedValue(beadsDir))
 	}
+	// So is an issues.jsonl beside nothing discovery treats as a workspace,
+	// most often a fresh clone of a project from before bd wrote config.json,
+	// which tracked only issues.jsonl and ignored its *.db. bd run there finds
+	// no workspace, and once bd init gives it a database, bd's upgrade
+	// auto-import (maybeAutoImportJSONL) loads issues.jsonl into it, but only
+	// while it is empty: the issue written here would keep it from ever
+	// loading. The file is the default import path, since the target has no
+	// config.yaml of its own to name another. bd init --from-jsonl in the
+	// repository imports it. An empty issues.jsonl holds nothing to hide (the
+	// size check is a cheap stand-in for "holds issues"), and a .beads that
+	// redirects elsewhere is not the one bd run there reads.
+	if info, err := os.Stat(filepath.Join(beadsDir, defaultImportJSONLPath)); err == nil && info.Mode().IsRegular() && info.Size() > 0 &&
+		!beads.HasProjectFiles(beadsDir) && beads.FollowRedirect(beadsDir) == beadsDir {
+		return fmt.Errorf("%w at %s: it has %s but no database (a fresh clone of a project from before bd wrote config.json, say), so bd run there does not treat it as a workspace; not initializing it, which would hide what it holds behind an empty database. Run `bd init --from-jsonl` in %s, which imports it, then rerun", ErrNoBeadsDatabase, remedy.PrintedValue(beadsDir), defaultImportJSONLPath, repo)
+	}
 	if databases := embeddeddolt.Databases(beadsDir); len(databases) > 1 {
 		return refuseTarget("%s has no metadata.json and holds several databases (%s); give it a metadata.json whose dolt_database names the one to use, then rerun", repo, remedy.PrintedList(databases, ", "))
 	}
@@ -1393,16 +1416,185 @@ func refuseExistingCreateTarget(beadsDir string) error {
 		return nil
 	}
 	if targetSelectsServerMode(beadsDir, cfg) && selectsEmbeddedStore(beadsDir, cfg) {
-		return &existingTargetRefusal{msg: "its own config selects Dolt server mode, but its metadata.json names no dolt_mode, so bd here would open it as an embedded workspace beside the server data bd there reads. Set \"dolt_mode\": \"server\" in its .beads/metadata.json, then rerun; nothing was created"}
+		const reason = "its own config selects Dolt server mode, but its metadata.json names no dolt_mode, so bd here would open it as an embedded workspace beside the server data bd there reads. "
+		return &existingTargetRefusal{
+			msg:         reason + existingTargetServerRemedy(beadsDir, cfg, true),
+			planningMsg: reason + existingTargetServerRemedy(beadsDir, cfg, false),
+		}
 	}
 	return nil
 }
 
+// existingTargetServerRemedy is the way out refuseExistingCreateTarget gives
+// for a target, beadsDir, with metadata cfg, whose own config selects Dolt
+// server mode: the metadata.json edit, then "then rerun; nothing was
+// created". An open from another workspace reads the target's metadata.json
+// but the launching workspace's config.yaml, so it does not see the
+// target's own config.yaml dolt.host or dolt.port. When the host the
+// target itself dials (cfg.GetDoltServerHost under the target's own
+// configuration, config.WithBeadsDir: its metadata.json dolt_server_host
+// over its dolt.host, where config.local.yaml beside config.yaml outranks
+// it) is one bd does not run its server at (configfile.BdRunsServerAt), the
+// edit names that host, escaped (remedy.EscapedValue) since it is the
+// target repository's content, and the port bd run there dials, or asks
+// for the port its server listens on when nothing names one. Setting only
+// dolt_mode would dial another server, or auto-start a server of bd's own
+// inside the target.
+//
+// Both opens, from here and from bd run there, take the target's port as
+// doltserver's port chain ranks it: its .beads/dolt-server.port, which bd
+// writes for the server it reaches in the target (doltserver.ReadPortFile;
+// read only at a host bd runs its server at), then the listener.port of
+// the Dolt server config.yaml in its data directory
+// (doltserver.DoltConfigYamlPort), then the dolt.port each reads, then its
+// metadata.json dolt_server_port. Only that dolt.port differs: the open
+// from here reads this process's (existingTargetLaunchPort), bd there the
+// one the target's own config.yaml or config.local.yaml names, and each
+// reads the user-level config.yaml's where its own names none. With no
+// port at all, at a host bd runs its server at, each starts a server of
+// bd's own for the target. The ports are read directly: resolving the
+// chain would print dolt_server_port's deprecation warning above a remedy
+// that names that field.
+//
+// The rerun is offered only where it dials the port bd there dials
+// (firstPort over the two chains), since once dolt_mode is set nothing
+// refuses it. Elsewhere bd create's remedy is the edit and the write inside
+// the target. writeInside is whether that write is a way out for the
+// caller: bd create can be run inside the target, bd migrate-personal
+// (which moves issues out of the launching workspace into it) cannot, so
+// its remedy says this write cannot be aimed at the target's server from
+// here.
+//
+// At a host bd runs its server at, bd create's remedy is that write for
+// every target whose own config names dolt.port and that has no
+// listener.port: of the target's files only its port file ranks above
+// that dolt.port, and bd removes it once it finds that server stopped,
+// after which an open from here may dial another port. Metadata's
+// dolt_server_port is not offered there: it would declare a server bd runs
+// for the target externally managed for its own commands. At another host,
+// where neither open reads the port file, the edit's dolt_server_port is
+// the port bd there dials, which the dolt.port bd here reads outranks; with
+// a listener.port, which both opens dial, the edit names no port.
+func existingTargetServerRemedy(beadsDir string, cfg *configfile.Config, writeInside bool) string {
+	const modeOnly = "Set \"dolt_mode\": \"server\" in its .beads/metadata.json, then rerun; nothing was created"
+	const modeThenInside = "Set \"dolt_mode\": \"server\" in its .beads/metadata.json, then make the write inside that repository, where bd dials the port its own config names, which bd here does not read; nothing was created"
+	// A config file that does not load fails the same way for the target's
+	// own commands, which run with what did load.
+	var host string
+	var targetPort int
+	_ = config.WithBeadsDir(beadsDir, func() {
+		host = cfg.GetDoltServerHost()
+		targetPort = configDoltPort()
+	})
+	launchPort, launchConfig := existingTargetLaunchPort()
+	ownPort := workspaceDoltPort(beadsDir)
+	listenerPort := doltserver.DoltConfigYamlPort(beadsDir)
+	if configfile.BdRunsServerAt(host) {
+		portFile := doltserver.ReadPortFile(beadsDir)
+		sameServer := firstPort(portFile, listenerPort, launchPort, cfg.DoltServerPort) == firstPort(portFile, listenerPort, targetPort, cfg.DoltServerPort)
+		switch {
+		case ownPort > 0 && listenerPort == 0 && writeInside:
+			return modeThenInside
+		case sameServer:
+			return modeOnly
+		case ownPort > 0:
+			return fmt.Sprintf("Its own config names dolt.port %d, which bd here does not read, and it has no .beads/dolt-server.port, which bd here would dial first, so even once its .beads/metadata.json sets \"dolt_mode\": \"server\", bd migrate-personal cannot aim this write at that port, and a \"dolt_server_port\" there would declare the server bd runs for it externally managed; nothing was created", ownPort)
+		case writeInside:
+			return fmt.Sprintf("Set \"dolt_mode\": \"server\" in its .beads/metadata.json, then make the write inside that repository, where bd dials the server its own config names: it has no .beads/dolt-server.port, which bd here would dial first, so bd here dials dolt.port %d, which %s names; nothing was created", launchPort, launchConfig)
+		}
+		return fmt.Sprintf("%s names dolt.port %d, which bd here dials for it once its .beads/metadata.json sets \"dolt_mode\": \"server\", since it has no .beads/dolt-server.port, which bd here would dial first, so bd migrate-personal cannot aim this write at its server unless that server listens on that port; nothing was created", capitalize(launchConfig), launchPort)
+	}
+	inside := ""
+	if writeInside {
+		inside = ", or make the write inside that repository, where bd dials the server its own config names"
+	}
+	if listenerPort > 0 {
+		return fmt.Sprintf("Set \"dolt_mode\": \"server\" and \"dolt_server_host\": %s in its .beads/metadata.json, then rerun (bd here and bd there both dial port %d, which the listener.port of the Dolt server config.yaml in its data directory names)%s; nothing was created", remedy.EscapedValue(host), listenerPort, inside)
+	}
+	port := firstPort(targetPort, cfg.DoltServerPort)
+	ok := port > 0
+	if launchPort > 0 && port != launchPort {
+		switch {
+		case writeInside && !ok:
+			return fmt.Sprintf("Set \"dolt_mode\": \"server\", \"dolt_server_host\": %s and \"dolt_server_port\" (the port its server listens on) in its .beads/metadata.json, then make the write inside that repository: %s names dolt.port %d, which outranks that port when bd here opens it; nothing was created", remedy.EscapedValue(host), launchConfig, launchPort)
+		case writeInside:
+			return fmt.Sprintf("Set \"dolt_mode\": \"server\", \"dolt_server_host\": %s and \"dolt_server_port\": %d in its .beads/metadata.json, then make the write inside that repository, where bd dials the server its own config names: %s names dolt.port %d, which outranks that port when bd here opens it; nothing was created", remedy.EscapedValue(host), port, launchConfig, launchPort)
+		case !ok:
+			return fmt.Sprintf("%s names dolt.port %d, which outranks any \"dolt_server_port\" in its .beads/metadata.json when bd here opens it, so bd migrate-personal cannot aim this write at its server at %s unless that server listens on that port; nothing was created", capitalize(launchConfig), launchPort, remedy.EscapedValue(host))
+		}
+		return fmt.Sprintf("%s names dolt.port %d, which outranks any \"dolt_server_port\" in its .beads/metadata.json when bd here opens it, so bd migrate-personal cannot aim this write at port %d, the port bd there dials for its server at %s; nothing was created", capitalize(launchConfig), launchPort, port, remedy.EscapedValue(host))
+	}
+	if !ok {
+		// Nothing names it a port: bd there refuses the unresolved port
+		// too, so no write inside it is offered, and none is made up.
+		return fmt.Sprintf("Set \"dolt_mode\": \"server\", \"dolt_server_host\": %s and \"dolt_server_port\" (the port its server listens on) in its .beads/metadata.json, then rerun; nothing was created", remedy.EscapedValue(host))
+	}
+	return fmt.Sprintf("Set \"dolt_mode\": \"server\", \"dolt_server_host\": %s and \"dolt_server_port\": %d in its .beads/metadata.json, then rerun (a dolt.port in this workspace's own configuration still outranks that port)%s; nothing was created", remedy.EscapedValue(host), port, inside)
+}
+
+// workspaceDoltPort is the dolt.port a workspace, beadsDir, names in its
+// own config.yaml or config.local.yaml (which outranks it), which an open
+// from another workspace does not read; 0 when it names none.
+func workspaceDoltPort(beadsDir string) int {
+	value, _, err := config.WorkspaceYamlSettingWithLocal(beadsDir, "dolt.port")
+	p, convErr := strconv.Atoi(value)
+	if err != nil || convErr != nil || p <= 0 {
+		return 0
+	}
+	return p
+}
+
+// configDoltPort is the dolt.port the loaded configuration names
+// (config.GetYamlConfig: BD_DOLT_PORT, then the workspace's own
+// config.local.yaml and config.yaml, then the user-level config.yaml
+// files), as doltserver's port chain reads it; 0 for none.
+func configDoltPort() int {
+	p, err := strconv.Atoi(config.GetYamlConfig("dolt.port"))
+	if err != nil || p <= 0 {
+		return 0
+	}
+	return p
+}
+
+// existingTargetLaunchPort is the dolt.port this process reads
+// (configDoltPort), 0 for none, and where, the configuration a remedy
+// names for it: the user-level config.yaml where that names the port
+// (config.GetUserYamlConfig), which bd run in the target reads too where
+// its own config names none, else this workspace's own configuration. An
+// open of a target from here dials it over the target's metadata.json
+// dolt_server_port, as doltserver's port chain ranks them, and never reads
+// the dolt.port the target's own config names. A BD_DOLT_PORT, which
+// outranks both files, bd run in the target reads too, so it never decides
+// a refusal.
+func existingTargetLaunchPort() (port int, where string) {
+	port = configDoltPort()
+	if port == 0 {
+		return 0, ""
+	}
+	if user, err := strconv.Atoi(config.GetUserYamlConfig("dolt.port")); err == nil && user == port {
+		return port, "the user-level config.yaml"
+	}
+	return port, "this workspace's own configuration"
+}
+
+// firstPort is the first of ports that names one, as a port chain picks
+// it, or 0 when none does.
+func firstPort(ports ...int) int {
+	for _, p := range ports {
+		if p > 0 {
+			return p
+		}
+	}
+	return 0
+}
+
 // existingTargetRefusal is refuseExistingCreateTarget's own refusal of a
-// target that has a metadata.json. Its message names no path: bd create
-// renders it as "target repo X: ..." (handleRepoTargetInitError) and bd
-// migrate-personal as "planning repo X: ...".
-type existingTargetRefusal struct{ msg string }
+// target that has a metadata.json. Its messages name no path: bd create
+// renders msg as "target repo X: ..." (handleRepoTargetInitError) and bd
+// migrate-personal planningMsg as "planning repo X: ...". They differ only
+// in a remedy that makes the write inside the target, which bd
+// migrate-personal cannot.
+type existingTargetRefusal struct{ msg, planningMsg string }
 
 func (r *existingTargetRefusal) Error() string { return r.msg }
 

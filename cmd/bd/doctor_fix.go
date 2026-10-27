@@ -341,6 +341,7 @@ func applyFixList(path string, fixes []doctorCheck) {
 	orderDoctorFixes(fixes)
 
 	fixedCount := 0
+	skippedCount := 0
 	errorCount := 0
 
 	for _, check := range fixes {
@@ -477,13 +478,13 @@ func applyFixList(path string, fixes []doctorCheck) {
 			dolt.CleanStaleCircuitBreakerFiles()
 			fmt.Printf("  %s Cleared stale circuit breaker files\n", ui.RenderPass("✓"))
 		case "Fresh Clone":
-			err = fix.FreshCloneImport(path, Version)
+			err = freshCloneImport(path, check)
 		case "Pending Migrations":
 			err = fixPendingMigrations(path)
 		case "Config Values":
 			err = fix.ConfigValues(path)
 		case "Classic Artifacts":
-			err = fix.ClassicArtifacts(path)
+			err = fix.ClassicArtifacts(path, os.Stdout)
 		case "Btrfs NoCOW (dolt)":
 			// Applies FS_NOCOW_FL to .beads/ and any existing dolt data
 			// subdirs. Prints the returned message (which includes the
@@ -519,21 +520,45 @@ func applyFixList(path string, fixes []doctorCheck) {
 			continue
 		}
 
-		if err != nil {
+		// A fix that did not run (fix.ErrSkipped: its server could not be
+		// opened, only a unix socket names it, or its project identity
+		// could not be verified) is reported as skipped, neither fixed nor
+		// an error.
+		var skip *fix.SkipError
+		switch {
+		case errors.As(err, &skip):
+			skippedCount++
+			fmt.Printf("  %s Skipped: %s\n", ui.RenderWarn("⚠"), remedy.PrintedMessage(skip.Reason))
+			fmt.Printf("  Manual fix: %s\n", shown.Fix)
+		case err != nil:
 			errorCount++
 			fmt.Printf("  %s Error: %s\n", ui.RenderFail("✗"), remedy.PrintedMessage(err))
 			fmt.Printf("  Manual fix: %s\n", shown.Fix)
-		} else {
+		default:
 			fixedCount++
 			fmt.Printf("  %s Fixed\n", ui.RenderPass("✓"))
 		}
 	}
 
 	// Summary
-	fmt.Printf("\nFix summary: %d fixed, %d errors\n", fixedCount, errorCount)
+	fmt.Printf("\nFix summary: %d fixed, %d skipped, %d errors\n", fixedCount, skippedCount, errorCount)
 	if errorCount > 0 {
 		fmt.Println("\nSome fixes failed. Please review the errors above and apply manual fixes as needed.")
 	}
+}
+
+// freshCloneImport is bd doctor --fix's Fresh Clone repair: it imports
+// issues.jsonl (fix.FreshCloneImport) only for a check that found the
+// database missing (doctor.FreshCloneDetected), and otherwise reports the
+// repair skipped. The check also warns when it could not log in to the
+// server, and says that is not a fresh clone; the import ran there all the
+// same, so any server or identity the repair could reach and the check could
+// not had its live rows overwritten with the tracked copy (#7874 review).
+func freshCloneImport(path string, check doctorCheck) error {
+	if !doctor.FreshCloneDetected(check.Message) {
+		return &fix.SkipError{Reason: errors.New("the Fresh Clone check did not find the database missing, so issues.jsonl is not imported over it")}
+	}
+	return fix.FreshCloneImport(path, Version)
 }
 
 func fixPendingMigrations(path string) error {
