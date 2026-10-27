@@ -110,9 +110,12 @@ func renderGatedReadyMolecules(molecules []*GatedMolecule) error {
 		ui.RenderAccent(""), len(molecules))
 
 	// Every ID below is read from the store, which holds a collaborator's
-	// issues after bd dolt pull: it is named by remedy.PrintedWord, a title
-	// and gate type by remedy.PrintedValue, and the step ID the bd assign hint pastes goes
-	// through remedy.CommandArg.
+	// issues after bd dolt pull: it is named by remedy.PrintedWord, and the
+	// step ID the bd assign hint pastes goes through remedy.CommandArg. A
+	// title and gate type are prose, which bd prints as it is in every
+	// listing: remedy.PrintedValue keeps a line break or terminal control in
+	// one from splitting or redrawing the hint, and shell syntax in one is
+	// printed as it is. The bd assign line is the one to paste.
 	for i, mol := range molecules {
 		fmt.Printf("%d. %s: %s\n", i+1, ui.RenderID(remedy.PrintedWord(mol.MoleculeID)), remedy.PrintedValue(mol.MoleculeTitle))
 		if mol.ClosedGate != nil {

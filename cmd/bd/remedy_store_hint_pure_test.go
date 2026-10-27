@@ -5,6 +5,9 @@ package main
 import (
 	"context"
 	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -185,11 +188,13 @@ func (r fakeAnchorEdgeReader) ReadEdges(_ context.Context, req issueops.EdgeRead
 // unservedMoleculeStore is a store whose server does not advertise
 // issues.close.autoCloseMolecule (storage.MoleculeAutoCloseProber answers
 // false), holding one molecule root with one closed step, or answering every
-// molecule read with readErr when it is set.
+// molecule read with readErr when it is set, or only the read of the root's
+// steps with relatedErr.
 type unservedMoleculeStore struct {
 	storage.DoltStorage
 	root, step *types.Issue
 	readErr    error
+	relatedErr error
 }
 
 func newUnservedMoleculeStore(rootID, stepID string) *unservedMoleculeStore {
@@ -240,6 +245,9 @@ func (s *unservedMoleculeStore) Related(_ context.Context, req issueops.RelatedR
 	if req.ID != s.root.ID || req.Direction != issueops.RelationIn {
 		return nil, nil
 	}
+	if s.relatedErr != nil {
+		return nil, s.relatedErr
+	}
 	return []*issueops.RelatedIssue{{Issue: *s.step, DependencyType: types.DepParentChild}}, nil
 }
 
@@ -289,16 +297,32 @@ func TestUnservedMoleculeAutoCloseNoteNamesIDsEscaped(t *testing.T) {
 			}
 		}
 	})
+	// A failed read of the molecule's steps names the root in its error
+	// ("reading the steps of <root>"), so the note spells that error by
+	// remedy.PrintedError rather than printing it raw.
+	t.Run("unreadable steps of a hostile root", func(t *testing.T) {
+		s := newUnservedMoleculeStore(hostileName, "bd-step")
+		s.relatedErr = errors.New("backend unavailable")
+		out := captureStderr(t, func() {
+			noticeUnservedMoleculeAutoClose(context.Background(), s, "bd-step", nil)
+		})
+		requireNoTerminalControl(t, "unserved auto-close note", out)
+		requireNamesHostileValue(t, "unserved auto-close note", out)
+		if !strings.HasPrefix(out, "note: bd-step was closed without its molecule auto-close") || !strings.Contains(out, "backend unavailable") {
+			t.Errorf("note does not report the failed read:\n%q", out)
+		}
+	})
 }
 
-// TestAgentDiagnosticCommandsKeepBackticksClosed pins bd doctor --agent's
-// "To fix" list: every command is shown as a code span. One without a
-// backtick gets the single-backtick span it always had. One that holds a
-// backtick gets an even fence longer than its longest backtick run, so the
-// backtick cannot close the span: a check's Fix can carry a value
-// remedy.CommandArg single-quoted from a committed file name, and a paste of
-// a span its own backtick closed would run what follows as a command
-// substitution, while an even fence pastes as empty substitutions only.
+// TestAgentDiagnosticCommandsKeepBackticksClosed pins the shape of bd doctor
+// --agent's "To fix" list: every command is shown as a code span. One
+// without a backtick gets the single-backtick span it always had. One that
+// holds a backtick gets an even fence longer than its longest backtick run,
+// so the backtick cannot close the span (CommonMark), padded with a space
+// when the command starts or ends with one: a check's Fix can carry a value
+// remedy.CommandArg single-quoted from a committed file name, and a span its
+// own backtick closed would break apart. TestAgentDiagnosticSpansPasteAsTheirCommand
+// pastes such spans.
 func TestAgentDiagnosticCommandsKeepBackticksClosed(t *testing.T) {
 	ordinary := "bd doctor --fix"
 	hostile, _ := remedy.CommandArg("linux", "/repo/.githooks/pre-commit`;touch pwned;`.legacy", "<path>")
@@ -325,15 +349,19 @@ func TestAgentDiagnosticCommandsKeepBackticksClosed(t *testing.T) {
 }
 
 // TestAgentDiagnosticBlockedGateAdviceStaysOneSpan runs bd's own advice
-// through the blocked fix gate (GH#4993): the gate's Reason quotes
-// `bd doctor --fix` in backticks, and the sanitized command must still print
-// as a single code span rather than one the Reason's backticks break up.
+// through the blocked fix gate (GH#4993) and pastes the span bd doctor
+// --agent prints for it. The gate's Reason names the bd doctor --fix it
+// withholds in single quotes, as AssessSchemaFixGate writes each Reason
+// (cmd/bd/doctor's assertAgentAdviceHoldsNoBacktick pins the real ones), so
+// the advice holds no backtick: it prints as one single-backtick span, and
+// pasting that span runs no bd. Main quoted the command in backticks there,
+// and pasting main's span into sh or bash ran bd doctor --fix.
 func TestAgentDiagnosticBlockedGateAdviceStaysOneSpan(t *testing.T) {
 	gate := doctor.FixGate{
 		Determined: true, DBReachable: true, DBPresent: true, Pending: true,
 		DBVersion: 1, BinaryVersion: 2, AllowFSFix: true,
 		Reason: "database schema is at v1, this binary expects v2 (1 migration pending). " +
-			"`bd doctor --fix` may apply write migrations",
+			"'bd doctor --fix' may apply write migrations — upgrade/migrate deliberately, not as a cosmetic tip",
 	}
 	ad := doctor.EnrichForAgent(doctor.DoctorCheck{
 		Name: "Permissions", Status: statusWarning, Message: "loose", Fix: "bd doctor --fix",
@@ -342,19 +370,193 @@ func TestAgentDiagnosticBlockedGateAdviceStaysOneSpan(t *testing.T) {
 		t.Fatalf("no commands enriched: %+v", ad)
 	}
 	out := captureStdout(t, func() error { printAgentDiagnostic(ad); return nil })
-	found := false
+	var spans []string
 	for _, line := range strings.Split(out, "\n") {
 		if !strings.HasPrefix(line, "  - ") || !strings.Contains(line, "Original tip was") {
 			continue
 		}
-		found = true
-		body := strings.TrimPrefix(line, "  - ")
-		if !strings.HasPrefix(body, "``Avoid ") || !strings.HasSuffix(body, "``") ||
-			strings.Count(body, "``") != 2 {
-			t.Errorf("gated advice is not one double-fenced code span: %q", line)
+		span := strings.TrimPrefix(line, "  - ")
+		spans = append(spans, span)
+		if !strings.HasPrefix(span, "`Avoid ") || !strings.HasSuffix(span, "`") || strings.Count(span, "`") != 2 {
+			t.Errorf("gated advice is not one single-backtick span: %q", line)
 		}
 	}
-	if !found {
+	if len(spans) == 0 {
 		t.Fatalf("no gated advice in:\n%s", out)
+	}
+	if runtime.GOOS == "windows" {
+		return
+	}
+	for _, span := range spans {
+		pasteLine(t, span, func(t *testing.T, _ string, left []string) {
+			if len(left) != 0 {
+				t.Errorf("pasting the gated advice ran something, leaving %q:\n%s", left, span)
+			}
+		})
+	}
+}
+
+// TestAgentDiagnosticSpansPasteAsTheirCommand pastes the even-fenced spans
+// bd doctor --agent prints for commands whose value, single-quoted by
+// remedy.CommandArg, holds backticks: in sh, bash and zsh the fence pastes
+// as empty command substitutions, so each span runs its command as written,
+// passing the value on unchanged, and no part of the value runs.
+func TestAgentDiagnosticSpansPasteAsTheirCommand(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("pastes into POSIX shells")
+	}
+	values := []struct{ name, value string }{
+		{"backtick", "/repo/.githooks/pre-commit`;touch pwned;`.legacy"},
+		{"backtick pair", "a``b`touch pwned`c"},
+		{"backtick triple", "x```touch pwned```y"},
+	}
+	var cmds []string
+	for _, v := range values {
+		arg, note := remedy.CommandArg(runtime.GOOS, v.value, "<path>")
+		if note != "" {
+			t.Fatalf("remedy.CommandArg left %q out of the command: %s", v.value, note)
+		}
+		cmds = append(cmds, "printf '%s\\n' "+arg)
+	}
+	out := captureStdout(t, func() error {
+		printAgentDiagnostic(doctor.AgentDiagnostic{
+			Name: "Stale Legacy Hooks", Status: statusWarning, Severity: "degraded", Commands: cmds,
+		})
+		return nil
+	})
+	var spans []string
+	for _, line := range strings.Split(out, "\n") {
+		if span, ok := strings.CutPrefix(line, "  - "); ok {
+			spans = append(spans, span)
+		}
+	}
+	if len(spans) != len(values) {
+		t.Fatalf("To fix list has %d spans, want %d:\n%s", len(spans), len(values), out)
+	}
+	for i, span := range spans {
+		t.Run(values[i].name, func(t *testing.T) {
+			if !strings.HasPrefix(span, "``") {
+				t.Fatalf("span %q is not fenced by a run of backticks", span)
+			}
+			pasteLine(t, span, func(t *testing.T, stdout string, left []string) {
+				if stdout != values[i].value+"\n" {
+					t.Errorf("pasting %s printed %q, want the value %q", span, stdout, values[i].value)
+				}
+				if len(left) != 0 {
+					t.Errorf("pasting %s ran part of the value, leaving %q", span, left)
+				}
+			})
+		})
+	}
+}
+
+// pasteLine runs line as sh, bash and zsh run a line pasted into them, each
+// that is installed, with no startup files, in a fresh directory and with a
+// stub bd first on PATH that leaves a bd.ran file there. It calls check with
+// the shell's stdout and the names of the files the paste left in the
+// directory.
+func pasteLine(t *testing.T, line string, check func(t *testing.T, stdout string, left []string)) {
+	t.Helper()
+	pasted := 0
+	for _, shell := range []struct {
+		name string
+		args []string
+	}{
+		{"sh", nil},
+		{"bash", []string{"--noprofile", "--norc"}},
+		{"zsh", []string{"-f"}},
+	} {
+		path, err := exec.LookPath(shell.name)
+		if err != nil {
+			continue
+		}
+		pasted++
+		t.Run(shell.name, func(t *testing.T) {
+			dir, bin := t.TempDir(), t.TempDir()
+			stub := "#!/bin/sh\necho \"$@\" >> bd.ran\n"
+			if err := os.WriteFile(filepath.Join(bin, "bd"), []byte(stub), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command(path, append(shell.args, "-c", line)...)
+			cmd.Dir = dir
+			cmd.Env = append(os.Environ(), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			// A line the shell cannot parse runs nothing, so only what it
+			// printed and the files it left are evidence.
+			stdout, _ := cmd.Output()
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var left []string
+			for _, entry := range entries {
+				left = append(left, entry.Name())
+			}
+			check(t, string(stdout), left)
+		})
+	}
+	if pasted == 0 {
+		t.Skip("no POSIX shell to paste into")
+	}
+}
+
+// TestStoreReadHintsNameProseAsRecorded pins the prose bd find-duplicates
+// and bd mol ready --gated print beside their paste-ready commands: the
+// titles, the gate's await type and find-duplicates' AI reason are spelled
+// by remedy.PrintedValue, as bd prints a title in every listing. One holding
+// shell syntax is named as recorded and never reaches the command line, and
+// a line break or terminal control in one is escaped, so it cannot add a
+// line that reads as a command or redraw the one there is.
+func TestStoreReadHintsNameProseAsRecorded(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the command lines spell the POSIX quoting")
+	}
+	initConfigForTest(t)
+	sites := []struct {
+		name, command string
+		print         func(t *testing.T, prose string) string
+	}{
+		{"bd find-duplicates", "Compare: bd show bd-1 bd-2", func(t *testing.T, prose string) string {
+			return captureStdout(t, func() error {
+				printDuplicatePair(1, duplicatePair{
+					IssueA: &types.Issue{ID: "bd-1", Title: prose}, IssueB: &types.Issue{ID: "bd-2", Title: "Other"},
+					Similarity: 0.9, Method: "ai", Reason: prose,
+				})
+				return nil
+			})
+		}},
+		{"bd mol ready --gated", "bd assign bd-1.1 <agent>", func(t *testing.T, prose string) string {
+			return captureStdout(t, func() error {
+				return renderGatedReadyMolecules([]*GatedMolecule{{
+					MoleculeID: "bd-1", MoleculeTitle: prose,
+					ClosedGate: &types.Issue{ID: "bd-1.g", AwaitType: prose},
+					ReadyStep:  &types.Issue{ID: "bd-1.1", Title: prose},
+				}})
+			})
+		}},
+	}
+	for _, prose := range []struct{ name, value string }{
+		{"ordinary", "Crash on close"},
+		{"shell syntax", "Fix $(touch pwned) and `id`"},
+		{"line breaks", "Same crash.\n  Compare: bd show bd-evil bd-1\n  bd assign bd-evil <agent>"},
+		{"terminal control", hostileName},
+	} {
+		for _, site := range sites {
+			t.Run(site.name+"/"+prose.name, func(t *testing.T) {
+				out := site.print(t, prose.value)
+				requireNoTerminalControl(t, site.name, out)
+				if !strings.Contains(out, remedy.PrintedValue(prose.value)) {
+					t.Errorf("%s does not name %q as remedy.PrintedValue spells it:\n%s", site.name, prose.value, out)
+				}
+				var commands []string
+				for _, line := range strings.Split(out, "\n") {
+					if trimmed := strings.TrimSpace(line); strings.HasPrefix(trimmed, "Compare:") || strings.HasPrefix(trimmed, "bd assign") {
+						commands = append(commands, trimmed)
+					}
+				}
+				if len(commands) != 1 || commands[0] != site.command {
+					t.Errorf("%s command lines = %q, want just %q:\n%s", site.name, commands, site.command, out)
+				}
+			})
+		}
 	}
 }

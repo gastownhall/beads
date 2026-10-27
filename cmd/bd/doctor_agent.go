@@ -131,12 +131,15 @@ func printAgentDiagnostic(d doctor.AgentDiagnostic) {
 
 // agentCodeSpan shows cmd as a Markdown code span. A command without a
 // backtick gets the single-backtick span it always had. One that holds a
-// backtick (bd's own blocked-gate advice quotes `bd doctor --fix`, and a
-// check's Fix can carry a value remedy.CommandArg single-quoted from a
-// committed file name) gets a fence longer than its longest backtick run, so
-// the backtick cannot close the span. The fence length is even: pasted into
-// sh, bash or zsh, an even fence is only empty command substitutions, so it
-// starts no substitution that would run part of the quoted value.
+// backtick (a check's Fix can carry a value remedy.CommandArg single-quoted
+// from a committed file name) gets a fence longer than its longest backtick
+// run, so the backtick cannot close the span (CommonMark). The fence length
+// is even: pasted into sh, bash or zsh, an even fence is only empty command
+// substitutions, so the span runs its command as written and a backtick
+// inside the command's single quotes stays literal. That is all the fence
+// does for a paste: a backtick the command leaves outside quotes still starts
+// a substitution, so bd's own commands and advice hold none (the fix gate's
+// Reason names the 'bd doctor --fix' it withholds in single quotes).
 func agentCodeSpan(cmd string) string {
 	longest, run := 0, 0
 	for _, r := range cmd {

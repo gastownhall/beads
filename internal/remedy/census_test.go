@@ -97,7 +97,16 @@ import (
 // TestStoreReadHintsNameTitlesEscaped,
 // TestEmbeddedRemedyPrinting_closeContinue and TestProxiedServerClose2B, and
 // bd close's partial-ID notice by internal/utils'
-// TestEmitPartialResolutionNoticeSpellsResolvedID. A remedy value wrapped in
+// TestEmitPartialResolutionNoticeSpellsResolvedID. One such line still names
+// IDs as the store holds them: when a completed molecule's root refuses its
+// auto-close, warnMoleculeAutoCloseRefusal prints the refusal's sentence
+// above bd close --continue's hint, spelled by remedy.PrintedValue because
+// the close result carries only the sentence, so a $(...) in the root or
+// blocker IDs it names still runs when the output is pasted;
+// TestStoreReadHintsNameTitlesEscaped pins only that it cannot redraw the
+// hint. A title, or bd find-duplicates' AI reason, printed beside such a
+// command is prose, spelled by remedy.PrintedValue as everywhere bd prints
+// one, so a $(...) in it is printed as it is. A remedy value wrapped in
 // literal backticks — a quoted word (shellWordSources) or a remedy printer
 // called in place that can return a backtick — is tracked by
 // TestRemedyCensusBacktickedRemedies; a value that crosses a struct field

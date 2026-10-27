@@ -1054,12 +1054,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   those commands name it escaped when it is not a plain word, as do the
   partial-ID notice every command that resolves an ID prefix prints and
   `bd close --force`'s open-children warning, so no such ID can redraw a
-  line above a hint. `bd doctor --agent` shows a fix command that holds a
+  line above a hint. `bd find-duplicates --method ai` spells the model's
+  reason for a pair as it spells the titles beside it, so a carriage return
+  or terminal escape in the reason no longer reaches the terminal raw above
+  the `Compare:` line. `bd doctor --agent` shows a fix command that holds a
   backtick in a code span fenced by a longer, even run of backticks, so the
-  command's own backtick no longer closes the span; this includes bd's own
-  advice while the fix gate withholds `bd doctor --fix`, which main printed
-  as a single-backtick span its quoted `bd doctor --fix` broke apart.
-
+  command's own backtick no longer closes the span. bd's own advice while
+  the fix gate withholds `bd doctor --fix` now names that command in single
+  quotes, in `bd doctor`'s schema fix-gate line too: main quoted it in
+  backticks, which broke the advice's single-backtick span apart, and
+  pasting that span into sh or bash ran `bd doctor --fix`.
 - **`bd export` and auto-export no longer write JSONL with relations silently
   dropped** (GH#6870). When a label, dependency, comment or count read fails,
   `bd export` now exits non-zero and leaves the output file untouched, and

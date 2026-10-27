@@ -852,7 +852,10 @@ func noticeUnservedMoleculeAutoClose(ctx context.Context, s storage.DoltStorage,
 		root, err = issueops.CompletedMolecule(ctx, reader, stepID)
 	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "note: %s was closed without its molecule auto-close (the server does not advertise %s), and its molecule could not be read: %v\n", printedIssueID(stepID), token, err)
+		// The read error can name the store's root ID (issueops wraps it into
+		// "reading the steps of <root>"), so it is spelled by
+		// remedy.PrintedError like any error that repeats a value.
+		fmt.Fprintf(os.Stderr, "note: %s was closed without its molecule auto-close (the server does not advertise %s), and its molecule could not be read: %v\n", printedIssueID(stepID), token, remedy.PrintedError(err))
 		return
 	}
 	if root == nil || noted[root.ID] {
