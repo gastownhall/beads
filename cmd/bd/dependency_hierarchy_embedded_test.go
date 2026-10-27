@@ -98,6 +98,46 @@ func TestEmbeddedExplicitHierarchicalParentEdges(t *testing.T) {
 		}
 	})
 
+	// GH#3415: `bd list --parent <epic> --pretty` renders the tree the
+	// storage.DescendantSearcher capability now fetches in one read. These
+	// subtests pin the one-shot rendering contract around that walk.
+	t.Run("list parent pretty all includes closed child subtree", func(t *testing.T) {
+		epic := bdCreate(t, bd, dir, "GH3415 tree epic", "--type", "epic")
+		open := bdCreate(t, bd, dir, "GH3415 open child", "--type", "task", "--parent", epic.ID)
+		closed := bdCreate(t, bd, dir, "GH3415 closed child", "--type", "task", "--parent", epic.ID)
+		grand := bdCreate(t, bd, dir, "GH3415 closed child's child", "--type", "task", "--parent", closed.ID)
+		// --force: closing a parent with an open child is refused otherwise.
+		if out, code := bdRunRaw(t, bd, dir, nil, "update", closed.ID, "--status", "closed", "--force"); code != 0 {
+			t.Fatalf("bd update %s --status closed exited %d:\n%s", closed.ID, code, out)
+		}
+
+		all, code := bdRunRaw(t, bd, dir, nil, "list", "--parent", epic.ID, "--pretty", "--all")
+		if code != 0 {
+			t.Fatalf("bd list --parent --pretty --all exited %d:\n%s", code, all)
+		}
+		for _, id := range []string{epic.ID, open.ID, closed.ID, grand.ID} {
+			if !strings.Contains(all, id) {
+				t.Errorf("--pretty --all is missing %s:\n%s", id, all)
+			}
+		}
+
+		pretty, code := bdRunRaw(t, bd, dir, nil, "list", "--parent", epic.ID, "--pretty")
+		if code != 0 {
+			t.Fatalf("bd list --parent --pretty exited %d:\n%s", code, pretty)
+		}
+		if !strings.Contains(pretty, open.ID) {
+			t.Errorf("--pretty without --all is missing open child %s:\n%s", open.ID, pretty)
+		}
+		// The closed child is omitted, and so is the subtree only reachable
+		// through it.
+		if strings.Contains(pretty, closed.ID) {
+			t.Errorf("--pretty without --all showed closed child %s:\n%s", closed.ID, pretty)
+		}
+		if strings.Contains(pretty, grand.ID) {
+			t.Errorf("--pretty without --all showed the closed child's subtree %s:\n%s", grand.ID, pretty)
+		}
+	})
+
 	// The embedded half of the capability parity contract: the same fixture
 	// TestSearchDescendantsMatchesPerNodeWalk runs against the server store
 	// (internal/storage/dolt), here through the embedded store the CLI

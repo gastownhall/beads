@@ -999,6 +999,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd list --watch` and `bd show --watch` no longer squeeze out concurrent
+  bd commands on an embedded workspace. A refresh that outgrew the poll
+  interval used to start the next one at once (a fixed-rate ticker), and a
+  `--parent` tree refresh opened the embedded backend once per node, so a
+  concurrent `bd list`, `bd show` or `bd update` could spend its whole
+  driver retry budget waiting for the flock and time out. Both watch loops
+  now wait a full poll interval after each refresh before arming the next
+  one, and the `--parent` tree is fetched by one storage read
+  (`SearchDescendants`) instead of a per-node walk, over one engine-open
+  (#3415).
 - `bd gitlab pull` no longer overwrites a bead linked to another GitLab
   project's issue with the same number, or puts that issue's dependency
   links on it. Issue IIDs are only unique within a project, but when the
