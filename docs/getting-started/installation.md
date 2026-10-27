@@ -221,6 +221,28 @@ curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/inst
 CGO_ENABLED=0 go install github.com/steveyegge/beads/cmd/bd@latest
 ```
 
+### Android (Termux)
+
+The `android_arm64` release is built for Termux with cgo, so embedded Dolt
+mode works on the device without a `dolt sql-server`. Install git first:
+
+```bash
+pkg install git
+```
+
+**Via npm** (downloads the `android_arm64` release):
+```bash
+npm install -g @beads/bd
+```
+
+**Via the release tarball**: download
+`beads_<version>_android_arm64.tar.gz` from
+[GitHub Releases](https://github.com/gastownhall/beads/releases), extract it,
+and put `bd` on your `PATH` (for example `$PREFIX/bin`).
+
+Do not use the quick install script on Termux: it sees `uname -s` as Linux
+and installs the glibc Linux build, which does not run on Android.
+
 ### Windows 11
 
 Beads ships with native Windows support—no MSYS or MinGW required.

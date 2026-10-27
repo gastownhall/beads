@@ -316,6 +316,24 @@ go_test(
     deps = ["//internal/testutil/bazeltest"],
 )
 
+# The docs and comments that describe the bd-android-arm64 cgo build (#3538),
+# declared file by file so a docs or Go change elsewhere leaves it cached.
+go_test(
+    name = "android_release_docs_test",
+    srcs = [
+        "android_release_docs_test.go",
+        "repo_helpers_test.go",
+    ],
+    data = [
+        "ci/bazel-release-cross-compile.sh",
+        "//:CHANGELOG.md",
+        "//:RELEASING.md",
+        "//:docs/getting-started/installation.md",
+        "//cmd/bd:store_factory_server_mode.go",
+    ],
+    deps = ["//internal/testutil/bazeltest"],
+)
+
 # pr.yml's check-doc-freshness-platforms Linux leg: `go test
 # -tags integration ./scripts -count=1 -run '^(TestDocFreshness.*|
 # TestRequiredSuiteContract)$' -args -required-suite=doc-freshness`, whose

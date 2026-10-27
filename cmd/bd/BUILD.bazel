@@ -1853,6 +1853,13 @@ exports_files(
     visibility = ["//internal/httpapi:__pkg__"],
 )
 
+# //scripts:android_release_docs_test: the comment counting the CGO_ENABLED=0
+# release targets.
+exports_files(
+    ["store_factory_server_mode.go"],
+    visibility = ["//scripts:__pkg__"],
+)
+
 # Release-metadata surfaces gated by //internal/versioncheck's releaseSources
 # table: the canonical version and the Windows PE resource files. Aggregated
 # into //:release_metadata_files, which is what the tests declare as data.
