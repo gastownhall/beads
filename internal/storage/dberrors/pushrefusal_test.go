@@ -31,3 +31,27 @@ func TestIsRemoteDanglingReference_EveryRendering(t *testing.T) {
 		}
 	}
 }
+
+// TestIsRemoteDanglingReference_NotOtherFailures keeps the remote guidance
+// off failures it would mislead: bd's own pre-push fsck (the push never
+// reached the remote, even when fsck's quoted output repeats Dolt's phrase),
+// Dolt's local NBS "dangling ref" form, and the push refusals that already
+// have guidance of their own.
+func TestIsRemoteDanglingReference_NotOtherFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"nil", nil},
+		{"pre-push fsck", fmt.Errorf("%w: aborting push to prevent propagating corrupt chunks: %s", errors.New("dangling chunk reference"), "chunk abc missing")},
+		{"pre-push fsck quoting dolt", fmt.Errorf("%w: aborting push to prevent propagating corrupt chunks: %s", errors.New("dangling chunk reference"), "Found dangling references to HashSet {\n  e564v1teutmhp289qspj9ba1lhrvit00\n}")},
+		{"local nbs", errors.New("dangling ref: found dangling references to HashSet {\n  e564v1teutmhp289qspj9ba1lhrvit00\n}")},
+		{"diverged history", errors.New("failed to push to origin/main: no common ancestor")},
+		{"pk mismatch", errors.New("error: cannot merge because table dependencies has different primary keys in its common ancestor")},
+		{"remote not found", errors.New("remote 'backup' not found")},
+	} {
+		if IsRemoteDanglingReference(tc.err) {
+			t.Errorf("%s: IsRemoteDanglingReference(%v) = true, want false", tc.name, tc.err)
+		}
+	}
+}
