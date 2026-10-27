@@ -70,6 +70,15 @@ func TestJournalContract(t *testing.T) {
 	t.Run("ArrivalIgnoresSuppliedValues", func(t *testing.T) {
 		conformance.RunJournalArrivalIgnoresSuppliedValues(t, ctx, fixture)
 	})
+	t.Run("ArrivalReimportKeepsTheStamp", func(t *testing.T) {
+		conformance.RunJournalArrivalReimportKeepsTheStamp(t, ctx, fixture)
+	})
+	t.Run("ArrivalFirstCreateRecordStampsAnUnstampedRow", func(t *testing.T) {
+		conformance.RunJournalArrivalFirstCreateRecordStampsAnUnstampedRow(t, ctx, fixture)
+	})
+	t.Run("ArrivalRenameKeepsTheStamp", func(t *testing.T) {
+		conformance.RunJournalArrivalRenameKeepsTheStamp(t, ctx, fixture)
+	})
 	t.Run("EveryMutationKindLandsARow", func(t *testing.T) {
 		conformance.RunJournalEveryMutationKindLandsARow(t, ctx, fixture)
 	})
@@ -92,6 +101,7 @@ func newEmbeddedJournalFixture(t *testing.T, te *testEnv, prefix string) conform
 		return store.PromoteFromEphemeral(ctx, id, "actor")
 	})
 	arrival.Import = conformance.ArrivalUpsertImportHook(store)
+	arrival.Rename = conformance.ArrivalRenameHook(store)
 	return conformance.JournalFixture{
 		IssuePrefix:       prefix,
 		Journal:           cursor,

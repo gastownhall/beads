@@ -428,7 +428,7 @@ func RunJournalHeadSurvivesAFullPrune(t *testing.T, ctx context.Context, fixture
 	}
 }
 
-// THE ARRIVAL CASES. The nine cases below pin the arrival_seq stamp; their
+// THE ARRIVAL CASES. The twelve cases below pin the arrival_seq stamp; their
 // hooks, helpers and the contract's statement are in
 // journal_arrival_contract.go. They are declared HERE, between the pruning
 // cases and RunJournalEveryMutationKindLandsARow, because the role table runs
@@ -747,6 +747,111 @@ func RunJournalArrivalIgnoresSuppliedValues(t *testing.T, ctx context.Context, f
 		if record, ok := arrivalFindCreateRecord(page.Rows, id); ok && got != record.Seq {
 			t.Errorf("%s arrival_seq = %d, want its create record's seq %d", id, got, record.Seq)
 		}
+	}
+}
+
+// RunJournalArrivalReimportKeepsTheStamp pins that a synthetic create never
+// moves a stamp. Re-importing a row that already exists is an upsert, and the
+// journal records it as a create (the importer cannot tell a consumer the row
+// was there before); that record must not restamp the row. It carries its own,
+// higher seq, and its post-image repeats the stamp the row already had.
+func RunJournalArrivalReimportKeepsTheStamp(t *testing.T, ctx context.Context, fixture JournalFixture) {
+	hooks := arrivalHooks(t, fixture)
+	if hooks.Import == nil {
+		t.Skip("this leg supplies no import (JournalArrivalHooks.Import)")
+	}
+	journalBaseline(t, ctx, fixture)
+	id := fixture.IssuePrefix + "-reimport-a"
+	stamp := arrivalCreateWisp(t, ctx, hooks, id).ArrivalSeq
+	if stamp == 0 {
+		t.Fatalf("wisp %s was created unstamped", id)
+	}
+	again := arrivalGet(t, ctx, hooks, id)
+	again.Title = "re-imported " + id
+	before := journalHead(t, ctx, fixture)
+	if err := hooks.Import(ctx, again); err != nil {
+		t.Fatalf("re-importing stamped wisp %s: %v", id, err)
+	}
+	if got := arrivalGet(t, ctx, hooks, id).ArrivalSeq; got != stamp {
+		t.Errorf("re-importing %s moved its arrival_seq from %d to %d: a synthetic create never restamps a row",
+			id, stamp, got)
+	}
+	record := arrivalCreateRecord(t, journalRead(t, ctx, fixture, before, 0).Rows, id)
+	if record.Seq == stamp {
+		t.Errorf("the re-import's create record reused seq %d, the row's stamp", record.Seq)
+	}
+	if post := arrivalPostImage(t, record); post != stamp {
+		t.Errorf("the re-import's create record (seq %d) carries arrival_seq %d in its post-image, want the "+
+			"row's unchanged %d", record.Seq, post, stamp)
+	}
+}
+
+// RunJournalArrivalFirstCreateRecordStampsAnUnstampedRow pins the first-record
+// rule: a wisp created while the journal was off has no stamp and no create
+// record, so the first create record journaled for it — here a re-import once
+// the journal is on — is the one that stamps it, with that record's seq.
+func RunJournalArrivalFirstCreateRecordStampsAnUnstampedRow(t *testing.T, ctx context.Context, fixture JournalFixture) {
+	hooks := arrivalHooks(t, fixture)
+	if hooks.Import == nil {
+		t.Skip("this leg supplies no import (JournalArrivalHooks.Import)")
+	}
+	journalBaseline(t, ctx, fixture)
+	id := fixture.IssuePrefix + "-first-a"
+	fixture.SetJournalEnabled(false)
+	created, err := hooks.CreateWisp(ctx, id)
+	fixture.SetJournalEnabled(true)
+	if err != nil {
+		t.Fatalf("creating wisp %s with the journal off: %v", id, err)
+	}
+	if created.ArrivalSeq != 0 {
+		t.Fatalf("a wisp created with the journal off returned arrival_seq %d, want none", created.ArrivalSeq)
+	}
+	again := arrivalGet(t, ctx, hooks, id)
+	again.Title = "re-imported " + id
+	before := journalHead(t, ctx, fixture)
+	if err := hooks.Import(ctx, again); err != nil {
+		t.Fatalf("re-importing unstamped wisp %s: %v", id, err)
+	}
+	record := arrivalCreateRecord(t, journalRead(t, ctx, fixture, before, 0).Rows, id)
+	if got := arrivalGet(t, ctx, hooks, id).ArrivalSeq; got != record.Seq {
+		t.Errorf("%s arrival_seq = %d after its first create record (seq %d): the first create record "+
+			"journaled for an unstamped row stamps it", id, got, record.Seq)
+	}
+	if post := arrivalPostImage(t, record); post != record.Seq {
+		t.Errorf("the stamping record (seq %d) carries arrival_seq %d in its post-image", record.Seq, post)
+	}
+}
+
+// RunJournalArrivalRenameKeepsTheStamp pins the rename half of the synthetic
+// create rule: a rename journals delete(old) + create(new), and the create
+// must carry the row's existing stamp rather than restamp it.
+func RunJournalArrivalRenameKeepsTheStamp(t *testing.T, ctx context.Context, fixture JournalFixture) {
+	hooks := arrivalHooks(t, fixture)
+	if hooks.Rename == nil {
+		t.Skip("this leg supplies no id rename (JournalArrivalHooks.Rename)")
+	}
+	journalBaseline(t, ctx, fixture)
+	from := fixture.IssuePrefix + "-rename-a"
+	to := fixture.IssuePrefix + "-rename-b"
+	stamp := arrivalCreateWisp(t, ctx, hooks, from).ArrivalSeq
+	if stamp == 0 {
+		t.Fatalf("wisp %s was created unstamped", from)
+	}
+	before := journalHead(t, ctx, fixture)
+	if err := hooks.Rename(ctx, from, to); err != nil {
+		t.Fatalf("renaming stamped wisp %s to %s: %v", from, to, err)
+	}
+	if got := arrivalGet(t, ctx, hooks, to).ArrivalSeq; got != stamp {
+		t.Errorf("renaming %s to %s moved its arrival_seq from %d to %d: a rename never restamps a row",
+			from, to, stamp, got)
+	}
+	record := arrivalCreateRecord(t, journalRead(t, ctx, fixture, before, 0).Rows, to)
+	if record.Seq == stamp {
+		t.Errorf("the rename's create record reused seq %d, the row's stamp", record.Seq)
+	}
+	if post := arrivalPostImage(t, record); post != stamp {
+		t.Errorf("the rename's create record (seq %d) carries arrival_seq %d in its post-image, want the "+
+			"row's unchanged %d", record.Seq, post, stamp)
 	}
 }
 

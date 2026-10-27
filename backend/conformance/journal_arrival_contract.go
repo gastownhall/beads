@@ -50,7 +50,12 @@ import (
 //     record is pruned (RecoversCreateOrderAfterTruncation);
 //   - it is never handed out twice, across a delete and a re-create
 //     (IsNeverReused);
-//   - a value a caller supplies is never stored (IgnoresSuppliedValues).
+//   - a value a caller supplies is never stored (IgnoresSuppliedValues);
+//   - a synthetic create record — an import upsert or a rename journals one
+//     for a row that already exists — never moves a stamp
+//     (ReimportKeepsTheStamp, RenameKeepsTheStamp), and the first create
+//     record journaled for an unstamped row is the one that stamps it
+//     (FirstCreateRecordStampsAnUnstampedRow).
 //
 // A LEG THAT CANNOT DRIVE A HOOK LEAVES IT NIL, and the case (or the part of it)
 // that needs the hook skips by name. A fixture with no Arrival at all skips
@@ -75,6 +80,10 @@ type JournalArrivalHooks struct {
 	CreateWispClaiming func(ctx context.Context, id string, forged int64) error
 	// Import imports issue (an upsert, carrying whatever ArrivalSeq it holds).
 	Import func(ctx context.Context, issue *types.Issue) error
+	// Rename changes an existing issue's id from one to another. A leg whose
+	// backend has no id-rename verb leaves it nil, and RenameKeepsTheStamp
+	// skips.
+	Rename func(ctx context.Context, from, to string) error
 	// Promote moves an ephemeral issue onto the durable plane.
 	Promote func(ctx context.Context, id string) error
 	// Update mutates a scalar field of an existing wisp, and Close closes one.
@@ -277,6 +286,24 @@ func ArrivalUpsertImportHook(store ArrivalUpserter) func(ctx context.Context, is
 			SkipPrefixValidation:           true,
 			SkipDependencyValidationErrors: true,
 		})
+	}
+}
+
+// ArrivalRenamer is the id-rename verb a store exposes (storage.DoltStorage's
+// UpdateIssueID), with the read the rename needs to carry the row's text.
+type ArrivalRenamer interface {
+	GetIssue(ctx context.Context, id string) (*types.Issue, error)
+	UpdateIssueID(ctx context.Context, oldID, newID string, issue *types.Issue, actor string) error
+}
+
+// ArrivalRenameHook binds JournalArrivalHooks.Rename to store's id rename.
+func ArrivalRenameHook(store ArrivalRenamer) func(ctx context.Context, from, to string) error {
+	return func(ctx context.Context, from, to string) error {
+		issue, err := store.GetIssue(ctx, from)
+		if err != nil {
+			return fmt.Errorf("reading %s before renaming it: %w", from, err)
+		}
+		return store.UpdateIssueID(ctx, from, to, issue, "actor")
 	}
 }
 

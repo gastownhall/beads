@@ -437,6 +437,9 @@ var roleContractCases = []roleContract{
 		RunJournalArrivalRecoversCreateOrderAfterTruncation,
 		RunJournalArrivalIsNeverReused,
 		RunJournalArrivalIgnoresSuppliedValues,
+		RunJournalArrivalReimportKeepsTheStamp,
+		RunJournalArrivalFirstCreateRecordStampsAnUnstampedRow,
+		RunJournalArrivalRenameKeepsTheStamp,
 		RunJournalEveryMutationKindLandsARow,
 	),
 
