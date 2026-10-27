@@ -229,3 +229,45 @@ func TestEnginePullOnlySelectiveConflict(t *testing.T) {
 		t.Errorf("conflict messages = %q, want one naming the imported external version", msgs)
 	}
 }
+
+// TestEnginePullOnlyKeepsLocalOnlyEdit pins that a local edit with no
+// matching remote change since last_sync is kept — even by the blanket
+// external strategy. That is not a conflict, so nothing is counted or
+// reported, and pull-only conflict resolution must not become blanket
+// overwrite.
+func TestEnginePullOnlyKeepsLocalOnlyEdit(t *testing.T) {
+	for _, row := range []struct {
+		name          string
+		remoteUpdated time.Time
+	}{
+		// Jira's Since filter rounds to the minute, so a remote edit can
+		// legitimately sit just before last_sync.
+		{"remote changed before the last sync", pullConflictLastSync.Add(-30 * time.Second)},
+		{"remote changed exactly at the last sync", pullConflictLastSync},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			fx := newPullConflictFixture(t, row.remoteUpdated)
+			result, err := fx.engine.Sync(context.Background(), SyncOptions{
+				Pull:              true,
+				ConflictResolution: ConflictExternal,
+			})
+			if err != nil {
+				t.Fatalf("Sync: %v", err)
+			}
+			if fx.local.Status != types.StatusOpen {
+				t.Errorf("status = %q, want open", fx.local.Status)
+			}
+			if result.PullStats.Updated != 0 || result.PullStats.Skipped != 1 {
+				t.Errorf("PullStats.Updated/Skipped = %d/%d, want 0/1",
+					result.PullStats.Updated, result.PullStats.Skipped)
+			}
+			if result.PullStats.Conflicts != 0 || result.Stats.Conflicts != 0 {
+				t.Errorf("conflicts = pull %d, total %d, want 0/0",
+					result.PullStats.Conflicts, result.Stats.Conflicts)
+			}
+			if msgs := conflictMessages(fx.messages); len(msgs) != 0 {
+				t.Errorf("conflict messages = %q, want none", msgs)
+			}
+		})
+	}
+}
