@@ -27,6 +27,7 @@ import (
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
@@ -80,6 +81,11 @@ type bootstrapServerDBCheck struct {
 	Exists    bool
 	Reachable bool
 	Err       error
+	// Prefix is the database's issue_prefix when PrefixKnown. A database
+	// with no config table or no issue_prefix row is known to have none; a
+	// read that failed any other way leaves PrefixKnown false.
+	Prefix      string
+	PrefixKnown bool
 }
 
 // bootstrapRetryDelay is the sleep function used between server-DB-not-found
@@ -113,20 +119,45 @@ var checkBootstrapServerDB = func(probeCfg bootstrapServerProbeConfig) bootstrap
 	}
 	defer rows.Close()
 
+	found := false
 	for rows.Next() {
 		var name string
 		if err := rows.Scan(&name); err != nil {
 			return bootstrapServerDBCheck{Reachable: true, Err: err}
 		}
 		if name == dbName {
-			return bootstrapServerDBCheck{Exists: true, Reachable: true}
+			found = true
+			break
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return bootstrapServerDBCheck{Reachable: true, Err: err}
 	}
+	if !found {
+		return bootstrapServerDBCheck{Exists: false, Reachable: true}
+	}
+	_ = rows.Close()
 
-	return bootstrapServerDBCheck{Exists: false, Reachable: true}
+	prefix, known := readBootstrapServerPrefix(ctx, db, dbName)
+	return bootstrapServerDBCheck{Exists: true, Reachable: true, Prefix: prefix, PrefixKnown: known}
+}
+
+// readBootstrapServerPrefix reads issue_prefix from dbName's config table on
+// the server db is connected to. A missing config table or row is a known
+// empty prefix (a database created outside bd, or one whose setup stopped
+// before seeding it); any other failure is unknown.
+func readBootstrapServerPrefix(ctx context.Context, db *sql.DB, dbName string) (prefix string, known bool) {
+	var value sql.NullString
+	query := fmt.Sprintf("SELECT value FROM `%s`.config WHERE `key` = 'issue_prefix'", strings.ReplaceAll(dbName, "`", "``")) //nolint:gosec // G201: the identifier is backtick-quoted with embedded backticks doubled
+	err := db.QueryRowContext(ctx, query).Scan(&value)
+	switch {
+	case err == nil:
+		return strings.TrimSpace(value.String), true
+	case errors.Is(err, sql.ErrNoRows), dberrors.IsMissingTable(err, "config"):
+		return "", true
+	default:
+		return "", false
+	}
 }
 
 var bootstrapCmd = &cobra.Command{
@@ -525,7 +556,7 @@ func detectBootstrapPlan(beadsDir string, cfg *configfile.Config) BootstrapPlan 
 	settledOnNameAlone := dbProbe.Ran && !dbProbe.LocalEvidence
 	if hasExistingDB {
 		if dbAction.Action != "none" || (beadsDirExists && !settledOnNameAlone) {
-			return seedPrefixPlan(dbAction, cfg, isServer)
+			return seedPrefixPlan(dbAction, cfg, isServer, dbProbe)
 		}
 		deferredExistingPlan = &dbAction
 	}
@@ -556,7 +587,7 @@ func detectBootstrapPlan(beadsDir string, cfg *configfile.Config) BootstrapPlan 
 	}
 
 	if deferredExistingPlan != nil {
-		return seedPrefixPlan(*deferredExistingPlan, cfg, isServer)
+		return seedPrefixPlan(*deferredExistingPlan, cfg, isServer, dbProbe)
 	}
 
 	// Only now, with every local recovery source exhausted, does an
@@ -580,6 +611,11 @@ func detectBootstrapPlan(beadsDir string, cfg *configfile.Config) BootstrapPlan 
 	if refusal, refused := refuseServerModeInitPlan(plan, cfg, isServer, dbProbe); refused {
 		return refusal
 	}
+	if isServer && !dbProbe.Ran {
+		if existing, probe, ok := unprobedServerDBPlan(beadsDir, cfg); ok {
+			return seedPrefixPlan(existing, cfg, isServer, probe)
+		}
+	}
 
 	// Fresh setup
 	plan.Action = "init"
@@ -596,11 +632,17 @@ func detectBootstrapPlan(beadsDir string, cfg *configfile.Config) BootstrapPlan 
 // It is applied where detectBootstrapPlan returns an existing-database
 // verdict, never inside existingBootstrapDBPlan, so the deferral of a
 // name-only server match ahead of the recovery sources is unchanged.
-func seedPrefixPlan(plan BootstrapPlan, cfg *configfile.Config, isServer bool) BootstrapPlan {
-	if plan.Action != "none" || !plan.HasExisting || isServer {
+func seedPrefixPlan(plan BootstrapPlan, cfg *configfile.Config, isServer bool, probe serverDBProbe) BootstrapPlan {
+	if plan.Action != "none" || !plan.HasExisting {
 		return plan
 	}
-	prefix, known := readBootstrapEmbeddedPrefix(context.Background(), plan.BeadsDir)
+	var prefix string
+	var known bool
+	if isServer {
+		prefix, known = probe.Prefix, probe.Exists && probe.PrefixKnown
+	} else {
+		prefix, known = readBootstrapEmbeddedPrefix(context.Background(), plan.BeadsDir)
+	}
 	if !known || prefix != "" {
 		return plan
 	}
@@ -770,12 +812,54 @@ type serverDBProbe struct {
 	Socket string
 	Exists bool  // the server confirmed the database exists
 	Err    error // the probe could not reach or question the server
+	// Prefix and PrefixKnown are the existing database's issue_prefix, as
+	// bootstrapServerDBCheck reports them.
+	Prefix      string
+	PrefixKnown bool
 	// LocalEvidence records whether anything on this machine ties this
 	// workspace to the database the probe asked about — in practice a
 	// populated local shadow directory. Without it the probe can only match
 	// on the database NAME, which is why the caller refuses to let an
 	// Exists verdict settle the plan ahead of the real recovery sources.
 	LocalEvidence bool
+}
+
+// newServerDBProbe records what probing ep returned.
+func newServerDBProbe(ep bootstrapServerProbeConfig, result bootstrapServerDBCheck) serverDBProbe {
+	return serverDBProbe{
+		Ran: true, Host: ep.host, Port: ep.port, Socket: ep.socket,
+		Exists: result.Exists, Err: result.Err,
+		Prefix: result.Prefix, PrefixKnown: result.PrefixKnown,
+	}
+}
+
+// existingServerDBPlan is the "nothing to do" verdict for a database the
+// server at ep confirmed exists.
+func existingServerDBPlan(plan BootstrapPlan, ep bootstrapServerProbeConfig) BootstrapPlan {
+	plan.HasExisting = true
+	plan.Action = "none"
+	plan.Reason = fmt.Sprintf("Database %s already exists on server at %s", remedy.PrintedValue(ep.database), remedy.PrintedValue(ep.serverLocation()))
+	return plan
+}
+
+// unprobedServerDBPlan probes the server once for a server-mode workspace
+// existingBootstrapDBPlan did not probe (no project_id and no local shadow
+// directory), just before the plan would fall through to "init": without it
+// a database that already exists on the server is answered with a fresh one
+// that is not where later commands look. No retry: nothing says the database
+// should be there. Absent or unreachable keeps the init plan.
+func unprobedServerDBPlan(beadsDir string, cfg *configfile.Config) (BootstrapPlan, serverDBProbe, bool) {
+	ep := bootstrapServerEndpoint(beadsDir, cfg)
+	if ep.port == 0 && ep.socket == "" {
+		return BootstrapPlan{}, serverDBProbe{}, false
+	}
+	result := probeBootstrapServerDB(ep, false)
+	probe := newServerDBProbe(ep, result)
+	if !result.Exists {
+		return BootstrapPlan{}, probe, false
+	}
+	plan := BootstrapPlan{BeadsDir: beadsDir, Database: cfg.GetDoltDatabase()}
+	return existingServerDBPlan(plan, ep), probe, true
 }
 
 // existingBootstrapDBPlan reports whether an existing database already settles
@@ -828,13 +912,11 @@ func existingBootstrapDBPlan(beadsDir string, cfg *configfile.Config, isServer, 
 			return unresolvedBootstrapDBPlan(plan, beadsDir, cfg, hasLocalShadowDir)
 		}
 		result := probeBootstrapServerDB(ep, hasLocalShadowDir)
-		probe := serverDBProbe{Ran: true, Host: ep.host, Port: ep.port, Socket: ep.socket, Exists: result.Exists, Err: result.Err, LocalEvidence: hasLocalShadowDir}
+		probe := newServerDBProbe(ep, result)
+		probe.LocalEvidence = hasLocalShadowDir
 
 		if result.Exists {
-			plan.HasExisting = true
-			plan.Action = "none"
-			plan.Reason = fmt.Sprintf("Database %s already exists on server at %s", remedy.PrintedValue(cfg.GetDoltDatabase()), remedy.PrintedValue(ep.serverLocation()))
-			return plan, probe, true
+			return existingServerDBPlan(plan, ep), probe, true
 		}
 		// An unverifiable probe means UNKNOWN, never "exists". Answering
 		// "nothing to do" for it is only defensible with local evidence that
