@@ -185,6 +185,29 @@ func newExistingDoltStoreFromConfig(ctx context.Context, beadsDir string) (stora
 	return openDoltStoreFromConfig(ctx, beadsDir, true)
 }
 
+// newProvisionedDoltStore opens, creating it when missing, the database bd
+// bootstrap provisions for beadsDir. cfg is the configuration bootstrap
+// resolved, which can be an ancestor workspace's (findParentConfig), so the
+// backend is chosen by the same effectiveServerMode selection the read path
+// (openDoltStoreFromConfig) uses rather than by the command's own mode: a
+// server-mode workspace gets its database created on the server, never a
+// local embedded one that no later command reads, and an unreachable server
+// fails the open.
+func newProvisionedDoltStore(ctx context.Context, beadsDir string, cfg *configfile.Config) (s storage.DoltStorage, err error) {
+	defer func() { s, err = activateVersionedHistoryStore(ctx, s, err) }()
+	defer func() { s, err = activateEventsJournalStore(beadsDir, s, err) }()
+	if cfg.IsDoltProxiedServerMode() {
+		return nil, errProxiedStoreUnrouted()
+	}
+	if effectiveServerMode(beadsDir, cfg) {
+		return dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{
+			Database:        cfg.GetDoltDatabase(),
+			CreateIfMissing: true,
+		})
+	}
+	return embeddeddolt.Open(ctx, beadsDir, cfg.GetDoltDatabase(), "main")
+}
+
 // openDoltStoreFromConfig is the body of newDoltStoreFromConfig and
 // newExistingDoltStoreFromConfig; requireExisting selects the latter.
 func openDoltStoreFromConfig(ctx context.Context, beadsDir string, requireExisting bool) (s storage.DoltStorage, err error) {

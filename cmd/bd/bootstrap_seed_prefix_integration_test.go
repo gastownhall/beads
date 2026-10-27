@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
@@ -147,5 +148,84 @@ func TestCLI_Bootstrap_SeedsServerDatabaseMissingPrefix_E2E(t *testing.T) {
 	}
 	if !strings.HasPrefix(strings.TrimSpace(id), "la-") {
 		t.Errorf("bd create after bootstrap made %q, want an la- id", strings.TrimSpace(id))
+	}
+}
+
+// AC-3: a server-mode workspace whose database is absent on the server gets
+// it, and its issue_prefix, created on that server by the init and
+// jsonl-import actions, the same server every later command reads. Those
+// actions used to open the command's default backend, so they created an
+// embedded database under .beads/embeddeddolt that nothing else reads.
+func TestCLI_Bootstrap_ProvisionsMissingServerDatabase_E2E(t *testing.T) {
+	skipIfNoDolt(t)
+
+	// A second Beads database on the server, so bootstrap's metadata
+	// reconcile has no sole schema candidate to redirect the workspace to.
+	decoy := uniqueTestDBName(t)
+	t.Cleanup(func() { dropTestDatabase(decoy, testDoltServerPort) })
+	createServerDatabaseWithoutPrefix(t, decoy)
+
+	for _, tc := range []struct {
+		name    string
+		jsonl   string
+		wantOut string
+	}{
+		{name: "init", wantOut: `Created fresh database with prefix "la"`},
+		{
+			name:    "jsonl-import",
+			jsonl:   `{"id":"la-1","title":"imported","status":"open","priority":2,"issue_type":"task","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}` + "\n",
+			wantOut: "Imported 1 issues",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			database := uniqueTestDBName(t)
+			t.Cleanup(func() { dropTestDatabase(database, testDoltServerPort) })
+			beadsDir := writeUnprovisionedServerWorkspace(t, dir, database, testDoltServerPort)
+			if tc.jsonl != "" {
+				if err := os.WriteFile(filepath.Join(beadsDir, "issues.jsonl"), []byte(tc.jsonl), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			stdout, stderr, err := runBDExecSeparated(t, testBD, dir, bootstrapServerTestEnv(), "bootstrap", "--yes")
+			if err != nil {
+				t.Fatalf("bd bootstrap --yes: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+			}
+			if !strings.Contains(stdout+stderr, tc.wantOut) {
+				t.Errorf("bootstrap output lacks %q:\nstdout:\n%s\nstderr:\n%s", tc.wantOut, stdout, stderr)
+			}
+			if _, err := os.Stat(filepath.Join(beadsDir, "embeddeddolt")); err == nil {
+				t.Errorf("bootstrap created .beads/embeddeddolt in a server-mode workspace")
+			}
+			if got, err := serverIssuePrefix(t, database); err != nil || got != "la" {
+				t.Errorf("server database issue_prefix = %q (err %v), want %q\nbootstrap stdout:\n%s\nstderr:\n%s", got, err, "la", stdout, stderr)
+			}
+		})
+	}
+}
+
+// AC-3: the init action fails when the workspace's server cannot be reached,
+// instead of creating an embedded database and reporting "Created fresh
+// database".
+func TestBootstrapInitAction_UnreachableServerFails(t *testing.T) {
+	// The package's TestMain exports the test server's port, which would
+	// replace the dead port metadata.json names.
+	t.Setenv("BEADS_DOLT_PORT", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	database := uniqueTestDBName(t)
+	t.Cleanup(func() { dropTestDatabase(database, testDoltServerPort) })
+	beadsDir := writeUnprovisionedServerWorkspace(t, t.TempDir(), database, freeLoopbackPort(t))
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := BootstrapPlan{Action: "init", BeadsDir: beadsDir, Database: cfg.GetDoltDatabase()}
+
+	if err := executeInitAction(context.Background(), plan, cfg); err == nil {
+		t.Fatal("executeInitAction succeeded against an unreachable Dolt server")
+	}
+	if _, err := os.Stat(filepath.Join(beadsDir, "embeddeddolt")); err == nil {
+		t.Errorf("executeInitAction created .beads/embeddeddolt in a server-mode workspace")
 	}
 }

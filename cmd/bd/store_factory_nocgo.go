@@ -118,6 +118,24 @@ func newExistingDoltStoreFromConfig(ctx context.Context, beadsDir string) (stora
 	return newDoltStoreFromConfig(ctx, beadsDir)
 }
 
+// newProvisionedDoltStore is the non-CGO twin of the CGO build's bootstrap
+// provisioning open: a server-mode workspace gets its database created on the
+// server, and this build refuses the embedded store.
+func newProvisionedDoltStore(ctx context.Context, beadsDir string, cfg *configfile.Config) (s storage.DoltStorage, err error) {
+	defer func() { s, err = activateVersionedHistoryStore(ctx, s, err) }()
+	defer func() { s, err = activateEventsJournalStore(beadsDir, s, err) }()
+	if cfg.IsDoltProxiedServerMode() {
+		return nil, errProxiedStoreUnrouted()
+	}
+	if effectiveServerMode(beadsDir, cfg) {
+		return dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{
+			Database:        cfg.GetDoltDatabase(),
+			CreateIfMissing: true,
+		})
+	}
+	return nil, fmt.Errorf("%s", nocgoEmbeddedErrMsg)
+}
+
 // newReadOnlyStoreFromConfig creates a read-only SQL-server-backed storage
 // backend. It does not activate the events journal: the store refuses writes,
 // so there is no mutation for a journal row to accompany (exemption is recorded
