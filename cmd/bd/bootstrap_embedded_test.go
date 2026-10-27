@@ -341,3 +341,103 @@ func TestEmbeddedBootstrapCloneFailureScrubsCredentials(t *testing.T) {
 		})
 	}
 }
+
+// runBDEmbeddedAllowError runs bd in dir with the embedded-lane env, returning
+// combined output and the process error. It never fails the test itself.
+func runBDEmbeddedAllowError(t *testing.T, bd, dir string, args ...string) (string, error) {
+	t.Helper()
+	cmd := exec.Command(bd, args...)
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+// dropEmbeddedIssuePrefixRow builds the GH#3494 state on a real embedded
+// database: the workspace is fully initialized (bd init), then the database's
+// issue_prefix row is deleted while config.yaml keeps naming the prefix.
+func dropEmbeddedIssuePrefixRow(t *testing.T, bd, dir string) {
+	t.Helper()
+	out, err := runBDEmbeddedAllowError(t, bd, dir, "config", "unset", "issue_prefix")
+	if err != nil {
+		t.Fatalf("bd config unset issue_prefix failed: %v\n%s", err, out)
+	}
+}
+
+// TestEmbeddedBootstrapSeedPrefixPlansAndSeeds covers the seed-prefix plan and
+// its execution on an embedded database that exists without an issue_prefix
+// row (GH#3494): `--dry-run --json` reports action seed-prefix with
+// has_existing and no blocked, and a real run sets the prefix from
+// config.yaml's issue-prefix — it must never claim "Created fresh database".
+func TestEmbeddedBootstrapSeedPrefixPlansAndSeeds(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "sp")
+	dropEmbeddedIssuePrefixRow(t, bd, dir)
+	// Name the prefix in config.yaml the way a config.yaml-only workspace does.
+	cfgPath := filepath.Join(dir, ".beads", "config.yaml")
+	cfgData, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read config.yaml: %v", err)
+	}
+	if err := os.WriteFile(cfgPath, append(cfgData, []byte("issue-prefix: la\n")...), 0o644); err != nil {
+		t.Fatalf("append issue-prefix to config.yaml: %v", err)
+	}
+
+	t.Run("dry_run_json_plans_seed_prefix", func(t *testing.T) {
+		out := bdBootstrap(t, bd, dir, "--dry-run", "--json")
+		start := strings.Index(out, "{")
+		if start < 0 {
+			t.Fatalf("expected JSON plan, got: %s", out)
+		}
+		var payload map[string]interface{}
+		if err := json.Unmarshal([]byte(out[start:]), &payload); err != nil {
+			t.Fatalf("parse bootstrap plan JSON: %v\n%s", err, out)
+		}
+		if action, _ := payload["action"].(string); action != "seed-prefix" {
+			t.Fatalf("action = %q, want seed-prefix (plan JSON: %s)", action, out)
+		}
+		if has, _ := payload["has_existing"].(bool); !has {
+			t.Fatalf("has_existing = %v, want true (plan JSON: %s)", payload["has_existing"], out)
+		}
+		if _, blocked := payload["blocked"]; blocked {
+			t.Fatalf("plan carries \"blocked\" for a seed-prefix plan: %s", out)
+		}
+		reason, _ := payload["reason"].(string)
+		if !strings.Contains(reason, `"la"`) || !strings.Contains(reason, "config.yaml issue-prefix") {
+			t.Fatalf("reason = %q, want it to name the prefix \"la\" and its source", reason)
+		}
+	})
+
+	t.Run("seed_sets_prefix_from_config_yaml", func(t *testing.T) {
+		cmd := exec.Command(bd, "bootstrap", "--yes")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err != nil {
+			t.Fatalf("bd bootstrap --yes failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+		}
+		combined := stdout.String() + stderr.String()
+		if !strings.Contains(combined, `Set issue_prefix "la" on existing database`) {
+			t.Errorf("expected the seed message with the prefix and its source:\nstdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+		}
+		if !strings.Contains(combined, "(from config.yaml issue-prefix)") {
+			t.Errorf("expected the message to name the prefix source:\nstdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+		}
+		if strings.Contains(combined, "Created fresh database") {
+			t.Errorf("seed-prefix execution must not claim a fresh database was created:\nstdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+		}
+
+		out, err := runBDEmbeddedAllowError(t, bd, dir, "config", "get", "issue_prefix")
+		if err != nil {
+			t.Fatalf("bd config get issue_prefix failed: %v\n%s", err, out)
+		}
+		if strings.TrimSpace(out) != "la" {
+			t.Fatalf("bd config get issue_prefix = %q, want la", strings.TrimSpace(out))
+		}
+	})
+}

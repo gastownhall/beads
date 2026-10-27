@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/go-sql-driver/mysql"
+	"github.com/go-sql-driver/mysql"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/cmd/bd/doctor/fix"
@@ -80,6 +80,12 @@ type bootstrapServerDBCheck struct {
 	Exists    bool
 	Reachable bool
 	Err       error
+	// Prefix is the database's issue_prefix config value when PrefixKnown is
+	// set and the database exists. A database that exists but carries no
+	// issue_prefix row is the config.yaml-only workspace shape (GH#3494):
+	// bootstrap can seed it rather than declare "nothing to do".
+	Prefix      string
+	PrefixKnown bool
 }
 
 // bootstrapRetryDelay is the sleep function used between server-DB-not-found
@@ -119,7 +125,7 @@ var checkBootstrapServerDB = func(probeCfg bootstrapServerProbeConfig) bootstrap
 			return bootstrapServerDBCheck{Reachable: true, Err: err}
 		}
 		if name == dbName {
-			return bootstrapServerDBCheck{Exists: true, Reachable: true}
+			return probeBootstrapServerDBPrefix(ctx, db, dbName)
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -127,6 +133,38 @@ var checkBootstrapServerDB = func(probeCfg bootstrapServerProbeConfig) bootstrap
 	}
 
 	return bootstrapServerDBCheck{Exists: false, Reachable: true}
+}
+
+// errMySQLTableDoesNotExist is MySQL error 1146, the one read error out of an
+// existing database that still settles its issue_prefix: a database that
+// predates bd has no config table, which for seeding purposes is an empty
+// prefix, not an unknown one.
+const errMySQLTableDoesNotExist = 1146
+
+// probeBootstrapServerDBPrefix reads the issue_prefix config row out of a
+// database the existence probe just found, keeping the connection that probe
+// already holds. The database exists on any return from here; PrefixKnown
+// says whether the prefix read settled. GH#3494: a database with no
+// issue_prefix row is seedable from config.yaml, so it must arrive as
+// PrefixKnown with an empty Prefix, not as a "nothing to do" verdict.
+func probeBootstrapServerDBPrefix(ctx context.Context, db *sql.DB, dbName string) bootstrapServerDBCheck {
+	quoted := "`" + strings.ReplaceAll(dbName, "`", "``") + "`"
+	var prefix string
+	err := db.QueryRowContext(ctx, "SELECT value FROM "+quoted+".config WHERE `key` = 'issue_prefix'").Scan(&prefix)
+	switch {
+	case err == nil:
+		return bootstrapServerDBCheck{Exists: true, Reachable: true, Prefix: strings.TrimSpace(prefix), PrefixKnown: true}
+	case errors.Is(err, sql.ErrNoRows):
+		return bootstrapServerDBCheck{Exists: true, Reachable: true, PrefixKnown: true}
+	default:
+		var mysqlErr *mysql.MySQLError
+		if errors.As(err, &mysqlErr) && mysqlErr.Number == errMySQLTableDoesNotExist {
+			return bootstrapServerDBCheck{Exists: true, Reachable: true, PrefixKnown: true}
+		}
+		// Any other read failure leaves the prefix unknown; the verdict stays
+		// what it is today (database exists, nothing seedable concluded).
+		return bootstrapServerDBCheck{Exists: true, Reachable: true}
+	}
 }
 
 var bootstrapCmd = &cobra.Command{
@@ -144,6 +182,7 @@ Bootstrap auto-detects the right action:
   • If no database exists: creates a fresh one — unless the workspace was already
     initialized (metadata.json has a project_id) and its server-mode database is
     missing, in which case bootstrap refuses rather than strand the existing data
+  • If the database exists but has no issue_prefix: sets it from config.yaml issue-prefix (never overwrites an existing prefix)
   • If database already exists: validates and reports status
 
 If sync.remote points at a git repository, bootstrap verifies refs/dolt/data
@@ -335,7 +374,7 @@ func applyBootstrapMetadataRepair(beadsDir string, cfg *configfile.Config, apply
 
 // BootstrapPlan describes what bootstrap will do.
 type BootstrapPlan struct {
-	Action   string `json:"action"` // "sync", "restore", "jsonl-import", "init", "none", "refuse"
+	Action   string `json:"action"` // "sync", "restore", "jsonl-import", "init", "seed-prefix", "none", "refuse"
 	Reason   string `json:"reason"` // Human-readable explanation
 	BeadsDir string `json:"beads_dir"`
 	Database string `json:"database"`
@@ -523,7 +562,7 @@ func detectBootstrapPlan(beadsDir string, cfg *configfile.Config) BootstrapPlan 
 	settledOnNameAlone := dbProbe.Ran && !dbProbe.LocalEvidence
 	if hasExistingDB {
 		if dbAction.Action != "none" || (beadsDirExists && !settledOnNameAlone) {
-			return dbAction
+			return maybeSeedPrefixPlan(dbAction, beadsDir, cfg, isServer, dbProbe)
 		}
 		deferredExistingPlan = &dbAction
 	}
@@ -554,7 +593,7 @@ func detectBootstrapPlan(beadsDir string, cfg *configfile.Config) BootstrapPlan 
 	}
 
 	if deferredExistingPlan != nil {
-		return *deferredExistingPlan
+		return maybeSeedPrefixPlan(*deferredExistingPlan, beadsDir, cfg, isServer, dbProbe)
 	}
 
 	// Only now, with every local recovery source exhausted, does an
@@ -567,6 +606,36 @@ func detectBootstrapPlan(beadsDir string, cfg *configfile.Config) BootstrapPlan 
 		plan.Reason = unusableRemoteReason
 		plan.BlockedRemote = unusableRemoteURL
 		return plan
+	}
+
+	// A server-mode workspace with no project_id and no local shadow
+	// directory skipped the plan-time probe entirely (existingBootstrapDBPlan
+	// returns early), which is exactly the config.yaml-only shape GH#3494
+	// ships in: the database can exist on the server while bootstrap has seen
+	// nothing but its name. Every recovery source above has declined by now,
+	// so probe once — retryTransient=false, one round-trip, no 70s budget,
+	// because nothing local says this database lives here. A database that
+	// exists settles the plan as the other existing-DB verdicts do ("none",
+	// or "seed-prefix" when its issue_prefix is known to be empty); an absent
+	// or unreachable one leaves the init fall-through below, which creates
+	// the database on the server or fails loudly rather than writing an
+	// embedded orphan.
+	//
+	// Locally-managed server mode only: in shared-server mode the database
+	// name (almost always the default) carries no evidence about THIS
+	// workspace — the granularity gap existingBootstrapDBPlan's scope note
+	// tracks separately — so a name match there settles nothing.
+	if isServer && !isSharedServer && !dbProbe.Ran {
+		if ep := bootstrapServerEndpoint(beadsDir, cfg); ep.port != 0 || ep.socket != "" {
+			result := probeBootstrapServerDB(ep, false)
+			dbProbe = serverDBProbe{Ran: true, Host: ep.host, Port: ep.port, Socket: ep.socket, Exists: result.Exists, Err: result.Err, Prefix: result.Prefix, PrefixKnown: result.PrefixKnown}
+			if result.Exists {
+				plan.HasExisting = true
+				plan.Action = "none"
+				plan.Reason = fmt.Sprintf("Database %s already exists on server at %s", remedy.PrintedValue(cfg.GetDoltDatabase()), remedy.PrintedValue(ep.serverLocation()))
+				return maybeSeedPrefixPlan(plan, beadsDir, cfg, isServer, dbProbe)
+			}
+		}
 	}
 
 	// Every recovery source has now been ruled out, so the fall-through below
@@ -583,6 +652,62 @@ func detectBootstrapPlan(beadsDir string, cfg *configfile.Config) BootstrapPlan 
 	plan.Action = "init"
 	plan.Reason = "No existing database, remote, or backup — will create fresh database"
 	return plan
+}
+
+// maybeSeedPrefixPlan converts an existing-database "none" plan into a
+// "seed-prefix" plan when the database holds no issue_prefix — the
+// config.yaml-only workspace shape of GH#3494, where `bd config get
+// issue_prefix` answers "(not set)" and `bd create` fails while the database
+// itself is right there. It is applied only at detectBootstrapPlan's two
+// settled existing-DB returns and its fall-through probe verdict;
+// existingBootstrapDBPlan itself never decides it, so no other consumer of
+// that verdict changes shape.
+//
+// A prefix the database already has is never rewritten: known-and-set keeps
+// the "none" plan, and unknown (the row could not be read) keeps it too —
+// seeding on an unknown state could clobber the prefix this workspace's issue
+// IDs are keyed to.
+func maybeSeedPrefixPlan(plan BootstrapPlan, beadsDir string, cfg *configfile.Config, isServer bool, probe serverDBProbe) BootstrapPlan {
+	if plan.Action != "none" || !plan.HasExisting {
+		return plan
+	}
+	prefix, known := "", false
+	if probe.Ran {
+		// The server probe read the row while it held the connection.
+		prefix, known = probe.Prefix, probe.PrefixKnown
+	} else if !isServer {
+		var err error
+		prefix, err = readBootstrapEmbeddedPrefix(context.Background(), beadsDir)
+		known = err == nil
+	}
+	if !known || strings.TrimSpace(prefix) != "" {
+		return plan
+	}
+	seed, source := inferBootstrapPrefix(beadsDir, cfg)
+	plan.Action = "seed-prefix"
+	plan.Reason = fmt.Sprintf("Database %s exists without issue_prefix: will set %q from %s", remedy.PrintedValue(plan.Database), seed, source)
+	return plan
+}
+
+// inferBootstrapPrefix picks the issue prefix a bootstrap action writes when
+// the database does not supply one, and names where it came from. config.yaml
+// is read strictly from the target workspace (WorkspaceYamlValueStrictWithLocal,
+// the same reader bootstrapSharedServerMode trusts for the target's mode), so
+// an enclosing workspace's config or the caller's cwd cannot answer for it:
+// issue-prefix, then issue_prefix, then the database name unless it is the
+// default, then the directory name.
+func inferBootstrapPrefix(beadsDir string, cfg *configfile.Config) (string, string) {
+	for _, key := range []string{"issue-prefix", "issue_prefix"} {
+		v, present, err := config.WorkspaceYamlValueStrictWithLocal(beadsDir, key)
+		if err == nil && present && strings.TrimSpace(v) != "" {
+			return normalizeIssuePrefix(v), "config.yaml " + key
+		}
+	}
+	if db := cfg.GetDoltDatabase(); db != "" && db != "beads" {
+		return db, "the database name"
+	}
+	cwd, _ := os.Getwd()
+	return normalizeIssuePrefix(filepath.Base(cwd)), "the directory name"
 }
 
 // planConfiguredSyncRemote resolves a configured sync.remote into plan. done==true
@@ -728,6 +853,12 @@ type serverDBProbe struct {
 	Socket string
 	Exists bool  // the server confirmed the database exists
 	Err    error // the probe could not reach or question the server
+	// Prefix and PrefixKnown carry the issue_prefix read the probe made of an
+	// existing database (probeBootstrapServerDBPrefix). PrefixKnown on a
+	// prefix-less database is what turns a "nothing to do" verdict into a
+	// seed-prefix plan (GH#3494).
+	Prefix      string
+	PrefixKnown bool
 	// LocalEvidence records whether anything on this machine ties this
 	// workspace to the database the probe asked about — in practice a
 	// populated local shadow directory. Without it the probe can only match
@@ -786,7 +917,7 @@ func existingBootstrapDBPlan(beadsDir string, cfg *configfile.Config, isServer, 
 			return unresolvedBootstrapDBPlan(plan, beadsDir, cfg, hasLocalShadowDir)
 		}
 		result := probeBootstrapServerDB(ep, hasLocalShadowDir)
-		probe := serverDBProbe{Ran: true, Host: ep.host, Port: ep.port, Socket: ep.socket, Exists: result.Exists, Err: result.Err, LocalEvidence: hasLocalShadowDir}
+		probe := serverDBProbe{Ran: true, Host: ep.host, Port: ep.port, Socket: ep.socket, Exists: result.Exists, Err: result.Err, Prefix: result.Prefix, PrefixKnown: result.PrefixKnown, LocalEvidence: hasLocalShadowDir}
 
 		if result.Exists {
 			plan.HasExisting = true
@@ -833,6 +964,20 @@ func existingBootstrapDBPlan(beadsDir string, cfg *configfile.Config, isServer, 
 	plan.Action = "none"
 	plan.Reason = "Database already exists at " + dbPath
 	return plan, serverDBProbe{}, true
+}
+
+// readBootstrapEmbeddedPrefix reads issue_prefix out of an existing embedded
+// database (the embedded twin of probeBootstrapServerDBPrefix, which keeps the
+// server probe's connection instead). Injectable for testing. An error means
+// the prefix is unknown, never empty: the caller only converts a "none" plan
+// when the read settles.
+var readBootstrapEmbeddedPrefix = func(ctx context.Context, beadsDir string) (string, error) {
+	st, err := newReadOnlyStoreFromConfig(ctx, beadsDir)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = st.Close() }()
+	return st.GetConfig(ctx, "issue_prefix")
 }
 
 // errNoOwnedServerDatabase is wrapped by unresolvedBootstrapDBPlan's probe
@@ -989,6 +1134,9 @@ func printBootstrapPlan(plan BootstrapPlan) {
 	case "init":
 		fmt.Printf("Bootstrap plan: create fresh database\n")
 		fmt.Printf("  Database: %s\n", remedy.PrintedValue(plan.Database))
+	case "seed-prefix":
+		fmt.Printf("Bootstrap plan: set missing issue_prefix on existing database\n")
+		fmt.Printf("  Database: %s\n", remedy.PrintedValue(plan.Database))
 	case "refuse":
 		// Deliberately the one-line summary, not refusalDetail: the full
 		// explanation is the error executeBootstrapPlan returns, and printing
@@ -1045,7 +1193,7 @@ func executeBootstrapPlan(plan BootstrapPlan, cfg *configfile.Config, nonInterac
 	ctx := context.Background()
 
 	// Workspace operation gate: every bootstrap action below replaces or
-	// creates workspace state (sync/restore/jsonl-import/init), and
+	// creates workspace state (sync/restore/jsonl-import/init/seed-prefix), and
 	// bootstrap is a skip-store command that the PersistentPreRunE
 	// chokepoint never gates. This is the single point where the target
 	// workspace is known and no state has been touched yet, so acquire the
@@ -1076,6 +1224,86 @@ func executeBootstrapPlan(plan BootstrapPlan, cfg *configfile.Config, nonInterac
 		return executeJSONLImportAction(ctx, plan, cfg)
 	case "init":
 		return executeInitAction(ctx, plan, cfg)
+	case "seed-prefix":
+		return executeSeedPrefixAction(ctx, plan, cfg)
+	}
+	return nil
+}
+
+// executeSeedPrefixAction sets issue_prefix on an existing database that never
+// got one (the seed-prefix plan, GH#3494). It opens the database the way every
+// later command does — newDoltStoreFromConfig, mode-aware, no CreateIfMissing
+// — so the write lands in the store readers use, seeds only when the row is
+// absent or empty, and verifies through a second normal-factory open that the
+// prefix is actually visible before reporting success.
+func executeSeedPrefixAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.Config) error {
+	prefix, source := inferBootstrapPrefix(plan.BeadsDir, cfg)
+
+	s, err := newDoltStoreFromConfig(ctx, plan.BeadsDir)
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	seeded, err := seedIssuePrefixIfMissing(ctx, s, prefix)
+	if err == nil && seeded {
+		err = s.CommitWithConfig(ctx, "bd bootstrap: seed issue_prefix")
+		if err != nil {
+			err = fmt.Errorf("commit: %w", err)
+		}
+	}
+	// Close before the verification open below: the embedded engine tolerates
+	// one writer at a time, and verification is a fresh reader of the
+	// committed state, not a second writer alongside the seeder.
+	if closeErr := s.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	if seeded {
+		if err := verifyBootstrapPrefixVisible(ctx, plan.BeadsDir, prefix); err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "Set issue_prefix %q on existing database %q (from %s)\n", prefix, plan.Database, source)
+	}
+	return nil
+}
+
+// seedIssuePrefixIfMissing writes issue_prefix to the database only when the
+// row is absent or empty — the same never-overwrite pattern as bd init's
+// config seeding and import's config import. It reports whether it wrote, and
+// says so on stderr when it declined: a bootstrap action must never rewrite
+// an existing prefix, because the workspace's issue IDs are keyed to it.
+func seedIssuePrefixIfMissing(ctx context.Context, s storage.DoltStorage, prefix string) (bool, error) {
+	current, err := s.GetConfig(ctx, "issue_prefix")
+	if err != nil {
+		return false, fmt.Errorf("read issue_prefix: %w", err)
+	}
+	if strings.TrimSpace(current) != "" {
+		fmt.Fprintf(os.Stderr, "issue_prefix already set to %q; left unchanged\n", current)
+		return false, nil
+	}
+	if err := s.SetConfig(ctx, "issue_prefix", prefix); err != nil {
+		return false, fmt.Errorf("set issue prefix: %w", err)
+	}
+	return true, nil
+}
+
+// verifyBootstrapPrefixVisible re-opens the workspace through the normal
+// store factory and fails when issue_prefix is not visible there: a bootstrap
+// action that wrote a store readers never open (the GH#3494 embedded-orphan
+// write) must fail instead of printing success.
+func verifyBootstrapPrefixVisible(ctx context.Context, beadsDir, prefix string) error {
+	s, err := newDoltStoreFromConfig(ctx, beadsDir)
+	if err != nil {
+		return fmt.Errorf("verify issue_prefix: open database: %w", err)
+	}
+	defer func() { _ = s.Close() }()
+	got, err := s.GetConfig(ctx, "issue_prefix")
+	if err != nil {
+		return fmt.Errorf("verify issue_prefix: %w", err)
+	}
+	if strings.TrimSpace(got) != prefix {
+		return fmt.Errorf("issue_prefix %q is not visible through the workspace's own store (read %q): the database bootstrap wrote is not the one bd commands read", prefix, got)
 	}
 	return nil
 }

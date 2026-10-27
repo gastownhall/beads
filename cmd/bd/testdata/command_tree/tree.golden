@@ -528,6 +528,7 @@ bd bootstrap
     |   • If no database exists: creates a fresh one — unless the workspace was already
     |     initialized (metadata.json has a project_id) and its server-mode database is
     |     missing, in which case bootstrap refuses rather than strand the existing data
+    |   • If the database exists but has no issue_prefix: sets it from config.yaml issue-prefix (never overwrites an existing prefix)
     |   • If database already exists: validates and reports status
     |
     | If sync.remote points at a git repository, bootstrap verifies refs/dolt/data
