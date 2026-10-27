@@ -70,33 +70,35 @@ func watchIssue(ctx context.Context, issueID string, commentsTail int) error {
 	})
 }
 
-// runIssueWatch drives watchIssueLoop on a real ticker until Ctrl+C or SIGTERM.
-// It fails when the initial render found nothing to watch; the render has
-// already said why, so the failure is silent.
+// runIssueWatch drives watchIssueLoop on a real poll cadence until Ctrl+C or
+// SIGTERM. It fails when the initial render found nothing to watch; the render
+// has already said why, so the failure is silent.
 func runIssueWatch(ctx context.Context, src issueWatchSource) error {
 	// Deferred Stop prevents signal handler leak
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(sigChan)
 
-	ticker := time.NewTicker(showWatchPollInterval)
-	defer ticker.Stop()
-
-	if !watchIssueLoop(ctx, src, ticker.C, sigChan) {
+	if !watchIssueLoop(ctx, src,
+		func() <-chan time.Time { return time.After(showWatchPollInterval) },
+		sigChan) {
 		return SilentExit()
 	}
 	return nil
 }
 
-// watchIssueLoop renders the issue once, then on every tick re-reads it and
-// redraws only when singleIssueSnapshot changes. A poll that fails — the
-// issue was deleted, the backend blipped, a unit of work would not open — keeps
-// the last render on screen and is retried on the next tick without printing:
-// the watch is a live view, and a line (or, under --json, an error object) on
-// every tick for a condition the user can already see would bury it. It
-// returns when stop fires, or immediately, reporting false, when the initial
-// render found nothing to watch.
-func watchIssueLoop(ctx context.Context, src issueWatchSource, tick <-chan time.Time, stop <-chan os.Signal) bool {
+// watchIssueLoop renders the issue once, then after each poll wait re-reads it
+// and redraws only when singleIssueSnapshot changes. poll is called each time
+// the loop starts waiting, which is after the previous fetch (and any redraw)
+// has returned, so a slow fetch can never collapse the loop into
+// back-to-back reads (the show half of GH#3415). A poll that fails — the
+// issue was deleted, the backend blipped, a unit of work would not open —
+// keeps the last render on screen and is retried after the next wait
+// without printing: the watch is a live view, and a line (or, under --json,
+// an error object) on every tick for a condition the user can already see
+// would bury it. It returns when stop fires, or immediately, reporting
+// false, when the initial render found nothing to watch.
+func watchIssueLoop(ctx context.Context, src issueWatchSource, poll func() <-chan time.Time, stop <-chan os.Signal) bool {
 	issue := src.render(ctx)
 	if issue == nil {
 		return false
@@ -110,7 +112,7 @@ func watchIssueLoop(ctx context.Context, src issueWatchSource, tick <-chan time.
 		case <-stop:
 			fmt.Fprintf(os.Stderr, "\nStopped watching.\n")
 			return true
-		case <-tick:
+		case <-poll():
 			issue, err := src.fetch(ctx)
 			if err != nil || issue == nil {
 				continue
