@@ -19,7 +19,8 @@ import (
 // newReadOnlyStoreFromConfig in store_factory_nocgo.go (//go:build !cgo). A
 // helper placed behind either tag could only ever reach half of them, so
 // "centralizing the check" would have been a claim the build tags falsify --
-// and .goreleaser.yml ships three CGO_ENABLED=0 targets, the build where a
+// and .goreleaser.yml ships two CGO_ENABLED=0 targets (windows/arm64,
+// freebsd/amd64), the build where a
 // shared server is the only usable backend. Keeping the helper untagged is
 // what actually stops the four call sites from drifting apart again. Nothing
 // here needs cgo: configfile, config and doltserver all build under

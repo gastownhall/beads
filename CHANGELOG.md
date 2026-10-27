@@ -4613,6 +4613,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   override cannot reach them; only the module floor can. Re-derive rather
   than trusting this table: `govulncheck -scan module`.
 
+### Fixed
+
+- **The `android_arm64` release asset — and the `@beads/bd` npm package on
+  Android — is now built with CGO, so embedded Dolt mode works on Termux**
+  ([#3538](https://github.com/gastownhall/beads/issues/3538)). The
+  `bd-android-arm64` goreleaser target shipped `CGO_ENABLED=0`, which made
+  `bd init` fail on Android with "embedded Dolt requires a CGO build, but
+  this bd binary was built with CGO_ENABLED=0", leaving server mode as the
+  only option there. The build now cross-compiles through the pinned Android
+  NDK r30 (API 21) via `scripts/ci/android-arm64-cc`/`-cxx` wrappers inside
+  the existing Ubuntu goreleaser job (no workflow change), and
+  `scripts/verify-android-elf.sh` gates the asset on the Bionic interpreter
+  (`/system/bin/linker64`) and 16 KB `PT_LOAD` alignment. Termux installation
+  notes are in `docs/getting-started/installation.md`.
+
 ## [1.3.2] - 2026-10-23
 
 First stable release of the 1.3.2 patch line. It ships the same code as

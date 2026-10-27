@@ -1844,6 +1844,14 @@ exports_files(
     visibility = ["//test/docsync:__pkg__"],
 )
 
+# scripts_test's android CGO release-docs guard
+# (TestAndroidCGOReleaseDocsAndComments) pins this file's CGO_ENABLED=0
+# target count; bd_lib itself is private, so the file is exported for it.
+exports_files(
+    ["store_factory_server_mode.go"],
+    visibility = ["//scripts:__pkg__"],
+)
+
 # CLI flag registrations pinned by //internal/httpapi spec parity tests.
 exports_files(
     [

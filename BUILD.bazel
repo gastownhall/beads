@@ -254,6 +254,19 @@ exports_files(
     visibility = ["//internal/httpclient/encode:__pkg__"],
 )
 
+# scripts_test's android CGO release-docs guard
+# (TestAndroidCGOReleaseDocsAndComments) reads these by path; repo_doc_files
+# globs them too but drags every Markdown file into that target's data, so
+# they are exported individually, docsync-style.
+exports_files(
+    [
+        "CHANGELOG.md",
+        "RELEASING.md",
+        "docs/getting-started/installation.md",
+    ],
+    visibility = ["//scripts:__pkg__"],
+)
+
 # --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
 
 filegroup(

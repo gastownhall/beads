@@ -174,13 +174,26 @@ tag burned on a freebsd compilation failure no pre-tag gate caught
 [#5662](https://github.com/gastownhall/beads/issues/5662)). PR CI now builds
 the whole tree for every target in `scripts/ci/release-targets.txt` with Bazel
 (`scripts/ci/bazel-release-cross-compile.sh`, in bazel.yml's pure-Go lane),
-but with cgo off, while linux/amd64, linux/arm64, windows/amd64 and the darwin
-pair ship with `CGO_ENABLED=1`. Build the real release configuration by hand
-before tagging:
+but with cgo off, while linux/amd64, linux/arm64, windows/amd64, android/arm64
+and the darwin pair ship with `CGO_ENABLED=1`. Build the real release
+configuration by hand before tagging:
 
 ```bash
 goreleaser build --snapshot --clean
 ```
+
+The android/arm64 CGO snapshot is **Linux x86_64 only**. Its CC/CXX wrappers
+(`scripts/ci/android-arm64-cc` / `-cxx`) resolve the pinned Android NDK r30
+(API 21), whose prebuilt toolchain tree exists only for a Linux x86_64 host,
+and refuse to run anywhere else. On Linux they install the NDK themselves
+(via `scripts/ci/install-android-ndk.sh` into `$RUNNER_TEMP` or
+`~/.cache/beads-ndk`), so the command above just works;
+`export "$(scripts/ci/install-android-ndk.sh "$HOME/.cache/beads-ndk")"`
+only pre-warms it. On macOS `goreleaser build --snapshot --clean` fails at
+the android id with the wrappers' Linux-only error: build the other ids there
+(omit `--id bd-android-arm64` from a per-id loop) and run the android one on
+a Linux host, or leave it to the Ubuntu `goreleaser` job that a tagged
+release uses anyway.
 
 A failure here costs a rebase. The same failure after the tag is pushed costs
 the tag.
@@ -941,6 +954,10 @@ goreleaser check
 # Test build locally
 goreleaser build --snapshot --clean
 ```
+
+On macOS the android/arm64 id cannot build: its NDK CC wrappers are Linux
+x86_64 only (see [Cross-compile before tagging](#cross-compile-before-tagging)).
+Build the other ids there and run `--id bd-android-arm64` on Linux.
 
 ## Version Numbering
 

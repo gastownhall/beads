@@ -331,6 +331,83 @@ func TestGoreleaserAndroidArm64BuildsWithNDKCGO(t *testing.T) {
 	}
 }
 
+// TestAndroidCGOReleaseDocsAndComments keeps the #3538 docs honest. The
+// android/arm64 build turning CGO on changes what release maintainers must
+// read: RELEASING.md's cross-compile list and its snapshot host restriction,
+// the CHANGELOG entry users search for, an installation path for Termux, and
+// the two comments that counted android/arm64 among the CGO_ENABLED=0
+// targets. Any of those going stale silently undoes the fix's paper trail.
+func TestAndroidCGOReleaseDocsAndComments(t *testing.T) {
+	root := sourceRepoRoot(t)
+	read := func(name string) string {
+		t.Helper()
+		data, err := os.ReadFile(filepath.Join(root, name))
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		return string(data)
+	}
+
+	releasing := read("RELEASING.md")
+	for _, phrase := range []string{
+		// android/arm64 joins the hand-built CGO targets...
+		"android/arm64",
+		"CGO_ENABLED=1",
+		// ...and the snapshot's host restriction is stated where the
+		// snapshot command is printed, including the macOS escape hatch.
+		"android/arm64 CGO snapshot",
+		"Linux x86_64 only",
+		"--id bd-android-arm64",
+		"install-android-ndk.sh",
+	} {
+		if !strings.Contains(releasing, phrase) {
+			t.Errorf("RELEASING.md lost %q from the android CGO release story (#3538)", phrase)
+		}
+	}
+
+	changelog := read("CHANGELOG.md")
+	const unreleasedMarker = "## [Unreleased]"
+	start := strings.Index(changelog, unreleasedMarker)
+	if start < 0 {
+		t.Fatalf("CHANGELOG.md has no %s section", unreleasedMarker)
+	}
+	unreleased := changelog[start+len(unreleasedMarker):]
+	if end := strings.Index(unreleased, "\n## ["); end >= 0 {
+		unreleased = unreleased[:end]
+	}
+	for _, phrase := range []string{"### Fixed", "#3538", "Termux"} {
+		if !strings.Contains(unreleased, phrase) {
+			t.Errorf("CHANGELOG.md [Unreleased] lost %q from the android CGO fix note", phrase)
+		}
+	}
+
+	installation := read(filepath.Join("docs", "getting-started", "installation.md"))
+	for _, phrase := range []string{
+		"### Android (Termux)",
+		"pkg install git",
+		// Termux reports uname -s = Linux; install.sh would fetch the
+		// glibc asset. The doc must say so.
+		"install.sh",
+	} {
+		if !strings.Contains(installation, phrase) {
+			t.Errorf("docs/getting-started/installation.md lost %q from the Android (Termux) section", phrase)
+		}
+	}
+
+	serverMode := read(filepath.Join("cmd", "bd", "store_factory_server_mode.go"))
+	if strings.Contains(serverMode, "three CGO_ENABLED=0") {
+		t.Error("cmd/bd/store_factory_server_mode.go still counts android/arm64 as a CGO_ENABLED=0 target; it ships CGO since #3538")
+	}
+	if !strings.Contains(serverMode, "two CGO_ENABLED=0") {
+		t.Error("cmd/bd/store_factory_server_mode.go must name the two remaining CGO_ENABLED=0 targets (windows/arm64, freebsd/amd64)")
+	}
+
+	crossCompile := read(filepath.Join("scripts", "ci", "bazel-release-cross-compile.sh"))
+	if !strings.Contains(crossCompile, "android/arm64 with CGO_ENABLED=1") {
+		t.Error("scripts/ci/bazel-release-cross-compile.sh coverage-boundary comment does not list android/arm64 among the CGO_ENABLED=1 targets")
+	}
+}
+
 type goreleaserBuild struct {
 	ID     string   `yaml:"id"`
 	GOOS   []string `yaml:"goos"`

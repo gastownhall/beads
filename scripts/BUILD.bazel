@@ -74,6 +74,14 @@ go_test(
     ],  # keep
     data = [
         "//:repo_other_files",
+        # Read by path in TestAndroidCGOReleaseDocsAndComments (the #3538
+        # android CGO docs guard); exported to this package in the root
+        # BUILD.bazel. Individual labels, not //:repo_doc_files, so a docs
+        # change elsewhere does not re-run this suite.
+        "//:CHANGELOG.md",
+        "//:RELEASING.md",
+        "//:docs/getting-started/installation.md",
+        "//cmd/bd:store_factory_server_mode.go",
         "//internal/testutil:testdoltcommon.go",
         "@go_sdk//:bin/go",
         "@go_sdk//:files",
