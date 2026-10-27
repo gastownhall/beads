@@ -141,6 +141,7 @@ go_test(
         "complexity_script_test.go",
         "conformance_script_test.go",
         "host_tools_test.go",
+        "install_android_ndk_test.go",
         "install_dolt_test.go",
         "install_sh_test.go",
         "oracle_a_script_test.go",
