@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -222,5 +223,62 @@ func TestArrivalSeq_EmbeddedJournalCollisionMovesTheStamp(t *testing.T) {
 	if got := stamps["eas-move-wisp"]; got.Int64 != journalHigh+1 || records["eas-move-wisp"] != journalHigh+1 {
 		t.Fatalf("stamp %v / record %d, want both %d: the stamp must move with the retried record",
 			got, records["eas-move-wisp"], journalHigh+1)
+	}
+}
+
+// TestArrivalSeq_EmbeddedCreateLeavesTheStampOnTheCallersIssue pins the storage
+// create APIs that write the stored row back onto the caller's struct
+// (CreateIssue, CreateIssues and a transaction's CreateIssue, the calls the
+// public beads.Storage exposes): once the create returns, the struct carries
+// the stamp its row was given. PrepareIssueForInsert zeroes the field on the
+// way in, so without the hand-back a caller that keeps the struct — the way a
+// library consumer maps its create result — reads every stamped wisp as
+// unstamped until it reads the row again. A durable create, and a wisp created
+// with the journal off, stay at zero, matching their rows.
+func TestArrivalSeq_EmbeddedCreateLeavesTheStampOnTheCallersIssue(t *testing.T) {
+	env := newTestEnv(t, "eas")
+	env.store.SetEventsJournalEnabled(true)
+	ctx := context.Background()
+
+	single := arrivalWisp("eas-hand-single")
+	if err := env.store.CreateIssue(ctx, single, "actor"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	batch := []*types.Issue{arrivalWisp("eas-hand-batch-a"), arrivalWisp("eas-hand-batch-b")}
+	if err := env.store.CreateIssues(ctx, batch, "actor"); err != nil {
+		t.Fatalf("CreateIssues: %v", err)
+	}
+	inTx := arrivalWisp("eas-hand-tx")
+	if err := env.store.RunInTransaction(ctx, "create in a transaction", func(tx storage.Transaction) error {
+		return tx.CreateIssue(ctx, inTx, "actor")
+	}); err != nil {
+		t.Fatalf("Transaction.CreateIssue: %v", err)
+	}
+	durable := &types.Issue{ID: "eas-hand-durable", Title: "t", IssueType: types.TypeTask, Status: types.StatusOpen}
+	if err := env.store.CreateIssue(ctx, durable, "actor"); err != nil {
+		t.Fatalf("CreateIssue (durable): %v", err)
+	}
+	env.store.SetEventsJournalEnabled(false)
+	off := arrivalWisp("eas-hand-off")
+	err := env.store.CreateIssue(ctx, off, "actor")
+	env.store.SetEventsJournalEnabled(true)
+	if err != nil {
+		t.Fatalf("CreateIssue (journal off): %v", err)
+	}
+
+	stamps, _ := arrivalStamps(t, env)
+	for _, issue := range []*types.Issue{single, batch[0], batch[1], inTx} {
+		stamp := stamps[issue.ID]
+		if !stamp.Valid {
+			t.Fatalf("%s is unstamped", issue.ID)
+		}
+		if issue.ArrivalSeq != stamp.Int64 {
+			t.Errorf("%s: the caller's issue carries arrival_seq %d after the create, its row %d", issue.ID, issue.ArrivalSeq, stamp.Int64)
+		}
+	}
+	for _, issue := range []*types.Issue{durable, off} {
+		if issue.ArrivalSeq != 0 {
+			t.Errorf("%s: the caller's issue carries arrival_seq %d, but its row has none", issue.ID, issue.ArrivalSeq)
+		}
 	}
 }

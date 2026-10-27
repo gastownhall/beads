@@ -62,7 +62,8 @@ func (r *issueSQLRepositoryImpl) Insert(ctx context.Context, issue *types.Issue,
 		issue.ContentHash = issue.ComputeContentHash()
 	}
 	// Storage assigns arrival_seq at the journal's create seam alone; see
-	// issueops.PrepareIssueForInsert.
+	// issueops.PrepareIssueForInsert. The create record below hands the row's
+	// stamp back (issueops.RecordCreateEventInTx).
 	issue.ArrivalSeq = 0
 
 	if issue.ID == "" {
@@ -84,7 +85,7 @@ func (r *issueSQLRepositoryImpl) Insert(ctx context.Context, issue *types.Issue,
 		}, domain.RecordEventOpts{UseWispsTable: opts.UseWispsTable}); err != nil {
 			return err
 		}
-		if err := issueops.RecordEventInTx(ctx, r.runner, issueops.EventCreate, issue.ID, actor); err != nil {
+		if err := issueops.RecordCreateEventInTx(ctx, r.runner, issue, actor); err != nil {
 			return err
 		}
 		// EnsureIssueIDAvailableInTx above already refused a collision, so this
@@ -130,7 +131,7 @@ func (r *issueSQLRepositoryImpl) Insert(ctx context.Context, issue *types.Issue,
 	}, domain.RecordEventOpts{UseWispsTable: opts.UseWispsTable}); err != nil {
 		return err
 	}
-	if err := issueops.RecordEventInTx(ctx, r.runner, issueops.EventCreate, issue.ID, actor); err != nil {
+	if err := issueops.RecordCreateEventInTx(ctx, r.runner, issue, actor); err != nil {
 		return err
 	}
 	if existed || opts.UseWispsTable {

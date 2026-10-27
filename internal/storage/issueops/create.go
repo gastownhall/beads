@@ -247,8 +247,9 @@ func finishCreateIssueInTx(ctx context.Context, tx DBTX, bc *BatchContext, issue
 	}
 	// Journal the create once, after labels and comments are in the row's
 	// transaction, so the snapshot is the complete bead. The early returns above
-	// (collision skip, stale reject) wrote nothing and journal nothing.
-	if err := RecordEventInTx(ctx, tx, EventCreate, issue.ID, actor); err != nil {
+	// (collision skip, stale reject) wrote nothing and journal nothing. The
+	// record hands the row's arrival_seq back onto issue, which callers keep.
+	if err := RecordCreateEventInTx(ctx, tx, issue, actor); err != nil {
 		return result, err
 	}
 	// The version row is the create's LAST durable-state write. A batch
@@ -730,7 +731,8 @@ func PrepareIssueForInsert(issue *types.Issue, customStatuses, customTypes []str
 	// arrival_seq is assigned by storage alone, at the journal's create seam
 	// (stampArrivalSeqInTx). A value carried in from a caller, an import, or a
 	// row being moved between planes is never stored, and the struct must not
-	// claim one the row does not have.
+	// claim one the row does not have; the create record hands the row's own
+	// stamp back (RecordCreateEventInTx).
 	issue.ArrivalSeq = 0
 	return nil
 }

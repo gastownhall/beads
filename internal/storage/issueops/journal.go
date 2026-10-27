@@ -314,15 +314,45 @@ func recordBlockedJournalChanges(
 // ambient context, so a new call site cannot compile without deciding
 // attribution.
 func RecordEventInTx(ctx context.Context, tx DBTX, op EventOp, issueID, actor string) error {
+	_, err := recordIssueEventInTx(ctx, tx, op, issueID, actor)
+	return err
+}
+
+// RecordCreateEventInTx is RecordEventInTx(EventCreate) for the create seams
+// that write the stored row back onto the caller's issue (finishCreateIssueInTx
+// and the unit-of-work repository's Insert): once the record is journaled it
+// hands the row's arrival_seq back onto issue — the stamp this record just
+// wrote, or the one an earlier record left on a row an import upsert rewrote —
+// so the struct a caller keeps describes the row it created. The insert paths
+// zero the field on the way in (PrepareIssueForInsert), so without this a
+// caller that keeps its struct, as the public storage API's CreateIssue,
+// CreateIssues and Transaction.CreateIssue callers do, reads every stamped
+// wisp as unstamped. With the journal off nothing is recorded or stamped, and
+// the field stays zero.
+func RecordCreateEventInTx(ctx context.Context, tx DBTX, issue *types.Issue, actor string) error {
+	recorded, err := recordIssueEventInTx(ctx, tx, EventCreate, issue.ID, actor)
+	if err != nil {
+		return err
+	}
+	if recorded != nil {
+		issue.ArrivalSeq = recorded.ArrivalSeq
+	}
+	return nil
+}
+
+// recordIssueEventInTx is RecordEventInTx's body. It returns the snapshot it
+// journaled — nil when the journal is off — whose ArrivalSeq is the row's
+// stamp once the record is written.
+func recordIssueEventInTx(ctx context.Context, tx DBTX, op EventOp, issueID, actor string) (*types.Issue, error) {
 	if !journalEnabled(ctx, tx) {
-		return nil
+		return nil, nil
 	}
 	issue, table, err := getJournalIssueInTx(ctx, tx, issueID)
 	if err != nil {
 		// The row should exist for a non-delete op; a missing row means the
 		// mutation and the journal disagree, so fail the transaction rather than
 		// record a hole.
-		return fmt.Errorf("journal: snapshot %s for %s: %w", op, issueID, err)
+		return nil, fmt.Errorf("journal: snapshot %s for %s: %w", op, issueID, err)
 	}
 	// A create of a wisp-plane row stamps the row with its create record's seq
 	// (arrival_seq). Only a row that has no stamp yet takes one — the first
@@ -331,7 +361,10 @@ func RecordEventInTx(ctx context.Context, tx DBTX, op EventOp, issueID, actor st
 	// stamp. issues rows are never stamped: that table replicates, and a
 	// clone-local number has no meaning on another clone (migration 0073).
 	stamp := op == EventCreate && table == "wisps" && issue.ArrivalSeq == 0
-	return insertEventRow(ctx, tx, op, issueID, issue, nil, nil, actor, stamp)
+	if err := insertEventRow(ctx, tx, op, issueID, issue, nil, nil, actor, stamp); err != nil {
+		return nil, err
+	}
+	return issue, nil
 }
 
 // RecordDeleteInTx records a delete for issueID with a null issue payload (the
@@ -435,11 +468,12 @@ func getJournalIssueInTx(ctx context.Context, tx DBTX, issueID string) (*types.I
 // paths — in the NOT NULL DEFAULT ” actor column.
 //
 // stamp asks for the create record's seq to be written onto the wisps row as
-// its arrival_seq (only RecordEventInTx passes true, and only for a create of
-// an unstamped wisp-plane row). The stamp is written after the seq is drawn and
-// before the snapshot is marshaled, so the record's post-image carries the
-// value it stamped — record.seq == row.arrival_seq == post-image.arrival_seq —
-// and the counter is held for one extra statement, not for a second counter.
+// its arrival_seq (only recordIssueEventInTx, RecordEventInTx's body, passes
+// true, and only for a create of an unstamped wisp-plane row). The stamp is
+// written after the seq is drawn and before the snapshot is marshaled, so the
+// record's post-image carries the value it stamped — record.seq ==
+// row.arrival_seq == post-image.arrival_seq — and the counter is held for one
+// extra statement, not for a second counter.
 func insertEventRow(ctx context.Context, tx DBTX, op EventOp, issueID string, issue *types.Issue, dep *EventDep, comment *EventComment, actor string, stamp bool) error {
 	var depJSON any
 	if dep != nil {

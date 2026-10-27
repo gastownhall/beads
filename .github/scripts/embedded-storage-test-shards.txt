@@ -210,6 +210,7 @@
 40 7 TestLoseVersionLeavesTheEpochTablesCommitted
 40 7 TestMergeAndSettleWithStrategy_ResolvesDeclinedConflict
 
+40 8 TestArrivalSeq_EmbeddedCreateLeavesTheStampOnTheCallersIssue
 40 8 TestDeleterContract
 40 8 TestEmbeddedDependencyEditorRoutesWispSourcedRemovalToTheWispPlane
 40 8 TestEmbeddedMergeAndSettleDirtyWorkingSetSurvivesRefusedMerge

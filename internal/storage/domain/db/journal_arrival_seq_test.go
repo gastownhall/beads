@@ -307,3 +307,28 @@ func (s *testSuite) TestArrivalSeq_HealFallsBackWithoutTheWispColumn() {
 	s.Require().Len(rows, 2)
 	s.Equal(rows[0].Seq+1, rows[1].Seq)
 }
+
+// TestArrivalSeq_InsertLeavesTheStampOnTheCallersIssue pins the repository's
+// half of the hand-back: Insert writes the stored row back onto the issue it
+// was given (the content hash, the timestamps), and once it returns that issue
+// carries the stamp its row was given — on both the upsert and the create-only
+// path — rather than the zero Insert wrote on the way in. A durable insert
+// stays at zero, matching its row.
+func (s *testSuite) TestArrivalSeq_InsertLeavesTheStampOnTheCallersIssue() {
+	s.enableJournalForTest()
+	ctx := s.Ctx()
+
+	upsert := newTestWisp("bd-as-hand-upsert")
+	s.Require().NoError(s.issueRepo().Insert(ctx, upsert, "actor", domain.InsertIssueOpts{UseWispsTable: true}))
+	createOnly := newTestWisp("bd-as-hand-create-only")
+	s.Require().NoError(s.issueRepo().Insert(ctx, createOnly, "actor", domain.InsertIssueOpts{UseWispsTable: true, CreateOnly: true}))
+	for _, issue := range []*types.Issue{upsert, createOnly} {
+		row := s.wispArrivalSeq(issue.ID)
+		s.NotZero(row, "%s unstamped", issue.ID)
+		s.Equal(row, issue.ArrivalSeq, "%s: the caller's issue must carry its row's stamp once Insert returns", issue.ID)
+	}
+
+	durable := newTestIssue("bd-as-hand-durable", "t")
+	s.Require().NoError(s.issueRepo().Insert(ctx, durable, "actor", domain.InsertIssueOpts{}))
+	s.Zero(durable.ArrivalSeq, "a durable row carries no stamp, so neither does its caller's issue")
+}

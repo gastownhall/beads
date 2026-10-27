@@ -132,7 +132,8 @@ func TestIssueInsertAndUpsertColumnsExcludeArrivalSeq(t *testing.T) {
 
 // TestOnlyRecordEventInTxRecordsCreates pins the stamp's single entry: the
 // only call to insertEventRow that may ask for a stamp, or record a create, is
-// RecordEventInTx's — which is where the decision "a create of an unstamped
+// the one in recordIssueEventInTx (RecordEventInTx's body, which
+// RecordCreateEventInTx shares) — where the decision "a create of an unstamped
 // wisp row" is made once. A second emitter recording creates would either
 // stamp under rules of its own or journal creates that never stamp.
 func TestOnlyRecordEventInTxRecordsCreates(t *testing.T) {
@@ -159,14 +160,14 @@ func TestOnlyRecordEventInTxRecordsCreates(t *testing.T) {
 			if len(call.Args) != 9 {
 				t.Fatalf("%s: insertEventRow takes 9 arguments here, got %d — update this guard with the signature", fset.Position(call.Pos()), len(call.Args))
 			}
-			if fn.Name.Name == "RecordEventInTx" {
+			if fn.Name.Name == "recordIssueEventInTx" {
 				return true
 			}
 			if op, ok := call.Args[2].(*ast.Ident); ok && op.Name == "EventCreate" {
-				t.Errorf("%s: %s records a create; only RecordEventInTx may", fset.Position(call.Pos()), fn.Name.Name)
+				t.Errorf("%s: %s records a create; only recordIssueEventInTx may", fset.Position(call.Pos()), fn.Name.Name)
 			}
 			if stamp, ok := call.Args[8].(*ast.Ident); !ok || stamp.Name != "false" {
-				t.Errorf("%s: %s asks insertEventRow for a stamp; only RecordEventInTx may", fset.Position(call.Pos()), fn.Name.Name)
+				t.Errorf("%s: %s asks insertEventRow for a stamp; only recordIssueEventInTx may", fset.Position(call.Pos()), fn.Name.Name)
 			}
 			return true
 		})
