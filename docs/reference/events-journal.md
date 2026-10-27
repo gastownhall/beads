@@ -337,9 +337,13 @@ What it promises:
 
 - **Unique, never reused.** No two rows in a workspace share a value, across
   deletes, re-creates and counter heals.
-- **Commit order.** If one create committed before another, its value is lower.
-  A reader that sees a row stamped `n` also sees every surviving row stamped
-  below `n`.
+- **Commit order.** Rows are ordered by the commit of the `create` record that
+  stamped them: if one such record committed before another, its row's value is
+  lower. A reader that sees a row stamped `n` also sees every surviving row
+  stamped below `n`. For a row created while the workspace journals, that record
+  is its insert. For a row created with the journal off and stamped later by a
+  synthetic `create` (see below), it is not, so that row sorts by its rename or
+  re-import, after rows created before it.
 - **It matches the journal.** The `create` record that stamped the row has
   `seq` equal to it, and that record's snapshot — and every later snapshot of
   the row — carries the same value.
@@ -358,8 +362,10 @@ What it promises:
 What it does not promise:
 
 - **No stamp without the journal.** With `events-journal` off there is no
-  stamp and no cost; turning it on does not backfill. A row created while it
-  was off carries none.
+  stamp and no extra statement (the unique index on the column is still
+  maintained on every wisp insert and delete, with NULL entries); turning it on
+  does not backfill. A row created while it was off carries none until a
+  `create` record is journaled for it.
 - **Durable beads carry none.** The durable plane replicates, and a
   clone-local number would mean nothing on another clone.
 - **Read it from the row, not from a record's `seq`.** A rename and an import

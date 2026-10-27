@@ -102,7 +102,10 @@ type Issue struct {
 	// seq of the create record written by the insert that made the row, stamped
 	// on the row in that same transaction (issueops.RecordEventInTx). Sorting
 	// rows by it reproduces the order their creates committed in, also after
-	// those journal records are pruned.
+	// those journal records are pruned. A row created while the writer did not
+	// journal is stamped by the first create record journaled for it later (a
+	// re-import or a rename), so it sorts by that record's commit, not its
+	// insert's.
 	//
 	// Only wisp-plane rows created while the writer journals carry one; 0 means
 	// none (the writer did not journal, the row is on the issues plane, or it

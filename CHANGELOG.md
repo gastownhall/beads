@@ -13,7 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   While a workspace journals, every `ephemeral` or `no_history` bead it creates
   is stamped with the `seq` of its own `create` journal record, in the same
   transaction, so sorting rows by `arrival_seq` recovers the order their
-  creates committed in even after the journal is pruned. Unique, never reused,
+  creates committed in even after the journal is pruned (a row created with
+  the journal off is stamped by the first `create` record later journaled for
+  it, a re-import or a rename, and sorts by that commit). Unique, never reused,
   never changed while the row stays on the wisp plane, never settable by a
   caller, and never written by `bd export`. Durable beads, and rows created
   with the journal off, carry none. Schema migration 0073 adds the column to
