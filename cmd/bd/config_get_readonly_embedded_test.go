@@ -3,9 +3,14 @@
 package main
 
 import (
+	"encoding/json"
+	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/configfile"
 )
 
 var configGetReadOnlyFiles = []string{"config.yaml", "metadata.json", "dolt-config.log"}
@@ -58,4 +63,68 @@ func TestEmbeddedConfigGetIsReadOnly(t *testing.T) {
 		}
 		assertConfigGetFilesUnchanged(t, beadsDir, "config get "+key, before)
 	}
+}
+
+// TestEmbeddedConfigGetYamlKeyWithServerDown pins the outage half of GH#5108:
+// a config.yaml key is answered from config.yaml without opening the store,
+// so `bd config get` still reads it while the configured Dolt server is down,
+// and still writes nothing.
+func TestEmbeddedConfigGetYamlKeyWithServerDown(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "test")
+
+	if stdout, stderr, err := runConfigCommandWithStreams(t, bd, dir, "set", "dolt.max-conns", "7"); err != nil {
+		t.Fatalf("config set dolt.max-conns failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+
+	// Point the workspace at a server-mode port nothing listens on.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	if err := ln.Close(); err != nil {
+		t.Fatalf("close listener: %v", err)
+	}
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil || cfg == nil {
+		t.Fatalf("load metadata: cfg=%v err=%v", cfg, err)
+	}
+	cfg.DoltMode = configfile.DoltModeServer
+	cfg.DoltServerHost = "127.0.0.1"
+	cfg.DoltServerPort = port
+	if err := cfg.Save(beadsDir); err != nil {
+		t.Fatalf("save metadata: %v", err)
+	}
+
+	before := snapshotConfigGetFiles(t, beadsDir)
+
+	stdout, stderr, err := runConfigCommandWithStreams(t, bd, dir, "get", "dolt.max-conns")
+	if err != nil {
+		t.Fatalf("config get dolt.max-conns with the server down failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+	if got := strings.TrimSpace(stdout); got != "7" {
+		t.Fatalf("config get dolt.max-conns = %q, want %q\nstderr:\n%s", got, "7", stderr)
+	}
+	assertConfigGetFilesUnchanged(t, beadsDir, "config get dolt.max-conns", before)
+
+	stdout, stderr, err = runConfigCommandWithStreams(t, bd, dir, "get", "--json", "dolt.max-conns")
+	if err != nil {
+		t.Fatalf("config get --json dolt.max-conns with the server down failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+		t.Fatalf("decode config get --json output: %v\nstdout:\n%s", err, stdout)
+	}
+	want := map[string]string{"key": "dolt.max-conns", "value": "7", "location": "config.yaml"}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("config get --json %s = %v, want %q (full: %s)", k, got[k], v, stdout)
+		}
+	}
+	assertConfigGetFilesUnchanged(t, beadsDir, "config get --json dolt.max-conns", before)
 }
