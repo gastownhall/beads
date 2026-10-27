@@ -122,3 +122,43 @@ func TestIgnoredMigration0029CarriesTheColumnAndTheUniqueIndex(t *testing.T) {
 		t.Error("ignored/0029 must not touch issues: it is a replicated table the ignored series never owns")
 	}
 }
+
+// TestIgnoredMigration0029RaisesTheSeqCounterPastTheStamps pins the step that
+// keeps a replayed counter seed above every surviving stamp. ignored/0022
+// re-seeds bd_events_seq from the journal's MAX(seq) whenever the counter table
+// goes missing and the ignored series replays from its floor; this file re-runs
+// in the same replay, after 0022, and must raise the counter past
+// MAX(arrival_seq) — never lower it — or a pruned journal hands the next create
+// a value below rows that are still there.
+func TestIgnoredMigration0029RaisesTheSeqCounterPastTheStamps(t *testing.T) {
+	upSQL, err := IgnoredMigrationSQL(ignoredMigration0029Up)
+	if err != nil {
+		t.Fatalf("IgnoredMigrationSQL(%s) error = %v", ignoredMigration0029Up, err)
+	}
+	for _, want := range []string{
+		"'UPDATE bd_events_seq SET next_seq = GREATEST(next_seq, COALESCE((SELECT MAX(arrival_seq) FROM wisps), 0)) WHERE id = 0'",
+		"TABLE_NAME = 'bd_events_seq'",
+	} {
+		if !strings.Contains(upSQL, want) {
+			t.Errorf("ignored/0029 missing %q\nfull SQL:\n%s", want, upSQL)
+		}
+	}
+	raise := strings.Index(upSQL, "UPDATE bd_events_seq")
+	if index := strings.Index(upSQL, "'CREATE UNIQUE INDEX uk_wisps_arrival_seq"); raise < index {
+		t.Error("ignored/0029 raises the counter before it ensures the column and its index; the raise must come last, over the column it reads")
+	}
+
+	// The replay this step exists for starts at the counter table's own floor:
+	// bd_events_seq must stay a floored sentinel at or below 0022, the migration
+	// that re-creates and re-seeds it, so that 0029 is in every replay that
+	// re-seeds the counter.
+	var floor int
+	for _, st := range ignoredSource.sentinelFlooredTables {
+		if st.table == "bd_events_seq" {
+			floor = st.replayFloor
+		}
+	}
+	if floor == 0 || floor >= 22 {
+		t.Fatalf("bd_events_seq replayFloor = %d, want a floor below 22 (ignored/0022 re-creates the counter), so a lost counter replays 0022 and then 0029", floor)
+	}
+}

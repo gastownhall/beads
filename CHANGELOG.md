@@ -19,8 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   never changed while the row stays on the wisp plane, never settable by a
   caller, and never written by `bd export`. Durable beads, and rows created
   with the journal off, carry none. Schema migration 0073 adds the column to
-  both planes (ignored migration 0029 adds the clone-local unique index); the
-  seq-counter heal now also clears `MAX(arrival_seq)`. `--json` output and
+  both planes (ignored migration 0029 adds the clone-local unique index, and
+  raises the seq counter past every surviving stamp whenever a lost counter is
+  re-created); the seq-counter heal now also clears `MAX(arrival_seq)`. `--json` output and
   every issue-shaped HTTP schema carry the optional member, announced over
   HTTP by the new build-level capability `issues.arrivalSeq`.
   See [Arrival order on the row](docs/reference/events-journal.md#arrival-order-on-the-row).

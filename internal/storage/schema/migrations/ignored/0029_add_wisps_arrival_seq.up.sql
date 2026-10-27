@@ -20,10 +20,11 @@
 -- because wisps is clone-local on every clone, upgraded or fresh, and this file
 -- is the one both doors run.
 --
--- Both steps are guarded: a no-op on in-place-upgraded workspaces where synced
--- 0073 already added the column, on workspaces with no local wisps table yet,
--- and on a re-run where the index already exists. Definition mirrors 0073
--- exactly: BIGINT, nullable, no default.
+-- The column and index steps are guarded: a no-op on in-place-upgraded
+-- workspaces where synced 0073 already added the column, on workspaces with no
+-- local wisps table yet, and on a re-run where the index already exists.
+-- Definition mirrors 0073 exactly: BIGINT, nullable, no default. The third
+-- step, the seq counter raise, is explained beside it.
 SET @needs_add = IF(
     (SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES
         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'wisps') > 0
@@ -51,5 +52,34 @@ SET @needs_index = IF(
 );
 SET @sql = IF(@needs_index = 1,
     'CREATE UNIQUE INDEX uk_wisps_arrival_seq ON wisps (arrival_seq)',
+    'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+-- Raise the seq counter past every surviving stamp. A stamp IS a journal seq
+-- and it outlives its record once the journal is pruned, so the counter must
+-- never hand out a value at or below MAX(arrival_seq). ignored/0022 seeds
+-- bd_events_seq from the journal's MAX(seq) alone, and it re-runs whenever the
+-- cursor's sentinel floor replays the ignored series because bd_events_seq went
+-- missing (replayFloor 21). With the journal pruned past every record that
+-- re-seed lands at 0 while stamps survive, and the low values the swept or
+-- deleted wisps held are free: the next create would take one without
+-- colliding, so the writer's collision heal never fires, and a new row would
+-- sort before older surviving rows. This file re-runs in that same replay,
+-- after 0022, so raising the counter here closes the gap. GREATEST never moves
+-- the counter backwards, so on an in-place upgrade (every stamp NULL), on a
+-- fresh clone (no wisps) and on a healthy re-run it changes nothing. Guarded on
+-- the counter table and the stamp column both existing.
+SET @needs_raise = IF(
+    (SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'bd_events_seq') > 0
+    AND
+    (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'wisps'
+          AND COLUMN_NAME = 'arrival_seq') > 0,
+    1, 0
+);
+SET @sql = IF(@needs_raise = 1,
+    'UPDATE bd_events_seq SET next_seq = GREATEST(next_seq, COALESCE((SELECT MAX(arrival_seq) FROM wisps), 0)) WHERE id = 0',
     'SELECT 1');
 PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;

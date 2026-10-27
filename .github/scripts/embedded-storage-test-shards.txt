@@ -276,6 +276,7 @@
 40 13 TestEmbeddedRelationsDirectionSelectsTheInverseGraph
 40 13 TestGraphWalkPlansHonorJoinHints
 
+40 14 TestArrivalSeq_EmbeddedReplayedCounterSeedClearsTheStamps
 40 14 TestBatchCreatorContract
 40 14 TestBlockingAnnotatorContract
 40 14 TestCountsIncludeWispDependencies

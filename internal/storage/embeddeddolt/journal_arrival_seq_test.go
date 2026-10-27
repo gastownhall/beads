@@ -12,6 +12,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
+	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -280,5 +281,74 @@ func TestArrivalSeq_EmbeddedCreateLeavesTheStampOnTheCallersIssue(t *testing.T) 
 		if issue.ArrivalSeq != 0 {
 			t.Errorf("%s: the caller's issue carries arrival_seq %d, but its row has none", issue.ID, issue.ArrivalSeq)
 		}
+	}
+}
+
+// TestArrivalSeq_EmbeddedReplayedCounterSeedClearsTheStamps covers the one way
+// a counter can land below surviving stamps WITHOUT a collision to heal it.
+// When bd_events_seq goes missing, the ignored series' cursor floor replays it
+// from ignored/0022, which re-creates the counter and seeds it from the
+// journal's MAX(seq) alone. With the journal pruned past every record that seed
+// is 0, and the lowest stamps are free once their wisps are gone, so the next
+// create would take one: no unique-index collision, no heal, and a new row that
+// sorts BEFORE an older surviving one. ignored/0029 re-runs in the same replay
+// and raises the counter past MAX(arrival_seq).
+func TestArrivalSeq_EmbeddedReplayedCounterSeedClearsTheStamps(t *testing.T) {
+	env := newTestEnv(t, "eas")
+	env.store.SetEventsJournalEnabled(true)
+	ctx := context.Background()
+	for _, id := range []string{"eas-replay-a", "eas-replay-b", "eas-replay-c"} {
+		if err := env.store.CreateIssue(ctx, arrivalWisp(id), "actor"); err != nil {
+			t.Fatalf("create %s: %v", id, err)
+		}
+	}
+	// The two oldest go away, freeing the lowest stamps; the newest survives.
+	for _, id := range []string{"eas-replay-a", "eas-replay-b"} {
+		if err := env.store.DeleteIssue(ctx, id); err != nil {
+			t.Fatalf("delete %s: %v", id, err)
+		}
+	}
+	var survivor int64
+	env.queryScalar(t, ctx, "SELECT arrival_seq FROM wisps WHERE id = ?", []any{"eas-replay-c"}, &survivor)
+	if survivor <= 2 {
+		t.Fatalf("surviving stamp = %d, want above the two deleted wisps' stamps", survivor)
+	}
+	env.exec(t, ctx, "DELETE FROM bd_events_journal")
+	env.exec(t, ctx, "DROP TABLE bd_events_seq")
+
+	// What the next open does: the missing counter floors the ignored cursor,
+	// and the series replays from 0022 on.
+	db, cleanup, err := embeddeddolt.OpenSQL(ctx, env.dataDir, env.database, "main")
+	if err != nil {
+		t.Fatalf("OpenSQL: %v", err)
+	}
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		_ = cleanup()
+		t.Fatalf("Conn: %v", err)
+	}
+	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		_ = conn.Close()
+		_ = cleanup()
+		t.Fatalf("MigrateUp with the counter table missing: %v", err)
+	}
+	var next int64
+	err = conn.QueryRowContext(ctx, "SELECT next_seq FROM bd_events_seq WHERE id = 0").Scan(&next)
+	_ = conn.Close()
+	_ = cleanup()
+	if err != nil {
+		t.Fatalf("reading the re-seeded counter: %v", err)
+	}
+	if next < survivor {
+		t.Fatalf("the replay re-seeded the counter at %d, below the surviving stamp %d: the next create "+
+			"would take a free value below it and sort before an older row", next, survivor)
+	}
+
+	if err := env.store.CreateIssue(ctx, arrivalWisp("eas-replay-d"), "actor"); err != nil {
+		t.Fatalf("create after the replay: %v", err)
+	}
+	stamps, _ := arrivalStamps(t, env)
+	if got := stamps["eas-replay-d"]; !got.Valid || got.Int64 <= survivor {
+		t.Fatalf("the first wisp created after the replay stamped %v, want above the surviving %d", got, survivor)
 	}
 }

@@ -384,7 +384,10 @@ events_journal_disabled` when it is off.
 The stamp is a journal `seq`, so the counter never hands out a value a row
 already carries: the stale-counter heal raises it past both the journal's
 highest `seq` and the highest `arrival_seq`, and a unique index on the column
-turns any collision into a loud failure rather than a duplicate.
+turns any collision into a loud failure rather than a duplicate. A counter lost
+outright is re-created on the next open and raised past the highest surviving
+`arrival_seq` as well, so a pruned journal cannot hand a new row a value below
+rows that are still there.
 
 ## Resuming, and the truncation error
 
