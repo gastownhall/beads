@@ -380,4 +380,24 @@ func TestMaybeAutoPush_NoGitOpsDoesNotPush(t *testing.T) {
 			t.Errorf("push-state.json should not exist, stat err = %v", err)
 		}
 	})
+
+	t.Run("explicit_auto_push", func(t *testing.T) {
+		// no-git-ops does not override an explicit dolt.auto-push opt-in.
+		fake, pushStateFile := setupNoGitOpsAutoPushWorkspace(t, "no-git-ops: true\ndolt:\n  auto-push: true\n")
+
+		maybeAutoPush(context.Background())
+
+		if fake.pushCalls != 1 {
+			t.Fatalf("Push called %d times, want 1", fake.pushCalls)
+		}
+		if _, err := os.Stat(pushStateFile); err != nil {
+			t.Errorf("push-state.json should exist after a push: %v", err)
+		}
+
+		// An immediate second write is debounced.
+		maybeAutoPush(context.Background())
+		if fake.pushCalls != 1 {
+			t.Errorf("Push called %d times after debounced retry, want 1", fake.pushCalls)
+		}
+	})
 }
