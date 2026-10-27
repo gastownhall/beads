@@ -33,9 +33,10 @@ import (
 //
 // What lives here is everything that genuinely needs the filter as a value:
 // the recursive --parent tree walk, which re-parents a copy of it at every
-// level; the --watch poll loop, which re-runs the same filter on a ticker; the
-// proxied route's builder call, which has to name the type to hand the filter
-// back; and --current, which resolves an id from a deliberately BARE filter
+// level; the --watch poll loop, which re-runs the same filter after every
+// full poll wait; the proxied route's builder call, which has to name the
+// type to hand the filter back; and --current, which resolves an id from a
+// deliberately BARE filter
 // that must not pick up the default listing's exclusions.
 //
 // The list is SHORTER by everything it no longer holds. `bd list`'s page is
@@ -212,26 +213,48 @@ func watchIssues(ctx context.Context, store storage.DoltStorage, filter types.Is
 	defer signal.Stop(sigChan)
 
 	pollInterval := 2 * time.Second
-	ticker := time.NewTicker(pollInterval)
-	defer ticker.Stop()
+	listWatchLoop(sigChan,
+		func() <-chan time.Time { return time.After(pollInterval) },
+		lastSnapshot,
+		func() ([]*types.Issue, bool, error) {
+			issues, err := loadWatchedIssues(ctx, store, filter, ready, parentID, sortBy, reverse)
+			if err != nil {
+				return nil, false, err
+			}
+			issues, truncated := workapi.FinishPage(issues, "", false, effectiveLimit, false)
+			return issues, truncated, nil
+		},
+		func(issues []*types.Issue, truncated bool) {
+			displayWatchedIssueList(ctx, store, issues, truncated, ready, statusSelector, sortBy, reverse)
+			printTruncationHint(truncated, effectiveLimit)
+		})
+	return nil
+}
 
+// listWatchLoop is watchIssues' refresh loop. poll is called each time the
+// loop starts waiting, which is after the previous refresh has returned: a
+// refresh that outgrew the poll interval — a `--parent` tree walk over many
+// nodes, say — therefore cannot collapse the next one into back-to-back
+// engine opens, which leaves a concurrent bd command a window to open the
+// backend between refreshes (GH#3415). It returns when stop fires, printing
+// "Stopped watching."
+func listWatchLoop(stop <-chan os.Signal, poll func() <-chan time.Time, lastSnapshot string,
+	refresh func() ([]*types.Issue, bool, error), redraw func(issues []*types.Issue, truncated bool)) {
 	for {
 		select {
-		case <-sigChan:
+		case <-stop:
 			fmt.Fprintf(os.Stderr, "\nStopped watching.\n")
-			return nil
-		case <-ticker.C:
-			issues, err := loadWatchedIssues(ctx, store, filter, ready, parentID, sortBy, reverse)
+			return
+		case <-poll():
+			issues, truncated, err := refresh()
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error refreshing issues: %s\n", remedy.PrintedMessage(err))
 				continue
 			}
-			issues, truncated := workapi.FinishPage(issues, "", false, effectiveLimit, false)
 			snap := issueSnapshot(issues)
 			if snap != lastSnapshot {
 				lastSnapshot = snap
-				displayWatchedIssueList(ctx, store, issues, truncated, ready, statusSelector, sortBy, reverse)
-				printTruncationHint(truncated, effectiveLimit)
+				redraw(issues, truncated)
 				fmt.Fprintf(os.Stderr, "\nWatching for changes... (Press Ctrl+C to exit)\n")
 			}
 		}

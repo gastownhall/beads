@@ -1001,6 +1001,7 @@ go_test(
         "list_test.go",
         "list_tree_cycle_test.go",
         "list_tree_deps_test.go",
+        "list_watch_loop_test.go",
         "list_wisp_type_reachability_test.go",
         "lite_filter_spy_test.go",
         "main_config_debug_test.go",
