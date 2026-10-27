@@ -100,6 +100,27 @@ bd init --quiet
 BEADS_DIR=/path/to/.beads bd list
 ```
 
+### `database not initialized: issue_prefix config is missing`
+
+`bd create` (and every other prefix-minting command) reads `issue_prefix` from
+the database's config table only. An `issue_prefix` or `issue-prefix` value in
+`.beads/config.yaml` does **not** satisfy the check — that state (a database
+whose `issue_prefix` row is empty, usually written by an external tool that
+only knows about config.yaml) is exactly what `bd bootstrap` repairs:
+
+```bash
+# Seed the database's issue_prefix row from config.yaml 'issue-prefix'
+bd bootstrap
+
+# Then confirm the read bd itself uses:
+bd config get issue_prefix
+```
+
+`bd bootstrap` never overwrites a prefix that is already set. For a brand-new
+project where you know the prefix, `bd init --prefix <prefix>` is the
+alternative; `bd config set issue_prefix` is rejected on purpose (the prefix
+belongs to init / bootstrap / rename-prefix).
+
 ### Database locked
 
 ```bash

@@ -995,6 +995,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd bootstrap` now repairs a database that exists without its
+  `issue_prefix` row, instead of claiming success while `bd create` still
+  fails** (GH#3494). A workspace whose `.beads/config.yaml` names
+  `issue-prefix` (what external tools like `gc init` write) but whose
+  database was never fully initialized produced `bd config get issue_prefix`
+  → `(not set)` and `bd create` →
+  `database not initialized: issue_prefix config is missing`, with no
+  non-destructive repair: `bd config set issue_prefix` is rejected on
+  purpose, `bd rename-prefix` failed with `failed to get current prefix:
+  <nil>`, and `bd bootstrap` reported "Database already exists". Bootstrap
+  now plans a `seed-prefix` action for that state and seeds `issue_prefix`
+  from config.yaml `issue-prefix` (never overwriting a prefix that is
+  already set), so `bd config get` and `bd create` work right after it —
+  and its local init/restore/jsonl-import actions now create the database
+  through the same server-vs-embedded selection every reader uses, instead
+  of silently writing a shadow database under `.beads/embeddeddolt` on a
+  server-mode workspace; an unreachable server fails the command instead of
+  reporting "Created fresh database". The check itself stays
+  database-only by design: config.yaml alone never satisfies it, a note on
+  `bd config get` / `bd config show` says so, and every failure naming it
+  (create, both paths; config set's rejection; rename-prefix) now names
+  `bd bootstrap` as the repair.
 - **`bd export` and auto-export no longer write JSONL with relations silently
   dropped** (GH#6870). When a label, dependency, comment or count read fails,
   `bd export` now exits non-zero and leaves the output file untouched, and
