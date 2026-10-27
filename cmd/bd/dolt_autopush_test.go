@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/storage"
 )
 
 type fakeAutoPushTarget struct {
@@ -288,6 +289,95 @@ func TestPushedCommitForState(t *testing.T) {
 		target := &fakeAutoPushTarget{commit: "after", commitErr: errors.New("engine closed")}
 		if got := pushedCommitForState(ctx, target, "before"); got != "before" {
 			t.Fatalf("pushedCommitForState() = %q, want %q (pre-push fallback)", got, "before")
+		}
+	})
+}
+
+// countingPushStore is a minimal DoltStorage stand-in for maybeAutoPush. It
+// embeds a nil DoltStorage and overrides only the methods the auto-push path
+// touches, plus HasRemote so the pre-#3446 auto-detect (enable auto-push
+// whenever an "origin" remote exists) sees a configured origin instead of
+// panicking on the nil embed.
+type countingPushStore struct {
+	storage.DoltStorage
+	pushCalls int
+}
+
+func (s *countingPushStore) HasRemote(_ context.Context, name string) (bool, error) {
+	return name == "origin", nil
+}
+
+func (s *countingPushStore) GetCurrentCommit(context.Context) (string, error) {
+	return "abc123", nil
+}
+
+func (s *countingPushStore) Push(context.Context) error {
+	s.pushCalls++
+	return nil
+}
+
+// setupNoGitOpsAutoPushWorkspace writes configYAML to a fresh workspace's
+// .beads/config.yaml, loads it, and installs a countingPushStore as the
+// active store. User-level config and the BD_DOLT_* overrides are isolated so
+// only the workspace YAML decides whether auto-push runs.
+func setupNoGitOpsAutoPushWorkspace(t *testing.T, configYAML string) (*countingPushStore, string) {
+	t.Helper()
+
+	tmp := t.TempDir()
+	beadsDir := filepath.Join(tmp, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(configYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DIR", beadsDir)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	for _, key := range []string{"BD_DOLT_AUTO_PUSH", "BD_DOLT_LOCAL_ONLY"} {
+		t.Setenv(key, "")
+		os.Unsetenv(key)
+	}
+
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+	if !config.GetBool("no-git-ops") {
+		t.Fatal("precondition: no-git-ops from .beads/config.yaml should be true")
+	}
+
+	fake := &countingPushStore{}
+	prev := store
+	setStore(fake)
+	t.Cleanup(func() { setStore(prev) })
+
+	return fake, filepath.Join(beadsDir, "push-state.json")
+}
+
+// TestMaybeAutoPush_NoGitOpsDoesNotPush pins GH#3463: a stealth workspace
+// (no-git-ops: true) whose store has a Dolt origin must not push on every
+// write unless the user explicitly opted into dolt.auto-push.
+func TestMaybeAutoPush_NoGitOpsDoesNotPush(t *testing.T) {
+	// Cannot be parallel: modifies global env vars, config, and store.
+
+	t.Run("auto_push_unset", func(t *testing.T) {
+		fake, pushStateFile := setupNoGitOpsAutoPushWorkspace(t, "no-git-ops: true\n")
+		if src := config.GetValueSource("dolt.auto-push"); src != config.SourceDefault {
+			t.Fatalf("precondition: dolt.auto-push source = %q, want %q", src, config.SourceDefault)
+		}
+
+		maybeAutoPush(context.Background())
+
+		if fake.pushCalls != 0 {
+			t.Errorf("Push called %d times, want 0", fake.pushCalls)
+		}
+		if _, err := os.Stat(pushStateFile); !os.IsNotExist(err) {
+			t.Errorf("push-state.json should not exist, stat err = %v", err)
 		}
 	})
 }
