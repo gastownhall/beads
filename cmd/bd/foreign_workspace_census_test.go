@@ -29,6 +29,7 @@ import (
 var metadataFactories = map[string]bool{
 	"newDoltStoreFromConfig":         true,
 	"newExistingDoltStoreFromConfig": true,
+	"newProvisioningStoreFromConfig": true,
 	"newReadOnlyStoreFromConfig":     true,
 	"newPreviewStoreFromConfig":      true,
 }
@@ -43,6 +44,12 @@ var metadataFactoryReferences = map[string]string{
 	"init.go:countExistingIssues":                      "own workspace: the workspace bd init runs in",
 	"init_contributor.go:autoConfigureForkContributor": "a planning .beads bd init just created, empty",
 	"bootstrap.go:var openSyncedWarmupStore":           "own workspace: the workspace bd bootstrap just synced",
+	"bootstrap.go:var readBootstrapEmbeddedPrefix":     "own workspace: the workspace bd bootstrap probes",
+	"bootstrap.go:executeSeedPrefixAction":             "own workspace: the workspace bd bootstrap seeds",
+	"bootstrap.go:verifyBootstrapPrefixVisible":        "own workspace: the workspace bd bootstrap verifies",
+	"bootstrap.go:executeInitAction":                   "own workspace: the workspace bd bootstrap provisions",
+	"bootstrap.go:executeRestoreAction":                "own workspace: the workspace bd bootstrap restores into",
+	"bootstrap.go:executeJSONLImportAction":            "own workspace: the workspace bd bootstrap imports into",
 	"repo.go:var repoSyncCmd":                          "bd-managed remote cache clone, never a user .beads",
 	"create.go:var createCmd":                          "bd-managed remote cache clone (the local target opens through openForeignStore)",
 	"create.go:openDryRunTargetStore":                  "bd-managed remote cache clone (the local target opens through openForeignStore)",
@@ -112,6 +119,7 @@ var configfileLoadSites = map[string]string{
 	"serve.go:serveDatabaseSource":                                     "own: bd serve's workspace",
 	"store_factory.go:openDoltStoreFromConfig":                         "admitted: after checkDiscoveredBackend (a foreign open, after admitForeignWorkspace too)",
 	"store_factory_nocgo.go:newDoltStoreFromConfig":                    "admitted: after checkDiscoveredBackend (a foreign open, after admitForeignWorkspace too)",
+	"store_factory_nocgo.go:newProvisioningStoreFromConfig":            "admitted: after checkDiscoveredBackend (a foreign open, after admitForeignWorkspace too)",
 	"uow_factory.go:resolveProxiedServerUOWTopology":                   "own: the command's or bd serve's workspace",
 	"uow_factory.go:resolveServerModeUOWTopologyWithTransportResolver": "own: the command's or bd serve's workspace",
 	"upgrade.go:var upgradeAckCmd":                                     "own",
