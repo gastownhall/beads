@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/configfile"
 )
 
 // bdBootstrap runs "bd bootstrap" with the given args and returns stdout.
@@ -450,6 +452,109 @@ func TestEmbeddedBootstrapSeedPrefixFallbacks(t *testing.T) {
 		if !strings.HasPrefix(issue.ID, want+"-") {
 			t.Fatalf("bd create minted %q, want a %s- ID", issue.ID, want)
 		}
+	})
+}
+
+// TestEmbeddedBootstrapKeepsExistingPrefix pins the never-overwrite half of
+// GH#3494's fix: an initialized workspace whose database already carries
+// issue_prefix "xx" while config.yaml names a different prefix ("la") must
+// keep "xx" across `bd bootstrap` — nothing rewritten, no issue ID re-minted —
+// and a seed-prefix action that finds the row filled (the row was written
+// between planning and execution) must leave it alone and say so.
+func TestEmbeddedBootstrapKeepsExistingPrefix(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "xx", "--database", "mydb4")
+	// config.yaml names a DIFFERENT prefix than the database: the
+	// conflicting-workspace shape bootstrap must never resolve by rewriting.
+	cfgPath := filepath.Join(beadsDir, "config.yaml")
+	cfgData, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read config.yaml: %v", err)
+	}
+	if err := os.WriteFile(cfgPath, append(cfgData, []byte("issue-prefix: la\n")...), 0o644); err != nil {
+		t.Fatalf("append issue-prefix to config.yaml: %v", err)
+	}
+	// An issue minted before bootstrap: its xx- ID must survive unchanged.
+	pre := bdCreate(t, bd, dir, "keep my id", "--type", "task")
+
+	assertPrefix := func(t *testing.T, want string) {
+		t.Helper()
+		out, err := runBDEmbeddedAllowError(t, bd, dir, "config", "get", "issue_prefix")
+		if err != nil {
+			t.Fatalf("bd config get issue_prefix failed: %v\n%s", err, out)
+		}
+		if got := strings.TrimSpace(out); got != want {
+			t.Fatalf("bd config get issue_prefix = %q, want %q (bootstrap must not touch it)", got, want)
+		}
+	}
+
+	// The E2E half: on an initialized workspace bootstrap settles on nothing
+	// to do. It pins that the conflict never becomes an action: no
+	// "Set issue_prefix", no "Created fresh database", prefix kept, existing
+	// IDs intact, new IDs still minted under "xx".
+	t.Run("bootstrap_on_initialized_workspace_changes_nothing", func(t *testing.T) {
+		cmd := exec.Command(bd, "bootstrap", "--yes")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err != nil {
+			t.Fatalf("bd bootstrap --yes failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+		}
+		combined := stdout.String() + stderr.String()
+		if !strings.Contains(stdout.String(), "already exists") && !strings.Contains(stdout.String(), "Nothing to do") {
+			t.Errorf("expected the nothing-to-do plan for an initialized workspace:\nstdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+		}
+		if strings.Contains(combined, "Set issue_prefix") {
+			t.Errorf("bootstrap must not rewrite the database prefix from config.yaml:\nstdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+		}
+		if strings.Contains(combined, "Created fresh database") {
+			t.Errorf("bootstrap must not claim a fresh database:\nstdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+		}
+		assertPrefix(t, "xx")
+
+		listOut, listErr := runBDEmbeddedAllowError(t, bd, dir, "list", "--id", pre.ID, "--json")
+		if listErr != nil || !strings.Contains(listOut, pre.ID) {
+			t.Fatalf("the pre-bootstrap issue %s must survive untouched (err=%v):\n%s", pre.ID, listErr, listOut)
+		}
+		post := bdCreate(t, bd, dir, "still xx", "--type", "task")
+		if !strings.HasPrefix(post.ID, "xx-") {
+			t.Fatalf("bd create minted %q after bootstrap, want an xx- ID", post.ID)
+		}
+	})
+
+	// The action-level half: a seed-prefix plan executed when the row turns
+	// out to be filled (planned empty, written before execution) declines the
+	// write and says so. At the branch base this case does not exist, so the
+	// plan executed as a silent no-op — the discriminator for this AC.
+	t.Run("seed_prefix_action_leaves_filled_row_unchanged", func(t *testing.T) {
+		cfg, err := configfile.Load(beadsDir)
+		if err != nil {
+			t.Fatalf("load config: %v", err)
+		}
+		plan := BootstrapPlan{
+			Action:   "seed-prefix",
+			BeadsDir: beadsDir,
+			Database: "mydb4",
+		}
+		var execErr error
+		stderrOut := captureStderr(t, func() {
+			execErr = executeBootstrapPlan(plan, cfg, true)
+		})
+		if execErr != nil {
+			t.Fatalf("executeBootstrapPlan(seed-prefix, filled row) failed: %v\nstderr:\n%s", execErr, stderrOut)
+		}
+		if !strings.Contains(stderrOut, `issue_prefix already set to "xx"; left unchanged`) {
+			t.Fatalf("expected the left-unchanged message naming the database prefix, got stderr:\n%s", stderrOut)
+		}
+		if strings.Contains(stderrOut, "Set issue_prefix") {
+			t.Fatalf("a filled row must not be rewritten, got stderr:\n%s", stderrOut)
+		}
+		assertPrefix(t, "xx")
 	})
 }
 
