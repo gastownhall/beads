@@ -121,3 +121,46 @@ func TestEmbeddedConfigGetYamlKeyWithServerDown(t *testing.T) {
 		}
 	}
 }
+
+// TestEmbeddedConfigGetIsReadOnly pins GH#5108: `bd config get` must not
+// rewrite .beads/config.yaml or .beads/metadata.json, nor append to
+// .beads/dolt-config.log.
+func TestEmbeddedConfigGetIsReadOnly(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "test")
+
+	files := []string{"config.yaml", "metadata.json", "dolt-config.log"}
+	snapshot := func() map[string]string {
+		m := map[string]string{}
+		for _, f := range files {
+			data, err := os.ReadFile(filepath.Join(beadsDir, f))
+			if os.IsNotExist(err) {
+				m[f] = "<absent>"
+				continue
+			}
+			if err != nil {
+				t.Fatalf("reading %s: %v", f, err)
+			}
+			m[f] = string(data)
+		}
+		return m
+	}
+
+	before := snapshot()
+	for _, key := range []string{"storage.backend", "dolt.server", "dolt.database"} {
+		stdout, stderr, err := runConfigCommandWithStreams(t, bd, dir, "get", key)
+		if err != nil {
+			t.Fatalf("config get %s failed: %v\nstdout:\n%s\nstderr:\n%s", key, err, stdout, stderr)
+		}
+		after := snapshot()
+		for _, f := range files {
+			if before[f] != after[f] {
+				t.Errorf("config get %s modified .beads/%s:\nbefore:\n%s\nafter:\n%s", key, f, before[f], after[f])
+			}
+		}
+	}
+}
