@@ -18,7 +18,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/uow"
 )
 
-// doltVersionWarnOnce ensures the dolt-version advisory (old/unverifiable
+// doltVersionWarnOnce ensures the dolt-version advisory (unverifiable
 // version) is printed at most once per process, even though
 // resolveAndProbeDolt can run repeatedly against the same resolved binary
 // (retries, multiple UOW providers opened in one command, or bd init
@@ -42,8 +42,11 @@ func doltProbeCachePath() string {
 }
 
 // resolveAndProbeDolt resolves the external dolt binary (env override >
-// sidecar > PATH) and hardened-probes it, printing the version-recommendation
-// advisory (if any) at most once per process via doltVersionWarnOnce.
+// sidecar > PATH) and hardened-probes it. A binary below
+// doltversion.RequiredMin is refused with the probe's *BelowMinimumError,
+// which names the version, the minimum and how to upgrade; one whose version
+// does not parse prints an advisory at most once per process via
+// doltVersionWarnOnce and is used anyway.
 //
 // quiet suppresses the advisory (errors still return). It is a parameter
 // rather than a read of the global quietFlag because bd init defines its own
@@ -84,6 +87,12 @@ func resolveAndProbeDolt(ctx context.Context, errPrefix string, quiet bool) (dol
 	cachePath := doltProbeCachePath()
 	res, err := doltversion.ProbeWithPolicyCached(ctx, doltBin, cachePath, time.Now())
 	if err != nil {
+		if errors.Is(err, doltversion.ErrBelowRequiredMin) {
+			// The binary works; it is too old. The error carries its own
+			// upgrade advice, so the generic install hint would only
+			// repeat it less precisely.
+			return doltBin, fmt.Errorf("%s: %w (source: %s)", errPrefix, err, doltSrc)
+		}
 		if errors.Is(err, context.Canceled) {
 			// The probe was killed because OUR context was canceled (user
 			// hit Ctrl-C, outer operation gave up) — dolt itself was never

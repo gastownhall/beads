@@ -18,8 +18,10 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/doltversion"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/schema"
+	"github.com/steveyegge/beads/internal/testutil"
 )
 
 // snapshotBootstrapEnv saves all BD_/BEADS_-prefixed env vars, clears them,
@@ -2456,32 +2458,6 @@ func TestDetectBootstrapAction_ShadowDirSettlesForEveryHost(t *testing.T) {
 	}
 }
 
-// clonePortTestEnv clears every variable that names a Dolt server endpoint,
-// its credentials or the mode, isolates HOME (the shared-server directory,
-// user config and credentials file live there) and resets the config package,
-// so only what a test writes chooses the endpoint.
-func clonePortTestEnv(t *testing.T) {
-	t.Helper()
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("BEADS_SHARED_SERVER_DIR", filepath.Join(home, "shared-server"))
-	for _, name := range []string{
-		"BEADS_DOLT_SERVER_MODE", "BEADS_DOLT_SHARED_SERVER", "BEADS_DOLT_SERVER_HOST",
-		"BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_PORT", "BEADS_DOLT_SERVER_SOCKET",
-		"BEADS_DOLT_DATA_DIR", "BEADS_DOLT_SERVER_DATABASE", "BEADS_DOLT_SERVER_USER",
-		"BEADS_DOLT_SERVER_TLS", "BEADS_DOLT_PASSWORD", "BEADS_CREDENTIALS_FILE",
-		// Config reports these as dolt.port, dolt.shared-server, dolt.host and
-		// dolt.mode.
-		"BD_DOLT_PORT", "BD_DOLT_SHARED_SERVER", "BD_DOLT_HOST", "BD_DOLT_MODE",
-	} {
-		t.Setenv(name, "")
-	}
-	config.ResetForTesting()
-	t.Cleanup(config.ResetForTesting)
-}
-
 // loadClonePortConfig makes beadsDir's config.yaml the one the store reads
 // dolt.port from.
 func loadClonePortConfig(t *testing.T, beadsDir string) {
@@ -3346,5 +3322,78 @@ func TestSyncActionClonesWhereTheRigsCommandsLook(t *testing.T) {
 				t.Errorf("warmup dials %s:%d, but later commands dial %s:%d", warmupHost, warmupPort, laterHost, laterPort)
 			}
 		})
+	}
+}
+
+// raiseRequiredMinForTest raises doltversion.RequiredMin above any Dolt the
+// tests run against, so a real server or binary stands in for one below the
+// floor, and restores it when t ends. Its caller must not run in parallel.
+func raiseRequiredMinForTest(t *testing.T) {
+	t.Helper()
+	prev := doltversion.RequiredMin
+	doltversion.RequiredMin = doltversion.MustParse("99.0.0")
+	t.Cleanup(func() { doltversion.RequiredMin = prev })
+}
+
+// TestSyncActionFailsWhenTheWarmupRefusesDolt: a Dolt below bd's minimum
+// refuses bootstrap's post-clone warmup, and every later command the same
+// way, so bd bootstrap fails rather than report a usable workspace behind
+// the non-fatal missing-wisp-table warning other warmup failures get.
+func TestSyncActionFailsWhenTheWarmupRefusesDolt(t *testing.T) {
+	clonePortTestEnv(t)
+	t.Chdir(t.TempDir())
+	t.Setenv("BEADS_DIR", "")
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	cfg := &configfile.Config{Backend: configfile.BackendDolt, DoltMode: configfile.DoltModeEmbedded, DoltDatabase: "rig_floor"}
+	origEmbedded, origOpen := remoteCloneViaEmbedded, openSyncedWarmupStore
+	t.Cleanup(func() {
+		remoteCloneViaEmbedded, openSyncedWarmupStore = origEmbedded, origOpen
+		schema.SetLocalMigrateConsent(false)
+	})
+	remoteCloneViaEmbedded = func(context.Context, string, string, string) error { return nil }
+	plan := BootstrapPlan{Action: "sync", BeadsDir: beadsDir, Database: "rig_floor", SyncRemote: "file:///nonexistent/remote"}
+
+	refusal := doltversion.CheckRequired(doltversion.MustParse("2.5.1"), "dolt sql-server at 127.0.0.1:3307", true)
+	openSyncedWarmupStore = func(context.Context, string) (storage.DoltStorage, error) {
+		return nil, fmt.Errorf("Dolt server unreachable at 127.0.0.1:3307 and auto-start failed: %w", refusal)
+	}
+	err := executeSyncAction(t.Context(), plan, cfg)
+	if !errors.Is(err, doltversion.ErrBelowRequiredMin) {
+		t.Fatalf("executeSyncAction = %v, want the warmup's ErrBelowRequiredMin", err)
+	}
+	if !strings.Contains(err.Error(), "file:///nonexistent/remote") || !strings.Contains(err.Error(), "2.5.1") {
+		t.Errorf("executeSyncAction = %q, want it to name the remote cloned from and the refused version", err)
+	}
+
+	// Any other warmup failure stays the warning it was.
+	openSyncedWarmupStore = func(context.Context, string) (storage.DoltStorage, error) {
+		return nil, errors.New("stub store")
+	}
+	if err := executeSyncAction(t.Context(), plan, cfg); err != nil {
+		t.Errorf("executeSyncAction with a warmup failure that is no refusal = %v, want nil", err)
+	}
+}
+
+// TestCloneViaServerRefusesBelowRequiredMin pins the floor cloneViaServer
+// checks against the server before CALL DOLT_CLONE, which bd init --remote
+// and bd bootstrap both clone through: with the floor raised above the test
+// server's version, the clone is refused with the floor's error, where
+// DOLT_CLONE would have failed on the missing remote with its own.
+func TestCloneViaServerRefusesBelowRequiredMin(t *testing.T) {
+	if testDoltServerPort == 0 {
+		t.Skip("Dolt test server not available")
+	}
+	if testutil.DoltContainerCrashed() {
+		t.Skipf("Dolt test server crashed: %v", testutil.DoltContainerCrashError())
+	}
+	raiseRequiredMinForTest(t)
+	ep := bootstrapServerProbeConfig{host: "127.0.0.1", port: testDoltServerPort, user: "root"}
+
+	err := cloneViaServer(t.Context(), "file:///nonexistent/remote", uniqueTestDBName(t), ep)
+	if !errors.Is(err, doltversion.ErrBelowRequiredMin) {
+		t.Fatalf("cloneViaServer = %v, want ErrBelowRequiredMin before the clone", err)
+	}
+	if !strings.Contains(err.Error(), "dolt sql-server at "+ep.serverLocation()) {
+		t.Errorf("cloneViaServer = %q, want it to name the server", err)
 	}
 }

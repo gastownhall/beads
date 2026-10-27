@@ -60,11 +60,11 @@ func findPIDOnPort(port int) int {
 	return 0
 }
 
-// listDoltProcessPIDs returns PIDs of all running dolt sql-server processes.
+// readDoltProcessPIDs returns PIDs of all running dolt sql-server processes.
 // Uses PowerShell Get-CimInstance to query dolt.exe processes and filter by
 // command line. Zombies are not a concern on Windows (they don't appear in
-// process lists).
-func listDoltProcessPIDs() []int {
+// process lists). An error means the process list could not be read.
+func readDoltProcessPIDs() ([]int, error) {
 	// Single PowerShell call: find dolt.exe processes whose command line
 	// contains "sql-server", output PIDs one per line.
 	script := `Get-CimInstance Win32_Process -Filter "Name='dolt.exe'" | ` +
@@ -72,7 +72,7 @@ func listDoltProcessPIDs() []int {
 		`Select-Object -ExpandProperty ProcessId`
 	out, err := exec.Command("powershell.exe", "-NoProfile", "-Command", script).Output()
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("listing processes: %w", err)
 	}
 	var pids []int
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
@@ -86,7 +86,7 @@ func listDoltProcessPIDs() []int {
 		}
 		pids = append(pids, pid)
 	}
-	return pids
+	return pids, nil
 }
 
 // isProcessInDir returns false on Windows. Windows doesn't expose process CWD
@@ -111,6 +111,12 @@ func isProcessAlive(pid int) bool {
 
 	status, err := windows.WaitForSingleObject(h, 0)
 	return err == nil && status == uint32(windows.WAIT_TIMEOUT)
+}
+
+// isSignalableProcess is isProcessAlive on Windows, which already answers
+// false for a process this user may not open.
+func isSignalableProcess(pid int) bool {
+	return isProcessAlive(pid)
 }
 
 // gracefulStop terminates a process on Windows. Uses TerminateProcess (hard kill)

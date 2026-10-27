@@ -71,7 +71,28 @@ import (
 // TestRemedyRefusalsDoNotInterpolateRawPaths covers the functions that print
 // one. Nor is a database config row (issue_prefix) a source:
 // warnHalfIdentifiedSubstrate, which prints one beside its remedy, is pinned
-// by TestRemedyValuesEscapeLineBreaks. bd doctor's text printers of checks
+// by TestRemedyValuesEscapeLineBreaks. Nor is an issue ID read from the
+// store: the bd duplicates, bd mol current, bd mol stale and bd close
+// --continue hints that paste one into a command, and the lines around them
+// that name it, are pinned by TestStoreReadIDHintsQuoteIDs, and bd close
+// --continue's output on both routes, when its close auto-closes the
+// molecule, by TestEmbeddedRemedyPrinting_closeContinue and
+// TestProxiedServerClose2B. When the root refuses that auto-close, those
+// tests and TestStoreReadHintsNameTitlesEscaped pin only that the warning
+// bd close prints above the hint cannot redraw it: the root and blocker IDs
+// the refusal's sentence names, like the step bd close --force names in its
+// open-children warning, print as the store holds them, so a $(...) in one
+// still runs when the output is pasted. Those two warnings, and other hints
+// that paste one, such as bd find-duplicates' Compare line, bd mol ready
+// --gated's bd assign and bd close's note on a molecule it did not
+// auto-close, are not covered yet. Nor is a .beads/recipes.toml recipe:
+// TestRunRecipeNamesRecipesTomlValuesEscaped pins that no key, name,
+// description, type or path bd setup prints, nor an OS error that repeats a
+// path, can redraw or split its Run: line, that the command on that line
+// takes the key as one shell word, and that its special-handling refusal
+// names the key and type so that no part of either runs when pasted. A
+// $(...) in a name, description or path printed beside that command is
+// printed as it is, as a title is. bd doctor's text printers of checks
 // spell each check they print (doctor.DoctorCheck.Printed and cmd/bd's
 // doctorCheck.printed), so a check's fields are not print calls here;
 // TestRemedyPrintersNameValuesEscaped's doctor rows pin several of them.

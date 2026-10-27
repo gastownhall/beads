@@ -89,9 +89,26 @@ topology. Two limitations to expect, both tracked in
 ## Gates in formulas
 
 A formula step declares a gate with a `[steps.gate]` block. When the formula
-is instantiated, bd creates the gate issue and wires it as a blocker of that
-step. The schema has five fields: `type`, `id`, `await_id`, `timeout`, and
-`repo`.
+is instantiated, bd creates a companion gate issue `<parent>.gate-<step>`
+next to the step. The schema has five fields: `type`, `id`, `await_id`,
+`timeout`, and `repo`.
+
+How the companion is wired depends on the step's own `type`:
+
+- **Entry-gate** (any step not declared `type = "gate"`): the gate blocks the
+  step. The step's work starts after the gate resolves.
+- **Exit-gate** (a step declared `type = "gate"`): the step becomes a `task`
+  that holds the preparation work and blocks the gate. A step that lists
+  this step in `depends_on` or `needs` waits for both the task and the gate.
+  A `waits_for` on this step waits for the children bonded under the task,
+  and for the gate.
+
+`bd gate check` and `bd gate resolve` close a gate without waiting for its
+blockers, so an exit-gate can close while its task is still open; a step
+that lists the exit-gate step in `depends_on` or `needs` still waits for the
+task. Under either form, a `timer` gate's timeout and `gh:*` gate checks
+count from when the molecule is poured, not from when the gate's blockers
+close: a timer exit-gate's wait runs alongside its task, not after it.
 
 This is the release gate from beads' own release formula — the step that
 waits for the GitHub release workflow:
@@ -138,15 +155,21 @@ ignores the local checkout's branch unless `--branch` is passed explicitly;
 an auto-detected local branch has no relationship to the target repo's
 branches.
 
-A human sign-off gate:
+A human sign-off gate, as an exit-gate whose task prepares the decision:
 
 ```toml
 [[steps]]
 id = "approve-deploy"
-title = "Human approves the deploy"
+title = "Prepare the deploy for human approval"
+type = "gate"
 
 [steps.gate]
 type = "human"
+
+[[steps]]
+id = "deploy"
+title = "Deploy"
+needs = ["approve-deploy"]   # waits for the prep task and for bd gate resolve
 ```
 
 And a cooling-off timer:

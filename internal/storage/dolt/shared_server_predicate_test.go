@@ -3,7 +3,9 @@ package dolt
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"testing"
 
@@ -51,6 +53,39 @@ func managedWorkspace(t *testing.T, port int) string {
 	t.Helper()
 	dir := unmanagedWorkspace(t)
 	writeServerState(t, dir, port, os.Getpid())
+	return dir
+}
+
+// doltManagedWorkspace is managedWorkspace for the decisions that also
+// require the recorded process to be a dolt sql-server
+// (doltserver.IsTrackedServerRunning, which reads ps): its PID file names a
+// process ps lists as one, a shell script named dolt run with the argument
+// sql-server, until the test ends. On Windows that check looks for dolt.exe,
+// so the test is skipped there.
+func doltManagedWorkspace(t *testing.T, port int) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("the stand-in dolt sql-server is a shell script; on Windows the identity check looks for dolt.exe")
+	}
+	script := filepath.Join(t.TempDir(), "dolt")
+	if err := os.WriteFile(script, []byte("while :; do sleep 1; done\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("/bin/sh", script, "sql-server")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start the stand-in dolt sql-server: %v", err)
+	}
+	exited := make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(exited)
+	}()
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		<-exited
+	})
+	dir := unmanagedWorkspace(t)
+	writeServerState(t, dir, port, cmd.Process.Pid)
 	return dir
 }
 

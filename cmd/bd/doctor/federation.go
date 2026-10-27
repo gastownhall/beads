@@ -72,7 +72,7 @@ func CheckLegacyCLIRemotes(path string) DoctorCheck {
 	}
 
 	ctx := context.Background()
-	store, err := dolt.New(ctx, doltServerConfig(beadsDir, doltPath))
+	store, err := dolt.New(ctx, federationStoreConfig(beadsDir, doltPath))
 	if err != nil {
 		return DoctorCheck{
 			Name:     "Dolt Remote Migration",
@@ -207,7 +207,7 @@ func CheckFederationRemotesAPI(path string) DoctorCheck {
 	if !serverRunning {
 		// No server running - check if we have remotes configured
 		ctx := context.Background()
-		store, err := dolt.New(ctx, doltServerConfig(beadsDir, doltPath))
+		store, err := dolt.New(ctx, federationStoreConfig(beadsDir, doltPath))
 		if err != nil {
 			return DoctorCheck{
 				Name:     "Federation remotesapi",
@@ -243,7 +243,7 @@ func CheckFederationRemotesAPI(path string) DoctorCheck {
 	// probing the remotesapi port. Without peers, remotesapi is irrelevant.
 	{
 		ctx := context.Background()
-		store, err := dolt.New(ctx, doltServerConfig(beadsDir, doltPath))
+		store, err := dolt.New(ctx, federationStoreConfig(beadsDir, doltPath))
 		if err == nil {
 			remotes, err := store.ListRemotes(ctx)
 			_ = store.Close()
@@ -357,7 +357,7 @@ func CheckFederationPeerConnectivity(path string) DoctorCheck {
 	}
 
 	ctx := context.Background()
-	store, err := dolt.New(ctx, doltServerConfig(beadsDir, doltPath))
+	store, err := dolt.New(ctx, federationStoreConfig(beadsDir, doltPath))
 	if err != nil {
 		return DoctorCheck{
 			Name:     "Peer Connectivity",
@@ -474,7 +474,7 @@ func CheckFederationSyncStaleness(path string) DoctorCheck {
 	}
 
 	ctx := context.Background()
-	store, err := dolt.New(ctx, doltServerConfig(beadsDir, doltPath))
+	store, err := dolt.New(ctx, federationStoreConfig(beadsDir, doltPath))
 	if err != nil {
 		return DoctorCheck{
 			Name:     "Sync Staleness",
@@ -567,7 +567,7 @@ func CheckFederationConflicts(path string) DoctorCheck {
 	}
 
 	ctx := context.Background()
-	store, err := dolt.New(ctx, doltServerConfig(beadsDir, doltPath))
+	store, err := dolt.New(ctx, federationStoreConfig(beadsDir, doltPath))
 	if err != nil {
 		return DoctorCheck{
 			Name:     "Federation Conflicts",
@@ -659,19 +659,12 @@ func CheckDoltServerModeMismatch(path string) DoctorCheck {
 
 	// Check if server is reachable by trying to connect
 	cfg, _ := configfile.Load(beadsDir)
-	serverReachable := false
-	if cfg != nil {
-		host := cfg.GetDoltServerHost()
-		port := doltserver.DefaultConfig(beadsDir).Port
-		addr := doltutil.ServerAddr(host, port)
-		if _, err := doltserver.ProbeSQLServer("tcp", addr, 2*time.Second); err == nil {
-			serverReachable = true
-		}
-	}
+	serverReachable := doltModeServerReachable(beadsDir, cfg)
 
-	// Open storage to check for remotes
+	// Open storage to check for remotes, on the server the probe reached
+	// (federationStoreConfig)
 	ctx := context.Background()
-	store, err := dolt.New(ctx, doltServerConfig(beadsDir, doltPath))
+	store, err := dolt.New(ctx, federationStoreConfig(beadsDir, doltPath))
 	if err != nil {
 		return DoctorCheck{
 			Name:     "Dolt Mode",
@@ -732,4 +725,37 @@ func CheckDoltServerModeMismatch(path string) DoctorCheck {
 		Detail:   "No federation peers configured",
 		Category: CategoryFederation,
 	}
+}
+
+// doltModeServerReachable reports whether the server beadsDir's store dials
+// accepts a connection: the endpoint doltserver.ResolveEndpoint resolves (its
+// port, the legacy BEADS_DOLT_PORT included, which DefaultConfig leaves out),
+// over the store's transport (Endpoint.Probe). It is false without a
+// metadata.json, and for an endpoint with neither a port nor a socket.
+func doltModeServerReachable(beadsDir string, cfg *configfile.Config) bool {
+	if cfg == nil {
+		return false
+	}
+	return doltserver.ResolveEndpoint(beadsDir, cfg).Probe(2*time.Second) == nil
+}
+
+// federationStoreConfig is the store config every federation check opens:
+// doltServerConfig with the unix socket the CLI's store dials,
+// BEADS_DOLT_SERVER_SOCKET else metadata.json's dolt_server_socket
+// (resolveDoltServerConnection in cmd/bd/main.go), so the checks read the
+// server bd list reads, the one the Dolt Mode check's probe
+// (doltModeServerReachable) reaches by the same socket-first rule. dolt.New
+// takes its socket from BEADS_DOLT_SERVER_SOCKET alone, so beside a resolved
+// port and a live metadata.json socket the Dolt Mode check reported the
+// socket's server connected while it counted the federation peers of the
+// server at the port, and once it listed the socket's, the other federation
+// checks still read the port's in the same run (#7874 review). None of them
+// has a bd doctor --fix repair whose server they must read instead, as the
+// SQL scans do (see fix.OpenScanDB).
+func federationStoreConfig(beadsDir, doltPath string) *dolt.Config {
+	storeCfg := doltServerConfig(beadsDir, doltPath)
+	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil {
+		storeCfg.ServerSocket = cfg.GetDoltServerSocket()
+	}
+	return storeCfg
 }

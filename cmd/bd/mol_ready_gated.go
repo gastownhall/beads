@@ -40,6 +40,10 @@ This command discovers molecules waiting at a gate step where:
 This enables discovery-based resume without explicit waiter tracking.
 The patrol system uses this to find and dispatch gate-ready molecules.
 
+For a formula step declared type = "gate" with a [steps.gate] block, the
+gate bead is an exit-gate that the step's own task blocks, so the ready
+step is the one that follows the gate, not that task.
+
 Examples:
   bd mol ready --gated           # Find all gate-ready molecules
   bd mol ready --gated --json    # JSON output for automation`,

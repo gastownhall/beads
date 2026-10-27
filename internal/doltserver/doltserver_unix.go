@@ -3,6 +3,7 @@
 package doltserver
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -20,7 +21,7 @@ const portConflictHint = "lsof -i :%d"
 
 // processListHint is the platform-specific command to list dolt processes.
 // Used in error messages when too many dolt servers are running.
-const processListHint = "pgrep -la 'dolt sql-server'"
+const processListHint = "pgrep -fl 'dolt sql-server'"
 
 // procAttrDetached is defined per-platform in procattr_linux.go (Linux) and
 // procattr_other_unix.go (darwin/BSD): Pdeathsig, used to test-gate
@@ -42,15 +43,16 @@ func findPIDOnPort(port int) int {
 	return 0
 }
 
-// listDoltProcessPIDs returns PIDs of all running dolt sql-server processes.
-// Excludes zombies and defunct processes. Callers derive count (len) and
-// membership (linear scan) from the returned slice.
-func listDoltProcessPIDs() []int {
+// readDoltProcessPIDs returns PIDs of all running dolt sql-server processes.
+// Excludes zombies and defunct processes. An error means the process list
+// could not be read (ps can be refused, e.g. inside a macOS sandbox), which
+// is not the same as there being no dolt processes.
+func readDoltProcessPIDs() ([]int, error) {
 	out, err := exec.Command("ps", "-axo", "pid=,state=,command=").Output()
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("listing processes: %w", err)
 	}
-	return parseDoltProcessPIDs(out)
+	return parseDoltProcessPIDs(out), nil
 }
 
 // parseDoltProcessPIDs returns matching, non-defunct Dolt server PIDs from a
@@ -124,14 +126,37 @@ func isProcessInDir(pid int, dir string) bool {
 	return false
 }
 
-// isProcessAlive checks if a process with the given PID is running.
-// Uses signal 0 which doesn't send a signal but checks process existence.
-func isProcessAlive(pid int) bool {
+// signalZero sends signal 0 to pid, which checks the process without
+// signaling it. It is a variable so tests can simulate a process this user may
+// not signal.
+var signalZero = func(pid int) error {
 	process, err := os.FindProcess(pid)
 	if err != nil {
-		return false
+		return err
 	}
-	return process.Signal(syscall.Signal(0)) == nil
+	return process.Signal(syscall.Signal(0))
+}
+
+// isProcessAlive checks if a process with the given PID is running.
+// Uses signal 0 which doesn't send a signal but checks process existence.
+// A process this user may not signal still exists, so it counts as alive.
+func isProcessAlive(pid int) bool {
+	return aliveAfterSignalZero(signalZero(pid))
+}
+
+// isSignalableProcess reports whether pid is a live process this user may
+// signal. Unlike isProcessAlive it is false for a process that belongs to
+// another account (EPERM).
+func isSignalableProcess(pid int) bool {
+	return signalZero(pid) == nil
+}
+
+// aliveAfterSignalZero classifies the error from signaling a process with
+// signal 0. EPERM (bare, or wrapped by kill and pidfd_send_signal) means the
+// process exists but belongs to someone else; only "no such process"
+// (ESRCH, os.ErrProcessDone) means dead. Same rule as processExists.
+func aliveAfterSignalZero(err error) bool {
+	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
 // gracefulStop sends SIGTERM, waits for the process to exit, then SIGKILL if needed.

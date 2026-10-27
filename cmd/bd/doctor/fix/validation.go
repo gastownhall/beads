@@ -1,9 +1,11 @@
 package fix
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"path/filepath"
+	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/steveyegge/beads/internal/configfile"
@@ -36,8 +38,7 @@ func OrphanedDependencies(path string, verbose bool) error {
 
 	db, cfg, err := openDoltDB(beadsDir)
 	if err != nil {
-		fmt.Printf("  Orphaned dependencies fix skipped (%v)\n", err)
-		return nil
+		return skipFix(err)
 	}
 	defer db.Close()
 
@@ -134,8 +135,7 @@ func ChildParentDependencies(path string, verbose bool) error {
 
 	db, cfg, err := openDoltDB(beadsDir)
 	if err != nil {
-		fmt.Printf("  Child-parent dependencies fix skipped (%v)\n", err)
-		return nil
+		return skipFix(err)
 	}
 	defer db.Close()
 
@@ -239,8 +239,7 @@ func CrossTableDuplicates(path string, verbose bool) error {
 
 	db, cfg, err := openDoltDB(beadsDir)
 	if err != nil {
-		fmt.Printf("  Cross-table duplicates fix skipped (%v)\n", err)
-		return nil
+		return skipFix(err)
 	}
 	defer db.Close()
 
@@ -307,15 +306,16 @@ func CrossTableDuplicates(path string, verbose bool) error {
 }
 
 // CountCrossTableDuplicates returns the number of IDs present in both the
-// issues and wisps tables. Returns 0 and an error if the database is
-// unreachable. Used by CheckCrossTableDuplicates in the doctor package.
+// issues and wisps tables, on the server its fix writes (openScanDB).
+// Returns 0 and an error if the database is unreachable. Used by
+// CheckCrossTableDuplicates in the doctor package.
 func CountCrossTableDuplicates(path string) (int, error) {
 	beadsDir, err := resolvedWorkspaceBeadsDir(path)
 	if err != nil {
 		return 0, err
 	}
 
-	db, _, err := openDoltDB(beadsDir)
+	db, _, err := openDoltScanDB(beadsDir)
 	if err != nil {
 		return 0, err
 	}
@@ -334,18 +334,50 @@ func CountCrossTableDuplicates(path string) (int, error) {
 // verify the connection's target identity) don't have to load it a second
 // time and risk it disagreeing with what was actually dialed.
 func openDoltDB(beadsDir string) (*sql.DB, *configfile.Config, error) {
+	return openDoltDBWith(beadsDir, openFixDB)
+}
+
+// openDoltScanDB is openDoltDB for a read-only scan: it opens through
+// openScanDB, which reads the server openFixDB writes and, where openFixDB
+// refuses a server only a unix socket names, that socket.
+func openDoltScanDB(beadsDir string) (*sql.DB, *configfile.Config, error) {
+	return openDoltDBWith(beadsDir, openScanDB)
+}
+
+// OpenScanDB opens, for a read-only bd doctor check of the workspace at path,
+// the server the check's bd doctor --fix repair writes (openDoltScanDB). The
+// Orphaned Dependencies, Child-Parent Dependencies, Blocked State and
+// Dependency Keys checks read through it, as CountCrossTableDuplicates and
+// ScanSeveredCloneLocalFKs do. The caller closes it.
+func OpenScanDB(path string) (*sql.DB, error) {
+	beadsDir, err := resolvedWorkspaceBeadsDir(path)
+	if err != nil {
+		return nil, err
+	}
+	db, _, err := openDoltScanDB(beadsDir)
+	return db, err
+}
+
+// openDoltDBWith is openDoltDB with open building the connection.
+func openDoltDBWith(beadsDir string, open func(string, *configfile.Config) (*sql.DB, error)) (*sql.DB, *configfile.Config, error) {
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil || cfg == nil {
 		return nil, nil, fmt.Errorf("no database configuration found")
 	}
 
-	db, err := openFixDB(beadsDir, cfg)
+	db, err := open(beadsDir, cfg)
 	if err != nil {
 		return nil, nil, fmt.Errorf("dolt server connection failed: %w", err)
 	}
 
-	// Verify the connection actually works
-	if err := db.Ping(); err != nil {
+	// Verify the connection actually works, within a deadline, as doctor's
+	// own openDoltDB does: the DSN's timeout bounds only the dial, so a
+	// server that accepts and never sends its greeting (a stopped or paused
+	// sql-server on the socket the store dials) held a plain Ping, and bd
+	// doctor with it, forever.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close() // Best effort cleanup
 		return nil, nil, fmt.Errorf("dolt server not reachable: %w", err)
 	}

@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/server"
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
 
 func NewExternalDoltServerUOWProvider(
@@ -69,7 +70,16 @@ func NewExternalDoltServerUOWProvider(
 		return nil, fmt.Errorf("uow: get proxy endpoint: %w", err)
 	}
 
-	return openAndInitSchema(ctx, ep, database, rootUser, rootPassword, tlsConfigName, teamServer, expectedProjectID, resolved)
+	return openAndInitSchema(ctx, ep, externalBackendAddress(external), database, rootUser, rootPassword, tlsConfigName, teamServer, expectedProjectID, resolved)
+}
+
+// externalBackendAddress names the external server behind the proxy: its
+// socket, or its host and port.
+func externalBackendAddress(external configfile.ExternalDoltConfig) string {
+	if external.Socket != "" {
+		return external.Socket
+	}
+	return doltutil.ServerAddr(external.Host, external.Port)
 }
 
 func registerExternalTLSConfig(external configfile.ExternalDoltConfig) (string, error) {

@@ -33,8 +33,10 @@ set -euo pipefail
 # Earlier, on one server: 2026-10-21 2.3.1 4/300, 2.4.2 0/250, 2.5.0 0/500,
 # 2.5.1 0/500, embedded 2.5.1 0/100; 2026-10-10 2.4.1 0/250. The pin tracks
 # that embedded engine, so the CLI, the container and embedded mode run the
-# same Dolt. Releases below
-# doltversion.RecommendedMin (2.5.0) have known defects: 2.4.0 through 2.4.2
+# same Dolt, and doltversion.RequiredMin (2.6.0), the oldest dolt bd runs
+# against outside embedded mode, must stay at or below this pin
+# (TestPinnedDoltCLIAtLeastRequiredMin). Older releases also have known
+# defects: 2.4.0 through 2.4.2
 # return no row for an ungrouped MAX/MIN over an unmatched primary-key prefix
 # (dolthub/dolt#12093); releases before 2.4.0 drop a join condition when an
 # ON clause has an OR over indexed columns (dolthub/dolt#11886); releases

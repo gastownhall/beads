@@ -1,6 +1,8 @@
 package main
 
 import (
+	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -21,9 +23,16 @@ import (
 // holding a database under any name (a Dolt chunk-store backup included),
 // stubs whose metadata or symlink points at a Dolt store, a Dolt workspace
 // under .git outside beads-worktrees, and rig roots (with a local store or
-// server-mode) that mayor/rig/.beads redirects to. Each must stay
-// byte-identical, while what the scan reports as safe to delete beside them
-// (an orphaned WAL in a workspace on Dolt) is still removed.
+// server-mode) that mayor/rig/.beads redirects to, and redirect-only stubs
+// holding what is not a bd runtime leftover: an orchestrator worktree's
+// tracked formulas/, config.yaml, README.md and .gitignore beside its
+// redirect, the audit log, routes and an encrypted database, a server-mode
+// config.yaml with no redirect beside the .local_version witness of a pre-1.0
+// server workspace, and bd's state files beside a redirect bd ignores. Each
+// must stay byte-identical, and bd must still refuse to open that legacy
+// server workspace, while what the scan reports as safe to delete beside
+// them (an orphaned WAL in a workspace on Dolt, a stub's runtime leftovers)
+// is still removed.
 func TestDoctorCleanupEntryPointsDeleteOnlyWhatTheyOwn(t *testing.T) {
 	const sqliteDB = "SQLite format 3\x00rest"
 	protected := map[string]map[string]string{
@@ -62,6 +71,17 @@ func TestDoctorCleanupEntryPointsDeleteOnlyWhatTheyOwn(t *testing.T) {
 		// .git is entered only at .git/beads-worktrees: a Dolt workspace
 		// elsewhere under .git keeps even an orphaned WAL.
 		".git/stash-area/.beads": {"metadata.json": `{"backend":"dolt"}`, "beads.db-wal": "w"},
+		// An orchestrator worktree of a repository that tracks .beads files
+		// keeps them beside the redirect it writes, and a stub with no
+		// redirect may be a server-mode workspace configured by config.yaml
+		// alone, whose .local_version is the witness that makes bd refuse a
+		// pre-1.0 server workspace. bd opens a stub whose redirect it
+		// ignores, so its state files are not leftovers either. None of it
+		// is a bd runtime leftover.
+		"crew/ivy/.beads":     {"redirect": "../../mayor/rig/.beads\n", ".gitignore": "redirect\n", "config.yaml": "issue-prefix: rig\n", "README.md": "# Beads\n", "formulas/beads-release.formula.toml": "formula = \"beads-release\"\n", "interactions.jsonl": "{}\n", "routes.jsonl": "{}\n", "beads.db.enc": "opaque", "mq/a.json": "{}"},
+		"crew/kim/.beads":     {"config.yaml": "dolt:\n  mode: server\n  host: db.example.com\n", "interactions.jsonl": "{}\n", ".local_version": "0.62.0\n"},
+		"polecats/p8/.beads":  {"redirect": "../../mayor/rig/.beads\n", "last-touched/notes.txt": "mine"},
+		"polecats/p11/.beads": {"redirect": "../../nowhere/.beads\n", ".local_version": "0.62.0\n", "last-touched": "rig-1\n"},
 	}
 	entryPoints := []struct {
 		name string
@@ -101,10 +121,16 @@ func TestDoctorCleanupEntryPointsDeleteOnlyWhatTheyOwn(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			// A stub holding only bd's runtime leftovers, beside a redirect
+			// bd follows, loses them.
+			leftovers := filepath.Join(root, "polecats", "p10", ".beads")
+			writeTreeForDoctorTest(t, leftovers, map[string]string{"redirect": "../../rig/.beads\n", ".local_version": "0.62.0\n", "last-touched": "rig-1\n", "daemon.pid": "1"})
 			before := map[string]map[string]string{}
 			for dir := range protected {
 				before[dir] = snapshotTreeForDoctorTest(t, filepath.Join(root, dir))
 			}
+			legacyServer := filepath.Join(root, "crew", "kim", ".beads")
+			requireLegacyServerRefusal(t, legacyServer, "before the cleanup")
 
 			entry.run(t, root)
 
@@ -116,6 +142,10 @@ func TestDoctorCleanupEntryPointsDeleteOnlyWhatTheyOwn(t *testing.T) {
 			if _, err := os.Stat(rootWAL); !os.IsNotExist(err) {
 				t.Errorf("%s left the orphaned WAL it reports as safe to delete (stat err %v)", entry.name, err)
 			}
+			if got, want := snapshotTreeForDoctorTest(t, leftovers), map[string]string{".": "/", "redirect": "../../rig/.beads\n"}; !reflect.DeepEqual(got, want) {
+				t.Errorf("%s left the stub's runtime leftovers it reports as safe to delete: %q, want %q", entry.name, got, want)
+			}
+			requireLegacyServerRefusal(t, legacyServer, "after the cleanup")
 		})
 	}
 
@@ -147,6 +177,20 @@ func TestDoctorCleanupEntryPointsDeleteOnlyWhatTheyOwn(t *testing.T) {
 		want := map[string]string{".": "/", "notes.txt": "mine", "sub": "/", "sub/keep.dat": "d"}
 		if got := snapshotTreeForDoctorTest(t, filepath.Join(beadsDir, "mq")); !reflect.DeepEqual(got, want) {
 			t.Fatalf("Legacy MQ Files fix left .beads/mq as\n %q\nwant only the reported *.json removed: %q", got, want)
+		}
+	})
+}
+
+// requireLegacyServerRefusal checks that guardLegacyUpgradeWorkspace refuses
+// beadsDir as a legacy Dolt server workspace. It runs in a subtest, so the
+// workspace config and environment it binds do not outlive the check.
+func requireLegacyServerRefusal(t *testing.T, beadsDir, when string) {
+	t.Helper()
+	t.Run("legacy server refused "+when, func(t *testing.T) {
+		captureLegacyUpgradeWarnings(t)
+		bindSelectedWorkspaceConfig(t, beadsDir)
+		if err := guardLegacyUpgradeWorkspace(beadsDir); !isLegacyUpgradeRefusal(err) {
+			t.Errorf("guardLegacyUpgradeWorkspace(%s) = %v, want the legacy server workspace refusal", beadsDir, err)
 		}
 	})
 }
@@ -207,4 +251,80 @@ func snapshotTreeForDoctorTest(t *testing.T, dir string) map[string]string {
 		t.Fatal(err)
 	}
 	return snapshot
+}
+
+// TestDoctorArtifactsCleanJSONPrintsOnlyJSON pins that bd doctor
+// --check=artifacts --clean --json prints exactly one JSON document on
+// stdout: the cleanup's progress lines (each removal, each finding kept for
+// review, the summary) go to stderr. They were printed on stdout ahead of
+// the document, so stdout did not parse as JSON. Without --json, --clean and
+// --fix still print them on stdout.
+func TestDoctorArtifactsCleanJSONPrintsOnlyJSON(t *testing.T) {
+	// An orphaned WAL on Dolt, which the cleanup removes, and a database it
+	// keeps for review.
+	setup := func(t *testing.T) (root, wal string) {
+		isolateBeadsDirForTest(t)
+		root = t.TempDir()
+		writeTreeForDoctorTest(t, filepath.Join(root, "sub", ".beads"), map[string]string{"metadata.json": `{"backend":"dolt"}`, "beads.db-wal": "w"})
+		writeTreeForDoctorTest(t, filepath.Join(root, "keep", ".beads"), map[string]string{"metadata.json": `{"backend":"dolt"}`, "beads.db": "SQLite format 3\x00rest"})
+		return root, filepath.Join(root, "sub", ".beads", "beads.db-wal")
+	}
+	const summary = "Artifact cleanup: 1 removed, 1 skipped, 0 errors"
+
+	t.Run("--clean --json", func(t *testing.T) {
+		root, wal := setup(t)
+		old := jsonOutput
+		jsonOutput = true
+		t.Cleanup(func() { jsonOutput = old })
+		var err error
+		stdout, stderr := captureStdio(t, func() { err = runArtifactsCheck(root, true, false) })
+		if err != nil {
+			t.Fatalf("runArtifactsCheck --clean --json: %v", err)
+		}
+		dec := json.NewDecoder(strings.NewReader(stdout))
+		var doc map[string]interface{}
+		if err := dec.Decode(&doc); err != nil {
+			t.Fatalf("stdout does not parse as JSON (%v):\n%s", err, stdout)
+		}
+		if _, err := dec.Token(); err != io.EOF {
+			t.Fatalf("stdout holds more than one JSON document:\n%s", stdout)
+		}
+		if doc["total_count"] != float64(1) || doc["safe_delete_count"] != float64(0) {
+			t.Errorf("JSON after the cleanup = %v, want total_count 1 (the database kept for review) and safe_delete_count 0", doc)
+		}
+		for _, want := range []string{"Removed: " + wal, "Skip (needs review): ", summary} {
+			if !strings.Contains(stderr, want) {
+				t.Errorf("stderr lacks %q:\n%s", want, stderr)
+			}
+		}
+		if _, err := os.Stat(wal); !os.IsNotExist(err) {
+			t.Errorf("the cleanup left %s (stat err %v)", wal, err)
+		}
+	})
+	for _, entry := range []struct {
+		name string
+		run  func(root string)
+	}{
+		{"--clean --yes", func(root string) {
+			if err := runArtifactsCheck(root, true, true); err != nil {
+				t.Errorf("runArtifactsCheck --clean --yes: %v", err)
+			}
+		}},
+		{"--fix", func(root string) {
+			applyFixList(root, []doctorCheck{{Name: "Classic Artifacts", Status: statusWarning, Fix: "bd doctor --fix"}})
+		}},
+	} {
+		t.Run(entry.name, func(t *testing.T) {
+			root, wal := setup(t)
+			stdout, stderr := captureStdio(t, func() { entry.run(root) })
+			for _, want := range []string{"Removed: " + wal, summary} {
+				if !strings.Contains(stdout, want) {
+					t.Errorf("stdout lacks %q:\n%s", want, stdout)
+				}
+			}
+			if strings.Contains(stderr, "Removed: ") {
+				t.Errorf("progress went to stderr:\n%s", stderr)
+			}
+		})
+	}
 }

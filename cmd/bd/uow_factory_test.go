@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/doltversion"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -265,4 +268,40 @@ func TestNewExternalProxiedServerUOWProvider_HonorsCustomLogPath(t *testing.T) {
 	require.Error(t, err, "invalid external config must surface a validation error")
 	assert.Contains(t, err.Error(), "Host requires Port",
 		"external code path must be the one reached; got: %v", err)
+}
+
+// TestResolveAndProbeDoltRefusesBinaryBelowRequiredMin pins the managed
+// proxied-server floor: bd init --proxied-server's preflight and every
+// managed proxied-server open go through resolveAndProbeDolt, so a dolt
+// older than doltversion.RequiredMin must come back as an error that names
+// the binary, its version and the minimum, before bd launches it.
+func TestResolveAndProbeDoltRefusesBinaryBelowRequiredMin(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script dolt stub")
+	}
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(dir, "cache"))
+
+	write := func(name, version string) string {
+		path := filepath.Join(dir, name)
+		require.NoError(t, os.WriteFile(path, []byte("#!/bin/sh\necho 'dolt version "+version+"'\n"), 0o755))
+		return path
+	}
+
+	old := write("dolt-old", "2.5.1")
+	t.Setenv(doltversion.DoltBinEnvVar, old)
+	_, err := resolveAndProbeDolt(context.Background(), "test", true)
+	require.ErrorIs(t, err, doltversion.ErrBelowRequiredMin)
+	// The refusal quotes the path with %q, which escapes a backslash (in
+	// TMPDIR, say), so match it quoted.
+	for _, want := range []string{fmt.Sprintf("%q", old), "2.5.1", "requires dolt " + doltversion.RequiredMin.String(), "Upgrade dolt"} {
+		assert.Contains(t, err.Error(), want)
+	}
+
+	current := write("dolt-current", doltversion.RequiredMin.String())
+	t.Setenv(doltversion.DoltBinEnvVar, current)
+	got, err := resolveAndProbeDolt(context.Background(), "test", true)
+	require.NoError(t, err)
+	assert.Equal(t, current, got)
 }

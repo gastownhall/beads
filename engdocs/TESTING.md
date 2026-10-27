@@ -297,6 +297,13 @@ sit behind that API, selected by `BEADS_TEST_DOLT_SERVER`:
   `--test_env=BEADS_TEST_DOLT_SERVER=local`); unset means `container`, which
   in a Bazel action without docker keeps the usual skip.
 
+bd refuses a Dolt older than `doltversion.RequiredMin` (2.6.0) outside
+embedded mode, so the server version these backends provide, and the `dolt`
+that proxied-server tests launch (`BEADS_DOLT_BIN`, else `dolt` on `PATH`),
+must be 2.6.0 or newer. With an older `dolt` on `PATH`, every proxied and
+server-mode test fails fast with the `bd requires dolt 2.6.0 or newer`
+refusal. The Bazel lanes use the pinned hermetic Dolt and are not affected.
+
 `BEADS_TEST_REQUIRE_DOLT_CONTAINER=1` turns an unavailable backend into a
 failure (per test and in every `TestMain`) instead of a skip; lanes that
 exist to run the Dolt suites set it. `BEADS_TEST_REQUIRE_SOCAT=1` does the

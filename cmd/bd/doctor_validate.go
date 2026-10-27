@@ -78,12 +78,17 @@ func runValidateCheckInner(path string) (bool, error) {
 	return overallOK, nil
 }
 
-// collectValidateChecks runs the data-integrity checks.
+// collectValidateChecks runs the data-integrity checks. Orphaned Dependencies
+// asks the shared store whether the workspace has a database when it cannot
+// read the server its repair writes, so it never reports a database it did
+// not read as "N/A (no database)" and validate never passes it.
 func collectValidateChecks(path string) []validateCheckResult {
+	sharedStore := doctor.NewSharedStore(path)
+	defer sharedStore.Close()
 	return []validateCheckResult{
 		{check: convertDoctorCheck(doctor.CheckCrossTableDuplicates(path)), fixable: true},
 		{check: convertDoctorCheck(doctor.CheckDuplicateIssues(path, doctorOrchestrator, orchestratorDuplicatesThreshold))},
-		{check: convertDoctorCheck(doctor.CheckOrphanedDependencies(path)), fixable: true},
+		{check: convertDoctorCheck(doctor.CheckOrphanedDependencies(path, sharedStore)), fixable: true},
 		{check: convertDoctorCheck(doctor.CheckTestPollution(path))},
 		{check: convertDoctorCheck(doctor.CheckGitConflicts(path))},
 	}

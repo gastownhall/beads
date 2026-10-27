@@ -142,7 +142,7 @@ Deep Validation Mode (--deep):
 Server Mode (--server):
   Run health checks for Dolt server mode connections (bd-dolt.2.3):
   - Server reachable: Can connect to configured host:port?
-  - Dolt version: Is it a Dolt server (not vanilla MySQL)?
+  - Dolt version: Is it a Dolt server (not vanilla MySQL) at 2.6.0 or newer?
   - Database exists: Does the 'beads' database exist?
   - Schema compatible: Can query beads tables?
   - Connection pool: Pool health metrics
@@ -808,7 +808,7 @@ func runDiagnostics(path string) doctorResult {
 
 	// Check 10b: Rekey-backfill leftovers — randomly-keyed or targetless
 	// dependency rows that survive the #4259 migration backfill (bd-6dnrw.17).
-	depKeyCheck := convertWithCategory(doctor.CheckDependencyKeysWithStore(sharedStore), doctor.CategoryMetadata)
+	depKeyCheck := convertWithCategory(doctor.CheckDependencyKeysWithStore(path, sharedStore), doctor.CategoryMetadata)
 	result.Checks = append(result.Checks, depKeyCheck)
 	if depKeyCheck.Status == statusError || depKeyCheck.Status == statusWarning {
 		result.OverallOK = false
@@ -821,7 +821,7 @@ func runDiagnostics(path string) doctorResult {
 	// patch, and is_blocked is self-healing via 'bd doctor --fix' / the next
 	// pull's recompute — surface it as actionable without turning doctor red
 	// across the fleet if an unforeseen dependency shape trips the predicate.
-	blockedConsistencyCheck := convertWithCategory(doctor.CheckBlockedConsistencyWithStore(sharedStore), doctor.CategoryData)
+	blockedConsistencyCheck := convertWithCategory(doctor.CheckBlockedConsistencyWithStore(path, sharedStore), doctor.CategoryData)
 	result.Checks = append(result.Checks, blockedConsistencyCheck)
 
 	// Check 10d: label whitespace damage (#5812) — labels written by a bd that
@@ -980,7 +980,7 @@ func runDiagnostics(path string) doctorResult {
 	// Don't fail overall check for untracked files, just warn
 
 	// Check 21: Orphaned dependencies (from bd repair-deps, bd validate)
-	orphanedDepsCheck := convertDoctorCheck(doctor.CheckOrphanedDependencies(path))
+	orphanedDepsCheck := convertDoctorCheck(doctor.CheckOrphanedDependencies(path, sharedStore))
 	result.Checks = append(result.Checks, orphanedDepsCheck)
 	// Don't fail overall check for orphaned deps, just warn
 
@@ -990,7 +990,7 @@ func runDiagnostics(path string) doctorResult {
 	// Don't fail overall check for severed clone-local FKs, just warn
 
 	// Check 22a: Child→parent dependencies (anti-pattern)
-	childParentDepsCheck := convertDoctorCheck(doctor.CheckChildParentDependencies(path))
+	childParentDepsCheck := convertDoctorCheck(doctor.CheckChildParentDependencies(path, sharedStore))
 	result.Checks = append(result.Checks, childParentDepsCheck)
 	// Don't fail overall check for child→parent deps, just warn
 

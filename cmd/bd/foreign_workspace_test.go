@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/testutil/legacyworkspace"
 )
 
@@ -103,7 +104,8 @@ func TestAdmitForeignWorkspaceRefusesLegacyDoltAsAdmissionDoes(t *testing.T) {
 
 // TestOpenForeignStoreLeavesPreDoltCloneUnchanged pins that no open of an
 // existing foreign workspace rewrites a fresh clone of a SQLite-era project
-// (config.json and issues.jsonl, no *.db): bd run inside it finds no
+// (config.json and issues.jsonl, no *.db), or of a project from before bd
+// wrote config.json (issues.jsonl, no *.db): bd run inside either finds no
 // workspace and writes nothing, so the open refuses it with that error. The
 // non-mutating factories under it read its config.json in place on every arm,
 // the server arm included, so it stays byte-identical even past the opener.
@@ -112,13 +114,33 @@ func TestAdmitForeignWorkspaceRefusesLegacyDoltAsAdmissionDoes(t *testing.T) {
 // planning target is initialized before it is opened, so the create access
 // is pinned at that initialization (ensureBeadsDirForPath, the dry-run's
 // checkRepoTargetInitializable, and migrate-personal's
-// refuseUninitializablePlanningRepo): each refuses the clone with the same
-// error. Before, bd create --repo and bd migrate-personal wrote an embedded
-// database and a metadata.json there, hiding its issues.jsonl from bd run
-// inside it behind an empty database.
+// refuseUninitializablePlanningRepo): each refuses either clone with the
+// same error, followed by its reason, and the issues.jsonl-only clone with
+// the bd init --from-jsonl that imports its issues. Before, bd create --repo
+// and bd migrate-personal wrote an embedded database and a metadata.json
+// there, hiding its issues.jsonl from bd run inside it: bd's upgrade
+// auto-import loads it only into an empty database.
 func TestOpenForeignStoreLeavesPreDoltCloneUnchanged(t *testing.T) {
 	isolateForeignWorkspaceSignals(t, "")
-	layout := legacyworkspace.PreDoltClone()
+	// reasons holds, per clone, the reason an initializer gives after the
+	// error openForeignStore returns for it, with <repo> standing for the
+	// clone's repository root. The pre-Dolt clone's is the one it has always
+	// given.
+	reasons := map[string]string{
+		legacyworkspace.PreDoltClone().Name:       "it has a legacy config.json but no database (a fresh clone of a SQLite-era project, say), so bd run there finds no workspace; not initializing it, which would hide what it holds behind an empty database",
+		legacyworkspace.PreConfigJSONClone().Name: "it has issues.jsonl but no database (a fresh clone of a project from before bd wrote config.json, say), so bd run there does not treat it as a workspace; not initializing it, which would hide what it holds behind an empty database. Run `bd init --from-jsonl` in <repo>, which imports it, then rerun",
+	}
+	for _, layout := range []legacyworkspace.Layout{legacyworkspace.PreDoltClone(), legacyworkspace.PreConfigJSONClone()} {
+		t.Run(layout.Name, func(t *testing.T) {
+			testOpenForeignStoreLeavesCloneUnchanged(t, layout, reasons[layout.Name])
+		})
+	}
+}
+
+// testOpenForeignStoreLeavesCloneUnchanged runs
+// TestOpenForeignStoreLeavesPreDoltCloneUnchanged's checks on one clone
+// layout, whose initializers refuse it with reason.
+func testOpenForeignStoreLeavesCloneUnchanged(t *testing.T, layout legacyworkspace.Layout, reason string) {
 	for _, name := range []string{"read", "preview", "write"} {
 		t.Run("openForeignStore/"+name, func(t *testing.T) {
 			beadsDir := filepath.Join(t.TempDir(), ".beads")
@@ -160,9 +182,9 @@ func TestOpenForeignStoreLeavesPreDoltCloneUnchanged(t *testing.T) {
 			if after := legacyworkspace.TreeDigest(t, beadsDir); !maps.Equal(after, before) {
 				t.Fatalf("%s changed the clone: before %v, after %v", name, slices.Sorted(maps.Keys(before)), slices.Sorted(maps.Keys(after)))
 			}
-			want := ErrNoBeadsDatabase.Error() + " at " + beadsDir + ": "
-			if !errors.Is(err, ErrNoBeadsDatabase) || !strings.HasPrefix(err.Error(), want) {
-				t.Fatalf("%s = %v, want the error openForeignStore returns (%q), with its reason", name, err, want)
+			want := ErrNoBeadsDatabase.Error() + " at " + beadsDir + ": " + strings.ReplaceAll(reason, "<repo>", filepath.Dir(beadsDir))
+			if !errors.Is(err, ErrNoBeadsDatabase) || err.Error() != want {
+				t.Fatalf("%s = %v, want the error openForeignStore returns, with its reason (%q)", name, err, want)
 			}
 		})
 	}
@@ -313,6 +335,183 @@ func TestRefuseExistingCreateTargetRefusesEmbeddedOpenOfServerWorkspace(t *testi
 			t.Fatalf("refuseExistingCreateTarget changed the target")
 		}
 	})
+	// The remedy names what the open from here needs to reach the server
+	// the target's own config.yaml names. That open takes the host from the
+	// target's metadata.json, else from the launcher's config.yaml, and the
+	// port as bd run there does: the target's .beads/dolt-server.port (at a
+	// host bd runs its server at), then the listener.port of the
+	// config.yaml in its Dolt data directory, then a dolt.port, then its
+	// metadata.json port. Only the dolt.port differs: the launcher's own
+	// where bd there reads the target's own, and the user-level one where
+	// either names none. So for a host bd does not run its server at the
+	// remedy names the host the target itself dials (its metadata.json over
+	// its config.yaml, as bd run there resolves it) and the port bd there
+	// dials, no port where a listener.port decides both opens, or asks for
+	// the port when nothing names one; setting only dolt_mode would dial
+	// another server, or auto-start one of bd's own inside the target. For
+	// a host bd runs its server at, main's remedy is kept where the rerun
+	// dials the port bd run there dials. A target whose own config.yaml or
+	// config.local.yaml names dolt.port, which the open from here does not
+	// read, gets bd create's remedy with the write inside the target, unless
+	// its listener.port decides both opens. Once dolt_mode is set nothing
+	// refuses the rerun, so no remedy offers a rerun that dials another
+	// port: bd create's remedy is the edit and the write inside the target,
+	// and bd migrate-personal's, which cannot make the write inside its
+	// planning repo (wantPlanning, "" for the same as want, which must then
+	// not offer the write inside), says this write cannot be aimed at the
+	// target's port from here. A launcher's port is named as its own
+	// configuration's only when that names it.
+	const bdHostInside = `Set "dolt_mode": "server" in its .beads/metadata.json, then make the write inside that repository, where bd dials the port its own config names, which bd here does not read; nothing was created`
+	const modeOnly = `Set "dolt_mode": "server" in its .beads/metadata.json, then rerun; nothing was created`
+	const bdHostCannotAim = `which bd here does not read, and it has no .beads/dolt-server.port, which bd here would dial first, so even once its .beads/metadata.json sets "dolt_mode": "server", bd migrate-personal cannot aim this write at that port, and a "dolt_server_port" there would declare the server bd runs for it externally managed; nothing was created`
+	const bdHostLauncherInside = `Set "dolt_mode": "server" in its .beads/metadata.json, then make the write inside that repository, where bd dials the server its own config names: it has no .beads/dolt-server.port, which bd here would dial first, so bd here dials dolt.port 3307, which this workspace's own configuration names; nothing was created`
+	const bdHostLauncherCannotAim = `This workspace's own configuration names dolt.port 3307, which bd here dials for it once its .beads/metadata.json sets "dolt_mode": "server", since it has no .beads/dolt-server.port, which bd here would dial first, so bd migrate-personal cannot aim this write at its server unless that server listens on that port; nothing was created`
+	const launcherPort = "dolt:\n  port: 3307\n"
+	const remoteListenerRerun = `Set "dolt_mode": "server" and "dolt_server_host": "db.example.com" in its .beads/metadata.json, then rerun (bd here and bd there both dial port 23485, which the listener.port of the Dolt server config.yaml in its data directory names)`
+	for _, tc := range []struct {
+		name         string
+		launcher     string // the launcher's config.yaml, "" for none
+		user         string // the user-level config.yaml, "" for none
+		metadata     string // the target's metadata.json, "" for the default
+		config       string // the target's config.yaml
+		local        string // the target's config.local.yaml, "" for none
+		portFile     string // the target's .beads/dolt-server.port, "" for none
+		listener     string // the listener.port of the target's .beads/dolt/config.yaml, "" for none
+		want         string
+		wantPlanning string
+	}{
+		{name: "no host", config: serverYAML, want: `Set "dolt_mode": "server" in its .beads/metadata.json, then rerun`},
+		{name: "127.0.0.1", config: "dolt:\n  mode: server\n  host: 127.0.0.1\n", want: modeOnly},
+		{name: "127.0.0.1 and its own port", config: "dolt:\n  mode: server\n  host: 127.0.0.1\n  port: 23481\n", want: bdHostInside, wantPlanning: "Its own config names dolt.port 23481, " + bdHostCannotAim},
+		{name: "no host, its own port", config: "dolt:\n  mode: server\n  port: 23481\n", want: bdHostInside, wantPlanning: "Its own config names dolt.port 23481, " + bdHostCannotAim},
+		{name: "no host, config.local.yaml names its port", config: serverYAML, local: "dolt:\n  port: 23482\n", want: bdHostInside, wantPlanning: "Its own config names dolt.port 23482, " + bdHostCannotAim},
+		// The open from here dials a port the launcher names too.
+		{name: "its own port, which the launcher names too", launcher: "dolt:\n  port: 23481\n", config: "dolt:\n  mode: server\n  port: 23481\n", want: bdHostInside, wantPlanning: modeOnly},
+		{name: "its own port, launcher names another", launcher: launcherPort, config: "dolt:\n  mode: server\n  port: 23481\n", want: bdHostInside, wantPlanning: "Its own config names dolt.port 23481, " + bdHostCannotAim},
+		// Both opens dial the target's port file first, whatever port its
+		// own config or the launcher's names.
+		{name: "its own port, which its port file names", launcher: launcherPort, config: "dolt:\n  mode: server\n  port: 23481\n", portFile: "23481", want: bdHostInside, wantPlanning: modeOnly},
+		{name: "its own port, its port file naming another", config: "dolt:\n  mode: server\n  port: 23481\n", portFile: "23499", want: bdHostInside, wantPlanning: modeOnly},
+		{name: "no host, no port, launcher names a port, its port file names one", launcher: launcherPort, config: serverYAML, portFile: "23490", want: modeOnly},
+		// With no port file, both dial its metadata.json port where nothing
+		// ahead of it names a port.
+		{name: "its own port, which its metadata names too", metadata: `{"backend":"dolt","dolt_database":"beads","dolt_server_port":23481}`, config: "dolt:\n  mode: server\n  port: 23481\n", want: bdHostInside, wantPlanning: modeOnly},
+		{name: "no host, metadata names the launcher's port", launcher: launcherPort, metadata: `{"backend":"dolt","dolt_database":"beads","dolt_server_port":3307}`, config: serverYAML, want: modeOnly},
+		// The open from here dials the launcher's port, where bd there
+		// dials its metadata.json port, or starts its own server.
+		{name: "no host, no port, launcher names a port", launcher: launcherPort, config: serverYAML, want: bdHostLauncherInside, wantPlanning: bdHostLauncherCannotAim},
+		{name: "no host, metadata names a port, launcher names another", launcher: launcherPort, metadata: `{"backend":"dolt","dolt_database":"beads","dolt_server_port":23483}`, config: serverYAML, want: bdHostLauncherInside, wantPlanning: bdHostLauncherCannotAim},
+		// The open from here reads the target's metadata.json port.
+		{name: "no host, metadata names the port", metadata: `{"backend":"dolt","dolt_database":"beads","dolt_server_port":23483}`, config: serverYAML, want: modeOnly},
+		// With no port file, both dial the listener.port in its Dolt data
+		// directory's config.yaml ahead of either dolt.port and its
+		// metadata.json port.
+		{name: "no host, no port, its listener.port, launcher names a port", launcher: launcherPort, config: serverYAML, listener: "23485", want: modeOnly},
+		{name: "its own port, its listener.port naming another, launcher names a third", launcher: launcherPort, config: "dolt:\n  mode: server\n  port: 23481\n", listener: "23485", want: modeOnly},
+		// Both read a user-level dolt.port where their own config names
+		// none, ahead of its metadata.json port.
+		{name: "no host, no port, user-level dolt.port", user: launcherPort, config: serverYAML, want: modeOnly},
+		{name: "no host, metadata names a port, user-level dolt.port", user: launcherPort, metadata: `{"backend":"dolt","dolt_database":"beads","dolt_server_port":23483}`, config: serverYAML, want: modeOnly},
+		{name: "no host, no port, user-level dolt.port, launcher names another", user: "dolt:\n  port: 23490\n", launcher: launcherPort, config: serverYAML, want: bdHostLauncherInside, wantPlanning: bdHostLauncherCannotAim},
+		{name: "no host, metadata names the launcher's port, user-level dolt.port naming another", user: "dolt:\n  port: 23490\n", launcher: launcherPort, metadata: `{"backend":"dolt","dolt_database":"beads","dolt_server_port":3307}`, config: serverYAML, want: bdHostLauncherInside, wantPlanning: bdHostLauncherCannotAim},
+		{name: "its own port, user-level dolt.port naming another", user: launcherPort, config: "dolt:\n  mode: server\n  port: 23481\n", want: bdHostInside, wantPlanning: "Its own config names dolt.port 23481, " + bdHostCannotAim},
+		{name: "remote host and port", config: "dolt:\n  mode: server\n  host: db.example.com\n  port: 23481\n", want: `Set "dolt_mode": "server", "dolt_server_host": "db.example.com" and "dolt_server_port": 23481 in its .beads/metadata.json, then rerun`},
+		// A launcher's own dolt.port outranks metadata.json's port, so the
+		// remedy also offers the write inside the target.
+		{name: "remote host and port offers the write inside the target", config: "dolt:\n  mode: server\n  host: db.example.com\n  port: 23481\n", want: `then rerun (a dolt.port in this workspace's own configuration still outranks that port), or make the write inside that repository, where bd dials the server its own config names; nothing was created`, wantPlanning: `then rerun (a dolt.port in this workspace's own configuration still outranks that port); nothing was created`},
+		// No port is made up for a target that names none (bd there
+		// refuses the unresolved port too).
+		{name: "remote host, no port", config: "dolt:\n  mode: server\n  host: db.example.com\n", want: `Set "dolt_mode": "server", "dolt_server_host": "db.example.com" and "dolt_server_port" (the port its server listens on) in its .beads/metadata.json, then rerun; nothing was created`},
+		{name: "another loopback address", config: "dolt:\n  mode: server\n  host: 127.0.0.2\n  port: 23481\n", want: `Set "dolt_mode": "server", "dolt_server_host": "127.0.0.2" and "dolt_server_port": 23481 in its .beads/metadata.json, then rerun`},
+		{name: "config.local.yaml names the host", config: serverYAML, local: "dolt:\n  host: 10.1.2.3\n  port: 23482\n", want: `Set "dolt_mode": "server", "dolt_server_host": "10.1.2.3" and "dolt_server_port": 23482 in its .beads/metadata.json, then rerun`},
+		// The target dials the port its metadata.json names, not the
+		// default for a remote host.
+		{name: "metadata names the port, config.yaml a remote host and no port", metadata: `{"backend":"dolt","dolt_database":"beads","dolt_server_port":23483}`, config: "dolt:\n  mode: server\n  host: 127.0.0.2\n", want: `Set "dolt_mode": "server", "dolt_server_host": "127.0.0.2" and "dolt_server_port": 23483 in its .beads/metadata.json, then rerun`},
+		{name: "metadata names 127.0.0.1 over a remote config.yaml host", metadata: `{"backend":"dolt","dolt_database":"beads","dolt_server_host":"127.0.0.1"}`, config: "dolt:\n  mode: server\n  host: db.example.com\n  port: 23481\n", want: bdHostInside, wantPlanning: "Its own config names dolt.port 23481, " + bdHostCannotAim},
+		// The open from here reads the metadata.json host, but not the
+		// config.yaml port. Any host there but bd's own and the IPv6
+		// loopback selects server mode for that open
+		// (configfile.HostImpliesServerMode), so it is not refused.
+		{name: "metadata names the IPv6 loopback, config.yaml only its port", metadata: `{"backend":"dolt","dolt_database":"beads","dolt_server_host":"::1"}`, config: "dolt:\n  mode: server\n  port: 23481\n", want: `Set "dolt_mode": "server", "dolt_server_host": "::1" and "dolt_server_port": 23481 in its .beads/metadata.json, then rerun`},
+		// A launcher dolt.port outranks metadata.json's port: bd create's
+		// remedy is the write inside the target and migrate-personal's
+		// offers no rerun, unless the launcher names the target's port.
+		{name: "remote host and port, launcher names another port", launcher: launcherPort, config: "dolt:\n  mode: server\n  host: db.example.com\n  port: 23481\n", want: `Set "dolt_mode": "server", "dolt_server_host": "db.example.com" and "dolt_server_port": 23481 in its .beads/metadata.json, then make the write inside that repository, where bd dials the server its own config names: this workspace's own configuration names dolt.port 3307, which outranks that port when bd here opens it; nothing was created`, wantPlanning: `This workspace's own configuration names dolt.port 3307, which outranks any "dolt_server_port" in its .beads/metadata.json when bd here opens it, so bd migrate-personal cannot aim this write at port 23481, the port bd there dials for its server at "db.example.com"; nothing was created`},
+		{name: "remote host, no port, launcher names a port", launcher: launcherPort, config: "dolt:\n  mode: server\n  host: db.example.com\n", want: `Set "dolt_mode": "server", "dolt_server_host": "db.example.com" and "dolt_server_port" (the port its server listens on) in its .beads/metadata.json, then make the write inside that repository: this workspace's own configuration names dolt.port 3307, which outranks that port when bd here opens it; nothing was created`, wantPlanning: `This workspace's own configuration names dolt.port 3307, which outranks any "dolt_server_port" in its .beads/metadata.json when bd here opens it, so bd migrate-personal cannot aim this write at its server at "db.example.com" unless that server listens on that port; nothing was created`},
+		{name: "remote host and port, which the launcher names too", launcher: "dolt:\n  port: 23481\n", config: "dolt:\n  mode: server\n  host: db.example.com\n  port: 23481\n", want: `Set "dolt_mode": "server", "dolt_server_host": "db.example.com" and "dolt_server_port": 23481 in its .beads/metadata.json, then rerun`},
+		// Neither open reads the port file at that host, and both dial a
+		// listener.port ahead of any dolt.port, so the edit names no port.
+		{name: "remote host and port, its listener.port, launcher names another port", launcher: launcherPort, config: "dolt:\n  mode: server\n  host: db.example.com\n  port: 23481\n", portFile: "23499", listener: "23485", want: remoteListenerRerun + `, or make the write inside that repository, where bd dials the server its own config names; nothing was created`, wantPlanning: remoteListenerRerun + `; nothing was created`},
+		{name: "remote host, no port, its listener.port", config: "dolt:\n  mode: server\n  host: db.example.com\n", listener: "23485", want: remoteListenerRerun},
+		// A user-level dolt.port outranks metadata.json's port for both
+		// opens, and the target's own dolt.port outranks it for bd there.
+		{name: "remote host and port, user-level dolt.port naming another", user: launcherPort, config: "dolt:\n  mode: server\n  host: db.example.com\n  port: 23481\n", want: `Set "dolt_mode": "server", "dolt_server_host": "db.example.com" and "dolt_server_port": 23481 in its .beads/metadata.json, then make the write inside that repository, where bd dials the server its own config names: the user-level config.yaml names dolt.port 3307, which outranks that port when bd here opens it; nothing was created`, wantPlanning: `The user-level config.yaml names dolt.port 3307, which outranks any "dolt_server_port" in its .beads/metadata.json when bd here opens it, so bd migrate-personal cannot aim this write at port 23481, the port bd there dials for its server at "db.example.com"; nothing was created`},
+		{name: "remote host, no port, user-level dolt.port", user: launcherPort, config: "dolt:\n  mode: server\n  host: db.example.com\n", want: `Set "dolt_mode": "server", "dolt_server_host": "db.example.com" and "dolt_server_port": 3307 in its .beads/metadata.json, then rerun`},
+		{name: "a host no shell word spells", config: "dolt:\n  mode: server\n  host: \"db$(touch x).example.com\"\n  port: 23481\n", want: `"dolt_server_host": "db\x24(touch x).example.com"`},
+	} {
+		t.Run("embedded launcher remedy/"+tc.name, func(t *testing.T) {
+			isolateForeignWorkspaceSignals(t, tc.launcher)
+			// Viper reads this as the launcher's dolt.port.
+			t.Setenv("BD_DOLT_PORT", "")
+			// The user-level config.yaml, under the HOME the isolation set;
+			// the launcher's configuration is loaded again over it.
+			userConfigDir := filepath.Join(os.Getenv("HOME"), ".config")
+			t.Setenv("XDG_CONFIG_HOME", userConfigDir)
+			if tc.user != "" {
+				legacyworkspace.Layout{Files: map[string]string{"config.yaml": tc.user}}.Write(t, filepath.Join(userConfigDir, "bd"))
+			}
+			config.ResetForTesting()
+			if err := config.Initialize(); err != nil {
+				t.Fatalf("config.Initialize: %v", err)
+			}
+			metadata := tc.metadata
+			if metadata == "" {
+				metadata = `{"backend":"dolt","dolt_database":"beads"}`
+			}
+			files := map[string]string{"metadata.json": metadata, "config.yaml": tc.config}
+			if tc.local != "" {
+				files["config.local.yaml"] = tc.local
+			}
+			if tc.portFile != "" {
+				files[doltserver.PortFileName] = tc.portFile
+			}
+			if tc.listener != "" {
+				files["dolt/config.yaml"] = "listener:\n  port: " + tc.listener + "\n"
+				// A .beads/dolt root needs a current version witness, or
+				// the target is refused as a legacy Dolt server workspace.
+				files[localVersionFile] = "1.0.0"
+			}
+			beadsDir := write(t, files)
+			before := legacyworkspace.TreeDigest(t, beadsDir)
+			var refusal *existingTargetRefusal
+			err := refuseExistingCreateTarget(beadsDir)
+			if !errors.As(err, &refusal) {
+				t.Fatalf("refuseExistingCreateTarget = %v, want the server-mode refusal", err)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("refusal does not say %q:\n%s", tc.want, err)
+			}
+			wantPlanning := tc.wantPlanning
+			if wantPlanning == "" {
+				wantPlanning = tc.want
+			}
+			if !strings.Contains(refusal.planningMsg, wantPlanning) {
+				t.Errorf("migrate-personal's refusal does not say %q:\n%s", wantPlanning, refusal.planningMsg)
+			}
+			if strings.Contains(refusal.planningMsg, "inside that repository") {
+				t.Errorf("migrate-personal's refusal offers a write inside its planning repo:\n%s", refusal.planningMsg)
+			}
+			if strings.Contains(wantPlanning, "cannot aim") && strings.Contains(refusal.planningMsg, "rerun") {
+				t.Errorf("migrate-personal's refusal offers a rerun that would not reach the target's port:\n%s", refusal.planningMsg)
+			}
+			if strings.Contains(err.Error(), "then make the write inside") && strings.Contains(err.Error(), "rerun") {
+				t.Errorf("bd create's refusal offers a rerun beside the write inside the target it leads with:\n%s", err)
+			}
+			if after := legacyworkspace.TreeDigest(t, beadsDir); !maps.Equal(after, before) {
+				t.Fatalf("refuseExistingCreateTarget changed the target")
+			}
+		})
+	}
 	t.Run("server launcher", func(t *testing.T) {
 		isolateForeignWorkspaceSignals(t, serverYAML)
 		beadsDir := write(t, map[string]string{"metadata.json": `{"backend":"dolt","dolt_database":"beads"}`, "config.yaml": serverYAML})

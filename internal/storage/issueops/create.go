@@ -179,6 +179,10 @@ func prepareCreateIssueInTx(ctx context.Context, tx DBTX, bc *BatchContext, issu
 		if err := EnsureIssueIDAvailableInTx(ctx, tx, issue.ID); err != nil {
 			return "", "", false, err
 		}
+		// The guard has just read both planes in this transaction and found
+		// no row with this id, so the cross-plane collision check below would
+		// re-read the sibling plane only to find the same nothing.
+		return issueTable, eventTable, false, nil
 	}
 
 	skip, err = checkCrossTableIDCollisionCached(ctx, tx, issue.ID, issueTable, bc.Opts, bc.cache)
@@ -474,7 +478,7 @@ func CreateIssuesInTxWithContext(ctx context.Context, tx DBTX, bc *BatchContext,
 	}
 	// The ids are this batch's rows, most of them fresh and edgeless: let the
 	// recompute skip the union statements for those (planRecomputeInTx).
-	recomputed, err := recomputeIsBlockedInTxWithResult(ctx, tx, issueIDs, wispIDs, true)
+	recomputed, err := recomputeIsBlockedInTxWithResult(ctx, tx, issueIDs, wispIDs, recomputeOptions{splitEdgeless: true})
 	if err != nil {
 		return CreateIssuesResult{}, err
 	}
@@ -845,7 +849,9 @@ func InsertIssueIfNew(ctx context.Context, tx DBTX, issueTable string, issue *ty
 // cache when it covers the id, and recording the write in cache.
 func insertIssueIfNewCached(ctx context.Context, tx DBTX, issueTable string, issue *types.Issue, opts storage.BatchCreateOptions, cache *createBatchCache) (isNew bool, staleRejected bool, err error) {
 	var existingCount int
-	if issue.ID != "" {
+	// A create-only insert that does not skip conflicts never reads the
+	// count: the strict INSERT itself refuses a duplicate.
+	if issue.ID != "" && (!opts.CreateOnly || opts.ConflictSkip) {
 		existingCount, err = cache.rowCount(ctx, tx, issueTable, issue.ID)
 		if err != nil {
 			return false, false, fmt.Errorf("failed to check issue existence for %s: %w", issue.ID, err)

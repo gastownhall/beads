@@ -37,10 +37,11 @@ import (
 // targetSelectsServerMode). An open of an existing workspace refuses a .beads
 // bd run inside finds no workspace in (openForeignStore); a create or
 // planning target is initialized there instead, unless it holds a legacy
-// config.json (a fresh clone of a SQLite-era project), which
-// refuseUninitializableTarget refuses with the error openForeignStore returns
-// for it. foreign_workspace_census_test.go pins that the store factories are
-// reached from a foreign path only through openForeignStore.
+// config.json (a fresh clone of a SQLite-era project) or a non-empty
+// issues.jsonl (a fresh clone of a project from before bd wrote config.json),
+// which refuseUninitializableTarget refuses with the error openForeignStore
+// returns for it. foreign_workspace_census_test.go pins that the store
+// factories are reached from a foreign path only through openForeignStore.
 
 // admitForeignWorkspace refuses, without writing anything, the layouts bd
 // run inside beadsDir refuses from its contents: a workspace format this build
