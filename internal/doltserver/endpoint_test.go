@@ -23,6 +23,7 @@ func endpointTestEnv(t *testing.T, sections map[string]string) string {
 		"BEADS_DOLT_SHARED_SERVER", "BEADS_DOLT_SERVER_MODE", "BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_PORT",
 		"BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_PASSWORD", "BEADS_DOLT_AUTO_START", "BEADS_DOLT_SERVER_USER",
 		"BEADS_DOLT_SERVER_SOCKET", "BEADS_DOLT_DATA_DIR", "BEADS_DOLT_CREDENTIAL_COMMAND",
+		"BEADS_DOLT_SERVER_TLS", "BEADS_DOLT_SERVER_ALLOW_CLEARTEXT_PASSWORD",
 	} {
 		t.Setenv(name, "")
 	}
@@ -258,20 +259,27 @@ func stubSocketProbe(t *testing.T, live ...string) *[]string {
 // store's socket-first / TCP-fallback choice (a socket-only workspace is
 // dialable, not refused as having no port), the user is a configured
 // credential command's token over the static user (a named user over both),
-// the password is the endpoint's, and an endpoint with no address is
+// the password is the endpoint's, TLS and the cleartext-password flag are the
+// endpoint's (the flag only over TLS: without it the dial is refused, never
+// made with a password in the clear), and an endpoint with no address is
 // refused rather than dialed at host:0.
 func TestEndpointDialDSNIsTheStoresConnection(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("the credential commands below are POSIX shell commands")
 	}
 	const sock = "/tmp/beads-endpoint-test.sock"
+	cleartextRefusal := configfile.ValidateServerAuthConfig(true, false)
+	if cleartextRefusal == nil {
+		t.Fatal("ValidateServerAuthConfig accepted cleartext without TLS")
+	}
 	for _, tc := range []struct {
-		name       string
-		ep         Endpoint
-		live       []string
-		wantSocket string
-		wantUser   string
-		wantErr    string
+		name          string
+		ep            Endpoint
+		live          []string
+		wantSocket    string
+		wantUser      string
+		wantCleartext bool
+		wantErr       string
 	}{
 		{name: "TCP", ep: Endpoint{Host: "127.0.0.1", Port: 13307, User: "beads"}.WithPassword("pw"), wantUser: "beads"},
 		{name: "socket only, socket down", ep: Endpoint{Host: "127.0.0.1", Socket: sock, User: "beads"}.WithPassword("pw"), wantSocket: sock, wantUser: "beads"},
@@ -281,6 +289,9 @@ func TestEndpointDialDSNIsTheStoresConnection(t *testing.T) {
 		{name: "named user over the credential command", ep: Endpoint{Host: "127.0.0.1", Port: 13307, CredentialCommand: "exit 3"}.WithPassword("pw").WithUser("named"), wantUser: "named"},
 		{name: "failing credential command", ep: Endpoint{Host: "127.0.0.1", Port: 13307, User: "beads", CredentialCommand: "exit 3"}, wantErr: "credential command"},
 		{name: "no address", ep: Endpoint{Host: "127.0.0.1", User: "beads"}, wantErr: ErrUnresolvedPort.Error()},
+		{name: "TLS without cleartext", ep: Endpoint{Host: "127.0.0.1", Port: 13307, User: "beads", TLS: true}.WithPassword("pw"), wantUser: "beads"},
+		{name: "cleartext over TLS", ep: Endpoint{Host: "127.0.0.1", Port: 13307, User: "beads", TLS: true, AllowCleartextPassword: true}.WithPassword("pw"), wantUser: "beads", wantCleartext: true},
+		{name: "cleartext without TLS", ep: Endpoint{Host: "127.0.0.1", Port: 13307, User: "beads", AllowCleartextPassword: true}.WithPassword("pw"), wantErr: cleartextRefusal.Error()},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			stubSocketProbe(t, tc.live...)
@@ -298,6 +309,10 @@ func TestEndpointDialDSNIsTheStoresConnection(t *testing.T) {
 				dsn.Host != tc.ep.Host || dsn.Port != tc.ep.Port || dsn.Database != "db" {
 				t.Errorf("DialDSN = %+v, want socket %q, user %q, password %q at %s:%d on db",
 					dsn, tc.wantSocket, tc.wantUser, tc.ep.Password(), tc.ep.Host, tc.ep.Port)
+			}
+			if dsn.TLS != tc.ep.TLS || dsn.AllowCleartextPasswords != tc.wantCleartext {
+				t.Errorf("DialDSN TLS %v, AllowCleartextPasswords %v; want TLS %v, AllowCleartextPasswords %v",
+					dsn.TLS, dsn.AllowCleartextPasswords, tc.ep.TLS, tc.wantCleartext)
 			}
 			if tc.ep.CredentialCommand != "" && tc.ep.WithUser("x").CredentialCommand != "" {
 				t.Error("WithUser kept the credential command")
@@ -352,6 +367,83 @@ func TestResolveEndpointCarriesTheCredentialCommand(t *testing.T) {
 	t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", "printf tok")
 	if got := ResolveEndpoint(beadsDir, nil).CredentialCommand; got != "printf tok" {
 		t.Errorf("CredentialCommand = %q, want the configured command", got)
+	}
+}
+
+// TestResolveEndpointCarriesTheCleartextFlag: the endpoint carries
+// dolt_server_allow_cleartext_password as configured, from metadata.json or
+// BEADS_DOLT_SERVER_ALLOW_CLEARTEXT_PASSWORD, so bd dolt show reports it and
+// a dial through the endpoint (DialDSN) keeps it.
+func TestResolveEndpointCarriesTheCleartextFlag(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		metadata      bool
+		env           string
+		wantCleartext bool
+	}{
+		{name: "unset"},
+		{name: "metadata.json", metadata: true, wantCleartext: true},
+		{name: "environment", env: "1", wantCleartext: true},
+		{name: "environment over metadata.json", metadata: true, env: "false"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			beadsDir := endpointTestEnv(t, nil)
+			t.Setenv("BEADS_DOLT_SERVER_ALLOW_CLEARTEXT_PASSWORD", tc.env)
+			writeEndpointMetadata(t, beadsDir, &configfile.Config{
+				DoltMode:                         configfile.DoltModeServer,
+				DoltServerPort:                   13307,
+				DoltServerTLS:                    true,
+				DoltServerAllowCleartextPassword: tc.metadata,
+			})
+
+			ep := ResolveEndpoint(beadsDir, nil)
+
+			if !ep.TLS || ep.AllowCleartextPassword != tc.wantCleartext {
+				t.Errorf("endpoint TLS %v, AllowCleartextPassword %v; want TLS true, AllowCleartextPassword %v",
+					ep.TLS, ep.AllowCleartextPassword, tc.wantCleartext)
+			}
+			if got, err := ep.CleartextAuth(); err != nil || got != tc.wantCleartext {
+				t.Errorf("CleartextAuth = %v, %v; want %v over TLS", got, err, tc.wantCleartext)
+			}
+		})
+	}
+}
+
+// TestEndpointCleartextAuthRefusesWithoutTLS pins Endpoint.CleartextAuth, the
+// gate every caller that dials through the endpoint takes the flag from: the
+// flag is granted only over TLS, and without TLS it is refused with
+// configfile.ValidateServerAuthConfig's error, never reported as allowed.
+func TestEndpointCleartextAuthRefusesWithoutTLS(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		ep        Endpoint
+		want      bool
+		wantError bool
+	}{
+		{name: "neither", ep: Endpoint{}},
+		{name: "TLS only", ep: Endpoint{TLS: true}},
+		{name: "cleartext over TLS", ep: Endpoint{TLS: true, AllowCleartextPassword: true}, want: true},
+		{name: "cleartext without TLS", ep: Endpoint{AllowCleartextPassword: true}, wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := tc.ep.CleartextAuth()
+			if tc.wantError {
+				want := configfile.ValidateServerAuthConfig(true, false)
+				if err == nil || want == nil || err.Error() != want.Error() {
+					t.Fatalf("CleartextAuth error = %v, want the refusal %v", err, want)
+				}
+				if got {
+					t.Error("CleartextAuth allowed cleartext while refusing it")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("CleartextAuth: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("CleartextAuth = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 
