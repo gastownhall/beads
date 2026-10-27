@@ -76,6 +76,17 @@ func TestArrivalSeq_EmbeddedConcurrentWritersAreUnique(t *testing.T) {
 	env := newTestEnv(t, "eas")
 	env.store.SetEventsJournalEnabled(true)
 
+	// The engine serializes these creates, so they share one budget: the test
+	// binary's own deadline less a grace period to report a failure in, not a
+	// fixed per-create timeout a slow race build can approach (12 creates ran
+	// in about 30s under the farm's -race build).
+	ctx := t.Context()
+	if deadline, ok := t.Deadline(); ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, deadline.Add(-30*time.Second))
+		defer cancel()
+	}
+
 	const writers = 12
 	var wg sync.WaitGroup
 	errs := make([]error, writers)
@@ -83,8 +94,6 @@ func TestArrivalSeq_EmbeddedConcurrentWritersAreUnique(t *testing.T) {
 		wg.Add(1)
 		go func(k int) {
 			defer wg.Done()
-			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-			defer cancel()
 			errs[k] = env.store.CreateIssue(ctx, arrivalWisp(fmt.Sprintf("eas-race-%d", k)), "actor")
 		}(i)
 	}
