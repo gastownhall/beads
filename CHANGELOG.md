@@ -518,6 +518,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   each entry still decodes as the closed issue, and the output stays an
   array (under `closed` with `--suggest-next`, `--continue` or
   `--claim-next`).
+- In server mode, `dolt.open-retry-budget` (a duration, off by default)
+  bounds how long `bd` keeps re-probing a Dolt sql-server it does not manage
+  when the first connectivity probe fails while opening a store: a
+  non-localhost host, a unix socket, or a configured server `bd` will not
+  auto-start, including an open whose auto-start is refused because the
+  server is externally managed. An open that waits prints one notice naming
+  the setting. A refused probe is classified by its errno, `ECONNREFUSED`
+  and on Windows `WSAECONNREFUSED` (10061), so Windows refusals get the
+  budget too.
 
 ### Changed
 
