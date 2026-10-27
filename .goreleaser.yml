@@ -57,11 +57,18 @@ builds:
       post:
         - ./scripts/verify-cgo.sh "{{ .Path }}"
 
+  # Cross-compiled against Bionic with the pinned Android NDK (#3538), so
+  # embedded Dolt works on Termux. The wrappers pick the NDK's API-21 clang
+  # (installing NDK r30 when it is missing) and only run on Linux x86_64; the
+  # absolute path is needed because Go runs CC from each cgo package's
+  # directory. Do not add netgo: on Android Go needs the cgo resolver.
   - id: bd-android-arm64
     main: ./cmd/bd
     binary: bd
     env:
-      - CGO_ENABLED=0
+      - CGO_ENABLED=1
+      - CC={{ .Env.PWD }}/scripts/ci/android-arm64-cc
+      - CXX={{ .Env.PWD }}/scripts/ci/android-arm64-cxx
     tags:
       - gms_pure_go
     goos:
@@ -74,6 +81,10 @@ builds:
       - -X main.Build={{.ShortCommit}}
       - -X main.Commit={{.Commit}}
       - -X main.Branch={{.Branch}}
+    hooks:
+      post:
+        - ./scripts/verify-cgo.sh "{{ .Path }}"
+        - ./scripts/verify-android-elf.sh "{{ .Path }}"
 
   # darwin-amd64 and darwin-arm64 are built by a dedicated macOS CI job
   # (release.yml: goreleaser-macos) with CGO_ENABLED=1 for embedded Dolt support.
