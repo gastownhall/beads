@@ -155,6 +155,7 @@ go_test(
         "update_nix_vendorhash_test.go",
         "update_nix_vendorhash_unix_test.go",
         "upgrade_smoke_loop_test.go",
+        "verify_android_elf_test.go",
     ],
     data = [
         ":repo_other_files",
