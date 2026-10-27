@@ -1111,4 +1111,8 @@ func TestEmbeddedListConcurrent(t *testing.T) {
 			t.Fatalf("authoritative list omitted concurrent snapshot ID %q", id)
 		}
 	}
+
+	t.Run("watch_leaves_list_and_show_free", func(t *testing.T) {
+		testListWatchLeavesListAndShowFree(t, bd)
+	})
 }
