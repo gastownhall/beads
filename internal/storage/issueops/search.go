@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
@@ -39,6 +40,18 @@ func SearchIssueIDsInTx(ctx context.Context, tx DBTX, query string, filter types
 // hydration pass) and returns []*types.IssueSummary instead of full issues.
 func SearchIssueSummariesInTx(ctx context.Context, tx DBTX, query string, filter types.IssueFilter) ([]*types.IssueSummary, error) {
 	return searchInTx(ctx, tx, query, filter, summaryProjection)
+}
+
+// SearchDescendantsInTx is the --parent tree walk (storage.WalkDescendants)
+// run inside one existing read transaction, one SearchIssuesInTx per node:
+// the whole tree is a single snapshot, and the tx is the single engine-open
+// an embedded caller pays for the walk instead of one per node. The walk
+// logic itself lives in internal/storage (which must not import issueops);
+// issueops may import it.
+func SearchDescendantsInTx(ctx context.Context, tx DBTX, rootID string, filter types.IssueFilter) ([]*types.Issue, error) {
+	return storage.WalkDescendants(ctx, rootID, filter, func(ctx context.Context, nodeFilter types.IssueFilter) ([]*types.Issue, error) {
+		return SearchIssuesInTx(ctx, tx, "", nodeFilter)
+	})
 }
 
 // SearchWispsPlaneInTx searches the wisps plane ALONE: every row stored in

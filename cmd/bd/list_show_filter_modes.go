@@ -32,11 +32,12 @@ import (
 // names no type, so a helper in this file could hand one back.
 //
 // What lives here is everything that genuinely needs the filter as a value:
-// the recursive --parent tree walk, which re-parents a copy of it at every
-// level; the --watch poll loop, which re-runs the same filter after every
-// full poll wait; the proxied route's builder call, which has to name the
-// type to hand the filter back; and --current, which resolves an id from a
-// deliberately BARE filter
+// the --parent tree walk, which hands the whole filter to
+// storage.SearchDescendants (the per-level re-parenting now lives there); the
+// --watch poll loop, which re-runs the same filter after every full poll
+// wait; the proxied route's builder call, which has to name the type to hand
+// the filter back; and --current, which resolves an id from a deliberately
+// BARE filter
 // that must not pick up the default listing's exclusions.
 //
 // The list is SHORTER by everything it no longer holds. `bd list`'s page is
@@ -101,29 +102,27 @@ func getHierarchicalChildren(ctx context.Context, store storage.DoltStorage, dbP
 	return treeIssues, nil
 }
 
-// findAllDescendants recursively finds all descendants using parent filtering.
-// baseFilter carries CLI filters (--type, --status, etc.) so the tree respects them.
+// findAllDescendants finds all descendants of parentID into result, first
+// sighting wins. baseFilter carries CLI filters (--type, --status, etc.) so
+// the tree respects them. The walk itself is storage.SearchDescendants — one
+// read through the innermost store's DescendantSearcher capability when it
+// has one (the whole tree inside a single engine-open), and the same per-node
+// SearchIssues walk otherwise (GH#3415: the recursion used to re-open the
+// backend once per node here).
 func findAllDescendants(ctx context.Context, store storage.DoltStorage, dbPath string, parentID string, baseFilter types.IssueFilter, result map[string]*types.Issue) error {
-	var children []*types.Issue
+	var descendants []*types.Issue
 	err := withStorage(ctx, store, dbPath, func(s storage.DoltStorage) error {
-		filter := baseFilter
-		filter.ParentID = &parentID
-		filter.Limit = 0 // unlimited per level to avoid truncating the tree walk
 		var err error
-		children, err = s.SearchIssues(ctx, "", filter)
+		descendants, err = storage.SearchDescendants(ctx, s, parentID, baseFilter)
 		return err
 	})
 	if err != nil {
 		return err
 	}
 
-	for _, child := range children {
-		if _, exists := result[child.ID]; !exists {
-			result[child.ID] = child
-			err = findAllDescendants(ctx, store, dbPath, child.ID, baseFilter, result)
-			if err != nil {
-				return err
-			}
+	for _, issue := range descendants {
+		if _, exists := result[issue.ID]; !exists {
+			result[issue.ID] = issue
 		}
 	}
 
