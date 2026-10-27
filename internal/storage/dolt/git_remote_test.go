@@ -2131,6 +2131,18 @@ func TestGitProtocolPullDeclinedConflictAbortsMerge(t *testing.T) {
 	acquireTestSlot()
 	t.Cleanup(releaseTestSlot)
 
+	// writer-a's sql-server at 127.0.0.1 is a host bd runs its own server
+	// at, but under the shared-container test harness BEADS_DOLT_SERVER_PORT
+	// (or the legacy BEADS_DOLT_PORT) names the suite's own shared container,
+	// not this test's standalone server (GH#7870: cliDirServesServer now
+	// requires that port proof — sharedServerDatabase — once either var is
+	// set, and this store has no BeadsDir/state files to provide it). Clear
+	// both so the host-only check in cliDirServesServer applies, exactly as
+	// the sibling TestPushPullAtAHostBdDoesNotRunMoveTheServersData already
+	// does for the same reason.
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	t.Setenv("BEADS_DOLT_PORT", "")
+
 	baseDir := t.TempDir()
 
 	// Bare git repo, seeded (dolt requires at least one branch to push to).
