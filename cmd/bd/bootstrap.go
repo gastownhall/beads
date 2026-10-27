@@ -1374,16 +1374,18 @@ func openBootstrapStore(ctx context.Context, plan BootstrapPlan, cfg *configfile
 		if held {
 			return nil, location, nil
 		}
-	}
-	s, err = newDoltStore(ctx, storeCfg)
-	if err == nil && storeCfg.ServerMode {
-		// bd bootstrap is a skip-store command, so nothing records this
-		// binary in the version witness after it: a server workspace whose
-		// local Dolt root this open populated (bd's own server, which the
-		// store just started there) would be refused as a legacy one by every
-		// later command, as after the sync action's clone into that root.
+		// bd bootstrap is a skip-store command, so PersistentPreRunE records
+		// no version witness for it (trackBdVersion), and a server workspace
+		// whose local Dolt root holds data and no witness is refused as a
+		// legacy one by every later command, bd bootstrap included. The open
+		// below populates that root when it starts bd's own server there,
+		// and it does so first (dolt init), so an open that then fails or is
+		// interrupted leaves the root populated too. The witness is recorded
+		// before the open, as PersistentPreRunE records it before every other
+		// command's; bootstrap's own legacy guard has admitted the workspace.
 		recordCloneVersionWitness(plan.BeadsDir)
 	}
+	s, err = newDoltStore(ctx, storeCfg)
 	return s, "", err
 }
 
@@ -2024,11 +2026,14 @@ func cloneViaCLI(ctx context.Context, beadsDir, remoteURL, dbName string) error 
 }
 
 // recordCloneVersionWitness records this binary in beadsDir's version
-// witness (.local_version) when there is none, after bootstrap cloned into
-// the workspace's local Dolt root. A server workspace whose .beads/dolt holds
-// data and no witness is refused as a legacy (pre-1.0) one by every later
-// command (guardLegacyUpgradeWorkspace); this binary created that root, after
-// the guard admitted the workspace, so the witness says what is true. An
+// witness (.local_version) when there is none, where bootstrap writes the
+// workspace's local Dolt root: after the sync action cloned into it, and
+// before the init and jsonl-import actions open a server store, which
+// populates it when it starts bd's own server there (openBootstrapStore). A
+// server workspace whose .beads/dolt holds data and no witness is refused as
+// a legacy (pre-1.0) one by every later command
+// (guardLegacyUpgradeWorkspace); this binary writes that root, after the
+// guard admitted the workspace, so the witness says what is true. An
 // existing witness is left alone: it is the one-shot upgrade signal
 // (trackBdVersion).
 func recordCloneVersionWitness(beadsDir string) {

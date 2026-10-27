@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -94,6 +95,10 @@ func foreignServerIssueTitles(t *testing.T, port int, db string) ([]string, bool
 // creating anything (main exited 1 too, after creating .beads/embeddeddolt),
 // and over a database the server holds names no --force restore.
 // An embedded workspace imports into .beads/embeddeddolt as before.
+// A first bootstrap whose start of bd's own server fails after dolt init in
+// .beads/dolt leaves the version witness behind it, so the rerun is not
+// refused as a legacy workspace; a server workspace whose .beads/dolt holds
+// data and no witness still is, and bootstrap records no witness there.
 func TestE2E_BootstrapProvisionsTheWorkspaceServer(t *testing.T) {
 	testutil.RequireDoltBinary(t)
 	bd := buildBDForInitTests(t)
@@ -101,17 +106,19 @@ func TestE2E_BootstrapProvisionsTheWorkspaceServer(t *testing.T) {
 {"_type":"issue","id":"jp-a2","title":"tracked two","status":"open","priority":2,"issue_type":"task","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}
 `
 	for _, tc := range []struct {
-		name       string
-		metaPort   bool // dolt_server_port in metadata.json, else dolt.port in .beads/config.yaml
-		projectID  bool
-		jsonl      bool
-		backup     bool
-		embedded   bool
-		ownServer  bool // no port named anywhere: bd's own server, which the store starts over .beads/dolt
-		serverHeld bool // the server already holds the database, with a live issue
-		wantExit   int
-		wantTitles []string // on the server, and in bd list afterwards; nil: the database is absent there
-		wantOut    string   // in bootstrap's output, when set
+		name        string
+		metaPort    bool // dolt_server_port in metadata.json, else dolt.port in .beads/config.yaml
+		projectID   bool
+		jsonl       bool
+		backup      bool
+		embedded    bool
+		ownServer   bool // no port named anywhere: bd's own server, which the store starts over .beads/dolt
+		serverHeld  bool // the server already holds the database, with a live issue
+		failedStart bool // an earlier bd bootstrap's start of bd's own server failed after dolt init in .beads/dolt
+		legacyRoot  bool // .beads/dolt holds data and there is no version witness: a pre-1.0 server workspace
+		wantExit    int
+		wantTitles  []string // on the server, and in bd list afterwards; nil: the database is absent there
+		wantOut     string   // in bootstrap's output, when set
 	}{
 		{name: "jsonl-import, metadata port, project_id", metaPort: true, projectID: true, jsonl: true, wantTitles: []string{"tracked one", "tracked two"}},
 		{name: "jsonl-import, config.yaml port, no project_id", jsonl: true, wantTitles: []string{"tracked one", "tracked two"}},
@@ -120,9 +127,14 @@ func TestE2E_BootstrapProvisionsTheWorkspaceServer(t *testing.T) {
 		{name: "restore, config.yaml port", jsonl: true, backup: true, wantExit: 1, wantOut: "once database"},
 		{name: "restore, server already holds the database", projectID: true, backup: true, serverHeld: true, wantExit: 1, wantTitles: []string{"live on the server"}, wantOut: "did not restore"},
 		{name: "jsonl-import, bd's own server, no port named", ownServer: true, jsonl: true, wantTitles: []string{"tracked one", "tracked two"}},
+		{name: "jsonl-import, bd's own server, after a first start that failed", ownServer: true, jsonl: true, failedStart: true, wantTitles: []string{"tracked one", "tracked two"}},
+		{name: "legacy server workspace, no version witness", ownServer: true, jsonl: true, legacyRoot: true, wantExit: 1, wantOut: "legacy Dolt server workspace"},
 		{name: "embedded jsonl-import", embedded: true, jsonl: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.failedStart && runtime.GOOS == windowsOS {
+				t.Skip("the dolt shim is a POSIX shell script")
+			}
 			// A server of the row's own: bootstrap's metadata reconcile adopts
 			// the only Beads database on a server for a workspace with no
 			// project_id, so rows sharing one would see each other's.
@@ -200,6 +212,39 @@ func TestE2E_BootstrapProvisionsTheWorkspaceServer(t *testing.T) {
 				}
 			}
 			_ = runCommandInDir(dir, "git", "init", "-q")
+			if tc.legacyRoot {
+				// What a pre-1.0 bd's server left in .beads/dolt: a database
+				// directory, with no version witness beside it.
+				if err := os.MkdirAll(filepath.Join(beadsDir, "dolt", db, ".dolt"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.failedStart {
+				// A stand-in dolt runs the real one for every command but
+				// sql-server, which never listens, so the store's start of
+				// bd's own server times out after dolt init in .beads/dolt.
+				realDolt, err := exec.LookPath("dolt")
+				if err == nil {
+					realDolt, err = filepath.Abs(realDolt)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				shimDir := t.TempDir()
+				shim := "#!/bin/sh\nif [ \"$1\" = sql-server ]; then exec sleep 30; fi\nexec \"$BOOTSTRAP_REAL_DOLT\" \"$@\"\n"
+				if err := os.WriteFile(filepath.Join(shimDir, "dolt"), []byte(shim), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				failEnv := append(env, "PATH="+shimDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+					"BOOTSTRAP_REAL_DOLT="+realDolt, "BEADS_DOLT_READY_TIMEOUT=1")
+				failOut, err := runBDExecWithBinary(t, bd, dir, failEnv, "bootstrap", "--yes")
+				if err == nil {
+					t.Fatalf("bd bootstrap succeeded with a dolt sql-server that never listens:\n%s", failOut)
+				}
+				if _, err := os.Stat(filepath.Join(beadsDir, "dolt", ".dolt")); err != nil {
+					t.Fatalf("the failed start left no Dolt data in .beads/dolt (%v):\n%s", err, failOut)
+				}
+			}
 			out, err := runBDExecWithBinary(t, bd, dir, env, "bootstrap", "--yes")
 			code := 0
 			if ee, ok := err.(*exec.ExitError); ok {
@@ -222,6 +267,11 @@ func TestE2E_BootstrapProvisionsTheWorkspaceServer(t *testing.T) {
 			}
 			if embErr == nil {
 				t.Errorf("bootstrap created .beads/embeddeddolt in a server-mode workspace:\n%s", out)
+			}
+			if tc.legacyRoot {
+				if _, err := os.Stat(filepath.Join(beadsDir, localVersionFile)); !os.IsNotExist(err) {
+					t.Errorf("bd bootstrap recorded a version witness in a legacy server workspace (stat: %v):\n%s", err, out)
+				}
 			}
 			if tc.wantTitles != nil {
 				// Every later command opens the database bootstrap wrote.
