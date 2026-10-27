@@ -109,6 +109,42 @@ func TestEnginePullOnlyConflictStrategy(t *testing.T) {
 			wantSkipped:   1,
 			wantMsg:       "keeping local version",
 		},
+		{
+			name:          "timestamp strategy imports the newer external version",
+			strategy:      ConflictTimestamp,
+			remoteUpdated: pullConflictLastSync.Add(20 * time.Minute),
+			wantStatus:    types.StatusInProgress,
+			wantUpdated:   1,
+			wantSkipped:   0,
+			wantMsg:       "external is newer, importing",
+		},
+		{
+			name:          "timestamp strategy keeps the newer local version",
+			strategy:      ConflictTimestamp,
+			remoteUpdated: pullConflictLastSync.Add(5 * time.Minute),
+			wantStatus:    types.StatusOpen,
+			wantUpdated:   0,
+			wantSkipped:   1,
+			wantMsg:       "local is newer, keeping local version",
+		},
+		{
+			name:          "timestamp strategy breaks a tie in favor of external",
+			strategy:      ConflictTimestamp,
+			remoteUpdated: pullConflictLastSync.Add(10 * time.Minute), // equals the local edit
+			wantStatus:    types.StatusInProgress,
+			wantUpdated:   1,
+			wantSkipped:   0,
+			wantMsg:       "external is newer, importing",
+		},
+		{
+			name:          "unset strategy defaults to newer-wins",
+			strategy:      "",
+			remoteUpdated: pullConflictLastSync.Add(20 * time.Minute),
+			wantStatus:    types.StatusInProgress,
+			wantUpdated:   1,
+			wantSkipped:   0,
+			wantMsg:       "external is newer, importing",
+		},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			fx := newPullConflictFixture(t, row.remoteUpdated)
@@ -167,4 +203,29 @@ func TestEnginePullOnlyConflictStrategy(t *testing.T) {
 			t.Errorf("FetchIssue calls = %d, want 0", fx.mock.fetchCalls)
 		}
 	})
+}
+
+// TestEnginePullOnlySelectiveConflict mirrors what `bd <tracker> pull <id>`
+// runs: a selective pull with no explicit strategy, which defaults to
+// newer-wins.
+func TestEnginePullOnlySelectiveConflict(t *testing.T) {
+	fx := newPullConflictFixture(t, pullConflictLastSync.Add(20*time.Minute))
+	result, err := fx.engine.Sync(context.Background(), SyncOptions{
+		Pull:     true,
+		IssueIDs: []string{"EXT-1"},
+	})
+	if err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if fx.local.Status != types.StatusInProgress {
+		t.Errorf("status = %q, want in_progress", fx.local.Status)
+	}
+	if result.PullStats.Updated != 1 || result.PullStats.Conflicts != 1 || result.Stats.Conflicts != 1 {
+		t.Errorf("Updated/Conflicts = %d/%d (total %d), want 1/1/1",
+			result.PullStats.Updated, result.PullStats.Conflicts, result.Stats.Conflicts)
+	}
+	msgs := conflictMessages(fx.messages)
+	if len(msgs) != 1 || !strings.Contains(msgs[0], "external is newer, importing") {
+		t.Errorf("conflict messages = %q, want one naming the imported external version", msgs)
+	}
 }

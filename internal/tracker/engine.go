@@ -467,27 +467,36 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 		}
 
 		if existing != nil {
-			// Conflict-aware pull: skip updating issues that were locally
-			// modified since last sync. Bidirectional syncs resolve real
-			// conflicts in Phase 1 (resolveConflicts seeds allowOverwriteIDs
-			// for the external-wins outcomes); a pull-only sync resolves an
-			// explicit external/local strategy here, since no other phase
-			// will.
+			// Conflict-aware pull: a local issue edited since last_sync is
+			// held back so the pull cannot silently clobber the local edit.
+			// When the external version changed too, that is a conflict:
+			// bidirectional syncs resolved it in Phase 1 (resolveConflicts
+			// seeds allowOverwriteIDs for the external-wins outcomes), and a
+			// pull-only sync resolves it here with the same strategy rules
+			// (externalWinsConflict). Anything else keeps the local version.
 			if lastSync != nil && existing.UpdatedAt.After(*lastSync) && !allowOverwriteIDs[existing.ID] && !prelinkedHydrateIDs[existing.ID] {
-				pullOnlyConflict := !opts.Push && extIssue.UpdatedAt.After(*lastSync)
-				switch {
-				case pullOnlyConflict && opts.ConflictResolution == ConflictExternal:
-					// The strategy names the external version the winner:
-					// apply it like an allowOverwriteIDs hit from Phase 1.
+				if !opts.Push && extIssue.UpdatedAt.After(*lastSync) {
 					stats.Conflicts++
-					e.msg("Conflict on %s: keeping external version", existing.ID)
-				case pullOnlyConflict && opts.ConflictResolution == ConflictLocal:
-					// The strategy names the local version the winner.
-					stats.Conflicts++
-					e.msg("Conflict on %s: keeping local version", existing.ID)
-					stats.Skipped++
-					continue
-				default:
+					if externalWinsConflict(opts.ConflictResolution, existing.UpdatedAt, extIssue.UpdatedAt) {
+						if opts.ConflictResolution == ConflictExternal {
+							e.msg("Conflict on %s: keeping external version", existing.ID)
+						} else {
+							e.msg("Conflict on %s: external is newer, importing", existing.ID)
+						}
+						// Fall through and apply the external version, like
+						// an allowOverwriteIDs hit from Phase 1.
+					} else {
+						if opts.ConflictResolution == ConflictLocal {
+							e.msg("Conflict on %s: keeping local version", existing.ID)
+						} else {
+							// A pull-only run never pushes, so this says
+							// "keeping local", not resolveConflicts' "pushing".
+							e.msg("Conflict on %s: local is newer, keeping local version", existing.ID)
+						}
+						stats.Skipped++
+						continue
+					}
+				} else {
 					stats.Skipped++
 					continue
 				}
@@ -1434,6 +1443,21 @@ func (e *Engine) renderBatchDryRun(issues []*types.Issue, result *BatchPushResul
 	}
 }
 
+// externalWinsConflict reports whether strategy resolves a conflict (both
+// sides changed since the last sync) in favor of the external version.
+// ConflictTimestamp and an unset strategy keep the newer version, with a tie
+// going to external.
+func externalWinsConflict(strategy ConflictResolution, localUpdated, externalUpdated time.Time) bool {
+	switch strategy {
+	case ConflictLocal:
+		return false
+	case ConflictExternal:
+		return true
+	default: // ConflictTimestamp or unset: newer wins, a tie goes to external
+		return !localUpdated.After(externalUpdated)
+	}
+}
+
 // resolveConflicts applies the configured conflict resolution strategy.
 func (e *Engine) resolveConflicts(opts SyncOptions, conflicts []Conflict, skipIDs, forceIDs, allowPullOverwriteIDs map[string]bool) {
 	for _, c := range conflicts {
@@ -1448,13 +1472,13 @@ func (e *Engine) resolveConflicts(opts SyncOptions, conflicts []Conflict, skipID
 			e.msg("Conflict on %s: keeping external version", c.IssueID)
 
 		default: // ConflictTimestamp or unset
-			if c.LocalUpdated.After(c.ExternalUpdated) {
-				forceIDs[c.IssueID] = true
-				e.msg("Conflict on %s: local is newer, pushing", c.IssueID)
-			} else {
+			if externalWinsConflict(opts.ConflictResolution, c.LocalUpdated, c.ExternalUpdated) {
 				skipIDs[c.IssueID] = true
 				allowPullOverwriteIDs[c.IssueID] = true
 				e.msg("Conflict on %s: external is newer, importing", c.IssueID)
+			} else {
+				forceIDs[c.IssueID] = true
+				e.msg("Conflict on %s: local is newer, pushing", c.IssueID)
 			}
 		}
 	}

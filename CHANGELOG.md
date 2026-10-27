@@ -3757,6 +3757,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   just `bd show`'s DESCRIPTION field. An explicit `GLAMOUR_STYLE` override
   still takes priority over the detected background.
 
+- Pull-only tracker syncs (`bd <tracker> sync --pull`, `bd <tracker> pull`)
+  now resolve issues changed on both sides since the last sync with the
+  configured conflict strategy (`--prefer-<tracker>`, `--prefer-local`, or
+  the newer-wins default) instead of silently keeping the local version,
+  and report each resolution (`Conflict on <id>: …`) and count it in the
+  conflicts stat. A local edit whose remote version did not change since
+  the last sync is still kept
+  ([#3702](https://github.com/gastownhall/beads/issues/3702)).
+
 ### Added
 
 - **`POST /v0/beads/issues:batchApply` accepts up to 1000 items, up from 100.**
