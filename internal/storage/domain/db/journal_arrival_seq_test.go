@@ -211,6 +211,12 @@ func (s *testSuite) TestArrivalSeq_ConcurrentWritersAreUnique() {
 // pruned, so a counter wound back collides with a stamp rather than with a
 // record. The heal must raise the counter past MAX(arrival_seq), and the
 // create must land at the next value.
+//
+// The wind-back is three, not one: wound back to high-1 the first draw is
+// high, the counter's own value already sits there, and a heal that consulted
+// only the (empty) journal would land on high+1 too. Wound back three, a
+// journal-only heal leaves the counter in place and the retry collides with
+// the next surviving stamp, so only a heal that reads MAX(arrival_seq) passes.
 func (s *testSuite) TestArrivalSeq_HealRaisesTheCounterPastTheStamps() {
 	s.enableJournalForTest()
 	ctx := s.Ctx()
@@ -220,8 +226,8 @@ func (s *testSuite) TestArrivalSeq_HealRaisesTheCounterPastTheStamps() {
 	var high int64
 	s.Require().NoError(s.Runner().QueryRowContext(ctx, "SELECT MAX(arrival_seq) FROM wisps").Scan(&high))
 	s.clearJournal()
-	// Wind the counter back so its next value is the highest surviving stamp.
-	_, err := s.Runner().ExecContext(ctx, "UPDATE bd_events_seq SET next_seq = ? WHERE id = 0", high-1)
+	// Wind the counter back so its next two draws are both surviving stamps.
+	_, err := s.Runner().ExecContext(ctx, "UPDATE bd_events_seq SET next_seq = ? WHERE id = 0", high-3)
 	s.Require().NoError(err)
 
 	s.Require().NoError(s.issueRepo().Insert(ctx, newTestWisp("bd-as-heal-d"), "actor", domain.InsertIssueOpts{UseWispsTable: true}),

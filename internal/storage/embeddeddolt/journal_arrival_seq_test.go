@@ -155,10 +155,17 @@ func TestUniqueIndexAllowsManyUnstampedWisps(t *testing.T) {
 }
 
 // TestArrivalSeq_EmbeddedHealRaisesTheCounterPastTheStamps winds the counter
-// back onto a surviving stamp with the journal empty — the state a prune plus
-// a restored counter leaves. The stamp UPDATE collides on the unique index,
-// which this engine reports with its own error kind; the create must heal past
-// MAX(arrival_seq) and land just above it.
+// back below the surviving stamps with the journal empty — the state a prune
+// plus a restored counter leaves. The stamp UPDATE collides on the unique
+// index, which this engine reports with its own error kind; the create must
+// heal past MAX(arrival_seq) and land just above it.
+//
+// The wind-back is deliberately deeper than one: wound back to high-1, the
+// first draw is high, the counter's own value already sits there, and a heal
+// that consulted only the (empty) journal would land on high+1 as well. Wound
+// back three, a journal-only heal leaves the counter where it is and the retry
+// collides with the next surviving stamp, so only a heal that reads
+// MAX(arrival_seq) passes.
 func TestArrivalSeq_EmbeddedHealRaisesTheCounterPastTheStamps(t *testing.T) {
 	env := newTestEnv(t, "eas")
 	env.store.SetEventsJournalEnabled(true)
@@ -171,7 +178,7 @@ func TestArrivalSeq_EmbeddedHealRaisesTheCounterPastTheStamps(t *testing.T) {
 	var high int64
 	env.queryScalar(t, ctx, "SELECT MAX(arrival_seq) FROM wisps", nil, &high)
 	env.exec(t, ctx, "DELETE FROM bd_events_journal")
-	env.exec(t, ctx, "UPDATE bd_events_seq SET next_seq = ? WHERE id = 0", high-1)
+	env.exec(t, ctx, "UPDATE bd_events_seq SET next_seq = ? WHERE id = 0", high-3)
 
 	if err := env.store.CreateIssue(ctx, arrivalWisp("eas-heal-d"), "actor"); err != nil {
 		t.Fatalf("a create whose first seq collides with a surviving stamp must heal, not wedge: %v", err)
