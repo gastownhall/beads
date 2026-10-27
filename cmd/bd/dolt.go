@@ -884,8 +884,10 @@ var doltStartCmd = &cobra.Command{
 	Short:         "Start the Dolt SQL server for this project",
 	Long: `Start a dolt sql-server for the current beads project.
 
-The server runs in the background on a per-project port derived from the
-project path. PID and logs are stored in .beads/.
+The server runs in the background; PID and logs are stored in .beads/. With
+no port configured, it listens on a free port the OS assigns and records it in
+.beads/dolt-server.port. 'bd dolt stop' removes that file, so the next start
+can get a different port (shared-server mode defaults to port 3308 instead).
 
 The server auto-starts transparently when needed, so manual start is rarely
 required. Use this command for explicit control or diagnostics.

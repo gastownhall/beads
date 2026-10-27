@@ -39,3 +39,21 @@ func TestDoltHelpDescribesEmbeddedDefault(t *testing.T) {
 		}
 	}
 }
+
+// GH#5969: hash-derived per-project ports were removed in v0.60.0 (GH#2415).
+// The help must describe the OS-assigned port and that stop discards it.
+func TestDoltStartHelpDescribesPortAllocation(t *testing.T) {
+	help := strings.Join(strings.Fields(doltStartCmd.Long), " ")
+	if strings.Contains(help, "derived from the project path") {
+		t.Error("dolt start help still describes a port derived from the project path")
+	}
+	for _, needle := range []string{
+		"free port the OS assigns",
+		".beads/dolt-server.port",
+		"'bd dolt stop' removes",
+	} {
+		if !strings.Contains(help, needle) {
+			t.Errorf("dolt start help missing %q:\n%s", needle, doltStartCmd.Long)
+		}
+	}
+}
