@@ -554,6 +554,7 @@ go_test(
         "ado_test.go",
         "agent_artifacts_embedded_test.go",
         "agent_hook_test.go",
+        "arrival_seq_json_e2e_test.go",
         "assign_fence_embedded_test.go",
         "assign_fence_proxied_test.go",
         "auto_import_upgrade_embedded_test.go",

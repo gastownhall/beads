@@ -73,6 +73,7 @@
 100 20 TestEmbeddedInitRoleRoutingRetainedFork
 100 20 TestEmbeddedMigrateSchema_IdentityMismatchRefusesBeforeApplying
 
+100 21 TestEmbeddedArrivalSeqOnEveryJSONRead
 100 21 TestEmbeddedMaxRowsReady
 100 21 TestEmbeddedMigratePersonal_movesIssues
 
