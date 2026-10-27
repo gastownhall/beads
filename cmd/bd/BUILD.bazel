@@ -993,6 +993,7 @@ go_test(
         "list_page_edges_embedded_test.go",
         "list_page_edges_store_test.go",
         "list_page_edges_test.go",
+        "list_parent_descendants_test.go",
         "list_proxied_integration_test.go",
         "list_proxied_watch_max_rows_test.go",
         "list_ready_brief_test.go",

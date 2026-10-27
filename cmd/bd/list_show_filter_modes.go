@@ -100,32 +100,28 @@ func getHierarchicalChildren(ctx context.Context, store storage.DoltStorage, dbP
 	return treeIssues, nil
 }
 
-// findAllDescendants recursively finds all descendants using parent filtering.
-// baseFilter carries CLI filters (--type, --status, etc.) so the tree respects them.
+// findAllDescendants finds all descendants using parent filtering, adding each
+// to result the first time it is seen. baseFilter carries CLI filters (--type,
+// --status, etc.) so the tree respects them. The walk is
+// storage.SearchDescendants: one read transaction on a store that offers it
+// (the embedded and Dolt server stores), so a `bd list --watch --parent`
+// refresh opens the embedded engine once rather than once per tree node and
+// leaves room for other bd commands (GH#3415); node by node otherwise.
 func findAllDescendants(ctx context.Context, store storage.DoltStorage, dbPath string, parentID string, baseFilter types.IssueFilter, result map[string]*types.Issue) error {
-	var children []*types.Issue
+	var found []*types.Issue
 	err := withStorage(ctx, store, dbPath, func(s storage.DoltStorage) error {
-		filter := baseFilter
-		filter.ParentID = &parentID
-		filter.Limit = 0 // unlimited per level to avoid truncating the tree walk
 		var err error
-		children, err = s.SearchIssues(ctx, "", filter)
+		found, err = storage.SearchDescendants(ctx, s, parentID, baseFilter)
 		return err
 	})
 	if err != nil {
 		return err
 	}
-
-	for _, child := range children {
-		if _, exists := result[child.ID]; !exists {
-			result[child.ID] = child
-			err = findAllDescendants(ctx, store, dbPath, child.ID, baseFilter, result)
-			if err != nil {
-				return err
-			}
+	for _, issue := range found {
+		if _, ok := result[issue.ID]; !ok {
+			result[issue.ID] = issue
 		}
 	}
-
 	return nil
 }
 
