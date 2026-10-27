@@ -397,6 +397,21 @@ func TestMaybeAutoPush_NoGitOpsDoesNotPush(t *testing.T) {
 			t.Errorf("Push calls after an immediate second tick = %d, want 1 (debounce interval still open)", fake.pushCalls)
 		}
 	})
+
+	t.Run("local_only_wins", func(t *testing.T) {
+		// dolt.local-only is the switch that governs Dolt networking: even an
+		// explicit auto-push opt-in must not push while it is set.
+		_, fake := setupNoGitOpsAutoPushWorkspace(t, "no-git-ops: true\ndolt:\n  auto-push: true\n  local-only: true\n")
+		if !config.GetBool("dolt.local-only") {
+			t.Fatal("precondition: dolt.local-only must be read from the workspace config.yaml")
+		}
+
+		maybeAutoPush(context.Background())
+
+		if fake.pushCalls != 0 {
+			t.Errorf("Push calls = %d, want 0 (dolt.local-only suppresses auto-push even when opted in)", fake.pushCalls)
+		}
+	})
 }
 
 // TestPushedCommitForState pins the push-state hash recorded after a successful
