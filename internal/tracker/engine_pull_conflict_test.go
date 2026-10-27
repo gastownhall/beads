@@ -149,3 +149,31 @@ func TestEnginePullOnlySelectiveConflict(t *testing.T) {
 		t.Errorf("status=%q PullStats=%+v, want in_progress with Updated=1 Conflicts=1", f.local.Status, result.PullStats)
 	}
 }
+
+// TestEnginePullOnlyKeepsLocalOnlyEdit: an external issue not changed since
+// last_sync is no conflict, even under ConflictExternal. Jira fetches with
+// minute granularity, so a pull can return issues updated before last_sync.
+func TestEnginePullOnlyKeepsLocalOnlyEdit(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		remote time.Time
+	}{
+		{"remote before last_sync", pullConflictLastSync.Add(-30 * time.Second)},
+		{"remote at last_sync", pullConflictLastSync},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newPullConflictFixture(test.remote)
+
+			result, err := f.engine.Sync(context.Background(), SyncOptions{Pull: true, ConflictResolution: ConflictExternal})
+			if err != nil {
+				t.Fatalf("Sync: %v", err)
+			}
+			if f.local.Status != types.StatusOpen || result.PullStats.Updated != 0 || result.PullStats.Conflicts != 0 {
+				t.Errorf("status=%q PullStats=%+v, want status open, Updated=0, Conflicts=0", f.local.Status, result.PullStats)
+			}
+			if msgs := f.conflictMessages(); len(msgs) != 0 {
+				t.Errorf("conflict messages = %q, want none", msgs)
+			}
+		})
+	}
+}
