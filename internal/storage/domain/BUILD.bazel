@@ -43,11 +43,13 @@ go_test(
         "context_test.go",
         "infra_types_test.go",
         "issue_delete_missing_table_test.go",
+        "issue_prefix_missing_test.go",
         "remote_test.go",
     ],
     embed = [":domain"],
     deps = [
         "//internal/configfile",
+        "//internal/storage",
         "//internal/types",
         "@com_github_go_sql_driver_mysql//:mysql",
     ],

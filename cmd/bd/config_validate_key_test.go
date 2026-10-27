@@ -85,8 +85,10 @@ func TestRejectProtectedConfigKey(t *testing.T) {
 			t.Errorf("rejectProtectedConfigKey(%q) = (_, false), want rejected", key)
 			continue
 		}
-		// Error message must surface the three lifecycle alternatives.
-		wantSubstrings := []string{"bd init --prefix", "bd bootstrap", "bd rename-prefix"}
+		// Error message must surface the lifecycle alternatives, including
+		// the repair for an existing database missing its prefix.
+		wantSubstrings := []string{"bd init --prefix", "bd bootstrap", "bd rename-prefix",
+			"Existing DB missing its prefix: bd bootstrap (seeds from config.yaml issue-prefix)"}
 		for _, want := range wantSubstrings {
 			if !strings.Contains(msg, want) {
 				t.Errorf("rejectProtectedConfigKey(%q) message missing %q; got:\n%s", key, want, msg)

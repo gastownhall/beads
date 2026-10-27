@@ -1651,7 +1651,7 @@ func (u *issueUseCaseImpl) resolveTopLevelPrefix(ctx context.Context, issue *typ
 	}
 	configPrefix = strings.TrimSuffix(configPrefix, "-")
 	if configPrefix == "" {
-		return "", fmt.Errorf("issue_prefix config is missing")
+		return "", storage.NewIssuePrefixMissingError()
 	}
 
 	switch {

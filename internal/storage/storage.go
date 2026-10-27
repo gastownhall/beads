@@ -40,6 +40,13 @@ var (
 	ErrNotesOverwrite    = issueops.ErrNotesOverwrite
 )
 
+// NewIssuePrefixMissingError is the error every create path returns when the
+// database's config table has no issue_prefix. It wraps ErrNotInitialized and
+// names the repair for an existing database beside the setup for a new one.
+func NewIssuePrefixMissingError() error {
+	return fmt.Errorf("%w: issue_prefix config is missing (run 'bd bootstrap' to finish setting up an existing database: it seeds issue_prefix from config.yaml 'issue-prefix'; or 'bd init --prefix <prefix>' for a new project; this check reads the database's config table, so config.yaml alone does not satisfy it)", ErrNotInitialized)
+}
+
 // CloseOpenChildrenError reports the issue and open-child count that refused a
 // guarded close. See issueops.CloseOpenChildrenError.
 type CloseOpenChildrenError = issueops.CloseOpenChildrenError

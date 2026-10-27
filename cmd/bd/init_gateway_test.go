@@ -466,7 +466,7 @@ func TestWarnHalfIdentifiedSubstrate(t *testing.T) {
 		{
 			name:  "project identity without a prefix",
 			found: issueops.VerifyIdentityResult{ProjectID: "proj-xyz"},
-			want:  []string{"no issue prefix", "uninitialized", "bd config set issue_prefix"},
+			want:  []string{"no issue prefix", "uninitialized", "bd bootstrap"},
 		},
 		{
 			name:  "fully identified says nothing",

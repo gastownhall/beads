@@ -300,7 +300,7 @@ func warnHalfIdentifiedSubstrate(found issueops.VerifyIdentityResult) {
 		fmt.Fprintf(os.Stderr, "%s the database has a project identity but no issue prefix.\n"+
 			"  bd will not complete a half-identified database, and a substrate with no prefix cannot name an\n"+
 			"  issue: later commands will report this workspace as uninitialized.\n"+
-			"  Set it deliberately with `bd config set issue_prefix <prefix>`.\n",
+			"  Set it with `bd bootstrap`, which seeds issue_prefix from config.yaml issue-prefix.\n",
 			ui.RenderWarn("WARNING:"))
 	}
 }

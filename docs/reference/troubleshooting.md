@@ -216,6 +216,27 @@ the import finishes.
 **Prevention:** use `bd delete --cascade` to also delete children, and review
 children first with `bd children <parent-id>`.
 
+### `database not initialized: issue_prefix config is missing`
+
+`bd create` reads the issue prefix from the database's own config table. A
+database that exists but never had its prefix recorded (a server database
+created by hand, or an init that stopped partway) fails this check even when
+`.beads/config.yaml` sets `issue-prefix`: config.yaml alone does not satisfy
+it, and `bd config get issue_prefix` notes that its value is not the database
+prefix.
+
+Run `bd bootstrap` to finish setting up the existing database. It seeds
+`issue_prefix` from config.yaml `issue-prefix` (else the database name, else
+the directory name), leaves a prefix that is already set unchanged, and never
+rewrites issue IDs:
+
+```bash
+bd bootstrap --dry-run   # plan: seed-prefix, naming the prefix and its source
+bd bootstrap --yes
+```
+
+For a new project, run `bd init --prefix <prefix>` instead.
+
 ### Old data returns after reset
 
 `bd admin reset --force` only removes **local** beads data. Old issues can
