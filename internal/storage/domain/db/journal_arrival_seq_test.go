@@ -243,6 +243,13 @@ func (s *testSuite) TestArrivalSeq_HealRaisesTheCounterPastTheStamps() {
 func (s *testSuite) TestArrivalSeq_JournalCollisionMovesTheStamp() {
 	s.enableJournalForTest()
 	ctx := s.Ctx()
+	// wisps and bd_events_seq survive DOLT_RESET, so stamps an earlier test
+	// left behind are still here. Lift the counter past every one of them
+	// first, so the records below sit above all surviving stamps by
+	// construction rather than by test order.
+	_, err := s.Runner().ExecContext(ctx, `UPDATE bd_events_seq
+		SET next_seq = GREATEST(next_seq, COALESCE((SELECT MAX(arrival_seq) FROM wisps), 0)) WHERE id = 0`)
+	s.Require().NoError(err)
 	// Durable creates: three records, no stamps.
 	for _, id := range []string{"bd-as-move-a", "bd-as-move-b", "bd-as-move-c"} {
 		s.Require().NoError(s.issueRepo().Insert(ctx, newTestIssue(id, "t"), "actor", domain.InsertIssueOpts{}))
@@ -253,7 +260,7 @@ func (s *testSuite) TestArrivalSeq_JournalCollisionMovesTheStamp() {
 	// Reset the counter to a value no stamp holds but a record does.
 	reset := journalHigh.Int64 - 1
 	s.Require().Greater(reset, stampHigh.Int64, "setup: the reset must clear every stamp so the stamp itself lands")
-	_, err := s.Runner().ExecContext(ctx, "UPDATE bd_events_seq SET next_seq = ? WHERE id = 0", reset)
+	_, err = s.Runner().ExecContext(ctx, "UPDATE bd_events_seq SET next_seq = ? WHERE id = 0", reset)
 	s.Require().NoError(err)
 
 	id := "bd-as-move-wisp"
@@ -274,9 +281,19 @@ func (s *testSuite) TestArrivalSeq_HealFallsBackWithoutTheWispColumn() {
 
 	_, err := s.Runner().ExecContext(context.Background(), "ALTER TABLE wisps DROP COLUMN arrival_seq")
 	s.Require().NoError(err)
-	s.T().Cleanup(func() {
-		_, _ = s.db.ExecContext(context.Background(), "ALTER TABLE wisps ADD COLUMN arrival_seq BIGINT")
-		_, _ = s.db.ExecContext(context.Background(), "CREATE UNIQUE INDEX uk_wisps_arrival_seq ON wisps (arrival_seq)")
+	// wisps is dolt_ignored, so SetupTest's DOLT_RESET never restores the
+	// column: a failed restore here would surface as unrelated failures in
+	// every later test, so it is reported against this one.
+	t := s.T()
+	t.Cleanup(func() {
+		ctx := context.Background()
+		if _, err := s.db.ExecContext(ctx, "ALTER TABLE wisps ADD COLUMN arrival_seq BIGINT"); err != nil {
+			t.Errorf("restoring wisps.arrival_seq for the rest of the suite: %v", err)
+			return
+		}
+		if _, err := s.db.ExecContext(ctx, "CREATE UNIQUE INDEX uk_wisps_arrival_seq ON wisps (arrival_seq)"); err != nil {
+			t.Errorf("restoring uk_wisps_arrival_seq for the rest of the suite: %v", err)
+		}
 	})
 	var journalHigh int64
 	s.Require().NoError(s.Runner().QueryRowContext(ctx, "SELECT MAX(seq) FROM bd_events_journal").Scan(&journalHigh))
