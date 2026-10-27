@@ -202,6 +202,7 @@ func (e *Engine) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 		result.Stats.Updated += pullStats.Updated
 		result.Stats.Skipped += pullStats.Skipped
 		result.Stats.Errors += pullStats.Errors
+		result.Stats.Conflicts += pullStats.Conflicts
 	}
 
 	// Phase 3: Push
@@ -466,14 +467,24 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 		}
 
 		if existing != nil {
-			// Conflict-aware pull: skip updating issues that were locally
-			// modified since last sync. Conflict detection (Phase 2) will
-			// handle these per the configured resolution strategy.
-			// Without this guard, pull silently overwrites local changes
-			// before conflict detection can compare timestamps.
+			// Conflict-aware pull: never silently overwrite an issue that was
+			// locally modified since last sync. A bidirectional sync decided
+			// its conflicts in Phase 1 and listed the ones external wins in
+			// allowOverwriteIDs. A pull-only sync decides here, using the
+			// remote UpdatedAt it just fetched: an issue changed on both
+			// sides is resolved per the configured strategy, and one with
+			// only a local edit keeps the local version.
 			if lastSync != nil && existing.UpdatedAt.After(*lastSync) && !allowOverwriteIDs[existing.ID] && !prelinkedHydrateIDs[existing.ID] {
-				stats.Skipped++
-				continue
+				if opts.Push || !extIssue.UpdatedAt.After(*lastSync) {
+					stats.Skipped++
+					continue
+				}
+				stats.Conflicts++
+				if opts.ConflictResolution != ConflictExternal {
+					stats.Skipped++
+					continue
+				}
+				e.msg("Conflict on %s: keeping external version", existing.ID)
 			}
 		}
 
