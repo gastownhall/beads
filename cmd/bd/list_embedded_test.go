@@ -1115,4 +1115,8 @@ func TestEmbeddedListConcurrent(t *testing.T) {
 	t.Run("watch_leaves_list_and_show_free", func(t *testing.T) {
 		testListWatchLeavesListAndShowFree(t, bd)
 	})
+
+	t.Run("watch_parent_tree_leaves_commands_free", func(t *testing.T) {
+		testListWatchParentTreeLeavesCommandsFree(t, bd)
+	})
 }

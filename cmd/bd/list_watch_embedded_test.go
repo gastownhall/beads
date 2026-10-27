@@ -5,7 +5,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -68,6 +71,81 @@ func testListWatchLeavesListAndShowFree(t *testing.T, bd string) {
 
 	if shown := parseIssueJSON(t, []byte(bdWithin(t, bd, dir, 30*time.Second, "show", id, "--json"))); shown.ID != id {
 		t.Fatalf("bd show %s --json alongside the watcher returned %s", id, shown.ID)
+	}
+	w.interrupt(t)
+}
+
+// waitForOutput blocks until w holds text, giving up when the process exits
+// or timeout elapses.
+func waitForOutput(w *watchBannerWriter, text string, timeout time.Duration, exited <-chan struct{}) bool {
+	deadline := time.After(timeout)
+	for !strings.Contains(w.String(), text) {
+		select {
+		case <-w.renders:
+		case <-exited:
+			return strings.Contains(w.String(), text)
+		case <-deadline:
+			return false
+		}
+	}
+	return true
+}
+
+// testListWatchParentTreeLeavesCommandsFree: with `bd list --watch --parent`
+// up on a 44-descendant, three-level epic, `bd show`, `bd list` and
+// `bd update` run one after another each finish within 30s, and the watcher
+// picks up the update within 10s. Every refresh of the tree is one
+// SearchDescendants read, and the watcher waits a full interval after it.
+func testListWatchParentTreeLeavesCommandsFree(t *testing.T, bd string) {
+	dir, _, _ := bdInit(t, bd, "--prefix", "lp")
+
+	type node struct {
+		Key       string `json:"key"`
+		Title     string `json:"title"`
+		Type      string `json:"type"`
+		ParentKey string `json:"parent_key,omitempty"`
+	}
+	nodes := []node{{Key: "epic", Title: "Watched epic", Type: "epic"}}
+	for m := range 2 {
+		mid := fmt.Sprintf("m%d", m)
+		nodes = append(nodes, node{Key: mid, Title: "Watched " + mid, Type: "task", ParentKey: "epic"})
+		for s := range 3 {
+			sub := fmt.Sprintf("%s-s%d", mid, s)
+			nodes = append(nodes, node{Key: sub, Title: "Watched " + sub, Type: "task", ParentKey: mid})
+			for l := range 6 {
+				leaf := fmt.Sprintf("%s-l%d", sub, l)
+				nodes = append(nodes, node{Key: leaf, Title: "Watched " + leaf, Type: "task", ParentKey: sub})
+			}
+		}
+	}
+	plan, err := json.Marshal(map[string][]node{"nodes": nodes})
+	if err != nil {
+		t.Fatal(err)
+	}
+	planFile := filepath.Join(t.TempDir(), "tree.json")
+	if err := os.WriteFile(planFile, plan, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ids := bdCreateGraph(t, bd, dir, planFile).IDs
+	if len(ids) != len(nodes) {
+		t.Fatalf("graph created %d issues, want %d (1 epic + 44 descendants)", len(ids), len(nodes))
+	}
+	epic, leaf := ids["epic"], ids["m1-s2-l5"]
+
+	w := startShowWatch(t, bd, dir, bdEnv(dir), "list", "--watch", "--parent", epic)
+	if !waitForOutput(w.stdout, leaf, 10*time.Second, w.exited) {
+		t.Fatalf("watched tree never showed leaf %s\nstdout:\n%s", leaf, w.stdout.String())
+	}
+
+	if shown := parseIssueJSON(t, []byte(bdWithin(t, bd, dir, 30*time.Second, "show", leaf, "--json"))); shown.ID != leaf {
+		t.Fatalf("bd show %s --json alongside the watcher returned %s", leaf, shown.ID)
+	}
+	bdWithin(t, bd, dir, 30*time.Second, "list", "--json")
+	const renamed = "Renamed under the watcher"
+	bdWithin(t, bd, dir, 30*time.Second, "update", leaf, "--title", renamed)
+
+	if !waitForOutput(w.stdout, renamed, 10*time.Second, w.exited) {
+		t.Fatalf("watcher did not show %q within 10s of the update\nstdout:\n%s\nstderr:\n%s", renamed, w.stdout.String(), w.stderr.String())
 	}
 	w.interrupt(t)
 }
