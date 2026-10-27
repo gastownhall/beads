@@ -168,7 +168,7 @@ func acquireEmbeddedLock(beadsDir string, serverMode bool) (util.Unlocker, error
 // exception is BEADS_DOLT_SHARED_SERVER, which is machine-global in every
 // resolver in the tree (see sharedServerModeForWorkspace).
 func newDoltStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
-	return openDoltStoreFromConfig(ctx, beadsDir, false)
+	return openDoltStoreFromConfig(ctx, beadsDir, openNormal)
 }
 
 // newExistingDoltStoreFromConfig is newDoltStoreFromConfig for a write routed
@@ -182,12 +182,40 @@ func newDoltStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltS
 // server-mode open already refuses a missing database: it does not set
 // CreateIfMissing.
 func newExistingDoltStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
-	return openDoltStoreFromConfig(ctx, beadsDir, true)
+	return openDoltStoreFromConfig(ctx, beadsDir, openRequireExisting)
 }
 
-// openDoltStoreFromConfig is the body of newDoltStoreFromConfig and
-// newExistingDoltStoreFromConfig; requireExisting selects the latter.
-func openDoltStoreFromConfig(ctx context.Context, beadsDir string, requireExisting bool) (s storage.DoltStorage, err error) {
+// newProvisioningStoreFromConfig opens beadsDir's store for bd bootstrap's
+// local actions (init/restore/jsonl-import) on a workspace with no database
+// yet: the database is created when missing — on the server for a server-mode
+// workspace, embedded otherwise — through the same effectiveServerMode
+// selection every reader uses, so what bootstrap writes is what bd commands
+// then read (GH#3494: the hand-built embedded open used to leave a server
+// workspace with a shadow database no command ever read).
+func newProvisioningStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
+	return openDoltStoreFromConfig(ctx, beadsDir, openProvision)
+}
+
+// openStoreIntent names what an open may do when the workspace's database
+// does not exist yet.
+type openStoreIntent int
+
+const (
+	// openNormal opens the workspace's own store: an embedded open creates
+	// the database when missing, a server open refuses a missing database.
+	openNormal openStoreIntent = iota
+	// openRequireExisting refuses a missing database (routed writes — see
+	// newExistingDoltStoreFromConfig).
+	openRequireExisting
+	// openProvision creates the database when missing (bd bootstrap's local
+	// actions — see newProvisioningStoreFromConfig).
+	openProvision
+)
+
+// openDoltStoreFromConfig is the body of newDoltStoreFromConfig,
+// newExistingDoltStoreFromConfig and newProvisioningStoreFromConfig; the
+// intent selects between them.
+func openDoltStoreFromConfig(ctx context.Context, beadsDir string, intent openStoreIntent) (s storage.DoltStorage, err error) {
 	defer func() { s, err = activateVersionedHistoryStore(ctx, s, err) }()
 	defer func() { s, err = activateEventsJournalStore(beadsDir, s, err) }()
 	// Before Load can migrate a legacy config.json; validateConfiguredBackend
@@ -201,7 +229,7 @@ func openDoltStoreFromConfig(ctx context.Context, beadsDir string, requireExisti
 	// refused open writes nothing. Without metadata Load writes nothing
 	// either, so that case, and unloadable metadata, are left to the check
 	// after Load.
-	if requireExisting && discovered != nil && selectsEmbeddedStore(beadsDir, discovered) && !embeddeddolt.HasRepository(beadsDir) {
+	if intent == openRequireExisting && discovered != nil && selectsEmbeddedStore(beadsDir, discovered) && !embeddeddolt.HasRepository(beadsDir) {
 		return nil, errNoRoutedEmbeddedDatabase(beadsDir)
 	}
 	cfg, err := configfile.Load(beadsDir)
@@ -224,11 +252,18 @@ func openDoltStoreFromConfig(ctx context.Context, beadsDir string, requireExisti
 		return nil, errProxiedStoreUnrouted()
 	}
 	if effectiveServerMode(beadsDir, cfg) {
+		if intent == openProvision {
+			// CreateIfMissing is the provisioning intent's one addition; every
+			// other field comes from the same resolved config the read path
+			// uses, and auto-start follows the workspace's own policy
+			// (resolveAutoStart: never when the server is externally managed).
+			return dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{CreateIfMissing: true})
+		}
 		return dolt.NewFromConfig(ctx, beadsDir)
 	}
 	// Refuse before the sanitize migration below, which renames the legacy
 	// directory and rewrites metadata.json: a refused open writes nothing.
-	if requireExisting && !embeddeddolt.HasRepository(beadsDir) {
+	if intent == openRequireExisting && !embeddeddolt.HasRepository(beadsDir) {
 		return nil, errNoRoutedEmbeddedDatabase(beadsDir)
 	}
 	database := configfile.DefaultDoltDatabase

@@ -235,7 +235,7 @@ func TestRemedyRefusalsNameValuesEscaped(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"database":"dolt","backend":"dolt"}`), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			_, err := openDoltStoreFromConfig(ctx, beadsDir, true)
+			_, err := openDoltStoreFromConfig(ctx, beadsDir, openRequireExisting)
 			return err
 		}, true},
 	} {
@@ -351,7 +351,7 @@ func TestRemedyPrintersNameValuesEscaped(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"database":"dolt","backend":"dolt"}`), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			_, openErr := openDoltStoreFromConfig(context.Background(), beadsDir, true)
+			_, openErr := openDoltStoreFromConfig(context.Background(), beadsDir, openRequireExisting)
 			return captureStderr(t, func() {
 				_ = handleCreateTargetStoreError(openErr, filepath.Dir(beadsDir), "failed to open target store: %v")
 			})

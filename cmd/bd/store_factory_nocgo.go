@@ -118,6 +118,40 @@ func newExistingDoltStoreFromConfig(ctx context.Context, beadsDir string) (stora
 	return newDoltStoreFromConfig(ctx, beadsDir)
 }
 
+// newProvisioningStoreFromConfig is the non-CGO twin of the CGO build's
+// bootstrap factory: the same server selection, but a server-mode open
+// creates the configured database when missing (CreateIfMissing). An embedded
+// workspace is refused exactly as every embedded open in this build is.
+func newProvisioningStoreFromConfig(ctx context.Context, beadsDir string) (s storage.DoltStorage, err error) {
+	defer func() { s, err = activateVersionedHistoryStore(ctx, s, err) }()
+	defer func() { s, err = activateEventsJournalStore(beadsDir, s, err) }()
+	discovered, err := checkDiscoveredBackend(beadsDir)
+	if err != nil {
+		return nil, err
+	}
+	if discovered != nil && selectsEmbeddedStore(beadsDir, discovered) {
+		return nil, fmt.Errorf("%s", nocgoEmbeddedErrMsg)
+	}
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil {
+		return nil, fmt.Errorf("load %s: %w", configfile.ConfigPath(beadsDir), err)
+	}
+	if err := validateConfiguredBackend(cfg, beadsDir); err != nil {
+		return nil, err
+	}
+	cfg = normalizeLoadedConfig(cfg)
+	if backend, ok := backends.Lookup(cfg.GetBackend()); ok {
+		return backend.Open(ctx, beadsDir)
+	}
+	if cfg != nil && cfg.IsDoltProxiedServerMode() {
+		return nil, errProxiedStoreUnrouted()
+	}
+	if effectiveServerMode(beadsDir, cfg) {
+		return dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{CreateIfMissing: true})
+	}
+	return nil, fmt.Errorf("%s", nocgoEmbeddedErrMsg)
+}
+
 // newReadOnlyStoreFromConfig creates a read-only SQL-server-backed storage
 // backend. It does not activate the events journal: the store refuses writes,
 // so there is no mutation for a journal row to accompany (exemption is recorded

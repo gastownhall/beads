@@ -1314,15 +1314,14 @@ func executeInitAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.
 	}
 
 	prefix, _ := inferBootstrapPrefix(plan.BeadsDir, cfg)
-	dbName := cfg.GetDoltDatabase()
 
-	s, err := newDoltStore(ctx, &dolt.Config{
-		Path:            doltserver.ResolveDoltDir(plan.BeadsDir),
-		Database:        dbName,
-		CreateIfMissing: true,
-		AutoStart:       true,
-		BeadsDir:        plan.BeadsDir,
-	})
+	// Provision through the workspace's own store selection (server vs
+	// embedded decided by effectiveServerMode, the same gate every reader
+	// uses) so the database bootstrap creates is the one bd commands read.
+	// The hand-built embedded open this replaced wrote a server workspace's
+	// fresh database into .beads/embeddeddolt while readers dialed the
+	// server (GH#3494).
+	s, err := newProvisioningStoreFromConfig(ctx, plan.BeadsDir)
 	if err != nil {
 		return fmt.Errorf("create database: %w", err)
 	}
@@ -1473,15 +1472,8 @@ func bootstrapMissingServerDBRefusal(dbName, location string, probeErr error) er
 
 func executeRestoreAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.Config) error {
 	prefix, _ := inferBootstrapPrefix(plan.BeadsDir, cfg)
-	dbName := cfg.GetDoltDatabase()
 
-	s, err := newDoltStore(ctx, &dolt.Config{
-		Path:            doltserver.ResolveDoltDir(plan.BeadsDir),
-		Database:        dbName,
-		CreateIfMissing: true,
-		AutoStart:       true,
-		BeadsDir:        plan.BeadsDir,
-	})
+	s, err := newProvisioningStoreFromConfig(ctx, plan.BeadsDir)
 	if err != nil {
 		return fmt.Errorf("create database: %w", err)
 	}
@@ -1508,15 +1500,8 @@ func executeRestoreAction(ctx context.Context, plan BootstrapPlan, cfg *configfi
 
 func executeJSONLImportAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.Config) error {
 	prefix, _ := inferBootstrapPrefix(plan.BeadsDir, cfg)
-	dbName := cfg.GetDoltDatabase()
 
-	s, err := newDoltStore(ctx, &dolt.Config{
-		Path:            doltserver.ResolveDoltDir(plan.BeadsDir),
-		Database:        dbName,
-		CreateIfMissing: true,
-		AutoStart:       true,
-		BeadsDir:        plan.BeadsDir,
-	})
+	s, err := newProvisioningStoreFromConfig(ctx, plan.BeadsDir)
 	if err != nil {
 		return fmt.Errorf("create database: %w", err)
 	}
