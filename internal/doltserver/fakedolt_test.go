@@ -29,6 +29,9 @@ const (
 	// fakeDoltLaunchesEnv names a file the fake appends each sql-server
 	// launch's port to.
 	fakeDoltLaunchesEnv = "BEADS_TEST_FAKE_DOLT_LAUNCHES"
+	// fakeDoltVersionEnv is the version `dolt version` reports, 2.6.0 when
+	// unset.
+	fakeDoltVersionEnv = "BEADS_TEST_FAKE_DOLT_VERSION"
 )
 
 var fakeDoltConfigPortRe = regexp.MustCompile(`(?m)^\s+port:\s*(\d+)`)
@@ -45,7 +48,11 @@ func fakeDolt(args []string) int {
 	}
 	switch args[0] {
 	case "version":
-		fmt.Println("dolt version 2.1.8")
+		version := os.Getenv(fakeDoltVersionEnv)
+		if version == "" {
+			version = "2.6.0"
+		}
+		fmt.Println("dolt version " + version)
 		return 0
 	case "config":
 		fmt.Println("fake")

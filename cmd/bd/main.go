@@ -35,6 +35,7 @@ import (
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/migration"
 	"github.com/steveyegge/beads/internal/molecules"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/remotecache"
 	"github.com/steveyegge/beads/internal/routing"
 	"github.com/steveyegge/beads/internal/storage"
@@ -321,7 +322,12 @@ func commandMemoizesReads(cmd *cobra.Command) bool {
 // It mirrors dolt.applyResolvedConfig, which this hand-built doltCfg path
 // bypasses.
 func resolveDoltServerConnection(ctx context.Context, beadsDir string, fileCfg *configfile.Config, doltCfg *dolt.Config) error {
-	doltCfg.ServerHost = fileCfg.GetDoltServerHost()
+	// An IPv6 host may be configured bracketed ("[::1]") as well as bare. The
+	// store and `bd serve` (its socket-fallback probe and its proxy's
+	// ExternalDoltServer) both dial with doltutil.ServerAddr, which accepts
+	// either, but they also key, name and compare the server by this host, so
+	// hand them the bare form.
+	doltCfg.ServerHost = configfile.UnbracketHost(fileCfg.GetDoltServerHost())
 	// Port 0 is fine here — auto-start will resolve it. Use the shared helper
 	// rather than DefaultConfig(...).Port: this hand-built doltCfg is handed
 	// straight to dolt.New, and a port arriving there without its source is
@@ -2904,6 +2910,11 @@ func main() {
 	rootCmd.InitDefaultHelpCmd()
 	registerHelpAllFlag()
 
+	// Cobra prints a command's returned error itself ("Error: ...") unless
+	// the command silences it: that line goes through the same backstop as
+	// bd's own error printers (HandleError), since an error can repeat a value
+	// a cloned repository sets.
+	rootCmd.SetErr(remedy.TextWriter(os.Stderr))
 	executedCmd, err := rootCmd.ExecuteC()
 
 	// Let this command's fire-and-forget hooks finish, for the same
@@ -2924,7 +2935,7 @@ func main() {
 			os.Exit(code)
 		}
 		if executedCmd != nil && executedCmd.SilenceErrors {
-			fmt.Fprintf(os.Stderr, "Error: %s\n", err.Error())
+			fmt.Fprintf(os.Stderr, "Error: %s\n", remedy.PrintedText(err.Error()))
 		}
 		os.Exit(1)
 	}

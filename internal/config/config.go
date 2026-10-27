@@ -72,6 +72,33 @@ func ignoredConfigKey(path string) string {
 // Initialize sets up the viper configuration singleton
 // Should be called once at application startup
 func Initialize() error {
+	return initialize(os.Getenv("BEADS_DIR"))
+}
+
+// WithBeadsDir runs fn with the configuration Initialize loads when BEADS_DIR
+// is beadsDir, which is how the bd CLI loads it for every command in a
+// workspace it found, and then puts the loaded configuration back. A command
+// about to create beadsDir uses it to read what every later command there
+// will read: beadsDir's own config.yaml over the user config files, with the
+// BD_* variables on top, and never an enclosing workspace's config.yaml that
+// the directory walk loaded at startup. The process environment is not
+// changed.
+//
+// fn runs even when loading fails, with what did load, as a command runs
+// after a failed Initialize; the error is returned. Like Initialize, it
+// replaces the process-wide configuration while fn runs, so nothing may read
+// configuration concurrently.
+func WithBeadsDir(beadsDir string, fn func()) error {
+	saved, savedOverrides := v, overriddenKeys
+	defer func() { v, overriddenKeys = saved, savedOverrides }()
+	overriddenKeys = map[string]bool{}
+	err := initialize(beadsDir)
+	fn()
+	return err
+}
+
+// initialize is Initialize for a process whose BEADS_DIR is beadsDirSetting.
+func initialize(beadsDirSetting string) error {
 	v = viper.New()
 
 	// Set config type to yaml (we only load config.yaml, not config.json)
@@ -115,7 +142,7 @@ func Initialize() error {
 	appendExistingUserConfig(userConfigPaths.documented)
 
 	// 1. Project: walk up from CWD to find .beads/config.yaml
-	beadsDirEnv := strings.TrimSpace(os.Getenv("BEADS_DIR"))
+	beadsDirEnv := strings.TrimSpace(beadsDirSetting)
 	beadsEnvConfigPath := ""
 	if beadsDirEnv != "" {
 		beadsEnvConfigPath = filepath.Clean(filepath.Join(beadsDirEnv, "config.yaml"))
@@ -206,7 +233,7 @@ func Initialize() error {
 	}
 
 	// 0. BEADS_DIR: highest priority
-	if beadsDir := os.Getenv("BEADS_DIR"); beadsDir != "" {
+	if beadsDir := beadsDirSetting; beadsDir != "" {
 		p := filepath.Join(beadsDir, "config.yaml")
 		// Honor the test ignore set here too, and skip primaryConfigPath along with
 		// the merge so ConfigFileUsed does not name the ignored repo config. This

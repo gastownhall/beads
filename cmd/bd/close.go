@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -289,7 +290,7 @@ in the molecule for you; add --no-auto to only show it.`,
 					closedIssues = append(closedIssues, newClosedIssueJSON(closedIssue, res.AutoClosedMolecule, res.MoleculeAutoCloseRefusal))
 				}
 			} else {
-				debug.PrintNormal("%s Closed %s: %s\n", ui.RenderPass("✓"), formatFeedbackID(id, issueTitleOrEmpty(issue)), reason)
+				debug.PrintNormal("%s Closed %s: %s\n", ui.RenderPass("✓"), printedFeedbackID(id, issueTitleOrEmpty(issue)), reason)
 			}
 		}
 
@@ -324,10 +325,7 @@ in the molecule for you; add --no-auto to only show it.`,
 						"unblocked": unblocked,
 					})
 				}
-				fmt.Printf("\nNewly unblocked:\n")
-				for _, issue := range unblocked {
-					fmt.Printf("  • %s (P%d)\n", formatFeedbackID(issue.ID, issue.Title), issue.Priority)
-				}
+				printNewlyUnblocked(unblocked)
 			}
 		}
 
@@ -732,12 +730,12 @@ func checkGateSatisfaction(issue *types.Issue, gateStore storage.DoltStorage) er
 		if resolved {
 			return nil
 		}
-		return fmt.Errorf("gate condition not satisfied: %s (use --force to override)", reason)
+		return fmt.Errorf("gate condition not satisfied: %s (use --force to override)", remedy.PrintedText(reason))
 	}
 
 	if err != nil {
 		// If we can't check the condition, allow close with a warning
-		fmt.Fprintf(os.Stderr, "Warning: could not evaluate gate condition: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Warning: could not evaluate gate condition: %s\n", remedy.PrintedMessage(err))
 		return nil
 	}
 
@@ -746,10 +744,10 @@ func checkGateSatisfaction(issue *types.Issue, gateStore storage.DoltStorage) er
 	}
 
 	if escalated {
-		return fmt.Errorf("gate condition not satisfied: %s (use --force to override)", reason)
+		return fmt.Errorf("gate condition not satisfied: %s (use --force to override)", remedy.PrintedText(reason))
 	}
 
-	return fmt.Errorf("gate condition not satisfied: %s (use --force to override)", reason)
+	return fmt.Errorf("gate condition not satisfied: %s (use --force to override)", remedy.PrintedText(reason))
 }
 
 // closeBeadGateGetter picks the bead-gate lookup the current route can serve.
@@ -770,15 +768,39 @@ func closeBeadGateGetter(gateStore storage.DoltStorage) issueGetter {
 // or why a completed root stayed open. It returns the closed root's id, or "".
 func reportMoleculeAutoClose(root *types.Issue, refusal string) string {
 	if refusal != "" {
-		fmt.Fprintf(os.Stderr, "Warning: could not auto-close completed molecule: %s\n", refusal)
+		warnMoleculeAutoCloseRefusal(refusal)
 	}
 	if root == nil {
 		return ""
 	}
 	if !jsonOutput {
-		debug.PrintNormal("%s Auto-closed completed molecule %s\n", ui.RenderPass("✓"), formatFeedbackID(root.ID, root.Title))
+		debug.PrintNormal("%s Auto-closed completed molecule %s\n", ui.RenderPass("✓"), printedFeedbackID(root.ID, root.Title))
 	}
 	return root.ID
+}
+
+// warnMoleculeAutoCloseRefusal warns, on both routes, that a completed
+// molecule's root refused its auto-close. The refusal is the sentence the
+// refusing guard wrote (issueops.RefusedMoleculeAutoClose). It names the
+// root, and for a blocked root its blockers, as the store holds them, and
+// bd close --continue prints its hint after it. So the sentence is spelled
+// by remedy.PrintedValue: a carriage return, terminal escape or line feed in
+// an ID cannot redraw or split the hint, and an ordinary refusal prints as
+// before. A $(...) in an ID is still printed as it is, because the close
+// result carries only the sentence, not the IDs it names, so they cannot be
+// spelled one by one as printedIssueID spells an ID.
+func warnMoleculeAutoCloseRefusal(refusal string) {
+	fmt.Fprintf(os.Stderr, "Warning: could not auto-close completed molecule: %s\n", remedy.PrintedValue(refusal)) //nolint:gosec // G705: stderr, not a browser context
+}
+
+// printNewlyUnblocked prints bd close --suggest-next's list of the issues the
+// close unblocked, on both routes. The --continue hint follows it, so each
+// issue is named by printedFeedbackID.
+func printNewlyUnblocked(unblocked []*types.Issue) {
+	fmt.Printf("\nNewly unblocked:\n")
+	for _, issue := range unblocked {
+		fmt.Printf("  • %s (P%d)\n", printedFeedbackID(issue.ID, issue.Title), issue.Priority)
+	}
 }
 
 // closedIssueJSON is one entry of `bd close --json`'s list of closed issues:

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/schema"
@@ -364,7 +365,7 @@ func openReadOnly(ctx context.Context, beadsDir, database, branch string, checkB
 	}
 	dataDir := filepath.Join(absBeadsDir, "embeddeddolt")
 	if _, err := os.Stat(dataDir); err != nil {
-		return nil, fmt.Errorf("%w at %s: %w", ErrNoEmbeddedDatabase, dataDir, err)
+		return nil, fmt.Errorf("%w at %s: %w", ErrNoEmbeddedDatabase, remedy.PrintedValue(dataDir), remedy.PrintedError(err))
 	}
 
 	s := &EmbeddedDoltStore{

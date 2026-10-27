@@ -353,14 +353,20 @@ forward, and the engine takes neither on your behalf:
 `bd events export` refuses the same way rather than present a pruned journal's
 surviving suffix as a complete history.
 
-Mid-`--follow`, the same failure arrives as **one line of JSON on the stream it
-interrupts** — same code, same `since` / `floor` / `head`, same exit status,
-compact and without the envelope, because the consumer on the other end is a
-line reader:
+Under `--follow`, the same failure arrives as **one line of JSON on the stream
+it interrupts**, whether the follower's first read finds the checkpoint pruned
+or a later poll does — same code, same `since` / `floor` / `head`, same exit
+status, compact and without the envelope, because the consumer on the other end
+is a line reader:
 
 ```json
 {"code":"events_journal_truncated","error":"events journal truncated: checkpoint 12 is below the retained window [41..980]; records 13..40 were pruned","floor":41,"head":980,"since":12}
 ```
+
+Any other failure that ends a running follower — a lost server connection, say
+— is one line too: bd's usual `--json` error object, compact
+(`{"error":"reading events journal: …","schema_version":1}`, inside `data` under
+`BD_JSON_ENVELOPE=1`).
 
 A hole in the *middle* of the retained window refuses the same way, with
 `since` reporting the last sequence number the read could serve contiguously

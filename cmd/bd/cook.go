@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/formula"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -316,7 +318,7 @@ func persistCookFormula(ctx context.Context, resolved *formula.Formula, protoID 
 	existingProto, err := store.GetIssue(ctx, protoID)
 	if err == nil && existingProto != nil {
 		if !force {
-			return fmt.Errorf("proto %s already exists (use --force to replace)", protoID)
+			return fmt.Errorf("proto %s already exists (use --force to replace)", remedy.PrintedValue(protoID))
 		}
 		// Delete existing proto and its children
 		if err := deleteProtoSubgraph(ctx, store, protoID); err != nil {
@@ -340,16 +342,27 @@ func persistCookFormula(ctx context.Context, resolved *formula.Formula, protoID 
 		})
 	}
 
-	fmt.Printf("%s Cooked proto: %s\n", ui.RenderPass("✓"), result.ProtoID)
-	fmt.Printf("  Created %d issues\n", result.Created)
+	printCookedProto(result.ProtoID, result.Created, vars, bondPoints)
+	return nil
+}
+
+// printCookedProto prints bd cook --persist's summary and its bd mol pour
+// hint. The proto ID is the formula file's own formula field, which a
+// committed .beads/formulas file sets: it is named escaped, and goes into
+// the hint as one shell word or a placeholder named beside it. The bond
+// point IDs printed above the hint come from the same file and are named
+// escaped too.
+func printCookedProto(protoID string, created int, vars, bondPoints []string) {
+	fmt.Printf("%s Cooked proto: %s\n", ui.RenderPass("✓"), remedy.PrintedValue(protoID))
+	fmt.Printf("  Created %d issues\n", created)
 	if len(vars) > 0 {
 		fmt.Printf("  Variables: %s\n", strings.Join(vars, ", "))
 	}
 	if len(bondPoints) > 0 {
-		fmt.Printf("  Bond points: %s\n", strings.Join(bondPoints, ", "))
+		fmt.Printf("  Bond points: %s\n", remedy.PrintedList(bondPoints, ", "))
 	}
-	fmt.Printf("\nTo use: bd mol pour %s --var <name>=<value>\n", result.ProtoID)
-	return nil
+	proto, note := remedy.CommandArg(runtime.GOOS, protoID, "<proto>")
+	fmt.Printf("\nTo use: bd mol pour %s --var <name>=<value>%s\n", proto, note)
 }
 
 func runCook(cmd *cobra.Command, args []string) error {

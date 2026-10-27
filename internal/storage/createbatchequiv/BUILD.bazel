@@ -7,6 +7,7 @@ go_library(
         "scenario_apply.go",
         "scenario_depadd.go",
         "scenario_import458.go",
+        "scenario_settled.go",
         "scenario_waitsfor.go",
     ],
     embedsrcs = [
@@ -14,6 +15,7 @@ go_library(
         "golden/depadd.json",
         "golden/import458-reject-stale.json",
         "golden/import458.json",
+        "golden/settled.json",
         "golden/small.json",
         "golden/waitsfor.json",
     ],

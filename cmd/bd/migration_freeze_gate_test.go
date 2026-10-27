@@ -369,7 +369,7 @@ func TestInitReinitBlockedDuringMigrationFreeze(t *testing.T) {
 // TestFreezeRefusalHasNoUsageDump: the refusal is returned as an error now, so
 // cobra renders it — and on a command that sets neither SilenceErrors nor
 // SilenceUsage (duplicate, supersede, dep relate/unrelate, backup *, ado sync,
-// migrate-personal, batch) that means "Error: exit code 14" plus a full usage
+// batch) that means "Error: exit code 14" plus a full usage
 // block after the clean refusal, making it read like a syntax error. Every
 // other freeze test uses a silenced command, so nothing else catches this.
 func TestFreezeRefusalHasNoUsageDump(t *testing.T) {

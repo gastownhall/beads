@@ -793,6 +793,11 @@ func runSyncCommand(cmd *cobra.Command, _ []string) error {
 		syncYes, _ := cmd.Flags().GetBool("yes")
 		syncNoAdopt, _ := cmd.Flags().GetBool("no-adopt")
 		adopted, adoptErr := syncAdoptGitOrigin(rootCtx, st, currentAdoptPolicy(syncYes, syncNoAdopt, stdinIsTerminal(), jsonOutput), syncAdoptOptIn)
+		var leftover *remoteOnlyInLeftoverDatabaseError
+		if errors.As(adoptErr, &leftover) {
+			// Refused before any adoption: the remote is set up, but not on the server.
+			return HandleErrorRespectJSON("sync failed: %v", adoptErr)
+		}
 		if adoptErr != nil {
 			return HandleErrorRespectJSON("sync failed: adopting git origin as Dolt remote: %v", adoptErr)
 		}

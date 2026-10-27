@@ -3,12 +3,16 @@ package doctor
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/testutil/legacyworkspace"
 )
 
 func TestReadTypesFromYAML_FlowSequence(t *testing.T) {
@@ -233,8 +237,14 @@ func TestDiscoverChildTypesLeavesGraphWorkspaceUnchanged(t *testing.T) {
 					t.Fatalf("readTypesFromDB changed the workspace:\n got %q\nwant %q", got, want)
 				}
 
-				if got := discoverChildTypes(repo); !reflect.DeepEqual(got, []string{"graph-node"}) {
+				got, refused := discoverChildTypes(repo)
+				if !reflect.DeepEqual(got, []string{"graph-node"}) {
 					t.Fatalf("discoverChildTypes = %q, want the config.yaml fallback [graph-node]", got)
+				}
+				var refusedFormat *configfile.UnsupportedWorkspaceFormatError
+				if !errors.As(refused, &refusedFormat) || refusedFormat.BeadsDir != ResolveBeadsDirForRepo(repo) ||
+					refusedFormat.GraphMode != layout.graphMode || refusedFormat.FormatMarker != (layout.graphMode == "") {
+					t.Fatalf("discoverChildTypes refusal = %v, want the UnsupportedWorkspaceFormatError readTypesFromDB returned", refused)
 				}
 				if got := snapshotBeadsDir(t, beadsDir); !reflect.DeepEqual(got, want) {
 					t.Fatalf("discoverChildTypes changed the workspace:\n got %q\nwant %q", got, want)
@@ -247,8 +257,17 @@ func TestDiscoverChildTypesLeavesGraphWorkspaceUnchanged(t *testing.T) {
 // TestDiscoverChildTypesLeavesLegacyConfigUnopenedUnchanged pins that type
 // discovery reads an additional repo's legacy config.json without migrating
 // it: only the store open itself may migrate it, so a child with no Dolt
-// database for discovery to open keeps its config.json.
+// database for discovery to open keeps its config.json. A child whose
+// database is present is opened, and reading its types needs a Dolt server;
+// that path is outside this unit pin.
 func TestDiscoverChildTypesLeavesLegacyConfigUnopenedUnchanged(t *testing.T) {
+	// An ambient BEADS_DOLT_DATA_DIR naming an existing directory would make
+	// the database look present, and the open would migrate config.json.
+	t.Setenv("BEADS_DOLT_DATA_DIR", "")
+	// If discovery reached the open anyway, it must fail fast rather than
+	// reach the suite's shared test server.
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "127.0.0.1")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "1")
 	repo := t.TempDir()
 	beadsDir := filepath.Join(repo, ".beads")
 	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
@@ -268,10 +287,204 @@ func TestDiscoverChildTypesLeavesLegacyConfigUnopenedUnchanged(t *testing.T) {
 	if _, err := readTypesFromDB(beadsDir); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("readTypesFromDB error = %v, want the missing Dolt database", err)
 	}
-	if got := discoverChildTypes(repo); !reflect.DeepEqual(got, []string{"legacy-node"}) {
-		t.Fatalf("discoverChildTypes = %q, want the config.yaml fallback [legacy-node]", got)
+	if got, refused := discoverChildTypes(repo); !reflect.DeepEqual(got, []string{"legacy-node"}) || refused != nil {
+		t.Fatalf("discoverChildTypes = %q, %v, want the config.yaml fallback [legacy-node] and no refusal", got, refused)
 	}
 	if got := snapshotBeadsDir(t, beadsDir); !reflect.DeepEqual(got, want) {
 		t.Fatalf("type discovery changed the workspace:\n got %q\nwant %q", got, want)
+	}
+}
+
+// TestDiscoverChildTypesLeavesUnrecognizedBackendUnchanged pins that type
+// discovery refuses an additional repo whose metadata names a backend this
+// build does not recognize before anything opens it. GetBackend reads such a
+// backend as Dolt, and the store constructor's configfile.Load migrated a
+// legacy config.json into metadata.json, dropping keys it does not know,
+// before the constructor refused the backend, whenever a Dolt database
+// directory was there for discovery to find.
+func TestDiscoverChildTypesLeavesUnrecognizedBackendUnchanged(t *testing.T) {
+	t.Setenv("BEADS_DOLT_DATA_DIR", "") // would override DatabasePath
+	// If the refusal were missing, the open must fail fast rather than reach
+	// the suite's shared test server.
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "127.0.0.1")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "1")
+	repo := t.TempDir()
+	beadsDir := filepath.Join(repo, ".beads")
+	if err := os.MkdirAll(filepath.Join(beadsDir, "dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	files := map[string]string{
+		"config.json": `{"database":"beads.db","backend":"future-backend","dolt_mode":"server","dolt_database":"beads_future_0123","future_binding":"keep-me"}`,
+		"config.yaml": "types:\n  custom: [future-node]\n",
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(beadsDir, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := snapshotBeadsDir(t, beadsDir)
+
+	if _, err := readTypesFromDB(beadsDir); err == nil {
+		t.Fatal("readTypesFromDB succeeded, want the unrecognized backend refused")
+	}
+	if got := snapshotBeadsDir(t, beadsDir); !reflect.DeepEqual(got, want) {
+		t.Fatalf("readTypesFromDB changed the workspace:\n got %q\nwant %q", got, want)
+	}
+	if got, refused := discoverChildTypes(repo); !reflect.DeepEqual(got, []string{"future-node"}) || refused != nil {
+		t.Fatalf("discoverChildTypes = %q, %v, want the config.yaml fallback [future-node] and no format refusal", got, refused)
+	}
+	if got := snapshotBeadsDir(t, beadsDir); !reflect.DeepEqual(got, want) {
+		t.Fatalf("discoverChildTypes changed the workspace:\n got %q\nwant %q", got, want)
+	}
+}
+
+// TestCheckMultiRepoTypesNamesRefusedWorkspace pins that the Multi-Repo Types
+// check says so when it lists only an additional repo's config.yaml types
+// because it refused that repo's workspace format, and why, instead of
+// presenting them as the repo's types without a word. A repo whose database
+// discovery simply does not find gets no such line.
+func TestCheckMultiRepoTypesNamesRefusedWorkspace(t *testing.T) {
+	t.Setenv("BEADS_DOLT_DATA_DIR", "") // would override DatabasePath
+	// If a refusal were missing, the open must fail fast rather than reach
+	// the suite's shared test server.
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "127.0.0.1")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "1")
+	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
+	config.ResetForTesting()
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+	t.Cleanup(config.ResetForTesting)
+
+	newRepo := func(files map[string]string) string {
+		t.Helper()
+		repo := t.TempDir()
+		beadsDir := filepath.Join(repo, ".beads")
+		if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for name, content := range files {
+			if err := os.WriteFile(filepath.Join(beadsDir, name), []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return repo
+	}
+	graphRepo := newRepo(map[string]string{
+		configfile.ConfigFileName: `{"backend":"dolt","dolt_mode":"server","dolt_database":"beads_graph_0123","graph_mode":"link"}`,
+		"config.yaml":             "types:\n  custom: [graph-node]\n",
+	})
+	markerRepo := newRepo(map[string]string{
+		configfile.ConfigFileName:        `{"backend":"dolt","dolt_mode":"server","dolt_database":"beads_graph_0456"}`,
+		configfile.GraphFormatMarkerFile: "link-preview-v9\n",
+	})
+	plainRepo := newRepo(map[string]string{
+		configfile.ConfigFileName: `{"backend":"dolt","dolt_mode":"server","dolt_database":"beads_plain_0123"}`,
+		"config.yaml":             "types:\n  custom: [plain-node]\n",
+	})
+	parent := newRepo(nil)
+	config.Set("repos.primary", parent)
+	config.Set("repos.additional", []string{graphRepo, markerRepo, plainRepo})
+
+	check := CheckMultiRepoTypes(parent)
+	const skipped = "    database not read, so only config.yaml types are listed: "
+	want := strings.Join([]string{
+		"  " + graphRepo + ": graph-node",
+		skipped + (&configfile.UnsupportedWorkspaceFormatError{BeadsDir: ResolveBeadsDirForRepo(graphRepo), GraphMode: configfile.GraphModeLink}).Error(),
+		"  " + markerRepo + ": (no custom types)",
+		skipped + (&configfile.UnsupportedWorkspaceFormatError{BeadsDir: ResolveBeadsDirForRepo(markerRepo), FormatMarker: true}).Error(),
+		"  " + plainRepo + ": plain-node",
+	}, "\n")
+	if check.Status != StatusOK || check.Detail != want {
+		t.Fatalf("CheckMultiRepoTypes = %s %q, detail:\n%s\nwant %s, detail:\n%s", check.Status, check.Message, check.Detail, StatusOK, want)
+	}
+}
+
+// TestCheckMultiRepoTypesNamesHistoricalSQLiteRepo pins that the Multi-Repo
+// Types check reads a repos.additional repo that is a historical SQLite
+// workspace without changing it, and says it did not read its database
+// because admission refuses that workspace, with admission's text, as it does
+// for a workspace format this build cannot open.
+func TestCheckMultiRepoTypesNamesHistoricalSQLiteRepo(t *testing.T) {
+	t.Setenv("BEADS_DOLT_DATA_DIR", "") // would override DatabasePath
+	// If the refusal were missing, the open must fail fast rather than reach
+	// the suite's shared test server.
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "127.0.0.1")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "1")
+	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
+	for _, layout := range legacyworkspace.HistoricalSQLiteLayouts() {
+		t.Run(layout.Name, func(t *testing.T) {
+			config.ResetForTesting()
+			if err := config.Initialize(); err != nil {
+				t.Fatalf("config.Initialize: %v", err)
+			}
+			t.Cleanup(config.ResetForTesting)
+			repo := t.TempDir()
+			beadsDir := filepath.Join(repo, ".beads")
+			layout.Write(t, beadsDir)
+			// A config.yaml beside a metadata-less SQLite database is not the
+			// layout a pre-Dolt bd left, and admission does not refuse it.
+			types := "(no custom types)"
+			if _, metadataLess := layout.Files["vc.db"]; !metadataLess {
+				if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("types:\n  custom: [legacy-node]\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				types = "legacy-node"
+			}
+			before := legacyworkspace.TreeDigest(t, beadsDir)
+			parent := t.TempDir()
+			config.Set("repos.primary", parent)
+			config.Set("repos.additional", []string{repo})
+
+			check := CheckMultiRepoTypes(parent)
+			if after := legacyworkspace.TreeDigest(t, beadsDir); !maps.Equal(after, before) {
+				t.Fatalf("CheckMultiRepoTypes changed the additional repo: before %v, after %v", before, after)
+			}
+			want := strings.Join([]string{
+				"  " + repo + ": " + types,
+				"    database not read, so only config.yaml types are listed: " + legacyworkspace.HistoricalSQLiteRefusal,
+			}, "\n")
+			if check.Detail != want {
+				t.Fatalf("CheckMultiRepoTypes detail:\n%s\nwant:\n%s", check.Detail, want)
+			}
+		})
+	}
+}
+
+// TestReadTypesFromDBAsksAdmissionBeforeTheOpen pins that readTypesFromDB
+// consults AdmitAdditionalRepo before it opens an additional repository's
+// database, and that discoverChildTypes reports the legacy refusal it returns
+// beside the repository's config.yaml types. bd sets the hook to its own
+// foreign-workspace admission, which classifies the legacy Dolt layouts.
+func TestReadTypesFromDBAsksAdmissionBeforeTheOpen(t *testing.T) {
+	t.Setenv("BEADS_DOLT_DATA_DIR", "")
+	// If the hook were skipped, the open must fail fast.
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "127.0.0.1")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "1")
+	t.Setenv("BEADS_DOLT_AUTO_START", "0")
+	repo := t.TempDir()
+	beadsDir := filepath.Join(repo, ".beads")
+	legacyworkspace.Layout{Files: map[string]string{
+		configfile.ConfigFileName:         `{"backend":"dolt","dolt_mode":"server","dolt_database":"herald"}`,
+		"config.yaml":                     "types:\n  custom: [legacy-node]\n",
+		"dolt/herald/.dolt/noms/manifest": "legacy manifest",
+	}}.Write(t, beadsDir)
+	refusal := &configfile.LegacyWorkspaceError{Reason: "legacy Dolt server workspace"}
+	var asked string
+	previous := AdmitAdditionalRepo
+	AdmitAdditionalRepo = func(dir string) error {
+		asked = dir
+		return refusal
+	}
+	t.Cleanup(func() { AdmitAdditionalRepo = previous })
+
+	if _, err := readTypesFromDB(beadsDir); !errors.Is(err, refusal) {
+		t.Fatalf("readTypesFromDB = %v, want the admission refusal", err)
+	}
+	if asked != beadsDir {
+		t.Fatalf("AdmitAdditionalRepo asked about %q, want %q", asked, beadsDir)
+	}
+	if got, refused := discoverChildTypes(repo); !reflect.DeepEqual(got, []string{"legacy-node"}) || !errors.Is(refused, refusal) {
+		t.Fatalf("discoverChildTypes = %v, %v; want the config.yaml types and the refusal", got, refused)
 	}
 }

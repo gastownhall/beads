@@ -370,15 +370,22 @@ func TestHealthz(t *testing.T) {
 //
 // THE PROBE IS AN UNKNOWN QUERY PARAMETER. The document promises every
 // operation refuses one at its own door with a 400, so each row answers with
-// no database work and no fake that has to answer every operation. The
-// request line naming the row's op is what proves the probe reached THAT row:
-// a substitution that missed would land on the catch-all's 404, which carries
-// the same headers and would pass for the wrong reason.
+// no database work and no fake that has to answer every operation. Each case
+// asserts that refusal, naming the probe: a row that stopped refusing would
+// otherwise pass on the fake's panic answer, which carries the same headers,
+// or fail with a 200 that the request_id check blames on the middleware. The
+// request line naming the row's op is what proves the refusal is THAT row's:
+// a substitution that missed and landed on another row would draw that row's
+// identical refusal and pass for the wrong reason (one that landed on a 404
+// already fails the refusal check).
 func TestEveryResponseCarriesTheResponseWideHeaders(t *testing.T) {
-	// Every header withRequestContext applies, and the pin below keeps the list
-	// honest: a header added to the middleware fails here until it is listed,
-	// and is then held to every answer below. Values, not Get, so a second
-	// Cache-Control line appended beside no-store fails too.
+	// What every answer must carry. Cache-Control: no-store is the requirement
+	// itself (no client or intermediary may cache an answer about live work),
+	// not a copy of what the middleware sets today. If withRequestContext stops
+	// setting it, the remedy is to restore it there, not to drop it from this
+	// list or to set it in each writer: the checks below catch a drop only on
+	// the answers they sample. Values, not Get, so a second Cache-Control line
+	// appended beside no-store fails too.
 	responseWide := http.Header{"Cache-Control": {"no-store"}}
 	check := func(t *testing.T, resp *http.Response) {
 		t.Helper()
@@ -390,12 +397,24 @@ func TestEveryResponseCarriesTheResponseWideHeaders(t *testing.T) {
 	}
 
 	ts := newTestServer(t, Config{})
+	// The pin runs one way, so following it can only add coverage: a header the
+	// middleware sets fails here until responseWide lists it, and is then held,
+	// value and all, to every answer below. It never asks for a listed header to
+	// go or to change its value. Cache-Control: no-store is additionally required
+	// of the middleware itself, against a literal rather than responseWide, so no
+	// edit to the list satisfies it: answers no case below samples (net/http's
+	// own path-cleaning redirects, among others) carry it only from there.
 	{
 		rec := httptest.NewRecorder()
 		ts.Server.withRequestContext(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})).
 			ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
-		if got := rec.Header(); !maps.EqualFunc(got, responseWide, slices.Equal) {
-			t.Errorf("withRequestContext sets %q, but this test holds %q; keep the list in step with the middleware", got, responseWide)
+		for name, got := range rec.Header() {
+			if _, listed := responseWide[name]; !listed {
+				t.Errorf("withRequestContext sets %s = %q, which responseWide does not list; add it to responseWide so every answer below is held to it", name, got)
+			}
+		}
+		if got := rec.Header().Values("Cache-Control"); !slices.Equal(got, []string{"no-store"}) {
+			t.Errorf("withRequestContext sets Cache-Control = %q, want [\"no-store\"]: answers no case below samples (net/http's own redirects) carry it only from the middleware; restore it there", got)
 		}
 	}
 
@@ -409,7 +428,14 @@ func TestEveryResponseCarriesTheResponseWideHeaders(t *testing.T) {
 		t.Run(rt.op, func(t *testing.T) {
 			resp := ts.do(t, rt.method, path, nil)
 			check(t, resp)
-			id, _ := decodeBody(t, resp)["request_id"].(string)
+			body := decodeBody(t, resp)
+			if resp.StatusCode != http.StatusBadRequest || body["code"] != string(CodeInvalidArgument) ||
+				body["reason"] != string(ReasonUnknownParameter) || body["param"] != probe {
+				t.Fatalf("%s %s = %d %v/%v naming %v, want %d %s/%s naming %s: the probe no longer reaches %s's own refusal",
+					rt.method, path, resp.StatusCode, body["code"], body["reason"], body["param"],
+					http.StatusBadRequest, CodeInvalidArgument, ReasonUnknownParameter, probe, rt.op)
+			}
+			id, _ := body["request_id"].(string)
 			if id == "" {
 				t.Fatalf("%s %s: no request_id, so the answer never passed through withRequestContext", rt.method, path)
 			}
@@ -457,6 +483,29 @@ func TestEveryResponseCarriesTheResponseWideHeaders(t *testing.T) {
 			}
 		})
 	}
+
+	// ServeMux answers a non-canonical path itself with a redirect, inside
+	// withRequestContext but through none of the writers, so this answer carries
+	// the header only if the middleware sets it. ts.client follows redirects;
+	// this client stops at the first answer so the redirect itself is checked.
+	t.Run("mux path-cleaning redirect", func(t *testing.T) {
+		noFollow := *ts.client
+		noFollow.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+		req, err := http.NewRequest(http.MethodGet, ts.base+"//healthz", nil)
+		if err != nil {
+			t.Fatalf("new request: %v", err)
+		}
+		resp, err := noFollow.Do(req)
+		if err != nil {
+			t.Fatalf("GET //healthz: %v", err)
+		}
+		t.Cleanup(func() { _ = resp.Body.Close() })
+		if resp.StatusCode != http.StatusTemporaryRedirect || resp.Header.Get("Location") != "/healthz" {
+			t.Fatalf("GET //healthz = %d Location %q, want %d to /healthz: the case no longer reaches ServeMux's own redirect",
+				resp.StatusCode, resp.Header.Get("Location"), http.StatusTemporaryRedirect)
+		}
+		check(t, resp)
+	})
 
 	// A handler can still overwrite or append to the header on its own success
 	// path, which no refusal above reaches. There are three success writers:

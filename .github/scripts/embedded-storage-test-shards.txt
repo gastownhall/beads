@@ -178,6 +178,7 @@
 
 40 4 TestBlockedListerContract
 40 4 TestCreateBatchFastPathsMatchPerRowSmallDepAdd_Embedded
+40 4 TestEmbeddedFirstMintOnEmptyHistoryIsRevisionOne
 40 4 TestEmbeddedIssueOperationsUpdateLabelPatchOrdering
 40 4 TestEmbeddedReaderGetMissIsNotFoundAndBackendFailureDoesNotDecay
 40 4 TestEmbeddedReaderListFilterFamiliesNarrowToTheirRows
@@ -434,12 +435,14 @@
 
 40 27 TestEmbeddedBatchCloserDurableHistoryNeverNamesAWisp
 40 27 TestEmbeddedBatchCloserRequestValidationReturnsZeroResultAndChangesNothing
+40 27 TestEmbeddedBlockedRecheckSettlesDependentAfterCommit
 40 27 TestEmbeddedDependencyEditorAcceptsADiamond
 40 27 TestEmbeddedDependencyEditorAddMarksItsSourceInTheSameVerb
 40 27 TestEmbeddedMigration0058HealsAlreadyAffectedDatabase
 40 27 TestEmbeddedReaderGetOptionalRowListsAreOffByDefault
 40 27 TestEmbeddedRelationsRefusesATypeFilterOverTheColumnLength
 40 27 TestEventsJournalReadRefusesAnInteriorHole
+40 27 TestOpenReadOnlyNamesMissingDatabaseEscaped
 40 27 TestPartitionWispIDs
 40 27 TestRemoteGitDataRefOnEngine
 40 27 TestSweeperContract
@@ -535,6 +538,7 @@
 40 34 TestQuerierContract
 40 34 TestReadyWorkStatementBudget
 
+40 35 TestCreateBatchFastPathsMatchPerRowSettled_Embedded
 40 35 TestEmbeddedBatchCloserAllIdempotentBatchLandsNothing
 40 35 TestEmbeddedClaimIssueWrapperClaimsTheWispPlane
 40 35 TestEmbeddedDependencyEditorGateScopeFollowsTheEdgeType

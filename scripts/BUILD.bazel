@@ -50,16 +50,19 @@ go_test(
         "ci_blacksmith_runner_test.go",
         "ci_f7b_review_test.go",
         "ci_f7c_advisory_test.go",
+        "ci_merge_group_scope_test.go",
         "ci_merge_queue_test.go",
         "ci_workflow_apt_get_timeout_test.go",
         "ci_workflow_core_test.go",
         "ci_workflow_test.go",
         "embedded_shard_count_test.go",
         "host_tools_test.go",
+        "main_ci_alert_test.go",
         "makefile_bazel_primary_test.go",
         "migration_corpus_bazel_test.go",
         "nogo_integration_step_script_test.go",
         "nogo_lint_policy_test.go",
+        "offline_shards_test.go",
         "pinned_shards_helpers_test.go",
         "pinned_shards_test.go",
         "pr_lanes_bazel_coverage_test.go",
@@ -67,6 +70,7 @@ go_test(
         "rbe_worker_env_test.go",
         "repo_helpers_test.go",
         "worker_env_autosync_test.go",
+        "worker_env_sync_automerge_test.go",
     ],  # keep
     data = [
         "//:repo_other_files",
@@ -83,6 +87,7 @@ go_test(
     # re-runs the rest of this suite too.
     env = {"BEADS_TEST_GO": "$(rlocationpath @go_sdk//:bin/go)"},
     deps = [
+        "//internal/configfile",
         "//internal/doltversion",
         "//internal/formula",
         "//internal/testutil/bazeltest",
@@ -223,7 +228,9 @@ go_test(
 
 # check-testing-short.sh over every Go file, test and non-test, plus the
 # Go-exec half of the host-go-under-Bazel policy (host_tool_exec_policy_test.go
-# scans //:repo_go_srcs and //:repo_go_test_srcs for a literal go/gofmt exec).
+# scans //:repo_go_srcs and //:repo_go_test_srcs for a literal go/gofmt exec),
+# plus the Dolt host policy (dolt_host_policy_test.go scans //:repo_go_srcs
+# for host spellings interpreted outside internal/configfile/dolt_host.go).
 # The shell-script half (host_tool_shell_policy_test.go) is its own
 # :shell_host_tool_policy_test below: it reads a fixed, narrow list of shell
 # scripts, not every Go source file, so it would otherwise pay this target's
@@ -231,6 +238,7 @@ go_test(
 go_test(
     name = "go_sources_test",
     srcs = [
+        "dolt_host_policy_test.go",
         "host_tool_exec_policy_test.go",
         "repo_helpers_test.go",
         "testing_short_tree_test.go",
@@ -240,7 +248,10 @@ go_test(
         "//:repo_go_srcs",
         "//:repo_go_test_srcs",
     ],
-    deps = ["//internal/testutil/bazeltest"],
+    deps = [
+        "//internal/configfile",
+        "//internal/testutil/bazeltest",
+    ],
 )
 
 # The shell-script half of the host-go-under-Bazel policy
