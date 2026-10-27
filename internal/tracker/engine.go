@@ -480,6 +480,11 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 					continue
 				}
 				stats.Conflicts++
+				if opts.ConflictResolution == ConflictLocal {
+					e.msg("Conflict on %s: keeping local version", existing.ID)
+					stats.Skipped++
+					continue
+				}
 				if opts.ConflictResolution != ConflictExternal {
 					stats.Skipped++
 					continue

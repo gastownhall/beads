@@ -83,6 +83,7 @@ func TestEnginePullOnlyConflictStrategy(t *testing.T) {
 	}{
 		{"external newer", ConflictExternal, 20 * time.Minute, types.StatusInProgress, "keeping external version"},
 		{"external older than local edit", ConflictExternal, 5 * time.Minute, types.StatusInProgress, "keeping external version"},
+		{"local", ConflictLocal, 20 * time.Minute, types.StatusOpen, "keeping local version"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			f := newPullConflictFixture(pullConflictLastSync.Add(test.remote))
