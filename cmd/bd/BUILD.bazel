@@ -636,6 +636,7 @@ go_test(
         "config_embedded_test.go",
         "config_get_backup_enabled_embedded_test.go",
         "config_get_backup_enabled_test.go",
+        "config_get_readonly_embedded_test.go",
         "config_get_store_free_test.go",
         "config_guard_test.go",
         "config_isolation_regression_test.go",
