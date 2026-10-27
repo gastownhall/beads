@@ -995,6 +995,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd config get` for config.yaml, git-config and user-global keys no longer
+  opens the database, so it works while the Dolt server is down (GH#5108).
+
 - `bd gitlab pull` no longer overwrites a bead linked to another GitLab
   project's issue with the same number, or puts that issue's dependency
   links on it. Issue IIDs are only unique within a project, but when the
