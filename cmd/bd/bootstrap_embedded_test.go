@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 )
 
 // bdBootstrap runs "bd bootstrap" with the given args and returns stdout.
@@ -337,6 +339,168 @@ func TestEmbeddedBootstrapCloneFailureScrubsCredentials(t *testing.T) {
 			}
 			if strings.Contains(stdout.String()+stderr.String(), tc.password) {
 				t.Errorf("bootstrap printed the sync.remote password %q:\nstdout:\n%s\nstderr:\n%s", tc.password, stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
+// GH#3494: a workspace whose .beads/config.yaml carries issue-prefix (what
+// gc init / gc rig add write) must come out of `bd bootstrap` with that
+// prefix in the database scope, so `bd config get` and `bd create` see it.
+func TestEmbeddedBootstrapPersistsConfigYamlPrefix(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir := t.TempDir()
+	initGitRepoAt(t, dir)
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	yaml := "issue_prefix: la\nissue-prefix: la\n"
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out := bdBootstrap(t, bd, dir, "--yes")
+	t.Logf("bootstrap output:\n%s", out)
+
+	get := exec.Command(bd, "config", "get", "issue_prefix")
+	get.Dir = dir
+	get.Env = bdEnv(dir)
+	got, err := get.Output()
+	if err != nil {
+		t.Fatalf("bd config get issue_prefix: %v\n%s", err, got)
+	}
+	if strings.TrimSpace(string(got)) != "la" {
+		t.Errorf("after bootstrap, bd config get issue_prefix = %q, want %q (config.yaml prefix)", strings.TrimSpace(string(got)), "la")
+	}
+
+	create := exec.Command(bd, "create", "--type", "task", "--title", "x", "--silent")
+	create.Dir = dir
+	create.Env = bdEnv(dir)
+	id, err := create.Output()
+	if err != nil {
+		t.Fatalf("bd create after bootstrap: %v\n%s", err, id)
+	}
+	if !strings.HasPrefix(strings.TrimSpace(string(id)), "la-") {
+		t.Errorf("bd create after bootstrap made %q, want an la- id", strings.TrimSpace(string(id)))
+	}
+}
+
+// embeddedWorkspaceMissingPrefix initializes an embedded workspace whose
+// database is named database, then deletes its issue_prefix row: the state a
+// setup interrupted between creating the database and seeding its prefix
+// leaves. yamlPrefix, when set, becomes config.yaml's issue-prefix; otherwise
+// config.yaml names none.
+func embeddedWorkspaceMissingPrefix(t *testing.T, bd, database, yamlPrefix string) (dir, beadsDir string) {
+	t.Helper()
+	dir, beadsDir, _ = bdInit(t, bd, "--prefix", database)
+
+	s, err := embeddeddolt.Open(t.Context(), beadsDir, database, "main")
+	if err != nil {
+		t.Fatalf("open embedded store: %v", err)
+	}
+	if err := s.DeleteConfig(t.Context(), "issue_prefix"); err != nil {
+		_ = s.Close()
+		t.Fatalf("delete issue_prefix: %v", err)
+	}
+	if err := s.Commit(t.Context(), "test: drop issue_prefix"); err != nil {
+		_ = s.Close()
+		t.Fatalf("commit: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("close embedded store: %v", err)
+	}
+
+	configPath := filepath.Join(beadsDir, "config.yaml")
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config.yaml: %v", err)
+	}
+	var lines []string
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(strings.TrimLeft(line, "# "), "issue-prefix:") || strings.HasPrefix(strings.TrimLeft(line, "# "), "issue_prefix:") {
+			continue
+		}
+		lines = append(lines, line)
+	}
+	if yamlPrefix != "" {
+		lines = append(lines, fmt.Sprintf("issue-prefix: %q", yamlPrefix))
+	}
+	if err := os.WriteFile(configPath, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatalf("write config.yaml: %v", err)
+	}
+	return dir, beadsDir
+}
+
+// bdConfigGetPrefix returns `bd config get issue_prefix` stdout, trimmed.
+func bdConfigGetPrefix(t *testing.T, bd, dir string) string {
+	t.Helper()
+	cmd := exec.Command(bd, "config", "get", "issue_prefix")
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	stdout, stderr, err := runCommandBuffers(t, cmd)
+	if err != nil {
+		t.Fatalf("bd config get issue_prefix: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+	return strings.TrimSpace(stdout.String())
+}
+
+// bdCreateID runs `bd create --silent` and returns the new issue's ID.
+func bdCreateID(t *testing.T, bd, dir string) string {
+	t.Helper()
+	cmd := exec.Command(bd, "create", "--type", "task", "--title", "x", "--silent")
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	stdout, stderr, err := runCommandBuffers(t, cmd)
+	if err != nil {
+		t.Fatalf("bd create: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+	return strings.TrimSpace(stdout.String())
+}
+
+// An embedded database that exists but has no issue_prefix is finished by
+// `bd bootstrap`: the prefix comes from config.yaml issue-prefix, else the
+// database name, where bootstrap used to report "Database already exists" and
+// leave every `bd create` failing.
+func TestEmbeddedBootstrapSeedsMissingPrefix(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+
+	for _, tc := range []struct{ name, yamlPrefix, want string }{
+		{"from_config_yaml", "la", "la"},
+		{"from_database_name", "", "zz"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, _ := embeddedWorkspaceMissingPrefix(t, bd, "zz", tc.yamlPrefix)
+
+			cmd := exec.Command(bd, "bootstrap", "--yes")
+			cmd.Dir = dir
+			cmd.Env = bdEnv(dir)
+			stdout, stderr, err := runCommandBuffers(t, cmd)
+			if err != nil {
+				t.Fatalf("bd bootstrap --yes: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+			}
+			if strings.Contains(stdout.String(), "already exists") {
+				t.Errorf("bootstrap reported an existing database instead of seeding its prefix:\n%s", stdout.String())
+			}
+
+			if got := bdConfigGetPrefix(t, bd, dir); got != tc.want {
+				t.Errorf("after bootstrap, bd config get issue_prefix = %q, want %q\nbootstrap stdout:\n%s\nstderr:\n%s", got, tc.want, stdout.String(), stderr.String())
+			}
+			if id := bdCreateID(t, bd, dir); !strings.HasPrefix(id, tc.want+"-") {
+				t.Errorf("bd create after bootstrap made %q, want a %s- id", id, tc.want)
 			}
 		})
 	}

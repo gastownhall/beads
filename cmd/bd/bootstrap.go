@@ -144,6 +144,8 @@ Bootstrap auto-detects the right action:
   • If no database exists: creates a fresh one — unless the workspace was already
     initialized (metadata.json has a project_id) and its server-mode database is
     missing, in which case bootstrap refuses rather than strand the existing data
+  • If the database exists but has no issue_prefix: sets it from config.yaml issue-prefix
+    (never overwrites an existing prefix)
   • If database already exists: validates and reports status
 
 If sync.remote points at a git repository, bootstrap verifies refs/dolt/data
@@ -523,7 +525,7 @@ func detectBootstrapPlan(beadsDir string, cfg *configfile.Config) BootstrapPlan 
 	settledOnNameAlone := dbProbe.Ran && !dbProbe.LocalEvidence
 	if hasExistingDB {
 		if dbAction.Action != "none" || (beadsDirExists && !settledOnNameAlone) {
-			return dbAction
+			return seedPrefixPlan(dbAction, cfg, isServer)
 		}
 		deferredExistingPlan = &dbAction
 	}
@@ -554,7 +556,7 @@ func detectBootstrapPlan(beadsDir string, cfg *configfile.Config) BootstrapPlan 
 	}
 
 	if deferredExistingPlan != nil {
-		return *deferredExistingPlan
+		return seedPrefixPlan(*deferredExistingPlan, cfg, isServer)
 	}
 
 	// Only now, with every local recovery source exhausted, does an
@@ -583,6 +585,46 @@ func detectBootstrapPlan(beadsDir string, cfg *configfile.Config) BootstrapPlan 
 	plan.Action = "init"
 	plan.Reason = "No existing database, remote, or backup — will create fresh database"
 	return plan
+}
+
+// seedPrefixPlan turns a settled "the database already exists" verdict into
+// "seed-prefix" when that database is known to have no issue_prefix: the state
+// a setup interrupted between creating the database and seeding its prefix
+// leaves, in which every bd create fails. Only a prefix read that succeeded
+// counts; a database that could not be read keeps the "none" verdict.
+//
+// It is applied where detectBootstrapPlan returns an existing-database
+// verdict, never inside existingBootstrapDBPlan, so the deferral of a
+// name-only server match ahead of the recovery sources is unchanged.
+func seedPrefixPlan(plan BootstrapPlan, cfg *configfile.Config, isServer bool) BootstrapPlan {
+	if plan.Action != "none" || !plan.HasExisting || isServer {
+		return plan
+	}
+	prefix, known := readBootstrapEmbeddedPrefix(context.Background(), plan.BeadsDir)
+	if !known || prefix != "" {
+		return plan
+	}
+	seed, source := inferPrefix(plan.BeadsDir, cfg)
+	plan.Action = "seed-prefix"
+	plan.Reason = fmt.Sprintf("Database %s exists but has no issue_prefix — will set %s (from %s)",
+		remedy.PrintedValue(plan.Database), remedy.PrintedValue(seed), source)
+	return plan
+}
+
+// readBootstrapEmbeddedPrefix reads issue_prefix from beadsDir's existing
+// embedded database through the read-only factory. known is false when the
+// database could not be opened or read. Injectable for testing.
+var readBootstrapEmbeddedPrefix = func(ctx context.Context, beadsDir string) (prefix string, known bool) {
+	s, err := newReadOnlyStoreFromConfig(ctx, beadsDir)
+	if err != nil {
+		return "", false
+	}
+	defer func() { _ = s.Close() }()
+	prefix, err = s.GetConfig(ctx, "issue_prefix")
+	if err != nil {
+		return "", false
+	}
+	return strings.TrimSpace(prefix), true
 }
 
 // planConfiguredSyncRemote resolves a configured sync.remote into plan. done==true
@@ -986,6 +1028,9 @@ func printBootstrapPlan(plan BootstrapPlan) {
 		fmt.Printf("Bootstrap plan: import from git-tracked JSONL\n")
 		fmt.Printf("  JSONL file: %s\n", plan.JSONLFile)
 		fmt.Printf("  Database: %s\n", remedy.PrintedValue(plan.Database))
+	case "seed-prefix":
+		fmt.Printf("Bootstrap plan: set missing issue_prefix on existing database\n")
+		fmt.Printf("  Database: %s\n", remedy.PrintedValue(plan.Database))
 	case "init":
 		fmt.Printf("Bootstrap plan: create fresh database\n")
 		fmt.Printf("  Database: %s\n", remedy.PrintedValue(plan.Database))
@@ -1076,7 +1121,31 @@ func executeBootstrapPlan(plan BootstrapPlan, cfg *configfile.Config, nonInterac
 		return executeJSONLImportAction(ctx, plan, cfg)
 	case "init":
 		return executeInitAction(ctx, plan, cfg)
+	case "seed-prefix":
+		return executeSeedPrefixAction(ctx, plan, cfg)
 	}
+	return nil
+}
+
+// executeSeedPrefixAction writes issue_prefix into an existing database that
+// has none, opening it through the factory every other command uses. No issue
+// is created, rewritten or renamed.
+func executeSeedPrefixAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.Config) error {
+	prefix, _ := inferPrefix(plan.BeadsDir, cfg)
+
+	s, err := newDoltStoreFromConfig(ctx, plan.BeadsDir)
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	if err := s.SetConfig(ctx, "issue_prefix", prefix); err != nil {
+		return fmt.Errorf("set issue prefix: %w", err)
+	}
+	if err := s.CommitWithConfig(ctx, "bd bootstrap: seed issue_prefix"); err != nil {
+		return fmt.Errorf("commit: %w", err)
+	}
+	fmt.Fprintf(os.Stderr, "Set issue_prefix %q on existing database %q\n", prefix, plan.Database)
 	return nil
 }
 
@@ -1085,7 +1154,7 @@ func executeInitAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.
 		return err
 	}
 
-	prefix := inferPrefix(cfg)
+	prefix, _ := inferPrefix(plan.BeadsDir, cfg)
 	dbName := cfg.GetDoltDatabase()
 
 	s, err := newDoltStore(ctx, &dolt.Config{
@@ -1241,7 +1310,7 @@ func bootstrapMissingServerDBRefusal(dbName, location string, probeErr error) er
 }
 
 func executeRestoreAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.Config) error {
-	prefix := inferPrefix(cfg)
+	prefix, _ := inferPrefix(plan.BeadsDir, cfg)
 	dbName := cfg.GetDoltDatabase()
 
 	s, err := newDoltStore(ctx, &dolt.Config{
@@ -1273,7 +1342,7 @@ func executeRestoreAction(ctx context.Context, plan BootstrapPlan, cfg *configfi
 }
 
 func executeJSONLImportAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.Config) error {
-	prefix := inferPrefix(cfg)
+	prefix, _ := inferPrefix(plan.BeadsDir, cfg)
 	dbName := cfg.GetDoltDatabase()
 
 	s, err := newDoltStore(ctx, &dolt.Config{
@@ -1908,13 +1977,23 @@ func cloneIntoOwnedDataDir(ctx context.Context, doltDir, remoteURL, dbName strin
 	return nil
 }
 
-func inferPrefix(cfg *configfile.Config) string {
-	db := cfg.GetDoltDatabase()
-	if db != "" && db != "beads" {
-		return db
+// inferPrefix picks the issue_prefix bootstrap writes into a database that
+// has none, and names where it came from: beadsDir's config.yaml issue-prefix
+// (then its issue_prefix spelling, config.local.yaml first), else the database
+// name unless it is the default "beads", else the current directory's name.
+func inferPrefix(beadsDir string, cfg *configfile.Config) (prefix, source string) {
+	for _, key := range []string{"issue-prefix", "issue_prefix"} {
+		if v, ok, err := config.WorkspaceYamlValueStrictWithLocal(beadsDir, key); err == nil && ok {
+			if p := normalizeIssuePrefix(strings.TrimSpace(v)); p != "" {
+				return p, "config.yaml " + key
+			}
+		}
+	}
+	if db := cfg.GetDoltDatabase(); db != "" && db != "beads" {
+		return normalizeIssuePrefix(db), "database name"
 	}
 	cwd, _ := os.Getwd()
-	return filepath.Base(cwd)
+	return normalizeIssuePrefix(filepath.Base(cwd)), "directory name"
 }
 
 // isNonInteractiveBootstrap returns true if bootstrap should skip confirmation prompts.

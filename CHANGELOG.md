@@ -995,6 +995,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd bootstrap` sets a missing `issue_prefix` on an existing database**
+  (GH#3494). A database that exists but has no `issue_prefix` row, which
+  every `bd create` then refuses, used to get "Database already exists" and
+  no change. Bootstrap now plans `seed-prefix` and writes the prefix from
+  `.beads/config.yaml` `issue-prefix`, else the database name, else the
+  directory name; it never overwrites a prefix that is already set. A fresh
+  database bootstrap creates takes its prefix from the same place, where
+  config.yaml used to be ignored.
 - **`bd export` and auto-export no longer write JSONL with relations silently
   dropped** (GH#6870). When a label, dependency, comment or count read fails,
   `bd export` now exits non-zero and leaves the output file untouched, and
