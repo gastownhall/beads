@@ -995,6 +995,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Pull-only tracker syncs (`bd linear sync --pull`, `bd <tracker> pull`, and
+  the same flags on Jira, GitHub, GitLab, Azure DevOps and Notion) no longer
+  silently keep the local version of an issue changed on both sides since
+  the last sync. Conflict resolution only ran for bidirectional syncs, so
+  `--prefer-linear` and the newer-wins default never applied, and the remote
+  change (for example a Linear issue moved to In Progress) was dropped while
+  `last_sync` advanced past it. A pull-only sync now resolves such an issue
+  with the configured strategy, prints `Conflict on <id>: ...` and counts it
+  in the resolved conflicts. An issue edited only locally is still kept
+  ([#3702](https://github.com/gastownhall/beads/issues/3702)).
+
 - `bd gitlab pull` no longer overwrites a bead linked to another GitLab
   project's issue with the same number, or puts that issue's dependency
   links on it. Issue IIDs are only unique within a project, but when the
