@@ -1,6 +1,7 @@
 package formula
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -959,6 +960,231 @@ func TestApplyInlineExpansionsCrossExpansionDeps(t *testing.T) {
 			t.Errorf("work.second.Needs = %v, want [work.first]", workSecond.Needs)
 		}
 	})
+
+	t.Run("inline expand rewrites dependent needs to last expanded step", func(t *testing.T) {
+		steps := []*Step{
+			{ID: "setup", Title: "Setup"},
+			{ID: "work", Title: "Work", Needs: []string{"setup"}, Expand: "inline-exp"},
+			{ID: "verify", Title: "Verify", Needs: []string{"work"}},
+		}
+
+		result, err := ApplyInlineExpansions(steps, parser)
+		if err != nil {
+			t.Fatalf("ApplyInlineExpansions failed: %v", err)
+		}
+
+		if len(result) != 4 {
+			t.Fatalf("expected 4 steps, got %d", len(result))
+		}
+
+		// verify must need work.second, the last step of work's expansion -
+		// the same rewrite [[compose.expand]] performs (issue #7637).
+		verify := result[3]
+		if verify.ID != "verify" {
+			t.Fatalf("result[3].ID = %q, want verify", verify.ID)
+		}
+		if len(verify.Needs) != 1 || verify.Needs[0] != "work.second" {
+			t.Errorf("verify.Needs = %v, want [work.second]", verify.Needs)
+		}
+
+		// The propagate direction is unchanged: work.first still needs setup.
+		if got := result[1].Needs; len(got) != 1 || got[0] != "setup" {
+			t.Errorf("work.first.Needs = %v, want [setup]", got)
+		}
+
+		// The caller's input is not modified.
+		if got := steps[2].Needs; len(got) != 1 || got[0] != "work" {
+			t.Errorf("input verify.Needs = %v, want [work] (caller's slice must stay untouched)", got)
+		}
+
+		// Compose parity: the same steps through [[compose.expand]] give the
+		// same step IDs and the same Needs for every step.
+		composeResult, err := ApplyExpansions(
+			[]*Step{
+				{ID: "setup", Title: "Setup"},
+				{ID: "work", Title: "Work", Needs: []string{"setup"}},
+				{ID: "verify", Title: "Verify", Needs: []string{"work"}},
+			},
+			&ComposeRules{Expand: []*ExpandRule{{Target: "work", With: "inline-exp"}}},
+			parser,
+		)
+		if err != nil {
+			t.Fatalf("ApplyExpansions failed: %v", err)
+		}
+		if len(composeResult) != len(result) {
+			t.Fatalf("compose expansion gave %d steps, inline gave %d", len(composeResult), len(result))
+		}
+		for i := range result {
+			if result[i].ID != composeResult[i].ID {
+				t.Errorf("step %d: inline ID = %q, compose ID = %q", i, result[i].ID, composeResult[i].ID)
+			}
+			if fmt.Sprint(result[i].Needs) != fmt.Sprint(composeResult[i].Needs) {
+				t.Errorf("%s: inline Needs = %v, compose Needs = %v", result[i].ID, result[i].Needs, composeResult[i].Needs)
+			}
+		}
+	})
+
+	t.Run("inline expand rewrites dependent depends_on to last expanded step", func(t *testing.T) {
+		steps := []*Step{
+			{ID: "setup", Title: "Setup"},
+			{ID: "work", Title: "Work", DependsOn: []string{"setup"}, Expand: "inline-exp"},
+			{ID: "verify", Title: "Verify", DependsOn: []string{"work"}},
+		}
+
+		result, err := ApplyInlineExpansions(steps, parser)
+		if err != nil {
+			t.Fatalf("ApplyInlineExpansions failed: %v", err)
+		}
+
+		if len(result) != 4 {
+			t.Fatalf("expected 4 steps, got %d", len(result))
+		}
+
+		verify := result[3]
+		if verify.ID != "verify" {
+			t.Fatalf("result[3].ID = %q, want verify", verify.ID)
+		}
+		if len(verify.DependsOn) != 1 || verify.DependsOn[0] != "work.second" {
+			t.Errorf("verify.DependsOn = %v, want [work.second]", verify.DependsOn)
+		}
+
+		// The propagate direction is unchanged: work.first inherits the
+		// target's DependsOn.
+		if got := result[1].DependsOn; len(got) != 1 || got[0] != "setup" {
+			t.Errorf("work.first.DependsOn = %v, want [setup]", got)
+		}
+	})
+
+	t.Run("inline expand rewrites dependents at other nesting levels", func(t *testing.T) {
+		// A dependent that is not a later sibling of the expanded step must
+		// still be rewritten: compose's dependency update walks the whole
+		// tree, and inline has to match it.
+		expanded := func() *Step {
+			return &Step{ID: "work", Title: "Work", Expand: "inline-exp"}
+		}
+		cases := []struct {
+			name      string
+			steps     []*Step
+			dependent string
+		}{
+			{
+				name:      "dependent declared before the expanded step",
+				steps:     []*Step{{ID: "report", Title: "Report", Needs: []string{"work"}}, expanded()},
+				dependent: "report",
+			},
+			{
+				name: "expanded step nested, dependent at top level",
+				steps: []*Step{
+					{ID: "phase", Title: "Phase", Children: []*Step{expanded()}},
+					{ID: "final", Title: "Final", Needs: []string{"work"}},
+				},
+				dependent: "final",
+			},
+			{
+				name: "expanded step at top level, dependent nested",
+				steps: []*Step{
+					expanded(),
+					{ID: "phase", Title: "Phase", Children: []*Step{{ID: "check", Title: "Check", Needs: []string{"work"}}}},
+				},
+				dependent: "check",
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				result, err := ApplyInlineExpansions(tc.steps, parser)
+				if err != nil {
+					t.Fatalf("ApplyInlineExpansions failed: %v", err)
+				}
+
+				var dependent *Step
+				var walk func([]*Step)
+				walk = func(steps []*Step) {
+					for _, s := range steps {
+						if s.ID == tc.dependent {
+							dependent = s
+						}
+						walk(s.Children)
+					}
+				}
+				walk(result)
+				if dependent == nil {
+					t.Fatalf("dependent step %q missing from result", tc.dependent)
+				}
+				if len(dependent.Needs) != 1 || dependent.Needs[0] != "work.second" {
+					t.Errorf("%s.Needs = %v, want [work.second]", tc.dependent, dependent.Needs)
+				}
+			})
+		}
+	})
+
+	t.Run("inline expand rewrites needs between two expanded steps", func(t *testing.T) {
+		// Mirrors "expand two chained steps preserves cross-expansion deps"
+		// in TestApplyExpansionsCrossExpansionDeps, for both declaration
+		// orders.
+		for _, tc := range []struct {
+			name  string
+			steps []*Step
+		}{
+			{
+				name: "declaration order",
+				steps: []*Step{
+					{ID: "a", Title: "A", Expand: "inline-exp"},
+					{ID: "b", Title: "B", Needs: []string{"a"}, Expand: "inline-exp"},
+				},
+			},
+			{
+				name: "reverse declaration order",
+				steps: []*Step{
+					{ID: "b", Title: "B", Needs: []string{"a"}, Expand: "inline-exp"},
+					{ID: "a", Title: "A", Expand: "inline-exp"},
+				},
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				result, err := ApplyInlineExpansions(tc.steps, parser)
+				if err != nil {
+					t.Fatalf("ApplyInlineExpansions failed: %v", err)
+				}
+
+				if len(result) != 4 {
+					t.Fatalf("expected 4 steps, got %d", len(result))
+				}
+
+				byID := make(map[string]*Step)
+				var walk func([]*Step)
+				walk = func(steps []*Step) {
+					for _, s := range steps {
+						byID[s.ID] = s
+						walk(s.Children)
+					}
+				}
+				walk(result)
+
+				// The root of b's expansion needs the last step of a's
+				// expansion, and b's internal chain is preserved.
+				if got := byID["b.first"].Needs; len(got) != 1 || got[0] != "a.second" {
+					t.Errorf("b.first.Needs = %v, want [a.second]", got)
+				}
+				if got := byID["b.second"].Needs; len(got) != 1 || got[0] != "b.first" {
+					t.Errorf("b.second.Needs = %v, want [b.first]", got)
+				}
+
+				// No dependency may keep naming an expanded (replaced) step.
+				for id, s := range byID {
+					for _, n := range s.Needs {
+						if n == "a" || n == "b" {
+							t.Errorf("%s.Needs still names expanded step %q", id, n)
+						}
+					}
+					for _, d := range s.DependsOn {
+						if d == "a" || d == "b" {
+							t.Errorf("%s.DependsOn still names expanded step %q", id, d)
+						}
+					}
+				}
+			})
+		}
+	})
 }
 
 func TestFindDuplicateStepIDs(t *testing.T) {
@@ -1268,6 +1494,289 @@ func TestExpansionVarRefs(t *testing.T) {
 		noTemplate := &Formula{Formula: "exp", Type: TypeExpansion}
 		if got := ExpansionVarRefs(noTemplate, "main"); got != nil {
 			t.Errorf("expansion without a template: ExpansionVarRefs() = %v, want nil", got)
+		}
+	})
+}
+
+// TestApplyInlineExpansionsRewritesDependentNeeds pins issue #7637: another
+// step's needs on an inline-expanded step must point at the expansion's last
+// step, as the [[compose.expand]] path does.
+func TestApplyInlineExpansionsRewritesDependentNeeds(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	expansion := `{
+		"formula": "round",
+		"type": "expansion",
+		"version": 1,
+		"template": [
+			{"id": "implement", "title": "Implement"},
+			{"id": "triage", "title": "Triage", "needs": ["implement"]}
+		]
+	}`
+	if err := os.WriteFile(filepath.Join(tmpDir, "round.formula.json"), []byte(expansion), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	steps := []*Step{
+		{ID: "brief", Title: "Brief"},
+		{ID: "round", Title: "Round", Needs: []string{"brief"}, Expand: "round"},
+		{ID: "land", Title: "Land", Needs: []string{"round"}},
+	}
+
+	result, err := ApplyInlineExpansions(steps, NewParser(tmpDir))
+	if err != nil {
+		t.Fatalf("ApplyInlineExpansions failed: %v", err)
+	}
+
+	var land *Step
+	for _, s := range result {
+		if s.ID == "land" {
+			land = s
+		}
+	}
+	if land == nil {
+		t.Fatalf("land step missing from result")
+	}
+	if len(land.Needs) != 1 || land.Needs[0] != "triage" {
+		t.Errorf("land.Needs = %v, want [triage] (the expansion's last step)", land.Needs)
+	}
+}
+
+// TestApplyInlineExpansionsDuplicateIDs mirrors TestApplyExpansionsDuplicateIDs
+// for inline expansion. A template whose step IDs do not use {target} yields
+// the same IDs each time it is expanded, and once dependents point at the
+// expansion's last step, two such expansions chained by needs form a cycle.
+func TestApplyInlineExpansionsDuplicateIDs(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	expansion := `{
+		"formula": "round",
+		"type": "expansion",
+		"version": 1,
+		"template": [
+			{"id": "implement", "title": "Implement"},
+			{"id": "triage", "title": "Triage", "needs": ["implement"]}
+		]
+	}`
+	if err := os.WriteFile(filepath.Join(tmpDir, "round.formula.json"), []byte(expansion), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	parser := NewParser(tmpDir)
+
+	for _, tc := range []struct {
+		name  string
+		steps []*Step
+		dups  []string
+	}{
+		{
+			name: "bare-ID template expanded twice",
+			steps: []*Step{
+				{ID: "round1", Title: "Round 1", Expand: "round"},
+				{ID: "round2", Title: "Round 2", Needs: []string{"round1"}, Expand: "round"},
+			},
+			dups: []string{"implement", "triage"},
+		},
+		{
+			name: "expansion collides with an existing step",
+			steps: []*Step{
+				{ID: "triage", Title: "Existing triage"},
+				{ID: "round", Title: "Round", Expand: "round"},
+			},
+			dups: []string{"triage"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ApplyInlineExpansions(tc.steps, parser)
+			if err == nil {
+				t.Fatal("expected error for duplicate step IDs, got nil")
+			}
+			if !strings.Contains(err.Error(), "duplicate step IDs") {
+				t.Errorf("expected duplicate step IDs error, got: %v", err)
+			}
+			for _, id := range tc.dups {
+				if !strings.Contains(err.Error(), id) {
+					t.Errorf("expected error to mention %q, got: %v", id, err)
+				}
+			}
+			if !errors.Is(err, ErrValidation) {
+				t.Errorf("errors.Is(err, ErrValidation) = false for %v", err)
+			}
+		})
+	}
+
+	// ApplyInlineExpansions runs on every cook, so the check applies only
+	// when a step was inline-expanded: a formula without inline expansions
+	// comes back as before.
+	t.Run("no inline expansion leaves the steps alone", func(t *testing.T) {
+		steps := []*Step{
+			{ID: "check", Title: "Check"},
+			{ID: "check", Title: "Check again"},
+		}
+
+		result, err := ApplyInlineExpansions(steps, parser)
+		if err != nil {
+			t.Fatalf("ApplyInlineExpansions failed: %v", err)
+		}
+		if len(result) != 2 {
+			t.Errorf("expected 2 steps, got %d", len(result))
+		}
+	})
+}
+
+// TestApplyInlineExpansionsReusedExpandedID: dependents of an inline-expanded
+// step are pointed at its expansion's last step after the walk, over the
+// whole tree. A step left after expansion with the expanded step's ID would
+// have its own dependents retargeted the same way: silently wrong ordering, a
+// cycle, or a self-edge that pour refuses. Such an expansion is refused,
+// except when the reused ID is the last step of that step's own expansion,
+// where the rewrite changes nothing.
+func TestApplyInlineExpansionsReusedExpandedID(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	templates := map[string]string{
+		// The issue #7637 template: its step IDs do not use {target}.
+		"round": `[
+			{"id": "implement", "title": "Implement"},
+			{"id": "triage", "title": "Triage", "needs": ["implement"]}
+		]`,
+		"split": `[
+			{"id": "{target}.a", "title": "A"},
+			{"id": "{target}.b", "title": "B", "needs": ["{target}.a"]}
+		]`,
+		"self-named": `[
+			{"id": "design", "title": "Design"},
+			{"id": "implement", "title": "Implement", "needs": ["design"]},
+			{"id": "verify", "title": "Verify", "needs": ["implement"]}
+		]`,
+		"keep-first": `[
+			{"id": "{target}", "title": "{target.title}"},
+			{"id": "{target}.verify", "title": "Verify", "needs": ["{target}"]}
+		]`,
+		"code-ship": `[
+			{"id": "code", "title": "Code"},
+			{"id": "ship", "title": "Ship", "needs": ["code"]}
+		]`,
+		"keep-last": `[
+			{"id": "{target}.prep", "title": "Prepare"},
+			{"id": "{target}", "title": "{target.title}", "needs": ["{target}.prep"]}
+		]`,
+	}
+	for name, template := range templates {
+		expansion := fmt.Sprintf(`{"formula": %q, "type": "expansion", "version": 1, "template": %s}`, name, template)
+		if err := os.WriteFile(filepath.Join(tmpDir, name+".formula.json"), []byte(expansion), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	parser := NewParser(tmpDir)
+
+	for _, tc := range []struct {
+		name  string
+		steps []*Step
+		want  string
+	}{
+		{
+			// Rewriting implement's dependents would point round's own
+			// triage at implement.b.
+			name: "another expansion has a step with the expanded step's ID",
+			steps: []*Step{
+				{ID: "implement", Title: "Implement", Expand: "split"},
+				{ID: "round1", Title: "Round 1", Expand: "round"},
+				{ID: "land", Title: "Land", Needs: []string{"round1"}},
+			},
+			want: `inline expand on step "implement": another step reuses its ID`,
+		},
+		{
+			// The same shape under a parent step: step IDs are checked at
+			// every nesting level, not only the top one.
+			name: "a nested expansion has a step with the expanded step's ID",
+			steps: []*Step{
+				{ID: "phase", Title: "Phase", Children: []*Step{
+					{ID: "implement", Title: "Implement", Expand: "split"},
+					{ID: "round1", Title: "Round 1", Expand: "round"},
+				}},
+				{ID: "land", Title: "Land", Needs: []string{"round1"}},
+			},
+			want: `inline expand on step "implement": another step reuses its ID`,
+		},
+		{
+			// Rewriting implement's dependents would make verify need
+			// itself.
+			name: "the expansion has a step with its own target's ID",
+			steps: []*Step{
+				{ID: "implement", Title: "Implement", Expand: "self-named"},
+				{ID: "land", Title: "Land", Needs: []string{"implement"}},
+			},
+			want: `inline expand on step "implement": another step reuses its ID`,
+		},
+		{
+			name: "the expansion keeps its target's ID on a step that is not its last",
+			steps: []*Step{
+				{ID: "implement", Title: "Implement", Expand: "keep-first"},
+				{ID: "land", Title: "Land", Needs: []string{"implement"}},
+			},
+			want: `inline expand on step "implement": another step reuses its ID`,
+		},
+		{
+			// done's needs on work become ship, the last step of work's
+			// expansion, and rewriting the expanded ship's dependents would
+			// chain them on to triage: implement and triage would need each
+			// other.
+			name: "an expansion's last step has another expanded step's ID",
+			steps: []*Step{
+				{ID: "work", Title: "Work", Expand: "code-ship"},
+				{ID: "ship", Title: "Ship", Needs: []string{"work"}, Expand: "round"},
+				{ID: "done", Title: "Done", Needs: []string{"work"}},
+			},
+			want: `inline expand on step "ship": another step reuses its ID`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ApplyInlineExpansions(tc.steps, parser)
+			if err == nil {
+				t.Fatal("expected an error for a reused expanded step ID, got nil")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %v, want it to contain %q", err, tc.want)
+			}
+			if !errors.Is(err, ErrValidation) {
+				t.Errorf("errors.Is(err, ErrValidation) = false for %v", err)
+			}
+		})
+	}
+
+	t.Run("the expansion's last step keeps its target's ID", func(t *testing.T) {
+		steps := []*Step{
+			{ID: "brief", Title: "Brief"},
+			{ID: "implement", Title: "Implement", Needs: []string{"brief"}, Expand: "keep-last"},
+			{ID: "land", Title: "Land", Needs: []string{"implement"}},
+		}
+
+		result, err := ApplyInlineExpansions(steps, parser)
+		if err != nil {
+			t.Fatalf("ApplyInlineExpansions failed: %v", err)
+		}
+
+		want := []struct {
+			id    string
+			needs []string
+		}{
+			{"brief", nil},
+			{"implement.prep", []string{"brief"}},
+			{"implement", []string{"implement.prep"}},
+			{"land", []string{"implement"}},
+		}
+		if len(result) != len(want) {
+			t.Fatalf("expected %d steps, got %d", len(want), len(result))
+		}
+		for i, w := range want {
+			if result[i].ID != w.id {
+				t.Errorf("result[%d].ID = %q, want %q", i, result[i].ID, w.id)
+			}
+			if fmt.Sprint(result[i].Needs) != fmt.Sprint(w.needs) {
+				t.Errorf("%s.Needs = %v, want %v", w.id, result[i].Needs, w.needs)
+			}
 		}
 	})
 }

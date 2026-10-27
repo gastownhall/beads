@@ -502,17 +502,75 @@ func ExpansionVarRefs(f *Formula, targetID string) []string {
 //
 // Returns a new steps slice with inline expansions applied.
 // The original steps slice is not modified.
+//
+// Steps that depended on an expanded step depend on the last step of its
+// expansion, as with compose.expand. It is an error for step IDs to repeat
+// after expansion, or for an expanded step's ID to remain on any step but the
+// last step of its own expansion; both errors wrap ErrValidation.
 func ApplyInlineExpansions(steps []*Step, parser *Parser) ([]*Step, error) {
 	if parser == nil {
 		return steps, nil
 	}
 
-	return applyInlineExpansionsRecursive(steps, parser, 0)
+	var replaced []inlineExpansion
+	result, err := applyInlineExpansionsRecursive(steps, parser, 0, &replaced)
+	if err != nil {
+		return nil, err
+	}
+	// The checks below run only when a step was expanded, so a formula
+	// without inline expansions cooks as before.
+	if len(replaced) == 0 {
+		return result, nil
+	}
+
+	// Validate no duplicate step IDs after expansion, as ApplyExpansions does.
+	// A template whose step IDs do not use {target} yields the same IDs each
+	// time it is expanded, and cook cannot tell the copies apart: two such
+	// expansions chained by needs would cook into a dependency cycle.
+	if dups := findDuplicateStepIDs(result); len(dups) > 0 {
+		return nil, fmt.Errorf("%w: duplicate step IDs after expansion: %v", ErrValidation, dups)
+	}
+
+	// The rewrite below points every needs/depends_on naming an expanded
+	// step at the last step of its expansion, anywhere in the tree. A step
+	// that still has that ID after expansion would have its dependents
+	// retargeted as well, onto the wrong step, into a cycle or onto itself,
+	// so it is refused. The exception is the expansion's own last step
+	// keeping the ID ({target}): the rewrite then changes nothing.
+	counts := make(map[string]int)
+	countStepIDs(result, counts)
+	for _, r := range replaced {
+		if counts[r.targetID] > 0 && r.lastStepID != r.targetID {
+			return nil, fmt.Errorf("%w: inline expand on step %q: another step reuses its ID after expansion, but dependencies on %q point at %q, the last step of its expansion",
+				ErrValidation, r.targetID, r.targetID, r.lastStepID)
+		}
+	}
+
+	// Steps that depended on an expanded step now depend on the last step of
+	// its expansion, as ApplyExpansions does for compose.expand. Applied
+	// after the walk because the dependent can be declared before the
+	// expanded step, sit at another nesting level, or be inline-expanded
+	// itself (propagateTargetDeps copied the raw ID onto its roots).
+	for _, r := range replaced {
+		result = UpdateDependenciesForExpansion(result, r.targetID, r.lastStepID)
+	}
+
+	return result, nil
+}
+
+// inlineExpansion records one inline expansion applied during the walk: the
+// expanded step's ID and the ID of the last step of the expansion that
+// replaced it.
+type inlineExpansion struct {
+	targetID   string
+	lastStepID string
 }
 
 // applyInlineExpansionsRecursive handles inline expansions for a slice of steps.
-// depth tracks recursion to prevent infinite expansion loops.
-func applyInlineExpansionsRecursive(steps []*Step, parser *Parser, depth int) ([]*Step, error) {
+// depth tracks recursion to prevent infinite expansion loops. replaced
+// accumulates every inline expansion applied anywhere in the walk, in document
+// order, so ApplyInlineExpansions can rewrite dependents afterwards.
+func applyInlineExpansionsRecursive(steps []*Step, parser *Parser, depth int, replaced *[]inlineExpansion) ([]*Step, error) {
 	if depth > DefaultMaxExpansionDepth {
 		return nil, fmt.Errorf("inline expansion depth limit exceeded: max %d levels", DefaultMaxExpansionDepth)
 	}
@@ -550,9 +608,20 @@ func applyInlineExpansionsRecursive(steps []*Step, parser *Parser, depth int) ([
 			propagateTargetDeps(step, expandedSteps)
 
 			// Recursively process expanded steps for nested inline expansions
-			processedSteps, err := applyInlineExpansionsRecursive(expandedSteps, parser, depth+1)
+			processedSteps, err := applyInlineExpansionsRecursive(expandedSteps, parser, depth+1, replaced)
 			if err != nil {
 				return nil, err
+			}
+
+			// Record the replacement so dependents of step.ID can be pointed
+			// at the expansion's last step afterwards. Taken from the
+			// processed steps so the record stays correct if that last step
+			// is itself inline-expanded.
+			if len(processedSteps) > 0 {
+				*replaced = append(*replaced, inlineExpansion{
+					targetID:   step.ID,
+					lastStepID: processedSteps[len(processedSteps)-1].ID,
+				})
 			}
 
 			result = append(result, processedSteps...)
@@ -561,7 +630,7 @@ func applyInlineExpansionsRecursive(steps []*Step, parser *Parser, depth int) ([
 			clone := cloneStep(step)
 
 			if len(step.Children) > 0 {
-				processedChildren, err := applyInlineExpansionsRecursive(step.Children, parser, depth)
+				processedChildren, err := applyInlineExpansionsRecursive(step.Children, parser, depth, replaced)
 				if err != nil {
 					return nil, err
 				}

@@ -1149,6 +1149,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   give up after 5 seconds on a server that accepts the connection but
   never sends the MySQL greeting, such as a stopped or paused
   `sql-server`, where they waited forever.
+- `bd cook` / `bd mol pour` now point a `needs`/`depends_on` on an
+  inline-`expand`ed step at the expansion's last step, as `[[compose.expand]]`
+  does. Before, the dependency was silently dropped and the dependent was
+  ready at pour (#7637). Inline expansions that produce the same step ID
+  twice, such as a template without `{target}` in its step IDs expanded on
+  two steps, are now refused with `duplicate step IDs after expansion`, as
+  `[[compose.expand]]` already refuses them. No step may keep an
+  inline-expanded step's ID after expansion, unless it is the last step of
+  that step's own expansion (`id = "{target}"`): cook refuses such a formula
+  rather than silently point its dependencies at the wrong step.
 - The batched bulk readers no longer return an issue's rows twice when the
   same id is requested twice. Since the 200-id batching (#6444), an id that
   appeared in two batches had its comments, labels, dependency records,
