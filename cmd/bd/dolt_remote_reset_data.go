@@ -214,11 +214,17 @@ Examples:
 	SilenceErrors: true,
 	Args:          cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		CheckReadonly("dolt remote reset-data")
+		if err := readonlyError("dolt remote reset-data"); err != nil {
+			return err
+		}
 		name := args[0]
 
 		if usesProxiedServer() {
 			return HandleErrorRespectJSON("bd dolt remote reset-data is not supported over a proxied bd server; run it from the workspace that hosts the Dolt database")
+		}
+		if isNoPush() {
+			fmt.Fprintln(os.Stderr, "Error: cannot reset remote data: rig is local-only (no-push: true).")
+			return SilentExit()
 		}
 		if isDoltLocalOnly() {
 			fmt.Fprintln(os.Stderr, "Error: cannot reset remote data: remote sync is disabled (dolt.local-only=true).")

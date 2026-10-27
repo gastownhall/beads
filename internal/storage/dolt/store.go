@@ -5178,9 +5178,24 @@ func logRouteDecision(op, remote string, cli bool) {
 	debug.Logf("dolt %s route: %s (remote=%q)\n", op, route, remote)
 }
 
+// validateRemoteOperand refuses a remote name Dolt would parse as an option
+// rather than as the remote operand of DOLT_PUSH/DOLT_PULL/DOLT_FETCH.
+func validateRemoteOperand(remote string) error {
+	if strings.HasPrefix(remote, "-") {
+		return fmt.Errorf("invalid remote name %q: must not start with '-'", remote)
+	}
+	return nil
+}
+
 // pushToRemote is the internal implementation for all push operations.
 // It routes through CLI or SQL based on the remote's protocol and credentials.
 func (s *DoltStore) pushToRemote(ctx context.Context, remote string, force bool) (retErr error) {
+	if s.readOnly && !s.classifiedRead {
+		return fmt.Errorf("cannot push to %s: store is read-only", remote)
+	}
+	if err := validateRemoteOperand(remote); err != nil {
+		return err
+	}
 	spanName := "dolt.push"
 	if force {
 		spanName = "dolt.force_push"
@@ -5290,6 +5305,9 @@ func (s *DoltStore) PullRemote(ctx context.Context, remote string) error {
 // pullFromRemote is the internal implementation for all pull operations.
 // It routes through CLI or SQL based on the remote's protocol and credentials.
 func (s *DoltStore) pullFromRemote(ctx context.Context, remote string) (retErr error) {
+	if err := validateRemoteOperand(remote); err != nil {
+		return err
+	}
 	return s.withCircuitWrite(ctx, func(ctx context.Context) error {
 		return s.pullFromRemoteUnchecked(ctx, remote)
 	})

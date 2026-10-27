@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/storage"
 )
 
 type fakeAutoPushTarget struct {
@@ -290,4 +291,71 @@ func TestPushedCommitForState(t *testing.T) {
 			t.Fatalf("pushedCommitForState() = %q, want %q (pre-push fallback)", got, "before")
 		}
 	})
+}
+
+type fakeAutoPushStore struct {
+	storage.DoltStorage
+	pushCalls int
+}
+
+func (f *fakeAutoPushStore) GetCurrentCommit(context.Context) (string, error) {
+	return "abc123", nil
+}
+
+func (f *fakeAutoPushStore) Push(context.Context) error {
+	f.pushCalls++
+	return nil
+}
+
+func TestMaybeAutoPush_HonorsNoPush(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		noPush     bool
+		envNoPush  string
+		wantPushes int
+	}{
+		{name: "no-push set in config", noPush: true, wantPushes: 0},
+		{name: "BD_NO_PUSH overrides shared config auto-push", noPush: false, envNoPush: "true", wantPushes: 0},
+		{name: "no-push unset", noPush: false, wantPushes: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			beadsDir := filepath.Join(t.TempDir(), ".beads")
+			if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("dolt:\n  auto-push: true\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("BEADS_DIR", beadsDir)
+			t.Setenv("BD_DOLT_AUTO_PUSH", "true")
+			if tc.envNoPush != "" {
+				t.Setenv("BD_NO_PUSH", tc.envNoPush)
+			}
+			config.ResetForTesting()
+			t.Cleanup(func() { config.ResetForTesting() })
+			if err := config.Initialize(); err != nil {
+				t.Fatalf("config.Initialize: %v", err)
+			}
+			if tc.noPush {
+				config.Set("no-push", true)
+			}
+
+			oldStore, oldCmdCtx, oldUseGlobals := store, cmdCtx, testModeUseGlobals
+			testModeUseGlobals = true
+			cmdCtx = nil
+			t.Cleanup(func() {
+				store, cmdCtx, testModeUseGlobals = oldStore, oldCmdCtx, oldUseGlobals
+			})
+			fake := &fakeAutoPushStore{}
+			setStore(fake)
+
+			maybeAutoPush(context.Background())
+			if fake.pushCalls != tc.wantPushes {
+				t.Fatalf("Push calls = %d, want %d", fake.pushCalls, tc.wantPushes)
+			}
+		})
+	}
 }

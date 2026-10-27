@@ -149,6 +149,12 @@ func getFederatedStore() (storage.DoltStorage, error) {
 }
 
 func runFederationSync(cmd *cobra.Command, args []string) error {
+	if err := readonlyError("federation sync"); err != nil {
+		return err
+	}
+	if isNoPush() {
+		return HandleErrorRespectJSON("cannot run federation sync: rig is local-only (no-push: true)")
+	}
 	if usesProxiedServer() {
 		return HandleErrorRespectJSON("federation sync is not supported in proxied-server mode")
 	}

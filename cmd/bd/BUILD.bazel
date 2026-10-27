@@ -1126,6 +1126,7 @@ go_test(
         "quickstart_embedded_test.go",
         "race_detector_off_test.go",
         "race_detector_on_test.go",
+        "readonly_federation_test.go",
         "readonly_policy_test.go",
         "readonly_test.go",
         "ready_embedded_test.go",

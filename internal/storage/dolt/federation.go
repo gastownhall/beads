@@ -40,6 +40,12 @@ func (s *DoltStore) PushTo(ctx context.Context, peer string) error {
 // pushRefToPeer pushes a specific refspec to a peer remote. The refspec can be
 // a simple branch name ("main") or a mapping ("staging:main").
 func (s *DoltStore) pushRefToPeer(ctx context.Context, peer string, refspec string) error {
+	if s.readOnly && !s.classifiedRead {
+		return fmt.Errorf("cannot push to %s: store is read-only", peer)
+	}
+	if err := validateRemoteOperand(peer); err != nil {
+		return err
+	}
 	if useCLI, err := s.prepareCLIRouteForPeerGitProtocol(ctx, peer); err != nil {
 		return err
 	} else if useCLI {
@@ -77,6 +83,9 @@ func (s *DoltStore) PullFrom(ctx context.Context, peer string) ([]storage.Confli
 }
 
 func (s *DoltStore) pullFromPeer(ctx context.Context, peer string) ([]storage.Conflict, error) {
+	if err := validateRemoteOperand(peer); err != nil {
+		return nil, err
+	}
 	// GH#2474: Auto-commit pending changes before pull to prevent
 	// "cannot merge with uncommitted changes" errors.
 	if !s.readOnly {
@@ -491,6 +500,12 @@ func (s *DoltStore) Sync(ctx context.Context, peer string, strategy string) (*Sy
 // issues table. Wisps normally live in dolt_ignore'd tables and are not pushed,
 // so this acts as a defense-in-depth safety net.
 func (s *DoltStore) filteredPushToPeer(ctx context.Context, peer string, excludeTypes []string) (retErr error) {
+	if s.readOnly && !s.classifiedRead {
+		return fmt.Errorf("cannot push to %s: store is read-only", peer)
+	}
+	if err := validateRemoteOperand(peer); err != nil {
+		return err
+	}
 	if len(excludeTypes) == 0 {
 		return s.PushTo(ctx, peer)
 	}

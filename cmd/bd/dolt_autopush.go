@@ -129,6 +129,10 @@ func maybeAutoPush(ctx context.Context) {
 		debug.Logf("dolt auto-push: skipped (dolt.local-only=true)\n")
 		return
 	}
+	if isNoPush() {
+		debug.Logf("dolt auto-push: skipped (no-push=true)\n")
+		return
+	}
 	if !isDoltAutoPushEnabled(ctx) {
 		return
 	}

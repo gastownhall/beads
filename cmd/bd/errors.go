@@ -226,6 +226,16 @@ func CheckReadonly(operation string) {
 	}
 }
 
+// readonlyError is CheckReadonly's read-only refusal for callers that return
+// their error instead of exiting.
+func readonlyError(operation string) error {
+	if !readonlyMode {
+		return nil
+	}
+	fmt.Fprintf(os.Stderr, "Error: operation '%s' is not allowed in read-only mode\n", operation)
+	return &exitError{Code: 1}
+}
+
 // freezeSearchRoots returns the directories whose ancestry the freeze lookup
 // must cover in addition to the working directory: the resolved workspace, so
 // the gate keys on the store being written rather than on the caller's shell.

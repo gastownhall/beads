@@ -597,6 +597,11 @@ func printDivergedHistoryGuidance(operation string) {
 	fmt.Fprintln(os.Stderr, "existing remote instead of 'bd init' to avoid divergent histories.")
 }
 
+// isNoPush reports whether publishing is off for this rig (no-push: true).
+func isNoPush() bool {
+	return config.GetBool("no-push")
+}
+
 var doltPushCmd = &cobra.Command{
 	Use:           "push",
 	SilenceUsage:  true,
@@ -617,7 +622,10 @@ uncommitted changes in its working set).
 Use --remote to push to a specific named remote instead of the default.
 The remote must already exist (see 'bd dolt remote add').`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if config.GetBool("no-push") {
+		if err := readonlyError("dolt push"); err != nil {
+			return err
+		}
+		if isNoPush() {
 			fmt.Println("skipping push: rig is local-only (no-push: true)")
 			return nil
 		}
@@ -1733,6 +1741,9 @@ clean-databases runs even if this run finds no stale databases to drop.
 Only pass it when nothing else on the server may be relying on DOLT_UNDROP
 recovery.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := readonlyError("dolt clean-databases"); err != nil {
+			return err
+		}
 		beadsDir := selectedDoltBeadsDir()
 		if beadsDir == "" {
 			return HandleErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
