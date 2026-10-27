@@ -1,0 +1,124 @@
+package schema
+
+import (
+	"os"
+	"strings"
+	"testing"
+)
+
+// Migration 0073 (+ ignored/0029) adds arrival_seq, the commit-ordered create
+// sequence the events journal stamps on a wisp-plane row
+// (types.Issue.ArrivalSeq, issueops.RecordEventInTx).
+
+const (
+	migration0073Up        = "0073_add_arrival_seq.up.sql"
+	migration0073Down      = "0073_add_arrival_seq.down.sql"
+	ignoredMigration0029Up = "0029_add_wisps_arrival_seq.up.sql"
+)
+
+// TestLatestVersionIncludesMigration0073 pins the slots 0073 and ignored/0029
+// claim, superseding 0072's own version of this test. A hardcoded literal for
+// the same reason 0067's to 0072's were: LatestVersion() drifting to 73 for an
+// unrelated reason should fail here, where the message names what 73 is
+// supposed to be.
+func TestLatestVersionIncludesMigration0073(t *testing.T) {
+	const want = 73
+	if got := LatestVersion(); got != want {
+		t.Fatalf("LatestVersion() = %d, want %d (arrival_seq migration slot)", got, want)
+	}
+	const wantIgnored = 29
+	if got := LatestIgnoredVersion(); got != wantIgnored {
+		t.Fatalf("LatestIgnoredVersion() = %d, want %d (wisps.arrival_seq twin and its unique index)", got, wantIgnored)
+	}
+}
+
+// TestMigration0073AddsArrivalSeqToBothPlanes checks the frozen bytes and the
+// CLI-bundle substitute directly, no dolt binary required.
+func TestMigration0073AddsArrivalSeqToBothPlanes(t *testing.T) {
+	upSQL, err := MigrationSQL(migration0073Up)
+	if err != nil {
+		t.Fatalf("MigrationSQL(%s) error = %v, want the migration file to exist", migration0073Up, err)
+	}
+	for _, want := range []string{
+		"'ALTER TABLE issues ADD COLUMN arrival_seq BIGINT'",
+		"'ALTER TABLE wisps ADD COLUMN arrival_seq BIGINT'",
+		"COLUMN_NAME = 'arrival_seq'",
+		// The wisps arm is guarded on the TABLE existing, not only on the
+		// column: older workspaces created issues-only (0054 precedent).
+		"INFORMATION_SCHEMA.TABLES",
+	} {
+		if !strings.Contains(upSQL, want) {
+			t.Errorf("0073 up migration missing %q\nfull SQL:\n%s", want, upSQL)
+		}
+	}
+	if !strings.Contains(strings.ToUpper(upSQL), "PREPARE STMT FROM @SQL") {
+		t.Error("0073 must keep its guarded PREPARE blocks: they make a raw .up.sql replay onto an already-migrated store a no-op")
+	}
+	// The column is nullable with no default on purpose: NULL is "never
+	// stamped", and a DEFAULT would rewrite every existing row's cell.
+	for _, forbidden := range []string{"DEFAULT", "NOT NULL"} {
+		for _, line := range strings.Split(upSQL, "\n") {
+			if strings.HasPrefix(strings.TrimSpace(line), "--") {
+				continue
+			}
+			if strings.Contains(strings.ToUpper(line), forbidden) && strings.Contains(line, "arrival_seq") {
+				t.Errorf("0073 declares arrival_seq with %q (%s); the column must be a bare nullable BIGINT", forbidden, strings.TrimSpace(line))
+			}
+		}
+	}
+	// No index on the replicating issues table, and the wisps index belongs to
+	// the ignored twin: the column is meaningless on issues.
+	if strings.Contains(strings.ToUpper(upSQL), "CREATE UNIQUE INDEX") {
+		t.Error("0073 must not create the unique index: it belongs to the clone-local ignored/0029")
+	}
+
+	bundle := cliCompatibleMigrationSQL(migration0073Up, upSQL)
+	for _, want := range []string{
+		"ALTER TABLE issues ADD COLUMN arrival_seq BIGINT;",
+		"ALTER TABLE wisps ADD COLUMN arrival_seq BIGINT;",
+	} {
+		if !strings.Contains(bundle, want) {
+			t.Errorf("0073's CLI bundle substitute missing direct DDL %q: a pre-2.3 CLI no-ops the prepared ALTER", want)
+		}
+	}
+	if !cliSubstituteAssumesWispTables(migration0073Up) {
+		t.Error("0073's CLI substitute ALTERs wisps unguarded, so it must be listed in cliSubstituteAssumesWispTables")
+	}
+
+	downBytes, err := os.ReadFile("migrations/" + migration0073Down)
+	if err != nil {
+		t.Fatalf("read %s: %v", migration0073Down, err)
+	}
+	downSQL := string(downBytes)
+	for _, want := range []string{
+		"'ALTER TABLE issues DROP COLUMN arrival_seq'",
+		"'ALTER TABLE wisps DROP COLUMN arrival_seq'",
+	} {
+		if !strings.Contains(downSQL, want) {
+			t.Errorf("0073 down migration missing %q\nfull SQL:\n%s", want, downSQL)
+		}
+	}
+}
+
+// TestIgnoredMigration0029CarriesTheColumnAndTheUniqueIndex pins the twin that
+// reaches fresh clones, and the unique index that makes a stamp impossible to
+// hand out twice.
+func TestIgnoredMigration0029CarriesTheColumnAndTheUniqueIndex(t *testing.T) {
+	upSQL, err := IgnoredMigrationSQL(ignoredMigration0029Up)
+	if err != nil {
+		t.Fatalf("IgnoredMigrationSQL(%s) error = %v", ignoredMigration0029Up, err)
+	}
+	for _, want := range []string{
+		"'ALTER TABLE wisps ADD COLUMN arrival_seq BIGINT'",
+		"'CREATE UNIQUE INDEX uk_wisps_arrival_seq ON wisps (arrival_seq)'",
+		"INDEX_NAME = 'uk_wisps_arrival_seq'",
+		"INFORMATION_SCHEMA.TABLES",
+	} {
+		if !strings.Contains(upSQL, want) {
+			t.Errorf("ignored/0029 missing %q\nfull SQL:\n%s", want, upSQL)
+		}
+	}
+	if strings.Contains(upSQL, "ALTER TABLE issues") {
+		t.Error("ignored/0029 must not touch issues: it is a replicated table the ignored series never owns")
+	}
+}

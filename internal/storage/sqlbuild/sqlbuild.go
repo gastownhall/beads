@@ -52,7 +52,7 @@ const IssueBaseColumns = `id, content_hash, title, description, design, acceptan
 	       mol_type,
 	       event_kind, actor, target, payload,
 	       due_at, defer_until,
-	       work_type, source_system, metadata, row_lock, storage_class`
+	       work_type, source_system, metadata, row_lock, storage_class, arrival_seq`
 
 // IssueBaseColumnsLite is IssueBaseColumns minus the heavy TEXT columns
 // (issueops.HeavyDropList). It lives here rather than beside its scan function
@@ -70,7 +70,7 @@ const IssueBaseColumnsLite = `id, content_hash, title,
 	       mol_type,
 	       event_kind, actor, target,
 	       due_at, defer_until,
-	       work_type, source_system, metadata, row_lock, storage_class`
+	       work_type, source_system, metadata, row_lock, storage_class, arrival_seq`
 
 // LeaseSelectColumns is the lease overlay for full issue hydration. Leases
 // live in the ephemeral leases table (bd-lrgn1), not on the issues row, so
