@@ -144,6 +144,10 @@ type PullStats struct {
 	Updated     int
 	Skipped     int
 	Errors      int
+	// Conflicts counts conflicts resolved inside the pull: pull-only syncs
+	// decide them per the configured strategy; bidirectional syncs decide
+	// them in Phase 1 (resolveConflicts) and leave this zero.
+	Conflicts   int
 	Incremental bool
 	SyncedSince string
 }
