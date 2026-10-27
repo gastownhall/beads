@@ -372,6 +372,31 @@ func TestMaybeAutoPush_NoGitOpsDoesNotPush(t *testing.T) {
 			t.Error("push-state.json was created although auto-push never ran")
 		}
 	})
+
+	t.Run("explicit_auto_push", func(t *testing.T) {
+		// no-git-ops does not override an explicit dolt.auto-push opt-in:
+		// a stealth workspace that deliberately configured replication
+		// keeps it (GH#3463 expected behavior, second bullet).
+		beadsDir, fake := setupNoGitOpsAutoPushWorkspace(t, "no-git-ops: true\ndolt:\n  auto-push: true\n")
+		if !config.GetBool("dolt.auto-push") {
+			t.Fatal("precondition: dolt.auto-push must be read from the workspace config.yaml")
+		}
+
+		maybeAutoPush(context.Background())
+
+		if fake.pushCalls != 1 {
+			t.Fatalf("Push calls = %d, want 1 (no-git-ops must not override an explicit dolt.auto-push opt-in)", fake.pushCalls)
+		}
+		if _, err := os.Stat(filepath.Join(beadsDir, "push-state.json")); err != nil {
+			t.Fatalf("push-state.json must exist after a successful auto-push: %v", err)
+		}
+
+		// The debounce window must hold for an immediate second tick.
+		maybeAutoPush(context.Background())
+		if fake.pushCalls != 1 {
+			t.Errorf("Push calls after an immediate second tick = %d, want 1 (debounce interval still open)", fake.pushCalls)
+		}
+	})
 }
 
 // TestPushedCommitForState pins the push-state hash recorded after a successful
