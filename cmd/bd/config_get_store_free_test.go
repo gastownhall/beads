@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/spf13/cobra"
+
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 )
@@ -98,6 +100,38 @@ func TestPersistentPreRunSkipsStoreForStoreFreeConfigGet(t *testing.T) {
 				t.Errorf("config get %s must not write .beads/%s", key, localVersionFile)
 			} else if !os.IsNotExist(err) {
 				t.Fatalf("stat %s: %v", localVersionFile, err)
+			}
+		})
+	}
+
+	// Control: a DB-backed key must still attempt store init and fail on the
+	// absent server, proving the fixture above really reaches the store path
+	// for a key the classification does not exempt (as at base).
+	resetPreRunGlobals()
+	if err := rootCmd.PersistentPreRunE(configGetCmd, []string{"storage.backend"}); err == nil {
+		t.Fatal("config get storage.backend should still attempt store init and fail on the absent database; test-environment precondition broken")
+	}
+
+	// The exemption is pinned to the `config get` command path, not to the
+	// classifier alone: configCommandCanRunWithoutStore also answers true for
+	// `config set`/`config unset` on a yaml-only key, and a leaf-name match
+	// would sweep in every other `get`. These must keep attempting store init
+	// (and failing on the absent server) exactly as at base.
+	mustStillOpenStore := []struct {
+		name string
+		cmd  *cobra.Command
+		args []string
+	}{
+		{"config set", configSetCmd, []string{"dolt.max-conns", "8"}},
+		{"config unset", configUnsetCmd, []string{"dolt.max-conns"}},
+		{"config list", configListCmd, nil},
+		{"kv get", kvGetCmd, []string{"k"}},
+	}
+	for _, tc := range mustStillOpenStore {
+		t.Run(tc.name+" still attempts store init", func(t *testing.T) {
+			resetPreRunGlobals()
+			if err := rootCmd.PersistentPreRunE(tc.cmd, tc.args); err == nil {
+				t.Errorf("%s must still attempt store init and fail on the absent database", tc.name)
 			}
 		})
 	}
