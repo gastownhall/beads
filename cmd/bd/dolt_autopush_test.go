@@ -400,4 +400,16 @@ func TestMaybeAutoPush_NoGitOpsDoesNotPush(t *testing.T) {
 			t.Errorf("Push called %d times after debounced retry, want 1", fake.pushCalls)
 		}
 	})
+
+	t.Run("local_only_wins", func(t *testing.T) {
+		// dolt.local-only is the switch that stops Dolt network sync, even
+		// over an explicit opt-in.
+		fake, _ := setupNoGitOpsAutoPushWorkspace(t, "no-git-ops: true\ndolt:\n  auto-push: true\n  local-only: true\n")
+
+		maybeAutoPush(context.Background())
+
+		if fake.pushCalls != 0 {
+			t.Errorf("Push called %d times, want 0", fake.pushCalls)
+		}
+	})
 }
