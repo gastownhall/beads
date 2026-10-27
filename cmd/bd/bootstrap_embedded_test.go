@@ -674,3 +674,30 @@ func TestEmbeddedConfigNotesYAMLPrefixIsNotDatabasePrefix(t *testing.T) {
 		}
 	}
 }
+
+// AC-8: rename-prefix on a database with no issue_prefix names the missing
+// prefix and bd bootstrap instead of "failed to get current prefix: <nil>".
+func TestEmbeddedRenamePrefixMissingPrefixNamesBootstrap(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _ := embeddedWorkspaceMissingPrefix(t, bd, "la", "la")
+
+	cmd := exec.Command(bd, "rename-prefix", "la-", "--dry-run")
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	stdout, stderr, err := runCommandBuffers(t, cmd)
+	out := stdout.String() + stderr.String()
+	if err == nil {
+		t.Fatalf("bd rename-prefix on a database with no issue_prefix succeeded:\n%s", out)
+	}
+	if want := "database has no issue_prefix set (it was never fully initialized); run 'bd bootstrap' first"; !strings.Contains(out, want) {
+		t.Errorf("output lacks %q:\n%s", want, out)
+	}
+	if strings.Contains(out, "<nil>") {
+		t.Errorf("output still prints a nil error:\n%s", out)
+	}
+}

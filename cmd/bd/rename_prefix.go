@@ -85,8 +85,11 @@ NOTE: This is a rare operation. Most users never need this command.`,
 		}
 
 		oldPrefix, err := store.GetConfig(ctx, "issue_prefix")
-		if err != nil || oldPrefix == "" {
+		if err != nil {
 			return HandleError("failed to get current prefix: %v", err)
+		}
+		if oldPrefix == "" {
+			return HandleError("database has no issue_prefix set (it was never fully initialized); run 'bd bootstrap' first")
 		}
 
 		newPrefix = strings.TrimRight(newPrefix, "-")
