@@ -679,10 +679,27 @@ func FindBeadsDirFrom(startDir string) string {
 		repoRoot = utils.CanonicalizePath(out)
 	}
 
+	isLinkedWorktree := false
+	fallbackBeadsDir := ""
+	fallbackHasDB := false
+	if repoRoot != "" {
+		if candidate := worktreeFallbackBeadsDirForRepo(repoRoot); candidate != "" {
+			isLinkedWorktree = true
+			resolved := FollowRedirect(candidate)
+			if hasBeadsProjectFiles(resolved) {
+				fallbackBeadsDir = resolved
+				fallbackHasDB = hasBeadsDatabase(resolved)
+			}
+		}
+	}
+
+	// Like FindBeadsDir, which looks for a jj secondary workspace only when
+	// the cwd is not in a linked worktree, ignore jj inside one: the worktree
+	// root bounds discovery even when a jj workspace sits below it.
 	jjSecondaryRoot := ""
 	jjPrimaryBeadsDir := ""
 	jjPrimaryHasDB := false
-	if root, ok := git.JJSecondaryWorkspaceRootFrom(startDir); ok {
+	if root, ok := git.JJSecondaryWorkspaceRootFrom(startDir); ok && !isLinkedWorktree {
 		jjSecondaryRoot = utils.CanonicalizePath(root)
 		if primaryRoot, err := git.GetJJPrimaryWorkspaceRootFrom(startDir); err == nil && primaryRoot != "" {
 			primaryBeadsDir := filepath.Join(primaryRoot, ".beads")
@@ -696,28 +713,19 @@ func FindBeadsDirFrom(startDir string) string {
 		}
 	}
 
-	fallbackBeadsDir := ""
-	fallbackHasDB := false
-	if repoRoot != "" {
-		fallbackBeadsDir = worktreeFallbackBeadsDirForRepo(repoRoot)
-		if fallbackBeadsDir != "" {
-			if fbInfo, err := os.Stat(fallbackBeadsDir); err == nil && fbInfo.IsDir() {
-				fallbackHasDB = hasBeadsDatabase(FollowRedirect(fallbackBeadsDir))
-			}
-		}
-	}
-
 	walk := NewAncestorDirWalk(startDir, startDir)
 	for dir, ok := walk.Next(); ok; dir, ok = walk.Next() {
 		beadsDir := filepath.Join(dir, ".beads")
+		isWorktreeRoot := repoRoot != "" && utils.PathsEqual(dir, repoRoot)
+		isJJSecondaryRoot := jjSecondaryRoot != "" && utils.PathsEqual(dir, jjSecondaryRoot)
 		if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
 			resolved := FollowRedirect(beadsDir)
-			isWorktreeRoot := repoRoot != "" && utils.PathsEqual(dir, repoRoot)
-			isJJSecondaryRoot := jjSecondaryRoot != "" && utils.PathsEqual(dir, jjSecondaryRoot)
-			if isWorktreeRoot && fallbackHasDB && !hasBeadsDatabase(resolved) {
+			if isWorktreeRoot && fallbackHasDB && resolved == beadsDir && !hasBeadsDatabase(resolved) {
 				// A worktree root can contain tracked .beads metadata without
 				// owning the ignored database directory. Match FindBeadsDir by
-				// preferring the shared worktree database in that case.
+				// preferring the shared worktree database in that case. A
+				// per-worktree redirect that FollowRedirect accepted still
+				// wins, as in FindBeadsDir's step 3a.
 			} else if isJJSecondaryRoot && jjPrimaryHasDB && !hasBeadsDatabase(resolved) {
 				// A jj secondary workspace can likewise contain inherited
 				// .beads metadata without the ignored database directory.
@@ -727,15 +735,25 @@ func FindBeadsDirFrom(startDir string) string {
 			}
 		}
 
+		// Don't walk past a linked worktree (or jj secondary workspace) root
+		// while its main checkout (primary workspace) has a store: FindBeadsDir
+		// stops its cwd walk here and returns that store (steps 3c and 3'c)
+		// before any ancestor's, and -C must bind what cd binds. Without one,
+		// keep walking. That matches FindBeadsDir's extended walk (step 4)
+		// only while the main checkout (primary) root is not an ancestor of
+		// this root: step 4 stops at that root, and this walk does not.
+		if isWorktreeRoot && fallbackBeadsDir != "" {
+			return fallbackBeadsDir
+		}
+		if isJJSecondaryRoot && jjPrimaryBeadsDir != "" {
+			return jjPrimaryBeadsDir
+		}
 	}
 
 	if fallbackBeadsDir != "" {
-		if info, err := os.Stat(fallbackBeadsDir); err == nil && info.IsDir() {
-			resolved := FollowRedirect(fallbackBeadsDir)
-			if hasBeadsProjectFiles(resolved) {
-				return resolved
-			}
-		}
+		// The walk ended below the worktree root (temp-root or ceiling); the
+		// shared store was validated when it was precomputed above.
+		return fallbackBeadsDir
 	}
 
 	if jjPrimaryBeadsDir != "" {

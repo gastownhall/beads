@@ -995,6 +995,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd -C <linked worktree>` now binds the same store as `cd <linked worktree>`.** When the worktree had no store of its own (or only tracked metadata without a database), `-C` walked past the worktree root and took the first `.beads` above it. Reads came from that store, writes (`create`, `dolt commit`, `dolt push`) landed in it, and the `BEADS_DIR` that `-C` exports overrode one the caller had set. It now uses the main checkout's store (or the target of the worktree's own `.beads/redirect`), as discovery from the working directory does, and a jj secondary workspace likewise uses its primary's; without such a store, discovery continues upward as before. (#7782)
 - **A nested `bd init --server` no longer creates its database on the
   enclosing workspace's Dolt server.** In a directory nested in a workspace
   whose `.beads/config.yaml` names `dolt.port`, `bd init --server` with no
