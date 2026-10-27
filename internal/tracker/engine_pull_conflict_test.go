@@ -100,6 +100,15 @@ func TestEnginePullOnlyConflictStrategy(t *testing.T) {
 			wantSkipped:   0,
 			wantMsg:       "keeping external version",
 		},
+		{
+			name:          "local strategy keeps the local version",
+			strategy:      ConflictLocal,
+			remoteUpdated: pullConflictLastSync.Add(20 * time.Minute),
+			wantStatus:    types.StatusOpen,
+			wantUpdated:   0,
+			wantSkipped:   1,
+			wantMsg:       "keeping local version",
+		},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			fx := newPullConflictFixture(t, row.remoteUpdated)
@@ -117,8 +126,9 @@ func TestEnginePullOnlyConflictStrategy(t *testing.T) {
 				t.Errorf("PullStats.Updated/Skipped = %d/%d, want %d/%d",
 					result.PullStats.Updated, result.PullStats.Skipped, row.wantUpdated, row.wantSkipped)
 			}
-			if result.Stats.Conflicts != 1 {
-				t.Errorf("Stats.Conflicts = %d, want 1", result.Stats.Conflicts)
+			if result.PullStats.Conflicts != 1 || result.Stats.Conflicts != 1 {
+				t.Errorf("conflicts = pull %d, total %d, want 1/1",
+					result.PullStats.Conflicts, result.Stats.Conflicts)
 			}
 			msgs := conflictMessages(fx.messages)
 			if len(msgs) != 1 || !strings.Contains(msgs[0], row.wantMsg) {

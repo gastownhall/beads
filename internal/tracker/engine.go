@@ -471,15 +471,23 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 			// modified since last sync. Bidirectional syncs resolve real
 			// conflicts in Phase 1 (resolveConflicts seeds allowOverwriteIDs
 			// for the external-wins outcomes); a pull-only sync resolves an
-			// external-wins conflict here, since no other phase will.
+			// explicit external/local strategy here, since no other phase
+			// will.
 			if lastSync != nil && existing.UpdatedAt.After(*lastSync) && !allowOverwriteIDs[existing.ID] && !prelinkedHydrateIDs[existing.ID] {
 				pullOnlyConflict := !opts.Push && extIssue.UpdatedAt.After(*lastSync)
-				if pullOnlyConflict && opts.ConflictResolution == ConflictExternal {
+				switch {
+				case pullOnlyConflict && opts.ConflictResolution == ConflictExternal:
 					// The strategy names the external version the winner:
 					// apply it like an allowOverwriteIDs hit from Phase 1.
 					stats.Conflicts++
 					e.msg("Conflict on %s: keeping external version", existing.ID)
-				} else {
+				case pullOnlyConflict && opts.ConflictResolution == ConflictLocal:
+					// The strategy names the local version the winner.
+					stats.Conflicts++
+					e.msg("Conflict on %s: keeping local version", existing.ID)
+					stats.Skipped++
+					continue
+				default:
 					stats.Skipped++
 					continue
 				}
