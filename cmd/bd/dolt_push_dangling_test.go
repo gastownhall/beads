@@ -10,6 +10,7 @@ import (
 	"github.com/go-sql-driver/mysql"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
 // remoteDanglingRefusal is Dolt's remote-side push refusal as GH#3358
@@ -113,4 +114,56 @@ func TestDoltPushPrintsRemoteDanglingReferenceGuidance(t *testing.T) {
 			t.Errorf("stderr has %q:\n%s", unwanted, stderr)
 		}
 	})
+}
+
+// TestDoltPushKeepsOtherFailureOutput: failures that are not the remote's
+// dangling-reference refusal keep their output: bd's own pre-push fsck (the
+// push never reached the remote, even when fsck's output quotes Dolt's
+// phrase), diverged history and the different-primary-keys refusal.
+func TestDoltPushKeepsOtherFailureOutput(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		err       error
+		guidance  string
+		forbidden []string
+	}{
+		{
+			name: "pre-push fsck",
+			err: fmt.Errorf("%w: aborting push to prevent propagating corrupt chunks: %s",
+				dolt.ErrDanglingReference, "Found dangling references to HashSet {\n  e564v1teutmhp289qspj9ba1lhrvit00\n}"),
+			forbidden: []string{"histories have diverged", "different primary keys"},
+		},
+		{
+			name:      "diverged history",
+			err:       errors.New("failed to push to origin/main: no common ancestor"),
+			guidance:  "Local and remote Dolt histories have diverged.",
+			forbidden: []string{"different primary keys"},
+		},
+		{
+			name:      "pk mismatch",
+			err:       errors.New("error: cannot merge because table dependencies has different primary keys in its common ancestor"),
+			guidance:  `Dolt refused to merge: table "dependencies" has different primary keys`,
+			forbidden: []string{"histories have diverged"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stderr, err := runFailingDoltPush(t, tc.err, "")
+			requireSilentExit(t, err, stderr)
+			errLine := "Error: " + tc.err.Error() + "\n"
+			if !strings.HasPrefix(stderr, errLine) {
+				t.Errorf("stderr does not start with the unchanged Error: line %q:\n%s", errLine, stderr)
+			}
+			if tc.guidance == "" && stderr != errLine {
+				t.Errorf("stderr = %q, want only the Error: line", stderr)
+			}
+			if tc.guidance != "" && !strings.Contains(stderr, tc.guidance) {
+				t.Errorf("stderr lacks %q:\n%s", tc.guidance, stderr)
+			}
+			for _, unwanted := range append([]string{"Dolt refused to update the remote"}, tc.forbidden...) {
+				if strings.Contains(stderr, unwanted) {
+					t.Errorf("stderr has %q:\n%s", unwanted, stderr)
+				}
+			}
+		})
+	}
 }
