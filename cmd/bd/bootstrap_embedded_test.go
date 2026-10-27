@@ -353,6 +353,106 @@ func runBDEmbeddedAllowError(t *testing.T, bd, dir string, args ...string) (stri
 	return string(out), err
 }
 
+// TestEmbeddedBootstrapPersistsConfigYamlPrefix is the GH#3494 triage repro:
+// a config.yaml-only embedded workspace (metadata.json "{}", no database)
+// bootstraps into a database whose issue_prefix comes from config.yaml, not
+// from the tempdir's basename, so `bd config get issue_prefix` answers "la"
+// and `bd create` mints an "la-" ID.
+func TestEmbeddedBootstrapPersistsConfigYamlPrefix(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir := t.TempDir()
+	initGitRepoAt(t, dir)
+	beadsDir := filepath.Join(dir, ".beads")
+	// 0700: bd warns on wider .beads permissions and the warning would end up
+	// in every captured command output below.
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatalf("write metadata.json: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("issue_prefix: la\nissue-prefix: la\n"), 0o600); err != nil {
+		t.Fatalf("write config.yaml: %v", err)
+	}
+
+	bcmd := exec.Command(bd, "bootstrap")
+	bcmd.Dir = dir
+	bcmd.Env = bdEnv(dir)
+	bcmd.Stdin = strings.NewReader("y\n")
+	stdout, stderr, err := runCommandBuffers(t, bcmd)
+	if err != nil {
+		t.Fatalf("bd bootstrap failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+
+	out, err := runBDEmbeddedAllowError(t, bd, dir, "config", "get", "issue_prefix")
+	if err != nil {
+		t.Fatalf("bd config get issue_prefix failed: %v\n%s", err, out)
+	}
+	if got := strings.TrimSpace(out); got != "la" {
+		t.Fatalf("bd config get issue_prefix = %q, want la (config.yaml issue-prefix must survive bootstrap)", got)
+	}
+
+	issue := bdCreate(t, bd, dir, "x", "--type", "task")
+	if !strings.HasPrefix(issue.ID, "la-") {
+		t.Fatalf("bd create minted %q, want an la- ID", issue.ID)
+	}
+}
+
+// TestEmbeddedBootstrapSeedPrefixFallbacks covers inferBootstrapPrefix's
+// fallback chain on an existing embedded database whose issue_prefix row is
+// empty: config.yaml first, then the database name (unless default), then the
+// directory name. Before GH#3494's fix bootstrap reported "Database already
+// exists" and seeded nothing.
+func TestEmbeddedBootstrapSeedPrefixFallbacks(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+
+	assertSeededPrefix := func(t *testing.T, dir, want string) {
+		t.Helper()
+		out, err := runBDEmbeddedAllowError(t, bd, dir, "config", "get", "issue_prefix")
+		if err != nil {
+			t.Fatalf("bd config get issue_prefix failed: %v\n%s", err, out)
+		}
+		if got := strings.TrimSpace(out); got != want {
+			t.Fatalf("bd config get issue_prefix = %q, want %q", got, want)
+		}
+	}
+
+	t.Run("database_name_when_yaml_has_no_prefix", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "tb", "--database", "mydb2")
+		dropEmbeddedIssuePrefixRow(t, bd, dir)
+
+		bdBootstrap(t, bd, dir, "--yes")
+
+		assertSeededPrefix(t, dir, "mydb2")
+	})
+
+	t.Run("directory_name_when_yaml_and_db_name_are_default", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "tb", "--database", "beads")
+		dropEmbeddedIssuePrefixRow(t, bd, dir)
+
+		bdBootstrap(t, bd, dir, "--yes")
+
+		// A numeric tempdir basename is not a bare identifier prefix; the
+		// fallback normalizes it the way bd init --prefix would.
+		want := normalizeIssuePrefix(filepath.Base(dir))
+		assertSeededPrefix(t, dir, want)
+		issue := bdCreate(t, bd, dir, "x", "--type", "task")
+		if !strings.HasPrefix(issue.ID, want+"-") {
+			t.Fatalf("bd create minted %q, want a %s- ID", issue.ID, want)
+		}
+	})
+}
+
 // dropEmbeddedIssuePrefixRow builds the GH#3494 state on a real embedded
 // database: the workspace is fully initialized (bd init), then the database's
 // issue_prefix row is deleted while config.yaml keeps naming the prefix.

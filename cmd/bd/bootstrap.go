@@ -1313,7 +1313,7 @@ func executeInitAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.
 		return err
 	}
 
-	prefix := inferPrefix(cfg)
+	prefix, _ := inferBootstrapPrefix(plan.BeadsDir, cfg)
 	dbName := cfg.GetDoltDatabase()
 
 	s, err := newDoltStore(ctx, &dolt.Config{
@@ -1328,11 +1328,14 @@ func executeInitAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.
 	}
 	defer func() { _ = s.Close() }()
 
-	if err := s.SetConfig(ctx, "issue_prefix", prefix); err != nil {
-		return fmt.Errorf("set issue prefix: %w", err)
+	seeded, err := seedIssuePrefixIfMissing(ctx, s, prefix)
+	if err != nil {
+		return err
 	}
-	if err := s.CommitWithConfig(ctx, "bd bootstrap"); err != nil {
-		return fmt.Errorf("commit: %w", err)
+	if seeded {
+		if err := s.CommitWithConfig(ctx, "bd bootstrap"); err != nil {
+			return fmt.Errorf("commit: %w", err)
+		}
 	}
 
 	wireBootstrapDoltRemote(ctx, s, plan)
@@ -1469,7 +1472,7 @@ func bootstrapMissingServerDBRefusal(dbName, location string, probeErr error) er
 }
 
 func executeRestoreAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.Config) error {
-	prefix := inferPrefix(cfg)
+	prefix, _ := inferBootstrapPrefix(plan.BeadsDir, cfg)
 	dbName := cfg.GetDoltDatabase()
 
 	s, err := newDoltStore(ctx, &dolt.Config{
@@ -1484,11 +1487,14 @@ func executeRestoreAction(ctx context.Context, plan BootstrapPlan, cfg *configfi
 	}
 	defer func() { _ = s.Close() }()
 
-	if err := s.SetConfig(ctx, "issue_prefix", prefix); err != nil {
-		return fmt.Errorf("set issue prefix: %w", err)
+	seeded, err := seedIssuePrefixIfMissing(ctx, s, prefix)
+	if err != nil {
+		return err
 	}
-	if err := s.CommitWithConfig(ctx, "bd bootstrap: init"); err != nil {
-		return fmt.Errorf("commit init: %w", err)
+	if seeded {
+		if err := s.CommitWithConfig(ctx, "bd bootstrap: init"); err != nil {
+			return fmt.Errorf("commit init: %w", err)
+		}
 	}
 
 	if err := runBackupRestore(ctx, s, plan.BackupDir, false); err != nil {
@@ -1501,7 +1507,7 @@ func executeRestoreAction(ctx context.Context, plan BootstrapPlan, cfg *configfi
 }
 
 func executeJSONLImportAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.Config) error {
-	prefix := inferPrefix(cfg)
+	prefix, _ := inferBootstrapPrefix(plan.BeadsDir, cfg)
 	dbName := cfg.GetDoltDatabase()
 
 	s, err := newDoltStore(ctx, &dolt.Config{
@@ -1516,11 +1522,14 @@ func executeJSONLImportAction(ctx context.Context, plan BootstrapPlan, cfg *conf
 	}
 	defer func() { _ = s.Close() }()
 
-	if err := s.SetConfig(ctx, "issue_prefix", prefix); err != nil {
-		return fmt.Errorf("set issue prefix: %w", err)
+	seeded, err := seedIssuePrefixIfMissing(ctx, s, prefix)
+	if err != nil {
+		return err
 	}
-	if err := s.CommitWithConfig(ctx, "bd bootstrap: init"); err != nil {
-		return fmt.Errorf("commit init: %w", err)
+	if seeded {
+		if err := s.CommitWithConfig(ctx, "bd bootstrap: init"); err != nil {
+			return fmt.Errorf("commit init: %w", err)
+		}
 	}
 
 	count, err := importFromLocalJSONL(ctx, s, plan.JSONLFile)
@@ -2134,15 +2143,6 @@ func cloneIntoOwnedDataDir(ctx context.Context, doltDir, remoteURL, dbName strin
 	}
 	fmt.Fprintf(os.Stderr, "Synced database from %s (into %s)\n", remedy.PrintedValue(remoteURL), remedy.PrintedValue(doltDir))
 	return nil
-}
-
-func inferPrefix(cfg *configfile.Config) string {
-	db := cfg.GetDoltDatabase()
-	if db != "" && db != "beads" {
-		return db
-	}
-	cwd, _ := os.Getwd()
-	return filepath.Base(cwd)
 }
 
 // isNonInteractiveBootstrap returns true if bootstrap should skip confirmation prompts.
