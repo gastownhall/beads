@@ -175,6 +175,7 @@ filegroup(
         "//internal/storage/journalscan:go_srcs",
         "//internal/storage/kvkeys:go_srcs",
         "//internal/storage/memoryops:go_srcs",
+        "//internal/storage/peercred:go_srcs",
         "//internal/storage/rowid:go_srcs",
         "//internal/storage/schema:go_srcs",
         "//internal/storage/sqlbuild:go_srcs",

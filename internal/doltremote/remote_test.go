@@ -155,3 +155,12 @@ func TestFromGitURLStillConvertsSCPForms(t *testing.T) {
 		})
 	}
 }
+
+func TestCanonicalForComparisonStopsAuthorityAtQueryOrFragment(t *testing.T) {
+	if got, want := CanonicalForComparison("https://evil#@good/x"), "git+https://evil#@good/x"; got != want {
+		t.Errorf("CanonicalForComparison(fragment @) = %q, want %q", got, want)
+	}
+	if got, want := CanonicalForComparison("https://evil?@good/x"), "git+https://evil?@good/x"; got != want {
+		t.Errorf("CanonicalForComparison(query @) = %q, want %q", got, want)
+	}
+}

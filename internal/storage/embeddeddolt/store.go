@@ -334,6 +334,9 @@ func newStore(ctx context.Context, beadsDir, database, branch string, intent ope
 	if err := s.initSchema(ctx); err != nil {
 		return nil, fmt.Errorf("embeddeddolt: init schema: %w", err)
 	}
+	if err := s.migrateLegacyPeerCredentials(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: federation credential migration: %v\n", err)
+	}
 
 	return s, nil
 }

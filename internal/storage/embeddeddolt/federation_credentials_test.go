@@ -4,6 +4,9 @@ package embeddeddolt
 
 import (
 	"bytes"
+	"context"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/rand"
 	"database/sql"
 	"errors"
@@ -17,6 +20,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/peercred"
 )
 
 func newPeerAuthTestStore(t *testing.T) *EmbeddedDoltStore {
@@ -37,6 +41,216 @@ func newPeerAuthTestStore(t *testing.T) *EmbeddedDoltStore {
 	}
 	t.Cleanup(func() { store.Close() })
 	return store
+}
+
+func TestFederationCredentialBindingRejectsCopiedCiphertext(t *testing.T) {
+	ctx := t.Context()
+	store := newPeerAuthTestStore(t)
+	good := &storage.FederationPeer{
+		Name: "good", RemoteURL: "file:///tmp/good-peer",
+		Username: "good-user", Password: "good-password",
+	}
+	evil := &storage.FederationPeer{
+		Name: "evil", RemoteURL: "file:///tmp/evil-peer",
+		Username: "evil-user",
+	}
+	if err := store.AddFederationPeer(ctx, good); err != nil {
+		t.Fatalf("AddFederationPeer(good): %v", err)
+	}
+	if err := store.AddFederationPeer(ctx, evil); err != nil {
+		t.Fatalf("AddFederationPeer(evil): %v", err)
+	}
+
+	var copied []byte
+	if err := store.withConn(ctx, true, func(tx *sql.Tx) error {
+		if err := tx.QueryRowContext(ctx, "SELECT password_encrypted FROM federation_peers WHERE name = ?", good.Name).Scan(&copied); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, "UPDATE federation_peers SET password_encrypted = ? WHERE name = ?", copied, evil.Name)
+		return err
+	}); err != nil {
+		t.Fatalf("copy good ciphertext to evil: %v", err)
+	}
+
+	if _, err := store.GetFederationPeer(ctx, evil.Name); err == nil {
+		t.Error("GetFederationPeer(evil) returned the copied password")
+	}
+	called := false
+	err := store.withPeerAuth(ctx, evil.Name, func(string) error {
+		called = true
+		return nil
+	})
+	if err == nil {
+		t.Error("withPeerAuth(evil) succeeded with the copied password")
+	}
+	if called {
+		t.Error("withPeerAuth invoked its callback with the copied password")
+	}
+	if !errors.Is(err, storage.ErrCredentialKeyMismatch) {
+		t.Errorf("withPeerAuth error = %v, want ErrCredentialKeyMismatch", err)
+	}
+}
+
+func TestFederationLegacyCredentialsMigrateOnOpen(t *testing.T) {
+	ctx := t.Context()
+	store := newPeerAuthTestStore(t)
+	peer := &storage.FederationPeer{
+		Name: "legacy", RemoteURL: "file:///tmp/legacy-peer",
+		Username: "legacy-user", Password: "legacy-password",
+	}
+	if err := store.AddFederationPeer(ctx, peer); err != nil {
+		t.Fatalf("AddFederationPeer: %v", err)
+	}
+	legacy := legacyCredentialForTest(t, store.credentialKey, peer.Password)
+	if err := updatePeerCredentialForTest(ctx, store, peer.Name, legacy); err != nil {
+		t.Fatalf("write legacy ciphertext: %v", err)
+	}
+	marker := filepath.Join(store.beadsDir, peercred.MigrationMarkerFile)
+	if err := os.Remove(marker); err != nil && !os.IsNotExist(err) {
+		t.Fatalf("remove migration marker: %v", err)
+	}
+	beadsDir := store.beadsDir
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	reopened, err := Open(ctx, beadsDir, "fedauth", "main")
+	if err != nil {
+		t.Fatalf("Open after legacy write: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	if !peercred.MigrationDone(beadsDir) {
+		t.Fatal("credential migration marker was not written")
+	}
+	var encrypted []byte
+	if err := reopened.withConn(ctx, false, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, "SELECT password_encrypted FROM federation_peers WHERE name = ?", peer.Name).Scan(&encrypted)
+	}); err != nil {
+		t.Fatalf("read migrated ciphertext: %v", err)
+	}
+	if !peercred.IsV2(encrypted) {
+		t.Fatal("legacy ciphertext was not rewritten in v2 format")
+	}
+	got, err := reopened.GetFederationPeer(ctx, peer.Name)
+	if err != nil {
+		t.Fatalf("GetFederationPeer after migration: %v", err)
+	}
+	if got.Password != peer.Password {
+		t.Fatalf("migrated password = %q, want %q", got.Password, peer.Password)
+	}
+}
+
+func TestFederationLegacyCredentialsSkipsDuplicatedLegacyBlobs(t *testing.T) {
+	ctx := t.Context()
+	store := newPeerAuthTestStore(t)
+	peers := []*storage.FederationPeer{
+		{Name: "duplicate-a", RemoteURL: "file:///tmp/duplicate-a", Username: "user-a", Password: "seed"},
+		{Name: "duplicate-b", RemoteURL: "file:///tmp/duplicate-b", Username: "user-b", Password: "seed"},
+		{Name: "unique-c", RemoteURL: "file:///tmp/unique-c", Username: "user-c", Password: "seed"},
+	}
+	for _, peer := range peers {
+		if err := store.AddFederationPeer(ctx, peer); err != nil {
+			t.Fatalf("AddFederationPeer(%s): %v", peer.Name, err)
+		}
+	}
+	shared := legacyCredentialForTest(t, store.credentialKey, "shared-password")
+	unique := legacyCredentialForTest(t, store.credentialKey, "unique-password")
+	if err := updatePeerCredentialForTest(ctx, store, "duplicate-a", shared); err != nil {
+		t.Fatalf("write duplicate-a legacy ciphertext: %v", err)
+	}
+	if err := updatePeerCredentialForTest(ctx, store, "duplicate-b", shared); err != nil {
+		t.Fatalf("write duplicate-b legacy ciphertext: %v", err)
+	}
+	if err := updatePeerCredentialForTest(ctx, store, "unique-c", unique); err != nil {
+		t.Fatalf("write unique-c legacy ciphertext: %v", err)
+	}
+	// Planted row with a unique legacy blob moved into a peer row whose URL
+	// does not match dolt_remotes (or has no dolt_remotes entry).
+	planted := legacyCredentialForTest(t, store.credentialKey, "planted-password")
+	if err := store.withConn(ctx, true, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `
+			INSERT INTO federation_peers (name, remote_url, username, password_encrypted)
+			VALUES ('planted', 'file:///tmp/attacker', 'attacker', ?)
+		`, planted)
+		return err
+	}); err != nil {
+		t.Fatalf("insert planted legacy row: %v", err)
+	}
+	marker := filepath.Join(store.beadsDir, peercred.MigrationMarkerFile)
+	if err := os.Remove(marker); err != nil && !os.IsNotExist(err) {
+		t.Fatalf("remove migration marker: %v", err)
+	}
+	beadsDir := store.beadsDir
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	reopened, err := Open(ctx, beadsDir, "fedauth", "main")
+	if err != nil {
+		t.Fatalf("Open after duplicate legacy writes: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	if !peercred.MigrationDone(beadsDir) {
+		t.Fatal("credential migration marker was not written")
+	}
+	got, err := reopened.GetFederationPeer(ctx, "unique-c")
+	if err != nil {
+		t.Fatalf("GetFederationPeer(unique-c): %v", err)
+	}
+	if got.Password != "unique-password" {
+		t.Fatalf("unique-c password = %q, want unique-password", got.Password)
+	}
+	for _, name := range []string{"duplicate-a", "duplicate-b", "planted"} {
+		if _, err := reopened.GetFederationPeer(ctx, name); !errors.Is(err, peercred.ErrLegacyCredential) {
+			t.Fatalf("GetFederationPeer(%s) error = %v, want ErrLegacyCredential", name, err)
+		}
+	}
+}
+
+func TestFederationLegacyCredentialsRejectedAfterMigrationMarker(t *testing.T) {
+	ctx := t.Context()
+	store := newPeerAuthTestStore(t)
+	peer := &storage.FederationPeer{
+		Name: "marked", RemoteURL: "file:///tmp/marked-peer",
+		Username: "marked-user", Password: "marked-password",
+	}
+	if err := store.AddFederationPeer(ctx, peer); err != nil {
+		t.Fatalf("AddFederationPeer: %v", err)
+	}
+	if err := peercred.MarkMigrated(store.beadsDir); err != nil {
+		t.Fatalf("MarkMigrated: %v", err)
+	}
+	legacy := legacyCredentialForTest(t, store.credentialKey, peer.Password)
+	if err := updatePeerCredentialForTest(ctx, store, peer.Name, legacy); err != nil {
+		t.Fatalf("write legacy ciphertext: %v", err)
+	}
+	if _, err := store.GetFederationPeer(ctx, peer.Name); !errors.Is(err, peercred.ErrLegacyCredential) {
+		t.Fatalf("GetFederationPeer error = %v, want ErrLegacyCredential", err)
+	}
+}
+
+func updatePeerCredentialForTest(ctx context.Context, store *EmbeddedDoltStore, name string, encrypted []byte) error {
+	return store.withConn(ctx, true, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, "UPDATE federation_peers SET password_encrypted = ? WHERE name = ?", encrypted, name)
+		return err
+	})
+}
+
+func legacyCredentialForTest(t *testing.T, key []byte, password string) []byte {
+	t.Helper()
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		t.Fatalf("aes.NewCipher: %v", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		t.Fatalf("cipher.NewGCM: %v", err)
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		t.Fatalf("generate nonce: %v", err)
+	}
+	return gcm.Seal(nonce, nonce, []byte(password), nil)
 }
 
 // Regression test for GH#5080: credentials stored by add-peer must be the
@@ -469,7 +683,9 @@ func TestDecryptPassword_KeyMismatchNamesTheLocalKey(t *testing.T) {
 func TestDecryptPassword_ShortCiphertextClassifiesAsKeyMismatch(t *testing.T) {
 	store := newPeerAuthTestStore(t)
 
-	_, err := store.decryptPassword([]byte("short"))
+	_, err := store.decryptPassword([]byte("v2:short"), peercred.Binding{
+		Name: "peer", RemoteURL: "https://peer.example/beads", Username: "user",
+	})
 	if err == nil {
 		t.Fatal("decryptPassword succeeded, want short-ciphertext failure")
 	}

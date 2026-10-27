@@ -334,7 +334,7 @@ func initialize(beadsDirSetting string) error {
 	v.SetDefault("federation.remote", "")                          // e.g., dolthub://org/beads, gs://bucket/beads, s3://bucket/beads, az://account.blob.core.windows.net/container/beads
 	v.SetDefault("federation.sovereignty", "")                     // T1 | T2 | T3 | T4 (empty = no restriction)
 	v.SetDefault("federation.allowed-remote-patterns", []string{}) // glob patterns restricting allowed remote URLs (enterprise lockdown)
-	v.SetDefault("federation.exclude_types", []string{"wisp"})     // issue types excluded from federation push (privacy filter)
+	v.SetDefault("federation.exclude_types", []string{"wisp"})     // issue types removed from pushed tips; history is not rewritten
 
 	// Push configuration defaults
 	v.SetDefault("no-push", false)

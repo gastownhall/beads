@@ -160,6 +160,7 @@
 40 3 TestEmbeddedSQLCommitResponseLossIsIndeterminate
 40 3 TestEpochContract
 40 3 TestExpectedRevisionContract
+40 3 TestFilteredFederationSyncExcludesWispsAndWarnsOnce
 40 3 TestGitRefPinsMatchDolt
 40 3 TestHasRepository
 40 3 TestHelperProcess
@@ -435,6 +436,8 @@
 40 26 TestEmbeddedReadyClaimerSkipsIneligibleFrontRows
 40 26 TestEmbeddedRecomputeAllBlockedDirtyGraphIsTyped
 40 26 TestEmbeddedRelationsRefusesTheZeroDirection
+40 26 TestFederationLegacyCredentialsMigrateOnOpen
+40 26 TestFederationLegacyCredentialsSkipsDuplicatedLegacyBlobs
 40 26 TestHookFiringStoreCreateIssuesFiresDependencyUpdatesFromEmbeddedStore
 40 26 TestReclaimAnyReplicaOverride
 40 26 TestWithPeerAuth_EnvFallbackDoesNotObservePeerCredentials
@@ -552,6 +555,7 @@
 40 35 TestEmbeddedDependencyEditorRepeatsWithinOneRequestCollapse
 40 35 TestEmbeddedIssueOperationsUpdateAllScalarAndPointerFieldsReportChanged
 40 35 TestEmbeddedIssueOperationsUpdateWritesEveryScalarPatchField
+40 35 TestFederationCredentialBindingRejectsCopiedCiphertext
 40 35 TestMerge_NoStrategyStillErrorsWithEscapeHatchHint
 40 35 TestReadEventsAutoPruneStateResolvesBothHalvesInOneQuery
 40 35 TestReadyWorkWithMissingDeferredParentTables
@@ -621,3 +625,4 @@
 40 40 TestEmbeddedOpenForRemoteSync_OtherRefusalsStayFatal
 40 40 TestEmbeddedRelationsSeparatesNoNeighborsFromNoSuchIssue
 40 40 TestEmbeddedReopenCustomDoneFallsBackWhenNormalizedTableMissing
+40 40 TestFederationLegacyCredentialsRejectedAfterMigrationMarker

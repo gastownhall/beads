@@ -131,6 +131,12 @@ bd federation list-peers
 Use `bd federation sync` to pull from and push to peer towns, and
 `bd federation status` to check sync state without transferring data.
 
+<Warning>
+`federation.exclude_types` removes matching issues from the pushed branch tip,
+not from earlier Dolt commits. A peer that reads history can recover excluded
+content. Exclude private issue types from federated databases from the start.
+</Warning>
+
 ```bash
 # Sync with all peers
 bd federation sync

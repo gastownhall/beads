@@ -28,7 +28,6 @@ var rawTxScopeExemptions = map[string]string{
 	// that keeps the readiness-recompute family from propagating emission in
 	// the issueops completeness guard.
 	"DoltStore.recomputeBlockedTxWithDB": "post-merge is_blocked recompute: derived state reconstructible from the dependency graph, so a replay consumer needs no record of it",
-	"DoltStore.commitFilteredStaging":    "federation-filter is_blocked recompute over staged state: derived state reconstructible from the dependency graph, so a replay consumer needs no record of it",
 }
 
 // TestEveryRawTxJournalScopeIsScopedOrExempt is the structural guard for the

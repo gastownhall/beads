@@ -1555,25 +1555,19 @@ func TestFilteredStagingPublishesRetainedWaiterUnblocked(t *testing.T) {
 		t.Fatalf("source blocker label count at HEAD = %d, want 1", seedLabelCount)
 	}
 	stagingBranch := federationStagingBranchPrefix + "recompute-test"
-	if _, err := conn.ExecContext(ctx, "CALL DOLT_BRANCH(?, ?)", stagingBranch, sourceBranch); err != nil {
-		t.Fatalf("create staging branch: %v", err)
-	}
 	defer func() {
 		_ = schema.DrainCall(ctx, conn, "CALL DOLT_CHECKOUT(?)", sourceBranch)
 		_ = schema.DrainCall(ctx, conn, "CALL DOLT_BRANCH('-Df', ?)", stagingBranch)
 	}()
+	removed, err := versioncontrolops.StageFilteredBranch(ctx, conn, sourceBranch, stagingBranch, []string{string(types.TypeTask)})
+	if err != nil {
+		t.Fatalf("stage filtered branch: %v", err)
+	}
+	if removed != 1 {
+		t.Fatalf("excluded issues = %d, want 1", removed)
+	}
 	if err := versioncontrolops.CheckoutBranch(ctx, conn, stagingBranch); err != nil {
 		t.Fatalf("checkout staging branch: %v", err)
-	}
-	result, err := conn.ExecContext(ctx, "DELETE FROM issues WHERE issue_type = ?", types.TypeTask)
-	if err != nil {
-		t.Fatalf("delete excluded blocker: %v", err)
-	}
-	if deleted, err := result.RowsAffected(); err != nil || deleted != 1 {
-		t.Fatalf("deleted blockers = %d, err = %v, want 1, nil", deleted, err)
-	}
-	if err := store.commitFilteredStaging(ctx, conn); err != nil {
-		t.Fatalf("commit filtered staging: %v", err)
 	}
 
 	var blocked bool

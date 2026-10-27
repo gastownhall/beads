@@ -50,6 +50,10 @@ Handles merge conflicts using the configured strategy:
 If no strategy is specified and conflicts occur, the sync will pause
 and report which tables have conflicts for manual resolution.
 
+The federation.exclude_types setting removes matching issues from the pushed
+tip only. Earlier commits still contain those issues, so do not commit private
+issue types to a database that will be federated.
+
 Examples:
   bd federation sync                      # Sync with all peers
   bd federation sync --peer town-beta     # Sync with specific peer

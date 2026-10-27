@@ -2476,6 +2476,12 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	// These report sql.DB.Stats() on each OTel scrape — no-op when telemetry is off.
 	store.registerPoolGauges()
 
+	if !store.readOnly && store.beadsDir != "" {
+		if err := store.migrateLegacyPeerCredentials(ctx); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: federation credential migration: %v\n", err)
+		}
+	}
+
 	// Ownership of db transfers to the returned store; suppress the deferred
 	// close above. Must be the last thing before the success return.
 	storeReady = true

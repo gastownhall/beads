@@ -172,9 +172,9 @@ func stripCredentialsAndFoldHostCase(url string) string {
 
 	authority := rest
 	tail := ""
-	if slashIdx := strings.Index(rest, "/"); slashIdx >= 0 {
-		authority = rest[:slashIdx]
-		tail = rest[slashIdx:]
+	if endIdx := strings.IndexAny(rest, "/?#"); endIdx >= 0 {
+		authority = rest[:endIdx]
+		tail = rest[endIdx:]
 	}
 
 	if atIdx := strings.LastIndex(authority, "@"); atIdx >= 0 {

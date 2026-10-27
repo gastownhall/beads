@@ -2,8 +2,13 @@ package dolt
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"database/sql/driver"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,6 +23,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
+	"github.com/steveyegge/beads/internal/storage/peercred"
 	"github.com/steveyegge/beads/internal/testutil"
 )
 
@@ -45,6 +51,22 @@ func TestEncryptDecryptWithKey(t *testing.T) {
 	if decrypted != password {
 		t.Errorf("decrypted = %q, want %q", decrypted, password)
 	}
+}
+
+func encryptWithKey(plaintext string, key []byte) ([]byte, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, err
+	}
+	return gcm.Seal(nonce, nonce, []byte(plaintext), nil), nil
 }
 
 func TestApplyS3ChecksumEnvToCmd(t *testing.T) {
@@ -564,12 +586,13 @@ func TestEncryptDecryptRoundTrip(t *testing.T) {
 
 	password := "my-federation-password-123!"
 
-	encrypted, err := store.encryptPassword(password)
+	binding := peercred.Binding{Name: "team", RemoteURL: "https://peer.example/beads", Username: "user"}
+	encrypted, err := store.encryptPassword(password, binding)
 	if err != nil {
 		t.Fatalf("encryptPassword failed: %v", err)
 	}
 
-	decrypted, err := store.decryptPassword(encrypted)
+	decrypted, err := store.decryptPassword(encrypted, binding)
 	if err != nil {
 		t.Fatalf("decryptPassword failed: %v", err)
 	}
@@ -582,7 +605,7 @@ func TestEncryptDecryptRoundTrip(t *testing.T) {
 func TestEncryptPasswordEmpty(t *testing.T) {
 	store := &DoltStore{}
 
-	encrypted, err := store.encryptPassword("")
+	encrypted, err := store.encryptPassword("", peercred.Binding{})
 	if err != nil {
 		t.Fatalf("encryptPassword with empty string failed: %v", err)
 	}
@@ -594,7 +617,7 @@ func TestEncryptPasswordEmpty(t *testing.T) {
 func TestDecryptPasswordEmpty(t *testing.T) {
 	store := &DoltStore{}
 
-	decrypted, err := store.decryptPassword(nil)
+	decrypted, err := store.decryptPassword(nil, peercred.Binding{})
 	if err != nil {
 		t.Fatalf("decryptPassword with nil failed: %v", err)
 	}
@@ -606,7 +629,7 @@ func TestDecryptPasswordEmpty(t *testing.T) {
 func TestEncryptPasswordNoKey(t *testing.T) {
 	store := &DoltStore{}
 
-	_, err := store.encryptPassword("password")
+	_, err := store.encryptPassword("password", peercred.Binding{})
 	if err == nil {
 		t.Fatal("expected error when key is not initialized")
 	}
@@ -898,10 +921,13 @@ func TestFederationPeerDecryptKeyMismatchNamesTheLocalKey(t *testing.T) {
 		localKey[i] = byte(i + 1)
 	}
 
-	encrypted, err := encryptWithKey("peerpass", writerKey)
+	encryptedPassword, err := peercred.Seal(writerKey, "peerpass", peercred.Binding{
+		Name: "team", RemoteURL: "https://peer.example/peerdb", Username: "peeruser",
+	})
 	if err != nil {
-		t.Fatalf("encryptWithKey() error = %v", err)
+		t.Fatalf("peercred.Seal() error = %v", err)
 	}
+	encrypted := []byte(encryptedPassword)
 
 	// beadsDir is set only so the enrichment can resolve the key path it names;
 	// credentialKey is preset, so initCredentialKey never runs and no test
@@ -1378,5 +1404,292 @@ func TestDecryptWithKeyStaysUnwrappedForRotation(t *testing.T) {
 	}
 	if errors.Is(err, storage.ErrCredentialKeyMismatch) {
 		t.Errorf("error = %v, want the bare cipher error; classification belongs to decryptPassword", err)
+	}
+}
+
+func TestServerCredentialBindingRejectsCopiedCiphertext(t *testing.T) {
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i)
+	}
+	blob, err := peercred.Seal(key, "good-password", peercred.Binding{
+		Name: "good", RemoteURL: "https://good.example/beads", Username: "good-user",
+	})
+	if err != nil {
+		t.Fatalf("peercred.Seal: %v", err)
+	}
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	store := &DoltStore{db: db, credentialKey: key, beadsDir: t.TempDir()}
+	now := time.Now()
+	mock.ExpectQuery(regexp.QuoteMeta("FROM federation_peers WHERE name = ?")).
+		WithArgs("evil").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"name", "remote_url", "username", "password_encrypted",
+			"sovereignty", "last_sync", "created_at", "updated_at",
+		}).AddRow("evil", "https://evil.example/beads", "evil-user", blob, "T2", nil, now, now))
+
+	called := false
+	err = store.withPeerCredentials(t.Context(), "evil", func(*remoteCredentials) error {
+		called = true
+		return nil
+	})
+	if err == nil {
+		t.Fatal("withPeerCredentials accepted a password copied from another peer")
+	}
+	if called {
+		t.Fatal("withPeerCredentials invoked its callback with a copied password")
+	}
+	if !errors.Is(err, storage.ErrCredentialKeyMismatch) {
+		t.Errorf("error = %v, want ErrCredentialKeyMismatch", err)
+	}
+	if !strings.Contains(err.Error(), "credentials do not match this peer's name, URL, and username or were encrypted with another key") {
+		t.Errorf("error = %v, want peer-binding authentication explanation", err)
+	}
+}
+
+func TestServerLegacyCredentialRejectedOutsideMigration(t *testing.T) {
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i)
+	}
+	legacy, err := encryptWithKey("legacy-password", key)
+	if err != nil {
+		t.Fatalf("encryptWithKey: %v", err)
+	}
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	store := &DoltStore{db: db, credentialKey: key, beadsDir: t.TempDir()}
+	if err := peercred.MarkMigrated(store.beadsDir); err != nil {
+		t.Fatalf("MarkMigrated: %v", err)
+	}
+	now := time.Now()
+	mock.ExpectQuery(regexp.QuoteMeta("FROM federation_peers WHERE name = ?")).
+		WithArgs("legacy").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"name", "remote_url", "username", "password_encrypted",
+			"sovereignty", "last_sync", "created_at", "updated_at",
+		}).AddRow("legacy", "https://legacy.example/beads", "legacy-user", legacy, "T2", nil, now, now))
+
+	_, err = store.GetFederationPeer(t.Context(), "legacy")
+	if !errors.Is(err, peercred.ErrLegacyCredential) {
+		t.Fatalf("GetFederationPeer error = %v, want ErrLegacyCredential", err)
+	}
+	if !strings.Contains(err.Error(), "bd federation add-peer legacy") {
+		t.Errorf("error = %v, want add-peer remediation", err)
+	}
+}
+
+type sealedPeerPasswordArg struct {
+	key      []byte
+	binding  peercred.Binding
+	password string
+}
+
+func (a sealedPeerPasswordArg) Match(value driver.Value) bool {
+	blob, ok := value.([]byte)
+	if !ok {
+		return false
+	}
+	got, err := peercred.Open(a.key, blob, a.binding)
+	return err == nil && got == a.password
+}
+
+func TestServerLegacyCredentialMigrationRebindsAndMarks(t *testing.T) {
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i)
+	}
+	legacy, err := encryptWithKey("legacy-password", key)
+	if err != nil {
+		t.Fatalf("encryptWithKey: %v", err)
+	}
+	beadsDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(beadsDir, credentialKeyFile), key, 0600); err != nil {
+		t.Fatalf("write key file: %v", err)
+	}
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	binding := peercred.Binding{Name: "legacy", RemoteURL: "https://legacy.example/beads", Username: "legacy-user"}
+	store := &DoltStore{db: db, credentialKey: key, beadsDir: beadsDir}
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT fp.name, fp.remote_url, fp.username, fp.password_encrypted, COALESCE(dr.url, '')")).
+		WillReturnRows(sqlmock.NewRows([]string{"name", "remote_url", "username", "password_encrypted", "local_remote_url"}).
+			AddRow(binding.Name, binding.RemoteURL, binding.Username, legacy, "git+https://legacy.example/beads.git"))
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE federation_peers SET password_encrypted = ? WHERE name = ?")).
+		WithArgs(sealedPeerPasswordArg{key: key, binding: binding, password: "legacy-password"}, binding.Name).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	if err := store.migrateLegacyPeerCredentials(t.Context()); err != nil {
+		t.Fatalf("migrateLegacyPeerCredentials: %v", err)
+	}
+	if !peercred.MigrationDone(beadsDir) {
+		t.Fatal("migration marker was not written")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("sqlmock expectations: %v", err)
+	}
+}
+
+func TestServerLegacyCredentialMigrationSkipsDuplicatedLegacyBlobs(t *testing.T) {
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i)
+	}
+	shared, err := encryptWithKey("shared-password", key)
+	if err != nil {
+		t.Fatalf("encrypt shared password: %v", err)
+	}
+	unique, err := encryptWithKey("unique-password", key)
+	if err != nil {
+		t.Fatalf("encrypt unique password: %v", err)
+	}
+	moved, err := encryptWithKey("moved-password", key)
+	if err != nil {
+		t.Fatalf("encrypt moved password: %v", err)
+	}
+	diverged, err := encryptWithKey("diverged-password", key)
+	if err != nil {
+		t.Fatalf("encrypt diverged password: %v", err)
+	}
+	beadsDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(beadsDir, credentialKeyFile), key, 0600); err != nil {
+		t.Fatalf("write key file: %v", err)
+	}
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	store := &DoltStore{db: db, credentialKey: key, beadsDir: beadsDir}
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT fp.name, fp.remote_url, fp.username, fp.password_encrypted, COALESCE(dr.url, '')")).
+		WillReturnRows(sqlmock.NewRows([]string{"name", "remote_url", "username", "password_encrypted", "local_remote_url"}).
+			AddRow("duplicate-a", "https://duplicate-a.example/beads", "user-a", shared, "https://duplicate-a.example/beads").
+			AddRow("duplicate-b", "https://duplicate-b.example/beads", "user-b", shared, "https://duplicate-b.example/beads").
+			AddRow("moved-no-remote", "https://attacker.example/beads", "user-m", moved, "").
+			AddRow("moved-diverged", "https://attacker.example/beads", "user-d", diverged, "https://good.example/beads").
+			AddRow("unique-c", "https://unique-c.example/beads", "user-c", unique, "https://unique-c.example/beads"))
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE federation_peers SET password_encrypted = ? WHERE name = ?")).
+		WithArgs(sealedPeerPasswordArg{
+			key: key,
+			binding: peercred.Binding{
+				Name: "unique-c", RemoteURL: "https://unique-c.example/beads", Username: "user-c",
+			},
+			password: "unique-password",
+		}, "unique-c").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	if err := store.migrateLegacyPeerCredentials(t.Context()); err != nil {
+		t.Fatalf("migrateLegacyPeerCredentials: %v", err)
+	}
+	if !peercred.MigrationDone(beadsDir) {
+		t.Fatal("migration marker was not written")
+	}
+	now := time.Now()
+	for _, name := range []string{"duplicate-a", "duplicate-b"} {
+		mock.ExpectQuery(regexp.QuoteMeta("FROM federation_peers WHERE name = ?")).
+			WithArgs(name).
+			WillReturnRows(sqlmock.NewRows([]string{
+				"name", "remote_url", "username", "password_encrypted",
+				"sovereignty", "last_sync", "created_at", "updated_at",
+			}).AddRow(name, "https://"+name+".example/beads", "user-"+name[len("duplicate-"):], shared, "T2", nil, now, now))
+		if _, err := store.GetFederationPeer(t.Context(), name); !errors.Is(err, peercred.ErrLegacyCredential) {
+			t.Fatalf("GetFederationPeer(%s) error = %v, want ErrLegacyCredential", name, err)
+		}
+	}
+	binding := peercred.Binding{Name: "unique-c", RemoteURL: "https://unique-c.example/beads", Username: "user-c"}
+	uniqueV2, err := peercred.Seal(key, "unique-password", binding)
+	if err != nil {
+		t.Fatalf("seal unique-c test credential: %v", err)
+	}
+	mock.ExpectQuery(regexp.QuoteMeta("FROM federation_peers WHERE name = ?")).
+		WithArgs("unique-c").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"name", "remote_url", "username", "password_encrypted",
+			"sovereignty", "last_sync", "created_at", "updated_at",
+		}).AddRow("unique-c", binding.RemoteURL, binding.Username, uniqueV2, "T2", nil, now, now))
+	got, err := store.GetFederationPeer(t.Context(), "unique-c")
+	if err != nil {
+		t.Fatalf("GetFederationPeer(unique-c): %v", err)
+	}
+	if got.Password != "unique-password" {
+		t.Fatalf("unique-c password = %q, want unique-password", got.Password)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("sqlmock expectations: %v", err)
+	}
+}
+
+// TestMigrateCredentialKeysSkipsUntrustedLegacyBlobs pins the key-rotation
+// path to the same guards as open-time migration: a duplicated legacy blob,
+// a peer whose row names no local Dolt remote, and a peer whose local remote
+// URL diverges from the row are all skipped; only the legitimate row is
+// re-sealed under the new key.
+func TestMigrateCredentialKeysSkipsUntrustedLegacyBlobs(t *testing.T) {
+	dbPath := t.TempDir()
+	probe := &DoltStore{dbPath: dbPath}
+	oldKey := probe.legacyEncryptionKey()
+	newKey := make([]byte, 32)
+	for i := range newKey {
+		newKey[i] = byte(i)
+	}
+	shared, err := encryptWithKey("shared-password", oldKey)
+	if err != nil {
+		t.Fatalf("encrypt shared password: %v", err)
+	}
+	unique, err := encryptWithKey("unique-password", oldKey)
+	if err != nil {
+		t.Fatalf("encrypt unique password: %v", err)
+	}
+	moved, err := encryptWithKey("moved-password", oldKey)
+	if err != nil {
+		t.Fatalf("encrypt moved password: %v", err)
+	}
+	diverged, err := encryptWithKey("diverged-password", oldKey)
+	if err != nil {
+		t.Fatalf("encrypt diverged password: %v", err)
+	}
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	store := &DoltStore{db: db, dbPath: dbPath, beadsDir: t.TempDir()}
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT fp.name, fp.remote_url, fp.username, fp.password_encrypted, COALESCE(dr.url, '')")).
+		WillReturnRows(sqlmock.NewRows([]string{"name", "remote_url", "username", "password_encrypted", "local_remote_url"}).
+			AddRow("duplicate-a", "https://duplicate-a.example/beads", "user-a", shared, "https://duplicate-a.example/beads").
+			AddRow("duplicate-b", "https://duplicate-b.example/beads", "user-b", shared, "https://duplicate-b.example/beads").
+			AddRow("moved-no-remote", "https://attacker.example/beads", "user-m", moved, "").
+			AddRow("moved-diverged", "https://attacker.example/beads", "user-d", diverged, "https://good.example/beads").
+			AddRow("unique-c", "https://unique-c.example/beads", "user-c", unique, "https://unique-c.example/beads"))
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE federation_peers SET password_encrypted = ? WHERE name = ?")).
+		WithArgs(sealedPeerPasswordArg{
+			key: newKey,
+			binding: peercred.Binding{
+				Name: "unique-c", RemoteURL: "https://unique-c.example/beads", Username: "user-c",
+			},
+			password: "unique-password",
+		}, "unique-c").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	if err := store.migrateCredentialKeys(t.Context(), newKey); err != nil {
+		t.Fatalf("migrateCredentialKeys: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("sqlmock expectations: %v", err)
 	}
 }
