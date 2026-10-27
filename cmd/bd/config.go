@@ -558,6 +558,28 @@ func noteDirectConfigWrite() {
 	}
 }
 
+// warnConfigYamlPrefixNotSeeded prints the one stderr note `bd config` gives
+// the GH#3494 half-identified workspace: config.yaml names an issue prefix
+// the database does not carry. dbPrefix is the database's issue_prefix — the
+// settings plane's answer — and when it is empty while config.yaml names a
+// prefix, the workspace is one `bd bootstrap` away from minting IDs; the note
+// says so. stdout stays byte-identical (callers print it only from the human
+// path), and --json runs never reach the call sites.
+func warnConfigYamlPrefixNotSeeded(dbPrefix string) {
+	if strings.TrimSpace(dbPrefix) != "" {
+		return
+	}
+	beadsDir := beads.FindBeadsDir()
+	if beadsDir == "" {
+		return
+	}
+	v, present, err := config.WorkspaceYamlValueStrictWithLocal(beadsDir, "issue-prefix")
+	if err != nil || !present || strings.TrimSpace(v) == "" {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "note: config.yaml issue-prefix %q is not the database prefix; run 'bd bootstrap' to set it\n", v)
+}
+
 var configGetCmd = &cobra.Command{
 	Use:           "get <key>",
 	Short:         "Get a configuration value",
@@ -671,6 +693,12 @@ var configGetCmd = &cobra.Command{
 			fmt.Printf("%s (not set)\n", result.Key)
 		} else {
 			fmt.Printf("%s\n", result.Value)
+		}
+		if result.Key == "issue_prefix" {
+			// GH#3494: the half-identified workspace answers "(not set)" here
+			// while config.yaml names the prefix. stdout above stays
+			// byte-identical; the repair hint rides on stderr.
+			warnConfigYamlPrefixNotSeeded(result.Value)
 		}
 		return nil
 	},

@@ -473,3 +473,101 @@ func TestEmbeddedConfigConcurrent(t *testing.T) {
 		t.Fatal("expected at least 1 worker to succeed")
 	}
 }
+
+// TestEmbeddedConfigGetShowNotesBootstrap pins the GH#3494 note on the config
+// surfaces: a workspace whose database lost its issue_prefix row while
+// config.yaml still names the prefix gets exactly one stderr note pointing at
+// bd bootstrap, with stdout byte-identical to before the note existed and
+// --json output unchanged (no note at all). Once bootstrap seeds the row the
+// note disappears.
+func TestEmbeddedConfigGetShowNotesBootstrap(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "cg")
+	dropEmbeddedIssuePrefixRow(t, bd, dir)
+	cfgPath := filepath.Join(beadsDir, "config.yaml")
+	cfgData, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read config.yaml: %v", err)
+	}
+	if err := os.WriteFile(cfgPath, append(cfgData, []byte("issue-prefix: la\n")...), 0o644); err != nil {
+		t.Fatalf("append issue-prefix to config.yaml: %v", err)
+	}
+
+	bdConfigBuffers := func(t *testing.T, args ...string) (string, string) {
+		t.Helper()
+		cmd := exec.Command(bd, append([]string{"config"}, args...)...)
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err != nil {
+			t.Fatalf("bd config %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
+		}
+		return stdout.String(), stderr.String()
+	}
+
+	t.Run("get_human_stdout_identical_one_stderr_note", func(t *testing.T) {
+		stdout, stderr := bdConfigBuffers(t, "get", "issue_prefix")
+		if stdout != "issue_prefix (not set)\n" {
+			t.Fatalf("stdout must stay byte-identical to before the note, got %q", stdout)
+		}
+		if strings.Count(stderr, "note:") != 1 || !strings.Contains(stderr, "bd bootstrap") {
+			t.Fatalf("expected exactly one stderr note naming bd bootstrap, got %q", stderr)
+		}
+		if !strings.Contains(stderr, `"la"`) || !strings.Contains(stderr, "issue-prefix") {
+			t.Fatalf("the note should name the config.yaml prefix and its source, got %q", stderr)
+		}
+	})
+
+	t.Run("get_json_unchanged", func(t *testing.T) {
+		stdout, stderr := bdConfigBuffers(t, "get", "issue_prefix", "--json")
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &payload); err != nil {
+			t.Fatalf("parse config get --json: %v\n%s", err, stdout)
+		}
+		if payload["key"] != "issue_prefix" || payload["value"] != "" {
+			t.Fatalf("config get --json = %v, want key issue_prefix with empty value", payload)
+		}
+		if _, ok := payload["schema_version"]; !ok {
+			t.Fatalf("config get --json lost its schema_version field:\n%s", stdout)
+		}
+		if strings.Contains(stdout+stderr, "note:") || strings.Contains(stdout+stderr, "bd bootstrap") {
+			t.Fatalf("--json output must be unchanged, no note:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+	})
+
+	t.Run("show_human_one_note", func(t *testing.T) {
+		stdout, stderr := bdConfigBuffers(t, "show")
+		if !strings.Contains(stdout, "issue-prefix") || !strings.Contains(stdout, "la") {
+			t.Fatalf("config show should still list the config.yaml issue-prefix, got:\n%s", stdout)
+		}
+		if strings.Count(stderr, "note:") != 1 || !strings.Contains(stderr, "bd bootstrap") {
+			t.Fatalf("expected exactly one stderr note naming bd bootstrap, got %q", stderr)
+		}
+	})
+
+	t.Run("show_json_unchanged", func(t *testing.T) {
+		stdout, stderr := bdConfigBuffers(t, "show", "--json")
+		if strings.Contains(stdout+stderr, "note:") || strings.Contains(stdout+stderr, "bd bootstrap") {
+			t.Fatalf("--json output must be unchanged, no note:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+		if !strings.Contains(stdout, "issue-prefix") {
+			t.Fatalf("config show --json should still list the yaml key, got:\n%s", stdout)
+		}
+	})
+
+	t.Run("note_gone_after_bootstrap", func(t *testing.T) {
+		bdBootstrap(t, bd, dir, "--yes")
+		stdout, stderr := bdConfigBuffers(t, "get", "issue_prefix")
+		if stdout != "la\n" {
+			t.Fatalf("config get issue_prefix = %q, want la after bootstrap", stdout)
+		}
+		if strings.Contains(stderr, "note:") {
+			t.Fatalf("the note must disappear once the prefix is seeded, got %q", stderr)
+		}
+	})
+}

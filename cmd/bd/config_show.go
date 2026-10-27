@@ -71,8 +71,29 @@ Examples:
 		}
 
 		printConfigEntries(entries)
+		warnConfigShowPrefixNotSeeded()
 		return nil
 	},
+}
+
+// warnConfigShowPrefixNotSeeded is `bd config show`'s arm of the note
+// warnConfigYamlPrefixNotSeeded prints for `bd config get issue_prefix`: the
+// GH#3494 half-identified workspace lists config.yaml's issue-prefix under
+// config.yaml and no issue_prefix under database, and this note is what names
+// the repair. The database row is read here — and the note skipped when it
+// cannot be — because collectDatabaseEntries' degraded nil return cannot tell
+// "no issue_prefix row" from "no reachable store". Human output only: the
+// --json arm above returns before this runs.
+func warnConfigShowPrefixNotSeeded() {
+	s := getStore()
+	if s == nil {
+		return
+	}
+	dbPrefix, err := s.GetConfig(getRootContext(), "issue_prefix")
+	if err != nil {
+		return
+	}
+	warnConfigYamlPrefixNotSeeded(dbPrefix)
 }
 
 func init() {
