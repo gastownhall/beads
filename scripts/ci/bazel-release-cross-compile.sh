@@ -21,10 +21,11 @@
 # so that check fails a platform whose pure bd links gozstd.
 #
 # Coverage boundary, as in the `go build` job this replaces: every target
-# builds with cgo off, but .goreleaser.yml builds linux/amd64, linux/arm64
-# and windows/amd64 with CGO_ENABLED=1, and release.yml builds the darwin
-# pair natively with CGO_ENABLED=1, so the cgo half of the tree (beads_cgo.go
-# -> internal/storage/embeddeddolt) is compiled for none of them here.
+# builds with cgo off, but .goreleaser.yml builds linux/amd64, linux/arm64,
+# windows/amd64 and android/arm64 with CGO_ENABLED=1, and release.yml builds
+# the darwin pair natively with CGO_ENABLED=1, so the cgo half of the tree
+# (beads_cgo.go -> internal/storage/embeddeddolt) is compiled for none of them
+# here.
 #
 # Usage: bazel-release-cross-compile.sh [extra bazel build flags...]
 set -euo pipefail

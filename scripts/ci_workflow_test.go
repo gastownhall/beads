@@ -257,6 +257,12 @@ type goreleaserBuild struct {
 	GOOS   []string `yaml:"goos"`
 	GOARCH []string `yaml:"goarch"`
 	Env    []string `yaml:"env"`
+	Tags   []string `yaml:"tags"`
+	// Hooks decodes the string form, the only one .goreleaser.yml uses: a
+	// switch to the object form fails the parse instead of reading as no hooks.
+	Hooks struct {
+		Post []string `yaml:"post"`
+	} `yaml:"hooks"`
 }
 
 func readGoreleaserBuilds(t *testing.T) []goreleaserBuild {
@@ -278,6 +284,102 @@ func readGoreleaserBuilds(t *testing.T) []goreleaserBuild {
 		t.Fatalf("%s declares no builds", path)
 	}
 	return config.Builds
+}
+
+// TestGoreleaserAndroidArm64BuildsWithNDKCGO pins issue #3538: the shipped
+// android/arm64 release (also what npm @beads/bd downloads on Termux) must be
+// a cgo build linked against Android's Bionic libc, otherwise embedded Dolt
+// is unavailable and `bd init` fails with "embedded Dolt requires a CGO
+// build". The NDK clang comes from the in-tree wrappers, by absolute path
+// because Go runs CC from each cgo package's directory, and the post hooks
+// prove the artifact is a cgo, Bionic, 16 KB-aligned ELF. Env entries are
+// compared exactly: a substring check would accept a relative CC path, or a
+// wrapper that reads ANDROID_NDK_HOME (the runner image's older NDK).
+func TestGoreleaserAndroidArm64BuildsWithNDKCGO(t *testing.T) {
+	const (
+		wantCC  = `CC={{ abs "." }}/scripts/ci/android-arm64-cc`
+		wantCXX = `CXX={{ abs "." }}/scripts/ci/android-arm64-cxx`
+	)
+	wantHooks := []string{
+		`./scripts/verify-cgo.sh "{{ .Path }}"`,
+		`./scripts/verify-android-elf.sh "{{ .Path }}"`,
+	}
+
+	var android []goreleaserBuild
+	for _, build := range readGoreleaserBuilds(t) {
+		if contains(build.GOOS, "android") {
+			android = append(android, build)
+		}
+	}
+	if len(android) != 1 {
+		t.Fatalf(".goreleaser.yml has %d android builds, want exactly one (bd-android-arm64)", len(android))
+	}
+	build := android[0]
+	if build.ID != "bd-android-arm64" || !reflect.DeepEqual(build.GOARCH, []string{"arm64"}) {
+		t.Fatalf(".goreleaser.yml android build is %s for %q, want bd-android-arm64 for [arm64]", build.ID, build.GOARCH)
+	}
+
+	if !contains(build.Env, "CGO_ENABLED=1") || contains(build.Env, "CGO_ENABLED=0") {
+		t.Errorf("%s env = %q, want CGO_ENABLED=1 and no CGO_ENABLED=0 so embedded Dolt is compiled in", build.ID, build.Env)
+	}
+	var cc, cxx []string
+	for _, entry := range build.Env {
+		switch {
+		case strings.HasPrefix(entry, "CC="):
+			cc = append(cc, entry)
+		case strings.HasPrefix(entry, "CXX="):
+			cxx = append(cxx, entry)
+		}
+	}
+	if !reflect.DeepEqual(cc, []string{wantCC}) {
+		t.Errorf("%s CC entries = %q, want exactly [%s]", build.ID, cc, wantCC)
+	}
+	if !reflect.DeepEqual(cxx, []string{wantCXX}) {
+		t.Errorf("%s CXX entries = %q, want exactly [%s]", build.ID, cxx, wantCXX)
+	}
+	// netgo would drop the cgo resolver Go needs on Android (golang/go#10714).
+	if !reflect.DeepEqual(build.Tags, []string{"gms_pure_go"}) {
+		t.Errorf("%s tags = %q, want exactly [gms_pure_go]", build.ID, build.Tags)
+	}
+	if !reflect.DeepEqual(build.Hooks.Post, wantHooks) {
+		t.Errorf("%s post hooks = %q, want %q", build.ID, build.Hooks.Post, wantHooks)
+	}
+}
+
+// TestGoreleaserReadsOnlyEnvTheReleaseStepSets: release.yml runs goreleaser
+// through goreleaser-action, which starts it without a shell, so a variable
+// only a shell sets (PWD, the first #3538 CC path) is unset there. goreleaser
+// templates fail on a missing key, so one such .Env read aborts the tagged
+// release for every platform, while RELEASING.md's shell-run snapshot passes.
+// Every .Env read must name a variable the workflow, the job or the step
+// sets, or one the runner sets for every step. YAML comments are not read.
+func TestGoreleaserReadsOnlyEnvTheReleaseStepSets(t *testing.T) {
+	workflow := readCIWorkflow(t, "release.yml")
+	job := workflow.job(t, "goreleaser")
+	step := job.step(t, "Run GoReleaser")
+	if !strings.HasPrefix(step.Uses, "goreleaser/goreleaser-action@") {
+		t.Fatalf("release.yml step %q uses %q, want goreleaser/goreleaser-action; update this test", step.Name, step.Uses)
+	}
+	set := map[string]bool{"CI": true}
+	for _, env := range []map[string]string{workflow.Env, job.Env, step.Env} {
+		for name := range env {
+			set[name] = true
+		}
+	}
+
+	envRead := regexp.MustCompile(`\.Env\.(\w+)`)
+	walkYAML(readYAMLNode(t, ".goreleaser.yml"), "", func(path string, key bool, value string) {
+		if key {
+			return
+		}
+		for _, match := range envRead.FindAllStringSubmatch(value, -1) {
+			name := match[1]
+			if set[name] || strings.HasPrefix(name, "GITHUB_") || strings.HasPrefix(name, "RUNNER_") {
+				continue
+			}
+			t.Errorf(".goreleaser.yml: %s reads .Env.%s, which release.yml's %q step does not set; set it in that step's env, or use a template function such as abs \".\"", path, name, step.Name)
+		}
+	})
 }
 
 // Exclude read-permission coverage is required, not best effort: Bazel's

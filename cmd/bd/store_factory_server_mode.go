@@ -19,11 +19,11 @@ import (
 // newReadOnlyStoreFromConfig in store_factory_nocgo.go (//go:build !cgo). A
 // helper placed behind either tag could only ever reach half of them, so
 // "centralizing the check" would have been a claim the build tags falsify --
-// and .goreleaser.yml ships three CGO_ENABLED=0 targets, the build where a
-// shared server is the only usable backend. Keeping the helper untagged is
-// what actually stops the four call sites from drifting apart again. Nothing
-// here needs cgo: configfile, config and doltserver all build under
-// CGO_ENABLED=0.
+// and .goreleaser.yml ships two CGO_ENABLED=0 targets (windows/arm64 and
+// freebsd/amd64), the build where a shared server is the only usable
+// backend. Keeping the helper untagged is what actually stops the four call
+// sites from drifting apart again. Nothing here needs cgo: configfile, config
+// and doltserver all build under CGO_ENABLED=0.
 
 // effectiveServerMode reports whether the workspace at beadsDir selects Dolt
 // server-mode storage, compensating for the same gap main.go's own resolution
