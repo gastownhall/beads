@@ -54,6 +54,38 @@ func TestDoltPushPrintsRemoteDanglingReferenceGuidance(t *testing.T) {
 			t.Errorf("a dangling-refusal push must not print diverged-history guidance, got:\n%s", stderr)
 		}
 	})
+
+	t.Run("named remote", func(t *testing.T) {
+		// The CLI-route rendering a dolt push failure surfaces
+		// (CombinedOutput with the exit status appended).
+		cliRouteRefusal := errors.New("dolt push failed: Error 1105 (HY000): unknown push error; Found dangling references to HashSet {\n  nrcp8b3mbvr4neiklr4tuitl7m0677bq\n}: exit status 1")
+		fake := &fakeDanglingRefusalStore{pushRemoteErr: cliRouteRefusal}
+		setupDanglingRefPushGlobals(t, fake)
+
+		if err := doltPushCmd.Flags().Set("remote", "backup"); err != nil {
+			t.Fatalf("set --remote flag: %v", err)
+		}
+		t.Cleanup(func() { _ = doltPushCmd.Flags().Set("remote", "") })
+
+		_, stderr, runErr := runPushCapturingStdio(t, func() error {
+			return doltPushCmd.RunE(doltPushCmd, nil)
+		})
+
+		var exit *exitError
+		if !errors.As(runErr, &exit) || exit.Code != 1 {
+			t.Errorf("RunE = %v, want the SilentExit() exit error (code 1)", runErr)
+		}
+		if !strings.Contains(stderr, "Error: dolt push failed: ") {
+			t.Errorf("stderr must keep the unchanged raw Error line, got:\n%s", stderr)
+		}
+		if !strings.Contains(stderr, "nrcp8b3mbvr4neiklr4tuitl7m0677bq") {
+			t.Errorf("stderr must include the hash from the refusal, got:\n%s", stderr)
+		}
+		assertRemoteDanglingReferenceGuidance(t, stderr)
+		if strings.Contains(stderr, `Remote "backup" is not configured.`) {
+			t.Errorf("a dangling-refusal push must not print the remote-not-found hint, got:\n%s", stderr)
+		}
+	})
 }
 
 // assertRemoteDanglingReferenceGuidance checks that every phrase the design
