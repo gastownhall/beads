@@ -177,3 +177,23 @@ func TestEnginePullOnlyKeepsLocalOnlyEdit(t *testing.T) {
 		})
 	}
 }
+
+// TestEngineBidirectionalConflictUnchanged: a bidirectional sync still
+// resolves conflicts in Phase 1, and doPull counts none of its own.
+func TestEngineBidirectionalConflictUnchanged(t *testing.T) {
+	f := newPullConflictFixture(pullConflictLastSync.Add(20 * time.Minute))
+
+	result, err := f.engine.Sync(context.Background(), SyncOptions{Pull: true, Push: true, ConflictResolution: ConflictLocal})
+	if err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if f.local.Status != types.StatusOpen {
+		t.Errorf("local status = %q, want open", f.local.Status)
+	}
+	if len(f.mock.updated) != 1 {
+		t.Errorf("tracker update calls = %d, want 1 (local version pushed)", len(f.mock.updated))
+	}
+	if result.Stats.Conflicts != 1 || result.PullStats.Conflicts != 0 {
+		t.Errorf("conflicts: Stats=%d PullStats=%d, want 1 and 0", result.Stats.Conflicts, result.PullStats.Conflicts)
+	}
+}
