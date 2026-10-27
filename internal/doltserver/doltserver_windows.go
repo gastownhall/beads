@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/steveyegge/beads/internal/execwin"
 )
 
 // portConflictHint is the platform-specific command to diagnose port conflicts.
@@ -24,15 +26,33 @@ const processListHint = `tasklist /FI "IMAGENAME eq dolt.exe"`
 
 // procAttrDetached returns SysProcAttr to detach a child process so it survives
 // parent exit. On Windows, CREATE_NEW_PROCESS_GROUP is the analog of Unix Setpgid.
+//
+// CREATE_NO_WINDOW is required alongside it, and is not merely cosmetic.
+// CREATE_NEW_PROCESS_GROUP alone does NOT stop a console-subsystem child from
+// getting a visible console: if the spawning bd has no console of its own (an
+// MCP server, or the proxy child), the system allocates a brand new one for
+// dolt, which Windows Terminal then shows as a real window when it is the
+// registered default terminal. CREATE_NO_WINDOW gives dolt its own console that
+// is never displayed, and that console is not the parent's, so the server
+// still survives the parent exiting.
+//
+// DETACHED_PROCESS looks equivalent but is wrong for dolt: it leaves the server
+// with no console at all, and dolt runs `uname -s/-r/-m` on every start. Each
+// of those console children then gets a fresh visible console — three Windows
+// Terminal windows per server start — whereas a hidden console is inherited.
+// This matches the sibling spawner at
+// internal/storage/dbproxy/proxy/endpoint_windows.go.
 func procAttrDetached() *syscall.SysProcAttr {
-	return &syscall.SysProcAttr{CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP}
+	return &syscall.SysProcAttr{
+		CreationFlags: windows.CREATE_NO_WINDOW | windows.CREATE_NEW_PROCESS_GROUP,
+	}
 }
 
 // findPIDOnPort returns the PID of the process listening on a TCP port.
 // Parses netstat -aon output matching LISTENING lines. Returns 0 if no process
 // found or on error.
 func findPIDOnPort(port int) int {
-	out, err := exec.Command("netstat", "-aon").Output()
+	out, err := execwin.Hide(exec.Command("netstat", "-aon")).Output()
 	if err != nil {
 		return 0
 	}
@@ -70,7 +90,7 @@ func listDoltProcessPIDs() []int {
 	script := `Get-CimInstance Win32_Process -Filter "Name='dolt.exe'" | ` +
 		`Where-Object { $_.CommandLine -match 'sql-server' } | ` +
 		`Select-Object -ExpandProperty ProcessId`
-	out, err := exec.Command("powershell.exe", "-NoProfile", "-Command", script).Output()
+	out, err := execwin.Hide(exec.Command("powershell.exe", "-NoProfile", "-Command", script)).Output()
 	if err != nil {
 		return nil
 	}

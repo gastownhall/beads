@@ -5,6 +5,8 @@ go_library(
     srcs = [
         "doltserver.go",
         "external_dolt_server.go",
+        "procattr_other.go",
+        "procattr_windows.go",
         "server.go",
         "testserver.go",
     ],
@@ -13,6 +15,7 @@ go_library(
     deps = [
         "//internal/configfile",
         "//internal/doltserver",
+        "//internal/execwin",
         "//internal/procid",
         "//internal/remedy",
         "//internal/storage/dbproxy/identity",
@@ -25,7 +28,12 @@ go_library(
         "@com_github_dolthub_dolt_go//libraries/utils/filesys",
         "@com_github_go_sql_driver_mysql//:mysql",
         "@org_golang_x_sync//errgroup",
-    ],
+    ] + select({
+        "@rules_go//go/platform:windows": [
+            "@org_golang_x_sys//windows",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 go_test(
@@ -35,6 +43,7 @@ go_test(
         "doltserver_internal_test.go",
         "doltserver_test.go",
         "external_dolt_server_test.go",
+        "procattr_windows_test.go",
         "testmain_test.go",
         "testserver_test.go",
     ],
@@ -49,7 +58,12 @@ go_test(
         "@com_github_go_sql_driver_mysql//:mysql",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
-    ],
+    ] + select({
+        "@rules_go//go/platform:windows": [
+            "@org_golang_x_sys//windows",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 # --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---

@@ -11,6 +11,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/execwin"
 	"github.com/steveyegge/beads/internal/githooksenv"
 	"github.com/steveyegge/beads/internal/gittraceenv"
 	"github.com/steveyegge/beads/internal/lockfile"
@@ -119,9 +120,10 @@ func BootstrapFromRemoteWithDBRef(ctx context.Context, doltDir, remoteURL, datab
 
 // bootstrapCloneCmd builds the `dolt clone` for remote bootstrap. It does not
 // route through prepareDoltCLITransferCommand, so it applies the remote env
-// guards itself (see internal/gittraceenv and internal/githooksenv).
+// guards itself (see internal/gittraceenv and internal/githooksenv), and the
+// Windows console suppression too (internal/execwin).
 func bootstrapCloneCmd(ctx context.Context, remoteURL, cloneTarget, ref string) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, "dolt", doltCloneArgs(remoteURL, cloneTarget, ref)...) // #nosec G204 -- validated remote URL; the ref is an option value, taken verbatim by dolt's argparser and checked by doltutil.ValidateGitDataRefArg
+	cmd := execwin.Hide(exec.CommandContext(ctx, "dolt", doltCloneArgs(remoteURL, cloneTarget, ref)...)) // #nosec G204 -- validated remote URL; the ref is an option value, taken verbatim by dolt's argparser and checked by doltutil.ValidateGitDataRefArg
 	cmd.Env = githooksenv.DisabledEnv(gittraceenv.ScrubEnv(os.Environ()))
 	return cmd
 }

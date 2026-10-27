@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/doltversion"
+	"github.com/steveyegge/beads/internal/execwin"
 )
 
 // MinDoltVersionForArchiveLevelConfig is the earliest Dolt release known to
@@ -125,7 +126,9 @@ func probeDoltVersionOutput(doltBin string) (string, bool) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), doltVersionProbeTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, doltBin, "version") //nolint:gosec // G204: doltBin is caller-resolved (PATH lookup or config), not user-request input
+	// execwin.Hide: keeps this probe from flashing a console window when bd is
+	// running without a console of its own. See internal/execwin.
+	cmd := execwin.Hide(exec.CommandContext(ctx, doltBin, "version")) //nolint:gosec // G204: doltBin is caller-resolved (PATH lookup or config), not user-request input
 	// WaitDelay keeps a grandchild holding the stdout pipe from blocking
 	// Output past the timeout after the kill.
 	cmd.WaitDelay = doltVersionProbeWaitDelay

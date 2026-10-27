@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/doltremote"
+	"github.com/steveyegge/beads/internal/execwin"
 	"github.com/steveyegge/beads/internal/remotecache"
 	"github.com/steveyegge/beads/internal/storage"
 )
@@ -126,7 +127,10 @@ func PersistedRemotes(dbPath string) ([]storage.RemoteInfo, error) {
 func ListCLIRemotes(dbPath string) ([]storage.RemoteInfo, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), listCLIRemotesTimeout(dbPath))
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "dolt", "remote", "-v") // #nosec G204 -- fixed command
+	// execwin.Hide: bd may be running without a console of its own (as an MCP
+	// server, or under bd db-proxy-child), and on Windows a console child of a
+	// console-less parent gets a new, visible console. See internal/execwin.
+	cmd := execwin.Hide(exec.CommandContext(ctx, "dolt", "remote", "-v")) // #nosec G204 -- fixed command
 	cmd.Dir = dbPath
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -224,7 +228,7 @@ func AddCLIRemoteWithRef(dbPath, name, url, ref string) error {
 		args = append(args, "--ref", ref)
 	}
 	args = append(args, name, url)
-	cmd := exec.Command("dolt", args...) // #nosec G204 -- validated argv
+	cmd := execwin.Hide(exec.Command("dolt", args...)) // #nosec G204 -- validated argv; execwin.Hide: see ListCLIRemotes
 	cmd.Dir = dbPath
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -238,7 +242,7 @@ func RemoveCLIRemote(dbPath, name string) error {
 	if err := remotecache.ValidateRemoteName(name); err != nil {
 		return fmt.Errorf("invalid remote name: %w", err)
 	}
-	cmd := exec.Command("dolt", "remote", "remove", name) // #nosec G204 -- validated argv
+	cmd := execwin.Hide(exec.Command("dolt", "remote", "remove", name)) // #nosec G204 -- validated argv; execwin.Hide: see ListCLIRemotes
 	cmd.Dir = dbPath
 	out, err := cmd.CombinedOutput()
 	if err != nil {

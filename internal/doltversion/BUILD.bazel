@@ -12,6 +12,9 @@ go_library(
     ],
     importpath = "github.com/steveyegge/beads/internal/doltversion",
     visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/execwin",
+    ],
 )
 
 go_test(

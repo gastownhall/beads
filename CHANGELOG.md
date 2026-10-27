@@ -995,6 +995,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **On Windows, `bd` no longer opens console windows when it runs without a
+  console of its own** (as an MCP server, from a SessionStart hook, or under
+  an agent harness with redirected stdio). Each `dolt` or `git` child of such
+  a process got a new console, which Windows Terminal showed as a window that
+  took focus; a short-lived child such as `dolt init` could fail with
+  `0x800700E8` before the window attached, and Windows Terminal could replay
+  that session later from `C:\Windows\System32`. The managed `dolt
+  sql-server`, `bd db-proxy-child`, the `dolt` CLI push, pull, fetch, fsck,
+  remote and clone spawns, `bd admin compact`'s `dolt gc` and the
+  `git config` actor lookups now start with a hidden console of their own
+  (`CREATE_NO_WINDOW`), which `dolt`'s own `uname` children inherit. A
+  build-time policy test fails on any new unsuppressed spawn in that code.
+  (#6076)
 - **A nested `bd init --server` no longer creates its database on the
   enclosing workspace's Dolt server.** In a directory nested in a workspace
   whose `.beads/config.yaml` names `dolt.port`, `bd init --server` with no

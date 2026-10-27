@@ -12,6 +12,7 @@ go_library(
         "//internal/configfile",
         "//internal/debug",
         "//internal/doltversion",
+        "//internal/execwin",
         "//internal/githooksenv",
         "//internal/gittraceenv",
         "//internal/lockfile",

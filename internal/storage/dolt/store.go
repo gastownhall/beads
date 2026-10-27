@@ -45,6 +45,7 @@ import (
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/doltversion"
+	"github.com/steveyegge/beads/internal/execwin"
 	"github.com/steveyegge/beads/internal/gittraceenv"
 	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
@@ -4652,7 +4653,10 @@ func prepareDoltCLITransferCommand(ctx context.Context, cliDir string, creds *re
 	if len(args) > 0 && creds != nil && creds.username != "" {
 		args = append([]string{args[0], "--user", creds.username}, args[1:]...)
 	}
-	cmd := exec.CommandContext(ctx, "dolt", args...) // #nosec G204 -- fixed command with validated remote/ref args
+	// execwin.Hide: bd may be running without a console of its own (as an MCP
+	// server, or under bd db-proxy-child), and on Windows a console child of a
+	// console-less parent gets a new, visible console. See internal/execwin.
+	cmd := execwin.Hide(exec.CommandContext(ctx, "dolt", args...)) // #nosec G204 -- fixed command with validated remote/ref args
 	// CommandContext kills only the direct dolt child on expiry; a grandchild
 	// (e.g. a cloud credential helper) holding the inherited output pipes
 	// would otherwise keep Wait/CombinedOutput blocked forever after the kill.
@@ -4856,7 +4860,7 @@ func (s *DoltStore) prePushFSCK(ctx context.Context) error {
 	}
 	fsckCtx, cancel := context.WithTimeout(ctx, fsckTimeoutDuration())
 	defer cancel()
-	cmd := exec.CommandContext(fsckCtx, "dolt", "fsck", "--quiet") // #nosec G204 -- fixed command
+	cmd := execwin.Hide(exec.CommandContext(fsckCtx, "dolt", "fsck", "--quiet")) // #nosec G204 -- fixed command; execwin.Hide: see prepareDoltCLITransferCommand
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
 	if err != nil {

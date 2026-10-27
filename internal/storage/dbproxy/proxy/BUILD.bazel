@@ -69,6 +69,7 @@ go_test(
         "endpoint_no_data_probe_test.go",
         "endpoint_security_test.go",
         "endpoint_spawn_stop_unix_test.go",
+        "endpoint_windows_test.go",
         "external_transport_lifecycle_internal_test.go",
         "force_stop_linux_test.go",
         "server_epoch_internal_test.go",
@@ -93,6 +94,9 @@ go_test(
         ],
         "@rules_go//go/platform:linux": [
             "//internal/testutil/bazeltest",
+        ],
+        "@rules_go//go/platform:windows": [
+            "@org_golang_x_sys//windows",
         ],
         "//conditions:default": [],
     }),

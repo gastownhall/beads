@@ -29,6 +29,7 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/execwin"
 	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/httpclient"
 	"github.com/steveyegge/beads/internal/initprocs"
@@ -1046,8 +1047,11 @@ func resolveActorWithGit() string {
 		return bdActor
 	}
 
-	// Try git config user.name - the natural default for a git-native tool
-	if out, err := exec.Command("git", "config", "user.name").Output(); err == nil {
+	// Try git config user.name - the natural default for a git-native tool.
+	// execwin.Hide: bd may be running without a console of its own (as an MCP
+	// server, or under bd db-proxy-child), and on Windows a console child of a
+	// console-less parent gets a new, visible console. See internal/execwin.
+	if out, err := execwin.Hide(exec.Command("git", "config", "user.name")).Output(); err == nil {
 		if gitUser := strings.TrimSpace(string(out)); gitUser != "" {
 			return gitUser
 		}
@@ -1071,8 +1075,9 @@ func getOwner() string {
 		return authorEmail
 	}
 
-	// Fall back to git config user.email - the natural default
-	if out, err := exec.Command("git", "config", "user.email").Output(); err == nil {
+	// Fall back to git config user.email - the natural default (execwin.Hide:
+	// see the user.name lookup above).
+	if out, err := execwin.Hide(exec.Command("git", "config", "user.email")).Output(); err == nil {
 		if gitEmail := strings.TrimSpace(string(out)); gitEmail != "" {
 			return gitEmail
 		}

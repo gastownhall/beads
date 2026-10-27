@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/compact"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/execwin"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -869,14 +870,17 @@ func runCompactDolt(ctx context.Context) error {
 	// `dolt gc` used to work. Detect that specific unknown-flag rejection
 	// and retry with plain `dolt gc` rather than fail outright; any other
 	// error (a genuine GC failure) is not swallowed.
-	cmd := exec.Command("dolt", "gc", "--archive-level", "0") // #nosec G204 -- fixed command, no user input
+	// execwin.Hide: bd may be running without a console of its own (as an MCP
+	// server, or under bd db-proxy-child), and on Windows a console child of a
+	// console-less parent gets a new, visible console. See internal/execwin.
+	cmd := execwin.Hide(exec.Command("dolt", "gc", "--archive-level", "0")) // #nosec G204 -- fixed command, no user input
 	cmd.Dir = doltPath
 	output, err := cmd.CombinedOutput()
 	if err != nil && isUnknownArchiveLevelFlagError(string(output)) {
 		if !jsonOutput {
 			fmt.Fprintf(os.Stderr, "Notice: external dolt does not support --archive-level; falling back to plain 'dolt gc' (new table files may still use zstd archives)\n")
 		}
-		fallbackCmd := exec.Command("dolt", "gc") // #nosec G204 -- fixed command, no user input
+		fallbackCmd := execwin.Hide(exec.Command("dolt", "gc")) // #nosec G204 -- fixed command, no user input
 		fallbackCmd.Dir = doltPath
 		output, err = fallbackCmd.CombinedOutput()
 	}

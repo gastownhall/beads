@@ -413,6 +413,7 @@ go_library(
         "//internal/doltversion",
         "//internal/eventsjournal",
         "//internal/execenv",
+        "//internal/execwin",
         "//internal/formula",
         "//internal/git",
         "//internal/gitenv",

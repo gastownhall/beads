@@ -88,6 +88,7 @@ go_library(
         "//internal/doltserver",
         "//internal/doltversion",
         "//internal/execenv",
+        "//internal/execwin",
         "//internal/githooksenv",
         "//internal/gittraceenv",
         "//internal/idgen",
