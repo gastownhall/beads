@@ -32,9 +32,12 @@ func TestShouldFlagTrackedFile_RuntimeArtifacts(t *testing.T) {
 		{"sync-state.json", true},
 		{"daemon.pid", true},
 		{"bd.lock", true},
+		{"dolt-server-config.yaml", true}, // GH#6191: absolute cfg_dir + per-machine port
+		{"dolt-server.activity", true},    // GH#6191
 		{"dolt/noms/manifest", true},
 		{"issues.jsonl", false},
 		{"config.json", false},
+		{"config.yaml", false},   // user config, tracked on purpose
 		{"sub/last_pull", false}, // patterns apply to top-level .beads/ files only
 	}
 	for _, tc := range cases {
