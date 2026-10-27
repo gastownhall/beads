@@ -727,6 +727,11 @@ func PrepareIssueForInsert(issue *types.Issue, customStatuses, customTypes []str
 	if issue.ContentHash == "" {
 		issue.ContentHash = issue.ComputeContentHash()
 	}
+	// arrival_seq is assigned by storage alone, at the journal's create seam
+	// (stampArrivalSeqInTx). A value carried in from a caller, an import, or a
+	// row being moved between planes is never stored, and the struct must not
+	// claim one the row does not have.
+	issue.ArrivalSeq = 0
 	return nil
 }
 

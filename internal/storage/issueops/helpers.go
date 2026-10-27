@@ -62,6 +62,13 @@ func TableRouting(issue *types.Issue) (issueTable, eventTable string) {
 // round-trip the JSONL interchange, wy-urlct). row_lock rides along because
 // any write that can change status/assignee must rewrite it to collide with a
 // concurrent reclaim/close on the same row (see freshRowLock in lease.go).
+//
+// arrival_seq must NEVER join this list or issueInsertSQL's column list: it is
+// written by the journal's create seam alone (stampArrivalSeqInTx), and leaving
+// it out of every generic insert/upsert is what keeps a caller-supplied value —
+// from the Go struct, an HTTP import or a JSONL import — from ever being stored,
+// and what clears it on a row moved between planes.
+// TestIssueInsertAndUpsertColumnsExcludeArrivalSeq holds it.
 var issueUpsertColumns = []string{
 	"content_hash", "title", "description", "design", "acceptance_criteria",
 	"notes", "status", "priority", "issue_type", "assignee",

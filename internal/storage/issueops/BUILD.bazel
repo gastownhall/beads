@@ -139,6 +139,7 @@ go_test(
     srcs = [
         "aggregate_authorize_notes_test.go",
         "aggregate_authorize_transfer_test.go",
+        "arrival_seq_guard_test.go",
         "as_of_test.go",
         "asof_read_test.go",
         "batch_apply_test.go",
@@ -219,9 +220,19 @@ go_test(
     ],
     data = glob(["testdata/**"]) + [
         ":go_srcs",
+        # TestArrivalSeqIsWrittenOnlyByTheJournalSeam scans every package
+        # under internal/storage that writes SQL.
+        "//internal/storage:go_srcs",
+        "//internal/storage/batchfixtures:go_srcs",
+        "//internal/storage/createbatchequiv:go_srcs",
         "//internal/storage/dolt:go_srcs",
         "//internal/storage/domain/db:go_srcs",
+        "//internal/storage/embeddeddolt:go_srcs",
+        "//internal/storage/journalscan:go_srcs",
+        "//internal/storage/schema:go_srcs",
         "//internal/storage/schema:migrations",
+        "//internal/storage/sqlbuild:go_srcs",
+        "//internal/storage/uow:go_srcs",
         "//internal/storage/versioncontrolops:go_srcs",
     ],
     embed = [":issueops"],

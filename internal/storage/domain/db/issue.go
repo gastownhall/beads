@@ -61,6 +61,9 @@ func (r *issueSQLRepositoryImpl) Insert(ctx context.Context, issue *types.Issue,
 	if issue.ContentHash == "" {
 		issue.ContentHash = issue.ComputeContentHash()
 	}
+	// Storage assigns arrival_seq at the journal's create seam alone; see
+	// issueops.PrepareIssueForInsert.
+	issue.ArrivalSeq = 0
 
 	if issue.ID == "" {
 		return errors.New("db: Insert: explicit ID required (ID generation belongs to CreateIssueUseCase)")
@@ -834,6 +837,10 @@ func insertIssueRow(ctx context.Context, runner Runner, table string, issue *typ
 	// RowVersion CAS token is stale-zero on read — the backend-divergent break
 	// the RowVersion contract (types.Issue.RowVersion) forbids. The duplicate-key
 	// path rewrites it too so an upsert also advances the token.
+	//
+	// arrival_seq is deliberately absent from both the column list and the
+	// upsert assignments: only the journal's create seam writes it
+	// (issueops.stampArrivalSeqInTx).
 	_, err := runner.ExecContext(ctx, fmt.Sprintf(`
 		INSERT INTO %s (
 			id, content_hash, title, description, design, acceptance_criteria, notes,

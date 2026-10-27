@@ -84,6 +84,7 @@ go_test(
         "issue_usecase_as_of_test.go",
         "issue_usecase_delete_test.go",
         "issue_usecase_test.go",
+        "journal_arrival_seq_test.go",
         "journal_behavior_test.go",
         "journal_completeness_test.go",
         "journal_doltignore_test.go",

@@ -176,6 +176,7 @@ go_test(
         "issue_operations_staging_test.go",
         "journal_accessor_test.go",
         "journal_actor_matrix_test.go",
+        "journal_arrival_seq_test.go",
         "journal_autoprune_test.go",
         "journal_concurrency_test.go",
         "journal_contract_test.go",
