@@ -604,3 +604,73 @@ func TestEmbeddedBootstrapSeedPrefixPlanAndMessage(t *testing.T) {
 		t.Errorf("bootstrap reported a fresh database:\nstdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
 	}
 }
+
+// AC-6: with config.yaml issue-prefix set and the database's issue_prefix
+// empty, `bd config get issue_prefix` and `bd config show` keep stdout as it
+// was and add one stderr note naming bd bootstrap; --json is untouched.
+func TestEmbeddedConfigNotesYAMLPrefixIsNotDatabasePrefix(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _ := embeddedWorkspaceMissingPrefix(t, bd, "la", "la")
+	const note = `config.yaml issue-prefix "la" is not the database prefix; run 'bd bootstrap' to set it`
+
+	run := func(args ...string) (string, string) {
+		t.Helper()
+		cmd := exec.Command(bd, args...)
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err != nil {
+			t.Fatalf("bd %s: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
+		}
+		return stdout.String(), stderr.String()
+	}
+
+	stdout, stderr := run("config", "get", "issue_prefix")
+	if stdout != "issue_prefix (not set)\n" {
+		t.Errorf("config get stdout = %q, want %q", stdout, "issue_prefix (not set)\n")
+	}
+	if n := strings.Count(stderr, note); n != 1 {
+		t.Errorf("config get stderr carries the note %d times, want 1:\n%s", n, stderr)
+	}
+
+	stdout, stderr = run("config", "get", "issue_prefix", "--json")
+	var got map[string]any
+	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+		t.Fatalf("parse config get --json: %v\n%s", err, stdout)
+	}
+	if got["key"] != "issue_prefix" || got["value"] != "" {
+		t.Errorf("config get --json = %v, want key issue_prefix with an empty value", got)
+	}
+	if strings.Contains(stdout+stderr, "is not the database prefix") {
+		t.Errorf("config get --json carries the note:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+	}
+
+	stdout, stderr = run("config", "show")
+	if strings.Contains(stdout, "is not the database prefix") {
+		t.Errorf("config show printed the note on stdout:\n%s", stdout)
+	}
+	if n := strings.Count(stderr, note); n != 1 {
+		t.Errorf("config show stderr carries the note %d times, want 1:\n%s", n, stderr)
+	}
+
+	stdout, stderr = run("config", "show", "--json")
+	if !json.Valid([]byte(stdout)) {
+		t.Errorf("config show --json is not JSON:\n%s", stdout)
+	}
+	if strings.Contains(stdout+stderr, "is not the database prefix") {
+		t.Errorf("config show --json carries the note:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+	}
+
+	// Once the database holds its prefix there is nothing to note.
+	run("bootstrap", "--yes")
+	for _, args := range [][]string{{"config", "get", "issue_prefix"}, {"config", "show"}} {
+		if _, stderr := run(args...); strings.Contains(stderr, "is not the database prefix") {
+			t.Errorf("bd %s still notes after bootstrap:\n%s", strings.Join(args, " "), stderr)
+		}
+	}
+}

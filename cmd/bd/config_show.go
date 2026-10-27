@@ -71,6 +71,9 @@ Examples:
 		}
 
 		printConfigEntries(entries)
+		if dbPrefix, ok := databaseIssuePrefix(); ok {
+			noteConfigYAMLPrefixIsNotDatabasePrefix(dbPrefix)
+		}
 		return nil
 	},
 }
@@ -297,6 +300,24 @@ func collectDatabaseEntries() []configEntry {
 	}
 
 	return databaseConfigEntries(dbConfig)
+}
+
+// databaseIssuePrefix reads the database's issue_prefix the way
+// collectDatabaseEntries reads the config table; ok is false when the
+// database could not be read, so there is no prefix to compare against.
+func databaseIssuePrefix() (prefix string, ok bool) {
+	if err := ensureDirectMode("config show"); err != nil {
+		return "", false
+	}
+	s := getStore()
+	if s == nil {
+		return "", false
+	}
+	prefix, err := s.GetConfig(getRootContext(), "issue_prefix")
+	if err != nil {
+		return "", false
+	}
+	return prefix, true
 }
 
 // databaseConfigEntries turns the config table into the entries `config show`

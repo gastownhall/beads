@@ -672,8 +672,31 @@ var configGetCmd = &cobra.Command{
 		} else {
 			fmt.Printf("%s\n", result.Value)
 		}
+		if result.Key == "issue_prefix" {
+			noteConfigYAMLPrefixIsNotDatabasePrefix(result.Value)
+		}
 		return nil
 	},
+}
+
+// noteConfigYAMLPrefixIsNotDatabasePrefix tells a human reader, on stderr,
+// that config.yaml's issue-prefix is not the prefix `bd create` checks when
+// the database's own issue_prefix is empty, and that `bd bootstrap` sets it.
+// Stdout and --json output stay as they were.
+func noteConfigYAMLPrefixIsNotDatabasePrefix(dbPrefix string) {
+	if jsonOutput || dbPrefix != "" {
+		return
+	}
+	beadsDir := beads.FindBeadsDir()
+	if beadsDir == "" {
+		return
+	}
+	v, ok, err := config.WorkspaceYamlValueStrictWithLocal(beadsDir, "issue-prefix")
+	yamlPrefix := strings.TrimSpace(v)
+	if err != nil || !ok || yamlPrefix == "" {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "config.yaml issue-prefix %q is not the database prefix; run 'bd bootstrap' to set it\n", yamlPrefix)
 }
 
 // runConfigGetBackupEnabled reports the EFFECTIVE value of
