@@ -1221,14 +1221,40 @@ func executeSeedPrefixAction(ctx context.Context, plan BootstrapPlan, cfg *confi
 	}
 	defer func() { _ = s.Close() }()
 
-	if err := s.SetConfig(ctx, "issue_prefix", prefix); err != nil {
-		return fmt.Errorf("set issue prefix: %w", err)
+	seeded, err := seedBootstrapIssuePrefix(ctx, s, prefix)
+	if err != nil || !seeded {
+		return err
 	}
 	if err := s.CommitWithConfig(ctx, "bd bootstrap: seed issue_prefix"); err != nil {
 		return fmt.Errorf("commit: %w", err)
 	}
 	fmt.Fprintf(os.Stderr, "Set issue_prefix %q on existing database %q\n", prefix, plan.Database)
 	return nil
+}
+
+// bootstrapPrefixStore is the part of a store seedBootstrapIssuePrefix uses.
+type bootstrapPrefixStore interface {
+	GetConfig(ctx context.Context, key string) (string, error)
+	SetConfig(ctx context.Context, key, value string) error
+}
+
+// seedBootstrapIssuePrefix writes prefix as issue_prefix only when the
+// database has none, and reports whether it did. Every bootstrap action seeds
+// through it, so an existing prefix, including one written after the plan was
+// made, is never overwritten; bootstrap never rewrites issue IDs either.
+func seedBootstrapIssuePrefix(ctx context.Context, s bootstrapPrefixStore, prefix string) (bool, error) {
+	existing, err := s.GetConfig(ctx, "issue_prefix")
+	if err != nil {
+		return false, fmt.Errorf("read issue prefix: %w", err)
+	}
+	if existing = strings.TrimSpace(existing); existing != "" {
+		fmt.Fprintf(os.Stderr, "issue_prefix already set to %q; left unchanged\n", existing)
+		return false, nil
+	}
+	if err := s.SetConfig(ctx, "issue_prefix", prefix); err != nil {
+		return false, fmt.Errorf("set issue prefix: %w", err)
+	}
+	return true, nil
 }
 
 func executeInitAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.Config) error {
@@ -1238,9 +1264,11 @@ func executeInitAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.
 
 	prefix, _ := inferPrefix(plan.BeadsDir, cfg)
 
+	var seeded bool
 	err := withProvisionedBootstrapStore(ctx, plan, cfg, func(s storage.DoltStorage) error {
-		if err := s.SetConfig(ctx, "issue_prefix", prefix); err != nil {
-			return fmt.Errorf("set issue prefix: %w", err)
+		var err error
+		if seeded, err = seedBootstrapIssuePrefix(ctx, s, prefix); err != nil {
+			return err
 		}
 		if err := s.CommitWithConfig(ctx, "bd bootstrap"); err != nil {
 			return fmt.Errorf("commit: %w", err)
@@ -1251,7 +1279,9 @@ func executeInitAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "Created fresh database with prefix %q\n", prefix)
+	if seeded {
+		fmt.Fprintf(os.Stderr, "Created fresh database with prefix %q\n", prefix)
+	}
 	return nil
 }
 
@@ -1431,8 +1461,8 @@ func executeRestoreAction(ctx context.Context, plan BootstrapPlan, cfg *configfi
 	prefix, _ := inferPrefix(plan.BeadsDir, cfg)
 
 	err := withProvisionedBootstrapStore(ctx, plan, cfg, func(s storage.DoltStorage) error {
-		if err := s.SetConfig(ctx, "issue_prefix", prefix); err != nil {
-			return fmt.Errorf("set issue prefix: %w", err)
+		if _, err := seedBootstrapIssuePrefix(ctx, s, prefix); err != nil {
+			return err
 		}
 		if err := s.CommitWithConfig(ctx, "bd bootstrap: init"); err != nil {
 			return fmt.Errorf("commit init: %w", err)
@@ -1455,8 +1485,8 @@ func executeJSONLImportAction(ctx context.Context, plan BootstrapPlan, cfg *conf
 
 	var count int
 	err := withProvisionedBootstrapStore(ctx, plan, cfg, func(s storage.DoltStorage) error {
-		if err := s.SetConfig(ctx, "issue_prefix", prefix); err != nil {
-			return fmt.Errorf("set issue prefix: %w", err)
+		if _, err := seedBootstrapIssuePrefix(ctx, s, prefix); err != nil {
+			return err
 		}
 		if err := s.CommitWithConfig(ctx, "bd bootstrap: init"); err != nil {
 			return fmt.Errorf("commit init: %w", err)

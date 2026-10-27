@@ -12,6 +12,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 )
 
@@ -503,5 +504,52 @@ func TestEmbeddedBootstrapSeedsMissingPrefix(t *testing.T) {
 				t.Errorf("bd create after bootstrap made %q, want a %s- id", id, tc.want)
 			}
 		})
+	}
+}
+
+// AC-4: a seed-prefix plan made while the database had no issue_prefix
+// leaves alone a prefix written before it executes, and says so.
+func TestEmbeddedBootstrapSeedPrefixKeepsPrefixSetAfterPlanning(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir := embeddedWorkspaceMissingPrefix(t, bd, "zz", "la")
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := BootstrapPlan{Action: "seed-prefix", BeadsDir: beadsDir, Database: cfg.GetDoltDatabase(), HasExisting: true}
+
+	// Another process sets the prefix between planning and execution.
+	s, err := embeddeddolt.Open(t.Context(), beadsDir, "zz", "main")
+	if err != nil {
+		t.Fatalf("open embedded store: %v", err)
+	}
+	if err := s.SetConfig(t.Context(), "issue_prefix", "xx"); err != nil {
+		_ = s.Close()
+		t.Fatalf("set issue_prefix: %v", err)
+	}
+	if err := s.Commit(t.Context(), "test: set issue_prefix"); err != nil {
+		_ = s.Close()
+		t.Fatalf("commit: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	var execErr error
+	stderr := captureStderr(t, func() {
+		execErr = executeSeedPrefixAction(t.Context(), plan, cfg)
+	})
+	if execErr != nil {
+		t.Fatalf("executeSeedPrefixAction: %v\nstderr:\n%s", execErr, stderr)
+	}
+	if want := `issue_prefix already set to "xx"; left unchanged`; !strings.Contains(stderr, want) {
+		t.Errorf("stderr lacks %q:\n%s", want, stderr)
+	}
+	if got := bdConfigGetPrefix(t, bd, dir); got != "xx" {
+		t.Errorf("bd config get issue_prefix = %q, want %q", got, "xx")
 	}
 }
