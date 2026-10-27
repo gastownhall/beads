@@ -20,6 +20,19 @@ func (s *EmbeddedDoltStore) SearchIssues(ctx context.Context, query string, filt
 	return result, err
 }
 
+// SearchDescendants walks the --parent tree under rootID on one connection
+// (storage.DescendantSearcher): one engine open for the whole tree rather than
+// one per node.
+func (s *EmbeddedDoltStore) SearchDescendants(ctx context.Context, rootID string, filter types.IssueFilter) ([]*types.Issue, error) {
+	var result []*types.Issue
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.SearchDescendantsInTx(ctx, tx, rootID, filter)
+		return err
+	})
+	return result, err
+}
+
 // SearchIssueIDs is the narrow-projection variant of SearchIssues.
 func (s *EmbeddedDoltStore) SearchIssueIDs(ctx context.Context, query string, filter types.IssueFilter) ([]string, error) {
 	var result []string
