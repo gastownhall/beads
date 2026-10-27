@@ -3,10 +3,12 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -689,4 +691,160 @@ func TestEmbeddedShowConcurrent(t *testing.T) {
 			t.Errorf("worker %d failed: %v", r.worker, r.err)
 		}
 	}
+
+	// GH#3415: the two subtests below run a live `bd list --watch` and race
+	// ordinary one-shot bd commands against it. The watch loop's refreshes
+	// used to open the embedded backend once per node (the recursive
+	// --parent walk) and back-to-back when a refresh outgrew the poll
+	// interval, so a concurrent command could spend its whole driver retry
+	// budget waiting for the flock and time out.
+	t.Run("WatchWithConcurrentListAndShowExitsCleanly", func(t *testing.T) {
+		watcher := startBdListWatch(t, bd, dir, "--limit", "100")
+		// Let the initial page render and the poll loop arm before racing it.
+		time.Sleep(1500 * time.Millisecond)
+
+		if err := bdRunWithTimeout(t, bd, dir, 30*time.Second, "list", "--json", "--limit", "10"); err != nil {
+			stopErr := stopBdListWatch(t, watcher, 15*time.Second)
+			t.Fatalf("concurrent bd list --json under a plain watch: %v\nwatcher stop: %v\nwatcher stderr:\n%s", err, stopErr, watcher.stderr.text())
+		}
+		if err := bdRunWithTimeout(t, bd, dir, 30*time.Second, "show", allIDs[0], "--json"); err != nil {
+			stopErr := stopBdListWatch(t, watcher, 15*time.Second)
+			t.Fatalf("concurrent bd show --json under a plain watch: %v\nwatcher stop: %v\nwatcher stderr:\n%s", err, stopErr, watcher.stderr.text())
+		}
+
+		// A plain watch's refreshes are cheap, so the interrupt lands in a
+		// poll gap and the loop must exit cleanly (GH#3415 AC: the watcher is
+		// a good neighbor, not a zombie).
+		if err := stopBdListWatch(t, watcher, 15*time.Second); err != nil {
+			t.Fatalf("bd list --watch did not stop cleanly: %v\nwatcher stderr:\n%s", err, watcher.stderr.text())
+		}
+		if !strings.Contains(watcher.stderr.text(), "Stopped watching.") {
+			t.Errorf("watcher stderr never printed the stop line:\n%s", watcher.stderr.text())
+		}
+	})
+
+}
+
+// watchOutput is a live view of one bd watch subprocess stream: lines
+// accumulate as the process writes them, so a redraw is observable while the
+// process still runs. drained closes when the stream hits EOF.
+type watchOutput struct {
+	mu      sync.Mutex
+	buf     strings.Builder
+	drained chan struct{}
+}
+
+// bdListWatcher is a running `bd list --watch` subprocess with live views of
+// both its streams.
+type bdListWatcher struct {
+	cmd            *exec.Cmd
+	stdout, stderr *watchOutput
+}
+
+func (w *watchOutput) scan(r io.ReadCloser) {
+	defer close(w.drained)
+	defer r.Close()
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for sc.Scan() {
+		w.mu.Lock()
+		w.buf.WriteString(sc.Text())
+		w.buf.WriteByte('\n')
+		w.mu.Unlock()
+	}
+}
+
+func (w *watchOutput) text() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.String()
+}
+
+// startBdListWatch runs `bd list --watch <args>` in dir and returns the
+// watcher. The pipes are plain os.Pipes the test owns, so they drain to EOF
+// before Wait and the final lines (the stop banner) are never lost to Wait
+// closing them. t.Cleanup guards against a watcher outliving a failed assert.
+func startBdListWatch(t *testing.T, bd, dir string, args ...string) *bdListWatcher {
+	t.Helper()
+	cmd := exec.Command(bd, append([]string{"list", "--watch"}, args...)...)
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("stdout pipe: %v", err)
+	}
+	errR, errW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("stderr pipe: %v", err)
+	}
+	cmd.Stdout, cmd.Stderr = outW, errW
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start bd list --watch: %v", err)
+	}
+	_ = outW.Close()
+	_ = errW.Close()
+	w := &bdListWatcher{
+		cmd:    cmd,
+		stdout: &watchOutput{drained: make(chan struct{})},
+		stderr: &watchOutput{drained: make(chan struct{})},
+	}
+	go w.stdout.scan(outR)
+	go w.stderr.scan(errR)
+	t.Cleanup(func() {
+		if cmd.ProcessState == nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}
+		<-w.stdout.drained
+		<-w.stderr.drained
+	})
+	return w
+}
+
+// stopBdListWatch interrupts the watcher, waits out its exit, and drains both
+// streams (see startBdListWatch for why the drain comes before Wait). It
+// reports rather than fatalf's on a dirty exit: only the caller knows whether
+// a clean stop is part of what its assertion pins, and a fatalf here would
+// mask the concurrent-command failure that led to the stop in the first place.
+func stopBdListWatch(t *testing.T, w *bdListWatcher, timeout time.Duration) error {
+	t.Helper()
+	if err := w.cmd.Process.Signal(os.Interrupt); err != nil {
+		_ = w.cmd.Process.Kill()
+		_ = w.cmd.Wait()
+		<-w.stdout.drained
+		<-w.stderr.drained
+		return fmt.Errorf("interrupt bd list --watch: %w", err)
+	}
+	drained := make(chan struct{})
+	go func() {
+		<-w.stdout.drained
+		<-w.stderr.drained
+		close(drained)
+	}()
+	select {
+	case <-drained:
+	case <-time.After(timeout):
+		_ = w.cmd.Process.Kill()
+		_ = w.cmd.Wait()
+		return fmt.Errorf("bd list --watch did not exit within %s of SIGINT", timeout)
+	}
+	return w.cmd.Wait()
+}
+
+// bdRunWithTimeout runs a bd command under a hard deadline. GH#3415's claim
+// is not just that a command eventually succeeds next to a running watch —
+// it is that the embedded flock is free often enough to succeed within the
+// deadline, so a timeout is reported as the failure it is.
+func bdRunWithTimeout(t *testing.T, bd, dir string, timeout time.Duration, args ...string) error {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bd, args...)
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("bd %s (deadline %s): %v\n%s", strings.Join(args, " "), timeout, err, out)
+	}
+	return nil
 }
