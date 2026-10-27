@@ -1033,10 +1033,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stamped by another bd version, the repair opened the server's existing
   database and imported `.beads/issues.jsonl` into it. That rewrote the
   database's rows to the tracked copy and recreated issues deleted since.
-  The repair now imports only into a database its own open created. A
-  database already on the server gets the local directory and its metadata
-  update, and nothing is imported. The Schema Compatibility repair runs the
-  same code and is fixed too.
+  The repair now imports only into a database its own open created or one
+  with no issues. A database already on the server with issues gets the
+  local directory and its metadata update, and nothing is imported. The
+  Schema Compatibility repair runs the same code and is fixed too.
 
 - **`bd export` and auto-export no longer write JSONL with relations silently
   dropped** (GH#6870). When a label, dependency, comment or count read fails,

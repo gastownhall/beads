@@ -3700,8 +3700,8 @@ func (s *DoltStore) IsReadOnly() bool {
 // server, by connecting to it, by SHOW DATABASES, or by losing the CREATE
 // DATABASE race to another open, and for a gateway server, on which bd never
 // creates a database. bd doctor --fix's Database repair imports issues.jsonl
-// only into a database its own open created, never into one a local
-// directory's absence merely suggested was missing.
+// into a database its own open created, and into one a local directory's
+// absence merely suggested was missing only when that has no issues.
 func (s *DoltStore) CreatedDatabase() bool {
 	return s.createdDatabase
 }
