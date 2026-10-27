@@ -502,6 +502,48 @@ func printAncestorPKMismatchGuidance(err error) {
 	fmt.Fprintln(w, "  https://github.com/gastownhall/beads/blob/main/docs/recovery/init-safety.md#pk-fork-refused")
 }
 
+// isRemoteDanglingReferenceErr reports Dolt's refusal to update a remote that
+// denies having a chunk the push points to ("Found dangling references");
+// see dberrors.IsRemoteDanglingReference for where Dolt raises it (GH#3358).
+func isRemoteDanglingReferenceErr(err error) bool {
+	return dberrors.IsRemoteDanglingReference(err)
+}
+
+// printRemoteDanglingReferenceGuidance prints recovery guidance when a push
+// is refused because the remote reports a chunk the push points to as
+// missing. Dolt checks this before it moves the remote branch, so the
+// attempt changed nothing on the remote and nothing locally is at risk.
+func printRemoteDanglingReferenceGuidance() {
+	w := os.Stderr
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "Dolt refused to update the remote: the remote reported that a chunk this")
+	fmt.Fprintln(w, "push points to is missing (\"Found dangling references\").")
+	fmt.Fprintln(w, "Dolt checks this before it moves the remote branch, so this attempt")
+	fmt.Fprintln(w, "did not move the remote branch. The check is about the remote; it is")
+	fmt.Fprintln(w, "not a sign that your local database is damaged.")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "A different hash on each failure usually means a transient race on the")
+	fmt.Fprintln(w, "remote (another push to the same remote, or an upload it had not yet")
+	fmt.Fprintln(w, "registered). The same hash on every attempt suggests the remote itself")
+	fmt.Fprintln(w, "is damaged.")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "What to do:")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "  1. Re-run the same push once.")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "  2. If it fails again with the same hash, seed a fresh remote from this")
+	fmt.Fprintln(w, "     clone, then move the other clones to it (see the playbook):")
+	fmt.Fprintln(w, "       bd dolt remote add <name> <url>")
+	fmt.Fprintln(w, "       bd dolt push --remote <name>")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "  3. If it keeps failing, report it to Dolt with the hash, the output of")
+	fmt.Fprintln(w, "     'dolt version', and the remote type:")
+	fmt.Fprintln(w, "       https://github.com/dolthub/dolt/issues")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "Full playbook:")
+	fmt.Fprintln(w, "  https://github.com/gastownhall/beads/blob/main/docs/recovery/sync-failures.md#push-fails-with-found-dangling-references")
+}
+
 // printNoRemoteGuidance prints an informational message (to stdout) when
 // push or pull is attempted but no Dolt remote is configured. Exits 0 because
 // the absence of a remote is a valid configuration — not an error.
@@ -688,6 +730,8 @@ The remote must already exist (see 'bd dolt remote add').`,
 					op = "push --force"
 				}
 				printDivergedHistoryGuidance(op)
+			} else if isRemoteDanglingReferenceErr(pushErr) {
+				printRemoteDanglingReferenceGuidance()
 			}
 			return SilentExit()
 		}

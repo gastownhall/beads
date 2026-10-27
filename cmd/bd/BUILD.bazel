@@ -770,6 +770,7 @@ go_test(
         "dolt_local_only_test.go",
         "dolt_metadata_e2e_test.go",
         "dolt_proxied_lifecycle_test.go",
+        "dolt_push_dangling_test.go",
         "dolt_remote_add_server_test.go",
         "dolt_remote_add_test.go",
         "dolt_remote_adopt_test.go",
