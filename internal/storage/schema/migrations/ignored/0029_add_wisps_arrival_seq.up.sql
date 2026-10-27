@@ -16,9 +16,11 @@
 -- healed behind it fails the stamp loudly instead of minting a duplicate, and
 -- the writer's heal (issueops.healEventSeqCounter) raises the counter past
 -- MAX(arrival_seq) before retrying. NULLs are distinct in a unique index, so
--- every unstamped row coexists. The index belongs here rather than in 0073
--- because wisps is clone-local on every clone, upgraded or fresh, and this file
--- is the one both doors run.
+-- every unstamped row coexists. The index is here because wisps is clone-local
+-- on every clone, upgraded or fresh, and this file is the one both doors run.
+-- 0073 creates it as well, under the same guard, for the door this file
+-- cannot cover: 0073 rolled back and applied again while this file stays
+-- recorded.
 --
 -- The column and index steps are guarded: a no-op on in-place-upgraded
 -- workspaces where synced 0073 already added the column, on workspaces with no

@@ -108,12 +108,14 @@ type Issue struct {
 	// insert's.
 	//
 	// Only wisp-plane rows created while the writer journals carry one; 0 means
-	// none (the writer did not journal, the row is on the issues plane, or it
-	// predates migration 0073). The value is workspace-local, unique, never
-	// reused, never changed while the row stays on the wisp plane, and never
-	// client-settable: create, update and import all ignore a supplied value,
-	// and bd export never writes it. A storage create writes the stored value
-	// back onto the issue it was given (issueops.RecordCreateEventInTx).
+	// none (the writer did not journal, the row is on the issues plane, it moved
+	// onto the wisp plane from the issues plane, or it predates migration 0073).
+	// The value is workspace-local, unique, not reused unless the seq counter is
+	// lost after the journal records that held it are pruned, never changed
+	// while the row stays on the wisp plane, and never client-settable: create,
+	// update and import all ignore a supplied value, and bd export never writes
+	// it. A storage create writes the stored value back onto the issue it was
+	// given (issueops.RecordCreateEventInTx).
 	ArrivalSeq int64 `json:"arrival_seq,omitempty"`
 
 	// ===== Time-Based Scheduling (GH#820) =====

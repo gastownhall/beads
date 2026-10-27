@@ -1964,6 +1964,11 @@ var rootCmd = &cobra.Command{
 			// preview: the store is genuinely writable underneath, so the
 			// lazy defer-wake sweep may still run (be-vbhpf).
 			ClassifiedRead: policy.readOnly && !readonlyMode && !previewMode,
+			// A read-only or gateway open does not migrate, so a schema too
+			// old for this binary's issue reads is refused at open instead of
+			// failing each read on an unknown column. Not for a preview,
+			// which reports an incompatibility through its own query.
+			RequireReadableSchema: !previewMode,
 		}
 
 		// Load config to get database name and server connection settings.

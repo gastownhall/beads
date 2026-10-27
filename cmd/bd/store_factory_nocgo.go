@@ -119,11 +119,17 @@ func newExistingDoltStoreFromConfig(ctx context.Context, beadsDir string) (stora
 }
 
 // newReadOnlyStoreFromConfig creates a read-only SQL-server-backed storage
-// backend. It does not activate the events journal: the store refuses writes,
-// so there is no mutation for a journal row to accompany (exemption is recorded
-// in the construction guard). The registry arm is the exception the cgo
-// twin, openNonMutatingStoreFromConfig, describes.
+// backend.
 func newReadOnlyStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
+	return openNonMutatingStoreFromConfig(ctx, beadsDir, false)
+}
+
+// openNonMutatingStoreFromConfig is the body of newReadOnlyStoreFromConfig and
+// newPreviewStoreFromConfig; preview selects the latter. It does not activate
+// the events journal: the store refuses writes, so there is no mutation for a
+// journal row to accompany (exemption is recorded in the construction guard).
+// The registry arm is the exception the cgo twin of the same name describes.
+func openNonMutatingStoreFromConfig(ctx context.Context, beadsDir string, preview bool) (storage.DoltStorage, error) {
 	// Before Load can migrate a legacy config.json; validateConfiguredBackend
 	// below re-checks the loaded config.
 	discovered, err := checkDiscoveredBackend(beadsDir)
@@ -153,16 +159,18 @@ func newReadOnlyStoreFromConfig(ctx context.Context, beadsDir string) (storage.D
 		return nil, errProxiedStoreUnrouted()
 	}
 	if effectiveServerMode(beadsDir, cfg) {
-		return dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
+		// A read refuses a schema too old for this binary's issue reads at
+		// open; a preview tolerates a behind schema, as in the cgo twin.
+		return dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true, RequireReadableSchema: !preview})
 	}
 	return nil, fmt.Errorf("%s", nocgoEmbeddedErrMsg)
 }
 
 // newPreviewStoreFromConfig is the non-CGO twin of the CGO build's preview
-// factory. The two differ only in how they open the EMBEDDED store, and this
-// build has no embedded store at all, so preview and read-only coincide here.
+// factory. This build has no embedded store, so the two differ only in the
+// server arm: a preview tolerates a schema behind this binary's.
 func newPreviewStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
-	return newReadOnlyStoreFromConfig(ctx, beadsDir)
+	return openNonMutatingStoreFromConfig(ctx, beadsDir, true)
 }
 
 const nocgoEmbeddedErrMsg = `embedded Dolt requires a CGO build, but this bd binary was built with CGO_ENABLED=0.

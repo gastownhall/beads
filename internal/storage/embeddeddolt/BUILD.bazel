@@ -80,6 +80,7 @@ go_library(
         "//internal/storage/issueops",
         "//internal/storage/memoryops",
         "//internal/storage/schema",
+        "//internal/storage/sqlbuild",
         "//internal/storage/versioncontrolops",
         "//internal/types",
         "//internal/utils",

@@ -52,6 +52,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/kvkeys"
 	"github.com/steveyegge/beads/internal/storage/schema"
+	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -406,6 +407,24 @@ type Config struct {
 	// value. That default is the guarantee — setting it true on such an open
 	// would make it eligible to sweep.
 	ClassifiedRead bool
+
+	// RequireReadableSchema makes an open that will not migrate the database
+	// (ReadOnly, or Gateway, whose server owns the schema) refuse one whose
+	// schema is behind this binary's and lacks a column the shared issue
+	// projection selects, with *schema.SchemaBehindError
+	// (schema.CheckReadableDrift). Such a database cannot answer a single
+	// issue read; without the check the open succeeds and every list, show
+	// and ready fails afterwards on an unknown column. A behind database that
+	// has every projected column still opens, so reads keep working through
+	// the upgrade window (bd-578h9.5, gastownhall/beads#5920). A migrating
+	// open needs none of this: its consent and gate refusals name a behind
+	// schema before anything reads it.
+	//
+	// Opt-in, false by default, because diagnostic opens (bd doctor, the
+	// version-bump probe) must still reach a behind database to report on it,
+	// and a preview reports an incompatibility through its own query
+	// (embeddeddolt.OpenForPreviewCommand's policy).
+	RequireReadableSchema bool
 
 	// LenientOpen opens the store leniently: a migration gate refusal (#4259),
 	// a dirty-working-set refusal (#4566) or a migration-consent refusal
@@ -2040,6 +2059,30 @@ var stopRejectedAutoStartedServer = doltserver.Stop
 // failure, such as a sandbox refusing the connection, without a live server.
 var dialServer = net.DialTimeout
 
+// issueProjectionColumns are the columns every issue read selects from the
+// row (sqlbuild.IssueBaseColumns, shared by both planes). checkOpenSchemaDrift
+// requires them on issues, the replicated table whose shape the schema cursor
+// describes.
+var issueProjectionColumns = sqlbuild.ColumnNames(sqlbuild.IssueBaseColumns)
+
+// checkOpenSchemaDrift is newServerMode's schema drift check. Every open
+// refuses a database ahead of this binary (schema.CheckForwardDrift). An open
+// that will not migrate and sets Config.RequireReadableSchema also refuses,
+// from the same version read, one behind it that lacks a projected column
+// (schema.CheckReadableDrift). Through a gateway that refusal names the
+// server administrator's remedy, since bd never migrates a gateway's schema.
+func checkOpenSchemaDrift(ctx context.Context, db *sql.DB, cfg *Config) error {
+	if !cfg.RequireReadableSchema || (!cfg.ReadOnly && !cfg.Gateway) {
+		return schema.CheckForwardDrift(ctx, db)
+	}
+	err := schema.CheckReadableDrift(ctx, db, "issues", issueProjectionColumns)
+	var behind *schema.SchemaBehindError
+	if cfg.Gateway && errors.As(err, &behind) {
+		behind.Gateway = true
+	}
+	return err
+}
+
 // newServerMode creates a DoltStore connected to a running dolt sql-server.
 // This path is pure Go and does not require CGO.
 func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
@@ -2341,8 +2384,10 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	// when the DB is already past the binary's latest migration (atLatest uses
 	// >=), so without this guard a writable open would proceed and later queries
 	// would fail with cryptic unknown-column errors instead of a clear
-	// "upgrade bd" message (the stale-binary incident behind #4135/#4137).
-	if err := schema.CheckForwardDrift(ctx, db); err != nil {
+	// "upgrade bd" message (the stale-binary incident behind #4135/#4137). An
+	// open that will not migrate also refuses, when it asks to, a database
+	// behind the binary that its reads cannot query (checkOpenSchemaDrift).
+	if err := checkOpenSchemaDrift(ctx, db, cfg); err != nil {
 		return nil, err
 	}
 

@@ -26,6 +26,7 @@ import (
 	db "github.com/steveyegge/beads/internal/storage/domain/db"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/schema"
+	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
 
@@ -426,6 +427,17 @@ func readThroughRefusedMigration(ctx context.Context, conn *sql.Conn, database s
 		// The gate refused AND the database cannot even be attached: report
 		// the refusal, which is the actionable half.
 		return backoff.Permanent(gateErr)
+	}
+	// Reading on at the current schema works only while this binary's issue
+	// reads can query it. A schema that lacks a column the shared projection
+	// selects would answer every one of them with an unknown-column error, so
+	// it is refused here as server mode's read-only open refuses it
+	// (dolt.Config.RequireReadableSchema).
+	if err := schema.CheckReadableDrift(ctx, conn, "issues", sqlbuild.ColumnNames(sqlbuild.IssueBaseColumns)); err != nil {
+		if isSerializationError(err) {
+			return err
+		}
+		return backoff.Permanent(err)
 	}
 	// A refusal the smart gate shaped — any Decision, or the #6575 data-behind
 	// stop — carries its own per-decision body in UserMessage. Print that

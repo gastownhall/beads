@@ -7797,10 +7797,13 @@ components:
             the workspace journals is stamped by its own insert, and one
             created while it did not is stamped by the first create record
             journaled for it later, so it sorts by that commit rather than its
-            insert's. Absent means none. Values are local to the
-            workspace that assigned them — unique, never reused, never changed
-            while the record stays on the wisp plane, never written to JSONL
-            interchange, and never settable by a client.
+            insert's; a record moved onto the wisp plane (`persistence`) has
+            none until such a record either. Absent means none. Values are
+            local to the workspace that assigned them — unique, not reused
+            unless the server's seq counter is lost after the journal records
+            that held them are pruned, never changed while the record stays on
+            the wisp plane, never written to JSONL interchange, and never
+            settable by a client.
         pinned:
           type: boolean
         is_template:

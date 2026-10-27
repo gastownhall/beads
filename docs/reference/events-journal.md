@@ -335,8 +335,10 @@ in — after the records themselves are long pruned.
 
 What it promises:
 
-- **Unique, never reused.** No two rows in a workspace share a value, across
-  deletes, re-creates and counter heals.
+- **Unique, and not reused.** No two rows in a workspace share a value, and a
+  value is not handed out again after its row is deleted or re-created, or
+  after the counter heals, while the counter, the journal or a surviving row
+  still holds it. A lost counter is the one exception (see below).
 - **Commit order.** Rows are ordered by the commit of the `create` record that
   stamped them: if one such record committed before another, its row's value is
   lower. A reader that sees a row stamped `n` also sees every surviving row
@@ -368,12 +370,22 @@ What it does not promise:
   `create` record is journaled for it.
 - **Durable beads carry none.** The durable plane replicates, and a
   clone-local number would mean nothing on another clone.
+- **A bead moved onto the wisp plane carries none.** `bd update --ephemeral`
+  and every other persistence move into the wisp plane journal an `update`, not
+  a `create`, so the bead has no stamp until a `create` record is journaled for
+  it (a rename or a re-import).
 - **Read it from the row, not from a record's `seq`.** A rename and an import
   upsert journal a synthetic `create` for a row that already exists. The first
   `create` record journaled for an unstamped row stamps it; later ones never
   move it.
 - **Create order only.** The order of later updates is not recoverable this
   way.
+- **A lost counter forgets deleted rows.** Once a deleted row's `create` record
+  is pruned, only the seq counter remembers its value. A counter lost after that
+  is re-created past the journal's highest `seq` and the highest surviving
+  `arrival_seq`, so the deleted row's value can be handed out again. A consumer
+  that keeps an `arrival_seq` high-water mark across such a reset can skip
+  rows.
 
 Over HTTP the member is announced by the `issues.arrivalSeq` capability and
 appears on every issue-shaped response when present. The capability says the

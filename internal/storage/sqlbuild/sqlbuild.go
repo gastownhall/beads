@@ -107,13 +107,24 @@ const QueryBatchSize = 200
 // QualifyColumns prefixes every column in a comma-separated list (e.g.
 // IssueSelectColumns) with the given table qualifier such as "i.".
 func QualifyColumns(columns, prefix string) string {
+	parts := ColumnNames(columns)
+	for i, p := range parts {
+		parts[i] = prefix + p
+	}
+	return strings.Join(parts, ", ")
+}
+
+// ColumnNames splits a comma-separated column list such as IssueBaseColumns
+// into its entries, trimmed of the newlines and indentation the constants are
+// laid out with.
+func ColumnNames(columns string) []string {
 	raw := strings.ReplaceAll(columns, "\n", " ")
 	raw = strings.ReplaceAll(raw, "\t", " ")
 	parts := strings.Split(raw, ",")
 	for i, p := range parts {
-		parts[i] = prefix + strings.TrimSpace(p)
+		parts[i] = strings.TrimSpace(p)
 	}
-	return strings.Join(parts, ", ")
+	return parts
 }
 
 // InPlaceholders renders "?,?,..." and the matching arg slice for an IN clause.

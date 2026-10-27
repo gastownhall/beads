@@ -1,7 +1,8 @@
 -- Roll back the arrival_seq column (0073). Guarded so an issues-only or
 -- partially-applied workspace rolls back as safely as it migrated up (0060
--- precedent). Dropping wisps.arrival_seq also drops the clone-local unique
--- index ignored/0029 built over it.
+-- precedent). Dropping wisps.arrival_seq also drops uk_wisps_arrival_seq, the
+-- clone-local unique index over it. ignored/0029 stays recorded and does not
+-- run again, so it is 0073's up, applied again, that rebuilds the index.
 --
 -- Manual rollback: run this over a server connection or with dolt >= 2.3. A
 -- pre-2.3 `dolt sql -f` silently no-ops the prepared ALTERs below while

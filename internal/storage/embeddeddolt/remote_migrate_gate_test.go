@@ -269,19 +269,62 @@ func TestEmbeddedOpenForReadOnlyCommand_LenientGate(t *testing.T) {
 	if roErr != nil {
 		t.Fatalf("OpenForReadOnlyCommand: %v", roErr)
 	}
-	defer roStore.Close()
+	roStore.Close()
 
 	db2, cleanup2, err := embeddeddolt.OpenSQL(ctx, dataDir, "testdb", "main")
 	if err != nil {
 		t.Fatalf("OpenSQL (verify): %v", err)
 	}
-	defer func() { _ = cleanup2() }()
 	var count int
 	if err := db2.QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM schema_migrations WHERE version = ?", schema.LatestVersion()).Scan(&count); err != nil {
+		_ = cleanup2()
 		t.Fatalf("read schema_migrations: %v", err)
 	}
 	if count != 0 {
+		_ = cleanup2()
 		t.Fatalf("lenient-gate open applied the pending migration (version %d present); it must not migrate", schema.LatestVersion())
+	}
+
+	// The read-through ends where the reads would fail: a schema that lacks a
+	// column this binary's issue reads select (arrival_seq, the shape a
+	// database the previous release migrated has) is refused at open instead
+	// of warned about and then failed on every query.
+	for _, stmt := range []string{
+		"ALTER TABLE issues DROP COLUMN arrival_seq",
+		"ALTER TABLE wisps DROP COLUMN arrival_seq",
+	} {
+		if _, err := db2.ExecContext(ctx, stmt); err != nil {
+			_ = cleanup2()
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	_ = cleanup2()
+	if unreadable, err := embeddeddolt.OpenForReadOnlyCommand(ctx, beadsDir, "testdb", "main"); err == nil {
+		unreadable.Close()
+		t.Fatal("OpenForReadOnlyCommand of a schema without arrival_seq = nil error, want *schema.SchemaBehindError")
+	} else if !schema.IsSchemaBehindError(err) {
+		t.Fatalf("OpenForReadOnlyCommand error = %T (%v), want *schema.SchemaBehindError", err, err)
+	}
+
+	// The same limit holds for the other refusal a read-only command
+	// tolerates. With the remote gone and consent given, the gate passes and
+	// the migration is refused by the #4566 dirty-table guard instead: the
+	// DROP COLUMNs above left issues dirty, and the pending 0073 alters it.
+	db3, cleanup3, err := embeddeddolt.OpenSQL(ctx, dataDir, "testdb", "main")
+	if err != nil {
+		t.Fatalf("OpenSQL (remove remote): %v", err)
+	}
+	if _, err := db3.ExecContext(ctx, "CALL DOLT_REMOTE('remove', 'origin')"); err != nil {
+		_ = cleanup3()
+		t.Fatalf("remove remote: %v", err)
+	}
+	_ = cleanup3()
+	t.Setenv(schema.AllowMigrateEnv, "1")
+	if unreadable, err := embeddeddolt.OpenForReadOnlyCommand(ctx, beadsDir, "testdb", "main"); err == nil {
+		unreadable.Close()
+		t.Fatal("OpenForReadOnlyCommand past a dirty-table refusal of a schema without arrival_seq = nil error, want *schema.SchemaBehindError")
+	} else if !schema.IsSchemaBehindError(err) {
+		t.Fatalf("OpenForReadOnlyCommand past a dirty-table refusal: error = %T (%v), want *schema.SchemaBehindError", err, err)
 	}
 }

@@ -18,6 +18,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/schema"
+	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/utils"
@@ -218,6 +219,21 @@ func lenientGateWarning(intent openIntent, gateErr *schema.RemoteMigrateGateErro
 				"  Writes are blocked until the schema is reconciled.\n",
 			body, gateErr.CurrentVersion)
 	}
+}
+
+// requireReadableSchema bounds a read-only command's read-through. Having
+// tolerated a migration refusal, the open goes on at the current schema, which
+// this binary's issue reads can query only while it has every column the
+// shared projection selects (schema.CheckReadableDrift). One that lacks any is
+// refused here, as server mode's read-only open refuses it
+// (dolt.Config.RequireReadableSchema), instead of opening and then failing
+// every read on an unknown column. The other intents read no issues through
+// this open and are left alone.
+func (s *EmbeddedDoltStore) requireReadableSchema(ctx context.Context, conn *sql.Conn) error {
+	if s.intent != openReadOnlyCommand {
+		return nil
+	}
+	return schema.CheckReadableDrift(ctx, conn, "issues", sqlbuild.ColumnNames(sqlbuild.IssueBaseColumns))
 }
 
 // toleratesGateRefusal reports whether this open's intent may warn and
@@ -678,6 +694,9 @@ func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
 			// migrate-or-adopt guidance.
 			// lenientGateWarning owns the rendering (and the rationale for
 			// preferring gateErr's shaped body over the blunt bullets).
+			if err := s.requireReadableSchema(ctx, conn); err != nil {
+				return err
+			}
 			fmt.Fprint(os.Stderr, lenientGateWarning(s.intent, gateErr))
 			return nil
 		}
@@ -701,6 +720,9 @@ func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
 			// read-only command must not be bricked by dirty tables either,
 			// so both non-strict intents warn and continue on the current
 			// schema instead of failing the open.
+			if err := s.requireReadableSchema(ctx, conn); err != nil {
+				return err
+			}
 			switch s.intent {
 			case openWorkingSetReconcile:
 				fmt.Fprintf(os.Stderr,

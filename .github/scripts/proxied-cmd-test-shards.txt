@@ -152,6 +152,7 @@
 34 16 TestProxiedServerServeCount
 34 16 TestProxiedServerServeCreate
 34 16 TestProxiedServerUpdateHooks
+34 16 TestServerModeReadRefusesASchemaItsReadsCannotQuery
 
 34 17 TestProxiedServerDep
 34 17 TestProxiedServerMultiStatementSQL

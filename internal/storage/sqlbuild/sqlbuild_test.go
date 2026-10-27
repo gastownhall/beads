@@ -613,3 +613,26 @@ func TestOptionalWispTable(t *testing.T) {
 		}
 	}
 }
+
+// TestColumnNames pins the split the readable-schema check depends on: every
+// entry of the row projection comes back bare, with arrival_seq last, and
+// QualifyColumns rebuilds the list from the same entries.
+func TestColumnNames(t *testing.T) {
+	t.Parallel()
+
+	names := ColumnNames(IssueBaseColumns)
+	if got, want := names[0], "id"; got != want {
+		t.Errorf("first column = %q, want %q", got, want)
+	}
+	if got, want := names[len(names)-1], "arrival_seq"; got != want {
+		t.Errorf("last column = %q, want %q", got, want)
+	}
+	for _, name := range names {
+		if name == "" || strings.ContainsAny(name, " \t\n,") {
+			t.Errorf("ColumnNames entry %q is not a bare column name", name)
+		}
+	}
+	if got, want := QualifyColumns(IssueBaseColumns, "i."), "i."+strings.Join(names, ", i."); got != want {
+		t.Errorf("QualifyColumns = %q, want %q", got, want)
+	}
+}

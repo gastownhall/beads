@@ -21,10 +21,18 @@
 --
 -- BIGINT, nullable, no default: NULL means "never stamped" (the writer did not
 -- journal, or the row predates this column), so no existing row is rewritten.
--- The unique index that makes a value impossible to hand out twice lives on the
--- clone-local wisps table and is created by the ignored-series twin
--- (ignored/0029), which is also what carries the column to fresh clones whose
--- main cursor arrives at-latest without running this file.
+--
+-- The unique index that makes a value impossible to hand out twice,
+-- uk_wisps_arrival_seq, lives on the clone-local wisps table. The
+-- ignored-series twin (ignored/0029) creates it, and is also what carries the
+-- column to fresh clones whose main cursor arrives at-latest without running
+-- this file. This file creates it too, guarded the same way, for the one door
+-- 0029 cannot cover: this migration's down drops the column and the index with
+-- it but leaves ignored/0029 recorded, so when 0073 is applied again it is the
+-- only migration that runs. On an in-place upgrade the index lands here and
+-- 0029's guard finds it. 0029's counter raise is not repeated: on either path
+-- this file adds the column empty, so there is no stamp yet for the counter to
+-- stay above.
 --
 -- Guarded so the migration is idempotent on a schema_migrations row that
 -- regressed without its DDL rolled back, and so a raw .up.sql replay onto an
@@ -58,5 +66,18 @@ SET @needs_add = IF(@has_wisps > 0 AND
     1, 0);
 SET @sql = IF(@needs_add = 1,
     'ALTER TABLE wisps ADD COLUMN arrival_seq BIGINT',
+    'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+-- uk_wisps_arrival_seq, on wisps only: on issues the column is always NULL.
+-- Guarded on the wisps table existing and the index not, as in ignored/0029.
+SET @needs_index = IF(@has_wisps > 0 AND
+    (SELECT COUNT(*) FROM INFORMATION_SCHEMA.STATISTICS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'wisps'
+          AND INDEX_NAME = 'uk_wisps_arrival_seq') = 0,
+    1, 0);
+SET @sql = IF(@needs_index = 1,
+    'CREATE UNIQUE INDEX uk_wisps_arrival_seq ON wisps (arrival_seq)',
     'SELECT 1');
 PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;

@@ -66,16 +66,28 @@ func TestMigration0073AddsArrivalSeqToBothPlanes(t *testing.T) {
 			}
 		}
 	}
-	// No index on the replicating issues table, and the wisps index belongs to
-	// the ignored twin: the column is meaningless on issues.
-	if strings.Contains(strings.ToUpper(upSQL), "CREATE UNIQUE INDEX") {
-		t.Error("0073 must not create the unique index: it belongs to the clone-local ignored/0029")
+	// The wisps unique index is built here as well as by ignored/0029: this
+	// migration's down drops it with the column and leaves 0029 recorded, so
+	// a 0073 applied again is the only file left to rebuild it. Guarded like
+	// 0029's, and never on the replicating issues table, where the column is
+	// meaningless.
+	for _, want := range []string{
+		"'CREATE UNIQUE INDEX uk_wisps_arrival_seq ON wisps (arrival_seq)'",
+		"INDEX_NAME = 'uk_wisps_arrival_seq'",
+	} {
+		if !strings.Contains(upSQL, want) {
+			t.Errorf("0073 up migration missing %q: a down then up would leave wisps.arrival_seq without its unique index\nfull SQL:\n%s", want, upSQL)
+		}
+	}
+	if strings.Contains(upSQL, "ON issues (arrival_seq)") {
+		t.Error("0073 indexes issues.arrival_seq: the column is always NULL on the replicating plane")
 	}
 
 	bundle := cliCompatibleMigrationSQL(migration0073Up, upSQL)
 	for _, want := range []string{
 		"ALTER TABLE issues ADD COLUMN arrival_seq BIGINT;",
 		"ALTER TABLE wisps ADD COLUMN arrival_seq BIGINT;",
+		"CREATE UNIQUE INDEX uk_wisps_arrival_seq ON wisps (arrival_seq);",
 	} {
 		if !strings.Contains(bundle, want) {
 			t.Errorf("0073's CLI bundle substitute missing direct DDL %q: a pre-2.3 CLI no-ops the prepared ALTER", want)

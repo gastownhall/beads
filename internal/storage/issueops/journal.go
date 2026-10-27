@@ -586,9 +586,11 @@ func stampArrivalSeqInTx(ctx context.Context, tx DBTX, issueID string, seq, prio
 // isSeqCollision reports whether err is a uniqueness violation on a value the
 // seq counter handed out: the journal's seq primary key, or the wisps
 // arrival_seq unique index. dberrors.IsDuplicateKey covers MySQL/Dolt server
-// (1062/1586) and the embedded engine's primary-key text; the embedded engine
-// reports a UNIQUE-index violation with its own error kind, which create.go's
-// create-only guard recognizes the same way.
+// (1062/1586) and the embedded engine's primary-key text. The embedded engine
+// reports a UNIQUE-index violation with its own error kind, but Kind.Is does
+// not unwrap, and the stamp's violation arrives wrapped (stampArrivalSeqInTx's
+// %w), so the kind arms match only a bare error: the "duplicate unique key"
+// text is what recognizes the wrapped one.
 func isSeqCollision(err error) bool {
 	return dberrors.IsDuplicateKey(err) || gmssql.ErrUniqueKeyViolation.Is(err) || gmssql.ErrPrimaryKeyViolation.Is(err) ||
 		strings.Contains(strings.ToLower(err.Error()), "duplicate unique key")
@@ -654,8 +656,11 @@ func isMissingArrivalSeqSource(err error) bool {
 		(strings.Contains(s, "could not be found") || strings.Contains(s, "unknown column"))
 }
 
-// mysqlUnknownColumn is ER_BAD_FIELD_ERROR, MySQL's "Unknown column" code, which
-// Dolt's sql-server reports for a column the table lacks.
+// mysqlUnknownColumn is ER_BAD_FIELD_ERROR, MySQL's "Unknown column" code. Dolt's
+// sql-server does not send it for a column the table lacks: 2.6 answers with
+// error 1105 and the text `column "arrival_seq" could not be found in any table
+// in scope`, so isMissingArrivalSeqSource's text match is what recognizes it
+// there, and must stay.
 const mysqlUnknownColumn = 1054
 
 // nextEventSeq allocates the next journal sequence number from the single-row

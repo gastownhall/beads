@@ -360,7 +360,9 @@ func openNonMutatingStoreFromConfig(ctx context.Context, beadsDir string, previe
 		return nil, errProxiedStoreUnrouted()
 	}
 	if effectiveServerMode(beadsDir, cfg) {
-		return dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
+		// A read refuses a schema too old for this binary's issue reads at
+		// open; a preview tolerates a behind schema, as on the embedded arms.
+		return dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true, RequireReadableSchema: !preview})
 	}
 	database := configfile.DefaultDoltDatabase
 	if cfg != nil {
