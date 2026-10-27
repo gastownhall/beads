@@ -271,3 +271,33 @@ func TestEnginePullOnlyKeepsLocalOnlyEdit(t *testing.T) {
 		})
 	}
 }
+
+// TestEngineBidirectionalConflictUnchanged pins bidirectional conflict
+// resolution: Phase 1 (DetectConflicts + resolveConflicts) still decides,
+// the pull does not double-count, and the local version is pushed.
+func TestEngineBidirectionalConflictUnchanged(t *testing.T) {
+	fx := newPullConflictFixture(t, pullConflictLastSync.Add(20*time.Minute))
+	result, err := fx.engine.Sync(context.Background(), SyncOptions{
+		Pull:              true,
+		Push:              true,
+		ConflictResolution: ConflictLocal,
+	})
+	if err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if fx.local.Status != types.StatusOpen {
+		t.Errorf("status = %q, want open", fx.local.Status)
+	}
+	if len(fx.mock.updated) != 1 {
+		t.Fatalf("tracker update calls = %d, want 1 (the local version pushed)", len(fx.mock.updated))
+	}
+	if _, ok := fx.mock.updated["EXT-1"]; !ok {
+		t.Errorf("tracker update calls = %v, want one for EXT-1", fx.mock.updated)
+	}
+	if result.PullStats.Conflicts != 0 {
+		t.Errorf("PullStats.Conflicts = %d, want 0 (bidirectional counts in Phase 1)", result.PullStats.Conflicts)
+	}
+	if result.Stats.Conflicts != 1 {
+		t.Errorf("Stats.Conflicts = %d, want 1, counted once", result.Stats.Conflicts)
+	}
+}
