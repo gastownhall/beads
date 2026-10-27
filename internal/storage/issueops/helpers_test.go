@@ -322,6 +322,8 @@ func TestReadConfigPrefix(t *testing.T) {
 			"issue_prefix config is missing",
 			"bd init --prefix",
 			"bd bootstrap",
+			"to finish setting up an existing database",
+			"seeds issue_prefix from config.yaml 'issue-prefix'",
 		) {
 			t.Fatalf("ReadConfigPrefix error missing actionable recovery commands: %s", msg)
 		}

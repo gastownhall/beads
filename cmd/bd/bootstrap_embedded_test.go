@@ -646,3 +646,45 @@ func TestEmbeddedBootstrapSeedPrefixPlansAndSeeds(t *testing.T) {
 		}
 	})
 }
+
+// TestEmbeddedCreateWithoutPrefixNamesBootstrap pins the failing-create half
+// of GH#3494's repair story: on the half-identified workspace (database lost
+// its issue_prefix row, config.yaml still names one) `bd create` must fail —
+// config.yaml alone never satisfies the mint — and its error must name
+// bd bootstrap as the repair alongside bd init --prefix for a new project.
+func TestEmbeddedCreateWithoutPrefixNamesBootstrap(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "np")
+	dropEmbeddedIssuePrefixRow(t, bd, dir)
+	cfgPath := filepath.Join(beadsDir, "config.yaml")
+	cfgData, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read config.yaml: %v", err)
+	}
+	if err := os.WriteFile(cfgPath, append(cfgData, []byte("issue-prefix: la\n")...), 0o644); err != nil {
+		t.Fatalf("append issue-prefix to config.yaml: %v", err)
+	}
+
+	out, err := runBDEmbeddedAllowError(t, bd, dir, "create", "--title", "x", "--type", "task")
+	if err == nil {
+		t.Fatalf("bd create must fail without a seeded prefix (config.yaml alone does not satisfy it), got success:\n%s", out)
+	}
+	for _, want := range []string{
+		"issue_prefix config is missing",
+		"bd bootstrap",
+		"bd init --prefix",
+		"to finish setting up an existing database",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("bd create failure missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "use key 'issue-prefix'") {
+		t.Errorf("bd create failure recommends a config.yaml key that does not satisfy it:\n%s", out)
+	}
+}

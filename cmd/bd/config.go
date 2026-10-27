@@ -1481,20 +1481,22 @@ func isRecognizedConfigKey(key string) bool {
 }
 
 // rejectProtectedConfigKey rejects keys that are owned by a dedicated
-// lifecycle command (init/rename) rather than 'bd config set'. The canonical
-// example is issue_prefix: 'bd create' reads YAML "issue-prefix"
-// then DB "issue_prefix", while 'bd config set' would land in DB
-// "issue-prefix" — a third key no reader consults. Accepting either the
-// dash or underscore form silently produces a write that looks like it
-// succeeded but is never visible to 'bd create'. Reject both and point the
-// user at the right command.
+// lifecycle command (init/bootstrap/rename) rather than 'bd config set'. The
+// canonical example is issue_prefix: 'bd create' mints IDs from the
+// database's issue_prefix row only (config.yaml never satisfies it, GH#3494),
+// while 'bd config set issue-prefix' would land in the database under a key
+// no reader consults. Accepting either the dash or underscore form silently
+// produces a write that looks like it succeeded but is never visible to
+// 'bd create'. Reject both and point the user at the commands that own the
+// lifecycle.
 func rejectProtectedConfigKey(key string) (string, bool) {
 	switch key {
 	case "issue_prefix", "issue-prefix":
 		return "Error: issue_prefix cannot be set via 'bd config set'.\n" +
-			"  - New project:       bd init --prefix <prefix>\n" +
-			"  - Fresh clone:       bd bootstrap\n" +
-			"  - Rename existing:   bd rename-prefix <new-prefix>", true
+			"  - New project:                    bd init --prefix <prefix>\n" +
+			"  - Fresh clone:                    bd bootstrap\n" +
+			"  - Existing DB missing its prefix: bd bootstrap (seeds from config.yaml issue-prefix)\n" +
+			"  - Rename existing:                bd rename-prefix <new-prefix>", true
 	}
 	return "", false
 }

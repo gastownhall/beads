@@ -1651,7 +1651,10 @@ func (u *issueUseCaseImpl) resolveTopLevelPrefix(ctx context.Context, issue *typ
 	}
 	configPrefix = strings.TrimSuffix(configPrefix, "-")
 	if configPrefix == "" {
-		return "", fmt.Errorf("issue_prefix config is missing")
+		// The shared never-overwrite vocabulary (storage.NewErrIssuePrefixMissing):
+		// same sentinel, same repair text as issueops' ReadConfigPrefix, so a
+		// caller cannot tell which create path failed — only how to fix it.
+		return "", storage.NewErrIssuePrefixMissing()
 	}
 
 	switch {

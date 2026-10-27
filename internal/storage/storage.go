@@ -40,6 +40,18 @@ var (
 	ErrNotesOverwrite    = issueops.ErrNotesOverwrite
 )
 
+// NewErrIssuePrefixMissing is the one error every ID-minting path returns when
+// the database carries no issue_prefix row: issueops' ReadConfigPrefix and
+// domain's resolveTopLevelPrefix both wrap storage.ErrNotInitialized with this
+// text, so a caller matches the sentinel while a human gets the same repair
+// whichever create path failed. The repair names bd bootstrap first because
+// that is what seeds the row on an existing database (from config.yaml's
+// issue-prefix); the YAML key itself never satisfies the check, which is why
+// the message says so (GH#3494).
+func NewErrIssuePrefixMissing() error {
+	return fmt.Errorf("%w: issue_prefix config is missing (run 'bd bootstrap' to finish setting up an existing database: it seeds issue_prefix from config.yaml 'issue-prefix'; or 'bd init --prefix <prefix>' for a new project; this check reads the database's config table, so adding 'issue-prefix' to config.yaml does not satisfy it)", ErrNotInitialized)
+}
+
 // CloseOpenChildrenError reports the issue and open-child count that refused a
 // guarded close. See issueops.CloseOpenChildrenError.
 type CloseOpenChildrenError = issueops.CloseOpenChildrenError
