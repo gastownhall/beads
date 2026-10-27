@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -283,5 +284,51 @@ func TestCLI_Bootstrap_JSONLImportKeepsExistingServerPrefix_E2E(t *testing.T) {
 	})
 	if strings.Join(ids, ",") != "la-1" {
 		t.Errorf("issues on the server = %v, want [la-1]", ids)
+	}
+}
+
+// AC-5: the dry-run plan for the AC-1 server workspace is a non-blocked
+// seed-prefix on an existing database whose reason names the prefix and
+// where it came from, and the real run reports the same.
+func TestCLI_Bootstrap_SeedPrefixPlanAndMessage_E2E(t *testing.T) {
+	skipIfNoDolt(t)
+
+	dir := t.TempDir()
+	database := uniqueTestDBName(t)
+	t.Cleanup(func() { dropTestDatabase(database, testDoltServerPort) })
+	createServerDatabaseWithoutPrefix(t, database)
+	writeUnprovisionedServerWorkspace(t, dir, database, testDoltServerPort)
+	env := bootstrapServerTestEnv()
+
+	stdout, stderr, err := runBDExecSeparated(t, testBD, dir, env, "bootstrap", "--dry-run", "--json")
+	if err != nil {
+		t.Fatalf("bd bootstrap --dry-run --json: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+	var plan map[string]any
+	if err := json.Unmarshal([]byte(stdout), &plan); err != nil {
+		t.Fatalf("parse plan JSON: %v\n%s", err, stdout)
+	}
+	if plan["action"] != "seed-prefix" {
+		t.Errorf("action = %v, want seed-prefix\n%s", plan["action"], stdout)
+	}
+	if plan["has_existing"] != true {
+		t.Errorf("has_existing = %v, want true", plan["has_existing"])
+	}
+	if _, ok := plan["blocked"]; ok {
+		t.Errorf("plan carries blocked: %v", plan["blocked"])
+	}
+	if reason, _ := plan["reason"].(string); !strings.Contains(reason, `"la"`) || !strings.Contains(reason, "config.yaml issue-prefix") {
+		t.Errorf("reason %q does not name the prefix and its source", reason)
+	}
+
+	stdout, stderr, err = runBDExecSeparated(t, testBD, dir, env, "bootstrap", "--yes")
+	if err != nil {
+		t.Fatalf("bd bootstrap --yes: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+	if want := fmt.Sprintf(`Set issue_prefix "la" on existing database %q (from config.yaml issue-prefix)`, database); !strings.Contains(stderr, want) {
+		t.Errorf("stderr lacks %q:\n%s", want, stderr)
+	}
+	if strings.Contains(stdout+stderr, "Created fresh database") {
+		t.Errorf("bootstrap reported a fresh database:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
 	}
 }

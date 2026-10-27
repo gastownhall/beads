@@ -553,3 +553,54 @@ func TestEmbeddedBootstrapSeedPrefixKeepsPrefixSetAfterPlanning(t *testing.T) {
 		t.Errorf("bd config get issue_prefix = %q, want %q", got, "xx")
 	}
 }
+
+// AC-5: the dry-run plan for an embedded database missing its prefix is a
+// non-blocked seed-prefix on an existing database whose reason names the
+// prefix and where it came from, and the real run reports the same.
+func TestEmbeddedBootstrapSeedPrefixPlanAndMessage(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _ := embeddedWorkspaceMissingPrefix(t, bd, "la", "la")
+
+	cmd := exec.Command(bd, "bootstrap", "--dry-run", "--json")
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	stdout, stderr, err := runCommandBuffers(t, cmd)
+	if err != nil {
+		t.Fatalf("bd bootstrap --dry-run --json: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+	var plan map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &plan); err != nil {
+		t.Fatalf("parse plan JSON: %v\n%s", err, stdout.String())
+	}
+	if plan["action"] != "seed-prefix" {
+		t.Errorf("action = %v, want seed-prefix\n%s", plan["action"], stdout.String())
+	}
+	if plan["has_existing"] != true {
+		t.Errorf("has_existing = %v, want true", plan["has_existing"])
+	}
+	if _, ok := plan["blocked"]; ok {
+		t.Errorf("plan carries blocked: %v", plan["blocked"])
+	}
+	if reason, _ := plan["reason"].(string); !strings.Contains(reason, `"la"`) || !strings.Contains(reason, "config.yaml issue-prefix") {
+		t.Errorf("reason %q does not name the prefix and its source", reason)
+	}
+
+	cmd = exec.Command(bd, "bootstrap", "--yes")
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	stdout, stderr, err = runCommandBuffers(t, cmd)
+	if err != nil {
+		t.Fatalf("bd bootstrap --yes: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+	if want := `Set issue_prefix "la" on existing database "la" (from config.yaml issue-prefix)`; !strings.Contains(stderr.String(), want) {
+		t.Errorf("stderr lacks %q:\n%s", want, stderr.String())
+	}
+	if strings.Contains(stdout.String()+stderr.String(), "Created fresh database") {
+		t.Errorf("bootstrap reported a fresh database:\nstdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+	}
+}

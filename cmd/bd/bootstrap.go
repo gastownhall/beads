@@ -648,8 +648,8 @@ func seedPrefixPlan(plan BootstrapPlan, cfg *configfile.Config, isServer bool, p
 	}
 	seed, source := inferPrefix(plan.BeadsDir, cfg)
 	plan.Action = "seed-prefix"
-	plan.Reason = fmt.Sprintf("Database %s exists but has no issue_prefix — will set %s (from %s)",
-		remedy.PrintedValue(plan.Database), remedy.PrintedValue(seed), source)
+	plan.Reason = fmt.Sprintf("Database %s exists but has no issue_prefix — will set %q (from %s)",
+		remedy.PrintedValue(plan.Database), seed, source)
 	return plan
 }
 
@@ -1213,7 +1213,7 @@ func executeBootstrapPlan(plan BootstrapPlan, cfg *configfile.Config, nonInterac
 // has none, opening it through the factory every other command uses. No issue
 // is created, rewritten or renamed.
 func executeSeedPrefixAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.Config) error {
-	prefix, _ := inferPrefix(plan.BeadsDir, cfg)
+	prefix, source := inferPrefix(plan.BeadsDir, cfg)
 
 	s, err := newDoltStoreFromConfig(ctx, plan.BeadsDir)
 	if err != nil {
@@ -1228,7 +1228,7 @@ func executeSeedPrefixAction(ctx context.Context, plan BootstrapPlan, cfg *confi
 	if err := s.CommitWithConfig(ctx, "bd bootstrap: seed issue_prefix"); err != nil {
 		return fmt.Errorf("commit: %w", err)
 	}
-	fmt.Fprintf(os.Stderr, "Set issue_prefix %q on existing database %q\n", prefix, plan.Database)
+	fmt.Fprintf(os.Stderr, "Set issue_prefix %q on existing database %q (from %s)\n", prefix, plan.Database, source)
 	return nil
 }
 
