@@ -60,8 +60,15 @@ builds:
   - id: bd-android-arm64
     main: ./cmd/bd
     binary: bd
+    # CGO build (#3538): embedded Dolt on Termux. CC/CXX point at in-tree
+    # wrappers (absolute, because cgo runs $CC from package directories) that
+    # resolve the pinned NDK r30 API-21 clang on Linux x86_64; see
+    # scripts/ci/android-arm64-cc and RELEASING.md "Cross-compile before
+    # tagging" for the Linux-only snapshot story.
     env:
-      - CGO_ENABLED=0
+      - CGO_ENABLED=1
+      - 'CC={{ .Env.PWD }}/scripts/ci/android-arm64-cc'
+      - 'CXX={{ .Env.PWD }}/scripts/ci/android-arm64-cxx'
     tags:
       - gms_pure_go
     goos:
@@ -74,6 +81,10 @@ builds:
       - -X main.Build={{.ShortCommit}}
       - -X main.Commit={{.Commit}}
       - -X main.Branch={{.Branch}}
+    hooks:
+      post:
+        - ./scripts/verify-cgo.sh "{{ .Path }}"
+        - ./scripts/verify-android-elf.sh "{{ .Path }}"
 
   # darwin-amd64 and darwin-arm64 are built by a dedicated macOS CI job
   # (release.yml: goreleaser-macos) with CGO_ENABLED=1 for embedded Dolt support.

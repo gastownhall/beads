@@ -252,11 +252,94 @@ func TestReleaseTargetCrossCompilationMatrixMatchesGoreleaser(t *testing.T) {
 	}
 }
 
+// TestGoreleaserAndroidArm64BuildEnablesCGO pins issue #3538: the shipped
+// android/arm64 release (also served by npm @beads/bd) must be a CGO build,
+// otherwise embedded Dolt mode is unavailable on Termux and `bd init` fails
+// with "embedded Dolt requires a CGO build".
+func TestGoreleaserAndroidArm64BuildEnablesCGO(t *testing.T) {
+	found := false
+	for _, build := range readGoreleaserBuilds(t) {
+		if !contains(build.GOOS, "android") || !contains(build.GOARCH, "arm64") {
+			continue
+		}
+		found = true
+		if !contains(build.Env, "CGO_ENABLED=1") {
+			t.Errorf(".goreleaser.yml build %s ships android/arm64 with env %q, want CGO_ENABLED=1 for embedded Dolt", build.ID, build.Env)
+		}
+	}
+	if !found {
+		t.Fatal(".goreleaser.yml has no android/arm64 build")
+	}
+}
+
+// TestGoreleaserAndroidArm64BuildsWithNDKCGO pins the rest of the #3538
+// contract: CGO alone is not the fix, the build must compile through the
+// pinned-NDK CC/CXX wrappers and verify the resulting ELF, or the android
+// asset would be a CGO build against the host glibc (or the runner image's
+// NDK 27 with 4 KB alignment) and still not run on Termux. Env entries are
+// compared exactly: a substring test would accept CC paths that are relative
+// (cgo runs $CC from package directories, so those miss) and env names that
+// merely contain the wanted one (ANDROID_NDK_HOME inside
+// BEADS_ANDROID_NDK_HOME). Hooks.Post is []string on purpose: the repo uses
+// the string form, and a switch to goreleaser's object form must fail the
+// YAML parse here rather than silently pass.
+func TestGoreleaserAndroidArm64BuildsWithNDKCGO(t *testing.T) {
+	builds := readGoreleaserBuilds(t)
+	var android *goreleaserBuild
+	for i := range builds {
+		if contains(builds[i].GOOS, "android") && contains(builds[i].GOARCH, "arm64") {
+			if android != nil {
+				t.Fatalf(".goreleaser.yml declares more than one android/arm64 build (%s, %s)", android.ID, builds[i].ID)
+			}
+			android = &builds[i]
+		}
+	}
+	if android == nil {
+		t.Fatal(".goreleaser.yml has no android/arm64 build")
+	}
+	if !contains(android.Env, "CGO_ENABLED=1") {
+		t.Errorf("build %s env = %q, want CGO_ENABLED=1 for embedded Dolt on Termux (#3538)", android.ID, android.Env)
+	}
+	if contains(android.Env, "CGO_ENABLED=0") {
+		t.Errorf("build %s env = %q, must not carry CGO_ENABLED=0", android.ID, android.Env)
+	}
+	for _, want := range []string{
+		"CC={{ .Env.PWD }}/scripts/ci/android-arm64-cc",
+		"CXX={{ .Env.PWD }}/scripts/ci/android-arm64-cxx",
+	} {
+		if !contains(android.Env, want) {
+			t.Errorf("build %s env = %q, want exact entry %s", android.ID, android.Env, want)
+		}
+	}
+	// Exactly [gms_pure_go]: the tag selects the pure-Go regexp so no ICU
+	// leaks into the NDK link, and netgo must NOT appear -- Android needs
+	// the cgo resolver (golang/go#10714).
+	if len(android.Tags) != 1 || android.Tags[0] != "gms_pure_go" {
+		t.Errorf("build %s tags = %q, want exactly [gms_pure_go]", android.ID, android.Tags)
+	}
+	wantHooks := []string{
+		`./scripts/verify-cgo.sh "{{ .Path }}"`,
+		`./scripts/verify-android-elf.sh "{{ .Path }}"`,
+	}
+	if len(android.Hooks.Post) != len(wantHooks) {
+		t.Fatalf("build %s post hooks = %q, want %q", android.ID, android.Hooks.Post, wantHooks)
+	}
+	for i, want := range wantHooks {
+		if android.Hooks.Post[i] != want {
+			t.Errorf("build %s post hook %d = %q, want %q", android.ID, i, android.Hooks.Post[i], want)
+		}
+	}
+}
+
 type goreleaserBuild struct {
 	ID     string   `yaml:"id"`
 	GOOS   []string `yaml:"goos"`
 	GOARCH []string `yaml:"goarch"`
 	Env    []string `yaml:"env"`
+	Tags   []string `yaml:"tags"`
+	Hooks  struct {
+		Post []string `yaml:"post"`
+	} `yaml:"hooks"`
 }
 
 func readGoreleaserBuilds(t *testing.T) []goreleaserBuild {
