@@ -85,3 +85,28 @@ func TestPersistentPreRunSkipsStoreForStoreFreeConfigGet(t *testing.T) {
 		t.Fatal("config get storage.backend should attempt store init and fail to open the absent database; test-environment precondition broken")
 	}
 }
+
+// TestPersistentPreRunKeepsStoreForDBBackedConfigGet guards the other side of
+// the GH#5108 skip: a DB-backed `config get` key, the other config verbs and
+// other `get` leaves keep today's store-opening pre-run.
+func TestPersistentPreRunKeepsStoreForDBBackedConfigGet(t *testing.T) {
+	_, drive := setupStoreFreeConfigGetWorkspace(t)
+
+	for _, tc := range []struct {
+		name string
+		cmd  *cobra.Command
+		args []string
+	}{
+		{"config get storage.backend", configGetCmd, []string{"storage.backend"}},
+		{"config set dolt.max-conns", configSetCmd, []string{"dolt.max-conns", "8"}},
+		{"config unset dolt.max-conns", configUnsetCmd, []string{"dolt.max-conns"}},
+		{"config list", configListCmd, nil},
+		{"kv get", kvGetCmd, []string{"k"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := drive(tc.cmd, tc.args); err == nil {
+				t.Fatalf("%s should attempt store init and fail to open the absent database", tc.name)
+			}
+		})
+	}
+}
