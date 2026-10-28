@@ -303,7 +303,7 @@ func TestParseMarkdownDependencies(t *testing.T) {
 		{"discovered-from preserved", []string{"discovered-from:bd-3"},
 			[]issueops.CreateDependency{{Type: types.DepDiscoveredFrom, TargetID: "bd-3"}}, false},
 		{"whitespace trimmed", []string{"  blocks : bd-4 "},
-			[]issueops.CreateDependency{{Type: types.DepBlocks, TargetID: "bd-4"}}, false},
+			[]issueops.CreateDependency{{Type: types.DepBlocks, TargetID: "bd-4", Reverse: true}}, false},
 		{"empty type rejected", []string{":bd-1"}, nil, true},
 	}
 	for _, tt := range tests {
@@ -325,13 +325,15 @@ func TestParseMarkdownDependencies(t *testing.T) {
 	}
 }
 
-func TestParseMarkdownDependencies_DoesNotSwapBlocks(t *testing.T) {
+// TestParseMarkdownDependencies_BlocksReversesDirection pins GH#7508: as with
+// `bd create --deps blocks:<id>`, the target depends on the new issue.
+func TestParseMarkdownDependencies_BlocksReversesDirection(t *testing.T) {
 	got, err := parseMarkdownDependencies([]string{"blocks:bd-5"}, "T")
 	if err != nil {
 		t.Fatalf("error: %v", err)
 	}
-	want := []issueops.CreateDependency{{Type: types.DepBlocks, TargetID: "bd-5"}}
+	want := []issueops.CreateDependency{{Type: types.DepBlocks, TargetID: "bd-5", Reverse: true}}
 	if !reflect.DeepEqual(got, want) {
-		t.Errorf("got %#v, want %#v (no swap-direction)", got, want)
+		t.Errorf("got %#v, want %#v (reversed, like --deps)", got, want)
 	}
 }

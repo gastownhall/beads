@@ -168,6 +168,29 @@ blocked-by:`+target+`
 			}
 		}
 	})
+
+	// GH#7508: --deps blocks:<id> makes <id> depend on the new issue. The file
+	// used to write the opposite edge from the same string.
+	t.Run("blocks_spelling_reverses_like_the_deps_flag", func(t *testing.T) {
+		target := createMarkdownDepTarget(t, bd, dir, "blocks spelling target 7508")
+		plan := writeMarkdownPlan(t, dir, "blocks.md", `## Blocks spelling blocker 7508
+
+### Deps
+blocks:`+target+`
+`)
+		runCreateDepsBD(t, bd, dir, "create", "--file", plan)
+		blocked := runCreateDepsBD(t, bd, dir, "blocked", "--json")
+		ready := runCreateDepsBD(t, bd, dir, "ready", "--json", "--limit", "0")
+		if !strings.Contains(blocked, "blocks spelling target 7508") {
+			t.Errorf("target %s is not in bd blocked; blocks: did not make it depend on the new issue:\n%s", target, blocked)
+		}
+		if strings.Contains(blocked, "Blocks spelling blocker 7508") {
+			t.Errorf("the blocks: template is in bd blocked; its edge points the wrong way:\n%s", blocked)
+		}
+		if !strings.Contains(ready, "Blocks spelling blocker 7508") {
+			t.Errorf("the blocks: template is not in bd ready:\n%s", ready)
+		}
+	})
 }
 
 // createMarkdownDepTarget creates a fresh open issue for a file's edges to
