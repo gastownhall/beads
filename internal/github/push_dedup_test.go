@@ -1,6 +1,10 @@
 package github
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -171,5 +175,34 @@ func TestPushContentHash(t *testing.T) {
 				t.Errorf("PushContentHash unchanged after %s mutation", name)
 			}
 		})
+	}
+}
+
+// TestPushContentHashInvalidatesPreFixHashes pins the hash-format bump that
+// repairs issues earlier builds left stuck open: they created a closed bead as
+// an open GitHub issue but cached the hash of the closed state, so the engine
+// skipped them forever (gastownhall/beads#5486). A hash stored with the
+// previous formula must no longer match, so the next push fetches the issue
+// and closes it.
+func TestPushContentHashInvalidatesPreFixHashes(t *testing.T) {
+	cfg := DefaultMappingConfig()
+	issue := &types.Issue{
+		ID: "bd-1", Title: "Done already", Description: "body",
+		IssueType: types.TypeTask, Priority: 2, Status: types.StatusClosed,
+		Labels: []string{"zeta", "alpha"},
+	}
+
+	labels, _ := BeadsIssueToGitHubFields(issue, cfg)["labels"].([]string)
+	sorted := append([]string(nil), labels...)
+	slices.Sort(sorted)
+	h := sha256.New()
+	for _, s := range []string{issue.Title, issue.Description, "closed", strings.Join(sorted, "\x00")} {
+		_, _ = h.Write([]byte(s))
+		_, _ = h.Write([]byte{0})
+	}
+	preFix := hex.EncodeToString(h.Sum(nil))
+
+	if got := PushContentHash(issue, cfg); got == preFix {
+		t.Fatalf("PushContentHash = %q, still equal to the pre-#5486 formula; stuck issues would stay skipped", got)
 	}
 }

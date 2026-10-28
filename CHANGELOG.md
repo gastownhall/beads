@@ -1027,6 +1027,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd github sync --push-only` and `bd github push` now create a locally
+  closed bead as a closed GitHub issue: GitHub's create call cannot set state,
+  so bd closes the issue with a follow-up update. If that close fails, bd
+  prints a warning and retries on the next sync instead of treating the issue
+  as in sync. The first push after upgrading re-checks each linked GitHub
+  issue once, which closes issues earlier versions left open (Fixes #5486).
+
 - `bd list --watch` and `bd show --watch` now wait a full poll interval after
   each refresh, and `bd list --watch --parent` reads its tree in one
   transaction, so other bd commands on an embedded workspace no longer stall
