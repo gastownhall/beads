@@ -72,7 +72,8 @@ func ResolveServerMode(beadsDir string) ServerMode {
 // shared-server state comes from the caller's target classification rather
 // than the active workspace.
 func ResolveServerModeForMode(beadsDir string, sharedMode bool) ServerMode {
-	return resolveServerMode(beadsDir, sharedMode, true)
+	mode, _ := resolveServerModeCheck(beadsDir, sharedMode, true)
+	return mode
 }
 
 // ResolveServerModeIgnoringPortEnv is ResolveServerMode with check 2c
@@ -98,10 +99,24 @@ func ResolveServerModeForMode(beadsDir string, sharedMode bool) ServerMode {
 // server as shared -- the same reasoning as the kill-guard above, applied
 // to the migrate-on-open decision instead of the process-reaping one.
 func ResolveServerModeIgnoringPortEnv(beadsDir string) ServerMode {
-	return resolveServerMode(beadsDir, IsSharedServerMode(), false)
+	mode, _ := resolveServerModeCheck(beadsDir, IsSharedServerMode(), false)
+	return mode
 }
 
-// resolveServerMode is the shared implementation behind ResolveServerMode,
+// serverModeCheck is the ResolveServerMode check that decided a mode.
+type serverModeCheck int
+
+const (
+	checkModeEnv      serverModeCheck = iota // 1: BEADS_DOLT_SERVER_MODE=1
+	checkShared                              // 2: shared-server mode
+	checkHost                                // 2b: host-based inference
+	checkPortEnv                             // 2c: BEADS_DOLT_SERVER_PORT / BEADS_DOLT_PORT
+	checkEmbedded                            // 3: metadata.json dolt_mode embedded
+	checkMetadataPort                        // 4: metadata.json dolt_server_port
+	checkDefault                             // 5: default
+)
+
+// resolveServerModeCheck is the shared implementation behind ResolveServerMode,
 // ResolveServerModeForMode and ResolveServerModeIgnoringPortEnv. sharedMode
 // is the target's shared-server classification (check 2). honorPortEnv
 // controls whether check 2c (BEADS_DOLT_SERVER_PORT / BEADS_DOLT_PORT)
@@ -111,14 +126,14 @@ func ResolveServerModeIgnoringPortEnv(beadsDir string) ServerMode {
 // ExternalPortSetting's Sole repeats checks 1, 2b and 2c to decide whether
 // removing dolt_server_port lets bd manage the server; a new check here that
 // returns ServerModeExternal before check 4 must be added there too.
-func resolveServerMode(beadsDir string, sharedMode, honorPortEnv bool) ServerMode {
+func resolveServerModeCheck(beadsDir string, sharedMode, honorPortEnv bool) (ServerMode, serverModeCheck) {
 	// 1. BEADS_DOLT_SERVER_MODE=1 env var -> external (explicit server mode)
 	if os.Getenv("BEADS_DOLT_SERVER_MODE") == "1" {
-		return ServerModeExternal
+		return ServerModeExternal, checkModeEnv
 	}
 
 	if sharedMode {
-		return ServerModeExternal
+		return ServerModeExternal, checkShared
 	}
 
 	var fileCfg *configfile.Config
@@ -143,7 +158,7 @@ func resolveServerMode(beadsDir string, sharedMode, honorPortEnv bool) ServerMod
 		hostCfg = &configfile.Config{}
 	}
 	if hostCfg.HostImpliesServerMode() {
-		return ServerModeExternal
+		return ServerModeExternal, checkHost
 	}
 
 	// 2c. Explicit server port via env var (BEADS_DOLT_SERVER_PORT, then
@@ -155,7 +170,7 @@ func resolveServerMode(beadsDir string, sharedMode, honorPortEnv bool) ServerMod
 	// it). Runs before the metadata.json checks for the same GH#2949
 	// reason as 1/2/2b: a runtime env var beats stale persisted metadata.
 	//
-	// Skipped when honorPortEnv is false — see resolveServerModeIgnoringPortEnv.
+	// Skipped when honorPortEnv is false — see ResolveServerModeIgnoringPortEnv.
 	//
 	// Delegates to the same centralized rule as 2b rather than keeping a
 	// private copy: PortImpliesServerMode is shaped like HostImpliesServerMode
@@ -172,22 +187,47 @@ func resolveServerMode(beadsDir string, sharedMode, honorPortEnv bool) ServerMod
 	// configfile.IsDoltServerMode deliberately does NOT consult this predicate
 	// — see the note there and GH#6181.
 	if honorPortEnv && hostCfg.PortImpliesServerMode() {
-		return ServerModeExternal
+		return ServerModeExternal, checkPortEnv
 	}
 
 	// 3. Explicit embedded mode in metadata.json
 	if fileCfg != nil && strings.ToLower(fileCfg.DoltMode) == configfile.DoltModeEmbedded &&
 		fileCfg.DoltMode != "" { // empty defaults to embedded in GetDoltMode, but we treat empty as "unset"
-		return ServerModeEmbedded
+		return ServerModeEmbedded, checkEmbedded
 	}
 
 	// 4. Explicit server port in metadata.json -> external
 	if fileCfg != nil && fileCfg.DoltServerPort > 0 {
-		return ServerModeExternal
+		return ServerModeExternal, checkMetadataPort
 	}
 
 	// 5. Default: beads owns the server
-	return ServerModeOwned
+	return ServerModeOwned, checkDefault
+}
+
+// ExternallyManagedBy names the setting that declares beadsDir's Dolt server
+// externally managed, so that bd neither starts nor manages it, or "" when
+// none does: the workspace is not ServerModeExternal, or it is in
+// shared-server mode, where `bd dolt start` is how bd starts the shared
+// server. Unlike ExternalPortSetting it answers who owns the lifecycle, not
+// which setting named the dialed port, so it also names
+// BEADS_DOLT_SERVER_MODE=1, and dolt_server_port whatever port file or pid
+// file sits beside it. sole reports that removing the setting lets bd manage
+// the server: true for dolt_server_port, since ResolveServerMode reaches
+// check 4 only when checks 1, 2b and 2c did not fire.
+func ExternallyManagedBy(beadsDir string) (setting string, sole bool) {
+	if IsSharedServerMode() {
+		return "", false
+	}
+	mode, check := resolveServerModeCheck(beadsDir, false, true)
+	if mode != ServerModeExternal {
+		return "", false
+	}
+	switch check {
+	case checkMetadataPort:
+		return "dolt_server_port in " + remedy.PrintedValue(configfile.ConfigPath(beadsDir)), true
+	}
+	return "", false
 }
 
 // ErrExternallyManaged matches EnsureRunning's refusal to start a server for a
@@ -291,7 +331,7 @@ func ExternalPortSetting(beadsDir string, source PortSource, port int) ExternalP
 	case source == PortSourcePortFile && portBehindPortFile(beadsDir, cfg.DoltServerPort) != port:
 		decl.PortFile, decl.DeclaredPort = portPath(beadsDir), cfg.DoltServerPort
 	default:
-		// Checks 1, 2b and 2c of resolveServerMode; keep in step with it.
+		// Checks 1, 2b and 2c of resolveServerModeCheck; keep in step with it.
 		decl.Sole = os.Getenv("BEADS_DOLT_SERVER_MODE") != "1" &&
 			!cfg.HostImpliesServerMode() && !cfg.PortImpliesServerMode()
 	}

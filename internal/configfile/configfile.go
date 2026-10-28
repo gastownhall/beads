@@ -433,7 +433,7 @@ func (c *Config) IsDoltServerMode() bool {
 	// NOTE: deliberately no PortImpliesServerMode call here. This resolver
 	// selects the storage backend for every data command, so honoring a bare
 	// BEADS_DOLT_SERVER_PORT here has a materially wider blast radius than the
-	// lifecycle-only question doltserver.resolveServerMode's check 2c answers.
+	// lifecycle-only question doltserver.resolveServerModeCheck's check 2c answers.
 	// The two therefore still disagree for an unset/embedded dolt_mode plus a
 	// bare port env var and no other server signal. That gap is real, narrow
 	// and tracked: GH#6181 owns whether this resolver should extend to the
@@ -512,7 +512,7 @@ func (c *Config) HostImpliesServerMode() bool {
 // There is deliberately no persisted-port tier here. HostImpliesServerMode
 // suppresses its weaker persisted/config.yaml host signals on an explicit
 // DoltMode; the port equivalent, metadata.json's dolt_server_port, is read by
-// a later check in doltserver.resolveServerMode that an explicit
+// a later check in doltserver.resolveServerModeCheck that an explicit
 // dolt_mode=embedded already returns before. There is nothing for a
 // downstream guard to protect.
 //

@@ -1004,6 +1004,13 @@ lifecycle and starts it on demand, so a server started here would be a second,
 unsupervised one over the same data directory. Use 'bd dolt status' to see what
 is running and 'bd dolt stop' to shut it down.
 
+Not available when a setting declares the server externally managed, such as
+dolt_server_port in .beads/metadata.json: bd neither starts nor manages that
+server, so a server started here would serve .beads/dolt on its port in place
+of its database. The refusal names the setting; --force does not bypass it.
+Start that server where it is managed, or remove the setting to let bd manage
+one.
+
 With dolt.auto-start: false the server is expected to be managed outside bd, so
 a start that would create a new, empty Dolt database (the data directory is
 missing, empty, or holds no database) is refused before anything is written:
@@ -1054,6 +1061,14 @@ over existing data, or adopting a server bd already tracks, is unaffected. Use
 				return HandleError("the configured Dolt server host %s; 'bd dolt start' only manages a local server.\nStart the server on that host, or clear dolt_server_host / dolt.host / BEADS_DOLT_SERVER_HOST to run one locally", desc)
 			}
 			return HandleError("the configured Dolt server host %s; 'bd dolt start' starts bd's own server, which listens on 127.0.0.1 only.\nStart the server that listens on %s, or clear dolt_server_host / dolt.host / BEADS_DOLT_SERVER_HOST to run bd's own", desc, listenAddr)
+		}
+		// At a host bd does run its server at, a setting can still declare the
+		// server externally managed (ResolveServerMode): starting one here would
+		// put bd's own server over .beads/dolt on that server's port, a second
+		// database that answers in its place (GH#6585). Checked before the
+		// fresh-data-dir refusal, which --force bypasses; this one it does not.
+		if setting, sole := doltserver.ExternallyManagedBy(beadsDir); setting != "" {
+			return HandleProxyCapabilityError(externalDoltStartRefusal(beadsDir, setting, sole))
 		}
 		serverDir := doltserver.ResolveServerDir(beadsDir)
 		force, _ := cmd.Flags().GetBool("force")

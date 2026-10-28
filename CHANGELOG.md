@@ -1055,6 +1055,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd dolt start` no longer starts bd's own Dolt server on a workspace whose
+  server a setting declares externally managed, such as `dolt_server_port` in
+  `.beads/metadata.json` (#6585). It used to put a bd-owned server over
+  `.beads/dolt` on that server's port, a second, empty database that answered
+  in place of the real one. It now refuses with the typed
+  `external.dolt_start.conflict` error (reason `design`, exit 1), which names
+  the setting and the endpoint; `--force` does not bypass it. Shared-server
+  mode and workspaces bd manages are unaffected.
 - `bd list --watch` and `bd show --watch` now wait a full poll interval after
   each refresh, and `bd list --watch --parent` reads its tree in one
   transaction, so other bd commands on an embedded workspace no longer stall
