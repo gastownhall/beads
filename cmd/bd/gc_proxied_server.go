@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/issueops"
 )
 
 func runGCProxiedServer(ctx context.Context) error {
@@ -41,6 +42,7 @@ func runGCProxiedServer(ctx context.Context) error {
 	}
 	var results []phaseResult
 	var gcFailed bool
+	retentionKept := 0
 
 	if gcSkipDecay {
 		results = append(results, phaseResult{name: "Decay", skipped: true})
@@ -57,20 +59,31 @@ func runGCProxiedServer(ctx context.Context) error {
 			ClosedBefore: &cutoffTime,
 		}
 
-		closedIssues, err := uow.RunTxRead(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) ([]*types.Issue, error) {
+		type decayRead struct {
+			closed   []*types.Issue
+			retained string
+		}
+		read, err := uow.RunTxRead(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (decayRead, error) {
 			page, err := uw.IssueUseCase().SearchIssues(ctx, "", filter)
 			if err != nil {
-				return nil, err
+				return decayRead{}, fmt.Errorf("searching closed issues: %w", err)
 			}
-			return page.Items, nil
+			retained, err := uw.ConfigUseCase().GetConfig(ctx, issueops.SettingKeyTypesRetained)
+			if err != nil {
+				return decayRead{}, fmt.Errorf("reading %s: %w", issueops.SettingKeyTypesRetained, err)
+			}
+			return decayRead{closed: page.Items, retained: retained}, nil
 		})
 		if err != nil {
-			return HandleErrorRespectJSON("searching closed issues: %v", err)
+			return HandleErrorRespectJSON("%v", err)
 		}
 
-		var stats closedDeletionCandidateStats
-		closedIssues, stats = filterClosedDeletionCandidates(closedIssues, &cutoffTime)
+		closedIssues, stats := filterClosedDeletionCandidates(read.closed, &cutoffTime)
 		warnClosedDeletionSafetySkips(stats)
+		closedIssues, retentionKept = holdBackRetainedTypes(closedIssues, read.retained)
+		if retentionKept > 0 && !jsonOutput {
+			fmt.Println(retainedTypesKeptLine(retentionKept))
+		}
 
 		switch {
 		case len(closedIssues) == 0:
@@ -214,6 +227,9 @@ func runGCProxiedServer(ctx context.Context) error {
 			phases = append(phases, p)
 		}
 		summaryMap["phases"] = phases
+		if retentionKept > 0 {
+			summaryMap["retention_required"] = retentionKept
+		}
 		if err := outputJSON(summaryMap); err != nil {
 			return err
 		}

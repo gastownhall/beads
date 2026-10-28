@@ -8,6 +8,7 @@ import (
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/issueops"
 )
 
 var (
@@ -26,7 +27,9 @@ var gcCmd = &cobra.Command{
 	Long: `Full lifecycle garbage collection for standalone Beads databases.
 
 Runs three phases in sequence:
-  1. DECAY   — Delete closed issues older than N days (default 90)
+  1. DECAY   — Delete closed issues older than N days (default 90), except
+               those of a type the workspace's types.retained setting names
+               (only bd prune/purge --retain-ids deletes those)
   2. COMPACT — Squash old Dolt commits into fewer commits (bd compact)
   3. GC      — Run Dolt garbage collection to reclaim disk space
 
@@ -76,6 +79,7 @@ Examples:
 			detail  string
 		}
 		var results []phaseResult
+		retentionKept := 0
 
 		if gcSkipDecay {
 			results = append(results, phaseResult{name: "Decay", skipped: true})
@@ -104,6 +108,15 @@ Examples:
 			var stats closedDeletionCandidateStats
 			closedIssues, stats = filterClosedDeletionCandidates(closedIssues, &cutoffTime)
 			warnClosedDeletionSafetySkips(stats)
+
+			retained, err := store.GetConfig(ctx, issueops.SettingKeyTypesRetained)
+			if err != nil {
+				return HandleErrorRespectJSON("reading %s: %v", issueops.SettingKeyTypesRetained, err)
+			}
+			closedIssues, retentionKept = holdBackRetainedTypes(closedIssues, retained)
+			if retentionKept > 0 && !jsonOutput {
+				fmt.Println(retainedTypesKeptLine(retentionKept))
+			}
 
 			if len(closedIssues) == 0 {
 				detail := fmt.Sprintf("  No closed issues older than %d days", cutoffDays)
@@ -267,6 +280,9 @@ Examples:
 				phases = append(phases, p)
 			}
 			summaryMap["phases"] = phases
+			if retentionKept > 0 {
+				summaryMap["retention_required"] = retentionKept
+			}
 			if gcSizeInfo != nil {
 				summaryMap["dolt_gc"] = gcSizeInfo
 			}

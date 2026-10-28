@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -34,4 +35,18 @@ func warnClosedDeletionSafetySkips(stats closedDeletionCandidateStats) {
 		stats.UnknownClosedAt,
 		stats.ClosedAtOrAfterCutoff,
 	)
+}
+
+// holdBackRetainedTypes keeps `bd gc`'s decay off the closed beads whose type
+// the workspace retains (issueops.SettingKeyTypesRetained). It is the same
+// partition the Sweeper role applies to a sweep without RetainIDs: decay
+// deletes by id and cannot retire one, so a retained bead is never its to
+// take. setting is the stored value of types.retained.
+func holdBackRetainedTypes(issues []*types.Issue, setting string) ([]*types.Issue, int) {
+	return workapi.PartitionSweepRetainedTypes(issues, workapi.RetainedTypesFromSetting(setting), false)
+}
+
+// retainedTypesKeptLine is the text line for the decay's kept count.
+func retainedTypesKeptLine(kept int) string {
+	return fmt.Sprintf("  Kept %d closed issue(s) of a retained type (types.retained) — only bd prune/purge --retain-ids deletes them", kept)
 }

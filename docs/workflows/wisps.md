@@ -78,8 +78,35 @@ for every deleted id: the id and its `closed_at`, nothing else. After that:
 
 No command removes a tombstone. Only a sweep with `--retain-ids` retires ids.
 A plain `bd purge` or `bd prune`, `bd delete`, and `bd gc` all leave deleted
-ids reusable. Over HTTP, the server must advertise `issues.sweep.retainIds`;
+ids reusable; `types.retained` (below) keeps the plain sweeps and `bd gc` away
+from the types whose ids must stay retired. Over HTTP, the server must advertise `issues.sweep.retainIds`;
 without it, bd refuses the sweep before sending anything.
+
+### Keeping key-bearing types out of plain sweeps
+
+A plain `bd prune` that happens to match key-bearing rows would delete them
+without tombstones. To prevent that, name their issue types in the workspace
+setting `types.retained`:
+
+```bash
+bd config set types.retained op
+```
+
+From then on a sweep without `--retain-ids` keeps every closed bead of those
+types and reports how many it kept (`retention_required` under `--json`).
+This applies to `bd prune`, `bd purge` (including `--wisps-plane`), their
+`--dry-run` previews, and the decay phase of `bd gc`. A sweep with
+`--retain-ids` keeps nothing back: it deletes those beads and retires their
+ids, which is the only way they leave through a sweep.
+
+The setting takes a comma-separated list or a JSON array. Names need not be
+registered types yet; a name no bead carries matches nothing. It is read from
+the workspace database on every sweep, never from `config.yaml`, so every
+client of a shared workspace sees the same rule. If bd cannot read it, the
+sweep fails and deletes nothing. `bd delete` does not consult it: it deletes
+the ids you name. Neither does `bd mol wisp gc`. Over HTTP, a server that
+honors the setting advertises `issues.sweep.retainedTypes`; an older server
+deletes those beads without retiring their ids.
 
 A sweep with `--retain-ids` briefly blocks or conflicts with creates of
 unrelated ids that hash to the same coordination shard as one it retires,

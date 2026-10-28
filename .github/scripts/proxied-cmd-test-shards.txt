@@ -251,6 +251,7 @@
 34 29 TestProxiedServerGateFrontDoorDirectServerProxyParity
 34 29 TestProxiedServerMolDistill
 34 29 TestProxiedServerReopen
+34 29 TestProxiedServerRetainedTypes
 34 29 TestProxiedServerServeDelete
 34 29 TestProxiedServerState
 

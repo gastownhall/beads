@@ -65,6 +65,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   create-coordination cell of every id it retires (4096 shards shared by
   unrelated ids) until it commits, so keep `limit` small, around 100, and loop
   on `remaining`. The new `IDRetention` conformance contract runs on every leg.
+- **`types.retained`: plain sweeps keep key-bearing types.** A workspace
+  setting (`issueops.SettingKeyTypesRetained`; a comma-separated list or JSON
+  array of issue types, unknown names allowed) that every sweep without
+  `RetainIDs` honors: `bd prune`, `bd purge` (including `--wisps-plane`),
+  their previews, `POST /v0/beads/issues:sweep` and the decay phase of
+  `bd gc` keep every closed bead of a listed type and report it as
+  `SweepSkips.RetentionRequired` (`retention_required` in `--json` and on the
+  wire, behind the new behavior capability `issues.sweep.retainedTypes`). A
+  retaining sweep keeps nothing back, so it is the one sweep that deletes
+  those beads, and it retires their ids. The setting is read from the
+  workspace database on the sweep's own transaction, never from
+  `config.yaml`; a read error fails the sweep and deletes nothing.
+  `bd delete` does not consult it.
 - `bd versions <id>` lists the versions recorded for a bead, and
   `versioned-history.enabled` turns recording on. While it is on, every
   accepted change to a bead created while it is on, or that enters the issues

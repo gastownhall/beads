@@ -3034,7 +3034,9 @@ bd gc
     | Full lifecycle garbage collection for standalone Beads databases.
     |
     | Runs three phases in sequence:
-    |   1. DECAY   — Delete closed issues older than N days (default 90)
+    |   1. DECAY   — Delete closed issues older than N days (default 90), except
+    |                those of a type the workspace's types.retained setting names
+    |                (only bd prune/purge --retain-ids deletes those)
     |   2. COMPACT — Squash old Dolt commits into fewer commits (bd compact)
     |   3. GC      — Run Dolt garbage collection to reclaim disk space
     |
@@ -5790,6 +5792,10 @@ bd prune
     | skips it. Use it when ids are idempotency keys that must never run twice.
     | Tombstones are permanent.
     |
+    | Without --retain-ids, closed beads whose type the workspace's types.retained
+    | setting names are skipped and reported (retention_required under --json):
+    | their ids are idempotency keys, so only a retaining sweep may delete them.
+    |
     | For full Dolt storage reclaim after deleting many rows, follow with `bd flatten`
     | so history can be collapsed and old chunks can be garbage-collected.
     |
@@ -5822,6 +5828,9 @@ bd purge
     | Skips: pinned beads, and closed beads a live bead still depends on through a
     | parent-child, tracks or blocks edge (a closed molecule root whose step is open,
     | a closed bead a live convoy tracks). Live means any status that is not done.
+    | Without --retain-ids it also skips beads whose type the workspace's
+    | types.retained setting names (their ids are idempotency keys); --json reports
+    | them as retention_required.
     |
     | --wisps-plane selects by storage plane instead: every closed row stored in the
     | wisps table, including --no-history beads, which the default ephemeral

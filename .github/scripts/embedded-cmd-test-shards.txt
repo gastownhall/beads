@@ -255,6 +255,7 @@
 100 58 TestEmbeddedDoctorUnsupportedProse
 100 58 TestEmbeddedIfRevisionCascadeDelete
 100 58 TestEmbeddedMigratePersonal_abortLeavesLegacyPlanningConfig
+100 58 TestEmbeddedRetainedTypes
 100 58 TestEmbeddedVersionedHistorySwitchRefusesAnUnrecordableGateTimeout
 
 100 59 TestEmbeddedDeferAutoWake
