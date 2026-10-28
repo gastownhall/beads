@@ -1009,4 +1009,24 @@ func TestProxiedServerDepListSingleIDWarnsOnDroppedExternalEdge(t *testing.T) {
 	if !strings.Contains(lonelyStderr.String(), "external:crm:pod-client via blocks") {
 		t.Errorf("stderr should still name the dropped edge, got:\n%s", lonelyStderr.String())
 	}
+
+	// --json keeps its documented shape even when every edge was dropped: an
+	// issue with no resolvable row on the far end answers the empty array [].
+	lonelyJSONCmd := exec.Command(bd, "dep", "list", lonely.ID, "--json")
+	lonelyJSONCmd.Dir = p.dir
+	lonelyJSONCmd.Env = bdProxiedEnv(p.dir)
+	lonelyJSONStdout, _, err := runCommandBuffers(t, lonelyJSONCmd)
+	if err != nil {
+		t.Fatalf("bd dep list lonely --json: %v", err)
+	}
+	var lonelyJSONItems []map[string]any
+	if err := json.Unmarshal(lonelyJSONStdout.Bytes(), &lonelyJSONItems); err != nil {
+		t.Fatalf("--json output %q is not an array: %v", lonelyJSONStdout.String(), err)
+	}
+	if len(lonelyJSONItems) != 0 {
+		t.Errorf("--json output = %q, want the empty array []", lonelyJSONStdout.String())
+	}
+	if strings.Contains(lonelyJSONStdout.String(), "external:crm:pod-client") {
+		t.Errorf("--json output must not carry the external target:\n%s", lonelyJSONStdout.String())
+	}
 }

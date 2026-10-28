@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -145,5 +146,25 @@ func TestEmbeddedDepListSingleIDWarnsOnDroppedExternalEdge(t *testing.T) {
 	}
 	if strings.Contains(filteredStderr.String(), "additional dependency edge(s)") {
 		t.Errorf("stderr = %q, want no dropped-edge warning for a filtered-out edge", filteredStderr.String())
+	}
+
+	// --json keeps its documented shape even when every edge was dropped: an
+	// issue with no resolvable row on the far end answers the empty array [].
+	lonelyJSONCmd := exec.Command(bd, "dep", "list", lonely.ID, "--json")
+	lonelyJSONCmd.Dir = dir
+	lonelyJSONCmd.Env = bdEnv(dir)
+	lonelyJSONStdout, _, err := runCommandBuffers(t, lonelyJSONCmd)
+	if err != nil {
+		t.Fatalf("bd dep list lonely --json: %v", err)
+	}
+	var lonelyJSONDeps []json.RawMessage
+	if err := json.Unmarshal(lonelyJSONStdout.Bytes(), &lonelyJSONDeps); err != nil {
+		t.Fatalf("--json output %q is not an array: %v", lonelyJSONStdout.String(), err)
+	}
+	if len(lonelyJSONDeps) != 0 {
+		t.Errorf("--json output = %q, want the empty array []", lonelyJSONStdout.String())
+	}
+	if strings.Contains(lonelyJSONStdout.String(), external.ID) {
+		t.Errorf("--json output must not carry the external target:\n%s", lonelyJSONStdout.String())
 	}
 }
