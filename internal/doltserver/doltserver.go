@@ -36,6 +36,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/doltinfoenv"
 	"github.com/steveyegge/beads/internal/doltversion"
 	"github.com/steveyegge/beads/internal/fdhygiene"
 	"github.com/steveyegge/beads/internal/githooksenv"
@@ -1484,10 +1485,12 @@ const doltServerLogLevel = "warning"
 // directly-managed spawn here and the proxied one in dbproxy/server). The
 // server runs CALL DOLT_PUSH/FETCH itself, so the guards must be in the
 // child's environment: templated git hooks disabled (GH#4272; approach from
-// PR #4281 by pmgledhill102) and stderr-directed git tracing scrubbed (see
-// internal/gittraceenv).
+// PR #4281 by pmgledhill102), stderr-directed git tracing scrubbed (see
+// internal/gittraceenv) and Dolt's __dolt_remote_info__ branch disabled
+// (GH#6484, internal/doltinfoenv). The server reads that last one once, at
+// start, so it is in force for every remote the server ever writes.
 func ServerSpawnEnv() []string {
-	return githooksenv.DisabledEnv(gittraceenv.ScrubEnv(os.Environ()))
+	return doltinfoenv.DisabledEnv(githooksenv.DisabledEnv(gittraceenv.ScrubEnv(os.Environ())))
 }
 
 // buildDoltServerArgs returns the argv passed to `dolt` (excluding argv[0]/

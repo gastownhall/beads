@@ -21,12 +21,22 @@
 // the call.
 package doltinfoenv
 
-import "os"
+import (
+	"os"
+	"slices"
+)
 
 // EnvVar is Dolt's environment variable for the info branch name
 // (blobstore.InfoBranchEnvVar), pinned here so production code does not
 // import Dolt's blobstore; a test keeps the pin honest.
 const EnvVar = "DOLT_REMOTE_INFO_BRANCH"
+
+// DisabledEnv returns env with the info branch disabled, for callers that
+// hand a dolt subprocess its environment explicitly. The input slice is not
+// modified.
+func DisabledEnv(env []string) []string {
+	return append(slices.Clip(env), EnvVar+"=")
+}
 
 // WithDisabled runs fn with the info branch disabled process-wide, unsetting
 // DOLT_REMOTE_INFO_BRANCH again afterwards. A variable that is already

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -16,6 +17,8 @@ import (
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/doltinfoenv"
+	"github.com/steveyegge/beads/internal/execenv"
 	"github.com/steveyegge/beads/internal/githooksenv"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
@@ -23,7 +26,9 @@ import (
 // The sql-server outlives the shell that started it: an inherited GIT_TRACE=1
 // would poison every server-side git-protocol transfer until restart. The
 // scrub is value-aware (file targets survive) and the hooks override
-// (GH#4272) must be the effective GIT_CONFIG_PARAMETERS entry.
+// (GH#4272) must be the effective GIT_CONFIG_PARAMETERS entry. With no
+// DOLT_REMOTE_INFO_BRANCH of the user's, the server must get it empty so it
+// never publishes __dolt_remote_info__ (GH#6484).
 func TestServerSpawnEnvIsGuarded(t *testing.T) {
 	absPath := "/tmp/git.trace"
 	if runtime.GOOS == "windows" {
@@ -32,6 +37,10 @@ func TestServerSpawnEnvIsGuarded(t *testing.T) {
 	t.Setenv("GIT_TRACE", "1")
 	t.Setenv("GIT_CURL_VERBOSE", "1")
 	t.Setenv("GIT_TRACE2", absPath)
+	t.Setenv(doltinfoenv.EnvVar, "") // restored after the test
+	if err := os.Unsetenv(doltinfoenv.EnvVar); err != nil {
+		t.Fatal(err)
+	}
 
 	env := ServerSpawnEnv()
 	keptFileTarget := false
@@ -49,6 +58,20 @@ func TestServerSpawnEnvIsGuarded(t *testing.T) {
 	if got := githooksenv.Extract(env); !strings.Contains(got, githooksenv.NoHooksParam) {
 		t.Errorf("ServerSpawnEnv() effective %s = %q, want the no-hooks override (GH#4272)", githooksenv.ParametersEnv, got)
 	}
+	if got := doltInfoBranchEntries(env); !slices.Equal(got, []string{doltinfoenv.EnvVar + "="}) {
+		t.Errorf("ServerSpawnEnv() %s entries = %q, want exactly one, empty (GH#6484)", doltinfoenv.EnvVar, got)
+	}
+}
+
+// doltInfoBranchEntries returns env's DOLT_REMOTE_INFO_BRANCH entries.
+func doltInfoBranchEntries(env []string) []string {
+	var out []string
+	for _, kv := range env {
+		if execenv.KeyEqual(execenv.EntryKey(kv), doltinfoenv.EnvVar) {
+			out = append(out, kv)
+		}
+	}
+	return out
 }
 
 func TestAllocateEphemeralPort(t *testing.T) {
