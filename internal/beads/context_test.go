@@ -1397,3 +1397,168 @@ func TestRoleIgnoresInheritedGitRouting(t *testing.T) {
 		}
 	})
 }
+
+// ownHomeFixture is a stand-in for a service account whose passwd home lives
+// under a SEC-003 denied prefix (GH#6323: /var/lib/flow-estate under /var). The
+// real /var cannot be written from a test, so a denied prefix of its own is
+// prepended to unsafePrefixes and the account seam is pointed at a home inside
+// it:
+//
+//	<denied>/lib/svc                 the account's home (owned by f.uid)
+//	<denied>/lib/svc/releases/r1/.beads
+//	<denied>/lib/svc/current      -> releases/r1
+//	<denied>/lib/svc/escape       -> ../other
+//	<denied>/lib/other/.beads        another account's tree
+//	<denied>/lib/svcXX/.beads        a sibling sharing the home's name prefix
+//	<denied>/lib/svc-link         -> svc
+//	<denied>/lib/rootsvc             left owned by the real uid
+//	<denied>/lib/file                a regular file
+type ownHomeFixture struct {
+	base, denied, lib, home string
+	uid                     int
+}
+
+func newOwnHomeFixture(t *testing.T) *ownHomeFixture {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("the denied-prefix home carve-out is unix-only")
+	}
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.HasPrefix(base, "/var/tmp/") || strings.HasPrefix(base, "/var/home/") {
+		t.Skipf("temp dir %s is admitted by a carve-out that runs before the deny loop", base)
+	}
+	// Move os.TempDir() off the fixture so its carve-out does not decide first.
+	t.Setenv("TMPDIR", filepath.Join(base, "tmp"))
+
+	f := &ownHomeFixture{base: base, denied: filepath.Join(base, "sys")}
+	f.lib = filepath.Join(f.denied, "lib")
+	f.home = filepath.Join(f.lib, "svc")
+
+	// Prepended so it is the first match even where base also sits under a real
+	// denied prefix (/private on macOS).
+	origPrefixes := unsafePrefixes
+	unsafePrefixes = append([]string{f.denied}, origPrefixes...)
+	t.Cleanup(func() { unsafePrefixes = origPrefixes })
+
+	for _, d := range []string{
+		filepath.Join(f.home, "releases", "r1", ".beads"),
+		filepath.Join(f.lib, "other", ".beads"),
+		filepath.Join(f.lib, "svcXX", ".beads"),
+		filepath.Join(f.lib, "rootsvc", "releases", "r1", ".beads"),
+	} {
+		if err := os.MkdirAll(d, 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for link, target := range map[string]string{
+		filepath.Join(f.home, "current"): filepath.Join("releases", "r1"),
+		filepath.Join(f.home, "escape"):  filepath.Join("..", "other"),
+		filepath.Join(f.lib, "svc-link"): "svc",
+	} {
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(f.lib, "file"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	f.uid = os.Getuid()
+	if f.uid == 0 {
+		// Root is never admitted, so give the account tree a stand-in non-root
+		// owner; rootsvc stays root-owned.
+		const standIn = 4242
+		rootsvc := filepath.Join(f.lib, "rootsvc")
+		err := filepath.Walk(f.denied, func(p string, _ os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			if p == rootsvc || strings.HasPrefix(p, rootsvc+string(filepath.Separator)) {
+				return nil
+			}
+			return os.Lchown(p, standIn, standIn)
+		})
+		if err != nil {
+			t.Skipf("cannot chown the fixture to a stand-in uid: %v", err)
+		}
+		f.uid = standIn
+	}
+
+	origAccount := currentAccount
+	t.Cleanup(func() { currentAccount = origAccount })
+	f.setAccount(f.uid, f.home, nil)
+	return f
+}
+
+// setAccount stands in the account database's answer for the process.
+func (f *ownHomeFixture) setAccount(uid int, home string, err error) {
+	currentAccount = func() (int, string, error) { return uid, home, err }
+}
+
+// TestIsPathInSafeBoundary_OwnHomeUnderDeniedPrefix pins GH#6323 (bd-pfe2c4,
+// AC-1): a path inside the non-root account's own home is admitted even when
+// that home sits under a denied prefix such as /var.
+func TestIsPathInSafeBoundary_OwnHomeUnderDeniedPrefix(t *testing.T) {
+	f := newOwnHomeFixture(t)
+	physical := filepath.Join(f.home, "releases", "r1", ".beads")
+	for _, tc := range []struct {
+		name, seamHome, path string
+	}{
+		{"home itself", f.home, f.home},
+		{"beads dir inside home", f.home, physical},
+		{"symlink inside home staying inside", f.home, filepath.Join(f.home, "current", ".beads")},
+		{"not yet created", f.home, filepath.Join(f.home, "notyet", ".beads")},
+		{"home recorded through a symlink, path physical", filepath.Join(f.lib, "svc-link"), physical},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f.setAccount(f.uid, tc.seamHome, nil)
+			if !isPathInSafeBoundary(tc.path) {
+				t.Errorf("isPathInSafeBoundary(%q) = false with account home %q, want true", tc.path, tc.seamHome)
+			}
+		})
+	}
+}
+
+// TestGetRepoContextAllowingNoGit_BeadsDirInOwnHomeUnderDeniedPrefix is the
+// reported GH#6323 symptom end to end (AC-1): BEADS_DIR names a release
+// selector symlink inside the account's own home under a denied prefix, and
+// bd context's entry point must resolve it instead of failing with
+// "unsafe location".
+func TestGetRepoContextAllowingNoGit_BeadsDirInOwnHomeUnderDeniedPrefix(t *testing.T) {
+	f := newOwnHomeFixture(t)
+	physical := filepath.Join(f.home, "releases", "r1", ".beads")
+	if err := os.WriteFile(filepath.Join(physical, "metadata.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	work := filepath.Join(f.base, "work")
+	if err := os.MkdirAll(work, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DIR", filepath.Join(f.home, "current", ".beads"))
+
+	origWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(origWD)
+		ResetCaches()
+		git.ResetCaches()
+	})
+	ResetCaches()
+	git.ResetCaches()
+	if err := os.Chdir(work); err != nil {
+		t.Fatal(err)
+	}
+
+	rc, err := GetRepoContextAllowingNoGit()
+	if err != nil {
+		t.Fatalf("GetRepoContextAllowingNoGit() with BEADS_DIR in the account's own home: %v", err)
+	}
+	if rc.BeadsDir != physical {
+		t.Errorf("BeadsDir = %q, want %q", rc.BeadsDir, physical)
+	}
+}

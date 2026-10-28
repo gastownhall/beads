@@ -522,7 +522,9 @@ func isPathInSafeBoundary(path string) bool {
 
 	for _, prefix := range unsafePrefixes {
 		if strings.HasPrefix(absPath, prefix+"/") || absPath == prefix {
-			return false
+			// A service account's own home can live under a denied prefix
+			// (/var/lib/<svc>, GH#6323); admit only that, never the prefix.
+			return inOwnHomeUnderPrefix(absPath)
 		}
 	}
 	// macOS's /Users/Shared is the OS-designated shared directory, not a peer
@@ -606,6 +608,43 @@ func resolvedPathWithinRoot(absPath, root string) bool {
 	resolved := resolveLongestExistingAncestor(absPath)
 	resolvedRoot := resolveLongestExistingAncestor(root)
 	return resolved == resolvedRoot || strings.HasPrefix(resolved, resolvedRoot+string(filepath.Separator))
+}
+
+// currentAccount reports the process uid and the home the account database
+// records for it. Unlike the peer-home check it never falls back to
+// os.UserHomeDir: the home it returns pierces the SEC-003 deny list, and $HOME
+// is caller-set. (A CGO-free user.Current() can itself report $HOME when the
+// uid has no /etc/passwd entry; see cmd/bd/init.go. The ownership check in
+// inOwnHomeUnderPrefix is what $HOME cannot forge.) A package var so tests can
+// stand in an account whose home lives under a denied prefix.
+var currentAccount = func() (uid int, home string, err error) {
+	u, err := user.Current()
+	if err != nil {
+		return 0, "", err
+	}
+	if u.HomeDir == "" {
+		return 0, "", fmt.Errorf("user home is empty")
+	}
+	return os.Getuid(), u.HomeDir, nil
+}
+
+// inOwnHomeUnderPrefix reports whether absPath, which the SEC-003 deny loop
+// matched, lies inside the current account's own home. Both the
+// recorded and the symlink-resolved spelling of the home are compared, so a
+// home recorded through a symlink (or /var vs /private/var on macOS) still
+// matches an already-canonicalized BEADS_DIR.
+func inOwnHomeUnderPrefix(absPath string) bool {
+	_, home, err := currentAccount()
+	if err != nil {
+		return false
+	}
+	home = filepath.Clean(home)
+	for _, h := range []string{home, resolveLongestExistingAncestor(home)} {
+		if absPath == h || strings.HasPrefix(absPath, h+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 // GetRepoContextForWorkspace returns a fresh RepoContext for a specific workspace.
