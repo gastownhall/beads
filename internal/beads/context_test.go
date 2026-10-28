@@ -1541,3 +1541,68 @@ func TestRole_NonGitBeadsDirFromGitCWD_ImpliesContributor(t *testing.T) {
 		t.Errorf("Role() = (%q, %v), want (%q, true), not the caller repo's beads.role", role, ok, Contributor)
 	}
 }
+
+// TestGetRepoContext_InTreeBeadsDirGitCannotPlace is the other half of
+// GH#5700: git reporting "not a git repository" for a .beads does not make it
+// foreign. One that belongs to the CWD repository's work tree stays local even
+// when git discovery cannot reach the repository from it.
+func TestGetRepoContext_InTreeBeadsDirGitCannotPlace(t *testing.T) {
+	assertLocal := func(t *testing.T, repo string) {
+		t.Helper()
+		rc, err := GetRepoContext()
+		if err != nil {
+			t.Fatalf("GetRepoContext failed: %v", err)
+		}
+		if rc.RepoRoot != repo {
+			t.Errorf("RepoRoot = %s, want the CWD repository %s", rc.RepoRoot, repo)
+		}
+		if rc.IsRedirected {
+			t.Error("IsRedirected = true for a .beads inside the CWD repository's work tree")
+		}
+	}
+
+	t.Run("ceiling", func(t *testing.T) {
+		// Discovery from A/sub/x/.beads stops at the ceiling A/sub, so git
+		// reports no repository for it, while A itself (above the ceiling)
+		// still resolves from the CWD.
+		repo := resolveSymlinks(t.TempDir())
+		if err := initGitRepo(repo); err != nil {
+			t.Fatalf("failed to init repo: %v", err)
+		}
+		beadsDir := filepath.Join(repo, "sub", "x", ".beads")
+		writeBeadsProjectForTest(t, beadsDir)
+		t.Setenv("GIT_CEILING_DIRECTORIES", filepath.Join(repo, "sub"))
+		t.Setenv("BEADS_DIR", beadsDir)
+		chdirForRepoContextTest(t, repo)
+		assertLocal(t, repo)
+	})
+
+	t.Run("symlinked-own-beads", func(t *testing.T) {
+		// A/.beads is a symlink to storage in no repository.
+		repo := resolveSymlinks(t.TempDir())
+		if err := initGitRepo(repo); err != nil {
+			t.Fatalf("failed to init repo: %v", err)
+		}
+		store := filepath.Join(resolveSymlinks(t.TempDir()), "store")
+		writeBeadsProjectForTest(t, store)
+		if err := os.Symlink(store, filepath.Join(repo, ".beads")); err != nil {
+			t.Skipf("cannot create symlink: %v", err)
+		}
+
+		for _, tc := range []struct {
+			name     string
+			beadsDir string
+		}{
+			// Walk-up discovery yields the lexical A/.beads.
+			{name: "discovered", beadsDir: ""},
+			// ExplicitBeadsDir canonicalizes it to the storage path.
+			{name: "explicit", beadsDir: filepath.Join(repo, ".beads")},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Setenv("BEADS_DIR", tc.beadsDir)
+				chdirForRepoContextTest(t, repo)
+				assertLocal(t, repo)
+			})
+		}
+	})
+}
