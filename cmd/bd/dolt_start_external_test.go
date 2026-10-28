@@ -169,3 +169,57 @@ func TestDoltStartExternalDeclarations(t *testing.T) {
 		})
 	}
 }
+
+// TestDoltStartOwnedAndSharedUnaffected pins the workspaces the refusal must
+// leave alone: one bd owns, including one whose port only config.yaml's
+// dolt.port fixes, and shared-server mode, where `bd dolt start` is how bd
+// starts the shared server. Both still reach doltserver.Start (the shim
+// records its version check), and the owned one keeps the bd-7pkvvd
+// fresh-data-dir refusal, which --force still bypasses.
+func TestDoltStartOwnedAndSharedUnaffected(t *testing.T) {
+	ownedWorkspace := func(t *testing.T, f *externalInitFixture) string {
+		beadsDir := namedPortWorkspace(t, f, 0)
+		namedPortConfigYaml(t, beadsDir, freeLoopbackPort(t))
+		if err := os.MkdirAll(filepath.Join(beadsDir, "dolt"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		return beadsDir
+	}
+	requireReachedStart := func(t *testing.T, res externalInitResult) {
+		t.Helper()
+		if !strings.Contains(res.launches, "version") {
+			t.Errorf("bd dolt start did not reach the dolt version check (dolt invocations %q):\n%s", res.launches, res.output)
+		}
+		if strings.Contains(res.output, "external.dolt_start.conflict") {
+			t.Errorf("bd dolt start refused a workspace bd manages:\n%s", res.output)
+		}
+	}
+	t.Run("owned, auto-start unset", func(t *testing.T) {
+		f := newExternalInitFixture(t)
+		ownedWorkspace(t, f)
+		requireReachedStart(t, f.run("", "dolt", "start"))
+	})
+	t.Run("owned, auto-start off, empty data dir", func(t *testing.T) {
+		f := newExternalInitFixture(t)
+		ownedWorkspace(t, f)
+		res := f.run("0", "dolt", "start")
+		if !res.failed || !strings.Contains(res.output, "holds no Dolt database") {
+			t.Errorf("want the fresh-data-dir refusal:\n%s", res.output)
+		}
+		if strings.Contains(res.output, "external.dolt_start.conflict") {
+			t.Errorf("bd dolt start gave the external refusal on a workspace bd owns:\n%s", res.output)
+		}
+		requireNoLaunch(t, res)
+	})
+	t.Run("owned, auto-start off, --force", func(t *testing.T) {
+		f := newExternalInitFixture(t)
+		ownedWorkspace(t, f)
+		requireReachedStart(t, f.run("0", "dolt", "start", "--force"))
+	})
+	t.Run("shared server", func(t *testing.T) {
+		f := newExternalInitFixture(t)
+		namedPortWorkspace(t, f, 0)
+		f.env = append(f.env, "BEADS_DOLT_SHARED_SERVER=1")
+		requireReachedStart(t, f.run("", "--json", "dolt", "start"))
+	})
+}
