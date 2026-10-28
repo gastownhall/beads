@@ -337,6 +337,7 @@ func assertMergeClosedWithTwoParents(t *testing.T, ctx context.Context, conn *sq
 func TestMergeAndSettleWithStrategy_KeepsCleanMergedTables(t *testing.T) {
 	for _, tc := range []struct{ strategy, wantTitle string }{
 		{"ours", "ours"},
+		{"theirs", "theirs"},
 	} {
 		t.Run(tc.strategy, func(t *testing.T) {
 			te := newTestEnv(t, "mgcp"+tc.strategy)
