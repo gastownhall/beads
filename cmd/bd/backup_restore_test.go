@@ -440,4 +440,22 @@ func TestBackupRestoreRefusesNonBackupSourceServerMode(t *testing.T) {
 		stdout, stderr, code := runBDMigrationFreezeWithEnv(t, bd, dir, env, "backup", "restore", "--force")
 		assertRefusedUnchanged(t, dir, env, stdout, stderr, code)
 	})
+
+	// The control proves a real Dolt backup still restores, so the refusals
+	// above are the manifest check and not a restore that no longer works.
+	t.Run("control_real_backup", func(t *testing.T) {
+		dir, env, backupDir := newRestoreServerWorkspace(t)
+		skipUnlessLocalBackup(t, backupDir)
+
+		stdout, stderr, code := runBDMigrationFreezeWithEnv(t, bd, dir, env, "backup", "restore", backupDir, "--force")
+		if code != 0 {
+			t.Fatalf("restore from a real backup exited %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+		}
+		if !strings.Contains(stdout, "Restore complete") {
+			t.Errorf("stdout is missing %q:\n%s", "Restore complete", stdout)
+		}
+		if got := restoreWorkspaceIssueCount(t, bd, dir, env); got != 2 {
+			t.Errorf("issue count after a real restore = %d, want 2: the backup holds two issues and the live store held three", got)
+		}
+	})
 }
