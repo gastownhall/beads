@@ -572,20 +572,31 @@ func (c *Config) GetDoltMode() string {
 }
 
 // GetDoltServerHost returns the Dolt server host.
-// Priority: BEADS_DOLT_SERVER_HOST env var > metadata.json dolt_server_host
-// > config.yaml / global config dolt.host > DefaultDoltServerHost.
-// The config.yaml layer mirrors the dolt.port fix (GH#2073) so a shared
-// team / user-level Dolt server can be configured once without per-clone
-// metadata.json edits.
+// Priority: BEADS_DOLT_SERVER_HOST env var > config.yaml / global config
+// dolt.host > metadata.json dolt_server_host > DefaultDoltServerHost.
+//
+// config.yaml ranks above metadata.json (GH#5961), mirroring the port chain's
+// demotion of dolt_server_port (GH#2372): metadata.json is git-tracked, so a
+// machine-local host committed there travels to every clone and must not
+// outrank the receiving project's own config.yaml — the same cross-project
+// leakage the port demotion cited. The config.yaml layer keeps its GH#2073
+// purpose too: a shared team / user-level Dolt server can be configured once
+// without per-clone metadata.json edits.
+//
+// The metadata.json fallback is deliberately not warned here, unlike the port
+// chain: the getter has dozens of callers (foreign opens, probes, pairing with
+// the port) where a repeated warning names remedies that do not converge. The
+// mismatch notice a flipping workspace needs is OutrankedServerHost, printed
+// by the CLI's store-open and `bd dolt show` paths instead.
 func (c *Config) GetDoltServerHost() string {
 	if h := os.Getenv("BEADS_DOLT_SERVER_HOST"); h != "" {
 		return h
 	}
-	if c.DoltServerHost != "" {
-		return c.DoltServerHost
-	}
 	if h := config.GetYamlConfig("dolt.host"); h != "" {
 		return h
+	}
+	if c.DoltServerHost != "" {
+		return c.DoltServerHost
 	}
 	return DefaultDoltServerHost
 }
