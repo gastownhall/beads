@@ -333,6 +333,45 @@ func TestFederationSyncNotStompedByPeerLastSync(t *testing.T) {
 	if peerLastSyncIsNull(t, ctx, db, "peer") {
 		t.Fatal("Sync completed but did not stamp last_sync")
 	}
+
+	// Round 2: the stamps above (federation_peers.last_sync and
+	// metadata.last_sync_peer) are still uncommitted by design, like
+	// metadata.last_sync_<peer> always was. The peer pulls round 1's merge,
+	// commits a new federation_peers row and a distinct metadata key, and
+	// pushes; the next Sync's commitBeforePull must commit the leftover
+	// stamps rather than let the merge stomp them, and its fetch must not
+	// re-dirty federation_peers.
+	for _, q := range []string{
+		"CALL DOLT_PULL('origin', 'main')",
+		"INSERT INTO federation_peers (name, remote_url) VALUES ('peer-of-peer-2', 'file:///tmp/elsewhere-2')",
+		"REPLACE INTO metadata (`key`, value) VALUES ('peer_marker', 'x')",
+		"CALL DOLT_COMMIT('-Am', 'peer adds a second peer row and a metadata key')",
+		"CALL DOLT_PUSH('origin', 'main')",
+	} {
+		if _, err := peerConn.ExecContext(ctx, q); err != nil {
+			t.Fatalf("peer %q: %v", q, err)
+		}
+	}
+
+	if _, err := store.Sync(ctx, "peer", ""); err != nil {
+		t.Fatalf("second Sync should commit the leftover stamps and merge the peer's new rows, got: %v", err)
+	}
+	var secondPeerRows int
+	if err := db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM federation_peers WHERE name = 'peer-of-peer-2'").Scan(&secondPeerRows); err != nil {
+		t.Fatalf("count merged second peer rows: %v", err)
+	}
+	if secondPeerRows != 1 {
+		t.Fatalf("second Sync merged %d peer-of-peer-2 row(s), want 1", secondPeerRows)
+	}
+	var markers int
+	if err := db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM metadata WHERE `key` = 'peer_marker'").Scan(&markers); err != nil {
+		t.Fatalf("count merged metadata markers: %v", err)
+	}
+	if markers != 1 {
+		t.Fatalf("second Sync merged %d peer_marker row(s), want 1", markers)
+	}
 }
 
 // TestFederationFetchDoesNotStampPeerLastSync covers the fetch half of
