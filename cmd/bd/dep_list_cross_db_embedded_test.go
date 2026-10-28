@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -123,6 +124,19 @@ func TestEmbeddedDepListSingleIDWarnsOnDroppedExternalEdge(t *testing.T) {
 	}
 	if !strings.Contains(lonelyStderr.String(), external.ID+" via related") {
 		t.Errorf("stderr should still name the dropped edge %s via related, got:\n%s", external.ID, lonelyStderr.String())
+	}
+
+	// --json keeps its RelatedIssue[] shape: the external edge is not a row.
+	lonelyJSONCmd := exec.Command(bd, "dep", "list", lonely.ID, "--json")
+	lonelyJSONCmd.Dir = dir
+	lonelyJSONCmd.Env = bdEnv(dir)
+	lonelyJSON, _, err := runCommandBuffers(t, lonelyJSONCmd)
+	if err != nil {
+		t.Fatalf("bd dep list --json (lonely): %v", err)
+	}
+	var lonelyRows []json.RawMessage
+	if err := json.Unmarshal(lonelyJSON.Bytes(), &lonelyRows); err != nil || lonelyRows == nil || len(lonelyRows) != 0 {
+		t.Errorf("--json = %q (err %v), want the empty array []", lonelyJSON.String(), err)
 	}
 
 	// With --type blocks the related edge drops out of both reads: no stored

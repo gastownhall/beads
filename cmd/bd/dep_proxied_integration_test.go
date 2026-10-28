@@ -1007,4 +1007,16 @@ func TestProxiedServerDepListSingleIDWarnsOnDroppedExternalEdge(t *testing.T) {
 	if !strings.Contains(lonelyStderr.String(), "external:crm:pod-client via blocks") {
 		t.Errorf("stderr should still name the dropped edge with its type, got:\n%s", lonelyStderr.String())
 	}
+
+	lonelyJSONCmd := exec.Command(bd, "dep", "list", lonely.ID, "--json")
+	lonelyJSONCmd.Dir = p.dir
+	lonelyJSONCmd.Env = bdProxiedEnv(p.dir)
+	lonelyJSON, _, err := runCommandBuffers(t, lonelyJSONCmd)
+	if err != nil {
+		t.Fatalf("bd dep list --json (lonely): %v", err)
+	}
+	var lonelyRows []json.RawMessage
+	if err := json.Unmarshal(lonelyJSON.Bytes(), &lonelyRows); err != nil || lonelyRows == nil || len(lonelyRows) != 0 {
+		t.Errorf("--json = %q (err %v), want the empty array []", lonelyJSON.String(), err)
+	}
 }
