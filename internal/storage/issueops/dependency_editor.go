@@ -172,7 +172,7 @@ func addDependencyEdgeInTx(ctx context.Context, tx *sql.Tx, request publicops.Ad
 	sourceTable, _, eventTable, depTable := WispTableRouting(sourceIsWisp)
 
 	dep := &types.Dependency{IssueID: edge.IssueID, DependsOnID: edge.DependsOnID, Type: edge.Type}
-	eventWritten, err := AddDependencyInTx(ctx, tx, dep, request.Actor, AddDependencyOpts{
+	result, err := AddDependencyInTxWithResult(ctx, tx, dep, request.Actor, AddDependencyOpts{
 		SourceTable:    sourceTable,
 		WriteTable:     depTable,
 		IsCrossPrefix:  types.ExtractPrefix(edge.IssueID) != types.ExtractPrefix(edge.DependsOnID),
@@ -187,32 +187,25 @@ func addDependencyEdgeInTx(ctx context.Context, tx *sql.Tx, request publicops.Ad
 	// (the idempotent re-add mints nothing, the same exemption eventWritten
 	// draws for the events table below) — so every leg that reaches that
 	// helper versions identically and this role adds no second mint.
-	// Stage the source's dependency table always and its events table only
-	// when a row was recorded — the same selective staging the stores' own
-	// AddDependencyWithOptions does, so an idempotent re-add cannot sweep
-	// unrelated pending event rows into this commit (GH#2455). Naming the
-	// source's own pair rather than the durable pair is what keeps that true
-	// across the planes: ChangedTables drops the wisp tables itself, so a
-	// wisp-sourced edge stages nothing and a request made entirely of them
-	// commits nothing, which is right — the wisp plane is dolt-ignored and has
-	// no version history to write.
 	//
-	// This is NOT every table the edge wrote. A blocking edge also flips the
-	// source's is_blocked (markDirectBlockingDependencySourceInTx, then
-	// MarkIsBlockedInTx over the affected ids), and neither `issues` nor any
-	// other issue-plane table is ever staged here. On an issue-sourced
-	// blocking add the flip therefore stays in the working set and is swept up
-	// by whatever command auto-commits next — including one that was REFUSED,
-	// which then shows up in history having changed nothing of its own. That
-	// predates this role: origin/main's dolt.AddDependencyWithOptions staged
-	// the same {dependencies, events} pair. Tracked as bd-2y9ke; fixing it
-	// changes what every dep-add commit contains and belongs in its own change
-	// with its own tests, so do not widen the set here without reading that
-	// bead first.
+	// Stage exactly the durable tables the edge wrote (GH#6647): the source's
+	// dependency table always; its events table only when a row was recorded,
+	// so an idempotent re-add cannot sweep unrelated pending event rows into
+	// this commit (GH#2455); and `issues` when the write's derived
+	// blocked-state maintenance flipped a durable issues row — the is_blocked
+	// change rides the same Dolt commit as the edge that caused it, instead of
+	// sitting in the working set for the next writer to sweep up. ChangedTables
+	// drops the wisp tables itself, so a wisp-sourced edge stages nothing of
+	// its own plane (it is dolt-ignored and has no version history to write)
+	// and only the `issues` rows its recompute flipped can ride — which is the
+	// one wisp-plane write that IS durable and must publish.
 	tables := ChangedTables{}
 	tables.Add(depTable)
-	if eventWritten {
+	if result.EventWritten {
 		tables.Add(eventTable)
+	}
+	if result.Blocked.IssueRowsChanged {
+		tables.Add("issues")
 	}
 	return tables, nil
 }

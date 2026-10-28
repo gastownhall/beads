@@ -241,31 +241,45 @@ func recomputeIsBlockedInTxWithResult(
 	}
 }
 
+// MarkIsBlockedInTx marks the given ids' blocked state to a fixpoint and
+// discards the per-table change result retained by MarkIsBlockedInTxWithResult.
 func MarkIsBlockedInTx(ctx context.Context, tx DBTX, issueIDs, wispIDs []string) error {
+	_, err := MarkIsBlockedInTxWithResult(ctx, tx, issueIDs, wispIDs)
+	return err
+}
+
+// MarkIsBlockedInTxWithResult is MarkIsBlockedInTx reporting, per issue table,
+// whether an UPDATE changed rows while the loop converged — the same fact
+// RecomputeIsBlockedInTxWithResult reports, so a caller that stages tables for
+// a Dolt commit can stage the issue-plane tables the mark actually touched.
+func MarkIsBlockedInTxWithResult(ctx context.Context, tx DBTX, issueIDs, wispIDs []string) (RecomputeIsBlockedResult, error) {
+	var result RecomputeIsBlockedResult
 	if len(issueIDs) == 0 && len(wispIDs) == 0 {
-		return nil
+		return result, nil
 	}
 	before, err := captureBlockedJournalSnapshot(ctx, tx, issueIDs, wispIDs)
 	if err != nil {
-		return err
+		return result, err
 	}
 	for {
 		var changed int64
 
 		n, err := markIsBlockedPassForIssuesInTx(ctx, tx, issueIDs)
 		if err != nil {
-			return err
+			return result, err
 		}
 		changed += n
+		result.IssueRowsChanged = result.IssueRowsChanged || n > 0
 
 		n, err = markIsBlockedPassForWispsInTx(ctx, tx, wispIDs)
 		if err != nil {
-			return err
+			return result, err
 		}
 		changed += n
+		result.WispRowsChanged = result.WispRowsChanged || n > 0
 
 		if changed == 0 {
-			return recordBlockedJournalChanges(ctx, tx, before, issueIDs, wispIDs)
+			return result, recordBlockedJournalChanges(ctx, tx, before, issueIDs, wispIDs)
 		}
 	}
 }

@@ -1,6 +1,7 @@
 package dolt
 
 import (
+	"context"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -46,7 +47,55 @@ func TestDoltStoreDependencyEditorBatchNamesItsHistoryEntry(t *testing.T) {
 	if !doltHasCommitMessage(ctx, t, store, "dependency: add 2 edges") {
 		t.Fatal("no commit named the edge count")
 	}
-	requireCleanTables(ctx, t, store, "dependencies")
+	// The batch's blocks edge flips test-dep-add-a's is_blocked, so `issues`
+	// is one of the tables this commit must have taken with it.
+	requireCleanTables(ctx, t, store, "issues", "dependencies")
+}
+
+// TestDoltStoreDependencyEditorBlockingAddCommitsIsBlocked is GH#6647 on the
+// `bd dep add` path: the is_blocked flip a blocking edge writes for its source
+// rides the same Dolt commit as the edge. Left unstaged, the flip sits in the
+// working set (committed history says the bead is not blocked, and a peer pull
+// or backup sees exactly that) until `bd recompute-blocked` refuses on the now
+// dirty `issues` table.
+func TestDoltStoreDependencyEditorBlockingAddCommitsIsBlocked(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+	seedIssues(ctx, t, store, "test-dep-blk-a", "test-dep-blk-b")
+	requireCleanTables(ctx, t, store, "issues", "dependencies")
+
+	editor, err := store.DependencyEditor()
+	if err != nil {
+		t.Fatalf("DependencyEditor(): %v", err)
+	}
+	if _, err := editor.AddDependencies(ctx, publicops.AddDependenciesRequest{
+		Actor: "writer",
+		Edges: []publicops.DependencyEdge{{IssueID: "test-dep-blk-b", DependsOnID: "test-dep-blk-a", Type: publicops.DepBlocks}},
+	}); err != nil {
+		t.Fatalf("AddDependencies: %v", err)
+	}
+
+	requireCleanTables(ctx, t, store, "issues", "dependencies")
+	if !isBlockedAtHEAD(ctx, t, store, "test-dep-blk-b") {
+		t.Fatal("committed HEAD has test-dep-blk-b is_blocked=0 despite an open blocker")
+	}
+	if _, err := store.RecomputeAllBlocked(ctx); err != nil {
+		t.Fatalf("RecomputeAllBlocked after dep add: %v", err)
+	}
+}
+
+// isBlockedAtHEAD reads is_blocked from the committed tree rather than the
+// working set, which is what a peer pull, a branch diff, or a backup sees.
+func isBlockedAtHEAD(ctx context.Context, t *testing.T, store *DoltStore, id string) bool {
+	t.Helper()
+	var blocked bool
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT is_blocked FROM issues AS OF 'HEAD' WHERE id = ?", id).Scan(&blocked); err != nil {
+		t.Fatalf("read HEAD is_blocked of %s: %v", id, err)
+	}
+	return blocked
 }
 
 // TestDoltStoreDependencyEditorSingleEdgeNamesTheHistoryEntry pins the other

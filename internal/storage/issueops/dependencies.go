@@ -213,7 +213,28 @@ type DepTargetPrecheck struct {
 // same terms; only a genuinely change-free re-add (identical type and metadata,
 // no new thread) mints nothing.
 func AddDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, actor string, opts AddDependencyOpts) (bool, error) {
-	return addDependencyInTx(ctx, tx, dep, actor, opts, nil, true)
+	result, err := AddDependencyInTxWithResult(ctx, tx, dep, actor, opts)
+	return result.EventWritten, err
+}
+
+// DependencyWriteResult reports what one dependency write changed, so a caller
+// that stages tables for a Dolt commit can stage exactly the durable tables the
+// write touched: EventWritten gates the events table (GH#2455's no-sweep rule),
+// and Blocked.IssueRowsChanged gates `issues` — the is_blocked flips the write's
+// derived blocked-state maintenance wrote, which must ride the same Dolt commit
+// as the edge that caused them or they sit dirty in the working set (GH#6647).
+type DependencyWriteResult struct {
+	EventWritten bool
+	Blocked      RecomputeIsBlockedResult
+}
+
+// AddDependencyInTxWithResult is AddDependencyInTx retaining the per-table
+// change facts in DependencyWriteResult instead of discarding them.
+func AddDependencyInTxWithResult(ctx context.Context, tx *sql.Tx, dep *types.Dependency, actor string, opts AddDependencyOpts) (DependencyWriteResult, error) {
+	var result DependencyWriteResult
+	eventWritten, err := addDependencyInTx(ctx, tx, dep, actor, opts, &result.Blocked, true)
+	result.EventWritten = eventWritten
+	return result, err
 }
 
 // addDependencyInTx is the body of AddDependencyInTx. mintVersion controls
@@ -410,8 +431,21 @@ func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 		return false, fmt.Errorf("affected by add dependency %s -> %s: %w", dep.IssueID, dep.DependsOnID, aerr)
 	}
 	if dep.Type == types.DepBlocks || dep.Type == types.DepConditionalBlocks {
-		if err := markDirectBlockingDependencySourceInTx(ctx, tx, dep.IssueID, srcIsWisp, dep.DependsOnID, kind, opts.PrecheckedTarget); err != nil {
+		marked, err := markDirectBlockingDependencySourceInTx(ctx, tx, dep.IssueID, srcIsWisp, dep.DependsOnID, kind, opts.PrecheckedTarget)
+		if err != nil {
 			return false, fmt.Errorf("mark direct is_blocked after add dependency %s -> %s: %w", dep.IssueID, dep.DependsOnID, err)
+		}
+		// The direct mark's UPDATE carries `AND s.is_blocked = 0`, so a matched
+		// row is a changed row and RowsAffected is the change-fact regardless
+		// of the driver's found-rows mode. Merge it into the source's own
+		// plane: it is the only change-fact the two-issue repro of GH#6647
+		// produces, because RemoveSourceFromAffected below takes the source
+		// out of the follow-up mark's id set.
+		if marked {
+			mergeRecomputeIsBlockedResult(recomputeResult, RecomputeIsBlockedResult{
+				IssueRowsChanged: !srcIsWisp,
+				WispRowsChanged:  srcIsWisp,
+			})
 		}
 		affectedIssues, affectedWisps = RemoveSourceFromAffected(dep.IssueID, srcIsWisp, affectedIssues, affectedWisps)
 	}
@@ -429,9 +463,11 @@ func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 		}
 		return eventWritten, mintDependencyVersion(ctx, tx, dep.IssueID, actor, mintVersion)
 	}
-	if err := MarkIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
+	marked, err := MarkIsBlockedInTxWithResult(ctx, tx, affectedIssues, affectedWisps)
+	if err != nil {
 		return false, fmt.Errorf("mark is_blocked after add dependency %s -> %s: %w", dep.IssueID, dep.DependsOnID, err)
 	}
+	mergeRecomputeIsBlockedResult(recomputeResult, marked)
 	// Snapshot only after all derived blocked-state maintenance has completed.
 	// The journal is never gated on opts.EmitEvent: a structurally-wired edge is
 	// as real to a replaying consumer as one added by an explicit dep verb —
@@ -479,8 +515,16 @@ func removeID(ids []string, remove string) []string {
 	return out
 }
 
+// markDirectBlockingDependencySourceInTx marks the source of a just-added
+// blocking edge blocked when the target is open, and reports whether it
+// actually flipped the row: the UPDATE's `AND s.is_blocked = 0` predicate
+// makes matched equal changed, so RowsAffected is the change-fact regardless
+// of the driver's found-rows mode. Callers merge that fact into the write's
+// RecomputeIsBlockedResult (GH#6647): the source is removed from the affected
+// set right after, so nothing else reports the flip.
+//
 //nolint:gosec // G201: table names are selected from fixed issue/wisp tables.
-func markDirectBlockingDependencySourceInTx(ctx context.Context, tx *sql.Tx, source string, srcIsWisp bool, target string, targetKind DepTargetKind, precheckedTarget *DepTargetPrecheck) error {
+func markDirectBlockingDependencySourceInTx(ctx context.Context, tx *sql.Tx, source string, srcIsWisp bool, target string, targetKind DepTargetKind, precheckedTarget *DepTargetPrecheck) (bool, error) {
 	sourceTable := "issues"
 	if srcIsWisp {
 		sourceTable = "wisps"
@@ -492,7 +536,7 @@ func markDirectBlockingDependencySourceInTx(ctx context.Context, tx *sql.Tx, sou
 	case DepTargetWisp:
 		targetTable = "wisps"
 	default:
-		return nil
+		return false, nil
 	}
 
 	if precheckedTarget != nil {
@@ -500,15 +544,14 @@ func markDirectBlockingDependencySourceInTx(ctx context.Context, tx *sql.Tx, sou
 		// would miss it there. Its openness is already known, so gate in Go
 		// and mark the source (whose table always matches tx) directly.
 		if types.Status(precheckedTarget.Status) == types.StatusClosed || types.Status(precheckedTarget.Status) == types.StatusPinned {
-			return nil
+			return false, nil
 		}
-		_, err := tx.ExecContext(ctx, fmt.Sprintf(`
+		return execMarkDirectBlockingSource(ctx, tx, fmt.Sprintf(`
 			UPDATE %s s SET s.is_blocked = 1, s.updated_at = s.updated_at
 			WHERE s.id = ?
 			  AND s.is_blocked = 0
 			  AND s.status <> 'closed' AND s.status <> 'pinned'
 		`, sourceTable), source)
-		return err
 	}
 
 	// MySQL 8.0+ rejects UPDATE <T> ... WHERE EXISTS (SELECT FROM <T> ...)
@@ -517,7 +560,7 @@ func markDirectBlockingDependencySourceInTx(ctx context.Context, tx *sql.Tx, sou
 	// targetTable. Wrapping the inner SELECT in a derived table makes MySQL
 	// treat it as an independent rowset, satisfying the restriction. Dolt
 	// accepts both forms, so this is a no-op there.
-	_, err := tx.ExecContext(ctx, fmt.Sprintf(`
+	return execMarkDirectBlockingSource(ctx, tx, fmt.Sprintf(`
 		UPDATE %s s SET s.is_blocked = 1, s.updated_at = s.updated_at
 		WHERE s.id = ?
 		  AND s.is_blocked = 0
@@ -529,7 +572,20 @@ func markDirectBlockingDependencySourceInTx(ctx context.Context, tx *sql.Tx, sou
 		    WHERE t.status <> 'closed' AND t.status <> 'pinned'
 		  )
 	`, sourceTable, targetTable), source, target)
-	return err
+}
+
+// execMarkDirectBlockingSource runs one of markDirectBlockingDependencySourceInTx's
+// UPDATEs and reports whether it changed a row.
+func execMarkDirectBlockingSource(ctx context.Context, tx *sql.Tx, query string, args ...interface{}) (bool, error) {
+	res, err := tx.ExecContext(ctx, query, args...)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 // CheckDependencyCycleInTx rejects self-dependencies and cycles across the
