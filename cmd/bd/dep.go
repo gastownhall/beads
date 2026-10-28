@@ -988,6 +988,51 @@ func warnDroppedDepEdges(ctx context.Context, reader issueops.EdgeReader, anchor
 	fmt.Fprintf(os.Stderr, "For raw edge records, run: bd dep list %s %s%s\n", arg, arg, note)
 }
 
+// noteHiddenChildren prints a stderr-only note for anchorID's inbound
+// parent-child edges — its children — on a view that lists outbound edges
+// only (the default human `bd dep list <id>` and `bd dep tree <id>`). A
+// parent's children reach it through edges stored on the child, so the down
+// view never shows them and an anchor with 26 children prints exactly what a
+// childless anchor prints (GH#5151: a dispatched molecule root was nearly
+// classified as a phantom by a procedure that discriminates the two by
+// child-count).
+//
+// The count comes from the same Relations read `bd dep list <id>
+// --direction=up --type=parent-child` makes, so it always equals what the
+// command printed beside it lists. It never writes to stdout, so the
+// documented single-id shapes and any script parsing them are unchanged;
+// view is "list" or "tree" and picks the remedy line. Like
+// warnDroppedDepEdges above, it is best-effort: the command's actual answer
+// was already produced, so a read that fails or comes back empty prints
+// nothing rather than failing the view.
+func noteHiddenChildren(ctx context.Context, rel issueops.Relations, anchorID, view string) {
+	children, err := rel.Related(ctx, issueops.RelatedRequest{
+		ID:        anchorID,
+		Direction: issueops.RelationIn,
+		Types:     []types.DependencyType{types.DepParentChild},
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: reading %s's children: %v\n", printedIssueID(anchorID), err)
+		return
+	}
+	if len(children) == 0 {
+		return
+	}
+	// The anchor's id and the command below are spelled the way
+	// warnDroppedDepEdges spells its own: the id as printedIssueID prints
+	// it, and the command's argument as remedy.CommandArg passes it on,
+	// with a placeholder and the id named escaped beside it when no shell
+	// takes it as one word — so neither line can be redrawn.
+	fmt.Fprintf(os.Stderr, "note: %s has %d child issue(s) not shown here: this view lists what %s depends on, and its children depend on it (parent-child).\n",
+		printedIssueID(anchorID), len(children), printedIssueID(anchorID))
+	arg, note := remedy.CommandArg(runtime.GOOS, anchorID, "<issue-id>")
+	if view == "tree" {
+		fmt.Fprintf(os.Stderr, "To see them, run: bd dep tree %s --direction=up%s\n", arg, note)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "To list them, run: bd dep list %s --direction=up --type=parent-child%s\n", arg, note)
+}
+
 var depListCmd = &cobra.Command{
 	Use:   "list [issue-id...]",
 	Short: "List dependencies or dependents of one or more issues",
@@ -1142,6 +1187,21 @@ Examples:
 				allIssues = []*issueops.RelatedIssue{}
 			}
 			return outputJSON(allIssues)
+		}
+
+		// The human single-id down view answers "what does this issue
+		// depend on", so the anchor's own children — inbound parent-child
+		// edges — are invisible on it. Note them on stderr, never stdout,
+		// the way warnDroppedDepEdges above warns about dropped edges. The
+		// condition is on the request actually issued rather than the
+		// flag string: --direction is not validated above, and a value
+		// that is not "up" lands in RelationOut, so it notes too. The
+		// defer prints after the view's own stdout, on the empty answer
+		// and the row list alike.
+		if !batchMode && len(resolved) == 1 && request.Direction == issueops.RelationOut {
+			if rel, relErr := resolved[0].store.IssueRelations(); relErr == nil {
+				defer noteHiddenChildren(ctx, rel, resolved[0].fullID, "list")
+			}
 		}
 
 		if len(allIssues) == 0 {
