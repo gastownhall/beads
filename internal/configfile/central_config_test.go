@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/config"
 )
 
 // writeCentralConfig writes a Config as JSON to the given path.
@@ -222,4 +224,110 @@ func TestDefaultCentralConfigPath(t *testing.T) {
 	if dir != "beads" {
 		t.Errorf("DefaultCentralConfigPath() parent dir = %q, want beads", dir)
 	}
+}
+
+// TestCentralConfigIsLowestConnectionSource pins GH#3895's precedence: the
+// central server config fills the host, user and TLS getters only where the
+// environment, metadata.json and (for the host) config.yaml dolt.host name
+// nothing, and it never selects server storage mode by itself.
+func TestCentralConfigIsLowestConnectionSource(t *testing.T) {
+	setup := func(t *testing.T) {
+		t.Helper()
+		for _, name := range []string{"BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_USER", "BEADS_DOLT_SERVER_TLS",
+			"BEADS_DOLT_SERVER_MODE", "BEADS_DOLT_SHARED_SERVER"} {
+			t.Setenv(name, "")
+		}
+		centralPath := filepath.Join(t.TempDir(), "server.json")
+		writeCentralConfig(t, centralPath, &Config{
+			DoltServerHost: "central.example.com",
+			DoltServerUser: "central_user",
+			DoltServerTLS:  true,
+		})
+		t.Setenv("BEADS_CENTRAL_CONFIG", centralPath)
+		configDir := t.TempDir()
+		t.Setenv("BEADS_DIR", configDir)
+		if err := config.Initialize(); err != nil {
+			t.Fatalf("config.Initialize: %v", err)
+		}
+		t.Cleanup(config.ResetForTesting)
+	}
+
+	t.Run("fills fields nothing else names", func(t *testing.T) {
+		setup(t)
+		cfg := &Config{Backend: BackendDolt}
+		if got := cfg.GetDoltServerHost(); got != "central.example.com" {
+			t.Errorf("GetDoltServerHost() = %q, want central.example.com", got)
+		}
+		if got := cfg.GetDoltServerUser(); got != "central_user" {
+			t.Errorf("GetDoltServerUser() = %q, want central_user", got)
+		}
+		if !cfg.GetDoltServerTLS() {
+			t.Error("GetDoltServerTLS() = false, want true from the central config")
+		}
+		if cfg.HostImpliesServerMode() || cfg.IsDoltServerMode() {
+			t.Error("a central host selected server storage mode; only the workspace's own settings may")
+		}
+	})
+
+	t.Run("env wins", func(t *testing.T) {
+		setup(t)
+		t.Setenv("BEADS_DOLT_SERVER_HOST", "10.0.0.1")
+		t.Setenv("BEADS_DOLT_SERVER_USER", "env_user")
+		t.Setenv("BEADS_DOLT_SERVER_TLS", "0")
+		cfg := &Config{}
+		if got := cfg.GetDoltServerHost(); got != "10.0.0.1" {
+			t.Errorf("GetDoltServerHost() = %q, want 10.0.0.1", got)
+		}
+		if got := cfg.GetDoltServerUser(); got != "env_user" {
+			t.Errorf("GetDoltServerUser() = %q, want env_user", got)
+		}
+		if cfg.GetDoltServerTLS() {
+			t.Error("GetDoltServerTLS() = true, want BEADS_DOLT_SERVER_TLS=0 to disable it")
+		}
+	})
+
+	t.Run("metadata.json wins", func(t *testing.T) {
+		setup(t)
+		cfg := &Config{DoltServerHost: "192.168.1.100", DoltServerUser: "meta_user"}
+		if got := cfg.GetDoltServerHost(); got != "192.168.1.100" {
+			t.Errorf("GetDoltServerHost() = %q, want 192.168.1.100", got)
+		}
+		if got := cfg.GetDoltServerUser(); got != "meta_user" {
+			t.Errorf("GetDoltServerUser() = %q, want meta_user", got)
+		}
+	})
+
+	t.Run("config.yaml dolt.host wins", func(t *testing.T) {
+		setup(t)
+		configDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte("dolt.host: 100.64.0.1\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("BEADS_DIR", configDir)
+		if err := config.Initialize(); err != nil {
+			t.Fatalf("config.Initialize: %v", err)
+		}
+		cfg := &Config{}
+		if got := cfg.GetDoltServerHost(); got != "100.64.0.1" {
+			t.Errorf("GetDoltServerHost() = %q, want 100.64.0.1", got)
+		}
+		if got := cfg.GetDoltServerUser(); got != "central_user" {
+			t.Errorf("GetDoltServerUser() = %q, want central_user (config.yaml names no user)", got)
+		}
+	})
+
+	t.Run("no central config keeps the defaults", func(t *testing.T) {
+		setup(t)
+		t.Setenv("BEADS_CENTRAL_CONFIG", filepath.Join(t.TempDir(), "none.json"))
+		cfg := &Config{}
+		if got := cfg.GetDoltServerHost(); got != DefaultDoltServerHost {
+			t.Errorf("GetDoltServerHost() = %q, want %q", got, DefaultDoltServerHost)
+		}
+		if got := cfg.GetDoltServerUser(); got != DefaultDoltServerUser {
+			t.Errorf("GetDoltServerUser() = %q, want %q", got, DefaultDoltServerUser)
+		}
+		if cfg.GetDoltServerTLS() {
+			t.Error("GetDoltServerTLS() = true with no TLS setting anywhere")
+		}
+	})
 }

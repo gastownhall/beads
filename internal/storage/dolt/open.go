@@ -500,22 +500,8 @@ func poolKnobFromConfig(cfg *Config, key string) string {
 // applyCentralConfigDefaults loads the central server config from
 // ~/.config/beads/server.json (or BEADS_CENTRAL_CONFIG env var) and
 // applies its server fields as defaults to the per-project config.
-// A missing central config file is silently ignored.
+// A missing central config file is silently ignored, and a broken one is
+// reported once (configfile.CentralConfig) and ignored.
 func applyCentralConfigDefaults(fileCfg *configfile.Config) {
-	centralPath := os.Getenv("BEADS_CENTRAL_CONFIG")
-	if centralPath == "" {
-		centralPath = configfile.DefaultCentralConfigPath()
-	}
-	if centralPath == "" {
-		return
-	}
-
-	centralCfg, err := configfile.LoadCentralConfig(centralPath)
-	if err != nil {
-		// Log but don't fail — a broken central config shouldn't block operations.
-		fmt.Fprintf(os.Stderr, "Warning: failed to load central config %s: %v\n", centralPath, err)
-		return
-	}
-
-	configfile.ApplyCentralDefaults(fileCfg, centralCfg)
+	configfile.ApplyCentralDefaults(fileCfg, configfile.CentralConfig())
 }
