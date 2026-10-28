@@ -402,6 +402,17 @@ func TestEmbeddedDepAAddRejectionsAndBulk(t *testing.T) {
 		}
 	})
 
+	t.Run("add_unresolved_quiet", func(t *testing.T) {
+		src := bdCreate(t, bd, dir, "Unresolved target quiet source", "--type", "task")
+		_, stderr := bdRunSplit(t, bd, dir, "--quiet", "dep", "add", src.ID, "zz-406")
+		if strings.Contains(stderr, "was not found") {
+			t.Errorf("stderr = %q, want no unresolved-target warning under --quiet", stderr)
+		}
+		if got := bdShowDetails(t, bd, dir, src.ID)["dependency_count"]; got != float64(1) {
+			t.Fatalf("dependency_count = %v, want 1: --quiet silences the warning, not the write", got)
+		}
+	})
+
 	t.Run("add_bulk_file_validation_no_partial_mutation", func(t *testing.T) {
 		v1 := bdCreate(t, bd, dir, "Bulk validation A", "--type", "task")
 		v2 := bdCreate(t, bd, dir, "Bulk validation B", "--type", "task")

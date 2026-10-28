@@ -281,6 +281,25 @@ func TestUnresolvedDepTargetWarning(t *testing.T) {
 	})
 }
 
+// TestWarnUnresolvedDepTargetHonorsQuiet: the unresolved-target notice is
+// advisory, so the global --quiet ("errors only") silences it like the other
+// non-error notices in this package. Not parallel: it sets quietFlag.
+func TestWarnUnresolvedDepTargetHonorsQuiet(t *testing.T) {
+	oldQuiet := quietFlag
+	t.Cleanup(func() { quietFlag = oldQuiet })
+
+	quietFlag = true
+	if got := captureStderr(t, func() { warnUnresolvedDepTarget("", "be-abc", "xy-999") }); got != "" {
+		t.Errorf("--quiet: stderr = %q, want empty", got)
+	}
+
+	quietFlag = false
+	want := unresolvedDepTargetWarning("", "be-abc", "xy-999")
+	if got := captureStderr(t, func() { warnUnresolvedDepTarget("", "be-abc", "xy-999") }); got != want {
+		t.Errorf("stderr = %q, want %q", got, want)
+	}
+}
+
 // newDepAddCommandForTest mirrors depAddCmd's flag set (dep.go's init) so the
 // proxied RunE helpers can be driven directly. Only the flags read before the
 // target decision matter, but registering all of them keeps the fixture honest

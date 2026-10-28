@@ -604,8 +604,12 @@ func unresolvedDepTargetWarning(where, sourceID, targetID string) string {
 // warnUnresolvedDepTarget writes unresolvedDepTargetWarning to stderr. It is
 // called only after the edge is stored. Unlike the D1 warning it is not
 // TTY-gated: it fires only on the unresolved minority path, and scripted and
-// agent callers are where such a typo most often comes from.
+// agent callers are where such a typo most often comes from. It honors
+// --quiet, like the package's other non-error notices.
 func warnUnresolvedDepTarget(where, sourceID, targetID string) {
+	if quietFlag {
+		return
+	}
 	fmt.Fprint(os.Stderr, unresolvedDepTargetWarning(where, sourceID, targetID)) //nolint:gosec // G705: stderr, not a browser context
 }
 
