@@ -138,6 +138,10 @@ var constructionExemptions = map[string]string{
 	// mutates a bead.
 	"ado.go:getADOConfigValue": "throwaway store used for a single GetConfig read; no bead mutation is possible through it",
 
+	// bd init's destroy count of the database a reinit would replace: a
+	// ReadOnly server config, read by GetStatistics only.
+	"init_identity.go:openConfiguredStoreForCount": "read-only open counting the issues a reinit would replace; no bead mutation is possible through it",
+
 	// `bd config apply` / drift detection open a store to read and reconcile the
 	// workspace's Dolt REMOTE configuration. That is workspace state, not bead
 	// rows, so there is nothing for a replay consumer to apply.

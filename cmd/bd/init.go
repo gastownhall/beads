@@ -971,6 +971,11 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			}
 		}
 
+		// What init is about to replace, resolved before the promotion below
+		// can turn a flag into an environment variable the getters would read
+		// back as the workspace's own setting (#6172).
+		initID := resolveInitIdentity(resolveInitWorkspace(), initIdentityFlags{Database: database}, initServerMode)
+
 		// Explicit connection flags outrank stale BEADS_DOLT_SERVER_* values
 		// (GH#5177). This must run AFTER every source of server mode has been
 		// consulted above: --server, BEADS_DOLT_SERVER_MODE, --shared-server,
@@ -1042,12 +1047,12 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			// prompt and no destroy token. Those flags authorize destroying a
 			// database that exists; only --recreate-missing authorizes creating
 			// one where the configured database has gone missing.
-			if err := guardMissingServerDatabase(prefix); err != nil {
+			if err := guardMissingServerDatabase(initID, prefix); err != nil {
 				return fmt.Errorf("%v", err)
 			}
 		}
 		if !reinitLocal {
-			if err := checkExistingBeadsData(prefix); err != nil {
+			if err := checkExistingBeadsDataFor(initID, prefix); err != nil {
 				// --init-if-missing makes init idempotent, but ONLY for the
 				// benign "workspace already initialized" case. An operational
 				// error from the check (e.g. an unreadable .beads/embeddeddolt
@@ -1161,20 +1166,11 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		}
 
 		// Determine beadsDir first (used for all storage path calculations).
-		// BEADS_DIR takes precedence, otherwise use CWD/.beads (with redirect support).
-		// This must be computed BEFORE initDBPath to ensure consistent path resolution
+		// BEADS_DIR takes precedence, otherwise use CWD/.beads (with redirect
+		// support); resolveInitWorkspace resolved it. This must be computed BEFORE initDBPath to ensure consistent path resolution
 		// (avoiding macOS /var -> /private/var symlink issues when directory creation
 		// happens between path computations).
-		var beadsDirForInit string
-		if envBeadsDir := os.Getenv("BEADS_DIR"); envBeadsDir != "" {
-			beadsDirForInit = utils.CanonicalizePath(envBeadsDir)
-		} else {
-			beadsDirForInit = beads.GetWorktreeFallbackBeadsDir()
-			if beadsDirForInit == "" {
-				localBeadsDir := filepath.Join(".", ".beads")
-				beadsDirForInit = beads.FollowRedirect(localBeadsDir)
-			}
-		}
+		beadsDirForInit := initID.BeadsDir
 
 		// Plan the storage root for gate acquisition without side effects.
 		// The operational path is resolved after the destructive preflight.
@@ -1250,7 +1246,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			plannedDBPathAbs = filepath.Dir(plannedDBPathAbs)
 		}
 		initGateHandle, gateErr := acquireInitMutationGate(rootCtx, beadsDirAbs, plannedDBPathAbs, func() error {
-			return runInitReinitPreflight(reinitLocal, destroyTokenPrefix, destroyToken)
+			return runInitReinitPreflight(reinitLocal, initID, destroyTokenPrefix, destroyToken)
 		})
 		if gateErr != nil {
 			return gateErr
@@ -2713,6 +2709,13 @@ func alreadyInitialized(format string, args ...any) error {
 // operational and must not be treated as success.
 
 func checkExistingBeadsDataAt(beadsDir string, prefix string) error {
+	return checkExistingBeadsDataAtRef(beadsDir, prefix, nil)
+}
+
+// checkExistingBeadsDataAtRef is checkExistingBeadsDataAt with the configured
+// database init resolved before promoting its flags (initIdentity). nil
+// resolves it from the workspace's metadata, as its commands would.
+func checkExistingBeadsDataAtRef(beadsDir string, prefix string, configured *initDBRef) error {
 	// Check if .beads directory exists
 	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
 		return nil // No .beads directory, safe to init
@@ -2799,6 +2802,9 @@ Aborting.`, remedy.PrintedValue(location), prefix)
 		// the directory would miss server-mode installations.
 		doltPath := doltserver.ResolveDoltDir(beadsDir)
 		dbName := cfg.GetDoltDatabase()
+		if configured != nil {
+			dbName = configured.databaseOrDefault()
+		}
 
 		// Probe THIS PROJECT's database directory, not the Dolt data directory
 		// that merely holds it: a data dir contains one subdirectory per
@@ -2994,46 +3000,13 @@ Aborting.`, dbPath, prefix)
 	return nil // No database found, safe to init
 }
 
-// countExistingIssues attempts to connect to the existing database and count
-// issues. Returns 0 if the database is unreachable or empty. Used by --force
-// safeguard to show users what they're about to destroy.
-func countExistingIssues(_ string) (int, error) {
-	var beadsDir string
-	if envBeadsDir := os.Getenv("BEADS_DIR"); envBeadsDir != "" {
-		beadsDir = utils.CanonicalizePath(envBeadsDir)
-	} else {
-		beadsDir = beads.FindBeadsDir()
-		if beadsDir == "" {
-			return 0, nil
-		}
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	store, err := newDoltStoreFromConfig(ctx, beadsDir)
-	if err != nil {
-		return 0, err
-	}
-	defer func() { _ = store.Close() }()
-
-	stats, err := store.GetStatistics(ctx)
-	if err != nil {
-		return 0, err
-	}
-	if stats == nil {
-		return 0, nil
-	}
-	return stats.TotalIssues, nil
-}
-
 // runInitReinitPreflight confirms the destructive local replacement while the
 // caller holds init's complete exclusive gate set.
-func runInitReinitPreflight(reinitLocal bool, prefix, destroyToken string) error {
+func runInitReinitPreflight(reinitLocal bool, id initIdentity, prefix, destroyToken string) error {
 	if !reinitLocal {
 		return nil
 	}
-	count, err := countExistingIssues(prefix)
+	count, err := countConfiguredIssues(id)
 	if err != nil || count == 0 {
 		return nil
 	}
@@ -3300,6 +3273,13 @@ func initModeExplicitlyRequested(cmd *cobra.Command) bool {
 // "already initialized" refusal that --reinit-local is legitimately meant to
 // bypass.
 func guardMissingServerDatabaseAt(beadsDir string, prefix string) error {
+	return guardMissingServerDatabaseAtRef(beadsDir, prefix, nil)
+}
+
+// guardMissingServerDatabaseAtRef is guardMissingServerDatabaseAt with the
+// configured database init resolved before promoting its flags
+// (initIdentity). nil resolves it from the workspace's metadata.
+func guardMissingServerDatabaseAtRef(beadsDir string, prefix string, configured *initDBRef) error {
 	if initAllowRecreateMissing {
 		return nil
 	}
@@ -3323,6 +3303,9 @@ func guardMissingServerDatabaseAt(beadsDir string, prefix string) error {
 	host := cfg.GetDoltServerHost()
 	port := doltserver.DefaultConfig(beadsDir).Port
 	dbName := cfg.GetDoltDatabase()
+	if configured != nil {
+		dbName = configured.databaseOrDefault()
+	}
 	doltPath := doltserver.ResolveDoltDir(beadsDir)
 
 	// TIER 1 (ADR-0004, engdocs/adr/0004-missing-database-guard-signal.md).
@@ -3390,13 +3373,14 @@ func guardMissingServerDatabaseAt(beadsDir string, prefix string) error {
 }
 
 // guardMissingServerDatabase resolves the init target the same way
-// checkExistingBeadsData does, then applies guardMissingServerDatabaseAt.
-func guardMissingServerDatabase(prefix string) error {
+// checkExistingBeadsData does, then applies guardMissingServerDatabaseAt to
+// the configured database in id.
+func guardMissingServerDatabase(id initIdentity, prefix string) error {
 	beadsDir := resolveInitBeadsDir()
 	if beadsDir == "" {
 		return nil
 	}
-	return guardMissingServerDatabaseAt(beadsDir, prefix)
+	return guardMissingServerDatabaseAtRef(beadsDir, prefix, id.configuredRef())
 }
 
 func checkExistingBeadsData(prefix string) error {
@@ -3405,6 +3389,16 @@ func checkExistingBeadsData(prefix string) error {
 		return nil // Can't determine target, allow init to proceed
 	}
 	return checkExistingBeadsDataAt(beadsDir, prefix)
+}
+
+// checkExistingBeadsDataFor is checkExistingBeadsData about the configured
+// database in id.
+func checkExistingBeadsDataFor(id initIdentity, prefix string) error {
+	beadsDir := resolveInitBeadsDir()
+	if beadsDir == "" {
+		return nil // Can't determine target, allow init to proceed
+	}
+	return checkExistingBeadsDataAtRef(beadsDir, prefix, id.configuredRef())
 }
 
 // isNonInteractiveInit returns true if init should run without interactive prompts.
