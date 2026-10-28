@@ -697,8 +697,40 @@ func printDivergedHistoryGuidance(operation string) {
 	fmt.Fprintln(os.Stderr, "existing remote instead of 'bd init' to avoid divergent histories.")
 }
 
+// remoteFromArgs resolves the remote `bd dolt push|pull` targets: the
+// optional positional name, else --remote. "" means the default remote.
+// Cobra's default ArbitraryArgs used to accept `bd dolt push 1st` and RunE
+// dropped the name, so the push went to the default remote (GH#3720).
+func remoteFromArgs(cmd *cobra.Command, args []string) (string, error) {
+	flagRemote, _ := cmd.Flags().GetString("remote")
+	if len(args) == 0 {
+		return flagRemote, nil
+	}
+	remote := args[0]
+	// An empty name (`bd dolt push "$R"` with R unset) must not fall back to
+	// the default remote: that is the same silent misdirection.
+	if strings.TrimSpace(remote) == "" {
+		return "", HandleError("remote name is empty: name a remote (see 'bd dolt remote list') or omit the argument to use the default")
+	}
+	// Letting either spelling win would silently discard a selector the
+	// user typed, the bug class this resolves.
+	if flagRemote != "" && flagRemote != remote {
+		return "", HandleError("remote named twice: %q as an argument and %q with --remote; name it once", remote, flagRemote)
+	}
+	return remote, nil
+}
+
+// validateRemoteArg runs remoteFromArgs as cobra's Args validation, which
+// executes before PersistentPreRunE opens the store, so a bad remote argument
+// fails before any server start or migration (as validateCreateArgs does).
+func validateRemoteArg(cmd *cobra.Command, args []string) error {
+	_, err := remoteFromArgs(cmd, args)
+	return err
+}
+
 var doltPushCmd = &cobra.Command{
-	Use:           "push",
+	Use:           "push [remote]",
+	Args:          cobra.MatchAll(cobra.MaximumNArgs(1), validateRemoteArg),
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	Short:         "Push commits to Dolt remote",
@@ -714,8 +746,9 @@ variables for authentication.
 Use --force to overwrite remote changes (e.g., when the remote has
 uncommitted changes in its working set).
 
-Use --remote to push to a specific named remote instead of the default.
-The remote must already exist (see 'bd dolt remote add').`,
+Name a remote to push to it instead of the default: 'bd dolt push <remote>'
+or 'bd dolt push --remote <remote>'. The remote must already exist (see
+'bd dolt remote add').`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if config.GetBool("no-push") {
 			fmt.Println("skipping push: rig is local-only (no-push: true)")
@@ -739,7 +772,10 @@ The remote must already exist (see 'bd dolt remote add').`,
 			return HandleError("no store available")
 		}
 		force, _ := cmd.Flags().GetBool("force")
-		remote, _ := cmd.Flags().GetString("remote")
+		remote, err := remoteFromArgs(cmd, args)
+		if err != nil {
+			return err
+		}
 		if remote != "" {
 			fmt.Printf("Pushing to Dolt remote %q...\n", remote)
 			if err := st.PushRemote(ctx, remote, force); err != nil {
@@ -801,7 +837,8 @@ The remote must already exist (see 'bd dolt remote add').`,
 }
 
 var doltPullCmd = &cobra.Command{
-	Use:           "pull",
+	Use:           "pull [remote]",
+	Args:          cobra.MatchAll(cobra.MaximumNArgs(1), validateRemoteArg),
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	Short:         "Pull commits from Dolt remote",
@@ -811,8 +848,9 @@ Requires a Dolt remote to be configured in the database directory.
 For Hosted Dolt, set DOLT_REMOTE_USER and DOLT_REMOTE_PASSWORD environment
 variables for authentication.
 
-Use --remote to pull from a specific named remote instead of the default.
-The remote must already exist (see 'bd dolt remote add').
+Name a remote to pull from it instead of the default: 'bd dolt pull <remote>'
+or 'bd dolt pull --remote <remote>'. The remote must already exist (see
+'bd dolt remote add').
 
 Use --strategy ours|theirs to resolve conflicts the auto-resolver declines
 (e.g. both sides edited the same issue since the last sync) instead of
@@ -837,7 +875,10 @@ reports conflicts.`,
 		if st == nil {
 			return HandleError("no store available")
 		}
-		remote, _ := cmd.Flags().GetString("remote")
+		remote, err := remoteFromArgs(cmd, args)
+		if err != nil {
+			return err
+		}
 		strategy, _ := cmd.Flags().GetString("strategy")
 		if strategy != "" {
 			if err := versioncontrolops.ValidateConflictStrategy(strategy); err != nil {
@@ -885,7 +926,6 @@ reports conflicts.`,
 			return HandleError("%v", err)
 		}
 		fmt.Println("Pulling from Dolt remote...")
-		var err error
 		if strategy != "" {
 			err = puller.PullWithStrategy(ctx, strategy)
 		} else {
