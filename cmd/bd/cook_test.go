@@ -1545,3 +1545,44 @@ func TestStepTypeToIssueType(t *testing.T) {
 		}
 	}
 }
+
+// loopDepsReproTOML is the GH#7636 repro: a loop step with its own needs,
+// and a step after it that needs the loop.
+const loopDepsReproTOML = `formula = "loopdeps"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "brief"
+title = "Brief"
+
+[[steps]]
+id = "round"
+title = "Round"
+needs = ["brief"]
+[steps.loop]
+count = 2
+[[steps.loop.body]]
+id = "work"
+title = "Work"
+
+[[steps]]
+id = "land"
+title = "Land"
+needs = ["round"]
+`
+
+// TestCookFormulaToSubgraph_LoopStepDependencies pins GH#7636 on the pour
+// cook path: a loop step's own needs gate its first expanded step, and a
+// step that needs the loop waits for the loop's last expanded step.
+func TestCookFormulaToSubgraph_LoopStepDependencies(t *testing.T) {
+	t.Run("loop_own_needs", func(t *testing.T) {
+		sg := cookGateFormulaTOML(t, "loopdeps", loopDepsReproTOML)
+		if got := blocksEdgesFrom(sg, "loopdeps.round.iter1.work"); !slices.Equal(got, []string{"loopdeps.brief"}) {
+			t.Errorf("round.iter1.work blocks edges = %v, want [loopdeps.brief] (the loop step's own needs)", got)
+		}
+		if got := blocksEdgesFrom(sg, "loopdeps.round.iter2.work"); !slices.Equal(got, []string{"loopdeps.round.iter1.work"}) {
+			t.Errorf("round.iter2.work blocks edges = %v, want [loopdeps.round.iter1.work] (iteration chaining only)", got)
+		}
+	})
+}
