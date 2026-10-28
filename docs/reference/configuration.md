@@ -276,6 +276,8 @@ How it works:
 
 Before pushing, `bd` verifies the local chunk store with `dolt fsck --quiet`, bounded by a 30-second timeout. For large stores, raise it with the runtime-only `BEADS_FSCK_TIMEOUT` environment variable (accepts durations like `2m` or bare seconds like `90`).
 
+The push itself is bounded too, by 5 minutes by default. For large stores, raise it with `BEADS_DOLT_TRANSFER_TIMEOUT` (pushes and pulls the Dolt server runs over SQL) or `BEADS_CLI_TRANSFER_TIMEOUT` (git-protocol, credentialed and cloud-auth remotes, which go through the `dolt` CLI).
+
 ## Actor Identity Resolution
 
 The actor name (used for `created_by` and audit trails) is resolved in this order:
@@ -536,6 +538,8 @@ Selected commonly-used variables:
 | `BEADS_ACTOR` | Actor identity (preferred over `BD_ACTOR`, which is a deprecated alias) |
 | `BEADS_IDENTITY` | Sender identity for `bd mail` |
 | `BEADS_FSCK_TIMEOUT` | Runtime-only timeout for the pre-push `dolt fsck --quiet` integrity check (default `30s`) |
+| `BEADS_DOLT_TRANSFER_TIMEOUT` | Read deadline for a push, pull or fetch the Dolt server runs over SQL (`bd dolt push`/`pull`, federation sync); a transfer that outlives it fails with an error naming this variable (default `5m`; accepts durations like `90m` or bare seconds like `5400`) |
+| `BEADS_CLI_TRANSFER_TIMEOUT` | Timeout for a push, pull or fetch that goes through the `dolt` CLI (git-protocol, credentialed and cloud-auth remotes) (default `5m`; accepts durations like `90m` or bare seconds like `5400`) |
 | `BEADS_INIT_GATE_TIMEOUT` | How long `bd init` waits for another bd process (another init, or live commands on the same workspace or shared server) to release the workspace gate before refusing (default `60s`; accepts durations like `2m` or bare seconds like `90`) |
 | `BEADS_GATE_WAIT_TIMEOUT` | How long an ordinary bd command waits while a maintenance operation (`bd init`, backup restore, migrate, bootstrap — on the same workspace, or on any project sharing the server in shared-server mode) holds or is queued for the workspace gate, before failing (default `30s`; accepts durations like `1m` or bare seconds like `90`; `0` fails immediately, for scripts that want the old fail-fast behavior). Queued maintenance operations run one after another and a waiting command waits for all of them; a queued one only delays a command, never fails it, and stops queueing others after 10s if it cannot get in. Git hooks always fail fast |
 | `BEADS_MIGRATION_WATCHDOG_INTERVAL` | Interval between soft WARN lines while a schema migration's SQL keeps running (default `5m`; accepts durations like `10m` or bare seconds like `90`). Observability only — it never aborts a migration |

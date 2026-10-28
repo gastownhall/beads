@@ -1055,6 +1055,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A push or pull the Dolt server runs over SQL is no longer cut off at a fixed
+  5 minutes: `BEADS_DOLT_TRANSFER_TIMEOUT` raises the deadline, and a transfer
+  that outlives it now says so and names the variable instead of failing with
+  a bare `invalid connection` (#6375, #6376; thanks @tdupu).
 - `bd list --watch` and `bd show --watch` now wait a full poll interval after
   each refresh, and `bd list --watch --parent` reads its tree in one
   transaction, so other bd commands on an embedded workspace no longer stall
