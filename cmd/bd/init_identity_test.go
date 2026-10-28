@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -178,5 +179,67 @@ func TestInitRepoint_UnreadableConfiguredRefuses(t *testing.T) {
 	requireDatabaseAbsent(t, target)
 	if got := recordedDB(t, w.beadsDir); got != w.db {
 		t.Fatalf("metadata.json records %q, want %q", got, w.db)
+	}
+}
+
+// AC-4: flags that only restate the recorded identity are not a repoint.
+func TestResolveInitIdentity_RestatingFlagsDoNotRepoint(t *testing.T) {
+	recorded := &configfile.Config{Backend: configfile.BackendDolt, DoltMode: configfile.DoltModeServer, DoltDatabase: "Alpha"}
+	ws := initWorkspace{
+		BeadsDir:  "/ws/.beads",
+		Recorded:  recorded,
+		Server:    true,
+		Effective: initEndpoint{Host: "127.0.0.1", Port: 3307},
+		Own:       initEndpoint{Host: "127.0.0.1", Port: 3307},
+	}
+	staleEnv := ws
+	staleEnv.Effective = initEndpoint{Host: "127.0.0.1", Port: 4410}
+
+	for _, tc := range []struct {
+		name     string
+		ws       initWorkspace
+		flags    initIdentityFlags
+		repoints bool
+		port     int // the configured port the count must dial
+	}{
+		{name: "no flags", ws: ws, port: 3307},
+		{name: "case-only database", ws: ws, flags: initIdentityFlags{Database: "alpha"}, port: 3307},
+		{name: "localhost for 127.0.0.1", ws: ws, flags: initIdentityFlags{Host: "localhost"}, port: 3307},
+		{name: "identical values", ws: ws, flags: initIdentityFlags{Database: "Alpha", Host: "127.0.0.1", Port: 3307}, port: 3307},
+		{name: "own port over a stale exported port", ws: staleEnv, flags: initIdentityFlags{Port: 3307}, port: 3307},
+		{name: "exported port restated", ws: staleEnv, flags: initIdentityFlags{Port: 4410}, port: 4410},
+		{name: "other database", ws: ws, flags: initIdentityFlags{Database: "beta"}, repoints: true, port: 3307},
+		{name: "other port", ws: ws, flags: initIdentityFlags{Port: 1}, repoints: true, port: 3307},
+		{name: "other host", ws: ws, flags: initIdentityFlags{Host: "db.example"}, repoints: true, port: 3307},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			id := resolveInitIdentity(tc.ws, tc.flags, true)
+			if got := id.Repoints(); got != tc.repoints {
+				t.Fatalf("Repoints() = %v, want %v (configured %+v, target %+v)", got, tc.repoints, id.Configured, id.Target)
+			}
+			if id.Configured.Database != "Alpha" || id.Configured.Port != tc.port {
+				t.Fatalf("configured = %+v, want database Alpha at port %d", id.Configured, tc.port)
+			}
+		})
+	}
+}
+
+// AC-4: a --server-port equal to the workspace's own port while a different
+// BEADS_DOLT_SERVER_PORT is exported (GH#5177) restates the workspace, so the
+// count is read at the flagged port, as it was before the identity record.
+func TestInitRepoint_OwnPortOverStaleEnvIsNotARepoint(t *testing.T) {
+	w := newRepointWorkspace(t, 1)
+	env := append(append([]string{}, w.env...), "BEADS_DOLT_SERVER_PORT=1")
+
+	out, code := w.reinit(t, env, "--reinit-local", "--non-interactive",
+		"--server-port", strconv.Itoa(testDoltServerPort), "--database", strings.ToUpper(w.db))
+	if code != ExitDestroyTokenMissing {
+		t.Fatalf("exit = %d, want %d (destroy token missing)\n%s", code, ExitDestroyTokenMissing, out)
+	}
+	if !strings.Contains(out, "Existing issues: 1") {
+		t.Fatalf("expected the count read at the flagged port (1 issue):\n%s", out)
+	}
+	if strings.Contains(out, "Repointing") {
+		t.Fatalf("restating flags printed a repoint notice:\n%s", out)
 	}
 }
