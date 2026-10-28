@@ -48,6 +48,17 @@ func TestClassify(t *testing.T) {
 		{"set", "SET @x = 1", Write},
 		{"select into variable", "SELECT 1 INTO @x", Write},
 
+		// A set operation keeps a trailing INTO on the SetOp node. INTO
+		// OUTFILE/DUMPFILE writes a file and INTO @var a variable, so these
+		// are writes --readonly must refuse (#7033).
+		{"union into outfile", "(SELECT id FROM issues) UNION ALL (SELECT id FROM issues) INTO OUTFILE '/p'", Write},
+		{"unparenthesized union into dumpfile", "SELECT id FROM issues UNION SELECT id FROM issues INTO DUMPFILE '/p'", Write},
+		{"union into variable", "(SELECT 1) UNION (SELECT 2) INTO @x", Write},
+		{"union order limit into", "SELECT 1 UNION SELECT 2 ORDER BY 1 LIMIT 1 INTO OUTFILE '/p'", Write},
+		{"cte union into outfile", "WITH t AS (SELECT 1 AS n) SELECT n FROM t UNION SELECT n FROM t INTO OUTFILE '/p'", Write},
+		{"intersect into outfile", "(SELECT 1) INTERSECT (SELECT 1) INTO OUTFILE '/p'", Write},
+		{"except into variable", "SELECT id FROM issues EXCEPT SELECT id FROM issues INTO @x", Write},
+
 		// Statements that may write AND return rows, or that the parser
 		// cannot classify, must run in a committing transaction that still
 		// renders any result set.

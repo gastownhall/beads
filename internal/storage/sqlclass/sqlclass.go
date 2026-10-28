@@ -57,7 +57,12 @@ func classify(stmt sqlparser.Statement) Kind {
 			return Write
 		}
 		return Read
-	case *sqlparser.SetOp, *sqlparser.Show, *sqlparser.OtherRead:
+	case *sqlparser.SetOp:
+		if s.Into != nil {
+			return Write
+		}
+		return Read
+	case *sqlparser.Show, *sqlparser.OtherRead:
 		return Read
 	case *sqlparser.Explain:
 		if !s.Analyze {
