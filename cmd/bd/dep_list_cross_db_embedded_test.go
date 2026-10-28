@@ -124,4 +124,20 @@ func TestEmbeddedDepListSingleIDWarnsOnDroppedExternalEdge(t *testing.T) {
 	if !strings.Contains(lonelyStderr.String(), external.ID+" via related") {
 		t.Errorf("stderr should still name the dropped edge %s via related, got:\n%s", external.ID, lonelyStderr.String())
 	}
+
+	// With --type blocks the related edge drops out of both reads: no stored
+	// edge matches, so the old line stays and nothing is warned about.
+	blocksCmd := exec.Command(bd, "dep", "list", lonely.ID, "--type", "blocks")
+	blocksCmd.Dir = dir
+	blocksCmd.Env = bdEnv(dir)
+	blocksStdout, blocksStderr, err := runCommandBuffers(t, blocksCmd)
+	if err != nil {
+		t.Fatalf("bd dep list --type blocks (lonely): %v\nstdout:\n%s\nstderr:\n%s", err, blocksStdout.String(), blocksStderr.String())
+	}
+	if want := "\n" + lonely.ID + " has no dependencies\n"; !strings.Contains(blocksStdout.String(), want) {
+		t.Errorf("stdout missing the unchanged %q:\n%s", want, blocksStdout.String())
+	}
+	if strings.Contains(blocksStderr.String(), "additional dependency edge(s)") {
+		t.Errorf("stderr warns although no stored edge matches --type blocks:\n%s", blocksStderr.String())
+	}
 }

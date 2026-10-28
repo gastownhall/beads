@@ -276,6 +276,16 @@ func TestDepListSingleIDNoLocalDepsWithExternalEdge(t *testing.T) {
 		}
 	})
 
+	t.Run("none", func(t *testing.T) {
+		stdout, stderr := run(nil)
+		if stdout != "\nbd-1 has no dependencies\n" {
+			t.Errorf("stdout = %q, want the unchanged no-dependencies line", stdout)
+		}
+		if stderr != "" {
+			t.Errorf("stderr = %q, want nothing", stderr)
+		}
+	})
+
 	t.Run("two external", func(t *testing.T) {
 		stdout, stderr := run([]*types.Dependency{
 			{IssueID: "bd-1", DependsOnID: "external:proj:cap", Type: types.DepBlocks},
