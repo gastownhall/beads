@@ -644,6 +644,10 @@ class BdCliClient(BdClientBase):
             args.extend(["--reason", params.reason])
 
         data = await self._run_command(*args)
+        # bd reopen reports no-ops (already open / not a done status) on
+        # stderr only (RULING R4 in cmd/bd/reopen.go), so empty stdout is [].
+        if data == {}:
+            data = []
         if not isinstance(data, list):
             raise BdCommandError(f"Invalid response for reopen {params.issue_ids}")
 
