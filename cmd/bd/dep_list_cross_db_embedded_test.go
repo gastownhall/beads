@@ -129,4 +129,21 @@ func TestEmbeddedDepListSingleIDWarnsOnDroppedExternalEdge(t *testing.T) {
 	if !strings.Contains(lonelyStderr.String(), external.ID+" via related") {
 		t.Errorf("stderr should still name the dropped edge, got:\n%s", lonelyStderr.String())
 	}
+
+	// Edge case: a --type both reads drop the only edge for hides nothing
+	// (the edge is filtered out, not unresolvable), so the empty-result line
+	// is today's "has no dependencies", byte for byte, and no warning prints.
+	filteredCmd := exec.Command(bd, "dep", "list", lonely.ID, "--type", "blocks")
+	filteredCmd.Dir = dir
+	filteredCmd.Env = bdEnv(dir)
+	filteredStdout, filteredStderr, err := runCommandBuffers(t, filteredCmd)
+	if err != nil {
+		t.Fatalf("bd dep list lonely --type blocks: %v\nstdout:\n%s\nstderr:\n%s", err, filteredStdout.String(), filteredStderr.String())
+	}
+	if !strings.Contains(filteredStdout.String(), "\n"+lonely.ID+" has no dependencies\n") {
+		t.Errorf("stdout = %q, want today's no-dependencies line byte for byte", filteredStdout.String())
+	}
+	if strings.Contains(filteredStderr.String(), "additional dependency edge(s)") {
+		t.Errorf("stderr = %q, want no dropped-edge warning for a filtered-out edge", filteredStderr.String())
+	}
 }
