@@ -2,6 +2,7 @@ package beads
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -1646,4 +1647,27 @@ func TestIsPathInSafeBoundary_OwnHomeOutsideAndEscapeRejected(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestIsPathInSafeBoundary_OwnHomeNoDollarHomeFallback pins AC-3: $HOME never
+// stands in for the account database. When the account lookup errors, a path
+// inside a directory $HOME names — one the process owns, under the denied
+// prefix — must still be rejected.
+func TestIsPathInSafeBoundary_OwnHomeNoDollarHomeFallback(t *testing.T) {
+	env := ownHomeFixture(t)
+	path := filepath.Join(env.home, "releases", "r1", ".beads")
+
+	// Control: the carve-out is active for this tree, so the rejection below
+	// is the account-lookup guard's, not the deny loop's.
+	if !isPathInSafeBoundary(path) {
+		t.Fatalf("control: isPathInSafeBoundary(%q) = false, want true (the carve-out must be active for this tree)", path)
+	}
+
+	t.Run("$HOME does not stand in for the account database", func(t *testing.T) {
+		t.Setenv("HOME", env.home)
+		setAccount(t, 0, "", errors.New("no account entry"))
+		if isPathInSafeBoundary(path) {
+			t.Errorf("isPathInSafeBoundary(%q) = true, want false ($HOME must not satisfy the own-home carve-out when the account lookup errors)", path)
+		}
+	})
 }
