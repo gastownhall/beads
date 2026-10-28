@@ -2,10 +2,13 @@ package dolt
 
 import (
 	"context"
+	"database/sql/driver"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -92,6 +95,99 @@ func assertTransferDeadlineHit(t *testing.T, err error, elapsed time.Duration) {
 	}
 }
 
+// TestAnnotateTransferTimeout pins that a lost-connection failure on a
+// transfer connection names the deadline and the env var that raises it only
+// when the statement ran at least as long as that deadline. An earlier loss
+// (server restart, proxy reap) or any other error class is not a deadline
+// expiry and comes back untouched.
+func TestAnnotateTransferTimeout(t *testing.T) {
+	const deadline = 5 * time.Minute
+
+	t.Run("nil stays nil", func(t *testing.T) {
+		if err := annotateTransferTimeout(nil, deadline, deadline); err != nil {
+			t.Fatalf("annotateTransferTimeout(nil) = %v, want nil", err)
+		}
+	})
+
+	lostConn := []struct {
+		name string
+		err  error
+	}{
+		{"mysql invalid conn", mysql.ErrInvalidConn},
+		{"driver bad conn", driver.ErrBadConn},
+		{"os deadline exceeded", os.ErrDeadlineExceeded},
+		{"wrapped", fmt.Errorf("failed to push to origin/main: %w", mysql.ErrInvalidConn)},
+	}
+	for _, tc := range lostConn {
+		t.Run(tc.name+" at the deadline is annotated", func(t *testing.T) {
+			got := annotateTransferTimeout(tc.err, deadline, deadline)
+			msg := got.Error()
+			if !strings.Contains(msg, "5m0s") {
+				t.Errorf("message does not name the deadline that fired: %q", msg)
+			}
+			if !strings.Contains(msg, transferExecTimeoutEnv) {
+				t.Errorf("message does not name %s: %q", transferExecTimeoutEnv, msg)
+			}
+			if !strings.Contains(msg, tc.err.Error()) {
+				t.Errorf("message dropped the original text %q: %q", tc.err.Error(), msg)
+			}
+			if !errors.Is(got, tc.err) {
+				t.Errorf("annotation broke the error chain: %v does not wrap %v", got, tc.err)
+			}
+		})
+		t.Run(tc.name+" before the deadline is unchanged", func(t *testing.T) {
+			got := annotateTransferTimeout(tc.err, deadline, deadline-time.Millisecond)
+			if got != tc.err { //nolint:errorlint // identity is the assertion
+				t.Fatalf("annotateTransferTimeout rewrote an early connection loss: %v", got)
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"context deadline", context.DeadlineExceeded},
+		{"context canceled", context.Canceled},
+		{"server error", &mysql.MySQLError{Number: 1105, Message: "remote origin not found"}},
+		{"unrelated", errors.New("remote origin not found")},
+	} {
+		t.Run(tc.name+" past the deadline is unchanged", func(t *testing.T) {
+			got := annotateTransferTimeout(tc.err, deadline, 2*deadline)
+			if got != tc.err { //nolint:errorlint // identity is the assertion
+				t.Fatalf("annotateTransferTimeout rewrote a non-connection error: %v", got)
+			}
+		})
+	}
+}
+
+// TestTransferDropBeforeDeadlineIsNotAnnotated pins the elapsed half of the
+// gate at a real transfer site: a server that closes the connection on the
+// CALL long before the 30s deadline yields the driver's ErrInvalidConn as-is,
+// with no claim that a deadline fired.
+func TestTransferDropBeforeDeadlineIsNotAnnotated(t *testing.T) {
+	t.Setenv("BEADS_DOLT_TRANSFER_TIMEOUT", "30s")
+	s := stallingStore(t, map[string]fakeStep{"CALL DOLT_PUSH": dropStep})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	err := s.execWithLongTimeoutNoTx(ctx, "CALL DOLT_PUSH(?, ?)", "origin", "main")
+	elapsed := time.Since(start)
+	if !errors.Is(err, mysql.ErrInvalidConn) {
+		t.Fatalf("dropped CALL returned %v, want mysql.ErrInvalidConn", err)
+	}
+	if elapsed > 5*time.Second {
+		t.Errorf("dropped CALL took %v; the server closed the connection at once", elapsed.Round(time.Millisecond))
+	}
+	if err != mysql.ErrInvalidConn { //nolint:errorlint // identity is the assertion
+		t.Errorf("early connection loss was rewritten: %v", err)
+	}
+	if strings.Contains(err.Error(), "BEADS_DOLT_TRANSFER_TIMEOUT") || strings.Contains(err.Error(), "read deadline") {
+		t.Errorf("early connection loss claims a deadline fired: %v", err)
+	}
+}
+
 // fakeStep is how startStallingMySQL answers one statement. The zero value
 // stalls: the server holds the statement unanswered until the client closes.
 type fakeStep struct {
@@ -103,6 +199,7 @@ type fakeStep struct {
 
 var (
 	stallStep = fakeStep{}
+	dropStep  = fakeStep{drop: true}
 	okStep    = fakeStep{ok: true}
 )
 

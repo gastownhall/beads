@@ -676,9 +676,14 @@ func transferExecTimeoutDuration() time.Duration {
 // dolt-CLI path. %w keeps the original error and its text, so errors.Is and
 // the string classifiers (isRetryableError, isBranchTrackingError) decide as
 // before.
-func annotateTransferTimeout(err error, deadline time.Duration) error {
-	if err == nil {
-		return nil
+//
+// The driver's error alone cannot tell a fired deadline from an early loss (a
+// server restart or proxy reap gives the same ErrInvalidConn), so the hint
+// lands only when elapsed, the time the statement ran, reached deadline.
+// Everything else is returned unchanged.
+func annotateTransferTimeout(err error, deadline, elapsed time.Duration) error {
+	if err == nil || elapsed < deadline {
+		return err
 	}
 	if !errors.Is(err, mysql.ErrInvalidConn) && !errors.Is(err, driver.ErrBadConn) &&
 		!errors.Is(err, os.ErrDeadlineExceeded) {
@@ -2964,8 +2969,9 @@ func (s *DoltStore) execWithLongTimeoutNoTx(ctx context.Context, query string, a
 		return err
 	}
 	defer db.Close()
+	start := time.Now()
 	_, err = db.ExecContext(ctx, query, args...)
-	return annotateTransferTimeout(err, deadline)
+	return annotateTransferTimeout(err, deadline, time.Since(start))
 }
 
 // oneShotConn opens a one-shot connection with the given read deadline
