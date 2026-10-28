@@ -201,6 +201,27 @@ func TestPrepareDoltCLITransferCommandDisablesDoltRemoteInfoBranch(t *testing.T)
 	}
 }
 
+// TestPrepareDoltCLITransferCommandKeepsUserDoltRemoteInfoBranch: a DOLT_REMOTE_INFO_BRANCH the user set (a branch name to opt in,
+// or empty) reaches the child unchanged as its only entry (GH#6484).
+func TestPrepareDoltCLITransferCommandKeepsUserDoltRemoteInfoBranch(t *testing.T) {
+	for _, value := range []string{"dolt-info", ""} {
+		t.Run("value="+value, func(t *testing.T) {
+			t.Setenv(doltinfoenv.EnvVar, value)
+			withNoDoltOnPath(t)
+			cmd, _, cancel, err := prepareDoltCLITransferCommand(context.Background(), t.TempDir(), nil, false, "fetch", "origin")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer cancel()
+			applyNoGitHooksToCmd(cmd)
+			env := cmd.Env
+			if got, want := doltInfoBranchEntries(env), []string{doltinfoenv.EnvVar + "=" + value}; !slices.Equal(got, want) {
+				t.Errorf("prepareDoltCLITransferCommand() + applyNoGitHooksToCmd %s entries = %q, want %q", doltinfoenv.EnvVar, got, want)
+			}
+		})
+	}
+}
+
 func TestPrepareDoltCLITransferCommandAddsRemoteUserFlag(t *testing.T) {
 	withNoDoltOnPath(t)
 	tests := []struct {

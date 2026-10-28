@@ -24,6 +24,8 @@ package doltinfoenv
 import (
 	"os"
 	"slices"
+
+	"github.com/steveyegge/beads/internal/execenv"
 )
 
 // EnvVar is Dolt's environment variable for the info branch name
@@ -32,9 +34,13 @@ import (
 const EnvVar = "DOLT_REMOTE_INFO_BRANCH"
 
 // DisabledEnv returns env with the info branch disabled, for callers that
-// hand a dolt subprocess its environment explicitly. The input slice is not
-// modified.
+// hand a dolt subprocess its environment explicitly. An env that already
+// carries DOLT_REMOTE_INFO_BRANCH is returned unchanged. The input slice is
+// not modified.
 func DisabledEnv(env []string) []string {
+	if _, present := execenv.Lookup(env, EnvVar); present {
+		return env
+	}
 	return append(slices.Clip(env), EnvVar+"=")
 }
 

@@ -40,6 +40,20 @@ func TestDoltCmdEnvIsGuarded(t *testing.T) {
 	}
 }
 
+// TestDoltCmdEnvKeepsUserDoltRemoteInfoBranch: a DOLT_REMOTE_INFO_BRANCH the user set (a branch name to opt in,
+// or empty) reaches the child unchanged as its only entry (GH#6484).
+func TestDoltCmdEnvKeepsUserDoltRemoteInfoBranch(t *testing.T) {
+	for _, value := range []string{"dolt-info", ""} {
+		t.Run("value="+value, func(t *testing.T) {
+			t.Setenv(doltinfoenv.EnvVar, value)
+			env := doltCmd(context.Background(), t.TempDir(), "push", "origin", "main").Env
+			if got, want := doltInfoBranchEntries(env), []string{doltinfoenv.EnvVar + "=" + value}; !slices.Equal(got, want) {
+				t.Errorf("doltCmd() %s entries = %q, want %q", doltinfoenv.EnvVar, got, want)
+			}
+		})
+	}
+}
+
 // doltInfoBranchEntries returns env's DOLT_REMOTE_INFO_BRANCH entries.
 func doltInfoBranchEntries(env []string) []string {
 	var out []string
