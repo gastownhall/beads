@@ -1581,7 +1581,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				// which init's store opens (see below).
 				err, disposition = nil, initRemoteCloneBootstrapped
 			}
-			if advice := initUnresolvedClonePortAdvice(err, externalServer, cloneCfg.GetDoltServerHost()); advice != "" {
+			if advice := initUnresolvedClonePortAdvice(err, externalServer, initCloneHost(cloneCfg)); advice != "" {
 				// Nothing was dialed: no port names the server to clone
 				// into, and the store would refuse it too. The advice is
 				// the store open's for that server: name the port.
@@ -3831,12 +3831,15 @@ func initCloneSocketTransport(socket, host string, port int) string {
 const initCloneSocketProbeTimeout = 500 * time.Millisecond
 
 // initCloneEndpoint is the endpoint bd init --server's store opens, as its
-// clone mode (initRemoteCloneMode) reads it: cloneCfg's, on the port init's
-// store dials (initServerClonePort), as the user it presents (--server-user,
-// serverUser, over a credential command's token).
+// clone mode (initRemoteCloneMode) reads it: the port init's store dials
+// (initServerClonePort) and the host it opens at (initCloneHost, over what
+// ResolveEndpoint would resolve for cloneCfg: the loaded configuration's
+// dolt.host must not aim the clone at a server the store does not open,
+// GH#5961), as the user it presents (--server-user, serverUser, over a
+// credential command's token).
 func initCloneEndpoint(beadsDir string, cloneCfg *configfile.Config, serverUser string) doltserver.Endpoint {
 	port, source := initServerClonePortAndSource(beadsDir, cloneCfg)
-	ep := doltserver.ResolveEndpoint(beadsDir, cloneCfg).AtPort(port, source)
+	ep := doltserver.ResolveEndpoint(beadsDir, cloneCfg).AtPort(port, source).WithHost(initCloneHost(cloneCfg))
 	if serverUser != "" {
 		ep = ep.WithUser(serverUser)
 	}
@@ -3876,7 +3879,7 @@ func initCloneFromRemote(ctx context.Context, beadsDir, remoteURL, dbName string
 			if held {
 				return &initCloneTargetHeldError{location: location}
 			}
-			if down && doltserver.HostRunsBDServer(cloneCfg.GetDoltServerHost()) {
+			if down && doltserver.HostRunsBDServer(initCloneHost(cloneCfg)) {
 				// A server some other process runs at bd's host that
 				// could not be dialed: keep main's CLI clone, so init's
 				// store open reports that server in its own words (the
@@ -4097,7 +4100,12 @@ func initTimeCloneConfig(serverMode bool, serverHost string, serverPort int, ser
 	cfg.DoltDatabase = dbName
 	if serverMode {
 		cfg.DoltMode = configfile.DoltModeServer
-		cfg.DoltServerHost = configfile.DefaultDoltServerHost
+		// No default host stamp (GH#5961): metadata.json is git-tracked, and
+		// a stamped 127.0.0.1 travels to every clone, re-creating the
+		// deprecated state the host demotion removed. A workspace with no
+		// dolt_server_host falls through the config.yaml layer to bd's own
+		// 127.0.0.1 every time a host is resolved. An explicit --server-host
+		// still lands here (foreign launches and older binaries read it).
 		cfg.DoltServerUser = configfile.DefaultDoltServerUser
 	} else {
 		cfg.DoltMode = configfile.DoltModeEmbedded
@@ -4128,6 +4136,24 @@ func initStoreServerHost(serverHost string) string {
 		return h
 	}
 	return configfile.DefaultDoltServerHost
+}
+
+// initCloneHost is the host bd init's clone resolves for cfg: the one the
+// store init opens (initStoreServerHost of cfg's explicit host), not the one
+// a loaded configuration would. Since GH#5961 promoted the merged
+// config.yaml dolt.host over the metadata host, cfg.GetDoltServerHost would
+// pick up the enclosing workspace's dolt.host while init's store still dials
+// --server-host, BEADS_DOLT_SERVER_HOST or 127.0.0.1 (initStoreServerHost,
+// which deliberately does not read the loaded dolt.host); a clone that
+// resolved through the loaded config would clone into a server the store
+// then does not open. It parallels initStoreServerPort, the port-facing
+// already-established rule (GH#2336).
+func initCloneHost(cfg *configfile.Config) string {
+	serverHost := ""
+	if cfg != nil {
+		serverHost = cfg.DoltServerHost
+	}
+	return initStoreServerHost(serverHost)
 }
 
 // persistInitServerHost writes an explicit --server-host to the

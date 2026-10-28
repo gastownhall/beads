@@ -835,6 +835,7 @@ go_test(
         "dolt_set_host_precedence_test.go",
         "dolt_host_notice_test.go",
         "host_precedence_classifiers_test.go",
+        "init_clone_host_precedence_test.go",
         "format_json_alias_embedded_test.go",
 
         "formula_fixture_proxied_test.go",

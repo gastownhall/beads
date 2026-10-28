@@ -1974,10 +1974,7 @@ func initServerClonePort(beadsDir string, cfg *configfile.Config) int {
 // initServerClonePortAndSource is initServerClonePort with the source the
 // store records for that port.
 func initServerClonePortAndSource(beadsDir string, cfg *configfile.Config) (int, doltserver.PortSource) {
-	host := configfile.DefaultDoltServerHost
-	if cfg != nil {
-		host = cfg.GetDoltServerHost()
-	}
+	host := initCloneHost(cfg)
 	storeCfg := &dolt.Config{BeadsDir: beadsDir}
 	if cfg != nil && cfg.DoltServerPort > 0 {
 		storeCfg.ServerPort, storeCfg.ServerPortSource = cfg.DoltServerPort, doltserver.PortSourceCallerExplicit
@@ -2001,6 +1998,14 @@ func initServerClonePortAndSource(beadsDir string, cfg *configfile.Config) (int,
 func initServerCloneEndpoint(beadsDir string, cfg *configfile.Config) (bootstrapServerProbeConfig, error) {
 	port := initServerClonePort(beadsDir, cfg)
 	ep := serverDialEndpoint(cfg, port)
+	if host := initCloneHost(cfg); host != ep.host {
+		// The host init's own store opens, not the one serverDialEndpoint
+		// resolved from the loaded configuration's dolt.host (GH#5961): the
+		// clone must land where the store opens, and the password is the
+		// credentials-file entry for THAT host:port.
+		ep.host = host
+		ep.pass = configfile.ServerPasswordFor(host, port)
+	}
 	if port == 0 && ep.socket == "" {
 		return ep, fmt.Errorf("%w for the Dolt server at %s to clone into", dolt.ErrUnresolvedServerPort, remedy.PrintedValue(ep.host))
 	}
