@@ -654,6 +654,74 @@ func TestEmbeddedReadyStaleBlockedFlagOnEdgelessIssue(t *testing.T) {
 		}
 	})
 
+	t.Run("guard_reads_around_the_flag_and_recompute_repairs_it", func(t *testing.T) {
+		t.Parallel()
+		// Own project: this subtest's recompute-blocked repairs the planted
+		// flag, which the sibling subtests still assert is in place.
+		fdir, fbeadsDir, _ := bdInit(t, bd, "--prefix", "rds7")
+		flagged := bdCreate(t, bd, fdir, "Stale flag for recompute", "--type", "task")
+		plantStaleBlockedFlag(t, fbeadsDir, "rds7", flagged.ID)
+
+		readRawFlag := func() bool {
+			t.Helper()
+			cmd := exec.Command(bd, "blocked", "--flags", "--raw", "--json")
+			cmd.Dir = fdir
+			cmd.Env = bdEnv(fdir)
+			cmd.Stdin = strings.NewReader(flagged.ID + "\n")
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout, cmd.Stderr = &stdout, &stderr
+			if err := cmd.Run(); err != nil {
+				t.Fatalf("bd blocked --flags --raw --json: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+			}
+			var rows []struct {
+				ID        string `json:"id"`
+				IsBlocked bool   `json:"is_blocked"`
+			}
+			if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &rows); err != nil || len(rows) != 1 {
+				t.Fatalf("parse blocked --flags output: %v\n%s", err, stdout.String())
+			}
+			return rows[0].IsBlocked
+		}
+
+		// Before any repair: the stored flag still reads true, ready lists
+		// the row anyway (the guard reads around the flag), and nothing has
+		// rewritten it.
+		if !readRawFlag() {
+			t.Fatal("the planted flag must read is_blocked: true before the repair")
+		}
+		readyCmd := exec.Command(bd, "ready", "--json")
+		readyCmd.Dir = fdir
+		readyCmd.Env = bdEnv(fdir)
+		readyOut, _, _ := runCommandBuffers(t, readyCmd)
+		var ready []*types.IssueWithCounts
+		if err := json.Unmarshal(bytes.TrimSpace(readyOut.Bytes()), &ready); err != nil || len(ready) != 1 || ready[0].ID != flagged.ID {
+			t.Fatalf("ready must list the row while its stored flag is still true, got: %s (err %v)", readyOut.String(), err)
+		}
+
+		// The repair is the operator's, not the read's: recompute-blocked
+		// corrects the stale row, and only then does the flag read false.
+		cmd := exec.Command(bd, "recompute-blocked", "--json")
+		cmd.Dir = fdir
+		cmd.Env = bdEnv(fdir)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("bd recompute-blocked --json: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+		}
+		var result struct {
+			RowsCorrected int `json:"rows_corrected"`
+		}
+		if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &result); err != nil {
+			t.Fatalf("parse recompute-blocked JSON: %v\n%s", err, stdout.String())
+		}
+		if result.RowsCorrected < 1 {
+			t.Errorf("rows_corrected = %d, want >= 1 (the planted stale flag)", result.RowsCorrected)
+		}
+		if readRawFlag() {
+			t.Error("the flag must read is_blocked: false after bd recompute-blocked")
+		}
+	})
+
 	t.Run("blocked_and_dep_list_still_agree_with_the_report", func(t *testing.T) {
 		t.Parallel()
 		cmd := exec.Command(bd, "blocked", "--json")
