@@ -3070,12 +3070,12 @@ func confirmReinitDestroy(w io.Writer, in io.Reader, interactive bool, target st
 		fmt.Fprintf(w, "    bd doctor                   # Find out why the issues could not be counted\n")
 	}
 	fmt.Fprintf(w, "\n")
-	if unknown {
-		fmt.Fprintf(w, "Refusing to destroy an unknown number of issues.\n")
-		fmt.Fprintf(w, "  See 'bd help init-safety' for the required --destroy-token format.\n")
-		return &exitError{Code: ExitDestroyTokenMissing}
-	}
 	if interactive {
+		if unknown {
+			fmt.Fprintf(w, "Refusing to destroy an unknown number of issues.\n")
+			fmt.Fprintf(w, "  See 'bd help init-safety' for the required --destroy-token format.\n")
+			return &exitError{Code: ExitDestroyTokenMissing}
+		}
 		fmt.Fprintf(w, "Type 'destroy %d issues' to confirm: ", count)
 		scanner := bufio.NewScanner(in)
 		scanner.Scan()
@@ -3097,6 +3097,11 @@ func confirmReinitDestroy(w io.Writer, in io.Reader, interactive bool, target st
 	if destroyToken == expectedToken {
 		fmt.Fprintf(w, "Destroy token accepted. Proceeding with re-initialization.\n")
 		return nil
+	}
+	if unknown {
+		fmt.Fprintf(w, "Refusing to destroy an unknown number of issues in non-interactive mode.\n")
+		fmt.Fprintf(w, "  See 'bd help init-safety' for the required --destroy-token format.\n")
+		return &exitError{Code: ExitDestroyTokenMissing}
 	}
 	fmt.Fprintf(w, "Refusing to destroy %d issues in non-interactive mode.\n", count)
 	fmt.Fprintf(w, "  See 'bd help init-safety' for the required --destroy-token format.\n")
