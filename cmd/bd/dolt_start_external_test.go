@@ -223,3 +223,30 @@ func TestDoltStartOwnedAndSharedUnaffected(t *testing.T) {
 		requireReachedStart(t, f.run("", "--json", "dolt", "start"))
 	})
 }
+
+// TestListUnreachableServerModeEnvNamesDeclaration is the advice half of
+// GH#6585: a workspace declared externally managed only by
+// BEADS_DOLT_SERVER_MODE=1, its port from config.yaml's dolt.port, with
+// nothing listening there. `bd list`'s unreachable-server error names that
+// variable, and never suggests `bd dolt start`, which refuses the workspace.
+func TestListUnreachableServerModeEnvNamesDeclaration(t *testing.T) {
+	f := newExternalInitFixture(t)
+	port := freeLoopbackPort(t)
+	beadsDir := namedPortWorkspace(t, f, 0)
+	namedPortConfigYaml(t, beadsDir, port)
+	f.env = append(f.env, "BEADS_DOLT_SERVER_MODE=1")
+
+	res := f.run("", "list")
+	if !res.failed {
+		t.Fatalf("bd list succeeded with nothing listening on %d:\n%s", port, res.output)
+	}
+	want := "BEADS_DOLT_SERVER_MODE=1 declares this workspace's Dolt server externally managed, so bd did not start one at " +
+		tcpEndpoint(port).addr
+	if !strings.Contains(res.output, want) {
+		t.Errorf("error does not contain %q:\n%s", want, res.output)
+	}
+	if strings.Contains(res.output, "bd dolt start") {
+		t.Errorf("error suggests `bd dolt start`, which refuses this workspace:\n%s", res.output)
+	}
+	requireNoLaunch(t, res)
+}

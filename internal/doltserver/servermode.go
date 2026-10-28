@@ -415,6 +415,22 @@ func ExternallyManagedAdvice(setting, endpoint string) string {
 		"Start that server, or point bd at the right endpoint.", setting, remedy.PrintedValue(endpoint))
 }
 
+// ExternallyManagedDeclaration is the declaration that advice for an
+// unreachable Dolt server names: ExternalPortSetting's for a dial of port
+// resolved from source, or, when no port setting names it, the setting that
+// makes beadsDir's server externally managed (ExternallyManagedBy), such as
+// BEADS_DOLT_SERVER_MODE=1, or a dolt_server_port whose dialed port came from
+// the port file of a server bd started. `bd dolt start` refuses every such
+// workspace, so its advice must not be the caller's fallback. The zero
+// declaration for a workspace bd manages, shared-server mode included.
+func ExternallyManagedDeclaration(beadsDir string, source PortSource, port int) ExternalPortDeclaration {
+	if decl := ExternalPortSetting(beadsDir, source, port); decl.Setting != "" {
+		return decl
+	}
+	setting, sole := ExternallyManagedBy(beadsDir)
+	return ExternalPortDeclaration{Setting: setting, Sole: sole}
+}
+
 // UnreachableEndpointAdvice is the advice for a TCP dial of host:port, the
 // port resolved from source, that found no server, or "" when the caller's own
 // advice stands. A host bd does not run its server at
@@ -424,7 +440,7 @@ func ExternallyManagedAdvice(setting, endpoint string) string {
 // resolved (port 0), it gets UnresolvedPortAdvice instead, never a check of
 // port 0. The host bd runs its server at gets the externally managed advice
 // when a setting declares the workspace's server so (see
-// ExternalPortSetting).
+// ExternallyManagedDeclaration).
 func UnreachableEndpointAdvice(beadsDir, host string, port int, source PortSource) string {
 	if !configfile.BdRunsServerAt(host) {
 		if port == 0 {
@@ -432,7 +448,7 @@ func UnreachableEndpointAdvice(beadsDir, host string, port int, source PortSourc
 		}
 		return remoteServerAdvice(host, port)
 	}
-	return ExternalPortSetting(beadsDir, source, port).Advice(doltutil.ServerAddr(host, port))
+	return ExternallyManagedDeclaration(beadsDir, source, port).Advice(doltutil.ServerAddr(host, port))
 }
 
 // UnresolvedPortAdvice is the advice for a Dolt server at host for which no
