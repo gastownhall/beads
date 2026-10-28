@@ -38,16 +38,23 @@ func (s *DoltStore) PushTo(ctx context.Context, peer string) error {
 }
 
 // pushRefToPeer pushes a specific refspec to a peer remote. The refspec can be
-// a simple branch name ("main") or a mapping ("staging:main").
+// a simple branch name ("main") or a mapping ("staging:main"). A successful
+// push stamps the peer row's last_sync (GH#3547): the completed transfer is
+// what the timestamp records, and stamping here — after the transfer — can
+// never leave an uncommitted write between a caller's commit and its merge.
 func (s *DoltStore) pushRefToPeer(ctx context.Context, peer string, refspec string) error {
 	if useCLI, err := s.prepareCLIRouteForPeerGitProtocol(ctx, peer); err != nil {
 		return err
 	} else if useCLI {
-		return s.withPeerCredentials(ctx, peer, func(creds *remoteCredentials) error {
+		if err := s.withPeerCredentials(ctx, peer, func(creds *remoteCredentials) error {
 			return s.doltCLIPushRefToPeer(ctx, peer, refspec, creds)
-		})
+		}); err != nil {
+			return err
+		}
+		_ = s.updatePeerLastSync(ctx, peer) // Best effort: peer sync timestamp is advisory
+		return nil
 	}
-	return s.withPeerCredentials(ctx, peer, func(creds *remoteCredentials) error {
+	if err := s.withPeerCredentials(ctx, peer, func(creds *remoteCredentials) error {
 		if useCLI, err := s.prepareCLIRouteForPeerCredentials(ctx, peer, creds); err != nil {
 			return err
 		} else if useCLI {
@@ -59,7 +66,11 @@ func (s *DoltStore) pushRefToPeer(ctx context.Context, peer string, refspec stri
 			}
 			return nil
 		})
-	})
+	}); err != nil {
+		return err
+	}
+	_ = s.updatePeerLastSync(ctx, peer) // Best effort: peer sync timestamp is advisory
+	return nil
 }
 
 // PullFrom pulls changes from a specific peer remote.
@@ -76,6 +87,11 @@ func (s *DoltStore) PullFrom(ctx context.Context, peer string) ([]storage.Confli
 	return conflicts, err
 }
 
+// pullFromPeer pulls from a peer remote and stamps the peer row's last_sync
+// once the pull has settled — including a pull that returned conflicts as
+// data (peerPullOutcome already swallowed them), but never before the pull's
+// own commitBeforePull/merge window. The stamp matches zero rows for a
+// credential-free remote with no federation_peers row (GH#4837).
 func (s *DoltStore) pullFromPeer(ctx context.Context, peer string) ([]storage.Conflict, error) {
 	// GH#2474: Auto-commit pending changes before pull to prevent
 	// "cannot merge with uncommitted changes" errors.
@@ -112,6 +128,9 @@ func (s *DoltStore) pullFromPeer(ctx context.Context, peer string) ([]storage.Co
 			pullErr := s.finishCLIPull(ctx, s.doltCLIPullFromPeer(ctx, peer, creds))
 			return s.peerPullOutcome(ctx, peer, pullErr, &conflicts)
 		})
+		if err == nil {
+			_ = s.updatePeerLastSync(ctx, peer) // Best effort: peer sync timestamp is advisory
+		}
 		return s.finishPeerPull(ctx, conflicts, err, preHead)
 	}
 	err = s.withPeerCredentials(ctx, peer, func(creds *remoteCredentials) error {
@@ -127,6 +146,9 @@ func (s *DoltStore) pullFromPeer(ctx context.Context, peer string) ([]storage.Co
 			return s.peerPullOutcome(ctx, peer, pullErr, &conflicts)
 		})
 	})
+	if err == nil {
+		_ = s.updatePeerLastSync(ctx, peer) // Best effort: peer sync timestamp is advisory
+	}
 	return s.finishPeerPull(ctx, conflicts, err, preHead)
 }
 
