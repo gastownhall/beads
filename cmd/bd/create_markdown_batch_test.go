@@ -209,4 +209,39 @@ blocks:`+t2+`
 			}
 		}
 	})
+
+	// A dependency type --deps refuses (a misspelling, or a custom type) must
+	// refuse the whole file here too, naming the template, the type and the
+	// accepted spellings, and leave no issue behind (GH#7508).
+	t.Run("a_dep_type_deps_refuses_refuses_the_whole_file", func(t *testing.T) {
+		target := strings.TrimSpace(runCreateDepsBD(t, bd, dir, "create", "#7508 refusal target", "--silent"))
+		if target == "" {
+			t.Fatal("target create returned empty ID")
+		}
+		for _, typo := range []string{"blokcs", "implements"} {
+			plan := writeMarkdownPlan(t, dir, "bad-type-"+typo+".md", `## `+typo+` entry must not land
+
+### Dependencies
+`+typo+`:`+target+`
+
+## Good entry beside it
+
+### Dependencies
+`+target+`
+`)
+			out, err := runCreateDepsBDRaw(bd, dir, "create", "--file", plan)
+			if err == nil {
+				t.Fatalf("create --file with %s: accepted a type --deps refuses; output:\n%s", typo, out)
+			}
+			for _, want := range []string{"unknown dependency type", typo, typo + " entry must not land"} {
+				if !strings.Contains(out, want) {
+					t.Errorf("create --file with %s: output missing %q:\n%s", typo, want, out)
+				}
+			}
+			titles := createDepsIssueTitles(t, bd, dir)
+			if titles[typo+" entry must not land"] || titles["Good entry beside it"] {
+				t.Errorf("create --file with %s left issues behind; titles now: %v", typo, titles)
+			}
+		}
+	})
 }

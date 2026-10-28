@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -286,24 +287,35 @@ func TestGraphApplyNodeIssue_DefaultsAndOpts(t *testing.T) {
 
 func TestParseMarkdownDependencies(t *testing.T) {
 	tests := []struct {
-		name    string
-		in      []string
-		want    []issueops.CreateDependency
-		wantErr bool
+		name              string
+		in                []string
+		want              []issueops.CreateDependency
+		wantErr           bool
+		wantErrSubstrings []string
 	}{
-		{"empty", nil, nil, false},
-		{"whitespace skipped", []string{"  ", ""}, nil, false},
+		{"empty", nil, nil, false, nil},
+		{"whitespace skipped", []string{"  ", ""}, nil, false, nil},
 		{"bare id → blocks edge", []string{"bd-1"},
-			[]issueops.CreateDependency{{Type: types.DepBlocks, TargetID: "bd-1"}}, false},
+			[]issueops.CreateDependency{{Type: types.DepBlocks, TargetID: "bd-1"}}, false, nil},
 		{"depends-on alias gates like --deps", []string{"depends-on:bd-2"},
-			[]issueops.CreateDependency{{Type: types.DepBlocks, TargetID: "bd-2"}}, false},
+			[]issueops.CreateDependency{{Type: types.DepBlocks, TargetID: "bd-2"}}, false, nil},
 		{"blocked-by alias gates like --deps", []string{"blocked-by:bd-2"},
-			[]issueops.CreateDependency{{Type: types.DepBlocks, TargetID: "bd-2"}}, false},
+			[]issueops.CreateDependency{{Type: types.DepBlocks, TargetID: "bd-2"}}, false, nil},
 		{"discovered-from preserved", []string{"discovered-from:bd-3"},
-			[]issueops.CreateDependency{{Type: types.DepDiscoveredFrom, TargetID: "bd-3"}}, false},
+			[]issueops.CreateDependency{{Type: types.DepDiscoveredFrom, TargetID: "bd-3"}}, false, nil},
 		{"whitespace trimmed", []string{"  blocks : bd-4 "},
-			[]issueops.CreateDependency{{Type: types.DepBlocks, TargetID: "bd-4", Reverse: true}}, false},
-		{"empty type rejected", []string{":bd-1"}, nil, true},
+			[]issueops.CreateDependency{{Type: types.DepBlocks, TargetID: "bd-4", Reverse: true}}, false, nil},
+		{"empty type rejected", []string{":bd-1"}, nil, true,
+			[]string{"invalid dependency type", "Test Title"}},
+		{"unknown type refused like --deps", []string{"blokcs:bd-1"}, nil, true,
+			[]string{"unknown dependency type", "blokcs", "Test Title", "blocked-by"}},
+		{"custom type refused like --deps", []string{"implements:bd-1"}, nil, true,
+			[]string{"unknown dependency type", "implements", "Test Title"}},
+		{"two types on one target refused like --deps",
+			[]string{"discovered-from:bd-1", "blocked-by:bd-1"}, nil, true,
+			[]string{"discovered-from", "blocks"}},
+		{"typed entry with no target named", []string{"depends-on:", "bd-1"}, nil, true,
+			[]string{"no target", "Test Title"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -311,6 +323,11 @@ func TestParseMarkdownDependencies(t *testing.T) {
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("expected error, got %v", got)
+				}
+				for _, want := range tt.wantErrSubstrings {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("parseMarkdownDependencies(%v) error = %q, want to contain %q", tt.in, err, want)
+					}
 				}
 				return
 			}
