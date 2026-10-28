@@ -24,7 +24,7 @@ buildGoModule {
   # bump (d594092eb), so the #5931 cherry-pick lands on a vendor set that
   # existed on neither side. Value taken from the `got:` hash the nix-build lane
   # reported on this branch.
-  vendorHash = "sha256-vQxt6ewJ8hnTSpNZEJdtpaZqb/S79C4KsY4kJhm/Zao=";
+  vendorHash = "sha256-el0pzE+WoABZ+sSBINHE3DlqHuyS/Xhz/q5xk3Dx6rg=";
 
   # Match go.mod to the selected Nix Go toolchain. buildGoModule also builds
   # vendored dependencies in the Nix sandbox, where toolchain downloads are not
