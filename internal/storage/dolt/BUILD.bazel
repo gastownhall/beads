@@ -378,6 +378,7 @@ go_test(
         "transaction_phase_test.go",
         "transaction_test.go",
         "transaction_wisp_lifecycle_persistence_test.go",
+        "transfer_exec_timeout_test.go",
         "tree_walker_contract_test.go",
         "tx_reads_test.go",
         "update_force_close_policy_test.go",

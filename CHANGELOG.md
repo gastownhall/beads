@@ -1055,6 +1055,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The server-side transfer read deadline is no longer hardcoded to 5 minutes:
+  `bd dolt push`/`pull` and federation sync over SQL accept
+  `BEADS_DOLT_TRANSFER_TIMEOUT` (default `5m`, so behavior is unchanged unless
+  set), and a transfer cut off by the deadline now fails with an error naming
+  the deadline and the variable that raises it, instead of a bare
+  `invalid connection` (#6375, #6376; reported and co-implemented by
+  @tdupu).
 - `bd list --watch` and `bd show --watch` now wait a full poll interval after
   each refresh, and `bd list --watch --parent` reads its tree in one
   transaction, so other bd commands on an embedded workspace no longer stall

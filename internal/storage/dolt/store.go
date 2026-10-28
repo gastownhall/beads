@@ -640,6 +640,36 @@ func withCLIExecTimeout(ctx context.Context) (context.Context, context.CancelFun
 	return context.WithTimeout(ctx, cliExecTimeoutDuration())
 }
 
+// transferExecTimeout is the default read deadline on the one-shot connections
+// that carry server-side transfer work — CALL DOLT_PUSH / DOLT_FETCH /
+// DOLT_PULL and the merge that follows a pull. It is the server-mode sibling of
+// cliExecTimeout: the pool's much shorter deadline would kill any procedure
+// that performs sustained network I/O to a git remote, so these callers open
+// their own connection with this deadline instead.
+//
+// Five minutes is ample for an ordinary store and far too short for a large
+// one. A 2.3GB / ~28k-commit store took well over half an hour to push, and
+// before this was configurable every attempt died at exactly 5m with a bare
+// "read tcp ...: i/o timeout / invalid connection" that named neither the
+// deadline nor a way to raise it. Set BEADS_DOLT_TRANSFER_TIMEOUT to override.
+const transferExecTimeout = 5 * time.Minute
+
+// transferExecTimeoutEnv is the environment variable that overrides
+// transferExecTimeout.
+const transferExecTimeoutEnv = "BEADS_DOLT_TRANSFER_TIMEOUT"
+
+// transferExecTimeoutDuration returns the configured server-side transfer read
+// deadline. BEADS_DOLT_TRANSFER_TIMEOUT overrides the compiled-in
+// transferExecTimeout const; valid time.ParseDuration strings (e.g. "90m",
+// "300s") or bare numbers treated as seconds (e.g. "5400") are accepted. Unset,
+// invalid, or non-positive values fall back to transferExecTimeout — to remove
+// the deadline entirely, pass a duration longer than any transfer you expect
+// (the no-deadline callers below pass 0 to oneShotConn directly and are
+// deliberately not routed through this).
+func transferExecTimeoutDuration() time.Duration {
+	return timeoutFromEnv(transferExecTimeoutEnv, transferExecTimeout)
+}
+
 // timeoutFromEnv returns the duration configured in the named env var, falling
 // back to fallback when the var is unset, unparsable, or non-positive. Valid
 // time.ParseDuration strings (e.g. "2m", "90s") or bare numbers treated as
