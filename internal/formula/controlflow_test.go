@@ -606,6 +606,32 @@ func TestApplyLoops_OwnDepsCarryToRoots(t *testing.T) {
 				"round.iter1.work": {"setup", "brief"},
 			},
 		},
+		{
+			// Chaining gates only iteration 2's slice-first step, a.
+			name: "parallel",
+			body: []*Step{
+				{ID: "a", Title: "A"},
+				{ID: "b", Title: "B"},
+			},
+			carried: map[string][]string{
+				"round.iter1.a": {"brief"},
+				"round.iter1.b": {"brief"},
+				"round.iter2.b": {"brief"},
+			},
+		},
+		{
+			// Chaining gates iteration 2's slice-first step, b, which its
+			// sibling a already gates; a itself is gated by nothing.
+			name: "out_of_order",
+			body: []*Step{
+				{ID: "b", Title: "B", Needs: []string{"a"}},
+				{ID: "a", Title: "A"},
+			},
+			carried: map[string][]string{
+				"round.iter1.a": {"brief"},
+				"round.iter2.a": {"brief"},
+			},
+		},
 	}
 
 	for _, tt := range tests {
