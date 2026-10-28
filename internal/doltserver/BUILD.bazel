@@ -64,6 +64,7 @@ go_test(
         "doltserver_test.go",
         "doltserver_unix_test.go",
         "doltserver_windows_test.go",
+        "endpoint_host_precedence_test.go",
         "endpoint_test.go",
         "fakedolt_test.go",
         "fdleak_integration_test.go",
