@@ -3160,12 +3160,15 @@ func confirmReinitDestroy(w io.Writer, in io.Reader, interactive bool, target st
 	// Non-interactive (piped input, AI agent, etc.), and — in every mode — the
 	// uncountable workspace: unknown is not empty, so it refuses rather than
 	// fall through to the destructive path with no count, no confirmation and
-	// no token (GH#5628).
-	if countErr != nil {
-		fmt.Fprintf(w, "Refusing to destroy an unknown number of issues in non-interactive mode.\n")
-	} else if destroyToken == FormatDestroyToken(prefix) {
+	// no token (GH#5628). The --destroy-token is the same remedy for an
+	// unknown count as for a counted one: it is the operator's explicit
+	// assertion that whatever the workspace holds may be destroyed.
+	if destroyToken == FormatDestroyToken(prefix) {
 		fmt.Fprintf(w, "Destroy token accepted. Proceeding with re-initialization.\n")
 		return nil
+	}
+	if countErr != nil {
+		fmt.Fprintf(w, "Refusing to destroy an unknown number of issues in non-interactive mode.\n")
 	} else {
 		fmt.Fprintf(w, "Refusing to destroy %d issues in non-interactive mode.\n", count)
 	}

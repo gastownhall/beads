@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -101,6 +103,124 @@ func TestRunInitReinitPreflight_CountErrorRefuses(t *testing.T) {
 			t.Errorf("the refusal must not name the BEADS_DIR workspace, got:\n%s", stderr)
 		}
 	})
+}
+
+// TestRunInitReinitPreflight_DestroyTokenProceeds pins that the
+// --destroy-token is the non-interactive remedy for an uncountable target
+// too: with the matching token the preflight lets the re-initialization
+// proceed.
+func TestRunInitReinitPreflight_DestroyTokenProceeds(t *testing.T) {
+	if term.IsTerminal(int(os.Stdin.Fd())) {
+		t.Skip("stdin is a terminal: this pins the non-interactive token path")
+	}
+	beadsDir := uncountableTargetBeadsDir(t)
+	isolateBeadsDirForTest(t)
+
+	var err error
+	stderr := captureStderr(t, func() {
+		err = runInitReinitPreflight(true, beadsDir, "bd", FormatDestroyToken("bd"))
+	})
+	if err != nil {
+		t.Fatalf("runInitReinitPreflight with the matching destroy token = %v, want nil so the re-initialization proceeds\n%s", err, stderr)
+	}
+	if !strings.Contains(stderr, "Destroy token accepted. Proceeding with re-initialization.") {
+		t.Errorf("stderr must report the accepted token, got:\n%s", stderr)
+	}
+	if strings.Contains(stderr, "DESTROY-") {
+		t.Errorf("stderr must not echo the destroy token value (ADR-0002 Invariant 4), got:\n%s", stderr)
+	}
+}
+
+// TestConfirmReinitDestroy drives the destroy confirmation through injected
+// streams — the same injection shape as currentAdoptPolicy — so every branch
+// is pinned without a terminal and without a store: an unknown count with
+// its error, and a known count, crossed with the interactive typed prompt and
+// the non-interactive --destroy-token demand.
+func TestConfirmReinitDestroy(t *testing.T) {
+	countErr := errors.New("store open failed: count deadline exceeded")
+	target := filepath.Join("t", ".beads")
+
+	rows := []struct {
+		name         string
+		count        int
+		countErr     error
+		interactive  bool
+		answer       string
+		destroyToken string
+		wantCode     int // 0: the confirmation proceeds (nil)
+		wantOut      []string
+	}{
+		{
+			name:     "unknown count, non-interactive, no token",
+			countErr: countErr,
+			wantCode: ExitDestroyTokenMissing,
+			wantOut: []string{
+				"Target: " + target,
+				"Existing issues: unknown (could not count them: " + countErr.Error() + ")",
+				"Refusing to destroy an unknown number of issues in non-interactive mode.",
+				"See 'bd help init-safety' for the required --destroy-token format.",
+			},
+		},
+		{
+			name:         "unknown count, non-interactive, matching token",
+			countErr:     countErr,
+			destroyToken: "DESTROY-bd",
+			wantOut: []string{
+				"Existing issues: unknown (could not count them: " + countErr.Error() + ")",
+				"Destroy token accepted. Proceeding with re-initialization.",
+			},
+		},
+		{
+			name:     "known count 3, non-interactive, no token",
+			count:    3,
+			wantCode: ExitDestroyTokenMissing,
+			wantOut: []string{
+				"Existing issues: 3",
+				"Refusing to destroy 3 issues in non-interactive mode.",
+			},
+		},
+		{
+			name:         "known count 3, non-interactive, matching token",
+			count:        3,
+			destroyToken: "DESTROY-bd",
+			wantOut: []string{
+				"Existing issues: 3",
+				"Destroy token accepted. Proceeding with re-initialization.",
+			},
+		},
+		{
+			name:     "unknown count with a control character is spelled, not raw",
+			countErr: errors.New("dial \x1b[31m127.0.0.1:1\x1b[0m refused"),
+			wantCode: ExitDestroyTokenMissing,
+			wantOut:  []string{"could not count them:"},
+		},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			var out bytes.Buffer
+			err := confirmReinitDestroy(&out, strings.NewReader(row.answer), row.interactive, target,
+				row.count, row.countErr, "bd", row.destroyToken)
+
+			if row.wantCode == 0 {
+				if err != nil {
+					t.Fatalf("confirmReinitDestroy = %v, want nil (the confirmation proceeds)\n%s", err, out.String())
+				}
+			} else if code, ok := exitCodeFromError(err); !ok || code != row.wantCode {
+				t.Fatalf("confirmReinitDestroy = %v, want exit %d\n%s", err, row.wantCode, out.String())
+			}
+			for _, want := range row.wantOut {
+				if !strings.Contains(out.String(), want) {
+					t.Errorf("output must contain %q, got:\n%s", want, out.String())
+				}
+			}
+			if strings.Contains(out.String(), "\x1b[") {
+				t.Errorf("output must spell control characters, not print them raw, got:\n%q", out.String())
+			}
+			if strings.Contains(out.String(), "DESTROY-") {
+				t.Errorf("output must not echo the destroy token value (ADR-0002 Invariant 4), got:\n%s", out.String())
+			}
+		})
+	}
 }
 
 // TestCountReinitTargetIssues pins the count's own contract: which workspaces
