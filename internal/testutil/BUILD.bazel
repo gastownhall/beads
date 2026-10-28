@@ -7,6 +7,7 @@ go_library(
         "container_provider.go",
         "container_provider_windows.go",
         "dockercontext.go",
+        "doltlock.go",
         "git_env.go",
         "git_test_hooks.go",
         "localdoltserver.go",
@@ -24,6 +25,7 @@ go_library(
     visibility = ["//:__subpackages__"],
     deps = [
         "//internal/execenv",
+        "//internal/lockfile",
         "//internal/storage/doltutil",
         "//internal/testutil/bazeltest",
         "@com_github_go_sql_driver_mysql//:mysql",

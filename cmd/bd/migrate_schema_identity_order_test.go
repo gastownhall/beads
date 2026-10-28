@@ -13,7 +13,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/schema"
 )
 
-// TestMigrateSchema_IdentityMismatchRefusesBeforeApplying reproduces be-0gfcs:
+// TestEmbeddedMigrateSchema_IdentityMismatchRefusesBeforeApplying reproduces be-0gfcs:
 // bd migrate schema's workspace-identity guard (validateWorkspaceIdentity)
 // runs AFTER the shared pre-run has already opened the store and let the
 // smart gate auto-apply a pending schema migration as a side effect. The
@@ -22,7 +22,7 @@ import (
 // schema_migrations. The fix must make the identity check run before (or
 // otherwise gate) that auto-apply, so a refused migrate leaves the schema
 // cursor untouched.
-func TestMigrateSchema_IdentityMismatchRefusesBeforeApplying(t *testing.T) {
+func TestEmbeddedMigrateSchema_IdentityMismatchRefusesBeforeApplying(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}

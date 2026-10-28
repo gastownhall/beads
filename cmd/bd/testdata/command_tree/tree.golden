@@ -1761,7 +1761,7 @@ bd doctor
     | Server Mode (--server):
     |   Run health checks for Dolt server mode connections (bd-dolt.2.3):
     |   - Server reachable: Can connect to configured host:port?
-    |   - Dolt version: Is it a Dolt server (not vanilla MySQL)?
+    |   - Dolt version: Is it a Dolt server (not vanilla MySQL) at 2.6.0 or newer?
     |   - Database exists: Does the 'beads' database exist?
     |   - Schema compatible: Can query beads tables?
     |   - Connection pool: Pool health metrics
@@ -2073,10 +2073,23 @@ bd dolt remote reset-data
     | only live chunks:
     |
     |   - Git-backed remotes (issue data riding a git remote under refs/dolt/data):
-    |     deletes the Dolt data refs on the git remote, then force-pushes to
-    |     rebuild a fresh store. Code branches are untouched.
+    |     rebuilds a fresh store from local HEAD and replaces the remote's Dolt
+    |     data refs with it (through a Dolt sql-server it pushes the fresh store
+    |     to a temporary ref first, so the remote keeps its data until the new
+    |     store is complete, then restarts bd's own server, the shared server in
+    |     shared-server mode, so that it rereads the remote; like bd dolt stop,
+    |     the restart commits any uncommitted changes in every database that
+    |     server serves, and it briefly interrupts them. Any other server must be
+    |     restarted after the reset, before its next push or pull of the remote,
+    |     and so must bd's own while auto-start is off or, outside shared-server
+    |     mode, BEADS_DOLT_SERVER_MODE=1 or dolt_server_port declares it
+    |     externally managed: bd does not stop such a server, and exits non-zero
+    |     once the reset is done, so that nothing pushes or pulls through it
+    |     first). Code branches are untouched.
     |   - Native file remotes (file:// paths): clears the store directory, then
-    |     force-pushes to rebuild it.
+    |     force-pushes to rebuild it. Refused for a git repository, bare or a
+    |     checkout, where Dolt keeps the store among the repository's own files:
+    |     replace that remote as below.
     |   - Cloud/hosted remotes (aws://, gs://, dolthub://, ...): bd cannot clear
     |     the stored data safely — replace the remote with a fresh URL or prefix:
     |       bd dolt remote remove <name>
@@ -2146,8 +2159,13 @@ bd dolt start
   long:
     | Start a dolt sql-server for the current beads project.
     |
-    | The server runs in the background on a per-project port derived from the
-    | project path. PID and logs are stored in .beads/.
+    | The server runs in the background; PID and logs are stored in .beads/. With
+    | no port configured, it listens on a free port the OS assigns and records it in
+    | .beads/dolt-server.port. 'bd dolt stop' removes that file, so the next start
+    | can get a different port (shared-server mode defaults to port 3308 instead).
+    | To keep one port across restarts, set dolt.port in .beads/config.yaml, or in
+    | .beads/config.local.yaml for a machine-local value; 'bd dolt show' lists the
+    | port sources in priority order.
     |
     | The server auto-starts transparently when needed, so manual start is rarely
     | required. Use this command for explicit control or diagnostics.
@@ -2156,6 +2174,14 @@ bd dolt start
     | lifecycle and starts it on demand, so a server started here would be a second,
     | unsupervised one over the same data directory. Use 'bd dolt status' to see what
     | is running and 'bd dolt stop' to shut it down.
+    |
+    | With dolt.auto-start: false the server is expected to be managed outside bd, so
+    | a start that would create a new, empty Dolt database (the data directory is
+    | missing, empty, or holds no database) is refused before anything is written:
+    | it would publish its port and shadow the managed server's database. Starting
+    | over existing data, or adopting a server bd already tracks, is unaffected. Use
+    | --force to create the new database anyway.
+  flag --force type=bool default="false" usage="Start even when dolt.auto-start is off and this would create a new, empty Dolt database"
 
 bd dolt status
   use: "status"
@@ -2169,9 +2195,16 @@ bd dolt status
     | the on-disk data directory. For beads-managed (local) servers, displays
     | PID, port, and data directory from the local PID file. For externally-
     | managed servers — a shared server (dolt.shared-server: true), a remote
-    | dolt_server_host, or a local server managed outside bd (dolt.auto-start:
-    | false, e.g. an orchestrator-shared sql-server) — pings the configured
-    | endpoint via SQL and reports reachability, server version, and database.
+    | dolt_server_host, a server at the IPv6 loopback (::1, where bd's own
+    | server never listens), or a local server managed outside bd
+    | (dolt.auto-start: false, e.g. an orchestrator-shared sql-server) — pings
+    | the configured endpoint via SQL and reports reachability, server version,
+    | and database. While no server of bd's own is running, it does the same for
+    | a local server bd does not start: one on a unix socket or behind a
+    | credential command, or one that BEADS_DOLT_SERVER_PORT, BEADS_DOLT_PORT,
+    | dolt_server_port or BEADS_DOLT_SERVER_MODE=1 declares externally managed.
+    | The probe logs in as the configured user; it does not present a credential
+    | command's token.
     |
     | In proxied-server mode, reports the proxy (the endpoint every bd command
     | connects through) and the dolt backend behind it separately, read from the
@@ -2439,6 +2472,7 @@ bd events tail
     | {"code":"events_journal_truncated","since":N,"floor":F,"head":H}: floor is the
     | oldest seq still retained, head the highest ever assigned. Resume from floor-1
     | to continue with a known gap, or rebuild from a full export.
+  flag --exit-on-stdin-eof type=bool default="false" usage="with --follow, exit when stdin closes (for parent-process lifecycle tracking)"
   flag --follow type=bool default="false" usage="keep printing new records as they are committed (Ctrl-C to stop)"
   flag --limit type=int default="0" usage="maximum number of records to return (0 = no limit)"
   flag --since type=int64 default="0" usage="return records with seq greater than this value"
@@ -5096,6 +5130,10 @@ bd mol ready
     | This enables discovery-based resume without explicit waiter tracking.
     | The patrol system uses this to find and dispatch gate-ready molecules.
     |
+    | For a formula step declared type = "gate" with a [steps.gate] block, the
+    | gate bead is an exit-gate that the step's own task blocks, so the ready
+    | step is the one that follows the gate, not that task.
+    |
     | Examples:
     |   bd mol ready --gated           # Find all gate-ready molecules
     |   bd mol ready --gated --json    # JSON output for automation
@@ -5746,6 +5784,12 @@ bd prune
     | To delete closed ephemeral beads (wisps, transient molecules) use
     | `bd purge` instead.
     |
+    | --retain-ids retires every id the sweep deletes: a permanent tombstone (the id
+    | and its closed_at) is written in the same transaction, and from then on a
+    | create naming that id is refused (code idempotency_expired) and an import
+    | skips it. Use it when ids are idempotency keys that must never run twice.
+    | Tombstones are permanent.
+    |
     | For full Dolt storage reclaim after deleting many rows, follow with `bd flatten`
     | so history can be collapsed and old chunks can be garbage-collected.
     |
@@ -5760,6 +5804,7 @@ bd prune
   flag --ignore-references type=bool default="false" usage="Delete closed beads even when referenced by open beads (use with care; see --help for details)"
   flag --older-than type=string default="" usage="Only prune beads closed more than N ago (e.g., 30d, 2w, 60, 36h)"
   flag --pattern type=string default="" usage="Only prune beads matching ID glob pattern (e.g., 'gm-old-*')"
+  flag --retain-ids type=bool default="false" usage="Retire every pruned id with a permanent tombstone so it can never be created again (see --help)"
 
 bd purge
   use: "purge"
@@ -5790,6 +5835,12 @@ bd purge
     | --older-than takes days (7, 7d), weeks (2w) or a duration with hour precision
     | (36h, 168h, 90m).
     |
+    | --retain-ids retires every id the sweep deletes: a permanent tombstone (the id
+    | and its closed_at) is written in the same transaction, and from then on a
+    | create naming that id is refused (code idempotency_expired) and an import
+    | skips it. Use it when ids are idempotency keys that must never run twice.
+    | Tombstones are permanent.
+    |
     | To delete closed non-ephemeral beads (regular tasks, features, bugs, etc.)
     | use `bd prune` instead.
     |
@@ -5810,6 +5861,7 @@ bd purge
   flag --limit type=int default="0" usage="Purge at most N beads this run, oldest-closed first (0 = no limit); --json reports remaining/has_more"
   flag --older-than type=string default="" usage="Only purge beads closed more than N ago (e.g., 7d, 2w, 30, 36h)"
   flag --pattern type=string default="" usage="Only purge beads matching ID glob pattern (e.g., *-wisp-*)"
+  flag --retain-ids type=bool default="false" usage="Retire every purged id with a permanent tombstone so it can never be created again (see --help)"
   flag --wisps-plane type=bool default="false" usage="Select every closed row in the wisps table, including --no-history beads (requires --older-than or --pattern)"
 
 bd q
@@ -6558,7 +6610,7 @@ bd setup
     | Use 'bd setup <recipe> --remove' to uninstall.
   flag --add type=string default="" usage="Add a custom recipe with given name"
   flag --check type=bool default="false" usage="Check if integration is installed"
-  flag --global type=bool default="false" usage="Install globally (claude/codex/cursor/mux; writes to ~/.claude/settings.json, $CODEX_HOME/AGENTS.md or ~/.codex/AGENTS.md, ~/.cursor/hooks.json, or ~/.mux/AGENTS.md)"
+  flag --global type=bool default="false" usage="Install globally (claude/codex/cursor/mux; writes to ~/.claude/settings.json and ~/.claude/CLAUDE.md, $CODEX_HOME/AGENTS.md or ~/.codex/AGENTS.md, ~/.cursor/hooks.json, or ~/.mux/AGENTS.md)"
   flag --list type=bool default="false" usage="List all available recipes"
   flag --output -o type=string default="" usage="Write template to custom path"
   flag --print type=bool default="false" usage="Print the template to stdout"

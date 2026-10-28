@@ -16,9 +16,10 @@ package main
 //
 // Every case runs the real bd binary in a fresh fixture and stops before any
 // store is opened, so these need no Dolt server or database. Fixture
-// workspaces with a corrupt metadata.json double as sentinels: the refusal
-// names the metadata.json it failed to parse, so the text shows which
-// directory discovery selected without opening a database.
+// workspaces with a corrupt metadata.json double as sentinels: binding the
+// workspace warns, naming the metadata.json it failed to parse (the refusal
+// that follows does not name it), so the text shows which directory
+// discovery selected without opening a database.
 //
 // The pinned no-database hints are an embedded-capable bd's. A CGO_ENABLED=0
 // bd is server-only and adds "run 'bd doctor' to diagnose" to them, so this

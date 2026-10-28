@@ -1658,14 +1658,73 @@ func TestParityCloseNothingSettledExits1(t *testing.T) {
 	if res.stdout != "" {
 		t.Errorf("stdout = %q, want empty (SilentExit prints nothing itself)", res.stdout)
 	}
-	// The batch summary is multi-id ONLY. A single refused id already names
-	// itself on stderr, so adding `N of M issues failed to close` to it would
-	// be noise — and this is the sole assertion pinning that suppression.
+	// The text batch summary is multi-id ONLY. A single refused id already
+	// names itself on stderr, so adding `N of M issues failed to close` to it
+	// would be noise — and this is the sole assertion pinning that
+	// suppression. --json is different: TestParityCloseJSONFailureReport.
 	if strings.Contains(res.stderr, "issues failed to close") {
 		t.Errorf("stderr = %q, want no batch summary for a single id", res.stderr)
 	}
 	if got := env.lastTouched(); got != "" {
 		t.Errorf("last-touched = %q, want it untouched when nothing settled", got)
+	}
+}
+
+// TestParityCloseJSONFailureReport pins the --json failure report for a
+// single refused id, the close twin of TestParityUpdateJSONFailureReport: a
+// consumer closing one id at a time must get a parseable reason, as it does
+// from `bd update --json`. stdout stays empty because nothing closed, the
+// inline refusal is unchanged, and the LAST stderr line is the compact JSON
+// report — with no text summary beside it. Source: cmd/bd/close.go
+// reportCloseFailures.
+func TestParityCloseJSONFailureReport(t *testing.T) {
+	env := newParityEnv(t)
+	env.seed("test-clsjf", "Owned by another actor", func(i *types.Issue) {
+		i.Assignee = "someone-else"
+	})
+
+	jsonOutput = true
+	env.setFlags(closeCmd, nil)
+	res := env.run(closeCmd, "test-clsjf")
+
+	if res.exitCode != 1 {
+		t.Fatalf("exit = %d, want 1\nstderr:\n%s", res.exitCode, res.stderr)
+	}
+	if res.stdout != "" {
+		t.Errorf("stdout = %q, want empty (no issue was closed)", res.stdout)
+	}
+	if env.get("test-clsjf").Status == types.StatusClosed {
+		t.Error("the refused ID must not have been closed")
+	}
+
+	refusal := fmt.Sprintf("cannot close %s: assignee is %q, actor is %q; reclaim or use --force to override",
+		"test-clsjf", "someone-else", actor)
+	lines := strings.Split(strings.TrimRight(res.stderr, "\n"), "\n")
+	if len(lines) != 2 || lines[0] != refusal {
+		t.Fatalf("stderr = %q, want the inline refusal %q and then one JSON report line", res.stderr, refusal)
+	}
+	var payload struct {
+		Error         string `json:"error"`
+		SchemaVersion int    `json:"schema_version"`
+		Failed        []struct {
+			ID    string `json:"id"`
+			Error string `json:"error"`
+		} `json:"failed"`
+	}
+	if err := json.Unmarshal([]byte(lines[1]), &payload); err != nil {
+		t.Fatalf("last stderr line is not the JSON failure report: %v\nline: %s", err, lines[1])
+	}
+	if payload.Error != "1 of 1 issues failed to close" {
+		t.Errorf("error = %q, want %q", payload.Error, "1 of 1 issues failed to close")
+	}
+	if payload.SchemaVersion != JSONSchemaVersion {
+		t.Errorf("schema_version = %d, want %d", payload.SchemaVersion, JSONSchemaVersion)
+	}
+	if len(payload.Failed) != 1 {
+		t.Fatalf("failed entries = %d, want 1", len(payload.Failed))
+	}
+	if payload.Failed[0].ID != "test-clsjf" || payload.Failed[0].Error != refusal {
+		t.Errorf("failed[0] = %+v, want {ID:%s Error:%s}", payload.Failed[0], "test-clsjf", refusal)
 	}
 }
 

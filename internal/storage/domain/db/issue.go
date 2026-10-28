@@ -61,6 +61,10 @@ func (r *issueSQLRepositoryImpl) Insert(ctx context.Context, issue *types.Issue,
 	if issue.ContentHash == "" {
 		issue.ContentHash = issue.ComputeContentHash()
 	}
+	// Storage assigns arrival_seq at the journal's create seam alone; see
+	// issueops.PrepareIssueForInsert. The create record below hands the row's
+	// stamp back (issueops.RecordCreateEventInTx).
+	issue.ArrivalSeq = 0
 
 	if issue.ID == "" {
 		return errors.New("db: Insert: explicit ID required (ID generation belongs to CreateIssueUseCase)")
@@ -81,7 +85,7 @@ func (r *issueSQLRepositoryImpl) Insert(ctx context.Context, issue *types.Issue,
 		}, domain.RecordEventOpts{UseWispsTable: opts.UseWispsTable}); err != nil {
 			return err
 		}
-		if err := issueops.RecordEventInTx(ctx, r.runner, issueops.EventCreate, issue.ID, actor); err != nil {
+		if err := issueops.RecordCreateEventInTx(ctx, r.runner, issue, actor); err != nil {
 			return err
 		}
 		// EnsureIssueIDAvailableInTx above already refused a collision, so this
@@ -117,6 +121,15 @@ func (r *issueSQLRepositoryImpl) Insert(ctx context.Context, issue *types.Issue,
 			return err
 		}
 	}
+	// The upsert below would resurrect a row a retaining sweep retired; an
+	// explicit retired id with no live row is refused instead. A generated id
+	// is never retired (the generators skip tombstones), so it is not guarded,
+	// as issueops' create body does not guard one.
+	if opts.ExplicitID {
+		if err := issueops.RefuseRetiredIDInTx(ctx, r.runner, issue.ID); err != nil {
+			return err
+		}
+	}
 	if err := insertIssueRow(ctx, r.runner, table, issue); err != nil {
 		return err
 	}
@@ -127,7 +140,7 @@ func (r *issueSQLRepositoryImpl) Insert(ctx context.Context, issue *types.Issue,
 	}, domain.RecordEventOpts{UseWispsTable: opts.UseWispsTable}); err != nil {
 		return err
 	}
-	if err := issueops.RecordEventInTx(ctx, r.runner, issueops.EventCreate, issue.ID, actor); err != nil {
+	if err := issueops.RecordCreateEventInTx(ctx, r.runner, issue, actor); err != nil {
 		return err
 	}
 	if existed || opts.UseWispsTable {
@@ -677,6 +690,64 @@ func (r *issueSQLRepositoryImpl) Exists(ctx context.Context, id string, opts dom
 	return true, nil
 }
 
+// Taken reports whether a fresh create may not mint id into the plane opts
+// names: a live row there holds it, or a retaining sweep retired it.
+func (r *issueSQLRepositoryImpl) Taken(ctx context.Context, id string, opts domain.IssueTableOpts) (bool, error) {
+	if id == "" {
+		return false, errors.New("db: Taken: id must not be empty")
+	}
+	taken, err := issueops.IDTakenInTx(ctx, r.runner, pickIssueTable(opts.UseWispsTable), id)
+	if err != nil {
+		return false, fmt.Errorf("db: Taken %s: %w", id, err)
+	}
+	return taken, nil
+}
+
+// Retired reports whether a retaining sweep retired id.
+func (r *issueSQLRepositoryImpl) Retired(ctx context.Context, id string) (bool, error) {
+	if id == "" {
+		return false, errors.New("db: Retired: id must not be empty")
+	}
+	retired, err := issueops.IDRetiredInTx(ctx, r.runner, id)
+	if err != nil {
+		return false, fmt.Errorf("db: Retired %s: %w", id, err)
+	}
+	return retired, nil
+}
+
+// RetiredIDs returns which of ids a tombstone in either table retired
+// (issueops.RetiredIDsInTx), in this repository's transaction.
+func (r *issueSQLRepositoryImpl) RetiredIDs(ctx context.Context, ids []string) (map[string]time.Time, error) {
+	retired, err := issueops.RetiredIDsInTx(ctx, r.runner, ids)
+	if err != nil {
+		return nil, fmt.Errorf("db: RetiredIDs: %w", err)
+	}
+	return retired, nil
+}
+
+// RetireIDs tombstones ids in the plane opts names (issueops.RetireIDsInTx),
+// in this repository's transaction.
+func (r *issueSQLRepositoryImpl) RetireIDs(ctx context.Context, ids map[string]time.Time, opts domain.IssueTableOpts) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	retired := make([]issueops.RetiredID, 0, len(ids))
+	for id, closedAt := range ids {
+		retired = append(retired, issueops.RetiredID{ID: id, ClosedAt: closedAt})
+	}
+	slices.SortFunc(retired, func(a, b issueops.RetiredID) int { return strings.Compare(a.ID, b.ID) })
+	if opts.UseWispsTable {
+		return issueops.RetireIDsInTx(ctx, r.runner, retired, nil)
+	}
+	return issueops.RetireIDsInTx(ctx, r.runner, nil, retired)
+}
+
+// CoordinateCreates writes the create coordination cells of ids
+// (issueops.CoordinateIDCreatesInTx), in this repository's transaction.
+func (r *issueSQLRepositoryImpl) CoordinateCreates(ctx context.Context, ids []string) error {
+	return issueops.CoordinateIDCreatesInTx(ctx, r.runner, ids)
+}
+
 func (r *issueSQLRepositoryImpl) CountForPrefix(ctx context.Context, prefix string, opts domain.IssueTableOpts) (int, error) {
 	if prefix == "" {
 		return 0, errors.New("db: CountForPrefix: prefix must not be empty")
@@ -834,6 +905,10 @@ func insertIssueRow(ctx context.Context, runner Runner, table string, issue *typ
 	// RowVersion CAS token is stale-zero on read — the backend-divergent break
 	// the RowVersion contract (types.Issue.RowVersion) forbids. The duplicate-key
 	// path rewrites it too so an upsert also advances the token.
+	//
+	// arrival_seq is deliberately absent from both the column list and the
+	// upsert assignments: only the journal's create seam writes it
+	// (issueops.stampArrivalSeqInTx).
 	_, err := runner.ExecContext(ctx, fmt.Sprintf(`
 		INSERT INTO %s (
 			id, content_hash, title, description, design, acceptance_criteria, notes,
@@ -1139,6 +1214,10 @@ func (r *issueSQLRepositoryImpl) FindAllDependents(ctx context.Context, ids []st
 
 func (r *issueSQLRepositoryImpl) FindWispDependentsRecursive(ctx context.Context, ids []string) (map[string]bool, error) {
 	return issueops.FindWispDependentsRecursiveInTx(ctx, r.runner, ids)
+}
+
+func (r *issueSQLRepositoryImpl) ParticipatingIssueIDs(ctx context.Context, ids []string) (map[string]struct{}, error) {
+	return issueops.ParticipatingIssueIDsInTx(ctx, r.runner, ids)
 }
 
 func (r *issueSQLRepositoryImpl) AffectedByDeletion(ctx context.Context, issueIDs, wispIDs []string) ([]string, []string, error) {

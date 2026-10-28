@@ -112,9 +112,9 @@ func gcClassifyAsPrecondition(out []byte, errText string) (ok bool, expected, cu
 // cover, pinning the 2026-10 Opus-review BLOCKER fix end-to-end: gc's own
 // classifier logic, not just bd's JSON shape in isolation, must recognize the
 // refusal as a precondition with the caller's expected revision and bd's
-// current one. The TestEmbedded name in an *_embedded_test.go file is what
-// puts it in a CI lane: .github/scripts/embedded-test-shard.sh discovers
-// tests by exactly that pair, and under any other name it skips everywhere.
+// current one. The TestEmbedded name is what puts it in a CI lane:
+// .github/scripts/embedded-test-shard.sh discovers tests by that prefix, and
+// under any other name it skips everywhere.
 func TestEmbeddedGCConditionalMatcherDecode(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")

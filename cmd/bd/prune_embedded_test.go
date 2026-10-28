@@ -238,12 +238,12 @@ func TestEmbeddedPruneDryRunAndFilters(t *testing.T) {
 	})
 }
 
-// TestPrune_protectsBeadCitedByCustomStatusBead is a regression test for the
+// TestEmbeddedPrune_protectsBeadCitedByCustomStatusBead is a regression test for the
 // maphew review of PR #4023 (be-e2nb): reference-aware prune must scan beads in
 // active *custom* statuses, not only the built-in non-closed statuses. A closed
 // bead cited by a bead in an active custom status must be protected from prune,
 // exactly like one cited by a built-in open bead.
-func TestPrune_protectsBeadCitedByCustomStatusBead(t *testing.T) {
+func TestEmbeddedPrune_protectsBeadCitedByCustomStatusBead(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}

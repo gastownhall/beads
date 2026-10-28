@@ -60,12 +60,14 @@ import (
 //     and --dry-run/--inspect previews also open the store read-only, but
 //     they keep creating the files, so they stay visible too.
 //
-// Known residual (PR-B2 scope, documented honestly): the pre-chokepoint
-// DISCOVERY code paths (configfile.Load at main.go's early config probe and
-// internal/beads.findDatabaseInBeadsDir) can perform the legacy
-// config.json→metadata.json migration write BEFORE this gate is acquired —
-// the chokepoint necessarily runs after workspace selection. Deferring that
-// legacy write behind the gate is out of scope here.
+// The legacy config.json→metadata.json migration write happens behind this
+// gate. The pre-chokepoint DISCOVERY code paths (main.go's early config probe,
+// the --db/BEADS_DB resolution in resolveBeadsDirForDBPath, and
+// internal/beads.findDatabaseInBeadsDir) read metadata with
+// configfile.LoadForDiscovery, which never migrates, and the internal/doltserver
+// loaders that plan the gate call configfile.Load only when metadata.json
+// already exists. The command workspace's first migrating configfile.Load is
+// the backend resolution PersistentPreRunE runs after acquiring the gate.
 
 // workspaceGateHandle is the gate set held for the current command, stored
 // beside `store` because their lifetimes are paired: acquired just before

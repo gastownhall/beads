@@ -1,6 +1,6 @@
 ---
 title: "bd worktree"
-description: "Manage git worktrees with proper beads configuration."
+description: "Manage git worktrees for parallel development"
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
@@ -23,7 +23,7 @@ Examples:
   bd worktree info                          # Show info about current worktree
 
 ```
-bd worktree [flags]
+bd worktree [command]
 ```
 
 ## bd worktree create
@@ -90,18 +90,26 @@ bd worktree list [flags]
 
 ## bd worktree remove
 
-Remove a git worktree with safety checks.
+Remove a registered git worktree with fail-closed safety checks.
 
-Before removing, this command checks for:
-- Uncommitted changes
-- Unpushed commits
-- Stashes
+Without --force, the target must be clean and its pinned HEAD must be contained
+in either the configured upstream or the single comparator selected by
+--merged-into. Comparators may be full refs, unambiguous short ref names, or
+full commit object IDs. Revision expressions and worktree-local pseudorefs such
+as HEAD and ORIG_HEAD are rejected.
 
-Use --force to skip safety checks (not recommended).
+--force skips cleanliness and containment requirements, but it does not skip
+registered-identity and concurrent-change checks. --force and --merged-into
+are mutually exclusive, and each flag may be specified at most once.
+
+Worktree removal and .gitignore cleanup are not atomic. If removal succeeds but
+cleanup fails, this command returns an error that explicitly reports the
+worktree as removed; it does not claim or attempt a rollback.
 
 Examples:
-  bd worktree remove feature-auth         # Remove with safety checks
-  bd worktree remove feature-auth --force # Skip safety checks
+  bd worktree remove feature-auth                    # Check the configured upstream
+  bd worktree remove feature-auth --merged-into main # Check containment in main
+  bd worktree remove feature-auth --force            # Skip clean/containment checks
 
 ```
 bd worktree remove <name> [flags]
@@ -110,5 +118,6 @@ bd worktree remove <name> [flags]
 **Flags:**
 
 ```
-      --force   Skip safety checks
+      --force                Skip cleanliness and containment checks
+      --merged-into string   Require worktree HEAD to be contained in this ref
 ```

@@ -55,6 +55,7 @@ func runConventionsCheck(path string) error {
 
 	var passCount, warnCount int
 	for _, c := range checks {
+		c = c.printed()
 		var statusIcon string
 		switch c.Status {
 		case statusOK:

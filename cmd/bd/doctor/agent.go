@@ -512,9 +512,9 @@ func enrichChildParentDeps(dc DoctorCheck) agentEnrichment {
 func enrichClassicArtifacts(dc DoctorCheck) agentEnrichment {
 	return agentEnrichment{
 		severity:    "advisory",
-		explanation: fmt.Sprintf("Classic (pre-Dolt) artifacts found: %s. These are leftover files from the SQLite/JSONL era that are no longer needed after Dolt migration.", dc.Message),
+		explanation: fmt.Sprintf("Classic (pre-Dolt) artifacts found: %s. 'bd doctor --check=artifacts --clean' removes only those marked safe to delete; the rest are databases, files a redirect-only .beads holds beyond bd's runtime leftovers (such as what the repository tracks there), or sit in a .beads whose backend doctor cannot establish, and need a human decision before anything is deleted.", dc.Message),
 		observed:    dc.Message + "\n" + dc.Detail,
-		expected:    "No classic artifacts present (JSONL files, SQLite database, cruft directories)",
+		expected:    "No classic artifacts present (leftover SQLite files, cruft directories)",
 		commands:    []string{"bd doctor --check=artifacts", "bd doctor --check=artifacts --clean"},
 		sourceFiles: []string{"cmd/bd/doctor/artifacts.go:CheckClassicArtifacts"},
 	}

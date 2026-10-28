@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/gitignore"
+	"github.com/steveyegge/beads/internal/remedy"
 )
 
 // GitignoreTemplate is the canonical .beads/.gitignore content
@@ -659,13 +660,16 @@ func CheckNoVestigialSyncWorktrees(repoPath string) DoctorCheck {
 		}
 	}
 
-	// Found a local .beads-sync but we have a redirect - this is vestigial
+	// Found a local .beads-sync but we have a redirect - this is vestigial.
+	// The path goes into the rm -rf command as one shell word: unquoted, a
+	// checkout path with a space in it would delete two other paths.
+	arg, note := remedy.CommandArg(runtime.GOOS, syncWorktreePath, "<path>")
 	return DoctorCheck{
 		Name:    "Vestigial Sync Worktrees",
 		Status:  StatusWarning,
 		Message: "Vestigial .beads-sync worktree found",
-		Detail:  fmt.Sprintf("This repo uses redirect but has unused worktree at: %s", syncWorktreePath),
-		Fix:     fmt.Sprintf("Remove with: rm -rf %s", syncWorktreePath),
+		Detail:  fmt.Sprintf("This repo uses redirect but has unused worktree at: %s", remedy.PrintedValue(syncWorktreePath)),
+		Fix:     fmt.Sprintf("Remove with: rm -rf %s%s", arg, note),
 	}
 }
 

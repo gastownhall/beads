@@ -492,6 +492,9 @@ func TestDetectBootstrapAction_BlockedIsDerivedNotInherited(t *testing.T) {
 		cfg.DoltMode = configfile.DoltModeServer
 		cfg.DoltDatabase = "mydb"
 		cfg.DoltDataDir = doltDataDir
+		// The workspace names its server's port, so there is a server to
+		// probe; with none named bootstrap probes nothing.
+		cfg.DoltServerPort = 13307
 		// Never created: this is the "fresh clone, .beads synthesized" path.
 		return filepath.Join(tmpDir, ".beads"), cfg
 	}
@@ -728,6 +731,11 @@ func TestDetectBootstrapAction_ServerTransientRestart_DBFoundAfterRetry(t *testi
 	cfg.DoltMode = configfile.DoltModeServer
 	cfg.DoltDatabase = "mydb"
 	cfg.DoltDataDir = doltDataDir
+	// The workspace names its server's port, never inheriting one: the Dolt
+	// test server exports BEADS_DOLT_PORT/BEADS_DOLT_SERVER_PORT when it is
+	// up, and with no port named bootstrap probes nothing.
+	cfg.DoltServerPort = 13307
+	t.Setenv("BEADS_DOLT_PORT", "")
 
 	// Simulate a restart: DB absent for first 2 probes, then found.
 	callCount := 0

@@ -61,7 +61,7 @@ var wantServerFingerprint = serverFingerprint{
 	CurrentUser:  "root@%",
 	Version:      "8.0.31",
 	MaxConns:     "151",
-	SQLMode:      "NO_ENGINE_SUBSTITUTION,ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES",
+	SQLMode:      "ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION",
 	SystemTZ:     "UTC",
 	TimeZone:     "SYSTEM",
 	Autocommit:   "1",

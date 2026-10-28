@@ -194,4 +194,26 @@ func TestRememberBareKeyPath(t *testing.T) {
 			t.Errorf("err = %v, want *exitError{Code: 1}", err)
 		}
 	})
+
+	// The text refusal names bd remember and bd memories bare, since a
+	// pasted backtick pair runs what it holds, and ends with the command that
+	// stores the token anyway, so a copy of it carries no sentence period
+	// into the key.
+	t.Run("not found refusal ends with its command", func(t *testing.T) {
+		jsonOutput = false
+		defer func() { jsonOutput = true }()
+		var err error
+		out := captureStderr(t, func() {
+			err = rememberBareKeyPath("auth-flow", "auth-flow", "", false)
+		})
+		if err == nil {
+			t.Fatal("rememberBareKeyPath stored a bare key naming nothing")
+		}
+		if strings.Contains(out, "`") {
+			t.Errorf("refusal wraps a command in backticks:\n%s", out)
+		}
+		if want := `To store it anyway, run: bd remember "auth-flow" --key auth-flow` + "\n"; !strings.HasSuffix(out, want) {
+			t.Errorf("refusal = %q\nwant it to end %q", out, want)
+		}
+	})
 }

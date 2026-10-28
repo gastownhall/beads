@@ -136,12 +136,12 @@ func vhRow(t *testing.T, w vhWorkspace) (value string, present bool) {
 	return got.value, got.present
 }
 
-// TestVersionedHistoryConfigSetWritesTheStoreRow is the front door, and D5's
+// TestEmbeddedVersionedHistoryConfigSetWritesTheStoreRow is the front door, and D5's
 // regression pin for the plane #6661 chose. `bd config set` has to write the
 // database row the stores read, and must not write config.yaml: the key is not a
 // yaml-only key, and making it one would move the switch off the store and back
 // to the per-process plane this feature was moved away from.
-func TestVersionedHistoryConfigSetWritesTheStoreRow(t *testing.T) {
+func TestEmbeddedVersionedHistoryConfigSetWritesTheStoreRow(t *testing.T) {
 	vhRequireEmbeddedLane(t)
 	bd := buildEmbeddedBD(t)
 	w := vhNewWorkspace(t, bd, filepath.Join(t.TempDir(), "ws"), "vhc")
@@ -258,7 +258,7 @@ func newVHMatrix(t *testing.T) vhMatrix {
 	return m
 }
 
-// TestVersionedHistoryFollowsTheStoreItWritesInto is the routed-write matrix, with
+// TestEmbeddedVersionedHistoryFollowsTheStoreItWritesInto is the routed-write matrix, with
 // a count of issue_versions rows in every workspace after every write.
 //
 // D1: with the TARGET's row on and the launching workspace's row absent, a routed
@@ -269,7 +269,7 @@ func newVHMatrix(t *testing.T) vhMatrix {
 // D2: the reverse. The launching workspace's row on and the target's off (or
 // absent), env unset: the routed write adds none. A store answers for itself, so
 // the town's answer cannot leak into a store it opened for someone else.
-func TestVersionedHistoryFollowsTheStoreItWritesInto(t *testing.T) {
+func TestEmbeddedVersionedHistoryFollowsTheStoreItWritesInto(t *testing.T) {
 	vhRequireEmbeddedLane(t)
 	m := newVHMatrix(t)
 
@@ -331,12 +331,12 @@ func TestVersionedHistoryFollowsTheStoreItWritesInto(t *testing.T) {
 	})
 }
 
-// TestVersionedHistoryEnvIsProcessWideAndOnlyTurnsRecordingOn is D3. The
+// TestEmbeddedVersionedHistoryEnvIsProcessWideAndOnlyTurnsRecordingOn is D3. The
 // environment applies to every store the process opens, routed targets included;
 // it can turn recording on for a store that never asked, and it can never turn it
 // off for a store whose row says on. Both planes are OR'd, never ranked: the
 // hazard is a write that fails to record, never one that records when it needn't.
-func TestVersionedHistoryEnvIsProcessWideAndOnlyTurnsRecordingOn(t *testing.T) {
+func TestEmbeddedVersionedHistoryEnvIsProcessWideAndOnlyTurnsRecordingOn(t *testing.T) {
 	vhRequireEmbeddedLane(t)
 	m := newVHMatrix(t)
 	idA, idB := m.create(t, m.rigA, "seed a"), m.create(t, m.rigB, "seed b")

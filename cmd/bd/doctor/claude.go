@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/steveyegge/beads/cmd/bd/setup"
 )
 
 var latestPyPIVersionFetcher = fetchLatestPyPIVersion
@@ -95,66 +97,11 @@ func CheckClaude(repoPath string) DoctorCheck {
 	}
 }
 
-// isBeadsPluginInstalled checks if beads plugin is enabled in Claude Code.
-// It checks user-level (~/.claude/settings.json) and project-level settings
-// (.claude/settings.json and .claude/settings.local.json).
-// repoPath is the project root directory.
+// isBeadsPluginInstalled reports whether Claude Code enables the beads plugin
+// in a session started in repoPath, the project root directory, resolved as
+// bd setup claude --check resolves it there (setup.BeadsPluginEnabled).
 func isBeadsPluginInstalled(repoPath string) bool {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return false
-	}
-
-	// Check user-level settings
-	userSettings := filepath.Join(home, ".claude", "settings.json")
-	if checkPluginInSettings(userSettings) {
-		return true
-	}
-
-	// Check project-level settings
-	projectSettings := filepath.Join(repoPath, ".claude", "settings.json")
-	if checkPluginInSettings(projectSettings) {
-		return true
-	}
-
-	// Check project-level local settings (gitignored)
-	projectLocalSettings := filepath.Join(repoPath, ".claude", "settings.local.json")
-	if checkPluginInSettings(projectLocalSettings) {
-		return true
-	}
-
-	return false
-}
-
-// checkPluginInSettings checks if beads plugin is enabled in a settings file
-func checkPluginInSettings(settingsPath string) bool {
-	data, err := os.ReadFile(settingsPath) // #nosec G304 -- settingsPath is constructed from known safe locations, not user input
-	if err != nil {
-		return false
-	}
-
-	var settings map[string]interface{}
-	if err := json.Unmarshal(data, &settings); err != nil {
-		return false
-	}
-
-	// Check enabledPlugins section for beads
-	enabledPlugins, ok := settings["enabledPlugins"].(map[string]interface{})
-	if !ok {
-		return false
-	}
-
-	// Look for beads@beads-marketplace plugin
-	for key, value := range enabledPlugins {
-		if strings.Contains(strings.ToLower(key), "beads") {
-			// Check if it's enabled (value should be true)
-			if enabled, ok := value.(bool); ok && enabled {
-				return true
-			}
-		}
-	}
-
-	return false
+	return setup.BeadsPluginEnabled(repoPath)
 }
 
 // isMCPServerInstalled checks if MCP server is configured.
@@ -216,19 +163,18 @@ func checkMCPInSettings(settingsPath string) bool {
 	return false
 }
 
-// hasClaudeHooks checks if Claude hooks are installed.
-// repoPath is the project root directory.
+// hasClaudeHooks reports whether a settings file Claude Code loads hooks from
+// in a session started in repoPath, the project root directory, has a bd
+// prime hook: the files bd setup claude --check reads there
+// (setup.ClaudeHookSettingsPaths), including the repository root's
+// .claude/settings.local.json from a subdirectory or linked worktree.
 func hasClaudeHooks(repoPath string) bool {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return false
+	for _, path := range setup.ClaudeHookSettingsPaths(repoPath) {
+		if hasBeadsHooks(path) {
+			return true
+		}
 	}
-
-	globalSettings := filepath.Join(home, ".claude", "settings.json")
-	projectSettings := filepath.Join(repoPath, ".claude", "settings.json")
-	projectLocalSettings := filepath.Join(repoPath, ".claude", "settings.local.json")
-
-	return hasBeadsHooks(globalSettings) || hasBeadsHooks(projectSettings) || hasBeadsHooks(projectLocalSettings)
+	return false
 }
 
 // hasBeadsHooks checks if a settings file has bd prime hooks
@@ -640,8 +586,9 @@ func fetchLatestPyPIVersion(packageName string) (string, error) {
 }
 
 // CheckClaudeSettingsHealth validates that Claude Code settings files are well-formed JSON.
-// Malformed settings silently break hooks and plugin detection.
-// repoPath is the project root directory.
+// Malformed settings silently break hooks and plugin detection. It checks the
+// files Claude Code loads hooks from in a session started in repoPath, the
+// project root directory (setup.ClaudeHookSettingsPaths).
 func CheckClaudeSettingsHealth(repoPath string) DoctorCheck {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -652,26 +599,17 @@ func CheckClaudeSettingsHealth(repoPath string) DoctorCheck {
 		}
 	}
 
-	settingsFiles := []struct {
-		path  string
-		label string
-	}{
-		{filepath.Join(home, ".claude", "settings.json"), "~/.claude/settings.json"},
-		{filepath.Join(repoPath, ".claude", "settings.json"), ".claude/settings.json"},
-		{filepath.Join(repoPath, ".claude", "settings.local.json"), ".claude/settings.local.json"},
-	}
-
 	var malformed []string
 	var checked int
-	for _, sf := range settingsFiles {
-		data, err := os.ReadFile(sf.path) // #nosec G304 -- paths are constructed from known safe locations
+	for _, path := range setup.ClaudeHookSettingsPaths(repoPath) {
+		data, err := os.ReadFile(path) // #nosec G304 -- paths are constructed from known safe locations
 		if err != nil {
 			continue // File doesn't exist, skip
 		}
 		checked++
 		var parsed map[string]interface{}
 		if err := json.Unmarshal(data, &parsed); err != nil {
-			malformed = append(malformed, fmt.Sprintf("%s: %v", sf.label, err))
+			malformed = append(malformed, fmt.Sprintf("%s: %v", claudeSettingsLabel(home, repoPath, path), err))
 		}
 	}
 
@@ -700,14 +638,30 @@ func CheckClaudeSettingsHealth(repoPath string) DoctorCheck {
 	}
 }
 
+// claudeSettingsLabel names a settings file in CheckClaudeSettingsHealth's
+// report: ~/.claude/settings.json for the user's, relative to repoPath for
+// the project's, and in full for one elsewhere, such as the repository root's
+// .claude/settings.local.json seen from a subdirectory.
+func claudeSettingsLabel(home, repoPath, path string) string {
+	if path == filepath.Join(home, ".claude", "settings.json") {
+		return "~/.claude/settings.json"
+	}
+	if abs, err := filepath.Abs(repoPath); err == nil {
+		if rel, err := filepath.Rel(abs, path); err == nil && filepath.IsLocal(rel) {
+			return rel
+		}
+	}
+	return path
+}
+
 // CheckClaudeHookCompleteness verifies that when hooks are installed,
 // SessionStart is covered. Claude Code fires SessionStart on startup, resume,
 // clear, and after compaction, so current bd prime context injection only needs
-// SessionStart.
-// repoPath is the project root directory.
+// SessionStart. It reads the files Claude Code loads hooks from in a session
+// started in repoPath, the project root directory
+// (setup.ClaudeHookSettingsPaths).
 func CheckClaudeHookCompleteness(repoPath string) DoctorCheck {
-	home, err := os.UserHomeDir()
-	if err != nil {
+	if _, err := os.UserHomeDir(); err != nil {
 		return DoctorCheck{
 			Name:    "Claude Hook Completeness",
 			Status:  StatusOK,
@@ -715,16 +669,10 @@ func CheckClaudeHookCompleteness(repoPath string) DoctorCheck {
 		}
 	}
 
-	settingsFiles := []string{
-		filepath.Join(home, ".claude", "settings.json"),
-		filepath.Join(repoPath, ".claude", "settings.json"),
-		filepath.Join(repoPath, ".claude", "settings.local.json"),
-	}
-
 	var hasAnyHook bool
 	var hasSessionStart bool
 
-	for _, sf := range settingsFiles {
+	for _, sf := range setup.ClaudeHookSettingsPaths(repoPath) {
 		ss, pc := checkHookEvents(sf)
 		if ss || pc {
 			hasAnyHook = true

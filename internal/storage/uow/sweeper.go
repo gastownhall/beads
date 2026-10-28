@@ -3,6 +3,7 @@ package uow
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/storage/domain"
@@ -75,7 +76,7 @@ func (s *sweeper) Sweep(ctx context.Context, req publicops.SweepRequest) (public
 // sweepInUOW is the whole sweep on one unit of work, shared by the preview
 // path and the committing one so the two cannot answer differently.
 func sweepInUOW(ctx context.Context, uw UnitOfWork, req publicops.SweepRequest) (publicops.SweepResult, error) {
-	result := publicops.SweepResult{DryRun: req.DryRun}
+	result := publicops.SweepResult{DryRun: req.DryRun, RetainIDs: req.RetainIDs}
 
 	candidates, err := sweepCandidatesInUOW(ctx, uw, req)
 	if err != nil {
@@ -113,9 +114,22 @@ func sweepInUOW(ctx context.Context, uw UnitOfWork, req publicops.SweepRequest) 
 	for i, issue := range kept {
 		ids[i] = issue.ID
 	}
+	// With RetainIDs the delete retires what it removes, in this same unit of
+	// work, each id with the closed_at the recheck above required it to carry.
+	var retire map[string]time.Time
+	if req.RetainIDs && !req.DryRun {
+		retire = make(map[string]time.Time, len(kept))
+		for _, issue := range kept {
+			if issue.ClosedAt == nil {
+				return publicops.SweepResult{}, fmt.Errorf("retain ids: sweep candidate %s has no closed_at", issue.ID)
+			}
+			retire[issue.ID] = *issue.ClosedAt
+		}
+	}
 	deleted, err := uw.IssueUseCase().DeleteIssues(ctx, domain.DeleteIssuesParams{
 		IDs:    ids,
 		DryRun: req.DryRun,
+		Retire: retire,
 	}, req.Actor)
 	if err != nil {
 		return publicops.SweepResult{}, err

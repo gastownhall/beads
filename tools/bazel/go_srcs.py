@@ -199,15 +199,23 @@ def packages_under(root: str) -> list[str]:
     return sorted(found)
 
 
+# Bazel's convenience symlinks (bazel-bin, bazel-out, bazel-testlogs,
+# bazel-beads) sit at the repository root, and a glob follows them into the
+# output tree: unexcluded, the root go_srcs would hold the output base's .go
+# files in any checkout that has built before, so every test that reads it
+# would re-run (and reload) on each build (scripts/bazel_policy_test.go
+# TestBazelRootGoSrcsSkipsConvenienceSymlinks).
+ROOT_GO_SRCS_EXCLUDE = ["bazel-*/**"]
+
+
 def block(pkg: str, tree_members: list[str] | None) -> str:
+    glob = _partition_glob(("**/*.go",), ROOT_GO_SRCS_EXCLUDE if pkg == "." else [], allow_empty=True)
     lines = [
         BEGIN,
         "",
         "filegroup(",
         '    name = "go_srcs",',
-        '    srcs = glob(',
-        '        ["**/*.go"],',
-        "        allow_empty = True,",
+        *glob,
         "    ),",
         '    visibility = ["//:__subpackages__"],',
         ")",
