@@ -116,4 +116,22 @@ func TestResolveCommandBeadsDir_SymlinkedBeadsDirTrapAncestor(t *testing.T) {
 	if !utils.PathsEqual(got, target) {
 		t.Errorf("resolveCommandBeadsDir(FindDatabasePath() = %q) = %q, want workspace %q", dbPath, got, target)
 	}
+
+	// AC-2: the reporter's explicit --db spellings. The real target
+	// directory worked at 1.1.0 while the .beads symlink path and
+	// <target>/embeddeddolt did not; at base all three must resolve to the
+	// same workspace, none to the trap.
+	for name, explicit := range map[string]string{
+		"real target dir":     target,
+		".beads symlink path": symlink,
+		"embeddeddolt dir":    filepath.Join(target, "embeddeddolt"),
+	} {
+		got := resolveCommandBeadsDir(explicit)
+		if utils.PathsEqual(got, trap) {
+			t.Errorf("resolveCommandBeadsDir(%s = %q) = %q, walked past the symlinked .beads to the trap ancestor %q", name, explicit, got, trap)
+		}
+		if !utils.PathsEqual(got, target) {
+			t.Errorf("resolveCommandBeadsDir(%s = %q) = %q, want workspace %q", name, explicit, got, target)
+		}
+	}
 }
