@@ -257,6 +257,16 @@ async def test_show(bd_client, mock_process):
         "issue_type": "bug",
         "created_at": "2024-01-01T00:00:00Z",
         "updated_at": "2024-01-01T00:00:00Z",
+        "comments_omitted": False,
+        "comments": [
+            {
+                "id": "c-1",
+                "issue_id": "bd-1",
+                "author": "agent",
+                "text": "Landed the fix",
+                "created_at": "2024-01-02T00:00:00Z",
+            }
+        ],
     }
     mock_process.communicate = AsyncMock(return_value=(json.dumps(issue_data).encode(), b""))
 
@@ -266,6 +276,9 @@ async def test_show(bd_client, mock_process):
 
     assert issue.id == "bd-1"
     assert issue.title == "Test issue"
+    assert issue.comment_count == 1
+    assert issue.comments_omitted is False
+    assert [comment.id for comment in issue.comments] == ["c-1"]
 
 
 @pytest.mark.asyncio
@@ -722,6 +735,7 @@ async def test_blocked(bd_client, mock_process):
             "issue_type": "bug",
             "created_at": "2025-01-25T00:00:00Z",
             "updated_at": "2025-01-25T00:00:00Z",
+            "comment_count": 3,
             "blocked_by_count": 2,
             "blocked_by": ["bd-2", "bd-3"],
         }
@@ -734,6 +748,7 @@ async def test_blocked(bd_client, mock_process):
     assert len(result) == 1
     assert result[0].id == "bd-1"
     assert result[0].blocked_by_count == 2
+    assert result[0].comment_count == 3
 
 
 @pytest.mark.asyncio

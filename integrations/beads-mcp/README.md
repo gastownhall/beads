@@ -214,12 +214,12 @@ await beads_ready_work(workspace_root="/Users/you/project-a")
 - `create` - Create new issue (bug, feature, task, epic, chore, decision)
 - `list` - List issues with filters (status, priority, type, assignee)
 - `ready` - Find tasks with no blockers ready to work on
-- `show` - Show detailed issue info including dependencies
+- `show` - Show detailed issue info including dependencies, `comment_count`, and comment bodies
 - `update` - Update issue (status, priority, design, notes, etc). Note: `status="closed"` or `status="open"` automatically route to `close` or `reopen` tools to respect approval workflows
 - `close` - Close completed issue
 - `dep` - Add dependency (blocks, related, parent-child, discovered-from)
 - `comment` - Add a durable, timestamped comment to an issue (a record of work/decisions)
-- `comments` - List all comments on an issue (`show` reports comment_count but not the bodies)
+- `comments` - List only the comment chronology for an issue
 - `note` - Append a note to an issue's notes field
 - `blocked` - Get blocked issues
 - `stats` - Get project statistics
