@@ -220,3 +220,111 @@ func TestFederationVerbsWithoutPeerRow(t *testing.T) {
 	// Proceeding without a row must not create one.
 	assertNoPeerRow("after push, fetch and pull")
 }
+
+// peerLastSyncIsNull reports whether the named peer's federation_peers row has
+// a NULL last_sync. NULL is the precondition the stamp tests start from —
+// last_sync is a one-second DATETIME, so a re-stamp within the same second
+// could otherwise leave the row unchanged and let a run pass without proving
+// anything — and the state a bare Fetch must leave intact (GH#3547).
+func peerLastSyncIsNull(t *testing.T, ctx context.Context, db *sql.DB, name string) bool {
+	t.Helper()
+	var isNull int
+	if err := db.QueryRowContext(ctx,
+		"SELECT last_sync IS NULL FROM federation_peers WHERE name = ?", name).Scan(&isNull); err != nil {
+		t.Fatalf("read last_sync for peer %s: %v", name, err)
+	}
+	return isNull == 1
+}
+
+// TestFederationSyncNotStompedByPeerLastSync reproduces GH#3547: Sync's Fetch
+// ran inside withPeerCredentials, which stamped federation_peers.last_sync
+// after a successful fetch — an uncommitted write between Sync's pre-merge
+// commit and its merge. When the peer's history also changed federation_peers,
+// DOLT_MERGE refused with "local changes would be stomped by merge:
+// federation_peers" on every sync. The stamp belongs after the transfer: the
+// peer row's last_sync is written once the merge has landed, so nothing bd
+// writes lands between the commit and the merge.
+func TestFederationSyncNotStompedByPeerLastSync(t *testing.T) {
+	store, cleanup := setupConcurrentTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+	db := store.db
+
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) "+
+			"VALUES ('stomp-a', 'stomp-a', '', '', '', '', 'open', 2, 'task')"); err != nil {
+		t.Fatalf("seed issue: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'seed issue')"); err != nil {
+		t.Fatalf("commit seed: %v", err)
+	}
+
+	peerDB := uniqueTestDBName(t)
+	remoteURL := "file:///tmp/" + peerDB + "_remote"
+	if err := store.AddFederationPeer(ctx, &storage.FederationPeer{Name: "peer", RemoteURL: remoteURL}); err != nil {
+		t.Fatalf("add federation peer: %v", err)
+	}
+	// Publish with a raw push: PushTo stamps last_sync after a successful
+	// transfer (like PullFrom), and a NULL last_sync is the precondition that
+	// proves who stamped the row.
+	if _, err := db.ExecContext(ctx, "CALL DOLT_PUSH('peer', 'main')"); err != nil {
+		t.Fatalf("raw push to peer remote: %v", err)
+	}
+	if !peerLastSyncIsNull(t, ctx, db, "peer") {
+		t.Fatal("precondition: last_sync must be NULL before the first Sync")
+	}
+	if _, err := db.ExecContext(ctx, "CALL DOLT_CLONE(?, ?)", remoteURL, peerDB); err != nil {
+		t.Fatalf("clone peer database: %v", err)
+	}
+
+	// Commit one more local issue so Sync's merge is a true three-way merge —
+	// the reporter's shape, not a fast-forward.
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) "+
+			"VALUES ('stomp-b', 'stomp-b', '', '', '', '', 'open', 2, 'task')"); err != nil {
+		t.Fatalf("seed divergent local issue: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'local diverges from the peer')"); err != nil {
+		t.Fatalf("commit divergent local issue: %v", err)
+	}
+
+	// The peer commits a federation_peers row of its own — a DIFFERENT row, so
+	// the incoming table change cannot three-way-conflict with a local
+	// last_sync stamp on 'peer'.
+	peerConn, err := sql.Open("mysql", doltutil.ServerDSN{
+		Host: "127.0.0.1", Port: testServerPort, User: "root", Database: peerDB,
+	}.String())
+	if err != nil {
+		t.Fatalf("open peer connection: %v", err)
+	}
+	defer peerConn.Close()
+	peerConn.SetMaxOpenConns(1)
+	for _, q := range []string{
+		"INSERT INTO federation_peers (name, remote_url) VALUES ('peer-of-peer', 'file:///tmp/elsewhere')",
+		"CALL DOLT_COMMIT('-Am', 'peer adds its own federation peer')",
+		"CALL DOLT_PUSH('origin', 'main')",
+	} {
+		if _, err := peerConn.ExecContext(ctx, q); err != nil {
+			t.Fatalf("peer %q: %v", q, err)
+		}
+	}
+
+	// Before the fix this fails with: merge failed: merge branch peer/main:
+	// error: local changes would be stomped by merge: federation_peers.
+	result, err := store.Sync(ctx, "peer", "")
+	if err != nil {
+		t.Fatalf("Sync should merge the peer's federation_peers change, got: %v", err)
+	}
+	if !result.Merged {
+		t.Fatalf("Sync result not merged: %+v", result)
+	}
+	var peerRows int
+	if err := db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM federation_peers WHERE name = 'peer-of-peer'").Scan(&peerRows); err != nil {
+		t.Fatalf("count merged peer rows: %v", err)
+	}
+	if peerRows != 1 {
+		t.Fatalf("Sync merged %d peer-of-peer row(s), want 1", peerRows)
+	}
+}

@@ -638,6 +638,11 @@ func isMissingFederationPeer(err error) bool {
 // it with its own remote error. A name check added in front of this must
 // consult PersistedRemoteInfos as well as ListRemotes, or it rejects a remote
 // persisted on disk that a cold sql-server does not list yet (GH#2118).
+//
+// It records nothing: callers that complete a transfer stamp last_sync
+// themselves, after any merge the transfer needs (GH#3547) — a stamp between
+// Sync's fetch and its merge left federation_peers dirty and DOLT_MERGE
+// refused with "local changes would be stomped by merge".
 func (s *DoltStore) withPeerCredentials(ctx context.Context, peerName string, fn func(creds *remoteCredentials) error) error {
 	peer, err := s.GetFederationPeer(ctx, peerName)
 	if err != nil {
@@ -653,14 +658,7 @@ func (s *DoltStore) withPeerCredentials(ctx context.Context, peerName string, fn
 		creds = &remoteCredentials{username: peer.Username, password: peer.Password}
 	}
 
-	err = fn(creds)
-
-	// Update last sync time on success
-	if err == nil && peer != nil {
-		_ = s.updatePeerLastSync(ctx, peerName) // Best effort: peer sync timestamp is advisory
-	}
-
-	return err
+	return fn(creds)
 }
 
 // FederationPeer is an alias for storage.FederationPeer for convenience.

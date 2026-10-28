@@ -1055,6 +1055,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd federation sync` no longer fails with "local changes would be stomped
+  by merge: federation_peers" (#3547). A successful fetch used to stamp
+  `federation_peers.last_sync` between sync's pre-merge commit and its merge,
+  and the merge refused the very write bd had just made. The peer's `last_sync`
+  is now stamped after the merge (like `metadata.last_sync_<peer>` already
+  was), and a completed push or pull still stamps. Fetching from a peer —
+  including the `bd federation status` probe — no longer writes
+  `federation_peers` at all. `bd federation sync --strategy ours|theirs` now
+  also concludes a genuinely conflicted merge: the merge runs conflict-tolerant
+  and resolves with the chosen strategy instead of failing with Dolt's
+  "@autocommit must be disabled" error.
 - `bd list --watch` and `bd show --watch` now wait a full poll interval after
   each refresh, and `bd list --watch --parent` reads its tree in one
   transaction, so other bd commands on an embedded workspace no longer stall

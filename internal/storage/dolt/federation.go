@@ -413,9 +413,19 @@ func (s *DoltStore) Sync(ctx context.Context, peer string, strategy string) (*Sy
 	// Step 2: Get status before merge
 	beforeCommit, _ := s.GetCurrentCommit(ctx) // Best effort: empty commit hash means diff won't be logged
 
-	// Step 3: Merge peer's branch
+	// Step 3: Merge peer's branch. With an operator strategy the merge runs
+	// through MergeWithStrategy: a bare autocommit DOLT_MERGE rejects any real
+	// conflict ("@autocommit must be disabled ...") before the strategy could
+	// ever run (#4992) — the reporter's `--strategy theirs` never had a chance
+	// against a peer that had bumped its own federation_peers row (GH#3547).
 	remoteBranch := fmt.Sprintf("%s/%s", peer, s.branch)
-	conflicts, err := s.Merge(ctx, remoteBranch)
+	var conflicts []storage.Conflict
+	var err error
+	if strategy == "" {
+		conflicts, err = s.Merge(ctx, remoteBranch)
+	} else {
+		conflicts, err = s.MergeWithStrategy(ctx, remoteBranch, strategy)
+	}
 	if err != nil {
 		result.Error = fmt.Errorf("merge failed: %w", err)
 		return result, result.Error
@@ -431,32 +441,12 @@ func (s *DoltStore) Sync(ctx context.Context, peer string, strategy string) (*Sy
 			return result, result.Error
 		}
 
-		// Auto-resolve using strategy
-		for _, c := range conflicts {
-			if err := s.ResolveConflicts(ctx, c.Field, strategy); err != nil {
-				result.Error = fmt.Errorf("conflict resolution failed for %s: %w", c.Field, err)
-				return result, result.Error
-			}
-		}
+		// MergeWithStrategy already resolved every conflicted table with the
+		// operator's strategy, committed the resolution (including config),
+		// and ran the is_blocked recompute over the merge+resolution window;
+		// the bare-Merge path above never gets here with a strategy, because
+		// it refuses a real conflict before conflicts can be returned as data.
 		result.ConflictsResolved = true
-
-		// Commit the resolution INCLUDING config: the operator chose this
-		// strategy, and plain Commit excludes config (GH#2455). A config-only
-		// conflict — routine now that kv.memory.* memories sync through config —
-		// would otherwise resolve but never commit, leaving the merge
-		// unconcluded and re-wedging the next sync.
-		if err := s.CommitMergeResolution(ctx, fmt.Sprintf("Resolve conflicts from %s using %s strategy", peer, strategy)); err != nil {
-			result.Error = fmt.Errorf("failed to commit conflict resolution: %w", err)
-			return result, result.Error
-		}
-
-		// bd-578h9.11: the conflicted merge skipped the automatic is_blocked
-		// recompute (unresolved rows would have fed it garbage); now that the
-		// resolution is committed, cover the whole merge+resolution window.
-		if err := s.RecomputeBlockedAfterMerge(ctx, beforeCommit); err != nil {
-			result.Error = fmt.Errorf("conflicts resolved but is_blocked recompute failed: %w", err)
-			return result, result.Error
-		}
 	}
 	result.Merged = true
 

@@ -216,3 +216,63 @@ func TestPullFromReportsOperatorConflicts(t *testing.T) {
 		t.Errorf("local title = %q after refused pull, want %q", title, "ours")
 	}
 }
+
+// TestSyncMergesPeerFederationPeersChangeAfterFetch reproduces GH#3547: Sync
+// fetches through withPeerCredentials, which writes federation_peers.last_sync
+// after a successful fetch, outside any commit. When the peer's history also
+// bumped last_sync on that row, the following bare-autocommit DOLT_MERGE hits
+// a federation_peers conflict and rolls back before Sync can apply the
+// operator's --strategy, so `bd federation sync --strategy theirs` fails on
+// every invocation. Sync must complete with the chosen strategy.
+func TestSyncMergesPeerFederationPeersChangeAfterFetch(t *testing.T) {
+	store, cleanup := setupConcurrentTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+	db := store.db
+
+	// Start from a clean working set (the fixture's config rows).
+	if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'seed')"); err != nil {
+		t.Fatalf("commit seed: %v", err)
+	}
+
+	peerDB := uniqueTestDBName(t)
+	remoteURL := "file:///tmp/" + peerDB + "_remote"
+	if err := store.AddFederationPeer(ctx, &storage.FederationPeer{Name: "peer", RemoteURL: remoteURL}); err != nil {
+		t.Fatalf("add federation peer: %v", err)
+	}
+	if err := store.PushTo(ctx, "peer"); err != nil {
+		t.Fatalf("push to peer remote: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "CALL DOLT_CLONE(?, ?)", remoteURL, peerDB); err != nil {
+		t.Fatalf("clone peer database: %v", err)
+	}
+
+	// Peer's history modifies the same federation_peers row Sync's post-fetch
+	// bookkeeping writes (last_sync), as the peer's own syncs do.
+	peerConn, err := sql.Open("mysql", doltutil.ServerDSN{
+		Host: "127.0.0.1", Port: testServerPort, User: "root", Database: peerDB,
+	}.String())
+	if err != nil {
+		t.Fatalf("open peer connection: %v", err)
+	}
+	defer peerConn.Close()
+	peerConn.SetMaxOpenConns(1)
+	for _, q := range []string{
+		"UPDATE federation_peers SET last_sync = '2026-01-01 00:00:00' WHERE name = 'peer'",
+		"CALL DOLT_COMMIT('-Am', 'peer records its own sync of the shared peer row')",
+		"CALL DOLT_PUSH('origin', 'main')",
+	} {
+		if _, err := peerConn.ExecContext(ctx, q); err != nil {
+			t.Fatalf("peer %q: %v", q, err)
+		}
+	}
+
+	result, err := store.Sync(ctx, "peer", "theirs")
+	if err != nil {
+		t.Fatalf("Sync should merge the peer's federation_peers change, got: %v", err)
+	}
+	if !result.Merged {
+		t.Fatalf("Sync result not merged: %+v", result)
+	}
+}
