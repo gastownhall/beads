@@ -246,3 +246,67 @@ func TestDoltStoreDependencyEditorRemoveCommitsUnblock(t *testing.T) {
 		t.Fatal("HEAD still has test-dep-unflip-b is_blocked=1 after its only blocker was removed")
 	}
 }
+
+// TestDoltStoreDependencyEditorNonFlippingAddLeavesPendingIssuesUncommitted
+// is the GH#2455 half of the GH#6647 staging rule: `issues` is staged only
+// when the edge flipped a durable is_blocked. A blocking edge onto a closed
+// target flips nothing, so another writer's pending issues edit must not ride
+// the edge's commit.
+func TestDoltStoreDependencyEditorNonFlippingAddLeavesPendingIssuesUncommitted(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+	seedIssues(ctx, t, store, "test-dep-closed-b", "test-dep-closed-c", "test-dep-closed-d")
+	if _, err := store.db.ExecContext(ctx,
+		"UPDATE issues SET status = 'closed', closed_at = NOW() WHERE id = 'test-dep-closed-d'"); err != nil {
+		t.Fatalf("close target: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'seed closed target')"); err != nil && !isDoltNothingToCommit(err) {
+		t.Fatalf("commit seed: %v", err)
+	}
+	requireCleanTables(ctx, t, store, "issues", "dependencies")
+
+	// A pending issues edit that belongs to nobody's transaction.
+	if _, err := store.db.ExecContext(ctx,
+		"UPDATE issues SET title = 'pending elsewhere' WHERE id = 'test-dep-closed-c'"); err != nil {
+		t.Fatalf("stage a pending title edit: %v", err)
+	}
+
+	editor, err := store.DependencyEditor()
+	if err != nil {
+		t.Fatalf("DependencyEditor(): %v", err)
+	}
+	if _, err := editor.AddDependencies(ctx, publicops.AddDependenciesRequest{
+		Actor: "writer",
+		Edges: []publicops.DependencyEdge{{IssueID: "test-dep-closed-b", DependsOnID: "test-dep-closed-d", Type: publicops.DepBlocks}},
+	}); err != nil {
+		t.Fatalf("AddDependencies: %v", err)
+	}
+
+	requireCleanTables(ctx, t, store, "dependencies")
+	var edges int
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM dependencies AS OF 'HEAD' WHERE issue_id = 'test-dep-closed-b' AND depends_on_issue_id = 'test-dep-closed-d'").Scan(&edges); err != nil {
+		t.Fatalf("read HEAD edge: %v", err)
+	}
+	if edges != 1 {
+		t.Fatalf("HEAD has %d edges B->D, want 1", edges)
+	}
+	var headTitle string
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT title FROM issues AS OF 'HEAD' WHERE id = 'test-dep-closed-c'").Scan(&headTitle); err != nil {
+		t.Fatalf("read HEAD title: %v", err)
+	}
+	if headTitle != "test-dep-closed-c" {
+		t.Fatalf("HEAD title of test-dep-closed-c = %q: the non-flipping add swept a pending issues edit into its commit", headTitle)
+	}
+	var dirty int
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM dolt_status WHERE table_name = 'issues'").Scan(&dirty); err != nil {
+		t.Fatalf("query dolt_status: %v", err)
+	}
+	if dirty == 0 {
+		t.Fatal("issues is clean: the non-flipping add committed a row it never wrote")
+	}
+}
