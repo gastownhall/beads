@@ -153,6 +153,203 @@ func TestMergeSettleDrainsCallResultSets(t *testing.T) {
 			})
 		}
 	})
+
+	// A converted CALL's error must reach the caller exactly as before: same
+	// wrapper text, and errors.Is still finds the driver's error. The two
+	// DOLT_MERGE sites still swallow "up to date".
+	t.Run("errors_preserved", func(t *testing.T) {
+		ctx := context.Background()
+		upToDate := errors.New("Already up to date.")
+		for _, tc := range []struct {
+			name  string
+			setup func(mock sqlmock.Sqlmock, cause error)
+			run   func(db DBConn) error
+			// want is the returned error's text; "" means nil.
+			want string
+		}{
+			{
+				name: "MergeAndSettle DOLT_MERGE",
+				setup: func(mock sqlmock.Sqlmock, cause error) {
+					expectWorkingSetClean(mock)
+					expectConflictFlags(mock)
+					mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_MERGE(?)")).WithArgs("origin/main").WillReturnError(cause)
+					expectConflicts(mock)
+					expectConflicts(mock)
+					expectNoViolations(mock)
+					expectDrainedCall(mock, "CALL DOLT_MERGE('--abort')")
+				},
+				run:  func(db DBConn) error { return MergeAndSettleWithStrategy(ctx, db, "origin/main", "") },
+				want: "injected",
+			},
+			{
+				name: "MergeAndSettle DOLT_MERGE up to date",
+				setup: func(mock sqlmock.Sqlmock, _ error) {
+					expectWorkingSetClean(mock)
+					expectConflictFlags(mock)
+					mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_MERGE(?)")).WithArgs("origin/main").WillReturnError(upToDate)
+					expectConflicts(mock)
+					expectConflicts(mock)
+					expectNoViolations(mock)
+				},
+				run: func(db DBConn) error { return MergeAndSettleWithStrategy(ctx, db, "origin/main", "") },
+			},
+			{
+				name: "MergeWithStrategy DOLT_MERGE",
+				setup: func(mock sqlmock.Sqlmock, cause error) {
+					expectWorkingSetClean(mock)
+					expectConflictFlags(mock)
+					mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_MERGE('--author', ?, ?)")).
+						WithArgs(testAuthor, "feature").WillReturnError(cause)
+					expectConflicts(mock)
+					expectDrainedCall(mock, "CALL DOLT_MERGE('--abort')")
+				},
+				run: func(db DBConn) error {
+					_, err := MergeWithStrategy(ctx, db, "feature", testAuthor, "theirs")
+					return err
+				},
+				want: "merge branch feature: injected",
+			},
+			{
+				name: "MergeWithStrategy DOLT_MERGE up to date",
+				setup: func(mock sqlmock.Sqlmock, _ error) {
+					expectWorkingSetClean(mock)
+					expectConflictFlags(mock)
+					mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_MERGE('--author', ?, ?)")).
+						WithArgs(testAuthor, "feature").WillReturnError(upToDate)
+					expectConflicts(mock)
+				},
+				run: func(db DBConn) error {
+					_, err := MergeWithStrategy(ctx, db, "feature", testAuthor, "theirs")
+					return err
+				},
+			},
+			{
+				name: "SettleMerge strategy DOLT_ADD",
+				setup: func(mock sqlmock.Sqlmock, cause error) {
+					expectConflicts(mock, "wisps")
+					expectConflicts(mock, "wisps")
+					expectDrainedCall(mock, "CALL DOLT_CONFLICTS_RESOLVE('--theirs', 'wisps')")
+					mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD(?)")).WithArgs("wisps").WillReturnError(cause)
+					expectDrainedCall(mock, "CALL DOLT_MERGE('--abort')")
+				},
+				run:  func(db DBConn) error { return SettleMerge(ctx, db, nil, true, "theirs") },
+				want: "stage resolved wisps: injected",
+			},
+			{
+				name: "SettleMerge strategy DOLT_COMMIT",
+				setup: func(mock sqlmock.Sqlmock, cause error) {
+					expectConflicts(mock, "wisps")
+					expectConflicts(mock, "wisps")
+					expectDrainedCall(mock, "CALL DOLT_CONFLICTS_RESOLVE('--theirs', 'wisps')")
+					expectDrainedCall(mock, "CALL DOLT_ADD(?)", "wisps")
+					expectNoViolations(mock)
+					mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', ?)")).
+						WithArgs("Resolve merge conflicts using 'theirs' strategy").WillReturnError(cause)
+					expectDrainedCall(mock, "CALL DOLT_MERGE('--abort')")
+				},
+				run:  func(db DBConn) error { return SettleMerge(ctx, db, nil, true, "theirs") },
+				want: "conflicts resolved but commit failed: injected",
+			},
+			{
+				name: "auto-resolve config DOLT_CONFLICTS_RESOLVE",
+				setup: func(mock sqlmock.Sqlmock, cause error) {
+					expectConflicts(mock, "config")
+					mock.ExpectQuery(regexp.QuoteMeta("SELECT our_key, their_key FROM dolt_conflicts_config")).
+						WillReturnRows(sqlmock.NewRows([]string{"our_key", "their_key"}).AddRow("kv.memory.a", "kv.memory.a"))
+					mock.ExpectQuery(regexp.QuoteMeta("SELECT COALESCE(our_key, their_key) FROM dolt_conflicts_config")).
+						WillReturnRows(sqlmock.NewRows([]string{"key"}))
+					mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_CONFLICTS_RESOLVE('--theirs', 'config')")).WillReturnError(cause)
+				},
+				run:  func(db DBConn) error { _, err := TryAutoResolveMergeConflicts(ctx, db); return err },
+				want: "failed to resolve config conflicts: injected",
+			},
+			{
+				name: "auto-resolve metadata DOLT_CONFLICTS_RESOLVE",
+				setup: func(mock sqlmock.Sqlmock, cause error) {
+					expectConflicts(mock, "metadata")
+					mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_CONFLICTS_RESOLVE('--theirs', 'metadata')")).WillReturnError(cause)
+				},
+				run:  func(db DBConn) error { _, err := TryAutoResolveMergeConflicts(ctx, db); return err },
+				want: "failed to resolve metadata conflicts: injected",
+			},
+			{
+				name: "auto-resolve DOLT_ADD",
+				setup: func(mock sqlmock.Sqlmock, cause error) {
+					expectConflicts(mock, "metadata")
+					expectDrainedCall(mock, "CALL DOLT_CONFLICTS_RESOLVE('--theirs', 'metadata')")
+					mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD('metadata')")).WillReturnError(cause)
+				},
+				run:  func(db DBConn) error { _, err := TryAutoResolveMergeConflicts(ctx, db); return err },
+				want: "failed to stage metadata: injected",
+			},
+			{
+				name: "CommitResolvedConflicts DOLT_COMMIT",
+				setup: func(mock sqlmock.Sqlmock, cause error) {
+					mock.ExpectQuery(regexp.QuoteMeta(autoResolveCommitCall)).WillReturnError(cause)
+				},
+				run:  func(db DBConn) error { return CommitResolvedConflicts(ctx, db) },
+				want: "failed to commit resolved conflicts: injected",
+			},
+			{
+				name: "schema_migrations DOLT_CONFLICTS_RESOLVE",
+				setup: func(mock sqlmock.Sqlmock, cause error) {
+					mock.ExpectQuery(regexp.QuoteMeta("SELECT our_version, our_content_hash, their_content_hash")).
+						WillReturnRows(sqlmock.NewRows([]string{"our_version", "our_content_hash", "their_content_hash"}))
+					mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_CONFLICTS_RESOLVE('--ours', 'schema_migrations')")).WillReturnError(cause)
+				},
+				run:  func(db DBConn) error { return resolveSchemaMigrationsVintageConflicts(ctx, db) },
+				want: "failed to resolve schema_migrations conflicts: injected",
+			},
+			{
+				name: "FK cascade repair DOLT_ADD",
+				setup: func(mock sqlmock.Sqlmock, cause error) {
+					expectViolations(mock, "labels")
+					mock.ExpectQuery(regexp.QuoteMeta("SELECT violation_type, violation_info FROM dolt_constraint_violations_labels")).
+						WillReturnRows(sqlmock.NewRows([]string{"violation_type", "violation_info"}).
+							AddRow("foreign key", `{"ReferencedTable":"issues"}`))
+					mock.ExpectExec(regexp.QuoteMeta(fkCascadeRepairDeletes["labels"])).
+						WillReturnResult(sqlmock.NewResult(0, 2))
+					mock.ExpectExec(regexp.QuoteMeta("DELETE FROM dolt_constraint_violations_labels")).
+						WillReturnResult(sqlmock.NewResult(0, 1))
+					mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD('labels')")).WillReturnError(cause)
+				},
+				run:  func(db DBConn) error { _, _, err := TryRepairFKCascadeViolations(ctx, db); return err },
+				want: "stage repaired labels: injected",
+			},
+			{
+				name: "ResolveConflicts DOLT_CONFLICTS_RESOLVE",
+				setup: func(mock sqlmock.Sqlmock, cause error) {
+					mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_CONFLICTS_RESOLVE('--theirs', 'wisps')")).WillReturnError(cause)
+				},
+				run:  func(db DBConn) error { return ResolveConflicts(ctx, db, "wisps", "theirs") },
+				want: "resolve conflicts: injected",
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				rec, mock := newDrainMock(t)
+				cause := errors.New("injected")
+				tc.setup(mock, cause)
+
+				err := tc.run(rec)
+				switch {
+				case tc.want == "":
+					if err != nil {
+						t.Errorf("err = %v, want nil", err)
+					}
+				case err == nil:
+					t.Errorf("err = nil, want %q", tc.want)
+				default:
+					if err.Error() != tc.want {
+						t.Errorf("err = %q, want %q", err.Error(), tc.want)
+					}
+					if !errors.Is(err, cause) {
+						t.Errorf("errors.Is(%v, injected cause) = false", err)
+					}
+				}
+				rec.assertDrained(t, mock)
+			})
+		}
+	})
 }
 
 const testAuthor = "Tester <tester@example.com>"
