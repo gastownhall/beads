@@ -340,6 +340,30 @@ func TestEmbeddedDepAAddRejectionsAndBulk(t *testing.T) {
 		}
 	})
 
+	t.Run("add_bulk_file_unresolved_warns", func(t *testing.T) {
+		a := bdCreate(t, bd, dir, "Bulk unresolved A", "--type", "task")
+		b := bdCreate(t, bd, dir, "Bulk unresolved B", "--type", "task")
+		path := filepath.Join(t.TempDir(), "unresolved-deps.jsonl")
+		body := fmt.Sprintf("{\"from\":%q,\"to\":%q}\n{\"from\":%q,\"to\":\"zz-405\"}\n", a.ID, b.ID, a.ID)
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatalf("write deps file: %v", err)
+		}
+
+		stdout, stderr := bdRunSplit(t, bd, dir, "dep", "add", "--file", path)
+		if !strings.Contains(stdout, "Added 2 dependencies") {
+			t.Fatalf("stdout = %q, want the bulk add summary", stdout)
+		}
+		if !strings.Contains(stderr, "warning: line 2: ") || !strings.Contains(stderr, "zz-405 was not found") {
+			t.Fatalf("stderr = %q, want the unresolved-target warning for line 2 naming zz-405", stderr)
+		}
+		if strings.Contains(stderr, "line 1:") {
+			t.Errorf("stderr = %q, want no warning for line 1 (a resolved local edge)", stderr)
+		}
+		if got := bdShowDetails(t, bd, dir, a.ID)["dependency_count"]; got != float64(2) {
+			t.Fatalf("dependency_count = %v, want 2: both edges must be written", got)
+		}
+	})
+
 	t.Run("add_bulk_file_validation_no_partial_mutation", func(t *testing.T) {
 		v1 := bdCreate(t, bd, dir, "Bulk validation A", "--type", "task")
 		v2 := bdCreate(t, bd, dir, "Bulk validation B", "--type", "task")

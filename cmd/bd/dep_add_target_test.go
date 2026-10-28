@@ -349,10 +349,11 @@ func TestDepAddBulkProxiedRefusesDepsSpecTarget(t *testing.T) {
 // all validateBulkDepEdges needs to reach its target decision: the source has
 // to resolve (or the line fails earlier with "resolving issue ID"), and the
 // target has to not resolve anywhere (or the decision point is skipped).
-// Four methods carry that. SearchIssues is ResolvePartialID's fast path and
-// GetIssue is resolveAndGetFromStore's follow-up; GetConfig and GetAllConfig
-// are consulted by the prefix-routing and auto-routing fallbacks the target
-// falls through on its way to failing. Nothing here opens a store, so this
+// Five methods carry that. SearchIssues is ResolvePartialID's fast path and
+// SearchIssueIDs its substring fallback (reached by a hash-shaped target such
+// as xy-999); GetIssue is resolveAndGetFromStore's follow-up; GetConfig and
+// GetAllConfig are consulted by the prefix-routing and auto-routing fallbacks
+// the target falls through on its way to failing. Nothing here opens a store, so this
 // needs no cgo build tag and no container — the same reason the proxied pins
 // above are cheap.
 type bulkDepStubStore struct {
@@ -366,6 +367,10 @@ func (s *bulkDepStubStore) SearchIssues(_ context.Context, _ string, filter type
 			return []*types.Issue{{ID: s.resolvableID}}, nil
 		}
 	}
+	return nil, nil
+}
+
+func (s *bulkDepStubStore) SearchIssueIDs(_ context.Context, _ string, _ types.IssueFilter) ([]string, error) {
 	return nil, nil
 }
 
@@ -409,6 +414,41 @@ func TestValidateBulkDepEdgesRefusesDepsSpecTarget(t *testing.T) {
 	if !strings.Contains(err.Error(), "line 1:") ||
 		!strings.Contains(err.Error(), "bd dep add be-abc ga-dguvnb --type discovered-from") {
 		t.Errorf("bulk validation error = %q, want the per-line target refusal", err.Error())
+	}
+}
+
+// TestValidateBulkDepEdgesMarksUnverifiedTarget is the --file wiring pin for
+// the GH#6556 warning: validateBulkDepEdges must carry the helper's unverified
+// signal onto the edge, or addBulkDependencies has nothing to warn about. A
+// well-formed external: ref is not unverified (the external-deps resolver
+// owns it).
+func TestValidateBulkDepEdgesMarksUnverifiedTarget(t *testing.T) {
+	oldStore := store
+	t.Cleanup(func() { store = oldStore })
+	store = &bulkDepStubStore{resolvableID: "be-abc"}
+
+	resolved, err := validateBulkDepEdges(context.Background(), []bulkDepEdge{
+		{Line: 1, IssueID: "be-abc", DependsOnID: "xy-999", Type: types.DepBlocks},
+		{Line: 2, IssueID: "be-abc", DependsOnID: "external:proj:cap", Type: types.DepBlocks},
+	})
+	if err != nil {
+		t.Fatalf("validateBulkDepEdges: unexpected error: %v", err)
+	}
+	t.Cleanup(func() {
+		for _, edge := range resolved {
+			for _, cleanup := range edge.Cleanups {
+				cleanup()
+			}
+		}
+	})
+	if len(resolved) != 2 {
+		t.Fatalf("validateBulkDepEdges returned %d edges, want 2", len(resolved))
+	}
+	if !resolved[0].Unverified {
+		t.Errorf("line 1 (be-abc -> xy-999): Unverified = false, want true")
+	}
+	if resolved[1].Unverified {
+		t.Errorf("line 2 (be-abc -> external:proj:cap): Unverified = true, want false")
 	}
 }
 

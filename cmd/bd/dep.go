@@ -629,6 +629,11 @@ type bulkDepEdge struct {
 	Store     storage.DoltStorage
 	StoreKey  string
 	Cleanups  []func()
+
+	// Unverified is true when the target resolved nowhere and was accepted
+	// as a bare cross-prefix reference (resolveUnresolvedDepTarget's outcome
+	// 3); addBulkDependencies warns about it once the batch is stored.
+	Unverified bool
 }
 
 func addBulkDependencies(cmd *cobra.Command, file string, defaultType string) error {
@@ -695,6 +700,14 @@ func addBulkDependencies(cmd *cobra.Command, file string, defaultType string) er
 				warnImplicitBlocksDefault(edge.Type, false)
 				break
 			}
+		}
+	}
+	// One notice per unverified edge, in input order: each names its own
+	// line and remove command. The batch is all-or-nothing, so reaching here
+	// means every one of them was stored.
+	for _, edge := range resolved {
+		if edge.Unverified {
+			warnUnresolvedDepTarget(fmt.Sprintf("line %d: ", edge.Line), edge.IssueID, edge.DependsOnID)
 		}
 	}
 
@@ -830,7 +843,7 @@ func validateBulkDepEdges(ctx context.Context, edges []bulkDepEdge) ([]bulkDepEd
 				// --file used to carry its own copy of the cross-prefix ladder,
 				// which left the be-gmdx5 "type:id" shape accepted and stored
 				// here after the positional path started refusing it.
-				toID, _, err = resolveUnresolvedDepTarget(current.IssueID, edge.DependsOnID, err)
+				toID, current.Unverified, err = resolveUnresolvedDepTarget(current.IssueID, edge.DependsOnID, err)
 				if err != nil {
 					errs = append(errs, fmt.Sprintf("line %d: %v", edge.Line, err))
 					resolved = append(resolved, current)
