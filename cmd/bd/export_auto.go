@@ -999,12 +999,17 @@ func saveExportAutoState(beadsDir string, state *exportAutoState) {
 	}
 }
 
-// gitAddFile stages a file in the enclosing git repo. When called from
-// inside a git hook, it scrubs inherited GIT_* env vars (so git
-// rediscovers the repo from cwd rather than treating cmd.Dir as the
-// worktree root) and skips staging when the target is outside the hook's
+// gitAddFile stages a file in the enclosing git repo, in the index the
+// running commit uses. When called from inside a git hook, it scrubs
+// inherited GIT_* env vars (so git rediscovers the repo from cwd rather than
+// treating cmd.Dir as the worktree root) and then, through gitIndexEnv,
+// puts an inherited contained GIT_INDEX_FILE back: during `git commit --
+// <paths>` and `git commit -a` git runs hooks with GIT_INDEX_FILE naming
+// the index it will commit from, while the parent holds <gitdir>/index.lock
+// (GH#4080). It skips staging when the target is outside the hook's
 // worktree (the .beads/redirect case, where staging would pollute the
-// main repo's index). See GH#3311, scrubGitHookEnv, hookWorkTreeRoot.
+// main repo's index). See GH#3311, scrubGitHookEnv, gitIndexEnv,
+// hookWorkTreeRoot.
 func gitAddFile(path string) error {
 	if wt := hookWorkTreeRoot(); wt != "" && !pathInsideDir(path, wt) {
 		// Running inside a hook AND target is outside the hook's worktree.
@@ -1012,15 +1017,25 @@ func gitAddFile(path string) error {
 		return nil
 	}
 
-	env := scrubGitHookEnv(os.Environ())
-	if lockPath, err := gitIndexLockPath(path, env); err == nil && lockPath != "" {
+	env, indexFile, err := gitIndexEnv(filepath.Dir(path))
+	if err != nil {
+		// Same toleration as when the preflight could not resolve the repo
+		// before GH#4080: resolve failures must not block the staging
+		// attempt itself.
+		debug.Logf("auto-export: git add lock preflight skipped: %v\n", err)
+	} else if indexFile != "" {
+		// Preflight the lock git add itself would take: <index>.lock. For a
+		// pathspec commit that is next-index-<pid>.lock.lock — the parent's
+		// held <gitdir>/index.lock is not that lock (it is the real index
+		// git commit -a is building, and <gitdir>/index.lock.lock is what
+		// collides there). <gitdir>/index.lock is checked only when nothing
+		// is honored.
+		lockPath := indexFile + ".lock"
 		if _, statErr := os.Stat(lockPath); statErr == nil {
 			return fmt.Errorf("git index is locked at %s; skipping auto-stage", lockPath)
 		} else if !os.IsNotExist(statErr) {
 			return fmt.Errorf("failed to check git index lock %s: %w", lockPath, statErr)
 		}
-	} else if err != nil {
-		debug.Logf("auto-export: git add lock preflight skipped: %v\n", err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), gitAddTimeout)
@@ -1052,30 +1067,78 @@ func gitAddFile(path string) error {
 	return nil
 }
 
-func gitIndexLockPath(path string, env []string) (string, error) {
+// gitIndexEnv returns the environment for a git child, run in dir, that
+// reads or writes the index, plus the absolute path of the index that child
+// will use. It is scrubGitHookEnv(os.Environ()) with an inherited
+// GIT_INDEX_FILE put back only when that value names an existing regular
+// file directly inside the git dir that dir resolves to (`index` for a
+// plain commit, `index.lock` for `git commit -a`, `next-index-<pid>.lock`
+// for `git commit -- <paths>`).
+//
+// Containment is two-sided (GH#4080): an inherited index is honored only
+// when it is an existing regular file — symlinks are rejected and the path
+// is never created — whose parent directory is the git dir itself, not a
+// descendant. os.SameFile does that comparison so /tmp -> /private/tmp,
+// Windows case folding, and 8.3 short names cannot break it, where a string
+// prefix check would also accept <gitdir>/modules/<name>/index. Anything
+// else falls back to the discovered <gitdir>/index, the pre-GH#4080
+// behavior.
+func gitIndexEnv(dir string) (env []string, indexFile string, err error) {
+	env = scrubGitHookEnv(os.Environ())
+
 	ctx, cancel := context.WithTimeout(context.Background(), gitAddTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--git-dir")
-	cmd.Dir = filepath.Dir(path)
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--absolute-git-dir")
+	cmd.Dir = dir
 	cmd.Env = env
 	out, err := cmd.CombinedOutput()
 	if ctx.Err() == context.DeadlineExceeded {
-		return "", fmt.Errorf("git rev-parse timed out after %s", gitAddTimeout)
+		return env, "", fmt.Errorf("git rev-parse timed out after %s", gitAddTimeout)
 	}
 	if err != nil {
 		if trimmed := strings.TrimSpace(string(out)); trimmed != "" {
-			return "", fmt.Errorf("%w: %s", err, trimmed)
+			return env, "", fmt.Errorf("%w: %s", err, trimmed)
 		}
-		return "", err
+		return env, "", err
 	}
 	gitDir := strings.TrimSpace(string(out))
 	if gitDir == "" {
-		return "", nil
+		return env, "", nil
 	}
-	if !filepath.IsAbs(gitDir) {
-		gitDir = filepath.Join(filepath.Dir(path), gitDir)
+	indexFile = filepath.Join(gitDir, "index")
+
+	value, ok := execenv.LookupForOS(os.Environ(), "GIT_INDEX_FILE", hookEnvGOOS)
+	if !ok || value == "" {
+		return env, indexFile, nil
 	}
-	return filepath.Join(gitDir, "index.lock"), nil
+	// Absolutize against the process cwd: hooks run from the worktree top,
+	// which is the base git itself uses for a relative value (and the base
+	// hookWorkTreeRoot already uses for GIT_DIR). Never join with dir (the
+	// export parent, .beads) — a root-relative value would resolve under
+	// .beads instead of the worktree root.
+	abs, absErr := filepath.Abs(value)
+	if absErr != nil {
+		debug.Logf("git: ignoring inherited GIT_INDEX_FILE %q: %v\n", value, absErr)
+		return env, indexFile, nil
+	}
+	info, statErr := os.Lstat(abs)
+	if statErr != nil || !info.Mode().IsRegular() {
+		debug.Logf("git: ignoring inherited GIT_INDEX_FILE %q: not an existing regular file in %s\n", value, gitDir)
+		return env, indexFile, nil
+	}
+	gitDirInfo, statErr := os.Stat(gitDir)
+	if statErr != nil {
+		debug.Logf("git: ignoring inherited GIT_INDEX_FILE %q: git dir %s: %v\n", value, gitDir, statErr)
+		return env, indexFile, nil
+	}
+	parentInfo, statErr := os.Stat(filepath.Dir(abs))
+	if statErr != nil || !os.SameFile(parentInfo, gitDirInfo) {
+		debug.Logf("git: ignoring inherited GIT_INDEX_FILE %q: not an index in %s\n", value, gitDir)
+		return env, indexFile, nil
+	}
+	// The scrub removed every key variant, so exactly one entry comes back.
+	env = append(env, "GIT_INDEX_FILE="+abs)
+	return env, abs, nil
 }
 
 // hookEnvGOOS lets both hook filters exercise either key policy on every test host.
@@ -1088,7 +1151,13 @@ var hookEnvGOOS = runtime.GOOS
 // unconditional: if a user has intentionally exported any of these vars
 // for scripting purposes, they will be stripped from the git-add child
 // process. That is the correct trade-off here; we never want beads'
-// auto-stage to honor a GIT_DIR pointing at an unrelated repo.
+// auto-stage to honor a GIT_DIR pointing at an unrelated repo. The one
+// deliberate exception is GIT_INDEX_FILE, which index-touching git
+// children (gitAddFile, preCommitHasStagedBeadsFiles,
+// isExportFileStagedForDeletion) put back through gitIndexEnv, and only
+// when the inherited value is contained in the staging repo's git dir —
+// during `git commit -- <paths>` and `-a` that value is how git tells hooks
+// which index the pending commit is built from (GH#4080).
 //
 // Covered vars:
 //   - Repo/worktree discovery: GIT_DIR, GIT_WORK_TREE, GIT_COMMON_DIR,

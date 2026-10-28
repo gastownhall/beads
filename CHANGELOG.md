@@ -1055,6 +1055,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Auto-export no longer drops the export from a pathspec commit
+  (`git commit -- <paths>`, also `git commit -a`). During those commits git
+  runs the pre-commit hook with `GIT_INDEX_FILE` naming the index the
+  commit is built from, while the parent holds `<gitdir>/index.lock`;
+  beads used to scrub that variable, target the on-disk real index, and
+  skip staging on the lock. The export now stages into the pending commit's
+  index when — and only when — the inherited index is an existing file
+  directly inside the repo's git dir (#4080).
 - `bd list --watch` and `bd show --watch` now wait a full poll interval after
   each refresh, and `bd list --watch --parent` reads its tree in one
   transaction, so other bd commands on an embedded workspace no longer stall

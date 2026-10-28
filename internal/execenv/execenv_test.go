@@ -174,6 +174,33 @@ func TestLookupUsesLastEffectiveValue(t *testing.T) {
 	}
 }
 
+// TestLookupForOSUsesLastEffectiveValue checks the explicit-goos wrapper the
+// git hook index filter shares with the scrub: last-wins duplicates, with
+// case folding only under the windows key policy.
+func TestLookupForOSUsesLastEffectiveValue(t *testing.T) {
+	env := []string{
+		"TARGET=first",
+		"target=mixed-case",
+		"TARGET=last",
+		"MALFORMED",
+	}
+	value, ok := LookupForOS(env, "TARGET", "linux")
+	if !ok || value != "last" {
+		t.Fatalf("LookupForOS(TARGET, linux) = %q, %v; want last, true", value, ok)
+	}
+	value, ok = LookupForOS(env, "target", "linux")
+	if !ok || value != "mixed-case" {
+		t.Fatalf("LookupForOS(target, linux) = %q, %v; want mixed-case, true", value, ok)
+	}
+	value, ok = LookupForOS(env, "target", "windows")
+	if !ok || value != "last" {
+		t.Fatalf("LookupForOS(target, windows) = %q, %v; want last, true", value, ok)
+	}
+	if value, ok = LookupForOS(env, "MISSING", "windows"); ok || value != "" {
+		t.Fatalf("LookupForOS(MISSING, windows) = %q, %v; want empty, false", value, ok)
+	}
+}
+
 func TestContainsKeyWithPrefixUsesKeyIdentity(t *testing.T) {
 	env := []string{
 		"MALFORMED",
