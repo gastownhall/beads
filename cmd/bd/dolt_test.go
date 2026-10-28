@@ -3358,4 +3358,97 @@ func TestDoltPushPositionalRemoteIsNotSilentlyIgnored(t *testing.T) {
 			}
 		})
 	}
+
+	// AC-4 regression rows: the default-remote path (consent-gated git-origin
+	// adoption, no-remote skip) and the --remote flag are unchanged by the
+	// positional. These pass on the base commit; they pin it there.
+	t.Run("bd dolt push 1st --remote 1st accepts the one remote named twice", func(t *testing.T) {
+		resetDoltTransferFlags(t)
+		if err := doltPushCmd.Flags().Set("remote", "1st"); err != nil {
+			t.Fatal(err)
+		}
+		fake := &positionalRemotePushStore{}
+		store = fake
+		out := captureStdout(t, func() error { return run(t, doltPushCmd, []string{"1st"}) })
+		if fake.defaultPushCalled {
+			t.Errorf("same remote named twice pushed to the default remote; output: %q", out)
+		}
+		if len(fake.pushedRemotes) != 1 || fake.pushedRemotes[0] != "1st" {
+			t.Errorf("--remote 1st plus positional 1st: want PushRemote(\"1st\"), got %v; output: %q", fake.pushedRemotes, out)
+		}
+	})
+
+	t.Run("bd dolt pull 1st --remote 1st accepts the one remote named twice", func(t *testing.T) {
+		resetDoltTransferFlags(t)
+		if err := doltPullCmd.Flags().Set("remote", "1st"); err != nil {
+			t.Fatal(err)
+		}
+		fake := &positionalRemotePushStore{}
+		store = fake
+		out := captureStdout(t, func() error { return run(t, doltPullCmd, []string{"1st"}) })
+		if fake.defaultPulls != 0 {
+			t.Errorf("same remote named twice pulled from the default remote; output: %q", out)
+		}
+		if len(fake.pulledRemotes) != 1 || fake.pulledRemotes[0] != "1st" {
+			t.Errorf("--remote 1st plus positional 1st: want PullRemote(\"1st\"), got %v; output: %q", fake.pulledRemotes, out)
+		}
+	})
+
+	t.Run("bd dolt push --remote 1st keeps targeting 1st", func(t *testing.T) {
+		resetDoltTransferFlags(t)
+		if err := doltPushCmd.Flags().Set("remote", "1st"); err != nil {
+			t.Fatal(err)
+		}
+		fake := &positionalRemotePushStore{}
+		store = fake
+		out := captureStdout(t, func() error { return run(t, doltPushCmd, nil) })
+		if fake.defaultPushCalled {
+			t.Errorf("--remote 1st pushed to the default remote; output: %q", out)
+		}
+		if len(fake.pushedRemotes) != 1 || fake.pushedRemotes[0] != "1st" {
+			t.Errorf("--remote 1st: want PushRemote(\"1st\"), got %v; output: %q", fake.pushedRemotes, out)
+		}
+	})
+
+	t.Run("bd dolt pull --remote 1st keeps targeting 1st", func(t *testing.T) {
+		resetDoltTransferFlags(t)
+		if err := doltPullCmd.Flags().Set("remote", "1st"); err != nil {
+			t.Fatal(err)
+		}
+		fake := &positionalRemotePushStore{}
+		store = fake
+		out := captureStdout(t, func() error { return run(t, doltPullCmd, nil) })
+		if fake.defaultPulls != 0 {
+			t.Errorf("--remote 1st pulled from the default remote; output: %q", out)
+		}
+		if len(fake.pulledRemotes) != 1 || fake.pulledRemotes[0] != "1st" {
+			t.Errorf("--remote 1st: want PullRemote(\"1st\"), got %v; output: %q", fake.pulledRemotes, out)
+		}
+	})
+
+	t.Run("bd dolt push with no remote named still pushes the default remote", func(t *testing.T) {
+		resetDoltTransferFlags(t)
+		fake := &positionalRemotePushStore{}
+		store = fake
+		out := captureStdout(t, func() error { return run(t, doltPushCmd, nil) })
+		if !fake.defaultPushCalled || len(fake.pushedRemotes) != 0 {
+			t.Errorf("bare bd dolt push: want one default-remote Push and no PushRemote, got default=%v named=%v; output: %q", fake.defaultPushCalled, fake.pushedRemotes, out)
+		}
+		if want := "Pushing to Dolt remote..."; !strings.Contains(out, want) || !strings.Contains(out, "Push complete.") {
+			t.Errorf("bare bd dolt push output changed; got: %q", out)
+		}
+	})
+
+	t.Run("bd dolt pull with no remote named still pulls the default remote", func(t *testing.T) {
+		resetDoltTransferFlags(t)
+		fake := &positionalRemotePushStore{}
+		store = fake
+		out := captureStdout(t, func() error { return run(t, doltPullCmd, nil) })
+		if fake.defaultPulls != 1 || len(fake.pulledRemotes) != 0 {
+			t.Errorf("bare bd dolt pull: want one default-remote Pull and no PullRemote, got default=%d named=%v; output: %q", fake.defaultPulls, fake.pulledRemotes, out)
+		}
+		if want := "Pulling from Dolt remote..."; !strings.Contains(out, want) || !strings.Contains(out, "Pull complete.") {
+			t.Errorf("bare bd dolt pull output changed; got: %q", out)
+		}
+	})
 }
