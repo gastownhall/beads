@@ -621,10 +621,46 @@ func TestProxiedServerReady2(t *testing.T) {
 			t.Errorf("expected 'No open issues', got: %s", stdout)
 		}
 
+		// gh#3268: with only an in-progress issue there is no ready work and
+		// nothing blocked either, so the empty state must not claim blocking
+		// dependencies — it names bd list and the stale-flag repair instead.
+		wip := bdProxiedCreate(t, bd, p.dir, "In progress only issue")
+		if _, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "update", wip.ID, "--status", "in_progress"); err != nil {
+			t.Fatalf("bd update wip to in_progress: %v\n%s", err, stderr)
+		}
+		stdout, _ = bdProxiedReadyCapture(t, bd, p)
+		if !strings.Contains(stdout, "No ready work found") {
+			t.Errorf("expected 'No ready work found', got: %s", stdout)
+		}
+		if strings.Contains(stdout, "all issues have blocking dependencies") {
+			t.Errorf("nothing is blocked, so the output must not claim blocking dependencies, got: %s", stdout)
+		}
+		if !strings.Contains(stdout, "bd recompute-blocked") {
+			t.Errorf("expected the empty state to name 'bd recompute-blocked', got: %s", stdout)
+		}
+
+		// Same honest message when a label filter matches no open issue.
+		filtered := bdProxiedCreate(t, bd, p.dir, "Open but filtered out", "--label", "rde-open")
+		stdout, _ = bdProxiedReadyCapture(t, bd, p, "--label", "rde-nomatch")
+		if !strings.Contains(stdout, "No ready work found") {
+			t.Errorf("expected 'No ready work found' for a label that matches nothing, got: %s", stdout)
+		}
+		if strings.Contains(stdout, "all issues have blocking dependencies") {
+			t.Errorf("the filter matched nothing, so the output must not claim blocking dependencies, got: %s", stdout)
+		}
+		if !strings.Contains(stdout, "bd recompute-blocked") {
+			t.Errorf("expected the empty state to name 'bd recompute-blocked', got: %s", stdout)
+		}
+
 		// A real blocking edge, not a planted flag: a stale is_blocked=1 on
 		// an edgeless row is listed by ready now (gh#3268). The blocker is
 		// in_progress so it is not itself ready work, and the empty state
 		// stays honest about what blocks the dependent.
+		// The filtered-out issue has to stop being ready work for this
+		// scenario, or ready is not empty and no empty state prints at all.
+		if _, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "update", filtered.ID, "--status", "in_progress"); err != nil {
+			t.Fatalf("bd update filtered to in_progress: %v\n%s", err, stderr)
+		}
 		blocker := bdProxiedCreate(t, bd, p.dir, "Empty-state blocker")
 		if _, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "update", blocker.ID, "--status", "in_progress"); err != nil {
 			t.Fatalf("bd update blocker to in_progress: %v\n%s", err, stderr)

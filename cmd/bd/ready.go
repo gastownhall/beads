@@ -252,8 +252,7 @@ This is useful for agents executing molecules to see which steps can run next.`,
 				hasOpenIssues = stats.OpenIssues > 0 || stats.InProgressIssues > 0
 			}
 			if hasOpenIssues {
-				fmt.Printf("\n%s No ready work found (all issues have blocking dependencies)\n\n",
-					ui.RenderWarn("✨"))
+				printReadyEmptyState(ctx, filter, activeStore.GetBlockedIssues)
 			} else {
 				fmt.Printf("\n%s No open issues\n\n", ui.RenderPass("✨"))
 			}
@@ -503,6 +502,32 @@ func readyHiddenHint(shown int) string {
 // The role has no --max-rows field to honor and needs none: the cap bounds a
 // page this machine materializes, and a count materializes no rows.
 //
+// printReadyEmptyState prints `bd ready`'s plain empty-result message when
+// open or in-progress issues exist but no ready work came back. Both
+// renderers — the direct route here and the proxied-server route — call it,
+// so the two texts cannot drift.
+//
+// gh#3268: the message used to claim "all issues have blocking dependencies"
+// unconditionally, which was false whenever the open set was only
+// in-progress, deferred or filtered out (and, worse, whenever a stale
+// is_blocked flag did the hiding — the very defect the read guard now
+// repairs). The claim prints only when getBlockedIssues can name a blocked
+// issue for the same filter; otherwise the message says what to check
+// instead. A failed getBlockedIssues is not a failed command — the honest
+// text is the safe fallback, so the error is swallowed there.
+func printReadyEmptyState(ctx context.Context, filter types.WorkFilter, getBlockedIssues func(context.Context, types.WorkFilter) ([]*types.BlockedIssue, error)) {
+	blocked, err := getBlockedIssues(ctx, filter)
+	if err != nil || len(blocked) == 0 {
+		fmt.Printf("\n%s No ready work found\n\n", ui.RenderWarn("✨"))
+		fmt.Printf("  No open issue is blocked by an open dependency. Check 'bd list' for in-progress,\n" +
+			"  deferred or filtered-out issues, and 'bd doctor' for a stale blocked flag\n" +
+			"  (repair: 'bd recompute-blocked').\n\n")
+		return
+	}
+	fmt.Printf("\n%s No ready work found (all issues have blocking dependencies)\n\n",
+		ui.RenderWarn("✨"))
+}
+
 // A failed count is not a failed command — the page is already correct; all
 // that is lost is the "of N" beside it.
 func readyTotal(ctx context.Context, activeStore storage.DoltStorage, in readyInput) (int, error) {

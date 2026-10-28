@@ -683,3 +683,72 @@ func TestEmbeddedReadyStaleBlockedFlagOnEdgelessIssue(t *testing.T) {
 		}
 	})
 }
+
+// gh#3268: the empty state claimed "all issues have blocking dependencies"
+// whenever any open or in-progress issue existed, without checking that
+// anything was actually blocked — equally false when the open set is only
+// in-progress, deferred or filtered out. The claim now prints only when
+// bd blocked can name a blocked issue for the same filter.
+func TestEmbeddedReadyEmptyState(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	readyOut := func(t *testing.T, dir string, args ...string) string {
+		t.Helper()
+		cmd := exec.Command(bd, append([]string{"ready"}, args...)...)
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err != nil {
+			t.Fatalf("bd ready %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
+		}
+		return stdout.String()
+	}
+	runBD := func(t *testing.T, dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command(bd, args...)
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err != nil {
+			t.Fatalf("bd %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
+		}
+	}
+
+	t.Run("honest_when_only_in_progress_exists", func(t *testing.T) {
+		t.Parallel()
+		dir, _, _ := bdInit(t, bd, "--prefix", "rde5")
+		issue := bdCreate(t, bd, dir, "In progress only issue", "--type", "task")
+		runBD(t, dir, "update", issue.ID, "--status", "in_progress")
+		out := readyOut(t, dir)
+		if !strings.Contains(out, "No ready work found") {
+			t.Errorf("expected 'No ready work found', got: %s", out)
+		}
+		if strings.Contains(out, "all issues have blocking dependencies") {
+			t.Errorf("nothing is blocked, so the output must not claim blocking dependencies, got: %s", out)
+		}
+		if !strings.Contains(out, "bd recompute-blocked") {
+			t.Errorf("expected the empty state to name 'bd recompute-blocked', got: %s", out)
+		}
+	})
+
+	t.Run("honest_when_label_matches_no_open_issue", func(t *testing.T) {
+		t.Parallel()
+		dir, _, _ := bdInit(t, bd, "--prefix", "rde6")
+		bdCreate(t, bd, dir, "Open but filtered out", "--type", "task", "--label", "rde6-open")
+		out := readyOut(t, dir, "--label", "rde6-nomatch")
+		if !strings.Contains(out, "No ready work found") {
+			t.Errorf("expected 'No ready work found', got: %s", out)
+		}
+		if strings.Contains(out, "all issues have blocking dependencies") {
+			t.Errorf("the filter matched nothing, so the output must not claim blocking dependencies, got: %s", out)
+		}
+		if !strings.Contains(out, "bd recompute-blocked") {
+			t.Errorf("expected the empty state to name 'bd recompute-blocked', got: %s", out)
+		}
+	})
+
+}

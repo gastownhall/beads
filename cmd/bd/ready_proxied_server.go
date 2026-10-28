@@ -144,8 +144,7 @@ func runReadyProxiedList(ctx context.Context, uw uow.UnitOfWork, in readyInput) 
 			hasOpenIssues = stats.OpenIssues > 0 || stats.InProgressIssues > 0
 		}
 		if hasOpenIssues {
-			fmt.Printf("\n%s No ready work found (all issues have blocking dependencies)\n\n",
-				ui.RenderWarn("✨"))
+			printReadyEmptyState(ctx, in.filter, uw.IssueUseCase().GetBlockedIssues)
 		} else {
 			fmt.Printf("\n%s No open issues\n\n", ui.RenderPass("✨"))
 		}

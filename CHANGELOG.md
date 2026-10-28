@@ -1055,6 +1055,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd ready` (and `bd list --ready`, ready counts and `bd ready --claim`) no
+  longer hide an open issue behind a stale `is_blocked` flag when the issue
+  has no blocking dependencies of its own (#3268). A flagged row with no
+  blocks, parent-child, conditional-blocks or waits-for edges is listed
+  again; rows with such an edge still trust the flag, and the stored flag is
+  never rewritten on read (`bd doctor` / `bd recompute-blocked` remain the
+  repairs). The empty-result message also stopped claiming "all issues have
+  blocking dependencies" when nothing is actually blocked — it now says what
+  to check (`bd list` for in-progress, deferred or filtered-out issues,
+  `bd doctor` for a stale flag) and prints the old line only when `bd blocked`
+  can name a blocked issue.
 - `bd list --watch` and `bd show --watch` now wait a full poll interval after
   each refresh, and `bd list --watch --parent` reads its tree in one
   transaction, so other bd commands on an embedded workspace no longer stall
