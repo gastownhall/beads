@@ -391,7 +391,8 @@ func GetDiscoveredRedirectInfo() RedirectInfo {
 // differently, so a caller that has not already resolved dir the way
 // `bd -C dir` does wants GetRedirectInfo, not this.
 func GetRedirectInfoFrom(dir string) RedirectInfo {
-	return redirectInfoFor(findLocalBdsDirInRepoFrom(dir), func() string { return findBeadsDirUpward(dir) })
+	repoRoot := repoRootFrom(dir)
+	return redirectInfoFor(repoLocalBeadsDir(repoRoot), func() string { return findBeadsDirUpward(dir, repoRoot) })
 }
 
 // redirectInfoFor reports the redirect state given the repo-local .beads
@@ -445,14 +446,14 @@ func findLocalBdsDirInRepo() string {
 	return repoLocalBeadsDir(git.GetRepoRoot())
 }
 
-// findLocalBdsDirInRepoFrom is findLocalBdsDirInRepo for the git repository
-// containing dir rather than the process cwd.
-func findLocalBdsDirInRepoFrom(dir string) string {
+// repoRootFrom returns the root of the git repository containing dir, as
+// `git rev-parse --show-toplevel` prints it, or "" outside a repository.
+func repoRootFrom(dir string) string {
 	repoRoot, err := gitOutput(dir, "rev-parse", "--show-toplevel")
 	if err != nil {
 		return ""
 	}
-	return repoLocalBeadsDir(repoRoot)
+	return repoRoot
 }
 
 // repoLocalBeadsDir returns <repoRoot>/.beads when repoRoot is known and the
@@ -522,14 +523,18 @@ func findDiscoveredLocalBeadsDir() string {
 	if err != nil {
 		return ""
 	}
-	return findBeadsDirUpward(cwd)
+	return findBeadsDirUpward(cwd, git.GetRepoRoot())
 }
 
 // findBeadsDirUpward returns the nearest .beads directory at or above start,
-// without following redirects, or "" when there is none.
-func findBeadsDirUpward(start string) string {
+// without following redirects, or "" when there is none. repoRoot is the root
+// of start's repository ("" for none); see skipsUserGlobalBeads.
+func findBeadsDirUpward(start, repoRoot string) string {
 	walk := NewAncestorDirWalk(start, start)
 	for dir, ok := walk.Next(); ok; dir, ok = walk.Next() {
+		if skipsUserGlobalBeads(dir, repoRoot) {
+			continue
+		}
 		beadsDir := filepath.Join(dir, ".beads")
 		if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
 			return beadsDir
@@ -709,6 +714,9 @@ func FindBeadsDirFrom(startDir string) string {
 
 	walk := NewAncestorDirWalk(startDir, startDir)
 	for dir, ok := walk.Next(); ok; dir, ok = walk.Next() {
+		if skipsUserGlobalBeads(dir, repoRoot) {
+			continue
+		}
 		beadsDir := filepath.Join(dir, ".beads")
 		if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
 			resolved := FollowRedirect(beadsDir)
@@ -761,7 +769,8 @@ func HasProjectFiles(beadsDir string) bool {
 // - A dolt/ directory (Dolt database)
 //
 // Returns false for directories that only contain legacy registry files.
-// This prevents FindBeadsDir from returning ~/.beads/ which only has registry.json.
+// This is a content guard only: skipsUserGlobalBeads is what keeps the
+// user-level ~/.beads out of the ancestor walks.
 func hasBeadsProjectFiles(beadsDir string) bool {
 	// Check for project configuration files
 	if _, err := os.Stat(filepath.Join(beadsDir, "metadata.json")); err == nil {
@@ -941,7 +950,9 @@ func ExplicitBeadsDir() string {
 //     FindBeadsDir returns "" instead of discovering some other workspace.
 //  2. Walk up from CWD toward repo root boundary, checking each directory
 //     for .beads/ with valid project files. For worktrees, stops at the
-//     worktree root; for non-worktrees, stops at the git root.
+//     worktree root; for non-worktrees, stops at the git root. The
+//     user-level <home>/.beads is passed over unless the repository is
+//     rooted at home (skipsUserGlobalBeads).
 //  3. Worktree-specific fallback: per-worktree redirect, worktree's own
 //     .beads (separate-DB mode), shared .beads via git-common-dir.
 //  4. Extended walk from the boundary to the main repo root (worktrees)
@@ -1026,6 +1037,9 @@ func FindBeadsDir() string {
 		// post-worktree walk, step 4).
 		if walkBoundaryCanonical != "" && dir == walkBoundaryCanonical {
 			break
+		}
+		if skipsUserGlobalBeads(dir, gitRoot) {
+			continue
 		}
 		beadsDir := filepath.Join(dir, ".beads")
 		if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
@@ -1165,7 +1179,7 @@ func FindBeadsDir() string {
 		extendedWalk := NewAncestorDirWalk(walkBoundaryCanonical, cwdCanonical)
 		for dir, ok := extendedWalk.Next(); ok; dir, ok = extendedWalk.Next() {
 			beadsDir := filepath.Join(dir, ".beads")
-			if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
+			if info, err := os.Stat(beadsDir); err == nil && info.IsDir() && !skipsUserGlobalBeads(dir, extendedRoot) {
 				beadsDir = FollowRedirect(beadsDir)
 				if hasBeadsProjectFiles(beadsDir) {
 					return beadsDir
@@ -1342,7 +1356,7 @@ func findDatabaseInTree() string {
 	{
 		skipCwdCheck := (isWt && dir == utils.CanonicalizePath(git.GetRepoRoot())) ||
 			(isJJSecondary && dir == utils.CanonicalizePath(jjSecondaryRoot))
-		if !skipCwdCheck {
+		if !skipCwdCheck && !skipsUserGlobalBeads(dir, findGitRoot()) {
 			cwdBeadsDir := filepath.Join(dir, ".beads")
 			if info, err := os.Stat(cwdBeadsDir); err == nil && info.IsDir() {
 				cwdBeadsDir = FollowRedirect(cwdBeadsDir)
@@ -1439,7 +1453,7 @@ func findDatabaseInTree() string {
 	walk := NewAncestorDirWalk(dir, dir)
 	for dir, ok := walk.Next(); ok; dir, ok = walk.Next() {
 		beadsDir := filepath.Join(dir, ".beads")
-		if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
+		if info, err := os.Stat(beadsDir); err == nil && info.IsDir() && !skipsUserGlobalBeads(dir, gitRoot) {
 			// Follow redirect if present
 			beadsDir = FollowRedirect(beadsDir)
 
@@ -1489,7 +1503,7 @@ func FindAllDatabases() []DatabaseInfo {
 	walk := NewAncestorDirWalk(dir, dir)
 	for dir, ok := walk.Next(); ok; dir, ok = walk.Next() {
 		beadsDir := filepath.Join(dir, ".beads")
-		if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
+		if info, err := os.Stat(beadsDir); err == nil && info.IsDir() && !skipsUserGlobalBeads(dir, gitRoot) {
 			// Follow redirect if present
 			beadsDir = FollowRedirect(beadsDir)
 
