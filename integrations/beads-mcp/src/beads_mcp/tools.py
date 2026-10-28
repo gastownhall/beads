@@ -511,9 +511,10 @@ async def beads_update_issue(
 ) -> Issue | list[Issue]:
     """Update an existing issue.
 
-    Note: Setting status to 'closed' or 'open' will automatically route to
-    beads_close_issue() or beads_reopen_issue() respectively to ensure
-    proper approval workflows are followed.
+    Note: Setting status to 'closed' routes to beads_close_issue() to
+    follow approval workflows. Setting status to 'open' reopens a closed
+    issue via bd reopen (notes become the reopen reason); on an issue that
+    is not closed it is an ordinary status update.
     """
     # Smart routing: intercept lifecycle status changes and route to dedicated tools
     if status == "closed":
@@ -521,13 +522,19 @@ async def beads_update_issue(
         reason = notes if notes else "Completed"
         return await beads_close_issue(issue_id=issue_id, reason=reason)
 
+    client = await _get_client()
     if status == "open":
-        # Route to reopen tool to respect approval workflows
-        reason = notes if notes else "Reopened"
-        return await beads_reopen_issue(issue_ids=[issue_id], reason=reason)
+        # bd reopen is the authority on what counts as closed: a non-empty
+        # result reopens the issue, an empty one means nothing was closed.
+        reopened = await client.reopen(
+            ReopenIssueParams(issue_ids=[issue_id], reason=notes or "Reopened")
+        )
+        if reopened:
+            return reopened
+        # bd reopen changed nothing: the issue is not closed, so fall
+        # through and treat this as a plain status change.
 
     # Normal attribute updates proceed as usual
-    client = await _get_client()
     params = UpdateIssueParams(
         issue_id=issue_id,
         status=status,

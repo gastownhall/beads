@@ -605,3 +605,32 @@ async def test_beads_init():
 
     assert "bd initialized successfully!" in result
     mock_client.init.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_update_issue_status_open_on_open_issue_keeps_other_fields(sample_issue):
+    """Issue #6872: update(status="open", ...) on a non-closed issue must apply
+    the other fields via `bd update`, not route to `bd reopen` (which drops
+    them and fails with "Invalid response for reopen")."""
+    updated_issue = sample_issue.model_copy(
+        update={"description": "desc via MCP", "priority": 0}
+    )
+    mock_client = AsyncMock()
+    # Issue is already open: bd reopen is a no-op and reopens nothing.
+    mock_client.reopen = AsyncMock(return_value=[])
+    mock_client.update = AsyncMock(return_value=updated_issue)
+
+    with patch("beads_mcp.tools._get_client", return_value=mock_client):
+        result = await beads_update_issue(
+            issue_id="bd-1", status="open", description="desc via MCP", priority=0
+        )
+
+    mock_client.update.assert_called_once()
+    params = mock_client.update.call_args.args[0]
+    assert params.status == "open"
+    assert params.description == "desc via MCP"
+    assert params.priority == 0
+    assert result.description == "desc via MCP"
+    assert result.priority == 0
+    # No pre-read of the issue should be needed to decide the routing.
+    mock_client.show.assert_not_called()
