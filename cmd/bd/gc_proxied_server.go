@@ -59,31 +59,11 @@ func runGCProxiedServer(ctx context.Context) error {
 			ClosedBefore: &cutoffTime,
 		}
 
-		type decayRead struct {
-			closed   []*types.Issue
-			retained string
-		}
-		read, err := uow.RunTxRead(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (decayRead, error) {
-			page, err := uw.IssueUseCase().SearchIssues(ctx, "", filter)
-			if err != nil {
-				return decayRead{}, fmt.Errorf("searching closed issues: %w", err)
-			}
-			retained, err := uw.ConfigUseCase().GetConfig(ctx, issueops.SettingKeyTypesRetained)
-			if err != nil {
-				return decayRead{}, fmt.Errorf("reading %s: %w", issueops.SettingKeyTypesRetained, err)
-			}
-			return decayRead{closed: page.Items, retained: retained}, nil
-		})
+		closedIssues, kept, err := readProxiedDecayCandidates(ctx, filter, &cutoffTime)
 		if err != nil {
 			return HandleErrorRespectJSON("%v", err)
 		}
-
-		closedIssues, stats := filterClosedDeletionCandidates(read.closed, &cutoffTime)
-		warnClosedDeletionSafetySkips(stats)
-		closedIssues, retentionKept = holdBackRetainedTypes(closedIssues, read.retained)
-		if retentionKept > 0 && !jsonOutput {
-			fmt.Println(retainedTypesKeptLine(retentionKept, "closed issue(s)"))
-		}
+		retentionKept = kept
 
 		switch {
 		case len(closedIssues) == 0:
@@ -282,4 +262,38 @@ func scalarCount(res *domain.RawSQLResult) int {
 	default:
 		return 0
 	}
+}
+
+// readProxiedDecayCandidates is the proxied route's decay selection: the
+// closed issues filter selects and the workspace's types.retained setting,
+// read on one unit of work, then the closed-deletion safety filter and the
+// retained-type hold-back (holdBackRetainedTypes). It returns the issues the
+// decay may delete and how many it held back as retained, and prints the
+// safety skips and the kept line. A failed read of either fails the decay.
+func readProxiedDecayCandidates(ctx context.Context, filter types.IssueFilter, cutoff *time.Time) ([]*types.Issue, int, error) {
+	type decayRead struct {
+		closed   []*types.Issue
+		retained string
+	}
+	read, err := uow.RunTxRead(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (decayRead, error) {
+		page, err := uw.IssueUseCase().SearchIssues(ctx, "", filter)
+		if err != nil {
+			return decayRead{}, fmt.Errorf("searching closed issues: %w", err)
+		}
+		retained, err := uw.ConfigUseCase().GetConfig(ctx, issueops.SettingKeyTypesRetained)
+		if err != nil {
+			return decayRead{}, fmt.Errorf("reading %s: %w", issueops.SettingKeyTypesRetained, err)
+		}
+		return decayRead{closed: page.Items, retained: retained}, nil
+	})
+	if err != nil {
+		return nil, 0, err
+	}
+	closedIssues, stats := filterClosedDeletionCandidates(read.closed, cutoff)
+	warnClosedDeletionSafetySkips(stats)
+	closedIssues, kept := holdBackRetainedTypes(closedIssues, read.retained)
+	if kept > 0 && !jsonOutput {
+		fmt.Println(retainedTypesKeptLine(kept, "closed issue(s)"))
+	}
+	return closedIssues, kept, nil
 }
