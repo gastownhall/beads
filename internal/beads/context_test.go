@@ -1670,3 +1670,40 @@ func TestDirOwnedBy(t *testing.T) {
 		})
 	}
 }
+
+// TestIsPathInSafeBoundary_HomeLookupOnlyInDenyLoop pins AC-5: the account
+// lookup behind the denied-prefix home carve-out runs only for paths the deny
+// list already matched. Paths outside every denied prefix, and those decided by
+// an earlier carve-out or the peer-home check, keep their old answer without
+// consulting it.
+func TestIsPathInSafeBoundary_HomeLookupOnlyInDenyLoop(t *testing.T) {
+	origAccount := currentAccount
+	t.Cleanup(func() { currentAccount = origAccount })
+	consulted := false
+	currentAccount = func() (int, string, error) {
+		consulted = true
+		return 0, "", errors.New("account lookup must not be consulted")
+	}
+	for _, tc := range []struct {
+		name string
+		path string
+		want bool
+	}{
+		{"outside every denied prefix", "/srv/project/.beads", true},
+		{"os temp dir", filepath.Join(os.TempDir(), "x", ".beads"), true},
+		{"/var/tmp", "/var/tmp/x/.beads", true},
+		{"/var/home", "/var/home/x/.beads", true},
+		{"/Users/Shared", "/Users/Shared/x/.beads", true},
+		{"peer home", "/home/bd-pfe2c4-peer/.beads", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			consulted = false
+			if got := isPathInSafeBoundary(tc.path); got != tc.want {
+				t.Errorf("isPathInSafeBoundary(%q) = %v, want %v", tc.path, got, tc.want)
+			}
+			if consulted {
+				t.Errorf("account lookup consulted for %q", tc.path)
+			}
+		})
+	}
+}
