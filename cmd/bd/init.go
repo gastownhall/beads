@@ -3004,7 +3004,14 @@ func runInitReinitPreflight(reinitLocal bool, prefix, destroyToken string, id in
 	if !reinitLocal {
 		return nil
 	}
-	count, _, err := countConfiguredIssuesWithTimeout(id)
+	count, present, err := countConfiguredIssuesWithTimeout(id)
+	if err != nil && present && id.Repoints() {
+		// The configured database exists but its count is unknown, so
+		// there is nothing a confirmation could promise about the issues a
+		// repoint strands. Same identity keeps the historical skip: the
+		// reinit replaces the database it could not read.
+		return initRepointUnreadableError(id, err)
+	}
 	if err != nil || count == 0 {
 		return nil
 	}

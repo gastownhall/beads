@@ -4,6 +4,7 @@ package main
 
 import (
 	"errors"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -148,5 +149,34 @@ func TestInitRepoint_FlaggedEndpointCountsConfigured(t *testing.T) {
 					cfg.DoltDatabase, cfg.DoltServerHost, cfg.DoltServerPort, w.db, testDoltServerPort)
 			}
 		})
+	}
+}
+
+// AC-3: a configured database whose Tier-1 directory exists but which cannot
+// be read has an unknown issue count. Repointing away from it is refused
+// outright: neither --recreate-missing nor a valid destroy token can stand in
+// for a count init could not take.
+func TestInitRepoint_UnreadableConfiguredRefuses(t *testing.T) {
+	w := newRepointWorkspace(t, 0)
+	target := w.otherDB(t, "b")
+	dropTestDatabase(w.db, testDoltServerPort)
+	if err := os.MkdirAll(filepath.Join(w.beadsDir, "dolt", w.db, ".dolt"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	out, code := w.reinit(t, w.env, "--reinit-local", "--recreate-missing", "--database", target,
+		"--non-interactive", "--destroy-token", FormatDestroyToken("ext"))
+	switch code {
+	case 0, ExitRemoteDivergenceRefused, ExitLocalExistsRefused, ExitDestroyTokenMissing:
+		t.Fatalf("exit = %d, want a plain refusal (none of 0/10/11/12)\n%s", code, out)
+	}
+	for _, want := range []string{w.db, target, "could not be read"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("refusal does not name %q:\n%s", want, out)
+		}
+	}
+	requireDatabaseAbsent(t, target)
+	if got := recordedDB(t, w.beadsDir); got != w.db {
+		t.Fatalf("metadata.json records %q, want %q", got, w.db)
 	}
 }
