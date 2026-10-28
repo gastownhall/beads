@@ -403,3 +403,29 @@ func TestUnresolvedErrorNamesTheHostEscaped(t *testing.T) {
 		t.Errorf("socket-only endpoint: UnresolvedError = %v, want nil", err)
 	}
 }
+
+// TestResolveEndpointPairsTheConfigYamlHostWithItsPort pins GH#5961: a
+// workspace whose tracked metadata.json names one endpoint and whose
+// config.yaml names another dials config.yaml's host and port together,
+// never metadata.json's host on config.yaml's port (an endpoint neither
+// file declares).
+func TestResolveEndpointPairsTheConfigYamlHostWithItsPort(t *testing.T) {
+	beadsDir := endpointTestEnv(t, nil)
+	writeEndpointMetadata(t, beadsDir, &configfile.Config{
+		DoltMode:       configfile.DoltModeServer,
+		DoltServerHost: "127.0.0.1",
+		DoltServerPort: 27169,
+	})
+	yaml := "dolt.mode: server\ndolt.host: 192.0.2.50\ndolt.port: 3307\n"
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var ep Endpoint
+	if err := config.WithBeadsDir(beadsDir, func() { ep = ResolveEndpoint(beadsDir, nil) }); err != nil {
+		t.Fatalf("config.WithBeadsDir: %v", err)
+	}
+	if ep.Host != "192.0.2.50" || ep.Port != 3307 || ep.PortSource != PortSourceConfigYaml {
+		t.Errorf("ResolveEndpoint = %s:%d (%s), want 192.0.2.50:3307 (%s): config.yaml's host must pair with config.yaml's port", ep.Host, ep.Port, ep.PortSource, PortSourceConfigYaml)
+	}
+}
