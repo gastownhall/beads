@@ -222,4 +222,31 @@ func TestMergeSettleDrainsCallResultSets(t *testing.T) {
 		}
 		assertDrainedCalls(t, mock, rec)
 	})
+
+	t.Run("settle_merge_strategy_theirs", func(t *testing.T) {
+		rec, mock := newDrainMock(t)
+
+		// The auto-resolver declines "widgets" (not on its allowlist)…
+		mock.ExpectQuery(regexp.QuoteMeta(doltConflictsSQL)).
+			WillReturnRows(sqlmock.NewRows([]string{"table", "num_conflicts"}).AddRow("widgets", 1))
+		// …so SettleMerge's escape hatch resolves it with the operator's
+		// strategy instead of aborting.
+		mock.ExpectQuery(regexp.QuoteMeta(doltConflictsSQL)).
+			WillReturnRows(sqlmock.NewRows([]string{"table", "num_conflicts"}).AddRow("widgets", 1))
+		mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_CONFLICTS_RESOLVE('--theirs', 'widgets')")).
+			WillReturnRows(emptyCallRows())
+		mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD(?)")).
+			WithArgs("widgets").
+			WillReturnRows(emptyCallRows())
+		mock.ExpectQuery(regexp.QuoteMeta(constraintViolationsSQL)).
+			WillReturnRows(sqlmock.NewRows([]string{"table"}))
+		mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', ?)")).
+			WithArgs("Resolve merge conflicts using 'theirs' strategy").
+			WillReturnRows(emptyCallRows())
+
+		if err := SettleMerge(context.Background(), rec, nil, true, "theirs"); err != nil {
+			t.Fatalf("SettleMerge: %v", err)
+		}
+		assertDrainedCalls(t, mock, rec)
+	})
 }
