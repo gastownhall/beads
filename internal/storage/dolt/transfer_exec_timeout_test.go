@@ -72,6 +72,44 @@ func TestTransferPushStallHitsConfiguredDeadline(t *testing.T) {
 	assertTransferDeadlineHit(t, err, time.Since(start))
 }
 
+// TestTransferSitesStallHitConfiguredDeadline extends the push pin to the
+// other server-side transfers: the SQL pull (and both statements of its
+// GH#3144 fetch+merge fallback) and federation's push and fetch each die at
+// the configured deadline with the annotated ErrInvalidConn.
+func TestTransferSitesStallHitConfiguredDeadline(t *testing.T) {
+	t.Setenv("BEADS_DOLT_TRANSFER_TIMEOUT", "1s")
+	noTracking := errStep(1105, "You must specify a branch to pull from: did not specify a branch")
+	pull := func(ctx context.Context, s *DoltStore) error {
+		_, err := s.pullWithAutoResolveUnchecked(ctx, "origin", "CALL DOLT_PULL(?, ?)", "origin", "main")
+		return err
+	}
+	for _, tc := range []struct {
+		name   string
+		script map[string]fakeStep
+		run    func(context.Context, *DoltStore) error
+	}{
+		{"pull", nil, pull},
+		{"pull fallback fetch", map[string]fakeStep{"CALL DOLT_PULL": noTracking}, pull},
+		{"pull fallback merge", map[string]fakeStep{"CALL DOLT_PULL": noTracking, "CALL DOLT_FETCH": okStep}, pull},
+		{"federation push", nil, func(ctx context.Context, s *DoltStore) error {
+			return s.execWithLongTimeout(ctx, "CALL DOLT_PUSH(?, ?)", "peer", "main")
+		}},
+		{"federation fetch", nil, func(ctx context.Context, s *DoltStore) error {
+			return s.execWithLongTimeout(ctx, "CALL DOLT_FETCH(?)", "peer")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := stallingStore(t, tc.script)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+
+			start := time.Now()
+			err := tc.run(ctx, s)
+			assertTransferDeadlineHit(t, err, time.Since(start))
+		})
+	}
+}
+
 // assertTransferDeadlineHit checks a transfer stalled against a 1s
 // BEADS_DOLT_TRANSFER_TIMEOUT: it failed between 1s and 5s with the driver's
 // lost-connection error, annotated with the deadline and the variable.
@@ -202,6 +240,8 @@ var (
 	dropStep  = fakeStep{drop: true}
 	okStep    = fakeStep{ok: true}
 )
+
+func errStep(code uint16, msg string) fakeStep { return fakeStep{errCode: code, errMsg: msg} }
 
 // stallingStore returns a DoltStore whose connStr points at a
 // startStallingMySQL server running script. The transfer sites under test
