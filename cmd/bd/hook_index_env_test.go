@@ -10,8 +10,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/config"
 )
 
 // runCommitIndexGit runs git in dir with the test process's scrubbed
@@ -377,4 +380,161 @@ func realIndexFiles(t *testing.T, gitDir string) map[string][]byte {
 		}
 	}
 	return out
+}
+// TestPreCommitHasStagedBeadsFiles_ReadsCommitIndex pins AC-2: the export
+// gate must answer "does the commit being prepared touch .beads?", which
+// during a pathspec commit is a question about the pending GIT_INDEX_FILE,
+// not the on-disk real index the parent commit has locked away.
+func TestPreCommitHasStagedBeadsFiles_ReadsCommitIndex(t *testing.T) {
+	rows := []struct {
+		name           string
+		stageInPending []string
+		stageInReal    []string
+		want           bool
+	}{
+		{
+			name:           "pending index carries the .beads change",
+			stageInPending: []string{".beads/config.yaml"},
+			want:           true,
+		},
+		{
+			name:        "real index only: pending index has no .beads change",
+			stageInReal: []string{".beads/config.yaml"},
+			want:        false,
+		},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			repo, gitDir, _ := newCommitIndexRepo(t)
+			cfg := filepath.Join(repo, ".beads", "config.yaml")
+			commitIndexWrite(t, cfg, []byte("export:\n  auto: false\n"))
+			pending := filepath.Join(gitDir, "next-index-4242.lock")
+			runCommitIndexGit(t, repo, []string{"GIT_INDEX_FILE=" + pending}, "read-tree", "HEAD")
+			for _, p := range row.stageInPending {
+				runCommitIndexGit(t, repo, []string{"GIT_INDEX_FILE=" + pending}, "add", "--", p)
+			}
+			for _, p := range row.stageInReal {
+				runCommitIndexGit(t, repo, nil, "add", "--", p)
+			}
+			if err := os.Unsetenv("GIT_DIR"); err != nil {
+				t.Fatal(err)
+			}
+			t.Chdir(repo)
+			t.Setenv("GIT_INDEX_FILE", pending)
+			if got := preCommitHasStagedBeadsFiles(filepath.Join(repo, ".beads")); got != row.want {
+				t.Fatalf("preCommitHasStagedBeadsFiles = %v, want %v", got, row.want)
+			}
+		})
+	}
+}
+
+// TestExportJSONLForCommit_CommitIndex pins the pre-commit export lane
+// end to end inside the hook envelopes git actually creates (GH#4080): the
+// gate must look at the commit being prepared, the export must land in that
+// commit's index, and a pathspec that excludes .beads must leave the pending
+// index untouched. A stub `bd` on PATH stands in for the real binary, like
+// TestHookLanesUseTheWorktreeJSONL.
+func TestExportJSONLForCommit_CommitIndex(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script stub binary is POSIX-only")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	binDir := t.TempDir()
+	sentinel := filepath.Join(binDir, "invocations")
+	quotedSentinel := "'" + strings.ReplaceAll(sentinel, "'", `'\''`) + "'"
+	stub := "#!/bin/sh\n" +
+		`printf '%s BD_GIT_HOOK=%s\n' "$*" "${BD_GIT_HOOK-unset}" >> ` + quotedSentinel + "\n" +
+		`if [ "$1" = export ] && [ "$2" = -o ]; then printf '%s\n' '{"id":"bd-exported"}' > "$3"; fi` + "\n" +
+		"exit 0\n"
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(stub), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	// Prove the stub is reachable and records, else nothing below can fail.
+	if err := exec.Command("bd", "probe").Run(); err != nil {
+		t.Fatalf("stub bd must be runnable from PATH: %v", err)
+	}
+	if _, err := os.Stat(sentinel); err != nil {
+		t.Fatalf("stub bd must record its invocations: %v", err)
+	}
+
+	t.Run("pathspec commit includes .beads", func(t *testing.T) {
+		repo, gitDir, exportPath := newCommitIndexRepo(t)
+		commitIndexWrite(t, filepath.Join(repo, ".beads", "metadata.json"), []byte("{}\n"))
+		runCommitIndexGit(t, repo, nil, "add", "--", ".beads/metadata.json")
+		runCommitIndexGit(t, repo, nil, "commit", "-qm", "metadata")
+		// The pending index carries the .beads change; the real index has
+		// nothing staged.
+		commitIndexWrite(t, filepath.Join(repo, ".beads", "config.yaml"), []byte("export:\n  auto: false\n"))
+		pending := commitIndexPathspecEnvelope(t, repo, gitDir, ".beads/config.yaml")
+
+		t.Setenv("BEADS_DIR", filepath.Join(repo, ".beads"))
+		initConfigForTest(t)
+		config.Set("export.auto", true)
+		config.Set("export.git-add", true)
+		config.Set("export.path", "issues.jsonl")
+		config.Set("no-git-ops", false)
+		config.Set("sync.remote", "")
+		config.Set("sync.git-remote", "")
+
+		if err := os.RemoveAll(sentinel); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Unsetenv("GIT_DIR"); err != nil {
+			t.Fatal(err)
+		}
+		t.Chdir(repo)
+		t.Setenv("GIT_INDEX_FILE", pending)
+
+		_ = captureHookStderr(t, exportJSONLForCommit)
+
+		if got, want := readFileForWorktreeTest(t, sentinel), "export -o "+exportPath+" BD_GIT_HOOK=1\n"; got != want {
+			t.Fatalf("export subprocess = %q, want %q", got, want)
+		}
+		assertCommitIndexHasExport(t, repo, pending, exportPath)
+	})
+
+	t.Run("pathspec commit excludes .beads", func(t *testing.T) {
+		repo, gitDir, exportPath := newCommitIndexRepo(t)
+		// The real index carries a .beads change; the pending index only the
+		// pathspec-selected tracked.txt.
+		commitIndexWrite(t, filepath.Join(repo, ".beads", "config.yaml"), []byte("export:\n  auto: false\n"))
+		runCommitIndexGit(t, repo, nil, "add", "--", ".beads/config.yaml")
+		commitIndexWrite(t, filepath.Join(repo, "tracked.txt"), []byte("v2\n"))
+		pending := commitIndexPathspecEnvelope(t, repo, gitDir, "tracked.txt")
+		before := commitIndexRead(t, pending)
+
+		t.Setenv("BEADS_DIR", filepath.Join(repo, ".beads"))
+		initConfigForTest(t)
+		config.Set("export.auto", true)
+		config.Set("export.git-add", true)
+		config.Set("export.path", "issues.jsonl")
+		config.Set("no-git-ops", false)
+		config.Set("sync.remote", "")
+		config.Set("sync.git-remote", "")
+
+		if err := os.RemoveAll(sentinel); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Unsetenv("GIT_DIR"); err != nil {
+			t.Fatal(err)
+		}
+		t.Chdir(repo)
+		t.Setenv("GIT_INDEX_FILE", pending)
+
+		_ = captureHookStderr(t, exportJSONLForCommit)
+
+		if _, err := os.Stat(sentinel); err == nil {
+			t.Fatalf("export ran although the pathspec excludes .beads:\n%s", readFileForWorktreeTest(t, sentinel))
+		}
+		if got := commitIndexRead(t, pending); string(got) != string(before) {
+			t.Errorf("pending index changed although the pathspec excludes .beads")
+		}
+		if got, want := readFileForWorktreeTest(t, exportPath), `{"id":"v1"}`+"\n"; got != want {
+			t.Errorf("export file = %q, want it untouched %q", got, want)
+		}
+	})
 }

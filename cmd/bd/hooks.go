@@ -2178,14 +2178,26 @@ func nearestExistingDir(dir string) string {
 	}
 }
 
+// preCommitHasStagedBeadsFiles reports whether the commit being prepared
+// stages anything under .beads. During `git commit -- <paths>` and `-a`
+// that is a question about the pending index GIT_INDEX_FILE names, not the
+// on-disk real index the parent commit has locked — so the env comes from
+// gitIndexEnv, which puts a contained inherited GIT_INDEX_FILE back
+// (GH#4080). Outside a hook the real index is the answer either way.
 func preCommitHasStagedBeadsFiles(beadsDir string) bool {
 	cmdDir := exportSubprocessDir(beadsDir)
 	if hookRoot := hookWorkTreeRoot(); hookRoot != "" {
 		cmdDir = hookRoot
 	}
+	env, _, envErr := gitIndexEnv(cmdDir)
+	if envErr != nil {
+		// gitIndexEnv already returned the scrubbed env; the gate then reads
+		// the real index, the pre-GH#4080 answer.
+		debug.Logf("pre-commit: commit-index env resolve failed, using the real index: %v\n", envErr)
+	}
 	cmd := exec.Command("git", "diff", "--cached", "--name-only", "--", ".beads")
 	cmd.Dir = cmdDir
-	cmd.Env = scrubGitHookEnv(os.Environ())
+	cmd.Env = env
 	out, err := cmd.Output()
 	if err != nil {
 		debug.Logf("pre-commit: failed to inspect staged .beads paths: %v\n", err)
