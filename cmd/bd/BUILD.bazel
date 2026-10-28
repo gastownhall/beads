@@ -784,6 +784,7 @@ go_test(
         "dolt_remote_remove_proxied_integration_test.go",
         "dolt_remote_reset_data_embedded_test.go",
         "dolt_remote_reset_data_test.go",
+        "dolt_start_direct_local_test.go",
         "dolt_start_external_test.go",
         "dolt_stop_test.go",
         "dolt_test.go",
