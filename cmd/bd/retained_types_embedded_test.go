@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -148,6 +149,30 @@ func TestEmbeddedRetainedTypes(t *testing.T) {
 		report := runJSON("gc", "--older-than", "0", "--force", "--skip-dolt")
 		if report["retention_required"] != float64(2) {
 			t.Errorf("bd gc --json = %v, want retention_required 2", report)
+		}
+	})
+
+	// The setting is read from the database only, so a key in config.yaml
+	// protects nothing; every bulk delete that honors the setting says so.
+	t.Run("a config.yaml key draws the ignored warning", func(t *testing.T) {
+		cfgPath := filepath.Join(dir, ".beads", "config.yaml")
+		orig, err := os.ReadFile(cfgPath)
+		if err != nil {
+			t.Fatalf("reading %s: %v", cfgPath, err)
+		}
+		t.Cleanup(func() { _ = os.WriteFile(cfgPath, orig, 0o600) })
+		withKey := append(append([]byte{}, orig...), []byte("\ntypes.retained: op\n")...)
+		if err := os.WriteFile(cfgPath, withKey, 0o600); err != nil {
+			t.Fatalf("writing %s: %v", cfgPath, err)
+		}
+		for _, args := range [][]string{
+			{"prune", "--pattern", "rk-none-*", "--dry-run"},
+			{"purge", "--pattern", "rk-none-*", "--dry-run"},
+		} {
+			out, stderr, code := run(args...)
+			if code != 0 || !strings.Contains(stderr, "types.retained in config.yaml (op) is ignored") {
+				t.Errorf("bd %s exited %d:\n%s\n%s\nwant the ignored-key warning on stderr", strings.Join(args, " "), code, out, stderr)
+			}
 		}
 	})
 
