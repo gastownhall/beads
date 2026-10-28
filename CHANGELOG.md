@@ -2027,6 +2027,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   old wiring; re-cook a persisted proto with `--persist --force` to replace
   it.
 
+- A formula loop step's own `needs`/`depends_on`, and another step's `needs`
+  on the loop step, are no longer dropped without an error when the loop
+  expands (#7636). The loop's dependencies now gate its first expanded steps,
+  and `needs = ["<loop>"]` waits for the loop's last expanded step (for an
+  `until` loop, the last step of the cooked iteration), so the first iteration
+  and every step after the loop are no longer ready as soon as the molecule is
+  poured. Molecules poured before the fix keep their dependencies.
 - `bd show <epic>` lists and counts an epic's children the same way
   whatever state the dolt-ignored `wisp_dependencies` table is in
   (bd-cif6y4). With the table missing from a Dolt server's working set

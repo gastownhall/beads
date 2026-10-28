@@ -978,3 +978,58 @@ func TestValidateLoopSpec_Range(t *testing.T) {
 		})
 	}
 }
+
+// Issue #7636: a loop step's own needs must reach the first expanded step, and
+// another step's needs on the loop step must point at the last expanded step.
+func TestApplyLoops_LoopStepNeedsCarriedThroughExpansion(t *testing.T) {
+	steps := []*Step{
+		{ID: "brief", Title: "Brief"},
+		{
+			ID:    "round",
+			Title: "Round",
+			Needs: []string{"brief"},
+			Loop: &LoopSpec{
+				Count: 2,
+				Body:  []*Step{{ID: "work", Title: "Work"}},
+			},
+		},
+		{ID: "land", Title: "Land", Needs: []string{"round"}},
+	}
+
+	result, err := ApplyLoops(steps)
+	if err != nil {
+		t.Fatalf("ApplyLoops failed: %v", err)
+	}
+
+	byID := map[string]*Step{}
+	for _, s := range result {
+		byID[s.ID] = s
+	}
+	has := func(deps []string, want string) bool {
+		for _, d := range deps {
+			if d == want {
+				return true
+			}
+		}
+		return false
+	}
+
+	first := byID["round.iter1.work"]
+	if first == nil {
+		t.Fatalf("missing round.iter1.work in %v", result)
+	}
+	if !has(first.Needs, "brief") && !has(first.DependsOn, "brief") {
+		t.Errorf("round.iter1.work needs = %v, depends_on = %v; want the loop step's own need %q", first.Needs, first.DependsOn, "brief")
+	}
+
+	land := byID["land"]
+	if land == nil {
+		t.Fatalf("missing land in %v", result)
+	}
+	if has(land.Needs, "round") {
+		t.Errorf("land needs = %v; still references the loop ID %q, which no longer exists after expansion", land.Needs, "round")
+	}
+	if !has(land.Needs, "round.iter2.work") {
+		t.Errorf("land needs = %v; want the last expanded step %q", land.Needs, "round.iter2.work")
+	}
+}
