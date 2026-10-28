@@ -1,6 +1,7 @@
 package formula
 
 import (
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -794,6 +795,200 @@ func TestApplyLoops_NeedsOnLoopTargetItsLastStep(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestApplyLoops_NestedLoopDependencies pins GH#7636 for nested loops: a
+// body step that needs a nested loop waits for that loop's last step in the
+// same outer iteration, the nested loop's own needs gate its first step, and
+// a step that needs the outer loop waits for its very last step.
+func TestApplyLoops_NestedLoopDependencies(t *testing.T) {
+	t.Run("two_levels", func(t *testing.T) {
+		steps := []*Step{
+			{ID: "brief", Title: "Brief"},
+			{
+				ID:    "outer",
+				Title: "Outer",
+				Needs: []string{"brief"},
+				Loop: &LoopSpec{
+					Count: 2,
+					Body: []*Step{
+						{ID: "prep", Title: "Prep"},
+						{
+							ID:    "inner",
+							Title: "Inner",
+							Needs: []string{"prep"},
+							Loop: &LoopSpec{
+								Count: 2,
+								Body:  []*Step{{ID: "x", Title: "X"}},
+							},
+						},
+						{ID: "after", Title: "After", Needs: []string{"inner"}},
+					},
+				},
+			},
+			{ID: "land", Title: "Land", Needs: []string{"outer"}},
+		}
+		result, err := ApplyLoops(steps)
+		if err != nil {
+			t.Fatalf("ApplyLoops failed: %v", err)
+		}
+		byID := make(map[string]*Step, len(result))
+		for _, s := range result {
+			byID[s.ID] = s
+		}
+
+		wantNeeds := map[string][]string{
+			"outer.iter1.prep":          {"brief"},
+			"outer.iter1.inner.iter1.x": {"outer.iter1.prep"},
+			"outer.iter1.inner.iter2.x": {"outer.iter1.inner.iter1.x"},
+			// Gated by the nested loop, so it does not also get brief.
+			"outer.iter1.after":         {"outer.iter1.inner.iter2.x"},
+			"outer.iter2.prep":          {"outer.iter1.after"},
+			"outer.iter2.inner.iter1.x": {"outer.iter2.prep"},
+			"outer.iter2.after":         {"outer.iter2.inner.iter2.x"},
+			"land":                      {"outer.iter2.after"},
+		}
+		for id, want := range wantNeeds {
+			s := byID[id]
+			if s == nil {
+				t.Errorf("%s not found", id)
+				continue
+			}
+			if !slices.Equal(s.Needs, want) {
+				t.Errorf("%s.Needs = %v, want %v", id, s.Needs, want)
+			}
+		}
+	})
+
+	t.Run("three_levels", func(t *testing.T) {
+		steps := []*Step{
+			{ID: "outer", Title: "Outer", Loop: &LoopSpec{Count: 2, Body: []*Step{
+				{ID: "mid", Title: "Mid", Loop: &LoopSpec{Count: 2, Body: []*Step{
+					{ID: "inner", Title: "Inner", Loop: &LoopSpec{Count: 2, Body: []*Step{
+						{ID: "x", Title: "X"},
+					}}},
+				}}},
+			}}},
+			{ID: "land", Title: "Land", Needs: []string{"outer"}},
+		}
+		result, err := ApplyLoops(steps)
+		if err != nil {
+			t.Fatalf("ApplyLoops failed: %v", err)
+		}
+		land := result[len(result)-1]
+		if want := []string{"outer.iter2.mid.iter2.inner.iter2.x"}; land.ID != "land" || !slices.Equal(land.Needs, want) {
+			t.Errorf("%s.Needs = %v, want %v (the deepest last step)", land.ID, land.Needs, want)
+		}
+	})
+}
+
+// TestApplyLoops_LoopDependencyEdgeCases covers GH#7636 shapes beyond the
+// acceptance criteria: loops in children, references between loops in either
+// declaration order, de-duplication, self-references and immutability.
+func TestApplyLoops_LoopDependencyEdgeCases(t *testing.T) {
+	loop := func(id string, count int, needs []string, body ...*Step) *Step {
+		return &Step{ID: id, Title: id, Needs: needs, Loop: &LoopSpec{Count: count, Body: body}}
+	}
+	step := func(id string, needs ...string) *Step {
+		return &Step{ID: id, Title: id, Needs: needs}
+	}
+	expand := func(t *testing.T, steps []*Step) map[string]*Step {
+		t.Helper()
+		result, err := ApplyLoops(steps)
+		if err != nil {
+			t.Fatalf("ApplyLoops failed: %v", err)
+		}
+		byID := map[string]*Step{}
+		var index func([]*Step)
+		index = func(steps []*Step) {
+			for _, s := range steps {
+				byID[s.ID] = s
+				index(s.Children)
+			}
+		}
+		index(result)
+		return byID
+	}
+	wantNeeds := func(t *testing.T, byID map[string]*Step, id string, want ...string) {
+		t.Helper()
+		s := byID[id]
+		if s == nil {
+			t.Fatalf("%s not found", id)
+		}
+		if !slices.Equal(s.Needs, want) {
+			t.Errorf("%s.Needs = %v, want %v", id, s.Needs, want)
+		}
+	}
+
+	t.Run("loop_in_children", func(t *testing.T) {
+		phase := step("phase")
+		phase.Children = []*Step{
+			loop("round", 2, nil, step("work")),
+			step("wrap", "round"),
+		}
+		byID := expand(t, []*Step{phase, step("land", "round")})
+		wantNeeds(t, byID, "wrap", "round.iter2.work")
+		wantNeeds(t, byID, "land", "round.iter2.work")
+	})
+
+	t.Run("body_step_names_another_loop", func(t *testing.T) {
+		byID := expand(t, []*Step{
+			loop("a", 2, nil, step("x")),
+			loop("b", 1, nil, step("y", "a")),
+			loop("c", 1, nil, step("z", "d")),
+			loop("d", 2, nil, step("w")),
+		})
+		wantNeeds(t, byID, "b.iter1.y", "a.iter2.x")
+		wantNeeds(t, byID, "c.iter1.z", "d.iter2.w")
+	})
+
+	t.Run("loop_needs_a_later_loop", func(t *testing.T) {
+		byID := expand(t, []*Step{
+			loop("b", 2, []string{"a"}, step("y")),
+			loop("a", 2, nil, step("x")),
+		})
+		wantNeeds(t, byID, "b.iter1.y", "a.iter2.x")
+		wantNeeds(t, byID, "b.iter2.y", "b.iter1.y")
+	})
+
+	t.Run("root_already_needs_it", func(t *testing.T) {
+		byID := expand(t, []*Step{
+			step("brief"),
+			loop("round", 1, []string{"brief"}, step("work", "brief")),
+		})
+		wantNeeds(t, byID, "round.iter1.work", "brief")
+	})
+
+	t.Run("body_step_names_its_own_loop", func(t *testing.T) {
+		_, err := ApplyLoops([]*Step{
+			loop("round", 2, nil, step("work"), step("check", "round")),
+		})
+		if err == nil {
+			t.Fatal("ApplyLoops accepted a body step that depends on its own loop")
+		}
+		for _, want := range []string{`"round"`, `"round.iter1.check"`} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error = %q, want it to name %s", err, want)
+			}
+		}
+	})
+
+	t.Run("input_unchanged", func(t *testing.T) {
+		build := func() []*Step {
+			return []*Step{
+				step("brief"),
+				loop("round", 2, []string{"brief"}, step("work"), step("check", "work")),
+				step("land", "round", "brief"),
+			}
+		}
+		in := build()
+		if _, err := ApplyLoops(in); err != nil {
+			t.Fatalf("ApplyLoops failed: %v", err)
+		}
+		if !reflect.DeepEqual(in, build()) {
+			t.Errorf("ApplyLoops modified its input steps")
+		}
+	})
 }
 
 func TestApplyLoops_NestedChildren(t *testing.T) {

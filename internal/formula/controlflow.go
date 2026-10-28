@@ -221,6 +221,14 @@ func expandLoopWithVars(step *Step, vars map[string]string, ends map[string]stri
 		}
 	}
 
+	// Name nested loops' real last steps before computing roots, so a body
+	// step that needs a nested loop counts as gated by it.
+	retargetLoopRefs(result, ends)
+	// Rewriting a body step's reference to its own loop would cycle with
+	// iteration chaining, and dropping it would be silent.
+	if selfRef := findStepNaming(result, step.ID); selfRef != "" {
+		return nil, fmt.Errorf("loop %q: step %q depends on its own loop", step.ID, selfRef)
+	}
 	carryLoopDeps(step, result)
 	// For an until loop this is the last step of the one cooked iteration.
 	if len(result) > 0 {
@@ -351,6 +359,27 @@ func retargetLoopRefs(steps []*Step, ends map[string]string) {
 		}
 		retargetLoopRefs(s.Children, ends)
 	}
+}
+
+// findStepNaming returns the ID of the first step in the tree whose Needs or
+// DependsOn names id, or "" when none does.
+func findStepNaming(steps []*Step, id string) string {
+	for _, s := range steps {
+		for _, dep := range s.Needs {
+			if dep == id {
+				return s.ID
+			}
+		}
+		for _, dep := range s.DependsOn {
+			if dep == id {
+				return s.ID
+			}
+		}
+		if found := findStepNaming(s.Children, id); found != "" {
+			return found
+		}
+	}
+	return ""
 }
 
 // substituteLoopVars replaces {varname} placeholders with values from vars map.
