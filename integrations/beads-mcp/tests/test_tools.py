@@ -582,6 +582,29 @@ async def test_update_issue_open_on_non_closed_issue_applies_fields(sample_issue
 
 
 @pytest.mark.asyncio
+async def test_update_issue_open_on_closed_issue_reopens_then_updates(sample_issue):
+    """GH#6872: status="open" on a closed issue reopens with notes as the reason, then applies the other fields."""
+    reopened_issue = sample_issue.model_copy(update={"status": "open", "closed_at": None})
+    updated_issue = reopened_issue.model_copy(update={"description": "D"})
+    mock_client = AsyncMock()
+    mock_client.reopen = AsyncMock(return_value=[reopened_issue])
+    mock_client.update = AsyncMock(return_value=updated_issue)
+
+    with patch("beads_mcp.tools._get_client", return_value=mock_client):
+        result = await beads_update_issue(issue_id="bd-1", status="open", notes="Needs more work", description="D")
+
+    reopen_params = mock_client.reopen.call_args.args[0]
+    assert reopen_params.issue_ids == ["bd-1"]
+    assert reopen_params.reason == "Needs more work"
+    mock_client.update.assert_called_once()
+    params = mock_client.update.call_args.args[0]
+    assert params.status is None
+    assert params.notes is None
+    assert params.description == "D"
+    assert result == [updated_issue]
+
+
+@pytest.mark.asyncio
 async def test_beads_stats():
     """Test beads_stats tool."""
     stats_data = Stats(

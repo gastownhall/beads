@@ -511,9 +511,10 @@ async def beads_update_issue(
 ) -> Issue | list[Issue]:
     """Update an existing issue.
 
-    Note: Setting status to 'closed' or 'open' will automatically route to
-    beads_close_issue() or beads_reopen_issue() respectively to ensure
-    proper approval workflows are followed.
+    Note: Setting status to 'closed' routes to beads_close_issue() to ensure
+    proper approval workflows are followed. Setting status to 'open' reopens a
+    closed issue through `bd reopen` (notes become the reason) and still applies
+    the other fields; on an issue that is not closed it is an ordinary update.
     """
     # Smart routing: intercept lifecycle status changes and route to dedicated tools
     if status == "closed":
@@ -523,10 +524,24 @@ async def beads_update_issue(
 
     client = await _get_client()
     if status == "open":
+        # Validate the other fields before anything changes.
+        fields = UpdateIssueParams(
+            issue_id=issue_id,
+            priority=priority,
+            assignee=assignee,
+            title=title,
+            description=description,
+            design=design,
+            acceptance_criteria=acceptance_criteria,
+            external_ref=external_ref,
+        )
         # Reopen through bd reopen to respect approval workflows; bd decides what is closed.
         reopened = await client.reopen(ReopenIssueParams(issue_ids=[issue_id], reason=notes or "Reopened"))
         if reopened:
-            return reopened
+            other_fields = (assignee, title, description, design, acceptance_criteria, external_ref)
+            if priority is None and not any(other_fields):
+                return reopened
+            return [await client.update(fields)]  # notes was the reopen reason
         # bd reopen changed nothing: not closed, so this is a plain status change
 
     # Normal attribute updates proceed as usual
