@@ -1050,7 +1050,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			// prompt and no destroy token. Those flags authorize destroying a
 			// database that exists; only --recreate-missing authorizes creating
 			// one where the configured database has gone missing.
-			if err := guardMissingServerDatabase(prefix); err != nil {
+			if err := guardMissingServerDatabaseRef(initID, prefix); err != nil {
 				return fmt.Errorf("%v", err)
 			}
 		}
@@ -3262,10 +3262,11 @@ func initModeExplicitlyRequested(cmd *cobra.Command) bool {
 	return config.GetYamlConfig("dolt.mode") != ""
 }
 
-// guardMissingServerDatabaseAt is the be-5up5 refusal, narrowed to the single
+// guardMissingServerDatabaseRef is the be-5up5 refusal, narrowed to the single
 // question --reinit-local/--force must NOT be able to answer for you: is this
 // an already-initialized server-mode project whose configured database is
-// missing or unconfirmable?
+// missing or unconfirmable? It answers from the identity record runInit
+// resolved (init_identity.go): the configured database at its own endpoint.
 //
 // It exists because those flags bypass checkExistingBeadsData entirely (see the
 // !reinitLocal gate in the init command), and the reinit path's own typed
@@ -3284,10 +3285,11 @@ func initModeExplicitlyRequested(cmd *cobra.Command) bool {
 // returns nil for every other state, so it never resurrects the
 // "already initialized" refusal that --reinit-local is legitimately meant to
 // bypass.
-func guardMissingServerDatabaseAt(beadsDir string, prefix string) error {
+func guardMissingServerDatabaseRef(id initIdentity, prefix string) error {
 	if initAllowRecreateMissing {
 		return nil
 	}
+	beadsDir := id.BeadsDir
 	if beadsDir == "" {
 		return nil
 	}
@@ -3295,19 +3297,30 @@ func guardMissingServerDatabaseAt(beadsDir string, prefix string) error {
 		return nil
 	}
 
-	cfg, cfgErr := configfile.LoadForDiscovery(beadsDir)
-	if cfgErr != nil || cfg == nil {
+	cfg := id.Recorded
+	if id.RecordedErr != nil || cfg == nil {
 		// Unreadable or absent metadata is the caller's problem, not this
 		// guard's: without it we cannot prove the workspace was ever
 		// initialized, and this guard only ever fires on proof that it was.
 		return nil
 	}
-	if cfg.GetBackend() != configfile.BackendDolt || !cfg.IsDoltServerMode() {
+	// The configured ref carries the mode the recorded config resolves to
+	// (false for a non-Dolt backend and for anything but server mode), and
+	// the database and endpoint resolved BEFORE runInit promoted the
+	// explicit --server-* flags into the environment: this guard proves its
+	// ADR-0004 claims about the CONFIGURED database at its own endpoint, so
+	// a reinit flagged at a different endpoint cannot make the configured
+	// one look missing (or hide a genuinely missing one) by renaming the
+	// endpoint the question is asked at.
+	if !id.Configured.Server {
 		return nil
 	}
-	host := cfg.GetDoltServerHost()
-	port := doltserver.DefaultConfig(beadsDir).Port
-	dbName := cfg.GetDoltDatabase()
+	host := id.Configured.Host
+	port := id.Configured.Port
+	dbName := id.Configured.Database
+	if dbName == "" {
+		dbName = configfile.DefaultDoltDatabase
+	}
 	doltPath := doltserver.ResolveDoltDir(beadsDir)
 
 	// TIER 1 (ADR-0004, engdocs/adr/0004-missing-database-guard-signal.md).
@@ -3374,14 +3387,14 @@ func guardMissingServerDatabaseAt(beadsDir string, prefix string) error {
 	return initGuardMissingServerDBMessage(dbName, host, port, prefix, cfg.ProjectID != "")
 }
 
-// guardMissingServerDatabase resolves the init target the same way
-// checkExistingBeadsData does, then applies guardMissingServerDatabaseAt.
-func guardMissingServerDatabase(prefix string) error {
-	beadsDir := resolveInitBeadsDir()
+// guardMissingServerDatabaseAt applies guardMissingServerDatabaseRef to a
+// .beads directory named by the caller, building the workspace half of the
+// identity from that directory under the ambient environment.
+func guardMissingServerDatabaseAt(beadsDir string, prefix string) error {
 	if beadsDir == "" {
 		return nil
 	}
-	return guardMissingServerDatabaseAt(beadsDir, prefix)
+	return guardMissingServerDatabaseRef(initIdentityAt(beadsDir), prefix)
 }
 
 func checkExistingBeadsData(prefix string) error {

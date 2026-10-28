@@ -172,3 +172,77 @@ func TestInitRepoint_EnvDatabaseCannotMaskConfigured(t *testing.T) {
 		t.Fatalf("the refused reinit must leave metadata recording %s, got %q", victimDB, got)
 	}
 }
+
+// initRepointChildEnv is initGuardE2EEnv without the port: a repoint fixture
+// names its workspace's own endpoint in its port file, so the child must get
+// no port from the environment — only the flags under test choose one.
+func initRepointChildEnv(t *testing.T) []string {
+	t.Helper()
+	env := []string{}
+	for _, kv := range externalServerTestEnv(t) {
+		name, _, _ := strings.Cut(kv, "=")
+		switch name {
+		case "BEADS_DB", "BD_DB", "BEADS_SHARED_SERVER_DIR":
+			continue
+		}
+		env = append(env, kv)
+	}
+	return append(env, "BD_NON_INTERACTIVE=1")
+}
+
+// TestInitRepoint_FlaggedEndpointCountsConfigured pins the endpoint the
+// reinit guards ask about: the workspace's CONFIGURED one, not the one the
+// flags name. The victim records database A whose server listens on its own
+// port file; --server-port points init at a second, live server that has
+// nothing on it. The missing-database guard must prove its ADR-0004 claim
+// about A at A's endpoint (where A exists), and the destroy confirmation must
+// then count A's one live issue and refuse — not be refused at the flagged
+// endpoint about a database it was never configured to hold.
+func TestInitRepoint_FlaggedEndpointCountsConfigured(t *testing.T) {
+	port1 := startRepointServer(t)
+	const victimDB = "repoint_a"
+	const targetDB = "repoint_b"
+	projectDir := seedRepointVictim(t, port1, victimDB, "rp")
+	beadsDir := filepath.Join(projectDir, ".beads")
+	// The workspace's own recorded endpoint: its port file names server 1.
+	if err := os.WriteFile(filepath.Join(beadsDir, doltserver.PortFileName), []byte(strconv.Itoa(port1)), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A second live server the flags repoint at, holding nothing.
+	port2 := startRepointServer(t)
+
+	out, err := runExternalServerBD(t, projectDir, initRepointChildEnv(t),
+		"init", "--reinit-local",
+		"--server-port", strconv.Itoa(port2),
+		"--database", targetDB, "--prefix", "rp",
+		"--skip-hooks", "--skip-agents")
+
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != ExitDestroyTokenMissing {
+		t.Fatalf("bd init --reinit-local --server-port %d must ask the missing-database question about %s at its own endpoint, then refuse on its one live issue with exit %d; got err=%v\n%s",
+			port2, victimDB, ExitDestroyTokenMissing, err, out)
+	}
+	if !strings.Contains(out, "Refusing to destroy 1 issues") {
+		t.Fatalf("refusal must count the configured database's one issue at its own endpoint, got:\n%s", out)
+	}
+	if strings.Contains(out, "not found on server") {
+		t.Errorf("the missing-database guard must not fire at the flagged endpoint while the configured database exists at its own:\n%s", out)
+	}
+	// The refusal must not have created the target database on the flagged
+	// server, nor rewritten the workspace it refused to touch.
+	if check := checkDatabaseOnServer("127.0.0.1", port2, "root", "", targetDB, false); check.Exists {
+		t.Fatalf("the refused reinit must not create database %s on the flagged server: %+v\n%s", targetDB, check, out)
+	}
+	after, err := configfile.LoadForDiscovery(beadsDir)
+	if err != nil {
+		t.Fatalf("read workspace metadata after the refusal: %v", err)
+	}
+	if after == nil || after.DoltDatabase != victimDB {
+		got := "<nil>"
+		if after != nil {
+			got = after.DoltDatabase
+		}
+		t.Fatalf("the refused reinit must leave metadata recording %s, got %q", victimDB, got)
+	}
+}

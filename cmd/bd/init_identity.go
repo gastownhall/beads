@@ -76,19 +76,24 @@ type initIdentity struct {
 // the ambient environment, never from flags this init is about to re-target
 // with.
 func resolveInitWorkspace() initIdentity {
-	var id initIdentity
+	var dir, redirectedFrom string
 	if envBeadsDir := os.Getenv("BEADS_DIR"); envBeadsDir != "" {
-		id.BeadsDir = utils.CanonicalizePath(envBeadsDir)
+		dir = utils.CanonicalizePath(envBeadsDir)
 	} else if fallback := beads.GetWorktreeFallbackBeadsDir(); fallback != "" {
-		id.BeadsDir = fallback
+		dir = fallback
 	} else {
 		local := filepath.Join(".", ".beads")
-		resolved := beads.FollowRedirect(local)
-		if resolved != local {
-			id.RedirectedFrom = local
+		dir = beads.FollowRedirect(local)
+		if dir != local {
+			redirectedFrom = local
 		}
-		id.BeadsDir = resolved
 	}
+	return initIdentityAtFill(initIdentity{BeadsDir: dir, RedirectedFrom: redirectedFrom})
+}
+
+// initIdentityAtFill fills the workspace half of an identity whose BeadsDir
+// is already chosen: the recorded metadata and the CONFIGURED database ref.
+func initIdentityAtFill(id initIdentity) initIdentity {
 	id.Recorded, id.RecordedErr = configfile.LoadForDiscovery(id.BeadsDir)
 	if id.Recorded != nil {
 		id.Configured = initDBRef{
@@ -103,6 +108,14 @@ func resolveInitWorkspace() initIdentity {
 		}
 	}
 	return id
+}
+
+// initIdentityAt builds the workspace half of an identity for an explicit
+// .beads directory, the way the unit-test-callable guards do: no BEADS_DIR
+// or worktree-fallback resolution, no redirect following — the caller named
+// the workspace.
+func initIdentityAt(beadsDir string) initIdentity {
+	return initIdentityAtFill(initIdentity{BeadsDir: beadsDir})
 }
 
 // resolveInitTargetRef completes the identity with the target half, from the
@@ -206,18 +219,27 @@ func countConfiguredServerIssues(ctx context.Context, id initIdentity, subject s
 	if !present {
 		return 0, false, nil
 	}
-	// A read-only open that pins the recorded database: applyResolvedConfig
-	// fills the endpoint from the workspace's own configuration the same way
-	// the configured ref above was resolved, and the env-first database fill
-	// never runs because Database is already set. DisableAutoStart keeps the
-	// count from starting a server: confirming a destruction must not have
-	// side effects of its own.
-	store, err := dolt.NewFromConfigWithOptions(ctx, id.BeadsDir, &dolt.Config{
+	// A read-only open that pins the recorded database and the configured
+	// endpoint. The preflight runs after runInit promoted the explicit
+	// --server-* flags into the environment, so letting the endpoint fill
+	// from that environment would count at the FLAGGED endpoint, not the
+	// configured one; pinning host and port (as a caller assertion — the
+	// count deliberately dials the configured endpoint, whatever promoted
+	// env values now say) keeps the count on the workspace's own server.
+	// DisableAutoStart keeps the count from starting a server: confirming a
+	// destruction must not have side effects of its own.
+	countCfg := &dolt.Config{
 		ReadOnly:              true,
 		RequireReadableSchema: true,
 		Database:              subject,
+		ServerHost:            id.Configured.Host,
 		DisableAutoStart:      true,
-	})
+	}
+	if id.Configured.Port > 0 {
+		countCfg.ServerPort = id.Configured.Port
+		countCfg.ServerPortSource = doltserver.PortSourceCallerExplicit
+	}
+	store, err := dolt.NewFromConfigWithOptions(ctx, id.BeadsDir, countCfg)
 	if err != nil {
 		return 0, present, err
 	}
