@@ -1306,3 +1306,46 @@ func TestRecomputeAllIsBlocked_StaleBitOnClosedOrPinnedParent(t *testing.T) {
 		})
 	}
 }
+
+// The close-gate walk reads the same stored bit (gastownhall/beads#7626).
+// OwnGateUnderExogenousParent's shape: Q blocks on outside X, pc P -> Q, P
+// blocks on its own child C. Then Q is closed or pinned by a merge that leaves
+// its bit at 1 and its reason row in place. Q is never blocked, so nothing
+// above P is, and a recompute that reaches C but not Q must bring C bright:
+// the walk must not meet Q as a blocked parent that is not explained and drop
+// P's gate from the explained set.
+func TestParentChildCascade_StaleBitOnClosedOrPinnedGateParent(t *testing.T) {
+	for _, status := range []types.Status{types.StatusClosed, types.StatusPinned} {
+		t.Run(string(status), func(t *testing.T) {
+			store, cleanup := setupTestStore(t)
+			defer cleanup()
+			ctx, cancel := testContext(t)
+			defer cancel()
+
+			for _, id := range []string{"sg-x", "sg-q", "sg-p", "sg-c"} {
+				createPerm(t, ctx, store, id)
+			}
+			addDependencyWithMeta(t, ctx, store, "sg-q", "sg-x", types.DepBlocks, "")
+			addDependencyWithMeta(t, ctx, store, "sg-p", "sg-q", types.DepParentChild, "")
+			addDependencyWithMeta(t, ctx, store, "sg-p", "sg-c", types.DepBlocks, "")
+			addDepSkippingCycleCheck(ctx, t, store, "sg-c", "sg-p", types.DepParentChild)
+			assertBlockedFlags(ctx, t, store, "own gate under an exogenously blocked parent", map[string]bool{
+				"sg-x": false, "sg-q": true, "sg-p": true, "sg-c": true,
+			})
+
+			plantStaleParent(ctx, t, store, "issues", "sg-q", status)
+			recomputeScoped(ctx, t, store.db, "sg-c")
+			assertBlockedFlags(ctx, t, store, "scoped recompute of c under a stale "+string(status)+" q", map[string]bool{
+				"sg-q": true,  // outside the batch, so still stale,
+				"sg-p": true,  // P still waits on C,
+				"sg-c": false, // and nothing above P is blocked.
+			})
+
+			recomputeAll(ctx, t, store.db)
+			assertBlockedFlags(ctx, t, store, "after full repair", map[string]bool{
+				"sg-x": false, "sg-q": false, "sg-p": true, "sg-c": false,
+			})
+			assertConvergedAndStable(ctx, t, store)
+		})
+	}
+}

@@ -236,3 +236,30 @@ func TestShouldBeBlockedUnionParentLegsGuardStatus(t *testing.T) {
 		}
 	}
 }
+
+// The close-gate walk meets a parent as blocked only while it is neither
+// closed nor pinned, as the parent-child legs do (gastownhall/beads#7626).
+func TestBlockedParentEdgesGuardStatus(t *testing.T) {
+	const guarded = "AND p.is_blocked = 1 AND p.status <> 'closed' AND p.status <> 'pinned'"
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherFunc(
+		func(_, actual string) error {
+			if !strings.Contains(strings.Join(strings.Fields(actual), " "), guarded) {
+				return errors.New("walk does not guard p.status after p.is_blocked = 1")
+			}
+			return nil
+		})))
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	// One child issue: one lookup per parent kind.
+	for range 2 {
+		mock.ExpectQuery("").WillReturnRows(sqlmock.NewRows([]string{"issue_id", "id"}))
+	}
+	if _, err := blockedParentEdgesInTx(context.Background(), db, []parentRef{{id: "c"}}); err != nil {
+		t.Fatalf("blockedParentEdgesInTx: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet sqlmock expectations: %v", err)
+	}
+}
