@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -488,5 +489,41 @@ func TestCreateIssue_NonClosedSkipsClose(t *testing.T) {
 				t.Errorf("returned State = %q, want %q", got.State, "open")
 			}
 		})
+	}
+}
+
+// TestCreateIssue_FailedCloseSurfacesWarning pins the partial-success
+// contract: when the follow-up close fails, CreateIssue still returns the
+// created issue (so the bead keeps its external_ref and no duplicate is made
+// on the next push) and reports the failed close as a warning.
+func TestCreateIssue_FailedCloseSurfacesWarning(t *testing.T) {
+	// 422 is not retried by the client, unlike 5xx.
+	rec, tr := newCreateStateServer(t, http.StatusUnprocessableEntity)
+	closedAt := time.Now()
+	issue := &types.Issue{
+		ID: "bd-1", Title: "Done already", Description: "body",
+		IssueType: types.TypeTask, Priority: 2,
+		Status: types.StatusClosed, ClosedAt: &closedAt, CloseReason: "done",
+	}
+
+	got, err := tr.CreateIssue(context.Background(), issue)
+	if err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	want := []string{"POST /repos/o/r/issues", "PATCH /repos/o/r/issues/42"}
+	if !slices.Equal(rec.calls, want) {
+		t.Fatalf("requests = %v, want %v", rec.calls, want)
+	}
+	if got.Identifier != "42" || got.URL != "https://github.com/o/r/issues/42" {
+		t.Errorf("returned Identifier/URL = %q/%q, want the created issue #42", got.Identifier, got.URL)
+	}
+	if got.State != "open" {
+		t.Errorf("returned State = %q, want %q", got.State, "open")
+	}
+	if len(got.Warnings) != 1 {
+		t.Fatalf("returned Warnings = %v, want exactly one", got.Warnings)
+	}
+	if w := got.Warnings[0]; !strings.Contains(w, "#42") || !strings.Contains(w, "failed to close") {
+		t.Errorf("warning = %q, want it to name #42 and the failed close", w)
 	}
 }
