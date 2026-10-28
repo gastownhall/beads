@@ -84,6 +84,26 @@ func TestMergeSettleDrainsCallResultSets(t *testing.T) {
 		}
 		rec.assertDrained(t, mock)
 	})
+
+	t.Run("fk_cascade_repair_labels", func(t *testing.T) {
+		rec, mock := newDrainMock(t)
+		expectViolations(mock, "labels")
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT violation_type, violation_info FROM dolt_constraint_violations_labels")).
+			WillReturnRows(sqlmock.NewRows([]string{"violation_type", "violation_info"}).
+				AddRow("foreign key", `{"ReferencedTable":"issues"}`))
+		mock.ExpectExec(regexp.QuoteMeta(fkCascadeRepairDeletes["labels"])).
+			WillReturnResult(sqlmock.NewResult(0, 2))
+		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM dolt_constraint_violations_labels")).
+			WillReturnResult(sqlmock.NewResult(0, 1))
+		expectDrainedCall(mock, "CALL DOLT_ADD('labels')")
+		expectNoViolations(mock)
+
+		repaired, had, err := TryRepairFKCascadeViolations(context.Background(), rec)
+		if err != nil || !repaired || !had {
+			t.Fatalf("TryRepairFKCascadeViolations = (%v, %v, %v), want (true, true, nil)", repaired, had, err)
+		}
+		rec.assertDrained(t, mock)
+	})
 }
 
 const testAuthor = "Tester <tester@example.com>"
@@ -168,6 +188,15 @@ func expectConflicts(mock sqlmock.Sqlmock, tables ...string) {
 }
 
 func expectNoViolations(mock sqlmock.Sqlmock) {
+	expectViolations(mock)
+}
+
+// expectViolations answers one dolt_constraint_violations read with tables.
+func expectViolations(mock sqlmock.Sqlmock, tables ...string) {
+	rows := sqlmock.NewRows([]string{"table"})
+	for _, table := range tables {
+		rows.AddRow(table)
+	}
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT `table` FROM dolt_constraint_violations WHERE num_violations > 0")).
-		WillReturnRows(sqlmock.NewRows([]string{"table"}))
+		WillReturnRows(rows)
 }
