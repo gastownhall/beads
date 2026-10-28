@@ -574,12 +574,16 @@ func TestIsDoltServerMode_HostInference_GH3545(t *testing.T) {
 		}
 	})
 
-	t.Run("metadata localhost host masks config.yaml remote host", func(t *testing.T) {
+	t.Run("yaml remote host outranks metadata localhost host (GH#5961)", func(t *testing.T) {
 		// The inference follows the EFFECTIVE host precedence
-		// (GetDoltServerHost: env > metadata > config.yaml): when
-		// metadata supplies localhost, a lower-priority remote
-		// dolt.host that GetDoltServerHost would ignore must not
-		// drive the inference (cross-vendor review round 5).
+		// (GetDoltServerHost: env > config.yaml > metadata, GH#5961):
+		// when metadata supplies localhost and config.yaml names a
+		// different, remote dolt.host — the reporter's leak — the host
+		// the dial resolves (the yaml one) drives the inference. This
+		// subtest once pinned the inverted order (metadata masked yaml,
+		// cross-vendor review round 5); GH#5961 demoted the tracked
+		// metadata host below config.yaml, exactly as GH#2372 demoted
+		// dolt_server_port, and the inference keeps step with it.
 		configDir := t.TempDir()
 		configYaml := filepath.Join(configDir, "config.yaml")
 		if err := os.WriteFile(configYaml,
@@ -593,8 +597,8 @@ func TestIsDoltServerMode_HostInference_GH3545(t *testing.T) {
 		t.Cleanup(config.ResetForTesting)
 
 		cfg := &Config{Backend: BackendDolt, DoltServerHost: "localhost"}
-		if cfg.IsDoltServerMode() {
-			t.Error("IsDoltServerMode() = true, want false: metadata localhost host must mask config.yaml remote host")
+		if !cfg.IsDoltServerMode() {
+			t.Error("IsDoltServerMode() = false, want true: config.yaml remote host outranks and unmasks the metadata localhost host (GH#5961)")
 		}
 	})
 

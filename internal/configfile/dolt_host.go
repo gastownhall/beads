@@ -92,3 +92,14 @@ func IsLocalHostString(host string) bool {
 	}
 	return false
 }
+
+// SameServerHost reports whether a and b name the same server host, ignoring
+// case, surrounding whitespace and one pair of enclosing brackets
+// (UnbracketHost, the spelling ClassifyDoltHost reads), so the host-based
+// server-mode inference (HostImpliesServerMode) and the mismatch notices
+// built on it (GH#5961) compare two configured spellings of one address as
+// one. A local-only host that names the same server as a yaml host suppresses
+// nothing: only a host that names a DIFFERENT server changes behavior.
+func SameServerHost(a, b string) bool {
+	return strings.EqualFold(UnbracketHost(a), UnbracketHost(b))
+}
