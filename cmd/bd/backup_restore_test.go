@@ -186,9 +186,11 @@ func assertWorkspaceUnchanged(t *testing.T, dir string, before workspaceSnapshot
 // refusal mattered: no storage layer stops a server connection, so a
 // `bd --readonly backup restore --force` ran to the end and replaced the store.
 // It drives the built bd as a subprocess because CheckReadonly exits the
-// process. Both the fixture's backup and the restore run inside the Dolt
-// server, against the same path on the server's own filesystem, so a local
-// and a containerized test server both serve.
+// process. The fixture's backup and the restore run inside the Dolt server,
+// against the same path on the server's own filesystem, so a containerized
+// test server serves every case: bd asks the server whether the source holds
+// a Dolt backup, and reads its own filesystem only when the server cannot
+// answer.
 func TestBackupRestoreStrictReadonlyServerMode(t *testing.T) {
 	if testDoltServerPort == 0 {
 		t.Skip("Dolt test server not available")
@@ -199,119 +201,10 @@ func TestBackupRestoreStrictReadonlyServerMode(t *testing.T) {
 
 	bd := buildBDForInitTests(t)
 
-	// newWorkspace builds a server-mode workspace on the test server whose live
-	// store holds one issue its backup does not (three against two), so a restore
-	// that really ran shows up as a changed issue count. Each case gets its own: a
-	// restore that runs replaces the store and would hide a leak from the next.
-	newWorkspace := func(t *testing.T) (dir string, env []string, backupDir string) {
-		t.Helper()
-		dir = t.TempDir()
-		beadsDir := filepath.Join(dir, ".beads")
-		if err := os.MkdirAll(beadsDir, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		database := uniqueTestDBName(t)
-		if err := (&configfile.Config{
-			Backend:        configfile.BackendDolt,
-			DoltMode:       configfile.DoltModeServer,
-			DoltServerHost: "127.0.0.1",
-			DoltServerPort: testDoltServerPort,
-			DoltDatabase:   database,
-		}).Save(beadsDir); err != nil {
-			t.Fatalf("save workspace metadata: %v", err)
-		}
-
-		ctx := context.Background()
-		seedStore, err := dolt.New(ctx, &dolt.Config{
-			Path:            filepath.Join(beadsDir, "dolt"),
-			BeadsDir:        beadsDir,
-			ServerHost:      "127.0.0.1",
-			ServerPort:      testDoltServerPort,
-			Database:        database,
-			CreateIfMissing: true,
-		})
-		if err != nil {
-			t.Fatalf("create the server-mode database: %v", err)
-		}
-		t.Cleanup(func() { dropTestDatabase(database, testDoltServerPort) })
-		defer func() { _ = seedStore.Close() }()
-
-		if err := seedStore.SetConfig(ctx, "issue_prefix", "rr"); err != nil {
-			t.Fatalf("set issue_prefix: %v", err)
-		}
-		seed := func(id, title string) {
-			t.Helper()
-			now := time.Now()
-			issue := &types.Issue{
-				ID:        id,
-				Title:     title,
-				Status:    types.StatusOpen,
-				Priority:  2,
-				IssueType: types.TypeTask,
-				CreatedAt: now,
-				UpdatedAt: now,
-			}
-			if err := seedStore.CreateIssue(ctx, issue, "test-user"); err != nil {
-				t.Fatalf("create issue %s: %v", id, err)
-			}
-		}
-		commit := func(message string) {
-			t.Helper()
-			if err := seedStore.Commit(ctx, message); err != nil && !strings.Contains(err.Error(), "nothing to commit") {
-				t.Fatalf("commit %q: %v", message, err)
-			}
-		}
-
-		seed("rr-1", "issue in the backup A")
-		seed("rr-2", "issue in the backup B")
-		commit("issues the backup holds")
-
-		backupDir = filepath.Join(t.TempDir(), "dolt-backup")
-		if err := os.MkdirAll(backupDir, 0o750); err != nil {
-			t.Fatal(err)
-		}
-		if err := seedStore.BackupDatabase(ctx, backupDir); err != nil {
-			t.Fatalf("back up the database (the Dolt server must be able to write %s): %v", backupDir, err)
-		}
-
-		seed("rr-3", "issue created after the backup")
-		commit("issue the backup lacks")
-
-		env = []string{
-			"BEADS_TEST_MODE=1",
-			// The subprocess connects to a testdb_* database on the test server;
-			// this is the opt-in the test-database firewall asks for.
-			"BEADS_TEST_SERVER=1",
-			"BEADS_DIR=" + beadsDir,
-			"XDG_CONFIG_HOME=" + t.TempDir(),
-			// Keep the subprocess's circuit-breaker state in the suite's own
-			// directory rather than the host's temp dir.
-			"BEADS_TEST_CIRCUIT_DIR=" + os.Getenv("BEADS_TEST_CIRCUIT_DIR"),
-		}
-		return dir, env, backupDir
-	}
-
-	issueCount := func(t *testing.T, dir string, env []string) int {
-		t.Helper()
-		stdout, stderr, code := runBDMigrationFreezeWithEnv(t, bd, dir, env, "list", "--json")
-		if code != 0 {
-			t.Fatalf("bd list --json exited %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
-		}
-		start := strings.Index(stdout, "[")
-		if start < 0 {
-			t.Fatalf("no JSON array in bd list --json output:\n%s", stdout)
-		}
-		var issues []json.RawMessage
-		if err := json.Unmarshal([]byte(stdout[start:]), &issues); err != nil {
-			t.Fatalf("parse bd list --json output: %v\n%s", err, stdout)
-		}
-		return len(issues)
-	}
-
 	// The control proves the fixture really does restore when --readonly is not
 	// asked for, so "the store is unchanged" below cannot be vacuous.
 	t.Run("control_restore_without_readonly", func(t *testing.T) {
-		dir, env, backupDir := newWorkspace(t)
+		dir, env, backupDir := newRestoreServerWorkspace(t)
 		stdout, stderr, code := runBDMigrationFreezeWithEnv(t, bd, dir, env, "backup", "restore", "--force", backupDir)
 		if code != 0 {
 			t.Fatalf("restore without --readonly exited %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
@@ -319,7 +212,7 @@ func TestBackupRestoreStrictReadonlyServerMode(t *testing.T) {
 		if !strings.Contains(stdout, "Restore complete") {
 			t.Errorf("stdout is missing %q:\n%s", "Restore complete", stdout)
 		}
-		if got := issueCount(t, dir, env); got != 2 {
+		if got := restoreWorkspaceIssueCount(t, bd, dir, env); got != 2 {
 			t.Errorf("issue count after a real restore = %d, want 2: the backup holds two issues and the live store held three", got)
 		}
 	})
@@ -332,7 +225,7 @@ func TestBackupRestoreStrictReadonlyServerMode(t *testing.T) {
 		{"readonly_sandbox", []string{"--readonly", "--sandbox"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			dir, env, backupDir := newWorkspace(t)
+			dir, env, backupDir := newRestoreServerWorkspace(t)
 			before := snapshotWorkspace(t, dir)
 
 			args := append(append([]string{}, tc.flags...), "backup", "restore", "--force", backupDir)
@@ -340,9 +233,281 @@ func TestBackupRestoreStrictReadonlyServerMode(t *testing.T) {
 
 			assertStrictReadonlyRestoreRefused(t, stdout, stderr, code)
 			assertWorkspaceUnchanged(t, dir, before)
-			if got := issueCount(t, dir, env); got != 3 {
+			if got := restoreWorkspaceIssueCount(t, bd, dir, env); got != 3 {
 				t.Errorf("issue count after the refused restore = %d, want 3: the restore replaced the store", got)
 			}
 		})
 	}
+}
+
+// newRestoreServerWorkspace builds a server-mode workspace on the test server
+// whose live store holds one issue its backup does not (three against two), so
+// a restore that really ran shows up as a changed issue count. Each case gets
+// its own: a restore that runs replaces the store and would hide a leak from
+// the next.
+func newRestoreServerWorkspace(t *testing.T) (dir string, env []string, backupDir string) {
+	t.Helper()
+	dir = t.TempDir()
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	database := uniqueTestDBName(t)
+	if err := (&configfile.Config{
+		Backend:        configfile.BackendDolt,
+		DoltMode:       configfile.DoltModeServer,
+		DoltServerHost: "127.0.0.1",
+		DoltServerPort: testDoltServerPort,
+		DoltDatabase:   database,
+	}).Save(beadsDir); err != nil {
+		t.Fatalf("save workspace metadata: %v", err)
+	}
+
+	ctx := context.Background()
+	seedStore, err := dolt.New(ctx, &dolt.Config{
+		Path:            filepath.Join(beadsDir, "dolt"),
+		BeadsDir:        beadsDir,
+		ServerHost:      "127.0.0.1",
+		ServerPort:      testDoltServerPort,
+		Database:        database,
+		CreateIfMissing: true,
+	})
+	if err != nil {
+		t.Fatalf("create the server-mode database: %v", err)
+	}
+	t.Cleanup(func() { dropTestDatabase(database, testDoltServerPort) })
+	defer func() { _ = seedStore.Close() }()
+
+	if err := seedStore.SetConfig(ctx, "issue_prefix", "rr"); err != nil {
+		t.Fatalf("set issue_prefix: %v", err)
+	}
+	seed := func(id, title string) {
+		t.Helper()
+		now := time.Now()
+		issue := &types.Issue{
+			ID:        id,
+			Title:     title,
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+			CreatedAt: now,
+			UpdatedAt: now,
+		}
+		if err := seedStore.CreateIssue(ctx, issue, "test-user"); err != nil {
+			t.Fatalf("create issue %s: %v", id, err)
+		}
+	}
+	commit := func(message string) {
+		t.Helper()
+		if err := seedStore.Commit(ctx, message); err != nil && !strings.Contains(err.Error(), "nothing to commit") {
+			t.Fatalf("commit %q: %v", message, err)
+		}
+	}
+
+	seed("rr-1", "issue in the backup A")
+	seed("rr-2", "issue in the backup B")
+	commit("issues the backup holds")
+
+	backupDir = filepath.Join(t.TempDir(), "dolt-backup")
+	if err := os.MkdirAll(backupDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := seedStore.BackupDatabase(ctx, backupDir); err != nil {
+		t.Fatalf("back up the database (the Dolt server must be able to write %s): %v", backupDir, err)
+	}
+
+	seed("rr-3", "issue created after the backup")
+	commit("issue the backup lacks")
+
+	env = []string{
+		"BEADS_TEST_MODE=1",
+		// The subprocess connects to a testdb_* database on the test server;
+		// this is the opt-in the test-database firewall asks for.
+		"BEADS_TEST_SERVER=1",
+		"BEADS_DIR=" + beadsDir,
+		"XDG_CONFIG_HOME=" + t.TempDir(),
+		// Keep the subprocess's circuit-breaker state in the suite's own
+		// directory rather than the host's temp dir.
+		"BEADS_TEST_CIRCUIT_DIR=" + os.Getenv("BEADS_TEST_CIRCUIT_DIR"),
+	}
+	return dir, env, backupDir
+}
+
+// restoreWorkspaceIssueCount is the number of issues bd list --json reports
+// for the workspace at dir.
+func restoreWorkspaceIssueCount(t *testing.T, bd, dir string, env []string) int {
+	t.Helper()
+	stdout, stderr, code := runBDMigrationFreezeWithEnv(t, bd, dir, env, "list", "--json")
+	if code != 0 {
+		t.Fatalf("bd list --json exited %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	start := strings.Index(stdout, "[")
+	if start < 0 {
+		t.Fatalf("no JSON array in bd list --json output:\n%s", stdout)
+	}
+	var issues []json.RawMessage
+	if err := json.Unmarshal([]byte(stdout[start:]), &issues); err != nil {
+		t.Fatalf("parse bd list --json output: %v\n%s", err, stdout)
+	}
+	return len(issues)
+}
+
+// TestBackupRestoreRefusesNonBackupSourceServerMode is the reporter's repro
+// for #5972: `bd backup restore <dir> --force` against a directory holding no
+// Dolt backup used to drop the target database before Dolt noticed, leaving
+// "table not found: issues". The restore must be refused with the source and
+// the store both untouched.
+func TestBackupRestoreRefusesNonBackupSourceServerMode(t *testing.T) {
+	if testDoltServerPort == 0 {
+		t.Skip("Dolt test server not available")
+	}
+	if testutil.DoltContainerCrashed() {
+		t.Skipf("Dolt test server crashed: %v", testutil.DoltContainerCrashError())
+	}
+
+	bd := buildBDForInitTests(t)
+
+	// assertRefusedUnchanged checks one refused restore: a non-zero exit, the
+	// refusal, a remedy that says wantRemedy and not avoid, and the store still
+	// holding its three issues.
+	assertRefusedUnchanged := func(t *testing.T, dir string, env []string, stdout, stderr string, code int, wantRemedy, avoid string) {
+		t.Helper()
+		if code == 0 {
+			t.Errorf("restore from a non-backup directory exited 0\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+		for _, want := range []string{"is not a Dolt backup (no manifest found)", "the database was not changed", wantRemedy} {
+			if !strings.Contains(stdout+stderr, want) {
+				t.Errorf("output is missing %q\nstdout:\n%s\nstderr:\n%s", want, stdout, stderr)
+			}
+		}
+		if avoid != "" && strings.Contains(stdout+stderr, avoid) {
+			t.Errorf("output offers %q, which would re-point the configured backup destination\nstdout:\n%s\nstderr:\n%s", avoid, stdout, stderr)
+		}
+		if got := restoreWorkspaceIssueCount(t, bd, dir, env); got != 3 {
+			t.Errorf("issue count after the refused restore = %d, want 3: the restore replaced the store", got)
+		}
+	}
+
+	for _, tc := range []struct {
+		name              string
+		files             []string
+		wantRemedy, avoid string
+	}{
+		{name: "empty_dir", wantRemedy: "To back up into it, run bd backup init "},
+		// A directory of exports is pointed at bd import, not at backing up
+		// into it.
+		{name: "jsonl_dir", files: []string{"issues.jsonl"}, wantRemedy: "run bd import <file>", avoid: "bd backup init"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, env, _ := newRestoreServerWorkspace(t)
+			source := t.TempDir()
+			for _, name := range tc.files {
+				if err := os.WriteFile(filepath.Join(source, name), []byte("{}\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			stdout, stderr, code := runBDMigrationFreezeWithEnv(t, bd, dir, env, "backup", "restore", source, "--force")
+			assertRefusedUnchanged(t, dir, env, stdout, stderr, code, tc.wantRemedy, tc.avoid)
+
+			entries, err := os.ReadDir(source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got []string
+			for _, e := range entries {
+				got = append(got, e.Name())
+			}
+			if !slices.Equal(got, tc.files) {
+				t.Errorf("source directory entries after the refused restore = %v, want %v", got, tc.files)
+			}
+		})
+	}
+
+	// With no path argument the source is the workspace's .beads/backup, which
+	// backupDir creates when it is missing, so a workspace that never took a
+	// Dolt backup hands the restore an empty directory.
+	t.Run("default_dir_without_backup", func(t *testing.T) {
+		dir, env, _ := newRestoreServerWorkspace(t)
+		manifest := filepath.Join(dir, ".beads", "backup", "manifest")
+		if _, err := os.Stat(manifest); !os.IsNotExist(err) {
+			t.Fatalf("fixture already has %s (stat err = %v); want a workspace with no Dolt backup", manifest, err)
+		}
+
+		stdout, stderr, code := runBDMigrationFreezeWithEnv(t, bd, dir, env, "backup", "restore", "--force")
+		assertRefusedUnchanged(t, dir, env, stdout, stderr, code, "To back up into it, run bd backup init ", "")
+	})
+
+	// With a backup destination configured, the refusal names it instead of
+	// offering bd backup init, which would replace it with the mistyped path.
+	t.Run("configured_destination_named", func(t *testing.T) {
+		dir, env, backupDir := newRestoreServerWorkspace(t)
+		if stdout, stderr, code := runBDMigrationFreezeWithEnv(t, bd, dir, env, "backup", "init", backupDir); code != 0 {
+			t.Fatalf("bd backup init %s exited %d\nstdout:\n%s\nstderr:\n%s", backupDir, code, stdout, stderr)
+		}
+
+		stdout, stderr, code := runBDMigrationFreezeWithEnv(t, bd, dir, env, "backup", "restore", t.TempDir(), "--force")
+		assertRefusedUnchanged(t, dir, env, stdout, stderr, code, "The configured backup destination is file://"+backupDir, "bd backup init")
+	})
+
+	// A path Dolt reads as a different directory is refused before the server
+	// sees it, manifest or not: Dolt would create and open the directory the
+	// path is cut or decoded to, and the forced restore would drop the target
+	// before failing to read it. On a server that shares bd's filesystem that
+	// directory would appear beside the source.
+	for _, tc := range []struct {
+		leaf, doltReads string
+	}{
+		{leaf: "bk#1", doltReads: "bk"},
+		{leaf: "b%41k", doltReads: "bAk"},
+	} {
+		t.Run("path_read_as_"+tc.doltReads, func(t *testing.T) {
+			dir, env, _ := newRestoreServerWorkspace(t)
+			parent := t.TempDir()
+			source := filepath.Join(parent, tc.leaf)
+			if err := os.MkdirAll(source, 0o750); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(source, "manifest"), []byte("never read: the path is refused first\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			stdout, stderr, code := runBDMigrationFreezeWithEnv(t, bd, dir, env, "backup", "restore", source, "--force")
+			if code == 0 {
+				t.Errorf("restore from %s exited 0\nstdout:\n%s\nstderr:\n%s", source, stdout, stderr)
+			}
+			for _, want := range []string{"cannot restore from", "the database was not changed"} {
+				if !strings.Contains(stdout+stderr, want) {
+					t.Errorf("output is missing %q\nstdout:\n%s\nstderr:\n%s", want, stdout, stderr)
+				}
+			}
+			if got := restoreWorkspaceIssueCount(t, bd, dir, env); got != 3 {
+				t.Errorf("issue count after the refused restore = %d, want 3: the restore replaced the store", got)
+			}
+			if _, err := os.Stat(filepath.Join(parent, tc.doltReads)); !os.IsNotExist(err) {
+				t.Errorf("%s, the directory Dolt reads %s as, exists after the refused restore (stat err = %v)", tc.doltReads, tc.leaf, err)
+			}
+		})
+	}
+
+	// The control proves a real Dolt backup still restores, so the refusals
+	// above are the manifest check and not a restore that no longer works.
+	// The backup is where the server wrote it, inside the container on the
+	// container backend: bd asks the server whether the source holds a backup,
+	// and reads its own filesystem only when the server cannot answer and runs
+	// on bd's host (the local backend confines LOAD_FILE, and runs here).
+	t.Run("control_real_backup", func(t *testing.T) {
+		dir, env, backupDir := newRestoreServerWorkspace(t)
+
+		stdout, stderr, code := runBDMigrationFreezeWithEnv(t, bd, dir, env, "backup", "restore", backupDir, "--force")
+		if code != 0 {
+			t.Fatalf("restore from a real backup exited %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+		}
+		if !strings.Contains(stdout, "Restore complete") {
+			t.Errorf("stdout is missing %q:\n%s", "Restore complete", stdout)
+		}
+		if got := restoreWorkspaceIssueCount(t, bd, dir, env); got != 2 {
+			t.Errorf("issue count after a real restore = %d, want 2: the backup holds two issues and the live store held three", got)
+		}
+	})
 }
