@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/execenv"
 )
 
 // runCommitIndexGit runs git in dir with the test process's scrubbed
@@ -633,4 +634,182 @@ func TestIsExportFileStagedForDeletion_LinkedWorktree(t *testing.T) {
 	if !isExportFileStagedForDeletion(wtExport) {
 		t.Fatal("isExportFileStagedForDeletion = false, want the staged deletion in the pending index to be seen")
 	}
+}
+
+// TestGitIndexEnv_Containment pins AC-4: an inherited GIT_INDEX_FILE is only
+// honored when it names an existing regular file directly inside the
+// staging repo's git dir. Every other shape — another repo's index, a
+// nested repo's or submodule-style index, a plain worktree file, a missing
+// next-index, a symlink — must be left untouched while the export stages
+// into the discovered <gitdir>/index. These rows also guard against the
+// naive fix of dropping GIT_INDEX_FILE from scrubGitHookEnv outright.
+func TestGitIndexEnv_Containment(t *testing.T) {
+	rows := []struct {
+		name        string
+		chdirSubdir bool
+		candidate   func(t *testing.T, repo, gitDir string) string
+	}{
+		{
+			name: "another repo's index",
+			candidate: func(t *testing.T, repo, gitDir string) string {
+				other := filepath.Join(filepath.Dir(repo), "other")
+				if err := os.MkdirAll(other, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				runCommitIndexGit(t, other, nil, "init", "-q")
+				commitIndexWrite(t, filepath.Join(other, "tracked.txt"), []byte("v1\n"))
+				runCommitIndexGit(t, other, nil, "add", "--", "tracked.txt")
+				return filepath.Join(other, ".git", "index")
+			},
+		},
+		{
+			name: "nested repo's index",
+			candidate: func(t *testing.T, repo, gitDir string) string {
+				nested := filepath.Join(repo, "vendor", "sub")
+				if err := os.MkdirAll(nested, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				runCommitIndexGit(t, nested, nil, "init", "-q")
+				commitIndexWrite(t, filepath.Join(nested, "tracked.txt"), []byte("v1\n"))
+				runCommitIndexGit(t, nested, nil, "add", "--", "tracked.txt")
+				return filepath.Join(nested, ".git", "index")
+			},
+		},
+		{
+			name: "submodule-style index below the git dir",
+			candidate: func(t *testing.T, repo, gitDir string) string {
+				// A descendant of the git dir, not a direct child: only the
+				// parent-directory identity check rejects it.
+				if err := os.MkdirAll(filepath.Join(gitDir, "modules", "x"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				candidate := filepath.Join(gitDir, "modules", "x", "index")
+				commitIndexCopy(t, filepath.Join(gitDir, "index"), candidate)
+				return candidate
+			},
+		},
+		{
+			name: "a worktree file",
+			candidate: func(t *testing.T, repo, gitDir string) string {
+				candidate := filepath.Join(repo, "my-index")
+				commitIndexCopy(t, filepath.Join(gitDir, "index"), candidate)
+				return candidate
+			},
+		},
+		{
+			name: "missing next-index file",
+			candidate: func(t *testing.T, repo, gitDir string) string {
+				return filepath.Join(gitDir, "next-index-999.lock")
+			},
+		},
+		{
+			name: "symlink in the git dir",
+			candidate: func(t *testing.T, repo, gitDir string) string {
+				if runtime.GOOS == "windows" {
+					t.Skip("symlink creation needs privileges on Windows")
+				}
+				other := filepath.Join(filepath.Dir(repo), "other")
+				if err := os.MkdirAll(other, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				runCommitIndexGit(t, other, nil, "init", "-q")
+				commitIndexWrite(t, filepath.Join(other, "tracked.txt"), []byte("v1\n"))
+				runCommitIndexGit(t, other, nil, "add", "--", "tracked.txt")
+				link := filepath.Join(gitDir, "link-index")
+				if err := os.Symlink(filepath.Join(other, ".git", "index"), link); err != nil {
+					t.Fatal(err)
+				}
+				return link
+			},
+		},
+		{
+			name: "relative .git/index with cwd in a subdirectory",
+			candidate: func(t *testing.T, repo, gitDir string) string {
+				if err := os.MkdirAll(filepath.Join(repo, "sub"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				return filepath.Join(".git", "index")
+			},
+			// The value resolves against the process cwd (a hook's worktree
+			// top); from repo/sub it names a missing repo/sub/.git/index.
+			chdirSubdir: true,
+		},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			repo, gitDir, exportPath := newCommitIndexRepo(t)
+			commitIndexWrite(t, exportPath, []byte(`{"id":"v2"}`+"\n"))
+			candidate := row.candidate(t, repo, gitDir)
+			var before []byte
+			if data, err := os.ReadFile(candidate); err == nil {
+				before = data
+			}
+
+			if err := os.Unsetenv("GIT_DIR"); err != nil {
+				t.Fatal(err)
+			}
+			if row.chdirSubdir {
+				t.Chdir(filepath.Join(repo, "sub"))
+			} else {
+				t.Chdir(repo)
+			}
+			t.Setenv("GIT_INDEX_FILE", candidate)
+
+			if err := gitAddFile(exportPath); err != nil {
+				t.Fatalf("gitAddFile with an unhonored GIT_INDEX_FILE: %v", err)
+			}
+			assertCommitIndexHasExport(t, repo, filepath.Join(gitDir, "index"), exportPath)
+			after, statErr := os.ReadFile(candidate)
+			if before == nil {
+				if statErr == nil {
+					t.Fatalf("candidate %s was created", candidate)
+				}
+			} else if statErr != nil || string(after) != string(before) {
+				t.Fatalf("candidate %s was modified", candidate)
+			}
+		})
+	}
+
+	// The inherited value is matched with the same key policy as the scrub:
+	// a mixed-case Git_Index_File is honored only under the windows policy,
+	// and exactly one GIT_INDEX_FILE entry comes back in that case.
+	checkHookEnvForBothHosts(t, func(t *testing.T) {
+		repo, gitDir, _ := newCommitIndexRepo(t)
+		next := filepath.Join(gitDir, "next-index-4242.lock")
+		commitIndexCopy(t, filepath.Join(gitDir, "index"), next)
+		if err := os.Unsetenv("GIT_INDEX_FILE"); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Unsetenv("GIT_DIR"); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("Git_Index_File", next)
+
+		env, indexFile, err := gitIndexEnv(repo)
+		if err != nil {
+			t.Fatalf("gitIndexEnv: %v", err)
+		}
+		keys := 0
+		for _, entry := range env {
+			if key, _, ok := strings.Cut(entry, "="); ok &&
+				execenv.KeyEqualForOS(key, "GIT_INDEX_FILE", hookEnvGOOS) {
+				keys++
+			}
+		}
+		if hookEnvGOOS == "windows" {
+			if indexFile != next {
+				t.Fatalf("indexFile = %q, want the inherited %q", indexFile, next)
+			}
+			if keys != 1 {
+				t.Fatalf("returned env has %d GIT_INDEX_FILE entries, want exactly 1", keys)
+			}
+		} else {
+			if indexFile != filepath.Join(gitDir, "index") {
+				t.Fatalf("indexFile = %q, want the discovered git dir index", indexFile)
+			}
+			if keys != 0 {
+				t.Fatalf("returned env has %d GIT_INDEX_FILE entries, want 0", keys)
+			}
+		}
+	})
 }
