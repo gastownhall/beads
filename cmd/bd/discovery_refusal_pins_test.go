@@ -957,3 +957,37 @@ func TestDiscoveryRefusalPinsUserGlobalBeadsDir(t *testing.T) {
 		})
 	}
 }
+
+// pinUserGlobalBeadsWhereHint is bd where's no-workspace hint when discovery
+// passed over the fixture's user-level $ROOT/home/.beads.
+const pinUserGlobalBeadsWhereHint = "check BEADS_DIR/worktree setup, or run 'bd init' to create a new database; " +
+	"$ROOT/home/.beads is your user-level beads directory, which bd does not use outside a project " +
+	"unless you name it: export BEADS_DIR=$ROOT/home/.beads"
+
+// TestDiscoveryRefusalPinsUserGlobalBeadsDirWhere pins bd where's refusal
+// from a directory under $HOME outside any project: its hint names the
+// user-level ~/.beads discovery passed over (GH#4402), with no new JSON keys.
+func TestDiscoveryRefusalPinsUserGlobalBeadsDirWhere(t *testing.T) {
+	notes := func(f *discoveryPinFixture) (string, []string) { return f.userGlobalBeadsFixture(), nil }
+	runDiscoveryPinCases(t, []discoveryPinCase{
+		{
+			name:   "where",
+			setup:  notes,
+			args:   []string{"where"},
+			exit:   1,
+			stderr: "Error: No active beads workspace found.\nHint: " + pinUserGlobalBeadsWhereHint + "\n",
+		},
+		{
+			name:  "where-json",
+			setup: notes,
+			args:  []string{"where", "--json"},
+			exit:  1,
+			stdout: "{\n" +
+				`  "error": "no_beads_directory",` + "\n" +
+				`  "hint": "` + pinUserGlobalBeadsWhereHint + `",` + "\n" +
+				`  "message": "No active beads workspace found.",` + "\n" +
+				`  "schema_version": 1` + "\n" +
+				"}\n",
+		},
+	})
+}

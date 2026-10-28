@@ -57,13 +57,13 @@ Examples:
 				if jerr := outputJSON(map[string]string{
 					"error":   "no_beads_directory",
 					"message": activeWorkspaceNotFoundMessage(),
-					"hint":    whereDiagHint(),
+					"hint":    whereNoWorkspaceHint(),
 				}); jerr != nil {
 					return jerr
 				}
 				return SilentExit()
 			}
-			return HandleErrorWithHint(activeWorkspaceNotFoundMessage(), whereDiagHint())
+			return HandleErrorWithHint(activeWorkspaceNotFoundMessage(), whereNoWorkspaceHint())
 		}
 
 		result.Path = beadsDir

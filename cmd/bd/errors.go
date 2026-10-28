@@ -93,6 +93,18 @@ func skippedUserGlobalBeadsNote() string {
 		"      unless you name it: " + export + "\n"
 }
 
+// whereNoWorkspaceHint is bd where's hint when it finds no workspace: the
+// diagnostic hint plus, when discovery passed over the user-level ~/.beads,
+// the directory and the command that selects it, on one line so --json keeps
+// it in its existing "hint" string.
+func whereNoWorkspaceHint() string {
+	hint := whereDiagHint()
+	if dir, export, ok := skippedUserGlobalBeads(); ok {
+		hint += "; " + dir + " is your user-level beads directory, which bd does not use outside a project unless you name it: " + export
+	}
+	return hint
+}
+
 func buildJSONError(message, hint string) interface{} {
 	inner := map[string]interface{}{
 		"error": message,
