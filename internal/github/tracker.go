@@ -152,6 +152,17 @@ func (t *Tracker) CreateIssue(ctx context.Context, issue *types.Issue) (*tracker
 		return nil, err
 	}
 
+	// GitHub's POST /issues cannot set state, so a closed bead is created
+	// open. Close it with a follow-up update so the state carries
+	// (gastownhall/beads#5486).
+	if issue.Status == types.StatusClosed {
+		if closed, err := t.client.UpdateIssue(ctx, created.Number, map[string]interface{}{
+			"state": "closed",
+		}); err == nil {
+			created = closed
+		}
+	}
+
 	ti := githubToTrackerIssue(created)
 	return &ti, nil
 }
