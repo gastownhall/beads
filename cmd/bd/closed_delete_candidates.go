@@ -43,7 +43,7 @@ func warnClosedDeletionSafetySkips(stats closedDeletionCandidateStats) {
 // deletes by id and cannot retire one, so a retained bead is never its to
 // take. setting is the stored value of types.retained.
 func holdBackRetainedTypes(issues []*types.Issue, setting string) ([]*types.Issue, int) {
-	return workapi.PartitionSweepRetainedTypes(issues, workapi.RetainedTypesFromSetting(setting), false)
+	return workapi.PartitionSweepRetainedTypes(issues, workapi.RetainedTypesFromSetting(setting))
 }
 
 // retainedTypesKeptLine is the text line for the decay's kept count.

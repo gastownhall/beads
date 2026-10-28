@@ -7,7 +7,6 @@ import (
 
 	"github.com/DATA-DOG/go-sqlmock"
 
-	"github.com/steveyegge/beads/internal/workapi"
 	publicops "github.com/steveyegge/beads/issueops"
 )
 
@@ -65,30 +64,5 @@ func TestResolveRetainedTypesInTxReadsTheConfigRow(t *testing.T) {
 				t.Errorf("unmet sqlmock expectations: %v", err)
 			}
 		})
-	}
-}
-
-// TestRetainedTypesParseAsTypesCustomDoes pins that types.retained takes
-// exactly the spellings types.custom does: workapi owns the retained-type
-// parse (it sits below this package), and a drift between the two would make
-// `bd config set types.retained` accept a value the sweep reads differently.
-func TestRetainedTypesParseAsTypesCustomDoes(t *testing.T) {
-	for _, value := range []string{
-		"", " ", "op", "op,fact", " op , ,fact,op ", `["op","fact"]`, `[" op ",""]`, `[]`, `["op"`, "a b,c",
-	} {
-		want := map[string]bool{}
-		for _, name := range ParseTypesConfigValue(value) {
-			want[name] = true
-		}
-		got := workapi.RetainedTypesFromSetting(value)
-		if len(got) != len(want) {
-			t.Errorf("value %q: retained %v, types.custom parse %v", value, got, want)
-			continue
-		}
-		for name := range want {
-			if !got[name] {
-				t.Errorf("value %q: retained %v, types.custom parse %v", value, got, want)
-			}
-		}
 	}
 }

@@ -55,7 +55,7 @@ func SweepInTx(ctx context.Context, tx *sql.Tx, req publicops.SweepRequest) (pub
 		if err != nil {
 			return publicops.SweepResult{}, err
 		}
-		kept, result.Skipped.RetentionRequired = workapi.PartitionSweepRetainedTypes(kept, retained, req.RetainIDs)
+		kept, result.Skipped.RetentionRequired = workapi.PartitionSweepRetainedTypes(kept, retained)
 	}
 
 	if req.ProtectLiveDependents {

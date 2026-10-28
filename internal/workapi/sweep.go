@@ -1,7 +1,6 @@
 package workapi
 
 import (
-	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -172,45 +171,34 @@ func FilterSweepCandidates(issues []*types.Issue, pattern string, cutoff *time.T
 }
 
 // RetainedTypesFromSetting parses the workspace's types.retained setting
-// (issueops.SettingKeyTypesRetained) into a set: a JSON array of names, or the
-// comma-separated form, with names trimmed and empties dropped — the two
-// spellings types.custom takes. An unset value retains nothing. Names are not
+// (issueops.SettingKeyTypesRetained) into a set, through ParseTypeList — the
+// parse types.custom takes. An unset value retains nothing. Names are not
 // checked against the registered types: an unknown name matches no row, which
 // is what lets an orchestrator name a type before it registers it.
 func RetainedTypesFromSetting(value string) map[string]bool {
-	value = strings.TrimSpace(value)
-	if value == "" {
+	names := ParseTypeList(value)
+	if len(names) == 0 {
 		return nil
-	}
-	var names []string
-	if err := json.Unmarshal([]byte(value), &names); err != nil {
-		names = strings.Split(value, ",")
 	}
 	retained := make(map[string]bool, len(names))
 	for _, name := range names {
-		if name = strings.TrimSpace(name); name != "" {
-			retained[name] = true
-		}
-	}
-	if len(retained) == 0 {
-		return nil
+		retained[name] = true
 	}
 	return retained
 }
 
 // PartitionSweepRetainedTypes is the retained-type protection
-// (issueops.SweepSkips.RetentionRequired). It runs right after
-// FilterSweepCandidates: without RetainIDs, a candidate whose issue type the
-// workspace retains is held back and counted; with RetainIDs nothing is held
-// back, because a retaining sweep deletes the row AND retires its id, which is
-// the one way such a row may leave. Candidate order is preserved and the input
-// slice is not modified.
+// (issueops.SweepSkips.RetentionRequired): a candidate whose issue type the
+// workspace retains is held back and counted. Candidate order is preserved and
+// the input slice is not modified.
 //
-// `bd gc`'s decay, which selects through FilterSweepCandidates without being a
-// sweep, calls this with retainIDs false, so a retained row is kept by every
-// bulk delete that cannot retire it.
-func PartitionSweepRetainedTypes(candidates []*types.Issue, retained map[string]bool, retainIDs bool) (kept []*types.Issue, retentionRequired int) {
-	if retainIDs || len(retained) == 0 {
+// A retaining sweep does not call it: the sweep bodies read the setting only
+// when RetainIDs is unset, because a retaining sweep deletes the row AND
+// retires its id, which is the one way such a row may leave. The bulk deletes
+// that cannot retire an id — `bd gc`'s decay, `bd admin cleanup`, `bd mol wisp
+// gc` and the stale-closed-issues doctor fix — call it on their own selection.
+func PartitionSweepRetainedTypes(candidates []*types.Issue, retained map[string]bool) (kept []*types.Issue, retentionRequired int) {
+	if len(retained) == 0 {
 		return candidates, 0
 	}
 	kept = make([]*types.Issue, 0, len(candidates))

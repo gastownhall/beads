@@ -524,10 +524,9 @@ func TestRetainedTypesFromSettingParsesBothForms(t *testing.T) {
 	}
 }
 
-// TestPartitionSweepRetainedTypes is the option C partition: without
-// RetainIDs a candidate of a retained type is held back and counted; with
-// RetainIDs nothing is held back, because the retaining sweep is the one door
-// such a row may leave by.
+// TestPartitionSweepRetainedTypes is the option C partition: a candidate of a
+// retained type is held back and counted. A retaining sweep never calls it —
+// the bodies skip the read under RetainIDs — so it has no RetainIDs input.
 func TestPartitionSweepRetainedTypes(t *testing.T) {
 	op := &types.Issue{ID: "be-op", IssueType: types.IssueType("op")}
 	task := &types.Issue{ID: "be-task", IssueType: types.TypeTask}
@@ -535,19 +534,17 @@ func TestPartitionSweepRetainedTypes(t *testing.T) {
 	candidates := []*types.Issue{op, task, fact}
 
 	for _, test := range []struct {
-		name      string
-		retained  map[string]bool
-		retainIDs bool
-		wantKept  []string
-		wantHeld  int
+		name     string
+		retained map[string]bool
+		wantKept []string
+		wantHeld int
 	}{
-		{"nothing retained", nil, false, []string{"be-op", "be-task", "be-fact"}, 0},
-		{"plain sweep holds retained types back", map[string]bool{"op": true, "fact": true}, false, []string{"be-task"}, 2},
-		{"retaining sweep holds nothing back", map[string]bool{"op": true, "fact": true}, true, []string{"be-op", "be-task", "be-fact"}, 0},
-		{"an unknown name matches nothing", map[string]bool{"never-registered": true}, false, []string{"be-op", "be-task", "be-fact"}, 0},
+		{"nothing retained", nil, []string{"be-op", "be-task", "be-fact"}, 0},
+		{"retained types are held back", map[string]bool{"op": true, "fact": true}, []string{"be-task"}, 2},
+		{"an unknown name matches nothing", map[string]bool{"never-registered": true}, []string{"be-op", "be-task", "be-fact"}, 0},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			kept, held := PartitionSweepRetainedTypes(candidates, test.retained, test.retainIDs)
+			kept, held := PartitionSweepRetainedTypes(candidates, test.retained)
 			if held != test.wantHeld {
 				t.Errorf("held = %d, want %d", held, test.wantHeld)
 			}

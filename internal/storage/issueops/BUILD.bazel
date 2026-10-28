@@ -252,7 +252,6 @@ go_test(
         "//internal/storage/sqlcount",
         "//internal/types",
         "//internal/validation",
-        "//internal/workapi",
         "//issueops",
         "@com_github_data_dog_go_sqlmock//:go-sqlmock",
         "@com_github_dolthub_go_mysql_server//sql",

@@ -94,7 +94,7 @@ func sweepInUOW(ctx context.Context, uw UnitOfWork, req publicops.SweepRequest) 
 		if err != nil {
 			return publicops.SweepResult{}, fmt.Errorf("reading %s for the retained-type protection: %w", publicops.SettingKeyTypesRetained, err)
 		}
-		kept, result.Skipped.RetentionRequired = workapi.PartitionSweepRetainedTypes(kept, workapi.RetainedTypesFromSetting(value), req.RetainIDs)
+		kept, result.Skipped.RetentionRequired = workapi.PartitionSweepRetainedTypes(kept, workapi.RetainedTypesFromSetting(value))
 	}
 
 	if req.ProtectLiveDependents {
