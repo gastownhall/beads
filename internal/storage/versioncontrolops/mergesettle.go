@@ -279,7 +279,7 @@ func MergeWithStrategy(ctx context.Context, db DBConn, ref, author, strategy str
 		return nil, fmt.Errorf("set dolt_force_transaction_commit: %w", err)
 	}
 
-	_, mergeErr := db.ExecContext(ctx, "CALL DOLT_MERGE('--author', ?, ?)", author, ref)
+	mergeErr := schema.DrainCall(ctx, db, "CALL DOLT_MERGE('--author', ?, ?)", author, ref)
 	if mergeErr != nil && strings.Contains(mergeErr.Error(), "up to date") {
 		mergeErr = nil
 	}

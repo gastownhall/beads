@@ -121,4 +121,30 @@ func TestMergeSettleDrainsCallResultSets(t *testing.T) {
 		}
 		assertDrainedCalls(t, mock, rec)
 	})
+
+	t.Run("merge_with_strategy_clean", func(t *testing.T) {
+		rec, mock := newDrainMock(t)
+
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM dolt_status LIMIT 1")).
+			WillReturnRows(sqlmock.NewRows([]string{"1"}))
+		mock.ExpectExec(regexp.QuoteMeta("SET @@dolt_allow_commit_conflicts = 1")).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectExec(regexp.QuoteMeta("SET @@dolt_force_transaction_commit = 1")).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_MERGE('--author', ?, ?)")).
+			WithArgs("Tester <tester@example.com>", "feature").
+			WillReturnRows(emptyCallRows())
+		mock.ExpectQuery(regexp.QuoteMeta(doltConflictsSQL)).
+			WillReturnRows(sqlmock.NewRows([]string{"table", "num_conflicts"}))
+
+		conflicts, err := MergeWithStrategy(context.Background(), rec, "feature",
+			"Tester <tester@example.com>", "theirs")
+		if err != nil {
+			t.Fatalf("MergeWithStrategy: %v", err)
+		}
+		if len(conflicts) != 0 {
+			t.Fatalf("MergeWithStrategy conflicts = %v, want none", conflicts)
+		}
+		assertDrainedCalls(t, mock, rec)
+	})
 }
