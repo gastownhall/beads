@@ -1397,3 +1397,156 @@ func TestRoleIgnoresInheritedGitRouting(t *testing.T) {
 		}
 	})
 }
+
+// writeBeadsProjectDir creates <scope>/.beads holding a beads.db project file
+// and returns the .beads path. The caller decides whether scope is inside a
+// git repository.
+func writeBeadsProjectDir(t *testing.T, scope string) string {
+	t.Helper()
+	beadsDir := filepath.Join(scope, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatalf("failed to create %s: %v", beadsDir, err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "beads.db"), []byte{}, 0o600); err != nil {
+		t.Fatalf("failed to create beads.db: %v", err)
+	}
+	return beadsDir
+}
+
+// assertNonGitTargetFromGitCWD stands the process in cwd (a git repository
+// rooted at cwdRepoRoot), points BEADS_DIR at the .beads of targetScope — the
+// way `bd -C` exports it, without changing directory — and checks the context
+// that resolves: RepoRoot must be the named target, never the caller's
+// repository (GH#5700).
+func assertNonGitTargetFromGitCWD(t *testing.T, cwd, cwdRepoRoot, targetScope string) {
+	t.Helper()
+	targetBeadsDir := filepath.Join(targetScope, ".beads")
+	t.Setenv("BEADS_DIR", targetBeadsDir)
+	t.Chdir(cwd)
+	ResetCaches()
+	git.ResetCaches()
+	t.Cleanup(func() {
+		ResetCaches()
+		git.ResetCaches()
+	})
+
+	rc, err := GetRepoContext()
+	if err != nil {
+		t.Fatalf("GetRepoContext failed: %v", err)
+	}
+	if want := resolveSymlinks(targetBeadsDir); rc.BeadsDir != want {
+		t.Errorf("BeadsDir = %s, want %s", rc.BeadsDir, want)
+	}
+	if want := resolveSymlinks(targetScope); rc.RepoRoot != want {
+		t.Errorf("RepoRoot = %s, want the -C target %s (caller repo is %s)",
+			rc.RepoRoot, want, resolveSymlinks(cwdRepoRoot))
+	}
+	if want := resolveSymlinks(cwdRepoRoot); rc.CWDRepoRoot != want {
+		t.Errorf("CWDRepoRoot = %s, want %s", rc.CWDRepoRoot, want)
+	}
+	if !rc.IsRedirected {
+		t.Error("IsRedirected = false, want true: the target .beads is in no git repository while the caller stands inside one")
+	}
+}
+
+// TestGetRepoContext_NonGitBeadsDirFromGitCWD pins GH#5700: `bd -C <target>`
+// and an exported BEADS_DIR both name a beads project without moving the
+// process, so when the caller stands inside a git repository and the target's
+// .beads is in no git repository, the context must root at the target rather
+// than silently adopting the caller's repository root.
+func TestGetRepoContext_NonGitBeadsDirFromGitCWD(t *testing.T) {
+	t.Run("in-process", func(t *testing.T) {
+		// Linux in-process discovery answers "not a repository" itself
+		// (CommonDirInProcess's ok && !isRepo).
+		tmpDir := t.TempDir()
+		callerRepo := filepath.Join(tmpDir, "caller-repo")
+		if err := os.MkdirAll(callerRepo, 0o750); err != nil {
+			t.Fatalf("failed to create caller repo dir: %v", err)
+		}
+		if err := initGitRepo(callerRepo); err != nil {
+			t.Fatalf("failed to init caller repo: %v", err)
+		}
+		targetScope := filepath.Join(tmpDir, "target-scope")
+		writeBeadsProjectDir(t, targetScope)
+
+		assertNonGitTargetFromGitCWD(t, callerRepo, callerRepo, targetScope)
+	})
+
+	t.Run("exec-git", func(t *testing.T) {
+		// Set-but-empty is a LookupEnv hit, so CommonDirInProcess declines
+		// (discoveryEnvOverridden) while git's own discovery is unchanged
+		// (an empty ceiling resolves like no ceiling): the subtest therefore
+		// runs the `git -C path rev-parse` fallback that macOS and Windows
+		// always take, on Linux too. This hinges on discoveryEnvOverridden
+		// keeping LookupEnv: a switch to Getenv would degrade the subtest to
+		// the in-process path without failing.
+		t.Setenv("GIT_CEILING_DIRECTORIES", "")
+
+		tmpDir := t.TempDir()
+		callerRepo := filepath.Join(tmpDir, "caller-repo")
+		if err := os.MkdirAll(callerRepo, 0o750); err != nil {
+			t.Fatalf("failed to create caller repo dir: %v", err)
+		}
+		if err := initGitRepo(callerRepo); err != nil {
+			t.Fatalf("failed to init caller repo: %v", err)
+		}
+		targetScope := filepath.Join(tmpDir, "target-scope")
+		writeBeadsProjectDir(t, targetScope)
+
+		assertNonGitTargetFromGitCWD(t, callerRepo, callerRepo, targetScope)
+	})
+
+	t.Run("target-is-ancestor", func(t *testing.T) {
+		// The Gas Town HQ shape: a non-git town root holding the .beads, with
+		// the git rig nested inside it. Discovery from the rig would find the
+		// town's .beads, so the answer must come from work-tree containment,
+		// not from treating every non-placeable .beads as foreign or local.
+		targetScope := t.TempDir()
+		rig := filepath.Join(targetScope, "rig")
+		if err := os.MkdirAll(rig, 0o750); err != nil {
+			t.Fatalf("failed to create rig dir: %v", err)
+		}
+		if err := initGitRepo(rig); err != nil {
+			t.Fatalf("failed to init rig repo: %v", err)
+		}
+		writeBeadsProjectDir(t, targetScope)
+
+		assertNonGitTargetFromGitCWD(t, rig, rig, targetScope)
+	})
+
+	t.Run("worktree-masked-redirect", func(t *testing.T) {
+		// Deliberate behavior change that comes with the fix: a linked
+		// worktree whose main checkout's .beads/redirect points at storage in
+		// no git repository. bd's pre-run rebind exports BEADS_DIR as that
+		// storage .beads, hiding the redirect from GetRedirectInfo, and the
+		// context must still root at the storage parent — exactly like the
+		// same setup with the CWD at the main checkout.
+		tmpDir := t.TempDir()
+		mainCheckout := filepath.Join(tmpDir, "main")
+		if err := os.MkdirAll(mainCheckout, 0o750); err != nil {
+			t.Fatalf("failed to create main checkout dir: %v", err)
+		}
+		if err := initGitRepoWithCommit(mainCheckout); err != nil {
+			t.Fatalf("failed to init main checkout with commit: %v", err)
+		}
+		storageScope := filepath.Join(tmpDir, "storage")
+		storageBeadsDir := writeBeadsProjectDir(t, storageScope)
+
+		redirectDir := filepath.Join(mainCheckout, ".beads")
+		if err := os.MkdirAll(redirectDir, 0o750); err != nil {
+			t.Fatalf("failed to create redirect dir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(redirectDir, RedirectFileName), []byte(storageBeadsDir+"\n"), 0o600); err != nil {
+			t.Fatalf("failed to write redirect file: %v", err)
+		}
+
+		worktree := filepath.Join(tmpDir, "worktree")
+		wtCmd := exec.Command("git", "worktree", "add", "--detach", worktree)
+		wtCmd.Dir = mainCheckout
+		if out, err := wtCmd.CombinedOutput(); err != nil {
+			t.Fatalf("git worktree add failed: %v\n%s", err, out)
+		}
+
+		assertNonGitTargetFromGitCWD(t, worktree, worktree, storageScope)
+	})
+}

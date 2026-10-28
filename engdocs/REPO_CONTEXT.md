@@ -122,16 +122,24 @@ $ bd dolt push
 | `BeadsDir` | Actual `.beads/` directory (after following redirects) |
 | `RepoRoot` | Repository root containing `BeadsDir` |
 | `CWDRepoRoot` | Repository root containing user's CWD (may differ) |
-| `IsRedirected` | True if BEADS_DIR points to different repo than CWD |
+| `IsRedirected` | True if BeadsDir is in a different repository than CWD, or in no repository while CWD is in one |
 | `IsWorktree` | True if CWD is in a git worktree |
 
 ## Resolving Without Git
 
-`GetRepoContext()` requires a git repository: it finds `.beads/`, validates the
-path boundary, and only then asks git for a repository root. A workspace that
-is located and boundary-checked but has no resolvable git root is therefore a
-*known* workspace, not an unknown one — which is why it is the one failure that
-is safe to recover from.
+`GetRepoContext()` requires a git repository for the CWD: it finds `.beads/`,
+validates the path boundary, and only then asks git for a repository root. A
+workspace that is located and boundary-checked but has no resolvable git root
+is therefore a *known* workspace, not an unknown one — which is why it is the
+one failure that is safe to recover from.
+
+A `.beads` in no git repository at all, named from a CWD that is in one
+(`bd -C <dir>`, `BEADS_DIR`), resolves as external: `RepoRoot` is the `.beads`
+parent and `IsRedirected` is true, as in the no-git table below. Only the
+CWD's missing repository is an error; the `.beads`'s never is, because git
+cannot tell a foreign non-git directory from an in-tree `.beads` with
+discovery stopped (`GIT_CEILING_DIRECTORIES`, a symlinked-out `.beads`), so
+externality there is decided by work-tree position, not by the error kind.
 
 `GetRepoContextAllowingNoGit()` is that recovery, for callers that only read
 config files and are documented to answer in degraded states: `bd context` and

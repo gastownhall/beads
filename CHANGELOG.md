@@ -1027,6 +1027,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd -C <dir>` (or an exported `BEADS_DIR`) naming a beads project outside
+  any git repository, run from inside one, no longer adopts the caller's
+  repository root, role or git remote: the context now resolves as external,
+  rooted at the `.beads` parent (GH#5700).
 - `bd gitlab pull` no longer overwrites a bead linked to another GitLab
   project's issue with the same number, or puts that issue's dependency
   links on it. Issue IIDs are only unique within a project, but when the

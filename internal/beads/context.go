@@ -255,7 +255,10 @@ func buildRepoContext() (*RepoContext, error) {
 	// 3. Check for redirect file in the local repo
 	redirectInfo := GetRedirectInfo()
 
-	// 4. Determine RepoRoot based on external/redirect status
+	// 4. Determine RepoRoot based on external/redirect status.
+	// A .beads git cannot place is classified from a git CWD by work-tree
+	// position (see isExternalBeadsDir); every other answer comes from
+	// comparing git common dirs.
 	var repoRoot string
 	isExternal := redirectInfo.IsRedirected
 	if !isExternal {
@@ -298,6 +301,16 @@ func buildRepoContext() (*RepoContext, error) {
 
 // isExternalBeadsDir returns true if beadsDir is in a different git repo than CWD.
 // Uses git common dir to correctly handle worktrees and bare repos.
+//
+// A beadsDir git cannot place is classified by work-tree position rather than
+// reported as an error: with the CWD inside a repository, git's failure to
+// place the .beads means either a genuinely foreign non-git directory (GH#5700:
+// `bd -C <target>` from inside a repository must not silently adopt the
+// caller's repo root) or discovery stopped inside the CWD repository's own
+// tree (GIT_CEILING_DIRECTORIES, a .beads symlinked out of the tree). Only
+// the CWD-side failure is returned as an error; that one is the GH#4772
+// NoRepoRootError path and must stay an error so git-dependent callers fail
+// at the point of use.
 func isExternalBeadsDir(beadsDir string) (bool, error) {
 	cwdCommonDir, err := git.GetGitCommonDir()
 	if err != nil {
@@ -306,10 +319,48 @@ func isExternalBeadsDir(beadsDir string) (bool, error) {
 
 	beadsCommonDir, err := getGitCommonDirForPath(beadsDir)
 	if err != nil {
-		return false, err
+		// CWD is in a repository, but git cannot place beadsDir in one.
+		// It is the CWD repository's own only if it belongs to that
+		// repository's work tree.
+		return !beadsDirInCWDWorkTree(beadsDir), nil
 	}
 
 	return cwdCommonDir != beadsCommonDir, nil
+}
+
+// beadsDirInCWDWorkTree reports whether beadsDir belongs to the work tree of
+// the repository the process CWD is in, when git itself cannot place it. See
+// isExternalBeadsDir for why that classification is needed.
+//
+// Containment is judged against the CWD's top level (git.GetRepoRoot, which
+// is the worktree root when the CWD is in a worktree) on comparison-normalized
+// paths, plus two by-location exceptions: the repository's own .beads — which
+// is counted even though storage may be a symlink or mount git cannot place,
+// whether beadsDir arrived canonicalized (BEADS_DIR / -C) or lexical (walk-up
+// discovery) — and, in a worktree, the main checkout's shared .beads that
+// GetWorktreeFallbackBeadsDir names. A .beads/redirect is not matched: it
+// relocates storage and is already external at buildRepoContext's step 3.
+func beadsDirInCWDWorkTree(beadsDir string) bool {
+	root := git.GetRepoRoot()
+	if root == "" {
+		// Unreachable once the CWD side of isExternalBeadsDir has resolved,
+		// but safe: unplaced must not silently mean external.
+		return false
+	}
+	normRoot := utils.NormalizePathForComparison(root)
+	normDir := utils.NormalizePathForComparison(beadsDir)
+	if normDir == normRoot || strings.HasPrefix(normDir, normRoot+string(filepath.Separator)) {
+		return true
+	}
+	if utils.PathsEqual(beadsDir, filepath.Join(root, ".beads")) {
+		return true
+	}
+	if git.IsWorktree() {
+		if fallback := GetWorktreeFallbackBeadsDir(); fallback != "" && utils.PathsEqual(beadsDir, fallback) {
+			return true
+		}
+	}
+	return false
 }
 
 // getGitCommonDirForPath returns the shared git directory for a path.
