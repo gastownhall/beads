@@ -5694,20 +5694,14 @@ func (s *DoltStore) pullTransportReporting(ctx context.Context, remote string) (
 // This method handles both by checking for conflicts after the pull call
 // (whether it errored or not) and auto-resolving metadata-only conflicts.
 // openLongTimeoutConn opens a dedicated single-connection *sql.DB to this store's
-// database with a long read timeout, for merge/pull/conflict operations that can run
-// longer than the default connection timeout. The caller must Close the returned DB.
+// database with a fixed 5m read timeout, for local operations (history reads,
+// blocked-state recomputes, federation staging) that can run longer than the
+// pool's timeout. It deliberately does not read BEADS_DOLT_TRANSFER_TIMEOUT:
+// that knob is for remote transfers, which open their own connection with
+// oneShotConn(transferExecTimeoutDuration()). The caller must Close the
+// returned DB.
 func (s *DoltStore) openLongTimeoutConn() (*sql.DB, error) {
-	cfg, err := mysql.ParseDSN(s.connStr)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse DSN for long-timeout connection: %w", err)
-	}
-	cfg.ReadTimeout = 5 * time.Minute
-	db, err := sql.Open("mysql", cfg.FormatDSN())
-	if err != nil {
-		return nil, fmt.Errorf("failed to open long-timeout connection: %w", err)
-	}
-	db.SetMaxOpenConns(1)
-	return db, nil
+	return s.oneShotConn(5 * time.Minute)
 }
 
 // remote names the remote the query pulls from; the GH#3144 fetch+merge

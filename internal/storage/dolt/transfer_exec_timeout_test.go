@@ -110,6 +110,33 @@ func TestTransferSitesStallHitConfiguredDeadline(t *testing.T) {
 	}
 }
 
+// TestLongTimeoutConnIgnoresTransferKnob pins that BEADS_DOLT_TRANSFER_TIMEOUT
+// reaches only transfer connections. openLongTimeoutConn also serves history
+// reads, blocked-state recomputes and federation staging; a knob set low to
+// make pushes fail fast must not cut those off, so a stalled statement there
+// still runs until its caller's context ends.
+func TestLongTimeoutConnIgnoresTransferKnob(t *testing.T) {
+	t.Setenv("BEADS_DOLT_TRANSFER_TIMEOUT", "1s")
+	s := stallingStore(t, nil)
+	db, err := s.openLongTimeoutConn()
+	if err != nil {
+		t.Fatalf("openLongTimeoutConn: %v", err)
+	}
+	defer db.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	_, err = db.ExecContext(ctx, "SELECT 1")
+	elapsed := time.Since(start)
+	if !errors.Is(err, context.DeadlineExceeded) || errors.Is(err, mysql.ErrInvalidConn) {
+		t.Fatalf("stalled statement returned %v after %v, want context.DeadlineExceeded at 3s", err, elapsed.Round(time.Millisecond))
+	}
+	if elapsed < 3*time.Second-100*time.Millisecond {
+		t.Errorf("stalled statement ended after %v, before its 3s context; the transfer knob reached openLongTimeoutConn", elapsed.Round(time.Millisecond))
+	}
+}
+
 // assertTransferDeadlineHit checks a transfer stalled against a 1s
 // BEADS_DOLT_TRANSFER_TIMEOUT: it failed between 1s and 5s with the driver's
 // lost-connection error, annotated with the deadline and the variable.
