@@ -1,6 +1,7 @@
 package versioncontrolops
 
 import (
+	"github.com/steveyegge/beads/internal/doltinfoenv"
 	"github.com/steveyegge/beads/internal/githooksenv"
 	"github.com/steveyegge/beads/internal/gittraceenv"
 )
@@ -15,13 +16,18 @@ import (
 //   - stderr-directed git tracing removed (gittraceenv): Dolt parses object
 //     ids out of combined stdout+stderr, so GIT_TRACE=1 corrupts every
 //     captured value and the transfer dies with "failed to get remote db".
-//     File-target tracing (GIT_TRACE=/abs/path) is preserved.
+//     File-target tracing (GIT_TRACE=/abs/path) is preserved;
+//   - Dolt's __dolt_remote_info__ branch disabled (doltinfoenv, GH#6484):
+//     otherwise every successful write force-pushes a one-file branch into
+//     the git remote, which by default is the user's code repo.
 //
 // Every remote-touching statement in this package must run inside this one
-// guard rather than picking wrappers piecemeal — a call site that gets one
-// protection and silently misses the other is exactly how GH#4272 shipped.
+// guard rather than picking wrappers piecemeal — a call site that gets some
+// protections and silently misses another is exactly how GH#4272 shipped.
 func withRemoteEnvGuards(fn func() error) error {
 	return gittraceenv.WithScrubbed(func() error {
-		return githooksenv.WithDisabled(fn)
+		return githooksenv.WithDisabled(func() error {
+			return doltinfoenv.WithDisabled(fn)
+		})
 	})
 }

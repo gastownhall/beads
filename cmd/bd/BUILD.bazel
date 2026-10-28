@@ -776,6 +776,7 @@ go_test(
         "dolt_remote_add_server_test.go",
         "dolt_remote_add_test.go",
         "dolt_remote_adopt_test.go",
+        "dolt_remote_info_branch_embedded_test.go",
         "dolt_remote_json_test.go",
         "dolt_remote_origin_guard_embedded_test.go",
         "dolt_remote_origin_guard_test.go",

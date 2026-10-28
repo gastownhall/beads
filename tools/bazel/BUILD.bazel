@@ -197,6 +197,7 @@ release_cross_build(
         "//internal/configfile:configfile",
         "//internal/creds:creds",
         "//internal/debug:debug",
+        "//internal/doltinfoenv:doltinfoenv",
         "//internal/doltremote:doltremote",
         "//internal/doltserver:doltserver",
         "//internal/doltversion:doltversion",
