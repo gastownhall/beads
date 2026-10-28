@@ -43,8 +43,9 @@ func (k Kind) String() string {
 // Classify classifies a single SQL statement by its main statement, so CTEs
 // (WITH [RECURSIVE] name(cols) AS (...)), comments, and string literals that
 // contain keywords do not affect the result. A read that calls a dolt_
-// function anywhere in its parsed tree is Mixed, because Dolt can expose a
-// write (DOLT_COMMIT, DOLT_RESET, ...) as a SELECT-callable function. Input
+// function outside readOnlyDoltFunctions anywhere in its parsed tree is
+// Mixed, because Dolt can expose a write (DOLT_COMMIT, DOLT_RESET, ...) as a
+// SELECT-callable function. Input
 // the parser rejects is Mixed: it may still be valid for the server, and
 // Mixed never discards rows or rolls back writes.
 func Classify(query string) Kind {
@@ -59,19 +60,37 @@ func Classify(query string) Kind {
 	return kind
 }
 
-// callsDoltWriteFunction reports whether stmt calls a dolt_ function, in any
-// clause and with any qualifier. Table functions (dolt_log(), dolt_diff(...))
-// and system tables are not function calls and do not match.
+// readOnlyDoltFunctions are the dolt_ scalar functions the Dolt engine
+// registers that only read. Any other dolt_ function, including one a future
+// Dolt adds, may write and makes a read Mixed until it is listed here.
+var readOnlyDoltFunctions = map[string]bool{
+	"dolt_hashof":         true,
+	"dolt_hashof_table":   true,
+	"dolt_hashof_db":      true,
+	"dolt_merge_base":     true,
+	"dolt_version":        true,
+	"dolt_storage_format": true,
+	"dolt_join_cost":      true,
+}
+
+// callsDoltWriteFunction reports whether stmt calls a dolt_ function outside
+// readOnlyDoltFunctions, in any clause and with any qualifier. Table functions
+// (dolt_log(), dolt_diff(...)) and system tables are not function calls and
+// do not match.
 func callsDoltWriteFunction(stmt sqlparser.Statement) bool {
 	found := false
 	_ = sqlparser.Walk(func(node sqlparser.SQLNode) (bool, error) {
-		if fn, ok := node.(*sqlparser.FuncExpr); ok && strings.HasPrefix(fn.Name.Lowered(), "dolt_") {
+		if fn, ok := node.(*sqlparser.FuncExpr); ok && isDoltWriteFunction(fn.Name.Lowered()) {
 			found = true
 			return false, nil
 		}
 		return !found, nil
 	}, stmt)
 	return found
+}
+
+func isDoltWriteFunction(name string) bool {
+	return strings.HasPrefix(name, "dolt_") && !readOnlyDoltFunctions[name]
 }
 
 func classify(stmt sqlparser.Statement) Kind {

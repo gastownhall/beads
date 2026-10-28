@@ -73,6 +73,20 @@ func TestClassify(t *testing.T) {
 		{"explain dolt function", "EXPLAIN SELECT DOLT_COMMIT('-Am','x')", Mixed},
 		{"explain analyze dolt function", "EXPLAIN ANALYZE SELECT DOLT_COMMIT('-Am','x')", Mixed},
 		{"unknown dolt function", "SELECT DOLT_FUTURE_PROC()", Mixed},
+
+		// Reads that touch Dolt only through system tables, table functions,
+		// read-only functions, or literals and comments stay reads.
+		{"dolt system table", "SELECT * FROM dolt_log", Read},
+		{"dolt conflicts table", "SELECT * FROM dolt_conflicts", Read},
+		{"dolt table function", "SELECT * FROM dolt_log()", Read},
+		{"dolt diff table function", "SELECT * FROM dolt_diff('HEAD~1', 'HEAD', 'issues')", Read},
+		{"read-only dolt functions", "SELECT DOLT_HASHOF('HEAD'), DOLT_VERSION(), DOLT_MERGE_BASE('main', 'feature')", Read},
+		{"more read-only dolt functions", "SELECT dolt_hashof_table('issues'), dolt_hashof_db(), dolt_storage_format(), dolt_join_cost()", Read},
+		{"as of read-only dolt function", "SELECT * FROM issues AS OF DOLT_HASHOF('HEAD~1')", Read},
+		{"unprefixed read functions", "SELECT HASHOF('HEAD'), ACTIVE_BRANCH()", Read},
+		{"dolt function in literal", "SELECT 'DOLT_COMMIT(1)'", Read},
+		{"dolt function in comment", "SELECT 1 /* dolt_commit('x') */", Read},
+		{"dolt column name", "SELECT dolt_commit FROM t", Read},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
