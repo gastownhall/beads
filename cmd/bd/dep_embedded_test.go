@@ -422,6 +422,45 @@ func TestEmbeddedDepAAddRejectionsAndBulk(t *testing.T) {
 			t.Fatalf("dependency_count = %d, want 2 — both edges must be stored", got)
 		}
 	})
+
+	t.Run("add_unresolved_cross_prefix_json", func(t *testing.T) {
+		// --json changes nothing about the notice's contract: a script
+		// parsing stdout keeps the same four-key object — no new key, no
+		// warning line — and stderr carries the warning.
+		jx := bdCreate(t, bd, dir, "Unresolved JSON target", "--type", "task")
+		stdout, stderr := runDepSplit(t, bd, dir, "dep", "add", jx.ID, "zz-404", "--json")
+		if strings.Contains(stdout, "warning:") {
+			t.Fatalf("stdout = %q, want the --json object only, no warning on stdout", stdout)
+		}
+		s := strings.TrimSpace(stdout)
+		start := strings.IndexAny(s, "{[")
+		if start < 0 {
+			t.Fatalf("no JSON in dep add output: %s", s)
+		}
+		var m map[string]interface{}
+		if err := json.Unmarshal([]byte(s[start:]), &m); err != nil {
+			t.Fatalf("parse dep add JSON: %v\n%s", err, s)
+		}
+		// schema_version is folded into every outputJSON object (output.go),
+		// so the unchanged dep add --json shape is these five keys — the four
+		// bd dep add adds plus the stamp. Nothing else may ride along.
+		wantKeys := []string{"status", "issue_id", "depends_on_id", "type", "schema_version"}
+		if len(m) != len(wantKeys) {
+			t.Fatalf("json object = %v, want exactly the unchanged keys %v (no new key)", m, wantKeys)
+		}
+		for _, k := range wantKeys {
+			if _, ok := m[k]; !ok {
+				t.Fatalf("json object = %v, want key %q", m, k)
+			}
+		}
+		if m["status"] != "added" || m["issue_id"] != jx.ID || m["depends_on_id"] != "zz-404" || m["type"] != "blocks" {
+			t.Fatalf("json object = %v, want added issue_id=%q depends_on_id=zz-404 type=blocks", m, jx.ID)
+		}
+		if !strings.Contains(stderr, "zz-404 was not found") ||
+			!strings.Contains(stderr, "bd dep remove "+jx.ID+" zz-404") {
+			t.Fatalf("stderr = %q, want the unresolved-target warning alongside the unchanged --json object", stderr)
+		}
+	})
 }
 
 func TestEmbeddedDepBTreeAndCycles(t *testing.T) {
