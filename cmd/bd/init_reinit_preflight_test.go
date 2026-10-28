@@ -387,3 +387,90 @@ func TestInitReinitLocal_CountsTheGateTargetFromLinkedWorktree(t *testing.T) {
 		t.Errorf("the main checkout's .beads must survive the refusal: %v %q", readErr, got)
 	}
 }
+
+// TestRunInitReinitPreflight_WorktreeCountsMainCheckout pins the divergence
+// behind GH#5628 part 2 without a Dolt server: in a linked worktree whose own
+// .beads holds an empty database, FindBeadsDir (what the old count resolved)
+// picks the worktree's .beads, while init's gate target is the main checkout's
+// (GetWorktreeFallbackBeadsDir). Counting the gate target must refuse on the
+// main checkout's uncountable database, name it, and leave it unchanged.
+//
+// Deliberately not t.Parallel(): t.Chdir and a shared git worktree fixture.
+func TestRunInitReinitPreflight_WorktreeCountsMainCheckout(t *testing.T) {
+	isolateBeadsDirForTest(t)
+
+	root := t.TempDir()
+	mainRepo := filepath.Join(root, "main-repo")
+	if err := os.MkdirAll(mainRepo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitInitAt(t, mainRepo)
+	worktreeDir := filepath.Join(root, "worktree")
+	for _, args := range [][]string{
+		{"-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-m", "init"},
+		{"worktree", "add", worktreeDir},
+	} {
+		if out, err := initArtifactGitCommand(mainRepo, args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+
+	// The main checkout's .beads: beads project files, uncountable.
+	mainBeadsDir := filepath.Join(mainRepo, ".beads")
+	writeReinitTargetMetadata(t, mainBeadsDir, []byte("{not json"))
+	metadataPath := filepath.Join(mainBeadsDir, "metadata.json")
+	beforeMetadata, err := os.ReadFile(metadataPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := countReinitTargetIssues(mainBeadsDir); err == nil {
+		t.Fatal("precondition: the main checkout's .beads must be uncountable")
+	}
+	// The worktree's own .beads: project files and an empty database of its
+	// own, so discovery prefers it over the main checkout.
+	worktreeBeadsDir := filepath.Join(worktreeDir, ".beads")
+	writeReinitTargetMetadata(t, worktreeBeadsDir, []byte(`{"backend": "dolt", "database": "dolt"}`))
+	if err := os.MkdirAll(filepath.Join(worktreeBeadsDir, "dolt", "emptydb", ".dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Chdir(worktreeDir)
+	git.ResetCaches()
+	beads.ResetCaches()
+	t.Cleanup(func() {
+		git.ResetCaches()
+		beads.ResetCaches()
+	})
+	if !git.IsWorktree() {
+		t.Fatal("precondition: expected git.IsWorktree() inside the linked worktree")
+	}
+	if got, want := utils.CanonicalizePath(beads.FindBeadsDir()), utils.CanonicalizePath(worktreeBeadsDir); got != want {
+		t.Fatalf("precondition: FindBeadsDir = %q, want the worktree's own %q", got, want)
+	}
+	gateTarget := beads.GetWorktreeFallbackBeadsDir()
+	if got, want := utils.CanonicalizePath(gateTarget), utils.CanonicalizePath(mainBeadsDir); got != want {
+		t.Fatalf("precondition: the gate target %q is not the main checkout's .beads %q", got, want)
+	}
+
+	var refusal error
+	out := captureStderr(t, func() {
+		refusal = runInitReinitPreflight(true, gateTarget, "bd", "")
+	})
+	requireExitCode(t, refusal, ExitDestroyTokenMissing)
+	if !strings.Contains(out, "Target: "+gateTarget) {
+		t.Errorf("warning must name the main checkout's .beads as the target, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Refusing to destroy an unknown number of issues") {
+		t.Errorf("warning must report the unknown count, got:\n%s", out)
+	}
+	if got, err := os.ReadFile(metadataPath); err != nil || !bytes.Equal(got, beforeMetadata) {
+		t.Errorf("the refusal must leave the main checkout's .beads unchanged, got %q, %v", got, err)
+	}
+	entries, err := os.ReadDir(mainBeadsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "metadata.json" {
+		t.Errorf("the refusal must create nothing in the main checkout's .beads, found %d entries", len(entries))
+	}
+}
