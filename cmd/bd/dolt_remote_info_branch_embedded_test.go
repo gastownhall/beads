@@ -5,6 +5,7 @@ package main
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -139,5 +140,67 @@ func TestEmbeddedDoltPushHonorsExplicitRemoteInfoBranch(t *testing.T) {
 	lines := strings.Split(tree, "\n")
 	if len(lines) != 1 || !strings.Contains(lines[0], "DOLT_REMOTE.md") {
 		t.Errorf("refs/heads/dolt-info tree = %q, want the single DOLT_REMOTE.md marker", tree)
+	}
+}
+
+// TestEmbeddedWritesNeverCheckOutDoltRemoteInfoBranch is the GH#6484 layout
+// end to end: the git origin doubles as the git-hosted Dolt remote, the info
+// branch is published (opt-in) and fetched so origin/__dolt_remote_info__
+// exists in the user's clone, then ordinary writes and a batch of six failed
+// creates run. The working repo's HEAD must never move to the info branch
+// and its tracked files must survive — the reported failure stripped every
+// tracked file from disk.
+func TestEmbeddedWritesNeverCheckOutDoltRemoteInfoBranch(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded integration tests")
+	}
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "ri")
+	env := riEnvOptIn(dir, doltRemoteInfoBranchName)
+
+	// A real working branch with a tracked file.
+	if err := os.WriteFile(filepath.Join(dir, "tracked.txt"), []byte("keep me\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	resetDataRunGit(t, dir, "add", "tracked.txt")
+	resetDataRunGit(t, dir, "commit", "-m", "tracked file")
+	resetDataRunGit(t, dir, "checkout", "-b", "work")
+
+	// The git origin is also the Dolt remote (git-hosted Dolt remote).
+	remoteDir := setupBareGitRemote(t)
+	resetDataRunGit(t, dir, "remote", "add", "origin", remoteDir)
+	resetDataRunGit(t, dir, "push", "origin", "work")
+	riRunOK(t, bd, dir, env, "dolt", "remote", "add", "origin", "git+file://"+remoteDir)
+	riRunOK(t, bd, dir, env, "config", "set", "dolt.auto-push", "true")
+	seed := riCreate(t, bd, dir, env, "seed issue", "--type", "task")
+	riRunOK(t, bd, dir, env, "dolt", "push")
+	if lsRemoteRef(t, remoteDir, "refs/heads/"+doltRemoteInfoBranchName) == "" {
+		t.Fatal("opt-in push did not publish " + doltRemoteInfoBranchName + " on the git remote")
+	}
+	// The user's clone now sees origin/__dolt_remote_info__, as in the report.
+	resetDataRunGit(t, dir, "fetch", "origin")
+
+	// Ordinary writes, then a batch of six failed creates.
+	riRunOK(t, bd, dir, env, "export", "-o", filepath.Join(t.TempDir(), "out.jsonl"))
+	riCreate(t, bd, dir, env, "second issue", "--type", "task")
+	riRunOK(t, bd, dir, env, "update", seed.ID, "--status", "in_progress")
+	for i := 0; i < 6; i++ {
+		if out, err := riRun(t, bd, dir, env, "create", "child", "--parent", "ri-doesnotexist"); err == nil {
+			t.Fatalf("create with missing parent unexpectedly succeeded:\n%s", out)
+		}
+	}
+
+	if got := strings.TrimSpace(resetDataRunGit(t, dir, "branch", "--show-current")); got != "work" {
+		t.Errorf("HEAD moved: current branch = %q, want %q", got, "work")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "tracked.txt")); err != nil {
+		t.Errorf("tracked file stripped from working tree: %v", err)
+	}
+	if reflog := resetDataRunGit(t, dir, "reflog", "--format=%gs"); strings.Contains(reflog, doltRemoteInfoBranchName) {
+		t.Errorf("HEAD reflog records a checkout of %s:\n%s", doltRemoteInfoBranchName, reflog)
+	}
+	if out := resetDataRunGit(t, dir, "for-each-ref", "refs/heads/"+doltRemoteInfoBranchName); strings.TrimSpace(out) != "" {
+		t.Errorf("local branch refs/heads/%s was created in the working repo: %s", doltRemoteInfoBranchName, out)
 	}
 }
