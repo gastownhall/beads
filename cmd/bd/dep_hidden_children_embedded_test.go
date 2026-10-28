@@ -255,4 +255,34 @@ func TestEmbeddedDepDefaultDirectionNotesHiddenChildren(t *testing.T) {
 			}
 		}
 	})
+	t.Run("no_children", func(t *testing.T) {
+		// AC-4: an anchor with inbound edges that are not parent-child (a
+		// blocks dependent, a related pair) gets no note: the view's answer
+		// already tells the whole story for them.
+		target := bdCreate(t, bd, dir, "No children target", "--type", "task")
+		blocker := bdCreate(t, bd, dir, "No children blocker", "--type", "task")
+		bdDep(t, bd, dir, "add", blocker.ID, target.ID) // blocker depends on target: inbound blocks edge
+		related := bdCreate(t, bd, dir, "No children related", "--type", "task")
+		bdDep(t, bd, dir, "relate", target.ID, related.ID)
+
+		_, stderr := bdDepInOut(t, "list", target.ID)
+		if strings.Contains(stderr, "note:") {
+			t.Errorf("an anchor with no parent-child children should carry no note, got:\n%s", stderr)
+		}
+		_, stderr = bdDepInOut(t, "tree", target.ID)
+		if strings.Contains(stderr, "note:") {
+			t.Errorf("an anchor with no parent-child children should carry no note, got:\n%s", stderr)
+		}
+
+		// A related pair plus one child reports the one child, not three
+		// edges: the note counts children, as its printed command lists them.
+		pairBase := bdCreate(t, bd, dir, "Pair plus child", "--type", "task")
+		pairOther := bdCreate(t, bd, dir, "Pair plus other", "--type", "task")
+		bdDep(t, bd, dir, "relate", pairBase.ID, pairOther.ID)
+		newEphemeralStep(pairBase, "Pair plus child step")
+		_, stderr = bdDepInOut(t, "list", pairBase.ID)
+		if !strings.Contains(stderr, "note: "+pairBase.ID+" has 1 child issue(s) not shown here") {
+			t.Errorf("a relate pair plus one child should report 1, got:\n%s", stderr)
+		}
+	})
 }
