@@ -1055,6 +1055,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- bd no longer publishes Dolt's `refs/heads/__dolt_remote_info__` branch on
+  git-hosted remotes, which by default are your code remote (GH#6484). Every
+  push, fetch, pull and clone bd runs, and every `dolt sql-server` bd starts,
+  sets `DOLT_REMOTE_INFO_BRANCH` to empty unless you set it yourself; set it
+  to a branch name to publish the branch again. A sql-server bd does not
+  start needs the variable in its own environment. Leftover-branch cleanup is
+  in [Git Integration](docs/reference/git-integration.md#the-__dolt_remote_info__-branch),
+  and the history-squash data-plane reset no longer fails when the branch is
+  absent.
 - `bd list --watch` and `bd show --watch` now wait a full poll interval after
   each refresh, and `bd list --watch --parent` reads its tree in one
   transaction, so other bd commands on an embedded workspace no longer stall

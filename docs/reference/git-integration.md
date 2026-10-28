@@ -192,6 +192,38 @@ beads data does not conflict with protected Git branches, and no separate
 with a Git `origin`, `bd init` configures that origin as the Dolt remote
 automatically.
 
+### The `__dolt_remote_info__` branch
+
+After each write to a git-hosted remote, Dolt can also publish a one-file
+branch, `refs/heads/__dolt_remote_info__` (just `DOLT_REMOTE.md`). Because
+the Dolt remote is usually your code remote, that branch would show up next
+to your code branches, and checking it out replaces your working tree with
+that one file. bd turns the branch off: every push, fetch, pull and clone bd
+runs, and every `dolt sql-server` bd starts, has `DOLT_REMOTE_INFO_BRANCH`
+set to empty.
+
+- **Opt in:** set `DOLT_REMOTE_INFO_BRANCH=<name>` in bd's environment and
+  bd keeps your value (Dolt's default name is `__dolt_remote_info__`). An
+  empty value you set yourself is kept too.
+- **A `dolt sql-server` bd does not start** reads only its own environment:
+  set `DOLT_REMOTE_INFO_BRANCH` there (empty to keep the branch off, a name
+  to publish it).
+- **Older versions:** an older bd, or a sql-server that was already running
+  before you upgraded, keeps publishing the branch until it is upgraded or
+  restarted.
+
+To remove a leftover branch from a clone:
+
+```bash
+git switch <work-branch>              # if you are on __dolt_remote_info__
+git branch -D __dolt_remote_info__    # if a local copy exists
+git fetch --prune origin
+```
+
+Delete it on the remote with `git push origin --delete __dolt_remote_info__`
+only when the remote has another branch: Dolt refuses to write to a git
+remote that has no branches.
+
 See [Protected Branches](/reference/protected-branches) for the full
 workflow, including legacy `beads-sync` cleanup.
 

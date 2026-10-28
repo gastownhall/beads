@@ -121,9 +121,15 @@ git remote, then force-push to rebuild a fresh store holding only live
 chunks. Code branches are untouched.
 
 ```bash
-git push origin :refs/dolt/data :refs/heads/__dolt_remote_info__
+git push origin :refs/dolt/data
 bd dolt push --force
 ```
+
+If `git ls-remote origin refs/heads/__dolt_remote_info__` lists a branch an
+older bd published, delete it too
+(`git push origin :refs/heads/__dolt_remote_info__`), as long as the remote
+has another branch. `bd dolt remote reset-data <name>` replaces the data
+plane for you and deletes only the data refs it finds on the remote.
 
 **Step 5:** Verify, then re-clone everywhere else. On this machine:
 
