@@ -46,6 +46,14 @@ var (
 	// environment variable.
 	ErrFSCKTimeout = errors.New("pre-push integrity check timed out")
 
+	// ErrDatabaseNotFound is wrapped by the error a server-mode open returns
+	// when the server it dialed does not list the database it was asked to
+	// open and it was not asked to create it (databaseNotFoundError). The
+	// server answered on the open's own connection: its transport, user and
+	// password. A gateway's open never returns it, since bd never probes a
+	// gateway's databases.
+	ErrDatabaseNotFound = errors.New("database not found on Dolt server")
+
 	// ErrCommitIndeterminate is the storage-wide no-replay sentinel. Keep this
 	// alias for server-Dolt callers while embedded Dolt returns the same value.
 	ErrCommitIndeterminate = storage.ErrCommitIndeterminate
@@ -205,8 +213,16 @@ func databaseNotFoundError(cfg *Config) error {
 		b.WriteString("Use bd init only when creating a brand-new project with no existing .beads data.")
 	}
 
-	return errors.New(b.String())
+	return &databaseNotFound{msg: b.String()}
 }
+
+// databaseNotFound is databaseNotFoundError's error: its message, wrapping
+// ErrDatabaseNotFound.
+type databaseNotFound struct{ msg string }
+
+func (e *databaseNotFound) Error() string { return e.msg }
+
+func (e *databaseNotFound) Unwrap() error { return ErrDatabaseNotFound }
 
 // HasBackupFiles checks whether .beads/backup/ contains any JSONL files,
 // indicating a prior backup that could be restored (GH#2327).

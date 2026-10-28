@@ -1055,6 +1055,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd init --reinit-local` (and `--force`) no longer skips the destroy
+  confirmation when it cannot count the issues it is about to replace. A
+  store that would not open, an unreachable server or the 5-second count
+  timeout on a large database used to read as "nothing to destroy", so no
+  warning, typed confirmation or `--destroy-token` was asked for. bd now
+  shows the count as unknown with the error and asks for `destroy all
+  issues` (exit 11 if declined), or `--destroy-token` without a terminal
+  (exit 12), so automation that re-initializes without a terminal now stops
+  at exit 12 when the count fails. The warning names the `.beads` it
+  replaces (`Target:`). The count is taken from that same directory, the one
+  init locks, and only from the database init replaces: bd also asks when
+  the store it counts opens another one, for example when `metadata.json`
+  has no `dolt_database` (init then replaces the database the issue prefix
+  names) or when `BEADS_DOLT_SERVER_DATABASE` or `--database` names another
+  database. A server-mode database that the store's server reports missing
+  counts as nothing to destroy only with `--recreate-missing`: without it bd
+  asks, since init's own store can dial another server than the one that
+  answered. With `--non-interactive`, `BD_NON_INTERACTIVE=1` or `CI=true`,
+  bd asks for `--destroy-token` even on a terminal instead of prompting
+  (#5628).
 - `bd list --watch` and `bd show --watch` now wait a full poll interval after
   each refresh, and `bd list --watch --parent` reads its tree in one
   transaction, so other bd commands on an embedded workspace no longer stall
