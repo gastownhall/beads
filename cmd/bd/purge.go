@@ -144,6 +144,7 @@ func openSweeper() (issueops.Sweeper, error) {
 // `bd purge` (ephemeral tier) and `bd prune` (durable tier), on both routes.
 func runPurgeOrPrune(cmd *cobra.Command, scope purgeScope) error {
 	CheckReadonly(scope.cmdName)
+	warnIgnoredYAMLRetainedTypes()
 
 	force, _ := cmd.Flags().GetBool("force")
 	dryRun, _ := cmd.Flags().GetBool("dry-run")

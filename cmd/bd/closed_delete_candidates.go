@@ -2,8 +2,10 @@ package main
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/workapi"
 	"github.com/steveyegge/beads/issueops"
@@ -59,6 +61,30 @@ func holdBackRetainedTypes(issues []*types.Issue, setting string) ([]*types.Issu
 // names what was kept ("closed issue(s)", "wisp(s)").
 func retainedTypesKeptLine(kept int, noun string) string {
 	return fmt.Sprintf("  Kept %d %s of a retained type (types.retained) — only bd prune/purge --retain-ids deletes them", kept, noun)
+}
+
+// ignoredYAMLRetainedTypesWarning is the warning for a types.retained key in
+// config.yaml (or BD_TYPES_RETAINED), or "" when there is none. That layer is
+// never read for the setting — every sweep and bulk delete reads the
+// workspace database, so a shared workspace has one rule — and a key there
+// would otherwise look like protection while protecting nothing.
+func ignoredYAMLRetainedTypesWarning() string {
+	names := config.GetRetainedTypesFromYAML()
+	if len(names) == 0 {
+		return ""
+	}
+	list := strings.Join(names, ",")
+	return fmt.Sprintf("%s in config.yaml (%s) is ignored: it is read from the workspace database only; set it with `bd config set %s %s`",
+		issueops.SettingKeyTypesRetained, list, issueops.SettingKeyTypesRetained, list)
+}
+
+// warnIgnoredYAMLRetainedTypes prints ignoredYAMLRetainedTypesWarning to
+// stderr, if there is one. Every bulk delete that honors types.retained calls
+// it before it selects.
+func warnIgnoredYAMLRetainedTypes() {
+	if msg := ignoredYAMLRetainedTypesWarning(); msg != "" {
+		WarnError("%s", msg)
+	}
 }
 
 // retentionReport is the --json member a bulk delete outside the Sweeper role

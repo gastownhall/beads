@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
 )
@@ -101,5 +102,23 @@ func TestRetentionReportAppearsOnlyWhenSomethingWasKept(t *testing.T) {
 	}
 	if report := retentionReport(2); report["retention_required"] != 2 || len(report) != 1 {
 		t.Errorf("retentionReport(2) = %v, want only retention_required 2", report)
+	}
+}
+
+// TestIgnoredYAMLRetainedTypesWarning pins the warning for a types.retained
+// key in config.yaml (or BD_TYPES_RETAINED). The setting is read from the
+// workspace database only, so such a key protects nothing; the bulk deletes
+// say so rather than letting an operator believe a type is retained.
+func TestIgnoredYAMLRetainedTypesWarning(t *testing.T) {
+	initConfigForTest(t)
+	if msg := ignoredYAMLRetainedTypesWarning(); msg != "" {
+		t.Errorf("warning with no yaml key = %q, want none", msg)
+	}
+	config.Set(issueops.SettingKeyTypesRetained, "op,fact")
+	msg := ignoredYAMLRetainedTypesWarning()
+	for _, want := range []string{"config.yaml", "ignored", "bd config set types.retained op,fact"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("warning = %q, want it to contain %q", msg, want)
+		}
 	}
 }

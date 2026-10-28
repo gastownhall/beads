@@ -111,7 +111,9 @@ nothing by accident: a bracketed list that is not JSON (`[op]`), a name with a
 space, quote, bracket or comma in it (`"op"`, `op fact`), and an alias of a
 built-in type (`feat`; beads store `feature`). It is read from
 the workspace database on every sweep, never from `config.yaml`, so every
-client of a shared workspace sees the same rule. If bd cannot read it, the
+client of a shared workspace sees the same rule; a `types.retained` key in
+`config.yaml` is ignored, and the bulk deletes warn that it is. If bd cannot
+read it, the
 sweep fails and deletes nothing. What it does not cover is deliberate and
 per id: `bd delete` deletes the ids you name, `bd mol burn` the molecule you
 name, and `bd sql` bypasses bd entirely. Over HTTP, a server that

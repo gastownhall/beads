@@ -53,6 +53,9 @@ Examples:
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, _ []string) error {
+		if !gcSkipDecay {
+			warnIgnoredYAMLRetainedTypes()
+		}
 		if usesProxiedServer() {
 			return runGCProxiedServer(rootCtx)
 		}

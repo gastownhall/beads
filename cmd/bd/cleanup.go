@@ -84,6 +84,7 @@ SEE ALSO:
 		}
 
 		ctx := rootCtx
+		warnIgnoredYAMLRetainedTypes()
 
 		// Build filter for closed issues. Cleanup is a scripted sweep — opt out
 		// of BEADS_MAX_ROWS (designer §4.1) so a misconfigured env doesn't abort
