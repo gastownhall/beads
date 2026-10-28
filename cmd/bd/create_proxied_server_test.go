@@ -295,12 +295,14 @@ func TestParseMarkdownDependencies(t *testing.T) {
 		{"whitespace skipped", []string{"  ", ""}, nil, false},
 		{"bare id → blocks edge", []string{"bd-1"},
 			[]issueops.CreateDependency{{Type: types.DepBlocks, TargetID: "bd-1"}}, false},
-		{"type:id preserved verbatim (no alias)", []string{"depends-on:bd-2"},
-			[]issueops.CreateDependency{{Type: types.DependencyType("depends-on"), TargetID: "bd-2"}}, false},
+		{"depends-on alias gates like --deps", []string{"depends-on:bd-2"},
+			[]issueops.CreateDependency{{Type: types.DepBlocks, TargetID: "bd-2"}}, false},
+		{"blocked-by alias gates like --deps", []string{"blocked-by:bd-2"},
+			[]issueops.CreateDependency{{Type: types.DepBlocks, TargetID: "bd-2"}}, false},
 		{"discovered-from preserved", []string{"discovered-from:bd-3"},
 			[]issueops.CreateDependency{{Type: types.DepDiscoveredFrom, TargetID: "bd-3"}}, false},
 		{"whitespace trimmed", []string{"  blocks : bd-4 "},
-			[]issueops.CreateDependency{{Type: types.DepBlocks, TargetID: "bd-4"}}, false},
+			[]issueops.CreateDependency{{Type: types.DepBlocks, TargetID: "bd-4", Reverse: true}}, false},
 		{"empty type rejected", []string{":bd-1"}, nil, true},
 	}
 	for _, tt := range tests {
@@ -322,13 +324,17 @@ func TestParseMarkdownDependencies(t *testing.T) {
 	}
 }
 
-func TestParseMarkdownDependencies_DoesNotSwapBlocks(t *testing.T) {
+// TestParseMarkdownDependencies_BlocksReversesDirection pins the markdown
+// section to --deps for an explicit `blocks:` entry (GH#7508): the target
+// depends on the issue being created, so the request carries Reverse, exactly
+// like `bd create --deps blocks:<id>`.
+func TestParseMarkdownDependencies_BlocksReversesDirection(t *testing.T) {
 	got, err := parseMarkdownDependencies([]string{"blocks:bd-5"}, "T")
 	if err != nil {
 		t.Fatalf("error: %v", err)
 	}
-	want := []issueops.CreateDependency{{Type: types.DepBlocks, TargetID: "bd-5"}}
+	want := []issueops.CreateDependency{{Type: types.DepBlocks, TargetID: "bd-5", Reverse: true}}
 	if !reflect.DeepEqual(got, want) {
-		t.Errorf("got %#v, want %#v (no swap-direction)", got, want)
+		t.Errorf("got %#v, want %#v (swap-direction)", got, want)
 	}
 }

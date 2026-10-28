@@ -343,3 +343,19 @@ func stringSlicesEqual(a, b []string) bool {
 	}
 	return true
 }
+
+// TestParseMarkdownDependenciesResolvesAliases pins GH#7508: a `### Deps`
+// entry spelled `depends-on:<id>` or `blocked-by:<id>` must gate ready work
+// exactly like the same string passed to `bd create --deps`, i.e. resolve to a
+// blocking edge rather than store the alias literally as a non-blocking type.
+func TestParseMarkdownDependenciesResolvesAliases(t *testing.T) {
+	for _, raw := range []string{"depends-on:bd-2", "blocked-by:bd-2"} {
+		got, err := parseMarkdownDependencies([]string{raw}, "T")
+		if err != nil {
+			t.Fatalf("%s: unexpected error: %v", raw, err)
+		}
+		if len(got) != 1 || got[0].TargetID != "bd-2" || !got[0].Type.AffectsReadyWork() {
+			t.Errorf("%s: got %#v, want a ready-gating (blocks) edge on bd-2", raw, got)
+		}
+	}
+}
