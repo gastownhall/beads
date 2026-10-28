@@ -2003,6 +2003,7 @@ var rootCmd = &cobra.Command{
 		}
 		if cfg != nil {
 			warnSharedServerEmbeddedMismatch(cfg)
+			warnOutrankedServerHost(os.Stderr, beadsDir, cfg)
 			doltCfg.ProxiedServer = cfg.IsDoltProxiedServerMode()
 			proxiedServerMode = doltCfg.ProxiedServer
 			if cmdCtx != nil {

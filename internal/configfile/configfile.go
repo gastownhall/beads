@@ -599,6 +599,37 @@ func (c *Config) GetDoltServerHost() string {
 	return DefaultDoltServerHost
 }
 
+// OutrankedServerHost reports a metadata.json dolt_server_host that the
+// merged config.yaml dolt.host now outranks (GH#5961) where that changes what
+// bd does: beadsDir's own metadata.json (read raw, so a server.json central
+// host never counts) names a host, config.yaml names a different server
+// (SameServerHost), BEADS_DOLT_SERVER_HOST does not outrank both, and the
+// host matters, because cfg selects server mode or because the metadata host
+// alone used to select it (no dolt_mode, a non-local host) and the config.yaml
+// host no longer does. Explicit embedded and proxied-server workspaces never
+// dial the host, so they are not reported. cfg is beadsDir's loaded config.
+func OutrankedServerHost(beadsDir string, cfg *Config) (metaHost, yamlHost string, ok bool) {
+	if cfg == nil || beadsDir == "" || os.Getenv("BEADS_DOLT_SERVER_HOST") != "" {
+		return "", "", false
+	}
+	if strings.EqualFold(cfg.DoltMode, DoltModeEmbedded) || strings.EqualFold(cfg.DoltMode, DoltModeProxiedServer) {
+		return "", "", false
+	}
+	raw, err := LoadForDiscovery(beadsDir)
+	if err != nil || raw == nil || raw.DoltServerHost == "" {
+		return "", "", false
+	}
+	metaHost = raw.DoltServerHost
+	yamlHost = config.GetYamlConfig("dolt.host")
+	if yamlHost == "" || SameServerHost(yamlHost, metaHost) {
+		return "", "", false
+	}
+	if !cfg.IsDoltServerMode() && (cfg.DoltMode != "" || IsLocalHostString(metaHost)) {
+		return "", "", false
+	}
+	return metaHost, yamlHost, true
+}
+
 // Deprecated: Use doltserver.DefaultConfig(beadsDir).Port instead.
 // This method falls back to 3307 which is wrong for standalone mode
 // (where the port is an OS-assigned ephemeral port).

@@ -2244,6 +2244,7 @@ func showDoltConfig(testConnection bool) error {
 	if err := validateConfiguredBackend(cfg, beadsDir); err != nil {
 		return HandleError("%v", err)
 	}
+	warnOutrankedServerHost(os.Stderr, beadsDir, cfg)
 
 	backend := cfg.GetBackend()
 	embedded := !usesSQLServer()
