@@ -1027,6 +1027,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd --readonly sql` refuses a `UNION`, `INTERSECT` or `EXCEPT` that ends
+  in `INTO OUTFILE`, `INTO DUMPFILE` or `INTO @var`
+  ([#7033](https://github.com/gastownhall/beads/issues/7033)). Such a set
+  operation was classified as a read, so `--readonly` did not refuse it:
+  direct mode let it write the file, and proxied mode ran it in a read
+  transaction. It is now a write, like `SELECT … INTO`.
+
 - `bd gitlab pull` no longer overwrites a bead linked to another GitLab
   project's issue with the same number, or puts that issue's dependency
   links on it. Issue IIDs are only unique within a project, but when the

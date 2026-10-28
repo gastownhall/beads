@@ -12,6 +12,8 @@ func TestClassify(t *testing.T) {
 		{"lowercase select", "  select id from issues", Read},
 		{"union", "SELECT 1 UNION SELECT 2", Read},
 		{"parenthesized union", "(SELECT 1) UNION (SELECT 2)", Read},
+		{"intersect", "SELECT 1 INTERSECT SELECT 2", Read},
+		{"except", "SELECT 1 EXCEPT SELECT 2", Read},
 		{"show", "SHOW TABLES", Read},
 		{"describe", "DESCRIBE issues", Read},
 		{"explain select", "EXPLAIN SELECT * FROM issues", Read},
@@ -47,6 +49,22 @@ func TestClassify(t *testing.T) {
 		{"drop table", "DROP TABLE x", Write},
 		{"set", "SET @x = 1", Write},
 		{"select into variable", "SELECT 1 INTO @x", Write},
+
+		// A set operation keeps a trailing INTO on the SetOp node. INTO
+		// OUTFILE/DUMPFILE writes a file and INTO @var a variable, so these
+		// are writes --readonly must refuse (#7033).
+		{"union into outfile", "(SELECT id FROM issues) UNION ALL (SELECT id FROM issues) INTO OUTFILE '/p'", Write},
+		{"unparenthesized union into dumpfile", "SELECT id FROM issues UNION SELECT id FROM issues INTO DUMPFILE '/p'", Write},
+		{"union into variable", "(SELECT 1) UNION (SELECT 2) INTO @x", Write},
+		{"union order limit into", "SELECT 1 UNION SELECT 2 ORDER BY 1 LIMIT 1 INTO OUTFILE '/p'", Write},
+		{"cte union into outfile", "WITH t AS (SELECT 1 AS n) SELECT n FROM t UNION SELECT n FROM t INTO OUTFILE '/p'", Write},
+		{"intersect into outfile", "(SELECT 1) INTERSECT (SELECT 1) INTO OUTFILE '/p'", Write},
+		{"except into variable", "SELECT id FROM issues EXCEPT SELECT id FROM issues INTO @x", Write},
+		// The grammar attaches INTO to a table-less last operand, or to an
+		// operand inside parentheses, and rejects it there: Mixed, which
+		// --readonly already refuses.
+		{"union into on table-less last operand", "SELECT 1 UNION SELECT 2 INTO @x", Mixed},
+		{"into inside union operand", "(SELECT 1 INTO @x) UNION (SELECT 2)", Mixed},
 
 		// Statements that may write AND return rows, or that the parser
 		// cannot classify, must run in a committing transaction that still
