@@ -57,7 +57,7 @@ func ApplyCLIAutoStart(beadsDir string, cfg *Config) {
 
 // ApplyResolvedServerPort fills cfg's server port from doltserver's
 // precedence chain (env > port file > dolt config.yaml > beads config.yaml >
-// metadata.json), and — the part that is easy to drop — records WHICH of those
+// metadata.json > central server config), and — the part that is easy to drop — records WHICH of those
 // produced it.
 //
 // The source is not decoration. applyConfigDefaults infers "the caller
