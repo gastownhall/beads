@@ -30,6 +30,21 @@ func bdDep(t *testing.T, bd, dir string, args ...string) string {
 	return stdout.String()
 }
 
+// bdRunSplit runs bd with the given args, requires success, and returns
+// stdout and stderr separately, so a stderr-only notice can be asserted
+// without it leaking into (or hiding behind) stdout.
+func bdRunSplit(t *testing.T, bd, dir string, args ...string) (stdout, stderr string) {
+	t.Helper()
+	cmd := exec.Command(bd, args...)
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	outBuf, errBuf, err := runCommandBuffers(t, cmd)
+	if err != nil {
+		t.Fatalf("bd %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, outBuf.String(), errBuf.String())
+	}
+	return outBuf.String(), errBuf.String()
+}
+
 // bdDepFail runs "bd dep" expecting failure.
 func bdDepFail(t *testing.T, bd, dir string, args ...string) string {
 	t.Helper()
@@ -299,6 +314,29 @@ func TestEmbeddedDepAAddRejectionsAndBulk(t *testing.T) {
 		list3 := bdDep(t, bd, dir, "list", b3.ID)
 		if !strings.Contains(list3, b2.ID) || !strings.Contains(list3, "tracks") {
 			t.Fatalf("expected typed bulk dependency in list: %s", list3)
+		}
+	})
+
+	// GH#6556: a bare cross-prefix target that resolves nowhere is still
+	// stored (the multi-rig "add now, route later" shape), but no longer
+	// silently: stderr names it and the command that removes the edge.
+	t.Run("add_unresolved_cross_prefix_warns", func(t *testing.T) {
+		src := bdCreate(t, bd, dir, "Unresolved target source", "--type", "task")
+		stdout, stderr := bdRunSplit(t, bd, dir, "dep", "add", src.ID, "zz-404")
+		if !strings.Contains(stdout, "Added dependency") || strings.Contains(stdout, "warning:") {
+			t.Errorf("stdout = %q, want the usual Added dependency line and no warning", stdout)
+		}
+		remove := fmt.Sprintf("bd dep remove %s zz-404", src.ID)
+		if !strings.Contains(stderr, "zz-404 was not found") || !strings.Contains(stderr, "stored unverified") || !strings.Contains(stderr, remove) {
+			t.Fatalf("stderr = %q, want the unresolved-target warning naming zz-404 and %q", stderr, remove)
+		}
+		if got := bdShowDetails(t, bd, dir, src.ID)["dependency_count"]; got != float64(1) {
+			t.Fatalf("dependency_count = %v, want 1: the edge must still be stored", got)
+		}
+		// The printed remedy addresses the stored row.
+		bdDep(t, bd, dir, "remove", src.ID, "zz-404")
+		if got := bdShowDetails(t, bd, dir, src.ID)["dependency_count"]; got != float64(0) {
+			t.Fatalf("dependency_count after the printed remove = %v, want 0", got)
 		}
 	})
 

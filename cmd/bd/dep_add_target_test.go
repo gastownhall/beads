@@ -39,10 +39,15 @@ func TestResolveUnresolvedDepTarget(t *testing.T) {
 	resolveErr := errors.New("issue not found")
 
 	tests := []struct {
-		name            string
-		sourceID        string
-		dependsOnArg    string
-		wantToID        string
+		name         string
+		sourceID     string
+		dependsOnArg string
+		wantToID     string
+		// wantUnverified is the cross-prefix pass-through signal the caller
+		// turns into the post-write stderr warning (GH#6556). Only outcome 3
+		// sets it: an external: ref is resolved later by the external-deps
+		// resolver, and a refusal stores nothing.
+		wantUnverified  bool
 		wantErr         bool
 		wantErrContains string
 		// wantErrOmits is the direction/diagnosis guard: for the reversing
@@ -51,11 +56,12 @@ func TestResolveUnresolvedDepTarget(t *testing.T) {
 		wantErrOmits string
 	}{
 		{
-			name:         "bare cross-prefix target is passed through as a cross-store edge",
-			sourceID:     "be-abc",
-			dependsOnArg: "xy-999",
-			wantToID:     "xy-999",
-			wantErr:      false,
+			name:           "bare cross-prefix target is passed through as a cross-store edge",
+			sourceID:       "be-abc",
+			dependsOnArg:   "xy-999",
+			wantToID:       "xy-999",
+			wantUnverified: true,
+			wantErr:        false,
 		},
 		{
 			name:            "type:id-shaped positional arg is rejected, not silently misparsed",
@@ -158,7 +164,7 @@ func TestResolveUnresolvedDepTarget(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			toID, err := resolveUnresolvedDepTarget(tt.sourceID, tt.dependsOnArg, resolveErr)
+			toID, unverified, err := resolveUnresolvedDepTarget(tt.sourceID, tt.dependsOnArg, resolveErr)
 
 			if tt.wantErr {
 				if err == nil {
@@ -173,6 +179,9 @@ func TestResolveUnresolvedDepTarget(t *testing.T) {
 				if toID != "" {
 					t.Errorf("resolveUnresolvedDepTarget(%q, %q): got toID %q on error, want empty", tt.sourceID, tt.dependsOnArg, toID)
 				}
+				if unverified {
+					t.Errorf("resolveUnresolvedDepTarget(%q, %q): reported unverified on a refusal, which stores nothing", tt.sourceID, tt.dependsOnArg)
+				}
 				return
 			}
 
@@ -181,6 +190,9 @@ func TestResolveUnresolvedDepTarget(t *testing.T) {
 			}
 			if toID != tt.wantToID {
 				t.Errorf("resolveUnresolvedDepTarget(%q, %q) = %q, want %q", tt.sourceID, tt.dependsOnArg, toID, tt.wantToID)
+			}
+			if unverified != tt.wantUnverified {
+				t.Errorf("resolveUnresolvedDepTarget(%q, %q): unverified = %v, want %v", tt.sourceID, tt.dependsOnArg, unverified, tt.wantUnverified)
 			}
 		})
 	}
@@ -197,16 +209,25 @@ func TestResolveUnresolvedDepTargetMatchesStorageClassification(t *testing.T) {
 	resolveErr := errors.New("issue not found")
 
 	const sourceID = "be-abc"
-	accepted := []string{
-		"xy-999",
-		"external:otherproj:some-capability",
+	// unverified is true only for the bare cross-prefix target: both land in
+	// depends_on_external, but only the external: ref has a resolver behind it.
+	accepted := []struct {
+		target     string
+		unverified bool
+	}{
+		{"xy-999", true},
+		{"external:otherproj:some-capability", false},
 	}
 
-	for _, target := range accepted {
+	for _, tc := range accepted {
+		target := tc.target
 		t.Run(target, func(t *testing.T) {
-			toID, err := resolveUnresolvedDepTarget(sourceID, target, resolveErr)
+			toID, unverified, err := resolveUnresolvedDepTarget(sourceID, target, resolveErr)
 			if err != nil {
 				t.Fatalf("resolveUnresolvedDepTarget(%q, %q): unexpected error: %v", sourceID, target, err)
+			}
+			if unverified != tc.unverified {
+				t.Errorf("resolveUnresolvedDepTarget(%q, %q): unverified = %v, want %v", sourceID, target, unverified, tc.unverified)
 			}
 			if !storeissueops.IsExternalDepTarget(sourceID, toID) {
 				t.Errorf("dep add accepted %q but storage would not classify it as an external dep target; "+
@@ -214,6 +235,50 @@ func TestResolveUnresolvedDepTargetMatchesStorageClassification(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestUnresolvedDepTargetWarning pins the write-time notice dep add prints
+// after storing an edge through resolveUnresolvedDepTarget's outcome 3
+// (GH#6556): the bare cross-prefix target was found neither locally nor
+// through routing, so the operator learns it was stored unverified and gets a
+// paste-ready command that deletes exactly the stored row. The target is
+// user-typed, so it goes through the remedy printers like any other value a
+// hint pastes into a command.
+func TestUnresolvedDepTargetWarning(t *testing.T) {
+	t.Run("names the target and the remove command", func(t *testing.T) {
+		msg := unresolvedDepTargetWarning("", "be-abc", "xy-999")
+		if !strings.HasPrefix(msg, "warning: ") {
+			t.Errorf("warning = %q, want the lowercase warning: prefix", msg)
+		}
+		for _, want := range []string{"xy-999 was not found", "stored unverified", "bd dep remove be-abc xy-999\n"} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("warning = %q, want it to contain %q", msg, want)
+			}
+		}
+	})
+
+	t.Run("--file line prefix", func(t *testing.T) {
+		msg := unresolvedDepTargetWarning("line 2: ", "be-abc", "xy-999")
+		if !strings.HasPrefix(msg, "warning: line 2: ") {
+			t.Errorf("warning = %q, want it to start with %q", msg, "warning: line 2: ")
+		}
+	})
+
+	t.Run("hostile target is escaped", func(t *testing.T) {
+		msg := unresolvedDepTargetWarning("", "be-abc", "xy-9\x1b[2K")
+		if strings.ContainsRune(msg, '\x1b') {
+			t.Errorf("warning = %q carries a raw ESC to the terminal", msg)
+		}
+		if !strings.Contains(msg, "bd dep remove be-abc <target-id>") || !strings.Contains(msg, "(<target-id>: ") {
+			t.Errorf("warning = %q, want the <target-id> placeholder and its escaped note", msg)
+		}
+	})
+
+	t.Run("no backticks", func(t *testing.T) {
+		if msg := unresolvedDepTargetWarning("line 1: ", "be-abc", "xy-999"); strings.Contains(msg, "`") {
+			t.Errorf("warning = %q, want no backticks", msg)
+		}
+	})
 }
 
 // newDepAddCommandForTest mirrors depAddCmd's flag set (dep.go's init) so the

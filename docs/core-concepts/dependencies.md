@@ -179,6 +179,11 @@ with that label is closed. `bd ready`, `bd blocked`, and `bd dep tree` resolve
 the capability at query time; an unconfigured or unavailable project remains
 blocking.
 
+A bare ID whose prefix names another rig (`bd dep add bd-abc gt-123`) is
+stored even when bd cannot find it in this database or through routes; `bd dep
+add` then warns on stderr and prints the `bd dep remove` command that deletes
+the edge if the ID was a typo (`--quiet` silences the warning).
+
 ## Gates
 
 Gates are special issues that block dependent work until an external

@@ -200,28 +200,35 @@ func refuseMalformedDepTarget(sourceID, dependsOnArg string) error {
 //     rig is not in routes.jsonl yet — and dep remove (the ExtractPrefix
 //     fallback further down this file) still addresses such an edge. Refusing
 //     it here would make dep add reject an edge the store holds and dep remove
-//     can still delete.
+//     can still delete. It is accepted, and reported to the caller as
+//     unverified: nothing found the target, so once the edge is stored the
+//     caller warns (warnUnresolvedDepTarget) rather than letting a typo pass
+//     as silently as a resolved target (GH#6556).
 //
 // A same-prefix target that resolves nowhere is still an error, unchanged.
-func resolveUnresolvedDepTarget(sourceID, dependsOnArg string, resolveErr error) (string, error) {
+//
+// The helper prints nothing: it runs before the write, and a later refusal,
+// write error or --file rollback would leave a warning about an edge that was
+// never stored.
+func resolveUnresolvedDepTarget(sourceID, dependsOnArg string, resolveErr error) (toID string, unverified bool, err error) {
 	if IsExternalRef(dependsOnArg) {
 		if err := validateExternalRef(dependsOnArg); err != nil {
-			return "", err
+			return "", false, err
 		}
-		return dependsOnArg, nil
+		return dependsOnArg, false, nil
 	}
 
 	if err := refuseMalformedDepTarget(sourceID, dependsOnArg); err != nil {
-		return "", err
+		return "", false, err
 	}
 
 	srcPrefix := types.ExtractPrefix(sourceID)
 	tgtPrefix := types.ExtractPrefix(dependsOnArg)
 	if srcPrefix != "" && tgtPrefix != "" && srcPrefix != tgtPrefix {
-		return dependsOnArg, nil
+		return dependsOnArg, true, nil
 	}
 
-	return "", fmt.Errorf("resolving dependency ID %s: %v", dependsOnArg, resolveErr)
+	return "", false, fmt.Errorf("resolving dependency ID %s: %v", dependsOnArg, resolveErr)
 }
 
 var depCmd = &cobra.Command{
@@ -438,6 +445,7 @@ Examples:
 		ctx := rootCtx
 
 		var fromID, toID string
+		var toUnverified bool
 
 		isExternalRef := strings.HasPrefix(dependsOnArg, "external:")
 
@@ -460,7 +468,7 @@ Examples:
 			var toCleanup func()
 			toID, _, toCleanup, err = resolveIDWithRouting(ctx, store, dependsOnArg)
 			if err != nil {
-				toID, err = resolveUnresolvedDepTarget(fromID, dependsOnArg, err)
+				toID, toUnverified, err = resolveUnresolvedDepTarget(fromID, dependsOnArg, err)
 				if err != nil {
 					return HandleErrorRespectJSON("%v", err)
 				}
@@ -509,6 +517,9 @@ Examples:
 
 		explicit := cmd.Flags().Changed("type") || cmd.Flags().Changed("blocked-by") || cmd.Flags().Changed("depends-on")
 		warnImplicitBlocksDefault(dt, explicit)
+		if toUnverified {
+			warnUnresolvedDepTarget("", fromID, toID)
+		}
 
 		if jsonOutput {
 			return outputJSON(map[string]interface{}{
@@ -572,6 +583,30 @@ func shouldWarnImplicitBlocksDefault(dt types.DependencyType, explicit, quiet bo
 // so the message text can be asserted under a captured (non-TTY) stderr.
 func emitImplicitBlocksDefaultWarning() {
 	fmt.Fprintf(os.Stderr, "warning: no -t/--type given; edge created as type=blocks — the dependent is excluded from bd ready until the edge resolves. Use -t parent-child for structural parent/child linkage (silence with --quiet or BD_NO_DEP_TYPE_WARNING=1)\n") //nolint:gosec // G705: stderr, not a browser context
+}
+
+// unresolvedDepTargetWarning is the notice for an edge stored through
+// resolveUnresolvedDepTarget's outcome 3: a bare cross-prefix target found
+// neither in this database nor through routing. where is "" or "line N: " for
+// --file. The IDs are the stored ones, so the bd dep remove command deletes
+// exactly the stored row (exactDependencyTarget); the target is user-typed,
+// so it is printed as printedIssueID spells it and goes into the command as
+// one shell word, or as a placeholder named escaped after it
+// (remedy.CommandArg).
+func unresolvedDepTargetWarning(where, sourceID, targetID string) string {
+	srcArg, srcNote := remedy.CommandArg(runtime.GOOS, sourceID, "<issue-id>")
+	tgtArg, tgtNote := remedy.CommandArg(runtime.GOOS, targetID, "<target-id>")
+	return fmt.Sprintf("warning: %sdependency target %s was not found in this database or through routing; the edge was stored unverified as a cross-repo reference\n"+
+		"If %s is a typo, remove the edge with: bd dep remove %s %s%s%s\n",
+		where, printedIssueID(targetID), printedIssueID(targetID), srcArg, tgtArg, srcNote, tgtNote)
+}
+
+// warnUnresolvedDepTarget writes unresolvedDepTargetWarning to stderr. It is
+// called only after the edge is stored. Unlike the D1 warning it is not
+// TTY-gated: it fires only on the unresolved minority path, and scripted and
+// agent callers are where such a typo most often comes from.
+func warnUnresolvedDepTarget(where, sourceID, targetID string) {
+	fmt.Fprint(os.Stderr, unresolvedDepTargetWarning(where, sourceID, targetID)) //nolint:gosec // G705: stderr, not a browser context
 }
 
 type bulkDepInput struct {
@@ -795,7 +830,7 @@ func validateBulkDepEdges(ctx context.Context, edges []bulkDepEdge) ([]bulkDepEd
 				// --file used to carry its own copy of the cross-prefix ladder,
 				// which left the be-gmdx5 "type:id" shape accepted and stored
 				// here after the positional path started refusing it.
-				toID, err = resolveUnresolvedDepTarget(current.IssueID, edge.DependsOnID, err)
+				toID, _, err = resolveUnresolvedDepTarget(current.IssueID, edge.DependsOnID, err)
 				if err != nil {
 					errs = append(errs, fmt.Sprintf("line %d: %v", edge.Line, err))
 					resolved = append(resolved, current)
