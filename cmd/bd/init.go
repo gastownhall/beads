@@ -3145,24 +3145,31 @@ func confirmReinitDestroy(w io.Writer, in io.Reader, interactive bool, target st
 	}
 	fmt.Fprintf(w, "    bd dolt status              # Check if this is a server config issue\n\n")
 
-	if interactive && countErr == nil {
-		fmt.Fprintf(w, "Type 'destroy %d issues' to confirm: ", count)
+	if interactive {
+		// The typed phrase is the only count-dependent wording, so an
+		// uncountable workspace asks for "all issues": there is no number to
+		// type, and typing one must not satisfy the confirmation.
+		phrase := fmt.Sprintf("destroy %d issues", count)
+		if countErr != nil {
+			phrase = "destroy all issues"
+		}
+		fmt.Fprintf(w, "Type '%s' to confirm: ", phrase)
 		scanner := bufio.NewScanner(in)
 		scanner.Scan()
-		expected := fmt.Sprintf("destroy %d issues", count)
-		if strings.TrimSpace(scanner.Text()) != expected {
+		if strings.TrimSpace(scanner.Text()) != phrase {
 			fmt.Fprintf(w, "\nAborted. Database was NOT modified.\n")
 			return &exitError{Code: ExitLocalExistsRefused}
 		}
 		return nil
 	}
 
-	// Non-interactive (piped input, AI agent, etc.), and — in every mode — the
-	// uncountable workspace: unknown is not empty, so it refuses rather than
-	// fall through to the destructive path with no count, no confirmation and
-	// no token (GH#5628). The --destroy-token is the same remedy for an
-	// unknown count as for a counted one: it is the operator's explicit
-	// assertion that whatever the workspace holds may be destroyed.
+	// Non-interactive (piped input, AI agent, etc.). The uncountable
+	// workspace refuses for want of a token just like a counted one:
+	// unknown is not empty, so it never falls through to the destructive
+	// path with no count, no confirmation and no token (GH#5628). The
+	// --destroy-token is the same remedy for an unknown count as for a
+	// counted one: it is the operator's explicit assertion that whatever
+	// the workspace holds may be destroyed.
 	if destroyToken == FormatDestroyToken(prefix) {
 		fmt.Fprintf(w, "Destroy token accepted. Proceeding with re-initialization.\n")
 		return nil

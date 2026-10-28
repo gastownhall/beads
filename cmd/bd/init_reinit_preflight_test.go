@@ -194,6 +194,51 @@ func TestConfirmReinitDestroy(t *testing.T) {
 			wantCode: ExitDestroyTokenMissing,
 			wantOut:  []string{"could not count them:"},
 		},
+		{
+			name:        "known count 3, interactive, typed phrase",
+			count:       3,
+			interactive: true,
+			answer:      "destroy 3 issues",
+			wantOut: []string{
+				"Existing issues: 3",
+				"Type 'destroy 3 issues' to confirm: ",
+			},
+		},
+		{
+			name:        "known count 3, interactive, wrong answer",
+			count:       3,
+			interactive: true,
+			answer:      "destroy 0 issues",
+			wantCode:     ExitLocalExistsRefused,
+			wantOut:     []string{"Aborted. Database was NOT modified."},
+		},
+		{
+			name:        "unknown count, interactive, typed 'destroy all issues'",
+			countErr:    countErr,
+			interactive: true,
+			answer:      "destroy all issues",
+			wantOut: []string{
+				"Existing issues: unknown (could not count them: " + countErr.Error() + ")",
+				"Type 'destroy all issues' to confirm: ",
+			},
+		},
+		{
+			// The phrase says "all", not a number: there is no count to type.
+			name:        "unknown count, interactive, a typed count is refused",
+			countErr:    countErr,
+			interactive: true,
+			answer:      "destroy 0 issues",
+			wantCode:    ExitLocalExistsRefused,
+			wantOut:     []string{"Aborted. Database was NOT modified."},
+		},
+		{
+			name:        "unknown count, interactive, wrong answer",
+			countErr:    countErr,
+			interactive: true,
+			answer:      "definitely not the confirmation",
+			wantCode:    ExitLocalExistsRefused,
+			wantOut:     []string{"Aborted. Database was NOT modified."},
+		},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
