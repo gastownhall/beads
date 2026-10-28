@@ -393,3 +393,57 @@ func TestPull_SameRepoRespellingsUpdateInPlace(t *testing.T) {
 		})
 	}
 }
+
+// TestPush_SkipsBeadLinkedToOtherRepo covers #7781's push half: a push
+// against acme/repo-b must update repo-B's issue 7 and never write repo-B's
+// issue 42 with the content of a bead linked to repo-A's issue 42, nor
+// create an issue for that bead. Its dry-run half covers the preview: the
+// foreign bead counts as skipped, prints no "Would update" line for it, and
+// the preview's counts equal the real push's.
+func TestPush_SkipsBeadLinkedToOtherRepo(t *testing.T) {
+	bind := func() (*ghFixtureTransport, *ghCrossRepoStore, *tracker.Engine) {
+		rt := &ghFixtureTransport{}
+		// The issue-42 routes exist so the test proves no request reaches them;
+		// an un-routed request would answer 404 and the request log would
+		// still name it, but a served route keeps the failure about the write.
+		rt.route(http.MethodGet, "/repos/acme/repo-b/issues/42",
+			ghIssueJSON(9001, 42, "Repo B issue 42 (remote)", "Repo B body", repoBIssue42Ref))
+		rt.route(http.MethodGet, "/repos/acme/repo-b/issues/7",
+			ghIssueJSON(9007, 7, "Repo B issue 7 (remote)", "Repo B body", repoBIssue7Ref))
+		rt.route(http.MethodPatch, "/repos/acme/repo-b/issues/42",
+			ghIssueJSON(9001, 42, "Repo B issue 42 (remote)", "Repo B body", repoBIssue42Ref))
+		rt.route(http.MethodPatch, "/repos/acme/repo-b/issues/7",
+			ghIssueJSON(9007, 7, "Repo B issue 7 (remote)", "Repo B body", repoBIssue7Ref))
+		rt.route(http.MethodPost, "/repos/acme/repo-b/issues",
+			ghIssueJSON(9001, 42, "Repo B issue 42 (remote)", "Repo B body", repoBIssue42Ref))
+		store := newGHCrossRepoStore(
+			newRepoBead("bd-a42", "Repo A issue 42", repoAIssue42Ref),
+			newRepoBead("bd-b7", "Repo B issue 7", repoBIssue7Ref),
+		)
+		return rt, store, tracker.NewEngine(newGHTestTracker(rt), store, "test")
+	}
+
+	t.Run("push", func(t *testing.T) {
+		rt, store, engine := bind()
+		result, err := engine.Sync(context.Background(), tracker.SyncOptions{Push: true})
+		if err != nil {
+			t.Fatalf("Sync: %v", err)
+		}
+		if result.PushStats.Updated != 1 || result.PushStats.Skipped != 1 {
+			t.Errorf("push: updated=%d skipped=%d, want updated=1 (repo-B issue 7) skipped=1 (repo-A bead)",
+				result.PushStats.Updated, result.PushStats.Skipped)
+		}
+		if !rt.seen(http.MethodPatch, "/repos/acme/repo-b/issues/7") {
+			t.Errorf("push never updated repo-B issue 7")
+		}
+		if rt.seen(http.MethodPatch, "/repos/acme/repo-b/issues/42") {
+			t.Errorf("push wrote repo-B issue 42 with repo-A bead content")
+		}
+		if rt.seen(http.MethodPost, "/repos/acme/repo-b/issues") {
+			t.Errorf("push created an issue for the repo-A bead")
+		}
+		if a := store.issues["bd-a42"]; a.ExternalRef == nil || *a.ExternalRef != repoAIssue42Ref {
+			t.Errorf("repo-A bead external_ref = %v, want unchanged", ghDerefRef(a.ExternalRef))
+		}
+	})
+}
