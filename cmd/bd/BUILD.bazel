@@ -937,6 +937,7 @@ go_test(
         "init_home_guard_test.go",
         "init_hooks_test.go",
         "init_host_ownership_test.go",
+        "init_identity_test.go",
         "init_metrics_test.go",
         "init_mode_inherit_test.go",
         "init_noninteractive_test.go",

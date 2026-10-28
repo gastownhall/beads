@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/remedy"
@@ -49,6 +51,10 @@ type initIdentity struct {
 	Recorded       *configfile.Config // metadata.json at BeadsDir; nil = fresh
 	Configured     initDBRef
 	Target         initDBRef
+
+	// ownPort is the workspace's own server port, read without the
+	// BEADS_DOLT_SERVER_PORT overlay; 0 = unknown.
+	ownPort int
 }
 
 // initIdentityFlags are the invocation's own database selectors.
@@ -86,6 +92,10 @@ func resolveInitWorkspace() initIdentity {
 			Port:       serverCfg.Port,
 			portSource: serverCfg.PortSource,
 		}
+		id.ownPort = id.Recorded.DoltServerPort
+		if id.ownPort <= 0 {
+			id.ownPort, _ = strconv.Atoi(strings.TrimSpace(config.GetYamlConfig("dolt.port")))
+		}
 	}
 	return id
 }
@@ -103,10 +113,27 @@ func resolveInitIdentity(ws initIdentity, flags initIdentityFlags, serverMode bo
 		id.Target.Host = flags.Host
 	}
 	if flags.Port != 0 {
+		// A port flag naming the effective or the workspace's own port
+		// restates it, even over a stale exported BEADS_DOLT_SERVER_PORT
+		// (GH#5177): both sides take the flag.
+		if flags.Port == id.Configured.Port || (id.ownPort > 0 && flags.Port == id.ownPort) {
+			id.Configured.Port = flags.Port
+			id.Configured.portSource = doltserver.PortSourceCallerExplicit
+		}
 		id.Target.Port = flags.Port
 		id.Target.portSource = doltserver.PortSourceCallerExplicit
 	}
 	return id
+}
+
+// sameDoltHost reports whether two host spellings name one server: any two
+// spellings of bd's own server, or otherwise the same host ignoring case and
+// brackets.
+func sameDoltHost(a, b string) bool {
+	if configfile.ClassifyDoltHost(a) == configfile.DoltHostBdServer && configfile.ClassifyDoltHost(b) == configfile.DoltHostBdServer {
+		return true
+	}
+	return strings.EqualFold(configfile.UnbracketHost(a), configfile.UnbracketHost(b))
 }
 
 // location names where the database lives, for messages.
@@ -128,7 +155,7 @@ func (id initIdentity) Repoints() bool {
 		return true
 	}
 	if c.Server && t.Server {
-		if c.Host != t.Host {
+		if !sameDoltHost(c.Host, t.Host) {
 			return true
 		}
 		if c.Port > 0 && t.Port != c.Port {

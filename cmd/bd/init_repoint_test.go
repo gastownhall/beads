@@ -4,6 +4,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -155,5 +156,23 @@ func TestInitRepoint_PresentUnreadableConfiguredRefuses(t *testing.T) {
 	assertNotOnTestServer(t, b)
 	if got := w.recordedDatabase(t); got != w.a {
 		t.Errorf("metadata.json dolt_database = %q, want %q", got, w.a)
+	}
+}
+
+// AC-4: --server-port naming the workspace's own port over a stale exported
+// BEADS_DOLT_SERVER_PORT restates the configured endpoint (GH#5177), so the
+// count is read at the flagged port, as it is without the flag's promotion.
+func TestInitRepoint_RestatedPortOverStaleExportCounts(t *testing.T) {
+	w := newRepointWorkspace(t, 1)
+
+	out, code := w.reinit(t, []string{"BEADS_DOLT_SERVER_PORT=1"}, "--server-port", fmt.Sprintf("%d", testDoltServerPort))
+	if code != ExitDestroyTokenMissing {
+		t.Fatalf("exit = %d, want %d (destroy token missing)\n%s", code, ExitDestroyTokenMissing, out)
+	}
+	if !strings.Contains(out, "Existing issues: 1") {
+		t.Errorf("the count must be read at the flagged port (1 issue):\n%s", out)
+	}
+	if strings.Contains(out, "Repointing") {
+		t.Errorf("a restated port is not a repoint:\n%s", out)
 	}
 }
