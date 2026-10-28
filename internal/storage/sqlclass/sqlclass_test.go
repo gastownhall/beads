@@ -50,6 +50,17 @@ func TestClassify(t *testing.T) {
 		{"set", "SET @x = 1", Write},
 		{"select into variable", "SELECT 1 INTO @x", Write},
 
+		// A set operation keeps a trailing INTO on the SetOp node: INTO
+		// OUTFILE/DUMPFILE writes a file and INTO @var a session variable,
+		// so these are writes --readonly must refuse, like SELECT ... INTO.
+		{"union into outfile", "(SELECT id FROM issues) UNION ALL (SELECT id FROM issues) INTO OUTFILE '/p'", Write},
+		{"unparenthesized union into dumpfile", "SELECT id FROM issues UNION SELECT id FROM issues INTO DUMPFILE '/p'", Write},
+		{"union into variable", "(SELECT 1) UNION (SELECT 2) INTO @x", Write},
+		{"union order limit into", "SELECT 1 UNION SELECT 2 ORDER BY 1 LIMIT 1 INTO OUTFILE '/p'", Write},
+		{"cte union into outfile", "WITH t AS (SELECT 1 AS n) SELECT n FROM t UNION SELECT n FROM t INTO OUTFILE '/p'", Write},
+		{"intersect into outfile", "(SELECT 1) INTERSECT (SELECT 1) INTO OUTFILE '/p'", Write},
+		{"except into variable", "SELECT id FROM issues EXCEPT SELECT id FROM issues INTO @x", Write},
+
 		// Statements that may write AND return rows, or that the parser
 		// cannot classify, must run in a committing transaction that still
 		// renders any result set.
@@ -58,11 +69,38 @@ func TestClassify(t *testing.T) {
 		{"unparseable", "PRAGMA table_info(issues)", Mixed},
 		{"garbage", "NOT SQL AT ALL (", Mixed},
 		{"empty", "", Mixed},
+
+		// The grammar rejects these INTO shapes (a trailing INTO after a
+		// table-less last operand attaches to the inner SELECT, and INTO
+		// inside an operand is not allowed), so they stay Mixed and
+		// --readonly already refuses them.
+		{"union into on table-less last operand", "SELECT 1 UNION SELECT 2 INTO @x", Mixed},
+		{"into inside union operand", "(SELECT 1 INTO @x) UNION (SELECT 2)", Mixed},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := Classify(tc.query); got != tc.want {
 				t.Errorf("Classify(%q) = %v, want %v", tc.query, got, tc.want)
+			}
+		})
+	}
+}
+
+// A set operation can carry INTO OUTFILE/DUMPFILE just like a plain SELECT,
+// so it must classify as Write and take the --readonly check (#7033).
+func TestClassifySetOpInto(t *testing.T) {
+	cases := []struct {
+		name  string
+		query string
+	}{
+		{"union into outfile", "(SELECT id FROM issues) UNION ALL (SELECT id FROM issues) INTO OUTFILE '/tmp/p'"},
+		{"union into dumpfile", "(SELECT id FROM issues) UNION ALL (SELECT id FROM issues) INTO DUMPFILE '/tmp/p'"},
+		{"cte union into outfile", "WITH t AS (SELECT id FROM issues) (SELECT id FROM t) UNION ALL (SELECT id FROM t) INTO OUTFILE '/tmp/p'"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := Classify(tc.query); got != Write {
+				t.Errorf("Classify(%q) = %v, want %v", tc.query, got, Write)
 			}
 		})
 	}
