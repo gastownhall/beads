@@ -2954,6 +2954,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recompute, now climbs through such a parent, whose bit is inherited,
   instead of treating it as a final unexplained ancestor; `bd doctor`'s
   Blocked State check counts the stale bit and `--fix` clears it.
+- A closed or pinned parent whose `is_blocked` bit a merge left stale no
+  longer darkens its open children (gastownhall/beads#7626). The next write
+  under such a parent used to mark its children blocked and hide them from
+  `bd ready`. The parent-child cascade, the close-gate walk, the full repair
+  and `bd doctor`'s Blocked State check now read a parent's bit only while
+  the parent is neither closed nor pinned. Children already darkened this
+  way stay out of `bd ready` until a write recomputes them: the Blocked State
+  check now counts them, and running `bd recompute-blocked` (or
+  `bd doctor --fix`) once clears them.
 
 - `bd show --current` over the HTTP backend no longer prints the wrong issue.
   Its in-progress/hooked lookup used the raw `SearchIssues` method, which
