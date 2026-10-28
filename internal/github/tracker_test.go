@@ -122,12 +122,37 @@ func TestExtractIdentifierScopedToRepository(t *testing.T) {
 		{"https://github.com/acme/repo-b/issues/42", "42"},
 		{"https://github.com/ACME/Repo-B/issues/42", "42"},
 		{"github:42", "42"},
+		// The REST URL form of the same repository, as the API returns it.
+		{"https://api.github.com/repos/acme/repo-b/issues/42", "42"},
 		{"https://github.com/acme/repo-a/issues/42", ""},
 		{"https://github.com/other/repo-b/issues/42", ""},
+		// Another host, GitHub Enterprise or otherwise, same owner/repo.
+		{"https://ghe.example.test/acme/repo-b/issues/42", ""},
+		// Not an issue of the configured repository.
+		{"https://github.com/acme/repo-b/pull/42", ""},
+		{"https://github.com/acme/repo-b/issues/abc", ""},
+		{"https://gitlab.com/group/project/-/issues/42", ""},
+		{"github:0", ""},
+		{"", ""},
 	}
 	for _, tt := range tests {
 		if got := tr.ExtractIdentifier(tt.ref); got != tt.want {
 			t.Errorf("ExtractIdentifier(%q) = %q, want %q", tt.ref, got, tt.want)
+		}
+	}
+
+	// A GitHub Enterprise tracker resolves the same spellings against its
+	// own host, in both the web and the /api/v3 REST form, and no longer
+	// addresses github.com refs.
+	ghe := &Tracker{client: NewClient("token", "acme", "repo-b").WithBaseURL("https://ghe.example.test/api/v3")}
+	for ref, want := range map[string]string{
+		"https://ghe.example.test/acme/repo-b/issues/42":              "42",
+		"https://ghe.example.test/api/v3/repos/acme/repo-b/issues/42": "42",
+		"github:42": "42",
+		"https://github.com/acme/repo-b/issues/42": "",
+	} {
+		if got := ghe.ExtractIdentifier(ref); got != want {
+			t.Errorf("GHE ExtractIdentifier(%q) = %q, want %q", ref, got, want)
 		}
 	}
 }

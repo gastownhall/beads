@@ -345,3 +345,51 @@ func TestPull_SameNumberInOtherRepoCreatesNewBead(t *testing.T) {
 		assertRepoABeadUntouched(t, store)
 	})
 }
+
+// TestPull_SameRepoRespellingsUpdateInPlace pins that repository-scoped
+// matching still relinks a bead that names the pulled issue under another
+// spelling of its URL or the github: shorthand, instead of creating a
+// duplicate.
+func TestPull_SameRepoRespellingsUpdateInPlace(t *testing.T) {
+	tests := []struct {
+		name   string
+		stored string
+	}{
+		{name: "owner and repo in upper case", stored: "https://github.com/ACME/Repo-B/issues/42"},
+		{name: "REST API URL form", stored: "https://api.github.com/repos/acme/repo-b/issues/42"},
+		{name: "github shorthand", stored: "github:42"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rt := &ghFixtureTransport{}
+			rt.route(http.MethodGet, "/repos/acme/repo-b/issues/42",
+				ghIssueJSON(9001, 42, "Repo B issue 42 (remote)", "Repo B remote body", repoBIssue42Ref))
+			store := newGHCrossRepoStore(newRepoBead("bd-b42", "Repo B issue 42", tt.stored))
+			engine := tracker.NewEngine(newGHTestTracker(rt), store, "test")
+
+			result, err := engine.Sync(context.Background(), tracker.SyncOptions{Pull: true, IssueIDs: []string{"42"}})
+			if err != nil {
+				t.Fatalf("Sync: %v", err)
+			}
+			if result.PullStats.Created != 0 || result.PullStats.Updated != 1 {
+				t.Errorf("pull with stored ref %q: created=%d updated=%d, want created=0 updated=1 (relink in place)",
+					tt.stored, result.PullStats.Created, result.PullStats.Updated)
+			}
+			if len(store.issues) != 1 {
+				t.Errorf("store holds %d beads, want bd-b42 alone", len(store.issues))
+			}
+			b := store.issues["bd-b42"]
+			if b.ExternalRef == nil || *b.ExternalRef != repoBIssue42Ref {
+				t.Errorf("bead external_ref = %v, want GitHub's %q", ghDerefRef(b.ExternalRef), repoBIssue42Ref)
+			}
+
+			second, err := engine.Sync(context.Background(), tracker.SyncOptions{Pull: true, IssueIDs: []string{"42"}})
+			if err != nil {
+				t.Fatalf("second Sync: %v", err)
+			}
+			if second.PullStats.Created != 0 {
+				t.Errorf("second identical pull created=%d, want 0", second.PullStats.Created)
+			}
+		})
+	}
+}
