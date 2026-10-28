@@ -115,8 +115,10 @@ client of a shared workspace sees the same rule. If bd cannot read it, the
 sweep fails and deletes nothing. What it does not cover is deliberate and
 per id: `bd delete` deletes the ids you name, `bd mol burn` the molecule you
 name, and `bd sql` bypasses bd entirely. Over HTTP, a server that
-honors the setting advertises `issues.sweep.retainedTypes`; an older server
-deletes those beads without retiring their ids.
+honors the setting advertises `issues.sweep.retainedTypes`. Against an older
+server, which would delete those beads without retiring their ids, bd reads
+the setting first and refuses a plain `bd prune` or `bd purge` when it names
+a type; upgrade the server, or use `--retain-ids` if the server supports it.
 
 A sweep with `--retain-ids` briefly blocks or conflicts with creates of
 unrelated ids that hash to the same coordination shard as one it retires,

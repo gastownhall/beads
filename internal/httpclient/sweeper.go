@@ -4,11 +4,13 @@ package httpclient
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
 	"github.com/steveyegge/beads/internal/httpclient/wire"
+	storageops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/issueops"
 )
 
@@ -138,10 +140,10 @@ func (s *httpSweeper) Sweep(ctx context.Context, req issueops.SweepRequest) (res
 // that predates the token would 400 the member, but a client that dropped it
 // to get past that would run a sweep leaving every swept id reusable — the
 // exact re-execution the caller asked retention to rule out.
+//
+// A PLAIN sweep consults the snapshot too, for issues.sweep.retainedTypes: see
+// refuseAnUnguardedPlainSweep.
 func (s *httpSweeper) refuseUnservedSweep(ctx context.Context, tier apigen.SweepRequestTier, req issueops.SweepRequest) error {
-	if tier != apigen.WispsPlane && !req.ProtectLiveDependents && req.Limit == 0 && !req.RetainIDs {
-		return nil
-	}
 	snap, err := s.store.snapshot(ctx)
 	if err != nil {
 		return err
@@ -165,6 +167,35 @@ func (s *httpSweeper) refuseUnservedSweep(ctx context.Context, tier apigen.Sweep
 	}
 	if req.RetainIDs && !slices.Contains(capabilities, wire.CapSweepRetainIDs) {
 		return s.store.unsupportedCapability("Sweeper.Sweep", wire.CapSweepRetainIDs)
+	}
+	if !req.RetainIDs && !slices.Contains(capabilities, wire.CapSweepRetainedTypes) {
+		return s.refuseAnUnguardedPlainSweep(ctx)
+	}
+	return nil
+}
+
+// refuseAnUnguardedPlainSweep is the client's defense in depth for the
+// workspace's types.retained setting (issueops.SettingKeyTypesRetained), run
+// only for a plain sweep against a server that does not advertise
+// issues.sweep.retainedTypes. Such a server holds nothing back by type, so the
+// sweep would delete the rows of a retained type with no tombstone — and, the
+// response member being absent, with no signal either. One getSetting reads
+// the setting the server's workspace stores; if it names a type the sweep is
+// refused before the dial, as invariant 8 refuses retain_ids locally. A read
+// error fails the sweep: a sweep that cannot tell which rows are keys must not
+// guess that none are. A server that advertises the token, and a retaining
+// sweep, which holds nothing back by type anywhere, never pay the read.
+func (s *httpSweeper) refuseAnUnguardedPlainSweep(ctx context.Context) error {
+	value, err := s.store.GetConfig(ctx, issueops.SettingKeyTypesRetained)
+	if err != nil {
+		return fmt.Errorf("reading %s before a plain sweep against a server without %s: %w",
+			issueops.SettingKeyTypesRetained, wire.CapSweepRetainedTypes, err)
+	}
+	// The one type-list parser (storageops.ParseTypesConfigValue is
+	// workapi.ParseTypeList, which this package may not import): the names
+	// the server's sweep would read.
+	if len(storageops.ParseTypesConfigValue(value)) > 0 {
+		return s.store.unsupportedCapability("Sweeper.Sweep", wire.CapSweepRetainedTypes)
 	}
 	return nil
 }
