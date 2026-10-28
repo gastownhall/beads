@@ -191,4 +191,68 @@ func TestEmbeddedDepDefaultDirectionNotesHiddenChildren(t *testing.T) {
 			t.Errorf("--max-depth=1 should note the children too, got:\n%s", stderr)
 		}
 	})
+	t.Run("attached_shape", func(t *testing.T) {
+		// AC-3: a durable task W with an ephemeral child epic M that carries
+		// three step wisps. The M views still answer the outbound question (W
+		// via parent-child, none of the steps); the notes count what each
+		// anchor's own children are — 1 for W, 3 for M.
+		work := bdCreate(t, bd, dir, "Attached work task", "--type", "task")
+		bdUpdate(t, bd, dir, work.ID, "--status", "hooked")
+		mid := bdCreate(t, bd, dir, "Attached epic", "--type", "epic", "--ephemeral", "--parent", work.ID)
+		midSteps := make([]*types.Issue, 3)
+		for i := range midSteps {
+			midSteps[i] = newEphemeralStep(mid, fmt.Sprintf("Attached step %d", i))
+		}
+
+		listOut, listErr := bdDepInOut(t, "list", mid.ID)
+		if !strings.Contains(listOut, work.ID) || !strings.Contains(listOut, "parent-child") {
+			t.Errorf("M's list should still name W via parent-child, got:\n%s", listOut)
+		}
+		for _, step := range midSteps {
+			if strings.Contains(listOut, step.ID) {
+				t.Errorf("M's list should name none of its steps, found %s:\n%s", step.ID, listOut)
+			}
+		}
+		if !strings.Contains(listErr, "note: "+mid.ID+" has 3 child issue(s) not shown here") {
+			t.Errorf("M's list should note its 3 children, got:\n%s", listErr)
+		}
+
+		treeOut, treeErr := bdDepInOut(t, "tree", mid.ID)
+		if !strings.Contains(treeOut, work.ID) || !strings.Contains(treeOut, "parent-child") {
+			t.Errorf("M's tree should still reach W via parent-child, got:\n%s", treeOut)
+		}
+		for _, step := range midSteps {
+			if strings.Contains(treeOut, step.ID) {
+				t.Errorf("M's tree should name none of its steps, found %s:\n%s", step.ID, treeOut)
+			}
+		}
+		if !strings.Contains(treeErr, "note: "+mid.ID+" has 3 child issue(s) not shown here") {
+			t.Errorf("M's tree should note its 3 children, got:\n%s", treeErr)
+		}
+
+		listOut, listErr = bdDepInOut(t, "list", work.ID)
+		if !strings.Contains(listOut, "has no dependencies") {
+			t.Errorf("W's list should print the empty outbound answer, got:\n%s", listOut)
+		}
+		if !strings.Contains(listErr, "note: "+work.ID+" has 1 child issue(s) not shown here") {
+			t.Errorf("W's list should note its 1 child, got:\n%s", listErr)
+		}
+
+		_, treeErr = bdDepInOut(t, "tree", work.ID)
+		if !strings.Contains(treeErr, "note: "+work.ID+" has 1 child issue(s) not shown here") {
+			t.Errorf("W's tree should note its 1 child, got:\n%s", treeErr)
+		}
+
+		// The up view from W does reach M and all of M's steps, which is
+		// what the notes' printed commands rely on.
+		up, _ := bdDepInOut(t, "tree", work.ID, "--direction", "up")
+		if !strings.Contains(up, mid.ID) {
+			t.Errorf("W's up tree should reach M, got:\n%s", up)
+		}
+		for _, step := range midSteps {
+			if !strings.Contains(up, step.ID) {
+				t.Errorf("W's up tree should reach %s, got:\n%s", step.ID, up)
+			}
+		}
+	})
 }
