@@ -1,0 +1,12 @@
+# Pinned shards for tools/bazel/go_test_pinned_shard.sh. Not pin_shards.py's:
+# each corpus part (corpus_test.go's corpusParts; TestServedCorpusPart1..N)
+# runs alone in the shard of its number, on its own server and seed, and the
+# binary's round-robin runs the package's other (engine-free) tests in the
+# one shard left over. Change corpusParts, this file and the target's
+# shard_count together (scripts TestCorpusPartsArePinnedOnePerShard).
+#
+# <pinned shard> <TestName>
+1 TestServedCorpusPart1
+2 TestServedCorpusPart2
+3 TestServedCorpusPart3
+4 TestServedCorpusPart4

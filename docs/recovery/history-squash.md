@@ -105,25 +105,75 @@ bd backup sync
 <Warning>
 A Dolt remote accumulates chunks monotonically: the force-push re-points the
 remote's refs at the squashed chain but deletes nothing, so the *remote's*
-storage does not shrink. To reclaim the published side too, replace the
-remote — clear its storage (or pick a fresh path/prefix) before the push:
+storage does not shrink. To reclaim the published side too, rebuild the
+remote's data plane from the squashed HEAD with `bd dolt remote reset-data`
+(below), or replace the remote with a fresh path/prefix:
 `bd dolt remote remove <name>`, `bd dolt remote add <name> <fresh-url>`,
 then `bd dolt push --force`. Every other clone must re-clone after a squash
 regardless, so replacing the remote costs nothing extra.
 </Warning>
 
-On a *git-backed* remote (issue data riding your code remote under
-`refs/dolt/data`) there is no fresh path to pick — the storage is the git
-repository itself, and its manifest lists every historical table file as
-current, so the full old store stays reachable even after the force-push.
-Replace the data plane in place instead: delete the Dolt data refs on the
-git remote, then force-push to rebuild a fresh store holding only live
-chunks. Code branches are untouched.
+`bd dolt remote reset-data` replaces a remote's data plane in place with a
+fresh store holding only live chunks. In server mode, restart the Dolt
+server right before it (`bd dolt stop`, then `bd dolt start`; restart a
+server bd does not run yourself), and do not push or pull that remote in
+between:
 
 ```bash
-git push origin :refs/dolt/data :refs/heads/__dolt_remote_info__
-bd dolt push --force
+bd dolt remote reset-data <name> --yes
 ```
+
+That is how to shrink a *git-backed* remote (issue data riding your code
+remote under `refs/dolt/data`), where there is no fresh path to pick — the
+storage is the git repository itself, and its manifest lists every
+historical table file as current, so the full old store stays reachable
+even after the force-push. reset-data replaces the remote's Dolt data refs
+with the fresh store; code branches are untouched. On a native `file://`
+remote it clears the store directory and pushes again. It refuses a cloud
+or hosted remote (`aws://`, `gs://`, `dolthub://`, ...): replace that one as
+above.
+
+<Warning>
+A `file://` remote whose URL does not end in `.git` (`bd dolt remote list`
+shows `file://`, not `git+file://`) and whose directory is a git repository, a
+checkout or a bare repository, is not a native file store: Dolt keeps its
+files among the repository's own. Do not run reset-data on such a remote; replace it with a
+fresh URL as above. Releases up to and including v1.3.2 clear such a
+checkout, `.git` and every working file included, and report a reset that
+leaves a bare repository's old table files in place; later releases refuse
+both.
+</Warning>
+
+The restart matters: a running sql-server keeps its view of every git
+remote it has used, the force-push above included. Releases up to and
+including v1.3.2 delete the remote's Dolt data refs and then force-push.
+Once the refs are deleted under that view, the push through the server
+hangs until a read timeout or reports success having written nothing, and
+the remote is left without its Dolt data; running reset-data again right
+after a restart rebuilds it. Deleting the refs by hand
+(`git push origin :refs/dolt/data`) and force-pushing runs into the same
+trap, so use reset-data.
+
+Through a server, releases after v1.3.2 never delete the data refs first:
+reset-data pushes the fresh store to a temporary ref and then moves the
+data ref to it, so the remote keeps its data until the new store is
+complete, and the restart before it does no harm. The move leaves the
+server's view of the remote stale instead: until the server restarts, it
+takes the pre-reset store's table files for present on the remote, so a
+push through it can write a manifest naming files the remote no longer
+holds, or report a branch as up to date that the remote lacks. So those
+releases restart bd's own server after the move, on the same port (in
+shared-server mode, the shared server). Like `bd dolt stop`, that restart
+commits any uncommitted changes in every database the server serves and
+briefly interrupts them, which for the shared server includes other
+workspaces' databases. They do not restart any other server, nor bd's own
+while auto-start is off (`dolt.auto-start: false`,
+`BEADS_DOLT_AUTO_START=0`) or, outside shared-server mode, while
+`BEADS_DOLT_SERVER_MODE=1` or `dolt_server_port` declares it externally
+managed. reset-data then exits non-zero once the reset is done, naming the
+setting for bd's own server, and `--json` sets `server_restart_required`:
+restart that server after reset-data returns, before the next push or pull
+of that remote, and do not run reset-data again.
 
 **Step 5:** Verify, then re-clone everywhere else. On this machine:
 

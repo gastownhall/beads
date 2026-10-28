@@ -4,8 +4,11 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os/exec"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -121,6 +124,78 @@ func TestProxiedServerGateFrontDoorDirectServerProxyParity(t *testing.T) {
 		beadShow := r.mustRun(t, bd, "gate", "show", beadGateID)
 		if !strings.Contains(beadShow, "Status: closed") {
 			t.Errorf("[%s] bead gate %s remains open after check:\n%s", r.name, beadGateID, beadShow)
+		}
+	}
+}
+
+// TestProxiedServerGateAddWaiterConvoy registers ten waiters (plus one
+// duplicate) on one gate at once, on the direct SQL route and the proxied
+// route against a real Dolt server: every adder must exit 0 and every waiter
+// must be on the gate exactly once. add-waiter is a guarded whole-list write,
+// so each round of simultaneous writes has one winner; this pins the retry's
+// backoff and budget, which must carry a convoy finishing a phase together.
+func TestProxiedServerGateAddWaiterConvoy(t *testing.T) {
+	requireSharedProxiedServer(t)
+	bd := buildEmbeddedBD(t)
+	directProject := newServerModeProject(t, bd, "cv")
+	proxiedProject := newSharedProxiedProject(t, bd, "cv")
+	modes := []gateFrontDoorRunner{
+		{name: "direct-sql", dir: directProject.dir, env: func(string) []string { return directProject.env }},
+		{name: "proxied", dir: proxiedProject.dir, env: bdProxiedEnv},
+	}
+	const adders = 10
+	for _, r := range modes {
+		r.mustRun(t, bd, "create", "Convoy target", "--id", "cv-target")
+		gateID := parseCreatedGateID(t, r.mustRun(t, bd, "gate", "create", "--blocks", "cv-target"))
+
+		type result struct {
+			stdout, stderr string
+			err            error
+		}
+		results := make([]result, adders+1)
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		for i := 0; i <= adders; i++ {
+			waiter := fmt.Sprintf("rig/workers/c%d", i%adders) // the last one repeats c0
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				<-start
+				cmd := exec.Command(bd, "gate", "add-waiter", gateID, waiter)
+				cmd.Dir = r.dir
+				cmd.Env = r.env(r.dir)
+				var stdout, stderr strings.Builder
+				cmd.Stdout, cmd.Stderr = &stdout, &stderr
+				err := cmd.Run()
+				results[i] = result{stdout.String(), stderr.String(), err}
+			}(i)
+		}
+		close(start)
+		wg.Wait()
+		for i, res := range results {
+			if res.err != nil {
+				t.Errorf("[%s] adder %d failed: %v\nstderr:\n%s", r.name, i, res.err, res.stderr)
+			}
+		}
+
+		var shown map[string]any
+		out := r.mustRun(t, bd, "gate", "show", gateID, "--json")
+		if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &shown); err != nil {
+			t.Fatalf("[%s] parse gate show --json: %v\n%s", r.name, err, out)
+		}
+		raw, _ := shown["waiters"].([]any)
+		got := make([]string, 0, len(raw))
+		for _, w := range raw {
+			got = append(got, fmt.Sprint(w))
+		}
+		want := make([]string, 0, adders)
+		for i := 0; i < adders; i++ {
+			want = append(want, fmt.Sprintf("rig/workers/c%d", i))
+		}
+		slices.Sort(got)
+		slices.Sort(want)
+		if !slices.Equal(got, want) {
+			t.Errorf("[%s] waiters after %d concurrent adders = %v, want each exactly once: %v", r.name, adders+1, got, want)
 		}
 	}
 }

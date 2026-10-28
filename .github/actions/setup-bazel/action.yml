@@ -1,9 +1,9 @@
 name: setup-bazel
 description: >
-  Install a sha256-pinned Bazelisk, have it download the sha256-pinned Bazel
-  release .bazelversion names (never from the runner cache), restore the
-  runner Bazel cache (--repository_cache only, whose entries Bazel re-hashes
-  on use),
+  Install a sha256-pinned Bazelisk and the sha256-pinned Bazel release
+  .bazelversion names, from their own runner-cache entry or downloaded, each
+  checked against its pin before anything runs it; restore the runner Bazel
+  cache (--repository_cache only, whose entries Bazel re-hashes on use),
   and write a CI bazelrc outside the workspace. When the caller passes all of
   BAZEL_REMOTE_EXECUTOR, RBE_TLS_CERT and RBE_TLS_KEY in the step env, that rc
   enables --config=remote-exec for every bazel command; with none of them the
@@ -30,6 +30,12 @@ outputs:
   cache-hit:
     description: '"true" when the cache for this .bazelversion and MODULE.bazel.lock was restored exactly'
     value: ${{ steps.restore.outputs.cache-hit }}
+  bin-cache-hit:
+    description: '"true" when Bazelisk and Bazel came from their own runner-cache entry'
+    value: ${{ steps.bin-restore.outputs.cache-hit }}
+  bin-cache-key:
+    description: The key the caller's push-to-main step saves Bazelisk and Bazel under (bazel-bin in runner.temp)
+    value: ${{ steps.bin-restore.outputs.cache-primary-key }}
 runs:
   using: composite
   steps:
@@ -39,8 +45,9 @@ runs:
     # of the downloads. It holds only the content-addressable repository cache,
     # which Bazel checks against each download's sha256 on every hit; the
     # unverified repo contents cache is off (write-bazelrc.sh) and the Bazel
-    # binary is not cached, so a poisoned entry (a cache written by an
-    # untrusted run) cannot change what executes. v3: v2 also held Bazelisk's
+    # binary is not in this entry (its own is checked against its pin before
+    # use, "Restore Bazelisk and Bazel"), so a poisoned entry (a cache written
+    # by an untrusted run) cannot change what executes. v3: v2 also held Bazelisk's
     # download and the contents cache. v4: MODULE.bazel joins the key because
     # the lock does not record non-registry repository rules (llvm_dist), so
     # v3 kept restoring the 1.94 GB LLVM .tar.xz after the switch to the
@@ -54,26 +61,40 @@ runs:
         restore-keys: |
           bazel-repo-v4-${{ runner.os }}-
 
+    # Bazelisk and the Bazel release .bazelversion names come from their own
+    # runner-cache entry when it holds them, else are downloaded. Both are
+    # pinned by sha256 and checked before anything runs them: a file the
+    # entry holds with other content (a corrupt entry) is replaced by a
+    # download, never run. What keeps the entry trustworthy beyond those two
+    # files is who writes it, as for the runner cache above (actions/cache
+    # extracts an archive wherever its paths point): only the caller's
+    # push-to-main save (bin-cache-key), under an exact key on this action
+    # and .bazelversion, which hold the pins, with no fallback key (other
+    # pins' files are no use). A download gives up on a stalled or slow
+    # transfer and retries, then tries the next source: on 2026-10-19 (about
+    # 21:50-23:30Z) GitHub release downloads crawled at ~30 KB/s, and
+    # `curl --retry 3 --max-time 120` held every lane 8 minutes, then failed
+    # it.
+    - name: Restore Bazelisk and Bazel
+      id: bin-restore
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ runner.temp }}/bazel-bin
+        key: bazel-bin-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bazelversion', '.github/actions/setup-bazel/action.yml') }}
+
     - name: Install Bazelisk
       shell: bash
       run: |
         set -euo pipefail
         version=v1.29.0
         case "$(uname -m)" in
-          x86_64) arch=amd64; sha=5a408715e932c0250d28bd84555f12edbf70117de42f9181691c736eacc4a992 ;;
-          aarch64 | arm64) arch=arm64; sha=e20e8b0f4f240091b7a55bf17b9398bd4f40ee70ae0208dff95dd4c445fb4010 ;;
+          x86_64) arch=amd64; bazel_arch=x86_64; sha=5a408715e932c0250d28bd84555f12edbf70117de42f9181691c736eacc4a992 ;;
+          aarch64 | arm64) arch=arm64; bazel_arch=arm64; sha=e20e8b0f4f240091b7a55bf17b9398bd4f40ee70ae0208dff95dd4c445fb4010 ;;
           *) echo "setup-bazel: unsupported arch $(uname -m)" >&2; exit 1 ;;
         esac
-        curl -fsSL --retry 3 --max-time 120 -o "$RUNNER_TEMP/bazelisk" \
-          "https://github.com/bazelbuild/bazelisk/releases/download/${version}/bazelisk-linux-${arch}"
-        echo "${sha}  $RUNNER_TEMP/bazelisk" | sha256sum -c -
-        sudo install -m 755 "$RUNNER_TEMP/bazelisk" /usr/local/bin/bazelisk
-        rm -f "$RUNNER_TEMP/bazelisk"
         # The Bazel release .bazelversion names, pinned like Bazelisk above
-        # (the release's bazel-<v>-linux-<arch>.sha256). Bazelisk verifies
-        # only fresh downloads, so its home is a fresh directory outside the
-        # runner cache: every job downloads and verifies Bazel. A .bazelversion
-        # bump adds its pair here (policy-tested).
+        # (the release's bazel-<v>-linux-<arch>.sha256). A .bazelversion bump
+        # adds its pair here (policy-tested).
         bazel_version="$(tr -d '[:space:]' < .bazelversion)"
         case "$bazel_version/$arch" in
           9.2.0/amd64) bazel_sha=7668a95db1250f12c40407251e4e203b4ec8bf39bc495d2f485b2d8c99048694 ;;
@@ -82,10 +103,69 @@ runs:
           9.3.0/arm64) bazel_sha=615cc2509819047e4930fe6643c5f01ebd705ccadf75e8f0b85f9b83cc6a6ca0 ;;
           *) echo "setup-bazel: no pinned sha256 for Bazel '$bazel_version' ($arch); add it from the release's .sha256 file" >&2; exit 1 ;;
         esac
+        bin="$RUNNER_TEMP/bazel-bin"
+        mkdir -p "$bin"
+        # have FILE SHA: the runner cache restored FILE with its pinned
+        # content. A FILE with any other content is removed, never run.
+        have() {
+          [ -f "$1" ] || return 1
+          if echo "$2  $1" | sha256sum -c --status -; then
+            echo "setup-bazel: $(basename "$1") from the runner cache, sha256 checked"
+            return 0
+          fi
+          echo "::warning title=setup-bazel::$(basename "$1") in the runner cache does not match its pinned sha256; downloading it. A cache entry is never overwritten: bump bazel-bin-v1 in setup-bazel's key, or delete the entry"
+          rm -f "$1"
+          return 1
+        }
+        # fetch FILE SHA FLOOR URL...: FILE from the first URL that delivers
+        # its pinned content. Each attempt gives up after 120 s, or after 15 s
+        # below FLOOR bytes a second, with two retries per URL. FLOOR is about
+        # the file's size over 100 s, so a transfer fast enough to keep going
+        # also finishes inside the 120 s.
+        fetch() {
+          local file=$1 want=$2 floor=$3 url
+          shift 3
+          for url in "$@"; do
+            if curl -fsSL --connect-timeout 10 --max-time 120 --speed-limit "$floor" --speed-time 15 \
+              --retry 2 --retry-delay 2 --retry-all-errors -o "$file.part" "$url" &&
+              echo "$want  $file.part" | sha256sum -c --status -; then
+              mv -f "$file.part" "$file"
+              return 0
+            fi
+            echo "::warning title=setup-bazel::no $(basename "$file") with its pinned sha256 from $url"
+          done
+          rm -f "$file.part"
+          echo "setup-bazel: no source delivered $(basename "$file") with sha256 $want" >&2
+          return 1
+        }
+        bazelisk="$bin/bazelisk-${version}-linux-${arch}"
+        # Bazelisk is about 7 MB: 64 KiB/s.
+        have "$bazelisk" "$sha" ||
+          fetch "$bazelisk" "$sha" 65536 "https://github.com/bazelbuild/bazelisk/releases/download/${version}/bazelisk-linux-${arch}"
+        sudo install -m 755 "$bazelisk" /usr/local/bin/bazelisk
+        # Bazel is about 77 MB: 768 KiB/s.
+        bazel_file="bazel-${bazel_version}-linux-${bazel_arch}"
+        have "$bin/$bazel_file" "$bazel_sha" ||
+          fetch "$bin/$bazel_file" "$bazel_sha" 786432 \
+            "https://releases.bazel.build/${bazel_version}/release/${bazel_file}" \
+            "https://github.com/bazelbuild/bazel/releases/download/${bazel_version}/${bazel_file}"
+        # Bazelisk's home is a fresh directory seeded with that checked
+        # binary, in the layout Bazelisk itself writes (downloads/metadata/
+        # bazelbuild/<file> names the sha256, downloads/sha256/<sha256>/bin/
+        # holds the binary), so Bazelisk runs it and downloads nothing.
+        home="$RUNNER_TEMP/bazelisk-home"
+        rm -rf "$home"
+        mkdir -p "$home/downloads/metadata/bazelbuild" "$home/downloads/sha256/$bazel_sha/bin"
+        install -m 755 "$bin/$bazel_file" "$home/downloads/sha256/$bazel_sha/bin/bazel"
+        printf '%s' "$bazel_sha" > "$home/downloads/metadata/bazelbuild/$bazel_file"
+        # BAZELISK_SKIP_WRAPPER: Bazelisk runs that binary, never a
+        # tools/bazel wrapper a workspace file could supply (tools/bazel is a
+        # directory here).
         {
           echo "BAZELISK_HOME=$RUNNER_TEMP/bazelisk-home"
           echo "BAZELISK_VERIFY_SHA256=$bazel_sha"
           echo "BAZEL_CI_BAZEL_SHA256=$bazel_sha"
+          echo "BAZELISK_SKIP_WRAPPER=true"
         } >> "$GITHUB_ENV"
 
     # Fork and Dependabot runs (no secrets, no OIDC): a key and a CSR, the CSR
@@ -142,11 +222,14 @@ runs:
         printf '%s\n' '#!/usr/bin/env bash' "exec /usr/local/bin/bazelisk --bazelrc=\"$RC\" \"\$@\"" > "$RUNNER_TEMP/bazel-wrapper"
         sudo install -m 755 "$RUNNER_TEMP/bazel-wrapper" /usr/local/bin/bazel
         rm -f "$RUNNER_TEMP/bazel-wrapper"
-        # Downloads Bazel (Bazelisk checks BAZELISK_VERIFY_SHA256; the
-        # wrapper's --bazelrc would make --version an unknown startup
-        # option), then checks again: every Bazel binary in Bazelisk's home
-        # is the pinned release.
-        /usr/local/bin/bazelisk --version
+        # Runs the Bazel the Install Bazelisk step seeded (the wrapper's
+        # --bazelrc would make --version an unknown startup option). Its
+        # download URL is an address that never resolves, so a Bazelisk that
+        # did not find the seeded binary (a layout change in a newer
+        # Bazelisk) fails here instead of downloading with no time limit.
+        # Then checks again: every Bazel binary in Bazelisk's home is the
+        # pinned release.
+        BAZELISK_FORMAT_URL='https://setup-bazel-seeded.invalid/%v/%o/%m' /usr/local/bin/bazelisk --version
         n=0
         while IFS= read -r -d '' bin; do
           echo "${BAZEL_CI_BAZEL_SHA256}  $bin" | sha256sum -c - >/dev/null

@@ -45,7 +45,19 @@ flowchart TD
 
 Reads follow the same routing: with routing active, `bd list` and `bd ready`
 read from the routed repository, and ID lookups like `bd show` fall back to
-the routed repository when a bead isn't found locally.
+the routed repository when a bead isn't found locally. Commands that change an
+existing bead (`bd update`, `bd close`, `bd comment`, `bd unclaim`,
+`bd mol bond` and the like) follow every route, contributor, maintainer and
+default alike, opening the routed repository for writing so the change commits
+there. A routed write never creates the routed repository's database: if that
+repository has not been bootstrapped yet, the write fails until you run
+`bd bootstrap` there. A routed write also refuses a repository whose
+`.beads/metadata.json` is unreadable or names no `dolt_database`, instead of
+guessing which database to write. Through these routes a repository with no
+`metadata.json` at all, such as a planning repository nothing has been created
+in yet, opens the one embedded database it holds, or its default database when
+it holds none or several; a prefix route in an orchestrator's `routes.jsonl`
+always needs the target's `dolt_database`, for reads as well as writes.
 
 ## Role detection
 

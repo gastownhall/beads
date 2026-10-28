@@ -12,7 +12,7 @@
 #          <shard script> <binary env var> <binary> [binary args...]
 #   <shard script>, <binary>: runfiles paths ($(rootpath ...)), relative to
 #     the workspace runfiles directory, which is the test's working directory
-#     and where the script's source globs (cmd/bd/*_embedded_test.go, ...)
+#     and where the script's source globs (cmd/bd/*_test.go, ...)
 #     resolve.
 #   <binary env var>: the variable the script reads the binary path from
 #     (BEADS_TEST_CMD_BINARY, BEADS_TEST_EMBEDDED_TEST_BINARY or

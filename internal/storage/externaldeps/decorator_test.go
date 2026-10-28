@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"testing"
 	"time"
@@ -30,6 +31,9 @@ type fakeStore struct {
 	batch       *fakeBatchCloser
 	enforced    bool
 	enforcedErr error
+	// liveProbes records storage.LivePolicyProbe for every policy probe, in
+	// order.
+	liveProbes []bool
 
 	excludeIDsUnsupported bool
 	// defaultPage, when positive, is how many rows a zero-Limit ready listing
@@ -52,7 +56,8 @@ func (f *fakeStore) IssueLifecycle() (publicops.Lifecycle, error) { return f.lif
 // every existing test's raw store on today's client-side-enforcement path
 // unchanged; enforced:true is set explicitly only by the test below that
 // pins loadBlockingState's skip branch.
-func (f *fakeStore) ServerEnforcesExternalDependencyPolicy(_ context.Context) (bool, error) {
+func (f *fakeStore) ServerEnforcesExternalDependencyPolicy(ctx context.Context) (bool, error) {
+	f.liveProbes = append(f.liveProbes, storage.LivePolicyProbe(ctx))
 	return f.enforced, f.enforcedErr
 }
 
@@ -155,6 +160,27 @@ func (f *fakeStore) IsBlockedBatch(_ context.Context, ids []string) (map[string]
 		result[id] = f.isBlocked
 	}
 	return result, nil
+}
+
+// BlockingAnnotator serves the decoration a local backend derives for these
+// rows: no local blockers, and when asked, isBlocked as each row's stored
+// flag.
+func (f *fakeStore) BlockingAnnotator() (publicops.BlockingAnnotator, error) {
+	return localAnnotator{f}, nil
+}
+
+type localAnnotator struct{ f *fakeStore }
+
+func (a localAnnotator) AnnotateBlocking(ctx context.Context, req publicops.BlockingRequest) (publicops.BlockingResult, error) {
+	items := make([]publicops.IssueBlocking, 0, len(req.IDs))
+	for _, id := range req.IDs {
+		item := publicops.IssueBlocking{ID: id}
+		if issue, _ := a.f.GetIssue(ctx, id); issue != nil && req.IncludeIsBlocked {
+			item.IsBlocked = boolPtr(a.f.isBlocked)
+		}
+		items = append(items, item)
+	}
+	return publicops.BlockingResult{Items: items}, nil
 }
 
 func (f *fakeStore) CloseIssueChecked(ctx context.Context, id, _ string, _ storage.CloseIssueOptions) (storage.CloseIssueResult, error) {
@@ -1008,6 +1034,29 @@ func TestIsBlockedBatchIncludesUnsatisfiedExternalRef(t *testing.T) {
 	}
 }
 
+// TestBlockingAnnotatorFlagsUnsatisfiedExternalRef: the annotation's
+// is_blocked flag keeps IsBlockedBatch's invariant, so a row the stored column
+// calls unblocked reads blocked while an external ref still blocks it.
+func TestBlockingAnnotatorFlagsUnsatisfiedExternalRef(t *testing.T) {
+	a, b := issue("be-a"), issue("be-b")
+	ref := "external:remote:payments"
+	raw := &fakeStore{ready: []*types.Issue{a, b}, deps: map[string][]*types.Dependency{
+		a.ID: {externalDep(a.ID, ref, types.DepBlocks)},
+	}}
+	annotator, err := testStore(raw, &fakeStore{}, true).BlockingAnnotator()
+	if err != nil {
+		t.Fatalf("BlockingAnnotator: %v", err)
+	}
+
+	result, err := annotator.AnnotateBlocking(t.Context(), publicops.BlockingRequest{IDs: []string{a.ID, b.ID}, IncludeIsBlocked: true})
+	if err != nil {
+		t.Fatalf("AnnotateBlocking: %v", err)
+	}
+	if got, want := blockedFlags(result), map[string]string{a.ID: "true", b.ID: "false"}; !maps.Equal(got, want) {
+		t.Fatalf("AnnotateBlocking is_blocked = %v, want %v", got, want)
+	}
+}
+
 func TestCloseIssueCheckedRefusesUnsatisfiedExternalRef(t *testing.T) {
 	a := issue("be-a")
 	ref := "external:remote:payments"
@@ -1117,5 +1166,71 @@ func assertExternalCloseBlockers(t *testing.T, err error, issueID, ref string) {
 	}
 	if wantText := "cannot close blocked issue: " + issueID + " is blocked by [" + ref + "]"; err.Error() != wantText {
 		t.Errorf("refusal = %q, want %q", err.Error(), wantText)
+	}
+}
+
+// TestIsBlockedBatchHonorsShippedExternalRef (bd-yewju3 store half): as
+// GetReadyWork does, the flag leaves a row unblocked when its external ref's
+// project has shipped it.
+func TestIsBlockedBatchHonorsShippedExternalRef(t *testing.T) {
+	a := issue("be-a")
+	raw := &fakeStore{ready: []*types.Issue{a}, deps: map[string][]*types.Dependency{
+		a.ID: {externalDep(a.ID, "external:remote:payments", types.DepBlocks)},
+	}}
+	foreign := &fakeStore{labels: map[string][]*types.Issue{
+		"provides:payments": {{ID: "remote-done", Status: types.StatusClosed}},
+	}}
+
+	got, err := testStore(raw, foreign, true).IsBlockedBatch(t.Context(), []string{a.ID})
+	if err != nil {
+		t.Fatalf("IsBlockedBatch: %v", err)
+	}
+	if want := map[string]bool{a.ID: false}; !maps.Equal(got, want) {
+		t.Fatalf("IsBlockedBatch = %v, want %v", got, want)
+	}
+}
+
+// TestBlockingAnnotatorLeavesShippedExternalRefUnblocked: the store arm's
+// served flag reads IsBlocked, so a shipped ref leaves the row unblocked.
+func TestBlockingAnnotatorLeavesShippedExternalRefUnblocked(t *testing.T) {
+	a := issue("be-a")
+	raw := &fakeStore{ready: []*types.Issue{a}, deps: map[string][]*types.Dependency{
+		a.ID: {externalDep(a.ID, "external:remote:payments", types.DepBlocks)},
+	}}
+	foreign := &fakeStore{labels: map[string][]*types.Issue{
+		"provides:payments": {{ID: "remote-done", Status: types.StatusClosed}},
+	}}
+	annotator, err := testStore(raw, foreign, true).BlockingAnnotator()
+	if err != nil {
+		t.Fatalf("BlockingAnnotator: %v", err)
+	}
+
+	result, err := annotator.AnnotateBlocking(t.Context(), publicops.BlockingRequest{IDs: []string{a.ID}, IncludeIsBlocked: true})
+	if err != nil {
+		t.Fatalf("AnnotateBlocking: %v", err)
+	}
+	if got, want := blockedFlags(result), map[string]string{a.ID: "false"}; !maps.Equal(got, want) {
+		t.Fatalf("AnnotateBlocking is_blocked = %v, want %v", got, want)
+	}
+}
+
+// TestBlockingAnnotatorAddsNoFlagUnasked: a request that did not ask for
+// is_blocked answers exactly as before, even for an externally blocked row.
+func TestBlockingAnnotatorAddsNoFlagUnasked(t *testing.T) {
+	a := issue("be-a")
+	raw := &fakeStore{ready: []*types.Issue{a}, deps: map[string][]*types.Dependency{
+		a.ID: {externalDep(a.ID, "external:remote:payments", types.DepBlocks)},
+	}}
+	annotator, err := testStore(raw, &fakeStore{}, true).BlockingAnnotator()
+	if err != nil {
+		t.Fatalf("BlockingAnnotator: %v", err)
+	}
+
+	result, err := annotator.AnnotateBlocking(t.Context(), publicops.BlockingRequest{IDs: []string{a.ID}})
+	if err != nil {
+		t.Fatalf("AnnotateBlocking: %v", err)
+	}
+	if got, want := blockedFlags(result), map[string]string{a.ID: "absent"}; !maps.Equal(got, want) {
+		t.Fatalf("AnnotateBlocking is_blocked = %v, want %v", got, want)
 	}
 }

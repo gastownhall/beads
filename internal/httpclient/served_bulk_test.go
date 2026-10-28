@@ -43,7 +43,13 @@ const bulkParkBead = "ga-6lbny"
 
 func newServedSweeperFixture(t *testing.T, prefix string) conformance.SweeperFixture {
 	t.Helper()
-	env := newServedEnv(t, prefix)
+	return newServedSweeperFixtureOnEnv(t, newServedEnv(t, prefix))
+}
+
+// newServedSweeperFixtureOnEnv builds the Sweeper fixture over an existing
+// served environment, for a contract that composes more of its roles.
+func newServedSweeperFixtureOnEnv(t *testing.T, env *servedEnv) conformance.SweeperFixture {
+	t.Helper()
 	sweeper, err := env.subject.Sweeper()
 	if err != nil {
 		t.Fatalf("Sweeper(): %v", err)

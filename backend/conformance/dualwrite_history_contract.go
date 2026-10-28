@@ -71,11 +71,13 @@ import (
 //   - PARTICIPATION-GENERATION GATING (design §16.2b). Whether an
 //     update-shaped mutation on a legacy (participation_generation IS NULL)
 //     row is correctly skipped is Phase 2 behavior this bead also owns, but
-//     it depends on migration 0068's participation_generation column, which
-//     does not exist when this contract is first written (0068 lands last in
-//     this bead's build order, by the mayor's explicit sequencing). It gets
-//     its own dedicated cases once 0068 lands, beside this file rather than
-//     inside it.
+//     it depends on migration 0070's participation_generation column, which
+//     does not exist when this contract is first written (0070 lands last in
+//     this bead's build order, by the mayor's explicit sequencing — steps 4-5
+//     of design §16.3 moved to their own migration slot when 0068 shipped as
+//     attribution_status-only, see that migration's header). It gets its own
+//     dedicated cases once 0070 lands, beside this file rather than inside
+//     it.
 //   - CONCURRENT WRITERS. Every case here is one writer, one issue, one
 //     mutation at a time — the same restriction journal_contract.go states
 //     for the same reason: a single-threaded case cannot exercise what only
@@ -88,8 +90,11 @@ import (
 //     built by this phase — so there is nothing yet for a case to run
 //     against. FR-4 has no dedicated case here for that reason, not because
 //     it was missed.
-//   - FR-8 (`wisps.current_revision`/`wisps.participation_generation` are
-//     never read or written by this phase). None of this fixture's five
+//   - FR-8 (`wisps.current_revision` is never read or written by this
+//     phase, and `wisps.participation_generation` only carries a demoted
+//     row's participation to its move back out, which
+//     dualwrite_participation_generation_contract.go's round-trip cases
+//     pin). None of this fixture's five
 //     closures can express it: Mutate's front door is CreateIssue against
 //     the issues table, so this fixture has no wisp-routed id to check in
 //     the first place. FR-8 is a routing exclusion, not a property of a

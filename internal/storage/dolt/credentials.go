@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -614,14 +615,36 @@ func withEnvCredentials(creds *remoteCredentials, fn func() error) error {
 	return withRemoteOperationEnv(creds, false, fn)
 }
 
+// isMissingFederationPeer reports whether err means no federation_peers row
+// exists for the name (credential-free remote). Other errors remain fatal.
+func isMissingFederationPeer(err error) bool {
+	return err != nil && errors.Is(err, storage.ErrNotFound)
+}
+
 // withPeerCredentials looks up credentials for a federation peer and passes
 // them to fn. The callback receives the credentials and is responsible for
 // applying them appropriately: CLI operations use creds.applyToCmd for
 // subprocess isolation; SQL operations use withEnvCredentials for mutex-protected
 // process env access.
+//
+// A missing federation_peers row (storage.ErrNotFound) is treated as empty
+// credentials, not a hard failure. Credential-free Dolt remotes (add-peer
+// without --user, or bootstrap via sync.remote) never create a peer row, but
+// still need status/fetch/pull/push via normal Dolt credential discovery
+// (GH#4837). Malformed, decryption, and database errors remain fatal.
+//
+// An unknown peer name (a mistyped --peer) is therefore passed through too:
+// without a row it looks the same as a credential-free remote, so Dolt rejects
+// it with its own remote error. A name check added in front of this must
+// consult PersistedRemoteInfos as well as ListRemotes, or it rejects a remote
+// persisted on disk that a cold sql-server does not list yet (GH#2118).
 func (s *DoltStore) withPeerCredentials(ctx context.Context, peerName string, fn func(creds *remoteCredentials) error) error {
 	peer, err := s.GetFederationPeer(ctx, peerName)
 	if err != nil {
+		if isMissingFederationPeer(err) {
+			// No peer-specific SQL credentials stored — proceed without them.
+			return fn(nil)
+		}
 		return fmt.Errorf("failed to get peer credentials: %w", err)
 	}
 
@@ -854,4 +877,41 @@ func (s *DoltStore) prepareCLIRouteForCloudAuth(ctx context.Context, remote stri
 
 func (s *DoltStore) shouldUseCLIForCloudAuthWithError(ctx context.Context, remote string) (bool, error) {
 	return s.prepareCLIRouteForCloudAuth(ctx, remote)
+}
+
+// serverEnvCredentialsNote completes the error of a push that failed on the
+// SQL route when this bd holds the remote's credentials. In server mode CALL
+// DOLT_PUSH runs in the Dolt server's process, which takes DOLT_REMOTE_PASSWORD
+// (for the remote user bd passes) and the cloud-storage variables of the
+// remote URL's scheme (cloudAuthSchemeMap) from its own environment: bd sets
+// them only in its own process (withRemoteOperationEnv), which a server bd
+// does not run never sees. The note names the ones bd holds, so a push that a
+// server without them refuses says where they must be set. It is empty when
+// bd holds none, and in embedded mode, where the push runs in this process.
+func (s *DoltStore) serverEnvCredentialsNote(ctx context.Context, remote string, creds *remoteCredentials) string {
+	if !s.serverMode {
+		return ""
+	}
+	var held []string
+	if creds != nil && creds.username != "" && creds.password != "" {
+		held = append(held, "DOLT_REMOTE_PASSWORD")
+	}
+	if remotes, err := s.ListRemotes(ctx); err == nil {
+		for _, r := range remotes {
+			if r.Name != remote {
+				continue
+			}
+			for _, prefix := range envPrefixesForRemoteURL(r.URL) {
+				// DOLT_REMOTE_ is the credential pair itself, named above
+				// when the push passes its user.
+				if prefix != "DOLT_REMOTE_" && execenv.ContainsKeyWithPrefix(os.Environ(), prefix) {
+					held = append(held, prefix+"*")
+				}
+			}
+		}
+	}
+	if len(held) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("; CALL DOLT_PUSH runs in the Dolt server's process, which takes %s from its own environment, not from bd's", strings.Join(held, " and "))
 }

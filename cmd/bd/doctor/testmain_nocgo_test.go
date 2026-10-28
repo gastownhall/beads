@@ -19,6 +19,14 @@ func TestMain(m *testing.M) {
 }
 
 func testMainInner(m *testing.M) int {
+	// A GIT_DIR/GIT_WORK_TREE leaked in from the invoking shell or a git hook
+	// would route the fixture `git init`/`git config` writes in this suite
+	// into that repository: the host checkout in the r880 clobber (wy-qlvlmf).
+	if err := testutil.UnsetGitRepoLocationEnv(); err != nil {
+		fmt.Fprintf(os.Stderr, "FATAL: %v\n", err)
+		return 1
+	}
+
 	// Clear out the roots of earlier runs of this suite whose process is
 	// gone, before claiming one of our own. A `go test -timeout` panic skips
 	// every defer here AND the post-run sweep, so the servers such a run

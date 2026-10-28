@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/beads/beadserrors"
 	"github.com/steveyegge/beads/internal/types"
@@ -290,6 +291,59 @@ func (e *CloseNotAssigneeError) Unwrap() error { return ErrNotOwner }
 // ErrAlreadyExists is returned when a create operation is given an ID that is
 // already occupied. The issue and wisp tables share one ID space.
 var ErrAlreadyExists = errors.New("issue already exists")
+
+// IdempotencyExpiredCode is the stable code a refused create of a retired id
+// carries off the process: the HTTP problem `code` (with status 410) and the
+// `code` member of the CLI's --json error envelope. It is declared once, here,
+// so the server, the client and the CLI cannot spell it three ways.
+//
+// A DELIBERATE DEPARTURE FROM BDP'S CODE FOR THIS SHAPE. Under BDP a
+// client-supplied identity of a deleted resource answers `identity-taken`
+// (409, retry never), and `idempotency-expired` (410) belongs to an expired
+// idempotency KEY. bd answers the latter because the ids it retires are keys:
+// the caller that pins an id names an operation that must run at most once,
+// and the tombstone is the expired key's permanent record, so "the create that
+// used this key already happened" is the answer that sends the caller the
+// right way (to its archive of outcomes, never to a new id). Both codes are
+// retry-never. bd also keeps no request fingerprint, so it never answers
+// BDP's `idempotency-conflict` either; a caller tells key reuse apart itself.
+const IdempotencyExpiredCode = "idempotency_expired"
+
+// ErrIdempotencyExpired is the sentinel every *IdempotencyExpiredError
+// matches. It is its own sentinel rather than ErrAlreadyExists because the two
+// answers send a caller in opposite directions: an occupied id still holds the
+// row the caller can read, while a retired id names a row a retention sweep
+// deleted after the create that used it had already happened. Retrying either
+// never succeeds; only the first is worth a read.
+var ErrIdempotencyExpired = errors.New("idempotency expired")
+
+// IdempotencyExpiredError refuses a create whose explicit id a RETAINING
+// retention sweep retired (SweepRequest.RetainIDs). The sweep deleted the row
+// and kept a permanent tombstone of its id, so the id behaves as an
+// idempotency key whose outcome has expired: the create that used it already
+// ran, and a create naming it never runs again. Nothing is written by the
+// refused request.
+//
+// It is never ErrAlreadyExists and never ErrValidation; it matches
+// ErrIdempotencyExpired.
+type IdempotencyExpiredError struct {
+	// ID is the retired id the refused create named.
+	ID string
+	// ClosedAt is when the swept row had closed, as its tombstone recorded it.
+	// It is the zero time when the reporting surface did not carry it.
+	ClosedAt time.Time
+}
+
+func (e *IdempotencyExpiredError) Error() string {
+	closed := ""
+	if !e.ClosedAt.IsZero() {
+		closed = " (closed " + e.ClosedAt.UTC().Format(time.RFC3339) + ")"
+	}
+	return fmt.Sprintf("idempotency expired: %s was retired by a retention sweep%s; a create of this id never runs again", e.ID, closed)
+}
+
+// Unwrap makes IdempotencyExpiredError match ErrIdempotencyExpired.
+func (e *IdempotencyExpiredError) Unwrap() error { return ErrIdempotencyExpired }
 
 // ErrAlreadyIdentified is returned by Bootstrapper.Bootstrap when the substrate
 // already carries a workspace identity. It is its own sentinel rather than

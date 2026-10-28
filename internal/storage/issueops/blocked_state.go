@@ -167,15 +167,40 @@ func RecomputeIsBlockedInTx(ctx context.Context, tx DBTX, issueIDs, wispIDs []st
 func RecomputeIsBlockedInTxWithResult(
 	ctx context.Context, tx DBTX, issueIDs, wispIDs []string,
 ) (RecomputeIsBlockedResult, error) {
-	return recomputeIsBlockedInTxWithResult(ctx, tx, issueIDs, wispIDs, false)
+	return recomputeIsBlockedInTxWithResult(ctx, tx, issueIDs, wispIDs, recomputeOptions{})
+}
+
+// recomputeOptions is what a caller of recomputeIsBlockedInTxWithResult
+// knows about its ids that lets planRecomputeInTx keep them off the union
+// statements.
+type recomputeOptions struct {
+	// splitEdgeless asks for the no-edge probe on every chunk: a create
+	// passes it, because its ids are mostly fresh rows without edges; every
+	// other caller leaves it to the chunk size.
+	splitEdgeless bool
+	// settledIssueIDs and settledWispIDs are rows of the issues and wisps
+	// tables the caller has just set closed or pinned in this transaction.
+	// Neither template can mark such a row and the unmark template clears it
+	// unconditionally, so it is settled without the union statements or a
+	// probe (see planRecomputeInTx). Its dependents are not settled by this:
+	// they stay in the recompute's ids and are recomputed in full.
+	settledIssueIDs, settledWispIDs []string
+}
+
+// settledRowRecompute is the recomputeOptions of a status change that just
+// closed or pinned row id of the issues table, or of the wisps table when
+// isWisp.
+func settledRowRecompute(id string, isWisp bool) recomputeOptions {
+	if isWisp {
+		return recomputeOptions{settledWispIDs: []string{id}}
+	}
+	return recomputeOptions{settledIssueIDs: []string{id}}
 }
 
 // recomputeIsBlockedInTxWithResult is RecomputeIsBlockedInTxWithResult with
-// the caller's say on the no-edge shortcut (planRecomputeInTx): a create
-// passes splitEdgeless, because its ids are mostly fresh rows without edges;
-// every other caller leaves it to the chunk size.
+// the caller's say on the shortcuts planRecomputeInTx takes (opts).
 func recomputeIsBlockedInTxWithResult(
-	ctx context.Context, tx DBTX, issueIDs, wispIDs []string, splitEdgeless bool,
+	ctx context.Context, tx DBTX, issueIDs, wispIDs []string, opts recomputeOptions,
 ) (RecomputeIsBlockedResult, error) {
 	var result RecomputeIsBlockedResult
 	if len(issueIDs) == 0 && len(wispIDs) == 0 {
@@ -185,11 +210,11 @@ func recomputeIsBlockedInTxWithResult(
 	if err != nil {
 		return result, err
 	}
-	issuePlan, err := planRecomputeInTx(ctx, tx, issuesBlockedSpec, issueIDs, splitEdgeless)
+	issuePlan, err := planRecomputeInTx(ctx, tx, issuesBlockedSpec, issueIDs, opts.splitEdgeless, opts.settledIssueIDs)
 	if err != nil {
 		return result, err
 	}
-	wispPlan, err := planRecomputeInTx(ctx, tx, wispsBlockedSpec, wispIDs, splitEdgeless)
+	wispPlan, err := planRecomputeInTx(ctx, tx, wispsBlockedSpec, wispIDs, opts.splitEdgeless, opts.settledWispIDs)
 	if err != nil {
 		return result, err
 	}
@@ -479,9 +504,11 @@ func runMarkUnmarkBatchedInTx(ctx context.Context, tx DBTX, spec blockedTableSpe
 const recomputeSplitMinChunk = 32
 
 // recomputeChunk is one queryBatchSize chunk of a recompute's ids, split by
-// whether each id has a dependency row of its own (see planRecomputeInTx).
+// whether each id can be in the should-be-blocked union at all (see
+// planRecomputeInTx). settled holds the ids that cannot: edgeless rows and
+// rows the caller has just closed or pinned.
 type recomputeChunk struct {
-	withEdges, edgeless []string
+	withEdges, settled []string
 }
 
 // recomputePlan is a recompute's chunks for one table, split once per
@@ -507,23 +534,70 @@ type recomputePlan struct {
 // The split costs one probe per chunk, which only pays when the chunk holds
 // edgeless ids worth skipping. So it runs when the caller asks (splitEdgeless:
 // the create paths) or when the chunk is large; the single-issue recomputes of
-// close, reopen, update and dependency edits keep exactly the statements they
-// ran before the shortcut existed.
-func planRecomputeInTx(ctx context.Context, tx DBTX, spec blockedTableSpec, ids []string, splitEdgeless bool) (recomputePlan, error) {
+// close, reopen, update and dependency edits do not probe.
+//
+// A row the caller has just closed or pinned (settled) is in the same position
+// whatever its edges: the mark template requires status <> 'closed' AND
+// status <> 'pinned' of the row it marks, and the unmark template clears any
+// closed or pinned row, so for it too mark selects nothing and unmark is
+// "is_blocked = 1 -> 0". The caller knows its status from the write it just
+// ran, so a settled id needs no probe. That is what keeps a close or a
+// status change to closed/pinned off the union statements for the row itself;
+// the rows it unblocks are not settled and keep the full recompute.
+func planRecomputeInTx(ctx context.Context, tx DBTX, spec blockedTableSpec, ids []string, splitEdgeless bool, settled []string) (recomputePlan, error) {
 	plan := recomputePlan{spec: spec}
+	fastPaths := !createFastPathsDisabled.Load()
+	var settledSet map[string]bool
+	if fastPaths && len(settled) > 0 {
+		settledSet = make(map[string]bool, len(settled))
+		for _, id := range settled {
+			settledSet[id] = true
+		}
+	}
 	for start := 0; start < len(ids); start += queryBatchSize {
 		end := min(start+queryBatchSize, len(ids))
-		chunk := recomputeChunk{withEdges: ids[start:end]}
-		if !createFastPathsDisabled.Load() && (splitEdgeless || end-start >= recomputeSplitMinChunk) {
+		chunkIDs := ids[start:end]
+		candidates := chunkIDs
+		if settledSet != nil {
+			candidates = make([]string, 0, len(chunkIDs))
+			for _, id := range chunkIDs {
+				if !settledSet[id] {
+					candidates = append(candidates, id)
+				}
+			}
+		}
+		withEdges := candidates
+		if fastPaths && len(candidates) > 0 && (splitEdgeless || end-start >= recomputeSplitMinChunk) {
 			var err error
-			chunk.withEdges, chunk.edgeless, err = splitByOwnDependencyRowsInTx(ctx, tx, spec.depTable, ids[start:end])
+			withEdges, _, err = splitByOwnDependencyRowsInTx(ctx, tx, spec.depTable, candidates)
 			if err != nil {
 				return plan, err
 			}
 		}
+		chunk := recomputeChunk{withEdges: withEdges}
+		if len(withEdges) < len(chunkIDs) {
+			chunk.settled = settledInChunkOrder(chunkIDs, withEdges)
+		}
 		plan.chunks = append(plan.chunks, chunk)
 	}
 	return plan, nil
+}
+
+// settledInChunkOrder returns the ids of chunk that are not in withEdges, in
+// chunk order, so the plain unmark binds them in the order the recompute was
+// asked for whichever shortcut settled them.
+func settledInChunkOrder(chunk, withEdges []string) []string {
+	hasEdges := make(map[string]bool, len(withEdges))
+	for _, id := range withEdges {
+		hasEdges[id] = true
+	}
+	settled := make([]string, 0, len(chunk)-len(withEdges))
+	for _, id := range chunk {
+		if !hasEdges[id] {
+			settled = append(settled, id)
+		}
+	}
+	return settled
 }
 
 // runRecomputePassInTx is one fixpoint pass over the plan,
@@ -531,11 +605,18 @@ func planRecomputeInTx(ctx context.Context, tx DBTX, spec blockedTableSpec, ids 
 // plan's full ids. Per chunk: the mark and unmark templates run over the ids
 // with edges — the union, scoped to them, holds exactly what it held scoped to
 // the whole chunk, and so does the batch's exogeneity read (an edgeless id
-// names no parent) — and then, on the first pass only, a plain unmark clears
-// the edgeless ids. It runs after both templates so their unions see the
-// edgeless rows' pre-pass is_blocked, as they did when those rows were cleared
-// by the chunk's own unmark statement; on later passes it would match no row
-// (nothing marks an edgeless id), so it is skipped.
+// names no parent, and exogeneity is a property of the parent, so a settled
+// closed row's parents are still read for any sibling that names them) — and
+// then, on the first pass only, a plain unmark clears the settled ids. It runs
+// after both templates so their unions see the settled rows' pre-pass
+// is_blocked, as they did when those rows were cleared by the chunk's own
+// unmark statement; on later passes it would match no row (nothing marks a
+// settled id), so it is skipped. Since the parent-child legs stopped reading
+// a closed or pinned parent's flag (gastownhall/beads#7626), the order shows
+// only through an edgeless settled row that is neither closed nor pinned,
+// carries a stale 1 and has a child in the same chunk. createbatchequiv's
+// settled scenario drives no such row, so none of its steps pins the order
+// any more.
 //
 // It is a function rather than a method on recomputePlan because the
 // structural write guards follow bare-identifier calls only: as a method, the
@@ -552,10 +633,10 @@ func runRecomputePassInTx(ctx context.Context, tx DBTX, p recomputePlan, firstPa
 				return changed, err
 			}
 		}
-		if !firstPass || len(chunk.edgeless) == 0 {
+		if !firstPass || len(chunk.settled) == 0 {
 			continue
 		}
-		placeholders, args := buildSQLInClause(chunk.edgeless)
+		placeholders, args := buildSQLInClause(chunk.settled)
 		//nolint:gosec // G201: table is one of two constants; only placeholders are formatted in.
 		res, err := tx.ExecContext(ctx, fmt.Sprintf(`
 			UPDATE %[1]s t SET t.is_blocked = 0, t.updated_at = t.updated_at

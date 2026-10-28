@@ -26,6 +26,7 @@ func (s *Store) BatchCloser() (issueops.BatchCloser, error) {
 type batchCloser struct{ policy *Store }
 
 func (c *batchCloser) CloseBatch(ctx context.Context, request issueops.CloseBatchRequest) (issueops.CloseBatchResult, error) {
+	ctx = storage.WithLivePolicyProbe(ctx)
 	if err := storageissueops.ValidateCloseBatchRequest(request); err != nil {
 		return issueops.CloseBatchResult{}, err
 	}

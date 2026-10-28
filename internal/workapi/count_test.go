@@ -16,57 +16,76 @@ import (
 // dimensions are the wisps merge (SkipWisps), template exclusion (IsTemplate),
 // the default gate exclusion (ExcludeTypes), and infra-type routing to the
 // ephemeral tier (Ephemeral).
+//
+// Each type runs twice, the second time with --include-ephemeral on both
+// sides. That flag lifts the infra-type routing on the list side (an
+// infra-typed row can live in the durable table too, and the flag promises
+// the durable answer plus the plane), so a count that kept routing would read
+// only the wisp tier while the listing it mirrors reads both: the `message`
+// arm is the one that fails if the two builders stop moving in lockstep.
 func TestBuildCountFilterIncludeInfraMirrorsListFilter(t *testing.T) {
 	cfg := ListConfig{}
-	for _, issueType := range []string{"", "task", "gate", "message"} {
-		name := issueType
-		if name == "" {
-			name = "none"
+	for _, includeEphemeral := range []bool{false, true} {
+		for _, issueType := range []string{"", "task", "gate", "message"} {
+			name := issueType
+			if name == "" {
+				name = "none"
+			}
+			if includeEphemeral {
+				name += "_include_ephemeral"
+			}
+			t.Run("type_"+name, func(t *testing.T) {
+				assertCountMirrorsListIncludeInfra(t, cfg, issueType, includeEphemeral)
+			})
 		}
-		t.Run("type_"+name, func(t *testing.T) {
-			want, err := BuildListFilter(issueops.ListRequest{
-				AllFlag: true, IncludeInfra: true, IssueType: issueType,
-			}, cfg)
-			if err != nil {
-				t.Fatalf("BuildListFilter(%q): %v", issueType, err)
-			}
-			got, err := BuildCountFilter(issueops.CountRequest{
-				IncludeInfra: true, IssueType: issueType,
-			}, cfg)
-			if err != nil {
-				t.Fatalf("BuildCountFilter(%q): %v", issueType, err)
-			}
+	}
+}
 
-			if got.SkipWisps != want.SkipWisps {
-				t.Errorf("SkipWisps = %v, list --include-infra --all uses %v", got.SkipWisps, want.SkipWisps)
-			}
-			if !reflect.DeepEqual(got.IsTemplate, want.IsTemplate) {
-				t.Errorf("IsTemplate = %v, list --include-infra --all uses %v", countPtrStr(got.IsTemplate), countPtrStr(want.IsTemplate))
-			}
-			if !reflect.DeepEqual(got.ExcludeTypes, want.ExcludeTypes) {
-				t.Errorf("ExcludeTypes = %v, list --include-infra --all uses %v", got.ExcludeTypes, want.ExcludeTypes)
-			}
-			if !reflect.DeepEqual(got.Ephemeral, want.Ephemeral) {
-				t.Errorf("Ephemeral = %v, list --include-infra --all uses %v", countPtrStr(got.Ephemeral), countPtrStr(want.Ephemeral))
-			}
-			if !reflect.DeepEqual(got.IssueType, want.IssueType) {
-				t.Errorf("IssueType = %v, list --include-infra --all uses %v", got.IssueType, want.IssueType)
-			}
-			// A count defaults to all statuses and all pinned states, which is
-			// exactly what list's --all flag selects.
-			if !reflect.DeepEqual(got.Status, want.Status) {
-				t.Errorf("Status = %v, list --include-infra --all uses %v", got.Status, want.Status)
-			}
-			if !reflect.DeepEqual(got.Statuses, want.Statuses) {
-				t.Errorf("Statuses = %v, list --include-infra --all uses %v", got.Statuses, want.Statuses)
-			}
-			if !reflect.DeepEqual(got.ExcludeStatus, want.ExcludeStatus) {
-				t.Errorf("ExcludeStatus = %v, list --include-infra --all uses %v", got.ExcludeStatus, want.ExcludeStatus)
-			}
-			if !reflect.DeepEqual(got.Pinned, want.Pinned) {
-				t.Errorf("Pinned = %v, list --include-infra --all uses %v", countPtrStr(got.Pinned), countPtrStr(want.Pinned))
-			}
-		})
+// assertCountMirrorsListIncludeInfra compares one `bd count --include-infra`
+// filter against the `bd list --include-infra --all` filter it mirrors.
+func assertCountMirrorsListIncludeInfra(t *testing.T, cfg ListConfig, issueType string, includeEphemeral bool) {
+	t.Helper()
+	want, err := BuildListFilter(issueops.ListRequest{
+		AllFlag: true, IncludeInfra: true, IssueType: issueType, IncludeEphemeral: includeEphemeral,
+	}, cfg)
+	if err != nil {
+		t.Fatalf("BuildListFilter(%q): %v", issueType, err)
+	}
+	got, err := BuildCountFilter(issueops.CountRequest{
+		IncludeInfra: true, IssueType: issueType, IncludeEphemeral: includeEphemeral,
+	}, cfg)
+	if err != nil {
+		t.Fatalf("BuildCountFilter(%q): %v", issueType, err)
+	}
+
+	if got.SkipWisps != want.SkipWisps {
+		t.Errorf("SkipWisps = %v, list --include-infra --all uses %v", got.SkipWisps, want.SkipWisps)
+	}
+	if !reflect.DeepEqual(got.IsTemplate, want.IsTemplate) {
+		t.Errorf("IsTemplate = %v, list --include-infra --all uses %v", countPtrStr(got.IsTemplate), countPtrStr(want.IsTemplate))
+	}
+	if !reflect.DeepEqual(got.ExcludeTypes, want.ExcludeTypes) {
+		t.Errorf("ExcludeTypes = %v, list --include-infra --all uses %v", got.ExcludeTypes, want.ExcludeTypes)
+	}
+	if !reflect.DeepEqual(got.Ephemeral, want.Ephemeral) {
+		t.Errorf("Ephemeral = %v, list --include-infra --all uses %v", countPtrStr(got.Ephemeral), countPtrStr(want.Ephemeral))
+	}
+	if !reflect.DeepEqual(got.IssueType, want.IssueType) {
+		t.Errorf("IssueType = %v, list --include-infra --all uses %v", got.IssueType, want.IssueType)
+	}
+	// A count defaults to all statuses and all pinned states, which is
+	// exactly what list's --all flag selects.
+	if !reflect.DeepEqual(got.Status, want.Status) {
+		t.Errorf("Status = %v, list --include-infra --all uses %v", got.Status, want.Status)
+	}
+	if !reflect.DeepEqual(got.Statuses, want.Statuses) {
+		t.Errorf("Statuses = %v, list --include-infra --all uses %v", got.Statuses, want.Statuses)
+	}
+	if !reflect.DeepEqual(got.ExcludeStatus, want.ExcludeStatus) {
+		t.Errorf("ExcludeStatus = %v, list --include-infra --all uses %v", got.ExcludeStatus, want.ExcludeStatus)
+	}
+	if !reflect.DeepEqual(got.Pinned, want.Pinned) {
+		t.Errorf("Pinned = %v, list --include-infra --all uses %v", countPtrStr(got.Pinned), countPtrStr(want.Pinned))
 	}
 }
 

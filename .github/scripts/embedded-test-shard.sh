@@ -3,7 +3,7 @@
 #
 # Usage: embedded-test-shard.sh <shard_number> <total_shards>
 #
-# Discovers all TestEmbedded* top-level functions from cmd/bd/*_embedded_test.go.
+# Discovers all TestEmbedded* top-level functions in cmd/bd/*_test.go.
 # Tests listed in embedded-cmd-test-shards.txt for the requested shard count use
 # that committed assignment; newly-added tests fall back to hash(name) % total.
 # Runs the matching subset using the pre-built test binary at
@@ -33,8 +33,12 @@ fi
 SHARD_INDEX=$(( SHARD_NUMBER - 1 ))
 MANIFEST="${BEADS_TEST_SHARD_MANIFEST:-.github/scripts/embedded-cmd-test-shards.txt}"
 
-# Discover all top-level TestEmbedded* functions.
-ALL_TESTS=$(grep -rh '^func TestEmbedded' cmd/bd/*_embedded_test.go \
+# Discover all top-level TestEmbedded* functions across every cmd/bd test
+# file, by name rather than by file glob (as proxied-test-shard.sh does): a
+# test gated on BEADS_TEST_EMBEDDED_DOLT runs in this lane or in none, wherever
+# it lives. scripts/embedded_lane_coverage_test.go fails on a gated test this
+# selection misses.
+ALL_TESTS=$(grep -rh '^func TestEmbedded' cmd/bd/*_test.go \
   | sed 's/func \(TestEmbedded[A-Za-z0-9_]*\).*/\1/' \
   | sort -u)
 

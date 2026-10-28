@@ -541,3 +541,37 @@ func TestReplaceSectionWithOptsDetectsRemoteChange(t *testing.T) {
 		t.Error("replaced content should not contain 'bd dolt push' with HasRemote=false")
 	}
 }
+
+// A user-level section loads in every repository, so it must not say the
+// current one uses bd, and its task-tracking rules hold only in repositories
+// that do. The wording is matched against the templates' text, so a template
+// edit that the rewording no longer finds fails here.
+func TestRenderSectionUserLevelAppliesOnlyInBeadsRepositories(t *testing.T) {
+	for _, profile := range []Profile{ProfileMinimal, ProfileFull} {
+		section := RenderSectionWithOpts(profile, UserLevelRenderOpts())
+		if strings.Contains(section, "This project uses") {
+			t.Errorf("%s user-level section says the current project uses bd:\n%s", profile, section)
+		}
+		if n := strings.Count(section, userLevelScope); n != 1 {
+			t.Errorf("%s user-level section states its scope %d times, want 1", profile, n)
+		}
+	}
+	rules := map[Profile][]string{
+		ProfileMinimal: {
+			"- In a beads repository, use `bd` for ALL task tracking — do NOT use TodoWrite",
+			"- In a beads repository, use `bd remember` for durable project facts",
+		},
+		ProfileFull: {
+			"**IMPORTANT**: In a beads repository, use **bd (beads)** for ALL issue tracking.",
+			"- ✅ In a beads repository, use bd for ALL task tracking",
+		},
+	}
+	for profile, want := range rules {
+		section := RenderSectionWithOpts(profile, UserLevelRenderOpts())
+		for _, rule := range want {
+			if !strings.Contains(section, rule) {
+				t.Errorf("%s user-level section lacks the scoped rule %q", profile, rule)
+			}
+		}
+	}
+}

@@ -1,6 +1,8 @@
 package scripts_test
 
 import (
+	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -37,7 +39,7 @@ func TestProxiedGatedTestsRunInTheProxiedLane(t *testing.T) {
 	requireAutofixBash(t)
 	root := sourceRepoRoot(t)
 
-	gated, err := proxiedGatedTests(filepath.Join(root, "cmd/bd"))
+	gated, err := gatedTests(filepath.Join(root, "cmd/bd"), proxiedServerEnv)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,7 +47,10 @@ func TestProxiedGatedTestsRunInTheProxiedLane(t *testing.T) {
 		t.Fatalf("found only %d cmd/bd tests gated on %s; did the gate helpers change shape?", len(gated), proxiedServerEnv)
 	}
 
-	listed := proxiedLaneListedTests(t, root, bazelProxiedShardCount(t))
+	listed, err := laneListedTests(root, ".github/scripts/proxied-test-shard.sh", bazelProxiedShardCount(t))
+	if err != nil {
+		t.Fatal(err)
+	}
 	var missing []string
 	for _, name := range gated {
 		if !listed[name] {
@@ -108,22 +113,54 @@ func TestProxiedGatedTestsDetector(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "fixture_test.go"), []byte(src), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	got, err := proxiedGatedTests(dir)
+	got, err := gatedTests(dir, proxiedServerEnv)
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := []string{"TestDirect", "TestInSubtest", "TestInline", "TestMethod", "TestTransitive"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Errorf("proxiedGatedTests = %v, want %v", got, want)
+		t.Errorf("gatedTests = %v, want %v", got, want)
 	}
 }
 
-// proxiedGatedTests returns, sorted, the top-level `func TestX(t *testing.T)`
-// declarations in dir's _test.go files that reach a proxied-only gate through
-// calls (functions and methods alike, by name, closures included). Matching
+// TestLaneListedTestsReportsShardScriptStderr pins that a shard script's
+// refusal reaches the lane guards' failure. The scripts explain every refusal
+// (a manifest entry naming no test, an invalid shard) only on stderr and exit
+// 1, so a failure that reported the exit status alone would not say what to
+// fix.
+func TestLaneListedTestsReportsShardScriptStderr(t *testing.T) {
+	requireHostTool(t, "bash")
+	root := t.TempDir()
+	const refusal = "Shard manifest entry does not match a discovered test: TestRenamedAway"
+	script := "echo \"Shard $1/$2: running 1 test(s)\"\n" +
+		"echo '  TestListed'\n" +
+		"if [ \"$1\" = 2 ]; then echo '" + refusal + "' >&2; exit 1; fi\n"
+	if err := os.WriteFile(filepath.Join(root, "shard.sh"), []byte(script), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := laneListedTests(root, "shard.sh", 2)
+	if err == nil {
+		t.Fatal("laneListedTests: want an error for the shard the script refused, got nil")
+	}
+	// The shard and the refusal are checked apart: bash can write to stderr
+	// before the script runs (a setlocale warning for an LC_ALL naming an
+	// uninstalled locale, or output from a BASH_ENV file), and that lands
+	// between the exit status and the refusal. The refusal is only on the
+	// script's stderr, never in the stdout the error also carries.
+	if !strings.Contains(err.Error(), "shard.sh 2 2: exit status 1") {
+		t.Errorf("laneListedTests error does not name the refusing shard and its exit status:\n%v", err)
+	}
+	if !strings.Contains(err.Error(), refusal) {
+		t.Errorf("laneListedTests error does not carry the script's stderr %q:\n%v", refusal, err)
+	}
+}
+
+// gatedTests returns, sorted, the top-level `func TestX(t *testing.T)`
+// declarations in dir's _test.go files that reach an env-only gate (see
+// isOnlyGate) through calls (functions and methods alike, by name, closures included). Matching
 // callees by bare name over-approximates, which errs toward demanding the
 // lane run a test rather than missing one.
-func proxiedGatedTests(dir string) ([]string, error) {
+func gatedTests(dir, env string) ([]string, error) {
 	files, err := filepath.Glob(filepath.Join(dir, "*_test.go"))
 	if err != nil {
 		return nil, err
@@ -152,7 +189,7 @@ func proxiedGatedTests(dir string) ([]string, error) {
 			ast.Inspect(fn.Body, func(n ast.Node) bool {
 				switch n := n.(type) {
 				case *ast.IfStmt:
-					if isProxiedOnlyGate(n.Cond) {
+					if isOnlyGate(n.Cond, env) {
 						gated[name] = true
 					}
 				case *ast.CallExpr:
@@ -192,9 +229,9 @@ func proxiedGatedTests(dir string) ([]string, error) {
 	return out, nil
 }
 
-// isProxiedOnlyGate reports whether cond is exactly
-// os.Getenv("BEADS_TEST_PROXIED_SERVER") != "1".
-func isProxiedOnlyGate(cond ast.Expr) bool {
+// isOnlyGate reports whether cond is exactly os.Getenv(env) != "1", where env
+// is a lane's variable (BEADS_TEST_PROXIED_SERVER, BEADS_TEST_EMBEDDED_DOLT).
+func isOnlyGate(cond ast.Expr, env string) bool {
 	be, ok := cond.(*ast.BinaryExpr)
 	if !ok || be.Op != token.NEQ {
 		return false
@@ -211,20 +248,21 @@ func isProxiedOnlyGate(cond ast.Expr) bool {
 		return false
 	}
 	arg, ok := call.Args[0].(*ast.BasicLit)
-	return ok && arg.Value == strconv.Quote(proxiedServerEnv)
+	return ok && arg.Value == strconv.Quote(env)
 }
 
-// proxiedLaneListedTests runs proxied-test-shard.sh list-only for every shard
-// of the Bazel lane's split and returns every test name any shard selects.
-func proxiedLaneListedTests(t *testing.T, root string, shards int) map[string]bool {
-	t.Helper()
+// laneListedTests runs a lane's shard script list-only for every shard of the
+// Bazel lane's split and returns every test name any shard selects. A shard
+// the script refuses is reported with what the script wrote to stderr, where
+// the shard scripts explain every refusal.
+func laneListedTests(root, script string, shards int) (map[string]bool, error) {
 	outs, errs := make([][]byte, shards+1), make([]error, shards+1)
 	var wg sync.WaitGroup
 	for k := 1; k <= shards; k++ {
 		wg.Add(1)
 		go func(k int) {
 			defer wg.Done()
-			cmd := exec.Command("bash", ".github/scripts/proxied-test-shard.sh", strconv.Itoa(k), strconv.Itoa(shards))
+			cmd := exec.Command("bash", script, strconv.Itoa(k), strconv.Itoa(shards))
 			cmd.Dir = root
 			cmd.Env = append(os.Environ(), "BEADS_TEST_SHARD_LIST_ONLY=1")
 			outs[k], errs[k] = cmd.Output()
@@ -233,8 +271,15 @@ func proxiedLaneListedTests(t *testing.T, root string, shards int) map[string]bo
 	wg.Wait()
 	listed := map[string]bool{}
 	for k := 1; k <= shards; k++ {
-		if errs[k] != nil {
-			t.Fatalf("proxied-test-shard.sh %d %d: %v\n%s", k, shards, errs[k], outs[k])
+		if err := errs[k]; err != nil {
+			msg := err.Error()
+			var exitErr *exec.ExitError
+			if errors.As(err, &exitErr) {
+				if stderr := strings.TrimSpace(string(exitErr.Stderr)); stderr != "" {
+					msg += ": " + stderr
+				}
+			}
+			return nil, fmt.Errorf("%s %d %d: %s\n%s", script, k, shards, msg, outs[k])
 		}
 		for _, line := range strings.Split(string(outs[k]), "\n") {
 			name, ok := strings.CutPrefix(line, "  ")
@@ -243,5 +288,5 @@ func proxiedLaneListedTests(t *testing.T, root string, shards int) map[string]bo
 			}
 		}
 	}
-	return listed
+	return listed, nil
 }

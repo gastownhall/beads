@@ -175,9 +175,10 @@ func TestDestructiveFix_AbortsOnProjectIdentityMismatch(t *testing.T) {
 // project_id (pre-project_id projects, shared-server-mode workspaces that
 // never got backfilled, or a user who declined the interactive "Project
 // Identity" fix) must not be permanently locked out of every other
-// doctor fix — the destructive statements still must not run, but the
-// caller gets nil back, not an error, matching the existing "database
-// unreachable" skip convention at each call site.
+// doctor fix — the destructive statements still must not run, and the
+// caller gets a skip (fix.ErrSkipped) back, not a hard error and not nil,
+// so bd doctor --fix reports it as skipped rather than fixed, matching the
+// "database unreachable" skip convention at each call site.
 func TestDestructiveFix_SkipsOnUnverifiableTarget(t *testing.T) {
 	dir := t.TempDir()
 	store, beadsDir, _ := newIdentityTestStore(t, dir, "skp")
@@ -212,8 +213,15 @@ func TestDestructiveFix_SkipsOnUnverifiableTarget(t *testing.T) {
 		t.Fatalf("insert randomly-keyed dependency: %v", err)
 	}
 
-	if err := DependencyKeys(dir, false); err != nil {
-		t.Fatalf("DependencyKeys should skip (nil error) on an unverifiable target, got: %v", err)
+	err = DependencyKeys(dir, false)
+	if !errors.Is(err, ErrSkipped) {
+		t.Fatalf("DependencyKeys should report a skip (ErrSkipped) on an unverifiable target, got: %v", err)
+	}
+	if !errors.Is(err, errUnverifiableFixTarget) {
+		t.Errorf("the skip should carry the unverifiable-target reason, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "backfill project identity") {
+		t.Errorf("the skip reason should say how to backfill project identity, got: %v", err)
 	}
 
 	// Still not touched — the skip must be as safe as the abort.

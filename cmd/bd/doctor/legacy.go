@@ -479,25 +479,47 @@ func CheckFreshClone(repoPath string) DoctorCheck {
 		// No local dolt directory — check server mode (FR-020, FR-021).
 		if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil && cfg.IsDoltServerMode() {
 			host := cfg.GetDoltServerHost()
-			// Use DefaultConfig (not deprecated GetDoltServerPort) to resolve
-			// the correct port for standalone server mode (ephemeral).
-			port := doltserver.DefaultConfig(beadsDir).Port
-			user := cfg.GetDoltServerUser()
-			// Look up the password by the resolved runtime port — cfg.GetDoltServerPassword
+			// The port the store dials (doltserver.ResolveEndpoint, not the
+			// deprecated GetDoltServerPort): ephemeral standalone ports and
+			// the legacy BEADS_DOLT_PORT included, which DefaultConfig leaves
+			// out.
+			ep := doltserver.ResolveEndpoint(beadsDir, cfg)
+			dbName := cfg.GetDoltDatabase()
+			if !ep.Dialable() {
+				// No port resolved and no socket: there is no server to look
+				// in, so none is dialed at 127.0.0.1:0. When the next bd
+				// command starts the workspace's own server, that server
+				// serves the data directory checked above, which does not
+				// exist yet: a fresh clone, as below, and bd bootstrap clones
+				// into that directory. Otherwise every store open refuses,
+				// with the advice this check gives.
+				if !ep.BDStartsServer() {
+					return freshCloneServerUnresolvedResult(dbName, ep)
+				}
+				break
+			}
+			port := ep.Port
+			// Look up the password by that port — cfg.GetDoltServerPassword
 			// uses cfg.GetDoltServerPort() which falls back to the 3307 default when
 			// metadata.json omits the port, causing credentials lookup to miss when
 			// the actual server runs on a different port (e.g. 3306 for
 			// externally-hosted Dolt). That mismatch produced spurious
 			// "Fresh clone detected" warnings (bd-tzo9).
-			password := cfg.GetDoltServerPasswordForPort(port)
-			dbName := cfg.GetDoltDatabase()
-			result := checkFreshCloneDB(host, port, user, password, dbName, cfg.GetDoltServerTLS())
+			password := ep.Password()
+			// The server its repair writes (freshCloneRepairTransport), as
+			// the user its repair presents there (freshCloneRepairUser).
+			socket := freshCloneRepairTransport(ep)
+			user, err := freshCloneRepairUser(ep)
+			if err != nil {
+				return freshCloneServerUnreachableResult(dbName, host, port, socket, err)
+			}
+			result := checkFreshCloneDB(host, port, socket, user, password, dbName, cfg.GetDoltServerTLS())
 			if result.Reachable {
 				syncRemote := config.GetStringFromDir(beadsDir, "sync.remote")
 				if syncRemote == "" {
 					syncRemote = config.GetStringFromDir(beadsDir, "sync.git-remote")
 				}
-				return freshCloneServerResult(result.Exists, dbName, host, port, syncRemote)
+				return freshCloneServerResult(result.Exists, dbName, host, port, socket, syncRemote)
 			}
 			// Server unreachable in server mode — emit a server-aware warning
 			// instead of falling through to the legacy "Fresh clone detected
@@ -505,7 +527,7 @@ func CheckFreshClone(repoPath string) DoctorCheck {
 			// dolt_mode=server (the local DB absence is expected). See GH#35.
 			// FR-030 only requires that we don't panic on unreachable; it does
 			// not mandate the misleading fall-through.
-			return freshCloneServerUnreachableResult(dbName, host, port, result.Err)
+			return freshCloneServerUnreachableResult(dbName, host, port, socket, result.Err)
 		}
 	default:
 		// Non-Dolt (legacy sqlite-era metadata): check configured .db file path.
@@ -541,7 +563,7 @@ func CheckFreshClone(repoPath string) DoctorCheck {
 	return DoctorCheck{
 		Name:    "Fresh Clone",
 		Status:  StatusWarning,
-		Message: fmt.Sprintf("Fresh clone detected (%d issues in %s, no database)", issueCount, jsonlName),
+		Message: fmt.Sprintf("%s (%d issues in %s, no database)", freshCloneDetected, issueCount, jsonlName),
 		Detail: "This appears to be a freshly cloned repository.\n" +
 			"  The JSONL file contains issues but no local database exists.\n" +
 			"  Run 'bd bootstrap' as the safe entry point for recovering existing state.\n" +

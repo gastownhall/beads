@@ -63,6 +63,7 @@ var roleContractCases = []roleContract{
 		RunBatchApplyCloseItemsAnswerToTheCloseGuards,
 		RunBatchApplyRefusesADottedChildGatedOnItsOwnParent,
 		RunBatchApplyAppliesTheDefaultPriority,
+		RunBatchApplyCarriesTheGateMembers,
 	),
 
 	roleCases("BatchCloser", "BatchCloser()", oncePerRole,
@@ -127,6 +128,7 @@ var roleContractCases = []roleContract{
 		RunBlockingAnnotatorRefusesAnEmptyID,
 		RunBlockingAnnotatorLeavesTheRequestAlone,
 		RunBlockingAnnotatorWritesNothing,
+		RunBlockingAnnotatorReportsTheTransitiveBlockedFlag,
 	),
 
 	// One contract file covers both halves of workspace identity: the eight
@@ -361,6 +363,30 @@ var roleContractCases = []roleContract{
 		RunGraphCounterWritesNothing,
 	),
 
+	roleCases("IDRetention", "Sweeper(), Lifecycle(), Reader(), BatchApplier(), BatchCreator(), Importer()", oncePerRole,
+		func(b RoleContractBundle) func(t *testing.T) *IDRetentionFixture { return b.IDRetention },
+		RunIDRetentionAPlainSweepLeavesTheIDReusable,
+		RunIDRetentionARetainingSweepRetiresEverySweptID,
+		RunIDRetentionRefusesARecreateThroughCreate,
+		RunIDRetentionRefusesARecreateOnTheOtherPlane,
+		RunIDRetentionRefusesThroughABatchApply,
+		RunIDRetentionRefusesThroughABatchCreate,
+		RunIDRetentionRefusesThroughTheStorageSeam,
+		RunIDRetentionRefusesARenameOntoARetiredID,
+		RunIDRetentionRefusesInsideATransaction,
+		RunIDRetentionImportSkipsAndReportsARetiredRow,
+		RunIDRetentionNeverMintsARetiredID,
+		RunIDRetentionNeverMintsARetiredChildID,
+		RunIDRetentionDryRunRetiresNothing,
+		RunIDRetentionRetiresOnlyWhatItSwept,
+		RunIDRetentionARetainingDurableSweepRecordsExactlyOneHistoryEntry,
+		RunIDRetentionARacingRecreateNeverLands,
+		RunIDRetentionARacingUpsertNeverResurrects,
+		RunIDRetentionARacingImportNeverResurrects,
+		RunIDRetentionRefusesANoHistoryRecreateThroughEveryDoor,
+		RunIDRetentionAWispsPlaneRetainingSweepRetiresItsRows,
+	),
+
 	// The accessor named here is NOT a storage.DoltStorage one, alone among
 	// these rows: Importer is served only by uow.ImporterSource, so a backend
 	// built on the store interface has nothing to fill this field with and
@@ -422,6 +448,22 @@ var roleContractCases = []roleContract{
 		RunJournalLimitCapsRowsNotHead,
 		RunJournalTruncationIsTypedAndNamesTheWindow,
 		RunJournalHeadSurvivesAFullPrune,
+		// The arrival_seq cases (journal_arrival_contract.go). They rebaseline
+		// like every case here, and one of them prunes; they run before
+		// EveryMutationKindLandsARow, which stays LAST for the reason its own
+		// doc states.
+		RunJournalArrivalStampsAWispCreateWithItsRecordSeq,
+		RunJournalArrivalOrdersABatchByItem,
+		RunJournalArrivalIsOnEveryReadPath,
+		RunJournalArrivalNeverChanges,
+		RunJournalArrivalOnlyWhileJournaling,
+		RunJournalArrivalOnlyOnTheWispPlane,
+		RunJournalArrivalRecoversCreateOrderAfterTruncation,
+		RunJournalArrivalIsNeverReused,
+		RunJournalArrivalIgnoresSuppliedValues,
+		RunJournalArrivalReimportKeepsTheStamp,
+		RunJournalArrivalFirstCreateRecordStampsAnUnstampedRow,
+		RunJournalArrivalRenameKeepsTheStamp,
 		RunJournalEveryMutationKindLandsARow,
 	),
 
@@ -462,6 +504,8 @@ var roleContractCases = []roleContract{
 		RunLifecycleCreateWritesEveryScalarField,
 		RunLifecycleCreateEchoesSubSecondTimestamps,
 		RunLifecycleCreateAppliesTheDefaultPriority,
+		RunLifecycleCreateWritesTheGateMembers,
+		RunLifecycleCreateBoundsTheGateMembers,
 	),
 
 	roleCases("LifecycleUpdate", "IssueLifecycle()", oncePerRole,
@@ -488,9 +532,13 @@ var roleContractCases = []roleContract{
 		RunLifecycleUpdateParentIDReplacesTheParentEdge,
 		RunLifecycleUpdateParentIDReplacesEveryParent,
 		RunLifecycleUpdatePersistentPreservesUnversionedClass,
+		RunLifecycleUpdateWispModesRefuseAnUnversionedRow,
+		RunLifecycleUpdatePersistentPromotesAWisp,
 		RunLifecycleUpdateProvenanceLabelsHistory,
 		RunLifecycleUpdateRefusesATemplate,
 		RunLifecycleUpdateAllowTemplateEditsATemplate,
+		RunLifecycleUpdatePatchesTheGateMembers,
+		RunLifecycleUpdateBoundsTheGateMembers,
 	),
 
 	roleCases("Memories", "Memories()", oncePerRole,
@@ -505,7 +553,7 @@ var roleContractCases = []roleContract{
 		RunMemoriesRememberRefusesAnUnderivableKey,
 		RunMemoriesRecallAnswersTheStoredValue,
 		RunMemoriesRecallReportsAMissAsNotFoundNotAnError,
-		RunMemoriesRecallConflatesStoredEmptyWithAbsent,
+		RunMemoriesEmptyRowIsPresentUntilForgotten,
 		RunMemoriesForgetRemovesExactlyTheNamedRow,
 		RunMemoriesForgetNeverTouchesTheSettingsPlane,
 		RunMemoriesForgetReportsTheForgottenValue,
@@ -568,6 +616,7 @@ var roleContractCases = []roleContract{
 		RunReaderListKeysetPositionResumesTheCreatedDescIDAscOrder,
 		RunReaderListReadyFlagAnswersTheBlockerAwareSet,
 		RunReaderListReadyFlagRefusesAFilterItCannotCarry,
+		RunReaderListQueryMatchesTheTitleOrTheID,
 		RunReaderListEmptyPageIsWellFormed,
 		RunReaderListMaxRowsIsHonored,
 		RunReaderListMaxRowsBoundaryIsLimitPlusOffset,
@@ -595,6 +644,8 @@ var roleContractCases = []roleContract{
 		RunReaderListWispTypeNarrowsTheAdmittedPlaneRatherThanAdmittingIt,
 		RunReaderListBriefDropsTheFreeFormTextAndNothingElse,
 		RunReaderReadyBriefDropsTheFreeFormTextAndNothingElse,
+		RunReaderListTimeBoundsAreStrictAndWholeSecond,
+		RunReaderListFilterFamiliesNarrowToTheirRows,
 	),
 
 	roleCases("ReadyClaimer", "ReadyClaimer() and IssueReader()", oncePerRole,

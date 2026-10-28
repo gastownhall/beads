@@ -9,13 +9,13 @@ import (
 	"testing"
 )
 
-// TestWispGCProtectsActiveWisps is the regression test for GH#4394:
+// TestEmbeddedWispGCProtectsActiveWisps is the regression test for GH#4394:
 // `bd mol wisp gc --age` deleted active (blocked/in-progress) molecule
 // steps. is_blocked is derived state and a recompute deliberately does NOT bump
 // updated_at, so a step that has been waiting (blocked) longer than --age looks
 // stale and was reclaimed mid-execution, self-destructing the molecule. Active
 // wisps must never be reclaimed by age, no matter how old their updated_at is.
-func TestWispGCProtectsActiveWisps(t *testing.T) {
+func TestEmbeddedWispGCProtectsActiveWisps(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}

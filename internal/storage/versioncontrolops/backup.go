@@ -62,6 +62,16 @@ func CurrentCommit(ctx context.Context, db DBConn) (string, error) {
 	return hash, nil
 }
 
+// HeadHashes returns the hash of the HEAD commit and the hash of its root
+// value, DOLT_HASHOF('HEAD') and DOLT_HASHOF_DB('HEAD'), read in one
+// statement so both describe the same HEAD.
+func HeadHashes(ctx context.Context, db DBConn) (commit, root string, err error) {
+	if err = db.QueryRowContext(ctx, "SELECT DOLT_HASHOF('HEAD'), DOLT_HASHOF_DB('HEAD')").Scan(&commit, &root); err != nil {
+		return "", "", fmt.Errorf("failed to read HEAD hashes: %w", err)
+	}
+	return commit, root, nil
+}
+
 // BackupToDir registers dir as the ExportBackupName file:// backup remote and
 // syncs the full database to it, preserving complete commit history. dir must
 // already exist on this machine.

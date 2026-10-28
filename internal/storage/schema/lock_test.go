@@ -511,18 +511,15 @@ func expectScalar(mock sqlmock.Sqlmock, query, column string, value any) {
 		WillReturnRows(sqlmock.NewRows([]string{column}).AddRow(value))
 }
 
-// expectCursorProbe mocks the information_schema existence probe that
-// migrationSource.currentVersion issues before it ever reads the cursor
-// table. The probe was added by be-bv7x so a not-yet-created cursor table
-// never poisons the pooled Dolt session with a failing statement.
+// expectCursorProbe mocks the existence probe that migrationSource.currentVersion
+// issues before it ever reads the cursor table: the schemata read proving the
+// session has a usable current database, then the SHOW TABLES listing. The
+// probe was added by be-bv7x so a not-yet-created cursor table never poisons
+// the pooled Dolt session with a failing statement.
 func expectCursorProbe(mock sqlmock.Sqlmock, table string, exists bool) {
-	present := 0
-	if exists {
-		present = 1
-	}
-	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM information_schema\.tables`).
-		WithArgs(table).
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(present))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = DATABASE()")).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	expectShowTable(mock, table, exists)
 }
 
 func expectDoltStatusRows(mock sqlmock.Sqlmock) {
@@ -805,29 +802,38 @@ func TestMigrateUpWithLockFreshBootstrapHealResetFailureStaysFatal(t *testing.T)
 	}
 }
 
-// expectIgnoredSentinelProbes mocks the INFORMATION_SCHEMA lookups
-// currentVersion issues to confirm a non-zero ignored cursor against the
-// schema it claims (gh 5033). They fire only for a non-zero cursor, in
-// ignoredSource's table then floored-table then column sentinel order.
+// expectIgnoredSentinelProbes mocks the schema lookups currentVersion issues
+// to confirm a non-zero ignored cursor against the schema it claims (gh 5033):
+// a SHOW TABLES probe per sentinel and floored table (showTableExists), then
+// per sentinel column its carrier table's existence and a SHOW COLUMNS read
+// (expectSentinelColumnProbe). None of them uses INFORMATION_SCHEMA, whose
+// predicates Dolt does not push down, because all of them run on every store
+// open. They fire only for a non-zero cursor, in ignoredSource's table then
+// floored-table then column sentinel order.
 func expectIgnoredSentinelProbes(mock sqlmock.Sqlmock, present bool) {
-	count := 0
-	if present {
-		count = 1
-	}
-	for range ignoredSource.sentinelTables {
-		mock.ExpectQuery(regexp.QuoteMeta("FROM INFORMATION_SCHEMA.TABLES")).
-			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(count))
+	for _, table := range ignoredSource.sentinelTables {
+		expectShowTable(mock, table, present)
 	}
 	if present {
-		for range ignoredSource.sentinelFlooredTables {
-			mock.ExpectQuery(regexp.QuoteMeta("FROM INFORMATION_SCHEMA.TABLES")).
-				WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+		for _, st := range ignoredSource.sentinelFlooredTables {
+			expectShowTable(mock, st.table, true)
 		}
-		for range ignoredSource.sentinelColumns {
-			mock.ExpectQuery(regexp.QuoteMeta("FROM INFORMATION_SCHEMA.COLUMNS")).
-				WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+		for _, sc := range ignoredSource.sentinelColumns {
+			expectSentinelColumnProbe(mock, sc, true, true)
 		}
 	}
+}
+
+// expectShowTable mocks one showTableExists probe: the database's unfiltered
+// SHOW TABLES listing, which holds table only when it exists. An absent table
+// is a listing without it, never a zero count. The listing always carries an
+// unrelated table, so a probe that took any row as presence fails.
+func expectShowTable(mock sqlmock.Sqlmock, table string, exists bool) {
+	rows := sqlmock.NewRows([]string{"Tables_in_testdb"}).AddRow("issues")
+	if exists {
+		rows.AddRow(table)
+	}
+	mock.ExpectQuery("^SHOW TABLES$").WillReturnRows(rows)
 }
 
 func TestMigrateUpWithLockFreshBootstrapHealProbeFailuresStayFatal(t *testing.T) {

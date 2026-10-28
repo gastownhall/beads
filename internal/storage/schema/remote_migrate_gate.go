@@ -253,8 +253,17 @@ func FormatMigrationVersions(versions []int) string {
 
 // UserMessage returns the full multi-line error block for terminal output.
 func (e *RemoteMigrateGateError) UserMessage() string {
-	msg := e.Error() + "\n" + e.userBody()
-	msg += e.fallbackReasonNote()
+	return e.Error() + "\n" + e.userBody() + e.Notes()
+}
+
+// Notes returns what UserMessage appends after its guidance body: the smart
+// gate's reason for falling back to this stop (fallbackReasonNote) and a
+// set-but-unrecognized AllowRemoteMigrateEnv value. Empty when neither
+// applies. A renderer that pairs Error() with guidance of its own instead of
+// userBody (embeddeddolt's lenient-open warning) appends it, so swapping the
+// body does not drop these diagnostics with it (bd-1z1pc).
+func (e *RemoteMigrateGateError) Notes() string {
+	msg := e.fallbackReasonNote()
 	if e.UnrecognizedEnv != "" {
 		msg += "\n" +
 			"  Note: " + AllowRemoteMigrateEnv + "=" + e.UnrecognizedEnv + " is set but was not recognized —\n" +

@@ -72,6 +72,33 @@ func ignoredConfigKey(path string) string {
 // Initialize sets up the viper configuration singleton
 // Should be called once at application startup
 func Initialize() error {
+	return initialize(os.Getenv("BEADS_DIR"))
+}
+
+// WithBeadsDir runs fn with the configuration Initialize loads when BEADS_DIR
+// is beadsDir, which is how the bd CLI loads it for every command in a
+// workspace it found, and then puts the loaded configuration back. A command
+// about to create beadsDir uses it to read what every later command there
+// will read: beadsDir's own config.yaml over the user config files, with the
+// BD_* variables on top, and never an enclosing workspace's config.yaml that
+// the directory walk loaded at startup. The process environment is not
+// changed.
+//
+// fn runs even when loading fails, with what did load, as a command runs
+// after a failed Initialize; the error is returned. Like Initialize, it
+// replaces the process-wide configuration while fn runs, so nothing may read
+// configuration concurrently.
+func WithBeadsDir(beadsDir string, fn func()) error {
+	saved, savedOverrides := v, overriddenKeys
+	defer func() { v, overriddenKeys = saved, savedOverrides }()
+	overriddenKeys = map[string]bool{}
+	err := initialize(beadsDir)
+	fn()
+	return err
+}
+
+// initialize is Initialize for a process whose BEADS_DIR is beadsDirSetting.
+func initialize(beadsDirSetting string) error {
 	v = viper.New()
 
 	// Set config type to yaml (we only load config.yaml, not config.json)
@@ -115,7 +142,7 @@ func Initialize() error {
 	appendExistingUserConfig(userConfigPaths.documented)
 
 	// 1. Project: walk up from CWD to find .beads/config.yaml
-	beadsDirEnv := strings.TrimSpace(os.Getenv("BEADS_DIR"))
+	beadsDirEnv := strings.TrimSpace(beadsDirSetting)
 	beadsEnvConfigPath := ""
 	if beadsDirEnv != "" {
 		beadsEnvConfigPath = filepath.Clean(filepath.Join(beadsDirEnv, "config.yaml"))
@@ -206,7 +233,7 @@ func Initialize() error {
 	}
 
 	// 0. BEADS_DIR: highest priority
-	if beadsDir := os.Getenv("BEADS_DIR"); beadsDir != "" {
+	if beadsDir := beadsDirSetting; beadsDir != "" {
 		p := filepath.Join(beadsDir, "config.yaml")
 		// Honor the test ignore set here too, and skip primaryConfigPath along with
 		// the merge so ConfigFileUsed does not name the ignored repo config. This
@@ -263,6 +290,18 @@ func Initialize() error {
 	// own deletion itself. Env: BD_EVENTS_JOURNAL_AUTO_PRUNE.
 	v.SetDefault("events-journal-auto-prune", true)
 	v.SetDefault("audit.enabled", false)
+	// versioned-history.enabled activates the dual-write issue-version history
+	// (issue_versions, issues.current_revision) that migrations 0067+ provision.
+	// Default OFF: with it off the writer short-circuits and a store is
+	// byte-identical to one built without the feature, which is the contract
+	// gastownhall/beads#6135 ships under. Env: BD_VERSIONED_HISTORY_ENABLED.
+	//
+	// The flag is single-writer-only until the version_id primary key lands
+	// (design section 16.3 steps 1-5): issue_versions.revision and
+	// issues.current_revision are per-store ordinals, so two disconnected
+	// clones can both mint revision 8 for the same issue. Do not enable it on
+	// a store that more than one writer mutates.
+	v.SetDefault("versioned-history.enabled", false)
 	v.SetDefault("no-db", false)
 	v.SetDefault("no-hooks", false)
 	v.SetDefault("db", "")

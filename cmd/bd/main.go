@@ -31,9 +31,11 @@ import (
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/httpclient"
+	"github.com/steveyegge/beads/internal/initprocs"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/migration"
 	"github.com/steveyegge/beads/internal/molecules"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/remotecache"
 	"github.com/steveyegge/beads/internal/routing"
 	"github.com/steveyegge/beads/internal/storage"
@@ -82,6 +84,33 @@ type envSnapshotValue struct {
 }
 
 var changeDirEnvSnapshot map[string]envSnapshotValue
+
+// beadsDirFromCaller is BEADS_DIR as the process INHERITED it, captured at
+// package initialization — which the language guarantees runs before main, and
+// therefore before any bd code exports a BEADS_DIR of its own.
+//
+// Reading os.Getenv("BEADS_DIR") later is a different question, and the wrong
+// one for anything that needs to know what the CALLER asked for. By the time a
+// command's RunE runs, bd has usually exported one itself:
+//
+//   - the root PersistentPreRunE resolves a beads dir for every no-DB command
+//     and exports it (selectedNoDBBeadsDir -> prepareSelectedNoDBContext ->
+//     prepareSelectedCommandContext), and that resolution bottoms out in
+//     beads.FindBeadsDir(), which accepts any ancestor .beads/ carrying so much
+//     as a config.yaml — including the legacy user-level ~/.beads/config.yaml;
+//   - `bd -C <dir>` exports one too (applyChangeDirSelection), which names a
+//     beads dir without moving the working directory.
+//
+// Neither is the caller saying "use this". Consult this snapshot, not the live
+// environment, when the answer must mean caller intent (GH#4635).
+//
+// A BEADS_DIR imported from a .beads/.env file is deliberately left out too,
+// although beadsDirProvidedAtStartup counts it as user selection for role
+// detection: the loaders read the .env of the beads dir beads.FindBeadsDir()
+// discovers from the working directory, which in a home directory is the legacy
+// ~/.beads/.env. Counting it would let the same discovered ~/.beads opt out of
+// the home-directory guard; the caller opts out by exporting BEADS_DIR.
+var beadsDirFromCaller = os.Getenv("BEADS_DIR")
 
 var (
 	noColorFlag       bool
@@ -251,6 +280,36 @@ func runsPostCommandMaintenance(cmdName string, strictReadonly bool) bool {
 	return effectiveRootStorePolicy(cmdName, strictReadonly).runMaintenance
 }
 
+// readMemoEnvVar turns the per-command http read memo off when set to "0": an
+// operator who suspects a stale read can rule the memo out without a rebuild.
+const readMemoEnvVar = "BD_HTTP_READ_MEMO"
+
+// commandMemoizesReads reports whether this invocation's http transport may
+// answer an identical row or settings read from a response it already received
+// (httpclient.WithReadMemo, bts-xpw.3.14.6). A one-shot command may: it reads,
+// writes and exits within seconds, and each write it makes drops the memo.
+//
+// A process that outlives its reads may not, and bd serve is excluded for the
+// reason runsPostCommandMaintenance excludes it — a server is not a command.
+// Over an http workspace it answers other clients, who must see what other
+// writers changed. A --watch or --follow poll exists to see exactly those
+// changes, and a memo would answer its polls from a snapshot instead.
+// BD_HTTP_READ_MEMO=0 turns the memo off for every command.
+func commandMemoizesReads(cmd *cobra.Command) bool {
+	if os.Getenv(readMemoEnvVar) == "0" {
+		return false
+	}
+	if cmd.Name() == serveCmdName {
+		return false
+	}
+	for _, name := range []string{"watch", "follow"} {
+		if f := cmd.Flags().Lookup(name); f != nil && f.Value.String() == "true" {
+			return false
+		}
+	}
+	return true
+}
+
 // resolveDoltServerConnection fills in how to reach the workspace's Dolt SQL
 // server — host, port, socket, user, password, TLS — on doltCfg.
 //
@@ -263,7 +322,12 @@ func runsPostCommandMaintenance(cmdName string, strictReadonly bool) bool {
 // It mirrors dolt.applyResolvedConfig, which this hand-built doltCfg path
 // bypasses.
 func resolveDoltServerConnection(ctx context.Context, beadsDir string, fileCfg *configfile.Config, doltCfg *dolt.Config) error {
-	doltCfg.ServerHost = fileCfg.GetDoltServerHost()
+	// An IPv6 host may be configured bracketed ("[::1]") as well as bare. The
+	// store and `bd serve` (its socket-fallback probe and its proxy's
+	// ExternalDoltServer) both dial with doltutil.ServerAddr, which accepts
+	// either, but they also key, name and compare the server by this host, so
+	// hand them the bare form.
+	doltCfg.ServerHost = configfile.UnbracketHost(fileCfg.GetDoltServerHost())
 	// Port 0 is fine here — auto-start will resolve it. Use the shared helper
 	// rather than DefaultConfig(...).Port: this hand-built doltCfg is handed
 	// straight to dolt.New, and a port arriving there without its source is
@@ -799,10 +863,11 @@ func prepareSelectedCommandContext(beadsDir string, loadEnv bool) {
 	}
 	config.CheckBeadsDirPermissions(beadsDir)
 	if err := loadServerModeFromBeadsDir(beadsDir); err != nil {
-		// Warn, don't fatal: this context also serves no-DB commands —
-		// doctor, init, bootstrap, config — which are exactly the repair
-		// paths for a corrupt metadata.json. Data commands stay protected
-		// by the hard error at store init and in the store factories.
+		// Warn, don't fatal: the commands workspace admission exempts,
+		// such as bd version and help, still run. Admission
+		// (guardLegacyUpgradeWorkspace) then refuses every other command,
+		// doctor, init and bootstrap included, and the store factories
+		// refuse too, so the repair is fixing or restoring the file by hand.
 		fmt.Fprintf(os.Stderr, "warning: %v\n", err)
 	}
 }
@@ -1501,10 +1566,11 @@ var rootCmd = &cobra.Command{
 			if os.Getenv("BEADS_DIR") == "" {
 				loadEnvironment()
 				if err := loadServerModeFromConfig(); err != nil {
-					// Warn, don't fatal: skipsStoreInit commands (doctor,
-					// init, bootstrap, version, ...) never select a store,
-					// and several of them are the repair path for the very
-					// corruption being reported.
+					// Warn, don't fatal, as prepareSelectedCommandContext
+					// does: the commands admission exempts still run, and
+					// admission refuses the rest (guardLegacyNoStoreCommand
+					// below; doctor, init and bootstrap run the guard
+					// themselves).
 					fmt.Fprintf(os.Stderr, "warning: %v\n", err)
 				}
 			}
@@ -1521,6 +1587,9 @@ var rootCmd = &cobra.Command{
 				}
 			}
 			if err := guardLegacyNoStoreCommand(cmd, beadsDir); err != nil {
+				if isUnsupportedWorkspaceFormat(err) {
+					return handleWorkspaceGuardError(err)
+				}
 				isMigrationCommand := false
 				for current := cmd; current != nil; current = current.Parent() {
 					if current.Name() == "migrate" {
@@ -1580,7 +1649,7 @@ var rootCmd = &cobra.Command{
 				prepareSelectedCommandContext(bd, true)
 				refreshBoundCommandConfig(cmd)
 				if guardErr := guardLegacyUpgradeWorkspace(bd); guardErr != nil {
-					return HandleError("%v", guardErr)
+					return handleWorkspaceGuardError(guardErr)
 				}
 				cfg, cfgErr := configfile.LoadForDiscovery(bd)
 				if cfgErr != nil || cfg != nil && (cfg.IsDoltProxiedServerMode() ||
@@ -1601,7 +1670,7 @@ var rootCmd = &cobra.Command{
 					dbPath = bd
 				}
 			} else if guardErr := guardUndiscoveredLegacyWorkspace(); guardErr != nil {
-				return HandleError("%v", guardErr)
+				return handleWorkspaceGuardError(guardErr)
 			}
 		}
 
@@ -1686,7 +1755,7 @@ var rootCmd = &cobra.Command{
 		prepareSelectedCommandContext(beadsDir, true)
 		refreshBoundCommandConfig(cmd)
 		if guardErr := guardLegacyUpgradeWorkspace(beadsDir); guardErr != nil {
-			return HandleError("%v", guardErr)
+			return handleWorkspaceGuardError(guardErr)
 		}
 
 		// Workspace operation gate: every command that reaches this point
@@ -1895,6 +1964,11 @@ var rootCmd = &cobra.Command{
 			// preview: the store is genuinely writable underneath, so the
 			// lazy defer-wake sweep may still run (be-vbhpf).
 			ClassifiedRead: policy.readOnly && !readonlyMode && !previewMode,
+			// A read-only or gateway open does not migrate, so a schema too
+			// old for this binary's issue reads is refused at open instead of
+			// failing each read on an unknown column. Not for a preview,
+			// which reports an incompatibility through its own query.
+			RequireReadableSchema: !previewMode,
 		}
 
 		// Load config to get database name and server connection settings.
@@ -2128,8 +2202,20 @@ var rootCmd = &cobra.Command{
 		// swallowed the same way, which let a preview failure wave the
 		// real, mutating open through unexamined — the one thing this check
 		// exists to prevent (be-3bt2e). Those cases now refuse instead.
+		//
+		// openCtx scopes ONE http transport to the gate's preview open and the
+		// real open below (bts-xpw.3.14.6): over a gateway each dial pays its
+		// own handshake and, with a gasworks credential, its own sts.Context,
+		// so sharing it saves both on every write. A one-shot command's
+		// transport also answers its repeated row and settings reads from the
+		// response it already has (commandMemoizesReads). Other backends
+		// ignore both.
+		openCtx := httpclient.WithSharedConnections(rootCtx)
+		if commandMemoizesReads(cmd) {
+			openCtx = httpclient.WithReadMemo(openCtx)
+		}
 		if !useReadOnly && !globalFlag && os.Getenv("BEADS_SKIP_IDENTITY_CHECK") != "1" {
-			idStore, previewErr := newPreviewStoreFromConfig(rootCtx, beadsDir)
+			idStore, previewErr := newPreviewStoreFromConfig(openCtx, beadsDir)
 			switch {
 			case previewErr == nil:
 				checkErr := validateWorkspaceIdentity(rootCtx, idStore, beadsDir)
@@ -2150,7 +2236,7 @@ var rootCmd = &cobra.Command{
 		// Dolt manages these files itself; external interference is never safe.
 
 		if _, ok := backends.Lookup(cfg.GetBackend()); ok {
-			store, err = newRegisteredBackendStore(rootCtx, cfg.GetBackend(), beadsDir, useReadOnly)
+			store, err = newRegisteredBackendStore(openCtx, cfg.GetBackend(), beadsDir, useReadOnly)
 		} else {
 			store, err = newDoltStore(rootCtx, doltCfg)
 		}
@@ -2680,8 +2766,14 @@ func flushBatchCommitOnShutdown() {
 // run, not a workspace problem. It must stay narrow: any other previewErr
 // (unreachable server, bad config, ...) has to refuse rather than silently
 // wave the real, mutating open through (be-3bt2e).
+//
+// So it matches the embedded store's own no-database error, and only when the
+// cause is a missing data dir — not any ENOENT. A dial to a configured unix
+// socket whose server is down satisfies errors.Is(err, os.ErrNotExist) too,
+// as does a data dir missing an internal file, and neither is a first run
+// (bd-wlygc).
 func isBootstrapPreviewErr(err error) bool {
-	return errors.Is(err, os.ErrNotExist)
+	return errors.Is(err, embeddeddolt.ErrNoEmbeddedDatabase) && errors.Is(err, os.ErrNotExist)
 }
 
 // refuseUnverifiablePreviewOpen renders the identity gate's refusal when the
@@ -2713,7 +2805,7 @@ func isBootstrapPreviewErr(err error) bool {
 // Extracted from the gate's default arm so both halves are directly testable
 // without standing up a forward-drifted workspace; the wire itself is pinned on
 // the embedded tier by
-// TestIdentityGateRendersSchemaSkewFromForwardDriftedWorkspace.
+// TestEmbeddedIdentityGateRendersSchemaSkewFromForwardDriftedWorkspace.
 func refuseUnverifiablePreviewOpen(previewErr error) error {
 	if handleFreshCloneError(previewErr) {
 		return SilentExit()
@@ -2809,6 +2901,7 @@ func validateWorkspaceIdentity(ctx context.Context, s storage.DoltStorage, beads
 }
 
 func main() {
+	initprocs.Done()
 	// BD_NAME overrides the binary name in help text (e.g. BD_NAME=ops makes
 	// "ops --help" show "ops" instead of "bd"). Useful for multi-instance
 	// setups where wrapper scripts set BEADS_DIR for routing.
@@ -2822,6 +2915,11 @@ func main() {
 	rootCmd.InitDefaultHelpCmd()
 	registerHelpAllFlag()
 
+	// Cobra prints a command's returned error itself ("Error: ...") unless
+	// the command silences it: that line goes through the same backstop as
+	// bd's own error printers (HandleError), since an error can repeat a value
+	// a cloned repository sets.
+	rootCmd.SetErr(remedy.TextWriter(os.Stderr))
 	executedCmd, err := rootCmd.ExecuteC()
 
 	// Let this command's fire-and-forget hooks finish, for the same
@@ -2842,7 +2940,7 @@ func main() {
 			os.Exit(code)
 		}
 		if executedCmd != nil && executedCmd.SilenceErrors {
-			fmt.Fprintf(os.Stderr, "Error: %s\n", err.Error())
+			fmt.Fprintf(os.Stderr, "Error: %s\n", remedy.PrintedText(err.Error()))
 		}
 		os.Exit(1)
 	}
