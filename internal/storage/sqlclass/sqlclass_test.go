@@ -12,6 +12,8 @@ func TestClassify(t *testing.T) {
 		{"lowercase select", "  select id from issues", Read},
 		{"union", "SELECT 1 UNION SELECT 2", Read},
 		{"parenthesized union", "(SELECT 1) UNION (SELECT 2)", Read},
+		{"intersect", "SELECT 1 INTERSECT SELECT 2", Read},
+		{"except", "SELECT 1 EXCEPT SELECT 2", Read},
 		{"show", "SHOW TABLES", Read},
 		{"describe", "DESCRIBE issues", Read},
 		{"explain select", "EXPLAIN SELECT * FROM issues", Read},
