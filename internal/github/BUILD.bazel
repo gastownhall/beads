@@ -28,6 +28,7 @@ go_test(
         "mapping_test.go",
         "push_dedup_test.go",
         "review_fixes_test.go",
+        "tracker_state_test.go",
         "tracker_test.go",
         "types_test.go",
     ],

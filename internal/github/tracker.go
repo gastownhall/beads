@@ -152,6 +152,18 @@ func (t *Tracker) CreateIssue(ctx context.Context, issue *types.Issue) (*tracker
 		return nil, err
 	}
 
+	// GitHub's POST /issues cannot set state, so a closed bead is created
+	// OPEN. Close it with a follow-up PATCH so the state carries, mirroring
+	// the GitLab tracker (internal/gitlab/tracker.go): the bead must not be
+	// left linked to an open issue that later pushes then believe is in sync.
+	if issue.Status == types.StatusClosed {
+		if closed, cerr := t.client.UpdateIssue(ctx, created.Number, map[string]interface{}{
+			"state": "closed",
+		}); cerr == nil {
+			created = closed
+		}
+	}
+
 	ti := githubToTrackerIssue(created)
 	return &ti, nil
 }
