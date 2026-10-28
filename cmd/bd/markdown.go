@@ -487,12 +487,15 @@ func parseMarkdownDependencies(deps []string, templateTitle string) ([]issueops.
 			depType = canonicalDependencyType(rawType)
 			reverse = rawType == types.DepBlocks
 			target = strings.TrimSpace(parts[1])
+			if target == "" {
+				return nil, fmt.Errorf("dependency %q for issue %q has no target; write type:id with no space after the colon", raw, templateTitle)
+			}
 		} else {
 			depType = types.DepBlocks
 			target = raw
 		}
-		if !depType.IsValid() {
-			return nil, fmt.Errorf("invalid dependency type %q for issue %q", depType, templateTitle)
+		if err := validateDependencyType(depType); err != nil {
+			return nil, fmt.Errorf("dependencies for issue %q: %w", templateTitle, err)
 		}
 		out = append(out, issueops.CreateDependency{Type: depType, TargetID: target, Reverse: reverse})
 	}
