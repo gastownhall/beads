@@ -66,6 +66,13 @@ func TestEmbeddedRetainedTypes(t *testing.T) {
 		return issue.ID
 	}
 
+	// A malformed value fails closed at the write: stored, it would read as
+	// names no row carries and protect nothing.
+	for _, bad := range []string{"[chore]", "chore task", "feat"} {
+		if out, stderr, code := run("config", "set", "types.retained", bad); code == 0 {
+			t.Errorf("bd config set types.retained %q succeeded:\n%s\n%s\nwant the malformed value refused", bad, out, stderr)
+		}
+	}
 	if out, stderr, code := run("config", "set", "types.retained", "chore"); code != 0 {
 		t.Fatalf("bd config set types.retained exited %d:\n%s\n%s", code, out, stderr)
 	}

@@ -67,7 +67,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on `remaining`. The new `IDRetention` conformance contract runs on every leg.
 - **`types.retained`: plain sweeps keep key-bearing types.** A workspace
   setting (`issueops.SettingKeyTypesRetained`; a comma-separated list or JSON
-  array of issue types, unknown names allowed) that every sweep without
+  array of issue types, unknown names allowed; a malformed value or a type
+  alias is refused at the write, so a typo cannot protect nothing) that every
+  sweep without
   `RetainIDs` honors: `bd prune`, `bd purge` (including `--wisps-plane`),
   their previews, `POST /v0/beads/issues:sweep` and the decay phase of
   `bd gc` keep every closed bead of a listed type and report it as

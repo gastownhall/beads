@@ -81,6 +81,52 @@ func TestValidateSettingWriteParsesTheCustomStatusValue(t *testing.T) {
 	}
 }
 
+// TestValidateSettingWriteRefusesAMalformedRetainedTypesValue pins that
+// types.retained, a SAFETY setting, fails closed at write time. The sweep reads
+// whatever is stored through the lenient list parse, so a value that parses to
+// names no row carries — a bracketed list that is not JSON, a quoted name, two
+// names split by a space, an alias of the type rows actually store — would hold
+// back nothing while the operator believes the type is protected.
+func TestValidateSettingWriteRefusesAMalformedRetainedTypesValue(t *testing.T) {
+	for _, value := range []string{
+		"",                 // unsets the key
+		"op",               // one name
+		"op,fact",          // the comma form
+		" op , fact ",      // trimmed on read
+		`["op","fact"]`,    // the JSON form
+		`[]`,               // an empty JSON list retains nothing
+		"never-registered", // a well-formed unknown name matches nothing, and is allowed
+		"feature",          // the canonical form of the feat alias
+	} {
+		if _, err := ValidateSettingWrite(issueops.SettingKeyTypesRetained, value); err != nil {
+			t.Errorf("ValidateSettingWrite(types.retained, %q) = %v, want it accepted", value, err)
+		}
+	}
+	for _, test := range []struct{ value, wantInError string }{
+		{"[op]", "JSON array"},
+		{`["op","fact"`, "JSON array"},
+		{`[1]`, "JSON array"},
+		{`"op"`, "op"},
+		{"'op'", "op"},
+		{"op fact", "op fact"},
+		{`["op fact"]`, "op fact"},
+		{`["op,fact"]`, "op,fact"},
+		{"op,[fact]", "[fact]"},
+		{"feat", "feature"},
+		{"Feat", "feature"},
+		{`["adr"]`, "decision"},
+	} {
+		_, err := ValidateSettingWrite(issueops.SettingKeyTypesRetained, test.value)
+		if !errors.Is(err, issueops.ErrValidation) {
+			t.Errorf("ValidateSettingWrite(types.retained, %q) error = %v, want ErrValidation", test.value, err)
+			continue
+		}
+		if !strings.Contains(err.Error(), test.wantInError) {
+			t.Errorf("ValidateSettingWrite(types.retained, %q) error = %q, want it to name %q", test.value, err, test.wantInError)
+		}
+	}
+}
+
 // TestValidateSettingWriteReturnsTheValueUnchanged is the machine half of
 // issueops.SetSettingResult.Value's promise: a successful write stores what the
 // caller sent. Nothing normalizes today, and this is what would fail if

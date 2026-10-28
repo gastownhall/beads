@@ -61,6 +61,14 @@ func ValidateSettingWrite(key, value string) (string, error) {
 			return "", fmt.Errorf("%w: invalid %s value: %v", issueops.ErrValidation, key, err)
 		}
 	}
+	// types.retained is a SAFETY setting read leniently by every sweep, so a
+	// value that would read as names no row carries is refused here, where
+	// every WorkspaceConfig body and every `bd config set` route passes.
+	if key == issueops.SettingKeyTypesRetained {
+		if err := ValidateRetainedTypesValue(value); err != nil {
+			return "", fmt.Errorf("%w: invalid %s value: %v", issueops.ErrValidation, key, err)
+		}
+	}
 	return value, nil
 }
 

@@ -100,7 +100,11 @@ This applies to `bd prune`, `bd purge` (including `--wisps-plane`), their
 ids, which is the only way they leave through a sweep.
 
 The setting takes a comma-separated list or a JSON array. Names need not be
-registered types yet; a name no bead carries matches nothing. It is read from
+registered types yet; a name no bead carries matches nothing. Because the
+setting is a safety rule, `bd config set` refuses a value that would protect
+nothing by accident: a bracketed list that is not JSON (`[op]`), a name with a
+space, quote, bracket or comma in it (`"op"`, `op fact`), and an alias of a
+built-in type (`feat`; beads store `feature`). It is read from
 the workspace database on every sweep, never from `config.yaml`, so every
 client of a shared workspace sees the same rule. If bd cannot read it, the
 sweep fails and deletes nothing. `bd delete` does not consult it: it deletes
