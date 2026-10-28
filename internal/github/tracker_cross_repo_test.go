@@ -489,3 +489,36 @@ func TestPush_SkipsBeadLinkedToOtherRepo(t *testing.T) {
 		}
 	})
 }
+
+// TestSync_NoConflictWithBeadLinkedToOtherRepo covers #7781's sync half: a
+// bidirectional sync against acme/repo-b must not report a conflict for a
+// locally edited bead linked to repo-A's issue 42, nor write repo-B's
+// issue 42.
+func TestSync_NoConflictWithBeadLinkedToOtherRepo(t *testing.T) {
+	rt := &ghFixtureTransport{}
+	rt.route(http.MethodGet, "/repos/acme/repo-b/issues",
+		"["+ghIssueJSON(9001, 42, "Repo B issue 42 (remote)", "Repo B body", repoBIssue42Ref)+"]")
+	rt.route(http.MethodPatch, "/repos/acme/repo-b/issues/42",
+		ghIssueJSON(9001, 42, "Repo B issue 42 (remote)", "Repo B body", repoBIssue42Ref)) // must never be requested
+	store := newGHCrossRepoStore(newRepoBead("bd-a42", "Repo A issue 42", repoAIssue42Ref))
+	store.local["github.last_sync"] = "2026-10-01T00:00:00Z"
+
+	result, err := tracker.NewEngine(newGHTestTracker(rt), store, "test").
+		Sync(context.Background(), tracker.SyncOptions{})
+	if err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if result.Stats.Conflicts != 0 {
+		t.Errorf("sync reported %d conflicts for a bead linked to another repository", result.Stats.Conflicts)
+	}
+	if rt.seen(http.MethodPatch, "/repos/acme/repo-b/issues/42") {
+		t.Errorf("sync wrote repo-B issue 42 with repo-A bead content")
+	}
+	a := store.issues["bd-a42"]
+	if a.Title != "Repo A issue 42" || a.ExternalRef == nil || *a.ExternalRef != repoAIssue42Ref {
+		t.Errorf("repo-A bead overwritten by sync: title=%q external_ref=%v", a.Title, ghDerefRef(a.ExternalRef))
+	}
+	if id := ghBeadIDByRef(store, repoBIssue42Ref); id == "" || id == "bd-a42" {
+		t.Errorf("repo-B issue 42 landed on bead %q, want a distinct new bead of its own", id)
+	}
+}
