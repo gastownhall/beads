@@ -206,7 +206,40 @@ func expandLoopWithVars(step *Step, vars map[string]string) ([]*Step, error) {
 		}
 	}
 
+	carryLoopDeps(step, result)
 	return result, nil
+}
+
+// carryLoopDeps appends the loop step's own Needs and DependsOn to the
+// roots of its expansion: the top-level expanded steps that depend on no
+// other step of the loop (GH#7636). Every other expanded step is already
+// gated by a sibling or by iteration chaining. Children need no carry: a
+// blocked parent blocks its children. The deps are appended, not
+// prepended, because needs[0] is the inferred waits_for spawner.
+func carryLoopDeps(step *Step, expanded []*Step) {
+	if len(step.Needs) == 0 && len(step.DependsOn) == 0 {
+		return
+	}
+	ids := collectStepIDs(expanded)
+	namesLoopStep := func(deps []string) bool {
+		for _, dep := range deps {
+			if ids[dep] {
+				return true
+			}
+		}
+		return false
+	}
+	for _, s := range expanded {
+		if namesLoopStep(s.Needs) || namesLoopStep(s.DependsOn) {
+			continue
+		}
+		for _, dep := range step.Needs {
+			s.Needs = appendUnique(s.Needs, dep)
+		}
+		for _, dep := range step.DependsOn {
+			s.DependsOn = appendUnique(s.DependsOn, dep)
+		}
+	}
 }
 
 // expandLoopIteration expands a single iteration of a loop.
