@@ -115,7 +115,7 @@ Examples:
 			}
 			closedIssues, retentionKept = holdBackRetainedTypes(closedIssues, retained)
 			if retentionKept > 0 && !jsonOutput {
-				fmt.Println(retainedTypesKeptLine(retentionKept))
+				fmt.Println(retainedTypesKeptLine(retentionKept, "closed issue(s)"))
 			}
 
 			if len(closedIssues) == 0 {

@@ -27,8 +27,10 @@ const (
 // sweep may delete (SweepRequest.RetainIDs). Its value is a list of type
 // names, in the JSON-array or comma-separated form types.custom takes. A
 // sweep without RetainIDs holds every closed row of a listed type back and
-// counts it in SweepSkips.RetentionRequired; `bd gc`'s decay holds them back
-// too.
+// counts it in SweepSkips.RetentionRequired; the bulk deletes outside the
+// role — `bd gc`'s decay, `bd admin cleanup` and the stale-closed-issues
+// doctor fix — hold them back too. A write of a malformed
+// value is refused (workapi.ValidateRetainedTypesValue).
 //
 // Unknown type names are accepted and match nothing, so an orchestrator can
 // name a type before it registers it. The setting is read from the workspace

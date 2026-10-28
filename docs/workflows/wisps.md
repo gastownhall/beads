@@ -77,9 +77,11 @@ for every deleted id: the id and its `closed_at`, nothing else. After that:
 - Generated ids never reuse a retired id.
 
 No command removes a tombstone. Only a sweep with `--retain-ids` retires ids.
-A plain `bd purge` or `bd prune`, `bd delete`, and `bd gc` all leave deleted
-ids reusable; `types.retained` (below) keeps the plain sweeps and `bd gc` away
-from the types whose ids must stay retired. Over HTTP, the server must advertise `issues.sweep.retainIds`;
+Every other delete — a plain `bd purge` or `bd prune`, `bd delete`,
+`bd gc`, `bd admin cleanup`, `bd mol wisp gc`, `bd mol burn`, the
+stale-closed-issues `bd doctor --fix`, and `bd sql` — leaves deleted ids
+reusable; `types.retained` (below) keeps the bulk ones away from the types
+whose ids must stay retired. Over HTTP, the server must advertise `issues.sweep.retainIds`;
 without it, bd refuses the sweep before sending anything.
 
 ### Keeping key-bearing types out of plain sweeps
@@ -95,9 +97,12 @@ bd config set types.retained op
 From then on a sweep without `--retain-ids` keeps every closed bead of those
 types and reports how many it kept (`retention_required` under `--json`).
 This applies to `bd prune`, `bd purge` (including `--wisps-plane`), their
-`--dry-run` previews, and the decay phase of `bd gc`. A sweep with
+`--dry-run` previews, and the decay phase of `bd gc`. The other bulk deletes
+keep those beads too and report the same count: `bd admin cleanup` (which also
+refuses `--cascade` while the setting names a type) and the stale-closed-issues
+`bd doctor --fix`. A sweep with
 `--retain-ids` keeps nothing back: it deletes those beads and retires their
-ids, which is the only way they leave through a sweep.
+ids, which is the only bulk way they leave.
 
 The setting takes a comma-separated list or a JSON array. Names need not be
 registered types yet; a name no bead carries matches nothing. Because the
@@ -107,8 +112,9 @@ space, quote, bracket or comma in it (`"op"`, `op fact`), and an alias of a
 built-in type (`feat`; beads store `feature`). It is read from
 the workspace database on every sweep, never from `config.yaml`, so every
 client of a shared workspace sees the same rule. If bd cannot read it, the
-sweep fails and deletes nothing. `bd delete` does not consult it: it deletes
-the ids you name. Neither does `bd mol wisp gc`. Over HTTP, a server that
+sweep fails and deletes nothing. What it does not cover is deliberate and
+per id: `bd delete` deletes the ids you name, `bd mol burn` the molecule you
+name, and `bd sql` bypasses bd entirely. Over HTTP, a server that
 honors the setting advertises `issues.sweep.retainedTypes`; an older server
 deletes those beads without retiring their ids.
 

@@ -82,7 +82,7 @@ func runGCProxiedServer(ctx context.Context) error {
 		warnClosedDeletionSafetySkips(stats)
 		closedIssues, retentionKept = holdBackRetainedTypes(closedIssues, read.retained)
 		if retentionKept > 0 && !jsonOutput {
-			fmt.Println(retainedTypesKeptLine(retentionKept))
+			fmt.Println(retainedTypesKeptLine(retentionKept, "closed issue(s)"))
 		}
 
 		switch {

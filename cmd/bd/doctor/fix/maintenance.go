@@ -8,6 +8,8 @@ import (
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/workapi"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // StaleClosedIssues deletes stale closed issues.
@@ -61,14 +63,17 @@ func StaleClosedIssues(path string) error {
 		return fmt.Errorf("failed to query issues: %w", err)
 	}
 
-	// Filter out pinned issues and delete the rest
-	var deleted, skipped int
-	for _, issue := range issues {
-		if issue.Pinned {
-			skipped++
-			continue
-		}
+	// The retained types are read from the workspace database the deletes go
+	// to. A read error fails the fix: deleting on a guess would take beads
+	// whose ids must be retired, and this fix retires none.
+	retainedSetting, err := store.GetConfig(ctx, issueops.SettingKeyTypesRetained)
+	if err != nil {
+		return fmt.Errorf("reading %s: %w", issueops.SettingKeyTypesRetained, err)
+	}
+	deletable, skipped, retained := selectStaleClosed(issues, retainedSetting)
 
+	var deleted int
+	for _, issue := range deletable {
 		if err := store.DeleteIssue(ctx, issue.ID); err != nil {
 			fmt.Printf("  Warning: failed to delete %s: %v\n", issue.ID, err)
 			continue
@@ -76,7 +81,7 @@ func StaleClosedIssues(path string) error {
 		deleted++
 	}
 
-	if deleted == 0 && skipped == 0 {
+	if deleted == 0 && skipped == 0 && retained == 0 {
 		fmt.Println("  No stale closed issues to clean up")
 	} else {
 		if deleted > 0 {
@@ -85,9 +90,30 @@ func StaleClosedIssues(path string) error {
 		if skipped > 0 {
 			fmt.Printf("  Skipped %d pinned issue(s)\n", skipped)
 		}
+		if retained > 0 {
+			fmt.Printf("  Kept %d closed issue(s) of a retained type (types.retained) — only bd prune/purge --retain-ids deletes them\n", retained)
+		}
 	}
 
 	return nil
+}
+
+// selectStaleClosed narrows the stale closed issues to the ones the fix may
+// delete: pinned issues are skipped, and so are issues of a type the
+// workspace retains (retainedSetting is the stored value of types.retained).
+// The fix deletes row by row and writes no tombstone, so a retained issue's id
+// — an idempotency key — is never its to free.
+func selectStaleClosed(issues []*types.Issue, retainedSetting string) (deletable []*types.Issue, pinned, retained int) {
+	unpinned := make([]*types.Issue, 0, len(issues))
+	for _, issue := range issues {
+		if issue.Pinned {
+			pinned++
+			continue
+		}
+		unpinned = append(unpinned, issue)
+	}
+	deletable, retained = workapi.PartitionSweepRetainedTypes(unpinned, workapi.RetainedTypesFromSetting(retainedSetting))
+	return deletable, pinned, retained
 }
 
 // PatrolPollution deletes patrol digest and session ended beads that pollute the database.

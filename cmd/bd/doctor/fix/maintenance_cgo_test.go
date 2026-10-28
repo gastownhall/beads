@@ -122,3 +122,73 @@ func TestPatrolPollution_DeletesFromDoltWithoutJSONL(t *testing.T) {
 		t.Fatalf("wisp title = %q, want ephemeral session wisp", wisps[0].Title)
 	}
 }
+
+// TestStaleClosedIssues_KeepsRetainedTypes drives the stale-closed-issues fix
+// against a server-mode workspace whose types.retained names chore: the old
+// closed chore stays, the old closed task goes. The fix deletes with no
+// tombstone, so a retained bead must never be its to take.
+func TestStaleClosedIssues_KeepsRetainedTypes(t *testing.T) {
+	requireFixDoltContainer(t)
+	port := fixTestServerPort()
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatalf("failed to create .beads: %v", err)
+	}
+	cfg := configfile.DefaultConfig()
+	cfg.Backend = configfile.BackendDolt
+	cfg.DoltMode = configfile.DoltModeServer
+	cfg.DoltServerHost = "127.0.0.1"
+	cfg.DoltServerPort = port
+	cfg.StaleClosedIssuesDays = 1
+	h := sha256.Sum256([]byte(t.Name() + fmt.Sprintf("%d", time.Now().UnixNano())))
+	cfg.DoltDatabase = "doctest_" + hex.EncodeToString(h[:6])
+	if err := cfg.Save(beadsDir); err != nil {
+		t.Fatalf("failed to save config: %v", err)
+	}
+
+	ctx := context.Background()
+	store, err := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{CreateIfMissing: true})
+	if err != nil {
+		t.Fatalf("dolt.NewFromConfigWithOptions against running test container: %v", err)
+	}
+	if err := store.SetConfig(ctx, "issue_prefix", "bd"); err != nil {
+		_ = store.Close()
+		t.Fatalf("failed to set issue_prefix: %v", err)
+	}
+	if err := store.SetConfig(ctx, "types.retained", "chore"); err != nil {
+		_ = store.Close()
+		t.Fatalf("failed to set types.retained: %v", err)
+	}
+	old := time.Now().AddDate(0, 0, -30)
+	seed := func(id string, issueType types.IssueType) {
+		t.Helper()
+		issue := &types.Issue{ID: id, Title: id, Status: types.StatusClosed, ClosedAt: &old, Priority: 2, IssueType: issueType}
+		if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+			_ = store.Close()
+			t.Fatalf("failed to create %s: %v", id, err)
+		}
+	}
+	seed("bd-keyed", types.TypeChore)
+	seed("bd-stale", types.TypeTask)
+	if err := store.Close(); err != nil {
+		t.Fatalf("failed to close setup store: %v", err)
+	}
+
+	if err := StaleClosedIssues(tmpDir); err != nil {
+		t.Fatalf("StaleClosedIssues returned error: %v", err)
+	}
+
+	verifyStore, err := dolt.NewFromConfig(ctx, beadsDir)
+	if err != nil {
+		t.Fatalf("failed to reopen store for verification: %v", err)
+	}
+	defer func() { _ = verifyStore.Close() }()
+	if _, err := verifyStore.GetIssue(ctx, "bd-keyed"); err != nil {
+		t.Errorf("bd-keyed (a retained type) is gone after the fix: %v", err)
+	}
+	if _, err := verifyStore.GetIssue(ctx, "bd-stale"); err == nil {
+		t.Errorf("bd-stale survived the fix; want it deleted")
+	}
+}

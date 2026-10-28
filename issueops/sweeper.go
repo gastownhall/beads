@@ -177,16 +177,22 @@ type SweepRequest struct {
 	// ONLY A RETAINING SWEEP RETIRES. Every other way a row leaves the store
 	// leaves its id reusable: a sweep without this flag (a plain `bd prune` or
 	// `bd purge`, whose durable tier also selects no-history rows), the
-	// Deleter role (`bd delete`), and `bd gc`'s decay, which deletes old
-	// closed rows by id.
+	// Deleter role (`bd delete`, and the bulk commands that delete through
+	// it: `bd admin cleanup`, `bd mol wisp gc`, `bd mol burn`), `bd gc`'s
+	// decay, the stale-closed-issues `bd doctor --fix`, and raw SQL.
 	//
 	// A WORKSPACE KEEPS ITS KEYED ROWS OUT OF THE PLAIN SWEEPS by naming their
 	// issue types in the SettingKeyTypesRetained setting: a sweep without
 	// this flag then holds every closed row of those types back
-	// (SweepSkips.RetentionRequired), and so does `bd gc`'s decay. With this
-	// flag set the setting holds nothing back — the retaining sweep is the
-	// one door those rows may leave by. The Deleter role does not consult
-	// it: `bd delete` names its ids one by one and deletes what it names.
+	// (SweepSkips.RetentionRequired). The bulk deletes that select rows by
+	// their own rule hold them back too — `bd gc`'s decay, `bd admin cleanup`
+	// (which also refuses --cascade while the setting names a type) and the
+	// stale-closed-issues doctor fix. With this flag set the
+	// setting holds nothing back, so the retaining sweep is the one bulk door
+	// those rows may leave by. What remains is deliberate and per id: the
+	// Deleter role does not consult the setting (`bd delete` deletes the ids
+	// it names, `bd mol burn` the molecule it names), and raw SQL bypasses
+	// every role. A caller whose ids are keys keeps those out by its own rule.
 	//
 	// A tombstone is exactly as durable as the row it replaces: a durable
 	// row's tombstone is versioned and replicates with it, a wisps-plane row's

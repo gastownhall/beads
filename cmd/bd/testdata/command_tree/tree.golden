@@ -68,7 +68,11 @@ bd admin cleanup
     |
     | SAFETY:
     | - Requires --force flag to actually delete (unless --dry-run)
-    | - Supports --cascade to delete dependents
+    | - Skips pinned issues, and issues of a type the workspace's types.retained
+    |   setting names (their ids are idempotency keys; only bd prune/purge
+    |   --retain-ids deletes them); --json reports the latter as retention_required
+    | - Supports --cascade to delete dependents (refused while types.retained names
+    |   a type, since a cascade could reach a retained issue)
     | - Shows preview of what will be deleted
     | - Use --json for programmatic output
     |

@@ -78,8 +78,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   retaining sweep keeps nothing back, so it is the one sweep that deletes
   those beads, and it retires their ids. The setting is read from the
   workspace database on the sweep's own transaction, never from
-  `config.yaml`; a read error fails the sweep and deletes nothing.
-  `bd delete` does not consult it.
+  `config.yaml`; a read error fails the sweep and deletes nothing. The bulk
+  deletes outside the sweep keep those beads too and report
+  `retention_required`: `bd admin cleanup` (which refuses `--cascade` while
+  the setting names a type) and the stale-closed-issues `bd doctor --fix`. `bd delete` and `bd mol burn`, which
+  delete the ids or molecule they name, do not consult it.
 - `bd versions <id>` lists the versions recorded for a bead, and
   `versioned-history.enabled` turns recording on. While it is on, every
   accepted change to a bead created while it is on, or that enters the issues
