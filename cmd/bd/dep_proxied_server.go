@@ -443,11 +443,14 @@ func runDepListProxiedServer(cmd *cobra.Command, ctx context.Context, args []str
 	// `len(args) > 1 && direction == "down"` branch above already uses the
 	// (non-dropping) EdgeReader role for batch mode — so this loop only runs
 	// for "down" with exactly one arg. Warn on stderr so a cross-database
-	// `bd link` isn't indistinguishable from no link at all (bd-mtla); never
-	// touches stdout/--json.
+	// `bd link` isn't indistinguishable from no link at all (bd-mtla). Stdout
+	// and --json are untouched except for the one case dep.go's RunE documents
+	// (#6557): no local row shown but edges dropped → printNoDependencies says
+	// "no local dependencies" instead of the false "has no dependencies".
+	hiddenDeps := 0
 	if direction == "down" && len(args) == 1 {
 		if reader, err := proxiedEdgeReader(); err == nil {
-			warnDroppedDepEdges(ctx, reader, args[0], typeFilter, allIssues)
+			hiddenDeps = warnDroppedDepEdges(ctx, reader, args[0], typeFilter, allIssues)
 		}
 	}
 
@@ -464,7 +467,7 @@ func runDepListProxiedServer(cmd *cobra.Command, ctx context.Context, args []str
 			if direction == "up" {
 				fmt.Printf("\nNo issues depend on %s\n", args[0])
 			} else {
-				fmt.Printf("\n%s has no dependencies\n", args[0])
+				printNoDependencies(args[0], hiddenDeps)
 			}
 		} else {
 			fmt.Println("\nNo dependencies found")
