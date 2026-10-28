@@ -5,8 +5,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/config"
 )
 
 // These tests build the index envelope git hands a pre-commit hook (GH#4080),
@@ -244,4 +247,104 @@ func TestGitAddFile_StagesIntoCommitIndex(t *testing.T) {
 			assertIndexFilesUnchanged(t, before)
 		})
 	}
+}
+
+// installExportStub puts a `bd` on PATH that records each invocation in the
+// returned sentinel and emulates `bd export -o <path>`.
+func installExportStub(t *testing.T) string {
+	t.Helper()
+	binDir := t.TempDir()
+	sentinel := filepath.Join(binDir, "invocations")
+	quotedSentinel := "'" + strings.ReplaceAll(sentinel, "'", `'\''`) + "'"
+	stub := "#!/bin/sh\n" +
+		`printf '%s\n' "$*" >> ` + quotedSentinel + "\n" +
+		`if [ "$1" = export ] && [ "$2" = -o ]; then printf '%s\n' '{"id":"bd-exported"}' > "$3"; fi` + "\n" +
+		"exit 0\n"
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(stub), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return sentinel
+}
+
+func setupExportLaneForIndexTest(t *testing.T, r commitIndexRepo) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script stub binary is POSIX-only")
+	}
+	sentinel := installExportStub(t)
+	initConfigForTest(t)
+	config.Set("export.auto", true)
+	config.Set("export.git-add", true)
+	config.Set("export.path", "issues.jsonl")
+	config.Set("no-git-ops", false)
+	t.Setenv("BEADS_DIR", r.path(".beads"))
+	return sentinel
+}
+
+// TestPreCommitHasStagedBeadsFiles_ReadsCommitIndex pins AC-2 at unit level:
+// the gate asks whether the commit being prepared touches .beads, not whether
+// the on-disk index does.
+func TestPreCommitHasStagedBeadsFiles_ReadsCommitIndex(t *testing.T) {
+	t.Run("pathspec excludes .beads staged in the real index", func(t *testing.T) {
+		r := newCommitIndexRepo(t, false)
+		writeFileForWorktreeTest(t, r.path(".beads/config.yaml"), []byte("# staged\n"))
+		r.git(t, nil, "add", ".beads/config.yaml")
+		writeFileForWorktreeTest(t, r.path("tracked.txt"), []byte("changed\n"))
+		next := r.pathspecEnvelope(t, "tracked.txt")
+		r.enterHook(t, next)
+		if preCommitHasStagedBeadsFiles(r.path(".beads")) {
+			t.Error("gate = true, want false: the pending commit has no .beads change")
+		}
+	})
+	t.Run("pathspec includes .beads not staged in the real index", func(t *testing.T) {
+		r := newCommitIndexRepo(t, false)
+		writeFileForWorktreeTest(t, r.path(".beads/config.yaml"), []byte("# pathspec\n"))
+		next := r.pathspecEnvelope(t, ".beads/config.yaml")
+		r.enterHook(t, next)
+		if !preCommitHasStagedBeadsFiles(r.path(".beads")) {
+			t.Error("gate = false, want true: the pending commit changes .beads")
+		}
+	})
+}
+
+// TestExportJSONLForCommit_CommitIndex runs the whole pre-commit export lane
+// against a pathspec envelope (AC-2, and AC-1 end to end).
+func TestExportJSONLForCommit_CommitIndex(t *testing.T) {
+	t.Run("pathspec includes .beads", func(t *testing.T) {
+		r := newCommitIndexRepo(t, false)
+		sentinel := setupExportLaneForIndexTest(t, r)
+		writeFileForWorktreeTest(t, r.path(".beads/config.yaml"), []byte("# pathspec\n"))
+		next := r.pathspecEnvelope(t, ".beads/config.yaml")
+		before := snapshotIndexFiles(t, filepath.Join(r.gitDir, "index"), filepath.Join(r.gitDir, "index.lock"))
+		r.enterHook(t, next)
+
+		_ = captureHookStderr(t, exportJSONLForCommit)
+
+		export := r.path(".beads/issues.jsonl")
+		if got, want := readFileForWorktreeTest(t, sentinel), "export -o "+export+"\n"; got != want {
+			t.Fatalf("export subprocess = %q, want %q", got, want)
+		}
+		if got, want := r.stagedBlob(t, next, ".beads/issues.jsonl"), r.blobOf(t, ".beads/issues.jsonl"); got != want {
+			t.Errorf("export blob in pending index = %q, want %q", got, want)
+		}
+		assertIndexFilesUnchanged(t, before)
+	})
+	t.Run("pathspec excludes .beads", func(t *testing.T) {
+		r := newCommitIndexRepo(t, false)
+		sentinel := setupExportLaneForIndexTest(t, r)
+		writeFileForWorktreeTest(t, r.path(".beads/config.yaml"), []byte("# staged\n"))
+		r.git(t, nil, "add", ".beads/config.yaml")
+		writeFileForWorktreeTest(t, r.path("tracked.txt"), []byte("changed\n"))
+		next := r.pathspecEnvelope(t, "tracked.txt")
+		before := snapshotIndexFiles(t, next)
+		r.enterHook(t, next)
+
+		_ = captureHookStderr(t, exportJSONLForCommit)
+
+		if _, err := os.Stat(sentinel); !os.IsNotExist(err) {
+			t.Errorf("export ran (%v) for a commit that does not touch .beads", err)
+		}
+		assertIndexFilesUnchanged(t, before)
+	})
 }
