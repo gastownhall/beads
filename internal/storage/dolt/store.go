@@ -640,6 +640,33 @@ func withCLIExecTimeout(ctx context.Context) (context.Context, context.CancelFun
 	return context.WithTimeout(ctx, cliExecTimeoutDuration())
 }
 
+// transferExecTimeout is the default read deadline on the one-shot connections
+// that carry server-side transfer work: CALL DOLT_PUSH / DOLT_FETCH /
+// DOLT_PULL and the merge that follows a pull. It is the server-mode sibling of
+// cliExecTimeout: the pool's much shorter deadline would kill any procedure
+// that performs sustained network I/O to a remote, so these callers open their
+// own connection with this deadline instead.
+//
+// Five minutes is ample for an ordinary store and far too short for a large
+// one (GH#6375: a 2.3GB / ~28k-commit store died at exactly 5m on every
+// attempt). Set BEADS_DOLT_TRANSFER_TIMEOUT to override.
+const transferExecTimeout = 5 * time.Minute
+
+// transferExecTimeoutEnv is the environment variable that overrides
+// transferExecTimeout.
+const transferExecTimeoutEnv = "BEADS_DOLT_TRANSFER_TIMEOUT"
+
+// transferExecTimeoutDuration returns the configured server-side transfer read
+// deadline. BEADS_DOLT_TRANSFER_TIMEOUT overrides the compiled-in
+// transferExecTimeout const; valid time.ParseDuration strings (e.g. "90m",
+// "300s") or bare numbers treated as seconds (e.g. "5400") are accepted. Unset,
+// invalid, or non-positive values fall back to transferExecTimeout, so this
+// never yields the 0 (no deadline) that oneShotConn reserves for backup
+// sync/restore.
+func transferExecTimeoutDuration() time.Duration {
+	return timeoutFromEnv(transferExecTimeoutEnv, transferExecTimeout)
+}
+
 // timeoutFromEnv returns the duration configured in the named env var, falling
 // back to fallback when the var is unset, unparsable, or non-positive. Valid
 // time.ParseDuration strings (e.g. "2m", "90s") or bare numbers treated as
@@ -2910,7 +2937,7 @@ func (s *DoltStore) execWithLongTimeout(ctx context.Context, query string, args 
 // passes s.branch explicitly as a CALL DOLT_PUSH(...) arg, so this fresh
 // connection's default checkout never matters.
 func (s *DoltStore) execWithLongTimeoutNoTx(ctx context.Context, query string, args ...any) error {
-	db, err := s.oneShotConn(5 * time.Minute)
+	db, err := s.oneShotConn(transferExecTimeoutDuration())
 	if err != nil {
 		return err
 	}
@@ -2922,7 +2949,8 @@ func (s *DoltStore) execWithLongTimeoutNoTx(ctx context.Context, query string, a
 // oneShotConn opens a one-shot connection with the given read deadline
 // (0 = no deadline), for callers that pass a DBConn into versioncontrolops.
 // The pool's 10s ReadTimeout kills any server-side procedure that performs
-// sustained network I/O; push/pull use 5m, while backup sync/restore use no
+// sustained network I/O; push/pull use transferExecTimeoutDuration (5m by
+// default, BEADS_DOLT_TRANSFER_TIMEOUT), while backup sync/restore use no
 // deadline at all — a first sync to a remote destination (gs://) can exceed
 // any fixed budget, and the server aborts the transfer when the client
 // connection drops, so a too-short deadline can never converge by retrying.
