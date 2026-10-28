@@ -282,3 +282,63 @@ func expectIssueBatchOf(mock sqlmock.Sqlmock, ids ...string) {
 		WithArgs(args...).
 		WillReturnRows(sqlmock.NewRows([]string{"issue_id", "label"}))
 }
+// TestGetDependencyTreeInTxStubsACrossEdgeButNeverABackEdge walks a→b→c→a
+// plus the cross edge a→c from the root a: the back-edge into a must add no
+// row, while the cross edge into the already-finished c must yield exactly one
+// extra c row, so the answer is a, b, c and one revisit of c — in either child
+// order.
+func TestGetDependencyTreeInTxStubsACrossEdgeButNeverABackEdge(t *testing.T) {
+	for _, order := range [][]dependencyRow{
+		{{id: "b", depType: string(types.DepBlocks)}, {id: "c", depType: string(types.DepBlocks)}},
+		{{id: "c", depType: string(types.DepBlocks)}, {id: "b", depType: string(types.DepBlocks)}},
+	} {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("sqlmock.New: %v", err)
+		}
+
+		mock.ExpectBegin()
+		expectIssue(mock, "a", "a")
+		expectDependencies(mock, "a", order)
+		expectIssueBatchOf(mock, order[0].id, order[1].id)
+		expectIssue(mock, "b", "b")
+		expectDependencies(mock, "b", []dependencyRow{{id: "c", depType: string(types.DepBlocks)}})
+		expectIssueBatchOf(mock, "c")
+		expectIssue(mock, "c", "c")
+		expectDependencies(mock, "c", []dependencyRow{{id: "a", depType: string(types.DepBlocks)}})
+		expectIssueBatchOf(mock, "a")
+		mock.MatchExpectationsInOrder(false)
+
+		tx, err := db.BeginTx(context.Background(), nil)
+		if err != nil {
+			t.Fatalf("BeginTx: %v", err)
+		}
+		tree, err := GetDependencyTreeInTx(context.Background(), tx, "a", 5, false, false)
+		_ = tx.Rollback()
+		db.Close()
+		if err != nil {
+			t.Fatalf("GetDependencyTreeInTx: %v", err)
+		}
+
+		if len(tree) != 4 {
+			t.Fatalf("order %v: len(tree) = %d, want 4 rows (a, b, c and one revisit of c): %v", order, len(tree), treeIDs(tree))
+		}
+		counts := map[string]int{}
+		deduped := 0
+		for _, node := range tree {
+			counts[node.ID]++
+			if node.Deduped {
+				deduped++
+				if node.ID != "c" || node.EdgeFromParent != types.DepBlocks {
+					t.Fatalf("order %v: the stub must be c via blocks, got %+v", order, node)
+				}
+			}
+		}
+		if counts["a"] != 1 || counts["b"] != 1 || counts["c"] != 2 {
+			t.Fatalf("order %v: node counts = %v, want a once, b once, c twice: %v", order, counts, treeIDs(tree))
+		}
+		if deduped != 1 {
+			t.Fatalf("order %v: %d Deduped rows, want exactly one (of c): %v", order, deduped, treeIDs(tree))
+		}
+	}
+}
