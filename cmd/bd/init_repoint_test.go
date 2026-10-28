@@ -215,3 +215,26 @@ func TestInitRepoint_MissingConfiguredNeedsRecreateMissing(t *testing.T) {
 		t.Errorf("metadata.json dolt_database = %q, want %q", got, b)
 	}
 }
+
+// AC-6: a repoint off an empty configured database needs no confirmation, but
+// it is still a repoint, so init says so exactly once.
+func TestInitRepoint_EmptyConfiguredProceedsWithOneNotice(t *testing.T) {
+	w := newRepointWorkspace(t, 0)
+	b := uniqueTestDBName(t) + "_b"
+	t.Cleanup(func() { dropTestDatabase(b, testDoltServerPort) })
+
+	out, code := w.reinit(t, nil, "--database", b)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0\n%s", code, out)
+	}
+	if strings.Contains(out, "Existing issues:") {
+		t.Errorf("an empty database needs no destroy confirmation:\n%s", out)
+	}
+	notice := fmt.Sprintf("Repointing this workspace from database %s (127.0.0.1:%d) to %s (127.0.0.1:%d).", w.a, testDoltServerPort, b, testDoltServerPort)
+	if n := strings.Count(out, notice); n != 1 {
+		t.Errorf("repoint notice printed %d times, want 1 (%q):\n%s", n, notice, out)
+	}
+	if got := w.recordedDatabase(t); got != b {
+		t.Errorf("metadata.json dolt_database = %q, want %q", got, b)
+	}
+}

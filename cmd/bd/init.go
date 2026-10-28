@@ -1246,12 +1246,14 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			plannedDBPathAbs = filepath.Dir(plannedDBPathAbs)
 		}
 		initGateHandle, gateErr := acquireInitMutationGate(rootCtx, beadsDirAbs, plannedDBPathAbs, func() error {
-			return runInitReinitPreflight(reinitLocal, quiet, initID, destroyTokenPrefix, destroyToken)
+			return runInitReinitPreflight(reinitLocal, initID, destroyTokenPrefix, destroyToken)
 		})
 		if gateErr != nil {
 			return gateErr
 		}
 		defer func() { _ = initGateHandle.Release() }()
+		// Every repoint that got this far proceeds (#6172): announce it once.
+		initID.printRepointNotice(quiet)
 
 		// Resolve the operational storage path only after held-gate preflight
 		// succeeds. ResolveDoltDir retains its mkdir-on-use behavior for a
@@ -3009,18 +3011,13 @@ Aborting.`, dbPath, prefix)
 
 // runInitReinitPreflight confirms the destructive local replacement while the
 // caller holds init's complete exclusive gate set.
-func runInitReinitPreflight(reinitLocal, quiet bool, id initIdentity, prefix, destroyToken string) error {
+func runInitReinitPreflight(reinitLocal bool, id initIdentity, prefix, destroyToken string) error {
 	if !reinitLocal {
 		return nil
 	}
 	count, present, err := countConfiguredIssues(id)
-	if err != nil && id.Repoints() {
-		if present {
-			return initRepointUnreadableError(id, err)
-		}
-		// Absent, and ADR-0004's guard on the configured database admitted it.
-		id.printRepointNotice(quiet)
-		return nil
+	if err != nil && present && id.Repoints() {
+		return initRepointUnreadableError(id, err)
 	}
 	// Same identity: a count error still reads as consent, which documented
 	// --reinit-local recovery of a corrupt database depends on.

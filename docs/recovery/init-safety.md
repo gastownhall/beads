@@ -464,6 +464,12 @@ counts its issues, and the missing-database refusal above is about it at its
 own server. Exported `BEADS_DOLT_SERVER_DATABASE`, `--server-host` and
 `--server-port` do not change which database is counted.
 
+A repoint that proceeds says so once on stderr, unless `--quiet` is given:
+
+```
+Repointing this workspace from database myproject (127.0.0.1:3306) to other (127.0.0.1:3306).
+```
+
 **What happened**
 
 The configured database is there (its directory exists under the Dolt data
