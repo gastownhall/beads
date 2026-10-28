@@ -135,6 +135,9 @@ func runCreateProxiedSingle(_ *cobra.Command, ctx context.Context, in createInpu
 		DefaultPriority: in.priorityDefault,
 	})
 	if err != nil {
+		if handled, rendered := reportCreateOfRetiredID(err); handled {
+			return rendered
+		}
 		// RULING R1, reported the same way the direct route reports it: an
 		// occupied --id is a refusal, not a silent full-row upsert dressed up
 		// as success.

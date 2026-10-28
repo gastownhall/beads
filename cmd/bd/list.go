@@ -220,8 +220,8 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 
 	// `bd list`'s PAGE is on issueops.Reader. The filter is still built here
 	// because --watch and the hierarchical --parent tree consume it as a VALUE:
-	// the poll loop re-runs it on a ticker and the tree walk re-parents a copy
-	// of it at every level, neither of which a page can express. Building it
+	// the poll loop re-runs it every poll interval and the tree walk re-parents
+	// a copy of it at every level, neither of which a page can express. Building it
 	// unconditionally also keeps the page query ahead of the tree branch, so
 	// `--parent --pretty --max-rows N` still refuses on the cap where it did.
 	cfg, err := workapi.LoadStoreListConfig(rootCtx, store)

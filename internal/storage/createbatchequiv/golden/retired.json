@@ -1,0 +1,73 @@
+{
+  "tables": {
+    "bd_events_journal": {
+      "rows": 4,
+      "sha256": "1ac4f785335883002148216f908a7ca9b6fa66ce7bf2a31286ce263b46b2bf0a"
+    },
+    "child_counters": {
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "comments": {
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "dependencies": {
+      "rows": 1,
+      "sha256": "72c4057a6c29a473155041be2eb3b9fd2501b6d0ccbdb63e5da3dbf221bb8fe3"
+    },
+    "events": {
+      "rows": 6,
+      "sha256": "df8c723c7012d040454bc98512308fffb54dbe4a46380be610318f93be5a71f3"
+    },
+    "events_ids": {
+      "rows": 1,
+      "sha256": "76f2bc97f719b07a8369ac6989a75d2091c4dc11ec9154555bb94bbef6cc27a3"
+    },
+    "issue_versions": {
+      "rows": 3,
+      "sha256": "8b2165a1d22c31f1a8802900d5a96ace04dd18bdb53f98e98b4267fa7afa692d"
+    },
+    "issues": {
+      "rows": 4,
+      "sha256": "fa0207c6a2b1460a7413cd71b2ddec00995ef415b87b5d672957fec569c5107b"
+    },
+    "issues_updated_at": {
+      "rows": 4,
+      "sha256": "8fc1c313c8206a806fbf03a715d64a282620eba4956ef934327b7c5119406548"
+    },
+    "labels": {
+      "rows": 2,
+      "sha256": "0a48f0167050df7f0cfce51e3d2074c008a98641c3cb73ad4cbd945570b42cae"
+    },
+    "wisp_dependencies": {
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "wisp_events": {
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "wisp_labels": {
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "wisps": {
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  },
+  "skipped": [
+    "retired eq-r1",
+    "retired eq-rw",
+    "eq-rf -\u003e eq-r1: target not found"
+  ],
+  "stale": null,
+  "changed": [
+    "dependencies",
+    "events",
+    "issues",
+    "labels"
+  ],
+  "counter": []
+}

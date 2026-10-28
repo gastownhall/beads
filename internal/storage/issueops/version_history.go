@@ -65,8 +65,8 @@ import (
 // steps follow as their own PR.
 //
 // "Single writer" means one writer AT A TIME per store, not merely one
-// clone. SELECT COALESCE(MAX(revision), 0) + 1 against PRIMARY KEY
-// (issue_id, revision) is not a safe allocator for two concurrent
+// clone. The MAX(revision) + 1 read against PRIMARY KEY (issue_id, revision)
+// in recordVersionAtInTx is not a safe allocator for two concurrent
 // transactions in one store either, and the label and dependency paths are
 // not serialized on the issue row the way the claim/close CAS is; the
 // RunDualWrite* contract cases exclude concurrent writers, so no test
@@ -115,10 +115,14 @@ import (
 // row, and so no content token, comes of it. A create-shaped mint never meets a
 // legacy row (its call site has just inserted the row), so it runs the gate
 // whenever it mints; a new row flagged no-history is stamped but not minted, so
-// nothing is canonicalized for it. So the switch's check keeps only the rows that
-// participate (ParticipatingIssueIDsInTx): a legacy row blocks no write, so it does
-// not block the switch either. Where the store cannot say which rows participate, the
-// check keeps legacy rows too, an over-approximation that can only refuse more.
+// nothing is canonicalized for it. So a legacy row blocks no write to itself, and
+// the switch's check keeps the rows that participate (ParticipatingIssueIDsInTx)
+// and, of the legacy rows, only the templates: `bd mol pour` and `bd mol bond`
+// copy a proto's metadata and gate timeouts into every row they create, that
+// create-shaped mint runs the gate, and bd update, the in-place fix, refuses a
+// template. It warns of the other legacy issues of a proto, which can be fixed in
+// place. Where the store cannot say which rows participate, the check keeps legacy
+// rows too, an over-approximation that can only refuse more.
 //
 // That check ran once, at that moment. Nothing keeps a writer that does not mint
 // from adding such a row afterwards, even right after the switch is on; if the
@@ -732,9 +736,19 @@ func recordVersionAtInTx(ctx context.Context, tx DBTX, issueID, actor string, at
 		return err
 	}
 
+	// The scalar-subquery form is deliberate. On Dolt 2.4.0 through 2.4.2,
+	// go-mysql-server's aggregate-over-index rewrite
+	// (dolthub/go-mysql-server#3907) returns zero rows, not one NULL row, for an
+	// ungrouped MAX over an empty primary-key prefix (dolthub/dolt#12093, fixed
+	// in 2.5.0), so "SELECT COALESCE(MAX(revision), 0) + 1 FROM issue_versions
+	// WHERE issue_id = ?" fails every first mint there. Embedded mode links a
+	// fixed engine, but server mode runs whatever dolt sql-server the user has.
+	// The outer SELECT has no FROM and yields exactly one row on every engine.
+	// Both forms pass the embedded tests on a fixed engine, so the sqlmock pins
+	// in version_history_preenable_scan_test.go are what hold this text.
 	var newRevision int64
 	if err := tx.QueryRowContext(ctx,
-		"SELECT COALESCE(MAX(revision), 0) + 1 FROM issue_versions WHERE issue_id = ?", issueID,
+		"SELECT COALESCE((SELECT MAX(revision) FROM issue_versions WHERE issue_id = ?), 0) + 1", issueID,
 	).Scan(&newRevision); err != nil {
 		return fmt.Errorf("versioned history: compute next revision for %s: %w", issueID, err)
 	}

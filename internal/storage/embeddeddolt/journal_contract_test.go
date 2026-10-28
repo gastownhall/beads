@@ -43,6 +43,42 @@ func TestJournalContract(t *testing.T) {
 	t.Run("HeadSurvivesAFullPrune", func(t *testing.T) {
 		conformance.RunJournalHeadSurvivesAFullPrune(t, ctx, fixture)
 	})
+	t.Run("ArrivalStampsAWispCreateWithItsRecordSeq", func(t *testing.T) {
+		conformance.RunJournalArrivalStampsAWispCreateWithItsRecordSeq(t, ctx, fixture)
+	})
+	t.Run("ArrivalOrdersABatchByItem", func(t *testing.T) {
+		conformance.RunJournalArrivalOrdersABatchByItem(t, ctx, fixture)
+	})
+	t.Run("ArrivalIsOnEveryReadPath", func(t *testing.T) {
+		conformance.RunJournalArrivalIsOnEveryReadPath(t, ctx, fixture)
+	})
+	t.Run("ArrivalNeverChanges", func(t *testing.T) {
+		conformance.RunJournalArrivalNeverChanges(t, ctx, fixture)
+	})
+	t.Run("ArrivalOnlyWhileJournaling", func(t *testing.T) {
+		conformance.RunJournalArrivalOnlyWhileJournaling(t, ctx, fixture)
+	})
+	t.Run("ArrivalOnlyOnTheWispPlane", func(t *testing.T) {
+		conformance.RunJournalArrivalOnlyOnTheWispPlane(t, ctx, fixture)
+	})
+	t.Run("ArrivalRecoversCreateOrderAfterTruncation", func(t *testing.T) {
+		conformance.RunJournalArrivalRecoversCreateOrderAfterTruncation(t, ctx, fixture)
+	})
+	t.Run("ArrivalIsNeverReused", func(t *testing.T) {
+		conformance.RunJournalArrivalIsNeverReused(t, ctx, fixture)
+	})
+	t.Run("ArrivalIgnoresSuppliedValues", func(t *testing.T) {
+		conformance.RunJournalArrivalIgnoresSuppliedValues(t, ctx, fixture)
+	})
+	t.Run("ArrivalReimportKeepsTheStamp", func(t *testing.T) {
+		conformance.RunJournalArrivalReimportKeepsTheStamp(t, ctx, fixture)
+	})
+	t.Run("ArrivalFirstCreateRecordStampsAnUnstampedRow", func(t *testing.T) {
+		conformance.RunJournalArrivalFirstCreateRecordStampsAnUnstampedRow(t, ctx, fixture)
+	})
+	t.Run("ArrivalRenameKeepsTheStamp", func(t *testing.T) {
+		conformance.RunJournalArrivalRenameKeepsTheStamp(t, ctx, fixture)
+	})
 	t.Run("EveryMutationKindLandsARow", func(t *testing.T) {
 		conformance.RunJournalEveryMutationKindLandsARow(t, ctx, fixture)
 	})
@@ -59,11 +95,19 @@ func newEmbeddedJournalFixture(t *testing.T, te *testEnv, prefix string) conform
 	if !ok {
 		t.Fatalf("%T does not implement storage.EventsJournalCursor", store)
 	}
+	// The store hands out no Importer role: `bd import` runs through its bulk
+	// upsert, so the import cases drive that door.
+	arrival := conformance.ArrivalHooksFromSource(t, store, func(ctx context.Context, id string) error {
+		return store.PromoteFromEphemeral(ctx, id, "actor")
+	})
+	arrival.Import = conformance.ArrivalUpsertImportHook(store)
+	arrival.Rename = conformance.ArrivalRenameHook(store)
 	return conformance.JournalFixture{
 		IssuePrefix:       prefix,
 		Journal:           cursor,
 		SetJournalEnabled: store.SetEventsJournalEnabled,
 		Prune:             store.PruneEventsJournal,
+		Arrival:           arrival,
 		Mutations: conformance.JournalMutations{
 			Create: func(ctx context.Context, id string) error {
 				return store.CreateIssue(ctx, &types.Issue{

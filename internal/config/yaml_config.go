@@ -8,11 +8,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/ceiling"
 	"github.com/steveyegge/beads/internal/gitenv"
+	"github.com/steveyegge/beads/internal/remedy"
 	"gopkg.in/yaml.v3"
 )
 
@@ -300,19 +302,24 @@ func checkSecretGitTracked(configPath, key string) error {
 		return nil
 	}
 	envVar := secretKeyEnvVarHint(key)
+	// The config path goes into the git rm and echo commands as one shell
+	// word each: bare, a workspace path with a space in it would untrack the
+	// wrong file and append to another.
+	configArg, configNote := remedy.CommandArg(runtime.GOOS, configPath, "<config>")
+	ignoreArg, ignoreNote := remedy.CommandArg(runtime.GOOS, filepath.Join(filepath.Dir(configPath), ".gitignore"), "<gitignore>")
 	return fmt.Errorf(
 		"refusing to write secret key %q to git-tracked config file %s\n\n"+
 			"This would expose your secret in git history. Instead:\n"+
 			"  export %s=\"your-key-here\"    # add to ~/.secrets or ~/.zshrc\n\n"+
 			"Or move config.yaml out of git tracking:\n"+
-			"  git rm --cached %s\n"+
-			"  echo \"config.yaml\" >> %s/.gitignore\n\n"+
+			"  git rm --cached %s%s\n"+
+			"  echo \"config.yaml\" >> %s%s\n\n"+
 			"To override this check (e.g., for testing):\n"+
 			"  bd config set --force-git-tracked %s \"value\"",
-		key, configPath,
+		key, remedy.PrintedValue(configPath),
 		envVar,
-		configPath,
-		filepath.Dir(configPath),
+		configArg, configNote,
+		ignoreArg, ignoreNote,
 		key,
 	)
 }
@@ -465,6 +472,23 @@ func WorkspaceYamlValueStrict(beadsDir, key string) (value string, present bool,
 // rather than silently treated as absent. Initialize is equally strict — it
 // fails outright on a config.local.yaml it cannot merge.
 func WorkspaceYamlValueStrictWithLocal(beadsDir, key string) (value string, present bool, err error) {
+	return workspaceYamlValueWithLocal(beadsDir, key, false)
+}
+
+// WorkspaceYamlSettingWithLocal is WorkspaceYamlValueStrictWithLocal for a
+// caller asking what a workspace's config sets, the way bd's merged reader
+// answers it there: a YAML null at the key or at any parent of it reads as
+// absent in that layer, as it does for config.GetYamlConfig, instead of as an
+// error. That is the shape a user leaves by commenting out every child of a
+// section ("dolt:\n  # mode: server\n"), and bd itself runs in that
+// workspace as if the key were unset. Every other error is kept: an
+// unreadable or unparseable file, a non-null non-map parent, and a non-scalar
+// value.
+func WorkspaceYamlSettingWithLocal(beadsDir, key string) (value string, present bool, err error) {
+	return workspaceYamlValueWithLocal(beadsDir, key, true)
+}
+
+func workspaceYamlValueWithLocal(beadsDir, key string, nullIsUnset bool) (value string, present bool, err error) {
 	if beadsDir == "" {
 		return "", false, nil
 	}
@@ -478,7 +502,7 @@ func WorkspaceYamlValueStrictWithLocal(beadsDir, key string) (value string, pres
 		names = names[1:]
 	}
 	for _, name := range names {
-		value, present, err = strictYamlValueAtPath(filepath.Join(beadsDir, name), key)
+		value, present, err = yamlValueAtPath(filepath.Join(beadsDir, name), key, nullIsUnset)
 		if err != nil || present {
 			return value, present, err
 		}
@@ -487,6 +511,13 @@ func WorkspaceYamlValueStrictWithLocal(beadsDir, key string) (value string, pres
 }
 
 func strictYamlValueAtPath(path, key string) (value string, present bool, err error) {
+	return yamlValueAtPath(path, key, false)
+}
+
+// yamlValueAtPath reads key from the YAML file at path with the strict
+// contract of WorkspaceYamlValueStrict; nullIsUnset reads a null at the key or
+// at a parent of it as absent instead of as an error.
+func yamlValueAtPath(path, key string, nullIsUnset bool) (value string, present bool, err error) {
 	data, err := os.ReadFile(path) //nolint:gosec // path is caller-resolved workspace state
 	if os.IsNotExist(err) {
 		return "", false, nil
@@ -501,7 +532,7 @@ func strictYamlValueAtPath(path, key string) (value string, present bool, err er
 	if root == nil {
 		return "", false, nil
 	}
-	if raw, ok := root[key]; ok {
+	if raw, ok := root[key]; ok && (raw != nil || !nullIsUnset) {
 		value, err := strictYamlScalarString(raw)
 		if err != nil {
 			return "", true, err
@@ -516,7 +547,7 @@ func strictYamlValueAtPath(path, key string) (value string, present bool, err er
 			return "", true, fmt.Errorf("workspace config key %q has a non-map parent", key)
 		}
 		node, ok = m[part]
-		if !ok {
+		if !ok || (node == nil && nullIsUnset) {
 			return "", false, nil
 		}
 		if i == len(parts)-1 {

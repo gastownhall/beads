@@ -1412,21 +1412,21 @@ func TestServedReaderDoesNotMutateTheCallerRequestOverTheWire(t *testing.T) {
 	build := func() (issueops.ReadyRequest, issueops.ListRequest, issueops.GetRequest) {
 		limit := 5
 		return issueops.ReadyRequest{
-				Labels:         []string{"Beta", "alpha"},
-				LabelsAny:      []string{"gamma", " delta "},
-				ExcludeLabels:  []string{"omega"},
-				ExcludeTypes:   []string{"chore,epic", " feat "},
-				MetadataFields: map[string]string{"kind": "probe"},
-				Sort:           "priority",
-				Limit:          &limit,
-			}, issueops.ListRequest{
-				Labels:         []string{"Beta", "alpha"},
-				LabelsAny:      []string{"gamma", " delta "},
-				ExcludeLabels:  []string{"omega"},
-				MetadataFields: map[string]string{"kind": "probe"},
-				SortBy:         "id",
-				Limit:          &limit,
-			}, issueops.GetRequest{ID: listID("nomut", "absent")}
+			Labels:         []string{"Beta", "alpha"},
+			LabelsAny:      []string{"gamma", " delta "},
+			ExcludeLabels:  []string{"omega"},
+			ExcludeTypes:   []string{"chore,epic", " feat "},
+			MetadataFields: map[string]string{"kind": "probe"},
+			Sort:           "priority",
+			Limit:          &limit,
+		}, issueops.ListRequest{
+			Labels:         []string{"Beta", "alpha"},
+			LabelsAny:      []string{"gamma", " delta "},
+			ExcludeLabels:  []string{"omega"},
+			MetadataFields: map[string]string{"kind": "probe"},
+			SortBy:         "id",
+			Limit:          &limit,
+		}, issueops.GetRequest{ID: listID("nomut", "absent")}
 	}
 	ready, list, get := build()
 	wantReady, wantList, wantGet := build()

@@ -56,6 +56,37 @@ bd mol wisp gc        # garbage collect old/abandoned wisps
 bd purge --force      # delete all closed ephemeral beads
 ```
 
+### Retiring ids with `--retain-ids`
+
+By default a purged or pruned id is free again: a later `bd create --id`
+with that id succeeds and writes a new issue. If your ids are idempotency
+keys, such as an orchestrator's pinned operation ids, pass `--retain-ids` to
+`bd purge` or `bd prune`:
+
+```bash
+bd purge --force --retain-ids
+bd prune --older-than 30d --force --retain-ids
+```
+
+In the same transaction as the delete, bd records a small permanent tombstone
+for every deleted id: the id and its `closed_at`, nothing else. After that:
+
+- `bd create --id <id>` fails with `idempotency_expired` (HTTP 410). It never
+  writes a new issue.
+- `bd import` skips the row and lists it under `retired_ids`.
+- Generated ids never reuse a retired id.
+
+No command removes a tombstone. Only a sweep with `--retain-ids` retires ids.
+A plain `bd purge` or `bd prune`, `bd delete`, and `bd gc` all leave deleted
+ids reusable. Over HTTP, the server must advertise `issues.sweep.retainIds`;
+without it, bd refuses the sweep before sending anything.
+
+A sweep with `--retain-ids` briefly blocks or conflicts with creates of
+unrelated ids that hash to the same coordination shard as one it retires,
+until the sweep commits. Its reach grows with its size, so keep large sweeps
+in batches of about 100 rows: `bd purge --limit 100`, repeated until nothing
+remains. `bd prune` has no `--limit`; narrow it with `--older-than` instead.
+
 ## Forcing a Phase
 
 `bd mol bond` accepts phase overrides when combining work:

@@ -195,6 +195,22 @@ const CapListIDs = "issues.list.ids"
 // token, against a server that does not advertise it.
 const CapDependenciesBlockingIsBlocked = "dependencies.blocking.isBlocked"
 
+// CapIssuesArrivalSeq is the behavior capability announcing `arrival_seq` on
+// every Issue-shaped response: the commit-ordered create sequence storage
+// stamps on a wisp-plane row (types.Issue.ArrivalSeq) — the events-journal seq
+// of the row's create record, kept on the row so a consumer can recover create
+// order after those records are pruned. It names a MEMBER added to existing
+// response schemas, so it rides behaviorCapabilities: a client that sees it
+// knows an absent member means the row carries no stamp, not that the server
+// predates the member.
+//
+// It is BUILD-LEVEL, like every other behavior token: it says this server
+// knows the member, not that rows are being stamped right now. Rows are
+// stamped only while the workspace journals. A client learns that the way it
+// learns journal activation for any purpose: events.list answers 409
+// events_journal_disabled when the journal is off.
+const CapIssuesArrivalSeq = "issues.arrivalSeq"
+
 // CapIssuesSweepWispsPlane is the behavior capability that advertises the
 // `wisps-plane` value of SweepRequest.tier (sweep.go, spec SweepRequest.tier):
 // a third, wider tier that clears the whole wisps table plus any durable bead
@@ -224,6 +240,21 @@ const CapIssuesSweepLiveDependents = "issues.sweep.liveDependents"
 // invalid_argument`/`unknown_parameter`. The client MUST check this token
 // before sending the member to a server that may predate it.
 const CapIssuesSweepLimit = "issues.sweep.limit"
+
+// CapIssuesSweepRetainIDs is the behavior capability that advertises
+// SweepRequest.retain_ids and the paired SweepResult.retain_ids echo
+// (sweep.go): a sweep that retires every id it deletes with a permanent
+// tombstone (issueops.SweepRequest.RetainIDs).
+//
+// IT PROMISES MORE THAN THE MEMBER. A server advertising it also refuses a
+// create of a retired id on every create operation — `410
+// idempotency_expired` on createIssue and on an applyBatch create item — so
+// the guarantee holds on the read side of the tombstone, not just the write
+// side. An older server answers the request member with `400
+// invalid_argument`/`unknown_parameter`; a client that needs the guarantee
+// MUST check this token and refuse to sweep without it, never fall back to a
+// sweep that leaves the ids reusable.
+const CapIssuesSweepRetainIDs = "issues.sweep.retainIds"
 
 // CapBatchApplyDepAddLineage is the behavior capability that advertises
 // ApplyDepAddItem's `has_spawner` and `thread_id` members (batch_apply.go):
@@ -1130,10 +1161,12 @@ func (r route) specPathOf() string {
 var behaviorCapabilities = []string{
 	CapProjectEnforce, CapBatchApplyLarge, CapIssuesListSort, CapIssuesCountScope,
 	CapIssuesSweepWispsPlane, CapIssuesSweepLiveDependents, CapIssuesSweepLimit,
+	CapIssuesSweepRetainIDs,
 	CapBatchApplyDepAddLineage, CapIssuesUpdateAllowTemplate, CapIssuesCreateDefaultPriority,
 	CapIssuesCloseAutoCloseMolecule, CapIssuesListSearch,
 	CapIssuesListNoAssignee, CapIssuesListTitle, CapListIDs, CapIssuesUpdatePersistence, CapDependenciesBlockingIsBlocked, CapIssuesUpdateClaim,
 	CapIssuesCreateGates, CapIssuesUpdateGates, CapIssuesListFilters,
+	CapIssuesArrivalSeq,
 }
 
 // Capabilities lists what this build advertises in ContextResponse.capabilities:

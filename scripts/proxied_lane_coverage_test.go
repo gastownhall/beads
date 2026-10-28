@@ -142,8 +142,16 @@ func TestLaneListedTestsReportsShardScriptStderr(t *testing.T) {
 	if err == nil {
 		t.Fatal("laneListedTests: want an error for the shard the script refused, got nil")
 	}
-	if !strings.Contains(err.Error(), "shard.sh 2 2: exit status 1: "+refusal) {
-		t.Errorf("laneListedTests error does not carry the refusing shard and the script's stderr %q:\n%v", refusal, err)
+	// The shard and the refusal are checked apart: bash can write to stderr
+	// before the script runs (a setlocale warning for an LC_ALL naming an
+	// uninstalled locale, or output from a BASH_ENV file), and that lands
+	// between the exit status and the refusal. The refusal is only on the
+	// script's stderr, never in the stdout the error also carries.
+	if !strings.Contains(err.Error(), "shard.sh 2 2: exit status 1") {
+		t.Errorf("laneListedTests error does not name the refusing shard and its exit status:\n%v", err)
+	}
+	if !strings.Contains(err.Error(), refusal) {
+		t.Errorf("laneListedTests error does not carry the script's stderr %q:\n%v", refusal, err)
 	}
 }
 

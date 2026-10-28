@@ -47,22 +47,26 @@ func (s *scriptedWatchSource) source() issueWatchSource {
 
 // driveWatchLoop runs the loop over src for every scripted poll, stops it, and
 // returns whether it reported watching plus everything it wrote to stderr.
+// Each wait the loop asks for fires only once the loop has asked for it, i.e.
+// after the previous poll (and any redraw) finished.
 func driveWatchLoop(t *testing.T, src *scriptedWatchSource) (bool, string) {
 	t.Helper()
 	polls := len(src.polls)
+	p := newPacedPoll(t)
 	var watched bool
 	stderr := captureStderr(t, func() {
-		tick := make(chan time.Time)
 		stop := make(chan os.Signal, 1)
-		done := make(chan bool)
-		go func() { done <- watchIssueLoop(context.Background(), src.source(), tick, stop) }()
-		// tick is unbuffered, so each send lands only once the loop is back in
-		// its select, i.e. after the previous poll (and any redraw) finished.
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			watched = watchIssueLoop(context.Background(), src.source(), p.poll, stop)
+		}()
 		for range polls {
-			tick <- time.Time{}
+			p.fire(p.next(done))
 		}
+		p.next(done) // the wait after the last poll; never fired
 		stop <- os.Interrupt
-		watched = <-done
+		<-done
 	})
 	return watched, stderr
 }
@@ -146,7 +150,116 @@ func TestWatchIssueLoopStopsWhenNothingToWatch(t *testing.T) {
 			return nil, nil
 		},
 	}
-	if watchIssueLoop(context.Background(), src, make(chan time.Time), make(chan os.Signal)) {
+	poll := func() <-chan time.Time {
+		t.Fatal("poll requested after a failed initial render")
+		return nil
+	}
+	if watchIssueLoop(context.Background(), src, poll, make(chan os.Signal)) {
 		t.Fatal("watchIssueLoop reported watching after a failed initial render")
+	}
+}
+
+// TestWatchIssueLoopWaitsAfterEachFetch pins `bd show --watch`'s cadence on
+// both routes: each fetch, whether unchanged, failed or redrawn, starts only
+// after a wait the loop asked for once the previous fetch (and redraw)
+// returned, and that wait has fired. A fixed-rate ticker instead starts the
+// next fetch the moment a slow one returns (GH#3415).
+func TestWatchIssueLoopWaitsAfterEachFetch(t *testing.T) {
+	base := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	open := &types.Issue{ID: "w-3", Status: types.StatusOpen, UpdatedAt: base}
+	closed := &types.Issue{ID: "w-3", Status: types.StatusClosed, UpdatedAt: base.Add(time.Second)}
+	polls := []watchPoll{
+		{issue: open},
+		{err: errors.New("backend blip")},
+		{issue: closed},
+		{issue: closed},
+	}
+
+	p := newPacedPoll(t)
+	src := issueWatchSource{
+		render: func(context.Context) *types.Issue {
+			p.record("render")
+			return open
+		},
+		fetch: func(context.Context) (*types.Issue, error) {
+			p.record("fetch")
+			defer p.record("fetched")
+			next := polls[0]
+			polls = polls[1:]
+			return next.issue, next.err
+		},
+	}
+	scripted := len(polls)
+	var watched bool
+	captureStderr(t, func() {
+		stop := make(chan os.Signal, 1)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			watched = watchIssueLoop(context.Background(), src, p.poll, stop)
+		}()
+		for range scripted {
+			p.fire(p.next(done))
+		}
+		p.next(done) // the wait after the last fetch; never fired
+		stop <- os.Interrupt
+		<-done
+	})
+
+	if !watched {
+		t.Fatal("watchIssueLoop reported nothing watched after a successful render")
+	}
+	want := []string{
+		"render",
+		"wait", "fire", "fetch", "fetched", // unchanged
+		"wait", "fire", "fetch", "fetched", // failed
+		"wait", "fire", "fetch", "fetched", "render", // changed
+		"wait", "fire", "fetch", "fetched", // unchanged again
+		"wait",
+	}
+	if got := p.events(); !slices.Equal(got, want) {
+		t.Fatalf("timeline =\n  %v\nwant\n  %v", got, want)
+	}
+}
+
+// TestWatchIssueLoopStopDuringFetchEndsLoop pins that a Ctrl+C arriving while
+// a fetch is running ends `bd show --watch` once that fetch returns, before
+// any further fetch.
+func TestWatchIssueLoopStopDuringFetchEndsLoop(t *testing.T) {
+	issue := &types.Issue{ID: "w-4", Status: types.StatusOpen}
+	p := newPacedPoll(t)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	fetches := 0
+	src := issueWatchSource{
+		render: func(context.Context) *types.Issue { return issue },
+		fetch: func(context.Context) (*types.Issue, error) {
+			fetches++
+			if fetches == 1 {
+				close(started)
+				<-release
+			}
+			return issue, nil
+		},
+	}
+	var watched bool
+	stderr := captureStderr(t, func() {
+		stop := make(chan os.Signal, 1)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			watched = watchIssueLoop(context.Background(), src, p.poll, stop)
+		}()
+		p.stopDuringRefresh(stop, started, release, done)
+	})
+
+	if !watched {
+		t.Fatal("watchIssueLoop reported nothing watched after a successful render")
+	}
+	if fetches != 1 {
+		t.Fatalf("fetches = %d, want 1 (stop sent during the first); timeline %v", fetches, p.events())
+	}
+	if !strings.HasSuffix(stderr, "\nStopped watching.\n") {
+		t.Fatalf("stop did not end with %q:\n%s", "Stopped watching.", stderr)
 	}
 }

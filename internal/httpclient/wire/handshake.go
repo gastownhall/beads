@@ -208,6 +208,13 @@ const CapListFilters = "issues.list.filters"
 // server that would answer `unknown_parameter`.
 const CapBlockingIsBlocked = "dependencies.blocking.isBlocked"
 
+// CapArrivalSeq is the behavior capability announcing `arrival_seq` on every
+// Issue-shaped response (types.Issue.ArrivalSeq), spelled exactly as httpapi's
+// CapIssuesArrivalSeq. It is build-level: whether rows are actually being
+// stamped follows the workspace's journal activation, which events.list's 409
+// events_journal_disabled reports.
+const CapArrivalSeq = "issues.arrivalSeq"
+
 // CapBatchApplyLarge is the behavior capability announcing that issues.batchApply
 // accepts a batch larger than the compiled-in floor (100 items), up to the
 // raised ceiling (1000), spelled exactly as httpapi's constant of the same name
@@ -256,6 +263,17 @@ const CapSweepLiveDependents = "issues.sweep.liveDependents"
 // server. encode/ledger.go's W-SweepRequest.Limit row records the S4 closure
 // of what used to be a permanent refusal.
 const CapSweepLimit = "issues.sweep.limit"
+
+// CapSweepRetainIDs is the behavior capability announcing that sweepIssues
+// honors SweepRequest.retain_ids (a sweep that retires every id it deletes
+// with a permanent tombstone) and echoes SweepResult.retain_ids — and that
+// every create on the server refuses a retired id with 410
+// idempotency_expired. Spelled exactly as httpapi's CapIssuesSweepRetainIDs
+// (held to it by TestCapabilityTableMatchesTheServerRouteTable). sweeper.go
+// reads it before sending the member and refuses LOCALLY without it: a sweep
+// that left the ids reusable is the one outcome a caller asking for retention
+// must never get.
+const CapSweepRetainIDs = "issues.sweep.retainIds"
 
 // CapBatchApplyDepAddLineage is the behavior capability announcing that
 // issues.batchApply's dep_add items accept `has_spawner` and `thread_id`,
@@ -465,11 +483,12 @@ func (e *WireRevisionSkewError) Unwrap() error { return ErrWireRevisionSkew }
 // test goes red the moment one ships without the other.
 var behaviorCapabilities = []string{
 	CapProjectEnforce, CapBatchApplyLarge, CapListSort, CapCountScope,
-	CapSweepWispsPlane, CapSweepLiveDependents, CapSweepLimit,
+	CapSweepWispsPlane, CapSweepLiveDependents, CapSweepLimit, CapSweepRetainIDs,
 	CapBatchApplyDepAddLineage, CapIssuesUpdateAllowTemplate, CapIssuesCreateDefaultPriority,
 	CapCloseAutoCloseMolecule, CapListSearch,
 	CapListNoAssignee, CapListTitle, CapListIDs, CapIssuesUpdatePersistence, CapBlockingIsBlocked, CapIssuesUpdateClaim,
 	CapIssuesCreateGates, CapIssuesUpdateGates, CapListFilters,
+	CapArrivalSeq,
 }
 
 // CapabilityFor reports the capability token gating op, and whether op is on

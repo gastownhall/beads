@@ -56,6 +56,23 @@ If the current storage interface cannot express a needed operation, widen the
 interface or route the issue to the driver instead of embedding storage-engine
 logic in core.
 
+One exception is granted by the maintainers, narrowly: `databaseLocked` in
+`internal/doltserver` probes Dolt's own `.dolt/noms/LOCK` with a shared,
+non-blocking lock that it releases at once, and never creates or writes that
+file. Its only purpose is to decide whether the workspace's Dolt database
+directory (the store's CLI directory: `.beads/dolt/<db>` by default, or
+`<db>` under a custom `dolt_data_dir` or under the shared server's data
+directory) is served by a live dolt process, which decides whether bd runs the
+dolt CLI on that directory or goes through the SQL server. A busy lock
+(another process holds it, as every dolt process with the database open does)
+reads as served. A probe that cannot open the file, or whose lock call
+fails for any other reason, reads as not served and falls back to the SQL
+route, the safe direction. The exception lasts until the Dolt driver can
+report whether a directory is served, and covers no other lock (the
+test-only `testutil.HoldDoltDatabaseLock` is outside it). The same proof also
+reads Dolt's `.dolt/sql-server.info` for the port and PID it names, as the
+dolt CLI does, the way bd already reads `repo_state.json`.
+
 This boundary is mechanically enforced for non-test code by a `depguard`
 rule in `.golangci.yml` that denies `github.com/dolthub/` imports outside
 `internal/storage/` and `internal/doltserver/` (the linter config does not

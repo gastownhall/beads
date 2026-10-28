@@ -95,7 +95,8 @@ func TestEmbeddedCorruptMetadataFailsLoudUntilRestored(t *testing.T) {
 	// run keeps stdout and stderr apart. Binding the workspace prints the
 	// same warning before every command, bd version included, so a check on
 	// the whole output passes on that warning whatever the command itself
-	// does: the warning is checked once, and each refusal on its Error line.
+	// does: the warning is checked on its own line, and each refusal on its
+	// Error line.
 	run := func(args ...string) (stdout, stderr string, err error) {
 		cmd := exec.Command(bd, args...)
 		cmd.Dir = dir
@@ -104,21 +105,31 @@ func TestEmbeddedCorruptMetadataFailsLoudUntilRestored(t *testing.T) {
 		return outBuf.String(), errBuf.String(), err
 	}
 
+	// checkWarning finds that warning by its own prefix, not as the first
+	// warning: bdEnv passes on the caller's BD_OTEL_* variables, and
+	// telemetry warns about a legacy one before the workspace is bound.
+	checkWarning := func(cmdline, stderr string) {
+		t.Helper()
+		warning := firstLineWithPrefix(stderr, "warning: load ")
+		for _, want := range []string{"metadata.json", "parsing config:", "no storage database was opened or modified"} {
+			if !strings.Contains(warning, want) {
+				t.Errorf("%s with corrupt metadata.json: warning %q missing %q\nstderr:\n%s", cmdline, warning, want, stderr)
+			}
+		}
+	}
+
 	// bd version needs no workspace: it runs, after the warning naming the
 	// file.
 	stdout, stderr, err := run("version")
 	if err != nil {
 		t.Errorf("bd version with corrupt metadata.json: want success, got %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
 	}
-	warning := firstLineWithPrefix(stderr, "warning: ")
-	for _, want := range []string{"metadata.json", "parsing config:", "no storage database was opened or modified"} {
-		if !strings.Contains(warning, want) {
-			t.Errorf("bd version with corrupt metadata.json: warning %q missing %q\nstderr:\n%s", warning, want, stderr)
-		}
-	}
+	checkWarning("bd version", stderr)
 
 	// Every command that selects the workspace refuses on the unparsable
-	// metadata before opening or modifying storage.
+	// metadata before opening or modifying storage, after the same warning:
+	// the refusal does not name the file, so the warning is what tells the
+	// user which file to repair.
 	for _, args := range [][]string{
 		{"doctor"},
 		{"list", "--json"},
@@ -133,6 +144,7 @@ func TestEmbeddedCorruptMetadataFailsLoudUntilRestored(t *testing.T) {
 			t.Errorf("%s with corrupt metadata.json: want a loud failure, got success\nstdout:\n%s\nstderr:\n%s", cmdline, stdout, stderr)
 			continue
 		}
+		checkWarning(cmdline, stderr)
 		if refusal := firstLineWithPrefix(stderr, "Error: "); !strings.Contains(refusal, "parsing config:") {
 			t.Errorf("%s with corrupt metadata.json: want its Error line to refuse the unparsable metadata (parsing config:), got %q\nstdout:\n%s\nstderr:\n%s", cmdline, refusal, stdout, stderr)
 		}

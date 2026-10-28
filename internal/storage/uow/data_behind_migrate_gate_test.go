@@ -244,6 +244,7 @@ func TestInitSchemaProxiedDataBehind(t *testing.T) {
 		expectLockRelease(mock, lockName)
 		mock.ExpectExec(regexp.QuoteMeta("USE `beads`")).
 			WillReturnResult(sqlmock.NewResult(0, 0))
+		expectIssuesProjection(mock, dataBehindCurrent, "")
 
 		var initErr error
 		stderr := captureStderr(t, func() {

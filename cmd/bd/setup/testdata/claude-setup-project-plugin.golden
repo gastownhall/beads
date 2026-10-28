@@ -10,7 +10,7 @@
 === bd setup claude --check
 result: error: agents file not found
 --- stdout
-✓ Hooks provided by beads plugin (plugin-managed)
+✓ Hooks provided by beads plugin (plugin-managed): $ROOT/project/.claude/settings.json
 ✗ CLAUDE.md not found
   Run: bd setup claude
 --- stderr
@@ -21,7 +21,7 @@ result: error: agents file not found
 result: ok
 --- stdout
 Installing Claude hooks for this project...
-✓ Beads plugin detected — hooks are plugin-managed, skipping
+✓ Beads plugin enabled in $ROOT/project/.claude/settings.json — hooks are plugin-managed, skipping
 Installing Claude Code integration...
 ✓ Created new CLAUDE.md with beads integration
 
@@ -35,13 +35,6 @@ No additional configuration needed!
 Restart Claude Code for changes to take effect.
 --- stderr
 (empty)
---- files: modified $ROOT/project/.claude/settings.json
-{
-  "enabledPlugins": {
-    "beads@beads-marketplace": true
-  },
-  "hooks": {}
-}
 --- files: created $ROOT/project/CLAUDE.md
 # Project Instructions for AI Agents
 
@@ -73,7 +66,7 @@ _Add your project-specific conventions here_
 === bd setup claude --check
 result: ok
 --- stdout
-✓ Hooks provided by beads plugin (plugin-managed)
+✓ Hooks provided by beads plugin (plugin-managed): $ROOT/project/.claude/settings.json
 ✓ Claude Code integration installed: $ROOT/project/CLAUDE.md (current)
 --- stderr
 (empty)
@@ -84,6 +77,9 @@ result: ok
 --- stdout
 Installing Claude hooks globally...
 ✓ Registered SessionStart hook
+⚠ bd prime runs twice per session here
+  Both the beads plugin (enabled in $ROOT/project/.claude/settings.json) and the hook in $ROOT/home/.claude/settings.json run it
+  To run it once: turn the plugin off in $ROOT/project/.claude/settings.local.json, or enable it in $ROOT/home/.claude/settings.json and run bd setup claude --remove --global, then bd setup claude --global
 Installing Claude Code integration...
 ✓ Created new CLAUDE.md with beads integration
 
@@ -122,6 +118,9 @@ Restart Claude Code for changes to take effect.
 result: ok
 --- stdout
 ✓ Global hooks installed: $ROOT/home/.claude/settings.json
+⚠ bd prime runs twice per session here
+  Both the beads plugin (enabled in $ROOT/project/.claude/settings.json) and the hook in $ROOT/home/.claude/settings.json run it
+  To run it once: turn the plugin off in $ROOT/project/.claude/settings.local.json, or enable it in $ROOT/home/.claude/settings.json and run bd setup claude --remove --global, then bd setup claude --global
 ✓ Claude Code integration installed: $ROOT/project/CLAUDE.md (current)
 --- stderr
 (empty)

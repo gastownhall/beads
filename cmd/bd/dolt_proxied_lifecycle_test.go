@@ -42,6 +42,7 @@ func TestExternalDoltEndpoint(t *testing.T) {
 	}{
 		{"tcp", configfile.ExternalDoltConfig{Host: "127.0.0.1", Port: 3310}, "127.0.0.1:3310"},
 		{"ipv6", configfile.ExternalDoltConfig{Host: "::1", Port: 3310}, "[::1]:3310"},
+		{"ipv6 bracketed", configfile.ExternalDoltConfig{Host: "[::1]", Port: 3310}, "[::1]:3310"},
 		{"socket wins", configfile.ExternalDoltConfig{Socket: "/tmp/dolt.sock"}, "unix:/tmp/dolt.sock"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

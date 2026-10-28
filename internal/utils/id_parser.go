@@ -12,6 +12,7 @@ import (
 
 	"github.com/steveyegge/beads/beadserrors"
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -495,8 +496,15 @@ func shouldNotifyPartialResolution(input, resolved string, quiet bool, noNotifyE
 //
 // stderr, never stdout: --json payloads and piped stdout stay byte-for-byte
 // unchanged, so this cannot break a parsing caller.
+//
+// resolved is read from the store, which holds a collaborator's issues after
+// bd dolt pull, and the notice prints ahead of whatever the command prints
+// next, such as bd close --continue's hint: it is spelled by
+// remedy.PrintedWord, as cmd/bd names a store-read ID beside a hint, so a
+// carriage return or terminal escape in it cannot redraw those lines. An ID
+// bd mints prints as it is.
 func emitPartialResolutionNotice(input, resolved string) {
-	fmt.Fprintf(os.Stderr, "note: %q is not an exact issue ID; resolved to %s (silence with --quiet or BD_NO_PARTIAL_ID_NOTICE=1)\n", input, resolved) //nolint:gosec // G705: stderr, not a browser context
+	fmt.Fprintf(os.Stderr, "note: %q is not an exact issue ID; resolved to %s (silence with --quiet or BD_NO_PARTIAL_ID_NOTICE=1)\n", input, remedy.PrintedWord(resolved)) //nolint:gosec // G705: stderr, not a browser context
 }
 
 func partialIDSearchPart(hashPart string) (string, bool) {

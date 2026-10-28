@@ -140,6 +140,7 @@
 
 40 3 TestActiveDatabaseSizeFailsForMissingEmbeddedDatabase
 40 3 TestActiveDatabaseSizeScopesToActiveEmbeddedDatabase
+40 3 TestArrivalSeq_EmbeddedJournalCollisionMovesTheStamp
 40 3 TestBuildDSN_NoDatabase
 40 3 TestBuildDSN_SpacesInPath
 40 3 TestBuildDSN_WithDatabase
@@ -178,6 +179,7 @@
 
 40 4 TestBlockedListerContract
 40 4 TestCreateBatchFastPathsMatchPerRowSmallDepAdd_Embedded
+40 4 TestEmbeddedFirstMintOnEmptyHistoryIsRevisionOne
 40 4 TestEmbeddedIssueOperationsUpdateLabelPatchOrdering
 40 4 TestEmbeddedReaderGetMissIsNotFoundAndBackendFailureDoesNotDecay
 40 4 TestEmbeddedReaderListFilterFamiliesNarrowToTheirRows
@@ -190,6 +192,7 @@
 40 5 TestWithPeerAuth
 
 40 6 TestCreateBatchFastPathsMatchPerRowApplyWaitsFor_Embedded
+40 6 TestEmbeddedIgnoredMigration0030RestoresALostTombstoneTable
 40 6 TestEmbeddedMergeAndSettleFKCascadeRepair
 40 6 TestEmbeddedMergeAndSettleSkipsNonMemoryConfigConflict
 40 6 TestEmbeddedReaderListKeysetPositionNarrowsWithoutReplacingTheOtherPredicates
@@ -208,6 +211,7 @@
 40 7 TestLoseVersionLeavesTheEpochTablesCommitted
 40 7 TestMergeAndSettleWithStrategy_ResolvesDeclinedConflict
 
+40 8 TestArrivalSeq_EmbeddedCreateLeavesTheStampOnTheCallersIssue
 40 8 TestDeleterContract
 40 8 TestEmbeddedDependencyEditorRoutesWispSourcedRemovalToTheWispPlane
 40 8 TestEmbeddedMergeAndSettleDirtyWorkingSetSurvivesRefusedMerge
@@ -245,6 +249,7 @@
 40 11 TestEmbeddedClaimerRefusalMessagesCarryTheirFragments
 40 11 TestEmbeddedGuardedUpdateMintsOnceAfterItsPatches
 40 11 TestEmbeddedMergeAndSettleRefusesUnknownTable
+40 11 TestEmbeddedMigration0074CreatesTheTombstoneTables
 40 11 TestEmbeddedReaderListMaxRowsBoundaryIsLimitPlusOffset
 40 11 TestEmbeddedReadyClaimerRecordsOneHistoryEntryForAWin
 40 11 TestEventsJournal_ActorMatrixOnEmbedded
@@ -273,6 +278,7 @@
 40 13 TestEmbeddedRelationsDirectionSelectsTheInverseGraph
 40 13 TestGraphWalkPlansHonorJoinHints
 
+40 14 TestArrivalSeq_EmbeddedReplayedCounterSeedClearsTheStamps
 40 14 TestBatchCreatorContract
 40 14 TestBlockingAnnotatorContract
 40 14 TestCountsIncludeWispDependencies
@@ -285,6 +291,7 @@
 40 14 TestHeartbeatIssueCommitsARefusalOnlyWhenItReadTheIssueEmbedded
 40 14 TestHistory_NullTextColumns
 
+40 15 TestArrivalSeq_EmbeddedSequentialCreatesStampInCommitOrder
 40 15 TestCreateIssuesRejectStaleUpserts
 40 15 TestDecryptPassword_ShortCiphertextClassifiesAsKeyMismatch
 40 15 TestEmbeddedGetMergeBlockersOnAQuietStore
@@ -370,6 +377,7 @@
 40 21 TestLargeBatchApplyWallClock_Embedded
 
 40 22 TestEdgeReaderContract
+40 22 TestEmbeddedChildCounterNeverReissuesASweptChild
 40 22 TestEmbeddedDepRekeyAbortLeavesMarkerUnrecorded
 40 22 TestEmbeddedDepRekeyRefusesToWriteIntoDirtyDependencies
 40 22 TestEmbeddedDependencyEditorRefusesSelfDependencyWithTheProbeSkipped
@@ -405,6 +413,7 @@
 40 24 TestIgnoredCursorHealResumeRespectsOperatorOverride
 40 24 TestLargeBatchApplyStatementCountsClassic40_Embedded
 40 24 TestReopenIssue
+40 24 TestUniqueIndexAllowsManyUnstampedWisps
 
 40 25 TestBatchGetterContract
 40 25 TestDatabases
@@ -420,6 +429,7 @@
 40 25 TestReadyWorkPageTotal
 40 25 TestWithPeerAuth_RestoresAbsentEnv
 
+40 26 TestArrivalSeq_EmbeddedConcurrentWritersAreUnique
 40 26 TestEmbeddedIssueOperationsCreateClosedDerivesTheClosedStamp
 40 26 TestEmbeddedMigration0058CleansOrphanedAndInvalidWispDependenciesRowsBeforeAddingConstraints
 40 26 TestEmbeddedOpenForReadOnlyCommand_LenientGate
@@ -428,18 +438,22 @@
 40 26 TestEmbeddedReadyClaimerSkipsIneligibleFrontRows
 40 26 TestEmbeddedRecomputeAllBlockedDirtyGraphIsTyped
 40 26 TestEmbeddedRelationsRefusesTheZeroDirection
+40 26 TestGetHeadHashesReadsHeadCommitAndRoot
 40 26 TestHookFiringStoreCreateIssuesFiresDependencyUpdatesFromEmbeddedStore
 40 26 TestReclaimAnyReplicaOverride
 40 26 TestWithPeerAuth_EnvFallbackDoesNotObservePeerCredentials
 
+40 27 TestDependentsAcrossWispPlaneStates
 40 27 TestEmbeddedBatchCloserDurableHistoryNeverNamesAWisp
 40 27 TestEmbeddedBatchCloserRequestValidationReturnsZeroResultAndChangesNothing
+40 27 TestEmbeddedBlockedRecheckSettlesDependentAfterCommit
 40 27 TestEmbeddedDependencyEditorAcceptsADiamond
 40 27 TestEmbeddedDependencyEditorAddMarksItsSourceInTheSameVerb
 40 27 TestEmbeddedMigration0058HealsAlreadyAffectedDatabase
 40 27 TestEmbeddedReaderGetOptionalRowListsAreOffByDefault
 40 27 TestEmbeddedRelationsRefusesATypeFilterOverTheColumnLength
 40 27 TestEventsJournalReadRefusesAnInteriorHole
+40 27 TestOpenReadOnlyNamesMissingDatabaseEscaped
 40 27 TestPartitionWispIDs
 40 27 TestRemoteGitDataRefOnEngine
 40 27 TestSweeperContract
@@ -461,6 +475,7 @@
 40 29 TestEmbeddedBatchCloserClaimNextIsNilWhenTheFrontIsEmpty
 40 29 TestEmbeddedDepRekeyMergesFreshDuplicateEdges
 40 29 TestEmbeddedDependencyEditorRecordsOneHistoryEntryPerLandedRequest
+40 29 TestEmbeddedImportJSONLDataSkipsRetiredRowsOnATombstoneOnlyDatabase
 40 29 TestEmbeddedMergeAndSettleMetadataConflict
 40 29 TestEmbeddedReaderListDefaultExclusionsAndTheirOverrides
 40 29 TestEmbeddedReaderListTimeBoundsAreStrictAndWholeSecond
@@ -535,6 +550,7 @@
 40 34 TestQuerierContract
 40 34 TestReadyWorkStatementBudget
 
+40 35 TestCreateBatchFastPathsMatchPerRowSettled_Embedded
 40 35 TestEmbeddedBatchCloserAllIdempotentBatchLandsNothing
 40 35 TestEmbeddedClaimIssueWrapperClaimsTheWispPlane
 40 35 TestEmbeddedDependencyEditorGateScopeFollowsTheEdgeType
@@ -583,6 +599,7 @@
 40 38 TestEmbeddedReaderListKeysetWalkOverAnOversizedGroupLosesNothingAndRepeatsNothing
 40 38 TestEmbeddedTempRebuildIntermediatesNeverReachHistory
 40 38 TestEventsJournalPruneWhenEveryRowIsOlderThanTheCutoff
+40 38 TestIDRetentionContract
 40 38 TestPolicyBlockingAnnotatorBatchEqualsPerItem
 40 38 TestWithPeerAuth_ConcurrentPeersDoNotMixCredentials
 
@@ -599,6 +616,7 @@
 40 39 TestReclaimRefusesForeignReplicaLease
 40 39 TestWorkspaceConfigContract
 
+40 40 TestArrivalSeq_EmbeddedHealRaisesTheCounterPastTheStamps
 40 40 TestCountsWithMissingWispPlaneTables
 40 40 TestEmbeddedBatchCloserDoesNotMutateTheCallerRequest
 40 40 TestEmbeddedBlockedRecheckSettlesWhatTheWriteRecorded

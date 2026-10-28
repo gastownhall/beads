@@ -98,13 +98,39 @@ func ConfigPath(beadsDir string) string {
 	return filepath.Join(beadsDir, ConfigFileName)
 }
 
+// LegacyConfigFileName is the pre-metadata.json name of a workspace's
+// metadata file. Load migrates it into metadata.json; LoadForDiscovery reads
+// it in place.
+const LegacyConfigFileName = "config.json"
+
+// MetadataFilePath returns the path of the file beadsDir's metadata is read
+// from: the legacy config.json when metadata.json is absent and config.json
+// exists (the file LoadForDiscovery reads, and Load would migrate), and
+// ConfigPath otherwise. Messages that name the file holding a setting use it,
+// so a refusal made before any migration names the file the user must edit.
+// It only stats; an empty beadsDir returns ConfigPath("").
+func MetadataFilePath(beadsDir string) string {
+	path := ConfigPath(beadsDir)
+	if beadsDir == "" {
+		return path
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		return path
+	}
+	legacyPath := filepath.Join(beadsDir, LegacyConfigFileName)
+	if _, err := os.Stat(legacyPath); err == nil {
+		return legacyPath
+	}
+	return path
+}
+
 func Load(beadsDir string) (*Config, error) {
 	configPath := ConfigPath(beadsDir)
 
 	data, err := os.ReadFile(configPath) // #nosec G304 - controlled path from config
 	if os.IsNotExist(err) {
 		// Try legacy config.json location (migration path)
-		legacyPath := filepath.Join(beadsDir, "config.json")
+		legacyPath := filepath.Join(beadsDir, LegacyConfigFileName)
 		data, err = os.ReadFile(legacyPath) // #nosec G304 - controlled path from config
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -152,7 +178,7 @@ func Load(beadsDir string) (*Config, error) {
 func LoadForDiscovery(beadsDir string) (*Config, error) {
 	data, err := os.ReadFile(ConfigPath(beadsDir)) // #nosec G304 -- beadsDir is caller-selected workspace state
 	if os.IsNotExist(err) {
-		data, err = os.ReadFile(filepath.Join(beadsDir, "config.json")) // #nosec G304 -- legacy workspace state
+		data, err = os.ReadFile(filepath.Join(beadsDir, LegacyConfigFileName)) // #nosec G304 -- legacy workspace state
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
@@ -441,6 +467,11 @@ func (c *Config) IsDoltServerMode() bool {
 //     GetDoltServerHost precedence).
 //   - An explicit config.yaml dolt.mode disables inference from the
 //     config.yaml dolt.host.
+//
+// "Localhost" here is IsLocalHostString, the machine-locality question, not
+// the ownership one (BdRunsServerAt): the IPv6 loopback in any spelling is
+// this machine and infers nothing, while another loopback address such as
+// 127.0.0.2 infers server mode, as a host on another machine does.
 func (c *Config) HostImpliesServerMode() bool {
 	if strings.EqualFold(c.DoltMode, DoltModeProxiedServer) {
 		return false
@@ -509,19 +540,6 @@ func doltServerPortFromEnv() int {
 		}
 	}
 	return 0
-}
-
-// IsLocalHostString reports whether host refers to the local machine, for
-// the purposes of mode inference. Mirrors the helpers in cmd/bd/dolt.go
-// and internal/storage/dolt/store.go; kept private to this package to
-// limit the blast radius of GH#3545's fix — consolidating the (now four)
-// definitions is a separate cleanup.
-func IsLocalHostString(host string) bool {
-	switch strings.ToLower(strings.TrimSpace(host)) {
-	case "", "localhost", "127.0.0.1", "::1", "[::1]", "0.0.0.0":
-		return true
-	}
-	return false
 }
 
 func (c *Config) IsDoltProxiedServerMode() bool {
@@ -674,14 +692,18 @@ func (c *Config) GetDoltServerPassword() string {
 // doltserver port file says 3307 (local), causing the credentials file lookup
 // to use the wrong [host:port] section.
 func (c *Config) GetDoltServerPasswordForPort(port int) string {
+	return ServerPasswordFor(c.GetDoltServerHost(), port)
+}
+
+// ServerPasswordFor is the password for the Dolt server at host and port:
+// BEADS_DOLT_PASSWORD when set, else the credentials-file entry for exactly
+// [host:port] (either spelling of an IPv6 host, see CredentialsSectionKeys),
+// else "". doltserver.Endpoint.Password calls it once the port is final.
+func ServerPasswordFor(host string, port int) string {
 	if p := os.Getenv("BEADS_DOLT_PASSWORD"); p != "" {
 		return p
 	}
-	host := c.GetDoltServerHost()
-	if p := LookupCredentialsPassword(host, port); p != "" {
-		return p
-	}
-	return ""
+	return LookupCredentialsPassword(host, port)
 }
 
 // GetDoltServerTLS returns whether TLS is enabled for server connections.

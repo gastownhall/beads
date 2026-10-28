@@ -3,8 +3,10 @@ package main
 import (
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/versionedhistory"
 )
 
@@ -21,8 +23,8 @@ func checkConfigSetSideEffects(key, value string) []configSideEffect {
 	switch {
 	case key == "federation.remote":
 		effects = append(effects, configSideEffect{
-			Message: fmt.Sprintf("To activate, ensure a Dolt remote matches this URL: %s", value),
-			Command: fmt.Sprintf("bd dolt remote add origin %s", value),
+			Message: fmt.Sprintf("To activate, ensure a Dolt remote matches this URL: %s", remedy.PrintedValue(value)),
+			Command: "bd dolt remote add origin " + commandArg(value, "<url>"),
 		})
 
 	case key == "dolt.shared-server" && strings.EqualFold(value, "true"):
@@ -65,7 +67,7 @@ func checkConfigSetSideEffects(key, value string) []configSideEffect {
 	case key == "sync.git-remote":
 		effects = append(effects, configSideEffect{
 			Message: fmt.Sprintf("Git sync remote set to %q. Ensure this git remote exists.", value),
-			Command: fmt.Sprintf("git remote -v | grep %s", value),
+			Command: "git remote -v | grep " + commandArg(value, "<remote>"),
 		})
 
 	case key == versionedHistorySettingKey && versionedhistory.ValueEnables(value):
@@ -122,4 +124,12 @@ func printConfigSideEffects(effects []configSideEffect) {
 			fmt.Fprintf(os.Stderr, "  → %s\n", e.Command)
 		}
 	}
+}
+
+// commandArg is value as one argument of a command printed for the user to
+// paste on this platform, or placeholder with value named escaped after it
+// when no quoting passes it on unchanged (remedy.CommandArg).
+func commandArg(value, placeholder string) string {
+	arg, note := remedy.CommandArg(runtime.GOOS, value, placeholder)
+	return arg + note
 }
