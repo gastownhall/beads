@@ -1207,6 +1207,12 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 				// A real --create-only run leaves linked issues alone, so the
 				// preview must skip them too (gastownhall/beads#6337).
 				stats.Skipped++
+			} else if e.Tracker.ExtractIdentifier(extRef) == "" {
+				// The ref is recognized but the tracker cannot address it in
+				// its configured target (e.g. another repository's issue): a
+				// real run skips it even when forced, so the preview must not
+				// count it as an update.
+				stats.Skipped++
 			} else if !forceIDs[issue.ID] && e.storedPushHashMatches(ctx, issue, extRef) {
 				// Content unchanged since last push: a real run would skip this
 				// issue, so the preview must say so too (gastownhall/beads#4214).

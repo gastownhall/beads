@@ -446,4 +446,46 @@ func TestPush_SkipsBeadLinkedToOtherRepo(t *testing.T) {
 			t.Errorf("repo-A bead external_ref = %v, want unchanged", ghDerefRef(a.ExternalRef))
 		}
 	})
+
+	t.Run("dry run", func(t *testing.T) {
+		rt, _, engine := bind()
+		var messages []string
+		engine.OnMessage = func(msg string) { messages = append(messages, msg) }
+		dry, err := engine.Sync(context.Background(), tracker.SyncOptions{Push: true, DryRun: true})
+		if err != nil {
+			t.Fatalf("dry-run Sync: %v", err)
+		}
+		var wantUpdate, foreignUpdate bool
+		for _, m := range messages {
+			if strings.Contains(m, "Repo B issue 7") {
+				wantUpdate = true
+			}
+			if strings.Contains(m, "Repo A issue 42") {
+				foreignUpdate = true
+			}
+		}
+		if !wantUpdate {
+			t.Errorf("no \"Would update\" line for repo-B issue 7: %q", messages)
+		}
+		if foreignUpdate {
+			t.Errorf("dry-run preview would update the repo-A bead: %q", messages)
+		}
+		for _, req := range rt.requestLog() {
+			if strings.HasPrefix(req, "POST ") || strings.HasPrefix(req, "PATCH ") {
+				t.Errorf("dry run sent %q; a preview writes nothing", req)
+			}
+		}
+		_, _, realEngine := bind()
+		real, err := realEngine.Sync(context.Background(), tracker.SyncOptions{Push: true})
+		if err != nil {
+			t.Fatalf("real Sync: %v", err)
+		}
+		if dry.PushStats.Created != real.PushStats.Created ||
+			dry.PushStats.Updated != real.PushStats.Updated ||
+			dry.PushStats.Skipped != real.PushStats.Skipped {
+			t.Errorf("dry-run created/updated/skipped = %d/%d/%d, real push = %d/%d/%d",
+				dry.PushStats.Created, dry.PushStats.Updated, dry.PushStats.Skipped,
+				real.PushStats.Created, real.PushStats.Updated, real.PushStats.Skipped)
+		}
+	})
 }
