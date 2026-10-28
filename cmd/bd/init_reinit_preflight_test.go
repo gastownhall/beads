@@ -2,12 +2,17 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/utils"
 )
 
 // writeReinitTargetMetadata writes metadata.json into beadsDir, creating it.
@@ -232,4 +237,82 @@ func TestCountReinitTargetIssues(t *testing.T) {
 			t.Fatal("want an error: a local copy of the database is never proof that it is absent")
 		}
 	})
+}
+
+// TestInitReinitLocal_CountsTheGateTargetFromLinkedWorktree pins GH#5628
+// part 2 through the init command itself. From a linked worktree, init locks
+// and replaces the main checkout's .beads (GetWorktreeFallbackBeadsDir), but
+// discovery prefers the worktree's own .beads when it holds a database. The
+// preflight used to count the latter, so an empty worktree database read as
+// "nothing to destroy" while the main checkout's issues were replaced.
+func TestInitReinitLocal_CountsTheGateTargetFromLinkedWorktree(t *testing.T) {
+	root := t.TempDir()
+	mainDir := filepath.Join(root, "main")
+	if err := os.MkdirAll(mainDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitInitAt(t, mainDir)
+	for _, args := range [][]string{
+		{"-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-m", "init"},
+		{"worktree", "add", filepath.Join(root, "wt")},
+	} {
+		if out, err := initArtifactGitCommand(mainDir, args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	metadata := []byte(`{"database":"dolt","backend":"dolt"}`)
+	mainBeads := filepath.Join(mainDir, ".beads")
+	writeReinitTargetMetadata(t, mainBeads, metadata)
+	// The worktree's own .beads holds a database of its own, so discovery
+	// picks it.
+	wtBeads := filepath.Join(root, "wt", ".beads")
+	writeReinitTargetMetadata(t, wtBeads, metadata)
+	if err := os.MkdirAll(filepath.Join(wtBeads, "embeddeddolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Chdir(filepath.Join(root, "wt"))
+	git.ResetCaches()
+	beads.ResetCaches()
+	t.Cleanup(func() {
+		git.ResetCaches()
+		beads.ResetCaches()
+	})
+	stubCallerBeadsDir(t, "")
+	t.Setenv("BEADS_DIR", "")
+	t.Setenv("BD_NON_INTERACTIVE", "1")
+	setInitFlag(t, "reinit-local", "true")
+	setInitFlag(t, "prefix", "wt")
+	setInitFlag(t, "skip-hooks", "true")
+	oldCtx := rootCtx
+	rootCtx = context.Background()
+	t.Cleanup(func() { rootCtx = oldCtx })
+
+	wantTarget := utils.CanonicalizePath(mainBeads)
+	origCount := countReinitTarget
+	countReinitTarget = func(beadsDir string) (int, error) {
+		if utils.CanonicalizePath(beadsDir) == wantTarget {
+			return 5, nil
+		}
+		t.Errorf("preflight counted %s, not the .beads init replaces (%s)", beadsDir, wantTarget)
+		// An error, not 0, so a wrong count still stops at the refusal
+		// instead of re-initializing the test fixture.
+		return 0, errors.New("counted the wrong workspace")
+	}
+	t.Cleanup(func() { countReinitTarget = origCount })
+
+	var err error
+	out := captureStderr(t, func() {
+		err = initCmd.RunE(initCmd, nil)
+	})
+	requireExitCode(t, err, ExitDestroyTokenMissing)
+	if !strings.Contains(out, "Target: "+wantTarget) {
+		t.Errorf("warning must name the main checkout's .beads %s, got:\n%s", wantTarget, out)
+	}
+	if !strings.Contains(out, "Existing issues: 5") {
+		t.Errorf("warning must show the main checkout's issue count, got:\n%s", out)
+	}
+	if got, readErr := os.ReadFile(filepath.Join(mainBeads, "metadata.json")); readErr != nil || !bytes.Equal(got, metadata) {
+		t.Errorf("the main checkout's .beads must survive the refusal: %v %q", readErr, got)
+	}
 }
