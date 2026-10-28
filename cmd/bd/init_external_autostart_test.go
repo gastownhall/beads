@@ -583,6 +583,37 @@ func runCentralConfigHostDiagnostic(t *testing.T, args []string) {
 	}
 }
 
+// TestRuntimeCommandDialsCentralServerConfig is GH#3895 for an ordinary
+// command: a server-mode workspace whose metadata.json names no host, port or
+// user takes all three from the central server config (server.json, here the
+// file BEADS_CENTRAL_CONFIG names), so bd list dials db.invalid:N, not
+// 127.0.0.1, and, the endpoint being one the whole machine shares, starts no
+// dolt server of its own.
+func TestRuntimeCommandDialsCentralServerConfig(t *testing.T) {
+	f := newExternalInitFixture(t)
+	port := freeLoopbackPort(t)
+	namedPortWorkspace(t, f, 0)
+	central := filepath.Join(f.home, "server.json")
+	body := fmt.Sprintf(`{"dolt_server_host":"db.invalid","dolt_server_port":%d,"dolt_server_user":"central_user"}`, port)
+	if err := os.WriteFile(central, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.env = append(f.env, "BEADS_CENTRAL_CONFIG="+central)
+
+	res := f.run("", "list")
+
+	requireNoLaunch(t, res)
+	if !res.failed {
+		t.Errorf("bd list succeeded with no server:\n%s", res.output)
+	}
+	if want := net.JoinHostPort("db.invalid", strconv.Itoa(port)); !strings.Contains(res.output, want) {
+		t.Errorf("bd list output does not name the central server config's endpoint %q:\n%s", want, res.output)
+	}
+	if banned := net.JoinHostPort("127.0.0.1", strconv.Itoa(port)); strings.Contains(res.output, banned) {
+		t.Errorf("bd list dialed %s, not the central server config's host:\n%s", banned, res.output)
+	}
+}
+
 // runRemoteHostDiagnostic runs one diagnostic against a server on another
 // machine whose port BEADS_DOLT_SERVER_PORT names. It must dial that host, not
 // 127.0.0.1, and give the remote-host advice: not `bd dolt start`, which
