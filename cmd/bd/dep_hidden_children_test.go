@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -123,5 +124,17 @@ func TestNoteHiddenChildren(t *testing.T) {
 		fmt.Sprintf("To list them, run: bd dep list <issue-id> --direction=up --type=parent-child  (<issue-id>: %s)\n", escapedWeird)
 	if stderr != want {
 		t.Errorf("unprintable-id note:\ngot  %q\nwant %q", stderr, want)
+	}
+
+	// A Relations read that errors prints nothing and does not panic: the
+	// command's actual answer was already produced, so the note is
+	// best-effort and a failed read must not touch the view's output or
+	// exit status.
+	rel = &hiddenChildrenRelations{err: errors.New("boom")}
+	stderr = captureStderr(t, func() {
+		noteHiddenChildren(context.Background(), rel, anchor, "list")
+	})
+	if stderr != "" {
+		t.Errorf("an erroring read should print nothing, got:\n%s", stderr)
 	}
 }

@@ -1012,7 +1012,10 @@ func noteHiddenChildren(ctx context.Context, rel issueops.Relations, anchorID, v
 		Types:     []types.DependencyType{types.DepParentChild},
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: reading %s's children: %v\n", printedIssueID(anchorID), err)
+		// The view's own answer was already produced; a failed best-effort
+		// read prints nothing rather than turning a note into an error the
+		// caller cannot act on (the command's output and exit status are
+		// what they would have been without the note).
 		return
 	}
 	if len(children) == 0 {
