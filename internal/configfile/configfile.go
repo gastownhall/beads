@@ -722,12 +722,20 @@ func ServerPasswordFor(host string, port int) string {
 
 // GetDoltServerTLS returns whether TLS is enabled for server connections.
 // Required for Hosted Dolt instances.
-// Checks BEADS_DOLT_SERVER_TLS env var first ("1" or "true"), then config.
+// Checks BEADS_DOLT_SERVER_TLS env var first ("1" or "true"; any other
+// non-empty value disables, so BEADS_DOLT_SERVER_TLS=0 stays an explicit
+// opt-out), then config, then the central server config (server.json).
 func (c *Config) GetDoltServerTLS() bool {
 	if t := os.Getenv("BEADS_DOLT_SERVER_TLS"); t != "" {
 		return t == "1" || strings.ToLower(t) == "true"
 	}
-	return c.DoltServerTLS
+	if c.DoltServerTLS {
+		return true
+	}
+	if central := CentralConfig(); central != nil {
+		return central.DoltServerTLS
+	}
+	return false
 }
 
 // GetDoltDataDir returns the custom dolt data directory path.

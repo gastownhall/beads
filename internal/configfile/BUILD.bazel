@@ -29,6 +29,7 @@ go_test(
     name = "configfile_test",
     srcs = [
         "backend_messages_test.go",
+        "central_config_getters_test.go",
         "central_config_test.go",
         "configfile_test.go",
         "credentials_test.go",
