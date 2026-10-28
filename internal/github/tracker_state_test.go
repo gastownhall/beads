@@ -99,3 +99,34 @@ func TestCreateIssue_ClosedLocalIssueLandsClosed(t *testing.T) {
 		t.Errorf("returned URL = %q, want the created issue's URL", ti.URL)
 	}
 }
+
+// TestCreateIssue_NonClosedSkipsClose verifies a non-closed bead is created
+// without a follow-up close request: only the create POST may hit the wire.
+// Statuses other than closed must stay open on GitHub.
+func TestCreateIssue_NonClosedSkipsClose(t *testing.T) {
+	for _, status := range []types.Status{types.StatusOpen, types.StatusInProgress, types.StatusBlocked, types.StatusDeferred} {
+		t.Run(string(status), func(t *testing.T) {
+			tr, reqs := newRecordingTracker(t, map[string]string{
+				"POST /repos/o/r/issues": `{"id":7008,"number":43,"title":"todo","state":"open","html_url":"https://github.com/o/r/issues/43"}`,
+			})
+
+			ti, err := tr.CreateIssue(context.Background(), &types.Issue{
+				ID: "bd-2", Title: "todo", Description: "b",
+				IssueType: types.TypeTask, Priority: 2,
+				Status: status,
+			})
+			if err != nil {
+				t.Fatalf("CreateIssue: %v", err)
+			}
+
+			for _, r := range *reqs {
+				if r.method == http.MethodPatch {
+					t.Errorf("%s issue triggered a follow-up PATCH (%s %s), want create only", status, r.method, r.path)
+				}
+			}
+			if ti.State != "open" {
+				t.Errorf("%s issue: returned TrackerIssue.State = %q, want %q", status, ti.State, "open")
+			}
+		})
+	}
+}
