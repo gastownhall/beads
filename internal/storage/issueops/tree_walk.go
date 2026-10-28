@@ -58,6 +58,16 @@ func ValidateWalkTreeRequest(req publicops.WalkTreeRequest) (publicops.TreeDirec
 // only as somebody's ancestor, never for its own sake, so a tree with no
 // matching member comes back empty rather than as a lone root — see
 // issueops.WalkTreeRequest.Status, which states it as a promise.
+//
+// STUBS KEY NOTHING BUT THEIR OWN SURVIVAL. A walk answer may carry one
+// TreeNode.Deduped stub per later parent of a revisited issue, and the stub's
+// ID is its expanded twin's ID: keying the parent map on every row would let
+// the stub's ParentID overwrite the expanded row's (last write wins, and the
+// two are different facts), rewiring a survivor's chain through the wrong
+// parent. So the chains are keyed on EXPANDED rows only, a stub survives
+// exactly when its own status matches — never merely because its twin does —
+// and a matching stub marks the chain from its own ParentID, the one parent
+// the expanded twin's chain cannot name.
 func PruneTreeByStatus(nodes []*types.TreeNode, status types.Status) []*types.TreeNode {
 	if len(nodes) == 0 {
 		return nodes
@@ -68,31 +78,48 @@ func PruneTreeByStatus(nodes []*types.TreeNode, status types.Status) []*types.Tr
 		if node == nil {
 			continue
 		}
-		if node.ParentID != "" && node.ParentID != node.ID {
+		if !node.Deduped && node.ParentID != "" && node.ParentID != node.ID {
 			parentOf[node.ID] = node.ParentID
 		}
 	}
-	for _, node := range nodes {
-		if node == nil || node.Status != status || keep[node.ID] {
-			continue
-		}
-		keep[node.ID] = true
+	markChain := func(id string) {
 		// Walk to the root, stopping on a repeat so a parent chain that loops
 		// back on itself cannot spin here. The walk's own first-visit rule makes
 		// that unreachable today, but this function is also called with
 		// hand-built input.
-		for current := node.ID; ; {
+		for current := id; current != "" && !keep[current]; {
+			keep[current] = true
 			parent, ok := parentOf[current]
-			if !ok || parent == current || keep[parent] {
+			if !ok || parent == current {
 				break
 			}
-			keep[parent] = true
 			current = parent
 		}
 	}
+	for _, node := range nodes {
+		if node == nil || node.Status != status {
+			continue
+		}
+		if node.Deduped {
+			markChain(node.ParentID)
+			continue
+		}
+		markChain(node.ID)
+	}
 	filtered := make([]*types.TreeNode, 0, len(nodes))
 	for _, node := range nodes {
-		if node != nil && keep[node.ID] {
+		if node == nil {
+			continue
+		}
+		if node.Deduped {
+			// A stub is a leaf: it survives on its own status, under a parent
+			// its own match just marked.
+			if node.Status == status && keep[node.ParentID] {
+				filtered = append(filtered, node)
+			}
+			continue
+		}
+		if keep[node.ID] {
 			filtered = append(filtered, node)
 		}
 	}
@@ -165,7 +192,7 @@ func WalkDependencyTreeInTx(ctx context.Context, tx DBTX, req publicops.WalkTree
 // walkTreeDirectionsInTx runs the one or two walks a direction asks for, and
 // applies the status prune to EACH HALF BEFORE merging them.
 //
-// The order matters. PruneTreeByStatus keys its parent chain by node ID, and a
+// The order matters. PruneTreeByStatus keys its parent chains by node ID, and a
 // merged `both` list may legitimately carry one ID TWICE with a different
 // ParentID in each half — TreeResult.Nodes says so. Pruning the merged list
 // therefore built one last-write-wins parent map for two different facts, so a
@@ -174,7 +201,8 @@ func WalkDependencyTreeInTx(ctx context.Context, tx DBTX, req publicops.WalkTree
 // whose ParentID named something absent, which is the scatter of orphans the
 // prune promise exists to prevent.
 //
-// Pruned per half, each ID appears once in the map it is looked up in.
+// Pruned per half, each expanded id appears once in the map it is looked up in
+// (a half's Deduped stubs key nothing — PruneTreeByStatus says so).
 func walkTreeDirectionsInTx(ctx context.Context, tx DBTX, rootID string, maxDepth int, direction publicops.TreeDirection, status types.Status) ([]*types.TreeNode, error) {
 	if direction != publicops.TreeBoth {
 		nodes, err := GetDependencyTreeInTx(ctx, tx, rootID, maxDepth, false, direction == publicops.TreeUp)

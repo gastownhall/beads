@@ -2,6 +2,7 @@ package issueops
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -101,6 +102,72 @@ func TestPruneTreeByStatus(t *testing.T) {
 			t.Errorf("Expected empty tree, got %d nodes", len(filtered))
 		}
 	})
+}
+
+// diamondWalkRows is a walk answer carrying a Deduped stub (GH#5282):
+// root→P1→X→Y plus root→P2 with X revisited as P2's stub.
+func diamondWalkRows(xStatus, yStatus, stubStatus types.Status) []*types.TreeNode {
+	return []*types.TreeNode{
+		{Issue: types.Issue{ID: "root", Status: types.StatusOpen}},
+		{Issue: types.Issue{ID: "P1", Status: types.StatusOpen}, Depth: 1, ParentID: "root"},
+		{Issue: types.Issue{ID: "X", Status: xStatus}, Depth: 2, ParentID: "P1"},
+		{Issue: types.Issue{ID: "Y", Status: yStatus}, Depth: 3, ParentID: "X"},
+		{Issue: types.Issue{ID: "P2", Status: types.StatusOpen}, Depth: 1, ParentID: "root"},
+		{Issue: types.Issue{ID: "X", Status: stubStatus}, Depth: 2, ParentID: "P2", Deduped: true},
+	}
+}
+
+// pruneIDs renders a pruned answer as an ordered id list.
+func pruneIDs(nodes []*types.TreeNode) string {
+	ids := make([]string, 0, len(nodes))
+	for _, node := range nodes {
+		ids = append(ids, node.ID)
+	}
+	return strings.Join(ids, ",")
+}
+
+// TestPruneTreeByStatusKeysStubParentChainsOnExpandedRows pins the prune rule
+// for a walk answer that carries a Deduped stub (GH#5282): the parent chains
+// are keyed on expanded rows only — a repeated id's stub cannot rewire a
+// survivor's chain through the wrong parent — and a stub survives exactly
+// when its own status matches, never merely because its twin does.
+func TestPruneTreeByStatusKeysStubParentChainsOnExpandedRows(t *testing.T) {
+	// root→P1→X→Y with only Y closed: the answer keeps Y's expanded chain
+	// (root, P1, X) and drops both P2 and the stub of X.
+	filtered := PruneTreeByStatus(diamondWalkRows(types.StatusOpen, types.StatusClosed, types.StatusOpen), types.StatusClosed)
+	if got, want := pruneIDs(filtered), "root,P1,X,Y"; got != want {
+		t.Fatalf("pruned walk = [%s], want [%s]: the stub's last-write-wins parent must not rewire X's chain through P2", got, want)
+	}
+	// Every kept row's ParentID names a kept expanded row.
+	for _, node := range filtered {
+		if node.ParentID == "" {
+			continue
+		}
+		present := false
+		for _, kept := range filtered {
+			if kept.ID == node.ParentID && !kept.Deduped {
+				present = true
+				break
+			}
+		}
+		if !present {
+			t.Fatalf("kept row %s names parent %s that the answer does not keep expanded: [%s]", node.ID, node.ParentID, pruneIDs(filtered))
+		}
+	}
+
+	// A stub whose own status matches survives, and marks its own parent's
+	// chain: X closed makes both the expanded row and P2's stub match.
+	filtered = PruneTreeByStatus(diamondWalkRows(types.StatusClosed, types.StatusOpen, types.StatusClosed), types.StatusClosed)
+	if got, want := pruneIDs(filtered), "root,P1,X,P2,X"; got != want {
+		t.Fatalf("matching stub: pruned walk = [%s], want [%s]", got, want)
+	}
+
+	// A stub whose own status does not match never survives, and never drags
+	// its parent's chain in: X closed, the stub still open.
+	filtered = PruneTreeByStatus(diamondWalkRows(types.StatusClosed, types.StatusOpen, types.StatusOpen), types.StatusClosed)
+	if got, want := pruneIDs(filtered), "root,P1,X"; got != want {
+		t.Fatalf("non-matching stub: pruned walk = [%s], want [%s]", got, want)
+	}
 }
 
 func TestMergeBidirectionalTree_Empty(t *testing.T) {
