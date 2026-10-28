@@ -591,6 +591,18 @@ async def test_reopen_with_reason(bd_client, mock_process):
 
 
 @pytest.mark.asyncio
+async def test_reopen_noop_returns_empty_list(bd_client, mock_process):
+    """bd reopen on a non-closed issue exits 0 with empty stdout (GH#6872)."""
+    mock_process.communicate = AsyncMock(return_value=(b"", b"bd-1 is already open\n"))
+
+    with patch("asyncio.create_subprocess_exec", return_value=mock_process):
+        params = ReopenIssueParams(issue_ids=["bd-1"])
+        issues = await bd_client.reopen(params)
+
+    assert issues == []
+
+
+@pytest.mark.asyncio
 async def test_reopen_invalid_response(bd_client, mock_process):
     """Test reopen method with invalid response type."""
     mock_process.communicate = AsyncMock(return_value=(json.dumps({"error": "not a list"}).encode(), b""))
