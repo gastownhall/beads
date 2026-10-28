@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"runtime"
 
 	"github.com/spf13/cobra"
 
@@ -67,6 +68,29 @@ func workspaceDiagHint(includeWhere bool) string {
 		return "check BEADS_DIR/worktree setup, or run 'bd init' to create a new database"
 	}
 	return "check BEADS_DIR/worktree setup, run 'bd doctor' to diagnose, or run 'bd init' to create a new database"
+}
+
+// skippedUserGlobalBeads returns how a no-workspace refusal names the
+// user-level beads directory discovery passed over (GH#4402) and the command
+// that selects it, or ok=false when discovery passed over none.
+func skippedUserGlobalBeads() (dir, export string, ok bool) {
+	skipped := beads.SkippedUserGlobalBeadsDir()
+	if skipped == "" {
+		return "", "", false
+	}
+	arg, note := remedy.CommandArg(runtime.GOOS, skipped, "<path>")
+	return remedy.PrintedValue(skipped), "export BEADS_DIR=" + arg + note, true
+}
+
+// skippedUserGlobalBeadsNote returns the lines the no-database refusal prints
+// after its hint when discovery passed over the user-level ~/.beads, or "".
+func skippedUserGlobalBeadsNote() string {
+	dir, export, ok := skippedUserGlobalBeads()
+	if !ok {
+		return ""
+	}
+	return "Note: " + dir + " is your user-level beads directory; bd does not use it outside a project\n" +
+		"      unless you name it: " + export + "\n"
 }
 
 func buildJSONError(message, hint string) interface{} {

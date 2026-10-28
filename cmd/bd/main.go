@@ -1725,6 +1725,7 @@ var rootCmd = &cobra.Command{
 					fmt.Fprintf(os.Stderr, "Error: no beads database found\n")
 					fmt.Fprintf(os.Stderr, "Hint: %s\n", diagHint())
 					fmt.Fprintf(os.Stderr, "      or set BEADS_DIR to point to your .beads directory\n")
+					fmt.Fprint(os.Stderr, skippedUserGlobalBeadsNote())
 					return SilentExit()
 				}
 

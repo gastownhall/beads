@@ -29,15 +29,18 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime"
 	"sort"
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/testutil"
 )
 
@@ -883,4 +886,74 @@ func TestDiscoveryRefusalPinsBlockedEnvVarsRunFirst(t *testing.T) {
 			stderrPrefix: true,
 		},
 	})
+}
+
+// userGlobalBeadsFixture gives the fixture home a user-level .beads holding
+// an embedded workspace (metadata.json and embeddeddolt/) and returns the
+// non-repository home/notes directory (GH#4402).
+func (f *discoveryPinFixture) userGlobalBeadsFixture() string {
+	f.t.Helper()
+	f.mkdir("home/.beads/embeddeddolt")
+	if err := configfile.DefaultConfig().Save(f.path("home/.beads")); err != nil {
+		f.t.Fatalf("write home/.beads/metadata.json: %v", err)
+	}
+	return f.mkdir("home/notes")
+}
+
+// treeSnapshot records every entry under dir with its mode, size and
+// modification time.
+func treeSnapshot(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	snap := map[string]string{}
+	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		snap[path] = fmt.Sprintf("%v %d %d", info.Mode(), info.Size(), info.ModTime().UnixNano())
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk %s: %v", dir, err)
+	}
+	return snap
+}
+
+// pinUserGlobalBeadsNote is the note that follows a no-workspace refusal
+// when discovery passed over the fixture's user-level $ROOT/home/.beads.
+const pinUserGlobalBeadsNote = "Note: $ROOT/home/.beads is your user-level beads directory; bd does not use it outside a project\n" +
+	"      unless you name it: export BEADS_DIR=$ROOT/home/.beads\n"
+
+// TestDiscoveryRefusalPinsUserGlobalBeadsDir pins GH#4402: run from a
+// directory under $HOME outside any project, a store-requiring command
+// refuses instead of writing to the user-level ~/.beads, names it, and
+// leaves it untouched.
+func TestDiscoveryRefusalPinsUserGlobalBeadsDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the pinned texts embed POSIX paths")
+	}
+	t.Parallel()
+	bd := buildBDForInitTests(t)
+	for _, args := range [][]string{{"remember", "some note"}, {"list", "--json"}} {
+		t.Run(args[0], func(t *testing.T) {
+			t.Parallel()
+			f := newDiscoveryPinFixture(t)
+			cwd := f.userGlobalBeadsFixture()
+			before := treeSnapshot(t, f.path("home/.beads"))
+
+			exit, stdout, stderr := f.run(bd, cwd, nil, args...)
+			if exit != 1 {
+				t.Errorf("bd %s: exit = %d, want 1", strings.Join(args, " "), exit)
+			}
+			if stdout != "" {
+				t.Errorf("bd %s: stdout = %q, want empty", strings.Join(args, " "), stdout)
+			}
+			if want := pinNoDatabaseRefusal + pinUserGlobalBeadsNote; stderr != want {
+				t.Errorf("bd %s: stderr differs\n got: %q\nwant: %q", strings.Join(args, " "), stderr, want)
+			}
+			after := treeSnapshot(t, f.path("home/.beads"))
+			if !reflect.DeepEqual(before, after) {
+				t.Errorf("bd %s changed %s\nbefore: %v\n after: %v", strings.Join(args, " "), f.path("home/.beads"), before, after)
+			}
+		})
+	}
 }

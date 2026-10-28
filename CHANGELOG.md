@@ -1055,6 +1055,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- bd no longer adopts your user-level `~/.beads` as the workspace when run
+  from a directory under your home that is outside any project (#4402).
+  Upward discovery used to reach `$HOME` and silently send writes such as
+  `bd remember` to `~/.beads`. Such a command now refuses with "no beads
+  database found" and a note naming the skipped directory; a repository
+  rooted at your home directory (a dotfiles repository) still uses its
+  `~/.beads`. **Migration:** to keep using `~/.beads` from anywhere, name it:
+  `export BEADS_DIR=~/.beads`.
 - `bd list --watch` and `bd show --watch` now wait a full poll interval after
   each refresh, and `bd list --watch --parent` reads its tree in one
   transaction, so other bd commands on an embedded workspace no longer stall
