@@ -188,9 +188,9 @@ func assertWorkspaceUnchanged(t *testing.T, dir string, before workspaceSnapshot
 // It drives the built bd as a subprocess because CheckReadonly exits the
 // process. The fixture's backup and the restore run inside the Dolt server,
 // against the same path on the server's own filesystem, so a containerized
-// test server serves the refusal cases; the control needs the backup on bd's
-// filesystem too, since bd checks the source holds a Dolt backup before it
-// hands it to the server (skipUnlessLocalBackup).
+// test server serves every case: bd asks the server whether the source holds
+// a Dolt backup, and reads its own filesystem only when the server cannot
+// answer.
 func TestBackupRestoreStrictReadonlyServerMode(t *testing.T) {
 	if testDoltServerPort == 0 {
 		t.Skip("Dolt test server not available")
@@ -205,7 +205,6 @@ func TestBackupRestoreStrictReadonlyServerMode(t *testing.T) {
 	// asked for, so "the store is unchanged" below cannot be vacuous.
 	t.Run("control_restore_without_readonly", func(t *testing.T) {
 		dir, env, backupDir := newRestoreServerWorkspace(t)
-		skipUnlessLocalBackup(t, backupDir)
 		stdout, stderr, code := runBDMigrationFreezeWithEnv(t, bd, dir, env, "backup", "restore", "--force", backupDir)
 		if code != 0 {
 			t.Fatalf("restore without --readonly exited %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
@@ -353,17 +352,6 @@ func restoreWorkspaceIssueCount(t *testing.T, bd, dir string, env []string) int 
 	return len(issues)
 }
 
-// skipUnlessLocalBackup skips a restore that must succeed when the backup the
-// Dolt server wrote is not on bd's filesystem: a containerized server without
-// a bind mount writes it inside the container, and bd refuses a source
-// directory with no manifest before the server sees it.
-func skipUnlessLocalBackup(t *testing.T, backupDir string) {
-	t.Helper()
-	if info, err := os.Stat(filepath.Join(backupDir, "manifest")); err != nil || !info.Mode().IsRegular() {
-		t.Skipf("the Dolt server's backup at %s is not visible on this filesystem (no local manifest); a containerized server without a bind mount writes it inside the container", backupDir)
-	}
-}
-
 // TestBackupRestoreRefusesNonBackupSourceServerMode is the reporter's repro
 // for #5972: `bd backup restore <dir> --force` against a directory holding no
 // Dolt backup used to drop the target database before Dolt noticed, leaving
@@ -379,15 +367,21 @@ func TestBackupRestoreRefusesNonBackupSourceServerMode(t *testing.T) {
 
 	bd := buildBDForInitTests(t)
 
-	assertRefusedUnchanged := func(t *testing.T, dir string, env []string, stdout, stderr string, code int) {
+	// assertRefusedUnchanged checks one refused restore: a non-zero exit, the
+	// refusal, a remedy that says wantRemedy and not avoid, and the store still
+	// holding its three issues.
+	assertRefusedUnchanged := func(t *testing.T, dir string, env []string, stdout, stderr string, code int, wantRemedy, avoid string) {
 		t.Helper()
 		if code == 0 {
 			t.Errorf("restore from a non-backup directory exited 0\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
 		}
-		for _, want := range []string{"is not a Dolt backup (no manifest found)", "the database was not changed"} {
+		for _, want := range []string{"is not a Dolt backup (no manifest found)", "the database was not changed", wantRemedy} {
 			if !strings.Contains(stdout+stderr, want) {
 				t.Errorf("output is missing %q\nstdout:\n%s\nstderr:\n%s", want, stdout, stderr)
 			}
+		}
+		if avoid != "" && strings.Contains(stdout+stderr, avoid) {
+			t.Errorf("output offers %q, which would re-point the configured backup destination\nstdout:\n%s\nstderr:\n%s", avoid, stdout, stderr)
 		}
 		if got := restoreWorkspaceIssueCount(t, bd, dir, env); got != 3 {
 			t.Errorf("issue count after the refused restore = %d, want 3: the restore replaced the store", got)
@@ -395,11 +389,14 @@ func TestBackupRestoreRefusesNonBackupSourceServerMode(t *testing.T) {
 	}
 
 	for _, tc := range []struct {
-		name  string
-		files []string
+		name              string
+		files             []string
+		wantRemedy, avoid string
 	}{
-		{name: "empty_dir"},
-		{name: "jsonl_dir", files: []string{"issues.jsonl"}},
+		{name: "empty_dir", wantRemedy: "To back up into it, run bd backup init "},
+		// A directory of exports is pointed at bd import, not at backing up
+		// into it.
+		{name: "jsonl_dir", files: []string{"issues.jsonl"}, wantRemedy: "run bd import <file>", avoid: "bd backup init"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir, env, _ := newRestoreServerWorkspace(t)
@@ -411,7 +408,7 @@ func TestBackupRestoreRefusesNonBackupSourceServerMode(t *testing.T) {
 			}
 
 			stdout, stderr, code := runBDMigrationFreezeWithEnv(t, bd, dir, env, "backup", "restore", source, "--force")
-			assertRefusedUnchanged(t, dir, env, stdout, stderr, code)
+			assertRefusedUnchanged(t, dir, env, stdout, stderr, code, tc.wantRemedy, tc.avoid)
 
 			entries, err := os.ReadDir(source)
 			if err != nil {
@@ -438,14 +435,69 @@ func TestBackupRestoreRefusesNonBackupSourceServerMode(t *testing.T) {
 		}
 
 		stdout, stderr, code := runBDMigrationFreezeWithEnv(t, bd, dir, env, "backup", "restore", "--force")
-		assertRefusedUnchanged(t, dir, env, stdout, stderr, code)
+		assertRefusedUnchanged(t, dir, env, stdout, stderr, code, "To back up into it, run bd backup init ", "")
 	})
+
+	// With a backup destination configured, the refusal names it instead of
+	// offering bd backup init, which would replace it with the mistyped path.
+	t.Run("configured_destination_named", func(t *testing.T) {
+		dir, env, backupDir := newRestoreServerWorkspace(t)
+		if stdout, stderr, code := runBDMigrationFreezeWithEnv(t, bd, dir, env, "backup", "init", backupDir); code != 0 {
+			t.Fatalf("bd backup init %s exited %d\nstdout:\n%s\nstderr:\n%s", backupDir, code, stdout, stderr)
+		}
+
+		stdout, stderr, code := runBDMigrationFreezeWithEnv(t, bd, dir, env, "backup", "restore", t.TempDir(), "--force")
+		assertRefusedUnchanged(t, dir, env, stdout, stderr, code, "The configured backup destination is file://"+backupDir, "bd backup init")
+	})
+
+	// A path Dolt reads as a different directory is refused before the server
+	// sees it, manifest or not: Dolt would create and open the directory the
+	// path is cut or decoded to, and the forced restore would drop the target
+	// before failing to read it. On a server that shares bd's filesystem that
+	// directory would appear beside the source.
+	for _, tc := range []struct {
+		leaf, doltReads string
+	}{
+		{leaf: "bk#1", doltReads: "bk"},
+		{leaf: "b%41k", doltReads: "bAk"},
+	} {
+		t.Run("path_read_as_"+tc.doltReads, func(t *testing.T) {
+			dir, env, _ := newRestoreServerWorkspace(t)
+			parent := t.TempDir()
+			source := filepath.Join(parent, tc.leaf)
+			if err := os.MkdirAll(source, 0o750); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(source, "manifest"), []byte("never read: the path is refused first\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			stdout, stderr, code := runBDMigrationFreezeWithEnv(t, bd, dir, env, "backup", "restore", source, "--force")
+			if code == 0 {
+				t.Errorf("restore from %s exited 0\nstdout:\n%s\nstderr:\n%s", source, stdout, stderr)
+			}
+			for _, want := range []string{"cannot restore from", "the database was not changed"} {
+				if !strings.Contains(stdout+stderr, want) {
+					t.Errorf("output is missing %q\nstdout:\n%s\nstderr:\n%s", want, stdout, stderr)
+				}
+			}
+			if got := restoreWorkspaceIssueCount(t, bd, dir, env); got != 3 {
+				t.Errorf("issue count after the refused restore = %d, want 3: the restore replaced the store", got)
+			}
+			if _, err := os.Stat(filepath.Join(parent, tc.doltReads)); !os.IsNotExist(err) {
+				t.Errorf("%s, the directory Dolt reads %s as, exists after the refused restore (stat err = %v)", tc.doltReads, tc.leaf, err)
+			}
+		})
+	}
 
 	// The control proves a real Dolt backup still restores, so the refusals
 	// above are the manifest check and not a restore that no longer works.
+	// The backup is where the server wrote it, inside the container on the
+	// container backend: bd asks the server whether the source holds a backup,
+	// and reads its own filesystem only when the server cannot answer and runs
+	// on bd's host (the local backend confines LOAD_FILE, and runs here).
 	t.Run("control_real_backup", func(t *testing.T) {
 		dir, env, backupDir := newRestoreServerWorkspace(t)
-		skipUnlessLocalBackup(t, backupDir)
 
 		stdout, stderr, code := runBDMigrationFreezeWithEnv(t, bd, dir, env, "backup", "restore", backupDir, "--force")
 		if code != 0 {

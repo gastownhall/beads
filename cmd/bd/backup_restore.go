@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -59,7 +60,7 @@ To initialize and restore in one step, use: bd init && bd backup restore`,
 			}
 		}
 
-		if err := validateBackupRestoreDir(dir); err != nil {
+		if err := validateBackupRestoreDir(dir, restoreReadsLocalSource()); err != nil {
 			return err
 		}
 
@@ -70,6 +71,9 @@ To initialize and restore in one step, use: bd init && bd backup restore`,
 				return err
 			}
 		} else if err := runBackupRestore(ctx, store, dir, force); err != nil {
+			if errors.Is(err, versioncontrolops.ErrNotDoltBackup) {
+				return notDoltBackupRefusal(dir, err)
+			}
 			return err
 		}
 
@@ -173,18 +177,62 @@ func syncProjectIDFromDB(ctx context.Context, s storage.DoltStorage) error {
 }
 
 // validateBackupRestoreDir refuses a restore source before anything touches
-// the database: a missing directory, and one that holds no Dolt backup, which
-// a forced restore would otherwise drop the target for before failing (#5972).
-func validateBackupRestoreDir(dir string) error {
+// the database: a missing directory, a path Dolt would read as a different
+// directory, and, when localSource is set, a directory that holds no Dolt
+// backup, which a forced restore would otherwise drop the target for before
+// failing (#5972).
+//
+// localSource says this process's filesystem is the one the restore reads
+// (restoreReadsLocalSource). Without it the backup can be on a Dolt server bd
+// cannot see into, so whether the directory holds one is left to
+// versioncontrolops.BackupRestore, which asks the server before the restore.
+// The directory itself must still exist here in every mode, since the store
+// stats it too: a backup at a path only the server has is refused as missing
+// before the server is asked.
+func validateBackupRestoreDir(dir string, localSource bool) error {
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		return fmt.Errorf("backup directory not found: %s\nRun 'bd backup' first to create a backup", dir)
 	}
-	if err := versioncontrolops.CheckBackupDir(dir); err != nil {
+	check := versioncontrolops.CheckBackupPath
+	if localSource {
+		check = versioncontrolops.CheckBackupDir
+	}
+	if err := check(dir); err != nil {
 		if errors.Is(err, versioncontrolops.ErrNotDoltBackup) {
-			return fmt.Errorf("%s is not a Dolt backup (no manifest found); the database was not changed\n"+
-				"To back up into it, run %s, then bd backup sync", remedy.PrintedValue(dir), backupInitCommand(dir))
+			return notDoltBackupRefusal(dir, err)
 		}
 		return err
 	}
 	return nil
+}
+
+// restoreReadsLocalSource reports whether the restore reads its source
+// directory on this process's filesystem: embedded Dolt runs in this process,
+// and proxied-server mode honors a restore only on managed-local, where bd
+// spawned the server itself. A direct server-mode connection can reach a Dolt
+// server on another host or in a container, which reads the path on its own
+// filesystem.
+func restoreReadsLocalSource() bool {
+	return isEmbeddedMode() || usesProxiedServer()
+}
+
+// notDoltBackupRefusal words err, a refusal of dir as a source that holds no
+// Dolt backup (versioncontrolops.ErrNotDoltBackup), for the user: the
+// database was not changed, and what to run instead. Backing up into dir is
+// offered only when nothing better is known: `bd backup init` replaces the
+// configured backup destination, so after a mistyped path, or on a directory
+// of JSONL exports, it would point the next sync at the wrong directory.
+func notDoltBackupRefusal(dir string, err error) error {
+	var next []string
+	entries, _ := os.ReadDir(dir)
+	if slices.ContainsFunc(entries, func(e os.DirEntry) bool { return !e.IsDir() && strings.HasSuffix(e.Name(), ".jsonl") }) {
+		next = append(next, "It holds JSONL exports, which are imported, not restored: run bd import <file>")
+	}
+	if cfg, _ := loadDoltBackupConfig(); cfg != nil && cfg.BackupURL != "" {
+		next = append(next, "The configured backup destination is "+remedy.PrintedValue(cfg.BackupURL)+" (bd backup status)")
+	}
+	if len(next) == 0 {
+		next = append(next, "To back up into it, run "+backupInitCommand(dir)+", then bd backup sync")
+	}
+	return fmt.Errorf("%w; the database was not changed\n%s", err, strings.Join(next, "\n"))
 }
