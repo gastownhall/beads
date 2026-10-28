@@ -1313,9 +1313,11 @@ Examples:
   bd dep tree gt-0iqq --status=open      # Only show open issues
   bd dep tree gt-0iqq --depth=3          # Limit to 3 levels deep
 
-A node reached by two paths is shown ONCE, under the first path that got
-there, and a cycle simply ends the descent. --show-all-paths is a deprecated
-no-op; use 'bd dep cycles' to find circular dependencies.
+A node reached by two paths is EXPANDED once, under the first path that got
+there; each later path lists it as "(shown above)" in the text output and as
+a "deduped": true row in --json, so every edge stays visible. A cycle simply
+ends the descent. --show-all-paths is a deprecated no-op; use 'bd dep cycles'
+to find circular dependencies.
 
 --max-rows / BEADS_MAX_ROWS caveat: the tree walk has no query filter to
 thread the cap through, so the full tree is always built first and the
@@ -1503,7 +1505,16 @@ func (r *treeRenderer) renderNode(node *types.TreeNode, children map[string][]*t
 
 	// Check if we've seen this node before (diamond dependency)
 	if r.seen[node.ID] {
-		fmt.Printf("%s%s (shown above)\n", prefix.String(), ui.RenderMuted(node.ID))
+		// This line records the edge, not a second expansion (GH#5282): a
+		// direct blocker reading "(shown above)" must still read as a
+		// blocker. The walk's Deduped stubs land here; DFS pre-order puts the
+		// expansion in the list before its stubs, so the first-rendered
+		// occurrence is always the expanded one.
+		line := fmt.Sprintf("%s%s (shown above)", prefix.String(), ui.RenderMuted(node.ID))
+		if label := treeEdgeLabel(node.EdgeFromParent); label != "" {
+			line += " " + label
+		}
+		fmt.Println(line)
 		return
 	}
 	r.seen[node.ID] = true
@@ -1528,6 +1539,15 @@ func (r *treeRenderer) renderNode(node *types.TreeNode, children map[string][]*t
 		}
 		r.renderNode(child, children, depth+1, i == len(nodeChildren)-1)
 	}
+}
+
+// treeEdgeLabel renders an edge-type annotation ("[blocks]") in the muted
+// style the tree uses for labels that are not the node itself.
+func treeEdgeLabel(edge types.DependencyType) string {
+	if edge == "" {
+		return ""
+	}
+	return ui.RenderMuted(fmt.Sprintf("[%s]", edge))
 }
 
 // formatTreeNode formats a single tree node with status, ready indicator, etc.
@@ -1569,7 +1589,7 @@ func formatTreeNode(node *types.TreeNode, isBlocked bool) string {
 
 	// Show edge type for non-root nodes (GH#3565)
 	if node.Depth > 0 && node.EdgeFromParent != "" {
-		line += " " + ui.RenderMuted(fmt.Sprintf("[%s]", node.EdgeFromParent))
+		line += " " + treeEdgeLabel(node.EdgeFromParent)
 	}
 
 	// Add READY/BLOCKED indicator for root node
@@ -1639,11 +1659,13 @@ func init() {
 	depAddCmd.Flags().Bool("no-cycle-check", false, "On bulk --file adds, skip per-edge cycle checks and the post-add cycle warning (one final whole-graph check still runs before commit); on a single-edge add, skip only the post-add cycle warning")
 
 	// DEPRECATED NO-OP, and it always was one: nothing has ever read this flag,
-	// so a diamond has always been rendered under one parent only. The role's
-	// contract states the first-visit rule as a promise
+	// so a diamond has always been expanded under one parent only — since the
+	// Deduped-stub fix, every later parent is answered with a stub row rather
+	// than a dropped edge, but there is still no second expansion. The role's
+	// contract states the expand-once rule as a promise
 	// (issueops/treewalker.go, TreeResult.Nodes) and this flag stays accepted so
 	// no script breaks. Same story as TreeNode.Truncated.
-	depTreeCmd.Flags().Bool("show-all-paths", false, "Deprecated no-op: accepted and ignored. A node reached by two paths is shown once, under the first.")
+	depTreeCmd.Flags().Bool("show-all-paths", false, "Deprecated no-op: accepted and ignored. A node reached by two paths is expanded once; later paths show it as \"(shown above)\".")
 	depTreeCmd.Flags().IntP("max-depth", "d", 50, "Maximum tree depth to display (safety limit)")
 	depTreeCmd.Flags().Bool("reverse", false, "Show dependent tree (deprecated: use --direction=up)")
 	depTreeCmd.Flags().String("direction", "", "Tree direction: 'down' (dependencies), 'up' (dependents), or 'both'")

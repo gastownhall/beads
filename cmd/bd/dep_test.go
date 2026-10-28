@@ -959,6 +959,100 @@ func TestRenderTreeOutput(t *testing.T) {
 	}
 }
 
+// diamondTreeRows builds the walk answer for GH#5282's triangle — open D
+// blocks-depends on closed E and open F, E blocks-depends on F — in the two
+// child orders the walk can visit them. Each answer has four rows: D, E, F
+// expanded once, and a leaf revisit of F under the other parent.
+func diamondTreeRows(order int) []*types.TreeNode {
+	expandedF := &types.TreeNode{
+		Issue:          types.Issue{ID: "BD-F", Title: "F", Status: types.StatusOpen, Priority: 2},
+		Depth:          2,
+		ParentID:       "BD-E",
+		EdgeFromParent: types.DepBlocks,
+	}
+	dedupedF := &types.TreeNode{
+		Issue:          types.Issue{ID: "BD-F", Title: "F", Status: types.StatusOpen, Priority: 2},
+		Depth:          1,
+		ParentID:       "BD-D",
+		EdgeFromParent: types.DepBlocks,
+		Deduped:        true,
+	}
+	d := &types.TreeNode{
+		Issue: types.Issue{ID: "BD-D", Title: "D", Status: types.StatusOpen, Priority: 1},
+	}
+	e := &types.TreeNode{
+		Issue:          types.Issue{ID: "BD-E", Title: "E", Status: types.StatusClosed, Priority: 2},
+		Depth:          1,
+		ParentID:       "BD-D",
+		EdgeFromParent: types.DepBlocks,
+	}
+	if order == 0 {
+		// F reached through E first; the direct D→F edge survives as the leaf
+		// revisit.
+		return []*types.TreeNode{d, e, expandedF, dedupedF}
+	}
+	// F reached directly from D first; the E→F edge survives as the leaf
+	// revisit.
+	expandedF.Depth = 1
+	expandedF.ParentID = "BD-D"
+	dedupedF.Depth = 2
+	dedupedF.ParentID = "BD-E"
+	return []*types.TreeNode{d, expandedF, e, dedupedF}
+}
+
+// TestRenderTreeKeepsADiamondDirectBlockerVisible pins GH#5282's rendering:
+// on the D/E/F triangle the root shows [BLOCKED], F is visible directly under
+// D (expanded, or as a "(shown above)" line that still carries its [blocks]
+// edge label), and the mermaid output keeps both the D→F and the E→F edge —
+// in either child order.
+func TestRenderTreeKeepsADiamondDirectBlockerVisible(t *testing.T) {
+	for order := range 2 {
+		tree := diamondTreeRows(order)
+
+		old := os.Stdout
+		r, w, _ := os.Pipe()
+		os.Stdout = w
+		renderTree(tree, 50, "down")
+		w.Close()
+		os.Stdout = old
+
+		var buf bytes.Buffer
+		_, _ = io.Copy(&buf, r)
+		output := buf.String()
+
+		if !strings.Contains(output, "[BLOCKED]") || strings.Contains(output, "[READY]") {
+			t.Errorf("order %d: root must render [BLOCKED] with open F blocking it, got:\n%s", order, output)
+		}
+		if !strings.Contains(output, "(shown above)") {
+			t.Errorf("order %d: expected a \"(shown above)\" line for the revisited F, got:\n%s", order, output)
+		}
+		// Three [blocks] labels: E's, the expanded F's, and the revisit's —
+		// the "(shown above)" line must carry its own edge label so a direct
+		// blocker still reads as a blocker.
+		if got := strings.Count(output, "[blocks]"); got != 3 {
+			t.Errorf("order %d: [blocks] labels = %d, want 3 (E, the expanded F, and the shown-above F), got:\n%s", order, got, output)
+		}
+
+		// Mermaid prints one edge per row, so the revisit row keeps the
+		// missing D→F (order 0) or E→F (order 1) edge in the graph.
+		old = os.Stdout
+		r, w, _ = os.Pipe()
+		os.Stdout = w
+		outputMermaidTree(tree, "BD-D")
+		w.Close()
+		os.Stdout = old
+
+		buf.Reset()
+		_, _ = io.Copy(&buf, r)
+		output = buf.String()
+		for _, want := range []string{"BD-D --> BD-E", "BD-D --> BD-F", "BD-E --> BD-F"} {
+			if !strings.Contains(output, want) {
+				t.Errorf("order %d: mermaid output missing edge %q, got:\n%s", order, want, output)
+			}
+		}
+	}
+}
+
 func TestRenderTreeExternalBlockerMarksRootBlocked(t *testing.T) {
 	tree := []*types.TreeNode{
 		{
