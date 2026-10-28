@@ -634,3 +634,26 @@ async def test_update_issue_status_open_on_open_issue_keeps_other_fields(sample_
     assert result.priority == 0
     # No pre-read of the issue should be needed to decide the routing.
     mock_client.show.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_update_issue_open_on_non_closed_issue_applies_fields(sample_issue):
+    """Issue #6872: on a deferred (neither closed nor open) issue,
+    update(status="open", ...) makes it open and applies the other fields
+    of the same call."""
+    updated_issue = sample_issue.model_copy(update={"status": "open", "title": "T"})
+    mock_client = AsyncMock()
+    # bd reopen is a no-op for a deferred issue: nothing is reopened.
+    mock_client.reopen = AsyncMock(return_value=[])
+    mock_client.update = AsyncMock(return_value=updated_issue)
+
+    with patch("beads_mcp.tools._get_client", return_value=mock_client):
+        result = await beads_update_issue(issue_id="bd-1", status="open", title="T", notes="n")
+
+    mock_client.update.assert_called_once()
+    params = mock_client.update.call_args.args[0]
+    assert params.status == "open"
+    assert params.title == "T"
+    assert params.notes == "n"
+    assert result.status == "open"
+    assert result.title == "T"

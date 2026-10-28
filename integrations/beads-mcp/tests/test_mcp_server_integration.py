@@ -239,6 +239,40 @@ async def test_update_open_on_open_issue_applies_fields(mcp_client):
 
 
 @pytest.mark.asyncio
+async def test_update_open_on_deferred_issue(mcp_client):
+    """Issue #6872: update(status="open", ...) on a deferred issue undefers
+    it and applies the other fields of the same call."""
+    import json
+
+    create_result = await mcp_client.call_tool(
+        "create", {"title": "Deferred bead", "priority": 2, "issue_type": "task", "brief": False}
+    )
+    created = json.loads(create_result.content[0].text)
+    issue_id = created["id"]
+
+    defer_result = await mcp_client.call_tool(
+        "update", {"issue_id": issue_id, "status": "deferred", "brief": False}
+    )
+    deferred = json.loads(defer_result.content[0].text)
+    assert deferred["status"] == "deferred"
+
+    update_result = await mcp_client.call_tool(
+        "update",
+        {
+            "issue_id": issue_id,
+            "status": "open",
+            "title": "Reopened from deferred",
+            "brief": False,
+        },
+    )
+
+    updated = json.loads(update_result.content[0].text)
+    assert updated["id"] == issue_id
+    assert updated["status"] == "open"
+    assert updated["title"] == "Reopened from deferred"
+
+
+@pytest.mark.asyncio
 async def test_claim_issue_tool(mcp_client):
     """Test claim_issue tool."""
     import json
