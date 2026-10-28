@@ -139,6 +139,7 @@ go_test(
     srcs = [
         "active_database_size_test.go",
         "autostart_test.go",
+        "central_config_parity_test.go",
         "aux_row_id_rekey_test.go",
         "batch_apply_contract_test.go",
         "batch_closer_contract_test.go",

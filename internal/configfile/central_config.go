@@ -90,6 +90,26 @@ func LoadCentralConfig(path string) (*Config, error) {
 	return &cfg, nil
 }
 
+// ApplyCentralModeDefault applies the central config's dolt_mode to
+// project's empty DoltMode — the one field the library open path
+// (internal/storage/dolt's open constructors) still inherits from the
+// central config. The connection fields (host, port, user, TLS) are
+// deliberately NOT applied here: the open paths read them through the
+// getters' and the port chain's own central tier (CentralConfig), where
+// they rank below metadata.json and config.yaml. Merging them into a loaded
+// config inverts that order — the loaded struct outranks config.yaml in
+// Config.GetDoltServerHost — and the CLI and library opens disagree.
+//
+// This is a no-op if central is nil.
+func ApplyCentralModeDefault(project *Config, central *Config) {
+	if central == nil {
+		return
+	}
+	if project.DoltMode == "" && central.DoltMode != "" {
+		project.DoltMode = central.DoltMode
+	}
+}
+
 // ApplyCentralDefaults merges server-related fields from the central config
 // into the per-project config, but only for fields that are at their zero
 // value in the project config. Non-server fields (Database, DoltDatabase,

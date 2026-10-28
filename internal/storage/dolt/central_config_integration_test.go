@@ -10,8 +10,12 @@ import (
 )
 
 // TestApplyCentralConfigDefaults_WiresIntoOpenPath verifies that the
-// applyCentralConfigDefaults glue function loads a central config file
-// and merges its server fields into the per-project config.
+// applyCentralConfigDefaults glue function loads a central config file and
+// inherits its dolt_mode for a mode-less project config — and copies NO
+// connection field into the loaded struct (GH#3895): host, port and user
+// come from the getters' and the port chain's own central tier, where they
+// rank below metadata.json and config.yaml instead of above them. A merge
+// like that would invert the getters' precedence on the library path.
 func TestApplyCentralConfigDefaults_WiresIntoOpenPath(t *testing.T) {
 	// Create a temp central config file.
 	tmpDir := t.TempDir()
@@ -41,14 +45,14 @@ func TestApplyCentralConfigDefaults_WiresIntoOpenPath(t *testing.T) {
 	if fileCfg.DoltMode != configfile.DoltModeServer {
 		t.Errorf("DoltMode = %q, want %q", fileCfg.DoltMode, configfile.DoltModeServer)
 	}
-	if fileCfg.DoltServerHost != "central.example.com" {
-		t.Errorf("DoltServerHost = %q, want central.example.com", fileCfg.DoltServerHost)
+	if fileCfg.DoltServerHost != "" {
+		t.Errorf("DoltServerHost = %q, want empty: the open path must not merge the central config's host into the loaded struct", fileCfg.DoltServerHost)
 	}
-	if fileCfg.DoltServerPort != 3308 {
-		t.Errorf("DoltServerPort = %d, want 3308", fileCfg.DoltServerPort)
+	if fileCfg.DoltServerPort != 0 {
+		t.Errorf("DoltServerPort = %d, want 0: the open path must not merge the central config's port into the loaded struct", fileCfg.DoltServerPort)
 	}
-	if fileCfg.DoltServerUser != "centraluser" {
-		t.Errorf("DoltServerUser = %q, want centraluser", fileCfg.DoltServerUser)
+	if fileCfg.DoltServerUser != "" {
+		t.Errorf("DoltServerUser = %q, want empty: the open path must not merge the central config's user into the loaded struct", fileCfg.DoltServerUser)
 	}
 }
 

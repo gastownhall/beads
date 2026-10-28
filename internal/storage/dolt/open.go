@@ -497,25 +497,16 @@ func poolKnobFromConfig(cfg *Config, key string) string {
 	return config.GetStringFromDir(cfg.BeadsDir, key)
 }
 
-// applyCentralConfigDefaults loads the central server config from
-// ~/.config/beads/server.json (or BEADS_CENTRAL_CONFIG env var) and
-// applies its server fields as defaults to the per-project config.
-// A missing central config file is silently ignored.
+// applyCentralConfigDefaults inherits the central server config's dolt_mode
+// (~/.config/beads/server.json, or BEADS_CENTRAL_CONFIG) for a workspace
+// whose metadata names none. Its connection fields have no place here
+// (GH#3895): they come from the getters' and the port chain's own central
+// tier (configfile.CentralConfig), which ranks the central config below
+// metadata.json and config.yaml. Merging them into fileCfg inverts that
+// order — the loaded struct outranks config.yaml in
+// Config.GetDoltServerHost — and the library open disconnects from the
+// CLI's, which has no merge at all. A missing central config is a silent
+// no-op; a broken one warns once per process per path.
 func applyCentralConfigDefaults(fileCfg *configfile.Config) {
-	centralPath := os.Getenv("BEADS_CENTRAL_CONFIG")
-	if centralPath == "" {
-		centralPath = configfile.DefaultCentralConfigPath()
-	}
-	if centralPath == "" {
-		return
-	}
-
-	centralCfg, err := configfile.LoadCentralConfig(centralPath)
-	if err != nil {
-		// Log but don't fail — a broken central config shouldn't block operations.
-		fmt.Fprintf(os.Stderr, "Warning: failed to load central config %s: %v\n", centralPath, err)
-		return
-	}
-
-	configfile.ApplyCentralDefaults(fileCfg, centralCfg)
+	configfile.ApplyCentralModeDefault(fileCfg, configfile.CentralConfig())
 }

@@ -131,17 +131,23 @@ func ResolveProxiedServerRootPath(beadsDir string) (string, error) {
 	return DoltDirPath(beadsDir), nil
 }
 
-// applyCentralModeDefaults mirrors the central-config merge the LIBRARY open
-// path performs (internal/storage/dolt/open.go applyCentralConfigDefaults):
-// load ~/.config/beads/server.json (or BEADS_CENTRAL_CONFIG) and apply its
-// server fields — DoltMode, host, port, user, TLS, never data dirs — as
-// defaults for fields the project config leaves empty.
+// applyCentralModeDefaults mirrors the central-config inheritance the
+// LIBRARY open path performs (internal/storage/dolt/open.go
+// applyCentralConfigDefaults): load ~/.config/beads/server.json (or
+// BEADS_CENTRAL_CONFIG) and apply its fields — DoltMode, host, port, user,
+// TLS, never data dirs — as defaults for fields the project config leaves
+// empty. The CLI now honors the CONNECTION fields from server.json too, but
+// through the configfile getters' and the port chain's own central tier,
+// never through a merge like this one, and never for mode selection: the
+// CLI still ignores the file's dolt_mode (GH#3895), so this merge remains
+// the mode-only inheritance LibraryOpenRootPath mirrors.
 //
 // This is deliberately NOT part of ResolvePhysicalRoots: the CLI's
-// hand-built store selection in cmd/bd/main.go never consults the central
-// config, so CLI gate planning must not either (it would gate a server root
-// the CLI would not open). It exists for LibraryOpenRootPath, which mirrors
-// the library path where the merge DOES apply.
+// hand-built store selection in cmd/bd/main.go never takes the mode
+// (dolt_mode) from the central config, so CLI gate planning must not
+// either (it would gate a server root the CLI would not open). It exists
+// for LibraryOpenRootPath, which mirrors the library path where the mode
+// inheritance DOES apply.
 //
 // A missing central config is a silent no-op, and a BROKEN central config is
 // also skipped (the open path warns and proceeds without it; this pure
