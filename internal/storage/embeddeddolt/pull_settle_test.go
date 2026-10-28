@@ -410,3 +410,60 @@ func TestEmbeddedMergeAndSettleDirtyWorkingSetSurvivesRefusedMerge(t *testing.T)
 		t.Fatalf("uncommitted working-set row was destroyed by the merge abort path (count=%d)", count)
 	}
 }
+
+// TestEmbeddedMergeAndSettleAutoResolveKeepsCleanMergedTables is #7811 on the
+// auto-resolve conclusion: CommitResolvedConflicts committed only the table
+// the resolver staged, so a label swap that merged cleanly beside a routine
+// metadata conflict was dropped from the merge commit.
+func TestEmbeddedMergeAndSettleAutoResolveKeepsCleanMergedTables(t *testing.T) {
+	te := newTestEnv(t, "metalabels")
+	ctx := t.Context()
+	conn := openSettleConn(t, ctx, te)
+
+	exec := func(q string) {
+		t.Helper()
+		if _, err := conn.ExecContext(ctx, q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	exec("INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) VALUES ('ml-1', 'X', '', '', '', '', 'open', 3, 'bug')")
+	exec("INSERT INTO labels (issue_id, label) VALUES ('ml-1', 'needs-triage')")
+	exec("CALL DOLT_COMMIT('-Am', 'seed labelled issue')")
+	exec("CALL DOLT_BRANCH('mlpeer', 'HEAD')")
+	exec("INSERT INTO metadata (`key`, value) VALUES ('dolt_auto_push_commit', 'aaa')")
+	exec("CALL DOLT_COMMIT('-Am', 'local metadata')")
+	exec("CALL DOLT_CHECKOUT('mlpeer')")
+	exec("INSERT INTO metadata (`key`, value) VALUES ('dolt_auto_push_commit', 'bbb')")
+	exec("DELETE FROM labels WHERE issue_id = 'ml-1' AND label = 'needs-triage'")
+	exec("INSERT INTO labels (issue_id, label) VALUES ('ml-1', 'ready-for-agent')")
+	exec("CALL DOLT_COMMIT('-Am', 'peer metadata + relabel')")
+	exec("CALL DOLT_CHECKOUT('main')")
+
+	if err := versioncontrolops.MergeAndSettle(ctx, conn, "mlpeer"); err != nil {
+		t.Fatalf("settling metadata-conflicted merge: %v", err)
+	}
+
+	var value string
+	if err := conn.QueryRowContext(ctx,
+		"SELECT value FROM metadata AS OF 'HEAD' WHERE `key` = 'dolt_auto_push_commit'").Scan(&value); err != nil {
+		t.Fatalf("read HEAD metadata: %v", err)
+	}
+	if value != "bbb" {
+		t.Errorf("metadata AS OF HEAD = %q, want %q (theirs)", value, "bbb")
+	}
+	var label string
+	if err := conn.QueryRowContext(ctx,
+		"SELECT GROUP_CONCAT(label ORDER BY label) FROM labels AS OF 'HEAD' WHERE issue_id = 'ml-1'").Scan(&label); err != nil {
+		t.Fatalf("read HEAD labels: %v", err)
+	}
+	if label != "ready-for-agent" {
+		t.Errorf("labels AS OF HEAD = %q, want %q: the merge commit dropped the peer's cleanly merged label change", label, "ready-for-agent")
+	}
+	var dirty int
+	if err := conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_status").Scan(&dirty); err != nil {
+		t.Fatalf("count dolt_status: %v", err)
+	}
+	if dirty != 0 {
+		t.Errorf("%d table(s) left uncommitted after the auto-resolved merge", dirty)
+	}
+}

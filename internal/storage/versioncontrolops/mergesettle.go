@@ -659,9 +659,11 @@ func TryAutoResolveMergeConflicts(ctx context.Context, db DBConn) (bool, error) 
 // has run: DOLT_COMMIT refuses a working set with outstanding constraint
 // violations, so a merge carrying both an auto-resolvable conflict and an FK
 // cascade violation could never settle while the resolver committed first
-// (bd-578h9.14).
+// (bd-578h9.14). The commit also stages the tables the merge integrated
+// cleanly, which the resolver never touched; without them the merge commit
+// kept HEAD's copy and a push reverted the peer's change (#7811).
 func CommitResolvedConflicts(ctx context.Context, db DBConn) error {
-	if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-m', 'auto-resolve merge conflicts: metadata, dependencies, schema_migrations, config, issues (field-level three-way merge), labels/comments/events (union)')"); err != nil {
+	if err := concludeMerge(ctx, db, "auto-resolve merge conflicts: metadata, dependencies, schema_migrations, config, issues (field-level three-way merge), labels/comments/events (union)", ""); err != nil {
 		return fmt.Errorf("failed to commit resolved conflicts: %w", err)
 	}
 	return nil
