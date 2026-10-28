@@ -2183,9 +2183,15 @@ func preCommitHasStagedBeadsFiles(beadsDir string) bool {
 	if hookRoot := hookWorkTreeRoot(); hookRoot != "" {
 		cmdDir = hookRoot
 	}
+	// Ask the index the commit is built from: during `git commit -- <paths>`
+	// that is the hook's GIT_INDEX_FILE, not the on-disk index (GH#4080).
+	env, _, err := gitIndexEnv(cmdDir)
+	if err != nil {
+		debug.Logf("pre-commit: failed to resolve the commit index: %v\n", err)
+	}
 	cmd := exec.Command("git", "diff", "--cached", "--name-only", "--", ".beads")
 	cmd.Dir = cmdDir
-	cmd.Env = scrubGitHookEnv(os.Environ())
+	cmd.Env = env
 	out, err := cmd.Output()
 	if err != nil {
 		debug.Logf("pre-commit: failed to inspect staged .beads paths: %v\n", err)
