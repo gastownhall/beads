@@ -1059,3 +1059,49 @@ func TestCrossProject_IdentityCheck_PathOnly_GlobalForeignRejected(t *testing.T)
 		}
 	}
 }
+
+// TestCrossProject_IdentityCheck_PathOnly_SoftSkipAndMatch is the guard for
+// the Path-only fix above: resolving the workspace from filepath.Dir(Path)
+// must not turn a matching project_id, or a workspace that cannot be
+// verified, into a refused open.
+func TestCrossProject_IdentityCheck_PathOnly_SoftSkipAndMatch(t *testing.T) {
+	const dbID = "proj-owner"
+	cases := []struct {
+		name      string
+		writeMeta func(t *testing.T, f *identityTestFixture)
+	}{
+		{"MatchingProjectID", func(t *testing.T, f *identityTestFixture) { f.saveLocalProjectID(t, dbID) }},
+		{"NoLocalMetadata", func(t *testing.T, f *identityTestFixture) {}},
+		{"EmptyLocalProjectID", func(t *testing.T, f *identityTestFixture) { f.saveLocalProjectID(t, "") }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			skipIfNoDolt(t)
+			acquireTestSlot()
+			t.Cleanup(releaseTestSlot)
+
+			f := newIdentityTestFixture(t, "pathonly-skip")
+			seedCtx, seedCancel := testContext(t)
+			f.seedProjectID(t, seedCtx, dbID)
+			seedCancel()
+			tc.writeMeta(t, f)
+
+			store, err := openStoreWithOwnBudget(t, f.pathOnlyConfig())
+			if err != nil {
+				t.Fatalf("Path-only reopen must succeed, got: %v", err)
+			}
+			defer store.Close()
+			// Build the read context after the open drained any earlier
+			// deadline (see openStoreWithOwnBudget).
+			ctx, cancel := testContext(t)
+			defer cancel()
+			got, err := store.GetMetadata(ctx, "_project_id")
+			if err != nil {
+				t.Fatalf("read _project_id: %v", err)
+			}
+			if got != dbID {
+				t.Errorf("_project_id = %q, want %q", got, dbID)
+			}
+		})
+	}
+}
