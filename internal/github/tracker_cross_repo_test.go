@@ -429,3 +429,31 @@ func TestPush_SkipsBeadLinkedToOtherRepo(t *testing.T) {
 		}
 	}
 }
+
+// TestSync_NoConflictWithBeadLinkedToOtherRepo: a bidirectional sync against
+// acme/repo-b must not read the bead linked to repo-a's issue 42 as a
+// conflict with repo-b's issue 42, nor push it there, when both changed after
+// the last sync.
+func TestSync_NoConflictWithBeadLinkedToOtherRepo(t *testing.T) {
+	ctx := context.Background()
+	lastSync := time.Date(2026, 10, 3, 0, 0, 0, 0, time.UTC)
+	remoteEdit := gitHubIssueJSON(42, "Repo B issue 42", "repo-b body", repoB42Ref, lastSync.Add(24*time.Hour))
+	routes := pushRoutes()
+	routes["GET /repos/acme/repo-b/issues"] = "[" + remoteEdit + "]"
+	routes["GET /repos/acme/repo-b/issues/42"] = remoteEdit
+	tr, rt := newCrossRepoTracker(routes)
+	store := newCrossRepoStore(repoABead(lastSync.Add(48 * time.Hour)))
+	store.metadata["github.last_sync"] = lastSync.Format(time.RFC3339)
+
+	result, err := tracker.NewEngine(tr, store, "test").Sync(ctx, tracker.SyncOptions{})
+	if err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if result.Stats.Conflicts != 0 {
+		t.Errorf("sync reported %d conflicts, want 0", result.Stats.Conflicts)
+	}
+	if rt.sent("PATCH /repos/acme/repo-b/issues/42") {
+		t.Errorf("sync wrote the repo-a bead onto repo-b #42; requests=%v", rt.log())
+	}
+	assertRepoABeadUnchanged(t, store)
+}
