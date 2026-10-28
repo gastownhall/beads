@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`config.yaml` `dolt.host` now outranks `metadata.json` `dolt_server_host`
+  (GH#5961).** A host committed in the git-tracked `.beads/metadata.json`
+  traveled to every clone and won the dial at a rank the receiving project's
+  own `config.yaml` could not override — the same leak the port chain cited
+  when it demoted `dolt_server_port` (GH#2372) — and the mixed pair dialed an
+  endpoint neither file declared. A connection now resolves its host from
+  `BEADS_DOLT_SERVER_HOST`, then the merged `dolt.host` (the workspace's own
+  `.beads/config.yaml`, the `config.local.yaml` beside it, the user-level
+  `~/.config/bd/config.yaml`), then the metadata host (a `server.json` central
+  host included), then the default; affected are workspaces whose two files
+  name different servers, which now dial the one `config.yaml` names. Host
+  inference of server mode, auto-backup's shared-filesystem check, foreign
+  opens, and the doctor probe follow the same host. Where the two files name
+  different servers the first store open (and `bd dolt show`) prints one
+  stderr notice naming both hosts, both files and two converging remedies:
+  remove `dolt_server_host` from `.beads/metadata.json` to keep the host
+  `config.yaml` names, or run `bd dolt set host` — which now also writes
+  `.beads/config.yaml dolt.host` whenever that file exists (`--update-config`
+  no longer needed for the host key; `--json`'s `config_yaml_updated` reports
+  a write that now actually ran). `bd init --server-host` writes both files
+  the same way, and `bd init` no longer stamps a default `127.0.0.1` into a
+  new clone's metadata.json. Explicit `dolt_mode`/`dolt.mode` settings and
+  `BEADS_DOLT_SERVER_HOST` keep their ranks; a user-level `dolt.host` now
+  also outranks a committed metadata host.
+  See [Dolt configuration](docs/architecture/dolt.md).
+
 ### Added
 
 - **`arrival_seq`, a commit-ordered create sequence on wisp-plane rows.**

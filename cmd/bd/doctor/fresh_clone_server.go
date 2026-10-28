@@ -151,7 +151,12 @@ func freshCloneServerUnreachableResult(dbName, host string, port int, socket str
 		Detail:  detail.String(),
 		Fix: "Verify Dolt server connectivity:\n" +
 			"  1. Confirm the server is running and reachable from this host\n" +
-			"  2. Check .beads/metadata.json: " + settings + "\n" +
+			// The check dials the endpoint the store would: since GH#5961 the
+			// .beads/config.yaml dolt.host outranks the metadata.json
+			// dolt_server_host (as its port outranked dolt_server_port since
+			// GH#2372), so that file is where the dialed address comes from
+			// first.
+			"  2. Check .beads/config.yaml (dolt.host and dolt.port), then .beads/metadata.json: " + settings + "\n" +
 			"  3. Verify credentials in ~/.config/beads/credentials (or BEADS_DOLT_PASSWORD)\n" +
 			"  4. Try a CRUD command (e.g. 'bd ready') to confirm the server is usable\n" +
 			"  5. Re-run 'bd doctor' once connectivity is restored",

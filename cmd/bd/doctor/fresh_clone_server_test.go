@@ -11,6 +11,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
@@ -522,5 +523,66 @@ func TestDoctorChecksNameConfiguredValuesEscaped(t *testing.T) {
 				t.Errorf("the bd repo add remedy pastes a value no shell passes on unchanged:\n%s", issues)
 			}
 		})
+	}
+}
+
+// TestCheckFreshClone_DualFileWorkspaceDialsTheConfigYamlEndpoint pins
+// GH#5961 at the doctor's probe: a workspace whose (tracked) metadata.json
+// names one host and port and whose config.yaml names another is probed at
+// the config.yaml endpoint — before the host demotion the probe paired the
+// metadata host with the yaml port, an address neither file declares.
+func TestCheckFreshClone_DualFileWorkspaceDialsTheConfigYamlEndpoint(t *testing.T) {
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// JSONL with issues so the check proceeds past the fresh-clone gate.
+	jsonl := `{"id":"bd-abc","title":"t"}` + "\n" + `{"id":"bd-def","title":"t"}` + "\n"
+	if err := os.WriteFile(filepath.Join(beadsDir, "issues.jsonl"), []byte(jsonl), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The metadata bd init once stamped: an explicit server mode, the local
+	// host, and a fossil port.
+	meta := `{
+  "database": "beads.db",
+  "dolt_mode": "server",
+  "dolt_server_host": "127.0.0.2",
+  "dolt_server_port": 3307,
+  "dolt_server_user": "root",
+  "dolt_database": "beads"
+}`
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(meta), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The workspace's own config.yaml names a different endpoint; port 1 is
+	// guaranteed-unreachable on loopback (GH#35's fixture trick).
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"),
+		[]byte("dolt:\n  host: 127.0.0.1\n  port: \"1\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_PORT"} {
+		t.Setenv(name, "")
+	}
+	// The check reads the merged configuration, as a bd command here does.
+	t.Setenv("BEADS_DIR", beadsDir)
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+	t.Cleanup(config.ResetForTesting)
+
+	check := CheckFreshClone(tmpDir)
+
+	if check.Status != StatusWarning {
+		t.Fatalf("expected %q probing an unreachable server, got %q (message: %s)", StatusWarning, check.Status, check.Message)
+	}
+	if !strings.Contains(check.Message, "127.0.0.1:1") {
+		t.Errorf("the check must probe the config.yaml endpoint 127.0.0.1:1, got: %s", check.Message)
+	}
+	if strings.Contains(check.Message, "127.0.0.2") {
+		t.Errorf("the outranked metadata.json host must be neither probed nor named, got: %s", check.Message)
+	}
+	if !strings.Contains(check.Fix, "dolt.host and dolt.port") {
+		t.Errorf("the fix must point at .beads/config.yaml's host and port first, got: %s", check.Fix)
 	}
 }

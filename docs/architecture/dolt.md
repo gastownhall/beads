@@ -337,6 +337,22 @@ Configure the connection with flags or environment variables:
 | `--server-user` | `BEADS_DOLT_SERVER_USER` | `root` |
 | | `BEADS_DOLT_PASSWORD` | (none) |
 
+**`config.yaml` `dolt.host` outranks `metadata.json` `dolt_server_host` (GH#5961).**
+The host a connection resolves is, in order: `BEADS_DOLT_SERVER_HOST`, the merged
+`dolt.host` (the workspace's `.beads/config.yaml`, the `config.local.yaml` beside
+it, the user-level `~/.config/bd/config.yaml`), the git-tracked
+`.beads/metadata.json` `dolt_server_host` (including a `server.json` central
+host merged into it), and bd's default `127.0.0.1` — the same rank the port
+chain already gives `dolt.port` over `dolt_server_port` (GH#2372). A host
+committed in `metadata.json` travels to every clone, so it must not hold a
+rank the receiving project's own `config.yaml` cannot override; the old order
+also paired a committed `127.0.0.1` with the `config.yaml` port and dialed an
+endpoint neither file declared. Where the two files name different servers, bd
+prints a one-time stderr notice naming both and the converging remedies;
+`bd dolt set host` and `bd init --server-host` now write both files (and
+`bd init` no longer stamps a default host into a new clone's metadata.json),
+so a host set on one machine cannot be silently outranked by the other file.
+
 **`BEADS_DOLT_SERVER_PORT` also declares the server externally managed.**
 Setting it — or the legacy `BEADS_DOLT_PORT` — makes `ResolveServerMode`
 classify the workspace as an externally-managed server, so bd will not
