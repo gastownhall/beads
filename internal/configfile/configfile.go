@@ -521,25 +521,37 @@ func (c *Config) PortImpliesServerMode() bool {
 	if strings.EqualFold(c.DoltMode, DoltModeProxiedServer) {
 		return false
 	}
-	return doltServerPortFromEnv() > 0
+	port, _ := doltServerPortFromEnv()
+	return port > 0
 }
 
 // doltServerPortFromEnv returns the server port named by
 // BEADS_DOLT_SERVER_PORT or, failing that, the legacy BEADS_DOLT_PORT --
 // mirroring Config.GetDoltServerPort's env precedence without needing a
-// loaded Config. Returns 0 when neither names a valid positive integer.
-func doltServerPortFromEnv() int {
+// loaded Config -- and the name of the variable it read it from, "" when
+// neither names a valid positive integer. The name is what a refusal or advice
+// names for the operator; PortImpliesServerMode needs only the port.
+func doltServerPortFromEnv() (port int, name string) {
 	if p := os.Getenv("BEADS_DOLT_SERVER_PORT"); p != "" {
-		if port, err := strconv.Atoi(p); err == nil && port > 0 {
-			return port
+		if parsed, err := strconv.Atoi(p); err == nil && parsed > 0 {
+			return parsed, "BEADS_DOLT_SERVER_PORT"
 		}
 	}
 	if p := os.Getenv("BEADS_DOLT_PORT"); p != "" {
-		if port, err := strconv.Atoi(p); err == nil && port > 0 {
-			return port
+		if parsed, err := strconv.Atoi(p); err == nil && parsed > 0 {
+			return parsed, "BEADS_DOLT_PORT"
 		}
 	}
-	return 0
+	return 0, ""
+}
+
+// DoltServerPortEnvName is the environment variable that declares a server
+// port and so, by PortImpliesServerMode's rule, an externally managed server:
+// BEADS_DOLT_SERVER_PORT, or the legacy BEADS_DOLT_PORT when only that one
+// names a valid port. "" when neither does.
+func DoltServerPortEnvName() string {
+	_, name := doltServerPortFromEnv()
+	return name
 }
 
 func (c *Config) IsDoltProxiedServerMode() bool {

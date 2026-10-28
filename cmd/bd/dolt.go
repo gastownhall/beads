@@ -1004,6 +1004,14 @@ lifecycle and starts it on demand, so a server started here would be a second,
 unsupervised one over the same data directory. Use 'bd dolt status' to see what
 is running and 'bd dolt stop' to shut it down.
 
+Refused on a workspace whose server a setting declares externally managed
+(BEADS_DOLT_SERVER_MODE=1, BEADS_DOLT_SERVER_PORT, the legacy BEADS_DOLT_PORT,
+or dolt_server_port in .beads/metadata.json): the declaring party runs that
+server, and a server started here would be a second one over .beads/dolt on
+the declared port, publishing a database that hides the managed one. The
+refusal names the setting; removing dolt_server_port, when it is the only one,
+lets bd manage the server. --force does not bypass it.
+
 With dolt.auto-start: false the server is expected to be managed outside bd, so
 a start that would create a new, empty Dolt database (the data directory is
 missing, empty, or holds no database) is refused before anything is written:
@@ -1054,6 +1062,21 @@ over existing data, or adopting a server bd already tracks, is unaffected. Use
 				return HandleError("the configured Dolt server host %s; 'bd dolt start' only manages a local server.\nStart the server on that host, or clear dolt_server_host / dolt.host / BEADS_DOLT_SERVER_HOST to run one locally", desc)
 			}
 			return HandleError("the configured Dolt server host %s; 'bd dolt start' starts bd's own server, which listens on 127.0.0.1 only.\nStart the server that listens on %s, or clear dolt_server_host / dolt.host / BEADS_DOLT_SERVER_HOST to run bd's own", desc, listenAddr)
+		}
+		// A workspace whose server a setting declares externally managed
+		// (doltserver.ExternallyManagedBy: BEADS_DOLT_SERVER_MODE=1, a port
+		// env var, dolt_server_port) has no server for bd to start: the
+		// declaring party runs it. Starting one here would launch a server
+		// of bd's own over .beads/dolt on the declared port — a different
+		// database that hides the managed one and takes the port the managed
+		// server needs — and publish it in .beads/dolt-server.pid/.port, so
+		// later commands silently resolve to the empty database. The shared
+		// server is excluded: bd starts that one itself. --force does not
+		// bypass this, unlike the fresh-data-dir refusal below, which --force
+		// exists to bypass: an externally managed workspace stays externally
+		// managed, whatever data dir it has.
+		if setting, sole := doltserver.ExternallyManagedBy(beadsDir); setting != "" {
+			return HandleProxyCapabilityError(externalDoltStartRefusal(beadsDir, setting, sole))
 		}
 		serverDir := doltserver.ResolveServerDir(beadsDir)
 		force, _ := cmd.Flags().GetBool("force")
