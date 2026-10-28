@@ -341,6 +341,47 @@ func TestInitServerDialsCentralServerConfig(t *testing.T) {
 	requireDoltRootEmpty(t, f.repoDir)
 }
 
+// TestInitServerRecordsNoCentralServerConfigEndpoint pins that a server-mode
+// init that reaches the server ~/.config/beads/server.json names records
+// dolt_mode server in metadata.json but none of server.json's endpoint
+// (GH#3895): a recorded copy would outrank server.json for every later
+// command, so editing server.json would no longer move the workspace.
+func TestInitServerRecordsNoCentralServerConfigEndpoint(t *testing.T) {
+	skipIfNoDolt(t)
+	f := newExternalInitFixture(t)
+	database := uniqueTestDBName(t)
+	t.Cleanup(func() { dropTestDatabase(database, testDoltServerPort) })
+	central := filepath.Join(f.home, "server.json")
+	body := fmt.Sprintf(`{"dolt_server_host":"127.0.0.1","dolt_server_port":%d,"dolt_server_user":"root"}`, testDoltServerPort)
+	if err := os.WriteFile(central, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.env = append(f.env, "BEADS_CENTRAL_CONFIG="+central)
+
+	res := f.run("", "init", "--quiet", "--server", "--database", database, "--prefix", "x", "--skip-hooks", "--skip-agents")
+
+	if res.failed {
+		t.Fatalf("bd init --server failed against the server the central server config names:\n%s", res.output)
+	}
+	requireNoLaunch(t, res)
+	data, err := os.ReadFile(filepath.Join(f.repoDir, ".beads", "metadata.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(data, &meta); err != nil {
+		t.Fatalf("metadata.json: %v\n%s", err, data)
+	}
+	if meta["dolt_mode"] != configfile.DoltModeServer {
+		t.Errorf("metadata.json dolt_mode = %v, want %s:\n%s", meta["dolt_mode"], configfile.DoltModeServer, data)
+	}
+	for _, key := range []string{"dolt_server_host", "dolt_server_port", "dolt_server_user", "dolt_server_tls"} {
+		if v, ok := meta[key]; ok {
+			t.Errorf("metadata.json records %s = %v from the central server config:\n%s", key, v, data)
+		}
+	}
+}
+
 // TestInitStoreTakesCentralServerConfig pins the rest of what init's store
 // takes from the central server config (GH#3895): its user and TLS, which
 // no dial error names, and its precedence below the flags and the
