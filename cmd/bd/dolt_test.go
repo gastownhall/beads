@@ -3111,6 +3111,28 @@ func (m *positionalRemotePushStore) PushRemote(_ context.Context, remote string,
 	return nil
 }
 
+func (m *positionalRemotePushStore) Pull(context.Context) error {
+	m.calls = append(m.calls, "Pull")
+	return nil
+}
+
+func (m *positionalRemotePushStore) PullRemote(_ context.Context, remote string) error {
+	m.calls = append(m.calls, fmt.Sprintf("PullRemote(%s)", remote))
+	return nil
+}
+
+// PullWithStrategy and PullRemoteWithStrategy make the fake a
+// storage.StrategicPuller, so --strategy rows reach the store.
+func (m *positionalRemotePushStore) PullWithStrategy(_ context.Context, strategy string) error {
+	m.calls = append(m.calls, fmt.Sprintf("PullWithStrategy(%s)", strategy))
+	return nil
+}
+
+func (m *positionalRemotePushStore) PullRemoteWithStrategy(_ context.Context, remote, strategy string) error {
+	m.calls = append(m.calls, fmt.Sprintf("PullRemoteWithStrategy(%s,%s)", remote, strategy))
+	return nil
+}
+
 func (m *positionalRemotePushStore) ListRemotes(context.Context) ([]storage.RemoteInfo, error) {
 	return []storage.RemoteInfo{
 		{Name: "origin", URL: "git+ssh://git@github.com/example/widgets.git"},
@@ -3160,6 +3182,33 @@ func TestDoltPushPositionalRemoteIsNotSilentlyIgnored(t *testing.T) {
 		{
 			name:            "AC-1/push_blank_positional_refused",
 			cmd:             doltPushCmd,
+			args:            []string{"  "},
+			wantValidateErr: []string{"remote name is empty"},
+		},
+		{
+			name:      "AC-2/pull_positional",
+			cmd:       doltPullCmd,
+			args:      []string{"1st"},
+			wantCalls: []string{"PullRemote(1st)"},
+			wantOut:   `Pulling from Dolt remote "1st"...`,
+		},
+		{
+			name:      "AC-2/pull_positional_strategy",
+			cmd:       doltPullCmd,
+			args:      []string{"1st"},
+			flags:     map[string]string{"strategy": "theirs"},
+			wantCalls: []string{"PullRemoteWithStrategy(1st,theirs)"},
+			wantOut:   `Pulling from Dolt remote "1st"...`,
+		},
+		{
+			name:            "AC-2/pull_empty_positional_refused",
+			cmd:             doltPullCmd,
+			args:            []string{""},
+			wantValidateErr: []string{"remote name is empty"},
+		},
+		{
+			name:            "AC-2/pull_blank_positional_refused",
+			cmd:             doltPullCmd,
 			args:            []string{"  "},
 			wantValidateErr: []string{"remote name is empty"},
 		},
