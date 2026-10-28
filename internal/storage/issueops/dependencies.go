@@ -1179,7 +1179,21 @@ func checkRenameTargetCollision(ctx context.Context, tx DBTX, table, typedCol, n
 //
 //nolint:gosec // G201: depTable from WispTableRouting (hardcoded constants)
 func RemoveDependencyInTx(ctx context.Context, tx *sql.Tx, issueID, dependsOnID, actor string, emitEvent bool) (bool, error) {
-	return removeDependencyInTx(ctx, tx, issueID, dependsOnID, actor, emitEvent, nil, true)
+	result, err := RemoveDependencyInTxWithResult(ctx, tx, issueID, dependsOnID, actor, emitEvent)
+	return result.EventWritten, err
+}
+
+// RemoveDependencyInTxWithResult is RemoveDependencyInTx retaining the
+// per-table change facts in DependencyWriteResult instead of discarding them,
+// on the same terms as AddDependencyInTxWithResult: a caller that stages
+// tables for a Dolt commit stages `issues` when the removal's recompute
+// flipped a durable issues row, so the unblock rides the same Dolt commit as
+// the edge delete (GH#6647).
+func RemoveDependencyInTxWithResult(ctx context.Context, tx *sql.Tx, issueID, dependsOnID, actor string, emitEvent bool) (DependencyWriteResult, error) {
+	var result DependencyWriteResult
+	eventWritten, err := removeDependencyInTx(ctx, tx, issueID, dependsOnID, actor, emitEvent, &result.Blocked, true)
+	result.EventWritten = eventWritten
+	return result, err
 }
 
 // removeDependencyInTx is the body of RemoveDependencyInTx. A deleted edge is a

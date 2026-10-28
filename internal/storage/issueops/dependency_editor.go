@@ -255,20 +255,30 @@ func ExecuteRemoveDependency(ctx context.Context, tx *sql.Tx, request publicops.
 	sourceIsWisp := IsActiveWispInTx(ctx, tx, request.IssueID)
 	_, _, eventTable, depTable := WispTableRouting(sourceIsWisp)
 
-	// RemoveDependencyInTx reports whether it recorded an event, which on the
-	// explicit-verb path is exactly "an edge was there and is gone" — it
-	// returns early without emitting when no row matched.
-	eventWritten, err := RemoveDependencyInTx(ctx, tx, request.IssueID, request.DependsOnID, request.Actor, true)
+	// RemoveDependencyInTxWithResult reports whether it recorded an event,
+	// which on the explicit-verb path is exactly "an edge was there and is
+	// gone" — it returns early without emitting when no row matched.
+	result, err := RemoveDependencyInTxWithResult(ctx, tx, request.IssueID, request.DependsOnID, request.Actor, true)
 	if err != nil {
 		return publicops.RemoveDependencyResult{}, nil, err
 	}
-	if !eventWritten {
+	if !result.EventWritten {
 		return publicops.RemoveDependencyResult{Removed: false}, nil, nil
 	}
 	// A removal that actually happened versioned the referencing issue inside
 	// RemoveDependencyInTx, at the row delete; an absent edge returned above
 	// without ever reaching that seam.
+	//
+	// Stage exactly the durable tables the removal wrote: its own pair always,
+	// and `issues` when the recompute flipped a durable issues row — the
+	// unblock rides the same Dolt commit as the edge delete (GH#6647), the
+	// mirror of the add-side rule. ChangedTables drops the wisp tables itself,
+	// so a wisp-sourced removal stages only the `issues` rows its recompute
+	// flipped, the one durable write it made.
 	tables := ChangedTables{}
 	tables.Add(depTable, eventTable)
+	if result.Blocked.IssueRowsChanged {
+		tables.Add("issues")
+	}
 	return publicops.RemoveDependencyResult{Removed: true}, tables, nil
 }

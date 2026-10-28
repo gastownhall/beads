@@ -151,7 +151,54 @@ func TestDoltStoreDependencyEditorRemoveNamesTheHistoryEntry(t *testing.T) {
 	if !doltHasCommitMessage(ctx, t, store, "bd: dep remove test-dep-rm-a test-dep-rm-b") {
 		t.Fatal("the removal did not name the edge in history")
 	}
-	requireCleanTables(ctx, t, store, "dependencies")
+	// The removed edge unblocked test-dep-rm-a, so `issues` is one of the
+	// tables this commit must have taken with it.
+	requireCleanTables(ctx, t, store, "issues", "dependencies")
+}
+
+// TestDoltStoreDependencyEditorRemoveCommitsUnblock is GH#6647 on the
+// `bd dep remove` path: removing the last blocker flips is_blocked back to 0
+// in the same SQL transaction as the edge delete, and that flip must ride the
+// removal's Dolt commit. Left unstaged, committed history keeps the bead
+// blocked forever while the working set says otherwise.
+func TestDoltStoreDependencyEditorRemoveCommitsUnblock(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+	seedIssues(ctx, t, store, "test-dep-unblk-a", "test-dep-unblk-b")
+	requireCleanTables(ctx, t, store, "issues", "dependencies")
+
+	editor, err := store.DependencyEditor()
+	if err != nil {
+		t.Fatalf("DependencyEditor(): %v", err)
+	}
+	if _, err := editor.AddDependencies(ctx, publicops.AddDependenciesRequest{
+		Actor: "writer",
+		Edges: []publicops.DependencyEdge{{IssueID: "test-dep-unblk-b", DependsOnID: "test-dep-unblk-a", Type: publicops.DepBlocks}},
+	}); err != nil {
+		t.Fatalf("AddDependencies: %v", err)
+	}
+	// Start the removal from a committed tree where B is blocked: the remove
+	// is then the only writer of the unblock flip.
+	if _, err := store.db.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'seed blocked pair')"); err != nil && !isDoltNothingToCommit(err) {
+		t.Fatalf("commit seed: %v", err)
+	}
+	requireCleanTables(ctx, t, store, "issues", "dependencies")
+	if !isBlockedAtHEAD(ctx, t, store, "test-dep-unblk-b") {
+		t.Fatal("precondition: test-dep-unblk-b must be blocked at HEAD before the remove")
+	}
+
+	if _, err := editor.RemoveDependency(ctx, publicops.RemoveDependencyRequest{
+		Actor: "writer", IssueID: "test-dep-unblk-b", DependsOnID: "test-dep-unblk-a",
+	}); err != nil {
+		t.Fatalf("RemoveDependency: %v", err)
+	}
+
+	requireCleanTables(ctx, t, store, "issues", "dependencies")
+	if isBlockedAtHEAD(ctx, t, store, "test-dep-unblk-b") {
+		t.Fatal("committed HEAD still has test-dep-unblk-b is_blocked=1 with no blocker left")
+	}
 }
 
 // TestDoltStoreDependencyEditorNoOpRemoveLeavesPendingRowsUncommitted is the
