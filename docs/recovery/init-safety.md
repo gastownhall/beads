@@ -125,10 +125,11 @@ Refusing to destroy an unknown number of issues in non-interactive mode.
 
 **Why this happens**
 
-You're running non-interactively (CI, agent, piped input) and asked for a
-destructive re-init. Destructive operations cannot be authorized silently,
-so `bd` requires `--destroy-token` in place of the interactive confirmation
-it cannot prompt for.
+You're running non-interactively (CI, agent, piped input; for
+`--reinit-local`, also `--non-interactive`, `BD_NON_INTERACTIVE=1` or
+`CI=true` on a terminal) and asked for a destructive re-init. Destructive
+operations cannot be authorized silently, so `bd` requires `--destroy-token`
+in place of the interactive confirmation it does not prompt for.
 
 Both destructive paths need the token, not just the cross-boundary one:
 
@@ -204,9 +205,16 @@ an unreachable server, a count that times out on a large database): an
 uncountable database is not an empty one, and the databases most likely to
 fail the count are the ones with the most to lose. It proceeds without asking
 only when there is provably nothing to destroy: no `.beads/`, one without
-beads project files, a database with no issues, or a server-mode database
-with no local copy that its reachable server reports absent. `bd doctor`
-helps find out why the count failed.
+beads project files, a database with no issues, or, with `--recreate-missing`,
+a server-mode database with no local copy that its reachable server reports
+absent. Without `--recreate-missing` that report is no proof, and `bd` asks:
+init opens the database on `--server-host`, else `BEADS_DOLT_SERVER_HOST`,
+else 127.0.0.1, which need not be the server that answered. That database
+must be the one init replaces, so `bd` also asks when the store it counts
+opens another one: for example when `metadata.json` has no `dolt_database`
+(init then replaces the database the issue prefix names), or when
+`BEADS_DOLT_SERVER_DATABASE` or `--database` names another database.
+`bd doctor` helps find out why the count failed.
 
 A plain `bd init` over an initialized workspace does not reach either code:
 the local-safety guard refuses it with an ordinary error before this point.

@@ -196,6 +196,7 @@ go_library(
         "init_guard.go",
         "init_policy.go",
         "init_proxied_server.go",
+        "init_reinit_preflight.go",
         "init_safety.go",
         "init_safety_help.go",
         "init_stealth.go",

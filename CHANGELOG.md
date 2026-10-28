@@ -1428,9 +1428,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   warning, typed confirmation or `--destroy-token` was asked for. bd now
   shows the count as unknown with the error and asks for `destroy all
   issues` (exit 11 if declined), or `--destroy-token` without a terminal
-  (exit 12). The count is also taken from the `.beads` init actually
-  replaces, so from a linked worktree it is the main checkout's issues that
-  are shown and protected, not the worktree's own database (#5628).
+  (exit 12), so automation that re-initializes without a terminal now stops
+  at exit 12 when the count fails. The warning names the `.beads` it
+  replaces (`Target:`). The count is taken from that same directory, the one
+  init locks, and only from the database init replaces: bd also asks when
+  the store it counts opens another one, for example when `metadata.json`
+  has no `dolt_database` (init then replaces the database the issue prefix
+  names) or when `BEADS_DOLT_SERVER_DATABASE` or `--database` names another
+  database. A server-mode database that the store's server reports missing
+  counts as nothing to destroy only with `--recreate-missing`: without it bd
+  asks, since init's own store can dial another server than the one that
+  answered. With `--non-interactive`, `BD_NON_INTERACTIVE=1` or `CI=true`,
+  bd asks for `--destroy-token` even on a terminal instead of prompting
+  (#5628).
 - `bd github sync --push-only` and `bd github push` now create a locally
   closed bead as a CLOSED GitHub issue (Fixes #5486). GitHub's create-issue
   endpoint cannot set state, so a closed bead pushed for the first time landed

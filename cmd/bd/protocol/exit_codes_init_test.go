@@ -172,15 +172,15 @@ func TestProtocol_ExitCode12_DestroyTokenMissing(t *testing.T) {
 
 // TestProtocol_ExitCode11_LocalExistsRefused pins §E3's exit 11: exit 11 is
 // returned only from the INTERACTIVE typed-confirmation abort in
-// `bd init --reinit-local` (cmd/bd/init.go, guarded by term.IsTerminal on
-// stdin). The non-interactive branch of the same guard returns 12 instead, so
-// no piped-stdin subprocess can produce 11 — the prompt only fires on a real
-// terminal. This test allocates a PTY (creack/pty, a test-only dependency),
-// drives `bd init --reinit-local` on it against a workspace with issues, answers
-// the "Type 'destroy N issues' to confirm:" prompt with the WRONG text, and
-// asserts the abort exits 11 — distinct from the 12 an agent supplying a bad
-// --destroy-token would get, so a script can tell "the operator declined at the
-// prompt" from "the token was wrong".
+// `bd init --reinit-local` (cmd/bd/init_reinit_preflight.go, guarded by
+// term.IsTerminal on stdin). The non-interactive branch of the same guard
+// returns 12 instead, so no piped-stdin subprocess can produce 11 — the prompt
+// only fires on a real terminal. This test allocates a PTY (creack/pty, a
+// test-only dependency), drives `bd init --reinit-local` on it against a
+// workspace with issues, answers the "Type 'destroy N issues' to confirm:"
+// prompt with the WRONG text, and asserts the abort exits 11 — distinct from
+// the 12 an agent supplying a bad --destroy-token would get, so a script can
+// tell "the operator declined at the prompt" from "the token was wrong".
 func TestProtocol_ExitCode11_LocalExistsRefused(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("no unix PTY on Windows; the exit-11 interactive prompt is unreachable here")
