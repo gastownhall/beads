@@ -475,8 +475,11 @@ func (s *DoltStore) Sync(ctx context.Context, peer string, strategy string) (*Sy
 		result.Pushed = true
 	}
 
-	// Record last sync time
-	_ = s.setLastSyncTime(ctx, peer) // Best effort: sync timestamp is advisory for scheduling
+	// Record last sync time, after the merge so nothing bd writes lands between
+	// the pre-merge commit and DOLT_MERGE (GH#3547). Stamping here also covers
+	// a sync whose non-fatal push failed.
+	_ = s.setLastSyncTime(ctx, peer)    // Best effort: sync timestamp is advisory for scheduling
+	_ = s.updatePeerLastSync(ctx, peer) // Best effort: peer sync timestamp is advisory
 
 	result.EndTime = time.Now()
 	return result, nil
