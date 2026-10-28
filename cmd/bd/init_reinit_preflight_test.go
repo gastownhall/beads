@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/git"
 	"golang.org/x/term"
 )
 
@@ -209,7 +211,7 @@ func TestConfirmReinitDestroy(t *testing.T) {
 			count:       3,
 			interactive: true,
 			answer:      "destroy 0 issues",
-			wantCode:     ExitLocalExistsRefused,
+			wantCode:    ExitLocalExistsRefused,
 			wantOut:     []string{"Aborted. Database was NOT modified."},
 		},
 		{
@@ -266,6 +268,156 @@ func TestConfirmReinitDestroy(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRunInitReinitPreflight_WorktreeCountsMainCheckout pins GH#5628 part 2,
+// the linked-worktree shape: from a worktree, `bd init --reinit-local`
+// replaces the MAIN checkout's .beads (the directory the gate resolves via
+// GetWorktreeFallbackBeadsDir), so the preflight must count — and refuse on —
+// that database, not the worktree's own .beads. The worktree's .beads here
+// holds nothing countable (registry files only), the shape that used to give
+// "0 issues" confidence while the main checkout's database was about to be
+// destroyed, and still would if the preflight resolved its workspace the way
+// the count it replaced did (BEADS_DIR, then the FindBeadsDir walk-up).
+//
+// Deliberately not t.Parallel(): t.Chdir and a shared git worktree fixture.
+func TestRunInitReinitPreflight_WorktreeCountsMainCheckout(t *testing.T) {
+	if term.IsTerminal(int(os.Stdin.Fd())) {
+		t.Skip("stdin is a terminal: the non-interactive refusal this pins would be a typed prompt instead")
+	}
+	isolateBeadsDirForTest(t)
+
+	run := func(dir string, args ...string) {
+		t.Helper()
+		cmd := gitCommand(args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v failed: %v\n%s", args, err, out)
+		}
+	}
+	dir := t.TempDir()
+	mainRepo := filepath.Join(dir, "main-repo")
+	if err := os.MkdirAll(mainRepo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run(mainRepo, "init")
+	run(mainRepo, "config", "user.email", "test@example.com")
+	run(mainRepo, "config", "user.name", "Test User")
+	if err := os.WriteFile(filepath.Join(mainRepo, "README.md"), []byte("# Test\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run(mainRepo, "add", "README.md")
+	run(mainRepo, "commit", "-m", "Initial commit")
+
+	worktreeDir := filepath.Join(dir, "worktree")
+	cmd := gitCommand("worktree", "add", worktreeDir, "HEAD")
+	cmd.Dir = mainRepo
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git worktree add failed: %v\n%s", err, out)
+	}
+	t.Cleanup(func() {
+		remove := gitCommand("worktree", "remove", "--force", worktreeDir)
+		remove.Dir = mainRepo
+		_ = remove.Run()
+	})
+
+	// The main checkout's .beads: some beads project files, uncountable.
+	mainBeadsDir := filepath.Join(mainRepo, ".beads")
+	if err := os.MkdirAll(mainBeadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	metadataPath := filepath.Join(mainBeadsDir, "metadata.json")
+	if err := os.WriteFile(metadataPath, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	beforeMetadata, err := os.ReadFile(metadataPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := countReinitTargetIssues(mainBeadsDir); err == nil {
+		t.Fatal("precondition: the main checkout's .beads must be uncountable")
+	}
+	// The worktree's own .beads: project files and an EMPTY database of its
+	// own — the exact shape of the hazard. HasBeadsDatabase is true (a dolt
+	// data dir), so the resolution the pre-fix count used (the FindBeadsDir
+	// walk-up) prefers it over the main checkout and would have counted it —
+	// zero issues — while re-init replaced the uncountable database the gate
+	// targets.
+	worktreeBeadsDir := filepath.Join(worktreeDir, ".beads")
+	if err := os.MkdirAll(worktreeBeadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(worktreeBeadsDir, "metadata.json"), []byte(`{"backend": "dolt", "database": "dolt"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(worktreeBeadsDir, "dolt", "emptydb", ".dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Chdir(worktreeDir)
+	git.ResetCaches()
+	if !git.IsWorktree() {
+		t.Fatal("precondition: expected git.IsWorktree() inside the linked worktree")
+	}
+	// The resolution the pre-fix count used — the FindBeadsDir walk-up —
+	// finds the worktree's own .beads here (it holds project files and a
+	// database), not the main checkout's: it would have counted the empty
+	// worktree database as zero issues and skipped the confirmation while
+	// re-init replaced the uncountable database at gateTarget below.
+	found, err := filepath.EvalSymlinks(beads.FindBeadsDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundWant, err := filepath.EvalSymlinks(worktreeBeadsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if found != foundWant {
+		t.Fatalf("precondition: FindBeadsDir = %q, want the worktree's own %q", found, foundWant)
+	}
+
+	// The way init itself resolves beadsDirForInit with no BEADS_DIR: the
+	// worktree fallback to the main checkout's .beads.
+	t.Run("the preflight refuses for, and names, the main checkout's .beads", func(t *testing.T) {
+		gateTarget := beads.GetWorktreeFallbackBeadsDir()
+		if gateTarget == "" {
+			t.Fatal("precondition: GetWorktreeFallbackBeadsDir resolved nothing in a linked worktree")
+		}
+		resolvedTarget, err := filepath.EvalSymlinks(gateTarget)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resolvedMain, err := filepath.EvalSymlinks(mainBeadsDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resolvedTarget != resolvedMain {
+			t.Fatalf("precondition: the gate target %q is not the main checkout's .beads %q", resolvedTarget, resolvedMain)
+		}
+		var refusal error
+		stderr := captureStderr(t, func() {
+			refusal = runInitReinitPreflight(true, gateTarget, "bd", "")
+		})
+		if code, ok := exitCodeFromError(refusal); !ok || code != ExitDestroyTokenMissing {
+			t.Fatalf("runInitReinitPreflight = %v, want exit %d (ExitDestroyTokenMissing): the worktree's own .beads counts as zero, but the gate's target — the main checkout's database — is uncountable", refusal, ExitDestroyTokenMissing)
+		}
+		if !strings.Contains(stderr, "Target: "+gateTarget) {
+			t.Errorf("stderr must name the main checkout's .beads as the target, got:\n%s", stderr)
+		}
+		if !strings.Contains(stderr, "Refusing to destroy an unknown number of issues") {
+			t.Errorf("stderr must report the unknown count, got:\n%s", stderr)
+		}
+		if got, err := os.ReadFile(metadataPath); err != nil || string(got) != string(beforeMetadata) {
+			t.Errorf("the refusal must leave the main checkout's .beads unchanged, got %q, %v", got, err)
+		}
+		mainEntries, statErr := os.ReadDir(mainBeadsDir)
+		if statErr != nil {
+			t.Fatal(statErr)
+		}
+		if len(mainEntries) != 1 || mainEntries[0].Name() != "metadata.json" {
+			t.Errorf("the refusal must create nothing in the main checkout's .beads, found %d entries", len(mainEntries))
+		}
+	})
 }
 
 // TestCountReinitTargetIssues pins the count's own contract: which workspaces
