@@ -174,6 +174,51 @@ func TestMigrateToProxiedServer_InvalidRootIdentityShapesFailClosed(t *testing.T
 	}
 }
 
+// TestMigrateToProxiedServer_RefusesServerBdDoesNotRun pins the host guard.
+// The migration only re-points the proxy at .beads/dolt, the data of bd's own
+// server, so it refuses a workspace whose server is on another machine or at
+// the IPv6 loopback, where bd's own server, which listens on 127.0.0.1 only,
+// never runs: named in metadata.json or BEADS_DOLT_SERVER_HOST, in either
+// IPv6 spelling. The workspace stays in server mode and nothing is written,
+// though .beads/dolt is a valid Dolt repository the migration would take.
+func TestMigrateToProxiedServer_RefusesServerBdDoesNotRun(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		host  string
+		inEnv bool
+		want  string
+	}{
+		{"remote host in metadata.json", "db.example.com", false, "is remote (db.example.com)"},
+		{"bare IPv6 loopback in metadata.json", "::1", false, "is the IPv6 loopback (::1)"},
+		{"bracketed IPv6 loopback in metadata.json", "[::1]", false, "is the IPv6 loopback ([::1])"},
+		{"bare IPv6 loopback in BEADS_DOLT_SERVER_HOST", "::1", true, "is the IPv6 loopback (::1)"},
+		{"bracketed IPv6 loopback in BEADS_DOLT_SERVER_HOST", "[::1]", true, "is the IPv6 loopback ([::1])"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			beadsDir := migrateModeWorkspace(t, configfile.DoltModeServer)
+			t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+			if tc.inEnv {
+				t.Setenv("BEADS_DOLT_SERVER_HOST", tc.host)
+			} else {
+				cfg, err := configfile.Load(beadsDir)
+				require.NoError(t, err)
+				cfg.DoltServerHost = tc.host
+				require.NoError(t, cfg.Save(beadsDir))
+			}
+			before := snapshotMigrationTree(t, beadsDir)
+
+			var err error
+			stderr := captureStderr(t, func() { err = runMigrateToProxiedServer(false, 0, false) })
+			require.Error(t, err)
+			assert.Contains(t, stderr, "the configured Dolt server host "+tc.want)
+			assert.Equal(t, before, snapshotMigrationTree(t, beadsDir))
+			cfg, loadErr := configfile.Load(beadsDir)
+			require.NoError(t, loadErr)
+			assert.True(t, cfg.IsDoltServerMode(), "a refused migration must leave dolt_mode=server")
+		})
+	}
+}
+
 func TestMigrateToProxiedServer_DryRunWritesNothing(t *testing.T) {
 	beadsDir := migrateModeWorkspace(t, configfile.DoltModeServer)
 	touchFile(t, filepath.Join(beadsDir, "dolt-server.log"))

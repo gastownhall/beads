@@ -46,11 +46,11 @@ func TestCheckWorkspaceFormatAdmitsIssueWorkspaces(t *testing.T) {
 	}
 }
 
-// TestCheckDiscoveredWorkspaceFormatLeavesWorkspaceUnchanged pins the
+// TestCheckDiscoveredForOpenLeavesWorkspaceUnchanged pins the
 // pre-check every open runs before Load: it refuses a graph workspace marked
 // in either metadata file without migrating a legacy config.json, and leaves
 // a workspace with no metadata to the caller's own load.
-func TestCheckDiscoveredWorkspaceFormatLeavesWorkspaceUnchanged(t *testing.T) {
+func TestCheckDiscoveredForOpenLeavesWorkspaceUnchanged(t *testing.T) {
 	const metadata = `{"backend":"dolt","graph_mode":"link"}`
 	for _, name := range []string{ConfigFileName, "config.json"} {
 		t.Run(name, func(t *testing.T) {
@@ -58,10 +58,10 @@ func TestCheckDiscoveredWorkspaceFormatLeavesWorkspaceUnchanged(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(beadsDir, name), []byte(metadata), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			err := CheckDiscoveredWorkspaceFormat(beadsDir)
+			err := CheckDiscoveredForOpen(beadsDir)
 			var formatErr *UnsupportedWorkspaceFormatError
 			if !errors.As(err, &formatErr) || formatErr.BeadsDir != beadsDir || formatErr.GraphMode != GraphModeLink {
-				t.Fatalf("CheckDiscoveredWorkspaceFormat() = %v, want the link refusal for %s", err, beadsDir)
+				t.Fatalf("CheckDiscoveredForOpen() = %v, want the link refusal for %s", err, beadsDir)
 			}
 			entries, err := os.ReadDir(beadsDir)
 			if err != nil || len(entries) != 1 || entries[0].Name() != name {
@@ -69,8 +69,8 @@ func TestCheckDiscoveredWorkspaceFormatLeavesWorkspaceUnchanged(t *testing.T) {
 			}
 		})
 	}
-	if err := CheckDiscoveredWorkspaceFormat(t.TempDir()); err != nil {
-		t.Fatalf("CheckDiscoveredWorkspaceFormat(no metadata) = %v, want nil", err)
+	if err := CheckDiscoveredForOpen(t.TempDir()); err != nil {
+		t.Fatalf("CheckDiscoveredForOpen(no metadata) = %v, want nil", err)
 	}
 }
 
@@ -114,11 +114,11 @@ func TestCheckWorkspaceFormatRefusesFormatMarker(t *testing.T) {
 	}
 }
 
-// TestCheckDiscoveredWorkspaceFormatRefusesFormatMarker pins that the
+// TestCheckDiscoveredForOpenRefusesFormatMarker pins that the
 // pre-check refuses a marked workspace with no, stripped or unparseable
 // metadata, and still leaves unparseable metadata without the marker to the
 // caller's own load.
-func TestCheckDiscoveredWorkspaceFormatRefusesFormatMarker(t *testing.T) {
+func TestCheckDiscoveredForOpenRefusesFormatMarker(t *testing.T) {
 	for name, files := range map[string]map[string]string{
 		"marker only":                    {GraphFormatMarkerFile: ""},
 		"stripped metadata.json":         {GraphFormatMarkerFile: "x", ConfigFileName: `{"backend":"dolt"}`},
@@ -133,10 +133,10 @@ func TestCheckDiscoveredWorkspaceFormatRefusesFormatMarker(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			err := CheckDiscoveredWorkspaceFormat(beadsDir)
+			err := CheckDiscoveredForOpen(beadsDir)
 			var formatErr *UnsupportedWorkspaceFormatError
 			if !errors.As(err, &formatErr) || !formatErr.FormatMarker || formatErr.BeadsDir != beadsDir {
-				t.Fatalf("CheckDiscoveredWorkspaceFormat() = %v, want the format marker refusal", err)
+				t.Fatalf("CheckDiscoveredForOpen() = %v, want the format marker refusal", err)
 			}
 			if _, err := LoadAndCheckWorkspaceFormat(beadsDir); !errors.As(err, &formatErr) || !formatErr.FormatMarker {
 				t.Fatalf("LoadAndCheckWorkspaceFormat() = %v, want the format marker refusal", err)
@@ -151,8 +151,8 @@ func TestCheckDiscoveredWorkspaceFormatRefusesFormatMarker(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(unparseable, ConfigFileName), []byte(`{"backend":`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := CheckDiscoveredWorkspaceFormat(unparseable); err != nil {
-		t.Fatalf("CheckDiscoveredWorkspaceFormat(unparseable, no marker) = %v, want nil", err)
+	if err := CheckDiscoveredForOpen(unparseable); err != nil {
+		t.Fatalf("CheckDiscoveredForOpen(unparseable, no marker) = %v, want nil", err)
 	}
 	if _, err := LoadAndCheckWorkspaceFormat(unparseable); err == nil || !strings.Contains(err.Error(), "loading config") {
 		t.Fatalf("LoadAndCheckWorkspaceFormat(unparseable, no marker) = %v, want the load failure", err)

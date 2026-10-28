@@ -26,8 +26,8 @@ import (
 // `--include-*` variants, and a residual refusal — are the table below.
 
 // walkFilter builds what `bd list --parent <id> <flags>` hands the walk: the
-// listing's own filter, with the two members findAllDescendants re-points per
-// level applied exactly as it applies them.
+// listing's own filter, with the two members storage.WalkDescendants re-points
+// per level applied exactly as it applies them.
 func walkFilter(t *testing.T, in issueops.ListRequest, cfg ListConfig) types.IssueFilter {
 	t.Helper()
 	in.ParentID = "bd-root"

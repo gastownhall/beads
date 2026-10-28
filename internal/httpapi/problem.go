@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"syscall"
+	"time"
 
 	"github.com/go-sql-driver/mysql"
 
@@ -249,7 +250,8 @@ const (
 	// code a `bd events tail --json` failure carries and the code this surface
 	// emits cannot drift to two spellings of one condition.
 	//
-	// A 410 Gone, and the only one in the vocabulary: the records the caller
+	// A 410 Gone, one of the vocabulary's two (CodeIdempotencyExpired is the
+	// other, for the same reason): the records the caller
 	// asked for existed, were addressable by exactly this request, and have been
 	// deliberately deleted. That is what 410 means and what 404 does not — a 404
 	// would say the resource never existed and invite a retry, and the whole
@@ -258,6 +260,18 @@ const (
 	// still serve, so the recovery (resume from `floor - 1` and accept the gap,
 	// or re-baseline) is a decision the client makes from data rather than prose.
 	CodeEventsJournalTruncated Code = Code(storage.EventsJournalTruncatedCode)
+	// CodeIdempotencyExpired is a create whose explicit id a RETAINING sweep
+	// retired (issueops.SweepRequest.RetainIDs): the bead that held it was
+	// deleted after the create that used the id had already happened, and a
+	// create of that id never runs again. The value is issueops' own constant,
+	// so the code `bd create --json` prints and the code this surface emits
+	// are one spelling.
+	//
+	// A 410 Gone for CodeEventsJournalTruncated's reason: what the request
+	// addresses existed and was deliberately removed, and retrying it can never
+	// succeed. Not a 409 — there is no row to read and adopt, which is the
+	// recovery a 409 on a create (already_exists) sends a client to.
+	CodeIdempotencyExpired Code = Code(issueops.IdempotencyExpiredCode)
 	// CodeEventsWatchSaturated is this server already holding as many open
 	// journal streams as it will. It is not CodeBusy, even though both are a
 	// 503 with a Retry-After, because the two carry different recoveries: busy
@@ -314,6 +328,7 @@ var codeStatus = map[Code]int{
 
 	CodeEventsJournalDisabled:  http.StatusConflict,
 	CodeEventsJournalTruncated: http.StatusGone,
+	CodeIdempotencyExpired:     http.StatusGone,
 	CodeEventsWatchSaturated:   http.StatusServiceUnavailable,
 
 	CodeBusy:          http.StatusServiceUnavailable,
@@ -1032,6 +1047,7 @@ var operationCodes = map[string][]Code{
 	// minting.
 	OpCreateIssue: {
 		CodeInvalidArgument, CodeUnauthenticated, CodeAlreadyExists, CodeDependencyCycle,
+		CodeIdempotencyExpired,
 		CodeBusy, CodeDBUnavailable, CodeInternal,
 	},
 	// The widest row here, and every code on it is inherited from an operation
@@ -1058,7 +1074,7 @@ var operationCodes = map[string][]Code{
 		CodeInvalidArgument, CodeUnauthenticated, CodeNotFound,
 		CodePreconditionFailed, CodeNotClosable, CodeAlreadyClaimed, CodeNotesOverwrite, CodeAlreadyExists,
 		CodeTemplateReadOnly, CodeIssuePinned, CodeNotAssignee,
-		CodeDependencyCycle, CodeDependencyExists,
+		CodeDependencyCycle, CodeDependencyExists, CodeIdempotencyExpired,
 		CodeBusy, CodeDBUnavailable, CodeInternal,
 	},
 	// getDependencyTree's row, and it is the same shape for the same two
@@ -1418,6 +1434,20 @@ func (r Result) WithJournalWindow(since, floor, head int64) Result {
 	r.Problem.Since = &since
 	r.Problem.Floor = &floor
 	r.Problem.Head = &head
+	return r
+}
+
+// WithClosedAt attaches the `closed_at` member of an `idempotency_expired`:
+// when the bead a retaining sweep retired had closed. It comes from the typed
+// refusal's own field — the tombstone read inside the transaction that refused
+// — never from parsing prose. A zero time is omitted rather than sent as the
+// year 1.
+func (r Result) WithClosedAt(closedAt time.Time) Result {
+	if closedAt.IsZero() {
+		return r
+	}
+	at := closedAt.UTC()
+	r.Problem.ClosedAt = &at
 	return r
 }
 

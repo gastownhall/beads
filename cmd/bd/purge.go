@@ -75,6 +75,12 @@ be drained in bounded transactions; --json then reports "remaining" and
 --older-than takes days (7, 7d), weeks (2w) or a duration with hour precision
 (36h, 168h, 90m).
 
+--retain-ids retires every id the sweep deletes: a permanent tombstone (the id
+and its closed_at) is written in the same transaction, and from then on a
+create naming that id is refused (code idempotency_expired) and an import
+skips it. Use it when ids are idempotency keys that must never run twice.
+Tombstones are permanent.
+
 To delete closed non-ephemeral beads (regular tasks, features, bugs, etc.)
 use ` + "`bd prune`" + ` instead.
 
@@ -142,6 +148,7 @@ func runPurgeOrPrune(cmd *cobra.Command, scope purgeScope) error {
 	pattern, _ := cmd.Flags().GetString("pattern")
 	// Only `bd purge` defines --limit; GetInt on an undefined flag is 0, "no cap".
 	limit, _ := cmd.Flags().GetInt("limit")
+	retainIDs, _ := cmd.Flags().GetBool("retain-ids")
 	if limit < 0 {
 		return HandleErrorRespectJSON("invalid --limit value %d: must be 0 (no limit) or positive", limit)
 	}
@@ -171,6 +178,7 @@ func runPurgeOrPrune(cmd *cobra.Command, scope purgeScope) error {
 		ProtectReferenced:     scope.protectReferenced,
 		ProtectLiveDependents: scope.protectLiveDependents,
 		Limit:                 limit,
+		RetainIDs:             retainIDs,
 		// A --dry-run and an UNCONFIRMED run ask the role the same question —
 		// "what would this do" — so both send DryRun. --force is this
 		// command's confirmation, not a request field.
@@ -259,6 +267,28 @@ func addLimitStats(stats map[string]interface{}, limit int, result issueops.Swee
 	stats["has_more"] = result.Remaining > 0
 }
 
+// addRetainStats reports that the sweep retired (or, previewed, would retire)
+// every id it counts. It is attached only when --retain-ids asked for it, so
+// a plain sweep's shape is unchanged.
+func addRetainStats(stats map[string]interface{}, result issueops.SweepResult) {
+	if result.RetainIDs {
+		stats["retain_ids"] = true
+	}
+}
+
+// printRetainNote tells a text reader how many ids the sweep retired or, in a
+// preview, would retire.
+func printRetainNote(result issueops.SweepResult, dryRun bool) {
+	if !result.RetainIDs || result.Swept == 0 {
+		return
+	}
+	if dryRun {
+		fmt.Printf("  Would retire %d id(s): a create of any of them would be refused from then on\n", result.Swept)
+		return
+	}
+	fmt.Printf("  Retired %d id(s): a create of any of them is refused from now on\n", result.Swept)
+}
+
 // printLimitNote tells a text reader that --limit left rows behind.
 func printLimitNote(result issueops.SweepResult) {
 	if result.Remaining > 0 {
@@ -321,6 +351,7 @@ func emitSweepDryRun(scope purgeScope, limit int, result issueops.SweepResult) e
 		addLiveDependentStats(stats, result)
 		addLimitStats(stats, limit, result)
 		addReferenceStats(scope, stats, result)
+		addRetainStats(stats, result)
 		return outputJSON(stats)
 	}
 	fmt.Printf("Would %s %d %s(s)\n", scope.cmdName, result.Swept, scope.subjectNoun)
@@ -350,6 +381,7 @@ func emitSweepDryRun(scope purgeScope, limit int, result issueops.SweepResult) e
 		fmt.Printf("  %s %s%s\n", ui.MutedStyle.Render("Referenced IDs (sample):"), strings.Join(idStrs, ", "), suffix)
 	}
 	printLimitNote(result)
+	printRetainNote(result, true)
 	fmt.Printf("\n(Dry-run mode — no changes made)\n")
 	return nil
 }
@@ -367,14 +399,15 @@ func emitSweepConfirm(scope purgeScope, olderThan, pattern string, limit int, re
 	}
 	return HandleErrorWithHint(
 		fmt.Sprintf("would %s %d bead(s)", scope.cmdName, result.Swept),
-		fmt.Sprintf("Use --force to confirm or --dry-run to preview.\n  %s", sweepConfirmHint(scope, olderThan, pattern, limit)))
+		fmt.Sprintf("Use --force to confirm or --dry-run to preview.\n  %s", sweepConfirmHint(scope, olderThan, pattern, limit, result.RetainIDs)))
 }
 
 // sweepConfirmHint is the command the confirmation suggests: the caller's own
 // selection with --force added. Every selector the caller gave is carried,
 // --limit among them — a hint that dropped the limit previewed one deletion
-// and, followed, deleted every eligible row, no-history beads included.
-func sweepConfirmHint(scope purgeScope, olderThan, pattern string, limit int) string {
+// and, followed, deleted every eligible row, no-history beads included — and
+// so is --retain-ids.
+func sweepConfirmHint(scope purgeScope, olderThan, pattern string, limit int, retainIDs bool) string {
 	hint := fmt.Sprintf("bd %s --force", scope.cmdName)
 	if scope.tier == issueops.SweepWispsPlane {
 		hint += " --wisps-plane"
@@ -387,6 +420,11 @@ func sweepConfirmHint(scope purgeScope, olderThan, pattern string, limit int) st
 	}
 	if limit > 0 {
 		hint += fmt.Sprintf(" --limit %d", limit)
+	}
+	if retainIDs {
+		// The confirmation must ask for the same sweep that was previewed: a
+		// hint that dropped the flag would run one that leaves the ids reusable.
+		hint += " --retain-ids"
 	}
 	return hint
 }
@@ -405,6 +443,7 @@ func emitSweepResult(scope purgeScope, limit int, result issueops.SweepResult) e
 		addLiveDependentStats(stats, result)
 		addLimitStats(stats, limit, result)
 		addReferenceStats(scope, stats, result)
+		addRetainStats(stats, result)
 		return outputJSON(stats)
 	}
 	fmt.Printf("%s %s %d %s(s)\n", ui.RenderPass("✓"), capitalize(scope.pastTense), result.Swept, scope.subjectNoun)
@@ -421,6 +460,7 @@ func emitSweepResult(scope purgeScope, limit int, result issueops.SweepResult) e
 		fmt.Printf("  %s %d\n", ui.MutedStyle.Render("Referenced (skipped):"), result.Skipped.Referenced)
 	}
 	printLimitNote(result)
+	printRetainNote(result, false)
 	return nil
 }
 
@@ -510,5 +550,6 @@ func init() {
 	purgeCmd.Flags().Int("limit", 0, "Purge at most N beads this run, oldest-closed first (0 = no limit); --json reports remaining/has_more")
 	purgeCmd.Flags().Bool("wisps-plane", false, "Select every closed row in the wisps table, including --no-history beads (requires --older-than or --pattern)")
 	purgeCmd.Flags().String("pattern", "", "Only purge beads matching ID glob pattern (e.g., *-wisp-*)")
+	purgeCmd.Flags().Bool("retain-ids", false, "Retire every purged id with a permanent tombstone so it can never be created again (see --help)")
 	rootCmd.AddCommand(purgeCmd)
 }

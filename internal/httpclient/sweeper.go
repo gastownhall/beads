@@ -113,6 +113,12 @@ func (s *httpSweeper) Sweep(ctx context.Context, req issueops.SweepRequest) (res
 		limit := int64(req.Limit)
 		body.Limit = &limit
 	}
+	if req.RetainIDs {
+		// Sent only when asked: refuseUnservedSweep has already proven the
+		// server advertises the token, and an absent member is what an
+		// older-server-compatible plain sweep has always sent.
+		body.RetainIds = &req.RetainIDs
+	}
 
 	res, err := s.wire.SweepIssues(ctx, body)
 	if err != nil {
@@ -127,8 +133,13 @@ func (s *httpSweeper) Sweep(ctx context.Context, req issueops.SweepRequest) (res
 // structurally possible) only some of the three. A request using none of
 // them never consults the snapshot at all, the same short-circuit
 // refuseUnservedScope uses for Count.
+//
+// RetainIDs is the fourth, and the one whose refusal matters most: a server
+// that predates the token would 400 the member, but a client that dropped it
+// to get past that would run a sweep leaving every swept id reusable — the
+// exact re-execution the caller asked retention to rule out.
 func (s *httpSweeper) refuseUnservedSweep(ctx context.Context, tier apigen.SweepRequestTier, req issueops.SweepRequest) error {
-	if tier != apigen.WispsPlane && !req.ProtectLiveDependents && req.Limit == 0 {
+	if tier != apigen.WispsPlane && !req.ProtectLiveDependents && req.Limit == 0 && !req.RetainIDs {
 		return nil
 	}
 	snap, err := s.store.snapshot(ctx)
@@ -151,6 +162,9 @@ func (s *httpSweeper) refuseUnservedSweep(ctx context.Context, tier apigen.Sweep
 	}
 	if req.Limit != 0 && !slices.Contains(capabilities, wire.CapSweepLimit) {
 		return s.store.unsupportedCapability("Sweeper.Sweep", wire.CapSweepLimit)
+	}
+	if req.RetainIDs && !slices.Contains(capabilities, wire.CapSweepRetainIDs) {
+		return s.store.unsupportedCapability("Sweeper.Sweep", wire.CapSweepRetainIDs)
 	}
 	return nil
 }
@@ -183,6 +197,9 @@ func sweepResult(res *apigen.SweepResult) issueops.SweepResult {
 	}
 	if res.Remaining != nil {
 		out.Remaining = int(*res.Remaining)
+	}
+	if res.RetainIds != nil {
+		out.RetainIDs = *res.RetainIds
 	}
 	if res.ReferencedIds != nil {
 		out.ReferencedIDs = append([]string(nil), *res.ReferencedIds...)

@@ -17,6 +17,12 @@ import (
 type InsertIssueOpts struct {
 	UseWispsTable bool
 	CreateOnly    bool
+	// ExplicitID reports that the caller named the id (createIDNamedByCaller)
+	// rather than a generator minting it. The upsert Insert guards only such
+	// an id against retirement: the generators already skip retired ids, so
+	// coordinating and probing a minted one is a cell write, a probe and, on
+	// a Dolt server, a commit-conflict surface for no safety.
+	ExplicitID bool
 }
 
 type IssueTableOpts struct {
@@ -73,6 +79,27 @@ type IssueSQLRepository interface {
 	// does.
 	GetMany(ctx context.Context, request publicops.GetManyRequest) (publicops.GetManyResult, error)
 	Exists(ctx context.Context, id string, opts IssueTableOpts) (bool, error)
+	// Taken reports whether id is unavailable to a fresh create in the
+	// plane opts names: a live row of that table holds it, or a retaining
+	// retention sweep retired it (either tombstone table). One statement.
+	Taken(ctx context.Context, id string, opts IssueTableOpts) (bool, error)
+	// Retired reports whether a retaining retention sweep retired id (either
+	// tombstone table), whatever the row tables hold.
+	Retired(ctx context.Context, id string) (bool, error)
+	// RetiredIDs returns which of ids a retaining retention sweep retired
+	// (either tombstone table), with the closed_at each tombstone recorded
+	// (issueops.RetiredIDsInTx).
+	RetiredIDs(ctx context.Context, ids []string) (map[string]time.Time, error)
+	// RetireIDs writes one permanent tombstone per id, with the closed_at it
+	// maps to, into the tombstone table of the plane opts names
+	// (issueops.RetireIDsInTx). It runs in the unit of work that deletes the
+	// rows, so a failure rolls the delete back with it.
+	RetireIDs(ctx context.Context, ids map[string]time.Time, opts IssueTableOpts) error
+	// CoordinateCreates writes the create coordination cell of every id's
+	// shard (issueops.CoordinateIDCreatesInTx): the lock that orders a create
+	// of an id against a retaining delete of it. A retaining delete takes it
+	// before it deletes anything.
+	CoordinateCreates(ctx context.Context, ids []string) error
 	CountForPrefix(ctx context.Context, prefix string, opts IssueTableOpts) (int, error)
 	NextCounterID(ctx context.Context, prefix string) (int, error)
 	SearchAcrossIssuesAndWisps(ctx context.Context, query string, filter types.IssueFilter) (SearchPage, error)
@@ -178,6 +205,14 @@ type DeleteIssuesParams struct {
 	// wisps out before the dependent check. Strictly safer; kept on purpose.
 	EnforceCascadePolicy bool
 	Force                bool
+
+	// Retire, when non-nil, retires every id the delete removes: after the
+	// rows are gone, each deleted id gets a permanent tombstone carrying the
+	// closed_at it maps to, in the tombstone table of the plane it was stored
+	// in (issueops.SweepRequest.RetainIDs). A deleted id missing from the map
+	// is an error, so the set deleted is the set retired. A DryRun retires
+	// nothing.
+	Retire map[string]time.Time
 }
 
 type DeleteIssuesResult struct {
@@ -333,6 +368,12 @@ type UpdateSpec struct {
 type IssueUseCase interface {
 	GetIssue(ctx context.Context, id string) (*types.Issue, error)
 	GetIssuesByIDs(ctx context.Context, ids []string) ([]*types.Issue, error)
+	// RetiredIssueIDs returns which of ids a retaining retention sweep
+	// retired, with the closed_at each tombstone recorded. It does not consult
+	// the row tables (a live row wins over its tombstone; the caller combines
+	// this with its own presence read). The import dry run asks it so its
+	// preview agrees with the real import, which skips a retired row.
+	RetiredIssueIDs(ctx context.Context, ids []string) (map[string]time.Time, error)
 	// GetMany is the shape issueops.BatchGetter publishes; see
 	// IssueSQLRepository.GetMany for why it takes no table option.
 	GetMany(ctx context.Context, request publicops.GetManyRequest) (publicops.GetManyResult, error)
@@ -510,6 +551,14 @@ func (u *issueUseCaseImpl) get(ctx context.Context, id string, useWisp bool) (*t
 
 func (u *issueUseCaseImpl) GetIssuesByIDs(ctx context.Context, ids []string) ([]*types.Issue, error) {
 	return u.getByIDs(ctx, ids, false)
+}
+
+func (u *issueUseCaseImpl) RetiredIssueIDs(ctx context.Context, ids []string) (map[string]time.Time, error) {
+	retired, err := u.issueRepo.RetiredIDs(ctx, ids)
+	if err != nil {
+		return nil, fmt.Errorf("retired issue ids: %w", err)
+	}
+	return retired, nil
 }
 
 // GetMany passes straight through to the repository with no pre-check and no
@@ -987,6 +1036,7 @@ func (u *issueUseCaseImpl) create(ctx context.Context, params CreateIssueParams,
 		issue.CreatedAt = time.Now().UTC()
 	}
 
+	explicitID := createIDNamedByCaller(params)
 	switch {
 	case params.ExplicitID != "":
 		issue.ID = params.ExplicitID
@@ -1024,7 +1074,7 @@ func (u *issueUseCaseImpl) create(ctx context.Context, params CreateIssueParams,
 		}
 	}
 
-	insertOpts := InsertIssueOpts{UseWispsTable: useWisp, CreateOnly: params.CreateOnly}
+	insertOpts := InsertIssueOpts{UseWispsTable: useWisp, CreateOnly: params.CreateOnly, ExplicitID: explicitID}
 	if err := u.issueRepo.Insert(ctx, issue, actor, insertOpts); err != nil {
 		return CreateIssueResult{}, fmt.Errorf("create: insert: %w", err)
 	}
@@ -1683,11 +1733,7 @@ func (u *issueUseCaseImpl) mintTopLevelID(ctx context.Context, issue *types.Issu
 			return "", fmt.Errorf("read issue_id_mode: %w", err)
 		}
 		if mode == "counter" {
-			n, err := u.issueRepo.NextCounterID(ctx, prefix)
-			if err != nil {
-				return "", err
-			}
-			return fmt.Sprintf("%s-%d", prefix, n), nil
+			return u.nextUnretiredCounterID(ctx, prefix)
 		}
 	}
 
@@ -1709,16 +1755,43 @@ func (u *issueUseCaseImpl) mintTopLevelID(ctx context.Context, issue *types.Issu
 	for length := baseLength; length <= cfg.MaxLength; length++ {
 		for nonce := 0; nonce < 10; nonce++ {
 			candidate := idgen.GenerateHashID(prefix, issue.Title, issue.Description, actor, issue.CreatedAt, length, nonce)
-			exists, err := u.issueRepo.Exists(ctx, candidate, tableOpts)
+			taken, err := u.issueRepo.Taken(ctx, candidate, tableOpts)
 			if err != nil {
 				return "", err
 			}
-			if !exists {
+			if !taken {
 				return candidate, nil
 			}
 		}
 	}
 	return "", fmt.Errorf("failed to generate unique ID for prefix %q after lengths %d..%d with 10 nonces each", prefix, baseLength, cfg.MaxLength)
+}
+
+// maxRetiredCounterSkips bounds how many retired counter values one
+// counter-mode mint walks past (issueops.GenerateIssueIDInTable's bound).
+const maxRetiredCounterSkips = 1000
+
+// nextUnretiredCounterID is the counter-mode mint skipping values a retaining
+// sweep retired, so a fresh create is never handed an id it would be refused.
+// The counter only advances, so a skipped value is never offered again.
+func (u *issueUseCaseImpl) nextUnretiredCounterID(ctx context.Context, prefix string) (string, error) {
+	for skips := 0; ; skips++ {
+		n, err := u.issueRepo.NextCounterID(ctx, prefix)
+		if err != nil {
+			return "", err
+		}
+		candidate := fmt.Sprintf("%s-%d", prefix, n)
+		retired, err := u.issueRepo.Retired(ctx, candidate)
+		if err != nil {
+			return "", err
+		}
+		if !retired {
+			return candidate, nil
+		}
+		if skips >= maxRetiredCounterSkips {
+			return "", fmt.Errorf("issue counter for prefix %q walked past %d retired ids without finding a free one", prefix, maxRetiredCounterSkips)
+		}
+	}
 }
 
 func (u *issueUseCaseImpl) CloseIssue(ctx context.Context, id string, params CloseIssueParams, actor string) (CloseIssueResult, error) {
@@ -2035,4 +2108,16 @@ func (u *issueUseCaseImpl) Reclaim(ctx context.Context, request publicops.Reclai
 // refusals must reach the caller as the body built them.
 func (u *issueUseCaseImpl) RenewLease(ctx context.Context, request publicops.HeartbeatRequest) (publicops.HeartbeatResult, error) {
 	return u.issueRepo.RenewLease(ctx, request)
+}
+
+// createIDNamedByCaller reports whether a create's id is the caller's rather
+// than a generator's: named by ExplicitID, or preset on the issue with no
+// parent whose child counter would replace it. It mirrors issueops'
+// prepareCreateIssueInTx, which treats an id present before assignment as
+// explicit.
+func createIDNamedByCaller(params CreateIssueParams) bool {
+	if params.ExplicitID != "" {
+		return true
+	}
+	return params.ParentID == "" && params.Issue != nil && params.Issue.ID != ""
 }

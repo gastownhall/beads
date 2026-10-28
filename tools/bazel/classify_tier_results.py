@@ -57,9 +57,10 @@ must still reach cmd_dolt_result.
 
 Exit status is 1 iff --gate-tier's tier is "failure" (or the exit-code or
 unknown-label branches above applied); a failure confined to another tier
-leaves this script's own exit 0, so the job step -- and so job.status --
-stays green, mirroring that tier's own advisory, continue-on-error nature
-outside mode remote. Every tier's result, win or lose, is appended to
+leaves this script's own exit 0, so this step stays green, mirroring that
+tier's own advisory, continue-on-error nature outside mode remote. (Where no
+caller gate reads that tier's result -- outside pr.yml's call -- bazel.yml's
+dolt-int job fails itself on it in a later step.) Every tier's result, win or lose, is appended to
 --github-output as "<name>_result=success|failure" (NAME lowercased, "-"
 turned into "_"), so the job can expose one output per tier.
 

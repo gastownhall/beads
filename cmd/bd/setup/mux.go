@@ -130,6 +130,32 @@ func muxInGlobalDir(path string) bool {
 // layer when bd runs from ~/.mux (installMuxProject).
 const muxNoWorkspaceLayerNote = "ℹ Mux workspace layer skipped: ~/.mux is not a workspace, and Mux does not load ~/.mux/.mux/AGENTS.md"
 
+// muxNestedHooksNote is how setup and --check run from ~/.mux name the
+// hooks an older bd installed in ~/.mux/.mux (noteMuxNestedHooks).
+const muxNestedHooksNote = "ℹ Mux does not load the hooks an earlier bd installed in ~/.mux/.mux: "
+
+// noteMuxNestedHooks names the hooks carrying bd's marker in the .mux
+// directory of ~/.mux, for setup and --check run from there, which install
+// and check none (installMuxRoot): an older bd installed them, and Mux does
+// not load them. bd setup mux --remove run there removes them, and with
+// them the global section, since there the root AGENTS.md is the global
+// layer's file (removeMux).
+func noteMuxNestedHooks(env agentsEnv) {
+	initPath, toolPostPath, toolEnvPath := muxProjectHookPaths(env.agentsPath)
+	var hooks []string
+	for _, path := range []string{initPath, toolPostPath, toolEnvPath} {
+		data, err := os.ReadFile(path) // #nosec G304 -- generated internal paths only
+		if err == nil && strings.Contains(string(data), muxHookMarkerBegin) {
+			hooks = append(hooks, path)
+		}
+	}
+	if len(hooks) == 0 {
+		return
+	}
+	_, _ = fmt.Fprintln(env.stdout, muxNestedHooksNote+strings.Join(hooks, ", "))
+	_, _ = fmt.Fprintln(env.stdout, "  Delete them, or run bd setup mux --remove here and then bd setup mux --global (--remove here also removes the global section)")
+}
+
 // muxGlobalLayerFile reports whether path is the global layer's file,
 // ~/.mux/AGENTS.md, and returns that file's path: run from the home
 // directory, the workspace layer's .mux/AGENTS.md is, and run from ~/.mux,
@@ -221,33 +247,46 @@ func checkMuxProjectHooks(env agentsEnv) error {
 	return errMuxHooksMissing
 }
 
-func removeManagedMuxHook(env agentsEnv, path string) error {
+// removeManagedMuxHook removes the hook at path if it carries bd's marker,
+// and reports whether it did.
+func removeManagedMuxHook(env agentsEnv, path string) (bool, error) {
 	data, err := os.ReadFile(path) // #nosec G304 -- generated internal paths only
 	if os.IsNotExist(err) {
-		return nil
+		return false, nil
 	}
 	if err != nil {
-		return err
+		return false, err
 	}
 	if !strings.Contains(string(data), muxHookMarkerBegin) {
 		_, _ = fmt.Fprintf(env.stdout, "ℹ Kept existing custom hook: %s\n", path)
-		return nil
+		return false, nil
 	}
 	if err := os.Remove(path); err != nil {
-		return err
+		return false, err
 	}
 	_, _ = fmt.Fprintf(env.stdout, "✓ Removed Mux hook: %s\n", path)
-	return nil
+	return true, nil
 }
 
+// removeMuxProjectHooks removes the hooks bd installed in the .mux directory
+// of the directory bd runs in, and then that directory if they were all it
+// held. It removes no directory it took no hook from, and never a .mux that
+// is a symlink, or on Windows a junction: removing one unlinks it, whatever
+// its target holds. Run from the home directory, that .mux is ~/.mux, which
+// Xum's migration replaces with a link to ~/.xum.
 func removeMuxProjectHooks(env agentsEnv) error {
 	initPath, toolPostPath, toolEnvPath := muxProjectHookPaths(env.agentsPath)
+	removed := false
 	for _, path := range []string{initPath, toolPostPath, toolEnvPath} {
-		if err := removeManagedMuxHook(env, path); err != nil {
+		ok, err := removeManagedMuxHook(env, path)
+		if err != nil {
 			return err
 		}
+		removed = removed || ok
 	}
-	_ = os.Remove(muxProjectDir(env.agentsPath))
+	if removed {
+		_ = RemoveEmptyDir(muxProjectDir(env.agentsPath))
+	}
 	return nil
 }
 
@@ -261,7 +300,8 @@ func InstallMux(project bool, global bool) error {
 // installMuxRoot installs the root layer: its agents file and the hooks of
 // the workspace bd runs in. Run from ~/.mux, bd runs in no workspace
 // (muxInGlobalDir), so it installs no hooks, whatever the agents file is
-// named; a root AGENTS.md there is the global layer's file (muxLayerEnv).
+// named, and names those an older bd installed there (noteMuxNestedHooks);
+// a root AGENTS.md there is the global layer's file (muxLayerEnv).
 func installMuxRoot(env agentsEnv) error {
 	skipped := false
 	env.skipped = &skipped
@@ -269,6 +309,7 @@ func installMuxRoot(env agentsEnv) error {
 		return err
 	}
 	if muxInGlobalDir(env.agentsPath) {
+		noteMuxNestedHooks(env)
 		return nil
 	}
 	if err := installMuxProjectHooks(env); err != nil {
@@ -355,6 +396,7 @@ func checkMuxRoot(env agentsEnv) error {
 		return err
 	}
 	if muxInGlobalDir(env.agentsPath) {
+		noteMuxNestedHooks(env)
 		return nil
 	}
 	return checkMuxProjectHooks(env)

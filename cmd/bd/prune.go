@@ -33,6 +33,12 @@ retired label across the rig).
 To delete closed ephemeral beads (wisps, transient molecules) use
 ` + "`bd purge`" + ` instead.
 
+--retain-ids retires every id the sweep deletes: a permanent tombstone (the id
+and its closed_at) is written in the same transaction, and from then on a
+create naming that id is refused (code idempotency_expired) and an import
+skips it. Use it when ids are idempotency keys that must never run twice.
+Tombstones are permanent.
+
 For full Dolt storage reclaim after deleting many rows, follow with ` + "`bd flatten`" + `
 so history can be collapsed and old chunks can be garbage-collected.
 
@@ -75,5 +81,6 @@ func init() {
 	pruneCmd.Flags().Bool("dry-run", false, "Preview what would be pruned with stats")
 	pruneCmd.Flags().String("older-than", "", "Only prune beads closed more than N ago (e.g., 30d, 2w, 60, 36h)")
 	pruneCmd.Flags().String("pattern", "", "Only prune beads matching ID glob pattern (e.g., 'gm-old-*')")
+	pruneCmd.Flags().Bool("retain-ids", false, "Retire every pruned id with a permanent tombstone so it can never be created again (see --help)")
 	rootCmd.AddCommand(pruneCmd)
 }

@@ -26,6 +26,7 @@ const (
 	sweepDryRunMember                = "dry_run"
 	sweepProtectLiveDependentsMember = "protect_live_dependents"
 	sweepLimitMember                 = "limit"
+	sweepRetainIDsMember             = "retain_ids"
 )
 
 // sweepMembers is the whole vocabulary, in one place, so the unknown-member
@@ -40,6 +41,7 @@ var sweepMembers = []string{
 	sweepDryRunMember,
 	sweepProtectLiveDependentsMember,
 	sweepLimitMember,
+	sweepRetainIDsMember,
 }
 
 // handleSweep answers POST /v0/beads/issues:sweep — one of the two DESTRUCTIVE
@@ -205,6 +207,7 @@ func (s *Server) sweepRequest(w http.ResponseWriter, r *http.Request) (issueops.
 		{sweepProtectReferencedMember, &request.ProtectReferenced},
 		{sweepDryRunMember, &request.DryRun},
 		{sweepProtectLiveDependentsMember, &request.ProtectLiveDependents},
+		{sweepRetainIDsMember, &request.RetainIDs},
 	} {
 		raw, ok := members[flag.member]
 		if !ok {
@@ -291,6 +294,8 @@ func sweepResponse(result issueops.SweepResult) apigen.SweepResult {
 	}
 	remaining := int64(result.Remaining)
 	body.Remaining = &remaining
+	retainIDs := result.RetainIDs
+	body.RetainIds = &retainIDs
 	if len(result.ReferencedIDs) > 0 {
 		ids := append([]string(nil), result.ReferencedIDs...)
 		body.ReferencedIds = &ids

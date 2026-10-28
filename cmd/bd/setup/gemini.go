@@ -190,6 +190,11 @@ func installGemini(env geminiEnv, project bool, stealth bool) error {
 			_, _ = fmt.Fprintf(env.stderr, "Error: failed to parse settings.json: %v\n", err)
 			return err
 		}
+	} else if !os.IsNotExist(err) {
+		// As in installClaude: only a missing file starts from empty
+		// settings, or an unreadable one is replaced by bd's hook alone.
+		_, _ = fmt.Fprintf(env.stderr, "Error: failed to read %s: %v\n", settingsPath, err)
+		return err
 	}
 
 	hooks, ok := settings["hooks"].(map[string]interface{})
@@ -320,8 +325,13 @@ func removeGemini(env geminiEnv, project bool) error {
 	}
 
 	data, err := env.readFile(settingsPath)
-	if err != nil {
+	if os.IsNotExist(err) {
 		_, _ = fmt.Fprintln(env.stdout, "No settings file found")
+	} else if err != nil {
+		// A settings file that cannot be read is not a missing one: stop
+		// with the section kept, as bd setup claude --remove does.
+		_, _ = fmt.Fprintf(env.stderr, "Error: failed to read %s: %v\n", settingsPath, err)
+		return err
 	} else {
 		var settings map[string]interface{}
 		if err := json.Unmarshal(data, &settings); err != nil {

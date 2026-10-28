@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
@@ -22,6 +23,15 @@ func SearchIssuesInTx(ctx context.Context, tx DBTX, query string, filter types.I
 		proj = issueLiteProjection
 	}
 	return searchInTx(ctx, tx, query, filter, proj)
+}
+
+// SearchDescendantsInTx is storage.WalkDescendants with every level searched
+// by SearchIssuesInTx inside tx, so the whole --parent tree reads one snapshot
+// (GH#3415).
+func SearchDescendantsInTx(ctx context.Context, tx DBTX, rootID string, filter types.IssueFilter) ([]*types.Issue, error) {
+	return storage.WalkDescendants(ctx, rootID, filter, func(ctx context.Context, f types.IssueFilter) ([]*types.Issue, error) {
+		return SearchIssuesInTx(ctx, tx, "", f)
+	})
 }
 
 // SearchIssueIDsInTx is the narrow-projection variant of SearchIssuesInTx:

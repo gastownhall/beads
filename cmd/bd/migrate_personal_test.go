@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/storage/issueops"
@@ -428,7 +429,8 @@ func (s *indeterminateCommitStore) DeleteIssues(ctx context.Context, ids []strin
 // that phase 1 does not roll back a copy whose commit may have landed
 // (storage.ErrCommitIndeterminate): an uncommitted delete of its rows would
 // undo that commit at the planning repo's next one. The error names bd dolt
-// commit, and the copy stays in the planning store for it to settle.
+// commit and the issues now in both repos, and the copy stays in the planning
+// store for it to settle.
 func TestEmbeddedCopyIssuesToPlanning_keepsCopyAfterIndeterminateCommit(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
@@ -459,8 +461,10 @@ func TestEmbeddedCopyIssuesToPlanning_keepsCopyAfterIndeterminateCommit(t *testi
 	if !errors.Is(err, storage.ErrCommitIndeterminate) {
 		t.Fatalf("copyIssuesToPlanning err = %v, want storage.ErrCommitIndeterminate", err)
 	}
-	if !strings.Contains(err.Error(), "run `bd dolt commit` in the planning repo") {
-		t.Errorf("copyIssuesToPlanning err = %v, want it to name bd dolt commit", err)
+	for _, want := range []string{"the copy of " + issue.ID + " is left there", "run `bd dolt commit` in the planning repo"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("copyIssuesToPlanning err = %v, want it to contain %q", err, want)
+		}
 	}
 	if dst.deleteCalls != 0 {
 		t.Errorf("DeleteIssues calls = %d after an indeterminate commit, want 0", dst.deleteCalls)
@@ -551,7 +555,8 @@ func TestDeleteMovedIssuesFollowsAutoCommitPolicy(t *testing.T) {
 }
 
 // requireMigratePersonalRefused runs "bd migrate-personal --yes" in dir,
-// expecting it to fail with output containing want and to report no move. It
+// expecting it to fail with output containing want and to report no move. A
+// refusal is not a usage error, so cobra's usage block must not follow it. It
 // returns the combined output.
 func requireMigratePersonalRefused(t *testing.T, bd, dir, want string) string {
 	t.Helper()
@@ -565,7 +570,20 @@ func requireMigratePersonalRefused(t *testing.T, bd, dir, want string) string {
 	if strings.Contains(out, "Moved") {
 		t.Errorf("bd migrate-personal --yes reported a move while refusing:\n%s", out)
 	}
+	if strings.Contains(out, "Usage:") {
+		t.Errorf("bd migrate-personal --yes printed cobra's usage block after a refusal:\n%s", out)
+	}
 	return out
+}
+
+// requireCleanPlanningRefusal asserts that out carries the refusal of
+// planningDir as its own Error line, not prefixed as a failed planning-store
+// open: nothing failed to open.
+func requireCleanPlanningRefusal(t *testing.T, out, planningDir string) {
+	t.Helper()
+	if strings.Contains(out, "failed to open planning store") || !strings.Contains(out, "Error: planning repo "+planningDir) {
+		t.Errorf("bd migrate-personal --yes output does not refuse with an Error line starting %q:\n%s", "Error: planning repo "+planningDir, out)
+	}
 }
 
 // requireStillInProject asserts issueID is still in the project database.
@@ -605,6 +623,303 @@ func TestEmbeddedMigratePersonal_refusesPlanningRepoThatIsTheProject(t *testing.
 
 			requireMigratePersonalRefused(t, bd, dir, "is this project's own workspace")
 			requireStillInProject(t, beadsDir, tc.prefix, personal.ID)
+		})
+	}
+}
+
+// sharedRootLayout lays out a shared root as Gas City does: a repository root
+// whose .beads holds its own database, hq, and the database rga beside it,
+// whose issue_prefix is rga. rig returns a new repository whose .beads
+// redirects to rootBeadsDir and whose metadata.json names database there (""
+// names none), as each rig of a shared root does.
+func sharedRootLayout(t *testing.T, bd string) (root, rootBeadsDir string, rig func(database string) string) {
+	t.Helper()
+	root, rootBeadsDir, _ = bdInit(t, bd, "--prefix", "hq")
+	// The project rig's database, beside the shared root's own.
+	s, err := embeddeddolt.Open(t.Context(), rootBeadsDir, "rga", "main")
+	if err != nil {
+		t.Fatalf("create the project rig's database: %v", err)
+	}
+	err = s.SetConfig(t.Context(), "issue_prefix", "rga")
+	if closeErr := s.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatalf("set the project rig's issue_prefix: %v", err)
+	}
+	rig = func(database string) string {
+		dir := t.TempDir()
+		initGitRepoAt(t, dir)
+		beadsDir := filepath.Join(dir, ".beads")
+		if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+			t.Fatalf("create rig .beads: %v", err)
+		}
+		cfg := configfile.DefaultConfig()
+		cfg.Backend = configfile.BackendDolt
+		cfg.DoltMode = configfile.DoltModeEmbedded
+		cfg.DoltDatabase = database
+		if err := cfg.Save(beadsDir); err != nil {
+			t.Fatalf("write rig metadata.json: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(beadsDir, "redirect"), []byte(rootBeadsDir+"\n"), 0o600); err != nil {
+			t.Fatalf("write rig redirect: %v", err)
+		}
+		return dir
+	}
+	return root, rootBeadsDir, rig
+}
+
+// TestEmbeddedMigratePersonal_refusesSharedRootRigAsARedirect verifies that a
+// planning repo that is a rig beside the project under a shared root, where
+// both redirect to one .beads and each names a database of its own, is refused
+// as the redirect stub it is, naming the database bd uses there, and not as
+// the project's own workspace: the two rigs are different databases.
+func TestEmbeddedMigratePersonal_refusesSharedRootRigAsARedirect(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	_, townBeadsDir, rig := sharedRootLayout(t, bd)
+	project, planning := rig("rga"), rig("rgb")
+	if out, err := bdRunWithFlockRetry(t, bd, project, "config", "set", "routing.contributor", planning); err != nil {
+		t.Fatalf("bd config set routing.contributor: %v\n%s", err, out)
+	}
+	personal := bdCreate(t, bd, project, "Personal issue in a shared-root rig")
+
+	out := requireMigratePersonalRefused(t, bd, project, `, where bd uses the database "rgb" that the planning repo names; routing.contributor cannot select that database`)
+	if strings.Contains(out, "this project's own workspace") {
+		t.Errorf("a rig beside the project under a shared root was refused as the project's own workspace:\n%s", out)
+	}
+	requireCleanPlanningRefusal(t, out, planning)
+	// Refused before the confirmation prompt, which follows this line.
+	if strings.Contains(out, "Move to planning repo") {
+		t.Errorf("a rig beside the project under a shared root was refused after the confirmation prompt:\n%s", out)
+	}
+	requireStillInProject(t, townBeadsDir, "rga", personal.ID)
+}
+
+// TestEmbeddedMigratePersonal_refusesSharedRootFromARig verifies, from a rig
+// under a shared root (the Gas City layout), how a planning repo that uses the
+// shared root's own database is refused: the shared root itself, and a stub
+// that redirects to it naming that database. Each is refused before the
+// confirmation prompt, naming the database bd uses there and the project's,
+// and points routing.contributor at a separate planning repository, never at
+// the shared root, which would only be refused in turn. That remedy, followed,
+// moves the issue.
+func TestEmbeddedMigratePersonal_refusesSharedRootFromARig(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	town, townBeadsDir, rig := sharedRootLayout(t, bd)
+	project := rig("rga")
+	const title = "Personal issue in a shared-root rig"
+	personal := bdCreate(t, bd, project, title)
+
+	const want = ` holds the .beads this project uses, where bd uses the database "hq", not this project's "rga"; a database beside this project's is not a separate planning repository; set routing.contributor to a separate planning repository (e.g. ~/.beads-planning)`
+	for _, tc := range []struct {
+		name, planning, notWant string
+	}{
+		// Before, this was refused as a redirect with the remedy "set
+		// routing.contributor to that repository instead": the shared root.
+		{"a stub naming the shared root's database", rig("hq"), "that repository instead"},
+		{"the shared root itself", town, "this project's own workspace"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if out, err := bdRunWithFlockRetry(t, bd, project, "config", "set", "routing.contributor", tc.planning); err != nil {
+				t.Fatalf("bd config set routing.contributor: %v\n%s", err, out)
+			}
+			out := requireMigratePersonalRefused(t, bd, project, want)
+			if strings.Contains(out, tc.notWant) {
+				t.Errorf("bd migrate-personal --yes output contains %q:\n%s", tc.notWant, out)
+			}
+			requireCleanPlanningRefusal(t, out, tc.planning)
+			// Refused before the confirmation prompt, which follows this line.
+			if strings.Contains(out, "Move to planning repo") {
+				t.Errorf("refused after the confirmation prompt:\n%s", out)
+			}
+		})
+	}
+
+	// The remedy the refusals give works from a rig. Stores are opened in
+	// process only after the last bd subprocess.
+	planningDir := setupContributorRouting(t, bd, project)
+	if out := requireMigratePersonal(t, bd, project); !strings.Contains(out, "Moved 1 issue") {
+		t.Errorf("bd migrate-personal --yes output does not report the move:\n%s", out)
+	}
+	requireMovedToPlanning(t, townBeadsDir, "rga", planningDir, personal.ID, title)
+}
+
+// TestRefuseSelfPlanningRepo pins which planning repos refuseSelfPlanningRepo
+// refuses, and how. Every one whose .beads, after any redirect, is the
+// project's is refused, named for the database bd uses there: the project's
+// own is the project's own workspace; one a stub names, other than the
+// .beads's own, is a rig beside the project under a shared root, refused as a
+// redirect; the .beads's own, from a rig under that shared root, is named as
+// that database. A separate directory carrying the project's project_id is a
+// clone of the project, and is refused as one. Every refusal ends pointing
+// routing.contributor at a separate planning repository: none of these is
+// one, so no refusal may point it at the shared root, which would only be
+// refused in turn.
+func TestRefuseSelfPlanningRepo(t *testing.T) {
+	root := t.TempDir()
+	// workspace writes a .beads under root/name whose metadata.json names
+	// database and projectID, redirecting to target when it is set.
+	workspace := func(name, database, projectID, target string) string {
+		beadsDir := filepath.Join(root, name, ".beads")
+		if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+			t.Fatalf("create %s: %v", beadsDir, err)
+		}
+		cfg := configfile.DefaultConfig()
+		cfg.Backend = configfile.BackendDolt
+		cfg.DoltMode = configfile.DoltModeServer
+		cfg.DoltDatabase = database
+		cfg.ProjectID = projectID
+		if err := cfg.Save(beadsDir); err != nil {
+			t.Fatalf("write %s metadata.json: %v", name, err)
+		}
+		if target != "" {
+			if err := os.WriteFile(filepath.Join(beadsDir, "redirect"), []byte(target+"\n"), 0o600); err != nil {
+				t.Fatalf("write %s redirect: %v", name, err)
+			}
+		}
+		return beadsDir
+	}
+	// A shared root whose rigs redirect to its .beads and each name a
+	// database of their own (preserveRedirectSourceDatabase), and a plain
+	// project with stubs redirecting to it.
+	town := workspace("town", "hq", "town-id", "")
+	project := workspace("project", "proj", "project-id", "")
+	// A legacy workspace whose metadata.json names no dolt_database: bd uses
+	// the default database there.
+	legacy := workspace("legacy", "", "legacy-id", "")
+	for _, tc := range []struct {
+		name string
+		// projectBeadsDir is the project's .beads as the command resolved
+		// it, and launchDatabase the BEADS_DOLT_SERVER_DATABASE it opened
+		// its store under ("" for none).
+		projectBeadsDir, launchDatabase string
+		planningBeadsDir                string
+		want                            string
+	}{
+		{name: "the project itself", projectBeadsDir: project, planningBeadsDir: project,
+			want: "is this project's own workspace"},
+		{name: "a stub naming no database", projectBeadsDir: project,
+			planningBeadsDir: workspace("stub", "", "", project), want: "is this project's own workspace"},
+		{name: "a stub naming the project's database", projectBeadsDir: project,
+			planningBeadsDir: workspace("worktree", "proj", "", project), want: "is this project's own workspace"},
+		{name: "a stub naming a database of its own", projectBeadsDir: project,
+			planningBeadsDir: workspace("rig", "rig", "", project),
+			want:             `where bd uses the database "rig" that the planning repo names; routing.contributor cannot select that database`},
+		{name: "the project's own rig under a shared root", projectBeadsDir: town, launchDatabase: "rga",
+			planningBeadsDir: workspace("rigA", "rga", "", town), want: "is this project's own workspace"},
+		{name: "a rig beside the project under a shared root", projectBeadsDir: town, launchDatabase: "rga",
+			planningBeadsDir: workspace("rigB", "rgb", "", town),
+			want:             `where bd uses the database "rgb" that the planning repo names; routing.contributor cannot select that database`},
+		// From a rig under a shared root, a planning repo using the shared
+		// root's own database: the root itself, or a stub naming that
+		// database or none. Not the project's database, and not a separate
+		// planning repository either, so it stays refused, named as what it
+		// is.
+		{name: "the shared root itself", projectBeadsDir: town, launchDatabase: "rga",
+			planningBeadsDir: town,
+			want:             "planning repo " + filepath.Dir(town) + ` holds the .beads this project uses, where bd uses the database "hq", not this project's "rga"; a database beside this project's is not a separate planning repository`},
+		{name: "a stub naming the shared root's database", projectBeadsDir: town, launchDatabase: "rga",
+			planningBeadsDir: workspace("rigHQ", "hq", "", town),
+			want:             `, which holds the .beads this project uses, where bd uses the database "hq", not this project's "rga"; a database beside this project's is not a separate planning repository`},
+		{name: "a stub naming no database under a shared root", projectBeadsDir: town, launchDatabase: "rga",
+			planningBeadsDir: workspace("rigNone", "", "", town),
+			want:             `, which holds the .beads this project uses, where bd uses the database "hq", not this project's "rga"; a database beside this project's is not a separate planning repository`},
+		{name: "a legacy project itself", projectBeadsDir: legacy, planningBeadsDir: legacy,
+			want: "is this project's own workspace"},
+		{name: "a legacy shared root itself", projectBeadsDir: legacy, launchDatabase: "rga",
+			planningBeadsDir: legacy,
+			want:             "planning repo " + filepath.Dir(legacy) + ` holds the .beads this project uses, where bd uses the database "beads", not this project's "rga"`},
+		{name: "a stub naming no database under a legacy shared root", projectBeadsDir: legacy, launchDatabase: "rga",
+			planningBeadsDir: workspace("legacyRigNone", "", "", legacy),
+			want:             `, which holds the .beads this project uses, where bd uses the database "beads", not this project's "rga"`},
+		{name: "a clone carrying the project's project_id", projectBeadsDir: project,
+			planningBeadsDir: workspace("clone", "proj", "project-id", ""),
+			want:             "has this project's project_id (project-id), so it is a clone of this project's workspace"},
+		{name: "a separate planning repository", projectBeadsDir: project,
+			planningBeadsDir: workspace("planning", "pl", "planning-id", "")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("BEADS_DOLT_SERVER_DATABASE", tc.launchDatabase)
+			err := refuseSelfPlanningRepo(filepath.Dir(tc.planningBeadsDir), tc.planningBeadsDir, tc.projectBeadsDir)
+			switch {
+			case tc.want == "" && err != nil:
+				t.Errorf("refuseSelfPlanningRepo = %v, want nil", err)
+			case tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)):
+				t.Errorf("refuseSelfPlanningRepo = %v, want an error containing %q", err, tc.want)
+			}
+			const remedy = "; set routing.contributor to a separate planning repository (e.g. ~/.beads-planning)"
+			if err != nil && !strings.HasSuffix(err.Error(), remedy) {
+				t.Errorf("refuseSelfPlanningRepo = %v, want its remedy to end %q", err, remedy)
+			}
+		})
+	}
+}
+
+// TestRefuseUninitializablePlanningRepoRaisesPlanningRepoRefusals verifies
+// that the refusals a metadata-less planning repo shares with a routed bd
+// create (refuseUninitializableTarget's own) are raised as refusals of the
+// planning repo, named as such, which planningOpenError returns as they are,
+// with no "failed to open planning store" prefix. bd's own admission refusal
+// is returned as it is, for planningOpenError to render as bd renders it.
+func TestRefuseUninitializablePlanningRepoRaisesPlanningRepoRefusals(t *testing.T) {
+	// databaseMarker is the file embeddeddolt.Databases looks for to count an
+	// embedded database.
+	databaseMarker := func(database string) string {
+		return filepath.Join("embeddeddolt", database, ".dolt", "noms", "manifest")
+	}
+	for _, tc := range []struct {
+		name  string
+		files map[string]string
+		// want follows "planning repo <dir>" in the refusal; "" is bd's own
+		// admission refusal.
+		want string
+	}{
+		{name: "server mode", files: map[string]string{"config.yaml": "dolt:\n  mode: server\n"},
+			want: " has no metadata.json and its own config selects Dolt server mode (dolt.mode: server); "},
+		{name: "remote dolt.host", files: map[string]string{"config.yaml": "dolt:\n  host: db.example.com\n"},
+			want: ` has no metadata.json and its own config selects Dolt server mode (dolt.host: "db.example.com"); `},
+		{name: "unreadable config", files: map[string]string{"config.yaml": "dolt: [unterminated\n"},
+			want: " has no metadata.json and its dolt.mode cannot be read ("},
+		{name: "several databases", files: map[string]string{databaseMarker("beads"): "x", databaseMarker("other"): "x"},
+			want: " has no metadata.json and holds several databases (beads, other); give it a metadata.json whose dolt_database names the one to use, then rerun"},
+		{name: "sqlite-era repo", files: map[string]string{"config.json": `{"database":"beads.db"}`, "beads.db": "SQLite format 3\x00" + strings.Repeat("\x00", 4080)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			planningDir := t.TempDir()
+			planningBeadsDir := filepath.Join(planningDir, ".beads")
+			for name, content := range tc.files {
+				path := filepath.Join(planningBeadsDir, name)
+				if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := refuseUninitializablePlanningRepo(planningBeadsDir)
+			var refusal *planningRepoRefusal
+			if tc.want == "" {
+				if !isLegacyUpgradeRefusal(err) {
+					t.Fatalf("refuseUninitializablePlanningRepo() = %v (%T), want bd's own admission refusal as it is", err, err)
+				}
+				return
+			}
+			if want := "planning repo " + planningDir + tc.want; !errors.As(err, &refusal) || !strings.HasPrefix(err.Error(), want) {
+				t.Fatalf("refuseUninitializablePlanningRepo() = %v (%T), want a *planningRepoRefusal starting %q", err, err, want)
+			}
+			if got := planningOpenError(planningDir, err); got == nil || got.Error() != err.Error() {
+				t.Errorf("planningOpenError() = %v, want the refusal as it is: %v", got, err)
+			}
 		})
 	}
 }
@@ -826,16 +1141,26 @@ func TestEmbeddedMigratePersonal_initializesContributorPlanningRepos(t *testing.
 // TestEmbeddedMigratePersonal_refusesUncommittedPlanningChanges verifies that
 // a planning repo whose working set already holds changes is refused before
 // anything moves. The move's embedded commit is DOLT_COMMIT('-Am'), which would
-// publish them under migrate-personal's message. The refusal names its remedy,
-// bd dolt commit in the planning repo, after which a rerun moves the issue. A
-// fork-setup database with no metadata.json is refused before its adoption
-// writes anything: no issue_prefix and no metadata.json.
+// publish them under migrate-personal's message. The refusal is the Error line
+// alone, and names its remedy, bd dolt commit in the planning repo, after
+// which a rerun moves the issue. A database with no metadata.json is refused
+// before its adoption writes anything: no issue_prefix and no metadata.json.
+// When that database is not the default one, bd run in the planning repo
+// opens the default one instead, so the remedy first gives the repo a
+// metadata.json naming it.
 func TestEmbeddedMigratePersonal_refusesUncommittedPlanningChanges(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
 	t.Parallel()
 
+	requireNoMetadata := func(t *testing.T, planningBeadsDir string) {
+		t.Helper()
+		if _, err := os.Stat(filepath.Join(planningBeadsDir, "metadata.json")); !os.IsNotExist(err) {
+			t.Errorf("planning metadata.json written by a refused migrate-personal: stat err = %v, want not exist", err)
+		}
+	}
+	const commitRemedy = "commit them there with `bd dolt commit`, then rerun; nothing was moved"
 	bd := buildEmbeddedBD(t)
 	for _, tc := range []struct {
 		name   string
@@ -843,11 +1168,16 @@ func TestEmbeddedMigratePersonal_refusesUncommittedPlanningChanges(t *testing.T)
 		// planningRepo returns a planning repo whose working set holds a
 		// change, and the database that holds it.
 		planningRepo func(t *testing.T, dir string) (planningDir, database string)
+		// remedy is the end of the refusal; nameDatabase is whether it first
+		// asks for a metadata.json naming the database, which the test then
+		// writes before running bd dolt commit.
+		remedy       string
+		nameDatabase bool
 		// check, when set, makes the case's own assertions after the refusal.
 		check func(t *testing.T, planningBeadsDir string)
 	}{
 		{
-			name: "initialized planning repo", prefix: "mpu",
+			name: "initialized planning repo", prefix: "mpu", remedy: commitRemedy,
 			planningRepo: func(t *testing.T, dir string) (string, string) {
 				planningDir := setupContributorRouting(t, bd, dir)
 				// A write the planning repo's own dolt.auto-commit left
@@ -857,7 +1187,22 @@ func TestEmbeddedMigratePersonal_refusesUncommittedPlanningChanges(t *testing.T)
 			},
 		},
 		{
-			name: "fork setup database", prefix: "mpe",
+			// The shape an ensureBeadsDirForPath interrupted before it saved
+			// metadata.json leaves, or a hand-removed metadata.json.
+			name: "database not named beads without metadata", prefix: "mpn", nameDatabase: true,
+			remedy: `bd run there opens the database "pl" only once a metadata.json names it, so give it a .beads/metadata.json whose dolt_database is "pl", ` + commitRemedy,
+			planningRepo: func(t *testing.T, dir string) (string, string) {
+				planningDir := setupContributorRouting(t, bd, dir)
+				bdCreate(t, bd, planningDir, "Planning issue left uncommitted", "--dolt-auto-commit", "off")
+				if err := os.Remove(filepath.Join(planningDir, ".beads", "metadata.json")); err != nil {
+					t.Fatalf("remove planning metadata.json: %v", err)
+				}
+				return planningDir, migratePersonalPlanningDatabase
+			},
+			check: requireNoMetadata,
+		},
+		{
+			name: "fork setup database", prefix: "mpe", remedy: commitRemedy,
 			planningRepo: func(t *testing.T, dir string) (string, string) {
 				planningDir := t.TempDir()
 				planningBeadsDir := filepath.Join(planningDir, ".beads")
@@ -882,9 +1227,7 @@ func TestEmbeddedMigratePersonal_refusesUncommittedPlanningChanges(t *testing.T)
 				return planningDir, "beads"
 			},
 			check: func(t *testing.T, planningBeadsDir string) {
-				if _, err := os.Stat(filepath.Join(planningBeadsDir, "metadata.json")); !os.IsNotExist(err) {
-					t.Errorf("planning metadata.json written by a refused migrate-personal: stat err = %v, want not exist", err)
-				}
+				requireNoMetadata(t, planningBeadsDir)
 				if prefix, err := openStore(t, planningBeadsDir, "beads").GetConfig(t.Context(), "issue_prefix"); err != nil || prefix != "" {
 					t.Errorf("planning database issue_prefix = %q (err %v) after a refused migrate-personal, want it unset", prefix, err)
 				}
@@ -903,9 +1246,11 @@ func TestEmbeddedMigratePersonal_refusesUncommittedPlanningChanges(t *testing.T)
 			const title = "Personal issue for a planning repo with uncommitted changes"
 			personal := bdCreate(t, bd, dir, title)
 
-			out := requireMigratePersonalRefused(t, bd, dir, "planning repo "+planningDir+" has uncommitted changes (")
-			if remedy := "commit them there with `bd dolt commit`, then rerun; nothing was moved"; !strings.Contains(out, remedy) {
-				t.Errorf("bd migrate-personal --yes output does not name the remedy %q:\n%s", remedy, out)
+			// The refusal is the Error line alone: no "failed to open planning
+			// store" prefix, since nothing failed to open.
+			out := requireMigratePersonalRefused(t, bd, dir, "Error: planning repo "+planningDir+" has uncommitted changes (")
+			if !strings.Contains(out, tc.remedy) {
+				t.Errorf("bd migrate-personal --yes output does not name the remedy %q:\n%s", tc.remedy, out)
 			}
 			requireStillInProject(t, beadsDir, tc.prefix, personal.ID)
 			requireInNoPlanningDatabase(t, planningBeadsDir, personal.ID)
@@ -916,6 +1261,16 @@ func TestEmbeddedMigratePersonal_refusesUncommittedPlanningChanges(t *testing.T)
 				tc.check(t, planningBeadsDir)
 			}
 
+			// The remedy, as the refusal prints it.
+			if tc.nameDatabase {
+				raw, err := json.Marshal(map[string]string{"dolt_database": database})
+				if err != nil {
+					t.Fatalf("encode planning metadata.json: %v", err)
+				}
+				if err := os.WriteFile(filepath.Join(planningBeadsDir, "metadata.json"), raw, 0o600); err != nil {
+					t.Fatalf("write planning metadata.json: %v", err)
+				}
+			}
 			if out, err := bdRunWithFlockRetry(t, bd, planningDir, "dolt", "commit"); err != nil {
 				t.Fatalf("bd dolt commit in the planning repo: %v\n%s", err, out)
 			}
@@ -1095,11 +1450,14 @@ func TestEmbeddedMigratePersonal_repoSyncMirrorHint(t *testing.T) {
 	}
 	requireStillInProject(t, beadsDir, "mps", planningIssue.ID)
 
-	// The path is quoted for this host's shell (TestShellQuotedPathFor), and
+	// The path is quoted for this host's shell (remedy.TestShellQuotedFor), and
 	// the hint says how to turn back on the hydration bd repo remove turns off.
-	quoted := shellQuotedPathFor(runtime.GOOS, planningDir)
-	requireMigratePersonalRefused(t, bd, dir, "by `bd repo sync` (remove those copies with `bd repo remove "+quoted+
-		"`, then rerun, and run `bd repo add "+quoted+"` again if you want them hydrated); nothing was moved")
+	quoted, ok := remedy.ShellQuotedFor(runtime.GOOS, planningDir)
+	if !ok {
+		t.Fatalf("remedy.ShellQuotedFor(%q, %q) cannot quote the planning repo's path", runtime.GOOS, planningDir)
+	}
+	requireMigratePersonalRefused(t, bd, dir, "by bd repo sync (remove those copies with bd repo remove "+quoted+
+		", then rerun, and run bd repo add "+quoted+" again if you want them hydrated); nothing was moved")
 	requireStillInProject(t, beadsDir, "mps", personal.ID)
 
 	if out, err := bdRunWithFlockRetry(t, bd, dir, "repo", "remove", planningDir); err != nil {
@@ -1300,8 +1658,10 @@ func TestEmbeddedMigratePersonal_refusesUninitializablePlanningRepos(t *testing.
 		want   string
 		// setup shapes planningBeadsDir, which exists and is empty.
 		setup func(t *testing.T, planningBeadsDir string)
-		// wantStderr, when set, is the refusal's whole stderr, which exits 1.
+		// wantStderr, when set, is the refusal's whole stderr, which exits
+		// wantCode, or 1 when wantCode is 0.
 		wantStderr func(planningDir string) string
+		wantCode   int
 	}{
 		{name: "redirect stub", prefix: "mps", want: "; set routing.contributor to that repository instead", setup: writeRedirect},
 		{name: "redirect stub with metadata", prefix: "mpr", want: "; set routing.contributor to that repository instead", setup: func(t *testing.T, planningBeadsDir string) {
@@ -1336,6 +1696,27 @@ func TestEmbeddedMigratePersonal_refusesUninitializablePlanningRepos(t *testing.
 			createDatabase(t, planningBeadsDir, "beads", "")
 			createDatabase(t, planningBeadsDir, "other", "")
 		}},
+		// bd run in a planning repo whose own config.yaml selects server mode
+		// opens its server database; an embedded metadata.json written there
+		// would outrank that file and hide it, as would adopting a stale
+		// embedded database beside it.
+		{name: "server mode in its config.yaml", prefix: "mpj", want: "selects Dolt server mode", setup: writeServerModeWorkspace},
+		{name: "server mode beside a stale embedded database", prefix: "mpz", want: "selects Dolt server mode", setup: func(t *testing.T, planningBeadsDir string) {
+			writeServerModeWorkspace(t, planningBeadsDir)
+			createDatabase(t, planningBeadsDir, "beads", "")
+		}},
+		// A planning repo in a format this build cannot open is refused as
+		// that, exactly as bd's own admission refuses it, whatever mode its
+		// config selects: the format fence runs before the config is read.
+		{name: "graph format marker beside a server-mode config.yaml", prefix: "mpf", want: "graph-preview-format", setup: func(t *testing.T, planningBeadsDir string) {
+			writeServerModeWorkspace(t, planningBeadsDir)
+			if err := os.WriteFile(filepath.Join(planningBeadsDir, configfile.GraphFormatMarkerFile), nil, 0o600); err != nil {
+				t.Fatalf("write planning graph format marker: %v", err)
+			}
+		}, wantStderr: func(planningDir string) string {
+			formatErr := &configfile.UnsupportedWorkspaceFormatError{BeadsDir: filepath.Join(planningDir, ".beads"), FormatMarker: true}
+			return "Error: " + formatErr.Error() + "\nHint: " + formatErr.Hint() + "\n"
+		}, wantCode: ExitUnsupportedWorkspaceFormat},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -1352,16 +1733,25 @@ func TestEmbeddedMigratePersonal_refusesUninitializablePlanningRepos(t *testing.
 			personal := bdCreate(t, bd, dir, "Personal issue for an uninitializable planning repo")
 			before := planningDirListing(t, planningBeadsDir)
 
-			requireMigratePersonalRefused(t, bd, dir, tc.want)
+			out := requireMigratePersonalRefused(t, bd, dir, tc.want)
+			if tc.wantCode != ExitUnsupportedWorkspaceFormat {
+				// The format refusal names the planning repo's .beads, as bd's
+				// own admission does there; its wantStderr pins it whole.
+				requireCleanPlanningRefusal(t, out, planningDir)
+			}
 			requireStillInProject(t, beadsDir, tc.prefix, personal.ID)
 			if after := planningDirListing(t, planningBeadsDir); !slices.Equal(after, before) {
 				t.Errorf("planning .beads after a refused migrate-personal = %v, want unchanged %v", after, before)
 			}
 			requireInNoPlanningDatabase(t, planningBeadsDir, personal.ID)
 			if tc.wantStderr != nil {
+				wantCode := tc.wantCode
+				if wantCode == 0 {
+					wantCode = 1
+				}
 				stderr, code := migratePersonalStderr(t, bd, dir)
-				if want := tc.wantStderr(planningDir); stderr != want || code != 1 {
-					t.Errorf("bd migrate-personal --yes exit %d, stderr:\n%s\nwant exit 1, stderr exactly:\n%s", code, stderr, want)
+				if want := tc.wantStderr(planningDir); stderr != want || code != wantCode {
+					t.Errorf("bd migrate-personal --yes exit %d, stderr:\n%s\nwant exit %d, stderr exactly:\n%s", code, stderr, wantCode, want)
 				}
 			}
 		})
@@ -1459,36 +1849,41 @@ func TestIsPlanningRepoMirror(t *testing.T) {
 	}
 }
 
-// TestShellQuotedPathFor pins how the phase-0 mirror refusal quotes a
-// source_repo for the shell its commands are pasted into: in single quotes on
-// POSIX, which keep $, backticks and quotes literal, and in plain double
-// quotes on Windows, whose shells keep backslashes as they are (Go's %q
-// doubled them there, and bd repo remove then found no such repository). On
-// a POSIX host each POSIX form is also run through sh, which must pass the
-// path on unchanged.
-func TestShellQuotedPathFor(t *testing.T) {
+// TestRepoSyncMirrorRefusal pins the phase-0 refusal's bd repo remove and bd
+// repo add commands on both platforms: the source_repo quoted for the shell
+// (remedy.TestShellQuotedFor), or, when no quoting passes it on unchanged there, a
+// <path> placeholder for the path the refusal names escaped (remedy.TestEscapedValue),
+// so pasting that name in its place runs nothing either. A value it names that
+// does not print as itself, such as one holding a carriage return, a terminal
+// escape or U+202E, is named escaped (remedy.PrintedValue), so none of those reaches
+// the line the commands are printed on.
+func TestRepoSyncMirrorRefusal(t *testing.T) {
 	t.Parallel()
+	const prefix = "issue mps-1 already exists in the planning repo P; the project copy was imported from "
+	const placeholders = "bd repo sync (remove those copies with bd repo remove <path>, then rerun, and run bd repo add <path> again if you want them hydrated, with that path for <path>); nothing was moved"
 	for _, tc := range []struct {
-		goos, path, want string
+		goos, sourceRepo, want string
 	}{
-		{"linux", "/home/me/.beads-planning", `'/home/me/.beads-planning'`},
-		{"darwin", "/tmp/$HOME/it's `id`", `'/tmp/$HOME/it'\''s ` + "`id`'"},
-		{"windows", `C:\Users\me\.beads-planning`, `"C:\Users\me\.beads-planning"`},
-		{"windows", `C:\Users\Jane Doe\R&D planning`, `"C:\Users\Jane Doe\R&D planning"`},
+		{"linux", "/home/me/planning", prefix + "/home/me/planning by bd repo sync (remove those copies with bd repo remove '/home/me/planning', then rerun, and run bd repo add '/home/me/planning' again if you want them hydrated); nothing was moved"},
+		{"windows", `C:\planning`, prefix + `C:\planning by ` + "bd repo sync (remove those copies with bd repo remove \"C:\\planning\", then rerun, and run bd repo add \"C:\\planning\" again if you want them hydrated); nothing was moved"},
+		{"windows", `C:\planning\`, prefix + `"C:\\planning\\" by ` + placeholders},
+		{"windows", `C:\Users\me\$work\planning`, prefix + `"C:\\Users\\me\\\x24work\\planning" by ` + placeholders},
+		{"windows", `C:\x" & calc & "$(calc)`, prefix + `"C:\\x\x22 \x26 calc \x26 \x22\x24(calc)" by ` + placeholders},
+		{"linux", "/home/me/x'; calc #", prefix + `"/home/me/x\x27\x3b calc #" by ` + placeholders},
+		{"linux", "/home/me/planning/\x1b[2K\r/..", prefix + `"/home/me/planning/\x1b[2K\r/.." by ` + placeholders},
+		{"windows", "C:\\planning\u202e\\..", prefix + `"C:\\planning\u202e\\.." by ` + placeholders},
 	} {
-		got := shellQuotedPathFor(tc.goos, tc.path)
-		if got != tc.want {
-			t.Errorf("shellQuotedPathFor(%q, %q) = %s, want %s", tc.goos, tc.path, got, tc.want)
+		err := repoSyncMirrorRefusal(&types.Issue{ID: "mps-1", SourceRepo: tc.sourceRepo}, "P", tc.goos)
+		if err == nil || err.Error() != tc.want || strings.ContainsAny(err.Error(), "\x1b\r\u202e") {
+			t.Errorf("repoSyncMirrorRefusal(source_repo %q, %q) = %q\nwant %q", tc.sourceRepo, tc.goos, err, tc.want)
 		}
-		if tc.goos == "windows" || runtime.GOOS == "windows" {
-			continue
-		}
-		out, err := exec.Command("sh", "-c", "printf '%s' "+got).Output()
-		if err != nil {
-			t.Fatalf("sh -c \"printf '%%s' %s\": %v", got, err)
-		}
-		if string(out) != tc.path {
-			t.Errorf("sh passed %s on as %q, want %q", got, out, tc.path)
-		}
+	}
+	// The issue ID and planning repo it names beside the commands are spelled
+	// the same way.
+	id, planningPath := "mps-1\x1b[2K", "/home/me/planning\r"
+	err := repoSyncMirrorRefusal(&types.Issue{ID: id, SourceRepo: planningPath}, planningPath, "linux")
+	want := `issue "mps-1\x1b[2K" already exists in the planning repo "/home/me/planning\r"; the project copy was imported from "/home/me/planning\r" by ` + placeholders
+	if err == nil || err.Error() != want || strings.ContainsAny(err.Error(), "\x1b\r") {
+		t.Errorf("repoSyncMirrorRefusal(ID %q, planning repo %q) = %q\nwant %q", id, planningPath, err, want)
 	}
 }

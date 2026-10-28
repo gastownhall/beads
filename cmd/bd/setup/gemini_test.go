@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -298,6 +299,57 @@ func TestInstallGemini_GlobalSectionStaysClearOfGeminiMemories(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// ~/.gemini/GEMINI.md holds Gemini CLI's saved memories and settings.json
+// can hold API keys. An install or --remove that rewrites either must keep
+// the mode the owner gave it, not reset it to 0644.
+func TestGeminiUserLevelFilesKeepTheirMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix file permissions are not supported on Windows")
+	}
+	seed := "# Prefs\n\n" + geminiMemoriesHeading + "\n- My cat is named Miso.\n"
+	for _, install := range geminiUserLevelInstalls {
+		t.Run(install.name, func(t *testing.T) {
+			env, _, _ := newGeminiTestEnv(t)
+			env.projectDir = install.dir(env)
+			instructions := geminiGlobalInstructionsPath(env.homeDir)
+			settings := geminiGlobalSettingsPath(env.homeDir)
+			seedFileMode(t, instructions, seed, 0o600)
+			seedFileMode(t, settings, "{\"theme\": \"Default\"}\n", 0o600)
+
+			if err := installGemini(env, install.project, false); err != nil {
+				t.Fatalf("installGemini: %v", err)
+			}
+			data, err := os.ReadFile(instructions)
+			if err != nil {
+				t.Fatalf("read %s: %v", instructions, err)
+			}
+			if !containsBeadsMarker(string(data)) {
+				t.Fatalf("install did not add the beads section:\n%s", data)
+			}
+			assertFileMode(t, instructions, 0o600)
+			assertFileMode(t, settings, 0o600)
+
+			for _, path := range []string{instructions, settings} {
+				if err := os.Chmod(path, 0o600); err != nil {
+					t.Fatalf("chmod %s: %v", path, err)
+				}
+			}
+			if err := removeGemini(env, install.project); err != nil {
+				t.Fatalf("removeGemini: %v", err)
+			}
+			data, err = os.ReadFile(instructions)
+			if err != nil {
+				t.Fatalf("read %s: %v", instructions, err)
+			}
+			if string(data) != seed {
+				t.Errorf("--remove left:\n%s\nwant:\n%s", data, seed)
+			}
+			assertFileMode(t, instructions, 0o600)
+			assertFileMode(t, settings, 0o600)
+		})
 	}
 }
 
@@ -665,6 +717,61 @@ func TestInstallGemini_PreservesExistingSettings(t *testing.T) {
 	hooks := settings["hooks"].(map[string]interface{})
 	if hooks["SomeOtherHook"] == nil {
 		t.Error("existing hook was not preserved")
+	}
+}
+
+// TestInstallGemini_UnreadableSettings: a settings file the install cannot
+// read is not a missing one. Taken for one, it was replaced by a file holding
+// only bd's hook, and every other setting in it was lost: the rename that
+// replaces it needs write access to the directory, not read access to the
+// file. The install now stops before it writes anything. The read error is
+// injected, since a chmod 000 file is still readable to root.
+func TestInstallGemini_UnreadableSettings(t *testing.T) {
+	for _, project := range []bool{false, true} {
+		name := "global"
+		if project {
+			name = "project"
+		}
+		t.Run(name, func(t *testing.T) {
+			env, stdout, stderr := newGeminiTestEnv(t)
+			settingsPath := geminiGlobalSettingsPath(env.homeDir)
+			instructionsPath := geminiGlobalInstructionsPath(env.homeDir)
+			if project {
+				settingsPath = geminiProjectSettingsPath(env.projectDir)
+				instructionsPath = filepath.Join(env.projectDir, geminiInstructionsFile)
+			}
+			const original = "{\n  \"security\": {\n    \"auth\": {\n      \"selectedType\": \"gemini-api-key\"\n    }\n  }\n}\n"
+			writeGeminiFile(t, settingsPath, original)
+			readFile := env.readFile
+			env.readFile = func(path string) ([]byte, error) {
+				if path == settingsPath {
+					return nil, &os.PathError{Op: "open", Path: path, Err: os.ErrPermission}
+				}
+				return readFile(path)
+			}
+			var written []string
+			writeFile := env.writeFile
+			env.writeFile = func(path string, data []byte) error {
+				written = append(written, path)
+				return writeFile(path, data)
+			}
+
+			if err := installGemini(env, project, false); !errors.Is(err, os.ErrPermission) {
+				t.Errorf("installGemini error = %v, want %v\nstdout:\n%s", err, os.ErrPermission, stdout.String())
+			}
+			if !strings.Contains(stderr.String(), "failed to read "+settingsPath) {
+				t.Errorf("expected the read error to name %s, got:\n%s", settingsPath, stderr.String())
+			}
+			if len(written) != 0 {
+				t.Errorf("expected nothing written, wrote %v", written)
+			}
+			if data, err := os.ReadFile(settingsPath); err != nil || string(data) != original {
+				t.Errorf("expected %s kept, got %q (%v)", settingsPath, data, err)
+			}
+			if _, err := os.Stat(instructionsPath); !os.IsNotExist(err) {
+				t.Errorf("expected no %s written, stat error = %v", instructionsPath, err)
+			}
+		})
 	}
 }
 
@@ -1196,6 +1303,48 @@ func TestRemoveGemini_NoSettingsFile(t *testing.T) {
 	out := stdout.String()
 	if !strings.Contains(out, "No settings file found") {
 		t.Errorf("expected 'No settings file found' message, got: %s", out)
+	}
+}
+
+// TestRemoveGemini_UnreadableSettings: a settings file the removal cannot
+// read is not a missing one. It was reported as "No settings file found", and
+// the removal went on to take the beads section out of GEMINI.md and report
+// success with the hook still in place. Like bd setup claude --remove, it now
+// fails with the section kept.
+func TestRemoveGemini_UnreadableSettings(t *testing.T) {
+	env, stdout, stderr := newGeminiTestEnv(t)
+	if err := installGemini(env, false, false); err != nil {
+		t.Fatalf("installGemini: %v", err)
+	}
+	settingsPath := geminiGlobalSettingsPath(env.homeDir)
+	instructionsPath := geminiGlobalInstructionsPath(env.homeDir)
+	settings, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+	readFile := env.readFile
+	env.readFile = func(path string) ([]byte, error) {
+		if path == settingsPath {
+			return nil, &os.PathError{Op: "open", Path: path, Err: os.ErrPermission}
+		}
+		return readFile(path)
+	}
+	stdout.Reset()
+
+	if err := removeGemini(env, false); !errors.Is(err, os.ErrPermission) {
+		t.Errorf("removeGemini error = %v, want %v\nstdout:\n%s", err, os.ErrPermission, stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "failed to read "+settingsPath) {
+		t.Errorf("expected the read error to name %s, got:\n%s", settingsPath, stderr.String())
+	}
+	if out := stdout.String(); strings.Contains(out, "No settings file found") || strings.Contains(out, "hooks removed") {
+		t.Errorf("expected neither a missing file nor a removal reported, got:\n%s", out)
+	}
+	if data, err := os.ReadFile(settingsPath); err != nil || string(data) != string(settings) {
+		t.Errorf("expected %s kept, got %q (%v)", settingsPath, data, err)
+	}
+	if data, err := os.ReadFile(instructionsPath); err != nil || string(data) != geminiUserLevelSection() {
+		t.Errorf("expected the user-level section kept, got %q (%v)", data, err)
 	}
 }
 
