@@ -329,7 +329,16 @@ func MergeWithStrategy(ctx context.Context, db DBConn, ref, author, strategy str
 		return conflicts, fmt.Errorf("conflicts resolved with '%s' strategy but merge left constraint violations bd cannot auto-repair; inspect dolt_constraint_violations and resolve before retrying", strategy)
 	}
 
-	if err := StageAndCommit(ctx, db, dirtyTables,
+	// Not StageAndCommit: "ours" leaves the resolved table equal to HEAD, so
+	// its nothing-staged skip would never commit and leave the merge open, and
+	// it would drop the tables the merge integrated cleanly (#7811).
+	for table := range dirtyTables {
+		if _, err := db.ExecContext(ctx, "CALL DOLT_ADD(?)", table); err != nil {
+			abortMerge(ctx, db, preMergeClean)
+			return conflicts, fmt.Errorf("stage resolved %s: %w", table, err)
+		}
+	}
+	if err := concludeMerge(ctx, db,
 		fmt.Sprintf("Resolve merge conflicts from %s using %s strategy", ref, strategy), author); err != nil {
 		abortMerge(ctx, db, preMergeClean)
 		return conflicts, fmt.Errorf("conflicts resolved but commit failed: %w", err)

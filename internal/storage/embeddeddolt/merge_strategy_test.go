@@ -152,6 +152,9 @@ func TestMergeWithStrategy_OursKeepsLocal(t *testing.T) {
 	if dirty != 0 {
 		t.Errorf("%d dirty table(s) remain: the resolution was not committed", dirty)
 	}
+	// An empty dolt_status does not prove a commit: the resolved table equals
+	// HEAD, so nothing was ever staged (#7811).
+	assertMergeClosedWithTwoParents(t, ctx, conn)
 }
 
 // TestMerge_NoStrategyStillErrorsWithEscapeHatchHint pins the "no --strategy"
@@ -350,6 +353,35 @@ func TestMergeAndSettleWithStrategy_KeepsCleanMergedTables(t *testing.T) {
 				t.Fatalf("MergeAndSettleWithStrategy(%s): %v", tc.strategy, err)
 			}
 			assertMergeConcludedWithPeerLabel(t, ctx, conn, "mgl-"+tc.strategy, tc.wantTitle)
+		})
+	}
+}
+
+// TestMergeWithStrategy_KeepsCleanMergedTables is #7811 on the `bd vc merge
+// --strategy` path: StageAndCommit staged only the conflicted table, so
+// "theirs" committed a merge without the peer's labels and "ours" (resolved
+// table equal to HEAD, nothing staged) committed nothing and left the merge
+// open.
+func TestMergeWithStrategy_KeepsCleanMergedTables(t *testing.T) {
+	for _, tc := range []struct{ strategy, wantTitle string }{
+		{"ours", "ours"},
+		{"theirs", "theirs"},
+	} {
+		t.Run(tc.strategy, func(t *testing.T) {
+			te := newTestEnv(t, "mgcv"+tc.strategy)
+			ctx := t.Context()
+			conn := openSettleConn(t, ctx, te)
+
+			peerBranch := seedRetitleAndLabelSwapConflict(t, ctx, conn, "mgv-"+tc.strategy)
+
+			conflicts, err := versioncontrolops.MergeWithStrategy(ctx, conn, peerBranch, "test <test@example.com>", tc.strategy)
+			if err != nil {
+				t.Fatalf("MergeWithStrategy(%s): %v", tc.strategy, err)
+			}
+			if len(conflicts) == 0 {
+				t.Fatal("expected the resolved conflict to be reported")
+			}
+			assertMergeConcludedWithPeerLabel(t, ctx, conn, "mgv-"+tc.strategy, tc.wantTitle)
 		})
 	}
 }
