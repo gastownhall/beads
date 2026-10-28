@@ -393,6 +393,35 @@ func TestEmbeddedDepAAddRejectionsAndBulk(t *testing.T) {
 			t.Fatalf("dependency_count = %d, want 1 — the edge must be stored", got)
 		}
 	})
+
+	t.Run("add_bulk_file_unresolved_warns", func(t *testing.T) {
+		// The --file route warns per unverified edge, prefixed by the input
+		// line it came from; resolved lines never warn. Both edges are still
+		// stored — the warning reports, it does not gate.
+		bua := bdCreate(t, bd, dir, "Bulk unresolved A", "--type", "task")
+		bub := bdCreate(t, bd, dir, "Bulk unresolved B", "--type", "task")
+		path := filepath.Join(t.TempDir(), "unresolved-deps.jsonl")
+		body := fmt.Sprintf("{\"from\":%q,\"to\":%q}\n{\"from\":%q,\"to\":\"zz-405\"}\n", bua.ID, bub.ID, bua.ID)
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatalf("write deps file: %v", err)
+		}
+
+		stdout, stderr := runDepSplit(t, bd, dir, "dep", "add", "--file", path)
+		if !strings.Contains(stdout, "Added 2 dependencies") {
+			t.Fatalf("stdout = %q, want the Added 2 dependencies summary", stdout)
+		}
+		if !strings.Contains(stderr, "line 2: ") ||
+			!strings.Contains(stderr, "zz-405 was not found") ||
+			!strings.Contains(stderr, "bd dep remove "+bua.ID+" zz-405") {
+			t.Fatalf("stderr = %q, want the unresolved-target warning prefixed line 2:", stderr)
+		}
+		if strings.Contains(stderr, "line 1:") {
+			t.Fatalf("stderr = %q, line 1 resolved and must not warn", stderr)
+		}
+		if got := depTargetCount(t, bd, dir, bua.ID); got != 2 {
+			t.Fatalf("dependency_count = %d, want 2 — both edges must be stored", got)
+		}
+	})
 }
 
 func TestEmbeddedDepBTreeAndCycles(t *testing.T) {

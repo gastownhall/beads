@@ -637,9 +637,15 @@ type bulkDepEdge struct {
 	// the command-line default (D1 guard: the implicit default is what the
 	// stderr warning targets; explicit per-line types are the user's choice).
 	Defaulted bool
-	Store     storage.DoltStorage
-	StoreKey  string
-	Cleanups  []func()
+	// Unverified is resolveUnresolvedDepTarget's outcome-3 flag: this target
+	// was accepted unresolved as a cross-repo reference, so once the write
+	// succeeds the after-the-write notice (warnUnresolvedDepTarget, prefixed
+	// with the input line) reports it — per unverified edge, unlike the
+	// once-per-invocation D1 warning below.
+	Unverified bool
+	Store      storage.DoltStorage
+	StoreKey   string
+	Cleanups   []func()
 }
 
 func addBulkDependencies(cmd *cobra.Command, file string, defaultType string) error {
@@ -706,6 +712,16 @@ func addBulkDependencies(cmd *cobra.Command, file string, defaultType string) er
 				warnImplicitBlocksDefault(edge.Type, false)
 				break
 			}
+		}
+	}
+
+	// The unresolved-target notice, per unverified edge and in input order:
+	// the edges are stored by now (the role's all-or-nothing write above),
+	// so nothing here announces an edge a later step could still cancel, and
+	// no break after the first — unlike the once-per-invocation D1 warning.
+	for _, edge := range resolved {
+		if edge.Unverified {
+			warnUnresolvedDepTarget(fmt.Sprintf("line %d: ", edge.Line), edge.IssueID, edge.DependsOnID)
 		}
 	}
 
@@ -841,7 +857,7 @@ func validateBulkDepEdges(ctx context.Context, edges []bulkDepEdge) ([]bulkDepEd
 				// --file used to carry its own copy of the cross-prefix ladder,
 				// which left the be-gmdx5 "type:id" shape accepted and stored
 				// here after the positional path started refusing it.
-				toID, _, err = resolveUnresolvedDepTarget(current.IssueID, edge.DependsOnID, err)
+				toID, current.Unverified, err = resolveUnresolvedDepTarget(current.IssueID, edge.DependsOnID, err)
 				if err != nil {
 					errs = append(errs, fmt.Sprintf("line %d: %v", edge.Line, err))
 					resolved = append(resolved, current)

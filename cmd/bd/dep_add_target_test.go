@@ -377,6 +377,13 @@ func (s *bulkDepStubStore) SearchIssues(_ context.Context, _ string, filter type
 	return nil, nil
 }
 
+// SearchIssueIDs is ResolvePartialID's narrow-projection twin of SearchIssues;
+// resolving an unresolvable bare target (xy-999) can reach it, and leaving it
+// to the nil embedded interface panics instead of answering "not found".
+func (s *bulkDepStubStore) SearchIssueIDs(_ context.Context, _ string, _ types.IssueFilter) ([]string, error) {
+	return nil, nil
+}
+
 func (s *bulkDepStubStore) GetIssue(_ context.Context, id string) (*types.Issue, error) {
 	if id == s.resolvableID {
 		return &types.Issue{ID: s.resolvableID}, nil
@@ -417,6 +424,40 @@ func TestValidateBulkDepEdgesRefusesDepsSpecTarget(t *testing.T) {
 	if !strings.Contains(err.Error(), "line 1:") ||
 		!strings.Contains(err.Error(), "bd dep add be-abc ga-dguvnb --type discovered-from") {
 		t.Errorf("bulk validation error = %q, want the per-line target refusal", err.Error())
+	}
+}
+
+// TestValidateBulkDepEdgesMarksUnverifiedTarget is the --file wiring pin for
+// the unverified report: validateBulkDepEdges passes the unresolved
+// cross-prefix target through resolveUnresolvedDepTarget (the be-gmdx5 call
+// site), and addBulkDependencies warns about an edge only when that helper
+// flagged it, so the flag must survive the round trip into bulkDepEdge.
+// Without it the bulk route would re-introduce the silent accept the
+// positional route just stopped having, mode-dependently.
+func TestValidateBulkDepEdgesMarksUnverifiedTarget(t *testing.T) {
+	oldStore := store
+	t.Cleanup(func() { store = oldStore })
+	store = &bulkDepStubStore{resolvableID: "be-abc"}
+
+	resolved, err := validateBulkDepEdges(context.Background(), []bulkDepEdge{
+		{Line: 1, IssueID: "be-abc", DependsOnID: "xy-999", Type: types.DepBlocks},
+		{Line: 2, IssueID: "be-abc", DependsOnID: "external:proj:cap", Type: types.DepBlocks},
+	})
+
+	if err != nil {
+		t.Fatalf("validateBulkDepEdges: unexpected error: %v", err)
+	}
+	if len(resolved) != 2 {
+		t.Fatalf("resolved = %d edges, want 2", len(resolved))
+	}
+	if !resolved[0].Unverified {
+		t.Errorf("unresolvable cross-prefix target xy-999: Unverified = false, want true — the bulk route's warning hangs off this flag")
+	}
+	if resolved[0].DependsOnID != "xy-999" {
+		t.Errorf("resolved[0].DependsOnID = %q, want the target stored verbatim", resolved[0].DependsOnID)
+	}
+	if resolved[1].Unverified {
+		t.Errorf("well-formed external ref external:proj:cap: Unverified = true, want false — it resolves later by design, not an unverified stored edge")
 	}
 }
 
