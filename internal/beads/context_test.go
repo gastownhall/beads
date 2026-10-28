@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -1396,4 +1398,218 @@ func TestRoleIgnoresInheritedGitRouting(t *testing.T) {
 			t.Errorf("redirected Role() = %q, %v", role, ok)
 		}
 	})
+}
+
+// ownHomeEnv is the fake account layout the GH#6323 (bd-pfe2c4) own-home
+// carve-out tests run against: a denied "system" prefix holding a service
+// account's home (the lib/svc tree), a peer service's directory, a sibling
+// whose name extends the home's last component, and the escape hatches each
+// guard must catch.
+type ownHomeEnv struct {
+	uid    int    // uid the carve-out acts as (a stand-in uid when run as root)
+	home   string // the account database's home, strictly inside denied
+	denied string // the fake denied prefix
+	base   string
+}
+
+// ownHomeFixture builds the tree above and installs the two package seams the
+// carve-out reads: unsafePrefixes gains the fake denied prefix (prepended, so
+// it is the first match — on macOS the suite's temp root also sits under
+// /private) and currentAccount answers as the fixture account. Both are
+// restored on cleanup, so no test using this fixture may call t.Parallel.
+func ownHomeFixture(t *testing.T) ownHomeEnv {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("own-home carve-out semantics need unix ownership and symlinks")
+	}
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve temp dir: %v", err)
+	}
+	if strings.HasPrefix(base, "/var/tmp/") || strings.HasPrefix(base, "/var/home/") {
+		t.Skipf("suite temp root %s sits under an existing carve-out; the fixture needs a denied prefix it owns", base)
+	}
+	// Keep os.TempDir() (it honors TMPDIR) from deciding the fixture's paths
+	// ahead of the deny loop: point it at a directory inside base that no
+	// fixture path lives under.
+	tmp := filepath.Join(base, "tmp")
+	if err := os.MkdirAll(tmp, 0o750); err != nil {
+		t.Fatalf("mkdir %s: %v", tmp, err)
+	}
+	t.Setenv("TMPDIR", tmp)
+
+	denied := filepath.Join(base, "sys")
+	home := filepath.Join(denied, "lib", "svc")
+	for _, d := range []string{
+		filepath.Join(home, "releases", "r1", ".beads"),
+		filepath.Join(denied, "lib", "other", ".beads"),
+		filepath.Join(denied, "lib", "svcXX", ".beads"),
+		filepath.Join(denied, "lib", "rootsvc"),
+	} {
+		if err := os.MkdirAll(d, 0o750); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(denied, "lib", "file"), []byte("regular file"), 0o600); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	// The release selector from the bug report: current -> releases/r1.
+	if err := os.Symlink("releases/r1", filepath.Join(home, "current")); err != nil {
+		t.Fatalf("symlink current: %v", err)
+	}
+	// A symlink inside the home whose target escapes it.
+	if err := os.Symlink("../other", filepath.Join(home, "escape")); err != nil {
+		t.Fatalf("symlink escape: %v", err)
+	}
+	// The home recorded through a symlink: svc-link -> svc.
+	if err := os.Symlink("svc", filepath.Join(denied, "lib", "svc-link")); err != nil {
+		t.Fatalf("symlink svc-link: %v", err)
+	}
+
+	uid := os.Getuid()
+	if uid == 0 {
+		// Running as root, every fixture path is root-owned, so the ownership
+		// guard would have no mismatch to catch. Hand the account-owned parts
+		// to a stand-in uid; rootsvc stays root-owned for the mismatch row.
+		if err := os.Chown(home, 4242, 4242); err != nil {
+			t.Skipf("cannot chown fixture home to a stand-in uid: %v", err)
+		}
+		uid = 4242
+	}
+
+	oldPrefixes := unsafePrefixes
+	unsafePrefixes = append([]string{denied}, oldPrefixes...)
+	t.Cleanup(func() { unsafePrefixes = oldPrefixes })
+
+	setAccount(t, uid, home, nil)
+
+	return ownHomeEnv{uid: uid, home: home, denied: denied, base: base}
+}
+
+// setAccount swaps the currentAccount seam for one test and restores it on
+// cleanup.
+func setAccount(t *testing.T, uid int, home string, err error) {
+	t.Helper()
+	old := currentAccount
+	currentAccount = func() (int, string, error) { return uid, home, err }
+	t.Cleanup(func() { currentAccount = old })
+}
+
+// TestIsPathInSafeBoundary_OwnHomeUnderDeniedPrefix pins the GH#6323
+// (bd-pfe2c4) fix, AC-1: a path inside the authenticated, non-root current
+// account's account-database home is admitted even though the home sits
+// strictly inside a SEC-003 denied prefix — the /var/lib/<service> layout a
+// Linux service account gets. The named, symlinked (staying inside),
+// not-yet-created, and resolved-spelling forms must all pass.
+func TestIsPathInSafeBoundary_OwnHomeUnderDeniedPrefix(t *testing.T) {
+	env := ownHomeFixture(t)
+
+	for _, tt := range []struct {
+		name string
+		path string
+	}{
+		{"the home itself", env.home},
+		{"inside the home", filepath.Join(env.home, "releases", "r1", ".beads")},
+		{"through the release selector symlink", filepath.Join(env.home, "current", ".beads")},
+		{"not yet created inside the home", filepath.Join(env.home, "notyet", ".beads")},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if !isPathInSafeBoundary(tt.path) {
+				t.Errorf("isPathInSafeBoundary(%q) = false, want true (inside the current account's own home %s under denied prefix %s)", tt.path, env.home, env.denied)
+			}
+		})
+	}
+
+	// The home recorded through a symlink, with the physical path checked: the
+	// carve-out must admit the resolved spelling of the home too.
+	t.Run("home recorded through a symlink", func(t *testing.T) {
+		setAccount(t, env.uid, filepath.Join(env.denied, "lib", "svc-link"), nil)
+		path := filepath.Join(env.home, "releases", "r1", ".beads")
+		if !isPathInSafeBoundary(path) {
+			t.Errorf("isPathInSafeBoundary(%q) = false, want true (physical path inside the symlink-recorded home)", path)
+		}
+	})
+}
+
+// TestGetRepoContextAllowingNoGit_BeadsDirInOwnHomeUnderDeniedPrefix pins the
+// reported GH#6323 symptom end to end, AC-1: BEADS_DIR pointing at a release
+// selector symlink inside the current account's own home under a denied prefix
+// must resolve instead of failing with "BEADS_DIR points to unsafe location".
+func TestGetRepoContextAllowingNoGit_BeadsDirInOwnHomeUnderDeniedPrefix(t *testing.T) {
+	env := ownHomeFixture(t)
+
+	// FindBeadsDir's BEADS_DIR step needs project files to accept the directory.
+	if err := os.WriteFile(filepath.Join(env.home, "releases", "r1", ".beads", "metadata.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatalf("write metadata.json: %v", err)
+	}
+
+	work := filepath.Join(env.base, "work")
+	if err := os.MkdirAll(work, 0o750); err != nil {
+		t.Fatalf("mkdir %s: %v", work, err)
+	}
+
+	origWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(origWD)
+		ResetCaches()
+		git.ResetCaches()
+	})
+	ResetCaches()
+	git.ResetCaches()
+	if err := os.Chdir(work); err != nil {
+		t.Fatalf("chdir %s: %v", work, err)
+	}
+
+	t.Setenv("BEADS_DIR", filepath.Join(env.home, "current", ".beads"))
+
+	rc, err := GetRepoContextAllowingNoGit()
+	if err != nil {
+		t.Fatalf("GetRepoContextAllowingNoGit failed for BEADS_DIR inside the account's own home under a denied prefix: %v", err)
+	}
+	want := filepath.Join(env.home, "releases", "r1", ".beads")
+	if rc.BeadsDir != want {
+		t.Errorf("BeadsDir = %q, want the canonicalized %q", rc.BeadsDir, want)
+	}
+}
+
+// TestIsPathInSafeBoundaryAdmitsOwnPasswdHome pins GH#6323 (bd-pfe2c4): a path
+// inside the authenticated, non-root current user's passwd home must be
+// admitted wherever that home lives, including conventional service-account
+// homes under /var/lib, while other /var/lib paths stay rejected.
+// repro-bd-pfe2c4.sh runs this for real against a service account whose passwd
+// home is /var/lib/flow-estate, which a host process cannot relocate.
+func TestIsPathInSafeBoundaryAdmitsOwnPasswdHome(t *testing.T) {
+	u, err := user.Current()
+	if err != nil || u.HomeDir == "" {
+		t.Skipf("no passwd home for the current user: %v", err)
+	}
+	if u.Uid == "0" {
+		t.Skip("root's home is deliberately rejected")
+	}
+	home := strings.TrimSuffix(u.HomeDir, "/")
+	t.Logf("current user %s (uid %s) passwd home %s", u.Username, u.Uid, home)
+
+	// The carve-out admits the account database's home only when that entry is
+	// real: an existing directory the account owns. A host whose passwd home is
+	// a placeholder (remote-exec service accounts homed under /var/lib with no
+	// directory) has nothing to admit; repro-bd-pfe2c4.sh creates the owned
+	// home in a container and runs this test against it.
+	uid, err := strconv.Atoi(u.Uid)
+	if err != nil {
+		t.Skipf("cannot parse uid %q: %v", u.Uid, err)
+	}
+	if !dirOwnedBy(home, uid) {
+		t.Skipf("passwd home %s is not an existing directory owned by uid %d; repro-bd-pfe2c4.sh runs this against a created home", home, uid)
+	}
+
+	beadsDir := filepath.Join(home, "releases", "r1", ".beads")
+	if !isPathInSafeBoundary(beadsDir) {
+		t.Errorf("isPathInSafeBoundary(%q) = false, want true (inside the current user's own passwd home %s)", beadsDir, home)
+	}
+	if other := "/var/lib/some-other-service/.beads"; isPathInSafeBoundary(other) {
+		t.Errorf("isPathInSafeBoundary(%q) = true, want false (another service's /var/lib home)", other)
+	}
 }
