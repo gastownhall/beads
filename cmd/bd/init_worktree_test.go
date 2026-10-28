@@ -10,10 +10,13 @@ import (
 	"github.com/steveyegge/beads/internal/git"
 )
 
-// These pin both halves of init's worktree resolution: the re-init preflight
-// counts the gate's workspace (GetWorktreeFallbackBeadsDir, the main
-// checkout's .beads, GH#5628), while discovery keeps FindBeadsDir's
-// worktree-local preference for everything else.
+// These pin the two resolvers behind init's worktree handling.
+// GetWorktreeFallbackBeadsDir, the main checkout's .beads, is the gate target
+// RunE computes when BEADS_DIR is unset, and so what the re-init preflight
+// counts there (GH#5628). FindBeadsDir keeps its worktree-local preference,
+// and that discovered .beads is what the root pre-run exports as BEADS_DIR
+// before RunE, so through the CLI a worktree with its own database counts
+// and replaces its own .beads.
 
 func TestGetWorktreeFallbackBeadsDir_MainRepoBeads(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "beads-worktree-init-test-*")
