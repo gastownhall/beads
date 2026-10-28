@@ -847,12 +847,14 @@ paths:
         depth-first pre-order, so a subtree is contiguous.
 
 
-        EVERY NODE APPEARS AT MOST ONCE PER WALK, at the depth and parent of the
-        first path that reached it. That single rule is both the cycle policy
-        and the diamond policy: a cycle TERMINATES rather than failing the call
-        or being reported (`GET /v0/beads/dependencies/cycles` is where a cycle
-        is an answer), and a shared subtree is shown under one parent only, with
-        no option to show it twice.
+        EVERY NODE IS EXPANDED AT MOST ONCE PER WALK, at the depth and parent of
+        the first path that reached it. A cycle TERMINATES rather than failing
+        the call or being reported (`GET /v0/beads/dependencies/cycles` is where
+        a cycle is an answer): the edge back into the current path adds no
+        element. A shared subtree is expanded under one parent only, with no
+        option to expand it twice, and every later parent's edge into it is a
+        stub element carrying `deduped: true`, so ids repeat; drop the stubs to
+        get each issue once.
 
 
         EDGES ARE WIDER THAN THEY ARE ON THE CYCLE REPORT. This walk follows
@@ -8642,9 +8644,9 @@ components:
           type: string
           description: >-
             The node this one was reached FROM, empty on the root. A node is
-            reached ONCE per walk, by the first path that got there, so a shared
-            child of two parents names only the first of them here and the
-            second has no visible edge to it.
+            expanded ONCE per walk, under the first path that got there; each
+            later parent of a shared child gets its own stub element (`deduped:
+            true`) naming that parent here.
         edge_from_parent:
           type: string
           description: >-
