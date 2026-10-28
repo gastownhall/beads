@@ -267,10 +267,20 @@ func (s *testSuite) TestParityReadyStaleEdgelessFlag() {
 	_, err := s.Runner().ExecContext(s.Ctx(), "UPDATE issues SET is_blocked = 1 WHERE id = ?", "bd-par-stl-a")
 	s.Require().NoError(err)
 
+	// The same position for a row whose only own dependency rows are a
+	// non-ready-affecting type: the recompute's union selects issue_id only
+	// over ready-affecting types, so a planted flag on such a row is stale
+	// and must be read around too, whatever its other edges say.
+	s.seedParityIssue("bd-par-stl-b", nil, false)
+	s.classicAddDep("bd-par-stl-b", "bd-par-stl-a", types.DepRelated)
+	_, err = s.Runner().ExecContext(s.Ctx(), "UPDATE issues SET is_blocked = 1 WHERE id = ?", "bd-par-stl-b")
+	s.Require().NoError(err)
+
 	classic := idsOf(s.classicReady(types.WorkFilter{}))
 	dom := idsOf(s.domainReady(types.WorkFilter{}).Items)
 	s.Equal(classic, dom, "ready with a stale edgeless flag: same id set from both stacks")
 	s.Contains(dom, "bd-par-stl-a", "a stale is_blocked=1 on an edgeless row must be listed, not hidden behind the flag")
+	s.Contains(dom, "bd-par-stl-b", "a stale is_blocked=1 on a row whose only edges are non-ready-affecting must be listed too")
 
 	// The counts paths render the same WHERE (SearchCountsSQL wraps it), so
 	// they must agree with the plain reads on both stacks.
@@ -282,6 +292,7 @@ func (s *testSuite) TestParityReadyStaleEdgelessFlag() {
 	s.Require().NoError(err)
 	s.Equal(idsOfCounts(classicCounts), idsOfCounts(domCounts.Items), "ready counts with a stale edgeless flag: same id set from both stacks")
 	s.Contains(idsOfCounts(domCounts.Items), "bd-par-stl-a")
+	s.Contains(idsOfCounts(domCounts.Items), "bd-par-stl-b")
 }
 
 // Case 4b: descendant expansion on blocking-edge insert (bd-6dnrw.44 item 3

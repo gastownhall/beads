@@ -622,6 +622,38 @@ func TestEmbeddedReadyStaleBlockedFlagOnEdgelessIssue(t *testing.T) {
 		}
 	})
 
+	t.Run("ready_lists_related_and_discovered_from_only_flagged_issues", func(t *testing.T) {
+		t.Parallel()
+		// Own project: the sibling subtests assert exact ready sets on theirs.
+		rdir, rbeadsDir, _ := bdInit(t, bd, "--prefix", "rds3")
+		target := bdCreate(t, bd, rdir, "Non-ready-affecting target", "--type", "task")
+		related := bdCreate(t, bd, rdir, "Related only flagged issue", "--type", "task", "--deps", "related:"+target.ID)
+		discovered := bdCreate(t, bd, rdir, "Discovered-from only flagged issue", "--type", "task", "--deps", "discovered-from:"+target.ID)
+		plantStaleBlockedFlag(t, rbeadsDir, "rds3", related.ID)
+		plantStaleBlockedFlag(t, rbeadsDir, "rds3", discovered.ID)
+
+		cmd := exec.Command(bd, "ready", "--json")
+		cmd.Dir = rdir
+		cmd.Env = bdEnv(rdir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err != nil {
+			t.Fatalf("bd ready --json failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+		}
+		var ready []*types.IssueWithCounts
+		if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &ready); err != nil {
+			t.Fatalf("parse ready JSON: %v\n%s", err, stdout.String())
+		}
+		got := map[string]bool{}
+		for _, r := range ready {
+			got[r.ID] = true
+		}
+		for _, id := range []string{target.ID, related.ID, discovered.ID} {
+			if !got[id] {
+				t.Errorf("ready --json must list %s (related/discovered-from edges do not block), got: %v", id, ready)
+			}
+		}
+	})
+
 	t.Run("blocked_and_dep_list_still_agree_with_the_report", func(t *testing.T) {
 		t.Parallel()
 		cmd := exec.Command(bd, "blocked", "--json")
