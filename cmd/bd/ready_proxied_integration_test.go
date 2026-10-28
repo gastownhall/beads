@@ -654,8 +654,8 @@ func TestProxiedServerReady2(t *testing.T) {
 
 		// A real blocking edge, not a planted flag: a stale is_blocked=1 on
 		// an edgeless row is listed by ready now (gh#3268). The blocker is
-		// in_progress so it is not itself ready work, and the empty state
-		// stays honest about what blocks the dependent.
+		// in_progress so it is not itself ready work, and when something IS
+		// blocked the existing claim line prints unchanged.
 		// The filtered-out issue has to stop being ready work for this
 		// scenario, or ready is not empty and no empty state prints at all.
 		if _, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "update", filtered.ID, "--status", "in_progress"); err != nil {
@@ -667,8 +667,8 @@ func TestProxiedServerReady2(t *testing.T) {
 		}
 		bdProxiedCreate(t, bd, p.dir, "Blocked open issue", "--deps", "depends-on:"+blocker.ID)
 		stdout, _ = bdProxiedReadyCapture(t, bd, p)
-		if !strings.Contains(stdout, "No ready work found") {
-			t.Errorf("expected 'No ready work found', got: %s", stdout)
+		if !strings.Contains(stdout, "No ready work found (all issues have blocking dependencies)") {
+			t.Errorf("something IS blocked, so the existing line must print unchanged, got: %s", stdout)
 		}
 	})
 

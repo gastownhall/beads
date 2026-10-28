@@ -751,4 +751,15 @@ func TestEmbeddedReadyEmptyState(t *testing.T) {
 		}
 	})
 
+	t.Run("blocked_claim_unchanged_when_something_is_blocked", func(t *testing.T) {
+		t.Parallel()
+		dir, _, _ := bdInit(t, bd, "--prefix", "rde7")
+		blocker := bdCreate(t, bd, dir, "In progress blocker", "--type", "task")
+		runBD(t, dir, "update", blocker.ID, "--status", "in_progress")
+		bdCreate(t, bd, dir, "Blocked dependent", "--type", "task", "--deps", "depends-on:"+blocker.ID)
+		out := readyOut(t, dir)
+		if !strings.Contains(out, "No ready work found (all issues have blocking dependencies)") {
+			t.Errorf("something IS blocked, so the existing line must print unchanged, got: %s", out)
+		}
+	})
 }
