@@ -334,6 +334,9 @@ func TestFederationSyncNotStompedByPeerLastSync(t *testing.T) {
 	if n := countPeerRow("peer-of-peer"); n != 1 {
 		t.Fatalf("Sync did not merge the peer's federation_peers row: %d row(s), want 1", n)
 	}
+	if !peerLastSyncSet(t, ctx, store) {
+		t.Fatal("Sync did not stamp federation_peers.last_sync for peer")
+	}
 }
 
 // TestFederationFetchDoesNotStampPeerLastSync pins where last_sync is
