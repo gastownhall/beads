@@ -464,3 +464,29 @@ func TestCreateIssue_ClosedLocalIssueLandsClosed(t *testing.T) {
 		t.Errorf("returned Warnings = %v, want none", got.Warnings)
 	}
 }
+
+// TestCreateIssue_NonClosedSkipsClose guards the follow-up close against
+// over-closing: only a closed bead gets the state PATCH after create.
+func TestCreateIssue_NonClosedSkipsClose(t *testing.T) {
+	for _, status := range []types.Status{types.StatusOpen, types.StatusInProgress, types.StatusBlocked, types.StatusDeferred} {
+		t.Run(string(status), func(t *testing.T) {
+			rec, tr := newCreateStateServer(t, http.StatusOK)
+			issue := &types.Issue{
+				ID: "bd-1", Title: "Still going", Description: "body",
+				IssueType: types.TypeTask, Priority: 2, Status: status,
+			}
+
+			got, err := tr.CreateIssue(context.Background(), issue)
+			if err != nil {
+				t.Fatalf("CreateIssue: %v", err)
+			}
+			want := []string{"POST /repos/o/r/issues"}
+			if !slices.Equal(rec.calls, want) {
+				t.Fatalf("requests = %v, want %v", rec.calls, want)
+			}
+			if got.State != "open" {
+				t.Errorf("returned State = %q, want %q", got.State, "open")
+			}
+		})
+	}
+}
