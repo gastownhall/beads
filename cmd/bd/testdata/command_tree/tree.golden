@@ -2077,10 +2077,15 @@ bd dolt remote reset-data
     |     data refs with it (through a Dolt sql-server it pushes the fresh store
     |     to a temporary ref first, so the remote keeps its data until the new
     |     store is complete, then restarts bd's own server, the shared server in
-    |     shared-server mode, so that it rereads the remote; the restart briefly
-    |     interrupts every database that server serves, and any other server must
-    |     be restarted before its next push or pull of the remote). Code branches
-    |     are untouched.
+    |     shared-server mode, so that it rereads the remote; like bd dolt stop,
+    |     the restart commits any uncommitted changes in every database that
+    |     server serves, and it briefly interrupts them. Any other server must be
+    |     restarted after the reset, before its next push or pull of the remote,
+    |     and so must bd's own while auto-start is off or, outside shared-server
+    |     mode, BEADS_DOLT_SERVER_MODE=1 or dolt_server_port declares it
+    |     externally managed: bd does not stop such a server, and exits non-zero
+    |     once the reset is done, so that nothing pushes or pulls through it
+    |     first). Code branches are untouched.
     |   - Native file remotes (file:// paths): clears the store directory, then
     |     force-pushes to rebuild it. Refused for a git repository, bare or a
     |     checkout, where Dolt keeps the store among the repository's own files:

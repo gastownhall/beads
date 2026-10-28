@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -133,10 +134,32 @@ func isBareGitRepoDir(dir string) bool {
 	return err == nil && fi.IsDir()
 }
 
-// resetDataGitURL converts a Dolt git-protocol remote URL to the form the
-// git CLI accepts (strip the git+ prefix).
-func resetDataGitURL(url string) string {
-	return strings.TrimPrefix(url, "git+")
+// resetDataGitURL converts a Dolt git-protocol remote URL to the URL the git
+// CLI takes, as Dolt does before it runs git (dbfactory
+// parseGitRemoteFactoryURL and gitRemoteURLString): it strips the git+
+// prefix, and turns the ssh://[user@]host/./path that Dolt stores for an
+// scp-style remote (git@github.com:org/repo.git) back into [user@]host:path,
+// since git takes /./path from the server's root, which a host such as
+// GitHub refuses. A URL that names a port keeps the ssh:// form: the scp
+// form has no place for one, so git would dial port 22 and take the port
+// for part of the path (Dolt's own reconstruction does that). A user or a
+// host that starts with "-" keeps the ssh:// form too, which git or ssh
+// refuses, so that git never gets an scp-style argument that starts with
+// "-", which it would read as an option.
+func resetDataGitURL(remoteURL string) string {
+	gitURL := strings.TrimPrefix(remoteURL, "git+")
+	u, err := url.Parse(gitURL)
+	if err != nil || !strings.EqualFold(u.Scheme, "ssh") || !strings.HasPrefix(u.Path, "/./") || u.Port() != "" {
+		return gitURL
+	}
+	if strings.HasPrefix(u.Hostname(), "-") || (u.User != nil && strings.HasPrefix(u.User.Username(), "-")) {
+		return gitURL
+	}
+	host := u.Host
+	if u.User != nil {
+		host = u.User.String() + "@" + host
+	}
+	return host + ":" + strings.TrimPrefix(u.Path, "/./")
 }
 
 // lsRemoteDoltDataRefs returns which of the Dolt data-plane refs currently
@@ -218,10 +241,15 @@ only live chunks:
     data refs with it (through a Dolt sql-server it pushes the fresh store
     to a temporary ref first, so the remote keeps its data until the new
     store is complete, then restarts bd's own server, the shared server in
-    shared-server mode, so that it rereads the remote; the restart briefly
-    interrupts every database that server serves, and any other server must
-    be restarted before its next push or pull of the remote). Code branches
-    are untouched.
+    shared-server mode, so that it rereads the remote; like bd dolt stop,
+    the restart commits any uncommitted changes in every database that
+    server serves, and it briefly interrupts them. Any other server must be
+    restarted after the reset, before its next push or pull of the remote,
+    and so must bd's own while auto-start is off or, outside shared-server
+    mode, BEADS_DOLT_SERVER_MODE=1 or dolt_server_port declares it
+    externally managed: bd does not stop such a server, and exits non-zero
+    once the reset is done, so that nothing pushes or pulls through it
+    first). Code branches are untouched.
   - Native file remotes (file:// paths): clears the store directory, then
     force-pushes to rebuild it. Refused for a git repository, bare or a
     checkout, where Dolt keeps the store among the repository's own files:
@@ -351,13 +379,13 @@ Examples:
 				return HandleError("%v", lerr)
 			}
 			if len(refs) == 0 {
-				fmt.Println("No Dolt data refs found on the remote (already reset?); pushing fresh store.")
+				resetDataProgressf("No Dolt data refs found on the remote (already reset?); pushing fresh store.\n")
 			} else {
 				if derr := deleteGitDoltDataRefs(ctx, gitURL, refs); derr != nil {
 					return HandleError("%v", derr)
 				}
 				deletedRefs = refs
-				fmt.Printf("Deleted %s on %s\n", strings.Join(refs, ", "), gitURL)
+				resetDataProgressf("Deleted %s on %s\n", strings.Join(refs, ", "), gitURL)
 			}
 		case resetDataFileStore:
 			path, _ := resetDataFilePath(url)
@@ -365,12 +393,12 @@ Examples:
 				return HandleError("%v", cerr)
 			}
 			clearedStore = true
-			fmt.Printf("Cleared remote store %s\n", path)
+			resetDataProgressf("Cleared remote store %s\n", path)
 		case resetDataFileAbsent:
-			fmt.Println("Remote store is empty or absent; pushing fresh store.")
+			resetDataProgressf("Remote store is empty or absent; pushing fresh store.\n")
 		}
 
-		fmt.Printf("Force-pushing to remote %q...\n", name)
+		resetDataProgressf("Force-pushing to remote %q...\n", name)
 		if perr := st.PushRemote(ctx, name, true); perr != nil {
 			remote, note := remedy.CommandArg(runtime.GOOS, name, "<remote>")
 			return HandleError("push after reset failed (the remote's data refs were already removed — re-run bd dolt push --force --remote %s%s once the cause is fixed): %v", remote, note, perr)
@@ -411,15 +439,20 @@ func (e *unknownMoveError) Unwrap() error { return e.err }
 // reportUnknownMove fails reset-data after a data-ref move whose outcome is
 // unknown. refresh is what refreshServerAfterReset did about the server, as
 // after a move that landed; the hint says what that did, or what is left to
-// do.
+// do, naming the setting under which bd did not restart its server, as the
+// report after a move that landed does.
 func reportUnknownMove(name string, err error, refresh *resetDataServerRefresh) error {
 	switch {
 	case refresh.restarted:
-		return HandleErrorWithHint(err.Error(), "bd restarted its Dolt server, so that it rereads the remote, whichever store the remote holds.")
+		hint := "bd restarted its Dolt server, so that it rereads the remote, whichever store the remote holds"
+		if w := refresh.warning(); w != "" {
+			hint += "; " + w
+		}
+		return HandleErrorWithHint(err.Error(), hint+".")
 	case refresh.restartErr != nil:
-		return HandleErrorWithHint(fmt.Sprintf("%v; restarting bd's Dolt server failed too: %v", err, refresh.restartErr), refresh.required+".")
+		return HandleErrorWithHint(fmt.Sprintf("%v; restarting %s failed too: %v", err, refresh.serverName(), refresh.restartErr), refresh.required+".")
 	}
-	return HandleErrorWithHint(err.Error(), fmt.Sprintf("restart the Dolt server before the next push or pull of remote %s: it may still hold its pre-reset view of the remote.", remedy.PrintedValue(name)))
+	return HandleErrorWithHint(err.Error(), fmt.Sprintf("restart the Dolt server before the next push or pull of remote %s: it may still hold its pre-reset view of the remote%s.", remedy.PrintedValue(name), refresh.declinedBecause()))
 }
 
 // resetDataServerRefresh is what a reset through a Dolt sql-server did about
@@ -427,14 +460,48 @@ func reportUnknownMove(name string, err error, refresh *resetDataServerRefresh) 
 // restart the server needs.
 type resetDataServerRefresh struct {
 	restarted bool
+	// shared is set when the server bd restarted, or tried to, is the shared
+	// server of shared-server mode, whose restart commits any uncommitted
+	// changes in every database it serves and interrupts them.
+	shared bool
 	// required is the server-restart notice, set when the server may still
 	// hold its pre-reset view of the remote, or a failed restart left it
-	// stopped.
+	// stopped. reset-data fails whenever it is set, also after a reset that
+	// replaced the data plane, so that a command run after it does not push
+	// or pull through a server in that state.
 	required string
-	// restartErr is why restarting bd's own server failed. The data plane
-	// was reset all the same, but reset-data then fails, so that a command
-	// run after it does not push or pull through a server in that state.
+	// declared is the setting that declares bd's server managed outside bd
+	// (externalServerDeclaration), set when bd did not restart the server
+	// because of it.
+	declared string
+	// restartErr is why restarting bd's own server failed.
 	restartErr error
+}
+
+// serverName names the server bd restarted, or tried to, in the report.
+func (r *resetDataServerRefresh) serverName() string {
+	if r.shared {
+		return "the shared Dolt server"
+	}
+	return "bd's Dolt server"
+}
+
+// warning is the report's warning: the restart the server needs, else, after
+// a restart of the shared server, what it did to the other databases.
+func (r *resetDataServerRefresh) warning() string {
+	if r.required == "" && r.restarted && r.shared {
+		return "the restart of the shared Dolt server committed any uncommitted changes in every database it serves, as bd dolt stop does, and briefly interrupted them"
+	}
+	return r.required
+}
+
+// declinedBecause is the clause of a restart notice that names the setting
+// under which bd did not restart its server, or "" when no setting did.
+func (r *resetDataServerRefresh) declinedBecause() string {
+	if r.declared == "" {
+		return ""
+	}
+	return "; bd does not restart it while " + r.declared
 }
 
 // restartDoltServer is doltserver.Restart, a variable so that a test can
@@ -451,9 +518,13 @@ var restartDoltServer = doltserver.Restart
 // up to date that the remote no longer has. Only a restart clears it. bd
 // restarts the server when it is the one bd manages for this workspace
 // (ManagedServerDir: the dialed port is the tracked server's), keeping its
-// port; any other server is the operator's to restart, which the report
-// says. A restart that fails is reported as the command's failure
-// (afterFailedRestart says what it left).
+// port, unless the operator declared it managed outside bd
+// (externalServerDeclaration); any other server is the operator's to
+// restart, which the command's failure says. In shared-server mode bd's
+// server is the shared one, and the report says that its restart committed
+// any uncommitted changes in every database it serves (doltserver's flush
+// before a stop) and interrupted them. A restart that fails is reported as
+// the command's failure too (afterFailedRestart says what it left).
 func refreshServerAfterReset(st storage.DoltStorage, remote string) *resetDataServerRefresh {
 	needed := fmt.Sprintf("restart the Dolt server before the next push or pull of remote %s: it still holds its pre-reset view of the remote", remedy.PrintedValue(remote))
 	m, ok := storage.UnwrapStore(st).(interface{ ManagedServerDir() (string, bool) })
@@ -464,31 +535,77 @@ func refreshServerAfterReset(st storage.DoltStorage, remote string) *resetDataSe
 	if !managed {
 		return &resetDataServerRefresh{required: needed}
 	}
-	if _, err := restartDoltServer(serverDir); err != nil {
-		return &resetDataServerRefresh{required: afterFailedRestart(serverDir, remote), restartErr: err}
+	if declared := externalServerDeclaration(serverDir); declared != "" {
+		refresh := &resetDataServerRefresh{declared: declared}
+		refresh.required = needed + refresh.declinedBecause()
+		return refresh
 	}
-	return &resetDataServerRefresh{restarted: true}
+	refresh := &resetDataServerRefresh{shared: doltserver.IsSharedServerMode()}
+	if _, err := restartDoltServer(serverDir); err != nil {
+		refresh.required, refresh.restartErr = afterFailedRestart(serverDir, remote, refresh.serverName()), err
+		return refresh
+	}
+	refresh.restarted = true
+	return refresh
 }
 
-// afterFailedRestart says what to do about bd's server, whose state files are
-// in serverDir, once doltserver.Restart has failed. Restart stops the server
-// before it starts it, so a failure leaves it stopped unless the stop itself
-// failed, and only a server bd sees stopped is known to hold no pre-reset
-// view of the remote: starting it reads the remote afresh.
-func afterFailedRestart(serverDir, remote string) string {
-	if state, err := doltserver.IsRunning(serverDir); err == nil && !state.Running {
-		return "bd's Dolt server is stopped; start it with `bd dolt start`"
+// externalServerDeclaration says which setting declares the Dolt server
+// whose state files are in serverDir managed outside bd, or "" when none
+// does. ManagedServerDir's proof cannot tell bd's own server from a server
+// bd adopted, such as one systemd runs over the workspace's data
+// (doltserver.ManagesLiveServerOnPort, #6123), so bd restarts it only when
+// no setting declares it managed outside bd, the settings that also keep bd
+// from killing a server (killStaleServersForDir): auto-start is off
+// (doltserver.IsAutoStartDisabled), or the workspace's server mode is not
+// owned (doltserver.ResolveServerModeIgnoringPortEnv, given serverDir, which
+// is the workspace's .beads directory outside shared-server mode). An
+// ambient port variable declares nothing (GH#6169). Shared-server mode,
+// which ResolveServerModeIgnoringPortEnv also reports as not owned, is no
+// declaration either: bd starts the shared server itself (bd init, bd dolt
+// start), so only auto-start off leaves it to the operator.
+func externalServerDeclaration(serverDir string) string {
+	if doltserver.IsAutoStartDisabled() {
+		return "auto-start is off (dolt.auto-start or BEADS_DOLT_AUTO_START)"
 	}
-	return fmt.Sprintf("restart bd's Dolt server (bd dolt stop, then bd dolt start) before the next push or pull of remote %s: it may still hold its pre-reset view of the remote", remedy.PrintedValue(remote))
+	if !doltserver.IsSharedServerMode() && doltserver.ResolveServerModeIgnoringPortEnv(serverDir) != doltserver.ServerModeOwned {
+		return "the workspace declares its server externally managed (such as with BEADS_DOLT_SERVER_MODE=1 or dolt_server_port in metadata.json)"
+	}
+	return ""
+}
+
+// afterFailedRestart says what to do about bd's server, named server in the
+// report and whose state files are in serverDir, once doltserver.Restart has
+// failed. Restart stops the server before it starts it, so a failure leaves
+// it stopped unless the stop itself failed, and only a server bd sees
+// stopped is known to hold no pre-reset view of the remote: starting it
+// reads the remote afresh.
+func afterFailedRestart(serverDir, remote, server string) string {
+	if state, err := doltserver.IsRunning(serverDir); err == nil && !state.Running {
+		return server + " is stopped; start it with `bd dolt start`"
+	}
+	return fmt.Sprintf("restart %s (bd dolt stop, then bd dolt start) before the next push or pull of remote %s: it may still hold its pre-reset view of the remote", server, remedy.PrintedValue(remote))
+}
+
+// resetDataProgressf prints a reset-data progress line, except under --json,
+// whose stdout is the one JSON report.
+func resetDataProgressf(format string, args ...interface{}) {
+	if !jsonOutput {
+		fmt.Printf(format, args...)
+	}
 }
 
 // reportResetData prints reset-data's success report. refresh is nil for a
 // reset that ran no push through a Dolt sql-server's temporary remote. When
-// restarting bd's server failed, the report still says the data plane was
-// reset, and the command then fails with the restart's error and what to do
-// about the server (--json: server_restart_error).
+// the server may still hold its pre-reset view of the remote, because bd did
+// not restart it or restarting it failed, the report still says the data
+// plane was reset, and the command then fails with what to do about the
+// server (--json: server_restart_required, and server_restart_error for a
+// failed restart), so that a command run after it does not push or pull
+// through that server. A server bd did not restart gets the hint not to run
+// reset-data again: the reset is done, and a re-run would end the same way.
 func reportResetData(name, url string, deletedRefs []string, clearedStore bool, refresh *resetDataServerRefresh) error {
 	failedRestart := refresh != nil && refresh.restartErr != nil
+	restartNeeded := refresh != nil && refresh.required != ""
 	if jsonOutput {
 		out := map[string]interface{}{
 			"remote":        name,
@@ -500,8 +617,8 @@ func reportResetData(name, url string, deletedRefs []string, clearedStore bool, 
 		if refresh != nil {
 			out["server_restarted"] = refresh.restarted
 			out["server_restart_required"] = refresh.required != ""
-			if refresh.required != "" {
-				out["warning"] = refresh.required
+			if w := refresh.warning(); w != "" {
+				out["warning"] = w
 			}
 			if failedRestart {
 				out["server_restart_error"] = refresh.restartErr.Error()
@@ -513,17 +630,20 @@ func reportResetData(name, url string, deletedRefs []string, clearedStore bool, 
 	} else {
 		fmt.Printf("✓ Remote %q data plane reset; store rebuilt from HEAD.\n", name)
 		if refresh != nil && refresh.restarted {
-			fmt.Println("  Restarted bd's Dolt server so that it rereads the remote.")
+			fmt.Printf("  Restarted %s so that it rereads the remote.\n", refresh.serverName())
 		}
-		if refresh != nil && refresh.required != "" && !failedRestart {
-			fmt.Printf("  Warning: %s.\n", refresh.required)
+		if refresh != nil && refresh.warning() != "" && !restartNeeded {
+			fmt.Printf("  Warning: %s.\n", refresh.warning())
 		}
 		fmt.Println("  Other clones of this database must re-clone from the remote.")
 	}
-	if !failedRestart {
+	switch {
+	case !restartNeeded:
 		return nil
+	case failedRestart:
+		return HandleErrorWithHint(fmt.Sprintf("restarting %s after the reset failed: %v", refresh.serverName(), refresh.restartErr), refresh.required+".")
 	}
-	return HandleErrorWithHint(fmt.Sprintf("restarting bd's Dolt server after the reset failed: %v", refresh.restartErr), refresh.required+".")
+	return HandleErrorWithHint("bd did not restart the Dolt server after the reset", refresh.required+". The reset is done: do not run reset-data again.")
 }
 
 // resetGitBackedThroughServer rebuilds a git-backed remote's Dolt data plane
@@ -590,7 +710,7 @@ func resetGitBackedThroughServer(ctx context.Context, st storage.DoltStorage, na
 		}
 		return fmt.Errorf("%w; %s", failure, leftover(cerr))
 	}
-	fmt.Printf("Pushing a fresh store to %s on %s...\n", tmpRef, gitURL)
+	resetDataProgressf("Pushing a fresh store to %s on %s...\n", tmpRef, gitURL)
 	if err := st.PushRemote(ctx, tmpName, true); err != nil {
 		return nil, failWith(fmt.Errorf("pushing a fresh store failed; the remote's Dolt data is unchanged (re-run %s once the cause is fixed): %w", rerun, err))
 	}
@@ -619,7 +739,7 @@ func resetGitBackedThroughServer(ctx context.Context, st storage.DoltStorage, na
 	if err := deleteTempGitRef(cleanupCtx, gitURL, tmpRef); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: %s\n", leftover(err))
 	}
-	fmt.Printf("Replaced %s on %s with the fresh store\n", dataRef, gitURL)
+	resetDataProgressf("Replaced %s on %s with the fresh store\n", dataRef, gitURL)
 	if before == "" {
 		return nil, nil
 	}

@@ -105,7 +105,8 @@ direction). The exception ends once the Dolt driver can report whether a
 directory is served, and covers no other lock (the test-only
 `testutil.HoldDoltDatabaseLock` is outside it). The same proof also reads
 Dolt's `.dolt/sql-server.info` for the port and PID it names, as the dolt CLI
-does, the way bd already reads `repo_state.json`. `bd doctor` support for
+does, the way bd already reads the remotes in Dolt's repo state file
+(`PersistedRemoteInfos`). `bd doctor` support for
 embedded mode is enabled one subcommand at a time, each human-vetted
 (GH#3794): do not lift the embedded-mode gate in
 `cmd/bd/doctor.go` wholesale, and keep database-layer checks and fixes

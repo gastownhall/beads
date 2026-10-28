@@ -147,6 +147,15 @@ func TestClassifyResetDataRemote(t *testing.T) {
 	}
 }
 
+// TestResetDataGitURL pins the URL reset-data gives git for a remote as Dolt
+// stored it. Dolt stores an scp-style remote (git@github.com:org/repo.git)
+// as git+ssh://git@github.com/./org/repo.git, and git takes the ssh:// form
+// of that from the server's root, which GitHub refuses, so it gets the
+// scp-style form back, as Dolt itself gives git. A URL that names a port
+// keeps the ssh:// form, since the scp-style form has no place for a port. A
+// user or a host starting with "-" keeps the ssh:// form, which git or ssh
+// refuses, so that git never gets an scp-style argument starting with "-",
+// which would be an option.
 func TestResetDataGitURL(t *testing.T) {
 	tests := []struct {
 		url  string
@@ -154,6 +163,12 @@ func TestResetDataGitURL(t *testing.T) {
 	}{
 		{"git+https://github.com/org/repo.git", "https://github.com/org/repo.git"},
 		{"git+ssh://git@github.com/org/repo.git", "ssh://git@github.com/org/repo.git"},
+		{"git+ssh://git@github.com/./org/repo.git", "git@github.com:org/repo.git"},
+		{"git+ssh://example.com/./repo.git", "example.com:repo.git"},
+		{"git+ssh://git@example.com:2222/./repo.git", "ssh://git@example.com:2222/./repo.git"},
+		{"git+ssh://-oProxyCommand=x@example.com/./repo.git", "ssh://-oProxyCommand=x@example.com/./repo.git"},
+		{"git+ssh://-example.com/./repo.git", "ssh://-example.com/./repo.git"},
+		{"git+ssh://git@-example.com/./repo.git", "ssh://git@-example.com/./repo.git"},
 		{"git+file:///tmp/remote.git", "file:///tmp/remote.git"},
 		{"git@github.com:org/repo.git", "git@github.com:org/repo.git"},
 	}
@@ -316,11 +331,16 @@ func (*unmanagedResetDataServerStore) ManagedServerDir() (string, bool) { return
 // TestResetThroughServerAsksForTheRestartBdDoesNotDo pins the report of a
 // reset through a Dolt server bd does not restart: one that is not the server
 // bd manages for the workspace, or one behind a store that cannot say. That
-// server still holds its pre-reset view of the remote, so the text report
-// warns to restart it before the next push or pull of the remote, and --json
-// sets server_restart_required with that warning, not server_restarted.
+// server still holds its pre-reset view of the remote, so reset-data reports
+// the reset and then fails, so that a command run after it does not push or
+// pull through that server: the hint says to restart the server before the
+// next push or pull of the remote, and not to run reset-data again, since
+// the reset is done. --json sets server_restart_required with that notice as
+// the warning, not server_restarted, and prints the error on stderr, so that
+// stdout stays the one JSON report.
 func TestResetThroughServerAsksForTheRestartBdDoesNotDo(t *testing.T) {
 	const url = "git+ssh://git@example.com/org/repo.git"
+	const notice = "restart the Dolt server before the next push or pull of remote origin: it still holds its pre-reset view of the remote"
 	t.Setenv("BD_JSON_ENVELOPE", "")
 	oldJSON := jsonOutput
 	t.Cleanup(func() { jsonOutput = oldJSON })
@@ -333,30 +353,49 @@ func TestResetThroughServerAsksForTheRestartBdDoesNotDo(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			refresh := refreshServerAfterReset(tc.st, "origin")
-			report := func() error {
-				return reportResetData("origin", url, []string{"refs/dolt/data"}, false, refresh)
+			var reportErr error
+			report := func() {
+				reportErr = reportResetData("origin", url, []string{"refs/dolt/data"}, false, refresh)
 			}
 
 			jsonOutput = false
-			text := captureStdout(t, report)
-			if want := "Warning: restart the Dolt server before the next push or pull of remote origin"; !strings.Contains(text, want) {
-				t.Errorf("text report lacks %q:\n%s", want, text)
+			stdout, stderr := captureStdio(t, report)
+			if reportErr == nil {
+				t.Error("reset-data exits 0 although the Dolt server still holds its pre-reset view of the remote")
 			}
-			if strings.Contains(text, "Restarted bd's Dolt server") {
-				t.Errorf("text report claims a restart bd did not do:\n%s", text)
+			if want := `✓ Remote "origin" data plane reset`; !strings.Contains(stdout, want) {
+				t.Errorf("text report lacks %q:\n%s", want, stdout)
+			}
+			for _, want := range []string{"Error: bd did not restart the Dolt server after the reset\n", "Hint: " + notice + ". The reset is done: do not run reset-data again.\n"} {
+				if !strings.Contains(stderr, want) {
+					t.Errorf("stderr lacks %q:\n%s", want, stderr)
+				}
+			}
+			if all := stdout + stderr; strings.Contains(all, "Restarted bd's Dolt server") {
+				t.Errorf("report claims a restart bd did not do:\n%s", all)
 			}
 
 			jsonOutput = true
-			raw := captureStdout(t, report)
+			stdout, stderr = captureStdio(t, report)
+			if reportErr == nil {
+				t.Error("reset-data --json exits 0 although the Dolt server still holds its pre-reset view of the remote")
+			}
 			var got map[string]interface{}
-			if err := json.Unmarshal([]byte(raw), &got); err != nil {
-				t.Fatalf("--json report is not one JSON object: %v\n%s", err, raw)
+			if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+				t.Fatalf("--json report is not one JSON object: %v\n%s", err, stdout)
 			}
 			if got["server_restarted"] != false || got["server_restart_required"] != true {
 				t.Errorf("server_restarted = %v, server_restart_required = %v, want false and true", got["server_restarted"], got["server_restart_required"])
 			}
-			if w, _ := got["warning"].(string); !strings.Contains(w, "restart the Dolt server before the next push or pull of remote origin") {
-				t.Errorf("warning = %q, want the restart notice naming remote origin", w)
+			if got["warning"] != notice {
+				t.Errorf("warning = %v, want %q", got["warning"], notice)
+			}
+			var failure map[string]interface{}
+			if err := json.Unmarshal([]byte(stderr), &failure); err != nil {
+				t.Fatalf("--json stderr is not one JSON error: %v\n%s", err, stderr)
+			}
+			if h, _ := failure["hint"].(string); !strings.Contains(h, "do not run reset-data again") {
+				t.Errorf("--json error hint = %q, want it to say not to run reset-data again", h)
 			}
 		})
 	}
@@ -383,6 +422,7 @@ func (m *managedResetDataServerStore) ManagedServerDir() (string, bool) { return
 func TestResetThroughServerFailsWhenBdsServerDoesNotRestart(t *testing.T) {
 	const url = "git+ssh://git@example.com/org/repo.git"
 	t.Setenv("BD_JSON_ENVELOPE", "")
+	clearServerOwnershipEnv(t)
 	oldJSON := jsonOutput
 	t.Cleanup(func() { jsonOutput = oldJSON })
 	oldRestart := restartDoltServer
@@ -446,6 +486,142 @@ func TestResetThroughServerFailsWhenBdsServerDoesNotRestart(t *testing.T) {
 			}
 			if got["warning"] != tc.want {
 				t.Errorf("warning = %v, want %q", got["warning"], tc.want)
+			}
+		})
+	}
+}
+
+// clearServerOwnershipEnv clears the variables that select shared-server
+// mode or declare a workspace's Dolt server managed outside bd
+// (externalServerDeclaration), so that the environment a test runs in does
+// not decide whether reset-data restarts bd's server.
+func clearServerOwnershipEnv(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{"BEADS_DOLT_AUTO_START", "BEADS_DOLT_SERVER_MODE", "BEADS_DOLT_SHARED_SERVER", "BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_PORT"} {
+		t.Setenv(name, "")
+	}
+}
+
+// TestResetThroughServerRestartsOnlyAServerBdMayStop pins which server a
+// reset through bd's own Dolt server restarts. ManagedServerDir also proves
+// a server bd adopted, such as one systemd runs over the workspace's data,
+// so bd restarts the server only when no setting declares it managed
+// outside bd: auto-start off, BEADS_DOLT_SERVER_MODE=1, or dolt_server_port
+// in metadata.json. For such a server reset-data fails after the report, as
+// for a server bd does not manage, asking for the restart and naming the
+// setting. A port variable set to route bd's connections declares nothing
+// (GH#6169). In shared-server mode bd restarts the shared server, which it
+// starts itself, unless auto-start is off, and the report says that the
+// restart committed any uncommitted changes in every database the server
+// serves and interrupted them.
+func TestResetThroughServerRestartsOnlyAServerBdMayStop(t *testing.T) {
+	const url = "git+ssh://git@example.com/org/repo.git"
+	t.Setenv("BD_JSON_ENVELOPE", "")
+	clearServerOwnershipEnv(t)
+	oldJSON, oldRestart := jsonOutput, restartDoltServer
+	t.Cleanup(func() { jsonOutput, restartDoltServer = oldJSON, oldRestart })
+
+	const declined = "restart the Dolt server before the next push or pull of remote origin: it still holds its pre-reset view of the remote; bd does not restart it while "
+	const autoStartOff = declined + "auto-start is off (dolt.auto-start or BEADS_DOLT_AUTO_START)"
+	const declaredExternal = declined + "the workspace declares its server externally managed (such as with BEADS_DOLT_SERVER_MODE=1 or dolt_server_port in metadata.json)"
+	const shared = "the restart of the shared Dolt server committed any uncommitted changes in every database it serves, as bd dolt stop does, and briefly interrupted them"
+	for _, tc := range []struct {
+		name     string
+		settings func(t *testing.T, dir string)
+		// restarted names the server the report says bd restarted, or is
+		// "" for no restart; warning is the report's whole warning.
+		restarted string
+		warning   string
+	}{
+		{name: "bd's own server", settings: func(*testing.T, string) {}, restarted: "bd's Dolt server"},
+		{name: "a port variable routing bd's connections", settings: func(t *testing.T, _ string) {
+			t.Setenv("BEADS_DOLT_SERVER_PORT", "54329")
+		}, restarted: "bd's Dolt server"},
+		{name: "the shared server", settings: func(t *testing.T, _ string) {
+			t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+		}, restarted: "the shared Dolt server", warning: shared},
+		{name: "auto-start off", settings: func(t *testing.T, _ string) {
+			t.Setenv("BEADS_DOLT_AUTO_START", "0")
+		}, warning: autoStartOff},
+		{name: "the shared server with auto-start off", settings: func(t *testing.T, _ string) {
+			t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+			t.Setenv("BEADS_DOLT_AUTO_START", "0")
+		}, warning: autoStartOff},
+		{name: "BEADS_DOLT_SERVER_MODE=1", settings: func(t *testing.T, _ string) {
+			t.Setenv("BEADS_DOLT_SERVER_MODE", "1")
+		}, warning: declaredExternal},
+		{name: "dolt_server_port in metadata.json", settings: func(t *testing.T, dir string) {
+			if err := os.WriteFile(filepath.Join(dir, "metadata.json"), []byte(`{"backend":"dolt","dolt_mode":"server","dolt_server_port":3307}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, warning: declaredExternal},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			tc.settings(t, dir)
+			var restarted []string
+			restartDoltServer = func(serverDir string) (*doltserver.State, error) {
+				restarted = append(restarted, serverDir)
+				return &doltserver.State{Running: true}, nil
+			}
+			refresh := refreshServerAfterReset(&managedResetDataServerStore{dir: dir}, "origin")
+			wantRestart := tc.restarted != ""
+			if (len(restarted) > 0) != wantRestart || (wantRestart && !slices.Equal(restarted, []string{dir})) {
+				t.Fatalf("bd restarted the servers in %v, want a restart of the one in %s: %t", restarted, dir, wantRestart)
+			}
+			var reportErr error
+			report := func() {
+				reportErr = reportResetData("origin", url, []string{"refs/dolt/data"}, false, refresh)
+			}
+
+			jsonOutput = false
+			stdout, stderr := captureStdio(t, report)
+			if (reportErr != nil) == wantRestart {
+				t.Errorf("reset-data err = %v, want an error: %t", reportErr, !wantRestart)
+			}
+			// After a restart the warning is the report's; without one, the
+			// command fails, and the restart it asks for is the hint.
+			var wantStdout, wantStderr []string
+			if wantRestart {
+				wantStdout = append(wantStdout, "  Restarted "+tc.restarted+" so that it rereads the remote.\n")
+				if tc.warning != "" {
+					wantStdout = append(wantStdout, "  Warning: "+tc.warning+".\n")
+				}
+			} else {
+				wantStderr = append(wantStderr, "Error: bd did not restart the Dolt server after the reset\n", "Hint: "+tc.warning+". The reset is done: do not run reset-data again.\n")
+			}
+			for _, want := range wantStdout {
+				if !strings.Contains(stdout, want) {
+					t.Errorf("text report lacks %q:\n%s", want, stdout)
+				}
+			}
+			for _, want := range wantStderr {
+				if !strings.Contains(stderr, want) {
+					t.Errorf("stderr lacks %q:\n%s", want, stderr)
+				}
+			}
+			all := stdout + stderr
+			if !wantRestart && strings.Contains(all, "Restarted") {
+				t.Errorf("report claims a restart bd did not do:\n%s", all)
+			}
+			if tc.warning == "" && strings.Contains(all, "Warning") {
+				t.Errorf("report warns after a restart of bd's own server:\n%s", all)
+			}
+
+			jsonOutput = true
+			stdout, _ = captureStdio(t, report)
+			if (reportErr != nil) == wantRestart {
+				t.Errorf("reset-data --json err = %v, want an error: %t", reportErr, !wantRestart)
+			}
+			var got map[string]interface{}
+			if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+				t.Fatalf("--json report is not one JSON object: %v\n%s", err, stdout)
+			}
+			if got["server_restarted"] != wantRestart || got["server_restart_required"] != !wantRestart {
+				t.Errorf("server_restarted = %v, server_restart_required = %v, want %t and %t", got["server_restarted"], got["server_restart_required"], wantRestart, !wantRestart)
+			}
+			if w, _ := got["warning"].(string); w != tc.warning {
+				t.Errorf("warning = %q, want %q", w, tc.warning)
 			}
 		})
 	}
@@ -591,6 +767,52 @@ func TestResetThroughServerReplacesTheDataRef(t *testing.T) {
 	})
 }
 
+// TestResetThroughServerJSONIsOneDocument pins the stdout of reset-data
+// --json through a Dolt server: the JSON report alone, without the progress
+// lines the text report prints before it, so that an agent can read
+// server_restart_required and the warning from it. Through a server bd does
+// not manage, the command then fails, and the error goes to stderr.
+func TestResetThroughServerJSONIsOneDocument(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	run := func(t *testing.T, dir string, args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	t.Setenv("BD_JSON_ENVELOPE", "")
+	oldJSON := jsonOutput
+	t.Cleanup(func() { jsonOutput = oldJSON })
+	jsonOutput = true
+	remote, work := resetDataTestRemote(t, run, nil)
+	st := &fakeResetDataServerStore{push: func(name string) error {
+		run(t, work, "-c", "user.name=t", "-c", "user.email=t@e", "commit", "-q", "--allow-empty", "-m", "fresh")
+		run(t, work, "push", "-q", remote, "HEAD:refs/dolt/"+name)
+		return nil
+	}}
+
+	var err error
+	stdout, stderr := captureStdio(t, func() {
+		err = resetDataThroughServer(context.Background(), st, "origin", "git+file://"+remote, "")
+	})
+	if !isReportedExit(err) {
+		t.Fatalf("reset-data --json through a server bd does not manage: err = %v, want the reported failure that asks for the restart\n%s", err, stderr)
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+		t.Fatalf("--json stdout is not one JSON object: %v\n%s", err, stdout)
+	}
+	if got["server_restart_required"] != true {
+		t.Errorf("server_restart_required = %v, want true for a server bd does not manage", got["server_restart_required"])
+	}
+}
+
 // TestResetThroughServerReadsTheDataRefBackAfterAFailedMove pins the server
 // route of reset-data when git reports that moving the data ref failed. git
 // can fail a push the remote applied (Ctrl-C, or a connection lost after the
@@ -601,7 +823,8 @@ func TestResetThroughServerReplacesTheDataRef(t *testing.T) {
 // client changed the ref after reset-data read it. A data ref that cannot be
 // read back leaves the outcome unknown: the command fails without calling the
 // data unchanged, and still restarts bd's server, or asks for the restart of
-// a server bd does not manage.
+// a server bd does not manage, or of bd's own while a setting declares it
+// managed outside bd, naming that setting.
 func TestResetThroughServerReadsTheDataRefBackAfterAFailedMove(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not on PATH")
@@ -621,6 +844,7 @@ func TestResetThroughServerReadsTheDataRefBackAfterAFailedMove(t *testing.T) {
 		run(t, work, "-c", "user.name=t", "-c", "user.email=t@e", "commit", "-q", "--allow-empty", "-m", msg)
 		return run(t, work, "rev-parse", "HEAD")
 	}
+	clearServerOwnershipEnv(t)
 	oldJSON, oldRestart, oldMove := jsonOutput, restartDoltServer, moveDataRef
 	t.Cleanup(func() { jsonOutput, restartDoltServer, moveDataRef = oldJSON, oldRestart, oldMove })
 	jsonOutput = false
@@ -639,10 +863,12 @@ func TestResetThroughServerReadsTheDataRefBackAfterAFailedMove(t *testing.T) {
 	)
 	const unknown = "whether the remote holds the fresh store is unknown"
 	for _, tc := range []struct {
-		name       string
-		move       int
-		unmanaged  bool
-		restartErr error
+		name      string
+		move      int
+		unmanaged bool
+		// autoStartOff declares bd's server managed outside bd.
+		autoStartOff bool
+		restartErr   error
 		// wantRef names the commit the data ref ends at: the fresh
 		// store's, the one reset-data read first, or another client's.
 		wantRef     string
@@ -676,6 +902,11 @@ func TestResetThroughServerReadsTheDataRefBackAfterAFailedMove(t *testing.T) {
 			want: []string{unknown, "Hint: restart the Dolt server before the next push or pull of remote origin: it may still hold its pre-reset view of the remote."},
 		},
 		{
+			name: "an unknown outcome names the setting under which bd does not restart its server", move: lost, autoStartOff: true,
+			wantRef: "fresh", wantErr: true,
+			want: []string{unknown, "Hint: restart the Dolt server before the next push or pull of remote origin: it may still hold its pre-reset view of the remote; bd does not restart it while auto-start is off (dolt.auto-start or BEADS_DOLT_AUTO_START)."},
+		},
+		{
 			name: "an unknown outcome names a restart that failed", move: lost, restartErr: restartErr,
 			wantRef: "fresh", wantErr: true, wantRestart: true,
 			want: []string{unknown, "restarting bd's Dolt server failed too: " + restartErr.Error(), "Hint: bd's Dolt server is stopped; start it with `bd dolt start`."},
@@ -692,6 +923,9 @@ func TestResetThroughServerReadsTheDataRefBackAfterAFailedMove(t *testing.T) {
 			var st storage.DoltStorage = &managedResetDataServerStore{fakeResetDataServerStore: fake, dir: t.TempDir()}
 			if tc.unmanaged {
 				st = &unmanagedResetDataServerStore{fakeResetDataServerStore: fake}
+			}
+			if tc.autoStartOff {
+				t.Setenv("BEADS_DOLT_AUTO_START", "0")
 			}
 			restarts := 0
 			restartDoltServer = func(string) (*doltserver.State, error) {

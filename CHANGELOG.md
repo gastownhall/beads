@@ -1125,15 +1125,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   remote after the move (a later push through it could write a manifest
   naming table files the remote does not hold, or report a branch as up to
   date that the remote lacks), so reset-data then restarts bd's own server
-  on the same port (in shared-server mode, the shared server); the restart
-  briefly interrupts every database that server serves. If that restart
-  fails, reset-data reports the reset and then exits non-zero with the
-  cause, saying to start the server with `bd dolt start` when bd sees it
-  stopped and to restart it otherwise, and the `--json` output adds
+  on the same port (in shared-server mode, the shared server); like
+  `bd dolt stop`, the restart commits any uncommitted changes in every
+  database that server serves and briefly interrupts them, which, for the
+  shared server, the report and the `--json` output's `warning` say. If
+  that restart fails, reset-data reports the reset and then exits non-zero
+  with the cause, saying to start the server with `bd dolt start` when bd
+  sees it stopped and to restart it otherwise, and the `--json` output adds
   `server_restart_error`. For a server bd does not run, or bd's own where
-  the process list cannot be read (GH#7214), it prints a warning, and the
-  `--json` output sets `server_restart_required`, saying to restart that
-  server before the next push or pull of the remote. git can report a failed
+  the process list cannot be read (GH#7214), it reports the reset and then
+  exits non-zero, so that nothing pushes or pulls through that server
+  first, saying to restart it before the next push or pull of the remote
+  and not to run reset-data again, and the `--json` output sets
+  `server_restart_required`. It does the same for bd's own server while
+  auto-start is off (`dolt.auto-start: false`, `BEADS_DOLT_AUTO_START=0`)
+  or, outside shared-server mode, while `BEADS_DOLT_SERVER_MODE=1` or
+  `dolt_server_port` declares it externally managed, and names the
+  setting: bd also counts a server you run over `.beads/dolt` as its own
+  once it has adopted it (#6123), and these settings are how you tell bd
+  not to stop it. git can report a failed
   move that the remote applied (Ctrl-C, a dropped connection), so after a
   failed move reset-data reads the data ref back: a move that landed
   completes the reset, with a warning, and one that did not says the
@@ -1149,7 +1159,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ref still names the pre-reset commit, and until the next push the remote's
   `refs/heads/__dolt_remote_info__` names the temporary ref. Through a
   server, the `--json` output's `deleted_refs` lists only the replaced data
-  ref.
+  ref. On every route, `--json` stdout is now the JSON report alone: the
+  progress lines printed before it are left out.
+- **`bd dolt remote reset-data` works for a git remote added in scp form**
+  (`bd dolt remote add origin git@github.com:org/repo.git`). Dolt stores
+  that remote as `git+ssh://git@github.com/./org/repo.git`, and reset-data
+  ran git with `ssh://git@github.com/./org/repo.git`, a path from the
+  server's root, which GitHub refuses ("./org/repo is not a valid repository
+  name"), so it failed before changing anything. It now gives git the scp
+  form, as Dolt does.
 - **`bd dolt remote reset-data` no longer deletes a git checkout used as a
   `file://` remote.** Dolt makes a file URL a git remote only when it ends
   in `.git`, and stores that one as `git+file://`, so any other `file://`

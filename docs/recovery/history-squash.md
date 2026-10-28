@@ -145,13 +145,35 @@ both.
 </Warning>
 
 The restart matters: a running sql-server keeps its view of every git
-remote it has used, the force-push above included. Once the remote's Dolt
-data refs are deleted under that view, a push through the server hangs
-until a read timeout or reports success having written nothing, and the
-remote is left without its Dolt data; running reset-data again right after
-a restart rebuilds it. Deleting the refs by hand
+remote it has used, the force-push above included. Releases up to and
+including v1.3.2 delete the remote's Dolt data refs and then force-push.
+Once the refs are deleted under that view, the push through the server
+hangs until a read timeout or reports success having written nothing, and
+the remote is left without its Dolt data; running reset-data again right
+after a restart rebuilds it. Deleting the refs by hand
 (`git push origin :refs/dolt/data`) and force-pushing runs into the same
 trap, so use reset-data.
+
+Through a server, releases after v1.3.2 never delete the data refs first:
+reset-data pushes the fresh store to a temporary ref and then moves the
+data ref to it, so the remote keeps its data until the new store is
+complete, and the restart before it does no harm. The move leaves the
+server's view of the remote stale instead: until the server restarts, it
+takes the pre-reset store's table files for present on the remote, so a
+push through it can write a manifest naming files the remote no longer
+holds, or report a branch as up to date that the remote lacks. So those
+releases restart bd's own server after the move, on the same port (in
+shared-server mode, the shared server). Like `bd dolt stop`, that restart
+commits any uncommitted changes in every database the server serves and
+briefly interrupts them, which for the shared server includes other
+workspaces' databases. They do not restart any other server, nor bd's own
+while auto-start is off (`dolt.auto-start: false`,
+`BEADS_DOLT_AUTO_START=0`) or, outside shared-server mode, while
+`BEADS_DOLT_SERVER_MODE=1` or `dolt_server_port` declares it externally
+managed. reset-data then exits non-zero once the reset is done, naming the
+setting for bd's own server, and `--json` sets `server_restart_required`:
+restart that server after reset-data returns, before the next push or pull
+of that remote, and do not run reset-data again.
 
 **Step 5:** Verify, then re-clone everywhere else. On this machine:
 
