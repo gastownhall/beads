@@ -263,17 +263,22 @@ func ExecuteRemoveDependency(ctx context.Context, tx *sql.Tx, request publicops.
 	// RemoveDependencyInTx reports whether it recorded an event, which on the
 	// explicit-verb path is exactly "an edge was there and is gone" — it
 	// returns early without emitting when no row matched.
-	eventWritten, err := RemoveDependencyInTx(ctx, tx, request.IssueID, request.DependsOnID, request.Actor, true)
+	written, err := RemoveDependencyInTxWithResult(ctx, tx, request.IssueID, request.DependsOnID, request.Actor, true)
 	if err != nil {
 		return publicops.RemoveDependencyResult{}, nil, err
 	}
-	if !eventWritten {
+	if !written.EventWritten {
 		return publicops.RemoveDependencyResult{Removed: false}, nil, nil
 	}
 	// A removal that actually happened versioned the referencing issue inside
 	// RemoveDependencyInTx, at the row delete; an absent edge returned above
-	// without ever reaching that seam.
+	// without ever reaching that seam. `issues` follows the add's rule: staged
+	// exactly when the removal's recompute cleared (or set) a durable row's
+	// is_blocked, so the unblock rides this commit (GH#6647).
 	tables := ChangedTables{}
 	tables.Add(depTable, eventTable)
+	if written.Blocked.IssueRowsChanged {
+		tables.Add("issues")
+	}
 	return publicops.RemoveDependencyResult{Removed: true}, tables, nil
 }

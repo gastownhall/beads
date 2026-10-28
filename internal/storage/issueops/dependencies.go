@@ -1173,6 +1173,16 @@ func RemoveDependencyInTx(ctx context.Context, tx *sql.Tx, issueID, dependsOnID,
 	return removeDependencyInTx(ctx, tx, issueID, dependsOnID, actor, emitEvent, nil, true)
 }
 
+// RemoveDependencyInTxWithResult is RemoveDependencyInTx reporting the
+// blocked-state tables the removal's recompute changed alongside the event
+// verdict (see DependencyWriteResult).
+func RemoveDependencyInTxWithResult(ctx context.Context, tx *sql.Tx, issueID, dependsOnID, actor string, emitEvent bool) (DependencyWriteResult, error) {
+	var result DependencyWriteResult
+	eventWritten, err := removeDependencyInTx(ctx, tx, issueID, dependsOnID, actor, emitEvent, &result.Blocked, true)
+	result.EventWritten = eventWritten
+	return result, err
+}
+
 // removeDependencyInTx is the body of RemoveDependencyInTx. A deleted edge is a
 // change to the source issue's durable state and mints one version row for it,
 // whether or not an audit event was requested; an absent edge returns before

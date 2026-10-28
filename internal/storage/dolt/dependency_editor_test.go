@@ -105,7 +105,7 @@ func TestDoltStoreDependencyEditorRemoveNamesTheHistoryEntry(t *testing.T) {
 	if !doltHasCommitMessage(ctx, t, store, "bd: dep remove test-dep-rm-a test-dep-rm-b") {
 		t.Fatal("the removal did not name the edge in history")
 	}
-	requireCleanTables(ctx, t, store, "dependencies")
+	requireCleanTables(ctx, t, store, "issues", "dependencies")
 }
 
 // TestDoltStoreDependencyEditorNoOpRemoveLeavesPendingRowsUncommitted is the
@@ -202,5 +202,47 @@ func TestDoltStoreDependencyEditorBlockingAddCommitsIsBlocked(t *testing.T) {
 	}
 	if _, err := store.RecomputeAllBlocked(ctx); err != nil {
 		t.Fatalf("RecomputeAllBlocked after dep add: %v", err)
+	}
+}
+
+// TestDoltStoreDependencyEditorRemoveCommitsUnblock is GH#6647 on the
+// `bd dep remove` path: removing the only blocker clears the source's
+// is_blocked in the removal's own commit, not just in the working set.
+func TestDoltStoreDependencyEditorRemoveCommitsUnblock(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+	seedIssues(ctx, t, store, "test-dep-unflip-a", "test-dep-unflip-b")
+
+	editor, err := store.DependencyEditor()
+	if err != nil {
+		t.Fatalf("DependencyEditor(): %v", err)
+	}
+	if _, err := editor.AddDependencies(ctx, publicops.AddDependenciesRequest{
+		Actor: "writer",
+		Edges: []publicops.DependencyEdge{{IssueID: "test-dep-unflip-b", DependsOnID: "test-dep-unflip-a", Type: publicops.DepBlocks}},
+	}); err != nil {
+		t.Fatalf("AddDependencies: %v", err)
+	}
+	// Commit the edge and the flip explicitly so the removal starts from a
+	// clean HEAD where B is blocked, whatever the add staged.
+	if _, err := store.db.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'seed blocked edge')"); err != nil && !isDoltNothingToCommit(err) {
+		t.Fatalf("commit seed: %v", err)
+	}
+	requireCleanTables(ctx, t, store, "issues", "dependencies")
+	if !headIsBlocked(ctx, t, store, "test-dep-unflip-b") {
+		t.Fatal("precondition: HEAD must have test-dep-unflip-b blocked")
+	}
+
+	if _, err := editor.RemoveDependency(ctx, publicops.RemoveDependencyRequest{
+		Actor: "writer", IssueID: "test-dep-unflip-b", DependsOnID: "test-dep-unflip-a",
+	}); err != nil {
+		t.Fatalf("RemoveDependency: %v", err)
+	}
+
+	requireCleanTables(ctx, t, store, "issues", "dependencies")
+	if headIsBlocked(ctx, t, store, "test-dep-unflip-b") {
+		t.Fatal("HEAD still has test-dep-unflip-b is_blocked=1 after its only blocker was removed")
 	}
 }
