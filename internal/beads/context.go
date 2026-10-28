@@ -641,7 +641,9 @@ func inOwnHomeUnderPrefix(absPath string) bool {
 	home = filepath.Clean(home)
 	for _, h := range []string{home, resolveLongestExistingAncestor(home)} {
 		if absPath == h || strings.HasPrefix(absPath, h+"/") {
-			return true
+			// Same symlink-escape treatment as the /var/tmp and /Users/Shared
+			// carve-outs: a link inside the home must not lead out of it.
+			return resolvedPathWithinRoot(absPath, home)
 		}
 	}
 	return false

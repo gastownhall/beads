@@ -1562,3 +1562,25 @@ func TestGetRepoContextAllowingNoGit_BeadsDirInOwnHomeUnderDeniedPrefix(t *testi
 		t.Errorf("BeadsDir = %q, want %q", rc.BeadsDir, physical)
 	}
 }
+
+// TestIsPathInSafeBoundary_DeniedPrefixOutsideOwnHome pins the other side of
+// GH#6323 (AC-2): the home carve-out admits nothing else under a denied prefix,
+// and a symlink inside the home whose target escapes it is not followed out.
+func TestIsPathInSafeBoundary_DeniedPrefixOutsideOwnHome(t *testing.T) {
+	f := newOwnHomeFixture(t)
+	for _, tc := range []struct{ name, path string }{
+		{"symlink inside home escaping it", filepath.Join(f.home, "escape", ".beads")},
+		{"another account's tree", filepath.Join(f.lib, "other", ".beads")},
+		{"sibling sharing the home's name prefix", filepath.Join(f.lib, "svcXX", ".beads")},
+		{"the denied prefix itself", f.denied},
+		{"root's home", "/root/.beads"},
+		{"system /var", "/var/lib/beads"},
+		{"system /etc", "/etc/beads"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if isPathInSafeBoundary(tc.path) {
+				t.Errorf("isPathInSafeBoundary(%q) = true with account home %q, want false", tc.path, f.home)
+			}
+		})
+	}
+}
