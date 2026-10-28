@@ -68,6 +68,7 @@ func TestEmbeddedDepDefaultDirectionNotesHiddenChildren(t *testing.T) {
 	// status.
 	control := bdCreate(t, bd, dir, "Molecule root", "--type", "epic", "--ephemeral")
 	bdUpdate(t, bd, dir, control.ID, "--status", "hooked")
+	other := bdCreate(t, bd, dir, "Unrelated", "--type", "task")
 
 	listCmd := "To list them, run: bd dep list " + root.ID + " --direction=up --type=parent-child"
 	treeCmd := "To see them, run: bd dep tree " + root.ID + " --direction=up"
@@ -231,6 +232,22 @@ func TestEmbeddedDepDefaultDirectionNotesHiddenChildren(t *testing.T) {
 		for _, id := range steps {
 			if strings.Contains(stdout, id) {
 				t.Errorf("tree mermaid: want one node, got step %s:\n%s", id, stdout)
+			}
+		}
+	})
+
+	t.Run("other_directions", func(t *testing.T) {
+		for _, args := range [][]string{
+			{"dep", "list", root.ID, "--direction=up"},
+			{"dep", "tree", root.ID, "--direction=up"},
+			{"dep", "tree", root.ID, "--direction=both"},
+			{"dep", "tree", root.ID, "--reverse"},
+			{"dep", "list", root.ID, "--type=blocks"},
+			{"dep", "list", root.ID, other.ID},
+		} {
+			_, stderr := bdRunSplit(t, bd, dir, args...)
+			if strings.Contains(stderr, "note:") {
+				t.Errorf("%v: unexpected note:\n%s", args, stderr)
 			}
 		}
 	})
