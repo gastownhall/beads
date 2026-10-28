@@ -19,7 +19,6 @@ go_test(
         "gitdir_test.go",
         "inherited_location_test.go",
         "jujutsu_test.go",
-        "testmain_test.go",
     ],
     embed = [":git"],
     deps = ["//internal/testutil"],
