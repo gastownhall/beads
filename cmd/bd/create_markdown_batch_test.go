@@ -135,4 +135,78 @@ Ephemeral body.
 			t.Errorf("the declared edge was not written; dependents of %s:\n%s", blocker, out)
 		}
 	})
+
+	// GH#7508: a `### Deps` entry must gate exactly like the same string on
+	// --deps. depends-on:/blocked-by: used to be stored as literal
+	// non-blocking types (so the issue stayed in `bd ready`), blocks: used to
+	// skip the direction swap the flag applies, and one edge repeated under
+	// several spellings used to fail the whole file.
+	t.Run("deps_spellings_gate_like_the_deps_flag", func(t *testing.T) {
+		t1 := strings.TrimSpace(runCreateDepsBD(t, bd, dir, "create", "#7508 gating target one", "--silent"))
+		t2 := strings.TrimSpace(runCreateDepsBD(t, bd, dir, "create", "#7508 gating target two", "--silent"))
+		if t1 == "" || t2 == "" {
+			t.Fatalf("target creates returned empty IDs: %q %q", t1, t2)
+		}
+		plan := writeMarkdownPlan(t, dir, "aliases.md", `## #7508 bare entry
+
+### Dependencies
+`+t1+`
+
+## #7508 depends-on entry
+
+### Dependencies
+depends-on:`+t1+`
+
+## #7508 blocked-by entry
+
+### Dependencies
+blocked-by:`+t1+`
+
+## #7508 aliased repeat entry
+
+### Dependencies
+depends-on:`+t1+`, blocked-by:`+t1+`, `+t1+`
+
+## #7508 blocks entry
+
+### Dependencies
+blocks:`+t2+`
+`)
+		runCreateDepsBD(t, bd, dir, "create", "--file", plan)
+
+		// Every template that depends on a target lands in `bd blocked` —
+		// the four forward-edge templates on T1, and T2 itself, which the
+		// blocks: entry makes depend on that template.
+		blocked := runCreateDepsBD(t, bd, dir, "blocked", "--json")
+		for _, title := range []string{
+			"#7508 bare entry",
+			"#7508 depends-on entry",
+			"#7508 blocked-by entry",
+			"#7508 aliased repeat entry",
+			"#7508 gating target two",
+		} {
+			if !strings.Contains(blocked, title) {
+				t.Errorf("bd blocked --json does not list %q:\n%s", title, blocked)
+			}
+		}
+
+		// The blocks: template constrains only T2, so it is ready; the four
+		// forward-edge templates are not. --limit 0 keeps the absence checks
+		// from being vacuous under the default ready cap in this shared
+		// workspace.
+		ready := runCreateDepsBD(t, bd, dir, "ready", "--json", "--limit", "0")
+		if !strings.Contains(ready, "#7508 blocks entry") {
+			t.Errorf("bd ready --json does not list the blocks: template:\n%s", ready)
+		}
+		for _, title := range []string{
+			"#7508 bare entry",
+			"#7508 depends-on entry",
+			"#7508 blocked-by entry",
+			"#7508 aliased repeat entry",
+		} {
+			if strings.Contains(ready, title) {
+				t.Errorf("bd ready --json lists %q, whose blocking edge should gate it:\n%s", title, ready)
+			}
+		}
+	})
 }
