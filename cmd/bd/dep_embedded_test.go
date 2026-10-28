@@ -68,6 +68,35 @@ func bdDepJSON(t *testing.T, bd, dir string, args ...string) map[string]interfac
 	return m
 }
 
+// runDepSplit runs `bd` with args keeping stdout and stderr apart, the way
+// runShowSplit does: the shared helpers either merge the two or keep only
+// stdout, and the unresolved-target warning's contract is that it appears
+// on stderr and nowhere else, so the split is the whole point.
+func runDepSplit(t *testing.T, bd, dir string, args ...string) (stdout, stderr string) {
+	t.Helper()
+	cmd := exec.Command(bd, args...)
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	outBuf, errBuf, err := runCommandBuffers(t, cmd)
+	if err != nil {
+		t.Fatalf("bd %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, outBuf.String(), errBuf.String())
+	}
+	return outBuf.String(), errBuf.String()
+}
+
+// depTargetCount asserts bd show's dependency_count for id, which is how the
+// embedded dep-add tests see that an edge was actually stored (and that the
+// printed bd dep remove really deleted it).
+func depTargetCount(t *testing.T, bd, dir, id string) int {
+	t.Helper()
+	details := bdShowDetails(t, bd, dir, id)
+	count, ok := details["dependency_count"].(float64)
+	if !ok {
+		t.Fatalf("bd show %s --json: dependency_count = %v, want a number", id, details["dependency_count"])
+	}
+	return int(count)
+}
+
 func bdDepWithInput(t *testing.T, bd, dir, input string, args ...string) string {
 	t.Helper()
 	fullArgs := append([]string{"dep"}, args...)
@@ -318,6 +347,50 @@ func TestEmbeddedDepAAddRejectionsAndBulk(t *testing.T) {
 		list := bdDep(t, bd, dir, "list", v1.ID)
 		if strings.Contains(list, v2.ID) {
 			t.Fatalf("bulk validation failure should not add valid rows: %s", list)
+		}
+	})
+
+	t.Run("add_unresolved_cross_prefix_warns", func(t *testing.T) {
+		// GH#6556: a bare target whose prefix merely differs from the
+		// source's, and that resolves nowhere, must still be stored (the
+		// multi-rig "add now, route later" shape), but the operator has to
+		// learn about it at write time: the usual success line on stdout,
+		// and the unresolved-target warning — with a paste-ready
+		// bd dep remove — on stderr, and nowhere else.
+		uw := bdCreate(t, bd, dir, "Unresolved target write", "--type", "task")
+		stdout, stderr := runDepSplit(t, bd, dir, "dep", "add", uw.ID, "zz-404")
+		if !strings.Contains(stdout, "Added dependency") {
+			t.Fatalf("stdout = %q, want the usual Added dependency line", stdout)
+		}
+		if strings.Contains(stdout, "warning:") {
+			t.Fatalf("stdout = %q, want no warning on stdout", stdout)
+		}
+		if !strings.Contains(stderr, "zz-404 was not found") ||
+			!strings.Contains(stderr, "stored unverified") ||
+			!strings.Contains(stderr, "bd dep remove "+uw.ID+" zz-404") {
+			t.Fatalf("stderr = %q, want the unresolved-target warning naming zz-404 and the bd dep remove command", stderr)
+		}
+		if got := depTargetCount(t, bd, dir, uw.ID); got != 1 {
+			t.Fatalf("dependency_count = %d, want 1 — the edge must be stored", got)
+		}
+		// The pasted remedy must actually delete the stored edge.
+		bdDep(t, bd, dir, "remove", uw.ID, "zz-404")
+		if got := depTargetCount(t, bd, dir, uw.ID); got != 0 {
+			t.Fatalf("dependency_count = %d after the printed bd dep remove, want 0", got)
+		}
+	})
+
+	t.Run("add_unresolved_blocked_by_warns", func(t *testing.T) {
+		// The --blocked-by alias is the same positional route, so its
+		// unresolved target warns identically.
+		ub := bdCreate(t, bd, dir, "Unresolved blocked-by", "--type", "task")
+		_, stderr := runDepSplit(t, bd, dir, "dep", "add", ub.ID, "--blocked-by", "zz-407")
+		if !strings.Contains(stderr, "zz-407 was not found") ||
+			!strings.Contains(stderr, "bd dep remove "+ub.ID+" zz-407") {
+			t.Fatalf("stderr = %q, want the unresolved-target warning for the --blocked-by target", stderr)
+		}
+		if got := depTargetCount(t, bd, dir, ub.ID); got != 1 {
+			t.Fatalf("dependency_count = %d, want 1 — the edge must be stored", got)
 		}
 	})
 }

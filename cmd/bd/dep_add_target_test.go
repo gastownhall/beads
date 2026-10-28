@@ -39,10 +39,14 @@ func TestResolveUnresolvedDepTarget(t *testing.T) {
 	resolveErr := errors.New("issue not found")
 
 	tests := []struct {
-		name            string
-		sourceID        string
-		dependsOnArg    string
-		wantToID        string
+		name         string
+		sourceID     string
+		dependsOnArg string
+		wantToID     string
+		// wantUnverified is the outcome-3 flag: true only for the bare
+		// cross-prefix pass-through, so the caller (GH#6556) knows to warn
+		// after the write that the target was accepted unresolved.
+		wantUnverified  bool
 		wantErr         bool
 		wantErrContains string
 		// wantErrOmits is the direction/diagnosis guard: for the reversing
@@ -51,11 +55,14 @@ func TestResolveUnresolvedDepTarget(t *testing.T) {
 		wantErrOmits string
 	}{
 		{
-			name:         "bare cross-prefix target is passed through as a cross-store edge",
-			sourceID:     "be-abc",
-			dependsOnArg: "xy-999",
-			wantToID:     "xy-999",
-			wantErr:      false,
+			name:            "bare cross-prefix target is passed through as a cross-store edge",
+			sourceID:        "be-abc",
+			dependsOnArg:    "xy-999",
+			wantToID:        "xy-999",
+			wantUnverified:  true,
+			wantErr:         false,
+			wantErrContains: "",
+			wantErrOmits:    "",
 		},
 		{
 			name:            "type:id-shaped positional arg is rejected, not silently misparsed",
@@ -158,7 +165,7 @@ func TestResolveUnresolvedDepTarget(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			toID, err := resolveUnresolvedDepTarget(tt.sourceID, tt.dependsOnArg, resolveErr)
+			toID, unverified, err := resolveUnresolvedDepTarget(tt.sourceID, tt.dependsOnArg, resolveErr)
 
 			if tt.wantErr {
 				if err == nil {
@@ -173,11 +180,17 @@ func TestResolveUnresolvedDepTarget(t *testing.T) {
 				if toID != "" {
 					t.Errorf("resolveUnresolvedDepTarget(%q, %q): got toID %q on error, want empty", tt.sourceID, tt.dependsOnArg, toID)
 				}
+				if unverified {
+					t.Errorf("resolveUnresolvedDepTarget(%q, %q): got unverified on a refusal; only the cross-prefix pass-through reports unverified", tt.sourceID, tt.dependsOnArg)
+				}
 				return
 			}
 
 			if err != nil {
 				t.Fatalf("resolveUnresolvedDepTarget(%q, %q): unexpected error: %v", tt.sourceID, tt.dependsOnArg, err)
+			}
+			if unverified != tt.wantUnverified {
+				t.Errorf("resolveUnresolvedDepTarget(%q, %q): unverified = %v, want %v", tt.sourceID, tt.dependsOnArg, unverified, tt.wantUnverified)
 			}
 			if toID != tt.wantToID {
 				t.Errorf("resolveUnresolvedDepTarget(%q, %q) = %q, want %q", tt.sourceID, tt.dependsOnArg, toID, tt.wantToID)
@@ -197,22 +210,82 @@ func TestResolveUnresolvedDepTargetMatchesStorageClassification(t *testing.T) {
 	resolveErr := errors.New("issue not found")
 
 	const sourceID = "be-abc"
-	accepted := []string{
-		"xy-999",
-		"external:otherproj:some-capability",
+	// wantUnverified mirrors the helper's outcome-3 report for each accepted
+	// shape: the bare cross-prefix target is stored unverified (the write-time
+	// warning exists because of it, GH#6556), the well-formed external: ref is
+	// not — it is resolved later by the external-deps resolver by design.
+	accepted := []struct {
+		target         string
+		wantUnverified bool
+	}{
+		{target: "xy-999", wantUnverified: true},
+		{target: "external:otherproj:some-capability", wantUnverified: false},
 	}
 
-	for _, target := range accepted {
-		t.Run(target, func(t *testing.T) {
-			toID, err := resolveUnresolvedDepTarget(sourceID, target, resolveErr)
+	for _, tt := range accepted {
+		t.Run(tt.target, func(t *testing.T) {
+			toID, unverified, err := resolveUnresolvedDepTarget(sourceID, tt.target, resolveErr)
 			if err != nil {
-				t.Fatalf("resolveUnresolvedDepTarget(%q, %q): unexpected error: %v", sourceID, target, err)
+				t.Fatalf("resolveUnresolvedDepTarget(%q, %q): unexpected error: %v", sourceID, tt.target, err)
+			}
+			if unverified != tt.wantUnverified {
+				t.Errorf("resolveUnresolvedDepTarget(%q, %q): unverified = %v, want %v", sourceID, tt.target, unverified, tt.wantUnverified)
 			}
 			if !storeissueops.IsExternalDepTarget(sourceID, toID) {
 				t.Errorf("dep add accepted %q but storage would not classify it as an external dep target; "+
 					"the edge would be written to a column that cannot hold it", toID)
 			}
 		})
+	}
+}
+
+// TestUnresolvedDepTargetWarning pins the write-time notice for the outcome-3
+// edge (GH#6556): the first line says the target was not found and the edge
+// stored unverified, the second is a paste-ready bd dep remove naming the
+// stored row. Every value the user could have typed goes into it spelled the
+// way the remedy helpers spell pasted words, so a hostile target can neither
+// run when pasted nor redraw the command, and there is no backtick to trip a
+// paste into markdown.
+func TestUnresolvedDepTargetWarning(t *testing.T) {
+	base := unresolvedDepTargetWarning("", "be-abc", "xy-999")
+	if !strings.Contains(base, "xy-999 was not found") {
+		t.Errorf("warning = %q, want the target named as not found", base)
+	}
+	if !strings.Contains(base, "stored unverified") {
+		t.Errorf("warning = %q, want the unverified storage named", base)
+	}
+	if !strings.Contains(base, "bd dep remove be-abc xy-999") {
+		t.Errorf("warning = %q, want the paste-ready bd dep remove be-abc xy-999", base)
+	}
+	if !strings.HasPrefix(base, "warning: dependency target") {
+		t.Errorf("warning = %q, want it to start with the lowercase warning: prefix", base)
+	}
+	if strings.ContainsRune(base, '`') {
+		t.Errorf("warning = %q, want no backtick anywhere in it", base)
+	}
+	if !strings.HasSuffix(base, "\n") {
+		t.Errorf("warning = %q, want a trailing newline so the printed notice ends its line", base)
+	}
+
+	// The --file route prefixes the notice with the input line it came from.
+	line2 := unresolvedDepTargetWarning("line 2: ", "be-abc", "xy-999")
+	if !strings.HasPrefix(line2, "warning: line 2: ") {
+		t.Errorf("--file warning = %q, want the line 2: prefix after warning:", line2)
+	}
+
+	// A hostile target — the user's argument verbatim — is spelled by the
+	// remedy helpers: escaped in prose, a placeholder plus the escaped note in
+	// the command, and no raw terminal control byte reaches the output.
+	const hostile = "xy-9\x1b[2K"
+	got := unresolvedDepTargetWarning("", "be-abc", hostile)
+	if strings.ContainsRune(got, '\x1b') {
+		t.Errorf("warning for %q = %q, want no raw ESC byte in it", hostile, got)
+	}
+	if !strings.Contains(got, "<target-id>") {
+		t.Errorf("warning for %q = %q, want the <target-id> placeholder in the command", hostile, got)
+	}
+	if !strings.Contains(got, `\x1b[2K`) {
+		t.Errorf("warning for %q = %q, want the escaped target named in the placeholder note", hostile, got)
 	}
 }
 

@@ -711,6 +711,7 @@ go_test(
         "delete_proxied_server_output_test.go",
         "delete_test.go",
         "dep_add_target_test.go",
+        "dep_add_unresolved_cross_prefix_repro_test.go",
         "dep_batch_test.go",
         "dep_bulk_role_test.go",
         "dep_cycles_test.go",
