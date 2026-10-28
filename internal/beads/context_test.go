@@ -2,6 +2,7 @@ package beads
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -1609,5 +1610,45 @@ func TestGetRepoContext_NonGitBeadsDirRoleIsImplicitContributor(t *testing.T) {
 	}
 	if role, ok := redirected.Role(); !ok || role != Contributor {
 		t.Errorf("redirected Role() = %q, %v, want %q, true — a non-git -C target must not inherit the caller repo's role", role, ok, Contributor)
+	}
+}
+
+// TestGetRepoContext_NonGitBeadsDirFromNonGitCWD guards the GH#4772 path that
+// the GH#5700 fix must not disturb (AC-3): standing outside every git
+// repository, a .beads that is itself in no repository must still make
+// GetRepoContext fail with *NoRepoRootError, and GetRepoContextAllowingNoGit
+// must still recover a context rooted at the .beads parent.
+func TestGetRepoContext_NonGitBeadsDirFromNonGitCWD(t *testing.T) {
+	scope := t.TempDir()
+	beadsDir := writeBeadsProjectDir(t, scope)
+	standalone := t.TempDir() // CWD outside every git repository
+
+	t.Setenv("BEADS_DIR", beadsDir)
+	t.Chdir(standalone)
+	ResetCaches()
+	git.ResetCaches()
+	t.Cleanup(func() {
+		ResetCaches()
+		git.ResetCaches()
+	})
+
+	_, err := GetRepoContext()
+	if err == nil {
+		t.Fatal("GetRepoContext should still fail when neither the CWD nor the named .beads is in a git repository")
+	}
+	var noRoot *NoRepoRootError
+	if !errors.As(err, &noRoot) {
+		t.Fatalf("GetRepoContext error = %v, want a *NoRepoRootError", err)
+	}
+
+	rc, err := GetRepoContextAllowingNoGit()
+	if err != nil {
+		t.Fatalf("GetRepoContextAllowingNoGit failed outside a git repository: %v", err)
+	}
+	if want := resolveSymlinks(beadsDir); rc.BeadsDir != want {
+		t.Errorf("BeadsDir = %s, want %s", rc.BeadsDir, want)
+	}
+	if want := filepath.Dir(resolveSymlinks(beadsDir)); rc.RepoRoot != want {
+		t.Errorf("RepoRoot = %s, want %s (the .beads parent)", rc.RepoRoot, want)
 	}
 }
