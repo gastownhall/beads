@@ -1,6 +1,7 @@
 package dolt
 
 import (
+	"context"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -46,7 +47,9 @@ func TestDoltStoreDependencyEditorBatchNamesItsHistoryEntry(t *testing.T) {
 	if !doltHasCommitMessage(ctx, t, store, "dependency: add 2 edges") {
 		t.Fatal("no commit named the edge count")
 	}
-	requireCleanTables(ctx, t, store, "dependencies")
+	// The blocks edge flipped test-dep-add-a's is_blocked, so `issues` rode
+	// the same commit (GH#6647).
+	requireCleanTables(ctx, t, store, "issues", "dependencies")
 }
 
 // TestDoltStoreDependencyEditorSingleEdgeNamesTheHistoryEntry pins the other
@@ -155,5 +158,49 @@ func TestDoltStoreDependencyEditorNoOpRemoveLeavesPendingRowsUncommitted(t *test
 	}
 	if dirty == 0 {
 		t.Fatal("dependencies is clean: the no-op removal committed a row it never wrote")
+	}
+}
+
+// headIsBlocked reads id's is_blocked as committed at HEAD, which is what a
+// push, a peer pull or a branch read sees.
+func headIsBlocked(ctx context.Context, t *testing.T, store *DoltStore, id string) bool {
+	t.Helper()
+	var blocked bool
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT is_blocked FROM issues AS OF 'HEAD' WHERE id = ?", id).Scan(&blocked); err != nil {
+		t.Fatalf("read HEAD is_blocked of %s: %v", id, err)
+	}
+	return blocked
+}
+
+// TestDoltStoreDependencyEditorBlockingAddCommitsIsBlocked is GH#6647 on the
+// `bd dep add B A` path: the is_blocked flip a blocking edge writes rides the
+// edge's own commit, so the working set is clean afterwards and a full
+// recompute is not refused for a dirty graph.
+func TestDoltStoreDependencyEditorBlockingAddCommitsIsBlocked(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+	seedIssues(ctx, t, store, "test-dep-flip-a", "test-dep-flip-b")
+	requireCleanTables(ctx, t, store, "issues", "dependencies")
+
+	editor, err := store.DependencyEditor()
+	if err != nil {
+		t.Fatalf("DependencyEditor(): %v", err)
+	}
+	if _, err := editor.AddDependencies(ctx, publicops.AddDependenciesRequest{
+		Actor: "writer",
+		Edges: []publicops.DependencyEdge{{IssueID: "test-dep-flip-b", DependsOnID: "test-dep-flip-a", Type: publicops.DepBlocks}},
+	}); err != nil {
+		t.Fatalf("AddDependencies: %v", err)
+	}
+
+	requireCleanTables(ctx, t, store, "issues", "dependencies")
+	if !headIsBlocked(ctx, t, store, "test-dep-flip-b") {
+		t.Fatal("HEAD has test-dep-flip-b is_blocked=0 despite an open blocker")
+	}
+	if _, err := store.RecomputeAllBlocked(ctx); err != nil {
+		t.Fatalf("RecomputeAllBlocked after dep add: %v", err)
 	}
 }
