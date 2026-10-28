@@ -119,7 +119,7 @@ func TestServerSettlementSQLCommitResponseLossIsIndeterminate(t *testing.T) {
 		// same DOLT_COMMIT.
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT source_commit FROM dolt_merge_status WHERE is_merging")).
 			WillReturnRows(sqlmock.NewRows([]string{"source_commit"}).AddRow("0123456789abcdefghijklmnopqrstuv"))
-		mock.ExpectQuery(regexp.QuoteMeta("SELECT DISTINCT s.table_name FROM dolt_status s JOIN dolt_diff_summary('HEAD', '0123456789abcdefghijklmnopqrstuv') d ON s.table_name IN (d.from_table_name, d.to_table_name) WHERE s.staged = 0")).
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT DISTINCT CASE WHEN s.table_name = CONCAT(d.from_table_name, ' -> ', d.to_table_name) THEN d.to_table_name ELSE s.table_name END FROM dolt_status s JOIN (SELECT from_table_name, to_table_name FROM dolt_diff_summary('HEAD', '0123456789abcdefghijklmnopqrstuv') UNION SELECT from_table_name, to_table_name FROM dolt_schema_diff('HEAD', '0123456789abcdefghijklmnopqrstuv')) d ON s.table_name IN (d.from_table_name, d.to_table_name, CONCAT(d.from_table_name, ' -> ', d.to_table_name)) WHERE s.staged = 0")).
 			WillReturnRows(sqlmock.NewRows([]string{"table_name"}))
 		// concludeMerge passes the commit message as a bind arg, not a
 		// string-interpolated literal.

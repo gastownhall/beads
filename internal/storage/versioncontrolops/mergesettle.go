@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/kvkeys"
 )
 
@@ -116,11 +117,12 @@ var ErrPullBehindFastForwardable = errors.New("pull merged nothing but the local
 
 // SettleMerge finishes a merge that ran on db with the session flags
 // MergeAndSettle sets: it auto-resolves the safe conflict classes, repairs FK
-// cascade violations (bd-6dnrw.4), and leaves the settled working set in
-// place — or aborts the merge when anything needs the operator. mergeErr is
-// the merge statement's own error; it is surfaced whenever nothing was
-// resolved or repaired. preMergeClean reports whether the working set was
-// clean before the merge ran; it gates abortMerge's hard-reset fallback.
+// cascade violations (bd-6dnrw.4), and concludes the settled merge with its
+// full result (CommitSettledMerge, GH#7811) — or aborts the merge when
+// anything needs the operator. mergeErr is the merge statement's own error;
+// it is surfaced whenever nothing was resolved or repaired. preMergeClean
+// reports whether the working set was clean before the merge ran; it gates
+// abortMerge's hard-reset fallback.
 // strategy is the #4992 operator escape hatch: "" preserves the exact
 // MergeAndSettle behavior below (a declined conflict aborts with
 // MergeConflictsError); "ours" or "theirs" resolves whatever the auto-resolver
@@ -204,18 +206,10 @@ func SettleMerge(ctx context.Context, db DBConn, mergeErr error, preMergeClean b
 		return mergeErr
 	}
 
-	// Conclude the merge for resolved conflicts only now, after the FK repair:
-	// DOLT_COMMIT refuses a violated working set, so a merge carrying both
-	// classes could never settle when the resolver committed first (bd-578h9.14).
+	// Conclude the merge only now, after the FK repair: DOLT_COMMIT refuses a
+	// violated working set, so a merge carrying both classes could never
+	// settle when the resolver committed first (bd-578h9.14).
 	switch {
-	case resolved:
-		if err := CommitResolvedConflicts(ctx, db); err != nil {
-			abortMerge(ctx, db, preMergeClean)
-			if mergeErr != nil {
-				return mergeErr
-			}
-			return err
-		}
 	case strategyResolved:
 		// Conclude with the FULL merge result, not just the resolved tables:
 		// the conflicted merge left its cleanly merged tables unstaged, and
@@ -228,6 +222,14 @@ func SettleMerge(ctx context.Context, db DBConn, mergeErr error, preMergeClean b
 				return mergeErr
 			}
 			return fmt.Errorf("conflicts resolved but commit failed: %w", err)
+		}
+	case resolved, repairedViol:
+		if err := CommitSettledMerge(ctx, db, resolved, repairedViol); err != nil {
+			abortMerge(ctx, db, preMergeClean)
+			if mergeErr != nil {
+				return mergeErr
+			}
+			return err
 		}
 	}
 
@@ -376,9 +378,10 @@ func abortMerge(ctx context.Context, db DBConn, preMergeClean bool) {
 }
 
 // doltCommitHashRE matches a Dolt commit hash (32 base32 characters), the
-// same shape as issueops' unexported validator: dolt_diff_summary takes
-// literal arguments only, so a merge's source commit read from
-// dolt_merge_status must be validated before it is inlined into a query.
+// same shape as issueops' unexported validator: dolt_diff_summary and
+// dolt_schema_diff take literal arguments only, so a merge's source commit
+// read from dolt_merge_status must be validated before it is inlined into a
+// query.
 var doltCommitHashRE = regexp.MustCompile(`^[0-9a-v]{32}$`)
 
 // stageMergeResult stages the tables a conflicted DOLT_MERGE merged cleanly
@@ -393,13 +396,21 @@ var doltCommitHashRE = regexp.MustCompile(`^[0-9a-v]{32}$`)
 // The staged set is exact by construction: unstaged tables (dolt_status
 // staged = 0) that also differ between HEAD and the merge source (the
 // two-commit dolt_diff_summary names peer-added tables as to_table_name and
-// peer-dropped ones as from_table_name). Dolt refuses to start a merge whose
-// dirty tables differ from HEAD by table hash, so an unstaged diff-vs-HEAD
-// table while a merge is open is merge output, never pre-existing pending
-// work — and that pending work stays pending in tables the merge did not
-// change (server mode deliberately leaves some config uncommitted, GH#2455).
-// DOLT_ADD without --force applies dolt_ignore patterns, so ignored tables
-// (wisps, ...) that dolt_status hides cannot sneak in.
+// peer-dropped ones as from_table_name). dolt_diff_summary skips a table
+// whose primary key changed (key column count or a key column's type) with
+// only a session warning, yet the merge fast-forwards a key change only the
+// peer made, so the two-commit dolt_schema_diff, which names every table
+// whose definition changed, is unioned in. A table the peer renamed is a
+// single dolt_status row named "<from> -> <to>", which matches neither
+// column, so the join also matches that display name and stages the new
+// name: DOLT_ADD of a rename's new name stages the rename. Dolt refuses to
+// start a merge whose dirty tables differ from HEAD by table hash, so an
+// unstaged diff-vs-HEAD table while a merge is open is merge output, never
+// pre-existing pending work — and that pending work stays pending in tables
+// the merge did not change (server mode deliberately leaves some config
+// uncommitted, GH#2455). DOLT_ADD without --force applies dolt_ignore
+// patterns, so ignored tables (wisps, ...) that dolt_status hides cannot
+// sneak in.
 func stageMergeResult(ctx context.Context, db DBConn) error {
 	var sourceCommit sql.NullString
 	if err := db.QueryRowContext(ctx,
@@ -414,11 +425,13 @@ func stageMergeResult(ctx context.Context, db DBConn) error {
 		// below, and concluding without staging would record a revert.
 		return fmt.Errorf("merge source commit %q is not a valid commit hash; refusing to stage the merge result", sourceCommit.String)
 	}
-	//nolint:gosec // G201: sourceCommit is validated against doltCommitHashRE above; dolt_diff_summary requires literal arguments.
+	//nolint:gosec // G201: sourceCommit is validated against doltCommitHashRE above; the diff table functions require literal arguments.
 	rows, err := db.QueryContext(ctx, fmt.Sprintf(
-		"SELECT DISTINCT s.table_name FROM dolt_status s "+
-			"JOIN dolt_diff_summary('HEAD', '%s') d "+
-			"ON s.table_name IN (d.from_table_name, d.to_table_name) "+
+		"SELECT DISTINCT CASE WHEN s.table_name = CONCAT(d.from_table_name, ' -> ', d.to_table_name) "+
+			"THEN d.to_table_name ELSE s.table_name END FROM dolt_status s "+
+			"JOIN (SELECT from_table_name, to_table_name FROM dolt_diff_summary('HEAD', '%[1]s') "+
+			"UNION SELECT from_table_name, to_table_name FROM dolt_schema_diff('HEAD', '%[1]s')) d "+
+			"ON s.table_name IN (d.from_table_name, d.to_table_name, CONCAT(d.from_table_name, ' -> ', d.to_table_name)) "+
 			"WHERE s.staged = 0", sourceCommit.String))
 	if err != nil {
 		return fmt.Errorf("query merged-but-unstaged tables: %w", err)
@@ -452,9 +465,15 @@ func stageMergeResult(ctx context.Context, db DBConn) error {
 // while a merge is active Dolt allows exactly that empty commit, and it is
 // what closes dolt_merge_status.is_merging — the #4992 --strategy ours case
 // resolves every conflicted table back to HEAD's value, stages nothing new,
-// and must still conclude. msg is the commit message; author follows Dolt's
-// --author form ("Name <email>"); an empty author leaves attribution to the
-// session.
+// and must still conclude. A "nothing to commit" refusal therefore means no
+// merge was open by the time the commit ran and nothing was staged: there is
+// nothing left to conclude. In server mode, where sessions share the working
+// set, that is another session concluding the merge first (the race the
+// server store's concludeOpenMerge absorbs too), so the refusal is absorbed,
+// as StageAndCommit absorbed it, instead of failing a merge that landed and
+// letting abortMerge hard-reset the shared working set. msg is the commit
+// message; author follows Dolt's --author form ("Name <email>"); an empty
+// author leaves attribution to the session.
 func concludeMerge(ctx context.Context, db DBConn, msg, author string) error {
 	if err := stageMergeResult(ctx, db); err != nil {
 		return err
@@ -464,6 +483,9 @@ func concludeMerge(ctx context.Context, db DBConn, msg, author string) error {
 		_, err = db.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?)", msg)
 	} else {
 		_, err = db.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)", msg, author)
+	}
+	if issueops.IsNothingToCommitError(err) {
+		return nil
 	}
 	return err
 }
@@ -701,6 +723,31 @@ func CommitResolvedConflicts(ctx context.Context, db DBConn) error {
 	if err := concludeMerge(ctx, db,
 		"auto-resolve merge conflicts: metadata, dependencies, schema_migrations, config, issues (field-level three-way merge), labels/comments/events (union)", ""); err != nil {
 		return fmt.Errorf("failed to commit resolved conflicts: %w", err)
+	}
+	return nil
+}
+
+// CommitSettledMerge creates the dolt commit that concludes a merge a settle
+// pass settled without the operator: resolved and repaired are what
+// TryAutoResolveMergeConflicts and TryRepairFKCascadeViolations returned, and
+// callers MUST call it only after the repair (bd-578h9.14). A merge whose
+// conflicts the resolver settled concludes as CommitResolvedConflicts. A
+// merge whose only artifacts were the FK cascade violations the repair
+// cleared concludes the same way, with the full merge result: left open, it
+// was concluded by whichever commit ran next — the embedded pull's is_blocked
+// commit, which stages only issues, or a server-mode commit, which leaves
+// config out (GH#2455) — and that merge commit recorded HEAD's copy of every
+// table the commit skipped (GH#7811). With neither, the merge needed no
+// settling and there is nothing to conclude.
+func CommitSettledMerge(ctx context.Context, db DBConn, resolved, repaired bool) error {
+	switch {
+	case resolved:
+		return CommitResolvedConflicts(ctx, db)
+	case repaired:
+		if err := concludeMerge(ctx, db,
+			"auto-repair merge FK cascade violations: deleted rows referencing issues deleted on the other side", ""); err != nil {
+			return fmt.Errorf("failed to commit FK cascade repair: %w", err)
+		}
 	}
 	return nil
 }

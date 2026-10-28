@@ -2,6 +2,7 @@ package versioncontrolops
 
 import (
 	"context"
+	"errors"
 	"regexp"
 	"testing"
 
@@ -120,5 +121,40 @@ func TestStageAndCommitSkipsWhenOnlyUnrelatedTableDirty(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("StageAndCommit issued an empty commit when only an unrelated table was dirty (the bug): %v", err)
+	}
+}
+
+// TestConcludeMergeAbsorbsNothingToCommit pins concludeMerge's tolerance for a
+// merge another session concluded first (server mode shares the working set):
+// with no merge open there is nothing to stage, and DOLT_COMMIT's "no changes
+// added to commit" refusal, impossible while a merge is active because Dolt
+// allows that empty commit, means the merge already landed. It must not fail
+// the conclusion into abortMerge's hard reset. Any other commit failure still
+// surfaces.
+func TestConcludeMergeAbsorbsNothingToCommit(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		commitErr error
+		wantErr   bool
+	}{
+		{"merge already concluded", errors.New("no changes added to commit"), false},
+		{"commit refused", errors.New("cannot commit with unresolved conflicts"), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock := newMockDB(t)
+			mock.ExpectQuery(regexp.QuoteMeta("SELECT source_commit FROM dolt_merge_status WHERE is_merging")).
+				WillReturnRows(sqlmock.NewRows([]string{"source_commit"}))
+			mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', ?)")).
+				WithArgs("conclude").
+				WillReturnError(tc.commitErr)
+
+			err := concludeMerge(t.Context(), db, "conclude", "")
+			if (err != nil) != tc.wantErr {
+				t.Errorf("concludeMerge() error = %v, want error: %v", err, tc.wantErr)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Errorf("unmet sqlmock expectations: %v", err)
+			}
+		})
 	}
 }

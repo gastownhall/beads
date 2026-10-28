@@ -546,3 +546,143 @@ func TestEmbeddedMergeAndSettleAutoResolveKeepsCleanMergedTables(t *testing.T) {
 		t.Errorf("%d uncommitted table(s) left after the auto-resolve merge", dirty)
 	}
 }
+
+// TestEmbeddedMergeAndSettleFKRepairKeepsCleanMergedTables (GH#7811): a pull
+// whose only artifact is an FK cascade violation the repair clears must be
+// concluded by the settle pass itself, with the full merge result. Left open,
+// the merge was concluded by the embedded pull's is_blocked commit, which
+// stages only issues, so the peer's cleanly merged metadata row never reached
+// the merge commit a push sends. No trailing DOLT_COMMIT('-Am') here: that
+// sweep is what kept TestEmbeddedMergeAndSettleFKCascadeRepair from seeing
+// the drop.
+func TestEmbeddedMergeAndSettleFKRepairKeepsCleanMergedTables(t *testing.T) {
+	te := newTestEnv(t, "fkridealong")
+	ctx := t.Context()
+	conn := openSettleConn(t, ctx, te)
+
+	tc := embeddedFKCascadeCases[1] // labels — any synced child table works
+	peerBranch := seedEmbeddedFKCascadeDivergence(t, ctx, conn, tc)
+	// The peer's ride-along: a metadata row the merge integrates cleanly
+	// beside the violating label.
+	for _, step := range []struct {
+		query string
+		args  []any
+	}{
+		{"CALL DOLT_CHECKOUT(?)", []any{peerBranch}},
+		{"INSERT INTO metadata (`key`, value) VALUES ('fk_ride_along', 'peer')", nil},
+		{"CALL DOLT_COMMIT('-Am', 'peer metadata ride-along')", nil},
+		{"CALL DOLT_CHECKOUT('main')", nil},
+	} {
+		if _, err := conn.ExecContext(ctx, step.query, step.args...); err != nil {
+			t.Fatalf("%s: %v", step.query, err)
+		}
+	}
+
+	if err := versioncontrolops.MergeAndSettle(ctx, conn, peerBranch); err != nil {
+		t.Fatalf("settling FK-violating merge: %v", err)
+	}
+
+	var value string
+	if err := conn.QueryRowContext(ctx,
+		"SELECT value FROM metadata AS OF 'HEAD' WHERE `key` = 'fk_ride_along'").Scan(&value); err != nil {
+		t.Fatalf("read the peer's metadata row AS OF 'HEAD' (the merge commit does not carry it): %v", err)
+	}
+	if value != "peer" {
+		t.Errorf("HEAD metadata fk_ride_along = %q, want %q", value, "peer")
+	}
+	var orphans int
+	if err := conn.QueryRowContext(ctx, fmt.Sprintf(tc.orphanQuery, tc.name)).Scan(&orphans); err != nil {
+		t.Fatalf("count dangling rows: %v", err)
+	}
+	if orphans != 0 {
+		t.Errorf("repair left %d dangling %s row(s) referencing the deleted issue", orphans, tc.name)
+	}
+	assertMergeConcluded(t, ctx, conn)
+}
+
+// TestEmbeddedMergeAndSettleCommitsPeerTableChanges (GH#7811) covers the
+// table-level shapes the conclusion must stage beside a resolved conflict: a
+// table the peer added (dolt_diff_summary's to_table_name), dropped
+// (from_table_name), or renamed, which dolt_status reports as one
+// "<from> -> <to>" row that matches neither column, and a table whose primary
+// key the peer changed (more key columns, or a new key type), which
+// dolt_diff_summary omits and only dolt_schema_diff names. The conflict is
+// the auto-resolvable metadata add/add of
+// TestEmbeddedMergeAndSettleAutoResolveKeepsCleanMergedTables.
+func TestEmbeddedMergeAndSettleCommitsPeerTableChanges(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		peerDDL string
+		// atHead maps each scratch table to whether HEAD must have it.
+		atHead map[string]bool
+		// headSchema, when set, is a fragment scratch_base's CREATE TABLE
+		// must contain at HEAD.
+		headSchema string
+	}{
+		{"added", "CREATE TABLE scratch_added (id INT PRIMARY KEY)",
+			map[string]bool{"scratch_base": true, "scratch_added": true}, ""},
+		{"dropped", "DROP TABLE scratch_base",
+			map[string]bool{"scratch_base": false}, ""},
+		{"renamed", "RENAME TABLE scratch_base TO scratch_renamed",
+			map[string]bool{"scratch_base": false, "scratch_renamed": true}, ""},
+		{"rekeyed", "ALTER TABLE scratch_base DROP PRIMARY KEY, ADD PRIMARY KEY (id, v)",
+			map[string]bool{"scratch_base": true}, "PRIMARY KEY (`id`,`v`)"},
+		{"retyped", "ALTER TABLE scratch_base MODIFY id BIGINT",
+			map[string]bool{"scratch_base": true}, "`id` bigint NOT NULL"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			te := newTestEnv(t, "peertable"+tc.name)
+			ctx := t.Context()
+			conn := openSettleConn(t, ctx, te)
+
+			exec := func(q string) {
+				t.Helper()
+				if _, err := conn.ExecContext(ctx, q); err != nil {
+					t.Fatalf("%s: %v", q, err)
+				}
+			}
+			exec("CREATE TABLE scratch_base (id INT PRIMARY KEY, v VARCHAR(16))")
+			exec("INSERT INTO scratch_base VALUES (1, 'base')")
+			exec("CALL DOLT_COMMIT('-Am', 'seed scratch table')")
+			exec("CALL DOLT_BRANCH('tablepeer', 'HEAD')")
+			exec("INSERT INTO metadata (`key`, value) VALUES ('dolt_auto_push_commit', 'aaa')")
+			exec("CALL DOLT_COMMIT('-Am', 'main metadata aaa')")
+			exec("CALL DOLT_CHECKOUT('tablepeer')")
+			exec("INSERT INTO metadata (`key`, value) VALUES ('dolt_auto_push_commit', 'bbb')")
+			exec(tc.peerDDL)
+			exec("CALL DOLT_COMMIT('-Am', 'peer metadata bbb + table change')")
+			exec("CALL DOLT_CHECKOUT('main')")
+
+			if err := versioncontrolops.MergeAndSettle(ctx, conn, "tablepeer"); err != nil {
+				t.Fatalf("MergeAndSettle: %v", err)
+			}
+
+			for table, want := range tc.atHead {
+				// The names are the constants above; SHOW TABLES takes no
+				// bind argument for its LIKE pattern.
+				rows, err := conn.QueryContext(ctx, fmt.Sprintf("SHOW TABLES AS OF 'HEAD' LIKE '%s'", table))
+				if err != nil {
+					t.Fatalf("list HEAD tables like %s: %v", table, err)
+				}
+				got := rows.Next()
+				if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+					t.Fatalf("read HEAD tables like %s: %v", table, err)
+				}
+				if got != want {
+					t.Errorf("table %s at HEAD = %v, want %v: the merge commit did not carry the peer's table change", table, got, want)
+				}
+			}
+			if tc.headSchema != "" {
+				var name, create string
+				if err := conn.QueryRowContext(ctx,
+					"SHOW CREATE TABLE scratch_base AS OF 'HEAD'").Scan(&name, &create); err != nil {
+					t.Fatalf("show scratch_base at HEAD: %v", err)
+				}
+				if !strings.Contains(create, tc.headSchema) {
+					t.Errorf("scratch_base at HEAD lacks %s: the merge commit did not carry the peer's key change:\n%s", tc.headSchema, create)
+				}
+			}
+			assertMergeConcluded(t, ctx, conn)
+		})
+	}
+}
