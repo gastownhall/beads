@@ -251,3 +251,71 @@ func TestAutoResolveConflictsAfterCLIPull_DependencyAuditOnly(t *testing.T) {
 		t.Errorf("expected 1 dependency row after resolve, got %d", count)
 	}
 }
+
+// TestSettleMergeInTxKeepsCleanMergedTables is #7811 on the server-mode settle
+// path: CommitResolvedConflicts committed only the auto-resolved metadata
+// table, so a label swap the same merge integrated cleanly stayed out of the
+// merge commit and a push would revert it.
+func TestSettleMergeInTxKeepsCleanMergedTables(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+	db := store.db
+
+	var currentBranch string
+	if err := db.QueryRowContext(ctx, "SELECT active_branch()").Scan(&currentBranch); err != nil {
+		t.Fatalf("get current branch: %v", err)
+	}
+	exec := func(q string) {
+		t.Helper()
+		if _, err := db.ExecContext(ctx, q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	exec("INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) VALUES ('sml-1', 'X', '', '', '', '', 'open', 3, 'bug')")
+	exec("INSERT INTO labels (issue_id, label) VALUES ('sml-1', 'needs-triage')")
+	exec("REPLACE INTO metadata (`key`, value) VALUES ('sml-key', 'base')")
+	exec("CALL DOLT_COMMIT('-Am', 'seed labelled issue')")
+
+	peerBranch := currentBranch + "_smlpeer"
+	if _, err := db.ExecContext(ctx, "CALL DOLT_BRANCH(?, 'HEAD')", peerBranch); err != nil {
+		t.Fatalf("create peer branch: %v", err)
+	}
+	t.Cleanup(func() {
+		db.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", currentBranch)
+		db.ExecContext(ctx, "CALL DOLT_BRANCH('-Df', ?)", peerBranch)
+	})
+	exec("UPDATE metadata SET value = 'ours' WHERE `key` = 'sml-key'")
+	exec("CALL DOLT_COMMIT('-Am', 'metadata ours')")
+	if _, err := db.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", peerBranch); err != nil {
+		t.Fatalf("checkout peer: %v", err)
+	}
+	exec("UPDATE metadata SET value = 'theirs' WHERE `key` = 'sml-key'")
+	exec("DELETE FROM labels WHERE issue_id = 'sml-1' AND label = 'needs-triage'")
+	exec("INSERT INTO labels (issue_id, label) VALUES ('sml-1', 'ready-for-agent')")
+	exec("CALL DOLT_COMMIT('-Am', 'metadata theirs + relabel')")
+	if _, err := db.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", currentBranch); err != nil {
+		t.Fatalf("checkout current: %v", err)
+	}
+
+	if err := settleForcedMerge(ctx, t, store, peerBranch); err != nil {
+		t.Fatalf("settling metadata-conflicted merge: %v", err)
+	}
+
+	var label string
+	if err := db.QueryRowContext(ctx,
+		"SELECT GROUP_CONCAT(label ORDER BY label) FROM labels AS OF 'HEAD' WHERE issue_id = 'sml-1'").Scan(&label); err != nil {
+		t.Fatalf("read HEAD labels: %v", err)
+	}
+	if label != "ready-for-agent" {
+		t.Errorf("labels AS OF HEAD = %q, want %q: the merge commit dropped the peer's cleanly merged label change", label, "ready-for-agent")
+	}
+	var dirty int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_status").Scan(&dirty); err != nil {
+		t.Fatalf("count dolt_status: %v", err)
+	}
+	if dirty != 0 {
+		t.Errorf("%d table(s) left uncommitted after the settled merge", dirty)
+	}
+}
