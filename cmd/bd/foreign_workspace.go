@@ -116,10 +116,16 @@ func guardForeignLegacyDoltWorkspace(beadsDir string, cfg *configfile.Config) er
 // configfile.Config.IsDoltServerMode's precedence with that resolver's
 // config.yaml layer read from beadsDir's own config.yaml and the
 // config.local.yaml beside it rather than from the launcher's: the
-// environment, then a non-local host (env, then metadata, then config.yaml
-// when it names no dolt.mode), then metadata's dolt_mode, then config.yaml's
-// dolt.mode. A config.yaml that cannot be read selects nothing, leaving the
-// stricter embedded classification.
+// environment, then a non-local host, then metadata's dolt_mode, then
+// config.yaml's dolt.mode. The host tier mirrors HostImpliesServerMode
+// since GH#5961: env, then the effective host of the two files
+// (beadsDir's own yaml dolt.host over the metadata dolt_server_host), with
+// a metadata host naming the SAME server as the yaml host (or no yaml host)
+// still deciding alone so an explicit yaml mode cannot silence it; the two
+// files naming DIFFERENT hosts — the tracked leak GH#5961 closes — leave
+// the yaml host inferring, gated by beadsDir's own dolt.mode. A config.yaml
+// that cannot be read selects nothing, leaving the stricter embedded
+// classification.
 //
 // It approximates bd run inside beadsDir: it omits the user-level config.yaml
 // layers and viper's BD_-prefixed environment (BD_DOLT_MODE, BD_DOLT_HOST)
@@ -166,15 +172,16 @@ func targetSelectsServerMode(beadsDir string, cfg *configfile.Config) bool {
 				return true
 			}
 		} else if cfg.DoltMode == "" {
-			if cfg.DoltServerHost != "" {
+			yamlHost, _, hostErr := config.WorkspaceYamlSettingWithLocal(beadsDir, "dolt.host")
+			if hostErr != nil {
+				yamlHost = ""
+			}
+			if cfg.DoltServerHost != "" && (yamlHost == "" || configfile.SameServerHost(yamlHost, cfg.DoltServerHost)) {
 				if !configfile.IsLocalHostString(cfg.DoltServerHost) {
 					return true
 				}
-			} else if mode == "" {
-				host, _, hostErr := config.WorkspaceYamlSettingWithLocal(beadsDir, "dolt.host")
-				if hostErr == nil && host != "" && !configfile.IsLocalHostString(host) {
-					return true
-				}
+			} else if yamlHost != "" && mode == "" && !configfile.IsLocalHostString(yamlHost) {
+				return true
 			}
 		}
 	}

@@ -831,6 +831,7 @@ go_test(
         "foreign_historical_sqlite_embedded_test.go",
         "foreign_workspace_census_test.go",
         "foreign_workspace_test.go",
+        "host_precedence_classifiers_test.go",
         "format_json_alias_embedded_test.go",
         "formula_fixture_proxied_test.go",
         "formula_help_test.go",
