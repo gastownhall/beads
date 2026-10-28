@@ -24,6 +24,7 @@ package doltinfoenv
 import (
 	"os"
 	"slices"
+	"sync"
 
 	"github.com/steveyegge/beads/internal/execenv"
 )
@@ -44,16 +45,46 @@ func DisabledEnv(env []string) []string {
 	return append(slices.Clip(env), EnvVar+"=")
 }
 
+var (
+	mu    sync.Mutex
+	depth int
+	// active reports that the outermost call set the variable, so the
+	// outermost release must unset it again.
+	active bool
+)
+
 // WithDisabled runs fn with the info branch disabled process-wide, unsetting
-// DOLT_REMOTE_INFO_BRANCH again afterwards. A variable that is already
-// present is never touched.
+// DOLT_REMOTE_INFO_BRANCH again when the outermost of any nested or
+// overlapping calls returns. A variable that is already present when the
+// outermost call starts is never touched.
 func WithDisabled(fn func() error) error {
-	if _, present := os.LookupEnv(EnvVar); present {
-		return fn()
-	}
-	// Best effort: Setenv failure is extremely rare, and a push that also
-	// publishes the info branch is better than no push at all.
-	_ = os.Setenv(EnvVar, "")
-	defer func() { _ = os.Unsetenv(EnvVar) }()
+	acquire()
+	defer release()
 	return fn()
+}
+
+func acquire() {
+	mu.Lock()
+	defer mu.Unlock()
+	if depth == 0 {
+		if _, present := os.LookupEnv(EnvVar); !present {
+			// Best effort: Setenv failure is extremely rare, and a push that
+			// also publishes the info branch is better than no push at all.
+			active = os.Setenv(EnvVar, "") == nil
+		}
+	}
+	depth++
+}
+
+func release() {
+	mu.Lock()
+	defer mu.Unlock()
+	depth--
+	if depth > 0 {
+		return
+	}
+	if active {
+		_ = os.Unsetenv(EnvVar)
+	}
+	active = false
 }
