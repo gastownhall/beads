@@ -488,3 +488,61 @@ func TestEmbeddedMergeAndSettleStrategyKeepsNonConflictedLabels(t *testing.T) {
 		t.Errorf("%d uncommitted table(s) left after the strategy merge", dirty)
 	}
 }
+
+// TestEmbeddedMergeAndSettleAutoResolveKeepsCleanMergedTables (bd-cdo628,
+// GH#7811): the same drop for the auto-resolve conclusion. A pull whose only
+// conflict is an auto-resolvable metadata add/add rides together with the
+// peer's cleanly merged label swap; CommitResolvedConflicts must commit both
+// the resolved conflict and the merge's clean output, or the merge commit
+// reverts the peer's label (what a push sends) — the routine metadata sweep
+// of TestEmbeddedMergeAndSettleMetadataConflict plus a label ride-along.
+func TestEmbeddedMergeAndSettleAutoResolveKeepsCleanMergedTables(t *testing.T) {
+	te := newTestEnv(t, "arlabels")
+	ctx := t.Context()
+	conn := openSettleConn(t, ctx, te)
+
+	exec := func(q string) {
+		t.Helper()
+		if _, err := conn.ExecContext(ctx, q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	exec("INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) VALUES ('arl-1', 'X', '', '', '', '', 'open', 3, 'bug')")
+	exec("INSERT INTO labels (issue_id, label) VALUES ('arl-1', 'needs-triage')")
+	exec("CALL DOLT_COMMIT('-Am', 'seed issue + label')")
+	exec("CALL DOLT_BRANCH('arlpeer', 'HEAD')")
+	exec("INSERT INTO metadata (`key`, value) VALUES ('dolt_auto_push_commit', 'aaa')")
+	exec("CALL DOLT_COMMIT('-Am', 'main metadata aaa')")
+	exec("CALL DOLT_CHECKOUT('arlpeer')")
+	exec("INSERT INTO metadata (`key`, value) VALUES ('dolt_auto_push_commit', 'bbb')")
+	exec("DELETE FROM labels WHERE issue_id = 'arl-1' AND label = 'needs-triage'")
+	exec("INSERT INTO labels (issue_id, label) VALUES ('arl-1', 'ready-for-agent')")
+	exec("CALL DOLT_COMMIT('-Am', 'peer metadata bbb + relabel')")
+	exec("CALL DOLT_CHECKOUT('main')")
+
+	if err := versioncontrolops.MergeAndSettle(ctx, conn, "arlpeer"); err != nil {
+		t.Fatalf("MergeAndSettle: %v", err)
+	}
+
+	// The metadata add/add is auto-resolved with "theirs"...
+	var value string
+	if err := conn.QueryRowContext(ctx,
+		"SELECT value FROM metadata AS OF 'HEAD' WHERE `key` = 'dolt_auto_push_commit'").Scan(&value); err != nil {
+		t.Fatalf("read resolved metadata: %v", err)
+	}
+	if value != "bbb" {
+		t.Errorf("metadata value = %q, want %q (theirs)", value, "bbb")
+	}
+	// ...and the merge's clean label output must reach the same commit.
+	labels := headLabels(t, ctx, conn, "arl-1")
+	if len(labels) != 1 || labels[0] != "ready-for-agent" {
+		t.Errorf("HEAD labels = %v, want [ready-for-agent]: the auto-resolve merge commit did not carry the peer's label swap", labels)
+	}
+	var dirty int
+	if err := conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_status").Scan(&dirty); err != nil {
+		t.Fatalf("count dolt_status: %v", err)
+	}
+	if dirty != 0 {
+		t.Errorf("%d uncommitted table(s) left after the auto-resolve merge", dirty)
+	}
+}

@@ -668,14 +668,20 @@ func TryAutoResolveMergeConflicts(ctx context.Context, db DBConn) (bool, error) 
 }
 
 // CommitResolvedConflicts creates the dolt commit that concludes a merge whose
-// conflicts TryAutoResolveMergeConflicts settled. Callers that saw
-// resolved=true MUST call this, and only AFTER TryRepairFKCascadeViolations
-// has run: DOLT_COMMIT refuses a working set with outstanding constraint
-// violations, so a merge carrying both an auto-resolvable conflict and an FK
-// cascade violation could never settle while the resolver committed first
+// conflicts TryAutoResolveMergeConflicts settled. It commits the tables the
+// resolver staged AND everything else the merge produced (concludeMerge →
+// stageMergeResult): a conflicted merge leaves its cleanly merged tables
+// unstaged in the working set, and a conclusion that commits only the
+// resolved tables would record HEAD's copy of those tables — a push then
+// reverts the peer's change to them (GH#7811). Callers that saw resolved=true
+// MUST call this, and only AFTER TryRepairFKCascadeViolations has run:
+// DOLT_COMMIT refuses a working set with outstanding constraint violations,
+// so a merge carrying both an auto-resolvable conflict and an FK cascade
+// violation could never settle while the resolver committed first
 // (bd-578h9.14).
 func CommitResolvedConflicts(ctx context.Context, db DBConn) error {
-	if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-m', 'auto-resolve merge conflicts: metadata, dependencies, schema_migrations, config, issues (field-level three-way merge), labels/comments/events (union)')"); err != nil {
+	if err := concludeMerge(ctx, db,
+		"auto-resolve merge conflicts: metadata, dependencies, schema_migrations, config, issues (field-level three-way merge), labels/comments/events (union)", ""); err != nil {
 		return fmt.Errorf("failed to commit resolved conflicts: %w", err)
 	}
 	return nil

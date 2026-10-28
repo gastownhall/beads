@@ -113,7 +113,18 @@ func TestServerSettlementSQLCommitResponseLossIsIndeterminate(t *testing.T) {
 			WillReturnResult(sqlmock.NewResult(0, 1))
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT `table` FROM dolt_constraint_violations WHERE num_violations > 0")).
 			WillReturnRows(sqlmock.NewRows([]string{"table"}))
-		mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', 'auto-resolve merge conflicts: metadata, dependencies, schema_migrations, config, issues (field-level three-way merge), labels/comments/events (union)')")).
+		// GH#7811: CommitResolvedConflicts now concludes with the FULL merge
+		// result — it reads the open merge's source commit, then the unstaged
+		// tables that differ between HEAD and it (none here) — before the
+		// same DOLT_COMMIT.
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT source_commit FROM dolt_merge_status WHERE is_merging")).
+			WillReturnRows(sqlmock.NewRows([]string{"source_commit"}).AddRow("0123456789abcdefghijklmnopqrstuv"))
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT DISTINCT s.table_name FROM dolt_status s JOIN dolt_diff_summary('HEAD', '0123456789abcdefghijklmnopqrstuv') d ON s.table_name IN (d.from_table_name, d.to_table_name) WHERE s.staged = 0")).
+			WillReturnRows(sqlmock.NewRows([]string{"table_name"}))
+		// concludeMerge passes the commit message as a bind arg, not a
+		// string-interpolated literal.
+		mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', ?)")).
+			WithArgs("auto-resolve merge conflicts: metadata, dependencies, schema_migrations, config, issues (field-level three-way merge), labels/comments/events (union)").
 			WillReturnResult(sqlmock.NewResult(0, 1))
 		responseLoss := errors.New("CLI repair SQL commit response lost")
 		mock.ExpectCommit().WillReturnError(responseLoss)
