@@ -474,3 +474,25 @@ func TestRunInitReinitPreflight_WorktreeCountsMainCheckout(t *testing.T) {
 		t.Errorf("the refusal must create nothing in the main checkout's .beads, found %d entries", len(entries))
 	}
 }
+
+// TestRunInitReinitPreflight_NothingToDestroyProceedsSilently pins the benign
+// half: a target the count proves empty passes the preflight with no warning,
+// no typed prompt and no token demand, so a fresh init asks nothing.
+func TestRunInitReinitPreflight_NothingToDestroyProceedsSilently(t *testing.T) {
+	isolateBeadsDirForTest(t)
+	beadsDir := filepath.Join(t.TempDir(), ".beads") // never created
+
+	var err error
+	out := captureStderr(t, func() {
+		err = runInitReinitPreflight(true, beadsDir, "bd", "")
+	})
+	if err != nil {
+		t.Fatalf("runInitReinitPreflight = %v, want nil: a proven-empty target must proceed", err)
+	}
+	if out != "" {
+		t.Errorf("a proven-empty target must produce no warning, prompt or token demand, got:\n%s", out)
+	}
+	if _, statErr := os.Stat(beadsDir); !os.IsNotExist(statErr) {
+		t.Errorf("the preflight must not create its target, stat err %v", statErr)
+	}
+}
