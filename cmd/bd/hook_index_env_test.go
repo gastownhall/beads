@@ -382,6 +382,7 @@ func realIndexFiles(t *testing.T, gitDir string) map[string][]byte {
 	}
 	return out
 }
+
 // TestPreCommitHasStagedBeadsFiles_ReadsCommitIndex pins AC-2: the export
 // gate must answer "does the commit being prepared touch .beads?", which
 // during a pathspec commit is a question about the pending GIT_INDEX_FILE,
@@ -812,4 +813,41 @@ func TestGitIndexEnv_Containment(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestGitAddFile_LockPreflightTargetsCommitIndex pins AC-5: the lock
+// preflight must check <index>.lock for the index git add will actually
+// use. In a pathspec envelope the parent legitimately holds
+// <gitdir>/index.lock for the whole hook — the preflight cannot refuse on
+// that lock, but it must still refuse when the pending index's own lock
+// (<next>.lock.lock) is held. The no-GIT_INDEX_FILE half of AC-5 is pinned
+// by TestGitAddFile_CapturesLockedIndexFailure.
+func TestGitAddFile_LockPreflightTargetsCommitIndex(t *testing.T) {
+	repo, gitDir, exportPath := newCommitIndexRepo(t)
+	pending := commitIndexPathspecEnvelope(t, repo, gitDir)
+	commitIndexWrite(t, exportPath, []byte(`{"id":"v2"}`+"\n"))
+	// Another git process is writing the pending index itself.
+	pendingLock := pending + ".lock"
+	if err := os.WriteFile(pendingLock, []byte("held by another git process"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before := commitIndexRead(t, pending)
+
+	if err := os.Unsetenv("GIT_DIR"); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(repo)
+	t.Setenv("GIT_INDEX_FILE", pending)
+
+	err := gitAddFile(exportPath)
+	if err == nil {
+		t.Fatal("expected gitAddFile to fail while the pending index's lock is held, got nil")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "index is locked") || !strings.Contains(msg, pendingLock) {
+		t.Fatalf("expected the error to name the pending index's lock %s, got: %q", pendingLock, msg)
+	}
+	if got := commitIndexRead(t, pending); string(got) != string(before) {
+		t.Fatal("gitAddFile staged into the pending index despite the lock")
+	}
 }
