@@ -285,4 +285,39 @@ func TestEmbeddedDepDefaultDirectionNotesHiddenChildren(t *testing.T) {
 			t.Errorf("a relate pair plus one child should report 1, got:\n%s", stderr)
 		}
 	})
+	t.Run("machine_output", func(t *testing.T) {
+		// AC-5: --json and --format=json/mermaid answer what they always
+		// answered, byte for byte, and never see the note.
+		stdout, stderr := bdDepInOut(t, "list", root.ID, "--json")
+		if strings.TrimSpace(stdout) != "[]" {
+			t.Errorf("--json list stdout = %q, want []", stdout)
+		}
+		if strings.Contains(stderr, "note:") {
+			t.Errorf("--json list should carry no note, got:\n%s", stderr)
+		}
+
+		stdout, stderr = bdDepInOut(t, "tree", root.ID, "--json")
+		if !strings.Contains(stdout, root.ID) {
+			t.Errorf("--json tree stdout should hold the one root node, got:\n%s", stdout)
+		}
+		if strings.Contains(stderr, "note:") {
+			t.Errorf("--json tree should carry no note, got:\n%s", stderr)
+		}
+
+		stdout, stderr = bdDepInOut(t, "tree", root.ID, "--format", "json")
+		if !strings.Contains(stdout, root.ID) {
+			t.Errorf("--format=json tree stdout should hold the one root node, got:\n%s", stdout)
+		}
+		if strings.Contains(stderr, "note:") {
+			t.Errorf("--format=json tree should carry no note, got:\n%s", stderr)
+		}
+
+		stdout, stderr = bdDepInOut(t, "tree", root.ID, "--format", "mermaid")
+		if !strings.Contains(stdout, "flowchart TD") || !strings.Contains(stdout, root.ID) {
+			t.Errorf("--format=mermaid stdout should be the one-node flowchart, got:\n%s", stdout)
+		}
+		if strings.Contains(stderr, "note:") {
+			t.Errorf("--format=mermaid should carry no note, got:\n%s", stderr)
+		}
+	})
 }
