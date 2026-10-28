@@ -1069,3 +1069,65 @@ func TestCrossProject_IdentityCheck_PathOnlyConfig_GlobalForeignRejected(t *test
 		}
 	}
 }
+
+// TestCrossProject_IdentityCheck_PathOnlyConfig_SoftSkipAndMatch guards the
+// Path-only open's skip contract: making Path-only configs verify against
+// the resolved dir must not turn a soft-skip into a hard failure. A
+// Path-only open of an existing database succeeds when the resolved dir's
+// metadata.json carries the SAME project id, holds no metadata.json at all,
+// or holds one without a project_id (GH#5559).
+func TestCrossProject_IdentityCheck_PathOnlyConfig_SoftSkipAndMatch(t *testing.T) {
+	for name, localMetadata := range map[string]func(t *testing.T, f *identityTestFixture, dbID string){
+		"matching project id": func(t *testing.T, f *identityTestFixture, dbID string) {
+			f.saveLocalProjectID(t, dbID)
+		},
+		"no metadata.json": func(t *testing.T, f *identityTestFixture, dbID string) {},
+		"empty project id": func(t *testing.T, f *identityTestFixture, dbID string) {
+			if err := (&configfile.Config{}).Save(f.beadsDir); err != nil {
+				t.Fatalf("save metadata.json: %v", err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			skipIfNoDolt(t)
+			acquireTestSlot()
+			t.Cleanup(releaseTestSlot)
+
+			f := newIdentityTestFixture(t, "pathskip")
+			dbID := "99999999-9999-9999-9999-999999999999"
+
+			// Seed an existing database with its owner's _project_id.
+			ownerStore, err := openStoreWithOwnBudget(t, f.config())
+			if err != nil {
+				t.Fatalf("create owner store: %v", err)
+			}
+			seedCtx, seedCancel := testContext(t)
+			if err := ownerStore.SetMetadata(seedCtx, "_project_id", dbID); err != nil {
+				ownerStore.Close()
+				seedCancel()
+				t.Fatalf("seed _project_id: %v", err)
+			}
+			seedCancel()
+			ownerStore.Close()
+
+			localMetadata(t, f, dbID)
+
+			store, err := openStoreWithOwnBudget(t, f.pathOnlyConfig())
+			if err != nil {
+				t.Fatalf("Path-only open must succeed for this workspace state, got: %v", err)
+			}
+			defer store.Close()
+			// Build the read context after the open drained any earlier
+			// deadline (see openStoreWithOwnBudget).
+			ctx, cancel := testContext(t)
+			defer cancel()
+			got, err := store.GetMetadata(ctx, "_project_id")
+			if err != nil {
+				t.Fatalf("read _project_id: %v", err)
+			}
+			if got != dbID {
+				t.Errorf("GetMetadata(_project_id) = %q, want %q", got, dbID)
+			}
+		})
+	}
+}
