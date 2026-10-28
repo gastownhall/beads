@@ -605,6 +605,23 @@ async def test_update_issue_open_on_closed_issue_reopens_then_updates(sample_iss
 
 
 @pytest.mark.asyncio
+async def test_reopen_issue_not_closed_raises():
+    """GH#6872: reopen on an issue that is not closed reports it instead of returning nothing."""
+    from beads_mcp.bd_client import BdError
+
+    mock_client = AsyncMock()
+    mock_client.reopen = AsyncMock(return_value=[])
+
+    with (
+        patch("beads_mcp.tools._get_client", return_value=mock_client),
+        pytest.raises(BdError, match="not closed") as exc_info,
+    ):
+        await beads_reopen_issue(issue_ids=["bd-1"])
+
+    assert "bd-1" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
 async def test_beads_stats():
     """Test beads_stats tool."""
     stats_data = Stats(

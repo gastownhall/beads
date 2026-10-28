@@ -343,6 +343,27 @@ async def test_reopen_issue_tool(mcp_client):
 
 
 @pytest.mark.asyncio
+async def test_reopen_not_closed_issue_tool_errors(mcp_client):
+    """reopen on an issue that is not closed fails with a clear error (GH#6872)."""
+    import json
+
+    from fastmcp.exceptions import ToolError
+
+    create_result = await mcp_client.call_tool(
+        "create", {"title": "Open issue", "priority": 1, "issue_type": "task", "brief": False}
+    )
+    issue_id = json.loads(create_result.content[0].text)["id"]
+
+    with pytest.raises(ToolError) as exc_info:
+        await mcp_client.call_tool("reopen", {"issue_ids": [issue_id]})
+
+    message = str(exc_info.value)
+    assert issue_id in message
+    assert "not closed" in message
+    assert "Invalid response" not in message
+
+
+@pytest.mark.asyncio
 async def test_reopen_multiple_issues_tool(mcp_client):
     """Test reopening multiple issues via MCP tool."""
     import json
