@@ -597,7 +597,15 @@ async def beads_reopen_issue(
     """
     client = await _get_client()
     params = ReopenIssueParams(issue_ids=issue_ids, reason=reason)
-    return await client.reopen(params)
+    reopened = await client.reopen(params)
+    if not reopened:
+        verb = "is" if len(issue_ids) == 1 else "are"
+        raise BdError(
+            f"Nothing to reopen: {', '.join(issue_ids)} {verb} not closed. "
+            "reopen only applies to closed issues; use update(status=...) to change "
+            "the status of an open, deferred or blocked issue."
+        )
+    return reopened
 
 
 async def beads_add_dependency(
