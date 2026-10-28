@@ -4,6 +4,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -241,5 +242,41 @@ func TestInitRepoint_OwnPortOverStaleEnvIsNotARepoint(t *testing.T) {
 	}
 	if strings.Contains(out, "Repointing") {
 		t.Fatalf("restating flags printed a repoint notice:\n%s", out)
+	}
+}
+
+// AC-5: a project_id workspace whose configured database is missing from its
+// server (no Tier-1 directory either) is ADR-0004's missing-database case for
+// that database, whatever --database names; --recreate-missing is what lets
+// the repoint proceed, and it says so.
+func TestInitRepoint_MissingConfiguredNeedsRecreateMissing(t *testing.T) {
+	w := newRepointWorkspace(t, 0)
+	target := w.otherDB(t, "b")
+	dropTestDatabase(w.db, testDoltServerPort)
+
+	out, code := w.reinit(t, w.env, "--reinit-local", "--database", target, "--non-interactive")
+	if code == 0 {
+		t.Fatalf("bd init repointed away from a missing configured database without --recreate-missing:\n%s", out)
+	}
+	wantRefusal := fmt.Sprintf("Database %q not found on server at 127.0.0.1:%d", w.db, testDoltServerPort)
+	if !strings.Contains(out, wantRefusal) {
+		t.Fatalf("expected ADR-0004's refusal naming %s at its configured endpoint (%q):\n%s", w.db, wantRefusal, out)
+	}
+	requireDatabaseAbsent(t, target)
+	if got := recordedDB(t, w.beadsDir); got != w.db {
+		t.Fatalf("metadata.json records %q after the refusal, want %q", got, w.db)
+	}
+
+	out, code = w.reinit(t, w.env, "--reinit-local", "--recreate-missing", "--database", target, "--non-interactive")
+	if code != 0 {
+		t.Fatalf("exit = %d with --recreate-missing, want 0\n%s", code, out)
+	}
+	wantNotice := fmt.Sprintf("Repointing this workspace from database %s (127.0.0.1:%d) to %s (127.0.0.1:%d).",
+		w.db, testDoltServerPort, target, testDoltServerPort)
+	if !strings.Contains(out, wantNotice) {
+		t.Fatalf("expected the repoint notice %q:\n%s", wantNotice, out)
+	}
+	if got := recordedDB(t, w.beadsDir); got != target {
+		t.Fatalf("metadata.json records %q, want %q", got, target)
 	}
 }
