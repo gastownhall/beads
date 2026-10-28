@@ -667,6 +667,27 @@ func transferExecTimeoutDuration() time.Duration {
 	return timeoutFromEnv(transferExecTimeoutEnv, transferExecTimeout)
 }
 
+// annotateTransferTimeout turns the driver's opaque read-deadline failure into
+// an actionable one. When a transfer connection's ReadTimeout fires, the
+// go-sql-driver logs "read tcp ...: i/o timeout" and returns
+// mysql.ErrInvalidConn ("invalid connection"); later statements on the dead
+// connection get driver.ErrBadConn. Neither names the deadline that fired nor
+// the knob that raises it. This mirrors what cliTransferError does for the
+// dolt-CLI path. %w keeps the original error and its text, so errors.Is and
+// the string classifiers (isRetryableError, isBranchTrackingError) decide as
+// before.
+func annotateTransferTimeout(err error, deadline time.Duration) error {
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, mysql.ErrInvalidConn) && !errors.Is(err, driver.ErrBadConn) &&
+		!errors.Is(err, os.ErrDeadlineExceeded) {
+		return err
+	}
+	return fmt.Errorf("%w (the server-side transfer exceeded the %v read deadline; raise it with %s, e.g. %s=90m)",
+		err, deadline, transferExecTimeoutEnv, transferExecTimeoutEnv)
+}
+
 // timeoutFromEnv returns the duration configured in the named env var, falling
 // back to fallback when the var is unset, unparsable, or non-positive. Valid
 // time.ParseDuration strings (e.g. "2m", "90s") or bare numbers treated as
@@ -2937,13 +2958,14 @@ func (s *DoltStore) execWithLongTimeout(ctx context.Context, query string, args 
 // passes s.branch explicitly as a CALL DOLT_PUSH(...) arg, so this fresh
 // connection's default checkout never matters.
 func (s *DoltStore) execWithLongTimeoutNoTx(ctx context.Context, query string, args ...any) error {
-	db, err := s.oneShotConn(transferExecTimeoutDuration())
+	deadline := transferExecTimeoutDuration()
+	db, err := s.oneShotConn(deadline)
 	if err != nil {
 		return err
 	}
 	defer db.Close()
 	_, err = db.ExecContext(ctx, query, args...)
-	return err
+	return annotateTransferTimeout(err, deadline)
 }
 
 // oneShotConn opens a one-shot connection with the given read deadline
