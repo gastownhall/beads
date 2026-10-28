@@ -1055,6 +1055,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd github pull` no longer overwrites a bead linked to another GitHub
+  repository's issue with the same number, and `bd github push` and
+  `bd github sync` no longer write such a bead's content onto the configured
+  repository's same-numbered issue, report it as a sync conflict, or (for a
+  pull by bead ID or a pre-linked hydration) read that issue for it at all.
+  Issue numbers are only unique within a repository, but the matching keyed
+  refs by the bare number of any repository's issue URL. A ref now matches
+  only when it names an issue of the configured host and owner/repo, in
+  either the `github.com` web or `api.github.com` REST spelling and without
+  regard to letter case, and the `github:N` shorthand still means the
+  configured repository. `bd github push --dry-run` counts beads linked
+  outside the configured repository as skipped, as a real push does. The
+  trade-off: after a repository rename or transfer, a bead whose
+  `external_ref` names the old owner/repo is no longer matched or pushed,
+  and the next pull imports a new bead for each such issue; point the bead
+  at the new URL first with `bd update <id> --external-ref <url>`
+  (#7781, #7794, reported and first fixed by @NahumLitvin).
 - `bd list --watch` and `bd show --watch` now wait a full poll interval after
   each refresh, and `bd list --watch --parent` reads its tree in one
   transaction, so other bd commands on an embedded workspace no longer stall

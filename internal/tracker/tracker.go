@@ -51,6 +51,9 @@ type IssueTracker interface {
 	IsExternalRef(ref string) bool
 
 	// ExtractIdentifier extracts the human-readable identifier from an external_ref.
+	// "" means the tracker cannot address the ref in its configured target
+	// (e.g. another repository's issue): the engine then neither fetches nor
+	// writes the issue the ref names.
 	ExtractIdentifier(ref string) string
 
 	// BuildExternalRef constructs an external_ref string for a tracker issue.

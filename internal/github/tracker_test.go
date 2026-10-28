@@ -109,6 +109,29 @@ func TestExtractIdentifier(t *testing.T) {
 	}
 }
 
+// TestExtractIdentifierScopedToRepository pins that an initialized GitHub
+// tracker only addresses issues of its configured repository: a ref pointing
+// at another repository yields "", so no sync path can match or write this
+// repository's same-numbered issue by accident (gastownhall/beads#7781).
+func TestExtractIdentifierScopedToRepository(t *testing.T) {
+	tr := &Tracker{client: NewClient("token", "acme", "repo-b")}
+	tests := []struct {
+		ref  string
+		want string
+	}{
+		{"https://github.com/acme/repo-b/issues/42", "42"},
+		{"https://github.com/ACME/Repo-B/issues/42", "42"},
+		{"github:42", "42"},
+		{"https://github.com/acme/repo-a/issues/42", ""},
+		{"https://github.com/other/repo-b/issues/42", ""},
+	}
+	for _, tt := range tests {
+		if got := tr.ExtractIdentifier(tt.ref); got != tt.want {
+			t.Errorf("ExtractIdentifier(%q) = %q, want %q", tt.ref, got, tt.want)
+		}
+	}
+}
+
 func TestBuildExternalRef(t *testing.T) {
 	tr := &Tracker{}
 	ti := &tracker.TrackerIssue{
