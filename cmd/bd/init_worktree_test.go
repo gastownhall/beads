@@ -10,7 +10,12 @@ import (
 	"github.com/steveyegge/beads/internal/git"
 )
 
-func TestCountExistingIssues_WorktreeFallback(t *testing.T) {
+// These pin both halves of init's worktree resolution: the re-init preflight
+// counts the gate's workspace (GetWorktreeFallbackBeadsDir, the main
+// checkout's .beads, GH#5628), while discovery keeps FindBeadsDir's
+// worktree-local preference for everything else.
+
+func TestGetWorktreeFallbackBeadsDir_MainRepoBeads(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "beads-worktree-init-test-*")
 	if err != nil {
 		t.Fatal(err)
@@ -94,7 +99,7 @@ func TestCountExistingIssues_WorktreeFallback(t *testing.T) {
 	}
 }
 
-func TestCountExistingIssues_WorktreeLocalBeadsPreferred(t *testing.T) {
+func TestFindBeadsDir_WorktreeLocalBeadsPreferred(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "beads-worktree-init-local-test-*")
 	if err != nil {
 		t.Fatal(err)
@@ -167,7 +172,7 @@ func TestCountExistingIssues_WorktreeLocalBeadsPreferred(t *testing.T) {
 	}
 }
 
-func TestCountExistingIssues_WorktreeNoBeadsAnywhere(t *testing.T) {
+func TestFindBeadsDir_WorktreeNoBeadsAnywhere(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "beads-worktree-init-empty-test-*")
 	if err != nil {
 		t.Fatal(err)
