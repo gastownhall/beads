@@ -23,9 +23,12 @@ import (
 // the id against a prefix-ROUTED database, and the walk then has to be asked of
 // that store rather than of the local one.
 type treeTarget struct {
-	rootID  string
-	walker  issueops.TreeWalker
-	cleanup func()
+	rootID string
+	walker issueops.TreeWalker
+	// relations hands back the neighbor-query role of the same store as walker,
+	// asked for only when the hidden-children note needs it.
+	relations func() (issueops.Relations, error)
+	cleanup   func()
 }
 
 // resolveTreeTarget resolves the argument to an exact id and hands back the tree
@@ -47,7 +50,7 @@ func resolveTreeTarget(ctx context.Context, arg string) (treeTarget, error) {
 		cleanup()
 		return treeTarget{}, err
 	}
-	return treeTarget{rootID: rootID, walker: walker, cleanup: cleanup}, nil
+	return treeTarget{rootID: rootID, walker: walker, relations: treeStore.IssueRelations, cleanup: cleanup}, nil
 }
 
 // proxiedTreeTarget resolves the argument against the proxied server and hands
@@ -77,7 +80,7 @@ func proxiedTreeTarget(ctx context.Context, arg string) (treeTarget, error) {
 	if err != nil {
 		return treeTarget{}, err
 	}
-	return treeTarget{rootID: rootID, walker: walker, cleanup: func() {}}, nil
+	return treeTarget{rootID: rootID, walker: walker, relations: proxiedIssueRelations, cleanup: func() {}}, nil
 }
 
 // isMermaidTreeFormat reports whether --format selects the mermaid renderer.
@@ -161,6 +164,15 @@ func runDepTree(cmd *cobra.Command, ctx context.Context, args []string) error {
 		// The role's slice is empty rather than nil for a successful call, so
 		// this is `[]` and never `null` without a guard here.
 		return outputJSON(tree)
+	}
+
+	// A down walk never reads the root's children (inbound parent-child edges),
+	// so a parent renders alone, as a childless issue does: say so on stderr
+	// after the tree (GH#5151). Deferred after cleanup, so it runs first.
+	if direction == issueops.TreeDown {
+		if rel, err := target.relations(); err == nil {
+			defer noteHiddenChildren(ctx, rel, target.rootID, "tree")
+		}
 	}
 
 	if len(tree) == 0 {

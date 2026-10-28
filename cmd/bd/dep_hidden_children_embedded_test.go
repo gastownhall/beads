@@ -63,8 +63,13 @@ func TestEmbeddedDepDefaultDirectionNotesHiddenChildren(t *testing.T) {
 		step := bdCreate(t, bd, dir, fmt.Sprintf("Step %d", i), "--type", "task", "--ephemeral", "--parent", root.ID)
 		steps = append(steps, step.ID)
 	}
+	// C: a childless control with the same title, type, ephemeral flag and
+	// status.
+	control := bdCreate(t, bd, dir, "Molecule root", "--type", "epic", "--ephemeral")
+	bdUpdate(t, bd, dir, control.ID, "--status", "hooked")
 
 	listCmd := "To list them, run: bd dep list " + root.ID + " --direction=up --type=parent-child"
+	treeCmd := "To see them, run: bd dep tree " + root.ID + " --direction=up"
 
 	t.Run("list_root_26", func(t *testing.T) {
 		stdout, stderr := bdRunSplit(t, bd, dir, "dep", "list", root.ID)
@@ -91,6 +96,53 @@ func TestEmbeddedDepDefaultDirectionNotesHiddenChildren(t *testing.T) {
 			_, stderr := bdRunSplit(t, bd, dir, args...)
 			if !strings.Contains(stderr, hiddenChildrenNote(root.ID, 26)) {
 				t.Errorf("%v: stderr missing the 26-child note:\n%s", extra, stderr)
+			}
+		}
+	})
+
+	t.Run("tree_root_26", func(t *testing.T) {
+		stdout, stderr := bdRunSplit(t, bd, dir, "dep", "tree", root.ID)
+		controlOut, controlErr := bdRunSplit(t, bd, dir, "dep", "tree", control.ID)
+		if want := strings.ReplaceAll(controlOut, control.ID, root.ID); stdout != want {
+			t.Errorf("stdout differs from the childless control's:\n got %q\nwant %q", stdout, want)
+		}
+		if strings.Contains(controlErr, "note:") {
+			t.Errorf("childless control printed a note:\n%s", controlErr)
+		}
+		if !strings.Contains(stderr, hiddenChildrenNote(root.ID, 26)) {
+			t.Errorf("stderr missing the 26-child note:\n%s", stderr)
+		}
+		if !strings.Contains(stderr, treeCmd+"\n") {
+			t.Errorf("stderr missing %q:\n%s", treeCmd, stderr)
+		}
+
+		// The printed command shows every step.
+		upOut, _ := bdRunSplit(t, bd, dir, "dep", "tree", root.ID, "--direction=up")
+		for _, id := range steps {
+			if !strings.Contains(upOut, id) {
+				t.Errorf("printed command does not show step %s:\n%s", id, upOut)
+			}
+		}
+
+		// --direction=down, --status and --max-depth still count every child.
+		for _, extra := range [][]string{{"--direction=down"}, {"--status=open"}, {"--max-depth=1"}} {
+			args := append([]string{"dep", "tree", root.ID}, extra...)
+			_, stderr := bdRunSplit(t, bd, dir, args...)
+			if !strings.Contains(stderr, hiddenChildrenNote(root.ID, 26)) {
+				t.Errorf("%v: stderr missing the 26-child note:\n%s", extra, stderr)
+			}
+		}
+	})
+
+	t.Run("partial_id", func(t *testing.T) {
+		partial := strings.TrimPrefix(root.ID, "hc-")
+		for _, view := range []string{"list", "tree"} {
+			_, stderr := bdRunSplit(t, bd, dir, "dep", view, partial)
+			if !strings.Contains(stderr, hiddenChildrenNote(root.ID, 26)) {
+				t.Errorf("dep %s %s: note should name the full id %s:\n%s", view, partial, root.ID, stderr)
+			}
+			if !strings.Contains(stderr, "bd dep "+view+" "+root.ID+" --direction=up") {
+				t.Errorf("dep %s %s: printed command should name the full id %s:\n%s", view, partial, root.ID, stderr)
 			}
 		}
 	})
