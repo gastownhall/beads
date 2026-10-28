@@ -165,6 +165,17 @@ func (id initIdentity) Repoints() bool {
 	return false
 }
 
+// printRepointNotice tells the operator which database this init moves the
+// workspace off and onto. --quiet suppresses it, like #3885's mode notice.
+func (id initIdentity) printRepointNotice(quiet bool) {
+	if quiet || !id.Repoints() {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "Repointing this workspace from database %s (%s) to %s (%s).\n",
+		remedy.PrintedValue(id.Configured.databaseOrDefault()), id.Configured.location(),
+		remedy.PrintedValue(id.Target.databaseOrDefault()), id.Target.location())
+}
+
 // configuredRef is the database the guards check for a guard run at the
 // init target. Through a redirect the guards still read the stub .beads, so
 // they get no override there.

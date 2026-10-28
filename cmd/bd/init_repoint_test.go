@@ -176,3 +176,42 @@ func TestInitRepoint_RestatedPortOverStaleExportCounts(t *testing.T) {
 		t.Errorf("a restated port is not a repoint:\n%s", out)
 	}
 }
+
+// AC-5: a repoint off a configured database that is missing from its server,
+// with no Tier-1 directory, meets ADR-0004's missing-database refusal about
+// that database at its own endpoint; --recreate-missing lets it through, and
+// init says what it is doing.
+func TestInitRepoint_MissingConfiguredNeedsRecreateMissing(t *testing.T) {
+	w := newRepointWorkspace(t, 1)
+	b := uniqueTestDBName(t) + "_b"
+	t.Cleanup(func() { dropTestDatabase(b, testDoltServerPort) })
+	dropTestDatabase(w.a, testDoltServerPort)
+	if err := os.RemoveAll(filepath.Join(w.beadsDir, "dolt", w.a)); err != nil {
+		t.Fatal(err)
+	}
+	endpoint := fmt.Sprintf("127.0.0.1:%d", testDoltServerPort)
+
+	out, code := w.reinit(t, nil, "--database", b)
+	if code == 0 {
+		t.Fatalf("repoint off a missing database must refuse without --recreate-missing:\n%s", out)
+	}
+	if !strings.Contains(out, fmt.Sprintf("Database %q not found on server at %s", w.a, endpoint)) {
+		t.Errorf("refusal must name %s at its configured endpoint %s:\n%s", w.a, endpoint, out)
+	}
+	assertNotOnTestServer(t, b)
+	if got := w.recordedDatabase(t); got != w.a {
+		t.Fatalf("metadata.json dolt_database = %q after the refusal, want %q", got, w.a)
+	}
+
+	out, code = w.reinit(t, nil, "--recreate-missing", "--database", b)
+	if code != 0 {
+		t.Fatalf("--recreate-missing repoint: exit = %d\n%s", code, out)
+	}
+	notice := fmt.Sprintf("Repointing this workspace from database %s (%s) to %s (%s).", w.a, endpoint, b, endpoint)
+	if !strings.Contains(out, notice) {
+		t.Errorf("missing repoint notice %q:\n%s", notice, out)
+	}
+	if got := w.recordedDatabase(t); got != b {
+		t.Errorf("metadata.json dolt_database = %q, want %q", got, b)
+	}
+}
