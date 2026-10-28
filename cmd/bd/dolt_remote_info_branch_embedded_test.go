@@ -110,3 +110,34 @@ func TestEmbeddedDoltPushDoesNotPublishRemoteInfoBranch(t *testing.T) {
 		t.Errorf("auto-push published %s on the git remote (%s)", doltRemoteInfoBranchName, got)
 	}
 }
+
+// TestEmbeddedDoltPushHonorsExplicitRemoteInfoBranch pins the opt-in: with
+// DOLT_REMOTE_INFO_BRANCH set to a name, `bd dolt push` publishes that
+// branch — still the single DOLT_REMOTE.md marker — and never the default
+// name.
+func TestEmbeddedDoltPushHonorsExplicitRemoteInfoBranch(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded integration tests")
+	}
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "ri")
+	env := riEnvOptIn(dir, "dolt-info")
+	remoteDir := setupBareGitRemote(t)
+	riRunOK(t, bd, dir, env, "dolt", "remote", "add", "origin", "git+file://"+remoteDir)
+
+	riCreate(t, bd, dir, env, "first issue", "--type", "task")
+	riRunOK(t, bd, dir, env, "dolt", "push")
+	if lsRemoteRef(t, remoteDir, "refs/heads/dolt-info") == "" {
+		t.Fatal("bd dolt push with DOLT_REMOTE_INFO_BRANCH=dolt-info did not publish refs/heads/dolt-info")
+	}
+	if lsRemoteRef(t, remoteDir, "refs/heads/"+doltRemoteInfoBranchName) != "" {
+		t.Errorf("bd dolt push published %s despite the explicit override", doltRemoteInfoBranchName)
+	}
+	// The opt-in branch stays what Dolt writes: a single-file marker tree.
+	tree := strings.TrimSpace(resetDataRunGit(t, remoteDir, "ls-tree", "refs/heads/dolt-info"))
+	lines := strings.Split(tree, "\n")
+	if len(lines) != 1 || !strings.Contains(lines[0], "DOLT_REMOTE.md") {
+		t.Errorf("refs/heads/dolt-info tree = %q, want the single DOLT_REMOTE.md marker", tree)
+	}
+}
