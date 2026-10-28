@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/config"
@@ -240,6 +241,104 @@ func writeMetadataPort(t *testing.T, beadsDir string, port int) {
 	}
 	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), data, 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestDialConfigCentralConfigPort pins the central server config's rank in
+// the port chain (GH#3895): the last step (below BEADS_DOLT_SERVER_PORT, the
+// port file, listener.port, dolt.port and metadata.json dolt_server_port),
+// authoritative like dolt.port — so the legacy BEADS_DOLT_PORT does not
+// replace it — skipped in shared-server mode, present in
+// DefaultConfigForMode's chain too, and the whole-resolved endpoint keys its
+// credentials lookup on the central host and port. PortSourceLabels renders
+// it as the last step, which is how `bd dolt show` lists it.
+func TestDialConfigCentralConfigPort(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	t.Setenv("BEADS_DOLT_PORT", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	isolateUserConfig(t)
+
+	centralPath := filepath.Join(t.TempDir(), "server.json")
+	if err := os.WriteFile(centralPath,
+		[]byte(`{"dolt_server_host":"db.central.invalid","dolt_server_port":6007,"dolt_server_user":"central_user"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_CENTRAL_CONFIG", centralPath)
+
+	// 1. Nothing else names a port: the central config resolves one, as an
+	// authoritative source (a user assertion, not bd bookkeeping).
+	beadsDir := t.TempDir()
+	cfg := DialConfig(beadsDir)
+	if cfg.Port != 6007 || cfg.PortSource != PortSourceCentralConfig {
+		t.Fatalf("central only: port=%d source=%q, want 6007/%q", cfg.Port, cfg.PortSource, PortSourceCentralConfig)
+	}
+	if !cfg.PortSource.IsAuthoritative() {
+		t.Fatalf("central config source must be authoritative, like dolt.port")
+	}
+
+	// 2. The legacy BEADS_DOLT_PORT replaces only non-authoritative ports;
+	// it must not replace the central config's.
+	t.Setenv("BEADS_DOLT_PORT", "6100")
+	cfg = DialConfig(beadsDir)
+	if cfg.Port != 6007 {
+		t.Fatalf("legacy BEADS_DOLT_PORT: port=%d, want 6007 (it must not replace a central config port)", cfg.Port)
+	}
+	t.Setenv("BEADS_DOLT_PORT", "")
+
+	// 3. Every step above it still wins. metadata.json dolt_server_port is
+	// the step right above; the whole ladder behaves the same way.
+	writeMetadataPort(t, beadsDir, 6001)
+	cfg = DialConfig(beadsDir)
+	if cfg.Port != 6001 || cfg.PortSource != PortSourceMetadataJSON {
+		t.Fatalf("+ metadata.json: port=%d source=%q, want 6001/%q (metadata over central)", cfg.Port, cfg.PortSource, PortSourceMetadataJSON)
+	}
+
+	// 4. Shared-server mode skips the central port: the shared default (or
+	// the shared dir's own sources) is the one port all its workspaces
+	// share, and a hosted central port must not hijack it.
+	t.Setenv("BEADS_SHARED_SERVER_DIR", t.TempDir())
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+	cfg = DefaultConfig(t.TempDir())
+	if cfg.Port != DefaultSharedServerPort || cfg.PortSource != PortSourceSharedServerDefault {
+		t.Fatalf("shared mode: port=%d source=%q, want %d/%q (central config skipped)",
+			cfg.Port, cfg.PortSource, DefaultSharedServerPort, PortSourceSharedServerDefault)
+	}
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+
+	// 5. DefaultConfigForMode's own resolver — diagnostics of an
+	// already-classified non-shared workspace — has the same last step.
+	cfg = DefaultConfigForMode(t.TempDir(), false)
+	if cfg.Port != 6007 || cfg.PortSource != PortSourceCentralConfig {
+		t.Fatalf("DefaultConfigForMode: port=%d source=%q, want 6007/%q", cfg.Port, cfg.PortSource, PortSourceCentralConfig)
+	}
+
+	// 6. The endpoint the store dials keys its credentials lookup on the
+	// central host and port, never port 0 or an external-host default.
+	credFile := filepath.Join(t.TempDir(), "credentials")
+	if err := os.WriteFile(credFile,
+		[]byte("[db.central.invalid:6007]\npassword = centralpw\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_CREDENTIALS_FILE", credFile)
+	ep := ResolveEndpoint(t.TempDir(), nil)
+	if ep.Host != "db.central.invalid" || ep.Port != 6007 {
+		t.Fatalf("ResolveEndpoint: host=%q port=%d, want db.central.invalid:6007", ep.Host, ep.Port)
+	}
+	if got := ep.Password(); got != "centralpw" {
+		t.Errorf("endpoint password = %q, want centralpw (keyed on [db.central.invalid:6007])", got)
+	}
+	if got := ep.User; got != "central_user" {
+		t.Errorf("endpoint user = %q, want central_user", got)
+	}
+
+	// 7. `bd dolt show` renders the chain: the central config is the last
+	// step, and the legacy env var is named beside it as never replacing it.
+	labels := PortSourceLabels()
+	if len(labels) == 0 || !strings.Contains(labels[len(labels)-1], "server.json") {
+		t.Errorf("PortSourceLabels' last step does not name the central config: %v", labels)
+	}
+	if !strings.Contains(LegacyPortEnvLabel, "server.json") {
+		t.Errorf("LegacyPortEnvLabel does not say the central config port survives the legacy env var: %q", LegacyPortEnvLabel)
 	}
 }
 

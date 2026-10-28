@@ -890,7 +890,7 @@ const (
 // authoritative one (GH#4052).
 func (s PortSource) IsAuthoritative() bool {
 	switch s {
-	case PortSourceEnv, PortSourceDoltConfigYaml, PortSourceConfigYaml, PortSourceMetadataJSON, PortSourceCallerExplicit:
+	case PortSourceEnv, PortSourceDoltConfigYaml, PortSourceConfigYaml, PortSourceMetadataJSON, PortSourceCallerExplicit, PortSourceCentralConfig:
 		return true
 	default:
 		return false
@@ -1050,6 +1050,16 @@ func resolveServerPortForMode(workspaceBeadsDir, serverDir string, sharedMode, s
 	if cfg, err := configfile.LoadForDiscovery(metadataDir); err == nil && cfg != nil && cfg.DoltServerPort > 0 {
 		return cfg.DoltServerPort, PortSourceMetadataJSON
 	}
+	// The central server config, the last step — the port every workspace
+	// on the machine shares (GH#3895). Shared-server mode skips it, as the
+	// portSources step does: the shared default (3308, below) is the one
+	// port all its workspaces share, and a hosted central port must not
+	// hijack it.
+	if !sharedMode {
+		if central := configfile.CentralConfig(); central != nil && central.DoltServerPort > 0 {
+			return central.DoltServerPort, PortSourceCentralConfig
+		}
+	}
 	return 0, PortSourceUnset
 }
 
@@ -1172,7 +1182,8 @@ func DialConfig(beadsDir string) *Config {
 // portSources, by the store's applyConfigDefaults rule: when
 // BEADS_DOLT_SERVER_PORT is unset, a valid BEADS_DOLT_PORT, parsed untrimmed,
 // replaces a port that is not authoritative. A port from config.yaml
-// dolt.port, listener.port or metadata.json dolt_server_port stays.
+// dolt.port, listener.port, metadata.json dolt_server_port or the central
+// server config (server.json) stays.
 func applyLegacyPortEnv(cfg *Config) {
 	if os.Getenv("BEADS_DOLT_SERVER_PORT") != "" || cfg.PortSource.IsAuthoritative() {
 		return
@@ -1187,7 +1198,7 @@ func applyLegacyPortEnv(cfg *Config) {
 // step of that order: it replaces only the ports some steps resolve, so the
 // list names it beside them rather than by a rank.
 const LegacyPortEnvLabel = "Legacy environment variable (BEADS_DOLT_PORT): when BEADS_DOLT_SERVER_PORT is unset, " +
-	"it overrides the port file and the default ports, not listener.port, dolt.port or dolt_server_port"
+	"it overrides the port file and the default ports, not listener.port, dolt.port, dolt_server_port or the central server config (server.json)"
 
 // DefaultConfigForMode resolves server configuration for an already-classified
 // target. Diagnostics use this when inspecting a workspace other than the
