@@ -157,7 +157,8 @@ func (t *Tracker) CreateIssue(ctx context.Context, issue *types.Issue) (*tracker
 	// (gastownhall/beads#5486). On failure we keep the created issue and its
 	// external_ref (returning an error here would strand the issue and
 	// re-create a duplicate on the next push) and report the failed close as
-	// a warning instead.
+	// a warning instead; the engine then leaves the push hash uncached, so the
+	// next push fetches the issue and retries the close.
 	var warnings []string
 	if issue.Status == types.StatusClosed {
 		if closed, err := t.client.UpdateIssue(ctx, created.Number, map[string]interface{}{
