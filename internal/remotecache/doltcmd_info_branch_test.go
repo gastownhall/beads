@@ -33,3 +33,25 @@ func TestDoltCmdEnvDisablesRemoteInfoBranch(t *testing.T) {
 		t.Errorf("doltCmd() %s entries = %q, want exactly one set to empty", doltinfoenv.EnvVar, entries)
 	}
 }
+
+// TestDoltCmdEnvPreservesUserRemoteInfoBranch pins the opt-in: a value the
+// user set in bd's environment must reach the dolt child unchanged, exactly
+// once.
+func TestDoltCmdEnvPreservesUserRemoteInfoBranch(t *testing.T) {
+	for _, set := range []string{"dolt-info", ""} {
+		t.Run("value "+set, func(t *testing.T) {
+			t.Setenv(doltinfoenv.EnvVar, set)
+			cmd := doltCmd(t.Context(), t.TempDir(), "push", "origin", "main")
+			var entries []string
+			for _, kv := range cmd.Env {
+				if strings.HasPrefix(kv, doltinfoenv.EnvVar+"=") || kv == doltinfoenv.EnvVar {
+					entries = append(entries, kv)
+				}
+			}
+			want := doltinfoenv.EnvVar + "=" + set
+			if len(entries) != 1 || entries[0] != want {
+				t.Errorf("doltCmd() %s entries = %q, want exactly one %q", doltinfoenv.EnvVar, entries, want)
+			}
+		})
+	}
+}

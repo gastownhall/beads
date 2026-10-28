@@ -62,3 +62,31 @@ func TestBootstrapCloneCmdEnvDisablesRemoteInfoBranch(t *testing.T) {
 		t.Errorf("dolt clone env %s entries = %q, want exactly one set to empty", doltinfoenv.EnvVar, entries)
 	}
 }
+
+// TestRemoteInfoBranchOptInSurvivesDoltChildEnv pins the opt-in on both
+// child routes: a value the user set in bd's environment — a branch name, or
+// empty, Dolt's own opt-out form — must reach the dolt child unchanged,
+// exactly once.
+func TestRemoteInfoBranchOptInSurvivesDoltChildEnv(t *testing.T) {
+	withNoDoltOnPath(t)
+	for _, set := range []string{"dolt-info", ""} {
+		t.Run("value "+set, func(t *testing.T) {
+			t.Setenv(doltinfoenv.EnvVar, set)
+			want := doltinfoenv.EnvVar + "=" + set
+
+			cmd, _, cancel, err := prepareDoltCLITransferCommand(context.Background(), t.TempDir(), nil, false, "push", "origin", "main")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer cancel()
+			if entries := remoteInfoBranchEntries(cmd.Env); len(entries) != 1 || entries[0] != want {
+				t.Errorf("dolt push env %s entries = %q, want exactly one %q", doltinfoenv.EnvVar, entries, want)
+			}
+
+			clone := bootstrapCloneCmd(context.Background(), "git+https://example.com/repo.git", filepath.Join(t.TempDir(), "beads"), "")
+			if entries := remoteInfoBranchEntries(clone.Env); len(entries) != 1 || entries[0] != want {
+				t.Errorf("dolt clone env %s entries = %q, want exactly one %q", doltinfoenv.EnvVar, entries, want)
+			}
+		})
+	}
+}

@@ -37,3 +37,19 @@ func TestServerSpawnEnvDisablesRemoteInfoBranch(t *testing.T) {
 		t.Errorf("ServerSpawnEnv() %s entries = %q, want exactly one set to empty", doltinfoenv.EnvVar, entries)
 	}
 }
+
+// TestServerSpawnEnvPreservesUserRemoteInfoBranch pins the opt-in: a value
+// the user set in bd's environment — a branch name, or empty, Dolt's own
+// opt-out form — must reach the spawned server unchanged, exactly once.
+func TestServerSpawnEnvPreservesUserRemoteInfoBranch(t *testing.T) {
+	for _, set := range []string{"dolt-info", ""} {
+		t.Run("value "+set, func(t *testing.T) {
+			t.Setenv(doltinfoenv.EnvVar, set)
+			entries := remoteInfoBranchEntries(ServerSpawnEnv())
+			want := doltinfoenv.EnvVar + "=" + set
+			if len(entries) != 1 || entries[0] != want {
+				t.Errorf("ServerSpawnEnv() %s entries = %q, want exactly one %q", doltinfoenv.EnvVar, entries, want)
+			}
+		})
+	}
+}
