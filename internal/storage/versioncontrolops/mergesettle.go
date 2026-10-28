@@ -883,7 +883,7 @@ func TryRepairFKCascadeViolations(ctx context.Context, db DBConn) (repaired, had
 			return false, true, fmt.Errorf("clear %s constraint violations: %w", t, err)
 		}
 		//nolint:gosec // G202: hardcoded table name.
-		if _, err := db.ExecContext(ctx, "CALL DOLT_ADD('"+t+"')"); err != nil {
+		if err := schema.DrainCall(ctx, db, "CALL DOLT_ADD('"+t+"')"); err != nil {
 			return false, true, fmt.Errorf("stage repaired %s: %w", t, err)
 		}
 		fmt.Fprintf(os.Stderr,

@@ -193,4 +193,33 @@ func TestMergeSettleDrainsCallResultSets(t *testing.T) {
 		}
 		assertDrainedCalls(t, mock, rec)
 	})
+
+	t.Run("try_repair_fk_cascade_labels", func(t *testing.T) {
+		rec, mock := newDrainMock(t)
+
+		mock.ExpectQuery(regexp.QuoteMeta(constraintViolationsSQL)).
+			WillReturnRows(sqlmock.NewRows([]string{"table"}).AddRow("labels"))
+		// t is from the fixed fkCascadeRepairDeletes allowlist.
+		//nolint:gosec // G202: hardcoded table name.
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT violation_type, violation_info FROM dolt_constraint_violations_labels")).
+			WillReturnRows(sqlmock.NewRows([]string{"violation_type", "violation_info"}).
+				AddRow("foreign key", `{"ReferencedTable":"issues"}`))
+		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM labels WHERE issue_id NOT IN (SELECT id FROM issues)")).
+			WillReturnResult(sqlmock.NewResult(0, 1))
+		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM dolt_constraint_violations_labels")).
+			WillReturnResult(sqlmock.NewResult(0, 1))
+		mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD('labels')")).
+			WillReturnRows(emptyCallRows())
+		mock.ExpectQuery(regexp.QuoteMeta(constraintViolationsSQL)).
+			WillReturnRows(sqlmock.NewRows([]string{"table"}))
+
+		repaired, had, err := TryRepairFKCascadeViolations(context.Background(), rec)
+		if err != nil {
+			t.Fatalf("TryRepairFKCascadeViolations: %v", err)
+		}
+		if !repaired || !had {
+			t.Fatalf("TryRepairFKCascadeViolations = (%v, %v), want (true, true)", repaired, had)
+		}
+		assertDrainedCalls(t, mock, rec)
+	})
 }
