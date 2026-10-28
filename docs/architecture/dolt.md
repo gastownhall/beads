@@ -337,6 +337,26 @@ Configure the connection with flags or environment variables:
 | `--server-user` | `BEADS_DOLT_SERVER_USER` | `root` |
 | | `BEADS_DOLT_PASSWORD` | (none) |
 
+**Central server config (`server.json`).** Every command that connects to a
+Dolt server — including `bd init` — also reads a machine-wide file,
+`~/.config/beads/server.json` (or the file `BEADS_CENTRAL_CONFIG` names):
+
+| Key | Purpose |
+|-----|---------|
+| `dolt_server_host` | Server host, when no env var, `metadata.json` or `config.yaml` `dolt.host` names one |
+| `dolt_server_port` | Server port — the last step of the port chain (below env vars, the port file, `listener.port`, `dolt.port` and `dolt_server_port`; never applies in shared-server mode) |
+| `dolt_server_user` | MySQL user, when no env var or `metadata.json` names one |
+| `dolt_server_tls` | Set `true` to enable TLS, when no env var or `metadata.json` names it |
+
+Use it to point a machine at one shared Dolt server (Hosted Dolt, a VPS,
+one server per host) instead of copying the connection into every
+workspace. The file never selects a workspace's storage mode: its
+`dolt_mode` promotes only a mode-less workspace opened through the
+embedding library, never one opened by bd. A `dolt_mode: server` workspace
+whose endpoint comes from `server.json` is externally managed — bd does
+not auto-start a server for it — and `bd init` consults the file for its
+own connection but records none of its values in `.beads/metadata.json`.
+
 **`BEADS_DOLT_SERVER_PORT` also declares the server externally managed.**
 Setting it — or the legacy `BEADS_DOLT_PORT` — makes `ResolveServerMode`
 classify the workspace as an externally-managed server, so bd will not
@@ -700,8 +720,9 @@ dolt:
 |----------|---------|
 | `BEADS_DOLT_PASSWORD` | Server mode password (highest priority) |
 | `BEADS_CREDENTIALS_FILE` | Path to credentials file (overrides default location) |
+| `BEADS_CENTRAL_CONFIG` | Path to the central server config (default: `~/.config/beads/server.json`) |
 | `BEADS_DOLT_SERVER_MODE` | Enable server mode (set to "1") |
-| `BEADS_DOLT_SERVER_HOST` | Server host (default: 127.0.0.1) |
+| `BEADS_DOLT_SERVER_HOST` | Server host (default: 127.0.0.1, else the central server config's) |
 | `BEADS_DOLT_SERVER_PORT` | Server port (default: 3307, or 3308 in shared mode) |
 | `BEADS_DOLT_SERVER_TLS` | Enable TLS (set to "1" or "true") |
 | `BEADS_DOLT_SERVER_USER` | MySQL connection user |
