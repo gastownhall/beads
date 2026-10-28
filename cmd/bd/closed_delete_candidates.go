@@ -45,9 +45,9 @@ func warnClosedDeletionSafetySkips(stats closedDeletionCandidateStats) {
 	)
 }
 
-// holdBackRetainedTypes keeps a bulk delete that cannot retire an id off the
-// beads whose type the workspace retains (issueops.SettingKeyTypesRetained):
-// `bd gc`'s decay, `bd admin cleanup` and `bd mol wisp gc`. It is the same
+// holdBackRetainedTypes keeps a retention door that cannot retire an id off
+// the beads whose type the workspace retains (issueops.SettingKeyTypesRetained):
+// `bd gc`'s decay and `bd admin cleanup`. It is the same
 // partition the Sweeper role applies to a sweep without RetainIDs: those
 // commands delete by id through the Deleter role and write no tombstone, so a
 // retained bead is never theirs to take. setting is the stored value of
@@ -58,7 +58,7 @@ func holdBackRetainedTypes(issues []*types.Issue, setting string) ([]*types.Issu
 }
 
 // retainedTypesKeptLine is the text line for a bulk delete's kept count; noun
-// names what was kept ("closed issue(s)", "wisp(s)").
+// names what was kept ("closed issue(s)").
 func retainedTypesKeptLine(kept int, noun string) string {
 	return fmt.Sprintf("  Kept %d %s of a retained type (types.retained) — only bd prune/purge --retain-ids deletes them", kept, noun)
 }

@@ -184,15 +184,36 @@ type SweepRequest struct {
 	// A WORKSPACE KEEPS ITS KEYED ROWS OUT OF THE PLAIN SWEEPS by naming their
 	// issue types in the SettingKeyTypesRetained setting: a sweep without
 	// this flag then holds every closed row of those types back
-	// (SweepSkips.RetentionRequired). The bulk deletes that select rows by
-	// their own rule hold them back too — `bd gc`'s decay, `bd admin cleanup`
-	// (which also refuses --cascade while the setting names a type) and the
-	// stale-closed-issues doctor fix. With this flag set the
-	// setting holds nothing back, so the retaining sweep is the one bulk door
-	// those rows may leave by. What remains is deliberate and per id: the
-	// Deleter role does not consult the setting (`bd delete` deletes the ids
-	// it names, `bd mol burn` the molecule it names), and raw SQL bypasses
-	// every role. A caller whose ids are keys keeps those out by its own rule.
+	// (SweepSkips.RetentionRequired). With this flag set the setting holds
+	// nothing back, so the retaining sweep is the one retention door those
+	// rows may leave by.
+	//
+	// THE SETTING'S SCOPE IS THE RETENTION DOORS: the commands whose selection
+	// is a retention policy over closed rows. They are this role, in both of
+	// its bodies (`bd prune`, `bd purge`, POST issues:sweep); `bd gc`'s decay;
+	// `bd admin cleanup`, which refuses --cascade while the setting names a
+	// type; and the stale-closed-issues `bd doctor --fix`. Its semantics:
+	//
+	//   - per row: a retained row protects itself only, never its dependents
+	//     or parents, and no in-scope door cascades;
+	//   - closed rows only: every in-scope door selects closed rows;
+	//   - order: here the partition runs after the pinned and closed_at
+	//     rechecks and before the live-dependent and reference protections
+	//     and Limit, so a held-back row never consumes Limit;
+	//   - database only: the setting is read on the door's own transaction or
+	//     unit of work, and a read error fails the door;
+	//   - one canonicalizing read (workapi.RetainedTypesFromSetting): a name
+	//     protects itself, its alias-canonical forms and, for a built-in
+	//     type, its lower-case form, so matching can only over-protect.
+	//
+	// NOT IN SCOPE, BY DESIGN: `bd mol wisp gc`, which selects only
+	// ephemeral = 1 rows; the doctor's Patrol Pollution and test-pollution
+	// deletes, which are heuristics; `bd migrate-personal`, a cross-store
+	// move; the deletes that name what they delete (the Deleter role's
+	// `bd delete`, --cascade included, `bd mol burn`/`squash`,
+	// `bd cook --force`, `bd repo remove`); and raw SQL. None consults the
+	// setting. A caller whose ids are keys keeps those doors off them by its
+	// own rule.
 	//
 	// A tombstone is exactly as durable as the row it replaces: a durable
 	// row's tombstone is versioned and replicates with it, a wisps-plane row's

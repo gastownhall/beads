@@ -281,9 +281,13 @@ const CapSweepRetainIDs = "issues.sweep.retainIds"
 // SweepSkips.retention_required. Spelled exactly as httpapi's
 // CapIssuesSweepRetainedTypes (held to it by
 // TestCapabilityTableMatchesTheServerRouteTable). It gates no request member,
-// so the sweeper never refuses on it; a caller that relies on the protection
-// (an orchestrator's doctor) reads it to learn whether a plain sweep through
-// this server can delete a retained bead without retiring its id.
+// but it is the only guard against an older server: sweeper.go reads it before
+// a plain sweep (no retain_ids), and against a server without it reads the
+// workspace's types.retained first and refuses the sweep before the dial when
+// the setting names a type (httpSweeper.refuseAnUnguardedPlainSweep). A
+// retaining sweep does not consult it. A caller that relies on the protection
+// (an orchestrator's doctor) also reads it to learn whether a plain sweep
+// through this server can delete a retained bead without retiring its id.
 const CapSweepRetainedTypes = "issues.sweep.retainedTypes"
 
 // CapBatchApplyDepAddLineage is the behavior capability announcing that

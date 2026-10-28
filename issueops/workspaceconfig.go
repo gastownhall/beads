@@ -23,17 +23,21 @@ const (
 	SettingKeyTypesCustom  = "types.custom"
 )
 
-// SettingKeyTypesRetained names the issue types whose rows only a RETAINING
-// sweep may delete (SweepRequest.RetainIDs). Its value is a list of type
-// names, in the JSON-array or comma-separated form types.custom takes. A
-// sweep without RetainIDs holds every closed row of a listed type back and
-// counts it in SweepSkips.RetentionRequired; the bulk deletes outside the
-// role — `bd gc`'s decay, `bd admin cleanup` and the stale-closed-issues
-// doctor fix — hold them back too. A write of a malformed
-// value is refused (workapi.ValidateRetainedTypesValue).
+// SettingKeyTypesRetained names the issue types whose closed rows only a
+// RETAINING sweep may delete (SweepRequest.RetainIDs) among the retention
+// doors: a sweep without RetainIDs, `bd gc`'s decay, `bd admin cleanup` and
+// the stale-closed-issues doctor fix hold every closed row of a listed type
+// back and count it (SweepSkips.RetentionRequired, retention_required). The
+// scope, the semantics and what is deliberately out of scope are stated once,
+// on SweepRequest.RetainIDs.
 //
-// Unknown type names are accepted and match nothing, so an orchestrator can
-// name a type before it registers it. The setting is read from the workspace
+// Its value is a list of type names, in the JSON-array or comma-separated
+// form types.custom takes. Every reader matches rows through one
+// canonicalizing read (workapi.RetainedTypesFromSetting), so an alias or a
+// case variant of a built-in type protects the type rows carry; a write is
+// checked for syntax only (workapi.ValidateRetainedTypesValue). Unknown type
+// names are accepted and match nothing, so an orchestrator can name a type
+// before it registers it. The setting is read from the workspace
 // database only — never from config.yaml — because the rule it states must be
 // the same for every client of a shared workspace, and a client's file is not
 // visible to a server sweeping on its behalf.

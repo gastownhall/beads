@@ -213,9 +213,10 @@ func RetainedTypesFromSetting(value string) map[string]bool {
 //
 // A retaining sweep does not call it: the sweep bodies read the setting only
 // when RetainIDs is unset, because a retaining sweep deletes the row AND
-// retires its id, which is the one way such a row may leave. The bulk deletes
-// that cannot retire an id — `bd gc`'s decay, `bd admin cleanup`, `bd mol wisp
-// gc` and the stale-closed-issues doctor fix — call it on their own selection.
+// retires its id, which is the one way such a row may leave. The other
+// retention doors, which cannot retire an id — `bd gc`'s decay, `bd admin
+// cleanup` and the stale-closed-issues doctor fix — call it on their own
+// selection. The scope is stated on issueops.SweepRequest.RetainIDs.
 func PartitionSweepRetainedTypes(candidates []*types.Issue, retained map[string]bool) (kept []*types.Issue, retentionRequired int) {
 	if len(retained) == 0 {
 		return candidates, 0

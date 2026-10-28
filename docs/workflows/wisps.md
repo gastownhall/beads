@@ -80,8 +80,8 @@ No command removes a tombstone. Only a sweep with `--retain-ids` retires ids.
 Every other delete — a plain `bd purge` or `bd prune`, `bd delete`,
 `bd gc`, `bd admin cleanup`, `bd mol wisp gc`, `bd mol burn`, the
 stale-closed-issues `bd doctor --fix`, and `bd sql` — leaves deleted ids
-reusable; `types.retained` (below) keeps the bulk ones away from the types
-whose ids must stay retired. Over HTTP, the server must advertise `issues.sweep.retainIds`;
+reusable; `types.retained` (below) keeps the retention commands away from the
+types whose ids must stay retired. Over HTTP, the server must advertise `issues.sweep.retainIds`;
 without it, bd refuses the sweep before sending anything.
 
 ### Keeping key-bearing types out of plain sweeps
@@ -94,33 +94,68 @@ setting `types.retained`:
 bd config set types.retained op
 ```
 
-From then on a sweep without `--retain-ids` keeps every closed bead of those
-types and reports how many it kept (`retention_required` under `--json`).
-This applies to `bd prune`, `bd purge` (including `--wisps-plane`), their
-`--dry-run` previews, and the decay phase of `bd gc`. The other bulk deletes
-keep those beads too and report the same count: `bd admin cleanup` (which also
-refuses `--cascade` while the setting names a type) and the stale-closed-issues
-`bd doctor --fix`. A sweep with
-`--retain-ids` keeps nothing back: it deletes those beads and retires their
-ids, which is the only bulk way they leave.
+**Which commands honor it.** The retention commands: the ones whose
+selection is a retention policy over closed beads. They keep every closed
+bead of a listed type and report how many they kept (`retention_required`
+under `--json`):
 
-The setting takes a comma-separated list or a JSON array. Names need not be
-registered types yet; a name no bead carries matches nothing. Because the
-setting is a safety rule, `bd config set` refuses a value that would protect
-nothing by accident: a bracketed list that is not JSON (`[op]`), a name with a
-space, quote, bracket or comma in it (`"op"`, `op fact`), and an alias of a
-built-in type (`feat`; beads store `feature`). It is read from
-the workspace database on every sweep, never from `config.yaml`, so every
-client of a shared workspace sees the same rule; a `types.retained` key in
-`config.yaml` is ignored, and the bulk deletes warn that it is. If bd cannot
-read it, the
-sweep fails and deletes nothing. What it does not cover is deliberate and
-per id: `bd delete` deletes the ids you name, `bd mol burn` the molecule you
-name, and `bd sql` bypasses bd entirely. Over HTTP, a server that
-honors the setting advertises `issues.sweep.retainedTypes`. Against an older
-server, which would delete those beads without retiring their ids, bd reads
-the setting first and refuses a plain `bd prune` or `bd purge` when it names
-a type; upgrade the server, or use `--retain-ids` if the server supports it.
+- `bd prune` and `bd purge` (including `--wisps-plane`) without
+  `--retain-ids`, their `--dry-run` previews, and
+  `POST /v0/beads/issues:sweep` without `retain_ids`;
+- the decay phase of `bd gc`;
+- `bd admin cleanup`, which also refuses `--cascade` while the setting names
+  a type;
+- the stale-closed-issues `bd doctor --fix`, whose check counts only the
+  beads the fix would delete.
+
+A sweep with `--retain-ids` keeps nothing back: it deletes those beads and
+retires their ids, which is the one retention command they leave by.
+
+**What it means.**
+
+- A retained bead protects itself only, never its dependents or its parents.
+  None of the commands above cascades.
+- It applies to closed beads; every command above selects closed beads only.
+- In a sweep the hold-back runs after the pinned and `closed_at` rechecks and
+  before the live-dependent and reference protections and `--limit`, so held
+  back beads never use up a sweep's limit.
+- It is read from the workspace database, on the command's own transaction,
+  never from `config.yaml`, so every client of a shared workspace sees the
+  same rule; a `types.retained` key in `config.yaml` is ignored, and the
+  commands above warn that it is. If bd cannot read it, the command fails and
+  deletes nothing.
+- Names are matched through one canonicalizing read: each name protects
+  itself, its canonical form under bd's type aliases, and its lower-case form
+  when that is a built-in type. So `feat` protects `feature` beads, `mol`
+  protects `molecule` and `Chore` protects `chore`. A custom type matches as
+  written. Names need not be registered types yet; a name no bead carries
+  matches nothing.
+- The value takes a comma-separated list or a JSON array. `bd config set`
+  refuses only a value whose syntax would read as something other than what
+  you wrote: a bracketed list that is not JSON (`[op]`), a name with a space,
+  quote, bracket or comma in it (`"op"`, `op fact`), and a non-blank value
+  that names no type (`null`, `,`). `[]` retains nothing, and an empty value
+  unsets the key.
+
+**What it does not cover, by design.** These commands do not consult the
+setting:
+
+- `bd mol wisp gc`, which selects only ephemeral wisps (`ephemeral = 1`); a
+  no-history bead is never one of them, so a retained ephemeral type gets no
+  protection from it;
+- the Patrol Pollution and test-pollution deletes of `bd doctor`, which are
+  heuristics;
+- `bd migrate-personal`, a move between two databases, which takes your own
+  beads of a retained type with the rest;
+- the deletes that name what they delete: `bd delete` (`--cascade`
+  included), `bd mol burn` and `bd mol squash`, `bd cook --force` and
+  `bd repo remove`; and `bd sql`, which bypasses bd.
+
+Over HTTP, a server that honors the setting advertises
+`issues.sweep.retainedTypes`. Against an older server, which would delete
+those beads without retiring their ids, bd reads the setting first and
+refuses a plain `bd prune` or `bd purge` when it names a type; upgrade the
+server, or use `--retain-ids` if the server supports it.
 
 A sweep with `--retain-ids` briefly blocks or conflicts with creates of
 unrelated ids that hash to the same coordination shard as one it retires,

@@ -262,10 +262,13 @@ const CapIssuesSweepRetainIDs = "issues.sweep.retainIds"
 // retain_ids holds back every candidate whose issue type the workspace's
 // types.retained setting names (issueops.SettingKeyTypesRetained,
 // issueops.SweepSkips.RetentionRequired). It names no request member — the
-// protection is the server's, keyed on a stored setting — so a client cannot
-// be refused by an older server; what it learns from the token is whether a
-// plain sweep through THIS server can delete a retained bead without retiring
-// its id. An older server does.
+// protection is the server's, keyed on a stored setting — so an older server
+// answers a plain sweep without complaint and deletes the retained beads
+// without retiring their ids. The token is how a client learns which it is
+// talking to: before a plain sweep, bd's client reads it and, against a
+// server without it, reads types.retained itself and refuses the sweep before
+// the dial when the setting names a type (httpclient's
+// refuseAnUnguardedPlainSweep; wire.CapSweepRetainedTypes).
 const CapIssuesSweepRetainedTypes = "issues.sweep.retainedTypes"
 
 // CapBatchApplyDepAddLineage is the behavior capability that advertises
