@@ -528,10 +528,12 @@ type parentEdge struct {
 // carry reasons of their own.
 //
 // WHY THE FIXPOINT DOES NOT CARRY IT. The read decides from a parent's OWN
-// reason rows. The legs' p.is_blocked = 1 conjunct carries inheritance only
-// for a parent with no reason row: such a parent is dark exactly while
-// something above it cascades into it. A parent with a subtree reason is dark
-// either way, so its bit says nothing about what is above it. Q blocks on
+// reason rows. The legs' p.is_blocked = 1 conjunct, read only on a parent
+// that is neither closed nor pinned (a closed or pinned row is never blocked,
+// whatever its stored bit says), carries inheritance only for a parent with
+// no reason row: such a parent is dark exactly while something above it
+// cascades into it. A parent with a subtree reason is dark either way, so its
+// bit says nothing about what is above it. Q blocks on
 // outside X, pc P -> Q, P blocks on its own child C: the read explains P, so C
 // comes bright while the epic above it is still gated by X. A one-level check
 // ("no blocked parent outside the set") is not enough either. Put a second
@@ -712,7 +714,9 @@ func allExplained(parents []parentRef, explained map[parentRef]bool) bool {
 // parent that is blocked. An edge lives in the child's dependency table and
 // names the parent in the column for the parent's kind, so this is one lookup
 // per child kind and parent kind, each keyed on the child's issue_id. The hints
-// pin that drive, as on the batched legs.
+// pin that drive, as on the batched legs. A parent is blocked here on the same
+// terms as there: its bit is 1 and it is neither closed nor pinned, because
+// the merge clause admits a stale 1 on such a row (gastownhall/beads#7626).
 //
 //nolint:gosec // G201: table and column names are constants; the ids are ? placeholders.
 func blockedParentEdgesInTx(ctx context.Context, tx DBTX, children []parentRef) ([]parentEdge, error) {
@@ -750,6 +754,7 @@ func blockedParentEdgesInTx(ctx context.Context, tx DBTX, children []parentRef) 
 					WHERE d.issue_id IN (%[4]s)
 					  AND d.type = 'parent-child'
 					  AND p.is_blocked = 1
+					  AND p.status <> 'closed' AND p.status <> 'pinned'
 				`, side.depTable, parent.table, parent.col, placeholders), args, side.wisp, parent.wisp)
 				if err != nil {
 					return nil, fmt.Errorf("read blocked parents of explained parents: %w", err)
