@@ -449,6 +449,78 @@ func TestCountReinitTargetIssues(t *testing.T) {
 			t.Fatalf("countReinitTargetIssues = (%d, nil), want an error: absence is proven by a reachable server, and nothing reaches port 1", count)
 		}
 	})
+
+	t.Run("a missing directory counts as zero and stays missing", func(t *testing.T) {
+		beadsDir := filepath.Join(t.TempDir(), "never-created", ".beads")
+		count, err := countReinitTargetIssues(beadsDir)
+		if err != nil || count != 0 {
+			t.Fatalf("countReinitTargetIssues = (%d, %v), want (0, nil): a target with no .beads has nothing to destroy", count, err)
+		}
+		if _, statErr := os.Stat(beadsDir); !os.IsNotExist(statErr) {
+			t.Errorf("the count must not create its target, stat err %v", statErr)
+		}
+	})
+
+	t.Run("an empty directory counts as zero and creates nothing", func(t *testing.T) {
+		beadsDir := filepath.Join(t.TempDir(), ".beads")
+		if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		count, err := countReinitTargetIssues(beadsDir)
+		if err != nil || count != 0 {
+			t.Fatalf("countReinitTargetIssues = (%d, %v), want (0, nil): empty .beads has nothing to destroy", count, err)
+		}
+		entries, statErr := os.ReadDir(beadsDir)
+		if statErr != nil {
+			t.Fatal(statErr)
+		}
+		if len(entries) != 0 {
+			t.Errorf("the count must open no store for a target without project files; created %d entries", len(entries))
+		}
+	})
+
+	t.Run("a registry-only directory counts as zero and opens no store", func(t *testing.T) {
+		// Registry files without project files are not a workspace (the
+		// ~/.beads shape); discovery refuses them, and so does the count —
+		// without opening a store that would create a database there.
+		beadsDir := filepath.Join(t.TempDir(), ".beads")
+		if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(beadsDir, "registry.json"), []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		count, err := countReinitTargetIssues(beadsDir)
+		if err != nil || count != 0 {
+			t.Fatalf("countReinitTargetIssues = (%d, %v), want (0, nil): registry files name no workspace to destroy", count, err)
+		}
+		entries, statErr := os.ReadDir(beadsDir)
+		if statErr != nil {
+			t.Fatal(statErr)
+		}
+		if len(entries) != 1 || entries[0].Name() != "registry.json" {
+			t.Errorf("the count must create nothing beside the registry files, found %d entries", len(entries))
+		}
+	})
+}
+
+// TestRunInitReinitPreflight_NothingToDestroyProceedsSilently pins the benign
+// half: a target the count proves empty passes the preflight with no warning,
+// no typed prompt and no token demand, so a fresh init asks nothing.
+func TestRunInitReinitPreflight_NothingToDestroyProceedsSilently(t *testing.T) {
+	beadsDir := filepath.Join(t.TempDir(), ".beads") // never created
+	isolateBeadsDirForTest(t)
+
+	var err error
+	stderr := captureStderr(t, func() {
+		err = runInitReinitPreflight(true, beadsDir, "bd", "")
+	})
+	if err != nil {
+		t.Fatalf("runInitReinitPreflight = %v, want nil: a proven-empty target must proceed", err)
+	}
+	if stderr != "" {
+		t.Errorf("a proven-empty target must produce no warning, prompt or token demand, got:\n%s", stderr)
+	}
 }
 
 // writeServerModeTargetWorkspace writes a .beads whose metadata selects Dolt
