@@ -475,13 +475,17 @@ func parseMarkdownDependencies(deps []string, templateTitle string) ([]issueops.
 
 		var depType types.DependencyType
 		var target string
+		var reverse bool
 		if strings.Contains(raw, ":") {
 			parts := strings.SplitN(raw, ":", 2)
 			if len(parts) != 2 {
 				return nil, fmt.Errorf("invalid dependency format %q for issue %q", raw, templateTitle)
 			}
-			// The --deps aliases depends-on/blocked-by gate like blocks (GH#7508).
-			depType = canonicalDependencyType(types.DependencyType(strings.TrimSpace(parts[0])))
+			rawType := types.DependencyType(strings.TrimSpace(parts[0]))
+			// The --deps aliases depends-on/blocked-by gate like blocks, and an
+			// explicit blocks: makes the target depend on the new issue (GH#7508).
+			depType = canonicalDependencyType(rawType)
+			reverse = rawType == types.DepBlocks
 			target = strings.TrimSpace(parts[1])
 		} else {
 			depType = types.DepBlocks
@@ -490,7 +494,7 @@ func parseMarkdownDependencies(deps []string, templateTitle string) ([]issueops.
 		if !depType.IsValid() {
 			return nil, fmt.Errorf("invalid dependency type %q for issue %q", depType, templateTitle)
 		}
-		out = append(out, issueops.CreateDependency{Type: depType, TargetID: target})
+		out = append(out, issueops.CreateDependency{Type: depType, TargetID: target, Reverse: reverse})
 	}
 	return out, nil
 }
