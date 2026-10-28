@@ -238,3 +238,56 @@ func TestInitRepoint_EmptyConfiguredProceedsWithOneNotice(t *testing.T) {
 		t.Errorf("metadata.json dolt_database = %q, want %q", got, b)
 	}
 }
+
+// redirectCheckout is a git checkout whose .beads/redirect points at w.
+func (w repointWorkspace) redirectCheckout(t *testing.T) string {
+	t.Helper()
+	checkout := t.TempDir()
+	initGitRepo(t, checkout)
+	stub := filepath.Join(checkout, ".beads")
+	if err := os.MkdirAll(stub, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stub, "redirect"), []byte(w.beadsDir+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return checkout
+}
+
+// AC-7: through .beads/redirect, init writes the target's metadata, but the
+// redirect branch of the existing-data guard only looked for a legacy
+// beads.db there, so plain `bd init --server --database B` repointed a live
+// Dolt target. It must refuse as bd init inside the target does.
+func TestInitRepoint_RedirectToDoltTargetRefusesPlainInit(t *testing.T) {
+	w := newRepointWorkspace(t, 1)
+	b := uniqueTestDBName(t) + "_b"
+	t.Cleanup(func() { dropTestDatabase(b, testDoltServerPort) })
+	checkout := w.redirectCheckout(t)
+
+	out, err := runExternalServerBD(t, checkout, w.env, "init", "--server", "--database", b, "--prefix", "ext",
+		"--non-interactive", "--skip-hooks", "--skip-agents")
+	if err == nil {
+		t.Fatalf("plain init through a redirect to a live Dolt target must refuse:\n%s", out)
+	}
+	if !strings.Contains(out, "This workspace is already initialized.") {
+		t.Errorf("want the already-initialized refusal bd init gives inside the target:\n%s", out)
+	}
+	assertNotOnTestServer(t, b)
+	if got := w.recordedDatabase(t); got != w.a {
+		t.Errorf("target metadata.json dolt_database = %q, want %q", got, w.a)
+	}
+}
+
+// AC-7, at the guard: the CLI binds BEADS_DIR to the redirect target before
+// init runs, but checkExistingBeadsData resolving from the checkout reaches
+// its redirect branch, which must see the Dolt target as init inside it does.
+func TestInitRepoint_RedirectGuardSeesDoltTarget(t *testing.T) {
+	w := newRepointWorkspace(t, 1)
+	t.Chdir(w.redirectCheckout(t))
+	t.Setenv("BEADS_DIR", "")
+
+	err := checkExistingBeadsData("ext")
+	if !errors.Is(err, errWorkspaceAlreadyInitialized) {
+		t.Fatalf("checkExistingBeadsData through a redirect to a live Dolt target = %v, want already initialized", err)
+	}
+}

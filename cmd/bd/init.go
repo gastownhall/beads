@@ -2965,6 +2965,12 @@ Aborting.`, remedy.PrintedValue(location), prefix)
 	// Check for redirect file - if present, check the redirect target
 	redirectTarget := beads.FollowRedirect(beadsDir)
 	if redirectTarget != beadsDir {
+		// A Dolt-backed target is refused the way bd init inside it is: its
+		// data is a Dolt database, not a legacy beads.db (#6172).
+		if targetCfg, err := configfile.LoadForDiscovery(redirectTarget); err == nil && targetCfg != nil &&
+			targetCfg.GetBackend() == configfile.BackendDolt {
+			return checkExistingBeadsDataAt(redirectTarget, prefix)
+		}
 		targetDBPath := filepath.Join(redirectTarget, beads.CanonicalDatabaseName)
 		if _, err := os.Stat(targetDBPath); err == nil {
 			return alreadyInitialized(`
