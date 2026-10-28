@@ -1613,3 +1613,37 @@ func TestIsPathInSafeBoundaryAdmitsOwnPasswdHome(t *testing.T) {
 		t.Errorf("isPathInSafeBoundary(%q) = true, want false (another service's /var/lib home)", other)
 	}
 }
+
+// TestIsPathInSafeBoundary_OwnHomeOutsideAndEscapeRejected pins AC-2: the
+// carve-out admits only the account's own home. Peer services' directories,
+// name-extending siblings, the denied prefix root, /root, and a symlink inside
+// the home whose target escapes it all stay rejected. The control row proves
+// the carve-out is active for this tree, so the rejections are the
+// carve-out's, not the deny loop's.
+func TestIsPathInSafeBoundary_OwnHomeOutsideAndEscapeRejected(t *testing.T) {
+	env := ownHomeFixture(t)
+
+	control := filepath.Join(env.home, "releases", "r1", ".beads")
+	if !isPathInSafeBoundary(control) {
+		t.Fatalf("control: isPathInSafeBoundary(%q) = false, want true (the carve-out must be active for this tree)", control)
+	}
+
+	for _, tt := range []struct {
+		name string
+		path string
+	}{
+		{"symlink inside the home escaping it", filepath.Join(env.home, "escape", ".beads")},
+		{"another service's home", filepath.Join(env.denied, "lib", "other", ".beads")},
+		{"sibling extending the home's name", filepath.Join(env.denied, "lib", "svcXX", ".beads")},
+		{"the denied prefix root itself", env.denied},
+		{"/root", "/root/.beads"},
+		{"/var/lib outside the home", "/var/lib/beads"},
+		{"/etc", "/etc/beads"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if isPathInSafeBoundary(tt.path) {
+				t.Errorf("isPathInSafeBoundary(%q) = true, want false", tt.path)
+			}
+		})
+	}
+}
