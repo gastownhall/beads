@@ -719,8 +719,19 @@ func remoteFromArgs(cmd *cobra.Command, args []string) (string, error) {
 	return args[0], nil
 }
 
+// validateRemoteArg is the cobra Args half of remoteFromArgs, the same shape
+// as validateCreateArgs in create.go: a positional that cannot name exactly
+// one remote is refused during argument validation, which cobra runs before
+// PersistentPreRunE opens the store or runs migrations — so a bad invocation
+// exits 1 without a store open, server auto-start, or a transfer.
+func validateRemoteArg(cmd *cobra.Command, args []string) error {
+	_, err := remoteFromArgs(cmd, args)
+	return err
+}
+
 var doltPushCmd = &cobra.Command{
 	Use:           "push",
+	Args:          cobra.MatchAll(cobra.MaximumNArgs(1), validateRemoteArg),
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	Short:         "Push commits to Dolt remote",
@@ -827,6 +838,7 @@ The remote must already exist (see 'bd dolt remote add').`,
 
 var doltPullCmd = &cobra.Command{
 	Use:           "pull",
+	Args:          cobra.MatchAll(cobra.MaximumNArgs(1), validateRemoteArg),
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	Short:         "Pull commits from Dolt remote",

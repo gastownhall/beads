@@ -3266,4 +3266,96 @@ func TestDoltPushPositionalRemoteIsNotSilentlyIgnored(t *testing.T) {
 			t.Errorf("bd dolt pull 1st --strategy theirs output lacks %q, got: %q", want, out)
 		}
 	})
+
+	// The rows below never run: their argument validation fails, so cobra
+	// exits 1 before the store opens and nothing is pushed or pulled. A
+	// silently dropped selector — the GH#3720 defect class — must be an
+	// error instead.
+	for _, tc := range []struct {
+		name    string
+		cmd     *cobra.Command
+		args    []string
+		flags   [][2]string
+		wantErr []string
+	}{
+		{
+			name:    "bd dolt push with a positional and a different --remote errors",
+			cmd:     doltPushCmd,
+			args:    []string{"1st"},
+			flags:   [][2]string{{"remote", "origin"}},
+			wantErr: []string{`"1st"`, `"origin"`},
+		},
+		{
+			name:    "bd dolt pull with a positional and a different --remote errors",
+			cmd:     doltPullCmd,
+			args:    []string{"1st"},
+			flags:   [][2]string{{"remote", "origin"}},
+			wantErr: []string{`"1st"`, `"origin"`},
+		},
+		{
+			name:    "bd dolt push refuses a second argument",
+			cmd:     doltPushCmd,
+			args:    []string{"1st", "main"},
+			wantErr: []string{"accepts at most 1 arg(s), received 2"},
+		},
+		{
+			name:    "bd dolt pull refuses a second argument",
+			cmd:     doltPullCmd,
+			args:    []string{"1st", "main"},
+			wantErr: []string{"accepts at most 1 arg(s), received 2"},
+		},
+		{
+			name:    "bd dolt push with an empty remote name errors",
+			cmd:     doltPushCmd,
+			args:    []string{""},
+			wantErr: []string{"remote name is empty"},
+		},
+		{
+			name:    "bd dolt pull with an empty remote name errors",
+			cmd:     doltPullCmd,
+			args:    []string{""},
+			wantErr: []string{"remote name is empty"},
+		},
+		{
+			name:    "bd dolt push with a whitespace remote name errors",
+			cmd:     doltPushCmd,
+			args:    []string{"  "},
+			wantErr: []string{"remote name is empty"},
+		},
+		{
+			name:    "bd dolt pull with a whitespace remote name errors",
+			cmd:     doltPullCmd,
+			args:    []string{"  "},
+			wantErr: []string{"remote name is empty"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetDoltTransferFlags(t)
+			for _, f := range tc.flags {
+				if err := tc.cmd.Flags().Set(f[0], f[1]); err != nil {
+					t.Fatal(err)
+				}
+			}
+			fake := &positionalRemotePushStore{}
+			store = fake
+			var runErr error
+			// remoteFromArgs reports through HandleError (it prints the
+			// message and returns a bare exit-code error like resolveTitle
+			// does for create), cobra's own arity check through its error:
+			// the user-readable text is in what was printed.
+			stdout, stderr := captureStdio(t, func() { runErr = run(t, tc.cmd, tc.args) })
+			if runErr == nil {
+				t.Fatalf("%s: wanted a validation error, got nil", tc.name)
+			}
+			combined := runErr.Error() + stdout + stderr
+			for _, want := range tc.wantErr {
+				if !strings.Contains(combined, want) {
+					t.Errorf("%s error %q lacks %q", tc.name, combined, want)
+				}
+			}
+			if fake.defaultPushCalled || fake.defaultPulls != 0 || len(fake.pushedRemotes) != 0 || len(fake.pulledRemotes) != 0 {
+				t.Errorf("%s transferred something despite the validation error: %+v", tc.name, fake)
+			}
+		})
+	}
 }
