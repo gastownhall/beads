@@ -69,7 +69,7 @@ func TestEmbeddedRetainedTypes(t *testing.T) {
 
 	// A malformed value fails closed at the write: stored, it would read as
 	// names no row carries and protect nothing.
-	for _, bad := range []string{"[chore]", "chore task", "feat"} {
+	for _, bad := range []string{"[chore]", "chore task", "null"} {
 		if out, stderr, code := run("config", "set", "types.retained", bad); code == 0 {
 			t.Errorf("bd config set types.retained %q succeeded:\n%s\n%s\nwant the malformed value refused", bad, out, stderr)
 		}
@@ -77,7 +77,7 @@ func TestEmbeddedRetainedTypes(t *testing.T) {
 	// `bd config set-many` writes the database plane by its own route (one
 	// commit for the batch), so it must refuse the same values: a malformed
 	// pair fails the whole batch before anything is written.
-	for _, bad := range []string{"types.retained=[chore]", "types.retained=feat"} {
+	for _, bad := range []string{"types.retained=[chore]", "types.retained=null"} {
 		if out, stderr, code := run("config", "set-many", bad, "rk.untouched=1"); code == 0 {
 			t.Errorf("bd config set-many %q succeeded:\n%s\n%s\nwant the malformed value refused", bad, out, stderr)
 		}
@@ -133,9 +133,10 @@ func TestEmbeddedRetainedTypes(t *testing.T) {
 		kept := closedChore("rk-gc1")
 		other := bdCreate(t, bd, dir, "decays", "--id", "rk-gc2", "--type", "task").ID
 		bdClose(t, bd, dir, other)
-		// --older-than 0 compares closed_at against now; let the second-precision
-		// close stamps fall strictly before it.
-		time.Sleep(1100 * time.Millisecond)
+		// --older-than 0 selects closed_at before now cut to the second, and a
+		// close stamp is stored rounded half-up to the second, so a bead closed
+		// in the last 1.5 s can still read as not closed before the cutoff.
+		time.Sleep(2 * time.Second)
 		out, stderr, code := run("gc", "--older-than", "0", "--force", "--skip-dolt")
 		if code != 0 || !strings.Contains(out, "Kept 2 closed issue(s) of a retained type") {
 			t.Errorf("bd gc exited %d:\n%s\n%s\nwant the kept-retained line", code, out, stderr)

@@ -49,9 +49,10 @@ func TestProxiedServerRetainedTypes(t *testing.T) {
 	if pruned["pruned_count"] != float64(0) || pruned["retention_required"] != float64(1) {
 		t.Errorf("bd prune --force --json = %v, want pruned_count 0 and retention_required 1", pruned)
 	}
-	// --older-than 0 compares closed_at against now; let the second-precision
-	// close stamp fall strictly before it.
-	time.Sleep(1100 * time.Millisecond)
+	// --older-than 0 selects closed_at before now cut to the second, and a
+	// close stamp is stored rounded half-up to the second, so a bead closed
+	// in the last 1.5 s can still read as not closed before the cutoff.
+	time.Sleep(2 * time.Second)
 	report := decayJSON("gc", "--older-than", "0", "--force", "--skip-dolt")
 	if report["retention_required"] != float64(1) {
 		t.Errorf("bd gc --json = %v, want retention_required 1", report)
