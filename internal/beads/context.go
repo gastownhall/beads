@@ -255,7 +255,10 @@ func buildRepoContext() (*RepoContext, error) {
 	// 3. Check for redirect file in the local repo
 	redirectInfo := GetRedirectInfo()
 
-	// 4. Determine RepoRoot based on external/redirect status
+	// 4. Determine RepoRoot based on external/redirect status. A .beads that
+	// git cannot place in any repository, named from a CWD that is in one,
+	// is external unless it belongs to the CWD's work tree (see
+	// isExternalBeadsDir); it is then rooted at its parent.
 	var repoRoot string
 	isExternal := redirectInfo.IsRedirected
 	if !isExternal {
@@ -298,6 +301,11 @@ func buildRepoContext() (*RepoContext, error) {
 
 // isExternalBeadsDir returns true if beadsDir is in a different git repo than CWD.
 // Uses git common dir to correctly handle worktrees and bare repos.
+//
+// When the CWD is in a repository but git cannot place beadsDir in one, the
+// answer is positional: beadsDir is external unless it belongs to the CWD
+// repository's work tree (GH#5700). The error return is reserved for a CWD
+// that is in no repository.
 func isExternalBeadsDir(beadsDir string) (bool, error) {
 	cwdCommonDir, err := git.GetGitCommonDir()
 	if err != nil {
@@ -306,10 +314,48 @@ func isExternalBeadsDir(beadsDir string) (bool, error) {
 
 	beadsCommonDir, err := getGitCommonDirForPath(beadsDir)
 	if err != nil {
-		return false, err
+		// CWD is in a repository, but git cannot place beadsDir in one:
+		// no repository, or discovery stopped (GIT_CEILING_DIRECTORIES,
+		// a filesystem boundary, a .beads symlinked out of the tree).
+		// It is the CWD repository's own only if it belongs to that
+		// repository's work tree.
+		return !beadsDirInCWDWorkTree(beadsDir), nil
 	}
 
 	return cwdCommonDir != beadsCommonDir, nil
+}
+
+// beadsDirInCWDWorkTree reports whether beadsDir belongs to the CWD
+// repository's work tree: it lies at or below the CWD's top level, or it is
+// that repository's own .beads (or, from a linked worktree, the main
+// checkout's) reached through a symlink. Paths are compared symlink-resolved
+// and, on case-insensitive filesystems, case-folded.
+//
+// Containment is against the CWD's top level rather than GetMainRepoRoot: for
+// a worktree of a bare repository the latter is the directory holding the bare
+// repository, which can also hold unrelated projects.
+func beadsDirInCWDWorkTree(beadsDir string) bool {
+	root := git.GetRepoRoot()
+	if root == "" {
+		return false
+	}
+
+	normalizedBeadsDir := utils.NormalizePathForComparison(beadsDir)
+	normalizedRoot := utils.NormalizePathForComparison(root)
+	if normalizedBeadsDir == normalizedRoot ||
+		strings.HasPrefix(normalizedBeadsDir, strings.TrimSuffix(normalizedRoot, string(filepath.Separator))+string(filepath.Separator)) {
+		return true
+	}
+
+	if utils.PathsEqual(beadsDir, filepath.Join(root, ".beads")) {
+		return true
+	}
+	if git.IsWorktree() {
+		if fallback := GetWorktreeFallbackBeadsDir(); fallback != "" && utils.PathsEqual(beadsDir, fallback) {
+			return true
+		}
+	}
+	return false
 }
 
 // getGitCommonDirForPath returns the shared git directory for a path.

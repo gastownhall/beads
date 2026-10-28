@@ -1397,3 +1397,127 @@ func TestRoleIgnoresInheritedGitRouting(t *testing.T) {
 		}
 	})
 }
+
+// writeBeadsProjectForTest creates beadsDir holding a project file, which is
+// what hasBeadsProjectFiles needs for discovery to accept it.
+func writeBeadsProjectForTest(t *testing.T, beadsDir string) {
+	t.Helper()
+	if err := os.MkdirAll(beadsDir, 0750); err != nil {
+		t.Fatalf("failed to create %s: %v", beadsDir, err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "beads.db"), []byte{}, 0644); err != nil {
+		t.Fatalf("failed to create beads.db: %v", err)
+	}
+}
+
+// chdirForRepoContextTest moves the process into dir with fresh resolution
+// caches. Under Bazel the ambient CWD is the runfiles tree, outside any
+// repository, so every test here must stand somewhere explicit.
+func chdirForRepoContextTest(t *testing.T, dir string) {
+	t.Helper()
+	t.Cleanup(func() {
+		ResetCaches()
+		git.ResetCaches()
+	})
+	t.Chdir(dir)
+	ResetCaches()
+	git.ResetCaches()
+}
+
+// nonGitTargetFromGitCWDForTest builds the GH#5700 shape: a git repository A
+// to stand in, and a beads project T outside A that is in no git repository.
+// BEADS_DIR names T's .beads, as `bd -C T` exports it, and the CWD is A.
+func nonGitTargetFromGitCWDForTest(t *testing.T) (callerRepo, target string) {
+	t.Helper()
+	callerRepo = resolveSymlinks(t.TempDir())
+	if err := initGitRepo(callerRepo); err != nil {
+		t.Fatalf("failed to init caller repo: %v", err)
+	}
+	target = resolveSymlinks(t.TempDir())
+	writeBeadsProjectForTest(t, filepath.Join(target, ".beads"))
+
+	t.Setenv("BEADS_DIR", filepath.Join(target, ".beads"))
+	chdirForRepoContextTest(t, callerRepo)
+	return callerRepo, target
+}
+
+// TestGetRepoContext_NonGitBeadsDirFromGitCWD pins GH#5700: `bd -C T` exports
+// BEADS_DIR without changing directory, so when the caller stands in git
+// repository A and T is in no repository, RepoRoot must be T, not A.
+func TestGetRepoContext_NonGitBeadsDirFromGitCWD(t *testing.T) {
+	assertRoots := func(t *testing.T, wantRepoRoot, wantCWDRepoRoot string) {
+		t.Helper()
+		rc, err := GetRepoContext()
+		if err != nil {
+			t.Fatalf("GetRepoContext failed: %v", err)
+		}
+		if rc.RepoRoot != wantRepoRoot {
+			t.Errorf("RepoRoot = %s, want the named project %s (caller repo is %s)",
+				rc.RepoRoot, wantRepoRoot, wantCWDRepoRoot)
+		}
+		if rc.CWDRepoRoot != wantCWDRepoRoot {
+			t.Errorf("CWDRepoRoot = %s, want the caller's repo %s", rc.CWDRepoRoot, wantCWDRepoRoot)
+		}
+	}
+
+	t.Run("in-process", func(t *testing.T) {
+		// Linux in-process discovery answers "not a repository" for T.
+		callerRepo, target := nonGitTargetFromGitCWDForTest(t)
+		assertRoots(t, target, callerRepo)
+	})
+
+	t.Run("exec-git", func(t *testing.T) {
+		// Set-but-empty makes git.CommonDirInProcess decline (it checks with
+		// os.LookupEnv) while git's own discovery is unchanged, so this runs
+		// the exec path macOS and Windows always take.
+		t.Setenv("GIT_CEILING_DIRECTORIES", "")
+		callerRepo, target := nonGitTargetFromGitCWDForTest(t)
+		assertRoots(t, target, callerRepo)
+	})
+
+	t.Run("target-is-ancestor", func(t *testing.T) {
+		// The Gas Town HQ shape: a non-git town root T holding a git rig.
+		// Walking up from the rig finds T/.beads, so only work-tree
+		// containment (not discoverability) says T is not the rig's own.
+		target := resolveSymlinks(t.TempDir())
+		writeBeadsProjectForTest(t, filepath.Join(target, ".beads"))
+		rig := filepath.Join(target, "rig")
+		if err := os.MkdirAll(rig, 0750); err != nil {
+			t.Fatalf("failed to create rig: %v", err)
+		}
+		if err := initGitRepo(rig); err != nil {
+			t.Fatalf("failed to init rig repo: %v", err)
+		}
+		t.Setenv("BEADS_DIR", filepath.Join(target, ".beads"))
+		chdirForRepoContextTest(t, rig)
+		assertRoots(t, target, rig)
+	})
+
+	t.Run("worktree-masked-redirect", func(t *testing.T) {
+		// A's .beads redirects to non-git storage S. From a linked worktree W
+		// the redirect is invisible to GetRedirectInfo once bd's pre-run rebind
+		// exports BEADS_DIR=S/.beads, so W must resolve as A does: rooted at S.
+		mainRepo := resolveSymlinks(t.TempDir())
+		if err := initGitRepoWithCommit(mainRepo); err != nil {
+			t.Fatalf("failed to init main repo: %v", err)
+		}
+		storage := resolveSymlinks(t.TempDir())
+		storageBeadsDir := filepath.Join(storage, ".beads")
+		writeBeadsProjectForTest(t, storageBeadsDir)
+		if err := os.MkdirAll(filepath.Join(mainRepo, ".beads"), 0750); err != nil {
+			t.Fatalf("failed to create main .beads: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(mainRepo, ".beads", RedirectFileName), []byte(storageBeadsDir+"\n"), 0644); err != nil {
+			t.Fatalf("failed to write redirect: %v", err)
+		}
+		worktree := filepath.Join(resolveSymlinks(t.TempDir()), "wt")
+		runGitInDir(t, mainRepo, "worktree", "add", "-q", "--detach", worktree)
+
+		t.Setenv("BEADS_DIR", storageBeadsDir)
+		chdirForRepoContextTest(t, mainRepo)
+		assertRoots(t, storage, mainRepo)
+
+		chdirForRepoContextTest(t, worktree)
+		assertRoots(t, storage, worktree)
+	})
+}

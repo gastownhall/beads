@@ -122,13 +122,13 @@ $ bd dolt push
 | `BeadsDir` | Actual `.beads/` directory (after following redirects) |
 | `RepoRoot` | Repository root containing `BeadsDir` |
 | `CWDRepoRoot` | Repository root containing user's CWD (may differ) |
-| `IsRedirected` | True if BEADS_DIR points to different repo than CWD |
+| `IsRedirected` | True if BeadsDir is in a different repository than the CWD, or in none while the CWD is in one |
 | `IsWorktree` | True if CWD is in a git worktree |
 
 ## Resolving Without Git
 
-`GetRepoContext()` requires a git repository: it finds `.beads/`, validates the
-path boundary, and only then asks git for a repository root. A workspace that
+`GetRepoContext()` requires a git repository for the CWD: it finds `.beads/`,
+validates the path boundary, and only then asks git for a repository root. A workspace that
 is located and boundary-checked but has no resolvable git root is therefore a
 *known* workspace, not an unknown one — which is why it is the one failure that
 is safe to recover from.
@@ -139,6 +139,15 @@ the `domain/fs` context provider behind the proxied route (which `bd serve`
 also resolves through). Anything that actually runs git commands must keep
 using `GetRepoContext()`, so a missing repository stays an error where it
 matters.
+
+The `.beads` itself need not be in a repository. Named from a CWD that is in
+one (`bd -C <dir>`, `BEADS_DIR`, `--db`), a `.beads` git cannot place resolves
+as external — `IsRedirected` true, `RepoRoot` its parent, as in the no-git
+table below — unless it belongs to the CWD repository's work tree (it lies
+below the CWD's top level, or is that repository's own `.beads` reached through
+a symlink), in which case it stays local. Git-backed operations against such a
+`RepoRoot` fail at the point of use with git's own "not a git repository"
+error rather than running against the CWD's repository (GH#5700).
 
 The selection is typed, deliberately. `buildRepoContext()` can fail three ways
 — no `.beads/`, the SEC-003 unsafe-location rejection, and no git root — and
