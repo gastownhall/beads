@@ -2,7 +2,9 @@ package versioncontrolops
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -37,10 +39,44 @@ func BackupRemove(ctx context.Context, db DBConn, name string) error {
 	return nil
 }
 
+// ErrNotDoltBackup marks a restore source directory that holds no Dolt backup.
+var ErrNotDoltBackup = errors.New("not a Dolt backup")
+
+// CheckBackupDir reports whether dir looks like a Dolt backup: an existing
+// directory holding a regular manifest file. It checks presence only; Dolt
+// itself rejects a corrupt manifest or missing table files before it touches
+// the restore target. A directory with no manifest is different: Dolt opens it
+// as an empty store, and a forced restore drops the target before it fails.
+func CheckBackupDir(dir string) error {
+	info, err := os.Stat(dir)
+	if err != nil {
+		return fmt.Errorf("backup source does not exist: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("backup source is not a directory: %s", dir)
+	}
+	manifest, err := os.Stat(filepath.Join(dir, "manifest"))
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("inspect backup source %s: %w", dir, err)
+	}
+	if err != nil || !manifest.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a Dolt backup (no manifest found): %w", dir, ErrNotDoltBackup)
+	}
+	return nil
+}
+
 // BackupRestore restores a database from a backup at the given URL into
 // the named database. When force is true, an existing database with the
 // same name is overwritten. Mirrors the CLI: dolt backup restore [--force] <url> <db_name>
+//
+// A file:// source must hold a Dolt backup (CheckBackupDir); anything else is
+// refused before any SQL runs, so the target is never touched (#5972).
 func BackupRestore(ctx context.Context, db DBConn, url, dbName string, force bool) error {
+	if dir, ok := strings.CutPrefix(url, "file://"); ok {
+		if err := CheckBackupDir(dir); err != nil {
+			return err
+		}
+	}
 	if force {
 		if _, err := db.ExecContext(ctx, "CALL DOLT_BACKUP('restore', '--force', ?, ?)", url, dbName); err != nil {
 			return fmt.Errorf("restore from backup %s: %w", url, err)

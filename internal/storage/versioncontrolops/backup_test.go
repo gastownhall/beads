@@ -2,11 +2,15 @@ package versioncontrolops
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/DATA-DOG/go-sqlmock"
 )
 
 // TestDirToFileURLRejectsSchemes pins the guard that stops a URL being turned
@@ -102,4 +106,122 @@ func TestBackupToDirRefusesMissingOrFileDestination(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestBackupRestoreRefusesSourceWithoutManifest pins #5972: a forced
+// DOLT_BACKUP('restore') drops the target before Dolt notices the source holds
+// no backup, so BackupRestore must refuse a file:// directory with no regular
+// manifest file before it issues any SQL. The connection is nil: a regression
+// that reached the server would panic here.
+func TestBackupRestoreRefusesSourceWithoutManifest(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, dir string)
+	}{
+		{name: "empty_dir", setup: func(*testing.T, string) {}},
+		{name: "jsonl_only", setup: func(t *testing.T, dir string) {
+			if err := os.WriteFile(filepath.Join(dir, "issues.jsonl"), []byte("{}\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "manifest_is_a_dir", setup: func(t *testing.T, dir string) {
+			if err := os.Mkdir(filepath.Join(dir, "manifest"), 0o750); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		for _, force := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/force=%t", tc.name, force), func(t *testing.T) {
+				dir := t.TempDir()
+				tc.setup(t, dir)
+				before := dirEntryNames(t, dir)
+
+				err := BackupRestore(context.Background(), nil, "file://"+dir, "beads", force)
+				if !errors.Is(err, ErrNotDoltBackup) {
+					t.Fatalf("BackupRestore(%q, force=%t) error = %v, want one wrapping ErrNotDoltBackup", dir, force, err)
+				}
+				if !strings.Contains(err.Error(), "no manifest found") {
+					t.Errorf("error %q does not say no manifest was found", err)
+				}
+				if after := dirEntryNames(t, dir); strings.Join(after, ",") != strings.Join(before, ",") {
+					t.Errorf("refused restore changed the source directory: entries %v, want %v", after, before)
+				}
+			})
+		}
+	}
+
+	parent := t.TempDir()
+	file := filepath.Join(parent, "not-a-dir")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, dir, want string
+	}{
+		{name: "missing", dir: filepath.Join(parent, "absent"), want: "does not exist"},
+		{name: "file", dir: file, want: "is not a directory"},
+	} {
+		t.Run("check_"+tc.name, func(t *testing.T) {
+			err := CheckBackupDir(tc.dir)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("CheckBackupDir(%q) error = %v, want one containing %q", tc.dir, err, tc.want)
+			}
+			if errors.Is(err, ErrNotDoltBackup) {
+				t.Errorf("CheckBackupDir(%q) error = %v wraps ErrNotDoltBackup; a %s source is a different failure", tc.dir, err, tc.name)
+			}
+		})
+	}
+}
+
+// TestBackupRestoreIssuesRestoreForBackupWithManifest is the positive control
+// for the guard above: a directory holding a manifest, and a source that is not
+// a file:// URL at all, still reach DOLT_BACKUP('restore').
+func TestBackupRestoreIssuesRestoreForBackupWithManifest(t *testing.T) {
+	backup := t.TempDir()
+	if err := os.WriteFile(filepath.Join(backup, "manifest"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, url string
+	}{
+		{name: "file_with_manifest", url: "file://" + backup},
+		{name: "non_file_scheme", url: "https://doltremoteapi.dolthub.com/user/repo"},
+	} {
+		for _, force := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/force=%t", tc.name, force), func(t *testing.T) {
+				db, mock, err := sqlmock.New()
+				if err != nil {
+					t.Fatalf("sqlmock.New: %v", err)
+				}
+				defer db.Close()
+				query := `CALL DOLT_BACKUP('restore', ?, ?)`
+				if force {
+					query = `CALL DOLT_BACKUP('restore', '--force', ?, ?)`
+				}
+				mock.ExpectExec(regexp.QuoteMeta(query)).
+					WithArgs(tc.url, "beads").
+					WillReturnResult(sqlmock.NewResult(0, 0))
+
+				if err := BackupRestore(context.Background(), db, tc.url, "beads", force); err != nil {
+					t.Fatalf("BackupRestore(%q, force=%t): %v", tc.url, force, err)
+				}
+				if err := mock.ExpectationsWereMet(); err != nil {
+					t.Fatal(err)
+				}
+			})
+		}
+	}
+}
+
+func dirEntryNames(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names
 }
