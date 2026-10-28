@@ -1102,6 +1102,35 @@ func TestApplyLoops_NeedsOnLoopTargetTheirLastStep(t *testing.T) {
 			t.Errorf("land.Needs = %v, want [round.iter2.work other]: the rewritten reference keeps its position", land.Needs)
 		}
 	})
+
+	t.Run("range", func(t *testing.T) {
+		steps := []*Step{
+			{
+				ID:    "moves",
+				Title: "Moves",
+				Loop: &LoopSpec{
+					Range: "1..3",
+					Body:  []*Step{{ID: "move", Title: "Move"}},
+				},
+			},
+			{ID: "land", Title: "Land", Needs: []string{"moves"}, DependsOn: []string{"moves"}},
+		}
+
+		result, err := ApplyLoops(steps)
+		if err != nil {
+			t.Fatalf("ApplyLoops failed: %v", err)
+		}
+		land := stepsByID(result)["land"]
+		if land == nil {
+			t.Fatal("land not found")
+		}
+		if !slices.Equal(land.Needs, []string{"moves.iter3.move"}) {
+			t.Errorf("land.Needs = %v, want [moves.iter3.move]", land.Needs)
+		}
+		if !slices.Equal(land.DependsOn, []string{"moves.iter3.move"}) {
+			t.Errorf("land.DependsOn = %v, want [moves.iter3.move]", land.DependsOn)
+		}
+	})
 }
 
 // TestApplyLoops_LoopReferencesRewritten walks the remaining shapes a
