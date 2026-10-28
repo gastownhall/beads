@@ -114,3 +114,39 @@ func TestInitRepoint_EnvDatabaseCannotMaskConfigured(t *testing.T) {
 		t.Fatalf("metadata.json records %q, want %q", got, w.db)
 	}
 }
+
+// AC-2: a --server-port or --server-host naming another endpoint used to be
+// promoted into the environment before the missing-database guard ran, so the
+// guard witnessed the workspace's database at init's target endpoint, found
+// nothing there, and refused a populated workspace as "missing". The guard and
+// the count read the configured endpoint; the populated database there needs
+// the destroy confirmation.
+func TestInitRepoint_FlaggedEndpointCountsConfigured(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"server-port", []string{"--server-port", "1"}},
+		{"server-host", []string{"--server-host", "repoint-target.invalid"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := newRepointWorkspace(t, 1)
+			args := append([]string{"--reinit-local", "--non-interactive"}, tc.args...)
+			out, code := w.reinit(t, w.env, args...)
+			if code != ExitDestroyTokenMissing {
+				t.Fatalf("exit = %d, want %d (destroy token missing)\n%s", code, ExitDestroyTokenMissing, out)
+			}
+			if !strings.Contains(out, "Existing issues: 1") {
+				t.Fatalf("expected the count read from %s at its configured endpoint (1 issue):\n%s", w.db, out)
+			}
+			cfg, err := configfile.LoadForDiscovery(w.beadsDir)
+			if err != nil || cfg == nil {
+				t.Fatalf("load metadata: %v", err)
+			}
+			if cfg.DoltDatabase != w.db || cfg.DoltServerPort != testDoltServerPort || cfg.DoltServerHost != "127.0.0.1" {
+				t.Fatalf("metadata.json changed: database %q host %q port %d, want %q 127.0.0.1 %d",
+					cfg.DoltDatabase, cfg.DoltServerHost, cfg.DoltServerPort, w.db, testDoltServerPort)
+			}
+		})
+	}
+}
