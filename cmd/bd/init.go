@@ -1794,6 +1794,11 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 					// bd bootstrap sync path produces (GH#3201) so
 					// `bd migrate --force` (or BD_ALLOW_REMOTE_MIGRATE=1) and
 					// `bd dolt push` can open the cloned database.
+					// finalizeSyncedBootstrap writes this struct to
+					// metadata.json, and initTimeCloneConfig carries only
+					// flag-given connection fields (GH#3895): keep any env
+					// or central-server-config (server.json) values out of
+					// it, as the main persistence block below does.
 					fcfg := initTimeCloneConfig(initServerMode, serverHost, serverPort, serverSocket, serverUser, dbName)
 					if ferr := finalizeSyncedBootstrap(beadsDir, syncURL, fcfg, dbName); ferr != nil {
 						fmt.Fprintf(os.Stderr, "Warning: failed to finalize bootstrapped workspace: %s\n", remedy.PrintedMessage(ferr))
@@ -2042,6 +2047,12 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				}
 
 				if !usesProxiedServer() {
+					// Flag-given connection fields only (GH#3895): the env
+					// vars and the central server config (server.json)
+					// init may have resolved its endpoint from stay per-run —
+					// the workspace reads them at runtime, like every other
+					// command — instead of being frozen into git-tracked
+					// metadata.json.
 					if serverHost != "" {
 						cfg.DoltServerHost = serverHost
 					}
@@ -4103,8 +4114,15 @@ func initTimeCloneConfig(serverMode bool, serverHost string, serverPort int, ser
 	cfg.DoltDatabase = dbName
 	if serverMode {
 		cfg.DoltMode = configfile.DoltModeServer
-		cfg.DoltServerHost = configfile.DefaultDoltServerHost
-		cfg.DoltServerUser = configfile.DefaultDoltServerUser
+		// No default host or user (GH#3895): the clone endpoint resolves
+		// the connection the way init's store does — --server-host /
+		// --server-user, else env, else the central server config
+		// (initStoreServerHost / initStoreServerUser) — and this struct is
+		// also the one init hands finalizeSyncedBootstrap on the
+		// remote-migrate-gate bail-out below, so it must carry only
+		// flag-given connection fields: a workspace inherits the central
+		// config at runtime like every command does, instead of freezing
+		// this machine's defaults into git-tracked metadata.json.
 	} else {
 		cfg.DoltMode = configfile.DoltModeEmbedded
 	}
