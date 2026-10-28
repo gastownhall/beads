@@ -1,10 +1,18 @@
-load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "doltinfoenv",
     srcs = ["doltinfoenv.go"],
     importpath = "github.com/steveyegge/beads/internal/doltinfoenv",
     visibility = ["//:__subpackages__"],
+    deps = ["//internal/execenv"],
+)
+
+go_test(
+    name = "doltinfoenv_test",
+    srcs = ["doltinfoenv_test.go"],
+    embed = [":doltinfoenv"],
+    deps = ["@com_github_dolthub_dolt_go//store/blobstore"],
 )
 
 # --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
