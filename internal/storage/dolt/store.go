@@ -43,6 +43,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/doltinfoenv"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/doltversion"
 	"github.com/steveyegge/beads/internal/gittraceenv"
@@ -4750,13 +4751,15 @@ func prepareDoltCLITransferCommand(ctx context.Context, cliDir string, creds *re
 	if s3Remote {
 		applyS3ChecksumEnvToCmd(cmd)
 	}
-	// Stderr-directed git tracing corrupts the transfer (see internal/gittraceenv);
-	// mirrors withRemoteEnvGuards on the in-process path.
+	// Stderr-directed git tracing corrupts the transfer (see internal/gittraceenv),
+	// and a git remote write publishes __dolt_remote_info__ unless disabled
+	// (GH#6484, internal/doltinfoenv); mirrors withRemoteEnvGuards on the
+	// in-process path.
 	base := cmd.Env
 	if base == nil {
 		base = os.Environ()
 	}
-	cmd.Env = gittraceenv.ScrubEnv(base)
+	cmd.Env = doltinfoenv.DisabledEnv(gittraceenv.ScrubEnv(base))
 	return cmd, ctx, cancel, nil
 }
 

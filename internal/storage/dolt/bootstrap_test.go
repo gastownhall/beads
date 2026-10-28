@@ -7,19 +7,27 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/doltinfoenv"
 	"github.com/steveyegge/beads/internal/doltversion"
+	"github.com/steveyegge/beads/internal/execenv"
 	"github.com/steveyegge/beads/internal/githooksenv"
 )
 
 // The bootstrap clone does not route through prepareDoltCLITransferCommand;
-// its env needs the git-trace scrub and the no-hooks override itself.
+// its env needs the git-trace scrub, the no-hooks override and the info-branch
+// off switch (GH#6484) itself.
 func TestBootstrapCloneCmdEnvIsGuarded(t *testing.T) {
 	t.Setenv("GIT_TRACE", "1")
 	t.Setenv("GIT_CURL_VERBOSE", "1")
+	t.Setenv(doltinfoenv.EnvVar, "") // restored after the test
+	if err := os.Unsetenv(doltinfoenv.EnvVar); err != nil {
+		t.Fatal(err)
+	}
 
 	cmd := bootstrapCloneCmd(context.Background(), "git+https://example.com/repo.git", filepath.Join(t.TempDir(), "beads"), "")
 	if cmd.Env == nil {
@@ -33,6 +41,34 @@ func TestBootstrapCloneCmdEnvIsGuarded(t *testing.T) {
 	if got := githooksenv.Extract(cmd.Env); !strings.Contains(got, githooksenv.NoHooksParam) {
 		t.Errorf("bootstrapCloneCmd() effective %s = %q, want the no-hooks override", githooksenv.ParametersEnv, got)
 	}
+	if got := doltInfoBranchEntries(cmd.Env); !slices.Equal(got, []string{doltinfoenv.EnvVar + "="}) {
+		t.Errorf("bootstrapCloneCmd() %s entries = %q, want exactly one, empty (GH#6484)", doltinfoenv.EnvVar, got)
+	}
+}
+
+// TestBootstrapCloneCmdEnvKeepsUserDoltRemoteInfoBranch: a DOLT_REMOTE_INFO_BRANCH the user set (a branch name to opt in,
+// or empty) reaches the child unchanged as its only entry (GH#6484).
+func TestBootstrapCloneCmdEnvKeepsUserDoltRemoteInfoBranch(t *testing.T) {
+	for _, value := range []string{"dolt-info", ""} {
+		t.Run("value="+value, func(t *testing.T) {
+			t.Setenv(doltinfoenv.EnvVar, value)
+			env := bootstrapCloneCmd(context.Background(), "git+https://example.com/repo.git", filepath.Join(t.TempDir(), "beads"), "").Env
+			if got, want := doltInfoBranchEntries(env), []string{doltinfoenv.EnvVar + "=" + value}; !slices.Equal(got, want) {
+				t.Errorf("bootstrapCloneCmd() %s entries = %q, want %q", doltinfoenv.EnvVar, got, want)
+			}
+		})
+	}
+}
+
+// doltInfoBranchEntries returns env's DOLT_REMOTE_INFO_BRANCH entries.
+func doltInfoBranchEntries(env []string) []string {
+	var out []string
+	for _, kv := range env {
+		if execenv.KeyEqual(execenv.EntryKey(kv), doltinfoenv.EnvVar) {
+			out = append(out, kv)
+		}
+	}
+	return out
 }
 
 // TestBootstrapFromRemoteWithDB_RejectsEmptyDatabase verifies that
