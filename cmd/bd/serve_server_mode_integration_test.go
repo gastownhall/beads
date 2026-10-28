@@ -57,6 +57,24 @@ func newServerModeProject(t *testing.T, bd, prefix string, extraInitArgs ...stri
 		}
 	})
 
+	// A command probed against this workspace (the capability matrix's
+	// `dolt start`, before external.dolt_start.conflict refused it) may leave
+	// a bd-started dolt sql-server behind: stop whatever the recorded pid
+	// names so nothing this workspace started outlives the test. Inline
+	// rather than the cgo&&unix direct-local helper: this file builds
+	// without that build tag's files.
+	t.Cleanup(func() {
+		if _, err := os.Stat(filepath.Join(beadsDir, doltserver.PIDFileName)); err != nil {
+			return
+		}
+		stop := exec.Command(bd, "dolt", "stop")
+		stop.Dir = dir
+		stop.Env = env
+		if out, err := stop.CombinedOutput(); err != nil {
+			t.Logf("bd dolt stop after a probed start: %v\n%s", err, out)
+		}
+	})
+
 	cmd := exec.Command(bd, "init", "--quiet", "--server",
 		"--server-host", "127.0.0.1",
 		"--server-port", strconv.Itoa(port),
