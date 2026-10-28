@@ -197,3 +197,68 @@ func TestDoltStartEnvDeclaredExternalRefusal(t *testing.T) {
 		})
 	}
 }
+
+// requireStartReached pins that a start bd or the shared server owns reaches
+// doltserver.Start: the recording shim catches its first probe, `dolt
+// version` (the shim logs the arguments only, so the recorded line is
+// "version"). Start then fails on the shim's exit 1, so a failed bd start
+// here is expected; what is not expected is the externally managed refusal's
+// wording.
+func requireStartReached(t *testing.T, res externalInitResult) {
+	t.Helper()
+	if !strings.Contains(res.launches, "version") {
+		t.Errorf("bd dolt start did not reach doltserver.Start on a workspace it manages:\n%s", res.output)
+	}
+	if strings.Contains(res.output, "externally managed") {
+		t.Errorf("bd dolt start gave the externally managed refusal on a workspace it manages:\n%s", res.output)
+	}
+}
+
+// TestDoltStartOwnedAndSharedWorkspacesStillStart pins the refusal's scope:
+// the workspaces bd or the shared server owns — a plain owned workspace, an
+// owned workspace pinning its port only with config.yaml dolt.port, and a
+// shared-server workspace — still reach doltserver.Start, and an owned
+// workspace with auto-start off and an empty data dir still gets the
+// fresh-data-dir refusal (bd-7pkvvd), which --force still bypasses.
+func TestDoltStartOwnedAndSharedWorkspacesStillStart(t *testing.T) {
+	t.Run("owned", func(t *testing.T) {
+		f := newExternalInitFixture(t)
+		namedPortWorkspace(t, f, 0)
+		requireStartReached(t, f.run("", "dolt", "start"))
+	})
+	t.Run("owned with config.yaml dolt.port", func(t *testing.T) {
+		f := newExternalInitFixture(t)
+		beadsDir := namedPortWorkspace(t, f, 0)
+		namedPortConfigYaml(t, beadsDir, freeLoopbackPort(t))
+		requireStartReached(t, f.run("", "dolt", "start"))
+	})
+	t.Run("shared", func(t *testing.T) {
+		f := newExternalInitFixture(t)
+		namedPortWorkspace(t, f, 0)
+		f.env = []string{"BEADS_DOLT_SHARED_SERVER=1"}
+		requireStartReached(t, f.run("", "dolt", "start"))
+	})
+	t.Run("owned auto-start off empty data dir", func(t *testing.T) {
+		f := newExternalInitFixture(t)
+		beadsDir := namedPortWorkspace(t, f, 0)
+		if err := os.MkdirAll(filepath.Join(beadsDir, "dolt"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		res := f.run("0", "dolt", "start")
+		if !res.failed {
+			t.Fatalf("bd dolt start succeeded where the fresh-data-dir refusal (bd-7pkvvd) must hold:\n%s", res.output)
+		}
+		requireNoLaunch(t, res)
+		if !strings.Contains(res.output, "holds no Dolt database") {
+			t.Errorf("the fresh-data-dir refusal (bd-7pkvvd) did not fire:\n%s", res.output)
+		}
+		if strings.Contains(res.output, "externally managed") {
+			t.Errorf("the externally managed refusal fired on an owned workspace:\n%s", res.output)
+		}
+		// --force exists to bypass bd-7pkvvd, and still does.
+		forced := f.run("0", "dolt", "start", "--force")
+		if !strings.Contains(forced.launches, "version") {
+			t.Errorf("bd dolt start --force did not reach doltserver.Start although --force bypasses the fresh-data-dir refusal:\n%s", forced.output)
+		}
+	})
+}
