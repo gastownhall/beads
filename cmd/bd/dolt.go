@@ -697,6 +697,28 @@ func printDivergedHistoryGuidance(operation string) {
 	fmt.Fprintln(os.Stderr, "existing remote instead of 'bd init' to avoid divergent histories.")
 }
 
+// remoteFromArgs resolves which Dolt remote `bd dolt push` / `bd dolt pull`
+// targets: the positional argument when one is given, else the --remote flag
+// ("" still selects the default remote). GH#3720: the positional was silently
+// dropped, so `bd dolt push 1st` transferred with the default remote and
+// reported success. A positional that cannot name exactly one remote — empty
+// or whitespace-only (e.g. `bd dolt push "$R"` with R unset, which must not
+// fall back to the default remote), or a second, different --remote — is an
+// error rather than a silently discarded selector.
+func remoteFromArgs(cmd *cobra.Command, args []string) (string, error) {
+	remote, _ := cmd.Flags().GetString("remote")
+	if len(args) == 0 {
+		return remote, nil
+	}
+	if strings.TrimSpace(args[0]) == "" {
+		return "", HandleError("remote name is empty: name a remote (see 'bd dolt remote list') or omit the argument to use the default")
+	}
+	if remote != "" && remote != args[0] {
+		return "", HandleError("remote named twice: %q as an argument and %q with --remote; name it once", args[0], remote)
+	}
+	return args[0], nil
+}
+
 var doltPushCmd = &cobra.Command{
 	Use:           "push",
 	SilenceUsage:  true,
@@ -739,7 +761,10 @@ The remote must already exist (see 'bd dolt remote add').`,
 			return HandleError("no store available")
 		}
 		force, _ := cmd.Flags().GetBool("force")
-		remote, _ := cmd.Flags().GetString("remote")
+		remote, err := remoteFromArgs(cmd, args)
+		if err != nil {
+			return HandleError("%v", err)
+		}
 		if remote != "" {
 			fmt.Printf("Pushing to Dolt remote %q...\n", remote)
 			if err := st.PushRemote(ctx, remote, force); err != nil {

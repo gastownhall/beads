@@ -3085,3 +3085,121 @@ func TestDoltCommandsAdviseAPortForAServerBdDoesNotRun(t *testing.T) {
 		})
 	}
 }
+
+// positionalRemotePushStore records which transfer entry point `bd dolt
+// push`/`bd dolt pull` used, so a positional remote name that regresses to the
+// default remote is caught instead of silently misdirected (GH#3720).
+type positionalRemotePushStore struct {
+	storage.DoltStorage
+	defaultPushCalled bool
+	pushedRemotes     []string
+	pushedForces      []bool
+}
+
+func (m *positionalRemotePushStore) Push(context.Context) error {
+	m.defaultPushCalled = true
+	return nil
+}
+
+func (m *positionalRemotePushStore) ForcePush(context.Context) error {
+	m.defaultPushCalled = true
+	return nil
+}
+
+func (m *positionalRemotePushStore) PushRemote(_ context.Context, remote string, force bool) error {
+	m.pushedRemotes = append(m.pushedRemotes, remote)
+	m.pushedForces = append(m.pushedForces, force)
+	return nil
+}
+
+func (m *positionalRemotePushStore) ListRemotes(context.Context) ([]storage.RemoteInfo, error) {
+	return []storage.RemoteInfo{
+		{Name: "origin", URL: "git+ssh://git@github.com/example/widgets.git"},
+		{Name: "1st", URL: "git+ssh://git@github.com/example/widgets1.git"},
+	}, nil
+}
+
+// resetDoltTransferFlags returns push and pull's flags to their defaults.
+// They live on package-level cobra commands, so a row that sets --remote or
+// --force would otherwise leak into the next test.
+func resetDoltTransferFlags(t *testing.T) {
+	t.Helper()
+	for _, f := range []struct {
+		cmd         *cobra.Command
+		name, value string
+	}{
+		{doltPushCmd, "yes", "false"}, {doltPushCmd, "no-adopt", "false"},
+		{doltPushCmd, "force", "false"}, {doltPushCmd, "remote", ""},
+		{doltPullCmd, "remote", ""}, {doltPullCmd, "strategy", ""},
+	} {
+		if err := f.cmd.Flags().Set(f.name, f.value); err != nil {
+			t.Fatalf("reset --%s: %v", f.name, err)
+		}
+	}
+}
+
+// TestDoltPushPositionalRemoteIsNotSilentlyIgnored reproduces GH#3720: `bd
+// dolt push 1st` printed "Push complete." after pushing to the DEFAULT remote,
+// because the positional remote name was silently dropped. The command must
+// push the remote the argument names (or fail validation), never fall back to
+// the default remote on the strength of an ignored argument. The rows also
+// cover pull, which drops the positional identically.
+func TestDoltPushPositionalRemoteIsNotSilentlyIgnored(t *testing.T) {
+	// Cannot be parallel: modifies process-global store and config.
+	saveAndRestoreGlobals(t)
+	resetCommandContext()
+
+	t.Setenv("BD_NO_PUSH", "")
+	t.Setenv("BD_NO_REMOTE_ADOPT", "")
+
+	config.ResetForTesting()
+	t.Cleanup(func() { config.ResetForTesting() })
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+
+	resetDoltTransferFlags(t)
+	t.Cleanup(func() { resetDoltTransferFlags(t) })
+
+	// Each row drives its command the way cobra does: validate the arguments,
+	// then — only when validation passes — run.
+	run := func(t *testing.T, cmd *cobra.Command, args []string) error {
+		t.Helper()
+		if err := cmd.ValidateArgs(args); err != nil {
+			return err
+		}
+		return cmd.RunE(cmd, args)
+	}
+
+	t.Run("bd dolt push 1st pushes 1st", func(t *testing.T) {
+		resetDoltTransferFlags(t)
+		fake := &positionalRemotePushStore{}
+		store = fake
+		out := captureStdout(t, func() error { return run(t, doltPushCmd, []string{"1st"}) })
+		if fake.defaultPushCalled {
+			t.Errorf("bd dolt push 1st pushed to the default remote instead of %q; output: %q", "1st", out)
+		}
+		if len(fake.pushedRemotes) != 1 || fake.pushedRemotes[0] != "1st" {
+			t.Errorf("bd dolt push 1st: want PushRemote(\"1st\"), got %v; output: %q", fake.pushedRemotes, out)
+		}
+		if want := `Pushing to Dolt remote "1st"...`; !strings.Contains(out, want) {
+			t.Errorf("bd dolt push 1st output lacks %q, got: %q", want, out)
+		}
+	})
+
+	t.Run("bd dolt push 1st --force force-pushes 1st", func(t *testing.T) {
+		resetDoltTransferFlags(t)
+		if err := doltPushCmd.Flags().Set("force", "true"); err != nil {
+			t.Fatal(err)
+		}
+		fake := &positionalRemotePushStore{}
+		store = fake
+		out := captureStdout(t, func() error { return run(t, doltPushCmd, []string{"1st"}) })
+		if fake.defaultPushCalled {
+			t.Errorf("bd dolt push 1st --force force-pushed to the default remote instead of %q; output: %q", "1st", out)
+		}
+		if len(fake.pushedRemotes) != 1 || fake.pushedRemotes[0] != "1st" || !fake.pushedForces[0] {
+			t.Errorf("bd dolt push 1st --force: want PushRemote(\"1st\", true), got %v; output: %q", fake.pushedRemotes, out)
+		}
+	})
+}
