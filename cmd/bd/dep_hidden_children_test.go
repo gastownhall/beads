@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -90,6 +91,16 @@ func TestNoteHiddenChildren(t *testing.T) {
 		stdout, stderr := runNoteHiddenChildren(t, &fakeChildRelations{}, "hc-root", "list")
 		if stdout != "" || stderr != "" {
 			t.Errorf("no children must print nothing, got stdout %q stderr %q", stdout, stderr)
+		}
+	})
+
+	// AC-8: a failing inbound read prints nothing and does not panic.
+	t.Run("read_error", func(t *testing.T) {
+		for _, view := range []string{"list", "tree"} {
+			stdout, stderr := runNoteHiddenChildren(t, &fakeChildRelations{n: 3, err: errors.New("boom")}, "hc-root", view)
+			if stdout != "" || stderr != "" {
+				t.Errorf("%s: a read error must print nothing, got stdout %q stderr %q", view, stdout, stderr)
+			}
 		}
 	})
 
