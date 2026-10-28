@@ -1131,6 +1131,57 @@ func TestApplyLoops_NeedsOnLoopTargetTheirLastStep(t *testing.T) {
 			t.Errorf("land.DependsOn = %v, want [moves.iter3.move]", land.DependsOn)
 		}
 	})
+
+	t.Run("until", func(t *testing.T) {
+		steps := []*Step{
+			{ID: "brief", Title: "Brief"},
+			{
+				ID:    "round",
+				Title: "Round",
+				Needs: []string{"brief"},
+				Loop: &LoopSpec{
+					Until: "step.status == 'complete'",
+					Max:   5,
+					Body: []*Step{
+						{ID: "work", Title: "Work"},
+						{ID: "check", Title: "Check", Needs: []string{"work"}},
+					},
+				},
+			},
+			{ID: "land", Title: "Land", Needs: []string{"round"}},
+		}
+
+		result, err := ApplyLoops(steps)
+		if err != nil {
+			t.Fatalf("ApplyLoops failed: %v", err)
+		}
+		byID := stepsByID(result)
+
+		land := byID["land"]
+		if land == nil {
+			t.Fatal("land not found")
+		}
+		if !slices.Equal(land.Needs, []string{"round.iter1.check"}) {
+			t.Errorf("land.Needs = %v, want [round.iter1.check] (the last step of the cooked iteration)", land.Needs)
+		}
+
+		work := byID["round.iter1.work"]
+		if work == nil {
+			t.Fatal("round.iter1.work not found")
+		}
+		if !slices.Contains(work.Needs, "brief") {
+			t.Errorf("round.iter1.work.Needs = %v, want the loop step's own need brief carried", work.Needs)
+		}
+		hasLoopLabel := false
+		for _, label := range work.Labels {
+			if strings.HasPrefix(label, "loop:") {
+				hasLoopLabel = true
+			}
+		}
+		if !hasLoopLabel {
+			t.Errorf("round.iter1.work.Labels = %v, want the loop: label kept for runtime re-evaluation", work.Labels)
+		}
+	})
 }
 
 // TestApplyLoops_LoopReferencesRewritten walks the remaining shapes a
