@@ -284,3 +284,34 @@ func TestImplicitDiscoverySkipsUserGlobalBeadsDir(t *testing.T) {
 		}
 	})
 }
+
+// TestImplicitDiscoveryKeepsHomeRepoBeadsDir: a repository rooted at $HOME (a
+// dotfiles repository) owns <home>/.beads, so discovery inside it still finds
+// it.
+func TestImplicitDiscoveryKeepsHomeRepoBeadsDir(t *testing.T) {
+	for _, rel := range []string{".", "sub"} {
+		t.Run("cwd="+rel, func(t *testing.T) {
+			home := userGlobalBeadsHome(t)
+			beadsDir := filepath.Join(home, ".beads")
+			gitInitForDiscovery(t, home)
+			cwd := filepath.Join(home, rel)
+			if err := os.MkdirAll(cwd, 0o750); err != nil {
+				t.Fatal(err)
+			}
+			chdirForDiscovery(t, cwd)
+
+			if got := FindBeadsDir(); got != beadsDir {
+				t.Errorf("FindBeadsDir() = %q, want %q", got, beadsDir)
+			}
+			if got, want := FindDatabasePath(), filepath.Join(beadsDir, "embeddeddolt"); got != want {
+				t.Errorf("FindDatabasePath() = %q, want %q", got, want)
+			}
+			if got := FindBeadsDirFrom(cwd); got != beadsDir {
+				t.Errorf("FindBeadsDirFrom(%q) = %q, want %q", cwd, got, beadsDir)
+			}
+			if got := SkippedUserGlobalBeadsDir(); got != "" {
+				t.Errorf("SkippedUserGlobalBeadsDir() = %q, want \"\"", got)
+			}
+		})
+	}
+}
