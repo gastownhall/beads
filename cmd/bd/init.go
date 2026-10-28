@@ -974,7 +974,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// What init is about to replace, resolved before the promotion below
 		// can turn a flag into an environment variable the getters would read
 		// back as the workspace's own setting (#6172).
-		initID := resolveInitIdentity(resolveInitWorkspace(), initIdentityFlags{Database: database}, initServerMode)
+		initID := resolveInitIdentity(resolveInitWorkspace(), initIdentityFlags{Database: database, Host: serverHost, Port: serverPort}, initServerMode)
 
 		// Explicit connection flags outrank stale BEADS_DOLT_SERVER_* values
 		// (GH#5177). This must run AFTER every source of server mode has been
@@ -2713,8 +2713,9 @@ func checkExistingBeadsDataAt(beadsDir string, prefix string) error {
 }
 
 // checkExistingBeadsDataAtRef is checkExistingBeadsDataAt with the configured
-// database init resolved before promoting its flags (initIdentity). nil
-// resolves it from the workspace's metadata, as its commands would.
+// database and endpoint init resolved before promoting its flags
+// (initIdentity). nil resolves them from the workspace's metadata, as its
+// commands would.
 func checkExistingBeadsDataAtRef(beadsDir string, prefix string, configured *initDBRef) error {
 	// Check if .beads directory exists
 	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
@@ -2845,6 +2846,9 @@ Aborting.`, remedy.PrintedValue(location), prefix)
 			if cfg.IsDoltServerMode() && !localDatabaseExists {
 				host := cfg.GetDoltServerHost()
 				port := doltserver.DefaultConfig(beadsDir).Port
+				if configured != nil {
+					host, port = configured.Host, configured.Port
+				}
 				password := cfg.GetDoltServerPassword()
 				user := cfg.GetDoltServerUser()
 
@@ -2931,6 +2935,9 @@ Aborting.`, remedy.PrintedValue(location), prefix)
 			if cfg.IsDoltServerMode() {
 				host := cfg.GetDoltServerHost()
 				port := doltserver.DefaultConfig(beadsDir).Port
+				if configured != nil {
+					host, port = configured.Host, configured.Port
+				}
 				location = fmt.Sprintf("dolt server at %s", doltutil.PrintedServerAddr(host, port))
 			}
 			return alreadyInitialized(`
@@ -3277,8 +3284,8 @@ func guardMissingServerDatabaseAt(beadsDir string, prefix string) error {
 }
 
 // guardMissingServerDatabaseAtRef is guardMissingServerDatabaseAt with the
-// configured database init resolved before promoting its flags
-// (initIdentity). nil resolves it from the workspace's metadata.
+// configured database and endpoint init resolved before promoting its flags
+// (initIdentity). nil resolves them from the workspace's metadata.
 func guardMissingServerDatabaseAtRef(beadsDir string, prefix string, configured *initDBRef) error {
 	if initAllowRecreateMissing {
 		return nil
@@ -3304,7 +3311,7 @@ func guardMissingServerDatabaseAtRef(beadsDir string, prefix string, configured 
 	port := doltserver.DefaultConfig(beadsDir).Port
 	dbName := cfg.GetDoltDatabase()
 	if configured != nil {
-		dbName = configured.databaseOrDefault()
+		host, port, dbName = configured.Host, configured.Port, configured.databaseOrDefault()
 	}
 	doltPath := doltserver.ResolveDoltDir(beadsDir)
 

@@ -100,3 +100,27 @@ func TestInitRepoint_EnvDatabaseCannotMaskConfigured(t *testing.T) {
 		t.Errorf("metadata.json dolt_database = %q, want %q", got, w.a)
 	}
 }
+
+// AC-2: init promotes --server-port/--server-host into BEADS_DOLT_SERVER_*
+// before its guards ran, so they and the destroy count dialed the flagged
+// endpoint, where the configured database is not. Port 1 is unreachable by
+// construction.
+func TestInitRepoint_FlaggedEndpointCountsConfigured(t *testing.T) {
+	w := newRepointWorkspace(t, 1)
+
+	out, code := w.reinit(t, nil, "--server-port", "1")
+	if code != ExitDestroyTokenMissing {
+		t.Fatalf("exit = %d, want %d (destroy token missing)\n%s", code, ExitDestroyTokenMissing, out)
+	}
+	if !strings.Contains(out, "Existing issues: 1") {
+		t.Errorf("the count must be read from %s at its configured endpoint (1 issue):\n%s", w.a, out)
+	}
+	cfg, err := configfile.LoadForDiscovery(w.beadsDir)
+	if err != nil || cfg == nil {
+		t.Fatalf("load metadata.json: cfg=%v err=%v", cfg, err)
+	}
+	if cfg.DoltDatabase != w.a || cfg.DoltServerPort != testDoltServerPort {
+		t.Errorf("metadata.json changed: dolt_database=%q dolt_server_port=%d, want %q and %d",
+			cfg.DoltDatabase, cfg.DoltServerPort, w.a, testDoltServerPort)
+	}
+}

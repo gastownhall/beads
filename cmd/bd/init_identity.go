@@ -8,6 +8,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/utils"
@@ -17,6 +18,10 @@ import (
 type initDBRef struct {
 	Database string // raw recorded or flagged name; "" = unset
 	Server   bool
+	Host     string
+	Port     int // 0 = unknown
+
+	portSource doltserver.PortSource
 }
 
 // databaseOrDefault is the database a store open of this ref selects.
@@ -45,11 +50,13 @@ type initIdentity struct {
 // initIdentityFlags are the invocation's own database selectors.
 type initIdentityFlags struct {
 	Database string // --database; "" when not given
+	Host     string // --server-host; "" when not given
+	Port     int    // --server-port; 0 when not given
 }
 
-// resolveInitWorkspace resolves the .beads init writes and reads what it
-// records. It runs once, before any init flag is promoted into the
-// environment.
+// resolveInitWorkspace resolves the .beads init writes and the database its
+// commands open. It runs once, before any init flag is promoted into the
+// environment, so the endpoint is the one the workspace resolves on its own.
 func resolveInitWorkspace() initIdentity {
 	var id initIdentity
 	if envBeadsDir := os.Getenv("BEADS_DIR"); envBeadsDir != "" {
@@ -66,23 +73,34 @@ func resolveInitWorkspace() initIdentity {
 	if cfg, err := configfile.LoadForDiscovery(id.BeadsDir); err == nil {
 		id.Recorded = cfg
 	}
+	if id.Recorded != nil {
+		serverCfg := doltserver.DefaultConfig(id.BeadsDir)
+		id.Configured = initDBRef{
+			Database:   id.Recorded.DoltDatabase,
+			Server:     id.Recorded.IsDoltServerMode(),
+			Host:       id.Recorded.GetDoltServerHost(),
+			Port:       serverCfg.Port,
+			portSource: serverCfg.PortSource,
+		}
+	}
 	return id
 }
 
-// resolveInitIdentity derives Configured from what the workspace records and
-// Target from Configured overlaid by the invocation's flags. It is pure.
+// resolveInitIdentity derives Target from the workspace's Configured
+// database overlaid by the invocation's flags. It is pure.
 func resolveInitIdentity(ws initIdentity, flags initIdentityFlags, serverMode bool) initIdentity {
 	id := ws
-	if id.Recorded != nil {
-		id.Configured = initDBRef{
-			Database: id.Recorded.DoltDatabase,
-			Server:   id.Recorded.IsDoltServerMode(),
-		}
-	}
 	id.Target = id.Configured
 	id.Target.Server = serverMode
 	if flags.Database != "" {
 		id.Target.Database = flags.Database
+	}
+	if flags.Host != "" {
+		id.Target.Host = flags.Host
+	}
+	if flags.Port != 0 {
+		id.Target.Port = flags.Port
+		id.Target.portSource = doltserver.PortSourceCallerExplicit
 	}
 	return id
 }
@@ -125,15 +143,26 @@ func countConfiguredIssues(id initIdentity) (int, error) {
 }
 
 // openConfiguredStoreForCount opens the configured database read-only. A
-// server-mode workspace pins the recorded database name, so the open neither
-// follows BEADS_DOLT_SERVER_DATABASE nor creates anything. Every other mode
-// opens the workspace as its commands do.
+// server-mode workspace pins the recorded database name and the endpoint
+// resolved before init promoted its flags, so the open follows neither
+// BEADS_DOLT_SERVER_DATABASE nor --server-host/--server-port, and creates
+// nothing. Every other mode opens the workspace as its commands do.
 func openConfiguredStoreForCount(ctx context.Context, id initIdentity) (storage.DoltStorage, error) {
 	if id.Recorded.GetBackend() == configfile.BackendDolt && id.Configured.Server {
-		return dolt.NewFromConfigWithOptions(ctx, id.BeadsDir, &dolt.Config{
-			Database: id.Configured.databaseOrDefault(),
-			ReadOnly: true,
-		})
+		cfg := &dolt.Config{
+			Database:         id.Configured.databaseOrDefault(),
+			ServerHost:       id.Configured.Host,
+			ServerPort:       id.Configured.Port,
+			ServerPortSource: id.Configured.portSource,
+			ReadOnly:         true,
+		}
+		// The port was resolved before init promoted --server-port into
+		// BEADS_DOLT_SERVER_PORT; a non-authoritative source would let the
+		// promoted variable override it again.
+		if cfg.ServerPort > 0 && !cfg.ServerPortSource.IsAuthoritative() {
+			cfg.ServerPortSource = doltserver.PortSourceCallerExplicit
+		}
+		return dolt.NewFromConfigWithOptions(ctx, id.BeadsDir, cfg)
 	}
 	return newDoltStoreFromConfig(ctx, id.BeadsDir)
 }
