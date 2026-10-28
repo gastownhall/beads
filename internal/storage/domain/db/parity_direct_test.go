@@ -356,6 +356,43 @@ func (s *testSuite) TestParityReadyStaleFlagNonReadyAffectingEdges() {
 		"related / discovered-from edges never block, so their stale flags must not hide the issues")
 }
 
+// Case 4e (GH#3268): the stale-flag guard must not surface really blocked
+// work. Every ready-affecting edge type, with the flag set by the recompute
+// itself, keeps its issue out of ready on both stacks: c blocks on open d,
+// e is a parent-child child of blocked c, f conditional-blocks on open d, and
+// g waits for spawner s whose child k is still open (default all-children
+// gate).
+func (s *testSuite) TestParityReadyRealBlockersStayHidden() {
+	base := s.parityBase()
+	ids := []string{"bd-par-real-c", "bd-par-real-d", "bd-par-real-e", "bd-par-real-f",
+		"bd-par-real-g", "bd-par-real-s", "bd-par-real-k"}
+	for n, id := range ids {
+		minute := n
+		s.seedParityIssue(id, func(i *types.Issue) {
+			i.CreatedAt = base.Add(time.Duration(minute) * time.Minute)
+		}, false)
+	}
+	s.classicAddDep("bd-par-real-c", "bd-par-real-d", types.DepBlocks)
+	s.classicAddDep("bd-par-real-e", "bd-par-real-c", types.DepParentChild)
+	s.classicAddDep("bd-par-real-f", "bd-par-real-d", types.DepConditionalBlocks)
+	s.classicAddDep("bd-par-real-k", "bd-par-real-s", types.DepParentChild)
+	s.classicAddDep("bd-par-real-g", "bd-par-real-s", types.DepWaitsFor)
+
+	hidden := []string{"bd-par-real-c", "bd-par-real-e", "bd-par-real-f", "bd-par-real-g"}
+	for _, id := range hidden {
+		var blocked bool
+		s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+			"SELECT is_blocked FROM issues WHERE id = ?", id).Scan(&blocked))
+		s.Require().True(blocked, "%s: the recompute must set is_blocked from its real edge", id)
+	}
+
+	ready := s.readyOnBothStacks("real ready-affecting blockers")
+	for _, id := range hidden {
+		s.NotContains(ready, id, "%s is really blocked and must stay out of ready work", id)
+	}
+	s.ElementsMatch([]string{"bd-par-real-d", "bd-par-real-s", "bd-par-real-k"}, ready)
+}
+
 // Case 5: ready limit boundary — membership parity at the cut, and the domain
 // HasMore flag agrees with what the direct stack's unlimited read implies.
 func (s *testSuite) TestParityReadyLimitBoundary() {
