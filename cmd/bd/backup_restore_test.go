@@ -435,4 +435,30 @@ func TestBackupRestoreRefusesNonBackupSourceServerMode(t *testing.T) {
 		}
 		assertRefusedAndUntouched(t, restoreDir)
 	})
+
+	// default_dir_without_backup is #5972's second trigger: `bd backup restore
+	// --force` with no path argument. backupDir() MkdirAlls .beads/backup when
+	// it is missing, so a workspace that never took a Dolt backup hands the
+	// restore a freshly created empty directory. The pre-existing MkdirAll is
+	// not what is asserted here — the database must not be replaced.
+	t.Run("default_dir_without_backup", func(t *testing.T) {
+		dir, env, _ := newServerModeRestoreWorkspace(t)
+		defaultBackupDir := filepath.Join(dir, ".beads", "backup")
+		if _, err := os.Stat(filepath.Join(defaultBackupDir, "manifest")); !os.IsNotExist(err) {
+			t.Fatalf("the fixture must not leave a Dolt backup under %s (stat manifest: %v)", defaultBackupDir, err)
+		}
+
+		stdout, stderr, code := runBDMigrationFreezeWithEnv(t, bd, dir, env, "backup", "restore", "--force")
+		if code == 0 {
+			t.Fatalf("restore with no path argument exited 0\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+		for _, want := range []string{"is not a Dolt backup (no manifest found)", "was not changed"} {
+			if !strings.Contains(stderr, want) {
+				t.Errorf("stderr from the default-dir restore is missing %q:\n%s", want, stderr)
+			}
+		}
+		if got := serverModeIssueCount(t, bd, dir, env); got != 3 {
+			t.Errorf("issue count after the refused default-dir restore = %d, want 3: the store did not survive a bad restore source", got)
+		}
+	})
 }
