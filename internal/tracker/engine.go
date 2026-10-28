@@ -377,7 +377,11 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 					identifier = e.Tracker.ExtractIdentifier(*local.ExternalRef)
 				}
 				if identifier == "" {
-					e.warn("No external ref found for local issue %s, skipping pull", id)
+					if local, ok := localByID[id]; ok && local.ExternalRef != nil && e.Tracker.IsExternalRef(*local.ExternalRef) {
+						e.warn("Local issue %s is linked outside the configured %s repository or project, skipping pull", id, e.Tracker.DisplayName())
+					} else {
+						e.warn("No external ref found for local issue %s, skipping pull", id)
+					}
 					stats.Skipped++
 					continue
 				}

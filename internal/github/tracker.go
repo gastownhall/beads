@@ -218,7 +218,9 @@ func canonicalGitHubBaseURL(raw string) string {
 
 // IsExternalRef checks if a ref belongs to this GitHub tracker.
 // It recognizes both full GitHub URLs and the "github:{id}" shorthand format
-// produced by BuildExternalRef when a URL is unavailable.
+// produced by BuildExternalRef when a URL is unavailable. It recognizes any
+// repository's issue URL; ExtractIdentifier decides whether the configured
+// repository can address it.
 func (t *Tracker) IsExternalRef(ref string) bool {
 	if ghShorthandPattern.MatchString(ref) {
 		return true
@@ -227,7 +229,15 @@ func (t *Tracker) IsExternalRef(ref string) bool {
 }
 
 // ExtractIdentifier extracts the issue number from a GitHub URL or shorthand ref.
+// Refs to other repositories yield "", or their number would match this repo's issue.
 func (t *Tracker) ExtractIdentifier(ref string) string {
+	if t.client != nil {
+		n, ok := t.RefScope().IssueNumberFromRef(ref)
+		if !ok {
+			return ""
+		}
+		return strconv.Itoa(n)
+	}
 	if m := ghShorthandPattern.FindStringSubmatch(ref); len(m) >= 2 {
 		return m[1]
 	}

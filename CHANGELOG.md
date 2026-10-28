@@ -1095,6 +1095,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   link only when both of its issues are in that project, and report the
   rest in one warning instead of linking that project's unrelated issues
   with the same IIDs (#7795, reported by @NahumLitvin).
+- `bd github pull` no longer overwrites a bead linked to another
+  repository's issue with the same number: pulling issue 42 of `acme/repo-b`
+  into a database that holds a bead for issue 42 of `acme/repo-a` now creates
+  a second bead instead of replacing the first one's title, description and
+  `external_ref`. `bd github push` and `bd github sync` likewise no longer
+  write a foreign bead's content onto the configured repository's issue with
+  the same number, or report a false sync conflict for it. An external ref
+  now matches only an issue URL on the configured host and owner/repo,
+  compared case-insensitively; the `github:N` shorthand still means the
+  configured repository, and `bd github push --dry-run` counts beads linked
+  to another repository as skipped, as the real push does. After a
+  repository rename or transfer, beads whose `external_ref` still names the
+  old owner/repo are no longer matched or pushed, and the next pull imports
+  a new bead for each such issue; point them at the new URL first with
+  `bd update <id> --external-ref <url>` (#7781, #7794, reported and first
+  fixed by @NahumLitvin).
 - `bd ado sync` no longer warns "Failed to resolve dependency" and counts
   a skipped issue for each link to a work item the pull did not import,
   such as one in another project. The dependency pass skips such a link

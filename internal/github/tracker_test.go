@@ -109,6 +109,25 @@ func TestExtractIdentifier(t *testing.T) {
 	}
 }
 
+func TestExtractIdentifierScopedToRepository(t *testing.T) {
+	tr := &Tracker{client: NewClient("token", "acme", "repo-b")}
+	tests := []struct {
+		ref  string
+		want string
+	}{
+		{"https://github.com/acme/repo-b/issues/42", "42"},
+		{"https://github.com/ACME/Repo-B/issues/42", "42"},
+		{"github:42", "42"},
+		{"https://github.com/acme/repo-a/issues/42", ""},
+		{"https://github.com/other/repo-b/issues/42", ""},
+	}
+	for _, tt := range tests {
+		if got := tr.ExtractIdentifier(tt.ref); got != tt.want {
+			t.Errorf("ExtractIdentifier(%q) = %q, want %q", tt.ref, got, tt.want)
+		}
+	}
+}
+
 func TestBuildExternalRef(t *testing.T) {
 	tr := &Tracker{}
 	ti := &tracker.TrackerIssue{
