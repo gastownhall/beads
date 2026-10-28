@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -10,7 +11,9 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
@@ -169,9 +172,24 @@ func syncProjectIDFromDB(ctx context.Context, s storage.DoltStorage) error {
 	return cfg.Save(beadsDir)
 }
 
+// validateBackupRestoreDir refuses a restore source that is not a local
+// directory holding a Dolt backup, before any SQL is issued and before the
+// proxied route quiesces the serving topology. With --force, DOLT_BACKUP
+// drops the target database before reading the source (#5972), so the
+// directory the operator typed must be told apart from a backup before the
+// store is touched — including on a proxied workspace, where the refusal
+// below runs ahead of quiesceProxiedTopology and leaves the serving child up.
 func validateBackupRestoreDir(dir string) error {
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		return fmt.Errorf("backup directory not found: %s\nRun 'bd backup' first to create a backup", dir)
+	}
+	if err := versioncontrolops.CheckBackupDir(dir); err != nil {
+		if errors.Is(err, versioncontrolops.ErrNotDoltBackup) {
+			return fmt.Errorf("%s is not a Dolt backup (no manifest found); the database was not changed\n"+
+				"To create a Dolt backup, run %s, then 'bd backup sync'",
+				remedy.PrintedValue(dir), backupInitCommand(dir))
+		}
+		return err
 	}
 	return nil
 }
