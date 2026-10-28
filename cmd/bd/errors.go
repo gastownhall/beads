@@ -56,6 +56,20 @@ func whereDiagHint() string {
 	return workspaceDiagHint(false)
 }
 
+// skippedUserGlobalBeadsNote returns the note naming the user-level beads
+// directory implicit discovery passed over (GH#4402), or "" when there is
+// nothing to name: no ancestor walk from the working directory reaches the
+// home directory, or <home>/.beads holds no workspace (a config.yaml-only
+// home directory is user configuration).
+func skippedUserGlobalBeadsNote() string {
+	skipped := beads.SkippedUserGlobalBeadsDir()
+	if skipped == "" {
+		return ""
+	}
+	return fmt.Sprintf("Note: %s is your user-level beads directory; bd does not use it outside a project\n"+
+		"      unless you name it: export BEADS_DIR=%s", skipped, skipped)
+}
+
 func workspaceDiagHint(includeWhere bool) string {
 	if includeWhere {
 		if !usesSQLServer() {

@@ -1055,6 +1055,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Running outside any project no longer silently adopts the user's global
+  `~/.beads` workspace (#4402). Upward discovery used to walk past the
+  repository boundary all the way to `$HOME`, and a `~/.beads` holding a
+  legacy `config.yaml` or a database counted as a workspace, so a command
+  like `bd remember` issued from the wrong directory wrote to the global
+  database with no warning. Discovery now passes over the home directory's
+  own `.beads` — and a redirect inside it — unless `$HOME` itself is the
+  repository root (a dotfiles repository); the command then refuses with
+  `no beads database found`, and both that refusal and `bd where` name the
+  skipped directory and the opt-in. **Migration:** to keep using
+  `~/.beads` as a workspace, name it: `export BEADS_DIR=~/.beads`
+  (`--db`/`BEADS_DB` still select it too, and a project's own
+  `.beads/redirect` pointing at it keeps working).
 - `bd list --watch` and `bd show --watch` now wait a full poll interval after
   each refresh, and `bd list --watch --parent` reads its tree in one
   transaction, so other bd commands on an embedded workspace no longer stall

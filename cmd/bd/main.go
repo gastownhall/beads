@@ -1725,6 +1725,12 @@ var rootCmd = &cobra.Command{
 					fmt.Fprintf(os.Stderr, "Error: no beads database found\n")
 					fmt.Fprintf(os.Stderr, "Hint: %s\n", diagHint())
 					fmt.Fprintf(os.Stderr, "      or set BEADS_DIR to point to your .beads directory\n")
+					if note := skippedUserGlobalBeadsNote(); note != "" {
+						// GH#4402: discovery passed over the user's own
+						// ~/.beads. Name it, so a misdirected write is
+						// visible and the opt-in is one copy away.
+						fmt.Fprintf(os.Stderr, "%s\n", note)
+					}
 					return SilentExit()
 				}
 

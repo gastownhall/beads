@@ -99,6 +99,9 @@ type discoveryPinCase struct {
 	// stderrPrefix compares only the start of stderr. Use it only where the
 	// rest of the output is not part of the pin.
 	stderrPrefix bool
+	// verify, when non-nil, runs after the invocation so a case can assert
+	// on-disk state the command must not have touched.
+	verify func(f *discoveryPinFixture)
 }
 
 func runDiscoveryPinCases(t *testing.T, cases []discoveryPinCase) {
@@ -130,6 +133,9 @@ func runDiscoveryPinCases(t *testing.T, cases []discoveryPinCase) {
 			}
 			if gotStderr != tc.stderr {
 				t.Errorf("bd %s: stderr differs\n got: %q\nwant: %q", strings.Join(tc.args, " "), stderr, tc.stderr)
+			}
+			if tc.verify != nil {
+				tc.verify(f)
 			}
 		})
 	}
@@ -881,6 +887,99 @@ func TestDiscoveryRefusalPinsBlockedEnvVarsRunFirst(t *testing.T) {
 			exit:         1,
 			stderr:       pinBlockedEnvRefusal("BD_BACKEND"),
 			stderrPrefix: true,
+		},
+	})
+}
+
+// pinUserGlobalBeadsNote is the note appended to a refusal when implicit
+// discovery passed over the user-level <home>/.beads.
+const pinUserGlobalBeadsNote = "Note: $ROOT/home/.beads is your user-level beads directory; bd does not use it outside a project\n" +
+	"      unless you name it: export BEADS_DIR=$ROOT/home/.beads\n"
+
+// pinUserGlobalWhereJSON is bd where --json's refusal for the same state:
+// the note joins the existing hint string, with no new JSON keys.
+const pinUserGlobalWhereJSON = `{
+  "error": "no_beads_directory",
+  "hint": "check BEADS_DIR/worktree setup, or run 'bd init' to create a new database\nNote: $ROOT/home/.beads is your user-level beads directory; bd does not use it outside a project\n      unless you name it: export BEADS_DIR=$ROOT/home/.beads",
+  "message": "No active beads workspace found.",
+  "schema_version": 1
+}
+`
+
+// TestDiscoveryRefusalPinsUserGlobalBeadsDir pins the GH#4402 contract: the
+// user-level <home>/.beads is never adopted by implicit discovery, so a
+// command run from a non-repository directory under $HOME refuses — naming
+// the skipped directory and the BEADS_DIR opt-in — instead of silently
+// binding the global workspace. Existing pins for fixtures without a real
+// <home>/.beads are unchanged: the note is empty unless there is a workspace
+// to name.
+func TestDiscoveryRefusalPinsUserGlobalBeadsDir(t *testing.T) {
+	// globalHome gives the fixture's home a user-level home/.beads workspace
+	// (an embedded one: metadata.json plus embeddeddolt/) and returns
+	// home/notes, a non-repository directory under $HOME.
+	globalHome := func(f *discoveryPinFixture) string {
+		f.mkdir("home/.beads")
+		f.write("home/.beads/metadata.json", "{\"database\": \"beads.db\"}\n")
+		f.mkdir("home/.beads/embeddeddolt")
+		return f.mkdir("home/notes")
+	}
+	// untouched asserts nothing under home/.beads was created or modified:
+	// the refusal runs before any store is opened.
+	untouched := func(f *discoveryPinFixture) {
+		f.t.Helper()
+		entries, err := os.ReadDir(f.path("home/.beads"))
+		if err != nil {
+			f.t.Fatal(err)
+		}
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		sort.Strings(names)
+		if got, want := strings.Join(names, ","), "embeddeddolt,metadata.json"; got != want {
+			f.t.Errorf("home/.beads holds %q, want exactly %q: the refusal must not touch the user-level directory", got, want)
+		}
+		data, err := os.ReadFile(f.path("home/.beads/metadata.json"))
+		if err != nil || string(data) != "{\"database\": \"beads.db\"}\n" {
+			f.t.Errorf("home/.beads/metadata.json was modified: %q, %v", data, err)
+		}
+		sub, err := os.ReadDir(f.path("home/.beads/embeddeddolt"))
+		if err != nil || len(sub) != 0 {
+			f.t.Errorf("home/.beads/embeddeddolt holds %d entries, want none: the refusal must not open or create the global database", len(sub))
+		}
+	}
+	runDiscoveryPinCases(t, []discoveryPinCase{
+		{
+			// The reporter's command (GH#4402): a write from outside any
+			// project must not land in the global database.
+			name:   "remember",
+			setup:  func(f *discoveryPinFixture) (string, []string) { return globalHome(f), nil },
+			args:   []string{"remember", "some note"},
+			exit:   1,
+			stderr: pinNoDatabaseRefusal + pinUserGlobalBeadsNote,
+			verify: untouched,
+		},
+		{
+			// --json does not turn the refusal into a JSON document.
+			name:   "list-json",
+			setup:  func(f *discoveryPinFixture) (string, []string) { return globalHome(f), nil },
+			args:   []string{"list", "--json"},
+			exit:   1,
+			stderr: pinNoDatabaseRefusal + pinUserGlobalBeadsNote,
+		},
+		{
+			name:   "where",
+			setup:  func(f *discoveryPinFixture) (string, []string) { return globalHome(f), nil },
+			args:   []string{"where"},
+			exit:   1,
+			stderr: pinNoWorkspaceWhereRefusal + pinUserGlobalBeadsNote,
+		},
+		{
+			name:   "where-json",
+			setup:  func(f *discoveryPinFixture) (string, []string) { return globalHome(f), nil },
+			args:   []string{"where", "--json"},
+			exit:   1,
+			stdout: pinUserGlobalWhereJSON,
 		},
 	})
 }

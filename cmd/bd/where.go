@@ -53,17 +53,23 @@ Examples:
 
 		beadsDir := resolveWhereBeadsDir(cmd)
 		if beadsDir == "" {
+			hint := whereDiagHint()
+			if note := skippedUserGlobalBeadsNote(); note != "" {
+				// GH#4402: name the user-level ~/.beads discovery passed
+				// over, in the hint both for text and --json output.
+				hint += "\n" + note
+			}
 			if jsonOutput {
 				if jerr := outputJSON(map[string]string{
 					"error":   "no_beads_directory",
 					"message": activeWorkspaceNotFoundMessage(),
-					"hint":    whereDiagHint(),
+					"hint":    hint,
 				}); jerr != nil {
 					return jerr
 				}
 				return SilentExit()
 			}
-			return HandleErrorWithHint(activeWorkspaceNotFoundMessage(), whereDiagHint())
+			return HandleErrorWithHint(activeWorkspaceNotFoundMessage(), hint)
 		}
 
 		result.Path = beadsDir

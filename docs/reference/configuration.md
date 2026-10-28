@@ -531,8 +531,8 @@ Selected commonly-used variables:
 | `BD_DEBUG` | Enable debug logging |
 | `BD_HTTP_READ_MEMO` | `0` turns off the per-command read memo on an http workspace, so each repeated row or settings read in a command goes to the server; for ruling out a stale read |
 | `BD_MIGRATION_FREEZE_FILE` | Check this exact path for the freeze marker instead of walking ancestor directories; authoritative when set (see [Migration Freeze](#migration-freeze)) |
-| `BEADS_DIR` | Force the active beads workspace directory |
-| `BEADS_CEILING_DIRECTORIES` | Directories (separated like `PATH`) that `.beads` and `config.yaml` discovery never looks at or above, like git's `GIT_CEILING_DIRECTORIES`; the starting directory is always examined. For sandboxes such as `bazel test` that must not reach the user's own `~/.beads` |
+| `BEADS_DIR` | Force the active beads workspace directory. `~/.beads` is never discovered implicitly — discovery passes over the home directory's own `.beads` on every upward walk unless `$HOME` itself is the repository root — so a home-directory workspace must be named: `export BEADS_DIR=~/.beads` |
+| `BEADS_CEILING_DIRECTORIES` | Directories (separated like `PATH`) that `.beads` and `config.yaml` discovery never looks at or above, like git's `GIT_CEILING_DIRECTORIES`; the starting directory is always examined. For sandboxes such as `bazel test` that must not reach the user's own `~/.beads`. Independent of this ceiling, discovery always passes over the user's own `~/.beads` unless `$HOME` is the repository root (see `BEADS_DIR`) |
 | `BEADS_ACTOR` | Actor identity (preferred over `BD_ACTOR`, which is a deprecated alias) |
 | `BEADS_IDENTITY` | Sender identity for `bd mail` |
 | `BEADS_FSCK_TIMEOUT` | Runtime-only timeout for the pre-push `dolt fsck --quiet` integrity check (default `30s`) |
