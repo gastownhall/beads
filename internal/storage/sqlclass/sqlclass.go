@@ -5,6 +5,8 @@
 package sqlclass
 
 import (
+	"strings"
+
 	"github.com/dolthub/vitess/go/vt/sqlparser"
 )
 
@@ -20,8 +22,9 @@ const (
 	// committing transaction and report the rows affected.
 	Write
 	// Mixed may change data and may also return a result set (CALL, EXPLAIN
-	// ANALYZE of a write, RETURNING, or anything the parser cannot classify):
-	// run it in a committing transaction and render any rows it returns.
+	// ANALYZE of a write, RETURNING, a read that calls a Dolt function that
+	// may write, or anything the parser cannot classify): run it in a
+	// committing transaction and render any rows it returns.
 	Mixed
 )
 
@@ -39,15 +42,36 @@ func (k Kind) String() string {
 
 // Classify classifies a single SQL statement by its main statement, so CTEs
 // (WITH [RECURSIVE] name(cols) AS (...)), comments, and string literals that
-// contain keywords do not affect the result. Input the parser rejects is
-// Mixed: it may still be valid for the server, and Mixed never discards rows
-// or rolls back writes.
+// contain keywords do not affect the result. A read that calls a dolt_
+// function anywhere in its parsed tree is Mixed, because Dolt can expose a
+// write (DOLT_COMMIT, DOLT_RESET, ...) as a SELECT-callable function. Input
+// the parser rejects is Mixed: it may still be valid for the server, and
+// Mixed never discards rows or rolls back writes.
 func Classify(query string) Kind {
 	stmt, err := sqlparser.Parse(query)
 	if err != nil || stmt == nil {
 		return Mixed
 	}
-	return classify(stmt)
+	kind := classify(stmt)
+	if kind == Read && callsDoltWriteFunction(stmt) {
+		return Mixed
+	}
+	return kind
+}
+
+// callsDoltWriteFunction reports whether stmt calls a dolt_ function, in any
+// clause and with any qualifier. Table functions (dolt_log(), dolt_diff(...))
+// and system tables are not function calls and do not match.
+func callsDoltWriteFunction(stmt sqlparser.Statement) bool {
+	found := false
+	_ = sqlparser.Walk(func(node sqlparser.SQLNode) (bool, error) {
+		if fn, ok := node.(*sqlparser.FuncExpr); ok && strings.HasPrefix(fn.Name.Lowered(), "dolt_") {
+			found = true
+			return false, nil
+		}
+		return !found, nil
+	}, stmt)
+	return found
 }
 
 func classify(stmt sqlparser.Statement) Kind {

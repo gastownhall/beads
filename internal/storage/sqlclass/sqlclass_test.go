@@ -56,6 +56,23 @@ func TestClassify(t *testing.T) {
 		{"unparseable", "PRAGMA table_info(issues)", Mixed},
 		{"garbage", "NOT SQL AT ALL (", Mixed},
 		{"empty", "", Mixed},
+
+		// Reads that call a Dolt function that may write must run in a
+		// committing transaction behind the read-only gate (GH#6230): a Read
+		// skips CheckReadonly and is rolled back.
+		{"select dolt function", "SELECT DOLT_COMMIT('-Am', 'msg')", Mixed},
+		{"lowercase dolt function", "select dolt_reset('--hard')", Mixed},
+		{"backticked dolt function", "SELECT `dolt_checkout`('main')", Mixed},
+		{"qualified dolt function", "SELECT mydb.dolt_merge('feature')", Mixed},
+		{"dolt function in where", "SELECT id FROM issues WHERE DOLT_COMMIT('-Am','x') = 0", Mixed},
+		{"dolt function in subquery", "SELECT (SELECT DOLT_RESET('--hard'))", Mixed},
+		{"dolt function in cte", "WITH t AS (SELECT DOLT_COMMIT('-Am','x') AS h) SELECT h FROM t", Mixed},
+		{"dolt function in union", "SELECT 1 UNION SELECT DOLT_PUSH('origin','main')", Mixed},
+		{"dolt function in table function arg", "SELECT * FROM dolt_diff(DOLT_COMMIT('-Am','x'), 'WORKING', 'issues')", Mixed},
+		{"dolt function in show filter", "SHOW TABLES WHERE DOLT_COMMIT('-Am','x') = 0", Mixed},
+		{"explain dolt function", "EXPLAIN SELECT DOLT_COMMIT('-Am','x')", Mixed},
+		{"explain analyze dolt function", "EXPLAIN ANALYZE SELECT DOLT_COMMIT('-Am','x')", Mixed},
+		{"unknown dolt function", "SELECT DOLT_FUTURE_PROC()", Mixed},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
