@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -194,6 +195,43 @@ func TestEmbeddedDepDefaultDirectionNotesHiddenChildren(t *testing.T) {
 		_, stderr := bdRunSplit(t, bd, dir, "dep", "list", x.ID)
 		if !strings.Contains(stderr, hiddenChildrenNote(x.ID, 1)) {
 			t.Errorf("relate pair plus one child: stderr missing the 1-child note:\n%s", stderr)
+		}
+	})
+
+	t.Run("machine_output", func(t *testing.T) {
+		stdout, stderr := bdRunSplit(t, bd, dir, "dep", "list", root.ID, "--json")
+		if strings.Contains(stderr, "note:") {
+			t.Errorf("list --json: unexpected note:\n%s", stderr)
+		}
+		if strings.TrimSpace(stdout) != "[]" {
+			t.Errorf("list --json stdout = %q, want []", stdout)
+		}
+
+		for _, args := range [][]string{{"--json"}, {"--format=json"}} {
+			stdout, stderr := bdRunSplit(t, bd, dir, append([]string{"dep", "tree", root.ID}, args...)...)
+			if strings.Contains(stderr, "note:") {
+				t.Errorf("tree %v: unexpected note:\n%s", args, stderr)
+			}
+			var nodes []map[string]any
+			if err := json.Unmarshal([]byte(stdout), &nodes); err != nil {
+				t.Fatalf("tree %v: parse JSON: %v\n%s", args, err, stdout)
+			}
+			if len(nodes) != 1 || nodes[0]["id"] != root.ID {
+				t.Errorf("tree %v: want a one-node array for %s, got:\n%s", args, root.ID, stdout)
+			}
+		}
+
+		stdout, stderr = bdRunSplit(t, bd, dir, "dep", "tree", root.ID, "--format=mermaid")
+		if strings.Contains(stderr, "note:") {
+			t.Errorf("tree mermaid: unexpected note:\n%s", stderr)
+		}
+		if !strings.Contains(stdout, "flowchart") || !strings.Contains(stdout, root.ID) {
+			t.Errorf("tree mermaid: want a flowchart naming %s:\n%s", root.ID, stdout)
+		}
+		for _, id := range steps {
+			if strings.Contains(stdout, id) {
+				t.Errorf("tree mermaid: want one node, got step %s:\n%s", id, stdout)
+			}
 		}
 	})
 
