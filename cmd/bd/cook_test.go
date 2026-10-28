@@ -1545,3 +1545,43 @@ func TestStepTypeToIssueType(t *testing.T) {
 		}
 	}
 }
+
+// loopdepsFormulaSrc is the loop formula from GH#7636: a loop step that has
+// its own needs, and a step after the loop that needs the loop as a whole.
+const loopdepsFormulaSrc = `formula = "loopdeps"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "brief"
+title = "Brief"
+
+[[steps]]
+id = "round"
+title = "Round"
+needs = ["brief"]
+[steps.loop]
+count = 2
+[[steps.loop.body]]
+id = "work"
+title = "Work"
+
+[[steps]]
+id = "land"
+title = "Land"
+needs = ["round"]
+`
+
+// TestCookFormulaToSubgraph_LoopStepDependencies pins GH#7636 on the pour
+// cook path (resolveAndCookFormulaWithVars): the loop step's own needs must
+// gate its first expanded step instead of being dropped with the loop step.
+func TestCookFormulaToSubgraph_LoopStepDependencies(t *testing.T) {
+	sg := cookGateFormulaTOML(t, "loopdeps", loopdepsFormulaSrc)
+
+	if got := blocksEdgesFrom(sg, "loopdeps.round.iter1.work"); !slices.Equal(got, []string{"loopdeps.brief"}) {
+		t.Errorf("blocks(loopdeps.round.iter1.work) = %v, want [loopdeps.brief] (the loop step's own need)", got)
+	}
+	if got := blocksEdgesFrom(sg, "loopdeps.round.iter2.work"); !slices.Equal(got, []string{"loopdeps.round.iter1.work"}) {
+		t.Errorf("blocks(loopdeps.round.iter2.work) = %v, want [loopdeps.round.iter1.work] (iteration chaining)", got)
+	}
+}
