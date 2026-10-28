@@ -1,6 +1,8 @@
 package formula
 
 import (
+	"errors"
+	"fmt"
 	"reflect"
 	"slices"
 	"strings"
@@ -693,10 +695,11 @@ func TestApplyLoops_OwnDepsCarryToRoots(t *testing.T) {
 	}
 }
 
-// TestApplyLoops_NeedsOnLoopTargetItsLastStep pins GH#7636: a step's Needs
-// and DependsOn on a loop step, which no longer exists after expansion, are
-// retargeted in place to the loop's last expanded step.
-func TestApplyLoops_NeedsOnLoopTargetItsLastStep(t *testing.T) {
+// TestApplyLoops_NeedsOnLoopTargetItsEnds pins GH#7636: a step's Needs and
+// DependsOn on a loop step, which no longer exists after expansion, are
+// retargeted to the loop's ends, the expanded steps nothing else in the loop
+// waits for: the last-declared one in place, the others appended.
+func TestApplyLoops_NeedsOnLoopTargetItsEnds(t *testing.T) {
 	tests := []struct {
 		name          string
 		loop          *Step
@@ -732,6 +735,32 @@ func TestApplyLoops_NeedsOnLoopTargetItsLastStep(t *testing.T) {
 			}},
 			land:      &Step{ID: "land", Title: "Land", Needs: []string{"round", "other"}},
 			wantNeeds: []string{"round.iter2.work", "other"},
+		},
+		{
+			// Chaining gates only iteration 2's a, on iteration 1's b, so
+			// round.iter1.a, round.iter2.a and round.iter2.b all end the loop.
+			name: "parallel",
+			loop: &Step{ID: "round", Title: "Round", Loop: &LoopSpec{
+				Count: 2,
+				Body:  []*Step{{ID: "a", Title: "A"}, {ID: "b", Title: "B"}},
+			}},
+			land:          &Step{ID: "land", Title: "Land", Needs: []string{"round", "other"}, DependsOn: []string{"round"}},
+			wantNeeds:     []string{"round.iter2.b", "other", "round.iter1.a", "round.iter2.a"},
+			wantDependsOn: []string{"round.iter2.b", "round.iter1.a", "round.iter2.a"},
+		},
+		{
+			// b needs a but is declared first, so the last-declared step, a,
+			// does not end an iteration: b does.
+			name: "out_of_order",
+			loop: &Step{ID: "round", Title: "Round", Loop: &LoopSpec{
+				Count: 2,
+				Body: []*Step{
+					{ID: "b", Title: "B", Needs: []string{"a"}},
+					{ID: "a", Title: "A"},
+				},
+			}},
+			land:      &Step{ID: "land", Title: "Land", Needs: []string{"round"}},
+			wantNeeds: []string{"round.iter2.b", "round.iter1.b"},
 		},
 		{
 			// An until loop cooks one iteration; the runtime re-runs it.
@@ -960,17 +989,104 @@ func TestApplyLoops_LoopDependencyEdgeCases(t *testing.T) {
 	})
 
 	t.Run("body_step_names_its_own_loop", func(t *testing.T) {
-		_, err := ApplyLoops([]*Step{
-			loop("round", 2, nil, step("work"), step("check", "round")),
+		// A loop in another loop's body expands under a prefixed ID, which
+		// the references to it in its own body must reach too: from its
+		// body steps, from a loop nested in it, and when it is a body
+		// step's child.
+		tests := []struct {
+			name string
+			// build returns a fresh copy of the input, so the test can
+			// tell whether ApplyLoops changed it.
+			build func() []*Step
+			// loopID and stepID are the loop and the step the error names.
+			loopID, stepID string
+		}{
+			{
+				name: "top_level",
+				build: func() []*Step {
+					return []*Step{loop("round", 2, nil, step("work"), step("check", "round"))}
+				},
+				loopID: "round",
+				stepID: "round.iter1.check",
+			},
+			{
+				name: "nested",
+				build: func() []*Step {
+					return []*Step{loop("outer", 2, nil, loop("inner", 2, nil, step("x"), step("y", "inner")))}
+				},
+				loopID: "outer.iter1.inner",
+				stepID: "outer.iter1.inner.iter1.y",
+			},
+			{
+				name: "two_loops_down",
+				build: func() []*Step {
+					return []*Step{loop("outer", 1, nil, loop("mid", 1, nil, loop("inner", 1, nil, step("x", "mid"))))}
+				},
+				loopID: "outer.iter1.mid",
+				stepID: "outer.iter1.mid.iter1.inner.iter1.x",
+			},
+			{
+				// x names the innermost of the two loops called l.
+				name: "same_id_nested",
+				build: func() []*Step {
+					return []*Step{loop("outer", 1, nil, loop("l", 1, nil, loop("l", 1, nil, step("x", "l"))))}
+				},
+				loopID: "outer.iter1.l.iter1.l",
+				stepID: "outer.iter1.l.iter1.l.iter1.x",
+			},
+			{
+				name: "loop_in_children",
+				build: func() []*Step {
+					phase := step("phase")
+					phase.Children = []*Step{loop("inner", 1, nil, step("x"), step("y", "inner"))}
+					return []*Step{loop("outer", 1, nil, phase)}
+				},
+				loopID: "outer.iter1.inner",
+				stepID: "outer.iter1.inner.iter1.y",
+			},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				in := tt.build()
+				_, err := ApplyLoops(in)
+				if err == nil {
+					t.Fatal("ApplyLoops accepted a body step that depends on its own loop")
+				}
+				// pour, wisp and bond report only an ErrValidation as the
+				// formula's own error, not as "not found".
+				if !errors.Is(err, ErrValidation) {
+					t.Errorf("error = %v, want it to wrap ErrValidation", err)
+				}
+				want := fmt.Sprintf("loop %q: step %q depends on its own loop", tt.loopID, tt.stepID)
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error = %q, want it to contain %q", err, want)
+				}
+				if !reflect.DeepEqual(in, tt.build()) {
+					t.Errorf("ApplyLoops modified its input steps")
+				}
+			})
+		}
+	})
+
+	t.Run("body_step_named_like_its_loop", func(t *testing.T) {
+		// The body's references to that ID name the step, not the loop,
+		// whether the loop is nested or not.
+		byID := expand(t, []*Step{
+			loop("round", 1, nil, step("round"), step("y", "round")),
+			loop("outer", 1, nil, loop("inner", 1, nil, step("inner"), step("y", "inner"))),
 		})
-		if err == nil {
-			t.Fatal("ApplyLoops accepted a body step that depends on its own loop")
-		}
-		for _, want := range []string{`"round"`, `"round.iter1.check"`} {
-			if !strings.Contains(err.Error(), want) {
-				t.Errorf("error = %q, want it to name %s", err, want)
-			}
-		}
+		wantNeeds(t, byID, "round.iter1.y", "round.iter1.round")
+		wantNeeds(t, byID, "outer.iter1.inner.iter1.y", "outer.iter1.inner.iter1.inner")
+	})
+
+	t.Run("cyclic_body", func(t *testing.T) {
+		// No step ends the loop. Cook refuses the cycle, but the reference
+		// still names a step of the loop rather than being dropped.
+		byID := expand(t, []*Step{
+			loop("round", 1, nil, step("a", "b"), step("b", "a")),
+			step("land", "round"),
+		})
+		wantNeeds(t, byID, "land", "round.iter1.b")
 	})
 
 	t.Run("input_unchanged", func(t *testing.T) {
@@ -989,6 +1105,49 @@ func TestApplyLoops_LoopDependencyEdgeCases(t *testing.T) {
 			t.Errorf("ApplyLoops modified its input steps")
 		}
 	})
+}
+
+// TestRetargetDeps pins how a reference to a loop becomes the loop's ends
+// (GH#7636): the first in its place, the others appended unless already
+// named, and an entry that names no loop left as it is.
+func TestRetargetDeps(t *testing.T) {
+	ends := map[string][]string{
+		"round": {"round.iter2.b", "round.iter1.a", "round.iter2.a"},
+		"solo":  {"solo.iter1.work"},
+	}
+	tests := []struct {
+		name string
+		deps []string
+		want []string
+	}{
+		{
+			name: "no_loop",
+			deps: []string{"x", "y"},
+			want: []string{"x", "y"},
+		},
+		{
+			name: "first_end_in_place",
+			deps: []string{"x", "round", "y"},
+			want: []string{"x", "round.iter2.b", "y", "round.iter1.a", "round.iter2.a"},
+		},
+		{
+			name: "end_already_named",
+			deps: []string{"round", "round.iter1.a"},
+			want: []string{"round.iter2.b", "round.iter1.a", "round.iter2.a"},
+		},
+		{
+			name: "two_loops",
+			deps: []string{"solo", "round"},
+			want: []string{"solo.iter1.work", "round.iter2.b", "round.iter1.a", "round.iter2.a"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := retargetDeps(slices.Clone(tt.deps), ends); !slices.Equal(got, tt.want) {
+				t.Errorf("retargetDeps(%v) = %v, want %v", tt.deps, got, tt.want)
+			}
+		})
+	}
 }
 
 func TestApplyLoops_NestedChildren(t *testing.T) {

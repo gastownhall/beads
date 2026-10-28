@@ -157,29 +157,6 @@ title = "Deploy"
 needs = ["test-unit", "test-integration"]  # Waits for both
 ```
 
-### Loops
-
-A loop step's own `needs` and `depends_on` gate its first expanded steps, and
-another step's `needs = ["<loop>"]` waits for the loop's last expanded step.
-For an `until` loop, that is the last step of the iteration cook expands.
-
-```toml
-[[steps]]
-id = "round"
-title = "Round"
-needs = ["brief"]            # round.iter1.work waits for brief
-[steps.loop]
-count = 2
-[[steps.loop.body]]
-id = "work"
-title = "Work"
-
-[[steps]]
-id = "land"
-title = "Land"
-needs = ["round"]            # waits for round.iter2.work
-```
-
 ## Gates
 
 Add gates for async coordination. A `[steps.gate]` on an ordinary step is an

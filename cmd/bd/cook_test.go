@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -1590,6 +1591,51 @@ func TestCookFormulaToSubgraph_LoopStepDependencies(t *testing.T) {
 		sg := cookGateFormulaTOML(t, "loopdeps", loopDepsReproTOML)
 		if got := blocksEdgesFrom(sg, "loopdeps.land"); !slices.Equal(got, []string{"loopdeps.round.iter2.work"}) {
 			t.Errorf("land blocks edges = %v, want [loopdeps.round.iter2.work] (the loop's last expanded step)", got)
+		}
+	})
+
+	// A body of two independent steps: every expanded step that nothing
+	// else in the loop waits for blocks the step that needs the loop.
+	t.Run("needs_on_parallel_loop", func(t *testing.T) {
+		src := strings.Replace(loopDepsReproTOML, `[[steps.loop.body]]
+id = "work"
+title = "Work"
+`, `[[steps.loop.body]]
+id = "a"
+title = "A"
+
+[[steps.loop.body]]
+id = "b"
+title = "B"
+`, 1)
+		sg := cookGateFormulaTOML(t, "loopdeps", src)
+		want := []string{"loopdeps.round.iter2.b", "loopdeps.round.iter1.a", "loopdeps.round.iter2.a"}
+		if got := blocksEdgesFrom(sg, "loopdeps.land"); !slices.Equal(got, want) {
+			t.Errorf("land blocks edges = %v, want %v (every step that ends the loop)", got, want)
+		}
+	})
+
+	// A body step that names its own loop is refused as an invalid formula:
+	// pour, wisp and bond report a formula.ErrValidation from this cook path
+	// as it is, where any other error makes them report the formula as not
+	// found.
+	t.Run("self_reference", func(t *testing.T) {
+		src := strings.Replace(loopDepsReproTOML, `id = "work"
+title = "Work"
+`, `id = "work"
+title = "Work"
+needs = ["round"]
+`, 1)
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "loopdeps.formula.toml"), []byte(src), 0o600); err != nil {
+			t.Fatalf("write formula: %v", err)
+		}
+		_, err := resolveAndCookFormulaWithVars("loopdeps", []string{dir}, nil)
+		if !errors.Is(err, formula.ErrValidation) {
+			t.Fatalf("cook error = %v, want a formula.ErrValidation", err)
+		}
+		if want := `loop "round": step "round.iter1.work" depends on its own loop`; !strings.Contains(err.Error(), want) {
+			t.Errorf("cook error = %q, want it to contain %q", err, want)
 		}
 	})
 
