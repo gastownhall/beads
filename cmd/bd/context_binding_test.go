@@ -905,3 +905,63 @@ func TestPrepareSelectedCommandContext_DoesNotMergeCallerConfigForUnsetKeys(t *t
 		t.Fatalf("actor = %q, want %q", actor, "target-actor")
 	}
 }
+
+// TestActiveRepoPathForRoutingBindsChangeDirToNonGitTarget pins GH#5700 AC-5:
+// `bd -C <target>` where the target is a beads project in no git repository
+// must route role detection at the target, not silently at the caller's
+// repository, and the non-repository warning must fire exactly once across
+// repeated role detection.
+func TestActiveRepoPathForRoutingBindsChangeDirToNonGitTarget(t *testing.T) {
+	resetRepoContextCachesForTest(t)
+	resetRolePathWarningForTest(t)
+
+	callerDir := filepath.Join(t.TempDir(), "caller")
+	initGitRepoForContextTest(t, callerDir)
+	roleCmd := gitCommand("config", "beads.role", "maintainer")
+	roleCmd.Dir = callerDir
+	if output, err := roleCmd.CombinedOutput(); err != nil {
+		t.Fatalf("git config beads.role: %v\n%s", err, output)
+	}
+
+	// The target holds a beads project but is in no git repository.
+	targetDir := filepath.Join(t.TempDir(), "target")
+	targetBeadsDir := filepath.Join(targetDir, ".beads")
+	writeTestConfigYAML(t, targetBeadsDir, "")
+
+	t.Chdir(callerDir)
+	t.Setenv("BEADS_DIR", targetBeadsDir)
+	setBeadsDirStartupProvenanceForTest(t, false)
+	setChangeDirForTest(t, targetDir)
+
+	assertActiveRepoPath(t, activeRepoPathForRouting(), targetDir,
+		"bd -C <non-git target> must bind role detection to the target, not silently to the caller's repository")
+
+	// Detect twice (an ID lookup re-runs role detection once per missing ID):
+	// the target is not a git repository, so the role-path warning fires on
+	// the first pass and must not repeat.
+	readStderr, writeStderr, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe stderr: %v", err)
+	}
+	oldStderr := os.Stderr
+	os.Stderr = writeStderr
+	t.Cleanup(func() {
+		os.Stderr = oldStderr
+		_ = readStderr.Close()
+		_ = writeStderr.Close()
+	})
+
+	for range 2 {
+		if _, err := detectUserRoleForActiveRepo(); err != nil {
+			t.Fatalf("detectUserRoleForActiveRepo: %v", err)
+		}
+	}
+	_ = writeStderr.Close()
+	stderrOutput, readErr := io.ReadAll(readStderr)
+	if readErr != nil {
+		t.Fatalf("read stderr: %v", readErr)
+	}
+	if n := strings.Count(string(stderrOutput), "is not a git repository"); n != 1 {
+		t.Fatalf("non-repo role path warned %d times across two detections, want exactly once; stderr:\n%s", n, stderrOutput)
+	}
+}
