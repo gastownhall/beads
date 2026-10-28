@@ -982,4 +982,31 @@ func TestProxiedServerDepListSingleIDWarnsOnDroppedExternalEdge(t *testing.T) {
 	if !strings.Contains(batchStdout.String(), "external:other:capability") || !strings.Contains(batchStdout.String(), local.ID) {
 		t.Errorf("batch mode should show both deps, got:\n%s", batchStdout.String())
 	}
+
+	// #6557: when EVERY stored "down" edge points outside this database, the
+	// old line "<id> has no dependencies" was an affirmative falsehood — the
+	// edge is stored and the stderr warning just named it. The line now says
+	// how many cross-repo/external edges were listed on stderr.
+	lonely := bdProxiedCreate(t, bd, p.dir, "lonely issue", "--type", "task")
+	bdProxiedDep(t, bd, p.dir, "add", lonely.ID, "external:crm:pod-client", "--type", "blocks")
+
+	lonelyCmd := exec.Command(bd, "dep", "list", lonely.ID)
+	lonelyCmd.Dir = p.dir
+	lonelyCmd.Env = bdProxiedEnv(p.dir)
+	lonelyStdout, lonelyStderr, err := runCommandBuffers(t, lonelyCmd)
+	if err != nil {
+		t.Fatalf("bd dep list lonely: %v\nstdout:\n%s\nstderr:\n%s", err, lonelyStdout.String(), lonelyStderr.String())
+	}
+	if strings.Contains(lonelyStdout.String(), "has no dependencies") {
+		t.Errorf("stdout must not claim no dependencies when the only stored edge is external:\n%s", lonelyStdout.String())
+	}
+	if strings.Contains(lonelyStdout.String(), "external:crm:pod-client") {
+		t.Errorf("stdout must not list the external target (shape stays unchanged):\n%s", lonelyStdout.String())
+	}
+	if !strings.Contains(lonelyStdout.String(), lonely.ID+" has no local dependencies (1 cross-repo/external edge(s) listed on stderr)") {
+		t.Errorf("stdout = %q, want the no-local-dependencies line naming the stderr count", lonelyStdout.String())
+	}
+	if !strings.Contains(lonelyStderr.String(), "external:crm:pod-client via blocks") {
+		t.Errorf("stderr should still name the dropped edge, got:\n%s", lonelyStderr.String())
+	}
 }
