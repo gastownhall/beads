@@ -261,16 +261,96 @@ async def test_update_open_on_closed_issue_reopens_and_applies_fields(mcp_client
     issue_id = json.loads(create_result.content[0].text)["id"]
     await mcp_client.call_tool("close", {"issue_id": issue_id, "reason": "Done"})
 
-    await mcp_client.call_tool(
+    update_result = await mcp_client.call_tool(
         "update",
-        {"issue_id": issue_id, "status": "open", "notes": "Found regression", "description": "D"},
+        {"issue_id": issue_id, "status": "open", "notes": "Found regression", "description": "D", "brief": False},
     )
+
+    # One issue, the same shape as on an issue that was not closed.
+    updated = json.loads(update_result.content[0].text)
+    assert isinstance(updated, dict)
+    assert updated["id"] == issue_id
+    assert updated["status"] == "open"
+    assert updated["closed_at"] is None
+    assert updated["description"] == "D"
 
     show_result = await mcp_client.call_tool("show", {"issue_id": issue_id})
     shown = json.loads(show_result.content[0].text)
     assert shown["status"] == "open"
     assert shown["closed_at"] is None
     assert shown["description"] == "D"
+
+
+@pytest.mark.parametrize("fields", [{}, {"description": "D"}])
+@pytest.mark.parametrize("closed", [True, False])
+@pytest.mark.asyncio
+async def test_update_open_brief_returns_one_result(mcp_client, closed, fields):
+    """update(status="open") returns one OperationResult whether or not the issue was closed (GH#6872)."""
+    import json
+
+    create_result = await mcp_client.call_tool(
+        "create", {"title": "Brief open", "priority": 2, "issue_type": "task", "brief": False}
+    )
+    issue_id = json.loads(create_result.content[0].text)["id"]
+    if closed:
+        await mcp_client.call_tool("close", {"issue_id": issue_id, "reason": "Done"})
+
+    update_result = await mcp_client.call_tool("update", {"issue_id": issue_id, "status": "open", **fields})
+
+    data = json.loads(update_result.content[0].text)
+    assert isinstance(data, dict)
+    assert data["id"] == issue_id
+    assert data["action"] == "updated"
+
+
+@pytest.mark.asyncio
+async def test_update_open_on_dated_defer_clears_defer_until(mcp_client, bd_executable, temp_db):
+    """update(status="open") on an issue deferred until a future date makes it ready again (GH#6872)."""
+    import asyncio
+    import json
+
+    create_result = await mcp_client.call_tool(
+        "create", {"title": "Snoozed issue", "priority": 2, "issue_type": "task", "brief": False}
+    )
+    issue_id = json.loads(create_result.content[0].text)["id"]
+
+    async def run_bd(*args: str) -> str:
+        env = os.environ.copy()
+        env.pop("BEADS_DB", None)
+        env.pop("BEADS_DIR", None)
+        process = await asyncio.create_subprocess_exec(
+            bd_executable,
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+            cwd=os.path.dirname(temp_db),
+        )
+        stdout, stderr = await process.communicate()
+        assert process.returncode == 0, stderr.decode()
+        return stdout.decode()
+
+    async def ready_ids() -> list[str]:
+        result = await mcp_client.call_tool("ready", {"limit": 100})
+        if not result.content:  # an empty ready list comes back as no content at all
+            return []
+        return [issue["id"] for issue in json.loads(result.content[0].text)]
+
+    # MCP has no defer tool: defer it the way a human would.
+    await run_bd("defer", issue_id, "--until", "2099-01-01")
+    assert issue_id not in await ready_ids()
+
+    update_result = await mcp_client.call_tool(
+        "update", {"issue_id": issue_id, "status": "open", "title": "retitled", "brief": False}
+    )
+
+    updated = json.loads(update_result.content[0].text)
+    assert updated["status"] == "open"
+    assert updated["title"] == "retitled"
+    shown = json.loads(await run_bd("show", issue_id, "--json"))
+    shown = shown[0] if isinstance(shown, list) else shown
+    assert shown.get("defer_until") is None
+    assert issue_id in await ready_ids()
 
 
 @pytest.mark.asyncio

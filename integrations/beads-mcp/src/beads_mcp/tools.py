@@ -514,7 +514,8 @@ async def beads_update_issue(
     Note: Setting status to 'closed' routes to beads_close_issue() to ensure
     proper approval workflows are followed. Setting status to 'open' reopens a
     closed issue through `bd reopen` (notes become the reason) and still applies
-    the other fields; on an issue that is not closed it is an ordinary update.
+    the other fields; on an issue that is not closed it is an ordinary update
+    that also clears defer_until. Either way it returns the one updated issue.
     """
     # Smart routing: intercept lifecycle status changes and route to dedicated tools
     if status == "closed":
@@ -523,28 +524,8 @@ async def beads_update_issue(
         return await beads_close_issue(issue_id=issue_id, reason=reason)
 
     client = await _get_client()
-    if status == "open":
-        # Validate the other fields before anything changes.
-        fields = UpdateIssueParams(
-            issue_id=issue_id,
-            priority=priority,
-            assignee=assignee,
-            title=title,
-            description=description,
-            design=design,
-            acceptance_criteria=acceptance_criteria,
-            external_ref=external_ref,
-        )
-        # Reopen through bd reopen to respect approval workflows; bd decides what is closed.
-        reopened = await client.reopen(ReopenIssueParams(issue_ids=[issue_id], reason=notes or "Reopened"))
-        if reopened:
-            other_fields = (assignee, title, description, design, acceptance_criteria, external_ref)
-            if priority is None and not any(other_fields):
-                return reopened
-            return [await client.update(fields)]  # notes was the reopen reason
-        # bd reopen changed nothing: not closed, so this is a plain status change
-
-    # Normal attribute updates proceed as usual
+    # Built before bd reopen runs, so pydantic rejects an out-of-range priority
+    # before anything changes; bd validates the other fields itself.
     params = UpdateIssueParams(
         issue_id=issue_id,
         status=status,
@@ -557,6 +538,27 @@ async def beads_update_issue(
         notes=notes,
         external_ref=external_ref,
     )
+    if status == "open":
+        # Reopen through bd reopen to respect approval workflows; bd decides what is closed.
+        reopened = await client.reopen(ReopenIssueParams(issue_ids=[issue_id], reason=notes or "Reopened"))
+        if reopened:
+            # notes was the reopen reason. Apply the rest; like update, skip None and "".
+            rest = params.model_copy(update={"status": None, "notes": None})
+            fields = rest.model_dump(exclude={"issue_id"})
+            pending = [name for name, value in fields.items() if value not in (None, "")]
+            if not pending:
+                return reopened[0]
+            try:
+                return await client.update(rest)
+            except BdError as e:
+                raise BdError(
+                    f"{issue_id} was reopened, but {', '.join(pending)} could not be applied. "
+                    f"Retry without notes, which would now replace the notes field. Cause: {e}"
+                ) from e
+        # bd reopen changed nothing, so the issue is not closed: an ordinary update that
+        # also clears defer_until, as bd reopen does, so a dated defer is ready again.
+        params = params.model_copy(update={"defer_until": ""})
+
     return await client.update(params)
 
 
