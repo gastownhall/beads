@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/storage"
@@ -216,8 +217,12 @@ func SettleMerge(ctx context.Context, db DBConn, mergeErr error, preMergeClean b
 			return err
 		}
 	case strategyResolved:
+		// Conclude with the FULL merge result, not just the resolved tables:
+		// the conflicted merge left its cleanly merged tables unstaged, and
+		// committing those alone would revert the peer's change to them in
+		// the commit a push sends (GH#7811).
 		msg := fmt.Sprintf("Resolve merge conflicts using '%s' strategy", strategy)
-		if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?)", msg); err != nil {
+		if err := concludeMerge(ctx, db, msg, ""); err != nil {
 			abortMerge(ctx, db, preMergeClean)
 			if mergeErr != nil {
 				return mergeErr
@@ -350,6 +355,99 @@ func abortMerge(ctx context.Context, db DBConn, preMergeClean bool) {
 	if _, err := db.ExecContext(ctx, "CALL DOLT_MERGE('--abort')"); err != nil && preMergeClean {
 		_, _ = db.ExecContext(ctx, "CALL DOLT_RESET('--hard')")
 	}
+}
+
+// doltCommitHashRE matches a Dolt commit hash (32 base32 characters), the
+// same shape as issueops' unexported validator: dolt_diff_summary takes
+// literal arguments only, so a merge's source commit read from
+// dolt_merge_status must be validated before it is inlined into a query.
+var doltCommitHashRE = regexp.MustCompile(`^[0-9a-v]{32}$`)
+
+// stageMergeResult stages the tables a conflicted DOLT_MERGE merged cleanly
+// but left unstaged. A conflicted merge parks its whole merged root in the
+// working set and leaves the staged root at HEAD, so a conclusion that stages
+// only the tables it resolved (DOLT_ADD per resolved table before
+// DOLT_COMMIT) records HEAD's copy of every cleanly merged sibling table: the
+// merge commit — what `bd dolt push` sends — reverts the peer's change on
+// that table while this clone's working set keeps reading the merged value
+// forever, because later pulls see nothing new to merge (GH#7811).
+//
+// The staged set is exact by construction: unstaged tables (dolt_status
+// staged = 0) that also differ between HEAD and the merge source (the
+// two-commit dolt_diff_summary names peer-added tables as to_table_name and
+// peer-dropped ones as from_table_name). Dolt refuses to start a merge whose
+// dirty tables differ from HEAD by table hash, so an unstaged diff-vs-HEAD
+// table while a merge is open is merge output, never pre-existing pending
+// work — and that pending work stays pending in tables the merge did not
+// change (server mode deliberately leaves some config uncommitted, GH#2455).
+// DOLT_ADD without --force applies dolt_ignore patterns, so ignored tables
+// (wisps, ...) that dolt_status hides cannot sneak in.
+func stageMergeResult(ctx context.Context, db DBConn) error {
+	var sourceCommit sql.NullString
+	if err := db.QueryRowContext(ctx,
+		"SELECT source_commit FROM dolt_merge_status WHERE is_merging").Scan(&sourceCommit); err != nil {
+		if errors.Is(err, sql.ErrNoRows) || isMissingSystemTable(err) {
+			return nil // no merge is open — there is nothing to stage
+		}
+		return fmt.Errorf("query merge source commit: %w", err)
+	}
+	if !sourceCommit.Valid || !doltCommitHashRE.MatchString(sourceCommit.String) {
+		// An unvalidated value must never be inlined into the diff query
+		// below, and concluding without staging would record a revert.
+		return fmt.Errorf("merge source commit %q is not a valid commit hash; refusing to stage the merge result", sourceCommit.String)
+	}
+	//nolint:gosec // G201: sourceCommit is validated against doltCommitHashRE above; dolt_diff_summary requires literal arguments.
+	rows, err := db.QueryContext(ctx, fmt.Sprintf(
+		"SELECT DISTINCT s.table_name FROM dolt_status s "+
+			"JOIN dolt_diff_summary('HEAD', '%s') d "+
+			"ON s.table_name IN (d.from_table_name, d.to_table_name) "+
+			"WHERE s.staged = 0", sourceCommit.String))
+	if err != nil {
+		return fmt.Errorf("query merged-but-unstaged tables: %w", err)
+	}
+	var tables []string
+	for rows.Next() {
+		var table string
+		if err := rows.Scan(&table); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("scan merged-but-unstaged table: %w", err)
+		}
+		tables = append(tables, table)
+	}
+	// Drain and close before the next statement: db is a single session and
+	// the DOLT_ADD calls below must not race the open cursor.
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		return fmt.Errorf("list merged-but-unstaged tables: %w", err)
+	}
+	for _, table := range tables {
+		if _, err := db.ExecContext(ctx, "CALL DOLT_ADD(?)", table); err != nil {
+			return fmt.Errorf("stage merged %s: %w", table, err)
+		}
+	}
+	return nil
+}
+
+// concludeMerge commits the resolved, repaired working set as the merge's
+// two-parent commit: it first stages the merge result a conflicted merge
+// left unstaged (stageMergeResult), then runs the merge-concluding
+// DOLT_COMMIT. Unlike StageAndCommit it never skips on an empty staged set:
+// while a merge is active Dolt allows exactly that empty commit, and it is
+// what closes dolt_merge_status.is_merging — the #4992 --strategy ours case
+// resolves every conflicted table back to HEAD's value, stages nothing new,
+// and must still conclude. msg is the commit message; author follows Dolt's
+// --author form ("Name <email>"); an empty author leaves attribution to the
+// session.
+func concludeMerge(ctx context.Context, db DBConn, msg, author string) error {
+	if err := stageMergeResult(ctx, db); err != nil {
+		return err
+	}
+	var err error
+	if author == "" {
+		_, err = db.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?)", msg)
+	} else {
+		_, err = db.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)", msg, author)
+	}
+	return err
 }
 
 // workingSetClean reports whether dolt_status is empty. Errors count as
