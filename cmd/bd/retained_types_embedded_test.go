@@ -73,6 +73,17 @@ func TestEmbeddedRetainedTypes(t *testing.T) {
 			t.Errorf("bd config set types.retained %q succeeded:\n%s\n%s\nwant the malformed value refused", bad, out, stderr)
 		}
 	}
+	// `bd config set-many` writes the database plane by its own route (one
+	// commit for the batch), so it must refuse the same values: a malformed
+	// pair fails the whole batch before anything is written.
+	for _, bad := range []string{"types.retained=[chore]", "types.retained=feat"} {
+		if out, stderr, code := run("config", "set-many", bad, "rk.untouched=1"); code == 0 {
+			t.Errorf("bd config set-many %q succeeded:\n%s\n%s\nwant the malformed value refused", bad, out, stderr)
+		}
+	}
+	if out, _, code := run("config", "get", "rk.untouched"); code != 0 || !strings.Contains(out, "rk.untouched (not set)") {
+		t.Errorf("bd config get rk.untouched = %q (exit %d) after a refused set-many; want the batch to write nothing", out, code)
+	}
 	if out, stderr, code := run("config", "set", "types.retained", "chore"); code != 0 {
 		t.Fatalf("bd config set types.retained exited %d:\n%s\n%s", code, out, stderr)
 	}

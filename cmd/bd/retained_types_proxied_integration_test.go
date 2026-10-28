@@ -20,6 +20,11 @@ func TestProxiedServerRetainedTypes(t *testing.T) {
 
 	bd := buildEmbeddedBD(t)
 	p := newSharedProxiedProject(t, bd, "pk")
+	// set-many writes the batch on its own unit of work on this route; it
+	// refuses a malformed value as `bd config set` does.
+	if out, err := bdProxiedRun(t, bd, p.dir, "config", "set-many", "types.retained=[chore]"); err == nil {
+		t.Errorf("bd config set-many types.retained=[chore] succeeded:\n%s\nwant the malformed value refused", out)
+	}
 	if out, err := bdProxiedRun(t, bd, p.dir, "config", "set", "types.retained", "chore"); err != nil {
 		t.Fatalf("bd config set types.retained: %v\n%s", err, out)
 	}
