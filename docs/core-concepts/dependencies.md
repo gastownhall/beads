@@ -179,6 +179,13 @@ with that label is closed. `bd ready`, `bd blocked`, and `bd dep tree` resolve
 the capability at query time; an unconfigured or unavailable project remains
 blocking.
 
+`bd dep list <id>` lists only dependencies that have a row in this database.
+External and cross-repo edges are named on stderr; when they are the issue's
+only edges, stdout says `<id> has no local dependencies (N cross-repo/external
+edge(s) listed on stderr)`. `bd dep list <id> <id>` prints the raw edge
+records, including those edges, and `bd show <id> --json` counts them as
+`unresolvable_dependencies`.
+
 ## Gates
 
 Gates are special issues that block dependent work until an external
