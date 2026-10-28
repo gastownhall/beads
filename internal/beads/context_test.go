@@ -1671,3 +1671,84 @@ func TestIsPathInSafeBoundary_OwnHomeNoDollarHomeFallback(t *testing.T) {
 		}
 	})
 }
+
+// TestIsPathInSafeBoundary_OwnHomeGuards pins AC-4: every guard around the
+// carve-out fails closed. Root, a wrong-uid lookup, and homes that are the
+// denied prefix itself, /, empty, ., a regular file, or missing never admit
+// anything.
+func TestIsPathInSafeBoundary_OwnHomeGuards(t *testing.T) {
+	env := ownHomeFixture(t)
+	lib := filepath.Join(env.denied, "lib")
+
+	// Control: the carve-out is active for this tree, so the rejections below
+	// are each guard's, not the deny loop's.
+	control := filepath.Join(env.home, "releases", "r1", ".beads")
+	if !isPathInSafeBoundary(control) {
+		t.Fatalf("control: isPathInSafeBoundary(%q) = false, want true (the carve-out must be active for this tree)", control)
+	}
+
+	type row struct {
+		name string
+		uid  int
+		home string
+		path string
+	}
+	rows := []row{
+		{"root is never admitted", 0, env.home, control},
+		{"uid that does not own the home", env.uid + 1, env.home, control},
+		{"home is the denied prefix itself", env.uid, env.denied, filepath.Join(env.denied, "releases", "r1", ".beads")},
+		{"home is /", env.uid, "/", control},
+		{"home is empty", env.uid, "", control},
+		{"home is .", env.uid, ".", control},
+		{"home is a regular file", env.uid, filepath.Join(lib, "file"), filepath.Join(lib, "file", "releases", "r1", ".beads")},
+		{"home does not exist", env.uid, filepath.Join(lib, "missing"), filepath.Join(lib, "missing", ".beads")},
+	}
+	if os.Getuid() == 0 {
+		// Only constructible as root: a home that exists, sits under the denied
+		// prefix, and belongs to another uid.
+		rows = append(rows, row{"home owned by another uid", env.uid, filepath.Join(lib, "rootsvc"), filepath.Join(lib, "rootsvc", "releases", "r1", ".beads")})
+	}
+	for _, tt := range rows {
+		t.Run(tt.name, func(t *testing.T) {
+			setAccount(t, tt.uid, tt.home, nil)
+			if isPathInSafeBoundary(tt.path) {
+				t.Errorf("isPathInSafeBoundary(%q) with uid=%d home=%q = true, want false", tt.path, tt.uid, tt.home)
+			}
+		})
+	}
+}
+
+// TestDirOwnedBy covers the ownership leg of the own-home carve-out (AC-4): an
+// existing directory owned by the uid, its symlink spelling, and the negative
+// shapes (wrong uid, regular file, missing path).
+func TestDirOwnedBy(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix ownership semantics required")
+	}
+	uid := os.Getuid()
+
+	dir := t.TempDir()
+	if !dirOwnedBy(dir, uid) {
+		t.Errorf("dirOwnedBy(%q, %d) = false, want true (the temp dir belongs to this process)", dir, uid)
+	}
+	if dirOwnedBy(dir, uid+1) {
+		t.Errorf("dirOwnedBy(%q, %d) = true, want false (wrong uid)", dir, uid+1)
+	}
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(dir, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	if !dirOwnedBy(link, uid) {
+		t.Errorf("dirOwnedBy(%q -> %q, %d) = false, want true (stat follows the symlink to the owned dir)", link, dir, uid)
+	}
+	file := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if dirOwnedBy(file, uid) {
+		t.Errorf("dirOwnedBy(%q, %d) = true, want false (regular file)", file, uid)
+	}
+	if dirOwnedBy(filepath.Join(t.TempDir(), "missing"), uid) {
+		t.Errorf("dirOwnedBy(missing, %d) = true, want false (does not exist)", uid)
+	}
+}
