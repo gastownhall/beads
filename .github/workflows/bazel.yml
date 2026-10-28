@@ -3094,11 +3094,11 @@ jobs:
         if: ${{ steps.detect.outputs.mcp_package == 'true' }}
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: '3.14'
+          python-version: '3.14.10'
 
       - name: Install uv
         if: ${{ steps.detect.outputs.mcp_package == 'true' }}
-        run: python -m pip install uv==0.13.5
+        run: python -m pip install uv==0.13.6
 
       - name: Run MCP package gate
         if: ${{ steps.detect.outputs.mcp_package == 'true' }}
