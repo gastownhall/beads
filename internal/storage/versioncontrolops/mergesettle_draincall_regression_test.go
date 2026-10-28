@@ -123,6 +123,115 @@ func TestMergeSettleDrainsCallResultSets(t *testing.T) {
 		assertDrainedCalls(t, mock, rec)
 	})
 
+	// AC-7: the drain conversion must not change error semantics. The "up
+	// to date" swallow at both merge sites and every %w wrapper still see
+	// the driver's own error, unwrapped.
+	t.Run("merge_and_settle_up_to_date_error_swallowed", func(t *testing.T) {
+		rec, mock := newDrainMock(t)
+
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM dolt_status LIMIT 1")).
+			WillReturnRows(sqlmock.NewRows([]string{"1"}))
+		mock.ExpectExec(regexp.QuoteMeta("SET @@dolt_allow_commit_conflicts = 1")).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectExec(regexp.QuoteMeta("SET @@dolt_force_transaction_commit = 1")).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_MERGE(?)")).
+			WithArgs("origin/main").
+			WillReturnError(errors.New("merge is already up to date"))
+		// Swallowed: the settle pass reads conflicts like a clean merge.
+		mock.ExpectQuery(regexp.QuoteMeta(doltConflictsSQL)).
+			WillReturnRows(sqlmock.NewRows([]string{"table", "num_conflicts"}))
+		mock.ExpectQuery(regexp.QuoteMeta(doltConflictsSQL)).
+			WillReturnRows(sqlmock.NewRows([]string{"table", "num_conflicts"}))
+		mock.ExpectQuery(regexp.QuoteMeta(constraintViolationsSQL)).
+			WillReturnRows(sqlmock.NewRows([]string{"table"}))
+
+		if err := MergeAndSettleWithStrategy(context.Background(), rec, "origin/main", ""); err != nil {
+			t.Fatalf("MergeAndSettleWithStrategy after an 'up to date' merge: %v, want nil", err)
+		}
+		assertDrainedCalls(t, mock, rec)
+	})
+
+	t.Run("merge_with_strategy_up_to_date_error_swallowed", func(t *testing.T) {
+		rec, mock := newDrainMock(t)
+
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM dolt_status LIMIT 1")).
+			WillReturnRows(sqlmock.NewRows([]string{"1"}))
+		mock.ExpectExec(regexp.QuoteMeta("SET @@dolt_allow_commit_conflicts = 1")).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectExec(regexp.QuoteMeta("SET @@dolt_force_transaction_commit = 1")).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_MERGE('--author', ?, ?)")).
+			WithArgs("Tester <tester@example.com>", "feature").
+			WillReturnError(errors.New("merge is already up to date"))
+		mock.ExpectQuery(regexp.QuoteMeta(doltConflictsSQL)).
+			WillReturnRows(sqlmock.NewRows([]string{"table", "num_conflicts"}))
+
+		conflicts, err := MergeWithStrategy(context.Background(), rec, "feature",
+			"Tester <tester@example.com>", "theirs")
+		if err != nil {
+			t.Fatalf("MergeWithStrategy after an 'up to date' merge: %v, want nil", err)
+		}
+		if len(conflicts) != 0 {
+			t.Fatalf("MergeWithStrategy conflicts = %v, want none", conflicts)
+		}
+		assertDrainedCalls(t, mock, rec)
+	})
+
+	t.Run("merge_with_strategy_merge_error_wraps_cause", func(t *testing.T) {
+		rec, mock := newDrainMock(t)
+
+		cause := errors.New("fatal: branch not found")
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM dolt_status LIMIT 1")).
+			WillReturnRows(sqlmock.NewRows([]string{"1"}))
+		mock.ExpectExec(regexp.QuoteMeta("SET @@dolt_allow_commit_conflicts = 1")).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectExec(regexp.QuoteMeta("SET @@dolt_force_transaction_commit = 1")).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_MERGE('--author', ?, ?)")).
+			WithArgs("Tester <tester@example.com>", "feature").
+			WillReturnError(cause)
+		mock.ExpectQuery(regexp.QuoteMeta(doltConflictsSQL)).
+			WillReturnRows(sqlmock.NewRows([]string{"table", "num_conflicts"}))
+		// No conflicts + a real merge error: surface it as-is after aborting.
+		mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_MERGE('--abort')")).
+			WillReturnRows(emptyCallRows())
+
+		_, err := MergeWithStrategy(context.Background(), rec, "feature",
+			"Tester <tester@example.com>", "theirs")
+		if !errors.Is(err, cause) {
+			t.Fatalf("MergeWithStrategy error = %v, want cause %v", err, cause)
+		}
+		if want := "merge branch feature: fatal: branch not found"; err.Error() != want {
+			t.Fatalf("MergeWithStrategy error = %q, want %q", err.Error(), want)
+		}
+		assertDrainedCalls(t, mock, rec)
+	})
+
+	t.Run("config_resolve_error_wraps_cause", func(t *testing.T) {
+		rec, mock := newDrainMock(t)
+
+		cause := errors.New("resolve rejected")
+		mock.ExpectQuery(regexp.QuoteMeta(doltConflictsSQL)).
+			WillReturnRows(sqlmock.NewRows([]string{"table", "num_conflicts"}).AddRow("config", 1))
+		mock.ExpectQuery(regexp.QuoteMeta("\n\t\tSELECT our_key, their_key FROM dolt_conflicts_config")).
+			WillReturnRows(sqlmock.NewRows([]string{"our_key", "their_key"}).
+				AddRow("kv.memory.a", "kv.memory.a"))
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT COALESCE(our_key, their_key) FROM dolt_conflicts_config")).
+			WillReturnRows(sqlmock.NewRows([]string{"key"}))
+		mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_CONFLICTS_RESOLVE('--theirs', 'config')")).
+			WillReturnError(cause)
+
+		_, err := TryAutoResolveMergeConflicts(context.Background(), rec)
+		if !errors.Is(err, cause) {
+			t.Fatalf("TryAutoResolveMergeConflicts error = %v, want cause %v", err, cause)
+		}
+		if want := "failed to resolve config conflicts: resolve rejected"; err.Error() != want {
+			t.Fatalf("TryAutoResolveMergeConflicts error = %q, want %q", err.Error(), want)
+		}
+		assertDrainedCalls(t, mock, rec)
+	})
+
 	t.Run("merge_with_strategy_clean", func(t *testing.T) {
 		rec, mock := newDrainMock(t)
 
