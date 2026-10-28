@@ -335,3 +335,22 @@ func TestFederationSyncNotStompedByPeerLastSync(t *testing.T) {
 		t.Fatalf("Sync did not merge the peer's federation_peers row: %d row(s), want 1", n)
 	}
 }
+
+// TestFederationFetchDoesNotStampPeerLastSync pins where last_sync is
+// recorded (GH#3547): a fetch is not a sync, so Fetch (also the probe behind
+// `bd federation status`) leaves federation_peers alone.
+func TestFederationFetchDoesNotStampPeerLastSync(t *testing.T) {
+	store, cleanup := setupConcurrentTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	seedFederationPeerWithRow(t, ctx, store)
+
+	if err := store.Fetch(ctx, "peer"); err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if peerLastSyncSet(t, ctx, store) {
+		t.Fatal("Fetch stamped federation_peers.last_sync, want it still NULL")
+	}
+}
