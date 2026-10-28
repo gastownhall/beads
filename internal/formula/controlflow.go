@@ -249,12 +249,56 @@ func finishLoopExpansion(step *Step, result []*Step, ends map[string]string) err
 		return err
 	}
 
+	// Carry the loop step's own dependencies (what gates the loop as a
+	// whole, declared outside the body) onto the roots of the fully
+	// expanded, chained result: the top-level steps whose needs/depends_on
+	// name nothing inside this loop. A step gated by a body sibling is not
+	// a root, and a step of a later iteration gated by iteration chaining
+	// is not a root either — chainExpandedIterations chains only the
+	// slice-first step of an iteration, so a later-iteration step it does
+	// not chain is a root. Children need no carry: a blocked parent blocks
+	// its children. Append rather than prepend: needs[0] is the inferred
+	// waits_for spawner, so a new entry must not displace the step's own
+	// first reference (GH#7636).
+	if len(step.Needs) > 0 || len(step.DependsOn) > 0 {
+		ids := collectStepIDs(result)
+		for _, s := range result {
+			if !isExpansionRoot(s, ids) {
+				continue
+			}
+			for _, dep := range step.Needs {
+				s.Needs = appendUnique(s.Needs, dep)
+			}
+			for _, dep := range step.DependsOn {
+				s.DependsOn = appendUnique(s.DependsOn, dep)
+			}
+		}
+	}
+
 	// The end of a count or range loop is the last step of its last cooked
 	// iteration; the end of an until loop is the last step of the one cooked
 	// iteration (the runtime executor appends later iterations itself).
 	ends[step.ID] = result[len(result)-1].ID
 
 	return nil
+}
+
+// isExpansionRoot reports whether step is a root of a loop's expansion: a
+// top-level step of the expansion whose needs/depends_on name no step of the
+// expansion. Steps gated by a body sibling or by iteration chaining are not
+// roots.
+func isExpansionRoot(s *Step, ids map[string]bool) bool {
+	for _, dep := range s.Needs {
+		if ids[dep] {
+			return false
+		}
+	}
+	for _, dep := range s.DependsOn {
+		if ids[dep] {
+			return false
+		}
+	}
+	return true
 }
 
 // rejectSelfReference rejects a step of a loop's expansion that still names
@@ -369,23 +413,6 @@ func expandLoopIteration(step *Step, iteration int, iterVars map[string]string) 
 		clone.DependsOn = rewriteLoopDependencies(bodyStep.DependsOn, step.ID, iteration, bodyStepIDs)
 		clone.Needs = rewriteLoopDependencies(bodyStep.Needs, step.ID, iteration, bodyStepIDs)
 
-		// The loop step's own Needs/DependsOn (what gates the loop as a
-		// whole, declared outside the body) reference no step the rewrite
-		// above can see, so without this they are dropped silently once
-		// the loop step stops existing post-expansion (GH#7636). Carry
-		// them onto the first iteration's entry steps: the body steps
-		// with no dependency of their own on another body step — a step
-		// gated by a sibling is not an entry point, and a later iteration
-		// is gated by the previous one via chainExpandedIterations.
-		if iteration == 1 && !hasAnyBodyDependency(bodyStep, bodyStepIDs) {
-			for _, dep := range step.Needs {
-				clone.Needs = appendUnique(clone.Needs, dep)
-			}
-			for _, dep := range step.DependsOn {
-				clone.DependsOn = appendUnique(clone.DependsOn, dep)
-			}
-		}
-
 		// Recursively handle children with proper dependency rewriting
 		if len(bodyStep.Children) > 0 {
 			clone.Children = expandLoopChildren(bodyStep.Children, step.ID, iteration, bodyStepIDs)
@@ -422,23 +449,6 @@ func collectBodyStepIDs(body []*Step) map[string]bool {
 	}
 	collect(body)
 	return ids
-}
-
-// hasAnyBodyDependency reports whether step's own (pre-rewrite) DependsOn or
-// Needs names another step inside the same loop body — i.e. whether step is
-// gated by a sibling rather than being one of the body's own entry points.
-func hasAnyBodyDependency(step *Step, bodyStepIDs map[string]bool) bool {
-	for _, d := range step.DependsOn {
-		if bodyStepIDs[d] {
-			return true
-		}
-	}
-	for _, d := range step.Needs {
-		if bodyStepIDs[d] {
-			return true
-		}
-	}
-	return false
 }
 
 // rewriteLoopDependencies rewrites dependency references for loop expansion.

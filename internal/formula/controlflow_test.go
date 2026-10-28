@@ -1535,6 +1535,90 @@ func TestApplyLoops_OwnDepsCarryToRoots(t *testing.T) {
 
 		assertEveryStepGated(t, result, byID, "round.", "brief")
 	})
+
+	t.Run("parallel", func(t *testing.T) {
+		steps := []*Step{
+			{ID: "brief", Title: "Brief"},
+			{
+				ID:    "round",
+				Title: "Round",
+				Needs: []string{"brief"},
+				Loop: &LoopSpec{
+					Count: 2,
+					Body: []*Step{
+						{ID: "a", Title: "A"},
+						{ID: "b", Title: "B"},
+					},
+				},
+			},
+		}
+
+		result, err := ApplyLoops(steps)
+		if err != nil {
+			t.Fatalf("ApplyLoops failed: %v", err)
+		}
+		byID := stepsByID(result)
+
+		for _, id := range []string{"round.iter1.a", "round.iter1.b", "round.iter2.b"} {
+			s := byID[id]
+			if s == nil {
+				t.Fatalf("%s not found", id)
+			}
+			if !slices.Contains(s.Needs, "brief") {
+				t.Errorf("%s.Needs = %v, want brief: nothing inside the loop gates it", id, s.Needs)
+			}
+		}
+		if a2 := byID["round.iter2.a"]; a2 != nil && slices.Contains(a2.Needs, "brief") {
+			t.Errorf("round.iter2.a.Needs = %v, want brief NOT added: it is chained to round.iter1.b", a2.Needs)
+		}
+
+		assertEveryStepGated(t, result, byID, "round.", "brief")
+	})
+
+	t.Run("out_of_order", func(t *testing.T) {
+		steps := []*Step{
+			{ID: "brief", Title: "Brief"},
+			{
+				ID:    "round",
+				Title: "Round",
+				Needs: []string{"brief"},
+				Loop: &LoopSpec{
+					Count: 2,
+					Body: []*Step{
+						{ID: "b", Title: "B", Needs: []string{"a"}},
+						{ID: "a", Title: "A"},
+					},
+				},
+			},
+		}
+
+		result, err := ApplyLoops(steps)
+		if err != nil {
+			t.Fatalf("ApplyLoops failed: %v", err)
+		}
+		byID := stepsByID(result)
+
+		for _, id := range []string{"round.iter1.a", "round.iter2.a"} {
+			s := byID[id]
+			if s == nil {
+				t.Fatalf("%s not found", id)
+			}
+			if !slices.Contains(s.Needs, "brief") {
+				t.Errorf("%s.Needs = %v, want brief: nothing inside the loop gates it", id, s.Needs)
+			}
+		}
+		for _, id := range []string{"round.iter1.b", "round.iter2.b"} {
+			s := byID[id]
+			if s == nil {
+				t.Fatalf("%s not found", id)
+			}
+			if slices.Contains(s.Needs, "brief") {
+				t.Errorf("%s.Needs = %v, want brief NOT added: b is gated by its sibling a", id, s.Needs)
+			}
+		}
+
+		assertEveryStepGated(t, result, byID, "round.", "brief")
+	})
 }
 
 // assertEveryStepGated checks the loop invariant of GH#7636's carry: every
