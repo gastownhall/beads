@@ -252,6 +252,38 @@ func (s *testSuite) TestParityReadyBlockedGraph() {
 	s.ElementsMatch(want, dom, "ready blocked graph: blocked/pinned/deferred excluded regardless of which stack wrote the edge")
 }
 
+// gh#3268: a stale is_blocked=1 planted on a row with no dependency rows of
+// its own (no write path produces one, but the reporter's database had them)
+// must be read around by BOTH ready stacks reading the same database: the
+// classic issueops path (what DoltStore executes) and the domain repository
+// (what proxied-server mode executes) render the same BuildReadyWorkWhere,
+// so the row must be listed by both and the two id sets must agree. The
+// planted flag is raw SQL, the same plant the storage suites use, so the
+// recompute that would unmark it never runs: only the read guard can see the
+// row through it.
+func (s *testSuite) TestParityReadyStaleEdgelessFlag() {
+	s.parityBase()
+	s.seedParityIssue("bd-par-stl-a", nil, false)
+	_, err := s.Runner().ExecContext(s.Ctx(), "UPDATE issues SET is_blocked = 1 WHERE id = ?", "bd-par-stl-a")
+	s.Require().NoError(err)
+
+	classic := idsOf(s.classicReady(types.WorkFilter{}))
+	dom := idsOf(s.domainReady(types.WorkFilter{}).Items)
+	s.Equal(classic, dom, "ready with a stale edgeless flag: same id set from both stacks")
+	s.Contains(dom, "bd-par-stl-a", "a stale is_blocked=1 on an edgeless row must be listed, not hidden behind the flag")
+
+	// The counts paths render the same WHERE (SearchCountsSQL wraps it), so
+	// they must agree with the plain reads on both stacks.
+	tx := s.beginClassicTx()
+	classicCounts, err := issueops.GetReadyWorkWithCountsInTx(s.Ctx(), tx, types.WorkFilter{})
+	s.Require().NoError(err)
+	s.Require().NoError(tx.Rollback())
+	domCounts, err := s.issueRepo().GetReadyWorkWithCounts(s.Ctx(), types.WorkFilter{})
+	s.Require().NoError(err)
+	s.Equal(idsOfCounts(classicCounts), idsOfCounts(domCounts.Items), "ready counts with a stale edgeless flag: same id set from both stacks")
+	s.Contains(idsOfCounts(domCounts.Items), "bd-par-stl-a")
+}
+
 // Case 4b: descendant expansion on blocking-edge insert (bd-6dnrw.44 item 3
 // residual): a blocks edge added to a PARENT must also drop its parent-child
 // descendants out of ready, whichever stack writes the edge. Case 4 is flat,
