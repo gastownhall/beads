@@ -276,11 +276,46 @@ func (s *testSuite) TestParityReadyStaleEdgelessFlag() {
 	_, err = s.Runner().ExecContext(s.Ctx(), "UPDATE issues SET is_blocked = 1 WHERE id = ?", "bd-par-stl-b")
 	s.Require().NoError(err)
 
+	// The other half of the guard's contract: rows the recompute legitimately
+	// flags from a real ready-affecting edge must stay hidden on both stacks
+	// — the guard trusts the flag whenever the row has any ready-affecting
+	// dependency row of its own.
+	s.seedParityIssue("bd-par-stl-d", nil, false) // open blocker target
+	s.seedParityIssue("bd-par-stl-c", nil, false)
+	s.classicAddDep("bd-par-stl-c", "bd-par-stl-d", types.DepBlocks)
+	s.seedParityIssue("bd-par-stl-e", nil, false)
+	s.classicAddDep("bd-par-stl-e", "bd-par-stl-c", types.DepParentChild) // child of a blocked parent
+	s.seedParityIssue("bd-par-stl-f", nil, false)
+	s.classicAddDep("bd-par-stl-f", "bd-par-stl-d", types.DepConditionalBlocks)
+	s.seedParityIssue("bd-par-stl-s", nil, false)  // gate spawner
+	s.seedParityIssue("bd-par-stl-sc", nil, false) // open child under the spawner
+	s.classicAddDep("bd-par-stl-sc", "bd-par-stl-s", types.DepParentChild)
+	s.seedParityIssue("bd-par-stl-g", nil, false)
+	// Default all-children gate with an open child under the spawner: the
+	// waiter stays blocked (the metadata shape is_blocked_test.go and
+	// blocked_full_repair_test.go pin).
+	s.classicAddDep("bd-par-stl-g", "bd-par-stl-s", types.DepWaitsFor)
+
+	// AC-4's premise: the recompute really flagged these from the edges —
+	// the flag is not stale on them, it is the guard that must not read
+	// around it here.
+	for _, id := range []string{"bd-par-stl-c", "bd-par-stl-e", "bd-par-stl-f", "bd-par-stl-g"} {
+		var flagged int
+		s.Require().NoError(s.db.QueryRowContext(s.Ctx(), "SELECT is_blocked FROM issues WHERE id = ?", id).Scan(&flagged))
+		s.Equal(1, flagged, "%s must be is_blocked=1 from its real ready-affecting edge", id)
+	}
+
+	wantReady := []string{
+		"bd-par-stl-a",  // stale flag, no edges: listed
+		"bd-par-stl-b",  // stale flag, related-only edge: listed
+		"bd-par-stl-d",  // open blocker target
+		"bd-par-stl-s",  // gate spawner
+		"bd-par-stl-sc", // child of the open spawner
+	}
 	classic := idsOf(s.classicReady(types.WorkFilter{}))
 	dom := idsOf(s.domainReady(types.WorkFilter{}).Items)
 	s.Equal(classic, dom, "ready with a stale edgeless flag: same id set from both stacks")
-	s.Contains(dom, "bd-par-stl-a", "a stale is_blocked=1 on an edgeless row must be listed, not hidden behind the flag")
-	s.Contains(dom, "bd-par-stl-b", "a stale is_blocked=1 on a row whose only edges are non-ready-affecting must be listed too")
+	s.ElementsMatch(wantReady, dom, "stale-flagged edgeless and related-only rows listed; blocks/parent-child/conditional-blocks/waits-for rows hidden on both stacks")
 
 	// The counts paths render the same WHERE (SearchCountsSQL wraps it), so
 	// they must agree with the plain reads on both stacks.
@@ -291,8 +326,7 @@ func (s *testSuite) TestParityReadyStaleEdgelessFlag() {
 	domCounts, err := s.issueRepo().GetReadyWorkWithCounts(s.Ctx(), types.WorkFilter{})
 	s.Require().NoError(err)
 	s.Equal(idsOfCounts(classicCounts), idsOfCounts(domCounts.Items), "ready counts with a stale edgeless flag: same id set from both stacks")
-	s.Contains(idsOfCounts(domCounts.Items), "bd-par-stl-a")
-	s.Contains(idsOfCounts(domCounts.Items), "bd-par-stl-b")
+	s.ElementsMatch(wantReady, idsOfCounts(domCounts.Items), "ready counts: same membership as the plain reads")
 }
 
 // Case 4b: descendant expansion on blocking-edge insert (bd-6dnrw.44 item 3
