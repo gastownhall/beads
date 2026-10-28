@@ -1256,6 +1256,9 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			return gateErr
 		}
 		defer func() { _ = initGateHandle.Release() }()
+		// Every guard on the configured database has passed: say once that
+		// this init moves the workspace to another database (GH#6172).
+		printInitRepointNotice(initID, quiet)
 
 		// Resolve the operational storage path only after held-gate preflight
 		// succeeds. ResolveDoltDir retains its mkdir-on-use behavior for a
