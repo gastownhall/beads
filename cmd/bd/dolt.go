@@ -68,7 +68,9 @@ Remote management:
 
 Configuration keys for 'bd dolt set':
   database  Database name (default: issue prefix or "beads")
-  host      Server host (default: 127.0.0.1)
+  host      Server host (default: 127.0.0.1). Written to .beads/config.yaml
+            dolt.host too when that file exists (config.yaml outranks the
+            metadata key, GH#5961), else metadata.json only
   port      Server port (auto-detected; override with bd dolt set port <N>)
   user      MySQL user (default: root)
   data-dir  Custom dolt data directory (absolute path; default: .beads/dolt)
@@ -91,11 +93,12 @@ Remote server authentication (password + TLS) is NOT stored via 'bd dolt set'
   Full reference: docs/architecture/dolt.md (Environment Variables / Credentials).
 
 Flags for 'bd dolt set':
-  --update-config  Also write to config.yaml for team-wide defaults
+  --update-config  Also write to config.yaml for team-wide defaults (the host
+                    key writes it already whenever the file exists)
 
 Examples:
   bd dolt set database myproject
-  bd dolt set host 192.168.1.100 --update-config
+  bd dolt set host 192.168.1.100
   bd dolt set data-dir /home/user/.beads-dolt/myproject
   export BEADS_DOLT_PASSWORD=... BEADS_DOLT_SERVER_TLS=1
   bd dolt test`,
@@ -120,7 +123,9 @@ var doltSetCmd = &cobra.Command{
 
 Keys:
   database  Database name (default: issue prefix or "beads")
-  host      Server host (default: 127.0.0.1)
+  host      Server host (default: 127.0.0.1). 'bd dolt set host' also writes
+            .beads/config.yaml dolt.host when that file exists — config.yaml
+            outranks the metadata key (GH#5961) — else metadata.json only
   port      Server port (auto-detected; override with bd dolt set port <N>)
   user      MySQL user (default: root)
   data-dir  Custom dolt data directory (absolute path; default: .beads/dolt)
@@ -139,7 +144,8 @@ not land in metadata.json. Use environment variables or the credentials file:
 
   See: bd dolt --help and docs/architecture/dolt.md
 
-Use --update-config to also write to config.yaml for team-wide defaults.
+Use --update-config to also write to config.yaml for team-wide defaults (the
+host key writes it already whenever the file exists).
 
 Examples:
   bd dolt set database myproject
@@ -2489,13 +2495,45 @@ func setDoltConfig(key, value string, updateConfig bool) error {
 		return HandleError("saving config: %v", err)
 	}
 
+	// config.yaml outranks metadata.json for dolt.host (GH#5961), so a host
+	// set here must reach the workspace's config.yaml too — a metadata-only
+	// write changes nothing a dial reads. The host key writes whenever the
+	// workspace HAS a .beads/config.yaml, with or without --update-config;
+	// where the workspace has none, only metadata.json is written and no
+	// config.yaml is created (foreign launches and older binaries still read
+	// the metadata key). Other keys keep --update-config's opt-in. The write
+	// runs before the JSON branch so config_yaml_updated reports what
+	// actually happened — it used to claim an update --json never ran.
+	configYamlUpdated := false
+	if yamlKey != "" {
+		switch {
+		case key == "host":
+			if _, statErr := os.Stat(filepath.Join(beadsDir, "config.yaml")); statErr == nil {
+				if err := config.SetYamlConfigInDir(beadsDir, yamlKey, value); err != nil {
+					fmt.Printf("%s\n", ui.RenderWarn(fmt.Sprintf("Warning: failed to update config.yaml: %v", err)))
+				} else {
+					configYamlUpdated = true
+				}
+			}
+		case updateConfig:
+			if err := config.SetYamlConfig(yamlKey, value); err != nil {
+				fmt.Printf("%s\n", ui.RenderWarn(fmt.Sprintf("Warning: failed to update config.yaml: %v", err)))
+			} else {
+				configYamlUpdated = true
+			}
+		}
+	}
+	if key == "host" {
+		warnOutrankingDoltSetHost(beadsDir, cfg, value)
+	}
+
 	if jsonOutput {
 		result := map[string]interface{}{
 			"key":      key,
 			"value":    value,
 			"location": "metadata.json",
 		}
-		if updateConfig {
+		if configYamlUpdated {
 			result["config_yaml_updated"] = true
 		}
 		if err := outputJSON(result); err != nil {
@@ -2505,16 +2543,53 @@ func setDoltConfig(key, value string, updateConfig bool) error {
 	}
 
 	fmt.Printf("Set %s = %s (in metadata.json)\n", key, value)
-
-	// Also update config.yaml if requested
-	if updateConfig && yamlKey != "" {
-		if err := config.SetYamlConfig(yamlKey, value); err != nil {
-			fmt.Printf("%s\n", ui.RenderWarn(fmt.Sprintf("Warning: failed to update config.yaml: %v", err)))
-		} else {
-			fmt.Printf("Set %s = %s (in config.yaml)\n", yamlKey, value)
-		}
+	if configYamlUpdated {
+		fmt.Printf("Set %s = %s (in config.yaml)\n", yamlKey, value)
 	}
 	return nil
+}
+
+// warnOutrankingDoltSetHost warns when `bd dolt set host` did not move the
+// dial: since GH#5961 every layer a later command in the workspace reads —
+// BEADS_DOLT_SERVER_HOST, BD_DOLT_HOST, a dolt.host in config.local.yaml,
+// this workspace's or the user-level config.yaml — outranks the
+// metadata.json dolt_server_host the set just wrote. The recheck runs under
+// the configuration a later command in beadsDir loads (config.WithBeadsDir),
+// so the source it names is the one that actually decides the dial.
+func warnOutrankingDoltSetHost(beadsDir string, cfg *configfile.Config, value string) {
+	var effective, source string
+	_ = config.WithBeadsDir(beadsDir, func() {
+		effective = cfg.GetDoltServerHost()
+		source = outrankingHostSourceLabel(beadsDir, effective)
+	})
+	if configfile.SameServerHost(effective, value) {
+		return
+	}
+	fmt.Printf("%s\n", ui.RenderWarn(fmt.Sprintf(
+		"Warning: bd still dials %s (from %s), which outranks the host just set (%s) in .beads/metadata.json (GH#5961); the dial changes only when that entry does",
+		remedy.EscapedValue(effective), source, remedy.EscapedValue(value))))
+}
+
+// outrankingHostSourceLabel names the layer effective (a host a dial just
+// resolved) came from, for warnOutrankingDoltSetHost's warning. It runs under
+// config.WithBeadsDir, whose merged reader it relies on.
+func outrankingHostSourceLabel(beadsDir, effective string) string {
+	if os.Getenv("BEADS_DOLT_SERVER_HOST") != "" {
+		return "the BEADS_DOLT_SERVER_HOST environment variable"
+	}
+	if config.GetValueSource("dolt.host") == config.SourceEnvVar && config.GetString("dolt.host") == effective {
+		return "the BD_DOLT_HOST environment variable"
+	}
+	if proj, _, err := config.WorkspaceYamlValueStrict(beadsDir, "dolt.host"); err == nil && proj != "" && configfile.SameServerHost(proj, effective) {
+		return "the dolt.host in this workspace's .beads/config.yaml"
+	}
+	if local, _, err := config.WorkspaceYamlSettingWithLocal(beadsDir, "dolt.host"); err == nil && local != "" && configfile.SameServerHost(local, effective) {
+		return "the dolt.host in .beads/config.local.yaml"
+	}
+	if user := config.GetUserYamlConfig("dolt.host"); user != "" && configfile.SameServerHost(user, effective) {
+		return "the dolt.host in the user-level config.yaml"
+	}
+	return "the dolt.host in this workspace's configuration"
 }
 
 func testDoltConnection() error {

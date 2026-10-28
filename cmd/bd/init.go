@@ -1791,6 +1791,10 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 					if ferr := finalizeSyncedBootstrap(beadsDir, syncURL, fcfg, dbName); ferr != nil {
 						fmt.Fprintf(os.Stderr, "Warning: failed to finalize bootstrapped workspace: %s\n", remedy.PrintedMessage(ferr))
 					}
+					// finalizeSyncedBootstrap wrote metadata.json and
+					// config.yaml; the explicit host belongs in both
+					// (persistInitServerHost, GH#5961).
+					persistInitServerHost(beadsDir, serverHost)
 				}
 				if jsonOutput {
 					handleRemoteMigrateGateJSON(gateErr)
@@ -2077,6 +2081,11 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			if err := persistInitSyncRemote(beadsDir, initRemote, syncURL, syncFromRemote, syncURLFromConfig, syncURLFromGitOrigin); err != nil {
 				return fmt.Errorf("failed to persist sync.remote to config.yaml: %v", err)
 			}
+
+			// GH#5961: an explicit --server-host must reach .beads/config.yaml
+			// too, or the dolt.host a fresh clone brings outranks it on every
+			// later dial (persistInitServerHost).
+			persistInitServerHost(beadsDir, serverHost)
 
 			// Enable shared server mode if requested via flag OR env var (GH#2377).
 			// Persist to config.yaml so the project continues working without the env var.
@@ -4119,6 +4128,25 @@ func initStoreServerHost(serverHost string) string {
 		return h
 	}
 	return configfile.DefaultDoltServerHost
+}
+
+// persistInitServerHost writes an explicit --server-host to the
+// .beads/config.yaml beside the metadata.json that keeps it: config.yaml
+// dolt.host outranks the metadata key (GH#5961), so a host recorded only in
+// metadata.json would be outranked by the config.yaml bd init itself
+// creates, and every later command would dial a server other than the one
+// init pointed the workspace at. The host stays in metadata.json too:
+// foreign launches and older binaries still read that key. No-op without
+// an explicit host, in proxied-server mode, or where no config.yaml exists
+// (both call paths create one first). Warn, never fail: the host remains
+// recorded where it always was.
+func persistInitServerHost(beadsDir, serverHost string) {
+	if serverHost == "" || usesProxiedServer() {
+		return
+	}
+	if err := config.SetYamlConfigInDir(beadsDir, "dolt.host", serverHost); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to write dolt.host to .beads/config.yaml: %v\n", err)
+	}
 }
 
 // initStoreServerPort is the server port, and its source, that bd init puts on

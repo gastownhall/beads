@@ -1878,7 +1878,9 @@ bd dolt
     |
     | Configuration keys for 'bd dolt set':
     |   database  Database name (default: issue prefix or "beads")
-    |   host      Server host (default: 127.0.0.1)
+    |   host      Server host (default: 127.0.0.1). Written to .beads/config.yaml
+    |             dolt.host too when that file exists (config.yaml outranks the
+    |             metadata key, GH#5961), else metadata.json only
     |   port      Server port (auto-detected; override with bd dolt set port <N>)
     |   user      MySQL user (default: root)
     |   data-dir  Custom dolt data directory (absolute path; default: .beads/dolt)
@@ -1901,11 +1903,12 @@ bd dolt
     |   Full reference: docs/architecture/dolt.md (Environment Variables / Credentials).
     |
     | Flags for 'bd dolt set':
-    |   --update-config  Also write to config.yaml for team-wide defaults
+    |   --update-config  Also write to config.yaml for team-wide defaults (the host
+    |                     key writes it already whenever the file exists)
     |
     | Examples:
     |   bd dolt set database myproject
-    |   bd dolt set host 192.168.1.100 --update-config
+    |   bd dolt set host 192.168.1.100
     |   bd dolt set data-dir /home/user/.beads-dolt/myproject
     |   export BEADS_DOLT_PASSWORD=... BEADS_DOLT_SERVER_TLS=1
     |   bd dolt test
@@ -2103,7 +2106,9 @@ bd dolt set
     |
     | Keys:
     |   database  Database name (default: issue prefix or "beads")
-    |   host      Server host (default: 127.0.0.1)
+    |   host      Server host (default: 127.0.0.1). 'bd dolt set host' also writes
+    |             .beads/config.yaml dolt.host when that file exists — config.yaml
+    |             outranks the metadata key (GH#5961) — else metadata.json only
     |   port      Server port (auto-detected; override with bd dolt set port <N>)
     |   user      MySQL user (default: root)
     |   data-dir  Custom dolt data directory (absolute path; default: .beads/dolt)
@@ -2122,7 +2127,8 @@ bd dolt set
     |
     |   See: bd dolt --help and docs/architecture/dolt.md
     |
-    | Use --update-config to also write to config.yaml for team-wide defaults.
+    | Use --update-config to also write to config.yaml for team-wide defaults (the
+    | host key writes it already whenever the file exists).
     |
     | Examples:
     |   bd dolt set database myproject
