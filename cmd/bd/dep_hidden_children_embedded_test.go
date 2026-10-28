@@ -176,6 +176,27 @@ func TestEmbeddedDepDefaultDirectionNotesHiddenChildren(t *testing.T) {
 		}
 	})
 
+	t.Run("no_children", func(t *testing.T) {
+		x := bdCreate(t, bd, dir, "Blocker X", "--type", "task")
+		d := bdCreate(t, bd, dir, "Dependent D", "--type", "task")
+		y := bdCreate(t, bd, dir, "Related Y", "--type", "task")
+		bdRunSplit(t, bd, dir, "dep", "add", d.ID, x.ID)
+		bdRunSplit(t, bd, dir, "dep", "relate", x.ID, y.ID)
+		for _, view := range []string{"list", "tree"} {
+			_, stderr := bdRunSplit(t, bd, dir, "dep", view, x.ID)
+			if strings.Contains(stderr, "note:") {
+				t.Errorf("dep %s X: unexpected note:\n%s", view, stderr)
+			}
+		}
+
+		// A relate pair plus one child counts only the child.
+		bdCreate(t, bd, dir, "Child of X", "--type", "task", "--parent", x.ID)
+		_, stderr := bdRunSplit(t, bd, dir, "dep", "list", x.ID)
+		if !strings.Contains(stderr, hiddenChildrenNote(x.ID, 1)) {
+			t.Errorf("relate pair plus one child: stderr missing the 1-child note:\n%s", stderr)
+		}
+	})
+
 	t.Run("partial_id", func(t *testing.T) {
 		partial := strings.TrimPrefix(root.ID, "hc-")
 		for _, view := range []string{"list", "tree"} {
