@@ -2422,11 +2422,13 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	// server-existence check; it does not reopen the separate "foreign
 	// server, no bd database at all" gap tracked as Part B (mybd-y18b).
 	if !cfg.CreateIfMissing || dbFacts.alreadyExisted {
+		// Verify against the resolved beadsDir that credentials and CLIDir
+		// use, so a Path-only open such as beads.Open is checked too (GH#5559).
 		var verifyErr error
 		if cfg.Database == doltserver.GlobalDatabaseName {
-			verifyErr = store.verifyGlobalProjectIdentity(ctx, cfg.BeadsDir)
+			verifyErr = store.verifyGlobalProjectIdentity(ctx, beadsDir)
 		} else {
-			verifyErr = store.verifyProjectIdentity(ctx, cfg.BeadsDir, cfg.OpenedByInit)
+			verifyErr = store.verifyProjectIdentity(ctx, beadsDir, cfg.OpenedByInit)
 		}
 		if verifyErr != nil {
 			return nil, verifyErr
@@ -2795,13 +2797,22 @@ func (s *DoltStore) verifyGlobalProjectIdentity(ctx context.Context, beadsDir st
 	}
 
 	if expectedID != dbID {
-		return fmt.Errorf(
-			"GLOBAL PROJECT IDENTITY MISMATCH — refusing to connect\n\n"+
-				"  Expected global project ID (metadata.json): %s\n"+
-				"  Database project ID:                        %s\n\n"+
-				expectedID, dbID)
+		return globalProjectIdentityMismatchError(expectedID, dbID)
 	}
 	return nil
+}
+
+// globalProjectIdentityMismatchError builds verifyGlobalProjectIdentity's
+// refusal when metadata.json's global_project_id and the beads_global
+// database's _project_id disagree. Both IDs are format arguments: neither is
+// part of the format string, so each prints on its own labeled line exactly
+// as stored, even when it holds a '%'.
+func globalProjectIdentityMismatchError(expectedID, dbID string) error {
+	return fmt.Errorf(
+		"GLOBAL PROJECT IDENTITY MISMATCH — refusing to connect\n\n"+
+			"  Expected global project ID (metadata.json): %s\n"+
+			"  Database project ID:                        %s",
+		expectedID, dbID)
 }
 
 // isExternalServerHost reports whether host names a server bd does not
