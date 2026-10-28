@@ -152,6 +152,54 @@ func TestMergeWithStrategy_OursKeepsLocal(t *testing.T) {
 	if dirty != 0 {
 		t.Errorf("%d dirty table(s) remain: the resolution was not committed", dirty)
 	}
+
+	// GH#7811: "ours" resolves every conflicted table back to HEAD's value,
+	// so the concluding commit stages nothing new — it is still required, and
+	// must be a real two-parent merge commit that closes the merge state.
+	if mergeOpen(t, ctx, conn) {
+		t.Error("merge left open (dolt_merge_status.is_merging = 1) after --strategy ours")
+	}
+	var parents int
+	if err := conn.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM dolt_commit_ancestors WHERE commit_hash = HASHOF('HEAD')").Scan(&parents); err != nil {
+		t.Fatalf("count HEAD parents: %v", err)
+	}
+	if parents != 2 {
+		t.Errorf("HEAD has %d parent(s) after a --strategy ours merge, want a two-parent merge commit", parents)
+	}
+}
+
+// TestMergeWithStrategy_KeepsCleanMergedTables (bd-cdo628, GH#7811) is the
+// `bd vc merge --strategy` counterpart of the pull regression: the merge's
+// cleanly integrated label swap must reach the concluding commit, for ours
+// and theirs alike. At base theirs dropped it (StageAndCommit committed only
+// the conflicted tables) and ours skipped the commit entirely, leaving
+// is_merging = 1 — what store.go and the embedded vc path both claim never
+// happens.
+func TestMergeWithStrategy_KeepsCleanMergedTables(t *testing.T) {
+	for _, strategy := range []string{"ours", "theirs"} {
+		t.Run(strategy, func(t *testing.T) {
+			te := newTestEnv(t, "vckept"+strategy)
+			ctx := t.Context()
+			conn := openSettleConn(t, ctx, te)
+
+			peerBranch := seedRetitleWithLabelSwap(t, ctx, conn, "vck-1")
+
+			conflicts, err := versioncontrolops.MergeWithStrategy(ctx, conn, peerBranch, "test <test@example.com>", strategy)
+			if err != nil {
+				t.Fatalf("MergeWithStrategy(%s): %v", strategy, err)
+			}
+			if len(conflicts) == 0 {
+				t.Fatal("expected the resolved conflict to be reported")
+			}
+
+			labels := headLabels(t, ctx, conn, "vck-1")
+			if len(labels) != 1 || labels[0] != "ready-for-agent" {
+				t.Errorf("HEAD labels = %v, want [ready-for-agent]: the strategy merge commit did not carry the peer's label swap", labels)
+			}
+			assertMergeConcluded(t, ctx, conn)
+		})
+	}
 }
 
 // TestMerge_NoStrategyStillErrorsWithEscapeHatchHint pins the "no --strategy"

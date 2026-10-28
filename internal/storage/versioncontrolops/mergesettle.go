@@ -259,7 +259,11 @@ func SettleMerge(ctx context.Context, db DBConn, mergeErr error, preMergeClean b
 //
 // Returns the conflicts the merge produced (empty for a clean merge) and any
 // error. A returned error means the merge was aborted and the working set
-// restored — nothing is left half-resolved.
+// restored — nothing is left half-resolved. A concluded merge is committed as
+// a two-parent merge commit carrying the full merge result: the resolved
+// tables and every cleanly merged table alike (concludeMerge, GH#7811) —
+// including for --strategy ours, where the resolved tables stage nothing new
+// and the commit would otherwise be skipped, wedging the open merge state.
 func MergeWithStrategy(ctx context.Context, db DBConn, ref, author, strategy string) ([]storage.Conflict, error) {
 	if err := ValidateConflictStrategy(strategy); err != nil {
 		return nil, err
@@ -333,7 +337,21 @@ func MergeWithStrategy(ctx context.Context, db DBConn, ref, author, strategy str
 		return conflicts, fmt.Errorf("conflicts resolved with '%s' strategy but merge left constraint violations bd cannot auto-repair; inspect dolt_constraint_violations and resolve before retrying", strategy)
 	}
 
-	if err := StageAndCommit(ctx, db, dirtyTables,
+	// Conclude with the FULL merge result, not just the resolved tables
+	// (GH#7811): the conflicted merge left its cleanly merged tables
+	// unstaged, and StageAndCommit's empty-staged-set skip also made
+	// --strategy ours drop the commit entirely — leaving is_merging open
+	// despite the success the callers report. Stage the resolved tables
+	// (what StageAndCommit did), then concludeMerge stages the merge's
+	// clean output and runs the merge-closing DOLT_COMMIT, which Dolt
+	// allows to stage nothing while the merge is active.
+	for table := range dirtyTables {
+		if _, err := db.ExecContext(ctx, "CALL DOLT_ADD(?)", table); err != nil {
+			abortMerge(ctx, db, preMergeClean)
+			return conflicts, fmt.Errorf("conflicts resolved but commit failed: %w", err)
+		}
+	}
+	if err := concludeMerge(ctx, db,
 		fmt.Sprintf("Resolve merge conflicts from %s using %s strategy", ref, strategy), author); err != nil {
 		abortMerge(ctx, db, preMergeClean)
 		return conflicts, fmt.Errorf("conflicts resolved but commit failed: %w", err)
