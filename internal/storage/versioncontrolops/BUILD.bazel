@@ -45,10 +45,12 @@ go_test(
         "gc_test.go",
         "remotes_githooks_test.go",
         "remotes_gittrace_test.go",
+        "remotes_infobranch_test.go",
         "remotes_test.go",
     ],
     embed = [":versioncontrolops"],
     deps = [
+        "//internal/doltinfoenv",
         "//internal/githooksenv",
         "@com_github_data_dog_go_sqlmock//:go-sqlmock",
     ],
