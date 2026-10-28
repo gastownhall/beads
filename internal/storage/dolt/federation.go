@@ -467,6 +467,12 @@ func (s *DoltStore) Sync(ctx context.Context, peer string, strategy string) (*Sy
 
 	// Record last sync time
 	_ = s.setLastSyncTime(ctx, peer) // Best effort: sync timestamp is advisory for scheduling
+	// GH#3547: the peer row's last_sync is stamped here, once the merge has
+	// landed — never between the fetch and the merge, where it left
+	// federation_peers dirty and DOLT_MERGE refused with "local changes
+	// would be stomped". The duplicate stamp from a successful push above is
+	// harmless.
+	_ = s.updatePeerLastSync(ctx, peer) // Best effort: peer sync timestamp is advisory
 
 	result.EndTime = time.Now()
 	return result, nil

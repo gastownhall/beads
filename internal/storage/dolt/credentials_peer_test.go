@@ -327,4 +327,10 @@ func TestFederationSyncNotStompedByPeerLastSync(t *testing.T) {
 	if peerRows != 1 {
 		t.Fatalf("Sync merged %d peer-of-peer row(s), want 1", peerRows)
 	}
+
+	// The completed sync stamps the peer row's last_sync — after the merge,
+	// never between the fetch and it (GH#3547).
+	if peerLastSyncIsNull(t, ctx, db, "peer") {
+		t.Fatal("Sync completed but did not stamp last_sync")
+	}
 }
