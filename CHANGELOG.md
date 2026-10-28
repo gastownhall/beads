@@ -1027,6 +1027,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd backup restore` refuses a directory that holds no Dolt backup (no
+  `manifest`) before it touches the database. A forced restore from an empty
+  directory or a JSONL export used to drop the target and leave `table not
+  found: issues` (#5972).
 - `bd list --watch` and `bd show --watch` now wait a full poll interval after
   each refresh, and `bd list --watch --parent` reads its tree in one
   transaction, so other bd commands on an embedded workspace no longer stall

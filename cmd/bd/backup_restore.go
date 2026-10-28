@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -10,7 +11,9 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
@@ -169,9 +172,19 @@ func syncProjectIDFromDB(ctx context.Context, s storage.DoltStorage) error {
 	return cfg.Save(beadsDir)
 }
 
+// validateBackupRestoreDir refuses a restore source before anything touches
+// the database: a missing directory, and one that holds no Dolt backup, which
+// a forced restore would otherwise drop the target for before failing (#5972).
 func validateBackupRestoreDir(dir string) error {
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		return fmt.Errorf("backup directory not found: %s\nRun 'bd backup' first to create a backup", dir)
+	}
+	if err := versioncontrolops.CheckBackupDir(dir); err != nil {
+		if errors.Is(err, versioncontrolops.ErrNotDoltBackup) {
+			return fmt.Errorf("%s is not a Dolt backup (no manifest found); the database was not changed\n"+
+				"To back up into it, run %s, then bd backup sync", remedy.PrintedValue(dir), backupInitCommand(dir))
+		}
+		return err
 	}
 	return nil
 }
