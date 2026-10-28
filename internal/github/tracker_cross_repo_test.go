@@ -318,3 +318,45 @@ func TestPull_SameNumberInOtherRepoCreatesNewBead(t *testing.T) {
 		}
 	})
 }
+
+// TestPull_SameRepoRespellingsUpdateInPlace guards the repository scoping
+// against over-reach: a bead linked to the configured repository's issue by a
+// ref spelling the exact lookup misses must still be matched and updated in
+// place, its ref rewritten to the issue's HTML URL.
+func TestPull_SameRepoRespellingsUpdateInPlace(t *testing.T) {
+	for _, localRef := range []string{
+		"https://github.com/ACME/Repo-B/issues/42",
+		"https://api.github.com/repos/acme/repo-b/issues/42",
+		"github:42",
+	} {
+		t.Run(localRef, func(t *testing.T) {
+			ctx := context.Background()
+			tr, _ := newCrossRepoTracker(map[string]string{"GET /repos/acme/repo-b/issues/42": repoB42JSON})
+			store := newCrossRepoStore(linkedBead("bd-b42", "Old title", "old body", localRef, time.Time{}))
+			engine := tracker.NewEngine(tr, store, "test")
+			opts := tracker.SyncOptions{Pull: true, IssueIDs: []string{"42"}}
+
+			result, err := engine.Sync(ctx, opts)
+			if err != nil {
+				t.Fatalf("Sync: %v", err)
+			}
+			if result.PullStats.Created != 0 || result.PullStats.Updated != 1 {
+				t.Errorf("pull of repo-b #42: created=%d updated=%d, want created=0 updated=1",
+					result.PullStats.Created, result.PullStats.Updated)
+			}
+			b := store.issue("bd-b42")
+			if b.Title != "Repo B issue 42" || b.ExternalRef == nil || *b.ExternalRef != repoB42Ref {
+				t.Errorf("bd-b42 after pull: title=%q external_ref=%v, want %q and %q",
+					b.Title, derefRef(b.ExternalRef), "Repo B issue 42", repoB42Ref)
+			}
+
+			again, err := engine.Sync(ctx, opts)
+			if err != nil {
+				t.Fatalf("second Sync: %v", err)
+			}
+			if again.PullStats.Created != 0 {
+				t.Errorf("second pull created %d beads, want 0", again.PullStats.Created)
+			}
+		})
+	}
+}

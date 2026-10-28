@@ -120,6 +120,13 @@ func TestExtractIdentifierScopedToRepository(t *testing.T) {
 		{"github:42", "42"},
 		{"https://github.com/acme/repo-a/issues/42", ""},
 		{"https://github.com/other/repo-b/issues/42", ""},
+		{"https://api.github.com/repos/acme/repo-b/issues/42", "42"},
+		{"https://api.github.com/repos/acme/repo-a/issues/42", ""},
+		{"https://github.example.com/acme/repo-b/issues/42", ""},
+		{"https://gitlab.com/acme/repo-b/-/issues/42", ""},
+		{"https://github.com/acme/repo-b/pull/42", ""},
+		{"github:abc", ""},
+		{"not-a-url", ""},
 	}
 	for _, tt := range tests {
 		if got := tr.ExtractIdentifier(tt.ref); got != tt.want {
