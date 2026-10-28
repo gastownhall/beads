@@ -140,10 +140,15 @@ func (s *testSuite) readyCountsExcludesPinned() {
 
 func (s *testSuite) readyCountsExcludesBlocked() {
 	r := s.issueRepo()
+	blocker := newTestIssue("bd-rdyc-blk-by-1", "open blocker")
+	s.Require().NoError(r.Insert(s.Ctx(), blocker, "tester", domain.InsertIssueOpts{}))
 	blocked := newTestIssue("bd-rdyc-blk-1", "blocked")
 	s.Require().NoError(r.Insert(s.Ctx(), blocked, "tester", domain.InsertIssueOpts{}))
-	_, err := s.Runner().ExecContext(s.Ctx(), "UPDATE issues SET is_blocked = 1 WHERE id = ?", "bd-rdyc-blk-1")
-	s.Require().NoError(err)
+	// A real blocks edge, so the recompute sets the flag: a flag planted on an
+	// edgeless row is stale and ready reads around it (GH#3268).
+	depUC := domain.NewDependencyUseCase(NewDependencySQLRepository(s.Runner()))
+	s.Require().NoError(depUC.AddDependency(s.Ctx(),
+		&types.Dependency{IssueID: "bd-rdyc-blk-1", DependsOnID: "bd-rdyc-blk-by-1", Type: types.DepBlocks}, "tester"))
 
 	out, err := r.GetReadyWorkWithCounts(s.Ctx(), types.WorkFilter{})
 	s.Require().NoError(err)

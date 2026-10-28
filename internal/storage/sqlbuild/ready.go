@@ -68,6 +68,28 @@ func BuildReadyWorkOrder(policy types.SortPolicy, createdCol, priorityCol string
 	}
 }
 
+// readyBlockedClause renders the ready-work blocked exclusion. The indexed
+// is_blocked projection decides, except for a row with no ready-affecting
+// dependency rows of its own: no leg of the blocked recompute can mark such a
+// row, so a set flag there is stale (an outside merge, a failed post-pull
+// recompute) and must not hide the issue (GH#3268). The flag is only read
+// around, never rewritten; bd recompute-blocked repairs it.
+//
+// The subquery is uncorrelated on purpose: SearchCountsSQL renders this WHERE
+// inside a pre-join subquery, and the dependency tables have their own id
+// column, so a correlated bare id would bind to the wrong table. The
+// IS NOT NULL keeps NOT IN null-safe. The types are built-in constants,
+// rendered as literals like the builder's other 'parent-child' clauses.
+func readyBlockedClause(tables FilterTables) string {
+	depTypes := types.ReadyAffectingDependencyTypes()
+	quoted := make([]string, len(depTypes))
+	for i, d := range depTypes {
+		quoted[i] = "'" + string(d) + "'"
+	}
+	return fmt.Sprintf("(is_blocked = 0 OR id NOT IN (SELECT issue_id FROM %s WHERE issue_id IS NOT NULL AND type IN (%s)))",
+		tables.Dependencies, strings.Join(quoted, ", "))
+}
+
 // ReadyWorkWhereInputs carries the precomputed ID sets the ready-work WHERE
 // clause folds in. Computing them takes queries, which is execution-context
 // work each stack does its own way.
@@ -115,7 +137,7 @@ func BuildReadyWorkWhere(filter types.WorkFilter, tables FilterTables, in ReadyW
 	whereClauses := []string{
 		statusClause,
 		"(pinned = 0 OR pinned IS NULL)",
-		"is_blocked = 0",
+		readyBlockedClause(tables),
 	}
 	if !filter.IncludeEphemeral {
 		whereClauses = append(whereClauses, "(ephemeral = 0 OR ephemeral IS NULL)")

@@ -276,12 +276,67 @@ func TestBuildReadyWorkWhereBatchesIDSets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got := strings.Count(where, "id NOT IN ("); got != 2 {
+	if got := strings.Count(where, "id NOT IN (?"); got != 2 {
 		t.Errorf("expected 2 batched NOT IN clauses for %d IDs, got %d", len(ids), got)
 	}
 	wantArgs := len(ids) + len(ReadyWorkExcludeTypes(nil))
 	if len(args) != wantArgs {
 		t.Errorf("args = %d, want %d", len(args), wantArgs)
+	}
+}
+
+// GH#3268: ready trusted a bare is_blocked = 0, so a stale flag on a row with
+// no ready-affecting dependency rows hid it. The flag must only decide for rows
+// that have such a row in the matching dependency table. Properties, not a
+// fixed string, so an equivalent rewrite of the guard stays possible.
+func TestBuildReadyWorkWhereIsBlockedGuard(t *testing.T) {
+	t.Parallel()
+
+	for _, tables := range []FilterTables{IssuesFilterTables, WispsFilterTables} {
+		t.Run(tables.Main, func(t *testing.T) {
+			where, _, err := BuildReadyWorkWhere(types.WorkFilter{}, tables, ReadyWorkWhereInputs{})
+			if err != nil {
+				t.Fatalf("BuildReadyWorkWhere: %v", err)
+			}
+			for _, term := range strings.Split(strings.TrimPrefix(where, "WHERE "), " AND ") {
+				if strings.TrimSpace(term) == "is_blocked = 0" {
+					t.Fatalf("bare is_blocked = 0 AND-term hides stale-flagged edgeless rows: %s", where)
+				}
+			}
+			if !strings.Contains(where, "is_blocked") {
+				t.Fatalf("no is_blocked clause at all; blocked rows would be ready: %s", where)
+			}
+			at := strings.Index(where, "FROM "+tables.Dependencies+" ")
+			if at < 0 {
+				t.Fatalf("guard must read %s: %s", tables.Dependencies, where)
+			}
+			guard := where[at:]
+			typesStart := strings.Index(guard, "type IN (")
+			if typesStart < 0 {
+				t.Fatalf("guard does not restrict dependency types: %s", guard)
+			}
+			list := guard[typesStart+len("type IN ("):]
+			list = list[:strings.Index(list, ")")]
+			got := map[string]bool{}
+			for _, lit := range strings.Split(list, ",") {
+				got[strings.Trim(strings.TrimSpace(lit), "'")] = true
+			}
+			want := map[string]bool{}
+			for _, d := range types.ReadyAffectingDependencyTypes() {
+				want[string(d)] = true
+			}
+			if len(got) != len(want) {
+				t.Errorf("guard types = %v, want %v", got, want)
+			}
+			for d := range want {
+				if !got[d] {
+					t.Errorf("guard omits ready-affecting type %q: %s", d, guard)
+				}
+			}
+			if !strings.Contains(guard, "issue_id IS NOT NULL") {
+				t.Errorf("NOT IN subquery must exclude NULL issue_id: %s", guard)
+			}
+		})
 	}
 }
 
@@ -300,7 +355,7 @@ func TestBuildReadyWorkWhereAppliesPolicyIDExclusions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildReadyWorkWhere: %v", err)
 	}
-	if got := strings.Count(where, "id NOT IN ("); got != 2 {
+	if got := strings.Count(where, "id NOT IN (?"); got != 2 {
 		t.Fatalf("external policy exclusions produced %d NOT IN clauses, want 2", got)
 	}
 	wantArgs := len(ids) + len(ReadyWorkExcludeTypes(nil))

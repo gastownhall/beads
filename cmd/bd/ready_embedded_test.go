@@ -13,6 +13,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -543,4 +544,90 @@ func TestEmbeddedReadyClaimConcurrent(t *testing.T) {
 	if got.Assignee == "" {
 		t.Fatal("expected final assignee to be set")
 	}
+}
+
+// plantStaleBlockedFlag sets is_blocked = 1 on an issue with raw SQL and
+// commits it: the stale-flag state an outside merge or a failed post-pull
+// recompute leaves behind, which no single-store bd command produces.
+func plantStaleBlockedFlag(t *testing.T, beadsDir, database, issueID string) {
+	t.Helper()
+	db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), filepath.Join(beadsDir, "embeddeddolt"), database, "main")
+	if err != nil {
+		t.Fatalf("OpenSQL: %v", err)
+	}
+	defer cleanup()
+	res, err := db.ExecContext(t.Context(), "UPDATE issues SET is_blocked = 1 WHERE id = ?", issueID)
+	if err != nil {
+		t.Fatalf("plant is_blocked on %s: %v", issueID, err)
+	}
+	if n, err := res.RowsAffected(); err != nil || n != 1 {
+		t.Fatalf("plant is_blocked on %s: %d rows affected (err %v), want 1", issueID, n, err)
+	}
+	if _, err := db.ExecContext(t.Context(), "CALL DOLT_COMMIT('-Am', 'test: plant a stale is_blocked flag')"); err != nil {
+		t.Fatalf("commit the stale flag: %v", err)
+	}
+}
+
+// readyJSONIDs runs `bd ready --json` with args and returns the listed ids.
+func readyJSONIDs(t *testing.T, bd, dir string, args ...string) map[string]bool {
+	t.Helper()
+	cmd := exec.Command(bd, append([]string{"ready", "--json"}, args...)...)
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	stdout, stderr, err := runCommandBuffers(t, cmd)
+	if err != nil {
+		t.Fatalf("bd ready --json failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+	var ready []types.IssueWithCounts
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &ready); err != nil {
+		t.Fatalf("parse ready JSON: %v\n%s", err, stdout.String())
+	}
+	ids := make(map[string]bool, len(ready))
+	for _, r := range ready {
+		ids[r.ID] = true
+	}
+	return ids
+}
+
+// TestEmbeddedReadyStaleBlockedFlagOnEdgelessIssue is GH#3268 end to end: an
+// open issue with no dependency rows but a stale is_blocked = 1 was hidden from
+// `bd ready` (which trusted the flag) and dropped by `bd blocked` (which could
+// name no blocker), and the empty state then claimed every issue was blocked.
+func TestEmbeddedReadyStaleBlockedFlagOnEdgelessIssue(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "rs")
+	edgeless := bdCreate(t, bd, dir, "GH3268 edgeless stale flag", "--type", "task")
+	plantStaleBlockedFlag(t, beadsDir, "rs", edgeless.ID)
+
+	t.Run("ready_json_lists_the_edgeless_issue", func(t *testing.T) {
+		if ids := readyJSONIDs(t, bd, dir); !ids[edgeless.ID] {
+			t.Fatalf("bd ready --json = %v, want it to list %s (no dependency rows, so is_blocked = 1 is stale)", ids, edgeless.ID)
+		}
+	})
+
+	t.Run("plain_ready_lists_it_without_the_blocking_claim", func(t *testing.T) {
+		out := bdRunOK(t, bd, dir, "ready")
+		if !strings.Contains(out, edgeless.ID) {
+			t.Errorf("plain bd ready does not list %s:\n%s", edgeless.ID, out)
+		}
+		if strings.Contains(out, "all issues have blocking dependencies") {
+			t.Errorf("plain bd ready claims blocking dependencies for an edgeless issue:\n%s", out)
+		}
+	})
+
+	t.Run("blocked_and_dep_list_are_unchanged", func(t *testing.T) {
+		for _, entry := range bdBlockedJSON(t, bd, dir) {
+			if entry["id"] == edgeless.ID {
+				t.Errorf("bd blocked lists edgeless %s: %v", edgeless.ID, entry)
+			}
+		}
+		if out := bdRunOK(t, bd, dir, "dep", "list", edgeless.ID); !strings.Contains(out, "has no dependencies") {
+			t.Errorf("bd dep list %s should report no dependencies:\n%s", edgeless.ID, out)
+		}
+	})
 }

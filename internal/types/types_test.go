@@ -844,6 +844,30 @@ func TestDependencyTypeAffectsReadyWork(t *testing.T) {
 	}
 }
 
+// TestReadyAffectingDependencyTypes pins that the list SQL renders (the ready
+// read guard) is exactly the set AffectsReadyWork classifies as blocking, in
+// both directions, so the two cannot drift.
+func TestReadyAffectingDependencyTypes(t *testing.T) {
+	listed := make(map[DependencyType]bool)
+	for _, d := range ReadyAffectingDependencyTypes() {
+		if listed[d] {
+			t.Errorf("ReadyAffectingDependencyTypes() lists %q twice", d)
+		}
+		listed[d] = true
+		if !d.AffectsReadyWork() {
+			t.Errorf("ReadyAffectingDependencyTypes() lists %q, but AffectsReadyWork() is false", d)
+		}
+	}
+	for _, d := range append(WellKnownDependencyTypes(), DependencyType("custom-type")) {
+		if d.AffectsReadyWork() && !listed[d] {
+			t.Errorf("%q affects ready work but ReadyAffectingDependencyTypes() omits it", d)
+		}
+	}
+	if len(listed) == 0 {
+		t.Fatal("ReadyAffectingDependencyTypes() is empty")
+	}
+}
+
 func TestParseWaitsForGateMetadata(t *testing.T) {
 	tests := []struct {
 		name     string
