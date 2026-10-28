@@ -135,7 +135,7 @@ Any key whose name contains `api_key`, `api-key`, `secret`, `token`, or `passwor
 | `export.auto` | — | — | `false` | Refresh `.beads/issues.jsonl` export after every write; not cross-machine sync |
 | `export.path` | — | — | `issues.jsonl` | Output filename relative to `.beads/` |
 | `export.interval` | — | — | `60s` | Minimum time between auto-exports |
-| `export.git-add` | — | — | `false` | Run `git add` on the export file |
+| `export.git-add` | — | — | `false` | Run `git add` on the export file. Inside a commit hook it stages into the index that commit uses, for example during `git commit -- <paths>` or `git commit -a` |
 | `import.auto` | — | `BD_IMPORT_AUTO` | `true` | Master switch for automatic JSONL imports: the git-hook fallback used when no Dolt remote is configured, and the empty-database recovery import when `.beads/issues.jsonl` exists but the database is empty. `false` disables all auto-imports; explicit `bd import` always works |
 | `import.path` | — | — | `issues.jsonl` | Input filename relative to `.beads/` for implied JSONL imports (including `bd init --from-jsonl` and empty-DB auto-import); use relative paths for portability |
 | `routing.mode` | — | — | (none) | Multi-repo routing: `auto`, `maintainer`, `contributor`, `explicit` |

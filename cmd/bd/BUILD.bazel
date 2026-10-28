@@ -879,6 +879,7 @@ go_test(
         "history_proxied_integration_test.go",
         "history_remote_frontdoor_matrix_test.go",
         "hook_env_test.go",
+        "hook_index_env_test.go",
         "hooks_embedded_test.go",
         "hooks_exec_composition_test.go",
         "hooks_export_staged_deletion_test.go",

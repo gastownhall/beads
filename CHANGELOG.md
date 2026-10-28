@@ -1055,6 +1055,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- With `export.git-add` on, the pre-commit export now lands in commits made
+  with `git commit -- <paths>`, `-a`, `-i` or `-p`. It used to stage into
+  `.git/index`, whose lock the commit holds, so it was skipped with
+  "git index is locked". The hook now stages into the index git hands it in
+  `GIT_INDEX_FILE` when that names an index of the same repository, decides
+  whether the commit touches `.beads` from that index, and in a linked
+  worktree no longer re-stages an export you removed with `git rm` (#4080).
 - `bd list --watch` and `bd show --watch` now wait a full poll interval after
   each refresh, and `bd list --watch --parent` reads its tree in one
   transaction, so other bd commands on an embedded workspace no longer stall
