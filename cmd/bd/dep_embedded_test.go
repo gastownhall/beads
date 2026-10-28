@@ -461,6 +461,40 @@ func TestEmbeddedDepAAddRejectionsAndBulk(t *testing.T) {
 			t.Fatalf("stderr = %q, want the unresolved-target warning alongside the unchanged --json object", stderr)
 		}
 	})
+
+	t.Run("add_resolved_and_external_no_warning", func(t *testing.T) {
+		// The negative-space guard: a target that resolves locally, or a
+		// well-formed external: ref — the two shapes meant to be stored —
+		// never draws the unresolved-target warning, positionally or via
+		// --file. They never enter resolveUnresolvedDepTarget's outcome 3,
+		// so a warning here would mean the notice misfires on legitimate
+		// adds (a resolved target resolves before the helper's error branch;
+		// the external ref is outcome 1).
+		ra := bdCreate(t, bd, dir, "Resolved target A", "--type", "task")
+		rc := bdCreate(t, bd, dir, "Resolved target C", "--type", "task")
+
+		if _, stderr := runDepSplit(t, bd, dir, "dep", "add", ra.ID, rc.ID); strings.Contains(stderr, "was not found") {
+			t.Errorf("stderr = %q, a locally resolved target must not warn", stderr)
+		}
+		if _, stderr := runDepSplit(t, bd, dir, "dep", "add", ra.ID, "external:someproj:some-capability"); strings.Contains(stderr, "was not found") {
+			t.Errorf("stderr = %q, a well-formed external ref must not warn", stderr)
+		}
+
+		path := filepath.Join(t.TempDir(), "all-resolvable-deps.jsonl")
+		body := fmt.Sprintf("{\"from\":%q,\"to\":%q}\n{\"from\":%q,\"to\":\"external:someproj:some-capability\"}\n", ra.ID, rc.ID, ra.ID)
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatalf("write deps file: %v", err)
+		}
+		if _, stderr := runDepSplit(t, bd, dir, "dep", "add", "--file", path); strings.Contains(stderr, "was not found") {
+			t.Errorf("stderr = %q, resolved and external-file lines must not warn", stderr)
+		}
+		// Two distinct edges across all three adds: the local one and the
+		// external ref (a --file line re-adding an existing edge stores
+		// nothing new), both stored, none warned about.
+		if got := depTargetCount(t, bd, dir, ra.ID); got != 2 {
+			t.Fatalf("dependency_count = %d, want 2 (the local and the external edge)", got)
+		}
+	})
 }
 
 func TestEmbeddedDepBTreeAndCycles(t *testing.T) {
