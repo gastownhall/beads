@@ -427,7 +427,11 @@ func TestRefuseExistingCreateTargetRefusesEmbeddedOpenOfServerWorkspace(t *testi
 		// The target dials the port its metadata.json names, not the
 		// default for a remote host.
 		{name: "metadata names the port, config.yaml a remote host and no port", metadata: `{"backend":"dolt","dolt_database":"beads","dolt_server_port":23483}`, config: "dolt:\n  mode: server\n  host: 127.0.0.2\n", want: `Set "dolt_mode": "server", "dolt_server_host": "127.0.0.2" and "dolt_server_port": 23483 in its .beads/metadata.json, then rerun`},
-		{name: "metadata names 127.0.0.1 over a remote config.yaml host", metadata: `{"backend":"dolt","dolt_database":"beads","dolt_server_host":"127.0.0.1"}`, config: "dolt:\n  mode: server\n  host: db.example.com\n  port: 23481\n", want: bdHostInside, wantPlanning: "Its own config names dolt.port 23481, " + bdHostCannotAim},
+		// GH#5961 flipped this fixture's world: config.yaml dolt.host
+		// outranks the metadata dolt_server_host, so the stale local stamp
+		// no longer holds the target at bd's own host and the remote-host
+		// remedies apply. This case pinned the old order.
+		{name: "config.yaml's remote host over a metadata 127.0.0.1", metadata: `{"backend":"dolt","dolt_database":"beads","dolt_server_host":"127.0.0.1"}`, config: "dolt:\n  mode: server\n  host: db.example.com\n  port: 23481\n", want: `then rerun (a dolt.port in this workspace's own configuration still outranks that port), or make the write inside that repository, where bd dials the server its own config names; nothing was created`, wantPlanning: `then rerun (a dolt.port in this workspace's own configuration still outranks that port); nothing was created`},
 		// The open from here reads the metadata.json host, but not the
 		// config.yaml port. Any host there but bd's own and the IPv6
 		// loopback selects server mode for that open

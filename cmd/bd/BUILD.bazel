@@ -833,6 +833,7 @@ go_test(
         "foreign_workspace_census_test.go",
         "foreign_workspace_test.go",
         "dolt_set_host_precedence_test.go",
+        "create_host_mismatch_test.go",
         "dolt_host_notice_test.go",
         "host_precedence_classifiers_test.go",
         "init_clone_host_precedence_test.go",
