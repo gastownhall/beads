@@ -173,6 +173,7 @@
 
 100 42 TestEmbeddedInitAForkAutoContributor
 100 42 TestEmbeddedUpdateIfGuardsFlagValidation
+100 42 TestEmbeddedWritesNeverCheckOutDoltRemoteInfoBranch
 
 100 43 TestEmbeddedDoltPushHonorsExplicitRemoteInfoBranch
 100 43 TestEmbeddedIfRevisionMultiIDRejected
