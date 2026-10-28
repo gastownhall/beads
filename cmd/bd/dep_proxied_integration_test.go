@@ -751,7 +751,8 @@ func TestProxiedServerDep2C(t *testing.T) {
 		})
 
 		// --show-all-paths is a DOCUMENTED NO-OP (Q7). It is still accepted so no
-		// script breaks, and a diamond is still rendered once.
+		// script breaks, and a diamond still expands the shared node once; the
+		// second parent's edge into it is a `deduped` stub either way.
 		t.Run("show_all_paths_is_an_accepted_no_op", func(t *testing.T) {
 			t.Parallel()
 			p := newSharedProxiedProject(t, bd, "dptd")
@@ -769,18 +770,23 @@ func TestProxiedServerDep2C(t *testing.T) {
 				{"tree", root.ID, "--show-all-paths"},
 			} {
 				arr := bdProxiedDepJSONArray(t, bd, p.dir, args...)
-				count := 0
+				expanded, stubs := 0, 0
 				for _, node := range arr {
 					m, ok := node.(map[string]interface{})
 					if !ok {
 						continue
 					}
-					if id, _ := m["id"].(string); id == shared.ID {
-						count++
+					if id, _ := m["id"].(string); id != shared.ID {
+						continue
+					}
+					if deduped, _ := m["deduped"].(bool); deduped {
+						stubs++
+					} else {
+						expanded++
 					}
 				}
-				if count != 1 {
-					t.Errorf("%v: shared node appears %d times, want 1", args, count)
+				if expanded != 1 || stubs != 1 {
+					t.Errorf("%v: shared node expanded %d times with %d stubs, want 1 and 1", args, expanded, stubs)
 				}
 			}
 		})
