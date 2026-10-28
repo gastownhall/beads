@@ -33,10 +33,12 @@ import (
 //     reports the row, and id generation never produces a retired id, top
 //     level or under a parent (cases 9-10, 20).
 //
-// Cases 20-21 are the workspace's own guard on the plain sweeps: a type named
+// Cases 20-22 are the workspace's own guard on the plain sweeps: a type named
 // in types.retained is held back by every sweep that does not retain ids, and
-// taken — and retired — by one that does; and a sweep that cannot read the
-// setting fails rather than deleting on a guess.
+// taken — and retired — by one that does; it is held back before the
+// protections and Limit, so it neither steals their counters nor fills a
+// batch; and a sweep that cannot read the setting fails rather than deleting
+// on a guess.
 //
 // Case 14 is the property the halves add up to: a create racing the sweep of
 // its id never lands. Cases 15-16 race the doors that do NOT refuse up front —
@@ -954,6 +956,115 @@ func RunIDRetentionAPlainSweepSkipsARetainedType(t *testing.T, ctx context.Conte
 	sweeperSeed(t, ctx, fixture.Sweep, released, nil)
 	assertHeld("plain sweep after the setting is unset", sweeperSweep(t, ctx, fixture.Sweep, publicops.SweepRequest{Tier: publicops.SweepDurable, IDPattern: released.ID}), 1, 0)
 	idRetentionAssertTombstones(t, ctx, fixture, released.ID, 0, 0)
+}
+
+// RunIDRetentionARetainedTypeIsHeldBackBeforeTheProtectionsAndTheLimit pins
+// WHERE the retained-type partition sits in the narrowing order the Sweeper
+// contract states: before the live-dependent and reference protections, and
+// before Limit.
+//
+// The Limit half is the one an orchestrator's batch loop depends on. A loop
+// takes the oldest closed rows first and stops when a call sweeps nothing; if
+// the partition ran after Limit, old retained rows would fill every batch
+// (Swept 0, Remaining > 0) and the closed backlog behind them would never
+// drain. So a retained row closed EARLIER than a plain one must not cost the
+// plain row its place: a Limit-1 sweep takes the plain row, counts the retained
+// one, and reports nothing remaining.
+//
+// The protection half pins the counters, which the contract calls part of the
+// answer: a retained row that an open bead also cites, or that a live bead
+// depends on, is counted in RetentionRequired and in neither protection's
+// counter. The live-dependent clause needs the fixture's AddDependencies hook
+// and is skipped, by name, without one. The setting is unset afterwards.
+func RunIDRetentionARetainedTypeIsHeldBackBeforeTheProtectionsAndTheLimit(t *testing.T, ctx context.Context, fixture IDRetentionFixture) {
+	t.Helper()
+	if fixture.WorkspaceConfig == nil {
+		t.Skip("fixture has no WorkspaceConfig; types.retained cannot be set here")
+	}
+	const retainedType = types.TypeChore
+	if _, err := fixture.WorkspaceConfig.SetSetting(ctx, publicops.SetSettingRequest{Key: publicops.SettingKeyTypesRetained, Value: string(retainedType)}); err != nil {
+		t.Fatalf("SetSetting(%s, %q): %v", publicops.SettingKeyTypesRetained, retainedType, err)
+	}
+	defer func() {
+		if _, err := fixture.WorkspaceConfig.UnsetSetting(ctx, publicops.UnsetSettingRequest{Key: publicops.SettingKeyTypesRetained}); err != nil {
+			t.Errorf("UnsetSetting(%s): %v", publicops.SettingKeyTypesRetained, err)
+		}
+	}()
+	retained := func(tag, name string, ephemeral bool) *types.Issue {
+		issue := sweeperIssue(fixture.Sweep, tag, name, ephemeral)
+		issue.IssueType = retainedType
+		return issue
+	}
+
+	t.Run("before the limit", func(t *testing.T) {
+		const tag = "retlimit"
+		early := retained(tag, "early", true)
+		earlier := sweeperClosedAt.Add(-24 * time.Hour)
+		early.ClosedAt = &earlier
+		sweeperSeed(t, ctx, fixture.Sweep, early, nil)
+		plain := sweeperSeed(t, ctx, fixture.Sweep, sweeperIssue(fixture.Sweep, tag, "plain", true), nil)
+
+		request := publicops.SweepRequest{Tier: publicops.SweepEphemeral, IDPattern: sweeperPattern(fixture.Sweep, tag), Limit: 1}
+		for _, step := range []struct {
+			name    string
+			request publicops.SweepRequest
+		}{{"dry run", sweeperAsDryRun(request)}, {"sweep", request}} {
+			result := sweeperSweep(t, ctx, fixture.Sweep, step.request)
+			if result.Swept != 1 || result.Skipped.RetentionRequired != 1 || result.Remaining != 0 {
+				t.Errorf("%s with Limit 1: Swept = %d, RetentionRequired = %d, Remaining = %d; want 1, 1 and 0 — "+
+					"the older retained row must be held back before the limit, not fill the batch",
+					step.name, result.Swept, result.Skipped.RetentionRequired, result.Remaining)
+			}
+		}
+		sweeperAssertWispRows(t, ctx, fixture.Sweep, 0, plain)
+		sweeperAssertWispRows(t, ctx, fixture.Sweep, 1, early.ID)
+	})
+
+	t.Run("before the reference protection", func(t *testing.T) {
+		const tag = "retref"
+		cited := sweeperSeed(t, ctx, fixture.Sweep, retained(tag, "cited", false), nil)
+		citing := sweeperIssue(fixture.Sweep, tag, "live", false)
+		citing.Description = fmt.Sprintf("follows (%s)", cited)
+		sweeperSeedOpen(t, ctx, fixture.Sweep, citing)
+
+		result := sweeperSweep(t, ctx, fixture.Sweep, publicops.SweepRequest{
+			Tier: publicops.SweepDurable, IDPattern: sweeperPattern(fixture.Sweep, tag), ProtectReferenced: true,
+		})
+		if result.Swept != 0 || result.Skipped.RetentionRequired != 1 || result.Skipped.Referenced != 0 {
+			t.Errorf("Swept = %d, RetentionRequired = %d, Referenced = %d; want 0, 1 and 0 — "+
+				"a cited retained row is held back as retained before the reference scan sees it",
+				result.Swept, result.Skipped.RetentionRequired, result.Skipped.Referenced)
+		}
+		sweeperAssertIssueRows(t, ctx, fixture.Sweep, 1, cited)
+	})
+
+	t.Run("before the live-dependent protection", func(t *testing.T) {
+		if fixture.Sweep.AddDependencies == nil {
+			t.Skip("fixture has no AddDependencies hook; cannot wire the edge this clause needs")
+		}
+		const tag = "retdep"
+		parent := sweeperSeed(t, ctx, fixture.Sweep, retained(tag, "parent", true), nil)
+		child := sweeperIssue(fixture.Sweep, tag, "child", true)
+		child.Status = types.StatusOpen
+		child.ClosedAt = nil
+		sweeperSeed(t, ctx, fixture.Sweep, child, nil)
+		if err := fixture.Sweep.AddDependencies(ctx, publicops.AddDependenciesRequest{
+			Actor: idRetentionActor,
+			Edges: []publicops.DependencyEdge{{IssueID: child.ID, DependsOnID: parent, Type: publicops.DepParentChild}},
+		}); err != nil {
+			t.Fatalf("wiring dependencies: %v", err)
+		}
+
+		result := sweeperSweep(t, ctx, fixture.Sweep, publicops.SweepRequest{
+			Tier: publicops.SweepWispsPlane, IDPattern: sweeperPattern(fixture.Sweep, tag), ProtectLiveDependents: true,
+		})
+		if result.Swept != 0 || result.Skipped.RetentionRequired != 1 || result.Skipped.LiveDependent != 0 {
+			t.Errorf("Swept = %d, RetentionRequired = %d, LiveDependent = %d; want 0, 1 and 0 — "+
+				"a retained row with a live dependent is held back as retained first",
+				result.Swept, result.Skipped.RetentionRequired, result.Skipped.LiveDependent)
+		}
+		sweeperAssertWispRows(t, ctx, fixture.Sweep, 1, parent)
+	})
 }
 
 // RunIDRetentionARetainedTypeReadErrorFailsTheSweep pins that the retained

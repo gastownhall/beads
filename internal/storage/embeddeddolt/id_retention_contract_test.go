@@ -86,6 +86,9 @@ func TestIDRetentionContract(t *testing.T) {
 	t.Run("APlainSweepSkipsARetainedType", func(t *testing.T) {
 		conformance.RunIDRetentionAPlainSweepSkipsARetainedType(t, ctx, fixture)
 	})
+	t.Run("ARetainedTypeIsHeldBackBeforeTheProtectionsAndTheLimit", func(t *testing.T) {
+		conformance.RunIDRetentionARetainedTypeIsHeldBackBeforeTheProtectionsAndTheLimit(t, ctx, fixture)
+	})
 	t.Run("ARetainedTypeReadErrorFailsTheSweep", func(t *testing.T) {
 		conformance.RunIDRetentionARetainedTypeReadErrorFailsTheSweep(t, ctx, fixture)
 	})

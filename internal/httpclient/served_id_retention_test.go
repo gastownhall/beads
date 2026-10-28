@@ -135,3 +135,7 @@ func TestServedIDRetentionAPlainSweepSkipsARetainedType(t *testing.T) {
 func TestServedIDRetentionARetainedTypeReadErrorFailsTheSweep(t *testing.T) {
 	conformance.RunIDRetentionARetainedTypeReadErrorFailsTheSweep(t, t.Context(), newServedIDRetentionFixture(t, "hidrh"))
 }
+
+func TestServedIDRetentionARetainedTypeIsHeldBackBeforeTheProtectionsAndTheLimit(t *testing.T) {
+	conformance.RunIDRetentionARetainedTypeIsHeldBackBeforeTheProtectionsAndTheLimit(t, t.Context(), newServedIDRetentionFixture(t, "hidri"))
+}
