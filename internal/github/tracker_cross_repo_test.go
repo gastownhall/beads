@@ -360,3 +360,51 @@ func TestPull_SameRepoRespellingsUpdateInPlace(t *testing.T) {
 		})
 	}
 }
+
+// pushRoutes serves repo-b's issues 7 and 42 as last changed before the local
+// edits, and accepts any write a push might send, so a test sees every write
+// the engine attempts rather than an error that hides it.
+func pushRoutes() map[string]string {
+	repoB7JSON := gitHubIssueJSON(7, "Repo B issue 7", "repo-b 7 body", repoB7Ref, fixtureUpdated)
+	return map[string]string{
+		"GET /repos/acme/repo-b/issues/7":    repoB7JSON,
+		"GET /repos/acme/repo-b/issues/42":   repoB42JSON,
+		"PATCH /repos/acme/repo-b/issues/7":  repoB7JSON,
+		"PATCH /repos/acme/repo-b/issues/42": repoB42JSON,
+		"POST /repos/acme/repo-b/issues":     gitHubIssueJSON(99, "Created", "", "https://github.com/acme/repo-b/issues/99", fixtureUpdated),
+	}
+}
+
+// TestPush_SkipsBeadLinkedToOtherRepo: pushing to acme/repo-b updates the
+// bead linked to repo-b's issue 7 but neither writes repo-b's issue 42 with
+// the content of the bead linked to repo-a's issue 42 nor re-creates that
+// bead as a new repo-b issue.
+func TestPush_SkipsBeadLinkedToOtherRepo(t *testing.T) {
+	ctx := context.Background()
+	localEdit := fixtureUpdated.Add(72 * time.Hour)
+	tr, rt := newCrossRepoTracker(pushRoutes())
+	store := newCrossRepoStore(
+		repoABead(localEdit),
+		linkedBead("bd-b7", "Repo B issue 7 edited", "repo-b 7 body", repoB7Ref, localEdit),
+	)
+	engine := tracker.NewEngine(tr, store, "test")
+
+	live, err := engine.Sync(ctx, tracker.SyncOptions{Push: true})
+	if err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if !rt.sent("PATCH /repos/acme/repo-b/issues/7") {
+		t.Errorf("push did not update repo-b #7; requests=%v", rt.log())
+	}
+	if rt.sent("PATCH /repos/acme/repo-b/issues/42") {
+		t.Errorf("push wrote the repo-a bead onto repo-b #42; requests=%v", rt.log())
+	}
+	if rt.sent("POST /repos/acme/repo-b/issues") {
+		t.Errorf("push created a repo-b issue for the repo-a bead; requests=%v", rt.log())
+	}
+	assertRepoABeadUnchanged(t, store)
+	if got := live.PushStats; got.Created != 0 || got.Updated != 1 || got.Skipped != 1 {
+		t.Errorf("push stats = {Created:%d Updated:%d Skipped:%d}, want {Created:0 Updated:1 Skipped:1}",
+			got.Created, got.Updated, got.Skipped)
+	}
+}
