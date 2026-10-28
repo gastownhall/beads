@@ -147,4 +147,50 @@ func TestMergeSettleDrainsCallResultSets(t *testing.T) {
 		}
 		assertDrainedCalls(t, mock, rec)
 	})
+
+	t.Run("auto_resolve_config_and_schema_migrations", func(t *testing.T) {
+		rec, mock := newDrainMock(t)
+
+		// Conflicted tables in the order the pre-screen loop must see them.
+		mock.ExpectQuery(regexp.QuoteMeta(doltConflictsSQL)).
+			WillReturnRows(sqlmock.NewRows([]string{"table", "num_conflicts"}).
+				AddRow("config", 1).
+				AddRow("schema_migrations", 1))
+		// config pre-screen: same kv.memory.* key on both sides.
+		mock.ExpectQuery(regexp.QuoteMeta("\n\t\tSELECT our_key, their_key FROM dolt_conflicts_config")).
+			WillReturnRows(sqlmock.NewRows([]string{"our_key", "their_key"}).
+				AddRow("kv.memory.a", "kv.memory.a"))
+		// schema_migrations pre-screen: vintage row, ours without a hash.
+		mock.ExpectQuery(regexp.QuoteMeta("\n\t\tSELECT our_version, their_version, our_content_hash, their_content_hash\n\t\tFROM dolt_conflicts_schema_migrations")).
+			WillReturnRows(sqlmock.NewRows([]string{"our_version", "their_version", "our_content_hash", "their_content_hash"}).
+				AddRow(7, 7, nil, "h7"))
+		// Resolved-key diagnostics: empty keeps the stderr Notice quiet.
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT COALESCE(our_key, their_key) FROM dolt_conflicts_config")).
+			WillReturnRows(sqlmock.NewRows([]string{"key"}))
+		mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_CONFLICTS_RESOLVE('--theirs', 'config')")).
+			WillReturnRows(emptyCallRows())
+		mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD('config')")).
+			WillReturnRows(emptyCallRows())
+		// Vintage resolve: theirs carries the hash ours lacks, so the
+		// working-set row is backfilled before the table-level --ours.
+		mock.ExpectQuery(regexp.QuoteMeta("\n\t\tSELECT our_version, our_content_hash, their_content_hash\n\t\tFROM dolt_conflicts_schema_migrations")).
+			WillReturnRows(sqlmock.NewRows([]string{"our_version", "our_content_hash", "their_content_hash"}).
+				AddRow(7, nil, "h7"))
+		mock.ExpectExec(regexp.QuoteMeta("UPDATE schema_migrations SET content_hash = ? WHERE version = ?")).
+			WithArgs("h7", 7).
+			WillReturnResult(sqlmock.NewResult(0, 1))
+		mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_CONFLICTS_RESOLVE('--ours', 'schema_migrations')")).
+			WillReturnRows(emptyCallRows())
+		mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD('schema_migrations')")).
+			WillReturnRows(emptyCallRows())
+
+		resolved, err := TryAutoResolveMergeConflicts(context.Background(), rec)
+		if err != nil {
+			t.Fatalf("TryAutoResolveMergeConflicts: %v", err)
+		}
+		if !resolved {
+			t.Fatal("TryAutoResolveMergeConflicts resolved = false, want true")
+		}
+		assertDrainedCalls(t, mock, rec)
+	})
 }
