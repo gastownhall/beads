@@ -11,6 +11,7 @@ go_library(
     deps = [
         "//internal/configfile",
         "//internal/debug",
+        "//internal/doltinfoenv",
         "//internal/doltversion",
         "//internal/githooksenv",
         "//internal/gittraceenv",
@@ -24,12 +25,14 @@ go_test(
     name = "remotecache_test",
     srcs = [
         "cache_test.go",
+        "doltcmd_info_branch_test.go",
         "doltcmd_test.go",
         "url_test.go",
         "version_floor_test.go",
     ],
     embed = [":remotecache"],
     deps = [
+        "//internal/doltinfoenv",
         "//internal/doltversion",
         "//internal/githooksenv",
     ],

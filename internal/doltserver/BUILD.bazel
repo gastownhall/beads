@@ -36,6 +36,7 @@ go_library(
         "//internal/configfile",
         "//internal/creds",
         "//internal/debug",
+        "//internal/doltinfoenv",
         "//internal/doltversion",
         "//internal/fdhygiene",
         "//internal/githooksenv",
@@ -82,6 +83,7 @@ go_test(
         "probe_test.go",
         "procattr_linux_test.go",
         "socket_integration_test.go",
+        "spawn_env_info_branch_test.go",
         "startowned_test.go",
         "startupwatch_test.go",
         "sweep_darwin_test.go",
@@ -96,6 +98,7 @@ go_test(
     deps = [
         "//internal/config",
         "//internal/configfile",
+        "//internal/doltinfoenv",
         "//internal/doltversion",
         "//internal/githooksenv",
         "//internal/storage",
