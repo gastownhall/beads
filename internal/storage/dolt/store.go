@@ -5691,6 +5691,23 @@ func (s *DoltStore) pullTransportReporting(ctx context.Context, remote string) (
 	return report, err
 }
 
+// openLongTimeoutConn opens a dedicated single-connection *sql.DB to this
+// store's database with a 5-minute read timeout, for statements that can run
+// longer than the pool's default but are NOT transfers: history queries
+// (withReadTxLongTimeout), blocked-state recompute, and federation staging.
+//
+// The deadline stays a 5m literal, deliberately not the
+// BEADS_DOLT_TRANSFER_TIMEOUT knob: that variable is named for transfers and
+// is set by operators trying to bound push/pull time (e.g. 1m to make pushes
+// fail fast), which would also cap a large recompute or a long history scan —
+// unrelated work an operator has no reason to expect the transfer knob to
+// touch. The transfer callers that shared this connection now dial their own
+// oneShotConn(transferExecTimeoutDuration()) so the knob reaches exactly them.
+// The caller must Close the returned DB.
+func (s *DoltStore) openLongTimeoutConn() (*sql.DB, error) {
+	return s.oneShotConn(5 * time.Minute)
+}
+
 // pullWithAutoResolve executes a DOLT_PULL query with long timeout and auto-resolves
 // metadata-only merge conflicts using "theirs" strategy. This handles the common case
 // where machine-local metadata rows (e.g., dolt_auto_push_*) diverge across clones
@@ -5702,23 +5719,6 @@ func (s *DoltStore) pullTransportReporting(ctx context.Context, remote string) (
 //
 // This method handles both by checking for conflicts after the pull call
 // (whether it errored or not) and auto-resolving metadata-only conflicts.
-// openLongTimeoutConn opens a dedicated single-connection *sql.DB to this store's
-// database with a long read timeout, for merge/pull/conflict operations that can run
-// longer than the default connection timeout. The caller must Close the returned DB.
-func (s *DoltStore) openLongTimeoutConn() (*sql.DB, error) {
-	cfg, err := mysql.ParseDSN(s.connStr)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse DSN for long-timeout connection: %w", err)
-	}
-	cfg.ReadTimeout = 5 * time.Minute
-	db, err := sql.Open("mysql", cfg.FormatDSN())
-	if err != nil {
-		return nil, fmt.Errorf("failed to open long-timeout connection: %w", err)
-	}
-	db.SetMaxOpenConns(1)
-	return db, nil
-}
-
 // remote names the remote the query pulls from; the GH#3144 fetch+merge
 // fallback targets it directly, so pulls from non-default remotes (PullRemote,
 // federation peers) no longer fall back to s.remote.

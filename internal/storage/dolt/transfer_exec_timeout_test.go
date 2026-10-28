@@ -453,3 +453,40 @@ func TestAnnotateTransferTimeout(t *testing.T) {
 		})
 	}
 }
+
+// TestLongTimeoutConnIgnoresTransferKnob pins the scope of
+// BEADS_DOLT_TRANSFER_TIMEOUT: it bounds transfer connections only.
+// openLongTimeoutConn — whose callers are history queries, blocked-state
+// recompute and federation staging, none of them transfers — keeps the 5m
+// literal. With the knob at 1s, a stalled statement on an openLongTimeoutConn
+// connection must still outlive the knob and end at the 3s context guard with
+// context.DeadlineExceeded, not mysql.ErrInvalidConn at about 1s. Wiring the
+// knob into openLongTimeoutConn (PR #6376's approach) would let
+// BEADS_DOLT_TRANSFER_TIMEOUT=1m, set to make pushes fail fast, kill a large
+// recompute at 1m.
+func TestLongTimeoutConnIgnoresTransferKnob(t *testing.T) {
+	t.Setenv(transferExecTimeoutEnv, "1s")
+
+	s := newTransferStore(t, transferScript{})
+	db, err := s.openLongTimeoutConn()
+	if err != nil {
+		t.Fatalf("openLongTimeoutConn: %v", err)
+	}
+	defer db.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	start := time.Now()
+	_, err = db.ExecContext(ctx, "SELECT 1")
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("statement on openLongTimeoutConn = %v, want context.DeadlineExceeded from the 3s guard", err)
+	}
+	if errors.Is(err, mysql.ErrInvalidConn) {
+		t.Errorf("openLongTimeoutConn honored %s: the statement died at about 1s", transferExecTimeoutEnv)
+	}
+	if elapsed < 2500*time.Millisecond {
+		t.Errorf("statement ended after %v; the 1s knob leaked into a non-transfer connection", elapsed.Round(time.Millisecond))
+	}
+}
