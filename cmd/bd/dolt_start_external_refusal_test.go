@@ -103,3 +103,52 @@ func TestDoltStartDirectExternalRefusal(t *testing.T) {
 		}
 	}
 }
+
+// requireNoStartCommandAdvice fails when a refusal message points back at
+// 'bd dolt start' — the command it refuses — or names --force, which does not
+// bypass it.
+func requireNoStartCommandAdvice(t *testing.T, text string) {
+	t.Helper()
+	if strings.Contains(text, "bd dolt start") {
+		t.Errorf("refusal advises 'bd dolt start', the command it refuses:\n%s", text)
+	}
+	if strings.Contains(text, "--force") {
+		t.Errorf("refusal names --force, which does not bypass it:\n%s", text)
+	}
+}
+
+// TestDoltStartForceDoesNotBypassExternalRefusal: --force exists to bypass
+// the fresh-data-dir refusal (bd-7pkvvd); it must not bypass the externally
+// managed refusal — whatever BEADS_DOLT_AUTO_START says and however much
+// database already sits under .beads/dolt, which is what the fresh-data-dir
+// refusal keys on.
+func TestDoltStartForceDoesNotBypassExternalRefusal(t *testing.T) {
+	f := newExternalInitFixture(t)
+	port := freeLoopbackPort(t)
+	beadsDir := directExternalStartWorkspace(t, f, port)
+	// A database under .beads/dolt is what the fresh-data-dir refusal keys
+	// on, so the externally managed refusal must hold with one present. The
+	// hand-made root needs a current-era version witness, or the legacy
+	// upgrade guard refuses the workspace as a pre-1.0 one first.
+	if err := os.MkdirAll(filepath.Join(beadsDir, "dolt", "named_port", ".dolt"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, ".local_version"), []byte("1.3.2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, autoStart := range []string{"", "0", "1"} {
+		t.Run("auto-start="+autoStart, func(t *testing.T) {
+			res := f.run(autoStart, "--json", "dolt", "start", "--force")
+			requireStartRefused(t, res)
+			payload := requireStartRefusalJSON(t, res)
+			requireNoStartCommandAdvice(t, payload.Error)
+		})
+	}
+	// Text mode carries the same message.
+	res := f.run("", "dolt", "start", "--force")
+	requireStartRefused(t, res)
+	if !strings.Contains(res.output, "refusing to start a Dolt server") {
+		t.Errorf("text output does not name the refusal:\n%s", res.output)
+	}
+	requireNoStartCommandAdvice(t, res.output)
+}
