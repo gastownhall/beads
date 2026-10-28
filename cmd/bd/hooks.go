@@ -2128,12 +2128,13 @@ func hookSubprocessEnv(env []string) []string {
 // back into a modification, silently reviving a file the user intentionally
 // removed.
 //
-// Unlike preCommitHasStagedBeadsFiles and gitAddFile, this deliberately runs
-// git with the hook's inherited environment intact rather than scrubbing
-// GIT_* vars. GIT_INDEX_FILE is set during an actual commit and points at
-// the pending index — where the staged deletion lives — so scrubbing it
-// here would make git fall back to the on-disk index and miss the
-// deletion. Reimplements gastownhall/beads#3838 (ckumar1).
+// Like preCommitHasStagedBeadsFiles and gitAddFile, this runs git with the
+// environment gitIndexEnv builds: GIT_* routing vars scrubbed, so git
+// discovers the repository from dir even when a linked-worktree hook
+// inherited GIT_DIR (which would make dir the work-tree top and the
+// pathspec miss), and the hook's GIT_INDEX_FILE kept, because it points at
+// the pending index where the staged deletion lives (GH#4080). Reimplements
+// gastownhall/beads#3838 (ckumar1).
 //
 // #nosec G702 -- no shell is involved: the binary is the literal "git" and
 // every argument is its own argv element. The only variable argument is the
@@ -2157,8 +2158,13 @@ func isExportFileStagedForDeletion(fullPath string) bool {
 	if err != nil {
 		return false
 	}
+	env, _, err := gitIndexEnv(dir)
+	if err != nil {
+		debug.Logf("pre-commit: failed to resolve the commit index: %v\n", err)
+	}
 	checkCmd := exec.Command("git", "diff", "--cached", "--diff-filter=D", "--name-only", "--", rel)
 	checkCmd.Dir = dir
+	checkCmd.Env = env
 	out, _ := checkCmd.Output()
 	return len(out) > 0
 }
