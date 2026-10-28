@@ -369,17 +369,20 @@ func expandLoopIteration(step *Step, iteration int, iterVars map[string]string) 
 		clone.DependsOn = rewriteLoopDependencies(bodyStep.DependsOn, step.ID, iteration, bodyStepIDs)
 		clone.Needs = rewriteLoopDependencies(bodyStep.Needs, step.ID, iteration, bodyStepIDs)
 
-		// The loop step's own Needs (what gates the loop as a whole,
-		// declared outside the body) reference no step the rewrite above
-		// can see, so without this they are dropped silently once the
-		// loop step stops existing post-expansion (GH#7636). Carry them
-		// onto the first iteration's entry steps: the body steps with no
-		// dependency of their own on another body step — a step gated by
-		// a sibling is not an entry point, and a later iteration is gated
-		// by the previous one via chainExpandedIterations.
+		// The loop step's own Needs/DependsOn (what gates the loop as a
+		// whole, declared outside the body) reference no step the rewrite
+		// above can see, so without this they are dropped silently once
+		// the loop step stops existing post-expansion (GH#7636). Carry
+		// them onto the first iteration's entry steps: the body steps
+		// with no dependency of their own on another body step — a step
+		// gated by a sibling is not an entry point, and a later iteration
+		// is gated by the previous one via chainExpandedIterations.
 		if iteration == 1 && !hasAnyBodyDependency(bodyStep, bodyStepIDs) {
 			for _, dep := range step.Needs {
 				clone.Needs = appendUnique(clone.Needs, dep)
+			}
+			for _, dep := range step.DependsOn {
+				clone.DependsOn = appendUnique(clone.DependsOn, dep)
 			}
 		}
 

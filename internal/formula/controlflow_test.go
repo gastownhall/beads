@@ -1378,3 +1378,184 @@ func TestApplyLoops_LoopReferencesRewritten(t *testing.T) {
 		}
 	})
 }
+
+// TestApplyLoops_OwnNeedsCarryToFirstIterationEntrySteps pins GH#7636's first
+// half: a loop step's own Needs/DependsOn, declared outside its body, name no
+// step the rewrite in expandLoopIteration can see at all, so before this fix
+// they were silently dropped the moment the loop step stopped existing post
+// -expansion. They must land on the first iteration's own entry steps (the
+// ones with no dependency of their own on a body sibling) — not an iteration
+// that chaining already gates, since only the very first one gates the loop
+// as a whole.
+func TestApplyLoops_OwnNeedsCarryToFirstIterationEntrySteps(t *testing.T) {
+	steps := []*Step{
+		{ID: "brief", Title: "Brief"},
+		{
+			ID:        "round",
+			Title:     "Round",
+			Needs:     []string{"brief"},
+			DependsOn: []string{"brief"},
+			Loop: &LoopSpec{
+				Count: 2,
+				Body: []*Step{
+					{ID: "work", Title: "Work"},
+				},
+			},
+		},
+	}
+
+	result, err := ApplyLoops(steps)
+	if err != nil {
+		t.Fatalf("ApplyLoops failed: %v", err)
+	}
+
+	byID := stepsByID(result)
+
+	work1 := byID["round.iter1.work"]
+	if work1 == nil {
+		t.Fatal("round.iter1.work not found")
+	}
+	if len(work1.Needs) != 1 || work1.Needs[0] != "brief" {
+		t.Errorf("round.iter1.work.Needs = %v, want [brief] (the loop step's own Needs)", work1.Needs)
+	}
+	if len(work1.DependsOn) != 1 || work1.DependsOn[0] != "brief" {
+		t.Errorf("round.iter1.work.DependsOn = %v, want [brief] (the loop step's own DependsOn)", work1.DependsOn)
+	}
+
+	work2 := byID["round.iter2.work"]
+	if work2 == nil {
+		t.Fatal("round.iter2.work not found")
+	}
+	if !slices.Contains(work2.Needs, "round.iter1.work") {
+		t.Errorf("round.iter2.work.Needs = %v, want chained to round.iter1.work", work2.Needs)
+	}
+	if slices.Contains(work2.Needs, "brief") {
+		t.Errorf("round.iter2.work.Needs = %v, want the loop's own Needs NOT repeated on a later iteration", work2.Needs)
+	}
+}
+
+// TestApplyLoops_OwnNeedsSkipABodyStepThatAlreadyDependsOnASibling confirms
+// the carry-over above targets only genuine entry steps: a body step that
+// already names another body step in its own Needs is gated by that sibling,
+// not by the loop's external Needs, so it must not also receive them.
+func TestApplyLoops_OwnNeedsSkipABodyStepThatAlreadyDependsOnASibling(t *testing.T) {
+	steps := []*Step{
+		{ID: "brief", Title: "Brief"},
+		{
+			ID:    "round",
+			Title: "Round",
+			Needs: []string{"brief"},
+			Loop: &LoopSpec{
+				Count: 1,
+				Body: []*Step{
+					{ID: "work", Title: "Work"},
+					{ID: "verify", Title: "Verify", Needs: []string{"work"}},
+				},
+			},
+		},
+	}
+
+	result, err := ApplyLoops(steps)
+	if err != nil {
+		t.Fatalf("ApplyLoops failed: %v", err)
+	}
+	byID := stepsByID(result)
+
+	if work := byID["round.iter1.work"]; work == nil || !slices.Contains(work.Needs, "brief") {
+		t.Errorf("round.iter1.work.Needs = %v, want [brief]: it is the body's entry step", work)
+	}
+	verify := byID["round.iter1.verify"]
+	if verify == nil {
+		t.Fatal("round.iter1.verify not found")
+	}
+	if slices.Contains(verify.Needs, "brief") {
+		t.Errorf("round.iter1.verify.Needs = %v, want brief NOT added: verify is gated by its sibling work, not the loop's own Needs", verify.Needs)
+	}
+	if !slices.Contains(verify.Needs, "round.iter1.work") {
+		t.Errorf("round.iter1.verify.Needs = %v, want its own internal dependency on round.iter1.work preserved", verify.Needs)
+	}
+}
+
+// TestApplyLoops_OwnDepsCarryToRoots pins where a loop step's own
+// needs/depends_on land after expansion: on the roots of the fully expanded,
+// chained result — the top-level steps that nothing inside the loop gates.
+// A step gated by a body sibling is not a root, and a step of a later
+// iteration gated by iteration chaining is not a root either (GH#7636).
+func TestApplyLoops_OwnDepsCarryToRoots(t *testing.T) {
+	t.Run("sequential", func(t *testing.T) {
+		steps := []*Step{
+			{ID: "brief", Title: "Brief"},
+			{
+				ID:        "round",
+				Title:     "Round",
+				Needs:     []string{"brief"},
+				DependsOn: []string{"brief"},
+				Loop: &LoopSpec{
+					Count: 2,
+					Body: []*Step{
+						{ID: "work", Title: "Work"},
+						{ID: "verify", Title: "Verify", Needs: []string{"work"}},
+					},
+				},
+			},
+		}
+
+		result, err := ApplyLoops(steps)
+		if err != nil {
+			t.Fatalf("ApplyLoops failed: %v", err)
+		}
+		byID := stepsByID(result)
+
+		work := byID["round.iter1.work"]
+		if work == nil {
+			t.Fatal("round.iter1.work not found")
+		}
+		if !slices.Equal(work.Needs, []string{"brief"}) {
+			t.Errorf("round.iter1.work.Needs = %v, want [brief] appended after its own entries", work.Needs)
+		}
+		if !slices.Equal(work.DependsOn, []string{"brief"}) {
+			t.Errorf("round.iter1.work.DependsOn = %v, want [brief] appended after its own entries", work.DependsOn)
+		}
+
+		verify := byID["round.iter1.verify"]
+		if verify == nil {
+			t.Fatal("round.iter1.verify not found")
+		}
+		if slices.Contains(verify.Needs, "brief") {
+			t.Errorf("round.iter1.verify.Needs = %v, want brief NOT added: verify is gated by its sibling work", verify.Needs)
+		}
+
+		work2 := byID["round.iter2.work"]
+		if work2 == nil {
+			t.Fatal("round.iter2.work not found")
+		}
+		if slices.Contains(work2.Needs, "brief") {
+			t.Errorf("round.iter2.work.Needs = %v, want brief NOT added: iteration 2 is gated by iteration chaining", work2.Needs)
+		}
+
+		assertEveryStepGated(t, result, byID, "round.", "brief")
+	})
+}
+
+// assertEveryStepGated checks the loop invariant of GH#7636's carry: every
+// step of the loop's expansion either names another step of the loop or
+// names the loop's own dependency, so nothing in the loop can start before
+// that dependency closes.
+func assertEveryStepGated(t *testing.T, result []*Step, byID map[string]*Step, loopPrefix, own string) {
+	t.Helper()
+	for _, s := range result {
+		if !strings.HasPrefix(s.ID, loopPrefix) {
+			continue
+		}
+		gated := false
+		for _, dep := range s.Needs {
+			if dep == own || byID[dep] != nil {
+				gated = true
+				break
+			}
+		}
+		if !gated {
+			t.Errorf("%s.Needs = %v; want a dependency on another step of the loop or on %q", s.ID, s.Needs, own)
+		}
+	}
+}
