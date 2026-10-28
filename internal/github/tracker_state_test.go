@@ -130,3 +130,58 @@ func TestCreateIssue_NonClosedSkipsClose(t *testing.T) {
 		})
 	}
 }
+
+// TestCreateIssue_FailedCloseSurfacesWarning verifies that when the follow-up
+// close fails, CreateIssue still returns the created issue (so the external_ref
+// is stored and the next push updates it instead of creating a duplicate) with
+// a nil error, and records a warning on the returned TrackerIssue so the sync
+// engine surfaces the degraded push instead of swallowing it.
+func TestCreateIssue_FailedCloseSurfacesWarning(t *testing.T) {
+	var reqs []capturedRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqs = append(reqs, capturedRequest{method: r.Method, path: r.URL.Path})
+		if r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/issues" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"id":7009,"number":44,"title":"done","state":"open","html_url":"https://github.com/o/r/issues/44"}`)
+			return
+		}
+		// The follow-up close (PATCH) fails with a non-retryable status (422)
+		// so the test doesn't wait on the client's 5xx/429 backoff retries.
+		http.Error(w, `{"message":"Validation Failed"}`, http.StatusUnprocessableEntity)
+	}))
+	t.Cleanup(srv.Close)
+	tr := &Tracker{
+		client: NewClient("token", "o", "r").WithBaseURL(srv.URL),
+		config: DefaultMappingConfig(),
+	}
+
+	ti, err := tr.CreateIssue(context.Background(), &types.Issue{
+		ID: "bd-3", Title: "done", Description: "b",
+		IssueType: types.TypeTask, Priority: 2,
+		Status: types.StatusClosed,
+	})
+	if err != nil {
+		t.Fatalf("CreateIssue should not error on a failed best-effort close: %v", err)
+	}
+	if ti == nil || ti.Identifier != "44" {
+		t.Fatalf("expected the created issue to be returned so external_ref is stored, got %+v", ti)
+	}
+	if !strings.Contains(ti.URL, "/issues/44") {
+		t.Errorf("returned URL = %q, want the created issue's URL", ti.URL)
+	}
+	if ti.State != "open" {
+		t.Errorf("returned TrackerIssue.State = %q, want %q (the close failed)", ti.State, "open")
+	}
+	if len(ti.Warnings) == 0 {
+		t.Fatal("expected a warning on the returned TrackerIssue when the close fails")
+	}
+	if !strings.Contains(ti.Warnings[0], "44") || !strings.Contains(ti.Warnings[0], "failed to close") {
+		t.Errorf("warning = %q, want it to name the issue number and the failed close", ti.Warnings[0])
+	}
+	if findRequest(reqs, http.MethodPost, "/repos/o/r/issues") == nil {
+		t.Fatalf("expected the create POST, got requests: %+v", reqs)
+	}
+	if findRequest(reqs, http.MethodPatch, "/repos/o/r/issues/44") == nil {
+		t.Fatalf("expected the follow-up close PATCH, got requests: %+v", reqs)
+	}
+}

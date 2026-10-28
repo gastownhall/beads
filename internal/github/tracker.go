@@ -154,17 +154,24 @@ func (t *Tracker) CreateIssue(ctx context.Context, issue *types.Issue) (*tracker
 
 	// GitHub's POST /issues cannot set state, so a closed bead is created
 	// OPEN. Close it with a follow-up PATCH so the state carries, mirroring
-	// the GitLab tracker (internal/gitlab/tracker.go): the bead must not be
-	// left linked to an open issue that later pushes then believe is in sync.
+	// the GitLab tracker (internal/gitlab/tracker.go). On failure we keep the
+	// created issue and its external_ref (returning an error here would
+	// strand the bead and re-create a duplicate on the next push); the
+	// warning makes the degraded push visible, and the engine skips the push
+	// hash so the next sync retries the close.
+	var warnings []string
 	if issue.Status == types.StatusClosed {
 		if closed, cerr := t.client.UpdateIssue(ctx, created.Number, map[string]interface{}{
 			"state": "closed",
 		}); cerr == nil {
 			created = closed
+		} else {
+			warnings = append(warnings, fmt.Sprintf("created GitHub issue #%d but failed to close it (left open): %v", created.Number, cerr))
 		}
 	}
 
 	ti := githubToTrackerIssue(created)
+	ti.Warnings = warnings
 	return &ti, nil
 }
 
