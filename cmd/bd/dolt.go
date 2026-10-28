@@ -2250,6 +2250,10 @@ func showDoltConfig(testConnection bool) error {
 	if err := validateConfiguredBackend(cfg, beadsDir); err != nil {
 		return HandleError("%v", err)
 	}
+	// GH#5961: `bd dolt show` names its own connection, so it also names a
+	// tracked metadata host a config.yaml dolt.host outranks with a
+	// different server (once per process, as at the store open).
+	warnOutrankedServerHost(beadsDir, cfg)
 
 	backend := cfg.GetBackend()
 	embedded := !usesSQLServer()
@@ -2577,7 +2581,7 @@ func outrankingHostSourceLabel(beadsDir, effective string) string {
 	if os.Getenv("BEADS_DOLT_SERVER_HOST") != "" {
 		return "the BEADS_DOLT_SERVER_HOST environment variable"
 	}
-	if config.GetValueSource("dolt.host") == config.SourceEnvVar && config.GetString("dolt.host") == effective {
+	if env := os.Getenv("BD_DOLT_HOST"); env != "" && env == effective {
 		return "the BD_DOLT_HOST environment variable"
 	}
 	if proj, _, err := config.WorkspaceYamlValueStrict(beadsDir, "dolt.host"); err == nil && proj != "" && configfile.SameServerHost(proj, effective) {

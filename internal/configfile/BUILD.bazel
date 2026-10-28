@@ -13,6 +13,7 @@ go_library(
         "external_dolt_config.go",
         "graph_mode.go",
         "historical_sqlite.go",
+        "host_notice.go",
         "proxied_server_client_info.go",
         "workspace_format.go",
     ],

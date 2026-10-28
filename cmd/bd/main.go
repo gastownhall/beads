@@ -2003,6 +2003,10 @@ var rootCmd = &cobra.Command{
 		}
 		if cfg != nil {
 			warnSharedServerEmbeddedMismatch(cfg)
+			// GH#5961: name the tracked metadata host a config.yaml
+			// dolt.host now outranks with a different server, before the
+			// connection resolution below dials it.
+			warnOutrankedServerHost(beadsDir, cfg)
 			doltCfg.ProxiedServer = cfg.IsDoltProxiedServerMode()
 			proxiedServerMode = doltCfg.ProxiedServer
 			if cmdCtx != nil {
