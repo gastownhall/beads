@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -320,6 +321,37 @@ func TestParseMarkdownDependencies(t *testing.T) {
 			}
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("got %#v, want %#v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestParseMarkdownDependencies_RefusesWhatDepsRefuses pins GH#7508: a type
+// `bd create --deps` refuses is refused in a file too, naming the template.
+func TestParseMarkdownDependencies_RefusesWhatDepsRefuses(t *testing.T) {
+	tests := []struct {
+		name              string
+		in                []string
+		wantErrSubstrings []string
+	}{
+		{"misspelled type", []string{"blokcs:bd-1"},
+			[]string{"unknown dependency type", "blokcs", "Test Title", "blocked-by"}},
+		{"custom type", []string{"implements:bd-1"},
+			[]string{"unknown dependency type", "implements", "Test Title", "blocked-by"}},
+		// `depends-on: bd-1` arrives split on the space.
+		{"type with no target", []string{"depends-on:", "bd-1"},
+			[]string{"no target", "Test Title"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseMarkdownDependencies(tt.in, "Test Title")
+			if err == nil {
+				t.Fatalf("parseMarkdownDependencies(%v) = %#v, want an error", tt.in, got)
+			}
+			for _, want := range tt.wantErrSubstrings {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("parseMarkdownDependencies(%v) error = %q, want to contain %q", tt.in, err, want)
+				}
 			}
 		})
 	}

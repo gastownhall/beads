@@ -191,6 +191,42 @@ blocks:`+target+`
 			t.Errorf("the blocks: template is not in bd ready:\n%s", ready)
 		}
 	})
+
+	// GH#7508: a type --deps refuses (a misspelling or a custom type) used to
+	// pass the file's own length check and land as a non-gating edge. It now
+	// refuses the whole file, like any other refused template.
+	t.Run("a_dep_type_deps_refuses_refuses_the_whole_file", func(t *testing.T) {
+		target := createMarkdownDepTarget(t, bd, dir, "refused type target 7508")
+		for _, depType := range []string{"blokcs", "implements"} {
+			good := "Lands beside the " + depType + " refusal 7508"
+			bad := "Names the " + depType + " type 7508"
+			plan := writeMarkdownPlan(t, dir, depType+".md", `## `+good+`
+
+### Deps
+`+target+`
+
+## `+bad+`
+
+### Deps
+`+depType+`:`+target+`
+`)
+			out, err := runCreateDepsBDRaw(bd, dir, "create", "--file", plan)
+			if err == nil {
+				t.Fatalf("create --file with %s:%s exited 0; output:\n%s", depType, target, out)
+			}
+			for _, want := range []string{"unknown dependency type", depType, bad} {
+				if !strings.Contains(out, want) {
+					t.Errorf("create --file with %s:%s output = %q, want %q", depType, target, out, want)
+				}
+			}
+			titles := createDepsIssueTitles(t, bd, dir)
+			for _, title := range []string{good, bad} {
+				if titles[title] {
+					t.Errorf("issue %q persisted although the file was refused", title)
+				}
+			}
+		}
+	})
 }
 
 // createMarkdownDepTarget creates a fresh open issue for a file's edges to
