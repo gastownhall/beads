@@ -306,6 +306,9 @@ func TestParseMarkdownDependencies(t *testing.T) {
 		{"whitespace trimmed", []string{"  blocks : bd-4 "},
 			[]issueops.CreateDependency{{Type: types.DepBlocks, TargetID: "bd-4", Reverse: true}}, false},
 		{"empty type rejected", []string{":bd-1"}, nil, true},
+		// One edge spelled three ways is written once, as --deps writes it.
+		{"repeated edge deduped", []string{"depends-on:bd-1", "blocked-by:bd-1", "bd-1"},
+			[]issueops.CreateDependency{{Type: types.DepBlocks, TargetID: "bd-1"}}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -341,6 +344,9 @@ func TestParseMarkdownDependencies_RefusesWhatDepsRefuses(t *testing.T) {
 		// `depends-on: bd-1` arrives split on the space.
 		{"type with no target", []string{"depends-on:", "bd-1"},
 			[]string{"no target", "Test Title"}},
+		// GH#4626: one target cannot carry two types.
+		{"two types on one target", []string{"discovered-from:bd-1", "blocked-by:bd-1"},
+			[]string{"discovered-from", "blocks", "Test Title"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -6,6 +6,7 @@ package main
 // reuse create_deps_atomic_test.go's hermetic environment and output helpers.
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -225,6 +226,40 @@ blocks:`+target+`
 					t.Errorf("issue %q persisted although the file was refused", title)
 				}
 			}
+		}
+	})
+
+	// GH#7508: once the aliases mean blocks, one edge spelled three ways is
+	// three identical edges, which the create role refuses as duplicates.
+	// --deps dedupes them; so does the file.
+	t.Run("a_repeated_edge_is_written_once", func(t *testing.T) {
+		target := createMarkdownDepTarget(t, bd, dir, "repeated edge target 7508")
+		const title = "Repeats one edge three ways 7508"
+		plan := writeMarkdownPlan(t, dir, "repeated.md", `## `+title+`
+
+### Deps
+depends-on:`+target+`, blocked-by:`+target+`, `+target+`
+`)
+		runCreateDepsBD(t, bd, dir, "create", "--file", plan)
+		out := runCreateDepsBD(t, bd, dir, "dep", "list", target, "--direction=up", "--json")
+		var dependents []struct {
+			Title          string `json:"title"`
+			DependencyType string `json:"dependency_type"`
+		}
+		if err := json.Unmarshal([]byte(out[strings.Index(out, "["):]), &dependents); err != nil {
+			t.Fatalf("parse bd dep list --json: %v\n%s", err, out)
+		}
+		var edges []string
+		for _, d := range dependents {
+			if d.Title == title {
+				edges = append(edges, d.DependencyType)
+			}
+		}
+		if len(edges) != 1 || edges[0] != "blocks" {
+			t.Errorf("edges from %q to %s = %v, want exactly one blocks edge:\n%s", title, target, edges, out)
+		}
+		if blocked := runCreateDepsBD(t, bd, dir, "blocked", "--json"); !strings.Contains(blocked, title) {
+			t.Errorf("%q is not in bd blocked:\n%s", title, blocked)
 		}
 	})
 }
