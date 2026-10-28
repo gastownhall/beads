@@ -356,4 +356,26 @@ func TestFederationFetchDoesNotStampPeerLastSync(t *testing.T) {
 	if peerLastSyncSet(t, ctx, store) {
 		t.Fatal("Fetch stamped federation_peers.last_sync, want it still NULL")
 	}
+
+	// A completed push or pull is a transfer, and stamps last_sync.
+	if err := store.PushTo(ctx, "peer"); err != nil {
+		t.Fatalf("PushTo: %v", err)
+	}
+	if !peerLastSyncSet(t, ctx, store) {
+		t.Fatal("PushTo did not stamp federation_peers.last_sync")
+	}
+	if _, err := store.db.ExecContext(ctx,
+		"UPDATE federation_peers SET last_sync = NULL WHERE name = 'peer'"); err != nil {
+		t.Fatalf("reset last_sync: %v", err)
+	}
+	conflicts, err := store.PullFrom(ctx, "peer")
+	if err != nil {
+		t.Fatalf("PullFrom: %v", err)
+	}
+	if len(conflicts) != 0 {
+		t.Fatalf("PullFrom conflicts = %d, want 0", len(conflicts))
+	}
+	if !peerLastSyncSet(t, ctx, store) {
+		t.Fatal("PullFrom did not stamp federation_peers.last_sync")
+	}
 }
