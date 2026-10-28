@@ -348,3 +348,70 @@ func TestExportJSONLForCommit_CommitIndex(t *testing.T) {
 		assertIndexFilesUnchanged(t, before)
 	})
 }
+
+// gitRmExport stages the deletion of the export in the real index, as
+// `git rm .beads/issues.jsonl` does.
+func gitRmExport(t *testing.T, r commitIndexRepo) {
+	t.Helper()
+	r.git(t, nil, "rm", "-q", "--", ".beads/issues.jsonl")
+}
+
+func stagedDeletions(t *testing.T, r commitIndexRepo, indexFile string) string {
+	t.Helper()
+	return r.git(t, []string{"GIT_INDEX_FILE=" + indexFile}, "diff", "--cached", "--diff-filter=D", "--name-only")
+}
+
+// TestIsExportFileStagedForDeletion_LinkedWorktree pins AC-3's guard: a
+// linked-worktree hook inherits an absolute GIT_DIR, which must not stop the
+// guard from finding the export's staged deletion.
+func TestIsExportFileStagedForDeletion_LinkedWorktree(t *testing.T) {
+	r := newCommitIndexRepo(t, true)
+	gitRmExport(t, r)
+	r.enterHook(t, filepath.Join(r.gitDir, "index"))
+	if !isExportFileStagedForDeletion(r.path(".beads/issues.jsonl")) {
+		t.Error("isExportFileStagedForDeletion = false, want true for a git rm'd export")
+	}
+}
+
+// TestExportJSONLForCommit_KeepsStagedDeletion pins AC-3 end to end: in a
+// linked worktree, a git rm'd export is neither re-exported nor re-staged.
+func TestExportJSONLForCommit_KeepsStagedDeletion(t *testing.T) {
+	tests := []struct {
+		name     string
+		envelope func(*testing.T, commitIndexRepo) string
+	}{
+		{
+			name: "plain git commit",
+			envelope: func(t *testing.T, r commitIndexRepo) string {
+				return filepath.Join(r.gitDir, "index")
+			},
+		},
+		{
+			name: "git commit -- <export>",
+			envelope: func(t *testing.T, r commitIndexRepo) string {
+				return r.pathspecEnvelope(t, ".beads/issues.jsonl")
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := newCommitIndexRepo(t, true)
+			sentinel := setupExportLaneForIndexTest(t, r)
+			gitRmExport(t, r)
+			indexFile := tt.envelope(t, r)
+			if got := stagedDeletions(t, r, indexFile); !strings.Contains(got, ".beads/issues.jsonl") {
+				t.Fatalf("fixture: pending index does not stage the deletion: %q", got)
+			}
+			r.enterHook(t, indexFile)
+
+			_ = captureHookStderr(t, exportJSONLForCommit)
+
+			if _, err := os.Stat(sentinel); !os.IsNotExist(err) {
+				t.Errorf("export ran (%v) although the export is staged for deletion", err)
+			}
+			if got := stagedDeletions(t, r, indexFile); !strings.Contains(got, ".beads/issues.jsonl") {
+				t.Errorf("pending index no longer stages the deletion: %q", got)
+			}
+		})
+	}
+}
