@@ -4761,6 +4761,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   override cannot reach them; only the module floor can. Re-derive rather
   than trusting this table: `govulncheck -scan module`.
 
+### Fixed
+
+- **`bd` no longer publishes Dolt's visible `__dolt_remote_info__` marker
+  branch on a git-hosted Dolt remote**
+  ([#6484](https://github.com/gastownhall/beads/issues/6484)). Dolt
+  force-publishes that single-`DOLT_REMOTE.md` branch after every successful
+  remote write; on bd's default layout, where the git-hosted Dolt remote is
+  the user's code repository, a fetched `origin/__dolt_remote_info__` is a
+  checkout-able trap — one `git checkout` of it replaces the working tree
+  with the marker file. bd now sets Dolt's own opt-out
+  (`DOLT_REMOTE_INFO_BRANCH` set to empty) on every seam that can construct
+  a Dolt git remote: the in-process push, force-push, fetch, pull and clone
+  statements, the spawned `dolt sql-server` (direct and proxied), and every
+  `dolt push`/`pull`/`fetch`/`clone` child bd spawns. Opt back in by setting
+  `DOLT_REMOTE_INFO_BRANCH` to a branch name in bd's environment — a
+  `dolt sql-server` you start yourself reads the variable from its own
+  environment, so set it there or restart the server after upgrading; an
+  older bd or an already-running server keeps publishing until then. The
+  Git integration reference documents cleanup of a leftover branch.
+
 ## [1.3.2] - 2026-10-23
 
 First stable release of the 1.3.2 patch line. It ships the same code as

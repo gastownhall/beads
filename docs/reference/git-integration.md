@@ -195,6 +195,35 @@ automatically.
 See [Protected Branches](/reference/protected-branches) for the full
 workflow, including legacy `beads-sync` cleanup.
 
+### The remote info branch
+
+Dolt can mark a repository that doubles as a Dolt remote with a visible
+`__dolt_remote_info__` branch — a single `DOLT_REMOTE.md` marker file. bd no
+longer publishes that branch
+([#6484](https://github.com/gastownhall/beads/issues/6484)): on the default
+layout, where the git-hosted Dolt remote is your code repository, a fetched
+`origin/__dolt_remote_info__` is a checkout-able trap — checking it out
+replaces the working tree with the marker file.
+
+To publish the marker again, set `DOLT_REMOTE_INFO_BRANCH` to a branch name
+in bd's environment; set it to an empty value to disable the branch
+explicitly. A `dolt sql-server` you start yourself (one bd does not spawn)
+reads the variable from its own environment — set it there, or restart the
+server after upgrading bd: an already-running server keeps publishing until
+restarted.
+
+If a clone already has the leftover branch, clean it up with:
+
+```bash
+git switch <work-branch>
+git branch -D __dolt_remote_info__
+git fetch --prune origin
+```
+
+Delete the branch on the remote
+(`git push origin --delete __dolt_remote_info__`) only when another branch
+exists there — Dolt refuses a repository with no branch at all as a remote.
+
 ## Git Worktrees
 
 Beads works in Git worktrees without extra setup. Linked worktrees discover the

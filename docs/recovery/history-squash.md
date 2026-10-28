@@ -121,9 +121,22 @@ git remote, then force-push to rebuild a fresh store holding only live
 chunks. Code branches are untouched.
 
 ```bash
-git push origin :refs/dolt/data :refs/heads/__dolt_remote_info__
+git push origin :refs/dolt/data
 bd dolt push --force
 ```
+
+bd no longer publishes the `__dolt_remote_info__` marker branch by default
+(see [Git integration](/reference/git-integration)), so the reset normally
+deletes `refs/dolt/data` alone. A remote written to by an older bd may still
+carry the marker branch; delete it too only when
+`git ls-remote origin refs/heads/__dolt_remote_info__` lists it:
+
+```bash
+git push origin :refs/heads/__dolt_remote_info__
+```
+
+`bd dolt remote reset-data` performs this in-place reset for you and lists
+the refs it is about to delete before deleting them.
 
 **Step 5:** Verify, then re-clone everywhere else. On this machine:
 
