@@ -414,6 +414,11 @@ func TestAPlainSweepAgainstAServerWithoutRetainedTypesReadsTheSetting(t *testing
 		if !errors.As(err, &unsup) || unsup.Capability != wire.CapSweepRetainedTypes {
 			t.Fatalf("Sweep error = %v, want an unsupported-capability refusal naming %s", err, wire.CapSweepRetainedTypes)
 		}
+		for _, want := range []string{"types.retained", `"op"`, "--retain-ids", "upgrade the server"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("Sweep error = %q, want it to name %s so the operator knows the remedy", err, want)
+			}
+		}
 		if !reflect.DeepEqual(w.calls, []string{wire.OpGetSetting}) {
 			t.Errorf("calls = %v, want only the setting read: the sweep must never be dialed", w.calls)
 		}

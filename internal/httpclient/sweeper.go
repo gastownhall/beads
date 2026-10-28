@@ -132,16 +132,16 @@ func (s *httpSweeper) Sweep(ctx context.Context, req issueops.SweepRequest) (res
 // refuseUnservedSweep checks each of the three S4 additions against the
 // handshake snapshot, independently — a caller may ask for any subset of
 // them, and an older server may serve none, some, or (not yet, but
-// structurally possible) only some of the three. A request using none of
-// them never consults the snapshot at all, the same short-circuit
-// refuseUnservedScope uses for Count.
+// structurally possible) only some of the three. Every sweep takes the
+// snapshot, including one that uses none of them: a plain sweep is checked
+// against issues.sweep.retainedTypes below.
 //
 // RetainIDs is the fourth, and the one whose refusal matters most: a server
 // that predates the token would 400 the member, but a client that dropped it
 // to get past that would run a sweep leaving every swept id reusable — the
 // exact re-execution the caller asked retention to rule out.
 //
-// A PLAIN sweep consults the snapshot too, for issues.sweep.retainedTypes: see
+// A PLAIN sweep against a server without issues.sweep.retainedTypes goes on to
 // refuseAnUnguardedPlainSweep.
 func (s *httpSweeper) refuseUnservedSweep(ctx context.Context, tier apigen.SweepRequestTier, req issueops.SweepRequest) error {
 	snap, err := s.store.snapshot(ctx)
@@ -195,7 +195,8 @@ func (s *httpSweeper) refuseAnUnguardedPlainSweep(ctx context.Context) error {
 	// workapi.ParseTypeList, which this package may not import): the names
 	// the server's sweep would read.
 	if len(storageops.ParseTypesConfigValue(value)) > 0 {
-		return s.store.unsupportedCapability("Sweeper.Sweep", wire.CapSweepRetainedTypes)
+		return fmt.Errorf("%s names %q, which this server's sweeps would delete without retiring their ids; re-run with --retain-ids or upgrade the server: %w",
+			issueops.SettingKeyTypesRetained, value, s.store.unsupportedCapability("Sweeper.Sweep", wire.CapSweepRetainedTypes))
 	}
 	return nil
 }
