@@ -177,6 +177,7 @@
 100 43 TestEmbeddedIfRevisionMultiIDRejected
 100 43 TestEmbeddedInitExplicitBeadsDirIsAuthoritative
 
+100 44 TestEmbeddedDoltPushDoesNotPublishRemoteInfoBranch
 100 44 TestEmbeddedIfRevisionComposesWithIfAssigneeIfStatus
 100 44 TestEmbeddedStaleConcurrent
 
