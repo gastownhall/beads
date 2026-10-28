@@ -1521,3 +1521,23 @@ func TestGetRepoContext_NonGitBeadsDirFromGitCWD(t *testing.T) {
 		assertRoots(t, storage, worktree)
 	})
 }
+
+// TestRole_NonGitBeadsDirFromGitCWD_ImpliesContributor pins the role half of
+// GH#5700: a beads project in no repository, named from git repository A, is
+// external, so Role() is the implicit Contributor rather than A's beads.role.
+func TestRole_NonGitBeadsDirFromGitCWD_ImpliesContributor(t *testing.T) {
+	callerRepo, _ := nonGitTargetFromGitCWDForTest(t)
+	runGitInDir(t, callerRepo, "config", "beads.role", "maintainer")
+
+	rc, err := GetRepoContext()
+	if err != nil {
+		t.Fatalf("GetRepoContext failed: %v", err)
+	}
+	if !rc.IsRedirected {
+		t.Error("IsRedirected = false, want true: the named .beads is in no repository while the CWD is in one")
+	}
+	role, ok := rc.Role()
+	if !ok || role != Contributor {
+		t.Errorf("Role() = (%q, %v), want (%q, true), not the caller repo's beads.role", role, ok, Contributor)
+	}
+}
