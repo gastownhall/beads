@@ -1055,6 +1055,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Server-mode project-identity verification now runs for a `Config` that sets
+  only `Path` — the shape `beads.Open` builds (#5559). `dolt.New` resolves the
+  workspace from `filepath.Dir(Path)` when `BeadsDir` is empty, but the
+  verifier calls passed the raw, empty `BeadsDir` and the verifiers soft-skip
+  on an empty dir, so opening an existing database that belongs to a different
+  project connected silently instead of with the "PROJECT IDENTITY MISMATCH"
+  refusal. Opens that set `BeadsDir` are unchanged, and the soft-skips (no
+  metadata.json, an empty project ID on either side, a brand-new database,
+  the gateway) still skip.
 - `bd list --watch` and `bd show --watch` now wait a full poll interval after
   each refresh, and `bd list --watch --parent` reads its tree in one
   transaction, so other bd commands on an embedded workspace no longer stall

@@ -950,3 +950,68 @@ func TestCrossProject_IdentityCheck_Gateway_SkipsVerification(t *testing.T) {
 	}
 	gatewayStore.Close()
 }
+
+// pathOnlyConfig is the beads.Open shape (beads.go Open): Path under .beads
+// and no BeadsDir, so New must derive the workspace a Path-only open
+// represents from filepath.Dir(cfg.Path).
+func (f *identityTestFixture) pathOnlyConfig() *Config {
+	return &Config{
+		Path:            filepath.Join(f.beadsDir, "dolt"),
+		CommitterName:   "test",
+		CommitterEmail:  "test@test.com",
+		Database:        f.dbName,
+		CreateIfMissing: true,
+	}
+}
+
+// TestCrossProject_IdentityCheck_PathOnlyConfig_ForeignRejected covers a
+// Path-only Config (no BeadsDir) — the shape beads.Open builds. New resolves
+// beadsDir from filepath.Dir(cfg.Path), so the identity check must verify
+// against that resolved directory and reject a foreign project's existing
+// database instead of silently skipping (GH#5559). Both CreateIfMissing
+// shapes reconnect to the already-existing database, so both must refuse.
+func TestCrossProject_IdentityCheck_PathOnlyConfig_ForeignRejected(t *testing.T) {
+	skipIfNoDolt(t)
+	acquireTestSlot()
+	t.Cleanup(releaseTestSlot)
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	f := newIdentityTestFixture(t, "pathonly")
+	ownerID := "77777777-7777-7777-7777-777777777777"
+
+	// Seed an existing database with its owner's _project_id. The owner open
+	// creates a brand-new database, so the identity gate skips it.
+	ownerStore, err := openStoreWithOwnBudget(t, f.config())
+	if err != nil {
+		t.Fatalf("create owner store: %v", err)
+	}
+	if err := ownerStore.SetMetadata(ctx, "_project_id", ownerID); err != nil {
+		ownerStore.Close()
+		t.Fatalf("seed _project_id: %v", err)
+	}
+	ownerStore.Close()
+
+	// A foreign project's metadata.json in f.beadsDir — the workspace a
+	// Path-only open resolves to via filepath.Dir(Path).
+	f.saveLocalProjectID(t, "88888888-8888-8888-8888-888888888888")
+
+	for _, createIfMissing := range []bool{true, false} {
+		cfg := f.pathOnlyConfig()
+		cfg.CreateIfMissing = createIfMissing
+		foreignStore, err := openStoreWithOwnBudget(t, cfg)
+		if err == nil {
+			foreignStore.Close()
+			t.Errorf("CreateIfMissing=%v: Path-only open of a foreign database succeeded; want PROJECT IDENTITY MISMATCH", createIfMissing)
+			continue
+		}
+		if !strings.Contains(err.Error(), "PROJECT IDENTITY MISMATCH") {
+			t.Errorf("CreateIfMissing=%v: expected PROJECT IDENTITY MISMATCH error, got: %v", createIfMissing, err)
+		}
+		// OpenedByInit stays false here: only Config.OpenedByInit selects the
+		// bd init wording (GH#5558).
+		if strings.Contains(err.Error(), "refusing to initialize") {
+			t.Errorf("CreateIfMissing=%v: a non-init Path-only open got the bd init wording: %v", createIfMissing, err)
+		}
+	}
+}
