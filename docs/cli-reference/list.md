@@ -41,7 +41,7 @@ bd list [flags]
       --id string                    Filter by specific issue IDs (comma-separated, e.g., bd-1,bd-5,bd-10)
       --include-ephemeral            Include ephemeral wisp-plane rows in output (normally hidden)
       --include-gates                Include gate issues in output (normally hidden)
-      --include-infra                Include infrastructure beads (agent/role/message) in output
+      --include-infra                Include infrastructure beads (agent/role/message) and the ephemeral wisp-plane rows in output (--include-ephemeral admits the plane alone)
       --include-templates            Include template molecules in output
   -l, --label strings                Filter by labels (AND: must have ALL). Can combine with --label-any
       --label-any strings            Filter by labels (OR: must have AT LEAST ONE). Can combine with --label
