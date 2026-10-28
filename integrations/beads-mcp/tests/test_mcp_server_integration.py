@@ -208,6 +208,28 @@ async def test_update_issue_tool(mcp_client):
 
 
 @pytest.mark.asyncio
+async def test_update_open_on_open_issue_applies_fields(mcp_client):
+    """update(status="open") on an open issue applies the other fields (GH#6872)."""
+    import json
+
+    create_result = await mcp_client.call_tool(
+        "create", {"title": "Open issue", "priority": 2, "issue_type": "task", "brief": False}
+    )
+    issue_id = json.loads(create_result.content[0].text)["id"]
+
+    update_result = await mcp_client.call_tool(
+        "update",
+        {"issue_id": issue_id, "status": "open", "description": "desc via MCP", "priority": 0, "brief": False},
+    )
+
+    updated = json.loads(update_result.content[0].text)
+    assert updated["id"] == issue_id
+    assert updated["status"] == "open"
+    assert updated["description"] == "desc via MCP"
+    assert updated["priority"] == 0
+
+
+@pytest.mark.asyncio
 async def test_claim_issue_tool(mcp_client):
     """Test claim_issue tool."""
     import json

@@ -521,13 +521,15 @@ async def beads_update_issue(
         reason = notes if notes else "Completed"
         return await beads_close_issue(issue_id=issue_id, reason=reason)
 
+    client = await _get_client()
     if status == "open":
-        # Route to reopen tool to respect approval workflows
-        reason = notes if notes else "Reopened"
-        return await beads_reopen_issue(issue_ids=[issue_id], reason=reason)
+        # Reopen through bd reopen to respect approval workflows; bd decides what is closed.
+        reopened = await client.reopen(ReopenIssueParams(issue_ids=[issue_id], reason=notes or "Reopened"))
+        if reopened:
+            return reopened
+        # bd reopen changed nothing: not closed, so this is a plain status change
 
     # Normal attribute updates proceed as usual
-    client = await _get_client()
     params = UpdateIssueParams(
         issue_id=issue_id,
         status=status,
