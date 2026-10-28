@@ -49,8 +49,9 @@ DESTROY-TOKEN (non-interactive only)
 
   When running with no TTY (CI, agents, piped input), a destructive
   re-init requires an explicit --destroy-token value. That covers both
-  --discard-remote and --reinit-local over existing issues. The token
-  format is:
+  --discard-remote and --reinit-local over existing issues, or over a
+  workspace whose issues could not be counted: bd never treats an
+  uncountable database as empty. The token format is:
 
       DESTROY-&lt;issue-prefix&gt;
 
@@ -70,7 +71,8 @@ EXIT CODES
   11    refused: existing local data and you declined the destroy confirm
         (interactive mode only)
   12    refused: destructive re-init (--discard-remote, or --reinit-local
-        over existing issues) without a valid --destroy-token
+        over existing issues or over a workspace whose issues could not
+        be counted) without a valid --destroy-token
         (non-interactive mode); also returned when the interactive
         --discard-remote typed-token confirmation is declined
 

@@ -37,7 +37,8 @@ const (
 	// ExitDestroyTokenMissing signals a destructive re-init was refused for
 	// want of a valid `--destroy-token`. Four sources:
 	//   1. non-interactive `--discard-remote` with no token;
-	//   2. non-interactive `--reinit-local` over existing local issues;
+	//   2. non-interactive `--reinit-local` over existing local issues, or
+	//      over a workspace whose issues could not be counted;
 	//   3. `--discard-remote` with a supplied token that does not match, in
 	//      EITHER mode — a token that WAS supplied is always validated (#6480);
 	//   4. the interactive `--discard-remote` typed-token confirmation
