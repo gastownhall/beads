@@ -56,6 +56,34 @@ func TestMergeSettleDrainsCallResultSets(t *testing.T) {
 		}
 		rec.assertDrained(t, mock)
 	})
+
+	t.Run("auto_resolve_config_and_schema_migrations", func(t *testing.T) {
+		rec, mock := newDrainMock(t)
+		expectConflicts(mock, "config", "schema_migrations")
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT our_key, their_key FROM dolt_conflicts_config")).
+			WillReturnRows(sqlmock.NewRows([]string{"our_key", "their_key"}).AddRow("kv.memory.a", "kv.memory.a"))
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT our_version, their_version, our_content_hash, their_content_hash")).
+			WillReturnRows(sqlmock.NewRows([]string{"our_version", "their_version", "our_content_hash", "their_content_hash"}).
+				AddRow(7, 7, nil, "h7"))
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT COALESCE(our_key, their_key) FROM dolt_conflicts_config")).
+			WillReturnRows(sqlmock.NewRows([]string{"key"}))
+		expectDrainedCall(mock, "CALL DOLT_CONFLICTS_RESOLVE('--theirs', 'config')")
+		expectDrainedCall(mock, "CALL DOLT_ADD('config')")
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT our_version, our_content_hash, their_content_hash")).
+			WillReturnRows(sqlmock.NewRows([]string{"our_version", "our_content_hash", "their_content_hash"}).
+				AddRow(7, nil, "h7"))
+		mock.ExpectExec(regexp.QuoteMeta("UPDATE schema_migrations SET content_hash = ? WHERE version = ?")).
+			WithArgs("h7", int64(7)).
+			WillReturnResult(sqlmock.NewResult(0, 1))
+		expectDrainedCall(mock, "CALL DOLT_CONFLICTS_RESOLVE('--ours', 'schema_migrations')")
+		expectDrainedCall(mock, "CALL DOLT_ADD('schema_migrations')")
+
+		resolved, err := TryAutoResolveMergeConflicts(context.Background(), rec)
+		if err != nil || !resolved {
+			t.Fatalf("TryAutoResolveMergeConflicts = (%v, %v), want (true, nil)", resolved, err)
+		}
+		rec.assertDrained(t, mock)
+	})
 }
 
 const testAuthor = "Tester <tester@example.com>"

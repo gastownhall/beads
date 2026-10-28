@@ -545,7 +545,7 @@ func TryAutoResolveMergeConflicts(ctx context.Context, db DBConn) (bool, error) 
 						"local edits to %s were superseded\n",
 					len(keys), strings.Join(keys, ", "))
 			}
-			if _, err := db.ExecContext(ctx, "CALL DOLT_CONFLICTS_RESOLVE('--theirs', 'config')"); err != nil {
+			if err := schema.DrainCall(ctx, db, "CALL DOLT_CONFLICTS_RESOLVE('--theirs', 'config')"); err != nil {
 				return false, fmt.Errorf("failed to resolve config conflicts: %w", err)
 			}
 		case "issues":
@@ -785,7 +785,7 @@ func resolveSchemaMigrationsVintageConflicts(ctx context.Context, db DBConn) err
 			return fmt.Errorf("backfill content_hash for migration %d: %w", f.version, err)
 		}
 	}
-	if _, err := db.ExecContext(ctx, "CALL DOLT_CONFLICTS_RESOLVE('--ours', 'schema_migrations')"); err != nil {
+	if err := schema.DrainCall(ctx, db, "CALL DOLT_CONFLICTS_RESOLVE('--ours', 'schema_migrations')"); err != nil {
 		return fmt.Errorf("failed to resolve schema_migrations conflicts: %w", err)
 	}
 	return nil
