@@ -732,6 +732,35 @@ func TestApplyLoops_NeedsOnLoopTargetItsLastStep(t *testing.T) {
 			land:      &Step{ID: "land", Title: "Land", Needs: []string{"round", "other"}},
 			wantNeeds: []string{"round.iter2.work", "other"},
 		},
+		{
+			// An until loop cooks one iteration; the runtime re-runs it.
+			name: "until",
+			loop: &Step{ID: "round", Title: "Round", Needs: []string{"brief"}, Loop: &LoopSpec{
+				Until: "step.status == 'complete'",
+				Max:   5,
+				Body: []*Step{
+					{ID: "work", Title: "Work"},
+					{ID: "check", Title: "Check", Needs: []string{"work"}},
+				},
+			}},
+			land:      &Step{ID: "land", Title: "Land", Needs: []string{"round"}},
+			wantNeeds: []string{"round.iter1.check"},
+			check: func(t *testing.T, byID map[string]*Step) {
+				work := byID["round.iter1.work"]
+				if work == nil {
+					t.Fatal("round.iter1.work not found")
+				}
+				if !slices.Equal(work.Needs, []string{"brief"}) {
+					t.Errorf("round.iter1.work.Needs = %v, want [brief] (the loop step's own needs)", work.Needs)
+				}
+				hasLoopLabel := slices.ContainsFunc(work.Labels, func(l string) bool {
+					return strings.HasPrefix(l, "loop:")
+				})
+				if !hasLoopLabel {
+					t.Errorf("round.iter1.work.Labels = %v, want the loop: label kept for runtime evaluation", work.Labels)
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {
