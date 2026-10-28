@@ -110,6 +110,12 @@ func TestConfirmReinitDestroy(t *testing.T) {
 			wantOut:  []string{"Refusing to destroy an unknown number of issues"},
 		},
 		{
+			name:     "unknown count, non-interactive, token",
+			countErr: countErr,
+			token:    "DESTROY-bd",
+			wantOut:  []string{"Existing issues: unknown", "Destroy token accepted"},
+		},
+		{
 			name:     "known count, non-interactive, no token",
 			count:    3,
 			wantCode: ExitDestroyTokenMissing,
