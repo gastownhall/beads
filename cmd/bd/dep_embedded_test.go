@@ -381,6 +381,27 @@ func TestEmbeddedDepAAddRejectionsAndBulk(t *testing.T) {
 		}
 	})
 
+	t.Run("add_resolved_and_external_no_warning", func(t *testing.T) {
+		a := bdCreate(t, bd, dir, "Resolved target A", "--type", "task")
+		c := bdCreate(t, bd, dir, "Resolved target C", "--type", "task")
+		d := bdCreate(t, bd, dir, "Resolved target D", "--type", "task")
+		for _, target := range []string{c.ID, "external:proj:cap"} {
+			_, stderr := bdRunSplit(t, bd, dir, "dep", "add", a.ID, target)
+			if strings.Contains(stderr, "was not found") {
+				t.Errorf("dep add %s %s: stderr = %q, want no unresolved-target warning", a.ID, target, stderr)
+			}
+		}
+		path := filepath.Join(t.TempDir(), "resolved-deps.jsonl")
+		body := fmt.Sprintf("{\"from\":%q,\"to\":%q}\n{\"from\":%q,\"to\":\"external:proj:cap2\"}\n", d.ID, c.ID, d.ID)
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatalf("write deps file: %v", err)
+		}
+		_, stderr := bdRunSplit(t, bd, dir, "dep", "add", "--file", path)
+		if strings.Contains(stderr, "was not found") {
+			t.Errorf("dep add --file: stderr = %q, want no unresolved-target warning", stderr)
+		}
+	})
+
 	t.Run("add_bulk_file_validation_no_partial_mutation", func(t *testing.T) {
 		v1 := bdCreate(t, bd, dir, "Bulk validation A", "--type", "task")
 		v2 := bdCreate(t, bd, dir, "Bulk validation B", "--type", "task")
