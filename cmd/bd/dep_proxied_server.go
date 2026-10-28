@@ -459,6 +459,20 @@ func runDepListProxiedServer(cmd *cobra.Command, ctx context.Context, args []str
 		return nil
 	}
 
+	// As the direct route's RunE (cmd/bd/dep.go): the single-id human down
+	// view answers "what does this issue depend on", so the anchor's own
+	// children — inbound parent-child edges — are invisible on it; note them
+	// on stderr, never stdout. The condition is on the request actually
+	// issued (--direction is not validated, a value that is not "up" lands
+	// in RelationOut, and a type filter that cannot name a parent-child edge
+	// asks a different question), and this route resolves nothing, so the
+	// anchor is the id exactly as the caller spelled it — which is also what
+	// the printed command below takes.
+	if len(args) == 1 && request.Direction == issueops.RelationOut &&
+		(typeFilter == "" || types.DependencyType(typeFilter) == types.DepParentChild) {
+		defer noteHiddenChildren(ctx, rel, args[0], "list")
+	}
+
 	if len(allIssues) == 0 {
 		if len(args) == 1 {
 			if direction == "up" {

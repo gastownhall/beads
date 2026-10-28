@@ -983,3 +983,68 @@ func TestProxiedServerDepListSingleIDWarnsOnDroppedExternalEdge(t *testing.T) {
 		t.Errorf("batch mode should show both deps, got:\n%s", batchStdout.String())
 	}
 }
+
+// TestProxiedServerDepDefaultDirectionNotesHiddenChildren is the proxied-
+// server counterpart to TestEmbeddedDepDefaultDirectionNotesHiddenChildren
+// (dep_hidden_children_embedded_test.go), and covers AC-7 of GH#5151: the
+// proxied route's runDepListProxiedServer used to leave the single-id human
+// down view as blind to inbound parent-child children as the direct route
+// was, while gastown's live-dolt-server deployment is exactly this route.
+// The tree already notes on this route (runDepTree is one body for both,
+// dep_tree.go); this test pins both views' proxied output so the two cannot
+// drift apart again.
+func TestProxiedServerDepDefaultDirectionNotesHiddenChildren(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+
+	p := newSharedProxiedProject(t, bd, "hcn")
+	root := bdProxiedCreate(t, bd, p.dir, "Hidden children root", "--type", "epic", "--ephemeral")
+	bdProxiedUpdateOne(t, bd, p.dir, root.ID, "--status", "hooked")
+	for i := 0; i < 26; i++ {
+		bdProxiedCreate(t, bd, p.dir, fmt.Sprintf("Hidden children step %02d", i), "--ephemeral", "--parent", root.ID)
+	}
+
+	depInOut := func(t *testing.T, args ...string) (string, string) {
+		t.Helper()
+		cmd := exec.Command(bd, append([]string{"dep"}, args...)...)
+		cmd.Dir = p.dir
+		cmd.Env = bdProxiedEnv(p.dir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err != nil {
+			t.Fatalf("bd dep %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
+		}
+		return stdout.String(), stderr.String()
+	}
+
+	t.Run("list", func(t *testing.T) {
+		stdout, stderr := depInOut(t, "list", root.ID)
+		if want := fmt.Sprintf("\n%s has no dependencies\n", root.ID); stdout != want {
+			t.Fatalf("stdout = %q, want %q", stdout, want)
+		}
+		if !strings.Contains(stderr, "note: "+root.ID+" has 26 child issue(s) not shown here") {
+			t.Errorf("stderr should note the 26 hidden children, got:\n%s", stderr)
+		}
+		wantCmd := "To list them, run: bd dep list " + root.ID + " --direction=up --type=parent-child"
+		if !strings.Contains(stderr, wantCmd) {
+			t.Errorf("stderr should carry %q, got:\n%s", wantCmd, stderr)
+		}
+	})
+
+	t.Run("tree", func(t *testing.T) {
+		stdout, stderr := depInOut(t, "tree", root.ID)
+		if !strings.Contains(stdout, "Dependency tree for "+root.ID) {
+			t.Fatalf("stdout should render the root alone, got:\n%s", stdout)
+		}
+		if strings.Count(stdout, "├──")+strings.Count(stdout, "└──") != 0 {
+			t.Fatalf("stdout should render no children, got:\n%s", stdout)
+		}
+		if !strings.Contains(stderr, "note: "+root.ID+" has 26 child issue(s) not shown here") {
+			t.Errorf("stderr should note the 26 hidden children, got:\n%s", stderr)
+		}
+		wantCmd := "To see them, run: bd dep tree " + root.ID + " --direction=up"
+		if !strings.Contains(stderr, wantCmd) {
+			t.Errorf("stderr should carry %q, got:\n%s", wantCmd, stderr)
+		}
+	})
+}

@@ -110,6 +110,7 @@
 
 34 11 TestProxiedServerBatchParity
 34 11 TestProxiedServerCompactHistory
+34 11 TestProxiedServerDepDefaultDirectionNotesHiddenChildren
 34 11 TestProxiedServerPour
 34 11 TestProxiedServerQuery
 34 11 TestProxiedServerReady
