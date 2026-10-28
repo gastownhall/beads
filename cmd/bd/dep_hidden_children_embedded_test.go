@@ -134,6 +134,48 @@ func TestEmbeddedDepDefaultDirectionNotesHiddenChildren(t *testing.T) {
 		}
 	})
 
+	t.Run("attached_shape", func(t *testing.T) {
+		work := bdCreate(t, bd, dir, "Work bead", "--type", "task")
+		mol := bdCreate(t, bd, dir, "Attached molecule", "--type", "epic", "--ephemeral", "--parent", work.ID)
+		bdUpdate(t, bd, dir, work.ID, "--status", "hooked")
+		var molSteps []string
+		for i := 1; i <= 3; i++ {
+			s := bdCreate(t, bd, dir, fmt.Sprintf("Attached step %d", i), "--type", "task", "--ephemeral", "--parent", mol.ID)
+			molSteps = append(molSteps, s.ID)
+		}
+
+		for _, view := range []string{"list", "tree"} {
+			_, stderr := bdRunSplit(t, bd, dir, "dep", view, work.ID)
+			if !strings.Contains(stderr, hiddenChildrenNote(work.ID, 1)) {
+				t.Errorf("dep %s W: stderr missing the 1-child note:\n%s", view, stderr)
+			}
+
+			stdout, stderr := bdRunSplit(t, bd, dir, "dep", view, mol.ID)
+			if !strings.Contains(stdout, work.ID) {
+				t.Errorf("dep %s M: stdout should still show the parent %s:\n%s", view, work.ID, stdout)
+			}
+			for _, id := range molSteps {
+				if strings.Contains(stdout, id) {
+					t.Errorf("dep %s M: stdout unexpectedly shows step %s:\n%s", view, id, stdout)
+				}
+			}
+			if !strings.Contains(stderr, hiddenChildrenNote(mol.ID, 3)) {
+				t.Errorf("dep %s M: stderr missing the 3-child note:\n%s", view, stderr)
+			}
+		}
+		listOut, _ := bdRunSplit(t, bd, dir, "dep", "list", mol.ID)
+		if !strings.Contains(listOut, work.ID) || !strings.Contains(listOut, "via parent-child") {
+			t.Errorf("dep list M should list W via parent-child:\n%s", listOut)
+		}
+
+		upOut, _ := bdRunSplit(t, bd, dir, "dep", "tree", work.ID, "--direction=up")
+		for _, id := range append([]string{mol.ID}, molSteps...) {
+			if !strings.Contains(upOut, id) {
+				t.Errorf("dep tree W --direction=up does not reach %s:\n%s", id, upOut)
+			}
+		}
+	})
+
 	t.Run("partial_id", func(t *testing.T) {
 		partial := strings.TrimPrefix(root.ID, "hc-")
 		for _, view := range []string{"list", "tree"} {
