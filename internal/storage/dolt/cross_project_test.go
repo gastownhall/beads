@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -1016,5 +1017,45 @@ func TestCrossProject_IdentityCheck_PathOnly_ForeignRejected(t *testing.T) {
 				t.Errorf("a non-init open got the bd init wording: %v", err)
 			}
 		})
+	}
+}
+
+// TestCrossProject_IdentityCheck_PathOnly_GlobalForeignRejected is the
+// beads_global counterpart: a Path-only open of the global database must
+// check global_project_id in filepath.Dir(Path)/metadata.json (GH#5559).
+// The database is not dropped: the suite avoids DROP DATABASE, and the owner
+// open re-seeds _project_id, so a re-run against an existing beads_global
+// stays deterministic.
+func TestCrossProject_IdentityCheck_PathOnly_GlobalForeignRejected(t *testing.T) {
+	skipIfNoDolt(t)
+	acquireTestSlot()
+	t.Cleanup(releaseTestSlot)
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	f := newIdentityTestFixture(t, "pathonly-global")
+	f.dbName = doltserver.GlobalDatabaseName
+	f.seedProjectID(t, ctx, "global-owner")
+	if err := (&configfile.Config{GlobalProjectID: "global-intruder"}).Save(f.beadsDir); err != nil {
+		t.Fatalf("save metadata.json: %v", err)
+	}
+
+	store, err := New(ctx, f.pathOnlyConfig())
+	if err == nil {
+		store.Close()
+		t.Fatalf("Path-only open of a foreign beads_global succeeded; want GLOBAL PROJECT IDENTITY MISMATCH")
+	}
+	if store != nil {
+		store.Close()
+		t.Errorf("New returned a non-nil store alongside error: %v", err)
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "GLOBAL PROJECT IDENTITY MISMATCH") {
+		t.Fatalf("expected GLOBAL PROJECT IDENTITY MISMATCH error, got: %v", err)
+	}
+	for _, id := range []string{"global-owner", "global-intruder"} {
+		if !strings.Contains(msg, id) {
+			t.Errorf("mismatch error does not name %q: %v", id, err)
+		}
 	}
 }
