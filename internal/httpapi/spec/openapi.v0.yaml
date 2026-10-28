@@ -847,12 +847,14 @@ paths:
         depth-first pre-order, so a subtree is contiguous.
 
 
-        EVERY NODE APPEARS AT MOST ONCE PER WALK, at the depth and parent of the
-        first path that reached it. That single rule is both the cycle policy
-        and the diamond policy: a cycle TERMINATES rather than failing the call
-        or being reported (`GET /v0/beads/dependencies/cycles` is where a cycle
-        is an answer), and a shared subtree is shown under one parent only, with
-        no option to show it twice.
+        EVERY NODE IS EXPANDED AT MOST ONCE PER WALK, at the depth and parent
+        of the first path that reached it. That single rule is both the cycle
+        policy and the diamond policy: a cycle TERMINATES rather than failing
+        the call or being reported (`GET /v0/beads/dependencies/cycles` is
+        where a cycle is an answer), and a shared subtree is EXPANDED under
+        one parent only, every later parent being answered with one optional
+        `deduped` stub row of the same id (drop the rows carrying `deduped`
+        to read each issue once).
 
 
         EDGES ARE WIDER THAN THEY ARE ON THE CYCLE REPORT. This walk follows
@@ -8642,9 +8644,10 @@ components:
           type: string
           description: >-
             The node this one was reached FROM, empty on the root. A node is
-            reached ONCE per walk, by the first path that got there, so a shared
-            child of two parents names only the first of them here and the
-            second has no visible edge to it.
+            EXPANDED once per walk, by the first path that got there; a
+            shared child of two parents names the first of them here, and the
+            second parent's row for it is a `deduped` stub carrying that
+            parent's id here.
         edge_from_parent:
           type: string
           description: >-
@@ -8658,6 +8661,13 @@ components:
             is ABSENT from the answer rather than present and flagged, so a
             client cannot tell a tree that ended from one that was cut. It is
             documented rather than removed because it is on the wire today.
+        deduped:
+          type: boolean
+          description: >-
+            True only on a stub row that records the edge from `parent_id`
+            into an issue the walk already expanded earlier in the list; such
+            a row has no descendants. Absent otherwise, never false. Drop the
+            rows carrying it to read each issue once.
 
     Dependency:
       type: object

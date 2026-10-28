@@ -1055,6 +1055,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd dep tree` keeps every edge of a diamond (GH#5282).** A revisited
+  node used to be dropped with no marker, so `bd dep tree` and `bd dep list`
+  could disagree about the direct blockers and the root could show
+  `[BLOCKED]` with no visible open blocker. The walk still expands each issue
+  once, under the first path that reached it, and now answers each later
+  path with one leaf stub row: the text renderer prints it as
+  `F (shown above) [blocks]`, mermaid keeps the edge, and `--json` /
+  `GET /v0/beads/dependencies/tree` carry `"deduped": true` on the stub row
+  only — drop the rows carrying it to read each issue once. Stub rows count
+  toward `--max-rows` / `BEADS_MAX_ROWS`. `--show-all-paths` remains a
+  deprecated no-op.
+
 - `bd list --watch` and `bd show --watch` now wait a full poll interval after
   each refresh, and `bd list --watch --parent` reads its tree in one
   transaction, so other bd commands on an embedded workspace no longer stall

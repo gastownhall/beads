@@ -5154,6 +5154,12 @@
     },
     {
       "schema": "TreeNode",
+      "member": "deduped",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "TreeNode",
       "member": "defer_until",
       "type": "string",
       "format": "date-time",

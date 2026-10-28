@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -1145,6 +1146,52 @@ func TestTreeNodeJSONIncludesEdgeFromParent(t *testing.T) {
 
 	if !strings.Contains(string(got), `"edge_from_parent":"parent-child"`) {
 		t.Fatalf("TreeNode JSON missing edge_from_parent: %s", got)
+	}
+}
+
+// TestTreeNodeJSONMarksDedupedStubsOnly pins the --json contract of the
+// walk's stub rows (GH#5282): setting Deduped adds "deduped": true and
+// nothing else — no pre-existing key of any row changes, and a row without
+// the flag carries no "deduped" key at all.
+func TestTreeNodeJSONMarksDedupedStubsOnly(t *testing.T) {
+	node := types.TreeNode{
+		Issue:          types.Issue{ID: "BD-F", Title: "F", Status: types.StatusOpen, Priority: 2},
+		Depth:          1,
+		ParentID:       "BD-D",
+		EdgeFromParent: types.DepBlocks,
+	}
+
+	plain, err := json.Marshal(node)
+	if err != nil {
+		t.Fatalf("json.Marshal(expanded TreeNode): %v", err)
+	}
+	if strings.Contains(string(plain), "deduped") {
+		t.Fatalf("an expanded row must not carry a deduped key: %s", plain)
+	}
+
+	node.Deduped = true
+	stub, err := json.Marshal(node)
+	if err != nil {
+		t.Fatalf("json.Marshal(stub TreeNode): %v", err)
+	}
+	if !strings.Contains(string(stub), `"deduped":true`) {
+		t.Fatalf("stub row missing \"deduped\": true: %s", stub)
+	}
+
+	var plainKeys, stubKeys map[string]any
+	if err := json.Unmarshal(plain, &plainKeys); err != nil {
+		t.Fatalf("unmarshal expanded row: %v", err)
+	}
+	if err := json.Unmarshal(stub, &stubKeys); err != nil {
+		t.Fatalf("unmarshal stub row: %v", err)
+	}
+	deduped, ok := stubKeys["deduped"]
+	if !ok || deduped != true {
+		t.Fatalf("stub row's deduped = %v (present: %v), want true", deduped, ok)
+	}
+	delete(stubKeys, "deduped")
+	if !reflect.DeepEqual(plainKeys, stubKeys) {
+		t.Fatalf("setting Deduped changed other keys:\nexpanded: %s\nstub:     %s", plain, stub)
 	}
 }
 
