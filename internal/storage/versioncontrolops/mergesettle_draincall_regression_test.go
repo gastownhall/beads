@@ -42,7 +42,23 @@ func TestMergeSettleDrainsCallResultSets(t *testing.T) {
 		}
 		rec.assertDrained(t, mock)
 	})
+
+	t.Run("merge_with_strategy_clean", func(t *testing.T) {
+		rec, mock := newDrainMock(t)
+		expectWorkingSetClean(mock)
+		expectConflictFlags(mock)
+		expectDrainedCall(mock, "CALL DOLT_MERGE('--author', ?, ?)", testAuthor, "feature")
+		expectConflicts(mock)
+
+		conflicts, err := MergeWithStrategy(context.Background(), rec, "feature", testAuthor, "theirs")
+		if err != nil || conflicts != nil {
+			t.Fatalf("MergeWithStrategy = (%v, %v), want (nil, nil)", conflicts, err)
+		}
+		rec.assertDrained(t, mock)
+	})
 }
+
+const testAuthor = "Tester <tester@example.com>"
 
 // autoResolveCommitCall is CommitResolvedConflicts' exact statement.
 const autoResolveCommitCall = "CALL DOLT_COMMIT('-m', 'auto-resolve merge conflicts: metadata, dependencies, schema_migrations, config, issues (field-level three-way merge), labels/comments/events (union)')"
