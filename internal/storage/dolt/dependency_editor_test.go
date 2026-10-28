@@ -201,6 +201,65 @@ func TestDoltStoreDependencyEditorRemoveCommitsUnblock(t *testing.T) {
 	}
 }
 
+// TestDoltStoreDependencyEditorAddWithoutBlockedChangeStagesNoIssues is the
+// GH#2455 converse of the flip-staging rule: an add that changed no is_blocked
+// row must not stage `issues`, because DOLT_ADD stages a whole TABLE and the
+// commit would carry away unrelated pending issues rows — here an uncommitted
+// title edit on a bystander issue. A blocks edge onto a closed target flips
+// nothing, so the add's commit takes the edge and the event and leaves the
+// edit exactly where it was.
+func TestDoltStoreDependencyEditorAddWithoutBlockedChangeStagesNoIssues(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+	seedIssues(ctx, t, store, "test-dep-nosweep-b", "test-dep-nosweep-c", "test-dep-nosweep-d")
+	if _, err := store.db.ExecContext(ctx, "UPDATE issues SET status = 'closed' WHERE id = 'test-dep-nosweep-d'"); err != nil {
+		t.Fatalf("close target: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'seed closed target')"); err != nil && !isDoltNothingToCommit(err) {
+		t.Fatalf("commit seed: %v", err)
+	}
+	requireCleanTables(ctx, t, store, "issues", "dependencies")
+
+	// An operator's uncommitted edit on the bystander.
+	if _, err := store.db.ExecContext(ctx, "UPDATE issues SET title = 'uncommitted edit' WHERE id = 'test-dep-nosweep-c'"); err != nil {
+		t.Fatalf("dirty issues: %v", err)
+	}
+
+	editor, err := store.DependencyEditor()
+	if err != nil {
+		t.Fatalf("DependencyEditor(): %v", err)
+	}
+	if _, err := editor.AddDependencies(ctx, publicops.AddDependenciesRequest{
+		Actor: "writer",
+		Edges: []publicops.DependencyEdge{{IssueID: "test-dep-nosweep-b", DependsOnID: "test-dep-nosweep-d", Type: publicops.DepBlocks}},
+	}); err != nil {
+		t.Fatalf("AddDependencies: %v", err)
+	}
+
+	if !doltHasCommitMessage(ctx, t, store, "bd: dep add test-dep-nosweep-b test-dep-nosweep-d") {
+		t.Fatal("the edge was not committed")
+	}
+	requireCleanTables(ctx, t, store, "dependencies")
+	var headTitle string
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT title FROM issues AS OF 'HEAD' WHERE id = 'test-dep-nosweep-c'").Scan(&headTitle); err != nil {
+		t.Fatalf("read HEAD title of the bystander: %v", err)
+	}
+	if headTitle != "test-dep-nosweep-c" {
+		t.Fatalf("the add's commit swept the bystander's uncommitted edit (HEAD title = %q)", headTitle)
+	}
+	var dirty int
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM dolt_status WHERE table_name = 'issues'").Scan(&dirty); err != nil {
+		t.Fatalf("query dolt_status: %v", err)
+	}
+	if dirty == 0 {
+		t.Fatal("issues is clean: the add committed a table it changed no row of")
+	}
+}
+
 // TestDoltStoreDependencyEditorNoOpRemoveLeavesPendingRowsUncommitted is the
 // GH#2455 pin for this role: an operation that wrote nothing must stage
 // nothing, because DOLT_ADD stages a whole TABLE and a commit made for a no-op
