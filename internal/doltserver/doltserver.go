@@ -852,6 +852,14 @@ const (
 	// PortSourceMetadataJSON is the deprecated metadata.json dolt_server_port
 	// fallback. Still an explicit user/tooling assertion, not bd bookkeeping.
 	PortSourceMetadataJSON PortSource = "metadata_json"
+	// PortSourceCentralConfig is the central server config's dolt_server_port
+	// (server.json, or the file BEADS_CENTRAL_CONFIG names): the port every
+	// workspace on the machine shares, the last step of the chain (GH#3895).
+	// Authoritative like dolt.port — it is a user assertion, so auto-start must
+	// not silently retarget it (GH#4052) and the legacy BEADS_DOLT_PORT does
+	// not replace it. Shared-server mode skips it: shared mode has its own
+	// default port (3308), which a hosted central port must not hijack.
+	PortSourceCentralConfig PortSource = "central_config"
 	// PortSourceExternalHostDefault is the documented default port (3307)
 	// assumed for a host-inferred external server when no port source
 	// resolved (GH#3545): the user asserted a remote host, so bd fills in
@@ -965,6 +973,25 @@ var portSources = []portSource{
 			fmt.Fprintf(os.Stderr, "  The port file (.beads/dolt-server.port) is now the primary source.\n")
 			fmt.Fprintf(os.Stderr, "  Remove dolt_server_port from .beads/metadata.json to silence this warning.\n")
 			return metaCfg.DoltServerPort, true
+		},
+	},
+	{
+		// The central server config (~/.config/beads/server.json, or the file
+		// BEADS_CENTRAL_CONFIG names), the last step: the port every workspace
+		// on the machine shares (GH#3895). Shared-server mode skips it — the
+		// chain's shared default (3308) below is the one port all its
+		// workspaces share, and a hosted central port must not hijack it.
+		label:  "Central server config (server.json dolt_server_port, or the file BEADS_CENTRAL_CONFIG names)",
+		source: PortSourceCentralConfig,
+		resolve: func(beadsDir string) (int, bool) {
+			if IsSharedServerMode() {
+				return 0, false
+			}
+			central := configfile.CentralConfig()
+			if central == nil || central.DoltServerPort <= 0 {
+				return 0, false
+			}
+			return central.DoltServerPort, true
 		},
 	},
 }

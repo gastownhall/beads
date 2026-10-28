@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 )
 
 // CentralConfigFileName is the filename for the central/global server config.
@@ -28,6 +29,46 @@ func DefaultCentralConfigPath() string {
 		return ""
 	}
 	return filepath.Join(home, ".config", "beads", CentralConfigFileName)
+}
+
+// centralConfigWarned records the central-config paths whose load failure has
+// already been warned about, so a broken file prints its warning once per
+// process per path no matter how many connection resolvers read it.
+var centralConfigWarned sync.Map
+
+// CentralConfig returns the machine's central server config: the file
+// BEADS_CENTRAL_CONFIG names, else ~/.config/beads/server.json
+// (DefaultCentralConfigPath). It is the lowest-precedence source of the four
+// server connection fields — host, port, user and TLS — for every connection
+// resolver (configfile's getters, doltserver's port chain), on both the CLI
+// and the library open path. It never selects a storage mode, socket,
+// database or data dir: those stay per-workspace decisions, so the
+// mode-selection resolvers (IsDoltServerMode, HostImpliesServerMode,
+// PortImpliesServerMode, doltserver.ResolveServerMode's mode checks) keep
+// ignoring it.
+//
+// A missing file returns nil. An unreadable or malformed file prints
+//     Warning: failed to load central config <path>: <err>
+// once per process per path (the first reader wins) and returns nil, so gate
+// planning and port resolution share the open paths' warn-and-proceed
+// posture without repeating the line. There is deliberately no content cache:
+// a t.Setenv or a file edit takes effect on the next call.
+func CentralConfig() *Config {
+	path := os.Getenv("BEADS_CENTRAL_CONFIG")
+	if path == "" {
+		path = DefaultCentralConfigPath()
+	}
+	if path == "" {
+		return nil
+	}
+	central, err := LoadCentralConfig(path)
+	if err != nil {
+		if _, warned := centralConfigWarned.LoadOrStore(path, true); !warned {
+			fmt.Fprintf(os.Stderr, "Warning: failed to load central config %s: %v\n", path, err)
+		}
+		return nil
+	}
+	return central
 }
 
 // LoadCentralConfig reads the central server config from the given path.

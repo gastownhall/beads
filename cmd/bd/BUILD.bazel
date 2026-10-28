@@ -596,6 +596,7 @@ go_test(
         "capability_registry_test.go",
         "capability_registry_transform_test.go",
         "cascade_parity_proxied_integration_test.go",
+        "central_config_runtime_repro_test.go",
         "children_embedded_test.go",
         "children_test.go",
         "claim_pools_embedded_test.go",

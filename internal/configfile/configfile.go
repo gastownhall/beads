@@ -472,6 +472,12 @@ func (c *Config) IsDoltServerMode() bool {
 // the ownership one (BdRunsServerAt): the IPv6 loopback in any spelling is
 // this machine and infers nothing, while another loopback address such as
 // 127.0.0.2 infers server mode, as a host on another machine does.
+//
+// The central server config (server.json) never participates: it supplies
+// connection fields (host, port, user, TLS) below every tier this predicate
+// reads, but never selects the storage mode, so it cannot promote a
+// mode-less workspace (TestResolvePhysicalRootsIgnoresCentralConfig pins
+// that on the gate-planning side).
 func (c *Config) HostImpliesServerMode() bool {
 	if strings.EqualFold(c.DoltMode, DoltModeProxiedServer) {
 		return false
@@ -573,7 +579,8 @@ func (c *Config) GetDoltMode() string {
 
 // GetDoltServerHost returns the Dolt server host.
 // Priority: BEADS_DOLT_SERVER_HOST env var > metadata.json dolt_server_host
-// > config.yaml / global config dolt.host > DefaultDoltServerHost.
+// > config.yaml / global config dolt.host > the central server config
+// (~/.config/beads/server.json, GH#3895) > DefaultDoltServerHost.
 // The config.yaml layer mirrors the dolt.port fix (GH#2073) so a shared
 // team / user-level Dolt server can be configured once without per-clone
 // metadata.json edits.
@@ -586,6 +593,9 @@ func (c *Config) GetDoltServerHost() string {
 	}
 	if h := config.GetYamlConfig("dolt.host"); h != "" {
 		return h
+	}
+	if central := CentralConfig(); central != nil && central.DoltServerHost != "" {
+		return central.DoltServerHost
 	}
 	return DefaultDoltServerHost
 }
@@ -625,13 +635,17 @@ func (c *Config) GetDoltServerSocket() string {
 }
 
 // GetDoltServerUser returns the Dolt server MySQL user.
-// Checks BEADS_DOLT_SERVER_USER env var first, then config, then default.
+// Checks BEADS_DOLT_SERVER_USER env var first, then config, then the central
+// server config (server.json), then the default.
 func (c *Config) GetDoltServerUser() string {
 	if u := os.Getenv("BEADS_DOLT_SERVER_USER"); u != "" {
 		return u
 	}
 	if c.DoltServerUser != "" {
 		return c.DoltServerUser
+	}
+	if central := CentralConfig(); central != nil && central.DoltServerUser != "" {
+		return central.DoltServerUser
 	}
 	return DefaultDoltServerUser
 }
