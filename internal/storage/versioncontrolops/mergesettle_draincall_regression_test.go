@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"errors"
 	"regexp"
 	"strings"
 	"testing"
@@ -119,6 +120,39 @@ func TestMergeSettleDrainsCallResultSets(t *testing.T) {
 		}
 		rec.assertDrained(t, mock)
 	})
+
+	t.Run("abort_merge", func(t *testing.T) {
+		abortFailed := errors.New("fatal: There is no merge to abort")
+		for _, tc := range []struct {
+			name          string
+			preMergeClean bool
+			abortErr      error
+			wantReset     bool
+		}{
+			{name: "abort succeeds", preMergeClean: true},
+			{name: "abort fails on a clean working set", preMergeClean: true, abortErr: abortFailed, wantReset: true},
+			{name: "abort fails on a dirty working set", preMergeClean: false, abortErr: abortFailed},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				rec, mock := newDrainMock(t)
+				if tc.abortErr != nil {
+					mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_MERGE('--abort')")).WillReturnError(tc.abortErr)
+				} else {
+					expectDrainedCall(mock, "CALL DOLT_MERGE('--abort')")
+				}
+				if tc.wantReset {
+					expectDrainedCall(mock, "CALL DOLT_RESET('--hard')")
+				}
+
+				abortMerge(context.Background(), rec, tc.preMergeClean)
+
+				rec.assertDrained(t, mock)
+				if !tc.wantReset && rec.sentStatement("DOLT_RESET") {
+					t.Errorf("abortMerge issued DOLT_RESET; want none (statements: execs %q, queries %q)", rec.execs, rec.queries)
+				}
+			})
+		}
+	})
 }
 
 const testAuthor = "Tester <tester@example.com>"
@@ -159,6 +193,17 @@ func (c *recordingConn) assertDrained(t *testing.T, mock sqlmock.Sqlmock) {
 			t.Errorf("%q went through ExecContext; CALLs must go through schema.DrainCall", q)
 		}
 	}
+}
+
+// sentStatement reports whether any statement containing substr was sent
+// through either path.
+func (c *recordingConn) sentStatement(substr string) bool {
+	for _, q := range append(append([]string(nil), c.execs...), c.queries...) {
+		if strings.Contains(q, substr) {
+			return true
+		}
+	}
+	return false
 }
 
 func newDrainMock(t *testing.T) (*recordingConn, sqlmock.Sqlmock) {

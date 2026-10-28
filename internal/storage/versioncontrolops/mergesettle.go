@@ -352,8 +352,8 @@ func MergeWithStrategy(ctx context.Context, db DBConn, ref, author, strategy str
 // destroy uncommitted data the merge never touched (bd-578h9.2).
 // Best-effort: the caller's error is what matters.
 func abortMerge(ctx context.Context, db DBConn, preMergeClean bool) {
-	if _, err := db.ExecContext(ctx, "CALL DOLT_MERGE('--abort')"); err != nil && preMergeClean {
-		_, _ = db.ExecContext(ctx, "CALL DOLT_RESET('--hard')")
+	if err := schema.DrainCall(ctx, db, "CALL DOLT_MERGE('--abort')"); err != nil && preMergeClean {
+		_ = schema.DrainCall(ctx, db, "CALL DOLT_RESET('--hard')")
 	}
 }
 
