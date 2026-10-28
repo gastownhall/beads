@@ -687,3 +687,22 @@ async def test_update_issue_open_on_closed_issue_reopens_then_updates(sample_iss
     assert params.notes is None
     assert params.description == "D"
     assert result == [updated_issue]
+
+
+@pytest.mark.asyncio
+async def test_reopen_issue_not_closed_raises(sample_issue):
+    """Issue #6872: reopening an issue that is not closed fails with a clear
+    error naming the id, instead of silently returning nothing."""
+    from beads_mcp.bd_client import BdError
+
+    mock_client = AsyncMock()
+    # bd reopen is a no-op for an open/deferred/blocked issue: nothing reopened.
+    mock_client.reopen = AsyncMock(return_value=[])
+
+    with (
+        patch("beads_mcp.tools._get_client", return_value=mock_client),
+        pytest.raises(BdError, match="not closed") as excinfo,
+    ):
+        await beads_reopen_issue(issue_ids=["bd-1"], reason="try again")
+
+    assert "bd-1" in str(excinfo.value)

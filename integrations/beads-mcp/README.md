@@ -215,7 +215,7 @@ await beads_ready_work(workspace_root="/Users/you/project-a")
 - `list` - List issues with filters (status, priority, type, assignee)
 - `ready` - Find tasks with no blockers ready to work on
 - `show` - Show detailed issue info including dependencies
-- `update` - Update issue (status, priority, design, notes, etc). Note: `status="closed"` or `status="open"` automatically route to `close` or `reopen` tools to respect approval workflows
+- `update` - Update issue (status, priority, design, notes, etc). Note: `status="closed"` routes to the `close` tool to respect approval workflows. `status="open"` reopens a closed issue via `bd reopen` (with `notes` as the reason) and applies the other fields of the same call; on an issue that is not closed it is an ordinary status update
 - `close` - Close completed issue
 - `dep` - Add dependency (blocks, related, parent-child, discovered-from)
 - `comment` - Add a durable, timestamped comment to an issue (a record of work/decisions)

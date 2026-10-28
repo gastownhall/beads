@@ -16,6 +16,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reads them back, and `note` appends to the notes field.
 
 ### Fixed
+- `update(status="open", ...)` no longer drops the other fields of the same
+  call and no longer fails with "Invalid response for reopen" on an issue
+  that is not closed. It reopens a closed issue via `bd reopen` (with
+  `notes` as the reason) and applies the remaining fields afterwards; on an
+  open, deferred or blocked issue it is an ordinary `bd update --status open`.
+  The `reopen` tool now fails with a clear "not closed" error naming the ids
+  instead of the opaque parse failure, and `bd reopen`'s stderr-only no-op
+  output parses as an empty result. (GH#6872)
 - `mcp__beads__show()` no longer crashes with `pydantic literal_error` when an
   issue has dependency types beyond the original four (`blocks`, `related`,
   `parent-child`, `discovered-from`). `DependencyType` is now `str`, matching
