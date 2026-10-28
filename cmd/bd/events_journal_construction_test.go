@@ -127,6 +127,11 @@ var constructionExemptions = map[string]string{
 	"store_factory.go:openNonMutatingStoreFromConfig":       "read-only/preview open: built-in arms refuse writes and the http arm's writes are journaled by its server, so no mutation can go unrecorded",
 	"store_factory_nocgo.go:openNonMutatingStoreFromConfig": "read-only/preview open: built-in arms refuse writes and the http arm's writes are journaled by its server, so no mutation can go unrecorded",
 
+	// bd init's count of the database a reinit or repoint leaves behind: a
+	// ReadOnly server open, only ever asked for GetStatistics.
+	"init_identity.go:countConfiguredIssues":       "read-only open of the configured database to count its issues before a reinit or repoint; no bead mutation",
+	"init_identity_cgo.go:countEmbeddedInitIssues": "preview open of the configured embedded database to count its issues before a reinit or repoint; no bead mutation",
+
 	// Store-open-time reconciliation, which runs BEFORE the command's own store
 	// exists and therefore before any workspace config could be applied to it.
 	// It writes only local_metadata, which is dolt-ignored working-set state and

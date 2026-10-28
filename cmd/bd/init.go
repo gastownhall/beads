@@ -428,7 +428,7 @@ func isGitWorkTreeRoot(dir string) bool {
 //
 // This runs as the first thing in init's RunE, ahead of every path that has an
 // effect: the proxied dispatch (runInitProxiedServer -> EnsureGitRepo -> git
-// init), the --reinit-local/--force pre-checks (countExistingIssues opens a
+// init), the --reinit-local/--force pre-checks (countConfiguredIssues opens a
 // real store, which creates the data directory and can run migrations), and
 // the mode globals RunE sets on itself. A guard placed after any of those
 // refuses only after the damage it exists to prevent.
@@ -971,6 +971,15 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			}
 		}
 
+		// Which database this workspace's commands use today, and which one
+		// this init opens and records, resolved once (GH#6172). It must run
+		// before the promotion below: once the flags are in the environment
+		// the getters answer with init's target, not the workspace's database,
+		// and every guard that counts or witnesses the configured database
+		// reads it from initID instead of re-deriving it.
+		initID := resolveInitIdentity(resolveInitWorkspace(),
+			initIdentityFlags{Database: database, Host: serverHost, Port: serverPort}, initServerMode)
+
 		// Explicit connection flags outrank stale BEADS_DOLT_SERVER_* values
 		// (GH#5177). This must run AFTER every source of server mode has been
 		// consulted above: --server, BEADS_DOLT_SERVER_MODE, --shared-server,
@@ -1036,7 +1045,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		if reinitLocal {
 			// be-5up5 round 2 (review of PR #5791): --reinit-local/--force skip
 			// checkExistingBeadsData entirely, and the typed confirmation below
-			// keys on countExistingIssues, which returns 0/err in exactly the
+			// keys on countConfiguredIssues, which returns 0/err in exactly the
 			// missing-database case — so `bd init --force` against a lost
 			// server-side database used to create a fresh empty one with no
 			// prompt and no destroy token. Those flags authorize destroying a
@@ -1165,16 +1174,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// This must be computed BEFORE initDBPath to ensure consistent path resolution
 		// (avoiding macOS /var -> /private/var symlink issues when directory creation
 		// happens between path computations).
-		var beadsDirForInit string
-		if envBeadsDir := os.Getenv("BEADS_DIR"); envBeadsDir != "" {
-			beadsDirForInit = utils.CanonicalizePath(envBeadsDir)
-		} else {
-			beadsDirForInit = beads.GetWorktreeFallbackBeadsDir()
-			if beadsDirForInit == "" {
-				localBeadsDir := filepath.Join(".", ".beads")
-				beadsDirForInit = beads.FollowRedirect(localBeadsDir)
-			}
-		}
+		beadsDirForInit, _ := initTargetBeadsDir()
 
 		// Plan the storage root for gate acquisition without side effects.
 		// The operational path is resolved after the destructive preflight.
@@ -1250,7 +1250,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			plannedDBPathAbs = filepath.Dir(plannedDBPathAbs)
 		}
 		initGateHandle, gateErr := acquireInitMutationGate(rootCtx, beadsDirAbs, plannedDBPathAbs, func() error {
-			return runInitReinitPreflight(reinitLocal, destroyTokenPrefix, destroyToken)
+			return runInitReinitPreflight(reinitLocal, destroyTokenPrefix, destroyToken, initID)
 		})
 		if gateErr != nil {
 			return gateErr
@@ -2994,46 +2994,17 @@ Aborting.`, dbPath, prefix)
 	return nil // No database found, safe to init
 }
 
-// countExistingIssues attempts to connect to the existing database and count
-// issues. Returns 0 if the database is unreachable or empty. Used by --force
-// safeguard to show users what they're about to destroy.
-func countExistingIssues(_ string) (int, error) {
-	var beadsDir string
-	if envBeadsDir := os.Getenv("BEADS_DIR"); envBeadsDir != "" {
-		beadsDir = utils.CanonicalizePath(envBeadsDir)
-	} else {
-		beadsDir = beads.FindBeadsDir()
-		if beadsDir == "" {
-			return 0, nil
-		}
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	store, err := newDoltStoreFromConfig(ctx, beadsDir)
-	if err != nil {
-		return 0, err
-	}
-	defer func() { _ = store.Close() }()
-
-	stats, err := store.GetStatistics(ctx)
-	if err != nil {
-		return 0, err
-	}
-	if stats == nil {
-		return 0, nil
-	}
-	return stats.TotalIssues, nil
-}
-
 // runInitReinitPreflight confirms the destructive local replacement while the
-// caller holds init's complete exclusive gate set.
-func runInitReinitPreflight(reinitLocal bool, prefix, destroyToken string) error {
+// caller holds init's complete exclusive gate set. The count is of the
+// database this workspace is configured for, at its configured endpoint
+// (initIdentity.Configured): that is the database a reinit destroys, or a
+// repoint stops reaching, whatever --database or the exported
+// BEADS_DOLT_SERVER_* variables name (GH#6172).
+func runInitReinitPreflight(reinitLocal bool, prefix, destroyToken string, id initIdentity) error {
 	if !reinitLocal {
 		return nil
 	}
-	count, err := countExistingIssues(prefix)
+	count, _, err := countConfiguredIssuesWithTimeout(id)
 	if err != nil || count == 0 {
 		return nil
 	}
@@ -3284,7 +3255,7 @@ func initModeExplicitlyRequested(cmd *cobra.Command) bool {
 //
 // It exists because those flags bypass checkExistingBeadsData entirely (see the
 // !reinitLocal gate in the init command), and the reinit path's own typed
-// confirmation keys on countExistingIssues — which returns 0 or an error in
+// confirmation keys on countConfiguredIssues — which returns 0 or an error in
 // exactly the case this guard is about, so no prompt fires either. That left
 // `bd init --force` against a lost database creating a fresh empty one with no
 // prompt and no destroy token: the precise reflex of the 2026-08-11 fleet-wide
