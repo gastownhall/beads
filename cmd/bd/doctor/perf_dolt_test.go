@@ -94,11 +94,10 @@ func TestRunDoltPerformanceDiagnosticsRemoteHost(t *testing.T) {
 }
 
 // TestRunDoltPerformanceDiagnosticsCentralConfigHost pins that bd doctor
-// --perf does not dial a host set only in the central server config
+// --perf dials a host set only in the central server config
 // (~/.config/beads/server.json). The commands it times (bd ready, bd list,
-// bd show) open the store with metadata.json alone, so they dial 127.0.0.1
-// here, and --perf measures that server and gives their advice for it,
-// although bd doctor's store checks (dolt.NewFromConfig*) apply the file.
+// bd show) take that host for their store open (GH#3895), so --perf measures
+// the server at db.invalid, not one at 127.0.0.1.
 func TestRunDoltPerformanceDiagnosticsCentralConfigHost(t *testing.T) {
 	tmpDir, port := perfServerWorkspace(t, "")
 	centralPath := filepath.Join(tmpDir, "server.json")
@@ -109,15 +108,13 @@ func TestRunDoltPerformanceDiagnosticsCentralConfigHost(t *testing.T) {
 
 	_, err := RunDoltPerformanceDiagnostics(tmpDir, false)
 	if err == nil {
-		t.Fatal("performance diagnostics succeeded with no server at 127.0.0.1")
+		t.Fatal("performance diagnostics succeeded with no server at db.invalid")
 	}
 	msg := err.Error()
-	for _, want := range []string{net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), "externally managed"} {
-		if !strings.Contains(msg, want) {
-			t.Errorf("error does not contain %q:\n%s", want, msg)
-		}
+	if want := net.JoinHostPort("db.invalid", strconv.Itoa(port)); !strings.Contains(msg, want) {
+		t.Errorf("error does not contain %q:\n%s", want, msg)
 	}
-	for _, banned := range []string{"db.invalid", "bd dolt start"} {
+	for _, banned := range []string{net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), "bd dolt start"} {
 		if strings.Contains(msg, banned) {
 			t.Errorf("error contains %q:\n%s", banned, msg)
 		}
