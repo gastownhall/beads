@@ -617,6 +617,37 @@ func TestRuntimeCommandDialsCentralServerConfig(t *testing.T) {
 	}
 }
 
+// TestRuntimeCommandPrefersConfigYAMLHostOverCentralServerConfig pins the
+// other half of GH#3895's precedence: server.json is the lowest source, so a
+// config.yaml dolt.host outranks its host while its port still applies.
+func TestRuntimeCommandPrefersConfigYAMLHostOverCentralServerConfig(t *testing.T) {
+	f := newExternalInitFixture(t)
+	port := freeLoopbackPort(t)
+	beadsDir := namedPortWorkspace(t, f, 0)
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("dolt.host: yaml.invalid\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	central := filepath.Join(f.home, "server.json")
+	body := fmt.Sprintf(`{"dolt_server_host":"db.invalid","dolt_server_port":%d}`, port)
+	if err := os.WriteFile(central, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.env = append(f.env, "BEADS_CENTRAL_CONFIG="+central)
+
+	res := f.run("", "list")
+
+	requireNoLaunch(t, res)
+	if !res.failed {
+		t.Errorf("bd list succeeded with no server:\n%s", res.output)
+	}
+	if want := net.JoinHostPort("yaml.invalid", strconv.Itoa(port)); !strings.Contains(res.output, want) {
+		t.Errorf("bd list output does not name config.yaml's host with the central port %q:\n%s", want, res.output)
+	}
+	if strings.Contains(res.output, "db.invalid") {
+		t.Errorf("bd list dialed the central server config's host over config.yaml dolt.host:\n%s", res.output)
+	}
+}
+
 // runRemoteHostDiagnostic runs one diagnostic against a server on another
 // machine whose port BEADS_DOLT_SERVER_PORT names. It must dial that host, not
 // 127.0.0.1, and give the remote-host advice: not `bd dolt start`, which

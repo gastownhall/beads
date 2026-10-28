@@ -213,9 +213,8 @@ func NewFromConfigWithCLIOptions(ctx context.Context, beadsDir string, cfg *Conf
 		return nil, err
 	}
 
-	// Apply central server config as defaults for any server fields not
-	// set in the per-project metadata.json. This eliminates the need to
-	// duplicate host/port/user across 30+ project configs.
+	// Apply the central server config's dolt_mode when metadata.json names
+	// none; its connection fields reach the store through the getters.
 	applyCentralConfigDefaults(fileCfg)
 
 	if cfg == nil {
@@ -248,8 +247,8 @@ func NewFromConfigWithOptions(ctx context.Context, beadsDir string, cfg *Config)
 		return nil, err
 	}
 
-	// Apply central server config as defaults for any server fields not
-	// set in the per-project metadata.json.
+	// Apply the central server config's dolt_mode when metadata.json names
+	// none; its connection fields reach the store through the getters.
 	applyCentralConfigDefaults(fileCfg)
 
 	// Build config from metadata.json, allowing overrides from caller
@@ -497,11 +496,16 @@ func poolKnobFromConfig(cfg *Config, key string) string {
 	return config.GetStringFromDir(cfg.BeadsDir, key)
 }
 
-// applyCentralConfigDefaults loads the central server config from
-// ~/.config/beads/server.json (or BEADS_CENTRAL_CONFIG env var) and
-// applies its server fields as defaults to the per-project config.
-// A missing central config file is silently ignored, and a broken one is
-// reported once (configfile.CentralConfig) and ignored.
+// applyCentralConfigDefaults applies the dolt_mode of the central server
+// config (~/.config/beads/server.json, or the file BEADS_CENTRAL_CONFIG
+// names) when the per-project config names none. Its host, port, user and
+// TLS are not copied: the configfile getters and doltserver's port chain
+// already end at the central server config, as for the CLI's store open
+// (GH#3895), and a copy into the metadata.json fields would outrank
+// config.yaml dolt.host. A missing central config file is silently ignored,
+// and a broken one is reported once (configfile.CentralConfig) and ignored.
 func applyCentralConfigDefaults(fileCfg *configfile.Config) {
-	configfile.ApplyCentralDefaults(fileCfg, configfile.CentralConfig())
+	if central := configfile.CentralConfig(); central != nil && fileCfg.DoltMode == "" {
+		fileCfg.DoltMode = central.DoltMode
+	}
 }

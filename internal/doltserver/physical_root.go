@@ -134,8 +134,9 @@ func ResolveProxiedServerRootPath(beadsDir string) (string, error) {
 // applyCentralModeDefaults mirrors the central-config merge the LIBRARY open
 // path performs (internal/storage/dolt/open.go applyCentralConfigDefaults):
 // load ~/.config/beads/server.json (or BEADS_CENTRAL_CONFIG) and apply its
-// server fields — DoltMode, host, port, user, TLS, never data dirs — as
-// defaults for fields the project config leaves empty.
+// DoltMode when the project config names none. It also fills the empty
+// connection fields, which the open path leaves to the getters; only the
+// mode reaches DatabasePath, so the root is the same.
 //
 // This is deliberately NOT part of ResolvePhysicalRoots: the CLI's
 // hand-built store selection in cmd/bd/main.go takes the connection fields
