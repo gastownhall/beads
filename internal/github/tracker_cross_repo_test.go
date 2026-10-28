@@ -378,7 +378,7 @@ func pushRoutes() map[string]string {
 // TestPush_SkipsBeadLinkedToOtherRepo: pushing to acme/repo-b updates the
 // bead linked to repo-b's issue 7 but neither writes repo-b's issue 42 with
 // the content of the bead linked to repo-a's issue 42 nor re-creates that
-// bead as a new repo-b issue.
+// bead as a new repo-b issue. The dry run previews exactly that.
 func TestPush_SkipsBeadLinkedToOtherRepo(t *testing.T) {
 	ctx := context.Background()
 	localEdit := fixtureUpdated.Add(72 * time.Hour)
@@ -388,6 +388,25 @@ func TestPush_SkipsBeadLinkedToOtherRepo(t *testing.T) {
 		linkedBead("bd-b7", "Repo B issue 7 edited", "repo-b 7 body", repoB7Ref, localEdit),
 	)
 	engine := tracker.NewEngine(tr, store, "test")
+	var msgs []string
+	engine.OnMessage = func(msg string) { msgs = append(msgs, msg) }
+
+	dry, err := engine.Sync(ctx, tracker.SyncOptions{Push: true, DryRun: true})
+	if err != nil {
+		t.Fatalf("dry-run Sync: %v", err)
+	}
+	joined := strings.Join(msgs, "\n")
+	if !strings.Contains(joined, "Would update in GitHub: Repo B issue 7 edited") {
+		t.Errorf("dry-run messages = %q, want an update preview for bd-b7", joined)
+	}
+	if strings.Contains(joined, repoATitle) {
+		t.Errorf("dry-run messages = %q, want no preview for the repo-a bead", joined)
+	}
+	for _, req := range rt.log() {
+		if !strings.HasPrefix(req, "GET ") {
+			t.Errorf("dry run sent a write: %s", req)
+		}
+	}
 
 	live, err := engine.Sync(ctx, tracker.SyncOptions{Push: true})
 	if err != nil {
@@ -403,8 +422,10 @@ func TestPush_SkipsBeadLinkedToOtherRepo(t *testing.T) {
 		t.Errorf("push created a repo-b issue for the repo-a bead; requests=%v", rt.log())
 	}
 	assertRepoABeadUnchanged(t, store)
-	if got := live.PushStats; got.Created != 0 || got.Updated != 1 || got.Skipped != 1 {
-		t.Errorf("push stats = {Created:%d Updated:%d Skipped:%d}, want {Created:0 Updated:1 Skipped:1}",
-			got.Created, got.Updated, got.Skipped)
+	for name, got := range map[string]tracker.PushStats{"dry-run": dry.PushStats, "real push": live.PushStats} {
+		if got.Created != 0 || got.Updated != 1 || got.Skipped != 1 {
+			t.Errorf("%s stats = {Created:%d Updated:%d Skipped:%d}, want {Created:0 Updated:1 Skipped:1}",
+				name, got.Created, got.Updated, got.Skipped)
+		}
 	}
 }
