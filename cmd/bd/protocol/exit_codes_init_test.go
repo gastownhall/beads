@@ -192,7 +192,7 @@ func TestProtocol_ExitCode11_LocalExistsRefused(t *testing.T) {
 
 	w := newWorkspace(t)
 	// The exit-11 prompt only fires when --reinit-local has data to destroy:
-	// countExistingIssues must return > 0, so seed one issue.
+	// countReinitTargetIssues must return > 0, so seed one issue.
 	w.create("--title", "seed issue for exit-11 refusal", "--type", "task")
 
 	cmd := exec.Command(w.bd, "init", "--reinit-local")
@@ -258,11 +258,13 @@ func TestProtocol_ExitCode11_LocalExistsRefused(t *testing.T) {
 		<-waitCh
 		out := got()
 		if !strings.Contains(out, "Re-initializing will destroy") {
-			// runInitReinitPreflight skips the confirmation, without a warning,
-			// when countExistingIssues errors (it has its own 5s timeout) or
-			// counts zero. The reinit then goes on and blocks at init's next
-			// TTY prompt (e.g. "Change role? [y/N]:"), which lands here.
-			t.Fatalf("timed out waiting for the destroy-confirmation prompt: the reinit preflight never warned, so it skipped the confirmation (its issue count failed, e.g. the 5s store timeout lapsed, or found none)\n%s", out)
+			// runInitReinitPreflight skips the confirmation, without a
+			// warning, only when countReinitTargetIssues proves the target
+			// empty (a missing .beads, no project files, or zero issues);
+			// a count that fails counts as "may hold data" and warns too.
+			// A reinit that still skipped past a real store blocks at init's
+			// next TTY prompt (e.g. "Change role? [y/N]:"), which lands here.
+			t.Fatalf("timed out waiting for the destroy-confirmation prompt: the reinit preflight never warned, so it skipped the confirmation (its issue count proved the workspace empty)\n%s", out)
 		}
 		t.Fatalf("timed out waiting for the destroy-confirmation prompt\n%s", out)
 	}

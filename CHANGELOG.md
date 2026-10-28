@@ -4721,6 +4721,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   override cannot reach them; only the module floor can. Re-derive rather
   than trusting this table: `govulncheck -scan module`.
 
+### Fixed
+
+- **`bd init --reinit-local` no longer skips the destroy confirmation when the
+  issue count fails, and no longer counts a different database than the one it
+  destroys** (GH#5628). The preflight used to read any `countExistingIssues`
+  error — including its own 5-second timeout on a large or slow database — as
+  "nothing to destroy", so the databases with the most to lose were the least
+  protected; and it counted the workspace ambient resolution found
+  (`BEADS_DIR`, the walk-up) while the destroy itself replaces the workspace
+  `bd init` resolves, so a linked worktree could show a count from one database
+  while destroying another. The confirmation now targets the gate's own
+  workspace, reports the target directory, and asks — counted or not: an
+  uncountable workspace is "unknown, may hold data", gets the same typed
+  confirmation (`destroy all issues`) and the same `--destroy-token` demand
+  (exit 12) as a counted one. A target without beads project files opens no
+  store at all, and the only count that skips the confirmation is a proven
+  zero, including a server-mode database proven absent (no local copy, the
+  reachable server reporting it gone) — the documented `--recreate-missing`
+  path. See
+  [docs/recovery/init-safety.md](docs/recovery/init-safety.md#init-token-missing).
+
 ## [1.3.2] - 2026-10-23
 
 First stable release of the 1.3.2 patch line. It ships the same code as

@@ -746,8 +746,10 @@ func TestInitGuard_UnreachableServerRefuses(t *testing.T) {
 //
 // --force is a deprecated alias for --reinit-local, and --reinit-local skips
 // checkExistingBeadsData entirely. The reinit path's own typed confirmation
-// keys on countExistingIssues, which returns 0 or an error in exactly the case
-// where the server-side database is missing — so before this fix,
+// (countReinitTargetIssues) demands a confirmed destroy for every workspace
+// except one PROVEN empty or holding a database PROVEN absent — which is
+// exactly the case where the server-side database is missing, so before this
+// fix,
 // `bd init --force` against a lost database created a fresh empty one with no
 // prompt and no destroy token. That is the 2026-08-11 fleet-wide data-loss
 // reflex, reached through the flag an operator in a panic is most likely to

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -428,10 +429,11 @@ func isGitWorkTreeRoot(dir string) bool {
 //
 // This runs as the first thing in init's RunE, ahead of every path that has an
 // effect: the proxied dispatch (runInitProxiedServer -> EnsureGitRepo -> git
-// init), the --reinit-local/--force pre-checks (countExistingIssues opens a
-// real store, which creates the data directory and can run migrations), and
-// the mode globals RunE sets on itself. A guard placed after any of those
-// refuses only after the damage it exists to prevent.
+// init), the --reinit-local/--force pre-checks (countReinitTargetIssues opens
+// a real store whenever the target holds beads project files, which creates
+// the data directory and can run migrations), and the mode globals RunE sets
+// on itself. A guard placed after any of those refuses only after the damage
+// it exists to prevent.
 //
 // Fail-open by construction: an unresolvable home, a working directory that is
 // not home, or a home that is itself a git repository all mean "not the case
@@ -1036,12 +1038,16 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		if reinitLocal {
 			// be-5up5 round 2 (review of PR #5791): --reinit-local/--force skip
 			// checkExistingBeadsData entirely, and the typed confirmation below
-			// keys on countExistingIssues, which returns 0/err in exactly the
-			// missing-database case — so `bd init --force` against a lost
-			// server-side database used to create a fresh empty one with no
-			// prompt and no destroy token. Those flags authorize destroying a
-			// database that exists; only --recreate-missing authorizes creating
-			// one where the configured database has gone missing.
+			// asks for a destroy token not just over a counted issue set but
+			// over any workspace whose issues could not be counted — so
+			// `bd init --force` against a lost server-side database still
+			// needs this guard: the only count that skips the confirmation is
+			// a proven zero, and a database PROVEN absent (no local copy, a
+			// reachable server reporting it gone) is exactly this guard's
+			// case, which --recreate-missing alone opts into. Those flags
+			// authorize destroying a database that exists; only
+			// --recreate-missing authorizes creating one where the configured
+			// database has gone missing.
 			if err := guardMissingServerDatabase(prefix); err != nil {
 				return fmt.Errorf("%v", err)
 			}
@@ -1250,7 +1256,9 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			plannedDBPathAbs = filepath.Dir(plannedDBPathAbs)
 		}
 		initGateHandle, gateErr := acquireInitMutationGate(rootCtx, beadsDirAbs, plannedDBPathAbs, func() error {
-			return runInitReinitPreflight(reinitLocal, destroyTokenPrefix, destroyToken)
+			// beadsDirAbs, not ambient resolution: the gate already locks this
+			// directory, and its lock makes it the directory re-init replaces.
+			return runInitReinitPreflight(reinitLocal, beadsDirAbs, destroyTokenPrefix, destroyToken)
 		})
 		if gateErr != nil {
 			return gateErr
@@ -2994,18 +3002,33 @@ Aborting.`, dbPath, prefix)
 	return nil // No database found, safe to init
 }
 
-// countExistingIssues attempts to connect to the existing database and count
-// issues. Returns 0 if the database is unreachable or empty. Used by --force
-// safeguard to show users what they're about to destroy.
-func countExistingIssues(_ string) (int, error) {
-	var beadsDir string
-	if envBeadsDir := os.Getenv("BEADS_DIR"); envBeadsDir != "" {
-		beadsDir = utils.CanonicalizePath(envBeadsDir)
-	} else {
-		beadsDir = beads.FindBeadsDir()
-		if beadsDir == "" {
+// countReinitTargetIssues counts the issues in beadsDir, the workspace the
+// re-init gate locks and replaces (beadsDirForInit, not whatever ambient
+// resolution — BEADS_DIR, the FindBeadsDir walk-up — happens to find from
+// here: the confirmation and the destroy must describe the same database,
+// GH#5628 part 2). Used by the --reinit-local/--force safeguard to show users
+// what they're about to destroy.
+//
+// It proves "nothing to destroy" before asking for any: a beadsDir that does
+// not exist, or holds no beads project files, counts as zero WITHOUT opening a
+// store, so a fresh init never creates a database before the confirmation;
+// and a server-mode workspace whose configured database is PROVEN absent
+// (no local copy; a reachable server reporting it gone) counts as zero — the
+// documented --recreate-missing recovery shape. Every other failure — the 5s
+// count deadline, a store that will not open, an unreachable server — is an
+// error the caller treats as "unknown, may hold data", never as empty
+// (GH#5628 part 1).
+func countReinitTargetIssues(beadsDir string) (int, error) {
+	if info, err := os.Stat(beadsDir); err != nil {
+		if os.IsNotExist(err) {
 			return 0, nil
 		}
+		return 0, err
+	} else if !info.IsDir() {
+		return 0, nil
+	}
+	if !beads.HasProjectFiles(beadsDir) {
+		return 0, nil
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -3013,6 +3036,9 @@ func countExistingIssues(_ string) (int, error) {
 
 	store, err := newDoltStoreFromConfig(ctx, beadsDir)
 	if err != nil {
+		if reinitTargetDatabaseAbsent(beadsDir) {
+			return 0, nil
+		}
 		return 0, err
 	}
 	defer func() { _ = store.Close() }()
@@ -3027,50 +3053,124 @@ func countExistingIssues(_ string) (int, error) {
 	return stats.TotalIssues, nil
 }
 
+// reinitTargetDatabaseAbsent reports whether beadsDir is a server-mode
+// workspace whose configured database is PROVEN absent: no local copy under
+// the Dolt data dir, and a reachable server reporting the database gone. It is
+// the one case an open failure may be read as "nothing to destroy" — the same
+// question guardMissingServerDatabaseAt owns the refusal half of, answered
+// with the same probe (checkDatabaseOnServer) on the same inputs. An
+// unreachable server proves nothing: absent means reported-gone, not
+// unconfirmable. Like gate planning it resolves the data dir side-effect-free
+// (doltserver.DoltDirPath, not ResolveDoltDir), so asking whether the
+// database exists must not create the directories it is asking about.
+func reinitTargetDatabaseAbsent(beadsDir string) bool {
+	cfg, err := configfile.LoadForDiscovery(beadsDir)
+	if err != nil || cfg == nil {
+		return false
+	}
+	// The same mode the failed open used: metadata may record it, or the
+	// workspace may select the shared server through config.yaml
+	// (effectiveServerMode; see store_factory_server_mode.go).
+	if cfg.GetBackend() != configfile.BackendDolt || !effectiveServerMode(beadsDir, cfg) {
+		return false
+	}
+	dbName := cfg.GetDoltDatabase()
+	if dbName == "" {
+		return false
+	}
+	doltPath := doltserver.DoltDirPath(beadsDir)
+	if _, err := os.Stat(filepath.Join(doltPath, dbName, ".dolt")); err == nil {
+		// A local copy is never "absent": it can hold data while the server is
+		// unreachable or the open above failed for its own reasons.
+		return false
+	}
+	result := checkDatabaseOnServer(cfg.GetDoltServerHost(), doltserver.DefaultConfig(beadsDir).Port,
+		cfg.GetDoltServerUser(), cfg.GetDoltServerPassword(), dbName, cfg.GetDoltServerTLS())
+	return result.Reachable && !result.Exists && result.Err == nil
+}
+
 // runInitReinitPreflight confirms the destructive local replacement while the
-// caller holds init's complete exclusive gate set.
-func runInitReinitPreflight(reinitLocal bool, prefix, destroyToken string) error {
+// caller holds init's complete exclusive gate set. beadsDir is the gate's own
+// workspace (beadsDirAbs), so the issue count and the confirmation describe
+// the directory re-init is about to replace, never an unrelated workspace
+// ambient resolution might find (GH#5628 part 2).
+//
+// A workspace whose issues cannot be counted is treated as "unknown, may hold
+// data": it gets the same confirmation, typed phrase and --destroy-token
+// demand as a known non-zero count (GH#5628 part 1). The preflight proceeds
+// without asking only on positive evidence there is nothing to destroy — a
+// count of zero from countReinitTargetIssues.
+func runInitReinitPreflight(reinitLocal bool, beadsDir, prefix, destroyToken string) error {
 	if !reinitLocal {
 		return nil
 	}
-	count, err := countExistingIssues(prefix)
-	if err != nil || count == 0 {
+	count, countErr := countReinitTargetIssues(beadsDir)
+	if countErr == nil && count == 0 {
 		return nil
 	}
+	return confirmReinitDestroy(os.Stderr, os.Stdin, term.IsTerminal(int(os.Stdin.Fd())),
+		beadsDir, count, countErr, prefix, destroyToken)
+}
 
-	fmt.Fprintf(os.Stderr, "\n%s Re-initializing will destroy the existing database.\n\n", ui.RenderWarn("WARNING:"))
-	fmt.Fprintf(os.Stderr, "  Existing issues: %d\n\n", count)
-	fmt.Fprintf(os.Stderr, "  This action CANNOT be undone. All issues, dependencies, and\n")
-	fmt.Fprintf(os.Stderr, "  Dolt commit history will be permanently lost.\n\n")
-	fmt.Fprintf(os.Stderr, "  Before proceeding, consider:\n")
-	fmt.Fprintf(os.Stderr, "    bd export > issue-export.jsonl    # Export issue records, not full DB state\n")
-	fmt.Fprintf(os.Stderr, "    bd dolt status              # Check if this is a server config issue\n\n")
-	if term.IsTerminal(int(os.Stdin.Fd())) {
-		fmt.Fprintf(os.Stderr, "Type 'destroy %d issues' to confirm: ", count)
-		scanner := bufio.NewScanner(os.Stdin)
+// confirmReinitDestroy is the --reinit-local/--force destroy confirmation:
+// the WARNING banner, the interactive typed prompt and the non-interactive
+// --destroy-token demand. count and countErr describe the workspace's issues
+// — a non-nil countErr means the issues could not be counted, in which case
+// the count is unknown and the caller must have decided "may hold data".
+// target is the .beads directory about to be replaced; w and in are the output
+// and input streams and interactive how the caller was invoked, so tests can
+// drive the whole conversation without a terminal (same injection shape as
+// currentAdoptPolicy in dolt_remote_adopt.go).
+//
+// ADR invariant (engdocs/adr/0002-init-safety-invariants.md): the refusal
+// text never echoes a complete destructive invocation — it points at
+// 'bd help init-safety' rather than spelling the token value, closing the
+// 58f5989bf failure class where an agent copy-pasted the suggestion.
+func confirmReinitDestroy(w io.Writer, in io.Reader, interactive bool, target string, count int, countErr error, prefix, destroyToken string) error {
+	fmt.Fprintf(w, "\n%s Re-initializing will destroy the existing database.\n\n", ui.RenderWarn("WARNING:"))
+	fmt.Fprintf(w, "  Target: %s\n", remedy.PrintedValue(target))
+	if countErr != nil {
+		fmt.Fprintf(w, "  Existing issues: unknown (could not count them: %s)\n\n", remedy.PrintedMessage(countErr))
+	} else {
+		fmt.Fprintf(w, "  Existing issues: %d\n\n", count)
+	}
+	fmt.Fprintf(w, "  This action CANNOT be undone. All issues, dependencies, and\n")
+	fmt.Fprintf(w, "  Dolt commit history will be permanently lost.\n\n")
+	fmt.Fprintf(w, "  Before proceeding, consider:\n")
+	fmt.Fprintf(w, "    bd export > issue-export.jsonl    # Export issue records, not full DB state\n")
+	if countErr != nil {
+		// An export can fail for the same reason the count did; say so while
+		// the reason is known.
+		fmt.Fprintf(w, "    bd doctor                    # Diagnose why the issues could not be counted\n")
+	}
+	fmt.Fprintf(w, "    bd dolt status              # Check if this is a server config issue\n\n")
+
+	if interactive && countErr == nil {
+		fmt.Fprintf(w, "Type 'destroy %d issues' to confirm: ", count)
+		scanner := bufio.NewScanner(in)
 		scanner.Scan()
 		expected := fmt.Sprintf("destroy %d issues", count)
 		if strings.TrimSpace(scanner.Text()) != expected {
-			fmt.Fprintf(os.Stderr, "\nAborted. Database was NOT modified.\n")
+			fmt.Fprintf(w, "\nAborted. Database was NOT modified.\n")
 			return &exitError{Code: ExitLocalExistsRefused}
 		}
 		return nil
 	}
 
-	// Non-interactive (piped input, AI agent, etc.)
-	//
-	// ADR invariant (engdocs/adr/0002-init-safety-invariants.md): runtime
-	// error text must not echo a complete destructive invocation. See
-	// 'bd help init-safety' for the token format. This closes the
-	// 58f5989bf failure class where an agent copy-pasted the suggestion.
-	expectedToken := FormatDestroyToken(prefix)
-	if destroyToken == expectedToken {
-		fmt.Fprintf(os.Stderr, "Destroy token accepted. Proceeding with re-initialization.\n")
+	// Non-interactive (piped input, AI agent, etc.), and — in every mode — the
+	// uncountable workspace: unknown is not empty, so it refuses rather than
+	// fall through to the destructive path with no count, no confirmation and
+	// no token (GH#5628).
+	if countErr != nil {
+		fmt.Fprintf(w, "Refusing to destroy an unknown number of issues in non-interactive mode.\n")
+	} else if destroyToken == FormatDestroyToken(prefix) {
+		fmt.Fprintf(w, "Destroy token accepted. Proceeding with re-initialization.\n")
 		return nil
+	} else {
+		fmt.Fprintf(w, "Refusing to destroy %d issues in non-interactive mode.\n", count)
 	}
-	fmt.Fprintf(os.Stderr, "Refusing to destroy %d issues in non-interactive mode.\n", count)
-	fmt.Fprintf(os.Stderr, "  See 'bd help init-safety' for the required --destroy-token format.\n")
-	fmt.Fprintf(os.Stderr, "  Or export issue records first: bd export > issue-export.jsonl\n")
+	fmt.Fprintf(w, "  See 'bd help init-safety' for the required --destroy-token format.\n")
+	fmt.Fprintf(w, "  Or export issue records first: bd export > issue-export.jsonl\n")
 	return &exitError{Code: ExitDestroyTokenMissing}
 }
 
@@ -3284,11 +3384,13 @@ func initModeExplicitlyRequested(cmd *cobra.Command) bool {
 //
 // It exists because those flags bypass checkExistingBeadsData entirely (see the
 // !reinitLocal gate in the init command), and the reinit path's own typed
-// confirmation keys on countExistingIssues — which returns 0 or an error in
-// exactly the case this guard is about, so no prompt fires either. That left
-// `bd init --force` against a lost database creating a fresh empty one with no
-// prompt and no destroy token: the precise reflex of the 2026-08-11 fleet-wide
-// data loss, reached by the flag a panicking operator is most likely to try.
+// confirmation (countReinitTargetIssues) asks only on positive evidence — a
+// database PROVEN absent (server mode, no local copy, a reachable server
+// reporting it gone) counts as zero, which is exactly the case this guard is
+// about, so no prompt or token demand fires there. That left `bd init --force`
+// against a lost database creating a fresh empty one with no prompt and no
+// destroy token: the precise reflex of the 2026-08-11 fleet-wide data loss,
+// reached by the flag a panicking operator is most likely to try.
 //
 // --reinit-local/--force authorize destroying a database that EXISTS. They do
 // not authorize inventing an empty one where the configured database has gone

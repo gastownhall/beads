@@ -190,8 +190,9 @@ func TestGuardInitInHomeDir(t *testing.T) {
 // decision. Both flag shapes below reach a side effect before the guard's
 // original location did:
 //
-//   - --reinit-local / --force run countExistingIssues, which opens a real
-//     store (creating the data directory, and able to run migrations);
+//   - --reinit-local / --force run countReinitTargetIssues, which opens a
+//     real store whenever the target workspace holds beads project files
+//     (creating the data directory, and able to run migrations);
 //   - --proxied-server dispatches to runInitProxiedServer, which calls
 //     EnsureGitRepo — a `git init` in the current directory.
 //

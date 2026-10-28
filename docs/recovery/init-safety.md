@@ -113,6 +113,16 @@ Refusing to destroy N issues in non-interactive mode.
   See 'bd help init-safety' for the required --destroy-token format.
 ```
 
+Or, re-initializing over a workspace whose issues could not be counted
+(for example a store that will not open, an unreachable Dolt server, or
+the 5-second count timeout lapsing on a large or slow database):
+
+```
+Existing issues: unknown (could not count them: <the count error>)
+Refusing to destroy an unknown number of issues in non-interactive mode.
+  See 'bd help init-safety' for the required --destroy-token format.
+```
+
 **Why this happens**
 
 You're running non-interactively (CI, agent, piped input) and asked for a
@@ -125,6 +135,16 @@ Both destructive paths need the token, not just the cross-boundary one:
 - `--discard-remote`, which would discard the remote's Dolt history.
 - plain `--reinit-local` over existing local issues, which would destroy
   them (see [init-local-exists](#init-local-exists)).
+- plain `--reinit-local` over a workspace whose issues could not be counted.
+  `bd` no longer treats an uncountable database as empty: a count that fails
+  means the workspace *may hold data* — the databases most likely to defeat
+  the count are exactly the ones with the most issues to lose — so it asks
+  for the same confirmation as a counted one, with the count reported as
+  unknown together with the count error. `bd doctor` can usually name the
+  reason the count failed. A workspace whose configured server-mode database
+  is provably absent (no local copy, and the reachable server reports it
+  gone) is the one exception: that counts as nothing to destroy, and the
+  [recreate it deliberately](#init-missing-server-db) path applies instead.
 
 **Recovery paths**
 
@@ -159,8 +179,9 @@ for why the token is never echoed in `bd`'s error messages.
 
 **Symptom**
 
-Interactive (TTY): you declined the typed `destroy N issues` confirmation.
-This is the only path that exits `11`.
+Interactive (TTY): you declined the typed `destroy N issues` confirmation —
+or, for a workspace whose issues could not be counted, the typed
+`destroy all issues` confirmation. This is the only path that exits `11`.
 
 ```
 Type 'destroy N issues' to confirm:
@@ -181,6 +202,21 @@ deprecated alias `--force`) would permanently destroy them, so `bd` demands
 an explicit confirmation first: the typed prompt in a TTY, and a
 `--destroy-token` when there is no TTY. This applies to `--reinit-local` on
 its own — `--discard-remote` is not required to trigger it.
+
+A workspace whose issues could not be counted (a store that will not open,
+an unreachable Dolt server, a count timeout on a large database) gets the
+same confirmation with the count reported as unknown together with the
+error that defeated it, and the typed phrase `destroy all issues` in a TTY:
+
+```
+  Target: /path/to/project/.beads
+  Existing issues: unknown (could not count them: <the count error>)
+Type 'destroy all issues' to confirm:
+```
+
+`bd` no longer treats an uncountable database as empty: a count that fails
+means the workspace *may hold data*, so it asks rather than silently
+destroying what it could not count.
 
 A plain `bd init` over an initialized workspace does not reach either code:
 the local-safety guard refuses it with an ordinary error before this point.
