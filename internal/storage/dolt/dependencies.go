@@ -54,7 +54,7 @@ func (s *DoltStore) addDependencyWithOptions(ctx context.Context, dep *types.Dep
 		}
 	}
 
-	var eventWritten bool
+	var writeResult issueops.DependencyWriteResult
 	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
 		opts := issueops.AddDependencyOpts{
 			SourceTable:   "issues",
@@ -65,7 +65,10 @@ func (s *DoltStore) addDependencyWithOptions(ctx context.Context, dep *types.Dep
 			EmitEvent:     addOpts.EmitEvent,
 		}
 		var e error
-		eventWritten, e = issueops.AddDependencyInTx(ctx, tx, dep, actor, opts)
+		// Plain assignment, never merge: withRetryTx re-runs this body on a
+		// retry and a rolled-back attempt's result must not survive into the
+		// staging decision below.
+		writeResult, e = issueops.AddDependencyInTxWithResult(ctx, tx, dep, actor, opts)
 		return e
 	}); err != nil {
 		return err
@@ -74,10 +77,15 @@ func (s *DoltStore) addDependencyWithOptions(ctx context.Context, dep *types.Dep
 	// Stage events only when AddDependencyInTx actually recorded a
 	// dependency_added event (explicit verb + genuine new edge). A structural or
 	// idempotent add writes no event, so staging events would sweep unrelated
-	// pending event rows into this dependency commit.
+	// pending event rows into this dependency commit. Stage issues only when the
+	// write's blocked-state maintenance flipped a durable issues row, so the
+	// is_blocked change rides this commit instead of the working set (GH#6647).
 	tables := []string{"dependencies"}
-	if eventWritten {
+	if writeResult.EventWritten {
 		tables = append(tables, "events")
+	}
+	if writeResult.Blocked.IssueRowsChanged {
+		tables = append(tables, "issues")
 	}
 	return s.doltAddAndCommit(ctx, tables, "dependency: add "+string(dep.Type)+" "+dep.IssueID+" -> "+dep.DependsOnID)
 }
@@ -144,7 +152,7 @@ func (s *DoltStore) RemoveDependencyWithOptions(ctx context.Context, issueID, de
 		clearRecheckScope := issueops.ScopeBlockedRecheckTransaction(tx)
 		defer clearRecheckScope()
 
-		eventWritten, err := issueops.RemoveDependencyInTx(ctx, tx, issueID, dependsOnID, actor, rmOpts.EmitEvent)
+		writeResult, err := issueops.RemoveDependencyInTxWithResult(ctx, tx, issueID, dependsOnID, actor, rmOpts.EmitEvent)
 		if err != nil {
 			return err
 		}
@@ -160,10 +168,15 @@ func (s *DoltStore) RemoveDependencyWithOptions(ctx context.Context, issueID, de
 		// Stage events only when RemoveDependencyInTx actually recorded a
 		// dependency_removed event (explicit verb + genuine edge removal). A
 		// structural or missing-edge remove writes no event, so staging events would
-		// sweep unrelated pending event rows into this dependency commit.
+		// sweep unrelated pending event rows into this dependency commit. Stage
+		// issues only when the removal's recompute flipped a durable issues row, so
+		// the unblock rides this commit instead of the working set (GH#6647).
 		tables := []string{"dependencies"}
-		if eventWritten {
+		if writeResult.EventWritten {
 			tables = append(tables, "events")
+		}
+		if writeResult.Blocked.IssueRowsChanged {
+			tables = append(tables, "issues")
 		}
 		return s.doltAddAndCommit(ctx, tables, "dependency: remove "+issueID+" -> "+dependsOnID)
 	})
