@@ -385,3 +385,44 @@ func TestMergeWithStrategy_KeepsCleanMergedTables(t *testing.T) {
 		})
 	}
 }
+
+// TestMergeWithStrategy_LeavesPreMergePendingChanges guards the staging set
+// the #7811 fix uses: only the merge's own results are committed. bd vc merge
+// runs no CommitPending first, so an uncommitted write to a table neither
+// branch changed must stay pending, not ride along in the merge commit.
+func TestMergeWithStrategy_LeavesPreMergePendingChanges(t *testing.T) {
+	for _, strategy := range []string{"ours", "theirs"} {
+		t.Run(strategy, func(t *testing.T) {
+			te := newTestEnv(t, "mgpp"+strategy)
+			ctx := t.Context()
+			conn := openSettleConn(t, ctx, te)
+
+			peerBranch := seedRetitleAndLabelSwapConflict(t, ctx, conn, "mgp-"+strategy)
+			if _, err := conn.ExecContext(ctx,
+				"INSERT INTO metadata (`key`, value) VALUES ('mgp_pending', 'uncommitted')"); err != nil {
+				t.Fatalf("insert pending metadata: %v", err)
+			}
+
+			if _, err := versioncontrolops.MergeWithStrategy(ctx, conn, peerBranch, "test <test@example.com>", strategy); err != nil {
+				t.Fatalf("MergeWithStrategy(%s): %v", strategy, err)
+			}
+
+			var inHead int
+			if err := conn.QueryRowContext(ctx,
+				"SELECT COUNT(*) FROM metadata AS OF 'HEAD' WHERE `key` = 'mgp_pending'").Scan(&inHead); err != nil {
+				t.Fatalf("read HEAD metadata: %v", err)
+			}
+			if inHead != 0 {
+				t.Error("pre-merge uncommitted metadata row was swept into the merge commit")
+			}
+			var pending int
+			if err := conn.QueryRowContext(ctx,
+				"SELECT COUNT(*) FROM dolt_status WHERE table_name = 'metadata' AND staged = 0").Scan(&pending); err != nil {
+				t.Fatalf("read dolt_status: %v", err)
+			}
+			if pending != 1 {
+				t.Errorf("metadata unstaged dolt_status rows = %d, want 1: the pre-merge write must stay pending", pending)
+			}
+		})
+	}
+}
