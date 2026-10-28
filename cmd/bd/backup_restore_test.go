@@ -426,4 +426,18 @@ func TestBackupRestoreRefusesNonBackupSourceServerMode(t *testing.T) {
 			}
 		})
 	}
+
+	// With no path argument the source is the workspace's .beads/backup, which
+	// backupDir creates when it is missing, so a workspace that never took a
+	// Dolt backup hands the restore an empty directory.
+	t.Run("default_dir_without_backup", func(t *testing.T) {
+		dir, env, _ := newRestoreServerWorkspace(t)
+		manifest := filepath.Join(dir, ".beads", "backup", "manifest")
+		if _, err := os.Stat(manifest); !os.IsNotExist(err) {
+			t.Fatalf("fixture already has %s (stat err = %v); want a workspace with no Dolt backup", manifest, err)
+		}
+
+		stdout, stderr, code := runBDMigrationFreezeWithEnv(t, bd, dir, env, "backup", "restore", "--force")
+		assertRefusedUnchanged(t, dir, env, stdout, stderr, code)
+	})
 }
