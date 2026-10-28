@@ -79,15 +79,20 @@ func (s *testSuite) readyExcludesPinned() {
 }
 
 func (s *testSuite) readyExcludesBlocked() {
+	// A real blocks edge, not a planted flag: the ready WHERE reads around a
+	// stale is_blocked=1 on a row with no ready-affecting dependency rows
+	// (gh#3268), so a row with such an edge is what must stay excluded here.
 	r := s.issueRepo()
+	blocker := newTestIssue("bd-rdy-blk-2", "blocker")
+	s.Require().NoError(r.Insert(s.Ctx(), blocker, "tester", domain.InsertIssueOpts{}))
 	blocked := newTestIssue("bd-rdy-blk-1", "blocked")
 	s.Require().NoError(r.Insert(s.Ctx(), blocked, "tester", domain.InsertIssueOpts{}))
-	_, err := s.Runner().ExecContext(s.Ctx(), "UPDATE issues SET is_blocked = 1 WHERE id = ?", "bd-rdy-blk-1")
-	s.Require().NoError(err)
+	s.classicAddDep("bd-rdy-blk-1", "bd-rdy-blk-2", types.DepBlocks)
 
 	out, err := r.GetReadyWork(s.Ctx(), types.WorkFilter{})
 	s.Require().NoError(err)
 	s.NotContains(issueIDsFrom(out), "bd-rdy-blk-1")
+	s.Contains(issueIDsFrom(out), "bd-rdy-blk-2")
 }
 
 func (s *testSuite) readyExcludesEphemeral() {

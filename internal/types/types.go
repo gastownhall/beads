@@ -1550,6 +1550,15 @@ func (d DependencyType) AffectsReadyWork() bool {
 	return d == DepBlocks || d == DepParentChild || d == DepConditionalBlocks || d == DepWaitsFor
 }
 
+// ReadyAffectingDependencyTypes returns every dependency type for which
+// AffectsReadyWork is true, the one list the ready-work SQL renders its
+// type filter from. Kept beside the predicate so the two cannot drift;
+// TestReadyAffectingDependencyTypesMatchesAffectsReadyWork pins the
+// agreement in both directions.
+func ReadyAffectingDependencyTypes() []DependencyType {
+	return []DependencyType{DepBlocks, DepParentChild, DepConditionalBlocks, DepWaitsFor}
+}
+
 // IsBlockingEdge returns true if this dependency type represents a hard blocker.
 // Unlike AffectsReadyWork, this excludes parent-child (structural, not blocking).
 // Used by dep tree rendering to decide whether the [BLOCKED] badge applies.

@@ -276,8 +276,11 @@ func TestBuildReadyWorkWhereBatchesIDSets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got := strings.Count(where, "id NOT IN ("); got != 2 {
-		t.Errorf("expected 2 batched NOT IN clauses for %d IDs, got %d", len(ids), got)
+	// 3 = the batched deferred-child clauses plus the is_blocked guard's own
+	// id NOT IN (SELECT ...) subquery (which carries no args: its type list
+	// renders as constants).
+	if got := strings.Count(where, "id NOT IN ("); got != 3 {
+		t.Errorf("expected 3 NOT IN clauses (2 batched for %d IDs + is_blocked guard), got %d", len(ids), got)
 	}
 	wantArgs := len(ids) + len(ReadyWorkExcludeTypes(nil))
 	if len(args) != wantArgs {
@@ -300,8 +303,8 @@ func TestBuildReadyWorkWhereAppliesPolicyIDExclusions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildReadyWorkWhere: %v", err)
 	}
-	if got := strings.Count(where, "id NOT IN ("); got != 2 {
-		t.Fatalf("external policy exclusions produced %d NOT IN clauses, want 2", got)
+	if got := strings.Count(where, "id NOT IN ("); got != 3 {
+		t.Fatalf("external policy exclusions produced %d NOT IN clauses, want 3 (2 batched + is_blocked guard)", got)
 	}
 	wantArgs := len(ids) + len(ReadyWorkExcludeTypes(nil))
 	if len(args) != wantArgs {
@@ -599,6 +602,47 @@ func TestBuildReadyWorkWhereStatusFilter(t *testing.T) {
 // leases and wisp_labels are joined or hydrated by that query but are not the
 // wisp plane being absent, so tolerating them turns a broken database into an
 // empty result.
+// gh#3268: the ready WHERE must not trust the denormalized is_blocked flag
+// alone. A row with no ready-affecting dependency rows of its own can never
+// be legitimately blocked (every leg of the recompute's should-be-blocked
+// union selects issue_id from the row's own dependency rows), so the clause
+// reads around a stale flag: rows with any such edge keep trusting the flag,
+// rows without any are listed. The subquery is uncorrelated — SearchCountsSQL
+// renders this WHERE inside a pre-join subquery where the main table's alias
+// is not fixed — and the type list renders as quoted constants, so the guard
+// contributes no bound args.
+func TestBuildReadyWorkWhereIsBlockedGuard(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name   string
+		tables FilterTables
+	}{
+		{"issues_table", IssuesFilterTables},
+		{"wisps_table", WispsFilterTables},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			where, args, err := BuildReadyWorkWhere(types.WorkFilter{}, tt.tables, ReadyWorkWhereInputs{})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			wantClause := fmt.Sprintf(
+				"(is_blocked = 0 OR id NOT IN (SELECT issue_id FROM %s WHERE issue_id IS NOT NULL AND type IN ('blocks', 'parent-child', 'conditional-blocks', 'waits-for')))",
+				tt.tables.Dependencies)
+			if !strings.Contains(where, wantClause) {
+				t.Errorf("is_blocked guard clause missing or malformed.\n where = %s\n want substring = %s", where, wantClause)
+			}
+			// The guard's type list is constants, so an empty filter still
+			// binds only the default issue_type exclusion's args.
+			wantArgs := len(ReadyWorkExcludeTypes(nil))
+			if len(args) != wantArgs {
+				t.Errorf("args = %d, want %d (guard must add none): %v", len(args), wantArgs, args)
+			}
+		})
+	}
+}
+
 func TestOptionalWispTable(t *testing.T) {
 	t.Parallel()
 

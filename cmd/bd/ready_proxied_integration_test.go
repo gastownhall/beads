@@ -621,11 +621,15 @@ func TestProxiedServerReady2(t *testing.T) {
 			t.Errorf("expected 'No open issues', got: %s", stdout)
 		}
 
-		blocked := bdProxiedCreate(t, bd, p.dir, "Blocked open issue")
-		db := openProxiedDB(t, p)
-		if _, err := db.ExecContext(context.Background(), "UPDATE issues SET is_blocked = 1 WHERE id = ?", blocked.ID); err != nil {
-			t.Fatalf("mark issue blocked: %v", err)
+		// A real blocking edge, not a planted flag: a stale is_blocked=1 on
+		// an edgeless row is listed by ready now (gh#3268). The blocker is
+		// in_progress so it is not itself ready work, and the empty state
+		// stays honest about what blocks the dependent.
+		blocker := bdProxiedCreate(t, bd, p.dir, "Empty-state blocker")
+		if _, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "update", blocker.ID, "--status", "in_progress"); err != nil {
+			t.Fatalf("bd update blocker to in_progress: %v\n%s", err, stderr)
 		}
+		bdProxiedCreate(t, bd, p.dir, "Blocked open issue", "--deps", "depends-on:"+blocker.ID)
 		stdout, _ = bdProxiedReadyCapture(t, bd, p)
 		if !strings.Contains(stdout, "No ready work found") {
 			t.Errorf("expected 'No ready work found', got: %s", stdout)

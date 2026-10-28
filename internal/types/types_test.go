@@ -844,6 +844,33 @@ func TestDependencyTypeAffectsReadyWork(t *testing.T) {
 	}
 }
 
+// ReadyAffectingDependencyTypes is the one list the ready-work SQL renders
+// its type filter from, so it must stay in exact agreement with the
+// AffectsReadyWork predicate in both directions: no type may be in the slice
+// but not the predicate (the guard would then keep trusting a stale flag for
+// a type the recompute can legitimately mark), and none may be in the
+// predicate but not the slice (the guard would then read around a flag set
+// from that type's edges and show blocked work).
+func TestReadyAffectingDependencyTypesMatchesAffectsReadyWork(t *testing.T) {
+	t.Parallel()
+
+	inSlice := make(map[DependencyType]bool)
+	for _, depType := range ReadyAffectingDependencyTypes() {
+		if inSlice[depType] {
+			t.Errorf("ReadyAffectingDependencyTypes lists %q twice", depType)
+		}
+		inSlice[depType] = true
+		if !depType.AffectsReadyWork() {
+			t.Errorf("ReadyAffectingDependencyTypes lists %q, but AffectsReadyWork(%q) = false", depType, depType)
+		}
+	}
+	for _, depType := range WellKnownDependencyTypes() {
+		if depType.AffectsReadyWork() && !inSlice[depType] {
+			t.Errorf("AffectsReadyWork(%q) = true, but ReadyAffectingDependencyTypes omits it", depType)
+		}
+	}
+}
+
 func TestParseWaitsForGateMetadata(t *testing.T) {
 	tests := []struct {
 		name     string

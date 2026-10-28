@@ -112,10 +112,33 @@ func BuildReadyWorkWhere(filter types.WorkFilter, tables FilterTables, in ReadyW
 	default:
 		statusClause = "status IN ('open', 'in_progress')"
 	}
+	// gh#3268: is_blocked is derived state the recompute maintains, and it
+	// goes stale (merge-time recompute skipped, planner bugs — see bd doctor
+	// and bd recompute-blocked). A row with no ready-affecting dependency
+	// rows of its own can never be legitimately blocked — every leg of the
+	// recompute's should-be-blocked union selects issue_id from the row's own
+	// per-table dependency rows over exactly these types — so read around a
+	// stale flag rather than hide the row behind it. Rows with any such edge
+	// keep trusting the flag, so no blocked work is shown.
+	//
+	// The subquery is uncorrelated on purpose: SearchCountsSQL renders this
+	// WHERE inside a pre-join subquery where the main table's alias is not
+	// fixed, and the dependency tables have their own id column, so a
+	// correlated bare `id` would bind to the wrong table. issue_id IS NOT
+	// NULL keeps NOT IN null-safe. The type list renders as quoted
+	// constants, not bound args: it is the fixed well-known set, like the
+	// status literals above.
+	readyAffecting := types.ReadyAffectingDependencyTypes()
+	quotedTypes := make([]string, len(readyAffecting))
+	for i, depType := range readyAffecting {
+		quotedTypes[i] = "'" + string(depType) + "'"
+	}
 	whereClauses := []string{
 		statusClause,
 		"(pinned = 0 OR pinned IS NULL)",
-		"is_blocked = 0",
+		fmt.Sprintf(
+			"(is_blocked = 0 OR id NOT IN (SELECT issue_id FROM %s WHERE issue_id IS NOT NULL AND type IN (%s)))",
+			tables.Dependencies, strings.Join(quotedTypes, ", ")),
 	}
 	if !filter.IncludeEphemeral {
 		whereClauses = append(whereClauses, "(ephemeral = 0 OR ephemeral IS NULL)")
