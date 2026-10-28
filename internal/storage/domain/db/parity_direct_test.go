@@ -336,6 +336,26 @@ func (s *testSuite) TestParityReadyStaleEdgelessFlag() {
 		"an edgeless issue with a stale is_blocked flag is ready work")
 }
 
+// Case 4d (GH#3268): edges that never block (related, discovered-from) do not
+// make a stale is_blocked flag believable: only ready-affecting rows can, so
+// the guard ignores the rest and the issue is ready on both stacks.
+func (s *testSuite) TestParityReadyStaleFlagNonReadyAffectingEdges() {
+	base := s.parityBase()
+	for n, id := range []string{"bd-par-nra-r", "bd-par-nra-b", "bd-par-nra-d"} {
+		minute := n
+		s.seedParityIssue(id, func(i *types.Issue) {
+			i.CreatedAt = base.Add(time.Duration(minute) * time.Minute)
+		}, false)
+	}
+	s.classicAddDep("bd-par-nra-b", "bd-par-nra-r", types.DepRelated)
+	s.classicAddDep("bd-par-nra-d", "bd-par-nra-r", types.DepDiscoveredFrom)
+	s.plantStaleBlocked("bd-par-nra-b", "bd-par-nra-d")
+
+	ready := s.readyOnBothStacks("stale flag over non-ready-affecting edges")
+	s.ElementsMatch([]string{"bd-par-nra-r", "bd-par-nra-b", "bd-par-nra-d"}, ready,
+		"related / discovered-from edges never block, so their stale flags must not hide the issues")
+}
+
 // Case 5: ready limit boundary — membership parity at the cut, and the domain
 // HasMore flag agrees with what the direct stack's unlimited read implies.
 func (s *testSuite) TestParityReadyLimitBoundary() {

@@ -630,4 +630,13 @@ func TestEmbeddedReadyStaleBlockedFlagOnEdgelessIssue(t *testing.T) {
 			t.Errorf("bd dep list %s should report no dependencies:\n%s", edgeless.ID, out)
 		}
 	})
+
+	t.Run("related_only_edge_does_not_make_the_flag_believable", func(t *testing.T) {
+		related := bdCreate(t, bd, dir, "GH3268 related-only stale flag", "--type", "task")
+		bdRunOK(t, bd, dir, "dep", "add", related.ID, edgeless.ID, "--type", "related")
+		plantStaleBlockedFlag(t, beadsDir, "rs", related.ID)
+		if ids := readyJSONIDs(t, bd, dir); !ids[related.ID] {
+			t.Fatalf("bd ready --json = %v, want it to list %s (its only edge is related, which never blocks)", ids, related.ID)
+		}
+	})
 }
