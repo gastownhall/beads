@@ -621,14 +621,21 @@ func TestProxiedServerReady2(t *testing.T) {
 			t.Errorf("expected 'No open issues', got: %s", stdout)
 		}
 
-		blocked := bdProxiedCreate(t, bd, p.dir, "Blocked open issue")
-		db := openProxiedDB(t, p)
-		if _, err := db.ExecContext(context.Background(), "UPDATE issues SET is_blocked = 1 WHERE id = ?", blocked.ID); err != nil {
-			t.Fatalf("mark issue blocked: %v", err)
+		// An in-progress issue is open but not ready, and nothing is blocked:
+		// the message must not claim blocking dependencies (GH#3268).
+		wip := bdProxiedCreate(t, bd, p.dir, "In progress issue")
+		if out, err := bdProxiedRun(t, bd, p.dir, "update", wip.ID, "--status", "in_progress"); err != nil {
+			t.Fatalf("set in_progress: %v\n%s", err, out)
 		}
 		stdout, _ = bdProxiedReadyCapture(t, bd, p)
 		if !strings.Contains(stdout, "No ready work found") {
 			t.Errorf("expected 'No ready work found', got: %s", stdout)
+		}
+		if strings.Contains(stdout, "all issues have blocking dependencies") {
+			t.Errorf("no issue is blocked, but the message claims blocking dependencies: %s", stdout)
+		}
+		if !strings.Contains(stdout, "bd recompute-blocked") {
+			t.Errorf("expected the neutral message to name 'bd recompute-blocked', got: %s", stdout)
 		}
 	})
 

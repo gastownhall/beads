@@ -251,12 +251,9 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			if stats, statsErr := activeStore.GetStatistics(ctx); statsErr == nil {
 				hasOpenIssues = stats.OpenIssues > 0 || stats.InProgressIssues > 0
 			}
-			if hasOpenIssues {
-				fmt.Printf("\n%s No ready work found (all issues have blocking dependencies)\n\n",
-					ui.RenderWarn("✨"))
-			} else {
-				fmt.Printf("\n%s No open issues\n\n", ui.RenderPass("✨"))
-			}
+			printReadyEmptyState(hasOpenIssues, func() ([]*types.BlockedIssue, error) {
+				return activeStore.GetBlockedIssues(ctx, filter)
+			})
 			maybeShowTip(store)
 			return nil
 		}
@@ -931,4 +928,27 @@ func printReadyItemDependencies(item types.ReadyItem) {
 	if len(item.OpenDependencies) > 0 {
 		fmt.Printf("    Open dependencies (not blocking): %s\n", strings.Join(item.OpenDependencies, ", "))
 	}
+}
+
+// printReadyEmptyState prints plain `bd ready`'s empty state for both
+// renderers, so the two texts cannot drift. It claims blocking dependencies
+// only when bd blocked names a blocked issue for the same filter: open issues
+// are also missing from ready when they are in progress, deferred or filtered
+// out, or when a stale is_blocked flag hides them (GH#3268). A failed blocked
+// read falls back to the neutral message instead of failing bd ready.
+func printReadyEmptyState(hasOpenIssues bool, listBlocked func() ([]*types.BlockedIssue, error)) {
+	if !hasOpenIssues {
+		fmt.Printf("\n%s No open issues\n\n", ui.RenderPass("✨"))
+		return
+	}
+	if blocked, err := listBlocked(); err == nil && len(blocked) > 0 {
+		fmt.Printf("\n%s No ready work found (all issues have blocking dependencies)\n\n",
+			ui.RenderWarn("✨"))
+		return
+	}
+	fmt.Printf("\n%s No ready work found\n\n", ui.RenderWarn("✨"))
+	fmt.Println("  No open issue is blocked by an open dependency. Check 'bd list' for")
+	fmt.Println("  in-progress, deferred or filtered-out issues, and 'bd doctor' for a stale")
+	fmt.Println("  blocked flag (repair: 'bd recompute-blocked').")
+	fmt.Println()
 }

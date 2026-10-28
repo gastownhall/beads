@@ -640,3 +640,44 @@ func TestEmbeddedReadyStaleBlockedFlagOnEdgelessIssue(t *testing.T) {
 		}
 	})
 }
+
+// TestEmbeddedReadyEmptyStateMessage pins plain `bd ready`'s empty state: the
+// "all issues have blocking dependencies" claim used to print whenever any
+// issue was open or in progress, though nothing was blocked (GH#3268). It is
+// now made only when bd blocked names a blocked issue for the same filter;
+// otherwise the message points at bd list and at the stale-flag repair.
+func TestEmbeddedReadyEmptyStateMessage(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	const claim = "all issues have blocking dependencies"
+
+	assertNeutral := func(t *testing.T, out string) {
+		t.Helper()
+		if !strings.Contains(out, "No ready work found") {
+			t.Errorf("expected 'No ready work found':\n%s", out)
+		}
+		if strings.Contains(out, claim) {
+			t.Errorf("nothing is blocked, yet bd ready claims %q:\n%s", claim, out)
+		}
+		if !strings.Contains(out, "bd recompute-blocked") {
+			t.Errorf("expected the stale-flag repair hint naming bd recompute-blocked:\n%s", out)
+		}
+	}
+
+	dir, _, _ := bdInit(t, bd, "--prefix", "re")
+	wip := bdCreate(t, bd, dir, "Only in-progress issue", "--type", "task")
+	bdRunOK(t, bd, dir, "update", wip.ID, "--status", "in_progress")
+
+	t.Run("only_an_in_progress_issue", func(t *testing.T) {
+		assertNeutral(t, bdRunOK(t, bd, dir, "ready"))
+	})
+
+	t.Run("label_matches_no_open_issue", func(t *testing.T) {
+		bdCreate(t, bd, dir, "Open but unlabelled", "--type", "task")
+		assertNeutral(t, bdRunOK(t, bd, dir, "ready", "--label", "nomatch"))
+	})
+}
