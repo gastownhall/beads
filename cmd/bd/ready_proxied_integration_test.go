@@ -637,6 +637,17 @@ func TestProxiedServerReady2(t *testing.T) {
 		if !strings.Contains(stdout, "bd recompute-blocked") {
 			t.Errorf("expected the neutral message to name 'bd recompute-blocked', got: %s", stdout)
 		}
+
+		// A real blocker keeps the exact claim: the open issue depends on the
+		// in-progress one, so bd blocked lists it.
+		bdProxiedCreate(t, bd, p.dir, "Blocked by the in-progress issue", "--deps", "depends-on:"+wip.ID)
+		stdout, _ = bdProxiedReadyCapture(t, bd, p)
+		if !strings.Contains(stdout, "No ready work found (all issues have blocking dependencies)") {
+			t.Errorf("expected the exact blocking-claim line, got: %s", stdout)
+		}
+		if strings.Contains(stdout, "bd recompute-blocked") {
+			t.Errorf("a real blocker must not get the stale-flag hint, got: %s", stdout)
+		}
 	})
 
 	t.Run("include_ephemeral_surfaces_wisps", func(t *testing.T) {

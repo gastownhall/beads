@@ -681,3 +681,28 @@ func TestEmbeddedReadyEmptyStateMessage(t *testing.T) {
 		assertNeutral(t, bdRunOK(t, bd, dir, "ready", "--label", "nomatch"))
 	})
 }
+
+// TestEmbeddedReadyEmptyStateRealBlocker pins that a workspace whose only
+// open issue is blocked by an in-progress one keeps the exact blocking-claim
+// line (GH#3268): bd blocked lists the issue, so the claim is true.
+func TestEmbeddedReadyEmptyStateRealBlocker(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "rb")
+	blocker := bdCreate(t, bd, dir, "In-progress blocker", "--type", "task")
+	blocked := bdCreate(t, bd, dir, "Open issue blocked by it", "--type", "task")
+	bdRunOK(t, bd, dir, "dep", "add", blocked.ID, blocker.ID)
+	bdRunOK(t, bd, dir, "update", blocker.ID, "--status", "in_progress")
+
+	out := bdRunOK(t, bd, dir, "ready")
+	if !strings.Contains(out, "No ready work found (all issues have blocking dependencies)") {
+		t.Errorf("expected the exact blocking-claim line:\n%s", out)
+	}
+	if strings.Contains(out, "bd recompute-blocked") {
+		t.Errorf("a real blocker must not get the stale-flag hint:\n%s", out)
+	}
+}
