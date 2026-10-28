@@ -1040,7 +1040,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// authorize cross-boundary operations on remote history (see
 		// CheckRemoteSafety at cmd/bd/init_safety.go and
 		// engdocs/adr/0002-init-safety-invariants.md), nor recreating a
-		// missing server-mode database (guardMissingServerDatabase below;
+		// missing server-mode database (guardMissingServerDatabaseFor below;
 		// engdocs/adr/0004-missing-database-guard-signal.md).
 		if reinitLocal {
 			// be-5up5 round 2 (review of PR #5791): --reinit-local/--force skip
@@ -1051,7 +1051,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			// prompt and no destroy token. Those flags authorize destroying a
 			// database that exists; only --recreate-missing authorizes creating
 			// one where the configured database has gone missing.
-			if err := guardMissingServerDatabase(prefix); err != nil {
+			if err := guardMissingServerDatabaseFor(initID.BeadsDir, &initID.Configured, prefix); err != nil {
 				return fmt.Errorf("%v", err)
 			}
 		}
@@ -3271,6 +3271,15 @@ func initModeExplicitlyRequested(cmd *cobra.Command) bool {
 // "already initialized" refusal that --reinit-local is legitimately meant to
 // bypass.
 func guardMissingServerDatabaseAt(beadsDir string, prefix string) error {
+	return guardMissingServerDatabaseFor(beadsDir, nil, prefix)
+}
+
+// guardMissingServerDatabaseFor is guardMissingServerDatabaseAt about the
+// database configured names: init passes its initIdentity.Configured, so the
+// witness is the workspace's own database at its own endpoint even after
+// --database/--server-host/--server-port were promoted into the environment
+// (GH#6172). A nil configured keeps the getters' answer.
+func guardMissingServerDatabaseFor(beadsDir string, configured *initDBRef, prefix string) error {
 	if initAllowRecreateMissing {
 		return nil
 	}
@@ -3294,6 +3303,12 @@ func guardMissingServerDatabaseAt(beadsDir string, prefix string) error {
 	host := cfg.GetDoltServerHost()
 	port := doltserver.DefaultConfig(beadsDir).Port
 	dbName := cfg.GetDoltDatabase()
+	if configured != nil {
+		host, dbName = configured.Host, configured.subject()
+		if configured.Port > 0 {
+			port = configured.Port
+		}
+	}
 	doltPath := doltserver.ResolveDoltDir(beadsDir)
 
 	// TIER 1 (ADR-0004, engdocs/adr/0004-missing-database-guard-signal.md).
@@ -3358,16 +3373,6 @@ func guardMissingServerDatabaseAt(beadsDir string, prefix string) error {
 	// project_id — the pre-GH#2372 cell permitted just above only when nothing
 	// local exists. Tell the message which evidence it actually has.
 	return initGuardMissingServerDBMessage(dbName, host, port, prefix, cfg.ProjectID != "")
-}
-
-// guardMissingServerDatabase resolves the init target the same way
-// checkExistingBeadsData does, then applies guardMissingServerDatabaseAt.
-func guardMissingServerDatabase(prefix string) error {
-	beadsDir := resolveInitBeadsDir()
-	if beadsDir == "" {
-		return nil
-	}
-	return guardMissingServerDatabaseAt(beadsDir, prefix)
 }
 
 func checkExistingBeadsData(prefix string) error {
