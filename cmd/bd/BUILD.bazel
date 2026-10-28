@@ -922,6 +922,7 @@ go_test(
         "info_test.go",
         "init_agent_test.go",
         "init_cancel_e2e_test.go",
+        "init_central_config_test.go",
         "init_commit_test.go",
         "init_embedded_test.go",
         "init_endpoint_test.go",

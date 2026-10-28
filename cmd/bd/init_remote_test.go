@@ -303,7 +303,7 @@ func TestInitRemoteCloneModeFollowsHostOwnership(t *testing.T) {
 	}
 }
 
-func TestInitDoltServerTLSFromEnv(t *testing.T) {
+func TestInitDoltServerTLS(t *testing.T) {
 	tests := []struct {
 		name string
 		env  string
@@ -324,8 +324,8 @@ func TestInitDoltServerTLSFromEnv(t *testing.T) {
 			} else {
 				t.Setenv("BEADS_DOLT_SERVER_TLS", tc.env)
 			}
-			if got := initDoltServerTLSFromEnv(); got != tc.want {
-				t.Fatalf("initDoltServerTLSFromEnv() = %v, want %v", got, tc.want)
+			if got := initDoltServerTLS(); got != tc.want {
+				t.Fatalf("initDoltServerTLS() = %v, want %v", got, tc.want)
 			}
 		})
 	}
