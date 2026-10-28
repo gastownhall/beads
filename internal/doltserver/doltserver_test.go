@@ -2042,6 +2042,150 @@ func TestResolveServerMode_ExplicitPort(t *testing.T) {
 	}
 }
 
+// TestResolveServerModeCentralConfigExternal pins check 4b (GH#3895): a
+// workspace already in server storage mode whose effective host or port the
+// central server config supplies is externally managed — bd never auto-starts
+// a server for the endpoint one file points every workspace on the machine
+// at — while embedded and mode-less workspaces resolve exactly as before.
+// The port the central config supplied is declared as the setting that makes
+// the workspace external, and metadata.json's port no longer claims Sole
+// when 4b would fire.
+func TestResolveServerModeCentralConfigExternal(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	t.Setenv("BEADS_DOLT_PORT", "")
+	isolateUserConfig(t)
+
+	centralPath := filepath.Join(t.TempDir(), "server.json")
+	writeCentralServerJSON := func(t *testing.T, body string) {
+		t.Helper()
+		if err := os.WriteFile(centralPath, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("BEADS_CENTRAL_CONFIG", centralPath)
+	}
+	serverModeMeta := func(t *testing.T) string {
+		t.Helper()
+		dir := t.TempDir()
+		metaCfg := &configfile.Config{
+			Backend:   configfile.BackendDolt,
+			DoltMode: configfile.DoltModeServer,
+		}
+		if err := metaCfg.Save(dir); err != nil {
+			t.Fatal(err)
+		}
+		return dir
+	}
+
+	t.Run("central host makes a server-mode workspace external", func(t *testing.T) {
+		writeCentralServerJSON(t, `{"dolt_server_host":"db.central.invalid","dolt_server_port":6007}`)
+		mode := ResolveServerMode(serverModeMeta(t))
+		if mode != ServerModeExternal {
+			t.Errorf("mode = %v, want ServerModeExternal: a non-local central host names a server bd never runs", mode)
+		}
+	})
+
+	t.Run("central port makes a server-mode workspace external", func(t *testing.T) {
+		writeCentralServerJSON(t, `{"dolt_server_port":6007}`)
+		dir := serverModeMeta(t)
+		mode := ResolveServerMode(dir)
+		if mode != ServerModeExternal {
+			t.Fatalf("mode = %v, want ServerModeExternal: one shared port cannot name a server one workspace owns", mode)
+		}
+		// The port the external classification keys on is declared as the
+		// setting that makes the workspace external, so down-endpoint
+		// advice reads "externally managed", not `bd dolt start`.
+		decl := ExternalPortSetting(dir, PortSourceCentralConfig, 6007)
+		if decl.Setting != "dolt_server_port in "+centralPath {
+			t.Errorf("decl.Setting = %q, want the central server config's port", decl.Setting)
+		}
+		if !decl.NamesEndpoint {
+			t.Error("decl.NamesEndpoint = false, want true for the port the dial used")
+		}
+	})
+
+	t.Run("metadata host and port still win", func(t *testing.T) {
+		writeCentralServerJSON(t, `{"dolt_server_host":"db.central.invalid","dolt_server_port":6007}`)
+		dir := t.TempDir()
+		metaCfg := &configfile.Config{
+			Backend:        configfile.BackendDolt,
+			DoltMode:       configfile.DoltModeServer,
+			DoltServerHost: "127.0.0.1",
+			DoltServerPort: 5555,
+		}
+		if err := metaCfg.Save(dir); err != nil {
+			t.Fatal(err)
+		}
+		if mode := ResolveServerMode(dir); mode != ServerModeExternal {
+			t.Errorf("mode = %v, want ServerModeExternal via metadata's own port (check 4)", mode)
+		}
+		// With no port in play anywhere, a workspace whose metadata names a
+		// LOCAL host keeps bd ownership of the lifecycle: the central host
+		// cannot override it. (With a central port in play 4b still fires —
+		// a shared port is external wherever the server lives.)
+		writeCentralServerJSON(t, `{"dolt_server_host":"db.central.invalid"}`)
+		dir = t.TempDir()
+		metaCfg.DoltServerPort = 0
+		if err := metaCfg.Save(dir); err != nil {
+			t.Fatal(err)
+		}
+		if mode := ResolveServerMode(dir); mode != ServerModeOwned {
+			t.Errorf("mode = %v, want ServerModeOwned: metadata's local host outranks the central config's", mode)
+		}
+	})
+
+	t.Run("embedded and mode-less workspaces resolve as before", func(t *testing.T) {
+		writeCentralServerJSON(t, `{"dolt_server_host":"db.central.invalid","dolt_server_port":6007}`)
+		dir := t.TempDir()
+		if err := (&configfile.Config{
+			Backend:   configfile.BackendDolt,
+			DoltMode: configfile.DoltModeEmbedded,
+		}).Save(dir); err != nil {
+			t.Fatal(err)
+		}
+		if mode := ResolveServerMode(dir); mode != ServerModeEmbedded {
+			t.Errorf("mode = %v, want ServerModeEmbedded: an explicit embedded mode still wins (check 3)", mode)
+		}
+		dir = t.TempDir()
+		if err := (&configfile.Config{Backend: configfile.BackendDolt}).Save(dir); err != nil {
+			t.Fatal(err)
+		}
+		if mode := ResolveServerMode(dir); mode != ServerModeOwned {
+			t.Errorf("mode = %v, want ServerModeOwned: the central config never selects a workspace's mode", mode)
+		}
+	})
+
+	t.Run("metadata port is not Sole when 4b would fire", func(t *testing.T) {
+		writeCentralServerJSON(t, `{"dolt_server_host":"db.central.invalid"}`)
+		dir := serverModeMeta(t)
+		writeMetadataPort(t, dir, 5001)
+		// config.yaml dolt.port outranks dolt_server_port for the dial, so
+		// the metadata port names another port than the one dialed.
+		configDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte("dolt.port: 5002\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("BEADS_DIR", configDir)
+		if err := config.Initialize(); err != nil {
+			t.Fatalf("config.Initialize: %v", err)
+		}
+		t.Cleanup(config.ResetForTesting)
+
+		decl := ExternalPortSetting(dir, PortSourceConfigYaml, 5002)
+		if decl.Setting == "" || decl.NamesEndpoint {
+			t.Fatalf("decl = %+v, want the metadata port declaring a non-dialed endpoint", decl)
+		}
+		if decl.Sole {
+			t.Error("decl.Sole = true, want false: the central config's host still declares the workspace external (4b)")
+		}
+		if strings.Contains(decl.Advice("db.central.invalid:5002"), "Removing dolt_server_port lets bd manage the server") {
+			t.Errorf("advice says removing dolt_server_port lets bd manage the server:\n%s", decl.Advice("db.central.invalid:5002"))
+		}
+	})
+}
+
 func TestResolveServerMode_HostInferredExternal(t *testing.T) {
 	// GH#3545: a non-localhost host with no explicit mode or port means
 	// the server lives on another machine — bd cannot own its lifecycle,
