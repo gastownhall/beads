@@ -862,7 +862,10 @@ reports conflicts.`,
 		if st == nil {
 			return HandleError("no store available")
 		}
-		remote, _ := cmd.Flags().GetString("remote")
+		remote, err := remoteFromArgs(cmd, args)
+		if err != nil {
+			return HandleError("%v", err)
+		}
 		strategy, _ := cmd.Flags().GetString("strategy")
 		if strategy != "" {
 			if err := versioncontrolops.ValidateConflictStrategy(strategy); err != nil {
@@ -910,7 +913,6 @@ reports conflicts.`,
 			return HandleError("%v", err)
 		}
 		fmt.Println("Pulling from Dolt remote...")
-		var err error
 		if strategy != "" {
 			err = puller.PullWithStrategy(ctx, strategy)
 		} else {

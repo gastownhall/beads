@@ -3094,6 +3094,9 @@ type positionalRemotePushStore struct {
 	defaultPushCalled bool
 	pushedRemotes     []string
 	pushedForces      []bool
+	defaultPulls      int
+	pulledRemotes     []string
+	strategies        []string
 }
 
 func (m *positionalRemotePushStore) Push(context.Context) error {
@@ -3117,6 +3120,32 @@ func (m *positionalRemotePushStore) ListRemotes(context.Context) ([]storage.Remo
 		{Name: "origin", URL: "git+ssh://git@github.com/example/widgets.git"},
 		{Name: "1st", URL: "git+ssh://git@github.com/example/widgets1.git"},
 	}, nil
+}
+
+// Pull side of the same recording store: a default pull records a
+// default-remote call, a named pull records the remote, and --strategy rows
+// record the remote (with strategy) so a regression cannot hide behind a
+// panic on the embedded nil interface.
+func (m *positionalRemotePushStore) Pull(context.Context) error {
+	m.defaultPulls++
+	return nil
+}
+
+func (m *positionalRemotePushStore) PullRemote(_ context.Context, remote string) error {
+	m.pulledRemotes = append(m.pulledRemotes, remote)
+	return nil
+}
+
+func (m *positionalRemotePushStore) PullWithStrategy(_ context.Context, strategy string) error {
+	m.defaultPulls++
+	m.strategies = append(m.strategies, strategy)
+	return nil
+}
+
+func (m *positionalRemotePushStore) PullRemoteWithStrategy(_ context.Context, remote, strategy string) error {
+	m.pulledRemotes = append(m.pulledRemotes, remote)
+	m.strategies = append(m.strategies, strategy)
+	return nil
 }
 
 // resetDoltTransferFlags returns push and pull's flags to their defaults.
@@ -3200,6 +3229,41 @@ func TestDoltPushPositionalRemoteIsNotSilentlyIgnored(t *testing.T) {
 		}
 		if len(fake.pushedRemotes) != 1 || fake.pushedRemotes[0] != "1st" || !fake.pushedForces[0] {
 			t.Errorf("bd dolt push 1st --force: want PushRemote(\"1st\", true), got %v; output: %q", fake.pushedRemotes, out)
+		}
+	})
+
+	t.Run("bd dolt pull 1st pulls 1st", func(t *testing.T) {
+		resetDoltTransferFlags(t)
+		fake := &positionalRemotePushStore{}
+		store = fake
+		out := captureStdout(t, func() error { return run(t, doltPullCmd, []string{"1st"}) })
+		if fake.defaultPulls != 0 {
+			t.Errorf("bd dolt pull 1st pulled from the default remote instead of %q; output: %q", "1st", out)
+		}
+		if len(fake.pulledRemotes) != 1 || fake.pulledRemotes[0] != "1st" {
+			t.Errorf("bd dolt pull 1st: want PullRemote(\"1st\"), got %v; output: %q", fake.pulledRemotes, out)
+		}
+		if want := `Pulling from Dolt remote "1st"...`; !strings.Contains(out, want) {
+			t.Errorf("bd dolt pull 1st output lacks %q, got: %q", want, out)
+		}
+	})
+
+	t.Run("bd dolt pull 1st --strategy theirs pulls 1st with the strategy", func(t *testing.T) {
+		resetDoltTransferFlags(t)
+		if err := doltPullCmd.Flags().Set("strategy", "theirs"); err != nil {
+			t.Fatal(err)
+		}
+		fake := &positionalRemotePushStore{}
+		store = fake
+		out := captureStdout(t, func() error { return run(t, doltPullCmd, []string{"1st"}) })
+		if fake.defaultPulls != 0 {
+			t.Errorf("bd dolt pull 1st --strategy theirs pulled from the default remote instead of %q; output: %q", "1st", out)
+		}
+		if len(fake.pulledRemotes) != 1 || fake.pulledRemotes[0] != "1st" || len(fake.strategies) != 1 || fake.strategies[0] != "theirs" {
+			t.Errorf("bd dolt pull 1st --strategy theirs: want PullRemoteWithStrategy(\"1st\", \"theirs\"), got %v/%v; output: %q", fake.pulledRemotes, fake.strategies, out)
+		}
+		if want := `Pulling from Dolt remote "1st"...`; !strings.Contains(out, want) {
+			t.Errorf("bd dolt pull 1st --strategy theirs output lacks %q, got: %q", want, out)
 		}
 	})
 }
