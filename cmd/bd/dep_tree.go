@@ -26,6 +26,12 @@ type treeTarget struct {
 	rootID  string
 	walker  issueops.TreeWalker
 	cleanup func()
+	// relations hands back the neighbor-query surface for the store that
+	// answered the root, for the hidden-children note the human down view
+	// prints (noteHiddenChildren, cmd/bd/dep.go). It is a closure because it
+	// is fetched only when the note is needed — after resolution succeeded —
+	// and nil on no route.
+	relations func() (issueops.Relations, error)
 }
 
 // resolveTreeTarget resolves the argument to an exact id and hands back the tree
@@ -47,7 +53,7 @@ func resolveTreeTarget(ctx context.Context, arg string) (treeTarget, error) {
 		cleanup()
 		return treeTarget{}, err
 	}
-	return treeTarget{rootID: rootID, walker: walker, cleanup: cleanup}, nil
+	return treeTarget{rootID: rootID, walker: walker, cleanup: cleanup, relations: treeStore.IssueRelations}, nil
 }
 
 // proxiedTreeTarget resolves the argument against the proxied server and hands
@@ -77,7 +83,7 @@ func proxiedTreeTarget(ctx context.Context, arg string) (treeTarget, error) {
 	if err != nil {
 		return treeTarget{}, err
 	}
-	return treeTarget{rootID: rootID, walker: walker, cleanup: func() {}}, nil
+	return treeTarget{rootID: rootID, walker: walker, cleanup: func() {}, relations: proxiedIssueRelations}, nil
 }
 
 // isMermaidTreeFormat reports whether --format selects the mermaid renderer.
@@ -161,6 +167,22 @@ func runDepTree(cmd *cobra.Command, ctx context.Context, args []string) error {
 		// The role's slice is empty rather than nil for a successful call, so
 		// this is `[]` and never `null` without a guard here.
 		return outputJSON(tree)
+	}
+
+	// The human down view walks outbound edges only, so the root's own
+	// children — inbound parent-child edges — are invisible on it and a root
+	// with 26 children renders exactly what a childless root renders
+	// (GH#5151). Note them on stderr, never stdout, through the same
+	// Relations read `bd dep list <id> --direction=up --type=parent-child`
+	// makes, so the count always equals what the printed command lists. The
+	// role is fetched only here, only for this view: the machine formats
+	// returned above never reach it, and up/both/--reverse walk the side the
+	// children live on. The defer runs after the view's own stdout and
+	// before target.cleanup (LIFO), so the store is still live for the read.
+	if direction == issueops.TreeDown && target.relations != nil {
+		if rel, relErr := target.relations(); relErr == nil {
+			defer noteHiddenChildren(ctx, rel, target.rootID, "tree")
+		}
 	}
 
 	if len(tree) == 0 {

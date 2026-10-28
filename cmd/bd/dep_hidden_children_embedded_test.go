@@ -151,4 +151,44 @@ func TestEmbeddedDepDefaultDirectionNotesHiddenChildren(t *testing.T) {
 			t.Errorf("the printed command listed %d rows after a step closed, want 26:\n%s", got, up)
 		}
 	})
+	t.Run("tree_root_26", func(t *testing.T) {
+		// AC-2: the tree renders the root alone, stdout indistinguishable
+		// from a childless control, and stderr notes the 26 children with the
+		// command that shows them.
+		control := newHookedEpic("Hidden children root") // same title, type, class and status; no children
+		stdoutRoot, stderrRoot := bdDepInOut(t, "tree", root.ID)
+		stdoutControl, stderrControl := bdDepInOut(t, "tree", control.ID)
+		if want := strings.ReplaceAll(stdoutControl, control.ID, root.ID); stdoutRoot != want {
+			t.Fatalf("tree stdout for the 26-child root should equal the childless control's:\ngot  %q\nwant %q", stdoutRoot, want)
+		}
+		if !strings.Contains(stderrRoot, "note: "+root.ID+" has 26 child issue(s) not shown here") {
+			t.Errorf("stderr should note the 26 hidden children, got:\n%s", stderrRoot)
+		}
+		wantCmd := "To see them, run: bd dep tree " + root.ID + " --direction=up"
+		if !strings.Contains(stderrRoot, wantCmd) {
+			t.Errorf("stderr should carry %q, got:\n%s", wantCmd, stderrRoot)
+		}
+		if strings.Contains(stderrControl, "note:") {
+			t.Errorf("the childless control should carry no note, got:\n%s", stderrControl)
+		}
+
+		// The printed command shows all 26 steps.
+		up, _ := bdDepInOut(t, "tree", root.ID, "--direction", "up")
+		for _, step := range steps {
+			if !strings.Contains(up, step.ID) {
+				t.Errorf("the printed command's tree should reach %s:\n%s", step.ID, up)
+			}
+		}
+
+		// The note is independent of the walk's filters: --status and
+		// --max-depth narrow the rendered tree, not the note's count.
+		_, stderr := bdDepInOut(t, "tree", root.ID, "--status", "open")
+		if !strings.Contains(stderr, "note: "+root.ID+" has 26 child issue(s) not shown here") {
+			t.Errorf("--status=open should note the children too, got:\n%s", stderr)
+		}
+		_, stderr = bdDepInOut(t, "tree", root.ID, "--max-depth", "1")
+		if !strings.Contains(stderr, "note: "+root.ID+" has 26 child issue(s) not shown here") {
+			t.Errorf("--max-depth=1 should note the children too, got:\n%s", stderr)
+		}
+	})
 }
