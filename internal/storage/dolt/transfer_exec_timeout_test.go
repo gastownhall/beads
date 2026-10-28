@@ -288,3 +288,69 @@ func TestTransferReadTimeoutConfigurable(t *testing.T) {
 		t.Errorf("transfer error does not name %s: %v", env, err)
 	}
 }
+
+// TestTransferSitesStallHitConfiguredDeadline extends the push pin to every
+// other transfer site: the SQL pull (CALL DOLT_PULL), the GH#3144 fetch+merge
+// fallback behind it, and the federation transfers (execWithLongTimeout's
+// CALL DOLT_PUSH / CALL DOLT_FETCH). With BEADS_DOLT_TRANSFER_TIMEOUT=1s each
+// site must fail in about a second — not hang until the 5m hardcoded deadline —
+// with the annotated error that still wraps mysql.ErrInvalidConn.
+func TestTransferSitesStallHitConfiguredDeadline(t *testing.T) {
+	const env = "BEADS_DOLT_TRANSFER_TIMEOUT"
+	t.Setenv(env, "1s")
+
+	for _, tc := range []struct {
+		name   string
+		script transferScript
+		run    func(context.Context, *DoltStore) error
+	}{
+		{"pull", transferScript{}, func(ctx context.Context, s *DoltStore) error {
+			_, err := s.pullWithAutoResolveUnchecked(ctx, "origin", "CALL DOLT_PULL(?, ?)", "origin", s.branch)
+			return err
+		}},
+		{"pull fallback fetch", transferScript{
+			"CALL DOLT_PULL":  "err:fatal: did not specify a branch",
+			"CALL DOLT_FETCH": "stall",
+		}, func(ctx context.Context, s *DoltStore) error {
+			_, err := s.pullWithAutoResolveUnchecked(ctx, "origin", "CALL DOLT_PULL(?, ?)", "origin", s.branch)
+			return err
+		}},
+		{"pull fallback merge", transferScript{
+			"CALL DOLT_PULL":  "err:fatal: did not specify a branch",
+			"CALL DOLT_FETCH": "ok",
+			"CALL DOLT_MERGE": "stall",
+		}, func(ctx context.Context, s *DoltStore) error {
+			_, err := s.pullWithAutoResolveUnchecked(ctx, "origin", "CALL DOLT_PULL(?, ?)", "origin", s.branch)
+			return err
+		}},
+		{"federation push", transferScript{}, func(ctx context.Context, s *DoltStore) error {
+			return s.execWithLongTimeout(ctx, "CALL DOLT_PUSH(?, ?)", "origin", s.branch)
+		}},
+		{"federation fetch", transferScript{}, func(ctx context.Context, s *DoltStore) error {
+			return s.execWithLongTimeout(ctx, "CALL DOLT_FETCH(?)", "origin")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTransferStore(t, tc.script)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+
+			start := time.Now()
+			err := tc.run(ctx, s)
+			elapsed := time.Since(start)
+
+			if err == nil {
+				t.Fatal("transfer to a stalling server unexpectedly succeeded")
+			}
+			if elapsed > 5*time.Second {
+				t.Errorf("transfer ran %v with %s=1s; the read deadline ignores the variable (err: %v)", elapsed.Round(time.Second), env, err)
+			}
+			if !errors.Is(err, mysql.ErrInvalidConn) {
+				t.Errorf("transfer error = %v, want it still wrapping mysql.ErrInvalidConn", err)
+			}
+			if msg := err.Error(); !strings.Contains(msg, env) || !strings.Contains(msg, "1s") {
+				t.Errorf("transfer error does not name the deadline or %s: %q", env, msg)
+			}
+		})
+	}
+}
