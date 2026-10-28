@@ -6,10 +6,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/execenv"
 )
 
 // These tests build the index envelope git hands a pre-commit hook (GH#4080),
@@ -414,4 +416,147 @@ func TestExportJSONLForCommit_KeepsStagedDeletion(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestGitIndexEnv_Containment pins AC-4: an inherited GIT_INDEX_FILE that is
+// not a regular file directly inside the staging repo's git dir is ignored,
+// never created or written, and the export is staged into <gitdir>/index.
+func TestGitIndexEnv_Containment(t *testing.T) {
+	tests := []struct {
+		name string
+		// candidate returns the GIT_INDEX_FILE value and the file that must
+		// stay unchanged (or absent).
+		candidate func(*testing.T, commitIndexRepo) (value, guarded string)
+		cwd       string
+	}{
+		{
+			name: "another repository's index",
+			candidate: func(t *testing.T, r commitIndexRepo) (string, string) {
+				other := newCommitIndexRepo(t, false)
+				p := filepath.Join(other.gitDir, "index")
+				return p, p
+			},
+		},
+		{
+			name: "a nested repository's index",
+			candidate: func(t *testing.T, r commitIndexRepo) (string, string) {
+				sub := r.path("vendor/sub")
+				mkdirs(t, sub)
+				runGitForWorktreeTest(t, sub, "init", "-q")
+				writeFileForWorktreeTest(t, filepath.Join(sub, "f"), []byte("f\n"))
+				runGitForWorktreeTest(t, sub, "add", "f")
+				p := filepath.Join(sub, ".git", "index")
+				return p, p
+			},
+		},
+		{
+			name: "an index below the git dir, not directly in it",
+			candidate: func(t *testing.T, r commitIndexRepo) (string, string) {
+				p := filepath.Join(r.gitDir, "modules", "x", "index")
+				mkdirs(t, filepath.Dir(p))
+				copyFileForIndexTest(t, filepath.Join(r.gitDir, "index"), p)
+				return p, p
+			},
+		},
+		{
+			name: "a file in the worktree",
+			candidate: func(t *testing.T, r commitIndexRepo) (string, string) {
+				p := r.path("my-index")
+				copyFileForIndexTest(t, filepath.Join(r.gitDir, "index"), p)
+				return p, p
+			},
+		},
+		{
+			name: "a missing next-index file",
+			candidate: func(t *testing.T, r commitIndexRepo) (string, string) {
+				p := filepath.Join(r.gitDir, "next-index-999.lock")
+				return p, p
+			},
+		},
+		{
+			name: "a symlink in the git dir to a foreign index",
+			candidate: func(t *testing.T, r commitIndexRepo) (string, string) {
+				other := newCommitIndexRepo(t, false)
+				target := filepath.Join(other.gitDir, "index")
+				link := filepath.Join(r.gitDir, "foreign-index")
+				if err := os.Symlink(target, link); err != nil {
+					t.Skipf("symlinks unavailable: %v", err)
+				}
+				return link, target
+			},
+		},
+		{
+			// Relative values resolve against the hook cwd, here a
+			// subdirectory, so .git/index names nothing.
+			name: "a relative .git/index from a subdirectory",
+			cwd:  "sub",
+			candidate: func(t *testing.T, r commitIndexRepo) (string, string) {
+				mkdirs(t, r.path("sub"))
+				return filepath.Join(".git", "index"), r.path("sub/.git/index")
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := newCommitIndexRepo(t, false)
+			value, guarded := tt.candidate(t, r)
+			export := r.path(".beads/issues.jsonl")
+			writeFileForWorktreeTest(t, export, []byte(`{"id":"bd-exported"}`+"\n"))
+			want := r.blobOf(t, ".beads/issues.jsonl")
+			before := snapshotIndexFiles(t, guarded)
+
+			r.enterHook(t, value)
+			if tt.cwd != "" {
+				t.Chdir(r.path(tt.cwd))
+			}
+			if err := gitAddFile(export); err != nil {
+				t.Fatalf("gitAddFile: %v", err)
+			}
+
+			assertIndexFilesUnchanged(t, before)
+			if got := r.stagedBlob(t, filepath.Join(r.gitDir, "index"), ".beads/issues.jsonl"); got != want {
+				t.Errorf("export blob in <gitdir>/index = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// TestGitIndexEnv_KeyPolicy pins AC-4's key identity: the inherited value is
+// read with the same key policy the scrub drops it with, so a Windows
+// Git_Index_File is honored and replaced by exactly one GIT_INDEX_FILE entry.
+func TestGitIndexEnv_KeyPolicy(t *testing.T) {
+	r := newCommitIndexRepo(t, false)
+	writeFileForWorktreeTest(t, r.path("tracked.txt"), []byte("changed\n"))
+	next := r.pathspecEnvelope(t, "tracked.txt")
+	r.enterHook(t, "")
+	unsetEnvForIndexTest(t, "GIT_INDEX_FILE")
+	t.Setenv("Git_Index_File", next)
+
+	checkHookEnvForBothHosts(t, func(t *testing.T) {
+		env, indexFile, err := gitIndexEnv(r.path(".beads"))
+		if err != nil {
+			t.Fatalf("gitIndexEnv: %v", err)
+		}
+		var entries []string
+		for _, entry := range env {
+			if execenv.KeyEqualForOS(execenv.EntryKey(entry), "GIT_INDEX_FILE", hookEnvGOOS) {
+				entries = append(entries, entry)
+			}
+		}
+		if hookEnvGOOS == "windows" {
+			if indexFile != next {
+				t.Errorf("index file = %q, want the inherited %q", indexFile, next)
+			}
+			if want := []string{"GIT_INDEX_FILE=" + next}; !slices.Equal(entries, want) {
+				t.Errorf("GIT_INDEX_FILE entries = %q, want %q", entries, want)
+			}
+			return
+		}
+		if want := filepath.Join(r.gitDir, "index"); indexFile != want {
+			t.Errorf("index file = %q, want %q: Git_Index_File is not GIT_INDEX_FILE on %s", indexFile, want, hookEnvGOOS)
+		}
+		if len(entries) != 0 {
+			t.Errorf("GIT_INDEX_FILE entries = %q, want none", entries)
+		}
+	})
 }
