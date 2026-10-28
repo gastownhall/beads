@@ -3,6 +3,7 @@ package versioncontrolops
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"regexp"
 	"strings"
 	"testing"
@@ -248,5 +249,58 @@ func TestMergeSettleDrainsCallResultSets(t *testing.T) {
 			t.Fatalf("SettleMerge: %v", err)
 		}
 		assertDrainedCalls(t, mock, rec)
+	})
+}
+
+// TestAbortMergeDrainsCallResultSets pins abortMerge's CALL
+// DOLT_MERGE('--abort') and its CALL DOLT_RESET('--hard') fallback to the
+// draining Query path (schema.DrainCall) instead of plain ExecContext, and
+// the fallback's preMergeClean gate. Both of abortMerge's errors are
+// swallowed, so unmet expectations — not a returned error — are what fails
+// a reverted site here.
+func TestAbortMergeDrainsCallResultSets(t *testing.T) {
+	t.Run("abort failure with clean working set falls back to reset", func(t *testing.T) {
+		rec, mock := newDrainMock(t)
+
+		mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_MERGE('--abort')")).
+			WillReturnError(errors.New("fatal: There is no merge to abort"))
+		mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_RESET('--hard')")).
+			WillReturnRows(emptyCallRows())
+
+		abortMerge(context.Background(), rec, true)
+
+		assertDrainedCalls(t, mock, rec)
+	})
+
+	t.Run("abort failure with dirty working set does not reset", func(t *testing.T) {
+		rec, mock := newDrainMock(t)
+
+		mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_MERGE('--abort')")).
+			WillReturnError(errors.New("fatal: There is no merge to abort"))
+
+		abortMerge(context.Background(), rec, false)
+
+		assertDrainedCalls(t, mock, rec)
+		for _, q := range rec.queries {
+			if strings.Contains(q, "DOLT_RESET") {
+				t.Errorf("abortMerge issued %q on a dirty working set; the hard-reset fallback would destroy uncommitted data", q)
+			}
+		}
+	})
+
+	t.Run("abort success does not reset", func(t *testing.T) {
+		rec, mock := newDrainMock(t)
+
+		mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_MERGE('--abort')")).
+			WillReturnRows(emptyCallRows())
+
+		abortMerge(context.Background(), rec, true)
+
+		assertDrainedCalls(t, mock, rec)
+		for _, q := range rec.queries {
+			if strings.Contains(q, "DOLT_RESET") {
+				t.Errorf("abortMerge issued %q after a successful abort", q)
+			}
+		}
 	})
 }
