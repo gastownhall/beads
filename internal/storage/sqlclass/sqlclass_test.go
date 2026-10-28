@@ -12,6 +12,8 @@ func TestClassify(t *testing.T) {
 		{"lowercase select", "  select id from issues", Read},
 		{"union", "SELECT 1 UNION SELECT 2", Read},
 		{"parenthesized union", "(SELECT 1) UNION (SELECT 2)", Read},
+		{"intersect", "SELECT 1 INTERSECT SELECT 2", Read},
+		{"except", "SELECT 1 EXCEPT SELECT 2", Read},
 		{"show", "SHOW TABLES", Read},
 		{"describe", "DESCRIBE issues", Read},
 		{"explain select", "EXPLAIN SELECT * FROM issues", Read},
@@ -58,6 +60,11 @@ func TestClassify(t *testing.T) {
 		{"cte union into outfile", "WITH t AS (SELECT 1 AS n) SELECT n FROM t UNION SELECT n FROM t INTO OUTFILE '/p'", Write},
 		{"intersect into outfile", "(SELECT 1) INTERSECT (SELECT 1) INTO OUTFILE '/p'", Write},
 		{"except into variable", "SELECT id FROM issues EXCEPT SELECT id FROM issues INTO @x", Write},
+		// The grammar attaches INTO to a table-less last operand, or to an
+		// operand inside parentheses, and rejects it there: Mixed, which
+		// --readonly already refuses.
+		{"union into on table-less last operand", "SELECT 1 UNION SELECT 2 INTO @x", Mixed},
+		{"into inside union operand", "(SELECT 1 INTO @x) UNION (SELECT 2)", Mixed},
 
 		// Statements that may write AND return rows, or that the parser
 		// cannot classify, must run in a committing transaction that still
