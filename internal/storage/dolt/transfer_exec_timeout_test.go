@@ -2,10 +2,13 @@ package dolt
 
 import (
 	"context"
+	"database/sql/driver"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -350,6 +353,102 @@ func TestTransferSitesStallHitConfiguredDeadline(t *testing.T) {
 			}
 			if msg := err.Error(); !strings.Contains(msg, env) || !strings.Contains(msg, "1s") {
 				t.Errorf("transfer error does not name the deadline or %s: %q", env, msg)
+			}
+		})
+	}
+}
+
+// TestTransferDropBeforeDeadlineIsNotAnnotated pins the elapsed half of the
+// annotation gate: a transfer whose failure is in the lost-connection class but
+// arrives BEFORE the deadline has elapsed — here the server drops the
+// connection right after the CALL, milliseconds in — must be returned
+// unchanged. Without the gate, an early ErrInvalidConn (server restart, proxy
+// reap) would be misreported as "the server-side transfer exceeded the
+// deadline".
+func TestTransferDropBeforeDeadlineIsNotAnnotated(t *testing.T) {
+	const env = "BEADS_DOLT_TRANSFER_TIMEOUT"
+	t.Setenv(env, "30s")
+
+	s := newTransferStore(t, transferScript{"CALL DOLT_PUSH": "drop"})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	err := s.execWithLongTimeoutNoTx(ctx, "CALL DOLT_PUSH(?, ?)", "origin", "main")
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("push to a dropping server unexpectedly succeeded")
+	}
+	if elapsed > 5*time.Second {
+		t.Errorf("push ran %v; a dropped connection should fail in milliseconds (err: %v)", elapsed.Round(time.Second), err)
+	}
+	if !errors.Is(err, mysql.ErrInvalidConn) {
+		t.Errorf("push error = %v, want it still wrapping mysql.ErrInvalidConn", err)
+	}
+	if msg := err.Error(); strings.Contains(msg, env) {
+		t.Errorf("a failure before the deadline elapsed claims a timeout: %q", msg)
+	}
+}
+
+// TestAnnotateTransferTimeout pins the annotation gate itself: only a
+// lost-connection-class error (mysql.ErrInvalidConn, driver.ErrBadConn,
+// os.ErrDeadlineExceeded, or a wrap of one) from a statement that ran at least
+// as long as the deadline gets the hint; anything else — the same errors early,
+// context errors, server errors, nil — passes through unchanged with its
+// errors.Is chain intact.
+func TestAnnotateTransferTimeout(t *testing.T) {
+	const deadline = 5 * time.Minute
+
+	t.Run("nil stays nil", func(t *testing.T) {
+		if err := annotateTransferTimeout(nil, deadline, deadline); err != nil {
+			t.Fatalf("annotateTransferTimeout(nil) = %v, want nil", err)
+		}
+	})
+
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"mysql invalid conn", mysql.ErrInvalidConn},
+		{"driver bad conn", driver.ErrBadConn},
+		{"os deadline exceeded", os.ErrDeadlineExceeded},
+		{"wrapped", fmt.Errorf("failed to push to origin/main: %w", mysql.ErrInvalidConn)},
+	} {
+		t.Run(tc.name+" at the deadline", func(t *testing.T) {
+			got := annotateTransferTimeout(tc.err, deadline, deadline)
+			msg := got.Error()
+			if !strings.Contains(msg, "5m0s") {
+				t.Errorf("message does not name the deadline that fired: %q", msg)
+			}
+			if !strings.Contains(msg, transferExecTimeoutEnv) {
+				t.Errorf("message does not name %s: %q", transferExecTimeoutEnv, msg)
+			}
+			if !errors.Is(got, tc.err) {
+				t.Errorf("annotation broke the error chain: %v does not wrap %v", got, tc.err)
+			}
+		})
+		t.Run(tc.name+" before the deadline", func(t *testing.T) {
+			got := annotateTransferTimeout(tc.err, deadline, time.Second)
+			if got != tc.err { //nolint:errorlint // identity is the assertion
+				t.Fatalf("a lost-connection error from before the deadline was annotated: %v", got)
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"context deadline exceeded", context.DeadlineExceeded},
+		{"context canceled", context.Canceled},
+		{"server error", &mysql.MySQLError{Number: 1105, Message: "fatal: did not specify a branch"}},
+		{"unrelated error", errors.New("remote origin not found")},
+	} {
+		t.Run(tc.name+" passes through", func(t *testing.T) {
+			got := annotateTransferTimeout(tc.err, deadline, 2*deadline)
+			if got != tc.err { //nolint:errorlint // identity is the assertion
+				t.Fatalf("annotateTransferTimeout rewrote a non-timeout error: %v", got)
 			}
 		})
 	}

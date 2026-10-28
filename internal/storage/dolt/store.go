@@ -675,13 +675,25 @@ func transferExecTimeoutDuration() time.Duration {
 // transfer, go-sql-driver logs "read tcp ...: i/o timeout" and returns
 // mysql.ErrInvalidConn ("invalid connection"), which surfaces to the user
 // bare — naming neither the deadline that fired nor the knob that raises it.
-// This mirrors what cliTransferError does for the dolt-CLI path. Errors that
-// are not in that lost-connection class pass through unchanged, and errors.Is
-// chains are preserved (%w), so callers that classify the message (retry,
-// circuit breaker, branch-tracking fallback) still decide as before.
-func annotateTransferTimeout(err error, deadline time.Duration) error {
+// This mirrors what cliTransferError does for the dolt-CLI path.
+//
+// The gate has two halves, and both must hold: err must be in the
+// lost-connection class (mysql.ErrInvalidConn, driver.ErrBadConn — what later
+// statements on an already-dead connection get — or os.ErrDeadlineExceeded),
+// AND the statement must have run at least as long as the deadline. An
+// ErrInvalidConn that arrives early — a server restart, a proxy reaping the
+// connection — is in the class but is not the deadline's casualty, and
+// reporting it as one would misdiagnose a fresh failure as a slow transfer.
+// Errors that fail either check pass through unchanged, and errors.Is chains
+// are preserved (%w), so callers that classify the message (retry, circuit
+// breaker, branch-tracking fallback) still decide as before; the hint adds
+// none of their substrings.
+func annotateTransferTimeout(err error, deadline, elapsed time.Duration) error {
 	if err == nil {
 		return nil
+	}
+	if elapsed < deadline {
+		return err
 	}
 	if !errors.Is(err, mysql.ErrInvalidConn) && !errors.Is(err, driver.ErrBadConn) &&
 		!errors.Is(err, os.ErrDeadlineExceeded) {
@@ -2942,9 +2954,10 @@ func (s *DoltStore) execWithLongTimeout(ctx context.Context, query string, args 
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
+	start := time.Now()
 	if _, err := tx.ExecContext(ctx, query, args...); err != nil {
 		_ = tx.Rollback()
-		return annotateTransferTimeout(err, deadline)
+		return annotateTransferTimeout(err, deadline, time.Since(start))
 	}
 	return tx.Commit()
 }
@@ -2964,8 +2977,9 @@ func (s *DoltStore) execWithLongTimeoutNoTx(ctx context.Context, query string, a
 		return err
 	}
 	defer db.Close()
+	start := time.Now()
 	_, err = db.ExecContext(ctx, query, args...)
-	return annotateTransferTimeout(err, deadline)
+	return annotateTransferTimeout(err, deadline, time.Since(start))
 }
 
 // oneShotConn opens a one-shot connection with the given read deadline
@@ -5601,7 +5615,8 @@ func (s *DoltStore) refreshTrackingRef(ctx context.Context, remote string) error
 	}
 	defer db.Close()
 	return withRemoteOperationEnv(s.credentialsForRemote(remote), s.isS3Remote(ctx, remote), func() error {
-		return annotateTransferTimeout(schema.DrainCall(ctx, db, "CALL DOLT_FETCH(?, ?)", remote, s.branch), deadline)
+		start := time.Now()
+		return annotateTransferTimeout(schema.DrainCall(ctx, db, "CALL DOLT_FETCH(?, ?)", remote, s.branch), deadline, time.Since(start))
 	})
 }
 
@@ -5785,8 +5800,9 @@ func (s *DoltStore) pullWithAutoResolveUnchecked(ctx context.Context, remote str
 	// to date, and so does this CALL. Capturing it costs nothing — the drain
 	// is identical — and it is the difference between a caller that knows
 	// nothing arrived and one that only knows no error occurred (ga-bq9zd).
+	pullStart := time.Now()
 	pullRow, pullErr := schema.CallReturningRow(ctx, tx, query, args...)
-	pullErr = annotateTransferTimeout(pullErr, deadline)
+	pullErr = annotateTransferTimeout(pullErr, deadline, time.Since(pullStart))
 	report := parseMergeReport(pullRow)
 
 	// GH#3144: When DOLT_PULL fails because upstream branch tracking is not
@@ -5794,15 +5810,17 @@ func (s *DoltStore) pullWithAutoResolveUnchecked(ctx context.Context, remote str
 	// bd dolt remote add rather than bd bootstrap/dolt clone), fall back to
 	// DOLT_FETCH + DOLT_MERGE which does not require tracking config.
 	if pullErr != nil && isBranchTrackingError(pullErr) {
+		fetchStart := time.Now()
 		if err := schema.DrainCall(ctx, tx, "CALL DOLT_FETCH(?, ?)", remote, s.branch); err != nil {
 			_ = tx.Rollback()
-			return pullReport{}, fmt.Errorf("fetch from %s/%s: %w", remote, s.branch, annotateTransferTimeout(err, deadline))
+			return pullReport{}, fmt.Errorf("fetch from %s/%s: %w", remote, s.branch, annotateTransferTimeout(err, deadline, time.Since(fetchStart)))
 		}
 		trackingRef := remote + "/" + s.branch
 		// The merge, not the pull, is now what happened — so its row replaces
 		// the failed pull's report rather than adding to it.
+		mergeStart := time.Now()
 		mergeRow, mergeErr := schema.CallReturningRow(ctx, tx, "CALL DOLT_MERGE(?)", trackingRef)
-		mergeErr = annotateTransferTimeout(mergeErr, deadline)
+		mergeErr = annotateTransferTimeout(mergeErr, deadline, time.Since(mergeStart))
 		report = parseMergeReport(mergeRow)
 		// Retained deliberately even though DOLT_MERGE reports the ordinary
 		// no-op as a MESSAGE with a nil error (measured: "Everything
