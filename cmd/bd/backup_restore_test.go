@@ -461,4 +461,26 @@ func TestBackupRestoreRefusesNonBackupSourceServerMode(t *testing.T) {
 			t.Errorf("issue count after the refused default-dir restore = %d, want 3: the store did not survive a bad restore source", got)
 		}
 	})
+
+	// control_real_backup forbids reading the refusal subtests above as "the
+	// restore never runs": the fixture's backup — written by a Dolt backup sync
+	// and carrying a manifest — restores for real, and the count moves from 3
+	// to the 2 the backup holds.
+	t.Run("control_real_backup", func(t *testing.T) {
+		dir, env, backupDir := newServerModeRestoreWorkspace(t)
+		if !restoreBackupDirManifestVisible(backupDir) {
+			t.Skipf("backup directory %s is not visible on bd's filesystem (containerized Dolt server without a bind mount), so the manifest pre-flight cannot validate this restore here", backupDir)
+		}
+
+		stdout, stderr, code := runBDMigrationFreezeWithEnv(t, bd, dir, env, "backup", "restore", "--force", backupDir)
+		if code != 0 {
+			t.Fatalf("restore from a real backup exited %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+		}
+		if !strings.Contains(stdout, "Restore complete") {
+			t.Errorf("stdout is missing %q:\n%s", "Restore complete", stdout)
+		}
+		if got := serverModeIssueCount(t, bd, dir, env); got != 2 {
+			t.Errorf("issue count after a real restore = %d, want 2: the backup holds two issues and the live store held three", got)
+		}
+	})
 }
