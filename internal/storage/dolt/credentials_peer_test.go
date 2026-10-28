@@ -334,3 +334,47 @@ func TestFederationSyncNotStompedByPeerLastSync(t *testing.T) {
 		t.Fatal("Sync completed but did not stamp last_sync")
 	}
 }
+
+// TestFederationFetchDoesNotStampPeerLastSync covers the fetch half of
+// GH#3547: a fetch is not a sync. Fetch — including the bd federation status
+// probe, whose reachability check routes through it — must not write the
+// versioned federation_peers table, while a completed transfer (PushTo,
+// PullFrom) still stamps the peer row's last_sync after it lands.
+func TestFederationFetchDoesNotStampPeerLastSync(t *testing.T) {
+	store, cleanup := setupConcurrentTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+	db := store.db
+
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) "+
+			"VALUES ('stamp-a', 'stamp-a', '', '', '', '', 'open', 2, 'task')"); err != nil {
+		t.Fatalf("seed issue: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'seed issue')"); err != nil {
+		t.Fatalf("commit seed: %v", err)
+	}
+
+	peerDB := uniqueTestDBName(t)
+	remoteURL := "file:///tmp/" + peerDB + "_remote"
+	if err := store.AddFederationPeer(ctx, &storage.FederationPeer{Name: "peer", RemoteURL: remoteURL}); err != nil {
+		t.Fatalf("add federation peer: %v", err)
+	}
+	// Raw push keeps last_sync NULL: PushTo stamps after a successful transfer.
+	if _, err := db.ExecContext(ctx, "CALL DOLT_PUSH('peer', 'main')"); err != nil {
+		t.Fatalf("raw push to peer remote: %v", err)
+	}
+	if !peerLastSyncIsNull(t, ctx, db, "peer") {
+		t.Fatal("precondition: last_sync must be NULL before Fetch")
+	}
+
+	// A fetch only refreshes the remote-tracking refs; it must not write the
+	// versioned federation_peers table (GH#3547).
+	if err := store.Fetch(ctx, "peer"); err != nil {
+		t.Fatalf("Fetch from peer: %v", err)
+	}
+	if !peerLastSyncIsNull(t, ctx, db, "peer") {
+		t.Fatal("Fetch stamped last_sync; a fetch is not a sync (GH#3547)")
+	}
+}
