@@ -1195,10 +1195,12 @@ Examples:
 		// the way warnDroppedDepEdges above warns about dropped edges. The
 		// condition is on the request actually issued rather than the
 		// flag string: --direction is not validated above, and a value
-		// that is not "up" lands in RelationOut, so it notes too. The
-		// defer prints after the view's own stdout, on the empty answer
-		// and the row list alike.
-		if !batchMode && len(resolved) == 1 && request.Direction == issueops.RelationOut {
+		// that is not "up" lands in RelationOut, so it notes too. A type
+		// filter that cannot name a parent-child edge asks a different
+		// question, so it notes nothing. The defer prints after the
+		// view's own stdout, on the empty answer and the row list alike.
+		if !batchMode && len(resolved) == 1 && request.Direction == issueops.RelationOut &&
+			(typeFilter == "" || types.DependencyType(typeFilter) == types.DepParentChild) {
 			if rel, relErr := resolved[0].store.IssueRelations(); relErr == nil {
 				defer noteHiddenChildren(ctx, rel, resolved[0].fullID, "list")
 			}

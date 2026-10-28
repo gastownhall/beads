@@ -320,4 +320,41 @@ func TestEmbeddedDepDefaultDirectionNotesHiddenChildren(t *testing.T) {
 			t.Errorf("--format=mermaid should carry no note, got:\n%s", stderr)
 		}
 	})
+	t.Run("other_directions", func(t *testing.T) {
+		// AC-6: every path that is not the human down view pays nothing.
+		other := bdCreate(t, bd, dir, "Unrelated other", "--type", "task")
+
+		_, stderr := bdDepInOut(t, "list", root.ID, "--direction", "up")
+		if strings.Contains(stderr, "note:") {
+			t.Errorf("list --direction=up should carry no note, got:\n%s", stderr)
+		}
+		_, stderr = bdDepInOut(t, "tree", root.ID, "--direction", "up")
+		if strings.Contains(stderr, "note:") {
+			t.Errorf("tree --direction=up should carry no note, got:\n%s", stderr)
+		}
+		_, stderr = bdDepInOut(t, "tree", root.ID, "--direction", "both")
+		if strings.Contains(stderr, "note:") {
+			t.Errorf("tree --direction=both should carry no note, got:\n%s", stderr)
+		}
+		_, stderr = bdDepInOut(t, "tree", root.ID, "--reverse")
+		if strings.Contains(stderr, "note:") {
+			t.Errorf("tree --reverse should carry no note, got:\n%s", stderr)
+		}
+
+		// A type filter that is not parent-child asks a different question;
+		// the note stays off it.
+		stdout, stderr := bdDepInOut(t, "list", root.ID, "--type", "blocks")
+		if !strings.Contains(stdout, "has no dependencies") {
+			t.Errorf("list --type=blocks should print the empty answer, got:\n%s", stdout)
+		}
+		if strings.Contains(stderr, "note:") {
+			t.Errorf("list --type=blocks should carry no note, got:\n%s", stderr)
+		}
+
+		// Batch mode is the EdgeReader shape, and never notes.
+		_, stderr = bdDepInOut(t, "list", root.ID, other.ID)
+		if strings.Contains(stderr, "note:") {
+			t.Errorf("batch list should carry no note, got:\n%s", stderr)
+		}
+	})
 }
