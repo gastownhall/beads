@@ -8658,6 +8658,13 @@ components:
             is ABSENT from the answer rather than present and flagged, so a
             client cannot tell a tree that ended from one that was cut. It is
             documented rather than removed because it is on the wire today.
+        deduped:
+          type: boolean
+          description: >-
+            True on a STUB: a row that records only the edge from `parent_id`
+            into an issue already expanded earlier in the same answer, with no
+            descendants of its own. Absent, never false, on every other row.
+            Drop the rows carrying it to get each issue once.
 
     Dependency:
       type: object

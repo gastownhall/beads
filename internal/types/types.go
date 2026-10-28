@@ -2119,6 +2119,10 @@ type TreeNode struct {
 	ParentID       string         `json:"parent_id"`
 	EdgeFromParent DependencyType `json:"edge_from_parent,omitempty"`
 	Truncated      bool           `json:"truncated"`
+	// Deduped is true on a stub row: it records only the edge from ParentID
+	// into an issue already expanded earlier in the same list, and it has no
+	// descendants. Drop these rows to get each issue once.
+	Deduped bool `json:"deduped,omitempty"`
 }
 
 // MoleculeProgressStats provides efficient progress info for large molecules.
