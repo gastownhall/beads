@@ -3071,15 +3071,15 @@ func confirmReinitDestroy(w io.Writer, in io.Reader, interactive bool, target st
 	}
 	fmt.Fprintf(w, "\n")
 	if interactive {
+		// An unknown count has no number to type back, so the phrase names
+		// all of them; no count typed back can stand in for it.
+		expected := fmt.Sprintf("destroy %d issues", count)
 		if unknown {
-			fmt.Fprintf(w, "Refusing to destroy an unknown number of issues.\n")
-			fmt.Fprintf(w, "  See 'bd help init-safety' for the required --destroy-token format.\n")
-			return &exitError{Code: ExitDestroyTokenMissing}
+			expected = "destroy all issues"
 		}
-		fmt.Fprintf(w, "Type 'destroy %d issues' to confirm: ", count)
+		fmt.Fprintf(w, "Type '%s' to confirm: ", expected)
 		scanner := bufio.NewScanner(in)
 		scanner.Scan()
-		expected := fmt.Sprintf("destroy %d issues", count)
 		if strings.TrimSpace(scanner.Text()) != expected {
 			fmt.Fprintf(w, "\nAborted. Database was NOT modified.\n")
 			return &exitError{Code: ExitLocalExistsRefused}
