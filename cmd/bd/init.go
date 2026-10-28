@@ -1263,7 +1263,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			plannedDBPathAbs = filepath.Dir(plannedDBPathAbs)
 		}
 		initGateHandle, gateErr := acquireInitMutationGate(rootCtx, beadsDirAbs, plannedDBPathAbs, func() error {
-			return runInitReinitPreflight(reinitLocal, reinitCountBeadsDir(), destroyTokenPrefix, destroyToken)
+			return runInitReinitPreflight(reinitLocal, beadsDirAbs, destroyTokenPrefix, destroyToken)
 		})
 		if gateErr != nil {
 			return gateErr
@@ -3032,14 +3032,9 @@ To use the existing database:
 Aborting.`, remedy.PrintedValue(proxiedRoot))
 }
 
-// reinitCountBeadsDir is the workspace the --reinit-local/--force preflight
-// counts: BEADS_DIR, else the discovered workspace. "" when there is none.
-func reinitCountBeadsDir() string {
-	if envBeadsDir := os.Getenv("BEADS_DIR"); envBeadsDir != "" {
-		return utils.CanonicalizePath(envBeadsDir)
-	}
-	return beads.FindBeadsDir()
-}
+// countReinitTarget is countReinitTargetIssues, as a variable so tests can
+// observe which workspace the preflight counts.
+var countReinitTarget = countReinitTargetIssues
 
 // countReinitTargetIssues counts the issues in beadsDir, the workspace a
 // --reinit-local/--force re-initialization is about to replace, so the
@@ -3077,7 +3072,7 @@ func runInitReinitPreflight(reinitLocal bool, beadsDir, prefix, destroyToken str
 	if !reinitLocal {
 		return nil
 	}
-	count, err := countReinitTargetIssues(beadsDir)
+	count, err := countReinitTarget(beadsDir)
 	if err == nil && count == 0 {
 		return nil
 	}
