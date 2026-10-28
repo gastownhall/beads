@@ -1310,9 +1310,13 @@ func findClonedDBName(t *testing.T, doltDir string) string {
 	return ""
 }
 
-// TestGitRemoteExternalServerRouting verifies that SQL-visible git-protocol
-// remotes on an external server materialize the local CLI remote needed for
-// subprocess routing.
+// TestGitRemoteExternalServerRouting pins the CLI routes for a plain dolt
+// sql-server on 127.0.0.1 that bd does not run, on a pinned port with no port
+// variable set. A Dolt database in the client's own data directory is a copy
+// no server holds: the dolt CLI would push or pull its files directly, so the
+// SQL-visible git-protocol remote takes the SQL route and no CLI remote is
+// materialized there. A store whose data directory is the one that server
+// serves (its sql-server.info names the dialed port) keeps the CLI routes.
 func TestGitRemoteExternalServerRouting(t *testing.T) {
 	testutil.RequireDoltBinary(t)
 	skipIfNoGit(t)
@@ -1398,15 +1402,35 @@ func TestGitRemoteExternalServerRouting(t *testing.T) {
 	t.Cleanup(func() { store.Close() })
 
 	require.Equal(t, "", doltutil.FindCLIRemote(clientTestdbDir, store.remote), "precondition: client CLI remote should be absent")
-	require.True(t, store.isGitProtocolRemote(ctx, store.remote), "SQL-visible git remote should materialize CLI routing")
-	require.True(t,
-		doltutil.RemoteURLsMatch(doltutil.FindCLIRemote(clientTestdbDir, store.remote), "git+https://example.com/test.git"),
-		"git-protocol routing should create a matching client CLI remote",
-	)
-	require.True(t, store.shouldUseCLIForCredentials(ctx, store.remote, store.mainRemoteCredentials()), "credential route should reuse matching CLI remote")
+	require.False(t, store.isGitProtocolRemote(ctx, store.remote), "a copy no server serves must not take the CLI route")
+	require.Equal(t, "", doltutil.FindCLIRemote(clientTestdbDir, store.remote), "the SQL route must not materialize a CLI remote in the copy")
+	require.False(t, store.shouldUseCLIForCredentials(ctx, store.remote, store.mainRemoteCredentials()), "credential route must not run the dolt CLI in the copy")
 	useLocalCLI, err := store.shouldUseCLIForLocalRemoteWithError(ctx, store.remote)
 	require.NoError(t, err)
-	require.True(t, useLocalCLI, "local remote guard should pass after materialization")
+	require.False(t, useLocalCLI, "local remote route must not run the dolt CLI in the copy")
+
+	served, err := New(ctx, &Config{
+		Path:            serverDataDir,
+		Database:        "testdb",
+		ServerHost:      "127.0.0.1",
+		ServerPort:      port,
+		ServerUser:      "root",
+		CommitterName:   "test",
+		CommitterEmail:  "test@test.com",
+		AutoStart:       false,
+		CreateIfMissing: false,
+		Remote:          "origin",
+		RemoteUser:      "testuser",
+	})
+	if err != nil {
+		t.Fatalf("failed to create DoltStore over the served data directory: %v", err)
+	}
+	t.Cleanup(func() { served.Close() })
+	require.True(t, served.isGitProtocolRemote(ctx, served.remote), "the served directory keeps the CLI route")
+	require.True(t, served.shouldUseCLIForCredentials(ctx, served.remote, served.mainRemoteCredentials()), "credential route keeps the CLI in the served directory")
+	useLocalCLI, err = served.shouldUseCLIForLocalRemoteWithError(ctx, served.remote)
+	require.NoError(t, err)
+	require.True(t, useLocalCLI, "local remote route keeps the CLI in the served directory")
 }
 
 func TestSQLRemotePersistsAcrossExternalServerRestart(t *testing.T) {
@@ -1557,7 +1581,10 @@ func TestSQLRemotePersistsAcrossExternalServerRestart(t *testing.T) {
 // The test proves routing works end-to-end: if shouldUseCLIForCredentials
 // routes to doltCLIPush, the CLI uses the file:// remote and push succeeds.
 // If the guard fails and falls through to SQL withEnvCredentials, the external
-// server process cannot see the env vars and push fails (SC-001).
+// server process cannot see the env vars and push fails (SC-001). That route
+// is taken only for the database the server serves: a store over a client
+// data directory the server does not serve takes SQL, since the dolt CLI
+// would push that copy's files instead of the server's.
 func TestCredentialCLIRoutingE2E(t *testing.T) {
 	testutil.RequireDoltBinary(t)
 
@@ -1658,25 +1685,50 @@ func TestCredentialCLIRoutingE2E(t *testing.T) {
 	}
 	require.Equal(t, "", doltutil.FindCLIRemote(clientTestdbDir, store.remote), "precondition: bd setup path should not manually seed CLI remote")
 
-	// Verify preconditions: not a git-protocol remote, but credentials trigger CLI routing
+	// The client's own testdb is a copy no server serves (the server on that
+	// port serves server-data): the dolt CLI would push its files, not the
+	// server's, so credentials must not route through the CLI there, and no
+	// CLI remote is materialized in it.
 	require.False(t, store.isGitProtocolRemote(ctx, store.remote), "file:// is not git-protocol")
-	if !store.shouldUseCLIForCredentials(ctx, store.remote, store.mainRemoteCredentials()) {
-		remotes, listErr := store.ListRemotes(ctx)
-		ensureErr := doltutil.EnsureCLIRemote(clientTestdbDir, store.remote, remoteURL, "")
-		t.Fatalf("should route through CLI for credentials; serverMode=%v remotes=%v listErr=%v cliRemote=%q ensureErr=%v",
-			store.serverMode, remotes, listErr, doltutil.FindCLIRemote(clientTestdbDir, store.remote), ensureErr)
+	require.False(t, store.shouldUseCLIForCredentials(ctx, store.remote, store.mainRemoteCredentials()), "a copy no server serves must not take the credential CLI route")
+	require.Equal(t, "", doltutil.FindCLIRemote(clientTestdbDir, store.remote), "the copy must not get a CLI remote")
+
+	// A store over the directory the server does serve keeps the CLI route,
+	// whose dolt child gets the client's credentials.
+	served, err := New(ctx, &Config{
+		Path:            serverDataDir,
+		Database:        "testdb",
+		ServerHost:      "127.0.0.1",
+		ServerPort:      port,
+		ServerUser:      "root",
+		CommitterName:   "test",
+		CommitterEmail:  "test@test.com",
+		AutoStart:       false,
+		CreateIfMissing: false,
+		Remote:          "origin",
+		RemoteUser:      "testuser",     // triggers credential CLI routing
+		RemotePassword:  "testpassword", // passed via applyToCmd to subprocess env
+	})
+	if err != nil {
+		t.Fatalf("failed to create DoltStore over the served data directory: %v", err)
+	}
+	t.Cleanup(func() { served.Close() })
+	if !served.shouldUseCLIForCredentials(ctx, served.remote, served.mainRemoteCredentials()) {
+		remotes, listErr := served.ListRemotes(ctx)
+		t.Fatalf("should route through CLI for credentials; serverMode=%v remotes=%v listErr=%v cliRemote=%q",
+			served.serverMode, remotes, listErr, doltutil.FindCLIRemote(testdbDir, served.remote))
 	}
 	require.True(t,
-		doltutil.RemoteURLsMatch(doltutil.FindCLIRemote(clientTestdbDir, store.remote), remoteURL),
-		"credential routing should materialize a matching client CLI remote",
+		doltutil.RemoteURLsMatch(doltutil.FindCLIRemote(testdbDir, served.remote), remoteURL),
+		"credential routing should find a matching CLI remote in the served database",
 	)
-	require.True(t, store.serverMode, "store should be in server mode")
+	require.True(t, served.serverMode, "store should be in server mode")
 
 	// 7. Push should succeed via CLI credential routing
 	// If the guard works: doltCLIPush uses CLI dir's file:// remote → success
 	// If guard fails: withEnvCredentials + SQL CALL DOLT_PUSH('--user',...) → fails
 	// (external server can't see env vars set on bd client process)
-	err = store.Push(ctx)
+	err = served.Push(ctx)
 	require.NoError(t, err, "Push should succeed via CLI credential routing (SC-001)")
 }
 

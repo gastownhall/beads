@@ -2073,10 +2073,18 @@ bd dolt remote reset-data
     | only live chunks:
     |
     |   - Git-backed remotes (issue data riding a git remote under refs/dolt/data):
-    |     deletes the Dolt data refs on the git remote, then force-pushes to
-    |     rebuild a fresh store. Code branches are untouched.
+    |     rebuilds a fresh store from local HEAD and replaces the remote's Dolt
+    |     data refs with it (through a Dolt sql-server it pushes the fresh store
+    |     to a temporary ref first, so the remote keeps its data until the new
+    |     store is complete, then restarts bd's own server, the shared server in
+    |     shared-server mode, so that it rereads the remote; the restart briefly
+    |     interrupts every database that server serves, and any other server must
+    |     be restarted before its next push or pull of the remote). Code branches
+    |     are untouched.
     |   - Native file remotes (file:// paths): clears the store directory, then
-    |     force-pushes to rebuild it.
+    |     force-pushes to rebuild it. Refused for a git repository, bare or a
+    |     checkout, where Dolt keeps the store among the repository's own files:
+    |     replace that remote as below.
     |   - Cloud/hosted remotes (aws://, gs://, dolthub://, ...): bd cannot clear
     |     the stored data safely — replace the remote with a fresh URL or prefix:
     |       bd dolt remote remove <name>

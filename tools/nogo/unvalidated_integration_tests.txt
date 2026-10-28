@@ -25,6 +25,7 @@ cmd/bd/dolt_autocommit_integration_test.go
 cmd/bd/dolt_autostart_lifecycle_integration_test.go
 cmd/bd/dolt_doctor_integration_test.go
 cmd/bd/dolt_metadata_e2e_test.go
+cmd/bd/dolt_remote_reset_data_server_test.go
 cmd/bd/gitlab_integration_test.go
 cmd/bd/import_missing_config_prefix_test.go
 cmd/bd/import_prefix_test.go
