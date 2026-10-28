@@ -589,6 +589,31 @@ func readyJSONIDs(t *testing.T, bd, dir string, args ...string) map[string]bool 
 	return ids
 }
 
+// storedBlockedFlag reads issueID's stored is_blocked column through
+// `bd blocked --flags --raw --json`.
+func storedBlockedFlag(t *testing.T, bd, dir, issueID string) bool {
+	t.Helper()
+	cmd := exec.Command(bd, "blocked", "--flags", "--raw", "--json")
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	cmd.Stdin = strings.NewReader(issueID + "\n")
+	stdout, stderr, err := runCommandBuffers(t, cmd)
+	if err != nil {
+		t.Fatalf("bd blocked --flags --raw --json failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+	var rows []struct {
+		ID        string `json:"id"`
+		IsBlocked bool   `json:"is_blocked"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &rows); err != nil {
+		t.Fatalf("parse blocked --flags JSON: %v\n%s", err, stdout.String())
+	}
+	if len(rows) != 1 || rows[0].ID != issueID {
+		t.Fatalf("bd blocked --flags = %+v, want one row for %s", rows, issueID)
+	}
+	return rows[0].IsBlocked
+}
+
 // TestEmbeddedReadyStaleBlockedFlagOnEdgelessIssue is GH#3268 end to end: an
 // open issue with no dependency rows but a stale is_blocked = 1 was hidden from
 // `bd ready` (which trusted the flag) and dropped by `bd blocked` (which could
@@ -637,6 +662,27 @@ func TestEmbeddedReadyStaleBlockedFlagOnEdgelessIssue(t *testing.T) {
 		plantStaleBlockedFlag(t, beadsDir, "rs", related.ID)
 		if ids := readyJSONIDs(t, bd, dir); !ids[related.ID] {
 			t.Fatalf("bd ready --json = %v, want it to list %s (its only edge is related, which never blocks)", ids, related.ID)
+		}
+	})
+
+	// The read guard lists the issue; bd recompute-blocked repairs the stored
+	// flag itself.
+	t.Run("recompute_blocked_clears_the_stale_flag", func(t *testing.T) {
+		if !storedBlockedFlag(t, bd, dir, edgeless.ID) {
+			t.Fatalf("stored is_blocked for %s is already 0 before bd recompute-blocked", edgeless.ID)
+		}
+		var res struct {
+			RowsCorrected int `json:"rows_corrected"`
+		}
+		out := bdRunOK(t, bd, dir, "recompute-blocked", "--json")
+		if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &res); err != nil {
+			t.Fatalf("parse recompute-blocked JSON: %v\n%s", err, out)
+		}
+		if res.RowsCorrected < 1 {
+			t.Errorf("rows_corrected = %d, want >= 1", res.RowsCorrected)
+		}
+		if storedBlockedFlag(t, bd, dir, edgeless.ID) {
+			t.Errorf("stored is_blocked for %s is still 1 after bd recompute-blocked", edgeless.ID)
 		}
 	})
 }
