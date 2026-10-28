@@ -1723,3 +1723,170 @@ func assertEveryStepGated(t *testing.T, result []*Step, byID map[string]*Step, l
 		}
 	}
 }
+
+// TestApplyLoops_NestedLoopDependencies pins the loop ID rewrite across
+// nested loops: a body step that names a nested loop resolves to that loop's
+// last expanded step, and a reference to the outer loop resolves to the last
+// step of the fully expanded outer body (GH#7636).
+func TestApplyLoops_NestedLoopDependencies(t *testing.T) {
+	t.Run("nested_own_needs_and_references", func(t *testing.T) {
+		steps := []*Step{
+			{ID: "brief", Title: "Brief"},
+			{
+				ID:    "outer",
+				Title: "Outer",
+				Loop: &LoopSpec{
+					Count: 2,
+					Body: []*Step{
+						{ID: "prep", Title: "Prep"},
+						{
+							ID:    "inner",
+							Title: "Inner",
+							Needs: []string{"prep"},
+							Loop: &LoopSpec{
+								Count: 2,
+								Body:  []*Step{{ID: "x", Title: "X"}},
+							},
+						},
+						{ID: "after", Title: "After", Needs: []string{"inner"}},
+					},
+				},
+			},
+			{ID: "land", Title: "Land", Needs: []string{"outer"}},
+		}
+
+		result, err := ApplyLoops(steps)
+		if err != nil {
+			t.Fatalf("ApplyLoops failed: %v", err)
+		}
+		byID := stepsByID(result)
+
+		x := byID["outer.iter1.inner.iter1.x"]
+		if x == nil {
+			t.Fatal("outer.iter1.inner.iter1.x not found")
+		}
+		if !slices.Contains(x.Needs, "outer.iter1.prep") {
+			t.Errorf("outer.iter1.inner.iter1.x.Needs = %v, want the nested loop's own need outer.iter1.prep carried", x.Needs)
+		}
+
+		after := byID["outer.iter1.after"]
+		if after == nil {
+			t.Fatal("outer.iter1.after not found")
+		}
+		if !slices.Equal(after.Needs, []string{"outer.iter1.inner.iter2.x"}) {
+			t.Errorf("outer.iter1.after.Needs = %v, want [outer.iter1.inner.iter2.x] (the nested loop's last step)", after.Needs)
+		}
+
+		land := byID["land"]
+		if land == nil {
+			t.Fatal("land not found")
+		}
+		if !slices.Equal(land.Needs, []string{"outer.iter2.after"}) {
+			t.Errorf("land.Needs = %v, want [outer.iter2.after] (the last step of the outer loop's expansion)", land.Needs)
+		}
+	})
+
+	t.Run("three_levels", func(t *testing.T) {
+		steps := []*Step{
+			{
+				ID:    "outer",
+				Title: "Outer",
+				Loop: &LoopSpec{
+					Count: 2,
+					Body: []*Step{
+						{
+							ID:    "inner",
+							Title: "Inner",
+							Loop: &LoopSpec{
+								Count: 2,
+								Body: []*Step{
+									{
+										ID:    "deepest",
+										Title: "Deepest",
+										Loop: &LoopSpec{
+											Count: 2,
+											Body:  []*Step{{ID: "x", Title: "X"}},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			{ID: "land", Title: "Land", Needs: []string{"outer"}},
+		}
+
+		result, err := ApplyLoops(steps)
+		if err != nil {
+			t.Fatalf("ApplyLoops failed: %v", err)
+		}
+		byID := stepsByID(result)
+
+		last := "outer.iter2.inner.iter2.deepest.iter2.x"
+		if byID[last] == nil {
+			t.Fatalf("%s not found", last)
+		}
+		land := byID["land"]
+		if land == nil {
+			t.Fatal("land not found")
+		}
+		if !slices.Equal(land.Needs, []string{last}) {
+			t.Errorf("land.Needs = %v, want [%s] (the deepest loop's last step)", land.Needs, last)
+		}
+	})
+
+	t.Run("nested_refs_resolved_before_roots", func(t *testing.T) {
+		// The reference to the nested loop must be rewritten to the nested
+		// loop's last step before the outer loop's roots are computed, so a
+		// step gated by the nested loop is not misread as an outer root and
+		// does not receive the outer loop's own needs.
+		steps := []*Step{
+			{ID: "brief", Title: "Brief"},
+			{
+				ID:    "outer",
+				Title: "Outer",
+				Needs: []string{"brief"},
+				Loop: &LoopSpec{
+					Count: 2,
+					Body: []*Step{
+						{
+							ID:    "inner",
+							Title: "Inner",
+							Loop: &LoopSpec{
+								Count: 2,
+								Body:  []*Step{{ID: "x", Title: "X"}},
+							},
+						},
+						{ID: "after", Title: "After", Needs: []string{"inner"}},
+					},
+				},
+			},
+		}
+
+		result, err := ApplyLoops(steps)
+		if err != nil {
+			t.Fatalf("ApplyLoops failed: %v", err)
+		}
+		byID := stepsByID(result)
+
+		x := byID["outer.iter1.inner.iter1.x"]
+		if x == nil {
+			t.Fatal("outer.iter1.inner.iter1.x not found")
+		}
+		if !slices.Contains(x.Needs, "brief") {
+			t.Errorf("outer.iter1.inner.iter1.x.Needs = %v, want brief: it is a root of the outer expansion", x.Needs)
+		}
+
+		after := byID["outer.iter1.after"]
+		if after == nil {
+			t.Fatal("outer.iter1.after not found")
+		}
+		if !slices.Equal(after.Needs, []string{"outer.iter1.inner.iter2.x"}) {
+			t.Errorf("outer.iter1.after.Needs = %v, want [outer.iter1.inner.iter2.x]", after.Needs)
+		}
+		if slices.Contains(after.Needs, "brief") {
+			t.Errorf("outer.iter1.after.Needs = %v, want brief NOT added: after is gated by the nested loop, not an outer root", after.Needs)
+		}
+	})
+}

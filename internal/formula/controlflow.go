@@ -245,6 +245,13 @@ func finishLoopExpansion(step *Step, result []*Step, ends map[string]string) err
 		return nil
 	}
 
+	// Rewrite references to nested loops this body named, so the roots
+	// computed below see the nested loop's real last step rather than the
+	// nested loop's (now gone) ID. References to loops that have not
+	// finished yet are rewritten by the enclosing loop's finish, and any
+	// that remain by ApplyLoops' final pass.
+	retargetLoopRefs(result, ends)
+
 	if err := rejectSelfReference(step.ID, result); err != nil {
 		return err
 	}
