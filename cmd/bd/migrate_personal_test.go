@@ -22,6 +22,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
+	publicops "github.com/steveyegge/beads/issueops"
 )
 
 // bdMigratePersonal runs "bd migrate-personal" with the given args.
@@ -551,6 +552,53 @@ func TestDeleteMovedIssuesFollowsAutoCommitPolicy(t *testing.T) {
 		if !slices.Equal(project.deferred, []bool{tc.deferred}) {
 			t.Errorf("dolt.auto-commit %s: DeleteIssues calls deferring the version commit = %v, want [%v]", tc.mode, project.deferred, tc.deferred)
 		}
+	}
+}
+
+// dependentsGuardStore is a project store whose DeleteIssues records the ids
+// and the cascade, force and dryRun flags of each call and answers err.
+type dependentsGuardStore struct {
+	storage.DoltStorage
+	err   error
+	ids   [][]string
+	flags [][3]bool
+}
+
+func (s *dependentsGuardStore) DeleteIssues(_ context.Context, ids []string, cascade, force, dryRun bool) (*types.DeleteIssuesResult, error) {
+	s.ids = append(s.ids, ids)
+	s.flags = append(s.flags, [3]bool{cascade, force, dryRun})
+	return &types.DeleteIssuesResult{}, s.err
+}
+
+// TestRefuseDependentsLeftBehind verifies that the pre-flight asks the project
+// store what phase 2's delete would do, as a dry run of the same delete
+// (cascade and force off), and turns its dependents refusal into a refusal
+// that names the issue and the dependents left behind and says nothing was
+// moved. Any other error fails the move too: phase 1 must not start on a
+// guard that did not answer.
+func TestRefuseDependentsLeftBehind(t *testing.T) {
+	t.Parallel()
+	personal := []*types.Issue{{ID: "mp-1"}, {ID: "mp-2"}}
+
+	clean := &dependentsGuardStore{}
+	if err := refuseDependentsLeftBehind(context.Background(), clean, personal); err != nil {
+		t.Fatalf("refuseDependentsLeftBehind with no dependent outside the move: %v", err)
+	}
+	if len(clean.ids) != 1 || !slices.Equal(clean.ids[0], []string{"mp-1", "mp-2"}) || clean.flags[0] != [3]bool{false, false, true} {
+		t.Errorf("DeleteIssues calls = %v with cascade, force, dryRun = %v, want one dry run of [mp-1 mp-2] with cascade and force off", clean.ids, clean.flags)
+	}
+
+	blocked := &dependentsGuardStore{err: fmt.Errorf("delete: %w", &publicops.DependentsOutsideRequestError{IssueID: "mp-1", Dependents: []string{"mp-1.1", "team-3"}})}
+	err := refuseDependentsLeftBehind(context.Background(), blocked, personal)
+	for _, want := range []string{"issue mp-1 has dependents that would stay in the project database (mp-1.1, team-3)", "bd dep remove", "nothing was moved"} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("refuseDependentsLeftBehind = %v, want a refusal containing %q", err, want)
+		}
+	}
+
+	failing := &dependentsGuardStore{err: errors.New("connection refused")}
+	if err := refuseDependentsLeftBehind(context.Background(), failing, personal); err == nil || !strings.Contains(err.Error(), "connection refused") {
+		t.Errorf("refuseDependentsLeftBehind = %v, want the store's error", err)
 	}
 }
 
@@ -1416,6 +1464,56 @@ func TestEmbeddedMigratePersonal_refusesIssueAlreadyInPlanningRepo(t *testing.T)
 	}
 	if kept.Title != planningTitle {
 		t.Errorf("planning issue %s title = %q after a refused migrate-personal, want unchanged %q", personal.ID, kept.Title, planningTitle)
+	}
+}
+
+// TestEmbeddedMigratePersonal_refusesDependentsLeftInTheProject verifies that a
+// move is refused before anything is copied when an issue it takes has a
+// dependent it leaves in the project database: someone else's bead that
+// depends on a personal one. Phase 2's delete refuses such an issue, but only
+// after phase 1 has committed the copy, which left it in both databases. Once
+// the dependency is removed, as the refusal says, a rerun moves the issue and
+// the dependent stays. A run after that moves nothing: none of the issues
+// left there is the caller's.
+func TestEmbeddedMigratePersonal_refusesDependentsLeftInTheProject(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "mpe")
+	planningDir := setupContributorRouting(t, bd, dir)
+	mustRun := func(args ...string) {
+		t.Helper()
+		if out, err := bdRunWithFlockRetry(t, bd, dir, args...); err != nil {
+			t.Fatalf("bd %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	const parentTitle = "Personal parent"
+	parent := bdCreate(t, bd, dir, parentTitle)
+	dependent := bdCreate(t, bd, dir, "Team issue", "--actor", "other-person").ID
+	mustRun("dep", "add", dependent, parent.ID)
+
+	requireMigratePersonalRefused(t, bd, dir, "issue "+parent.ID+" has dependents that would stay in the project database ("+dependent+")")
+	requireStillInProject(t, beadsDir, "mpe", parent.ID)
+	requireStillInProject(t, beadsDir, "mpe", dependent)
+	planningStore := openStore(t, filepath.Join(planningDir, ".beads"), migratePersonalPlanningDatabase)
+	if _, err := planningStore.GetIssue(t.Context(), parent.ID); !errors.Is(err, storage.ErrNotFound) {
+		t.Errorf("issue %s in the planning database after a refused migrate-personal: err = %v, want storage.ErrNotFound", parent.ID, err)
+	}
+
+	mustRun("dep", "remove", dependent, parent.ID)
+	if out := requireMigratePersonal(t, bd, dir); !strings.Contains(out, "Moved 1 issue") {
+		t.Errorf("migrate-personal after bd dep remove does not report moving 1 issue:\n%s", out)
+	}
+	requireMovedToPlanning(t, beadsDir, "mpe", planningDir, parent.ID, parentTitle)
+	if _, err := openStore(t, beadsDir, "mpe").GetIssue(t.Context(), dependent); err != nil {
+		t.Errorf("issue %s left the project database with the move: %v", dependent, err)
+	}
+
+	if out := requireMigratePersonal(t, bd, dir); !strings.Contains(out, "Nothing to migrate — no issues in the project database were created by") {
+		t.Errorf("migrate-personal with nothing of the caller's left does not say so:\n%s", out)
 	}
 }
 

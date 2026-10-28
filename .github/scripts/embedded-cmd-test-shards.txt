@@ -48,6 +48,7 @@
 
 100 12 TestEmbeddedAutoImportFallback_ConflictSkip_SkipsRetiredRows
 100 12 TestEmbeddedGatedRendering
+100 12 TestEmbeddedMigratePersonal_refusesDependentsLeftInTheProject
 
 100 13 TestEmbeddedListFilteringStatusAndHierarchy
 100 13 TestEmbeddedMigratePersonal_refusesSharedRootFromARig
