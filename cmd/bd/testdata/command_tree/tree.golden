@@ -1978,7 +1978,7 @@ bd dolt killall
     | servers are preserved.
 
 bd dolt pull
-  use: "pull"
+  use: "pull [remote]"
   short: "Pull commits from Dolt remote"
   hidden: false
   runnable: true
@@ -1989,8 +1989,9 @@ bd dolt pull
     | For Hosted Dolt, set DOLT_REMOTE_USER and DOLT_REMOTE_PASSWORD environment
     | variables for authentication.
     |
-    | Use --remote to pull from a specific named remote instead of the default.
-    | The remote must already exist (see 'bd dolt remote add').
+    | Name a remote to pull from it instead of the default: 'bd dolt pull <remote>'
+    | or 'bd dolt pull --remote <remote>'. The remote must already exist (see
+    | 'bd dolt remote add').
     |
     | Use --strategy ours|theirs to resolve conflicts the auto-resolver declines
     | (e.g. both sides edited the same issue since the last sync) instead of
@@ -2001,7 +2002,7 @@ bd dolt pull
   flag --strategy type=string default="" usage="Conflict resolution strategy for conflicts the auto-resolver declines: 'ours' or 'theirs' (embedded storage only, #4992)"
 
 bd dolt push
-  use: "push"
+  use: "push [remote]"
   short: "Push commits to Dolt remote"
   hidden: false
   runnable: true
@@ -2018,8 +2019,9 @@ bd dolt push
     | Use --force to overwrite remote changes (e.g., when the remote has
     | uncommitted changes in its working set).
     |
-    | Use --remote to push to a specific named remote instead of the default.
-    | The remote must already exist (see 'bd dolt remote add').
+    | Name a remote to push to it instead of the default: 'bd dolt push <remote>'
+    | or 'bd dolt push --remote <remote>'. The remote must already exist (see
+    | 'bd dolt remote add').
   flag --force type=bool default="false" usage="Force push (overwrite remote changes)"
   flag --no-adopt type=bool default="false" usage="Never derive a Dolt remote from git origin (also BD_NO_REMOTE_ADOPT=1)"
   flag --remote type=string default="" usage="Push to a specific named remote instead of the default"
