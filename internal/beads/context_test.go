@@ -2,6 +2,7 @@ package beads
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -1582,5 +1583,19 @@ func TestIsPathInSafeBoundary_DeniedPrefixOutsideOwnHome(t *testing.T) {
 				t.Errorf("isPathInSafeBoundary(%q) = true with account home %q, want false", tc.path, f.home)
 			}
 		})
+	}
+}
+
+// TestIsPathInSafeBoundary_DeniedPrefixHomeNeverFromHOME pins AC-3: the home
+// carve-out pierces the deny list, so when the account database has no answer
+// it fails closed rather than trusting the caller-set $HOME (as the peer-home
+// check does), even when $HOME names a directory the process owns.
+func TestIsPathInSafeBoundary_DeniedPrefixHomeNeverFromHOME(t *testing.T) {
+	f := newOwnHomeFixture(t)
+	t.Setenv("HOME", f.home)
+	f.setAccount(0, "", errors.New("no account entry"))
+	path := filepath.Join(f.home, "releases", "r1", ".beads")
+	if isPathInSafeBoundary(path) {
+		t.Errorf("isPathInSafeBoundary(%q) = true with HOME=%q and no account entry, want false", path, f.home)
 	}
 }
