@@ -65,6 +65,7 @@ go_test(
         "doltserver_unix_test.go",
         "doltserver_windows_test.go",
         "endpoint_test.go",
+        "externally_managed_test.go",
         "fakedolt_test.go",
         "fdleak_integration_test.go",
         "gc_config_test.go",

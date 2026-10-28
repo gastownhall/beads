@@ -53,7 +53,8 @@ type matrixOutcome string
 const (
 	// outcomeHonored: the command ran and the topology did not stand in its way.
 	outcomeHonored matrixOutcome = "HONORED"
-	// outcomeRefusedTyped: front-door refusal carrying a stable proxy.* code.
+	// outcomeRefusedTyped: front-door refusal carrying a stable code: proxy.*,
+	// or external.* on direct-external.
 	outcomeRefusedTyped matrixOutcome = "REFUSED_TYPED"
 	// outcomeRefusedUntyped: refused with a bare string and no machine-readable
 	// code. A downstream JSON consumer cannot classify these.
@@ -80,7 +81,8 @@ const (
 // expectation is the observed contract for one command on one topology.
 type expectation struct {
 	outcome matrixOutcome
-	// code is the proxy.* capability code, for outcomeRefusedTyped only.
+	// code is the stable refusal code (proxy.* or external.*), for
+	// outcomeRefusedTyped only.
 	code string
 	// substr must appear in the combined output.
 	substr string
@@ -224,11 +226,14 @@ var capabilityProbes = []probe{
 		},
 	},
 
-	// --- dolt start: probed only where it cannot start anything -------------
+	// --- dolt start ---------------------------------------------------------
 	{
 		// The same command, three refusal surfaces. A proxied workspace's dolt
 		// backend belongs to the proxy, which spawns it on demand and reaps it
 		// when idle, so bd refuses with a code a JSON consumer can branch on.
+		// A direct-external workspace's server is declared externally managed
+		// (dolt_server_port), so bd refuses with its own external.* code rather
+		// than put a bd-owned server over .beads/dolt on that port (GH#6585).
 		// Embedded refuses too — there is no server to start — but with a bare
 		// string and no code. Direct-local is the one topology where bd owns
 		// the server and the command is its own honored idempotent no-op.
@@ -256,19 +261,11 @@ var capabilityProbes = []probe{
 				substr:  "'bd dolt start' is not supported in embedded mode",
 				reason:  reasonDesign,
 			},
-		},
-		notProbedOn: map[string]string{
-			// The configured host is 127.0.0.1, so the remote-host ownership
-			// guard does not fire and doltserver.Start goes on to put a
-			// bd-owned sql-server over this workspace's own .beads/dolt — for
-			// a workspace whose server bd does not own. That is worth
-			// recording, but not by running it: the external-server fixture
-			// tears down only its proxy, so whatever the start leaves behind
-			// outlives the test, and this matrix must not leak a dolt server
-			// onto a shared host. Probe it when the fixture can stop one.
-			topoDirectExternal: "`bd dolt start` would launch a bd-owned sql-server over the workspace's .beads/dolt " +
-				"(host is 127.0.0.1, so the remote-host guard does not fire) and the external-server fixture has no " +
-				"`bd dolt stop` teardown for it, so the process would outlive the test",
+			topoDirectExternal: {
+				outcome: outcomeRefusedTyped, code: "external.dolt_start.conflict",
+				substr: "refusing to start a Dolt server",
+				reason: reasonDesign,
+			},
 		},
 	},
 
@@ -625,6 +622,13 @@ func directExternalServerTopology() topologySpec {
 		name: topoDirectExternal, class: classDirect,
 		make: func(t *testing.T, bd string) topologyWorkspace {
 			p := newServerModeProject(t, bd, "mtxdx")
+			// `bd dolt start` is refused here, but a regression that starts
+			// bd's own server over .beads/dolt must not leave it running.
+			t.Cleanup(func() {
+				if _, err := os.Stat(filepath.Join(p.beadsDir, "dolt-server.pid")); err == nil {
+					stopDirectLocalServer(t, bd, p.dir, p.beadsDir, p.env)
+				}
+			})
 			return topologyWorkspace{
 				name: topoDirectExternal, class: classDirect,
 				dir: p.dir, beadsDir: p.beadsDir, env: p.env,

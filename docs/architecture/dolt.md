@@ -344,7 +344,11 @@ auto-start a server for it: if nothing is listening on that port you get
 `BEADS_DOLT_SERVER_PORT declares the Dolt server at 127.0.0.1:<port>
 externally managed, so bd did not start one` rather than a server started on
 it. Use these vars to point bd at a server you already run; they are not a way
-to choose the port of a bd-owned server. A
+to choose the port of a bd-owned server. In releases after v1.3.2,
+`bd dolt start` refuses such a workspace, as it does one whose
+`metadata.json` names a `dolt_server_port`, with
+`external.dolt_start.conflict` rather than start bd's own server on that
+port. A
 `dolt_mode: proxied-server` workspace is exempt — it reaches its server
 through the proxy, so an ambient port does not describe its lifecycle — and
 a shared-server workspace is already classified external on its own.

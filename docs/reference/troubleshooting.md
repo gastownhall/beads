@@ -276,9 +276,13 @@ names another. When one of those names the file's own port, removing the
 file changes nothing, so bd does not name it.
 
 **Fix:** start the server that should be listening there, with its own data
-directory. Unless that server is bd's own over `.beads/dolt` (for example one
-you started with `bd dolt start` after `bd dolt set port`), `bd dolt start` is
-not it: it would start one of bd's own over `.beads/dolt` on the same port.
+directory. `bd dolt start` is not it. In v1.3.2 and earlier it starts one of
+bd's own over `.beads/dolt` on the same port, which is that server only when
+the server is bd's own over `.beads/dolt` (for example one you started with
+`bd dolt start` after `bd dolt set port`). Releases after v1.3.2 refuse
+`bd dolt start` on such a workspace with `external.dolt_start.conflict`, and
+`--force` does not bypass it: to run bd's own server on a fixed port there,
+remove `dolt_server_port` and set `dolt.port` in `.beads/config.yaml`.
 
 ```bash
 dolt sql-server --host 127.0.0.1 --port 3307 --data-dir /path/to/your/dolt/data

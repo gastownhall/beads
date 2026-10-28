@@ -433,7 +433,7 @@ func (c *Config) IsDoltServerMode() bool {
 	// NOTE: deliberately no PortImpliesServerMode call here. This resolver
 	// selects the storage backend for every data command, so honoring a bare
 	// BEADS_DOLT_SERVER_PORT here has a materially wider blast radius than the
-	// lifecycle-only question doltserver.resolveServerMode's check 2c answers.
+	// lifecycle-only question doltserver.resolveServerModeCheck's check 2c answers.
 	// The two therefore still disagree for an unset/embedded dolt_mode plus a
 	// bare port env var and no other server signal. That gap is real, narrow
 	// and tracked: GH#6181 owns whether this resolver should extend to the
@@ -512,7 +512,7 @@ func (c *Config) HostImpliesServerMode() bool {
 // There is deliberately no persisted-port tier here. HostImpliesServerMode
 // suppresses its weaker persisted/config.yaml host signals on an explicit
 // DoltMode; the port equivalent, metadata.json's dolt_server_port, is read by
-// a later check in doltserver.resolveServerMode that an explicit
+// a later check in doltserver.resolveServerModeCheck that an explicit
 // dolt_mode=embedded already returns before. There is nothing for a
 // downstream guard to protect.
 //
@@ -529,17 +529,22 @@ func (c *Config) PortImpliesServerMode() bool {
 // mirroring Config.GetDoltServerPort's env precedence without needing a
 // loaded Config. Returns 0 when neither names a valid positive integer.
 func doltServerPortFromEnv() int {
-	if p := os.Getenv("BEADS_DOLT_SERVER_PORT"); p != "" {
-		if port, err := strconv.Atoi(p); err == nil && port > 0 {
-			return port
+	_, port := DoltServerPortEnv()
+	return port
+}
+
+// DoltServerPortEnv is doltServerPortFromEnv with the name of the variable
+// that named the port, for a caller that reports which setting declared the
+// server: ("", 0) when neither names a valid positive integer.
+func DoltServerPortEnv() (name string, port int) {
+	for _, name := range []string{"BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_PORT"} {
+		if p := os.Getenv(name); p != "" {
+			if port, err := strconv.Atoi(p); err == nil && port > 0 {
+				return name, port
+			}
 		}
 	}
-	if p := os.Getenv("BEADS_DOLT_PORT"); p != "" {
-		if port, err := strconv.Atoi(p); err == nil && port > 0 {
-			return port
-		}
-	}
-	return 0
+	return "", 0
 }
 
 func (c *Config) IsDoltProxiedServerMode() bool {

@@ -2297,12 +2297,14 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 					"  %s",
 					remedy.PrintedValue(addr), doltserver.ReachabilityCheck(cfg.ServerHost, cfg.ServerPort))
 			} else if named := externallyManagedPortHint(cfg, resolvedBeadsDir, addr); named != "" {
-				// A named port declares the server externally managed
-				// (BEADS_DOLT_SERVER_PORT, dolt_server_port), which is
-				// why auto-start is off here: "bd dolt start" would start
-				// bd's own server on that port, not the one that belongs
-				// there. Checked before the auto-start-disabled hint,
-				// whose remedy is that same command.
+				// A setting declares the server externally managed
+				// (BEADS_DOLT_SERVER_PORT, dolt_server_port,
+				// BEADS_DOLT_SERVER_MODE=1), which is why auto-start is
+				// off here: "bd dolt start" refuses such a workspace, and
+				// would otherwise start bd's own server on that port, not
+				// the one that belongs there. Checked before the
+				// auto-start-disabled hint, whose remedy is that same
+				// command.
 				hint = named
 			} else if !cfg.AutoStart && doltserver.IsAutoStartDisabled() {
 				hint = "Dolt server auto-start is disabled (dolt.auto-start: false).\n" +
@@ -2636,14 +2638,14 @@ func unresolvedServerPortError(cfg *Config, beadsDir, serverDir string) error {
 }
 
 // externallyManagedPortHint is the advice for an unreachable TCP endpoint on
-// this machine whose port is named by a setting that declares its server
-// externally managed (doltserver.ExternalPortSetting), or "" for any other
-// endpoint, which keeps its own advice. addr is the endpoint that was dialed.
+// this machine whose server a setting declares externally managed
+// (doltserver.ExternallyManagedDeclaration), or "" for any other endpoint,
+// which keeps its own advice. addr is the endpoint that was dialed.
 func externallyManagedPortHint(cfg *Config, beadsDir, addr string) string {
 	if cfg.ServerSocket != "" || isExternalServerHost(cfg.ServerHost) {
 		return ""
 	}
-	decl := doltserver.ExternalPortSetting(beadsDir, cfg.ServerPortSource, cfg.ServerPort)
+	decl := doltserver.ExternallyManagedDeclaration(beadsDir, cfg.ServerPortSource, cfg.ServerPort)
 	if decl.NamesEndpoint && cfg.OpenedByInit && cfg.ServerPortSource == doltserver.PortSourceCallerExplicit {
 		// bd init's only caller-explicit port is its --server-port flag,
 		// which it promotes into BEADS_DOLT_SERVER_PORT: name what was typed.
