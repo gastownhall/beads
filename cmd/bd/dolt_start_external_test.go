@@ -88,3 +88,51 @@ func TestDoltStartRefusesExternallyManagedServer(t *testing.T) {
 		"dolt_server_port in "+filepath.Join(beadsDir, "metadata.json"),
 		tcpEndpoint(port).addr)
 }
+
+// TestDoltStartExternalRefusalIgnoresForceAndAutoStart covers the starts the
+// bd-7pkvvd fresh-data-dir refusal lets through: --force, and data already
+// under .beads/dolt. Whatever dolt.auto-start says, the externally managed
+// workspace gets the same refusal, and its text points at neither the start
+// nor the --force it refuses.
+func TestDoltStartExternalRefusalIgnoresForceAndAutoStart(t *testing.T) {
+	for _, autoStart := range []string{"", "0", "1"} {
+		for _, force := range []bool{false, true} {
+			for _, existingDB := range []bool{false, true} {
+				name := "auto-start unset"
+				if autoStart != "" {
+					name = "auto-start " + autoStart
+				}
+				args := []string{"--json", "dolt", "start"}
+				if force {
+					name += ", --force"
+					args = append(args, "--force")
+				}
+				if existingDB {
+					name += ", existing database"
+				}
+				t.Run(name, func(t *testing.T) {
+					f := newExternalInitFixture(t)
+					port := freeLoopbackPort(t)
+					beadsDir := directExternalStartWorkspace(t, f, port)
+					if existingDB {
+						if err := os.MkdirAll(filepath.Join(beadsDir, "dolt", "named_port", ".dolt"), 0o700); err != nil {
+							t.Fatal(err)
+						}
+						// This bd's version witness, so the legacy-upgrade
+						// guard admits the populated data directory.
+						if err := writeLocalVersion(filepath.Join(beadsDir, localVersionFile), Version); err != nil {
+							t.Fatal(err)
+						}
+					}
+					res := f.run(autoStart, args...)
+					got := requireExternalStartRefusal(t, res, beadsDir, tcpEndpoint(port).addr)
+					for _, absent := range []string{"bd dolt start", "--force"} {
+						if strings.Contains(got.Error, absent) {
+							t.Errorf("refusal contains %q: %q", absent, got.Error)
+						}
+					}
+				})
+			}
+		}
+	}
+}
