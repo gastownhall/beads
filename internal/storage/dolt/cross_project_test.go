@@ -19,6 +19,7 @@
 package dolt
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -734,6 +735,18 @@ func (f *identityTestFixture) config() *Config {
 	}
 }
 
+// pathOnlyConfig is the beads.Open shape: Path under .beads and no
+// BeadsDir, so New must derive the workspace from filepath.Dir(Path).
+func (f *identityTestFixture) pathOnlyConfig() *Config {
+	return &Config{
+		Path:            filepath.Join(f.beadsDir, "dolt"),
+		CommitterName:   "test",
+		CommitterEmail:  "test@test.com",
+		Database:        f.dbName,
+		CreateIfMissing: true,
+	}
+}
+
 func TestCrossProject_IdentityCheck_ExistingDatabase_ForeignRejected(t *testing.T) {
 	skipIfNoDolt(t)
 	acquireTestSlot()
@@ -949,4 +962,59 @@ func TestCrossProject_IdentityCheck_Gateway_SkipsVerification(t *testing.T) {
 		t.Fatalf("gateway open must skip identity verification (reconciled by resolveInitProjectID instead), got error: %v", err)
 	}
 	gatewayStore.Close()
+}
+
+// seedProjectID creates the fixture's database through a BeadsDir open made
+// before any metadata.json exists (so that open soft-skips) and records
+// dbID as its _project_id.
+func (f *identityTestFixture) seedProjectID(t *testing.T, ctx context.Context, dbID string) {
+	t.Helper()
+	ownerStore, err := openStoreWithOwnBudget(t, f.config())
+	if err != nil {
+		t.Fatalf("create owner store: %v", err)
+	}
+	if err := ownerStore.SetMetadata(ctx, "_project_id", dbID); err != nil {
+		ownerStore.Close()
+		t.Fatalf("seed _project_id: %v", err)
+	}
+	ownerStore.Close()
+}
+
+// TestCrossProject_IdentityCheck_PathOnly_ForeignRejected covers a Path-only
+// Config (no BeadsDir), the shape beads.Open builds (GH#5559). New resolves
+// the workspace from filepath.Dir(Path), so the identity gate must check
+// that resolved directory and refuse a foreign project's existing database,
+// whether or not CreateIfMissing is set.
+func TestCrossProject_IdentityCheck_PathOnly_ForeignRejected(t *testing.T) {
+	skipIfNoDolt(t)
+	acquireTestSlot()
+	t.Cleanup(releaseTestSlot)
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	f := newIdentityTestFixture(t, "pathonly-foreign")
+	f.seedProjectID(t, ctx, "proj-owner")
+	f.saveLocalProjectID(t, "proj-intruder")
+
+	for _, createIfMissing := range []bool{true, false} {
+		t.Run(fmt.Sprintf("CreateIfMissing=%v", createIfMissing), func(t *testing.T) {
+			cfg := f.pathOnlyConfig()
+			cfg.CreateIfMissing = createIfMissing
+			store, err := New(ctx, cfg)
+			if err == nil {
+				store.Close()
+				t.Fatalf("Path-only open of a foreign database succeeded; want PROJECT IDENTITY MISMATCH")
+			}
+			if store != nil {
+				store.Close()
+				t.Errorf("New returned a non-nil store alongside error: %v", err)
+			}
+			if !strings.Contains(err.Error(), "PROJECT IDENTITY MISMATCH") {
+				t.Fatalf("expected PROJECT IDENTITY MISMATCH error, got: %v", err)
+			}
+			if strings.Contains(err.Error(), "refusing to initialize") {
+				t.Errorf("a non-init open got the bd init wording: %v", err)
+			}
+		})
+	}
 }
