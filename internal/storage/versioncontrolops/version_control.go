@@ -8,6 +8,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/steveyegge/beads/internal/storage/schema"
 )
 
 // validTablePattern matches valid SQL table names (letters, digits, underscores).
@@ -176,7 +177,7 @@ func ResolveConflicts(ctx context.Context, db DBConn, table, strategy string) er
 		return fmt.Errorf("unknown conflict resolution strategy: %s", strategy)
 	}
 
-	if _, err := db.ExecContext(ctx, query); err != nil {
+	if err := schema.DrainCall(ctx, db, query); err != nil {
 		return fmt.Errorf("resolve conflicts: %w", err)
 	}
 	return nil

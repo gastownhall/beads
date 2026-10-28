@@ -104,6 +104,21 @@ func TestMergeSettleDrainsCallResultSets(t *testing.T) {
 		}
 		rec.assertDrained(t, mock)
 	})
+
+	t.Run("settle_merge_strategy_theirs", func(t *testing.T) {
+		rec, mock := newDrainMock(t)
+		expectConflicts(mock, "wisps") // the auto-resolver declines wisps
+		expectConflicts(mock, "wisps") // GetConflicts
+		expectDrainedCall(mock, "CALL DOLT_CONFLICTS_RESOLVE('--theirs', 'wisps')")
+		expectDrainedCall(mock, "CALL DOLT_ADD(?)", "wisps")
+		expectNoViolations(mock)
+		expectDrainedCall(mock, "CALL DOLT_COMMIT('-m', ?)", "Resolve merge conflicts using 'theirs' strategy")
+
+		if err := SettleMerge(context.Background(), rec, nil, true, "theirs"); err != nil {
+			t.Fatalf("SettleMerge: %v", err)
+		}
+		rec.assertDrained(t, mock)
+	})
 }
 
 const testAuthor = "Tester <tester@example.com>"

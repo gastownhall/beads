@@ -171,7 +171,7 @@ func SettleMerge(ctx context.Context, db DBConn, mergeErr error, preMergeClean b
 					abortMerge(ctx, db, preMergeClean)
 					return fmt.Errorf("resolve %s conflicts with '%s' strategy: %w", table, strategy, err)
 				}
-				if _, err := db.ExecContext(ctx, "CALL DOLT_ADD(?)", table); err != nil {
+				if err := schema.DrainCall(ctx, db, "CALL DOLT_ADD(?)", table); err != nil {
 					abortMerge(ctx, db, preMergeClean)
 					return fmt.Errorf("stage resolved %s: %w", table, err)
 				}
@@ -222,7 +222,7 @@ func SettleMerge(ctx context.Context, db DBConn, mergeErr error, preMergeClean b
 		}
 	case strategyResolved:
 		msg := fmt.Sprintf("Resolve merge conflicts using '%s' strategy", strategy)
-		if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?)", msg); err != nil {
+		if err := schema.DrainCall(ctx, db, "CALL DOLT_COMMIT('-m', ?)", msg); err != nil {
 			abortMerge(ctx, db, preMergeClean)
 			if mergeErr != nil {
 				return mergeErr
