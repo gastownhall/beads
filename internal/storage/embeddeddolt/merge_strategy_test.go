@@ -364,7 +364,7 @@ func assertMergeConcluded(t *testing.T, ctx context.Context, conn *sql.Conn) {
 // settled with --strategy ours/theirs, must carry the peer's cleanly merged
 // label swap into the merge commit — not just the working set.
 func TestMergeAndSettleWithStrategy_KeepsCleanMergedTables(t *testing.T) {
-	for _, strategy := range []string{"ours"} {
+	for _, strategy := range []string{"ours", "theirs"} {
 		t.Run(strategy, func(t *testing.T) {
 			te := newTestEnv(t, "mergekept"+strategy)
 			ctx := t.Context()
