@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -1012,6 +1013,59 @@ func TestCrossProject_IdentityCheck_PathOnlyConfig_ForeignRejected(t *testing.T)
 		// bd init wording (GH#5558).
 		if strings.Contains(err.Error(), "refusing to initialize") {
 			t.Errorf("CreateIfMissing=%v: a non-init Path-only open got the bd init wording: %v", createIfMissing, err)
+		}
+	}
+}
+
+// TestCrossProject_IdentityCheck_PathOnlyConfig_GlobalForeignRejected is the
+// beads_global counterpart of the Path-only rejection above: a Path-only
+// Config with Database beads_global and no BeadsDir must verify
+// global_project_id from the workspace resolved via filepath.Dir(Path), not
+// silently skip (GH#5559). The database is never dropped (rapid CREATE/DROP
+// cycles crash the test container), so the owner open re-seeds _project_id
+// and an in-process re-run that finds beads_global already present stays
+// deterministic.
+func TestCrossProject_IdentityCheck_PathOnlyConfig_GlobalForeignRejected(t *testing.T) {
+	skipIfNoDolt(t)
+	acquireTestSlot()
+	t.Cleanup(releaseTestSlot)
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	f := newIdentityTestFixture(t, "pathglobal")
+	f.dbName = doltserver.GlobalDatabaseName
+	ownerID := "global-owner"
+
+	ownerStore, err := openStoreWithOwnBudget(t, f.config())
+	if err != nil {
+		t.Fatalf("create owner store: %v", err)
+	}
+	if err := ownerStore.SetMetadata(ctx, "_project_id", ownerID); err != nil {
+		ownerStore.Close()
+		t.Fatalf("seed _project_id: %v", err)
+	}
+	ownerStore.Close()
+
+	// A foreign global_project_id in the workspace a Path-only open
+	// resolves to.
+	if err := (&configfile.Config{GlobalProjectID: "global-intruder"}).Save(f.beadsDir); err != nil {
+		t.Fatalf("save metadata.json: %v", err)
+	}
+
+	foreignStore, err := openStoreWithOwnBudget(t, f.pathOnlyConfig())
+	if err == nil {
+		foreignStore.Close()
+		t.Fatalf("Path-only open of a foreign beads_global succeeded; want GLOBAL PROJECT IDENTITY MISMATCH")
+	}
+	// Do not pin the IDs' positions: the global mismatch message format
+	// predates this fix and is malformed (expectedID concatenated into the
+	// format string); only the header and the two IDs are stable.
+	if !strings.Contains(err.Error(), "GLOBAL PROJECT IDENTITY MISMATCH") {
+		t.Fatalf("expected GLOBAL PROJECT IDENTITY MISMATCH error, got: %v", err)
+	}
+	for _, id := range []string{"global-owner", "global-intruder"} {
+		if !strings.Contains(err.Error(), id) {
+			t.Errorf("mismatch error does not mention %q: %v", id, err)
 		}
 	}
 }
