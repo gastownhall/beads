@@ -1055,6 +1055,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd federation sync` no longer fails on every run with "local changes would
+  be stomped by merge: federation_peers" (#3547). Fetching from a peer,
+  including the `bd federation status` probe, no longer writes
+  `federation_peers`; the peer's `last_sync` is stamped after the merge.
 - `bd list --watch` and `bd show --watch` now wait a full poll interval after
   each refresh, and `bd list --watch --parent` reads its tree in one
   transaction, so other bd commands on an embedded workspace no longer stall
