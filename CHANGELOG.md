@@ -1055,6 +1055,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd context` (and every command that resolves `BEADS_DIR`) now accepts a
+  `.beads` inside the current non-root account's own home when that home sits
+  under a protected system prefix, such as a service account homed at
+  `/var/lib/<service>`. The home must come from the account database (not
+  `$HOME`), be a directory the account owns, and the path must not leave it
+  through a symlink; other paths under `/var`, `/root` and the rest stay
+  rejected (#6323).
 - `bd list --watch` and `bd show --watch` now wait a full poll interval after
   each refresh, and `bd list --watch --parent` reads its tree in one
   transaction, so other bd commands on an embedded workspace no longer stall

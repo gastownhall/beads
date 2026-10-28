@@ -193,6 +193,14 @@ system directories:
 Temporary directories (e.g., `/var/folders` on macOS) are explicitly allowed
 for test environments.
 
+A path under one of the system prefixes is still allowed when it lies inside
+the current account's own home, so a service account homed at
+`/var/lib/<service>` can keep its `.beads` there (GH#6323). That exception
+applies only when the process is not root, the home comes from the account
+database (`user.Current()`, never `$HOME`), sits strictly inside the prefix,
+and is a directory owned by the process uid, and the path does not escape the
+home through a symlink.
+
 ## Server Mode Handling
 
 ### CLI vs Server Context

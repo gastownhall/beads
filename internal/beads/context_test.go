@@ -1599,3 +1599,74 @@ func TestIsPathInSafeBoundary_DeniedPrefixHomeNeverFromHOME(t *testing.T) {
 		t.Errorf("isPathInSafeBoundary(%q) = true with HOME=%q and no account entry, want false", path, f.home)
 	}
 }
+
+// TestIsPathInSafeBoundary_DeniedPrefixHomeGuards pins AC-4: the account's
+// home only pierces the deny list when the process is not root and the home is
+// an existing directory the process owns, strictly inside the matched prefix.
+// Ownership is what a forged $HOME (reported by a CGO-free user.Current for a
+// uid with no passwd entry) cannot fake, and it keeps root-owned system homes
+// such as /var/www out.
+func TestIsPathInSafeBoundary_DeniedPrefixHomeGuards(t *testing.T) {
+	f := newOwnHomeFixture(t)
+	inHome := filepath.Join(f.home, "releases", "r1", ".beads")
+	rootsvc := filepath.Join(f.lib, "rootsvc")
+	for _, tc := range []struct {
+		name     string
+		uid      int
+		seamHome string
+		path     string
+	}{
+		{"root", 0, rootsvc, filepath.Join(rootsvc, "releases", "r1", ".beads")},
+		{"home not owned by the process", f.uid + 1, f.home, inHome},
+		{"home is the denied prefix itself", f.uid, f.denied, filepath.Join(f.denied, "releases", "r1", ".beads")},
+		{"home is the filesystem root", f.uid, "/", inHome},
+		{"empty home", f.uid, "", inHome},
+		{"dot home", f.uid, ".", inHome},
+		{"home is a regular file", f.uid, filepath.Join(f.lib, "file"), filepath.Join(f.lib, "file", ".beads")},
+		{"home is missing", f.uid, filepath.Join(f.lib, "missing"), filepath.Join(f.lib, "missing", ".beads")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f.setAccount(tc.uid, tc.seamHome, nil)
+			if isPathInSafeBoundary(tc.path) {
+				t.Errorf("isPathInSafeBoundary(%q) = true with account uid %d home %q, want false", tc.path, tc.uid, tc.seamHome)
+			}
+		})
+	}
+}
+
+// TestDirOwnedBy pins the ownership check behind the denied-prefix home
+// carve-out (AC-4): only an existing directory owned by uid passes, and a
+// symlink is judged by its target.
+func TestDirOwnedBy(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("ownership is not vetted on windows; dirOwnedBy fails closed there")
+	}
+	dir := t.TempDir()
+	uid := os.Getuid()
+	file := filepath.Join(dir, "file")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(dir, link); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		path string
+		uid  int
+		want bool
+	}{
+		{"own directory", dir, uid, true},
+		{"another uid", dir, uid + 1, false},
+		{"symlink to own directory", link, uid, true},
+		{"regular file", file, uid, false},
+		{"missing", filepath.Join(dir, "missing"), uid, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := dirOwnedBy(tc.path, tc.uid); got != tc.want {
+				t.Errorf("dirOwnedBy(%q, %d) = %v, want %v", tc.path, tc.uid, got, tc.want)
+			}
+		})
+	}
+}

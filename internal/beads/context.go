@@ -524,7 +524,7 @@ func isPathInSafeBoundary(path string) bool {
 		if strings.HasPrefix(absPath, prefix+"/") || absPath == prefix {
 			// A service account's own home can live under a denied prefix
 			// (/var/lib/<svc>, GH#6323); admit only that, never the prefix.
-			return inOwnHomeUnderPrefix(absPath)
+			return inOwnHomeUnderPrefix(absPath, prefix)
 		}
 	}
 	// macOS's /Users/Shared is the OS-designated shared directory, not a peer
@@ -629,21 +629,29 @@ var currentAccount = func() (uid int, home string, err error) {
 }
 
 // inOwnHomeUnderPrefix reports whether absPath, which the SEC-003 deny loop
-// matched, lies inside the current account's own home. Both the
-// recorded and the symlink-resolved spelling of the home are compared, so a
-// home recorded through a symlink (or /var vs /private/var on macOS) still
-// matches an already-canonicalized BEADS_DIR.
-func inOwnHomeUnderPrefix(absPath string) bool {
-	_, home, err := currentAccount()
-	if err != nil {
+// matched against prefix, lies inside the current account's own home. The
+// home pierces the deny list only when the process is not root, the home
+// sits strictly inside prefix (never the prefix itself, which would admit the
+// whole tree), it is an existing directory the process owns, and absPath does
+// not escape it through a symlink. Both the recorded and the symlink-resolved
+// spelling of the home are compared, so a home recorded through a symlink (or
+// /var vs /private/var on macOS) still matches an already-canonicalized
+// BEADS_DIR.
+func inOwnHomeUnderPrefix(absPath, prefix string) bool {
+	uid, home, err := currentAccount()
+	if err != nil || uid <= 0 {
 		return false
 	}
+	// filepath.Clean("") is "."; neither it nor "/" may stand for a home.
 	home = filepath.Clean(home)
+	if home == "." || home == string(filepath.Separator) {
+		return false
+	}
 	for _, h := range []string{home, resolveLongestExistingAncestor(home)} {
-		if absPath == h || strings.HasPrefix(absPath, h+"/") {
+		if strings.HasPrefix(h, prefix+"/") && (absPath == h || strings.HasPrefix(absPath, h+"/")) {
 			// Same symlink-escape treatment as the /var/tmp and /Users/Shared
 			// carve-outs: a link inside the home must not lead out of it.
-			return resolvedPathWithinRoot(absPath, home)
+			return dirOwnedBy(home, uid) && resolvedPathWithinRoot(absPath, home)
 		}
 	}
 	return false
