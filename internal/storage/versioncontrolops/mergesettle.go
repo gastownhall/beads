@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/storage"
@@ -217,7 +218,7 @@ func SettleMerge(ctx context.Context, db DBConn, mergeErr error, preMergeClean b
 		}
 	case strategyResolved:
 		msg := fmt.Sprintf("Resolve merge conflicts using '%s' strategy", strategy)
-		if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?)", msg); err != nil {
+		if err := concludeMerge(ctx, db, msg, ""); err != nil {
 			abortMerge(ctx, db, preMergeClean)
 			if mergeErr != nil {
 				return mergeErr
@@ -335,6 +336,89 @@ func MergeWithStrategy(ctx context.Context, db DBConn, ref, author, strategy str
 	}
 
 	return conflicts, nil
+}
+
+// doltCommitHashRE matches a Dolt commit hash (32 base32 characters), the same
+// check issueops applies before inlining a hash into a dolt_diff table
+// function, which takes literal arguments only.
+var doltCommitHashRE = regexp.MustCompile(`^[0-9a-v]{32}$`)
+
+// stageMergeResult stages every table the active merge integrated cleanly
+// (#7811). A conflicted DOLT_MERGE leaves the staged root at HEAD and the
+// merged root in the working set, and the settle paths stage only the tables
+// they resolved, so a bare DOLT_COMMIT('-m') concluded the merge with HEAD's
+// copy of every other table: a push reverted the peer's change while local
+// reads kept the merged copy.
+//
+// The staged set is exact. Dolt refuses to start a merge when a table with
+// uncommitted changes also differs between HEAD and the merge source, so an
+// unstaged table in that diff is merge output; pending work in any other
+// table (bd vc merge runs no CommitPending, and server mode leaves some
+// config pending, GH#2455) stays pending. DOLT_ADD without -f keeps ignored
+// tables out. No active merge stages nothing.
+func stageMergeResult(ctx context.Context, db DBConn) error {
+	var source string
+	err := db.QueryRowContext(ctx, "SELECT source_commit FROM dolt_merge_status WHERE is_merging").Scan(&source)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read merge source: %w", err)
+	}
+	if !doltCommitHashRE.MatchString(source) {
+		return fmt.Errorf("merge source %q is not a dolt commit hash", source)
+	}
+
+	//nolint:gosec // G201: source is validated against doltCommitHashRE; dolt_diff_summary requires literal args.
+	rows, err := db.QueryContext(ctx, fmt.Sprintf(
+		"SELECT DISTINCT s.table_name FROM dolt_status s JOIN dolt_diff_summary('HEAD', '%s') d "+
+			"ON s.table_name IN (d.from_table_name, d.to_table_name) WHERE s.staged = 0", source))
+	if err != nil {
+		return fmt.Errorf("list cleanly merged tables: %w", err)
+	}
+	var tables []string
+	for rows.Next() {
+		var table string
+		if err := rows.Scan(&table); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("scan cleanly merged table: %w", err)
+		}
+		tables = append(tables, table)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return fmt.Errorf("list cleanly merged tables: %w", err)
+	}
+	// db is a single session: close before the next statement.
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("list cleanly merged tables: %w", err)
+	}
+
+	for _, table := range tables {
+		if _, err := db.ExecContext(ctx, "CALL DOLT_ADD(?)", table); err != nil {
+			return fmt.Errorf("stage merged %s: %w", table, err)
+		}
+	}
+	return nil
+}
+
+// concludeMerge commits the active merge with its full result: the tables a
+// caller resolved and staged, plus every table the merge integrated cleanly
+// (stageMergeResult). It never skips an "empty" commit the way StageAndCommit
+// does: while a merge is active, DOLT_COMMIT may commit a tree equal to HEAD
+// and must, to close the merge as a two-parent commit. author formats
+// "Name <email>"; empty leaves attribution to the session.
+func concludeMerge(ctx context.Context, db DBConn, msg, author string) error {
+	if err := stageMergeResult(ctx, db); err != nil {
+		return err
+	}
+	var err error
+	if author == "" {
+		_, err = db.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?)", msg)
+	} else {
+		_, err = db.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)", msg, author)
+	}
+	return err
 }
 
 // abortMerge restores the pre-merge state after a settle pass refused the

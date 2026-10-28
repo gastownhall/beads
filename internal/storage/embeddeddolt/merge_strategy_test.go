@@ -232,3 +232,123 @@ func TestMergeAndSettleWithStrategy_EmptyStrategyMatchesMergeAndSettle(t *testin
 		t.Errorf("title = %q after aborted pull, want unchanged local value %q", title, "ours")
 	}
 }
+
+// seedRetitleAndLabelSwapConflict is seedIssueRetitleConflict plus the #7811
+// shape: the issue carries label needs-triage at the common base, and the
+// peer, besides retitling, swaps it for ready-for-agent. labels merges
+// cleanly; only the issues title conflicts. Leaves main checked out.
+func seedRetitleAndLabelSwapConflict(t *testing.T, ctx context.Context, conn *sql.Conn, issueID string) (peerBranch string) {
+	t.Helper()
+	exec := func(q string, args ...any) {
+		t.Helper()
+		if _, err := conn.ExecContext(ctx, q, args...); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	exec("INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) VALUES (?, 'base', '', '', '', '', 'open', 3, 'bug')", issueID)
+	exec("INSERT INTO labels (issue_id, label) VALUES (?, 'needs-triage')", issueID)
+	exec("CALL DOLT_COMMIT('-Am', 'seed labelled issue')")
+
+	peerBranch = issueID + "-peer"
+	exec("CALL DOLT_BRANCH(?, 'HEAD')", peerBranch)
+	exec("UPDATE issues SET title = 'ours', updated_at = '2026-01-01 00:00:00' WHERE id = ?", issueID)
+	exec("CALL DOLT_COMMIT('-Am', 'retitle ours')")
+
+	exec("CALL DOLT_CHECKOUT(?)", peerBranch)
+	exec("DELETE FROM labels WHERE issue_id = ? AND label = 'needs-triage'", issueID)
+	exec("INSERT INTO labels (issue_id, label) VALUES (?, 'ready-for-agent')", issueID)
+	exec("UPDATE issues SET title = 'theirs', updated_at = '2026-01-01 00:00:00' WHERE id = ?", issueID)
+	exec("CALL DOLT_COMMIT('-Am', 'relabel + retitle theirs')")
+	exec("CALL DOLT_CHECKOUT('main')")
+	return peerBranch
+}
+
+// assertMergeConcludedWithPeerLabel checks what a push would send, not the
+// working set (which shows the merged labels even when the commit dropped
+// them, #7811): HEAD carries the peer's label swap and the wantTitle side of
+// the conflict, nothing is left uncommitted, and the merge is closed as a
+// two-parent commit.
+func assertMergeConcludedWithPeerLabel(t *testing.T, ctx context.Context, conn *sql.Conn, issueID, wantTitle string) {
+	t.Helper()
+	if got := headLabels(t, ctx, conn, issueID); got != "ready-for-agent" {
+		t.Errorf("labels AS OF HEAD = %q, want %q: the merge commit dropped the peer's cleanly merged label change", got, "ready-for-agent")
+	}
+	var title string
+	if err := conn.QueryRowContext(ctx, "SELECT title FROM issues AS OF 'HEAD' WHERE id = ?", issueID).Scan(&title); err != nil {
+		t.Fatalf("read HEAD title: %v", err)
+	}
+	if title != wantTitle {
+		t.Errorf("title AS OF HEAD = %q, want %q", title, wantTitle)
+	}
+	var dirty int
+	if err := conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_status").Scan(&dirty); err != nil {
+		t.Fatalf("count dolt_status: %v", err)
+	}
+	if dirty != 0 {
+		t.Errorf("%d table(s) left uncommitted after the merge concluded", dirty)
+	}
+	assertMergeClosedWithTwoParents(t, ctx, conn)
+}
+
+func headLabels(t *testing.T, ctx context.Context, conn *sql.Conn, issueID string) string {
+	t.Helper()
+	rows, err := conn.QueryContext(ctx, "SELECT label FROM labels AS OF 'HEAD' WHERE issue_id = ? ORDER BY label", issueID)
+	if err != nil {
+		t.Fatalf("read HEAD labels: %v", err)
+	}
+	defer rows.Close()
+	var got []string
+	for rows.Next() {
+		var l string
+		if err := rows.Scan(&l); err != nil {
+			t.Fatalf("scan label: %v", err)
+		}
+		got = append(got, l)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate HEAD labels: %v", err)
+	}
+	return strings.Join(got, ",")
+}
+
+func assertMergeClosedWithTwoParents(t *testing.T, ctx context.Context, conn *sql.Conn) {
+	t.Helper()
+	var merging bool
+	if err := conn.QueryRowContext(ctx, "SELECT is_merging FROM dolt_merge_status").Scan(&merging); err != nil {
+		t.Fatalf("read dolt_merge_status: %v", err)
+	}
+	if merging {
+		t.Error("dolt_merge_status.is_merging is still true: the merge was never concluded")
+	}
+	var parents int
+	if err := conn.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM dolt_commit_ancestors WHERE commit_hash = HASHOF('HEAD')").Scan(&parents); err != nil {
+		t.Fatalf("count HEAD parents: %v", err)
+	}
+	if parents != 2 {
+		t.Errorf("HEAD has %d parent(s), want 2 (a merge commit)", parents)
+	}
+}
+
+// TestMergeAndSettleWithStrategy_KeepsCleanMergedTables is #7811: `bd dolt
+// pull --strategy` staged only the conflicted table before DOLT_COMMIT, so the
+// merge commit kept HEAD's labels (a push reverted the peer's swap) while the
+// working set kept the merged ones.
+func TestMergeAndSettleWithStrategy_KeepsCleanMergedTables(t *testing.T) {
+	for _, tc := range []struct{ strategy, wantTitle string }{
+		{"ours", "ours"},
+	} {
+		t.Run(tc.strategy, func(t *testing.T) {
+			te := newTestEnv(t, "mgcp"+tc.strategy)
+			ctx := t.Context()
+			conn := openSettleConn(t, ctx, te)
+
+			peerBranch := seedRetitleAndLabelSwapConflict(t, ctx, conn, "mgl-"+tc.strategy)
+
+			if err := versioncontrolops.MergeAndSettleWithStrategy(ctx, conn, peerBranch, tc.strategy); err != nil {
+				t.Fatalf("MergeAndSettleWithStrategy(%s): %v", tc.strategy, err)
+			}
+			assertMergeConcludedWithPeerLabel(t, ctx, conn, "mgl-"+tc.strategy, tc.wantTitle)
+		})
+	}
+}
