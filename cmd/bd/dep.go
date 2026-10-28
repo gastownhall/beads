@@ -1313,9 +1313,10 @@ Examples:
   bd dep tree gt-0iqq --status=open      # Only show open issues
   bd dep tree gt-0iqq --depth=3          # Limit to 3 levels deep
 
-A node reached by two paths is shown ONCE, under the first path that got
-there, and a cycle simply ends the descent. --show-all-paths is a deprecated
-no-op; use 'bd dep cycles' to find circular dependencies.
+A node reached by two paths is expanded once, under the first path that got
+there; later paths list it as "(shown above)" (in --json, a row with
+"deduped": true). A cycle simply ends the descent. --show-all-paths is a
+deprecated no-op; use 'bd dep cycles' to find circular dependencies.
 
 --max-rows / BEADS_MAX_ROWS caveat: the tree walk has no query filter to
 thread the cap through, so the full tree is always built first and the
@@ -1503,7 +1504,7 @@ func (r *treeRenderer) renderNode(node *types.TreeNode, children map[string][]*t
 
 	// Check if we've seen this node before (diamond dependency)
 	if r.seen[node.ID] {
-		fmt.Printf("%s%s (shown above)\n", prefix.String(), ui.RenderMuted(node.ID))
+		fmt.Printf("%s%s (shown above)%s\n", prefix.String(), ui.RenderMuted(node.ID), treeEdgeLabel(node))
 		return
 	}
 	r.seen[node.ID] = true
@@ -1567,10 +1568,7 @@ func formatTreeNode(node *types.TreeNode, isBlocked bool) string {
 	line := fmt.Sprintf("%s: %s [P%d] (%s)",
 		idStr, node.Title, node.Priority, node.Status)
 
-	// Show edge type for non-root nodes (GH#3565)
-	if node.Depth > 0 && node.EdgeFromParent != "" {
-		line += " " + ui.RenderMuted(fmt.Sprintf("[%s]", node.EdgeFromParent))
-	}
+	line += treeEdgeLabel(node)
 
 	// Add READY/BLOCKED indicator for root node
 	if node.Status == types.StatusOpen && node.Depth == 0 {
@@ -1582,6 +1580,15 @@ func formatTreeNode(node *types.TreeNode, isBlocked bool) string {
 	}
 
 	return line
+}
+
+// treeEdgeLabel is the muted " [type]" a non-root node shows for the edge that
+// led to it (GH#3565), on its expanded line and on a "(shown above)" line alike.
+func treeEdgeLabel(node *types.TreeNode) string {
+	if node.Depth > 0 && node.EdgeFromParent != "" {
+		return " " + ui.RenderMuted(fmt.Sprintf("[%s]", node.EdgeFromParent))
+	}
+	return ""
 }
 
 // validateExternalRef validates the format of an external dependency reference.
@@ -1639,11 +1646,12 @@ func init() {
 	depAddCmd.Flags().Bool("no-cycle-check", false, "On bulk --file adds, skip per-edge cycle checks and the post-add cycle warning (one final whole-graph check still runs before commit); on a single-edge add, skip only the post-add cycle warning")
 
 	// DEPRECATED NO-OP, and it always was one: nothing has ever read this flag,
-	// so a diamond has always been rendered under one parent only. The role's
-	// contract states the first-visit rule as a promise
+	// so a diamond's shared subtree is expanded under one parent only, and each
+	// later parent gets a Deduped stub. The role's contract states the
+	// first-visit rule as a promise
 	// (issueops/treewalker.go, TreeResult.Nodes) and this flag stays accepted so
 	// no script breaks. Same story as TreeNode.Truncated.
-	depTreeCmd.Flags().Bool("show-all-paths", false, "Deprecated no-op: accepted and ignored. A node reached by two paths is shown once, under the first.")
+	depTreeCmd.Flags().Bool("show-all-paths", false, "Deprecated no-op: accepted and ignored. A node reached by two paths is expanded once, under the first; later paths list it as (shown above).")
 	depTreeCmd.Flags().IntP("max-depth", "d", 50, "Maximum tree depth to display (safety limit)")
 	depTreeCmd.Flags().Bool("reverse", false, "Show dependent tree (deprecated: use --direction=up)")
 	depTreeCmd.Flags().String("direction", "", "Tree direction: 'down' (dependencies), 'up' (dependents), or 'both'")
