@@ -197,7 +197,8 @@ const (
 // generators skip tombstones). Without it an upsert would resurrect a row a
 // retaining sweep retired. A retired id with no live row is refused with
 // *publicops.IdempotencyExpiredError, unless the options say to skip it:
-// ConflictSkip skips it silently and OnRetiredID skips and reports it.
+// ConflictSkip or OnRetiredID skips it, and OnRetiredID, when set, reports it
+// under ConflictSkip too.
 func prepareCreateIssueInTx(ctx context.Context, tx DBTX, bc *BatchContext, issue *types.Issue, actor string) (issueTable, eventTable string, outcome prepareOutcome, err error) {
 	if err := PrepareIssueForInsert(issue, bc.CustomStatuses, bc.CustomTypes); err != nil {
 		return "", "", prepareWrite, err
@@ -237,11 +238,12 @@ func prepareCreateIssueInTx(ctx context.Context, tx DBTX, bc *BatchContext, issu
 			return "", "", prepareWrite, err
 		}
 		if retired != nil {
-			switch {
-			case bc.Opts.ConflictSkip:
-				return issueTable, eventTable, prepareRetiredSkip, nil
-			case bc.Opts.OnRetiredID != nil:
+			// Report before skipping, ConflictSkip or not, so a caller that
+			// counts the rows it wrote never counts a retired one.
+			if bc.Opts.OnRetiredID != nil {
 				bc.Opts.OnRetiredID(issue.ID)
+			}
+			if bc.Opts.ConflictSkip || bc.Opts.OnRetiredID != nil {
 				return issueTable, eventTable, prepareRetiredSkip, nil
 			}
 			return "", "", prepareWrite, idempotencyExpired(retired)

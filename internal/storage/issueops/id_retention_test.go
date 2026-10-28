@@ -255,3 +255,47 @@ func TestIDTakenRefusesAnUnknownTable(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// TestGetNextChildIDCountsARetiredChildInTheHighWaterRead pins the child id
+// mint: the parent's live children and both tombstone tables are read in ONE
+// statement (one snapshot on every isolation level), and a retired suffix
+// above both the counter and every live child is taken, so the mint passes it.
+func TestGetNextChildIDCountsARetiredChildInTheHighWaterRead(t *testing.T) {
+	db, mock := newIDRetentionMock(t)
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM wisps WHERE id = ? LIMIT 1")).
+		WithArgs("bd-p").WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT last_child FROM child_counters WHERE parent_id = ?")).
+		WithArgs("bd-p").WillReturnRows(sqlmock.NewRows([]string{"last_child"}).AddRow(1))
+	mock.ExpectQuery(regexp.QuoteMeta(fmt.Sprintf(usedChildIDsSQL, "issues", IDTombstoneTable, WispIDTombstoneTable))).
+		WithArgs("bd-p", "bd-p", "bd-p", "bd-p", "bd-p", "bd-p").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("bd-p.2").AddRow("bd-p.4"))
+	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO child_counters (parent_id, last_child) VALUES (?, ?)")).
+		WithArgs("bd-p", 5, 5).WillReturnResult(sqlmock.NewResult(0, 1))
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := GetNextChildIDTx(context.Background(), tx, "bd-p")
+	if err != nil {
+		t.Fatalf("GetNextChildIDTx() = %v", err)
+	}
+	if id != "bd-p.5" {
+		t.Fatalf("GetNextChildIDTx() = %q, want bd-p.5 past the retired bd-p.4", id)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestUsedChildIDsRefusesAnUnknownTable pins that the one formatted row table
+// is checked rather than trusted.
+func TestUsedChildIDsRefusesAnUnknownTable(t *testing.T) {
+	db, mock := newIDRetentionMock(t)
+	if _, err := UsedChildIDsInTx(context.Background(), db, "issues; DROP TABLE x", "bd-p"); err == nil {
+		t.Fatal("UsedChildIDsInTx(unknown table) = nil error")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}

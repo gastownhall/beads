@@ -492,6 +492,10 @@ func wireDeferredImportDeps(ctx context.Context, store storage.DoltStorage, defe
 	// callback unset keeps a phase-2 signal from ever misreporting a row
 	// whose phase-1 write committed.
 	depOpts.OnStaleRejected = nil
+	// Phase 1 already reported every row it skipped as retired. A row a
+	// retaining sweep retired after its phase-1 write committed was written,
+	// so a phase-2 report would misattribute it the same way.
+	depOpts.OnRetiredID = nil
 	// One plane per transaction is no longer required: the engine writes an
 	// in-batch regular<->wisp edge under SkipDependencyValidationErrors
 	// (wy-a648lq), so a mixed dependency-pass batch wires every edge whose
@@ -1290,6 +1294,9 @@ func intPtrEqual(a, b *int) bool {
 type importLocalResult struct {
 	Issues   int
 	Memories int
+	// Retired counts the issue ids the import skipped because a retaining
+	// sweep retired them; they are not in Issues.
+	Retired int
 }
 
 // memoryRecord represents a memory entry in the JSONL export.
@@ -1509,7 +1516,10 @@ func importFromLocalJSONLWithOpts(ctx context.Context, store storage.DoltStorage
 		}
 		// Rows the resume fast path proved already present count as imported
 		// here: this is "rows the file put in the store", not "rows written".
+		// A retired row is in neither (assembleImportResult), ConflictSkip or
+		// not: it is counted apart.
 		result.Issues = importResult.Created + importResult.Unchanged
+		result.Retired = len(importResult.RetiredIDs)
 	}
 
 	return result, nil

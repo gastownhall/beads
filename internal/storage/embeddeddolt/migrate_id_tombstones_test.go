@@ -130,10 +130,12 @@ func requireTombstoneShape(t *testing.T, ctx context.Context, conn *sql.Conn, ta
 	}
 }
 
-// TestEmbeddedChildCounterNeverReissuesASweptChild pins the one id source the
-// retired-id guard deliberately leaves alone (GetNextChildIDTx): a parent's
-// child counter only advances, so after a retaining sweep retires child .1 the
-// next child create is handed .2 — never the retired .1 it would be refused.
+// TestEmbeddedChildCounterNeverReissuesASweptChild pins the child id mint
+// (GetNextChildIDTx) with the parent's child counter in step: it only
+// advances, so after a retaining sweep retires child .1 the next child create
+// is handed .2 — never the retired .1 it would be refused. A counter that lags
+// the retired child is the IDRetention contract's NeverMintsARetiredChildID
+// case: there the tombstone alone keeps the suffix taken.
 func TestEmbeddedChildCounterNeverReissuesASweptChild(t *testing.T) {
 	requireEmbedded(t)
 	te := newTestEnv(t, "cc")
@@ -172,4 +174,55 @@ func TestEmbeddedChildCounterNeverReissuesASweptChild(t *testing.T) {
 	if second := create(parent); second != parent+".2" {
 		t.Fatalf("child after sweeping .1 = %s, want %s.2", second, parent)
 	}
+}
+
+// TestEmbeddedImportJSONLDataSkipsRetiredRowsOnATombstoneOnlyDatabase pins the
+// auto-import's single-transaction body (ImportJSONLData, ConflictSkip) on the
+// database a retaining sweep of every row leaves: no issue rows, so it counts
+// as empty and the import runs, while the tombstone remains. The retired row,
+// which the file carries twice, is skipped and named once; only the row
+// actually written counts as imported.
+func TestEmbeddedImportJSONLDataSkipsRetiredRowsOnATombstoneOnlyDatabase(t *testing.T) {
+	requireEmbedded(t)
+	te := newTestEnv(t, "ij")
+	ctx := t.Context()
+	lifecycle, err := te.store.IssueLifecycle()
+	if err != nil {
+		t.Fatalf("IssueLifecycle(): %v", err)
+	}
+	sweeper, err := te.store.Sweeper()
+	if err != nil {
+		t.Fatalf("Sweeper(): %v", err)
+	}
+	created, err := lifecycle.Create(ctx, issueops.CreateRequest{
+		Actor: "import-jsonl-test",
+		Issue: &types.Issue{Title: "retire me", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+	})
+	if err != nil {
+		t.Fatalf("Create = %v", err)
+	}
+	retired := created.Issue.ID
+	if _, err := lifecycle.Close(ctx, issueops.CloseRequest{Actor: "import-jsonl-test", IssueID: retired, Reason: "done"}); err != nil {
+		t.Fatalf("Close(%s) = %v", retired, err)
+	}
+	if result, err := sweeper.Sweep(ctx, issueops.SweepRequest{Tier: issueops.SweepDurable, IDPattern: retired, RetainIDs: true}); err != nil || result.Swept != 1 {
+		t.Fatalf("retaining sweep of %s = %+v, %v; want Swept 1", retired, result, err)
+	}
+
+	row := func(id string) *types.Issue {
+		return &types.Issue{ID: id, Title: "imported " + id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	}
+	const fresh = "ij-fresh1"
+	imported, retiredIDs, err := te.store.ImportJSONLData(ctx, []*types.Issue{row(retired), row(fresh), row(retired)}, nil, "auto-import")
+	if err != nil {
+		t.Fatalf("ImportJSONLData = %v, want nil: an import skips a retired row rather than failing", err)
+	}
+	if imported != 1 {
+		t.Errorf("ImportJSONLData imported = %d, want 1 (the fresh row only; neither row of the retired id)", imported)
+	}
+	if len(retiredIDs) != 1 || retiredIDs[0] != retired {
+		t.Errorf("ImportJSONLData retired ids = %v, want [%s]", retiredIDs, retired)
+	}
+	te.assertRowNotExists(t, ctx, "issues", retired)
+	te.assertRowExists(t, ctx, "issues", fresh)
 }

@@ -30,8 +30,8 @@ import (
 //     the batch roles, the storage-level (upsert) create, a transaction's
 //     create and a rename onto the id (cases 3-8, 19);
 //   - the doors that do not refuse still never write it: an import skips and
-//     reports the row, and id generation never produces a retired id (cases
-//     9-10).
+//     reports the row, and id generation never produces a retired id, top
+//     level or under a parent (cases 9-10, 20).
 //
 // Case 14 is the property the halves add up to: a create racing the sweep of
 // its id never lands. Cases 15-16 race the doors that do NOT refuse up front —
@@ -429,6 +429,66 @@ func RunIDRetentionNeverMintsARetiredID(t *testing.T, ctx context.Context, fixtu
 	if minted := create(); minted == first {
 		t.Fatalf("the identical create minted the retired id %s", first)
 	}
+}
+
+// RunIDRetentionNeverMintsARetiredChildID pins the generator half for the
+// child id mint, a create under a parent: it is never handed a retired child
+// id, even when the parent's child counter lags the retired child. The counter
+// is only half of the mint's high-water mark, and the other half, the highest
+// live child, cannot see a swept row, so the tombstone has to count as taken.
+// The case drops the parent's counter row by hand (Sweep.Exec): that is the
+// shape a database written before GH#4750 leaves, and the one an explicit
+// child created through a door that does not advance the counter leaves. It
+// creates twice afterwards, because a refused create rolls its counter advance
+// back and the next one would mint the same retired id again.
+func RunIDRetentionNeverMintsARetiredChildID(t *testing.T, ctx context.Context, fixture IDRetentionFixture) {
+	t.Helper()
+	if fixture.Sweep.Exec == nil {
+		t.Skip("fixture has no Sweep.Exec; this case cannot make the child counter lag the retired child")
+	}
+	parent := idRetentionID(fixture, "child", "parent")
+	if _, err := fixture.Lifecycle.Create(ctx, idRetentionCreate(parent, false)); err != nil {
+		t.Fatalf("Create(%s) = %v", parent, err)
+	}
+	createChild := func() (string, error) {
+		result, err := fixture.Lifecycle.Create(ctx, publicops.CreateRequest{
+			Actor:         idRetentionActor,
+			ParentID:      parent,
+			ForceIDPrefix: true,
+			Issue:         &types.Issue{Title: "id retention child of " + parent, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		})
+		if err != nil {
+			return "", err
+		}
+		return result.Issue.ID, nil
+	}
+	retired, err := createChild()
+	if err != nil {
+		t.Fatalf("Create(child of %s) = %v", parent, err)
+	}
+	if want := parent + ".1"; retired != want {
+		t.Fatalf("first child of %s = %s, want %s", parent, retired, want)
+	}
+	if _, err := fixture.Lifecycle.Close(ctx, publicops.CloseRequest{Actor: idRetentionActor, IssueID: retired, Reason: "id-retention"}); err != nil {
+		t.Fatalf("Close(%s) = %v", retired, err)
+	}
+	if result := sweeperSweep(t, ctx, fixture.Sweep, publicops.SweepRequest{Tier: publicops.SweepDurable, IDPattern: retired, RetainIDs: true}); result.Swept != 1 {
+		t.Fatalf("retaining sweep of %s Swept = %d, want 1", retired, result.Swept)
+	}
+	idRetentionAssertTombstones(t, ctx, fixture, retired, 1, 0)
+	if err := fixture.Sweep.Exec(ctx, []SQLStatement{{Query: "DELETE FROM child_counters WHERE parent_id = ?", Args: []any{parent}}}); err != nil {
+		t.Fatalf("dropping the child counter of %s: %v", parent, err)
+	}
+	for range 2 {
+		minted, err := createChild()
+		if err != nil {
+			t.Fatalf("Create(child of %s) after its child %s was retired = %v, want a fresh child id", parent, retired, err)
+		}
+		if minted == retired {
+			t.Fatalf("Create(child of %s) minted the retired child id %s", parent, retired)
+		}
+	}
+	idRetentionAssertAbsent(t, ctx, fixture, retired)
 }
 
 // RunIDRetentionDryRunRetiresNothing pins that a dry run writes no tombstone

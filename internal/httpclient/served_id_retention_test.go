@@ -92,6 +92,10 @@ func TestServedIDRetentionNeverMintsARetiredID(t *testing.T) {
 	conformance.RunIDRetentionNeverMintsARetiredID(t, t.Context(), newServedIDRetentionFixture(t, "hidr8"))
 }
 
+func TestServedIDRetentionNeverMintsARetiredChildID(t *testing.T) {
+	conformance.RunIDRetentionNeverMintsARetiredChildID(t, t.Context(), newServedIDRetentionFixture(t, "hidrg"))
+}
+
 func TestServedIDRetentionDryRunRetiresNothing(t *testing.T) {
 	conformance.RunIDRetentionDryRunRetiresNothing(t, t.Context(), newServedIDRetentionFixture(t, "hidr9"))
 }

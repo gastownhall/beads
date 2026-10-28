@@ -53,17 +53,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   prints `{"error","code":"idempotency_expired","id","closed_at"}` and exits
   1), a rename onto it (`UpdateIssueID`: `bd rename`, `bd rename-prefix`) is
   refused the same way, `bd import` and the `Importer` role skip the row and
-  report it in `retired_ids` (`bd import --dry-run` previews the same skip),
-  and id generation never mints a retired id. Opt-in: a sweep without it behaves
-  exactly as before, and only a retaining sweep retires — a plain prune or
-  purge, `bd delete` and `bd gc` leave deleted ids reusable. The main-series
-  migration locks older bd binaries, which do not check tombstones, out of a
-  migrated Dolt database, but not a process that was already running when the
-  migration landed, so every writer must run this release before any retaining
-  sweep runs. A retaining sweep holds the create-coordination cell of every id
-  it retires (4096 shards shared by unrelated ids) until it commits, so keep
-  `limit` small, around 100, and loop on `remaining`. The new `IDRetention`
-  conformance contract runs on every leg.
+  report it in `retired_ids` (`bd import --dry-run` previews the same skip; the
+  JSONL auto-import skips it too and does not count it as imported), and id
+  generation, child ids under a parent included, never mints a retired id.
+  Opt-in: a sweep without it behaves exactly as before, and only a retaining
+  sweep retires — a plain prune or purge, `bd delete` and `bd gc` leave deleted
+  ids reusable. The main-series migration locks older bd binaries, which do not
+  check tombstones, out of a migrated Dolt database, but not a process that was
+  already running when the migration landed, so every writer must run this
+  release before any retaining sweep runs. A retaining sweep holds the
+  create-coordination cell of every id it retires (4096 shards shared by
+  unrelated ids) until it commits, so keep `limit` small, around 100, and loop
+  on `remaining`. The new `IDRetention` conformance contract runs on every leg.
 - `bd versions <id>` lists the versions recorded for a bead, and
   `versioned-history.enabled` turns recording on. While it is on, every
   accepted change to a bead created while it is on, or that enters the issues

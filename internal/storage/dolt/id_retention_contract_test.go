@@ -52,6 +52,9 @@ func TestIDRetentionContract(t *testing.T) {
 	t.Run("NeverMintsARetiredID", func(t *testing.T) {
 		conformance.RunIDRetentionNeverMintsARetiredID(t, ctx, fixture)
 	})
+	t.Run("NeverMintsARetiredChildID", func(t *testing.T) {
+		conformance.RunIDRetentionNeverMintsARetiredChildID(t, ctx, fixture)
+	})
 	t.Run("DryRunRetiresNothing", func(t *testing.T) {
 		conformance.RunIDRetentionDryRunRetiresNothing(t, ctx, fixture)
 	})

@@ -13,9 +13,10 @@ import (
 
 // jsonlImporter is implemented by stores that support single-transaction
 // JSONL import (currently EmbeddedDoltStore). Stores that don't implement
-// this fall back to the multi-call path.
+// this fall back to the multi-call path. ImportJSONLData returns the issues
+// it wrote and the ids it skipped because a retaining sweep retired them.
 type jsonlImporter interface {
-	ImportJSONLData(ctx context.Context, issues []*types.Issue, configEntries map[string]string, actor string) (int, error)
+	ImportJSONLData(ctx context.Context, issues []*types.Issue, configEntries map[string]string, actor string) (int, []string, error)
 }
 
 // fallbackImporter is the function maybeAutoImportJSONL invokes for stores
@@ -122,7 +123,7 @@ func maybeAutoImportJSONL(ctx context.Context, s storage.DoltStorage, beadsDir s
 	// Prefer single-transaction import (embedded mode) to avoid
 	// DOLT_COMMIT races with concurrent writers.
 	if importer, ok := s.(jsonlImporter); ok {
-		imported, err := importer.ImportJSONLData(ctx, issues, configEntries, "auto-import")
+		imported, retiredIDs, err := importer.ImportJSONLData(ctx, issues, configEntries, "auto-import")
 		if err != nil {
 			writeAutoImportStamp(beadsDir, info)
 			fmt.Fprintf(os.Stderr, "warning: auto-import from %s failed: %v\n", jsonlPath, err)
@@ -131,7 +132,9 @@ func maybeAutoImportJSONL(ctx context.Context, s storage.DoltStorage, beadsDir s
 			fmt.Fprintf(os.Stderr, "If this persists, please report at https://github.com/gastownhall/beads/issues\n\n")
 			return
 		}
-		if imported > 0 {
+		// A file whose every row was retired imported nothing, but it was
+		// attempted: stamp it, or every command would re-read it.
+		if imported > 0 || len(retiredIDs) > 0 {
 			writeAutoImportStamp(beadsDir, info)
 			// Signal PersistentPostRun to auto-commit (no explicit DOLT_COMMIT here).
 			commandDidWrite.Store(true)
@@ -139,6 +142,7 @@ func maybeAutoImportJSONL(ctx context.Context, s storage.DoltStorage, beadsDir s
 			if len(configEntries) > 0 {
 				fmt.Fprintf(os.Stderr, " and %d config entries", len(configEntries))
 			}
+			printAutoImportRetired(len(retiredIDs))
 			fmt.Fprintf(os.Stderr, " from %s\n", jsonlPath)
 		}
 		return
@@ -167,13 +171,24 @@ func maybeAutoImportJSONL(ctx context.Context, s storage.DoltStorage, beadsDir s
 		fmt.Fprintf(os.Stderr, "warning: auto-import: dolt commit failed: %v\n", err)
 		return
 	}
-	if result.Issues > 0 || result.Memories > 0 {
+	if result.Issues > 0 || result.Memories > 0 || result.Retired > 0 {
 		writeAutoImportStamp(beadsDir, info)
 	}
 
+	fmt.Fprintf(os.Stderr, "auto-imported %d issues", result.Issues)
 	if result.Memories > 0 {
-		fmt.Fprintf(os.Stderr, "auto-imported %d issues and %d memories from %s\n", result.Issues, result.Memories, jsonlPath)
-	} else {
-		fmt.Fprintf(os.Stderr, "auto-imported %d issues from %s\n", result.Issues, jsonlPath)
+		fmt.Fprintf(os.Stderr, " and %d memories", result.Memories)
+	}
+	printAutoImportRetired(result.Retired)
+	fmt.Fprintf(os.Stderr, " from %s\n", jsonlPath)
+}
+
+// printAutoImportRetired continues an "auto-imported N issues" line with the
+// rows the import skipped because a retaining sweep retired their ids (`bd
+// prune/purge --retain-ids`), in bd import's words, so a file the operator may
+// hold as the last copy of those rows is not reported as restored.
+func printAutoImportRetired(retired int) {
+	if retired > 0 {
+		fmt.Fprintf(os.Stderr, " (%d retired by a retention sweep, not re-created)", retired)
 	}
 }

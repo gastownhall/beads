@@ -376,6 +376,7 @@ var roleContractCases = []roleContract{
 		RunIDRetentionRefusesInsideATransaction,
 		RunIDRetentionImportSkipsAndReportsARetiredRow,
 		RunIDRetentionNeverMintsARetiredID,
+		RunIDRetentionNeverMintsARetiredChildID,
 		RunIDRetentionDryRunRetiresNothing,
 		RunIDRetentionRetiresOnlyWhatItSwept,
 		RunIDRetentionARetainingDurableSweepRecordsExactlyOneHistoryEntry,
