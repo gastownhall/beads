@@ -1175,6 +1175,7 @@ go_test(
         "restore_test.go",
         "retain_ids_embedded_test.go",
         "retain_ids_proxied_integration_test.go",
+        "retained_types_cleanup_server_test.go",
         "retained_types_embedded_test.go",
         "retained_types_proxied_integration_test.go",
         "retained_types_test.go",
