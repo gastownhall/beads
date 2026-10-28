@@ -440,3 +440,55 @@ func TestMergeAndSettleWithStrategy_KeepsCleanMergedTables(t *testing.T) {
 		})
 	}
 }
+
+// TestMergeWithStrategy_LeavesPreMergePendingChanges guards the exact-set
+// property the GH#7811 fix depends on: the merge conclusion stages the
+// merge's own output (unstaged tables that differ between HEAD and the merge
+// source), never pre-existing pending work. An uncommitted insert made
+// BEFORE the merge, into a table neither branch changed, must stay out of
+// the merge commit and remain an unstaged working-set change afterwards.
+func TestMergeWithStrategy_LeavesPreMergePendingChanges(t *testing.T) {
+	for _, strategy := range []string{"ours", "theirs"} {
+		t.Run(strategy, func(t *testing.T) {
+			te := newTestEnv(t, "pendkept"+strategy)
+			ctx := t.Context()
+			conn := openSettleConn(t, ctx, te)
+
+			peerBranch := seedRetitleWithLabelSwap(t, ctx, conn, "pc-1")
+
+			// Pending work predating the merge, in a table neither branch
+			// changed: sweeping it into the merge commit (a DOLT_ADD('-A')
+			// conclusion) would publish half-finished local work.
+			if _, err := conn.ExecContext(ctx,
+				"INSERT INTO metadata (`key`, value) VALUES ('pc_pending', 'local-uncommitted')"); err != nil {
+				t.Fatalf("seed pending metadata: %v", err)
+			}
+
+			if _, err := versioncontrolops.MergeWithStrategy(ctx, conn, peerBranch, "test <test@example.com>", strategy); err != nil {
+				t.Fatalf("MergeWithStrategy(%s): %v", strategy, err)
+			}
+
+			var value string
+			err := conn.QueryRowContext(ctx,
+				"SELECT value FROM metadata AS OF 'HEAD' WHERE `key` = 'pc_pending'").Scan(&value)
+			if !errors.Is(err, sql.ErrNoRows) {
+				t.Errorf("metadata AS OF 'HEAD' = (%q, %v), want the pre-merge pending insert uncommitted and absent from the merge commit", value, err)
+			}
+			var unstaged int
+			if err := conn.QueryRowContext(ctx,
+				"SELECT COUNT(*) FROM dolt_status WHERE table_name = 'metadata' AND staged = 0").Scan(&unstaged); err != nil {
+				t.Fatalf("count unstaged metadata: %v", err)
+			}
+			if unstaged != 1 {
+				t.Errorf("dolt_status lists %d unstaged metadata row(s), want the pending insert preserved unstaged", unstaged)
+			}
+
+			// The peer's cleanly merged label swap still reached HEAD: the
+			// pending insert did not buy back the GH#7811 drop.
+			labels := headLabels(t, ctx, conn, "pc-1")
+			if len(labels) != 1 || labels[0] != "ready-for-agent" {
+				t.Errorf("HEAD labels = %v, want [ready-for-agent]", labels)
+			}
+		})
+	}
+}
