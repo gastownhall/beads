@@ -57,8 +57,8 @@ func (m ServerMode) String() string {
 //  3. metadata.json dolt_mode == "embedded"         -> ServerModeEmbedded
 //  4. metadata.json has explicit dolt_server_port   -> ServerModeExternal
 //     4b. central server config (server.json) supplies the workspace's
-//         effective host (non-local) or port, for a workspace already in
-//         server storage mode                      -> ServerModeExternal
+//     effective host (non-local) or port, for a workspace already in
+//     server storage mode                      -> ServerModeExternal
 //  5. default                                       -> ServerModeOwned
 //
 // Runtime env vars (1, 2, 2c) take precedence over persisted metadata.json

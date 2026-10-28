@@ -48,7 +48,9 @@ var centralConfigWarned sync.Map
 // ignoring it.
 //
 // A missing file returns nil. An unreadable or malformed file prints
-//     Warning: failed to load central config <path>: <err>
+//
+//	Warning: failed to load central config <path>: <err>
+//
 // once per process per path (the first reader wins) and returns nil, so gate
 // planning and port resolution share the open paths' warn-and-proceed
 // posture without repeating the line. There is deliberately no content cache:

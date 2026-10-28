@@ -2070,7 +2070,7 @@ func TestResolveServerModeCentralConfigExternal(t *testing.T) {
 		t.Helper()
 		dir := t.TempDir()
 		metaCfg := &configfile.Config{
-			Backend:   configfile.BackendDolt,
+			Backend:  configfile.BackendDolt,
 			DoltMode: configfile.DoltModeServer,
 		}
 		if err := metaCfg.Save(dir); err != nil {
@@ -2140,7 +2140,7 @@ func TestResolveServerModeCentralConfigExternal(t *testing.T) {
 		writeCentralServerJSON(t, `{"dolt_server_host":"db.central.invalid","dolt_server_port":6007}`)
 		dir := t.TempDir()
 		if err := (&configfile.Config{
-			Backend:   configfile.BackendDolt,
+			Backend:  configfile.BackendDolt,
 			DoltMode: configfile.DoltModeEmbedded,
 		}).Save(dir); err != nil {
 			t.Fatal(err)
