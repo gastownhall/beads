@@ -2,6 +2,7 @@ package versioncontrolops
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -37,10 +38,63 @@ func BackupRemove(ctx context.Context, db DBConn, name string) error {
 	return nil
 }
 
+// ErrNotDoltBackup reports a file:// restore source that does not hold a
+// Dolt backup. It is what every refusal of a not-a-backup directory
+// unwraps to, so callers can word their own remedy without matching text.
+var ErrNotDoltBackup = errors.New("not a Dolt backup")
+
+// CheckBackupDir verifies dir can be a file:// backup restore source: it
+// exists, is a directory, and holds a regular Dolt backup `manifest` file.
+//
+// Presence is the only judgement here. Dolt itself rejects a corrupt
+// manifest or missing table files when it opens the source — and Dolt's
+// restore drops the target database before opening it, which is exactly why
+// this check must run first (#5972): a directory that merely exists is not
+// evidence it was written by a backup, and an empty one must cost nothing.
+func CheckBackupDir(dir string) error {
+	info, err := os.Stat(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("backup source does not exist: %w", err)
+		}
+		return fmt.Errorf("inspect backup source %s: %w", dir, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("backup source is not a directory: %s", dir)
+	}
+	manifest, err := os.Stat(filepath.Join(dir, "manifest"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("%s is not a Dolt backup (no manifest found): %w", dir, ErrNotDoltBackup)
+		}
+		return fmt.Errorf("inspect backup source %s: %w", dir, err)
+	}
+	if !manifest.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a Dolt backup (no manifest found): %w", dir, ErrNotDoltBackup)
+	}
+	return nil
+}
+
 // BackupRestore restores a database from a backup at the given URL into
 // the named database. When force is true, an existing database with the
 // same name is overwritten. Mirrors the CLI: dolt backup restore [--force] <url> <db_name>
+//
+// A file:// URL must name a local directory holding a Dolt backup (see
+// CheckBackupDir); anything else is refused before any SQL is issued, so a
+// bad source cannot drop or recreate the target database. Restore with
+// --force drops the target before reading the source, which is why the
+// source is validated first. DOLT_BACKUP also writes into the source while
+// opening it (an oldgen/ directory), so a refused source is left untouched.
 func BackupRestore(ctx context.Context, db DBConn, url, dbName string, force bool) error {
+	// DirToFileURL (the only producer of file:// URLs here) returns
+	// "file://"+abs, so the inverse is exact: no host component, no
+	// percent-encoding. Non-file:// URLs cannot name a local directory to
+	// check and pass through untouched.
+	if dir, ok := strings.CutPrefix(url, "file://"); ok {
+		if err := CheckBackupDir(dir); err != nil {
+			return err
+		}
+	}
 	if force {
 		if _, err := db.ExecContext(ctx, "CALL DOLT_BACKUP('restore', '--force', ?, ?)", url, dbName); err != nil {
 			return fmt.Errorf("restore from backup %s: %w", url, err)
