@@ -394,15 +394,18 @@ const (
 //     treated as a deliberate suppression of host-based inference, not
 //     merely "no signal" — it also suppresses the struct/config.yaml host
 //     inference below.
-//  4. dolt_mode field in metadata.json (project-local, explicit) — always
-//     wins over any persisted or configured host, since it is the
-//     operator's explicit statement of intent.
-//  5. Non-localhost DoltServerHost persisted in metadata.json (GH#3545),
-//     when no explicit dolt_mode is set and env didn't suppress inference.
+//  4. dolt_mode field in metadata.json (explicit) — always wins over any
+//     persisted or configured host, since it is the operator's explicit
+//     statement of intent.
+//  5. The non-localhost host GetDoltServerHost dials (GH#3545), when no
+//     explicit dolt_mode is set and env didn't suppress inference: the
+//     config.yaml dolt.host, which outranks metadata.json dolt_server_host
+//     (GH#5961) unless both name the same server, and is gated by an
+//     explicit config.yaml dolt.mode; otherwise the metadata.json host,
+//     which a config.yaml dolt.mode does not gate. See
+//     HostImpliesServerMode.
 //  6. dolt.mode in config.yaml (user-global fallback, only when
 //     metadata.json has no mode)
-//  7. Non-localhost dolt.host in config.yaml (GH#3545), gated the same way
-//     as (5) — a configured host must mean server mode.
 //
 // Runtime env vars take precedence over persisted metadata.json to prevent
 // stale dolt_mode=embedded from overriding active server intent (GH#2949).
@@ -444,7 +447,7 @@ func (c *Config) IsDoltServerMode() bool {
 
 // HostImpliesServerMode evaluates host-based server-mode inference
 // (GH#3545) against the EFFECTIVE host precedence chain (env >
-// metadata.json > config.yaml, mirroring GetDoltServerHost), so that a
+// config.yaml > metadata.json, mirroring GetDoltServerHost), so that a
 // lower-priority host that GetDoltServerHost would ignore can never
 // drive the inference. Rules, in order:
 //
@@ -462,11 +465,14 @@ func (c *Config) IsDoltServerMode() bool {
 //     exactly the split-storage failure this inference fixes.
 //   - An explicit metadata.json dolt_mode disables inference from
 //     persisted/configured hosts.
-//   - A metadata.json dolt_server_host, when set, decides alone (a
-//     lower-priority config.yaml dolt.host is not consulted, matching
-//     GetDoltServerHost precedence).
-//   - An explicit config.yaml dolt.mode disables inference from the
-//     config.yaml dolt.host.
+//   - A metadata.json dolt_server_host decides alone when config.yaml
+//     names no dolt.host or names the same server (SameServerHost): it is
+//     the host GetDoltServerHost dials, and a config.yaml dolt.mode does
+//     not suppress it, so a user-level dolt.mode cannot flip a workspace
+//     whose metadata names the server it uses to embedded storage.
+//   - Otherwise a config.yaml dolt.host outranks the metadata host (it is
+//     the host GetDoltServerHost dials, GH#5961) and decides, unless an
+//     explicit config.yaml dolt.mode disables inference from it.
 //
 // "Localhost" here is IsLocalHostString, the machine-locality question, not
 // the ownership one (BdRunsServerAt): the IPv6 loopback in any spelling is
@@ -482,16 +488,14 @@ func (c *Config) HostImpliesServerMode() bool {
 	if c.DoltMode != "" {
 		return false
 	}
-	if c.DoltServerHost != "" {
+	h := config.GetYamlConfig("dolt.host")
+	if c.DoltServerHost != "" && (h == "" || SameServerHost(h, c.DoltServerHost)) {
 		return !IsLocalHostString(c.DoltServerHost)
 	}
-	if config.GetYamlConfig("dolt.mode") != "" {
+	if h == "" || config.GetYamlConfig("dolt.mode") != "" {
 		return false
 	}
-	if h := config.GetYamlConfig("dolt.host"); h != "" {
-		return !IsLocalHostString(h)
-	}
-	return false
+	return !IsLocalHostString(h)
 }
 
 // PortImpliesServerMode evaluates port-based server-mode inference: an

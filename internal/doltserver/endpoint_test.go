@@ -429,3 +429,32 @@ func TestResolveEndpointPairsTheConfigYamlHostWithItsPort(t *testing.T) {
 		t.Errorf("ResolveEndpoint = %s:%d (%s), want 192.0.2.50:3307 (%s): config.yaml's host must pair with config.yaml's port", ep.Host, ep.Port, ep.PortSource, PortSourceConfigYaml)
 	}
 }
+
+// TestServerModeFollowsTheConfigYamlHostOverTheMetadataHost pins GH#5961 for
+// mode inference: with config.yaml dolt.host outranking metadata.json
+// dolt_server_host, the remote config.yaml host the store dials implies
+// server mode, and the storage and lifecycle resolvers agree, instead of a
+// local metadata host masking it into embedded storage.
+func TestServerModeFollowsTheConfigYamlHostOverTheMetadataHost(t *testing.T) {
+	beadsDir := endpointTestEnv(t, nil)
+	cfg := &configfile.Config{DoltServerHost: "127.0.0.1"}
+	writeEndpointMetadata(t, beadsDir, cfg)
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("dolt.host: db.example.com\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var serverMode bool
+	var mode ServerMode
+	if err := config.WithBeadsDir(beadsDir, func() {
+		serverMode = cfg.IsDoltServerMode()
+		mode = ResolveServerMode(beadsDir)
+	}); err != nil {
+		t.Fatalf("config.WithBeadsDir: %v", err)
+	}
+	if !serverMode {
+		t.Error("IsDoltServerMode() = false, want true: config.yaml dolt.host db.example.com outranks the local metadata host")
+	}
+	if mode != ServerModeExternal {
+		t.Errorf("ResolveServerMode() = %v, want %v", mode, ServerModeExternal)
+	}
+}

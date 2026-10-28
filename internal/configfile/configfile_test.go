@@ -562,12 +562,11 @@ func TestIsDoltServerMode_HostInference_GH3545(t *testing.T) {
 		}
 	})
 
-	t.Run("metadata localhost host masks config.yaml remote host", func(t *testing.T) {
+	t.Run("config.yaml remote host outranks metadata localhost host", func(t *testing.T) {
 		// The inference follows the EFFECTIVE host precedence
-		// (GetDoltServerHost: env > metadata > config.yaml): when
-		// metadata supplies localhost, a lower-priority remote
-		// dolt.host that GetDoltServerHost would ignore must not
-		// drive the inference (cross-vendor review round 5).
+		// (GetDoltServerHost: env > config.yaml > metadata, GH#5961):
+		// the remote dolt.host the store dials implies server mode even
+		// though the outranked metadata host is local.
 		configDir := t.TempDir()
 		configYaml := filepath.Join(configDir, "config.yaml")
 		if err := os.WriteFile(configYaml,
@@ -581,8 +580,30 @@ func TestIsDoltServerMode_HostInference_GH3545(t *testing.T) {
 		t.Cleanup(config.ResetForTesting)
 
 		cfg := &Config{Backend: BackendDolt, DoltServerHost: "localhost"}
-		if cfg.IsDoltServerMode() {
-			t.Error("IsDoltServerMode() = true, want false: metadata localhost host must mask config.yaml remote host")
+		if !cfg.IsDoltServerMode() {
+			t.Error("IsDoltServerMode() = false, want true: config.yaml remote host outranks metadata localhost host")
+		}
+	})
+
+	t.Run("config.yaml dolt.mode does not gate a metadata host naming the same server", func(t *testing.T) {
+		// A config.yaml dolt.host naming the metadata host's server
+		// leaves the metadata host deciding, so a config.yaml
+		// dolt.mode: embedded cannot flip it to embedded storage.
+		configDir := t.TempDir()
+		configYaml := filepath.Join(configDir, "config.yaml")
+		if err := os.WriteFile(configYaml,
+			[]byte("dolt.mode: embedded\ndolt.host: DB.example.com\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("BEADS_DIR", configDir)
+		if err := config.Initialize(); err != nil {
+			t.Fatalf("config.Initialize: %v", err)
+		}
+		t.Cleanup(config.ResetForTesting)
+
+		cfg := &Config{Backend: BackendDolt, DoltServerHost: "db.example.com"}
+		if !cfg.IsDoltServerMode() {
+			t.Error("IsDoltServerMode() = false, want true: config.yaml dolt.mode must not gate a metadata host naming the same server")
 		}
 	})
 
