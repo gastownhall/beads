@@ -108,9 +108,9 @@ func ResolveServerModeIgnoringPortEnv(beadsDir string) ServerMode {
 // participates; see ResolveServerModeIgnoringPortEnv for why a caller would
 // want it excluded.
 //
-// ExternalPortSetting's Sole repeats checks 1, 2b and 2c to decide whether
+// ExternalPortSetting's Sole repeats checks 1, 2b, 2c and 4b to decide whether
 // removing dolt_server_port lets bd manage the server; a new check here that
-// returns ServerModeExternal before check 4 must be added there too.
+// returns ServerModeExternal must be added there too.
 func resolveServerMode(beadsDir string, sharedMode, honorPortEnv bool) ServerMode {
 	// 1. BEADS_DOLT_SERVER_MODE=1 env var -> external (explicit server mode)
 	if os.Getenv("BEADS_DOLT_SERVER_MODE") == "1" {
@@ -186,8 +186,45 @@ func resolveServerMode(beadsDir string, sharedMode, honorPortEnv bool) ServerMod
 		return ServerModeExternal
 	}
 
+	// 4b. The central server config names this server-mode workspace's
+	// endpoint -> external (GH#3895). See centralConfigNamesServer.
+	if centralConfigNamesServer(beadsDir, fileCfg) {
+		return ServerModeExternal
+	}
+
 	// 5. Default: beads owns the server
 	return ServerModeOwned
+}
+
+// centralConfigNamesServer is resolveServerMode's check 4b: fileCfg is in
+// server storage mode (IsDoltServerMode, which excludes proxied) and the
+// central server config (server.json) supplies its effective non-local host,
+// or its effective port (no source above the central step names one; bd's
+// port file is skipped, since it records only the port an earlier open
+// reached). One file every workspace on the machine shares cannot name a
+// server one workspace owns.
+//
+// Only a workspace already in server mode qualifies: server.json never
+// selects the storage mode (configfile.Config.HostImpliesServerMode), so an
+// embedded or mode-less workspace never resolves external because of it, and
+// the storage-mode and lifecycle resolvers keep agreeing.
+//
+// A metadata.json dolt_server_port is the step just above the central one,
+// and check 4 returns before this check sees it, so here it stands for "the
+// central port is next": ExternalPortSetting's Sole asks this question as if
+// that port were removed.
+func centralConfigNamesServer(beadsDir string, fileCfg *configfile.Config) bool {
+	if fileCfg == nil || !fileCfg.IsDoltServerMode() {
+		return false
+	}
+	if fileCfg.CentralConfigSuppliesHost() && !configfile.IsLocalHostString(fileCfg.GetDoltServerHost()) {
+		return true
+	}
+	if configfile.CentralServerPort() == 0 {
+		return false
+	}
+	_, source := resolveServerPortForMode(beadsDir, beadsDir, false, true)
+	return source == PortSourceCentralConfig || source == PortSourceMetadataJSON
 }
 
 // ErrExternallyManaged matches EnsureRunning's refusal to start a server for a
@@ -208,8 +245,9 @@ func (e *externallyManagedError) Is(target error) bool { return target == ErrExt
 // found by ExternalPortSetting. The zero value means no such setting does.
 type ExternalPortDeclaration struct {
 	// Setting names the declaring setting for the operator:
-	// "BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_PORT", or
-	// "dolt_server_port in <metadata.json path>".
+	// "BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_PORT",
+	// "dolt_server_port in <metadata.json path>", or
+	// "dolt_server_port in <server.json path>".
 	Setting string
 	// NamesEndpoint reports whether Setting's value is the port bd dialed. It
 	// is false when a higher-ranked source (config.yaml dolt.port, the dolt
@@ -274,6 +312,16 @@ func ExternalPortSetting(beadsDir string, source PortSource, port int) ExternalP
 			return ExternalPortDeclaration{Setting: name, NamesEndpoint: true}
 		}
 	}
+	// The central server config's port (check 4b, GH#3895), when it is the
+	// one dialed.
+	if source == PortSourceCentralConfig {
+		if p := configfile.CentralServerPort(); p > 0 && (port == 0 || p == port) {
+			return ExternalPortDeclaration{
+				Setting:       "dolt_server_port in " + remedy.PrintedValue(configfile.CentralConfigPath()),
+				NamesEndpoint: true,
+			}
+		}
+	}
 	metadataPath := configfile.ConfigPath(beadsDir)
 	if _, err := os.Stat(metadataPath); err != nil {
 		return ExternalPortDeclaration{}
@@ -291,9 +339,10 @@ func ExternalPortSetting(beadsDir string, source PortSource, port int) ExternalP
 	case source == PortSourcePortFile && portBehindPortFile(beadsDir, cfg.DoltServerPort) != port:
 		decl.PortFile, decl.DeclaredPort = portPath(beadsDir), cfg.DoltServerPort
 	default:
-		// Checks 1, 2b and 2c of resolveServerMode; keep in step with it.
+		// Checks 1, 2b, 2c and 4b of resolveServerMode; keep in step with it.
 		decl.Sole = os.Getenv("BEADS_DOLT_SERVER_MODE") != "1" &&
-			!cfg.HostImpliesServerMode() && !cfg.PortImpliesServerMode()
+			!cfg.HostImpliesServerMode() && !cfg.PortImpliesServerMode() &&
+			!centralConfigNamesServer(beadsDir, cfg)
 	}
 	return decl
 }
