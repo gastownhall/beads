@@ -2128,12 +2128,15 @@ func hookSubprocessEnv(env []string) []string {
 // back into a modification, silently reviving a file the user intentionally
 // removed.
 //
-// Unlike preCommitHasStagedBeadsFiles and gitAddFile, this deliberately runs
-// git with the hook's inherited environment intact rather than scrubbing
-// GIT_* vars. GIT_INDEX_FILE is set during an actual commit and points at
-// the pending index — where the staged deletion lives — so scrubbing it
-// here would make git fall back to the on-disk index and miss the
-// deletion. Reimplements gastownhall/beads#3838 (ckumar1).
+// The guard runs git with the environment from gitIndexEnv, the same
+// filtered env as preCommitHasStagedBeadsFiles and gitAddFile (GH#4080): a
+// contained inherited GIT_INDEX_FILE is put back so the diff reads the
+// pending index the commit is built from — where the staged deletion lives —
+// while GIT_DIR and friends stay scrubbed. In a linked worktree the
+// inherited GIT_DIR used to make git treat this function's cwd as the
+// worktree top, so the pathspec never matched the index entry and a git
+// rm'd export was revived (GH#6680's envelope). Reimplements
+// gastownhall/beads#3838 (ckumar1).
 //
 // #nosec G702 -- no shell is involved: the binary is the literal "git" and
 // every argument is its own argv element. The only variable argument is the
@@ -2157,8 +2160,15 @@ func isExportFileStagedForDeletion(fullPath string) bool {
 	if err != nil {
 		return false
 	}
+	env, _, envErr := gitIndexEnv(dir)
+	if envErr != nil {
+		// gitIndexEnv already returned the scrubbed env; the guard then
+		// reads the real index, the pre-GH#4080 answer.
+		debug.Logf("pre-commit: commit-index env resolve failed for the deletion guard: %v\n", envErr)
+	}
 	checkCmd := exec.Command("git", "diff", "--cached", "--diff-filter=D", "--name-only", "--", rel)
 	checkCmd.Dir = dir
+	checkCmd.Env = env
 	out, _ := checkCmd.Output()
 	return len(out) > 0
 }

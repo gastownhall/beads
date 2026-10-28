@@ -537,4 +537,100 @@ func TestExportJSONLForCommit_CommitIndex(t *testing.T) {
 			t.Errorf("export file = %q, want it untouched %q", got, want)
 		}
 	})
+
+	// linkedWorktreeDeletionEnvelope stages the deletion of the worktree's
+	// export file in the pending index idx and returns idx. plain=true uses
+	// the worktree's real index as the pending index (a `git rm` before a
+	// plain commit); otherwise the pending index is a pathspec next-index
+	// while the parent holds the real index lock.
+	linkedWorktreeDeletionEnvelope := func(t *testing.T, wt, wtGitDir string, plain bool) string {
+		t.Helper()
+		idx := filepath.Join(wtGitDir, "next-index-4242.lock")
+		if plain {
+			idx = filepath.Join(wtGitDir, "index")
+		} else {
+			commitIndexCopy(t, filepath.Join(wtGitDir, "index"), idx)
+			defer func() {
+				// The parent pathspec commit holds the real index lock.
+				commitIndexCopy(t, filepath.Join(wtGitDir, "index"), filepath.Join(wtGitDir, "index.lock"))
+			}()
+		}
+		runCommitIndexGit(t, wt, []string{"GIT_INDEX_FILE=" + idx}, "rm", "--cached", "--", ".beads/issues.jsonl")
+		return idx
+	}
+
+	t.Run("linked worktree, export git rm'd", func(t *testing.T) {
+		for _, plain := range []bool{true, false} {
+			name := "plain commit envelope"
+			if !plain {
+				name = "pathspec commit envelope"
+			}
+			t.Run(name, func(t *testing.T) {
+				repo, _, _ := newCommitIndexRepo(t)
+				commitIndexWrite(t, filepath.Join(repo, ".beads", "metadata.json"), []byte("{}\n"))
+				runCommitIndexGit(t, repo, nil, "add", "--", ".beads/metadata.json")
+				runCommitIndexGit(t, repo, nil, "commit", "-qm", "metadata")
+				wt, wtGitDir, wtExport := addCommitIndexWorktree(t, repo)
+				pending := linkedWorktreeDeletionEnvelope(t, wt, wtGitDir, plain)
+
+				t.Setenv("BEADS_DIR", filepath.Join(repo, ".beads"))
+				initConfigForTest(t)
+				config.Set("export.auto", true)
+				config.Set("export.git-add", true)
+				config.Set("export.path", "issues.jsonl")
+				config.Set("no-git-ops", false)
+				config.Set("sync.remote", "")
+				config.Set("sync.git-remote", "")
+
+				if err := os.RemoveAll(sentinel); err != nil {
+					t.Fatal(err)
+				}
+				// Enter the linked worktree the way git enters a hook: GIT_DIR
+				// names the per-worktree admin dir, cwd is the worktree top,
+				// and store discovery has fallen back to the primary
+				// checkout's shared .beads (BEADS_DIR above).
+				t.Setenv("GIT_DIR", wtGitDir)
+				t.Chdir(wt)
+				t.Setenv("GIT_INDEX_FILE", pending)
+
+				_ = captureHookStderr(t, exportJSONLForCommit)
+
+				if _, err := os.Stat(sentinel); err == nil {
+					t.Fatalf("export ran although the export file is staged for deletion:\n%s", readFileForWorktreeTest(t, sentinel))
+				}
+				deletions := runCommitIndexGit(t, wt, []string{"GIT_INDEX_FILE=" + pending},
+					"diff", "--cached", "--diff-filter=D", "--name-only", "--", ".beads/issues.jsonl")
+				if !strings.Contains(deletions, ".beads/issues.jsonl") {
+					t.Fatalf("pending index no longer stages the export's deletion:\n%s", deletions)
+				}
+				if _, err := os.Stat(wtExport); err != nil {
+					t.Fatalf("export file missing from the worktree: %v", err)
+				}
+			})
+		}
+	})
+}
+
+// TestIsExportFileStagedForDeletion_LinkedWorktree pins AC-3: in a linked
+// worktree the inherited GIT_DIR used to make git treat the guard's cwd
+// (.beads) as the worktree top, so the diff never matched the staged
+// deletion and the pre-commit lane revived a git rm'd export. With the env
+// from gitIndexEnv the pending index is read and the deletion is seen.
+func TestIsExportFileStagedForDeletion_LinkedWorktree(t *testing.T) {
+	repo, _, _ := newCommitIndexRepo(t)
+	wt, wtGitDir, wtExport := addCommitIndexWorktree(t, repo)
+	// The pending index stages the export's deletion.
+	pending := filepath.Join(wtGitDir, "next-index-4242.lock")
+	runCommitIndexGit(t, wt, []string{"GIT_INDEX_FILE=" + pending}, "read-tree", "HEAD")
+	runCommitIndexGit(t, wt, []string{"GIT_INDEX_FILE=" + pending}, "rm", "--cached", "--", ".beads/issues.jsonl")
+
+	// The hook envelope of a linked worktree: GIT_DIR names the per-worktree
+	// admin dir, cwd is the worktree top.
+	t.Setenv("GIT_DIR", wtGitDir)
+	t.Chdir(wt)
+	t.Setenv("GIT_INDEX_FILE", pending)
+
+	if !isExportFileStagedForDeletion(wtExport) {
+		t.Fatal("isExportFileStagedForDeletion = false, want the staged deletion in the pending index to be seen")
+	}
 }
