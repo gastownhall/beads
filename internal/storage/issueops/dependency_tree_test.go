@@ -182,3 +182,103 @@ func treeIDs(tree []*types.TreeNode) []string {
 	}
 	return ids
 }
+
+// TestGetDependencyTreeInTxKeepsDirectEdgeToRevisitedNode reproduces GH#5282:
+// on a diamond (D→E, D→F, E→F) the direct D→F edge must stay in the tree even
+// though F was already reached through E. The answer has exactly four rows —
+// D, E and F expanded once, plus one leaf Deduped stub of F carrying the other
+// path's ParentID, Depth and EdgeFromParent — in either child order, and
+// producing the stub must read no issue and no dependency rows (the sqlmock
+// expectations cover exactly one read of each).
+func TestGetDependencyTreeInTxKeepsDirectEdgeToRevisitedNode(t *testing.T) {
+	for _, order := range [][]dependencyRow{
+		{{id: "E", depType: string(types.DepBlocks)}, {id: "F", depType: string(types.DepBlocks)}},
+		{{id: "F", depType: string(types.DepBlocks)}, {id: "E", depType: string(types.DepBlocks)}},
+	} {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("sqlmock.New: %v", err)
+		}
+
+		mock.ExpectBegin()
+		expectIssue(mock, "D", "D")
+		expectDependencies(mock, "D", order)
+		expectIssueBatchOf(mock, order[0].id, order[1].id)
+		expectIssue(mock, "E", "E")
+		expectDependencies(mock, "E", []dependencyRow{
+			{id: "F", depType: string(types.DepBlocks)},
+		})
+		expectIssueBatchOf(mock, "F")
+		expectIssue(mock, "F", "F")
+		expectDependencies(mock, "F", nil)
+		mock.MatchExpectationsInOrder(false)
+
+		tx, err := db.BeginTx(context.Background(), nil)
+		if err != nil {
+			t.Fatalf("BeginTx: %v", err)
+		}
+		tree, err := GetDependencyTreeInTx(context.Background(), tx, "D", 5, false, false)
+		_ = tx.Rollback()
+		db.Close()
+		if err != nil {
+			t.Fatalf("order %v: GetDependencyTreeInTx: %v", order, err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("order %v: the stub must read nothing: %v", order, err)
+		}
+
+		if len(tree) != 4 {
+			t.Fatalf("order %v: len(tree) = %d, want 4 rows (D, E, F and one stub of F): %v", order, len(tree), treeIDs(tree))
+		}
+
+		edges := make([]string, 0, len(tree))
+		wantStubParent, wantStubDepth := "D", 1
+		if order[0].id == "F" {
+			// F is expanded directly under D first, so the stub records the
+			// E→F edge.
+			wantStubParent, wantStubDepth = "E", 2
+		}
+		directF := false
+		deduped := 0
+		for _, node := range tree {
+			edges = append(edges, node.ParentID+"->"+node.ID)
+			if node.ID == "F" && node.ParentID == "D" && node.Depth == 1 {
+				directF = true
+			}
+			if node.Deduped {
+				deduped++
+				if node.ID != "F" || node.EdgeFromParent != types.DepBlocks ||
+					node.ParentID != wantStubParent || node.Depth != wantStubDepth {
+					t.Fatalf("order %v: the stub must be F under %s at depth %d via blocks, got %+v", order, wantStubParent, wantStubDepth, node)
+				}
+			}
+		}
+		if !directF {
+			t.Fatalf("order %v: direct edge D->F missing from dependency tree; got parent->child edges %v (want D->E, E->F and D->F)", order, edges)
+		}
+		if deduped != 1 {
+			t.Fatalf("order %v: %d Deduped rows, want exactly one: %v", order, deduped, treeIDs(tree))
+		}
+	}
+}
+
+// expectIssueBatchOf is expectIssueBatch for any arity: the IN placeholder
+// list is built from the ids the batch actually loads.
+func expectIssueBatchOf(mock sqlmock.Sqlmock, ids ...string) {
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM wisps LIMIT 1")).
+		WillReturnError(sql.ErrNoRows)
+
+	placeholders := "?" + strings.Repeat(",?", len(ids)-1)
+	args := make([]driver.Value, 0, len(ids))
+	rows := issueRows()
+	for _, id := range ids {
+		args = append(args, id)
+		rows.AddRow(issueRowValues(id, id)...)
+	}
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT "+IssueSelectColumns+" FROM issues "+sqlbuild.LeaseJoin("issues")+" WHERE id IN ("+placeholders+")")).
+		WithArgs(args...).
+		WillReturnRows(rows)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT issue_id, label FROM labels WHERE issue_id IN ("+placeholders+") ORDER BY issue_id, label")).
+		WithArgs(args...).
+		WillReturnRows(sqlmock.NewRows([]string{"issue_id", "label"}))
+}

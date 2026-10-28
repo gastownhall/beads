@@ -6,9 +6,12 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// TreeNode is one node of a walked dependency tree: the issue, the depth it was
-// first reached at, the node it was reached FROM, and the type of the edge that
-// led there.
+// TreeNode is one node of a walked dependency tree: the issue, the depth and
+// parent of the path that reached it, and the type of the edge that led there.
+// On a row with Deduped set, the path is a REVISIT of an issue the walk
+// already expanded earlier in the list: the row records only the edge from
+// ParentID into that issue and has no descendants, so the depth and parent on
+// it are the revisiting path's, not the first one's.
 //
 // It is the canonical struct rather than a view of one — the same value
 // `bd dep tree --json` marshals — so the CLI's output and the HTTP body are one
@@ -159,23 +162,25 @@ type TreeResult struct {
 	// CycleReport's canonicalization, which had to be strong because the walk
 	// there chose which cycles exist.
 	//
-	// EVERY NODE APPEARS AT MOST ONCE PER WALK, at the depth and parent of the
-	// FIRST path that reached it. That single rule is both the cycle policy and
-	// the diamond policy:
+	// EVERY NODE IS EXPANDED AT MOST ONCE PER WALK, at the depth and parent of
+	// the FIRST path that reached it. That single rule is both the cycle
+	// policy and the diamond policy:
 	//
 	//   - A CYCLE TERMINATES. Revisiting a node on the current path stops the
 	//     descent, so the walk finishes on a cyclic graph instead of recursing
 	//     forever. This role therefore never fails on a cycle and never reports
 	//     one; `bd dep cycles` and issueops.CycleDetector are where a cycle is
 	//     an answer.
-	//   - A SHARED SUBTREE IS RENDERED ONCE. A diamond — two parents reaching
-	//     one child — shows the child under whichever parent the walk reached
-	//     first, and the second parent has no visible edge to it. There is no
-	//     option to show it twice. `bd dep tree --show-all-paths` is a
-	//     DOCUMENTED NO-OP that predates this role: it was accepted and threaded
-	//     and never read by any walk, and nobody has specified what "all paths"
-	//     means for a DAG with shared subtrees. This contract deliberately does
-	//     not invent one.
+	//   - A SHARED SUBTREE IS EXPANDED ONCE. A diamond — two parents reaching
+	//     one child — expands the child under whichever parent the walk
+	//     reached first, and answers every later parent with one leaf
+	//     `TreeNode.Deduped` stub: the same id, that path's own ParentID,
+	//     Depth and EdgeFromParent, and no descendants, so every edge stays
+	//     visible. `bd dep tree --show-all-paths` is a DOCUMENTED NO-OP that
+	//     predates this role: it was accepted and threaded and never read by
+	//     any walk, and nobody has specified what "all paths" means for a DAG
+	//     with shared subtrees. This contract deliberately does not invent
+	//     one.
 	//
 	// FOR TreeBoth the two walks are INDEPENDENT and the answer is their
 	// concatenation: every up-tree node except the root, in the up walk's order,
@@ -186,7 +191,10 @@ type TreeResult struct {
 	// own direction, so a node's Depth does not say which half it came from and
 	// neither does anything else on it. That is the shape both front doors have
 	// always rendered; it is stated because a caller aggregating Nodes must not
-	// assume the ids are distinct.
+	// assume the ids are distinct. The same is true WITHIN one direction since
+	// the Deduped stub — a diamond's later parent answers with a second row of
+	// the child's id — so the distinct issues of any answer are the rows
+	// without Deduped.
 	//
 	// The two walks DO see one database state. On every implementation they run
 	// inside one transaction, so an edge added between them cannot make the up

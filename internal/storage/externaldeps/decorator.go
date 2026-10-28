@@ -968,21 +968,29 @@ func (s *Store) appendTreeExternalReferences(ctx context.Context, tree []*types.
 	if effectiveMaxDepth <= 0 {
 		effectiveMaxDepth = 50
 	}
-	seen := make(map[string]bool, len(tree)+len(refs))
+	held := make(map[string]bool, len(tree)+len(refs))
 	for _, node := range tree {
 		if node != nil {
-			seen[node.ID] = true
+			held[node.ID] = true
 		}
 	}
+	emitted := make(map[string]bool, len(refs))
 	for _, parent := range tree {
-		if parent == nil || parent.Depth >= effectiveMaxDepth {
+		// A Deduped stub has no descendants and shares its id with the
+		// expanded twin elsewhere in the list, so leaves found for it would
+		// land under the twin; only an expanded row owns its leaves.
+		if parent == nil || parent.Depth >= effectiveMaxDepth || parent.Deduped {
 			continue
 		}
 		for _, dep := range deps[parent.ID] {
 			if dep == nil || !isExternalReference(dep.DependsOnID) {
 				continue
 			}
-			if !showAllPaths && seen[dep.DependsOnID] {
+			// An id the tree already holds is not repeated: its edge is
+			// already a row. A ref this pass emitted for an earlier parent
+			// still gets the later parent its row — the edge is real — but
+			// as a Deduped leaf stub rather than a second expansion.
+			if held[dep.DependsOnID] {
 				continue
 			}
 			ref := parseReference(dep.DependsOnID)
@@ -992,6 +1000,7 @@ func (s *Store) appendTreeExternalReferences(ctx context.Context, tree []*types.
 				status = types.StatusClosed
 				title = "✓ " + externalTitle(ref)
 			}
+			deduped := !showAllPaths && emitted[dep.DependsOnID]
 			tree = append(tree, &types.TreeNode{
 				Issue: types.Issue{
 					ID:        dep.DependsOnID,
@@ -1002,8 +1011,9 @@ func (s *Store) appendTreeExternalReferences(ctx context.Context, tree []*types.
 				Depth:          parent.Depth + 1,
 				ParentID:       parent.ID,
 				EdgeFromParent: dep.Type,
+				Deduped:        deduped,
 			})
-			seen[dep.DependsOnID] = true
+			emitted[dep.DependsOnID] = true
 		}
 	}
 	return tree, nil

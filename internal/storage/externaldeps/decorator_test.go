@@ -1112,6 +1112,54 @@ func TestGetDependencyTreeAddsResolvedExternalLeaf(t *testing.T) {
 	}
 }
 
+// TestGetDependencyTreeStubsASharedExternalRefUnderEachParent pins the
+// diamond rule for synthetic external leaves: two parents that depend on the
+// same external ref each get a row for it — the first an ordinary leaf, the
+// second a Deduped stub carrying its own edge — instead of the second edge
+// being dropped silently.
+func TestGetDependencyTreeStubsASharedExternalRefUnderEachParent(t *testing.T) {
+	root := issue("be-root")
+	left := issue("be-left")
+	right := issue("be-right")
+	ref := "external:remote:payments"
+	raw := &fakeStore{
+		tree: []*types.TreeNode{
+			{Issue: *root},
+			{Issue: *left, Depth: 1, ParentID: root.ID, EdgeFromParent: types.DepBlocks},
+			{Issue: *right, Depth: 1, ParentID: root.ID, EdgeFromParent: types.DepBlocks},
+		},
+		deps: map[string][]*types.Dependency{
+			left.ID:  {externalDep(left.ID, ref, types.DepBlocks)},
+			right.ID: {externalDep(right.ID, ref, types.DepBlocks)},
+		},
+	}
+	store := testStore(raw, &fakeStore{}, true)
+
+	tree, err := store.GetDependencyTree(t.Context(), root.ID, 10, false, false)
+	if err != nil {
+		t.Fatalf("GetDependencyTree: %v", err)
+	}
+	if len(tree) != 5 {
+		t.Fatalf("tree length = %d, want 5 rows (root, two parents, a leaf and a stub of the shared ref): %v", len(tree), tree)
+	}
+	leaves := 0
+	for _, node := range tree[3:] {
+		if node.ID != ref || node.Depth != 2 || node.EdgeFromParent != types.DepBlocks {
+			t.Fatalf("shared external row = %+v, want the ref at depth 2 via blocks", node)
+		}
+		if node.Deduped {
+			if node.ParentID != right.ID && node.ParentID != left.ID {
+				t.Fatalf("stub row = %+v, want it under the second parent", node)
+			}
+		} else {
+			leaves++
+		}
+	}
+	if leaves != 1 {
+		t.Fatalf("the shared ref is an ordinary leaf %d times, want 1 (plus exactly one Deduped stub)", leaves)
+	}
+}
+
 func TestUnavailableProjectWarnsOnce(t *testing.T) {
 	a := issue("be-a")
 	ref := "external:remote:payments"

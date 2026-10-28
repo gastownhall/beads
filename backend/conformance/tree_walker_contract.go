@@ -195,13 +195,16 @@ func RunTreeWalkerTerminatesOnACycle(t *testing.T, ctx context.Context, fixture 
 	assertTreeWalkerIDs(t, result, a, b, c)
 }
 
-// RunTreeWalkerRendersASharedSubtreeOnce pins treewalker.go:170-178: a diamond
-// shows the shared child under whichever parent the walk reached first, and
-// there is no option to show it twice.
+// RunTreeWalkerRendersASharedSubtreeOnce pins the diamond rule of
+// treewalker.go's TreeResult.Nodes: the shared child is EXPANDED under the
+// first parent that reached it, and every later parent is answered with one
+// leaf Deduped stub of the same id carrying that path's own ParentID, Depth
+// and EdgeFromParent, so every edge stays visible without a second expansion.
 //
-// This is the clause `--show-all-paths` would have changed, and the case exists
-// so that implementing that flag as a side effect of some later refactor fails
-// here rather than shipping.
+// This is the clause `--show-all-paths` would have changed, and the case
+// exists so that implementing that flag as a side effect of some later
+// refactor fails here rather than shipping: full re-expansion would give the
+// second occurrence descendants, which a stub never has.
 func RunTreeWalkerRendersASharedSubtreeOnce(t *testing.T, ctx context.Context, fixture TreeWalkerFixture) {
 	t.Helper()
 	root := fixture.IssuePrefix + "-diamond-root"
@@ -215,10 +218,39 @@ func RunTreeWalkerRendersASharedSubtreeOnce(t *testing.T, ctx context.Context, f
 	seedTreeWalkerEdge(t, ctx, fixture, right, shared, types.DepBlocks)
 
 	result := walkTree(t, ctx, fixture, publicops.WalkTreeRequest{RootID: root, MaxDepth: 10})
-	if got := treeWalkerCount(result, shared); got != 1 {
-		t.Fatalf("the shared node appears %d times, want 1: treewalker.go:170-178 forbids a second path", got)
+	if got := treeWalkerCount(result, shared); got != 2 {
+		t.Fatalf("the shared node appears %d times, want 2 (expanded once plus one Deduped stub): %v", got, treeWalkerIDs(result))
 	}
-	assertTreeWalkerIDSet(t, result, root, left, right, shared)
+	for _, id := range []string{root, left, right} {
+		if got := treeWalkerCount(result, id); got != 1 {
+			t.Fatalf("%s appears %d times, want 1: %v", id, got, treeWalkerIDs(result))
+		}
+	}
+	expanded, stubs := 0, 0
+	var stub *types.TreeNode
+	for _, node := range result.Nodes {
+		if node == nil || node.ID != shared {
+			continue
+		}
+		if node.Deduped {
+			stubs++
+			stub = node
+			continue
+		}
+		expanded++
+	}
+	if expanded != 1 || stubs != 1 {
+		t.Fatalf("the shared node is expanded %d times and stubbed %d times, want 1 and 1: %v", expanded, stubs, treeWalkerIDs(result))
+	}
+	if stub == nil {
+		t.Fatalf("no Deduped stub of the shared node: %v", treeWalkerIDs(result))
+	}
+	if stub.ParentID != left && stub.ParentID != right {
+		t.Fatalf("the stub's ParentID = %q, want the second parent (%s or %s): %v", stub.ParentID, left, right, treeWalkerIDs(result))
+	}
+	if stub.EdgeFromParent != types.DepBlocks {
+		t.Fatalf("the stub's EdgeFromParent = %q, want %q", stub.EdgeFromParent, types.DepBlocks)
+	}
 }
 
 // RunTreeWalkerMergesTheDurableAndEphemeralPlanes pins treewalker.go:234-238:

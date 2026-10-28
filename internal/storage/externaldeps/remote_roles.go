@@ -476,8 +476,9 @@ type remoteTreeWalker struct {
 // enforces the external-dependency policy, whose own walker already does.
 //
 // The probe only spares the edge reads: a leaf is display, not enforcement,
-// and appendTreeExternalReferences skips an id the tree already holds. So a
-// probe that fails renders the leaves here rather than failing a walk the
+// and appendTreeExternalReferences answers a second parent of an external ref
+// the tree already holds with a Deduped stub rather than dropping the edge. So
+// a probe that fails renders the leaves here rather than failing a walk the
 // server has already answered.
 func (t *remoteTreeWalker) WalkTree(ctx context.Context, req issueops.WalkTreeRequest) (issueops.TreeResult, error) {
 	result, err := t.inner.WalkTree(ctx, req)
