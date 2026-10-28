@@ -427,6 +427,20 @@ func ParseTypesConfigValue(value string) []string {
 	return workapi.ParseTypeList(value)
 }
 
+// RetainedTypesFromSetting is workapi.RetainedTypesFromSetting, the one
+// canonicalizing read of types.retained, for a caller that may not import
+// internal/workapi (the HTTP client).
+func RetainedTypesFromSetting(value string) map[string]bool {
+	return workapi.RetainedTypesFromSetting(value)
+}
+
+// ValidateRetainedTypesValue is workapi.ValidateRetainedTypesValue, the
+// syntax check of a types.retained write, for a caller that may not import
+// internal/workapi (the HTTP client, which refuses before the dial).
+func ValidateRetainedTypesValue(value string) error {
+	return workapi.ValidateRetainedTypesValue(value)
+}
+
 // SyncConfigTables re-syncs the normalized lookup table backing a config
 // key, if any (status.custom → custom_statuses, types.custom →
 // custom_types). Reads of those sets are table-first, so every SetConfig

@@ -82,21 +82,28 @@ func TestValidateSettingWriteParsesTheCustomStatusValue(t *testing.T) {
 }
 
 // TestValidateSettingWriteRefusesAMalformedRetainedTypesValue pins that
-// types.retained, a SAFETY setting, fails closed at write time. The sweep reads
-// whatever is stored through the lenient list parse, so a value that parses to
-// names no row carries — a bracketed list that is not JSON, a quoted name, two
-// names split by a space, an alias of the type rows actually store — would hold
-// back nothing while the operator believes the type is protected.
+// types.retained, a SAFETY setting, fails closed at write time on SYNTAX: a
+// value the lenient list parse would read as something other than the list
+// the operator wrote — a bracketed list that is not JSON, a quoted name, two
+// names split by a space — or as no name at all (`null`, `,`). Spelling is not
+// refused: an alias or a case variant of a built-in type is canonicalized by
+// the one read (RetainedTypesFromSetting), so it protects the type rows carry.
 func TestValidateSettingWriteRefusesAMalformedRetainedTypesValue(t *testing.T) {
 	for _, value := range []string{
 		"",                 // unsets the key
+		"   ",              // so does a blank one
 		"op",               // one name
 		"op,fact",          // the comma form
 		" op , fact ",      // trimmed on read
 		`["op","fact"]`,    // the JSON form
 		`[]`,               // an empty JSON list retains nothing
+		`[ ]`,              // so does one spelled with a space
 		"never-registered", // a well-formed unknown name matches nothing, and is allowed
-		"feature",          // the canonical form of the feat alias
+		"OpsKey",           // so does one in mixed case that is no built-in type
+		"feature",          // a built-in type
+		"feat",             // an alias: the read canonicalizes it to feature
+		"mol",              // an alias only bd update --type expands
+		"Chore",            // a built-in in another case: the read lower-cases it
 	} {
 		if _, err := ValidateSettingWrite(issueops.SettingKeyTypesRetained, value); err != nil {
 			t.Errorf("ValidateSettingWrite(types.retained, %q) = %v, want it accepted", value, err)
@@ -112,9 +119,10 @@ func TestValidateSettingWriteRefusesAMalformedRetainedTypesValue(t *testing.T) {
 		{`["op fact"]`, "op fact"},
 		{`["op,fact"]`, "op,fact"},
 		{"op,[fact]", "[fact]"},
-		{"feat", "feature"},
-		{"Feat", "feature"},
-		{`["adr"]`, "decision"},
+		{"null", "names no type"},
+		{",", "names no type"},
+		{" , ", "names no type"},
+		{`[""]`, "names no type"},
 	} {
 		_, err := ValidateSettingWrite(issueops.SettingKeyTypesRetained, test.value)
 		if !errors.Is(err, issueops.ErrValidation) {

@@ -3,6 +3,7 @@ package workapi
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 	"testing"
 	"time"
@@ -521,6 +522,61 @@ func TestRetainedTypesFromSettingParsesBothForms(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestRetainedTypesFromSettingCanonicalizes pins the one canonicalizing read
+// of types.retained: each stored name protects itself, its canonical form under
+// both alias tables, and its lower-case form when that is a built-in type. So
+// a value an older server, an older client or `bd sql` stored with an alias or
+// a case variant still protects the type rows actually carry, and a custom
+// type is matched verbatim. The want sets are exact: the read may over-protect
+// by these forms and by nothing else.
+func TestRetainedTypesFromSettingCanonicalizes(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		value string
+		want  []string
+	}{
+		{"a built-in matches itself", "chore", []string{"chore"}},
+		{"the Normalize alias table", "feat", []string{"feat", "feature"}},
+		{"an alias in another case", "Feat", []string{"Feat", "feature"}},
+		{"an alias only Normalize knows", "investigation", []string{"investigation", "spike"}},
+		{"an alias only NormalizeIssueType knows", "mol", []string{"mol", "molecule"}},
+		{"the other one", "MR", []string{"MR", "merge-request"}},
+		{"the tables agree", "adr", []string{"adr", "decision"}},
+		{"a built-in in another case", "Chore", []string{"Chore", "chore"}},
+		{"upper case", "TASK", []string{"TASK", "task"}},
+		{"the event built-in", "Event", []string{"Event", "event"}},
+		{"a custom type is verbatim", "op", []string{"op"}},
+		{"a mixed-case custom type is verbatim", "OpRecord", []string{"OpRecord"}},
+		{"the union of every name", `["op","feat","Bug"]`, []string{"op", "feat", "feature", "Bug", "bug"}},
+		{"the comma form unions too", "fact, mol", []string{"fact", "mol", "molecule"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := RetainedTypesFromSetting(test.value)
+			want := make(map[string]bool, len(test.want))
+			for _, name := range test.want {
+				want[name] = true
+			}
+			if !maps.Equal(got, want) {
+				t.Errorf("RetainedTypesFromSetting(%q) = %v, want %v", test.value, got, want)
+			}
+		})
+	}
+}
+
+// TestPartitionSweepRetainedTypesMatchesTheCanonicalRead pins that the
+// partition matches rows against the canonical read rather than the stored
+// spelling: a stored `feat` or `Chore` holds back the `feature` and `chore`
+// rows bd actually writes.
+func TestPartitionSweepRetainedTypesMatchesTheCanonicalRead(t *testing.T) {
+	feature := &types.Issue{ID: "bd-f", IssueType: types.TypeFeature}
+	chore := &types.Issue{ID: "bd-c", IssueType: types.TypeChore}
+	task := &types.Issue{ID: "bd-t", IssueType: types.TypeTask}
+	kept, held := PartitionSweepRetainedTypes([]*types.Issue{feature, chore, task}, RetainedTypesFromSetting("feat,Chore"))
+	if held != 2 || len(kept) != 1 || kept[0] != task {
+		t.Errorf("PartitionSweepRetainedTypes(feat,Chore) kept %v, held %d; want only %s kept and 2 held", kept, held, task.ID)
 	}
 }
 

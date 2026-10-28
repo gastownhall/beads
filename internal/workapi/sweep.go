@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/utils"
 	"github.com/steveyegge/beads/issueops"
 )
 
@@ -171,10 +172,23 @@ func FilterSweepCandidates(issues []*types.Issue, pattern string, cutoff *time.T
 }
 
 // RetainedTypesFromSetting parses the workspace's types.retained setting
-// (issueops.SettingKeyTypesRetained) into a set, through ParseTypeList — the
-// parse types.custom takes. An unset value retains nothing. Names are not
-// checked against the registered types: an unknown name matches no row, which
-// is what lets an orchestrator name a type before it registers it.
+// (issueops.SettingKeyTypesRetained) into the set of issue types it protects,
+// through ParseTypeList — the parse types.custom takes. An unset value retains
+// nothing. It is THE ONE READ of the setting: every door that honors it
+// matches rows against this set, never against the stored spelling.
+//
+// THE READ CANONICALIZES, so a stored name protects the type its writer meant
+// whatever route wrote it (an older server, an older client, `bd sql`). For
+// each name the set holds the name itself (a custom type matches verbatim),
+// its canonical form under both alias tables (types.IssueType.Normalize, which
+// bd create applies, and utils.NormalizeIssueType, which bd update --type
+// applies), and its lower-case form when that is a built-in type. So `feat`
+// protects `feature`, `mol` protects `molecule` and `Chore` protects `chore`.
+// Matching can only over-protect, never protect nothing in silence.
+//
+// Names are not checked against the registered types: an unknown name matches
+// no row, which is what lets an orchestrator name a type before it registers
+// it.
 func RetainedTypesFromSetting(value string) map[string]bool {
 	names := ParseTypeList(value)
 	if len(names) == 0 {
@@ -183,6 +197,11 @@ func RetainedTypesFromSetting(value string) map[string]bool {
 	retained := make(map[string]bool, len(names))
 	for _, name := range names {
 		retained[name] = true
+		retained[string(types.IssueType(name).Normalize())] = true
+		retained[utils.NormalizeIssueType(name)] = true
+		if lower := types.IssueType(strings.ToLower(name)); lower.IsBuiltIn() {
+			retained[string(lower)] = true
+		}
 	}
 	return retained
 }

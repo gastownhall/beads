@@ -191,10 +191,10 @@ func (s *httpSweeper) refuseAnUnguardedPlainSweep(ctx context.Context) error {
 		return fmt.Errorf("reading %s before a plain sweep against a server without %s: %w",
 			issueops.SettingKeyTypesRetained, wire.CapSweepRetainedTypes, err)
 	}
-	// The one type-list parser (storageops.ParseTypesConfigValue is
-	// workapi.ParseTypeList, which this package may not import): the names
-	// the server's sweep would read.
-	if len(storageops.ParseTypesConfigValue(value)) > 0 {
+	// The one read of the setting (storageops.RetainedTypesFromSetting is
+	// workapi.RetainedTypesFromSetting, which this package may not import):
+	// the types the server's sweep would hold back.
+	if len(storageops.RetainedTypesFromSetting(value)) > 0 {
 		return fmt.Errorf("%s names %q, which this server's sweeps would delete without retiring their ids; re-run with --retain-ids or upgrade the server: %w",
 			issueops.SettingKeyTypesRetained, value, s.store.unsupportedCapability("Sweeper.Sweep", wire.CapSweepRetainedTypes))
 	}
