@@ -442,6 +442,26 @@ func ExternallyManagedAdvice(setting, endpoint string) string {
 		"Start that server, or point bd at the right endpoint.", setting, atEndpoint(endpoint))
 }
 
+// ExternalManagementAdvice is the advice for an unreachable Dolt server at
+// addr, whose port resolved from source, on a workspace whose server a
+// setting declares externally managed: the ExternalPortSetting declaration's
+// advice when a port-naming setting declares it, else the declaration
+// ExternallyManagedBy found — BEADS_DOLT_SERVER_MODE=1, a port env var, a
+// metadata dolt_server_port, a host setting — so that the advice names the
+// declaring setting for every such workspace, not only the ones a port names.
+// "" when no setting declares the server externally managed (an owned or
+// shared workspace), whose callers keep their own advice.
+func ExternalManagementAdvice(beadsDir string, source PortSource, port int, addr string) string {
+	if advice := ExternalPortSetting(beadsDir, source, port).Advice(addr); advice != "" {
+		return advice
+	}
+	setting, sole := ExternallyManagedBy(beadsDir)
+	if setting == "" {
+		return ""
+	}
+	return ExternalPortDeclaration{Setting: setting, Sole: sole}.Advice(addr)
+}
+
 // UnreachableEndpointAdvice is the advice for a TCP dial of host:port, the
 // port resolved from source, that found no server, or "" when the caller's own
 // advice stands. A host bd does not run its server at
@@ -450,8 +470,8 @@ func ExternallyManagedAdvice(setting, endpoint string) string {
 // starts no server, and `bd dolt start` refuses the host. With no port
 // resolved (port 0), it gets UnresolvedPortAdvice instead, never a check of
 // port 0. The host bd runs its server at gets the externally managed advice
-// when a setting declares the workspace's server so (see
-// ExternalPortSetting).
+// naming the declaring setting (ExternalManagementAdvice) whenever one
+// declares the workspace's server so.
 func UnreachableEndpointAdvice(beadsDir, host string, port int, source PortSource) string {
 	if !configfile.BdRunsServerAt(host) {
 		if port == 0 {
@@ -459,7 +479,7 @@ func UnreachableEndpointAdvice(beadsDir, host string, port int, source PortSourc
 		}
 		return remoteServerAdvice(host, port)
 	}
-	return ExternalPortSetting(beadsDir, source, port).Advice(doltutil.ServerAddr(host, port))
+	return ExternalManagementAdvice(beadsDir, source, port, doltutil.ServerAddr(host, port))
 }
 
 // UnresolvedPortAdvice is the advice for a Dolt server at host for which no

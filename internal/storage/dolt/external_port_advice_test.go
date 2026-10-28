@@ -187,18 +187,22 @@ func TestNewServerModeExternallyManagedPortAdvice(t *testing.T) {
 }
 
 // TestNewServerModeUnreachableAdviceOutsideNamedPorts pins the controls: an
-// endpoint whose port no such setting names keeps its own advice, `bd dolt
-// start` included, because bd may own that server. A server bd started (its
-// pid file beside the port file), even on the port dolt_server_port names
-// (`bd dolt set port N`, then `bd dolt start`), the shared-server port, and a
-// bd-owned workspace with auto-start turned off.
+// endpoint whose workspace bd or the shared server owns keeps its own advice,
+// `bd dolt start` included — the shared-server port, and a bd-owned workspace
+// with auto-start turned off. A workspace whose setting declares the server
+// externally managed gets that setting named even beside a server bd started
+// (its pid file beside the port file on the port dolt_server_port names —
+// `bd dolt set port N`, then `bd dolt start`): `bd dolt start` refuses that
+// workspace now, so the advice names dolt_server_port instead of suggesting
+// it.
 func TestNewServerModeUnreachableAdviceOutsideNamedPorts(t *testing.T) {
 	cases := []struct {
 		name         string
 		setup        func(t *testing.T, beadsDir string, port int)
 		metadataPort bool // dolt_server_port names the dialed port
 		source       doltserver.PortSource
-		want         string
+		wants        func(beadsDir string) []string
+		banned       []string
 	}{
 		{"bd's pid and port files beside dolt_server_port", func(t *testing.T, beadsDir string, port int) {
 			// The server bd started is gone; its state files stay until
@@ -211,14 +215,26 @@ func TestNewServerModeUnreachableAdviceOutsideNamedPorts(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-		}, true, doltserver.PortSourcePortFile, "The Dolt server may not be running"},
+		}, true, doltserver.PortSourcePortFile,
+			func(beadsDir string) []string {
+				return []string{
+					"dolt_server_port in " + configfile.ConfigPath(beadsDir) + " declares this workspace's Dolt server externally managed",
+					"did not start one",
+					"Removing dolt_server_port lets bd manage the server.",
+				}
+			},
+			[]string{"bd dolt start", "The Dolt server may not be running"}},
 		{"shared server", func(t *testing.T, _ string, port int) {
 			t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
 			t.Setenv("BEADS_DOLT_SERVER_PORT", strconv.Itoa(port))
-		}, false, doltserver.PortSourceEnv, "The Dolt server may not be running"},
+		}, false, doltserver.PortSourceEnv,
+			func(string) []string { return []string{"The Dolt server may not be running"} },
+			[]string{"externally managed"}},
 		{"owned, auto-start off", func(t *testing.T, _ string, _ int) {
 			t.Setenv("BEADS_DOLT_AUTO_START", "0")
-		}, false, doltserver.PortSourcePortFile, "auto-start is disabled"},
+		}, false, doltserver.PortSourcePortFile,
+			func(string) []string { return []string{"auto-start is disabled"} },
+			[]string{"externally managed"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -244,13 +260,15 @@ func TestNewServerModeUnreachableAdviceOutsideNamedPorts(t *testing.T) {
 				t.Fatal("open of a dead endpoint succeeded")
 			}
 			msg := err.Error()
-			for _, want := range []string{tc.want, "bd dolt start"} {
+			for _, want := range tc.wants(beadsDir) {
 				if !strings.Contains(msg, want) {
 					t.Errorf("error does not contain %q:\n%s", want, msg)
 				}
 			}
-			if strings.Contains(msg, "externally managed") {
-				t.Errorf("error calls a server bd may own externally managed:\n%s", msg)
+			for _, banned := range tc.banned {
+				if strings.Contains(msg, banned) {
+					t.Errorf("error contains %q:\n%s", banned, msg)
+				}
 			}
 		})
 	}

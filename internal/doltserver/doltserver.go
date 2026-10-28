@@ -1424,17 +1424,20 @@ func EnsureRunningDetailed(beadsDir string) (port int, startedByUs bool, err err
 				"  bd dolt status   # detailed external-server check",
 				doltutil.PrintedServerAddr(host, cfg.Port), remoteServerAdvice(host, cfg.Port))}
 		}
-		// A named port declares the server external: "bd dolt start" would
-		// start bd's own server on it instead of the one that belongs there.
+		// A setting names the server external (a named port, the mode env
+		// var, a host setting): "bd dolt start" would start bd's own server
+		// on that port instead of the one that belongs there, and refuses.
 		// DialConfig names the legacy BEADS_DOLT_PORT the way the store
 		// dials it.
 		if advice := UnreachableEndpointAdvice(beadsDir, cfg.Host, cfg.Port, cfg.PortSource); advice != "" {
 			return 0, false, &externallyManagedError{fmt.Sprintf("Dolt server is not running on port %d.\n\n%s",
 				cfg.Port, advice)}
 		}
+		// No setting declares the server external: this is shared-server
+		// mode, whose server bd starts on demand — `bd dolt start` is how.
 		return 0, false, &externallyManagedError{fmt.Sprintf("Dolt server is not running on port %d, and auto-start is suppressed "+
-			"because the server is externally managed (dolt.auto-start: false or explicit port configured).\n\n"+
-			"Start the external server, or enable auto-start to allow bd to manage the server.\n"+
+			"because the shared Dolt server owns this workspace's database.\n\n"+
+			"Start the shared server, or enable auto-start to allow bd to start it.\n"+
 			"  To start manually: bd dolt start\n"+
 			"  To check status: bd dolt status", cfg.Port)}
 	}

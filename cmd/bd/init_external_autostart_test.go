@@ -398,6 +398,14 @@ func TestNamedPortServerUnreachableAdvice(t *testing.T) {
 			namedPortConfigYaml(t, namedPortWorkspace(t, f, 0), port)
 			f.env = append(f.env, "BEADS_DOLT_PORT="+strconv.Itoa(port))
 		}, "BEADS_DOLT_PORT declares the Dolt server at"},
+		// BEADS_DOLT_SERVER_MODE=1 declares the server externally managed
+		// although no port setting does: config.yaml's dolt.port only pins
+		// the port bd dials. The advice names the variable (bd-pvh7lf), and
+		// never `bd dolt start`, which refuses this workspace.
+		{"BEADS_DOLT_SERVER_MODE=1 with config.yaml dolt.port", func(t *testing.T, f *externalInitFixture, port int) {
+			namedPortConfigYaml(t, namedPortWorkspace(t, f, 0), port)
+			f.env = append(f.env, "BEADS_DOLT_SERVER_MODE=1")
+		}, "BEADS_DOLT_SERVER_MODE=1 declares this workspace's Dolt server externally managed"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newExternalInitFixture(t)

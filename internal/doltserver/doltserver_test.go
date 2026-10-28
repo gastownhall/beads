@@ -3517,9 +3517,12 @@ func TestExternalPortSetting(t *testing.T) {
 // TestExternalPortSettingLeavesServersBdStarted pins the port file's
 // exclusion: `bd dolt start` writes bd's pid file beside the port file, and
 // the server on that port is bd's own (`bd dolt set port N`, then `bd dolt
-// start`), so no setting is named even when one names the same port, and the
-// caller keeps its `bd dolt start` advice. The pid file is what marks it: the
-// same port file without one is only the record a successful open leaves.
+// start`), so no setting is named even when one names the same port. Its
+// callers no longer keep their `bd dolt start` advice for that shape — that
+// command refuses the workspace now — but fall back to the declaration
+// ExternallyManagedBy finds (ExternalManagementAdvice) and name
+// dolt_server_port instead. The pid file is what marks it: the same port
+// file without one is only the record a successful open leaves.
 func TestExternalPortSettingLeavesServersBdStarted(t *testing.T) {
 	const port = 13323
 	for _, tc := range []struct {
