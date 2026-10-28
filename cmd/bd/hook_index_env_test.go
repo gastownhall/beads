@@ -560,3 +560,30 @@ func TestGitIndexEnv_KeyPolicy(t *testing.T) {
 		}
 	})
 }
+
+// TestGitAddFile_LockPreflightTargetsCommitIndex pins AC-5: the preflight
+// checks the lock git add itself would take on the honored index, not the
+// parent's <gitdir>/index.lock.
+func TestGitAddFile_LockPreflightTargetsCommitIndex(t *testing.T) {
+	r := newCommitIndexRepo(t, false)
+	writeFileForWorktreeTest(t, r.path("tracked.txt"), []byte("changed\n"))
+	next := r.pathspecEnvelope(t, "tracked.txt")
+	if err := os.WriteFile(next+".lock", []byte("held by another git add"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	staged := r.stagedBlob(t, next, ".beads/issues.jsonl")
+	export := r.path(".beads/issues.jsonl")
+	writeFileForWorktreeTest(t, export, []byte(`{"id":"bd-exported"}`+"\n"))
+	r.enterHook(t, next)
+
+	err := gitAddFile(export)
+	if err == nil {
+		t.Fatal("gitAddFile = nil, want a locked-index error")
+	}
+	if msg := err.Error(); !strings.Contains(msg, "index is locked") || !strings.Contains(msg, next+".lock") {
+		t.Errorf("error = %q, want it to name %s", msg, next+".lock")
+	}
+	if got := r.stagedBlob(t, next, ".beads/issues.jsonl"); got != staged {
+		t.Errorf("pending index export blob = %q, want it unchanged %q", got, staged)
+	}
+}
