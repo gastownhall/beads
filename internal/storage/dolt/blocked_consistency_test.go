@@ -1262,3 +1262,47 @@ func TestParentChildCascade_StaleBitOnClosedOrPinnedParent(t *testing.T) {
 		})
 	}
 }
+
+// The doctor's count and the full repair over the same #7626 state, planted
+// with no write in between: the children read 0, which is right, so the only
+// inconsistent row is the parent's own stale bit. The count must name just
+// that row, and the repair must correct just that row rather than mark the
+// children in one pass and unmark them in the next.
+func TestRecomputeAllIsBlocked_StaleBitOnClosedOrPinnedParent(t *testing.T) {
+	for _, arm := range staleParentArms {
+		t.Run(arm.name, func(t *testing.T) {
+			store, cleanup := setupTestStore(t)
+			defer cleanup()
+			ctx, cancel := testContext(t)
+			defer cancel()
+
+			p, children := "rp-p", []string{"rp-c1", "rp-c2"}
+			if arm.wisp {
+				createWisp(t, ctx, store, p)
+			} else {
+				createPerm(t, ctx, store, p)
+			}
+			for _, c := range children {
+				createPerm(t, ctx, store, c)
+				addDependencyWithMeta(t, ctx, store, c, p, types.DepParentChild, "")
+			}
+			plantStaleParent(ctx, t, store, arm.table, p, arm.status)
+
+			if n := countInconsistencies(ctx, t, store.db); n != 1 {
+				t.Errorf("doctor count = %d, want 1 (the %s parent's own stale bit)", n, arm.status)
+			}
+			if changed := recomputeAll(ctx, t, store.db); changed != 1 {
+				t.Errorf("full repair corrected %d rows, want 1 (the %s parent's own stale bit)", changed, arm.status)
+			}
+			if getIsBlocked(t, ctx, store, arm.table, p) {
+				t.Errorf("after repair: %s is_blocked = 1, want 0", p)
+			}
+			for _, c := range children {
+				if getIsBlocked(t, ctx, store, "issues", c) {
+					t.Errorf("after repair: %s is_blocked = 1, want 0", c)
+				}
+			}
+			assertConvergedAndStable(ctx, t, store)
+		})
+	}
+}
