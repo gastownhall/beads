@@ -2103,7 +2103,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			// In stealth mode, persist no-git-ops: true so bd prime
 			// automatically uses stealth session-close protocol (GH#2159)
 			if stealth {
-				if err := config.SaveConfigValue("no-git-ops", true, beadsDir); err != nil {
+				if err := config.SetYamlConfigInDir(beadsDir, "no-git-ops", "true"); err != nil {
 					fmt.Fprintf(os.Stderr, "Warning: failed to set no-git-ops in config: %v\n", err)
 				}
 			}

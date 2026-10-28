@@ -1114,6 +1114,37 @@ func TestEmbeddedInitBStealthAndForceReinit(t *testing.T) {
 		}
 	})
 
+	// Regression: with a user-level config present and no project config yet,
+	// --stealth wrote no-git-ops into the user config instead of .beads/config.yaml.
+	t.Run("stealth_no_git_ops_with_user_config", func(t *testing.T) {
+		dir := t.TempDir()
+		initGitRepoAt(t, dir)
+
+		// bdEnv sets HOME to dir, so this is the user-level config bd reads.
+		userConfig := filepath.Join(dir, ".config", "bd", "config.yaml")
+		if err := os.MkdirAll(filepath.Dir(userConfig), 0o755); err != nil {
+			t.Fatalf("mkdir user config dir: %v", err)
+		}
+		const userContent = "actor: someone\n"
+		if err := os.WriteFile(userConfig, []byte(userContent), 0o600); err != nil {
+			t.Fatalf("write user config: %v", err)
+		}
+
+		runBDInit(t, bd, dir, "--prefix", "snu", "--stealth")
+
+		if got, err := os.ReadFile(userConfig); err != nil {
+			t.Fatalf("read user config: %v", err)
+		} else if string(got) != userContent {
+			t.Errorf("stealth init modified the user config:\ngot: %q\nwant: %q", got, userContent)
+		}
+
+		beadsDir := filepath.Join(dir, ".beads")
+		if got := config.GetStringFromDir(beadsDir, "no-git-ops"); got != "true" {
+			configYAML, _ := os.ReadFile(filepath.Join(beadsDir, "config.yaml"))
+			t.Errorf("stealth init did not persist no-git-ops in the project config; config.yaml:\n%s", configYAML)
+		}
+	})
+
 	t.Run("force_reinit", func(t *testing.T) {
 		doltBin, err := exec.LookPath("dolt")
 		if err != nil {
