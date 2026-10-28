@@ -495,6 +495,23 @@ func TestEmbeddedDepAAddRejectionsAndBulk(t *testing.T) {
 			t.Fatalf("dependency_count = %d, want 2 (the local and the external edge)", got)
 		}
 	})
+
+	t.Run("add_unresolved_quiet", func(t *testing.T) {
+		// --quiet silences the notice and nothing else: the unresolvable
+		// target is still stored, the command still exits 0, stdout is
+		// untouched.
+		qa := bdCreate(t, bd, dir, "Unresolved quiet target", "--type", "task")
+		stdout, stderr := runDepSplit(t, bd, dir, "--quiet", "dep", "add", qa.ID, "zz-406")
+		if !strings.Contains(stdout, "Added dependency") {
+			t.Fatalf("stdout = %q, want the usual Added dependency line even under --quiet", stdout)
+		}
+		if strings.Contains(stderr, "zz-406") || strings.Contains(stderr, "stored unverified") {
+			t.Errorf("stderr = %q, want no unresolved-target warning under --quiet", stderr)
+		}
+		if got := depTargetCount(t, bd, dir, qa.ID); got != 1 {
+			t.Fatalf("dependency_count = %d, want 1 — --quiet silences the notice, not the store", got)
+		}
+	})
 }
 
 func TestEmbeddedDepBTreeAndCycles(t *testing.T) {

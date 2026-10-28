@@ -461,6 +461,29 @@ func TestValidateBulkDepEdgesMarksUnverifiedTarget(t *testing.T) {
 	}
 }
 
+// TestWarnUnresolvedDepTargetHonorsQuiet pins the --quiet gate of the
+// write-time notice: --quiet is documented as "Suppress non-essential output
+// (errors only)", and this advisory notice is exactly that — an edge the
+// operator can still see with bd show, whose message is noise for a script
+// that asked for errors only. It saves and restores the package-global
+// quietFlag, so it must not run in parallel with anything else reading it.
+func TestWarnUnresolvedDepTargetHonorsQuiet(t *testing.T) {
+	oldQuiet := quietFlag
+	t.Cleanup(func() { quietFlag = oldQuiet })
+
+	quietFlag = true
+	stderr := captureStderr(t, func() { warnUnresolvedDepTarget("", "be-abc", "xy-999") })
+	if stderr != "" {
+		t.Errorf("quietFlag = true: stderr = %q, want the notice suppressed", stderr)
+	}
+
+	quietFlag = false
+	stderr = captureStderr(t, func() { warnUnresolvedDepTarget("", "be-abc", "xy-999") })
+	if want := unresolvedDepTargetWarning("", "be-abc", "xy-999"); stderr != want {
+		t.Errorf("quietFlag = false: stderr = %q, want exactly the notice:\n%q", stderr, want)
+	}
+}
+
 // TestDepBlocksProxiedServerRefusesDepsSpecTarget covers the fifth decision
 // site. `bd dep <blocker> --blocks <blocked>` is dispatched before any dep add
 // helper runs, and `bd dep --help` documents it as "equivalent to: bd dep add
