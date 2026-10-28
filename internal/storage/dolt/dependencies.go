@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/storage"
@@ -122,12 +123,18 @@ func (s *DoltStore) RemoveDependencyWithOptions(ctx context.Context, issueID, de
 			defer clearVersionScope()
 			clearRecheckScope := issueops.ScopeBlockedRecheckTransaction(tx)
 			defer clearRecheckScope()
-			if _, err := issueops.RemoveDependencyInTx(ctx, tx, issueID, dependsOnID, actor, rmOpts.EmitEvent); err != nil {
+			written, err := issueops.RemoveDependencyInTxWithResult(ctx, tx, issueID, dependsOnID, actor, rmOpts.EmitEvent)
+			if err != nil {
 				return err
 			}
-			if err := s.commitSQLTxAndRecheck(ctx, "commit remove wisp dependency", tx); err != nil {
+			if err := s.commitSQLTx(ctx, "commit remove wisp dependency", tx); err != nil {
 				return err
 			}
+			// Same order as the durable arm: this removal's own commit first,
+			// the recheck's after it.
+			pending := issueops.TakeBlockedRecheck(tx)
+			s.commitWispDependencyIssues(ctx, written, "dependency: remove "+issueID+" -> "+dependsOnID)
+			s.settleBlockedRecheck(ctx, pending)
 			return nil
 		}
 
@@ -180,6 +187,24 @@ func (s *DoltStore) RemoveDependencyWithOptions(ctx context.Context, issueID, de
 		}
 		return s.doltAddAndCommit(ctx, tables, "dependency: remove "+issueID+" -> "+dependsOnID)
 	})
+}
+
+// commitWispDependencyIssues publishes the durable is_blocked flips a
+// wisp-sourced dependency write made. The wisp tables are dolt-ignored and
+// commit with the SQL transaction, but the edge can still flip a durable
+// descendant (a durable child of the wisp, a durable waiter on it), and that
+// issues row would otherwise sit in the working set (GH#6647). It runs after
+// the SQL commit, so the edge is already durable: a failed history commit is
+// counted and logged like runIssueOperationTxWithMessage's trailing commit,
+// never returned.
+func (s *DoltStore) commitWispDependencyIssues(ctx context.Context, written issueops.DependencyWriteResult, commitMsg string) {
+	if !written.Blocked.IssueRowsChanged {
+		return
+	}
+	if err := s.doltAddAndCommitPostTx(ctx, []string{"issues"}, commitMsg); err != nil {
+		doltMetrics.postTxCommitDropped.Add(ctx, 1)
+		log.Printf("dolt: post-tx dolt commit failed for %q (data already committed; change rides the next dolt commit): %v", commitMsg, err)
+	}
 }
 
 // GetDependencies retrieves issues that this issue depends on

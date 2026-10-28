@@ -674,18 +674,24 @@ func (s *DoltStore) addWispDependency(ctx context.Context, dep *types.Dependency
 
 	kind := issueops.ClassifyDepTarget(ctx, tx, dep, isCrossPrefix)
 	// Wisp source/event tables are dolt_ignored (committed with the SQL tx, not
-	// via selective doltAddAndCommit), so the event-written flag is not needed here.
-	if _, err := issueops.AddDependencyInTx(ctx, tx, dep, actor, issueops.AddDependencyOpts{
+	// via selective doltAddAndCommit), so the event-written flag is not needed
+	// here; only a durable is_blocked flip needs a Dolt commit.
+	written, err := issueops.AddDependencyInTxWithResult(ctx, tx, dep, actor, issueops.AddDependencyOpts{
 		SourceTable:   "wisps",
 		WriteTable:    "wisp_dependencies",
 		IsCrossPrefix: isCrossPrefix,
 		TargetKind:    &kind,
 		EmitEvent:     emitEvent,
-	}); err != nil {
+	})
+	if err != nil {
 		return err
 	}
 
-	return s.commitSQLTx(ctx, "commit add wisp dependency", tx)
+	if err := s.commitSQLTx(ctx, "commit add wisp dependency", tx); err != nil {
+		return err
+	}
+	s.commitWispDependencyIssues(ctx, written, "dependency: add "+string(dep.Type)+" "+dep.IssueID+" -> "+dep.DependsOnID)
+	return nil
 }
 
 // getWispDependencies retrieves issues that a wisp depends on.
