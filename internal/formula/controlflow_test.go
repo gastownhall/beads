@@ -692,6 +692,81 @@ func TestApplyLoops_OwnDepsCarryToRoots(t *testing.T) {
 	}
 }
 
+// TestApplyLoops_NeedsOnLoopTargetItsLastStep pins GH#7636: a step's Needs
+// and DependsOn on a loop step, which no longer exists after expansion, are
+// retargeted in place to the loop's last expanded step.
+func TestApplyLoops_NeedsOnLoopTargetItsLastStep(t *testing.T) {
+	tests := []struct {
+		name          string
+		loop          *Step
+		land          *Step
+		wantNeeds     []string
+		wantDependsOn []string
+		check         func(t *testing.T, byID map[string]*Step)
+	}{
+		{
+			name: "count",
+			loop: &Step{ID: "round", Title: "Round", Loop: &LoopSpec{
+				Count: 2,
+				Body:  []*Step{{ID: "work", Title: "Work"}},
+			}},
+			land:      &Step{ID: "land", Title: "Land", Needs: []string{"round"}},
+			wantNeeds: []string{"round.iter2.work"},
+		},
+		{
+			name: "range",
+			loop: &Step{ID: "moves", Title: "Moves", Loop: &LoopSpec{
+				Range: "1..3",
+				Body:  []*Step{{ID: "move", Title: "Move"}},
+			}},
+			land:          &Step{ID: "land", Title: "Land", Needs: []string{"moves"}, DependsOn: []string{"moves"}},
+			wantNeeds:     []string{"moves.iter3.move"},
+			wantDependsOn: []string{"moves.iter3.move"},
+		},
+		{
+			name: "position",
+			loop: &Step{ID: "round", Title: "Round", Loop: &LoopSpec{
+				Count: 2,
+				Body:  []*Step{{ID: "work", Title: "Work"}},
+			}},
+			land:      &Step{ID: "land", Title: "Land", Needs: []string{"round", "other"}},
+			wantNeeds: []string{"round.iter2.work", "other"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			steps := []*Step{
+				{ID: "brief", Title: "Brief"},
+				{ID: "other", Title: "Other"},
+				tt.loop,
+				tt.land,
+			}
+			result, err := ApplyLoops(steps)
+			if err != nil {
+				t.Fatalf("ApplyLoops failed: %v", err)
+			}
+			byID := make(map[string]*Step, len(result))
+			for _, s := range result {
+				byID[s.ID] = s
+			}
+			land := byID["land"]
+			if land == nil {
+				t.Fatal("land not found")
+			}
+			if !slices.Equal(land.Needs, tt.wantNeeds) {
+				t.Errorf("land.Needs = %v, want %v", land.Needs, tt.wantNeeds)
+			}
+			if !slices.Equal(land.DependsOn, tt.wantDependsOn) {
+				t.Errorf("land.DependsOn = %v, want %v", land.DependsOn, tt.wantDependsOn)
+			}
+			if tt.check != nil {
+				tt.check(t, byID)
+			}
+		})
+	}
+}
+
 func TestApplyLoops_NestedChildren(t *testing.T) {
 	// Test that children are preserved when recursing
 	steps := []*Step{
