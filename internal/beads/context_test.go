@@ -1752,3 +1752,35 @@ func TestDirOwnedBy(t *testing.T) {
 		t.Errorf("dirOwnedBy(missing, %d) = true, want false (does not exist)", uid)
 	}
 }
+
+// TestIsPathInSafeBoundary_UnchangedOutsideDenyLoop pins AC-5: paths decided
+// before or after the deny loop keep their exact pre-carve-out verdicts and
+// never consult the account lookup. Should the own-home carve-out ever widen
+// past the deny-loop hit, the seam errors and these rows start failing.
+func TestIsPathInSafeBoundary_UnchangedOutsideDenyLoop(t *testing.T) {
+	old := currentAccount
+	currentAccount = func() (int, string, error) {
+		t.Errorf("currentAccount consulted for a path decided outside the deny loop")
+		return 0, "", errors.New("must not be consulted")
+	}
+	t.Cleanup(func() { currentAccount = old })
+
+	for _, tt := range []struct {
+		name     string
+		path     string
+		expected bool
+	}{
+		{"outside every denied prefix", "/srv/project/.beads", true},
+		{"the os.TempDir() carve-out", filepath.Join(os.TempDir(), "x", ".beads"), true},
+		{"the /var/tmp carve-out", "/var/tmp/gotmp/x/.beads", true},
+		{"the /var/home carve-out", "/var/home/userx/.beads", true},
+		{"the /Users/Shared carve-out", "/Users/Shared/portharbour/.beads", true},
+		{"peer-home rejection", "/home/definitely-not-the-current-user-7f3a/.beads", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isPathInSafeBoundary(tt.path); got != tt.expected {
+				t.Errorf("isPathInSafeBoundary(%q) = %v, want %v", tt.path, got, tt.expected)
+			}
+		})
+	}
+}

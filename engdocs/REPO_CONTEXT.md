@@ -193,6 +193,15 @@ system directories:
 Temporary directories (e.g., `/var/folders` on macOS) are explicitly allowed
 for test environments.
 
+A path under a denied prefix is admitted when it lies inside the current
+non-root account's own home (GH#6323): conventional service-account homes such
+as `/var/lib/<service>` could otherwise never validate. The home must come
+from the account database (`user.Current`), never `$HOME`; it must sit
+strictly inside the denied prefix, be an existing directory owned by the
+account, and the checked path must not escape it through symlinks. Everything
+else under a denied prefix — peer services' directories, `/root`, missing or
+foreign-owned homes — stays rejected.
+
 ## Server Mode Handling
 
 ### CLI vs Server Context

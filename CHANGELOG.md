@@ -1055,6 +1055,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd context` no longer rejects a non-root service account's own workspace
+  when the account's home sits under a denied system prefix (GH#6323): a
+  passwd home like `/var/lib/<service>` is now admitted for `BEADS_DIR` while
+  it is an existing directory the account owns and the path does not escape
+  it through symlinks. `$HOME` never stands in for the account database, and
+  peer services' directories, `/root`, and missing or foreign-owned homes stay
+  rejected.
 - `bd list --watch` and `bd show --watch` now wait a full poll interval after
   each refresh, and `bd list --watch --parent` reads its tree in one
   transaction, so other bd commands on an embedded workspace no longer stall
