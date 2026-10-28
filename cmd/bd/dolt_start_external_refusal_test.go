@@ -9,14 +9,18 @@ package main
 // a refusal is observable without a real server and leaves nothing running.
 
 import (
+	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/testutil"
 )
 
 // directExternalStartWorkspace writes the direct-external workspace the
@@ -261,4 +265,71 @@ func TestDoltStartOwnedAndSharedWorkspacesStillStart(t *testing.T) {
 			t.Errorf("bd dolt start --force did not reach doltserver.Start although --force bypasses the fresh-data-dir refusal:\n%s", forced.output)
 		}
 	})
+}
+
+// runDoltStartBD runs the bd binary under test in dir with env and returns its
+// combined output, like the integration lane's runBDExecWithBinary: this file
+// compiles in lanes that do not build the integration-tagged one.
+func runDoltStartBD(t *testing.T, bd, dir string, env []string, args ...string) (string, error) {
+	t.Helper()
+	cmd := exec.Command(bd, args...)
+	cmd.Dir = dir
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+// TestDoltStartAdoptsTrackedDirectLocalServer pins the adopt path the
+// externally managed refusal must not reach: on a direct-local-server
+// workspace whose server bd started and still tracks, `bd dolt start` again
+// succeeds without touching the recorded state — same pid file bytes, same
+// PID printed — instead of refusing to start a second server. It passes at
+// the base commit; it pins scope, not the fix.
+func TestDoltStartAdoptsTrackedDirectLocalServer(t *testing.T) {
+	testutil.RequireDoltBinary(t)
+	bd := buildBDUnderTest(t)
+	dir := t.TempDir()
+	home := t.TempDir()
+	env := directLocalServerEnv(home)
+	beadsDir := filepath.Join(dir, ".beads")
+	t.Cleanup(func() { stopDirectLocalServer(t, bd, dir, beadsDir, env) })
+
+	out, err := runDoltStartBD(t, bd, dir, env, "init", "--backend", "dolt", "--server", "--prefix", "dl", "--quiet")
+	if err != nil {
+		t.Fatalf("bd init --server: %v\n%s", err, out)
+	}
+	pidPath := filepath.Join(beadsDir, doltserver.PIDFileName)
+	if _, err := os.Stat(pidPath); err != nil {
+		// init left no running server; start one so the start below adopts.
+		if out, err := runDoltStartBD(t, bd, dir, env, "dolt", "start"); err != nil {
+			t.Fatalf("bd dolt start (first): %v\n%s", err, out)
+		}
+	}
+	before, err := os.ReadFile(pidPath)
+	if err != nil {
+		t.Fatalf("no recorded pid after the server started: %v", err)
+	}
+
+	out, err = runDoltStartBD(t, bd, dir, env, "dolt", "start")
+	if err != nil {
+		t.Fatalf("bd dolt start did not adopt bd's own tracked server: %v\n%s", err, out)
+	}
+	after, err := os.ReadFile(pidPath)
+	if err != nil {
+		t.Fatalf("pid file gone after the second start: %v", err)
+	}
+	if string(after) != string(before) {
+		t.Errorf("pid file changed across the adopt start: %q -> %q", before, after)
+	}
+	idx := strings.Index(out, "Dolt server started (PID ")
+	if idx < 0 {
+		t.Fatalf("second start printed no started line:\n%s", out)
+	}
+	var printed int
+	if _, err := fmt.Sscanf(out[idx:], "Dolt server started (PID %d,", &printed); err != nil {
+		t.Fatalf("cannot read the printed PID: %v\n%s", err, out)
+	}
+	if recorded := readRecordedServerPID(t, beadsDir); printed != recorded {
+		t.Errorf("second start printed PID %d, pid file records %d", printed, recorded)
+	}
 }
