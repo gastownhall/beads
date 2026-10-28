@@ -251,6 +251,29 @@ async def test_update_open_on_deferred_issue(mcp_client):
 
 
 @pytest.mark.asyncio
+async def test_update_open_on_closed_issue_reopens_and_applies_fields(mcp_client):
+    """update(status="open") on a closed issue reopens it (notes = reason) and applies other fields (GH#6872)."""
+    import json
+
+    create_result = await mcp_client.call_tool(
+        "create", {"title": "Closed issue", "priority": 2, "issue_type": "task", "brief": False}
+    )
+    issue_id = json.loads(create_result.content[0].text)["id"]
+    await mcp_client.call_tool("close", {"issue_id": issue_id, "reason": "Done"})
+
+    await mcp_client.call_tool(
+        "update",
+        {"issue_id": issue_id, "status": "open", "notes": "Found regression", "description": "D"},
+    )
+
+    show_result = await mcp_client.call_tool("show", {"issue_id": issue_id})
+    shown = json.loads(show_result.content[0].text)
+    assert shown["status"] == "open"
+    assert shown["closed_at"] is None
+    assert shown["description"] == "D"
+
+
+@pytest.mark.asyncio
 async def test_claim_issue_tool(mcp_client):
     """Test claim_issue tool."""
     import json
