@@ -1,8 +1,10 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -55,6 +57,45 @@ func warnOutrankedServerHost(w io.Writer, beadsDir string, cfg *configfile.Confi
 	default:
 		fmt.Fprintf(w, "  To keep %s: set dolt.host to it in %s, or remove dolt.host there.\n", meta, source)
 	}
+}
+
+// writeWorkspaceDoltHost writes host to beadsDir's config.yaml as dolt.host,
+// which outranks metadata.json's dolt_server_host (GH#5961), so a host bd is
+// told to use beside metadata.json is the one it dials. It creates no
+// config.yaml: updated is false when beadsDir has none.
+func writeWorkspaceDoltHost(beadsDir, host string) (updated bool, err error) {
+	if _, err := os.Stat(filepath.Join(beadsDir, config.ProjectConfigFileName)); errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err := config.SetYamlConfigInDir(beadsDir, "dolt.host", host); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// warnDoltHostOutranked warns when bd still dials another host than host,
+// just written to beadsDir's metadata.json (and config.yaml, where
+// writeWorkspaceDoltHost found one), under beadsDir's own configuration: it
+// names the setting that outranks host and how to drop it.
+func warnDoltHostOutranked(w io.Writer, beadsDir, host string) {
+	dialed := host
+	_ = config.WithBeadsDir(beadsDir, func() {
+		dialed = (&configfile.Config{DoltServerHost: host}).GetDoltServerHost()
+	})
+	if configfile.SameServerHost(dialed, host) {
+		return
+	}
+	setting, drop := "BEADS_DOLT_SERVER_HOST", "unset BEADS_DOLT_SERVER_HOST"
+	if os.Getenv("BEADS_DOLT_SERVER_HOST") != dialed {
+		source, _ := doltHostSource(beadsDir, dialed)
+		setting, drop = source+" dolt.host", "remove dolt.host from "+source
+		if source == "BD_DOLT_HOST" {
+			setting, drop = source, "unset BD_DOLT_HOST"
+		}
+	}
+	fmt.Fprintf(w, "%s %s %s outranks %s, so bd dials %s.\n  To dial %s: %s.\n",
+		ui.RenderWarn("Warning:"), setting, remedy.EscapedValue(dialed), remedy.EscapedValue(host),
+		remedy.EscapedValue(dialed), remedy.EscapedValue(host), drop)
 }
 
 // doltHostSource names where the merged dolt.host value host comes from for

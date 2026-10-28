@@ -66,7 +66,7 @@ Flags for 'bd dolt set':
 
 Examples:
   bd dolt set database myproject
-  bd dolt set host 192.168.1.100 --update-config
+  bd dolt set host 192.168.1.100
   bd dolt set data-dir /home/user/.beads-dolt/myproject
   `export BEADS_DOLT_PASSWORD=... BEADS_DOLT_SERVER_TLS=1`
   bd dolt test
@@ -320,6 +320,8 @@ not land in metadata.json. Use environment variables or the credentials file:
   See: bd dolt --help and docs/architecture/dolt.md
 
 Use --update-config to also write to config.yaml for team-wide defaults.
+host is always written to the workspace's config.yaml too, when it has one:
+its dolt.host outranks metadata.json, so bd dials the host you set.
 
 Examples:
   bd dolt set database myproject

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -1790,6 +1791,8 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 					fcfg := initTimeCloneConfig(initServerMode, serverHost, serverPort, serverSocket, serverUser, dbName)
 					if ferr := finalizeSyncedBootstrap(beadsDir, syncURL, fcfg, dbName); ferr != nil {
 						fmt.Fprintf(os.Stderr, "Warning: failed to finalize bootstrapped workspace: %s\n", remedy.PrintedMessage(ferr))
+					} else if serverHost != "" && fcfg.DoltMode == configfile.DoltModeServer && !usesProxiedServer() {
+						recordInitServerHost(os.Stderr, beadsDir, serverHost)
 					}
 				}
 				if jsonOutput {
@@ -2076,6 +2079,10 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			// rather than rejecting it (#5743).
 			if err := persistInitSyncRemote(beadsDir, initRemote, syncURL, syncFromRemote, syncURLFromConfig, syncURLFromGitOrigin); err != nil {
 				return fmt.Errorf("failed to persist sync.remote to config.yaml: %v", err)
+			}
+
+			if serverHost != "" && cfg.DoltMode == configfile.DoltModeServer {
+				recordInitServerHost(os.Stderr, beadsDir, serverHost)
 			}
 
 			// Enable shared server mode if requested via flag OR env var (GH#2377).
@@ -4130,6 +4137,17 @@ func initCloneHost(cloneCfg *configfile.Config) string {
 		return initStoreServerHost("")
 	}
 	return initStoreServerHost(cloneCfg.DoltServerHost)
+}
+
+// recordInitServerHost records bd init --server-host, serverHost, in
+// beadsDir's config.yaml beside metadata.json, where it outranks
+// dolt_server_host (GH#5961), when beadsDir has a config.yaml, and warns on w
+// when another setting still outranks it there.
+func recordInitServerHost(w io.Writer, beadsDir, serverHost string) {
+	if _, err := writeWorkspaceDoltHost(beadsDir, serverHost); err != nil {
+		fmt.Fprintf(w, "Warning: failed to record --server-host in config.yaml: %s\n", remedy.PrintedMessage(err))
+	}
+	warnDoltHostOutranked(w, beadsDir, serverHost)
 }
 
 // initStoreServerPort is the server port, and its source, that bd init puts on
