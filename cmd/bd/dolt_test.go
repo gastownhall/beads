@@ -3212,6 +3212,32 @@ func TestDoltPushPositionalRemoteIsNotSilentlyIgnored(t *testing.T) {
 			args:            []string{"  "},
 			wantValidateErr: []string{"remote name is empty"},
 		},
+		{
+			name:            "AC-3/push_positional_conflicts_with_flag",
+			cmd:             doltPushCmd,
+			args:            []string{"1st"},
+			flags:           map[string]string{"remote": "origin"},
+			wantValidateErr: []string{`"1st"`, `"origin"`},
+		},
+		{
+			name:            "AC-3/pull_positional_conflicts_with_flag",
+			cmd:             doltPullCmd,
+			args:            []string{"1st"},
+			flags:           map[string]string{"remote": "origin"},
+			wantValidateErr: []string{`"1st"`, `"origin"`},
+		},
+		{
+			name:            "AC-3/push_second_positional_refused",
+			cmd:             doltPushCmd,
+			args:            []string{"1st", "main"},
+			wantValidateErr: []string{"accepts at most 1 arg(s), received 2"},
+		},
+		{
+			name:            "AC-3/pull_second_positional_refused",
+			cmd:             doltPullCmd,
+			args:            []string{"1st", "main"},
+			wantValidateErr: []string{"accepts at most 1 arg(s), received 2"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -3242,9 +3268,12 @@ func TestDoltPushPositionalRemoteIsNotSilentlyIgnored(t *testing.T) {
 				if validateErr == nil {
 					t.Fatalf("ValidateArgs(%q) = nil, want an error", tt.args)
 				}
+				// bd's own refusals print through HandleError; cobra's
+				// arg-count error is returned for main to print.
+				msg := stderr + validateErr.Error()
 				for _, want := range tt.wantValidateErr {
-					if !strings.Contains(stderr, want) {
-						t.Errorf("ValidateArgs(%q) stderr = %q, want it to contain %q", tt.args, stderr, want)
+					if !strings.Contains(msg, want) {
+						t.Errorf("ValidateArgs(%q) error = %q, want it to contain %q", tt.args, msg, want)
 					}
 				}
 			} else {

@@ -712,6 +712,11 @@ func remoteFromArgs(cmd *cobra.Command, args []string) (string, error) {
 	if strings.TrimSpace(remote) == "" {
 		return "", HandleError("remote name is empty: name a remote (see 'bd dolt remote list') or omit the argument to use the default")
 	}
+	// Letting either spelling win would silently discard a selector the
+	// user typed, the bug class this resolves.
+	if flagRemote != "" && flagRemote != remote {
+		return "", HandleError("remote named twice: %q as an argument and %q with --remote; name it once", remote, flagRemote)
+	}
 	return remote, nil
 }
 
