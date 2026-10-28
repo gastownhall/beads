@@ -1031,6 +1031,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   each refresh, and `bd list --watch --parent` reads its tree in one
   transaction, so other bd commands on an embedded workspace no longer stall
   behind a large watched tree (#3415).
+- The `### Dependencies` (or `### Deps`) section of a `bd create --file`
+  batch now reads its entries the way `bd create --deps` does (#7508).
+  `depends-on:<id>` and `blocked-by:<id>` now block: they used to be stored
+  as non-blocking literal types, so the new issue stayed in `bd ready`.
+  `blocks:<id>` now means `<id>` depends on the new issue, which used to be
+  the other way round; a file that meant "blocked by" should list the bare
+  id. A type `--deps` refuses (a misspelling or a custom type) now refuses
+  the whole file and lists the accepted types; `bd link` still writes custom
+  types. Repeating one edge writes it once. Edges an earlier batch stored
+  under the literal `depends-on` or `blocked-by` type are left as they are:
+  `bd dep remove` plus `bd dep add` replaces one.
+
 - `bd gitlab pull` no longer overwrites a bead linked to another GitLab
   project's issue with the same number, or puts that issue's dependency
   links on it. Issue IIDs are only unique within a project, but when the
