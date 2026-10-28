@@ -11,7 +11,9 @@
 //
 // Dolt reads DOLT_REMOTE_INFO_BRANCH once, when it builds the blobstore for a
 // remote: a name overrides the branch, an empty value disables it, unset
-// means the default. bd sets it to empty for the dolt work it starts.
+// means the default. bd sets it to empty for the dolt work it starts unless
+// the variable is already present (with any value, empty included): then the
+// user's choice wins, which is how a user opts back in.
 //
 // Same shape as packages githooksenv and gittraceenv: the primary path is
 // CALL DOLT_PUSH/DOLT_FETCH running in the Dolt engine inside bd, so the
@@ -26,19 +28,16 @@ import "os"
 // import Dolt's blobstore; a test keeps the pin honest.
 const EnvVar = "DOLT_REMOTE_INFO_BRANCH"
 
-// WithDisabled runs fn with the info branch disabled process-wide, restoring
-// the previous DOLT_REMOTE_INFO_BRANCH afterwards.
+// WithDisabled runs fn with the info branch disabled process-wide, unsetting
+// DOLT_REMOTE_INFO_BRANCH again afterwards. A variable that is already
+// present is never touched.
 func WithDisabled(fn func() error) error {
-	saved, hadSaved := os.LookupEnv(EnvVar)
+	if _, present := os.LookupEnv(EnvVar); present {
+		return fn()
+	}
 	// Best effort: Setenv failure is extremely rare, and a push that also
 	// publishes the info branch is better than no push at all.
 	_ = os.Setenv(EnvVar, "")
-	defer func() {
-		if hadSaved {
-			_ = os.Setenv(EnvVar, saved)
-		} else {
-			_ = os.Unsetenv(EnvVar)
-		}
-	}()
+	defer func() { _ = os.Unsetenv(EnvVar) }()
 	return fn()
 }
