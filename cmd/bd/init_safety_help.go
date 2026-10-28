@@ -60,6 +60,14 @@ FLAG SURFACE
 
                                   bd init --recreate-missing --prefix <prefix>
 
+  bd init --reinit-local \      Repoint the workspace at another database
+      --database <other>        or server. The confirmation counts the
+                                configured database, the one being left.
+                                If that database is there but cannot be
+                                read, init refuses and no flag lifts it;
+                                the playbook is init-repoint in
+                                docs/recovery/init-safety.md.
+
   bd init --from-jsonl          Import from configured import.path. If
                                 origin has Dolt data, this refuses unless
                                 --discard-remote authorizes replacing that

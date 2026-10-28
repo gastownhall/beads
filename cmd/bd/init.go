@@ -3013,7 +3013,12 @@ func runInitReinitPreflight(reinitLocal bool, id initIdentity, prefix, destroyTo
 	if !reinitLocal {
 		return nil
 	}
-	count, err := countConfiguredIssues(id)
+	count, present, err := countConfiguredIssues(id)
+	if err != nil && present && id.Repoints() {
+		return initRepointUnreadableError(id, err)
+	}
+	// Same identity: a count error still reads as consent, which documented
+	// --reinit-local recovery of a corrupt database depends on.
 	if err != nil || count == 0 {
 		return nil
 	}

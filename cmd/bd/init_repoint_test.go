@@ -4,6 +4,7 @@ package main
 
 import (
 	"errors"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -122,5 +123,37 @@ func TestInitRepoint_FlaggedEndpointCountsConfigured(t *testing.T) {
 	if cfg.DoltDatabase != w.a || cfg.DoltServerPort != testDoltServerPort {
 		t.Errorf("metadata.json changed: dolt_database=%q dolt_server_port=%d, want %q and %d",
 			cfg.DoltDatabase, cfg.DoltServerPort, w.a, testDoltServerPort)
+	}
+}
+
+// AC-3: a configured database whose Tier-1 directory exists but which cannot
+// be read is present, not missing. A count error used to read as consent, so a
+// repoint went ahead and orphaned it; neither --recreate-missing nor a token
+// may lift the refusal, since neither says anything about what A holds.
+func TestInitRepoint_PresentUnreadableConfiguredRefuses(t *testing.T) {
+	w := newRepointWorkspace(t, 1)
+	b := uniqueTestDBName(t) + "_b"
+	t.Cleanup(func() { dropTestDatabase(b, testDoltServerPort) })
+	dropTestDatabase(w.a, testDoltServerPort)
+	if err := os.MkdirAll(filepath.Join(w.beadsDir, "dolt", w.a, ".dolt"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	out, code := w.reinit(t, nil, "--recreate-missing", "--destroy-token", "DESTROY-ext", "--database", b)
+	switch code {
+	case 0, ExitRemoteDivergenceRefused, ExitLocalExistsRefused, ExitDestroyTokenMissing:
+		t.Fatalf("exit = %d, want a plain refusal (not 0/10/11/12)\n%s", code, out)
+	}
+	for _, want := range []string{w.a, b, "could not be read"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("refusal must name %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "DESTROY-") {
+		t.Errorf("refusal must not print a destroy token:\n%s", out)
+	}
+	assertNotOnTestServer(t, b)
+	if got := w.recordedDatabase(t); got != w.a {
+		t.Errorf("metadata.json dolt_database = %q, want %q", got, w.a)
 	}
 }

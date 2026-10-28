@@ -2,15 +2,19 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/utils"
 )
 
@@ -105,6 +109,35 @@ func resolveInitIdentity(ws initIdentity, flags initIdentityFlags, serverMode bo
 	return id
 }
 
+// location names where the database lives, for messages.
+func (r initDBRef) location() string {
+	if !r.Server {
+		return "embedded"
+	}
+	return doltutil.PrintedServerAddr(r.Host, r.Port)
+}
+
+// Repoints reports whether this init moves an initialized workspace off the
+// database its commands open today. A mode change (#3885) compares names only.
+func (id initIdentity) Repoints() bool {
+	if id.Recorded == nil {
+		return false
+	}
+	c, t := id.Configured, id.Target
+	if c.Database != "" && t.Database != "" && !strings.EqualFold(c.Database, t.Database) {
+		return true
+	}
+	if c.Server && t.Server {
+		if c.Host != t.Host {
+			return true
+		}
+		if c.Port > 0 && t.Port != c.Port {
+			return true
+		}
+	}
+	return false
+}
+
 // configuredRef is the database the guards check for a guard run at the
 // init target. Through a redirect the guards still read the stub .beads, so
 // they get no override there.
@@ -118,28 +151,65 @@ func (id initIdentity) configuredRef() *initDBRef {
 
 // countConfiguredIssues counts the issues in the configured database, the one
 // the workspace's commands open, never the one an exported variable or an
-// init flag names. Returns 0 for a fresh workspace.
-func countConfiguredIssues(id initIdentity) (int, error) {
+// init flag names. Returns 0 for a fresh workspace. When the count fails,
+// present reports whether the database is there all the same: its Tier-1
+// directory exists (ADR-0004) or its server says it does.
+func countConfiguredIssues(id initIdentity) (n int, present bool, err error) {
 	if id.Recorded == nil {
-		return 0, nil
+		return 0, false, nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	store, err := openConfiguredStoreForCount(ctx, id)
 	if err != nil {
-		return 0, err
+		return 0, configuredDatabasePresent(id), err
 	}
 	defer func() { _ = store.Close() }()
 
 	stats, err := store.GetStatistics(ctx)
 	if err != nil {
-		return 0, err
+		return 0, true, err
 	}
 	if stats == nil {
-		return 0, nil
+		return 0, true, nil
 	}
-	return stats.TotalIssues, nil
+	return stats.TotalIssues, true, nil
+}
+
+// configuredDatabasePresent is ADR-0004's evidence that the configured
+// database exists, gathered without opening it.
+func configuredDatabasePresent(id initIdentity) bool {
+	db := id.Configured.databaseOrDefault()
+	roots := []string{filepath.Join(id.BeadsDir, "embeddeddolt")}
+	if id.Configured.Server {
+		roots = append(roots, doltserver.ResolveDoltDir(id.BeadsDir))
+	}
+	for _, root := range roots {
+		if info, err := os.Stat(filepath.Join(root, db, ".dolt")); err == nil && info.IsDir() {
+			return true
+		}
+	}
+	if !id.Configured.Server {
+		return false
+	}
+	check := checkDatabaseOnServer(id.Configured.Host, id.Configured.Port, id.Recorded.GetDoltServerUser(),
+		id.Recorded.GetDoltServerPassword(), db, id.Recorded.GetDoltServerTLS())
+	return check.Reachable && check.Exists && check.Err == nil
+}
+
+// initRepointUnreadableError refuses a repoint away from a database that is
+// there but could not be read: bd cannot say what moving off it would leave
+// behind. It is a plain refusal, not one of ADR-0002's exit codes, and no
+// flag lifts it.
+func initRepointUnreadableError(id initIdentity, readErr error) error {
+	a := remedy.PrintedValue(id.Configured.databaseOrDefault())
+	return fmt.Errorf("refusing to repoint this workspace from database %s (%s) to %s (%s): %s exists but could not be read: %w\n\n"+
+		"Neither --recreate-missing nor --destroy-token lifts this. Repair %s and re-run bd init in place,\n"+
+		"or move it aside so it is missing and --recreate-missing applies.\n"+
+		"See docs/recovery/init-safety.md#init-repoint.",
+		a, id.Configured.location(), remedy.PrintedValue(id.Target.databaseOrDefault()), id.Target.location(),
+		a, readErr, a)
 }
 
 // openConfiguredStoreForCount opens the configured database read-only. A

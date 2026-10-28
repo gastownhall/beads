@@ -113,6 +113,17 @@ freezes (pinned in `cmd/bd/protocol/exit_codes_init_test.go`). 15 is stable
 in-repo but not §E3-frozen (GH#4635); it skips 13 and 14, which bd already
 uses for `ExitGuardMismatch` and `ExitMigrationFrozen`.
 
+### Repointing a workspace (#6172)
+
+When `--database`, `--server-host` or `--server-port` name a database other
+than the one an initialized workspace's commands open, init's guards and the
+destroy-N count still reason about that configured database at its own
+endpoint, resolved once before init promotes its connection flags; the flags
+only name the target init opens and records. A configured database that is
+present but cannot be counted refuses the repoint with a plain error that no
+flag lifts, since a count error is no longer consent to leave it. The
+target's own data is protected by the GH#4637 project-identity verifier.
+
 ### Deprecation cycle
 
 `--force` continues to work for ≥2 releases post-0.x, emitting a

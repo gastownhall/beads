@@ -27,6 +27,7 @@ See also: `bd help init-safety`, and
 - [init-local-exists — `bd init --reinit-local` refused because local data already exists](#init-local-exists)
 - [init-home-refused — `bd init` refused because the working directory is your home directory](#init-home-refused)
 - [init-missing-server-db — `bd init` refused because the configured server-side database is missing](#init-missing-server-db)
+- [init-repoint — `bd init --reinit-local` refused to move a workspace off a database it could not read](#init-repoint)
 - [pk-fork-refused — `bd dolt pull`/`push` refused because a table has different primary keys in its common ancestor](#pk-fork-refused)
 - [re-clone-gotchas — two gotchas hit during manual re-clone recovery: damaged stores left inside `data_dir`, and a fresh clone missing clone-local tables](#re-clone-gotchas)
 
@@ -440,6 +441,55 @@ rows rarely apply there.
   mode before creating anything, and does not restore over a database the
   server already holds. Elsewhere, including shared-server mode named only
   by `dolt.shared-server` in a config.yaml, it uses the embedded store.
+
+---
+
+## init-repoint
+
+**Symptom**
+
+```
+Error: refusing to repoint this workspace from database myproject (127.0.0.1:3306) to other (127.0.0.1:3306): myproject exists but could not be read: ...
+```
+
+**What counts as a repoint**
+
+`bd init` over an initialized workspace repoints it when `--database`,
+`--server-host` or `--server-port` names a different database or server from
+the one the workspace's commands open today (its *configured* database). A
+flag that only restates it is not a repoint. Every safety check in a repoint
+is about the configured database, the one being left: the destroy
+confirmation (`destroy N issues`, or `--destroy-token` without a terminal)
+counts its issues, and the missing-database refusal above is about it at its
+own server. Exported `BEADS_DOLT_SERVER_DATABASE`, `--server-host` and
+`--server-port` do not change which database is counted.
+
+**What happened**
+
+The configured database is there (its directory exists under the Dolt data
+dir or `.beads/embeddeddolt`, or its server reports it), but `bd init` could
+not read it to count its issues. Without the count it cannot tell you what
+the repoint would leave behind, so it refuses. Neither `--recreate-missing`
+nor `--destroy-token` lifts this refusal: `--recreate-missing` is about a
+database that is *missing*, and a token confirms a count that was never read.
+
+A re-init that keeps the same database is unaffected: `bd init --reinit-local`
+over a database it cannot read still proceeds, which is how a corrupt
+database is recovered in place.
+
+### 1. Repair the database, or re-initialize it in place
+
+Find out why it could not be read (`bd doctor`, `bd dolt status`). Once it
+reads, re-run the repoint and confirm the count. Or drop the flags that name
+the other database and run `bd init --reinit-local` to re-initialize it in
+place.
+
+### 2. Move it aside, then repoint
+
+Move the configured database out of the Dolt data dir (see
+Gotcha 1 under [re-clone-gotchas](#re-clone-gotchas)) so
+it is genuinely missing. The missing-database refusal above then applies, and
+`--recreate-missing` is the way through it.
 
 ---
 
