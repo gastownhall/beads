@@ -74,7 +74,7 @@ func MergeAndSettleWithStrategy(ctx context.Context, db DBConn, ref, strategy st
 		return fmt.Errorf("set dolt_force_transaction_commit: %w", err)
 	}
 
-	_, mergeErr := db.ExecContext(ctx, "CALL DOLT_MERGE(?)", ref)
+	mergeErr := schema.DrainCall(ctx, db, "CALL DOLT_MERGE(?)", ref)
 	if mergeErr != nil && strings.Contains(mergeErr.Error(), "up to date") {
 		// DOLT_PULL swallows "Already up to date." internally; we do the same.
 		mergeErr = nil
