@@ -82,3 +82,26 @@ func TestEmbeddedDoltPushDoesNotPublishRemoteInfoBranch(t *testing.T) {
 		t.Errorf("auto-push published %s (%s) on the git remote", defaultInfoBranchRef, got)
 	}
 }
+
+func TestEmbeddedDoltPushHonorsExplicitRemoteInfoBranch(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded integration tests")
+	}
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+	_, remoteDir := infoBranchPushSetup(t, bd, func(dir string) []string {
+		return infoBranchBDEnv(dir, blobstore.InfoBranchEnvVar+"=dolt-info")
+	})
+
+	if lsRemoteRef(t, remoteDir, "refs/heads/dolt-info") == "" {
+		t.Fatalf("bd dolt push with %s=dolt-info did not publish refs/heads/dolt-info", blobstore.InfoBranchEnvVar)
+	}
+	tree := resetDataRunGit(t, remoteDir, "ls-tree", "--name-only", "refs/heads/dolt-info")
+	if got := strings.Fields(tree); !slices.Equal(got, []string{"DOLT_REMOTE.md"}) {
+		t.Errorf("refs/heads/dolt-info tree = %q, want only DOLT_REMOTE.md", got)
+	}
+	if got := lsRemoteRef(t, remoteDir, defaultInfoBranchRef); got != "" {
+		t.Errorf("bd dolt push published %s (%s) although %s names another branch",
+			defaultInfoBranchRef, got, blobstore.InfoBranchEnvVar)
+	}
+}

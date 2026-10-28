@@ -19,7 +19,8 @@ import (
 //     File-target tracing (GIT_TRACE=/abs/path) is preserved;
 //   - Dolt's __dolt_remote_info__ branch disabled (doltinfoenv, GH#6484):
 //     otherwise every successful write force-pushes a one-file branch into
-//     the git remote, which by default is the user's code repo.
+//     the git remote, which by default is the user's code repo. A
+//     DOLT_REMOTE_INFO_BRANCH the user set is left alone.
 //
 // Every remote-touching statement in this package must run inside this one
 // guard rather than picking wrappers piecemeal — a call site that gets some
