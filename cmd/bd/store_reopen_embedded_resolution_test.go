@@ -110,3 +110,26 @@ func TestResolveCommandBeadsDir_SymlinkedBeadsDirTrapAncestor(t *testing.T) {
 		t.Fatalf("resolveCommandBeadsDir(%q) = %q, want %q", dbPath, got, target)
 	}
 }
+
+// TestResolveCommandBeadsDir_SymlinkedBeadsDirExplicitSpellings guards the
+// explicit --db forms from GH#4627: the real target directory, the .beads
+// symlink path and <target>/embeddeddolt must all bind the same workspace,
+// never the ancestor trap.
+func TestResolveCommandBeadsDir_SymlinkedBeadsDirExplicitSpellings(t *testing.T) {
+	target, link, trap := symlinkedBeadsDirTrapFixture(t)
+
+	for name, dbPath := range map[string]string{
+		"target dir":      target,
+		"symlink path":    link,
+		"target data dir": filepath.Join(target, "embeddeddolt"),
+	} {
+		got := resolveCommandBeadsDir(dbPath)
+		if utils.PathsEqual(got, trap) {
+			t.Errorf("%s: resolveCommandBeadsDir(%q) = %q, the ancestor trap", name, dbPath, got)
+			continue
+		}
+		if !utils.PathsEqual(got, target) {
+			t.Errorf("%s: resolveCommandBeadsDir(%q) = %q, want workspace %q", name, dbPath, got, target)
+		}
+	}
+}
