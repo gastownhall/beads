@@ -1055,6 +1055,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd context`, and the other commands that resolve the repository context
+  (such as `bd prime` and `bd worktree`), now accept a `.beads` inside the
+  current non-root account's own home when that home sits under a protected
+  system prefix, such as a service account homed at `/var/lib/<service>`. The
+  home must be a directory the account owns, and the path must not leave it
+  through a symlink; other paths under `/var`, `/root` and the rest stay
+  rejected. The home comes from the account database with no `$HOME`
+  fallback, though a CGO-free build can report `$HOME` for an account with
+  no `/etc/passwd` entry; the ownership check is what a forged `$HOME`
+  cannot pass (#6323, reported by @swedeinasia-flow, building on their
+  #6326).
 - `bd list --watch` and `bd show --watch` now wait a full poll interval after
   each refresh, and `bd list --watch --parent` reads its tree in one
   transaction, so other bd commands on an embedded workspace no longer stall

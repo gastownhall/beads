@@ -522,7 +522,9 @@ func isPathInSafeBoundary(path string) bool {
 
 	for _, prefix := range unsafePrefixes {
 		if strings.HasPrefix(absPath, prefix+"/") || absPath == prefix {
-			return false
+			// A service account's own home can live under a denied prefix
+			// (/var/lib/<svc>, GH#6323); admit only that, never the prefix.
+			return inOwnHomeUnderPrefix(absPath, prefix)
 		}
 	}
 	// macOS's /Users/Shared is the OS-designated shared directory, not a peer
@@ -606,6 +608,62 @@ func resolvedPathWithinRoot(absPath, root string) bool {
 	resolved := resolveLongestExistingAncestor(absPath)
 	resolvedRoot := resolveLongestExistingAncestor(root)
 	return resolved == resolvedRoot || strings.HasPrefix(resolved, resolvedRoot+string(filepath.Separator))
+}
+
+// lookupCurrentUser is user.Current, swappable so a test can run
+// currentAccount's own body against an account database with no answer.
+var lookupCurrentUser = user.Current
+
+// currentAccount reports the process uid and the home the account database
+// records for it. Unlike the peer-home check it never falls back to
+// os.UserHomeDir: the home it returns pierces the SEC-003 deny list, and $HOME
+// is caller-set. (A CGO-free user.Current() can itself report $HOME when the
+// uid has no /etc/passwd entry; see cmd/bd/init.go. The ownership check in
+// inOwnHomeUnderPrefix is what $HOME cannot forge.) A package var so tests can
+// stand in an account whose home lives under a denied prefix.
+var currentAccount = func() (uid int, home string, err error) {
+	u, err := lookupCurrentUser()
+	if err != nil {
+		return 0, "", err
+	}
+	if u.HomeDir == "" {
+		return 0, "", fmt.Errorf("user home is empty")
+	}
+	return os.Getuid(), u.HomeDir, nil
+}
+
+// dirOwnedByFn is dirOwnedBy, swappable so a test can stand in a root-owned
+// home (macOS's /private/var/root sits strictly inside the denied /private) on
+// a runner where every directory the test can create is owned by its own uid.
+var dirOwnedByFn = dirOwnedBy
+
+// inOwnHomeUnderPrefix reports whether absPath, which the SEC-003 deny loop
+// matched against prefix, lies inside the current account's own home. The
+// home pierces the deny list only when the process is not root, the home
+// sits strictly inside prefix (never the prefix itself, which would admit the
+// whole tree), it is an existing directory the process owns, and absPath does
+// not escape it through a symlink. Both the recorded and the symlink-resolved
+// spelling of the home are compared, so a home recorded through a symlink (or
+// /var vs /private/var on macOS) still matches an already-canonicalized
+// BEADS_DIR.
+func inOwnHomeUnderPrefix(absPath, prefix string) bool {
+	uid, home, err := currentAccount()
+	if err != nil || uid <= 0 {
+		return false
+	}
+	// filepath.Clean("") is "."; neither it nor "/" may stand for a home.
+	home = filepath.Clean(home)
+	if home == "." || home == string(filepath.Separator) {
+		return false
+	}
+	for _, h := range []string{home, resolveLongestExistingAncestor(home)} {
+		if strings.HasPrefix(h, prefix+"/") && (absPath == h || strings.HasPrefix(absPath, h+"/")) {
+			// Same symlink-escape treatment as the /var/tmp and /Users/Shared
+			// carve-outs: a link inside the home must not lead out of it.
+			return dirOwnedByFn(home, uid) && resolvedPathWithinRoot(absPath, home)
+		}
+	}
+	return false
 }
 
 // GetRepoContextForWorkspace returns a fresh RepoContext for a specific workspace.

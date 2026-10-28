@@ -193,6 +193,17 @@ system directories:
 Temporary directories (e.g., `/var/folders` on macOS) are explicitly allowed
 for test environments.
 
+A path under one of the system prefixes is still allowed when it lies inside
+the current account's own home, so a service account homed at
+`/var/lib/<service>` can keep its `.beads` there (GH#6323). That exception
+applies only when the process is not root, the home sits strictly inside the
+prefix and is a directory owned by the process uid, and the path does not
+escape the home through a symlink. The home comes from `user.Current()`, the
+account database, and bd does not fall back to `$HOME` when that lookup fails.
+A CGO-free build (such as the FreeBSD and Android release binaries) can still
+get `$HOME` from `user.Current()` for a uid with no `/etc/passwd` entry; the
+ownership check is what a forged `$HOME` cannot pass.
+
 ## Server Mode Handling
 
 ### CLI vs Server Context
