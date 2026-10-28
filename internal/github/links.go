@@ -3,7 +3,9 @@ package github
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/url"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -27,7 +29,17 @@ type RefScope struct {
 	webHost string // canonical host[:port] used by issue HTML URLs
 	owner   string
 	repo    string
+	// issueHost is the host of the repository's own html_url, and names
+	// holds every other owner/repo, lower-cased, that GitHub answers with
+	// this repository (a renamed or transferred repository keeps answering
+	// its old one). Tracker.ResolveTarget learns both.
+	issueHost string
+	names     map[string]bool
 }
+
+// repoNamePattern matches the characters GitHub allows in an owner or
+// repository name.
+var repoNamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 // SubIssueLinkFromParentChild is retained for existing callers. Relationship
 // sync itself uses the scoped RefScope method below.
@@ -68,7 +80,19 @@ func hostFromURL(raw string) string {
 	if err != nil || u.Host == "" {
 		return ""
 	}
-	return strings.ToLower(u.Host)
+	return canonicalHost(u)
+}
+
+// canonicalHost returns u's host[:port] lower-cased, without a trailing dot
+// or the scheme's default port, so respellings of one host compare equal.
+func canonicalHost(u *url.URL) string {
+	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+	switch port := u.Port(); {
+	case port == "", port == "443" && u.Scheme == "https", port == "80" && u.Scheme == "http":
+		return host
+	default:
+		return net.JoinHostPort(host, port)
+	}
 }
 
 // IssueNumberFromRef extracts a repository-scoped GitHub issue number from a
@@ -77,6 +101,9 @@ func hostFromURL(raw string) string {
 // repo-less "github:{digits}" shorthand that BuildExternalRef emits when no
 // URL is available is read as the configured repository. Everything else —
 // another repository, another host, a non-GitHub tracker URL — is rejected.
+// Host respellings still match: any letter case, a trailing dot, an explicit
+// default port, the web host's www. alias, and a ref with no scheme. So does
+// any other name of the repository the scope learned (Tracker.ResolveTarget).
 func (s RefScope) IssueNumberFromRef(ref string) (int, bool) {
 	ref = strings.TrimSpace(ref)
 	if ref == "" || s.owner == "" || s.repo == "" {
@@ -88,46 +115,97 @@ func (s RefScope) IssueNumberFromRef(ref string) (int, bool) {
 		return n, err == nil && n > 0
 	}
 
-	u, err := url.Parse(ref)
-	if err != nil || u.Host == "" {
-		return 0, false
-	}
-	if host := strings.ToLower(u.Host); host != s.apiHost && host != s.webHost {
+	u, ok := parseRefURL(ref)
+	if !ok || !s.servesHost(u) {
 		return 0, false
 	}
 
 	owner, repo, number, ok := splitIssueURLPath(u.Path)
-	if !ok {
-		return 0, false
-	}
-	if !strings.EqualFold(owner, s.owner) || !strings.EqualFold(repo, s.repo) {
+	if !ok || !s.namesRepository(owner, repo) {
 		return 0, false
 	}
 	return number, true
 }
 
+// namesRepository reports whether owner/repo names the scope's repository:
+// the configured name, or another one GitHub answers with that repository.
+func (s RefScope) namesRepository(owner, repo string) bool {
+	if strings.EqualFold(owner, s.owner) && strings.EqualFold(repo, s.repo) {
+		return true
+	}
+	return s.names[strings.ToLower(owner+"/"+repo)]
+}
+
+// otherRepository returns the owner/repo that ref names when ref is an issue
+// URL on a host the scope serves whose owner/repo is not a name of the
+// scope's repository and could name a GitHub repository.
+func (s RefScope) otherRepository(ref string) (owner, repo string, ok bool) {
+	u, ok := parseRefURL(ref)
+	if !ok || !s.servesHost(u) {
+		return "", "", false
+	}
+	owner, repo, _, ok = splitIssueURLPath(u.Path)
+	if !ok || s.namesRepository(owner, repo) || !validRepoName(owner) || !validRepoName(repo) {
+		return "", "", false
+	}
+	return owner, repo, true
+}
+
+// validRepoName reports whether name could be a GitHub owner or repository
+// name, so a request for it stays on the /repos/{owner}/{repo} endpoint.
+func validRepoName(name string) bool {
+	return name != "." && name != ".." && repoNamePattern.MatchString(name)
+}
+
+// onHost reports whether ref is a URL on a host the scope serves, spelled any
+// way IssueNumberFromRef accepts, whichever repository it names.
+func (s RefScope) onHost(ref string) bool {
+	u, ok := parseRefURL(ref)
+	return ok && s.servesHost(u)
+}
+
+// servesHost reports whether u is on the scope's API host, its web host or
+// the host of the repository's html_url, or on either web host's www. alias.
+func (s RefScope) servesHost(u *url.URL) bool {
+	host := canonicalHost(u)
+	return host != "" && (host == s.apiHost || host == s.webHost || host == "www."+s.webHost ||
+		(s.issueHost != "" && (host == s.issueHost || host == "www."+s.issueHost)))
+}
+
+// parseRefURL parses ref as a URL with a host, reading a ref with no scheme
+// (github.com/{owner}/{repo}/issues/42) as https.
+func parseRefURL(ref string) (*url.URL, bool) {
+	ref = strings.TrimSpace(ref)
+	u, err := url.Parse(ref)
+	if err == nil && u.Scheme == "" && u.Host == "" {
+		u, err = url.Parse("https://" + ref)
+	}
+	return u, err == nil && u.Host != ""
+}
+
 // splitIssueURLPath pulls owner, repo, and issue number out of a GitHub issue
 // URL path. It accepts both the HTML form (/{owner}/{repo}/issues/42) and the
 // REST form (/repos/{owner}/{repo}/issues/42, optionally behind a GitHub
-// Enterprise /api/v3 prefix), and requires the number to be the last segment.
+// Enterprise /api/v3 prefix). It reads the first issues/{number} pair, as
+// IsExternalRef's /issues/{digits} match does, so a path below the issue
+// (/issues/42/comments) names that issue too.
 func splitIssueURLPath(path string) (owner, repo string, number int, ok bool) {
 	segments := strings.Split(strings.Trim(path, "/"), "/")
-	if len(segments) < 4 {
-		return "", "", 0, false
+	for i := 2; i+1 < len(segments); i++ {
+		if segments[i] != "issues" {
+			continue
+		}
+		n, err := strconv.Atoi(segments[i+1])
+		if err != nil || n <= 0 {
+			continue // a repository named "issues": /repos/{owner}/issues/issues/42
+		}
+		owner, repo = segments[i-2], segments[i-1]
+		if owner == "" || repo == "" {
+			return "", "", 0, false
+		}
+		return owner, repo, n, true
 	}
-	last := len(segments) - 1
-	if segments[last-1] != "issues" {
-		return "", "", 0, false
-	}
-	n, err := strconv.Atoi(segments[last])
-	if err != nil || n <= 0 {
-		return "", "", 0, false
-	}
-	owner, repo = segments[last-3], segments[last-2]
-	if owner == "" || repo == "" {
-		return "", "", 0, false
-	}
-	return owner, repo, n, true
+	return "", "", 0, false
 }
 
 // DependencyLink is a GitHub relationship operation derived from a beads

@@ -175,6 +175,16 @@ func (e *Engine) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 
 	allowPullOverwriteIDs := make(map[string]bool)
 
+	// Learn every name the configured target answers under before any phase
+	// reads a ref (TargetResolver).
+	if err := e.resolveTarget(ctx); err != nil {
+		result.Success = false
+		result.Error = err.Error()
+		span.RecordError(err)
+		span.SetStatus(codes.Error, result.Error)
+		return result, err
+	}
+
 	// Phase 1: Detect conflicts (only for bidirectional sync)
 	if opts.Pull && opts.Push {
 		conflicts, err := e.DetectConflicts(ctx)
@@ -303,6 +313,14 @@ func (e *Engine) DetectConflicts(ctx context.Context) ([]Conflict, error) {
 		if err != nil || extIssue == nil {
 			continue
 		}
+		// The tracker answered with an issue it serves under a ref it cannot
+		// address, so the issue left the configured target (GitHub: it was
+		// transferred to another repository). The pull and the push both skip
+		// it, so resolving a conflict could only force the local content over
+		// it.
+		if e.unaddressable(e.Tracker.BuildExternalRef(extIssue)) {
+			continue
+		}
 
 		if extIssue.UpdatedAt.After(lastSync) {
 			conflicts = append(conflicts, Conflict{
@@ -364,8 +382,10 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 
 	prelinkedHydrateIDs := make(map[string]bool)
 
-	// Fetch issues from external tracker
+	// Fetch issues from external tracker; extIssues[:listed] come from the
+	// tracker's issue list, the rest were fetched one by one.
 	var extIssues []TrackerIssue
+	listed := 0
 	if len(opts.IssueIDs) > 0 {
 		// Selective pull: fetch only requested issues via FetchIssue()
 		prefix, _ := e.Store.GetConfig(ctx, "issue_prefix")
@@ -373,11 +393,19 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 			var identifier string
 			if isBeadID(id, prefix) {
 				// Look up the local issue to find its external ref
-				if local, ok := localByID[id]; ok && local.ExternalRef != nil {
+				local, hasLocal := localByID[id]
+				if hasLocal && local.ExternalRef != nil {
 					identifier = e.Tracker.ExtractIdentifier(*local.ExternalRef)
 				}
 				if identifier == "" {
-					e.warn("No external ref found for local issue %s, skipping pull", id)
+					// A recognized ref that resolves to no identifier names an
+					// issue this tracker's configuration cannot address, e.g.
+					// another repository's issue; that is not "no ref".
+					if hasLocal && local.ExternalRef != nil && e.Tracker.IsExternalRef(*local.ExternalRef) {
+						e.warn("Local issue %s is linked outside %s, skipping pull", id, e.configuredTarget())
+					} else {
+						e.warn("No external ref found for local issue %s, skipping pull", id)
+					}
 					stats.Skipped++
 					continue
 				}
@@ -405,6 +433,7 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 			return nil, fmt.Errorf("fetching issues: %w", err)
 		}
 		stats.Candidates = len(extIssues)
+		listed = len(extIssues)
 		if provider, ok := e.Tracker.(PullStatsProvider); ok {
 			stats.Queried, stats.Candidates = provider.LastPullStats()
 		}
@@ -423,8 +452,9 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 	mapper := e.Tracker.FieldMapper()
 	var pendingDeps []DependencyInfo
 	var dryRunIssues []*types.Issue
+	var outsideRefs, skippedOutsideRefs []string
 
-	for _, extIssue := range extIssues {
+	for i, extIssue := range extIssues {
 		// ShouldImport hook: filter before conversion
 		if e.PullHooks != nil && e.PullHooks.ShouldImport != nil {
 			if !e.PullHooks.ShouldImport(&extIssue) {
@@ -448,6 +478,17 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 		if existing == nil {
 			if localID := strings.TrimSpace(conv.Issue.ID); localID != "" {
 				existing = localByID[localID]
+			}
+		}
+		// The tracker fetched this issue but cannot address its ref (GitHub:
+		// an issue transferred to another repository). Skip it where
+		// importing it could duplicate a bead.
+		if existing == nil && e.unaddressable(ref) {
+			outsideRefs = append(outsideRefs, ref)
+			if e.pullSkipsUnaddressable(fallback, &extIssue, i, listed) {
+				skippedOutsideRefs = append(skippedOutsideRefs, ref)
+				stats.Skipped++
+				continue
 			}
 		}
 
@@ -556,6 +597,7 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 			}
 		}
 	}
+	e.warnUnaddressablePulls(outsideRefs, skippedOutsideRefs)
 
 	// Create dependencies after all issues are imported
 	depErrors := 0
@@ -1162,6 +1204,12 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 		}
 	}
 
+	var unaddressableIDs, movedIDs, movedRefs []string
+	// Report the skipped beads however the push ends, a rate-limit abort too.
+	defer func() {
+		e.warnUnaddressablePushes(opts, unaddressableIDs)
+		e.warnMovedPushes(movedIDs, movedRefs)
+	}()
 	for _, issue := range issues {
 		// Limit to parent and its descendants if requested.
 		if descendantSet != nil && !descendantSet[issue.ID] {
@@ -1198,6 +1246,13 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 			} else if opts.CreateOnly && !forceIDs[issue.ID] {
 				// A real --create-only run leaves linked issues alone, so the
 				// preview must skip them too (gastownhall/beads#6337).
+				stats.Skipped++
+			} else if e.Tracker.ExtractIdentifier(extRef) == "" {
+				// The ref is recognized but the tracker cannot address it in
+				// its configured target (e.g. another repository's issue): a
+				// real run skips it even when forced, so the preview must not
+				// count it as an update.
+				unaddressableIDs = append(unaddressableIDs, issue.ID)
 				stats.Skipped++
 			} else if !forceIDs[issue.ID] && e.storedPushHashMatches(ctx, issue, extRef) {
 				// Content unchanged since last push: a real run would skip this
@@ -1256,6 +1311,7 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 			// Update existing external issue
 			extID := e.Tracker.ExtractIdentifier(extRef)
 			if extID == "" {
+				unaddressableIDs = append(unaddressableIDs, issue.ID)
 				stats.Skipped++
 				continue
 			}
@@ -1276,6 +1332,17 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 					return stats, fmt.Errorf("sync aborted: %w", err)
 				}
 				if err == nil && extIssue != nil {
+					// The tracker answered with an issue it serves under a ref
+					// it cannot address (GitHub: an issue transferred to
+					// another repository). A pull skips that issue, so writing
+					// over it would discard the remote edits the pull never
+					// took.
+					if movedRef := e.Tracker.BuildExternalRef(extIssue); e.unaddressable(movedRef) {
+						movedIDs = append(movedIDs, issue.ID)
+						movedRefs = append(movedRefs, movedRef)
+						stats.Skipped++
+						continue
+					}
 					// ContentEqual hook: content-hash dedup to skip unnecessary API calls
 					if e.PushHooks != nil && e.PushHooks.ContentEqual != nil {
 						if e.PushHooks.ContentEqual(issue, extIssue) {

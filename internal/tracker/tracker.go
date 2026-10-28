@@ -51,6 +51,13 @@ type IssueTracker interface {
 	IsExternalRef(ref string) bool
 
 	// ExtractIdentifier extracts the human-readable identifier from an external_ref.
+	// "" means the tracker cannot address the ref in its configured target
+	// (e.g. another repository's issue): the engine then neither fetches nor
+	// writes the issue the ref names. A fetched issue whose own ref yields ""
+	// left the target (e.g. an issue transferred to another repository); a
+	// push or conflict check that fetched it leaves it alone, and a pull
+	// imports it only from the tracker's issue list and where no bead would
+	// be duplicated (see Engine.pullSkipsUnaddressable).
 	ExtractIdentifier(ref string) string
 
 	// BuildExternalRef constructs an external_ref string for a tracker issue.
@@ -95,6 +102,25 @@ type MatchKeyer interface {
 type IdentityKeyer interface {
 	LocalIdentityKey(issue *types.Issue) string
 	RemoteIdentityKey(issue *TrackerIssue) string
+}
+
+// TargetResolver is implemented by trackers whose configured target can
+// answer under more than one name (GitHub: a renamed or transferred
+// repository keeps answering its old owner/repo, but serves its issues under
+// the new one). Engine.Sync calls ResolveTarget before it reads any ref, with
+// every local issue's external_ref, so that ExtractIdentifier addresses each
+// ref that names the configured target under any of its names. An error stops
+// the sync: it could not tell which refs the configured target addresses.
+type TargetResolver interface {
+	ResolveTarget(ctx context.Context, refs []string) error
+}
+
+// TargetDescriber is implemented by trackers whose ExtractIdentifier
+// addresses refs of one configured target only (GitHub: one repository).
+// DescribeTarget names that target, e.g. "repository acme/repo", for the
+// warnings a sync gives about refs outside it; "" means unknown.
+type TargetDescriber interface {
+	DescribeTarget() string
 }
 
 // FieldMapper handles bidirectional conversion of issue fields between

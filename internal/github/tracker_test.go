@@ -71,6 +71,9 @@ func TestIsExternalRef(t *testing.T) {
 	}{
 		{"https://github.com/org/repo/issues/42", true},
 		{"https://github.com/team/project/issues/123", true},
+		{"https://GitHub.com/org/repo/issues/42", true},
+		// An uninitialized tracker knows no GitHub Enterprise host.
+		{"https://ghe.example.test/org/repo/issues/42", false},
 		{"https://gitlab.com/group/project/-/issues/42", false},
 		{"https://linear.app/team/issue/PROJ-123", false},
 		{"", false},
@@ -84,6 +87,34 @@ func TestIsExternalRef(t *testing.T) {
 	for _, tt := range tests {
 		if got := tr.IsExternalRef(tt.ref); got != tt.want {
 			t.Errorf("IsExternalRef(%q) = %v, want %v", tt.ref, got, tt.want)
+		}
+	}
+}
+
+// TestIsExternalRefRecognizesConfiguredHost pins that an initialized tracker
+// takes an issue URL on its configured host for GitHub's, whichever
+// repository it names and in every spelling the repository scope accepts, so
+// a GitHub Enterprise host without "github.com" in its name counts; github.com
+// refs stay GitHub's there, so a push skips a bead linked to one instead of
+// creating an issue for it.
+func TestIsExternalRefRecognizesConfiguredHost(t *testing.T) {
+	ghe := &Tracker{client: NewClient("token", "acme", "repo-b").WithBaseURL("https://ghe.example.test/api/v3")}
+	for ref, want := range map[string]bool{
+		"https://ghe.example.test/acme/repo-b/issues/42":             true,
+		"https://ghe.example.test/acme/other/issues/42":              true,
+		"https://GHE.Example.test.:443/acme/repo-b/issues/42":        true,
+		"ghe.example.test/acme/repo-b/issues/42":                     true,
+		"https://ghe.example.test/api/v3/repos/acme/other/issues/42": true,
+		"https://github.com/acme/repo-b/issues/42":                   true,
+		"https://GitHub.com/acme/repo-b/issues/42":                   true,
+		"github:42": true,
+		"https://ghe.example.test/acme/repo-b/pull/42":             false,
+		"https://ghe.example.test.evil.test/acme/issues/42":        false,
+		"https://ghe.example.test@evil.test/acme/repo-b/issues/42": false,
+		"https://gitlab.example.test/acme/repo-b/-/issues/42":      false,
+	} {
+		if got := ghe.IsExternalRef(ref); got != want {
+			t.Errorf("GHE IsExternalRef(%q) = %v, want %v", ref, got, want)
 		}
 	}
 }
@@ -105,6 +136,80 @@ func TestExtractIdentifier(t *testing.T) {
 	for _, tt := range tests {
 		if got := tr.ExtractIdentifier(tt.ref); got != tt.want {
 			t.Errorf("ExtractIdentifier(%q) = %q, want %q", tt.ref, got, tt.want)
+		}
+	}
+}
+
+// TestExtractIdentifierScopedToRepository pins that an initialized GitHub
+// tracker only addresses issues of its configured repository: a ref pointing
+// at another repository yields "", so no sync path can match or write this
+// repository's same-numbered issue by accident (gastownhall/beads#7781).
+func TestExtractIdentifierScopedToRepository(t *testing.T) {
+	tr := &Tracker{client: NewClient("token", "acme", "repo-b")}
+	tests := []struct {
+		ref  string
+		want string
+	}{
+		{"https://github.com/acme/repo-b/issues/42", "42"},
+		{"https://github.com/ACME/Repo-B/issues/42", "42"},
+		{"github:42", "42"},
+		// The REST URL form of the same repository, as the API returns it.
+		{"https://api.github.com/repos/acme/repo-b/issues/42", "42"},
+		// Respellings of the github.com host that the legacy parse accepted.
+		{"https://www.github.com/acme/repo-b/issues/42", "42"},
+		{"github.com/acme/repo-b/issues/42", "42"},
+		{"https://GitHub.com.:443/acme/repo-b/issues/42", "42"},
+		// A path below the issue still names it.
+		{"https://github.com/acme/repo-b/issues/42/comments", "42"},
+		{"https://api.github.com/repos/acme/repo-b/issues/42/comments", "42"},
+		{"https://github.com/acme/repo-a/issues/42/comments", ""},
+		{"https://github.com/acme/repo-a/issues/42", ""},
+		{"https://github.com/other/repo-b/issues/42", ""},
+		{"https://www.github.com/acme/repo-a/issues/42", ""},
+		{"github.com/acme/repo-a/issues/42", ""},
+		{"https://github.com:8443/acme/repo-b/issues/42", ""},
+		// Another host, GitHub Enterprise or otherwise, same owner/repo.
+		{"https://ghe.example.test/acme/repo-b/issues/42", ""},
+		// Not an issue of the configured repository.
+		{"https://github.com/acme/repo-b/pull/42", ""},
+		{"https://github.com/acme/repo-b/issues/abc", ""},
+		{"https://gitlab.com/group/project/-/issues/42", ""},
+		{"github:0", ""},
+		{"", ""},
+	}
+	for _, tt := range tests {
+		if got := tr.ExtractIdentifier(tt.ref); got != tt.want {
+			t.Errorf("ExtractIdentifier(%q) = %q, want %q", tt.ref, got, tt.want)
+		}
+	}
+
+	// A repository named "issues" keeps its owner/repo in both URL forms.
+	named := &Tracker{client: NewClient("token", "acme", "issues")}
+	for _, ref := range []string{"https://github.com/acme/issues/issues/42", "https://api.github.com/repos/acme/issues/issues/42"} {
+		if got := named.ExtractIdentifier(ref); got != "42" {
+			t.Errorf("ExtractIdentifier(%q) for acme/issues = %q, want %q", ref, got, "42")
+		}
+	}
+
+	// A github.url that spells out the default port still addresses the
+	// issue URLs GitHub returns, which never carry one.
+	port := &Tracker{client: NewClient("token", "acme", "repo-b").WithBaseURL("https://api.github.com:443")}
+	if got := port.ExtractIdentifier("https://github.com/acme/repo-b/issues/42"); got != "42" {
+		t.Errorf("ExtractIdentifier with github.url https://api.github.com:443 = %q, want %q", got, "42")
+	}
+
+	// A GitHub Enterprise tracker resolves the same spellings against its
+	// own host, in both the web and the /api/v3 REST form, and no longer
+	// addresses github.com refs.
+	ghe := &Tracker{client: NewClient("token", "acme", "repo-b").WithBaseURL("https://ghe.example.test/api/v3")}
+	for ref, want := range map[string]string{
+		"https://ghe.example.test/acme/repo-b/issues/42":              "42",
+		"https://ghe.example.test/api/v3/repos/acme/repo-b/issues/42": "42",
+		"github:42": "42",
+		"https://github.com/acme/repo-b/issues/42": "",
+	} {
+		if got := ghe.ExtractIdentifier(ref); got != want {
+			t.Errorf("GHE ExtractIdentifier(%q) = %q, want %q", ref, got, want)
 		}
 	}
 }

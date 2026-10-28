@@ -9,6 +9,7 @@ import (
 	"io"
 	"math/rand/v2"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -362,6 +363,24 @@ func (c *Client) FetchIssueByNumber(ctx context.Context, number int) (*Issue, er
 	}
 
 	return &issue, nil
+}
+
+// FetchRepository retrieves the repository GitHub answers owner/repo with. A
+// renamed or transferred repository keeps answering its old owner/repo, so
+// the result can name the repository differently than the request did.
+func (c *Client) FetchRepository(ctx context.Context, owner, repo string) (*Repository, error) {
+	urlStr := fmt.Sprintf("%s/repos/%s/%s", c.BaseURL, url.PathEscape(owner), url.PathEscape(repo))
+	respBody, _, err := c.doRequest(ctx, http.MethodGet, urlStr, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch repository %s/%s: %w", owner, repo, err)
+	}
+
+	var repository Repository
+	if err := json.Unmarshal(respBody, &repository); err != nil {
+		return nil, fmt.Errorf("failed to parse repository response: %w", err)
+	}
+
+	return &repository, nil
 }
 
 // listIssuePages walks every page of an endpoint that returns a bare JSON
