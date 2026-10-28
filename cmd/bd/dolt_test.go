@@ -3238,6 +3238,48 @@ func TestDoltPushPositionalRemoteIsNotSilentlyIgnored(t *testing.T) {
 			args:            []string{"1st", "main"},
 			wantValidateErr: []string{"accepts at most 1 arg(s), received 2"},
 		},
+		{
+			name:      "AC-4/push_positional_equal_to_flag",
+			cmd:       doltPushCmd,
+			args:      []string{"1st"},
+			flags:     map[string]string{"remote": "1st"},
+			wantCalls: []string{"PushRemote(1st,force=false)"},
+			wantOut:   `Pushing to Dolt remote "1st"...`,
+		},
+		{
+			name:      "AC-4/push_flag_only",
+			cmd:       doltPushCmd,
+			flags:     map[string]string{"remote": "1st"},
+			wantCalls: []string{"PushRemote(1st,force=false)"},
+			wantOut:   `Pushing to Dolt remote "1st"...`,
+		},
+		{
+			name:      "AC-4/push_default_remote",
+			cmd:       doltPushCmd,
+			wantCalls: []string{"Push"},
+			wantOut:   "Pushing to Dolt remote...",
+		},
+		{
+			name:      "AC-4/pull_positional_equal_to_flag",
+			cmd:       doltPullCmd,
+			args:      []string{"1st"},
+			flags:     map[string]string{"remote": "1st"},
+			wantCalls: []string{"PullRemote(1st)"},
+			wantOut:   `Pulling from Dolt remote "1st"...`,
+		},
+		{
+			name:      "AC-4/pull_flag_only",
+			cmd:       doltPullCmd,
+			flags:     map[string]string{"remote": "1st"},
+			wantCalls: []string{"PullRemote(1st)"},
+			wantOut:   `Pulling from Dolt remote "1st"...`,
+		},
+		{
+			name:      "AC-4/pull_default_remote",
+			cmd:       doltPullCmd,
+			wantCalls: []string{"Pull"},
+			wantOut:   "Pulling from Dolt remote...",
+		},
 	}
 
 	for _, tt := range tests {
