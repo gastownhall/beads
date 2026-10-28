@@ -304,6 +304,7 @@ func TestInitRemoteCloneModeFollowsHostOwnership(t *testing.T) {
 }
 
 func TestInitDoltServerTLSFromEnv(t *testing.T) {
+	t.Setenv("BEADS_CENTRAL_CONFIG", filepath.Join(t.TempDir(), "absent.json"))
 	tests := []struct {
 		name string
 		env  string
@@ -324,8 +325,8 @@ func TestInitDoltServerTLSFromEnv(t *testing.T) {
 			} else {
 				t.Setenv("BEADS_DOLT_SERVER_TLS", tc.env)
 			}
-			if got := initDoltServerTLSFromEnv(); got != tc.want {
-				t.Fatalf("initDoltServerTLSFromEnv() = %v, want %v", got, tc.want)
+			if got := initDoltServerTLS(); got != tc.want {
+				t.Fatalf("initDoltServerTLS() = %v, want %v", got, tc.want)
 			}
 		})
 	}
@@ -460,6 +461,7 @@ func TestInitTimeCloneConfigExternalDefaultsAreSelfContained(t *testing.T) {
 	t.Setenv("BEADS_DOLT_PORT", "")
 	t.Setenv("BEADS_DOLT_SERVER_USER", "")
 	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
+	t.Setenv("BEADS_CENTRAL_CONFIG", filepath.Join(t.TempDir(), "absent.json"))
 
 	cfg := initTimeCloneConfig(true, "", 3312, "", "", "beads_proj")
 
