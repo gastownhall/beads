@@ -1001,7 +1001,8 @@ func TestCrossProject_IdentityCheck_PathOnly_ForeignRejected(t *testing.T) {
 		t.Run(fmt.Sprintf("CreateIfMissing=%v", createIfMissing), func(t *testing.T) {
 			cfg := f.pathOnlyConfig()
 			cfg.CreateIfMissing = createIfMissing
-			store, err := New(ctx, cfg)
+			// Its own budget: ctx was built before the seed's cold open (be-gvnsq).
+			store, err := openStoreWithOwnBudget(t, cfg)
 			if err == nil {
 				store.Close()
 				t.Fatalf("Path-only open of a foreign database succeeded; want PROJECT IDENTITY MISMATCH")
@@ -1040,7 +1041,8 @@ func TestCrossProject_IdentityCheck_PathOnly_GlobalForeignRejected(t *testing.T)
 		t.Fatalf("save metadata.json: %v", err)
 	}
 
-	store, err := New(ctx, f.pathOnlyConfig())
+	// Its own budget: ctx was built before the seed's cold open (be-gvnsq).
+	store, err := openStoreWithOwnBudget(t, f.pathOnlyConfig())
 	if err == nil {
 		store.Close()
 		t.Fatalf("Path-only open of a foreign beads_global succeeded; want GLOBAL PROJECT IDENTITY MISMATCH")
@@ -1053,11 +1055,9 @@ func TestCrossProject_IdentityCheck_PathOnly_GlobalForeignRejected(t *testing.T)
 	if !strings.Contains(msg, "GLOBAL PROJECT IDENTITY MISMATCH") {
 		t.Fatalf("expected GLOBAL PROJECT IDENTITY MISMATCH error, got: %v", err)
 	}
-	for _, id := range []string{"global-owner", "global-intruder"} {
-		if !strings.Contains(msg, id) {
-			t.Errorf("mismatch error does not name %q: %v", id, err)
-		}
-	}
+	// Each ID on its own labeled line: metadata.json holds global-intruder,
+	// the database global-owner.
+	assertGlobalMismatchLines(t, msg, "global-intruder", "global-owner")
 }
 
 // TestCrossProject_IdentityCheck_PathOnly_SoftSkipAndMatch is the guard for

@@ -1109,6 +1109,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   check against the `.beads` directory above `Path`, and refuses a database
   whose `_project_id` differs from that workspace's `metadata.json` (#5559).
   It used to skip the check and connect to a foreign project's database.
+- The GLOBAL PROJECT IDENTITY MISMATCH refusal of a `beads_global` open now
+  prints the `metadata.json` and database project IDs each on its own
+  labeled line. It used to print the database's ID as the `metadata.json`
+  one, `%!s(MISSING)` for the database, and the `metadata.json` ID unlabeled
+  at the end.
 - `bd list --watch` and `bd show --watch` now wait a full poll interval after
   each refresh, and `bd list --watch --parent` reads its tree in one
   transaction, so other bd commands on an embedded workspace no longer stall
