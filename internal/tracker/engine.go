@@ -78,8 +78,8 @@ type PushHooks struct {
 	// ContentHash, if set, returns a stable fingerprint of the issue's pushable
 	// fields. When present, the engine binds the hash to the issue's external_ref
 	// and TargetScope (when provided), and persists that fingerprint in local_metadata
-	// after each successful create/update (and whenever ContentEqual reports a
-	// match). It consults the fingerprint BEFORE fetching the remote issue: if the
+	// after each fully successful create (one with no Warnings) or update (and
+	// whenever ContentEqual reports a match). It consults the fingerprint BEFORE fetching the remote issue: if the
 	// stored content and target still match, the remote fetch and update are
 	// skipped entirely. This avoids the per-issue GET that ContentEqual alone
 	// still incurs, so a no-op `--push-only` run does not drain the API rate limit
@@ -1250,7 +1250,11 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 				e.warn("%s (%s)", w, issue.ID)
 			}
 			// Remember what we just pushed so the next sync can skip the fetch.
-			e.recordPushHash(ctx, issue, ref)
+			// A create with warnings left the remote short of the local content,
+			// so leave it uncached: the next push fetches, compares and repairs it.
+			if len(created.Warnings) == 0 {
+				e.recordPushHash(ctx, issue, ref)
+			}
 			stats.Created++
 		} else if !opts.CreateOnly || forceIDs[issue.ID] {
 			// Update existing external issue
