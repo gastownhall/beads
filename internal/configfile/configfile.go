@@ -572,20 +572,25 @@ func (c *Config) GetDoltMode() string {
 }
 
 // GetDoltServerHost returns the Dolt server host.
-// Priority: BEADS_DOLT_SERVER_HOST env var > metadata.json dolt_server_host
-// > config.yaml / global config dolt.host > DefaultDoltServerHost.
+// Priority: BEADS_DOLT_SERVER_HOST env var > config.yaml / global config
+// dolt.host > metadata.json dolt_server_host (including a server.json
+// central host merged into it) > DefaultDoltServerHost.
 // The config.yaml layer mirrors the dolt.port fix (GH#2073) so a shared
 // team / user-level Dolt server can be configured once without per-clone
-// metadata.json edits.
+// metadata.json edits. It outranks metadata.json because metadata.json is
+// git-tracked: a host one operator persisted there travels to every clone,
+// and pairing it with a config.yaml port dials an endpoint neither file
+// declares. The port chain demoted its metadata.json tier for the same
+// reason (GH#2372); host followed in GH#5961.
 func (c *Config) GetDoltServerHost() string {
 	if h := os.Getenv("BEADS_DOLT_SERVER_HOST"); h != "" {
 		return h
 	}
-	if c.DoltServerHost != "" {
-		return c.DoltServerHost
-	}
 	if h := config.GetYamlConfig("dolt.host"); h != "" {
 		return h
+	}
+	if c.DoltServerHost != "" {
+		return c.DoltServerHost
 	}
 	return DefaultDoltServerHost
 }
