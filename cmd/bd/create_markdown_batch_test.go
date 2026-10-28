@@ -135,4 +135,48 @@ Ephemeral body.
 			t.Errorf("the declared edge was not written; dependents of %s:\n%s", blocker, out)
 		}
 	})
+
+	// GH#7508: depends-on: and blocked-by: are --deps aliases for a blocking
+	// edge. The file used to store them as literal, non-gating types, so the
+	// issue stayed in bd ready while bd show printed the edge.
+	t.Run("deps_alias_spellings_gate_like_the_deps_flag", func(t *testing.T) {
+		target := createMarkdownDepTarget(t, bd, dir, "alias spelling target 7508")
+		plan := writeMarkdownPlan(t, dir, "aliases.md", `## Alias case bare id 7508
+
+### Deps
+`+target+`
+
+## Alias case depends-on 7508
+
+### Deps
+depends-on:`+target+`
+
+## Alias case blocked-by 7508
+
+### Deps
+blocked-by:`+target+`
+`)
+		runCreateDepsBD(t, bd, dir, "create", "--file", plan)
+		blocked := runCreateDepsBD(t, bd, dir, "blocked", "--json")
+		ready := runCreateDepsBD(t, bd, dir, "ready", "--json", "--limit", "0")
+		for _, title := range []string{"Alias case bare id 7508", "Alias case depends-on 7508", "Alias case blocked-by 7508"} {
+			if !strings.Contains(blocked, title) {
+				t.Errorf("%q is not in bd blocked; its edge on %s does not gate:\n%s", title, target, blocked)
+			}
+			if strings.Contains(ready, title) {
+				t.Errorf("%q is in bd ready although it depends on open %s", title, target)
+			}
+		}
+	})
+}
+
+// createMarkdownDepTarget creates a fresh open issue for a file's edges to
+// name, so no other subtest's edge can satisfy a ready/blocked check.
+func createMarkdownDepTarget(t *testing.T, bd, dir, title string) string {
+	t.Helper()
+	id := strings.TrimSpace(runCreateDepsBD(t, bd, dir, "create", title, "--silent"))
+	if id == "" {
+		t.Fatalf("create %q returned empty ID", title)
+	}
+	return id
 }

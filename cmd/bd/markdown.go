@@ -480,7 +480,8 @@ func parseMarkdownDependencies(deps []string, templateTitle string) ([]issueops.
 			if len(parts) != 2 {
 				return nil, fmt.Errorf("invalid dependency format %q for issue %q", raw, templateTitle)
 			}
-			depType = types.DependencyType(strings.TrimSpace(parts[0]))
+			// The --deps aliases depends-on/blocked-by gate like blocks (GH#7508).
+			depType = canonicalDependencyType(types.DependencyType(strings.TrimSpace(parts[0])))
 			target = strings.TrimSpace(parts[1])
 		} else {
 			depType = types.DepBlocks

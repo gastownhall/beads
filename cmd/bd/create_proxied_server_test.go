@@ -295,8 +295,11 @@ func TestParseMarkdownDependencies(t *testing.T) {
 		{"whitespace skipped", []string{"  ", ""}, nil, false},
 		{"bare id → blocks edge", []string{"bd-1"},
 			[]issueops.CreateDependency{{Type: types.DepBlocks, TargetID: "bd-1"}}, false},
-		{"type:id preserved verbatim (no alias)", []string{"depends-on:bd-2"},
-			[]issueops.CreateDependency{{Type: types.DependencyType("depends-on"), TargetID: "bd-2"}}, false},
+		// GH#7508: the --deps aliases gate ready work in a file too.
+		{"depends-on alias → blocks edge", []string{"depends-on:bd-2"},
+			[]issueops.CreateDependency{{Type: types.DepBlocks, TargetID: "bd-2"}}, false},
+		{"blocked-by alias → blocks edge", []string{"blocked-by:bd-2"},
+			[]issueops.CreateDependency{{Type: types.DepBlocks, TargetID: "bd-2"}}, false},
 		{"discovered-from preserved", []string{"discovered-from:bd-3"},
 			[]issueops.CreateDependency{{Type: types.DepDiscoveredFrom, TargetID: "bd-3"}}, false},
 		{"whitespace trimmed", []string{"  blocks : bd-4 "},
