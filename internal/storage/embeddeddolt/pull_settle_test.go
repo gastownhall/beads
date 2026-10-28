@@ -410,3 +410,81 @@ func TestEmbeddedMergeAndSettleDirtyWorkingSetSurvivesRefusedMerge(t *testing.T)
 		t.Fatalf("uncommitted working-set row was destroyed by the merge abort path (count=%d)", count)
 	}
 }
+
+// TestEmbeddedMergeAndSettleStrategyKeepsNonConflictedLabels (bd-cdo628,
+// GH#7811): a `--strategy ours` pull that settles a notes-only issues
+// conflict must COMMIT the peer's non-conflicted label change, so the merge
+// commit (what `bd dolt push` sends) and the local working set agree.
+func TestEmbeddedMergeAndSettleStrategyKeepsNonConflictedLabels(t *testing.T) {
+	te := newTestEnv(t, "stratlabels")
+	ctx := t.Context()
+	conn := openSettleConn(t, ctx, te)
+
+	exec := func(q string) {
+		t.Helper()
+		if _, err := conn.ExecContext(ctx, q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	exec("INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) VALUES ('sl-1', 'X', '', '', '', '', 'open', 3, 'bug')")
+	exec("INSERT INTO labels (issue_id, label) VALUES ('sl-1', 'needs-triage')")
+	exec("CALL DOLT_COMMIT('-Am', 'seed')")
+	exec("CALL DOLT_BRANCH('slpeer', 'HEAD')")
+	// Same updated_at on both sides so the LWW resolver declines the notes
+	// conflict and the strategy escape hatch is what settles it.
+	exec("UPDATE issues SET notes = 'B', updated_at = '2026-01-01 00:00:00' WHERE id = 'sl-1'")
+	exec("CALL DOLT_COMMIT('-Am', 'notes B (ours)')")
+	exec("CALL DOLT_CHECKOUT('slpeer')")
+	exec("DELETE FROM labels WHERE issue_id = 'sl-1' AND label = 'needs-triage'")
+	exec("INSERT INTO labels (issue_id, label) VALUES ('sl-1', 'ready-for-agent')")
+	exec("UPDATE issues SET notes = 'A', updated_at = '2026-01-01 00:00:00' WHERE id = 'sl-1'")
+	exec("CALL DOLT_COMMIT('-Am', 'relabel + notes A (theirs)')")
+	exec("CALL DOLT_CHECKOUT('main')")
+
+	if err := versioncontrolops.MergeAndSettleWithStrategy(ctx, conn, "slpeer", "ours"); err != nil {
+		t.Fatalf("MergeAndSettleWithStrategy(ours): %v", err)
+	}
+
+	labelsAt := func(q string) string {
+		t.Helper()
+		rows, err := conn.QueryContext(ctx, q)
+		if err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+		defer rows.Close()
+		var got []string
+		for rows.Next() {
+			var l string
+			if err := rows.Scan(&l); err != nil {
+				t.Fatalf("scan label: %v", err)
+			}
+			got = append(got, l)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("iterate labels: %v", err)
+		}
+		return strings.Join(got, ",")
+	}
+	working := labelsAt("SELECT label FROM labels WHERE issue_id = 'sl-1' ORDER BY label")
+	committed := labelsAt("SELECT label FROM labels AS OF 'HEAD' WHERE issue_id = 'sl-1' ORDER BY label")
+	if committed != "ready-for-agent" {
+		t.Errorf("HEAD (pushed) labels = %q, want %q: the strategy merge commit reverted the peer's label change", committed, "ready-for-agent")
+	}
+	if working != committed {
+		t.Errorf("working-set labels %q != HEAD labels %q: local reads diverge from what a push sends", working, committed)
+	}
+	var notes string
+	if err := conn.QueryRowContext(ctx, "SELECT notes FROM issues AS OF 'HEAD' WHERE id = 'sl-1'").Scan(&notes); err != nil {
+		t.Fatalf("read notes: %v", err)
+	}
+	if notes != "B" {
+		t.Errorf("HEAD notes = %q, want %q (ours)", notes, "B")
+	}
+	var dirty int
+	if err := conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_status").Scan(&dirty); err != nil {
+		t.Fatalf("count dolt_status: %v", err)
+	}
+	if dirty != 0 {
+		t.Errorf("%d uncommitted table(s) left after the strategy merge", dirty)
+	}
+}

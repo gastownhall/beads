@@ -232,3 +232,163 @@ func TestMergeAndSettleWithStrategy_EmptyStrategyMatchesMergeAndSettle(t *testin
 		t.Errorf("title = %q after aborted pull, want unchanged local value %q", title, "ours")
 	}
 }
+
+// seedRetitleWithLabelSwap extends seedIssueRetitleConflict with the GH#7811
+// wrinkle: the peer branch also swaps the issue's label needs-triage →
+// ready-for-agent. The label edit lives in a separate table that merges
+// cleanly while the issues retitle conflicts (same updated_at on both sides,
+// so the LWW resolver declines it), so any conclusion that commits only the
+// resolved table records HEAD's stale copy of labels: the merge commit —
+// what `bd dolt push` sends — reverts the peer's change while the working
+// set keeps reading the merged value forever. Leaves main checked out.
+func seedRetitleWithLabelSwap(t *testing.T, ctx context.Context, conn *sql.Conn, issueID string) (peerBranch string) {
+	t.Helper()
+	if _, err := conn.ExecContext(ctx,
+		"INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) VALUES (?, 'base', '', '', '', '', 'open', 2, 'task')",
+		issueID); err != nil {
+		t.Fatalf("seed issue: %v", err)
+	}
+	if _, err := conn.ExecContext(ctx,
+		"INSERT INTO labels (issue_id, label) VALUES (?, 'needs-triage')", issueID); err != nil {
+		t.Fatalf("seed label: %v", err)
+	}
+	if _, err := conn.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'seed issue + label')"); err != nil {
+		t.Fatalf("commit seed: %v", err)
+	}
+
+	peerBranch = issueID + "-peer"
+	if _, err := conn.ExecContext(ctx, "CALL DOLT_BRANCH(?, 'HEAD')", peerBranch); err != nil {
+		t.Fatalf("create peer branch: %v", err)
+	}
+
+	if _, err := conn.ExecContext(ctx,
+		"UPDATE issues SET title = 'ours', updated_at = '2026-01-01 00:00:00' WHERE id = ?", issueID); err != nil {
+		t.Fatalf("retitle on main: %v", err)
+	}
+	if _, err := conn.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'retitle ours')"); err != nil {
+		t.Fatalf("commit main retitle: %v", err)
+	}
+
+	if _, err := conn.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", peerBranch); err != nil {
+		t.Fatalf("checkout peer: %v", err)
+	}
+	if _, err := conn.ExecContext(ctx,
+		"UPDATE issues SET title = 'theirs', updated_at = '2026-01-01 00:00:00' WHERE id = ?", issueID); err != nil {
+		t.Fatalf("retitle on peer: %v", err)
+	}
+	if _, err := conn.ExecContext(ctx,
+		"DELETE FROM labels WHERE issue_id = ? AND label = 'needs-triage'", issueID); err != nil {
+		t.Fatalf("remove peer label: %v", err)
+	}
+	if _, err := conn.ExecContext(ctx,
+		"INSERT INTO labels (issue_id, label) VALUES (?, 'ready-for-agent')", issueID); err != nil {
+		t.Fatalf("add peer label: %v", err)
+	}
+	if _, err := conn.ExecContext(ctx,
+		"CALL DOLT_COMMIT('-Am', 'relabel + retitle theirs')"); err != nil {
+		t.Fatalf("commit peer diverge: %v", err)
+	}
+	if _, err := conn.ExecContext(ctx, "CALL DOLT_CHECKOUT('main')"); err != nil {
+		t.Fatalf("checkout main: %v", err)
+	}
+	return peerBranch
+}
+
+// headLabels reads an issue's labels from the committed HEAD root, not the
+// working set: at base the working set holds the merged value HEAD lacks
+// (GH#7811's second symptom), so only a HEAD read can see the revert.
+func headLabels(t *testing.T, ctx context.Context, conn *sql.Conn, issueID string) []string {
+	t.Helper()
+	rows, err := conn.QueryContext(ctx,
+		"SELECT label FROM labels AS OF 'HEAD' WHERE issue_id = ? ORDER BY label", issueID)
+	if err != nil {
+		t.Fatalf("query HEAD labels: %v", err)
+	}
+	defer rows.Close()
+	var labels []string
+	for rows.Next() {
+		var l string
+		if err := rows.Scan(&l); err != nil {
+			t.Fatalf("scan HEAD label: %v", err)
+		}
+		labels = append(labels, l)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate HEAD labels: %v", err)
+	}
+	return labels
+}
+
+// mergeOpen reports whether a merge is still open (dolt_merge_status.is_merging).
+func mergeOpen(t *testing.T, ctx context.Context, conn *sql.Conn) bool {
+	t.Helper()
+	var merging bool
+	err := conn.QueryRowContext(ctx, "SELECT is_merging FROM dolt_merge_status").Scan(&merging)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false
+	}
+	if err != nil {
+		t.Fatalf("read dolt_merge_status: %v", err)
+	}
+	return merging
+}
+
+// assertMergeConcluded asserts the three post-settle invariants GH#7811 needs
+// once the merge commit itself is right: nothing left uncommitted, the merge
+// state closed, and HEAD a two-parent merge commit (a one-parent "conclusion"
+// would mean the tables the merge produced were never committed).
+func assertMergeConcluded(t *testing.T, ctx context.Context, conn *sql.Conn) {
+	t.Helper()
+	var dirty int
+	if err := conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_status").Scan(&dirty); err != nil {
+		t.Fatalf("count dolt_status: %v", err)
+	}
+	if dirty != 0 {
+		t.Errorf("%d table(s) left uncommitted after the merge was concluded", dirty)
+	}
+	if mergeOpen(t, ctx, conn) {
+		t.Error("merge left open (dolt_merge_status.is_merging = 1) after settlement")
+	}
+	var parents int
+	if err := conn.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM dolt_commit_ancestors WHERE commit_hash = HASHOF('HEAD')").Scan(&parents); err != nil {
+		t.Fatalf("count HEAD parents: %v", err)
+	}
+	if parents != 2 {
+		t.Errorf("HEAD (a concluded merge) has %d parent(s), want 2", parents)
+	}
+}
+
+// TestMergeAndSettleWithStrategy_KeepsCleanMergedTables (bd-cdo628, GH#7811):
+// a pull whose only conflict is an issues cell the LWW resolver declines,
+// settled with --strategy ours/theirs, must carry the peer's cleanly merged
+// label swap into the merge commit — not just the working set.
+func TestMergeAndSettleWithStrategy_KeepsCleanMergedTables(t *testing.T) {
+	for _, strategy := range []string{"ours"} {
+		t.Run(strategy, func(t *testing.T) {
+			te := newTestEnv(t, "mergekept"+strategy)
+			ctx := t.Context()
+			conn := openSettleConn(t, ctx, te)
+
+			peerBranch := seedRetitleWithLabelSwap(t, ctx, conn, "mk-1")
+
+			if err := versioncontrolops.MergeAndSettleWithStrategy(ctx, conn, peerBranch, strategy); err != nil {
+				t.Fatalf("MergeAndSettleWithStrategy(%s): %v", strategy, err)
+			}
+
+			labels := headLabels(t, ctx, conn, "mk-1")
+			if len(labels) != 1 || labels[0] != "ready-for-agent" {
+				t.Errorf("HEAD labels = %v, want [ready-for-agent]: the merge commit did not carry the peer's label swap", labels)
+			}
+			var title string
+			if err := conn.QueryRowContext(ctx,
+				"SELECT title FROM issues AS OF 'HEAD' WHERE id = 'mk-1'").Scan(&title); err != nil {
+				t.Fatalf("read HEAD title: %v", err)
+			}
+			if title != strategy {
+				t.Errorf("HEAD title = %q after --strategy %s, want %q", title, strategy, strategy)
+			}
+			assertMergeConcluded(t, ctx, conn)
+		})
+	}
+}
