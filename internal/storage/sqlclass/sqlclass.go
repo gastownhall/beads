@@ -22,8 +22,9 @@ const (
 	// committing transaction and report the rows affected.
 	Write
 	// Mixed may change data and may also return a result set (CALL, EXPLAIN
-	// ANALYZE of a write, RETURNING, or anything the parser cannot classify):
-	// run it in a committing transaction and render any rows it returns.
+	// ANALYZE of a write, RETURNING, a read that calls a Dolt function that
+	// may write, or anything the parser cannot classify): run it in a
+	// committing transaction and render any rows it returns.
 	Mixed
 )
 
@@ -41,9 +42,11 @@ func (k Kind) String() string {
 
 // Classify classifies a single SQL statement by its main statement, so CTEs
 // (WITH [RECURSIVE] name(cols) AS (...)), comments, and string literals that
-// contain keywords do not affect the result. Input the parser rejects is
-// Mixed: it may still be valid for the server, and Mixed never discards rows
-// or rolls back writes.
+// contain keywords do not affect the result. A statement whose tree calls a
+// Dolt function that may write is Mixed even when its main verb reads,
+// because Dolt exposes mutating procedures as SELECT-callable functions.
+// Input the parser rejects is Mixed: it may still be valid for the server,
+// and Mixed never discards rows or rolls back writes.
 func Classify(query string) Kind {
 	stmt, err := sqlparser.Parse(query)
 	if err != nil || stmt == nil {
