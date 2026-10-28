@@ -670,6 +670,27 @@ func transferExecTimeoutDuration() time.Duration {
 	return timeoutFromEnv(transferExecTimeoutEnv, transferExecTimeout)
 }
 
+// annotateTransferTimeout turns the driver's opaque read-deadline failure into
+// an actionable one. When the one-shot connection's ReadTimeout fires mid
+// transfer, go-sql-driver logs "read tcp ...: i/o timeout" and returns
+// mysql.ErrInvalidConn ("invalid connection"), which surfaces to the user
+// bare — naming neither the deadline that fired nor the knob that raises it.
+// This mirrors what cliTransferError does for the dolt-CLI path. Errors that
+// are not in that lost-connection class pass through unchanged, and errors.Is
+// chains are preserved (%w), so callers that classify the message (retry,
+// circuit breaker, branch-tracking fallback) still decide as before.
+func annotateTransferTimeout(err error, deadline time.Duration) error {
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, mysql.ErrInvalidConn) && !errors.Is(err, driver.ErrBadConn) &&
+		!errors.Is(err, os.ErrDeadlineExceeded) {
+		return err
+	}
+	return fmt.Errorf("%w (the server-side transfer exceeded the %v read deadline; raise it with %s, e.g. %s=90m)",
+		err, deadline, transferExecTimeoutEnv, transferExecTimeoutEnv)
+}
+
 // timeoutFromEnv returns the duration configured in the named env var, falling
 // back to fallback when the var is unset, unparsable, or non-positive. Valid
 // time.ParseDuration strings (e.g. "2m", "90s") or bare numbers treated as
@@ -2940,23 +2961,25 @@ func (s *DoltStore) execWithLongTimeout(ctx context.Context, query string, args 
 // passes s.branch explicitly as a CALL DOLT_PUSH(...) arg, so this fresh
 // connection's default checkout never matters.
 func (s *DoltStore) execWithLongTimeoutNoTx(ctx context.Context, query string, args ...any) error {
-	db, err := s.oneShotConn(5 * time.Minute)
+	deadline := transferExecTimeoutDuration()
+	db, err := s.oneShotConn(deadline)
 	if err != nil {
 		return err
 	}
 	defer db.Close()
 	_, err = db.ExecContext(ctx, query, args...)
-	return err
+	return annotateTransferTimeout(err, deadline)
 }
 
 // oneShotConn opens a one-shot connection with the given read deadline
 // (0 = no deadline), for callers that pass a DBConn into versioncontrolops.
 // The pool's 10s ReadTimeout kills any server-side procedure that performs
-// sustained network I/O; push/pull use 5m, while backup sync/restore use no
-// deadline at all — a first sync to a remote destination (gs://) can exceed
-// any fixed budget, and the server aborts the transfer when the client
-// connection drops, so a too-short deadline can never converge by retrying.
-// Caller closes.
+// sustained network I/O; push/pull use the configured transfer deadline
+// (transferExecTimeoutDuration: 5m by default, BEADS_DOLT_TRANSFER_TIMEOUT
+// to override), while backup sync/restore use no deadline at all — a first
+// sync to a remote destination (gs://) can exceed any fixed budget, and the
+// server aborts the transfer when the client connection drops, so a
+// too-short deadline can never converge by retrying. Caller closes.
 func (s *DoltStore) oneShotConn(readTimeout time.Duration) (*sql.DB, error) {
 	cfg, err := mysql.ParseDSN(s.connStr)
 	if err != nil {
