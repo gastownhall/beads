@@ -340,6 +340,23 @@ func TestEmbeddedDepAAddRejectionsAndBulk(t *testing.T) {
 		}
 	})
 
+	t.Run("add_unresolved_cross_prefix_json", func(t *testing.T) {
+		src := bdCreate(t, bd, dir, "Unresolved target JSON source", "--type", "task")
+		stdout, stderr := bdRunSplit(t, bd, dir, "dep", "add", src.ID, "zz-404", "--json")
+		var got map[string]interface{}
+		if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &got); err != nil {
+			t.Fatalf("stdout is not one JSON object: %v\n%s", err, stdout)
+		}
+		// schema_version is outputJSON's envelope on every object; the
+		// warning must not add a key beside it.
+		if len(got) != 5 || got["schema_version"] == nil || got["status"] != "added" || got["issue_id"] != src.ID || got["depends_on_id"] != "zz-404" || got["type"] != "blocks" {
+			t.Errorf("stdout JSON = %v, want exactly status, issue_id, depends_on_id and type (plus schema_version)", got)
+		}
+		if !strings.Contains(stderr, "zz-404 was not found") || !strings.Contains(stderr, "bd dep remove "+src.ID+" zz-404") {
+			t.Fatalf("stderr = %q, want the unresolved-target warning", stderr)
+		}
+	})
+
 	t.Run("add_bulk_file_unresolved_warns", func(t *testing.T) {
 		a := bdCreate(t, bd, dir, "Bulk unresolved A", "--type", "task")
 		b := bdCreate(t, bd, dir, "Bulk unresolved B", "--type", "task")
