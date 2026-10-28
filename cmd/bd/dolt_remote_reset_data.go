@@ -122,7 +122,10 @@ func resetDataGitURL(url string) string {
 func lsRemoteDoltDataRefs(ctx context.Context, gitURL string) ([]string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "ls-remote", gitURL, gitDoltDataRef, gitDoltInfoRef) // #nosec G204 -- URL from configured remote
+	if err := checkRemoteNotOption("git remote", gitURL); err != nil {
+		return nil, err
+	}
+	cmd := exec.CommandContext(ctx, "git", "ls-remote", "--", gitURL, gitDoltDataRef, gitDoltInfoRef) // #nosec G204 -- URL from configured remote, after "--"
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("git ls-remote %s failed: %s: %w", gitURL, strings.TrimSpace(string(out)), err)
@@ -142,7 +145,10 @@ func lsRemoteDoltDataRefs(ctx context.Context, gitURL string) ([]string, error) 
 // git invocations (GH#3724 class: a user's templated pre-push hook must not
 // break — or observe — bd's data-plane plumbing).
 func deleteGitDoltDataRefs(ctx context.Context, gitURL string, refs []string) error {
-	args := []string{"push", gitURL}
+	if err := checkRemoteNotOption("git remote", gitURL); err != nil {
+		return err
+	}
+	args := []string{"push", "--", gitURL}
 	for _, ref := range refs {
 		args = append(args, ":"+ref)
 	}

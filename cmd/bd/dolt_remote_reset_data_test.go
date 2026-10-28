@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"slices"
@@ -127,5 +128,20 @@ func TestResetDataGitURL(t *testing.T) {
 		if got := resetDataGitURL(tt.url); got != tt.want {
 			t.Errorf("resetDataGitURL(%q) = %q, want %q", tt.url, got, tt.want)
 		}
+	}
+}
+
+func TestResetDataGitCommandsRejectOptionRemote(t *testing.T) {
+	pwned := filepath.Join(t.TempDir(), "pwned")
+	gitURL := "--upload-pack=touch " + pwned + ";false"
+
+	if _, err := lsRemoteDoltDataRefs(context.Background(), gitURL); err == nil {
+		t.Error("lsRemoteDoltDataRefs accepted a remote starting with '-'")
+	}
+	if err := deleteGitDoltDataRefs(context.Background(), "--receive-pack=touch "+pwned+";false", []string{gitDoltDataRef}); err == nil {
+		t.Error("deleteGitDoltDataRefs accepted a remote starting with '-'")
+	}
+	if _, err := os.Stat(pwned); err == nil {
+		t.Fatal("an injected git option ran a command")
 	}
 }

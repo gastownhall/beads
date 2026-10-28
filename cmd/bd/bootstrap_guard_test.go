@@ -89,21 +89,6 @@ func TestIsGitCodeRepoURL(t *testing.T) {
 	}
 }
 
-// setupSyncRemoteConfig writes sync.remote to .beads/config.yaml and
-// initializes the config subsystem so resolveSyncRemote() can read it.
-// Returns a cleanup function that resets config state.
-func setupSyncRemoteConfig(t *testing.T, beadsDir, remote string) func() {
-	t.Helper()
-	seedSyncRemote(t, beadsDir, remote)
-	config.ResetForTesting()
-	t.Setenv("BEADS_DIR", beadsDir)
-	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
-	if err := config.Initialize(); err != nil {
-		t.Fatalf("config.Initialize: %v", err)
-	}
-	return func() { config.ResetForTesting() }
-}
-
 // stubProbeGitRemoteDoltData replaces the refs/dolt/data probe for the
 // duration of a test. Every test that configures a forge sync.remote must
 // install a stub: the real probe shells out to `git ls-remote` against
@@ -139,28 +124,6 @@ var forgeSyncRemoteForms = []struct {
 	// No .git suffix, so only the host can make it a forge: github.com, after
 	// the last "@" of the authority (mc-gcmer).
 	{"multi-@ userinfo", "https://a@b@github.com/org/repo", "git+https://a@b@github.com/org/repo"},
-}
-
-// newForgeSyncRemoteWorkspace builds a workspace whose config.yaml carries
-// remote as sync.remote and chdirs into it, returning the .beads path.
-func newForgeSyncRemoteWorkspace(t *testing.T, remote string) string {
-	t.Helper()
-	snapshotBootstrapEnv(t)
-
-	tmpDir := t.TempDir()
-	beadsDir := filepath.Join(tmpDir, ".beads")
-	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
-		t.Fatal(err)
-	}
-	cleanup := setupSyncRemoteConfig(t, beadsDir, remote)
-	t.Cleanup(cleanup)
-
-	oldWd, _ := os.Getwd()
-	t.Cleanup(func() { _ = os.Chdir(oldWd) })
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatal(err)
-	}
-	return beadsDir
 }
 
 // TestDetectBootstrapAction_GitForgeSyncRemote_ProbeRouting covers the #5743 /
@@ -817,5 +780,93 @@ func TestDetectBootstrapAction_ServerGenuinelyAbsent_FallsThrough(t *testing.T) 
 	// No backup or JSONL → should fall through to init.
 	if plan.Action != "init" {
 		t.Errorf("action=%q, want %q — no backup/jsonl available, fresh init expected", plan.Action, "init")
+	}
+}
+
+func TestResolveSyncRemoteCheckedRejectsOptionValue(t *testing.T) {
+	optionRemotes := []string{
+		"--upload-pack=touch /tmp/pwned;false #.git",
+		"-utouch /tmp/pwned;false #.git",
+		"git+--upload-pack=touch /tmp/pwned;false",
+		"git+-utouch /tmp/pwned;false",
+		"GIT+ -utouch /tmp/pwned;false",
+	}
+
+	for _, remote := range optionRemotes {
+		t.Run("sync.remote/"+remote, func(t *testing.T) {
+			newForgeSyncRemoteWorkspace(t, remote)
+			_, err := resolveSyncRemoteChecked()
+			if err == nil || !strings.Contains(err.Error(), "sync.remote") {
+				t.Fatalf("remote=%q: err = %v, want a rejection naming sync.remote", remote, err)
+			}
+		})
+
+		t.Run("sync.git-remote/"+remote, func(t *testing.T) {
+			newForgeSyncRemoteWorkspace(t, "")
+			config.Set("sync.remote", "")
+			config.Set("sync.git-remote", remote)
+			_, err := resolveSyncRemoteChecked()
+			if err == nil || !strings.Contains(err.Error(), "sync.git-remote") {
+				t.Fatalf("remote=%q: err = %v, want a rejection naming sync.git-remote", remote, err)
+			}
+		})
+	}
+
+	t.Run("valid remote passes", func(t *testing.T) {
+		newForgeSyncRemoteWorkspace(t, "https://github.com/org/repo.git")
+		got, err := resolveSyncRemoteChecked()
+		if err != nil || got != "https://github.com/org/repo.git" {
+			t.Fatalf("got %q, %v; want the configured URL", got, err)
+		}
+	})
+}
+
+func TestDetectBootstrapAction_OptionSyncRemoteBlocksWithoutProbe(t *testing.T) {
+	for _, remote := range []string{
+		"--upload-pack=touch /tmp/pwned;false #.git",
+		"-utouch /tmp/pwned;false #.git",
+		"git+--upload-pack=touch /tmp/pwned;false",
+		"git+-utouch /tmp/pwned;false",
+	} {
+		t.Run(remote, func(t *testing.T) {
+			beadsDir := newForgeSyncRemoteWorkspace(t, remote)
+			stubProbeGitRemoteDoltData(t, func(url string) (bool, error) {
+				t.Errorf("probe ran for %q; an option-shaped sync.remote must be refused first", url)
+				return false, nil
+			})
+
+			plan := detectBootstrapAction(beadsDir, configfile.DefaultConfig())
+
+			if !plan.Blocked || plan.Action != "none" {
+				t.Fatalf("plan = action %q blocked %v, want a blocked none plan", plan.Action, plan.Blocked)
+			}
+			if !strings.Contains(plan.Reason, "sync.remote") || plan.SyncRemote != "" {
+				t.Errorf("Reason=%q SyncRemote=%q, want the key named and no remote wired", plan.Reason, plan.SyncRemote)
+			}
+		})
+	}
+}
+
+func TestDetectBootstrapAction_OptionSyncRemoteStillRestoresBackup(t *testing.T) {
+	beadsDir := newForgeSyncRemoteWorkspace(t, "--upload-pack=touch /tmp/pwned;false #.git")
+	backupDir := filepath.Join(beadsDir, "backup")
+	if err := os.MkdirAll(backupDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(backupDir, "issues.jsonl"), []byte(`{"id":"bd-1"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stubProbeGitRemoteDoltData(t, func(url string) (bool, error) {
+		t.Errorf("probe ran for %q; an option-shaped sync.remote must be refused first", url)
+		return false, nil
+	})
+
+	plan := detectBootstrapAction(beadsDir, configfile.DefaultConfig())
+
+	if plan.Action != "restore" {
+		t.Fatalf("action=%q reason=%q, want %q", plan.Action, plan.Reason, "restore")
+	}
+	if plan.SyncRemote != "" {
+		t.Errorf("SyncRemote=%q, want empty: a rejected remote must not be wired", plan.SyncRemote)
 	}
 }

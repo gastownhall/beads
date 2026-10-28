@@ -24,6 +24,37 @@ func resolveSyncRemote() string {
 	return config.GetString("sync.git-remote")
 }
 
+// resolveSyncRemoteChecked is resolveSyncRemote for paths that hand the value
+// to git or dolt: a committed config.yaml can set it, so a value git would
+// parse as an option is refused, naming the key that set it.
+func resolveSyncRemoteChecked() (string, error) {
+	key := "sync.remote"
+	v := config.GetString(key)
+	if v == "" {
+		key = "sync.git-remote"
+		v = config.GetString(key)
+	}
+	if err := checkRemoteNotOption(key, v); err != nil {
+		return "", err
+	}
+	return v, nil
+}
+
+// checkRemoteNotOption rejects a remote URL that begins with "-", including
+// after a "git+" scheme prefix, which git and dolt would read as an option
+// (e.g. --upload-pack=<command> or -u<command>).
+func checkRemoteNotOption(source, remote string) error {
+	trimmed := strings.TrimSpace(remote)
+	afterGitPlus := trimmed
+	if len(trimmed) >= 4 && strings.EqualFold(trimmed[:4], "git+") {
+		afterGitPlus = strings.TrimSpace(trimmed[4:])
+	}
+	if strings.HasPrefix(trimmed, "-") || strings.HasPrefix(afterGitPlus, "-") {
+		return fmt.Errorf("%s %q is not a valid remote URL: it must not start with '-'", source, redactRemoteURL(remote))
+	}
+	return nil
+}
+
 // resolveSyncRemoteFromDir is like resolveSyncRemote but reads from a
 // specific beads directory's config.yaml. Used by context_cmd, doctor,
 // and other paths that operate on a resolved beads dir rather than CWD.
