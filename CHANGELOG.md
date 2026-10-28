@@ -1094,9 +1094,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with `git commit -- <paths>`, `-a`, `-i` or `-p`. It used to stage into
   `.git/index`, whose lock the commit holds, so it was skipped with
   "git index is locked". The hook now stages into the index git hands it in
-  `GIT_INDEX_FILE` when that names an index of the same repository, decides
-  whether the commit touches `.beads` from that index, and in a linked
-  worktree no longer re-stages an export you removed with `git rm` (#4080).
+  `GIT_INDEX_FILE` when that names an index of the same repository, and for
+  `git commit -- <paths>` also into the index git keeps after the commit, so
+  the export is not left staged at its old content. It also decides whether
+  the commit touches `.beads` from that index, and in a linked worktree no
+  longer re-stages an export you removed with `git rm` (#4080).
 - `bd migrate-personal` no longer leaves an issue in both databases when
   someone else's bead in the project database depends on it. The move's
   delete from the project database refuses such an issue, but it ran only

@@ -189,37 +189,41 @@ func assertIndexFilesUnchanged(t *testing.T, before map[string][]byte) {
 
 // TestGitAddFile_StagesIntoCommitIndex pins AC-1 for gitAddFile: the export
 // lands in the index git commits from, with the parent's index.lock held, and
-// no other index file in the git dir changes.
+// for `git commit -- <paths>` also in that index.lock, which git installs as
+// the new index after the commit. No other index file in the git dir changes.
 func TestGitAddFile_StagesIntoCommitIndex(t *testing.T) {
 	tests := []struct {
-		name     string
-		linked   bool
-		envelope func(*testing.T, commitIndexRepo) (indexFile string, others []string)
+		name   string
+		linked bool
+		// envelope returns the GIT_INDEX_FILE git hands the hook, the other
+		// index files that must get the export too, and those that must not
+		// change (or appear).
+		envelope func(*testing.T, commitIndexRepo) (indexFile string, alsoStaged, unchanged []string)
 	}{
 		{
 			name: "main worktree, git commit -- <paths>",
-			envelope: func(t *testing.T, r commitIndexRepo) (string, []string) {
-				return r.pathspecEnvelope(t, "tracked.txt"), []string{filepath.Join(r.gitDir, "index"), filepath.Join(r.gitDir, "index.lock")}
+			envelope: func(t *testing.T, r commitIndexRepo) (string, []string, []string) {
+				return r.pathspecEnvelope(t, "tracked.txt"), []string{filepath.Join(r.gitDir, "index.lock")}, []string{filepath.Join(r.gitDir, "index")}
 			},
 		},
 		{
 			name:   "linked worktree, git commit -- <paths>",
 			linked: true,
-			envelope: func(t *testing.T, r commitIndexRepo) (string, []string) {
-				return r.pathspecEnvelope(t, "tracked.txt"), []string{filepath.Join(r.gitDir, "index"), filepath.Join(r.gitDir, "index.lock")}
+			envelope: func(t *testing.T, r commitIndexRepo) (string, []string, []string) {
+				return r.pathspecEnvelope(t, "tracked.txt"), []string{filepath.Join(r.gitDir, "index.lock")}, []string{filepath.Join(r.gitDir, "index")}
 			},
 		},
 		{
 			name: "main worktree, git commit -a",
-			envelope: func(t *testing.T, r commitIndexRepo) (string, []string) {
-				return r.allEnvelope(t), []string{filepath.Join(r.gitDir, "index")}
+			envelope: func(t *testing.T, r commitIndexRepo) (string, []string, []string) {
+				return r.allEnvelope(t), nil, []string{filepath.Join(r.gitDir, "index")}
 			},
 		},
 		{
 			// No regression: git's relative value, resolved against the hook cwd.
 			name: "main worktree, plain git commit",
-			envelope: func(t *testing.T, r commitIndexRepo) (string, []string) {
-				return filepath.Join(".git", "index"), nil
+			envelope: func(t *testing.T, r commitIndexRepo) (string, []string, []string) {
+				return filepath.Join(".git", "index"), nil, []string{filepath.Join(r.gitDir, "index.lock")}
 			},
 		},
 	}
@@ -227,12 +231,12 @@ func TestGitAddFile_StagesIntoCommitIndex(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			r := newCommitIndexRepo(t, tt.linked)
 			writeFileForWorktreeTest(t, r.path("tracked.txt"), []byte("changed\n"))
-			indexFile, others := tt.envelope(t, r)
+			indexFile, alsoStaged, unchanged := tt.envelope(t, r)
 			// bd export rewrites the file after git has built the envelope.
 			export := r.path(".beads/issues.jsonl")
 			writeFileForWorktreeTest(t, export, []byte(`{"id":"bd-exported"}`+"\n"))
 			want := r.blobOf(t, ".beads/issues.jsonl")
-			before := snapshotIndexFiles(t, others...)
+			before := snapshotIndexFiles(t, unchanged...)
 
 			r.enterHook(t, indexFile)
 			if err := gitAddFile(export); err != nil {
@@ -243,25 +247,34 @@ func TestGitAddFile_StagesIntoCommitIndex(t *testing.T) {
 			if !filepath.IsAbs(absIndex) {
 				absIndex = filepath.Join(r.top, absIndex)
 			}
-			if got := r.stagedBlob(t, absIndex, ".beads/issues.jsonl"); got != want {
-				t.Errorf("export blob in %s = %q, want %q", absIndex, got, want)
+			for _, staged := range append([]string{absIndex}, alsoStaged...) {
+				if got := r.stagedBlob(t, staged, ".beads/issues.jsonl"); got != want {
+					t.Errorf("export blob in %s = %q, want %q", staged, got, want)
+				}
 			}
 			assertIndexFilesUnchanged(t, before)
 		})
 	}
 }
 
+func shellQuoteForIndexTest(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
 // installExportStub puts a `bd` on PATH that records each invocation in the
-// returned sentinel and emulates `bd export -o <path>`.
-func installExportStub(t *testing.T) string {
+// returned sentinel and emulates `bd export -o <path>`. Any other invocation
+// runs fallback, or exits 0 when fallback is "".
+func installExportStub(t *testing.T, fallback string) string {
 	t.Helper()
 	binDir := t.TempDir()
 	sentinel := filepath.Join(binDir, "invocations")
-	quotedSentinel := "'" + strings.ReplaceAll(sentinel, "'", `'\''`) + "'"
 	stub := "#!/bin/sh\n" +
-		`printf '%s\n' "$*" >> ` + quotedSentinel + "\n" +
-		`if [ "$1" = export ] && [ "$2" = -o ]; then printf '%s\n' '{"id":"bd-exported"}' > "$3"; fi` + "\n" +
-		"exit 0\n"
+		`printf '%s\n' "$*" >> ` + shellQuoteForIndexTest(sentinel) + "\n" +
+		`if [ "$1" = export ] && [ "$2" = -o ]; then printf '%s\n' '{"id":"bd-exported"}' > "$3"; exit 0; fi` + "\n"
+	if fallback != "" {
+		stub += "exec " + shellQuoteForIndexTest(fallback) + ` "$@"` + "\n"
+	}
+	stub += "exit 0\n"
 	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(stub), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -274,7 +287,7 @@ func setupExportLaneForIndexTest(t *testing.T, r commitIndexRepo) string {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell-script stub binary is POSIX-only")
 	}
-	sentinel := installExportStub(t)
+	sentinel := installExportStub(t, "")
 	initConfigForTest(t)
 	config.Set("export.auto", true)
 	config.Set("export.git-add", true)
@@ -318,7 +331,7 @@ func TestExportJSONLForCommit_CommitIndex(t *testing.T) {
 		sentinel := setupExportLaneForIndexTest(t, r)
 		writeFileForWorktreeTest(t, r.path(".beads/config.yaml"), []byte("# pathspec\n"))
 		next := r.pathspecEnvelope(t, ".beads/config.yaml")
-		before := snapshotIndexFiles(t, filepath.Join(r.gitDir, "index"), filepath.Join(r.gitDir, "index.lock"))
+		before := snapshotIndexFiles(t, filepath.Join(r.gitDir, "index"))
 		r.enterHook(t, next)
 
 		_ = captureHookStderr(t, exportJSONLForCommit)
@@ -327,8 +340,12 @@ func TestExportJSONLForCommit_CommitIndex(t *testing.T) {
 		if got, want := readFileForWorktreeTest(t, sentinel), "export -o "+export+"\n"; got != want {
 			t.Fatalf("export subprocess = %q, want %q", got, want)
 		}
-		if got, want := r.stagedBlob(t, next, ".beads/issues.jsonl"), r.blobOf(t, ".beads/issues.jsonl"); got != want {
-			t.Errorf("export blob in pending index = %q, want %q", got, want)
+		// index.lock is the index git installs once the commit succeeds.
+		want := r.blobOf(t, ".beads/issues.jsonl")
+		for _, index := range []string{next, filepath.Join(r.gitDir, "index.lock")} {
+			if got := r.stagedBlob(t, index, ".beads/issues.jsonl"); got != want {
+				t.Errorf("export blob in %s = %q, want %q", index, got, want)
+			}
 		}
 		assertIndexFilesUnchanged(t, before)
 	})
@@ -352,10 +369,11 @@ func TestExportJSONLForCommit_CommitIndex(t *testing.T) {
 }
 
 // gitRmExport stages the deletion of the export in the real index, as
-// `git rm .beads/issues.jsonl` does.
-func gitRmExport(t *testing.T, r commitIndexRepo) {
+// `git rm [flags] .beads/issues.jsonl` does.
+func gitRmExport(t *testing.T, r commitIndexRepo, flags ...string) {
 	t.Helper()
-	r.git(t, nil, "rm", "-q", "--", ".beads/issues.jsonl")
+	args := append(append([]string{"rm", "-q"}, flags...), "--", ".beads/issues.jsonl")
+	r.git(t, nil, args...)
 }
 
 func stagedDeletions(t *testing.T, r commitIndexRepo, indexFile string) string {
@@ -375,45 +393,103 @@ func TestIsExportFileStagedForDeletion_LinkedWorktree(t *testing.T) {
 	}
 }
 
-// TestExportJSONLForCommit_KeepsStagedDeletion pins AC-3 end to end: in a
-// linked worktree, a git rm'd export is neither re-exported nor re-staged.
+// TestExportJSONLForCommit_KeepsStagedDeletion pins AC-3 end to end: an export
+// the commit deletes is neither re-exported nor re-staged. With `git rm` the
+// deletion is in <gitdir>/index too; after a plain `rm`, only the index of
+// `git commit -a` or `git commit -- <export>` has it, so the guard must read
+// that one.
 func TestExportJSONLForCommit_KeepsStagedDeletion(t *testing.T) {
+	plain := func(t *testing.T, r commitIndexRepo) string { return filepath.Join(r.gitDir, "index") }
+	pathspec := func(t *testing.T, r commitIndexRepo) string {
+		return r.pathspecEnvelope(t, ".beads/issues.jsonl")
+	}
+	all := func(t *testing.T, r commitIndexRepo) string { return r.allEnvelope(t) }
 	tests := []struct {
 		name     string
+		linked   bool
+		gitRm    bool
 		envelope func(*testing.T, commitIndexRepo) string
 	}{
-		{
-			name: "plain git commit",
-			envelope: func(t *testing.T, r commitIndexRepo) string {
-				return filepath.Join(r.gitDir, "index")
-			},
-		},
-		{
-			name: "git commit -- <export>",
-			envelope: func(t *testing.T, r commitIndexRepo) string {
-				return r.pathspecEnvelope(t, ".beads/issues.jsonl")
-			},
-		},
+		{name: "linked worktree, git rm, plain git commit", linked: true, gitRm: true, envelope: plain},
+		{name: "linked worktree, git rm, git commit -- <export>", linked: true, gitRm: true, envelope: pathspec},
+		{name: "main worktree, rm, git commit -- <export>", envelope: pathspec},
+		{name: "linked worktree, rm, git commit -- <export>", linked: true, envelope: pathspec},
+		{name: "main worktree, rm, git commit -a", envelope: all},
+		{name: "linked worktree, rm, git commit -a", linked: true, envelope: all},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := newCommitIndexRepo(t, true)
+			r := newCommitIndexRepo(t, tt.linked)
 			sentinel := setupExportLaneForIndexTest(t, r)
-			gitRmExport(t, r)
+			if tt.gitRm {
+				gitRmExport(t, r)
+			} else if err := os.Remove(r.path(".beads/issues.jsonl")); err != nil {
+				t.Fatal(err)
+			}
 			indexFile := tt.envelope(t, r)
 			if got := stagedDeletions(t, r, indexFile); !strings.Contains(got, ".beads/issues.jsonl") {
 				t.Fatalf("fixture: pending index does not stage the deletion: %q", got)
 			}
+			if !tt.gitRm {
+				if got := stagedDeletions(t, r, filepath.Join(r.gitDir, "index")); got != "" {
+					t.Fatalf("fixture: <gitdir>/index stages a deletion: %q", got)
+				}
+			}
+			before := snapshotIndexFiles(t, indexFile, filepath.Join(r.gitDir, "index"), filepath.Join(r.gitDir, "index.lock"))
 			r.enterHook(t, indexFile)
 
 			_ = captureHookStderr(t, exportJSONLForCommit)
 
 			if _, err := os.Stat(sentinel); !os.IsNotExist(err) {
-				t.Errorf("export ran (%v) although the export is staged for deletion", err)
+				t.Errorf("export ran (%v) although the commit deletes the export", err)
 			}
 			if got := stagedDeletions(t, r, indexFile); !strings.Contains(got, ".beads/issues.jsonl") {
 				t.Errorf("pending index no longer stages the deletion: %q", got)
 			}
+			assertIndexFilesUnchanged(t, before)
+		})
+	}
+}
+
+// TestExportJSONLForCommit_KeepsDeletionOutsidePathspec pins AC-3 for a
+// `git commit -- <paths>` that leaves a git rm'd export out. The commit's index
+// is HEAD plus the paths, so only index.lock, which git installs as the index
+// after the commit, stages the deletion. The guard must read it: otherwise the
+// export runs and gitAddFile stages it into index.lock, reviving the file the
+// user removed (GH#3838).
+func TestExportJSONLForCommit_KeepsDeletionOutsidePathspec(t *testing.T) {
+	tests := []struct {
+		name    string
+		linked  bool
+		rmFlags []string
+	}{
+		{name: "main worktree, git rm"},
+		{name: "main worktree, git rm --cached", rmFlags: []string{"--cached"}},
+		{name: "linked worktree, git rm", linked: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := newCommitIndexRepo(t, tt.linked)
+			sentinel := setupExportLaneForIndexTest(t, r)
+			gitRmExport(t, r, tt.rmFlags...)
+			writeFileForWorktreeTest(t, r.path(".beads/config.yaml"), []byte("# pathspec\n"))
+			next := r.pathspecEnvelope(t, ".beads/config.yaml")
+			realIndex := filepath.Join(r.gitDir, "index.lock")
+			if got := stagedDeletions(t, r, next); got != "" {
+				t.Fatalf("fixture: the commit's index stages a deletion: %q", got)
+			}
+			if got := stagedDeletions(t, r, realIndex); !strings.Contains(got, ".beads/issues.jsonl") {
+				t.Fatalf("fixture: index.lock does not stage the deletion: %q", got)
+			}
+			before := snapshotIndexFiles(t, next, realIndex, filepath.Join(r.gitDir, "index"))
+			r.enterHook(t, next)
+
+			_ = captureHookStderr(t, exportJSONLForCommit)
+
+			if _, err := os.Stat(sentinel); !os.IsNotExist(err) {
+				t.Errorf("export ran (%v) although index.lock stages the export's deletion", err)
+			}
+			assertIndexFilesUnchanged(t, before)
 		})
 	}
 }
@@ -562,28 +638,177 @@ func TestGitIndexEnv_KeyPolicy(t *testing.T) {
 }
 
 // TestGitAddFile_LockPreflightTargetsCommitIndex pins AC-5: the preflight
-// checks the lock git add itself would take on the honored index, not the
-// parent's <gitdir>/index.lock.
+// checks the lock git add itself would take on each index it writes (the
+// honored index and, for `git commit -- <paths>`, index.lock), not the
+// parent's <gitdir>/index.lock, and stages into neither when one is held.
 func TestGitAddFile_LockPreflightTargetsCommitIndex(t *testing.T) {
+	tests := []struct {
+		name string
+		lock func(r commitIndexRepo, next string) string
+	}{
+		{name: "next-index lock held", lock: func(r commitIndexRepo, next string) string { return next + ".lock" }},
+		{name: "index.lock lock held", lock: func(r commitIndexRepo, next string) string {
+			return filepath.Join(r.gitDir, "index.lock.lock")
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := newCommitIndexRepo(t, false)
+			writeFileForWorktreeTest(t, r.path("tracked.txt"), []byte("changed\n"))
+			next := r.pathspecEnvelope(t, "tracked.txt")
+			held := tt.lock(r, next)
+			if err := os.WriteFile(held, []byte("held by another git add"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			export := r.path(".beads/issues.jsonl")
+			writeFileForWorktreeTest(t, export, []byte(`{"id":"bd-exported"}`+"\n"))
+			before := snapshotIndexFiles(t, next, filepath.Join(r.gitDir, "index.lock"), filepath.Join(r.gitDir, "index"))
+			r.enterHook(t, next)
+
+			err := gitAddFile(export)
+			if err == nil {
+				t.Fatal("gitAddFile = nil, want a locked-index error")
+			}
+			if msg := err.Error(); !strings.Contains(msg, "index is locked") || !strings.Contains(msg, held) {
+				t.Errorf("error = %q, want it to name %s", msg, held)
+			}
+			assertIndexFilesUnchanged(t, before)
+		})
+	}
+}
+
+// TestGitAddFile_StagesRealIndexFirst pins stagingIndexes' order: when the
+// commit index's git add fails, the export is already staged in index.lock,
+// the index git installs, so it is left staged for the next commit instead of
+// reverted by it.
+func TestGitAddFile_StagesRealIndexFirst(t *testing.T) {
 	r := newCommitIndexRepo(t, false)
 	writeFileForWorktreeTest(t, r.path("tracked.txt"), []byte("changed\n"))
 	next := r.pathspecEnvelope(t, "tracked.txt")
-	if err := os.WriteFile(next+".lock", []byte("held by another git add"), 0o644); err != nil {
+	// git add fails on a corrupt index.
+	if err := os.WriteFile(next, []byte("not an index"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	staged := r.stagedBlob(t, next, ".beads/issues.jsonl")
 	export := r.path(".beads/issues.jsonl")
 	writeFileForWorktreeTest(t, export, []byte(`{"id":"bd-exported"}`+"\n"))
+	want := r.blobOf(t, ".beads/issues.jsonl")
 	r.enterHook(t, next)
 
-	err := gitAddFile(export)
-	if err == nil {
-		t.Fatal("gitAddFile = nil, want a locked-index error")
+	if err := gitAddFile(export); err == nil {
+		t.Fatal("gitAddFile = nil, want the commit index's git add error")
 	}
-	if msg := err.Error(); !strings.Contains(msg, "index is locked") || !strings.Contains(msg, next+".lock") {
-		t.Errorf("error = %q, want it to name %s", msg, next+".lock")
+	if got := r.stagedBlob(t, filepath.Join(r.gitDir, "index.lock"), ".beads/issues.jsonl"); got != want {
+		t.Errorf("export blob in index.lock = %q, want %q", got, want)
 	}
-	if got := r.stagedBlob(t, next, ".beads/issues.jsonl"); got != staged {
-		t.Errorf("pending index export blob = %q, want it unchanged %q", got, staged)
+}
+
+// commitConfigThroughHook installs bd's pre-commit shim in r, with `bd export`
+// stubbed in front of bd, runs a real `git commit -- .beads/config.yaml` with
+// the export lane on, and returns the bd invocations the stub recorded.
+func commitConfigThroughHook(t *testing.T, r commitIndexRepo, bd string) string {
+	t.Helper()
+	hooksDir := filepath.Join(r.main, ".git", "hooks")
+	mkdirs(t, hooksDir)
+	hook := "#!/usr/bin/env sh\n" + generateHookSection("pre-commit")
+	if err := os.WriteFile(filepath.Join(hooksDir, "pre-commit"), []byte(hook), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := installExportStub(t, bd)
+	writeFileForWorktreeTest(t, r.path(".beads/config.yaml"), []byte("# pathspec\n"))
+
+	r.git(t, []string{"BD_EXPORT_AUTO=true", "BD_EXPORT_GIT_ADD=true"},
+		"commit", "-q", "-m", "pathspec", "--", ".beads/config.yaml")
+	return readFileForWorktreeTest(t, sentinel)
+}
+
+// TestPreCommitHook_PathspecCommitLeavesIndexClean runs a real
+// `git commit -- .beads/config.yaml` through the installed pre-commit shim and
+// the real bd (only `bd export` is stubbed: the repository has no database).
+// The export must reach both the commit and the index git installs after it.
+// Otherwise the old blob stays staged against the new HEAD and the next
+// commit that does not export reverts it, or, for a first export, a staged
+// deletion is left that the GH#3838 guard then honors (GH#4080).
+func TestPreCommitHook_PathspecCommitLeavesIndexClean(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script stub binary is POSIX-only")
+	}
+	bd := buildBDForTest(t)
+	tests := []struct {
+		name        string
+		linked      bool
+		firstExport bool
+	}{
+		{name: "main worktree, export tracked"},
+		{name: "main worktree, first export", firstExport: true},
+		{name: "linked worktree, export tracked", linked: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := newCommitIndexRepo(t, tt.linked)
+			if tt.firstExport {
+				r.git(t, nil, "rm", "-q", "--", ".beads/issues.jsonl")
+				r.git(t, nil, "commit", "-q", "-m", "drop the export")
+			}
+
+			invocations := commitConfigThroughHook(t, r, bd)
+
+			export := r.path(".beads/issues.jsonl")
+			if !strings.Contains(invocations, "export -o "+export+"\n") {
+				t.Fatalf("bd invocations = %q, want the hook's export of %s", invocations, export)
+			}
+			if got, want := r.git(t, nil, "show", "HEAD:.beads/issues.jsonl"), `{"id":"bd-exported"}`+"\n"; got != want {
+				t.Errorf("committed export = %q, want %q", got, want)
+			}
+			if got := r.git(t, nil, "status", "--porcelain", "--", ".beads/issues.jsonl"); got != "" {
+				t.Errorf("git status after the commit = %q, want the export clean", got)
+			}
+		})
+	}
+}
+
+// TestPreCommitHook_PathspecCommitKeepsStagedDeletion runs a real
+// `git commit -- .beads/config.yaml` after the export's deletion was staged.
+// Only the index git installs after the commit holds that deletion, so the
+// hook must neither export nor stage the file: the commit keeps HEAD's export
+// and the deletion stays staged for the next commit (GH#3838, GH#4080).
+func TestPreCommitHook_PathspecCommitKeepsStagedDeletion(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script stub binary is POSIX-only")
+	}
+	bd := buildBDForTest(t)
+	tests := []struct {
+		name    string
+		linked  bool
+		rmFlags []string
+		status  string // git status --porcelain -- .beads/issues.jsonl after the commit
+	}{
+		{name: "main worktree, git rm", status: "D  .beads/issues.jsonl\n"},
+		{name: "main worktree, git rm --cached", rmFlags: []string{"--cached"},
+			status: "D  .beads/issues.jsonl\n?? .beads/issues.jsonl\n"},
+		{name: "linked worktree, git rm", linked: true, status: "D  .beads/issues.jsonl\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := newCommitIndexRepo(t, tt.linked)
+			gitRmExport(t, r, tt.rmFlags...)
+
+			invocations := commitConfigThroughHook(t, r, bd)
+
+			if !strings.Contains(invocations, "hooks run pre-commit") {
+				t.Fatalf("bd invocations = %q, want the pre-commit hook", invocations)
+			}
+			if strings.Contains(invocations, "export -o") {
+				t.Errorf("bd invocations = %q, want no export of a git rm'd file", invocations)
+			}
+			if got, want := r.git(t, nil, "show", "HEAD:.beads/config.yaml"), "# pathspec\n"; got != want {
+				t.Errorf("committed config = %q, want %q", got, want)
+			}
+			if got, want := r.git(t, nil, "show", "HEAD:.beads/issues.jsonl"), `{"id":"bd-committed"}`+"\n"; got != want {
+				t.Errorf("committed export = %q, want HEAD's %q", got, want)
+			}
+			if got := r.git(t, nil, "status", "--porcelain", "--", ".beads/issues.jsonl"); got != tt.status {
+				t.Errorf("git status after the commit = %q, want %q", got, tt.status)
+			}
+		})
 	}
 }

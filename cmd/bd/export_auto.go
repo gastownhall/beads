@@ -1009,7 +1009,8 @@ func saveExportAutoState(beadsDir string, state *exportAutoState) {
 // It stages into the index the running commit uses: during
 // `git commit -- <paths>` or `git commit -a` that is the GIT_INDEX_FILE git
 // hands the hook, not <gitdir>/index, whose lock the parent commit holds
-// (GH#4080). See gitIndexEnv.
+// (GH#4080). See gitIndexEnv. A `git commit -- <paths>` also gets the export
+// in the index git installs once it has committed; see partialCommitRealIndex.
 func gitAddFile(path string) error {
 	if wt := hookWorkTreeRoot(); wt != "" && !pathInsideDir(path, wt) {
 		// Running inside a hook AND target is outside the hook's worktree.
@@ -1017,21 +1018,80 @@ func gitAddFile(path string) error {
 		return nil
 	}
 
-	// Preflight the lock git add itself will take on the index it writes:
-	// <index>.lock, which is <gitdir>/index.lock only when no commit index
-	// was inherited.
 	env, indexFile, err := gitIndexEnv(filepath.Dir(path))
 	if err != nil {
 		debug.Logf("auto-export: git add lock preflight skipped: %v\n", err)
-	} else {
-		lockPath := indexFile + ".lock"
+		return runGitAdd(path, env)
+	}
+	indexes := stagingIndexes(indexFile)
+	if err := checkIndexLocks(indexes); err != nil {
+		return err
+	}
+	for _, index := range indexes {
+		if err := runGitAdd(path, envForIndex(env, indexFile, index)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// stagingIndexes returns the indexes gitAddFile stages into: indexFile, the
+// index gitIndexEnv resolved, preceded for `git commit -- <paths>` by
+// partialCommitRealIndex. The real index goes first: if staging stops between
+// the two, the export is left staged for the next commit, never reverted by
+// it. isExportFileStagedForDeletion asks the same indexes.
+func stagingIndexes(indexFile string) []string {
+	if realIndex := partialCommitRealIndex(indexFile); realIndex != "" {
+		return []string{realIndex, indexFile}
+	}
+	return []string{indexFile}
+}
+
+// envForIndex returns env, which gitIndexEnv built for indexFile, routed to
+// index instead.
+func envForIndex(env []string, indexFile, index string) []string {
+	if index == indexFile {
+		return env
+	}
+	return append(execenv.WithoutForOS(env, hookEnvGOOS, "GIT_INDEX_FILE"), "GIT_INDEX_FILE="+index)
+}
+
+// checkIndexLocks preflights the lock git add itself will take on each index
+// it writes: <index>.lock, which is <gitdir>/index.lock only when no commit
+// index was inherited. It checks them all before anything is staged.
+func checkIndexLocks(indexes []string) error {
+	for _, index := range indexes {
+		lockPath := index + ".lock"
 		if _, statErr := os.Stat(lockPath); statErr == nil {
 			return fmt.Errorf("git index is locked at %s; skipping auto-stage", lockPath)
 		} else if !os.IsNotExist(statErr) {
 			return fmt.Errorf("failed to check git index lock %s: %w", lockPath, statErr)
 		}
 	}
+	return nil
+}
 
+// partialCommitRealIndex returns <gitdir>/index.lock when indexFile is the
+// next-index-<pid>.lock of a `git commit -- <paths>` and that lock is a regular
+// file beside it, else "". git commits from next-index (HEAD plus the paths)
+// but then installs index.lock (the real index plus the paths) as the new
+// index, and rolls both back if the commit fails. An export staged only into
+// next-index therefore stays staged at its old content (a deletion when it
+// is new), and the next commit that does not export again reverts it.
+func partialCommitRealIndex(indexFile string) string {
+	if ok, _ := filepath.Match("next-index-*.lock", filepath.Base(indexFile)); !ok {
+		return ""
+	}
+	dir := filepath.Dir(indexFile)
+	realIndex := filepath.Join(dir, "index.lock")
+	if !isFileDirectlyIn(realIndex, dir) {
+		return ""
+	}
+	return realIndex
+}
+
+// runGitAdd stages path, by its base name from its own directory, with env.
+func runGitAdd(path string, env []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), gitAddTimeout)
 	defer cancel()
 	// Pass the basename only, defensively: cmd.Dir is the parent of path, so
