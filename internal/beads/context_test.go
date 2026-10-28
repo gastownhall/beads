@@ -1652,3 +1652,96 @@ func TestGetRepoContext_NonGitBeadsDirFromNonGitCWD(t *testing.T) {
 		t.Errorf("RepoRoot = %s, want %s (the .beads parent)", rc.RepoRoot, want)
 	}
 }
+
+// TestGetRepoContext_InTreeBeadsDirGitCannotPlace guards GH#5700 AC-4: a
+// .beads git cannot place, but that belongs to the CWD repository's own work
+// tree, must stay local — RepoRoot at the CWD repo root, IsRedirected false.
+// Both subtests fail under the tempting wrong fix ("any .beads-side
+// not-a-repository error means external"): discovery stopped by a ceiling is
+// byte-identical to a genuine non-repository from git's side, which is why
+// the classification is by work-tree position and not by error kind.
+func TestGetRepoContext_InTreeBeadsDirGitCannotPlace(t *testing.T) {
+	t.Run("ceiling", func(t *testing.T) {
+		repo := t.TempDir()
+		if err := initGitRepo(repo); err != nil {
+			t.Fatalf("failed to init repo: %v", err)
+		}
+		nested := filepath.Join(repo, "sub", "x")
+		beadsDir := writeBeadsProjectDir(t, nested)
+
+		// Git discovery stopped inside the repo: discovery from the .beads
+		// walks into A/sub and reports "not a repository", while discovery
+		// from the repo root still finds A/.git. The ceiling must name the
+		// physical directory (t.TempDir may hand back a symlinked path).
+		t.Setenv("GIT_CEILING_DIRECTORIES", filepath.Join(resolveSymlinks(repo), "sub"))
+		t.Setenv("BEADS_DIR", beadsDir)
+		t.Chdir(repo)
+		ResetCaches()
+		git.ResetCaches()
+		t.Cleanup(func() {
+			ResetCaches()
+			git.ResetCaches()
+		})
+
+		rc, err := GetRepoContext()
+		if err != nil {
+			t.Fatalf("GetRepoContext failed: %v", err)
+		}
+		if want := resolveSymlinks(repo); rc.RepoRoot != want {
+			t.Errorf("RepoRoot = %s, want %s (the .beads belongs to this work tree; only discovery was stopped)", rc.RepoRoot, want)
+		}
+		if rc.IsRedirected {
+			t.Error("IsRedirected = true, want false: a project .beads under the repo root is not external")
+		}
+	})
+
+	t.Run("symlinked-own-beads", func(t *testing.T) {
+		repo := t.TempDir()
+		if err := initGitRepo(repo); err != nil {
+			t.Fatalf("failed to init repo: %v", err)
+		}
+		storage := filepath.Join(t.TempDir(), "store")
+		if err := os.MkdirAll(storage, 0o750); err != nil {
+			t.Fatalf("failed to create storage dir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(storage, "beads.db"), []byte{}, 0o600); err != nil {
+			t.Fatalf("failed to create beads.db: %v", err)
+		}
+		if err := os.Symlink(storage, filepath.Join(repo, ".beads")); err != nil {
+			t.Skip("Cannot create symlinks on this system (may require admin on Windows)")
+		}
+
+		for _, state := range []struct {
+			name     string
+			beadsDir string
+		}{
+			// Walk-up discovery hands back the lexical repo/.beads; the
+			// explicit spelling is canonicalized to the storage dir by
+			// ExplicitBeadsDir. Both must count as the repository's own .beads.
+			{name: "walk-discovered", beadsDir: ""},
+			{name: "explicit", beadsDir: filepath.Join(repo, ".beads")},
+		} {
+			t.Run(state.name, func(t *testing.T) {
+				t.Setenv("BEADS_DIR", state.beadsDir)
+				t.Chdir(repo)
+				ResetCaches()
+				git.ResetCaches()
+				t.Cleanup(func() {
+					ResetCaches()
+					git.ResetCaches()
+				})
+
+				rc, err := GetRepoContext()
+				if err != nil {
+					t.Fatalf("GetRepoContext failed: %v", err)
+				}
+				if want := resolveSymlinks(repo); rc.RepoRoot != want {
+					t.Errorf("RepoRoot = %s, want %s (the symlinked .beads is the repository's own storage)", rc.RepoRoot, want)
+				}
+				if rc.IsRedirected {
+					t.Error("IsRedirected = true, want false: the repository's own .beads, however it is spelled, is not external")
+				}
+			})
+		}
+	})
+}
