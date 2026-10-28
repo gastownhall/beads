@@ -23,6 +23,20 @@ const (
 	SettingKeyTypesCustom  = "types.custom"
 )
 
+// SettingKeyTypesRetained names the issue types whose rows only a RETAINING
+// sweep may delete (SweepRequest.RetainIDs). Its value is a list of type
+// names, in the JSON-array or comma-separated form types.custom takes. A
+// sweep without RetainIDs holds every closed row of a listed type back and
+// counts it in SweepSkips.RetentionRequired; `bd gc`'s decay holds them back
+// too.
+//
+// Unknown type names are accepted and match nothing, so an orchestrator can
+// name a type before it registers it. The setting is read from the workspace
+// database only — never from config.yaml — because the rule it states must be
+// the same for every client of a shared workspace, and a client's file is not
+// visible to a server sweeping on its behalf.
+const SettingKeyTypesRetained = "types.retained"
+
 // GetSettingRequest names one stored setting.
 type GetSettingRequest struct {
 	// Key is the setting's name, used verbatim: there is no namespace

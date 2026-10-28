@@ -9152,6 +9152,11 @@ components:
             answering `unknown_parameter` — and, with it, that EVERY create on
             this surface refuses an id a retaining sweep retired with `410`
             `idempotency_expired` rather than re-creating it,
+            `issues.sweep.retainedTypes`, which announces that the same
+            operation holds back every candidate whose issue type the
+            workspace's types.retained setting names unless the request sets
+            `retain_ids`, and answers `skipped.retention_required` — an older
+            server deletes those beads without retiring their ids,
             `issues.batchApply.depAddLineage`, which announces that a
             `dep_add` item on `POST /v0/beads/issues:batchApply` accepts
             `has_spawner` and `thread_id` (see `ApplyDepAddItem`) rather than
@@ -10083,8 +10088,9 @@ components:
       description: >-
         The candidates a sweep declined to delete, bucketed by WHY. They are
         separate counters rather than one number because they mean different
-        things: `pinned`, `referenced` and `live_dependent` are PROTECTIONS,
-        and the other four are the sweep declining to trust its own input.
+        things: `pinned`, `referenced`, `live_dependent` and
+        `retention_required` are PROTECTIONS, and the other four are the sweep
+        declining to trust its own input.
       properties:
         pinned:
           type: integer
@@ -10123,6 +10129,16 @@ components:
             Candidates protected by `protect_live_dependents`. Always 0 when
             that member is false or absent. Present only behind the
             `issues.sweep.liveDependents` behavior token.
+        retention_required:
+          type: integer
+          description: >-
+            Candidates held back because their issue type is named in the
+            workspace's `types.retained` setting and the request did not set
+            `retain_ids`: such a bead's id is an idempotency key, so only a
+            retaining sweep may delete it. Always 0 when `retain_ids` is true.
+            A PROTECTION, like `pinned`; a caller that wants those beads gone
+            re-runs with `retain_ids`. Present only behind the
+            `issues.sweep.retainedTypes` behavior token.
 
     ReadyPage:
       type: object

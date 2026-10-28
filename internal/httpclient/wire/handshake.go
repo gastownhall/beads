@@ -275,6 +275,17 @@ const CapSweepLimit = "issues.sweep.limit"
 // must never get.
 const CapSweepRetainIDs = "issues.sweep.retainIds"
 
+// CapSweepRetainedTypes is the behavior capability announcing that
+// sweepIssues holds back every candidate whose issue type the workspace's
+// types.retained setting names unless the request sets retain_ids, and answers
+// SweepSkips.retention_required. Spelled exactly as httpapi's
+// CapIssuesSweepRetainedTypes (held to it by
+// TestCapabilityTableMatchesTheServerRouteTable). It gates no request member,
+// so the sweeper never refuses on it; a caller that relies on the protection
+// (an orchestrator's doctor) reads it to learn whether a plain sweep through
+// this server can delete a retained bead without retiring its id.
+const CapSweepRetainedTypes = "issues.sweep.retainedTypes"
+
 // CapBatchApplyDepAddLineage is the behavior capability announcing that
 // issues.batchApply's dep_add items accept `has_spawner` and `thread_id`,
 // spelled exactly as httpapi's constant of the same name (held to it by
@@ -483,7 +494,7 @@ func (e *WireRevisionSkewError) Unwrap() error { return ErrWireRevisionSkew }
 // test goes red the moment one ships without the other.
 var behaviorCapabilities = []string{
 	CapProjectEnforce, CapBatchApplyLarge, CapListSort, CapCountScope,
-	CapSweepWispsPlane, CapSweepLiveDependents, CapSweepLimit, CapSweepRetainIDs,
+	CapSweepWispsPlane, CapSweepLiveDependents, CapSweepLimit, CapSweepRetainIDs, CapSweepRetainedTypes,
 	CapBatchApplyDepAddLineage, CapIssuesUpdateAllowTemplate, CapIssuesCreateDefaultPriority,
 	CapCloseAutoCloseMolecule, CapListSearch,
 	CapListNoAssignee, CapListTitle, CapListIDs, CapIssuesUpdatePersistence, CapBlockingIsBlocked, CapIssuesUpdateClaim,

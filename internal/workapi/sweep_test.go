@@ -493,3 +493,74 @@ func TestLimitSweepCandidatesTakesTheOldestClosedFirst(t *testing.T) {
 		}
 	}
 }
+
+// TestRetainedTypesFromSettingParsesBothForms pins the two spellings the
+// types.retained setting takes — the JSON array `bd config set` writes for
+// list keys and the legacy comma-separated form — and that an unset value
+// retains nothing.
+func TestRetainedTypesFromSettingParsesBothForms(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		value string
+		want  []string
+	}{
+		{"unset", "", nil},
+		{"blank", "   ", nil},
+		{"csv", "op, fact ,,op", []string{"op", "fact"}},
+		{"json", `["op"," fact ",""]`, []string{"op", "fact"}},
+		{"unknown names are kept", "not-a-registered-type", []string{"not-a-registered-type"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := RetainedTypesFromSetting(test.value)
+			if len(got) != len(test.want) {
+				t.Fatalf("RetainedTypesFromSetting(%q) = %v, want %v", test.value, got, test.want)
+			}
+			for _, name := range test.want {
+				if !got[name] {
+					t.Errorf("RetainedTypesFromSetting(%q) = %v, missing %q", test.value, got, name)
+				}
+			}
+		})
+	}
+}
+
+// TestPartitionSweepRetainedTypes is the option C partition: without
+// RetainIDs a candidate of a retained type is held back and counted; with
+// RetainIDs nothing is held back, because the retaining sweep is the one door
+// such a row may leave by.
+func TestPartitionSweepRetainedTypes(t *testing.T) {
+	op := &types.Issue{ID: "be-op", IssueType: types.IssueType("op")}
+	task := &types.Issue{ID: "be-task", IssueType: types.TypeTask}
+	fact := &types.Issue{ID: "be-fact", IssueType: types.IssueType("fact")}
+	candidates := []*types.Issue{op, task, fact}
+
+	for _, test := range []struct {
+		name      string
+		retained  map[string]bool
+		retainIDs bool
+		wantKept  []string
+		wantHeld  int
+	}{
+		{"nothing retained", nil, false, []string{"be-op", "be-task", "be-fact"}, 0},
+		{"plain sweep holds retained types back", map[string]bool{"op": true, "fact": true}, false, []string{"be-task"}, 2},
+		{"retaining sweep holds nothing back", map[string]bool{"op": true, "fact": true}, true, []string{"be-op", "be-task", "be-fact"}, 0},
+		{"an unknown name matches nothing", map[string]bool{"never-registered": true}, false, []string{"be-op", "be-task", "be-fact"}, 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			kept, held := PartitionSweepRetainedTypes(candidates, test.retained, test.retainIDs)
+			if held != test.wantHeld {
+				t.Errorf("held = %d, want %d", held, test.wantHeld)
+			}
+			var got []string
+			for _, issue := range kept {
+				got = append(got, issue.ID)
+			}
+			if strings.Join(got, ",") != strings.Join(test.wantKept, ",") {
+				t.Errorf("kept = %v, want %v (candidate order preserved)", got, test.wantKept)
+			}
+		})
+	}
+	if len(candidates) != 3 || candidates[0] != op {
+		t.Errorf("PartitionSweepRetainedTypes reordered or truncated its input: %v", candidates)
+	}
+}

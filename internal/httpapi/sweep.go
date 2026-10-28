@@ -290,6 +290,7 @@ func sweepResponse(result issueops.SweepResult) apigen.SweepResult {
 			ClosedAtOrAfterCutoff: result.Skipped.ClosedAtOrAfterCutoff,
 			Unreadable:            result.Skipped.Unreadable,
 			LiveDependent:         &result.Skipped.LiveDependent,
+			RetentionRequired:     &result.Skipped.RetentionRequired,
 		},
 	}
 	remaining := int64(result.Remaining)

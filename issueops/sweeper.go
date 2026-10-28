@@ -178,9 +178,15 @@ type SweepRequest struct {
 	// leaves its id reusable: a sweep without this flag (a plain `bd prune` or
 	// `bd purge`, whose durable tier also selects no-history rows), the
 	// Deleter role (`bd delete`), and `bd gc`'s decay, which deletes old
-	// closed rows by id. Nothing stops those paths from reaching rows whose
-	// ids are keys, so a caller that stores such rows in a shared store must
-	// keep them out of every non-retaining delete by its own rule.
+	// closed rows by id.
+	//
+	// A WORKSPACE KEEPS ITS KEYED ROWS OUT OF THE PLAIN SWEEPS by naming their
+	// issue types in the SettingKeyTypesRetained setting: a sweep without
+	// this flag then holds every closed row of those types back
+	// (SweepSkips.RetentionRequired), and so does `bd gc`'s decay. With this
+	// flag set the setting holds nothing back — the retaining sweep is the
+	// one door those rows may leave by. The Deleter role does not consult
+	// it: `bd delete` names its ids one by one and deletes what it names.
 	//
 	// A tombstone is exactly as durable as the row it replaces: a durable
 	// row's tombstone is versioned and replicates with it, a wisps-plane row's
@@ -242,6 +248,17 @@ type SweepSkips struct {
 	// Unreadable counts rows the tier's query returned as nothing at all. It
 	// is a defense of the same kind, on a shape rather than a value.
 	Unreadable int
+	// RetentionRequired counts candidates held back because their issue type
+	// is one the workspace RETAINS (the SettingKeyTypesRetained setting) and
+	// the request did not set RetainIDs. Such a row's id is an idempotency
+	// key, and deleting it without a tombstone would let a late retry of the
+	// operation it names run again; so only a retaining sweep — which
+	// deletes it AND retires its id — may take it. It is always 0 under
+	// RetainIDs.
+	//
+	// It is a protection, like Pinned, and a caller that wants those rows
+	// gone re-runs with RetainIDs rather than overriding it.
+	RetentionRequired int
 }
 
 // SweepResult reports one sweep.
@@ -361,8 +378,9 @@ type Sweeper interface {
 	// THE ORDER THE NARROWING HAPPENS IN IS PART OF THE ANSWER, because the
 	// skip counters are counted along the way: the tier's closed rows, then
 	// IDPattern, then the pinned and closed_at rechecks, then the
-	// live-dependent protection, then the reference protection, then Limit
-	// (oldest-closed first). A pinned row
+	// retained-type protection (without RetainIDs), then the live-dependent
+	// protection, then the reference protection, then Limit (oldest-closed
+	// first). A pinned row
 	// excluded by the pattern is therefore NOT counted in Skipped.Pinned — it
 	// was never a candidate — and the counters describe the set the request
 	// actually reached.
@@ -374,6 +392,11 @@ type Sweeper interface {
 	//     nor IDPattern (see SweepRequest.ClosedBefore for why this lives here);
 	//   - an IDPattern that is not a well-formed glob;
 	//   - a negative Limit.
+	//
+	// THE RETAINED TYPES ARE READ ON THE SWEEP'S OWN TRANSACTION, from the
+	// workspace setting SettingKeyTypesRetained. A failure to read them fails
+	// the sweep and deletes nothing: a sweep that could not tell which rows
+	// are keys must not guess that none are.
 	//
 	// A REQUEST THAT MATCHES NOTHING IS A ZERO RESULT AND A NIL ERROR, not a
 	// not-found: an empty set of closed rows is the steady state of a swept

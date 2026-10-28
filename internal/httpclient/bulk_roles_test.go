@@ -202,13 +202,14 @@ func TestSweepDoesNotWriteThroughTheCallersCutoff(t *testing.T) {
 func TestSweepResultCarriesEveryWireMember(t *testing.T) {
 	remaining := int64(13)
 	liveDependent := 14
+	retentionRequired := 15
 	retainIDs := true
 	w := &stubWire{swept: &apigen.SweepResult{
 		DryRun: true, Swept: 3, Dependencies: 4, Labels: 5, Events: 6,
 		Skipped: apigen.SweepSkips{
 			Pinned: 7, Referenced: 8, NotClosed: 9,
 			UnknownClosedAt: 10, ClosedAtOrAfterCutoff: 11, Unreadable: 12,
-			LiveDependent: &liveDependent,
+			LiveDependent: &liveDependent, RetentionRequired: &retentionRequired,
 		},
 		ReferencedIds: &[]string{"bd-1"},
 		Remaining:     &remaining,

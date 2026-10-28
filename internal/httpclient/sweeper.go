@@ -195,6 +195,11 @@ func sweepResult(res *apigen.SweepResult) issueops.SweepResult {
 	if res.Skipped.LiveDependent != nil {
 		out.Skipped.LiveDependent = *res.Skipped.LiveDependent
 	}
+	if res.Skipped.RetentionRequired != nil {
+		// Absent from a server predating issues.sweep.retainedTypes, which
+		// holds nothing back by type: 0 is then the true count.
+		out.Skipped.RetentionRequired = *res.Skipped.RetentionRequired
+	}
 	if res.Remaining != nil {
 		out.Remaining = int(*res.Remaining)
 	}
