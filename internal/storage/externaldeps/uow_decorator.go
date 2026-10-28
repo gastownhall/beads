@@ -512,5 +512,5 @@ func (u *dependencyUseCase) GetDependencyTree(ctx context.Context, rootID string
 	if err != nil {
 		return nil, fmt.Errorf("external dependencies: load tree edges: %w", err)
 	}
-	return u.policy.appendTreeExternalReferences(ctx, tree, deps, opts.MaxDepth, opts.ShowAllPaths)
+	return u.policy.appendTreeExternalReferences(ctx, tree, deps, opts.MaxDepth)
 }

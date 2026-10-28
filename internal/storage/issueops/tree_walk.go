@@ -62,37 +62,58 @@ func PruneTreeByStatus(nodes []*types.TreeNode, status types.Status) []*types.Tr
 	if len(nodes) == 0 {
 		return nodes
 	}
-	keep := make(map[string]bool, len(nodes))
+	// The parent chain is keyed on EXPANDED rows only. A Deduped stub repeats
+	// an expanded id under a different parent, so letting it write here would
+	// make the last row win and send the expanded node's chain up the stub's
+	// branch.
 	parentOf := make(map[string]string, len(nodes))
 	for _, node := range nodes {
-		if node == nil {
+		if node == nil || node.Deduped {
 			continue
 		}
 		if node.ParentID != "" && node.ParentID != node.ID {
 			parentOf[node.ID] = node.ParentID
 		}
 	}
-	for _, node := range nodes {
-		if node == nil || node.Status != status || keep[node.ID] {
-			continue
-		}
-		keep[node.ID] = true
-		// Walk to the root, stopping on a repeat so a parent chain that loops
-		// back on itself cannot spin here. The walk's own first-visit rule makes
-		// that unreachable today, but this function is also called with
-		// hand-built input.
-		for current := node.ID; ; {
+	keep := make(map[string]bool, len(nodes))
+	// Walk to the root, stopping on a repeat so a parent chain that loops back
+	// on itself cannot spin here. The walk's own first-visit rule makes that
+	// unreachable today, but this function is also called with hand-built
+	// input.
+	markChain := func(id string) {
+		for current := id; current != "" && !keep[current]; {
+			keep[current] = true
 			parent, ok := parentOf[current]
-			if !ok || parent == current || keep[parent] {
+			if !ok || parent == current {
 				break
 			}
-			keep[parent] = true
 			current = parent
 		}
 	}
+	for _, node := range nodes {
+		if node == nil || node.Status != status {
+			continue
+		}
+		// A stub is a leaf: it survives on its own status and keeps the chain
+		// of the parent it hangs under, not its expanded twin's.
+		if node.Deduped {
+			markChain(node.ParentID)
+			continue
+		}
+		markChain(node.ID)
+	}
 	filtered := make([]*types.TreeNode, 0, len(nodes))
 	for _, node := range nodes {
-		if node != nil && keep[node.ID] {
+		if node == nil {
+			continue
+		}
+		if node.Deduped {
+			if node.Status == status && keep[node.ParentID] {
+				filtered = append(filtered, node)
+			}
+			continue
+		}
+		if keep[node.ID] {
 			filtered = append(filtered, node)
 		}
 	}
@@ -174,7 +195,8 @@ func WalkDependencyTreeInTx(ctx context.Context, tx DBTX, req publicops.WalkTree
 // whose ParentID named something absent, which is the scatter of orphans the
 // prune promise exists to prevent.
 //
-// Pruned per half, each ID appears once in the map it is looked up in.
+// Pruned per half, each expanded id appears once in the map it is looked up
+// in; a Deduped stub repeats an id but never enters that map.
 func walkTreeDirectionsInTx(ctx context.Context, tx DBTX, rootID string, maxDepth int, direction publicops.TreeDirection, status types.Status) ([]*types.TreeNode, error) {
 	if direction != publicops.TreeBoth {
 		nodes, err := GetDependencyTreeInTx(ctx, tx, rootID, maxDepth, false, direction == publicops.TreeUp)

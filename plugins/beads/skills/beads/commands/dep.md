@@ -26,7 +26,7 @@ Manage dependencies between beads issues.
     - `--format mermaid`: Output as Mermaid.js flowchart (renders in GitHub/GitLab markdown)
     - `--json`: Output as JSON
     - `--max-depth N`: Limit tree depth (default: 50)
-    - `--show-all-paths`: Show all paths (no deduplication for diamond dependencies)
+    - `--show-all-paths`: Deprecated no-op. A node reached by two paths is expanded once; later paths show it as "(shown above)"
 
 - **cycles**: Detect dependency cycles
 

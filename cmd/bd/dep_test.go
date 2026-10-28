@@ -987,6 +987,92 @@ func TestRenderTreeExternalBlockerMarksRootBlocked(t *testing.T) {
 	}
 }
 
+// TestRenderTreeShowsADiamondsDirectBlocker is GH#5282 at the renderer: open D
+// blocks-depends on closed E and open F, and E blocks-depends on F. Whichever
+// child the walk took first, D renders [BLOCKED], F is listed directly under D
+// (expanded, or as the stub's "(shown above)" line with its edge label), and
+// the mermaid graph carries both D --> F and E --> F.
+func TestRenderTreeShowsADiamondsDirectBlocker(t *testing.T) {
+	row := func(id string, status types.Status, depth int, parent string, deduped bool) *types.TreeNode {
+		node := &types.TreeNode{
+			Issue:    types.Issue{ID: id, Title: id, Status: status, Priority: 2},
+			Depth:    depth,
+			ParentID: parent,
+			Deduped:  deduped,
+		}
+		if parent != "" {
+			node.EdgeFromParent = types.DepBlocks
+		}
+		return node
+	}
+	for _, tt := range []struct {
+		name    string
+		tree    []*types.TreeNode
+		directF string
+	}{
+		{
+			name: "F reached through E first",
+			tree: []*types.TreeNode{
+				row("D", types.StatusOpen, 0, "", false),
+				row("E", types.StatusClosed, 1, "D", false),
+				row("F", types.StatusOpen, 2, "E", false),
+				row("F", types.StatusOpen, 1, "D", true),
+			},
+			directF: "    └── F (shown above) [blocks]",
+		},
+		{
+			name: "F reached directly first",
+			tree: []*types.TreeNode{
+				row("D", types.StatusOpen, 0, "", false),
+				row("F", types.StatusOpen, 1, "D", false),
+				row("E", types.StatusClosed, 1, "D", false),
+				row("F", types.StatusOpen, 2, "E", true),
+			},
+			directF: "    ├── F: F [P2] (open) [blocks]",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			text := stripANSIForTest(captureDepTreeStdout(t, func() { renderTree(tt.tree, 50, "down") }))
+			lines := strings.Split(strings.TrimRight(text, "\n"), "\n")
+			if !strings.Contains(lines[0], "[BLOCKED]") || strings.Contains(lines[0], "[READY]") {
+				t.Fatalf("root line = %q, want [BLOCKED]:\n%s", lines[0], text)
+			}
+			found := false
+			for _, line := range lines {
+				if line == tt.directF {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("no direct-child line %q for F:\n%s", tt.directF, text)
+			}
+
+			mermaid := captureDepTreeStdout(t, func() { outputMermaidTree(tt.tree, "D") })
+			for _, edge := range []string{"  D --> F\n", "  E --> F\n"} {
+				if !strings.Contains(mermaid, edge) {
+					t.Fatalf("mermaid output lacks %q:\n%s", strings.TrimSpace(edge), mermaid)
+				}
+			}
+		})
+	}
+}
+
+func captureDepTreeStdout(t *testing.T, render func()) string {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	os.Stdout = w
+	render()
+	w.Close()
+	os.Stdout = old
+	var buf bytes.Buffer
+	_, _ = io.Copy(&buf, r)
+	return buf.String()
+}
+
 func TestRenderTreeOutputShowsDependencyTypeLabelsInMixedGraph(t *testing.T) {
 	downTree := []*types.TreeNode{
 		{

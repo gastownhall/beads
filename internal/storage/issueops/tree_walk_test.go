@@ -2,6 +2,7 @@ package issueops
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -502,4 +503,124 @@ func TestMergeBidirectionalTreeCopiesTheUpNodes(t *testing.T) {
 	if upNode.Depth != 1 {
 		t.Errorf("mutating the merged answer reached the up walk's node: depth = %d", upNode.Depth)
 	}
+}
+
+// diamondPruneTree is root→P1→X→Y and root→P2→X as the walk answers it: X is
+// expanded under P1 and P2's edge into it is a Deduped stub.
+func diamondPruneTree(prefix string, closed ...string) []*types.TreeNode {
+	status := func(id string) types.Status {
+		for _, c := range closed {
+			if c == id {
+				return types.StatusClosed
+			}
+		}
+		return types.StatusOpen
+	}
+	node := func(id string, depth int, parent string, deduped bool) *types.TreeNode {
+		return &types.TreeNode{Issue: types.Issue{ID: prefix + id, Status: status(id)}, Depth: depth, ParentID: parentIDFor(prefix, parent), Deduped: deduped}
+	}
+	return []*types.TreeNode{
+		node("root", 0, "", false),
+		node("P1", 1, "root", false),
+		node("X", 2, "P1", false),
+		node("Y", 3, "X", false),
+		node("P2", 1, "root", false),
+		node("X", 2, "P2", true),
+	}
+}
+
+func parentIDFor(prefix, parent string) string {
+	if parent == "" {
+		return ""
+	}
+	return prefix + parent
+}
+
+// prunedRows spells each row as id, with a trailing * on a stub.
+func prunedRows(nodes []*types.TreeNode) []string {
+	rows := make([]string, 0, len(nodes))
+	for _, node := range nodes {
+		if node.Deduped {
+			rows = append(rows, node.ID+"*")
+		} else {
+			rows = append(rows, node.ID)
+		}
+	}
+	return rows
+}
+
+// assertPrunedIsATree checks that every kept row's ParentID names a kept
+// expanded row, the property the prune exists to keep.
+func assertPrunedIsATree(t *testing.T, nodes []*types.TreeNode, rootID string) {
+	t.Helper()
+	expanded := map[string]bool{}
+	for _, node := range nodes {
+		if !node.Deduped {
+			expanded[node.ID] = true
+		}
+	}
+	for _, node := range nodes {
+		if node.ID == rootID && !node.Deduped {
+			continue
+		}
+		if !expanded[node.ParentID] {
+			t.Errorf("row %v has parent %q, which is not a kept expanded row: %v", node.ID, node.ParentID, prunedRows(nodes))
+		}
+	}
+}
+
+// TestPruneTreeByStatusFollowsTheExpandedParentNotTheStub pins the prune on a
+// diamond answer. A stub repeats X's id with a different parent, so a parent
+// map keyed on id must take X's parent from the expanded row only: a closed Y
+// below X keeps root, P1, X and Y, and drops P2 and the open stub. A stub is a
+// leaf that survives exactly when its own status matches, and then keeps its
+// own parent chain.
+func TestPruneTreeByStatusFollowsTheExpandedParentNotTheStub(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		closed []string
+		want   string
+	}{
+		{name: "only Y closed", closed: []string{"Y"}, want: "root,P1,X,Y"},
+		{name: "X closed keeps its stub", closed: []string{"X"}, want: "root,P1,X,P2,X*"},
+		{name: "only P2 closed drops the stub", closed: []string{"P2"}, want: "root,P2"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got := PruneTreeByStatus(diamondPruneTree("", tt.closed...), types.StatusClosed)
+			if rows := prunedRows(got); strings.Join(rows, ",") != tt.want {
+				t.Fatalf("PruneTreeByStatus = %v, want [%s]", rows, tt.want)
+			}
+			assertPrunedIsATree(t, got, "root")
+		})
+	}
+
+	// A stub whose own status does not match never survives and never drags
+	// its parent's chain in, even when its expanded twin matches: X closed,
+	// the stub of X still open.
+	mismatched := diamondPruneTree("", "X")
+	mismatched[5].Status = types.StatusOpen
+	got := PruneTreeByStatus(mismatched, types.StatusClosed)
+	if rows := prunedRows(got); strings.Join(rows, ",") != "root,P1,X" {
+		t.Fatalf("non-matching stub: PruneTreeByStatus = %v, want [root P1 X]", rows)
+	}
+	assertPrunedIsATree(t, got, "root")
+
+	// Each half of a `both` walk carries its own stub; pruning each half before
+	// the merge keeps both halves trees.
+	down := diamondPruneTree("", "Y")
+	up := diamondPruneTree("", "Y")
+	for _, node := range up[1:] {
+		node.ID = "up-" + node.ID
+		if node.ParentID != "root" {
+			node.ParentID = "up-" + node.ParentID
+		}
+	}
+	prunedDown, prunedUp := pruneBidirectionalByStatus(down, up, "root", types.StatusClosed)
+	if rows := prunedRows(prunedDown); strings.Join(rows, ",") != "root,P1,X,Y" {
+		t.Fatalf("down half = %v, want [root P1 X Y]", rows)
+	}
+	if rows := prunedRows(prunedUp); strings.Join(rows, ",") != "root,up-P1,up-X,up-Y" {
+		t.Fatalf("up half = %v, want [root up-P1 up-X up-Y]", rows)
+	}
+	assertPrunedIsATree(t, MergeBidirectionalTree(prunedDown, prunedUp, "root"), "root")
 }
