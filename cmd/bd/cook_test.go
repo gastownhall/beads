@@ -1574,7 +1574,10 @@ needs = ["round"]
 
 // TestCookFormulaToSubgraph_LoopStepDependencies pins GH#7636 on the pour
 // cook path (resolveAndCookFormulaWithVars): the loop step's own needs must
-// gate its first expanded step instead of being dropped with the loop step.
+// gate its first expanded step instead of being dropped with the loop step,
+// and the step after the loop must block on the loop's last expanded step
+// instead of on a loop ID that no longer exists (where the dangling reference
+// used to be skipped silently, because validation ran before expansion).
 func TestCookFormulaToSubgraph_LoopStepDependencies(t *testing.T) {
 	sg := cookGateFormulaTOML(t, "loopdeps", loopdepsFormulaSrc)
 
@@ -1584,4 +1587,78 @@ func TestCookFormulaToSubgraph_LoopStepDependencies(t *testing.T) {
 	if got := blocksEdgesFrom(sg, "loopdeps.round.iter2.work"); !slices.Equal(got, []string{"loopdeps.round.iter1.work"}) {
 		t.Errorf("blocks(loopdeps.round.iter2.work) = %v, want [loopdeps.round.iter1.work] (iteration chaining)", got)
 	}
+	if got := blocksEdgesFrom(sg, "loopdeps.land"); !slices.Equal(got, []string{"loopdeps.round.iter2.work"}) {
+		t.Errorf("blocks(loopdeps.land) = %v, want [loopdeps.round.iter2.work] (the loop's last expanded step)", got)
+	}
+
+	t.Run("dry_run", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "loopdeps.formula.toml")
+		if err := os.WriteFile(path, []byte(loopdepsFormulaSrc), 0o600); err != nil {
+			t.Fatalf("write formula: %v", err)
+		}
+		cmd := &cobra.Command{}
+		cmd.Flags().Bool("dry-run", true, "")
+		cmd.Flags().Bool("persist", false, "")
+		cmd.Flags().Bool("force", false, "")
+		cmd.Flags().StringSlice("search-path", []string{dir}, "")
+		cmd.Flags().String("prefix", "", "")
+		cmd.Flags().StringArray("var", nil, "")
+		cmd.Flags().String("mode", "", "")
+
+		stdout, stderr, err := runCookCapturingOutput(t, cmd, "loopdeps")
+		if err != nil {
+			t.Fatalf("runCook dry-run failed: %v; stderr = %q", err, stderr)
+		}
+		for _, want := range []string{
+			"round.iter1.work: Work [needs: brief]",
+			"land: Land [needs: round.iter2.work]",
+		} {
+			if !strings.Contains(stdout, want) {
+				t.Errorf("dry-run output missing %q:\n%s", want, stdout)
+			}
+		}
+	})
+
+	t.Run("exit_gate_end", func(t *testing.T) {
+		// The loop's last step is an exit gate, so the step after the loop
+		// must block on both the gate's task and its companion gate issue
+		// (GH#3316).
+		src := `formula = "loopdeps"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "brief"
+title = "Brief"
+
+[[steps]]
+id = "round"
+title = "Round"
+needs = ["brief"]
+[steps.loop]
+count = 2
+[[steps.loop.body]]
+id = "work"
+title = "Work"
+[[steps.loop.body]]
+id = "done"
+title = "Done"
+needs = ["work"]
+type = "gate"
+[steps.loop.body.gate]
+type = "human"
+
+[[steps]]
+id = "land"
+title = "Land"
+needs = ["round"]
+`
+		sg := cookGateFormulaTOML(t, "loopdeps", src)
+		got := blocksEdgesFrom(sg, "loopdeps.land")
+		want := []string{"loopdeps.round.iter2.done", "loopdeps.gate-round.iter2.done"}
+		if !slices.Equal(got, want) {
+			t.Errorf("blocks(loopdeps.land) = %v, want %v (the exit gate's task and its companion gate)", got, want)
+		}
+	})
 }

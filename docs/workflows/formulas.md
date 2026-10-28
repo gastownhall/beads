@@ -157,6 +157,37 @@ title = "Deploy"
 needs = ["test-unit", "test-integration"]  # Waits for both
 ```
 
+### Loops
+
+A `[steps.loop]` step is replaced by its expanded body steps at cook time,
+and its dependencies follow the expansion:
+
+- The loop step's own `needs`/`depends_on` gate the loop's first steps —
+  the expanded steps nothing inside the loop already gates.
+- A `needs = ["<loop>"]` on another step waits for the loop's last expanded
+  step. For an `until` loop, that is the last step of the cooked iteration.
+
+```toml
+[[steps]]
+id = "brief"
+title = "Brief"
+
+[[steps]]
+id = "round"
+title = "Round"
+needs = ["brief"]
+[steps.loop]
+count = 2
+[[steps.loop.body]]
+id = "work"
+title = "Work"
+
+[[steps]]
+id = "land"
+title = "Land"
+needs = ["round"]  # Waits for round.iter2.work
+```
+
 ## Gates
 
 Add gates for async coordination. A `[steps.gate]` on an ordinary step is an

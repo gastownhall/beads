@@ -20,6 +20,24 @@ import (
 // Conditional loops expand once and add a "loop:until" label for runtime evaluation.
 // Returns a new steps slice with loops expanded.
 func ApplyLoops(steps []*Step) ([]*Step, error) {
+	ends := make(map[string]string)
+	result, err := applyLoops(steps, ends)
+	if err != nil {
+		return nil, err
+	}
+
+	// Rewrite references to loop IDs now that every loop has recorded its
+	// last expanded step: a step declared before the loop it names, a child,
+	// and a carried need that named another loop all resolve here.
+	retargetLoopRefs(result, ends)
+
+	return result, nil
+}
+
+// applyLoops is ApplyLoops' recursion, threading the map of loop IDs to
+// their last expanded steps so nested and sibling loops record their ends
+// in the same map.
+func applyLoops(steps []*Step, ends map[string]string) ([]*Step, error) {
 	result := make([]*Step, 0, len(steps))
 
 	for _, step := range steps {
@@ -27,7 +45,7 @@ func ApplyLoops(steps []*Step) ([]*Step, error) {
 			// No loop - recursively process children
 			clone := cloneStep(step)
 			if len(step.Children) > 0 {
-				children, err := ApplyLoops(step.Children)
+				children, err := applyLoops(step.Children, ends)
 				if err != nil {
 					return nil, err
 				}
@@ -43,7 +61,7 @@ func ApplyLoops(steps []*Step) ([]*Step, error) {
 		}
 
 		// Expand the loop
-		expanded, err := expandLoop(step)
+		expanded, err := expandLoopWithVars(step, nil, ends)
 		if err != nil {
 			return nil, err
 		}
@@ -107,14 +125,10 @@ func validateLoopSpec(loop *LoopSpec, stepID string) error {
 	return nil
 }
 
-// expandLoop expands a loop step into its constituent steps.
-func expandLoop(step *Step) ([]*Step, error) {
-	return expandLoopWithVars(step, nil)
-}
-
 // expandLoopWithVars expands a loop step using the given variable context.
 // The vars map is used to resolve range expressions with variables.
-func expandLoopWithVars(step *Step, vars map[string]string) ([]*Step, error) {
+// The ends map records each (nested) loop's last expanded step.
+func expandLoopWithVars(step *Step, vars map[string]string, ends map[string]string) ([]*Step, error) {
 	var result []*Step
 
 	if step.Loop.Count > 0 {
@@ -129,7 +143,7 @@ func expandLoopWithVars(step *Step, vars map[string]string) ([]*Step, error) {
 
 		// Recursively expand any nested loops FIRST
 		var err error
-		result, err = ApplyLoops(result)
+		result, err = applyLoops(result, ends)
 		if err != nil {
 			return nil, err
 		}
@@ -138,6 +152,10 @@ func expandLoopWithVars(step *Step, vars map[string]string) ([]*Step, error) {
 		// This must happen AFTER recursive expansion so we chain the final steps
 		if step.Loop.Count > 1 {
 			result = chainExpandedIterations(result, step.ID, step.Loop.Count)
+		}
+
+		if err := finishLoopExpansion(step, result, ends); err != nil {
+			return nil, err
 		}
 	} else if step.Loop.Range != "" {
 		// Range loop: expand body for each value in the computed range
@@ -170,7 +188,7 @@ func expandLoopWithVars(step *Step, vars map[string]string) ([]*Step, error) {
 		}
 
 		// Recursively expand any nested loops FIRST
-		result, err = ApplyLoops(result)
+		result, err = applyLoops(result, ends)
 		if err != nil {
 			return nil, err
 		}
@@ -178,6 +196,10 @@ func expandLoopWithVars(step *Step, vars map[string]string) ([]*Step, error) {
 		// THEN chain iterations on the expanded result
 		if count > 1 {
 			result = chainExpandedIterations(result, step.ID, count)
+		}
+
+		if err := finishLoopExpansion(step, result, ends); err != nil {
+			return nil, err
 		}
 	} else {
 		// Conditional loop: expand once with loop metadata
@@ -200,13 +222,93 @@ func expandLoopWithVars(step *Step, vars map[string]string) ([]*Step, error) {
 		}
 
 		// Recursively expand any nested loops
-		result, err = ApplyLoops(iterSteps)
+		result, err = applyLoops(iterSteps, ends)
 		if err != nil {
+			return nil, err
+		}
+
+		if err := finishLoopExpansion(step, result, ends); err != nil {
 			return nil, err
 		}
 	}
 
 	return result, nil
+}
+
+// finishLoopExpansion completes a loop's expansion once its body has been
+// expanded and its iterations chained. It rejects a step of the expansion
+// that still references the loop itself, and records the loop's last
+// expanded step so references to the loop ID can be rewritten once every
+// loop has finished.
+func finishLoopExpansion(step *Step, result []*Step, ends map[string]string) error {
+	if len(result) == 0 {
+		return nil
+	}
+
+	if err := rejectSelfReference(step.ID, result); err != nil {
+		return err
+	}
+
+	// The end of a count or range loop is the last step of its last cooked
+	// iteration; the end of an until loop is the last step of the one cooked
+	// iteration (the runtime executor appends later iterations itself).
+	ends[step.ID] = result[len(result)-1].ID
+
+	return nil
+}
+
+// rejectSelfReference rejects a step of a loop's expansion that still names
+// the loop itself: the reference would otherwise be dropped silently, and
+// rewriting it to the loop's end would cycle with the iteration chaining.
+func rejectSelfReference(loopID string, result []*Step) error {
+	var walk func(steps []*Step) error
+	walk = func(steps []*Step) error {
+		for _, s := range steps {
+			for _, dep := range s.Needs {
+				if dep == loopID {
+					return fmt.Errorf("loop %q: step %q depends on its own loop", loopID, s.ID)
+				}
+			}
+			for _, dep := range s.DependsOn {
+				if dep == loopID {
+					return fmt.Errorf("loop %q: step %q depends on its own loop", loopID, s.ID)
+				}
+			}
+			if len(s.Children) > 0 {
+				if err := walk(s.Children); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	return walk(result)
+}
+
+// retargetLoopRefs rewrites references to a loop's ID into references to
+// the loop's last expanded step, in place, keeping position — the loop
+// analog of UpdateDependenciesForExpansion. In place is safe: every step
+// applyLoops returns is a fresh copy. One pass is enough: end values are
+// real step IDs, never loop IDs.
+func retargetLoopRefs(steps []*Step, ends map[string]string) {
+	if len(ends) == 0 {
+		return
+	}
+	for _, step := range steps {
+		for i, dep := range step.Needs {
+			if end, ok := ends[dep]; ok {
+				step.Needs[i] = end
+			}
+		}
+		for i, dep := range step.DependsOn {
+			if end, ok := ends[dep]; ok {
+				step.DependsOn[i] = end
+			}
+		}
+		if len(step.Children) > 0 {
+			retargetLoopRefs(step.Children, ends)
+		}
+	}
 }
 
 // expandLoopIteration expands a single iteration of a loop.

@@ -1055,6 +1055,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A loop step's own `needs`/`depends_on` now gate its expanded steps, and
+  another step's `needs = ["<loop>"]` now waits for the loop's last expanded
+  step (the last step of the cooked iteration for an `until` loop), the way
+  `[[compose.expand]]` already retargets references to its target. Both used
+  to be dropped silently at cook time, so the loop's first iteration and
+  every step after the loop were ready immediately after a pour (#7636). A
+  step of a loop body that names its own loop is now a cook error instead of
+  a silent drop. Molecules poured before the fix are not migrated.
 - `bd list --watch` and `bd show --watch` now wait a full poll interval after
   each refresh, and `bd list --watch --parent` reads its tree in one
   transaction, so other bd commands on an embedded workspace no longer stall
