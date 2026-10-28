@@ -604,6 +604,20 @@ async def test_reopen_invalid_response(bd_client, mock_process):
 
 
 @pytest.mark.asyncio
+async def test_reopen_noop_returns_empty_list(bd_client, mock_process):
+    """Issue #6872: bd reopen reports no-ops (already open, or not a done
+    status) on stderr only and prints nothing on stdout with exit 0; that
+    must parse as an empty result, not "Invalid response for reopen"."""
+    mock_process.communicate = AsyncMock(return_value=(b"", b"bd-1 is already open\n"))
+
+    with patch("asyncio.create_subprocess_exec", return_value=mock_process):
+        params = ReopenIssueParams(issue_ids=["bd-1"])
+        issues = await bd_client.reopen(params)
+
+    assert issues == []
+
+
+@pytest.mark.asyncio
 async def test_add_dependency(bd_client, mock_process):
     """Test add_dependency method."""
     mock_process.communicate = AsyncMock(return_value=(b"Dependency added\n", b""))
