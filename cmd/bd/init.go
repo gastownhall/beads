@@ -429,8 +429,9 @@ func isGitWorkTreeRoot(dir string) bool {
 //
 // This runs as the first thing in init's RunE, ahead of every path that has an
 // effect: the proxied dispatch (runInitProxiedServer -> EnsureGitRepo -> git
-// init), the --reinit-local/--force pre-checks (countExistingIssues opens a
-// real store, which creates the data directory and can run migrations), and
+// init), the --reinit-local/--force pre-checks (countReinitTargetIssues opens
+// a real store for a target holding project files, which can create the data
+// directory and run migrations), and
 // the mode globals RunE sets on itself. A guard placed after any of those
 // refuses only after the damage it exists to prevent.
 //
@@ -1037,12 +1038,13 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		if reinitLocal {
 			// be-5up5 round 2 (review of PR #5791): --reinit-local/--force skip
 			// checkExistingBeadsData entirely, and the typed confirmation below
-			// keys on countExistingIssues, which returns 0/err in exactly the
-			// missing-database case — so `bd init --force` against a lost
-			// server-side database used to create a fresh empty one with no
-			// prompt and no destroy token. Those flags authorize destroying a
-			// database that exists; only --recreate-missing authorizes creating
-			// one where the configured database has gone missing.
+			// proceeds without asking when the database is provably absent
+			// (countReinitTargetIssues) — so without this guard `bd init
+			// --force` against a lost server-side database would create a
+			// fresh empty one with no prompt and no destroy token. Those
+			// flags authorize destroying a database that exists; only
+			// --recreate-missing authorizes creating one where the
+			// configured database has gone missing.
 			if err := guardMissingServerDatabase(prefix); err != nil {
 				return fmt.Errorf("%v", err)
 			}
@@ -3003,8 +3005,24 @@ var countReinitTarget = countReinitTargetIssues
 // --reinit-local/--force re-initialization is about to replace, so the
 // confirmation can show what will be destroyed. An error means the issues
 // could not be counted, which is not evidence that there are none.
+//
+// It counts zero only on positive evidence that there is nothing to destroy:
+// no .beads, one without beads project files (settled without opening a
+// store, so nothing is created before the confirmation), a database that
+// counts no issues, or a server-mode database that is provably absent
+// (reinitTargetDatabaseAbsent).
 func countReinitTargetIssues(beadsDir string) (int, error) {
 	if beadsDir == "" {
+		return 0, nil
+	}
+	info, err := os.Stat(beadsDir)
+	if os.IsNotExist(err) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	if !info.IsDir() || !beads.HasProjectFiles(beadsDir) {
 		return 0, nil
 	}
 
@@ -3013,6 +3031,9 @@ func countReinitTargetIssues(beadsDir string) (int, error) {
 
 	store, err := newDoltStoreFromConfig(ctx, beadsDir)
 	if err != nil {
+		if reinitTargetDatabaseAbsent(beadsDir) {
+			return 0, nil
+		}
 		return 0, err
 	}
 	defer func() { _ = store.Close() }()
@@ -3025,6 +3046,29 @@ func countReinitTargetIssues(beadsDir string) (int, error) {
 		return 0, nil
 	}
 	return stats.TotalIssues, nil
+}
+
+// reinitTargetDatabaseAbsent reports whether beadsDir is a server-mode
+// workspace whose database provably does not exist: there is no local copy of
+// it, and its server is reachable and reports it absent. It asks the same
+// questions guardMissingServerDatabaseAt does, through the side-effect-free
+// DoltDirPath, so it creates nothing before the confirmation. Any other
+// answer, an unreachable server included, is not proof.
+func reinitTargetDatabaseAbsent(beadsDir string) bool {
+	cfg, err := configfile.LoadForDiscovery(beadsDir)
+	if err != nil || cfg == nil || cfg.GetBackend() != configfile.BackendDolt {
+		return false
+	}
+	if !effectiveServerMode(beadsDir, cfg) {
+		return false
+	}
+	dbName := cfg.GetDoltDatabase()
+	if _, err := os.Stat(filepath.Join(doltserver.DoltDirPath(beadsDir), dbName, ".dolt")); !os.IsNotExist(err) {
+		return false
+	}
+	port := doltserver.DefaultConfig(beadsDir).Port
+	result := checkDatabaseOnServer(cfg.GetDoltServerHost(), port, cfg.GetDoltServerUser(), cfg.GetDoltServerPassword(), dbName, cfg.GetDoltServerTLS())
+	return result.Reachable && !result.Exists && result.Err == nil
 }
 
 // runInitReinitPreflight confirms the destructive local replacement of
@@ -3314,8 +3358,9 @@ func initModeExplicitlyRequested(cmd *cobra.Command) bool {
 //
 // It exists because those flags bypass checkExistingBeadsData entirely (see the
 // !reinitLocal gate in the init command), and the reinit path's own typed
-// confirmation keys on countExistingIssues — which returns 0 or an error in
-// exactly the case this guard is about, so no prompt fires either. That left
+// confirmation proceeds without asking when countReinitTargetIssues proves the
+// database absent — exactly the case this guard is about, so no prompt fires
+// either. That left
 // `bd init --force` against a lost database creating a fresh empty one with no
 // prompt and no destroy token: the precise reflex of the 2026-08-11 fleet-wide
 // data loss, reached by the flag a panicking operator is most likely to try.

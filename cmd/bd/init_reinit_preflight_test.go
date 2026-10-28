@@ -208,8 +208,54 @@ func TestConfirmReinitDestroy(t *testing.T) {
 }
 
 // TestCountReinitTargetIssues pins what the reinit preflight treats as an
-// uncountable workspace: one it cannot open is an error, never zero.
+// uncountable workspace: one it cannot open is an error, never zero. Only
+// positive evidence that there is nothing to destroy counts as zero, and a
+// target without project files is settled without opening a store, so the
+// count creates nothing before the confirmation.
 func TestCountReinitTargetIssues(t *testing.T) {
+	t.Run("missing directory counts zero and stays missing", func(t *testing.T) {
+		beadsDir := filepath.Join(t.TempDir(), ".beads")
+		count, err := countReinitTargetIssues(beadsDir)
+		if err != nil || count != 0 {
+			t.Fatalf("want 0, nil; got %d, %v", count, err)
+		}
+		if _, statErr := os.Stat(beadsDir); !os.IsNotExist(statErr) {
+			t.Fatalf("counting a missing target created it: %v", statErr)
+		}
+	})
+
+	for name, files := range map[string][]string{
+		"empty directory":        nil,
+		"only a legacy registry": {"registry.json"},
+	} {
+		t.Run(name+" counts zero and creates nothing", func(t *testing.T) {
+			beadsDir := filepath.Join(t.TempDir(), ".beads")
+			if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			for _, f := range files {
+				if err := os.WriteFile(filepath.Join(beadsDir, f), []byte("{}"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			count, err := countReinitTargetIssues(beadsDir)
+			if err != nil || count != 0 {
+				t.Fatalf("want 0, nil; got %d, %v", count, err)
+			}
+			entries, readErr := os.ReadDir(beadsDir)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if len(entries) != len(files) {
+				var names []string
+				for _, e := range entries {
+					names = append(names, e.Name())
+				}
+				t.Fatalf("counting a target without project files created entries in it: %v", names)
+			}
+		})
+	}
+
 	t.Run("unparseable metadata.json is an error", func(t *testing.T) {
 		beadsDir := filepath.Join(t.TempDir(), ".beads")
 		writeReinitTargetMetadata(t, beadsDir, []byte("{not json"))
@@ -237,6 +283,31 @@ func TestCountReinitTargetIssues(t *testing.T) {
 			t.Fatal("want an error: a local copy of the database is never proof that it is absent")
 		}
 	})
+}
+
+// TestCountReinitTargetIssues_ServerReportsDatabaseAbsent is the one open
+// failure that proves there is nothing to destroy: a server-mode workspace with
+// no local copy of its database, whose reachable server reports that database
+// absent. That counts zero, so --recreate-missing against a reachable server
+// still needs no destroy token. Needs a Dolt binary.
+func TestCountReinitTargetIssues_ServerReportsDatabaseAbsent(t *testing.T) {
+	beadsDir := startProjectServerModeGuardFixture(t, "myproject")
+	t.Setenv("BEADS_DOLT_AUTO_START", "0")
+
+	count, err := countReinitTargetIssues(beadsDir)
+	if err != nil || count != 0 {
+		t.Fatalf("want 0, nil for a database the reachable server reports absent; got %d, %v", count, err)
+	}
+	var out string
+	out = captureStderr(t, func() {
+		err = runInitReinitPreflight(true, beadsDir, "myproject", "")
+	})
+	if err != nil {
+		t.Fatalf("preflight must pass with nothing to destroy, got %v\n%s", err, out)
+	}
+	if strings.Contains(out, "WARNING") {
+		t.Errorf("preflight warned with nothing to destroy:\n%s", out)
+	}
 }
 
 // TestInitReinitLocal_CountsTheGateTargetFromLinkedWorktree pins GH#5628
