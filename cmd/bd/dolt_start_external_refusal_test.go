@@ -152,3 +152,48 @@ func TestDoltStartForceDoesNotBypassExternalRefusal(t *testing.T) {
 	}
 	requireNoStartCommandAdvice(t, res.output)
 }
+
+// TestDoltStartEnvDeclaredExternalRefusal: a workspace whose server only an
+// environment variable declares externally managed — the port env vars, or
+// BEADS_DOLT_SERVER_MODE=1 beside a config.yaml dolt.port — gets the same
+// typed refusal, naming the variable.
+func TestDoltStartEnvDeclaredExternalRefusal(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		env        string // the full entry, %d standing in for the port
+		configYaml bool   // pin dolt.port in .beads/config.yaml
+		declaredBy string
+	}{
+		{name: "server port env", env: "BEADS_DOLT_SERVER_PORT=%d", declaredBy: "BEADS_DOLT_SERVER_PORT"},
+		{name: "legacy port env", env: "BEADS_DOLT_PORT=%d", declaredBy: "BEADS_DOLT_PORT"},
+		{name: "server mode env", env: "BEADS_DOLT_SERVER_MODE=1", configYaml: true, declaredBy: "BEADS_DOLT_SERVER_MODE=1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newExternalInitFixture(t)
+			port := freeLoopbackPort(t)
+			beadsDir := namedPortWorkspace(t, f, 0)
+			if tc.configYaml {
+				namedPortConfigYaml(t, beadsDir, port)
+			}
+			// The port is templated in with a plain Replace: Sprintf would append
+			// %!(EXTRA ...) to the entry without a %d verb, silently breaking
+			// the server-mode entry.
+			f.env = []string{strings.Replace(tc.env, "%d", strconv.Itoa(port), 1)}
+
+			res := f.run("", "--json", "dolt", "start")
+			requireStartRefused(t, res)
+			payload := requireStartRefusalJSON(t, res)
+			if !strings.Contains(payload.Error, tc.declaredBy) {
+				t.Errorf("refusal does not name the declaring setting %q:\n%s", tc.declaredBy, payload.Error)
+			}
+			if endpoint := net.JoinHostPort("127.0.0.1", strconv.Itoa(port)); !strings.Contains(payload.Error, endpoint) {
+				t.Errorf("refusal does not name the declared endpoint %s:\n%s", endpoint, payload.Error)
+			}
+			for _, state := range []string{"dolt-server.pid", "dolt-server.port"} {
+				if _, err := os.Stat(filepath.Join(beadsDir, state)); !os.IsNotExist(err) {
+					t.Errorf("bd wrote %s although it refused the start", state)
+				}
+			}
+		})
+	}
+}
