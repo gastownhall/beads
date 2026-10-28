@@ -65,6 +65,7 @@ type initWorkspace struct {
 	Recorded       *configfile.Config
 	Server         bool         // the workspace's commands open a server store
 	Effective      initEndpoint // with the ambient BEADS_DOLT_SERVER_* overlay
+	Own            initEndpoint // the workspace's own settings, overlay removed
 }
 
 // initIdentityFlags are the explicit target selectors of this invocation;
@@ -112,6 +113,9 @@ func resolveInitWorkspace() initWorkspace {
 	ws.Recorded = cfg
 	ws.Server = effectiveServerMode(ws.BeadsDir, cfg)
 	ws.Effective = initEndpoint{Host: cfg.GetDoltServerHost(), Port: doltserver.DialConfig(ws.BeadsDir).Port}
+	withoutServerEndpointEnv(func() {
+		ws.Own = initEndpoint{Host: cfg.GetDoltServerHost(), Port: doltserver.DialConfig(ws.BeadsDir).Port}
+	})
 	return ws
 }
 
@@ -125,8 +129,32 @@ func absInitPath(path string) string {
 	return filepath.Clean(path)
 }
 
+// withoutServerEndpointEnv runs fn with the ambient endpoint overlay
+// (BEADS_DOLT_SERVER_HOST/PORT and the legacy BEADS_DOLT_PORT) removed, and
+// puts it back exactly as it was. It only reads: a flag that restates the
+// workspace's own endpoint over a stale exported one is not a repoint
+// (GH#5177).
+func withoutServerEndpointEnv(fn func()) {
+	keys := []string{"BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_PORT"}
+	saved := map[string]string{}
+	for _, key := range keys {
+		if value, ok := os.LookupEnv(key); ok {
+			saved[key] = value
+			_ = os.Unsetenv(key)
+		}
+	}
+	defer func() {
+		for key, value := range saved {
+			_ = os.Setenv(key, value)
+		}
+	}()
+	fn()
+}
+
 // resolveInitIdentity overlays the explicit flags on the workspace's
-// configured identity.
+// configured identity. A flag that restates the effective value or the
+// workspace's own value is not a change: both sides take it, so the guards
+// keep reading the endpoint init dials today.
 func resolveInitIdentity(ws initWorkspace, flags initIdentityFlags, targetServer bool) initIdentity {
 	id := initIdentity{BeadsDir: ws.BeadsDir, RedirectedFrom: ws.RedirectedFrom, Recorded: ws.Recorded}
 	configured := initDBRef{Server: ws.Server, Host: ws.Effective.Host, Port: ws.Effective.Port}
@@ -142,10 +170,13 @@ func resolveInitIdentity(ws initWorkspace, flags initIdentityFlags, targetServer
 	}
 	if flags.Host != "" {
 		target.Host = flags.Host
+		if sameInitDoltHost(flags.Host, ws.Effective.Host) || (ws.Recorded != nil && sameInitDoltHost(flags.Host, ws.Own.Host)) {
+			configured.Host = flags.Host
+		}
 	}
 	if flags.Port != 0 {
 		target.Port = flags.Port
-		if configured.Port == 0 {
+		if configured.Port == 0 || flags.Port == ws.Effective.Port || (ws.Recorded != nil && flags.Port == ws.Own.Port) {
 			configured.Port = flags.Port
 		}
 	}
