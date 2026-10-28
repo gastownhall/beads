@@ -58,12 +58,12 @@ func RunDoltPerformanceDiagnostics(path string, enableProfiling bool) (*DoltPerf
 	}
 
 	// Dial the endpoint the commands --perf times (bd ready, bd list, bd
-	// show) dial. The host is metadata.json's, read as the CLI's own store
-	// open reads it: DialConfig's Host is always 127.0.0.1, and that open
-	// never applies the central server config (~/.config/beads/server.json),
-	// as bd doctor's store checks (dolt.NewFromConfig*) do. The port is
-	// DialConfig's, which handles standalone ephemeral ports and the legacy
-	// BEADS_DOLT_PORT.
+	// show) dial: the host as the store open reads it
+	// (configfile.GetDoltServerHost: env > metadata.json > config.yaml
+	// dolt.host > the central server config, server.json) and the port as
+	// DialConfig resolves it (whose chain ends with the central config's
+	// dolt_server_port). bd doctor's store checks (dolt.NewFromConfig*)
+	// read the same sources.
 	dsCfg := doltserver.DialConfig(beadsDir)
 	fileCfg := loadServerConfig(beadsDir)
 	host := fileCfg.GetDoltServerHost()

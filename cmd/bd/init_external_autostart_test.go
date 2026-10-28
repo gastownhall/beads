@@ -469,8 +469,8 @@ func TestNamedPortServerUnreachableAdvice(t *testing.T) {
 // than 127.0.0.1:0 when it is alone, or a port-file port left over beside it.
 // A config.yaml dolt.port outranks it for the dial, as in the store, and the
 // advice still names it when both name the same port. A remote host gets the
-// remote-host advice. A host set only in the central server config is not
-// dialed: they dial what bd list dials.
+// remote-host advice. A host set only in the central server config is dialed
+// too, like bd list's store open does (GH#3895).
 func TestNamedPortServerDiagnosticsAdvice(t *testing.T) {
 	diagnostics := [][]string{
 		{"dolt", "test"},
@@ -551,15 +551,14 @@ func runIPv6HostDiagnostic(t *testing.T, host string, args []string) {
 
 // runCentralConfigHostDiagnostic runs bd list and one diagnostic against a
 // workspace whose metadata.json names a dead port and whose host only the
-// central server config (~/.config/beads/server.json) names. bd list's store
-// open never applies that file, so it dials 127.0.0.1, and the diagnostic must
-// dial the same endpoint: --perf times bd list, and the others check the
-// server it uses.
+// central server config (~/.config/beads/server.json) names. Every command
+// that names a workspace endpoint — bd list's store open included — reads
+// the central config's connection fields (GH#3895), so all of them dial that
+// host and give the remote-host advice for it, never 127.0.0.1.
 func runCentralConfigHostDiagnostic(t *testing.T, args []string) {
 	t.Helper()
 	f := newExternalInitFixture(t)
 	port := freeLoopbackPort(t)
-	ep := tcpEndpoint(port)
 	namedPortWorkspace(t, f, port)
 	central := filepath.Join(f.home, "server.json")
 	if err := os.WriteFile(central, []byte(`{"dolt_server_host":"db.invalid"}`), 0o600); err != nil {
@@ -574,12 +573,35 @@ func runCentralConfigHostDiagnostic(t *testing.T, args []string) {
 		if !res.failed {
 			t.Errorf("bd %s succeeded with no server:\n%s", strings.Join(cmdArgs, " "), res.output)
 		}
-		if !strings.Contains(res.output, ep.addr) {
-			t.Errorf("bd %s output does not contain %q:\n%s", strings.Join(cmdArgs, " "), ep.addr, res.output)
+		for _, want := range []string{net.JoinHostPort("db.invalid", strconv.Itoa(port)), fmt.Sprintf("nc -zv db.invalid %d", port)} {
+			if !strings.Contains(res.output, want) {
+				t.Errorf("bd %s output does not contain %q:\n%s", strings.Join(cmdArgs, " "), want, res.output)
+			}
 		}
-		if strings.Contains(res.output, "db.invalid") {
-			t.Errorf("bd %s output names the central server config's host:\n%s", strings.Join(cmdArgs, " "), res.output)
+		// The loopback endpoint, not "127.0.0.1" alone: a resolver on
+		// 127.0.0.1 can appear in the failed lookup of db.invalid.
+		for _, banned := range []string{net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), "bd dolt start", "externally managed"} {
+			if strings.Contains(res.output, banned) {
+				t.Errorf("bd %s output contains %q:\n%s", strings.Join(cmdArgs, " "), banned, res.output)
+			}
 		}
+	}
+}
+
+// TestCentralConfigHostDialedByEveryServerCommand pins GH#3895's runtime
+// contract: with a named-port server-mode workspace and a central server
+// config naming the host, every command that names the workspace's
+// endpoint — bd list, bd dolt test, bd dolt clean-databases --dry-run and
+// bd doctor --perf — dials that host, and none dials 127.0.0.1.
+func TestCentralConfigHostDialedByEveryServerCommand(t *testing.T) {
+	for _, args := range [][]string{
+		{"dolt", "test"},
+		{"dolt", "clean-databases", "--dry-run"},
+		{"doctor", "--perf"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			runCentralConfigHostDiagnostic(t, args)
+		})
 	}
 }
 
