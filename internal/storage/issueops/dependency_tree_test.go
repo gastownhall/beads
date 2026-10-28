@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -352,4 +353,84 @@ func expectIssueBatchOne(mock sqlmock.Sqlmock, id string) {
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT issue_id, label FROM labels WHERE issue_id IN (?) ORDER BY issue_id, label")).
 		WithArgs(id).
 		WillReturnRows(sqlmock.NewRows([]string{"issue_id", "label"}))
+}
+
+// TestGetDependencyTreeInTxTellsABackEdgeFromACrossEdge walks a cycle
+// a → b → c → a that also has a cross edge a → c. The two revisits are
+// answered differently: the back-edge into a (on the current path) adds no
+// row, so the root is never a stub, while the second edge into the finished c
+// is kept as exactly one Deduped stub, in either child order of a.
+func TestGetDependencyTreeInTxTellsABackEdgeFromACrossEdge(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		rootDeps []string
+		wantIDs  []string
+		stub     [2]string // parent, then the edge's depth as a string
+	}{
+		{name: "b first", rootDeps: []string{"b", "c"}, wantIDs: []string{"a", "b", "c", "c"}, stub: [2]string{"a", "1"}},
+		{name: "c first", rootDeps: []string{"c", "b"}, wantIDs: []string{"a", "c", "b", "c"}, stub: [2]string{"b", "2"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("sqlmock.New: %v", err)
+			}
+			defer db.Close()
+
+			mock.ExpectBegin()
+			expectIssue(mock, "a", "A")
+			expectDependencies(mock, "a", []dependencyRow{
+				{id: tt.rootDeps[0], depType: string(types.DepBlocks)},
+				{id: tt.rootDeps[1], depType: string(types.DepBlocks)},
+			})
+			expectIssueBatch(mock, tt.rootDeps)
+			expectC := func() {
+				expectIssue(mock, "c", "C")
+				expectDependencies(mock, "c", []dependencyRow{{id: "a", depType: string(types.DepBlocks)}})
+				// The back-edge into a reads a's row for the adjacency, then stops.
+				expectIssueBatchOne(mock, "a")
+			}
+			if tt.rootDeps[0] == "b" {
+				expectIssue(mock, "b", "B")
+				expectDependencies(mock, "b", []dependencyRow{{id: "c", depType: string(types.DepBlocks)}})
+				expectIssueBatchOne(mock, "c")
+				expectC()
+			} else {
+				expectC()
+				expectIssue(mock, "b", "B")
+				expectDependencies(mock, "b", []dependencyRow{{id: "c", depType: string(types.DepBlocks)}})
+				expectIssueBatchOne(mock, "c")
+			}
+
+			tx, err := db.BeginTx(context.Background(), nil)
+			if err != nil {
+				t.Fatalf("BeginTx: %v", err)
+			}
+			tree, err := GetDependencyTreeInTx(context.Background(), tx, "a", 50, false, false)
+			if err != nil {
+				_ = tx.Rollback()
+				t.Fatalf("GetDependencyTreeInTx: %v", err)
+			}
+			mock.ExpectRollback()
+			if err := tx.Rollback(); err != nil {
+				t.Fatalf("Rollback: %v", err)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("unmet sql expectations: %v", err)
+			}
+
+			if got := treeIDs(tree); strings.Join(got, ",") != strings.Join(tt.wantIDs, ",") {
+				t.Fatalf("tree = %v, want %v", got, tt.wantIDs)
+			}
+			for i, node := range tree {
+				if node.Deduped != (i == 3) {
+					t.Fatalf("row %d (%s) Deduped = %v, want only the last row to be a stub", i, node.ID, node.Deduped)
+				}
+			}
+			stub := tree[3]
+			if stub.ParentID != tt.stub[0] || strconv.Itoa(stub.Depth) != tt.stub[1] || stub.EdgeFromParent != types.DepBlocks {
+				t.Fatalf("stub of c = parent %q depth %d edge %q, want %s/%s/blocks", stub.ParentID, stub.Depth, stub.EdgeFromParent, tt.stub[0], tt.stub[1])
+			}
+		})
+	}
 }
