@@ -95,3 +95,26 @@ func TestClassifyDoltProcedureSelectIsNotRead(t *testing.T) {
 		}
 	}
 }
+
+// The other half of the dolt_ rule: reads that touch Dolt only through
+// system tables, table functions, the read-only dolt_ scalars or unprefixed
+// read functions stay reads, and literals, comments and columns that merely
+// name a dolt_ function change nothing.
+func TestClassifyDoltReadOnlyReadsStayRead(t *testing.T) {
+	for _, query := range []string{
+		"SELECT * FROM dolt_log",
+		"SELECT * FROM dolt_conflicts",
+		"SELECT * FROM dolt_log()",
+		"SELECT * FROM dolt_diff('HEAD~1', 'HEAD', 'issues')",
+		"SELECT DOLT_HASHOF('HEAD'), DOLT_VERSION(), DOLT_MERGE_BASE('main', 'feature')",
+		"SELECT * FROM issues AS OF DOLT_HASHOF('HEAD~1')",
+		"SELECT HASHOF('HEAD'), ACTIVE_BRANCH()",
+		"SELECT 'DOLT_COMMIT(1)'",
+		"SELECT 1 /* dolt_commit('x') */",
+		"SELECT dolt_commit FROM t",
+	} {
+		if got := Classify(query); got != Read {
+			t.Errorf("Classify(%q) = %v, want read", query, got)
+		}
+	}
+}

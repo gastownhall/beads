@@ -56,15 +56,30 @@ func Classify(query string) Kind {
 	return kind
 }
 
+// readOnlyDoltFunctions lists the dolt_-prefixed functions the pinned Dolt
+// engine registers that only read. Every other dolt_ name is treated as a
+// write: the engine exposes mutating procedures as SELECT-callable functions,
+// and a name it does not have today may be one a newer server adds.
+var readOnlyDoltFunctions = map[string]bool{
+	"dolt_hashof":         true,
+	"dolt_hashof_table":   true,
+	"dolt_hashof_db":      true,
+	"dolt_merge_base":     true,
+	"dolt_version":        true,
+	"dolt_storage_format": true,
+	"dolt_join_cost":      true,
+}
+
 // callsDoltWriteFunction reports whether the parsed statement calls a
-// dolt_-prefixed function anywhere in its tree: Dolt exposes mutating
-// procedures as SELECT-callable functions, and a read transaction would roll
-// their writes back while a read routing skips the read-only guard. CTE
-// bodies, subqueries, WHERE clauses and the statement inside EXPLAIN all
-// count. Letter case and backtick quoting are absorbed by Lowered, and a
-// database qualifier is ignored. System tables (dolt_log, dolt_conflicts)
-// and table functions (dolt_diff(...)) are not function calls, and comments
-// and string literals are not in the parsed tree, so none of them trip it.
+// dolt_-prefixed function outside readOnlyDoltFunctions anywhere in its
+// tree: Dolt exposes mutating procedures as SELECT-callable functions, and
+// a read transaction would roll their writes back while a read routing
+// skips the read-only guard. CTE bodies, subqueries, WHERE clauses and the
+// statement inside EXPLAIN all count. Letter case and backtick quoting are
+// absorbed by Lowered, and a database qualifier is ignored. System tables
+// (dolt_log, dolt_conflicts) and table functions (dolt_diff(...)) are not
+// function calls, and comments and string literals are not in the parsed
+// tree, so none of them trip it.
 func callsDoltWriteFunction(stmt sqlparser.Statement) bool {
 	found := false
 	visit := func(node sqlparser.SQLNode) (kontinue bool, err error) {
@@ -72,7 +87,8 @@ func callsDoltWriteFunction(stmt sqlparser.Statement) bool {
 		if !ok {
 			return true, nil
 		}
-		if strings.HasPrefix(fn.Name.Lowered(), "dolt_") {
+		name := fn.Name.Lowered()
+		if strings.HasPrefix(name, "dolt_") && !readOnlyDoltFunctions[name] {
 			found = true
 			return false, nil
 		}
