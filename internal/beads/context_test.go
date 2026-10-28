@@ -1550,3 +1550,64 @@ func TestGetRepoContext_NonGitBeadsDirFromGitCWD(t *testing.T) {
 		assertNonGitTargetFromGitCWD(t, worktree, worktree, storageScope)
 	})
 }
+
+// TestGetRepoContext_NonGitBeadsDirRoleIsImplicitContributor pins GH#5700
+// AC-2: with beads.role=maintainer in the caller repo's git config and
+// BEADS_DIR naming a .beads outside the caller repo that is in no git
+// repository, Role() must answer via the redirect (Contributor), not the
+// caller repo's configured maintainer role.
+func TestGetRepoContext_NonGitBeadsDirRoleIsImplicitContributor(t *testing.T) {
+	tmpDir := t.TempDir()
+	callerRepo := filepath.Join(tmpDir, "caller-repo")
+	if err := os.MkdirAll(callerRepo, 0o750); err != nil {
+		t.Fatalf("failed to create caller repo dir: %v", err)
+	}
+	if err := initGitRepo(callerRepo); err != nil {
+		t.Fatalf("failed to init caller repo: %v", err)
+	}
+	roleCmd := exec.Command("git", "config", "beads.role", "maintainer")
+	roleCmd.Dir = callerRepo
+	if out, err := roleCmd.CombinedOutput(); err != nil {
+		t.Fatalf("git config beads.role failed: %v\n%s", err, out)
+	}
+	// The precondition below stands in the caller repo with BEADS_DIR unset,
+	// so it needs its own .beads project for discovery to resolve.
+	writeBeadsProjectDir(t, callerRepo)
+	targetScope := filepath.Join(tmpDir, "target-scope")
+	targetBeadsDir := writeBeadsProjectDir(t, targetScope)
+
+	t.Setenv("BEADS_DIR", "")
+	t.Chdir(callerRepo)
+	ResetCaches()
+	git.ResetCaches()
+	t.Cleanup(func() {
+		ResetCaches()
+		git.ResetCaches()
+	})
+
+	// Precondition: standing in the caller repo with no redirect, the
+	// configured maintainer role is what Role() answers.
+	local, err := GetRepoContext()
+	if err != nil {
+		t.Fatalf("GetRepoContext failed: %v", err)
+	}
+	if role, ok := local.Role(); !ok || role != Maintainer {
+		t.Fatalf("local Role() = %q, %v, want %q, true — fixture must prove the caller repo's beads.role is readable", role, ok, Maintainer)
+	}
+
+	// The -C shape: BEADS_DIR names the non-git target.
+	t.Setenv("BEADS_DIR", targetBeadsDir)
+	ResetCaches()
+	git.ResetCaches()
+
+	redirected, err := GetRepoContext()
+	if err != nil {
+		t.Fatalf("GetRepoContext failed: %v", err)
+	}
+	if !redirected.IsRedirected {
+		t.Fatal("IsRedirected = false, want true")
+	}
+	if role, ok := redirected.Role(); !ok || role != Contributor {
+		t.Errorf("redirected Role() = %q, %v, want %q, true — a non-git -C target must not inherit the caller repo's role", role, ok, Contributor)
+	}
+}
