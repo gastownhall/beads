@@ -40,26 +40,33 @@ func (s *DoltStore) PushTo(ctx context.Context, peer string) error {
 // pushRefToPeer pushes a specific refspec to a peer remote. The refspec can be
 // a simple branch name ("main") or a mapping ("staging:main").
 func (s *DoltStore) pushRefToPeer(ctx context.Context, peer string, refspec string) error {
-	if useCLI, err := s.prepareCLIRouteForPeerGitProtocol(ctx, peer); err != nil {
+	useCLI, err := s.prepareCLIRouteForPeerGitProtocol(ctx, peer)
+	if err != nil {
 		return err
-	} else if useCLI {
-		return s.withPeerCredentials(ctx, peer, func(creds *remoteCredentials) error {
+	}
+	if useCLI {
+		err = s.withPeerCredentials(ctx, peer, func(creds *remoteCredentials) error {
 			return s.doltCLIPushRefToPeer(ctx, peer, refspec, creds)
+		})
+	} else {
+		err = s.withPeerCredentials(ctx, peer, func(creds *remoteCredentials) error {
+			if useCLI, err := s.prepareCLIRouteForPeerCredentials(ctx, peer, creds); err != nil {
+				return err
+			} else if useCLI {
+				return s.doltCLIPushRefToPeer(ctx, peer, refspec, creds)
+			}
+			return withEnvCredentials(creds, func() error {
+				if err := s.execWithLongTimeout(ctx, "CALL DOLT_PUSH(?, ?)", peer, refspec); err != nil {
+					return fmt.Errorf("failed to push to peer %s: %w", peer, err)
+				}
+				return nil
+			})
 		})
 	}
-	return s.withPeerCredentials(ctx, peer, func(creds *remoteCredentials) error {
-		if useCLI, err := s.prepareCLIRouteForPeerCredentials(ctx, peer, creds); err != nil {
-			return err
-		} else if useCLI {
-			return s.doltCLIPushRefToPeer(ctx, peer, refspec, creds)
-		}
-		return withEnvCredentials(creds, func() error {
-			if err := s.execWithLongTimeout(ctx, "CALL DOLT_PUSH(?, ?)", peer, refspec); err != nil {
-				return fmt.Errorf("failed to push to peer %s: %w", peer, err)
-			}
-			return nil
-		})
-	})
+	if err == nil {
+		_ = s.updatePeerLastSync(ctx, peer) // Best effort: peer sync timestamp is advisory
+	}
+	return err
 }
 
 // PullFrom pulls changes from a specific peer remote.
@@ -112,6 +119,9 @@ func (s *DoltStore) pullFromPeer(ctx context.Context, peer string) ([]storage.Co
 			pullErr := s.finishCLIPull(ctx, s.doltCLIPullFromPeer(ctx, peer, creds))
 			return s.peerPullOutcome(ctx, peer, pullErr, &conflicts)
 		})
+		if err == nil {
+			_ = s.updatePeerLastSync(ctx, peer) // Best effort: peer sync timestamp is advisory
+		}
 		return s.finishPeerPull(ctx, conflicts, err, preHead)
 	}
 	err = s.withPeerCredentials(ctx, peer, func(creds *remoteCredentials) error {
@@ -127,6 +137,11 @@ func (s *DoltStore) pullFromPeer(ctx context.Context, peer string) ([]storage.Co
 			return s.peerPullOutcome(ctx, peer, pullErr, &conflicts)
 		})
 	})
+	// Stamped after DOLT_PULL's merge; a pull whose conflicts came back as data
+	// still counts, as it did when withPeerCredentials stamped (GH#3547).
+	if err == nil {
+		_ = s.updatePeerLastSync(ctx, peer) // Best effort: peer sync timestamp is advisory
+	}
 	return s.finishPeerPull(ctx, conflicts, err, preHead)
 }
 
