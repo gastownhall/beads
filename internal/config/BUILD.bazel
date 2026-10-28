@@ -20,6 +20,7 @@ go_library(
         "//internal/ceiling",
         "//internal/debug",
         "//internal/gitenv",
+        "//internal/remedy",
         "@com_github_spf13_viper//:viper",
         "@in_gopkg_yaml_v3//:yaml_v3",
     ] + select({

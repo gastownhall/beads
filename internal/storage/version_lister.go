@@ -79,12 +79,16 @@ type VersionLister interface {
 // participate in versioned history: the issues-table rows whose
 // participation_generation is set (migration 0070, design §16.2b). Only those
 // are versioned by an update-shaped write, so only a value one of them holds
-// can make a later write fail once recording is on; the write fence skips a
-// legacy row (participation_generation NULL) whatever it holds.
+// can make a later write to that row fail once recording is on; the write
+// fence skips a legacy row (participation_generation NULL) whatever it holds.
+// A write that copies a legacy row's values into a new issue, as `bd mol pour`
+// copies a proto's, is versioned like any create, which is why the switch also
+// keeps a legacy template, and warns of the other legacy issues of a proto.
 //
 // It is the pre-enable scan's second read. The scan finds the issues a version
 // would refuse from what the issue reader returns; participation is not on
-// types.Issue, so it asks this which of those participate and keeps only them.
+// types.Issue, so it asks this which of those participate and keeps them, and
+// of the legacy ones only the templates.
 // The unit-of-work route answers the same question through its IssueUseCase. A
 // backend that cannot answer is not forced to: the scan keeps every issue it
 // found, an over-approximation that can only refuse more, and says so. That is

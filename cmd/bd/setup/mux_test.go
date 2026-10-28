@@ -225,12 +225,22 @@ func TestCheckMuxProjectRequiresBothLayers(t *testing.T) {
 }
 
 func TestRemoveMuxProjectRemovesBothLayers(t *testing.T) {
-	env, _, _ := newFactoryTestEnv(t)
+	env, stdout, _ := newFactoryTestEnv(t)
 	if err := installMux(env, true, false); err != nil {
 		t.Fatalf("installMux(project=true) returned error: %v", err)
 	}
+	stdout.Reset()
 	if err := removeMux(env, true, false); err != nil {
 		t.Fatalf("removeMux(project=true) returned error: %v", err)
+	}
+	// Each removal names its own layer and file.
+	for _, header := range []string{
+		"Removing " + muxIntegration.name + " integration from " + env.agentsPath + "...\n",
+		"Removing " + muxProjectIntegration.name + " integration from " + muxProjectAgentsPath(env.agentsPath) + "...\n",
+	} {
+		if !strings.Contains(stdout.String(), header) {
+			t.Errorf("expected %q, got:\n%s", header, stdout.String())
+		}
 	}
 
 	for _, path := range []string{env.agentsPath, muxProjectAgentsPath(env.agentsPath)} {
@@ -481,12 +491,17 @@ func TestMuxLayerAtGlobalPathIsGlobalLayer(t *testing.T) {
 			if n := strings.Count(stdout.String(), "Removing "+muxGlobalIntegration.name+" integration from "+globalPath+"..."); n != want {
 				t.Errorf("expected %d removals reported as the global layer's, got %d:\n%s", want, n, stdout.String())
 			}
+			// No other file's removal is reported as the global layer's.
+			if n := strings.Count(stdout.String(), "Removing "+muxGlobalIntegration.name+" integration from "); n != want {
+				t.Errorf("expected only the global file's %d removals reported as the global layer's, got %d:\n%s", want, n, stdout.String())
+			}
 		})
 	}
 
 	// Only a root file named AGENTS.md is the global one: an agents file of
 	// another name in ~/.mux is the root layer's own. bd still runs in no
-	// workspace there, so it installs no hooks and --check asks for none.
+	// workspace there, so it installs no hooks or workspace layer, and
+	// --check asks for neither.
 	t.Run("root layer with another agents file from ~/.mux", func(t *testing.T) {
 		homeDir := stubMuxHome(t)
 		dir := filepath.Join(homeDir, ".mux")
@@ -512,6 +527,20 @@ func TestMuxLayerAtGlobalPathIsGlobalLayer(t *testing.T) {
 		if err := checkMux(env, false, false); err != nil {
 			t.Fatalf("checkMux: %v\n%s", err, stdout.String())
 		}
+		// Nor does it install, or --check ask for, a workspace layer there.
+		stdout.Reset()
+		if err := installMux(env, true, false); err != nil {
+			t.Fatalf("installMux(project=true): %v\n%s", err, stdout.String())
+		}
+		if err := checkMux(env, true, false); err != nil {
+			t.Fatalf("checkMux(project=true): %v\n%s", err, stdout.String())
+		}
+		if _, err := os.Stat(nested); !os.IsNotExist(err) {
+			t.Errorf("setup --project from ~/.mux should not create %s, stat err = %v", nested, err)
+		}
+		if n := strings.Count(stdout.String(), muxNoWorkspaceLayerNote+"\n"); n != 2 {
+			t.Errorf("expected setup and --check each to note the skipped workspace layer, got %d:\n%s", n, stdout.String())
+		}
 	})
 }
 
@@ -521,7 +550,8 @@ func TestMuxLayerAtGlobalPathIsGlobalLayer(t *testing.T) {
 // after a --global install from a project, setup there installs no hooks
 // and, with --project, no workspace layer, and remove there clears what an
 // older bd installed in ~/.mux/.mux, along with the global layer's section,
-// which setup there installs.
+// which setup there installs. Setup and --check there name the hooks an
+// older bd installed in ~/.mux/.mux, and only those.
 func TestMuxRunFromMuxHomeHasNoWorkspaceHooks(t *testing.T) {
 	stubDetectRenderOpts(t)
 	homeDir := stubMuxHome(t)
@@ -558,10 +588,35 @@ func TestMuxRunFromMuxHomeHasNoWorkspaceHooks(t *testing.T) {
 		if n := strings.Count(stdout.String(), muxNoWorkspaceLayerNote+"\n"); n != want {
 			t.Errorf("project=%v: expected the skipped workspace layer noted %d times, got %d:\n%s", project, want, n, stdout.String())
 		}
+		if strings.Contains(stdout.String(), muxNestedHooksNote) {
+			t.Errorf("project=%v: noted hooks in %s, which has none:\n%s", project, nested, stdout.String())
+		}
 	}
 
+	// Hooks an older bd installed in ~/.mux/.mux: setup and --check there
+	// name them, and the cleanup, and leave them where they are.
 	if err := installMuxProjectHooks(env); err != nil {
 		t.Fatalf("installing an older bd's hooks: %v", err)
+	}
+	initPath, toolPostPath, toolEnvPath := muxProjectHookPaths(env.agentsPath)
+	note := muxNestedHooksNote + strings.Join([]string{initPath, toolPostPath, toolEnvPath}, ", ") + "\n"
+	stdout.Reset()
+	if err := checkMux(env, false, false); err != nil {
+		t.Fatalf("checkMux from ~/.mux with an older bd's hooks: %v\n%s", err, stdout.String())
+	}
+	if err := installMux(env, false, false); err != nil {
+		t.Fatalf("installMux from ~/.mux with an older bd's hooks: %v\n%s", err, stdout.String())
+	}
+	if n := strings.Count(stdout.String(), note); n != 2 {
+		t.Errorf("expected --check and setup each to name the older bd's hooks, got %d notes:\n%s", n, stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "bd setup mux --remove") {
+		t.Errorf("expected the note to name the --remove cleanup:\n%s", stdout.String())
+	}
+	for _, path := range []string{initPath, toolPostPath, toolEnvPath} {
+		if got := readMuxFile(t, path); !strings.Contains(got, muxHookMarkerBegin) {
+			t.Errorf("setup from ~/.mux should leave the older bd's hook %s alone, got:\n%s", path, got)
+		}
 	}
 	stdout.Reset()
 	if err := removeMux(env, false, false); err != nil {
@@ -587,6 +642,17 @@ func TestMuxRunFromMuxHomeHasNoWorkspaceHooks(t *testing.T) {
 	}
 	if got := readMuxFile(t, nestedAgents); containsBeadsMarker(got) {
 		t.Errorf("remove --project from ~/.mux should remove the section from %s, left:\n%s", nestedAgents, got)
+	}
+
+	// A hook of the user's own there is not one bd installed: setup does not
+	// name it.
+	writeMuxFile(t, initPath, "#!/bin/sh\necho mine\n")
+	stdout.Reset()
+	if err := installMux(env, false, false); err != nil {
+		t.Fatalf("installMux from ~/.mux with a custom hook: %v\n%s", err, stdout.String())
+	}
+	if strings.Contains(stdout.String(), muxNestedHooksNote) {
+		t.Errorf("setup from ~/.mux named a hook bd did not install:\n%s", stdout.String())
 	}
 }
 
@@ -618,6 +684,88 @@ func TestRemoveMuxGlobalRemovesGlobalLayerSection(t *testing.T) {
 
 			if got := readMuxFile(t, globalPath); got != tt.want {
 				t.Fatalf("global AGENTS.md after remove = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// Remove takes bd's hooks out of a .mux directory and then removes the
+// directory if they were all it held, but it never removes a .mux that is a
+// symlink, since that unlinks it whatever its target holds, nor a directory
+// it took no hook from. Run from the home directory that .mux is ~/.mux,
+// which Xum's migration replaces with a link to ~/.xum; with --global, the
+// global section in the link's target goes too.
+func TestRemoveMuxKeepsMuxDirItDidNotEmpty(t *testing.T) {
+	stubDetectRenderOpts(t)
+	for _, tt := range []struct {
+		name    string
+		global  bool
+		home    bool // bd runs in the home directory, else in a workspace
+		link    bool // .mux is a symlink to a directory beside it
+		install bool // set up first, with --global from the home directory
+	}{
+		{name: "~/.mux linked to ~/.xum, from home", home: true, link: true, install: true},
+		{name: "~/.mux linked to ~/.xum, from home with --global", home: true, link: true, install: true, global: true},
+		{name: "~/.mux linked to ~/.xum, from home, nothing installed", home: true, link: true},
+		{name: "a workspace's .mux linked to a directory holding only bd's hooks", link: true, install: true},
+		{name: "a workspace's .mux bd installed no hooks in"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			home := stubMuxHome(t)
+			dir := home
+			if !tt.home {
+				dir = t.TempDir()
+			}
+			muxDir := filepath.Join(dir, ".mux")
+			target := muxDir
+			if tt.link {
+				target = filepath.Join(dir, ".xum")
+			}
+			if err := os.MkdirAll(target, 0o755); err != nil {
+				t.Fatalf("mkdir %s: %v", target, err)
+			}
+			if tt.link {
+				if err := os.Symlink(target, muxDir); err != nil {
+					t.Skipf("symlink: %v", err)
+				}
+			}
+			// The CLI names the agents file with a bare name, relative to
+			// where bd runs.
+			t.Chdir(dir)
+			stdout := &bytes.Buffer{}
+			env := agentsEnv{agentsPath: "AGENTS.md", stdout: stdout, stderr: &bytes.Buffer{}}
+			if tt.install {
+				if err := installMux(env, false, tt.home); err != nil {
+					t.Fatalf("installMux: %v\n%s", err, stdout.String())
+				}
+			}
+
+			stdout.Reset()
+			if err := removeMux(env, false, tt.global); err != nil {
+				t.Fatalf("removeMux: %v\n%s", err, stdout.String())
+			}
+			info, err := os.Lstat(muxDir)
+			if err != nil {
+				t.Fatalf("remove should keep %s, lstat err = %v\n%s", muxDir, err, stdout.String())
+			}
+			if got := info.Mode()&os.ModeSymlink != 0; got != tt.link {
+				t.Errorf("%s is a symlink = %v, want %v", muxDir, got, tt.link)
+			}
+			if tt.link {
+				requireLinkKept(t, muxDir)
+			}
+			for _, hook := range []string{"init", "tool_post", "tool_env"} {
+				path := filepath.Join(target, hook)
+				if _, err := os.Lstat(path); !os.IsNotExist(err) {
+					t.Errorf("remove should remove the hook %s, lstat err = %v", path, err)
+				}
+			}
+			if tt.home && tt.install {
+				// The global section is in the link's target, ~/.xum/AGENTS.md.
+				got := readMuxFile(t, filepath.Join(target, "AGENTS.md"))
+				if containsBeadsMarker(got) == tt.global {
+					t.Errorf("global section in %s after remove (global=%v):\n%s", target, tt.global, got)
+				}
 			}
 		})
 	}

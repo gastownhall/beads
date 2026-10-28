@@ -10,6 +10,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/steveyegge/beads/cmd/bd/doctor/fix"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
@@ -33,19 +34,34 @@ func openStoreDB(beadsDir string) (*sql.DB, storage.DoltStorage, error) {
 	return db, store, nil
 }
 
-// CheckOrphanedDependencies detects dependencies pointing to non-existent issues.
-func CheckOrphanedDependencies(path string) DoctorCheck {
-	beadsDir := ResolveBeadsDirForRepo(path)
-
-	db, store, err := openStoreDB(beadsDir)
+// CheckOrphanedDependencies detects dependencies pointing to non-existent issues
+// on the server its bd doctor --fix repair (fix.OrphanedDependencies) deletes
+// them from (fix.OpenScanDB). It read the store's server, so beside a live
+// BEADS_DOLT_SERVER_SOCKET and a resolved port it diagnosed the socket's
+// server while the repair deleted rows on the server at the port and
+// reported them fixed (#7874 review). It reports a database whose repair
+// server it cannot read as CheckBlockedConsistencyWithStore does: "N/A (no
+// database)" only when the shared store found no database either, else a
+// warning, so bd doctor --check=validate does not pass a database it never
+// read.
+func CheckOrphanedDependencies(path string, ss *SharedStore) DoctorCheck {
+	db, err := fix.OpenScanDB(path)
 	if err != nil {
+		if ss.Store() == nil {
+			return DoctorCheck{
+				Name:    "Orphaned Dependencies",
+				Status:  "ok",
+				Message: "N/A (no database)",
+			}
+		}
 		return DoctorCheck{
 			Name:    "Orphaned Dependencies",
-			Status:  "ok",
-			Message: "N/A (no database)",
+			Status:  StatusWarning,
+			Message: "Unable to check orphaned dependencies",
+			Detail:  err.Error(),
 		}
 	}
-	defer func() { _ = store.Close() }()
+	defer func() { _ = db.Close() }()
 
 	return checkOrphanedDependenciesDB(db)
 }
@@ -322,18 +338,27 @@ func CheckGitConflicts(path string) DoctorCheck {
 // CheckChildParentDependencies detects child→parent blocking dependencies.
 // These often indicate a modeling mistake (deadlock: child waits for parent, parent waits for children).
 // However, they may be intentional in some workflows, so removal requires explicit opt-in.
-func CheckChildParentDependencies(path string) DoctorCheck {
-	beadsDir := ResolveBeadsDirForRepo(path)
-
-	db, store, err := openStoreDB(beadsDir)
+// It reads the server that removal (fix.ChildParentDependencies) writes
+// (fix.OpenScanDB), and reports a database whose repair server it cannot
+// read, as CheckOrphanedDependencies does.
+func CheckChildParentDependencies(path string, ss *SharedStore) DoctorCheck {
+	db, err := fix.OpenScanDB(path)
 	if err != nil {
+		if ss.Store() == nil {
+			return DoctorCheck{
+				Name:    "Child-Parent Dependencies",
+				Status:  "ok",
+				Message: "N/A (no database)",
+			}
+		}
 		return DoctorCheck{
 			Name:    "Child-Parent Dependencies",
-			Status:  "ok",
-			Message: "N/A (no database)",
+			Status:  StatusWarning,
+			Message: "Unable to check child→parent dependencies",
+			Detail:  err.Error(),
 		}
 	}
-	defer func() { _ = store.Close() }()
+	defer func() { _ = db.Close() }()
 
 	return checkChildParentDependenciesDB(db)
 }

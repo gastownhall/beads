@@ -4,12 +4,14 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"runtime"
 	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/formula"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
@@ -224,11 +226,16 @@ func runPour(cmd *cobra.Command, args []string) error {
 
 func warnPourVaporFormula(protoArg string, varFlags []string) {
 	fmt.Fprintf(os.Stderr, "%s Formula %q recommends vapor phase (ephemeral)\n", ui.RenderWarn("⚠"), protoArg)
-	fmt.Fprintf(os.Stderr, "  Consider using: bd mol wisp %s", protoArg)
-	for _, v := range varFlags {
-		fmt.Fprintf(os.Stderr, " --var %s", v)
+	// The formula and its variables are what the user passed: each goes into
+	// the command as one shell word, or a placeholder named after it.
+	proto, notes := remedy.CommandArg(runtime.GOOS, protoArg, "<formula>")
+	fmt.Fprintf(os.Stderr, "  Consider using: bd mol wisp %s", proto)
+	for i, v := range varFlags {
+		arg, note := remedy.CommandArg(runtime.GOOS, v, fmt.Sprintf("<var%d>", i+1))
+		fmt.Fprintf(os.Stderr, " --var %s", arg)
+		notes += note
 	}
-	fmt.Fprintf(os.Stderr, "\n")
+	fmt.Fprintf(os.Stderr, "%s\n", notes)
 	fmt.Fprintf(os.Stderr, "  Pour creates persistent issues that sync like any other bead.\n")
 	fmt.Fprintf(os.Stderr, "  Wisp creates ephemeral issues that auto-cleanup.\n\n")
 }

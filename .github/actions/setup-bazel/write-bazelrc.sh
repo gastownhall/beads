@@ -25,8 +25,10 @@
 # cert path) and outside BAZEL_CI_CACHE_DIR (the runner cache must never store
 # credentials). The endpoint is masked in the job log.
 #
-# BAZEL_FORK_CACHE=true (bazel.yml mode "cache": rbe=cache dispatches, and
-# fork/Dependabot runs while rbe-fork is closed) appends --config=fork-cache:
+# BAZEL_FORK_CACHE=true (bazel.yml mode "cache": rbe=cache dispatches, whose
+# lanes run on Blacksmith; rbe-cache refuses GitHub-hosted runners, so fork
+# and Dependabot runs while rbe-fork is closed are mode local) appends
+# --config=fork-cache:
 # .bazelrc's credential-free, read-only rbe-west cache. While that cache
 # advertises zstd (cache-zstd-probe.sh asks its GetCapabilities; any failure
 # means no) it also asks for zstd transfers (--remote_cache_compression). A

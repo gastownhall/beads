@@ -5,7 +5,7 @@ description: Dependency-aware, Dolt-backed issue tracker built for AI coding age
 
 **Beads** (`bd`) is a Dolt-powered issue tracker designed for AI-supervised coding workflows.
 
-These docs are for the 1.3.0 release of beads — see the [v1.3.0 release notes](https://github.com/gastownhall/beads/releases/tag/v1.3.0). Upgrading from 1.2.2 or earlier crosses a schema migration; read [Upgrading](/getting-started/upgrading) first.
+These docs are for the 1.3.2 release of beads — see the [v1.3.2 release notes](https://github.com/gastownhall/beads/releases/tag/v1.3.2). Upgrading from 1.2.2 or earlier crosses a schema migration; read [Upgrading](/getting-started/upgrading) first. After upgrading from 1.3.0 or earlier, run `bd recompute-blocked` once per workspace.
 
 ## Why Beads?
 

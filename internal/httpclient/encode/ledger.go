@@ -1013,6 +1013,15 @@ func writeSideRows() []Row {
 			PinnedBy: pinnedByS3Conformance,
 		},
 		{
+			ID: "W-SweepRequest.RetainIDs", Kind: KindRetired,
+			Type: tySweepRequest, Field: "RetainIDs",
+			What: "retiring the ids a sweep deletes used to refuse",
+			Why: "RETIRED by the wire extension that sends it. The local Sweeper role writes a permanent tombstone for every id it deletes, and apigen.SweepRequest had no retain_ids member, so a dropped RetainIDs would have run the sweep and left every swept id reusable. " +
+				"The spec now publishes `retain_ids` on the request and its echo on the response behind issues.sweep.retainIds, a token that also promises every create on that server refuses a retired id with 410 idempotency_expired. The client sends it only once the handshake advertises the token and refuses locally, before the dial, when it does not (refuseUnservedSweep)",
+			SpecRow:  "D8 refuse-not-drop",
+			PinnedBy: "TestSweepRefusesTheS4MembersWhenTheServerLacksTheCapability",
+		},
+		{
 			ID: "W-SweepRequest.ProtectLiveDependents", Kind: KindRetired,
 			Type: tySweepRequest, Field: "ProtectLiveDependents",
 			What: "protecting live structural dependents during a sweep used to refuse",

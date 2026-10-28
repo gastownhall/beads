@@ -14,6 +14,7 @@ go_library(
         "compaction.go",
         "config_metadata.go",
         "dependency_queries.go",
+        "descendants.go",
         "diff_store.go",
         "directory_size.go",
         "errors_unsupported.go",

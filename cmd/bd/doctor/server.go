@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"net"
 	"strings"
 	"time"
 
@@ -13,6 +12,8 @@ import (
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/doltversion"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
 
@@ -88,6 +89,20 @@ func RunServerHealthChecks(path string) ServerHealthResult {
 	// Port 0 means server not yet started — report that clearly.
 	port := doltserver.DialConfig(beadsDir).Port
 	if port == 0 {
+		// No bd command starts, and so resolves a port for, a server bd does
+		// not run, at the IPv6 loopback or on another machine: every store
+		// open there refuses until the port is pinned, with this advice.
+		if advice := doltserver.UnresolvedPortAdvice(host); advice != "" {
+			result.Checks = append(result.Checks, DoctorCheck{
+				Name:     "Server port",
+				Status:   StatusError,
+				Message:  "No Dolt server port configured",
+				Fix:      advice,
+				Category: CategoryFederation,
+			})
+			result.OverallOK = false
+			return result
+		}
 		result.Checks = append(result.Checks, DoctorCheck{
 			Name:     "Server port",
 			Status:   StatusWarning,
@@ -262,14 +277,15 @@ func checkStaleDatabases(db *sql.DB) DoctorCheck {
 
 // checkServerReachable checks if the server is reachable via TCP
 func checkServerReachable(host string, port int) DoctorCheck {
-	addr := net.JoinHostPort(host, fmt.Sprintf("%d", port))
+	addr := doltutil.ServerAddr(host, port)
 	_, err := doltserver.ProbeSQLServer("tcp", addr, 5*time.Second)
 	if err != nil {
+		// The dial error repeats the host.
 		return DoctorCheck{
 			Name:     "Server Reachable",
 			Status:   StatusError,
-			Message:  fmt.Sprintf("Cannot connect to %s", addr),
-			Detail:   err.Error(),
+			Message:  fmt.Sprintf("Cannot connect to %s", remedy.PrintedValue(addr)),
+			Detail:   remedy.PrintedError(err).Error(),
 			Fix:      "Ensure dolt sql-server is running and accessible",
 			Category: CategoryFederation,
 		}
@@ -278,12 +294,13 @@ func checkServerReachable(host string, port int) DoctorCheck {
 	return DoctorCheck{
 		Name:     "Server Reachable",
 		Status:   StatusOK,
-		Message:  fmt.Sprintf("Connected to %s", addr),
+		Message:  fmt.Sprintf("Connected to %s", remedy.PrintedValue(addr)),
 		Category: CategoryFederation,
 	}
 }
 
 // checkDoltVersion connects to the server and checks if it's a Dolt server
+// at or above doltversion.RequiredMin.
 // Returns the DoctorCheck and an open database connection (caller must close)
 func checkDoltVersion(cfg *configfile.Config, beadsDir string) (DoctorCheck, *sql.DB) {
 	host := cfg.GetDoltServerHost()
@@ -365,12 +382,43 @@ func checkDoltVersion(cfg *configfile.Config, beadsDir string) (DoctorCheck, *sq
 		}, nil
 	}
 
+	return doltVersionFloorCheck(version, "dolt sql-server at "+remedy.PrintedValue(doltutil.ServerAddr(host, port))), db
+}
+
+// doltVersionFloorCheck judges the version a server's dolt_version()
+// reported against doltversion.RequiredMin, the floor every server-mode
+// open enforces. Below it is an error whose fix is the upgrade. A version
+// that does not parse stays OK, as before: the open does not refuse one
+// either (see doltversion.CheckServer), and the detail says it was not
+// checked.
+func doltVersionFloorCheck(version, subject string) DoctorCheck {
+	v, err := doltversion.ParseVersion(version)
+	if err != nil {
+		// The server supplied this text, so it is printed escaped.
+		return DoctorCheck{
+			Name:     "Dolt Version",
+			Status:   StatusOK,
+			Message:  fmt.Sprintf("Dolt %s", remedy.PrintedValue(version)),
+			Detail:   fmt.Sprintf("not a version bd recognizes; not checked against the required minimum %s", doltversion.RequiredMin),
+			Category: CategoryFederation,
+		}
+	}
+	if floorErr := doltversion.CheckRequired(v, subject, true); floorErr != nil {
+		return DoctorCheck{
+			Name:     "Dolt Version",
+			Status:   StatusError,
+			Message:  fmt.Sprintf("Dolt %s is below the required minimum %s", v, doltversion.RequiredMin),
+			Detail:   floorErr.Error(),
+			Fix:      fmt.Sprintf("Upgrade the dolt sql-server to %s or newer and restart it; bd refuses to open older servers", doltversion.RequiredMin),
+			Category: CategoryFederation,
+		}
+	}
 	return DoctorCheck{
 		Name:     "Dolt Version",
 		Status:   StatusOK,
-		Message:  fmt.Sprintf("Dolt %s", version),
+		Message:  fmt.Sprintf("Dolt %s", v),
 		Category: CategoryFederation,
-	}, db
+	}
 }
 
 // checkDatabaseExists checks if the beads database exists
@@ -388,7 +436,7 @@ func checkDatabaseExists(db *sql.DB, database string) DoctorCheck {
 			return DoctorCheck{
 				Name:     "Database Exists",
 				Status:   StatusError,
-				Message:  fmt.Sprintf("Invalid database name '%s'", database),
+				Message:  fmt.Sprintf("Invalid database name '%s'", remedy.PrintedValue(database)),
 				Detail:   "Database name must be alphanumeric with underscores only",
 				Category: CategoryFederation,
 			}
@@ -431,11 +479,13 @@ func checkDatabaseExists(db *sql.DB, database string) DoctorCheck {
 	}
 
 	if !found {
+		// The name is metadata.json's dolt_database, which a cloned
+		// repository commits.
 		return DoctorCheck{
 			Name:     "Database Exists",
 			Status:   StatusError,
-			Message:  fmt.Sprintf("Database '%s' not found", database),
-			Fix:      fmt.Sprintf("Run 'bd bootstrap' to recover the existing '%s' database safely. Use 'bd init' only for brand-new projects.", database),
+			Message:  fmt.Sprintf("Database '%s' not found", remedy.PrintedValue(database)),
+			Fix:      fmt.Sprintf("Run 'bd bootstrap' to recover the existing '%s' database safely. Use 'bd init' only for brand-new projects.", remedy.PrintedValue(database)),
 			Category: CategoryFederation,
 		}
 	}
@@ -448,7 +498,7 @@ func checkDatabaseExists(db *sql.DB, database string) DoctorCheck {
 		return DoctorCheck{
 			Name:     "Database Exists",
 			Status:   StatusError,
-			Message:  fmt.Sprintf("Cannot access database '%s'", database),
+			Message:  fmt.Sprintf("Cannot access database '%s'", remedy.PrintedValue(database)),
 			Detail:   err.Error(),
 			Category: CategoryFederation,
 		}
@@ -459,7 +509,7 @@ func checkDatabaseExists(db *sql.DB, database string) DoctorCheck {
 		return DoctorCheck{
 			Name:     "Database Exists",
 			Status:   StatusWarning,
-			Message:  fmt.Sprintf("Database '%s' uses hyphens (legacy naming)", database),
+			Message:  fmt.Sprintf("Database '%s' uses hyphens (legacy naming)", remedy.PrintedValue(database)),
 			Detail:   "New projects use underscores. To migrate: export data, run 'bd init --force', re-import.",
 			Category: CategoryFederation,
 		}
@@ -468,7 +518,7 @@ func checkDatabaseExists(db *sql.DB, database string) DoctorCheck {
 	return DoctorCheck{
 		Name:     "Database Exists",
 		Status:   StatusOK,
-		Message:  fmt.Sprintf("Database '%s' accessible", database),
+		Message:  fmt.Sprintf("Database '%s' accessible", remedy.PrintedValue(database)),
 		Category: CategoryFederation,
 	}
 }

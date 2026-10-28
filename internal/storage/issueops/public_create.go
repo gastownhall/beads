@@ -132,6 +132,11 @@ func ClassifyPublicCreateError(err error) error {
 	if err == nil || errors.Is(err, storage.ErrValidation) || errors.Is(err, storage.ErrAlreadyExists) {
 		return err
 	}
+	// A retired id is its own refusal: neither a validation failure nor an
+	// occupied id, and it must reach the caller as the typed error it is.
+	if errors.Is(err, publicops.ErrIdempotencyExpired) {
+		return err
+	}
 	var conflict *domain.DependencyTypeConflictError
 	var hierarchyConflict *domain.DependencyHierarchyConflictError
 	var stateErr interface{ SQLState() string }

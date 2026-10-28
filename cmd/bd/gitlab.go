@@ -650,9 +650,18 @@ func gitLabLicenseSkipMessage(n int) string {
 // --json); warnings are delivered via warn. Returns the number of links created,
 // license-skipped, and milestones updated.
 func pushGitLabDependencyLinks(ctx context.Context, gt *gitlab.Tracker, st storage.Storage, opts tracker.SyncOptions, dryRun bool, out io.Writer, warn func(string)) (linksPushed, linksLicenseSkipped, milestonesUpdated int) {
-	linkData, collectWarnings := collectGitLabLinkSyncData(ctx, st, opts)
+	scope := gt.ProjectScope()
+	linkData, collectWarnings := collectGitLabLinkSyncData(ctx, st, opts, func(issue *types.Issue) bool {
+		return scope.Contains(ctx, issue)
+	})
 	for _, warning := range collectWarnings {
 		warn(warning)
+	}
+	if err := scope.Err(); err != nil {
+		warn(fmt.Sprintf("GitLab dependency link sync could not look up the configured project: %v", err))
+	}
+	if linkData.OutsideProject > 0 {
+		warn(gitLabOutsideProjectLinkMessage(linkData.OutsideProject))
 	}
 
 	client := gt.GitLabClient()
@@ -702,12 +711,33 @@ func pushGitLabDependencyLinks(ctx context.Context, gt *gitlab.Tracker, st stora
 	return linksPushed, linksLicenseSkipped, milestonesUpdated
 }
 
-type gitlabLinkSyncData struct {
-	ScopedIssues []*types.Issue
-	DesiredLinks []gitlab.DependencyLink
+// gitLabOutsideProjectLinkMessage returns the one line that reports n
+// dependencies left out of the link push because an endpoint is not an issue
+// of the configured project, the only project the push creates links in.
+func gitLabOutsideProjectLinkMessage(n int) string {
+	noun := "dependency"
+	if n != 1 {
+		noun = "dependencies"
+	}
+	return fmt.Sprintf(
+		"GitLab dependency link sync skipped %d %s on issues outside the configured project: "+
+			"links are pushed only between issues of gitlab.project_id (gitlab.default_project_id in group mode)", n, noun)
 }
 
-func collectGitLabLinkSyncData(ctx context.Context, st storage.Storage, opts tracker.SyncOptions) (gitlabLinkSyncData, []string) {
+// gitlabLinkSyncData is the dependency-link pass's input. OutsideProject
+// counts the dependencies left out of DesiredLinks because an endpoint is not
+// an issue of the configured project.
+type gitlabLinkSyncData struct {
+	ScopedIssues   []*types.Issue
+	DesiredLinks   []gitlab.DependencyLink
+	OutsideProject int
+}
+
+// collectGitLabLinkSyncData gathers the scoped issues and the links their
+// dependencies on each other map to. A link is desired only when inProject
+// holds for both of its issues: links are pushed by IID into the configured
+// project.
+func collectGitLabLinkSyncData(ctx context.Context, st storage.Storage, opts tracker.SyncOptions, inProject func(*types.Issue) bool) (gitlabLinkSyncData, []string) {
 	if st == nil {
 		return gitlabLinkSyncData{}, []string{"GitLab dependency link sync skipped: database not available"}
 	}
@@ -729,6 +759,7 @@ func collectGitLabLinkSyncData(ctx context.Context, st storage.Storage, opts tra
 	scopedIssues := filterGitLabLinkScopedIssues(allIssues, opts, descendantSet)
 	scopedIssueIDs := gitlabScopedIssueIDSet(scopedIssues)
 	desired := make([]gitlab.DependencyLink, 0, len(scopedIssues))
+	outside := 0
 	for _, issue := range scopedIssues {
 		deps, err := st.GetDependenciesWithMetadata(ctx, issue.ID)
 		if err != nil {
@@ -740,15 +771,21 @@ func collectGitLabLinkSyncData(ctx context.Context, st storage.Storage, opts tra
 				continue
 			}
 			link, ok := gitlab.LinkFromBeadsDependency(issue, dep)
-			if ok {
-				desired = append(desired, link)
+			if !ok {
+				continue
 			}
+			if !inProject(issue) || !inProject(&dep.Issue) {
+				outside++
+				continue
+			}
+			desired = append(desired, link)
 		}
 	}
 
 	return gitlabLinkSyncData{
-		ScopedIssues: scopedIssues,
-		DesiredLinks: gitlab.DeduplicateLinks(desired),
+		ScopedIssues:   scopedIssues,
+		DesiredLinks:   gitlab.DeduplicateLinks(desired),
+		OutsideProject: outside,
 	}, warnings
 }
 

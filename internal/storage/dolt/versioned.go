@@ -242,6 +242,14 @@ func (s *DoltStore) GetStateHash(ctx context.Context) (string, error) {
 	return s.GetCurrentCommit(ctx)
 }
 
+var _ storage.HeadHasher = (*DoltStore)(nil)
+
+// GetHeadHashes returns the HEAD commit hash and the hash of its root value.
+// Implements storage.HeadHasher.
+func (s *DoltStore) GetHeadHashes(ctx context.Context) (commit, root string, err error) {
+	return versioncontrolops.HeadHashes(ctx, s.db)
+}
+
 // GetConflicts returns any merge conflicts in the current state.
 // Implements storage.VersionedStorage.
 func (s *DoltStore) GetConflicts(ctx context.Context) ([]storage.Conflict, error) {

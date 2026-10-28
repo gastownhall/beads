@@ -42,17 +42,19 @@ func hasGraphFormatMarker(beadsDir string) bool {
 	return configfile.HasGraphFormatMarker(beadsDir)
 }
 
-// checkDiscoveredWorkspaceFormat runs checkWorkspaceFormat on beadsDir's
-// metadata as LoadForDiscovery reads it, which never rewrites the workspace.
-// A path that opens or initializes a workspace without passing through command
-// admission runs it first: configfile.Load would otherwise migrate a legacy
-// config.json into metadata.json before the format check could refuse it.
-// Metadata that does not load is left to the caller's own load to report,
-// unless the graph format marker sits beside it (loadAndCheckWorkspaceFormat).
-// It is configfile.CheckDiscoveredWorkspaceFormat, the pre-check the public
-// beads package's opens run too.
-func checkDiscoveredWorkspaceFormat(beadsDir string) error {
-	return configfile.CheckDiscoveredWorkspaceFormat(beadsDir)
+// checkDiscoveredForOpen is configfile.CheckDiscoveredForOpen, the
+// non-mutating pre-check every path that opens, attaches or initializes a
+// workspace without passing through command admission runs before it writes
+// there: configfile.Load would otherwise migrate a legacy config.json into
+// metadata.json before the workspace could be refused. It refuses what
+// admission refuses from the workspace's own metadata and layout, with
+// admission's text: a format this build cannot open
+// (*configfile.UnsupportedWorkspaceFormatError) and a historical SQLite
+// workspace (*configfile.LegacyWorkspaceError). Metadata that does not load
+// is left to the caller's own load to report, unless the graph format marker
+// sits beside it. The public beads package's opens run the same check.
+func checkDiscoveredForOpen(beadsDir string) error {
+	return configfile.CheckDiscoveredForOpen(beadsDir)
 }
 
 func isUnsupportedWorkspaceFormat(err error) bool {

@@ -1,0 +1,82 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "remedy",
+    srcs = ["remedy.go"],
+    importpath = "github.com/steveyegge/beads/internal/remedy",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "remedy_test",
+    srcs = [
+        "census_test.go",
+        "remedy_test.go",
+        "windowsargv_test.go",
+    ],
+    # census_test.go parses every production Go file of cmd/bd and
+    # internal/ for a clone-controlled value printed without the printer.
+    data = ["//:repo_go_srcs"],
+    embed = [":remedy"],
+)
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_doc_files",
+    srcs = glob(
+        [
+            "**/*.md",
+            "**/*.mdx",
+        ],
+        allow_empty = True,
+        exclude = ["**/node_modules/**"],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = [
+            "**/*_test.go",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+        exclude = ["**/node_modules/**"],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_other_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.go",
+            "**/*.md",
+            "**/*.mdx",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+# --- end repo_files ---

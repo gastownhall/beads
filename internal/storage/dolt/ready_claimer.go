@@ -32,6 +32,7 @@ func (s *DoltStore) WakeExpiredDefersAdvisory(ctx context.Context) {
 }
 
 var _ storage.ExpiredDeferWaker = (*DoltStore)(nil)
+var _ storage.DescendantSearcher = (*DoltStore)(nil)
 
 // ClaimNext runs selection, the compare-and-set and hydration in one
 // transaction, under the claim-family verify-after-write (bd-zccb9) that

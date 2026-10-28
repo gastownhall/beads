@@ -10,11 +10,10 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	mysql "github.com/go-sql-driver/mysql"
-
-	"github.com/steveyegge/beads/internal/doltserver"
 )
 
 // Circuit breaker states.
@@ -187,13 +186,20 @@ func (cb *circuitBreaker) Allow() bool {
 	case circuitOpen:
 		if time.Since(state.TrippedAt) >= circuitCooldown {
 			// Cooldown elapsed — actively probe the server
-			if cb.probe() {
+			probeErr := cb.probe()
+			if probeErr == nil {
 				state.State = circuitClosed
 				state.Failures = 0
 				state.FirstFailure = time.Time{}
 				cb.writeState(state)
 				log.Printf("[circuit-breaker] %s:%d/%s: open → closed (active probe succeeded)", cb.host, cb.port, cb.database)
 				return true
+			}
+			if isLocalDialRefusal(probeErr) {
+				// This process may not connect at all, which says nothing
+				// about the server: stay open without resetting the
+				// cooldown, so a process that can connect probes next.
+				return false
 			}
 			// Probe failed — stay open, reset the tripped timer
 			state.TrippedAt = time.Now()
@@ -205,13 +211,17 @@ func (cb *circuitBreaker) Allow() bool {
 	case circuitHalfOpen:
 		// Legacy state from older breaker versions — treat as open with
 		// immediate probe since we no longer use half-open passively.
-		if cb.probe() {
+		probeErr := cb.probe()
+		if probeErr == nil {
 			state.State = circuitClosed
 			state.Failures = 0
 			state.FirstFailure = time.Time{}
 			cb.writeState(state)
 			log.Printf("[circuit-breaker] %s:%d/%s: half-open → closed (active probe succeeded)", cb.host, cb.port, cb.database)
 			return true
+		}
+		if isLocalDialRefusal(probeErr) {
+			return false // as for an open breaker, above
 		}
 		state.State = circuitOpen
 		state.TrippedAt = time.Now()
@@ -223,16 +233,34 @@ func (cb *circuitBreaker) Allow() bool {
 	}
 }
 
-// probe performs a quick TCP dial to check if the Dolt server is reachable.
+// probe performs a quick TCP dial to check if the Dolt server is reachable,
+// and returns the dial error (nil when it is reachable).
 // One-shot: reachability is based on dial success alone, so a drain timeout
 // (dial-accepted-but-mute) still counts as reachable here. Draining before
 // close still applies — it avoids sending the dolt sql-server a TCP RST that
 // it would interpret as an aborted MySQL handshake (gastownhall/beads#4132,
-// #4133).
-func (cb *circuitBreaker) probe() bool {
+// #4133); dialProbe drains through doltserver.ProbeSQLServer.
+func (cb *circuitBreaker) probe() error {
 	addr := net.JoinHostPort(cb.host, fmt.Sprintf("%d", cb.port))
-	_, err := doltserver.ProbeSQLServer("tcp", addr, 1*time.Second)
-	return err == nil
+	return dialProbe("tcp", addr, 1*time.Second)
+}
+
+// isLocalDialRefusal reports whether a dial failed because this process may
+// not connect at all: connect returned EPERM or EACCES, as it does inside a
+// sandbox that refuses localhost (GH#7214) or under a local firewall policy.
+// That says nothing about the server, so it must not move the breaker: every
+// process sharing the server reads it, and the ones that can connect would
+// then fail fast.
+func isLocalDialRefusal(err error) bool {
+	return errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES)
+}
+
+// recordDialFailure records a failed dial of the server on breaker (nil means
+// no breaker), unless isLocalDialRefusal says the dial never reached it.
+func recordDialFailure(breaker *circuitBreaker, dialErr error) {
+	if breaker != nil && !isLocalDialRefusal(dialErr) {
+		breaker.RecordFailure()
+	}
 }
 
 // RecordSuccess records a successful connection. Resets the breaker to closed.

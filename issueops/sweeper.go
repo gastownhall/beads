@@ -158,6 +158,51 @@ type SweepRequest struct {
 	// refusals — computed against the same snapshot the real sweep would have
 	// used, which is what makes a preview worth reading.
 	DryRun bool
+	// RetainIDs retires every id this sweep deletes: in the SAME transaction
+	// as the delete, the sweep writes one permanent tombstone per deleted row
+	// — its id and its closed_at, nothing else — into the tombstone table of
+	// the row's own storage plane. From then on no create path commits a row
+	// with that id again: a create naming it is refused with
+	// *IdempotencyExpiredError, an import skips the row and reports it
+	// (ImportBatchResult.RetiredIDs), and id generation never produces it.
+	//
+	// It is what lets a caller sweep rows whose ids are IDEMPOTENCY KEYS — a
+	// pinned id that names an operation which must never run twice — without
+	// a late retry of that operation re-creating the row it already created.
+	//
+	// IT IS OPT-IN, because only the caller knows the ids are keys: a sweep
+	// without it behaves exactly as it always has, and a swept id stays
+	// reusable. Tombstones are permanent; no API removes one.
+	//
+	// ONLY A RETAINING SWEEP RETIRES. Every other way a row leaves the store
+	// leaves its id reusable: a sweep without this flag (a plain `bd prune` or
+	// `bd purge`, whose durable tier also selects no-history rows), the
+	// Deleter role (`bd delete`), and `bd gc`'s decay, which deletes old
+	// closed rows by id. Nothing stops those paths from reaching rows whose
+	// ids are keys, so a caller that stores such rows in a shared store must
+	// keep them out of every non-retaining delete by its own rule.
+	//
+	// A tombstone is exactly as durable as the row it replaces: a durable
+	// row's tombstone is versioned and replicates with it, a wisps-plane row's
+	// is clone-local like the wisps table. A store that loses its clone-local
+	// tables loses those tombstones with the rows.
+	//
+	// ITS LOCK FOOTPRINT IS ITS SIZE. To order itself against a racing create
+	// of an id it retires, a retaining sweep takes, before it deletes, the
+	// create-coordination cell of every id it will retire. Cells are 4096
+	// shards of the id space, shared by unrelated ids, so a sweep of N rows
+	// holds about 4096·(1-e^(-N/4096)) of them until it commits: about 22% of
+	// all shards at N = 1000, about 2.4% at N = 100. Every create, upsert and
+	// import of an explicit id in one of those shards meets the sweep: on
+	// Postgres it waits for the sweep's commit; on a Dolt sql-server, where
+	// there is no lock wait, whichever commits second conflicts and replays
+	// (the stores' sweepers replay a sweep that lost; a large sweep under
+	// heavy create traffic can lose repeatedly). Size Limit to keep the
+	// footprint small — around 100 rows per call — and loop on Remaining.
+	//
+	// A dry run writes no tombstone. A backend that cannot retain ids refuses
+	// the request with *ErrUnsupported rather than sweeping without them.
+	RetainIDs bool
 }
 
 // SweepSkips reports the candidates a sweep declined to delete, bucketed by
@@ -225,6 +270,9 @@ type SweepResult struct {
 	// because of SweepRequest.Limit. Zero when there is no limit or the
 	// backlog fit; a caller loops while it is non-zero.
 	Remaining int
+	// RetainIDs echoes the request: true means every row Swept counts is now
+	// a retired id (under DryRun, would be).
+	RetainIDs bool
 	// ReferencedIDs is a BOUNDED SAMPLE of the ids Skipped.Referenced counts —
 	// at most SweepReferencedSampleLimit of them, in the order the candidate
 	// query returned them. It is a sample and not the set: a caller that needs
@@ -331,6 +379,11 @@ type Sweeper interface {
 	// not-found: an empty set of closed rows is the steady state of a swept
 	// workspace, and it is the answer a scheduled sweep gets every time it
 	// runs after the first.
+	//
+	// WITH RetainIDs THE SET IT DELETED IS THE SET IT RETIRED: the tombstones
+	// are written in the same transaction as the delete, so a failure to write
+	// them deletes nothing, and no row the sweep held back (pinned, protected,
+	// over the limit) is retired.
 	//
 	// A DRY RUN CHANGES NOTHING, including history: an implementation that
 	// records a version-control entry for a sweep records none for a dry run
