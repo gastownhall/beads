@@ -78,7 +78,8 @@ type PushHooks struct {
 	// ContentHash, if set, returns a stable fingerprint of the issue's pushable
 	// fields. When present, the engine binds the hash to the issue's external_ref
 	// and TargetScope (when provided), and persists that fingerprint in local_metadata
-	// after each successful create/update (and whenever ContentEqual reports a
+	// after each fully successful create (no Warnings) or update (and whenever
+	// ContentEqual reports a
 	// match). It consults the fingerprint BEFORE fetching the remote issue: if the
 	// stored content and target still match, the remote fetch and update are
 	// skipped entirely. This avoids the per-issue GET that ContentEqual alone
@@ -1250,7 +1251,15 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 				e.warn("%s (%s)", w, issue.ID)
 			}
 			// Remember what we just pushed so the next sync can skip the fetch.
-			e.recordPushHash(ctx, issue, ref)
+			// A partial-success create (Warnings set) means the remote does not
+			// match local content (e.g. a close that failed to carry), so
+			// caching the desired-state hash here would make the next push
+			// skip the very update that repairs it (gastownhall/beads#5486).
+			// Without a stored hash the next push takes the fetch + update
+			// path and caches only once the remote fully matches.
+			if len(created.Warnings) == 0 {
+				e.recordPushHash(ctx, issue, ref)
+			}
 			stats.Created++
 		} else if !opts.CreateOnly || forceIDs[issue.ID] {
 			// Update existing external issue
