@@ -337,6 +337,29 @@ func TestFederationSyncNotStompedByPeerLastSync(t *testing.T) {
 	if !peerLastSyncSet(t, ctx, store) {
 		t.Fatal("Sync did not stamp federation_peers.last_sync for peer")
 	}
+
+	// Round 2: round 1's post-merge stamps (federation_peers.last_sync and
+	// metadata.last_sync_peer) are still uncommitted. The next Sync must commit
+	// them before fetching, and the fetch must not re-dirty federation_peers,
+	// while the peer changes both tables on rows that cannot conflict.
+	peerExec(
+		"CALL DOLT_PULL('origin', 'main')",
+		"INSERT INTO federation_peers (name, remote_url) VALUES ('peer-of-peer-2', 'file:///tmp/elsewhere-2')",
+		"REPLACE INTO metadata (`key`, value) VALUES ('peer_marker', 'x')",
+		"CALL DOLT_COMMIT('-Am', 'peer adds another peer and a marker')",
+		"CALL DOLT_PUSH('origin', 'main')",
+	)
+	if _, err := store.Sync(ctx, "peer", ""); err != nil {
+		t.Fatalf("second Sync over uncommitted post-merge stamps: %v", err)
+	}
+	if n := countPeerRow("peer-of-peer-2"); n != 1 {
+		t.Fatalf("second Sync did not merge the peer's federation_peers row: %d row(s), want 1", n)
+	}
+	var marker string
+	if err := db.QueryRowContext(ctx,
+		"SELECT value FROM metadata WHERE `key` = 'peer_marker'").Scan(&marker); err != nil {
+		t.Fatalf("second Sync did not merge the peer's metadata row: %v", err)
+	}
 }
 
 // TestFederationFetchDoesNotStampPeerLastSync pins where last_sync is
