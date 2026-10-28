@@ -29,6 +29,7 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/utils"
@@ -165,6 +166,31 @@ func (id initIdentity) Repoints() bool {
 		id.Configured.Server != id.Target.Server ||
 		!initHostsEqual(id.Configured.Host, id.Target.Host) ||
 		id.Configured.Port != id.Target.Port
+}
+
+// refuseUnreadableConfiguredDatabase is the repoint refusal for a configured
+// database that exists but cannot be read: an init that re-targets the
+// workspace must first know what the old database holds, and when it cannot
+// know, it must not run. It is a plain error (exit 1) on purpose: it is not
+// one of the frozen init-safety exit codes because no opt-in lifts it — not
+// --recreate-missing (which authorizes creating where nothing exists, not
+// destroying what cannot be inspected) and not --destroy-token (whose
+// confirmation this very failure made impossible to run). The text names the
+// configured database, its endpoint, the read failure and the target, and no
+// token value (ADR-0002 invariant 4).
+func refuseUnreadableConfiguredDatabase(id initIdentity, cause error) error {
+	configured := id.Configured.Database
+	if configured == "" {
+		configured = configfile.DefaultDoltDatabase
+	}
+	addr := doltutil.PrintedServerAddr(id.Configured.Host, id.Configured.Port)
+	return fmt.Errorf("\n⚠ Refusing to repoint this workspace from database %q at %s to database %q:\n"+
+		"the configured database is present but its issue count could not be read (%v),\n"+
+		"so the destruction a re-initialization would cause cannot be confirmed.\n"+
+		"Neither --recreate-missing nor --destroy-token lifts this refusal.\n"+
+		"Start the Dolt server at %s or fix the connection so the count can run,\n"+
+		"or re-run init without the flags that change the database.\n",
+		configured, addr, id.Target.Database, cause, addr)
 }
 
 // initHostsEqual compares two server hosts for identity: bd's own server

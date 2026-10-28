@@ -246,3 +246,79 @@ func TestInitRepoint_FlaggedEndpointCountsConfigured(t *testing.T) {
 		t.Fatalf("the refused reinit must leave metadata recording %s, got %q", victimDB, got)
 	}
 }
+
+// TestInitRepoint_UnreadableConfiguredDatabaseRefuses pins the repoint rule
+// for a configured database that exists but cannot be read: the reinit must
+// refuse as a plain error naming both databases, and neither opt-in may lift
+// it — --recreate-missing authorizes creating where nothing exists, and a
+// --destroy-token confirmation is exactly what the unreadable count made
+// impossible. The victim's database A is present as local Dolt data behind a
+// dead endpoint; the flags repoint at B with every destructive opt-in passed.
+//
+// Before this rule, the unreadable count read as zero issues and the
+// reinit ran to completion.
+func TestInitRepoint_UnreadableConfiguredDatabaseRefuses(t *testing.T) {
+	const victimDB = "repoint_a"
+	const targetDB = "repoint_b"
+	deadPort, err := testutil.FindFreePort()
+	if err != nil {
+		t.Fatalf("FindFreePort: %v", err)
+	}
+
+	projectDir := t.TempDir()
+	beadsDir := filepath.Join(projectDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := (&configfile.Config{
+		Backend:        configfile.BackendDolt,
+		DoltMode:       configfile.DoltModeServer,
+		DoltServerHost: "127.0.0.1",
+		DoltDatabase:   victimDB,
+		ProjectID:      "repoint-0000-1111-2222-333344445555",
+	}).Save(beadsDir); err != nil {
+		t.Fatalf("save workspace metadata: %v", err)
+	}
+	// Tier-1 evidence that A exists — local Dolt data for it — behind an
+	// endpoint nothing listens on, plus the current-era witness the
+	// legacy-upgrade guard requires.
+	if err := os.MkdirAll(filepath.Join(beadsDir, "dolt", victimDB, ".dolt"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeLocalVersion(filepath.Join(beadsDir, localVersionFile), Version); err != nil {
+		t.Fatalf("write local version: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, doltserver.PortFileName), []byte(strconv.Itoa(deadPort)), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := runExternalServerBD(t, projectDir, initRepointChildEnv(t),
+		"init", "--reinit-local", "--recreate-missing",
+		"--database", targetDB, "--prefix", "rp",
+		"--destroy-token", "DESTROY-rp",
+		"--skip-hooks", "--skip-agents")
+
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+		t.Fatalf("an unreadable configured database must refuse as a plain error (exit 1), got err=%v\n%s", err, out)
+	}
+	for _, want := range []string{"Refusing to repoint", victimDB, targetDB} {
+		if !strings.Contains(out, want) {
+			t.Errorf("refusal must name %q, got:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "Destroy token accepted") {
+		t.Errorf("a --destroy-token must not lift the unreadable-database refusal:\n%s", out)
+	}
+	after, err := configfile.LoadForDiscovery(beadsDir)
+	if err != nil {
+		t.Fatalf("read workspace metadata after the refusal: %v", err)
+	}
+	if after == nil || after.DoltDatabase != victimDB {
+		got := "<nil>"
+		if after != nil {
+			got = after.DoltDatabase
+		}
+		t.Fatalf("the refused reinit must leave metadata recording %s, got %q", victimDB, got)
+	}
+}

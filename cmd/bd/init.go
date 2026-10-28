@@ -3018,7 +3018,16 @@ func runInitReinitPreflight(reinitLocal bool, id initIdentity, prefix, destroyTo
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	count, _, err := countConfiguredIssues(ctx, id)
+	count, present, err := countConfiguredIssues(ctx, id)
+	// A repoint whose configured database is present but unreadable must not
+	// run: the old behavior (treat a read error like an empty database and
+	// skip the confirmation) strands whatever the unreadable database holds
+	// behind the new target with no prompt at all. Scoped to repoints — a
+	// reinit of the same database keeps the missing-database guard as its
+	// safety net.
+	if err != nil && present && id.Repoints() {
+		return refuseUnreadableConfiguredDatabase(id, err)
+	}
 	if err != nil || count == 0 {
 		return nil
 	}
