@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -3081,6 +3082,133 @@ func TestDoltCommandsAdviseAPortForAServerBdDoesNotRun(t *testing.T) {
 						t.Errorf("bd %s contains %q:\n%s", strings.Join(args, " "), banned, out)
 					}
 				}
+			}
+		})
+	}
+}
+
+// positionalRemotePushStore records which push/pull entry point bd dolt
+// push|pull used. The default-remote methods are overridden too, so a
+// regression records the misdirected call instead of panicking on the
+// embedded nil interface.
+type positionalRemotePushStore struct {
+	storage.DoltStorage
+	calls []string
+}
+
+func (m *positionalRemotePushStore) Push(context.Context) error {
+	m.calls = append(m.calls, "Push")
+	return nil
+}
+
+func (m *positionalRemotePushStore) ForcePush(context.Context) error {
+	m.calls = append(m.calls, "ForcePush")
+	return nil
+}
+
+func (m *positionalRemotePushStore) PushRemote(_ context.Context, remote string, force bool) error {
+	m.calls = append(m.calls, fmt.Sprintf("PushRemote(%s,force=%v)", remote, force))
+	return nil
+}
+
+func (m *positionalRemotePushStore) ListRemotes(context.Context) ([]storage.RemoteInfo, error) {
+	return []storage.RemoteInfo{
+		{Name: "origin", URL: "git+ssh://git@github.com/example/widgets.git"},
+		{Name: "1st", URL: "git+ssh://git@github.com/example/widgets1.git"},
+	}, nil
+}
+
+// TestDoltPushPositionalRemoteIsNotSilentlyIgnored reproduces GH#3720:
+// `bd dolt push 1st` printed "Push complete." after pushing to the DEFAULT
+// remote, because the positional remote name was silently dropped. Each row
+// runs the command as cobra does: ValidateArgs, then RunE only if it passed.
+func TestDoltPushPositionalRemoteIsNotSilentlyIgnored(t *testing.T) {
+	// Cannot be parallel: modifies process-global store, config and the
+	// shared push/pull command flags.
+	tests := []struct {
+		name  string
+		cmd   *cobra.Command
+		args  []string
+		flags map[string]string
+		// wantValidateErr: substrings of the stderr error ValidateArgs must
+		// fail with. Empty means validation must pass and RunE runs.
+		wantValidateErr []string
+		wantCalls       []string
+		wantOut         string
+	}{
+		{
+			name:      "AC-1/push_positional",
+			cmd:       doltPushCmd,
+			args:      []string{"1st"},
+			wantCalls: []string{"PushRemote(1st,force=false)"},
+			wantOut:   `Pushing to Dolt remote "1st"...`,
+		},
+		{
+			name:      "AC-1/push_positional_force",
+			cmd:       doltPushCmd,
+			args:      []string{"1st"},
+			flags:     map[string]string{"force": "true"},
+			wantCalls: []string{"PushRemote(1st,force=true)"},
+			wantOut:   `Pushing to Dolt remote "1st"...`,
+		},
+		{
+			name:            "AC-1/push_empty_positional_refused",
+			cmd:             doltPushCmd,
+			args:            []string{""},
+			wantValidateErr: []string{"remote name is empty"},
+		},
+		{
+			name:            "AC-1/push_blank_positional_refused",
+			cmd:             doltPushCmd,
+			args:            []string{"  "},
+			wantValidateErr: []string{"remote name is empty"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			saveAndRestoreGlobals(t)
+			resetCommandContext()
+			resetCommandFlags(tt.cmd)
+			t.Cleanup(func() { resetCommandFlags(tt.cmd) })
+
+			fake := &positionalRemotePushStore{}
+			store = fake
+
+			config.ResetForTesting()
+			t.Cleanup(func() { config.ResetForTesting() })
+			if err := config.Initialize(); err != nil {
+				t.Fatalf("config.Initialize: %v", err)
+			}
+			for name, value := range tt.flags {
+				if err := tt.cmd.Flags().Set(name, value); err != nil {
+					t.Fatalf("set --%s=%s: %v", name, value, err)
+				}
+			}
+
+			var validateErr error
+			stderr := captureStderr(t, func() { validateErr = tt.cmd.ValidateArgs(tt.args) })
+			var out string
+			if len(tt.wantValidateErr) > 0 {
+				if validateErr == nil {
+					t.Fatalf("ValidateArgs(%q) = nil, want an error", tt.args)
+				}
+				for _, want := range tt.wantValidateErr {
+					if !strings.Contains(stderr, want) {
+						t.Errorf("ValidateArgs(%q) stderr = %q, want it to contain %q", tt.args, stderr, want)
+					}
+				}
+			} else {
+				if validateErr != nil {
+					t.Fatalf("ValidateArgs(%q) = %v (stderr %q), want nil", tt.args, validateErr, stderr)
+				}
+				out = captureStdout(t, func() error { return tt.cmd.RunE(tt.cmd, tt.args) })
+				if !strings.Contains(out, tt.wantOut) {
+					t.Errorf("output = %q, want it to contain %q", out, tt.wantOut)
+				}
+			}
+			if !slices.Equal(fake.calls, tt.wantCalls) {
+				t.Errorf("store calls = %q, want %q; output: %q", fake.calls, tt.wantCalls, out)
 			}
 		})
 	}

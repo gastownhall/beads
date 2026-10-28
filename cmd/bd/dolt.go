@@ -697,8 +697,35 @@ func printDivergedHistoryGuidance(operation string) {
 	fmt.Fprintln(os.Stderr, "existing remote instead of 'bd init' to avoid divergent histories.")
 }
 
+// remoteFromArgs resolves the remote `bd dolt push|pull` targets: the
+// optional positional name, else --remote. "" means the default remote.
+// Cobra's default ArbitraryArgs used to accept `bd dolt push 1st` and RunE
+// dropped the name, so the push went to the default remote (GH#3720).
+func remoteFromArgs(cmd *cobra.Command, args []string) (string, error) {
+	flagRemote, _ := cmd.Flags().GetString("remote")
+	if len(args) == 0 {
+		return flagRemote, nil
+	}
+	remote := args[0]
+	// An empty name (`bd dolt push "$R"` with R unset) must not fall back to
+	// the default remote: that is the same silent misdirection.
+	if strings.TrimSpace(remote) == "" {
+		return "", HandleError("remote name is empty: name a remote (see 'bd dolt remote list') or omit the argument to use the default")
+	}
+	return remote, nil
+}
+
+// validateRemoteArg runs remoteFromArgs as cobra's Args validation, which
+// executes before PersistentPreRunE opens the store, so a bad remote argument
+// fails before any server start or migration (as validateCreateArgs does).
+func validateRemoteArg(cmd *cobra.Command, args []string) error {
+	_, err := remoteFromArgs(cmd, args)
+	return err
+}
+
 var doltPushCmd = &cobra.Command{
 	Use:           "push",
+	Args:          cobra.MatchAll(cobra.MaximumNArgs(1), validateRemoteArg),
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	Short:         "Push commits to Dolt remote",
@@ -739,7 +766,10 @@ The remote must already exist (see 'bd dolt remote add').`,
 			return HandleError("no store available")
 		}
 		force, _ := cmd.Flags().GetBool("force")
-		remote, _ := cmd.Flags().GetString("remote")
+		remote, err := remoteFromArgs(cmd, args)
+		if err != nil {
+			return err
+		}
 		if remote != "" {
 			fmt.Printf("Pushing to Dolt remote %q...\n", remote)
 			if err := st.PushRemote(ctx, remote, force); err != nil {
