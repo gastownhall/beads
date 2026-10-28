@@ -5,6 +5,8 @@
 package sqlclass
 
 import (
+	"strings"
+
 	"github.com/dolthub/vitess/go/vt/sqlparser"
 )
 
@@ -47,7 +49,38 @@ func Classify(query string) Kind {
 	if err != nil || stmt == nil {
 		return Mixed
 	}
-	return classify(stmt)
+	kind := classify(stmt)
+	if kind == Read && callsDoltWriteFunction(stmt) {
+		return Mixed
+	}
+	return kind
+}
+
+// callsDoltWriteFunction reports whether the parsed statement calls a
+// dolt_-prefixed function anywhere in its tree: Dolt exposes mutating
+// procedures as SELECT-callable functions, and a read transaction would roll
+// their writes back while a read routing skips the read-only guard. CTE
+// bodies, subqueries, WHERE clauses and the statement inside EXPLAIN all
+// count. Letter case and backtick quoting are absorbed by Lowered, and a
+// database qualifier is ignored. System tables (dolt_log, dolt_conflicts)
+// and table functions (dolt_diff(...)) are not function calls, and comments
+// and string literals are not in the parsed tree, so none of them trip it.
+func callsDoltWriteFunction(stmt sqlparser.Statement) bool {
+	found := false
+	visit := func(node sqlparser.SQLNode) (kontinue bool, err error) {
+		fn, ok := node.(*sqlparser.FuncExpr)
+		if !ok {
+			return true, nil
+		}
+		if strings.HasPrefix(fn.Name.Lowered(), "dolt_") {
+			found = true
+			return false, nil
+		}
+		return true, nil
+	}
+	// The visit function never returns an error, so Walk's error is always nil.
+	_ = sqlparser.Walk(visit, stmt)
+	return found
 }
 
 func classify(stmt sqlparser.Statement) Kind {

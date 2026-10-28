@@ -65,3 +65,33 @@ func TestClassify(t *testing.T) {
 		})
 	}
 }
+
+// Dolt exposes mutating procedures as SELECT-callable functions. They change
+// repository state, so they must not be routed as reads: a Read skips the
+// read-only guard and runs in a rolled-back read transaction (GH#6230).
+func TestClassifyDoltProcedureSelectIsNotRead(t *testing.T) {
+	for _, query := range []string{
+		"SELECT DOLT_COMMIT('-Am', 'msg')",
+		"SELECT DOLT_RESET('--hard')",
+		"SELECT DOLT_CHECKOUT('main')",
+		"SELECT DOLT_MERGE('feature')",
+		"select dolt_reset('--hard')",
+		"SELECT `dolt_checkout`('main')",
+		"SELECT mydb.dolt_merge('feature')",
+		"SELECT id FROM issues WHERE DOLT_COMMIT('-Am','x') = 0",
+		"SELECT (SELECT DOLT_RESET('--hard'))",
+		"WITH t AS (SELECT DOLT_COMMIT('-Am','x') AS h) SELECT h FROM t",
+		"SELECT 1 UNION SELECT DOLT_PUSH('origin','main')",
+		"SELECT * FROM dolt_diff(DOLT_COMMIT('-Am','x'), 'WORKING', 'issues')",
+		"SHOW TABLES WHERE DOLT_COMMIT('-Am','x') = 0",
+		"EXPLAIN SELECT DOLT_COMMIT('-Am','x')",
+		"EXPLAIN ANALYZE SELECT DOLT_COMMIT('-Am','x')",
+		// A dolt_ name the pinned engine does not register still fails
+		// closed: a newer server may expose it as a SELECT-callable write.
+		"SELECT DOLT_FUTURE_PROC()",
+	} {
+		if got := Classify(query); got == Read {
+			t.Errorf("Classify(%q) = %v, want a committing kind (mixed)", query, got)
+		}
+	}
+}
