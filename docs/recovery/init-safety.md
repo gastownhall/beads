@@ -113,6 +113,16 @@ Refusing to destroy N issues in non-interactive mode.
   See 'bd help init-safety' for the required --destroy-token format.
 ```
 
+Or, re-initializing with no TTY over a workspace whose issues could not be
+counted:
+
+```
+  Existing issues: unknown (could not count them: <error>)
+...
+Refusing to destroy an unknown number of issues in non-interactive mode.
+  See 'bd help init-safety' for the required --destroy-token format.
+```
+
 **Why this happens**
 
 You're running non-interactively (CI, agent, piped input) and asked for a
@@ -124,7 +134,8 @@ Both destructive paths need the token, not just the cross-boundary one:
 
 - `--discard-remote`, which would discard the remote's Dolt history.
 - plain `--reinit-local` over existing local issues, which would destroy
-  them (see [init-local-exists](#init-local-exists)).
+  them, or over a workspace whose issues could not be counted (see
+  [init-local-exists](#init-local-exists)).
 
 **Recovery paths**
 
@@ -159,8 +170,9 @@ for why the token is never echoed in `bd`'s error messages.
 
 **Symptom**
 
-Interactive (TTY): you declined the typed `destroy N issues` confirmation.
-This is the only path that exits `11`.
+Interactive (TTY): you declined the typed `destroy N issues` confirmation,
+or `destroy all issues` when the issues could not be counted. This is the
+only path that exits `11`.
 
 ```
 Type 'destroy N issues' to confirm:
@@ -174,6 +186,11 @@ Refusing to destroy N issues in non-interactive mode.
   See 'bd help init-safety' for the required --destroy-token format.
 ```
 
+The warning above either prompt names the `.beads` directory being replaced
+(`Target:`). When the issues could not be counted it reads
+`Existing issues: unknown (could not count them: <error>)`, and the
+non-interactive refusal says `an unknown number of issues`.
+
 **Why this happens**
 
 Local `.beads/` has existing issues. `bd init --reinit-local` (or its
@@ -181,6 +198,15 @@ deprecated alias `--force`) would permanently destroy them, so `bd` demands
 an explicit confirmation first: the typed prompt in a TTY, and a
 `--destroy-token` when there is no TTY. This applies to `--reinit-local` on
 its own — `--discard-remote` is not required to trigger it.
+
+`bd` asks even when it cannot count the issues (a store that will not open,
+an unreachable server, a count that times out on a large database): an
+uncountable database is not an empty one, and the databases most likely to
+fail the count are the ones with the most to lose. It proceeds without asking
+only when there is provably nothing to destroy: no `.beads/`, one without
+beads project files, a database with no issues, or a server-mode database
+with no local copy that its reachable server reports absent. `bd doctor`
+helps find out why the count failed.
 
 A plain `bd init` over an initialized workspace does not reach either code:
 the local-safety guard refuses it with an ordinary error before this point.
