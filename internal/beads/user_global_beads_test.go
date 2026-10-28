@@ -315,3 +315,33 @@ func TestImplicitDiscoveryKeepsHomeRepoBeadsDir(t *testing.T) {
 		})
 	}
 }
+
+// TestExplicitBeadsDirSelectsUserGlobalBeadsDir: naming <home>/.beads through
+// BEADS_DIR or BEADS_DB still selects it from anywhere under home.
+func TestExplicitBeadsDirSelectsUserGlobalBeadsDir(t *testing.T) {
+	for _, env := range []string{"BEADS_DIR", "BEADS_DB"} {
+		t.Run(env, func(t *testing.T) {
+			home := userGlobalBeadsHome(t)
+			beadsDir := filepath.Join(home, ".beads")
+			t.Setenv(env, beadsDir)
+			chdirForDiscovery(t, filepath.Join(home, "notes"))
+
+			if env == "BEADS_DIR" {
+				if got := FindBeadsDir(); got != beadsDir {
+					t.Errorf("FindBeadsDir() = %q, want %q", got, beadsDir)
+				}
+				// Reachable only by being named, like any other named store.
+				rc, err := GetRepoContextAllowingNoGit()
+				if err != nil {
+					t.Fatalf("GetRepoContextAllowingNoGit: %v", err)
+				}
+				if !rc.IsRedirected {
+					t.Errorf("RepoContext.IsRedirected = false, want true for a BEADS_DIR-named store")
+				}
+			}
+			if got, want := FindDatabasePath(), filepath.Join(beadsDir, "embeddeddolt"); got != want {
+				t.Errorf("FindDatabasePath() = %q, want %q", got, want)
+			}
+		})
+	}
+}
