@@ -293,6 +293,49 @@ func (s *testSuite) TestParityReadyBlockedDescendants() {
 	s.ElementsMatch([]string{"bd-par-desc-x"}, dom, "new child of a blocked parent must not be ready")
 }
 
+// plantStaleBlocked sets is_blocked = 1 on issue rows directly, the state an
+// outside merge or a failed post-pull recompute can leave (GH#3268).
+func (s *testSuite) plantStaleBlocked(ids ...string) {
+	for _, id := range ids {
+		res, err := s.Runner().ExecContext(s.Ctx(), "UPDATE issues SET is_blocked = 1 WHERE id = ?", id)
+		s.Require().NoError(err)
+		n, err := res.RowsAffected()
+		s.Require().NoError(err)
+		s.Require().EqualValues(1, n, "plant is_blocked on %s", id)
+	}
+}
+
+// readyOnBothStacks reads ready work through the direct stack, the domain
+// stack and the domain counts path, requires all three to agree, and returns
+// the ids.
+func (s *testSuite) readyOnBothStacks(label string) []string {
+	classic := idsOf(s.classicReady(types.WorkFilter{}))
+	dom := idsOf(s.domainReady(types.WorkFilter{}).Items)
+	s.Equal(classic, dom, "%s: direct and domain ready must return the same sequence", label)
+	counts, err := s.issueRepo().GetReadyWorkWithCounts(s.Ctx(), types.WorkFilter{})
+	s.Require().NoError(err)
+	s.ElementsMatch(dom, iwcIDs(counts), "%s: domain ready counts must list the same rows", label)
+	return dom
+}
+
+// Case 4c (GH#3268): an open issue with no dependency rows but a stale
+// is_blocked = 1 must be ready on both stacks. No recompute leg can mark such
+// a row, so ready reads around the flag; at base both stacks hid it.
+func (s *testSuite) TestParityReadyStaleEdgelessFlag() {
+	base := s.parityBase()
+	for n, id := range []string{"bd-par-stale-a", "bd-par-stale-r"} {
+		minute := n
+		s.seedParityIssue(id, func(i *types.Issue) {
+			i.CreatedAt = base.Add(time.Duration(minute) * time.Minute)
+		}, false)
+	}
+	s.plantStaleBlocked("bd-par-stale-a")
+
+	ready := s.readyOnBothStacks("stale edgeless flag")
+	s.ElementsMatch([]string{"bd-par-stale-a", "bd-par-stale-r"}, ready,
+		"an edgeless issue with a stale is_blocked flag is ready work")
+}
+
 // Case 5: ready limit boundary — membership parity at the cut, and the domain
 // HasMore flag agrees with what the direct stack's unlimited read implies.
 func (s *testSuite) TestParityReadyLimitBoundary() {
