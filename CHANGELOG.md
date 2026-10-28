@@ -1056,8 +1056,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - `bd dolt start` no longer starts bd's own Dolt server on a workspace whose
-  server a setting declares externally managed, such as `dolt_server_port` in
-  `.beads/metadata.json` (#6585). It used to put a bd-owned server over
+  server a setting declares externally managed: `dolt_server_port` in
+  `.beads/metadata.json`, `BEADS_DOLT_SERVER_PORT` or the legacy
+  `BEADS_DOLT_PORT`, or `BEADS_DOLT_SERVER_MODE=1` (#6585). It used to put a bd-owned server over
   `.beads/dolt` on that server's port, a second, empty database that answered
   in place of the real one. It now refuses with the typed
   `external.dolt_start.conflict` error (reason `design`, exit 1), which names

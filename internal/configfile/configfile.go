@@ -529,17 +529,22 @@ func (c *Config) PortImpliesServerMode() bool {
 // mirroring Config.GetDoltServerPort's env precedence without needing a
 // loaded Config. Returns 0 when neither names a valid positive integer.
 func doltServerPortFromEnv() int {
-	if p := os.Getenv("BEADS_DOLT_SERVER_PORT"); p != "" {
-		if port, err := strconv.Atoi(p); err == nil && port > 0 {
-			return port
+	_, port := DoltServerPortEnv()
+	return port
+}
+
+// DoltServerPortEnv is doltServerPortFromEnv with the name of the variable
+// that named the port, for a caller that reports which setting declared the
+// server: ("", 0) when neither names a valid positive integer.
+func DoltServerPortEnv() (name string, port int) {
+	for _, name := range []string{"BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_PORT"} {
+		if p := os.Getenv(name); p != "" {
+			if port, err := strconv.Atoi(p); err == nil && port > 0 {
+				return name, port
+			}
 		}
 	}
-	if p := os.Getenv("BEADS_DOLT_PORT"); p != "" {
-		if port, err := strconv.Atoi(p); err == nil && port > 0 {
-			return port
-		}
-	}
-	return 0
+	return "", 0
 }
 
 func (c *Config) IsDoltProxiedServerMode() bool {

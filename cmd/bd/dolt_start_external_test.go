@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -134,5 +135,37 @@ func TestDoltStartExternalRefusalIgnoresForceAndAutoStart(t *testing.T) {
 				})
 			}
 		}
+	}
+}
+
+// TestDoltStartExternalDeclarations covers the declarations other than
+// metadata.json's port: a port environment variable, or
+// BEADS_DOLT_SERVER_MODE=1 with config.yaml's dolt.port choosing the port.
+// Each gets the same refusal, naming the variable that declared the server.
+func TestDoltStartExternalDeclarations(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		envName string
+		yaml    bool // dolt.port in config.yaml names the port, not the variable
+		setting string
+	}{
+		{"BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_SERVER_PORT", false, "BEADS_DOLT_SERVER_PORT declares the Dolt server at "},
+		{"legacy BEADS_DOLT_PORT", "BEADS_DOLT_PORT", false, "BEADS_DOLT_PORT declares the Dolt server at "},
+		{"BEADS_DOLT_SERVER_MODE=1", "BEADS_DOLT_SERVER_MODE", true, "BEADS_DOLT_SERVER_MODE=1 declares this workspace's Dolt server externally managed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newExternalInitFixture(t)
+			port := freeLoopbackPort(t)
+			beadsDir := namedPortWorkspace(t, f, 0)
+			value := strconv.Itoa(port)
+			if tc.yaml {
+				namedPortConfigYaml(t, beadsDir, port)
+				value = "1"
+			}
+			f.env = append(f.env, tc.envName+"="+value)
+
+			res := f.run("", "--json", "dolt", "start")
+			requireExternalStartRefusal(t, res, beadsDir, tc.setting, tcpEndpoint(port).addr)
+		})
 	}
 }

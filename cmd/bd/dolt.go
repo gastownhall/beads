@@ -1004,12 +1004,12 @@ lifecycle and starts it on demand, so a server started here would be a second,
 unsupervised one over the same data directory. Use 'bd dolt status' to see what
 is running and 'bd dolt stop' to shut it down.
 
-Not available when a setting declares the server externally managed, such as
-dolt_server_port in .beads/metadata.json: bd neither starts nor manages that
-server, so a server started here would serve .beads/dolt on its port in place
-of its database. The refusal names the setting; --force does not bypass it.
-Start that server where it is managed, or remove the setting to let bd manage
-one.
+Not available when a setting declares the server externally managed:
+dolt_server_port in .beads/metadata.json, a port environment variable, or
+BEADS_DOLT_SERVER_MODE=1. bd neither starts nor manages that server, so a
+server started here would serve .beads/dolt on its port in place of its
+database. The refusal names the setting; --force does not bypass it. Start
+that server where it is managed, or remove the setting to let bd manage one.
 
 With dolt.auto-start: false the server is expected to be managed outside bd, so
 a start that would create a new, empty Dolt database (the data directory is

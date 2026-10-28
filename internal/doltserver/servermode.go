@@ -224,10 +224,32 @@ func ExternallyManagedBy(beadsDir string) (setting string, sole bool) {
 		return "", false
 	}
 	switch check {
+	case checkModeEnv:
+		return "BEADS_DOLT_SERVER_MODE=1", false
+	case checkHost:
+		return externalHostSetting(beadsDir), false
+	case checkPortEnv:
+		name, _ := configfile.DoltServerPortEnv()
+		return name, false
 	case checkMetadataPort:
 		return "dolt_server_port in " + remedy.PrintedValue(configfile.ConfigPath(beadsDir)), true
 	}
 	return "", false
+}
+
+// externalHostSetting names the setting that made check 2b fire, in
+// configfile.Config.HostImpliesServerMode's order.
+func externalHostSetting(beadsDir string) string {
+	if os.Getenv("BEADS_DOLT_SERVER_HOST") != "" {
+		return "BEADS_DOLT_SERVER_HOST"
+	}
+	metadataPath := configfile.ConfigPath(beadsDir)
+	if _, err := os.Stat(metadataPath); err == nil {
+		if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil && cfg.DoltServerHost != "" {
+			return "dolt_server_host in " + remedy.PrintedValue(metadataPath)
+		}
+	}
+	return "dolt.host in config.yaml"
 }
 
 // ErrExternallyManaged matches EnsureRunning's refusal to start a server for a
