@@ -673,19 +673,32 @@ func (s *DoltStore) addWispDependency(ctx context.Context, dep *types.Dependency
 	defer clearJournalScope()
 
 	kind := issueops.ClassifyDepTarget(ctx, tx, dep, isCrossPrefix)
-	// Wisp source/event tables are dolt_ignored (committed with the SQL tx, not
-	// via selective doltAddAndCommit), so the event-written flag is not needed here.
-	if _, err := issueops.AddDependencyInTx(ctx, tx, dep, actor, issueops.AddDependencyOpts{
+	result, err := issueops.AddDependencyInTxWithResult(ctx, tx, dep, actor, issueops.AddDependencyOpts{
 		SourceTable:   "wisps",
 		WriteTable:    "wisp_dependencies",
 		IsCrossPrefix: isCrossPrefix,
 		TargetKind:    &kind,
 		EmitEvent:     emitEvent,
-	}); err != nil {
+	})
+	if err != nil {
 		return err
 	}
 
-	return s.commitSQLTx(ctx, "commit add wisp dependency", tx)
+	if err := s.commitSQLTx(ctx, "commit add wisp dependency", tx); err != nil {
+		return err
+	}
+	// The wisp source/event/dependency tables are dolt_ignored and ride the SQL
+	// commit, but the add's derived blocked-state maintenance can still flip
+	// DURABLE issues rows — a wisp parent that blocks darkens its durable
+	// descendants (issueops.AffectedByDepChangeForWispInTx). Publish that flip
+	// with a post-tx Dolt commit, the ordering runIssueOperationTxWithMessage
+	// requires; without it the flip sits in the working set with no later
+	// dependency commit to sweep it (GH#6647). A publication failure is
+	// counted and logged, never returned: the edge is already durable.
+	if result.Blocked.IssueRowsChanged {
+		s.commitDurableBlockedFlipPostTx(ctx, "dependency: add "+string(dep.Type)+" "+dep.IssueID+" -> "+dep.DependsOnID)
+	}
+	return nil
 }
 
 // getWispDependencies retrieves issues that a wisp depends on.

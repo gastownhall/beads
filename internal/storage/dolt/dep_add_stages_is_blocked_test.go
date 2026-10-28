@@ -3,6 +3,7 @@ package dolt
 import (
 	"testing"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -66,5 +67,58 @@ func TestRemoveDependency_StagesUnblockFlip(t *testing.T) {
 	}
 	if isBlockedAtHEAD(ctx, t, store, "bm-w") {
 		t.Fatalf("committed HEAD still has bm-w is_blocked=1 with no blocker left")
+	}
+}
+
+// TestAddWispDependency_StagesDurableIsBlockedFlip is the wisp-source leg of
+// GH#6647: a wisp dependency's own tables are dolt_ignored and ride the SQL
+// commit, but its derived blocked-state maintenance can still flip DURABLE
+// issues rows — a wisp parent that blocks darkens its durable children. Those
+// flips were never Dolt-committed at all, so they sat in the working set
+// forever.
+func TestAddWispDependency_StagesDurableIsBlockedFlip(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	seedIssues(ctx, t, store, "test-wispdep-w", "test-wispdep-d", "test-wispdep-a")
+	// W becomes a wisp FIRST, so the parent-child edge below targets its wisp
+	// row with the typed wisp target column.
+	if err := store.UpdateIssue(ctx, "test-wispdep-w", map[string]interface{}{"wisp": true}, "tester"); err != nil {
+		t.Fatalf("demote W to a wisp: %v", err)
+	}
+	// D is a durable child of the wisp parent W.
+	if err := store.AddDependency(ctx, &types.Dependency{IssueID: "test-wispdep-d", DependsOnID: "test-wispdep-w", Type: types.DepParentChild}, "tester"); err != nil {
+		t.Fatalf("seed parent-child edge: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'seed wisp parent')"); err != nil && !isDoltNothingToCommit(err) {
+		t.Fatalf("commit seed: %v", err)
+	}
+	requireCleanTables(ctx, t, store, "issues", "dependencies")
+	if isBlocked(ctx, t, store.db, "test-wispdep-d") {
+		t.Fatal("precondition: an open wisp parent alone must not block its child")
+	}
+
+	// W blocks on A: the blocked parent darkens its durable child D, and that
+	// flip is on the issues table — it must reach HEAD.
+	if err := store.AddDependencyWithOptions(ctx, &types.Dependency{IssueID: "test-wispdep-w", DependsOnID: "test-wispdep-a", Type: types.DepBlocks}, "tester", storage.DependencyAddOptions{}); err != nil {
+		t.Fatalf("AddDependencyWithOptions (wisp source): %v", err)
+	}
+	if !isBlocked(ctx, t, store.db, "test-wispdep-d") {
+		t.Fatal("precondition: the wisp-parent blocks edge must block the durable child in the working set")
+	}
+	requireCleanTables(ctx, t, store, "issues")
+	if !isBlockedAtHEAD(ctx, t, store, "test-wispdep-d") {
+		t.Fatal("committed HEAD has test-wispdep-d is_blocked=0 under a blocked parent")
+	}
+
+	// Removing the edge unblocks the parent and with it the child — same rule.
+	if err := store.RemoveDependencyWithOptions(ctx, "test-wispdep-w", "test-wispdep-a", "tester", storage.DependencyRemoveOptions{}); err != nil {
+		t.Fatalf("RemoveDependencyWithOptions (wisp source): %v", err)
+	}
+	requireCleanTables(ctx, t, store, "issues")
+	if isBlockedAtHEAD(ctx, t, store, "test-wispdep-d") {
+		t.Fatal("committed HEAD still has test-wispdep-d is_blocked=1 with no blocker left")
 	}
 }

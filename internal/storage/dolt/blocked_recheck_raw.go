@@ -3,9 +3,26 @@ package dolt
 import (
 	"context"
 	"database/sql"
+	"log"
 
 	"github.com/steveyegge/beads/internal/storage/issueops"
 )
+
+// commitDurableBlockedFlipPostTx publishes, as its own post-tx Dolt commit,
+// the durable `issues` rows a wisp-plane dependency write's blocked-state
+// maintenance flipped. Wisp writers run on raw transactions with no selective
+// doltAddAndCommit of their own (their tables are dolt_ignored), so without
+// this the flip sits dirty in the working set with no later dependency commit
+// to sweep it (GH#6647). A failure is counted and logged, never returned — the
+// write is already durable, and the flip rides the next Dolt commit on the
+// branch (runIssueOperationTxWithMessage's trailing-commit contract).
+func (s *DoltStore) commitDurableBlockedFlipPostTx(ctx context.Context, commitMsg string) {
+	if err := s.doltAddAndCommitPostTx(ctx, []string{"issues"}, commitMsg); err != nil {
+		doltMetrics.postTxCommitDropped.Add(ctx, 1)
+		log.Printf("dolt: post-tx dolt commit failed for %q (wisp dependency write already committed; is_blocked change rides the next dolt commit): %v",
+			commitMsg, err)
+	}
+}
 
 // settleBlockedRecheck runs the post-commit blocked-state recheck of what a
 // committed write recorded (gastownhall/beads#6716) and logs a failure

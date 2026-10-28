@@ -123,12 +123,22 @@ func (s *DoltStore) RemoveDependencyWithOptions(ctx context.Context, issueID, de
 			defer clearVersionScope()
 			clearRecheckScope := issueops.ScopeBlockedRecheckTransaction(tx)
 			defer clearRecheckScope()
-			if _, err := issueops.RemoveDependencyInTx(ctx, tx, issueID, dependsOnID, actor, rmOpts.EmitEvent); err != nil {
+			writeResult, err := issueops.RemoveDependencyInTxWithResult(ctx, tx, issueID, dependsOnID, actor, rmOpts.EmitEvent)
+			if err != nil {
 				return err
 			}
-			if err := s.commitSQLTxAndRecheck(ctx, "commit remove wisp dependency", tx); err != nil {
+			if err := s.commitSQLTx(ctx, "commit remove wisp dependency", tx); err != nil {
 				return err
 			}
+			// The wisp planes are dolt_ignored and rode the SQL commit, but the
+			// removal's recompute can have flipped DURABLE issues rows (an
+			// unblocked wisp parent undarkens its durable descendants). Publish
+			// that flip before the recheck settles, so a recheck's own commit
+			// still comes last (GH#6647).
+			if writeResult.Blocked.IssueRowsChanged {
+				s.commitDurableBlockedFlipPostTx(ctx, "dependency: remove "+issueID+" -> "+dependsOnID)
+			}
+			s.settleBlockedRecheck(ctx, issueops.TakeBlockedRecheck(tx))
 			return nil
 		}
 

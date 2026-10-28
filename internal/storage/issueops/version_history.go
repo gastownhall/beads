@@ -195,8 +195,12 @@ func VersionedHistoryEnabledFor(tx DBTX) bool {
 // already staged; on the dependency paths it is not, which is the case this
 // list exists for. Note that staging `issues` there is gated on versioned
 // history being active (see the store-side callers), so it does not widen what
-// an ordinary dep-add commit contains — the pre-existing unstaged-`issues`
-// gap on those paths is bd-2y9ke, and deliberately still theirs to fix.
+// an ordinary dep-add commit contains. The separate gap — a dependency write
+// whose derived blocked-state maintenance flipped a durable `issues` row
+// without staging it — is closed: those paths stage `issues` when and only
+// when a row actually flipped (GH#6647). This list still adds `issues` for the
+// mint's own write, e.g. a dep add that mints a version but flips no
+// is_blocked row.
 func VersionedHistoryStagedTables() []string {
 	return []string{"issue_versions", "store_epoch", "issues"}
 }

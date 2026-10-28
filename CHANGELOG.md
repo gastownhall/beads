@@ -1027,6 +1027,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd dep add` and `bd dep remove` now commit the `is_blocked` flip with
+  the edge** (#6647, reported by @bee-ghosttrack). Every dependency write
+  whose derived blocked-state maintenance changed a durable `issues` row
+  staged only the dependency and event tables for its Dolt commit, so under
+  `dolt.auto-commit = on` the flip stayed uncommitted in the working set:
+  committed history said a blocked bead was open (what a `bd dolt push`, a
+  peer pull, a branch diff, or a backup saw) and an unblocked one was still
+  blocked, and `bd recompute-blocked` refused from then on until some later
+  write happened to stage `issues`. The flip — or the unblock a removal
+  caused, including the durable descendants a wisp-source edge darkens or
+  undarkens — now rides the same Dolt commit as the edge that caused it,
+  while a write that changed no `issues` row still stages nothing beyond
+  its own tables, so a dependency commit cannot sweep unrelated pending
+  `issues` rows (#2455).
 - `bd gitlab pull` no longer overwrites a bead linked to another GitLab
   project's issue with the same number, or puts that issue's dependency
   links on it. Issue IIDs are only unique within a project, but when the
