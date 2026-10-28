@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -1250,7 +1251,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			plannedDBPathAbs = filepath.Dir(plannedDBPathAbs)
 		}
 		initGateHandle, gateErr := acquireInitMutationGate(rootCtx, beadsDirAbs, plannedDBPathAbs, func() error {
-			return runInitReinitPreflight(reinitLocal, destroyTokenPrefix, destroyToken)
+			return runInitReinitPreflight(reinitLocal, reinitCountBeadsDir(), destroyTokenPrefix, destroyToken)
 		})
 		if gateErr != nil {
 			return gateErr
@@ -2994,18 +2995,22 @@ Aborting.`, dbPath, prefix)
 	return nil // No database found, safe to init
 }
 
-// countExistingIssues attempts to connect to the existing database and count
-// issues. Returns 0 if the database is unreachable or empty. Used by --force
-// safeguard to show users what they're about to destroy.
-func countExistingIssues(_ string) (int, error) {
-	var beadsDir string
+// reinitCountBeadsDir is the workspace the --reinit-local/--force preflight
+// counts: BEADS_DIR, else the discovered workspace. "" when there is none.
+func reinitCountBeadsDir() string {
 	if envBeadsDir := os.Getenv("BEADS_DIR"); envBeadsDir != "" {
-		beadsDir = utils.CanonicalizePath(envBeadsDir)
-	} else {
-		beadsDir = beads.FindBeadsDir()
-		if beadsDir == "" {
-			return 0, nil
-		}
+		return utils.CanonicalizePath(envBeadsDir)
+	}
+	return beads.FindBeadsDir()
+}
+
+// countReinitTargetIssues counts the issues in beadsDir, the workspace a
+// --reinit-local/--force re-initialization is about to replace, so the
+// confirmation can show what will be destroyed. An error means the issues
+// could not be counted, which is not evidence that there are none.
+func countReinitTargetIssues(beadsDir string) (int, error) {
+	if beadsDir == "" {
+		return 0, nil
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -3027,31 +3032,56 @@ func countExistingIssues(_ string) (int, error) {
 	return stats.TotalIssues, nil
 }
 
-// runInitReinitPreflight confirms the destructive local replacement while the
-// caller holds init's complete exclusive gate set.
-func runInitReinitPreflight(reinitLocal bool, prefix, destroyToken string) error {
+// runInitReinitPreflight confirms the destructive local replacement of
+// beadsDir while the caller holds init's complete exclusive gate set. It
+// proceeds without asking only when the count succeeds and finds nothing: a
+// workspace whose issues cannot be counted may hold any number of them.
+func runInitReinitPreflight(reinitLocal bool, beadsDir, prefix, destroyToken string) error {
 	if !reinitLocal {
 		return nil
 	}
-	count, err := countExistingIssues(prefix)
-	if err != nil || count == 0 {
+	count, err := countReinitTargetIssues(beadsDir)
+	if err == nil && count == 0 {
 		return nil
 	}
+	return confirmReinitDestroy(os.Stderr, os.Stdin, term.IsTerminal(int(os.Stdin.Fd())), beadsDir, count, err, prefix, destroyToken)
+}
 
-	fmt.Fprintf(os.Stderr, "\n%s Re-initializing will destroy the existing database.\n\n", ui.RenderWarn("WARNING:"))
-	fmt.Fprintf(os.Stderr, "  Existing issues: %d\n\n", count)
-	fmt.Fprintf(os.Stderr, "  This action CANNOT be undone. All issues, dependencies, and\n")
-	fmt.Fprintf(os.Stderr, "  Dolt commit history will be permanently lost.\n\n")
-	fmt.Fprintf(os.Stderr, "  Before proceeding, consider:\n")
-	fmt.Fprintf(os.Stderr, "    bd export > issue-export.jsonl    # Export issue records, not full DB state\n")
-	fmt.Fprintf(os.Stderr, "    bd dolt status              # Check if this is a server config issue\n\n")
-	if term.IsTerminal(int(os.Stdin.Fd())) {
-		fmt.Fprintf(os.Stderr, "Type 'destroy %d issues' to confirm: ", count)
-		scanner := bufio.NewScanner(os.Stdin)
+// confirmReinitDestroy shows what re-initializing target destroys and asks
+// for the typed confirmation (interactive) or the destroy token (not). A
+// non-nil countErr means the count is unknown, and the confirmation is still
+// required: the databases most likely to fail the count are the ones with the
+// most issues to lose.
+func confirmReinitDestroy(w io.Writer, in io.Reader, interactive bool, target string, count int, countErr error, prefix, destroyToken string) error {
+	unknown := countErr != nil
+	fmt.Fprintf(w, "\n%s Re-initializing will destroy the existing database.\n\n", ui.RenderWarn("WARNING:"))
+	fmt.Fprintf(w, "  Target: %s\n", remedy.PrintedValue(target))
+	if unknown {
+		fmt.Fprintf(w, "  Existing issues: unknown (could not count them: %s)\n\n", remedy.PrintedMessage(countErr))
+	} else {
+		fmt.Fprintf(w, "  Existing issues: %d\n\n", count)
+	}
+	fmt.Fprintf(w, "  This action CANNOT be undone. All issues, dependencies, and\n")
+	fmt.Fprintf(w, "  Dolt commit history will be permanently lost.\n\n")
+	fmt.Fprintf(w, "  Before proceeding, consider:\n")
+	fmt.Fprintf(w, "    bd export > issue-export.jsonl    # Export issue records, not full DB state\n")
+	fmt.Fprintf(w, "    bd dolt status              # Check if this is a server config issue\n")
+	if unknown {
+		fmt.Fprintf(w, "    bd doctor                   # Find out why the issues could not be counted\n")
+	}
+	fmt.Fprintf(w, "\n")
+	if unknown {
+		fmt.Fprintf(w, "Refusing to destroy an unknown number of issues.\n")
+		fmt.Fprintf(w, "  See 'bd help init-safety' for the required --destroy-token format.\n")
+		return &exitError{Code: ExitDestroyTokenMissing}
+	}
+	if interactive {
+		fmt.Fprintf(w, "Type 'destroy %d issues' to confirm: ", count)
+		scanner := bufio.NewScanner(in)
 		scanner.Scan()
 		expected := fmt.Sprintf("destroy %d issues", count)
 		if strings.TrimSpace(scanner.Text()) != expected {
-			fmt.Fprintf(os.Stderr, "\nAborted. Database was NOT modified.\n")
+			fmt.Fprintf(w, "\nAborted. Database was NOT modified.\n")
 			return &exitError{Code: ExitLocalExistsRefused}
 		}
 		return nil
@@ -3065,12 +3095,12 @@ func runInitReinitPreflight(reinitLocal bool, prefix, destroyToken string) error
 	// 58f5989bf failure class where an agent copy-pasted the suggestion.
 	expectedToken := FormatDestroyToken(prefix)
 	if destroyToken == expectedToken {
-		fmt.Fprintf(os.Stderr, "Destroy token accepted. Proceeding with re-initialization.\n")
+		fmt.Fprintf(w, "Destroy token accepted. Proceeding with re-initialization.\n")
 		return nil
 	}
-	fmt.Fprintf(os.Stderr, "Refusing to destroy %d issues in non-interactive mode.\n", count)
-	fmt.Fprintf(os.Stderr, "  See 'bd help init-safety' for the required --destroy-token format.\n")
-	fmt.Fprintf(os.Stderr, "  Or export issue records first: bd export > issue-export.jsonl\n")
+	fmt.Fprintf(w, "Refusing to destroy %d issues in non-interactive mode.\n", count)
+	fmt.Fprintf(w, "  See 'bd help init-safety' for the required --destroy-token format.\n")
+	fmt.Fprintf(w, "  Or export issue records first: bd export > issue-export.jsonl\n")
 	return &exitError{Code: ExitDestroyTokenMissing}
 }
 

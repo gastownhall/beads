@@ -1027,6 +1027,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd init --reinit-local` (and `--force`) no longer skips the destroy
+  confirmation when it cannot count the issues it is about to replace. A
+  store that would not open, an unreachable server or the 5-second count
+  timeout on a large database used to read as "nothing to destroy", so no
+  warning, typed confirmation or `--destroy-token` was asked for. bd now
+  shows the count as unknown with the error and asks for `destroy all
+  issues` (exit 11 if declined), or `--destroy-token` without a terminal
+  (exit 12). The count is also taken from the `.beads` init actually
+  replaces, so from a linked worktree it is the main checkout's issues that
+  are shown and protected, not the worktree's own database (#5628).
 - `bd list --watch` and `bd show --watch` now wait a full poll interval after
   each refresh, and `bd list --watch --parent` reads its tree in one
   transaction, so other bd commands on an embedded workspace no longer stall
