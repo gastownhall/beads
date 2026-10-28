@@ -1104,6 +1104,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before it checks the rest for dependents, and a dry run, which deletes
   nothing, counted those children as dependents left outside the request
   and refused. The embedded store was already right.
+- **`bd dep list <id>` no longer says "has no dependencies" when the issue's
+  only dependencies are external or cross-repo.** Those edges are warned
+  about on stderr but not listed, so stdout contradicted the warning above
+  it. It now says the issue has no local dependencies and how many edges were
+  listed on stderr; output for an issue with no edges at all is unchanged
+  (#6557).
 - `bd list --watch` and `bd show --watch` now wait a full poll interval after
   each refresh, and `bd list --watch --parent` reads its tree in one
   transaction, so other bd commands on an embedded workspace no longer stall

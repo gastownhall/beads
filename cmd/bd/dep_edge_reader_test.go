@@ -242,3 +242,66 @@ func captureDepListOutput(t *testing.T, asJSON bool, anchors []issueops.AnchorEd
 	}
 	return string(outBytes), string(errBytes)
 }
+
+type fixedEdgeReader struct{ edges []*types.Dependency }
+
+func (r fixedEdgeReader) ReadEdges(_ context.Context, req issueops.EdgeReadRequest) (issueops.EdgeReadResult, error) {
+	return issueops.EdgeReadResult{Anchors: []issueops.AnchorEdges{{ID: req.IDs[0], Edges: r.edges}}}, nil
+}
+
+// TestDepListSingleIDNoLocalDepsWithExternalEdge pins #6557: the single-id
+// "down" route shows no rows (Relations dropped the external edge), so the
+// human line must not affirmatively say "has no dependencies" — the edge is
+// stored and was just named on stderr. With no stored edge at all, the old
+// line stays.
+func TestDepListSingleIDNoLocalDepsWithExternalEdge(t *testing.T) {
+	runFor := func(id string, edges []*types.Dependency) (string, string) {
+		return captureStdio(t, func() {
+			hidden := warnDroppedDepEdges(context.Background(), fixedEdgeReader{edges: edges}, id, "", nil)
+			printNoDependencies(id, hidden)
+		})
+	}
+	run := func(edges []*types.Dependency) (string, string) { return runFor("bd-1", edges) }
+
+	t.Run("external only", func(t *testing.T) {
+		stdout, stderr := run([]*types.Dependency{{IssueID: "bd-1", DependsOnID: "external:proj:cap", Type: types.DepBlocks}})
+		if strings.Contains(stdout, "has no dependencies") {
+			t.Errorf("stdout = %q, must not claim no dependencies when an external edge is stored", stdout)
+		}
+		if !strings.Contains(stdout, "bd-1 has no local dependencies (1 cross-repo/external edge(s) listed on stderr)") {
+			t.Errorf("stdout = %q, want the no-local-dependencies line", stdout)
+		}
+		if !strings.Contains(stderr, "external:proj:cap via blocks") {
+			t.Errorf("stderr = %q, want the dropped edge named", stderr)
+		}
+	})
+
+	t.Run("two external", func(t *testing.T) {
+		stdout, stderr := run([]*types.Dependency{
+			{IssueID: "bd-1", DependsOnID: "external:proj:cap", Type: types.DepBlocks},
+			{IssueID: "bd-1", DependsOnID: "hq-abc", Type: types.DepRelated},
+		})
+		if !strings.Contains(stdout, "bd-1 has no local dependencies (2 cross-repo/external edge(s) listed on stderr)") {
+			t.Errorf("stdout = %q, want the count of both dropped edges", stdout)
+		}
+		if !strings.Contains(stderr, "has 2 additional dependency edge(s)") {
+			t.Errorf("stderr = %q, want the warning to name the same count", stderr)
+		}
+	})
+
+	t.Run("non-plain id", func(t *testing.T) {
+		const id = "bd-1\nforged"
+		stdout, stderr := runFor(id, []*types.Dependency{{IssueID: id, DependsOnID: "external:proj:cap", Type: types.DepBlocks}})
+		if !strings.Contains(stdout, printedIssueID(id)+" has no local dependencies") {
+			t.Errorf("stdout = %q, want the anchor spelled %q", stdout, printedIssueID(id))
+		}
+		for _, line := range strings.Split(stdout, "\n") {
+			if strings.HasPrefix(line, "forged") {
+				t.Errorf("stdout = %q, the anchor's line feed started a forged line", stdout)
+			}
+		}
+		if !strings.Contains(stderr, "warning: "+printedIssueID(id)+" has 1 additional") {
+			t.Errorf("stderr = %q, want the warning to spell the anchor the same way", stderr)
+		}
+	})
+}
