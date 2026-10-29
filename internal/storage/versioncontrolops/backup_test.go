@@ -176,3 +176,25 @@ func TestBackupRestoreSanitizesURLOnError(t *testing.T) {
 		}
 	}
 }
+
+// TestBackupRestorePassesURLVerbatim pins that redaction is error-text only:
+// Dolt still receives the caller's URL byte-for-byte, credentials included.
+func TestBackupRestorePassesURLVerbatim(t *testing.T) {
+	for _, url := range []string{
+		"aws://key:secret@bucket/path?X-Amz-Signature=deadbeefcafe",
+		"aws://AKIAUNP:wJal/K7MDUNP@bucket/db",
+	} {
+		for _, force := range []bool{false, true} {
+			conn := &restoreConn{}
+			if err := BackupRestore(context.Background(), conn, url, "beads", force); err != nil {
+				t.Fatalf("BackupRestore(%q, force=%v): %v", url, force, err)
+			}
+			if len(conn.args) != 1 {
+				t.Fatalf("force=%v: ExecContext called %d times, want 1", force, len(conn.args))
+			}
+			if got := conn.args[0]; len(got) != 2 || got[0] != url || got[1] != "beads" {
+				t.Errorf("force=%v: restore args = %q, want [%q %q]", force, got, url, "beads")
+			}
+		}
+	}
+}
