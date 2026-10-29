@@ -567,5 +567,8 @@ func validateBackupPruneDestination(backupURL string) error {
 	if !strings.EqualFold(parsed.Scheme, "file") {
 		return fmt.Errorf("--%s supports only file:// backup destinations (configured scheme: %s)", backupSyncPruneGracePeriodFlag, parsed.Scheme)
 	}
+	if !strings.HasPrefix(strings.ToLower(backupURL), "file://") {
+		return fmt.Errorf("--%s requires a file:// backup destination", backupSyncPruneGracePeriodFlag)
+	}
 	return nil
 }

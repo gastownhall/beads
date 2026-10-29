@@ -156,6 +156,17 @@ func TestEmbeddedBackup(t *testing.T) {
 			t.Fatalf("pruned sync left the orphan in place; stat error: %v", err)
 		}
 
+		recentOrphan := filepath.Join(backupDest, "00000000000000000000000000000002")
+		if err := os.WriteFile(recentOrphan, []byte("recent orphaned table file"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if out := bdBackup(t, bd, dir, "sync", "--prune-with-grace-period", "10m"); !strings.Contains(out, "Backup synced") {
+			t.Fatalf("pruned sync with recent destination file did not report success: %s", out)
+		}
+		if _, err := os.Stat(recentOrphan); err != nil {
+			t.Fatalf("pruned sync removed a recent destination file; stat error: %v", err)
+		}
+
 		after := bdCreateSilent(t, bd, dir, "issue created after pruned backup")
 		bdBackup(t, bd, dir, "restore", backupDest, "--force")
 		if got := bdShow(t, bd, dir, before); got.Title != "issue present before pruning" {
