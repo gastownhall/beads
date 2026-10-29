@@ -10,6 +10,33 @@ integration, orchestrator, team workflow, or experimental automation. Before
 adding first-class fields, commands, or schema changes, check the
 [Project Charter](https://github.com/gastownhall/beads/blob/main/engdocs/PROJECT_CHARTER.md#schema-boundary).
 
+## Conditional CLI Metadata Updates
+
+`bd update <id> --expected-version <revision> --set-metadata key=value --json`
+applies the update only while the issue still has the supplied revision. Read
+`revision` from `bd show <id> --json` and echo that string verbatim: it is an
+opaque equality token, not a timestamp, counter to increment, or JSON number.
+The flag name matches the native `ExpectedVersion` update precondition and the
+HTTP `expected_version` member.
+
+The flag is optional; omitting it preserves unguarded update behavior. An
+explicit empty, malformed, or out-of-range token fails before opening the
+store. A stale token fails with a nonzero exit (1) and the backend writes
+nothing for that issue. Both local and proxied updates pass the precondition
+to the existing lifecycle transaction; the CLI does not implement a separate
+read-then-write check. With multiple IDs, the same token guards each issue
+independently; the command does not make the batch atomic.
+
+`--set-metadata` merges the named keys inside that transaction, preserving all
+other metadata keys and unrelated issue fields, including status and title.
+Migration metadata is not replaced. The revision precondition also applies to
+other edits included in the same update, and `--force` does not bypass it.
+It does not turn the provider's row token into a complete content version;
+its coverage remains the native backend's existing revision contract.
+
+The generated CLI reference is release-pinned. For the current source's flag
+contract, use `bd update --help` or `bd help --doc update`.
+
 ## Example: Agent Execution Metadata
 
 Agent execution hints are one example of using metadata to extend beads without

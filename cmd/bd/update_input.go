@@ -33,8 +33,9 @@ type updateInput struct {
 	// bd-wsqvw conditional-update guards; non-nil only when the flag was
 	// explicitly passed (a pointer to "" is the real "expected unassigned"
 	// guard).
-	ifAssignee *string
-	ifStatus   *string
+	ifAssignee      *string
+	ifStatus        *string
+	expectedVersion *int64
 	// bd-98s5c: --force bypasses the live-claim reassign fence (mutually
 	// exclusive with --if-assignee at the flag-group level).
 	force bool
@@ -42,6 +43,11 @@ type updateInput struct {
 
 func gatherUpdateInput(ctx context.Context, cmd *cobra.Command) (*updateInput, error) {
 	in := &updateInput{fields: map[string]any{}}
+	var err error
+	in.expectedVersion, err = updateExpectedVersionFromFlags(cmd)
+	if err != nil {
+		return nil, err
+	}
 
 	if cmd.Flags().Changed("status") {
 		status, _ := cmd.Flags().GetString("status")

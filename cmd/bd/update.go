@@ -40,6 +40,7 @@ type commandUpdateMutation struct {
 	force            bool
 	expectedAssignee *string
 	expectedStatus   *issueops.Status
+	expectedVersion  *int64
 	// provenance names the history entry the write records. Empty takes the
 	// backend's default, which is what the direct route wants; the proxied
 	// route spells the message it has always written.
@@ -60,6 +61,7 @@ func runCommandUpdateMutation(ctx context.Context, updater commandIssueUpdater, 
 		ForceClosePolicy:      mutation.force,
 		ExpectedAssignee:      mutation.expectedAssignee,
 		ExpectedStatus:        mutation.expectedStatus,
+		ExpectedVersion:       mutation.expectedVersion,
 		Provenance:            mutation.provenance,
 	})
 }
@@ -81,6 +83,11 @@ Updates are applied per issue ID, not atomically across IDs: when some IDs
 fail, the remaining issues are still updated, every failed ID is reported on
 stderr, and the command exits nonzero.
 
+--expected-version echoes the opaque revision string from bd show --json.
+The backend checks it inside the update transaction; a stale revision writes
+nothing for that issue and exits 1. The same token applies independently to
+each ID, and --force does not bypass it. Omit the flag for unguarded updates.
+
 Exit codes: 1 for general failures; 13 when every failure is a stale
 --if-assignee/--if-status guard (the precondition no longer held, nothing was
 written — another actor won the race, so retrying the same guard is
@@ -94,7 +101,8 @@ pointless).`,
 		if len(args) == 0 && !AllowLastTouchedFallback() {
 			return HandleErrorRespectJSON("no issue ID provided (the last-touched fallback only applies in interactive sessions; pass an explicit issue ID or set BD_LAST_TOUCHED_FALLBACK=1)")
 		}
-		return nil
+		_, err := updateExpectedVersionFromFlags(cmd)
+		return err
 	},
 	SilenceUsage:  true,
 	SilenceErrors: true,
@@ -117,6 +125,11 @@ pointless).`,
 
 		if usesProxiedServer() {
 			return runUpdateProxiedServer(cmd, rootCtx, args)
+		}
+
+		expectedVersion, err := updateExpectedVersionFromFlags(cmd)
+		if err != nil {
+			return err
 		}
 
 		// If no IDs provided, use last touched issue (interactive only;
@@ -535,6 +548,7 @@ pointless).`,
 				force:            forceFlag,
 				expectedAssignee: ifAssignee,
 				expectedStatus:   expectedStatus,
+				expectedVersion:  expectedVersion,
 			})
 			if updateErr != nil {
 				fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, updateErr)
@@ -961,6 +975,20 @@ func updateGuardsFromFlags(cmd *cobra.Command, claimFlag bool, updates map[strin
 	return ifAssignee, ifStatus, nil
 }
 
+// Presence is separate from the token value: an empty flag is malformed, not
+// an omitted guard. Args calls this before root's store-opening pre-run hooks.
+func updateExpectedVersionFromFlags(cmd *cobra.Command) (*int64, error) {
+	if !cmd.Flags().Changed("expected-version") {
+		return nil, nil
+	}
+	token, _ := cmd.Flags().GetString("expected-version")
+	version, err := types.ParseRevisionToken(token)
+	if err != nil {
+		return nil, HandleErrorRespectJSON("invalid --expected-version: echo the revision string from bd show --json verbatim: %v", err)
+	}
+	return &version, nil
+}
+
 func init() {
 	updateCmd.Flags().StringP("status", "s", "", "New status")
 	registerPriorityFlag(updateCmd, "")
@@ -983,6 +1011,7 @@ func init() {
 	// Conditional (compare-and-set) update guards (bd-wsqvw)
 	updateCmd.Flags().String("if-assignee", "", "Apply the update only if the current assignee equals this value (--if-assignee '' requires unassigned); a mismatch writes nothing and exits 13 (vs 1 for other failures). Requires a field update; cannot combine with --claim")
 	updateCmd.Flags().String("if-status", "", "Apply the update only if the current status equals this value; a mismatch writes nothing and exits 13 (vs 1 for other failures). Requires a field update; cannot combine with --claim")
+	updateCmd.Flags().String("expected-version", "", "Apply the update only if the revision matches this opaque string from bd show --json; a mismatch writes nothing and exits 1 (not bypassed by --force)")
 	// --force (unconditional bypass of the reassign fence) and --if-assignee
 	// (write only while a specific assignee still holds it) encode
 	// contradictory intent — same rationale as unclaim's pairing. Rejecting the
