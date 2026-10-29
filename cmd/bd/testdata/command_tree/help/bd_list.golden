@@ -31,7 +31,7 @@ Flags:
       --include-comments             Populate each row's comments field with full comment bodies in JSON output (--json only; costs one query per row that has comments). Without it, a row with comments carries comments_omitted=true, so an absent comments field is never mistaken for having none. Text output is unaffected either way.
       --include-ephemeral            Include ephemeral wisp-plane rows in output (normally hidden)
       --include-gates                Include gate issues in output (normally hidden)
-      --include-infra                Include infrastructure beads (agent/role/message) in output
+      --include-infra                Include infrastructure beads (agent/role/message) and the ephemeral wisp-plane rows in output (--include-ephemeral admits the plane alone)
       --include-templates            Include template molecules in output
   -l, --label strings                Filter by labels (AND: must have ALL). Can combine with --label-any
       --label-any strings            Filter by labels (OR: must have AT LEAST ONE). Can combine with --label
