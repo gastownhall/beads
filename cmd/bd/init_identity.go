@@ -24,13 +24,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
-	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/utils"
 )
@@ -141,6 +143,24 @@ func resolveInitTargetRef(id initIdentity, database string, prefix string, serve
 	if port == 0 {
 		port, _, _, _ = initStoreServerPort(id.BeadsDir, host)
 	}
+	// Restating flags are not changes (GH#5177). A --server-host/--server-port
+	// that names the endpoint the workspace itself records — its own host, or
+	// the port its own port file names for that host — re-targets nothing,
+	// even under a stale BEADS_DOLT_SERVER_* overlay: the flag proves the
+	// overlay wrong, so both sides of the identity take the flag and the
+	// destroy confirmation still counts at the workspace's own endpoint.
+	// The host restatement also re-resolves the configured port through the
+	// workspace's own chain, because DefaultConfig discards the port file
+	// under whatever host a stale overlay names.
+	if id.Recorded != nil && serverHost != "" && initHostsEqual(serverHost, initOwnServerHost(id.Recorded)) {
+		id.Configured.Host = host
+		if ownPort := initOwnServerPort(id.BeadsDir, id.Recorded); ownPort > 0 {
+			id.Configured.Port = ownPort
+		}
+	}
+	if id.Recorded != nil && serverPort != 0 && initOwnServerPort(id.BeadsDir, id.Recorded) == serverPort {
+		id.Configured.Port = serverPort
+	}
 	id.Target = initDBRef{
 		Database: dbName,
 		Server:   initServerMode,
@@ -162,7 +182,10 @@ func (id initIdentity) Repoints() bool {
 	if configured == "" {
 		configured = configfile.DefaultDoltDatabase
 	}
-	return configured != id.Target.Database ||
+	// A --database differing from the recorded name only by case restates
+	// the same database (GH#5177): the spelling differs, the database does
+	// not, so this is not a repoint.
+	return !strings.EqualFold(configured, id.Target.Database) ||
 		id.Configured.Server != id.Target.Server ||
 		!initHostsEqual(id.Configured.Host, id.Target.Host) ||
 		id.Configured.Port != id.Target.Port
@@ -201,6 +224,44 @@ func initHostsEqual(a, b string) bool {
 		return true
 	}
 	return strings.EqualFold(configfile.UnbracketHost(a), configfile.UnbracketHost(b))
+}
+
+// initOwnServerHost is the server host the workspace itself names, with the
+// environment overlay removed: metadata.json's dolt_server_host, else
+// config.yaml's dolt.host, else bd's own default. A --server-host restating
+// this value re-targets nothing (GH#5177): the workspace already lives at
+// that host, whatever a stale BEADS_DOLT_SERVER_HOST overlay says.
+func initOwnServerHost(recorded *configfile.Config) string {
+	if recorded != nil && recorded.DoltServerHost != "" {
+		return recorded.DoltServerHost
+	}
+	if h := config.GetYamlConfig("dolt.host"); h != "" {
+		return h
+	}
+	return configfile.DefaultDoltServerHost
+}
+
+// initOwnServerPort is the server port the workspace itself names for its own
+// host, with the environment overlay removed: the port file (bd's bookkeeping
+// for the server it runs at the workspace's own host), else config.yaml's
+// dolt.port, else metadata.json's dolt_server_port. Zero when the workspace
+// names none. A --server-port restating this value re-targets nothing
+// (GH#5177).
+func initOwnServerPort(beadsDir string, recorded *configfile.Config) int {
+	if configfile.BdRunsServerAt(initOwnServerHost(recorded)) {
+		if port := doltserver.ReadPortFile(beadsDir); port > 0 {
+			return port
+		}
+	}
+	if p := config.GetYamlConfig("dolt.port"); p != "" {
+		if port, err := strconv.Atoi(p); err == nil && port > 0 {
+			return port
+		}
+	}
+	if recorded != nil && recorded.DoltServerPort > 0 {
+		return recorded.DoltServerPort
+	}
+	return 0
 }
 
 // countConfiguredIssues counts the issues in the CONFIGURED database — the

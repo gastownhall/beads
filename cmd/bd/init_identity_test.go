@@ -322,3 +322,87 @@ func TestInitRepoint_UnreadableConfiguredDatabaseRefuses(t *testing.T) {
 		t.Fatalf("the refused reinit must leave metadata recording %s, got %q", victimDB, got)
 	}
 }
+
+// TestInitRepoint_RestatingFlagsAreNotChanges pins the resolver's restatement
+// rules (GH#5177): a flag that names the database or endpoint the workspace
+// already uses re-targets nothing, even under a stale environment overlay, so
+// Repoints() must stay false. The table runs the resolver directly — the same
+// two calls runInit makes, workspace half before the flag promotion and target
+// half after — because the question is the resolver's decision, not any one
+// command's output.
+func TestInitRepoint_RestatingFlagsAreNotChanges(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "0")
+	t.Setenv("BEADS_DOLT_DATA_DIR", "")
+
+	// The workspace under init: server mode, recording host 127.0.0.1,
+	// database repoint_a, and its own port file naming ownPort.
+	beadsDir := t.TempDir()
+	ownPort, err := testutil.FindFreePort()
+	if err != nil {
+		t.Fatalf("FindFreePort: %v", err)
+	}
+	otherPort, err := testutil.FindFreePort()
+	if err != nil {
+		t.Fatalf("FindFreePort: %v", err)
+	}
+	if err := (&configfile.Config{
+		Backend:        configfile.BackendDolt,
+		DoltMode:       configfile.DoltModeServer,
+		DoltServerHost: "127.0.0.1",
+		DoltDatabase:   "repoint_a",
+		ProjectID:      "repoint-0000-1111-2222-333344445555",
+	}).Save(beadsDir); err != nil {
+		t.Fatalf("save workspace metadata: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, doltserver.PortFileName), []byte(strconv.Itoa(ownPort)), 0o600); err != nil {
+		t.Fatalf("write the workspace's port file: %v", err)
+	}
+
+	// A stale environment overlay the flags argue with. Cleared first so an
+	// ambient value from the test harness cannot leak into the decision.
+	for _, name := range []string{"BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_PORT", "BEADS_DOLT_SERVER_DATABASE"} {
+		t.Setenv(name, "")
+	}
+	t.Setenv("BEADS_DIR", beadsDir)
+
+	cases := []struct {
+		name       string
+		envHost    string
+		envPort    string
+		database   string
+		serverHost string
+		serverPort int
+		repoints   bool
+	}{
+		// The flag restates what the workspace already records: not a change.
+		{name: "identical_database", database: "repoint_a"},
+		{name: "case_only_database_spelling", database: "REPOINT_A"},
+		{name: "localhost_restates_the_recorded_host", serverHost: "localhost"},
+		// The flag restates the workspace's OWN endpoint under a stale env
+		// overlay: both sides of the identity take the flag, so the count and
+		// the notice still see the workspace's endpoint, not the overlay's.
+		{name: "host_flag_restates_own_host_under_stale_env_host", envHost: "stale.example.com", database: "repoint_a", serverHost: "localhost"},
+		{name: "port_flag_restates_own_port_under_stale_env_port", envPort: strconv.Itoa(otherPort), database: "repoint_a", serverPort: ownPort},
+		// Genuine changes: the notice and the refusal must still fire.
+		{name: "different_database_repoints", database: "repoint_b", repoints: true},
+		{name: "different_host_repoints", serverHost: "dolt.internal.example.com", repoints: true},
+		{name: "different_port_repoints", serverPort: otherPort, repoints: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("BEADS_DOLT_SERVER_HOST", tc.envHost)
+			t.Setenv("BEADS_DOLT_SERVER_PORT", tc.envPort)
+			if tc.envPort == "" {
+				t.Setenv("BEADS_DOLT_PORT", "")
+			}
+
+			id := resolveInitWorkspace()
+			id = resolveInitTargetRef(id, tc.database, "rp", tc.serverHost, tc.serverPort, true)
+
+			if got := id.Repoints(); got != tc.repoints {
+				t.Errorf("Repoints() = %v, want %v\nConfigured = %+v\nTarget    = %+v", got, tc.repoints, id.Configured, id.Target)
+			}
+		})
+	}
+}
