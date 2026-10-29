@@ -150,6 +150,12 @@ func TestBackupRestoreSanitizesURLOnError(t *testing.T) {
 			forbidden: []string{"deadbeefcafe", "AKIAEXAMPLE", "?"}, want: "aws://bucket/path"},
 		{name: "AC-2 s3 signed query", url: "s3://bucket/db?X-Amz-Signature=s3sigvalue#frag",
 			forbidden: []string{"s3sigvalue", "frag"}, want: "s3://bucket/db"},
+		{name: "AC-4 slash in secret", url: "aws://AKIAUNP:wJal/K7MDUNP@bucket/db",
+			forbidden: []string{"AKIAUNP", "wJal", "K7MDUNP"}, want: "aws:[redacted]"},
+		{name: "AC-4 hash in password", url: "aws://KEYHASH:SEKHASH#tailH@b/p",
+			forbidden: []string{"KEYHASH", "SEKHASH", "tailH"}, want: "aws:[redacted]"},
+		{name: "AC-4 question mark in password", url: "aws://KEYQ:SEKQ?tailQ@b/p",
+			forbidden: []string{"KEYQ", "SEKQ", "tailQ"}, want: "aws:[redacted]"},
 		{name: "credential-free file URL", url: "file:///var/backups/x",
 			want: "file:///var/backups/x"},
 	} {
