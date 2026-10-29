@@ -2,6 +2,8 @@ package versioncontrolops
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -101,5 +103,72 @@ func TestBackupToDirRefusesMissingOrFileDestination(t *testing.T) {
 				t.Fatalf("BackupToDir(%q) error = %v, want one containing %q", tc.dir, err, tc.want)
 			}
 		})
+	}
+}
+
+// restoreConn is a DBConn stub for BackupRestore: ExecContext records each
+// statement's bind args and returns execErr.
+type restoreConn struct {
+	execErr error
+	args    [][]any
+}
+
+func (c *restoreConn) ExecContext(_ context.Context, _ string, args ...any) (sql.Result, error) {
+	c.args = append(c.args, args)
+	return nil, c.execErr
+}
+
+func (c *restoreConn) QueryContext(context.Context, string, ...any) (*sql.Rows, error) {
+	return nil, errStubConn
+}
+
+func (c *restoreConn) QueryRowContext(context.Context, string, ...any) *sql.Row {
+	return nil
+}
+
+// errDoltRestore stands in for the engine's error. It deliberately does not
+// quote the source URL: Dolt echoing the URL inside %w is a separate leak, and
+// this test pins only the text BackupRestore itself interpolates.
+var errDoltRestore = errors.New("dolt exploded")
+
+// TestBackupRestoreSanitizesURLOnError pins that a failed restore never names
+// the credentials or signed query of the backup URL in its own error text
+// (#6341), on both the force and non-force branches, and that the driver error
+// stays unwrappable.
+func TestBackupRestoreSanitizesURLOnError(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		url       string
+		forbidden []string
+		want      string
+	}{
+		{name: "AC-1 userinfo", url: "aws://key:secret@bucket/path",
+			forbidden: []string{"secret", "key:", "@"}, want: "aws://bucket/path"},
+		{name: "AC-1 at sign in password", url: "aws://KEYAT:p@ssAT@bucket/db",
+			forbidden: []string{"KEYAT", "ssAT", "@"}, want: "aws://bucket/db"},
+		{name: "credential-free file URL", url: "file:///var/backups/x",
+			want: "file:///var/backups/x"},
+	} {
+		for _, force := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/force=%v", tc.name, force), func(t *testing.T) {
+				conn := &restoreConn{execErr: errDoltRestore}
+				err := BackupRestore(context.Background(), conn, tc.url, "beads", force)
+				if err == nil {
+					t.Fatal("BackupRestore returned nil, want an error")
+				}
+				msg := err.Error()
+				if !strings.Contains(msg, "restore from backup "+tc.want) {
+					t.Errorf("error = %q, want it to name the source as %q", msg, tc.want)
+				}
+				for _, s := range tc.forbidden {
+					if strings.Contains(msg, s) {
+						t.Errorf("error leaks %q: %q", s, msg)
+					}
+				}
+				if !errors.Is(err, errDoltRestore) {
+					t.Errorf("errors.Is(%v, errDoltRestore) = false, want the driver error wrapped", err)
+				}
+			})
+		}
 	}
 }
