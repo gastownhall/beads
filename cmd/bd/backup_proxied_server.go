@@ -197,6 +197,14 @@ func runBackupInitProxied(ctx context.Context, rawPath string) error {
 
 // runBackupSyncProxied pushes the database to the configured destination.
 func runBackupSyncProxied(ctx context.Context) error {
+	return runBackupSyncProxiedWithGracePeriod(ctx, 0)
+}
+
+func runBackupSyncProxiedWithPrune(ctx context.Context, gracePeriod time.Duration) error {
+	return runBackupSyncProxiedWithGracePeriod(ctx, gracePeriod)
+}
+
+func runBackupSyncProxiedWithGracePeriod(ctx context.Context, gracePeriod time.Duration) error {
 	if err := requireLocalProxiedBackup("backup sync"); err != nil {
 		return err
 	}
@@ -208,6 +216,9 @@ func runBackupSyncProxied(ctx context.Context) error {
 			// means the backup may miss the newest writes, which is worth
 			// saying out loud and is not worth refusing to back up over.
 			fmt.Fprintf(os.Stderr, "Warning: failed to commit pending changes: %v\n", err)
+		}
+		if gracePeriod > 0 {
+			return versioncontrolops.BackupSyncWithPrune(ctx, conn, proxiedBackupTargetName, gracePeriod)
 		}
 		return versioncontrolops.BackupSync(ctx, conn, proxiedBackupTargetName)
 	})

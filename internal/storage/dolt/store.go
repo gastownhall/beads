@@ -1608,6 +1608,17 @@ func (s *DoltStore) BackupSync(ctx context.Context, name string) error {
 	return versioncontrolops.BackupSync(ctx, db, name)
 }
 
+// BackupSyncWithPrune runs a long-timeout Dolt backup sync with native
+// grace-period pruning enabled for the configured file:// destination.
+func (s *DoltStore) BackupSyncWithPrune(ctx context.Context, name string, gracePeriod time.Duration) error {
+	db, err := s.oneShotConn(0)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	return versioncontrolops.BackupSyncWithPrune(ctx, db, name, gracePeriod)
+}
+
 // BackupRemove removes a configured Dolt backup destination.
 func (s *DoltStore) BackupRemove(ctx context.Context, name string) error {
 	return versioncontrolops.BackupRemove(ctx, s.db, name)
