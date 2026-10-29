@@ -54,6 +54,14 @@ func startRepointServer(t *testing.T) int {
 // port. It returns the project directory the bd child runs in.
 func seedRepointVictim(t *testing.T, port int, database, prefix string) string {
 	t.Helper()
+	return seedRepointVictimWithIssues(t, port, database, prefix, 1)
+}
+
+// seedRepointVictimWithIssues is seedRepointVictim for a chosen number of
+// live issues — zero for a configured database that exists but is empty, the
+// shape whose reinit needs no destroy confirmation.
+func seedRepointVictimWithIssues(t *testing.T, port int, database, prefix string, issueCount int) string {
+	t.Helper()
 
 	// Pin per-project server mode and a local data root, like the guard
 	// fixtures: ambient shared-server settings would redirect ResolveDoltDir
@@ -87,8 +95,9 @@ func seedRepointVictim(t *testing.T, port int, database, prefix string) string {
 		t.Fatalf("write local version: %v", err)
 	}
 
-	// One live issue in the recorded database, seeded in-process the same way
-	// the backup/restore fixtures seed a server-mode store.
+	// The recorded database's live issues (none when issueCount is zero),
+	// seeded in-process the same way the backup/restore fixtures seed a
+	// server-mode store.
 	ctx := context.Background()
 	seedStore, err := dolt.New(ctx, &dolt.Config{
 		Path:            doltDir,
@@ -106,16 +115,18 @@ func seedRepointVictim(t *testing.T, port int, database, prefix string) string {
 		t.Fatalf("set issue_prefix: %v", err)
 	}
 	now := time.Now()
-	if err := seedStore.CreateIssue(ctx, &types.Issue{
-		ID:        prefix + "-1",
-		Title:     "issue the reinit must not destroy unconfirmed",
-		Status:    types.StatusOpen,
-		Priority:  2,
-		IssueType: types.TypeTask,
-		CreatedAt: now,
-		UpdatedAt: now,
-	}, "test-user"); err != nil {
-		t.Fatalf("seed one issue: %v", err)
+	for i := 1; i <= issueCount; i++ {
+		if err := seedStore.CreateIssue(ctx, &types.Issue{
+			ID:        prefix + "-" + strconv.Itoa(i),
+			Title:     "issue the reinit must not destroy unconfirmed",
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+			CreatedAt: now,
+			UpdatedAt: now,
+		}, "test-user"); err != nil {
+			t.Fatalf("seed issue %d: %v", i, err)
+		}
 	}
 	return projectDir
 }
@@ -505,4 +516,79 @@ func TestInitRepoint_MissingConfiguredDBRefusesThenRecreates(t *testing.T) {
 		t.Errorf("the reinit must create database %s on the server: %+v\n%s", targetDB, check, out)
 	}
 	assertMetadataRecords(t, targetDB)
+}
+
+// TestInitRepoint_EmptyConfiguredDBRepoints pins the notice's place in the
+// narration and --quiet's hold over it. The workspace records an EMPTY
+// configured database — nothing to destroy, so the reinit needs no destroy
+// confirmation — and repoints at B: the repoint still announces itself,
+// exactly once, naming both databases. With --quiet the notice goes away with
+// the rest of the narration and the reinit still runs.
+func TestInitRepoint_EmptyConfiguredDBRepoints(t *testing.T) {
+	port := startRepointServer(t)
+	const victimDB = "repoint_a"
+
+	writePortFile := func(t *testing.T, beadsDir string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(beadsDir, doltserver.PortFileName), []byte(strconv.Itoa(port)), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	metadataRecords := func(t *testing.T, beadsDir, want string) {
+		t.Helper()
+		after, err := configfile.LoadForDiscovery(beadsDir)
+		if err != nil {
+			t.Fatalf("read workspace metadata: %v", err)
+		}
+		got := "<nil>"
+		if after != nil {
+			got = after.DoltDatabase
+		}
+		if got != want {
+			t.Fatalf("metadata must record %q, got %q", want, got)
+		}
+	}
+
+	t.Run("announces_the_repoint", func(t *testing.T) {
+		const targetDB = "repoint_b"
+		projectDir := seedRepointVictimWithIssues(t, port, victimDB, "rp", 0)
+		beadsDir := filepath.Join(projectDir, ".beads")
+		writePortFile(t, beadsDir)
+
+		out, err := runExternalServerBD(t, projectDir, initRepointChildEnv(t),
+			"init", "--reinit-local", "--database", targetDB, "--prefix", "rp",
+			"--skip-hooks", "--skip-agents")
+		if err != nil {
+			t.Fatalf("a reinit over an empty configured database must proceed without a confirmation, got %v\n%s", err, out)
+		}
+		if strings.Contains(out, "Refusing to destroy") {
+			t.Errorf("an empty configured database needs no destroy confirmation:\n%s", out)
+		}
+		if n := strings.Count(out, "Repointing this workspace"); n != 1 {
+			t.Errorf("the reinit must print the repoint notice exactly once, got %d:\n%s", n, out)
+		}
+		if !strings.Contains(out, "database \""+victimDB+"\"") || !strings.Contains(out, "database \""+targetDB+"\"") {
+			t.Errorf("the notice must name the database it leaves and the one it targets, got:\n%s", out)
+		}
+		metadataRecords(t, beadsDir, targetDB)
+	})
+
+	t.Run("quiet_suppresses_the_repoint_notice", func(t *testing.T) {
+		const targetDB = "repoint_c"
+		projectDir := seedRepointVictimWithIssues(t, port, victimDB, "rp", 0)
+		beadsDir := filepath.Join(projectDir, ".beads")
+		writePortFile(t, beadsDir)
+
+		out, err := runExternalServerBD(t, projectDir, initRepointChildEnv(t),
+			"init", "--reinit-local", "--quiet",
+			"--database", targetDB, "--prefix", "rp",
+			"--skip-hooks", "--skip-agents")
+		if err != nil {
+			t.Fatalf("a quiet reinit over an empty configured database must still run, got %v\n%s", err, out)
+		}
+		if n := strings.Count(out, "Repointing this workspace"); n != 0 {
+			t.Errorf("--quiet must suppress the repoint notice, got %d:\n%s", n, out)
+		}
+		metadataRecords(t, beadsDir, targetDB)
+	})
 }
