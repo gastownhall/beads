@@ -5,6 +5,7 @@
 //
 // The selection rules are platform independent and live in this file and
 // rank.go; only enumeration, key acquisition and signing are Windows specific.
+// On other platforms Configure returns ErrUnsupported.
 package certstore
 
 import (
@@ -13,6 +14,10 @@ import (
 	"fmt"
 	"strings"
 )
+
+// ErrUnsupported is returned by Configure on platforms without a Windows
+// certificate store.
+var ErrUnsupported = errors.New("certstore: the Windows certificate store is only available on Windows")
 
 // Location is a certificate store location.
 type Location int
