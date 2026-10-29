@@ -3,6 +3,7 @@ package versioncontrolops
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -43,14 +44,33 @@ func BackupRemove(ctx context.Context, db DBConn, name string) error {
 func BackupRestore(ctx context.Context, db DBConn, url, dbName string, force bool) error {
 	if force {
 		if _, err := db.ExecContext(ctx, "CALL DOLT_BACKUP('restore', '--force', ?, ?)", url, dbName); err != nil {
-			return fmt.Errorf("restore from backup %s: %w", sanitizeURL(url), err)
+			return fmt.Errorf("restore from backup %s: %w", backupRestoreSafeURL(url), err)
 		}
 	} else {
 		if _, err := db.ExecContext(ctx, "CALL DOLT_BACKUP('restore', ?, ?)", url, dbName); err != nil {
-			return fmt.Errorf("restore from backup %s: %w", sanitizeURL(url), err)
+			return fmt.Errorf("restore from backup %s: %w", backupRestoreSafeURL(url), err)
 		}
 	}
 	return nil
+}
+
+// backupRestoreSafeURL redacts a backup URL for BackupRestore's error text
+// (#6341). Parseable URLs go through sanitizeURL, which strips userinfo,
+// query and fragment. The parse failures that matter here are the AWS
+// credential shapes whose secret contains '/', '#' or '?' — url.Parse rejects
+// those, and sanitizeURL fails open on a parse error, returning the raw string
+// with the secret in it — so a parse error degrades to "scheme:[redacted]"
+// instead. Only the error text is rewritten; the URL bound for DOLT_BACKUP is
+// the caller's argument verbatim.
+func backupRestoreSafeURL(raw string) string {
+	if _, err := url.Parse(raw); err != nil {
+		scheme, _, ok := strings.Cut(raw, "://")
+		if ok && scheme != "" && !strings.ContainsAny(scheme, "/?#@") {
+			return scheme + ":[redacted]"
+		}
+		return "[redacted]"
+	}
+	return sanitizeURL(raw)
 }
 
 // CurrentCommit returns the hash of the current HEAD commit.

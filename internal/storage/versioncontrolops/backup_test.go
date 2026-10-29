@@ -228,31 +228,6 @@ func TestBackupRestoreSanitizesSignedQueryInError(t *testing.T) {
 	}
 }
 
-// TestBackupRestoreErrorRedactsURLCredentials pins that a failed restore never
-// echoes the userinfo secret or a signed query from the backup URL (#6341).
-func TestBackupRestoreErrorRedactsURLCredentials(t *testing.T) {
-	const url = "aws://k:supersecret@b/p?X-Amz-Signature=sigvalue123"
-	for _, force := range []bool{false, true} {
-		db, mock, err := sqlmock.New()
-		if err != nil {
-			t.Fatalf("sqlmock.New: %v", err)
-		}
-		mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_BACKUP('restore'")).
-			WillReturnError(fmt.Errorf("access denied"))
-
-		err = BackupRestore(context.Background(), db, url, "beads", force)
-		db.Close()
-		if err == nil {
-			t.Fatalf("force=%v: BackupRestore returned nil, want an error", force)
-		}
-		for _, secret := range []string{"supersecret", "sigvalue123"} {
-			if strings.Contains(err.Error(), secret) {
-				t.Errorf("force=%v: error leaks %q: %v", force, secret, err)
-			}
-		}
-	}
-}
-
 // TestBackupRestorePassesVerbatimURLToDolt is AC-3 of #6341: redaction is
 // error-text only. The URL bound for DOLT_BACKUP('restore', …) must be the
 // caller's argument byte-for-byte: WithArgs fails the exec and
@@ -275,5 +250,65 @@ func TestBackupRestorePassesVerbatimURLToDolt(t *testing.T) {
 			t.Errorf("force=%v: restore did not receive the verbatim URL: %v", force, err)
 		}
 		db.Close()
+	}
+}
+
+// TestBackupRestoreRedactsUnparseableCredentialedURLs is AC-4 of #6341:
+// url.Parse rejects the real AWS secret shapes ('/', '#' or '?' inside the
+// password), and sanitizeURL fails open on those, returning the raw string
+// with the secret in it. The restore error must degrade to a redacted form
+// there instead, for either force branch.
+func TestBackupRestoreRedactsUnparseableCredentialedURLs(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		url       string
+		forbidden []string
+	}{
+		{
+			name:      "slash in secret",
+			url:       "aws://AKIAUNP:wJal/K7MDUNP@bucket/db",
+			forbidden: []string{"AKIAUNP", "wJal", "K7MDUNP"},
+		},
+		{
+			name:      "hash in password",
+			url:       "aws://KEYHASH:SEKHASH#tailH@b/p",
+			forbidden: []string{"KEYHASH", "SEKHASH", "tailH"},
+		},
+		{
+			name:      "question mark in password",
+			url:       "aws://KEYQ:SEKQ?tailQ@b/p",
+			forbidden: []string{"KEYQ", "SEKQ", "tailQ"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, force := range []bool{false, true} {
+				checkRedactedRestoreError(t, tc.url, force, "", tc.forbidden)
+			}
+		})
+	}
+}
+
+// TestBackupRestoreErrorRedactsURLCredentials pins that a failed restore never
+// echoes the userinfo secret or a signed query from the backup URL (#6341).
+func TestBackupRestoreErrorRedactsURLCredentials(t *testing.T) {
+	const url = "aws://k:supersecret@b/p?X-Amz-Signature=sigvalue123"
+	for _, force := range []bool{false, true} {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("sqlmock.New: %v", err)
+		}
+		mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_BACKUP('restore'")).
+			WillReturnError(fmt.Errorf("access denied"))
+
+		err = BackupRestore(context.Background(), db, url, "beads", force)
+		db.Close()
+		if err == nil {
+			t.Fatalf("force=%v: BackupRestore returned nil, want an error", force)
+		}
+		for _, secret := range []string{"supersecret", "sigvalue123"} {
+			if strings.Contains(err.Error(), secret) {
+				t.Errorf("force=%v: error leaks %q: %v", force, secret, err)
+			}
+		}
 	}
 }
