@@ -3,6 +3,7 @@ package versioncontrolops
 import (
 	"context"
 	"fmt"
+	neturl "net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -43,14 +44,29 @@ func BackupRemove(ctx context.Context, db DBConn, name string) error {
 func BackupRestore(ctx context.Context, db DBConn, url, dbName string, force bool) error {
 	if force {
 		if _, err := db.ExecContext(ctx, "CALL DOLT_BACKUP('restore', '--force', ?, ?)", url, dbName); err != nil {
-			return fmt.Errorf("restore from backup %s: %w", sanitizeURL(url), err)
+			return fmt.Errorf("restore from backup %s: %w", backupRestoreSafeURL(url), err)
 		}
 	} else {
 		if _, err := db.ExecContext(ctx, "CALL DOLT_BACKUP('restore', ?, ?)", url, dbName); err != nil {
-			return fmt.Errorf("restore from backup %s: %w", sanitizeURL(url), err)
+			return fmt.Errorf("restore from backup %s: %w", backupRestoreSafeURL(url), err)
 		}
 	}
 	return nil
+}
+
+// backupRestoreSafeURL names a restore source in error text without its
+// credentials. A URL net/url can parse goes through sanitizeURL; one it cannot
+// (a base64 secret holding '/', a password holding '#' or '?') is reduced to
+// its scheme, because sanitizeURL would return it raw, secret and all.
+func backupRestoreSafeURL(raw string) string {
+	if _, err := neturl.Parse(raw); err != nil {
+		scheme, _, ok := strings.Cut(raw, "://")
+		if ok && scheme != "" && !strings.ContainsAny(scheme, "/?#@") {
+			return scheme + ":[redacted]"
+		}
+		return "[redacted]"
+	}
+	return sanitizeURL(raw)
 }
 
 // CurrentCommit returns the hash of the current HEAD commit.
