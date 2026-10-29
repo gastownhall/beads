@@ -252,3 +252,28 @@ func TestBackupRestoreErrorRedactsURLCredentials(t *testing.T) {
 		}
 	}
 }
+
+// TestBackupRestorePassesVerbatimURLToDolt is AC-3 of #6341: redaction is
+// error-text only. The URL bound for DOLT_BACKUP('restore', …) must be the
+// caller's argument byte-for-byte: WithArgs fails the exec and
+// ExpectationsWereMet fails the test if any pre-validation or scrubbing ever
+// reaches the bind argument.
+func TestBackupRestorePassesVerbatimURLToDolt(t *testing.T) {
+	const url = "aws://key:secret@bucket/path?X-Amz-Signature=sigvalue123"
+	for _, force := range []bool{false, true} {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("sqlmock.New: %v", err)
+		}
+		mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_BACKUP('restore'")).
+			WithArgs(url, "beads").
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		if err := BackupRestore(context.Background(), db, url, "beads", force); err != nil {
+			t.Errorf("force=%v: BackupRestore: %v", force, err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("force=%v: restore did not receive the verbatim URL: %v", force, err)
+		}
+		db.Close()
+	}
+}
