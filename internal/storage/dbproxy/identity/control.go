@@ -2,6 +2,7 @@ package identity
 
 import (
 	"bufio"
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -39,12 +40,27 @@ type IdentReply struct {
 
 // Identify authenticates to a proxy control listener and returns its identity.
 func Identify(host string, controlPort int, secret string, timeout time.Duration) (*IdentReply, error) {
+	return IdentifyContext(context.Background(), host, controlPort, secret, timeout)
+}
+
+// IdentifyContext preserves the identity probe bound and also interrupts control
+// I/O when the caller cancels discovery.
+func IdentifyContext(ctx context.Context, host string, controlPort int, secret string, timeout time.Duration) (replyValue *IdentReply, err error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	defer func() {
+		if ctx.Err() != nil {
+			replyValue, err = nil, ctx.Err()
+		}
+	}()
 	addr := net.JoinHostPort(host, strconv.Itoa(controlPort))
-	conn, err := net.DialTimeout("tcp", addr, timeout)
+	conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("identity: dial control listener: %w", err)
 	}
 	defer func() { _ = conn.Close() }()
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stop()
 
 	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
 		return nil, fmt.Errorf("identity: set control deadline: %w", err)

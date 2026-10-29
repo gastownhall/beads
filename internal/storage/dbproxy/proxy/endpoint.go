@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -123,6 +124,13 @@ var stopEpochSequence atomic.Uint64
 // release-lock-before-exec scheduling window. Production leaves it as a no-op.
 var beforeProxyChildStart = func() {}
 
+// These hooks park cancellation tests at the lifecycle boundary they exercise.
+// Production leaves them as no-ops.
+var beforeProxyLockWait = func() {}
+var beforeOrphanBackendKill = func() {}
+var afterProxyChildStart = func(*spawnedProxyChild) {}
+var afterProxyIdentityRead = func() {}
+
 type adoptionStatus uint8
 
 const (
@@ -194,6 +202,23 @@ func PickFreePort() (int, error) {
 }
 
 func GetCreateDatabaseProxyServerEndpoint(rootDir string, opts OpenOpts) (Endpoint, error) {
+	return GetCreateDatabaseProxyServerEndpointContext(context.Background(), rootDir, opts)
+}
+
+// GetCreateDatabaseProxyServerEndpointContext discovers or starts the workspace
+// proxy within both the caller deadline and the existing open budget.
+func GetCreateDatabaseProxyServerEndpointContext(ctx context.Context, rootDir string, opts OpenOpts) (Endpoint, error) {
+	return getCreateDatabaseProxyServerEndpointContext(ctx, rootDir, opts, time.Now().Add(openDeadline))
+}
+
+// The explicit deadline keeps discovery I/O and startup cleanup on one budget.
+// caller remains separate: its cancellation never grants child-kill authority.
+func getCreateDatabaseProxyServerEndpointContext(caller context.Context, rootDir string, opts OpenOpts, deadline time.Time) (Endpoint, error) {
+	ctx, cancel := context.WithDeadline(caller, deadline)
+	defer cancel()
+	if err := proxyOpenWaitError(caller, ctx, rootDir, nil); err != nil {
+		return Endpoint{}, err
+	}
 	if err := opts.Backend.Validate(); err != nil {
 		return Endpoint{}, fmt.Errorf("OpenOpts.Backend: %w", err)
 	}
@@ -223,10 +248,6 @@ func GetCreateDatabaseProxyServerEndpoint(rootDir string, opts OpenOpts) (Endpoi
 	if err != nil {
 		return Endpoint{}, fmt.Errorf("read proxy stop epoch: %w", err)
 	}
-	deadline := time.Now().Add(openDeadline)
-
-	timeout := time.NewTimer(openDeadline)
-	defer timeout.Stop()
 	poll := time.NewTicker(openPollInterval)
 	defer poll.Stop()
 
@@ -234,7 +255,17 @@ func GetCreateDatabaseProxyServerEndpoint(rootDir string, opts OpenOpts) (Endpoi
 
 	var lastSpawnErr error
 	for {
-		discovery := readAndDial(rootDir)
+		discovery := readAndDialContext(ctx, rootDir)
+		if err := caller.Err(); err != nil {
+			return Endpoint{}, err
+		}
+		// An authenticated reply already received wins a simultaneous internal
+		// timeout. Caller cancellation still takes precedence over success.
+		if discovery.status != adoptionAdopted {
+			if err := proxyOpenWaitError(caller, ctx, rootDir, lastSpawnErr); err != nil {
+				return Endpoint{}, err
+			}
+		}
 		switch discovery.status {
 		case adoptionAdopted:
 			return adoptedEndpoint(rootDir, want, discovery)
@@ -247,10 +278,18 @@ func GetCreateDatabaseProxyServerEndpoint(rootDir string, opts OpenOpts) (Endpoi
 		case err == nil:
 			// Re-read under proxy.lock. Another opener may have replaced the
 			// record after our lock-free discovery.
-			discovery = readAndDial(rootDir)
+			discovery = readAndDialContext(ctx, rootDir)
+			if err := caller.Err(); err != nil {
+				lock.Unlock()
+				return Endpoint{}, err
+			}
 			if discovery.status == adoptionAdopted {
 				lock.Unlock()
 				return adoptedEndpoint(rootDir, want, discovery)
+			}
+			if err := proxyOpenWaitError(caller, ctx, rootDir, lastSpawnErr); err != nil {
+				lock.Unlock()
+				return Endpoint{}, err
 			}
 			if discovery.status == adoptionIOErr {
 				lock.Unlock()
@@ -271,9 +310,12 @@ func GetCreateDatabaseProxyServerEndpoint(rootDir string, opts OpenOpts) (Endpoi
 			}
 
 			var ep Endpoint
-			ep, lastSpawnErr = spawnAndHandoff(rootDir, opts, deadline, stopEpoch, lock, discovery)
+			ep, lastSpawnErr = spawnAndHandoffWait(caller, ctx, rootDir, opts, stopEpoch, lock, discovery)
 			if lastSpawnErr == nil {
 				return ep, nil
+			}
+			if err := proxyOpenWaitError(caller, ctx, rootDir, lastSpawnErr); err != nil {
+				return Endpoint{}, err
 			}
 			if errors.Is(lastSpawnErr, errStartInterrupted) {
 				return Endpoint{}, lastSpawnErr
@@ -289,17 +331,32 @@ func GetCreateDatabaseProxyServerEndpoint(rootDir string, opts OpenOpts) (Endpoi
 				recordPath,
 				recordPath,
 			)
+		case lockfile.IsLocked(err):
+			beforeProxyLockWait()
 		}
 
 		select {
-		case <-timeout.C:
-			if lastSpawnErr != nil {
-				return Endpoint{}, lastSpawnErr
-			}
-			return Endpoint{}, fmt.Errorf("timeout waiting for proxy on %s", rootDir)
+		case <-ctx.Done():
+			return Endpoint{}, proxyOpenWaitError(caller, ctx, rootDir, lastSpawnErr)
 		case <-poll.C:
 		}
 	}
+}
+
+// Only the caller's deadline is a context error. The operation's own bound
+// retains the startup diagnostic (including a failed child's log/race error),
+// so callers such as prime do not misreport it as their store-context timeout.
+func proxyOpenWaitError(caller, wait context.Context, rootDir string, lastSpawnErr error) error {
+	if err := caller.Err(); err != nil {
+		return errors.Join(err, lastSpawnErr)
+	}
+	if wait.Err() != nil {
+		if lastSpawnErr != nil {
+			return lastSpawnErr
+		}
+		return fmt.Errorf("timeout waiting for proxy on %s", rootDir)
+	}
+	return nil
 }
 
 func adoptedEndpoint(rootDir, want string, discovery adoptionResult) (Endpoint, error) {
@@ -321,6 +378,16 @@ func spawnAndHandoff(
 	lock *util.Lock,
 	discovery adoptionResult,
 ) (Endpoint, error) {
+	return spawnAndHandoffContext(context.Background(), rootDir, opts, deadline, stopEpoch, lock, discovery)
+}
+
+func spawnAndHandoffContext(caller context.Context, rootDir string, opts OpenOpts, deadline time.Time, stopEpoch string, lock *util.Lock, discovery adoptionResult) (Endpoint, error) {
+	ctx, cancel := context.WithDeadline(caller, deadline)
+	defer cancel()
+	return spawnAndHandoffWait(caller, ctx, rootDir, opts, stopEpoch, lock, discovery)
+}
+
+func spawnAndHandoffWait(caller, ctx context.Context, rootDir string, opts OpenOpts, stopEpoch string, lock *util.Lock, discovery adoptionResult) (Endpoint, error) {
 	handedOff := false
 	defer func() {
 		if !handedOff {
@@ -328,6 +395,9 @@ func spawnAndHandoff(
 		}
 	}()
 
+	if err := proxyOpenWaitError(caller, ctx, rootDir, nil); err != nil {
+		return Endpoint{}, err
+	}
 	currentEpoch, err := readStopEpoch(rootDir)
 	if err != nil {
 		return Endpoint{}, fmt.Errorf("read proxy stop epoch under lock: %w", err)
@@ -336,83 +406,128 @@ func spawnAndHandoff(
 		return Endpoint{}, fmt.Errorf("%w for %s", errStartInterrupted, rootDir)
 	}
 
+	if err := proxyOpenWaitError(caller, ctx, rootDir, nil); err != nil {
+		return Endpoint{}, err
+	}
 	if err := quarantineForSpawn(rootDir, discovery); err != nil {
 		return Endpoint{}, err
 	}
-	if err := cleanupOrphanBackend(rootDir); err != nil {
+	if err := cleanupOrphanBackendContext(ctx, rootDir); err != nil {
+		if waitErr := proxyOpenWaitError(caller, ctx, rootDir, nil); waitErr != nil {
+			return Endpoint{}, waitErr
+		}
 		return Endpoint{}, err
 	}
 
 	handedOff = true
-	child, err := forkExecChild(rootDir, opts, opts.Port, stopEpoch, lock)
+	child, err := forkExecChildContext(ctx, rootDir, opts, opts.Port, stopEpoch, lock)
 	if err != nil {
+		if waitErr := proxyOpenWaitError(caller, ctx, rootDir, nil); waitErr != nil {
+			return Endpoint{}, waitErr
+		}
 		return Endpoint{}, fmt.Errorf("fork child: %w", err)
 	}
 	defer func() { _ = clearOwnSpawnMarker(rootDir, child.marker) }()
+	// Once started, the child is shared: a lock-free opener may already have
+	// adopted it. Cancellation or a discovery error relinquishes this wait;
+	// it must not kill a process a peer is using. Shutdown/stop epochs and the
+	// existing explicit startup timeout paths retain their lifecycle authority.
 	defer func() {
 		if child.handle != nil {
 			_ = child.handle.Close()
 		}
 	}()
+	afterProxyChildStart(child)
 
 	hard := time.NewTimer(spawnReadyHardTimeout)
 	defer hard.Stop()
 	poll := time.NewTicker(openPollInterval)
 	defer poll.Stop()
 
+	childExitError := func(childErr error) error {
+		if interrupted, ierr := stopEpochChanged(rootDir, stopEpoch); ierr != nil {
+			return ierr
+		} else if interrupted {
+			return fmt.Errorf("%w for %s", errStartInterrupted, rootDir)
+		}
+		if childErr == nil {
+			childErr = errors.New("child exited without reporting an error")
+		}
+		// A LockHeldExitCode exit is a lost spawn race, not a listen
+		// failure; any other exit gets the child's log path so the real
+		// error (listen, backend start, ...) is findable.
+		var exitErr *exec.ExitError
+		if errors.As(childErr, &exitErr) && exitErr.ExitCode() == LockHeldExitCode {
+			return fmt.Errorf(
+				"proxy child lost the proxy.lock spawn race for %s: %w",
+				rootDir, childErr,
+			)
+		}
+		if opts.Port != 0 {
+			return fmt.Errorf(
+				"proxy child exited before becoming ready on explicitly configured port %d (see %s): %w",
+				opts.Port, opts.LogFilePath, childErr,
+			)
+		}
+		return fmt.Errorf(
+			"proxy child exited before publishing its OS-assigned port (see %s): %w",
+			opts.LogFilePath, childErr,
+		)
+	}
+
+	// The verified handle belongs to this spawned, unreaped child. Only our
+	// startup bound (or the existing hard timeout) authorizes its cleanup.
+	startupTimeout := func(hard bool) error {
+		if err := caller.Err(); err != nil {
+			return err
+		}
+		select {
+		case childErr := <-child.done:
+			return childExitError(childErr)
+		default:
+		}
+		if interrupted, err := stopEpochChanged(rootDir, stopEpoch); err != nil {
+			return err
+		} else if interrupted {
+			return fmt.Errorf("%w for %s", errStartInterrupted, rootDir)
+		}
+		if err := killSpawnedChild(child); err != nil {
+			return fmt.Errorf("timeout waiting for proxy on %s; safe child kill failed: %w", describeSpawnPort(opts.Port), err)
+		}
+		if hard {
+			return fmt.Errorf("hard timeout (%s) waiting for proxy on %s", spawnReadyHardTimeout, describeSpawnPort(opts.Port))
+		}
+		return fmt.Errorf("timeout waiting for proxy to become ready on %s", describeSpawnPort(opts.Port))
+	}
+
 	for {
-		discovered := readAndDial(rootDir)
+		discovered := readAndDialContext(ctx, rootDir)
+		if err := caller.Err(); err != nil {
+			return Endpoint{}, err
+		}
 		if discovered.status == adoptionAdopted {
 			if err := sweepOldQuarantines(rootDir, time.Now()); err != nil {
 				log.Printf("dbproxy: could not sweep old quarantined records in %s: %v", rootDir, err)
 			}
 			return discovered.endpoint, nil
 		}
+		if ctx.Err() != nil {
+			return Endpoint{}, startupTimeout(false)
+		}
 		if discovered.status == adoptionIOErr {
 			return Endpoint{}, fmt.Errorf("discover spawned proxy: %w", discovered.err)
 		}
 		select {
+		case <-ctx.Done():
+			return Endpoint{}, startupTimeout(false)
 		case childErr := <-child.done:
-			if interrupted, ierr := stopEpochChanged(rootDir, stopEpoch); ierr != nil {
-				return Endpoint{}, ierr
-			} else if interrupted {
-				return Endpoint{}, fmt.Errorf("%w for %s", errStartInterrupted, rootDir)
+			if err := caller.Err(); err != nil {
+				return Endpoint{}, err
 			}
-			if childErr == nil {
-				childErr = errors.New("child exited without reporting an error")
-			}
-			// A LockHeldExitCode exit is a lost spawn race, not a listen
-			// failure; any other exit gets the child's log path so the real
-			// error (listen, backend start, ...) is findable.
-			var exitErr *exec.ExitError
-			if errors.As(childErr, &exitErr) && exitErr.ExitCode() == LockHeldExitCode {
-				return Endpoint{}, fmt.Errorf(
-					"proxy child lost the proxy.lock spawn race for %s: %w",
-					rootDir, childErr,
-				)
-			}
-			if opts.Port != 0 {
-				return Endpoint{}, fmt.Errorf(
-					"proxy child exited before becoming ready on explicitly configured port %d (see %s): %w",
-					opts.Port, opts.LogFilePath, childErr,
-				)
-			}
-			return Endpoint{}, fmt.Errorf(
-				"proxy child exited before publishing its OS-assigned port (see %s): %w",
-				opts.LogFilePath, childErr,
-			)
+			return Endpoint{}, childExitError(childErr)
 		case <-hard.C:
-			if err := killSpawnedChild(child); err != nil {
-				return Endpoint{}, fmt.Errorf("hard timeout waiting for proxy on %s; safe child kill failed: %w", describeSpawnPort(opts.Port), err)
-			}
-			return Endpoint{}, fmt.Errorf("hard timeout (%s) waiting for proxy on %s", spawnReadyHardTimeout, describeSpawnPort(opts.Port))
+			return Endpoint{}, startupTimeout(true)
 		case <-poll.C:
-		}
-		if time.Now().After(deadline) {
-			if err := killSpawnedChild(child); err != nil {
-				return Endpoint{}, fmt.Errorf("timeout waiting for proxy on %s; safe child kill failed: %w", describeSpawnPort(opts.Port), err)
-			}
-			return Endpoint{}, fmt.Errorf("timeout waiting for proxy to become ready on %s", describeSpawnPort(opts.Port))
 		}
 	}
 }
@@ -434,6 +549,10 @@ type spawnedProxyChild struct {
 }
 
 func forkExecChild(rootDir string, opts OpenOpts, port int, stopEpoch string, lock *util.Lock) (*spawnedProxyChild, error) {
+	return forkExecChildContext(context.Background(), rootDir, opts, port, stopEpoch, lock)
+}
+
+func forkExecChildContext(ctx context.Context, rootDir string, opts OpenOpts, port int, stopEpoch string, lock *util.Lock) (*spawnedProxyChild, error) {
 	released := false
 	defer func() {
 		if !released {
@@ -441,6 +560,9 @@ func forkExecChild(rootDir string, opts OpenOpts, port int, stopEpoch string, lo
 		}
 	}()
 
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	self, err := ResolveExecutable()
 	if err != nil {
 		return nil, fmt.Errorf("locate bd executable: %w", err)
@@ -545,6 +667,11 @@ func forkExecChild(rootDir string, opts OpenOpts, port int, stopEpoch string, lo
 		debug.Logf("dbproxy: marked %d inherited fd(s) close-on-exec before starting proxy child: %v", len(leaked), leaked)
 	}
 
+	if err := ctx.Err(); err != nil {
+		_ = logFile.Close()
+		_ = clearOwnSpawnMarker(rootDir, marker)
+		return nil, err
+	}
 	if err := cmd.Start(); err != nil {
 		_ = logFile.Close()
 		_ = clearOwnSpawnMarker(rootDir, marker)
@@ -591,6 +718,10 @@ func IsRunning(rootDir string) (bool, int) {
 }
 
 func readAndDial(rootDir string) adoptionResult {
+	return readAndDialContext(context.Background(), rootDir)
+}
+
+func readAndDialContext(ctx context.Context, rootDir string) adoptionResult {
 	pf, err := pidfile.Read(rootDir, PIDFileName)
 	if err != nil {
 		if isMalformedPIDFileError(err) {
@@ -632,7 +763,7 @@ func readAndDial(rootDir string) adoptionResult {
 	if err != nil {
 		return adoptionResult{status: adoptionUnverifiable, pidfile: pf, err: err}
 	}
-	reply, err := identity.Identify("127.0.0.1", pf.ControlPort, secret, identityProbeTimeout)
+	reply, err := identity.IdentifyContext(ctx, "127.0.0.1", pf.ControlPort, secret, identityProbeTimeout)
 	if err != nil {
 		return adoptionResult{status: adoptionIdentityMismatch, pidfile: pf, err: err}
 	}
@@ -663,6 +794,7 @@ func readAndDial(rootDir string) adoptionResult {
 	// control listener exists, so an identity reply carrying this DataPort
 	// already implies the data listener is bound (wy-s8ytnw).
 	ep := Endpoint{Host: "127.0.0.1", Port: pf.Port}
+	afterProxyIdentityRead()
 	return adoptionResult{status: adoptionAdopted, endpoint: ep, pidfile: pf}
 }
 
@@ -759,6 +891,13 @@ func sweepOldQuarantines(rootDir string, now time.Time) error {
 }
 
 func cleanupOrphanBackend(rootDir string) error {
+	return cleanupOrphanBackendContext(context.Background(), rootDir)
+}
+
+func cleanupOrphanBackendContext(ctx context.Context, rootDir string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	recordPath := pidfile.Path(rootDir, server.PIDFileName)
 	pf, readErr := pidfile.Read(rootDir, server.PIDFileName)
 
@@ -846,6 +985,11 @@ func cleanupOrphanBackend(rootDir string) error {
 		}
 		return nil
 	}
+	beforeOrphanBackendKill()
+	if err := ctx.Err(); err != nil {
+		_ = handle.Close()
+		return err
+	}
 	if err := handle.Kill(); err != nil {
 		_ = handle.Close()
 		return fmt.Errorf("kill verified orphan backend pid %d from %s: %w", pf.Pid, recordPath, err)
@@ -856,7 +1000,7 @@ func cleanupOrphanBackend(rootDir string) error {
 	if err := handle.Close(); err != nil {
 		return fmt.Errorf("close verified backend process handle for pid %d: %w", pf.Pid, err)
 	}
-	if err := waitForRecordedProcessExit(pf, backendExitTimeout); err != nil {
+	if err := waitForRecordedProcessExitContext(ctx, pf, backendExitTimeout); err != nil {
 		return fmt.Errorf("wait for verified orphan backend pid %d: %w", pf.Pid, err)
 	}
 	if _, err := quarantineRecord(rootDir, server.PIDFileName, time.Now()); err != nil {
@@ -937,8 +1081,15 @@ func openRecordedProcess(pf *pidfile.PidFile) (*procid.Handle, bool, error) {
 }
 
 func waitForRecordedProcessExit(pf *pidfile.PidFile, timeout time.Duration) error {
+	return waitForRecordedProcessExitContext(context.Background(), pf, timeout)
+}
+
+func waitForRecordedProcessExitContext(ctx context.Context, pf *pidfile.PidFile, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		matched, err := procid.Verify(pf.Pid, procid.Token(pf.Birth))
 		if err != nil {
 			return err
@@ -949,7 +1100,13 @@ func waitForRecordedProcessExit(pf *pidfile.PidFile, timeout time.Duration) erro
 		if time.Now().After(deadline) {
 			return fmt.Errorf("timeout (%s) waiting for process exit", timeout)
 		}
-		time.Sleep(shutdownConfirmPoll)
+		timer := time.NewTimer(shutdownConfirmPoll)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
 	}
 }
 
