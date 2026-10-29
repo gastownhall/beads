@@ -1026,9 +1026,11 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 
 		// Historical workspaces need an explicit sealed-copy bridge. This runs
 		// before init's existing-workspace checks so even --force cannot create
-		// or rewrite state beside a source that has not been preserved.
-		if beadsDir := resolveInitBeadsDir(); beadsDir != "" {
-			if err := guardLegacyUpgradeWorkspaceForInit(beadsDir, initServerMode); err != nil {
+		// or rewrite state beside a source that has not been preserved. It
+		// guards the workspace the identity names — redirect included — for
+		// the same reason as the plain-init guard below (GH#6172).
+		if initID.BeadsDir != "" {
+			if err := guardLegacyUpgradeWorkspaceForInit(initID.BeadsDir, initServerMode); err != nil {
 				return handleWorkspaceGuardError(err)
 			}
 		}
@@ -1055,7 +1057,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			}
 		}
 		if !reinitLocal {
-			if err := checkExistingBeadsData(prefix); err != nil {
+			if err := checkExistingBeadsDataRef(initID, prefix); err != nil {
 				// --init-if-missing makes init idempotent, but ONLY for the
 				// benign "workspace already initialized" case. An operational
 				// error from the check (e.g. an unreadable .beads/embeddeddolt
@@ -2735,6 +2737,26 @@ func alreadyInitialized(format string, args ...any) error {
 // operational and must not be treated as success.
 
 func checkExistingBeadsDataAt(beadsDir string, prefix string) error {
+	if beadsDir == "" {
+		return nil
+	}
+	return checkExistingBeadsDataRef(initIdentityAt(beadsDir), prefix)
+}
+
+// checkExistingBeadsDataRef is the shared body of the plain-init guard, run
+// against the workspace the identity names. runInit passes the identity its
+// own chokepoint resolved (init_identity.go) — whose BeadsDir already
+// followed any .beads redirect — so this guard protects the workspace the
+// write path targets, not only the stub that points at it (GH#6172): a
+// redirect target that is an initialized workspace refuses a plain init the
+// same way a direct one does. The At wrapper passes an identity built at its
+// caller's directory, which may still be an unfollowed stub; the redirect
+// tail below keeps that shape working.
+func checkExistingBeadsDataRef(id initIdentity, prefix string) error {
+	beadsDir := id.BeadsDir
+	if beadsDir == "" {
+		return nil // Can't determine target, allow init to proceed
+	}
 	// Check if .beads directory exists
 	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
 		return nil // No .beads directory, safe to init
@@ -2748,7 +2770,7 @@ func checkExistingBeadsDataAt(beadsDir string, prefix string) error {
 	// /--force bypass this (handled by the caller). Invalid metadata must fail closed:
 	// without an explicit reinitialization request, init may not overwrite the only
 	// marker for an external or otherwise nonlocal database.
-	cfg, cfgErr := configfile.LoadForDiscovery(beadsDir)
+	cfg, cfgErr := id.Recorded, id.RecordedErr
 	if cfgErr != nil {
 		return fmt.Errorf("failed to load %s: %w; refusing to reinitialize automatically (restore the metadata or use --reinit-local after safeguarding existing data)", configfile.ConfigPath(beadsDir), cfgErr)
 	}
@@ -2969,9 +2991,23 @@ Aborting.`, remedy.PrintedValue(location), prefix)
 		return nil
 	}
 
-	// Check for redirect file - if present, check the redirect target
-	redirectTarget := beads.FollowRedirect(beadsDir)
-	if redirectTarget != beadsDir {
+	// Check for redirect - if present, check the redirect target.
+	//
+	// runInit passes an identity whose BeadsDir already followed the
+	// redirect, so the full metadata and Dolt checks above have already run
+	// against the target itself (GH#6172) — an initialized redirect target
+	// refuses as itself, and only the legacy beads.db artifact can still be
+	// missed there. The At wrapper passes an unfollowed stub whose cfg is
+	// nil; derive the redirect pair either way: an internal FollowRedirect
+	// that moves means the caller named a stub, while a non-empty
+	// RedirectedFrom means the identity already followed one.
+	redirectFrom, redirectTarget := "", beadsDir
+	if unfollowed := beads.FollowRedirect(beadsDir); unfollowed != beadsDir {
+		redirectFrom, redirectTarget = beadsDir, unfollowed
+	} else if id.RedirectedFrom != "" {
+		redirectFrom, redirectTarget = id.RedirectedFrom, beadsDir
+	}
+	if redirectFrom != "" {
 		targetDBPath := filepath.Join(redirectTarget, beads.CanonicalDatabaseName)
 		if _, err := os.Stat(targetDBPath); err == nil {
 			return alreadyInitialized(`
