@@ -69,6 +69,8 @@ type doltSQLProvider struct {
 	// provider instance only. See SetVersionedHistoryEnabled and
 	// DeferVersionedHistory.
 	versionedHistory issueops.VersionedHistorySwitch
+	// releaseTLS undoes registerExternalTLSConfig when the provider closes.
+	releaseTLS func()
 }
 
 // SetEventsJournalEnabled activates the durable events journal for every unit
@@ -217,6 +219,10 @@ func (p *doltSQLProvider) NewUOW(ctx context.Context) (UnitOfWork, error) {
 }
 
 func (p *doltSQLProvider) Close(ctx context.Context) error {
+	if release := p.releaseTLS; release != nil {
+		p.releaseTLS = nil
+		defer release()
+	}
 	if p.db == nil {
 		return nil
 	}

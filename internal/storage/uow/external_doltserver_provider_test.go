@@ -60,6 +60,40 @@ func TestNewExternalDoltServerUOWProvider_ValidationErrors(t *testing.T) {
 	}
 }
 
+func TestRegisterExternalTLSConfig_NamesEachProviderAndReleases(t *testing.T) {
+	external := configfile.ExternalDoltConfig{Host: "db", Port: 3306, TLSRequired: true}
+	first, releaseFirst, err := registerExternalTLSConfig(external)
+	require.NoError(t, err)
+	second, releaseSecond, err := registerExternalTLSConfig(external)
+	require.NoError(t, err)
+	defer releaseSecond()
+	assert.NotEqual(t, first, second, "two providers for one server must not share a registered TLS config")
+
+	parse := func(name string) error {
+		_, err := mysql.ParseDSN("root@tcp(db:3306)/beads?tls=" + name)
+		return err
+	}
+	require.NoError(t, parse(first))
+	releaseFirst()
+	assert.Error(t, parse(first), "a released TLS config must be deregistered")
+	assert.NoError(t, parse(second), "releasing one provider's TLS config must leave another's registered")
+}
+
+func TestRegisterExternalTLSConfig_WithoutTLS(t *testing.T) {
+	name, release, err := registerExternalTLSConfig(configfile.ExternalDoltConfig{Host: "db", Port: 3306})
+	require.NoError(t, err)
+	assert.Empty(t, name)
+	release()
+}
+
+func TestDoltSQLProviderClose_ReleasesTLSOnce(t *testing.T) {
+	calls := 0
+	p := &doltSQLProvider{releaseTLS: func() { calls++ }}
+	require.NoError(t, p.Close(context.Background()))
+	require.NoError(t, p.Close(context.Background()))
+	assert.Equal(t, 1, calls)
+}
+
 func TestNewExternalDoltServerUOWProvider_EndToEnd(t *testing.T) {
 	port := testutil.StartIsolatedDoltContainer(t)
 	portInt, err := strconv.Atoi(port)

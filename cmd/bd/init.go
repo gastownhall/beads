@@ -674,6 +674,9 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		externalTLSCACertPath, _ := cmd.Flags().GetString("proxied-server-external-tls-ca-cert-path")
 		externalTLSCertPath, _ := cmd.Flags().GetString("proxied-server-external-tls-cert-path")
 		externalTLSKeyPath, _ := cmd.Flags().GetString("proxied-server-external-tls-key-path")
+		externalTLSCertStore, _ := cmd.Flags().GetString("proxied-server-external-tls-cert-store")
+		externalTLSCertSubject, _ := cmd.Flags().GetString("proxied-server-external-tls-cert-subject")
+		externalTLSCertThumbprint, _ := cmd.Flags().GetString("proxied-server-external-tls-cert-thumbprint")
 		externalTLSServerName, _ := cmd.Flags().GetString("proxied-server-external-tls-server-name")
 		externalTLSSkipVerify, _ := cmd.Flags().GetBool("proxied-server-external-tls-skip-verify")
 		externalKeepAlive, _ := cmd.Flags().GetDuration("proxied-server-external-keep-alive")
@@ -756,6 +759,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		externalProvided := externalHost != "" || externalPort != 0 || externalSocketPath != "" ||
 			externalUser != "" ||
 			externalTLS || externalTLSCACertPath != "" || externalTLSCertPath != "" || externalTLSKeyPath != "" ||
+			externalTLSCertStore != "" || externalTLSCertSubject != "" || externalTLSCertThumbprint != "" ||
 			externalTLSServerName != "" || externalTLSSkipVerify || externalKeepAlive != 0
 		if externalProvided && !initProxiedServer {
 			return fmt.Errorf("--proxied-server-external-* flags require --proxied-server")
@@ -769,17 +773,20 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		var externalConfig *configfile.ExternalDoltConfig
 		if externalProvided {
 			cfg := configfile.ExternalDoltConfig{
-				Host:            externalHost,
-				Port:            externalPort,
-				Socket:          externalSocketPath,
-				User:            externalUser,
-				TLSRequired:     externalTLS,
-				TLSCACert:       externalTLSCACertPath,
-				TLSCert:         externalTLSCertPath,
-				TLSKey:          externalTLSKeyPath,
-				TLSServerName:   externalTLSServerName,
-				TLSSkipVerify:   externalTLSSkipVerify,
-				KeepAlivePeriod: externalKeepAlive,
+				Host:              externalHost,
+				Port:              externalPort,
+				Socket:            externalSocketPath,
+				User:              externalUser,
+				TLSRequired:       externalTLS,
+				TLSCACert:         externalTLSCACertPath,
+				TLSCert:           externalTLSCertPath,
+				TLSKey:            externalTLSKeyPath,
+				TLSCertStore:      externalTLSCertStore,
+				TLSCertSubject:    externalTLSCertSubject,
+				TLSCertThumbprint: externalTLSCertThumbprint,
+				TLSServerName:     externalTLSServerName,
+				TLSSkipVerify:     externalTLSSkipVerify,
+				KeepAlivePeriod:   externalKeepAlive,
 			}
 			if err := cfg.Validate(); err != nil {
 				return fmt.Errorf("--proxied-server-external-*: %v", err)
@@ -2599,6 +2606,9 @@ func init() {
 	initCmd.Flags().String("proxied-server-external-tls-ca-cert-path", "", "[EXPERIMENTAL] Absolute path to a CA certificate (PEM) used to verify the externally-managed dolt sql-server. Empty uses the system trust store. Relative paths are rejected.")
 	initCmd.Flags().String("proxied-server-external-tls-cert-path", "", "[EXPERIMENTAL] Absolute path to a client TLS certificate (for mTLS to the externally-managed dolt sql-server). Must be paired with --proxied-server-external-tls-key-path. Relative paths are rejected.")
 	initCmd.Flags().String("proxied-server-external-tls-key-path", "", "[EXPERIMENTAL] Absolute path to the client TLS private key (for mTLS to the externally-managed dolt sql-server). Must be paired with --proxied-server-external-tls-cert-path. Relative paths are rejected.")
+	initCmd.Flags().String("proxied-server-external-tls-cert-store", "", "[EXPERIMENTAL] Windows only. Certificate store to take the client TLS certificate from, for example LocalMachine\\My. Empty searches CurrentUser\\My, then LocalMachine\\My. Requires --proxied-server-external-tls-cert-subject or --proxied-server-external-tls-cert-thumbprint.")
+	initCmd.Flags().String("proxied-server-external-tls-cert-subject", "", "[EXPERIMENTAL] Windows only. Use the client TLS certificate from the Windows certificate store whose subject contains this text (case-insensitive), as PowerShell shows it in Cert:\\CurrentUser\\My. The certificate must allow client authentication; among matches the most recently issued valid one is used, so renewals are picked up. Its private key may be non-exportable. Cannot be combined with the --proxied-server-external-tls-cert-path/key-path files.")
+	initCmd.Flags().String("proxied-server-external-tls-cert-thumbprint", "", "[EXPERIMENTAL] Windows only. Use the client TLS certificate from the Windows certificate store with this SHA-1 thumbprint. Stops matching when the certificate is renewed; prefer --proxied-server-external-tls-cert-subject. Mutually exclusive with it.")
 	initCmd.Flags().String("proxied-server-external-tls-server-name", "", "[EXPERIMENTAL] Server name to verify in the external dolt sql-server's TLS certificate. Defaults to the external host. Required with a unix socket unless --proxied-server-external-tls-skip-verify is set.")
 	initCmd.Flags().Bool("proxied-server-external-tls-skip-verify", false, "[EXPERIMENTAL] Skip TLS certificate verification for the external dolt sql-server. Insecure; testing only.")
 	initCmd.Flags().Duration("proxied-server-external-keep-alive", 0, "[EXPERIMENTAL] TCP keepalive period for the proxy→external connection. Zero uses the package default (30s).")

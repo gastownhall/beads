@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"time"
 
 	mysql "github.com/go-sql-driver/mysql"
@@ -52,7 +53,7 @@ func NewExternalDoltServerUOWProvider(
 		return nil, fmt.Errorf("uow: creating server root directory: %w", err)
 	}
 
-	tlsConfigName, err := registerExternalTLSConfig(external)
+	tlsConfigName, releaseTLS, err := registerExternalTLSConfig(external)
 	if err != nil {
 		return nil, fmt.Errorf("uow: external TLS: %w", err)
 	}
@@ -67,10 +68,17 @@ func NewExternalDoltServerUOWProvider(
 		Port:          proxyPort,
 	})
 	if err != nil {
+		releaseTLS()
 		return nil, fmt.Errorf("uow: get proxy endpoint: %w", err)
 	}
 
-	return openAndInitSchema(ctx, ep, externalBackendAddress(external), database, rootUser, rootPassword, tlsConfigName, teamServer, expectedProjectID, resolved)
+	provider, err := openAndInitSchema(ctx, ep, externalBackendAddress(external), database, rootUser, rootPassword, tlsConfigName, teamServer, expectedProjectID, resolved)
+	if err != nil {
+		releaseTLS()
+		return nil, err
+	}
+	provider.(*doltSQLProvider).releaseTLS = releaseTLS
+	return provider, nil
 }
 
 // externalBackendAddress names the external server behind the proxy: its
@@ -82,17 +90,33 @@ func externalBackendAddress(external configfile.ExternalDoltConfig) string {
 	return doltutil.ServerAddr(external.Host, external.Port)
 }
 
-func registerExternalTLSConfig(external configfile.ExternalDoltConfig) (string, error) {
+var externalTLSConfigSeq atomic.Uint64
+
+// registerExternalTLSConfig registers the external server's TLS settings with
+// the MySQL driver under a name used by this provider alone. The driver clones
+// a registered config when a pool opens, so each pool keeps the config, and
+// the certificate store handles, it opened with. release removes the name and
+// closes those handles.
+func registerExternalTLSConfig(external configfile.ExternalDoltConfig) (name string, release func(), err error) {
 	if !external.TLSRequired {
-		return "", nil
+		return "", func() {}, nil
 	}
-	tc, err := external.TLSClientConfig()
+	tc, closer, err := external.TLSClientConfig()
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
-	name := "beads-external-" + server.ExternalDoltServerID(external)
+	closeStore := func() {
+		if closer != nil {
+			_ = closer.Close()
+		}
+	}
+	name = fmt.Sprintf("beads-external-%s-%d", server.ExternalDoltServerID(external), externalTLSConfigSeq.Add(1))
 	if err := mysql.RegisterTLSConfig(name, tc); err != nil {
-		return "", fmt.Errorf("register TLS config: %w", err)
+		closeStore()
+		return "", nil, fmt.Errorf("register TLS config: %w", err)
 	}
-	return name, nil
+	return name, func() {
+		mysql.DeregisterTLSConfig(name)
+		closeStore()
+	}, nil
 }
