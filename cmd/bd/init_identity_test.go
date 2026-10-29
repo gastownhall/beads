@@ -306,3 +306,50 @@ func TestInitRepoint_EmptyConfiguredProceedsWithOneNotice(t *testing.T) {
 		t.Fatalf("metadata.json records %q, want %q", got, target)
 	}
 }
+
+// AC-7: plain `bd init` from a checkout whose .beads redirects to an
+// initialized workspace targets that workspace, so it refuses exactly as it
+// would inside the target instead of rewriting the target's metadata.json.
+// The pre-dispatch selection exports the redirect target as BEADS_DIR, which
+// checkExistingBeadsData and the identity record both read; this pins that the
+// identity record keeps resolving the same workspace.
+func TestInitRepoint_RedirectedCheckoutRefusesLikeTarget(t *testing.T) {
+	w := newRepointWorkspace(t, 1)
+	target := w.otherDB(t, "b")
+	args := externalServerInitArgs(target)
+
+	inTarget, err := runExternalServerBD(t, w.repoDir, w.env, args...)
+	if err == nil {
+		t.Fatalf("plain bd init inside the initialized target succeeded:\n%s", inTarget)
+	}
+	var refusal string
+	for _, line := range strings.Split(inTarget, "\n") {
+		if strings.Contains(line, "Found existing Dolt database") {
+			refusal = strings.TrimSpace(line)
+		}
+	}
+	if refusal == "" || !strings.Contains(inTarget, "This workspace is already initialized.") {
+		t.Fatalf("unexpected refusal inside the target:\n%s", inTarget)
+	}
+
+	checkout := t.TempDir()
+	initGitRepo(t, checkout)
+	if err := os.MkdirAll(filepath.Join(checkout, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(checkout, ".beads", "redirect"), []byte(w.beadsDir+"\n"))
+
+	out, err := runExternalServerBD(t, checkout, w.env, args...)
+	if err == nil {
+		t.Fatalf("plain bd init from the redirected checkout succeeded:\n%s", out)
+	}
+	for _, want := range []string{refusal, "This workspace is already initialized."} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("refusal from the checkout does not contain %q:\n%s", want, out)
+		}
+	}
+	requireDatabaseAbsent(t, target)
+	if got := recordedDB(t, w.beadsDir); got != w.db {
+		t.Fatalf("target metadata.json records %q, want %q", got, w.db)
+	}
+}
