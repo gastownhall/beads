@@ -280,3 +280,29 @@ func TestInitRepoint_MissingConfiguredNeedsRecreateMissing(t *testing.T) {
 		t.Fatalf("metadata.json records %q, want %q", got, target)
 	}
 }
+
+// AC-6: repointing away from a configured database that exists with zero
+// issues needs no destroy confirmation, but is announced exactly once.
+func TestInitRepoint_EmptyConfiguredProceedsWithOneNotice(t *testing.T) {
+	w := newRepointWorkspace(t, 0)
+	target := w.otherDB(t, "b")
+
+	out, code := w.reinit(t, w.env, "--reinit-local", "--database", target, "--non-interactive")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0\n%s", code, out)
+	}
+	if strings.Contains(out, "Existing issues") || strings.Contains(out, "destroy") {
+		t.Fatalf("an empty configured database asked for a destroy confirmation:\n%s", out)
+	}
+	if n := strings.Count(out, "Repointing this workspace"); n != 1 {
+		t.Fatalf("printed %d repoint notices, want exactly 1:\n%s", n, out)
+	}
+	for _, want := range []string{"from database " + w.db + " ", "to " + target + " "} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("repoint notice does not contain %q:\n%s", want, out)
+		}
+	}
+	if got := recordedDB(t, w.beadsDir); got != target {
+		t.Fatalf("metadata.json records %q, want %q", got, target)
+	}
+}

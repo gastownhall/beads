@@ -113,6 +113,20 @@ freezes (pinned in `cmd/bd/protocol/exit_codes_init_test.go`). 15 is stable
 in-repo but not §E3-frozen (GH#4635); it skips 13 and 14, which bd already
 uses for `ExitGuardMismatch` and `ExitMigrationFrozen`.
 
+### Repointing to another database
+
+`bd init --reinit-local` with a `--database`, `--server-host` or
+`--server-port` that names a database other than the recorded one is a
+repoint (GH#6172). Invariant 2's local-data confirmation, and ADR-0004's
+missing-database guard, are about the database the workspace is configured
+for, at its configured endpoint, resolved once before the flags are promoted
+into the environment: never the target, and never an exported
+`BEADS_DOLT_SERVER_*` value. A populated configured database takes the same
+11/12 confirmation; a configured database that exists but cannot be read
+refuses the repoint with an ordinary error that no token or
+`--recreate-missing` lifts, so 10/11/12 keep their frozen meanings. A
+proceeding repoint prints one notice naming both databases.
+
 ### Deprecation cycle
 
 `--force` continues to work for ≥2 releases post-0.x, emitting a
