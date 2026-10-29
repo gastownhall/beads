@@ -207,6 +207,7 @@ func TestValidateBackupPruneDestination(t *testing.T) {
 		{name: "file URL", url: "file:///var/backups/beads"},
 		{name: "case-insensitive scheme", url: "FILE:///var/backups/beads"},
 		{name: "https destination", url: "https://user:secret@example.com/beads", wantErr: "configured scheme: https"},
+		{name: "file URI without //", url: "file:/var/backups/beads", wantErr: "requires a file://"},
 		{name: "scheme missing", url: "/var/backups/beads", wantErr: "requires a valid file://"},
 		{name: "malformed URL", url: "file://%zz", wantErr: "requires a valid file://"},
 	}
