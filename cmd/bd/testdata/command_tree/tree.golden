@@ -3813,6 +3813,16 @@ bd init-safety
     |   deliberate guard against pattern-matched one-liners (see
     |   engdocs/adr/0002-init-safety-invariants.md).
     |
+    | REPOINTING (notice, not a refusal)
+    |
+    |   A re-init that re-targets the workspace's database — a different
+    |   --database, or a --server-host/--server-port other than the workspace's
+    |   own endpoint — prints a one-line repoint notice before it runs, after
+    |   every refusal has passed. --quiet suppresses it. A flag that restates
+    |   what the workspace already records (a case-only --database spelling,
+    |   localhost vs 127.0.0.1, the workspace's own port file port) is not a
+    |   repoint. See docs/recovery/init-safety.md#init-repoint.
+    |
     | EXIT CODES
     |
     |   10    refused: remote has Dolt history and you selected local history

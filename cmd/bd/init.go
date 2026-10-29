@@ -1270,6 +1270,15 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		}
 		defer func() { _ = initGateHandle.Release() }()
 
+		// The repoint notice (GH#6172): every refusal has now passed and the
+		// reinit is committed, so a re-targeting reinit says so — once,
+		// before the writes it is about to make. A reinit that keeps the
+		// workspace's own database, and restating flags (GH#5177), say
+		// nothing.
+		if initID.Repoints() && !quiet {
+			fmt.Fprintln(os.Stderr, initRepointNotice(initID))
+		}
+
 		// Resolve the operational storage path only after held-gate preflight
 		// succeeds. ResolveDoltDir retains its mkdir-on-use behavior for a
 		// real shared-server initialization.

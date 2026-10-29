@@ -27,6 +27,7 @@ See also: `bd help init-safety`, and
 - [init-local-exists — `bd init --reinit-local` refused because local data already exists](#init-local-exists)
 - [init-home-refused — `bd init` refused because the working directory is your home directory](#init-home-refused)
 - [init-missing-server-db — `bd init` refused because the configured server-side database is missing](#init-missing-server-db)
+- [init-repoint — a re-init repointed this workspace at a different database or endpoint (this is a notice, not a refusal)](#init-repoint)
 - [pk-fork-refused — `bd dolt pull`/`push` refused because a table has different primary keys in its common ancestor](#pk-fork-refused)
 - [re-clone-gotchas — two gotchas hit during manual re-clone recovery: damaged stores left inside `data_dir`, and a fresh clone missing clone-local tables](#re-clone-gotchas)
 
@@ -440,6 +441,51 @@ rows rarely apply there.
   mode before creating anything, and does not restore over a database the
   server already holds. Elsewhere, including shared-server mode named only
   by `dolt.shared-server` in a config.yaml, it uses the embedded store.
+
+---
+
+## init-repoint
+
+**Symptom**
+
+```text
+Repointing this workspace from database "old" (127.0.0.1:3307) to database "new" (127.0.0.1:3308).
+```
+
+This is a notice, not a refusal. `bd init --reinit-local` printed it while
+re-initializing a workspace whose `metadata.json` records one database when
+the invocation's flags select a different one: a different `--database`, or a
+`--server-host`/`--server-port` that points somewhere other than the
+workspace's own endpoint.
+
+**What already ran before the notice**
+
+The notice prints only after every safety refusal has passed and the re-init
+is committed:
+
+- The missing-database guard has confirmed the configured database's fate
+  (see [init-missing-server-db](#init-missing-server-db)).
+- The destroy confirmation has counted the configured database's live issues,
+  and you have confirmed the destruction (see
+  [init-local-exists](#init-local-exists) and
+  [init-token-missing](#init-token-missing)).
+- A configured database that exists but cannot be read refuses the re-init
+  outright: an unconfirmed destruction does not run.
+
+**What is not a repoint**
+
+A flag that restates what the workspace already records is not a change and
+prints no notice (GH#5177): the same `--database` the workspace metadata
+already names (including a case-only spelling difference), a `--server-host`
+that names the workspace's own host (`localhost` and `127.0.0.1` count as
+the same), or a `--server-port` that names the port the workspace's own port
+file records. A stale `BEADS_DOLT_SERVER_*` environment overlay does not turn
+such a restatement into a repoint.
+
+**Suppressing it**
+
+`--quiet` suppresses the notice along with the rest of init's narration. The
+re-init still runs exactly as it would with the notice.
 
 ---
 

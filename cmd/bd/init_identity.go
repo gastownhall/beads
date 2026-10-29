@@ -216,6 +216,29 @@ func refuseUnreadableConfiguredDatabase(id initIdentity, cause error) error {
 		configured, addr, id.Target.Database, cause, addr)
 }
 
+// initDBRefLabel names one database identity the way the repoint notice
+// does: the database, with its endpoint when it lives on a server.
+func initDBRefLabel(ref initDBRef) string {
+	name := ref.Database
+	if name == "" {
+		name = configfile.DefaultDoltDatabase
+	}
+	if !ref.Server {
+		return fmt.Sprintf("database %q (embedded)", name)
+	}
+	return fmt.Sprintf("database %q (%s)", name, doltutil.PrintedServerAddr(ref.Host, ref.Port))
+}
+
+// initRepointNotice is the one line a re-targeting reinit prints before it
+// runs (GH#6172): the reinit's own words about the database it is leaving and
+// the one it is targeting, so a silent database switch cannot look like an
+// ordinary re-initialization. It is a notice, not a confirmation — the
+// destroy confirmation and the missing-database guard have already run by
+// the time it prints, and it names no command line (ADR-0002 invariant 4).
+func initRepointNotice(id initIdentity) string {
+	return fmt.Sprintf("Repointing this workspace from %s to %s.", initDBRefLabel(id.Configured), initDBRefLabel(id.Target))
+}
+
 // initHostsEqual compares two server hosts for identity: bd's own server
 // address is one host however it is spelled, and every other address compares
 // by its unbracketed form, ignoring case.

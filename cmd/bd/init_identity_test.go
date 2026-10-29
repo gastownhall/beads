@@ -406,3 +406,103 @@ func TestInitRepoint_RestatingFlagsAreNotChanges(t *testing.T) {
 		})
 	}
 }
+
+// TestInitRepoint_MissingConfiguredDBRefusesThenRecreates pins the repoint
+// notice's two halves. The victim records database A that its live server
+// does not have and holds no local Dolt data for: a recovery shape, so init
+// refuses without --recreate-missing, about A at its own endpoint, and
+// prints no notice. With the opt-in it proceeds — and says so, exactly once,
+// naming the database it leaves and the one it targets, then records the
+// target.
+func TestInitRepoint_MissingConfiguredDBRefusesThenRecreates(t *testing.T) {
+	port := startRepointServer(t) // a live server holding nothing
+	const victimDB = "repoint_a"
+	const targetDB = "repoint_b"
+
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "0")
+	t.Setenv("BEADS_DOLT_DATA_DIR", "")
+
+	projectDir := t.TempDir()
+	beadsDir := filepath.Join(projectDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := (&configfile.Config{
+		Backend:        configfile.BackendDolt,
+		DoltMode:       configfile.DoltModeServer,
+		DoltServerHost: "127.0.0.1",
+		DoltDatabase:   victimDB,
+		ProjectID:      "repoint-0000-1111-2222-333344445555",
+	}).Save(beadsDir); err != nil {
+		t.Fatalf("save workspace metadata: %v", err)
+	}
+	// No local Dolt data for the configured database: it exists only in the
+	// workspace's record, and the live server does not hold it. The port
+	// file names the live server, so the configured endpoint is reachable.
+	if err := os.WriteFile(filepath.Join(beadsDir, doltserver.PortFileName), []byte(strconv.Itoa(port)), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeLocalVersion(filepath.Join(beadsDir, localVersionFile), Version); err != nil {
+		t.Fatalf("write local version: %v", err)
+	}
+
+	assertMetadataRecords := func(t *testing.T, want string) {
+		t.Helper()
+		after, err := configfile.LoadForDiscovery(beadsDir)
+		if err != nil {
+			t.Fatalf("read workspace metadata: %v", err)
+		}
+		got := "<nil>"
+		if after != nil {
+			got = after.DoltDatabase
+		}
+		if got != want {
+			t.Fatalf("metadata must record %q, got %q", want, got)
+		}
+	}
+
+	// Without the opt-in: refuse about the configured database, and do not
+	// print a notice for a repoint that did not run.
+	out, err := runExternalServerBD(t, projectDir, initRepointChildEnv(t),
+		"init", "--reinit-local", "--database", targetDB, "--prefix", "rp",
+		"--skip-hooks", "--skip-agents")
+	if err == nil {
+		t.Fatalf("bd init must refuse to recreate the missing configured database %s without --recreate-missing, got success:\n%s", victimDB, out)
+	}
+	for _, want := range []string{"not found on server", victimDB, "--recreate-missing"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("refusal must name %q, got:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "Repointing this workspace") {
+		t.Errorf("a refused reinit must not print a repoint notice:\n%s", out)
+	}
+	if check := checkDatabaseOnServer("127.0.0.1", port, "root", "", targetDB, false); check.Exists {
+		t.Errorf("the refused reinit must not create database %s on the server: %+v", targetDB, check)
+	}
+	assertMetadataRecords(t, victimDB)
+
+	// With the opt-in: proceed, print the notice exactly once naming both
+	// databases, and record the target.
+	out, err = runExternalServerBD(t, projectDir, initRepointChildEnv(t),
+		"init", "--reinit-local", "--recreate-missing",
+		"--database", targetDB, "--prefix", "rp",
+		"--skip-hooks", "--skip-agents")
+	if err != nil {
+		t.Fatalf("bd init --recreate-missing must proceed when the configured database is missing and the target is new, got %v\n%s", err, out)
+	}
+	if n := strings.Count(out, "Repointing this workspace"); n != 1 {
+		t.Errorf("the reinit must print the repoint notice exactly once, got %d:\n%s", n, out)
+	}
+	notice := "Repointing this workspace from database \"" + victimDB + "\""
+	if !strings.Contains(out, notice) {
+		t.Errorf("the notice must name the database the workspace leaves, got:\n%s", out)
+	}
+	if !strings.Contains(out, "to database \""+targetDB+"\"") {
+		t.Errorf("the notice must name the database the workspace targets, got:\n%s", out)
+	}
+	if check := checkDatabaseOnServer("127.0.0.1", port, "root", "", targetDB, false); !check.Exists {
+		t.Errorf("the reinit must create database %s on the server: %+v\n%s", targetDB, check, out)
+	}
+	assertMetadataRecords(t, targetDB)
+}

@@ -137,6 +137,23 @@ Mutation-testing ritual (optional but recommended): flip `!force &&` to
 `CheckRemoteSafety`, and confirm both the matrix test and the
 subprocess test fail. If either stays green, coverage is theater.
 
+### Repoint notice (GH#6172)
+
+A re-init that re-targets the workspace's database — a different
+`--database`, or a `--server-host`/`--server-port` other than the
+workspace's own endpoint — prints a one-line repoint notice once, after
+every refusal has passed and immediately before the writes it is about to
+make. It is a notice, not a confirmation: the destroy confirmation and the
+missing-database guard have already run, and it names no command line
+(Invariant 4). `--quiet` suppresses it with the rest of init's narration.
+A flag that restates what the workspace already records (a case-only
+`--database` spelling, `localhost` vs `127.0.0.1`, the workspace's own port
+file port) is not a repoint and prints nothing (GH#5177). The identity the
+notice names is resolved once, at one chokepoint in `runInit`, from the
+workspace's own metadata read raw — never from `BEADS_DOLT_SERVER_*` values
+that could substitute a different database for the one being left. The
+playbook is `docs/recovery/init-safety.md#init-repoint`.
+
 ### Review discipline
 
 `.github/CODEOWNERS` points `cmd/bd/init*.go` at maintainers and
