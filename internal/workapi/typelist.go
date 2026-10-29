@@ -53,16 +53,23 @@ func ParseCommaSeparatedList(value string) []string {
 
 // typeNameForbiddenRunes are the characters no issue type name carries. A
 // stored name holding one is a mis-spelled list — `[op]`, `"op"`, `op fact`
-// — that the lenient ParseTypeList would read as a name matching no row.
+// — that the lenient ParseTypeList would read as a name matching no row: the
+// write check refuses it, and the read also splits it on them.
 const typeNameForbiddenRunes = " \t\r\n\"'`[],"
+
+// isTypeNameForbiddenRune reports whether r is one of typeNameForbiddenRunes.
+func isTypeNameForbiddenRune(r rune) bool {
+	return strings.ContainsRune(typeNameForbiddenRunes, r)
+}
 
 // ValidateRetainedTypesValue is the write-time check of a types.retained value
 // (issueops.SettingKeyTypesRetained). It checks SYNTAX ONLY: that the value is
 // a list ParseTypeList reads the way the operator wrote it. Spelling is the
 // reader's job — RetainedTypesFromSetting canonicalizes aliases and the case of
-// built-in types — so a write route that skips this check, or a server that
-// predates it, can store a value that over-protects but never one that
-// silently protects a different type.
+// built-in types, and splits a name on the characters this check refuses — so
+// a write route that skips this check, or a server that predates it, can store
+// a value that over-protects but never one that silently protects nothing or a
+// different type.
 //
 // It refuses a value that opens with '[' but is not a JSON array of strings, a
 // non-blank value that names no type (`null`, `,`, `[""]`), and a name

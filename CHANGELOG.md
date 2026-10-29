@@ -81,14 +81,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a type). A retaining sweep keeps nothing back, so it is the one that
   deletes those beads, and it retires their ids. A retained bead protects
   itself only; in a sweep the hold-back runs before the protections and
-  `limit`. The setting is read from the workspace database on the command's
-  own transaction, never from `config.yaml` (a key there draws a warning); a
-  read error fails the command and deletes nothing. Names are matched through
-  one canonicalizing read, so an alias (`feat`, `mol`) or a case variant of a
-  built-in type (`Chore`) protects the type beads carry; a write refuses only
-  malformed syntax (a bracketed list that is not JSON, a name with a space,
-  quote, bracket or comma, a non-blank value that names no type), and
-  `bd config set-many` checks every pair before it writes. Not in scope, by
+  `limit`. The setting is read from the workspace database, never from
+  `config.yaml` (a key there draws a warning): a sweep reads it in the
+  transaction that deletes, and `bd gc`, `bd admin cleanup` and
+  `bd doctor --fix` read it with their selection (from one snapshot, except
+  `bd gc` over HTTP) before they delete; a read error fails the command and
+  deletes nothing. Names are
+  matched through one canonicalizing read, so an alias (`feat`, `mol`) or a
+  case variant of a built-in type (`Chore`) protects the type beads carry,
+  and a malformed name stored past the write check (`[op]`, `op fact`) still
+  protects the names in it; a write refuses only malformed syntax (a
+  bracketed list that is not JSON, a name with a space, quote, bracket or
+  comma, a non-blank value that names no type), and `bd config set-many`
+  checks every pair before it writes. A bd that predates the setting ignores
+  it, so upgrade every bd that runs these commands on a workspace before
+  relying on it. Not in scope, by
   design: `bd mol wisp gc` (it selects only ephemeral wisps), the
   `bd doctor` pollution deletes, `bd migrate-personal`, and the deletes that
   name what they delete (`bd delete`, `bd mol burn`/`squash`,

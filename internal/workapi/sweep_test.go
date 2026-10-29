@@ -530,8 +530,10 @@ func TestRetainedTypesFromSettingParsesBothForms(t *testing.T) {
 // both alias tables, and its lower-case form when that is a built-in type. So
 // a value an older server, an older client or `bd sql` stored with an alias or
 // a case variant still protects the type rows actually carry, and a custom
-// type is matched verbatim. The want sets are exact: the read may over-protect
-// by these forms and by nothing else.
+// type is matched verbatim. A name the write check would refuse (`[op]`,
+// `"op"`, `op fact`) also protects each fragment of it, read the same way, so
+// a value stored past that check still protects what it names. The want sets
+// are exact: the read may over-protect by these forms and by nothing else.
 func TestRetainedTypesFromSettingCanonicalizes(t *testing.T) {
 	for _, test := range []struct {
 		name  string
@@ -552,6 +554,11 @@ func TestRetainedTypesFromSettingCanonicalizes(t *testing.T) {
 		{"a mixed-case custom type is verbatim", "OpRecord", []string{"OpRecord"}},
 		{"the union of every name", `["op","feat","Bug"]`, []string{"op", "feat", "feature", "Bug", "bug"}},
 		{"the comma form unions too", "fact, mol", []string{"fact", "mol", "molecule"}},
+		{"a bracketed name protects the name inside", "[op]", []string{"[op]", "op"}},
+		{"a quoted name protects the name inside", `"op"`, []string{`"op"`, "op"}},
+		{"a spaced name protects each word", "op fact", []string{"op fact", "op", "fact"}},
+		{"a truncated JSON array protects its names", `["op","fact"`, []string{`["op"`, "op", `"fact"`, "fact"}},
+		{"a fragment is read canonically too", "[Feat]", []string{"[Feat]", "Feat", "feature"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			got := RetainedTypesFromSetting(test.value)

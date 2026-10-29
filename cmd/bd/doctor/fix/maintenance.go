@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/workapi"
@@ -39,6 +40,7 @@ func StaleClosedIssues(path string) error {
 		fmt.Println("  Stale closed issues cleanup disabled (set stale_closed_issues_days to enable)")
 		return nil
 	}
+	warnIgnoredYAMLRetainedTypes()
 
 	// Open database using factory to respect backend configuration (bd-m2jr:
 	// SQLite fallback fix). This handler DELETES issues, so it opens through
@@ -58,17 +60,13 @@ func StaleClosedIssues(path string) error {
 		ClosedBefore: &cutoff,
 	}
 
-	issues, err := store.SearchIssues(ctx, "", filter)
+	// The retained types are read from the workspace database the deletes go
+	// to, on the snapshot the closed issues are read from. A read error fails
+	// the fix: deleting on a guess would take beads whose ids must be retired,
+	// and this fix retires none.
+	issues, retainedSetting, err := store.SearchIssuesWithConfig(ctx, "", filter, issueops.SettingKeyTypesRetained)
 	if err != nil {
 		return fmt.Errorf("failed to query issues: %w", err)
-	}
-
-	// The retained types are read from the workspace database the deletes go
-	// to. A read error fails the fix: deleting on a guess would take beads
-	// whose ids must be retired, and this fix retires none.
-	retainedSetting, err := store.GetConfig(ctx, issueops.SettingKeyTypesRetained)
-	if err != nil {
-		return fmt.Errorf("reading %s: %w", issueops.SettingKeyTypesRetained, err)
 	}
 	deletable, skipped, retained := selectStaleClosed(issues, retainedSetting)
 
@@ -114,6 +112,16 @@ func selectStaleClosed(issues []*types.Issue, retainedSetting string) (deletable
 	}
 	deletable, retained = workapi.PartitionSweepRetainedTypes(unpinned, workapi.RetainedTypesFromSetting(retainedSetting))
 	return deletable, pinned, retained
+}
+
+// warnIgnoredYAMLRetainedTypes prints config.RetainedTypesYAMLWarning, if
+// there is one, before the fix selects: like the other commands that honor
+// types.retained, it reads the setting from the workspace database only, so a
+// key in config.yaml protects nothing from it.
+func warnIgnoredYAMLRetainedTypes() {
+	if msg := config.RetainedTypesYAMLWarning(); msg != "" {
+		fmt.Printf("  Warning: %s\n", msg)
+	}
 }
 
 // PatrolPollution deletes patrol digest and session ended beads that pollute the database.

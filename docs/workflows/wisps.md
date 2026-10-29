@@ -119,11 +119,15 @@ retires their ids, which is the one retention command they leave by.
 - In a sweep the hold-back runs after the pinned and `closed_at` rechecks and
   before the live-dependent and reference protections and `--limit`, so held
   back beads never use up a sweep's limit.
-- It is read from the workspace database, on the command's own transaction,
-  never from `config.yaml`, so every client of a shared workspace sees the
-  same rule; a `types.retained` key in `config.yaml` is ignored, and the
-  commands above warn that it is. If bd cannot read it, the command fails and
-  deletes nothing.
+- It is read from the workspace database, never from `config.yaml`, so
+  every client of a shared workspace sees the same rule; a `types.retained`
+  key in `config.yaml` is ignored, and the commands above warn that it is. If
+  bd cannot read it, the command fails and deletes nothing.
+- A sweep reads it in the transaction that deletes. `bd gc`,
+  `bd admin cleanup` and `bd doctor --fix` read it together with the beads
+  they select, from one snapshot (over HTTP, `bd gc` reads it right after),
+  and delete afterwards: a change to the setting made after they select
+  applies from their next run.
 - Names are matched through one canonicalizing read: each name protects
   itself, its canonical form under bd's type aliases, and its lower-case form
   when that is a built-in type. So `feat` protects `feature` beads, `mol`
@@ -135,7 +139,9 @@ retires their ids, which is the one retention command they leave by.
   you wrote: a bracketed list that is not JSON (`[op]`), a name with a space,
   quote, bracket or comma in it (`"op"`, `op fact`), and a non-blank value
   that names no type (`null`, `,`). `[]` retains nothing, and an empty value
-  unsets the key.
+  unsets the key. A value stored past that check, by an older bd or by
+  `bd sql`, still protects the names in it: `[op]` and `op fact` protect
+  `op`.
 
 **What it does not cover, by design.** These commands do not consult the
 setting:
@@ -156,6 +162,12 @@ Over HTTP, a server that honors the setting advertises
 those beads without retiring their ids, bd reads the setting first and
 refuses a plain `bd prune` or `bd purge` when it names a type; upgrade the
 server, or use `--retain-ids` if the server supports it.
+
+**Upgrade every bd first.** A bd that predates the setting ignores it, so
+its `bd prune`, `bd purge`, `bd gc` or `bd admin cleanup` can delete those
+beads without retiring their ids, and a `bd dolt push` carries the deletes to
+every clone. The setting protects a workspace only once every bd that runs
+these commands on it honors the setting.
 
 A sweep with `--retain-ids` briefly blocks or conflicts with creates of
 unrelated ids that hash to the same coordination shard as one it retires,

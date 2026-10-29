@@ -7,11 +7,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
@@ -126,7 +129,9 @@ func TestPatrolPollution_DeletesFromDoltWithoutJSONL(t *testing.T) {
 // TestStaleClosedIssues_KeepsRetainedTypes drives the stale-closed-issues fix
 // against a server-mode workspace whose types.retained names chore: the old
 // closed chore stays, the old closed task goes. The fix deletes with no
-// tombstone, so a retained bead must never be its to take.
+// tombstone, so a retained bead must never be its to take. A types.retained
+// key in config.yaml naming task is ignored, and the fix says so before it
+// selects: the setting is read from the workspace database only.
 func TestStaleClosedIssues_KeepsRetainedTypes(t *testing.T) {
 	requireFixDoltContainer(t)
 	port := fixTestServerPort()
@@ -176,8 +181,23 @@ func TestStaleClosedIssues_KeepsRetainedTypes(t *testing.T) {
 		t.Fatalf("failed to close setup store: %v", err)
 	}
 
-	if err := StaleClosedIssues(tmpDir); err != nil {
-		t.Fatalf("StaleClosedIssues returned error: %v", err)
+	t.Chdir(tmpDir)
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+	config.Set("types.retained", "task")
+
+	var fixErr error
+	out := captureFixStdout(t, func() { fixErr = StaleClosedIssues(tmpDir) })
+	if fixErr != nil {
+		t.Fatalf("StaleClosedIssues returned error: %v\n%s", fixErr, out)
+	}
+	warning := strings.Index(out, "Warning: types.retained in config.yaml (task) is ignored")
+	cleaned := strings.Index(out, "Cleaned up 1 stale closed issue(s)")
+	if warning < 0 || cleaned < 0 || warning > cleaned {
+		t.Errorf("StaleClosedIssues printed:\n%s\nwant the ignored config.yaml warning, then the one task cleaned up", out)
 	}
 
 	verifyStore, err := dolt.NewFromConfig(ctx, beadsDir)
@@ -191,4 +211,31 @@ func TestStaleClosedIssues_KeepsRetainedTypes(t *testing.T) {
 	if _, err := verifyStore.GetIssue(ctx, "bd-stale"); err == nil {
 		t.Errorf("bd-stale survived the fix; want it deleted")
 	}
+}
+
+// captureFixStdout runs fn with os.Stdout redirected and returns what it
+// printed there, which is where a fix handler reports.
+func captureFixStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	printed := make(chan string)
+	go func() {
+		b, _ := io.ReadAll(r)
+		printed <- string(b)
+	}()
+	orig := os.Stdout
+	os.Stdout = w
+	func() {
+		defer func() {
+			os.Stdout = orig
+			_ = w.Close()
+		}()
+		fn()
+	}()
+	out := <-printed
+	_ = r.Close()
+	return out
 }

@@ -103,7 +103,9 @@ Examples:
 				MaxRowsSource: "",
 			}
 
-			closedIssues, err := store.SearchIssues(ctx, "", filter)
+			// The closed issues and types.retained come from one snapshot, so
+			// the hold-back below uses the setting the selection's snapshot held.
+			closedIssues, retained, err := storage.SearchIssuesWithConfig(ctx, store, "", filter, issueops.SettingKeyTypesRetained)
 			if err != nil {
 				return HandleErrorRespectJSON("searching closed issues: %v", err)
 			}
@@ -112,10 +114,6 @@ Examples:
 			closedIssues, stats = filterClosedDeletionCandidates(closedIssues, &cutoffTime)
 			warnClosedDeletionSafetySkips(stats)
 
-			retained, err := store.GetConfig(ctx, issueops.SettingKeyTypesRetained)
-			if err != nil {
-				return HandleErrorRespectJSON("reading %s: %v", issueops.SettingKeyTypesRetained, err)
-			}
 			closedIssues, retentionKept = holdBackRetainedTypes(closedIssues, retained)
 			if retentionKept > 0 && !jsonOutput {
 				fmt.Println(retainedTypesKeptLine(retentionKept, "closed issue(s)"))

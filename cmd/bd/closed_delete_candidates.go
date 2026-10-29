@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/steveyegge/beads/internal/config"
@@ -17,11 +16,14 @@ import (
 // plus gc's own warning line. One definition, two callers: gc and the role
 // cannot come to disagree about what "a closed bead safe to delete" means.
 //
-// The other bulk deletes outside the role — `bd admin cleanup`, `bd mol wisp
-// gc` and the stale-closed-issues doctor fix — select by their own rules, but
-// all of them delete through the Deleter role, which writes no tombstone, so
-// each holds back the beads of a retained type through holdBackRetainedTypes
-// (the doctor fix, in its own package, through the workapi partition itself).
+// The other retention doors outside the role — `bd admin cleanup` and the
+// stale-closed-issues doctor fix — select by their own rules and delete with
+// no tombstone (cleanup through the Deleter role, the doctor fix row by row),
+// so each holds back the beads of a retained type: cleanup through
+// holdBackRetainedTypes, the doctor fix, in its own package, through the
+// workapi partition itself. Each reads types.retained with its selection, on
+// one snapshot (storage.SearchIssuesWithConfig). `bd mol wisp gc` does not
+// consult the setting; SweepRequest.RetainIDs says why.
 
 type closedDeletionCandidateStats = issueops.SweepSkips
 
@@ -49,10 +51,10 @@ func warnClosedDeletionSafetySkips(stats closedDeletionCandidateStats) {
 // the beads whose type the workspace retains (issueops.SettingKeyTypesRetained):
 // `bd gc`'s decay and `bd admin cleanup`. It is the same
 // partition the Sweeper role applies to a sweep without RetainIDs: those
-// commands delete by id through the Deleter role and write no tombstone, so a
-// retained bead is never theirs to take. setting is the stored value of
-// types.retained, read from the workspace database; a caller that cannot read
-// it must fail rather than pass "".
+// commands delete by id and write no tombstone, so a retained bead is never
+// theirs to take. setting is the stored value of types.retained, read from the
+// workspace database with the selection; a caller that cannot read it must
+// fail rather than pass "".
 func holdBackRetainedTypes(issues []*types.Issue, setting string) ([]*types.Issue, int) {
 	return workapi.PartitionSweepRetainedTypes(issues, workapi.RetainedTypesFromSetting(setting))
 }
@@ -63,26 +65,13 @@ func retainedTypesKeptLine(kept int, noun string) string {
 	return fmt.Sprintf("  Kept %d %s of a retained type (types.retained) — only bd prune/purge --retain-ids deletes them", kept, noun)
 }
 
-// ignoredYAMLRetainedTypesWarning is the warning for a types.retained key in
-// config.yaml (or BD_TYPES_RETAINED), or "" when there is none. That layer is
-// never read for the setting — every sweep and bulk delete reads the
-// workspace database, so a shared workspace has one rule — and a key there
-// would otherwise look like protection while protecting nothing.
-func ignoredYAMLRetainedTypesWarning() string {
-	names := config.GetRetainedTypesFromYAML()
-	if len(names) == 0 {
-		return ""
-	}
-	list := strings.Join(names, ",")
-	return fmt.Sprintf("%s in config.yaml (%s) is ignored: it is read from the workspace database only; set it with `bd config set %s %s`",
-		issueops.SettingKeyTypesRetained, list, issueops.SettingKeyTypesRetained, list)
-}
-
-// warnIgnoredYAMLRetainedTypes prints ignoredYAMLRetainedTypesWarning to
-// stderr, if there is one. Every bulk delete that honors types.retained calls
-// it before it selects.
+// warnIgnoredYAMLRetainedTypes prints config.RetainedTypesYAMLWarning to
+// stderr, if there is one. That layer is never read for the setting — every
+// sweep and bulk delete reads the workspace database, so a shared workspace
+// has one rule — so every bulk delete that honors types.retained calls it
+// before it selects (the doctor fix through its own copy of this call).
 func warnIgnoredYAMLRetainedTypes() {
-	if msg := ignoredYAMLRetainedTypesWarning(); msg != "" {
+	if msg := config.RetainedTypesYAMLWarning(); msg != "" {
 		WarnError("%s", msg)
 	}
 }

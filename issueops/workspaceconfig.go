@@ -41,6 +41,15 @@ const (
 // database only — never from config.yaml — because the rule it states must be
 // the same for every client of a shared workspace, and a client's file is not
 // visible to a server sweeping on its behalf.
+//
+// AN OLDER BD IGNORES IT. A bd from before this setting that runs prune,
+// purge, gc or admin cleanup on the direct, embedded or proxied route holds
+// nothing back and deletes those rows with no tombstone, and a `bd dolt push`
+// carries the deletes to every clone. So the guard holds only while every bd
+// that runs a retention door against the workspace is at the release that
+// introduced it or later. (The reverse case is guarded: a current client
+// refuses a plain sweep against an older http server, one that lacks
+// issues.sweep.retainedTypes.)
 const SettingKeyTypesRetained = "types.retained"
 
 // GetSettingRequest names one stored setting.

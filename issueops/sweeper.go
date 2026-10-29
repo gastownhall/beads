@@ -200,11 +200,20 @@ type SweepRequest struct {
 	//   - order: here the partition runs after the pinned and closed_at
 	//     rechecks and before the live-dependent and reference protections
 	//     and Limit, so a held-back row never consumes Limit;
-	//   - database only: the setting is read on the door's own transaction or
-	//     unit of work, and a read error fails the door;
+	//   - database only: the setting is read from the workspace database, and
+	//     a read error fails the door. This role's bodies read it on the
+	//     transaction or unit of work that deletes. `bd gc`'s decay,
+	//     `bd admin cleanup` and the doctor fix read it with their selection,
+	//     on the selection's snapshot (storage.SearchIssuesWithConfig, or the
+	//     proxied decay's read unit of work; over http, which has no
+	//     transaction, `bd gc` reads it in the request after the selection's),
+	//     and delete afterwards: a change made after they select does not
+	//     reach that run's deletes;
 	//   - one canonicalizing read (workapi.RetainedTypesFromSetting): a name
 	//     protects itself, its alias-canonical forms and, for a built-in
-	//     type, its lower-case form, so matching can only over-protect.
+	//     type, its lower-case form, and a name the write check would refuse
+	//     (`[op]`, `op fact`) also protects each name inside it, so matching
+	//     can only over-protect.
 	//
 	// NOT IN SCOPE, BY DESIGN: `bd mol wisp gc`, which selects only
 	// ephemeral = 1 rows; the doctor's Patrol Pollution and test-pollution

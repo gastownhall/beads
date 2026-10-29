@@ -186,6 +186,14 @@ func FilterSweepCandidates(issues []*types.Issue, pattern string, cutoff *time.T
 // protects `feature`, `mol` protects `molecule` and `Chore` protects `chore`.
 // Matching can only over-protect, never protect nothing in silence.
 //
+// THE READ ALSO SPLITS A NAME THE WRITE CHECK WOULD REFUSE. A route that skips
+// ValidateRetainedTypesValue (an older bd, `bd sql`, a Dolt pull) can store
+// `[op]`, `"op"` or `op fact`, which ParseTypeList reads as names no row
+// carries. So each name also protects every fragment of it between the
+// characters no type name holds (typeNameForbiddenRunes), each read the same
+// way: such a value protects op, rather than nothing. A name the check accepts
+// has no such character, so the split adds nothing to it.
+//
 // Names are not checked against the registered types: an unknown name matches
 // no row, which is what lets an orchestrator name a type before it registers
 // it.
@@ -196,14 +204,24 @@ func RetainedTypesFromSetting(value string) map[string]bool {
 	}
 	retained := make(map[string]bool, len(names))
 	for _, name := range names {
-		retained[name] = true
-		retained[string(types.IssueType(name).Normalize())] = true
-		retained[utils.NormalizeIssueType(name)] = true
-		if lower := types.IssueType(strings.ToLower(name)); lower.IsBuiltIn() {
-			retained[string(lower)] = true
+		retainTypeName(retained, name)
+		for _, fragment := range strings.FieldsFunc(name, isTypeNameForbiddenRune) {
+			retainTypeName(retained, fragment)
 		}
 	}
 	return retained
+}
+
+// retainTypeName adds name to retained with the forms RetainedTypesFromSetting
+// matches it by: its canonical form under both alias tables and, when that is
+// a built-in type, its lower-case form.
+func retainTypeName(retained map[string]bool, name string) {
+	retained[name] = true
+	retained[string(types.IssueType(name).Normalize())] = true
+	retained[utils.NormalizeIssueType(name)] = true
+	if lower := types.IssueType(strings.ToLower(name)); lower.IsBuiltIn() {
+		retained[string(lower)] = true
+	}
 }
 
 // PartitionSweepRetainedTypes is the retained-type protection

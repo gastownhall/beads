@@ -6,6 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/workapi"
@@ -106,14 +107,11 @@ SEE ALSO:
 			filter.Ephemeral = &wispTrue
 		}
 
-		closedIssues, err := store.SearchIssues(ctx, "", filter)
+		// The closed issues and types.retained come from one snapshot, so the
+		// hold-back and the --cascade refusal use the setting it held.
+		closedIssues, retainedSetting, err := storage.SearchIssuesWithConfig(ctx, store, "", filter, issueops.SettingKeyTypesRetained)
 		if err != nil {
 			return HandleError("listing issues: %v", err)
-		}
-
-		retainedSetting, err := store.GetConfig(ctx, issueops.SettingKeyTypesRetained)
-		if err != nil {
-			return HandleError("reading %s: %v", issueops.SettingKeyTypesRetained, err)
 		}
 		selection, err := selectCleanupCandidates(closedIssues, retainedSetting, cascade)
 		if err != nil {
