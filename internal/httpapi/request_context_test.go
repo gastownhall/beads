@@ -12,9 +12,10 @@ import (
 	"github.com/steveyegge/beads/internal/storage/uow"
 )
 
-// These tests pin Config.RequestContext: the embedder hook that runs after a
-// request is authorized and before it is dispatched, and either returns the
-// context the handler runs with or refuses the request.
+// These tests pin Config.RequestContext: the embedder hook that runs for every
+// routed request after the bearer check (when the route has one) and before it
+// is dispatched, and either returns the context the handler runs with or
+// refuses the request.
 
 // callerLabelKey is the context key a test hook stores its value under, the
 // way an embedder would carry a label asserted by a trusted fronting proxy.
@@ -238,6 +239,25 @@ func TestRequestContextRunsOnlyAfterAuthorization(t *testing.T) {
 	}
 	if got := calls.Load(); got != 1 {
 		t.Errorf("hook calls after one authorized request = %d, want 1", got)
+	}
+}
+
+// TestRequestContextRunsForAuthExemptRoutes pins the other half of the
+// contract: an auth-exempt route (the liveness probe) reaches the hook with no
+// credential checked, so a hook must never read "it reached me" as "it was
+// authorized".
+func TestRequestContextRunsForAuthExemptRoutes(t *testing.T) {
+	var calls atomic.Int32
+	ts := newTestServer(t, Config{
+		Provider:       newCtxRecordingProvider(),
+		Auth:           authTokenFile(t, "real-token"),
+		RequestContext: labelHook(&calls),
+	})
+	if resp := ts.get(t, "/healthz"); resp.StatusCode != http.StatusOK {
+		t.Fatalf("liveness without a credential = %d, want 200", resp.StatusCode)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("hook calls for an unauthenticated liveness probe = %d, want 1", got)
 	}
 }
 

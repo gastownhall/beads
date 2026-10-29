@@ -15,10 +15,15 @@ import (
 //
 // The contract:
 //
-//   - The hook runs once per routed request, after the Host check and the
-//     bearer check, and before the project stamp, the wire-revision check, the
-//     concurrency slot and the handler. A request refused earlier, or one that
-//     matches no route, never reaches it.
+//   - The hook runs once for EVERY routed request: after the Host check and,
+//     on a route that requires one, the bearer check; and before the project
+//     stamp, the wire-revision check, the concurrency slot and the handler. A
+//     request refused earlier, or one that matches no route, never reaches it.
+//   - It also runs for the routes exempt from the bearer check (the liveness
+//     probe) and, on a server configured without bearer authentication, for
+//     every route — in both cases with no credential checked at all. A hook
+//     must not read "it reached me" as "it was authorized", and should pass a
+//     request it has nothing to say about through unchanged.
 //   - The context it returns MUST be derived from r.Context(): that context
 //     carries the request deadline and the per-request record the log line is
 //     written from. A context that is not derived from it is an embedder bug,
