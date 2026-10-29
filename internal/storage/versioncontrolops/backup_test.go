@@ -199,3 +199,56 @@ func TestBackupRestoreSanitizesUserinfoInError(t *testing.T) {
 		})
 	}
 }
+
+// TestBackupRestoreSanitizesSignedQueryInError is AC-2 of #6341: the signed
+// query parameters a cloud backup URL carries (X-Amz-Signature,
+// X-Amz-Credential) must not reach the error text, for either force branch.
+func TestBackupRestoreSanitizesSignedQueryInError(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		url       string
+		forbidden []string
+	}{
+		{
+			name:      "aws signed query",
+			url:       "aws://bucket/path?X-Amz-Signature=deadbeefcafe&X-Amz-Credential=AKIAEXAMPLE",
+			forbidden: []string{"deadbeefcafe", "AKIAEXAMPLE"},
+		},
+		{
+			name:      "s3 signed query",
+			url:       "s3://bucket/key?X-Amz-Signature=cafebabe99&X-Amz-Credential=AKIAEXAMPQ",
+			forbidden: []string{"cafebabe99", "AKIAEXAMPQ"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, force := range []bool{false, true} {
+				checkRedactedRestoreError(t, tc.url, force, "", tc.forbidden)
+			}
+		})
+	}
+}
+
+// TestBackupRestoreErrorRedactsURLCredentials pins that a failed restore never
+// echoes the userinfo secret or a signed query from the backup URL (#6341).
+func TestBackupRestoreErrorRedactsURLCredentials(t *testing.T) {
+	const url = "aws://k:supersecret@b/p?X-Amz-Signature=sigvalue123"
+	for _, force := range []bool{false, true} {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("sqlmock.New: %v", err)
+		}
+		mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_BACKUP('restore'")).
+			WillReturnError(fmt.Errorf("access denied"))
+
+		err = BackupRestore(context.Background(), db, url, "beads", force)
+		db.Close()
+		if err == nil {
+			t.Fatalf("force=%v: BackupRestore returned nil, want an error", force)
+		}
+		for _, secret := range []string{"supersecret", "sigvalue123"} {
+			if strings.Contains(err.Error(), secret) {
+				t.Errorf("force=%v: error leaks %q: %v", force, secret, err)
+			}
+		}
+	}
+}
