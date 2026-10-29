@@ -217,8 +217,9 @@ func maybeAutoBackup(ctx context.Context) {
 	}
 
 	// Size cap: skip entirely once the destination has grown past
-	// backup.size-cap-mb (ga-y6gjv) — see backupSizeCapExceeded for why a
-	// cap, not an in-place prune, is the safe fix here.
+	// backup.size-cap-mb (ga-y6gjv). Automatic backups do not opt into the
+	// explicit command's grace-period pruning; see backupSizeCapExceeded for why
+	// this path remains capped until it has a configured pruning policy.
 	//
 	// Placed AFTER change detection, which is the order
 	// docs/reference/configuration.md:"How it works" documents. Ahead of

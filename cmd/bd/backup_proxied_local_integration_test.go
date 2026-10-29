@@ -63,6 +63,17 @@ func TestManagedLocalProxiedBackupRoundTrip(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dest, "manifest")); err != nil {
 		t.Fatalf("backup sync produced no manifest at %s: %v", dest, err)
 	}
+	orphan := filepath.Join(dest, "00000000000000000000000000000001")
+	if err := os.WriteFile(orphan, []byte("orphaned table file"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ageBackupDestinationEntries(t, dest, 20*time.Minute)
+	if out, err := bdProxiedRun(t, bd, p.dir, "backup", "sync", "--prune-with-grace-period", "10m"); err != nil {
+		t.Fatalf("bd backup sync --prune-with-grace-period 10m: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
+		t.Fatalf("pruned sync left the orphan in place; stat error: %v", err)
+	}
 
 	after := bdProxiedCreate(t, bd, p.dir, "must not survive the restore", "-p", "1")
 

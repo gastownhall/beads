@@ -5,8 +5,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/DATA-DOG/go-sqlmock"
 )
 
 // TestDirToFileURLRejectsSchemes pins the guard that stops a URL being turned
@@ -75,6 +79,42 @@ func TestExtractAddressConflictName(t *testing.T) {
 				t.Errorf("got %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestBackupSyncWithPrunePassesNativeProcedureOptions(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	query := "CALL DOLT_BACKUP('sync', ?, '--prune-with-grace-period', ?)"
+	mock.ExpectExec(regexp.QuoteMeta(query)).
+		WithArgs("default", "30m0s").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	if err := BackupSyncWithPrune(context.Background(), db, "default", 30*time.Minute); err != nil {
+		t.Fatalf("BackupSyncWithPrune: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBackupSyncWithPruneRejectsTooShortGracePeriodBeforeSQL(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	err = BackupSyncWithPrune(context.Background(), db, "default", time.Minute)
+	if err == nil || !strings.Contains(err.Error(), "at least 10m") {
+		t.Fatalf("BackupSyncWithPrune short grace error = %v, want minimum-duration error", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
 	}
 }
 

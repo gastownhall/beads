@@ -1072,6 +1072,13 @@ type BackupStore interface {
 	RestoreDatabase(ctx context.Context, dir string, force bool) error
 }
 
+// PrunableBackupStore supports Dolt's grace-period pruning for file:// backup
+// destinations. It is separate from BackupStore so callers that do not offer
+// this opt-in operation can keep the ordinary sync contract unchanged.
+type PrunableBackupStore interface {
+	BackupSyncWithPrune(ctx context.Context, name string, gracePeriod time.Duration) error
+}
+
 // ReadyWorkCounter sizes the total ready-work count for a filter without
 // materializing the counts mega-query. It is identical to
 // len(GetReadyWorkWithCounts(filter with Limit=0)) but computed with cheap
