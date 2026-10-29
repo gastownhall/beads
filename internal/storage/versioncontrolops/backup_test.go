@@ -2,11 +2,15 @@ package versioncontrolops
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/DATA-DOG/go-sqlmock"
 )
 
 // TestDirToFileURLRejectsSchemes pins the guard that stops a URL being turned
@@ -99,6 +103,98 @@ func TestBackupToDirRefusesMissingOrFileDestination(t *testing.T) {
 			err := BackupToDir(context.Background(), nil, nil, tc.dir)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("BackupToDir(%q) error = %v, want one containing %q", tc.dir, err, tc.want)
+			}
+		})
+	}
+}
+
+// expectFailedRestore arms a sqlmock DBConn whose CALL DOLT_BACKUP('restore', …)
+// exec fails with a sentinel error, runs BackupRestore, and returns the
+// sentinel alongside the returned error so callers can assert errors.Is. The
+// sentinel deliberately does not contain the URL: the wrapped Dolt text echoing
+// it is a separate leak (see #6341 follow-ups), and an echoing sentinel would
+// mask whether the %s operand itself was redacted.
+//
+// The WithArgs expectation also pins that the verbatim URL still reaches Dolt
+// on the error path: if a future change scrubbed the bind argument,
+// ExpectationsWereMet would fail the test.
+func expectFailedRestore(t *testing.T, url string, force bool) (sentinel error, err error) {
+	t.Helper()
+	db, mock, mockErr := sqlmock.New()
+	if mockErr != nil {
+		t.Fatalf("sqlmock.New: %v", mockErr)
+	}
+	defer db.Close()
+	sentinel = errors.New("dolt exploded")
+	mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_BACKUP('restore'")).
+		WithArgs(url, "beads").
+		WillReturnError(sentinel)
+	err = BackupRestore(context.Background(), db, url, "beads", force)
+	if metErr := mock.ExpectationsWereMet(); metErr != nil {
+		t.Errorf("force=%v: %v", force, metErr)
+	}
+	return sentinel, err
+}
+
+// checkRedactedRestoreError runs the assertions shared by #6341's
+// redaction ACs: the error still says what failed and still unwraps to the
+// driver sentinel, names the backup source when wantSource is set, and never
+// contains any of the forbidden substrings (credentials, signatures).
+func checkRedactedRestoreError(t *testing.T, url string, force bool, wantSource string, forbidden []string) {
+	t.Helper()
+	sentinel, err := expectFailedRestore(t, url, force)
+	if err == nil {
+		t.Fatalf("force=%v: BackupRestore returned nil, want an error", force)
+	}
+	if !strings.Contains(err.Error(), "restore from backup") {
+		t.Errorf("force=%v: error %q lost the restore context", force, err)
+	}
+	if wantSource != "" && !strings.Contains(err.Error(), wantSource) {
+		t.Errorf("force=%v: error %q no longer names the backup source %q", force, err, wantSource)
+	}
+	if !errors.Is(err, sentinel) {
+		t.Errorf("force=%v: errors.Is lost the driver error: %v", force, err)
+	}
+	for _, f := range forbidden {
+		if strings.Contains(err.Error(), f) {
+			t.Errorf("force=%v: error leaks %q: %v", force, f, err)
+		}
+	}
+}
+
+// TestBackupRestoreSanitizesUserinfoInError is AC-1 of #6341: a failed
+// restore must not echo the userinfo of the backup URL into its error, for
+// either force branch.
+func TestBackupRestoreSanitizesUserinfoInError(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		url        string
+		wantSource string
+		forbidden  []string
+	}{
+		{
+			name:      "aws credentials",
+			url:       "aws://key:secret@bucket/path",
+			forbidden: []string{"secret", "key:secret@"},
+		},
+		{
+			// url.Parse takes everything up to the last '@' as userinfo, so
+			// an '@' inside the password is not a parse failure: sanitizeURL
+			// still strips it.
+			name:      "at sign in password",
+			url:       "aws://KEYAT:p@ssAT@bucket/db",
+			forbidden: []string{"KEYAT", "p@ssAT"},
+		},
+		{
+			// Credential-free local sources keep naming the destination.
+			name:       "file url names the source",
+			url:        "file:///var/backups/x",
+			wantSource: "file:///var/backups/x",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, force := range []bool{false, true} {
+				checkRedactedRestoreError(t, tc.url, force, tc.wantSource, tc.forbidden)
 			}
 		})
 	}

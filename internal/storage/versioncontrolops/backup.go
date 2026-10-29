@@ -43,11 +43,11 @@ func BackupRemove(ctx context.Context, db DBConn, name string) error {
 func BackupRestore(ctx context.Context, db DBConn, url, dbName string, force bool) error {
 	if force {
 		if _, err := db.ExecContext(ctx, "CALL DOLT_BACKUP('restore', '--force', ?, ?)", url, dbName); err != nil {
-			return fmt.Errorf("restore from backup %s: %w", url, err)
+			return fmt.Errorf("restore from backup %s: %w", sanitizeURL(url), err)
 		}
 	} else {
 		if _, err := db.ExecContext(ctx, "CALL DOLT_BACKUP('restore', ?, ?)", url, dbName); err != nil {
-			return fmt.Errorf("restore from backup %s: %w", url, err)
+			return fmt.Errorf("restore from backup %s: %w", sanitizeURL(url), err)
 		}
 	}
 	return nil
