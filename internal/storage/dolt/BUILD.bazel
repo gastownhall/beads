@@ -305,6 +305,7 @@ go_test(
         "migration_0073_rollback_test.go",
         "mixed_table_lifecycle_test.go",
         "molecule_contract_test.go",
+        "molecule_progress_rows_err_test.go",
         "multistore_multiprocess_test.go",
         "open_test.go",
         "pool_timeouts_test.go",
