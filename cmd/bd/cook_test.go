@@ -1661,3 +1661,44 @@ func TestCookFormulaConditionKeptNeedsTargetSucceeds(t *testing.T) {
 		t.Errorf("consumer blocks edges = %v, want %v", got, want)
 	}
 }
+
+// TestCookFormulaLoopContainerExternalNeedsSkipped pins the skip that
+// collectDependencies keeps for a reference control flow replaced: ApplyLoops
+// replaces the loop container round with its expanded body and
+// rewriteLoopDependencies rewrites only in-body references, so after's needs
+// on round still names no issue at cook. The pour succeeds without that edge;
+// erroring on every dangling reference would break it (GH#6437).
+func TestCookFormulaLoopContainerExternalNeedsSkipped(t *testing.T) {
+	const name = "loop-external-needs"
+	sg, err := cookFormulaTOMLWithVars(t, name, `formula = "loop-external-needs"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "round"
+title = "Rounds"
+
+[steps.loop]
+count = 2
+
+[[steps.loop.body]]
+id = "work"
+title = "Work"
+
+[[steps]]
+id = "after"
+title = "After the rounds"
+needs = ["round"]
+`, map[string]string{})
+	if err != nil {
+		t.Fatalf("cook %q: %v", name, err)
+	}
+	for _, want := range []string{name + ".round.iter1.work", name + ".round.iter2.work", name + ".after"} {
+		if sg.IssueMap[want] == nil {
+			t.Errorf("missing issue %q; have %v", want, allIssueIDs(sg))
+		}
+	}
+	if got := blocksEdgesFrom(sg, name+".after"); slices.Contains(got, name+".round") {
+		t.Errorf("after blocks edges = %v, want none onto the replaced container %q", got, name+".round")
+	}
+}
