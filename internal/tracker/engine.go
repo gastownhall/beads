@@ -849,15 +849,23 @@ func (e *Engine) fetchPrelinkedIssues(ctx context.Context, fetched []TrackerIssu
 		return nil, hydratedLocalIDs, nil
 	}
 
+	// seen holds remotes the bulk fetch shows changed after lastSync. A row
+	// only the overlap window returned (pullOverlapOnly) did not change after
+	// it, so a pre-linked local matching it is still hydrated, from that row.
 	seen := make(map[string]struct{}, len(fetched))
+	overlapOnly := make(map[string]struct{})
 	for _, issue := range fetched {
+		into := seen
+		if pullOverlapOnly(&issue, lastSync) {
+			into = overlapOnly
+		}
 		for _, id := range []string{
 			strings.TrimSpace(issue.Identifier),
 			strings.TrimSpace(e.Tracker.ExtractIdentifier(e.Tracker.BuildExternalRef(&issue))),
 		} {
 			if id != "" {
-				seen[id] = struct{}{}
-				seen[strings.ToLower(id)] = struct{}{}
+				into[id] = struct{}{}
+				into[strings.ToLower(id)] = struct{}{}
 			}
 		}
 	}
@@ -886,6 +894,18 @@ func (e *Engine) fetchPrelinkedIssues(ctx context.Context, fetched []TrackerIssu
 			continue
 		}
 		if _, ok := seen[strings.ToLower(identifier)]; ok {
+			continue
+		}
+		_, inOverlap := overlapOnly[identifier]
+		if _, ok := overlapOnly[strings.ToLower(identifier)]; ok {
+			inOverlap = true
+		}
+		if inOverlap {
+			// The bulk row is already in the pull; marking the local lets the
+			// conflict guard apply it instead of skipping the stub.
+			hydratedLocalIDs[local.ID] = true
+			seen[identifier] = struct{}{}
+			seen[strings.ToLower(identifier)] = struct{}{}
 			continue
 		}
 
