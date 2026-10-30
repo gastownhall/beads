@@ -557,6 +557,10 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 			if pulledIDs != nil {
 				pulledIDs[conv.Issue.ID] = true
 			}
+			// A new row has no stale entry to clear, so only record.
+			if conv.Issue.ID != "" {
+				e.recordPushHash(ctx, conv.Issue, ref)
+			}
 		}
 	}
 
