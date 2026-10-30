@@ -200,6 +200,7 @@ go_test(
         "retained_types_test.go",
         "role_requests_test.go",
         "row_lock_guard_test.go",
+        "rows_err_test.go",
         "scan_test.go",
         "search_counts_test.go",
         "search_goside_sort_test.go",
