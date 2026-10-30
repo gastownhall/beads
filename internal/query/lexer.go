@@ -91,7 +91,7 @@ func (t TokenType) String() string {
 type Token struct {
 	Type  TokenType
 	Value string
-	Pos   int // Position in input string
+	Pos   int // Byte offset of the token in the input string
 }
 
 // Lexer tokenizes a query string.

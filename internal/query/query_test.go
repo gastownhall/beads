@@ -14,10 +14,11 @@ import (
 
 func TestLexer(t *testing.T) {
 	tests := []struct {
-		name     string
-		input    string
-		expected []TokenType
-		values   []string
+		name      string
+		input     string
+		expected  []TokenType
+		values    []string
+		positions []int
 	}{
 		{
 			name:     "simple equality",
@@ -285,6 +286,13 @@ func TestLexer(t *testing.T) {
 			expected: []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenAnd, TokenIdent, TokenEquals, TokenIdent, TokenEOF},
 			values:   []string{"status", "=", "open", "AND", "label", "=", "x", ""},
 		},
+		{
+			name:      "positions after a multi-byte value are byte offsets",
+			input:     "label=größe AND status=open",
+			expected:  []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenAnd, TokenIdent, TokenEquals, TokenIdent, TokenEOF},
+			values:    []string{"label", "=", "größe", "AND", "status", "=", "open", ""},
+			positions: []int{0, 5, 6, 14, 18, 24, 25, 29},
+		},
 	}
 
 	for _, tt := range tests {
@@ -305,6 +313,9 @@ func TestLexer(t *testing.T) {
 				}
 				if tt.values != nil && tok.Value != tt.values[i] {
 					t.Errorf("token %d: got value %q, want %q", i, tok.Value, tt.values[i])
+				}
+				if tt.positions != nil && tok.Pos != tt.positions[i] {
+					t.Errorf("token %d: got pos %d, want %d", i, tok.Pos, tt.positions[i])
 				}
 			}
 		})
