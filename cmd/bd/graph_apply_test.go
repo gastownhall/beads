@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/types"
@@ -1641,5 +1642,48 @@ func TestBuildGraphApplyBatchRequestLeavesAnAbsentPriorityToTheRole(t *testing.T
 	}
 	if z := creates["z"]; z == nil || z.DefaultPriority || z.Issue.Priority != 0 {
 		t.Errorf("explicit 0 item = %+v, want P0 without DefaultPriority", z)
+	}
+}
+
+// TestGraphApplyNodeIssueStampsCreatedAtWithStatusTimestamps pins GH#7519:
+// when graphApplyNodeIssue stamps a node's status timestamp from its one
+// plan-build clock read, created_at takes the same read, so the insert's own
+// later stamp (one per row, at apply time) can never land after it. A node
+// that gets no status stamp keeps a zero created_at: the HTTP create wire
+// refuses a populated Issue.CreatedAt, and open-only graph plans over that
+// wire depend on the field staying empty (W-CreateItem.Issue).
+func TestGraphApplyNodeIssueStampsCreatedAtWithStatusTimestamps(t *testing.T) {
+	stamped := []struct {
+		name   string
+		status types.Status
+	}{
+		{"closed", types.StatusClosed},
+	}
+	for _, row := range stamped {
+		t.Run(row.name, func(t *testing.T) {
+			issue, err := graphApplyNodeIssue(
+				GraphApplyNode{Key: "n", Title: "N", Status: string(row.status)},
+				GraphApplyOptions{}, "actor", "")
+			if err != nil {
+				t.Fatalf("graphApplyNodeIssue: %v", err)
+			}
+			if issue.CreatedAt.IsZero() {
+				t.Fatalf("%s: created_at left zero for the insert to stamp", row.name)
+			}
+			if loc := issue.CreatedAt.Location(); loc != time.UTC {
+				t.Errorf("%s: created_at location = %v, want UTC", row.name, loc)
+			}
+			statusStamp := issue.ClosedAt
+			if row.status == types.StatusInProgress {
+				statusStamp = issue.StartedAt
+			}
+			if statusStamp == nil {
+				t.Fatalf("%s: status timestamp not stamped", row.name)
+			}
+			if !issue.CreatedAt.Equal(*statusStamp) {
+				t.Errorf("%s: created_at %v != %s stamp %v (one clock read must fill both)",
+					row.name, issue.CreatedAt, row.status, *statusStamp)
+			}
+		})
 	}
 }
