@@ -671,8 +671,12 @@ var (
 	ErrNotClaimable    = storage.ErrNotClaimable
 	ErrCloseBlocked    = storage.ErrCloseBlocked
 	ErrVersionMismatch = storage.ErrVersionMismatch
-	ErrSelfDependency  = domain.ErrSelfDependency
-	ErrDependencyCycle = domain.ErrDependencyCycle
+	// ErrIdempotencyExpired matches a create refused because a retaining
+	// retention sweep retired its id: the create that used the id already
+	// happened and a create of it never runs again.
+	ErrIdempotencyExpired = storage.ErrIdempotencyExpired
+	ErrSelfDependency     = domain.ErrSelfDependency
+	ErrDependencyCycle    = domain.ErrDependencyCycle
 	// ErrDependencySourceNotFound and ErrDependencyTargetNotFound are the two
 	// endpoint-existence refusals AddDependency and AddDependencies raise; the
 	// typed value carrying the missing id is DependencyEndpointNotFoundError.

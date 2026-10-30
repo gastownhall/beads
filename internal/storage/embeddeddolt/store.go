@@ -1040,7 +1040,11 @@ func (s *EmbeddedDoltStore) ListTags(ctx context.Context) ([]string, error) {
 
 // ImportJSONLData atomically checks if the database is empty and, if so,
 // imports parsed issues and config key/value pairs in a single transaction.
-// Returns the count of issues imported, or 0 if the database was not empty.
+// Returns the count of issues imported and, deduplicated in file order, the
+// ids it skipped because a retaining retention sweep retired them (an import
+// never resurrects a swept row, and they are not counted as imported), or 0
+// and nil if the database was not empty. A database holding only tombstones
+// has no issue rows, so it counts as empty.
 // Does NOT issue DOLT_COMMIT — the caller is responsible for committing
 // (e.g. via the PersistentPostRun auto-commit hook).
 func (s *EmbeddedDoltStore) ImportJSONLData(
@@ -1048,8 +1052,9 @@ func (s *EmbeddedDoltStore) ImportJSONLData(
 	issues []*types.Issue,
 	configEntries map[string]string,
 	actor string,
-) (int, error) {
+) (int, []string, error) {
 	var imported int
+	var retiredIDs []string
 	err := s.withConn(ctx, true, func(tx *sql.Tx) error {
 		// Atomically check: is the database empty?
 		stats := &types.Statistics{}
@@ -1082,6 +1087,7 @@ func (s *EmbeddedDoltStore) ImportJSONLData(
 		}
 
 		// Create all issues in the same transaction
+		retired := make(map[string]bool)
 		if err := issueops.CreateIssuesInTx(ctx, tx, issues, actor, storage.BatchCreateOptions{
 			SkipPrefixValidation: true,
 			// Defense-in-depth (GH#3955): the embedded fast-path is the primary
@@ -1090,14 +1096,26 @@ func (s *EmbeddedDoltStore) ImportJSONLData(
 			// that check cannot clobber live rows — matching the server-mode
 			// fallback's conflict-skip behavior.
 			ConflictSkip: true,
+			// A row whose id a retaining sweep retired is skipped, never
+			// written; the callback names it so the count below leaves it out.
+			OnRetiredID: func(issueID string) { retired[issueID] = true },
 		}); err != nil {
 			return err
 		}
 
-		imported = len(issues)
+		imported, retiredIDs = 0, nil
+		listed := make(map[string]bool, len(retired))
+		for _, issue := range issues {
+			if !retired[issue.ID] {
+				imported++
+			} else if !listed[issue.ID] {
+				listed[issue.ID] = true
+				retiredIDs = append(retiredIDs, issue.ID)
+			}
+		}
 		return nil
 	})
-	return imported, err
+	return imported, retiredIDs, err
 }
 
 // Flatten squashes all Dolt commit history into a single commit.

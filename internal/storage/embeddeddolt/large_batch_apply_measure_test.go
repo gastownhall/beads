@@ -440,10 +440,16 @@ func TestLargeBatchApplyWallClock_Embedded(t *testing.T) {
 // cross-plane collision check nor the create-only insert re-reads a plane:
 // -2 statements per create item (356: 102 creates, -204; 712: 204, -408;
 // classic: 10, -20). The Dolt server backend drops by the same amounts.
+//
+// Re-pinned for the id-retention guard (was 6192 / 12382 / 815). The
+// create-only guard now reads a create's occupancy — both row tables and both
+// id tombstone tables — in ONE statement where it used to read the two row
+// tables in two: -1 statement per create item (356: 102 creates, -102; 712:
+// 204, -204; classic: 10, -10).
 var pinnedEmbeddedStatementCounts = map[string]int64{
-	"356 (mol 1x)":    6192,
-	large712ShapeName: 12382,
-	"40 (classic)":    815,
+	"356 (mol 1x)":    6090,
+	large712ShapeName: 12178,
+	"40 (classic)":    805,
 }
 
 // BenchmarkLargeBatchApply_Embedded benchmarks issueops.ApplyBatchInTx on

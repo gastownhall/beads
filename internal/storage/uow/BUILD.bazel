@@ -130,6 +130,7 @@ go_test(
         "graph_counter_contract_test.go",
         "heartbeater_contract_test.go",
         "history_off_differential_test.go",
+        "id_retention_contract_test.go",
         "importer_contract_test.go",
         "importer_uow_test.go",
         "issue_claimer_test.go",

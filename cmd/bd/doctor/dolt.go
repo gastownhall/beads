@@ -286,7 +286,7 @@ func checkSchemaWithDB(conn *doltConn) DoctorCheck {
 	ctx := context.Background()
 
 	// Check required tables
-	requiredTables := []string{"issues", "dependencies", "config", "labels", "events"}
+	requiredTables := []string{"issues", "dependencies", "config", "labels", "events", "id_tombstones"}
 	var missingTables []string
 
 	for _, table := range requiredTables {
@@ -326,6 +326,7 @@ func checkSchemaWithDB(conn *doltConn) DoctorCheck {
 	ignoredTables := []string{
 		"events", "leases", "local_metadata", "repo_mtimes",
 		"wisps", "wisp_labels", "wisp_dependencies", "wisp_events", "wisp_comments",
+		"wisp_id_tombstones",
 	}
 	var missingIgnoredTables []string
 	for _, table := range ignoredTables {

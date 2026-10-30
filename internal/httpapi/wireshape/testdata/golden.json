@@ -4328,6 +4328,13 @@
     },
     {
       "schema": "Problem",
+      "member": "closed_at",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "Problem",
       "member": "code",
       "type": "string",
       "required": true
@@ -4930,6 +4937,12 @@
     },
     {
       "schema": "SweepRequest",
+      "member": "retain_ids",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "SweepRequest",
       "member": "tier",
       "type": "string",
       "enum": [
@@ -4979,6 +4992,12 @@
     },
     {
       "schema": "SweepResult",
+      "member": "retain_ids",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "SweepResult",
       "member": "skipped",
       "type": "object",
       "required": true
@@ -5018,6 +5037,12 @@
       "member": "referenced",
       "type": "integer",
       "required": true
+    },
+    {
+      "schema": "SweepSkips",
+      "member": "retention_required",
+      "type": "integer",
+      "required": false
     },
     {
       "schema": "SweepSkips",

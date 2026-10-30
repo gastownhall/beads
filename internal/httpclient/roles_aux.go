@@ -11,6 +11,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
 	"github.com/steveyegge/beads/internal/httpclient/wire"
+	storageops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
 )
@@ -221,10 +222,12 @@ func validateSettingKey(key string) error {
 }
 
 // validateSettingWrite is the role's own write rules, restated: the key rule
-// above, the protected key, and the one value whose shape is checked because it
-// is PROJECTED rather than merely stored.
+// above, the protected key, the one value whose shape is checked because it is
+// PROJECTED rather than merely stored, and the one checked because it is a
+// SAFETY rule every sweep reads (types.retained, whose check is the shared
+// syntax validator itself rather than a restatement of it).
 //
-// ALL THREE ARE THE ROLE'S AND NOT THE SERVER'S, which is the line this function
+// ALL FOUR ARE THE ROLE'S AND NOT THE SERVER'S, which is the line this function
 // draws and the reason it stops where it does. The server applies its own EDGE
 // bounds on top — a key past 255 characters on the write (but not on the
 // remove), a value past types.MaxTextBytes BYTES, a media type — and this client
@@ -233,7 +236,7 @@ func validateSettingKey(key string) error {
 // take. They travel as the 400 the mapper turns into the same ErrValidation, and
 // the difference that makes to a local leg is ledgered (L-config-bounds).
 //
-// The three below cannot travel that way for the reason every restated role rule
+// The four below cannot travel that way for the reason every restated role rule
 // on this seam cannot: a request the role's own contract calls invalid must not
 // spend a round trip to be told so, and must not bind its classification to a
 // problem body a future server release might spell differently.
@@ -260,6 +263,17 @@ func validateSettingWrite(key, value string) error {
 	// applied by whichever wrote first.
 	if key == issueops.SettingKeyStatusCustom && value != "" {
 		if _, err := types.ParseCustomStatusConfig(value); err != nil {
+			return invalid("invalid %s value: %v", key, err)
+		}
+	}
+	// types.retained is the SAFETY setting every sweep reads, so a value the
+	// type-list parse would read as something other than the list the operator
+	// wrote must not become a row. This leg has a reason of its own to refuse
+	// before the dial: a server that predates the rule stores the value. The
+	// check is the shared validator through its storageops delegate, so there
+	// is no second copy to drift.
+	if key == issueops.SettingKeyTypesRetained {
+		if err := storageops.ValidateRetainedTypesValue(value); err != nil {
 			return invalid("invalid %s value: %v", key, err)
 		}
 	}

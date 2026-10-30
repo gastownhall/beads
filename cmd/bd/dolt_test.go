@@ -1448,11 +1448,18 @@ func TestHasConfiguredRemote_RemoteOnlyInALeftoverDatabase(t *testing.T) {
 				"the Dolt server lists no remote",
 				leftoverCopyDir,
 				"origin (" + leftoverCopyOrigin.URL + ")",
+				"bd cannot confirm that the server serves that directory",
 				leftoverOriginAddCommand(),
 			} {
 				if !strings.Contains(err.Error(), want) {
 					t.Errorf("hasConfiguredRemote error lacks %q:\n%v", want, err)
 				}
+			}
+			// The server may serve that directory (a server the user runs
+			// over .beads/dolt on a socket, ::1 or TLS), so the error must
+			// not say it does not.
+			if strings.Contains(err.Error(), "is not the server's data") {
+				t.Errorf("hasConfiguredRemote error claims the directory is not the server's data:\n%v", err)
 			}
 			if hasNoRemoteConfigured(ctx, st) {
 				t.Error("hasNoRemoteConfigured = true: push, pull and sync would report no remote and exit 0 over the leftover database's origin")

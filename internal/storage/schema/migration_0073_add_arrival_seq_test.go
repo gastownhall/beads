@@ -16,21 +16,12 @@ const (
 	ignoredMigration0029Up = "0029_add_wisps_arrival_seq.up.sql"
 )
 
-// TestLatestVersionIncludesMigration0073 pins the slots 0073 and ignored/0029
-// claim, superseding 0072's own version of this test. A hardcoded literal for
-// the same reason 0067's to 0072's were: LatestVersion() drifting to 73 for an
-// unrelated reason should fail here, where the message names what 73 is
-// supposed to be.
-func TestLatestVersionIncludesMigration0073(t *testing.T) {
-	const want = 73
-	if got := LatestVersion(); got != want {
-		t.Fatalf("LatestVersion() = %d, want %d (arrival_seq migration slot)", got, want)
-	}
-	const wantIgnored = 29
-	if got := LatestIgnoredVersion(); got != wantIgnored {
-		t.Fatalf("LatestIgnoredVersion() = %d, want %d (wisps.arrival_seq twin and its unique index)", got, wantIgnored)
-	}
-}
+// TestLatestVersionIncludesMigration0073 (pinning LatestVersion() == 73 and
+// LatestIgnoredVersion() == 29) is superseded by
+// TestLatestVersionIncludesMigration0074
+// (migration_0074_create_id_tombstones_test.go) now that 0074 and ignored/0030
+// claim the next free slots -- only one such pin lives at a time, matching how
+// this test itself already superseded 0072's own version.
 
 // TestMigration0073AddsArrivalSeqToBothPlanes checks the frozen bytes and the
 // CLI-bundle substitute directly, no dolt binary required.

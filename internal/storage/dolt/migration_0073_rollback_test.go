@@ -3,6 +3,8 @@ package dolt
 import (
 	"context"
 	"database/sql"
+	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -13,12 +15,14 @@ import (
 // TestMigration0073RollbackAndReapplyRebuildsTheArrivalSeqIndex pins a manual
 // rollback of 0073 and the migration pass after it. The down file drops
 // wisps.arrival_seq, and uk_wisps_arrival_seq with it, but leaves ignored/0029,
-// the twin that also builds the index, recorded, so the pass that applies 0073
-// again runs 0073 alone. Without the index a counter left behind its stamps
-// hands out a duplicate instead of colliding and healing.
+// the twin that also builds the index, recorded, so of the two files that
+// build it the pass that applies 0073 again runs 0073 alone. Without the index
+// a counter left behind its stamps hands out a duplicate instead of colliding
+// and healing.
 //
 // The down runs as raw SQL, as an operator runs it, with its cursor row deleted
-// beside it; the re-apply is the real migration pass.
+// beside it, after the migrations above 0073 are rolled back the same way
+// (rollBackMainMigrationsAbove); the re-apply is the real migration pass.
 func TestMigration0073RollbackAndReapplyRebuildsTheArrivalSeqIndex(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
@@ -47,6 +51,7 @@ func TestMigration0073RollbackAndReapplyRebuildsTheArrivalSeqIndex(t *testing.T)
 		t.Fatal("precondition failed: a migrated store has no uk_wisps_arrival_seq")
 	}
 
+	rollBackMainMigrationsAbove(t, ctx, store, 73)
 	runMigrationSQL(t, ctx, store, downFile)
 	if _, err := store.db.ExecContext(ctx, "DELETE FROM schema_migrations WHERE version = 73"); err != nil {
 		t.Fatalf("delete the 0073 cursor row: %v", err)
@@ -99,6 +104,25 @@ func TestMigration0073RollbackAndReapplyRebuildsTheArrivalSeqIndex(t *testing.T)
 	// The rebuilt index is live: no second row can take that stamp.
 	if _, err := store.db.ExecContext(ctx, "UPDATE wisps SET arrival_seq = ? WHERE id = 'rb73-a'", stamp); err == nil {
 		t.Fatalf("a second wisp took arrival_seq %d: uk_wisps_arrival_seq is not enforcing", stamp)
+	}
+}
+
+// rollBackMainMigrationsAbove rolls a migrated store back to version the way
+// an operator does by hand: newest first, it runs the down file of every main
+// migration above version and deletes that migration's cursor row beside it.
+// A later row left in schema_migrations would hold the cursor past version,
+// and the next pass would never apply the migrations at and below it again.
+func rollBackMainMigrationsAbove(t *testing.T, ctx context.Context, store *DoltStore, version int) {
+	t.Helper()
+	for v := schema.LatestVersion(); v > version; v-- {
+		downs, err := filepath.Glob(fmt.Sprintf("../schema/migrations/%04d_*.down.sql", v))
+		if err != nil || len(downs) != 1 {
+			t.Fatalf("down migration of %04d = %v (glob error %v), want exactly one file", v, downs, err)
+		}
+		runMigrationSQL(t, ctx, store, downs[0])
+		if _, err := store.db.ExecContext(ctx, "DELETE FROM schema_migrations WHERE version = ?", v); err != nil {
+			t.Fatalf("delete the %04d cursor row: %v", v, err)
+		}
 	}
 }
 

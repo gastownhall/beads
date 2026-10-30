@@ -472,7 +472,19 @@ type schemaSentinelTable struct {
 	// schemaSentinelColumn.replayFloor, applied to a whole table's presence
 	// instead of one column's.
 	replayFloor int
+	// lossNotice, when set, is the operator warning migrate prints when the
+	// replay is about to re-create this table EMPTY on a clone whose cursor
+	// says it was already created (cursor above replayFloor): the table was
+	// lost, not never made, and what it held is gone. Empty for a table whose
+	// re-creation loses nothing anyone relies on.
+	lossNotice string
 }
+
+// lostTableNoticeOut is where migrate writes a sentinel table's lossNotice.
+// Like watchdogStderr it is deliberately NOT terminal-gated: a lost table is
+// a data loss an operator must see on every surface, piped or not.
+// Overridable in tests.
+var lostTableNoticeOut io.Writer = os.Stderr
 
 type schemaSentinelColumn struct {
 	table  string
@@ -502,6 +514,13 @@ type schemaSentinelColumn struct {
 	// files, so a future renumbering breaks CI rather than users.
 	replayFloor int
 }
+
+// wispIDTombstonesLossNotice is wisp_id_tombstones' lossNotice.
+const wispIDTombstonesLossNotice = "WARNING: wisp_id_tombstones was missing and is being re-created EMPTY. " +
+	"The ids retaining retention sweeps (--retain-ids) retired on the wisps plane of this clone are " +
+	"creatable again: a create naming one is no longer refused, so an operation keyed by such an id can run " +
+	"twice. Treat this clone as a new logical scope for wisps-plane idempotency keys (reset the producers' keys) " +
+	"before relying on them."
 
 var (
 	mainSource = migrationSource{
@@ -539,6 +558,17 @@ var (
 			{table: "events", replayFloor: 18},
 			{table: "bd_events_journal", replayFloor: 21},
 			{table: "bd_events_seq", replayFloor: 21},
+			// wisp_id_tombstones is created by ignored/0030 (floor 29, same
+			// reasoning). A clone that lost it would otherwise fail every
+			// create closed — the retired-id probe reads it — with no path
+			// back short of a hand repair; the replay re-creates it on the
+			// next write-intent open. Re-created EMPTY, which is a loss of
+			// the wisps-plane tombstones: a new logical scope for anything
+			// that relied on them (see migrations/ignored/0030). The wisps
+			// rows can survive the loss, so nothing else on the clone shows
+			// it; the notice is the only signal, and it is printed on every
+			// surface rather than recorded where a consumer could read it.
+			{table: "wisp_id_tombstones", replayFloor: 29, lossNotice: wispIDTombstonesLossNotice},
 		},
 		// A historical ignored-v16 ordinal collision can leave the local
 		// leases table present but without the column frozen 0016 adds; a
@@ -1643,6 +1673,15 @@ func (m migrationSource) atLatest(ctx context.Context, db DBConn) bool {
 }
 
 func (m migrationSource) currentVersion(ctx context.Context, db DBConn) (int, error) {
+	current, _, err := m.readCursor(ctx, db)
+	return current, err
+}
+
+// readCursor is currentVersion that also reports the sentinel tables with a
+// lossNotice that the cursor claims were created (cursor above their
+// replayFloor) and that are absent: the tables the replay that follows will
+// re-create empty after a loss.
+func (m migrationSource) readCursor(ctx context.Context, db DBConn) (int, []schemaSentinelTable, error) {
 	// Probe existence with a query that always SUCCEEDS before ever issuing one
 	// that can fail. A Dolt session that issues a failing statement stays
 	// pinned to its pre-statement catalog snapshot, so a bare SELECT against a
@@ -1651,22 +1690,22 @@ func (m migrationSource) currentVersion(ctx context.Context, db DBConn) (int, er
 	// the rest of its life in the pool (be-bv7x).
 	cursorExists, err := tableInCurrentDatabase(ctx, db, m.cursorTable)
 	if err != nil {
-		return 0, fmt.Errorf("probing %s existence: %w", m.cursorTable, err)
+		return 0, nil, fmt.Errorf("probing %s existence: %w", m.cursorTable, err)
 	}
 	if !cursorExists {
-		return 0, nil
+		return 0, nil, nil
 	}
 
 	var current int
 	err = db.QueryRowContext(ctx, "SELECT COALESCE(MAX(version), 0) FROM "+m.cursorTable).Scan(&current)
 	if err != nil && err != sql.ErrNoRows {
 		if dberrors.IsTableNotExist(err) {
-			return 0, nil
+			return 0, nil, nil
 		}
-		return 0, fmt.Errorf("reading %s version: %w", m.cursorTable, err)
+		return 0, nil, fmt.Errorf("reading %s version: %w", m.cursorTable, err)
 	}
 	if current == 0 {
-		return 0, nil
+		return 0, nil, nil
 	}
 	// A missing cursor TABLE already meant "nothing applied". A cursor whose
 	// tables are absent means the same thing and was previously believed
@@ -1683,14 +1722,20 @@ func (m migrationSource) currentVersion(ctx context.Context, db DBConn) (int, er
 	// is evidence about the migration that creates it and everything after,
 	// and nothing at all about what ran before. Zeroing anyway replays the
 	// whole series, which is not a no-op (see schemaSentinelColumn.replayFloor).
-	floor, limited, ferr := m.cursorRealityFloor(ctx, db)
+	floor, limited, missing, ferr := m.cursorReality(ctx, db)
 	if ferr != nil {
-		return 0, ferr
+		return 0, nil, ferr
+	}
+	var lost []schemaSentinelTable
+	for _, st := range missing {
+		if st.lossNotice != "" && current > st.replayFloor {
+			lost = append(lost, st)
+		}
 	}
 	if limited && floor < current {
 		current = floor
 	}
-	return current, nil
+	return current, lost, nil
 }
 
 // cursorRealityFloor reports how much of this series' cursor the live schema
@@ -1714,24 +1759,35 @@ func (m migrationSource) currentVersion(ctx context.Context, db DBConn) (int, er
 // tables are then probed together with columns, each clamping floor to the
 // lowest replayFloor of anything found absent.
 func (m migrationSource) cursorRealityFloor(ctx context.Context, db DBConn) (int, bool, error) {
+	floor, limited, _, err := m.cursorReality(ctx, db)
+	return floor, limited, err
+}
+
+// cursorReality is cursorRealityFloor that also returns the sentinel floored
+// tables it found absent. A missing sentinel table short-circuits before the
+// floored tables are probed, so on that path none are reported: the whole
+// series replays, re-creating them along with everything else.
+func (m migrationSource) cursorReality(ctx context.Context, db DBConn) (int, bool, []schemaSentinelTable, error) {
 	for _, table := range m.sentinelTables {
 		present, err := sentinelTableExists(ctx, db, table)
 		if err != nil {
-			return 0, false, fmt.Errorf("checking %s sentinel table %s: %w", m.cursorTable, table, err)
+			return 0, false, nil, fmt.Errorf("checking %s sentinel table %s: %w", m.cursorTable, table, err)
 		}
 		if !present {
-			return 0, true, nil
+			return 0, true, nil, nil
 		}
 	}
 	floor, limited := 0, false
+	var missing []schemaSentinelTable
 	for _, st := range m.sentinelFlooredTables {
 		present, err := sentinelTableExists(ctx, db, st.table)
 		if err != nil {
-			return 0, false, fmt.Errorf("checking %s sentinel floored table %s: %w", m.cursorTable, st.table, err)
+			return 0, false, nil, fmt.Errorf("checking %s sentinel floored table %s: %w", m.cursorTable, st.table, err)
 		}
 		if present {
 			continue
 		}
+		missing = append(missing, st)
 		if !limited || st.replayFloor < floor {
 			floor = st.replayFloor
 		}
@@ -1740,7 +1796,7 @@ func (m migrationSource) cursorRealityFloor(ctx context.Context, db DBConn) (int
 	for _, column := range m.sentinelColumns {
 		present, err := sentinelColumnExists(ctx, db, column.table, column.column)
 		if err != nil {
-			return 0, false, fmt.Errorf("checking %s sentinel column %s.%s: %w", m.cursorTable, column.table, column.column, err)
+			return 0, false, nil, fmt.Errorf("checking %s sentinel column %s.%s: %w", m.cursorTable, column.table, column.column, err)
 		}
 		if present {
 			continue
@@ -1750,7 +1806,7 @@ func (m migrationSource) cursorRealityFloor(ctx context.Context, db DBConn) (int
 		}
 		limited = true
 	}
-	return floor, limited, nil
+	return floor, limited, missing, nil
 }
 
 // sentinelTableExists is a function variable for the same reason
@@ -2145,13 +2201,19 @@ func (m migrationSource) migrate(ctx context.Context, db DBConn, upTo int) (int,
 	// would decide "work needed" on every open, run the whole pass, and then
 	// apply nothing, leaving the missing tables missing and the pass to repeat
 	// forever. The heal only happens if the applier disbelieves the cursor too.
-	current, err := m.currentVersion(ctx, db)
+	current, lost, err := m.readCursor(ctx, db)
 	if err != nil {
 		return 0, columnAdded, err
 	}
 
 	if current >= target {
 		return 0, columnAdded, nil
+	}
+	// The replay below re-creates every lost table empty; say so first.
+	for _, st := range lost {
+		if upTo == 0 || upTo > st.replayFloor {
+			fmt.Fprintln(lostTableNoticeOut, st.lossNotice)
+		}
 	}
 
 	// commitEachStep gates the per-migration commit to the production path

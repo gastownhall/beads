@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
@@ -59,6 +60,18 @@ type createBatchCache struct {
 	labelsProbed map[string]map[string]bool
 	// events are the buffered events-plane rows, in mint order.
 	events []bufferedAuxEvent
+	// retired holds the probed ids a tombstone retired, with the closed_at it
+	// recorded. Tombstones are only ever written by a sweep, never by a
+	// create, and an upsert batch reads them only after coordinating every
+	// probed id (see coordinated), so the up-front read stays true for the
+	// whole batch. A CreateOnly batch does not read them: its rows are never
+	// deferred and each one meets the create-only occupancy probe.
+	retired map[string]time.Time
+	// coordinated reports that the batch wrote the create coordination cell
+	// of every probed id before its up-front reads (CoordinateIDCreatesInTx),
+	// so a row it prepares need not write it again (coordinatedID). Set for
+	// every batch that builds a cache, upsert and CreateOnly alike.
+	coordinated bool
 }
 
 type bufferedAuxEvent struct {
@@ -73,7 +86,21 @@ const createBatchCacheMinIssues = 2
 // newCreateBatchCache reads the presence of every explicit id in issues in
 // both planes, and the stored labels of every explicit id that carries
 // labels, in a handful of IN-list queries.
-func newCreateBatchCache(ctx context.Context, tx DBTX, issues []*types.Issue) (*createBatchCache, error) {
+//
+// It first coordinates every explicit id in ONE sorted write
+// (CoordinateIDCreatesInTx), upsert and CreateOnly batches alike:
+//
+//   - The reads that follow then wait out a retaining sweep of any of them, so
+//     no row an upsert batch writes can be resurrected from under a tombstone
+//     committed between the read and the write. An upsert batch also reads the
+//     tombstones up front; a CreateOnly batch leaves that to each row's
+//     create-only probe.
+//   - The batch takes all its cells at once, in shard order, rather than one
+//     row at a time in item order. Retaining sweeps, upsert batches and imports
+//     lock large sorted cell sets; a batch that locked in item order could
+//     hold a later cell while it waits on an earlier one and deadlock against
+//     them. Its rows then meet cells the transaction already holds.
+func newCreateBatchCache(ctx context.Context, tx DBTX, issues []*types.Issue, opts storage.BatchCreateOptions) (*createBatchCache, error) {
 	c := &createBatchCache{
 		probed:       map[string]bool{},
 		present:      map[string]map[string]bool{"issues": {}, "wisps": {}},
@@ -89,6 +116,10 @@ func newCreateBatchCache(ctx context.Context, tx DBTX, issues []*types.Issue) (*
 		c.probed[issue.ID] = true
 		ids = append(ids, issue.ID)
 	}
+	if err := CoordinateIDCreatesInTx(ctx, tx, ids); err != nil {
+		return nil, err
+	}
+	c.coordinated = true
 	for _, table := range []string{"issues", "wisps"} {
 		found, err := idSetInTx(ctx, tx, table, ids)
 		if err != nil {
@@ -97,6 +128,13 @@ func newCreateBatchCache(ctx context.Context, tx DBTX, issues []*types.Issue) (*
 		for id := range found {
 			c.present[table][id] = true
 		}
+	}
+	if !opts.CreateOnly {
+		retired, err := RetiredIDsInTx(ctx, tx, ids)
+		if err != nil {
+			return nil, err
+		}
+		c.retired = retired
 	}
 	seenLabelID := map[string]map[string]bool{"labels": {}, "wisp_labels": {}}
 	for _, issue := range issues {
@@ -360,7 +398,37 @@ func (c *createBatchCache) deferrable(issue *types.Issue, opts storage.BatchCrea
 	if c == nil || issue == nil || issue.ID == "" || opts.CreateOnly || !c.probed[issue.ID] {
 		return false
 	}
+	if _, retired := c.retired[issue.ID]; retired {
+		// A retired id is refused or skipped, never written: the per-row path
+		// owns that decision.
+		return false
+	}
 	return !c.present["issues"][issue.ID] && !c.present["wisps"][issue.ID]
+}
+
+// coordinatedID reports whether the batch wrote id's coordination cell up
+// front, before its reads (see createBatchCache.coordinated): true only for an
+// id the up-front read covered. A nil cache coordinated nothing, and an id the
+// batch did not name up front (a generated one) takes its own cell.
+func (c *createBatchCache) coordinatedID(id string) bool {
+	return c != nil && c.coordinated && c.probed[id]
+}
+
+// retiredNotLive reports whether a tombstone retired id while no live row
+// holds it, answering from the up-front read when it covers id and from one
+// probeIDOccupancyInTx statement otherwise. A nil cache always probes.
+func (c *createBatchCache) retiredNotLive(ctx context.Context, tx DBTX, id string) (*RetiredID, error) {
+	if c != nil && c.probed[id] {
+		if c.present["issues"][id] || c.present["wisps"][id] {
+			return nil, nil
+		}
+		if closedAt, ok := c.retired[id]; ok {
+			return &RetiredID{ID: id, ClosedAt: closedAt}, nil
+		}
+		return nil, nil
+	}
+	_, retired, err := probeIDOccupancyInTx(ctx, tx, id)
+	return retired, err
 }
 
 // deferredCreate is one prepared issue whose row write is pending.

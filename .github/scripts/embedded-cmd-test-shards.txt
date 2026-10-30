@@ -46,7 +46,9 @@
 
 100 11 TestEmbeddedKVConcurrent
 
+100 12 TestEmbeddedAutoImportFallback_ConflictSkip_SkipsRetiredRows
 100 12 TestEmbeddedGatedRendering
+100 12 TestEmbeddedMigratePersonal_refusesDependentsLeftInTheProject
 
 100 13 TestEmbeddedListFilteringStatusAndHierarchy
 100 13 TestEmbeddedMigratePersonal_refusesSharedRootFromARig
@@ -253,12 +255,14 @@
 100 58 TestEmbeddedDoctorUnsupportedProse
 100 58 TestEmbeddedIfRevisionCascadeDelete
 100 58 TestEmbeddedMigratePersonal_abortLeavesLegacyPlanningConfig
+100 58 TestEmbeddedRetainedTypes
 100 58 TestEmbeddedVersionedHistorySwitchRefusesAnUnrecordableGateTimeout
 
 100 59 TestEmbeddedDeferAutoWake
 100 59 TestEmbeddedDoctorSupportedChecks
 100 59 TestEmbeddedIdentityGateRendersSchemaSkewFromForwardDriftedWorkspace
 100 59 TestEmbeddedMigratePersonal_refusesPlanningRepoThatIsTheProject
+100 59 TestEmbeddedRetainIDs
 100 59 TestEmbeddedVersionedHistorySetManyRefusesUnversionableMetadata
 
 100 60 TestEmbeddedCommentsCLI

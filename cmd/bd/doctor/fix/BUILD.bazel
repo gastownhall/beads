@@ -34,6 +34,7 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//internal/beads",
+        "//internal/config",
         "//internal/configfile",
         "//internal/doltserver",
         "//internal/eventsjournal",
@@ -47,6 +48,8 @@ go_library(
         "//internal/types",
         "//internal/utils",
         "//internal/versionedhistory",
+        "//internal/workapi",
+        "//issueops",
         "@com_github_burntsushi_toml//:toml",
         "@com_github_go_sql_driver_mysql//:mysql",
         "@in_gopkg_yaml_v3//:yaml_v3",

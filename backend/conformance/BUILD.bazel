@@ -36,6 +36,7 @@ go_library(
         "graph_counter_contract.go",
         "heartbeater_contract.go",
         "history_matching.go",
+        "id_retention_contract.go",
         "importer_contract.go",
         "issue_operations_contract.go",
         "issue_operations_staging.go",

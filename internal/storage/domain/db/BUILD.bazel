@@ -69,6 +69,7 @@ go_test(
         "issue_descendants_test.go",
         "issue_force_close_policy_test.go",
         "issue_insert_history_off_test.go",
+        "issue_insert_retired_guard_test.go",
         "issue_mergeops_test.go",
         "issue_scan_parity_test.go",
         "issue_search_counts_missing_table_test.go",

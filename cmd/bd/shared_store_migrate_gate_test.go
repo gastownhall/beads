@@ -269,21 +269,24 @@ func TestServerModeReadRefusesASchemaItsReadsCannotQuery(t *testing.T) {
 	}
 	t.Cleanup(func() { admin.Close() })
 
-	// The v72 shape a previous release leaves: 0073 never ran, so neither
-	// plane has the column and the cursor stops at 72. Committed, as that
-	// release's own migration pass committed it.
+	// The v72 shape a previous release leaves: 0073 and 0074 never ran, so
+	// neither plane has the column, neither id tombstone table exists and the
+	// cursor stops at 72. Committed, as that release's own migration pass
+	// committed it.
 	for _, stmt := range []string{
 		"ALTER TABLE issues DROP COLUMN arrival_seq",
 		"ALTER TABLE wisps DROP COLUMN arrival_seq",
-		"DELETE FROM schema_migrations WHERE version = 73",
+		"DROP TABLE id_tombstones",
+		"DROP TABLE wisp_id_tombstones",
+		"DELETE FROM schema_migrations WHERE version >= 73",
 		"CALL DOLT_COMMIT('-Am', 'test: the schema a v72 release leaves')",
 	} {
 		if _, err := admin.ExecContext(ctx, stmt); err != nil {
 			t.Fatalf("%s: %v", stmt, err)
 		}
 	}
-	if schema.LatestVersion() != 73 {
-		t.Fatalf("this fixture rebuilds the v72 shape for migration 0073 (arrival_seq); LatestVersion() = %d, retarget it", schema.LatestVersion())
+	if schema.LatestVersion() != 74 {
+		t.Fatalf("this fixture rebuilds the v72 shape for migrations 0073 (arrival_seq, which this binary's reads select) and 0074 (the id tombstone tables); LatestVersion() = %d, retarget it", schema.LatestVersion())
 	}
 
 	bd := buildBDForInitTests(t)
@@ -320,7 +323,7 @@ func TestServerModeReadRefusesASchemaItsReadsCannotQuery(t *testing.T) {
 		if code == 0 {
 			t.Fatalf("bd %v succeeded on a schema its reads cannot query\nstdout:\n%s\nstderr:\n%s", args, stdout, stderr)
 		}
-		if !strings.Contains(stderr, "schema version mismatch: database is at v72, binary expects v73") ||
+		if !strings.Contains(stderr, "schema version mismatch: database is at v72, binary expects v74") ||
 			!strings.Contains(stderr, "bd migrate schema") {
 			t.Errorf("bd %v refusal does not name the behind schema and its remedy:\n%s", args, stderr)
 		}

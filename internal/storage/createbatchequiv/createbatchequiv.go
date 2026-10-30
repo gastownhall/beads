@@ -82,6 +82,10 @@ func scenarios() []scenario {
 		}, run: runDepAdd},
 		{name: "waitsfor", seed: seedWaitsFor, afterSeed: stampParticipation, run: runWaitsFor},
 		{name: "settled", seed: seedSettled, afterSeed: afterSeedSettled, run: runSettled, compare: true},
+		{name: "retired", seed: seedRetired, afterSeed: func(t *testing.T, db *sql.DB) {
+			plantTombstones(t, db)
+			stampParticipation(t, db)
+		}, batch: batchRetired},
 	}
 }
 
@@ -115,7 +119,9 @@ func largeScenarios() []scenario {
 // mint; that is the fenced outcome they now pin. depadd and waitsfor stamp
 // their seeded rows instead (stampParticipation), so their dependency adds,
 // closes and reopens mint as they did before the fence, and their digests
-// did not move.
+// did not move. So does retired, recorded before the fence from the code
+// that added it: its batch's upsert of the live and tombstoned eq-rl mints
+// as it did then.
 //
 // Third, the issues_updated_at digests of small, depadd, import458 and
 // import458-reject-stale were re-recorded when the update-shaped version
@@ -512,6 +518,7 @@ func applyScenario(t *testing.T, open Open, sc scenario, perRow bool) Outcome {
 			out.Skipped = append(out.Skipped, issueID+" -> "+dependsOnID+": "+reason)
 		}
 		opts.OnStaleRejected = func(issueID string) { out.Stale = append(out.Stale, issueID) }
+		opts.OnRetiredID = func(issueID string) { out.Skipped = append(out.Skipped, "retired "+issueID) }
 		result, err := issueops.CreateIssuesInTxWithResult(ctx, tx, sc.batch(), "importer", opts)
 		if err != nil {
 			_ = tx.Rollback()

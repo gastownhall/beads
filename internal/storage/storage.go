@@ -34,10 +34,13 @@ var (
 	ErrCloseBlocked      = issueops.ErrCloseBlocked
 	ErrCloseOpenChildren = issueops.ErrCloseOpenChildren
 	ErrAlreadyExists     = issueops.ErrAlreadyExists
-	ErrAlreadyIdentified = issueops.ErrAlreadyIdentified
-	ErrVersionMismatch   = issueops.ErrVersionMismatch
-	ErrStatusMismatch    = issueops.ErrStatusMismatch
-	ErrNotesOverwrite    = issueops.ErrNotesOverwrite
+	// ErrIdempotencyExpired matches a create refused because a retaining
+	// retention sweep retired its id (issueops.IdempotencyExpiredError).
+	ErrIdempotencyExpired = issueops.ErrIdempotencyExpired
+	ErrAlreadyIdentified  = issueops.ErrAlreadyIdentified
+	ErrVersionMismatch    = issueops.ErrVersionMismatch
+	ErrStatusMismatch     = issueops.ErrStatusMismatch
+	ErrNotesOverwrite     = issueops.ErrNotesOverwrite
 )
 
 // CloseOpenChildrenError reports the issue and open-child count that refused a

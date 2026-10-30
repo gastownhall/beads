@@ -68,7 +68,11 @@ bd admin cleanup
     |
     | SAFETY:
     | - Requires --force flag to actually delete (unless --dry-run)
-    | - Supports --cascade to delete dependents
+    | - Skips pinned issues, and issues of a type the workspace's types.retained
+    |   setting names (their ids are idempotency keys; only bd prune/purge
+    |   --retain-ids deletes them); --json reports the latter as retention_required
+    | - Supports --cascade to delete dependents (refused while types.retained names
+    |   a type, since a cascade could reach a retained issue)
     | - Shows preview of what will be deleted
     | - Use --json for programmatic output
     |
@@ -2073,10 +2077,23 @@ bd dolt remote reset-data
     | only live chunks:
     |
     |   - Git-backed remotes (issue data riding a git remote under refs/dolt/data):
-    |     deletes the Dolt data refs on the git remote, then force-pushes to
-    |     rebuild a fresh store. Code branches are untouched.
+    |     rebuilds a fresh store from local HEAD and replaces the remote's Dolt
+    |     data refs with it (through a Dolt sql-server it pushes the fresh store
+    |     to a temporary ref first, so the remote keeps its data until the new
+    |     store is complete, then restarts bd's own server, the shared server in
+    |     shared-server mode, so that it rereads the remote; like bd dolt stop,
+    |     the restart commits any uncommitted changes in every database that
+    |     server serves, and it briefly interrupts them. Any other server must be
+    |     restarted after the reset, before its next push or pull of the remote,
+    |     and so must bd's own while auto-start is off or, outside shared-server
+    |     mode, BEADS_DOLT_SERVER_MODE=1 or dolt_server_port declares it
+    |     externally managed: bd does not stop such a server, and exits non-zero
+    |     once the reset is done, so that nothing pushes or pulls through it
+    |     first). Code branches are untouched.
     |   - Native file remotes (file:// paths): clears the store directory, then
-    |     force-pushes to rebuild it.
+    |     force-pushes to rebuild it. Refused for a git repository, bare or a
+    |     checkout, where Dolt keeps the store among the repository's own files:
+    |     replace that remote as below.
     |   - Cloud/hosted remotes (aws://, gs://, dolthub://, ...): bd cannot clear
     |     the stored data safely — replace the remote with a fresh URL or prefix:
     |       bd dolt remote remove <name>
@@ -3021,7 +3038,9 @@ bd gc
     | Full lifecycle garbage collection for standalone Beads databases.
     |
     | Runs three phases in sequence:
-    |   1. DECAY   — Delete closed issues older than N days (default 90)
+    |   1. DECAY   — Delete closed issues older than N days (default 90), except
+    |                those of a type the workspace's types.retained setting names
+    |                (only bd prune/purge --retain-ids deletes those)
     |   2. COMPACT — Squash old Dolt commits into fewer commits (bd compact)
     |   3. GC      — Run Dolt garbage collection to reclaim disk space
     |
@@ -5771,6 +5790,16 @@ bd prune
     | To delete closed ephemeral beads (wisps, transient molecules) use
     | `bd purge` instead.
     |
+    | --retain-ids retires every id the sweep deletes: a permanent tombstone (the id
+    | and its closed_at) is written in the same transaction, and from then on a
+    | create naming that id is refused (code idempotency_expired) and an import
+    | skips it. Use it when ids are idempotency keys that must never run twice.
+    | Tombstones are permanent.
+    |
+    | Without --retain-ids, closed beads whose type the workspace's types.retained
+    | setting names are skipped and reported (retention_required under --json):
+    | their ids are idempotency keys, so only a retaining sweep may delete them.
+    |
     | For full Dolt storage reclaim after deleting many rows, follow with `bd flatten`
     | so history can be collapsed and old chunks can be garbage-collected.
     |
@@ -5785,6 +5814,7 @@ bd prune
   flag --ignore-references type=bool default="false" usage="Delete closed beads even when referenced by open beads (use with care; see --help for details)"
   flag --older-than type=string default="" usage="Only prune beads closed more than N ago (e.g., 30d, 2w, 60, 36h)"
   flag --pattern type=string default="" usage="Only prune beads matching ID glob pattern (e.g., 'gm-old-*')"
+  flag --retain-ids type=bool default="false" usage="Retire every pruned id with a permanent tombstone so it can never be created again (see --help)"
 
 bd purge
   use: "purge"
@@ -5802,6 +5832,9 @@ bd purge
     | Skips: pinned beads, and closed beads a live bead still depends on through a
     | parent-child, tracks or blocks edge (a closed molecule root whose step is open,
     | a closed bead a live convoy tracks). Live means any status that is not done.
+    | Without --retain-ids it also skips beads whose type the workspace's
+    | types.retained setting names (their ids are idempotency keys); --json reports
+    | them as retention_required.
     |
     | --wisps-plane selects by storage plane instead: every closed row stored in the
     | wisps table, including --no-history beads, which the default ephemeral
@@ -5814,6 +5847,12 @@ bd purge
     |
     | --older-than takes days (7, 7d), weeks (2w) or a duration with hour precision
     | (36h, 168h, 90m).
+    |
+    | --retain-ids retires every id the sweep deletes: a permanent tombstone (the id
+    | and its closed_at) is written in the same transaction, and from then on a
+    | create naming that id is refused (code idempotency_expired) and an import
+    | skips it. Use it when ids are idempotency keys that must never run twice.
+    | Tombstones are permanent.
     |
     | To delete closed non-ephemeral beads (regular tasks, features, bugs, etc.)
     | use `bd prune` instead.
@@ -5835,6 +5874,7 @@ bd purge
   flag --limit type=int default="0" usage="Purge at most N beads this run, oldest-closed first (0 = no limit); --json reports remaining/has_more"
   flag --older-than type=string default="" usage="Only purge beads closed more than N ago (e.g., 7d, 2w, 30, 36h)"
   flag --pattern type=string default="" usage="Only purge beads matching ID glob pattern (e.g., *-wisp-*)"
+  flag --retain-ids type=bool default="false" usage="Retire every purged id with a permanent tombstone so it can never be created again (see --help)"
   flag --wisps-plane type=bool default="false" usage="Select every closed row in the wisps table, including --no-history beads (requires --older-than or --pattern)"
 
 bd q

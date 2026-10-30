@@ -28,6 +28,7 @@ go_test(
         "//backend/conformance",
         "//internal/storage",
         "//internal/testutil/bazeltest",
+        "//issueops",
     ],
 )
 

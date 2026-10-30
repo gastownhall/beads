@@ -38,10 +38,12 @@ func newServedStoreForCLIMirror(t *testing.T) (*DoltStore, string) {
 	// not depend on what a real dolt binary does in a directory that holds
 	// only a state file, so no dolt is reachable from PATH here.
 	t.Setenv("PATH", t.TempDir())
-	// The directory is the served one: no port variable names the server.
+	// The directory is the served one: no port variable names the server,
+	// and a live server on the dialed port serves the Dolt root.
 	clearServerPortEnv(t)
 	root := t.TempDir()
-	store := &DoltStore{serverMode: true, dbPath: root, database: "beads"}
+	store := &DoltStore{serverMode: true, dbPath: root, database: "beads", cfg: &Config{ServerHost: "127.0.0.1", ServerPort: testServedPort}}
+	serveDoltDatabase(t, store, root, testServedPort)
 	cliDir := store.CLIDir()
 	if cliDir != filepath.Join(root, "beads") {
 		t.Fatalf("CLIDir() = %q, want %q", cliDir, filepath.Join(root, "beads"))

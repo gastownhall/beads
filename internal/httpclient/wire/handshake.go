@@ -264,6 +264,32 @@ const CapSweepLiveDependents = "issues.sweep.liveDependents"
 // of what used to be a permanent refusal.
 const CapSweepLimit = "issues.sweep.limit"
 
+// CapSweepRetainIDs is the behavior capability announcing that sweepIssues
+// honors SweepRequest.retain_ids (a sweep that retires every id it deletes
+// with a permanent tombstone) and echoes SweepResult.retain_ids — and that
+// every create on the server refuses a retired id with 410
+// idempotency_expired. Spelled exactly as httpapi's CapIssuesSweepRetainIDs
+// (held to it by TestCapabilityTableMatchesTheServerRouteTable). sweeper.go
+// reads it before sending the member and refuses LOCALLY without it: a sweep
+// that left the ids reusable is the one outcome a caller asking for retention
+// must never get.
+const CapSweepRetainIDs = "issues.sweep.retainIds"
+
+// CapSweepRetainedTypes is the behavior capability announcing that
+// sweepIssues holds back every candidate whose issue type the workspace's
+// types.retained setting names unless the request sets retain_ids, and answers
+// SweepSkips.retention_required. Spelled exactly as httpapi's
+// CapIssuesSweepRetainedTypes (held to it by
+// TestCapabilityTableMatchesTheServerRouteTable). It gates no request member,
+// but it is the only guard against an older server: sweeper.go reads it before
+// a plain sweep (no retain_ids), and against a server without it reads the
+// workspace's types.retained first and refuses the sweep before the dial when
+// the setting names a type (httpSweeper.refuseAnUnguardedPlainSweep). A
+// retaining sweep does not consult it. A caller that relies on the protection
+// (an orchestrator's doctor) also reads it to learn whether a plain sweep
+// through this server can delete a retained bead without retiring its id.
+const CapSweepRetainedTypes = "issues.sweep.retainedTypes"
+
 // CapBatchApplyDepAddLineage is the behavior capability announcing that
 // issues.batchApply's dep_add items accept `has_spawner` and `thread_id`,
 // spelled exactly as httpapi's constant of the same name (held to it by
@@ -472,7 +498,7 @@ func (e *WireRevisionSkewError) Unwrap() error { return ErrWireRevisionSkew }
 // test goes red the moment one ships without the other.
 var behaviorCapabilities = []string{
 	CapProjectEnforce, CapBatchApplyLarge, CapListSort, CapCountScope,
-	CapSweepWispsPlane, CapSweepLiveDependents, CapSweepLimit,
+	CapSweepWispsPlane, CapSweepLiveDependents, CapSweepLimit, CapSweepRetainIDs, CapSweepRetainedTypes,
 	CapBatchApplyDepAddLineage, CapIssuesUpdateAllowTemplate, CapIssuesCreateDefaultPriority,
 	CapCloseAutoCloseMolecule, CapListSearch,
 	CapListNoAssignee, CapListTitle, CapListIDs, CapIssuesUpdatePersistence, CapBlockingIsBlocked, CapIssuesUpdateClaim,
