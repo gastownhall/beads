@@ -390,3 +390,34 @@ func TestInstallHooksFromLinkedWorktreeIgnoresInheritedIndex(t *testing.T) {
 	_, statErr := os.Stat(filepath.Join(worktree, ".beads"))
 	require.True(t, os.IsNotExist(statErr), "inherited routing must not manufacture a redirect target")
 }
+
+// TestInstallHooksFromLinkedWorktreeRefusesForeignTrackedCopy pins AC-6: a
+// hook the worktree's branch carries without bd markers is refused by name,
+// and no hook file changes in either checkout. Before the redirect the guard
+// judged the primary's bd-owned copy, so the install sailed through and
+// dirtied the primary; the guard must judge the files actually written.
+func TestInstallHooksFromLinkedWorktreeRefusesForeignTrackedCopy(t *testing.T) {
+	primary, worktree := newWorktreeHooksFixture(t, filepath.Join(".beads", "hooks"), true)
+	foreign := "#!/bin/sh\necho team pre-commit\n"
+	foreignPath := filepath.Join(worktree, ".beads", "hooks", "pre-commit")
+	writeFileForWorktreeTest(t, foreignPath, []byte(foreign))
+	runGitForWorktreeTest(t, worktree, "add", ".beads/hooks/pre-commit")
+	runGitForWorktreeTest(t, worktree, "commit", "-q", "-m", "foreign pre-commit")
+	enterWorktreeForInstallTest(t, worktree)
+
+	err := installStandaloneHooks(managedHookNames, false, false, false, false)
+	require.ErrorContains(t, err, foreignPath, "the refusal must name the worktree's tracked copy")
+	require.ErrorContains(t, err, "tracked by git")
+	requirePrimaryUnchanged(t, primary, filepath.Join(".beads", "hooks"))
+	for _, name := range managedHookNames {
+		if name == "pre-commit" {
+			continue
+		}
+		data, readErr := os.ReadFile(filepath.Join(worktree, ".beads", "hooks", name))
+		require.NoError(t, readErr)
+		require.Contains(t, string(data), "v0.0.1", "%s in the worktree must be untouched", name)
+	}
+	got, readErr := os.ReadFile(foreignPath)
+	require.NoError(t, readErr)
+	require.Equal(t, foreign, string(got), "the foreign hook must be untouched")
+}
