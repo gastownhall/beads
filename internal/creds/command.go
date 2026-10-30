@@ -12,6 +12,52 @@ import (
 	"time"
 )
 
+// CommandEnvKeys names environment settings whose values bd executes.
+var CommandEnvKeys = []string{
+	"BEADS_DOLT_CREDENTIAL_COMMAND",
+	"BEADS_HTTP_TOKEN_COMMAND",
+	"BEADS_MAIL_DELEGATE",
+	"BD_MAIL_DELEGATE",
+	"EDITOR",
+	"VISUAL",
+	"BD_PAGER",
+	"PAGER",
+	"BEADS_DOLT_BIN",
+}
+
+// CredentialRedirectEnvKeys names environment settings that redirect where a
+// user's credential command or file is sent or read from.
+var CredentialRedirectEnvKeys = []string{
+	"BEADS_DOLT_SERVER_HOST",
+	"BEADS_CREDENTIALS_FILE",
+}
+
+// AllowedProjectEnvKey reports whether key may be imported from a project
+// .beads/.env file. Comparison is case-insensitive so mixed-case keys on
+// Windows cannot bypass the filter, and only BEADS_*, BD_*, and DOLT_* keys
+// outside the command and credential-redirection sets are admitted so child
+// git/dolt/ssh processes cannot inherit GIT_*, SSH_*, LD_*, or DYLD_* hooks.
+func AllowedProjectEnvKey(key string) (bool, string) {
+	upper := strings.ToUpper(strings.TrimSpace(key))
+	if upper == "" {
+		return false, "empty environment variable name"
+	}
+	for _, k := range CommandEnvKeys {
+		if upper == k {
+			return false, "command settings must come from your shell environment or user config"
+		}
+	}
+	for _, k := range CredentialRedirectEnvKeys {
+		if upper == k {
+			return false, "credential target settings must come from your shell environment or user config"
+		}
+	}
+	if !strings.HasPrefix(upper, "BEADS_") && !strings.HasPrefix(upper, "BD_") && !strings.HasPrefix(upper, "DOLT_") {
+		return false, "only BEADS_*, BD_*, and DOLT_* variables are allowed in .beads/.env"
+	}
+	return true, ""
+}
+
 // CommandSource runs a configured command and reads a credential from its stdout —
 // the external credential-process idiom (kubectl ExecCredential / AWS
 // credential_process / git credential helper). bd knows nothing of the issuer: the

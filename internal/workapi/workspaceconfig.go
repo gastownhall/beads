@@ -4,10 +4,14 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage/kvkeys"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
 )
+
+// CommandSettingKeys cannot be written to replicated workspace settings.
+var CommandSettingKeys = config.CommandSettingKeys
 
 // The single definition of what a write to the workspace's durable settings
 // plane is allowed to be and of what a READ of it may carry — either by
@@ -41,6 +45,9 @@ func ValidateSettingKey(key string) (string, error) {
 func ValidateSettingWrite(key, value string) (string, error) {
 	if _, err := ValidateSettingKey(key); err != nil {
 		return "", err
+	}
+	if config.IsCommandSettingKey(key) {
+		return "", fmt.Errorf("%w: %q must come from your shell environment or user config", issueops.ErrValidation, key)
 	}
 	// The prefix is owned by bd init --prefix, bd bootstrap and bd
 	// rename-prefix. Refused HERE rather than at the front door because `bd
