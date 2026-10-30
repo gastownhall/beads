@@ -183,6 +183,11 @@ func TestEmbeddedCompactKeepsCommitDates(t *testing.T) {
 		return out
 	}
 
+	// The boundary commit is the HEAD at this point: every commit made so far
+	// is dated at or before real-now, so --days 0 keeps the three
+	// future-dated commits below and squashes everything else.
+	boundaryDate := oneTime("SELECT date FROM dolt_log ORDER BY date DESC LIMIT 1")
+
 	commitAt := func(date time.Time, msg string, title, externalRef string) {
 		if title != "" {
 			if _, err := db.ExecContext(t.Context(), "UPDATE issues SET title = ?, external_ref = ? WHERE id = ?",
@@ -262,6 +267,16 @@ func TestEmbeddedCompactKeepsCommitDates(t *testing.T) {
 				t.Errorf("replayed commit %q has committer %q <%s>, want %q <%s>",
 					msg, committer, email, "Original Author", "orig@example.com")
 			}
+		}
+	})
+
+	// AC-3: the squashed base is dated as the boundary commit, so AS OF times
+	// between the boundary and the first kept commit still resolve to the
+	// pre-compaction state.
+	t.Run("squashed base dated as boundary", func(t *testing.T) {
+		got := oneTime("SELECT date FROM dolt_log WHERE message LIKE 'compact: squash%'")
+		if !got.Equal(boundaryDate) {
+			t.Errorf("squashed base dated %s, want the boundary commit's date %s", got.UTC(), boundaryDate.UTC())
 		}
 	})
 }
