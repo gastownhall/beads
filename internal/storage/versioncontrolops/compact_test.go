@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"strings"
 	"testing"
 	"time"
 
@@ -62,6 +63,20 @@ func (f compactFixture) recentHashes() []string {
 	return hashes
 }
 
+// rebuilt returns the dolt_log rows of compact-tmp after a faithful replay:
+// the initial commit, the base at the boundary's date, then the kept commits
+// under new hashes with their original metadata.
+func (f compactFixture) rebuilt() []compactRow {
+	rows := []compactRow{f.initial, {hash: "basebasebase", committer: "root", email: "root@%",
+		date: f.boundary.date, message: "compact: squash 2 commits into base snapshot", order: 2}}
+	for i, r := range f.kept {
+		r.hash = strings.Repeat(string(rune('p'+i)), 12)
+		r.order = int64(3 + i)
+		rows = append(rows, r)
+	}
+	return rows
+}
+
 func newCompactMock(t *testing.T) (*sql.DB, sqlmock.Sqlmock) {
 	t.Helper()
 	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
@@ -100,6 +115,7 @@ func expectCompactSuccess(mock sqlmock.Sqlmock, f compactFixture) {
 		expectExec(mock, "CALL DOLT_CHERRY_PICK('--allow-empty', ?)", r.hash)
 		expectExec(mock, "CALL DOLT_COMMIT('--amend', '--allow-empty', '--date', ?, '--author', ?)", r.wantDate, r.wantAuthor)
 	}
+	expectCompactLog(mock, f.rebuilt()...)
 	expectExec(mock, "CALL DOLT_CHECKOUT('main')")
 	expectExec(mock, "CALL DOLT_RESET('--hard', 'compact-tmp')")
 	expectExec(mock, "CALL DOLT_BRANCH('-D', 'compact-tmp')")
@@ -156,4 +172,93 @@ func TestCompactDatesSquashedBase(t *testing.T) {
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// TestCompactRefusesUnknownRecentCommit pins the refusals: a commit missing
+// from the log or an identity --author cannot carry stops Compact before the
+// temp branch exists, and a replay whose read-back differs from the original
+// stops it before main moves (no DOLT_RESET('--hard')), leaving no temp branch.
+func TestCompactRefusesUnknownRecentCommit(t *testing.T) {
+	before := []struct {
+		name   string
+		mutate func(*compactFixture) (logRows []compactRow, wantHash string)
+	}{
+		{"recent hash not in log", func(f *compactFixture) ([]compactRow, string) {
+			return []compactRow{f.initial, f.boundary, f.kept[0], f.kept[2]}, f.kept[1].hash
+		}},
+		{"boundary hash not in log", func(f *compactFixture) ([]compactRow, string) {
+			return append([]compactRow{f.initial}, f.kept...), f.boundary.hash
+		}},
+		{"name with closing paren", func(f *compactFixture) ([]compactRow, string) {
+			f.kept[1].committer = "Ann (bot) Smith"
+			return append([]compactRow{f.initial, f.boundary}, f.kept...), f.kept[1].hash
+		}},
+		{"empty name", func(f *compactFixture) ([]compactRow, string) {
+			f.kept[0].committer = ""
+			return append([]compactRow{f.initial, f.boundary}, f.kept...), f.kept[0].hash
+		}},
+		{"email with angle bracket", func(f *compactFixture) ([]compactRow, string) {
+			f.kept[2].email = "a<b@example.com"
+			return append([]compactRow{f.initial, f.boundary}, f.kept...), f.kept[2].hash
+		}},
+	}
+	for _, tc := range before {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock := newCompactMock(t)
+			f := newCompactFixture()
+			rows, wantHash := tc.mutate(&f)
+			expectCompactLog(mock, rows...)
+
+			err := Compact(context.Background(), db, f.initial.hash, f.boundary.hash, 2, f.recentHashes())
+			if err == nil || !strings.Contains(err.Error(), wantHash) {
+				t.Fatalf("Compact error = %v, want a refusal naming %s", err, wantHash)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+
+	t.Run("read-back date differs", func(t *testing.T) {
+		db, mock := newCompactMock(t)
+		f := newCompactFixture()
+		expectCompactLog(mock, append([]compactRow{f.initial, f.boundary}, f.kept...)...)
+		expectExec(mock, "CALL DOLT_BRANCH('compact-tmp', ?)", f.boundary.hash)
+		expectExec(mock, "CALL DOLT_CHECKOUT('compact-tmp')")
+		expectExec(mock, "CALL DOLT_RESET('--soft', ?)", f.initial.hash)
+		expectExec(mock, "CALL DOLT_COMMIT('-Am', ?, '--date', ?)", "compact: squash 2 commits into base snapshot", f.boundary.wantDate)
+		for _, r := range f.kept {
+			expectExec(mock, "CALL DOLT_CHERRY_PICK('--allow-empty', ?)", r.hash)
+			expectExec(mock, "CALL DOLT_COMMIT('--amend', '--allow-empty', '--date', ?, '--author', ?)", r.wantDate, r.wantAuthor)
+		}
+		rebuilt := f.rebuilt()
+		rebuilt[2].date = rebuilt[2].date.Add(time.Millisecond)
+		expectCompactLog(mock, rebuilt...)
+		// Deferred cleanup only: main is never reset.
+		expectExec(mock, "CALL DOLT_CHECKOUT('main')")
+		expectExec(mock, "CALL DOLT_BRANCH('-D', 'compact-tmp')")
+
+		err := Compact(context.Background(), db, f.initial.hash, f.boundary.hash, 2, f.recentHashes())
+		if err == nil || !strings.Contains(err.Error(), f.kept[0].hash[:8]) {
+			t.Fatalf("Compact error = %v, want a refusal naming %s", err, f.kept[0].hash[:8])
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("empty email is carried", func(t *testing.T) {
+		db, mock := newCompactMock(t)
+		f := newCompactFixture()
+		f.kept[1].email = ""
+		f.kept[1].wantAuthor = "Original Author <>"
+		expectCompactSuccess(mock, f)
+
+		if err := Compact(context.Background(), db, f.initial.hash, f.boundary.hash, 2, f.recentHashes()); err != nil {
+			t.Fatalf("Compact: %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
 }

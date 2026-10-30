@@ -3,6 +3,8 @@ package versioncontrolops
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
@@ -10,13 +12,21 @@ import (
 
 // Compact squashes old Dolt commits into a single base commit while preserving
 // recent commits via cherry-pick. The recipe:
-//  1. Create temp branch at the boundary commit (last old commit)
-//  2. Checkout temp branch
-//  3. Soft-reset to initial commit (collapses old history into working set)
-//  4. Commit as single squashed base
-//  5. Cherry-pick each recent commit on top
-//  6. Checkout main, hard-reset to temp branch
-//  7. Delete temp branch
+//  1. Read the log; refuse if the boundary or a recent commit is missing, or
+//     a recent commit's committer cannot be restored with --author
+//  2. Create temp branch at the boundary commit (last old commit)
+//  3. Checkout temp branch
+//  4. Soft-reset to initial commit (collapses old history into working set)
+//  5. Commit as single squashed base, dated with the boundary commit's date
+//  6. Cherry-pick each recent commit on top, amending it back to its original
+//     date and committer (cherry-pick records the replay time and the session)
+//  7. Re-read the log; refuse unless the replay kept every commit's metadata
+//  8. Checkout main, hard-reset to temp branch
+//  9. Delete temp branch
+//
+// Keeping the dates keeps every timestamp recorded before the compaction (a
+// tracker's last_sync, an AS OF cursor) meaningful against the rewritten
+// history (#7294).
 //
 // Callers should run PruneRemoteRefs and then DoltGC afterward to reclaim disk
 // space — remote-tracking refs still anchor the pre-compact chain, and GC
@@ -41,12 +51,18 @@ func Compact(ctx context.Context, conn DBConn, initialHash, boundaryHash string,
 		return fmt.Errorf("compact: commit %s is not in the log of the current branch", boundaryHash)
 	}
 	originals := make([]storage.CommitInfo, len(recentHashes))
+	authors := make([]string, len(recentHashes))
 	for i, hash := range recentHashes {
 		c, ok := byHash[hash]
 		if !ok {
 			return fmt.Errorf("compact: commit %s is not in the log of the current branch", hash)
 		}
+		author, err := authorArg(c.Author, c.Email)
+		if err != nil {
+			return fmt.Errorf("compact: commit %s: %w; a smaller --days squashes it into the base", hash, err)
+		}
 		originals[i] = c
+		authors[i] = author
 	}
 
 	branchCreated := false
@@ -104,9 +120,15 @@ func Compact(ctx context.Context, conn DBConn, initialHash, boundaryHash string,
 		}
 		if err := execSQL(fmt.Sprintf("restore metadata %s", short),
 			"CALL DOLT_COMMIT('--amend', '--allow-empty', '--date', ?, '--author', ?)",
-			commitDateArg(originals[i].Date), authorArg(originals[i].Author, originals[i].Email)); err != nil {
+			commitDateArg(originals[i].Date), authors[i]); err != nil {
 			return err
 		}
+	}
+
+	// Main has not moved yet: refuse here if the server applied the dates or
+	// identities differently, and the deferred cleanup drops the temp branch.
+	if err := verifyCompactReplay(ctx, conn, boundary, originals); err != nil {
+		return err
 	}
 
 	if err := execSQL("checkout main", "CALL DOLT_CHECKOUT('main')"); err != nil {
@@ -129,7 +151,46 @@ func commitDateArg(t time.Time) string {
 	return t.UTC().Format("2006-01-02T15:04:05.000Z07:00")
 }
 
-// authorArg renders a committer identity for DOLT_COMMIT --author.
-func authorArg(name, email string) string {
-	return fmt.Sprintf("%s <%s>", name, email)
+// authorArg renders a committer identity for DOLT_COMMIT --author. Dolt parses
+// --author with the unanchored regex `([^)]+) \<([^)]+)` and then strips every
+// '>' from the email, so an identity that would not round-trip is refused
+// rather than restored altered. An empty email ("name <>") does round-trip.
+func authorArg(name, email string) (string, error) {
+	if name == "" || strings.Contains(name, ")") || strings.ContainsAny(email, ")<>") {
+		return "", fmt.Errorf("committer %q <%s> cannot be restored with DOLT_COMMIT --author", name, email)
+	}
+	return fmt.Sprintf("%s <%s>", name, email), nil
+}
+
+// verifyCompactReplay re-reads the log of the rebuilt branch and checks that
+// the replayed commits carry the originals' committer, email, date and
+// message, in order, and that the squashed base carries the boundary's date.
+func verifyCompactReplay(ctx context.Context, conn DBConn, boundary storage.CommitInfo, originals []storage.CommitInfo) error {
+	rebuilt, err := Log(ctx, conn, 0)
+	if err != nil {
+		return fmt.Errorf("compact: read back: %w", err)
+	}
+	sort.SliceStable(rebuilt, func(i, j int) bool { return rebuilt[i].CommitOrder < rebuilt[j].CommitOrder })
+	if len(rebuilt) < len(originals)+1 {
+		return fmt.Errorf("compact: rebuilt branch has %d commits, want at least %d", len(rebuilt), len(originals)+1)
+	}
+	replayed := rebuilt[len(rebuilt)-len(originals):]
+	for i, want := range originals {
+		got := replayed[i]
+		short := want.Hash[:min(8, len(want.Hash))]
+		switch {
+		case got.Author != want.Author:
+			return fmt.Errorf("compact: replayed %s has committer %q, want %q", short, got.Author, want.Author)
+		case got.Email != want.Email:
+			return fmt.Errorf("compact: replayed %s has email %q, want %q", short, got.Email, want.Email)
+		case !got.Date.Equal(want.Date):
+			return fmt.Errorf("compact: replayed %s has date %s, want %s", short, commitDateArg(got.Date), commitDateArg(want.Date))
+		case got.Message != want.Message:
+			return fmt.Errorf("compact: replayed %s has message %q, want %q", short, got.Message, want.Message)
+		}
+	}
+	if base := rebuilt[len(rebuilt)-len(originals)-1]; !base.Date.Equal(boundary.Date) {
+		return fmt.Errorf("compact: squashed base has date %s, want the boundary's %s", commitDateArg(base.Date), commitDateArg(boundary.Date))
+	}
+	return nil
 }

@@ -31,7 +31,9 @@ For full history squash, use 'bd flatten'.
 How it works:
   1. Identifies commits older than --days threshold
   2. Creates a squashed base commit from all old history
-  3. Cherry-picks recent commits on top
+  3. Cherry-picks recent commits on top, keeping each commit's date,
+     committer and message (the squashed base takes the date of the newest
+     commit it squashes, so earlier timestamps still resolve)
   4. Swaps main branch to the compacted version
   5. Prunes remote-tracking refs (they would keep the old history alive;
      the next push or fetch re-creates them at the new tip)

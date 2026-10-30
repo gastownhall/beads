@@ -1090,6 +1090,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd compact` keeps the dates of the history it rewrites (#7294). The
+  replayed recent commits were dated at the time of the compaction, with the
+  SQL user as committer, and the squashed base too, so every timestamp
+  recorded before the compaction (a tracker's `last_sync`) predated the new
+  history: `AS OF` reads resolved to the initial commit, and a tracker pull
+  saw every linked issue as changed. Each replayed commit now keeps its
+  original date (to the millisecond), committer and message, and the base
+  takes the date of the newest commit it squashes. Compaction refuses, with
+  main unchanged, when a recent commit's committer cannot be restored or the
+  rebuilt history does not read back with the original metadata.
 - `bd migrate-personal` no longer leaves an issue in both databases when
   someone else's bead in the project database depends on it. The move's
   delete from the project database refuses such an issue, but it ran only
