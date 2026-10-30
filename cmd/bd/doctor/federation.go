@@ -11,6 +11,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
@@ -303,6 +304,9 @@ func CheckFederationRemotesAPI(path string) DoctorCheck {
 // configfile alone diagnoses port 8080 while a shared server launched from the
 // user-global key is listening somewhere else.
 //
+// pid is the server's PID from the PID file, or 0 for a server only the
+// endpoint probe found; the error then names that endpoint instead.
+//
 // The mode is classified once because it also decides the remedy. bd opens a
 // remotesapi listener only for the shared server it launches, so restarting is
 // the fix there; restarting a per-project server reproduces the same error.
@@ -336,11 +340,18 @@ func checkRemotesAPIListener(beadsDir string, pid int) DoctorCheck {
 		if sharedMode {
 			fix = "Restart the shared server so it picks up the resolved remotesapi port: bd dolt stop && bd dolt start"
 		}
+		detail := fmt.Sprintf("Server running (PID %d) but remotesapi port unreachable: %v", pid, err)
+		if pid <= 0 {
+			// Only the endpoint probe found this server, so name the endpoint
+			// it reached rather than "PID 0".
+			ep := doltserver.ResolveEndpoint(beadsDir, nil)
+			detail = fmt.Sprintf("Server reachable at %s (no PID file in this workspace) but remotesapi port unreachable: %v", remedy.PrintedValue(ep.Location()), err)
+		}
 		return DoctorCheck{
 			Name:     "Federation remotesapi",
 			Status:   StatusError,
 			Message:  fmt.Sprintf("remotesapi port %d not accessible", remotesAPIPort),
-			Detail:   fmt.Sprintf("Server running (PID %d) but remotesapi port unreachable: %v", pid, err),
+			Detail:   detail,
 			Fix:      fix,
 			Category: CategoryFederation,
 		}

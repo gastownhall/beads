@@ -484,6 +484,17 @@ func localTCPPort(t *testing.T, open bool) int {
 	return port
 }
 
+// listenerEndpoint names the Dolt server endpoint checkRemotesAPIListener
+// resolves for a server only the probe found: host ("" for the default) and
+// port, with every other endpoint variable cleared.
+func listenerEndpoint(t *testing.T, host string, port int) {
+	t.Helper()
+	t.Setenv("BEADS_DOLT_SERVER_HOST", host)
+	t.Setenv("BEADS_DOLT_SERVER_PORT", strconv.Itoa(port))
+	t.Setenv("BEADS_DOLT_PORT", "")
+	t.Setenv("BEADS_DOLT_SERVER_SOCKET", "")
+}
+
 // TestCheckRemotesAPIListener covers the running-server arm of
 // CheckFederationRemotesAPI, which the getter tests above never reach: the
 // port it resolves and the remedy it prints for each server mode.
@@ -529,6 +540,41 @@ func TestCheckRemotesAPIListener(t *testing.T) {
 		check := checkRemotesAPIListener(remotesAPITarget(t, true, "", ""), 4242)
 		if check.Status != StatusOK || check.Message != "N/A (remotesapi listener disabled)" || !strings.Contains(check.Detail, "shared dolt sql-server") {
 			t.Fatalf("got %s %q, Detail %q; want the shared server's disabled listener", check.Status, check.Message, check.Detail)
+		}
+	})
+
+	t.Run("unreachable server only the probe found names its endpoint, not PID 0", func(t *testing.T) {
+		serverPort := localTCPPort(t, true)
+		listenerEndpoint(t, "", serverPort)
+		check := checkRemotesAPIListener(remotesAPITarget(t, false, "", strconv.Itoa(localTCPPort(t, false))), 0)
+		want := "Server reachable at 127.0.0.1:" + strconv.Itoa(serverPort) + " (no PID file in this workspace) but remotesapi port unreachable: "
+		if check.Status != StatusError || !strings.HasPrefix(check.Detail, want) || strings.Contains(check.Detail, "PID 0") {
+			t.Fatalf("got %s, Detail %q; want StatusError with Detail starting %q", check.Status, check.Detail, want)
+		}
+	})
+
+	t.Run("unreachable PID-tracked server names its PID", func(t *testing.T) {
+		listenerEndpoint(t, "", localTCPPort(t, true))
+		check := checkRemotesAPIListener(remotesAPITarget(t, false, "", strconv.Itoa(localTCPPort(t, false))), 4242)
+		want := "Server running (PID 4242) but remotesapi port unreachable: "
+		if check.Status != StatusError || !strings.HasPrefix(check.Detail, want) {
+			t.Fatalf("got %s, Detail %q; want StatusError with Detail starting %q", check.Status, check.Detail, want)
+		}
+	})
+
+	t.Run("server only the probe found keeps the shared server's restart remedy", func(t *testing.T) {
+		listenerEndpoint(t, "", localTCPPort(t, true))
+		check := checkRemotesAPIListener(remotesAPITarget(t, true, strconv.Itoa(localTCPPort(t, false)), ""), 0)
+		if check.Status != StatusError || !strings.Contains(check.Fix, "bd dolt stop && bd dolt start") {
+			t.Fatalf("got %s, Fix %q; want StatusError with the stop/start remedy", check.Status, check.Fix)
+		}
+	})
+
+	t.Run("server only the probe found keeps the disabled listener", func(t *testing.T) {
+		listenerEndpoint(t, "", localTCPPort(t, true))
+		check := checkRemotesAPIListener(remotesAPITarget(t, true, "", ""), 0)
+		if check.Status != StatusOK || check.Message != "N/A (remotesapi listener disabled)" {
+			t.Fatalf("got %s %q; want the disabled listener", check.Status, check.Message)
 		}
 	})
 
@@ -880,6 +926,36 @@ func TestCheckFederationRemotesAPI_ProbeOnlyServer(t *testing.T) {
 	port := doctorTestServerPort()
 	if port == 0 {
 		t.Skip("Dolt test server not available")
+	}
+
+	// A server only the probe found, with federation peers and nothing on
+	// the remotesapi port: the listener's real state, naming the endpoint the
+	// probe reached. A directory at the PID path makes IsRunning return a nil
+	// state.
+	for _, tc := range []struct {
+		name     string
+		pidAsDir bool
+	}{
+		{name: "peers, no PID file"},
+		{name: "peers, unreadable PID file", pidAsDir: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo, beadsDir := probeOnlyServerWorkspace(t, port, "origin", "peer1")
+			t.Setenv("BEADS_DOLT_SERVER_PORT", strconv.Itoa(port))
+			if tc.pidAsDir {
+				if err := os.Mkdir(filepath.Join(beadsDir, "dolt-server.pid"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			remotesAPIPort := os.Getenv("BEADS_DOLT_REMOTESAPI_PORT")
+			check := CheckFederationRemotesAPI(repo)
+			wantDetail := "Server reachable at 127.0.0.1:" + strconv.Itoa(port) + " (no PID file in this workspace)"
+			if check.Status != StatusError || check.Message != "remotesapi port "+remotesAPIPort+" not accessible" ||
+				!strings.Contains(check.Detail, wantDetail) || strings.Contains(check.Detail, "PID 0") {
+				t.Fatalf("live server at %d with a peer: got %s %q (%s), want error %q with Detail containing %q",
+					port, check.Status, check.Message, check.Detail, "remotesapi port "+remotesAPIPort+" not accessible", wantDetail)
+			}
+		})
 	}
 
 	for _, env := range []string{"BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_PORT"} {
