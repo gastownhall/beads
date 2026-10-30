@@ -2101,9 +2101,13 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			}
 
 			// In stealth mode, persist no-git-ops: true so bd prime
-			// automatically uses stealth session-close protocol (GH#2159)
+			// automatically uses stealth session-close protocol (GH#2159).
+			// Name this workspace's config.yaml (created just above) via
+			// beadsDir: SaveConfigValue would write viper's ConfigFileUsed(),
+			// which still points at the user config when no project config
+			// existed at Initialize time, leaking stealth machine-wide (#7938).
 			if stealth {
-				if err := config.SaveConfigValue("no-git-ops", true, beadsDir); err != nil {
+				if err := config.SetYamlConfigInDir(beadsDir, "no-git-ops", "true"); err != nil {
 					fmt.Fprintf(os.Stderr, "Warning: failed to set no-git-ops in config: %v\n", err)
 				}
 			}
