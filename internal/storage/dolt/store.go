@@ -4848,9 +4848,8 @@ func (s *DoltStore) prepareCLIRouteForGitProtocol(ctx context.Context, remote st
 			// the served directory: a client-local state file proves nothing
 			// about an external server. The remedy names the procedure the
 			// server accepts (the proxied CLI in its directory would refuse
-			// the same --ref, and bd's own remote add finds the persisted
-			// remote and returns without a SQL add). The remote, URL and ref
-			// are named escaped (remedy.EscapedValue), as the statement that
+			// the same --ref). The remote, URL and ref are named escaped
+			// (remedy.EscapedValue), as the statement that
 			// re-adds them is when one of them holds a character a shell
 			// acts on: a $( ) or a backtick in a persisted URL is not live on
 			// the line a user copies the remedy from.
