@@ -11,6 +11,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
@@ -368,6 +369,37 @@ func TestDoctorRepairScansReportARepairServerTheyCannotRead(t *testing.T) {
 			c := tc.check(repo, opened)
 			if c.Status != StatusWarning || !strings.Contains(c.Detail, "127.0.0.1:"+port) {
 				t.Errorf("with a database whose repair server refuses the check: %s %q (%s), want a warning naming 127.0.0.1:%s", c.Status, c.Message, c.Detail, port)
+			}
+		})
+	}
+}
+
+// TestServerRunningOrProbeable pins the Federation remotesapi check's gate: a
+// server the PID file names is running without a dial, and otherwise the
+// endpoint probe decides (an absent PID file, or an unreadable one, which
+// doltserver.IsRunning reports as a nil state).
+func TestServerRunningOrProbeable(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		state     *doltserver.State
+		probe     bool
+		want      bool
+		wantCalls int
+	}{
+		{name: "PID-tracked server, probe would fail", state: &doltserver.State{Running: true, PID: 4242}, probe: false, want: true, wantCalls: 0},
+		{name: "nil state, live endpoint", state: nil, probe: true, want: true, wantCalls: 1},
+		{name: "nil state, dead endpoint", state: nil, probe: false, want: false, wantCalls: 1},
+		{name: "no PID file, live endpoint", state: &doltserver.State{}, probe: true, want: true, wantCalls: 1},
+		{name: "no PID file, dead endpoint", state: &doltserver.State{}, probe: false, want: false, wantCalls: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			got := serverRunningOrProbeable(tc.state, func() bool {
+				calls++
+				return tc.probe
+			})
+			if got != tc.want || calls != tc.wantCalls {
+				t.Errorf("serverRunningOrProbeable = %v after %d probe call(s), want %v after %d", got, calls, tc.want, tc.wantCalls)
 			}
 		})
 	}
