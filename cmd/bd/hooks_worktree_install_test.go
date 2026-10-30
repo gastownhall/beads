@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/gitenv"
 	"github.com/stretchr/testify/require"
 )
@@ -135,6 +136,22 @@ func TestInstallSharedHooksFromLinkedWorktreeWritesTrackedCopy(t *testing.T) {
 	f := newLinkedHooksFixture(t, rel, true)
 
 	_, _, err := runHooksInstallForTest(t, "shared", false)
+	require.NoError(t, err)
+
+	requireHooksCurrent(t, filepath.Join(f.worktree, rel))
+	requirePrimaryUnchanged(t, f, rel)
+	requireHooksPath(t, f, filepath.Join(f.primary, rel))
+}
+
+func TestInstallBeadsHooksFromLinkedWorktreeWritesTrackedCopy(t *testing.T) {
+	rel := filepath.Join(".beads", "hooks")
+	f := newLinkedHooksFixture(t, rel, true)
+	// An untracked embedded store makes W's discovery fall back to P's .beads.
+	mkdirs(t, filepath.Join(f.primary, ".beads", "embeddeddolt"))
+	resetRepoCaches()
+	require.Equal(t, filepath.Join(f.primary, ".beads"), beads.FindBeadsDir(), "fixture precondition")
+
+	_, _, err := runHooksInstallForTest(t, "beads", false)
 	require.NoError(t, err)
 
 	requireHooksCurrent(t, filepath.Join(f.worktree, rel))
