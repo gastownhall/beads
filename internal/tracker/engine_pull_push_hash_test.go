@@ -2,7 +2,9 @@ package tracker
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -70,6 +72,16 @@ func titlePushHooks() *PushHooks {
 func (f *pushHashFixture) editRemote(title string) {
 	f.mock.issues[0].Title = title
 	f.mock.issues[0].UpdatedAt = f.mock.issues[0].UpdatedAt.Add(time.Hour)
+}
+
+func (f *pushHashFixture) pushHashes() map[string]string {
+	out := make(map[string]string)
+	for key, value := range f.store.localMetadata {
+		if strings.Contains(key, ".pushhash.") {
+			out[key] = value
+		}
+	}
+	return out
 }
 
 func runSync(t *testing.T, engine *Engine, opts SyncOptions) *SyncResult {
@@ -196,5 +208,65 @@ func TestEnginePullRecordsPushHash(t *testing.T) {
 		if got := f.store.localMetadata[key]; got != "" {
 			t.Fatalf("push hash after a pull ContentHash cannot fingerprint = %q, want it cleared", got)
 		}
+	})
+
+	t.Run("pulls_that_must_not_touch_the_cache", func(t *testing.T) {
+		assertUnchanged := func(t *testing.T, f *pushHashFixture, before map[string]string) {
+			t.Helper()
+			after := f.pushHashes()
+			if len(after) != len(before) {
+				t.Fatalf("push hashes = %v, want %v", after, before)
+			}
+			for key, value := range before {
+				if got, ok := after[key]; !ok || got != value {
+					t.Fatalf("push hashes = %v, want %v", after, before)
+				}
+			}
+		}
+
+		t.Run("dry_run", func(t *testing.T) {
+			f := newPushHashFixture()
+			runSync(t, f.engine, SyncOptions{Push: true})
+			before := f.pushHashes()
+
+			f.editRemote("remote edit")
+			result := runSync(t, f.engine, SyncOptions{Pull: true, DryRun: true})
+			if result.PullStats.Updated != 1 || f.local.Title != "pushed" {
+				t.Fatalf("dry-run pull: stats=%+v title=%q", result.PullStats, f.local.Title)
+			}
+			assertUnchanged(t, f, before)
+		})
+
+		t.Run("failed_update", func(t *testing.T) {
+			f := newPushHashFixture()
+			f.store.tx.addLabelErr = errors.New("label write failed")
+			f.mock.fieldMapper = &mockMapper{issueToBeads: func(ti *TrackerIssue) *IssueConversion {
+				return &IssueConversion{Issue: &types.Issue{
+					Title: ti.Title, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+					Labels: []string{"remote"},
+				}}
+			}}
+			runSync(t, f.engine, SyncOptions{Push: true})
+			before := f.pushHashes()
+
+			f.editRemote("remote edit")
+			result := runSync(t, f.engine, SyncOptions{Pull: true})
+			if result.PullStats.Errors != 1 || f.local.Title != "pushed" {
+				t.Fatalf("failed pull: stats=%+v title=%q", result.PullStats, f.local.Title)
+			}
+			assertUnchanged(t, f, before)
+		})
+
+		t.Run("no_content_hash_no_entry", func(t *testing.T) {
+			f := newPushHashFixture()
+			before := f.pushHashes()
+
+			f.editRemote("remote edit")
+			result := runSync(t, NewEngine(f.mock, f.store, "sync"), SyncOptions{Pull: true})
+			if result.PullStats.Updated != 1 || f.local.Title != "remote edit" {
+				t.Fatalf("pull: stats=%+v title=%q", result.PullStats, f.local.Title)
+			}
+			assertUnchanged(t, f, before)
+		})
 	})
 }
