@@ -245,6 +245,31 @@ func TestLexer(t *testing.T) {
 			expected: []TokenType{TokenIdent, TokenEquals, TokenString, TokenEOF},
 			values:   []string{"title", "=", "é", ""},
 		},
+		// Bare values made of Unicode letters lex as one identifier (#7539).
+		{
+			name:     "bare multi-byte value is one identifier",
+			input:    "title=größe",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenEOF},
+			values:   []string{"title", "=", "größe", ""},
+		},
+		{
+			name:     "bare accented value is one identifier",
+			input:    "label=fête",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenEOF},
+			values:   []string{"label", "=", "fête", ""},
+		},
+		{
+			name:     "bare value starting with a multi-byte rune",
+			input:    "label=été",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenEOF},
+			values:   []string{"label", "=", "été", ""},
+		},
+		{
+			name:     "no-break space after a multi-byte identifier still separates tokens",
+			input:    "label=fête\u00a0AND status=open",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenAnd, TokenIdent, TokenEquals, TokenIdent, TokenEOF},
+			values:   []string{"label", "=", "fête", "AND", "status", "=", "open", ""},
+		},
 	}
 
 	for _, tt := range tests {
@@ -278,6 +303,7 @@ func TestLexerErrors(t *testing.T) {
 	}{
 		{"unterminated string", `title="hello`},
 		{"invalid character", "status@open"},
+		{"non-ASCII symbol is not an identifier character", "label=🐛"},
 	}
 
 	for _, tt := range tests {
