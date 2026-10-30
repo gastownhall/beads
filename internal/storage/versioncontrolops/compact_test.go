@@ -62,7 +62,8 @@ func compactTestCommits() (initial, boundary storage.CommitInfo, kept []storage.
 // TestCompactRestoresCommitMetadata covers #7294 at the statement level:
 // Compact reads the kept commits' original metadata before creating
 // anything, and each cherry-pick is followed by a metadata restore so the
-// replayed commit keeps its original date to the millisecond (AC-1).
+// replayed commit keeps its original date to the millisecond (AC-1) and its
+// original committer and email (AC-2).
 func TestCompactRestoresCommitMetadata(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -93,8 +94,8 @@ func TestCompactRestoresCommitMetadata(t *testing.T) {
 		mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_CHERRY_PICK('--allow-empty', ?)")).
 			WithArgs(k.Hash).
 			WillReturnResult(sqlmock.NewResult(0, 1))
-		mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_COMMIT('--amend', '--allow-empty', '--date', ?)")).
-			WithArgs(commitDateArg(k.Date)).
+		mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_COMMIT('--amend', '--allow-empty', '--date', ?, '--author', ?)")).
+			WithArgs(commitDateArg(k.Date), k.Author+" <"+k.Email+">").
 			WillReturnResult(sqlmock.NewResult(0, 1))
 	}
 	mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_CHECKOUT('main')")).
