@@ -307,6 +307,10 @@ func CheckFederationRemotesAPI(path string) DoctorCheck {
 // configfile alone diagnoses port 8080 while a shared server launched from the
 // user-global key is listening somewhere else.
 //
+// pid names who confirmed the server: a PID file in this workspace (pid > 0)
+// or the gate's endpoint probe alone (pid 0), whose detail names the endpoint
+// instead of a PID the workspace cannot show.
+//
 // The mode is classified once because it also decides the remedy. bd opens a
 // remotesapi listener only for the shared server it launches, so restarting is
 // the fix there; restarting a per-project server reproduces the same error.
@@ -336,6 +340,14 @@ func checkRemotesAPIListener(beadsDir string, pid int) DoctorCheck {
 	// greeting to drain here.
 	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
 	if err != nil {
+		// A PID file in this workspace names the server (pid > 0); a
+		// server only the endpoint probe found has none, so its detail
+		// names the endpoint the probe reached instead.
+		server := fmt.Sprintf("Server running (PID %d)", pid)
+		if pid <= 0 {
+			ep := doltserver.ResolveEndpoint(beadsDir, nil)
+			server = fmt.Sprintf("Server reachable at %s (no PID file in this workspace)", ep.Location())
+		}
 		fix := fmt.Sprintf("bd opens a remotesapi listener only for the shared server: run dolt sql-server with --remotesapi-port %d, or enable dolt.shared-server and set dolt.remotesapi-port in the user-global config", remotesAPIPort)
 		if sharedMode {
 			fix = "Restart the shared server so it picks up the resolved remotesapi port: bd dolt stop && bd dolt start"
@@ -344,7 +356,7 @@ func checkRemotesAPIListener(beadsDir string, pid int) DoctorCheck {
 			Name:     "Federation remotesapi",
 			Status:   StatusError,
 			Message:  fmt.Sprintf("remotesapi port %d not accessible", remotesAPIPort),
-			Detail:   fmt.Sprintf("Server running (PID %d) but remotesapi port unreachable: %v", pid, err),
+			Detail:   fmt.Sprintf("%s but remotesapi port unreachable: %v", server, err),
 			Fix:      fix,
 			Category: CategoryFederation,
 		}
