@@ -1702,3 +1702,22 @@ needs = ["round"]
 		t.Errorf("after blocks edges = %v, want none onto the replaced container %q", got, name+".round")
 	}
 }
+
+// TestCookFormulaConditionPrimitiveDefaultDropsUnreferencedDeploy: the
+// shipped condition primitive (examples/formulas/primitives/
+// condition.formula.toml) is the blessed unreferenced-leaf shape. Cooking
+// it with its own default (deploy=false) must keep succeeding - the
+// dropped-reference rejection must not over-error on a dropped step that
+// nothing names (GH#6437).
+func TestCookFormulaConditionPrimitiveDefaultDropsUnreferencedDeploy(t *testing.T) {
+	sg, err := resolveAndCookFormulaWithVars("condition", []string{primitivesDir(t)}, map[string]string{})
+	if err != nil {
+		t.Fatalf("cook condition primitive with its deploy=false default: %v", err)
+	}
+	if hasIssueID(sg, "condition.deploy") {
+		t.Errorf("deploy issue present although the default drops the step; issues: %v", allIssueIDs(sg))
+	}
+	if got := len(childIssueIDs(sg, "condition")); got != 2 {
+		t.Errorf("child issues = %d, want 2 (build, test): %v", got, allIssueIDs(sg))
+	}
+}
