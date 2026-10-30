@@ -194,7 +194,9 @@ func (l *Lexer) NextToken() (Token, error) {
 	}
 }
 
-// readString reads a quoted string.
+// readString reads a quoted string. Ordinary characters are copied from the
+// input bytes rather than re-encoded, so a value round-trips exactly as typed
+// (an invalid UTF-8 byte included).
 func (l *Lexer) readString(quote rune, startPos int) (Token, error) {
 	var sb strings.Builder
 	for {
@@ -222,10 +224,10 @@ func (l *Lexer) readString(quote rune, startPos int) (Token, error) {
 			case 0:
 				return Token{}, fmt.Errorf("unterminated escape sequence at position %d", l.pos-1)
 			default:
-				sb.WriteRune(escaped)
+				sb.WriteString(l.input[l.pos-l.width : l.pos])
 			}
 		} else {
-			sb.WriteRune(r)
+			sb.WriteString(l.input[l.pos-l.width : l.pos])
 		}
 	}
 }

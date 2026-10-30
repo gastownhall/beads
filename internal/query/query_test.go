@@ -213,6 +213,36 @@ func TestLexer(t *testing.T) {
 			expected: []TokenType{TokenIdent, TokenGreater, TokenDuration, TokenEOF},
 			values:   []string{"updated", ">", "+30d", ""},
 		},
+		{
+			name:     "quoted multi-byte value round-trips",
+			input:    `title="größe test"`,
+			expected: []TokenType{TokenIdent, TokenEquals, TokenString, TokenEOF},
+			values:   []string{"title", "=", "größe test", ""},
+		},
+		{
+			name:     "quoted CJK value round-trips",
+			input:    `title="日本語"`,
+			expected: []TokenType{TokenIdent, TokenEquals, TokenString, TokenEOF},
+			values:   []string{"title", "=", "日本語", ""},
+		},
+		{
+			name:     "single-quoted multi-byte value round-trips",
+			input:    `title='naïve café'`,
+			expected: []TokenType{TokenIdent, TokenEquals, TokenString, TokenEOF},
+			values:   []string{"title", "=", "naïve café", ""},
+		},
+		{
+			name:     "invalid byte in a quoted value passes through",
+			input:    "title=\"a\xffb\"",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenString, TokenEOF},
+			values:   []string{"title", "=", "a\xffb", ""},
+		},
+		{
+			name:     "unknown escape before a multi-byte rune",
+			input:    `title="\é"`,
+			expected: []TokenType{TokenIdent, TokenEquals, TokenString, TokenEOF},
+			values:   []string{"title", "=", "é", ""},
+		},
 	}
 
 	for _, tt := range tests {
@@ -437,6 +467,13 @@ func TestEvaluatorSimpleQueries(t *testing.T) {
 			query: "label=none",
 			expectFilter: func(f *types.IssueFilter) bool {
 				return f.NoLabels
+			},
+		},
+		{
+			name:  "title contains a multi-byte value",
+			query: `title="größe test"`,
+			expectFilter: func(f *types.IssueFilter) bool {
+				return f.TitleContains == "größe test"
 			},
 		},
 		{
