@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/types"
@@ -1641,5 +1642,48 @@ func TestBuildGraphApplyBatchRequestLeavesAnAbsentPriorityToTheRole(t *testing.T
 	}
 	if z := creates["z"]; z == nil || z.DefaultPriority || z.Issue.Priority != 0 {
 		t.Errorf("explicit 0 item = %+v, want P0 without DefaultPriority", z)
+	}
+}
+
+// TestGraphApplyNodeIssueStampsCreatedAtWithStatusTimestamps pins GH#7519: a
+// node whose materialization stamps closed_at or started_at takes created_at
+// from the same clock read. Left zero, created_at is filled per item at apply
+// time, so a load crossing a second boundary stores a status timestamp one
+// second before created_at.
+func TestGraphApplyNodeIssueStampsCreatedAtWithStatusTimestamps(t *testing.T) {
+	tests := []struct {
+		name string
+		node GraphApplyNode
+		// stamp names the status timestamp CreatedAt must equal.
+		stamp string
+	}{
+		{name: "closed", node: GraphApplyNode{Key: "n", Title: "N", Status: string(types.StatusClosed)}, stamp: "closed_at"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			issue, err := graphApplyNodeIssue(tt.node, GraphApplyOptions{}, "actor", "")
+			if err != nil {
+				t.Fatalf("graphApplyNodeIssue: %v", err)
+			}
+			var stamped *time.Time
+			switch tt.stamp {
+			case "closed_at":
+				stamped = issue.ClosedAt
+			case "started_at":
+				stamped = issue.StartedAt
+			}
+			if stamped == nil {
+				t.Fatalf("%s not stamped", tt.stamp)
+			}
+			if issue.CreatedAt.IsZero() {
+				t.Fatalf("created_at left zero for the insert to stamp; %s = %v", tt.stamp, *stamped)
+			}
+			if issue.CreatedAt.Location() != time.UTC {
+				t.Errorf("created_at location = %v, want UTC", issue.CreatedAt.Location())
+			}
+			if !issue.CreatedAt.Equal(*stamped) {
+				t.Errorf("created_at = %v, want it equal to %s %v", issue.CreatedAt, tt.stamp, *stamped)
+			}
+		})
 	}
 }
