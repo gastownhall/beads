@@ -2287,9 +2287,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which write no PID file in the workspace. When the PID file names no
   running server, the check probes the endpoint the store opens, as the
   "Dolt Mode" check does, and reports the remotesapi listener's real state.
-  A server only that probe found is named by its endpoint instead of
-  `PID 0`, and its listener is dialed at the configured host instead of
-  `127.0.0.1`. (#7724)
+  A server only that probe found is named by the endpoint the probe
+  reached, its unix socket or host:port, instead of `PID 0`. Its listener
+  is dialed at the configured host when the probe reached it over TCP, and
+  at `127.0.0.1` over the socket. When the store cannot open there (wrong
+  credentials, a missing database, a listener that is not Dolt), the check
+  reports `Skipped (database unavailable)` with the error. (#7724)
 - **When bd's port file chose the port, the unreachable-server advice names
   that file.** A command that reaches the server records its port in
   `.beads/dolt-server.port`, which outranks `dolt_server_port`, and

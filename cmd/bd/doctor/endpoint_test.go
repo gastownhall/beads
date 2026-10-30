@@ -495,3 +495,24 @@ func TestCheckFederationRemotesAPI_NoServerAnywhere(t *testing.T) {
 		})
 	}
 }
+
+// TestCheckFederationRemotesAPI_AcceptOnlyListener pins the check for a
+// listener that is not a Dolt server at the endpoint the store opens. The
+// endpoint probe counts its TCP accept, so the check takes the running path,
+// but the store does not open there and no peer is read: the check reports
+// the failed open, never the closed remotesapi port's error and its
+// federation-setup remedy.
+func TestCheckFederationRemotesAPI_AcceptOnlyListener(t *testing.T) {
+	repo, beadsDir := doctorEndpointWorkspace(t)
+	t.Setenv("GT_ROOT", "")
+	t.Setenv("BEADS_DOLT_AUTO_START", "0")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", strconv.Itoa(acceptingLocalPort(t)))
+	t.Setenv("BEADS_DOLT_REMOTESAPI_PORT", strconv.Itoa(closedLocalPort(t)))
+	if err := os.MkdirAll(filepath.Join(beadsDir, "dolt"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	check := CheckFederationRemotesAPI(repo)
+	if check.Status != StatusOK || check.Message != "Skipped (database unavailable)" || check.Detail == "" {
+		t.Errorf("got %s %q (%s), want ok %q with the open's error as Detail", check.Status, check.Message, check.Detail, "Skipped (database unavailable)")
+	}
+}
