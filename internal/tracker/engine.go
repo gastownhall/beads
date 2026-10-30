@@ -557,6 +557,11 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 			if pulledIDs != nil {
 				pulledIDs[conv.Issue.ID] = true
 			}
+			// A freshly created row carries no stale hash; record what the
+			// remote holds so the next push of unchanged content skips.
+			if conv.Issue.ID != "" {
+				e.recordPushHash(ctx, conv.Issue, ref)
+			}
 		}
 	}
 

@@ -129,4 +129,39 @@ func TestEnginePullRecordsPushHash(t *testing.T) {
 			t.Fatalf("push did not send the revert: updated[EXT-1] = %v", f.mock.updated["EXT-1"])
 		}
 	})
+
+	// AC-2: a pull that updates one linked issue and creates one new issue
+	// records both fingerprints, so the following push of unchanged content
+	// makes no FetchIssue call and no tracker update or create.
+	t.Run("pull_then_push_is_a_no_op", func(t *testing.T) {
+		pushedAt := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+		f := newPullHashFixture(t, true, TrackerIssue{
+			ID: "EXT-2", Identifier: "EXT-2", URL: "https://test.test/EXT-2",
+			Title: "new issue", UpdatedAt: pushedAt,
+		})
+		ctx := context.Background()
+
+		// 1. The last push sent "pushed"; the remote then changes EXT-1.
+		f.engine.recordPushHash(ctx, f.local, f.ref)
+		f.editRemote("remote edit")
+		res, err := f.engine.Sync(ctx, SyncOptions{Pull: true})
+		if err != nil {
+			t.Fatalf("pull Sync: %v", err)
+		}
+		if res.PullStats.Updated != 1 || res.PullStats.Created != 1 {
+			t.Fatalf("PullStats = %+v, want one update and one create", res.PullStats)
+		}
+
+		// 2. The push of the unchanged pulled rows is a no-op.
+		f.mock.fetchCalls = 0
+		if _, err := f.engine.Sync(ctx, SyncOptions{Push: true}); err != nil {
+			t.Fatalf("push Sync: %v", err)
+		}
+		if f.mock.fetchCalls != 0 {
+			t.Fatalf("push fetchCalls = %d, want 0: an unchanged pulled issue must not cost a fetch", f.mock.fetchCalls)
+		}
+		if len(f.mock.updated) != 0 || len(f.mock.created) != 0 {
+			t.Fatalf("push updated=%v created=%v, want none", f.mock.updated, f.mock.created)
+		}
+	})
 }
