@@ -196,4 +196,25 @@ func TestRowIterationReportsMidIterationFailure(t *testing.T) {
 	t.Run("last-activity/children-first-row", func(t *testing.T) {
 		runLastActivity(t, childIDRows("c-1", "c-2").RowError(0, errMidIteration))
 	})
+
+	// AC-3: GetMoleculeProgressInTx.
+	t.Run("progress/child-statuses", func(t *testing.T) {
+		db, mock := newRowsErrMock(t)
+		tx := beginRowsErrTx(t, db, mock)
+		expectNotWisp(mock)
+		mock.ExpectQuery(`SELECT title FROM issues WHERE id = \?`).WithArgs("mol-1").
+			WillReturnRows(sqlmock.NewRows([]string{"title"}).AddRow("Molecule"))
+		mock.ExpectQuery(moleculeChildQuery).WithArgs("mol-1").
+			WillReturnRows(childIDRows("c-1", "c-2"))
+		mock.ExpectQuery(`SELECT id, status FROM issues WHERE id IN`).
+			WillReturnRows(sqlmock.NewRows([]string{"id", "status"}).
+				AddRow("c-1", "closed").
+				AddRow("c-2", "open").
+				RowError(1, errMidIteration))
+		got, err := GetMoleculeProgressInTx(ctx, tx, "mol-1")
+		if got != nil {
+			t.Errorf("got progress %+v, want nil", got)
+		}
+		assertMidIterationFailure(t, mock, err)
+	})
 }
