@@ -3,6 +3,7 @@ package versioncontrolops
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -63,8 +64,12 @@ func commitHash8(hash string) string {
 //     original commit date and committer (DOLT_COMMIT --amend --date
 //     --author; without a message it reuses HEAD's, which the cherry-pick
 //     already copied from the original)
-//  7. Checkout main, hard-reset to temp branch
-//  8. Delete temp branch
+//  7. Read back the rebuilt log and verify it: sorted by commit_order, the
+//     newest len(recent) rows must match each kept commit's committer,
+//     email, date and message, and the row below them is the base dated
+//     as the boundary; any mismatch refuses before main moves
+//  8. Checkout main, hard-reset to temp branch
+//  9. Delete temp branch
 //
 // Callers should run PruneRemoteRefs and then DoltGC afterward to reclaim disk
 // space — remote-tracking refs still anchor the pre-compact chain, and GC
@@ -161,6 +166,37 @@ func Compact(ctx context.Context, conn DBConn, initialHash, boundaryHash string,
 			commitDateArg(keptDates[i]), keptAuthors[i]); err != nil {
 			return err
 		}
+	}
+
+	// Verify the rebuilt chain before main moves onto it: read the log back
+	// and check each replayed commit against the original it must preserve,
+	// and the base against the boundary date. Any mismatch refuses here,
+	// while main is still checked out nowhere near the temp branch, and the
+	// deferred cleanup deletes the temp branch — main's HEAD never moves.
+	// recentHashes arrive in ascending commit_order (planCompaction's
+	// contract), the same order the replay created the rebuilt commits in.
+	rebuilt, err := Log(ctx, conn, 0)
+	if err != nil {
+		return fmt.Errorf("compact: read rebuilt log: %w", err)
+	}
+	sort.Slice(rebuilt, func(i, j int) bool { return rebuilt[i].CommitOrder < rebuilt[j].CommitOrder })
+	if len(rebuilt) < len(recentHashes)+1 {
+		return fmt.Errorf("compact: rebuilt log holds %d commits, want at least the squashed base plus %d replayed", len(rebuilt), len(recentHashes))
+	}
+	keptRows := rebuilt[len(rebuilt)-len(recentHashes):]
+	for i, hash := range recentHashes {
+		c := byHash[hash]
+		got := keptRows[i]
+		if got.Author != c.Author || got.Email != c.Email || got.Message != c.Message || !got.Date.Equal(keptDates[i]) {
+			return fmt.Errorf("compact: rebuilt commit for %s does not preserve the original: rebuilt %s <%s> %s %q, original %s <%s> %s %q",
+				commitHash8(hash), got.Author, got.Email, got.Date.UTC(), got.Message,
+				c.Author, c.Email, keptDates[i].UTC(), c.Message)
+		}
+	}
+	baseRow := rebuilt[len(rebuilt)-len(recentHashes)-1]
+	if !baseRow.Date.Equal(boundaryInfo.Date) {
+		return fmt.Errorf("compact: rebuilt squashed base is dated %s, want boundary %s's date %s",
+			baseRow.Date.UTC(), commitHash8(boundaryHash), boundaryInfo.Date.UTC())
 	}
 
 	if err := execSQL("checkout main", "CALL DOLT_CHECKOUT('main')"); err != nil {
