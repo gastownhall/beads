@@ -1090,6 +1090,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A row read that dies part-way through (dropped connection, cancelled
+  context) no longer reads as a complete result in the issueops readers:
+  epic closure eligibility, molecule progress and last activity now report
+  the failed read instead of acting on a partial one, and `bd repo remove`
+  fails the wipe instead of reporting success while deleting nothing.
 - `bd migrate-personal` no longer leaves an issue in both databases when
   someone else's bead in the project database depends on it. The move's
   delete from the project database refuses such an issue, but it ran only

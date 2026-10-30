@@ -244,4 +244,50 @@ func TestRowIterationReportsMidIterationFailure(t *testing.T) {
 			t.Fatalf("unmet SQL expectations: %v", err)
 		}
 	})
+
+	// DeleteIssuesBySourceRepoInTx journals per issue id before wiping the
+	// repo: a partial id list would journal a subset while DELETE FROM
+	// issues WHERE source_repo = ? still removes every row, so the failure
+	// must stop the transaction before any write runs.
+	t.Run("delete-by-source-repo/ids", func(t *testing.T) {
+		_, mock, tx := beginMockTx(t)
+		mock.ExpectQuery("SELECT id FROM issues WHERE source_repo").
+			WillReturnRows(sqlmock.NewRows([]string{"id"}).
+				AddRow("bd-1").
+				AddRow("bd-2").
+				RowError(1, errTransport))
+
+		n, err := DeleteIssuesBySourceRepoInTx(context.Background(), tx, "example/repo")
+		if !errors.Is(err, errTransport) {
+			t.Fatalf("iteration failed part-way through and no error was returned (deleted=%d, err=%v): the caller cannot tell a truncated result from a complete one", n, err)
+		}
+		if n != 0 {
+			t.Fatalf("delete reported rows from a truncated id read: %d", n)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet SQL expectations: %v", err)
+		}
+	})
+
+	// The same read failing on the first row: without the check the empty id
+	// set takes the len == 0 early return, `bd repo remove` reports success
+	// and deletes nothing.
+	t.Run("delete-by-source-repo/ids-first-row", func(t *testing.T) {
+		_, mock, tx := beginMockTx(t)
+		mock.ExpectQuery("SELECT id FROM issues WHERE source_repo").
+			WillReturnRows(sqlmock.NewRows([]string{"id"}).
+				AddRow("bd-1").
+				RowError(0, errTransport))
+
+		n, err := DeleteIssuesBySourceRepoInTx(context.Background(), tx, "example/repo")
+		if !errors.Is(err, errTransport) {
+			t.Fatalf("iteration failed on the first row and no error was returned (deleted=%d, err=%v): the caller cannot tell a truncated result from a complete one", n, err)
+		}
+		if n != 0 {
+			t.Fatalf("delete reported rows from a truncated id read: %d", n)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet SQL expectations: %v", err)
+		}
+	})
 }
