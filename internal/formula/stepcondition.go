@@ -106,9 +106,26 @@ func unquoteValue(s string) string {
 	return s
 }
 
+// droppedStep records why FilterStepsByCondition excluded a step: the
+// condition text and the ID of the step that carried it (the step itself,
+// or the dropped ancestor whose condition took a descendant with it).
+type droppedStep struct {
+	conditionStepID string
+	condition       string
+}
+
 // FilterStepsByCondition filters a list of steps based on their Condition field.
 // Steps with conditions that evaluate to false are excluded from the result.
 // Children of excluded steps are also excluded.
+//
+// A kept step must not name a step this filter dropped: a depends_on or
+// needs entry referencing a dropped step ID is rejected with an error
+// wrapping ErrValidation, naming the referencing step, the field, the
+// dropped target and the condition that removed it. Formula.Validate runs
+// inside parser.Resolve against the formula as written, before this filter,
+// so this is the only check that sees the post-filter step set a pour
+// actually cooks; without it the consumer pours with no dependency edge at
+// all.
 //
 // Parameters:
 //   - steps: the steps to filter
@@ -120,6 +137,25 @@ func FilterStepsByCondition(steps []*Step, vars map[string]string) ([]*Step, err
 		vars = make(map[string]string)
 	}
 
+	dropped := make(map[string]droppedStep)
+	result, err := filterStepsByCondition(steps, vars, dropped)
+	if err != nil {
+		return nil, err
+	}
+	if len(dropped) > 0 {
+		if err := checkDroppedStepReferences(result, dropped); err != nil {
+			return nil, err
+		}
+	}
+	return result, nil
+}
+
+// filterStepsByCondition is the filtering walk behind FilterStepsByCondition.
+// It keeps the include/exclude logic (a false condition drops the step and
+// its descendants; keepers are cloned) and additionally records every
+// excluded step ID in dropped with the condition and the ID of the step
+// that carried it.
+func filterStepsByCondition(steps []*Step, vars map[string]string, dropped map[string]droppedStep) ([]*Step, error) {
 	result := make([]*Step, 0, len(steps))
 
 	for _, step := range steps {
@@ -131,6 +167,7 @@ func FilterStepsByCondition(steps []*Step, vars map[string]string) ([]*Step, err
 
 		if !include {
 			// Skip this step and all its children
+			recordDroppedStep(step, step.ID, step.Condition, dropped)
 			continue
 		}
 
@@ -139,7 +176,7 @@ func FilterStepsByCondition(steps []*Step, vars map[string]string) ([]*Step, err
 
 		// Recursively filter children
 		if len(step.Children) > 0 {
-			filteredChildren, err := FilterStepsByCondition(step.Children, vars)
+			filteredChildren, err := filterStepsByCondition(step.Children, vars, dropped)
 			if err != nil {
 				return nil, err
 			}
@@ -150,4 +187,53 @@ func FilterStepsByCondition(steps []*Step, vars map[string]string) ([]*Step, err
 	}
 
 	return result, nil
+}
+
+// recordDroppedStep marks step and every descendant as excluded by condition
+// on conditionStepID, so a kept reference to any of them can name both.
+func recordDroppedStep(step *Step, conditionStepID, condition string, dropped map[string]droppedStep) {
+	dropped[step.ID] = droppedStep{conditionStepID: conditionStepID, condition: condition}
+	for _, child := range step.Children {
+		recordDroppedStep(child, conditionStepID, condition, dropped)
+	}
+}
+
+// checkDroppedStepReferences rejects a kept step that still names a step the
+// filter dropped. Every offending reference is listed; the error wraps
+// ErrValidation so the pour/wisp/bond/seed callers report it as a formula
+// error instead of falling through to proto-ID lookup.
+func checkDroppedStepReferences(kept []*Step, dropped map[string]droppedStep) error {
+	var errs []string
+	var walk func([]*Step)
+	walk = func(steps []*Step) {
+		for _, step := range steps {
+			if step == nil {
+				continue
+			}
+			for _, refs := range []struct {
+				field string
+				ids   []string
+			}{
+				{"depends_on", step.DependsOn},
+				{"needs", step.Needs},
+			} {
+				for _, id := range refs.ids {
+					d, ok := dropped[id]
+					if !ok {
+						continue
+					}
+					errs = append(errs, fmt.Sprintf(
+						"step %q: %s references %q, but condition %q on step %q drops it from this pour (give %q the same condition, or do not name a step that this pour excludes)",
+						step.ID, refs.field, id, d.condition, d.conditionStepID, step.ID))
+				}
+			}
+			walk(step.Children)
+		}
+	}
+	walk(kept)
+
+	if len(errs) > 0 {
+		return fmt.Errorf("%w:\n  - %s", ErrValidation, strings.Join(errs, "\n  - "))
+	}
+	return nil
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -859,6 +860,19 @@ func cookGateFormulaTOML(t *testing.T, name, src string) *TemplateSubgraph {
 	return sg
 }
 
+// cookFormulaTOMLWithVars cooks a TOML formula through the same path as
+// cookGateFormulaTOML but with a non-nil vars map, so the step condition
+// filter (resolveAndCookFormulaWithVars) actually runs. A nil vars map skips
+// the filter entirely, which is why the gate tests above cannot drive it.
+func cookFormulaTOMLWithVars(t *testing.T, name, src string, vars map[string]string) (*TemplateSubgraph, error) {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, name+".formula.toml"), []byte(src), 0o600); err != nil {
+		t.Fatalf("write formula: %v", err)
+	}
+	return resolveAndCookFormulaWithVars(name, []string{dir}, vars)
+}
+
 // blocksEdgesFrom returns the DepBlocks targets of issueID in subgraph order.
 func blocksEdgesFrom(sg *TemplateSubgraph, issueID string) []string {
 	var out []string
@@ -1543,5 +1557,55 @@ func TestStepTypeToIssueType(t *testing.T) {
 		if got := stepTypeToIssueType(tt.stepType); got != tt.want {
 			t.Errorf("stepTypeToIssueType(%q) = %q, want %q", tt.stepType, got, tt.want)
 		}
+	}
+}
+
+// TestCookFormulaConditionDroppedNeedsTargetErrors: a step whose needs or
+// depends_on target is removed by FilterStepsByCondition must not cook
+// silently without its dependency edge (GH#6437 / PR #6642).
+func TestCookFormulaConditionDroppedNeedsTargetErrors(t *testing.T) {
+	for _, field := range []struct{ name, line string }{
+		{"needs", `needs = ["fanout"]`},
+		{"depends_on", `depends_on = ["fanout"]`},
+	} {
+		t.Run(field.name, func(t *testing.T) {
+			src := `formula = "dangling-` + field.name + `"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "fanout"
+title = "Fan out"
+type = "task"
+condition = "{{fanout_enabled}}"
+
+[[steps]]
+id = "consumer"
+title = "Consume"
+type = "task"
+` + field.line + "\n"
+			sg, err := cookFormulaTOMLWithVars(t, "dangling-"+field.name, src, map[string]string{"fanout_enabled": "false"})
+			if err == nil {
+				var consumerID string
+				for _, iss := range sg.Issues {
+					if strings.HasSuffix(iss.ID, ".consumer") {
+						consumerID = iss.ID
+					}
+				}
+				t.Fatalf("cook succeeded although consumer's %s target %q was dropped by its condition; consumer %q blocks edges: %v",
+					field.name, "fanout", consumerID, blocksEdgesFrom(sg, consumerID))
+			}
+			if sg != nil {
+				t.Fatalf("cook returned a subgraph alongside its error: %v", allIssueIDs(sg))
+			}
+			if !errors.Is(err, formula.ErrValidation) {
+				t.Errorf("error %v does not wrap formula.ErrValidation", err)
+			}
+			for _, want := range []string{"consumer", field.name, "fanout", "{{fanout_enabled}}"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not mention %q", err, want)
+				}
+			}
+		})
 	}
 }

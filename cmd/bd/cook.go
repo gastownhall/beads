@@ -1164,7 +1164,17 @@ func collectDependencies(step *formula.Step, idMapping, exitGates map[string]str
 	addBlocks := func(targetStepID string) {
 		targetIssueID, ok := idMapping[targetStepID]
 		if !ok {
-			return // Will be caught during validation
+			// On the pour path, FilterStepsByCondition has already
+			// rejected a needs/depends_on target dropped by its
+			// condition (an ErrValidation naming both steps). A
+			// reference that still misses here is a step ID that
+			// control flow replaced: Formula.Validate checks step IDs
+			// as written, so needs = ["round"] on a loop container
+			// validates, but ApplyLoops replaces the container with
+			// its expanded body while rewriteLoopDependencies rewrites
+			// only in-body refs, leaving this external ref dangling.
+			// Skipping it is existing pour behavior.
+			return
 		}
 		addBlocksEdge(targetIssueID)
 		// A reference to an exit-gate step waits for its task and for its

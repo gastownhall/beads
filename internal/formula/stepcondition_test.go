@@ -1,6 +1,8 @@
 package formula
 
 import (
+	"errors"
+	"strings"
 	"testing"
 )
 
@@ -347,6 +349,132 @@ func TestFilterStepsByCondition(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestFilterStepsByConditionRejectsDroppedReferences pins the contract the
+// pour path depends on: the filter is the only pass that sees the step set
+// after conditions have run, so it is the one that must refuse to keep a
+// step that still names a step it dropped. Formula.Validate ran inside
+// parser.Resolve, against the formula as written, so it cannot see this.
+func TestFilterStepsByConditionRejectsDroppedReferences(t *testing.T) {
+	t.Run("kept needs to a dropped sibling errors", func(t *testing.T) {
+		steps := []*Step{
+			{ID: "consumer", Title: "Consumer", Needs: []string{"fanout"}},
+			{ID: "fanout", Title: "Fanout", Condition: "{{fanout_enabled}}"},
+		}
+		result, err := FilterStepsByCondition(steps, map[string]string{"fanout_enabled": "false"})
+		if err == nil {
+			t.Fatalf("filter kept a needs reference to a dropped step; result IDs: %v", collectStepIDsForTest(result))
+		}
+		if result != nil {
+			t.Errorf("filter returned steps alongside the error: %v", collectStepIDsForTest(result))
+		}
+		if !errors.Is(err, ErrValidation) {
+			t.Errorf("error %v does not wrap ErrValidation", err)
+		}
+		for _, want := range []string{"consumer", "needs", "fanout", "{{fanout_enabled}}"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not mention %q", err, want)
+			}
+		}
+	})
+
+	t.Run("kept depends_on to a dropped sibling errors", func(t *testing.T) {
+		steps := []*Step{
+			{ID: "consumer", Title: "Consumer", DependsOn: []string{"fanout"}},
+			{ID: "fanout", Title: "Fanout", Condition: "{{fanout_enabled}}"},
+		}
+		_, err := FilterStepsByCondition(steps, map[string]string{"fanout_enabled": "false"})
+		if err == nil {
+			t.Fatal("filter kept a depends_on reference to a dropped step")
+		}
+		for _, want := range []string{"consumer", "depends_on", "fanout", "{{fanout_enabled}}"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not mention %q", err, want)
+			}
+		}
+	})
+
+	t.Run("target dropped through its parent's condition names the parent", func(t *testing.T) {
+		steps := []*Step{
+			{ID: "consumer", Title: "Consumer", Needs: []string{"worker"}},
+			{ID: "parent", Title: "Parent", Condition: "{{enable}}", Children: []*Step{
+				{ID: "worker", Title: "Worker"},
+			}},
+		}
+		_, err := FilterStepsByCondition(steps, map[string]string{"enable": "false"})
+		if err == nil {
+			t.Fatal("filter kept a needs reference to a child dropped with its parent")
+		}
+		for _, want := range []string{"consumer", "worker", "parent", "{{enable}}"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not mention %q", err, want)
+			}
+		}
+	})
+
+	t.Run("two broken references are both listed", func(t *testing.T) {
+		steps := []*Step{
+			{ID: "consumer", Title: "Consumer", Needs: []string{"alpha", "beta"}},
+			{ID: "alpha", Title: "Alpha", Condition: "{{a}}"},
+			{ID: "beta", Title: "Beta", Condition: "{{b}}"},
+		}
+		_, err := FilterStepsByCondition(steps, map[string]string{"a": "false", "b": "false"})
+		if err == nil {
+			t.Fatal("filter kept needs references to two dropped steps")
+		}
+		if got := strings.Count(err.Error(), "drops it from this pour"); got != 2 {
+			t.Errorf("error lists %d broken references, want 2: %v", got, err)
+		}
+		if !strings.Contains(err.Error(), `"alpha"`) || !strings.Contains(err.Error(), `"beta"`) {
+			t.Errorf("error does not name both dropped targets: %v", err)
+		}
+	})
+
+	t.Run("all conditions true keeps every step", func(t *testing.T) {
+		steps := []*Step{
+			{ID: "fanout", Title: "Fanout", Condition: "{{fanout_enabled}}"},
+			{ID: "consumer", Title: "Consumer", Needs: []string{"fanout"}},
+		}
+		result, err := FilterStepsByCondition(steps, map[string]string{"fanout_enabled": "true"})
+		if err != nil {
+			t.Fatalf("filter rejected a formula whose every condition is true: %v", err)
+		}
+		if got, want := strings.Join(collectStepIDsForTest(result), ","), "fanout,consumer"; got != want {
+			t.Errorf("filtered IDs = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("unreferenced dropped leaf is excluded without error", func(t *testing.T) {
+		steps := []*Step{
+			{ID: "build", Title: "Build"},
+			{ID: "test", Title: "Test", Needs: []string{"build"}},
+			{ID: "deploy", Title: "Deploy", Needs: []string{"test"}, Condition: "{{deploy}}"},
+		}
+		result, err := FilterStepsByCondition(steps, map[string]string{"deploy": "false"})
+		if err != nil {
+			t.Fatalf("filter rejected a formula whose dropped step nothing references: %v", err)
+		}
+		if got, want := strings.Join(collectStepIDsForTest(result), ","), "build,test"; got != want {
+			t.Errorf("filtered IDs = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("input steps are not modified", func(t *testing.T) {
+		steps := []*Step{
+			{ID: "consumer", Title: "Consumer", Needs: []string{"fanout"}},
+			{ID: "fanout", Title: "Fanout", Condition: "{{fanout_enabled}}"},
+		}
+		if _, err := FilterStepsByCondition(steps, map[string]string{"fanout_enabled": "false"}); err == nil {
+			t.Fatal("filter kept a needs reference to a dropped step")
+		}
+		if len(steps[0].Needs) != 1 || steps[0].Needs[0] != "fanout" {
+			t.Errorf("input Needs rewritten: %v", steps[0].Needs)
+		}
+		if steps[1].ID != "fanout" || steps[1].Condition != "{{fanout_enabled}}" {
+			t.Errorf("input step mutated: %+v", steps[1])
+		}
+	})
 }
 
 // collectStepIDsForTest collects all step IDs (including children) in order.
