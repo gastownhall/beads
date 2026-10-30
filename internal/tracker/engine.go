@@ -23,6 +23,15 @@ import (
 // syncTracer is the OTel tracer for tracker sync spans.
 var syncTracer = otel.Tracer("github.com/steveyegge/beads/tracker")
 
+// pullFetchOverlap widens an incremental pull's fetch window to start before
+// the stored last_sync. That cursor is the end-of-sync wall time, but tracker
+// list endpoints lag behind writes, clocks drift, and a remote write can land
+// during a sync's post-fetch phases, so an issue updated just before the
+// cursor would otherwise never be fetched again (#6806). Only the fetch moves:
+// the conflict guard, DetectConflicts and pre-linked hydration keep the exact
+// stored cursor.
+const pullFetchOverlap = 5 * time.Minute
+
 // rateLimitExhaustedError is implemented by tracker errors (e.g.
 // linear.ErrRateLimitExhausted) that signal the API quota floor has been
 // hit and the sync loop should abort immediately rather than cascade the
@@ -341,7 +350,8 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 	key := e.Tracker.ConfigPrefix() + ".last_sync"
 	if lastSyncStr, err := e.Store.GetLocalMetadata(ctx, key); err == nil && lastSyncStr != "" {
 		if t, err := parseSyncTime(lastSyncStr); err == nil {
-			fetchOpts.Since = &t
+			fetchSince := t.Add(-pullFetchOverlap)
+			fetchOpts.Since = &fetchSince
 			lastSync = &t
 			stats.Incremental = true
 			stats.SyncedSince = lastSyncStr
