@@ -129,3 +129,15 @@ func TestInstallHooksFromLinkedWorktreeWritesTrackedCopy(t *testing.T) {
 	requirePrimaryUnchanged(t, f, rel)
 	requireHooksPath(t, f, filepath.Join(f.primary, rel))
 }
+
+func TestInstallSharedHooksFromLinkedWorktreeWritesTrackedCopy(t *testing.T) {
+	rel := ".beads-hooks"
+	f := newLinkedHooksFixture(t, rel, true)
+
+	_, _, err := runHooksInstallForTest(t, "shared", false)
+	require.NoError(t, err)
+
+	requireHooksCurrent(t, filepath.Join(f.worktree, rel))
+	requirePrimaryUnchanged(t, f, rel)
+	requireHooksPath(t, f, filepath.Join(f.primary, rel))
+}
