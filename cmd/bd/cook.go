@@ -1194,7 +1194,11 @@ func collectDependencies(step *formula.Step, idMapping, exitGates map[string]str
 		addBlocks(needID)
 	}
 
-	// Process waits_for field - fanout gate dependency
+	// Process waits_for field - fanout gate dependency. A missing spawner
+	// is the control-flow-replaced ID case addBlocks documents above: on
+	// the pour path the condition filter has already rejected a
+	// condition-dropped spawner, so a miss here leaves the gate with its
+	// gate:<value> label and no waits-for edge, as before.
 	if waitsForSpec != nil && waitsForSpawnerStepID != "" {
 		if spawnerIssueID, ok := idMapping[waitsForSpawnerStepID]; ok {
 			// Spawner identity is the depends_on_id; metadata carries

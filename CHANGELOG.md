@@ -1090,6 +1090,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A pour no longer silently drops a dependency when step conditions remove
+  its target: `bd mol pour`, `bd mol wisp`, `bd mol bond` and `bd mol seed`
+  now fail with a formula validation error when a kept step's `needs`,
+  `depends_on` or `waits_for` names a step that `condition` filtering
+  dropped from that pour — the error names the referencing step, the field,
+  the dropped step and the condition — instead of cooking a consumer with
+  no dependency edge at all, or a gate that still carries its `gate:`
+  label but waits for no one (#6437). Give the referencing step the same
+  condition, or drop the reference. An external `needs`/`depends_on` of a
+  loop container is unchanged: it still pours with that edge skipped, as
+  before.
 - `bd migrate-personal` no longer leaves an issue in both databases when
   someone else's bead in the project database depends on it. The move's
   delete from the project database refuses such an issue, but it ran only

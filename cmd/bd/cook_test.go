@@ -1609,3 +1609,43 @@ type = "task"
 		})
 	}
 }
+
+// TestCookFormulaConditionDroppedWaitsForSpawnerErrors: a gate whose
+// waits_for spawner is removed by FilterStepsByCondition must not cook as a
+// gate that carries its gate:<value> label but waits for no one (GH#6437 /
+// PR #6642).
+func TestCookFormulaConditionDroppedWaitsForSpawnerErrors(t *testing.T) {
+	src := `formula = "dangling-waits-for"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "fanout"
+title = "Fan out"
+type = "task"
+condition = "{{fanout_enabled}}"
+
+[[steps]]
+id = "gate"
+title = "Gate on the fanout"
+type = "task"
+needs = ["fanout"]
+waits_for = "all-children"
+`
+	sg, err := cookFormulaTOMLWithVars(t, "dangling-waits-for", src, map[string]string{"fanout_enabled": "false"})
+	if err == nil {
+		t.Fatalf("cook succeeded although gate's waits_for spawner %q was dropped by its condition; gate blocks edges: %v",
+			"fanout", blocksEdgesFrom(sg, "dangling-waits-for.gate"))
+	}
+	if sg != nil {
+		t.Fatalf("cook returned a subgraph alongside its error: %v", allIssueIDs(sg))
+	}
+	if !errors.Is(err, formula.ErrValidation) {
+		t.Errorf("error %v does not wrap formula.ErrValidation", err)
+	}
+	for _, want := range []string{"gate", "waits_for", "fanout", "{{fanout_enabled}}"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+}

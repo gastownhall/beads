@@ -475,6 +475,90 @@ func TestFilterStepsByConditionRejectsDroppedReferences(t *testing.T) {
 			t.Errorf("input step mutated: %+v", steps[1])
 		}
 	})
+
+	t.Run("kept waits_for with inferred spawner errors", func(t *testing.T) {
+		steps := []*Step{
+			{ID: "fanout", Title: "Fanout", Condition: "{{fanout_enabled}}"},
+			{ID: "gate", Title: "Gate", Needs: []string{"fanout"}, WaitsFor: "all-children"},
+		}
+		_, err := FilterStepsByCondition(steps, map[string]string{"fanout_enabled": "false"})
+		if err == nil {
+			t.Fatal("filter kept a waits_for whose inferred spawner (needs[0]) was dropped")
+		}
+		if !errors.Is(err, ErrValidation) {
+			t.Errorf("error %v does not wrap ErrValidation", err)
+		}
+		for _, want := range []string{"gate", "waits_for", "fanout", "{{fanout_enabled}}"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not mention %q", err, want)
+			}
+		}
+	})
+
+	t.Run("kept waits_for with explicit spawner errors", func(t *testing.T) {
+		steps := []*Step{
+			{ID: "anchor", Title: "Anchor"},
+			{ID: "fanout", Title: "Fanout", Condition: "{{fanout_enabled}}"},
+			{ID: "gate", Title: "Gate", Needs: []string{"anchor"}, WaitsFor: "children-of(fanout)"},
+		}
+		_, err := FilterStepsByCondition(steps, map[string]string{"fanout_enabled": "false"})
+		if err == nil {
+			t.Fatal("filter kept a waits_for naming a dropped spawner")
+		}
+		for _, want := range []string{"gate", "waits_for", "fanout", "{{fanout_enabled}}"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not mention %q", err, want)
+			}
+		}
+	})
+
+	t.Run("spawner dropped through its parent's condition names the parent", func(t *testing.T) {
+		steps := []*Step{
+			{ID: "anchor", Title: "Anchor"},
+			{ID: "parent", Title: "Parent", Condition: "{{enable}}", Children: []*Step{
+				{ID: "worker", Title: "Worker"},
+			}},
+			{ID: "gate", Title: "Gate", Needs: []string{"anchor"}, WaitsFor: "children-of(worker)"},
+		}
+		_, err := FilterStepsByCondition(steps, map[string]string{"enable": "false"})
+		if err == nil {
+			t.Fatal("filter kept a waits_for whose spawner was dropped with its parent")
+		}
+		for _, want := range []string{"gate", "waits_for", "worker", "parent", "{{enable}}"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not mention %q", err, want)
+			}
+		}
+	})
+
+	t.Run("gate with the spawner's condition drops with it", func(t *testing.T) {
+		steps := []*Step{
+			{ID: "fanout", Title: "Fanout", Condition: "{{fanout_enabled}}"},
+			{ID: "gate", Title: "Gate", Needs: []string{"fanout"}, WaitsFor: "all-children", Condition: "{{fanout_enabled}}"},
+		}
+		result, err := FilterStepsByCondition(steps, map[string]string{"fanout_enabled": "false"})
+		if err != nil {
+			t.Fatalf("filter rejected a gate that drops with its spawner: %v", err)
+		}
+		if got := len(collectStepIDsForTest(result)); got != 0 {
+			t.Errorf("kept %d steps, want 0", got)
+		}
+	})
+
+	t.Run("kept consumer needs a dropped gate errors", func(t *testing.T) {
+		steps := []*Step{
+			{ID: "fanout", Title: "Fanout", Condition: "{{fanout_enabled}}"},
+			{ID: "gate", Title: "Gate", Needs: []string{"fanout"}, WaitsFor: "all-children", Condition: "{{fanout_enabled}}"},
+			{ID: "consumer", Title: "Consumer", Needs: []string{"gate"}},
+		}
+		_, err := FilterStepsByCondition(steps, map[string]string{"fanout_enabled": "false"})
+		if err == nil {
+			t.Fatal("filter kept a needs reference to a gate dropped with its spawner")
+		}
+		if want := `give "consumer" the same condition`; !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not carry the remedy %q", err, want)
+		}
+	})
 }
 
 // collectStepIDsForTest collects all step IDs (including children) in order.

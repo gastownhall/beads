@@ -157,6 +157,34 @@ title = "Deploy"
 needs = ["test-unit", "test-integration"]  # Waits for both
 ```
 
+### Conditional steps
+
+A step can carry a `condition` — an expression over formula variables that
+`bd mol pour` evaluates at pour time. When it is false, the step (and its
+children) is left out of that pour; `{{var}}`, `!{{var}}` and
+`{{var}} == value` are accepted.
+
+```toml
+[vars.deploy]
+default = "false"
+
+[[steps]]
+id = "deploy"
+title = "Deploy to production"
+needs = ["test"]
+condition = "{{deploy}} == true"   # poured only with --var deploy=true
+```
+
+The safe shape is a leaf: the conditional step comes last and no other step
+names it (`examples/formulas/primitives/condition.formula.toml` is the
+reference example). A step that survives the filter must not name one that
+was dropped: a `needs`, `depends_on` or `waits_for` reference to a
+condition-removed step fails the pour with a validation error naming the
+referencing step, the field, the dropped step and the condition that
+dropped it. Give the referencing step the same condition, or drop the
+reference — otherwise the consumer would pour with no dependency edge, or a
+gate would carry its `gate:` label and wait for no one.
+
 ## Gates
 
 Add gates for async coordination. A `[steps.gate]` on an ordinary step is an

@@ -119,13 +119,15 @@ type droppedStep struct {
 // Children of excluded steps are also excluded.
 //
 // A kept step must not name a step this filter dropped: a depends_on or
-// needs entry referencing a dropped step ID is rejected with an error
-// wrapping ErrValidation, naming the referencing step, the field, the
-// dropped target and the condition that removed it. Formula.Validate runs
-// inside parser.Resolve against the formula as written, before this filter,
-// so this is the only check that sees the post-filter step set a pour
-// actually cooks; without it the consumer pours with no dependency edge at
-// all.
+// needs entry, or a waits_for spawner (explicit children-of(id) or the one
+// inferred from needs[0]), referencing a dropped step ID is rejected with
+// an error wrapping ErrValidation, naming the referencing step, the field,
+// the dropped target and the condition that removed it. Formula.Validate
+// runs inside parser.Resolve against the formula as written, before this
+// filter, so this is the only check that sees the post-filter step set a
+// pour actually cooks; without it the consumer pours with no dependency
+// edge at all, or a waits_for gate keeps its gate:<value> label with no
+// spawner behind it and waits for no one.
 //
 // Parameters:
 //   - steps: the steps to filter
@@ -225,6 +227,19 @@ func checkDroppedStepReferences(kept []*Step, dropped map[string]droppedStep) er
 					errs = append(errs, fmt.Sprintf(
 						"step %q: %s references %q, but condition %q on step %q drops it from this pour (give %q the same condition, or do not name a step that this pour excludes)",
 						step.ID, refs.field, id, d.condition, d.conditionStepID, step.ID))
+				}
+			}
+			if spec := ParseWaitsFor(step.WaitsFor); spec != nil {
+				// Same spawner inference as collectDependencies: an
+				// explicit children-of(id), else needs[0].
+				spawnerID := spec.SpawnerID
+				if spawnerID == "" && len(step.Needs) > 0 {
+					spawnerID = step.Needs[0]
+				}
+				if d, ok := dropped[spawnerID]; ok {
+					errs = append(errs, fmt.Sprintf(
+						"step %q: waits_for %q waits for the children of %q, but condition %q on step %q drops it from this pour (give %q the same condition, or name a spawner that is always poured)",
+						step.ID, step.WaitsFor, spawnerID, d.condition, d.conditionStepID, step.ID))
 				}
 			}
 			walk(step.Children)
