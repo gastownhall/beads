@@ -1038,6 +1038,13 @@ func TestEmbeddedInitBStealthAndForceReinit(t *testing.T) {
 		if string(got) != seeded {
 			t.Errorf("stealth init modified the user config:\ngot:  %q\nwant: %q", got, seeded)
 		}
+		// The flag must land in the project config, read back the way
+		// isStealthRepo / bd doctor do (GH#2159).
+		beadsDir := filepath.Join(dir, ".beads")
+		projectConfig, _ := os.ReadFile(filepath.Join(beadsDir, "config.yaml"))
+		if config.GetStringFromDir(beadsDir, "no-git-ops") != "true" {
+			t.Errorf("stealth init did not persist no-git-ops in the project config; config.yaml:\n%s", projectConfig)
+		}
 	})
 
 	// Regression: bd init --stealth must not touch any git-visible files. Previously it
