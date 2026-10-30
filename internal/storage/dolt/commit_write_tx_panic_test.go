@@ -101,3 +101,64 @@ func TestCommitWriteTxPanicRollsBackAndPropagates(t *testing.T) {
 		}
 	})
 }
+
+// TestCommitWriteTxNormalPathsUnchanged pins that the deferred rollback does
+// not alter commitWriteTx's normal outcomes: a nil body commits and returns
+// nil, and a body error E rolls back and returns an error that is E. Neither
+// path may surface sql.ErrTxDone — the deferred Rollback must stay a no-op
+// after Commit or the explicit error-path Rollback.
+func TestCommitWriteTxNormalPathsUnchanged(t *testing.T) {
+	errBody := errors.New("write body error")
+
+	t.Run("commit", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("sqlmock.New: %v", err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+
+		mock.ExpectBegin()
+		mock.ExpectCommit()
+
+		store := &DoltStore{db: db}
+		_, err = store.commitWriteTx(context.Background(), func(*sql.Tx) error { return nil })
+		if err != nil {
+			t.Fatalf("commitWriteTx with a nil body: err = %v, want nil", err)
+		}
+		if errors.Is(err, sql.ErrTxDone) {
+			t.Fatalf("commitWriteTx with a nil body returned sql.ErrTxDone")
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("commit path SQL: %v", err)
+		}
+		if inUse := db.Stats().InUse; inUse != 0 {
+			t.Errorf("db.Stats().InUse = %d after the commit, want 0", inUse)
+		}
+	})
+
+	t.Run("body_error", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("sqlmock.New: %v", err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+
+		mock.ExpectBegin()
+		mock.ExpectRollback()
+
+		store := &DoltStore{db: db}
+		_, err = store.commitWriteTx(context.Background(), func(*sql.Tx) error { return errBody })
+		if !errors.Is(err, errBody) {
+			t.Fatalf("commitWriteTx with a failing body: err = %v, want %v", err, errBody)
+		}
+		if errors.Is(err, sql.ErrTxDone) {
+			t.Fatalf("commitWriteTx with a failing body joined sql.ErrTxDone into %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("body error path SQL: %v", err)
+		}
+		if inUse := db.Stats().InUse; inUse != 0 {
+			t.Errorf("db.Stats().InUse = %d after the rollback, want 0", inUse)
+		}
+	})
+}
