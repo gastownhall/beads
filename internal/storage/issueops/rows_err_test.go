@@ -74,7 +74,7 @@ const (
 	moleculeChildQuery   = `SELECT issue_id FROM dependencies\s+WHERE depends_on_issue_id = \? AND type = 'parent-child'`
 )
 
-func epicIDRows(ids ...string) *sqlmock.Rows {
+func idRows(ids ...string) *sqlmock.Rows {
 	rows := sqlmock.NewRows([]string{"id"})
 	for _, id := range ids {
 		rows.AddRow(id)
@@ -113,20 +113,20 @@ func TestRowIterationReportsMidIterationFailure(t *testing.T) {
 	t.Run("epics/open-epic-ids", func(t *testing.T) {
 		db, mock := newRowsErrMock(t)
 		mock.ExpectQuery(epicIDsQuery).
-			WillReturnRows(epicIDRows("e-1", "e-2").RowError(1, errMidIteration))
+			WillReturnRows(idRows("e-1", "e-2").RowError(1, errMidIteration))
 		runEpics(t, db, mock)
 	})
 
 	t.Run("epics/open-epic-ids-first-row", func(t *testing.T) {
 		db, mock := newRowsErrMock(t)
 		mock.ExpectQuery(epicIDsQuery).
-			WillReturnRows(epicIDRows("e-1", "e-2").RowError(0, errMidIteration))
+			WillReturnRows(idRows("e-1", "e-2").RowError(0, errMidIteration))
 		runEpics(t, db, mock)
 	})
 
 	t.Run("epics/edges-dependencies", func(t *testing.T) {
 		db, mock := newRowsErrMock(t)
-		mock.ExpectQuery(epicIDsQuery).WillReturnRows(epicIDRows("e-1"))
+		mock.ExpectQuery(epicIDsQuery).WillReturnRows(idRows("e-1"))
 		mock.ExpectQuery(epicDepsQuery).
 			WillReturnRows(parentChildRows([2]string{"e-1", "c-1"}, [2]string{"e-1", "c-2"}).
 				RowError(1, errMidIteration))
@@ -135,7 +135,7 @@ func TestRowIterationReportsMidIterationFailure(t *testing.T) {
 
 	t.Run("epics/edges-wisp_dependencies", func(t *testing.T) {
 		db, mock := newRowsErrMock(t)
-		mock.ExpectQuery(epicIDsQuery).WillReturnRows(epicIDRows("e-1"))
+		mock.ExpectQuery(epicIDsQuery).WillReturnRows(idRows("e-1"))
 		mock.ExpectQuery(epicDepsQuery).
 			WillReturnRows(parentChildRows([2]string{"e-1", "c-1"}))
 		mock.ExpectQuery(epicWispDepsQuery).
@@ -146,7 +146,7 @@ func TestRowIterationReportsMidIterationFailure(t *testing.T) {
 
 	t.Run("epics/child-statuses-issues", func(t *testing.T) {
 		db, mock := newRowsErrMock(t)
-		mock.ExpectQuery(epicIDsQuery).WillReturnRows(epicIDRows("e-1"))
+		mock.ExpectQuery(epicIDsQuery).WillReturnRows(idRows("e-1"))
 		mock.ExpectQuery(epicDepsQuery).
 			WillReturnRows(parentChildRows([2]string{"e-1", "c-1"}, [2]string{"e-1", "c-2"}))
 		mock.ExpectQuery(epicWispDepsQuery).WillReturnRows(parentChildRows())
@@ -160,7 +160,7 @@ func TestRowIterationReportsMidIterationFailure(t *testing.T) {
 
 	t.Run("epics/child-statuses-wisps", func(t *testing.T) {
 		db, mock := newRowsErrMock(t)
-		mock.ExpectQuery(epicIDsQuery).WillReturnRows(epicIDRows("e-1"))
+		mock.ExpectQuery(epicIDsQuery).WillReturnRows(idRows("e-1"))
 		mock.ExpectQuery(epicDepsQuery).
 			WillReturnRows(parentChildRows([2]string{"e-1", "c-1"}))
 		mock.ExpectQuery(epicWispDepsQuery).
@@ -216,5 +216,29 @@ func TestRowIterationReportsMidIterationFailure(t *testing.T) {
 			t.Errorf("got progress %+v, want nil", got)
 		}
 		assertMidIterationFailure(t, mock, err)
+	})
+
+	// AC-4: DeleteIssuesBySourceRepoInTx. No statement is registered after the
+	// id read, so a lease delete, journal write, DELETE or is_blocked
+	// recompute fails ExpectationsWereMet's ordering.
+	runDeleteBySourceRepo := func(t *testing.T, rows *sqlmock.Rows) {
+		t.Helper()
+		db, mock := newRowsErrMock(t)
+		tx := beginRowsErrTx(t, db, mock)
+		mock.ExpectQuery(`SELECT id FROM issues WHERE source_repo = \?`).WithArgs("repo-a").
+			WillReturnRows(rows)
+		n, err := DeleteIssuesBySourceRepoInTx(ctx, tx, "repo-a")
+		if n != 0 {
+			t.Errorf("deleted = %d, want 0", n)
+		}
+		assertMidIterationFailure(t, mock, err)
+	}
+
+	t.Run("delete-by-source-repo/ids", func(t *testing.T) {
+		runDeleteBySourceRepo(t, idRows("i-1", "i-2").RowError(1, errMidIteration))
+	})
+
+	t.Run("delete-by-source-repo/ids-first-row", func(t *testing.T) {
+		runDeleteBySourceRepo(t, idRows("i-1", "i-2").RowError(0, errMidIteration))
 	})
 }
