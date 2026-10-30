@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -119,28 +120,42 @@ func requireHooksPath(t *testing.T, f linkedHooksFixture, want string) {
 		"core.hooksPath must keep naming the primary copy (#2414)")
 }
 
+// requireSingleRedirectNote asserts stderr is exactly one note line naming
+// both the written directory and the one Git runs.
+func requireSingleRedirectNote(t *testing.T, stderr, written, runs string) {
+	t.Helper()
+	lines := strings.Split(strings.TrimRight(stderr, "\n"), "\n")
+	require.Len(t, lines, 1, "stderr: %q", stderr)
+	require.Contains(t, lines[0], written)
+	require.Contains(t, lines[0], runs)
+}
+
 func TestInstallHooksFromLinkedWorktreeWritesTrackedCopy(t *testing.T) {
 	rel := filepath.Join(".beads", "hooks")
 	f := newLinkedHooksFixture(t, rel, true)
 
-	_, _, err := runHooksInstallForTest(t, "", false)
+	stdout, stderr, err := runHooksInstallForTest(t, "", false)
 	require.NoError(t, err)
 
 	requireHooksCurrent(t, filepath.Join(f.worktree, rel))
 	requirePrimaryUnchanged(t, f, rel)
 	requireHooksPath(t, f, filepath.Join(f.primary, rel))
+	requireSingleRedirectNote(t, stderr, filepath.Join(f.worktree, rel), filepath.Join(f.primary, rel))
+	require.NotContains(t, stdout, "Note:")
 }
 
 func TestInstallSharedHooksFromLinkedWorktreeWritesTrackedCopy(t *testing.T) {
 	rel := ".beads-hooks"
 	f := newLinkedHooksFixture(t, rel, true)
 
-	_, _, err := runHooksInstallForTest(t, "shared", false)
+	stdout, stderr, err := runHooksInstallForTest(t, "shared", false)
 	require.NoError(t, err)
 
 	requireHooksCurrent(t, filepath.Join(f.worktree, rel))
 	requirePrimaryUnchanged(t, f, rel)
 	requireHooksPath(t, f, filepath.Join(f.primary, rel))
+	requireSingleRedirectNote(t, stderr, filepath.Join(f.worktree, rel), filepath.Join(f.primary, rel))
+	require.NotContains(t, stdout, "Note:")
 }
 
 func TestInstallBeadsHooksFromLinkedWorktreeWritesTrackedCopy(t *testing.T) {
@@ -151,10 +166,18 @@ func TestInstallBeadsHooksFromLinkedWorktreeWritesTrackedCopy(t *testing.T) {
 	resetRepoCaches()
 	require.Equal(t, filepath.Join(f.primary, ".beads"), beads.FindBeadsDir(), "fixture precondition")
 
-	_, _, err := runHooksInstallForTest(t, "beads", false)
+	stdout, stderr, err := runHooksInstallForTest(t, "beads", true)
 	require.NoError(t, err)
 
 	requireHooksCurrent(t, filepath.Join(f.worktree, rel))
 	requirePrimaryUnchanged(t, f, rel)
 	requireHooksPath(t, f, filepath.Join(f.primary, rel))
+	requireSingleRedirectNote(t, stderr, filepath.Join(f.worktree, rel), filepath.Join(f.primary, rel))
+	// The --json map is today's: no note and no directory field.
+	var got map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(stdout), &got), "stdout: %q", stdout)
+	require.Equal(t, map[string]interface{}{
+		"success": true, "message": "Git hooks installed successfully",
+		"shared": false, "chained": false, "beadsHooks": true,
+	}, got)
 }
