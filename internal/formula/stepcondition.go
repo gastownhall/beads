@@ -110,6 +110,11 @@ func unquoteValue(s string) string {
 // Steps with conditions that evaluate to false are excluded from the result.
 // Children of excluded steps are also excluded.
 //
+// A kept step whose needs or depends_on names a step this pass excluded is
+// rejected with an error wrapping ErrValidation: Validate checked the formula
+// as written, before the filter ran, so the reference would otherwise reach
+// the cook dangling and the step would be poured with no edge.
+//
 // Parameters:
 //   - steps: the steps to filter
 //   - vars: variable values for condition evaluation
@@ -120,6 +125,32 @@ func FilterStepsByCondition(steps []*Step, vars map[string]string) ([]*Step, err
 		vars = make(map[string]string)
 	}
 
+	dropped := make(map[string]droppedStep)
+	result, err := filterStepsByCondition(steps, vars, dropped)
+	if err != nil {
+		return nil, err
+	}
+	if len(dropped) == 0 {
+		return result, nil
+	}
+
+	var errs []string
+	collectDroppedReferences(result, dropped, &errs)
+	if len(errs) > 0 {
+		return nil, fmt.Errorf("%w:\n  - %s", ErrValidation, strings.Join(errs, "\n  - "))
+	}
+	return result, nil
+}
+
+// droppedStep records why FilterStepsByCondition excluded a step: the
+// condition that evaluated false and the ID of the step carrying it (the step
+// itself, or the excluded ancestor it went with).
+type droppedStep struct {
+	condition string
+	carrierID string
+}
+
+func filterStepsByCondition(steps []*Step, vars map[string]string, dropped map[string]droppedStep) ([]*Step, error) {
 	result := make([]*Step, 0, len(steps))
 
 	for _, step := range steps {
@@ -131,6 +162,7 @@ func FilterStepsByCondition(steps []*Step, vars map[string]string) ([]*Step, err
 
 		if !include {
 			// Skip this step and all its children
+			recordDropped(step, droppedStep{condition: step.Condition, carrierID: step.ID}, dropped)
 			continue
 		}
 
@@ -139,7 +171,7 @@ func FilterStepsByCondition(steps []*Step, vars map[string]string) ([]*Step, err
 
 		// Recursively filter children
 		if len(step.Children) > 0 {
-			filteredChildren, err := FilterStepsByCondition(step.Children, vars)
+			filteredChildren, err := filterStepsByCondition(step.Children, vars, dropped)
 			if err != nil {
 				return nil, err
 			}
@@ -150,4 +182,35 @@ func FilterStepsByCondition(steps []*Step, vars map[string]string) ([]*Step, err
 	}
 
 	return result, nil
+}
+
+// recordDropped marks step and all its descendants as excluded for why.
+func recordDropped(step *Step, why droppedStep, dropped map[string]droppedStep) {
+	dropped[step.ID] = why
+	for _, child := range step.Children {
+		recordDropped(child, why, dropped)
+	}
+}
+
+// collectDroppedReferences appends one line to errs for each reference a kept
+// step makes to a dropped step.
+func collectDroppedReferences(steps []*Step, dropped map[string]droppedStep, errs *[]string) {
+	for _, step := range steps {
+		for _, ref := range step.DependsOn {
+			if why, ok := dropped[ref]; ok {
+				*errs = append(*errs, droppedReferenceError(step.ID, "depends_on", ref, why))
+			}
+		}
+		for _, ref := range step.Needs {
+			if why, ok := dropped[ref]; ok {
+				*errs = append(*errs, droppedReferenceError(step.ID, "needs", ref, why))
+			}
+		}
+		collectDroppedReferences(step.Children, dropped, errs)
+	}
+}
+
+func droppedReferenceError(stepID, field, ref string, why droppedStep) string {
+	return fmt.Sprintf("step %q: %s references %q, but condition %q on step %q drops it from this pour (give %q the same condition, or do not name a step that this pour excludes)",
+		stepID, field, ref, why.condition, why.carrierID, stepID)
 }

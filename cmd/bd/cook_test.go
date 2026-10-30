@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -1543,5 +1544,68 @@ func TestStepTypeToIssueType(t *testing.T) {
 		if got := stepTypeToIssueType(tt.stepType); got != tt.want {
 			t.Errorf("stepTypeToIssueType(%q) = %q, want %q", tt.stepType, got, tt.want)
 		}
+	}
+}
+
+// cookFormulaTOMLWithVars cooks a TOML formula through
+// resolveAndCookFormulaWithVars with a non-nil vars map, so the step
+// condition filter runs as it does for pour and wisp (cookGateFormulaTOML
+// passes nil and skips it).
+func cookFormulaTOMLWithVars(t *testing.T, name, src string, vars map[string]string) (*TemplateSubgraph, error) {
+	t.Helper()
+	if vars == nil {
+		vars = map[string]string{}
+	}
+	dir := writePipelineFormula(t, name, src)
+	return resolveAndCookFormulaWithVars(name, []string{dir}, vars)
+}
+
+// conditionalFanoutFormula is a formula whose consumer names the conditional
+// fanout step through field (needs or depends_on).
+func conditionalFanoutFormula(name, field string) string {
+	return `formula = "` + name + `"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "fanout"
+title = "Fan out"
+type = "task"
+condition = "{{fanout_enabled}}"
+
+[[steps]]
+id = "consumer"
+title = "Consume"
+type = "task"
+` + field + ` = ["fanout"]
+`
+}
+
+// TestCookFormulaConditionDroppedNeedsTargetErrors: a step whose needs or
+// depends_on target is dropped by its condition must fail the cook, not pour
+// without its edge (GH#6437, PR #6642).
+func TestCookFormulaConditionDroppedNeedsTargetErrors(t *testing.T) {
+	for _, field := range []string{"needs", "depends_on"} {
+		t.Run(field, func(t *testing.T) {
+			name := "dangling-" + strings.ReplaceAll(field, "_", "-")
+			sg, err := cookFormulaTOMLWithVars(t, name, conditionalFanoutFormula(name, field),
+				map[string]string{"fanout_enabled": "false"})
+			if err == nil {
+				consumerID := name + ".consumer"
+				t.Fatalf("cook succeeded although consumer's %s target %q was dropped by its condition; consumer blocks edges: %v",
+					field, "fanout", blocksEdgesFrom(sg, consumerID))
+			}
+			if sg != nil {
+				t.Errorf("cook returned a subgraph alongside the error")
+			}
+			if !errors.Is(err, formula.ErrValidation) {
+				t.Errorf("errors.Is(err, formula.ErrValidation) = false for %v", err)
+			}
+			for _, want := range []string{`"consumer"`, field, `"fanout"`, "{{fanout_enabled}}"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not mention %q", err, want)
+				}
+			}
+		})
 	}
 }
