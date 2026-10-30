@@ -85,6 +85,11 @@ type PushHooks struct {
 	// still incurs, so a no-op `--push-only` run does not drain the API rate limit
 	// (gastownhall/beads#4214). Returning "" disables the short-circuit for that
 	// issue (the engine falls back to the fetch + ContentEqual path).
+	//
+	// A pull that writes an issue refreshes its fingerprint to the pulled
+	// content, which is what the remote then holds. A pull by an engine without
+	// ContentHash (or one that returns "" for the pulled content) clears a
+	// stored fingerprint instead, so a later push never trusts the last push.
 	ContentHash func(local *types.Issue) string
 
 	// TargetScope returns the canonical remote namespace in which external issue
@@ -1069,7 +1074,9 @@ func (e *Engine) recordPushHash(ctx context.Context, issue *types.Issue, externa
 // refreshPushHashAfterPull keeps the stored push hash of a pulled issue in
 // step with the remote. After a pull the remote holds the pulled content, not
 // the content of the last push. The hash is keyed by id, the local row the pull
-// wrote: a GenerateID hook may have given pulled a fresh ID.
+// wrote: a GenerateID hook may have given pulled a fresh ID. Without a
+// fingerprint for the pulled content, a stored hash is cleared so the next push
+// fetches and compares instead of trusting the last push.
 func (e *Engine) refreshPushHashAfterPull(ctx context.Context, id string, pulled *types.Issue, ref string) {
 	if id == "" || pulled == nil {
 		return
@@ -1082,6 +1089,13 @@ func (e *Engine) refreshPushHashAfterPull(ctx context.Context, id string, pulled
 		if err := e.Store.SetLocalMetadata(ctx, key, value); err != nil {
 			e.warn("Failed to record push hash for %s: %v", id, err)
 		}
+		return
+	}
+	if stored, err := e.Store.GetLocalMetadata(ctx, key); err == nil && stored == "" {
+		return
+	}
+	if err := e.Store.SetLocalMetadata(ctx, key, ""); err != nil {
+		e.warn("Failed to clear push hash for %s: %v", id, err)
 	}
 }
 
