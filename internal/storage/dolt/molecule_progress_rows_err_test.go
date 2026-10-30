@@ -3,6 +3,7 @@ package dolt
 import (
 	"context"
 	"errors"
+	"fmt"
 	"regexp"
 	"testing"
 
@@ -78,6 +79,45 @@ func TestGetMoleculeProgressReportsTruncatedReads(t *testing.T) {
 		statuses := sqlmock.NewRows([]string{"id", "status"}).
 			AddRow("c1", "closed").AddRow("c2", "closed")
 		expectMoleculeProgressReads(mock, children, statuses)
+
+		stats, err := store.GetMoleculeProgress(context.Background(), "mol-1")
+		requireMoleculeProgressReadError(t, stats, err, moleculeProgressLost)
+	})
+
+	t.Run("status truncated", func(t *testing.T) {
+		store, mock := moleculeProgressMockStore(t)
+		children := sqlmock.NewRows([]string{"issue_id"}).
+			AddRow("c1").AddRow("c2").AddRow("c3").AddRow("c4")
+		statuses := sqlmock.NewRows([]string{"id", "status"}).
+			AddRow("c1", "closed").AddRow("c2", "closed").
+			AddRow("c3", "in_progress").AddRow("c4", "open")
+		statuses.RowError(2, moleculeProgressLost)
+		expectMoleculeProgressReads(mock, children, statuses)
+
+		stats, err := store.GetMoleculeProgress(context.Background(), "mol-1")
+		requireMoleculeProgressReadError(t, stats, err, moleculeProgressLost)
+	})
+
+	t.Run("status truncated in a later batch", func(t *testing.T) {
+		store, mock := moleculeProgressMockStore(t)
+		children := sqlmock.NewRows([]string{"issue_id"})
+		for i := 1; i <= queryBatchSize+1; i++ {
+			children.AddRow(fmt.Sprintf("c%d", i))
+		}
+		mock.ExpectQuery("SELECT issue_id FROM dependencies").WillReturnRows(children)
+		// The first status batch (200 ids) completes; the second holds one
+		// row whose delivery fails, so the check must run inside the batch
+		// loop, not only after the last batch.
+		firstBatch := sqlmock.NewRows([]string{"id", "status"})
+		for i := 1; i <= queryBatchSize; i++ {
+			firstBatch.AddRow(fmt.Sprintf("c%d", i), "open")
+		}
+		mock.ExpectQuery("SELECT id, status FROM issues WHERE id IN").
+			WillReturnRows(firstBatch)
+		lastBatch := sqlmock.NewRows([]string{"id", "status"}).AddRow("c201", "open")
+		lastBatch.RowError(0, moleculeProgressLost)
+		mock.ExpectQuery("SELECT id, status FROM issues WHERE id IN").
+			WillReturnRows(lastBatch)
 
 		stats, err := store.GetMoleculeProgress(context.Background(), "mol-1")
 		requireMoleculeProgressReadError(t, stats, err, moleculeProgressLost)
