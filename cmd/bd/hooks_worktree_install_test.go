@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -44,6 +45,13 @@ func clearGitRoutingForTest(t *testing.T) {
 	for _, key := range []string{"HOME", "USERPROFILE", "XDG_CONFIG_HOME"} {
 		t.Setenv(key, home)
 	}
+}
+
+// legacyVersionHook is a bd-owned pre-section hook whose recorded version is
+// outdated, which is what makes `bd init` reinstall: init treats a
+// section-marker hook as current whatever its marker version.
+func legacyVersionHook(name string) string {
+	return "#!/bin/sh\n# bd (beads) " + name + " hook\n" + hookVersionPrefix + "0.0.1\nexit 0\n"
 }
 
 // newLinkedHooksFixture commits old-marker hooks under rel in P when track is
@@ -201,6 +209,19 @@ func TestInstallHooksFromLinkedWorktreeRefusesForeignTrackedCopy(t *testing.T) {
 		require.Equal(t, oldMarkerHook(name), string(readInitHooksFile(t, filepath.Join(f.worktree, rel, name))))
 	}
 	require.Empty(t, initExcludeGit(t, f.worktree, "status", "--porcelain"))
+}
+
+func TestInitHooksFromLinkedWorktreeWritesTrackedCopy(t *testing.T) {
+	rel := filepath.Join(".beads", "hooks")
+	f := newLinkedHooksFixtureWith(t, rel, true, legacyVersionHook)
+
+	captureStdio(t, func() {
+		runEmbeddedInitHooks(context.Background(), f.worktree, filepath.Join(f.primary, ".beads"), false, true)
+	})
+
+	requireHooksCurrent(t, filepath.Join(f.worktree, rel))
+	requirePrimaryUnchanged(t, f, rel)
+	requireHooksPath(t, f, filepath.Join(f.primary, rel))
 }
 
 func TestInstallHooksFromLinkedWorktreeKeepsUntrackedPrimaryCopy(t *testing.T) {
