@@ -72,3 +72,37 @@ func TestProxiedServerInitSecondCloneAdoptsDatabaseProjectID(t *testing.T) {
 	require.Equal(t, adopted, committedCfg.ProjectID,
 		"the tail-committed .beads/metadata.json must carry the adopted id")
 }
+
+// TestProxiedServerInitPrefixOnlyDatabaseKeepsLocalProjectID pins the AC-4
+// half of #7576: a database carrying a prefix but no _project_id is a partial
+// identity the adopt branch already treats as identified, so a clone initing
+// against it must keep its own minted id — an empty adopted id is never saved,
+// and the clone's id is not written back to the identified database either.
+func TestProxiedServerInitPrefixOnlyDatabaseKeepsLocalProjectID(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+	database, args := sharedProxiedInitArgs(t, sharedProxiedScopedUser)
+
+	a := bdProxiedInit(t, bd, "pfx", args...)
+	a.database = database
+	db := openProxiedDB(t, a)
+
+	// Reduce the database to a prefix-only identity: identified, but with no
+	// _project_id for a clone to adopt.
+	_, err := db.ExecContext(context.Background(), "DELETE FROM metadata WHERE `key` = '_project_id'")
+	require.NoError(t, err, "delete _project_id")
+
+	c := bdProxiedInit(t, bd, "pfx", args...)
+	cCfg, err := configfile.Load(c.beadsDir)
+	require.NoError(t, err)
+	require.NotNil(t, cCfg)
+	require.NotEmpty(t, cCfg.ProjectID,
+		"a prefix-only database must not blank the clone's own project_id")
+
+	// The adopt branch never rewrites database identity, so the partial
+	// identity must still be exactly that.
+	still, ok := readProxiedMetadataRow(t, db, "metadata", "_project_id")
+	require.False(t, ok,
+		"the clone must not write its id back to the identified database; found _project_id %q", still)
+}
