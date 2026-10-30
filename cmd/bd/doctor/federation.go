@@ -305,7 +305,10 @@ func CheckFederationRemotesAPI(path string) DoctorCheck {
 // user-global key is listening somewhere else.
 //
 // pid is the server's PID from the PID file, or 0 for a server only the
-// endpoint probe found; the error then names that endpoint instead.
+// endpoint probe found. A PID-tracked server is bd's own, which binds
+// 127.0.0.1, so its listener is dialed there; for pid 0 the listener is
+// dialed at the host of the endpoint the probe reached
+// (doltserver.ResolveEndpoint), and the error names that endpoint.
 //
 // The mode is classified once because it also decides the remedy. bd opens a
 // remotesapi listener only for the shared server it launches, so restarting is
@@ -328,9 +331,15 @@ func checkRemotesAPIListener(beadsDir string, pid int) DoctorCheck {
 			Category: CategoryFederation,
 		}
 	}
-	host := "127.0.0.1"
-
-	addr := net.JoinHostPort(host, fmt.Sprintf("%d", remotesAPIPort))
+	// bd's own server binds 127.0.0.1, so a PID-tracked server is dialed
+	// there. A server only the endpoint probe found is dialed at the host the
+	// probe reached.
+	addr := doltutil.ServerAddr("127.0.0.1", remotesAPIPort)
+	var ep doltserver.Endpoint
+	if pid <= 0 {
+		ep = doltserver.ResolveEndpoint(beadsDir, nil)
+		addr = doltutil.ServerAddr(ep.Host, remotesAPIPort)
+	}
 	// Left as a bare dial+close (no doltserver.ProbeSQLServer): remotesapi
 	// speaks gRPC/HTTP, not the MySQL protocol, so there is no handshake
 	// greeting to drain here.
@@ -343,9 +352,9 @@ func checkRemotesAPIListener(beadsDir string, pid int) DoctorCheck {
 		detail := fmt.Sprintf("Server running (PID %d) but remotesapi port unreachable: %v", pid, err)
 		if pid <= 0 {
 			// Only the endpoint probe found this server, so name the endpoint
-			// it reached rather than "PID 0".
-			ep := doltserver.ResolveEndpoint(beadsDir, nil)
-			detail = fmt.Sprintf("Server reachable at %s (no PID file in this workspace) but remotesapi port unreachable: %v", remedy.PrintedValue(ep.Location()), err)
+			// it reached rather than "PID 0". The dial error repeats the
+			// configured host.
+			detail = fmt.Sprintf("Server reachable at %s (no PID file in this workspace) but remotesapi port unreachable: %v", remedy.PrintedValue(ep.Location()), remedy.PrintedError(err))
 		}
 		return DoctorCheck{
 			Name:     "Federation remotesapi",
