@@ -114,4 +114,26 @@ func TestEnginePullRecordsPushHash(t *testing.T) {
 			t.Fatalf("push skipped the revert to %q; remote stays %q", f.local.Title, f.mock.issues[0].Title)
 		}
 	})
+
+	t.Run("pull_then_push_is_a_no_op", func(t *testing.T) {
+		f := newPushHashFixture()
+		runSync(t, f.engine, SyncOptions{Push: true})
+
+		f.editRemote("remote edit")
+		f.mock.issues = append(f.mock.issues, TrackerIssue{
+			ID: "EXT-2", Identifier: "EXT-2", URL: "https://test.test/EXT-2", Title: "new remote",
+			UpdatedAt: f.mock.issues[0].UpdatedAt,
+		})
+		pull := runSync(t, f.engine, SyncOptions{Pull: true})
+		if pull.PullStats.Updated != 1 || pull.PullStats.Created != 1 {
+			t.Fatalf("PullStats = %+v, want one update and one create", pull.PullStats)
+		}
+
+		f.mock.fetchCalls = 0
+		runSync(t, f.engine, SyncOptions{Push: true})
+		if f.mock.fetchCalls != 0 || len(f.mock.updated) != 0 || len(f.mock.created) != 0 {
+			t.Fatalf("push after the pull: fetchCalls=%d updated=%d created=%d, want all 0",
+				f.mock.fetchCalls, len(f.mock.updated), len(f.mock.created))
+		}
+	})
 }
