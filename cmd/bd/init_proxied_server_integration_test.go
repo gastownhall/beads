@@ -127,3 +127,38 @@ func TestProxiedServerInitBootstrapWritesNoCloneFingerprints(t *testing.T) {
 			"a fresh proxied bootstrap recorded the per-clone fingerprint %q in the shared metadata table", key)
 	}
 }
+
+// TestProxiedServerInitKeepsExistingSharedFingerprints pins #7577's
+// shared-database half: a database whose metadata table already carries
+// repo_id/clone_id rows (an older bd wrote them) must keep them exactly as
+// they are when another clone runs plain proxied init against it.
+func TestProxiedServerInitKeepsExistingSharedFingerprints(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+	database, args := sharedProxiedInitArgs(t, sharedProxiedScopedUser)
+
+	a := bdProxiedInit(t, bd, "shfp", args...)
+	a.database = database
+	db := openProxiedDB(t, a)
+
+	// Seed the rows an older bd would have left on this shared database.
+	_, err := db.ExecContext(context.Background(),
+		"REPLACE INTO metadata (`key`, value) VALUES ('repo_id','seed-repo'),('clone_id','seed-clone')")
+	require.NoError(t, err, "seed fingerprint rows")
+
+	// Clone B inits against the same database with its own fingerprints.
+	b := bdProxiedInit(t, bd, "shfp", args...)
+	bCfg, err := configfile.Load(b.beadsDir)
+	require.NoError(t, err)
+	require.NotNil(t, bCfg)
+
+	repo, ok := readProxiedMetadataRow(t, db, "metadata", "repo_id")
+	require.True(t, ok, "the seeded repo_id row vanished")
+	require.Equal(t, "seed-repo", repo,
+		"a second clone's init overwrote the shared repo_id")
+	clone, ok := readProxiedMetadataRow(t, db, "metadata", "clone_id")
+	require.True(t, ok, "the seeded clone_id row vanished")
+	require.Equal(t, "seed-clone", clone,
+		"a second clone's init overwrote the shared clone_id")
+}

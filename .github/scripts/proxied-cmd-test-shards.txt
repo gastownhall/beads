@@ -144,6 +144,7 @@
 
 34 15 TestProxiedServerDepConcurrent
 34 15 TestProxiedServerImport
+34 15 TestProxiedServerInitKeepsExistingSharedFingerprints
 34 15 TestProxiedServerMoleculeFrontDoorWriteParity
 34 15 TestProxiedServerReopenConcurrent
 34 15 TestProxiedServerSQL
