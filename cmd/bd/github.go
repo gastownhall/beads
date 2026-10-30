@@ -418,14 +418,9 @@ func runGitHubSync(cmd *cobra.Command, args []string) error {
 		return HandleError("initializing GitHub tracker: %v", err)
 	}
 
-	// Create the sync engine
-	engine := tracker.NewEngine(gt, store, currentActor())
-	engine.OnMessage = func(msg string) { _, _ = fmt.Fprintln(out, "  "+msg) }
-	engine.OnWarning = func(msg string) { _, _ = fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }
-
-	// Set up GitHub-specific pull and push hooks
+	// Create the sync engine, with the GitHub push hooks
+	engine := newGitHubEngine(gt, out)
 	engine.PullHooks = buildGitHubPullHooks(ctx)
-	engine.PushHooks = buildGitHubPushHooks(gt)
 
 	// Build sync options from CLI flags
 	pull := !githubSyncPushOnly
@@ -720,6 +715,20 @@ func pushGitHubDependencyLinks(ctx context.Context, gt *github.Tracker, st stora
 		warn(fmt.Sprintf("GitHub relationship sync: %d link(s) skipped; the source issue is not readable on GitHub (deleted, renumbered, or not visible to this token)", res.SourceMissing))
 	}
 	return res.Created
+}
+
+// newGitHubEngine builds the sync engine of `bd github sync`, `push` and
+// `pull`. Each one carries the push hooks, the pull too: a pull keeps the
+// stored push hash in step with GitHub only through ContentHash. Without it
+// the pull clears the hash, and the next push fetches the issue and PATCHes
+// bd's normalized labels over GitHub labels bd cannot map, such as
+// priority::urgent.
+func newGitHubEngine(gt *github.Tracker, out io.Writer) *tracker.Engine {
+	engine := tracker.NewEngine(gt, store, currentActor())
+	engine.OnMessage = func(msg string) { _, _ = fmt.Fprintln(out, "  "+msg) }
+	engine.OnWarning = func(msg string) { _, _ = fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }
+	engine.PushHooks = buildGitHubPushHooks(gt)
+	return engine
 }
 
 // buildGitHubPushHooks creates PushHooks for GitHub-specific push behavior.
