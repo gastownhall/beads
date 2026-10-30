@@ -361,6 +361,7 @@ func TestShouldSaveAdoptedProjectID(t *testing.T) {
 	}{
 		{"database id differs from the minted one", "db", "local", true},
 		{"already carries the database id", "same", "same", false},
+		{"prefix-only database keeps the minted id", "", "local", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

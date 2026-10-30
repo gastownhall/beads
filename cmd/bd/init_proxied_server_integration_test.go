@@ -50,6 +50,26 @@ func TestProxiedServerInitSharedDatabaseAdoptsIdentityAndKeepsFingerprints(t *te
 			t.Errorf("AC-1: second clone committed metadata.json project_id = %q, want %q", committedCfg.ProjectID, dbProjectID)
 		}
 	}
+
+	// A database carrying a prefix but no _project_id is identified all the
+	// same, so a further clone adopts it — and must keep its own minted id
+	// rather than save the empty one.
+	db := openProxiedDB(t, b)
+	if _, err := db.ExecContext(context.Background(), "DELETE FROM metadata WHERE `key` = '_project_id'"); err != nil {
+		t.Fatalf("drop _project_id: %v", err)
+	}
+	c := bdProxiedInit(t, bd, "shid", args...)
+	c.database = database
+	cfg, err = configfile.Load(c.beadsDir)
+	if err != nil || cfg == nil {
+		t.Fatalf("load third clone metadata.json: %v", err)
+	}
+	if cfg.ProjectID == "" {
+		t.Error("AC-4: third clone adopted a prefix-only database and saved an empty metadata.json project_id")
+	}
+	if got := readProxiedMetadata(t, openProxiedDB(t, c), "_project_id"); got != "" {
+		t.Errorf("third clone's init recorded _project_id %q on a prefix-only database it adopted", got)
+	}
 }
 
 // readProxiedMetadata reads key from the database's metadata table, "" when

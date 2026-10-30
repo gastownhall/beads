@@ -278,7 +278,8 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 	// metadata.json was written with a locally-minted project id before any
 	// DB connection existed; the adopted id — team-server's provisioned
 	// identity, or the identity an earlier init already recorded on this
-	// database — must replace it before the tail git-commits .beads/.
+	// database — must replace it before the tail git-commits .beads/. An
+	// empty adopted id is never saved.
 	if shouldSaveAdoptedProjectID(adoptedProjectID, projectID) {
 		fileCfg, err := configfile.Load(beadsDir)
 		if err != nil || fileCfg == nil {
@@ -303,9 +304,12 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 }
 
 // shouldSaveAdoptedProjectID reports whether init must rewrite metadata.json's
-// project_id with the identity it adopted from the database.
+// project_id with the identity it adopted from the database. An empty adopted id
+// is a database carrying a prefix but no _project_id — a partial identity
+// issueops.Bootstrapper already treats as identified — and saving it would
+// blank the clone's own id.
 func shouldSaveAdoptedProjectID(adopted, local string) bool {
-	return adopted != local
+	return adopted != "" && adopted != local
 }
 
 func resolveInitPrefix(flagPrefix string) (string, error) {
