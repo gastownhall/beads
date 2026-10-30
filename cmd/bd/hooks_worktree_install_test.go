@@ -92,6 +92,15 @@ func requireHooksCarryMarker(t *testing.T, dir, marker string) {
 	}
 }
 
+// requireRedirectNote pins AC-4: stderr carries exactly one note line naming
+// both the directory the install wrote and the directory Git runs.
+func requireRedirectNote(t *testing.T, stderr, written, runs string) {
+	t.Helper()
+	require.Equal(t, 1, strings.Count(stderr, "Note:"), "stderr must carry exactly one note line: %q", stderr)
+	require.Contains(t, stderr, written, "the note must name the directory written")
+	require.Contains(t, stderr, runs, "the note must name the directory Git runs")
+}
+
 // TestInstallHooksFromLinkedWorktreeWritesTrackedCopy pins AC-1: the default
 // install from a linked worktree updates the worktree's tracked .beads/hooks
 // copy, leaves the primary checkout clean, and keeps core.hooksPath naming the
@@ -100,12 +109,16 @@ func TestInstallHooksFromLinkedWorktreeWritesTrackedCopy(t *testing.T) {
 	primary, worktree := newWorktreeHooksFixture(t, filepath.Join(".beads", "hooks"), true)
 	enterWorktreeForInstallTest(t, worktree)
 	setStandaloneHookMode(t, "")
-	require.NoError(t, hooksInstallCmd.RunE(hooksInstallCmd, nil))
+	var err error
+	stderr := captureStderr(t, func() { err = hooksInstallCmd.RunE(hooksInstallCmd, nil) })
+	require.NoError(t, err)
 	requireHooksCurrent(t, filepath.Join(worktree, ".beads", "hooks"))
 	requirePrimaryUnchanged(t, primary, filepath.Join(".beads", "hooks"))
 	require.Equal(t, filepath.Join(primary, ".beads", "hooks"),
 		initExcludeGit(t, worktree, "config", "--get", "core.hooksPath"),
 		"core.hooksPath must keep naming the primary copy (#2414)")
+	requireRedirectNote(t, stderr,
+		filepath.Join(worktree, ".beads", "hooks"), filepath.Join(primary, ".beads", "hooks"))
 }
 
 // TestInstallSharedHooksFromLinkedWorktreeWritesTrackedCopy pins AC-2 for the
@@ -114,12 +127,16 @@ func TestInstallSharedHooksFromLinkedWorktreeWritesTrackedCopy(t *testing.T) {
 	primary, worktree := newWorktreeHooksFixture(t, ".beads-hooks", true)
 	enterWorktreeForInstallTest(t, worktree)
 	setStandaloneHookMode(t, "shared")
-	require.NoError(t, hooksInstallCmd.RunE(hooksInstallCmd, nil))
+	var err error
+	stderr := captureStderr(t, func() { err = hooksInstallCmd.RunE(hooksInstallCmd, nil) })
+	require.NoError(t, err)
 	requireHooksCurrent(t, filepath.Join(worktree, ".beads-hooks"))
 	requirePrimaryUnchanged(t, primary, ".beads-hooks")
 	require.Equal(t, filepath.Join(primary, ".beads-hooks"),
 		initExcludeGit(t, worktree, "config", "--get", "core.hooksPath"),
 		"core.hooksPath must keep naming the primary copy (#2414)")
+	requireRedirectNote(t, stderr,
+		filepath.Join(worktree, ".beads-hooks"), filepath.Join(primary, ".beads-hooks"))
 }
 
 // TestInstallBeadsHooksFromLinkedWorktreeWritesTrackedCopy pins AC-3: --beads
@@ -132,10 +149,32 @@ func TestInstallBeadsHooksFromLinkedWorktreeWritesTrackedCopy(t *testing.T) {
 	mkdirs(t, filepath.Join(primary, ".beads", "embeddeddolt"))
 	enterWorktreeForInstallTest(t, worktree)
 	setStandaloneHookMode(t, "beads")
-	require.NoError(t, hooksInstallCmd.RunE(hooksInstallCmd, nil))
+	var err error
+	stderr := captureStderr(t, func() { err = hooksInstallCmd.RunE(hooksInstallCmd, nil) })
+	require.NoError(t, err)
 	requireHooksCurrent(t, filepath.Join(worktree, ".beads", "hooks"))
 	requirePrimaryUnchanged(t, primary, filepath.Join(".beads", "hooks"))
 	require.Equal(t, filepath.Join(primary, ".beads", "hooks"),
 		initExcludeGit(t, worktree, "config", "--get", "core.hooksPath"),
 		"core.hooksPath must keep naming the primary copy (#2414)")
+	requireRedirectNote(t, stderr,
+		filepath.Join(worktree, ".beads", "hooks"), filepath.Join(primary, ".beads", "hooks"))
+}
+
+// TestInstallHooksFromLinkedWorktreeNoteIsStderrOnly pins the stdout half of
+// AC-4: the note never reaches stdout, and a --json run still prints only
+// today's map.
+func TestInstallHooksFromLinkedWorktreeNoteIsStderrOnly(t *testing.T) {
+	primary, worktree := newWorktreeHooksFixture(t, filepath.Join(".beads", "hooks"), true)
+	enterWorktreeForInstallTest(t, worktree)
+	setStandaloneHookMode(t, "")
+	oldJSON := jsonOutput
+	jsonOutput = true
+	t.Cleanup(func() { jsonOutput = oldJSON })
+	stdout := captureStdout(t, func() error { return hooksInstallCmd.RunE(hooksInstallCmd, nil) })
+	require.NotContains(t, stdout, "Note:", "the note must stay off stdout")
+	require.Contains(t, stdout, `"message": "Git hooks installed successfully"`,
+		"--json must still print only today's map")
+	requireHooksCurrent(t, filepath.Join(worktree, ".beads", "hooks"))
+	requirePrimaryUnchanged(t, primary, filepath.Join(".beads", "hooks"))
 }

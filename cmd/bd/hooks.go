@@ -1258,6 +1258,15 @@ func installHooksAt(hookNames []string, force, shared, chain, beadsHooks bool, s
 		}
 	}
 
+	// A redirected install (#7725) owes the user the one fact a bare success
+	// would hide: the tracked files it changed live in this worktree, while Git
+	// keeps running the primary checkout's copy until the change reaches it.
+	// Stderr only — stdout and the --json map stay unchanged — and not gated on
+	// any quiet flag: installHooksAt has none.
+	if writeDir != hooksDir {
+		fmt.Fprintf(os.Stderr, "Note: updated this worktree's tracked hooks in %s; Git runs %s (core.hooksPath), which picks this up when the primary checkout gets the change (or run bd hooks install there)\n", writeDir, hooksDir)
+	}
+
 	return nil
 }
 
