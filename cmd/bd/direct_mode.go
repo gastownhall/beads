@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/storage"
 )
 
 // ErrNoBeadsDatabase reports that no beads workspace could be resolved at all,
@@ -26,6 +27,16 @@ func ensureStoreActive() error {
 }
 
 func ensureStoreActiveWithContext(ctx context.Context) error {
+	return ensureStoreActiveWithFactory(ctx, newDoltStoreFromConfig)
+}
+
+// ensureReadOnlyStoreActiveWithContext opens existing storage for prime's
+// memory read without initializing an embedded database (GH#7920).
+func ensureReadOnlyStoreActiveWithContext(ctx context.Context) error {
+	return ensureStoreActiveWithFactory(ctx, newReadOnlyStoreFromConfig)
+}
+
+func ensureStoreActiveWithFactory(ctx context.Context, openStore func(context.Context, string) (storage.DoltStorage, error)) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -46,7 +57,7 @@ func ensureStoreActiveWithContext(ctx context.Context) error {
 
 	// Use the factory to create the appropriate backend
 	// based on metadata.json configuration and build tags
-	store, err := newDoltStoreFromConfig(ctx, beadsDir)
+	store, err := openStore(ctx, beadsDir)
 	if err != nil {
 		return fmt.Errorf("%w\nHint: %s", openStoreError(backendNameForErrorFraming(beadsDir), err), diagHint())
 	}

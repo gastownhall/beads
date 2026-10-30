@@ -42,7 +42,7 @@ const (
 	primeStoreTimeoutDefault = 10 * time.Second
 )
 
-var ensureStoreActiveForPrime = ensureStoreActiveWithContext
+var ensureStoreActiveForPrime = ensureReadOnlyStoreActiveWithContext
 
 func primeStoreTimeout() time.Duration {
 	raw := strings.TrimSpace(os.Getenv(primeStoreTimeoutEnv))
@@ -96,6 +96,8 @@ Automatically detects if MCP server is active and adapts output:
 
 Designed for Claude Code, Gemini CLI, and Codex SessionStart hooks to prevent
 agents from forgetting bd workflow after context compaction.
+Memory reads open existing storage without initializing an embedded database.
+Use bd init to create a database explicitly.
 
 Config options:
 - no-git-ops: When true, outputs stealth mode (no git commands in session close protocol).
@@ -580,7 +582,7 @@ func formatMemoriesForPrime(compact bool) string {
 		return formatMemoriesForPrimeProxied(compact)
 	}
 
-	// Try to initialize store if not already active (prime may run before other commands)
+	// Open existing storage without creating a ledger (prime may run before other commands).
 	if store == nil {
 		timeout := primeStoreTimeout()
 		ctx := context.Background()
