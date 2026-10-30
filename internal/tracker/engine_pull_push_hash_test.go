@@ -164,4 +164,26 @@ func TestEnginePullRecordsPushHash(t *testing.T) {
 			t.Fatalf("push updated=%v created=%v, want none", f.mock.updated, f.mock.created)
 		}
 	})
+
+	// AC-3: when GenerateID fills a fresh id on every conversion (as the
+	// GitHub pull mapper does when the mapping leaves the id empty), the
+	// pulled hash is stored under the existing local row's key, never under
+	// the generated id's.
+	t.Run("generated_id_does_not_key_the_hash", func(t *testing.T) {
+		f := newPullHashFixture(t, true)
+		ctx := context.Background()
+
+		f.engine.recordPushHash(ctx, f.local, f.ref)
+		f.editRemote("remote edit")
+		if _, err := f.engine.Sync(ctx, SyncOptions{Pull: true}); err != nil {
+			t.Fatalf("pull Sync: %v", err)
+		}
+		want := "v3:13:h:remote edit0:" + f.ref
+		if got := f.store.localMetadata[f.engine.pushHashKey(f.local.ID)]; got != want {
+			t.Fatalf("hash under the local id = %q, want %q", got, want)
+		}
+		if got, ok := f.store.localMetadata[f.engine.pushHashKey("bd-generated")]; ok {
+			t.Fatalf("hash stored under the generated id: %q", got)
+		}
+	})
 }
