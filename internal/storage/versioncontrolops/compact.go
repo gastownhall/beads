@@ -3,6 +3,9 @@ package versioncontrolops
 import (
 	"context"
 	"fmt"
+	"time"
+
+	"github.com/steveyegge/beads/internal/storage"
 )
 
 // Compact squashes old Dolt commits into a single base commit while preserving
@@ -22,6 +25,26 @@ import (
 // conn must be a single database connection (not a pooled *sql.DB) since the
 // stored procedures rely on session-scoped state (current branch, working set).
 func Compact(ctx context.Context, conn DBConn, initialHash, boundaryHash string, oldCommits int, recentHashes []string) (retErr error) {
+	// Read the original metadata before touching history: DOLT_CHERRY_PICK
+	// dates each replayed commit at replay time, so the kept commits are
+	// amended back to their original dates below (#7294).
+	logEntries, err := Log(ctx, conn, 0)
+	if err != nil {
+		return fmt.Errorf("compact: %w", err)
+	}
+	byHash := make(map[string]storage.CommitInfo, len(logEntries))
+	for _, c := range logEntries {
+		byHash[c.Hash] = c
+	}
+	originals := make([]storage.CommitInfo, len(recentHashes))
+	for i, hash := range recentHashes {
+		c, ok := byHash[hash]
+		if !ok {
+			return fmt.Errorf("compact: commit %s is not in the log of the current branch", hash)
+		}
+		originals[i] = c
+	}
+
 	branchCreated := false
 
 	// Best-effort cleanup: if any step fails after creating the temp branch,
@@ -63,8 +86,17 @@ func Compact(ctx context.Context, conn DBConn, initialHash, boundaryHash string,
 	// aborts the entire replay at the first empty commit with Error 1105
 	// ("The previous cherry-pick commit is empty. Use --allow-empty ..."),
 	// leaving compaction permanently blocked on active databases. See #3815.
-	for _, hash := range recentHashes {
-		if err := execSQL(fmt.Sprintf("cherry-pick %s", hash[:min(8, len(hash))]), "CALL DOLT_CHERRY_PICK('--allow-empty', ?)", hash); err != nil {
+	//
+	// Each pick is then amended with the original commit date; --amend keeps
+	// the message cherry-pick copied.
+	for i, hash := range recentHashes {
+		short := hash[:min(8, len(hash))]
+		if err := execSQL(fmt.Sprintf("cherry-pick %s", short), "CALL DOLT_CHERRY_PICK('--allow-empty', ?)", hash); err != nil {
+			return err
+		}
+		if err := execSQL(fmt.Sprintf("restore metadata %s", short),
+			"CALL DOLT_COMMIT('--amend', '--allow-empty', '--date', ?)",
+			commitDateArg(originals[i].Date)); err != nil {
 			return err
 		}
 	}
@@ -80,4 +112,11 @@ func Compact(ctx context.Context, conn DBConn, initialHash, boundaryHash string,
 	}
 
 	return nil
+}
+
+// commitDateArg renders t for DOLT_COMMIT --date. Dolt stores commit dates to
+// the millisecond, so the fraction is kept: commits made within the same
+// second keep their order.
+func commitDateArg(t time.Time) string {
+	return t.UTC().Format("2006-01-02T15:04:05.000Z07:00")
 }

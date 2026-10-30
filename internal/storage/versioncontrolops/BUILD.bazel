@@ -39,6 +39,7 @@ go_test(
         "backup_test.go",
         "clone_test.go",
         "commit_empty_test.go",
+        "compact_test.go",
         "conflicts_test.go",
         "fastforward_test.go",
         "gc_test.go",
