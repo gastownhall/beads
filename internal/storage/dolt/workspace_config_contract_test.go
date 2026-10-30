@@ -57,6 +57,9 @@ func TestWorkspaceConfigContract(t *testing.T) {
 	t.Run("RefusesAnUnparseableCustomStatus", func(t *testing.T) {
 		conformance.RunWorkspaceConfigRefusesAnUnparseableCustomStatus(t, ctx, fixture)
 	})
+	t.Run("BoundsTheKeyAndTheValueOnSet", func(t *testing.T) {
+		conformance.RunWorkspaceConfigBoundsTheKeyAndTheValueOnSet(t, ctx, fixture)
+	})
 	t.Run("ProjectsCustomStatuses", func(t *testing.T) {
 		conformance.RunWorkspaceConfigProjectsCustomStatuses(t, ctx, fixture)
 	})

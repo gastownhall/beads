@@ -42,6 +42,28 @@ func ValidateSettingWrite(key, value string) (string, error) {
 	if _, err := ValidateSettingKey(key); err != nil {
 		return "", err
 	}
+	// THE LENGTH BOUNDS ARE THE ROLE'S, so every leg refuses the same set.
+	// The Dolt schema stores config.key in VARCHAR(255) and config.value in
+	// TEXT, so a row past either bound was already refused below this rule —
+	// but by the column, as a driver error no caller can classify, while the
+	// HTTP operation refused the same write as a typed, member-named
+	// ErrValidation at its edge. Stating the bound here makes every leg's
+	// answer the typed refusal, and holds for a backend whose columns are
+	// unbounded text, where nothing below the edge would refuse it at all.
+	// Keyed on storage's own constants: the key in CHARACTERS, the value in
+	// BYTES, which is how each column counts. Both errors also carry
+	// types.ErrFieldTooLong, so a caller can tell "too long" from the other
+	// refusals here without matching a message.
+	//
+	// The bound is on the WRITE only. A read or a removal compares the key and
+	// never stores it, so an over-long key there matches nothing and already
+	// has an answer (ValidateSettingKey).
+	if err := types.CheckFieldLen("config key", key); err != nil {
+		return "", fmt.Errorf("%w: %w", issueops.ErrValidation, err)
+	}
+	if err := types.CheckTextLen("config value", value); err != nil {
+		return "", fmt.Errorf("%w: %w", issueops.ErrValidation, err)
+	}
 	// The prefix is owned by bd init --prefix, bd bootstrap and bd
 	// rename-prefix. Refused HERE rather than at the front door because `bd
 	// config set` is not the only door that reaches this plane: before this
