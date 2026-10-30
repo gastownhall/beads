@@ -429,6 +429,9 @@ func (s *DoltStore) GetMoleculeProgress(ctx context.Context, moleculeID string) 
 				childMap[id] = childInfo{status: status}
 			}
 			_ = statusRows.Close()
+			if err := statusRows.Err(); err != nil {
+				return nil, wrapQueryError("get molecule progress: status rows", err)
+			}
 		}
 
 		for _, childID := range childIDs {
