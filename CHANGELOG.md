@@ -1090,6 +1090,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Pouring a formula (`bd mol pour`, `bd mol wisp`, `bd mol bond`,
+  `bd mol seed`) now fails with a formula validation error when a step that
+  stays in the pour names, in its `needs` or `depends_on` or as its
+  `waits_for` spawner, a step whose `condition` leaves it out. The step used
+  to be poured with that dependency silently dropped, so it was ready before
+  the work it waited on, and a `waits_for` gate waited for no one. The error
+  names both steps and the condition (#6437).
 - `bd migrate-personal` no longer leaves an issue in both databases when
   someone else's bead in the project database depends on it. The move's
   delete from the project database refuses such an issue, but it ran only

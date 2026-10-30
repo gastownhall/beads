@@ -110,10 +110,11 @@ func unquoteValue(s string) string {
 // Steps with conditions that evaluate to false are excluded from the result.
 // Children of excluded steps are also excluded.
 //
-// A kept step whose needs or depends_on names a step this pass excluded is
-// rejected with an error wrapping ErrValidation: Validate checked the formula
-// as written, before the filter ran, so the reference would otherwise reach
-// the cook dangling and the step would be poured with no edge.
+// A kept step whose needs, depends_on, or waits_for spawner names a step this
+// pass excluded is rejected with an error wrapping ErrValidation: Validate
+// checked the formula as written, before the filter ran, so the reference
+// would otherwise reach the cook dangling and the step would be poured with
+// no edge (or, for waits_for, as a gate that waits for no one).
 //
 // Parameters:
 //   - steps: the steps to filter
@@ -204,6 +205,16 @@ func collectDroppedReferences(steps []*Step, dropped map[string]droppedStep, err
 		for _, ref := range step.Needs {
 			if why, ok := dropped[ref]; ok {
 				*errs = append(*errs, droppedReferenceError(step.ID, "needs", ref, why))
+			}
+		}
+		if spec := ParseWaitsFor(step.WaitsFor); spec != nil {
+			spawner := spec.SpawnerID
+			if spawner == "" && len(step.Needs) > 0 {
+				spawner = step.Needs[0]
+			}
+			if why, ok := dropped[spawner]; ok {
+				*errs = append(*errs, fmt.Sprintf("step %q: waits_for %q waits for the children of %q, but condition %q on step %q drops it from this pour (give %q the same condition, or name a spawner that is always poured)",
+					step.ID, step.WaitsFor, spawner, why.condition, why.carrierID, step.ID))
 			}
 		}
 		collectDroppedReferences(step.Children, dropped, errs)
