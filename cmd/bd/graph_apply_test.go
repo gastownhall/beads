@@ -1651,6 +1651,7 @@ func TestBuildGraphApplyBatchRequestLeavesAnAbsentPriorityToTheRole(t *testing.T
 // time, so a load crossing a second boundary stores a status timestamp one
 // second before created_at.
 func TestGraphApplyNodeIssueStampsCreatedAtWithStatusTimestamps(t *testing.T) {
+	deferUntil := time.Now().UTC().Add(24 * time.Hour)
 	tests := []struct {
 		name string
 		node GraphApplyNode
@@ -1659,12 +1660,27 @@ func TestGraphApplyNodeIssueStampsCreatedAtWithStatusTimestamps(t *testing.T) {
 	}{
 		{name: "closed", node: GraphApplyNode{Key: "n", Title: "N", Status: string(types.StatusClosed)}, stamp: "closed_at"},
 		{name: "in_progress", node: GraphApplyNode{Key: "n", Title: "N", Status: string(types.StatusInProgress)}, stamp: "started_at"},
+		// No status stamp: created_at stays zero, so an open-only plan's
+		// create items carry no creation stamp for the HTTP wire to refuse.
+		{name: "default open", node: GraphApplyNode{Key: "n", Title: "N"}},
+		{name: "explicit open", node: GraphApplyNode{Key: "n", Title: "N", Status: string(types.StatusOpen)}},
+		{name: "blocked", node: GraphApplyNode{Key: "n", Title: "N", Status: string(types.StatusBlocked)}},
+		{name: "deferred", node: GraphApplyNode{Key: "n", Title: "N", DeferUntil: &deferUntil}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			issue, err := graphApplyNodeIssue(tt.node, GraphApplyOptions{}, "actor", "")
 			if err != nil {
 				t.Fatalf("graphApplyNodeIssue: %v", err)
+			}
+			if tt.stamp == "" {
+				if !issue.CreatedAt.IsZero() {
+					t.Errorf("status %q: created_at = %v, want zero", issue.Status, issue.CreatedAt)
+				}
+				if issue.ClosedAt != nil || issue.StartedAt != nil {
+					t.Errorf("status %q: closed_at = %v, started_at = %v, want both nil", issue.Status, issue.ClosedAt, issue.StartedAt)
+				}
+				return
 			}
 			var stamped *time.Time
 			switch tt.stamp {
