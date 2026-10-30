@@ -34,10 +34,13 @@ var (
 	ErrCloseBlocked      = issueops.ErrCloseBlocked
 	ErrCloseOpenChildren = issueops.ErrCloseOpenChildren
 	ErrAlreadyExists     = issueops.ErrAlreadyExists
-	ErrAlreadyIdentified = issueops.ErrAlreadyIdentified
-	ErrVersionMismatch   = issueops.ErrVersionMismatch
-	ErrStatusMismatch    = issueops.ErrStatusMismatch
-	ErrNotesOverwrite    = issueops.ErrNotesOverwrite
+	// ErrIdempotencyExpired matches a create refused because a retaining
+	// retention sweep retired its id (issueops.IdempotencyExpiredError).
+	ErrIdempotencyExpired = issueops.ErrIdempotencyExpired
+	ErrAlreadyIdentified  = issueops.ErrAlreadyIdentified
+	ErrVersionMismatch    = issueops.ErrVersionMismatch
+	ErrStatusMismatch     = issueops.ErrStatusMismatch
+	ErrNotesOverwrite     = issueops.ErrNotesOverwrite
 )
 
 // CloseOpenChildrenError reports the issue and open-child count that refused a
@@ -889,6 +892,17 @@ type StateHasher interface {
 	GetStateHash(ctx context.Context) (string, error)
 }
 
+// HeadHasher reads the hash of the HEAD commit and of the root value it
+// records: DOLT_HASHOF('HEAD') and DOLT_HASHOF_DB('HEAD'). They are the two
+// chunks of a push that a remote can report missing while it is still
+// registering them, so the guidance for Dolt's "Found dangling references"
+// push refusal prints them beside the hash the refusal names. Both Dolt
+// stores implement it, the embedded one included, where bd sql does not run.
+// Callers type-assert.
+type HeadHasher interface {
+	GetHeadHashes(ctx context.Context) (commit, root string, err error)
+}
+
 // The durable mutation journal's vocabulary lives in the journalops leaf, and
 // these four names are ALIASES of it — not copies, and not a compatibility
 // shim to be deleted later. The canon is journalops: what a record carries,
@@ -989,6 +1003,38 @@ type EventsJournalConfigurer interface {
 type VersionedHistoryConfigurer interface {
 	SetVersionedHistoryEnabled(enabled bool)
 }
+
+// VersionedHistoryDeferrer is a VersionedHistoryConfigurer that can take the
+// store-plane half of the switch as a read to make later instead of an
+// answer now (internal/versionedhistory's ActivateStore and
+// ActivateProvider).
+//
+// It calls resolve inside the first write transaction it begins (a
+// unit-of-work provider: its first unit of work, read or write), before that
+// transaction's body runs, and then behaves as if
+// SetVersionedHistoryEnabled(answer) had been called at that point. The answer
+// is the row as that transaction reads it, not as it stood at open.
+// Until then it records nothing, which is all a plumbing that has not written
+// can have recorded. Asked this way, a plumbing that never writes never reads
+// the row, and one that does pays one statement inside a transaction it
+// opened anyway, rather than a transaction (on the embedded store, an engine
+// open) of its own at every open.
+//
+// A resolve that returns an error has not answered: the transaction it ran in
+// fails with that error before its body runs, so it writes nothing, and the
+// next write asks again. Like Apply, DeferVersionedHistory never turns an
+// enabled instance off; SetVersionedHistoryEnabled after it replaces the
+// pending read.
+type VersionedHistoryDeferrer interface {
+	VersionedHistoryConfigurer
+	DeferVersionedHistory(resolve VersionedHistoryResolver)
+}
+
+// VersionedHistoryResolver answers the versioned-history switch from the
+// plumbing's own config table. readConfig reads one config row inside the
+// transaction the answer first governs, returning "" and a nil error for a
+// row that is not there.
+type VersionedHistoryResolver func(ctx context.Context, readConfig func(ctx context.Context, key string) (string, error)) (enabled bool, err error)
 
 // LifecycleManager provides lifecycle inspection beyond Close().
 type LifecycleManager interface {
@@ -1120,6 +1166,23 @@ type Pinger interface {
 // is remote.
 type ExternalDependencyPolicyProber interface {
 	ServerEnforcesExternalDependencyPolicy(ctx context.Context) (bool, error)
+}
+
+type livePolicyProbeKey struct{}
+
+// WithLivePolicyProbe marks ctx as carrying a claim or a close: an
+// ExternalDependencyPolicyProber asked under it must answer from the server,
+// never from a cache another process wrote. A read can tolerate a cached
+// answer for its TTL; a write guard cannot, since a stale "the server
+// enforces it" would skip the client-side refusal of externally blocked work.
+func WithLivePolicyProbe(ctx context.Context) context.Context {
+	return context.WithValue(ctx, livePolicyProbeKey{}, true)
+}
+
+// LivePolicyProbe reports whether ctx was marked by WithLivePolicyProbe.
+func LivePolicyProbe(ctx context.Context) bool {
+	live, _ := ctx.Value(livePolicyProbeKey{}).(bool)
+	return live
 }
 
 // MoleculeAutoCloseProber is implemented by a DoltStorage whose closes may not

@@ -51,6 +51,25 @@ func (s *DoltStore) ListVersions(ctx context.Context, issueID string) ([]storage
 	return result, err
 }
 
+// ParticipatingIssueIDs implements storage.HistoryParticipation: which of ids
+// name an issues-table row whose participation_generation is set. Plain
+// withReadTx, as ListVersions: it reads an ordinary user table by its primary
+// key.
+func (s *DoltStore) ParticipatingIssueIDs(ctx context.Context, ids []string) (map[string]struct{}, error) {
+	var participating map[string]struct{}
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		participating, err = issueops.ParticipatingIssueIDsInTx(ctx, tx, ids)
+		if err != nil {
+			return wrapQueryError("read history participation", err)
+		}
+		return nil
+	})
+	return participating, err
+}
+
+var _ storage.HistoryParticipation = (*DoltStore)(nil)
+
 // HistoricalIssueIDs reports which of ids appear in HEAD's committed history
 // of the issues table. Implements storage.HistoryPresence.
 //
@@ -221,6 +240,14 @@ func (s *DoltStore) GetStateHash(ctx context.Context) (string, error) {
 	}
 	// Older servers predate DOLT_HASHOF_DB; degrade to HEAD-based detection.
 	return s.GetCurrentCommit(ctx)
+}
+
+var _ storage.HeadHasher = (*DoltStore)(nil)
+
+// GetHeadHashes returns the HEAD commit hash and the hash of its root value.
+// Implements storage.HeadHasher.
+func (s *DoltStore) GetHeadHashes(ctx context.Context) (commit, root string, err error) {
+	return versioncontrolops.HeadHashes(ctx, s.db)
 }
 
 // GetConflicts returns any merge conflicts in the current state.

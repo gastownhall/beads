@@ -166,7 +166,11 @@ Lane targets that are `sh_test`s run the test binary through a wrapper or
 shard script, which can pass its own `-test.run` and so override
 `--test_filter`. Select the test with a trailing
 `--test_arg='-test.run=^TestExactName$'` instead (the last one wins), with
-`--test_sharding_strategy=disabled` so that it runs once.
+`--test_sharding_strategy=disabled` so that it runs once. The exception is
+`//cmd/bd:bd_managed_local_test`: `cmd/bd/managed_local_shards.txt` is its
+whole selection, and its wrapper (`tools/bazel/go_test_offline.sh
+--shard-manifest`) refuses a `-test.run`; narrow it with
+`--test_arg='-test.skip=...'`.
 
 A test can need more than one of these (a `-short`-gated Dolt test needs the
 Dolt flags and `--test_arg=-test.short=false`); combine them and check the
@@ -262,6 +266,17 @@ test environment adds `dolt` to `BEADS_TEST_SKIP`; set
 and its prerequisites are available. Do not make ordinary tests depend on a
 developer's database, daemon, global Git configuration, or filesystem state.
 
+System-wide files are not isolated. `bd setup claude`, the `bd init` that runs
+it, `bd doctor`'s Claude Integration check and the `bd setup claude` tip read
+Claude Code's managed settings from `/etc/claude-code`
+(`/Library/Application Support/ClaudeCode` on macOS). On a host whose managed
+settings enable or turn off the beads plugin, the tests that run `bd init`,
+`bd setup claude` or `bd doctor` there, such as the
+`cmd/bd/testdata/agent_artifacts/` goldens, see that policy. The
+`cmd/bd/setup` unit tests are unaffected: they read no managed settings, or a
+managed directory of their own. Tests in other packages that check the plugin
+give themselves one with `setup.SetClaudeManagedSettingsDirForTest`.
+
 To skip an optional service explicitly, use the existing skip mechanism:
 
 ```bash
@@ -281,6 +296,13 @@ sit behind that API, selected by `BEADS_TEST_DOLT_SERVER`:
   `go test` and `bazel test` alike (a Bazel target's `env`, or
   `--test_env=BEADS_TEST_DOLT_SERVER=local`); unset means `container`, which
   in a Bazel action without docker keeps the usual skip.
+
+bd refuses a Dolt older than `doltversion.RequiredMin` (2.6.0) outside
+embedded mode, so the server version these backends provide, and the `dolt`
+that proxied-server tests launch (`BEADS_DOLT_BIN`, else `dolt` on `PATH`),
+must be 2.6.0 or newer. With an older `dolt` on `PATH`, every proxied and
+server-mode test fails fast with the `bd requires dolt 2.6.0 or newer`
+refusal. The Bazel lanes use the pinned hermetic Dolt and are not affected.
 
 `BEADS_TEST_REQUIRE_DOLT_CONTAINER=1` turns an unavailable backend into a
 failure (per test and in every `TestMain`) instead of a skip; lanes that
@@ -333,6 +355,18 @@ also passes bazel.yml `cmd-dolt-required: true`, and the PR's
 integration-build test runs once (push, nightly and bazel-farm runs keep
 `bd_test` in the integration lane). Locally:
 `bazel test //cmd/bd:bd_dolt_server_test --config=doltserver-cmd`.
+
+A pinned-shard manifest written with `pin_shards.py --record-measured`
+(`backend/http/served_pinned_shards.txt`) also lists every other test it
+measured, as `rr <TestName>`, so `//scripts:go_test_sources_test` can tell
+the tests added since: they all land in the round-robin shards, and once
+there are more than 2 per round-robin shard the test fails and prints the
+regeneration command (for `http_served_test`, one `pin_shards.py` run over
+the CI test.xml `tools/bazel/fetch_served_testxml.sh` downloads, with
+`--tests-in` keeping only the tests the checkout defines). An rr name that is
+no longer a test is only logged. Every
+pinned-shard target but `corpus_served_test` keeps at least 3 round-robin
+shards.
 
 An ambient `BEADS_DOLT_SERVER_PORT` or `BEADS_DOLT_PORT` is never honored by
 the suites that call `testutil.EnsureDoltContainerForTestMain`. When a test

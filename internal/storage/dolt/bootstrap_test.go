@@ -6,10 +6,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/doltversion"
 	"github.com/steveyegge/beads/internal/githooksenv"
 )
 
@@ -316,5 +318,37 @@ func TestFormatFailedCloneTargetErrorCleanupFailed(t *testing.T) {
 		if !strings.Contains(msg, want) {
 			t.Fatalf("expected %q in error, got:\n%s", want, msg)
 		}
+	}
+}
+
+// TestBootstrapFromRemoteWithDBRefusesDoltBelowRequiredMin pins the binary
+// floor the CLI clone checks: a dolt on PATH whose `dolt version` reports a
+// release below doltversion.RequiredMin is refused before `dolt clone` runs,
+// and nothing is created under the data directory.
+func TestBootstrapFromRemoteWithDBRefusesDoltBelowRequiredMin(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the dolt stub is a POSIX shell script")
+	}
+	binDir := t.TempDir()
+	calls := filepath.Join(t.TempDir(), "calls")
+	stub := "#!/bin/sh\nif [ \"$1\" = version ]; then echo 'dolt version 2.5.1'; exit 0; fi\necho \"$@\" >> '" + calls + "'\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(binDir, "dolt"), []byte(stub), 0o755); err != nil { //nolint:gosec // G306: the stub must be executable
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	doltDir := filepath.Join(t.TempDir(), "dolt")
+
+	_, err := BootstrapFromRemoteWithDB(context.Background(), doltDir, "file:///dev/null", "beads")
+	if !errors.Is(err, doltversion.ErrBelowRequiredMin) {
+		t.Fatalf("BootstrapFromRemoteWithDB = %v, want ErrBelowRequiredMin", err)
+	}
+	if !strings.Contains(err.Error(), "2.5.1") {
+		t.Errorf("refusal = %q, want it to name the version the binary reported", err)
+	}
+	if got, readErr := os.ReadFile(calls); readErr == nil {
+		t.Errorf("the dolt stub ran %q after the refusal, want only `dolt version`", got)
+	}
+	if _, statErr := os.Stat(doltDir); !os.IsNotExist(statErr) {
+		t.Errorf("stat %s = %v, want nothing created before the refusal", doltDir, statErr)
 	}
 }

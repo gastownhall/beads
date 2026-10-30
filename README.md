@@ -282,6 +282,17 @@ the host name that did not resolve. `off` turns off only the
 header timer: a reset read is still retried, and a write's timeout is still
 reported as above.
 
+Whether the server applies bd's external-dependency policy itself (the
+`policy.external_dependencies` capability) is remembered for 5 minutes per
+server URL and pinned project, in `beads/http-policy/` under the user cache
+directory, so `bd ready` does not fetch the server's context before every
+listing just to learn it. `BEADS_HTTP_POLICY_CACHE_TTL` sets that window (a
+duration such as `1m`, a number of seconds, or `off`); a server restarted
+with a different composition is seen once it passes. Claims and closes never
+use the cached answer: they ask the server, since a stale one could skip the
+client-side refusal of externally blocked work. A workspace connected without
+a project pin is not cached.
+
 `bd search`, `bd show --current` and `bd recompute-blocked` work over HTTP
 too, each in its own way. `bd search` asks the server's listing with its text (`q`, behind the `issues.list.search` capability) and
 refuses before dialing against a server that does not advertise it. `bd list
@@ -337,7 +348,8 @@ bd close bd-a1b2 "Fixed"
 
 `BEADS_DIR` tells bd where to put the `.beads/` database directory,
 bypassing git repo discovery. `--stealth` sets `no-git-ops: true` in
-config, disabling all git hook installation and git operations.
+config, disabling bd's own git hook installation and git commands. It
+does not stop Dolt network sync; set `dolt.local-only: true` for that.
 
 This is useful for:
 - **Non-git VCS** (Sapling, Jujutsu, Piper) — no `.git/` directory needed

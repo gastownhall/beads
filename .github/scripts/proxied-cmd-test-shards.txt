@@ -34,10 +34,12 @@
 34 1 TestProxiedServerReadyClaimConcurrent
 34 1 TestProxiedServerServeActivatesTheEventsJournal
 34 1 TestProxiedServerServeRelease
+34 1 TestProxiedServerVersionedHistorySwitchChecksTheLegacyProtosAPourCopies
 
 34 2 TestProxiedServerDepListSingleIDWarnsOnDroppedExternalEdge
 34 2 TestProxiedServerGateList
 34 2 TestProxiedServerList
+34 2 TestProxiedServerRetainIDs
 34 2 TestProxiedServerServeRemoveDependency
 34 2 TestProxiedServerUpdateC
 
@@ -55,6 +57,7 @@
 34 4 TestProxiedServerServeRelatedIssues
 34 4 TestProxiedServerServeSettingsWrites
 34 4 TestProxiedServerShow2
+34 4 TestProxiedServerTopologyCapabilityMatrix
 34 4 TestServerModeServeSkipsPostRunMaintenance
 
 34 5 TestProxiedServerHistoryRemoteRefusalFrontDoorMatrix
@@ -150,6 +153,7 @@
 34 16 TestProxiedServerServeCount
 34 16 TestProxiedServerServeCreate
 34 16 TestProxiedServerUpdateHooks
+34 16 TestServerModeReadRefusesASchemaItsReadsCannotQuery
 
 34 17 TestProxiedServerDep
 34 17 TestProxiedServerMultiStatementSQL
@@ -247,6 +251,7 @@
 34 29 TestProxiedServerGateFrontDoorDirectServerProxyParity
 34 29 TestProxiedServerMolDistill
 34 29 TestProxiedServerReopen
+34 29 TestProxiedServerRetainedTypes
 34 29 TestProxiedServerServeDelete
 34 29 TestProxiedServerState
 

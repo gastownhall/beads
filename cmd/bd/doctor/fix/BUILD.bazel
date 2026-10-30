@@ -4,6 +4,7 @@ load("@rules_shell//shell:sh_test.bzl", "sh_test")
 go_library(
     name = "fix",
     srcs = [
+        "artifact_plan.go",
         "artifacts.go",
         "blocked.go",
         "clone_local_fks.go",
@@ -33,17 +34,22 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//internal/beads",
+        "//internal/config",
         "//internal/configfile",
         "//internal/doltserver",
         "//internal/eventsjournal",
+        "//internal/remedy",
         "//internal/storage",
         "//internal/storage/depid",
         "//internal/storage/dolt",
         "//internal/storage/doltutil",
+        "//internal/storage/embeddeddolt",
         "//internal/storage/issueops",
         "//internal/types",
         "//internal/utils",
         "//internal/versionedhistory",
+        "//internal/workapi",
+        "//issueops",
         "@com_github_burntsushi_toml//:toml",
         "@com_github_go_sql_driver_mysql//:mysql",
         "@in_gopkg_yaml_v3//:yaml_v3",
@@ -53,6 +59,7 @@ go_library(
 go_test(
     name = "fix_test",
     srcs = [
+        "artifact_plan_test.go",
         "artifacts_test.go",
         "clone_local_fks_cgo_test.go",
         "common_test.go",
@@ -61,6 +68,7 @@ go_test(
         "dep_keys_test.go",
         "dependency_sql_test.go",
         "e2e_test.go",
+        "endpoint_test.go",
         "fix_edge_cases_test.go",
         "fix_test.go",
         "fs_test.go",
@@ -89,8 +97,10 @@ go_test(
     data = ["store.go"],
     embed = [":fix"],
     deps = [
+        "//internal/config",
         "//internal/configfile",
         "//internal/doltserver",
+        "//internal/storage/backendnames",
         "//internal/storage/depid",
         "//internal/storage/dolt",
         "//internal/storage/doltutil",

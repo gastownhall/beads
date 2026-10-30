@@ -45,6 +45,18 @@ func TestParticipationGenerationFence(t *testing.T) {
 	t.Run("WispPersistenceMoveBeginsHistory", func(t *testing.T) {
 		conformance.RunParticipationGenerationWispPersistenceMoveBeginsHistory(t, ctx, fixture)
 	})
+	t.Run("DemotedLegacyRowStaysLegacyAcrossPromotion", func(t *testing.T) {
+		conformance.RunParticipationGenerationDemotedLegacyRowStaysLegacyAcrossPromotion(t, ctx, fixture)
+	})
+	t.Run("DemotedLegacyRowStaysLegacyAcrossPersistenceMove", func(t *testing.T) {
+		conformance.RunParticipationGenerationDemotedLegacyRowStaysLegacyAcrossPersistenceMove(t, ctx, fixture)
+	})
+	t.Run("DemotedParticipatingRowKeepsItsHistoryAcrossPromotion", func(t *testing.T) {
+		conformance.RunParticipationGenerationDemotedParticipatingRowKeepsItsHistoryAcrossPromotion(t, ctx, fixture)
+	})
+	t.Run("DemotedParticipatingRowKeepsItsHistoryAcrossPersistenceMove", func(t *testing.T) {
+		conformance.RunParticipationGenerationDemotedParticipatingRowKeepsItsHistoryAcrossPersistenceMove(t, ctx, fixture)
+	})
 	t.Run("WispFlagClearMintsNothing", func(t *testing.T) {
 		conformance.RunParticipationGenerationWispFlagClearMintsNothing(t, ctx, fixture)
 	})
@@ -59,6 +71,9 @@ func TestParticipationGenerationFence(t *testing.T) {
 	})
 	t.Run("LegacyNoHistoryIssueStaysLegacy", func(t *testing.T) {
 		conformance.RunParticipationGenerationLegacyNoHistoryIssueStaysLegacy(t, ctx, fixture)
+	})
+	t.Run("ReadReportsExactlyTheParticipatingRows", func(t *testing.T) {
+		conformance.RunParticipationGenerationReadReportsExactlyTheParticipatingRows(t, ctx, fixture)
 	})
 }
 
@@ -90,6 +105,9 @@ func TestParticipationGenerationFixtureKitIsWired(t *testing.T) {
 	if fixture.MovePersistent == nil {
 		t.Error("ParticipationGenerationFixture.MovePersistent is nil")
 	}
+	if fixture.MoveEphemeral == nil {
+		t.Error("ParticipationGenerationFixture.MoveEphemeral is nil")
+	}
 	if fixture.ClearWispFlag == nil {
 		t.Error("ParticipationGenerationFixture.ClearWispFlag is nil")
 	}
@@ -113,6 +131,9 @@ func TestParticipationGenerationFixtureKitIsWired(t *testing.T) {
 	}
 	if fixture.InWispsTable == nil {
 		t.Error("ParticipationGenerationFixture.InWispsTable is nil")
+	}
+	if fixture.ParticipatingIssueIDs == nil {
+		t.Error("ParticipationGenerationFixture.ParticipatingIssueIDs is nil")
 	}
 }
 
@@ -315,6 +336,14 @@ func uowParticipationGenerationFixtureFor(t *testing.T, provider UnitOfWorkProvi
 				return "move persistent " + id, err
 			})
 		},
+		MoveEphemeral: func(ctx context.Context, id string) error {
+			// ApplyUpdate's persistence step, as MovePersistent's.
+			ephemeral := types.PersistenceModeEphemeral
+			return RunTx(ctx, provider, func(ctx context.Context, uw UnitOfWork) (string, error) {
+				_, err := uw.IssueUseCase().ApplyUpdate(ctx, id, domain.UpdateSpec{Persistence: &ephemeral}, "actor")
+				return "move ephemeral " + id, err
+			})
+		},
 		ClearWispFlag: func(ctx context.Context, id string) error {
 			// UpdateWisp, as the molecule writer routes bd mol squash's flag
 			// clear for a row it found on the wisp plane.
@@ -383,6 +412,13 @@ func uowParticipationGenerationFixtureFor(t *testing.T, provider UnitOfWorkProvi
 				return false, err
 			}
 			return rows > 0, nil
+		},
+		// The unit-of-work route's participation read: one read-only unit of
+		// work and its IssueUseCase, the way cmd/bd's pre-enable scan asks.
+		ParticipatingIssueIDs: func(ctx context.Context, ids []string) (map[string]struct{}, error) {
+			return RunTxRead(ctx, provider, func(ctx context.Context, uw UnitOfWork) (map[string]struct{}, error) {
+				return uw.IssueUseCase().ParticipatingIssueIDs(ctx, ids)
+			})
 		},
 	}
 }

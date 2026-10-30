@@ -23,6 +23,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/workapi"
 	"github.com/steveyegge/beads/issueops"
 )
 
@@ -281,9 +282,10 @@ var configSetCmd = &cobra.Command{
 			return HandleError("%v", err)
 		}
 		// Per-key validation that needs the store rather than the key alone: turning
-		// versioned history on refuses, writing nothing, while any issue holds a value a
-		// version could not record. The store is open here, on whichever route this is.
-		if err := checkVersionedHistoryCanBeEnabled(rootCtx, key, value); err != nil {
+		// versioned history on refuses, writing nothing, while any issue that
+		// participates in history, or any template, holds a value a version could not
+		// record. The store is open here, on whichever route this is.
+		if err := guardVersionedHistorySwitch(rootCtx, key, value); err != nil {
 			return HandleError("%v", err)
 		}
 		result, err := settings.SetSetting(rootCtx, issueops.SetSettingRequest{Key: key, Value: value})
@@ -1218,22 +1220,18 @@ Examples:
 					return HandleError("invalid role %q (valid values: maintainer, contributor)", p.value)
 				}
 			}
-			if p.key == "status.custom" && p.value != "" {
-				if _, err := types.ParseCustomStatusConfig(p.value); err != nil {
-					return HandleError("invalid status.custom value: %v", err)
-				}
-			}
 			if strings.HasPrefix(p.key, "storage-class.") {
 				if err := validateStorageClassConfig(p.key, p.value); err != nil {
 					return HandleError("%v", err)
 				}
 			}
 			// The pre-enable check `bd config set` makes: turning versioned history
-			// on refuses while any issue holds a value a version could not record.
+			// on refuses while any issue that participates in history, or any
+			// template, holds a value a version could not record.
 			// This verb writes the same setting through a loop of its own, so it
 			// makes the check itself, here and before any pair is written: a refusal
 			// stores nothing from the batch.
-			if err := checkVersionedHistoryCanBeEnabled(rootCtx, p.key, p.value); err != nil {
+			if err := guardVersionedHistorySwitch(rootCtx, p.key, p.value); err != nil {
 				return HandleError("%v", err)
 			}
 		}
@@ -1246,6 +1244,16 @@ Examples:
 				gitPairs = append(gitPairs, p)
 			} else {
 				dbPairs = append(dbPairs, p)
+			}
+		}
+
+		// Every database-bound pair passes the settings plane's write
+		// validation before ANY pair is written, on both routes, so the batch
+		// refuses what `bd config set` refuses (a malformed types.retained, an
+		// unprojectable status.custom) and a refusal leaves nothing half-set.
+		for _, p := range dbPairs {
+			if _, err := workapi.ValidateSettingWrite(p.key, p.value); err != nil {
+				return HandleError("%v", err)
 			}
 		}
 

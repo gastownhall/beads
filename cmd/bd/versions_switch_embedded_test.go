@@ -10,7 +10,7 @@ import (
 
 // THE NAME IS LOAD-BEARING: it must keep the TestEmbedded prefix, because
 // .github/scripts/embedded-test-shard.sh selects what runs with
-// `grep -rh '^func TestEmbedded' cmd/bd/*_embedded_test.go` and validates each
+// `grep -rh '^func TestEmbedded' cmd/bd/*_test.go` and validates each
 // manifest entry against `^TestEmbedded[A-Za-z0-9_]+$`. As
 // TestVersionedHistorySwitchRoundTrip_Embedded this test matched neither, so
 // the only job that sets BEADS_TEST_EMBEDDED_DOLT=1 for cmd/bd never selected

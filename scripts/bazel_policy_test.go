@@ -351,6 +351,29 @@ func diffStringSets(want, got []string) (missing, extra []string) {
 	return missing, extra
 }
 
+// rootGoSrcsGlobRe matches the glob of the root package's go_srcs filegroup.
+var rootGoSrcsGlobRe = regexp.MustCompile(`(?s)filegroup\(\s*name\s*=\s*"go_srcs",\s*srcs\s*=\s*glob\((.*?)\),\s*visibility`)
+
+// Bazel's convenience symlinks (bazel-bin, bazel-out, bazel-testlogs,
+// bazel-beads) sit at the repository root, and a glob follows them into the
+// output tree. CI's test step is the first build in a fresh checkout, but in
+// any checkout that has built before (every agent worktree) an unexcluded
+// root glob(["**/*.go"]) puts the output base's .go files into //:go_srcs and
+// so into every test that reads it (//cmd/bd's test targets): their inputs
+// change on every build, they never come from the cache, and loading them
+// takes ~36 s instead of ~3 s (433,026 such files after a few runs, measured
+// 2026-10-19, ga-ylpbsy.24).
+func TestBazelRootGoSrcsSkipsConvenienceSymlinks(t *testing.T) {
+	root := sourceRepoRoot(t)
+	m := rootGoSrcsGlobRe.FindStringSubmatch(stripStarlarkComments(readPolicyFile(t, root, "BUILD.bazel")))
+	if m == nil {
+		t.Fatal("BUILD.bazel has no root go_srcs glob: the block tools/bazel/go_srcs.py writes changed shape; update rootGoSrcsGlobRe")
+	}
+	if !strings.Contains(m[1], `"bazel-*/**"`) {
+		t.Errorf("the root //:go_srcs glob does not exclude \"bazel-*/**\", so it follows Bazel's convenience symlinks into the output tree; fix tools/bazel/go_srcs.py and run `make bazel-sync`")
+	}
+}
+
 // goSrcsTrees are the tools/bazel/go_srcs.py TREES roots. A test that walks
 // one of these trees through its tree_go_srcs sees only the packages listed
 // there, so an unlisted package makes that walk pass vacuously.

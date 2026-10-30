@@ -369,9 +369,9 @@ func (s *localDoltServer) waitReady(port int, done chan struct{}, logStart int64
 		select {
 		case <-done:
 			tail := s.logSince(logStart)
-			// dolt 2.2.0 checks the port itself ("Port N already in use.");
-			// a bind that loses the race after that check reports the
-			// kernel's "address already in use".
+			// dolt checks the port itself ("Port N already in use.", on
+			// 2.2.0, 2.4.1 and 2.5.1); a bind that loses the race after that
+			// check reports the kernel's "address already in use".
 			if strings.Contains(tail, "already in use") {
 				return fmt.Errorf("%w: port %d: %s", errLocalServerBind, port, tail)
 			}

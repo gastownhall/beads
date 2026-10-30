@@ -20,6 +20,19 @@ use std::sync::OnceLock;
 pub const ACTOR_NAME: &str = "CI Bot";
 pub const ACTOR_EMAIL: &str = "ci@beads.test";
 
+/// The `BEADS_TIP_SEED` every step runs with. After a successful human-output
+/// `create`/`show`/`list`/`ready`, bd may append a "💡 Tip:" line chosen by a
+/// probability roll, and unless BEADS_TIP_SEED is set that RNG is seeded from
+/// the clock (cmd/bd/tips.go `initTipRand`), so the same binary prints the tip
+/// on a different step, or not at all, from run to run. For this seed Go's
+/// `math/rand` returns 0.0000159 as its first `Float64()`, so the
+/// highest-priority eligible tip always wins its roll. Which tip prints, and on
+/// which step, then depends only on eligibility, priority and the tip's
+/// frequency gate, so any change to which tip prints, on which step, or to its
+/// text still diverges instead of being normalized away. (A tip only prints
+/// where the host makes it eligible; see tests/oracle-a/README.md.)
+pub const TIP_SEED: &str = "1214";
+
 /// A scenario: a prefix to `bd init` with, and an ordered list of argv steps
 /// (each run after init in the same workspace). A scenario whose first step is
 /// its own `init` owns initialization: it starts in an empty workspace and
@@ -222,12 +235,14 @@ pub fn run_scenario(bin: &Path, sc: &Scenario) -> std::io::Result<Trace> {
         // run and on any host. (BEADS_TEST_MODE=1 is retained deliberately; its
         // store-construction delta — auto-server decisions off, port rewiring —
         // is a documented ungated gap: this rig does not cover mode/topology
-        // construction paths. See tests/oracle-a/README.md.)
+        // construction paths. See tests/oracle-a/README.md.) BEADS_TIP_SEED pins
+        // bd's tip roll; see TIP_SEED.
         let mut cmd = Command::new(bin);
         cmd.args(args)
             .current_dir(work.path())
             .env_clear()
-            .env("BEADS_TEST_MODE", "1");
+            .env("BEADS_TEST_MODE", "1")
+            .env("BEADS_TIP_SEED", TIP_SEED);
         for key in ["PATH", "HOME", "TMPDIR"] {
             if let Ok(val) = std::env::var(key) {
                 cmd.env(key, val);
@@ -420,6 +435,13 @@ pub fn diff(reference: &Trace, candidate: &Trace, ordered: bool) -> Vec<Divergen
 mod tests {
     use super::*;
 
+    /// Serializes the tests that spawn processes through `run_scenario`. One of
+    /// them writes a stub bd with `std::fs::write` and then execs it; if another
+    /// test forks while that write fd is still open, the child inherits the fd
+    /// until it execs, and running the stub fails with ETXTBSY ("Text file
+    /// busy", rust-lang/rust#114554). Take this lock first in every such test.
+    static SPAWN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn ordered_comparison_bites_on_permutations_multiset_does_not() {
         // A reordered array is EQUAL as a multiset but UNEQUAL as a sequence — this is
@@ -538,6 +560,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn run_scenario_collapses_the_workspace_in_both_step_streams() {
+        let _spawn = SPAWN.lock().unwrap_or_else(|e| e.into_inner());
         // A stub bd that echoes its cwd on stdout and its symlink-resolved form
         // on stderr, like the "Found existing Dolt database" error: both must
         // reach the trace as <WORKSPACE>, so the run's random tempdir never does.
@@ -659,5 +682,23 @@ mod tests {
         assert!(!stdout_equiv(r#"[{"id":"a"}]"#, r#"[{"id":"b"}]"#, false));
         // and multiset cardinality IS caught
         assert!(!stdout_equiv(r#"[{"id":"a"},{"id":"a"}]"#, r#"[{"id":"a"}]"#, false));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_scenario_pins_the_tip_seed_for_every_step() {
+        let _spawn = SPAWN.lock().unwrap_or_else(|e| e.into_inner());
+        // printenv stands in for bd: each step prints BEADS_TIP_SEED from the
+        // environment the harness hands every bd step (the harness's own
+        // `init -p t --quiet` just exits non-zero, which run_scenario ignores).
+        // Unset, real bd seeds its tip roll from the clock, so the same binary
+        // prints a "💡 Tip:" line on some runs and not on others.
+        let sc = Scenario::new("tip_seed", "t", &[&["BEADS_TIP_SEED"], &["BEADS_TIP_SEED"]]);
+        let trace = run_scenario(Path::new("printenv"), &sc).expect("run printenv");
+        assert_eq!(trace.steps.len(), 2);
+        let want = format!("{TIP_SEED}\n");
+        for step in &trace.steps {
+            assert_eq!((step.exit, step.stdout.as_str()), (0, want.as_str()));
+        }
     }
 }

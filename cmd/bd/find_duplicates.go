@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"runtime"
 	"sort"
 	"strings"
 	"unicode"
@@ -17,6 +18,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/telemetry"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -228,16 +230,35 @@ func reportFindDuplicates(ctx context.Context, issues []*types.Issue, method str
 		ui.RenderWarn("🔍"), len(pairs), threshold*100)
 
 	for i, p := range pairs {
-		pct := p.Similarity * 100
-		fmt.Printf("%s Pair %d (%.0f%% similar):\n", ui.RenderAccent("━━"), i+1, pct)
-		fmt.Printf("  %s %s\n", ui.RenderPass(p.IssueA.ID), p.IssueA.Title)
-		fmt.Printf("  %s %s\n", ui.RenderPass(p.IssueB.ID), p.IssueB.Title)
-		if p.Reason != "" {
-			fmt.Printf("  %s %s\n", ui.RenderAccent("Reason:"), p.Reason)
-		}
-		fmt.Printf("  %s bd show %s %s\n\n", ui.RenderAccent("Compare:"), p.IssueA.ID, p.IssueB.ID)
+		printDuplicatePair(i+1, p)
 	}
 	return nil
+}
+
+// printDuplicatePair prints the nth pair bd find-duplicates reports, ending
+// with the bd show command that compares the two issues. The IDs are read
+// from the store, which holds a collaborator's issues after bd dolt pull:
+// each goes into the bd show command as one shell word, or as a placeholder
+// named escaped after it (remedy.CommandArg), and is named on the lines above
+// the command by remedy.PrintedWord, so no part of one runs when the Compare
+// line is pasted and none can redraw it. The titles, and the reason the
+// model gives for an AI-found pair, which it writes from the issues' titles
+// and descriptions, are prose, which bd prints as it is in every listing:
+// they are spelled by remedy.PrintedValue, as printedIssueID's titles are, so
+// no line break or terminal control in them can split or redraw the Compare
+// line, and shell syntax in them is printed as it is. The Compare line is
+// the one to paste.
+func printDuplicatePair(n int, p duplicatePair) {
+	pct := p.Similarity * 100
+	fmt.Printf("%s Pair %d (%.0f%% similar):\n", ui.RenderAccent("━━"), n, pct)
+	fmt.Printf("  %s %s\n", ui.RenderPass(remedy.PrintedWord(p.IssueA.ID)), remedy.PrintedValue(p.IssueA.Title))
+	fmt.Printf("  %s %s\n", ui.RenderPass(remedy.PrintedWord(p.IssueB.ID)), remedy.PrintedValue(p.IssueB.Title))
+	if p.Reason != "" {
+		fmt.Printf("  %s %s\n", ui.RenderAccent("Reason:"), remedy.PrintedValue(p.Reason))
+	}
+	idA, noteA := remedy.CommandArg(runtime.GOOS, p.IssueA.ID, "<issue-a-id>")
+	idB, noteB := remedy.CommandArg(runtime.GOOS, p.IssueB.ID, "<issue-b-id>")
+	fmt.Printf("  %s bd show %s %s%s%s\n\n", ui.RenderAccent("Compare:"), idA, idB, noteA, noteB)
 }
 
 // tokenize splits text into lowercase word tokens, removing punctuation.

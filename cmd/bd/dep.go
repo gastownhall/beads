@@ -9,10 +9,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -168,8 +170,17 @@ func refuseMalformedDepTarget(sourceID, dependsOnArg string) error {
 	if types.DependencyType(depType) == types.DepBlocks {
 		first, second = target, sourceID
 	}
-	return fmt.Errorf("invalid dependency target %q: that is `bd create --deps` <type>:<id> syntax, not a target ID; use: bd dep add %s %s --type %s",
-		dependsOnArg, first, second, depType)
+	// On the direct route the source is the store's ID a partial argument
+	// resolved to, so each ID goes into the bd dep add command as one shell
+	// word, or as a placeholder named escaped after it (remedy.CommandArg).
+	firstArg, firstNote := remedy.CommandArg(runtime.GOOS, first, "<issue-id>")
+	secondArg, secondNote := remedy.CommandArg(runtime.GOOS, second, "<target-id>")
+	// depType passed validateDependencyType, so it is a well-known type
+	// spelling and prints bare; it goes through the same printer so the
+	// command holds no word that does not.
+	typeArg, typeNote := remedy.CommandArg(runtime.GOOS, depType, "<type>")
+	return fmt.Errorf("invalid dependency target %q: that is `bd create --deps` <type>:<id> syntax, not a target ID; use: bd dep add %s %s --type %s%s%s%s",
+		dependsOnArg, firstArg, secondArg, typeArg, firstNote, secondNote, typeNote)
 }
 
 // resolveUnresolvedDepTarget decides what to do when a dep add target could
@@ -964,11 +975,17 @@ func warnDroppedDepEdges(ctx context.Context, reader issueops.EdgeReader, anchor
 	if len(dropped) == 0 {
 		return
 	}
-	fmt.Fprintf(os.Stderr, "warning: %s has %d additional dependency edge(s) whose target has no row in this database (cross-repo/external) and are not shown above:\n", anchorID, len(dropped))
+	// anchorID is the store's (a partial-id argument resolves to it), and the
+	// edges are the store's rows: each is named as printedIssueID spells it,
+	// so none can redraw the bd dep list command below, which takes anchorID
+	// as one shell word, or as a placeholder named escaped after it
+	// (remedy.CommandArg).
+	fmt.Fprintf(os.Stderr, "warning: %s has %d additional dependency edge(s) whose target has no row in this database (cross-repo/external) and are not shown above:\n", printedIssueID(anchorID), len(dropped))
 	for _, dep := range dropped {
-		fmt.Fprintf(os.Stderr, "  %s via %s\n", dep.DependsOnID, dep.Type)
+		fmt.Fprintf(os.Stderr, "  %s via %s\n", printedIssueID(dep.DependsOnID), remedy.PrintedValue(string(dep.Type)))
 	}
-	fmt.Fprintf(os.Stderr, "For raw edge records, run: bd dep list %s %s\n", anchorID, anchorID)
+	arg, note := remedy.CommandArg(runtime.GOOS, anchorID, "<issue-id>")
+	fmt.Fprintf(os.Stderr, "For raw edge records, run: bd dep list %s %s%s\n", arg, arg, note)
 }
 
 var depListCmd = &cobra.Command{
@@ -1018,7 +1035,7 @@ Examples:
 			routedResult, err := resolveAndGetIssueWithRouting(ctx, store, arg)
 			if err != nil {
 				if batchMode {
-					fmt.Fprintf(os.Stderr, "warning: resolving %s: %v (skipped)\n", arg, err)
+					fmt.Fprintf(os.Stderr, "warning: resolving %s: %s (skipped)\n", arg, remedy.PrintedMessage(err))
 					continue
 				}
 				return HandleErrorRespectJSON("resolving %s: %v", arg, err)

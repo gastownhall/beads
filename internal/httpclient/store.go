@@ -46,6 +46,7 @@ type Store struct {
 	target Target
 	wire   WireClient
 	local  *localMetadata
+	policy *policyCache
 
 	// mu guards the lazily fetched handshake snapshot. D6 makes the context
 	// fetch lazy (first post-baseline dispatch) and cached for the process, so
@@ -97,7 +98,19 @@ var _ storage.RemoteBackendStore = (*Store)(nil)
 // specific true/false meaning but would still hide a transport failure behind
 // a policy decision) or to "yes, so skip" (which would be the actual bug this
 // interface exists to prevent — the policy must never be silently skipped).
+//
+// A store opened from a workspace answers a read from the policy cache
+// (policy_cache.go) while it is fresh, so a short-lived command whose own
+// requests need no handshake does not dial one just for this. A claim or a
+// close (storage.WithLivePolicyProbe) always asks the server: it handshakes
+// anyway, and a stale answer must not stand down its client-side refusal. A
+// handshake this process already holds wins over the cache and refreshes it.
 func (s *Store) ServerEnforcesExternalDependencyPolicy(ctx context.Context) (bool, error) {
+	if s.cachedSnapshot() == nil && !storage.LivePolicyProbe(ctx) {
+		if enforced, ok := s.policy.load(); ok {
+			return enforced, nil
+		}
+	}
 	snap, err := s.snapshot(ctx)
 	if err != nil {
 		return false, err
@@ -105,7 +118,9 @@ func (s *Store) ServerEnforcesExternalDependencyPolicy(ctx context.Context) (boo
 	if snap == nil {
 		return false, nil
 	}
-	return slices.Contains(snap.Capabilities, wire.CapExternalDependencies), nil
+	enforced := slices.Contains(snap.Capabilities, wire.CapExternalDependencies)
+	s.policy.store(enforced)
+	return enforced, nil
 }
 
 var _ storage.ExternalDependencyPolicyProber = (*Store)(nil)
@@ -187,6 +202,7 @@ func open(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
 	}
 	s := New(target, wire, nil)
 	s.local = newLocalMetadata(beadsDir)
+	s.policy = newPolicyCache(target)
 	return s, nil
 }
 

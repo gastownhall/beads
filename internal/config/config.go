@@ -72,6 +72,33 @@ func ignoredConfigKey(path string) string {
 // Initialize sets up the viper configuration singleton
 // Should be called once at application startup
 func Initialize() error {
+	return initialize(os.Getenv("BEADS_DIR"))
+}
+
+// WithBeadsDir runs fn with the configuration Initialize loads when BEADS_DIR
+// is beadsDir, which is how the bd CLI loads it for every command in a
+// workspace it found, and then puts the loaded configuration back. A command
+// about to create beadsDir uses it to read what every later command there
+// will read: beadsDir's own config.yaml over the user config files, with the
+// BD_* variables on top, and never an enclosing workspace's config.yaml that
+// the directory walk loaded at startup. The process environment is not
+// changed.
+//
+// fn runs even when loading fails, with what did load, as a command runs
+// after a failed Initialize; the error is returned. Like Initialize, it
+// replaces the process-wide configuration while fn runs, so nothing may read
+// configuration concurrently.
+func WithBeadsDir(beadsDir string, fn func()) error {
+	saved, savedOverrides := v, overriddenKeys
+	defer func() { v, overriddenKeys = saved, savedOverrides }()
+	overriddenKeys = map[string]bool{}
+	err := initialize(beadsDir)
+	fn()
+	return err
+}
+
+// initialize is Initialize for a process whose BEADS_DIR is beadsDirSetting.
+func initialize(beadsDirSetting string) error {
 	v = viper.New()
 
 	// Set config type to yaml (we only load config.yaml, not config.json)
@@ -115,7 +142,7 @@ func Initialize() error {
 	appendExistingUserConfig(userConfigPaths.documented)
 
 	// 1. Project: walk up from CWD to find .beads/config.yaml
-	beadsDirEnv := strings.TrimSpace(os.Getenv("BEADS_DIR"))
+	beadsDirEnv := strings.TrimSpace(beadsDirSetting)
 	beadsEnvConfigPath := ""
 	if beadsDirEnv != "" {
 		beadsEnvConfigPath = filepath.Clean(filepath.Join(beadsDirEnv, "config.yaml"))
@@ -206,7 +233,7 @@ func Initialize() error {
 	}
 
 	// 0. BEADS_DIR: highest priority
-	if beadsDir := os.Getenv("BEADS_DIR"); beadsDir != "" {
+	if beadsDir := beadsDirSetting; beadsDir != "" {
 		p := filepath.Join(beadsDir, "config.yaml")
 		// Honor the test ignore set here too, and skip primaryConfigPath along with
 		// the merge so ConfigFileUsed does not name the ignored repo config. This
@@ -1158,6 +1185,28 @@ func GetCustomTypesFromYAML() []string {
 // Returns nil if no infra types are configured in config.yaml (caller should use defaults).
 func GetInfraTypesFromYAML() []string {
 	return getConfigList("types.infra")
+}
+
+// GetRetainedTypesFromYAML reports a types.retained key in config.yaml (or
+// BD_TYPES_RETAINED). The setting is read from the workspace database ONLY —
+// a sweep never consults this layer, because the rule must be the same for
+// every client of a shared workspace — so the one use of this value is to warn
+// that it is ignored. Returns nil if the key is absent.
+func GetRetainedTypesFromYAML() []string {
+	return getConfigList("types.retained")
+}
+
+// RetainedTypesYAMLWarning is the warning for a types.retained key in
+// config.yaml (or BD_TYPES_RETAINED), or "" when there is none. Every command
+// that honors the setting prints it before it selects: the key here would
+// otherwise look like protection while protecting nothing.
+func RetainedTypesYAMLWarning() string {
+	names := GetRetainedTypesFromYAML()
+	if len(names) == 0 {
+		return ""
+	}
+	list := strings.Join(names, ",")
+	return fmt.Sprintf("types.retained in config.yaml (%s) is ignored: it is read from the workspace database only; set it with `bd config set types.retained %s`", list, list)
 }
 
 // GetCustomStatusesFromYAML retrieves custom statuses from config.yaml.

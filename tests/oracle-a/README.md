@@ -137,10 +137,24 @@ the loop — every scenario uses embedded Dolt in its own tempdir.
   gate. No scenario sets one today; use another key name in any that would.
 - **The scenario environment is scrubbed, and `BEADS_TEST_MODE=1` is ungated.**
   Scenarios run with an explicit env whitelist (`PATH`/`HOME`/`TMPDIR` +
-  `BEADS_TEST_MODE=1`) rather than the inherited host env, so a green certifies the
-  *same* configuration every run. But `BEADS_TEST_MODE=1` itself changes store
-  construction (auto-server decisions off, port rewiring), so this rig does NOT
-  cover the mode/topology construction paths — do not cite Oracle A green for those.
+  `BEADS_TEST_MODE=1` + `BEADS_TIP_SEED`) rather than the inherited host env, so a
+  green certifies the *same* configuration every run. But `BEADS_TEST_MODE=1`
+  itself changes store construction (auto-server decisions off, port rewiring), so
+  this rig does NOT cover the mode/topology construction paths — do not cite Oracle
+  A green for those.
+- **Tips are pinned, not erased, and depend on the host.** Human output may end
+  with a `💡 Tip:` line picked by a probability roll. `BEADS_TIP_SEED` (`TIP_SEED`
+  in `harness/src/differential.rs`) pins that roll so the highest-priority eligible
+  tip always wins: its text, the step it prints on, and its frequency gate are
+  compared like any other output, but a tip's probability value is not gated.
+  Whether the `claude_setup` tip is eligible depends on the host (`~/.claude`
+  present, and no beads plugin enabled or `bd prime` hook in the settings
+  Claude Code loads in the scenario directory: the host's managed settings,
+  `~/.claude/settings.json`, and the `.claude/` files of the directory and of
+  its repository root). Both binaries
+  run on the same host, so this is symmetric, but on a host where no tip is
+  eligible (a CI runner, or a beads developer with the plugin installed) none
+  prints and tip changes go unobserved, including a tip leaking into `--json`.
 - **This is a same-backend gate.** Oracle A is same-backend (embedded Dolt)
   before-vs-after. It is a refactor-safety net, not a cross-backend conformance run.
 

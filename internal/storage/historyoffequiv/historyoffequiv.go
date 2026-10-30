@@ -156,7 +156,9 @@ var schemaAdditions = []schemaAddition{{
 		// A create with history off leaves it NULL, indistinguishable from
 		// a legacy row (design §16.2b, FR-7).
 		"issues": {"participation_generation"},
-		// Migration 0070 mirrors it, inert, on the wisps table (FR-8).
+		// Migration 0070 mirrors it on the wisps table, where only a
+		// demotion made with history on writes it, to carry the row's
+		// participation through the wisps plane (carryParticipationInTx).
 		"wisps": {"participation_generation"},
 		// Migration 0071 (#6661).
 		"issue_versions": {"removed_restriction"},
@@ -168,6 +170,34 @@ var schemaAdditions = []schemaAddition{{
 	Migrations: map[string][]string{
 		"schema_migrations":         {"70", "71", "72"},
 		"ignored_schema_migrations": {"28"},
+	},
+}, {
+	By: "arrival_seq, the events journal's create stamp (BD-5)",
+	Columns: map[string][]string{
+		// Migration 0073: carried on the replicated plane for shape only and
+		// never written there.
+		"issues": {"arrival_seq"},
+		// Migration 0073 and ignored/0029: written only by the events
+		// journal's create seam (issueops.stampArrivalSeqInTx), which runs
+		// only while the workspace journals, so it stays NULL here.
+		"wisps": {"arrival_seq"},
+	},
+	// 0073 on the main series, and ignored/0029 (its wisps twin, with the
+	// unique index and the seq-counter raise) on the dolt_ignored series.
+	Migrations: map[string][]string{
+		"schema_migrations":         {"73"},
+		"ignored_schema_migrations": {"29"},
+	},
+}, {
+	By: "the id tombstone tables of retaining retention sweeps (BD-6)",
+	// Migration 0074 creates both; ignored/0030 creates the clone-local one
+	// on a fresh clone. Only a retaining sweep (SweepRequest.RetainIDs)
+	// writes them, and the scenario runs none, so both stay empty here.
+	Tables: []string{"id_tombstones", "wisp_id_tombstones"},
+	// 0074 on the main series, and ignored/0030 on the dolt_ignored series.
+	Migrations: map[string][]string{
+		"schema_migrations":         {"74"},
+		"ignored_schema_migrations": {"30"},
 	},
 }}
 

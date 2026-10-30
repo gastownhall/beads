@@ -157,7 +157,8 @@ type BatchCreator interface {
 	// outcome to put one in, because an item that refused took the batch down
 	// with it. The refusals are the ones Lifecycle.Create raises, in the same
 	// typed vocabulary — ErrValidation for a request or content rule,
-	// ErrAlreadyExists for an occupied explicit id, ErrValidation wrapping
+	// ErrAlreadyExists for an occupied explicit id, *IdempotencyExpiredError
+	// for an explicit id a retaining sweep retired, ErrValidation wrapping
 	// ErrNotFound for an edge whose target is not there — so a caller
 	// classifies them with errors.Is rather than by reading prose.
 	//

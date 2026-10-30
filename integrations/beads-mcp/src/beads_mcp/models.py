@@ -202,6 +202,7 @@ class UpdateIssueParams(BaseModel):
     acceptance_criteria: str | None = None
     notes: str | None = None
     external_ref: str | None = None
+    defer_until: str | None = None  # "" clears it, as `bd update --defer ""` does
 
 
 class ClaimIssueParams(BaseModel):

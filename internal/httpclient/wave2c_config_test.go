@@ -38,9 +38,15 @@ import (
 // for the same reason. Driving both bodies over one table is what makes them
 // agree case by case rather than in prose.
 //
-// THE VALUE IS PART OF THE TABLE, not only the key, because one of the three
-// rules is about a value: `status.custom` is projected into a lookup table reads
-// consult first, so a value that cannot be projected must not become a row.
+// THE VALUE IS PART OF THE TABLE, not only the key, because two of the four
+// rules are about a value: `status.custom` is projected into a lookup table reads
+// consult first, so a value that cannot be projected must not become a row; and
+// `types.retained` is read by every sweep, so a value the type-list parse would
+// read as other than the list written must not become one either. That rule
+// calls the shared validator through its storageops delegate rather than
+// restating it; its rows still put a refused and an accepted value on each of
+// the validator's rules, so a client that stopped calling it, or called it on
+// the wrong key, fails a row.
 func TestSettingWriteValidationMatchesTheSharedValidator(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -57,6 +63,23 @@ func TestSettingWriteValidationMatchesTheSharedValidator(t *testing.T) {
 		{"an empty custom status", issueops.SettingKeyStatusCustom, ""},
 		{"a custom type list", issueops.SettingKeyTypesCustom, "not:a:status"},
 		{"a key that only LOOKS protected", "issue_prefix_backup", "bd"},
+		{"an empty retained value", issueops.SettingKeyTypesRetained, ""},
+		{"a blank retained value", issueops.SettingKeyTypesRetained, "  "},
+		{"an empty retained array", issueops.SettingKeyTypesRetained, "[]"},
+		{"a retained built-in", issueops.SettingKeyTypesRetained, "chore"},
+		{"a retained JSON array of built-ins", issueops.SettingKeyTypesRetained, `["chore","task"]`},
+		{"a retained comma list of custom types", issueops.SettingKeyTypesRetained, "op, fact"},
+		{"a retained mixed-case custom type", issueops.SettingKeyTypesRetained, "OpRecord"},
+		{"a retained built-in in another case", issueops.SettingKeyTypesRetained, "Chore"},
+		{"a retained alias", issueops.SettingKeyTypesRetained, "feat"},
+		{"a retained null", issueops.SettingKeyTypesRetained, "null"},
+		{"a retained lone comma", issueops.SettingKeyTypesRetained, ","},
+		{"a retained empty name", issueops.SettingKeyTypesRetained, `[""]`},
+		{"a retained unclosed bracket", issueops.SettingKeyTypesRetained, "["},
+		{"a retained bracketed list that is not JSON", issueops.SettingKeyTypesRetained, "[op]"},
+		{"a retained array of numbers", issueops.SettingKeyTypesRetained, "[1]"},
+		{"a retained name with a space", issueops.SettingKeyTypesRetained, "op fact"},
+		{"a retained quoted name", issueops.SettingKeyTypesRetained, `"op"`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			mine := validateSettingWrite(tc.key, tc.value)
@@ -114,6 +137,10 @@ func TestConfigWritesRefuseBeforeTheDial(t *testing.T) {
 		}},
 		{"set of an unparseable custom status", func(c issueops.WorkspaceConfig) error {
 			_, err := c.SetSetting(context.Background(), issueops.SetSettingRequest{Key: issueops.SettingKeyStatusCustom, Value: "open"})
+			return err
+		}},
+		{"set of a retained value that names no type", func(c issueops.WorkspaceConfig) error {
+			_, err := c.SetSetting(context.Background(), issueops.SetSettingRequest{Key: issueops.SettingKeyTypesRetained, Value: "null"})
 			return err
 		}},
 		{"unset with an empty key", func(c issueops.WorkspaceConfig) error {
@@ -272,7 +299,7 @@ func settingsOver(t *testing.T, w WireClient) issueops.WorkspaceConfig {
 // a client that refused them locally would be a second copy free to drift, and
 // would refuse tomorrow's server a request it would have taken.
 //
-// The three rules this client DOES restate are refused before the dial by the
+// The four rules this client DOES apply are refused before the dial by the
 // case above, so the two together say exactly where the line is.
 func TestConfigWriteBoundsAreNotRestatedClientSide(t *testing.T) {
 	for _, tc := range []struct {

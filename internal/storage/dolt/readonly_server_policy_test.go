@@ -173,6 +173,38 @@ func TestPersistResolvedPortFileHonorsDisableAutoStart(t *testing.T) {
 	}
 }
 
+// TestPersistResolvedPortFileSkipsIPv6Loopback pins that an open of a server
+// at the IPv6 loopback, in either spelling, records no port file. The file
+// names the port of bd's own server on 127.0.0.1, and doltserver.DefaultConfig
+// ignores it for this host; written here, it would name the [::1] server's
+// port to whatever next dials 127.0.0.1.
+func TestPersistResolvedPortFileSkipsIPv6Loopback(t *testing.T) {
+	originalEnsure := ensureResolvedPortFile
+	t.Cleanup(func() { ensureResolvedPortFile = originalEnsure })
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	t.Setenv("BEADS_DOLT_PORT", "")
+
+	calls := 0
+	ensureResolvedPortFile = func(string, int) error {
+		calls++
+		return nil
+	}
+	for _, host := range []string{"::1", "[::1]"} {
+		if err := persistResolvedPortFile(&Config{ServerHost: host, ServerPort: 3307}, t.TempDir()); err != nil {
+			t.Fatalf("persist for %q: %v", host, err)
+		}
+		if calls != 0 {
+			t.Fatalf("an open of the server at %q wrote the port file", host)
+		}
+	}
+	if err := persistResolvedPortFile(&Config{ServerHost: "127.0.0.1", ServerPort: 3307}, t.TempDir()); err != nil {
+		t.Fatalf("persist for 127.0.0.1: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("an open of the server at 127.0.0.1 wrote the port file %d time(s), want once", calls)
+	}
+}
+
 func TestServerOpenCanAutoStartHonorsDisableAutoStart(t *testing.T) {
 	strictReadOnly := &Config{DisableAutoStart: true, AutoStart: true, Path: "/unused", ServerHost: "127.0.0.1"}
 	if serverOpenCanAutoStart(strictReadOnly) {
