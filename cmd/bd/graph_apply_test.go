@@ -1658,6 +1658,7 @@ func TestGraphApplyNodeIssueStampsCreatedAtWithStatusTimestamps(t *testing.T) {
 		stamp string
 	}{
 		{name: "closed", node: GraphApplyNode{Key: "n", Title: "N", Status: string(types.StatusClosed)}, stamp: "closed_at"},
+		{name: "in_progress", node: GraphApplyNode{Key: "n", Title: "N", Status: string(types.StatusInProgress)}, stamp: "started_at"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
