@@ -91,3 +91,124 @@ func TestEnginePullOverlapImportsIssueMissedBeforeLastSync(t *testing.T) {
 		t.Fatalf("stored last_sync = %q, want it unchanged at %s", got, overlapLastSync.Format(time.RFC3339))
 	}
 }
+
+// overlapTitleEqual is a GitHub-style ContentEqual: it compares only the
+// fields a push carries, so a remote copy without the local assignee still
+// counts as holding what the push sent.
+func overlapTitleEqual(local *types.Issue, remote *TrackerIssue) bool {
+	return local.Title == remote.Title && local.Description == remote.Description
+}
+
+// TestEnginePullOverlapPullsOnlyRemoteChanges pins that the overlap window
+// re-fetches the previous sync's own pushes without letting them rewrite
+// local issues: a linked issue is written only when the remote changed what a
+// push carries, and never by a remote copy older than the local issue.
+func TestEnginePullOverlapPullsOnlyRemoteChanges(t *testing.T) {
+	const ref = "https://test.test/EXT-1"
+	for _, test := range []struct {
+		name          string
+		hooks         bool
+		push          bool
+		localTitle    string
+		localUpdated  time.Duration // relative to last_sync
+		remoteTitle   string
+		remoteUpdated time.Duration // relative to last_sync
+		wantUpdated   int
+		wantTitle     string
+		wantAssignee  string
+		wantPushed    string // title pushed to EXT-1, "" for none
+	}{
+		{
+			// Echo of the previous push: GitHub never pushes assignee, so
+			// the pulled conversion clears it, yet the remote holds what the
+			// push sent.
+			name: "echo", hooks: true,
+			localTitle: "same title", localUpdated: -10 * time.Minute,
+			remoteTitle: "same title", remoteUpdated: -30 * time.Second,
+			wantTitle: "same title", wantAssignee: "alice",
+		},
+		{
+			name: "remote_edit", hooks: true,
+			localTitle: "same title", localUpdated: -10 * time.Minute,
+			remoteTitle: "renamed remotely", remoteUpdated: -30 * time.Second,
+			wantUpdated: 1, wantTitle: "renamed remotely",
+		},
+		{
+			name:       "no_hook",
+			localTitle: "same title", localUpdated: -10 * time.Minute,
+			remoteTitle: "renamed remotely", remoteUpdated: -30 * time.Second,
+			wantUpdated: 1, wantTitle: "renamed remotely",
+		},
+		{
+			// Pushed at T-3m, edited locally at T-60s, then a sync that did
+			// not push it advanced last_sync past the edit. The overlap
+			// re-fetches the older push; it must not replace the edit.
+			name: "unpushed_local_edit", hooks: true, push: true,
+			localTitle: "edited locally", localUpdated: -60 * time.Second,
+			remoteTitle: "pushed title", remoteUpdated: -3 * time.Minute,
+			wantTitle: "edited locally", wantAssignee: "alice", wantPushed: "edited locally",
+		},
+		{
+			name: "local_edit_after_T", hooks: true, push: true,
+			localTitle: "edited locally", localUpdated: 10 * time.Second,
+			remoteTitle: "pushed title", remoteUpdated: -30 * time.Second,
+			wantTitle: "edited locally", wantAssignee: "alice", wantPushed: "edited locally",
+		},
+		{
+			// A row at last_sync was returned before the overlap too, so it
+			// still goes through pullIssueEqual as it always has.
+			name: "at_T", hooks: true,
+			localTitle: "same title", localUpdated: -10 * time.Minute,
+			remoteTitle: "same title", remoteUpdated: 0,
+			wantUpdated: 1, wantTitle: "same title",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			linkedRef := ref
+			local := &types.Issue{
+				ID:          "bd-1",
+				Title:       test.localTitle,
+				Description: "body",
+				Assignee:    "alice",
+				Status:      types.StatusOpen,
+				Priority:    2,
+				IssueType:   types.TypeTask,
+				ExternalRef: &linkedRef,
+				CreatedAt:   overlapLastSync.Add(-time.Hour),
+				UpdatedAt:   overlapLastSync.Add(test.localUpdated),
+			}
+			store := newOverlapStore(local)
+			store.previousRefs[local.ID] = ref
+			mock, _ := newOverlapTracker(TrackerIssue{
+				ID:          "EXT-1",
+				Identifier:  "EXT-1",
+				Title:       test.remoteTitle,
+				Description: "body",
+				UpdatedAt:   overlapLastSync.Add(test.remoteUpdated),
+			})
+			engine := NewEngine(mock, store, "sync")
+			if test.hooks {
+				engine.PushHooks = &PushHooks{ContentEqual: overlapTitleEqual}
+			}
+
+			result, err := engine.Sync(ctx, SyncOptions{Pull: true, Push: test.push})
+			if err != nil {
+				t.Fatalf("Sync: %v", err)
+			}
+			if result.PullStats.Updated != test.wantUpdated || store.commits != test.wantUpdated {
+				t.Fatalf("PullStats = %+v, commits = %d, want %d update(s)", result.PullStats, store.commits, test.wantUpdated)
+			}
+			if local.Title != test.wantTitle || local.Assignee != test.wantAssignee {
+				t.Fatalf("local title/assignee = %q/%q, want %q/%q", local.Title, local.Assignee, test.wantTitle, test.wantAssignee)
+			}
+			pushed := ""
+			if issue := mock.updated["EXT-1"]; issue != nil {
+				pushed = issue.Title
+			}
+			if pushed != test.wantPushed || len(mock.created) != 0 {
+				t.Fatalf("pushed title = %q (creates %d), want %q", pushed, len(mock.created), test.wantPushed)
+			}
+		})
+	}
+}
