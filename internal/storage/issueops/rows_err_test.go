@@ -28,6 +28,33 @@ func newRowsErrMock(t *testing.T) (*sql.DB, sqlmock.Sqlmock) {
 	return db, mock
 }
 
+// beginRowsErrTx opens the transaction the *sql.Tx readers take.
+func beginRowsErrTx(t *testing.T, db *sql.DB, mock sqlmock.Sqlmock) *sql.Tx {
+	t.Helper()
+	mock.ExpectBegin()
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	t.Cleanup(func() { _ = tx.Rollback() })
+	return tx
+}
+
+// expectNotWisp answers IsActiveWispInTx's probe with no row, so the
+// molecule readers route to issues/dependencies.
+func expectNotWisp(mock sqlmock.Sqlmock) {
+	mock.ExpectQuery(`SELECT 1 FROM wisps WHERE id = \?`).
+		WillReturnRows(sqlmock.NewRows([]string{"1"}))
+}
+
+func childIDRows(ids ...string) *sqlmock.Rows {
+	rows := sqlmock.NewRows([]string{"issue_id"})
+	for _, id := range ids {
+		rows.AddRow(id)
+	}
+	return rows
+}
+
 func assertMidIterationFailure(t *testing.T, mock sqlmock.Sqlmock, err error) {
 	t.Helper()
 	if !errors.Is(err, errMidIteration) {
@@ -44,6 +71,7 @@ const (
 	epicWispDepsQuery    = `AS parent_id, issue_id FROM wisp_dependencies\s`
 	epicIssueStatusQuery = `SELECT id, status, COALESCE\(close_reason, ''\) FROM issues WHERE id IN`
 	epicWispStatusQuery  = `SELECT id, status, COALESCE\(close_reason, ''\) FROM wisps WHERE id IN`
+	moleculeChildQuery   = `SELECT issue_id FROM dependencies\s+WHERE depends_on_issue_id = \? AND type = 'parent-child'`
 )
 
 func epicIDRows(ids ...string) *sqlmock.Rows {
@@ -145,5 +173,27 @@ func TestRowIterationReportsMidIterationFailure(t *testing.T) {
 				AddRow("w-2", "open", "").
 				RowError(1, errMidIteration))
 		runEpics(t, db, mock)
+	})
+
+	// AC-2: GetMoleculeLastActivityInTx.
+	runLastActivity := func(t *testing.T, rows *sqlmock.Rows) {
+		t.Helper()
+		db, mock := newRowsErrMock(t)
+		tx := beginRowsErrTx(t, db, mock)
+		expectNotWisp(mock)
+		mock.ExpectQuery(moleculeChildQuery).WithArgs("mol-1").WillReturnRows(rows)
+		got, err := GetMoleculeLastActivityInTx(ctx, tx, "mol-1")
+		if got != nil {
+			t.Errorf("got last activity %+v, want nil", got)
+		}
+		assertMidIterationFailure(t, mock, err)
+	}
+
+	t.Run("last-activity/children", func(t *testing.T) {
+		runLastActivity(t, childIDRows("c-1", "c-2").RowError(1, errMidIteration))
+	})
+
+	t.Run("last-activity/children-first-row", func(t *testing.T) {
+		runLastActivity(t, childIDRows("c-1", "c-2").RowError(0, errMidIteration))
 	})
 }
