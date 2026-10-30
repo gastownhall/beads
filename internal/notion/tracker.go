@@ -129,6 +129,15 @@ func (t *Tracker) Validate() error {
 
 func (t *Tracker) Close() error { return nil }
 
+// fetchSinceGranularity is the precision of Notion page timestamps, so
+// FetchIssues matches Since to it (matchesFetchSince).
+const fetchSinceGranularity = time.Minute
+
+var _ itracker.SinceGranularityProvider = (*Tracker)(nil)
+
+// SinceGranularity reports that FetchIssues matches Since to the minute.
+func (t *Tracker) SinceGranularity() time.Duration { return fetchSinceGranularity }
+
 func (t *Tracker) FetchIssues(ctx context.Context, opts itracker.FetchOptions) ([]itracker.TrackerIssue, error) {
 	if err := t.ensureRemoteIndex(ctx); err != nil {
 		return nil, err
@@ -661,7 +670,7 @@ func matchesFetchSince(issue *itracker.TrackerIssue, since *time.Time) bool {
 	if since != nil && !issue.UpdatedAt.IsZero() {
 		// Notion page timestamps are minute-precision. Revisit the boundary minute
 		// so edits made later in the same minute as last_sync are not lost.
-		cutoff := since.UTC().Truncate(time.Minute)
+		cutoff := since.UTC().Truncate(fetchSinceGranularity)
 		if issue.UpdatedAt.Before(cutoff) {
 			return false
 		}
