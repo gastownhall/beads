@@ -562,6 +562,30 @@ func TestCheckRemotesAPIListener(t *testing.T) {
 		}
 	})
 
+	t.Run("server only the probe found is dialed at its configured host", func(t *testing.T) {
+		ln, err := net.Listen("tcp", "[::1]:0")
+		if err != nil {
+			t.Skipf("cannot listen on [::1]: %v", err)
+		}
+		t.Cleanup(func() { _ = ln.Close() })
+		port := ln.Addr().(*net.TCPAddr).Port
+		if conn, err := net.Dial("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port))); err == nil {
+			_ = conn.Close()
+			t.Skipf("127.0.0.1:%d also accepts, so the dial host is not observable", port)
+		}
+		listenerEndpoint(t, "::1", localTCPPort(t, false))
+		beadsDir := remotesAPITarget(t, false, "", strconv.Itoa(port))
+
+		check := checkRemotesAPIListener(beadsDir, 0)
+		if check.Status != StatusOK || check.Message != "Port "+strconv.Itoa(port)+" accessible" {
+			t.Fatalf("pid 0: got %s %q (%s), want the listener on [::1]:%d accessible", check.Status, check.Message, check.Detail, port)
+		}
+		// bd's own server binds 127.0.0.1, where nothing listens.
+		if check := checkRemotesAPIListener(beadsDir, 4242); check.Status != StatusError {
+			t.Fatalf("pid 4242: got %s %q, want StatusError from a dial of 127.0.0.1:%d", check.Status, check.Message, port)
+		}
+	})
+
 	t.Run("server only the probe found keeps the shared server's restart remedy", func(t *testing.T) {
 		listenerEndpoint(t, "", localTCPPort(t, true))
 		check := checkRemotesAPIListener(remotesAPITarget(t, true, strconv.Itoa(localTCPPort(t, false)), ""), 0)
