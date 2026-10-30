@@ -519,6 +519,8 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 			updates := buildPullIssueUpdates(existing, conv.Issue, ref)
 			if raw, ok := marshalTrackerMetadata(extIssue.Metadata); ok {
 				updates["metadata"] = raw
+				// The push hash below fingerprints the row this update writes.
+				conv.Issue.Metadata = raw
 			}
 
 			markPullIssueFields(updates)
@@ -540,6 +542,7 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 			if pulledIDs != nil {
 				pulledIDs[existing.ID] = true
 			}
+			e.refreshPushHashAfterPull(ctx, existing.ID, conv.Issue, ref)
 		} else {
 			// Create new issue
 			conv.Issue.ExternalRef = strPtr(ref)
@@ -1056,6 +1059,25 @@ func (e *Engine) recordPushHash(ctx context.Context, issue *types.Issue, externa
 	}
 	if err := e.Store.SetLocalMetadata(ctx, e.pushHashKey(issue.ID), h); err != nil {
 		e.warn("Failed to record push hash for %s: %v", issue.ID, err)
+	}
+}
+
+// refreshPushHashAfterPull keeps the stored push hash of a pulled issue in
+// step with the remote. After a pull the remote holds the pulled content, not
+// the content of the last push. The hash is keyed by id, the local row the pull
+// wrote: a GenerateID hook may have given pulled a fresh ID.
+func (e *Engine) refreshPushHashAfterPull(ctx context.Context, id string, pulled *types.Issue, ref string) {
+	if id == "" || pulled == nil {
+		return
+	}
+	hashed := *pulled
+	hashed.ID = id
+	hashed.ExternalRef = strPtr(ref)
+	key := e.pushHashKey(id)
+	if value := e.pushCacheValue(&hashed, ref); value != "" {
+		if err := e.Store.SetLocalMetadata(ctx, key, value); err != nil {
+			e.warn("Failed to record push hash for %s: %v", id, err)
+		}
 	}
 }
 
