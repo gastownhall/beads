@@ -44,10 +44,24 @@ func TestProxiedServerInitSharedDatabaseAdoptsIdentityAndKeepsFingerprints(t *te
 		t.Errorf("AC-2: bootstrapping init wrote %d repo_id/clone_id row(s) into the shared metadata table, want 0", fingerprints)
 	}
 
+	// The rows an older bd left behind belong to some other clone; a later
+	// init must leave them alone.
+	if _, err := dbA.ExecContext(context.Background(),
+		"REPLACE INTO metadata (`key`, value) VALUES ('repo_id', 'seed-repo'), ('clone_id', 'seed-clone')"); err != nil {
+		t.Fatalf("seed fingerprint rows: %v", err)
+	}
+
 	// A fresh clone with no metadata.json: init mints a project id locally,
 	// then adopts the database's.
 	b := bdProxiedInit(t, bd, "shid", args...)
 	b.database = database
+	dbB := openProxiedDB(t, b)
+	if got := readProxiedMetadata(t, dbB, "repo_id"); got != "seed-repo" {
+		t.Errorf("AC-3: second clone's init left repo_id = %q, want the earlier %q", got, "seed-repo")
+	}
+	if got := readProxiedMetadata(t, dbB, "clone_id"); got != "seed-clone" {
+		t.Errorf("AC-3: second clone's init left clone_id = %q, want the earlier %q", got, "seed-clone")
+	}
 	cfg, err := configfile.Load(b.beadsDir)
 	if err != nil || cfg == nil {
 		t.Fatalf("load second clone metadata.json: %v", err)
@@ -68,8 +82,7 @@ func TestProxiedServerInitSharedDatabaseAdoptsIdentityAndKeepsFingerprints(t *te
 	// A database carrying a prefix but no _project_id is identified all the
 	// same, so a further clone adopts it — and must keep its own minted id
 	// rather than save the empty one.
-	db := openProxiedDB(t, b)
-	if _, err := db.ExecContext(context.Background(), "DELETE FROM metadata WHERE `key` = '_project_id'"); err != nil {
+	if _, err := dbB.ExecContext(context.Background(), "DELETE FROM metadata WHERE `key` = '_project_id'"); err != nil {
 		t.Fatalf("drop _project_id: %v", err)
 	}
 	c := bdProxiedInit(t, bd, "shid", args...)
