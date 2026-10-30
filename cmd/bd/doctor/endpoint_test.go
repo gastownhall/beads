@@ -313,10 +313,11 @@ func TestDoltModeCheckProbesTheEndpointTheStoreDials(t *testing.T) {
 	}
 }
 
-// TestServerRunningOrProbeable pins the short-circuit of the federation
-// remotesapi check's server gate (serverRunningOrProbeable): a PID file that
-// names a running server answers true without a dial, so a PID-tracked
-// server never pays the endpoint probe.
+// TestServerRunningOrProbeable pins the federation remotesapi check's server
+// gate (serverRunningOrProbeable): a PID file that names a running server
+// answers true without a dial, so a PID-tracked server never pays the
+// endpoint probe, and every other verdict (no PID file, a stale one, an
+// unreadable one) asks the probe exactly once.
 func TestServerRunningOrProbeable(t *testing.T) {
 	t.Run("running state answers true without the probe", func(t *testing.T) {
 		calls := 0
@@ -328,6 +329,90 @@ func TestServerRunningOrProbeable(t *testing.T) {
 			t.Fatalf("probe ran %d time(s); a PID-tracked server must never dial", calls)
 		}
 	})
+
+	t.Run("every other verdict asks the probe", func(t *testing.T) {
+		for _, tc := range []struct {
+			name  string
+			state *doltserver.State
+		}{
+			{name: "nil state (no or unreadable PID file)", state: nil},
+			{name: "state that is not running (stale PID file)", state: &doltserver.State{}},
+		} {
+			t.Run(tc.name+", probe finds no server", func(t *testing.T) {
+				calls := 0
+				probe := func() bool { calls++; return false }
+				if serverRunningOrProbeable(tc.state, probe) {
+					t.Fatal("the gate must answer the probe's verdict, not the state's absence")
+				}
+				if calls != 1 {
+					t.Fatalf("probe ran %d time(s); an absent verdict must dial exactly once", calls)
+				}
+			})
+			t.Run(tc.name+", probe finds a server", func(t *testing.T) {
+				calls := 0
+				probe := func() bool { calls++; return true }
+				if !serverRunningOrProbeable(tc.state, probe) {
+					t.Fatal("the gate must answer the probe's verdict, not the state's absence")
+				}
+				if calls != 1 {
+					t.Fatalf("probe ran %d time(s); an absent verdict must dial exactly once", calls)
+				}
+			})
+		}
+	})
+}
+
+// TestFederationServerProbe pins the probe the federation gate falls back to
+// (doltModeServerReachable, the Dolt Mode check's own): it answers for the
+// endpoint the store dials — the configured server port, the legacy
+// BEADS_DOLT_PORT, or a live socket — and reports no server when the
+// endpoint does not answer, so the gate takes the check's no-server branch
+// exactly when the store cannot open the server either.
+func TestFederationServerProbe(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		unix       bool // unix-socket fixture: skip on Windows
+		set        func(t *testing.T, beadsDir string)
+		wantServer bool
+	}{
+		{name: "live BEADS_DOLT_SERVER_PORT", set: func(t *testing.T, beadsDir string) {
+			t.Setenv("BEADS_DOLT_SERVER_PORT", strconv.Itoa(acceptingLocalPort(t)))
+		}, wantServer: true},
+		{name: "live legacy BEADS_DOLT_PORT only", set: func(t *testing.T, beadsDir string) {
+			t.Setenv("BEADS_DOLT_PORT", strconv.Itoa(acceptingLocalPort(t)))
+		}, wantServer: true},
+		{name: "live socket, no port", unix: true, set: func(t *testing.T, beadsDir string) {
+			t.Setenv("BEADS_DOLT_SERVER_SOCKET", liveUnixSocket(t))
+		}, wantServer: true},
+		{name: "live socket beside a closed port", unix: true, set: func(t *testing.T, beadsDir string) {
+			t.Setenv("BEADS_DOLT_SERVER_SOCKET", liveUnixSocket(t))
+			t.Setenv("BEADS_DOLT_SERVER_PORT", strconv.Itoa(closedLocalPort(t)))
+		}, wantServer: true},
+		{name: "closed port", set: func(t *testing.T, beadsDir string) {
+			t.Setenv("BEADS_DOLT_SERVER_PORT", strconv.Itoa(closedLocalPort(t)))
+		}},
+		{name: "no port and no socket", set: func(t *testing.T, beadsDir string) {}},
+		{name: "no metadata.json", set: func(t *testing.T, beadsDir string) {
+			if err := os.Remove(filepath.Join(beadsDir, "metadata.json")); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.unix && runtime.GOOS == "windows" {
+				t.Skip("unix socket fixture")
+			}
+			_, beadsDir := doctorEndpointWorkspace(t)
+			tc.set(t, beadsDir)
+			cfg, err := configfile.Load(beadsDir)
+			if tc.name != "no metadata.json" && err != nil {
+				t.Fatal(err)
+			}
+			if got := doltModeServerReachable(beadsDir, cfg); got != tc.wantServer {
+				t.Errorf("the gate's probe = %v, want %v: it must answer for the endpoint the store dials", got, tc.wantServer)
+			}
+		})
+	}
 }
 
 // acceptingLocalPort is a 127.0.0.1 port whose listener accepts and closes
