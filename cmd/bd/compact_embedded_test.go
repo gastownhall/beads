@@ -3,6 +3,7 @@
 package main
 
 import (
+	"database/sql"
 	"fmt"
 	"os"
 	"os/exec"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 )
 
 // bdCompact runs "bd compact" with the given args and returns stdout.
@@ -252,5 +254,157 @@ func TestEmbeddedCompactMisdatedChild(t *testing.T) {
 
 	if got := bdShow(t, bd, dir, issue.ID).Title; got != "edit B" {
 		t.Errorf("title after compact = %q, want %q", got, "edit B")
+	}
+}
+
+// compactLogRow is one dolt_log row as TestEmbeddedCompactKeepsCommitDates
+// compares it across a compaction.
+type compactLogRow struct {
+	committer, email, message string
+	date                      time.Time
+}
+
+// TestEmbeddedCompactKeepsCommitDates pins #7294 end to end: compaction keeps
+// each replayed commit's date (to the millisecond, so two commits in one
+// second keep their order), committer, email and message, dates the squashed
+// base with the boundary commit, and so leaves AS OF reads and the tracker's
+// previous-external_ref lookup between two kept commits unchanged.
+func TestEmbeddedCompactKeepsCommitDates(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "kd")
+	issue := bdCreate(t, bd, dir, "Dated bead", "--type", "task")
+
+	cfg, _ := configfile.Load(beadsDir)
+	database := ""
+	if cfg != nil {
+		database = cfg.GetDoltDatabase()
+	}
+	openConn := func() (*sql.Conn, func()) {
+		db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), filepath.Join(beadsDir, "embeddeddolt"), database, "main")
+		if err != nil {
+			t.Fatalf("OpenSQL: %v", err)
+		}
+		conn, err := db.Conn(t.Context())
+		if err != nil {
+			t.Fatalf("db.Conn: %v", err)
+		}
+		if _, err := conn.ExecContext(t.Context(), "SET time_zone = '+00:00'"); err != nil {
+			t.Fatalf("set time_zone: %v", err)
+		}
+		return conn, func() {
+			conn.Close()
+			if err := cleanup(); err != nil {
+				t.Fatalf("cleanup: %v", err)
+			}
+		}
+	}
+	// readLog returns dolt_log in graph order, oldest first.
+	readLog := func(conn *sql.Conn) []compactLogRow {
+		rows, err := conn.QueryContext(t.Context(), "SELECT committer, email, message, date FROM dolt_log ORDER BY commit_order")
+		if err != nil {
+			t.Fatalf("read dolt_log: %v", err)
+		}
+		defer rows.Close()
+		var out []compactLogRow
+		for rows.Next() {
+			var r compactLogRow
+			if err := rows.Scan(&r.committer, &r.email, &r.message, &r.date); err != nil {
+				t.Fatalf("scan dolt_log: %v", err)
+			}
+			out = append(out, r)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("read dolt_log: %v", err)
+		}
+		return out
+	}
+
+	// Dated in the future so --days 0 keeps all three commits in the replay
+	// window; the first two are 333 ms apart within one second.
+	s := time.Now().UTC().Truncate(time.Second)
+	const author = "Original Author <orig@example.com>"
+	commits := []struct {
+		title, ref string // empty: an --allow-empty commit
+		message    string
+		date       time.Time
+	}{
+		{"edit A", "ext-A", "keep: edit A", s.Add(20*time.Minute + 123*time.Millisecond)},
+		{"", "", "keep: empty", s.Add(20*time.Minute + 456*time.Millisecond)},
+		{"edit B", "ext-B", "keep: edit B", s.Add(40 * time.Minute)},
+	}
+	conn, closeConn := openConn()
+	for _, c := range commits {
+		date := c.date.Format("2006-01-02T15:04:05.000Z07:00")
+		if c.title == "" {
+			if _, err := conn.ExecContext(t.Context(), "CALL DOLT_COMMIT('--allow-empty', '-m', ?, '--date', ?, '--author', ?)", c.message, date, author); err != nil {
+				t.Fatalf("dolt commit %q: %v", c.message, err)
+			}
+			continue
+		}
+		if _, err := conn.ExecContext(t.Context(), "UPDATE issues SET title = ?, external_ref = ? WHERE id = ?", c.title, c.ref, issue.ID); err != nil {
+			t.Fatalf("update %q: %v", c.title, err)
+		}
+		if _, err := conn.ExecContext(t.Context(), "CALL DOLT_COMMIT('-Am', ?, '--date', ?, '--author', ?)", c.message, date, author); err != nil {
+			t.Fatalf("dolt commit %q: %v", c.message, err)
+		}
+	}
+	before := readLog(conn)
+	kept := before[len(before)-len(commits):]
+	for i, c := range commits {
+		if kept[i].message != c.message || !kept[i].date.Equal(c.date) {
+			t.Fatalf("setup: commit %d is %q at %s, want %q at %s", i, kept[i].message, kept[i].date, c.message, c.date)
+		}
+	}
+	boundary := before[len(before)-len(commits)-1]
+	closeConn()
+
+	bdCompact(t, bd, dir, "--force", "--days", "0")
+
+	conn, closeConn = openConn()
+	defer closeConn()
+	after := readLog(conn)
+	if len(after) != len(commits)+2 {
+		t.Fatalf("dolt_log after compact has %d commits, want initial + base + %d kept: %+v", len(after), len(commits), after)
+	}
+	for i, want := range kept {
+		got := after[len(after)-len(commits)+i]
+		if got.message != want.message || !got.date.Equal(want.date) || got.committer != want.committer || got.email != want.email {
+			t.Errorf("replayed commit %d = %q by %s <%s> at %s, want %q by %s <%s> at %s",
+				i, got.message, got.committer, got.email, got.date.Format(time.RFC3339Nano),
+				want.message, want.committer, want.email, want.date.Format(time.RFC3339Nano))
+		}
+	}
+	if base := after[1]; !strings.HasPrefix(base.message, "compact: squash") || !base.date.Equal(boundary.date) {
+		t.Errorf("squashed base = %q at %s, want a compact: squash commit at the boundary's date %s",
+			base.message, base.date.Format(time.RFC3339Nano), boundary.date.Format(time.RFC3339Nano))
+	}
+
+	// Between edit A and edit B. A time literal: AS OF reads a bare string as a ref.
+	between := s.Add(30 * time.Minute)
+	var title string
+	if err := conn.QueryRowContext(t.Context(),
+		fmt.Sprintf("SELECT title FROM issues AS OF TIMESTAMP('%s') WHERE id = ?", between.Format("2006-01-02 15:04:05")),
+		issue.ID).Scan(&title); err != nil {
+		t.Fatalf("AS OF read: %v", err)
+	}
+	if title != "edit A" {
+		t.Errorf("title AS OF %s = %q, want %q", between.Format(time.RFC3339), title, "edit A")
+	}
+	tx, err := conn.BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	ref, found, err := issueops.PreviousExternalRefInTx(t.Context(), tx, issue.ID, between)
+	if err != nil {
+		t.Fatalf("PreviousExternalRefInTx: %v", err)
+	}
+	if !found || ref != "ext-A" {
+		t.Errorf("PreviousExternalRefInTx(%s) = %q (found %v), want %q", between.Format(time.RFC3339), ref, found, "ext-A")
 	}
 }
