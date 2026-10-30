@@ -87,8 +87,8 @@ func TestCompactRestoresCommitMetadata(t *testing.T) {
 		WithArgs(initial.Hash).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	msg := fmt.Sprintf("compact: squash %d commits into base snapshot", 2)
-	mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_COMMIT('-Am', ?)")).
-		WithArgs(msg).
+	mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_COMMIT('-Am', ?, '--date', ?)")).
+		WithArgs(msg, commitDateArg(boundary.Date)).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	for _, k := range kept {
 		mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_CHERRY_PICK('--allow-empty', ?)")).
