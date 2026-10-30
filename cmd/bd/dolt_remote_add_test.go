@@ -207,6 +207,35 @@ func TestEnsureDoltRemoteColdStartSameURLMigratesToSQL(t *testing.T) {
 	})
 }
 
+// TestEnsureDoltRemoteListedSameURLSkipsDisk: a match the SQL listing
+// already has is the idempotent case: the add neither consults the persisted
+// remotes nor writes, even when disk records the same remote.
+func TestEnsureDoltRemoteListedSameURLSkipsDisk(t *testing.T) {
+	store := &fakeDoltRemoteAddStoreWithDisk{
+		fakeDoltRemoteAddStore: fakeDoltRemoteAddStore{
+			remotes: []storage.RemoteInfo{
+				{Name: "origin", URL: "https://github.com/org/repo.git"},
+			},
+		},
+		persisted: []storage.RemoteInfo{
+			{Name: "origin", URL: "https://github.com/org/repo.git"},
+		},
+	}
+	result, err := ensureDoltRemote(context.Background(), store, "origin", "git+https://github.com/org/repo.git", func(surface, name, existingURL, newURL string) bool {
+		t.Fatalf("listed same-URL add should not prompt")
+		return false
+	})
+	if err != nil {
+		t.Fatalf("ensureDoltRemote: %v", err)
+	}
+	if result.Canceled {
+		t.Fatal("listed same-URL add should not cancel")
+	}
+	if want := []string{"list"}; !reflect.DeepEqual(store.calls, want) {
+		t.Fatalf("calls = %v, want %v", store.calls, want)
+	}
+}
+
 // TestEnsureDoltRemoteColdStartDifferentURLPrompts pins that the invisible
 // persisted remote gets the SAME overwrite confirmation the visible one
 // would — before wy-6k7f7 an empty listing skipped the confirmation and the
