@@ -589,6 +589,55 @@ func TestCheckRemotesAPIListener(t *testing.T) {
 			t.Fatalf("got %s, Fix %q; want StatusError with the stop/start remedy", check.Status, check.Fix)
 		}
 	})
+
+	t.Run("probe-found server dials the configured host", func(t *testing.T) {
+		port := localIPv6Port(t)
+		if port == 0 {
+			t.Skip("no [::1]-only listener possible here")
+		}
+		beadsDir := remotesAPITarget(t, false, "", strconv.Itoa(port))
+		pinServerEndpoint(t, localTCPPort(t, false))
+		t.Setenv("BEADS_DOLT_SERVER_HOST", "::1")
+		check := checkRemotesAPIListener(beadsDir, 0)
+		want := "Port " + strconv.Itoa(port) + " accessible"
+		if check.Status != StatusOK || check.Message != want {
+			t.Fatalf("a remotesapi listener on [::1] only: got %s %q (detail: %s), want ok %q — the dial must go to the configured host",
+				check.Status, check.Message, check.Detail, want)
+		}
+	})
+
+	t.Run("PID-tracked server still dials 127.0.0.1", func(t *testing.T) {
+		port := localIPv6Port(t)
+		if port == 0 {
+			t.Skip("no [::1]-only listener possible here")
+		}
+		beadsDir := remotesAPITarget(t, false, "", strconv.Itoa(port))
+		pinServerEndpoint(t, localTCPPort(t, false))
+		t.Setenv("BEADS_DOLT_SERVER_HOST", "::1")
+		check := checkRemotesAPIListener(beadsDir, 4242)
+		if check.Status != StatusError {
+			t.Fatalf("a remotesapi listener on [::1] only: got %s %q, want StatusError — a PID-tracked server is one bd started at 127.0.0.1",
+				check.Status, check.Message)
+		}
+	})
+}
+
+// localIPv6Port is a port whose listener accepts on [::1] only, and 0 when no
+// such listener is possible or 127.0.0.1 on the same port also accepts —
+// either way a dial cannot prove which host it went to.
+func localIPv6Port(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "[::1]:0")
+	if err != nil {
+		return 0
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	t.Cleanup(func() { _ = ln.Close() })
+	if conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), time.Second); err == nil {
+		_ = conn.Close()
+		return 0
+	}
+	return port
 }
 
 // pinServerEndpoint points the endpoint env at port and clears the host and

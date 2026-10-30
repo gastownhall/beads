@@ -307,9 +307,12 @@ func CheckFederationRemotesAPI(path string) DoctorCheck {
 // configfile alone diagnoses port 8080 while a shared server launched from the
 // user-global key is listening somewhere else.
 //
-// pid names who confirmed the server: a PID file in this workspace (pid > 0)
-// or the gate's endpoint probe alone (pid 0), whose detail names the endpoint
-// instead of a PID the workspace cannot show.
+// pid names who confirmed the server, and with it the host the dial goes to:
+// a PID file in this workspace (pid > 0) names a server bd started, which
+// binds 127.0.0.1, so that arm dials it; the gate's endpoint probe alone
+// (pid 0) may have confirmed a server at any configured host, so that arm
+// dials the resolved endpoint's host (doltutil.ServerAddr) and its detail
+// names the endpoint instead of a PID the workspace cannot show.
 //
 // The mode is classified once because it also decides the remedy. bd opens a
 // remotesapi listener only for the shared server it launches, so restarting is
@@ -332,22 +335,24 @@ func checkRemotesAPIListener(beadsDir string, pid int) DoctorCheck {
 			Category: CategoryFederation,
 		}
 	}
+	// Dial the server the gate confirmed: a PID-tracked server (pid > 0) is
+	// one bd started, which binds 127.0.0.1; a server only the endpoint
+	// probe found (pid 0) may be configured at any host, so dial the
+	// resolved endpoint's host and name that endpoint in the detail.
 	host := "127.0.0.1"
+	server := fmt.Sprintf("Server running (PID %d)", pid)
+	if pid <= 0 {
+		ep := doltserver.ResolveEndpoint(beadsDir, nil)
+		host = ep.Host
+		server = fmt.Sprintf("Server reachable at %s (no PID file in this workspace)", ep.Location())
+	}
 
-	addr := net.JoinHostPort(host, fmt.Sprintf("%d", remotesAPIPort))
+	addr := doltutil.ServerAddr(host, remotesAPIPort)
 	// Left as a bare dial+close (no doltserver.ProbeSQLServer): remotesapi
 	// speaks gRPC/HTTP, not the MySQL protocol, so there is no handshake
 	// greeting to drain here.
 	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
 	if err != nil {
-		// A PID file in this workspace names the server (pid > 0); a
-		// server only the endpoint probe found has none, so its detail
-		// names the endpoint the probe reached instead.
-		server := fmt.Sprintf("Server running (PID %d)", pid)
-		if pid <= 0 {
-			ep := doltserver.ResolveEndpoint(beadsDir, nil)
-			server = fmt.Sprintf("Server reachable at %s (no PID file in this workspace)", ep.Location())
-		}
 		fix := fmt.Sprintf("bd opens a remotesapi listener only for the shared server: run dolt sql-server with --remotesapi-port %d, or enable dolt.shared-server and set dolt.remotesapi-port in the user-global config", remotesAPIPort)
 		if sharedMode {
 			fix = "Restart the shared server so it picks up the resolved remotesapi port: bd dolt stop && bd dolt start"
