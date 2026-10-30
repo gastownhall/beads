@@ -84,6 +84,7 @@ func IsGitProtocolURL(url string) bool {
 // git_ref parameter when recorded, else empty; a git_ref that is present but
 // is not a string is unparseable in the same sense (see
 // storage.GitRefFromParams) and is reported as an error naming the remote.
+// CLIOnlyParams names the remote's other recorded parameters.
 func PersistedRemotes(dbPath string) ([]storage.RemoteInfo, error) {
 	path := filepath.Join(dbPath, ".dolt", "repo_state.json")
 	data, err := os.ReadFile(path) // #nosec G304 -- repo-local dolt state file
@@ -109,13 +110,27 @@ func PersistedRemotes(dbPath string) ([]storage.RemoteInfo, error) {
 			return nil, fmt.Errorf("remote %s in %s: %w", name, path, err)
 		}
 		remotes = append(remotes, storage.RemoteInfo{
-			Name: name,
-			URL:  r.URL,
-			Ref:  ref,
+			Name:          name,
+			URL:           r.URL,
+			Ref:           ref,
+			CLIOnlyParams: cliOnlyParams(r.Params),
 		})
 	}
 	sort.Slice(remotes, func(i, j int) bool { return remotes[i].Name < remotes[j].Name })
 	return remotes, nil
+}
+
+// cliOnlyParams names, sorted, the recorded remote parameters other than
+// storage.GitRefParam; nil when there are none.
+func cliOnlyParams(params map[string]any) []string {
+	var names []string
+	for name := range params {
+		if name != storage.GitRefParam {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
 }
 
 // ListCLIRemotes parses `dolt remote -v` output from the given database

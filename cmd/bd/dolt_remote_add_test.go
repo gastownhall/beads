@@ -121,6 +121,10 @@ type fakeDoltRemoteAddStoreWithDisk struct {
 	persisted []storage.RemoteInfo
 	removeErr error
 	addErr    error
+	// raced is what a concurrent add registered on the server after the
+	// listing: a failing add lists it from then on, as the losing side of
+	// that race finds the server.
+	raced []storage.RemoteInfo
 }
 
 func (f *fakeDoltRemoteAddStoreWithDisk) PersistedRemoteInfos() []storage.RemoteInfo {
@@ -131,6 +135,7 @@ func (f *fakeDoltRemoteAddStoreWithDisk) PersistedRemoteInfos() []storage.Remote
 func (f *fakeDoltRemoteAddStoreWithDisk) AddRemoteWithRef(ctx context.Context, name, url, ref string) error {
 	if f.addErr != nil {
 		f.calls = append(f.calls, "add-fail "+name)
+		f.remotes = append(f.remotes, f.raced...)
 		return f.addErr
 	}
 	return f.fakeDoltRemoteAddStore.AddRemoteWithRef(ctx, name, url, ref)
@@ -148,10 +153,10 @@ func (f *fakeDoltRemoteAddStoreWithDisk) RemoveRemote(ctx context.Context, name 
 // only from persisted disk state (SQL dolt_remotes empty) must be registered
 // in SQL, so `bd dolt remote add` reporting success leaves the remote visible
 // to the server (PR #7447). The recorded URL and git ref are what get written,
-// not the caller's spelling: doltremote.Normalize equates https:// with
-// git+https:// while Dolt implies git transport only for .git and git+ URLs,
-// and a re-add without the recorded ref would pin pushes onto the default
-// data ref.
+// not the caller's spelling: the recorded URL is the one a server restart
+// would load, doltremote.Normalize equates https:// with git+https:// while
+// Dolt implies git transport only for .git and git+ URLs, and a re-add
+// without the recorded ref would pin pushes onto the default data ref.
 func TestEnsureDoltRemoteColdStartSameURLMigratesToSQL(t *testing.T) {
 	t.Run("recorded_url", func(t *testing.T) {
 		store := &fakeDoltRemoteAddStoreWithDisk{
@@ -219,6 +224,91 @@ func TestEnsureDoltRemoteColdStartSameURLMigratesToSQL(t *testing.T) {
 		}
 		if !errors.Is(err, store.addErr) || !strings.Contains(err.Error(), "add remote origin") {
 			t.Fatalf("ensureDoltRemote = %v, want an error wrapping the add failure as \"add remote origin: …\"", err)
+		}
+	})
+
+	// The server checks the add against the set it lists, so "remote already
+	// exists" after a listing without the remote means a concurrent add
+	// registered it. As for the push path's re-add, that is the state the add
+	// wanted, once the server lists the remote at a matching URL.
+	t.Run("already_exists_is_accepted", func(t *testing.T) {
+		store := &fakeDoltRemoteAddStoreWithDisk{
+			persisted: []storage.RemoteInfo{
+				{Name: "origin", URL: "https://github.com/org/repo.git"},
+			},
+			addErr: errors.New("Error 1105 (HY000): remote already exists"),
+			raced:  []storage.RemoteInfo{{Name: "origin", URL: "git+https://github.com/org/repo.git"}},
+		}
+
+		result, err := ensureDoltRemote(context.Background(), store, "origin", "git+https://github.com/org/repo.git", func(surface, name, existingURL, newURL string) bool {
+			t.Fatalf("same-URL migration should not prompt")
+			return false
+		})
+		if err != nil {
+			t.Fatalf("ensureDoltRemote = %v, want the concurrently registered remote taken as registered", err)
+		}
+		if result.Canceled {
+			t.Fatal("same-URL migration should not cancel")
+		}
+		want := []string{"list", "persisted", "add-fail origin", "list"}
+		if !reflect.DeepEqual(store.calls, want) {
+			t.Fatalf("calls = %v, want %v (the listing read again before the race counts as success)", store.calls, want)
+		}
+	})
+
+	t.Run("already_exists_without_a_matching_listing_surfaces", func(t *testing.T) {
+		for _, tc := range []struct {
+			name  string
+			raced []storage.RemoteInfo
+		}{
+			{name: "listed_at_another_url", raced: []storage.RemoteInfo{{Name: "origin", URL: "git+https://github.com/org/other.git"}}},
+			{name: "still_unlisted"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				store := &fakeDoltRemoteAddStoreWithDisk{
+					persisted: []storage.RemoteInfo{
+						{Name: "origin", URL: "https://github.com/org/repo.git"},
+					},
+					addErr: errors.New("Error 1105 (HY000): remote already exists"),
+					raced:  tc.raced,
+				}
+
+				_, err := ensureDoltRemote(context.Background(), store, "origin", "git+https://github.com/org/repo.git", func(surface, name, existingURL, newURL string) bool {
+					t.Fatalf("same-URL migration should not prompt")
+					return false
+				})
+				if !errors.Is(err, store.addErr) || !strings.Contains(err.Error(), "add remote origin") {
+					t.Fatalf("ensureDoltRemote = %v, want the add failure surfaced: the server lists no origin at the requested URL (server remotes %+v)", err, store.remotes)
+				}
+			})
+		}
+	})
+
+	// DOLT_REMOTE('add') takes --ref alone and the server rewrites the
+	// remote's record from it, so registering a remote recorded with the
+	// dolt CLI's aws-*/oss-* parameters would erase them, where a restart
+	// loads them: the add is refused and nothing is written.
+	t.Run("cli_only_params_refused", func(t *testing.T) {
+		store := &fakeDoltRemoteAddStoreWithDisk{
+			persisted: []storage.RemoteInfo{
+				{Name: "awsr", URL: "aws://[tbl:bucket]/db", CLIOnlyParams: []string{"aws-creds-type", "aws-region"}},
+			},
+		}
+
+		_, err := ensureDoltRemote(context.Background(), store, "awsr", "aws://[tbl:bucket]/db", func(surface, name, existingURL, newURL string) bool {
+			t.Fatalf("same-URL migration should not prompt")
+			return false
+		})
+		if err == nil {
+			t.Fatal("ensureDoltRemote = nil error, want the add refused: it would erase the recorded aws-* parameters")
+		}
+		for _, part := range []string{"add remote awsr", "aws-creds-type, aws-region", "restart the Dolt server"} {
+			if !strings.Contains(err.Error(), part) {
+				t.Errorf("ensureDoltRemote = %v, want it to name %q", err, part)
+			}
+		}
+		if want := []string{"list", "persisted"}; !reflect.DeepEqual(store.calls, want) {
+			t.Fatalf("calls = %v, want %v (nothing written)", store.calls, want)
 		}
 	})
 }
