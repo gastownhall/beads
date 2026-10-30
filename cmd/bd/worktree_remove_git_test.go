@@ -588,6 +588,11 @@ func TestWorktreeRemoveGitAdapterSharedServerDiscovery(t *testing.T) {
 			if status := fixture.git(t, fixture.lane, "status", "--porcelain=v1", "--ignored"); status != "" {
 				t.Fatalf("discovered runtime writes dirtied linked worktree: %s", status)
 			}
+			// Leave the lane before removal without registering a t.Chdir cleanup
+			// that would return to the removed directory. The earlier t.Chdir restores cwd.
+			if err := os.Chdir(fixture.repo); err != nil {
+				t.Fatal(err)
+			}
 			if unrelatedIgnored {
 				fixture.writeLaneFile(t, filepath.Join("ignored", "user-cache.bin"), "keep this user file\n")
 				before := fixture.snapshot(t)
