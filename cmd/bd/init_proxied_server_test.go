@@ -366,6 +366,26 @@ func TestIsTeamServerManaged_RequiresProxiedServerMode(t *testing.T) {
 	assert.True(t, cfg.IsTeamServerManaged())
 }
 
+func TestShouldSaveAdoptedProjectID(t *testing.T) {
+	// The save rule has no mode qualifier: any non-empty id adopted from the
+	// database replaces the locally-minted one, and an empty adopted id (a
+	// database carrying a prefix but no _project_id) never blanks the clone's
+	// own id.
+	for _, tc := range []struct {
+		name           string
+		adopted, local string
+		want           bool
+	}{
+		{"database id replaces the minted one", "db", "local", true},
+		{"prefix-only database keeps the local id", "", "local", false},
+		{"bootstrap records the id it was given", "same", "same", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, shouldSaveAdoptedProjectID(tc.adopted, tc.local))
+		})
+	}
+}
+
 func TestProxiedInitTailRoleIgnoresInheritedGitRouting(t *testing.T) {
 	for _, entry := range os.Environ() {
 		key := gitenv.EntryKey(entry)

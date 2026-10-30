@@ -192,7 +192,6 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 
 	remoteURL := resolveProxiedInitRemoteURL(ctx, cwd, in)
 
-	// Unlike the origin lookup above, ComputeRepoID and GetCloneID still inherit
 	// The order is VERIFY, then bootstrap or adopt: Bootstrapper REFUSES an
 	// already-identified substrate, and asking first is how a front door tells a
 	// re-init from the collision that guard exists for.
@@ -241,11 +240,12 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 			adoptedPrefix, adoptedProjectID = result.Prefix, result.ProjectID
 		}
 
-		// The synced-at marker and recorded binary version are refreshed on
-		// EVERY init, adopt or not, which is why they are not on the role: a
-		// fresh clone of an already-identified database still needs them
-		// stamped, precisely because it bootstrapped nothing. repo_id and
-		// clone_id are not part of this call (see recordProxiedInitTrackingState).
+		// Database-level bookkeeping is written on EVERY init, adopt or not,
+		// which is why it is not part of the one-time identity write. It
+		// deliberately records no repo_id/clone_id: every clone of a proxied
+		// server shares this database's metadata tables (local_metadata
+		// included), so a per-clone fingerprint would be last-init-wins —
+		// team-server mode and gateway init skip them for the same reason.
 		if err := recordProxiedInitTrackingState(ctx, initUOWProvider); err != nil {
 			return HandleError("%v", err)
 		}
@@ -262,20 +262,18 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 	}
 
 	// metadata.json was written with a locally-minted project id before any
-	// DB connection existed; the adopted id must replace it before the tail
-	// git-commits .beads/. This applies in BOTH modes: the plain proxied path
-	// above can adopt an existing database's identity exactly as team-server
-	// mode can, and until GH#7576 that adoption was never saved back to disk
-	// outside team-server mode, leaving every later clone with its own
-	// mismatched local project_id while the server kept the adopted one.
-	if adoptedProjectID != projectID {
+	// DB connection existed; the id adopted from the database — team-server's
+	// provisioned identity, or the identity an earlier init already recorded
+	// on this database — must replace it before the tail git-commits .beads/.
+	// An empty adopted id is no identity to adopt: see shouldSaveAdoptedProjectID.
+	if shouldSaveAdoptedProjectID(adoptedProjectID, projectID) {
 		fileCfg, err := configfile.Load(beadsDir)
 		if err != nil || fileCfg == nil {
-			return HandleError("failed to reload %s to adopt the provisioned project identity: %v", configfile.ConfigFileName, err)
+			return HandleError("failed to reload %s to save the adopted project identity: %v", configfile.ConfigFileName, err)
 		}
 		fileCfg.ProjectID = adoptedProjectID
 		if err := fileCfg.Save(beadsDir); err != nil {
-			return HandleError("failed to save the provisioned project identity to %s: %v", configfile.ConfigFileName, err)
+			return HandleError("failed to save the adopted project identity to %s: %v", configfile.ConfigFileName, err)
 		}
 	}
 
@@ -354,28 +352,26 @@ func proxiedBootstrapper(provider uow.UnitOfWorkProvider) (issueops.Bootstrapper
 	return src.Bootstrapper()
 }
 
-// recordProxiedInitTrackingState seeds the per-clone bookkeeping that is safe
-// to refresh on a SHARED database: the synced-at marker and the recorded
-// binary version.
-//
-// repo_id and clone_id are deliberately NOT written here. They used to be,
-// but a proxied-server database has no local store of its own — every clone
-// that proxies to it shares the same row — so stamping a per-clone fingerprint
-// there on every init was last-init-wins: each clone's init silently
-// overwrote the fingerprint the clone before it had just recorded, corrupting
-// the exact cross-project mismatch diagnostics the fingerprint exists for
-// (GH#7577). That is also why `in.teamServer`'s branch above writes neither
-// identity nor tracking metadata at all; this plain path now matches it for
-// the two fields that have no safe destination in proxied mode. `bd doctor
-// --fix` already treats an empty repo_id/clone_id as a normal, repairable
-// state (cmd/bd/doctor/fix/metadata.go), so leaving them unset here is a
-// state the rest of the codebase already expects, not a new one.
+// shouldSaveAdoptedProjectID reports whether init must rewrite metadata.json's
+// project_id with the identity it adopted from the database. An empty adopted
+// id is a database carrying a prefix but no _project_id — a partial identity
+// issueops.Bootstrapper already treats as identified — and saving it would
+// blank the clone's own id.
+func shouldSaveAdoptedProjectID(adopted, local string) bool {
+	return adopted != "" && adopted != local
+}
+
+// recordProxiedInitTrackingState records the database-level bookkeeping of an
+// init: the synced-at marker and the recorded binary version.
 //
 // It is separate from the identity because its LIFETIME is: the identity is
-// written once and then adopted forever, while these two describe the clone
-// running init and are refreshed every time it runs. In the refusable
-// one-time write, a re-init on a shared database would silently stop
-// recording them.
+// written once and then adopted forever, while these two describe the init
+// that just ran and are refreshed every time one does. It deliberately
+// records no repo_id/clone_id: those are per-clone fingerprints, and every
+// clone of a proxied server shares this database's metadata tables
+// (local_metadata included), so the rows would be last-init-wins;
+// team-server mode and gateway init (shouldWriteInitStateToDB) skip them for
+// the same reason.
 func recordProxiedInitTrackingState(ctx context.Context, provider uow.UnitOfWorkProvider) error {
 	return uow.RunTx(ctx, provider, func(ctx context.Context, uw uow.UnitOfWork) (string, error) {
 		cfg := uw.ConfigUseCase()
