@@ -41,7 +41,7 @@ const sharedServerPrimePort = "19999"
 // The config.yaml layer is the ONLY thing this test may rely on, which is why
 // BEADS_DOLT_SHARED_SERVER is deliberately absent from the env below.
 // configfile.IsDoltServerMode honors that env var itself (step 2 of its
-// precedence chain), and newDoltStoreFromConfig runs normalizeLoadedConfig
+// precedence chain), and newReadOnlyStoreFromConfig runs normalizeLoadedConfig
 // before the gate, so an absent metadata.json arrives as a non-nil
 // DefaultConfig() rather than nil: exporting the env var made the OLD gate
 // select server mode too, and the A/B went green on unfixed code. This test
@@ -73,8 +73,8 @@ func TestPrimeHonorsSharedServerConfigYaml(t *testing.T) {
 	// returns (nil, nil) because it reads only metadata.json — and what makes
 	// the workspace DISCOVERABLE. With an entirely empty dir,
 	// internal/beads.hasBeadsProjectFiles is false, so FindBeadsDir() ignores
-	// BEADS_DIR and returns "", and ensureStoreActiveWithContext refuses with
-	// ErrNoBeadsDatabase before newDoltStoreFromConfig is ever reached. This
+	// BEADS_DIR and returns "", and ensureReadOnlyStoreActiveWithContext refuses with
+	// ErrNoBeadsDatabase before newReadOnlyStoreFromConfig is ever reached. This
 	// test then passed identically with and without the fix: no phantom store
 	// can be created on either, so the assertion below proved nothing.
 	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"),

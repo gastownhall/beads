@@ -96,8 +96,6 @@ Automatically detects if MCP server is active and adapts output:
 
 Designed for Claude Code, Gemini CLI, and Codex SessionStart hooks to prevent
 agents from forgetting bd workflow after context compaction.
-Memory reads open existing storage without initializing an embedded database.
-Use bd init to create a database explicitly.
 
 Config options:
 - no-git-ops: When true, outputs stealth mode (no git commands in session close protocol).

@@ -86,6 +86,15 @@ func (s *strictReadonlyPostRunStore) Close() error {
 }
 
 func TestPersistentPostRunStrictReadonlySuppressesMaintenance(t *testing.T) {
+	testPostRunSuppressesMaintenance(t, "create", true)
+}
+
+func TestPrimePersistentPostRunSuppressesMaintenance(t *testing.T) {
+	testPostRunSuppressesMaintenance(t, "prime", false)
+}
+
+func testPostRunSuppressesMaintenance(t *testing.T, command string, strictReadonly bool) {
+	t.Helper()
 	originalStore := store
 	originalReadonly := readonlyMode
 	originalProxied := proxiedServerMode
@@ -145,7 +154,7 @@ func TestPersistentPostRunStrictReadonlySuppressesMaintenance(t *testing.T) {
 
 	fake := &strictReadonlyPostRunStore{}
 	store = fake
-	readonlyMode = true
+	readonlyMode = strictReadonly
 	proxiedServerMode = false
 	rootCtx = context.Background()
 	rootCancel = nil
@@ -158,17 +167,49 @@ func TestPersistentPostRunStrictReadonlySuppressesMaintenance(t *testing.T) {
 	commandTipIDsShown = map[string]struct{}{"strict-readonly": {}}
 	doltAutoCommit = string(doltAutoCommitOn)
 
-	if err := rootCmd.PersistentPostRunE(&cobra.Command{Use: "create"}, nil); err != nil {
+	if err := rootCmd.PersistentPostRunE(&cobra.Command{Use: command}, nil); err != nil {
 		t.Fatalf("PersistentPostRunE: %v", err)
 	}
 	if maintenanceCalls != 0 {
-		t.Fatalf("strict readonly ran %d automatic commit/backup/export/push operation(s)", maintenanceCalls)
+		t.Fatalf("command ran %d automatic commit/backup/export/push operation(s)", maintenanceCalls)
 	}
 	if fake.metadataWrites != 0 {
-		t.Fatalf("strict readonly wrote %d tip metadata value(s)", fake.metadataWrites)
+		t.Fatalf("command wrote %d tip metadata value(s)", fake.metadataWrites)
 	}
 	if fake.closeCalls != 1 {
 		t.Fatalf("store close calls = %d, want 1", fake.closeCalls)
+	}
+}
+
+// Both post-run arms use these gates. Prime must skip even the backup hook
+// (which persists a failed-attempt throttle) and the journal-prune trigger;
+// ordinary write commands and compatibility backups for list remain eligible.
+func TestPrimePostCommandMaintenancePolicy(t *testing.T) {
+	originalReadonly := readonlyMode
+	t.Cleanup(func() { readonlyMode = originalReadonly })
+	readonlyMode = false
+
+	if !isReadOnlyCommand("prime") {
+		t.Fatal("prime is not classified as read-only")
+	}
+	for _, tc := range []struct {
+		command         string
+		wantMaintenance bool
+		wantPrune       bool
+	}{
+		{command: "prime"},
+		{command: "create", wantMaintenance: true, wantPrune: true},
+		{command: "update", wantMaintenance: true, wantPrune: true},
+		{command: "list", wantMaintenance: true},
+	} {
+		t.Run(tc.command, func(t *testing.T) {
+			if got := runsPostCommandMaintenance(tc.command, false); got != tc.wantMaintenance {
+				t.Errorf("runsPostCommandMaintenance = %v, want %v", got, tc.wantMaintenance)
+			}
+			if got := shouldAutoPruneEventsJournal(&cobra.Command{Use: tc.command}); got != tc.wantPrune {
+				t.Errorf("shouldAutoPruneEventsJournal = %v, want %v", got, tc.wantPrune)
+			}
+		})
 	}
 }
 
