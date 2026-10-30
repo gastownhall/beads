@@ -411,6 +411,64 @@ func TestFilterStepsByConditionRejectsDroppedReferences(t *testing.T) {
 			},
 		},
 		{
+			name: "inferred waits_for spawner is dropped",
+			steps: []*Step{
+				{ID: "fanout", Condition: "{{fanout_enabled}}"},
+				{ID: "gate", Needs: []string{"fanout"}, WaitsFor: "all-children"},
+			},
+			vars: off,
+			wantErrs: []string{
+				`step "gate": waits_for "all-children" waits for the children of "fanout", but condition "{{fanout_enabled}}" on step "fanout" drops it from this pour`,
+				`give "gate" the same condition, or name a spawner that is always poured`,
+			},
+		},
+		{
+			name: "explicit children-of spawner is dropped while needs[0] is kept",
+			steps: []*Step{
+				{ID: "start"},
+				{ID: "fanout", Condition: "{{fanout_enabled}}"},
+				{ID: "gate", Needs: []string{"start"}, WaitsFor: "children-of(fanout)"},
+			},
+			vars: off,
+			wantErrs: []string{
+				`step "gate": waits_for "children-of(fanout)" waits for the children of "fanout", but condition "{{fanout_enabled}}" on step "fanout" drops it from this pour`,
+			},
+		},
+		{
+			name: "waits_for spawner dropped through its parent's condition",
+			steps: []*Step{
+				{ID: "phase", Condition: "{{fanout_enabled}}", Children: []*Step{{ID: "fanout"}}},
+				{ID: "start"},
+				{ID: "gate", Needs: []string{"start"}, WaitsFor: "children-of(fanout)"},
+			},
+			vars: off,
+			wantErrs: []string{
+				`step "gate": waits_for "children-of(fanout)" waits for the children of "fanout", but condition "{{fanout_enabled}}" on step "phase" drops it from this pour`,
+			},
+		},
+		{
+			name: "gate sharing the spawner's condition is dropped with it",
+			steps: []*Step{
+				{ID: "fanout", Condition: "{{fanout_enabled}}"},
+				{ID: "gate", Needs: []string{"fanout"}, WaitsFor: "all-children", Condition: "{{fanout_enabled}}"},
+				{ID: "after"},
+			},
+			vars:    off,
+			wantIDs: []string{"after"},
+		},
+		{
+			name: "kept consumer of a gate dropped with its spawner",
+			steps: []*Step{
+				{ID: "fanout", Condition: "{{fanout_enabled}}"},
+				{ID: "gate", Needs: []string{"fanout"}, WaitsFor: "all-children", Condition: "{{fanout_enabled}}"},
+				{ID: "consumer", Needs: []string{"gate"}},
+			},
+			vars: off,
+			wantErrs: []string{
+				`step "consumer": needs references "gate", but condition "{{fanout_enabled}}" on step "gate" drops it from this pour (give "consumer" the same condition`,
+			},
+		},
+		{
 			name: "two broken references are listed in one error",
 			steps: []*Step{
 				{ID: "fanout", Condition: "{{fanout_enabled}}"},

@@ -1164,7 +1164,13 @@ func collectDependencies(step *formula.Step, idMapping, exitGates map[string]str
 	addBlocks := func(targetStepID string) {
 		targetIssueID, ok := idMapping[targetStepID]
 		if !ok {
-			return // Will be caught during validation
+			// FilterStepsByCondition has already rejected a target dropped
+			// by its condition. A target still missing here is a step ID that
+			// control flow replaced: Validate accepts a needs/depends_on of a
+			// loop container as written, ApplyLoops replaces the container
+			// with its expanded body, and rewriteLoopDependencies rewrites
+			// only in-body references, so the external reference is skipped.
+			return
 		}
 		addBlocksEdge(targetIssueID)
 		// A reference to an exit-gate step waits for its task and for its
@@ -1186,6 +1192,8 @@ func collectDependencies(step *formula.Step, idMapping, exitGates map[string]str
 
 	// Process waits_for field - fanout gate dependency
 	if waitsForSpec != nil && waitsForSpawnerStepID != "" {
+		// A spawner missing from idMapping is skipped for the same reason as
+		// a missing addBlocks target above.
 		if spawnerIssueID, ok := idMapping[waitsForSpawnerStepID]; ok {
 			// Spawner identity is the depends_on_id; metadata carries
 			// the gate. A collapsed needs/depends_on edge additionally marks
