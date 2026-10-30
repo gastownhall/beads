@@ -1072,14 +1072,15 @@ func FindBeadsDir() string {
 				if hasBeadsDatabase(worktreeBeadsDir) {
 					return worktreeBeadsDir
 				}
-				// Lenient acceptance only when there is no shared .beads with
-				// a real database to fall back to.
+				// A shared or external server may have no local database directory.
+				// Use the same metadata-aware discovery as FindDatabasePath
+				// before treating inherited worktree metadata as a new project.
 				fallback := GetWorktreeFallbackBeadsDir()
 				fallbackHasDB := false
 				if fallback != "" {
 					if fbInfo, err := os.Stat(fallback); err == nil && fbInfo.IsDir() {
 						resolved := FollowRedirect(fallback)
-						fallbackHasDB = hasBeadsDatabase(resolved)
+						fallbackHasDB = hasBeadsDatabase(resolved) || findDatabaseInBeadsDir(resolved, true) != ""
 					}
 				}
 				if !fallbackHasDB && hasBeadsProjectFiles(worktreeBeadsDir) {

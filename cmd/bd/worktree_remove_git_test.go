@@ -3,11 +3,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/beads"
+	beadsgit "github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/worktreeremove"
 )
 
@@ -165,12 +168,12 @@ func TestWorktreeRemoveGitAdapterComparatorAndCleanupContracts(t *testing.T) {
 			f.commitLane(t, "contained")
 			f.mergeLaneIntoMain(t)
 			before := "# bd worktree\r\nlane/\r\n# bd worktree\r\nother/\r\n# unrelated\r\nignored/\r\n"
-			if err := os.WriteFile(filepath.Join(f.repo, ".gitignore"), []byte(before), 0644); err != nil {
+			if err := os.WriteFile(filepath.Join(f.repo, ".gitignore"), []byte(before), 0o644); err != nil {
 				t.Fatal(err)
 			}
 		}},
 		{"leading space cleanup", " lane", func(t *testing.T, f *worktreeRemovalFixture) {
-			if err := os.WriteFile(filepath.Join(f.repo, ".gitignore"), []byte("# bd worktree\n lane/\n# bd worktree\nlane/\nignored/\n"), 0644); err != nil {
+			if err := os.WriteFile(filepath.Join(f.repo, ".gitignore"), []byte("# bd worktree\n lane/\n# bd worktree\nlane/\nignored/\n"), 0o644); err != nil {
 				t.Fatal(err)
 			}
 		}},
@@ -202,12 +205,12 @@ func TestWorktreeRemoveGitAdapterScrubsEveryPoisonedEnvironmentKey(t *testing.T)
 	fixture.commitLane(t, "contained")
 	fixture.mergeLaneIntoMain(t)
 	decoy := filepath.Join(t.TempDir(), "decoy")
-	if err := os.MkdirAll(decoy, 0755); err != nil {
+	if err := os.MkdirAll(decoy, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	fixture.git(t, decoy, "init")
 	shallow := filepath.Join(t.TempDir(), "shallow")
-	if err := os.WriteFile(shallow, nil, 0600); err != nil {
+	if err := os.WriteFile(shallow, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	for key, value := range map[string]string{
@@ -352,12 +355,12 @@ func TestWorktreeRemoveGitAdapterRevalidatesFilesystemAndGitState(t *testing.T) 
 		}},
 		{"cleanliness", "target cleanliness changed", func(t *testing.T, f *worktreeRemovalFixture) worktreeRemoveHooks {
 			return worktreeRemoveHooks{beforeFinalCheck: func() error {
-				return os.WriteFile(filepath.Join(f.lane, "interleaved.txt"), []byte("changed\n"), 0644)
+				return os.WriteFile(filepath.Join(f.lane, "interleaved.txt"), []byte("changed\n"), 0o644)
 			}}
 		}},
 		{"dirty content", "target changed files changed", func(t *testing.T, f *worktreeRemovalFixture) worktreeRemoveHooks {
 			f.writeLaneFile(t, "dirty.txt", "alpha\n")
-			return worktreeRemoveHooks{beforeFinalCheck: func() error { return os.WriteFile(filepath.Join(f.lane, "dirty.txt"), []byte("bravo\n"), 0644) }}
+			return worktreeRemoveHooks{beforeFinalCheck: func() error { return os.WriteFile(filepath.Join(f.lane, "dirty.txt"), []byte("bravo\n"), 0o644) }}
 		}},
 		{"comparator", "comparison target changed", func(t *testing.T, f *worktreeRemovalFixture) worktreeRemoveHooks {
 			return worktreeRemoveHooks{beforeFinalCheck: func() error { return runWorktreeRemoveHookGit(f.repo, "reset", "--hard", f.baseOID) }}
@@ -463,7 +466,7 @@ func TestWorktreeRemoveGitAdapterRejectsUnsafeGitignore(t *testing.T) {
 			if err := os.Remove(path); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.Mkdir(path, 0755); err != nil {
+			if err := os.Mkdir(path, 0o755); err != nil {
 				t.Fatal(err)
 			}
 			return func() {
@@ -479,7 +482,7 @@ func TestWorktreeRemoveGitAdapterRejectsUnsafeGitignore(t *testing.T) {
 		{"symlink", func(t *testing.T, path string) func() {
 			external := filepath.Join(t.TempDir(), "external")
 			externalContent := []byte("external sentinel\n")
-			if err := os.WriteFile(external, externalContent, 0644); err != nil {
+			if err := os.WriteFile(external, externalContent, 0o644); err != nil {
 				t.Fatal(err)
 			}
 			if err := os.Remove(path); err != nil {
@@ -533,6 +536,70 @@ func TestWorktreeRemoveGitAdapterRejectsUnsafeGitignore(t *testing.T) {
 				t.Fatalf("unsafe .gitignore refusal changed target status: got %q, want %q", got, beforeStatus)
 			}
 			verifyUnsafe()
+		})
+	}
+}
+
+// Discovery must keep bd runtime files out of the linked worktree. Exercise
+// removal with writes at the discovered directory, without running a server.
+func TestWorktreeRemoveGitAdapterSharedServerDiscovery(t *testing.T) {
+	for _, unrelatedIgnored := range []bool{false, true} {
+		t.Run(fmt.Sprintf("unrelated ignored file=%t", unrelatedIgnored), func(t *testing.T) {
+			t.Setenv("BEADS_DIR", "")
+			t.Setenv("BEADS_DB", "")
+			t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+			t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
+			fixture := newWorktreeRemovalFixture(t)
+			mainBeads := filepath.Join(fixture.repo, ".beads")
+			if err := os.MkdirAll(mainBeads, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			for name, body := range map[string]string{
+				"metadata.json": `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"shared_project"}`,
+				"config.yaml":   "dolt.shared-server: true\n",
+				".gitignore":    "dolt/\nembeddeddolt/\ndolt-server.*\n.local_version\n",
+			} {
+				if err := os.WriteFile(filepath.Join(mainBeads, name), []byte(body), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			fixture.git(t, fixture.repo, "add", ".beads")
+			fixture.git(t, fixture.repo, "commit", "-m", "shared server metadata")
+			fixture.git(t, fixture.lane, "merge", "--ff-only", "main")
+			fixture.git(t, fixture.repo, "commit", "--allow-empty", "-m", "independent containing comparator")
+			t.Chdir(fixture.lane)
+			beadsgit.ResetCaches()
+			t.Cleanup(beadsgit.ResetCaches)
+			dir := beads.FindBeadsDir()
+			if !sameWorktreePath(dir, mainBeads) {
+				t.Fatalf("discovery = %q, want main workspace %q", dir, mainBeads)
+			}
+			// Model the three reported write locations; this is not a bd list
+			// invocation or a live shared-server reproduction.
+			for _, path := range []string{
+				filepath.Join(filepath.Dir(dir), ".beads.gate.lock"),
+				filepath.Join(dir, ".local_version"),
+				filepath.Join(dir, "dolt-server.port"),
+			} {
+				if err := os.WriteFile(path, []byte("runtime\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if status := fixture.git(t, fixture.lane, "status", "--porcelain=v1", "--ignored"); status != "" {
+				t.Fatalf("discovered runtime writes dirtied linked worktree: %s", status)
+			}
+			if unrelatedIgnored {
+				fixture.writeLaneFile(t, filepath.Join("ignored", "user-cache.bin"), "keep this user file\n")
+				before := fixture.snapshot(t)
+				err := runWorktreeRemoveGitAdapter(t, fixture.repo, fixture.lane, false, "main", worktreeRemoveHooks{})
+				requireWorktreeRemoveGitAdapterFailure(t, err, "modified, untracked, or ignored files")
+				fixture.assertSnapshot(t, before)
+			} else {
+				if err := runWorktreeRemoveGitAdapter(t, fixture.repo, fixture.lane, false, "main", worktreeRemoveHooks{}); err != nil {
+					t.Fatal(err)
+				}
+				fixture.assertRemovedAndCleaned(t)
+			}
 		})
 	}
 }
