@@ -175,9 +175,11 @@
 100 42 TestEmbeddedInitAForkAutoContributor
 100 42 TestEmbeddedUpdateIfGuardsFlagValidation
 
+100 43 TestEmbeddedCompactKeepsReplayedCommitDates
 100 43 TestEmbeddedIfRevisionMultiIDRejected
 100 43 TestEmbeddedInitExplicitBeadsDirIsAuthoritative
 
+100 44 TestEmbeddedCompactKeepsCommitDates
 100 44 TestEmbeddedIfRevisionComposesWithIfAssigneeIfStatus
 100 44 TestEmbeddedStaleConcurrent
 

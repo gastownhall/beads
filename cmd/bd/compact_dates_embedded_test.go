@@ -108,7 +108,8 @@ func TestEmbeddedCompactKeepsReplayedCommitDates(t *testing.T) {
 // `bd compact --force --days 0` with every replayed commit's date intact, to
 // the millisecond, and the kept window in its original order. The replayed
 // commits also keep their original committer and email, not the SQL
-// session's identity.
+// session's identity, and their original author and author date, including
+// a commit whose author and committer differ.
 func TestEmbeddedCompactKeepsCommitDates(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
@@ -147,6 +148,32 @@ func TestEmbeddedCompactKeepsCommitDates(t *testing.T) {
 	emptyMarker := S.Add(20 * time.Minute).Add(456 * time.Millisecond)
 	editB := S.Add(40 * time.Minute)
 	asOf := S.Add(30 * time.Minute)
+
+	// What each kept commit is created with, and must still carry after the
+	// compaction. Date is the committer date, the one dolt_log.date, AS OF
+	// and dolt_history read.
+	type commitMeta struct {
+		Committer, Email    string
+		Date                time.Time
+		Author, AuthorEmail string
+		AuthorDate          time.Time
+	}
+	byOriginalAuthor := func(at time.Time) commitMeta {
+		return commitMeta{"Original Author", "orig@example.com", at, "Original Author", "orig@example.com", at}
+	}
+	wantMeta := map[string]commitMeta{
+		"repro: edit A": byOriginalAuthor(editA),
+		"repro: marker": byOriginalAuthor(emptyMarker),
+		// Committed by someone other than its author, five minutes after it
+		// was authored: the shape `dolt cherry-pick` and an earlier
+		// `bd compact` leave behind.
+		"repro: edit B": {"Replayer", "replayer@example.com", editB,
+			"Original Author", "orig@example.com", editB.Add(-5 * time.Minute)},
+	}
+	sameMeta := func(a, b commitMeta) bool {
+		return a.Committer == b.Committer && a.Email == b.Email && a.Date.Equal(b.Date) &&
+			a.Author == b.Author && a.AuthorEmail == b.AuthorEmail && a.AuthorDate.Equal(b.AuthorDate)
+	}
 
 	// No defer on the first connection: bdCompact's subprocess needs the
 	// store's lock, so this connection closes before it runs and reopens
@@ -191,36 +218,51 @@ func TestEmbeddedCompactKeepsCommitDates(t *testing.T) {
 	// future-dated commits below and squashes everything else.
 	boundaryDate := oneTime("SELECT date FROM dolt_log ORDER BY date DESC LIMIT 1")
 
-	commitAt := func(date time.Time, msg string, title, externalRef string) {
-		if title != "" {
-			if _, err := db.ExecContext(t.Context(), "UPDATE issues SET title = ?, external_ref = ? WHERE id = ?",
-				title, externalRef, issue.ID); err != nil {
-				t.Fatalf("update for %q: %v", msg, err)
+	metaOf := func(msg string) commitMeta {
+		var m commitMeta
+		if err := db.QueryRowContext(t.Context(),
+			"SELECT committer, email, date, author, author_email, author_date FROM dolt_log WHERE message = ?", msg,
+		).Scan(&m.Committer, &m.Email, &m.Date, &m.Author, &m.AuthorEmail, &m.AuthorDate); err != nil {
+			t.Fatalf("read commit %q: %v", msg, err)
+		}
+		return m
+	}
+
+	// commitAt commits as wantMeta[msg] says: the author and author date
+	// through --author and --date, the committer and commit date through
+	// the session's committer variables, on one pinned connection that
+	// clears them again before it goes back to the pool.
+	commitAt := func(msg, title, externalRef string) {
+		m := wantMeta[msg]
+		conn, err := db.Conn(t.Context())
+		if err != nil {
+			t.Fatalf("db.Conn: %v", err)
+		}
+		defer conn.Close()
+		exec := func(q string, args ...interface{}) {
+			if _, err := conn.ExecContext(t.Context(), q, args...); err != nil {
+				t.Fatalf("commit %q: %s: %v", msg, q, err)
 			}
 		}
-		if _, err := db.ExecContext(t.Context(),
-			"CALL DOLT_COMMIT('-Am', ?, '--date', ?, '--allow-empty', '--author', 'Original Author <orig@example.com>')",
-			msg, date.UTC().Format("2006-01-02T15:04:05.000Z07:00")); err != nil {
-			t.Fatalf("dolt commit %q: %v", msg, err)
+		if title != "" {
+			exec("UPDATE issues SET title = ?, external_ref = ? WHERE id = ?", title, externalRef, issue.ID)
 		}
+		exec("SET @@dolt_committer_name = ?, @@dolt_committer_email = ?, @@dolt_committer_date = ?",
+			m.Committer, m.Email, m.Date.UTC().Format("2006-01-02T15:04:05.000Z07:00"))
+		exec("CALL DOLT_COMMIT('-Am', ?, '--date', ?, '--allow-empty', '--author', ?)",
+			msg, m.AuthorDate.UTC().Format("2006-01-02T15:04:05.000Z07:00"), m.Author+" <"+m.AuthorEmail+">")
+		exec("SET @@dolt_committer_name = '', @@dolt_committer_email = '', @@dolt_committer_date = ''")
 	}
-	commitAt(editA, "repro: edit A", "edit A", "A")
-	commitAt(emptyMarker, "repro: marker", "", "")
-	commitAt(editB, "repro: edit B", "edit B", "B")
+	commitAt("repro: edit A", "edit A", "A")
+	commitAt("repro: marker", "", "")
+	commitAt("repro: edit B", "edit B", "B")
 
-	// The setup above must actually produce millisecond-dated commits, or the
-	// assertions below would report on a harness artifact, not on compaction.
-	for _, e := range []struct {
-		msg     string
-		orgDate time.Time
-	}{
-		{"repro: edit A", editA},
-		{"repro: marker", emptyMarker},
-		{"repro: edit B", editB},
-	} {
-		got := oneTime("SELECT date FROM dolt_log WHERE message = ?", e.msg)
-		if !got.Equal(e.orgDate) {
-			t.Fatalf("setup: commit %q stored date %s, want %s (DOLT_COMMIT --date dropped precision)", e.msg, got.UTC(), e.orgDate)
+	// The setup above must actually produce commits with both identities and
+	// millisecond dates as intended, or the assertions below would report on
+	// a harness artifact, not on compaction.
+	for msg, want := range wantMeta {
+		if got := metaOf(msg); !sameMeta(got, want) {
+			t.Fatalf("setup: commit %q stored %+v, want %+v (DOLT_COMMIT dropped precision or an identity)", msg, got, want)
 		}
 	}
 
@@ -264,30 +306,20 @@ func TestEmbeddedCompactKeepsCommitDates(t *testing.T) {
 				t.Errorf("recent dolt_log row %d = %q, want %q", i, msgs[i], w)
 			}
 		}
-		for _, e := range []struct {
-			msg     string
-			orgDate time.Time
-		}{
-			{"repro: edit A", editA},
-			{"repro: marker", emptyMarker},
-			{"repro: edit B", editB},
-		} {
-			got := oneTime("SELECT date FROM dolt_log WHERE message = ?", e.msg)
-			if !got.Equal(e.orgDate) {
-				t.Errorf("replayed commit %q dated %s after compact, want its original date %s", e.msg, got.UTC(), e.orgDate)
+		for msg, want := range wantMeta {
+			if got := oneTime("SELECT date FROM dolt_log WHERE message = ?", msg); !got.Equal(want.Date) {
+				t.Errorf("replayed commit %q dated %s after compact, want its original date %s", msg, got.UTC(), want.Date)
 			}
 		}
 	})
 
-	// AC-2: each replayed commit keeps its original committer, email and
-	// message rather than the SQL session's identity.
-	t.Run("replayed committer and message", func(t *testing.T) {
-		for _, msg := range []string{"repro: edit A", "repro: marker", "repro: edit B"} {
-			committer, email := oneString("SELECT committer FROM dolt_log WHERE message = ?", msg),
-				oneString("SELECT email FROM dolt_log WHERE message = ?", msg)
-			if committer != "Original Author" || email != "orig@example.com" {
-				t.Errorf("replayed commit %q has committer %q <%s>, want %q <%s>",
-					msg, committer, email, "Original Author", "orig@example.com")
+	// AC-2: each replayed commit keeps its original committer and email
+	// rather than the SQL session's identity, and its original author and
+	// author date, which the replay must not overwrite with the committer's.
+	t.Run("replayed committer and author", func(t *testing.T) {
+		for msg, want := range wantMeta {
+			if got := metaOf(msg); !sameMeta(got, want) {
+				t.Errorf("replayed commit %q carries %+v after compact, want its original %+v", msg, got, want)
 			}
 		}
 	})
