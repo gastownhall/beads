@@ -234,7 +234,7 @@ func TestEmbeddedBlockedLabelFilters(t *testing.T) {
 		}
 	})
 
-	// blockedFilterFromFlags normalizes, as every sibling label filter does.
+	// the blocked role normalizes, as every sibling label filter does.
 	// Without it an untrimmed value returns nothing and is indistinguishable
 	// from "nothing blocked carries that label".
 	t.Run("leading_space_is_trimmed_like_every_other_label_filter", func(t *testing.T) {

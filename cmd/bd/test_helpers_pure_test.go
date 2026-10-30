@@ -29,6 +29,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/testutil"
 	"github.com/steveyegge/beads/internal/testutil/bazeltest"
 )
 
@@ -116,6 +117,32 @@ func initConfigForTest(t *testing.T) {
 	if err := config.Initialize(); err != nil {
 		t.Fatalf("config.Initialize: %v", err)
 	}
+	t.Cleanup(config.ResetForTesting)
+}
+
+// clonePortTestEnv clears every variable that names a Dolt server endpoint,
+// its credentials or the mode, isolates HOME (the shared-server directory,
+// user config and credentials file live there) and resets the config package,
+// so only what a test writes chooses the endpoint.
+func clonePortTestEnv(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("BEADS_SHARED_SERVER_DIR", filepath.Join(home, "shared-server"))
+	for _, name := range []string{
+		"BEADS_DOLT_SERVER_MODE", "BEADS_DOLT_SHARED_SERVER", "BEADS_DOLT_SERVER_HOST",
+		"BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_PORT", "BEADS_DOLT_SERVER_SOCKET",
+		"BEADS_DOLT_DATA_DIR", "BEADS_DOLT_SERVER_DATABASE", "BEADS_DOLT_SERVER_USER",
+		"BEADS_DOLT_SERVER_TLS", "BEADS_DOLT_PASSWORD", "BEADS_CREDENTIALS_FILE",
+		// Config reports these as dolt.port, dolt.shared-server, dolt.host and
+		// dolt.mode.
+		"BD_DOLT_PORT", "BD_DOLT_SHARED_SERVER", "BD_DOLT_HOST", "BD_DOLT_MODE",
+	} {
+		t.Setenv(name, "")
+	}
+	config.ResetForTesting()
 	t.Cleanup(config.ResetForTesting)
 }
 
@@ -214,6 +241,26 @@ func runCommandInDirWithOutput(dir string, name string, args ...string) (string,
 		return "", err
 	}
 	return strings.TrimSpace(string(output)), nil
+}
+
+// runCommandBuffers runs cmd and returns its stdout and stderr apart.
+func runCommandBuffers(t *testing.T, cmd *exec.Cmd) (stdout, stderr bytes.Buffer, err error) {
+	t.Helper()
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err = cmd.Run()
+	return stdout, stderr, err
+}
+
+// firstLineWithPrefix returns the first line of s that starts with prefix
+// once trimmed, itself trimmed, or "" when no line does.
+func firstLineWithPrefix(s, prefix string) string {
+	for _, line := range strings.Split(s, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), prefix) {
+			return strings.TrimSpace(line)
+		}
+	}
+	return ""
 }
 
 // testEnvNoPrompt returns the current environment with git auth prompts
@@ -440,12 +487,21 @@ func buildBDForInitTests(t *testing.T) string {
 
 // runGitForBootstrapTest runs a git subcommand in the given directory and
 // fails the test on error. Used by bootstrap and init-safety subprocess tests.
+//
+// An empty dir never inherits the test process cwd: that cwd is this package's
+// directory inside this checkout, so a cwd-resolved git write (config, init)
+// lands in the checkout's own .git — the r880 host .git/config clobber
+// (wy-qlvlmf). Callers that pass "" operate on absolute paths in args and get
+// a neutral scratch cwd instead. The env scrub keeps a leaked GIT_DIR /
+// GIT_WORK_TREE from routing the command at some other repository.
 func runGitForBootstrapTest(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := gitCommand(args...)
-	if dir != "" {
-		cmd.Dir = dir
+	if dir == "" {
+		dir = t.TempDir()
 	}
+	cmd.Dir = dir
+	cmd.Env = testutil.WithoutGitRepoLocationEnv(os.Environ())
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %v failed: %v\n%s", args, err, string(output))
@@ -459,9 +515,15 @@ func runGitForBootstrapTest(t *testing.T, dir string, args ...string) {
 // This lives in the pure-Go helper file, not alongside the embedded-Dolt
 // helpers: cmd/bd/where_test.go carries no build tag, so it compiles under
 // CGO_ENABLED=0 where every `//go:build cgo` file is excluded. Keep this
-// helper stdlib-only and keep it here.
+// helper free of cgo-only dependencies and keep it here.
 func initGitRepoAt(t *testing.T, dir string) {
 	t.Helper()
+	if dir == "" {
+		// cmd.Dir = "" inherits the test process cwd — this checkout's own
+		// package dir — so the init and configs would hit the host .git
+		// (the r880 clobber class, wy-qlvlmf).
+		t.Fatal("initGitRepoAt: empty dir would run git against the host checkout")
+	}
 	for _, args := range [][]string{
 		{"init"},
 		{"config", "user.email", "test@test.com"},
@@ -471,6 +533,7 @@ func initGitRepoAt(t *testing.T, dir string) {
 	} {
 		cmd := gitCommand(args...)
 		cmd.Dir = dir
+		cmd.Env = testutil.WithoutGitRepoLocationEnv(os.Environ())
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("git %s failed: %v\n%s", args[0], err, out)
 		}

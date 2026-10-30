@@ -49,9 +49,9 @@ const (
 // alone under `canary`). Not bazel-release-cross (other target platforms,
 // not seeded) nor the package gates.
 var bazelRRCReadLanes = []string{
-	"bazel-cmd-dolt", "bazel-dolt-race", "bazel-doltserver", "bazel-embedded",
-	"bazel-integration", "bazel-proxied", "bazel-pure", "bazel-server-storage",
-	"bazel-test",
+	"bazel-cmd-dolt", "bazel-dolt-int", "bazel-dolt-race", "bazel-doltserver",
+	"bazel-embedded", "bazel-integration", "bazel-proxied", "bazel-pure",
+	"bazel-server-storage", "bazel-test",
 }
 
 // bazelRRCReadLines: the reader's .bazelrc.local lines; both are key neutral
@@ -586,8 +586,9 @@ func TestBazelRRCVerifyJob(t *testing.T) {
 	if strings.Contains(alert.Run, "${{") {
 		t.Errorf("alert step interpolates an expression into its script; pass it through env")
 	}
-	// The issue's containment: mode cache lanes see no repository
-	// variables, so the committed switches (both repositories) and
+	// The issue's containment: mode cache lanes do not follow the
+	// variable (the rbe job's rrc output is off outside mode remote), so the
+	// committed switches (both repositories) and
 	// rbe-cache-gate stop them. The mode remote readers read the same
 	// entries, so a mismatch sets the variable to seed (no reader, rrc-seed
 	// and this check keep running); off stops seeding and this check too.

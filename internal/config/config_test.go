@@ -1564,6 +1564,32 @@ types:
 	}
 }
 
+// TestRetainedTypesYAMLWarning pins the warning for a types.retained key in
+// config.yaml (or BD_TYPES_RETAINED). The setting is read from the workspace
+// database only, so such a key protects nothing; the commands that honor the
+// setting say so rather than letting an operator believe a type is retained.
+func TestRetainedTypesYAMLWarning(t *testing.T) {
+	restore := envSnapshot(t)
+	defer restore()
+	t.Chdir(t.TempDir())
+	ResetForTesting()
+	t.Cleanup(ResetForTesting)
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() returned error: %v", err)
+	}
+
+	if msg := RetainedTypesYAMLWarning(); msg != "" {
+		t.Errorf("warning with no yaml key = %q, want none", msg)
+	}
+	Set("types.retained", "op,fact")
+	msg := RetainedTypesYAMLWarning()
+	for _, want := range []string{"config.yaml", "ignored", "bd config set types.retained op,fact"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("warning = %q, want it to contain %q", msg, want)
+		}
+	}
+}
+
 // TestGetCustomTypesFromYAML_ListForm verifies that the YAML sequence form
 // (e.g. `types: { custom: [step, wisp] }`) is honored equivalently to the
 // legacy comma-separated string form. Before the fix, viper.GetString on a
@@ -1963,6 +1989,74 @@ func TestInitialize_ExternalBEADSDirDoesNotMergeCallerProjectConfig(t *testing.T
 	}
 	if got := GetBool("json"); got {
 		t.Fatalf("GetBool(json) = %v, want false", got)
+	}
+}
+
+// TestWithBeadsDirLoadsTheBoundWorkspacesConfig covers a command about to
+// create a workspace inside another one (bd bootstrap for a fresh rig): the
+// process loaded the enclosing workspace's config.yaml, and fn must see what a
+// command bound to the new workspace loads, its own config.yaml once it has
+// one over the user config files, never the enclosing file. The loaded
+// configuration, a runtime Set included, comes back afterwards, and BEADS_DIR
+// is never touched.
+func TestWithBeadsDirLoadsTheBoundWorkspacesConfig(t *testing.T) {
+	restore := envSnapshot(t)
+	defer restore()
+	ResetForTesting()
+	t.Cleanup(ResetForTesting)
+
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("APPDATA", filepath.Join(root, "appdata"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "xdg-config"))
+	writeConfigActor(t, filepath.Join(home, ".beads", "config.yaml"), "legacy")
+	town := filepath.Join(root, "town")
+	writeConfigActor(t, filepath.Join(town, ".beads", "config.yaml"), "town")
+	rig := filepath.Join(town, "rig")
+	if err := os.MkdirAll(rig, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rigBeadsDir := filepath.Join(rig, ".beads")
+	t.Chdir(rig)
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+	Set("json", true)
+	if got := GetString("actor"); got != "town" {
+		t.Fatalf("precondition: actor = %q, want the enclosing workspace's %q", got, "town")
+	}
+
+	for _, step := range []struct{ name, want string }{
+		{name: "no config.yaml of its own", want: "legacy"},
+		{name: "its own config.yaml", want: "rig"},
+	} {
+		if step.want == "rig" {
+			writeConfigActor(t, filepath.Join(rigBeadsDir, "config.yaml"), "rig")
+		}
+		var actor string
+		var jsonSet bool
+		if err := WithBeadsDir(rigBeadsDir, func() {
+			actor, jsonSet = GetString("actor"), GetBool("json")
+		}); err != nil {
+			t.Fatalf("%s: WithBeadsDir: %v", step.name, err)
+		}
+		if actor != step.want {
+			t.Errorf("%s: actor inside = %q, want %q", step.name, actor, step.want)
+		}
+		if jsonSet {
+			t.Errorf("%s: a Set on the loaded configuration leaked into fn", step.name)
+		}
+		if got := GetString("actor"); got != "town" {
+			t.Errorf("%s: actor after = %q, want the loaded %q back", step.name, got, "town")
+		}
+		if !GetBool("json") {
+			t.Errorf("%s: the loaded configuration's Set was not restored", step.name)
+		}
+		if got, ok := os.LookupEnv("BEADS_DIR"); ok {
+			t.Errorf("%s: BEADS_DIR = %q, want it left unset", step.name, got)
+		}
 	}
 }
 

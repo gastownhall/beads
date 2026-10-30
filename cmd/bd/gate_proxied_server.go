@@ -87,13 +87,6 @@ func runGateCheckProxiedServer(cmd *cobra.Command, ctx context.Context) error {
 		return HandleErrorRespectJSON("proxied-server UOW provider not initialized")
 	}
 
-	gateType := types.IssueType("gate")
-	filter := types.IssueFilter{
-		IssueType:     &gateType,
-		ExcludeStatus: []types.Status{types.StatusClosed},
-		Limit:         limit,
-	}
-
 	discovered := map[string]string{}
 	var seen []*types.Issue
 	var persistAwaitID func(gateID, runID string) error
@@ -109,17 +102,12 @@ func runGateCheckProxiedServer(cmd *cobra.Command, ctx context.Context) error {
 		}
 	}
 
-	readUW, err := proxiedOpenReadUOW(ctx)
+	// The listing is the shared entry's, on this route too (gate list's S20).
+	gates, err := listOpenGatesForCheck(ctx, limit)
 	if err != nil {
-		return err
-	}
-	page, err := readUW.IssueUseCase().SearchIssues(ctx, "", filter)
-	if err != nil {
-		readUW.Close(ctx)
 		return HandleErrorRespectJSON("%v", err)
 	}
-	filteredGates := filterCheckableGates(page.Items, gateTypeFilter)
-	readUW.Close(ctx)
+	filteredGates := filterCheckableGates(gates, gateTypeFilter)
 
 	if len(filteredGates) == 0 {
 		printNoOpenGates(gateTypeFilter)
@@ -280,152 +268,6 @@ func runGateShowProxiedServer(_ *cobra.Command, ctx context.Context, args []stri
 	return nil
 }
 
-type gateAddWaiterApply struct {
-	already bool
-	after   *types.Issue
-}
-
-func runGateAddWaiterProxiedServer(_ *cobra.Command, ctx context.Context, args []string) error {
-	CheckReadonly("gate add-waiter")
-
-	evt := metrics.NewCommandEvent("gate-add-waiter")
-	defer func() {
-		if c := metrics.Global(); c != nil {
-			c.CloseEventAndAdd(evt)
-		}
-	}()
-
-	gateID := args[0]
-	waiter := args[1]
-
-	if uowProvider == nil {
-		return HandleError("proxied-server UOW provider not initialized")
-	}
-
-	applied, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (gateAddWaiterApply, string, error) {
-		var out gateAddWaiterApply
-
-		issue, err := uw.IssueUseCase().GetIssue(ctx, gateID)
-		if gateProxiedNotFound(err) {
-			return out, "", fmt.Errorf("gate not found: %s", gateID)
-		}
-		if err != nil {
-			return out, "", fmt.Errorf("reading gate %s: %w", gateID, err)
-		}
-		if issue.IssueType != "gate" {
-			return out, "", fmt.Errorf("%s is not a gate issue (type=%s)", gateID, issue.IssueType)
-		}
-
-		for _, w := range issue.Waiters {
-			if w == waiter {
-				out.already = true
-				// Empty commit message: a registered waiter is a no-op, and a
-				// no-op writes no Dolt commit.
-				return out, "", nil
-			}
-		}
-
-		newWaiters := append(issue.Waiters, waiter)
-		if err := uw.IssueUseCase().UpdateIssue(ctx, gateID, map[string]any{"waiters": newWaiters}, currentActor()); err != nil {
-			return out, "", fmt.Errorf("updating gate: %w", err)
-		}
-		if after, getErr := uw.IssueUseCase().GetIssue(ctx, gateID); getErr == nil {
-			out.after = after
-		}
-		return out, fmt.Sprintf("bd: gate add-waiter %s", gateID), nil
-	})
-	if err != nil {
-		return HandleError("%v", err)
-	}
-
-	if applied.already {
-		renderGateWaiterAlready(gateID)
-		return nil
-	}
-
-	commandDidWrite.Store(true)
-
-	renderGateWaiterAdded(gateID, waiter)
-	return nil
-}
-
-type gateCreateApply struct {
-	gate   *types.Issue
-	target *types.Issue
-}
-
-func runGateCreateProxiedServer(cmd *cobra.Command, ctx context.Context) error {
-	CheckReadonly("gate create")
-
-	evt := metrics.NewCommandEvent("gate-create")
-	defer func() {
-		if c := metrics.Global(); c != nil {
-			c.CloseEventAndAdd(evt)
-		}
-	}()
-
-	in, err := gatherGateCreateInput(cmd)
-	if err != nil {
-		return HandleErrorRespectJSON("%v", err)
-	}
-
-	if uowProvider == nil {
-		return HandleError("proxied-server UOW provider not initialized")
-	}
-
-	// One transaction, one Dolt commit for the whole invocation: the direct
-	// route's create + add-dependency + explicit store.Commit collapse into a
-	// single unit of work carrying the same commit message. Semantically
-	// equivalent, minus the window where the gate exists without its edge.
-	applied, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (gateCreateApply, string, error) {
-		var out gateCreateApply
-
-		target, err := uw.IssueUseCase().GetIssue(ctx, in.blocksID)
-		if err != nil {
-			// The direct route reports every target-lookup failure as
-			// not-found; keep that message for parity.
-			return out, "", fmt.Errorf("issue not found: %s", in.blocksID)
-		}
-
-		gate := buildGateIssue(in, target.ID)
-		metadata, metaErr := gateMetadataForCreate(in, target)
-		if metaErr != nil {
-			return out, "", metaErr
-		}
-		gate.Metadata = metadata
-
-		res, err := uw.IssueUseCase().CreateIssue(ctx, domain.CreateIssueParams{Issue: gate}, currentActor())
-		if err != nil {
-			return out, "", fmt.Errorf("creating gate: %w", err)
-		}
-
-		dep := &types.Dependency{
-			IssueID:     target.ID,
-			DependsOnID: res.Issue.ID,
-			Type:        types.DepBlocks,
-		}
-		if err := uw.DependencyUseCase().AddDependency(ctx, dep, currentActor()); err != nil {
-			return out, "", fmt.Errorf("adding blocking dependency: %w", err)
-		}
-
-		out.gate = res.Issue
-		out.target = target
-		return out, fmt.Sprintf("bd: create gate %s blocking %s", res.Issue.ID, target.ID), nil
-	})
-	if err != nil {
-		return HandleErrorRespectJSON("%v", err)
-	}
-
-	commandDidWrite.Store(true)
-
-	if jsonOutput {
-		return outputJSON(applied.gate)
-	}
-
-	renderGateCreated(applied.gate, applied.target, in)
-	return nil
-}
-
 type gateResolveApply struct {
 	before    *types.Issue
 	after     *types.Issue
@@ -498,58 +340,43 @@ func runGateListProxiedServer(cmd *cobra.Command, ctx context.Context, args []st
 	allFlag, _ := cmd.Flags().GetBool("all")
 	limit, _ := cmd.Flags().GetInt("limit")
 
+	if len(args) == 0 {
+		// The workspace-wide listing is the shared entry's, on this route too.
+		return runGateList(ctx, allFlag, limit)
+	}
+
 	uw, err := proxiedOpenReadUOW(ctx)
 	if err != nil {
 		return err
 	}
 	defer uw.Close(ctx)
 
-	if len(args) == 1 {
-		target, isWisp, err := workapi.GetIssueOrWisp(ctx, workapi.NewUOWDetailSource(uw), args[0])
-		if errors.Is(err, storage.ErrNotFound) {
-			return HandleErrorRespectJSON("issue not found: %s", args[0])
-		}
-		if err != nil {
-			return HandleErrorRespectJSON("resolving %s: %v", args[0], err)
-		}
-		var metas []*types.IssueWithDependencyMetadata
-		if isWisp {
-			metas, err = uw.DependencyUseCase().ListWispWithIssueMetadata(ctx, target.ID, domain.DepListFilter{Direction: domain.DepDirectionOut})
-		} else {
-			metas, err = uw.DependencyUseCase().ListWithIssueMetadata(ctx, target.ID, domain.DepListFilter{Direction: domain.DepDirectionOut})
-		}
-		if err != nil {
-			return HandleErrorRespectJSON("%v", err)
-		}
-		deps := make([]*types.Issue, 0, len(metas))
-		for _, m := range metas {
-			if m != nil {
-				deps = append(deps, &m.Issue)
-			}
-		}
-		gates := filterIssueGates(deps, allFlag, limit)
-		if jsonOutput {
-			return outputJSON(gates)
-		}
-		displayGates(gates, allFlag)
-		return nil
+	target, isWisp, err := workapi.GetIssueOrWisp(ctx, workapi.NewUOWDetailSource(uw), args[0])
+	if errors.Is(err, storage.ErrNotFound) {
+		return HandleErrorRespectJSON("issue not found: %s", args[0])
 	}
-
-	gateType := types.IssueType("gate")
-	filter := types.IssueFilter{
-		IssueType: &gateType,
-		Limit:     limit,
+	if err != nil {
+		return HandleErrorRespectJSON("resolving %s: %v", args[0], err)
 	}
-	if !allFlag {
-		filter.ExcludeStatus = []types.Status{types.StatusClosed}
+	var metas []*types.IssueWithDependencyMetadata
+	if isWisp {
+		metas, err = uw.DependencyUseCase().ListWispWithIssueMetadata(ctx, target.ID, domain.DepListFilter{Direction: domain.DepDirectionOut})
+	} else {
+		metas, err = uw.DependencyUseCase().ListWithIssueMetadata(ctx, target.ID, domain.DepListFilter{Direction: domain.DepDirectionOut})
 	}
-	page, err := uw.IssueUseCase().SearchIssues(ctx, "", filter)
 	if err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}
-	if jsonOutput {
-		return outputJSON(page.Items)
+	deps := make([]*types.Issue, 0, len(metas))
+	for _, m := range metas {
+		if m != nil {
+			deps = append(deps, &m.Issue)
+		}
 	}
-	displayGates(page.Items, allFlag)
+	gates := filterIssueGates(deps, allFlag, limit)
+	if jsonOutput {
+		return outputJSON(gates)
+	}
+	displayGates(gates, allFlag)
 	return nil
 }

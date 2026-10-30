@@ -12,6 +12,7 @@ import (
 	"github.com/go-sql-driver/mysql"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/depid"
+	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -85,7 +86,13 @@ type CreateIssueResult struct {
 	// StaleRejected reports that the RejectStaleUpserts guard kept the stored
 	// row: nothing was written, and the issue's aux data must not be
 	// persisted by later batch stages either (bd-578h9.8).
-	StaleRejected         bool
+	StaleRejected bool
+	// RetiredSkipped reports that the row's explicit id is retired (a
+	// retaining sweep deleted it and kept its tombstone) and the batch's
+	// options said to skip such rows rather than refuse them
+	// (BatchCreateOptions.OnRetiredID, ConflictSkip): nothing was written, and
+	// the issue's aux data must not be persisted by later batch stages either.
+	RetiredSkipped        bool
 	persistedDependencies []persistedDependency
 	// persistedComments are the comments this create actually inserted, carried
 	// up to the entry point so their journal rows land AFTER the create's. A
@@ -96,6 +103,17 @@ type CreateIssueResult struct {
 	// Set only on the path that would otherwise have minted, so the batch
 	// mints for exactly the issues a singular create would have.
 	versionDeferred bool
+	// isNew is whether this create actually inserted a new row, as opposed
+	// to resolving to an already-existing one. On the per-row path
+	// (CreateIssueInTxWithResult) it is InsertIssueIfNew's result; a row
+	// written by deferredCreates' multi-row INSERT reaches
+	// finishCreateIssueInTx directly and is always new, since only an id
+	// absent from both planes is deferrable. The participation_generation
+	// write-fence (design §16.2b) needs this to choose
+	// RecordVersionForCreateInTx over RecordVersionInTx; a batch that defers
+	// its mint (BatchContext.DeferVersionMint) carries it here since the
+	// per-issue isNew local is out of scope by the time the batch mints.
+	isNew bool
 }
 
 type persistedDependency struct {
@@ -127,9 +145,13 @@ func mergeChangedTables(dst map[string]bool, src map[string]bool) map[string]boo
 
 func CreateIssueInTxWithResult(ctx context.Context, tx DBTX, bc *BatchContext, issue *types.Issue, actor string) (CreateIssueResult, error) {
 	var result CreateIssueResult
-	issueTable, eventTable, skip, err := prepareCreateIssueInTx(ctx, tx, bc, issue, actor)
-	if err != nil || skip {
+	issueTable, eventTable, outcome, err := prepareCreateIssueInTx(ctx, tx, bc, issue, actor)
+	if err != nil || outcome == prepareSkip {
 		return result, err
+	}
+	if outcome == prepareRetiredSkip {
+		result.RetiredSkipped = true
+		return result, nil
 	}
 
 	isNew, staleRejected, err := insertIssueIfNewCached(ctx, tx, issueTable, issue, bc.Opts, bc.cache)
@@ -149,31 +171,93 @@ func CreateIssueInTxWithResult(ctx context.Context, tx DBTX, bc *BatchContext, i
 	return finishCreateIssueInTx(ctx, tx, bc, issue, actor, issueTable, eventTable, isNew)
 }
 
+// prepareOutcome is what prepareCreateIssueInTx decided for one issue.
+type prepareOutcome int
+
+const (
+	// prepareWrite: the row is to be written.
+	prepareWrite prepareOutcome = iota
+	// prepareSkip: a cross-plane collision the options tolerate
+	// (ConflictSkip). Nothing is written for the row itself, but the issue
+	// stays in the batch, so its labels, comments and edges still merge.
+	prepareSkip
+	// prepareRetiredSkip: the explicit id is retired and the options say to
+	// skip such rows. Nothing at all is written for the issue.
+	prepareRetiredSkip
+)
+
 // prepareCreateIssueInTx is the part of a create before its row write:
 // normalization and validation, table routing, id assignment, the create-only
-// guard and the cross-plane collision check. skip reports a collision the
-// options tolerate (ConflictSkip): nothing is written for the issue.
-func prepareCreateIssueInTx(ctx context.Context, tx DBTX, bc *BatchContext, issue *types.Issue, actor string) (issueTable, eventTable string, skip bool, err error) {
+// guard, the retired-id guard and the cross-plane collision check.
+//
+// THE RETIRED-ID GUARD covers the upsert-shaped creates (CreateOnly false:
+// the stores' CreateIssue, transactions, import, tracker sync) for an
+// EXPLICIT id; a create-only create meets the same rule inside
+// EnsureIssueIDAvailableInTx, and a generated id is never retired (the
+// generators skip tombstones). Without it an upsert would resurrect a row a
+// retaining sweep retired. A retired id with no live row is refused with
+// *publicops.IdempotencyExpiredError, unless the options say to skip it:
+// ConflictSkip or OnRetiredID skips it, and OnRetiredID, when set, reports it
+// under ConflictSkip too.
+func prepareCreateIssueInTx(ctx context.Context, tx DBTX, bc *BatchContext, issue *types.Issue, actor string) (issueTable, eventTable string, outcome prepareOutcome, err error) {
 	if err := PrepareIssueForInsert(issue, bc.CustomStatuses, bc.CustomTypes); err != nil {
-		return "", "", false, err
+		return "", "", prepareWrite, err
 	}
 
 	issueTable, eventTable = TableRouting(issue)
 
+	explicitID := issue.ID != ""
 	if err := assignCreateIssueIDInTx(ctx, tx, bc, issue, actor); err != nil {
-		return "", "", false, err
+		return "", "", prepareWrite, err
 	}
 	if bc.Opts.CreateOnly {
-		if err := EnsureIssueIDAvailableInTx(ctx, tx, issue.ID); err != nil {
-			return "", "", false, err
+		// A batch that coordinated this id up front already holds its cell.
+		ensure := EnsureIssueIDAvailableInTx
+		if bc.cache.coordinatedID(issue.ID) {
+			ensure = checkIssueIDAvailableInTx
+		}
+		if err := ensure(ctx, tx, issue.ID); err != nil {
+			return "", "", prepareWrite, err
+		}
+		// The guard has just read both planes in this transaction and found
+		// no row with this id, so the cross-plane collision check below would
+		// re-read the sibling plane only to find the same nothing.
+		return issueTable, eventTable, prepareWrite, nil
+	}
+	if explicitID {
+		// Coordinate before the probe (CoordinateIDCreatesInTx): on READ
+		// COMMITTED a retaining sweep could otherwise commit between the probe
+		// and the upsert below. A batch that coordinated up front already did.
+		if !bc.cache.coordinatedID(issue.ID) {
+			if err := CoordinateIDCreatesInTx(ctx, tx, []string{issue.ID}); err != nil {
+				return "", "", prepareWrite, err
+			}
+		}
+		retired, err := bc.cache.retiredNotLive(ctx, tx, issue.ID)
+		if err != nil {
+			return "", "", prepareWrite, err
+		}
+		if retired != nil {
+			// Report before skipping, ConflictSkip or not, so a caller that
+			// counts the rows it wrote never counts a retired one.
+			if bc.Opts.OnRetiredID != nil {
+				bc.Opts.OnRetiredID(issue.ID)
+			}
+			if bc.Opts.ConflictSkip || bc.Opts.OnRetiredID != nil {
+				return issueTable, eventTable, prepareRetiredSkip, nil
+			}
+			return "", "", prepareWrite, idempotencyExpired(retired)
 		}
 	}
 
-	skip, err = checkCrossTableIDCollisionCached(ctx, tx, issue.ID, issueTable, bc.Opts, bc.cache)
+	skip, err := checkCrossTableIDCollisionCached(ctx, tx, issue.ID, issueTable, bc.Opts, bc.cache)
 	if err != nil {
-		return "", "", false, err
+		return "", "", prepareWrite, err
 	}
-	return issueTable, eventTable, skip, nil
+	if skip {
+		return issueTable, eventTable, prepareSkip, nil
+	}
+	return issueTable, eventTable, prepareWrite, nil
 }
 
 // finishCreateIssueInTx is the part of a create after its row is written:
@@ -182,6 +266,7 @@ func prepareCreateIssueInTx(ctx context.Context, tx DBTX, bc *BatchContext, issu
 func finishCreateIssueInTx(ctx context.Context, tx DBTX, bc *BatchContext, issue *types.Issue, actor, issueTable, eventTable string, isNew bool) (CreateIssueResult, error) {
 	var result CreateIssueResult
 	result.markChanged(issueTable)
+	result.isNew = isNew
 
 	// Reconcile the ephemeral lease row with the accepted issue state
 	// (restore an imported lease / drop an orphaned one — see
@@ -230,8 +315,9 @@ func finishCreateIssueInTx(ctx context.Context, tx DBTX, bc *BatchContext, issue
 	}
 	// Journal the create once, after labels and comments are in the row's
 	// transaction, so the snapshot is the complete bead. The early returns above
-	// (collision skip, stale reject) wrote nothing and journal nothing.
-	if err := RecordEventInTx(ctx, tx, EventCreate, issue.ID, actor); err != nil {
+	// (collision skip, stale reject) wrote nothing and journal nothing. The
+	// record hands the row's arrival_seq back onto issue, which callers keep.
+	if err := RecordCreateEventInTx(ctx, tx, issue, actor); err != nil {
 		return result, err
 	}
 	// The version row is the create's LAST durable-state write. A batch
@@ -240,6 +326,10 @@ func finishCreateIssueInTx(ctx context.Context, tx DBTX, bc *BatchContext, issue
 	// create has nothing after this point and mints here.
 	if bc.DeferVersionMint {
 		result.versionDeferred = true
+	} else if isNew {
+		if err := RecordVersionForCreateInTx(ctx, tx, issue.ID, actor); err != nil {
+			return result, err
+		}
 	} else if err := RecordVersionInTx(ctx, tx, issue.ID, actor); err != nil {
 		return result, err
 	}
@@ -319,6 +409,17 @@ func CreateIssuesInTxWithResult(ctx context.Context, tx DBTX, issues []*types.Is
 	return CreateIssuesInTxWithContext(ctx, tx, bc, issues, actor)
 }
 
+// deferredVersion carries a create's issue id and whether it was a genuinely
+// new row (CreateIssueResult.isNew) from the per-issue loop in
+// CreateIssuesInTxWithContext to that function's own final mint pass. The
+// loop fills it from both of its write paths: a row CreateIssueInTxWithResult
+// wrote on its own, and a row deferredCreates wrote in a multi-row INSERT and
+// finished through finishCreateIssueInTx, which is always new.
+type deferredVersion struct {
+	id    string
+	isNew bool
+}
+
 // CreateIssuesInTxWithContext is CreateIssuesInTxWithResult with a
 // caller-supplied BatchContext. Callers that split config reads from row
 // writes across SQL sessions (doltTransaction's wisp tier) build the context
@@ -355,7 +456,7 @@ func CreateIssuesInTxWithContext(ctx context.Context, tx DBTX, bc *BatchContext,
 	// creation, minted last).
 	batch.DeferVersionMint = true
 	if len(issues) >= createBatchCacheMinIssues && !createFastPathsDisabled.Load() {
-		cache, err := newCreateBatchCache(ctx, tx, issues)
+		cache, err := newCreateBatchCache(ctx, tx, issues, opts)
 		if err != nil {
 			return CreateIssuesResult{}, err
 		}
@@ -364,14 +465,16 @@ func CreateIssuesInTxWithContext(ctx context.Context, tx DBTX, bc *BatchContext,
 
 	result := CreateIssuesResult{}
 	accepted := issues[:0:0]
-	var toVersion []string
+	var toVersion []deferredVersion
 	record := func(issue *types.Issue, issueResult CreateIssueResult) {
 		result.merge(issueResult.ChangedTables)
 		if issueResult.versionDeferred {
-			toVersion = append(toVersion, issue.ID)
+			toVersion = append(toVersion, deferredVersion{id: issue.ID, isNew: issueResult.isNew})
 		}
-		if issueResult.StaleRejected {
-			return // stale snapshot: keep its deps out of the batch too
+		if issueResult.StaleRejected || issueResult.RetiredSkipped {
+			// A stale snapshot or a retired id: nothing of the issue was
+			// written, so keep its deps out of the batch too.
+			return
 		}
 		accepted = append(accepted, issue)
 	}
@@ -446,7 +549,7 @@ func CreateIssuesInTxWithContext(ctx context.Context, tx DBTX, bc *BatchContext,
 	}
 	// The ids are this batch's rows, most of them fresh and edgeless: let the
 	// recompute skip the union statements for those (planRecomputeInTx).
-	recomputed, err := recomputeIsBlockedInTxWithResult(ctx, tx, issueIDs, wispIDs, true)
+	recomputed, err := recomputeIsBlockedInTxWithResult(ctx, tx, issueIDs, wispIDs, recomputeOptions{splitEdgeless: true})
 	if err != nil {
 		return CreateIssuesResult{}, err
 	}
@@ -461,8 +564,14 @@ func CreateIssuesInTxWithContext(ctx context.Context, tx DBTX, bc *BatchContext,
 	// outgoing edge set. PersistDependenciesWithOptionsResult writes the edge
 	// rows directly and mints nothing itself, so this is the one version per
 	// issue at creation. Wisps are excluded by the seam.
-	for _, id := range toVersion {
-		if err := RecordVersionInTx(ctx, tx, id, actor); err != nil {
+	for _, dv := range toVersion {
+		if dv.isNew {
+			if err := RecordVersionForCreateInTx(ctx, tx, dv.id, actor); err != nil {
+				return CreateIssuesResult{}, err
+			}
+			continue
+		}
+		if err := RecordVersionInTx(ctx, tx, dv.id, actor); err != nil {
 			return CreateIssuesResult{}, err
 		}
 	}
@@ -689,6 +798,12 @@ func PrepareIssueForInsert(issue *types.Issue, customStatuses, customTypes []str
 	if issue.ContentHash == "" {
 		issue.ContentHash = issue.ComputeContentHash()
 	}
+	// arrival_seq is assigned by storage alone, at the journal's create seam
+	// (stampArrivalSeqInTx). A value carried in from a caller, an import, or a
+	// row being moved between planes is never stored, and the struct must not
+	// claim one the row does not have; the create record hands the row's own
+	// stamp back (RecordCreateEventInTx).
+	issue.ArrivalSeq = 0
 	return nil
 }
 
@@ -811,7 +926,9 @@ func InsertIssueIfNew(ctx context.Context, tx DBTX, issueTable string, issue *ty
 // cache when it covers the id, and recording the write in cache.
 func insertIssueIfNewCached(ctx context.Context, tx DBTX, issueTable string, issue *types.Issue, opts storage.BatchCreateOptions, cache *createBatchCache) (isNew bool, staleRejected bool, err error) {
 	var existingCount int
-	if issue.ID != "" {
+	// A create-only insert that does not skip conflicts never reads the
+	// count: the strict INSERT itself refuses a duplicate.
+	if issue.ID != "" && (!opts.CreateOnly || opts.ConflictSkip) {
 		existingCount, err = cache.rowCount(ctx, tx, issueTable, issue.ID)
 		if err != nil {
 			return false, false, fmt.Errorf("failed to check issue existence for %s: %w", issue.ID, err)
@@ -1145,7 +1262,7 @@ func PersistDependenciesWithOptionsResult(ctx context.Context, tx DBTX, issues [
 
 			if kind != DepTargetExternal && types.ExtractPrefix(dep.IssueID) == types.ExtractPrefix(dep.DependsOnID) {
 				if err := lookups.checkHierarchy(ctx, tx, dep); err != nil {
-					if opts.SkipDependencyValidationErrors {
+					if opts.SkipDependencyValidationErrors && isDependencyValidationRefusal(err) {
 						recordSkippedDependency(opts, dep, err.Error())
 						continue
 					}
@@ -1154,7 +1271,7 @@ func PersistDependenciesWithOptionsResult(ctx context.Context, tx DBTX, issues [
 			}
 
 			if err := lookups.checkCycle(ctx, tx, dep); err != nil {
-				if opts.SkipDependencyValidationErrors {
+				if opts.SkipDependencyValidationErrors && isDependencyValidationRefusal(err) {
 					recordSkippedDependency(opts, dep, err.Error())
 					continue
 				}
@@ -1221,6 +1338,24 @@ func dependencyCreatedBy(dep *types.Dependency, actor string) string {
 		return dep.CreatedBy
 	}
 	return actor
+}
+
+// isDependencyValidationRefusal reports whether err, from checkHierarchy or
+// checkCycle, is a typed refusal of the edge itself (a self-dependency, a
+// cycle, or a blocker that is the issue's own ancestor or descendant) — the
+// only failures SkipDependencyValidationErrors tolerates. Every other error is
+// a failed walk query (an untranslated statement, a timeout, a dropped
+// connection): recording it as a skipped edge would commit the import without
+// the edge and report the SQL error only as a skip reason. On a backend whose
+// transaction aborts on a failed statement, the import would instead fail
+// later at an unrelated statement, with the real cause hidden in the skip
+// reason.
+func isDependencyValidationRefusal(err error) bool {
+	if errors.Is(err, domain.ErrSelfDependency) || errors.Is(err, domain.ErrDependencyCycle) {
+		return true
+	}
+	var hierarchy *domain.DependencyHierarchyConflictError
+	return errors.As(err, &hierarchy)
 }
 
 func recordSkippedDependency(opts storage.BatchCreateOptions, dep *types.Dependency, reason string) {

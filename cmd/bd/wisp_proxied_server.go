@@ -182,8 +182,9 @@ func runWispGCProxiedServer(ctx context.Context, dryRun bool, ageThreshold time.
 
 	res, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (domain.DeleteIssuesResult, string, error) {
 		// Cascade must stay OFF: findAbandonedWisps already expanded dependents
-		// and kept only unprotected ones; a cascade here re-expands to ALL
-		// transitive dependents, bypassing that protection (GH#4394).
+		// and kept only unprotected ones that meet --age; a cascade here
+		// re-expands to ALL transitive dependents, bypassing that protection
+		// (GH#4394) and sweeping fresh children past the --age filter.
 		// Mirrors runWispGC in wisp.go.
 		res, err := uw.IssueUseCase().DeleteIssues(ctx, domain.DeleteIssuesParams{
 			IDs:                  ids,

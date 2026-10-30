@@ -881,9 +881,11 @@ func TestTreeViewUsesWispDependencyRecords(t *testing.T) {
 		t.Fatalf("AddDependency: %v", err)
 	}
 
-	allDeps, err := store.GetAllDependencyRecords(ctx)
+	// The tree's own edge read: the listed issues' records, which for a wisp
+	// live in wisp_dependencies.
+	allDeps, err := listDependencyRecords(ctx, store, []*types.Issue{parent, child})
 	if err != nil {
-		t.Fatalf("GetAllDependencyRecords: %v", err)
+		t.Fatalf("listDependencyRecords: %v", err)
 	}
 	if ds := allDeps[child.ID]; len(ds) != 1 || ds[0].DependsOnID != parent.ID {
 		t.Fatalf("wisp dependency records = %+v, want child -> parent", ds)

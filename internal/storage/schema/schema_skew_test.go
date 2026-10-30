@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -320,5 +321,180 @@ func TestCheckBehindDrift_FreshDB_ReturnsSchemaBehindError(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+// -- CheckReadableDrift unit tests (mock DB) --
+
+// readableColumns stands in for the projection a caller passes.
+var readableColumns = []string{"id", "arrival_seq"}
+
+func expectMainCursor(mock sqlmock.Sqlmock, version int) {
+	expectCursorProbe(mock, "schema_migrations", true)
+	mock.ExpectQuery(`SELECT COALESCE\(MAX\(version\), 0\) FROM schema_migrations`).
+		WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(version))
+}
+
+// expectIssuesColumns mocks missingColumns' read of issues: the table probe,
+// then the SHOW COLUMNS listing with these names in its Field column.
+func expectIssuesColumns(mock sqlmock.Sqlmock, columns ...string) {
+	expectCursorProbe(mock, "issues", true)
+	rows := sqlmock.NewRows([]string{"Field", "Type", "Null", "Key", "Default", "Extra"})
+	for _, column := range columns {
+		rows.AddRow(column, "bigint", "YES", "", nil, "")
+	}
+	mock.ExpectQuery(`^SHOW COLUMNS FROM issues$`).WillReturnRows(rows)
+}
+
+func TestCheckReadableDrift(t *testing.T) {
+	behind := LatestVersion() - 1
+	for _, tc := range []struct {
+		name   string
+		expect func(sqlmock.Sqlmock)
+		// check judges the returned error.
+		check func(t *testing.T, err error)
+	}{
+		{
+			// A database at the binary's version costs nothing beyond the
+			// version read: no column listing is expected.
+			name:   "at latest",
+			expect: func(mock sqlmock.Sqlmock) { expectMainCursor(mock, LatestVersion()) },
+			check:  requireNoDriftError,
+		},
+		{
+			name:   "ahead is refused as forward drift",
+			expect: func(mock sqlmock.Sqlmock) { expectMainCursor(mock, LatestVersion()+1) },
+			check: func(t *testing.T, err error) {
+				if !IsSchemaSkewError(err) {
+					t.Fatalf("CheckReadableDrift = %T (%v), want *SchemaSkewError", err, err)
+				}
+			},
+		},
+		{
+			// bd-578h9.5 / #5920: a behind database that still has every
+			// column the reads select keeps serving them. Column names
+			// compare case-insensitively.
+			name: "behind with every column stays readable",
+			expect: func(mock sqlmock.Sqlmock) {
+				expectMainCursor(mock, behind)
+				expectIssuesColumns(mock, "id", "title", "ARRIVAL_SEQ")
+			},
+			check: requireNoDriftError,
+		},
+		{
+			name: "behind and missing a column is refused",
+			expect: func(mock sqlmock.Sqlmock) {
+				expectMainCursor(mock, behind)
+				expectIssuesColumns(mock, "id", "title")
+			},
+			check: requireBehindError(behind),
+		},
+		{
+			// No issues table at all: every column is missing. The listing
+			// is never sent, since SHOW COLUMNS on a missing table fails and
+			// pins the session (be-bv7x).
+			name: "behind without an issues table is refused",
+			expect: func(mock sqlmock.Sqlmock) {
+				expectMainCursor(mock, behind)
+				mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = DATABASE()")).
+					WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+				mock.ExpectQuery("^SHOW TABLES$").
+					WillReturnRows(sqlmock.NewRows([]string{"Tables_in_testdb"}).AddRow("schema_migrations"))
+			},
+			check: requireBehindError(behind),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("sqlmock.New: %v", err)
+			}
+			defer db.Close()
+			tc.expect(mock)
+			tc.check(t, CheckReadableDrift(context.Background(), db, "issues", readableColumns))
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("unmet sql expectations: %v", err)
+			}
+		})
+	}
+}
+
+func TestCheckReadableDrift_EscapeHatchReadsAnyway(t *testing.T) {
+	t.Setenv("BD_IGNORE_SCHEMA_SKEW", "1")
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+	behind := LatestVersion() - 1
+	expectMainCursor(mock, behind)
+	expectIssuesColumns(mock, "id")
+
+	origStderr := os.Stderr
+	r, w, pipeErr := os.Pipe()
+	if pipeErr != nil {
+		t.Fatal(pipeErr)
+	}
+	os.Stderr = w
+	gotErr := CheckReadableDrift(context.Background(), db, "issues", readableColumns)
+	_ = w.Close()
+	os.Stderr = origStderr
+	var buf bytes.Buffer
+	if _, copyErr := io.Copy(&buf, r); copyErr != nil {
+		t.Fatal(copyErr)
+	}
+	_ = r.Close()
+
+	if gotErr != nil {
+		t.Fatalf("CheckReadableDrift = %v, want nil when BD_IGNORE_SCHEMA_SKEW=1", gotErr)
+	}
+	wantWarning := fmt.Sprintf("database (v%d) is behind binary (v%d)", behind, LatestVersion())
+	if !strings.Contains(buf.String(), wantWarning) {
+		t.Errorf("stderr = %q, want a warning containing %q", buf.String(), wantWarning)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+// TestSchemaBehindError_GatewayRemedy pins that a gateway's refusal does not
+// send its reader to `bd migrate schema`, which bd never runs against a
+// schema the gateway server owns.
+func TestSchemaBehindError_GatewayRemedy(t *testing.T) {
+	err := &SchemaBehindError{DBVersion: 72, BinaryVersion: 73, Gateway: true}
+	msg := err.Error()
+	for _, want := range []string{"database is at v72, binary expects v73", "gateway server owns", "server administrator", "schema v72"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("gateway refusal %q is missing %q", msg, want)
+		}
+	}
+	if strings.Contains(msg, "bd migrate schema") {
+		t.Errorf("gateway refusal prescribes `bd migrate schema`: %q", msg)
+	}
+	if !IsSchemaBehindError(err) {
+		t.Error("IsSchemaBehindError(gateway refusal) = false, want true")
+	}
+}
+
+func requireNoDriftError(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("CheckReadableDrift = %v, want nil", err)
+	}
+}
+
+func requireBehindError(dbVersion int) func(t *testing.T, err error) {
+	return func(t *testing.T, err error) {
+		t.Helper()
+		var behindErr *SchemaBehindError
+		if !errors.As(err, &behindErr) {
+			t.Fatalf("CheckReadableDrift = %T (%v), want *SchemaBehindError", err, err)
+		}
+		if behindErr.DBVersion != dbVersion || behindErr.BinaryVersion != LatestVersion() {
+			t.Errorf("SchemaBehindError = v%d/v%d, want v%d/v%d", behindErr.DBVersion, behindErr.BinaryVersion, dbVersion, LatestVersion())
+		}
+		if behindErr.Gateway {
+			t.Error("CheckReadableDrift set Gateway; only the gateway open path may")
+		}
 	}
 }

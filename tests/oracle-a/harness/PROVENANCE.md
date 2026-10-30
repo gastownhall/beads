@@ -31,10 +31,14 @@ the current "before" rather than a checked-in snapshot.
 ## Environment contract
 
 The scenario runner scrubs the environment to an explicit whitelist
-(`PATH`/`HOME`/`TMPDIR` + `BEADS_TEST_MODE=1`) via `env_clear()` rather than
-inheriting the host environment, so a green certifies the same configuration on
-every host and run. The `BEADS_TEST_MODE=1` store-construction delta is a
-documented ungated gap (see `../README.md`).
+(`PATH`/`HOME`/`TMPDIR` + `BEADS_TEST_MODE=1` + `BEADS_TIP_SEED`) via
+`env_clear()` rather than inheriting the host environment, so a green certifies
+the same configuration on every host and run. `BEADS_TIP_SEED` (`TIP_SEED` in
+`src/differential.rs`) pins bd's otherwise clock-seeded tip roll, so where the
+host makes a tip eligible it prints on the same step every run and tip changes
+still diverge; where no tip is eligible none prints (see `../README.md`). The
+`BEADS_TEST_MODE=1` store-construction delta is a documented ungated gap (see
+`../README.md`).
 
 ## Cargo manifest
 

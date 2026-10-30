@@ -1230,7 +1230,8 @@ async def close_issue(
 
 @mcp.tool(
     name="reopen",
-    description="Reopen one or more closed issues. Sets status to 'open' and clears closed_at timestamp.",
+    description="Reopen one or more closed issues. Sets status to 'open' and clears closed_at timestamp. "
+    "Fails if none of the issues is closed.",
 )
 @with_workspace
 @require_context

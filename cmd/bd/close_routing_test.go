@@ -69,6 +69,7 @@ func TestResolveCloseTargets(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			initConfigForTest(t)
+			neutralizeRoutingModeEnv(t)
 
 			tmpDir := t.TempDir()
 			repoDir := filepath.Join(tmpDir, "repo")

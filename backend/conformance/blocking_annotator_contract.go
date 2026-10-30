@@ -546,3 +546,65 @@ func assertParent(t *testing.T, result publicops.BlockingResult, id, want string
 		t.Errorf("entry %s parent = %q, want %q", id, got, want)
 	}
 }
+
+// RunBlockingAnnotatorReportsTheTransitiveBlockedFlag pins
+// BlockingRequest.IncludeIsBlocked and IssueBlocking.IsBlocked: asked, each id
+// with a row carries its STORED TRANSITIVE is_blocked flag — a child of a
+// blocked parent is blocked with no blocking edge of its own, which BlockedBy
+// alone would read as free — and an id naming no row carries none. Unasked,
+// no item carries a flag. This is the read issueops.BlockedFlags (storage's
+// IsBlockedBatch on a role-served backend) is built on.
+func RunBlockingAnnotatorReportsTheTransitiveBlockedFlag(t *testing.T, ctx context.Context, fixture BlockingAnnotatorFixture) {
+	t.Helper()
+	blocker := fixture.IssuePrefix + "-flag-blocker"
+	blocked := fixture.IssuePrefix + "-flag-blocked"
+	child := fixture.IssuePrefix + "-flag-child"
+	free := fixture.IssuePrefix + "-flag-free"
+	ghost := fixture.IssuePrefix + "-flag-ghost"
+	seedBlockingIssues(t, ctx, fixture, blocker, blocked, child, free)
+	seedBlockingEdge(t, ctx, fixture, child, blocked, types.DepParentChild)
+	seedBlockingEdge(t, ctx, fixture, blocked, blocker, types.DepBlocks)
+
+	ids := []string{blocked, child, free, ghost}
+	unasked := annotateBlocking(t, ctx, fixture, publicops.BlockingRequest{IDs: ids})
+	for _, item := range unasked.Items {
+		if item.IsBlocked != nil {
+			t.Errorf("unasked: %s carries IsBlocked=%v, want no flag", item.ID, *item.IsBlocked)
+		}
+	}
+
+	asked := annotateBlocking(t, ctx, fixture, publicops.BlockingRequest{IDs: ids, IncludeIsBlocked: true})
+	want := map[string]*bool{blocked: new(true), child: new(true), free: new(false), ghost: nil}
+	if len(asked.Items) != len(ids) {
+		t.Fatalf("asked: %d items, want %d", len(asked.Items), len(ids))
+	}
+	for _, item := range asked.Items {
+		w, ok := want[item.ID]
+		if !ok {
+			t.Errorf("asked: unexpected item %s", item.ID)
+			continue
+		}
+		switch {
+		case w == nil && item.IsBlocked != nil:
+			t.Errorf("asked: %s (no row) IsBlocked=%v, want no flag", item.ID, *item.IsBlocked)
+		case w != nil && item.IsBlocked == nil:
+			t.Errorf("asked: %s IsBlocked absent, want %v", item.ID, *w)
+		case w != nil && *item.IsBlocked != *w:
+			t.Errorf("asked: %s IsBlocked=%v, want %v", item.ID, *item.IsBlocked, *w)
+		}
+	}
+
+	flags, err := publicops.BlockedFlags(ctx, fixture.Annotator, append(ids, blocked, ""))
+	if err != nil {
+		t.Fatalf("BlockedFlags: %v", err)
+	}
+	wantFlags := map[string]bool{blocked: true, child: true, free: false}
+	if len(flags) != len(wantFlags) {
+		t.Errorf("BlockedFlags = %v, want %v (no entry for the ghost or the blank id)", flags, wantFlags)
+	}
+	for id, w := range wantFlags {
+		if got, ok := flags[id]; !ok || got != w {
+			t.Errorf("BlockedFlags[%s] = %v (present %v), want %v", id, got, ok, w)
+		}
+	}
+}

@@ -599,8 +599,9 @@ func TestRemoteReadyClaimerWalksAContendedFront(t *testing.T) {
 }
 
 // TestRemoteBlockingAnnotatorMergesExternalBlockers: the served annotation's
-// own blockers stay, the external ones join them, and the edges behind them
-// are read in chunks the wire accepts.
+// own blockers stay, the external ones join them without an is_blocked flag
+// the request did not ask for, and the edges behind them are read in chunks
+// the wire accepts.
 func TestRemoteBlockingAnnotatorMergesExternalBlockers(t *testing.T) {
 	issues := make([]*types.Issue, 0, 150)
 	ids := make([]string, 0, 150)
@@ -623,6 +624,9 @@ func TestRemoteBlockingAnnotatorMergesExternalBlockers(t *testing.T) {
 	blockedBy := make(map[string][]string, len(result.Items))
 	for _, item := range result.Items {
 		blockedBy[item.ID] = item.BlockedBy
+		if item.IsBlocked != nil {
+			t.Errorf("%s is_blocked = %v unasked, want no flag", item.ID, *item.IsBlocked)
+		}
 	}
 	if want := []string{"be-local", paymentsRef}; !slices.Equal(blockedBy["be-000"], want) {
 		t.Errorf("be-000 blocked by %v, want %v", blockedBy["be-000"], want)

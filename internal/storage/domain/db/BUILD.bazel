@@ -42,6 +42,7 @@ go_library(
 go_test(
     name = "db_test",
     srcs = [
+        "batching_dedupe_test.go",
         "batching_test.go",
         "child_counter_test.go",
         "close_checked_usecase_test.go",
@@ -67,6 +68,8 @@ go_test(
         "issue_cross_tier_test.go",
         "issue_descendants_test.go",
         "issue_force_close_policy_test.go",
+        "issue_insert_history_off_test.go",
+        "issue_insert_retired_guard_test.go",
         "issue_mergeops_test.go",
         "issue_scan_parity_test.go",
         "issue_search_counts_missing_table_test.go",
@@ -82,6 +85,7 @@ go_test(
         "issue_usecase_as_of_test.go",
         "issue_usecase_delete_test.go",
         "issue_usecase_test.go",
+        "journal_arrival_seq_test.go",
         "journal_behavior_test.go",
         "journal_completeness_test.go",
         "journal_doltignore_test.go",
@@ -114,6 +118,7 @@ go_test(
         "//internal/storage/journalscan",
         "//internal/storage/schema",
         "//internal/storage/sqlbuild",
+        "//internal/storage/sqlcount",
         "//internal/testutil",
         "//internal/types",
         "//issueops",

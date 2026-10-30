@@ -40,6 +40,18 @@ func bdUndefer(t *testing.T, bd, dir string, args ...string) string {
 	return stdout.String()
 }
 
+// bdStderrAllowError runs bd with the given args and returns stderr and the
+// exit error without failing the test. BD_NO_PARTIAL_ID_NOTICE is dropped so
+// an inherited opt-out cannot hide the partial-ID notice a caller counts.
+func bdStderrAllowError(t *testing.T, bd, dir string, args ...string) (string, error) {
+	t.Helper()
+	cmd := exec.Command(bd, args...)
+	cmd.Dir = dir
+	cmd.Env = envWithout(bdEnv(dir), "BD_NO_PARTIAL_ID_NOTICE")
+	_, stderr, err := runCommandBuffers(t, cmd)
+	return stderr.String(), err
+}
+
 // getIssueStatus returns the status of an issue via bd show --json.
 func getIssueStatus(t *testing.T, bd, dir, id string) string {
 	t.Helper()
@@ -138,6 +150,33 @@ func TestEmbeddedDefer(t *testing.T) {
 		out := bdDefer(t, bd, dir, issue.ID)
 		if !strings.Contains(out, "Deferred") {
 			t.Errorf("expected 'Deferred' on second defer: %s", out)
+		}
+	})
+
+	// ===== Partial ID (mc-qec7j) =====
+
+	t.Run("defer_partial_id_notice_once", func(t *testing.T) {
+		// An explicit ID keeps the abbreviation unambiguous in this workspace.
+		issue := bdCreate(t, bd, dir, "Defer partial ID", "--type", "task", "--id", "df-qec7jnotice")
+
+		// Every argument is resolved before any write, so one unresolvable
+		// argument still aborts the whole command.
+		if stderr, err := bdStderrAllowError(t, bd, dir, "defer", "qec7jnot", "df-qec7jmissing"); err == nil {
+			t.Errorf("bd defer with an unresolvable ID succeeded; want a non-zero exit\nstderr:\n%s", stderr)
+		}
+		if status := getIssueStatus(t, bd, dir, issue.ID); status != "open" {
+			t.Errorf("aborted bd defer changed %s to %q; want it left open", issue.ID, status)
+		}
+
+		stderr, err := bdStderrAllowError(t, bd, dir, "defer", "qec7jnot")
+		if err != nil {
+			t.Fatalf("bd defer qec7jnot failed: %v\nstderr:\n%s", err, stderr)
+		}
+		if n := strings.Count(stderr, `"qec7jnot" is not an exact issue ID`); n != 1 {
+			t.Errorf("partial-ID notice printed %d times; want exactly once\nstderr:\n%s", n, stderr)
+		}
+		if status := getIssueStatus(t, bd, dir, issue.ID); status != "deferred" {
+			t.Errorf("expected status=deferred, got %q", status)
 		}
 	})
 }

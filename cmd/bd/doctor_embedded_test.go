@@ -43,10 +43,10 @@ func runBDSplit(t *testing.T, bd, dir string, args ...string) (stdout, stderr st
 	return stdoutBuf.String(), stderrBuf.String(), err
 }
 
-// TestDoctorEmbeddedSupportedChecks verifies that --check=artifacts,
+// TestEmbeddedDoctorSupportedChecks verifies that --check=artifacts,
 // --check=conventions, and --check=pollution run in embedded mode rather
 // than hitting the "not yet supported" stub (GH#3597).
-func TestDoctorEmbeddedSupportedChecks(t *testing.T) {
+func TestEmbeddedDoctorSupportedChecks(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -83,11 +83,11 @@ func TestDoctorEmbeddedSupportedChecks(t *testing.T) {
 	}
 }
 
-// TestDoctorEmbeddedUnsupportedJSON verifies that variants which still require
+// TestEmbeddedDoctorUnsupportedJSON verifies that variants which still require
 // server mode (bare doctor, --check=validate) emit a structured JSON payload
 // when --json or --agent --json is set, rather than the prose stub. Tooling
 // can detect "unsupported" without text-matching (GH#3597).
-func TestDoctorEmbeddedUnsupportedJSON(t *testing.T) {
+func TestEmbeddedDoctorUnsupportedJSON(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -150,10 +150,10 @@ func TestDoctorEmbeddedUnsupportedJSON(t *testing.T) {
 	}
 }
 
-// TestDoctorEmbeddedUnsupportedProse verifies that bare bd doctor (without
+// TestEmbeddedDoctorUnsupportedProse verifies that bare bd doctor (without
 // --json) still emits the human-readable prose stub for terminal users,
 // pointing at the supported --check=* variants (GH#3597).
-func TestDoctorEmbeddedUnsupportedProse(t *testing.T) {
+func TestEmbeddedDoctorUnsupportedProse(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}

@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	storeissueops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/internal/utils"
 	"github.com/steveyegge/beads/issueops"
 )
 
@@ -123,7 +125,12 @@ Force: Delete and orphan dependents
 		// stays in the front door: issueops.DeleteRequest.IDs are exact, because
 		// resolving an ambiguous prefix and then deleting the row it hit is the
 		// one place a convenience is not.
-		routedResult, err := resolveAndGetIssueForMutation(ctx, store, issueID)
+		//
+		// Exact here too, never a leading-prefix abbreviation: an id that is
+		// gone (already deleted, a re-run script) would otherwise resolve to
+		// whichever surviving issue's id it begins, and the preview would
+		// print `bd delete <that issue> --force` as the next step.
+		routedResult, err := resolveAndGetIssueForMutationExact(ctx, store, issueID)
 		if err != nil {
 			// mc-zndi7.81: this pre-flight existence check runs before
 			// deleter.Delete() and the per-id lock fence #7244 added, so a
@@ -135,6 +142,9 @@ Force: Delete and orphan dependents
 			}
 			if isNotFoundErr(err) {
 				return HandleError("issue %s not found", issueID)
+			}
+			if refusal := deleteAbbreviationRefusal(err); refusal != nil {
+				return HandleError("%v", refusal)
 			}
 			return HandleError("%v", err)
 		}
@@ -303,6 +313,34 @@ func renderSingleDeletePreview(
 	return nil
 }
 
+// deleteAbbreviationRefusal is the refusal of an id that names no issue
+// exactly but is the start of one or more: delete needs the full id, so say
+// that and name the ids it begins. It is nil for any other error.
+func deleteAbbreviationRefusal(err error) error {
+	var abbrev *utils.AbbreviatedIDError
+	if !errors.As(err, &abbrev) {
+		return nil
+	}
+	return &deleteAbbreviationError{abbrev: abbrev}
+}
+
+// deleteAbbreviationError is that refusal. To a delete, an id that is only the
+// start of other ids names no row, so the text leads with "not found" — the
+// words gascity's isBdNotFound reads as an already-gone bead — and the error
+// unwraps to storage.ErrNotFound, which lets a guarded `bd delete --cascade`
+// report it as the same lost race as any other gone target (see
+// reportIfRevisionTargetGone).
+type deleteAbbreviationError struct {
+	abbrev *utils.AbbreviatedIDError
+}
+
+func (e *deleteAbbreviationError) Error() string {
+	return fmt.Sprintf("issue %q not found: bd delete needs the full issue id, and %q is only the start of %s",
+		e.abbrev.Input, e.abbrev.Input, strings.Join(e.abbrev.Matches, ", "))
+}
+
+func (e *deleteAbbreviationError) Unwrap() []error { return []error{storage.ErrNotFound, e.abbrev} }
+
 // deleteIssue removes an issue from the database.
 func deleteIssue(ctx context.Context, issueID string) error {
 	return store.DeleteIssue(ctx, issueID)
@@ -311,9 +349,11 @@ func deleteIssue(ctx context.Context, issueID string) error {
 // deleteBatch is the multi-id and cascade path, shared by `bd delete`,
 // `bd cleanup`, `bd wisp gc` and `bd mol burn`.
 //
-// It resolves the ids the way this front door always has - prefix matching and
+// It resolves the ids in the front door - exact-id matching and
 // cross-repository routing, which issueops.DeleteRequest deliberately does not
-// do - and hands the RESOLVED ids to the role.
+// do - and hands the RESOLVED ids to the role. Never a leading-prefix
+// abbreviation: a re-run of a finished --from-file list would otherwise
+// delete every surviving issue whose id one of its ids begins.
 //
 // ifRevision is non-nil only via `bd delete`'s own --if-revision (beads#4682);
 // its other three callers always pass nil, and requireSingleIfRevisionID has
@@ -321,6 +361,13 @@ func deleteIssue(ctx context.Context, issueID string) error {
 //
 //nolint:unparam // cmd parameter required for potential future use
 func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, cascade bool, jsonOutput bool, _ bool, ifRevision *int64, _ ...string) error {
+	return deleteBatchReporting(issueIDs, force, dryRun, cascade, jsonOutput, ifRevision, nil)
+}
+
+// deleteBatchReporting is deleteBatch for a bulk command that reports on its
+// own selection: report's members (`bd admin cleanup`'s retention_required) are added to the --json preview and result. A nil report
+// adds nothing, which is deleteBatch.
+func deleteBatchReporting(issueIDs []string, force, dryRun, cascade, jsonOutput bool, ifRevision *int64, report map[string]interface{}) error {
 	if store == nil {
 		if err := ensureStoreActive(); err != nil {
 			return err
@@ -332,10 +379,12 @@ func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, c
 	notFound := []string{}
 	var routedStore storage.DoltStorage
 	for _, id := range issueIDs {
-		result, err := resolveAndGetIssueForMutation(ctx, store, id)
+		result, err := resolveAndGetIssueForMutationExact(ctx, store, id)
 		if err != nil {
 			if isNotFoundErr(err) {
 				notFound = append(notFound, id)
+			} else if refusal := deleteAbbreviationRefusal(err); refusal != nil {
+				return refusal
 			} else {
 				return fmt.Errorf("getting issue %s: %v", id, err)
 			}
@@ -400,7 +449,7 @@ func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, c
 					return err
 				}
 			}
-			if previewErr := outputDeletionPreview(resolvedIDs, issues, cascade, dryRun, nil, err, jsonOutput); previewErr != nil {
+			if previewErr := outputDeletionPreviewReporting(resolvedIDs, issues, cascade, dryRun, nil, err, jsonOutput, report); previewErr != nil {
 				return previewErr
 			}
 			if jsonOutput {
@@ -408,7 +457,7 @@ func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, c
 			}
 			return err
 		}
-		if previewErr := outputDeletionPreview(resolvedIDs, issues, cascade, dryRun, &result, nil, jsonOutput); previewErr != nil {
+		if previewErr := outputDeletionPreviewReporting(resolvedIDs, issues, cascade, dryRun, &result, nil, jsonOutput, report); previewErr != nil {
 			return previewErr
 		}
 		if !dryRun && !jsonOutput && !isQuiet() {
@@ -442,7 +491,7 @@ func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, c
 	// deleted from, and defers it in batch and off modes.
 
 	if jsonOutput {
-		if err := outputJSON(map[string]interface{}{
+		answer := map[string]interface{}{
 			"deleted":              resolvedIDs,
 			"deleted_count":        result.Deleted,
 			"dependencies_removed": result.Dependencies,
@@ -450,7 +499,11 @@ func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, c
 			"events_removed":       result.Events,
 			"references_updated":   result.ReferencesUpdated,
 			"orphaned_issues":      result.Orphaned,
-		}); err != nil {
+		}
+		for key, value := range report {
+			answer[key] = value
+		}
+		if err := outputJSON(answer); err != nil {
 			return err
 		}
 	} else {
@@ -474,12 +527,21 @@ func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, c
 // beside a refusal would read as "nothing would have been deleted" rather than
 // "we did not get that far".
 func outputDeletionPreview(issueIDs []string, issues map[string]*types.Issue, cascade bool, dryRun bool, result *issueops.DeleteResult, depError error, jsonOutput bool) error {
+	return outputDeletionPreviewReporting(issueIDs, issues, cascade, dryRun, result, depError, jsonOutput, nil)
+}
+
+// outputDeletionPreviewReporting is outputDeletionPreview with report's
+// members added to the --json preview (see deleteBatchReporting).
+func outputDeletionPreviewReporting(issueIDs []string, issues map[string]*types.Issue, cascade bool, dryRun bool, result *issueops.DeleteResult, depError error, jsonOutput bool, report map[string]interface{}) error {
 	if jsonOutput {
 		preview := map[string]interface{}{
 			"preview":   true,
 			"dry_run":   dryRun,
 			"issue_ids": issueIDs,
 			"cascade":   cascade,
+		}
+		for key, value := range report {
+			preview[key] = value
 		}
 		if result != nil {
 			preview["would_delete"] = result.Deleted

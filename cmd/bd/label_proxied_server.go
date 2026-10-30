@@ -166,7 +166,7 @@ func runLabelPropagateProxiedServer(ctx context.Context, args []string) error {
 		return HandleErrorRespectJSON("label cannot be empty")
 	}
 	if strings.HasPrefix(label, "provides:") {
-		return HandleErrorRespectJSON("'provides:' labels are reserved for cross-project capabilities. Hint: use 'bd ship %s' instead", strings.TrimPrefix(label, "provides:"))
+		return HandleErrorRespectJSON("'provides:' labels are reserved for cross-project capabilities. Hint: use %s instead", shipCommand(strings.TrimPrefix(label, "provides:")))
 	}
 	if uowProvider == nil {
 		return HandleError("proxied-server UOW provider not initialized")

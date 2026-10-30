@@ -8,6 +8,7 @@ import (
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/issueops"
 )
 
 var (
@@ -26,7 +27,9 @@ var gcCmd = &cobra.Command{
 	Long: `Full lifecycle garbage collection for standalone Beads databases.
 
 Runs three phases in sequence:
-  1. DECAY   — Delete closed issues older than N days (default 90)
+  1. DECAY   — Delete closed issues older than N days (default 90), except
+               those of a type the workspace's types.retained setting names
+               (only bd prune/purge --retain-ids deletes those)
   2. COMPACT — Squash old Dolt commits into fewer commits (bd compact)
   3. GC      — Run Dolt garbage collection to reclaim disk space
 
@@ -50,6 +53,9 @@ Examples:
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, _ []string) error {
+		if !gcSkipDecay {
+			warnIgnoredYAMLRetainedTypes()
+		}
 		if usesProxiedServer() {
 			return runGCProxiedServer(rootCtx)
 		}
@@ -76,6 +82,7 @@ Examples:
 			detail  string
 		}
 		var results []phaseResult
+		retentionKept := 0
 
 		if gcSkipDecay {
 			results = append(results, phaseResult{name: "Decay", skipped: true})
@@ -96,7 +103,9 @@ Examples:
 				MaxRowsSource: "",
 			}
 
-			closedIssues, err := store.SearchIssues(ctx, "", filter)
+			// The closed issues and types.retained come from one snapshot, so
+			// the hold-back below uses the setting the selection's snapshot held.
+			closedIssues, retained, err := storage.SearchIssuesWithConfig(ctx, store, "", filter, issueops.SettingKeyTypesRetained)
 			if err != nil {
 				return HandleErrorRespectJSON("searching closed issues: %v", err)
 			}
@@ -104,6 +113,11 @@ Examples:
 			var stats closedDeletionCandidateStats
 			closedIssues, stats = filterClosedDeletionCandidates(closedIssues, &cutoffTime)
 			warnClosedDeletionSafetySkips(stats)
+
+			closedIssues, retentionKept = holdBackRetainedTypes(closedIssues, retained)
+			if retentionKept > 0 && !jsonOutput {
+				fmt.Println(retainedTypesKeptLine(retentionKept, "closed issue(s)"))
+			}
 
 			if len(closedIssues) == 0 {
 				detail := fmt.Sprintf("  No closed issues older than %d days", cutoffDays)
@@ -267,6 +281,9 @@ Examples:
 				phases = append(phases, p)
 			}
 			summaryMap["phases"] = phases
+			if retentionKept > 0 {
+				summaryMap["retention_required"] = retentionKept
+			}
 			if gcSizeInfo != nil {
 				summaryMap["dolt_gc"] = gcSizeInfo
 			}

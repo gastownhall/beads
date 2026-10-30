@@ -90,8 +90,25 @@ orchestration layer.
 introspection, storage-specific retry or crash-recovery logic, or public SDK
 return types that leak driver internals. If the boundary is too narrow, widen
 the interface or route the issue to the driver instead of patching around it
-in beads. `bd doctor` support for embedded mode is enabled one subcommand at a
-time, each human-vetted (GH#3794): do not lift the embedded-mode gate in
+in beads. One maintainer-granted exception: `databaseLocked` in
+`internal/doltserver` takes a shared, non-blocking lock on Dolt's own
+`.dolt/noms/LOCK` and releases it at once (it never creates or writes the
+file), only to decide whether the workspace's Dolt database directory (the
+store's CLI directory: `.beads/dolt/<db>` by default, or `<db>` under a
+custom `dolt_data_dir` or under the shared server's data directory) is served
+by a live dolt process, so bd runs the dolt CLI there only for a served
+directory. A busy lock (another process holds it, as every dolt process with
+the database open does) counts as served. A probe
+that cannot open the file, or whose lock call fails for any other reason,
+counts as not served, which sends bd through the SQL server (the safe
+direction). The exception ends once the Dolt driver can report whether a
+directory is served, and covers no other lock (the test-only
+`testutil.HoldDoltDatabaseLock` is outside it). The same proof also reads
+Dolt's `.dolt/sql-server.info` for the port and PID it names, as the dolt CLI
+does, the way bd already reads the remotes in Dolt's repo state file
+(`PersistedRemoteInfos`). `bd doctor` support for
+embedded mode is enabled one subcommand at a time, each human-vetted
+(GH#3794): do not lift the embedded-mode gate in
 `cmd/bd/doctor.go` wholesale, and keep database-layer checks and fixes
 server-gated until the driver interface covers them.
 
@@ -126,9 +143,29 @@ make install       # build and install bd to ~/.local/bin (canonical)
   certificate `--config=remote-exec`, agent hosts whose `~/.bazelrc` names the
   executor neither. Make yours the default with a `build --config=...` line in
   the gitignored `.bazelrc.local`, or pass `BAZEL_FLAGS=...` to make.
-- `go test` (`./scripts/test.sh`, `make test-go`) is an inner-loop
-  convenience only. CI does not enforce it, and it skips nogo, gofmt and the
-  guards; finish with `make test`.
+- Agents run tests only with `bazel test`, also while iterating on one
+  behavior:
+
+  ```bash
+  bazel test //cmd/bd:bd_test --config=ci --test_filter='^TestName$' --test_output=all
+  ```
+
+  A target also passes when the test never ran (a filter that matches
+  nothing, a skip, a file the configuration does not compile), so count a run
+  only when its log shows `--- PASS: TestName` and no `--- SKIP` for the test
+  or a `TestName/...` subtest: Go prints `--- PASS` for a test whose every
+  subtest skipped. "Check That the Test Ran" in
+  [engdocs/TESTING.md](engdocs/TESTING.md) names the tests `--config=ci` does
+  not run (Dolt-backed, `-short`-gated, integration-tagged, `TestEmbedded*`
+  and embedded-Dolt, files `BUILD.bazel` does not list) and the way into
+  each. An unchanged target returns its cached result, which is the same
+  evidence. Finish with `make test`.
+- Agents do not run `go test` (`./scripts/test.sh`, `make test-go`): CI does
+  not enforce it, it skips nogo, gofmt and the guards, and agent hosts may
+  refuse it. It stays a convenience for humans working offline. The exception
+  is regenerating golden files (`make corpus-regen`, `make githooks-regen`,
+  `BD_UPDATE_GOLDEN=1`), which Bazel cannot do: see "Regenerating Golden
+  Files" in [engdocs/TESTING.md](engdocs/TESTING.md).
 - **Do NOT** use `go build -o bd ./cmd/bd`, `go install ./cmd/bd`, or raw
   `go run ./cmd/bd ...`: they bypass the canonical build path, leave stale
   binaries, and raw `go run` misses the `gms_pure_go` tag. Use `make install`,

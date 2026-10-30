@@ -133,6 +133,7 @@ func TestIssueMethodPathBuildsTheSuffixIntoTheFinalSegment(t *testing.T) {
 		{MethodClose, "/v0/beads/issues/ga-1:close"},
 		{MethodReopen, "/v0/beads/issues/ga-1:reopen"},
 		{MethodRelease, "/v0/beads/issues/ga-1:release"},
+		{MethodHeartbeat, "/v0/beads/issues/ga-1:heartbeat"},
 	}
 	for _, tc := range cases {
 		got, err := IssueMethodPath("ga-1", tc.method)

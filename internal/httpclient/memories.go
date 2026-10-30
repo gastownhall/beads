@@ -5,6 +5,7 @@ package httpclient
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
@@ -66,9 +67,10 @@ func (m *httpMemories) Recall(ctx context.Context, req memoryops.RecallRequest) 
 	if err != nil {
 		return memoryops.RecallResult{}, err
 	}
-	// Found is Value != "": the role conflates a stored empty string with an
-	// absent memory, and so does the wire, which 404s the same row.
-	return memoryops.RecallResult{Key: req.Key, Value: res.Value, Found: res.Value != ""}, nil
+	// Found is about the ROW, not the value: the wire spells a miss as the 404
+	// handled above, and a row stored as the empty string as a 200 with an
+	// empty value. Reading Found off Value would hide that row again.
+	return memoryops.RecallResult{Key: req.Key, Value: res.Value, Found: true}, nil
 }
 
 // Forget removes one memory and reports the value it removed.
@@ -94,10 +96,19 @@ func (m *httpMemories) Forget(ctx context.Context, req memoryops.ForgetRequest) 
 // The folding is the ROLE's, so it happens server-side: the raw term goes on the
 // wire as `search` and the server's own role lowercases both sides. Folding it
 // here as well would be a second implementation of a rule that has one.
+//
+// A TRUNCATED PAGE IS REFUSED. The envelope is paginated but ListResult has no
+// cursor, so a page reporting has_more would pass a partial plane off as the
+// whole one, and `bd export` would drop the rest without a word. No v0 server
+// truncates; this keeps the day one does from becoming a silent loss.
 func (m *httpMemories) List(ctx context.Context, req memoryops.ListRequest) (memoryops.ListResult, error) {
 	page, err := m.wire.ListMemories(ctx, req.Search)
 	if err != nil {
 		return memoryops.ListResult{}, err
+	}
+	if page.HasMore {
+		return memoryops.ListResult{}, fmt.Errorf("listMemories over http: the server returned %d memories with more remaining; "+
+			"refusing a truncated answer (this client cannot page the memory plane)", len(page.Items))
 	}
 	// Empty map, never nil: a caller ranges over it without a nil check, and
 	// "the plane is empty" is not something to spell as an absent answer.

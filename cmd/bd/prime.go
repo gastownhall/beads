@@ -106,6 +106,11 @@ Config options:
   Set via: bd config set agent.profile team-maintainer
   Or per-session: BD_AGENT_PROFILE=team-maintainer (env var takes precedence).
   See docs/getting-started/ide-setup.md#policy-profiles for what each profile means.
+- prime.disabled: When true, bd prime prints nothing, as it does outside a
+  workspace (an empty envelope under --hook-json), whatever its other flags.
+  For sessions whose host briefs the agent itself but that inherit a
+  project's bd prime hook, such as an orchestrator's agent sessions.
+  Set per-session: BD_PRIME_DISABLED=true. Or: bd config set prime.disabled true
 
 	Workflow customization:
 	- Place a PRIME.md file to override the default workflow text. Checked in this
@@ -144,6 +149,15 @@ Memory injection caps:
 				c.CloseEventAndAdd(evt)
 			}
 		}()
+
+		// Before any workspace or store access: a disabled prime costs the
+		// session nothing, the same as running outside a workspace.
+		if primeDisabled() {
+			if primeHookJSONMode {
+				_ = outputHookJSON(os.Stdout, "")
+			}
+			return nil
+		}
 
 		primeMaxMemoriesSet = cmd.Flags().Changed("max-memories")
 		primeMaxMemoryCharsSet = cmd.Flags().Changed("max-memory-chars")
@@ -618,6 +632,17 @@ func renderPrimeMemoryPlane(memories map[string]string, compact bool) string {
 // primeConfigInt reads an integer config key (stubbable for tests).
 var primeConfigInt = func(key string) int {
 	return config.GetInt(key)
+}
+
+// primeConfigBool reads a boolean config key (stubbable for tests).
+var primeConfigBool = func(key string) bool {
+	return config.GetBool(key)
+}
+
+// primeDisabled reports whether prime.disabled (usually BD_PRIME_DISABLED in
+// the session's environment) turns bd prime off.
+func primeDisabled() bool {
+	return primeConfigBool("prime.disabled")
 }
 
 // primeMemoryCaps resolves the memory-injection caps. An explicitly passed

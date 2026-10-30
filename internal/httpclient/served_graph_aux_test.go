@@ -177,6 +177,7 @@ func TestServedBlockingAnnotatorContract(t *testing.T) {
 		{"RefusesAnEmptyID", conformance.RunBlockingAnnotatorRefusesAnEmptyID},
 		{"LeavesTheRequestAlone", conformance.RunBlockingAnnotatorLeavesTheRequestAlone},
 		{"WritesNothing", conformance.RunBlockingAnnotatorWritesNothing},
+		{"ReportsTheTransitiveBlockedFlag", conformance.RunBlockingAnnotatorReportsTheTransitiveBlockedFlag},
 	} {
 		t.Run(tc.name, func(t *testing.T) { tc.run(t, t.Context(), fixture) })
 	}

@@ -24,6 +24,24 @@ bd dep add issue-2 --depends-on issue-1
 When issue-1 is open, issue-2 won't appear in `bd ready`. Once issue-1
 is closed, issue-2 unblocks automatically.
 
+To add dependencies while creating an issue, `bd create --deps` and the
+`### Dependencies` (or `### Deps`) section of a `bd create --file` batch take
+the same entries:
+
+- a bare id, `depends-on:id` or `blocked-by:id`: the new issue depends on id
+- `blocks:id`: id depends on the new issue
+- any other type from the table below, written `type:id`
+
+In a file, entries are separated by commas, spaces or newlines, so write no
+space after the colon:
+
+```markdown
+## Ship the parser
+
+### Deps
+issue-1, depends-on:issue-2, blocks:issue-3, discovered-from:issue-4
+```
+
 ## Removing Dependencies
 
 ```bash

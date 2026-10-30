@@ -5,7 +5,9 @@ package httpclient
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
+	"strconv"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage"
@@ -283,6 +285,32 @@ func TestServedRolesKeepTheExternalDependencyPolicy(t *testing.T) {
 		if blockedBy := slices.Contains(item.BlockedBy, externalRef); blockedBy != (item.ID == blockedID) {
 			t.Errorf("AnnotateBlocking over http: %s blocked by %v", item.ID, item.BlockedBy)
 		}
+	}
+	// The stored is_blocked column has no external term, so the server calls
+	// the blocked issue unblocked; the flag and the batch read over it must
+	// still say blocked, as Ready does.
+	flagged, err := annotator.AnnotateBlocking(ctx, issueops.BlockingRequest{IDs: []string{blockedID, freeID}, IncludeIsBlocked: true})
+	if err != nil {
+		t.Fatalf("AnnotateBlocking(IncludeIsBlocked) over http: %v", err)
+	}
+	if len(flagged.Items) != 2 {
+		t.Fatalf("AnnotateBlocking(IncludeIsBlocked) over http answered %d items, want 2", len(flagged.Items))
+	}
+	for _, item := range flagged.Items {
+		got := "absent"
+		if item.IsBlocked != nil {
+			got = strconv.FormatBool(*item.IsBlocked)
+		}
+		if want := strconv.FormatBool(item.ID == blockedID); got != want {
+			t.Errorf("AnnotateBlocking(IncludeIsBlocked) over http: %s is_blocked = %s, want %s", item.ID, got, want)
+		}
+	}
+	flags, err := decorated.IsBlockedBatch(ctx, []string{blockedID, freeID})
+	if err != nil {
+		t.Fatalf("IsBlockedBatch over http: %v", err)
+	}
+	if want := map[string]bool{blockedID: true, freeID: false}; !maps.Equal(flags, want) {
+		t.Errorf("IsBlockedBatch over http = %v, want %v", flags, want)
 	}
 
 	walker, err := decorated.TreeWalker()

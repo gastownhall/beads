@@ -6,11 +6,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/steveyegge/beads/cmd/bd/doctor/fix"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
@@ -21,12 +23,16 @@ func CheckInstallation(path string) DoctorCheck {
 		// Auto-detect prefix from directory name
 		prefix := filepath.Base(path)
 		prefix = strings.TrimRight(prefix, "-")
+		// The directory is the checkout's, named by the repository it was
+		// cloned from, so the prefix goes into the command through the
+		// remedy printer (internal/remedy).
+		arg, note := remedy.CommandArg(runtime.GOOS, prefix, "<prefix>")
 
 		return DoctorCheck{
 			Name:    "Installation",
 			Status:  StatusError,
 			Message: "No .beads/ directory found",
-			Fix:     fmt.Sprintf("Run 'bd init --prefix %s' to initialize beads", prefix),
+			Fix:     fmt.Sprintf("Run bd init --prefix %s%s to initialize beads", arg, note),
 		}
 	}
 

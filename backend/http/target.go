@@ -1,6 +1,9 @@
 package bdhttp
 
-import "github.com/steveyegge/beads/internal/httpclient"
+import (
+	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/httpclient"
+)
 
 // Target is the resolved endpoint for one workspace: the server's mount root
 // and, optionally, the workspace identity pinned when it was connected. A
@@ -29,13 +32,24 @@ func TargetPath(beadsDir string) string { return httpclient.TargetPath(beadsDir)
 // opened at all.
 func LoadTarget(beadsDir string) (Target, error) { return httpclient.LoadTarget(beadsDir) }
 
-// SaveTarget writes the sidecar 0600, beside metadata.json. It is the encoder
-// `bd connect` uses; the connect UX around it — gitignore coverage, identity
-// verification, conversion consent — is the CLI's, so an embedder that writes
-// a workspace this way owns those decisions itself.
-func SaveTarget(beadsDir string, t Target) error { return httpclient.SaveTarget(beadsDir, t) }
+// SaveTarget writes the sidecar 0600, beside metadata.json. It writes what
+// Attach (and so `bd connect`) writes; the connect UX around it — gitignore
+// coverage, identity verification, conversion consent — is the CLI's, so an
+// embedder that writes a workspace this way owns those decisions itself.
+//
+// It refuses a workspace in a format this build cannot open, as Attach does,
+// with *UnsupportedWorkspaceFormatError, and a historical SQLite workspace
+// with *LegacyWorkspaceError, and writes nothing there.
+func SaveTarget(beadsDir string, t Target) error {
+	if err := configfile.CheckDiscoveredForOpen(beadsDir); err != nil {
+		return err
+	}
+	return httpclient.SaveTarget(beadsDir, t)
+}
 
 // RemoveTarget deletes the activation sidecar, reporting whether one was
 // there. Detaching is a per-user act, so it never touches the tracked
-// metadata.json that selects the backend.
+// metadata.json that selects the backend. Unlike SaveTarget it does not
+// refuse a workspace in a format this build cannot open: it only deletes
+// this backend's own per-user file.
 func RemoveTarget(beadsDir string) (bool, error) { return httpclient.RemoveTarget(beadsDir) }

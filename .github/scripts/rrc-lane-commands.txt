@@ -12,5 +12,6 @@ test //... --config=doltserver-proxied
 test //... --config=dolt-race
 test //... --config=doltserver-integration
 test //... --config=doltserver-cmd
+test //... --config=dolt-int
 build --config=pure //cmd/bd:bd //cmd/bd:bd_test //internal/storage/embeddeddolt:embeddeddolt_test //internal/tracker:tracker_test
 build --config=js-wasm //internal/hooks:hooks_test
