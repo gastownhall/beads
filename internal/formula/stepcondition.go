@@ -13,6 +13,7 @@ package formula
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -116,6 +117,17 @@ func unquoteValue(s string) string {
 // would otherwise reach the cook dangling and the step would be poured with
 // no edge (or, for waits_for, as a gate that waits for no one).
 //
+// A needs edge that a transform added on its own (a loop chaining one
+// iteration to the next, compose.branch wiring, advice) is not a reference
+// the formula wrote, so it is routed around the excluded step instead, also
+// where a bare waits_for would infer its spawner from it: the kept step
+// needs the excluded step's own needs and depends_on, following any of those
+// that were excluded too through theirs. A loop whose last body step is
+// excluded stays chained through that step's needs, and a compose.branch
+// join waits for the parallel steps that stay. A bare waits_for gate that the
+// route leaves with no needs would wait for no one, so it is rejected like a
+// spawner the formula named.
+//
 // Parameters:
 //   - steps: the steps to filter
 //   - vars: variable values for condition evaluation
@@ -136,7 +148,7 @@ func FilterStepsByCondition(steps []*Step, vars map[string]string) ([]*Step, err
 	}
 
 	var errs []string
-	collectDroppedReferences(result, dropped, &errs)
+	resolveDroppedReferences(result, dropped, &errs)
 	if len(errs) > 0 {
 		return nil, fmt.Errorf("%w:\n  - %s", ErrValidation, strings.Join(errs, "\n  - "))
 	}
@@ -145,10 +157,12 @@ func FilterStepsByCondition(steps []*Step, vars map[string]string) ([]*Step, err
 
 // droppedStep records why FilterStepsByCondition excluded a step: the
 // condition that evaluated false and the ID of the step carrying it (the step
-// itself, or the excluded ancestor it went with).
+// itself, or the excluded ancestor it went with). deps are the excluded
+// step's own needs and depends_on, where a generated edge onto it is routed.
 type droppedStep struct {
 	condition string
 	carrierID string
+	deps      []string
 }
 
 func filterStepsByCondition(steps []*Step, vars map[string]string, dropped map[string]droppedStep) ([]*Step, error) {
@@ -185,40 +199,107 @@ func filterStepsByCondition(steps []*Step, vars map[string]string, dropped map[s
 	return result, nil
 }
 
-// recordDropped marks step and all its descendants as excluded for why.
+// recordDropped marks step and all its descendants as excluded for why, each
+// with its own deps.
 func recordDropped(step *Step, why droppedStep, dropped map[string]droppedStep) {
+	why.deps = slices.Concat(step.Needs, step.DependsOn)
 	dropped[step.ID] = why
 	for _, child := range step.Children {
 		recordDropped(child, why, dropped)
 	}
 }
 
-// collectDroppedReferences appends one line to errs for each reference a kept
-// step makes to a dropped step.
-func collectDroppedReferences(steps []*Step, dropped map[string]droppedStep, errs *[]string) {
+// resolveDroppedReferences goes through the kept steps (the filter's clones)
+// for references to a dropped step: it routes each generated needs edge
+// around the dropped step, and appends one line to errs for each reference
+// the formula wrote and for each bare waits_for gate that the route leaves
+// nothing to wait for.
+func resolveDroppedReferences(steps []*Step, dropped map[string]droppedStep, errs *[]string) {
 	for _, step := range steps {
+		// Read the spawner before routeNeeds rewrites the needs it may
+		// be inferred from.
+		spawner, generated := waitsForSpawner(step)
 		for _, ref := range step.DependsOn {
 			if why, ok := dropped[ref]; ok {
 				*errs = append(*errs, droppedReferenceError(step.ID, "depends_on", ref, why))
 			}
 		}
-		for _, ref := range step.Needs {
-			if why, ok := dropped[ref]; ok {
-				*errs = append(*errs, droppedReferenceError(step.ID, "needs", ref, why))
-			}
-		}
-		if spec := ParseWaitsFor(step.WaitsFor); spec != nil {
-			spawner := spec.SpawnerID
-			if spawner == "" && len(step.Needs) > 0 {
-				spawner = step.Needs[0]
-			}
-			if why, ok := dropped[spawner]; ok {
+		routeNeeds(step, dropped, errs)
+		// "" names no spawner, also where a step without an ID was dropped.
+		if why, ok := dropped[spawner]; ok && spawner != "" {
+			switch {
+			case !generated:
 				*errs = append(*errs, fmt.Sprintf("step %q: waits_for %q waits for the children of %q, but condition %q on step %q drops it from this pour (give %q the same condition, or name a spawner that is always poured)",
+					step.ID, step.WaitsFor, spawner, why.condition, why.carrierID, step.ID))
+			case len(step.Needs) == 0:
+				// routeNeeds routed the generated need and the cook infers
+				// the spawner from the needs it left: none, so the cook would
+				// pour the gate's label with no one to wait for.
+				*errs = append(*errs, fmt.Sprintf("step %q: waits_for %q takes its spawner from the dependency bd, not the formula, added onto %q, but condition %q on step %q drops it from this pour and leaves the gate nothing to wait for (give %q the same condition, or name a spawner that is always poured)",
 					step.ID, step.WaitsFor, spawner, why.condition, why.carrierID, step.ID))
 			}
 		}
-		collectDroppedReferences(step.Children, dropped, errs)
+		resolveDroppedReferences(step.Children, dropped, errs)
 	}
+}
+
+// waitsForSpawner returns the step whose children step's waits_for waits for,
+// as the cook infers it: children-of(id), else needs[0]; "" when there is
+// none. generated reports a needs[0] that a transform added rather than the
+// formula, such as the chain edge a bare gate first in a loop body gets from
+// the iteration before: routeNeeds routes it like any other generated edge,
+// and the cook infers the spawner from what the route leaves.
+func waitsForSpawner(step *Step) (spawner string, generated bool) {
+	spec := ParseWaitsFor(step.WaitsFor)
+	if spec == nil {
+		return "", false
+	}
+	if spec.SpawnerID == "" && len(step.Needs) > 0 {
+		return step.Needs[0], isGeneratedNeed(step, step.Needs[0])
+	}
+	return spec.SpawnerID, false
+}
+
+// routeNeeds rewrites step's needs: a need onto a dropped step that a
+// transform generated is replaced by the steps routeAround finds, and a need
+// the formula wrote onto a dropped step appends a line to errs.
+func routeNeeds(step *Step, dropped map[string]droppedStep, errs *[]string) {
+	needs := step.Needs
+	step.Needs = nil
+	for _, ref := range needs {
+		why, ok := dropped[ref]
+		switch {
+		case !ok:
+			step.Needs = append(step.Needs, ref)
+		case isGeneratedNeed(step, ref):
+			for _, target := range routeAround(ref, dropped, map[string]bool{step.ID: true, ref: true}) {
+				addGeneratedNeed(step, target)
+			}
+		default:
+			*errs = append(*errs, droppedReferenceError(step.ID, "needs", ref, why))
+		}
+	}
+}
+
+// routeAround returns the kept steps that a generated edge onto the dropped
+// step id leads to instead: the dropped step's own needs and depends_on, with
+// each of those that was dropped too replaced by its own in turn. seen holds
+// the steps already visited, starting with the step the edge comes from, so
+// that no step is routed onto itself.
+func routeAround(id string, dropped map[string]droppedStep, seen map[string]bool) []string {
+	var targets []string
+	for _, dep := range dropped[id].deps {
+		if seen[dep] {
+			continue
+		}
+		seen[dep] = true
+		if _, ok := dropped[dep]; ok {
+			targets = append(targets, routeAround(dep, dropped, seen)...)
+			continue
+		}
+		targets = append(targets, dep)
+	}
+	return targets
 }
 
 func droppedReferenceError(stepID, field, ref string, why droppedStep) string {

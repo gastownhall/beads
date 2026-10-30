@@ -1164,12 +1164,16 @@ func collectDependencies(step *formula.Step, idMapping, exitGates map[string]str
 	addBlocks := func(targetStepID string) {
 		targetIssueID, ok := idMapping[targetStepID]
 		if !ok {
-			// FilterStepsByCondition has already rejected a target dropped
-			// by its condition. A target still missing here is a step ID that
-			// control flow replaced: Validate accepts a needs/depends_on of a
-			// loop container as written, ApplyLoops replaces the container
-			// with its expanded body, and rewriteLoopDependencies rewrites
-			// only in-body references, so the external reference is skipped.
+			// FilterStepsByCondition has already rejected a reference the
+			// formula wrote to a step its condition dropped, and routed an
+			// edge that a loop, compose.branch or advice added around one. A
+			// target still missing here is a step that a transform replaced
+			// without rewriting the references to it: a loop container named
+			// from outside the loop (Validate accepts it as written, ApplyLoops
+			// replaces the container with its expanded body, and
+			// rewriteLoopDependencies rewrites only in-body references), or a
+			// step with an inline expand (GH#7637). The edge is dropped, so
+			// this step does not wait for the replaced step's work.
 			return
 		}
 		addBlocksEdge(targetIssueID)
@@ -1192,8 +1196,10 @@ func collectDependencies(step *formula.Step, idMapping, exitGates map[string]str
 
 	// Process waits_for field - fanout gate dependency
 	if waitsForSpec != nil && waitsForSpawnerStepID != "" {
-		// A spawner missing from idMapping is skipped for the same reason as
-		// a missing addBlocks target above.
+		// A spawner missing from idMapping (a replaced step, as for a
+		// missing addBlocks target above) gets no waits-for edge, but
+		// processStepToIssue has already given the step its gate:<value>
+		// label: the gate waits for no one.
 		if spawnerIssueID, ok := idMapping[waitsForSpawnerStepID]; ok {
 			// Spawner identity is the depends_on_id; metadata carries
 			// the gate. A collapsed needs/depends_on edge additionally marks

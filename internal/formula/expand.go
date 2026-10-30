@@ -17,6 +17,7 @@ package formula
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -363,6 +364,11 @@ func UpdateDependenciesForExpansion(steps []*Step, expandedID string, lastExpand
 				clone.Needs[j] = lastExpandedStepID
 			}
 		}
+		for j, need := range clone.generatedNeeds {
+			if need == expandedID {
+				clone.generatedNeeds[j] = lastExpandedStepID
+			}
+		}
 
 		// Handle children recursively
 		if len(step.Children) > 0 {
@@ -409,13 +415,25 @@ func propagateTargetDeps(target *Step, expandedSteps []*Step) {
 		if isRoot {
 			// Prepend target's deps (new slice to avoid aliasing)
 			if len(target.Needs) > 0 {
-				s.Needs = append(append([]string{}, target.Needs...), s.Needs...)
+				prependTargetNeeds(s, target)
 			}
 			if len(target.DependsOn) > 0 {
 				s.DependsOn = append(append([]string{}, target.DependsOn...), s.DependsOn...)
 			}
 		}
 	}
+}
+
+// prependTargetNeeds puts target's needs in front of root's (in a new slice,
+// to avoid aliasing). A need that a transform added to target stays generated
+// on root, unless root's own template already needs that step.
+func prependTargetNeeds(root, target *Step) {
+	for _, ref := range target.generatedNeeds {
+		if !slices.Contains(root.Needs, ref) {
+			root.generatedNeeds = append(root.generatedNeeds, ref)
+		}
+	}
+	root.Needs = append(append([]string{}, target.Needs...), root.Needs...)
 }
 
 // MaterializeExpansion converts a standalone expansion formula into a cookable

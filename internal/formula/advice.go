@@ -14,6 +14,7 @@ package formula
 
 import (
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -123,12 +124,12 @@ func applyAdviceWithGuard(steps []*Step, advice []*AdviceRule, originalIDs map[s
 		// If there are before steps, the original step needs to depend on the last before step
 		if len(beforeSteps) > 0 {
 			lastBefore := beforeSteps[len(beforeSteps)-1]
-			clonedStep.Needs = appendUnique(clonedStep.Needs, lastBefore.ID)
+			addGeneratedNeed(clonedStep, lastBefore.ID)
 		}
 
 		// Chain before steps together
 		for i := 1; i < len(beforeSteps); i++ {
-			beforeSteps[i].Needs = appendUnique(beforeSteps[i].Needs, beforeSteps[i-1].ID)
+			addGeneratedNeed(beforeSteps[i], beforeSteps[i-1].ID)
 		}
 
 		result = append(result, clonedStep)
@@ -137,10 +138,10 @@ func applyAdviceWithGuard(steps []*Step, advice []*AdviceRule, originalIDs map[s
 		for i, as := range afterSteps {
 			if i == 0 {
 				// First after step depends on the original step
-				as.Needs = appendUnique(as.Needs, step.ID)
+				addGeneratedNeed(as, step.ID)
 			} else {
 				// Subsequent after steps chain to previous
-				as.Needs = appendUnique(as.Needs, afterSteps[i-1].ID)
+				addGeneratedNeed(as, afterSteps[i-1].ID)
 			}
 			result = append(result, as)
 		}
@@ -173,6 +174,10 @@ func adviceStepToStep(as *AdviceStep, target *Step) *Step {
 		SourceFormula: target.SourceFormula, // Inherit source formula from target
 		// SourceLocation will be "advice" to indicate this came from advice transformation
 		SourceLocation: "advice",
+		// Advice goes where its target goes: a target that its condition
+		// drops from a pour takes its advice steps with it, instead of
+		// leaving them poured around a step that is not there.
+		Condition: target.Condition,
 	}
 }
 
@@ -194,6 +199,10 @@ func cloneStep(s *Step) *Step {
 	if len(s.Needs) > 0 {
 		clone.Needs = make([]string, len(s.Needs))
 		copy(clone.Needs, s.Needs)
+	}
+	if len(s.generatedNeeds) > 0 {
+		clone.generatedNeeds = make([]string, len(s.generatedNeeds))
+		copy(clone.generatedNeeds, s.generatedNeeds)
 	}
 	if len(s.Labels) > 0 {
 		clone.Labels = make([]string, len(s.Labels))
@@ -230,6 +239,22 @@ func appendUnique(slice []string, item string) []string {
 		}
 	}
 	return append(slice, item)
+}
+
+// addGeneratedNeed makes s need ref as an edge a transform added on its own,
+// unless s already needs ref: an edge the formula wrote stays the formula's.
+func addGeneratedNeed(s *Step, ref string) {
+	if slices.Contains(s.Needs, ref) {
+		return
+	}
+	s.Needs = append(s.Needs, ref)
+	s.generatedNeeds = append(s.generatedNeeds, ref)
+}
+
+// isGeneratedNeed reports whether s needs ref only because a transform added
+// the edge (see addGeneratedNeed).
+func isGeneratedNeed(s *Step, ref string) bool {
+	return slices.Contains(s.generatedNeeds, ref)
 }
 
 // collectStepIDs returns a set of all step IDs (including nested children).
