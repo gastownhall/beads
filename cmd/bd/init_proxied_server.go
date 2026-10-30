@@ -276,16 +276,18 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 	}
 
 	// metadata.json was written with a locally-minted project id before any
-	// DB connection existed; the adopted id must replace it before the tail
-	// git-commits .beads/.
-	if in.teamServer && adoptedProjectID != projectID {
+	// DB connection existed; the id adopted from the database — team-server's
+	// provisioned identity, or the identity an earlier init already recorded
+	// on this database — must replace it before the tail git-commits .beads/.
+	// An empty adopted id is no identity to adopt: see shouldSaveAdoptedProjectID.
+	if shouldSaveAdoptedProjectID(adoptedProjectID, projectID) {
 		fileCfg, err := configfile.Load(beadsDir)
 		if err != nil || fileCfg == nil {
-			return HandleError("failed to reload %s to adopt the provisioned project identity: %v", configfile.ConfigFileName, err)
+			return HandleError("failed to reload %s to save the adopted project identity: %v", configfile.ConfigFileName, err)
 		}
 		fileCfg.ProjectID = adoptedProjectID
 		if err := fileCfg.Save(beadsDir); err != nil {
-			return HandleError("failed to save the provisioned project identity to %s: %v", configfile.ConfigFileName, err)
+			return HandleError("failed to save the adopted project identity to %s: %v", configfile.ConfigFileName, err)
 		}
 	}
 
@@ -362,6 +364,15 @@ func proxiedBootstrapper(provider uow.UnitOfWorkProvider) (issueops.Bootstrapper
 		return nil, fmt.Errorf("proxied-server provider %T does not offer the identity-seeding surface", provider)
 	}
 	return src.Bootstrapper()
+}
+
+// shouldSaveAdoptedProjectID reports whether init must rewrite metadata.json's
+// project_id with the identity it adopted from the database. An empty adopted
+// id is a database carrying a prefix but no _project_id — a partial identity
+// issueops.Bootstrapper already treats as identified — and saving it would
+// blank the clone's own id.
+func shouldSaveAdoptedProjectID(adopted, local string) bool {
+	return adopted != "" && adopted != local
 }
 
 // recordProxiedInitTrackingState seeds the per-clone bookkeeping: the
