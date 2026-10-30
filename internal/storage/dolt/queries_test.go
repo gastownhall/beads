@@ -3345,6 +3345,21 @@ func fourChildMoleculeRows() (children, statuses *sqlmock.Rows) {
 	return children, statuses
 }
 
+// twoBatchMoleculeRows returns the child-ID result set for a molecule with
+// queryBatchSize+1 open children, so its status read takes two batches, and
+// the full first status batch. The caller builds the one-row second batch.
+func twoBatchMoleculeRows() (children, firstBatch *sqlmock.Rows) {
+	children = sqlmock.NewRows([]string{"issue_id"})
+	firstBatch = sqlmock.NewRows([]string{"id", "status"})
+	for i := 0; i < queryBatchSize; i++ {
+		id := fmt.Sprintf("c%03d", i)
+		children.AddRow(id)
+		firstBatch.AddRow(id, "open")
+	}
+	children.AddRow(fmt.Sprintf("c%03d", queryBatchSize))
+	return children, firstBatch
+}
+
 // requireTruncatedReadError fails unless GetMoleculeProgress reported the
 // mid-iteration driver error instead of a rollup built from partial rows.
 func requireTruncatedReadError(t *testing.T, stats *types.MoleculeProgressStats, err, cause error) {
@@ -3363,7 +3378,10 @@ func requireTruncatedReadError(t *testing.T, stats *types.MoleculeProgressStats,
 
 // TestGetMoleculeProgressReportsTruncatedReads pins that a result set which
 // ends early (the driver reports an error after some rows) surfaces as an
-// error instead of a progress total built from the rows that arrived.
+// error instead of a progress total built from the rows that arrived. A read
+// that comes after the failed one is primed with healthy rows even though the
+// fixed code returns before it, so a missing check fails as the skewed rollup
+// the bug produced, not as an unexpected query.
 func TestGetMoleculeProgressReportsTruncatedReads(t *testing.T) {
 	lost := errors.New("connection lost mid-iteration")
 
@@ -3387,21 +3405,32 @@ func TestGetMoleculeProgressReportsTruncatedReads(t *testing.T) {
 
 		stats, err := store.GetMoleculeProgress(context.Background(), "mol-1")
 		requireTruncatedReadError(t, stats, err, lost)
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unmet sqlmock expectations: %v", err)
+		}
 	})
 
-	// The status read is batched; a failure in any batch, not only the last,
-	// must surface.
-	t.Run("status truncated in a later batch", func(t *testing.T) {
+	// The status read is batched, so a failure in any batch must surface.
+	// Here the second batch is healthy: a check of only the last batch's
+	// Rows.Err misses the failure and returns Total=2 Completed=1 for the
+	// molecule's queryBatchSize+1 children.
+	t.Run("status truncated in an earlier batch", func(t *testing.T) {
 		store, mock := newMoleculeProgressMock(t)
-		children := sqlmock.NewRows([]string{"issue_id"})
-		firstBatch := sqlmock.NewRows([]string{"id", "status"})
-		for i := 0; i < queryBatchSize+1; i++ {
-			id := fmt.Sprintf("c%03d", i)
-			children.AddRow(id)
-			if i < queryBatchSize {
-				firstBatch.AddRow(id, "open")
-			}
-		}
+		children, firstBatch := twoBatchMoleculeRows()
+		firstBatch.RowError(1, lost)
+		secondBatch := sqlmock.NewRows([]string{"id", "status"}).
+			AddRow(fmt.Sprintf("c%03d", queryBatchSize), "closed")
+		mock.ExpectQuery(moleculeProgressDepQuery).WillReturnRows(children)
+		mock.ExpectQuery(moleculeProgressStatusQuery).WillReturnRows(firstBatch)
+		mock.ExpectQuery(moleculeProgressStatusQuery).WillReturnRows(secondBatch)
+
+		stats, err := store.GetMoleculeProgress(context.Background(), "mol-1")
+		requireTruncatedReadError(t, stats, err, lost)
+	})
+
+	t.Run("status truncated in the last batch", func(t *testing.T) {
+		store, mock := newMoleculeProgressMock(t)
+		children, firstBatch := twoBatchMoleculeRows()
 		secondBatch := sqlmock.NewRows([]string{"id", "status"}).
 			AddRow(fmt.Sprintf("c%03d", queryBatchSize), "open").
 			RowError(0, lost)
@@ -3411,6 +3440,9 @@ func TestGetMoleculeProgressReportsTruncatedReads(t *testing.T) {
 
 		stats, err := store.GetMoleculeProgress(context.Background(), "mol-1")
 		requireTruncatedReadError(t, stats, err, lost)
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unmet sqlmock expectations: %v", err)
+		}
 	})
 
 	// A read that completes keeps today's rollup, which also proves the
