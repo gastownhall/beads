@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/gitenv"
 	"github.com/stretchr/testify/require"
 )
@@ -180,4 +181,109 @@ func TestInstallBeadsHooksFromLinkedWorktreeWritesTrackedCopy(t *testing.T) {
 		"success": true, "message": "Git hooks installed successfully",
 		"shared": false, "chained": false, "beadsHooks": true,
 	}, got)
+}
+
+func TestInstallHooksFromLinkedWorktreeKeepsUntrackedPrimaryCopy(t *testing.T) {
+	rel := filepath.Join(".beads", "hooks")
+	f := newLinkedHooksFixture(t, rel, false)
+
+	_, stderr, err := runHooksInstallForTest(t, "", false)
+	require.NoError(t, err)
+
+	requireHooksCurrent(t, filepath.Join(f.primary, rel))
+	_, statErr := os.Stat(filepath.Join(f.worktree, ".beads"))
+	require.True(t, os.IsNotExist(statErr), "install created %s/.beads", f.worktree)
+	require.Empty(t, stderr)
+	requireHooksPath(t, f, filepath.Join(f.primary, rel))
+}
+
+func TestInstallHooksFromLinkedWorktreeIgnoresInheritedIndex(t *testing.T) {
+	rel := filepath.Join(".beads", "hooks")
+	f := newLinkedHooksFixture(t, rel, false)
+	// A decoy repository whose index does track .beads/hooks.
+	decoy := filepath.Join(f.root, "decoy")
+	mkdirs(t, filepath.Join(decoy, rel))
+	initExcludeGit(t, decoy, "init", "-q")
+	require.NoError(t, os.WriteFile(filepath.Join(decoy, rel, "pre-commit"), []byte(oldMarkerHook("pre-commit")), 0o755))
+	initExcludeGit(t, decoy, "add", "--", rel)
+	t.Setenv("GIT_INDEX_FILE", filepath.Join(decoy, ".git", "index"))
+	resetRepoCaches()
+
+	_, stderr, err := runHooksInstallForTest(t, "", false)
+	require.NoError(t, err)
+
+	requireHooksCurrent(t, filepath.Join(f.primary, rel))
+	_, statErr := os.Stat(filepath.Join(f.worktree, ".beads"))
+	require.True(t, os.IsNotExist(statErr), "install created %s/.beads", f.worktree)
+	require.NotContains(t, stderr, "Note:")
+}
+
+// TestWorktreeHooksWriteDir pins both sides of the install retarget: a linked
+// worktree writes its own mirror of a hooks directory only when it and the
+// primary checkout both track it; every other layout keeps the directory Git
+// runs.
+func TestWorktreeHooksWriteDir(t *testing.T) {
+	root := t.TempDir()
+	primary := filepath.Join(root, "main")
+	worktree := filepath.Join(root, "wt")
+	nested := filepath.Join(primary, ".worktrees", "wt")
+	common := filepath.Join(primary, ".git")
+	outside := filepath.Join(root, "elsewhere", "hooks")
+	mkdirs(t,
+		filepath.Join(primary, ".beads", "hooks"),
+		filepath.Join(primary, ".beads-hooks"),
+		filepath.Join(primary, "tools", "store", "hooks"),
+		filepath.Join(common, "hooks"),
+		filepath.Join(worktree, ".beads", "hooks"),
+		nested,
+		outside,
+		filepath.Join(root, "repo.git"),
+	)
+	beadsHooks := filepath.Join(".beads", "hooks")
+	linked := git.HooksContext{CommonDir: common, RepoRoot: worktree, MainRepoRoot: primary}
+	both := func(roots ...string) map[[2]string]bool {
+		tracks := map[[2]string]bool{}
+		for _, r := range roots {
+			for _, rel := range []string{beadsHooks, ".beads-hooks", filepath.Join("tools", "store", "hooks"), filepath.Join(".git", "hooks"), "."} {
+				tracks[[2]string{r, rel}] = true
+			}
+		}
+		return tracks
+	}
+
+	tests := []struct {
+		name   string
+		target string
+		paths  git.HooksContext
+		tracks map[[2]string]bool
+		want   string
+	}{
+		{"both track .beads/hooks", filepath.Join(primary, beadsHooks), linked, both(primary, worktree), filepath.Join(worktree, beadsHooks)},
+		{"both track .beads-hooks", filepath.Join(primary, ".beads-hooks"), linked, both(primary, worktree), filepath.Join(worktree, ".beads-hooks")},
+		{"in-repo redirected store keeps its relative path", filepath.Join(primary, "tools", "store", "hooks"), linked, both(primary, worktree), filepath.Join(worktree, "tools", "store", "hooks")},
+		{"worktree nested under the primary", filepath.Join(primary, beadsHooks),
+			git.HooksContext{CommonDir: common, RepoRoot: nested, MainRepoRoot: primary}, both(primary, nested), filepath.Join(nested, beadsHooks)},
+		{"only the worktree tracks", filepath.Join(primary, beadsHooks), linked, both(worktree), filepath.Join(primary, beadsHooks)},
+		{"only the primary tracks", filepath.Join(primary, beadsHooks), linked, both(primary), filepath.Join(primary, beadsHooks)},
+		{"neither tracks", filepath.Join(primary, beadsHooks), linked, both(), filepath.Join(primary, beadsHooks)},
+		{"common dir hooks stay shared", filepath.Join(common, "hooks"), linked, both(primary, worktree), filepath.Join(common, "hooks")},
+		{"target outside the primary", outside, linked, both(primary, worktree), outside},
+		{"target already inside the worktree", filepath.Join(worktree, beadsHooks), linked, both(primary, worktree), filepath.Join(worktree, beadsHooks)},
+		{"bare-backed common dir", filepath.Join(primary, beadsHooks),
+			git.HooksContext{CommonDir: filepath.Join(root, "repo.git"), RepoRoot: worktree, MainRepoRoot: primary}, both(primary, worktree), filepath.Join(primary, beadsHooks)},
+		{"empty common dir", filepath.Join(primary, beadsHooks),
+			git.HooksContext{RepoRoot: worktree, MainRepoRoot: primary}, both(primary, worktree), filepath.Join(primary, beadsHooks)},
+		{"install from the primary itself", filepath.Join(primary, beadsHooks),
+			git.HooksContext{CommonDir: common, RepoRoot: primary, MainRepoRoot: primary}, both(primary), filepath.Join(primary, beadsHooks)},
+		{"target is the primary checkout root", primary, linked, both(primary, worktree), primary},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := worktreeHooksWriteDir(tt.target, tt.paths, func(root, rel string) bool {
+				return tt.tracks[[2]string{root, rel}]
+			})
+			require.Equal(t, tt.want, got)
+		})
+	}
 }
