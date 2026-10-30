@@ -36,6 +36,10 @@ func Compact(ctx context.Context, conn DBConn, initialHash, boundaryHash string,
 	for _, c := range logEntries {
 		byHash[c.Hash] = c
 	}
+	boundary, ok := byHash[boundaryHash]
+	if !ok {
+		return fmt.Errorf("compact: commit %s is not in the log of the current branch", boundaryHash)
+	}
 	originals := make([]storage.CommitInfo, len(recentHashes))
 	for i, hash := range recentHashes {
 		c, ok := byHash[hash]
@@ -75,8 +79,10 @@ func Compact(ctx context.Context, conn DBConn, initialHash, boundaryHash string,
 	if err := execSQL("soft reset to initial", "CALL DOLT_RESET('--soft', ?)", initialHash); err != nil {
 		return err
 	}
+	// The base holds the boundary commit's tree, so it takes the boundary's
+	// date: AS OF any time up to the first kept commit still resolves to it.
 	msg := fmt.Sprintf("compact: squash %d commits into base snapshot", oldCommits)
-	if err := execSQL("commit squashed base", "CALL DOLT_COMMIT('-Am', ?)", msg); err != nil {
+	if err := execSQL("commit squashed base", "CALL DOLT_COMMIT('-Am', ?, '--date', ?)", msg, commitDateArg(boundary.Date)); err != nil {
 		return err
 	}
 

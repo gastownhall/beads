@@ -36,7 +36,8 @@ func newCompactFixture() compactFixture {
 		initial: compactRow{hash: "iiiiiiiiiiii", committer: "beads", email: "beads@local",
 			date: s.Add(-48 * time.Hour), message: "Initialize data repository", order: 1},
 		boundary: compactRow{hash: "bbbbbbbbbbbb", committer: "beads", email: "beads@local",
-			date: s.Add(-time.Hour + 789*time.Millisecond), message: "bd: old work", order: 2},
+			date: s.Add(-time.Hour + 789*time.Millisecond), message: "bd: old work", order: 2,
+			wantDate: "2026-03-04T04:06:07.789Z"},
 		kept: []compactRow{
 			{hash: "k1k1k1k1k1k1", committer: "Original Author", email: "orig@example.com",
 				date: s.Add(123 * time.Millisecond), message: "bd: edit A", order: 3,
@@ -94,7 +95,7 @@ func expectCompactSuccess(mock sqlmock.Sqlmock, f compactFixture) {
 	expectExec(mock, "CALL DOLT_BRANCH('compact-tmp', ?)", f.boundary.hash)
 	expectExec(mock, "CALL DOLT_CHECKOUT('compact-tmp')")
 	expectExec(mock, "CALL DOLT_RESET('--soft', ?)", f.initial.hash)
-	expectExec(mock, "CALL DOLT_COMMIT('-Am', ?)", "compact: squash 2 commits into base snapshot")
+	expectExec(mock, "CALL DOLT_COMMIT('-Am', ?, '--date', ?)", "compact: squash 2 commits into base snapshot", f.boundary.wantDate)
 	for _, r := range f.kept {
 		expectExec(mock, "CALL DOLT_CHERRY_PICK('--allow-empty', ?)", r.hash)
 		expectExec(mock, "CALL DOLT_COMMIT('--amend', '--allow-empty', '--date', ?, '--author', ?)", r.wantDate, r.wantAuthor)
@@ -129,6 +130,24 @@ func TestCompactRestoresCommitAuthor(t *testing.T) {
 	f := newCompactFixture()
 	f.kept = f.kept[:1]
 	f.kept[0].message = "-m bd: edit A"
+	expectCompactSuccess(mock, f)
+
+	if err := Compact(context.Background(), db, f.initial.hash, f.boundary.hash, 2, f.recentHashes()); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestCompactDatesSquashedBase pins that the squashed base, which holds the
+// boundary commit's tree, carries the boundary commit's date, so AS OF any
+// time from that date up to the first kept commit still resolves to it.
+func TestCompactDatesSquashedBase(t *testing.T) {
+	db, mock := newCompactMock(t)
+	f := newCompactFixture()
+	f.boundary.date = time.Date(2026, 3, 1, 12, 0, 0, 5e6, time.FixedZone("CET", 3600))
+	f.boundary.wantDate = "2026-03-01T11:00:00.005Z"
 	expectCompactSuccess(mock, f)
 
 	if err := Compact(context.Background(), db, f.initial.hash, f.boundary.hash, 2, f.recentHashes()); err != nil {
