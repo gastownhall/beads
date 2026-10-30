@@ -183,6 +183,15 @@ var funcNameExemptions = map[string]string{
 	// token a second time within one transaction for no content change, the
 	// same reason recordVersionAtInTx above leaves it alone.
 	"carryParticipationInTx": "writes only participation_generation on a row the same plane move just inserted with a fresh row_lock in this transaction; reminting would double-bump the token for no content change",
+
+	// TouchIssueUpdatedAtInTx (labels.go) stamps updated_at for a label
+	// add/remove, which writes directly to the labels/wisp_labels table and
+	// bypasses UpdateIssueInTx entirely. row_lock only tracks lifecycle/
+	// ownership writes (lease.go's freshRowLock invariant, close.go's
+	// --if-revision contract): a label edit is not one, and reminting here
+	// would make a guarded close (bd close --if-revision) fail on a write
+	// that was never meant to be revision-visible.
+	"TouchIssueUpdatedAtInTx": "stamps updated_at for a label add/remove; row_lock only tracks lifecycle/ownership writes, and a label edit is not one -- reminting would make a guarded close (--if-revision) fail on a write that was never meant to be revision-visible",
 }
 
 // TestAllIssueRowWritesStampRowLock is the load-bearing completeness guard for
