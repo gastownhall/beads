@@ -292,8 +292,12 @@ func priorityToLabel(priority int) string {
 
 // filterNonScopedLabels returns only labels without scoped prefixes.
 // Removes priority::*, status::*, and type::* labels.
+//
+// The result is never nil. A pull passes it to ApplyIssueUpdate, which leaves
+// the local labels alone for a nil set, so an issue whose last plain label was
+// removed on GitHub would keep it locally, and a later push would put it back.
 func filterNonScopedLabels(labels []string) []string {
-	var filtered []string
+	filtered := []string{}
 	for _, label := range labels {
 		prefix, _ := parseLabelPrefix(label)
 		// Skip scoped labels that we handle specially
