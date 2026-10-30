@@ -70,4 +70,34 @@ func TestCommitWriteTxPanicRollsBackAndPropagates(t *testing.T) {
 			t.Errorf("db.Stats().InUse = %d after the panic, want 0", inUse)
 		}
 	})
+
+	t.Run("pinned_connection", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("sqlmock.New: %v", err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		// Ordered matching pins ROLLBACK before RELEASE_LOCK; conn.Close
+		// follows both in withDeleteFence's defer order.
+		mock.ExpectQuery("SELECT GET_LOCK").WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(1))
+		mock.ExpectBegin()
+		mock.ExpectRollback()
+		mock.ExpectQuery("SELECT RELEASE_LOCK").WillReturnRows(sqlmock.NewRows([]string{"released"}).AddRow(1))
+
+		store := &DoltStore{db: db}
+		runPanickingBody(t, ctx, cancel, 5*time.Second, func(fn func(*sql.Tx) error) {
+			_ = store.withDeleteFence(ctx, "bd-1", fn)
+		})
+
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("panic path SQL: %v", err)
+		}
+		if inUse := db.Stats().InUse; inUse != 0 {
+			t.Errorf("db.Stats().InUse = %d after the panic, want 0", inUse)
+		}
+	})
 }
