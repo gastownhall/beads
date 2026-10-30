@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/config"
+	storeissueops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
 )
@@ -1702,5 +1703,71 @@ func TestGraphApplyNodeIssueStampsCreatedAtWithStatusTimestamps(t *testing.T) {
 				t.Errorf("created_at = %v, want it equal to %s %v", issue.CreatedAt, tt.stamp, *stamped)
 			}
 		})
+	}
+}
+
+// TestBuildGraphApplyBatchRequestCreationStampSurvivesCreatePreparation runs
+// each built create item through the preparation both BatchApplier legs run
+// before the insert (GH#7519). A closed or in_progress item keeps its
+// plan-time created_at, which its status timestamp equals; an open item still
+// leaves created_at for the insert to stamp.
+func TestBuildGraphApplyBatchRequestCreationStampSurvivesCreatePreparation(t *testing.T) {
+	req, err := buildGraphApplyBatchRequest(&GraphApplyPlan{Nodes: []GraphApplyNode{
+		{Key: "done", Title: "done", Status: string(types.StatusClosed)},
+		{Key: "main", Title: "main", Status: string(types.StatusInProgress)},
+		{Key: "next", Title: "next"},
+	}}, GraphApplyOptions{}, "actor", "")
+	if err != nil {
+		t.Fatalf("buildGraphApplyBatchRequest: %v", err)
+	}
+	creates := map[string]*issueops.CreateItem{}
+	for _, item := range req.Items {
+		if item.Kind == issueops.ItemCreate {
+			creates[item.Create.Key] = item.Create
+		}
+	}
+	prepare := func(item *issueops.CreateItem) *types.Issue {
+		t.Helper()
+		prepared, err := storeissueops.PreparePublicCreateRequest(issueops.CreateRequest{
+			Actor:           req.Actor,
+			Issue:           item.Issue,
+			DefaultPriority: item.DefaultPriority,
+		}, storeissueops.PublicCreateContext{})
+		if err != nil {
+			t.Fatalf("PreparePublicCreateRequest(%s): %v", item.Key, err)
+		}
+		return prepared.Issue
+	}
+
+	for _, tc := range []struct {
+		key   string
+		stamp func(*types.Issue) *time.Time
+	}{
+		{key: "done", stamp: func(issue *types.Issue) *time.Time { return issue.ClosedAt }},
+		{key: "main", stamp: func(issue *types.Issue) *time.Time { return issue.StartedAt }},
+	} {
+		item := creates[tc.key]
+		if item == nil {
+			t.Fatalf("no create item for %q", tc.key)
+		}
+		if item.Issue.CreatedAt.IsZero() {
+			t.Errorf("%s: built item's created_at is zero; the insert would stamp a later one", tc.key)
+		}
+		prepared := prepare(item)
+		if !prepared.CreatedAt.Equal(item.Issue.CreatedAt) {
+			t.Errorf("%s: prepared created_at = %v, want the plan-time %v", tc.key, prepared.CreatedAt, item.Issue.CreatedAt)
+		}
+		stamped := tc.stamp(prepared)
+		if stamped == nil || !stamped.Equal(prepared.CreatedAt) {
+			t.Errorf("%s: prepared status timestamp = %v, want it equal to created_at %v", tc.key, stamped, prepared.CreatedAt)
+		}
+	}
+
+	next := creates["next"]
+	if next == nil {
+		t.Fatal("no create item for \"next\"")
+	}
+	if !next.Issue.CreatedAt.IsZero() {
+		t.Errorf("open item's created_at = %v, want zero in the built request", next.Issue.CreatedAt)
 	}
 }
