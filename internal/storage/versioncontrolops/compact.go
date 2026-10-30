@@ -3,6 +3,7 @@ package versioncontrolops
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
@@ -18,6 +19,25 @@ import (
 // instants.
 func commitDateArg(t time.Time) string {
 	return t.UTC().Format("2006-01-02T15:04:05.000Z07:00")
+}
+
+// authorArg renders a DOLT_COMMIT --author argument (#7294). The `Name
+// <email>` argument cannot carry a name containing ')' or an email
+// containing any of ")<>" without breaking out of the argument, and an
+// empty name would silently fall back to the session identity, so those
+// refuse before anything is created; callers name the offending commit and
+// suggest compacting a smaller window.
+func authorArg(name, email string) (string, error) {
+	if name == "" {
+		return "", fmt.Errorf("committer name is empty")
+	}
+	if strings.Contains(name, ")") {
+		return "", fmt.Errorf("committer name %q contains ')'", name)
+	}
+	if strings.ContainsAny(email, ")<>") {
+		return "", fmt.Errorf("committer email %q contains one of ')', '<', '>'", email)
+	}
+	return fmt.Sprintf("%s <%s>", name, email), nil
 }
 
 // commitHash8 returns the short display form of a commit hash.
@@ -38,8 +58,9 @@ func commitHash8(hash string) string {
 //  4. Soft-reset to initial commit (collapses old history into working set)
 //  5. Commit as single squashed base
 //  6. Cherry-pick each recent commit on top, then amend it back to its
-//     original commit date (DOLT_COMMIT --amend --date; without a message it
-//     reuses HEAD's, which the cherry-pick already copied from the original)
+//     original commit date and committer (DOLT_COMMIT --amend --date
+//     --author; without a message it reuses HEAD's, which the cherry-pick
+//     already copied from the original)
 //  7. Checkout main, hard-reset to temp branch
 //  8. Delete temp branch
 //
@@ -84,12 +105,18 @@ func Compact(ctx context.Context, conn DBConn, initialHash, boundaryHash string,
 		return fmt.Errorf("compact: commit %s is not in the log of the current branch", boundaryHash)
 	}
 	keptDates := make([]time.Time, len(recentHashes))
+	keptAuthors := make([]string, len(recentHashes))
 	for i, hash := range recentHashes {
 		c, ok := byHash[hash]
 		if !ok {
 			return fmt.Errorf("compact: commit %s is not in the log of the current branch", hash)
 		}
+		author, err := authorArg(c.Author, c.Email)
+		if err != nil {
+			return fmt.Errorf("compact: commit %s: %w; compact a smaller window with --days", commitHash8(hash), err)
+		}
 		keptDates[i] = c.Date
+		keptAuthors[i] = author
 	}
 
 	if err := execSQL("create temp branch", "CALL DOLT_BRANCH('compact-tmp', ?)", boundaryHash); err != nil {
@@ -118,12 +145,13 @@ func Compact(ctx context.Context, conn DBConn, initialHash, boundaryHash string,
 		if err := execSQL(fmt.Sprintf("cherry-pick %s", commitHash8(hash)), "CALL DOLT_CHERRY_PICK('--allow-empty', ?)", hash); err != nil {
 			return err
 		}
-		// The amend restores the original commit date without touching the
-		// replayed content or message; the explicit --allow-empty documents
-		// that the amended commit may itself be empty (#3815).
-		if err := execSQL(fmt.Sprintf("restore date %s", commitHash8(hash)),
-			"CALL DOLT_COMMIT('--amend', '--allow-empty', '--date', ?)",
-			commitDateArg(keptDates[i])); err != nil {
+		// The amend restores the original commit date and committer without
+		// touching the replayed content or message; the explicit
+		// --allow-empty documents that the amended commit may itself be
+		// empty (#3815).
+		if err := execSQL(fmt.Sprintf("restore metadata %s", commitHash8(hash)),
+			"CALL DOLT_COMMIT('--amend', '--allow-empty', '--date', ?, '--author', ?)",
+			commitDateArg(keptDates[i]), keptAuthors[i]); err != nil {
 			return err
 		}
 	}
