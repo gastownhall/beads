@@ -1049,6 +1049,15 @@ func TestEmbeddedInitBStealthAndForceReinit(t *testing.T) {
 		}
 	})
 
+	t.Run("stealth_no_git_ops_persists_in_project_config", func(t *testing.T) {
+		_, _, beadsDir := stealthInitWithUserConfig(t)
+		// isStealthRepo and bd doctor read the project file through GetStringFromDir.
+		if got := config.GetStringFromDir(beadsDir, "no-git-ops"); got != "true" {
+			projectConfig, _ := os.ReadFile(filepath.Join(beadsDir, "config.yaml"))
+			t.Errorf("project config no-git-ops = %q, want \"true\"; config.yaml:\n%s", got, projectConfig)
+		}
+	})
+
 	t.Run("stealth_leaves_worktree_clean", func(t *testing.T) {
 		bareDir := filepath.Join(t.TempDir(), "stealth.git")
 		runGitForBootstrapTest(t, "", "init", "--bare", "-b", "main", bareDir)
