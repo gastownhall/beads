@@ -183,6 +183,26 @@ func TestInstallBeadsHooksFromLinkedWorktreeWritesTrackedCopy(t *testing.T) {
 	}, got)
 }
 
+func TestInstallHooksFromLinkedWorktreeRefusesForeignTrackedCopy(t *testing.T) {
+	rel := filepath.Join(".beads", "hooks")
+	f := newLinkedHooksFixture(t, rel, true)
+	foreign := filepath.Join(f.worktree, rel, "pre-commit")
+	require.NoError(t, os.WriteFile(foreign, []byte("#!/bin/sh\necho team hook\n"), 0o755))
+	initExcludeGit(t, f.worktree, "commit", "-q", "-am", "team pre-commit")
+
+	_, stderr, err := runHooksInstallForTest(t, "", false)
+	require.Error(t, err)
+	require.Contains(t, stderr, foreign+" is tracked by git")
+	require.Contains(t, stderr, "not a bd-managed hook")
+
+	requirePrimaryUnchanged(t, f, rel)
+	require.Equal(t, "#!/bin/sh\necho team hook\n", string(readInitHooksFile(t, foreign)))
+	for _, name := range managedHookNames[1:] {
+		require.Equal(t, oldMarkerHook(name), string(readInitHooksFile(t, filepath.Join(f.worktree, rel, name))))
+	}
+	require.Empty(t, initExcludeGit(t, f.worktree, "status", "--porcelain"))
+}
+
 func TestInstallHooksFromLinkedWorktreeKeepsUntrackedPrimaryCopy(t *testing.T) {
 	rel := filepath.Join(".beads", "hooks")
 	f := newLinkedHooksFixture(t, rel, false)
