@@ -504,20 +504,18 @@ func labelTableUsesWisps(labelTable string) (bool, error) {
 // UpdateIssueInTx -- label add/remove write directly to the labels/
 // wisp_labels table, bypassing the normal field-update path entirely --
 // must call this so --updated-after filtering, stale-upsert rejection, and
-// LWW merge all see the edit (#5442). Also mints a fresh row_lock, matching
-// every other issues/wisps content write (see the freshRowLock invariant in
-// lease.go) -- otherwise this write would be invisible to RowVersion-gated
-// optimistic-concurrency checks.
+// LWW merge all see the edit (#5442). Deliberately leaves row_lock alone:
+// row_lock only tracks lifecycle/ownership writes (lease.go's freshRowLock
+// invariant, close.go's --if-revision contract), and a label edit reminting
+// it would make a guarded close fail on a write that was never meant to be
+// revision-visible.
 func TouchIssueUpdatedAtInTx(ctx context.Context, tx DBTX, issueID string, useWisps bool) error {
 	issueTable := "issues"
 	if useWisps {
 		issueTable = "wisps"
 	}
-	rowLockClause, rowLockArgs := RowLockClause()
-	args := append([]interface{}{time.Now().UTC()}, rowLockArgs...)
-	args = append(args, issueID)
 	//nolint:gosec // G201: issueTable is one of two hardcoded constants.
-	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`UPDATE %s SET updated_at = ?, %s WHERE id = ?`, issueTable, rowLockClause), args...); err != nil {
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`UPDATE %s SET updated_at = ? WHERE id = ?`, issueTable), time.Now().UTC(), issueID); err != nil {
 		return fmt.Errorf("touch updated_at: %w", err)
 	}
 	return nil
