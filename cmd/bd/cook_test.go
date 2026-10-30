@@ -1649,3 +1649,33 @@ waits_for = "all-children"
 		}
 	}
 }
+
+// TestCookFormulaConditionKeptNeedsTargetSucceeds: with the condition
+// satisfied, the same formula as TestCookFormulaConditionDroppedNeedsTarget
+// Errors pours normally - the filter must not over-error when its target
+// survives (GH#6437).
+func TestCookFormulaConditionKeptNeedsTargetSucceeds(t *testing.T) {
+	src := `formula = "kept-needs"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "fanout"
+title = "Fan out"
+type = "task"
+condition = "{{fanout_enabled}}"
+
+[[steps]]
+id = "consumer"
+title = "Consume"
+type = "task"
+needs = ["fanout"]
+`
+	sg, err := cookFormulaTOMLWithVars(t, "kept-needs", src, map[string]string{"fanout_enabled": "true"})
+	if err != nil {
+		t.Fatalf("cook with the condition satisfied: %v", err)
+	}
+	if got := blocksEdgesFrom(sg, "kept-needs.consumer"); len(got) != 1 || got[0] != "kept-needs.fanout" {
+		t.Errorf("consumer blocks edges = %v, want exactly [kept-needs.fanout]; deps: %v", got, allDeps(sg))
+	}
+}
