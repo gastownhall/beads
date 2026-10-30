@@ -62,6 +62,13 @@ func TableRouting(issue *types.Issue) (issueTable, eventTable string) {
 // round-trip the JSONL interchange, wy-urlct). row_lock rides along because
 // any write that can change status/assignee must rewrite it to collide with a
 // concurrent reclaim/close on the same row (see freshRowLock in lease.go).
+//
+// arrival_seq must NEVER join this list or issueInsertSQL's column list: it is
+// written by the journal's create seam alone (stampArrivalSeqInTx), and leaving
+// it out of every generic insert/upsert is what keeps a caller-supplied value —
+// from the Go struct, an HTTP import or a JSONL import — from ever being stored,
+// and what clears it on a row moved between planes.
+// TestIssueInsertAndUpsertColumnsExcludeArrivalSeq holds it.
 var issueUpsertColumns = []string{
 	"content_hash", "title", "description", "design", "acceptance_criteria",
 	"notes", "status", "priority", "issue_type", "assignee",
@@ -266,8 +273,20 @@ func RecordEventInTable(ctx context.Context, tx DBTX, table, issueID string, eve
 	})
 }
 
+// maxRetiredCounterSkips bounds how many retired counter values one
+// counter-mode create walks past before giving up with an error rather than
+// looping on a counter that a sweep retired a long run of.
+const maxRetiredCounterSkips = 1000
+
 // GenerateIssueIDInTable generates a unique ID, checking for collisions
 // in the specified table. Supports counter mode for non-ephemeral issues.
+//
+// A RETIRED ID IS TAKEN: a candidate a retaining sweep retired (either
+// tombstone table) is skipped exactly like one a live row holds, so a fresh
+// create is never refused with *IdempotencyExpiredError for an id it did not
+// choose. Hash mode folds the tombstone check into the one collision read it
+// already made; counter mode walks past retired values, at most
+// maxRetiredCounterSkips of them.
 //
 //nolint:gosec // G201: table is a hardcoded constant
 func GenerateIssueIDInTable(ctx context.Context, tx DBTX, table, prefix string, issue *types.Issue, actor string) (string, error) {
@@ -278,7 +297,7 @@ func GenerateIssueIDInTable(ctx context.Context, tx DBTX, table, prefix string, 
 			return "", err
 		}
 		if counterMode {
-			return NextCounterIDTx(ctx, tx, prefix)
+			return nextUnretiredCounterIDTx(ctx, tx, prefix)
 		}
 	}
 
@@ -297,19 +316,39 @@ func GenerateIssueIDInTable(ctx context.Context, tx DBTX, table, prefix string, 
 		for nonce := 0; nonce < 10; nonce++ {
 			candidate := idgen.GenerateHashID(prefix, issue.Title, issue.Description, actor, issue.CreatedAt, length, nonce)
 
-			var count int
-			err = tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE id = ?`, table), candidate).Scan(&count)
+			taken, err := IDTakenInTx(ctx, tx, table, candidate)
 			if err != nil {
 				return "", fmt.Errorf("failed to check for ID collision: %w", err)
 			}
-
-			if count == 0 {
+			if !taken {
 				return candidate, nil
 			}
 		}
 	}
 
 	return "", fmt.Errorf("failed to generate unique ID after trying lengths %d-%d with 10 nonces each", baseLength, maxLength)
+}
+
+// nextUnretiredCounterIDTx is NextCounterIDTx skipping counter values a
+// retaining sweep retired. The counter only ever advances, so a skipped value
+// is never offered again.
+func nextUnretiredCounterIDTx(ctx context.Context, tx DBTX, prefix string) (string, error) {
+	for skips := 0; ; skips++ {
+		candidate, err := NextCounterIDTx(ctx, tx, prefix)
+		if err != nil {
+			return "", err
+		}
+		retired, err := IDRetiredInTx(ctx, tx, candidate)
+		if err != nil {
+			return "", err
+		}
+		if !retired {
+			return candidate, nil
+		}
+		if skips >= maxRetiredCounterSkips {
+			return "", fmt.Errorf("issue counter for prefix %q walked past %d retired ids without finding a free one", prefix, maxRetiredCounterSkips)
+		}
+	}
 }
 
 // IsCounterModeTx checks whether issue_id_mode=counter is configured.

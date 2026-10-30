@@ -316,6 +316,12 @@ func (p *notifyingProvider) Heartbeater() (publicops.Heartbeater, error) {
 	return NewHeartbeater(p)
 }
 
+// BlockedLister builds the blocked listing over THIS provider. It is a read:
+// nothing is recorded and no hook fires.
+func (p *notifyingProvider) BlockedLister() (publicops.BlockedLister, error) {
+	return NewBlockedLister(p)
+}
+
 func (p *notifyingProvider) Memories() (memoryops.Memories, error) { return NewMemories(p) }
 
 // EventsJournalCursor builds on THIS provider, like every role above it, so a
@@ -433,6 +439,7 @@ var (
 	_ MemoriesSource            = (*notifyingProvider)(nil)
 	_ LeaseReclaimerSource      = (*notifyingProvider)(nil)
 	_ HeartbeaterSource         = (*notifyingProvider)(nil)
+	_ BlockedListerSource       = (*notifyingProvider)(nil)
 	_ EventsJournalCursorSource = (*notifyingProvider)(nil)
 )
 

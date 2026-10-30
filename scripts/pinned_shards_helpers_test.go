@@ -5,6 +5,7 @@ package scripts_test
 // (pinned_shards_sources_test.go).
 
 import (
+	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
@@ -13,6 +14,15 @@ import (
 
 // pinnedShardWrapper is the sh_test src that pins slow tests to shards.
 const pinnedShardWrapper = "tools/bazel/go_test_pinned_shard.sh"
+
+// minRoundRobinShards is the fewest round-robin shards a pinned-shard target
+// may leave (TestPinnedShardManifests). Every test added since its manifest
+// was measured lands in them, so one catch-all shard grows without bound:
+// http_served_test's single one ran 314-633s by 2026-10-23, 10 days after its
+// manifest was written. corpus_served_test is the exception: one shard per
+// corpus part and one for its engine-free tests
+// (TestCorpusPartsArePinnedOnePerShard).
+const minRoundRobinShards = 3
 
 // pinnedShardTargets are the sh_tests that run a go_test binary through
 // tools/bazel/go_test_pinned_shard.sh: the BUILD file, the rule, its
@@ -36,42 +46,78 @@ var pinnedShardTargets = []struct {
 	{"backend/http/corpus/BUILD.bazel", "corpus_served_test", "backend/http/corpus/served_pinned_shards.txt", "backend/http/corpus", "embedded"},
 }
 
-var pinnedLineRe = regexp.MustCompile(`^([1-9][0-9]*) (Test[A-Za-z0-9_]*)$`)
+// pinnedShardManifest is a parsed pinned-shard manifest.
+type pinnedShardManifest struct {
+	// pinned maps each pinned test to its shard, 1..shards.
+	pinned map[string]int
+	// shards is the number of pinned shards.
+	shards int
+	// rr holds the "rr <TestName>" lines (tools/bazel/pin_shards.py
+	// --record-measured): tests measured under the pinning threshold when
+	// the manifest was generated. They run in the round-robin shards like
+	// any test the manifest does not list.
+	rr map[string]bool
+}
 
-// readPinnedShardManifest parses a pinned-shard manifest the way
-// go_test_pinned_shard.sh does, reporting malformed lines, duplicate names
-// and empty shards, and returns the pinned names and the pinned shard count.
-func readPinnedShardManifest(t *testing.T, root, manifest string) (map[string]int, int) {
-	t.Helper()
-	pinned := map[string]int{}
-	shards := map[int]int{}
-	maxShard := 0
-	for i, line := range strings.Split(readPolicyFile(t, root, manifest), "\n") {
+var (
+	pinnedLineRe = regexp.MustCompile(`^([1-9][0-9]*) (Test[A-Za-z0-9_]*)$`)
+	rrLineRe     = regexp.MustCompile(`^rr (Test[A-Za-z0-9_]*)$`)
+)
+
+// parsePinnedShardManifest parses a pinned-shard manifest the way
+// go_test_pinned_shard.sh does and returns it with every problem it finds:
+// a malformed line, a name listed twice (pinned or rr), an empty shard, no
+// pinned shard at all.
+func parsePinnedShardManifest(manifest, text string) (pinnedShardManifest, []string) {
+	m := pinnedShardManifest{pinned: map[string]int{}, rr: map[string]bool{}}
+	var problems []string
+	perShard := map[int]int{}
+	for i, line := range strings.Split(text, "\n") {
 		line, _, _ = strings.Cut(line, "#")
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
-		m := pinnedLineRe.FindStringSubmatch(line)
-		if m == nil {
-			t.Errorf("%s:%d: %q is not \"<shard> <TestName>\"", manifest, i+1, line)
+		name, shard := "", 0
+		if p := pinnedLineRe.FindStringSubmatch(line); p != nil {
+			name = p[2]
+			shard, _ = strconv.Atoi(p[1])
+		} else if r := rrLineRe.FindStringSubmatch(line); r != nil {
+			name = r[1]
+		} else {
+			problems = append(problems, fmt.Sprintf("%s:%d: %q is not \"<shard> <TestName>\" or \"rr <TestName>\"", manifest, i+1, line))
 			continue
 		}
-		shard, _ := strconv.Atoi(m[1])
-		if _, dup := pinned[m[2]]; dup {
-			t.Errorf("%s: %s pinned twice", manifest, m[2])
+		if _, dup := m.pinned[name]; dup || m.rr[name] {
+			problems = append(problems, fmt.Sprintf("%s:%d: %s listed twice", manifest, i+1, name))
+			continue
 		}
-		pinned[m[2]] = shard
-		shards[shard]++
-		maxShard = max(maxShard, shard)
+		if shard == 0 {
+			m.rr[name] = true
+			continue
+		}
+		m.pinned[name] = shard
+		perShard[shard]++
+		m.shards = max(m.shards, shard)
 	}
-	for s := 1; s <= maxShard; s++ {
-		if shards[s] == 0 {
-			t.Errorf("%s: pinned shard %d is empty", manifest, s)
+	for s := 1; s <= m.shards; s++ {
+		if perShard[s] == 0 {
+			problems = append(problems, fmt.Sprintf("%s: pinned shard %d is empty", manifest, s))
 		}
 	}
-	if maxShard == 0 {
-		t.Errorf("%s pins nothing", manifest)
+	if m.shards == 0 {
+		problems = append(problems, manifest+" pins nothing")
 	}
-	return pinned, maxShard
+	return m, problems
+}
+
+// readPinnedShardManifest reads and parses a committed pinned-shard
+// manifest, failing the test on every problem parsePinnedShardManifest finds.
+func readPinnedShardManifest(t *testing.T, root, manifest string) pinnedShardManifest {
+	t.Helper()
+	m, problems := parsePinnedShardManifest(manifest, readPolicyFile(t, root, manifest))
+	for _, p := range problems {
+		t.Error(p)
+	}
+	return m
 }

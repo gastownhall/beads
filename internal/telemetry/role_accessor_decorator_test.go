@@ -94,7 +94,7 @@ func TestInstrumentedStorageDeclaresEveryRoleAccessor(t *testing.T) {
 }
 
 // roleAccessorStore is a DoltStorage whose only real methods are the
-// thirty role accessors, each answering with a distinguishable sentinel
+// thirty-one role accessors, each answering with a distinguishable sentinel
 // so a test can tell an instrumented surface from a passed-through one.
 //
 // TWO sentinels rather than one: memoryops.Memories.List and issueops.Reader.List
@@ -181,8 +181,11 @@ func (s *roleAccessorStore) LeaseReclaimer() (issueops.LeaseReclaimer, error) {
 func (s *roleAccessorStore) Heartbeater() (issueops.Heartbeater, error) {
 	return s.surface, s.err
 }
+func (s *roleAccessorStore) BlockedLister() (issueops.BlockedLister, error) {
+	return s.surface, s.err
+}
 
-// roleAccessorSentinel implements twenty-nine of the thirty roles at
+// roleAccessorSentinel implements thirty of the thirty-one roles at
 // once — every one but memoryops.Memories, whose List collides with
 // issueops.Reader.List and needs the second sentinel below.
 // Nothing calls its methods; identity is the whole point.
@@ -318,6 +321,9 @@ func (*roleAccessorSentinel) Reclaim(context.Context, issueops.ReclaimRequest) (
 func (*roleAccessorSentinel) Heartbeat(context.Context, issueops.HeartbeatRequest) (issueops.HeartbeatResult, error) {
 	return issueops.HeartbeatResult{}, nil
 }
+func (*roleAccessorSentinel) ListBlocked(context.Context, issueops.BlockedRequest) (issueops.BlockedResult, error) {
+	return issueops.BlockedResult{}, nil
+}
 
 // memoryRoleSentinel is the memory role's sentinel — see
 // memoryRoleSentinel is the remaining role's sentinel — see
@@ -396,6 +402,7 @@ func TestInstrumentedStorageInstrumentsEveryRoleAccessor(t *testing.T) {
 		{"Releaser", func() (any, error) { return wrapped.Releaser() }, sentinel},
 		{"LeaseReclaimer", func() (any, error) { return wrapped.LeaseReclaimer() }, sentinel},
 		{"Heartbeater", func() (any, error) { return wrapped.Heartbeater() }, sentinel},
+		{"BlockedLister", func() (any, error) { return wrapped.BlockedLister() }, sentinel},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			surface, err := test.got()
@@ -419,9 +426,10 @@ func TestInstrumentedStorageInstrumentsEveryRoleAccessor(t *testing.T) {
 // turn, so an externaldeps override that skips it silently drops the
 // storage.ReadyCounter.CountReady span for every text-mode `bd ready`.
 //
-// This is the only test that wires a real decorator above the instrumented
-// store, which is why WrapReadyCounter's sole caller outside this package is
-// the thing being pinned here.
+// This and its blocked-listing twin below are the only tests that wire a real
+// decorator above the instrumented store, which is why WrapReadyCounter's and
+// WrapBlockedLister's sole callers outside this package are the things being
+// pinned here.
 func TestExternalDepsReadyCounterSurvivesThisLayer(t *testing.T) {
 	t.Setenv("BD_OTEL_STDOUT", "true")
 	inner := &roleAccessorStore{surface: &roleAccessorSentinel{}}
@@ -436,6 +444,29 @@ func TestExternalDepsReadyCounterSurvivesThisLayer(t *testing.T) {
 	}
 	if _, ok := counter.(*instrumentedReadyCounter); !ok {
 		t.Fatalf("externaldeps ReadyCounter() = %T, want it wrapped by this layer; the storage.ReadyCounter.CountReady span stops being emitted for text-mode bd ready", counter)
+	}
+}
+
+// TestExternalDepsBlockedListerSurvivesThisLayer is the same pin for the
+// blocked listing. externaldeps builds a local store's lister over its own
+// GetBlockedIssues, so the listing carries the external blockers that read
+// adds, which leaves handing the finished lister to WrapBlockedLister as this
+// layer's only turn: an override that skips it silently drops the
+// storage.BlockedLister.ListBlocked span for every local `bd blocked`.
+func TestExternalDepsBlockedListerSurvivesThisLayer(t *testing.T) {
+	t.Setenv("BD_OTEL_STDOUT", "true")
+	inner := &roleAccessorStore{surface: &roleAccessorSentinel{}}
+	instrumented, ok := WrapStorage(inner).(*InstrumentedStorage)
+	if !ok {
+		t.Fatal("WrapStorage did not instrument the store; telemetry is disabled in this environment")
+	}
+
+	lister, err := externaldeps.New(instrumented, nil, nil).BlockedLister()
+	if err != nil {
+		t.Fatalf("externaldeps BlockedLister() error = %v", err)
+	}
+	if _, ok := lister.(*instrumentedBlockedLister); !ok {
+		t.Fatalf("externaldeps BlockedLister() = %T, want it wrapped by this layer; the storage.BlockedLister.ListBlocked span stops being emitted for local bd blocked", lister)
 	}
 }
 
@@ -484,6 +515,7 @@ func TestInstrumentedStorageRoleAccessorsPropagateInnerErrors(t *testing.T) {
 		{"Releaser", func() (any, error) { return wrapped.Releaser() }},
 		{"LeaseReclaimer", func() (any, error) { return wrapped.LeaseReclaimer() }},
 		{"Heartbeater", func() (any, error) { return wrapped.Heartbeater() }},
+		{"BlockedLister", func() (any, error) { return wrapped.BlockedLister() }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			surface, err := test.got()

@@ -223,6 +223,11 @@ func (*serveIdentityStore) LeaseReclaimer() (issueops.LeaseReclaimer, error) {
 func (*serveIdentityStore) Heartbeater() (issueops.Heartbeater, error) {
 	return serveIdentityRole{}, nil
 }
+
+// BlockedLister is declared at depth 1 for the same reason.
+func (*serveIdentityStore) BlockedLister() (issueops.BlockedLister, error) {
+	return serveIdentityRole{}, nil
+}
 func (*serveIdentityStore) IssueLifecycle() (issueops.Lifecycle, error) {
 	return serveIdentityRole{}, nil
 }
@@ -312,6 +317,7 @@ type serveIdentityRole struct {
 	issueops.Releaser
 	issueops.LeaseReclaimer
 	issueops.Heartbeater
+	issueops.BlockedLister
 	issueops.ReadyClaimer
 	issueops.BatchCloser
 	issueops.MetadataCAS

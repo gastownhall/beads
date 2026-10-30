@@ -10,9 +10,13 @@
 # TestFederationPeerCredentialLifecycleLazyKeyInit,
 # TestConcurrentWorkQueueDrain, TestHighContentionStress,
 # TestSerializationConflictRetry,
-# TestConcurrentCommentAndCloseWithoutCallerRetry, TestReadWriteMix, and
-# TestConcurrentIssueCreationWithoutCallerRetry) are each roughly 10-20s and
-# are spread across the remaining shards so they don't cluster on one.
+# TestConcurrentCommentAndCloseWithoutCallerRetry, TestReadWriteMix,
+# TestConcurrentIssueCreationWithoutCallerRetry, and
+# TestIDRetentionContractRaces) are each roughly 10-20s and are spread across
+# the remaining shards so they don't cluster on one. TestIDRetentionContractRaces
+# would hash into shard 6, which already takes about the whole 15m test timeout
+# under load (907s on rbe-west on 2026-10-28), so it is pinned to shard 16, the
+# lightest (250-420s in the same run).
 # Every other discovered test (the bulk of the 1126) is not listed here and
 # falls through to server-storage-test-shard.sh's hash(name) % total
 # fallback, the same mechanism the embedded manifest uses for its unlisted
@@ -36,3 +40,4 @@
 16 14 TestHighContentionStress
 16 15 TestSerializationConflictRetry
 16 16 TestConcurrentCommentAndCloseWithoutCallerRetry
+16 16 TestIDRetentionContractRaces

@@ -31,6 +31,9 @@ type fakeStore struct {
 	batch       *fakeBatchCloser
 	enforced    bool
 	enforcedErr error
+	// liveProbes records storage.LivePolicyProbe for every policy probe, in
+	// order.
+	liveProbes []bool
 
 	excludeIDsUnsupported bool
 	// defaultPage, when positive, is how many rows a zero-Limit ready listing
@@ -53,7 +56,8 @@ func (f *fakeStore) IssueLifecycle() (publicops.Lifecycle, error) { return f.lif
 // every existing test's raw store on today's client-side-enforcement path
 // unchanged; enforced:true is set explicitly only by the test below that
 // pins loadBlockingState's skip branch.
-func (f *fakeStore) ServerEnforcesExternalDependencyPolicy(_ context.Context) (bool, error) {
+func (f *fakeStore) ServerEnforcesExternalDependencyPolicy(ctx context.Context) (bool, error) {
+	f.liveProbes = append(f.liveProbes, storage.LivePolicyProbe(ctx))
 	return f.enforced, f.enforcedErr
 }
 

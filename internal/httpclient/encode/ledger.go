@@ -1013,6 +1013,15 @@ func writeSideRows() []Row {
 			PinnedBy: pinnedByS3Conformance,
 		},
 		{
+			ID: "W-SweepRequest.RetainIDs", Kind: KindRetired,
+			Type: tySweepRequest, Field: "RetainIDs",
+			What: "retiring the ids a sweep deletes used to refuse",
+			Why: "RETIRED by the wire extension that sends it. The local Sweeper role writes a permanent tombstone for every id it deletes, and apigen.SweepRequest had no retain_ids member, so a dropped RetainIDs would have run the sweep and left every swept id reusable. " +
+				"The spec now publishes `retain_ids` on the request and its echo on the response behind issues.sweep.retainIds, a token that also promises every create on that server refuses a retired id with 410 idempotency_expired. The client sends it only once the handshake advertises the token and refuses locally, before the dial, when it does not (refuseUnservedSweep)",
+			SpecRow:  "D8 refuse-not-drop",
+			PinnedBy: "TestSweepRefusesTheS4MembersWhenTheServerLacksTheCapability",
+		},
+		{
 			ID: "W-SweepRequest.ProtectLiveDependents", Kind: KindRetired,
 			Type: tySweepRequest, Field: "ProtectLiveDependents",
 			What: "protecting live structural dependents during a sweep used to refuse",
@@ -1113,8 +1122,16 @@ func commandRows() []Row {
 			"showIssueChildren's --json marshals the full GetDependentsWithMetadata rows, the same collectDependents shallow projection as --refs, so created_at/assignee/description come back zeroed over http. `bd children` is NOT this flag: it is a `bd list --parent` listing, served through the reader role (S6c)"),
 		row("F-mol-ready", "mol ready", "", "`bd mol ready` refuses",
 			"it is the same runMolReadyGatedCore body as `bd ready --gated`"),
-		row("F-blocked", "blocked", "", "`bd blocked` refuses",
-			"it is raw GetBlockedIssues, which is on the unsupported allowlist"),
+		{
+			ID: "F-blocked", Kind: KindRetired, Command: "blocked",
+			What:    "RETIRED — `bd blocked` is SERVED whole",
+			Why:     "it said the command refuses because \"it is raw GetBlockedIssues, which is on the unsupported allowlist\", and that is no longer so: bd serve publishes listBlockedIssues (GET /v0/beads/blocked) behind blocked.list, over the issueops.BlockedLister role every leg implements, and `bd blocked` takes that role on every route, so the http client dials the one operation and prints the server's answer. Every listing flag the command publishes (--parent, --label, --label-any, --exclude-label) is a parameter of that operation. THE RAW FLAG IS THE EXCEPTION. --flags is not the listing: it reads listBlockingAnnotations with is_blocked, behind dependencies.blocking.isBlocked, and --flags --raw refuses before that read against a server that advertises policy.external_dependencies, as bd serve does on both arms because it composes its roles through the policy. That server's flag already carries the policy, and the v0 wire has no member that asks it for the stored column, so answering would print the decorated flag as the raw one (refuseRawFlagsFromAPolicyServer, cmd/bd/blocked_flags.go); the refusal names --flags, the policy-aware flag. Against a server that does not apply the policy its flag IS the column, and --raw is served. Against a server that does not advertise blocked.list the role refuses before the dial, naming the token: a capability refusal, not a divergence. The listing is unpaged and is one response body: an answer over the client's 32 MiB response limit is refused (wire.ResponseTooLargeError), and one reporting has_more is refused (TruncatedListingError), never returned short",
+			SpecRow: "D7 (RETIRED)",
+			// The retirement's own evidence: the corpus replay and
+			// TestE2E_BlockedOverHTTP compare `bd blocked --json` over http
+			// against the same command over a local workspace.
+			PinnedBy: pinnedByS3Conformance,
+		},
 		{
 			ID: "F-count", Kind: KindRetired, Command: "count",
 			What: "RETIRED — `bd count` is SERVED whole",

@@ -163,6 +163,14 @@ is refused on both list operations with 400 `invalid_argument` /
 `reason: "invalid_value"`, whether or not a token is configured. Clients must
 page.
 
+The blocked listing (`GET /v0/beads/blocked`, behind `blocked.list`) is the
+exception, on every bind: like `bd blocked`, it takes no `limit` and no cursor,
+so it answers the whole blocked set in one body. That set, not the whole active
+one, is what it buffers, and the client bounds what it will read (bd's HTTP
+client refuses a body over 32 MiB). The operation answers `has_more` so a
+later server can bound it; a client must refuse `has_more: true` rather than
+treat it as the whole listing.
+
 ## Probes
 
 | Probe | Route | What green means |

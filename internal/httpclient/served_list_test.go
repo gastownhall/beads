@@ -1412,21 +1412,21 @@ func TestServedReaderDoesNotMutateTheCallerRequestOverTheWire(t *testing.T) {
 	build := func() (issueops.ReadyRequest, issueops.ListRequest, issueops.GetRequest) {
 		limit := 5
 		return issueops.ReadyRequest{
-				Labels:         []string{"Beta", "alpha"},
-				LabelsAny:      []string{"gamma", " delta "},
-				ExcludeLabels:  []string{"omega"},
-				ExcludeTypes:   []string{"chore,epic", " feat "},
-				MetadataFields: map[string]string{"kind": "probe"},
-				Sort:           "priority",
-				Limit:          &limit,
-			}, issueops.ListRequest{
-				Labels:         []string{"Beta", "alpha"},
-				LabelsAny:      []string{"gamma", " delta "},
-				ExcludeLabels:  []string{"omega"},
-				MetadataFields: map[string]string{"kind": "probe"},
-				SortBy:         "id",
-				Limit:          &limit,
-			}, issueops.GetRequest{ID: listID("nomut", "absent")}
+			Labels:         []string{"Beta", "alpha"},
+			LabelsAny:      []string{"gamma", " delta "},
+			ExcludeLabels:  []string{"omega"},
+			ExcludeTypes:   []string{"chore,epic", " feat "},
+			MetadataFields: map[string]string{"kind": "probe"},
+			Sort:           "priority",
+			Limit:          &limit,
+		}, issueops.ListRequest{
+			Labels:         []string{"Beta", "alpha"},
+			LabelsAny:      []string{"gamma", " delta "},
+			ExcludeLabels:  []string{"omega"},
+			MetadataFields: map[string]string{"kind": "probe"},
+			SortBy:         "id",
+			Limit:          &limit,
+		}, issueops.GetRequest{ID: listID("nomut", "absent")}
 	}
 	ready, list, get := build()
 	wantReady, wantList, wantGet := build()
@@ -1465,23 +1465,20 @@ func TestServedReaderDoesNotMutateTheCallerRequestOverTheWire(t *testing.T) {
 func TestServedReaderRefusesTheFiltersTheWireCannotCarry(t *testing.T) {
 	ctx := t.Context()
 	_, reader := servedReader(t)
-	cutoff := time.Now().UTC().Add(-time.Hour)
-	priority := 1
 
+	// The filter members that stood here (SpecPrefix, PinnedFlag, PriorityMax,
+	// UpdatedAfter, a TitleContains that differs from TitleSearch,
+	// ExcludeTypes) ride listIssues behind issues.list.filters now; their
+	// served answers are the Reader contract's filter cases, and their refusal
+	// against a server without the token is list_filters_test.go's. What is
+	// left is the vocabulary the wire still cannot put.
 	for _, test := range []struct {
 		field string
 		req   issueops.ListRequest
 	}{
-		{"SpecPrefix", issueops.ListRequest{SpecPrefix: "docs/"}},
 		{"ReadyFlag", issueops.ListRequest{ReadyFlag: true}},
 		{"Offset", issueops.ListRequest{Offset: 1}},
-		{"PinnedFlag", issueops.ListRequest{PinnedFlag: true}},
-		{"PriorityMax", issueops.ListRequest{PriorityMax: &priority}},
-		{"UpdatedAfter", issueops.ListRequest{UpdatedAfter: &cutoff}},
-		// A TitleContains alone folds onto `title`; only a pair that differs
-		// is left with no parameter to ride.
-		{"TitleContains", issueops.ListRequest{TitleSearch: "something", TitleContains: "anything"}},
-		{"ExcludeTypes", issueops.ListRequest{ExcludeTypes: []string{"chore"}}},
+		{"IncludeComments", issueops.ListRequest{IncludeComments: true}},
 	} {
 		page, err := reader.List(ctx, test.req)
 		if err == nil {

@@ -281,12 +281,12 @@ func primeFirstDiff(got, want string) string {
 // subprocess parity tests. The TestEmbedded prefix is deliberate and
 // load-bearing in both directions: the fast `./...` lanes run
 // -skip '^TestEmbedded' (pr.yml, main.yml), and .github/scripts/embedded-test-shard.sh
-// discovers shard members by grepping ^func TestEmbedded in *_embedded_test.go.
+// discovers shard members by grepping ^func TestEmbedded in cmd/bd/*_test.go.
 // So they run in the full embedded tier, which ci-embedded-tier.sh enables
 // unconditionally for merge_group and pushes to main — i.e. in the merge queue
 // before this can land, not on every PR push. Renaming them out of the prefix
-// moves ~30s of subprocess work into every short lane; renaming the file out of
-// *_embedded_test.go drops them from the shard runner entirely.
+// moves ~30s of subprocess work into every short lane and drops them from the
+// shard runner entirely.
 //
 // TestEmbeddedPrimeChangeDirPrimesTarget is the issue's repro end to end
 // (#5509): from repo-a, `bd -C repo-b prime` must emit repo-b's PRIME.md,

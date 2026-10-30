@@ -144,6 +144,16 @@ type ListRequest struct {
 	// so `pinned` and `hooked` are the two spellings that also drop that
 	// predicate — every other status narrows to unflagged rows.
 	Status string
+	// ExcludeStatus names statuses to leave out, on top of whatever Status or
+	// the default exclusions select (it never re-admits a row they hide).
+	// Entries may be comma-separated, and each name is validated against the
+	// workspace vocabulary (built-in plus custom statuses) exactly as
+	// CountRequest.ExcludeStatus is: an unknown name is ErrValidation rather
+	// than excluding nothing, because a silently ignored exclusion answers a
+	// wider set. With AllFlag there are no default exclusions, so the
+	// listing keeps every status not named here, without the caller
+	// having to enumerate every status it wants.
+	ExcludeStatus []string
 	// IssueType is validated against the workspace vocabulary — unlike
 	// ReadyRequest.IssueType, which matches nothing rather than failing.
 	IssueType   string
@@ -284,6 +294,11 @@ type ListRequest struct {
 	// On the ReadyFlag arm neither applies: that set decides pinned for itself,
 	// which is why PinnedFlag is refused there and NoPinnedFlag merely accepted
 	// (see AllFlag).
+	//
+	// The two together are a contradiction and are refused with ErrValidation
+	// on every route, the way `bd list --pinned --no-pinned` refuses: no
+	// answer is both only-flagged and only-unflagged, and letting one win
+	// would answer a question the caller did not ask.
 	PinnedFlag       bool
 	NoPinnedFlag     bool
 	IncludeTemplates bool
@@ -381,9 +396,10 @@ type ListRequest struct {
 	// GetDescendantIDsInTx (GH#3396); on the ReadyFlag arm this field crosses
 	// to that query and resolves recursively there.
 	// The recursive tree that `bd list --parent X` renders by DEFAULT comes
-	// from cmd/bd/list_show_filter_modes.go's findAllDescendants re-running
-	// this clause against the store once per level and accumulating the
-	// results client-side, not from this field answering a deeper question.
+	// from cmd/bd/list_show_filter_modes.go's findAllDescendants, whose walk
+	// (storage.WalkDescendants) re-runs this clause against the store once per
+	// level and accumulates the results client-side, not from this field
+	// answering a deeper question.
 	// --flat, --json and --format skip that walk and return exactly this
 	// field's answer, which is why the flat listing is the invocation that
 	// agrees with `bd count --parent X`'s cardinality.
@@ -391,6 +407,11 @@ type ListRequest struct {
 	// NoParent restricts to rows with no parent-child dependency edge. It has
 	// no dotted-id arm, so an edge-less "X.1" matches BOTH ParentID X and
 	// NoParent. The ReadyFlag arm refuses it; see that field.
+	//
+	// Setting both is refused with ErrValidation on every route, as
+	// CountRequest refuses it and in the sentence `bd list --parent X
+	// --no-parent` refuses with, rather than answered with only the edge-less
+	// rows under X's dotted id, which both clauses match.
 	ParentID string
 	NoParent bool
 	MolType  *MolType
@@ -437,7 +458,7 @@ type ListRequest struct {
 	// fields rather than answering a wider question than was asked. That is
 	// IDFilter, TitleSearch, SpecPrefix, the four *Contains fields,
 	// ExternalRef, every Created/Updated/Closed/Defer/Due bound, DeferredFlag,
-	// OverdueFlag, EmptyDesc, NoLabels, NoParent, PinnedFlag, PriorityMin,
+	// OverdueFlag, EmptyDesc, NoLabels, NoParent, PinnedFlag, ExcludeStatus, PriorityMin,
 	// PriorityMax, and the keyset position. There is no fallback: no
 	// combination of the two silently widens the answer.
 	//

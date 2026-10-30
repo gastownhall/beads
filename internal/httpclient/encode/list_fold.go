@@ -21,9 +21,9 @@ import (
 // former is the store's own lowering: EqualFold also matches pairs such as
 // "ſ" and "s", which lower to different patterns.
 //
-// When both are set and differ the request is returned unchanged: the listing
-// publishes one title parameter, and the encoder refuses the leftover
-// TitleContains (E-ListRequest.TitleContains) rather than drop either half.
+// When both are set and differ the request is returned unchanged: the leftover
+// TitleContains rides `title_contains` beside `title`, behind
+// issues.list.filters (ListFiltersMembers), so neither half is dropped.
 //
 // The request is taken and returned by value; the caller's copy is never
 // mutated.

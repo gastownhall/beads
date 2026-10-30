@@ -167,6 +167,12 @@ func TestReaderContract(t *testing.T) {
 	t.Run("ListWispTypeNarrowsTheAdmittedPlaneRatherThanAdmittingIt", func(t *testing.T) {
 		conformance.RunReaderListWispTypeNarrowsTheAdmittedPlaneRatherThanAdmittingIt(t, ctx, fixture)
 	})
+	t.Run("ListTimeBoundsAreStrictAndWholeSecond", func(t *testing.T) {
+		conformance.RunReaderListTimeBoundsAreStrictAndWholeSecond(t, ctx, fixture)
+	})
+	t.Run("ListFilterFamiliesNarrowToTheirRows", func(t *testing.T) {
+		conformance.RunReaderListFilterFamiliesNarrowToTheirRows(t, ctx, fixture)
+	})
 	t.Run("ListBriefDropsTheFreeFormTextAndNothingElse", func(t *testing.T) {
 		conformance.RunReaderListBriefDropsTheFreeFormTextAndNothingElse(t, ctx, fixture)
 	})

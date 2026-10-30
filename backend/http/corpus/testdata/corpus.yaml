@@ -315,7 +315,32 @@ shapes:
   - id: gc-polecat-title-contains-closed-after
     source: gascity core formulas/mol-polecat-base.toml (pre-flight 3d, list --title-contains --status closed --closed-after DATE --json)
     args: [list, --title-contains, "closed task", --status, closed, --closed-after, "2000-01-01", --json]
-    pending: {slice: "SRV-1+list-closed-after", reason: "two refusals: against the reference server --title-contains folds onto listIssues title behind issues.list.title, which it does not advertise, so the client refuses before dialing; past that, listIssues publishes no closed_after parameter, so the encoder refuses --closed-after (E-ListRequest.ClosedAfter); remove the mark when reference_server.json is upgraded and listIssues carries closed_after"}
+    pending: {slice: "SRV-1", reason: "needs issues.list.title (--title-contains folds onto listIssues title) and issues.list.filters (closed_after), which the reference server does not advertise, so the client refuses before dialing; remove the mark when reference_server.json is upgraded"}
+  - id: gc-polecat-closed-after
+    source: gascity core formulas/mol-polecat-base.toml:267 (list --title-contains --status closed --closed-after --json)
+    args: [list, --title-contains, "task", --status, closed, --closed-after, "2000-01-01", --json]
+    compare: ids
+    pending: {slice: "SRV-1", reason: "needs issues.list.title (--title-contains folds onto listIssues title) and issues.list.filters (closed_after), which the reference server does not advertise, so the client refuses before dialing (pinned passing against the current server by backend/http TestE2E_ListFilterParityOverHTTP); remove the mark when reference_server.json is upgraded"}
+  - id: wf-session-cleanup
+    source: an order cleanup script's closed-session sweep (list --all --include-infra --include-gates --status closed --label --closed-before --updated-before)
+    args: [list, --json, --all, --include-infra, --include-gates, --status, closed, --label, "lane:a", --closed-before, "2100-01-01T00:00:00Z", --updated-before, "2100-01-01T00:00:00Z", --limit, "0"]
+    compare: ids
+    pending: {slice: "SRV-1", reason: "needs issues.list.filters, which the reference server does not advertise, so the client refuses before dialing (pinned passing against the current server by backend/http TestE2E_ListFilterParityOverHTTP); remove the mark when reference_server.json is upgraded"}
+  - id: list-filter-priority-range
+    source: bd list --priority-min/--priority-max (listing filter parity)
+    args: [list, --json, --priority-min, "1", --priority-max, "3", --limit, "0"]
+    compare: ids
+    pending: {slice: "SRV-1", reason: "needs issues.list.filters, which the reference server does not advertise, so the client refuses before dialing (pinned passing against the current server by backend/http TestE2E_ListFilterParityOverHTTP); remove the mark when reference_server.json is upgraded"}
+  - id: list-filter-exclude-type-no-parent
+    source: bd list --exclude-type --no-parent (listing filter parity)
+    args: [list, --json, --exclude-type, epic, --no-parent, --limit, "0"]
+    compare: ids
+    pending: {slice: "SRV-1", reason: "needs issues.list.filters, which the reference server does not advertise, so the client refuses before dialing (pinned passing against the current server by backend/http TestE2E_ListFilterParityOverHTTP); remove the mark when reference_server.json is upgraded"}
+  - id: list-filter-updated-after
+    source: bd list --updated-after (listing filter parity)
+    args: [list, --json, --updated-after, "2000-01-01", --limit, "0"]
+    compare: ids
+    pending: {slice: "SRV-1", reason: "needs issues.list.filters, which the reference server does not advertise, so the client refuses before dialing (pinned passing against the current server by backend/http TestE2E_ListFilterParityOverHTTP); remove the mark when reference_server.json is upgraded"}
   - id: mc-list-assignee-status
     source: mc review summaries (list --assignee --json --limit --status)
     args: [list, --assignee, alice, --json, --limit, "10", --status, open]
@@ -379,7 +404,23 @@ shapes:
   - id: gc-blocked
     source: gc bdstore_ready_projection.go fetchReadyProjectionViaBlocked
     args: [blocked, --json]
-    pending: {slice: "S18", reason: "bd blocked hits the GetBlockedIssues stub (B3 #10)"}
+    pending: {slice: "SRV-1", reason: "bd blocked dials listBlockedIssues behind blocked.list, which the reference server does not advertise, so the client refuses at its capability preflight (pinned passing against the current server by backend/http TestE2E_BlockedOverHTTP); remove the mark when reference_server.json is upgraded"}
+  - id: gc-blocked-flags
+    source: gc bdstore_ready_projection.go readiness door (bd blocked --flags --json, ids on stdin)
+    args: [blocked, --flags, --json]
+    stdin: "e2e-mol\ne2e-mol.1\ne2e-mol.2\ne2e-no-such-row\n"
+    compare: json
+    pending: {slice: "SRV-1", reason: "bd blocked --flags reads listBlockingAnnotations is_blocked behind dependencies.blocking.isBlocked, which the reference server does not advertise, so the client refuses at its capability preflight (pinned passing against the current server by backend/http TestE2E_BlockedFlagsOverHTTP); remove the mark when reference_server.json is upgraded"}
+  - id: gc-blocked-flags-raw
+    source: gc bdstore_ready_projection.go readiness door (the stored is_blocked column, bd blocked --flags --raw --json, ids on stdin)
+    args: [blocked, --flags, --raw, --json]
+    stdin: "e2e-mol\ne2e-mol.1\ne2e-mol.2\ne2e-no-such-row\n"
+    compare: json
+    pending: {slice: "SRV-1", reason: "bd blocked --flags reads listBlockingAnnotations is_blocked behind dependencies.blocking.isBlocked, which the reference server does not advertise, so the client refuses at its capability preflight (pinned passing against the current server by backend/http TestE2E_BlockedFlagsOverHTTP); remove the mark when reference_server.json is upgraded"}
+  - id: gc-blocked-parent
+    source: bd blocked --parent (the molecule-scoped blocked listing)
+    args: [blocked, --json, --parent, e2e-mol]
+    pending: {slice: "SRV-1", reason: "bd blocked dials listBlockedIssues behind blocked.list, which the reference server does not advertise, so the client refuses at its capability preflight (pinned passing against the current server by backend/http TestE2E_BlockedOverHTTP); remove the mark when reference_server.json is upgraded"}
 
   # ---------------------------------------------------------------- molecules
   - id: mc-mol-current

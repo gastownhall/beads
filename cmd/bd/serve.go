@@ -321,6 +321,7 @@ func runServe() error {
 			BatchGetter:       roles.batchGetter,
 			LeaseReclaimer:    roles.leaseReclaimer,
 			Heartbeater:       roles.heartbeater,
+			BlockedLister:     roles.blockedLister,
 			Relations:         roles.relations,
 			Commenter:         roles.commenter,
 			BlockingAnnotator: roles.blocking,
@@ -684,6 +685,7 @@ type serveRoleSource interface {
 	BatchGetter() (issueops.BatchGetter, error)
 	LeaseReclaimer() (issueops.LeaseReclaimer, error)
 	Heartbeater() (issueops.Heartbeater, error)
+	BlockedLister() (issueops.BlockedLister, error)
 	IssueRelations() (issueops.Relations, error)
 	Commenter() (issueops.Commenter, error)
 	BlockingAnnotator() (issueops.BlockingAnnotator, error)
@@ -753,6 +755,7 @@ func serveIssueRoles(src serveRoleSource, journalEnabled bool) (serveRoles, erro
 		{"batch getter", func() (err error) { roles.batchGetter, err = src.BatchGetter(); return }},
 		{"lease reclaimer", func() (err error) { roles.leaseReclaimer, err = src.LeaseReclaimer(); return }},
 		{"heartbeater", func() (err error) { roles.heartbeater, err = src.Heartbeater(); return }},
+		{"blocked lister", func() (err error) { roles.blockedLister, err = src.BlockedLister(); return }},
 		{"issue relations", func() (err error) { roles.relations, err = src.IssueRelations(); return }},
 		{"commenter", func() (err error) { roles.commenter, err = src.Commenter(); return }},
 		{"blocking annotator", func() (err error) { roles.blocking, err = src.BlockingAnnotator(); return }},
@@ -875,6 +878,7 @@ type serveRoles struct {
 	// re-arm (a refresh fires nothing).
 	leaseReclaimer issueops.LeaseReclaimer
 	heartbeater    issueops.Heartbeater
+	blockedLister  issueops.BlockedLister
 	relations      issueops.Relations
 	commenter      issueops.Commenter
 	blocking       issueops.BlockingAnnotator

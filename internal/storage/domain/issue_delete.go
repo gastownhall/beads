@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/types"
@@ -145,6 +146,15 @@ func (u *issueUseCaseImpl) deleteMany(ctx context.Context, params DeleteIssuesPa
 		return result, nil
 	}
 
+	// A retaining delete locks the ids it will retire before the first row
+	// goes, so a create of one of them that probed first is waited out rather
+	// than deadlocked against (issueops.CoordinateIDCreatesInTx).
+	if params.Retire != nil {
+		if err := u.issueRepo.CoordinateCreates(ctx, allIDs); err != nil {
+			return result, fmt.Errorf("delete: retire: %w", err)
+		}
+	}
+
 	var connected map[string]*types.Issue
 	var connectedIsWisp map[string]bool
 	if params.UpdateTextReferences {
@@ -203,6 +213,15 @@ func (u *issueUseCaseImpl) deleteMany(ctx context.Context, params DeleteIssuesPa
 	}
 	result.DeletedCount = issuesDeleted + wispsDeleted
 
+	if params.Retire != nil {
+		if err := u.retireDeleted(ctx, params.Retire, regularIDs, IssueTableOpts{}); err != nil {
+			return result, err
+		}
+		if err := u.retireDeleted(ctx, params.Retire, wispIDs, IssueTableOpts{UseWispsTable: true}); err != nil {
+			return result, err
+		}
+	}
+
 	if params.UpdateTextReferences && len(connected) > 0 {
 		refs, err := u.rewriteTextReferences(ctx, allIDs, connected, connectedIsWisp, actor)
 		if err != nil {
@@ -216,6 +235,27 @@ func (u *issueUseCaseImpl) deleteMany(ctx context.Context, params DeleteIssuesPa
 	}
 
 	return result, nil
+}
+
+// retireDeleted tombstones the deleted ids of one plane, taking each id's
+// closed_at from retire. An id with no entry is refused rather than retired
+// without one: the caller promised the set it deleted is the set it retired.
+func (u *issueUseCaseImpl) retireDeleted(ctx context.Context, retire map[string]time.Time, ids []string, opts IssueTableOpts) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	picked := make(map[string]time.Time, len(ids))
+	for _, id := range ids {
+		closedAt, ok := retire[id]
+		if !ok {
+			return fmt.Errorf("delete: retire: deleted id %s has no closed_at to retire it with", id)
+		}
+		picked[id] = closedAt
+	}
+	if err := u.issueRepo.RetireIDs(ctx, picked, opts); err != nil {
+		return fmt.Errorf("delete: retire ids: %w", err)
+	}
+	return nil
 }
 
 // externalDependents finds the direct dependents of each id in ids that are

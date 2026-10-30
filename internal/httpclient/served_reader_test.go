@@ -27,8 +27,9 @@ import (
 // those cases parked on E-ListRequest.IDFilter. It now rides `id` behind
 // issues.list.ids, which this in-process server serves, and they run as
 // written. What still parks is a case whose SUBJECT (or one arm) is a member
-// the wire refuses — Offset, ReadyFlag, PinnedFlag, ExcludeTypes, WispType,
-// SkipCounts — and each names that member's row. The refusals THEMSELVES are
+// the wire refuses — Offset, ReadyFlag, SkipCounts — and each names that
+// member's row. PinnedFlag, ExcludeTypes and WispType retired from this list
+// with issues.list.filters, which this in-process server also serves. The refusals THEMSELVES are
 // asserted in TestServedReaderRefusesTheFiltersTheWireCannotCarry, so the
 // parking never stands in for an unpinned behaviour.
 
@@ -133,10 +134,9 @@ func TestServedReaderOffsetSkipsTheRowsBeforeThePage(t *testing.T) {
 	conformance.RunReaderOffsetSkipsTheRowsBeforeThePage(t, t.Context(), servedReaderFixture(t, "rdr"))
 }
 
+// The two pinned-flag arms ride `pinned` / `no_pinned` behind
+// issues.list.filters, so the case runs as written.
 func TestServedReaderListDefaultExclusionsAndTheirOverrides(t *testing.T) {
-	skipKnownDivergence(t, "E-ListRequest.PinnedFlag", readParkBead,
-		"two arms set PinnedFlag/NoPinnedFlag, which listIssues publishes no parameters for (the id scope "+
-			"every arm uses now rides `id`)")
 	conformance.RunReaderListDefaultExclusionsAndTheirOverrides(t, t.Context(), servedReaderFixture(t, "rdr"))
 }
 
@@ -214,8 +214,9 @@ func TestServedReaderListIncludeEphemeralMergesThePlanesIntoOneOrder(t *testing.
 }
 
 // The id-scoped List cases that parked on E-ListRequest.IDFilter until S15b
-// put `id` on listIssues (issues.list.ids). They run as written now; the two
-// below them still park, because their SUBJECT is a member the wire refuses.
+// put `id` on listIssues (issues.list.ids). They run as written now; the one
+// below them that still parks does so because its SUBJECT is Offset, a member
+// the wire refuses.
 
 func TestServedReaderListCountsAreBlocksOnlyWhereGetCountsEveryEdge(t *testing.T) {
 	conformance.RunReaderListCountsAreBlocksOnlyWhereGetCountsEveryEdge(t, t.Context(), servedReaderFixture(t, "rdr"))
@@ -251,18 +252,24 @@ func TestServedReaderListMaxRowsBoundaryIsLimitPlusOffset(t *testing.T) {
 	conformance.RunReaderListMaxRowsBoundaryIsLimitPlusOffset(t, t.Context(), servedReaderFixture(t, "rdr"))
 }
 
-// TestServedReaderListWispTypeNarrowsTheAdmittedPlaneRatherThanAdmittingIt
-// names WISPTYPE for the same reason: the classification predicate IS the
-// subject, and listIssues publishes no parameter for it, so no rescoping saves
-// the case. The plane knob it composes against — IncludeEphemeral — is served,
-// and its own half is asserted by
-// TestServedReaderListIncludeEphemeralMergesThePlanesUnderALabelScope.
+// TestServedReaderListWispTypeNarrowsTheAdmittedPlaneRatherThanAdmittingIt runs
+// as written: the classification predicate rides `wisp_type` behind
+// issues.list.filters beside the served IncludeEphemeral plane knob.
 func TestServedReaderListWispTypeNarrowsTheAdmittedPlaneRatherThanAdmittingIt(t *testing.T) {
-	skipKnownDivergence(t, "E-ListRequest.WispType", readParkBead,
-		"the wisp classification predicate is the case's subject and listIssues publishes no parameter for "+
-			"it; the client refuses it rather than answering the whole admitted plane, which is the reading "+
-			"the case exists to rule out")
 	conformance.RunReaderListWispTypeNarrowsTheAdmittedPlaneRatherThanAdmittingIt(t, t.Context(), servedReaderFixture(t, "rdr"))
+}
+
+// The list filter families behind issues.list.filters, run through the
+// client's encoder and the server's decode: the eight time bounds at their
+// exact boundaries (whole-second, strict, NULL never matching, an offset bound
+// equal to its UTC twin) and one included and one excluded row per remaining
+// family.
+func TestServedReaderListTimeBoundsAreStrictAndWholeSecond(t *testing.T) {
+	conformance.RunReaderListTimeBoundsAreStrictAndWholeSecond(t, t.Context(), servedReaderFixture(t, "rdr"))
+}
+
+func TestServedReaderListFilterFamiliesNarrowToTheirRows(t *testing.T) {
+	conformance.RunReaderListFilterFamiliesNarrowToTheirRows(t, t.Context(), servedReaderFixture(t, "rdr"))
 }
 
 func TestServedReaderListStatusAcceptsACommaSeparatedORSet(t *testing.T) {
@@ -382,10 +389,58 @@ func TestServedReaderGetPopulatesRowVersionForAGuardedWrite(t *testing.T) {
 	}
 }
 
+// The List leg sets ExcludeTypes, which rides `exclude_type` behind
+// issues.list.filters, so the case runs as written.
 func TestServedReaderDoesNotMutateTheCallerRequest(t *testing.T) {
-	skipKnownDivergence(t, "E-ListRequest.ExcludeTypes", readParkBead,
-		"the List leg of the tripwire sets ExcludeTypes, which listIssues publishes no parameter for (its id "+
-			"scope now rides `id`); the promise is exercised over this wire by "+
-			"TestServedReaderDoesNotMutateTheCallerRequestOverTheWire")
 	conformance.RunReaderDoesNotMutateTheCallerRequest(t, t.Context(), servedReaderFixture(t, "rdr"))
+}
+
+// TestServedReaderListExcludeStatusAcceptsAWorkspaceCustomStatus is the
+// served twin of the count's custom-status pin: ListRequest.ExcludeStatus is
+// validated against the SERVER workspace's own statuses (status.custom), so a
+// custom status is accepted and applied over the wire, and a name in no
+// vocabulary is still refused. A leg test rather than a conformance case
+// because ReaderFixture has no way to configure a workspace custom status.
+func TestServedReaderListExcludeStatusAcceptsAWorkspaceCustomStatus(t *testing.T) {
+	e := newServedEnv(t, "lcs")
+	ctx := t.Context()
+	if err := e.setConfig(ctx, "status.custom", "review,qa"); err != nil {
+		t.Fatalf("SetConfig(status.custom): %v", err)
+	}
+	const openID, reviewID = "lcs-open", "lcs-review"
+	for _, id := range []string{openID, reviewID} {
+		if err := e.createIssue(ctx, &types.Issue{ID: id, Title: id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}, "tester"); err != nil {
+			t.Fatalf("CreateIssue(%s): %v", id, err)
+		}
+	}
+	if err := e.reference.UpdateIssue(ctx, reviewID, map[string]interface{}{"status": types.Status("review")}, "tester"); err != nil {
+		t.Fatalf("UpdateIssue(%s) to review: %v", reviewID, err)
+	}
+	reader, err := e.subject.IssueReader()
+	if err != nil {
+		t.Fatalf("IssueReader(): %v", err)
+	}
+
+	scope := issueops.ListRequest{IDFilter: openID + "," + reviewID}
+	page, err := reader.List(ctx, scope)
+	if err != nil {
+		t.Fatalf("List(unfiltered): %v", err)
+	}
+	if got := pageIDs(page); len(got) != 2 {
+		t.Fatalf("List(unfiltered) = %v, want both rows (a custom status with no category is not a default exclusion)", got)
+	}
+
+	scope.ExcludeStatus = []string{"review"}
+	page, err = reader.List(ctx, scope)
+	if err != nil {
+		t.Fatalf("List(ExcludeStatus=review): %v, want the custom status accepted", err)
+	}
+	if got := pageIDs(page); len(got) != 1 || got[0] != openID {
+		t.Fatalf("List(ExcludeStatus=review) = %v, want [%s]", got, openID)
+	}
+
+	scope.ExcludeStatus = []string{"reveiw"}
+	if _, err := reader.List(ctx, scope); err == nil {
+		t.Fatal("List(ExcludeStatus=reveiw) answered instead of refusing a status in no vocabulary")
+	}
 }

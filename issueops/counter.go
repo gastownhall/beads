@@ -122,11 +122,9 @@ type CountRequest struct {
 	// It composes with IncludeInfra's own "gate" exclusion rather than
 	// replacing it: both contribute to the same exclusion set.
 	ExcludeTypes []string
-	// ExcludeStatus names statuses to exclude. Unlike Status, this has no
-	// List counterpart — ListRequest computes its default status exclusions
-	// internally from workspace configuration and exposes no caller-facing
-	// knob for them. Here it is a new, Count-only capability (behavior token
-	// `issues.count.scope`): entries may be comma-separated, and — UNLIKE
+	// ExcludeStatus names statuses to exclude (behavior token
+	// `issues.count.scope`; ListRequest.ExcludeStatus is its listing twin,
+	// validated by the same rule): entries may be comma-separated, and — UNLIKE
 	// Status and ExcludeTypes above — each name IS validated against the
 	// workspace vocabulary (built-in statuses plus the workspace's own custom
 	// ones). An unrecognized name is ErrValidation rather than excluding

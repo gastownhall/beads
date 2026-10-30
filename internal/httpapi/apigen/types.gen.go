@@ -139,6 +139,60 @@ func (e CountDependencyEdgesParamsDirection) Valid() bool {
 	}
 }
 
+// Defines values for ListIssuesParamsMolType.
+const (
+	ListIssuesParamsMolTypePatrol ListIssuesParamsMolType = "patrol"
+	ListIssuesParamsMolTypeSwarm  ListIssuesParamsMolType = "swarm"
+	ListIssuesParamsMolTypeWork   ListIssuesParamsMolType = "work"
+)
+
+// Valid indicates whether the value is a known member of the ListIssuesParamsMolType enum.
+func (e ListIssuesParamsMolType) Valid() bool {
+	switch e {
+	case ListIssuesParamsMolTypePatrol:
+		return true
+	case ListIssuesParamsMolTypeSwarm:
+		return true
+	case ListIssuesParamsMolTypeWork:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ListIssuesParamsWispType.
+const (
+	ListIssuesParamsWispTypeError      ListIssuesParamsWispType = "error"
+	ListIssuesParamsWispTypeEscalation ListIssuesParamsWispType = "escalation"
+	ListIssuesParamsWispTypeGcReport   ListIssuesParamsWispType = "gc_report"
+	ListIssuesParamsWispTypeHeartbeat  ListIssuesParamsWispType = "heartbeat"
+	ListIssuesParamsWispTypePatrol     ListIssuesParamsWispType = "patrol"
+	ListIssuesParamsWispTypePing       ListIssuesParamsWispType = "ping"
+	ListIssuesParamsWispTypeRecovery   ListIssuesParamsWispType = "recovery"
+)
+
+// Valid indicates whether the value is a known member of the ListIssuesParamsWispType enum.
+func (e ListIssuesParamsWispType) Valid() bool {
+	switch e {
+	case ListIssuesParamsWispTypeError:
+		return true
+	case ListIssuesParamsWispTypeEscalation:
+		return true
+	case ListIssuesParamsWispTypeGcReport:
+		return true
+	case ListIssuesParamsWispTypeHeartbeat:
+		return true
+	case ListIssuesParamsWispTypePatrol:
+		return true
+	case ListIssuesParamsWispTypePing:
+		return true
+	case ListIssuesParamsWispTypeRecovery:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for ListIssuesParamsSort.
 const (
 	ListIssuesParamsSortCreated  ListIssuesParamsSort = "created"
@@ -905,6 +959,18 @@ type BatchGetIssuesResult struct {
 	Missing []string `json:"missing"`
 }
 
+// BlockedIssue An `Issue` plus the blockers bd names for it. This is the element type of `/v0/beads/blocked`, matching what `bd blocked --json` emits. Property semantics are documented on `Issue`.
+type BlockedIssue = types.BlockedIssue
+
+// BlockedPage defines model for BlockedPage.
+type BlockedPage struct {
+	// HasMore Always false in v0: this operation takes no limit, so the listing is never truncated. Present so that adding a bound later is additive.
+	HasMore bool `json:"has_more"`
+
+	// Items Empty array (never null) when nothing is blocked.
+	Items []BlockedIssue `json:"items"`
+}
+
 // Blocker One live blocker named by a blocked-issue refusal.
 type Blocker struct {
 	// Id The blocker: a local issue id, or the full `external:<project>:<capability>` reference.
@@ -1119,7 +1185,7 @@ type ContextResponse struct {
 	// OPTIONAL, and absent means only that this server does not disclose its filesystem layout — never that it has no workspace. A client MUST NOT require it, MUST NOT treat absence as an error, and has no use for the value beyond display: it is a path on the SERVER's filesystem, which the client cannot open. Identify the workspace by `project_id` and `database`, which are required.
 	BeadsDir *string `json:"beads_dir,omitempty"`
 
-	// Capabilities The tokens this server advertises: the OPERATIONS it implements, derived from its route table, and the server-wide BEHAVIORS it enforces. v0's operation vocabulary is `ready.list`, `ready.count`, `issues.list`, `issues.query`, `issues.count`, `issues.get`, `issues.related`, `issues.create`, `issues.addComment`, `issues.batchClose`, `issues.claim`, `issues.claimNext`, `issues.release`, `issues.heartbeat`, `issues.close`, `issues.reopen`, `issues.update`, `issues.sweep`, `issues.delete`, `issues.batchGet`, `issues.reclaim`, `issues.batchCreate`, `issues.batchApply`, `stats.get`, `config.list`, `config.get`, `config.set`, `config.unset`, `dependencies.cycles`, `dependencies.list`, `dependencies.count`, `dependencies.blocking`, `dependencies.tree`, `dependencies.add`, `dependencies.remove`, `memories.list`, `memories.get`, `memories.remember`, `memories.forget`, `events.list`, `events.watch`, `issues.casMetadata`, `issues.advanceMolecule`; the behavior tokens are `project.enforce`, which announces that a `Bd-Project-Id` stamp for the wrong workspace is refused here rather than silently ignored, `issues.batchApplyLarge`, which announces that `POST /v0/beads/issues:batchApply` accepts the RAISED envelope — up to 1000 items (`ApplyBatchRequest.items.maxItems`), a 16 MiB body, and (for a request over 100 items) a run budget that EXTENDS to an operator-configured ceiling (`bd serve --large-apply-ceiling`, 5 minutes by default) — rather than the original 100-item, 4 MiB bound. The ceiling is a flat whole-run budget, not a value scaled by item count: a 101-item request and a 1000-item request both get the same extended budget. A request at or under 100 items is unaffected either way and keeps the server's ordinary deadline exactly as before. A client that checks for this token before sending a plan over 100 items learns whether THIS server accepts it without paying for a round trip an older server would refuse anyway, and `issues.list.sort`, which announces that `GET /v0/beads/issues` accepts the `sort` query parameter (two closed, pageable total orders — see that parameter) rather than silently answering `unknown_parameter`, and `issues.count.scope`, which announces that `GET /v0/beads/issues:count` accepts `parent`, `no_parent`, `exclude_type`, and `exclude_status` (see those parameters) rather than silently answering `unknown_parameter` for all four, `issues.sweep.wispsPlane`, which announces that `POST /v0/beads/issues:sweep` accepts the `wisps-plane` value of `tier` rather than silently answering `invalid_value`, `issues.sweep.liveDependents`, which announces that the same operation accepts `protect_live_dependents` and answers `skipped.live_dependent` rather than silently answering `unknown_parameter`, `issues.sweep.limit`, which announces that it accepts `limit` and answers `remaining` rather than silently answering `unknown_parameter`, `issues.batchApply.depAddLineage`, which announces that a `dep_add` item on `POST /v0/beads/issues:batchApply` accepts `has_spawner` and `thread_id` (see `ApplyDepAddItem`) rather than a `400` naming the member unknown, and `issues.update.allowTemplate`, which announces that `PATCH /v0/beads/issues/{id}` accepts `allow_template` (see `UpdateIssueRequest`) rather than a `400` naming the member unknown, and `issues.update.persistence`, which announces that `PATCH /v0/beads/issues/{id}` accepts a `persistence` member in its `patch` (see `IssuePatchBody`), the plane move behind `bd promote`, rather than a `400` naming the member unknown, and `issues.create.defaultPriority`, which announces that a create (`POST /v0/beads/issues`, `issues:batchCreate` and `issues:batchApply` create items) with no `priority` member stores the default P2 rather than P0, and `issues.close.autoCloseMolecule`, which announces that `POST /v0/beads/issues/{id}:close` and `POST /v0/beads/issues:batchClose` accept `auto_close_molecule` and answer `auto_closed_molecule` and `molecule_auto_close_refusal` rather than a `400` naming the member unknown, `issues.list.search`, which announces that `GET /v0/beads/issues` accepts `q`, `bd search`'s free text (see that parameter), rather than silently answering `unknown_parameter`, `issues.list.noAssignee`, `issues.list.title` and `issues.list.ids`, which announce that `GET /v0/beads/issues` accepts `no_assignee`, `title` and the repeatable `id` respectively (`bd list --no-assignee`, `--title` and `--id`; see those parameters) rather than answering `unknown_parameter`, `dependencies.blocking.isBlocked`, which announces that `GET /v0/beads/dependencies/blocking` accepts `is_blocked` and answers each item's stored, transitive `is_blocked` flag (see that parameter) rather than silently answering `unknown_parameter`, and `issues.update.claim`, which announces that `PATCH /v0/beads/issues/{id}` accepts `claim` (see `UpdateIssueRequest`) and resolves the claimed id on both planes, so a wisp is claimable there, rather than a `400` naming the member unknown, and `issues.create.gates`, which announces that `POST /v0/beads/issues` and `issues:batchApply` create items accept the gate members `await_type`, `await_id`, `timeout` and `waiters` (see `CreateIssueRequest`), and `issues.update.gates`, which announces that `PATCH /v0/beads/issues/{id}`'s `patch` and an `issues:batchApply` update item's `patch` accept `await_id` and `waiters` (see `IssuePatchBody`), each rather than a `400` naming the member unknown. One behavior token is CONDITIONAL rather than build-level: `policy.external_dependencies` announces that this server's ready, claim, claim-next, close, blocking and dependency-tree operations already apply bd's external-dependency policy (an issue blocked by an unsatisfied `external:<project>:<capability>` dependency is neither ready, claimable nor closable without force). A server advertises it only when it enforces that policy; a client that sees it must not apply the policy again, and a client that does not see it applies the policy itself. The list grows additively, and an operation never appears here unless it is fully implemented. This is how a client checks for an operation or a behavior — never the version string.
+	// Capabilities The tokens this server advertises: the OPERATIONS it implements, derived from its route table, and the server-wide BEHAVIORS it enforces. v0's operation vocabulary is `ready.list`, `ready.count`, `blocked.list`, `issues.list`, `issues.query`, `issues.count`, `issues.get`, `issues.related`, `issues.create`, `issues.addComment`, `issues.batchClose`, `issues.claim`, `issues.claimNext`, `issues.release`, `issues.heartbeat`, `issues.close`, `issues.reopen`, `issues.update`, `issues.sweep`, `issues.delete`, `issues.batchGet`, `issues.reclaim`, `issues.batchCreate`, `issues.batchApply`, `stats.get`, `config.list`, `config.get`, `config.set`, `config.unset`, `dependencies.cycles`, `dependencies.list`, `dependencies.count`, `dependencies.blocking`, `dependencies.tree`, `dependencies.add`, `dependencies.remove`, `memories.list`, `memories.get`, `memories.remember`, `memories.forget`, `events.list`, `events.watch`, `issues.casMetadata`, `issues.advanceMolecule`; the behavior tokens are `project.enforce`, which announces that a `Bd-Project-Id` stamp for the wrong workspace is refused here rather than silently ignored, `issues.batchApplyLarge`, which announces that `POST /v0/beads/issues:batchApply` accepts the RAISED envelope — up to 1000 items (`ApplyBatchRequest.items.maxItems`), a 16 MiB body, and (for a request over 100 items) a run budget that EXTENDS to an operator-configured ceiling (`bd serve --large-apply-ceiling`, 5 minutes by default) — rather than the original 100-item, 4 MiB bound. The ceiling is a flat whole-run budget, not a value scaled by item count: a 101-item request and a 1000-item request both get the same extended budget. A request at or under 100 items is unaffected either way and keeps the server's ordinary deadline exactly as before. A client that checks for this token before sending a plan over 100 items learns whether THIS server accepts it without paying for a round trip an older server would refuse anyway, and `issues.list.sort`, which announces that `GET /v0/beads/issues` accepts the `sort` query parameter (two closed, pageable total orders — see that parameter) rather than silently answering `unknown_parameter`, and `issues.count.scope`, which announces that `GET /v0/beads/issues:count` accepts `parent`, `no_parent`, `exclude_type`, and `exclude_status` (see those parameters) rather than silently answering `unknown_parameter` for all four, `issues.sweep.wispsPlane`, which announces that `POST /v0/beads/issues:sweep` accepts the `wisps-plane` value of `tier` rather than silently answering `invalid_value`, `issues.sweep.liveDependents`, which announces that the same operation accepts `protect_live_dependents` and answers `skipped.live_dependent` rather than silently answering `unknown_parameter`, `issues.sweep.limit`, which announces that it accepts `limit` and answers `remaining` rather than silently answering `unknown_parameter`, `issues.sweep.retainIds`, which announces that the same operation accepts `retain_ids` and answers `retain_ids` rather than silently answering `unknown_parameter` — and, with it, that EVERY create on this surface refuses an id a retaining sweep retired with `410` `idempotency_expired` rather than re-creating it, `issues.sweep.retainedTypes`, which announces that the same operation holds back every candidate whose issue type the workspace's types.retained setting names unless the request sets `retain_ids`, and answers `skipped.retention_required` — an older server deletes those beads without retiring their ids, `issues.batchApply.depAddLineage`, which announces that a `dep_add` item on `POST /v0/beads/issues:batchApply` accepts `has_spawner` and `thread_id` (see `ApplyDepAddItem`) rather than a `400` naming the member unknown, and `issues.update.allowTemplate`, which announces that `PATCH /v0/beads/issues/{id}` accepts `allow_template` (see `UpdateIssueRequest`) rather than a `400` naming the member unknown, and `issues.update.persistence`, which announces that `PATCH /v0/beads/issues/{id}` accepts a `persistence` member in its `patch` (see `IssuePatchBody`), the plane move behind `bd promote`, rather than a `400` naming the member unknown, and `issues.create.defaultPriority`, which announces that a create (`POST /v0/beads/issues`, `issues:batchCreate` and `issues:batchApply` create items) with no `priority` member stores the default P2 rather than P0, and `issues.close.autoCloseMolecule`, which announces that `POST /v0/beads/issues/{id}:close` and `POST /v0/beads/issues:batchClose` accept `auto_close_molecule` and answer `auto_closed_molecule` and `molecule_auto_close_refusal` rather than a `400` naming the member unknown, `issues.list.search`, which announces that `GET /v0/beads/issues` accepts `q`, `bd search`'s free text (see that parameter), rather than silently answering `unknown_parameter`, `issues.list.noAssignee`, `issues.list.title` and `issues.list.ids`, which announce that `GET /v0/beads/issues` accepts `no_assignee`, `title` and the repeatable `id` respectively (`bd list --no-assignee`, `--title` and `--id`; see those parameters) rather than answering `unknown_parameter`, `dependencies.blocking.isBlocked`, which announces that `GET /v0/beads/dependencies/blocking` accepts `is_blocked` and answers each item's stored, transitive `is_blocked` flag (see that parameter) rather than silently answering `unknown_parameter`, and `issues.update.claim`, which announces that `PATCH /v0/beads/issues/{id}` accepts `claim` (see `UpdateIssueRequest`) and resolves the claimed id on both planes, so a wisp is claimable there, rather than a `400` naming the member unknown, and `issues.create.gates`, which announces that `POST /v0/beads/issues` and `issues:batchApply` create items accept the gate members `await_type`, `await_id`, `timeout` and `waiters` (see `CreateIssueRequest`), and `issues.update.gates`, which announces that `PATCH /v0/beads/issues/{id}`'s `patch` and an `issues:batchApply` update item's `patch` accept `await_id` and `waiters` (see `IssuePatchBody`), each rather than a `400` naming the member unknown, and `issues.list.filters`, which announces that `GET /v0/beads/issues` accepts the rest of `bd list`'s filter vocabulary (the updated, closed, defer and due bounds, the priority range, the text, external-ref, label-pattern, label-regex and spec matches, and the empty-description, no-labels, no-parent, exclude-type, exclude-status, pinned, no-pinned, deferred, overdue, mol-type and wisp-type filters; see those parameters) rather than answering `unknown_parameter`, and `issues.arrivalSeq`, which announces that every Issue-shaped schema carries `arrival_seq`, the commit-ordered create sequence storage stamps on a wisp-plane record (see `Issue.arrival_seq`; build-level like the others — records are stamped only while the workspace journals, which `GET /v0/beads/events` reports by answering `409 events_journal_disabled` when it does not). One behavior token is CONDITIONAL rather than build-level: `policy.external_dependencies` announces that this server's ready, blocked-listing, claim, claim-next, close, blocking and dependency-tree operations already apply bd's external-dependency policy (an issue blocked by an unsatisfied `external:<project>:<capability>` dependency is neither ready, claimable nor closable without force, and the blocked listing lists it with that dependency in its `blocked_by`). A server advertises it only when it enforces that policy; a client that sees it must not apply the policy again, and a client that does not see it applies the policy itself. The list grows additively, and an operation never appears here unless it is fully implemented. This is how a client checks for an operation or a behavior — never the version string.
 	//
 	// THIS LIST IS BUILD-LEVEL, NOT WORKSPACE-LEVEL, apart from the conditional `policy.external_dependencies` above, which depends on how this server composed its roles rather than on the build. It says which operations this binary serves, and for every entry but two that is the whole answer. `events.list` and `events.watch` are the exceptions: the durable events journal is a per-workspace setting that is OFF by default, so a server that advertises them may still refuse every request to both with 409 `events_journal_disabled` — correctly, because the operations exist and the workspace has no journal. A consumer of either MUST treat the capability as "this server speaks it" and the 409 as "not on this workspace", and must not read the capability as a promise that records will arrive.
 	Capabilities []string `json:"capabilities"`
@@ -1726,7 +1792,10 @@ type Problem struct {
 	// IT IS OPTIONAL. A refusal that could not name its blockers omits it and keeps the generic `detail`; absence means "this refusal did not name them", never "nothing blocks it". Re-read the issue's dependencies then.
 	Blockers *[]Blocker `json:"blockers,omitempty"`
 
-	// Code The stable machine-readable reason, and the ONLY member a client may dispatch on. v0's vocabulary: `invalid_argument` (400, also emitted by the Host-header middleware on any route), `invalid_cursor` (400), `unauthenticated` (401, only on a server configured with a token file), `not_found` (404), `already_claimed` (409), `not_claimable` (409), `not_closable` (409), `not_releasable` (409), `lease_not_held` (409), `template_read_only` (409), `issue_pinned` (409), `not_assignee` (409), `dependency_cycle` (409), `dependency_exists` (409), `already_exists` (409), `precondition_failed` (409), `events_journal_disabled` (409), `events_journal_truncated` (410), `busy` (503), `db_unavailable` (503), `events_watch_saturated` (503), `internal` (500). Renaming or removing a status+code pair is a breaking change; ADDING one is not, so clients MUST default-branch on unknown values and fall back to the status class (unknown 4xx → client bug, fail loud; unknown 503 → retry per `Retry-After`; other unknown 5xx → server fault).
+	// ClosedAt With `idempotency_expired`: when the bead a retaining sweep retired had closed, as its tombstone recorded it. It dates the create that used the id, which already happened and never runs again.
+	ClosedAt *time.Time `json:"closed_at,omitempty"`
+
+	// Code The stable machine-readable reason, and the ONLY member a client may dispatch on. v0's vocabulary: `invalid_argument` (400, also emitted by the Host-header middleware on any route), `invalid_cursor` (400), `unauthenticated` (401, only on a server configured with a token file), `not_found` (404), `already_claimed` (409), `not_claimable` (409), `not_closable` (409), `not_releasable` (409), `lease_not_held` (409), `template_read_only` (409), `issue_pinned` (409), `not_assignee` (409), `dependency_cycle` (409), `dependency_exists` (409), `already_exists` (409), `precondition_failed` (409), `events_journal_disabled` (409), `events_journal_truncated` (410), `idempotency_expired` (410), `busy` (503), `db_unavailable` (503), `events_watch_saturated` (503), `internal` (500). Renaming or removing a status+code pair is a breaking change; ADDING one is not, so clients MUST default-branch on unknown values and fall back to the status class (unknown 4xx → client bug, fail loud; unknown 503 → retry per `Retry-After`; other unknown 5xx → server fault).
 	Code string `json:"code"`
 
 	// DeclaredLater With `invalid_argument` on a batch operation whose items may name each other: whether the unresolvable key IS declared by the request, at a LATER index.
@@ -1794,6 +1863,8 @@ type Problem struct {
 	// Param With `invalid_argument`: the offending query parameter, body member or header name. Present on every 400 except a body that fails to parse at all.
 	//
 	// With `precondition_failed`: the body member carrying the guard that missed. It is the same spelling a 400 on the same operation would use, so a client reads one member to find the offending input whichever way the request was refused.
+	//
+	// With `idempotency_expired`: the body member that named the retired id — `id` on `POST /v0/beads/issues`, `items[i].create.id` on `issues:batchApply`.
 	Param *string `json:"param,omitempty"`
 
 	// Reason With `invalid_argument`: `unknown_parameter` (this server does not know that parameter — version skew; degrade or fall back), `invalid_value` (the value is not one this server will act on: malformed, out of vocabulary, or — for `limit=0` under `--allow-non-loopback` — legal but refused in this server's configuration; `detail` says which), `project_mismatch` (the `Bd-Project-Id` header named a project this server does not serve — a document-level refusal like the Host-header 400, raised on every enforced route, and the one that carries `server_project_id`; see the document-level rule), or `wire_revision_unsupported` (the `Bd-Wire-Revision` header named a revision below `ContextResponse.min_client_wire_revision` — also a document-level refusal, raised on every route including the identity handshake, and the one that carries `min_wire_revision`; see the document-level rule and `ContextResponse.wire_revision`). Either way the recovery is to send something different, never to retry the same request. With `lease_not_held`: `ephemeral` (the id names a wisp, which is never leased; its `issue_status` may be `in_progress`). The set may grow; default-branch on unknown values.
@@ -2064,7 +2135,7 @@ type SetSettingRequest struct {
 
 // Setting One entry of the workspace's stored settings plane.
 //
-// THIS SCHEMA IS DELIBERATELY NOT `x-go-type`-PINNED, and it is one of the two ROW schemas on this surface that is not — `Memory` is the other. (Envelopes and page wrappers are unpinned as a class, for a different reason: they are new wire surface with no prior implementation. `TestWireTagBijection`'s `pinnedSchemas` is the authority on what is pinned.) The thirteen pinned schemas above are pinned because a canonical Go struct already IS the contract — `types.Issue`'s JSON encoding is what `bd show --json` emits. A setting has no such struct: the CLI marshals an ad-hoc `map[string]string` per verb, so there is nothing to pin TO, and minting a type to pin to would mean changing what `bd config get --json` prints in order to satisfy a rule about not changing it.
+// THIS SCHEMA IS DELIBERATELY NOT `x-go-type`-PINNED, and it is one of the two ROW schemas on this surface that is not — `Memory` is the other. (Envelopes and page wrappers are unpinned as a class, for a different reason: they are new wire surface with no prior implementation. `TestWireTagBijection`'s `pinnedSchemas` is the authority on what is pinned.) The fourteen pinned schemas above are pinned because a canonical Go struct already IS the contract — `types.Issue`'s JSON encoding is what `bd show --json` emits. A setting has no such struct: the CLI marshals an ad-hoc `map[string]string` per verb, so there is nothing to pin TO, and minting a type to pin to would mean changing what `bd config get --json` prints in order to satisfy a rule about not changing it.
 //
 // The two surfaces are still one shape where they overlap — `key` and `value` are spelled as the CLI spells them — and they diverge in exactly one deliberate place, `redacted`, which exists because a bearer on this surface is optional, shared and surface-wide — it cannot decide that one caller may read a credential and another may not — while the CLI requires access to the database anyway.
 type Setting struct {
@@ -2141,6 +2212,13 @@ type SweepRequest struct {
 	// It costs a full scan of the not-done set and its comments. Sending `protect_referenced: false` buys the cheaper sweep, and asking for it explicitly is the point: that is the request that should be the deliberate one.
 	ProtectReferenced *bool `json:"protect_referenced,omitempty"`
 
+	// RetainIds RETIRE every id this sweep deletes. In the same transaction as the delete, the server writes one permanent tombstone per deleted bead — its id and its `closed_at`, nothing else — and from then on no write path creates a bead with that id again: a create naming it is refused with `410` `idempotency_expired` (on `POST /v0/beads/issues` and on an `issues:batchApply` create item), an import skips the row and reports it, and id generation never produces it. It is what lets a caller sweep beads whose ids are idempotency keys without a late retry re-creating the bead the first attempt created.
+	//
+	// Opt-in: absent or `false` sweeps exactly as before and leaves the swept ids reusable. Tombstones are permanent; nothing on this surface removes one. A tombstone is exactly as durable as the bead it replaces — a bead on the ephemeral plane leaves a clone-local one. `dry_run` writes none.
+	//
+	// Behind the `issues.sweep.retainIds` behavior token: an older server answers `unknown_parameter` for this name, and a client that needs the guarantee must not sweep at all without the token.
+	RetainIds *bool `json:"retain_ids,omitempty"`
+
 	// Tier Which plane to clear. `ephemeral` is the wisp tier (`bd purge`) and `durable` is the issue tier (`bd prune`). The two are DISJOINT: a sweep of one can never touch a bead of the other. Required, with no default — a caller handed the wrong tier has nothing to notice until the beads are gone.
 	//
 	// `wisps-plane` is a THIRD, wider tier: it clears the whole wisps table (ephemeral beads) AND any durable bead with no history row, in one pass. Behind the `issues.sweep.wispsPlane` behavior token: an older server answers `invalid_value` for this member, since it predates the token and knows only the first two values.
@@ -2174,14 +2252,17 @@ type SweepResult struct {
 	// Remaining How many beads this sweep's own selection left unswept because `limit` cut it off, oldest-closed-first. Always 0 when `limit` was absent, zero, or at least as large as the matching set — never a dropped count, a 0 here means nothing was left over. Present only behind the `issues.sweep.limit` behavior token.
 	Remaining *int64 `json:"remaining,omitempty"`
 
-	// Skipped The candidates a sweep declined to delete, bucketed by WHY. They are separate counters rather than one number because they mean different things: `pinned`, `referenced` and `live_dependent` are PROTECTIONS, and the other four are the sweep declining to trust its own input.
+	// RetainIds Echoes the request's `retain_ids`: `true` means every bead `swept` counts is now a retired id (under `dry_run`, would be). Present only behind the `issues.sweep.retainIds` behavior token.
+	RetainIds *bool `json:"retain_ids,omitempty"`
+
+	// Skipped The candidates a sweep declined to delete, bucketed by WHY. They are separate counters rather than one number because they mean different things: `pinned`, `referenced`, `live_dependent` and `retention_required` are PROTECTIONS, and the other four are the sweep declining to trust its own input.
 	Skipped SweepSkips `json:"skipped"`
 
 	// Swept How many beads were deleted, or under `dry_run` would be.
 	Swept int `json:"swept"`
 }
 
-// SweepSkips The candidates a sweep declined to delete, bucketed by WHY. They are separate counters rather than one number because they mean different things: `pinned`, `referenced` and `live_dependent` are PROTECTIONS, and the other four are the sweep declining to trust its own input.
+// SweepSkips The candidates a sweep declined to delete, bucketed by WHY. They are separate counters rather than one number because they mean different things: `pinned`, `referenced`, `live_dependent` and `retention_required` are PROTECTIONS, and the other four are the sweep declining to trust its own input.
 type SweepSkips struct {
 	// ClosedAtOrAfterCutoff Candidates whose close timestamp did not satisfy `closed_before`. See `not_closed`.
 	ClosedAtOrAfterCutoff int `json:"closed_at_or_after_cutoff"`
@@ -2197,6 +2278,9 @@ type SweepSkips struct {
 
 	// Referenced Candidates protected by `protect_referenced`. Always 0 when that member is false or absent, so a 0 read without having asked says nothing about whether beads are cited.
 	Referenced int `json:"referenced"`
+
+	// RetentionRequired Candidates held back because their issue type is named in the workspace's `types.retained` setting and the request did not set `retain_ids`: such a bead's id is an idempotency key, so only a retaining sweep may delete it. Always 0 when `retain_ids` is true. A PROTECTION, like `pinned`; a caller that wants those beads gone re-runs with `retain_ids`. Present only behind the `issues.sweep.retainedTypes` behavior token.
+	RetentionRequired *int `json:"retention_required,omitempty"`
 
 	// UnknownClosedAt Closed candidates carrying no close timestamp. See `not_closed`.
 	UnknownClosedAt int `json:"unknown_closed_at"`
@@ -2295,6 +2379,21 @@ type Unavailable = Problem
 
 // bearerTokenContextKey is the context key for bearerToken security scheme
 type bearerTokenContextKey string
+
+// ListBlockedIssuesParams defines parameters for ListBlockedIssues.
+type ListBlockedIssuesParams struct {
+	// Parent Only the parent's direct children (a parent-child edge) and ids under it in the dotted hierarchy, as `bd blocked --parent` narrows.
+	Parent *string `form:"parent,omitempty" json:"parent,omitempty"`
+
+	// Label Labels that must ALL be present (AND). Each value is trimmed, and blank and repeated values are dropped, as `bd blocked --label` does.
+	Label *[]string `form:"label,omitempty" json:"label,omitempty"`
+
+	// LabelAny Labels of which at least one must be present (OR).
+	LabelAny *[]string `form:"label_any,omitempty" json:"label_any,omitempty"`
+
+	// ExcludeLabel Labels that must all be absent.
+	ExcludeLabel *[]string `form:"exclude_label,omitempty" json:"exclude_label,omitempty"`
+}
 
 // ListDependenciesParams defines parameters for ListDependencies.
 type ListDependenciesParams struct {
@@ -2468,10 +2567,10 @@ type ListIssuesParams struct {
 	// A `type` this workspace calls infra is the one NARROWING it lifts. Such a type on its own reads only that type's ephemeral rows, which is where creating one puts it; with `include_ephemeral` the type's durable rows (a promoted wisp, an issue retyped after it was created) are listed as well. `include_infra` alone keeps the narrowing.
 	IncludeEphemeral *bool `form:"include_ephemeral,omitempty" json:"include_ephemeral,omitempty"`
 
-	// CreatedBefore Only issues created strictly before this instant (RFC 3339).
+	// CreatedBefore Only issues created strictly before this instant. RFC 3339; compared strictly and at whole-second precision (the bound is truncated to the second before it is compared), and normalized to UTC, so a bound carrying an offset selects exactly what its `Z` twin does.
 	CreatedBefore *time.Time `form:"created_before,omitempty" json:"created_before,omitempty"`
 
-	// CreatedAfter Only issues created strictly after this instant (RFC 3339).
+	// CreatedAfter Only issues created strictly after this instant. RFC 3339; compared strictly and at whole-second precision (the bound is truncated to the second before it is compared), and normalized to UTC, so a bound carrying an offset selects exactly what its `Z` twin does.
 	CreatedAfter *time.Time `form:"created_after,omitempty" json:"created_after,omitempty"`
 
 	// MetadataField Top-level metadata equality filter as `key=value`, split on the first `=`. Repeatable. An invalid key is a 400.
@@ -2497,6 +2596,156 @@ type ListIssuesParams struct {
 
 	// Id Restrict to these canonical ids (repeat the parameter). AND-ed with every other filter, including the default exclusions, so a caller addressing rows regardless of status, type or tier also sends all=true, include_templates, include_gates, include_infra and include_ephemeral. At most 200 values; an id longer than storage holds, an empty one, one with leading or trailing whitespace, or one carrying a control character or a comma is a 400 `invalid_argument` on `param: "id"` — each value is matched exactly as sent, never trimmed or split. An id that names no row is simply not matched. Advertised by the behavior token `issues.list.ids`.
 	Id *[]string `form:"id,omitempty" json:"id,omitempty"`
+
+	// TitleContains Case-insensitive substring match on the title: `bd list --title-contains`, spelled as `GET /v0/beads/issues:count` spells it. It overlaps `title` deliberately: both reach the role, which carries both fields.
+	//
+	// Behind the `issues.list.filters` behavior token: an older server answers `unknown_parameter` for this name. A client with the handshake's capabilities cached refuses the request locally against a server that does not advertise the token, rather than paying for that round trip or answering a wider listing.
+	TitleContains *string `form:"title_contains,omitempty" json:"title_contains,omitempty"`
+
+	// DescContains Case-insensitive substring match on the description: `bd list --desc-contains`.
+	//
+	// Behind the `issues.list.filters` behavior token: an older server answers `unknown_parameter` for this name. A client with the handshake's capabilities cached refuses the request locally against a server that does not advertise the token, rather than paying for that round trip or answering a wider listing.
+	DescContains *string `form:"desc_contains,omitempty" json:"desc_contains,omitempty"`
+
+	// NotesContains Case-insensitive substring match on the notes: `bd list --notes-contains`.
+	//
+	// Behind the `issues.list.filters` behavior token: an older server answers `unknown_parameter` for this name. A client with the handshake's capabilities cached refuses the request locally against a server that does not advertise the token, rather than paying for that round trip or answering a wider listing.
+	NotesContains *string `form:"notes_contains,omitempty" json:"notes_contains,omitempty"`
+
+	// ExternalContains Substring match on the external reference: `bd list --external-contains`.
+	//
+	// Behind the `issues.list.filters` behavior token: an older server answers `unknown_parameter` for this name. A client with the handshake's capabilities cached refuses the request locally against a server that does not advertise the token, rather than paying for that round trip or answering a wider listing.
+	ExternalContains *string `form:"external_contains,omitempty" json:"external_contains,omitempty"`
+
+	// ExternalRef Exact match on the external reference: `bd list --external-ref`.
+	//
+	// Behind the `issues.list.filters` behavior token: an older server answers `unknown_parameter` for this name. A client with the handshake's capabilities cached refuses the request locally against a server that does not advertise the token, rather than paying for that round trip or answering a wider listing.
+	ExternalRef *string `form:"external_ref,omitempty" json:"external_ref,omitempty"`
+
+	// Spec Only issues whose spec id starts with this prefix: `bd list --spec`.
+	//
+	// Behind the `issues.list.filters` behavior token: an older server answers `unknown_parameter` for this name. A client with the handshake's capabilities cached refuses the request locally against a server that does not advertise the token, rather than paying for that round trip or answering a wider listing.
+	Spec *string `form:"spec,omitempty" json:"spec,omitempty"`
+
+	// LabelPattern Glob label filter: `bd list --label-pattern`, with `GET /v0/beads/ready`'s spelling.
+	//
+	// Behind the `issues.list.filters` behavior token: an older server answers `unknown_parameter` for this name. A client with the handshake's capabilities cached refuses the request locally against a server that does not advertise the token, rather than paying for that round trip or answering a wider listing.
+	LabelPattern *string `form:"label_pattern,omitempty" json:"label_pattern,omitempty"`
+
+	// LabelRegex Regular-expression label filter: `bd list --label-regex`, with `GET /v0/beads/ready`'s spelling. A pattern the database cannot compile is a 400 `invalid_value` on this parameter.
+	//
+	// Behind the `issues.list.filters` behavior token: an older server answers `unknown_parameter` for this name. A client with the handshake's capabilities cached refuses the request locally against a server that does not advertise the token, rather than paying for that round trip or answering a wider listing.
+	LabelRegex *string `form:"label_regex,omitempty" json:"label_regex,omitempty"`
+
+	// UpdatedAfter Only issues last updated strictly after this instant: `bd list --updated-after`. RFC 3339; compared strictly and at whole-second precision (the bound is truncated to the second before it is compared), and normalized to UTC, so a bound carrying an offset selects exactly what its `Z` twin does. A row whose column is NULL never matches either bound.
+	//
+	// Behind the `issues.list.filters` behavior token: an older server answers `unknown_parameter` for this name. A client with the handshake's capabilities cached refuses the request locally against a server that does not advertise the token, rather than paying for that round trip or answering a wider listing.
+	UpdatedAfter *time.Time `form:"updated_after,omitempty" json:"updated_after,omitempty"`
+
+	// UpdatedBefore Only issues last updated strictly before this instant: `bd list --updated-before`. RFC 3339; compared strictly and at whole-second precision (the bound is truncated to the second before it is compared), and normalized to UTC, so a bound carrying an offset selects exactly what its `Z` twin does. A row whose column is NULL never matches either bound.
+	//
+	// Behind the `issues.list.filters` behavior token: an older server answers `unknown_parameter` for this name. A client with the handshake's capabilities cached refuses the request locally against a server that does not advertise the token, rather than paying for that round trip or answering a wider listing.
+	UpdatedBefore *time.Time `form:"updated_before,omitempty" json:"updated_before,omitempty"`
+
+	// ClosedAfter Only issues closed strictly after this instant: `bd list --closed-after`. RFC 3339; compared strictly and at whole-second precision (the bound is truncated to the second before it is compared), and normalized to UTC, so a bound carrying an offset selects exactly what its `Z` twin does. A row whose column is NULL never matches either bound.
+	//
+	// Behind the `issues.list.filters` behavior token: an older server answers `unknown_parameter` for this name. A client with the handshake's capabilities cached refuses the request locally against a server that does not advertise the token, rather than paying for that round trip or answering a wider listing.
+	ClosedAfter *time.Time `form:"closed_after,omitempty" json:"closed_after,omitempty"`
+
+	// ClosedBefore Only issues closed strictly before this instant: `bd list --closed-before`. RFC 3339; compared strictly and at whole-second precision (the bound is truncated to the second before it is compared), and normalized to UTC, so a bound carrying an offset selects exactly what its `Z` twin does. A row whose column is NULL never matches either bound.
+	//
+	// Behind the `issues.list.filters` behavior token: an older server answers `unknown_parameter` for this name. A client with the handshake's capabilities cached refuses the request locally against a server that does not advertise the token, rather than paying for that round trip or answering a wider listing.
+	ClosedBefore *time.Time `form:"closed_before,omitempty" json:"closed_before,omitempty"`
+
+	// DeferAfter Only issues deferred until strictly after this instant: `bd list --defer-after`. RFC 3339; compared strictly and at whole-second precision (the bound is truncated to the second before it is compared), and normalized to UTC, so a bound carrying an offset selects exactly what its `Z` twin does. A row whose column is NULL never matches either bound.
+	//
+	// Behind the `issues.list.filters` behavior token: an older server answers `unknown_parameter` for this name. A client with the handshake's capabilities cached refuses the request locally against a server that does not advertise the token, rather than paying for that round trip or answering a wider listing.
+	DeferAfter *time.Time `form:"defer_after,omitempty" json:"defer_after,omitempty"`
+
+	// DeferBefore Only issues deferred until strictly before this instant: `bd list --defer-before`. RFC 3339; compared strictly and at whole-second precision (the bound is truncated to the second before it is compared), and normalized to UTC, so a bound carrying an offset selects exactly what its `Z` twin does. A row whose column is NULL never matches either bound.
+	//
+	// Behind the `issues.list.filters` behavior token: an older server answers `unknown_parameter` for this name. A client with the handshake's capabilities cached refuses the request locally against a server that does not advertise the token, rather than paying for that round trip or answering a wider listing.
+	DeferBefore *time.Time `form:"defer_before,omitempty" json:"defer_before,omitempty"`
+
+	// DueAfter Only issues due strictly after this instant: `bd list --due-after`. RFC 3339; compared strictly and at whole-second precision (the bound is truncated to the second before it is compared), and normalized to UTC, so a bound carrying an offset selects exactly what its `Z` twin does. A row whose column is NULL never matches either bound.
+	//
+	// Behind the `issues.list.filters` behavior token: an older server answers `unknown_parameter` for this name. A client with the handshake's capabilities cached refuses the request locally against a server that does not advertise the token, rather than paying for that round trip or answering a wider listing.
+	DueAfter *time.Time `form:"due_after,omitempty" json:"due_after,omitempty"`
+
+	// DueBefore Only issues due strictly before this instant: `bd list --due-before`. RFC 3339; compared strictly and at whole-second precision (the bound is truncated to the second before it is compared), and normalized to UTC, so a bound carrying an offset selects exactly what its `Z` twin does. A row whose column is NULL never matches either bound.
+	//
+	// Behind the `issues.list.filters` behavior token: an older server answers `unknown_parameter` for this name. A client with the handshake's capabilities cached refuses the request locally against a server that does not advertise the token, rather than paying for that round trip or answering a wider listing.
+	DueBefore *time.Time `form:"due_before,omitempty" json:"due_before,omitempty"`
+
+	// Priority Exact priority: `bd list --priority`. Absent means unfiltered; `0` is a real priority.
+	//
+	// Behind the `issues.list.filters` behavior token: an older server answers `unknown_parameter` for this name. A client with the handshake's capabilities cached refuses the request locally against a server that does not advertise the token, rather than paying for that round trip or answering a wider listing.
+	Priority *int `form:"priority,omitempty" json:"priority,omitempty"`
+
+	// PriorityMin Lowest priority to list, inclusive: `bd list --priority-min`.
+	//
+	// Behind the `issues.list.filters` behavior token: an older server answers `unknown_parameter` for this name. A client with the handshake's capabilities cached refuses the request locally against a server that does not advertise the token, rather than paying for that round trip or answering a wider listing.
+	PriorityMin *int `form:"priority_min,omitempty" json:"priority_min,omitempty"`
+
+	// PriorityMax Highest priority to list, inclusive: `bd list --priority-max`.
+	//
+	// Behind the `issues.list.filters` behavior token: an older server answers `unknown_parameter` for this name. A client with the handshake's capabilities cached refuses the request locally against a server that does not advertise the token, rather than paying for that round trip or answering a wider listing.
+	PriorityMax *int `form:"priority_max,omitempty" json:"priority_max,omitempty"`
+
+	// EmptyDescription Only issues with an empty description: `bd list --empty-description`.
+	//
+	// Behind the `issues.list.filters` behavior token: an older server answers `unknown_parameter` for this name. A client with the handshake's capabilities cached refuses the request locally against a server that does not advertise the token, rather than paying for that round trip or answering a wider listing.
+	EmptyDescription *bool `form:"empty_description,omitempty" json:"empty_description,omitempty"`
+
+	// NoLabels Only issues carrying no label: `bd list --no-labels`.
+	//
+	// Behind the `issues.list.filters` behavior token: an older server answers `unknown_parameter` for this name. A client with the handshake's capabilities cached refuses the request locally against a server that does not advertise the token, rather than paying for that round trip or answering a wider listing.
+	NoLabels *bool `form:"no_labels,omitempty" json:"no_labels,omitempty"`
+
+	// NoParent Only top-level issues, those with no parent: `bd list --no-parent`. Sending it with `parent` is a 400 on `no_parent`, as on `GET /v0/beads/issues:count`.
+	//
+	// Behind the `issues.list.filters` behavior token: an older server answers `unknown_parameter` for this name. A client with the handshake's capabilities cached refuses the request locally against a server that does not advertise the token, rather than paying for that round trip or answering a wider listing.
+	NoParent *bool `form:"no_parent,omitempty" json:"no_parent,omitempty"`
+
+	// ExcludeType Issue types to leave out (repeat the parameter; a value may also be comma-separated): `bd list --exclude-type`. Normalized by the role as the local listing normalizes it.
+	//
+	// Behind the `issues.list.filters` behavior token: an older server answers `unknown_parameter` for this name. A client with the handshake's capabilities cached refuses the request locally against a server that does not advertise the token, rather than paying for that round trip or answering a wider listing.
+	ExcludeType *[]string `form:"exclude_type,omitempty" json:"exclude_type,omitempty"`
+
+	// ExcludeStatus Statuses to leave out (repeat the parameter; a value may also be comma-separated), on top of what `status` or the default exclusions select; it never re-admits a row they hide. With `all` there are no default exclusions, so the listing keeps every status not named here (the `pinned` and `hooked` statuses and custom done or frozen statuses included unless named). Each name is validated against the workspace's statuses (built-in and custom), as `GET /v0/beads/issues:count` validates it: an unknown name is a 400 `invalid_value` on this parameter, never an exclusion that excludes nothing.
+	//
+	// Behind the `issues.list.filters` behavior token: an older server answers `unknown_parameter` for this name. A client with the handshake's capabilities cached refuses the request locally against a server that does not advertise the token, rather than paying for that round trip or answering a wider listing.
+	ExcludeStatus *[]string `form:"exclude_status,omitempty" json:"exclude_status,omitempty"`
+
+	// Pinned Only issues carrying the pinned FLAG, at any status: `bd list --pinned`. The pinned STATUS is `status`; the flag is a separate predicate. Sending it with `no_pinned` is a 400 on `no_pinned`.
+	//
+	// Behind the `issues.list.filters` behavior token: an older server answers `unknown_parameter` for this name. A client with the handshake's capabilities cached refuses the request locally against a server that does not advertise the token, rather than paying for that round trip or answering a wider listing.
+	Pinned *bool `form:"pinned,omitempty" json:"pinned,omitempty"`
+
+	// NoPinned Only issues without the pinned flag, held in place where `all` or a pinned/hooked `status` would otherwise drop that predicate: `bd list --no-pinned`. Sending it with `pinned` is a 400 on `no_pinned`.
+	//
+	// Behind the `issues.list.filters` behavior token: an older server answers `unknown_parameter` for this name. A client with the handshake's capabilities cached refuses the request locally against a server that does not advertise the token, rather than paying for that round trip or answering a wider listing.
+	NoPinned *bool `form:"no_pinned,omitempty" json:"no_pinned,omitempty"`
+
+	// Deferred Only deferred issues: `bd list --deferred`.
+	//
+	// Behind the `issues.list.filters` behavior token: an older server answers `unknown_parameter` for this name. A client with the handshake's capabilities cached refuses the request locally against a server that does not advertise the token, rather than paying for that round trip or answering a wider listing.
+	Deferred *bool `form:"deferred,omitempty" json:"deferred,omitempty"`
+
+	// Overdue Only overdue issues, those whose due time is before now: `bd list --overdue`. Now is the SERVER's clock when the query runs, not the client's.
+	//
+	// Behind the `issues.list.filters` behavior token: an older server answers `unknown_parameter` for this name. A client with the handshake's capabilities cached refuses the request locally against a server that does not advertise the token, rather than paying for that round trip or answering a wider listing.
+	Overdue *bool `form:"overdue,omitempty" json:"overdue,omitempty"`
+
+	// MolType Only molecules of this type: `bd list --mol-type`. Any other value, including an empty one, is a 400 naming the parameter.
+	//
+	// Behind the `issues.list.filters` behavior token: an older server answers `unknown_parameter` for this name. A client with the handshake's capabilities cached refuses the request locally against a server that does not advertise the token, rather than paying for that round trip or answering a wider listing.
+	MolType *ListIssuesParamsMolType `form:"mol_type,omitempty" json:"mol_type,omitempty"`
+
+	// WispType Only rows of this wisp type (a predicate on the column, not a plane selector): `bd list --wisp-type`. Any other value, including an empty one, is a 400 naming the parameter.
+	//
+	// Behind the `issues.list.filters` behavior token: an older server answers `unknown_parameter` for this name. A client with the handshake's capabilities cached refuses the request locally against a server that does not advertise the token, rather than paying for that round trip or answering a wider listing.
+	WispType *ListIssuesParamsWispType `form:"wisp_type,omitempty" json:"wisp_type,omitempty"`
 
 	// Sort Which of the two served total orders this page is in. `created` is `(created_at DESC, id ASC)`; `priority` is `(priority ASC, created_at DESC, id ASC)` — `bd list`'s flagless ordering, and the order `bd list --sort priority` produces.
 	//
@@ -2528,6 +2777,12 @@ type ListIssuesParams struct {
 	// The response carries no marker for the omission, so an omitted field is indistinguishable from a genuinely empty one: only the client that sent this parameter knows the rows are partial. Fetch a whole issue with `GET /v0/beads/issues/{id}`.
 	Brief *bool `form:"brief,omitempty" json:"brief,omitempty"`
 }
+
+// ListIssuesParamsMolType defines parameters for ListIssues.
+type ListIssuesParamsMolType string
+
+// ListIssuesParamsWispType defines parameters for ListIssues.
+type ListIssuesParamsWispType string
 
 // ListIssuesParamsSort defines parameters for ListIssues.
 type ListIssuesParamsSort string
@@ -2594,7 +2849,7 @@ type ClaimNextIssueParams struct {
 	// LabelPattern Glob matched against labels.
 	LabelPattern *string `form:"label_pattern,omitempty" json:"label_pattern,omitempty"`
 
-	// LabelRegex Regular expression matched against labels.
+	// LabelRegex Regular expression matched against labels, compiled by the database in its own dialect. A pattern it cannot compile is a 400 `invalid_value` on this parameter.
 	LabelRegex *string `form:"label_regex,omitempty" json:"label_regex,omitempty"`
 
 	// Priority Exact priority (0 is a real value, not "unset").
@@ -2671,22 +2926,22 @@ type CountIssuesParams struct {
 	// NotesContains Substring match on the notes.
 	NotesContains *string `form:"notes_contains,omitempty" json:"notes_contains,omitempty"`
 
-	// CreatedAfter RFC 3339. Only issues created strictly after this instant.
+	// CreatedAfter RFC 3339. Only issues created strictly after this instant, compared at whole-second precision (the bound is truncated to the second before it is compared) and normalized to UTC, so a bound carrying an offset selects exactly what its `Z` twin does.
 	CreatedAfter *time.Time `form:"created_after,omitempty" json:"created_after,omitempty"`
 
-	// CreatedBefore RFC 3339. Only issues created strictly before this instant.
+	// CreatedBefore RFC 3339. Only issues created strictly before this instant, compared at whole-second precision (the bound is truncated to the second before it is compared) and normalized to UTC, so a bound carrying an offset selects exactly what its `Z` twin does.
 	CreatedBefore *time.Time `form:"created_before,omitempty" json:"created_before,omitempty"`
 
-	// UpdatedAfter RFC 3339.
+	// UpdatedAfter RFC 3339. Only issues last updated strictly after this instant, compared at whole-second precision (the bound is truncated to the second before it is compared) and normalized to UTC, so a bound carrying an offset selects exactly what its `Z` twin does.
 	UpdatedAfter *time.Time `form:"updated_after,omitempty" json:"updated_after,omitempty"`
 
-	// UpdatedBefore RFC 3339.
+	// UpdatedBefore RFC 3339. Only issues last updated strictly before this instant, compared at whole-second precision (the bound is truncated to the second before it is compared) and normalized to UTC, so a bound carrying an offset selects exactly what its `Z` twin does.
 	UpdatedBefore *time.Time `form:"updated_before,omitempty" json:"updated_before,omitempty"`
 
-	// ClosedAfter RFC 3339. Counting closed rows needs no `status` beside it: a bare count already includes them.
+	// ClosedAfter RFC 3339. Only issues closed strictly after this instant, compared at whole-second precision (the bound is truncated to the second before it is compared) and normalized to UTC, so a bound carrying an offset selects exactly what its `Z` twin does. A row whose `closed_at` is NULL never matches either bound. Counting closed rows needs no `status` beside it: a bare count already includes them.
 	ClosedAfter *time.Time `form:"closed_after,omitempty" json:"closed_after,omitempty"`
 
-	// ClosedBefore RFC 3339.
+	// ClosedBefore RFC 3339. Only issues closed strictly before this instant, compared at whole-second precision (the bound is truncated to the second before it is compared) and normalized to UTC, so a bound carrying an offset selects exactly what its `Z` twin does. A row whose `closed_at` is NULL never matches either bound.
 	ClosedBefore *time.Time `form:"closed_before,omitempty" json:"closed_before,omitempty"`
 
 	// EmptyDescription Only issues with no description.
@@ -2739,7 +2994,7 @@ type CountIssuesParams struct {
 	// Behind the `issues.count.scope` behavior token: an older server answers `unknown_parameter` for this name.
 	ExcludeType *[]string `form:"exclude_type,omitempty" json:"exclude_type,omitempty"`
 
-	// ExcludeStatus Statuses to exclude from the count. Repeat the parameter, or pass a comma-separated list; entries are taken as written (no normalization) but — UNLIKE `status` and `exclude_type` above — each name IS validated against this workspace's vocabulary (built-in statuses plus this workspace's own custom ones): an unrecognized name is `invalid_argument` on this parameter with `reason: invalid_value`, rather than silently excluding nothing and overcounting. There is no listing counterpart to this parameter: `GET /v0/beads/issues` computes its default status exclusions internally from workspace configuration and exposes no equivalent knob, so this is a Count-only capability.
+	// ExcludeStatus Statuses to exclude from the count. Repeat the parameter, or pass a comma-separated list; entries are taken as written (no normalization) but — UNLIKE `status` and `exclude_type` above — each name IS validated against this workspace's vocabulary (built-in statuses plus this workspace's own custom ones): an unrecognized name is `invalid_argument` on this parameter with `reason: invalid_value`, rather than silently excluding nothing and overcounting. `GET /v0/beads/issues` takes the same parameter behind the `issues.list.filters` token and validates it by the same rule; there it narrows on top of the listing's default status exclusions, which a count does not apply.
 	//
 	// Behind the `issues.count.scope` behavior token: an older server answers `unknown_parameter` for this name.
 	ExcludeStatus *[]string `form:"exclude_status,omitempty" json:"exclude_status,omitempty"`
@@ -2822,7 +3077,7 @@ type ListReadyWorkParams struct {
 	// LabelPattern Glob matched against labels.
 	LabelPattern *string `form:"label_pattern,omitempty" json:"label_pattern,omitempty"`
 
-	// LabelRegex Regular expression matched against labels.
+	// LabelRegex Regular expression matched against labels, compiled by the database in its own dialect. A pattern it cannot compile is a 400 `invalid_value` on this parameter.
 	LabelRegex *string `form:"label_regex,omitempty" json:"label_regex,omitempty"`
 
 	// Priority Exact priority (0 is a real value, not "unset").
@@ -2890,7 +3145,7 @@ type CountReadyWorkParams struct {
 	// LabelPattern Glob matched against labels.
 	LabelPattern *string `form:"label_pattern,omitempty" json:"label_pattern,omitempty"`
 
-	// LabelRegex Regular expression matched against labels.
+	// LabelRegex Regular expression matched against labels, compiled by the database in its own dialect. A pattern it cannot compile is a 400 `invalid_value` on this parameter.
 	LabelRegex *string `form:"label_regex,omitempty" json:"label_regex,omitempty"`
 
 	// Priority Exact priority (0 is a real value, not "unset").

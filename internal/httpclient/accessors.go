@@ -402,3 +402,11 @@ func (s *Store) LeaseReclaimer() (issueops.LeaseReclaimer, error) {
 func (s *Store) Heartbeater() (issueops.Heartbeater, error) {
 	return &httpHeartbeater{store: s}, nil
 }
+
+// BlockedLister serves listBlockedIssues (GET /v0/beads/blocked), the
+// listing behind `bd blocked`. Store.dispatch preflights blocked.list, so an
+// older server is refused before the dial naming the token. See
+// blockedlister.go.
+func (s *Store) BlockedLister() (issueops.BlockedLister, error) {
+	return &httpBlockedLister{store: s}, nil
+}

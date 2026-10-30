@@ -54,18 +54,6 @@ func (u *fakeIssueUseCase) GetIssue(_ context.Context, id string) (*types.Issue,
 	return nil, nil
 }
 
-func (u *fakeIssueUseCase) GetIssuesByIDs(ctx context.Context, ids []string) ([]*types.Issue, error) {
-	result := make([]*types.Issue, 0, len(ids))
-	for _, id := range ids {
-		if issue, err := u.GetIssue(ctx, id); err != nil {
-			return nil, err
-		} else if issue != nil {
-			result = append(result, issue)
-		}
-	}
-	return result, nil
-}
-
 func (u *fakeIssueUseCase) GetWisp(_ context.Context, id string) (*types.Issue, error) {
 	for _, issue := range u.wisps {
 		if issue.ID == id {
@@ -75,16 +63,23 @@ func (u *fakeIssueUseCase) GetWisp(_ context.Context, id string) (*types.Issue, 
 	return nil, nil
 }
 
-func (u *fakeIssueUseCase) GetWispsByIDs(ctx context.Context, ids []string) ([]*types.Issue, error) {
-	result := make([]*types.Issue, 0, len(ids))
-	for _, id := range ids {
-		issue, err := u.GetWisp(ctx, id)
+// GetMany answers both planes, as ExecuteGetMany does, each row with the
+// labels it was seeded with (GetMany's one hydration).
+func (u *fakeIssueUseCase) GetMany(ctx context.Context, request publicops.GetManyRequest) (publicops.GetManyResult, error) {
+	result := publicops.GetManyResult{Issues: []*publicops.Issue{}, Missing: []string{}}
+	for _, id := range request.IDs {
+		issue, err := u.GetIssue(ctx, id)
+		if err == nil && issue == nil {
+			issue, err = u.GetWisp(ctx, id)
+		}
 		if err != nil {
-			return nil, err
+			return publicops.GetManyResult{}, err
 		}
-		if issue != nil {
-			result = append(result, issue)
+		if issue == nil {
+			result.Missing = append(result.Missing, id)
+			continue
 		}
+		result.Issues = append(result.Issues, issue)
 	}
 	return result, nil
 }

@@ -15,9 +15,11 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/httpclient"
+	"github.com/steveyegge/beads/internal/httpclient/wire"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	storageissueops "github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/issueops"
@@ -294,13 +296,42 @@ This is used by 'bd done --phase-complete' to register for gate wake notificatio
 // seconds per read and write), and a wall-clock budget would fail a convoy on
 // a slow server after only two or three rounds. Each round has a winner, so
 // the bound carries at least that many simultaneous adders; the jitter
-// spreads them further. The waits themselves add up to at most about 6s, and
-// a gate rewritten without pause still fails after the last attempt.
+// spreads them further. The backoffs themselves add up to at most about 6s,
+// and a gate rewritten without pause still fails after the last attempt.
+//
+// A write lost to contention the store gave up replaying (see
+// gateAddWaiterContended) is not one quick round, so it gets a much tighter
+// bound of its own, gateAddWaiterContentionRetries. It reaches this loop only
+// after the store or bd serve has spent a whole replay budget on it (up to
+// 15s, the server-mode Dolt store's and bd serve's), and the wait after a
+// busy answer includes the server's Retry-After (5s once bd serve's budget is
+// spent). Two retries, like the HTTP client's for a busy read, hold that tail
+// to three such writes (three 15s budgets and two 5s waits: about a minute),
+// where twenty would take over six minutes. They count against
+// gateAddWaiterMaxAttempts too.
 const (
-	gateAddWaiterMaxAttempts = 20
-	gateAddWaiterBackoffBase = 10 * time.Millisecond
-	gateAddWaiterBackoffCap  = 400 * time.Millisecond
+	gateAddWaiterMaxAttempts       = 20
+	gateAddWaiterContentionRetries = 2
+	gateAddWaiterBackoffBase       = 10 * time.Millisecond
+	gateAddWaiterBackoffCap        = 400 * time.Millisecond
 )
+
+// gateAddWaiterRetryWait is the wait before retry number retry after the
+// failed write err: the jittered backoff, plus the server's Retry-After when
+// err is a busy answer that carries one. bd serve sends Retry-After on its
+// busy answers: 1s when its admission limiter is saturated, and 5s when its
+// transaction retry budget is spent, because a convoy back sooner would hold
+// slots while it waited, starving reads. It is honored as sent: the wire
+// client already bounds the header (wire.Options.MaxRetryAfter). The jitter on
+// top keeps adders that were answered busy together from retrying together.
+func gateAddWaiterRetryWait(retry int, err error) time.Duration {
+	wait := gateAddWaiterBackoff(retry)
+	var problem *wire.ProblemError
+	if errors.Is(err, wire.ErrBusy) && errors.As(err, &problem) {
+		wait += problem.RetryAfter
+	}
+	return wait
+}
 
 // gateAddWaiterBackoff is the wait before retry number retry (1-based):
 // jittered in [d/2, d) around d = base * 2^(retry-1), capped.
@@ -342,10 +373,10 @@ var gateAddWaiterSleep = func(ctx context.Context, d time.Duration) error {
 // the role stores the list it is given.
 func addGateWaiter(ctx context.Context, reader issueops.Reader, lifecycle issueops.Lifecycle, gateID, waiter string) (bool, error) {
 	var lastErr error
-	attempts := 0
-	for attempts < gateAddWaiterMaxAttempts {
+	attempts, contended := 0, 0
+	for attempts < gateAddWaiterMaxAttempts && contended <= gateAddWaiterContentionRetries {
 		if attempts > 0 {
-			if err := gateAddWaiterSleep(ctx, gateAddWaiterBackoff(attempts)); err != nil {
+			if err := gateAddWaiterSleep(ctx, gateAddWaiterRetryWait(attempts, lastErr)); err != nil {
 				return false, fmt.Errorf("updating gate: %w", err)
 			}
 		}
@@ -376,12 +407,84 @@ func addGateWaiter(ctx context.Context, reader issueops.Reader, lifecycle issueo
 		if err == nil {
 			return true, nil
 		}
-		if !errors.Is(err, issueops.ErrVersionMismatch) {
+		if !gateAddWaiterLostRound(err) {
 			return false, fmt.Errorf("updating gate: %w", err)
+		}
+		if gateAddWaiterContended(err) {
+			contended++
 		}
 		lastErr = err
 	}
-	return false, fmt.Errorf("updating gate: %s changed on every one of %d attempts: %w", gateID, attempts, lastErr)
+	if errors.Is(lastErr, wire.ErrBusy) && gateAddWaiterLanded(ctx, reader, gateID, waiter) {
+		return false, nil
+	}
+	return false, gateAddWaiterExhausted(gateID, attempts, contended, lastErr)
+}
+
+// gateAddWaiterLanded reports whether waiter is on the gate gateID, read once
+// after addGateWaiter's last write was answered busy. Such a write may have
+// landed (see gateAddWaiterLostRound), and every earlier round's re-read
+// would have found it, but the last write has no round left; so it gets this
+// one read, with no wait first. A failed read reports false.
+func gateAddWaiterLanded(ctx context.Context, reader issueops.Reader, gateID, waiter string) bool {
+	details, err := reader.Get(ctx, issueops.GetRequest{ID: gateID})
+	return err == nil && slices.Contains(details.Issue.Waiters, waiter)
+}
+
+// gateAddWaiterLostRound reports whether a failed guarded write is a lost
+// round the loop retries: a version miss, or a write lost to contention the
+// store gave up replaying (gateAddWaiterContended).
+//
+// Retrying is safe because of how a round is built, NOT because every busy
+// answer means nothing was written. bd serve's own busy answers are no-write,
+// but a gateway in front of the server can answer 503 after the write
+// committed, and the client maps that uncoded 503 to wire.ErrBusy too. Each
+// round re-reads the gate, deduplicates, and writes the whole list guarded by
+// the row version it read, so a write that did land is found on the re-read
+// (the waiter is already there: nothing more is written) and a stale list can
+// never overwrite a newer one. So a retry never adds a waiter twice and never
+// drops another adder's.
+//
+// Everything else is returned at once, including the classes a retry would
+// also survive but that are not contention: a refusal, a database bd serve
+// cannot reach (wire.ErrDBUnavailable), and a server fault such as an
+// indeterminate commit (wire.ErrServerFault, a 500). Those are for the caller
+// to see, not for a convoy loop to hammer.
+func gateAddWaiterLostRound(err error) bool {
+	return errors.Is(err, issueops.ErrVersionMismatch) || gateAddWaiterContended(err)
+}
+
+// gateAddWaiterContended reports whether a failed guarded write was lost to
+// contention the store gave up replaying. On the direct route that is a
+// serialization failure or deadlock, which guarantees a rollback (Dolt and
+// MySQL report 1213/1205, a SERIALIZABLE store such as Postgres SQLSTATE
+// 40001/40P01): the store's transaction envelope replays one until its budget
+// is spent and then returns it. Over HTTP it is wire.ErrBusy, which the client
+// maps from bd serve's busy answer (a refused admission, or a spent retry
+// budget) and from a 503 whose code it does not know or that has none, such as
+// a gateway's. A 503 coded db_unavailable or events_watch_saturated maps to its
+// own sentinel, not to this one.
+//
+// Dolt's 1105 "@autocommit transaction rolled back", which the direct route's
+// store also replays, is deliberately not admitted: Dolt raises it for
+// conflicts that a merge inside the transaction left behind, while a write
+// lost to a concurrent writer, the convoy's case, comes back as 1213.
+func gateAddWaiterContended(err error) bool {
+	return uow.IsSerializationError(err) || errors.Is(err, wire.ErrBusy)
+}
+
+// gateAddWaiterExhausted is addGateWaiter's error once it stops retrying:
+// after attempts writes, contended of them answered busy or lost to
+// contention, the last with lastErr. Only when none was contended did the gate
+// change under every write, so only then does the error say that; otherwise it
+// names the contention, so that the operator of a busy server is not sent
+// looking for a concurrent writer. It says no write was confirmed, not that
+// none landed, because a busy answer does not prove that nothing was written.
+func gateAddWaiterExhausted(gateID string, attempts, contended int, lastErr error) error {
+	if contended == 0 {
+		return fmt.Errorf("updating gate: %s changed on every one of %d attempts: %w", gateID, attempts, lastErr)
+	}
+	return fmt.Errorf("updating gate: no write to %s was confirmed in %d attempts (%d answered busy or lost to write contention): %w", gateID, attempts, contended, lastErr)
 }
 
 // renderGateWaiterAlready and renderGateWaiterAdded are shared by the direct

@@ -521,6 +521,7 @@ func (*serveRolesStore) EdgeReader() (issueops.EdgeReader, error)               
 func (*serveRolesStore) BlockingAnnotator() (issueops.BlockingAnnotator, error) { return nil, nil }
 func (*serveRolesStore) TreeWalker() (issueops.TreeWalker, error)               { return nil, nil }
 func (*serveRolesStore) ReadyCounter() (issueops.ReadyCounter, error)           { return nil, nil }
+func (*serveRolesStore) BlockedLister() (issueops.BlockedLister, error)         { return nil, nil }
 func (*serveRolesStore) Querier() (issueops.Querier, error)                     { return nil, nil }
 func (*serveRolesStore) Sweeper() (issueops.Sweeper, error)                     { return nil, nil }
 func (*serveRolesStore) Deleter() (issueops.Deleter, error)                     { return nil, nil }

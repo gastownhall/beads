@@ -103,10 +103,11 @@ func TestListScopeFiltersRefuseLocallyWhenTheServerLacksTheToken(t *testing.T) {
 	}
 }
 
-// TestListTitleContainsThatDiffersFromTitleRefusesBeforeDialing: the listing
-// publishes one title parameter, so a `--title` and `--title-contains` that
-// differ cannot both ride it. The request refuses, naming the member, without
-// a round trip and without dropping either half.
+// TestListTitleContainsThatDiffersFromTitleRefusesBeforeDialing: a `--title`
+// and `--title-contains` that differ cannot both ride `title`, so the leftover
+// TitleContains rides `title_contains`, behind issues.list.filters. Against a
+// server that serves the title token but not that one, the request refuses,
+// naming the token, without a round trip and without dropping either half.
 func TestListTitleContainsThatDiffersFromTitleRefusesBeforeDialing(t *testing.T) {
 	served := &apigen.ContextResponse{Capabilities: []string{"issues.list", wire.CapListTitle}}
 	w := newCountingWire(`{"items":[],"has_more":false}`)
@@ -115,8 +116,8 @@ func TestListTitleContainsThatDiffersFromTitleRefusesBeforeDialing(t *testing.T)
 	if err == nil {
 		t.Fatal("List with a differing --title/--title-contains pair succeeded; one half was dropped")
 	}
-	if !strings.Contains(err.Error(), "TitleContains") {
-		t.Errorf("refusal %q does not name TitleContains", err)
+	if !strings.Contains(err.Error(), wire.CapListFilters) {
+		t.Errorf("refusal %q does not name %s", err, wire.CapListFilters)
 	}
 	if len(w.dialed) != 0 {
 		t.Errorf("dialed %d times, want 0", len(w.dialed))

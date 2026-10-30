@@ -81,9 +81,12 @@ func (r httpReader) List(ctx context.Context, req issueops.ListRequest) (issueop
 
 // tokenedListFilters are the ListRequest members listIssues carries only on a
 // server advertising a behavior token of their own, each with that token:
-// `bd search`'s text (S26) and `bd list --title`, `--id` and `--no-assignee`
-// (S15b). `--title-contains` has no entry: List folds it onto TitleSearch
-// first (encode.FoldTitleContains), so it is gated by issues.list.title.
+// `bd search`'s text (S26), `bd list --title`, `--id` and `--no-assignee`
+// (S15b), and the rest of `bd list`'s filters behind issues.list.filters.
+// `--title-contains` is folded onto TitleSearch first
+// (encode.FoldTitleContains), so alone it is gated by issues.list.title;
+// only one that differs from `--title` keeps TitleContains, which rides
+// `title_contains` with the filters.
 // Order decides which token a request carrying several names; each refusal is
 // complete on its own, so any order is honest.
 var tokenedListFilters = []struct {
@@ -98,6 +101,10 @@ var tokenedListFilters = []struct {
 	{wire.CapListIDs, func(r issueops.ListRequest) bool {
 		return strings.TrimSpace(strings.ReplaceAll(r.IDFilter, ",", "")) != ""
 	}},
+	// The rest of `bd list`'s filter vocabulary, one token for the set: the
+	// members are encode.ListFiltersMembers, the same list the encoder emits
+	// from, so a member cannot ride the wire without asking for the token.
+	{wire.CapListFilters, encode.ListFiltersSet},
 }
 
 // refuseUnservedListFilters is the pre-dial gate for the tokened members. An

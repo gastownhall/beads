@@ -215,7 +215,7 @@ const large712ShapeName = "712 (mol 2x)"
 // The 712 (mol 2x) shape alone still measures ~260-300s: it is a single
 // pinned statement-count assertion over one indivisible ApplyBatchInTx
 // transaction (no internal sub-cases to split further), a genuine, CPU-bound
-// cost: 12790 real SQL statement round-trips through the race-instrumented
+// cost: 12382 real SQL statement round-trips through the race-instrumented
 // in-process Dolt engine. It is skipped under -race below, following the
 // exact precedent TestLargeBatchApplyWallClock_Embedded set for its
 // 1000-item shape: the cost here is race-instrumentation overhead on the
@@ -224,7 +224,7 @@ const large712ShapeName = "712 (mol 2x)"
 // real pass/fail assertion (the pinned Total() above), so skipping it under
 // race moves this regression check to the non-race embedded variant — not a
 // weakening of the assertion itself. //internal/storage/embeddeddolt:embeddeddolt_batch_apply_nonrace_test
-// (the Bazel embedded tier) selects this test, so the full 12790-statement
+// (the Bazel embedded tier) selects this test, so the full 12382-statement
 // pinned baseline still runs, non-race.
 func runLargeBatchApplyStatementCountsShape(t *testing.T, shapeName string) {
 	skipUnlessEmbeddedDolt(t)
@@ -434,10 +434,22 @@ func TestLargeBatchApplyWallClock_Embedded(t *testing.T) {
 //
 // Net: classic +49 (seven distinct parent-child adds; the eighth repeats a
 // pair and is a no-op). 356 and 712 are unchanged.
+//
+// Re-pinned for the create-only existence reads (was 6396 / 12790 / 835).
+// The create-only guard already reads both planes for the id, so neither the
+// cross-plane collision check nor the create-only insert re-reads a plane:
+// -2 statements per create item (356: 102 creates, -204; 712: 204, -408;
+// classic: 10, -20). The Dolt server backend drops by the same amounts.
+//
+// Re-pinned for the id-retention guard (was 6192 / 12382 / 815). The
+// create-only guard now reads a create's occupancy — both row tables and both
+// id tombstone tables — in ONE statement where it used to read the two row
+// tables in two: -1 statement per create item (356: 102 creates, -102; 712:
+// 204, -204; classic: 10, -10).
 var pinnedEmbeddedStatementCounts = map[string]int64{
-	"356 (mol 1x)":    6396,
-	large712ShapeName: 12790,
-	"40 (classic)":    835,
+	"356 (mol 1x)":    6090,
+	large712ShapeName: 12178,
+	"40 (classic)":    805,
 }
 
 // BenchmarkLargeBatchApply_Embedded benchmarks issueops.ApplyBatchInTx on

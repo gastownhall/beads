@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/beads/internal/audit"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	storageissueops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/timeparsing"
@@ -494,7 +495,7 @@ pointless).`,
 				if reported, ok := reportIfRevisionTargetGone("updating", id, err, ifRevision); ok {
 					return reported
 				}
-				fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", id, err)
+				fmt.Fprintf(os.Stderr, "Error resolving %s: %s\n", id, remedy.PrintedMessage(err))
 				recordFailure(id, fmt.Sprintf("resolving issue: %v", err))
 				continue
 			}
@@ -564,7 +565,7 @@ pointless).`,
 			}
 			ops, err := writeOps(issueStore)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, err)
+				fmt.Fprintf(os.Stderr, "Error updating %s: %s\n", id, remedy.PrintedMessage(err))
 				recordFailure(id, fmt.Sprintf("updating issue: %v", err))
 				closeIfUnmutated(result)
 				continue
@@ -614,7 +615,7 @@ pointless).`,
 					failureText = refusal.Error()
 					fmt.Fprintf(os.Stderr, "%s\n", refusal)
 				} else {
-					fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, updateErr)
+					fmt.Fprintf(os.Stderr, "Error updating %s: %s\n", id, remedy.PrintedMessage(updateErr))
 				}
 				failures = append(failures, updateIDFailure{
 					ID:            id,
@@ -975,7 +976,7 @@ func reportUpdateFailures(failures []updateIDFailure, total int) error {
 	} else {
 		fmt.Fprintf(os.Stderr, "Error: %s\n", msg)
 		for _, f := range failures {
-			fmt.Fprintf(os.Stderr, "  %s: %s\n", f.ID, f.Error)
+			fmt.Fprintf(os.Stderr, "  %s: %s\n", f.ID, remedy.PrintedText(f.Error))
 		}
 	}
 	allGuard := len(failures) > 0

@@ -157,6 +157,26 @@ const (
 	CapIssuesListTitle      = "issues.list.title"
 )
 
+// CapIssuesListFilters is the behavior capability that advertises the rest of
+// `bd list`'s filter vocabulary on GET /v0/beads/issues (reads.go
+// listFilterParams, spec OpListIssues): the updated/closed/defer/due bounds,
+// the priority range, the text and external-ref matches, the label
+// pattern/regex, the spec prefix, the empty-description, no-labels, no-parent,
+// pinned-flag, deferred and overdue predicates, the type and status exclusions
+// and the mol/wisp types. Each is carried as the issueops.ListRequest member
+// `bd list` sets and applied by the same Reader role (workapi.BuildListFilter)
+// the local route reads through; the handler builds no filter.
+//
+// ONE token for the set, unlike the per-parameter list tokens above: these
+// members land in one build and no server will ever carry a subset, so a split
+// would mint about twenty tokens with no cutover distinction between them.
+//
+// The client refuses a request carrying any of them locally against a server
+// that does not advertise this token, with ErrUnsupported naming it: an older
+// server answers the parameter with `unknown_parameter`, and dropping one would
+// answer a WIDER listing than asked for.
+const CapIssuesListFilters = "issues.list.filters"
+
 // CapListIDs is the behavior capability that advertises the repeatable `id`
 // filter on listIssues (issueops.ListRequest.IDFilter; `bd list --id`). It
 // rides beside `issues.list` for the reason CapIssuesListSort does: the
@@ -174,6 +194,22 @@ const CapListIDs = "issues.list.ids"
 // (issueops.BlockedFlags). The client refuses the read locally, naming this
 // token, against a server that does not advertise it.
 const CapDependenciesBlockingIsBlocked = "dependencies.blocking.isBlocked"
+
+// CapIssuesArrivalSeq is the behavior capability announcing `arrival_seq` on
+// every Issue-shaped response: the commit-ordered create sequence storage
+// stamps on a wisp-plane row (types.Issue.ArrivalSeq) — the events-journal seq
+// of the row's create record, kept on the row so a consumer can recover create
+// order after those records are pruned. It names a MEMBER added to existing
+// response schemas, so it rides behaviorCapabilities: a client that sees it
+// knows an absent member means the row carries no stamp, not that the server
+// predates the member.
+//
+// It is BUILD-LEVEL, like every other behavior token: it says this server
+// knows the member, not that rows are being stamped right now. Rows are
+// stamped only while the workspace journals. A client learns that the way it
+// learns journal activation for any purpose: events.list answers 409
+// events_journal_disabled when the journal is off.
+const CapIssuesArrivalSeq = "issues.arrivalSeq"
 
 // CapIssuesSweepWispsPlane is the behavior capability that advertises the
 // `wisps-plane` value of SweepRequest.tier (sweep.go, spec SweepRequest.tier):
@@ -204,6 +240,36 @@ const CapIssuesSweepLiveDependents = "issues.sweep.liveDependents"
 // invalid_argument`/`unknown_parameter`. The client MUST check this token
 // before sending the member to a server that may predate it.
 const CapIssuesSweepLimit = "issues.sweep.limit"
+
+// CapIssuesSweepRetainIDs is the behavior capability that advertises
+// SweepRequest.retain_ids and the paired SweepResult.retain_ids echo
+// (sweep.go): a sweep that retires every id it deletes with a permanent
+// tombstone (issueops.SweepRequest.RetainIDs).
+//
+// IT PROMISES MORE THAN THE MEMBER. A server advertising it also refuses a
+// create of a retired id on every create operation — `410
+// idempotency_expired` on createIssue and on an applyBatch create item — so
+// the guarantee holds on the read side of the tombstone, not just the write
+// side. An older server answers the request member with `400
+// invalid_argument`/`unknown_parameter`; a client that needs the guarantee
+// MUST check this token and refuse to sweep without it, never fall back to a
+// sweep that leaves the ids reusable.
+const CapIssuesSweepRetainIDs = "issues.sweep.retainIds"
+
+// CapIssuesSweepRetainedTypes is the behavior capability that advertises the
+// workspace's retained-type protection on issues:sweep and the paired
+// SweepSkips.retention_required response member (sweep.go): a sweep without
+// retain_ids holds back every candidate whose issue type the workspace's
+// types.retained setting names (issueops.SettingKeyTypesRetained,
+// issueops.SweepSkips.RetentionRequired). It names no request member — the
+// protection is the server's, keyed on a stored setting — so an older server
+// answers a plain sweep without complaint and deletes the retained beads
+// without retiring their ids. The token is how a client learns which it is
+// talking to: before a plain sweep, bd's client reads it and, against a
+// server without it, reads types.retained itself and refuses the sweep before
+// the dial when the setting names a type (httpclient's
+// refuseAnUnguardedPlainSweep; wire.CapSweepRetainedTypes).
+const CapIssuesSweepRetainedTypes = "issues.sweep.retainedTypes"
 
 // CapBatchApplyDepAddLineage is the behavior capability that advertises
 // ApplyDepAddItem's `has_spawner` and `thread_id` members (batch_apply.go):
@@ -286,10 +352,12 @@ const CapIssuesCreateGates = "issues.create.gates"
 const CapIssuesUpdateGates = "issues.update.gates"
 
 // CapExternalDependencies is the CONDITIONAL behavior capability announcing
-// that this server's ready, claim, claim-next, close, blocking-annotation and
-// dependency-tree operations already apply bd's external-dependency policy
-// (an issue blocked by an unsatisfied `external:<project>:<capability>`
-// dependency is not ready, not claimable and not closable without force). A
+// that this server's ready, blocked-listing, claim, claim-next, close,
+// blocking-annotation and dependency-tree operations already apply bd's
+// external-dependency policy (an issue blocked by an unsatisfied
+// `external:<project>:<capability>` dependency is not ready, not claimable and
+// not closable without force, and the blocked listing lists it with that
+// dependency among its blockers). A
 // client that sees it must pass those operations through untouched: running
 // the policy again on the client would judge it against the CLIENT machine's
 // project configuration and would turn the server's atomic claim-next into a
@@ -532,6 +600,14 @@ var routeTable = []route{
 		capability:  "ready.count",
 		implemented: true,
 		handler:     (*Server).handleCountReady,
+	},
+	{
+		op:          OpListBlockedIssues,
+		method:      http.MethodGet,
+		pattern:     "/v0/beads/blocked",
+		capability:  "blocked.list",
+		implemented: true,
+		handler:     (*Server).handleListBlocked,
 	},
 	{
 		op:          OpListIssues,
@@ -1100,10 +1176,12 @@ func (r route) specPathOf() string {
 var behaviorCapabilities = []string{
 	CapProjectEnforce, CapBatchApplyLarge, CapIssuesListSort, CapIssuesCountScope,
 	CapIssuesSweepWispsPlane, CapIssuesSweepLiveDependents, CapIssuesSweepLimit,
+	CapIssuesSweepRetainIDs, CapIssuesSweepRetainedTypes,
 	CapBatchApplyDepAddLineage, CapIssuesUpdateAllowTemplate, CapIssuesCreateDefaultPriority,
 	CapIssuesCloseAutoCloseMolecule, CapIssuesListSearch,
 	CapIssuesListNoAssignee, CapIssuesListTitle, CapListIDs, CapIssuesUpdatePersistence, CapDependenciesBlockingIsBlocked, CapIssuesUpdateClaim,
-	CapIssuesCreateGates, CapIssuesUpdateGates,
+	CapIssuesCreateGates, CapIssuesUpdateGates, CapIssuesListFilters,
+	CapIssuesArrivalSeq,
 }
 
 // Capabilities lists what this build advertises in ContextResponse.capabilities:

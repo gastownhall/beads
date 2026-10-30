@@ -126,7 +126,7 @@ func runShowProxiedServer(cmd *cobra.Command, ctx context.Context, args []string
 
 	switch {
 	case in.asOfRef != "":
-		runShowProxiedAsOf(ctx, uw, in)
+		return runShowProxiedAsOf(ctx, uw, in)
 	case in.thread:
 		return runShowProxiedThread(ctx, uw, in)
 	case in.refs:
@@ -218,8 +218,9 @@ func reportIssueLookupFailure(verb, id string, err error) {
 	fmt.Fprintf(os.Stderr, "Error %s %s: %v\n", verb, id, err)
 }
 
-func runShowProxiedAsOf(ctx context.Context, uw uow.UnitOfWork, in *showProxiedInput) {
+func runShowProxiedAsOf(ctx context.Context, uw uow.UnitOfWork, in *showProxiedInput) error {
 	var jsonIssues []*types.Issue
+	foundCount := 0
 	for idx, id := range in.ids {
 		issue, err := uw.IssueUseCase().AsOf(ctx, id, in.asOfRef)
 		if err != nil {
@@ -230,6 +231,7 @@ func runShowProxiedAsOf(ctx context.Context, uw uow.UnitOfWork, in *showProxiedI
 			fmt.Fprintf(os.Stderr, "Issue %s did not exist at %s\n", id, in.asOfRef)
 			continue
 		}
+		foundCount++
 
 		if in.shortMode {
 			fmt.Println(formatShortIssue(issue))
@@ -250,9 +252,13 @@ func runShowProxiedAsOf(ctx context.Context, uw uow.UnitOfWork, in *showProxiedI
 		}
 		fmt.Println()
 	}
-	if jsonOutput && len(jsonIssues) > 0 {
-		_ = outputJSON(jsonIssues)
+	if foundCount == 0 {
+		return showAsOfFoundNothing()
 	}
+	if jsonOutput && len(jsonIssues) > 0 {
+		return outputJSON(jsonIssues)
+	}
+	return nil
 }
 
 func runShowProxiedRefs(ctx context.Context, uw uow.UnitOfWork, in *showProxiedInput) {

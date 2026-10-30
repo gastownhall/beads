@@ -239,13 +239,13 @@ func TestReadRolesRefuseWhatTheWireCannotCarry(t *testing.T) {
 		t.Fatalf("IssueReader(): %v", err)
 	}
 
-	_, err = reader.List(ctx, issueops.ListRequest{SpecPrefix: "docs/"})
+	_, err = reader.List(ctx, issueops.ListRequest{Offset: 1})
 	var inexpressible *InexpressibleError
 	if !errors.As(err, &inexpressible) {
-		t.Fatalf("List with a SpecPrefix = %v, want *InexpressibleError", err)
+		t.Fatalf("List with an Offset = %v, want *InexpressibleError", err)
 	}
-	if inexpressible.Refused.Row.Field != "SpecPrefix" {
-		t.Errorf("the refusal names %q, want SpecPrefix", inexpressible.Refused.Row.Field)
+	if inexpressible.Refused.Row.Field != "Offset" {
+		t.Errorf("the refusal names %q, want Offset", inexpressible.Refused.Row.Field)
 	}
 	if inexpressible.Refused.Row.SpecRow == "" || inexpressible.Refused.Row.Why == "" {
 		t.Error("the refusal carries a ledger row with no reason or no citation")

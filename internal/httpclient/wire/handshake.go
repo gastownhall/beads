@@ -111,6 +111,11 @@ var opCapability = map[string]string{
 	// does not advertise the token, so Preflight refuses locally with a typed
 	// capability error rather than dialing a route the older server lacks.
 	OpHeartbeatIssue: "issues.heartbeat",
+	// The blocked listing, dialed by httpBlockedLister. A server that
+	// predates it does not advertise the token, so Preflight refuses locally
+	// with a typed capability error naming blocked.list rather than dialing a
+	// route the older server lacks.
+	OpListBlockedIssues: "blocked.list",
 	// The advance-a-molecule role (molecule.go) dials it when served and
 	// refuses before dialing when not; it never composes a client-side copy.
 	OpAdvanceMolecule: "issues.advanceMolecule",
@@ -183,6 +188,17 @@ const (
 	CapListIDs        = "issues.list.ids"
 )
 
+// CapListFilters is the behavior capability announcing that listIssues honors
+// the rest of `bd list`'s filter vocabulary — the updated/closed/defer/due
+// bounds, the priority range, the text and external-ref matches, the label
+// pattern/regex, the spec prefix, the type and status exclusions, the mol/wisp
+// types and the empty-description, no-labels, no-parent, pinned, no-pinned,
+// deferred and overdue predicates — spelled exactly as httpapi's
+// CapIssuesListFilters. One token for the set: the members land in one server
+// build. The Reader's List refuses a request carrying any of them LOCALLY,
+// naming this token, when the server does not advertise it.
+const CapListFilters = "issues.list.filters"
+
 // CapBlockingIsBlocked is the behavior capability announcing that
 // listBlockingAnnotations honors `is_blocked` (issueops.BlockingRequest.
 // IncludeIsBlocked), spelled exactly as httpapi's
@@ -191,6 +207,13 @@ const (
 // the server does not advertise it, so the IsBlockedBatch read never dials a
 // server that would answer `unknown_parameter`.
 const CapBlockingIsBlocked = "dependencies.blocking.isBlocked"
+
+// CapArrivalSeq is the behavior capability announcing `arrival_seq` on every
+// Issue-shaped response (types.Issue.ArrivalSeq), spelled exactly as httpapi's
+// CapIssuesArrivalSeq. It is build-level: whether rows are actually being
+// stamped follows the workspace's journal activation, which events.list's 409
+// events_journal_disabled reports.
+const CapArrivalSeq = "issues.arrivalSeq"
 
 // CapBatchApplyLarge is the behavior capability announcing that issues.batchApply
 // accepts a batch larger than the compiled-in floor (100 items), up to the
@@ -240,6 +263,32 @@ const CapSweepLiveDependents = "issues.sweep.liveDependents"
 // server. encode/ledger.go's W-SweepRequest.Limit row records the S4 closure
 // of what used to be a permanent refusal.
 const CapSweepLimit = "issues.sweep.limit"
+
+// CapSweepRetainIDs is the behavior capability announcing that sweepIssues
+// honors SweepRequest.retain_ids (a sweep that retires every id it deletes
+// with a permanent tombstone) and echoes SweepResult.retain_ids — and that
+// every create on the server refuses a retired id with 410
+// idempotency_expired. Spelled exactly as httpapi's CapIssuesSweepRetainIDs
+// (held to it by TestCapabilityTableMatchesTheServerRouteTable). sweeper.go
+// reads it before sending the member and refuses LOCALLY without it: a sweep
+// that left the ids reusable is the one outcome a caller asking for retention
+// must never get.
+const CapSweepRetainIDs = "issues.sweep.retainIds"
+
+// CapSweepRetainedTypes is the behavior capability announcing that
+// sweepIssues holds back every candidate whose issue type the workspace's
+// types.retained setting names unless the request sets retain_ids, and answers
+// SweepSkips.retention_required. Spelled exactly as httpapi's
+// CapIssuesSweepRetainedTypes (held to it by
+// TestCapabilityTableMatchesTheServerRouteTable). It gates no request member,
+// but it is the only guard against an older server: sweeper.go reads it before
+// a plain sweep (no retain_ids), and against a server without it reads the
+// workspace's types.retained first and refuses the sweep before the dial when
+// the setting names a type (httpSweeper.refuseAnUnguardedPlainSweep). A
+// retaining sweep does not consult it. A caller that relies on the protection
+// (an orchestrator's doctor) also reads it to learn whether a plain sweep
+// through this server can delete a retained bead without retiring its id.
+const CapSweepRetainedTypes = "issues.sweep.retainedTypes"
 
 // CapBatchApplyDepAddLineage is the behavior capability announcing that
 // issues.batchApply's dep_add items accept `has_spawner` and `thread_id`,
@@ -449,11 +498,12 @@ func (e *WireRevisionSkewError) Unwrap() error { return ErrWireRevisionSkew }
 // test goes red the moment one ships without the other.
 var behaviorCapabilities = []string{
 	CapProjectEnforce, CapBatchApplyLarge, CapListSort, CapCountScope,
-	CapSweepWispsPlane, CapSweepLiveDependents, CapSweepLimit,
+	CapSweepWispsPlane, CapSweepLiveDependents, CapSweepLimit, CapSweepRetainIDs, CapSweepRetainedTypes,
 	CapBatchApplyDepAddLineage, CapIssuesUpdateAllowTemplate, CapIssuesCreateDefaultPriority,
 	CapCloseAutoCloseMolecule, CapListSearch,
 	CapListNoAssignee, CapListTitle, CapListIDs, CapIssuesUpdatePersistence, CapBlockingIsBlocked, CapIssuesUpdateClaim,
-	CapIssuesCreateGates, CapIssuesUpdateGates,
+	CapIssuesCreateGates, CapIssuesUpdateGates, CapListFilters,
+	CapArrivalSeq,
 }
 
 // CapabilityFor reports the capability token gating op, and whether op is on

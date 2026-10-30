@@ -218,6 +218,32 @@ func (h *roleHeartbeater) heartbeatRequests() []issueops.HeartbeatRequest {
 	return append([]issueops.HeartbeatRequest(nil), h.calls...)
 }
 
+// roleBlockedLister is the blocked listing of the store-shaped source, its own
+// fake for roleHeartbeater's reason: a separate role on a separate accessor.
+type roleBlockedLister struct {
+	result issueops.BlockedResult
+	err    error
+
+	mu    sync.Mutex
+	calls []issueops.BlockedRequest
+}
+
+func (l *roleBlockedLister) ListBlocked(_ context.Context, req issueops.BlockedRequest) (issueops.BlockedResult, error) {
+	l.mu.Lock()
+	l.calls = append(l.calls, req)
+	l.mu.Unlock()
+	if l.err != nil {
+		return issueops.BlockedResult{}, l.err
+	}
+	return l.result, nil
+}
+
+func (l *roleBlockedLister) blockedRequests() []issueops.BlockedRequest {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]issueops.BlockedRequest(nil), l.calls...)
+}
+
 // roleRelations is the single-anchor NEIGHBOR role of the store-shaped source,
 // its own fake beside roleEdgeReader for roleGraphCounter's reason: the two sit
 // on adjacent accessors and answer about the same edges, so one fake serving
@@ -1021,6 +1047,9 @@ func rolesConfig(cfg Config) Config {
 	}
 	if cfg.Heartbeater == nil {
 		cfg.Heartbeater = &roleHeartbeater{}
+	}
+	if cfg.BlockedLister == nil {
+		cfg.BlockedLister = &roleBlockedLister{}
 	}
 	if cfg.Relations == nil {
 		cfg.Relations = &roleRelations{}

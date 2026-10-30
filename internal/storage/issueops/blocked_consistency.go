@@ -528,10 +528,12 @@ type parentEdge struct {
 // carry reasons of their own.
 //
 // WHY THE FIXPOINT DOES NOT CARRY IT. The read decides from a parent's OWN
-// reason rows. The legs' p.is_blocked = 1 conjunct carries inheritance only
-// for a parent with no reason row: such a parent is dark exactly while
-// something above it cascades into it. A parent with a subtree reason is dark
-// either way, so its bit says nothing about what is above it. Q blocks on
+// reason rows. The legs' p.is_blocked = 1 conjunct, read only on a parent
+// that is neither closed nor pinned (a closed or pinned row is never blocked,
+// whatever its stored bit says), carries inheritance only for a parent with
+// no reason row: such a parent is dark exactly while something above it
+// cascades into it. A parent with a subtree reason is dark either way, so its
+// bit says nothing about what is above it. Q blocks on
 // outside X, pc P -> Q, P blocks on its own child C: the read explains P, so C
 // comes bright while the epic above it is still gated by X. A one-level check
 // ("no blocked parent outside the set") is not enough either. Put a second
@@ -712,7 +714,9 @@ func allExplained(parents []parentRef, explained map[parentRef]bool) bool {
 // parent that is blocked. An edge lives in the child's dependency table and
 // names the parent in the column for the parent's kind, so this is one lookup
 // per child kind and parent kind, each keyed on the child's issue_id. The hints
-// pin that drive, as on the batched legs.
+// pin that drive, as on the batched legs. A parent is blocked here on the same
+// terms as there: its bit is 1 and it is neither closed nor pinned, because
+// the merge clause admits a stale 1 on such a row (gastownhall/beads#7626).
 //
 //nolint:gosec // G201: table and column names are constants; the ids are ? placeholders.
 func blockedParentEdgesInTx(ctx context.Context, tx DBTX, children []parentRef) ([]parentEdge, error) {
@@ -750,6 +754,7 @@ func blockedParentEdgesInTx(ctx context.Context, tx DBTX, children []parentRef) 
 					WHERE d.issue_id IN (%[4]s)
 					  AND d.type = 'parent-child'
 					  AND p.is_blocked = 1
+					  AND p.status <> 'closed' AND p.status <> 'pinned'
 				`, side.depTable, parent.table, parent.col, placeholders), args, side.wisp, parent.wisp)
 				if err != nil {
 					return nil, fmt.Errorf("read blocked parents of explained parents: %w", err)
@@ -1030,11 +1035,17 @@ func shouldBeBlockedIDsUnionScopedPrecomputedSQL(
 		notInPlaceholders(len(explained.wispParents)))
 }
 
-// shouldBeBlockedIDsUnionCoreSQL is the five legs themselves. The two
-// parent-child legs take their exogeneity condition as text: both callers
-// pass an already-read IN-list rendered to placeholders (notInPlaceholders),
-// saying "unless this parent is explained by its own subtree", and the empty
-// string says "no parent is", which is what an empty set means.
+// shouldBeBlockedIDsUnionCoreSQL is the five legs themselves. A parent-child
+// leg reads the parent's stored bit only while the parent is neither closed
+// nor pinned, the same status test legs 1-2 apply to their targets: such a row
+// is never blocked, but BlockedStateInvariant's merge clause admits a stale 1
+// on it, and its children must not inherit that (gastownhall/beads#7626).
+//
+// The two parent-child legs take their exogeneity condition as text: both
+// callers pass an already-read IN-list rendered to placeholders
+// (notInPlaceholders), saying "unless this parent is explained by its own
+// subtree", and the empty string says "no parent is", which is what an empty
+// set means.
 //
 //nolint:gosec // G201: depTable and scope are constants; the conditions come from the two callers above.
 func shouldBeBlockedIDsUnionCoreSQL(depTable, scope, issueParentCond, wispParentCond string) string {
@@ -1061,6 +1072,7 @@ func shouldBeBlockedIDsUnionCoreSQL(depTable, scope, issueParentCond, wispParent
 		WHERE d.issue_id IS NOT NULL %[3]s
 		  AND d.type = 'parent-child'
 		  AND p.is_blocked = 1
+		  AND p.status <> 'closed' AND p.status <> 'pinned'
 		  %[4]s
 		UNION
 		SELECT %[7]sd.issue_id FROM %[1]s d
@@ -1068,6 +1080,7 @@ func shouldBeBlockedIDsUnionCoreSQL(depTable, scope, issueParentCond, wispParent
 		WHERE d.issue_id IS NOT NULL %[3]s
 		  AND d.type = 'parent-child'
 		  AND p.is_blocked = 1
+		  AND p.status <> 'closed' AND p.status <> 'pinned'
 		  %[5]s
 		UNION
 		SELECT d.issue_id FROM (
@@ -1149,10 +1162,12 @@ const subtreeWalkDepth = 4
 // recursion: it is dark because ITS parent is, so its children inherit.
 // Because the legs keep the p.is_blocked = 1 conjunct, a chain converges the
 // way it always did, one level per fixpoint pass, and the single-pass doctor
-// COUNT stays the documented lower bound. A parent that DOES carry a reason is
-// dark whatever is above it, so the fixpoint cannot carry the clause for it:
-// pruneExplainedByAncestryInTx drops it from the set when a blocked parent
-// above it is not itself explained.
+// COUNT stays the documented lower bound. The conjunct counts only on a parent
+// that is neither closed nor pinned: such a row is never blocked, and a stale
+// 1 the merge clause leaves on it must not cascade (gastownhall/beads#7626).
+// A parent that DOES carry a reason is dark whatever is above it, so the
+// fixpoint cannot carry the clause for it: pruneExplainedByAncestryInTx drops
+// it from the set when a blocked parent above it is not itself explained.
 //
 // Every reason row is either inside the parent's subtree or outside it, so
 // "no reason row is exogenous" (MAX(...) = 0 below) is the whole membership

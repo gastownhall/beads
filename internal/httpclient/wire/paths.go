@@ -60,6 +60,7 @@ const (
 	OpBatchGetIssues          = "batchGetIssues"
 	OpReclaimIssues           = "reclaimIssues"
 	OpHeartbeatIssue          = "heartbeatIssue"
+	OpListBlockedIssues       = "listBlockedIssues"
 )
 
 // The paths that carry no caller-supplied segment. A path with one is built by
@@ -69,6 +70,7 @@ const (
 	PathContext              = "/v0/beads/context"
 	PathReady                = "/v0/beads/ready"
 	PathReadyCount           = "/v0/beads/ready:count"
+	PathBlocked              = "/v0/beads/blocked"
 	PathStats                = "/v0/beads/stats"
 	PathIssues               = "/v0/beads/issues"
 	PathIssuesQuery          = "/v0/beads/issues:query"

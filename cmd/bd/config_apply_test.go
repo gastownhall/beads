@@ -193,32 +193,52 @@ func TestApplyServerSkipsWhenAutoStartDisabled(t *testing.T) {
 	}
 }
 
+// isolatedApplyFixture builds a throwaway git repo with a .beads dir for the
+// runApply tests. runApply(false) is a live apply: it inspects AND MUTATES the
+// repository that owns the process cwd (hook reinstalls, hooksPath mkdirs).
+// Run bare from the package dir, that repository is this checkout — the r880
+// host .git clobber (wy-qlvlmf) — so these tests must always chdir into a
+// fixture they own first.
+func isolatedApplyFixture(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	initGitRepoAt(t, dir)
+	if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o755); err != nil {
+		t.Fatalf("create fixture .beads: %v", err)
+	}
+	return dir
+}
+
 func TestRunApplyAllOK(t *testing.T) {
 	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
-	// In a test environment with no drift, all results should be ok or skipped
-	results := runApply(false)
-	if len(results) != 3 {
-		t.Errorf("expected 3 results, got %d", len(results))
-	}
-	for _, r := range results {
-		if r.Status == applyStatusError {
-			t.Errorf("unexpected error for check %q: %s", r.Check, r.Error)
+	runInDir(t, isolatedApplyFixture(t), func() {
+		// In a test environment with no drift, all results should be ok or skipped
+		results := runApply(false)
+		if len(results) != 3 {
+			t.Errorf("expected 3 results, got %d", len(results))
 		}
-	}
+		for _, r := range results {
+			if r.Status == applyStatusError {
+				t.Errorf("unexpected error for check %q: %s", r.Check, r.Error)
+			}
+		}
+	})
 }
 
 func TestRunApplyDryRun(t *testing.T) {
 	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
-	results := runApply(true)
-	if len(results) != 3 {
-		t.Errorf("expected 3 results, got %d", len(results))
-	}
-	// In dry-run, no actions should be "applied"
-	for _, r := range results {
-		if r.Status == applyStatusApplied {
-			t.Errorf("dry-run should not apply actions, but check %q was applied", r.Check)
+	runInDir(t, isolatedApplyFixture(t), func() {
+		results := runApply(true)
+		if len(results) != 3 {
+			t.Errorf("expected 3 results, got %d", len(results))
 		}
-	}
+		// In dry-run, no actions should be "applied"
+		for _, r := range results {
+			if r.Status == applyStatusApplied {
+				t.Errorf("dry-run should not apply actions, but check %q was applied", r.Check)
+			}
+		}
+	})
 }
 
 func TestDriftDomainsGroupsDottedChecks(t *testing.T) {

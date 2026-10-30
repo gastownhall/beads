@@ -28,12 +28,18 @@ type recordingIssues struct {
 	// index-aligned with search.
 	queries []string
 	items   []*types.IssueWithCounts
+	// err, when set, is what both reads answer with after recording the
+	// filter: the storage-side failure a handler has to classify.
+	err error
 }
 
 func (f *recordingIssues) GetReadyWorkWithCounts(_ context.Context, filter types.WorkFilter) (domain.SearchCountsPage, error) {
 	f.mu.Lock()
 	f.ready = append(f.ready, filter)
 	f.mu.Unlock()
+	if f.err != nil {
+		return domain.SearchCountsPage{}, f.err
+	}
 	return domain.SearchCountsPage{Items: f.items}, nil
 }
 
@@ -42,6 +48,9 @@ func (f *recordingIssues) SearchIssuesWithCounts(_ context.Context, query string
 	f.search = append(f.search, filter)
 	f.queries = append(f.queries, query)
 	f.mu.Unlock()
+	if f.err != nil {
+		return domain.SearchCountsPage{}, f.err
+	}
 	return domain.SearchCountsPage{Items: f.items}, nil
 }
 
@@ -174,6 +183,9 @@ func TestABuilderRefusalIsTheDocumentedBadRequest(t *testing.T) {
 		{"a has-metadata key on the count surface", "/v0/beads/issues:count?has_metadata_key=1bad", "has_metadata_key"},
 		{"an unknown exclude-status name on the count surface", "/v0/beads/issues:count?exclude_status=bogus", "exclude_status"},
 		{"parent and no_parent together on the count surface", "/v0/beads/issues:count?parent=bd-1&no_parent=true", "no_parent"},
+		{"pinned and no_pinned together on the listing", "/v0/beads/issues?pinned=true&no_pinned=true", "no_pinned"},
+		{"parent and no_parent together on the listing", "/v0/beads/issues?parent=bd-1&no_parent=true", "no_parent"},
+		{"an unknown exclude-status name on the listing", "/v0/beads/issues?exclude_status=bogus", "exclude_status"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ts, _ := newReadServer(t, Config{})

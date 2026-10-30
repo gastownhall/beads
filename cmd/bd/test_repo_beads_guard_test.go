@@ -1,10 +1,15 @@
 package main
 
 import (
+	"errors"
+	"flag"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -13,6 +18,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/initprocs"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/migration"
 	"github.com/steveyegge/beads/internal/testutil"
@@ -76,6 +82,13 @@ const suiteRootPrefix = "beads-bd-tests-"
 // Guardrail: ensure the cmd/bd test suite does not touch the real repo .beads state.
 // Disable with BEADS_TEST_GUARD_DISABLE=1 (useful when running tests while actively using beads).
 func TestMain(m *testing.M) {
+	// main() is not run here, so hand back the Ps initprocs held during init,
+	// and the -test.parallel default testing derived from the capped count.
+	// An explicit -test.parallel is parsed later, by m.Run, and still wins.
+	initprocs.Done()
+	if f := flag.Lookup("test.parallel"); f != nil {
+		_ = f.Value.Set(strconv.Itoa(runtime.GOMAXPROCS(0)))
+	}
 	if code, ok := credentialcmd.Dispatch(); ok {
 		os.Exit(code)
 	}
@@ -129,6 +142,21 @@ func testMainInner(m *testing.M) int {
 		git.PinNoRepositoryUnderForTesting(repoRoot)
 	}
 	beads.ResetCaches()
+
+	// Drop inherited git repository-location vars (GIT_DIR, GIT_WORK_TREE,
+	// GIT_COMMON_DIR, GIT_INDEX_FILE, GIT_CONFIG, ...) for the whole test
+	// process. Fixture helpers in this package run `git config`/`git init`
+	// with only cmd.Dir set; a location var leaked in from the invoking shell
+	// or a hook overrides that Dir and points every such write at a
+	// repository the suite does not own — one of the vectors behind the r880
+	// host .git/config clobber (wy-qlvlmf). GIT_CEILING_DIRECTORIES,
+	// GIT_CONFIG_GLOBAL and GIT_CONFIG_NOSYSTEM stay: tools/bazel/test_env.sh
+	// sets them on purpose. Tests that need a location var set it per-test
+	// with t.Setenv.
+	if err := testutil.UnsetGitRepoLocationEnv(); err != nil {
+		fmt.Fprintf(os.Stderr, "FATAL: %v\n", err)
+		return 1
+	}
 
 	// Separately bound any literal ancestor-directory walk that starts
 	// at (or under) this checkout: the pin above only defeats the
@@ -356,7 +384,26 @@ func testMainInner(m *testing.M) int {
 			guardDirs = append(guardDirs, fallbackBeadsDir)
 		}
 	}
-	if len(guardDirs) == 0 {
+
+	// The checkout's own git state is guarded alongside its .beads state: on
+	// 2026-10-16 a `go test ./cmd/bd` run from a linked worktree rewrote the
+	// host rig's shared .git/config (core.bare=true, extensions.worktreeConfig,
+	// a test remote.origin.url over the real origin) and its hooks, breaking
+	// every worktree of that clone (wy-qlvlmf, r880). The common config and
+	// hooks are shared by every worktree of the clone, so the keys other
+	// worktrees rewrite routinely (branch tracking, a remote other than origin
+	// added or removed whole) only draw a note; any other change means a test
+	// most likely ran git against this checkout instead of a fixture it owns.
+	gitDirs, err := locateRepoGitDirs(repoRoot)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: this checkout's own git state is not guarded in this run: %v\n", err)
+	}
+	var gitStateBefore repoGitState
+	if gitDirs.common != "" {
+		gitStateBefore = readRepoGitState(gitDirs)
+	}
+
+	if len(guardDirs) == 0 && gitDirs.common == "" {
 		return runTestsAndSweep(m)
 	}
 
@@ -417,7 +464,358 @@ func testMainInner(m *testing.M) int {
 		}
 	}
 
+	if gitDirs.common != "" {
+		changes := diffRepoGitState(gitStateBefore, readRepoGitState(gitDirs))
+		// PinSuiteTempRoot pointed TMPDIR at the suite root, which the
+		// deferred cleanup deletes; keep the pre-run copies beside it.
+		report, failed := reportGitStateChanges(changes, gitStateBefore, filepath.Dir(testTempRoot))
+		fmt.Fprint(os.Stderr, report)
+		if failed && code == 0 {
+			code = 1
+		}
+	}
+
 	return code
+}
+
+// repoGitDirs names a checkout's git directories: gitDir is its own (a linked
+// worktree's .git/worktrees/<name>), common is the one every worktree of the
+// clone shares. They are the same directory for a main checkout.
+type repoGitDirs struct {
+	gitDir, common string
+}
+
+func (d repoGitDirs) commonConfig() string { return filepath.Join(d.common, "config") }
+
+// worktreeConfig is the checkout's own config.worktree. A main checkout's sits
+// in the common dir beside the shared config. With extensions.worktreeConfig
+// set, git reads it after the shared config, so its keys win, and
+// `git config --worktree` writes there.
+func (d repoGitDirs) worktreeConfig() string {
+	if d.gitDir == "" {
+		return ""
+	}
+	return filepath.Join(d.gitDir, "config.worktree")
+}
+
+// locateRepoGitDirs resolves repoRoot's git directories once, before the run,
+// so the post-run read looks at the same files even if a test rewrote the
+// checkout's .git pointer. A repoRoot outside any checkout (Bazel runfiles, a
+// source tarball) has nothing to guard and is not an error.
+func locateRepoGitDirs(repoRoot string) (repoGitDirs, error) {
+	if repoRoot == "" {
+		return repoGitDirs{}, nil
+	}
+	cmd := gitCommand("-C", repoRoot, "rev-parse", "--git-dir", "--git-common-dir")
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		if _, statErr := os.Lstat(filepath.Join(repoRoot, ".git")); errors.Is(statErr, os.ErrNotExist) {
+			return repoGitDirs{}, nil
+		}
+		return repoGitDirs{}, fmt.Errorf("git rev-parse in %s: %w: %s", repoRoot, err, strings.TrimSpace(stderr.String()))
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if len(lines) < 2 {
+		return repoGitDirs{}, fmt.Errorf("git rev-parse in %s: unexpected output %q", repoRoot, out)
+	}
+	dirs := repoGitDirs{
+		gitDir: resolveGitPath(repoRoot, strings.TrimSpace(lines[0])),
+		common: resolveGitPath(repoRoot, strings.TrimSpace(lines[1])),
+	}
+	if dirs.common == "" {
+		return repoGitDirs{}, fmt.Errorf("git rev-parse in %s: no common git dir in %q", repoRoot, out)
+	}
+	return dirs, nil
+}
+
+// repoGitState captures the parts of a checkout's own git state that the r880
+// incident showed a test escape mutates: the common (shared) config, the
+// checkout's own config.worktree, and every file under the common hooks dir.
+// Files are keyed by absolute path, and a missing one is recorded as missing,
+// so a deletion and a re-creation both show up.
+type repoGitState struct {
+	dirs  repoGitDirs
+	files map[string]gitFileSnap
+}
+
+type gitFileSnap struct {
+	present bool
+	data    string
+}
+
+func readRepoGitState(dirs repoGitDirs) repoGitState {
+	state := repoGitState{dirs: dirs, files: map[string]gitFileSnap{}}
+	snapFile := func(p string) {
+		data, err := os.ReadFile(p)
+		state.files[p] = gitFileSnap{present: err == nil, data: string(data)}
+	}
+	snapFile(dirs.commonConfig())
+	if p := dirs.worktreeConfig(); p != "" {
+		snapFile(p)
+	}
+	_ = filepath.Walk(filepath.Join(dirs.common, "hooks"), func(path string, info os.FileInfo, err error) error {
+		if err != nil || info == nil || info.IsDir() {
+			return nil //nolint:nilerr // best-effort snapshot; a walk error just narrows what gets watched
+		}
+		snapFile(path)
+		return nil
+	})
+	return state
+}
+
+// gitStateChange is one watched git-state file that differs across the run.
+// detail names what changed (config keys, or a file-level summary) and never
+// echoes a value: configs carry remote URLs and can carry credentials.
+type gitStateChange struct {
+	path    string
+	detail  string
+	routine bool
+}
+
+// diffRepoGitState compares two readRepoGitState results. A common-config
+// change is routine when every changed key is one that other worktrees of a
+// shared clone rewrite as a matter of course (routineSharedConfigKey). Any
+// other change (a hook file, config.worktree, core.*, user.*, extensions.*, an
+// existing remote's url, origin added or removed) is the clobber class.
+func diffRepoGitState(before, after repoGitState) []gitStateChange {
+	paths := make([]string, 0, len(before.files))
+	for p := range before.files {
+		paths = append(paths, p)
+	}
+	for p := range after.files {
+		if _, ok := before.files[p]; !ok {
+			paths = append(paths, p)
+		}
+	}
+	slices.Sort(paths)
+
+	var changes []gitStateChange
+	for _, p := range paths {
+		b, a := before.files[p], after.files[p]
+		switch {
+		case b == a:
+			continue
+		case !b.present:
+			changes = append(changes, gitStateChange{path: p, detail: fmt.Sprintf("new file (%d bytes)", len(a.data))})
+		case !a.present:
+			changes = append(changes, gitStateChange{path: p, detail: fmt.Sprintf("deleted (was %d bytes)", len(b.data))})
+		case p == before.dirs.commonConfig():
+			changes = append(changes, diffGitConfig(p, b.data, a.data, true))
+		case p == before.dirs.worktreeConfig():
+			changes = append(changes, diffGitConfig(p, b.data, a.data, false))
+		default:
+			changes = append(changes, gitStateChange{path: p, detail: fmt.Sprintf("changed (%d → %d bytes)", len(b.data), len(a.data))})
+		}
+	}
+	return changes
+}
+
+// diffGitConfig names the keys that differ between two versions of a git
+// config file. shared marks the clone's common config, the only file where
+// routine shared-clone keys do not count as a clobber.
+func diffGitConfig(path, before, after string, shared bool) gitStateChange {
+	change := gitStateChange{path: path}
+	b, errBefore := gitConfigEntries(before)
+	a, errAfter := gitConfigEntries(after)
+	if err := errors.Join(errBefore, errAfter); err != nil {
+		change.detail = fmt.Sprintf("changed (%d → %d bytes), not parseable as git config: %v", len(before), len(after), err)
+		return change
+	}
+	var clobbered, routine []string
+	for _, key := range changedConfigKeys(b, a) {
+		if shared && routineSharedConfigKey(key, b, a) {
+			routine = append(routine, describeConfigKey(key, b, a))
+		} else {
+			clobbered = append(clobbered, describeConfigKey(key, b, a))
+		}
+	}
+	switch {
+	case len(clobbered) > 0:
+		change.detail = summarizeConfigKeys(clobbered)
+		if len(routine) > 0 {
+			change.detail += fmt.Sprintf("; also %d branch/remote key change(s)", len(routine))
+		}
+	case len(routine) > 0:
+		change.routine = true
+		change.detail = summarizeConfigKeys(routine)
+	default:
+		// Same keys and values in different bytes: an empty section left
+		// behind by a removal, or reformatting. Nothing git reads changed.
+		change.routine = true
+		change.detail = "rewritten with no key or value change"
+	}
+	return change
+}
+
+// gitConfigEntries parses git config file contents with git itself. `git
+// config --file -` reads only stdin (no includes, no -c or env config), and
+// each key maps to its raw records in file order, so a multi-valued key
+// compares as a list.
+func gitConfigEntries(data string) (map[string][]string, error) {
+	cmd := gitCommand("config", "--file", "-", "--list", "-z")
+	cmd.Dir = os.TempDir()
+	cmd.Stdin = strings.NewReader(data)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	entries := map[string][]string{}
+	for _, record := range strings.Split(string(out), "\x00") {
+		if record == "" {
+			continue
+		}
+		key, _, _ := strings.Cut(record, "\n")
+		entries[key] = append(entries[key], record)
+	}
+	return entries, nil
+}
+
+func changedConfigKeys(before, after map[string][]string) []string {
+	var keys []string
+	for key, values := range before {
+		if !slices.Equal(values, after[key]) {
+			keys = append(keys, key)
+		}
+	}
+	for key := range after {
+		if _, ok := before[key]; !ok {
+			keys = append(keys, key)
+		}
+	}
+	slices.Sort(keys)
+	return keys
+}
+
+// routineSharedConfigKey reports whether a change to key in a clone's common
+// config is one that other worktrees of the clone make as a matter of course:
+// branch tracking (branch.<name>.*, from checkout -b, push -u or branch -d in
+// any worktree) and a remote other than origin added or removed whole
+// (remote.<name>.* where that remote exists on only one side). A changed key
+// of a remote that exists both before and after, such as remote.origin.url,
+// is the r880 clobber. So is origin itself appearing or disappearing: the
+// clone's worktrees do not add or remove it, while `git remote add origin` and
+// `git remote remove origin` are common fixture steps.
+func routineSharedConfigKey(key string, before, after map[string][]string) bool {
+	section, subsection, _ := splitConfigKey(key)
+	switch {
+	case subsection == "":
+		return false
+	case section == "branch":
+		return true
+	case section == "remote" && subsection != "origin":
+		return !hasConfigSubsection(before, section, subsection) || !hasConfigSubsection(after, section, subsection)
+	}
+	return false
+}
+
+// splitConfigKey splits a `git config --list` key into section, subsection and
+// variable name. A subsection may contain dots; section and name cannot.
+func splitConfigKey(key string) (section, subsection, name string) {
+	first, last := strings.IndexByte(key, '.'), strings.LastIndexByte(key, '.')
+	if first < 0 || first == last {
+		section, name, _ = strings.Cut(key, ".")
+		return section, "", name
+	}
+	return key[:first], key[first+1 : last], key[last+1:]
+}
+
+func hasConfigSubsection(entries map[string][]string, section, subsection string) bool {
+	for key := range entries {
+		if s, sub, _ := splitConfigKey(key); s == section && sub == subsection {
+			return true
+		}
+	}
+	return false
+}
+
+func describeConfigKey(key string, before, after map[string][]string) string {
+	_, had := before[key]
+	_, has := after[key]
+	switch {
+	case !had:
+		return key + " added"
+	case !has:
+		return key + " removed"
+	}
+	return key + " changed"
+}
+
+// summarizeConfigKeys joins key descriptions, capped so a sibling deleting a
+// few hundred branches cannot flood the test log.
+func summarizeConfigKeys(descriptions []string) string {
+	const limit = 12
+	if len(descriptions) <= limit {
+		return strings.Join(descriptions, ", ")
+	}
+	return fmt.Sprintf("%s, and %d more", strings.Join(descriptions[:limit], ", "), len(descriptions)-limit)
+}
+
+// reportGitStateChanges renders the guard's verdict on changes. Routine
+// shared-clone changes get a NOTE and leave the run green: this suite and any
+// other process using the clone could have made them. Anything else is an
+// ERROR that fails the run, and the pre-run copies of the affected files are
+// saved under saveDir so a clobbered config can be restored by hand.
+func reportGitStateChanges(changes []gitStateChange, before repoGitState, saveDir string) (report string, failed bool) {
+	var routine, clobbered []gitStateChange
+	for _, c := range changes {
+		if c.routine {
+			routine = append(routine, c)
+		} else {
+			clobbered = append(clobbered, c)
+		}
+	}
+	var out strings.Builder
+	if len(routine) > 0 {
+		fmt.Fprintf(&out, "NOTE: this clone's shared git config changed during the run, by this suite or another "+
+			"process using the clone; branch tracking and whole-remote changes are routine for a shared clone "+
+			"(values not shown):\n%s\n", formatGitStateChanges(routine))
+	}
+	if len(clobbered) > 0 {
+		saved := "pre-run copies of the changed files: "
+		if dir, err := saveGitStateBefore(saveDir, before, clobbered); err != nil {
+			saved = fmt.Sprintf("could not save pre-run copies of the changed files: %v", err)
+		} else {
+			saved += dir
+		}
+		fmt.Fprintf(&out, "ERROR: test suite modified this checkout's own git state "+
+			"(the wy-qlvlmf host-clobber class — a test ran git against the checkout instead of a fixture, "+
+			"unless another process rewrote the clone during the run; values not shown):\n%s\n%s\n",
+			formatGitStateChanges(clobbered), saved)
+	}
+	return out.String(), len(clobbered) > 0
+}
+
+func formatGitStateChanges(changes []gitStateChange) string {
+	lines := make([]string, 0, len(changes))
+	for _, c := range changes {
+		lines = append(lines, fmt.Sprintf("- %s: %s", c.path, c.detail))
+	}
+	return strings.Join(lines, "\n")
+}
+
+// saveGitStateBefore copies the pre-run contents of each changed file that
+// existed before the run into a new private directory under dir and returns
+// that directory. Each copy is named after its original absolute path.
+func saveGitStateBefore(dir string, before repoGitState, changes []gitStateChange) (string, error) {
+	out, err := os.MkdirTemp(dir, "bd-test-git-state-before-*")
+	if err != nil {
+		return "", err
+	}
+	flatten := strings.NewReplacer("/", "_", `\`, "_", ":", "_")
+	for _, c := range changes {
+		f := before.files[c.path]
+		if !f.present {
+			continue
+		}
+		if err := os.WriteFile(filepath.Join(out, flatten.Replace(c.path)), []byte(f.data), 0o600); err != nil {
+			return out, err
+		}
+	}
+	return out, nil
 }
 
 // worktreeFallbackBeadsDirDirect resolves the shared .beads directory a
