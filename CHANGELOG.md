@@ -1090,6 +1090,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd hooks install` (and the hook step of `bd init` and `bd doctor --fix`)
+  run from a linked git worktree now updates that worktree's own tracked copy
+  of the hooks directory (`.beads/hooks`, or `.beads-hooks` with `--shared`)
+  instead of rewriting the primary checkout's committed hook files, which
+  dirtied a branch nobody was working on and left the worktree's copy stale.
+  `core.hooksPath` still names the primary checkout's copy, so every worktree
+  runs the same hooks (#2414), and bd prints one note naming both
+  directories. This applies only when both the primary checkout and the
+  worktree track that directory; every other layout installs where it did
+  before (#7725).
 - `bd migrate-personal` no longer leaves an issue in both databases when
   someone else's bead in the project database depends on it. The move's
   delete from the project database refuses such an issue, but it ran only
