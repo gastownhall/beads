@@ -3377,4 +3377,39 @@ func TestGetMoleculeProgressReportsTruncatedReads(t *testing.T) {
 		stats, err := store.GetMoleculeProgress(context.Background(), "mol-1")
 		requireTruncatedReadError(t, stats, err, lost)
 	})
+
+	t.Run("status truncated", func(t *testing.T) {
+		store, mock := newMoleculeProgressMock(t)
+		children, statuses := fourChildMoleculeRows()
+		statuses.RowError(2, lost)
+		mock.ExpectQuery(moleculeProgressDepQuery).WillReturnRows(children)
+		mock.ExpectQuery(moleculeProgressStatusQuery).WillReturnRows(statuses)
+
+		stats, err := store.GetMoleculeProgress(context.Background(), "mol-1")
+		requireTruncatedReadError(t, stats, err, lost)
+	})
+
+	// The status read is batched; a failure in any batch, not only the last,
+	// must surface.
+	t.Run("status truncated in a later batch", func(t *testing.T) {
+		store, mock := newMoleculeProgressMock(t)
+		children := sqlmock.NewRows([]string{"issue_id"})
+		firstBatch := sqlmock.NewRows([]string{"id", "status"})
+		for i := 0; i < queryBatchSize+1; i++ {
+			id := fmt.Sprintf("c%03d", i)
+			children.AddRow(id)
+			if i < queryBatchSize {
+				firstBatch.AddRow(id, "open")
+			}
+		}
+		secondBatch := sqlmock.NewRows([]string{"id", "status"}).
+			AddRow(fmt.Sprintf("c%03d", queryBatchSize), "open").
+			RowError(0, lost)
+		mock.ExpectQuery(moleculeProgressDepQuery).WillReturnRows(children)
+		mock.ExpectQuery(moleculeProgressStatusQuery).WillReturnRows(firstBatch)
+		mock.ExpectQuery(moleculeProgressStatusQuery).WillReturnRows(secondBatch)
+
+		stats, err := store.GetMoleculeProgress(context.Background(), "mol-1")
+		requireTruncatedReadError(t, stats, err, lost)
+	})
 }
