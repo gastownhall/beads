@@ -156,4 +156,45 @@ func TestEnginePullRecordsPushHash(t *testing.T) {
 			t.Fatalf("pull stored a push hash under the generated ID: %q", value)
 		}
 	})
+
+	t.Run("pull_without_content_hash_clears", func(t *testing.T) {
+		f := newPushHashFixture()
+		key := f.engine.pushHashKey(f.local.ID)
+		runSync(t, f.engine, SyncOptions{Push: true})
+
+		// `bd github pull` builds its engine without PushHooks.
+		f.editRemote("remote edit")
+		runSync(t, NewEngine(f.mock, f.store, "sync"), SyncOptions{Pull: true})
+		if got := f.store.localMetadata[key]; got != "" {
+			t.Fatalf("push hash after a pull without ContentHash = %q, want it cleared", got)
+		}
+
+		f.local.Title = "pushed"
+		fetchesBefore := f.mock.fetchCalls
+		runSync(t, f.engine, SyncOptions{Push: true})
+		if f.mock.fetchCalls == fetchesBefore {
+			t.Fatalf("push of the revert did not fetch the remote")
+		}
+		if sent, ok := f.mock.updated["EXT-1"]; !ok || sent.Title != "pushed" {
+			t.Fatalf("push skipped the revert to %q; remote stays %q", f.local.Title, f.mock.issues[0].Title)
+		}
+		if f.store.localMetadata[key] == "" {
+			t.Fatalf("push of the revert recorded no push hash")
+		}
+
+		// A ContentHash that has no fingerprint for the pulled content clears too.
+		f.editRemote("unhashable")
+		noHash := NewEngine(f.mock, f.store, "sync")
+		noHash.PushHooks = titlePushHooks()
+		noHash.PushHooks.ContentHash = func(l *types.Issue) string {
+			if l.Title == "unhashable" {
+				return ""
+			}
+			return "h:" + l.Title
+		}
+		runSync(t, noHash, SyncOptions{Pull: true})
+		if got := f.store.localMetadata[key]; got != "" {
+			t.Fatalf("push hash after a pull ContentHash cannot fingerprint = %q, want it cleared", got)
+		}
+	})
 }
