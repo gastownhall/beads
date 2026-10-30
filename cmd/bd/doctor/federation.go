@@ -172,6 +172,19 @@ func CheckLegacyCLIRemotes(path string) DoctorCheck {
 	}
 }
 
+// serverRunningOrProbeable reports whether the workspace's Dolt server is up:
+// true when the PID file names a running server (state from
+// doltserver.IsRunning), without calling probe, and otherwise probe's answer.
+// The PID file alone misses every server bd did not start (launchd, systemd,
+// a container) and bd's shared server, whose PID file lives in the shared
+// server directory, while the store still opens the endpoint probe asks about.
+func serverRunningOrProbeable(state *doltserver.State, probe func() bool) bool {
+	if state != nil && state.Running {
+		return true
+	}
+	return probe()
+}
+
 // CheckFederationRemotesAPI checks if the remotesapi port is accessible for federation.
 // This is the port used for peer-to-peer sync operations.
 func CheckFederationRemotesAPI(path string) DoctorCheck {
