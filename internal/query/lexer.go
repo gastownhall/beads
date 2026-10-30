@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/steveyegge/beads/internal/timeparsing"
 )
@@ -105,14 +106,15 @@ func NewLexer(input string) *Lexer {
 	return &Lexer{input: input}
 }
 
-// next returns the next rune and advances position.
+// next decodes the next UTF-8 rune and advances position past it. An invalid
+// byte decodes as utf8.RuneError with width 1.
 func (l *Lexer) next() rune {
 	if l.pos >= len(l.input) {
 		l.width = 0
 		return 0
 	}
-	r := rune(l.input[l.pos])
-	l.width = 1
+	r, w := utf8.DecodeRuneInString(l.input[l.pos:])
+	l.width = w
 	l.pos += l.width
 	return r
 }
@@ -122,7 +124,8 @@ func (l *Lexer) peek() rune {
 	if l.pos >= len(l.input) {
 		return 0
 	}
-	return rune(l.input[l.pos])
+	r, _ := utf8.DecodeRuneInString(l.input[l.pos:])
+	return r
 }
 
 // backup steps back one rune.
@@ -302,20 +305,18 @@ func (l *Lexer) readNumberOrDuration(startPos int) (Token, error) {
 	return Token{Type: TokenNumber, Value: sb.String(), Pos: startPos}, nil
 }
 
-// readIdent reads an identifier or keyword.
+// readIdent reads an identifier or keyword starting at startPos, which must
+// be the current position.
 func (l *Lexer) readIdent(startPos int) (Token, error) {
-	var sb strings.Builder
-
 	for {
 		r := l.next()
 		if r == 0 || !isIdentChar(r) {
 			l.backup()
 			break
 		}
-		sb.WriteRune(r)
 	}
 
-	value := sb.String()
+	value := l.input[startPos:l.pos]
 	upper := strings.ToUpper(value)
 
 	// Check for keywords
