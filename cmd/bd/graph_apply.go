@@ -872,6 +872,7 @@ func graphApplyNodeIssue(node GraphApplyNode, opts GraphApplyOptions, createdBy,
 	}
 	if issue.Status == types.StatusInProgress && issue.StartedAt == nil {
 		issue.StartedAt = &now
+		stamped = true
 	}
 	if stamped && issue.CreatedAt.IsZero() {
 		issue.CreatedAt = now
