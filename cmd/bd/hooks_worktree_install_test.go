@@ -22,6 +22,20 @@ func writeOldMarkerHook(t *testing.T, dir, name string) {
 	require.NoError(t, os.Chmod(path, 0o755))
 }
 
+// writeLegacyBdHook writes the pre-section-marker bd hook shape: the inline
+// "bd (beads)" comment plus a bd-hooks-version line aged to 0.0.1. Unlike a
+// section-marker hook, which delegates to `bd hooks run` and is therefore
+// never classified outdated, this is the one hook state bd init's update gate
+// (needsUpdate) actually rewrites. The body is inert so git can run it during
+// the fixture's own `worktree add` without a bd binary on PATH.
+func writeLegacyBdHook(t *testing.T, dir, name string) {
+	t.Helper()
+	body := "#!/bin/sh\n# bd (beads) " + name + " hook\n# bd-hooks-version: 0.0.1\n"
+	path := filepath.Join(dir, name)
+	writeFileForWorktreeTest(t, path, []byte(body))
+	require.NoError(t, os.Chmod(path, 0o755))
+}
+
 // newWorktreeHooksFixture builds the PR #7725 shape: a primary checkout P
 // whose index tracks hookDirRel (a path relative to P, e.g. ".beads/hooks" or
 // ".beads-hooks") holding every managed hook with the aged marker, an absolute
@@ -29,6 +43,13 @@ func writeOldMarkerHook(t *testing.T, dir, name string) {
 // so both indexes track the same files. When trackHooks is false the hook
 // directory is left untracked in P and W is created without it.
 func newWorktreeHooksFixture(t *testing.T, hookDirRel string, trackHooks bool) (primary, worktree string) {
+	return newWorktreeHooksFixtureWithWriter(t, hookDirRel, trackHooks, writeOldMarkerHook)
+}
+
+// newWorktreeHooksFixtureWithWriter is newWorktreeHooksFixture with the hook
+// writer replaced, so a test can commit a different hook shape into the same
+// layout.
+func newWorktreeHooksFixtureWithWriter(t *testing.T, hookDirRel string, trackHooks bool, write func(t *testing.T, dir, name string)) (primary, worktree string) {
 	t.Helper()
 	root, err := filepath.EvalSymlinks(t.TempDir())
 	require.NoError(t, err)
@@ -41,7 +62,7 @@ func newWorktreeHooksFixture(t *testing.T, hookDirRel string, trackHooks bool) (
 	hooksDir := filepath.Join(primary, hookDirRel)
 	mkdirs(t, hooksDir)
 	for _, name := range managedHookNames {
-		writeOldMarkerHook(t, hooksDir, name)
+		write(t, hooksDir, name)
 	}
 	if trackHooks {
 		runGitForWorktreeTest(t, primary, "add", hookDirRel)
@@ -420,4 +441,29 @@ func TestInstallHooksFromLinkedWorktreeRefusesForeignTrackedCopy(t *testing.T) {
 	got, readErr := os.ReadFile(foreignPath)
 	require.NoError(t, readErr)
 	require.Equal(t, foreign, string(got), "the foreign hook must be untouched")
+}
+
+// TestInitHooksFromLinkedWorktreeWritesTrackedCopy pins AC-7: the bd init hook
+// step from a worktree (runEmbeddedInitHooks pointed at the primary's shared
+// .beads) writes the worktree's tracked copy too. This is not a free
+// corollary of AC-1 — it pins the second entry point (installHooksWithContext
+// with a selected context) that bd init drives.
+//
+// The committed hooks carry the legacy bd-hooks-version marker rather than the
+// AC-1 section markers: a section-marker hook delegates to `bd hooks run` and
+// is never classified outdated, so with aged section markers the init step
+// would early-return and install nothing anywhere. The legacy marker is the
+// shape whose update path reaches installHooksWithContext — the one whose
+// cross-worktree write the redirect must inherit.
+func TestInitHooksFromLinkedWorktreeWritesTrackedCopy(t *testing.T) {
+	primary, worktree := newWorktreeHooksFixtureWithWriter(t, filepath.Join(".beads", "hooks"), true, writeLegacyBdHook)
+	enterWorktreeForInstallTest(t, worktree)
+	runEmbeddedInitHooks(t.Context(), worktree, filepath.Join(primary, ".beads"), false, true)
+	requireHooksCurrent(t, filepath.Join(worktree, ".beads", "hooks"))
+	require.Empty(t, initExcludeGit(t, primary, "status", "--porcelain", "--untracked-files=no"),
+		"the init hook step from the linked worktree dirtied the primary checkout")
+	requireHooksCarryMarker(t, filepath.Join(primary, ".beads", "hooks"), "bd-hooks-version: 0.0.1")
+	require.Equal(t, filepath.Join(primary, ".beads", "hooks"),
+		initExcludeGit(t, worktree, "config", "--get", "core.hooksPath"),
+		"core.hooksPath must keep naming the primary copy (#2414)")
 }
