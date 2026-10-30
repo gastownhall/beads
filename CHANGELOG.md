@@ -1090,6 +1090,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Plain `bd init --proxied-server` (without `--team-server`) now saves the
+  project id it adopts from an already-identified database to
+  `.beads/metadata.json`, so a further clone no longer git-commits a
+  locally minted id that disagrees with the server (#7576). A database with
+  a prefix but no `_project_id` still leaves the clone's own id in place.
+  The same init no longer writes the clone's `repo_id`/`clone_id`
+  fingerprints into the server's shared `metadata` table, where each clone's
+  init overwrote the previous one's (#7577).
 - `bd migrate-personal` no longer leaves an issue in both databases when
   someone else's bead in the project database depends on it. The move's
   delete from the project database refuses such an issue, but it ran only

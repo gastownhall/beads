@@ -16,7 +16,9 @@ import (
 // several clones through plain (non --team-server) `bd init --proxied-server`
 // against ONE shared database. A later clone adopts the identity the first
 // one recorded, and metadata.json must carry that adopted id rather than the
-// one init minted locally before it reached the database (#7576).
+// one init minted locally before it reached the database (#7576). No clone
+// records its repo_id/clone_id fingerprints in the shared metadata table, where
+// each init would overwrite the previous clone's (#7577).
 func TestProxiedServerInitSharedDatabaseAdoptsIdentityAndKeepsFingerprints(t *testing.T) {
 	requireSharedProxiedServer(t)
 	t.Parallel()
@@ -25,9 +27,21 @@ func TestProxiedServerInitSharedDatabaseAdoptsIdentityAndKeepsFingerprints(t *te
 
 	a := bdProxiedInit(t, bd, "shid", args...)
 	a.database = database
-	dbProjectID := readProxiedMetadata(t, openProxiedDB(t, a), "_project_id")
+	dbA := openProxiedDB(t, a)
+	dbProjectID := readProxiedMetadata(t, dbA, "_project_id")
 	if dbProjectID == "" {
 		t.Fatal("precondition: the first clone's init recorded no _project_id")
+	}
+
+	// Every clone of a proxied server shares this metadata table, so a
+	// per-clone fingerprint has no row to live in (#7577).
+	var fingerprints int
+	if err := dbA.QueryRowContext(context.Background(),
+		"SELECT COUNT(*) FROM metadata WHERE `key` IN ('repo_id', 'clone_id')").Scan(&fingerprints); err != nil {
+		t.Fatalf("count fingerprint rows: %v", err)
+	}
+	if fingerprints != 0 {
+		t.Errorf("AC-2: bootstrapping init wrote %d repo_id/clone_id row(s) into the shared metadata table, want 0", fingerprints)
 	}
 
 	// A fresh clone with no metadata.json: init mints a project id locally,
