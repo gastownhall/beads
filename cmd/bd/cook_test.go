@@ -1698,3 +1698,49 @@ func TestCookFormulaConditionPrimitiveDefaultDropsUnreferencedDeploy(t *testing.
 		t.Errorf("child issues = %d, want 2 (build, test): %v", got, allIssueIDs(sg))
 	}
 }
+
+// TestCookFormulaLoopContainerExternalNeedsSkipped: ApplyLoops replaces a
+// loop container with its expanded body while rewriteLoopDependencies
+// rewrites only in-body refs, so a sibling's needs = ["round"] names a step
+// ID that no longer exists at cook time - control flow replaced it, no
+// condition dropped it. The pour must keep succeeding with the edge
+// silently skipped; this is the behavior that breaks if the skip in
+// collectDependencies is ever tightened to reject any dangling reference
+// (GH#6437).
+func TestCookFormulaLoopContainerExternalNeedsSkipped(t *testing.T) {
+	src := `formula = "loop-ext-needs"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "round"
+title = "Rounds"
+
+[steps.loop]
+count = 2
+
+[[steps.loop.body]]
+id = "rev"
+title = "Review round"
+
+[[steps]]
+id = "after"
+title = "After the rounds"
+needs = ["round"]
+`
+	sg, err := cookFormulaTOMLWithVars(t, "loop-ext-needs", src, map[string]string{})
+	if err != nil {
+		t.Fatalf("cook with an external needs of a loop container: %v", err)
+	}
+	for _, want := range []string{"loop-ext-needs.round.iter1.rev", "loop-ext-needs.round.iter2.rev"} {
+		if !hasIssueID(sg, want) {
+			t.Errorf("missing expanded issue %q; issues: %v", want, allIssueIDs(sg))
+		}
+	}
+	if hasIssueID(sg, "loop-ext-needs.round") {
+		t.Errorf("loop container issue present although ApplyLoops replaced it; issues: %v", allIssueIDs(sg))
+	}
+	if got := blocksEdgesFrom(sg, "loop-ext-needs.after"); len(got) != 0 {
+		t.Errorf("after blocks edges = %v, want none (the container edge is skipped); deps: %v", got, allDeps(sg))
+	}
+}
