@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -161,4 +162,27 @@ func TestProxiedServerInitKeepsExistingSharedFingerprints(t *testing.T) {
 	require.True(t, ok, "the seeded clone_id row vanished")
 	require.Equal(t, "seed-clone", clone,
 		"a second clone's init overwrote the shared clone_id")
+}
+
+// TestProxiedServerInitStillRecordsVersionAndImportTime is #7577's guard
+// against removing too much: dropping the per-clone fingerprints from
+// recordProxiedInitTrackingState must not take the database-level
+// bookkeeping with it. bd_version (local_metadata) feeds version
+// reconciliation, and last_import_time (metadata) still marks the init.
+func TestProxiedServerInitStillRecordsVersionAndImportTime(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+
+	a := newSharedProxiedProject(t, bd, "shvt")
+	db := openProxiedDB(t, a)
+
+	version, ok := readProxiedMetadataRow(t, db, "local_metadata", "bd_version")
+	require.True(t, ok, "proxied init recorded no bd_version in local_metadata")
+	require.NotEmpty(t, version, "bd_version is empty")
+
+	importedAt, ok := readProxiedMetadataRow(t, db, "metadata", "last_import_time")
+	require.True(t, ok, "proxied init recorded no last_import_time in metadata")
+	_, err := time.Parse(time.RFC3339, importedAt)
+	require.NoError(t, err, "last_import_time %q is not an RFC3339 timestamp", importedAt)
 }

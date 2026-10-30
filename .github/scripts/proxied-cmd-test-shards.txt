@@ -180,6 +180,7 @@
 34 19 TestServerModeTypesAgreeWithCreate
 
 34 20 TestProxiedServerDelete
+34 20 TestProxiedServerInitStillRecordsVersionAndImportTime
 34 20 TestProxiedServerLint
 34 20 TestProxiedServerPriority
 34 20 TestProxiedServerShow2B
