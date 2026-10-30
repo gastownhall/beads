@@ -11,6 +11,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
@@ -310,6 +311,23 @@ func TestDoltModeCheckProbesTheEndpointTheStoreDials(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestServerRunningOrProbeable pins the short-circuit of the federation
+// remotesapi check's server gate (serverRunningOrProbeable): a PID file that
+// names a running server answers true without a dial, so a PID-tracked
+// server never pays the endpoint probe.
+func TestServerRunningOrProbeable(t *testing.T) {
+	t.Run("running state answers true without the probe", func(t *testing.T) {
+		calls := 0
+		probe := func() bool { calls++; return false }
+		if !serverRunningOrProbeable(&doltserver.State{Running: true, PID: 4242}, probe) {
+			t.Fatal("a state that names a running server must answer true")
+		}
+		if calls != 0 {
+			t.Fatalf("probe ran %d time(s); a PID-tracked server must never dial", calls)
+		}
+	})
 }
 
 // acceptingLocalPort is a 127.0.0.1 port whose listener accepts and closes
