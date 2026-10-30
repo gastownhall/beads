@@ -164,4 +164,53 @@ func TestRowIterationReportsMidIterationFailure(t *testing.T) {
 			t.Fatalf("unmet SQL expectations: %v", err)
 		}
 	})
+
+	// GetMoleculeLastActivityInTx reports when a molecule last moved. The
+	// wisps probe returns no rows, so the molecule routes to the issues
+	// plane and its children are read from dependencies.
+	t.Run("last-activity/children", func(t *testing.T) {
+		_, mock, tx := beginMockTx(t)
+		mock.ExpectQuery("SELECT 1 FROM wisps WHERE id").
+			WillReturnRows(sqlmock.NewRows([]string{"1"}))
+		mock.ExpectQuery("SELECT issue_id FROM dependencies WHERE depends_on_issue_id").
+			WillReturnRows(sqlmock.NewRows([]string{"issue_id"}).
+				AddRow("bd-child-1").
+				AddRow("bd-child-2").
+				RowError(1, errTransport))
+
+		got, err := GetMoleculeLastActivityInTx(context.Background(), tx, "bd-mol")
+		if !errors.Is(err, errTransport) {
+			t.Fatalf("iteration failed part-way through and no error was returned (activity=%+v, err=%v): the caller cannot tell a truncated result from a complete one", got, err)
+		}
+		if got != nil {
+			t.Fatalf("last activity computed from a truncated child set: %+v", got)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet SQL expectations: %v", err)
+		}
+	})
+
+	// The same read failing on the first row: without the check the empty
+	// child set falls into the molecule_updated fallback and reports the
+	// molecule's own updated_at as its last activity.
+	t.Run("last-activity/children-first-row", func(t *testing.T) {
+		_, mock, tx := beginMockTx(t)
+		mock.ExpectQuery("SELECT 1 FROM wisps WHERE id").
+			WillReturnRows(sqlmock.NewRows([]string{"1"}))
+		mock.ExpectQuery("SELECT issue_id FROM dependencies WHERE depends_on_issue_id").
+			WillReturnRows(sqlmock.NewRows([]string{"issue_id"}).
+				AddRow("bd-child-1").
+				RowError(0, errTransport))
+
+		got, err := GetMoleculeLastActivityInTx(context.Background(), tx, "bd-mol")
+		if !errors.Is(err, errTransport) {
+			t.Fatalf("iteration failed on the first row and no error was returned (activity=%+v, err=%v): the caller cannot tell a truncated result from a complete one", got, err)
+		}
+		if got != nil {
+			t.Fatalf("last activity computed from a truncated child set: %+v", got)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet SQL expectations: %v", err)
+		}
+	})
 }
