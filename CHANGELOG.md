@@ -1090,6 +1090,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd dolt remote add` now registers a remote on the sql-server when the
+  served database records it on disk with the same URL but the server lists
+  none (GH#2118). The add used to treat that as already configured and
+  report success while `dolt_remotes` stayed empty, so push, pull and fetch
+  still could not resolve the name. It now adds the recorded remote, keeping
+  its URL and git ref, without a prompt, and reports a failed add as an
+  error (PR #7447).
 - `bd migrate-personal` no longer leaves an issue in both databases when
   someone else's bead in the project database depends on it. The move's
   delete from the project database refuses such an issue, but it ran only

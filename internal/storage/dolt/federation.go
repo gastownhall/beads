@@ -237,10 +237,12 @@ func (s *DoltStore) HasPersistedRemote() bool {
 // remotes wins, mirroring HasPersistedRemote's first-hit semantics.
 //
 // Callers in the GH#2118 cold-start window use this to RECOVER the invisible
-// remote rather than merely detect it: a freshly (auto-)started sql-server
-// can report an empty dolt_remotes even though the remote is persisted on
-// disk, so an empty listing is a reporting artifact, not an unconfigured rig
-// (wy-6k7f7). Read/parse failures are logged and skipped, matching the old
+// remote rather than merely detect it: the sql-server can list an empty
+// dolt_remotes even though the served database records the remote on disk
+// (wy-6k7f7). That listing is the set the server can push, pull and fetch
+// with, so a recovered remote keeps its URL and ref: a replace of it still
+// asks for confirmation, and `bd dolt remote add` registers it on the server.
+// Read/parse failures are logged and skipped, matching the old
 // HasPersistedRemote behavior — callers only consult this after a SUCCESSFUL
 // (empty) ListRemotes, so a read failure here never masquerades as evidence.
 //
