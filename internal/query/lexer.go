@@ -374,14 +374,18 @@ func (l *Lexer) acceptDuration(number string) (string, bool) {
 	}
 	start := l.pos - l.width
 	end := start
-	for end < len(l.input) && isIdentChar(rune(l.input[end])) {
-		end++
+	for end < len(l.input) {
+		r, w := utf8.DecodeRuneInString(l.input[end:])
+		if !isIdentChar(r) {
+			break
+		}
+		end += w
 	}
 	lexeme := number + l.input[start:end]
 	if !timeparsing.IsCompactDuration(lexeme) {
 		return "", false
 	}
 	l.pos = end
-	l.width = 1
+	l.width = 1 // a compact duration is all ASCII
 	return lexeme, true
 }

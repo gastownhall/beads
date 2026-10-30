@@ -267,6 +267,24 @@ func TestLexer(t *testing.T) {
 			expected: []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenAnd, TokenIdent, TokenEquals, TokenIdent, TokenEOF},
 			values:   []string{"label", "=", "fête", "AND", "status", "=", "open", ""},
 		},
+		{
+			name:     "no-break space after a duration",
+			input:    "updated>7d\u00a0AND status=open",
+			expected: []TokenType{TokenIdent, TokenGreater, TokenDuration, TokenAnd, TokenIdent, TokenEquals, TokenIdent, TokenEOF},
+			values:   []string{"updated", ">", "7d", "AND", "status", "=", "open", ""},
+		},
+		{
+			name:     "multi-byte letter after a duration unit stays an identifier",
+			input:    "label=7dש",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenEOF},
+			values:   []string{"label", "=", "7dש", ""},
+		},
+		{
+			name:     "ideographic spaces separate tokens",
+			input:    "status=open\u3000AND\u3000label=x",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenAnd, TokenIdent, TokenEquals, TokenIdent, TokenEOF},
+			values:   []string{"status", "=", "open", "AND", "label", "=", "x", ""},
+		},
 	}
 
 	for _, tt := range tests {
