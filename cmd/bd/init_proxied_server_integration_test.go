@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"os/exec"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/configfile"
 )
@@ -42,6 +43,20 @@ func TestProxiedServerInitSharedDatabaseAdoptsIdentityAndKeepsFingerprints(t *te
 	}
 	if fingerprints != 0 {
 		t.Errorf("AC-2: bootstrapping init wrote %d repo_id/clone_id row(s) into the shared metadata table, want 0", fingerprints)
+	}
+
+	// The database-level bookkeeping is still recorded.
+	var version string
+	if err := dbA.QueryRowContext(context.Background(),
+		"SELECT value FROM local_metadata WHERE `key` = 'bd_version'").Scan(&version); err != nil {
+		t.Errorf("AC-5: read local_metadata bd_version: %v", err)
+	} else if version == "" {
+		t.Error("AC-5: bootstrapping init recorded an empty bd_version")
+	}
+	if imported := readProxiedMetadata(t, dbA, "last_import_time"); imported == "" {
+		t.Error("AC-5: bootstrapping init recorded no last_import_time")
+	} else if _, err := time.Parse(time.RFC3339, imported); err != nil {
+		t.Errorf("AC-5: last_import_time %q is not RFC3339: %v", imported, err)
 	}
 
 	// The rows an older bd left behind belong to some other clone; a later
