@@ -136,4 +136,24 @@ func TestEnginePullRecordsPushHash(t *testing.T) {
 				f.mock.fetchCalls, len(f.mock.updated), len(f.mock.created))
 		}
 	})
+
+	t.Run("generated_id_does_not_key_the_hash", func(t *testing.T) {
+		f := newPushHashFixture()
+		f.engine.PullHooks = &PullHooks{GenerateID: func(_ context.Context, issue *types.Issue) error {
+			if issue.ID == "" {
+				issue.ID = "bd-generated"
+			}
+			return nil
+		}}
+		runSync(t, f.engine, SyncOptions{Push: true})
+
+		f.editRemote("remote edit")
+		runSync(t, f.engine, SyncOptions{Pull: true})
+		if got, want := f.store.localMetadata["test.pushhash.bd-hash1"], "v3:13:h:remote edit0:"+pushHashTestRef; got != want {
+			t.Fatalf("push hash of the local issue = %q, want %q", got, want)
+		}
+		if value, ok := f.store.localMetadata["test.pushhash.bd-generated"]; ok {
+			t.Fatalf("pull stored a push hash under the generated ID: %q", value)
+		}
+	})
 }
