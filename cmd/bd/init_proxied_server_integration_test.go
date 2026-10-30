@@ -106,3 +106,24 @@ func TestProxiedServerInitPrefixOnlyDatabaseKeepsLocalProjectID(t *testing.T) {
 	require.False(t, ok,
 		"the clone must not write its id back to the identified database; found _project_id %q", still)
 }
+
+// TestProxiedServerInitBootstrapWritesNoCloneFingerprints pins #7577: a
+// fresh plain proxied init must record no repo_id/clone_id in the shared
+// database's metadata table. Every clone proxying to the database shares
+// that row, so a per-clone fingerprint there is last-init-wins and feeds
+// false cross-project mismatch diagnostics; team-server mode and gateway
+// init write neither for exactly this reason.
+func TestProxiedServerInitBootstrapWritesNoCloneFingerprints(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+
+	a := newSharedProxiedProject(t, bd, "shfp")
+	db := openProxiedDB(t, a)
+
+	for _, key := range []string{"repo_id", "clone_id"} {
+		_, ok := readProxiedMetadataRow(t, db, "metadata", key)
+		require.False(t, ok,
+			"a fresh proxied bootstrap recorded the per-clone fingerprint %q in the shared metadata table", key)
+	}
+}
