@@ -213,4 +213,35 @@ func TestRowIterationReportsMidIterationFailure(t *testing.T) {
 			t.Fatalf("unmet SQL expectations: %v", err)
 		}
 	})
+
+	// GetMoleculeProgressInTx runs no statement after its child-status loop,
+	// so a truncated status batch silently undercounts Total/Completed/
+	// InProgress. The children read itself already checks Rows.Err.
+	t.Run("progress/child-statuses", func(t *testing.T) {
+		_, mock, tx := beginMockTx(t)
+		mock.ExpectQuery("SELECT 1 FROM wisps WHERE id").
+			WillReturnRows(sqlmock.NewRows([]string{"1"}))
+		mock.ExpectQuery("SELECT title FROM issues WHERE id").
+			WillReturnRows(sqlmock.NewRows([]string{"title"}))
+		mock.ExpectQuery("SELECT issue_id FROM dependencies WHERE depends_on_issue_id").
+			WillReturnRows(sqlmock.NewRows([]string{"issue_id"}).
+				AddRow("bd-child-1").
+				AddRow("bd-child-2"))
+		mock.ExpectQuery("SELECT id, status FROM issues WHERE id IN").
+			WillReturnRows(sqlmock.NewRows([]string{"id", "status"}).
+				AddRow("bd-child-1", "closed").
+				AddRow("bd-child-2", "open").
+				RowError(1, errTransport))
+
+		stats, err := GetMoleculeProgressInTx(context.Background(), tx, "bd-mol")
+		if !errors.Is(err, errTransport) {
+			t.Fatalf("iteration failed part-way through and no error was returned (stats=%+v, err=%v): the caller cannot tell a truncated result from a complete one", stats, err)
+		}
+		if stats != nil {
+			t.Fatalf("progress counted over a truncated status set: %+v", stats)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet SQL expectations: %v", err)
+		}
+	})
 }
