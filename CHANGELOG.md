@@ -1131,6 +1131,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the default remote and reported "Push complete."; a name that differs from
   `--remote`, an empty name, or a second argument is now an error (#3720,
   reported by @bryanhirsch).
+- `bd dolt remote add` now registers a matching remote that exists only in
+  the served database's on-disk state (`.dolt/repo_state.json`) on the
+  server, instead of reporting success while SQL `dolt_remotes` stayed
+  empty. A sql-server resolves push, pull and fetch through its in-memory
+  remotes table and re-reads the state file only when it loads the
+  database, so a remote recorded only on disk was invisible to every SQL
+  operation while the add — the documented remedy — silently did nothing
+  (GH#2118). The add now writes the remote's recorded URL and git ref, asks
+  nothing when the URLs match, and still asks before replacing a differing
+  one.
 - `bd migrate-personal` no longer leaves an issue in both databases when
   someone else's bead in the project database depends on it. The move's
   delete from the project database refuses such an issue, but it ran only

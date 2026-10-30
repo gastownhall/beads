@@ -21,8 +21,19 @@ func (f *fakeDoltRemoteAddStore) ListRemotes(ctx context.Context) ([]storage.Rem
 }
 
 func (f *fakeDoltRemoteAddStore) AddRemote(ctx context.Context, name, url string) error {
-	f.calls = append(f.calls, "add "+name+" "+url)
-	f.remotes = append(f.remotes, storage.RemoteInfo{Name: name, URL: url})
+	return f.AddRemoteWithRef(ctx, name, url, "")
+}
+
+// AddRemoteWithRef records the git ref alongside the add, the way the SQL
+// store does; an empty ref logs the same call AddRemote always logged, so
+// expectations that never carry a ref are unchanged.
+func (f *fakeDoltRemoteAddStore) AddRemoteWithRef(ctx context.Context, name, url, ref string) error {
+	call := "add " + name + " " + url
+	if ref != "" {
+		call += " ref=" + ref
+	}
+	f.calls = append(f.calls, call)
+	f.remotes = append(f.remotes, storage.RemoteInfo{Name: name, URL: url, Ref: ref})
 	return nil
 }
 
@@ -106,11 +117,20 @@ type fakeDoltRemoteAddStoreWithDisk struct {
 	fakeDoltRemoteAddStore
 	persisted []storage.RemoteInfo
 	removeErr error
+	addErr    error
 }
 
 func (f *fakeDoltRemoteAddStoreWithDisk) PersistedRemoteInfos() []storage.RemoteInfo {
 	f.calls = append(f.calls, "persisted")
 	return append([]storage.RemoteInfo(nil), f.persisted...)
+}
+
+func (f *fakeDoltRemoteAddStoreWithDisk) AddRemoteWithRef(ctx context.Context, name, url, ref string) error {
+	if f.addErr != nil {
+		f.calls = append(f.calls, "add-fail "+name)
+		return f.addErr
+	}
+	return f.fakeDoltRemoteAddStore.AddRemoteWithRef(ctx, name, url, ref)
 }
 
 func (f *fakeDoltRemoteAddStoreWithDisk) RemoveRemote(ctx context.Context, name string) error {
@@ -121,31 +141,83 @@ func (f *fakeDoltRemoteAddStoreWithDisk) RemoveRemote(ctx context.Context, name 
 	return f.fakeDoltRemoteAddStore.RemoveRemote(ctx, name)
 }
 
-// TestEnsureDoltRemoteColdStartSameURLIsNoop pins the wy-6k7f7 fence: an
-// empty dolt_remotes listing with the same remote persisted on disk (a
-// freshly started sql-server, GH#2118) must be treated as the existing
-// remote it is — an idempotent re-add writes nothing and asks nothing.
-func TestEnsureDoltRemoteColdStartSameURLIsNoop(t *testing.T) {
-	store := &fakeDoltRemoteAddStoreWithDisk{
-		persisted: []storage.RemoteInfo{
-			{Name: "origin", URL: "https://github.com/org/repo.git"},
-		},
-	}
-	prompted := false
+// TestEnsureDoltRemoteColdStartSameURLMigratesToSQL: a matching remote known
+// only from persisted disk state (SQL dolt_remotes empty) must be registered
+// in SQL, so `bd dolt remote add` reporting success leaves the remote visible
+// to the server (PR #7447). The recorded URL and git ref are what get written,
+// not the caller's spelling: doltremote.Normalize equates https:// with
+// git+https:// while Dolt implies git transport only for .git and git+ URLs,
+// and a re-add without the recorded ref would pin pushes onto the default
+// data ref.
+func TestEnsureDoltRemoteColdStartSameURLMigratesToSQL(t *testing.T) {
+	t.Run("recorded_url", func(t *testing.T) {
+		store := &fakeDoltRemoteAddStoreWithDisk{
+			persisted: []storage.RemoteInfo{
+				{Name: "origin", URL: "https://github.com/org/repo.git"},
+			},
+		}
 
-	result, err := ensureDoltRemote(context.Background(), store, "origin", "git+https://github.com/org/repo.git", func(surface, name, existingURL, newURL string) bool {
-		prompted = true
-		return true
+		result, err := ensureDoltRemote(context.Background(), store, "origin", "git+https://github.com/org/repo.git", func(surface, name, existingURL, newURL string) bool {
+			t.Fatalf("same-URL migration should not prompt")
+			return false
+		})
+		if err != nil {
+			t.Fatalf("ensureDoltRemote: %v", err)
+		}
+		if result.Canceled {
+			t.Fatal("same-URL migration should not cancel")
+		}
+		want := []string{"list", "persisted", "add origin https://github.com/org/repo.git"}
+		if !reflect.DeepEqual(store.calls, want) {
+			t.Fatalf("calls = %v, want %v (the recorded URL, not the caller's)", store.calls, want)
+		}
+		if got := findDoltRemoteURL(store.remotes, "origin"); got != "https://github.com/org/repo.git" {
+			t.Fatalf("SQL remotes = %+v, want origin at the recorded URL", store.remotes)
+		}
 	})
-	if err != nil {
-		t.Fatalf("ensureDoltRemote: %v", err)
-	}
-	if result.Canceled || prompted {
-		t.Fatalf("cold-start same-URL re-add should be a silent no-op (canceled=%v prompted=%v)", result.Canceled, prompted)
-	}
-	if want := []string{"list", "persisted"}; !reflect.DeepEqual(store.calls, want) {
-		t.Fatalf("calls = %v, want %v (no write may reach the store)", store.calls, want)
-	}
+
+	t.Run("recorded_ref", func(t *testing.T) {
+		store := &fakeDoltRemoteAddStoreWithDisk{
+			persisted: []storage.RemoteInfo{
+				{Name: "origin", URL: "git+ssh://git@github.com/org/repo.git", Ref: "refs/dolt/custom"},
+			},
+		}
+
+		_, err := ensureDoltRemote(context.Background(), store, "origin", "git+ssh://git@github.com/org/repo.git", func(surface, name, existingURL, newURL string) bool {
+			t.Fatalf("same-URL migration should not prompt")
+			return false
+		})
+		if err != nil {
+			t.Fatalf("ensureDoltRemote: %v", err)
+		}
+		want := []string{"list", "persisted", "add origin git+ssh://git@github.com/org/repo.git ref=refs/dolt/custom"}
+		if !reflect.DeepEqual(store.calls, want) {
+			t.Fatalf("calls = %v, want %v (the recorded ref carried onto the add)", store.calls, want)
+		}
+		if wantRemotes := []storage.RemoteInfo{{Name: "origin", URL: "git+ssh://git@github.com/org/repo.git", Ref: "refs/dolt/custom"}}; !reflect.DeepEqual(store.remotes, wantRemotes) {
+			t.Fatalf("SQL remotes = %+v, want %+v (the recorded ref kept)", store.remotes, wantRemotes)
+		}
+	})
+
+	t.Run("add_error_surfaces", func(t *testing.T) {
+		store := &fakeDoltRemoteAddStoreWithDisk{
+			persisted: []storage.RemoteInfo{
+				{Name: "origin", URL: "https://github.com/org/repo.git"},
+			},
+			addErr: errors.New("dolt refused the add"),
+		}
+
+		_, err := ensureDoltRemote(context.Background(), store, "origin", "git+https://github.com/org/repo.git", func(surface, name, existingURL, newURL string) bool {
+			t.Fatalf("same-URL migration should not prompt")
+			return false
+		})
+		if err == nil {
+			t.Fatal("ensureDoltRemote = nil error, want the failed registration surfaced, not a silent success")
+		}
+		if !errors.Is(err, store.addErr) || !strings.Contains(err.Error(), "add remote origin") {
+			t.Fatalf("ensureDoltRemote = %v, want an error wrapping the add failure as \"add remote origin: …\"", err)
+		}
+	})
 }
 
 // TestEnsureDoltRemoteColdStartDifferentURLPrompts pins that the invisible
