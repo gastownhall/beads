@@ -12,14 +12,15 @@ import (
 
 const compactLogQuery = "SELECT commit_hash, committer, email, date, message, commit_order FROM dolt_log ORDER BY date DESC"
 
-// compactRow is one dolt_log row of a compaction fixture. wantDate is the
-// literal --date argument the replay must pass for it.
+// compactRow is one dolt_log row of a compaction fixture. wantDate and
+// wantAuthor are the literal --date and --author arguments the replay must
+// pass for it.
 type compactRow struct {
 	hash, committer, email string
 	date                   time.Time
 	message                string
 	order                  int64
-	wantDate               string
+	wantDate, wantAuthor   string
 }
 
 // compactFixture is a history of an initial commit, a boundary commit and the
@@ -39,15 +40,15 @@ func newCompactFixture() compactFixture {
 		kept: []compactRow{
 			{hash: "k1k1k1k1k1k1", committer: "Original Author", email: "orig@example.com",
 				date: s.Add(123 * time.Millisecond), message: "bd: edit A", order: 3,
-				wantDate: "2026-03-04T05:06:07.123Z"},
+				wantDate: "2026-03-04T05:06:07.123Z", wantAuthor: "Original Author <orig@example.com>"},
 			// Empty commit in the same second, 333 ms later.
 			{hash: "k2k2k2k2k2k2", committer: "Original Author", email: "orig@example.com",
 				date: s.Add(456 * time.Millisecond), message: "bd: empty", order: 4,
-				wantDate: "2026-03-04T05:06:07.456Z"},
+				wantDate: "2026-03-04T05:06:07.456Z", wantAuthor: "Original Author <orig@example.com>"},
 			// Scanned in a non-UTC zone; the message starts with a dash.
 			{hash: "k3k3k3k3k3k3", committer: "root", email: "root@%",
 				date: time.Date(2026, 3, 4, 1, 10, 0, 789e6, time.FixedZone("EST", -5*3600)), message: "-m looks like a flag", order: 5,
-				wantDate: "2026-03-04T06:10:00.789Z"},
+				wantDate: "2026-03-04T06:10:00.789Z", wantAuthor: "root <root@%>"},
 		},
 	}
 }
@@ -96,7 +97,7 @@ func expectCompactSuccess(mock sqlmock.Sqlmock, f compactFixture) {
 	expectExec(mock, "CALL DOLT_COMMIT('-Am', ?)", "compact: squash 2 commits into base snapshot")
 	for _, r := range f.kept {
 		expectExec(mock, "CALL DOLT_CHERRY_PICK('--allow-empty', ?)", r.hash)
-		expectExec(mock, "CALL DOLT_COMMIT('--amend', '--allow-empty', '--date', ?)", r.wantDate)
+		expectExec(mock, "CALL DOLT_COMMIT('--amend', '--allow-empty', '--date', ?, '--author', ?)", r.wantDate, r.wantAuthor)
 	}
 	expectExec(mock, "CALL DOLT_CHECKOUT('main')")
 	expectExec(mock, "CALL DOLT_RESET('--hard', 'compact-tmp')")
@@ -109,6 +110,25 @@ func expectCompactSuccess(mock sqlmock.Sqlmock, f compactFixture) {
 func TestCompactRestoresCommitDates(t *testing.T) {
 	db, mock := newCompactMock(t)
 	f := newCompactFixture()
+	expectCompactSuccess(mock, f)
+
+	if err := Compact(context.Background(), db, f.initial.hash, f.boundary.hash, 2, f.recentHashes()); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestCompactRestoresCommitAuthor pins that the amend carries the original
+// committer and email as --author instead of leaving the SQL session's
+// identity, and passes no -m: the message cherry-pick copied is kept as is,
+// so one starting with a dash never reaches Dolt's argument parser.
+func TestCompactRestoresCommitAuthor(t *testing.T) {
+	db, mock := newCompactMock(t)
+	f := newCompactFixture()
+	f.kept = f.kept[:1]
+	f.kept[0].message = "-m bd: edit A"
 	expectCompactSuccess(mock, f)
 
 	if err := Compact(context.Background(), db, f.initial.hash, f.boundary.hash, 2, f.recentHashes()); err != nil {

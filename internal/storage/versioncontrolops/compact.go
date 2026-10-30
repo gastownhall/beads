@@ -87,16 +87,18 @@ func Compact(ctx context.Context, conn DBConn, initialHash, boundaryHash string,
 	// ("The previous cherry-pick commit is empty. Use --allow-empty ..."),
 	// leaving compaction permanently blocked on active databases. See #3815.
 	//
-	// Each pick is then amended with the original commit date; --amend keeps
-	// the message cherry-pick copied.
+	// Each pick is then amended with the original commit date and identity:
+	// cherry-pick records the SQL session as committer at replay time, and
+	// AS OF, dolt_history and dolt_log all read the committer. No -m: --amend
+	// keeps the message cherry-pick copied.
 	for i, hash := range recentHashes {
 		short := hash[:min(8, len(hash))]
 		if err := execSQL(fmt.Sprintf("cherry-pick %s", short), "CALL DOLT_CHERRY_PICK('--allow-empty', ?)", hash); err != nil {
 			return err
 		}
 		if err := execSQL(fmt.Sprintf("restore metadata %s", short),
-			"CALL DOLT_COMMIT('--amend', '--allow-empty', '--date', ?)",
-			commitDateArg(originals[i].Date)); err != nil {
+			"CALL DOLT_COMMIT('--amend', '--allow-empty', '--date', ?, '--author', ?)",
+			commitDateArg(originals[i].Date), authorArg(originals[i].Author, originals[i].Email)); err != nil {
 			return err
 		}
 	}
@@ -119,4 +121,9 @@ func Compact(ctx context.Context, conn DBConn, initialHash, boundaryHash string,
 // second keep their order.
 func commitDateArg(t time.Time) string {
 	return t.UTC().Format("2006-01-02T15:04:05.000Z07:00")
+}
+
+// authorArg renders a committer identity for DOLT_COMMIT --author.
+func authorArg(name, email string) string {
+	return fmt.Sprintf("%s <%s>", name, email)
 }
