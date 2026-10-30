@@ -121,3 +121,21 @@ func TestInstallSharedHooksFromLinkedWorktreeWritesTrackedCopy(t *testing.T) {
 		initExcludeGit(t, worktree, "config", "--get", "core.hooksPath"),
 		"core.hooksPath must keep naming the primary copy (#2414)")
 }
+
+// TestInstallBeadsHooksFromLinkedWorktreeWritesTrackedCopy pins AC-3: --beads
+// resolves the primary's .beads through the worktree fallback and still writes
+// the worktree's tracked copy of it.
+func TestInstallBeadsHooksFromLinkedWorktreeWritesTrackedCopy(t *testing.T) {
+	primary, worktree := newWorktreeHooksFixture(t, filepath.Join(".beads", "hooks"), true)
+	// The untracked database directory is what makes FindBeadsDir resolve the
+	// worktree's .beads to the primary's shared copy (its step 3c).
+	mkdirs(t, filepath.Join(primary, ".beads", "embeddeddolt"))
+	enterWorktreeForInstallTest(t, worktree)
+	setStandaloneHookMode(t, "beads")
+	require.NoError(t, hooksInstallCmd.RunE(hooksInstallCmd, nil))
+	requireHooksCurrent(t, filepath.Join(worktree, ".beads", "hooks"))
+	requirePrimaryUnchanged(t, primary, filepath.Join(".beads", "hooks"))
+	require.Equal(t, filepath.Join(primary, ".beads", "hooks"),
+		initExcludeGit(t, worktree, "config", "--get", "core.hooksPath"),
+		"core.hooksPath must keep naming the primary copy (#2414)")
+}
