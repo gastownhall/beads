@@ -1096,7 +1096,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   written on the tracker just before a sync finished is imported on the next
   sync instead of being missed until someone edits it again (#6806). A
   re-fetched copy of what the previous sync pushed, or a remote copy older
-  than the local issue, does not overwrite the local issue.
+  than the local issue, does not overwrite the local issue, and a local issue
+  linked after the cursor is still hydrated from the overlapped fetch instead
+  of letting the next push overwrite the remote with a stub.
 - `bd migrate-personal` no longer leaves an issue in both databases when
   someone else's bead in the project database depends on it. The move's
   delete from the project database refuses such an issue, but it ran only

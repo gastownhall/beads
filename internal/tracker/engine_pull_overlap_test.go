@@ -212,3 +212,48 @@ func TestEnginePullOverlapPullsOnlyRemoteChanges(t *testing.T) {
 		})
 	}
 }
+
+// TestEnginePullOverlapHydratesPrelinkedStub pins that a local issue linked
+// after last_sync to a remote issue last updated before it is still hydrated
+// from the remote when the overlap window returns that remote in the bulk
+// fetch, so the push does not overwrite the remote with the local stub.
+func TestEnginePullOverlapHydratesPrelinkedStub(t *testing.T) {
+	ctx := context.Background()
+	ref := "https://test.test/EXT-1"
+	stub := &types.Issue{
+		ID:          "bd-stub",
+		Title:       "stub",
+		Status:      types.StatusOpen,
+		Priority:    2,
+		IssueType:   types.TypeTask,
+		ExternalRef: &ref,
+		CreatedAt:   overlapLastSync.Add(-time.Hour),
+		UpdatedAt:   overlapLastSync.Add(10 * time.Second),
+	}
+	store := newOverlapStore(stub) // created before last_sync, no ref at it: linked after it
+	mock, _ := newOverlapTracker(TrackerIssue{
+		ID:          "EXT-1",
+		Identifier:  "EXT-1",
+		Title:       "remote title",
+		Description: "remote body",
+		UpdatedAt:   overlapLastSync.Add(-30 * time.Second),
+	})
+	engine := NewEngine(mock, store, "sync")
+	engine.PushHooks = &PushHooks{ContentEqual: overlapTitleEqual}
+
+	result, err := engine.Sync(ctx, SyncOptions{Pull: true, Push: true})
+	if err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if result.PullStats.Updated != 1 || stub.Title != "remote title" || stub.Description != "remote body" {
+		t.Fatalf("PullStats = %+v, stub = %q/%q, want the stub hydrated from the remote", result.PullStats, stub.Title, stub.Description)
+	}
+	if len(mock.updated) != 0 || len(mock.created) != 0 {
+		t.Fatalf("push wrote the remote: updates %v, creates %d, want it left unchanged", mock.updated, len(mock.created))
+	}
+	// The only single-issue fetch is DetectConflicts' probe of the locally
+	// modified stub: hydration reuses the overlap-only bulk row.
+	if mock.fetchCalls != 1 {
+		t.Fatalf("FetchIssue calls = %d, want 1 (DetectConflicts probe only; hydration reused the bulk row)", mock.fetchCalls)
+	}
+}
