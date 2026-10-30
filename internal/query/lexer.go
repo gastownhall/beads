@@ -369,17 +369,22 @@ func isIdentChar(r rune) bool {
 // acceptDuration reports whether number, followed by the run of identifier
 // characters that starts at the rune the caller most recently read with
 // next(), is a compact duration (timeparsing.IsCompactDuration). The run is
-// taken whole, so a unit only counts when it stands alone. On a match it
-// consumes the run and returns the full lexeme; otherwise the lexer position
-// is left untouched.
+// taken whole, so a unit only counts when it stands alone, and is scanned by
+// decoded runes, so a multi-byte rune belongs to the run whole or ends it.
+// On a match it consumes the run and returns the full lexeme; otherwise the
+// lexer position is left untouched.
 func (l *Lexer) acceptDuration(number string) (string, bool) {
 	if l.width == 0 {
 		return "", false
 	}
 	start := l.pos - l.width
 	end := start
-	for end < len(l.input) && isIdentChar(rune(l.input[end])) {
-		end++
+	for end < len(l.input) {
+		r, w := utf8.DecodeRuneInString(l.input[end:])
+		if !isIdentChar(r) {
+			break
+		}
+		end += w
 	}
 	lexeme := number + l.input[start:end]
 	if !timeparsing.IsCompactDuration(lexeme) {
