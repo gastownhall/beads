@@ -213,6 +213,38 @@ func TestLexer(t *testing.T) {
 			expected: []TokenType{TokenIdent, TokenGreater, TokenDuration, TokenEOF},
 			values:   []string{"updated", ">", "+30d", ""},
 		},
+		// Multi-byte UTF-8 values must lex unchanged instead of being
+		// re-encoded byte by byte (#7539).
+		{
+			name:     "quoted multi-byte value round-trips",
+			input:    `title="größe test"`,
+			expected: []TokenType{TokenIdent, TokenEquals, TokenString, TokenEOF},
+			values:   []string{"title", "=", "größe test", ""},
+		},
+		{
+			name:     "quoted CJK value round-trips",
+			input:    `title="日本語"`,
+			expected: []TokenType{TokenIdent, TokenEquals, TokenString, TokenEOF},
+			values:   []string{"title", "=", "日本語", ""},
+		},
+		{
+			name:     "single-quoted accented value round-trips",
+			input:    `title='naïve café'`,
+			expected: []TokenType{TokenIdent, TokenEquals, TokenString, TokenEOF},
+			values:   []string{"title", "=", "naïve café", ""},
+		},
+		{
+			name:     "invalid byte in a quoted value passes through",
+			input:    "title=\"a\xffb\"",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenString, TokenEOF},
+			values:   []string{"title", "=", "a\xffb", ""},
+		},
+		{
+			name:     "unknown escape copies the following multi-byte rune",
+			input:    "title=\"\\é\"",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenString, TokenEOF},
+			values:   []string{"title", "=", "é", ""},
+		},
 	}
 
 	for _, tt := range tests {
@@ -444,6 +476,13 @@ func TestEvaluatorSimpleQueries(t *testing.T) {
 			query: "title=authentication",
 			expectFilter: func(f *types.IssueFilter) bool {
 				return f.TitleContains == "authentication"
+			},
+		},
+		{
+			name:  "title contains multi-byte value",
+			query: `title="größe test"`,
+			expectFilter: func(f *types.IssueFilter) bool {
+				return f.TitleContains == "größe test"
 			},
 		},
 		{
@@ -1308,5 +1347,28 @@ func TestMetadataPredicateEvaluation(t *testing.T) {
 	}
 	if !result.Predicate(issueClosed) {
 		t.Error("predicate should match closed issue via OR")
+	}
+}
+
+// TestLexerUTF8Values pins that non-ASCII values lex unchanged (#7539).
+func TestLexerUTF8Values(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"quoted multi-byte", `title="größe test"`, "größe test"},
+		{"bare multi-byte", "label=fête", "fête"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tokens, err := NewLexer(tt.input).Tokenize()
+			if err != nil {
+				t.Fatalf("Tokenize(%q): %v", tt.input, err)
+			}
+			if len(tokens) < 3 || tokens[2].Value != tt.want {
+				t.Fatalf("Tokenize(%q) value = %q, want %q (tokens %+v)", tt.input, tokens[2].Value, tt.want, tokens)
+			}
+		})
 	}
 }

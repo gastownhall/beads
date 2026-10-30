@@ -1090,6 +1090,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Non-ASCII values in `bd query` now match. The query lexer read its input
+  one byte at a time and treated each byte as a character, so a quoted value
+  like `title="größe test"` reached the filter re-encoded into mojibake that
+  silently matched nothing, and a bare `title=größe` failed to lex with
+  `unexpected character '¶'` (#7539). The lexer now decodes UTF-8, so quoted
+  and unquoted values lex as typed and token positions stay byte offsets.
 - `bd migrate-personal` no longer leaves an issue in both databases when
   someone else's bead in the project database depends on it. The move's
   delete from the project database refuses such an issue, but it ran only

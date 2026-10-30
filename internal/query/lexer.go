@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/steveyegge/beads/internal/timeparsing"
 )
@@ -90,7 +91,7 @@ func (t TokenType) String() string {
 type Token struct {
 	Type  TokenType
 	Value string
-	Pos   int // Position in input string
+	Pos   int // Byte offset in the input string
 }
 
 // Lexer tokenizes a query string.
@@ -105,24 +106,29 @@ func NewLexer(input string) *Lexer {
 	return &Lexer{input: input}
 }
 
-// next returns the next rune and advances position.
+// next returns the next rune and advances position. Input is decoded as
+// UTF-8, so a multi-byte rune is consumed whole, backup() steps back over
+// all of its bytes, and an invalid byte decodes to utf8.RuneError with
+// width 1.
 func (l *Lexer) next() rune {
 	if l.pos >= len(l.input) {
 		l.width = 0
 		return 0
 	}
-	r := rune(l.input[l.pos])
-	l.width = 1
-	l.pos += l.width
+	r, w := utf8.DecodeRuneInString(l.input[l.pos:])
+	l.width = w
+	l.pos += w
 	return r
 }
 
-// peek returns the next rune without advancing.
+// peek returns the next rune without advancing. Like next, it decodes
+// UTF-8 rather than reading a single byte.
 func (l *Lexer) peek() rune {
 	if l.pos >= len(l.input) {
 		return 0
 	}
-	return rune(l.input[l.pos])
+	r, _ := utf8.DecodeRuneInString(l.input[l.pos:])
+	return r
 }
 
 // backup steps back one rune.
@@ -194,7 +200,9 @@ func (l *Lexer) NextToken() (Token, error) {
 	}
 }
 
-// readString reads a quoted string.
+// readString reads a quoted string. Ordinary characters — and unknown
+// escapes — copy the input bytes just consumed, so valid UTF-8 round-trips
+// and an invalid byte passes through unchanged instead of re-encoding.
 func (l *Lexer) readString(quote rune, startPos int) (Token, error) {
 	var sb strings.Builder
 	for {
@@ -222,10 +230,10 @@ func (l *Lexer) readString(quote rune, startPos int) (Token, error) {
 			case 0:
 				return Token{}, fmt.Errorf("unterminated escape sequence at position %d", l.pos-1)
 			default:
-				sb.WriteRune(escaped)
+				sb.WriteString(l.input[l.pos-l.width : l.pos])
 			}
 		} else {
-			sb.WriteRune(r)
+			sb.WriteString(l.input[l.pos-l.width : l.pos])
 		}
 	}
 }
