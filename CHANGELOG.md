@@ -1208,7 +1208,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sync`, `bd jira sync` and the other trackers) now fetch remote issues
   updated up to five minutes before the stored `last_sync`, so an issue
   written on the tracker just before a sync finished is imported on the next
-  sync instead of being missed until someone edits it again (#6806).
+  sync instead of being missed until someone edits it again (#6806). A
+  re-fetched copy of what the previous sync pushed, or a remote copy older
+  than the local issue, does not overwrite the local issue.
 - `bd ado sync` no longer warns "Failed to resolve dependency" and counts
   a skipped issue for each link to a work item the pull did not import,
   such as one in another project. The dependency pass skips such a link
