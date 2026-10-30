@@ -195,6 +195,69 @@ func TestGitLabPushHooksPreserveTimestampSkipForIssues(t *testing.T) {
 	}
 }
 
+// TestGitLabPushFieldsEqualComparesContentNotTimestamps pins the hook a pull
+// uses to tell an echo of its own push from a remote edit (#6806): it
+// compares what a GitLab push sends, where ContentEqual keeps the push's
+// timestamp skip and calls any newer remote issue equal.
+func TestGitLabPushFieldsEqualComparesContentNotTimestamps(t *testing.T) {
+	now := time.Now().UTC()
+	local := &types.Issue{
+		ID:          "bd-task",
+		Title:       "Task",
+		Description: "body",
+		Status:      types.StatusInProgress,
+		Priority:    1,
+		IssueType:   types.TypeBug,
+		Assignee:    "alice",
+		Labels:      []string{"backend"},
+		UpdatedAt:   now,
+	}
+	// echo is what GitLab holds after a push of local: the push sends no
+	// assignee, so the remote has none.
+	echo := func() *tracker.TrackerIssue {
+		return &tracker.TrackerIssue{
+			Identifier:  "42",
+			Title:       "Task",
+			Description: "body",
+			State:       "opened",
+			Labels:      []string{"backend", "status::in_progress", "priority::high", "type::bug"},
+			UpdatedAt:   now.Add(time.Minute),
+		}
+	}
+	hooks := buildGitLabPushHooks()
+	if !hooks.PushFieldsEqual(local, echo()) {
+		t.Fatal("PushFieldsEqual = false for a remote holding the pushed title, description, state and labels, want true")
+	}
+	for _, edit := range []struct {
+		name  string
+		apply func(*tracker.TrackerIssue)
+	}{
+		{"title", func(r *tracker.TrackerIssue) { r.Title = "Renamed remotely" }},
+		{"description", func(r *tracker.TrackerIssue) { r.Description = "edited remotely" }},
+		{"state", func(r *tracker.TrackerIssue) { r.State = "closed" }},
+		{"labels", func(r *tracker.TrackerIssue) { r.Labels = append(r.Labels, "frontend") }},
+	} {
+		remote := echo()
+		edit.apply(remote)
+		if !hooks.ContentEqual(local, remote) {
+			t.Fatalf("%s: ContentEqual = false for a newer remote issue, want the push's timestamp skip kept", edit.name)
+		}
+		if hooks.PushFieldsEqual(local, remote) {
+			t.Errorf("%s: PushFieldsEqual = true for a newer remote edit, want false", edit.name)
+		}
+	}
+
+	epic := &types.Issue{ID: "bd-epic", Title: "Milestone", Status: types.StatusOpen, IssueType: types.TypeEpic, UpdatedAt: now}
+	milestone := &tracker.TrackerIssue{Identifier: "35", Title: "Milestone", State: "active", UpdatedAt: now.Add(time.Minute)}
+	if !hooks.PushFieldsEqual(epic, milestone) {
+		t.Fatal("PushFieldsEqual = false for a milestone holding the epic's pushed fields, want true")
+	}
+	milestone.State = "closed"
+	if hooks.PushFieldsEqual(epic, milestone) {
+		t.Fatal("PushFieldsEqual = true for a milestone closed remotely, want false")
+	}
+}
+
 // TestGitLabConfigValidation verifies validation catches missing required fields.
 func TestGitLabConfigValidation(t *testing.T) {
 	tests := []struct {

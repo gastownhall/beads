@@ -1048,6 +1048,80 @@ func TestPushFieldsEqualIgnoresLocalOnlyDifferences(t *testing.T) {
 	}
 }
 
+// TestPushFieldsEqualMatchesPushedState pins that PushFieldsEqual accepts the
+// workflow state a push of the local status selects, not only one the pull
+// maps back to that status: Linear states always carry a type, and the pull
+// maps the type first, so "Blocked" (type started), the state a name-keyed
+// linear.state_map entry pushes blocked to, reads back as in_progress.
+func TestPushFieldsEqualMatchesPushedState(t *testing.T) {
+	blocked := &State{ID: "state-blocked", Name: "Blocked", Type: "started"}
+	inProgress := &State{ID: "state-progress", Name: "In Progress", Type: "started"}
+	onHold := &State{ID: "state-hold", Name: "On Hold", Type: "started"}
+	for _, test := range []struct {
+		name     string
+		stateMap map[string]string // linear.state_map.<key>
+		outbound map[string]string // linear.outbound_state_map.<status>
+		status   types.Status
+		state    *State
+		want     bool
+	}{
+		{
+			name:     "name_mapped_echo",
+			stateMap: map[string]string{"in progress": "in_progress", "blocked": "blocked"},
+			status:   types.StatusBlocked, state: blocked, want: true,
+		},
+		{
+			name:     "moved_to_another_state",
+			stateMap: map[string]string{"in progress": "in_progress", "blocked": "blocked"},
+			status:   types.StatusBlocked, state: inProgress,
+		},
+		{
+			name:     "outbound_name_echo",
+			stateMap: map[string]string{"in progress": "in_progress"},
+			outbound: map[string]string{"blocked": "Blocked"},
+			status:   types.StatusBlocked, state: blocked, want: true,
+		},
+		{
+			// The outbound name decides the push, as it does in
+			// ResolveStateIDForBeadsStatus.
+			name:     "outbound_name_over_state_map",
+			stateMap: map[string]string{"in progress": "in_progress", "on hold": "blocked"},
+			outbound: map[string]string{"blocked": "Blocked"},
+			status:   types.StatusBlocked, state: onHold,
+		},
+		{
+			// A custom status reads back as open, so only the push's type
+			// rule recognizes it.
+			name:     "type_mapped_custom_status",
+			stateMap: map[string]string{"started": "review"},
+			status:   types.Status("review"), state: inProgress, want: true,
+		},
+		{
+			// A state the pull maps back to the local status still counts,
+			// as before, though the push would select "In Progress".
+			name:     "pull_mapping_still_counts",
+			stateMap: map[string]string{"in progress": "in_progress", "blocked": "blocked"},
+			status:   types.StatusInProgress, state: blocked, want: true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			config := DefaultMappingConfig()
+			for key, value := range test.stateMap {
+				config.StateMap[key] = value
+				config.ExplicitStateMap[key] = value
+			}
+			for key, value := range test.outbound {
+				config.OutboundStateMap[key] = value
+			}
+			local := &types.Issue{Title: "x", Description: "d", Status: test.status, Priority: 2}
+			remote := &Issue{Title: "x", Description: "d", Priority: PriorityToLinear(2, config), State: test.state}
+			if got := PushFieldsEqual(local, remote, config, nil); got != test.want {
+				t.Fatalf("PushFieldsEqual(status %s, state %s) = %v, want %v", test.status, test.state.Name, got, test.want)
+			}
+		})
+	}
+}
+
 func TestPushFieldsEqualToBeads(t *testing.T) {
 	local := &types.Issue{
 		Title:       "Ship the fix",

@@ -2,6 +2,7 @@ package tracker
 
 import (
 	"context"
+	"time"
 
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -73,6 +74,17 @@ type BatchPushDryRunner interface {
 // raw fetch counts separately from incremental pull candidates.
 type PullStatsProvider interface {
 	LastPullStats() (queried int, candidates int)
+}
+
+// SinceGranularityProvider is implemented by trackers whose incremental
+// FetchIssues returns every issue updated at or after FetchOptions.Since
+// truncated (in UTC) to SinceGranularity, not only those updated at or after
+// Since itself: Jira's JQL and Notion's minute-precision page times match to
+// the minute, Azure DevOps' date-only WIQL to the day. The engine uses it to
+// tell the rows a fetch from the stored last_sync already returned from those
+// only its widened overlap window returns.
+type SinceGranularityProvider interface {
+	SinceGranularity() time.Duration
 }
 
 // MatchKeyer is implemented by trackers whose ExtractIdentifier values are
