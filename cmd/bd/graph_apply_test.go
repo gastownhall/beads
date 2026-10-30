@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/config"
+	storeissueops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
 )
@@ -1718,5 +1719,63 @@ func TestGraphApplyNodeIssueStampsCreatedAtWithStatusTimestamps(t *testing.T) {
 				t.Errorf("%s: started_at = %v, want nil", row.name, *issue.StartedAt)
 			}
 		})
+	}
+}
+
+// TestBuildGraphApplyBatchRequestCreationStampSurvivesCreatePreparation runs
+// the exact preparation both BatchApplier legs apply to every create item
+// (storeissueops.PreparePublicCreateRequest) over a mixed-status plan: the
+// closed and in_progress items must keep their plan-time created_at, with the
+// status timestamp equal to it — never before it (GH#7519) — while the open
+// item still carries no creation stamp for the HTTP wire to refuse.
+func TestBuildGraphApplyBatchRequestCreationStampSurvivesCreatePreparation(t *testing.T) {
+	req, err := buildGraphApplyBatchRequest(&GraphApplyPlan{Nodes: []GraphApplyNode{
+		{Key: "done", Title: "Done", Status: string(types.StatusClosed)},
+		{Key: "wip", Title: "Work", Status: string(types.StatusInProgress)},
+		{Key: "later", Title: "Later"},
+	}}, GraphApplyOptions{}, "actor", "")
+	if err != nil {
+		t.Fatalf("buildGraphApplyBatchRequest: %v", err)
+	}
+	creates := map[string]*issueops.CreateItem{}
+	for _, item := range req.Items {
+		if item.Kind == issueops.ItemCreate {
+			creates[item.Create.Key] = item.Create
+		}
+	}
+	for _, key := range []string{"done", "wip"} {
+		item := creates[key]
+		if item == nil {
+			t.Fatalf("no create item for %q", key)
+		}
+		if item.Issue.CreatedAt.IsZero() {
+			t.Fatalf("%s: built create item carries no plan-time created_at", key)
+		}
+		prepared, err := storeissueops.PreparePublicCreateRequest(issueops.CreateRequest{
+			Actor:           req.Actor,
+			Issue:           item.Issue,
+			DefaultPriority: item.DefaultPriority,
+		}, storeissueops.PublicCreateContext{})
+		if err != nil {
+			t.Fatalf("%s: PreparePublicCreateRequest: %v", key, err)
+		}
+		if !prepared.Issue.CreatedAt.Equal(item.Issue.CreatedAt) {
+			t.Errorf("%s: prepared created_at %v != plan-time %v (preparation stamped its own later read)",
+				key, prepared.Issue.CreatedAt, item.Issue.CreatedAt)
+		}
+		statusStamp := prepared.Issue.ClosedAt
+		if key == "wip" {
+			statusStamp = prepared.Issue.StartedAt
+		}
+		if statusStamp == nil {
+			t.Fatalf("%s: prepared issue lost its status timestamp", key)
+		}
+		if !statusStamp.Equal(prepared.Issue.CreatedAt) {
+			t.Errorf("%s: status timestamp %v does not equal created_at %v after preparation",
+				key, *statusStamp, prepared.Issue.CreatedAt)
+		}
+	}
+	if later := creates["later"]; later == nil || !later.Issue.CreatedAt.IsZero() {
+		t.Errorf("open node's create item must keep a zero created_at (the HTTP wire refuses a populated one), got %+v", later)
 	}
 }
