@@ -3,7 +3,9 @@
 package doctor
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -11,8 +13,11 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/testutil"
 )
 
 func TestCheckFederationRemotesAPI_NonDoltBackend(t *testing.T) {
@@ -73,6 +78,11 @@ func TestCheckFederationRemotesAPI_NoDoltDatabase(t *testing.T) {
 func TestCheckFederationRemotesAPI_ServerNotRunning(t *testing.T) {
 	// Isolate from orchestrator daemon which would be detected as a running server
 	t.Setenv("GT_ROOT", "")
+	// The gate falls back to the endpoint probe, so pin every port variable
+	// to a closed port: in the Dolt-backed lane TestMain exports the
+	// container's port process-wide, and the probe would reach it and take
+	// the running branch this "no server" row must not take.
+	hermeticOfflineEndpoint(t)
 
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
@@ -184,6 +194,11 @@ func TestDoltServerConfig_HonorsAutoStartOptOut(t *testing.T) {
 func TestCheckFederationRemotesAPI_PidFileInBeadsDir(t *testing.T) {
 	// Isolate from orchestrator daemon which would be detected as a running server
 	t.Setenv("GT_ROOT", "")
+	// The gate falls back to the endpoint probe, so pin every port variable
+	// to a closed port: in the Dolt-backed lane TestMain exports the
+	// container's port process-wide, and the probe would reach it and take
+	// the running branch this PID-file-location row must not take.
+	hermeticOfflineEndpoint(t)
 
 	// Verify the fix: PID file should be looked for in beadsDir, not doltPath.
 	// The old code had: filepath.Join(doltPath, "dolt-server.pid") which was wrong.
@@ -441,6 +456,25 @@ func remotesAPITarget(t *testing.T, shared bool, userGlobalPort, envPort string)
 		t.Fatal(err)
 	}
 	return beadsDir
+}
+
+// hermeticOfflineEndpoint pins every variable that could resolve the
+// workspace's Dolt endpoint to an address that answers: both port variables
+// to a closed port, no socket, no host, and an empty HOME, so nothing
+// outside the test names a server. The endpoint probe the federation gate
+// falls back to would otherwise reach whatever the surrounding environment
+// points at (in the Dolt-backed lane, TestMain exports the container's port
+// process-wide) and take the check's running branch.
+func hermeticOfflineEndpoint(t *testing.T) {
+	t.Helper()
+	closed := strconv.Itoa(closedLocalPort(t))
+	t.Setenv("BEADS_DOLT_SERVER_PORT", closed)
+	t.Setenv("BEADS_DOLT_PORT", closed)
+	t.Setenv("BEADS_DOLT_SERVER_SOCKET", "")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 }
 
 // localTCPPort returns a loopback port, still listening when open is true and
@@ -755,6 +789,101 @@ func findDoltPIDs(t *testing.T) []string {
 		}
 	}
 	return pids
+}
+
+// federationProbeWorkspace is a server-mode workspace whose store endpoint is
+// the test container's Dolt server and whose database lists remotes, and no
+// PID file exists under the workspace: the shape of a server bd did not start
+// (launchd, systemd, a container), which the PID-file gate alone reads as "no
+// server". It points BEADS_DOLT_SERVER_PORT at the container and returns the
+// repo root, the container port and a closed remotesapi port. metadata.json
+// names no port, so the rows decide which variable names the endpoint.
+func federationProbeWorkspace(t *testing.T, remotes [][2]string) (repo string, port, remotesAPIPort int) {
+	t.Helper()
+	if testutil.DoltContainerCrashed() {
+		t.Skipf("Dolt test server crashed: %v", testutil.DoltContainerCrashError())
+	}
+	port = doctorTestServerPort()
+	if port == 0 {
+		t.Skip("Dolt test server not available")
+	}
+
+	repo, beadsDir := doctorEndpointWorkspace(t)
+	t.Setenv("GT_ROOT", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "0")
+	t.Setenv("BEADS_DOLT_AUTO_START", "0")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", strconv.Itoa(port))
+	remotesAPIPort = closedLocalPort(t)
+	t.Setenv("BEADS_DOLT_REMOTESAPI_PORT", strconv.Itoa(remotesAPIPort))
+
+	dbName := fmt.Sprintf("doctest_nopid_%d", time.Now().UnixNano())
+	t.Cleanup(func() { dropDoctorTestDatabase(dbName, port) })
+
+	doltDir := filepath.Join(beadsDir, "dolt")
+	if err := os.MkdirAll(doltDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	store, err := dolt.New(ctx, &dolt.Config{
+		Path:            doltDir,
+		ServerHost:      "127.0.0.1",
+		ServerPort:      port,
+		Database:        dbName,
+		CreateIfMissing: true,
+	})
+	if err != nil {
+		t.Fatalf("open test database: %v", err)
+	}
+	for _, remote := range remotes {
+		if err := store.AddRemote(ctx, remote[0], remote[1]); err != nil {
+			_ = store.Close()
+			t.Fatalf("add %s remote: %v", remote[0], err)
+		}
+	}
+	_ = store.Close()
+
+	cfg := &configfile.Config{
+		Backend:        configfile.BackendDolt,
+		DoltMode:       configfile.DoltModeServer,
+		DoltServerHost: "127.0.0.1",
+		DoltDatabase:   dbName,
+	}
+	data, _ := json.Marshal(cfg)
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Deliberately no dolt-server.pid: the server is externally managed.
+	return repo, port, remotesAPIPort
+}
+
+// TestCheckFederationRemotesAPI_ServerWithoutPIDFile reproduces bd-0r8dcw:
+// a Dolt server bd did not start writes no PID file under the workspace, so
+// the PID-file gate alone takes the check's no-server branch while the store
+// opens that very server. The gate must fall back to the endpoint probe and
+// take the running path, which excludes origin from the federation peers.
+func TestCheckFederationRemotesAPI_ServerWithoutPIDFile(t *testing.T) {
+	originOnly := [][2]string{{"origin", "file:///tmp/bd-0r8dcw-origin"}}
+
+	t.Run("origin only is no federation peer", func(t *testing.T) {
+		repo, _, _ := federationProbeWorkspace(t, originOnly)
+		check := CheckFederationRemotesAPI(repo)
+		if check.Status != StatusOK || check.Message != "N/A (no federation peers configured)" {
+			t.Fatalf("a reachable server with only origin configured: want ok %q, got %s %q (detail: %s)",
+				"N/A (no federation peers configured)", check.Status, check.Message, check.Detail)
+		}
+	})
+
+	t.Run("the legacy BEADS_DOLT_PORT names the endpoint too", func(t *testing.T) {
+		repo, port, _ := federationProbeWorkspace(t, originOnly)
+		t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+		t.Setenv("BEADS_DOLT_PORT", strconv.Itoa(port))
+		check := CheckFederationRemotesAPI(repo)
+		if check.Status != StatusOK || check.Message != "N/A (no federation peers configured)" {
+			t.Fatalf("a server named only by the legacy port variable: want ok %q, got %s %q (detail: %s)",
+				"N/A (no federation peers configured)", check.Status, check.Message, check.Detail)
+		}
+	})
 }
 
 // TestCheckFederationRemotesAPI_AllCheckNames verifies all federation checks

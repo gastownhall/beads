@@ -1090,6 +1090,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd doctor`'s "Federation remotesapi" check no longer warns
+  `Server not running (N peers configured)` — counting `origin` as a peer —
+  on a workspace whose Dolt server bd did not start (launchd, systemd, a
+  container: no PID file under the workspace). The check decided from the
+  workspace PID file alone, then opened the store on that very server. It
+  now falls back to the endpoint probe the "Dolt Mode" check in the same
+  report makes, so the two checks cannot disagree; a server only that probe
+  found has its remotesapi listener checked instead of being reported down.
 - `bd migrate-personal` no longer leaves an issue in both databases when
   someone else's bead in the project database depends on it. The move's
   delete from the project database refuses such an issue, but it ran only

@@ -216,9 +216,16 @@ func CheckFederationRemotesAPI(path string) DoctorCheck {
 
 	// Check if dolt server is running using doltserver.IsRunning which
 	// correctly resolves PID file paths (in beadsDir, not doltPath)
-	// and handles orchestrator daemon PID files.
+	// and handles orchestrator daemon PID files. A PID file is proof only
+	// of a server bd started; a server bd did not start writes none, so ask
+	// the endpoint probe (the one the Dolt Mode check in this same report
+	// makes) before taking the no-server branch the store below disproves
+	// by opening that very server.
 	serverState, _ := doltserver.IsRunning(beadsDir)
-	serverRunning := serverState != nil && serverState.Running
+	cfg, _ := configfile.Load(beadsDir)
+	serverRunning := serverRunningOrProbeable(serverState, func() bool {
+		return doltModeServerReachable(beadsDir, cfg)
+	})
 
 	if !serverRunning {
 		// No server running - check if we have remotes configured
@@ -284,8 +291,13 @@ func CheckFederationRemotesAPI(path string) DoctorCheck {
 	}
 
 	// Server is running and peers are configured - check if remotesapi port is
-	// accessible.
-	return checkRemotesAPIListener(beadsDir, serverState.PID)
+	// accessible. A server only the endpoint probe found has no PID file in
+	// this workspace, so there is no PID to pass on.
+	pid := 0
+	if serverState != nil && serverState.Running {
+		pid = serverState.PID
+	}
+	return checkRemotesAPIListener(beadsDir, pid)
 }
 
 // checkRemotesAPIListener probes the remotesapi listener of a running server.
