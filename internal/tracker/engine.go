@@ -858,16 +858,30 @@ func (e *Engine) fetchPrelinkedIssues(ctx context.Context, fetched []TrackerIssu
 		return nil, hydratedLocalIDs, nil
 	}
 
+	// seen holds the identifiers the bulk fetch returned that mean "remote
+	// changed since lastSync": rows the exact window would have returned.
+	// Rows only the overlapped fetch window re-fetched (updated before
+	// lastSync) mean no such thing, so they land in overlapped instead and
+	// count as "remote not changed" below.
 	seen := make(map[string]struct{}, len(fetched))
-	for _, issue := range fetched {
+	overlapped := make(map[string]*TrackerIssue)
+	for i := range fetched {
+		issue := &fetched[i]
+		overlapOnly := overlapOnlyRow(issue, lastSync)
 		for _, id := range []string{
 			strings.TrimSpace(issue.Identifier),
-			strings.TrimSpace(e.Tracker.ExtractIdentifier(e.Tracker.BuildExternalRef(&issue))),
+			strings.TrimSpace(e.Tracker.ExtractIdentifier(e.Tracker.BuildExternalRef(issue))),
 		} {
-			if id != "" {
-				seen[id] = struct{}{}
-				seen[strings.ToLower(id)] = struct{}{}
+			if id == "" {
+				continue
 			}
+			if overlapOnly {
+				overlapped[id] = issue
+				overlapped[strings.ToLower(id)] = issue
+				continue
+			}
+			seen[id] = struct{}{}
+			seen[strings.ToLower(id)] = struct{}{}
 		}
 	}
 
@@ -895,6 +909,18 @@ func (e *Engine) fetchPrelinkedIssues(ctx context.Context, fetched []TrackerIssu
 			continue
 		}
 		if _, ok := seen[strings.ToLower(identifier)]; ok {
+			continue
+		}
+
+		// The overlapped window re-fetched this remote even though it did
+		// not change after lastSync: the bulk row is already in the pull's
+		// issue set, so reuse it instead of issuing another FetchIssue, and
+		// mark the local hydrated so the pull loop's conflict guard applies
+		// the row instead of skipping the stub.
+		if overlapped[identifier] != nil || overlapped[strings.ToLower(identifier)] != nil {
+			hydratedLocalIDs[local.ID] = true
+			seen[identifier] = struct{}{}
+			seen[strings.ToLower(identifier)] = struct{}{}
 			continue
 		}
 

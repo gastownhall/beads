@@ -83,7 +83,6 @@ func (s *overlapHistoryStore) PreviousExternalRef(_ context.Context, _ string, _
 // pullIssueEqual.
 func overlapConversion(ti *TrackerIssue) *IssueConversion {
 	return &IssueConversion{Issue: &types.Issue{
-		ID:          "bd-ov-1",
 		Title:       ti.Title,
 		Description: ti.Description,
 		Assignee:    ti.Assignee,
@@ -294,5 +293,88 @@ func TestEnginePullOverlapPullsOnlyRemoteChanges(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestEnginePullOverlapHydratesPrelinkedStub covers a local issue linked to a
+// remote after last_sync whose remote row only the overlapped fetch window
+// returns: the pull must hydrate the stub from that row (so the push does not
+// overwrite the remote with the stub's placeholder content) instead of
+// treating the row as "remote already in this pull" and skipping hydration.
+func TestEnginePullOverlapHydratesPrelinkedStub(t *testing.T) {
+	ctx := context.Background()
+	lastSync := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+	const ref = "https://test.test/EXT-1"
+
+	remote := TrackerIssue{
+		ID:          "ext-1",
+		Identifier:  "EXT-1",
+		URL:         ref,
+		Title:       "remote title",
+		Description: "remote desc",
+		State:       types.StatusOpen,
+		Priority:    2,
+		UpdatedAt:   lastSync.Add(-30 * time.Second), // overlap-only row
+	}
+	// The link was made after last_sync: no previous external ref at T.
+	local := &types.Issue{
+		ID:        "bd-ov-stub",
+		Title:     "stub title",
+		Status:    types.StatusOpen,
+		IssueType: types.TypeTask,
+		Priority:  2,
+		CreatedAt: lastSync.Add(-time.Hour),
+		UpdatedAt: lastSync.Add(10 * time.Second),
+		ExternalRef: strPtr(ref),
+	}
+	store := &overlapHistoryStore{
+		pullFailureStore: &pullFailureStore{
+			pureTestStore: newPureTestStore(local),
+			tx:            &pullTestTransaction{issue: local},
+		},
+		prevFound: false,
+	}
+	store.localMetadata["test.last_sync"] = lastSync.Format(time.RFC3339)
+
+	tr := newMockTracker("test")
+	tr.issues = []TrackerIssue{remote}
+	tr.fieldMapper = &mockMapper{issueToBeads: overlapConversion}
+	tr.fetchIssues = func(_ context.Context, opts FetchOptions) ([]TrackerIssue, error) {
+		if opts.Since != nil && !remote.UpdatedAt.After(*opts.Since) {
+			return nil, nil
+		}
+		return []TrackerIssue{remote}, nil
+	}
+
+	engine := NewEngine(tr, store, "sync")
+	engine.PushHooks = &PushHooks{ContentEqual: func(local *types.Issue, remote *TrackerIssue) bool {
+		return local.Title == remote.Title && local.Description == remote.Description
+	}}
+
+	result, err := engine.Sync(ctx, SyncOptions{Pull: true, Push: true})
+	if err != nil {
+		t.Fatalf("Sync error: %v", err)
+	}
+
+	// The stub is hydrated from the overlapped bulk row.
+	if result.PullStats.Updated != 1 {
+		t.Errorf("PullStats.Updated = %d, want 1 (stub hydrated, stats %+v)", result.PullStats.Updated, result.PullStats)
+	}
+	if store.commits != 1 {
+		t.Errorf("store commits = %d, want 1 (the hydration write)", store.commits)
+	}
+	if local.Title != "remote title" || local.Description != "remote desc" {
+		t.Errorf("hydrated stub = %q / %q, want %q / %q", local.Title, local.Description, "remote title", "remote desc")
+	}
+	// The push finds the remote already holds the hydrated content.
+	if len(tr.updated) != 0 {
+		t.Errorf("push updated the remote to %v, want no update (remote unchanged)", tr.updated)
+	}
+	// The only single-issue fetch is DetectConflicts' probe of the locally
+	// modified stub: hydration reuses the overlapped bulk row instead of
+	// fetching, and the push does not re-examine an issue this sync just
+	// pulled.
+	if tr.fetchCalls != 1 {
+		t.Errorf("FetchIssue calls = %d, want 1 (DetectConflicts probe only; hydration reused the bulk row and the push echoed nothing back)", tr.fetchCalls)
 	}
 }

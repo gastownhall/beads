@@ -1098,8 +1098,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   conflict detection and pre-linked hydration still compare against the exact
   cursor, an unchanged re-fetch makes no writes, an echo of the previous
   push's own writes is skipped instead of rewriting the local issue through
-  the lossy pull conversion, and a row older than the local issue no longer
-  overwrites an unpushed local edit.
+  the lossy pull conversion, a row older than the local issue no longer
+  overwrites an unpushed local edit, and a local issue linked after the
+  cursor is still hydrated from the overlapped fetch instead of letting the
+  next push overwrite the remote with a stub.
 - `bd migrate-personal` no longer leaves an issue in both databases when
   someone else's bead in the project database depends on it. The move's
   delete from the project database refuses such an issue, but it ran only
