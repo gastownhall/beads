@@ -239,6 +239,15 @@ func (s *pureTestStore) SearchIssues(_ context.Context, _ string, _ types.IssueF
 	return append([]*types.Issue(nil), s.issues...), nil
 }
 
+func (s *pureTestStore) GetIssueByExternalRef(_ context.Context, ref string) (*types.Issue, error) {
+	for _, issue := range s.issues {
+		if issue.ExternalRef != nil && *issue.ExternalRef == ref {
+			return issue, nil
+		}
+	}
+	return nil, nil
+}
+
 func (s *pureTestStore) UpdateIssue(_ context.Context, id string, updates map[string]interface{}, _ string) error {
 	for _, issue := range s.issues {
 		if issue.ID != id {

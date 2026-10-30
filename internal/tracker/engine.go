@@ -320,6 +320,15 @@ func (e *Engine) DetectConflicts(ctx context.Context) ([]Conflict, error) {
 	return conflicts, nil
 }
 
+// pullFetchOverlap widens an incremental pull's fetch window before the
+// stored last_sync. Tracker list endpoints lag behind writes (GitHub's
+// ?since= list can miss an issue written seconds earlier) and clocks drift,
+// so a remote issue's updated_at can land just before the end-of-sync cursor
+// and the issue is never fetched again until someone edits it (#6806).
+// Re-fetched unchanged rows are skipped without writes, so the overlap costs
+// only a slightly larger fetch.
+const pullFetchOverlap = 5 * time.Minute
+
 // doPull imports issues from the external tracker into beads.
 // doPull imports tracker issues. IDs of issues it creates or updates are
 // added to pulledIDs so a bidirectional sync's push phase does not echo the
@@ -341,7 +350,12 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 	key := e.Tracker.ConfigPrefix() + ".last_sync"
 	if lastSyncStr, err := e.Store.GetLocalMetadata(ctx, key); err == nil && lastSyncStr != "" {
 		if t, err := parseSyncTime(lastSyncStr); err == nil {
-			fetchOpts.Since = &t
+			// Widen only the fetch window. lastSync keeps the exact stored
+			// cursor: it is the local-edit threshold for the conflict guard
+			// below, DetectConflicts and pre-linked hydration, none of which
+			// may shift backwards with the fetch.
+			fetchSince := t.Add(-pullFetchOverlap)
+			fetchOpts.Since = &fetchSince
 			lastSync = &t
 			stats.Incremental = true
 			stats.SyncedSince = lastSyncStr

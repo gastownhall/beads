@@ -1090,6 +1090,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Incremental tracker pulls no longer lose remote issues whose `updated_at`
+  lands just before the stored `last_sync` cursor (#6806). Tracker list
+  endpoints lag behind writes and clocks drift, so such an issue was never
+  fetched again until someone edited it; the pull now re-fetches a 5-minute
+  window before the cursor. Only the fetch widens: the conflict guard,
+  conflict detection and pre-linked hydration still compare against the exact
+  cursor, and an unchanged re-fetch makes no writes.
 - `bd migrate-personal` no longer leaves an issue in both databases when
   someone else's bead in the project database depends on it. The move's
   delete from the project database refuses such an issue, but it ran only
