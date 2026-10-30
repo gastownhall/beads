@@ -34,6 +34,18 @@ func TestCommitWriteTxPanicRollsBackAndPropagates(t *testing.T) {
 				_, _ = store.commitWriteTx(ctx, body)
 			},
 		},
+		{
+			name: "pinned_connection",
+			expect: func(mock sqlmock.Sqlmock) {
+				mock.ExpectQuery("SELECT GET_LOCK").WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(1))
+				mock.ExpectBegin()
+				mock.ExpectRollback()
+				mock.ExpectQuery("SELECT RELEASE_LOCK").WillReturnRows(sqlmock.NewRows([]string{"released"}).AddRow(1))
+			},
+			run: func(ctx context.Context, store *DoltStore, body func(*sql.Tx) error) {
+				_ = store.withDeleteFence(ctx, "bd-1", body)
+			},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
