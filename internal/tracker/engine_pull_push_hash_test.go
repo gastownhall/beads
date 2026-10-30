@@ -2,7 +2,10 @@ package tracker
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -247,5 +250,76 @@ func TestEnginePullRecordsPushHash(t *testing.T) {
 		if got := f.mock.updated["EXT-1"]; got == nil || got.Title != "pushed" {
 			t.Fatalf("push did not send the revert: updated[EXT-1] = %v", f.mock.updated["EXT-1"])
 		}
+	})
+
+	// AC-5: the pulls that must not touch the cache leave the .pushhash.
+	// entries exactly as they were: a dry-run pull, a pull whose
+	// ApplyIssueUpdate fails, and a pull by an engine without ContentHash
+	// for an issue with no stored entry.
+	t.Run("pulls_that_must_not_touch_the_cache", func(t *testing.T) {
+		ctx := context.Background()
+		snapshot := func(s *pullHashStore) map[string]string {
+			entries := make(map[string]string)
+			for k, v := range s.localMetadata {
+				if strings.Contains(k, ".pushhash.") {
+					entries[k] = v
+				}
+			}
+			return entries
+		}
+		assertUntouched := func(before map[string]string, f *pullHashFixture) {
+			t.Helper()
+			if after := snapshot(f.store); !reflect.DeepEqual(before, after) {
+				t.Fatalf(".pushhash. entries changed by the pull: before=%v after=%v", before, after)
+			}
+		}
+
+		// (a) A dry-run pull previews only.
+		f := newPullHashFixture(t, false)
+		f.engine.recordPushHash(ctx, f.local, f.ref)
+		f.editRemote("remote edit")
+		before := snapshot(f.store)
+		if _, err := f.engine.Sync(ctx, SyncOptions{Pull: true, DryRun: true}); err != nil {
+			t.Fatalf("dry-run Sync: %v", err)
+		}
+		assertUntouched(before, f)
+
+		// (b) A pull whose ApplyIssueUpdate fails keeps the old hash: the
+		// remote holds an edit the pull did not import, and the unchanged
+		// local content still matches the old hash (same setup as
+		// TestEngineSyncFailedPullIsNotPushed).
+		f2 := newPullHashFixture(t, false)
+		f2.store.tx.addLabelErr = errors.New("label write failed")
+		f2.mock.fieldMapper = &mockMapper{issueToBeads: func(ti *TrackerIssue) *IssueConversion {
+			return &IssueConversion{Issue: &types.Issue{
+				Title: ti.Title, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+				Labels: []string{"remote"},
+			}}
+		}}
+		f2.engine.recordPushHash(ctx, f2.local, f2.ref)
+		f2.editRemote("remote edit")
+		before = snapshot(f2.store)
+		res, err := f2.engine.Sync(ctx, SyncOptions{Pull: true})
+		if err != nil {
+			t.Fatalf("failed-pull Sync: %v", err)
+		}
+		if res.PullStats.Errors != 1 {
+			t.Fatalf("PullStats = %+v, want one error", res.PullStats)
+		}
+		if f2.local.Title != "pushed" {
+			t.Fatalf("failed pull changed the local title: %q", f2.local.Title)
+		}
+		assertUntouched(before, f2)
+
+		// (c) An engine without ContentHash pulling an issue with no stored
+		// entry adds no key.
+		f3 := newPullHashFixture(t, false)
+		f3.editRemote("remote edit")
+		pullOnly := NewEngine(f3.mock, f3.store, "sync")
+		before = snapshot(f3.store)
+		if _, err := pullOnly.Sync(ctx, SyncOptions{Pull: true}); err != nil {
+			t.Fatalf("pull-only Sync: %v", err)
+		}
+		assertUntouched(before, f3)
 	})
 }
