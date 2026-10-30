@@ -20,12 +20,34 @@ func (t *pullTestTransaction) UpdateIssue(_ context.Context, _ string, updates m
 	if title, ok := updates["title"].(string); ok {
 		t.issue.Title = title
 	}
+	if description, ok := updates["description"].(string); ok {
+		t.issue.Description = description
+	}
+	if assignee, ok := updates["assignee"].(string); ok {
+		t.issue.Assignee = assignee
+	}
 	if status, ok := updates["status"]; ok {
 		switch value := status.(type) {
 		case types.Status:
 			t.issue.Status = value
 		case string:
 			t.issue.Status = types.Status(value)
+		}
+	}
+	if issueType, ok := updates["issue_type"]; ok {
+		switch value := issueType.(type) {
+		case types.IssueType:
+			t.issue.IssueType = value
+		case string:
+			t.issue.IssueType = types.IssueType(value)
+		}
+	}
+	if priority, ok := updates["priority"].(int); ok {
+		t.issue.Priority = priority
+	}
+	if raw, ok := updates["external_ref"]; ok {
+		if ref, ok := raw.(string); ok {
+			t.issue.ExternalRef = &ref
 		}
 	}
 	return nil

@@ -1096,7 +1096,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fetched again until someone edited it; the pull now re-fetches a 5-minute
   window before the cursor. Only the fetch widens: the conflict guard,
   conflict detection and pre-linked hydration still compare against the exact
-  cursor, and an unchanged re-fetch makes no writes.
+  cursor, an unchanged re-fetch makes no writes, an echo of the previous
+  push's own writes is skipped instead of rewriting the local issue through
+  the lossy pull conversion, and a row older than the local issue no longer
+  overwrites an unpushed local edit.
 - `bd migrate-personal` no longer leaves an issue in both databases when
   someone else's bead in the project database depends on it. The move's
   delete from the project database refuses such an issue, but it ran only

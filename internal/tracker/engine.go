@@ -329,6 +329,17 @@ func (e *Engine) DetectConflicts(ctx context.Context) ([]Conflict, error) {
 // only a slightly larger fetch.
 const pullFetchOverlap = 5 * time.Minute
 
+// overlapOnlyRow reports whether a bulk incremental pull's fetched row is one
+// the exact last_sync window would not have returned: its UpdatedAt predates
+// the stored cursor. Handling of such a row must never be worse for the local
+// issue it matches than not fetching the row at all.
+func overlapOnlyRow(extIssue *TrackerIssue, lastSync *time.Time) bool {
+	if lastSync == nil {
+		return false
+	}
+	return !extIssue.UpdatedAt.IsZero() && extIssue.UpdatedAt.Before(*lastSync)
+}
+
 // doPull imports issues from the external tracker into beads.
 // doPull imports tracker issues. IDs of issues it creates or updates are
 // added to pulledIDs so a bidirectional sync's push phase does not echo the
@@ -488,6 +499,30 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 			if lastSync != nil && existing.UpdatedAt.After(*lastSync) && !allowOverwriteIDs[existing.ID] && !prelinkedHydrateIDs[existing.ID] {
 				stats.Skipped++
 				continue
+			}
+
+			// A row only the overlapped fetch window returned must not be
+			// worse for the linked local issue than not being fetched at
+			// all. Skip it when it is an echo of this tracker's own previous
+			// push (ContentEqual, the same check doPush uses to skip no-op
+			// updates — the pull conversion is lossy, so pullIssueEqual
+			// would rewrite the local issue) or when the remote row is older
+			// than the local issue, so an unpushed local edit is not
+			// overwritten by stale remote content. Trackers without
+			// ContentEqual only take the timestamp clause, which never
+			// lets an overlapped row do more than today's exact window did.
+			// Hydrated pre-linked stubs and conflict resolutions keep their
+			// say through their ID sets.
+			if len(opts.IssueIDs) == 0 && overlapOnlyRow(&extIssue, lastSync) {
+				if _, linked := e.trackerRef(existing); linked &&
+					!allowOverwriteIDs[existing.ID] && !prelinkedHydrateIDs[existing.ID] {
+					echo := e.PushHooks != nil && e.PushHooks.ContentEqual != nil &&
+						e.PushHooks.ContentEqual(existing, &extIssue)
+					if echo || extIssue.UpdatedAt.Before(existing.UpdatedAt) {
+						stats.Skipped++
+						continue
+					}
+				}
 			}
 		}
 
