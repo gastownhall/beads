@@ -1210,7 +1210,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   written on the tracker just before a sync finished is imported on the next
   sync instead of being missed until someone edits it again (#6806). A
   re-fetched copy of what the previous sync pushed, or a remote copy older
-  than the local issue, does not overwrite the local issue.
+  than the local issue, does not overwrite the local issue, and a local issue
+  linked after the cursor is still hydrated from the overlapped fetch instead
+  of letting the next push overwrite the remote with a stub.
 - `bd ado sync` no longer warns "Failed to resolve dependency" and counts
   a skipped issue for each link to a work item the pull did not import,
   such as one in another project. The dependency pass skips such a link
