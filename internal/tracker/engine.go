@@ -374,8 +374,10 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 
 	prelinkedHydrateIDs := make(map[string]bool)
 
-	// Fetch issues from external tracker
+	// Fetch issues from external tracker. The first bulkRows rows come from
+	// the bulk FetchIssues call; only those can be overlap-only.
 	var extIssues []TrackerIssue
+	bulkRows := 0
 	if len(opts.IssueIDs) > 0 {
 		// Selective pull: fetch only requested issues via FetchIssue()
 		prefix, _ := e.Store.GetConfig(ctx, "issue_prefix")
@@ -415,6 +417,7 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 			return nil, fmt.Errorf("fetching issues: %w", err)
 		}
 		stats.Candidates = len(extIssues)
+		bulkRows = len(extIssues)
 		if provider, ok := e.Tracker.(PullStatsProvider); ok {
 			stats.Queried, stats.Candidates = provider.LastPullStats()
 		}
@@ -434,7 +437,7 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 	var pendingDeps []DependencyInfo
 	var dryRunIssues []*types.Issue
 
-	for _, extIssue := range extIssues {
+	for i, extIssue := range extIssues {
 		// ShouldImport hook: filter before conversion
 		if e.PullHooks != nil && e.PullHooks.ShouldImport != nil {
 			if !e.PullHooks.ShouldImport(&extIssue) {
@@ -482,6 +485,14 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 			// Without this guard, pull silently overwrites local changes
 			// before conflict detection can compare timestamps.
 			if lastSync != nil && existing.UpdatedAt.After(*lastSync) && !allowOverwriteIDs[existing.ID] && !prelinkedHydrateIDs[existing.ID] {
+				stats.Skipped++
+				continue
+			}
+			// A row only the overlap window returned must not rewrite a
+			// linked issue the old exact-cursor fetch would have left alone:
+			// skip it when it is an echo of our own push, or older than the
+			// local issue (an edit a later sync never pushed).
+			if i < bulkRows && pullOverlapOnly(&extIssue, lastSync) && !allowOverwriteIDs[existing.ID] && !prelinkedHydrateIDs[existing.ID] && e.skipOverlapRow(existing, &extIssue) {
 				stats.Skipped++
 				continue
 			}
@@ -582,6 +593,25 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 		attribute.Int("sync.skipped", stats.Skipped),
 	)
 	return stats, nil
+}
+
+// pullOverlapOnly reports whether a bulk incremental fetch row predates the
+// stored last_sync, i.e. only the pullFetchOverlap window returned it.
+func pullOverlapOnly(issue *TrackerIssue, lastSync *time.Time) bool {
+	return lastSync != nil && !issue.UpdatedAt.IsZero() && issue.UpdatedAt.Before(*lastSync)
+}
+
+// skipOverlapRow reports whether an overlap-only row should leave existing
+// untouched: existing is linked to this tracker and the row either holds what
+// a push of existing would send (ContentEqual) or is older than existing.
+func (e *Engine) skipOverlapRow(existing *types.Issue, extIssue *TrackerIssue) bool {
+	if _, linked := e.trackerRef(existing); !linked {
+		return false
+	}
+	if e.PushHooks != nil && e.PushHooks.ContentEqual != nil && e.PushHooks.ContentEqual(existing, extIssue) {
+		return true
+	}
+	return extIssue.UpdatedAt.Before(existing.UpdatedAt)
 }
 
 func applyPullIssueFields(ctx context.Context, tx storage.IssueLifecycleTransaction, id string, updates map[string]interface{}, actor string) error {

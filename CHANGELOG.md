@@ -1094,7 +1094,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sync`, `bd jira sync` and the other trackers) now fetch remote issues
   updated up to five minutes before the stored `last_sync`, so an issue
   written on the tracker just before a sync finished is imported on the next
-  sync instead of being missed until someone edits it again (#6806).
+  sync instead of being missed until someone edits it again (#6806). A
+  re-fetched copy of what the previous sync pushed, or a remote copy older
+  than the local issue, does not overwrite the local issue.
 - `bd migrate-personal` no longer leaves an issue in both databases when
   someone else's bead in the project database depends on it. The move's
   delete from the project database refuses such an issue, but it ran only
