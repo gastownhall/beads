@@ -107,3 +107,17 @@ func TestInstallHooksFromLinkedWorktreeWritesTrackedCopy(t *testing.T) {
 		initExcludeGit(t, worktree, "config", "--get", "core.hooksPath"),
 		"core.hooksPath must keep naming the primary copy (#2414)")
 }
+
+// TestInstallSharedHooksFromLinkedWorktreeWritesTrackedCopy pins AC-2 for the
+// committed .beads-hooks directory a --shared install targets.
+func TestInstallSharedHooksFromLinkedWorktreeWritesTrackedCopy(t *testing.T) {
+	primary, worktree := newWorktreeHooksFixture(t, ".beads-hooks", true)
+	enterWorktreeForInstallTest(t, worktree)
+	setStandaloneHookMode(t, "shared")
+	require.NoError(t, hooksInstallCmd.RunE(hooksInstallCmd, nil))
+	requireHooksCurrent(t, filepath.Join(worktree, ".beads-hooks"))
+	requirePrimaryUnchanged(t, primary, ".beads-hooks")
+	require.Equal(t, filepath.Join(primary, ".beads-hooks"),
+		initExcludeGit(t, worktree, "config", "--get", "core.hooksPath"),
+		"core.hooksPath must keep naming the primary copy (#2414)")
+}
