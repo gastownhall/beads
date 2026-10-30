@@ -1255,6 +1255,11 @@ func installHooksAt(hookNames []string, force, shared, chain, beadsHooks bool, s
 		}
 	}
 
+	if writeDir != hooksDir {
+		fmt.Fprintf(os.Stderr, "Note: updated this worktree's tracked hooks in %s; Git runs %s (core.hooksPath), "+
+			"which picks this up when the primary checkout gets the change (or run bd hooks install there).\n", writeDir, hooksDir)
+	}
+
 	return nil
 }
 
