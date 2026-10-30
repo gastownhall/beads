@@ -105,7 +105,9 @@ func TestEmbeddedCompactKeepsReplayedCommitDates(t *testing.T) {
 // store whose kept window holds commits with original dates — two of them in
 // the same second 333 ms apart, one of those empty — survives
 // `bd compact --force --days 0` with every replayed commit's date intact, to
-// the millisecond, and the kept window in its original order.
+// the millisecond, and the kept window in its original order. The replayed
+// commits also keep their original committer and email, not the SQL
+// session's identity.
 func TestEmbeddedCompactKeepsCommitDates(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
@@ -153,6 +155,13 @@ func TestEmbeddedCompactKeepsCommitDates(t *testing.T) {
 			t.Fatalf("query %q: %v", q, err)
 		}
 		return v
+	}
+	oneString := func(q string, args ...interface{}) string {
+		var s string
+		if err := db.QueryRowContext(t.Context(), q, args...).Scan(&s); err != nil {
+			t.Fatalf("query %q: %v", q, err)
+		}
+		return s
 	}
 	firstColumn := func(q string) []string {
 		rows, err := db.QueryContext(t.Context(), q)
@@ -239,6 +248,19 @@ func TestEmbeddedCompactKeepsCommitDates(t *testing.T) {
 			got := oneTime("SELECT date FROM dolt_log WHERE message = ?", e.msg)
 			if !got.Equal(e.orgDate) {
 				t.Errorf("replayed commit %q dated %s after compact, want its original date %s", e.msg, got.UTC(), e.orgDate)
+			}
+		}
+	})
+
+	// AC-2: each replayed commit keeps its original committer, email and
+	// message rather than the SQL session's identity.
+	t.Run("replayed committer and message", func(t *testing.T) {
+		for _, msg := range []string{"repro: edit A", "repro: marker", "repro: edit B"} {
+			committer, email := oneString("SELECT committer FROM dolt_log WHERE message = ?", msg),
+				oneString("SELECT email FROM dolt_log WHERE message = ?", msg)
+			if committer != "Original Author" || email != "orig@example.com" {
+				t.Errorf("replayed commit %q has committer %q <%s>, want %q <%s>",
+					msg, committer, email, "Original Author", "orig@example.com")
 			}
 		}
 	})
