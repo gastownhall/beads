@@ -84,3 +84,63 @@ func TestCommitWriteTxPanicRollsBackAndPropagates(t *testing.T) {
 		})
 	}
 }
+
+// TestCommitWriteTxNormalPathsUnchanged: the deferred rollback in
+// commitWriteTxOn is a no-op on the commit and body-error paths. It sends no
+// extra ROLLBACK to the driver and never surfaces sql.ErrTxDone in the
+// returned error.
+func TestCommitWriteTxNormalPathsUnchanged(t *testing.T) {
+	errBody := errors.New("write body failed")
+	cases := []struct {
+		name    string
+		body    func(*sql.Tx) error
+		expect  func(mock sqlmock.Sqlmock)
+		wantErr error
+	}{
+		{
+			name: "commit",
+			body: func(*sql.Tx) error { return nil },
+			expect: func(mock sqlmock.Sqlmock) {
+				mock.ExpectBegin()
+				mock.ExpectCommit()
+			},
+		},
+		{
+			name: "body_error",
+			body: func(*sql.Tx) error { return errBody },
+			expect: func(mock sqlmock.Sqlmock) {
+				mock.ExpectBegin()
+				mock.ExpectRollback()
+			},
+			wantErr: errBody,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("sqlmock.New: %v", err)
+			}
+			t.Cleanup(func() { _ = db.Close() })
+			tc.expect(mock)
+			store := &DoltStore{db: db}
+
+			_, err = store.commitWriteTx(context.Background(), tc.body)
+			if tc.wantErr == nil && err != nil {
+				t.Fatalf("commitWriteTx = %v, want nil", err)
+			}
+			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
+				t.Fatalf("commitWriteTx = %v, want an error wrapping %v", err, tc.wantErr)
+			}
+			if errors.Is(err, sql.ErrTxDone) {
+				t.Errorf("commitWriteTx = %v, must not carry sql.ErrTxDone", err)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Errorf("SQL: %v", err)
+			}
+			if inUse := db.Stats().InUse; inUse != 0 {
+				t.Errorf("db.Stats().InUse = %d, want 0", inUse)
+			}
+		})
+	}
+}
