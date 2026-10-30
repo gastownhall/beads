@@ -3412,4 +3412,25 @@ func TestGetMoleculeProgressReportsTruncatedReads(t *testing.T) {
 		stats, err := store.GetMoleculeProgress(context.Background(), "mol-1")
 		requireTruncatedReadError(t, stats, err, lost)
 	})
+
+	// A read that completes keeps today's rollup, which also proves the
+	// fixture is faithful: the truncation subtests fail for the right reason.
+	t.Run("complete read", func(t *testing.T) {
+		store, mock := newMoleculeProgressMock(t)
+		children, statuses := fourChildMoleculeRows()
+		mock.ExpectQuery(moleculeProgressDepQuery).WillReturnRows(children)
+		mock.ExpectQuery(moleculeProgressStatusQuery).WillReturnRows(statuses)
+
+		stats, err := store.GetMoleculeProgress(context.Background(), "mol-1")
+		if err != nil {
+			t.Fatalf("GetMoleculeProgress on a complete read: %v", err)
+		}
+		if stats.Total != 4 || stats.Completed != 2 || stats.InProgress != 1 || stats.CurrentStepID != "c3" {
+			t.Errorf("GetMoleculeProgress on a complete read: Total=%d Completed=%d InProgress=%d CurrentStepID=%q, want Total=4 Completed=2 InProgress=1 CurrentStepID=\"c3\"",
+				stats.Total, stats.Completed, stats.InProgress, stats.CurrentStepID)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unmet sqlmock expectations: %v", err)
+		}
+	})
 }
