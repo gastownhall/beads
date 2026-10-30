@@ -5,10 +5,12 @@ package doctor
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -495,6 +497,24 @@ func listenerEndpoint(t *testing.T, host string, port int) {
 	t.Setenv("BEADS_DOLT_SERVER_SOCKET", "")
 }
 
+// ipv6OnlyLoopbackPort is a port that accepts on [::1] while 127.0.0.1
+// refuses it, so whether a dial succeeds shows which of the two hosts it went
+// to. It skips the test when [::1] cannot listen or 127.0.0.1 also accepts.
+func ipv6OnlyLoopbackPort(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "[::1]:0")
+	if err != nil {
+		t.Skipf("cannot listen on [::1]: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	port := ln.Addr().(*net.TCPAddr).Port
+	if conn, err := net.Dial("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port))); err == nil {
+		_ = conn.Close()
+		t.Skipf("127.0.0.1:%d also accepts, so the dial host is not observable", port)
+	}
+	return port
+}
+
 // TestCheckRemotesAPIListener covers the running-server arm of
 // CheckFederationRemotesAPI, which the getter tests above never reach: the
 // port it resolves and the remedy it prints for each server mode.
@@ -547,9 +567,41 @@ func TestCheckRemotesAPIListener(t *testing.T) {
 		serverPort := localTCPPort(t, true)
 		listenerEndpoint(t, "", serverPort)
 		check := checkRemotesAPIListener(remotesAPITarget(t, false, "", strconv.Itoa(localTCPPort(t, false))), 0)
-		want := "Server reachable at 127.0.0.1:" + strconv.Itoa(serverPort) + " (no PID file in this workspace) but remotesapi port unreachable: "
+		want := "Server reachable at 127.0.0.1:" + strconv.Itoa(serverPort) + " (no PID file in this workspace names it) but remotesapi port unreachable: "
 		if check.Status != StatusError || !strings.HasPrefix(check.Detail, want) || strings.Contains(check.Detail, "PID 0") {
 			t.Fatalf("got %s, Detail %q; want StatusError with Detail starting %q", check.Status, check.Detail, want)
+		}
+	})
+
+	// The probe takes the store's transport, a live socket before TCP, so
+	// beside a live socket the port that resolved is not where it reached the
+	// server.
+	t.Run("unreachable server the probe found over its socket names the socket", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("unix sockets")
+		}
+		listenerEndpoint(t, "", localTCPPort(t, false))
+		socket := liveUnixSocket(t)
+		t.Setenv("BEADS_DOLT_SERVER_SOCKET", socket)
+		remotesAPIPort := strconv.Itoa(localTCPPort(t, false))
+		check := checkRemotesAPIListener(remotesAPITarget(t, false, "", remotesAPIPort), 0)
+		want := "Server reachable at unix:" + socket + " (no PID file in this workspace names it) but remotesapi port unreachable: dial tcp 127.0.0.1:" + remotesAPIPort + ": "
+		if check.Status != StatusError || !strings.HasPrefix(check.Detail, want) {
+			t.Fatalf("got %s, Detail %q; want StatusError with Detail starting %q", check.Status, check.Detail, want)
+		}
+	})
+
+	t.Run("server the probe found over its socket is dialed at 127.0.0.1, not the configured host", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("unix sockets")
+		}
+		port := ipv6OnlyLoopbackPort(t)
+		listenerEndpoint(t, "::1", localTCPPort(t, false))
+		t.Setenv("BEADS_DOLT_SERVER_SOCKET", liveUnixSocket(t))
+		check := checkRemotesAPIListener(remotesAPITarget(t, false, "", strconv.Itoa(port)), 0)
+		if check.Status != StatusError || !strings.Contains(check.Detail, "dial tcp 127.0.0.1:"+strconv.Itoa(port)+": ") {
+			t.Fatalf("got %s %q (%s), want StatusError from a dial of 127.0.0.1:%d: the probe reached the socket, not [::1]",
+				check.Status, check.Message, check.Detail, port)
 		}
 	})
 
@@ -563,16 +615,7 @@ func TestCheckRemotesAPIListener(t *testing.T) {
 	})
 
 	t.Run("server only the probe found is dialed at its configured host", func(t *testing.T) {
-		ln, err := net.Listen("tcp", "[::1]:0")
-		if err != nil {
-			t.Skipf("cannot listen on [::1]: %v", err)
-		}
-		t.Cleanup(func() { _ = ln.Close() })
-		port := ln.Addr().(*net.TCPAddr).Port
-		if conn, err := net.Dial("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port))); err == nil {
-			_ = conn.Close()
-			t.Skipf("127.0.0.1:%d also accepts, so the dial host is not observable", port)
-		}
+		port := ipv6OnlyLoopbackPort(t)
 		listenerEndpoint(t, "::1", localTCPPort(t, false))
 		beadsDir := remotesAPITarget(t, false, "", strconv.Itoa(port))
 
@@ -936,6 +979,48 @@ func probeOnlyServerWorkspace(t *testing.T, port int, remotes ...string) (repo, 
 	return repo, beadsDir
 }
 
+// unixSocketRelay is a unix socket that relays every connection to the TCP
+// server at 127.0.0.1:port, so the endpoint probe and the store reach the
+// Dolt test server over a socket. Its path is short enough to bind, as
+// liveUnixSocket's is.
+func unixSocketRelay(t *testing.T, port int) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "bds")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	path := filepath.Join(dir, "dolt.sock")
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			client, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer func() { _ = client.Close() }()
+				server, err := net.Dial("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+				if err != nil {
+					return
+				}
+				defer func() { _ = server.Close() }()
+				// Either side closing ends the relay; the deferred closes
+				// then unblock the other copy.
+				done := make(chan struct{}, 2)
+				go func() { _, _ = io.Copy(server, client); done <- struct{}{} }()
+				go func() { _, _ = io.Copy(client, server); done <- struct{}{} }()
+				<-done
+			}()
+		}
+	}()
+	return path
+}
+
 // TestCheckFederationRemotesAPI_ProbeOnlyServer pins the Federation
 // remotesapi check for a live server no dolt-server.pid names. The check read
 // the PID file alone, so it took its no-server branch, listed the remotes on
@@ -973,11 +1058,71 @@ func TestCheckFederationRemotesAPI_ProbeOnlyServer(t *testing.T) {
 			}
 			remotesAPIPort := os.Getenv("BEADS_DOLT_REMOTESAPI_PORT")
 			check := CheckFederationRemotesAPI(repo)
-			wantDetail := "Server reachable at 127.0.0.1:" + strconv.Itoa(port) + " (no PID file in this workspace)"
+			wantDetail := "Server reachable at 127.0.0.1:" + strconv.Itoa(port) + " (no PID file in this workspace names it)"
 			if check.Status != StatusError || check.Message != "remotesapi port "+remotesAPIPort+" not accessible" ||
 				!strings.Contains(check.Detail, wantDetail) || strings.Contains(check.Detail, "PID 0") {
 				t.Fatalf("live server at %d with a peer: got %s %q (%s), want error %q with Detail containing %q",
 					port, check.Status, check.Message, check.Detail, "remotesapi port "+remotesAPIPort+" not accessible", wantDetail)
+			}
+		})
+	}
+
+	// The same server reached over a live socket beside a closed port, at a
+	// configured host whose remotesapi port accepts: the check reads the
+	// peers through the socket, names it, and dials the listener at
+	// 127.0.0.1, where nothing listens, never at the host the probe did not
+	// reach.
+	t.Run("peers, reached over a live socket beside a closed port", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("unix sockets")
+		}
+		repo, _ := probeOnlyServerWorkspace(t, port, "origin", "peer1")
+		remotesAPIPort := strconv.Itoa(ipv6OnlyLoopbackPort(t))
+		t.Setenv("BEADS_DOLT_REMOTESAPI_PORT", remotesAPIPort)
+		t.Setenv("BEADS_DOLT_SERVER_HOST", "::1")
+		t.Setenv("BEADS_DOLT_SERVER_PORT", strconv.Itoa(closedLocalPort(t)))
+		socket := unixSocketRelay(t, port)
+		t.Setenv("BEADS_DOLT_SERVER_SOCKET", socket)
+		check := CheckFederationRemotesAPI(repo)
+		wantDetail := "Server reachable at unix:" + socket + " (no PID file in this workspace names it) but remotesapi port unreachable: dial tcp 127.0.0.1:" + remotesAPIPort + ": "
+		if check.Status != StatusError || !strings.HasPrefix(check.Detail, wantDetail) {
+			t.Fatalf("live server over %s with a peer: got %s %q (%s), want error with Detail starting %q",
+				socket, check.Status, check.Message, check.Detail, wantDetail)
+		}
+	})
+
+	// A server only the probe found whose store does not open. The probe
+	// counts a TCP accept, which proves neither a server that takes the
+	// workspace's user nor one holding its database: no peer was read, so
+	// the check reports the failed open, not the closed remotesapi port.
+	// TestCheckFederationRemotesAPI_AcceptOnlyListener covers a listener
+	// that is not a Dolt server.
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, beadsDir string)
+	}{
+		{name: "workspace database missing on the server", setup: func(t *testing.T, beadsDir string) {
+			cfg, err := configfile.Load(beadsDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg.DoltDatabase = "doctest_fedprobe_absent_" + strconv.FormatInt(time.Now().UnixNano(), 16)
+			if err := cfg.Save(beadsDir); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "server refuses the workspace's user", setup: func(t *testing.T, _ string) {
+			t.Setenv("BEADS_DOLT_SERVER_USER", "doctest_nobody")
+		}},
+	} {
+		t.Run("peers, store does not open: "+tc.name, func(t *testing.T) {
+			repo, beadsDir := probeOnlyServerWorkspace(t, port, "origin", "peer1")
+			t.Setenv("BEADS_DOLT_SERVER_PORT", strconv.Itoa(port))
+			tc.setup(t, beadsDir)
+			check := CheckFederationRemotesAPI(repo)
+			if check.Status != StatusOK || check.Message != "Skipped (database unavailable)" || check.Detail == "" {
+				t.Fatalf("live server at %d whose store does not open: got %s %q (%s), want ok %q with the open's error as Detail",
+					port, check.Status, check.Message, check.Detail, "Skipped (database unavailable)")
 			}
 		})
 	}
