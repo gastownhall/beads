@@ -11,6 +11,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 )
 
 // TestEmbeddedCompactKeepsReplayedCommitDates reproduces #7294: Compact
@@ -139,11 +140,13 @@ func TestEmbeddedCompactKeepsCommitDates(t *testing.T) {
 	}
 
 	// All three kept commits are dated in the future so --days 0 keeps them;
-	// "edit A" and the empty commit sit in the same second 333 ms apart.
+	// "edit A" and the empty commit sit in the same second 333 ms apart, and
+	// asOf falls strictly between the two non-empty edits.
 	S := time.Now().UTC().Truncate(time.Second)
 	editA := S.Add(20 * time.Minute).Add(123 * time.Millisecond)
 	emptyMarker := S.Add(20 * time.Minute).Add(456 * time.Millisecond)
 	editB := S.Add(40 * time.Minute)
+	asOf := S.Add(30 * time.Minute)
 
 	// No defer on the first connection: bdCompact's subprocess needs the
 	// store's lock, so this connection closes before it runs and reopens
@@ -221,6 +224,25 @@ func TestEmbeddedCompactKeepsCommitDates(t *testing.T) {
 		}
 	}
 
+	// Dolt parses an AS OF TIMESTAMP literal as a session-zone wall time;
+	// confirm this session reads the UTC literal as the intended instant
+	// before relying on it (resolveAsOf treats a bare string as a ref, so
+	// the timestamp must be a literal, not a bind parameter).
+	tLiteral := asOf.UTC().Format("2006-01-02 15:04:05")
+	var parsed time.Time
+	if err := db.QueryRowContext(t.Context(), "SELECT CAST(? AS DATETIME)", tLiteral).Scan(&parsed); err != nil {
+		t.Fatalf("parse probe %q: %v", tLiteral, err)
+	}
+	if !parsed.Equal(asOf) {
+		t.Fatalf("session reads TIMESTAMP literal %q as %s, want %s (session time zone is not UTC)", tLiteral, parsed, asOf)
+	}
+
+	// Precondition: before compaction, the time between the two edits already
+	// resolves to edit A's state; the assertions below pin that compaction
+	// does not change that.
+	if got := oneString("SELECT title FROM issues AS OF TIMESTAMP('" + tLiteral + "') WHERE id = '" + issue.ID + "'"); got != "edit A" {
+		t.Fatalf("precondition: issues as of %s = %q, want %q", tLiteral, got, "edit A")
+	}
 	closeDB()
 
 	bdCompact(t, bd, dir, "--force", "--days", "0")
@@ -277,6 +299,28 @@ func TestEmbeddedCompactKeepsCommitDates(t *testing.T) {
 		got := oneTime("SELECT date FROM dolt_log WHERE message LIKE 'compact: squash%'")
 		if !got.Equal(boundaryDate) {
 			t.Errorf("squashed base dated %s, want the boundary commit's date %s", got.UTC(), boundaryDate.UTC())
+		}
+	})
+
+	// AC-4: a timestamp between the two kept edits resolves to edit A's
+	// state, as it did before the compaction — both through dolt's AS OF
+	// and through the dolt_history_issues lookup behind
+	// issueops.PreviousExternalRefInTx.
+	t.Run("as-of reads resolve to the same commit", func(t *testing.T) {
+		if got := oneString("SELECT title FROM issues AS OF TIMESTAMP('" + tLiteral + "') WHERE id = '" + issue.ID + "'"); got != "edit A" {
+			t.Errorf("issues as of %s = %q after compact, want %q", tLiteral, got, "edit A")
+		}
+		tx, err := db.BeginTx(t.Context(), nil)
+		if err != nil {
+			t.Fatalf("BeginTx: %v", err)
+		}
+		defer tx.Rollback()
+		ref, found, err := issueops.PreviousExternalRefInTx(t.Context(), tx, issue.ID, asOf)
+		if err != nil {
+			t.Fatalf("PreviousExternalRefInTx: %v", err)
+		}
+		if !found || ref != "A" {
+			t.Errorf("previous external_ref as of %s = (%q, %v), want (%q, true)", asOf, ref, found, "A")
 		}
 	})
 }

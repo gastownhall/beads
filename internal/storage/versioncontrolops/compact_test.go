@@ -52,7 +52,7 @@ func compactTestCommits() (initial, boundary storage.CommitInfo, kept []storage.
 		},
 		{
 			Hash: "kept-hash-3", Author: "Original Author", Email: "orig@example.com",
-			Date: base.Add(time.Hour).Add(789 * time.Millisecond).In(tz),
+			Date:    base.Add(time.Hour).Add(789 * time.Millisecond).In(tz),
 			Message: "- leading dash edit B", CommitOrder: 6,
 		},
 	}
