@@ -1687,4 +1687,36 @@ func TestGraphApplyNodeIssueStampsCreatedAtWithStatusTimestamps(t *testing.T) {
 			}
 		})
 	}
+
+	deferUntil := time.Now().UTC().Add(time.Hour)
+	unstamped := []struct {
+		name       string
+		node       GraphApplyNode
+		wantStatus types.Status
+	}{
+		{"default open", GraphApplyNode{Key: "n", Title: "N"}, types.StatusOpen},
+		{"explicit open", GraphApplyNode{Key: "n", Title: "N", Status: string(types.StatusOpen)}, types.StatusOpen},
+		{"blocked", GraphApplyNode{Key: "n", Title: "N", Status: string(types.StatusBlocked)}, types.StatusBlocked},
+		{"deferred by future defer_until", GraphApplyNode{Key: "n", Title: "N", DeferUntil: &deferUntil}, types.StatusDeferred},
+	}
+	for _, row := range unstamped {
+		t.Run(row.name, func(t *testing.T) {
+			issue, err := graphApplyNodeIssue(row.node, GraphApplyOptions{}, "actor", "")
+			if err != nil {
+				t.Fatalf("graphApplyNodeIssue: %v", err)
+			}
+			if issue.Status != row.wantStatus {
+				t.Fatalf("status = %q, want %q", issue.Status, row.wantStatus)
+			}
+			if !issue.CreatedAt.IsZero() {
+				t.Errorf("%s: created_at = %v, want the zero time (no status stamp was given)", row.name, issue.CreatedAt)
+			}
+			if issue.ClosedAt != nil {
+				t.Errorf("%s: closed_at = %v, want nil", row.name, *issue.ClosedAt)
+			}
+			if issue.StartedAt != nil {
+				t.Errorf("%s: started_at = %v, want nil", row.name, *issue.StartedAt)
+			}
+		})
+	}
 }
