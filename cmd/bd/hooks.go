@@ -1137,6 +1137,17 @@ func installHooksAt(hookNames []string, force, shared, chain, beadsHooks bool, s
 		}
 	}
 
+	// An install from a linked worktree writes the invoking worktree's tracked
+	// copy of hooksDir when both indexes track it (#7725); core.hooksPath and
+	// pre-existing-hook preservation below keep naming hooksDir, the directory
+	// Git runs (#2414).
+	writeDir := hooksDir
+	if selected != nil {
+		writeDir = worktreeHooksWriteDir(hooksDir, selected.paths, func(root, rel string) bool {
+			return gitIndexTracksDir(root, rel, selected.env)
+		})
+	}
+
 	// Create hooks directory if it doesn't exist.
 	// Directories inside .beads/ use BeadsDirPerm (0700); git-managed hook
 	// dirs (.git/hooks, .beads-hooks) use 0755 so git can execute them.
@@ -1144,7 +1155,7 @@ func installHooksAt(hookNames []string, force, shared, chain, beadsHooks bool, s
 	if beadsHooks {
 		hooksDirPerm = config.BeadsDirPerm
 	}
-	if err := os.MkdirAll(hooksDir, hooksDirPerm); err != nil {
+	if err := os.MkdirAll(writeDir, hooksDirPerm); err != nil {
 		return fmt.Errorf("failed to create hooks directory: %w", err)
 	}
 
@@ -1169,7 +1180,7 @@ func installHooksAt(hookNames []string, force, shared, chain, beadsHooks bool, s
 	// Refuse the whole install up front if any target is unsafe to write —
 	// stopping midway through the loop would leave hooks half-installed.
 	for _, hookName := range hookNames {
-		if err := guardHookWritePathWithProbe(filepath.Join(hooksDir, hookName), shared, tracked); err != nil {
+		if err := guardHookWritePathWithProbe(filepath.Join(writeDir, hookName), shared, tracked); err != nil {
 			return fmt.Errorf("refusing to install %s hook: %w", hookName, err)
 		}
 	}
@@ -1178,7 +1189,7 @@ func installHooksAt(hookNames []string, force, shared, chain, beadsHooks bool, s
 	// Only the content between markers is managed by beads; user content
 	// outside the markers is preserved across reinstalls and upgrades.
 	for _, hookName := range hookNames {
-		hookPath := filepath.Join(hooksDir, hookName)
+		hookPath := filepath.Join(writeDir, hookName)
 		section := generateHookSection(hookName)
 
 		// Read existing hook file (if any)
@@ -2044,6 +2055,66 @@ func worktreeJSONLDir(beadsDir, hookRoot, primaryRoot string) string {
 		return beadsDir
 	}
 	return filepath.Join(hookRoot, rel)
+}
+
+// worktreeHooksWriteDir returns the directory an install from paths.RepoRoot
+// writes hook files into when Git runs target (the directory core.hooksPath
+// names or will name). It returns target unless the invoking linked worktree
+// and the primary checkout both track target's path relative to the primary:
+// the files a tracked directory holds belong to the checkout being worked in
+// (#7725), while the hooks Git runs stay where #2414 put them.
+//
+// The gating mirrors worktreeJSONLDir's (#6680): every unusual layout declines
+// and keeps the pre-fix behavior, so the redirect fires only for the shape the
+// defect describes — a conventional primary checkout P (its common dir is
+// <P>/.git, so bare-backed worktrees, --separate-git-dir layouts and the
+// work-tree-less fallback of resolveStandaloneHooksContext decline), an
+// invocation from a linked worktree W, and a target that belongs to P but to
+// neither W (tested first, so a worktree nested under the primary keeps its
+// own targets; a relative core.hooksPath resolves into W and declines here
+// too) nor the shared common dir. A mixed-spelling filepath.Rel result
+// declines rather than inventing a target.
+func worktreeHooksWriteDir(target string, paths git.HooksContext, indexTracks func(root, rel string) bool) string {
+	if paths.CommonDir == "" || filepath.Base(paths.CommonDir) != ".git" {
+		return target
+	}
+	primary := paths.MainRepoRoot
+	if !utils.PathsEqual(filepath.Dir(paths.CommonDir), primary) {
+		return target
+	}
+	if paths.RepoRoot == "" || utils.PathsEqual(paths.RepoRoot, primary) {
+		return target
+	}
+	if pathInsideDir(target, paths.RepoRoot) || !pathInsideDir(target, primary) || pathInsideDir(target, paths.CommonDir) {
+		return target
+	}
+	rel, err := filepath.Rel(primary, target)
+	if err != nil || rel == "." || !filepath.IsLocal(rel) {
+		return target
+	}
+	// The primary tracking the directory is the defect's precondition: writing
+	// an untracked primary copy dirties nothing committed and keeps the hooks
+	// Git runs current. The worktree tracking it is what justifies the
+	// destination: it is a directory the invoking checkout's own commit
+	// contains.
+	if !indexTracks(primary, rel) || !indexTracks(paths.RepoRoot, rel) {
+		return target
+	}
+	return filepath.Join(paths.RepoRoot, rel)
+}
+
+// gitIndexTracksDir reports whether the index of the repository at root tracks
+// any file under rel (a directory path relative to root). Only exit 0 counts
+// as tracked: exit 1 and every other failure mean not tracked, the declining
+// direction for worktreeHooksWriteDir. env is the selected, routing-scrubbed
+// environment — inherited routing may name a different index and must never
+// select a destination (the initHooksContext contract).
+func gitIndexTracksDir(root, rel string, env []string) bool {
+	// #nosec G204 G702 - fixed "git" command; root and rel come from the hooks
+	// context bd itself resolved, not user input
+	cmd := exec.Command("git", "-C", root, "--literal-pathspecs", "ls-files", "--error-unmatch", "--", filepath.ToSlash(rel))
+	cmd.Env = env
+	return cmd.Run() == nil
 }
 
 // hookLinkedWorktreePrimaryRoot returns the primary checkout's worktree root

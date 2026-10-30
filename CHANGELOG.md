@@ -1090,6 +1090,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd hooks install` run from a linked git worktree now writes the worktree's
+  own tracked copy of the hooks directory (`.beads/hooks`, or `.beads-hooks`
+  with `--shared`) instead of the primary checkout's, while `core.hooksPath`
+  keeps naming the primary checkout's copy as before. `bd init`'s hook step and
+  `bd doctor --fix` inherit the fix. The redirect is narrow: it applies only
+  when the install target is inside the primary checkout, outside the common
+  git directory, and the invoking worktree's index and the primary's index
+  both track that directory. An untracked primary-only `.beads/hooks`, the
+  shared `.git/hooks`, a bare repository's hooks, and any target outside the
+  repository keep today's behavior. When the redirect applies, bd prints one
+  note on stderr naming both the directory it wrote and the one Git runs.
 - `bd migrate-personal` no longer leaves an issue in both databases when
   someone else's bead in the project database depends on it. The move's
   delete from the project database refuses such an issue, but it ran only
