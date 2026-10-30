@@ -73,6 +73,9 @@ func TestEnsureDoltRemoteSameNormalizedURLIsNoop(t *testing.T) {
 	if want := []string{"list"}; !reflect.DeepEqual(store.calls, want) {
 		t.Fatalf("calls = %v, want %v", store.calls, want)
 	}
+	if wantRemotes := []storage.RemoteInfo{{Name: "origin", URL: "https://github.com/org/repo.git"}}; !reflect.DeepEqual(store.remotes, wantRemotes) {
+		t.Fatalf("remotes = %+v, want %+v (a listed match keeps the listed spelling, untouched)", store.remotes, wantRemotes)
+	}
 }
 
 func TestEnsureDoltRemoteDifferentURLReplacesExisting(t *testing.T) {
