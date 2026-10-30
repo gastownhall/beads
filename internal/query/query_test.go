@@ -181,49 +181,6 @@ func TestLexer(t *testing.T) {
 			expected: []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenEOF},
 			values:   []string{"label", "=", "30MIN", ""},
 		},
-		{
-			name:     "quoted multi-byte value round-trips",
-			input:    `title="größe"`,
-			expected: []TokenType{TokenIdent, TokenEquals, TokenString, TokenEOF},
-			values:   []string{"title", "=", "größe", ""},
-		},
-		{
-			name:     "quoted CJK value round-trips",
-			input:    `title="日本語"`,
-			expected: []TokenType{TokenIdent, TokenEquals, TokenString, TokenEOF},
-			values:   []string{"title", "=", "日本語", ""},
-		},
-		{
-			name:     "quoted accented value with space round-trips",
-			input:    `title="naïve café"`,
-			expected: []TokenType{TokenIdent, TokenEquals, TokenString, TokenEOF},
-			values:   []string{"title", "=", "naïve café", ""},
-		},
-		{
-			name:     "bare multi-byte value is one identifier",
-			input:    "label=größe",
-			expected: []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenEOF},
-			values:   []string{"label", "=", "größe", ""},
-		},
-		{
-			name:     "bare accented value is one identifier",
-			input:    "label=fête",
-			expected: []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenEOF},
-			values:   []string{"label", "=", "fête", ""},
-		},
-		{
-			name:      "token after multi-byte value has byte position",
-			input:     "label=fête AND status=open",
-			expected:  []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenAnd, TokenIdent, TokenEquals, TokenIdent, TokenEOF},
-			values:    []string{"label", "=", "fête", "AND", "status", "=", "open", ""},
-			positions: []int{0, 5, 6, 12, 16, 22, 23, 27},
-		},
-		{
-			name:     "invalid UTF-8 inside quotes round-trips unchanged",
-			input:    "title=\"a\xffb\"",
-			expected: []TokenType{TokenIdent, TokenEquals, TokenString, TokenEOF},
-			values:   []string{"title", "=", "a\xffb", ""},
-		},
 		// Units are lowercase in the shared grammar, so an uppercase one is
 		// not a duration: it reaches the evaluator as typed and fails there as
 		// an unparseable time instead of as a negated compact duration.
@@ -256,6 +213,88 @@ func TestLexer(t *testing.T) {
 			input:    "updated>+30d",
 			expected: []TokenType{TokenIdent, TokenGreater, TokenDuration, TokenEOF},
 			values:   []string{"updated", ">", "+30d", ""},
+		},
+		{
+			name:     "quoted multi-byte value round-trips",
+			input:    `title="größe test"`,
+			expected: []TokenType{TokenIdent, TokenEquals, TokenString, TokenEOF},
+			values:   []string{"title", "=", "größe test", ""},
+		},
+		{
+			name:     "quoted CJK value round-trips",
+			input:    `title="日本語"`,
+			expected: []TokenType{TokenIdent, TokenEquals, TokenString, TokenEOF},
+			values:   []string{"title", "=", "日本語", ""},
+		},
+		{
+			name:     "single-quoted multi-byte value round-trips",
+			input:    `title='naïve café'`,
+			expected: []TokenType{TokenIdent, TokenEquals, TokenString, TokenEOF},
+			values:   []string{"title", "=", "naïve café", ""},
+		},
+		{
+			name:     "invalid byte in a quoted value passes through",
+			input:    "title=\"a\xffb\"",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenString, TokenEOF},
+			values:   []string{"title", "=", "a\xffb", ""},
+		},
+		{
+			name:     "unknown escape before a multi-byte rune",
+			input:    `title="\é"`,
+			expected: []TokenType{TokenIdent, TokenEquals, TokenString, TokenEOF},
+			values:   []string{"title", "=", "é", ""},
+		},
+		{
+			name:     "bare multi-byte value is one identifier",
+			input:    "title=größe",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenEOF},
+			values:   []string{"title", "=", "größe", ""},
+		},
+		{
+			name:     "bare value with a multi-byte letter",
+			input:    "label=fête",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenEOF},
+			values:   []string{"label", "=", "fête", ""},
+		},
+		{
+			name:     "bare value starting with a multi-byte letter",
+			input:    "label=été",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenEOF},
+			values:   []string{"label", "=", "été", ""},
+		},
+		{
+			name:     "no-break space after a bare multi-byte value",
+			input:    "label=fête\u00a0AND status=open",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenAnd, TokenIdent, TokenEquals, TokenIdent, TokenEOF},
+			values:   []string{"label", "=", "fête", "AND", "status", "=", "open", ""},
+		},
+		// The duration lookahead scans by decoded rune, so a multi-byte rune
+		// right after a number ends the unit run instead of being read byte
+		// by byte (#7539).
+		{
+			name:     "no-break space after a duration keeps the duration",
+			input:    "updated>7d\u00a0AND status=open",
+			expected: []TokenType{TokenIdent, TokenGreater, TokenDuration, TokenAnd, TokenIdent, TokenEquals, TokenIdent, TokenEOF},
+			values:   []string{"updated", ">", "7d", "AND", "status", "=", "open", ""},
+		},
+		{
+			name:     "multi-byte rune after a duration prefix keeps it one identifier",
+			input:    "label=7dש",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenEOF},
+			values:   []string{"label", "=", "7dש", ""},
+		},
+		{
+			name:     "ideographic space separates tokens",
+			input:    "status=open\u3000AND\u3000label=x",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenAnd, TokenIdent, TokenEquals, TokenIdent, TokenEOF},
+			values:   []string{"status", "=", "open", "AND", "label", "=", "x", ""},
+		},
+		{
+			name:      "positions after a multi-byte value are byte offsets",
+			input:     "label=größe AND status=open",
+			expected:  []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenAnd, TokenIdent, TokenEquals, TokenIdent, TokenEOF},
+			values:    []string{"label", "=", "größe", "AND", "status", "=", "open", ""},
+			positions: []int{0, 5, 6, 14, 18, 24, 25, 29},
 		},
 	}
 
@@ -293,6 +332,7 @@ func TestLexerErrors(t *testing.T) {
 	}{
 		{"unterminated string", `title="hello`},
 		{"invalid character", "status@open"},
+		{"symbol is not an identifier character", "label=🐛"},
 	}
 
 	for _, tt := range tests {
@@ -484,6 +524,13 @@ func TestEvaluatorSimpleQueries(t *testing.T) {
 			query: "label=none",
 			expectFilter: func(f *types.IssueFilter) bool {
 				return f.NoLabels
+			},
+		},
+		{
+			name:  "title contains a multi-byte value",
+			query: `title="größe test"`,
+			expectFilter: func(f *types.IssueFilter) bool {
+				return f.TitleContains == "größe test"
 			},
 		},
 		{

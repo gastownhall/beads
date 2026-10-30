@@ -1090,6 +1090,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd query` now matches non-ASCII values. Its lexer read the query one
+  byte at a time, so a quoted value such as `title="größe test"` reached the
+  filter re-encoded and silently matched nothing, and a bare one either
+  failed to lex (`title=größe`: `unexpected character '¶'`) or was mangled
+  (`label=fête`). The lexer now decodes UTF-8 and keeps values exactly as
+  typed (#7539).
 - `bd migrate-personal` no longer leaves an issue in both databases when
   someone else's bead in the project database depends on it. The move's
   delete from the project database refuses such an issue, but it ran only
@@ -3388,12 +3394,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   build if a command shadows the root flag again — closing the class before an
   *unbound* local copy can reappear and invert the output mode it was meant to
   select.
-
-- **`bd query` now matches non-ASCII values.** The query lexer read its input
-  one byte at a time, so a quoted value like `title="größe"` was re-encoded
-  and silently matched nothing, and a bare value like `label=fête` either
-  failed to parse or matched a mangled string. It now decodes UTF-8, and
-  invalid bytes inside a value pass through unchanged (#7539).
 
 - **`bd init --force` can no longer silently recreate a missing server-side
   database as empty** (be-5up5). `--force` is an alias for `--reinit-local`,

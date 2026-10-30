@@ -91,7 +91,7 @@ func (t TokenType) String() string {
 type Token struct {
 	Type  TokenType
 	Value string
-	Pos   int // Position in input string
+	Pos   int // Byte offset of the token in the input string
 }
 
 // Lexer tokenizes a query string.
@@ -106,7 +106,8 @@ func NewLexer(input string) *Lexer {
 	return &Lexer{input: input}
 }
 
-// next returns the next rune and advances position.
+// next decodes the next UTF-8 rune and advances position past it. An invalid
+// byte decodes as utf8.RuneError with width 1.
 func (l *Lexer) next() rune {
 	if l.pos >= len(l.input) {
 		l.width = 0
@@ -196,7 +197,9 @@ func (l *Lexer) NextToken() (Token, error) {
 	}
 }
 
-// readString reads a quoted string.
+// readString reads a quoted string. Ordinary characters are copied from the
+// input bytes rather than re-encoded, so a value round-trips exactly as typed
+// (an invalid UTF-8 byte included).
 func (l *Lexer) readString(quote rune, startPos int) (Token, error) {
 	var sb strings.Builder
 	for {
@@ -227,7 +230,6 @@ func (l *Lexer) readString(quote rune, startPos int) (Token, error) {
 				sb.WriteString(l.input[l.pos-l.width : l.pos])
 			}
 		} else {
-			// Copy the consumed bytes so invalid UTF-8 round-trips unchanged.
 			sb.WriteString(l.input[l.pos-l.width : l.pos])
 		}
 	}
@@ -303,20 +305,18 @@ func (l *Lexer) readNumberOrDuration(startPos int) (Token, error) {
 	return Token{Type: TokenNumber, Value: sb.String(), Pos: startPos}, nil
 }
 
-// readIdent reads an identifier or keyword.
+// readIdent reads an identifier or keyword starting at startPos, which must
+// be the current position.
 func (l *Lexer) readIdent(startPos int) (Token, error) {
-	var sb strings.Builder
-
 	for {
 		r := l.next()
 		if r == 0 || !isIdentChar(r) {
 			l.backup()
 			break
 		}
-		sb.WriteString(l.input[l.pos-l.width : l.pos])
 	}
 
-	value := sb.String()
+	value := l.input[startPos:l.pos]
 	upper := strings.ToUpper(value)
 
 	// Check for keywords
@@ -365,9 +365,10 @@ func isIdentChar(r rune) bool {
 // acceptDuration reports whether number, followed by the run of identifier
 // characters that starts at the rune the caller most recently read with
 // next(), is a compact duration (timeparsing.IsCompactDuration). The run is
-// taken whole, so a unit only counts when it stands alone. On a match it
-// consumes the run and returns the full lexeme; otherwise the lexer position
-// is left untouched.
+// taken whole, so a unit only counts when it stands alone, and is scanned by
+// decoded runes, so a multi-byte rune belongs to the run whole or ends it.
+// On a match it consumes the run and returns the full lexeme; otherwise the
+// lexer position is left untouched.
 func (l *Lexer) acceptDuration(number string) (string, bool) {
 	if l.width == 0 {
 		return "", false
