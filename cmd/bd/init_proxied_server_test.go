@@ -353,6 +353,22 @@ func TestComposeProxiedServerMetadataJSON_TeamServer(t *testing.T) {
 	})
 }
 
+func TestShouldSaveAdoptedProjectID(t *testing.T) {
+	cases := []struct {
+		name           string
+		adopted, local string
+		want           bool
+	}{
+		{"database id differs from the minted one", "db", "local", true},
+		{"already carries the database id", "same", "same", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, shouldSaveAdoptedProjectID(tc.adopted, tc.local))
+		})
+	}
+}
+
 func TestIsTeamServerManaged_RequiresProxiedServerMode(t *testing.T) {
 	cfg := configfile.Config{
 		Backend:        configfile.BackendDolt,

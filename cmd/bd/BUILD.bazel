@@ -943,6 +943,7 @@ go_test(
         "init_permissions_test.go",
         "init_policy_test.go",
         "init_proxied_if_missing_test.go",
+        "init_proxied_server_integration_test.go",
         "init_proxied_server_test.go",
         "init_registered_backend_test.go",
         "init_remote_test.go",

@@ -276,16 +276,17 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 	}
 
 	// metadata.json was written with a locally-minted project id before any
-	// DB connection existed; the adopted id must replace it before the tail
-	// git-commits .beads/.
-	if in.teamServer && adoptedProjectID != projectID {
+	// DB connection existed; the adopted id — team-server's provisioned
+	// identity, or the identity an earlier init already recorded on this
+	// database — must replace it before the tail git-commits .beads/.
+	if shouldSaveAdoptedProjectID(adoptedProjectID, projectID) {
 		fileCfg, err := configfile.Load(beadsDir)
 		if err != nil || fileCfg == nil {
-			return HandleError("failed to reload %s to adopt the provisioned project identity: %v", configfile.ConfigFileName, err)
+			return HandleError("failed to reload %s to adopt the database's project identity: %v", configfile.ConfigFileName, err)
 		}
 		fileCfg.ProjectID = adoptedProjectID
 		if err := fileCfg.Save(beadsDir); err != nil {
-			return HandleError("failed to save the provisioned project identity to %s: %v", configfile.ConfigFileName, err)
+			return HandleError("failed to save the adopted project identity to %s: %v", configfile.ConfigFileName, err)
 		}
 	}
 
@@ -299,6 +300,12 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 		fsUseCase:     fsUseCase,
 		gitUC:         gitUC,
 	})
+}
+
+// shouldSaveAdoptedProjectID reports whether init must rewrite metadata.json's
+// project_id with the identity it adopted from the database.
+func shouldSaveAdoptedProjectID(adopted, local string) bool {
+	return adopted != local
 }
 
 func resolveInitPrefix(flagPrefix string) (string, error) {
