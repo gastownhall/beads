@@ -122,4 +122,32 @@ func TestGetMoleculeProgressReportsTruncatedReads(t *testing.T) {
 		stats, err := store.GetMoleculeProgress(context.Background(), "mol-1")
 		requireMoleculeProgressReadError(t, stats, err, moleculeProgressLost)
 	})
+
+	t.Run("complete read", func(t *testing.T) {
+		store, mock := moleculeProgressMockStore(t)
+		children := sqlmock.NewRows([]string{"issue_id"}).
+			AddRow("c1").AddRow("c2").AddRow("c3").AddRow("c4")
+		statuses := sqlmock.NewRows([]string{"id", "status"}).
+			AddRow("c1", "closed").AddRow("c2", "closed").
+			AddRow("c3", "in_progress").AddRow("c4", "open")
+		expectMoleculeProgressReads(mock, children, statuses)
+
+		stats, err := store.GetMoleculeProgress(context.Background(), "mol-1")
+		if err != nil {
+			t.Fatalf("GetMoleculeProgress: %v", err)
+		}
+		if stats.Total != 4 || stats.Completed != 2 || stats.InProgress != 1 {
+			t.Fatalf("rollup Total=%d Completed=%d InProgress=%d; want 4/2/1",
+				stats.Total, stats.Completed, stats.InProgress)
+		}
+		if stats.CurrentStepID != "c3" {
+			t.Fatalf("CurrentStepID=%q; want c3", stats.CurrentStepID)
+		}
+		if stats.MoleculeTitle != "Molecule" {
+			t.Fatalf("MoleculeTitle=%q; want Molecule", stats.MoleculeTitle)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet sqlmock expectations: %v", err)
+		}
+	})
 }
