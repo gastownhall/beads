@@ -1955,6 +1955,38 @@ func findDoltRemoteURL(remotes []storage.RemoteInfo, name string) string {
 	return findDoltRemote(remotes, name).URL
 }
 
+// registerPersistedDoltRemote registers on the server a remote that the
+// server does not list but the served database records on disk at a URL
+// matching url. The server resolves push, pull and fetch through that
+// listing and reads repo_state.json only when it loads the database, so
+// the recorded remote is added, its URL (the spelling a restart would load)
+// and git ref, and the server ends where a listed match leaves it.
+func registerPersistedDoltRemote(ctx context.Context, st doltRemoteAddStore, persisted storage.RemoteInfo, url string) error {
+	if len(persisted.CLIOnlyParams) > 0 {
+		// The server rewrites the remote's record from the add, which
+		// carries only the URL and git ref: it would erase these for good,
+		// where a restart loads them.
+		return fmt.Errorf("its recorded parameters %s cannot be set over SQL, and the add would erase them; restart the Dolt server so it loads the remote as recorded", remedy.PrintedList(persisted.CLIOnlyParams, ", "))
+	}
+	addErr := st.AddRemoteWithRef(ctx, persisted.Name, persisted.URL, persisted.Ref)
+	if addErr == nil || !strings.Contains(strings.ToLower(addErr.Error()), "already exists") {
+		return addErr
+	}
+	// The server checks the add against the set it lists, which lacked the
+	// remote, so a concurrent add registered it in between. That is the
+	// state this add wanted, as the push path's re-add takes it
+	// (prepareCLIRouteForGitProtocol), once the server lists the remote at
+	// a matching URL.
+	remotes, err := st.ListRemotes(ctx)
+	if err != nil {
+		return fmt.Errorf("%w (listing remotes again: %v)", addErr, err)
+	}
+	if !doltutil.RemoteURLsMatch(findDoltRemoteURL(remotes, persisted.Name), url) {
+		return addErr
+	}
+	return nil
+}
+
 func ensureDoltRemote(ctx context.Context, st doltRemoteAddStore, name, url string, confirm doltRemoteOverwriteConfirmer) (doltRemoteAddResult, error) {
 	remotes, err := st.ListRemotes(ctx)
 	if err != nil {
@@ -1985,11 +2017,7 @@ func ensureDoltRemote(ctx context.Context, st doltRemoteAddStore, name, url stri
 
 	if doltutil.RemoteURLsMatch(existingURL, url) {
 		if existingFromDiskOnly {
-			// The server lists no such remote and resolves push, pull and
-			// fetch through that listing; it reads repo_state.json only when
-			// it loads the database. Register the recorded remote, its URL
-			// and git ref, so the server ends where a listed match leaves it.
-			if err := st.AddRemoteWithRef(ctx, name, persisted.URL, persisted.Ref); err != nil {
+			if err := registerPersistedDoltRemote(ctx, st, persisted, url); err != nil {
 				return doltRemoteAddResult{}, fmt.Errorf("add remote %s: %w", name, err)
 			}
 		}

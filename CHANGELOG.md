@@ -1097,9 +1097,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   remotes table and re-reads the state file only when it loads the
   database, so a remote recorded only on disk was invisible to every SQL
   operation while the add — the documented remedy — silently did nothing
-  (GH#2118). The add now writes the remote's recorded URL and git ref, asks
-  nothing when the URLs match, and still asks before replacing a differing
-  one.
+  (GH#2118). The add now writes the remote's recorded URL (the spelling a
+  server restart would load) and git ref, asks nothing when the URLs match,
+  and still asks before replacing a differing one. A remote recorded with
+  parameters an add over SQL cannot set (the dolt CLI's `aws-*` and `oss-*`
+  options) is refused instead, with the advice to restart the Dolt server,
+  because the add would erase them.
 - `bd migrate-personal` no longer leaves an issue in both databases when
   someone else's bead in the project database depends on it. The move's
   delete from the project database refuses such an issue, but it ran only
