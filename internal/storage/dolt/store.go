@@ -1366,6 +1366,14 @@ func (s *DoltStore) commitWriteTxOn(ctx context.Context, beginner txBeginner, fn
 	if err != nil {
 		return issueops.BlockedRecheck{}, fmt.Errorf("begin write tx: %w", err)
 	}
+	// Roll back on every exit that leaves tx open, including a panic in fn
+	// or in the scope setup below. A pinned *sql.Conn (withDeleteFence)
+	// cannot close while a Tx on it is open, so the caller's deferred
+	// conn.Close would block forever and swallow the panic; on the pool
+	// the open Tx keeps its connection checked out. After Commit or an
+	// explicit Rollback this returns sql.ErrTxDone without reaching the
+	// driver.
+	defer func() { _ = tx.Rollback() }()
 	clearJournalScope := s.scopeEventsJournalTransaction(tx)
 	defer clearJournalScope()
 	clearVersionScope, err := s.scopeVersionedHistoryTransaction(ctx, tx)
