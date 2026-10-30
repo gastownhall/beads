@@ -186,4 +186,66 @@ func TestEnginePullRecordsPushHash(t *testing.T) {
 			t.Fatalf("hash stored under the generated id: %q", got)
 		}
 	})
+
+	// AC-4: a pull by an engine without ContentHash (as `bd github pull`
+	// builds it) clears a hash stored by an earlier push, so the next push
+	// that can fingerprint still fetches and sends the revert. A ContentHash
+	// that declines the pulled content ("") clears too.
+	t.Run("pull_without_content_hash_clears", func(t *testing.T) {
+		f := newPullHashFixture(t, false)
+		ctx := context.Background()
+		key := f.engine.pushHashKey(f.local.ID)
+
+		// 1. A push from an engine with ContentHash stored the hash.
+		f.engine.recordPushHash(ctx, f.local, f.ref)
+		f.editRemote("remote edit")
+
+		// 2. `bd github pull` builds an engine with no PushHooks on the
+		// same store.
+		pullOnly := NewEngine(f.mock, f.store, "sync")
+		if _, err := pullOnly.Sync(ctx, SyncOptions{Pull: true}); err != nil {
+			t.Fatalf("pull-only Sync: %v", err)
+		}
+		if f.local.Title != "remote edit" {
+			t.Fatalf("pull did not import the remote edit: title=%q", f.local.Title)
+		}
+		if got := f.store.localMetadata[key]; got != "" {
+			t.Fatalf("pull without ContentHash left push hash %q, want it cleared", got)
+		}
+
+		// 3. Edge: a ContentHash that returns "" for the pulled content
+		// cannot describe the remote either; it clears too.
+		f.store.localMetadata[key] = "v3:8:h:pushed0:" + f.ref
+		f.editRemote("unfingerprintable")
+		declining := NewEngine(f.mock, f.store, "sync")
+		declining.PushHooks = &PushHooks{
+			ContentHash: func(l *types.Issue) string {
+				if l.Title == "unfingerprintable" {
+					return ""
+				}
+				return "h:" + l.Title
+			},
+		}
+		if _, err := declining.Sync(ctx, SyncOptions{Pull: true}); err != nil {
+			t.Fatalf("declining pull Sync: %v", err)
+		}
+		if got := f.store.localMetadata[key]; got != "" {
+			t.Fatalf(`pull whose ContentHash returned "" left push hash %q, want it cleared`, got)
+		}
+
+		// 4. After the clear, the next push with ContentHash fetches the
+		// remote and sends the revert.
+		f.local.Title = "pushed"
+		f.local.UpdatedAt = time.Now().Add(time.Hour)
+		f.mock.fetchCalls = 0
+		if _, err := f.engine.Sync(ctx, SyncOptions{Push: true}); err != nil {
+			t.Fatalf("push Sync: %v", err)
+		}
+		if f.mock.fetchCalls == 0 {
+			t.Fatal("cleared push hash must not short-circuit the fetch")
+		}
+		if got := f.mock.updated["EXT-1"]; got == nil || got.Title != "pushed" {
+			t.Fatalf("push did not send the revert: updated[EXT-1] = %v", f.mock.updated["EXT-1"])
+		}
+	})
 }

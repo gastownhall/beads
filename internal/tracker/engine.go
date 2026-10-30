@@ -79,12 +79,15 @@ type PushHooks struct {
 	// fields. When present, the engine binds the hash to the issue's external_ref
 	// and TargetScope (when provided), and persists that fingerprint in local_metadata
 	// after each successful create/update (and whenever ContentEqual reports a
-	// match). It consults the fingerprint BEFORE fetching the remote issue: if the
-	// stored content and target still match, the remote fetch and update are
-	// skipped entirely. This avoids the per-issue GET that ContentEqual alone
-	// still incurs, so a no-op `--push-only` run does not drain the API rate limit
-	// (gastownhall/beads#4214). Returning "" disables the short-circuit for that
-	// issue (the engine falls back to the fetch + ContentEqual path).
+	// match), and refreshes it after a pull writes the issue, because the remote
+	// then holds the pulled content. It consults the fingerprint BEFORE fetching
+	// the remote issue: if the stored content and target still match, the remote
+	// fetch and update are skipped entirely. This avoids the per-issue GET that
+	// ContentEqual alone still incurs, so a no-op `--push-only` run does not
+	// drain the API rate limit (gastownhall/beads#4214). Returning "" disables
+	// the short-circuit for that issue (the engine falls back to the fetch +
+	// ContentEqual path). A pull by an engine without ContentHash clears any
+	// stored entry, so a later engine that has ContentHash still fetches.
 	ContentHash func(local *types.Issue) string
 
 	// TargetScope returns the canonical remote namespace in which external issue
@@ -1071,7 +1074,9 @@ func (e *Engine) recordPushHash(ctx context.Context, issue *types.Issue, externa
 // step with the remote. After a pull the remote holds the pulled content, not
 // the content of the last push, so the pulled fingerprint is recorded under
 // the local row's id: the pull's GenerateID hook may have filled conv.Issue.ID
-// with a fresh id that no local row carries.
+// with a fresh id that no local row carries. When this engine cannot
+// fingerprint content, a stored entry from an earlier push is cleared instead,
+// so a later engine that can fingerprint still fetches.
 func (e *Engine) refreshPushHashAfterPull(ctx context.Context, id string, pulled *types.Issue, extMetadata interface{}, ref string) {
 	if id == "" || pulled == nil {
 		return
@@ -1083,11 +1088,21 @@ func (e *Engine) refreshPushHashAfterPull(ctx context.Context, id string, pulled
 		hashed.Metadata = raw
 	}
 	value := e.pushCacheValue(&hashed, ref)
-	if value == "" {
+	if value != "" {
+		if err := e.Store.SetLocalMetadata(ctx, e.pushHashKey(id), value); err != nil {
+			e.warn("Failed to record push hash for %s: %v", id, err)
+		}
 		return
 	}
-	if err := e.Store.SetLocalMetadata(ctx, e.pushHashKey(id), value); err != nil {
-		e.warn("Failed to record push hash for %s: %v", id, err)
+	// The engine cannot fingerprint the pulled content (no ContentHash hook,
+	// or the hook declined it). A stale entry from an earlier push by an
+	// engine that could must not survive to suppress that engine's next
+	// push, so clear it; an absent entry stays absent.
+	key := e.pushHashKey(id)
+	if stored, err := e.Store.GetLocalMetadata(ctx, key); err != nil || stored != "" {
+		if err := e.Store.SetLocalMetadata(ctx, key, ""); err != nil {
+			e.warn("Failed to clear push hash for %s: %v", id, err)
+		}
 	}
 }
 

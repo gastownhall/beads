@@ -1090,6 +1090,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A pull now records the push hash of each issue it updates or creates, and a
+  pull by an engine without a content hash (`bd github pull`) clears the stored
+  entry. Before, the stored hash still described the last push, so a pull that
+  imported a remote edit followed by a local revert to the pushed content made
+  the next push skip the issue: the remote kept the pulled edit. The next push
+  of an unchanged pulled issue now makes no tracker call, so bd no longer
+  re-sends normalized fields the conversion cannot represent over remote
+  content (for example re-adding `type::task` / `priority::medium`, or
+  replacing an unmapped `priority::urgent`). Affects the trackers that set
+  `PushHooks.ContentHash`: `bd github` today (gastownhall/beads#7755, part of
+  #7754).
 - `bd migrate-personal` no longer leaves an issue in both databases when
   someone else's bead in the project database depends on it. The move's
   delete from the project database refuses such an issue, but it ran only
