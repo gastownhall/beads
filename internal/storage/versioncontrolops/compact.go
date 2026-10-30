@@ -56,7 +56,9 @@ func commitHash8(hash string) string {
 //  2. Create temp branch at the boundary commit (last old commit)
 //  3. Checkout temp branch
 //  4. Soft-reset to initial commit (collapses old history into working set)
-//  5. Commit as single squashed base
+//  5. Commit as single squashed base, dated as the boundary commit so AS OF
+//     reads between the boundary and the first kept commit still resolve to
+//     the pre-compaction state
 //  6. Cherry-pick each recent commit on top, then amend it back to its
 //     original commit date and committer (DOLT_COMMIT --amend --date
 //     --author; without a message it reuses HEAD's, which the cherry-pick
@@ -101,7 +103,8 @@ func Compact(ctx context.Context, conn DBConn, initialHash, boundaryHash string,
 	for _, c := range originals {
 		byHash[c.Hash] = c
 	}
-	if _, ok := byHash[boundaryHash]; !ok {
+	boundaryInfo, ok := byHash[boundaryHash]
+	if !ok {
 		return fmt.Errorf("compact: commit %s is not in the log of the current branch", boundaryHash)
 	}
 	keptDates := make([]time.Time, len(recentHashes))
@@ -131,7 +134,11 @@ func Compact(ctx context.Context, conn DBConn, initialHash, boundaryHash string,
 		return err
 	}
 	msg := fmt.Sprintf("compact: squash %d commits into base snapshot", oldCommits)
-	if err := execSQL("commit squashed base", "CALL DOLT_COMMIT('-Am', ?)", msg); err != nil {
+	// --date: the squashed base inherits the boundary commit's date, so AS OF
+	// reads between the boundary and the first kept commit still resolve to
+	// the pre-compaction state (#7294).
+	if err := execSQL("commit squashed base", "CALL DOLT_COMMIT('-Am', ?, '--date', ?)",
+		msg, commitDateArg(boundaryInfo.Date)); err != nil {
 		return err
 	}
 
