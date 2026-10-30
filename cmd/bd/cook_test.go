@@ -1647,3 +1647,17 @@ waits_for = "all-children"
 		}
 	}
 }
+
+// TestCookFormulaConditionKeptNeedsTargetSucceeds: when the condition keeps
+// fanout, the consumer's needs edge is cooked as before (GH#6437).
+func TestCookFormulaConditionKeptNeedsTargetSucceeds(t *testing.T) {
+	const name = "kept-needs"
+	sg, err := cookFormulaTOMLWithVars(t, name, conditionalFanoutFormula(name, "needs"),
+		map[string]string{"fanout_enabled": "true"})
+	if err != nil {
+		t.Fatalf("cook %q: %v", name, err)
+	}
+	if got, want := blocksEdgesFrom(sg, name+".consumer"), []string{name + ".fanout"}; !slices.Equal(got, want) {
+		t.Errorf("consumer blocks edges = %v, want %v", got, want)
+	}
+}
