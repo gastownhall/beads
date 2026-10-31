@@ -644,3 +644,52 @@ func TestDetectUserRoleIgnoresInheritedConfigSuppression(t *testing.T) {
 		})
 	}
 }
+
+func TestDetectUserRoleSharedStore(t *testing.T) {
+	home := t.TempDir()
+	for _, key := range []string{"HOME", "USERPROFILE", "XDG_CONFIG_HOME"} {
+		t.Setenv(key, home)
+	}
+	t.Setenv("BEADS_DIR", "")
+	workspace := t.TempDir()
+	store := filepath.Join(workspace, ".beads-store")
+	beadsDir := filepath.Join(store, ".beads")
+	nested := filepath.Join(workspace, "arcadia", "project", "nested")
+	for _, dir := range []string{beadsDir, nested} {
+		if err := os.MkdirAll(dir, 0750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Env = gitenv.ScrubRoutingAndSuppression(os.Environ())
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git: %v: %s", err, out)
+		}
+	}
+	run("-C", store, "init", "--quiet")
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("issue-prefix: test\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(beadsDir, filepath.Join(workspace, ".beads")); err != nil {
+		t.Fatal(err)
+	}
+	for _, role := range []UserRole{Maintainer, Contributor} {
+		run("-C", store, "config", "--local", "beads.role", string(role))
+		oldStderr := os.Stderr
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		os.Stderr = w
+		got, detectErr := DetectUserRole(nested)
+		os.Stderr = oldStderr
+		_ = w.Close()
+		stderr, readErr := io.ReadAll(r)
+		_ = r.Close()
+		if detectErr != nil || readErr != nil || got != role || len(stderr) != 0 {
+			t.Fatalf("DetectUserRole = %q, %v; stderr %q; want %q without warning", got, detectErr, stderr, role)
+		}
+	}
+}

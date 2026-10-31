@@ -735,6 +735,90 @@ func (rc *RepoContext) GitOutput(ctx context.Context, args ...string) (string, e
 	return string(output), nil
 }
 
+// RoleConfigRepo returns the Git repository used for role configuration.
+// A Git working directory takes precedence. Outside Git, discover the beads
+// directory using the native ancestor walk and resolve symlinks before asking
+// Git for the repository containing the store.
+func RoleConfigRepo(path string) string {
+	fromCWD := path == ""
+	if path == "" {
+		var err error
+		path, err = os.Getwd()
+		if err != nil {
+			return ""
+		}
+	}
+	if root := roleGitRoot(path); root != "" {
+		return root
+	}
+	var beadsDir string
+	if fromCWD {
+		beadsDir = FindBeadsDir()
+	} else {
+		beadsDir = FindBeadsDirFrom(path)
+	}
+	if beadsDir == "" {
+		return ""
+	}
+	resolved, err := filepath.EvalSymlinks(beadsDir)
+	if err != nil {
+		return ""
+	}
+	return roleGitRoot(resolved)
+}
+
+func roleGitRootFromCWD() string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	return roleGitRoot(cwd)
+}
+
+func roleGitRoot(path string) string {
+	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
+	cmd.Dir = path
+	cmd.Env = gitenv.ScrubRoutingAndSuppression(os.Environ())
+	output, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(output))
+}
+
+// ReadRoleConfig reads the explicit beads.role configuration. In Git it keeps
+// the working directory's normal config precedence (including worktree and
+// global config). Outside Git only the discovered store repository's local
+// config is authoritative; global settings cannot supply a shared-store role.
+// It does not apply RepoContext's implicit contributor policy.
+func ReadRoleConfig(path string) (string, bool) {
+	selection := path
+	if path == "" {
+		var err error
+		path, err = os.Getwd()
+		if err != nil {
+			return "", false
+		}
+	}
+	args := []string{"config", "--get", "beads.role"}
+	if roleGitRoot(path) == "" {
+		path = RoleConfigRepo(selection)
+		if path == "" {
+			return "", false
+		}
+		args = []string{"config", "--local", "--get", "beads.role"}
+	}
+	cmd := exec.Command("git", args...)
+	cmd.Dir = path
+	cmd.Env = gitenv.ScrubRoutingAndSuppression(os.Environ())
+	output, err := cmd.Output()
+	if err != nil {
+		return "", false
+	}
+	role := strings.TrimSpace(string(output))
+	return role, true
+}
+
 // Role reads beads.role from git config (fresh each call, ~1ms).
 //
 // If BEADS_DIR is set (IsRedirected), returns Contributor implicitly
@@ -748,7 +832,13 @@ func (rc *RepoContext) Role() (UserRole, bool) {
 		return Contributor, true
 	}
 
-	cmd := rc.gitCmdWithEnv(context.Background(), gitenv.ScrubRoutingAndSuppression(os.Environ()), "config", "--get", "beads.role")
+	args := []string{"config", "--get", "beads.role"}
+	if rc.CWDRepoRoot == "" && roleGitRootFromCWD() == "" {
+		// Outside Git, a walk-found shared store supplies only a local role.
+		// Explicit external selections retain the contributor policy above.
+		args = []string{"config", "--local", "--get", "beads.role"}
+	}
+	cmd := rc.gitCmdWithEnv(context.Background(), gitenv.ScrubRoutingAndSuppression(os.Environ()), args...)
 	output, err := cmd.Output()
 	if err != nil {
 		return "", false // Not configured

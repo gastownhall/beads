@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/gitenv"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 )
@@ -18,16 +19,7 @@ import (
 // before GH#1531 moved storage to git config.
 // Opens its own store; prefer CheckBeadsRoleWithStore when a shared store is available.
 func CheckBeadsRole(path string) DoctorCheck {
-	// Read beads.role from git config (canonical location)
-	cmd := exec.Command("git", "config", "--get", "beads.role")
-	cmd.Env = gitenv.ScrubRoutingAndSuppression(os.Environ())
-	if path != "" {
-		cmd.Dir = path
-	}
-	output, err := cmd.Output()
-
-	if err == nil {
-		role := strings.TrimSpace(string(output))
+	if role, ok := beads.ReadRoleConfig(path); ok {
 		return validateRole(role)
 	}
 
@@ -43,16 +35,7 @@ func CheckBeadsRole(path string) DoctorCheck {
 
 // CheckBeadsRoleWithStore verifies beads.role using a shared store (GH#2636).
 func CheckBeadsRoleWithStore(path string, ss *SharedStore) DoctorCheck {
-	// Read beads.role from git config (canonical location)
-	cmd := exec.Command("git", "config", "--get", "beads.role")
-	cmd.Env = gitenv.ScrubRoutingAndSuppression(os.Environ())
-	if path != "" {
-		cmd.Dir = path
-	}
-	output, err := cmd.Output()
-
-	if err == nil {
-		role := strings.TrimSpace(string(output))
+	if role, ok := beads.ReadRoleConfig(path); ok {
 		return validateRole(role)
 	}
 
@@ -65,10 +48,9 @@ func CheckBeadsRoleWithStore(path string, ss *SharedStore) DoctorCheck {
 }
 
 func checkBeadsRoleNotInGit(path string) DoctorCheck {
-	// Check if we're even in a git repository. If not, skip the check rather
-	// than warn about missing config that may be correctly set in a worktree
-	// (e.g., rig roots use .repo.git instead of .git).
-	if !isGitRepo(path) {
+	// Skip only when neither the selected path nor its discovered store has
+	// a Git repository in which a role can be configured.
+	if beads.RoleConfigRepo(path) == "" {
 		return DoctorCheck{
 			Name:     "Role Configuration",
 			Status:   StatusOK,
@@ -77,13 +59,18 @@ func checkBeadsRoleNotInGit(path string) DoctorCheck {
 		}
 	}
 
+	fix := "git config beads.role maintainer"
+	if !isGitRepo(path) {
+		fix = fmt.Sprintf("git -C %q config --local beads.role maintainer", beads.RoleConfigRepo(path))
+	}
+
 	// Neither git config nor database has the role configured
 	return DoctorCheck{
 		Name:     "Role Configuration",
 		Status:   StatusWarning,
 		Message:  "beads.role not configured",
 		Detail:   "Role must be set for routing to work. Run one of the commands below.",
-		Fix:      "git config beads.role maintainer",
+		Fix:      fix,
 		Category: CategoryData,
 	}
 }

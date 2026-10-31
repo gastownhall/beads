@@ -628,14 +628,7 @@ var configGetCmd = &cobra.Command{
 		}
 
 		if key == "beads.role" {
-			// Same role-authority boundary as `bd config set` above.
-			cmd := exec.Command("git", "config", "--get", "beads.role")
-			cmd.Env = gitenv.ScrubRoutingAndSuppression(os.Environ())
-			output, err := cmd.Output()
-			value := strings.TrimSpace(string(output))
-			if err != nil {
-				value = ""
-			}
+			value, _ := beads.ReadRoleConfig("")
 			if jsonOutput {
 				return outputJSON(map[string]interface{}{
 					"key":      key,

@@ -1397,3 +1397,83 @@ func TestRoleIgnoresInheritedGitRouting(t *testing.T) {
 		}
 	})
 }
+
+func TestReadRoleConfigSharedStore(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("BEADS_DIR", "")
+	if err := os.WriteFile(filepath.Join(home, ".gitconfig"), []byte("[beads]\nrole = global-role\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	workspace := t.TempDir()
+	store := filepath.Join(workspace, ".beads-store")
+	beadsDir := filepath.Join(store, "data", ".beads")
+	nested := filepath.Join(workspace, "arcadia", "project", "nested")
+	for _, dir := range []string{beadsDir, nested} {
+		if err := os.MkdirAll(dir, 0750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := initGitRepo(store); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("issue-prefix: test\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(".beads-store", "data", ".beads"), filepath.Join(workspace, ".beads")); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(nested)
+	for _, role := range []string{"maintainer", "contributor", "invalid"} {
+		cmd := gitCommand("-C", store, "config", "--local", "beads.role", role)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("set role: %v: %s", err, out)
+		}
+		for _, path := range []string{"", nested} {
+			if got, ok := ReadRoleConfig(path); !ok || got != role {
+				t.Fatalf("ReadRoleConfig(%q) = %q, %v; want %q, true", path, got, ok, role)
+			}
+		}
+		ResetCaches()
+		git.ResetCaches()
+		rc, err := GetRepoContextAllowingNoGit()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, ok := rc.Role(); !ok || string(got) != role {
+			t.Fatalf("shared context Role = %q, %v; want %q", got, ok, role)
+		}
+	}
+	t.Cleanup(func() { ResetCaches(); git.ResetCaches() })
+	if err := gitCommand("-C", store, "config", "--unset", "beads.role").Run(); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := ReadRoleConfig(nested); ok || got != "" {
+		t.Fatalf("global role leaked into shared store: %q, %v", got, ok)
+	}
+	// A Git checkout below the same workspace retains its own role, including
+	// ordinary global fallback, even though the shared store is discoverable.
+	repo := filepath.Join(workspace, "git-checkout")
+	if err := os.Mkdir(repo, 0750); err != nil {
+		t.Fatal(err)
+	}
+	if err := initGitRepo(repo); err != nil {
+		t.Fatal(err)
+	}
+	for _, role := range []string{"maintainer", "contributor"} {
+		if err := gitCommand("-C", repo, "config", "beads.role", role).Run(); err != nil {
+			t.Fatal(err)
+		}
+		if got, ok := ReadRoleConfig(repo); !ok || got != role {
+			t.Fatalf("Git checkout role = %q, %v; want %q", got, ok, role)
+		}
+	}
+	if err := gitCommand("-C", repo, "config", "--unset", "beads.role").Run(); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := ReadRoleConfig(repo); !ok || got != "global-role" {
+		t.Fatalf("Git global fallback = %q, %v", got, ok)
+	}
+}

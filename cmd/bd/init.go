@@ -3448,49 +3448,15 @@ func isInitRoleGitRepo(ctx context.Context) bool {
 	return cmd.Run() == nil
 }
 
-// getBeadsRole reads the beads.role git config value.
-// Returns the role and true if configured, or empty string and false if not set.
-//
-// Both halves of the pair run on the same authority boundary as every role
-// reader so init cannot report a role it wrote into a different repository:
-// an inherited GIT_DIR would redirect setBeadsRole's write, and inherited
-// config suppression would blind the read that decides whether to write at
-// all.
-//
-// Selection is then the working directory or a containing ancestor. The scrub
-// drops GIT_CEILING_DIRECTORIES along with the redirects, so it removes a
-// bound rather than installing one: measured from a non-repository directory
-// nested under a repository, `git config beads.role <value>` fails "not in a
-// git directory" while a ceiling below that repository is inherited, and
-// writes the repository's local config once the ceiling is scrubbed. cmd.Dir
-// is still not threaded through the pair, because no production path chdirs
-// away from the invocation directory before these run. Two residuals remain:
-// upward discovery from an unintended cwd, and `bd -C <dir>`, which redirects
-// project selection by setting BEADS_DIR without chdir-ing
-// (applyChangeDirSelection), so init can act on another project's workspace
-// while the pair still reads and writes beads.role in the invocation
-// repository; -C requires an existing beads project at the target, so that
-// pairing arises on re-init rather than first init, and the GH#2950 safety net
-// records the same BEADS_DIR skew. Threading init's resolved project root
-// through the pair would close that one, but it is a behavior change rather
-// than a boundary fix. clearWorktreeGitRoutingEnv discloses the same widening
-// for the bd worktree commands.
+// getBeadsRole reads explicit role configuration from CWD's Git repository,
+// or the discovered shared store when CWD is outside Git.
 func getBeadsRole() (string, bool) {
-	cmd := exec.Command("git", "config", "--get", "beads.role")
-	cmd.Env = gitenv.ScrubRoutingAndSuppression(os.Environ())
-	output, err := cmd.Output()
-	if err != nil {
-		return "", false
-	}
-	role := strings.TrimSpace(string(output))
-	if role == "" {
-		return "", false
-	}
-	return role, true
+	role, ok := beads.ReadRoleConfig("")
+	return role, ok && role != ""
 }
 
-// setBeadsRole writes the beads.role git config value. See getBeadsRole for
-// why the pair shares the role-authority environment boundary.
+// setBeadsRole writes beads.role in the invocation repository, discarding
+// inherited Git routing and config suppression just like the role reader.
 func setBeadsRole(role string) error {
 	cmd := exec.Command("git", "config", "beads.role", role)
 	cmd.Env = gitenv.ScrubRoutingAndSuppression(os.Environ())

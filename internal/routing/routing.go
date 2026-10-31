@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/gitenv"
 )
@@ -16,6 +17,12 @@ import (
 // suppression: detectFromURL below answers a missed read with Maintainer, which
 // would let a caller escalate by blinding the lookup rather than forging it.
 var gitCommandRunner = func(repoPath string, args ...string) ([]byte, error) {
+	if len(args) == 3 && args[0] == "config" && args[1] == "--get" && args[2] == "beads.role" {
+		if role, ok := beads.ReadRoleConfig(repoPath); ok {
+			return []byte(role), nil
+		}
+		return nil, os.ErrNotExist
+	}
 	cmd := exec.Command("git", args...)
 	cmd.Env = gitenv.ScrubRoutingAndSuppression(os.Environ())
 	if repoPath != "" {
