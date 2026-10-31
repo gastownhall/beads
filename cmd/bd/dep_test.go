@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	storageissueops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
@@ -1172,6 +1173,140 @@ func TestDepRoutedTargetOpensReadOnly(t *testing.T) {
 	}
 	if rwDolt.IsReadOnly() {
 		t.Fatal("source resolution must open the routed store writable, but it is read-only")
+	}
+}
+
+// TestDepAddProxiedServerRoutedTargetIsNotUnverified covers the routed
+// answers of the proxied unresolved-target notice (GH#6556), which the
+// stub-server pins in dep_add_target_test.go cannot reach: the proxied writers
+// resolve no IDs, so once the server has missed a cross-prefix target,
+// proxiedDepTargetMiss follows a prefix route itself. A target the routed rig
+// holds is no typo and gets no notice; one the rig misses is reported as not
+// found, not as a lookup that failed. The server stores the target as typed,
+// so only that exact ID counts as found: an abbreviation of a rig ID, or a
+// hash the rig holds under another prefix, is named with the ID the rig has,
+// and a hash two rig issues share is named as ambiguous. None of them gets
+// the resolver's "resolved to" note, which would confirm an edge that names
+// no issue. Once the rig's metadata.json says proxied-server, the route cannot
+// open it (#5861): bd could not look the target up, so neither the target the
+// rig holds nor a typo gets a notice, and no bd dep remove is offered for a
+// valid edge.
+//
+// NOTE: This test uses os.Chdir and cannot run in parallel with other tests.
+func TestDepAddProxiedServerRoutedTargetIsNotUnverified(t *testing.T) {
+	ctx := context.Background()
+
+	tmpDir := t.TempDir()
+	townBeadsDir := filepath.Join(tmpDir, ".beads")
+	rigBeadsDir := filepath.Join(tmpDir, "rig", ".beads")
+	for _, dir := range []string{townBeadsDir, rigBeadsDir} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatalf("create %s: %v", dir, err)
+		}
+	}
+
+	rigStore := newTestStoreIsolatedDB(t, filepath.Join(rigBeadsDir, "dolt"), "gt")
+	for _, id := range []string{"gt-target1", "ops-xyz789", "ops-abc123", "qa-abc123"} {
+		if err := rigStore.CreateIssue(ctx, &types.Issue{
+			ID:        id,
+			Title:     "Routed dep target",
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+		}, "test"); err != nil {
+			t.Fatalf("create rig issue %s: %v", id, err)
+		}
+	}
+	if err := rigStore.SetConfig(ctx, "allowed_prefixes", "ops,qa"); err != nil {
+		t.Fatalf("set allowed_prefixes: %v", err)
+	}
+	// Release the rig store before routing reopens it.
+	rigStore.Close()
+
+	if err := os.WriteFile(filepath.Join(townBeadsDir, "routes.jsonl"), []byte(`{"prefix":"gt-","path":"rig"}`), 0644); err != nil {
+		t.Fatalf("write routes.jsonl: %v", err)
+	}
+
+	// The server holds neither target, so only the route can find one.
+	server, _ := withProxiedDepAddServer(t, proxiedDepAddIssues{})
+	dbPath = filepath.Join(townBeadsDir, "dolt") // restored by withProxiedDepAddServer
+
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+
+	// setRigMode rewrites the rig's dolt_mode, which is all a routed open
+	// reads to refuse a proxied-server rig.
+	setRigMode := func(mode string) {
+		t.Helper()
+		cfg, err := configfile.Load(rigBeadsDir)
+		if err != nil || cfg == nil {
+			t.Fatalf("load rig metadata.json: cfg=%v err=%v", cfg, err)
+		}
+		cfg.DoltMode = mode
+		if err := cfg.Save(rigBeadsDir); err != nil {
+			t.Fatalf("save rig metadata.json: %v", err)
+		}
+	}
+
+	for _, tt := range []struct {
+		target     string
+		proxiedRig bool     // the rig's metadata.json says dolt_mode: proxied-server
+		want       []string // empty means no notice
+	}{
+		{target: "gt-target1"},
+		{target: "gt-missing1", want: []string{"dependency target gt-missing1 was not found in this database or through routing"}},
+		{
+			target: "gt-targ",
+			want: []string{
+				"dependency target gt-targ could not be verified: ",
+				"(matches [gt-target1])",
+				"If gt-targ is a typo, remove the edge with: bd dep remove hq-abc gt-targ\n",
+			},
+		},
+		{
+			target: "gt-xyz789",
+			want:   []string{"dependency target gt-xyz789 could not be verified: the routed rig resolves it to ops-xyz789, an ID the edge does not store"},
+		},
+		{
+			target: "gt-abc123",
+			want:   []string{"dependency target gt-abc123 could not be verified: ", "ambiguous issue ID", "[ops-abc123 qa-abc123]"},
+		},
+		{target: "gt-target1", proxiedRig: true},
+		{target: "gt-missing1", proxiedRig: true},
+	} {
+		mode := configfile.DoltModeServer
+		if tt.proxiedRig {
+			mode = configfile.DoltModeProxiedServer
+		}
+		setRigMode(mode)
+		server.stored = nil
+		var runErr error
+		stderr := captureStderr(t, func() {
+			runErr = runDepAddProxiedServer(proxiedDepAddCmd(t), ctx, []string{"hq-abc", tt.target})
+		})
+		if runErr != nil {
+			t.Fatalf("runDepAddProxiedServer(hq-abc, %s): %v\nstderr:\n%s", tt.target, runErr, stderr)
+		}
+		if len(server.stored) != 1 || server.stored[0].DependsOnID != tt.target {
+			t.Fatalf("stored edges = %+v, want the one edge hq-abc -> %s", server.stored, tt.target)
+		}
+		if len(tt.want) == 0 && (strings.Contains(stderr, "stored unverified") || strings.Contains(stderr, "bd dep remove")) {
+			t.Errorf("%s (proxied rig %v): stderr = %q, want no notice and no bd dep remove", tt.target, tt.proxiedRig, stderr)
+		}
+		for _, want := range tt.want {
+			if !strings.Contains(stderr, want) {
+				t.Errorf("%s: stderr = %q, want it to contain %q", tt.target, stderr, want)
+			}
+		}
+		if strings.Contains(stderr, "resolved to") {
+			t.Errorf("%s: stderr = %q, want no partial-ID note: the edge stores %s as typed", tt.target, stderr, tt.target)
+		}
 	}
 }
 

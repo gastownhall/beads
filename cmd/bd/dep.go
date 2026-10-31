@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -200,28 +201,57 @@ func refuseMalformedDepTarget(sourceID, dependsOnArg string) error {
 //     rig is not in routes.jsonl yet — and dep remove (the ExtractPrefix
 //     fallback further down this file) still addresses such an edge. Refusing
 //     it here would make dep add reject an edge the store holds and dep remove
-//     can still delete.
+//     can still delete. It is accepted unverified: miss is resolveErr, the
+//     lookup that did not find the target, so once the edge is stored the
+//     caller warns (warnUnresolvedDepTarget) rather than letting a typo pass
+//     as silently as a resolved target (GH#6556), and the warning can tell a
+//     target that is missing from one whose lookup failed. A route into a
+//     rig bd cannot open leaves no miss (depTargetLookupMiss).
 //
 // A same-prefix target that resolves nowhere is still an error, unchanged.
-func resolveUnresolvedDepTarget(sourceID, dependsOnArg string, resolveErr error) (string, error) {
+// miss is nil on every outcome but 3.
+//
+// The helper prints nothing: it runs before the write, and a later refusal,
+// write error or --file rollback would leave a warning about an edge that was
+// never stored.
+func resolveUnresolvedDepTarget(sourceID, dependsOnArg string, resolveErr error) (toID string, miss error, err error) {
 	if IsExternalRef(dependsOnArg) {
 		if err := validateExternalRef(dependsOnArg); err != nil {
-			return "", err
+			return "", nil, err
 		}
-		return dependsOnArg, nil
+		return dependsOnArg, nil, nil
 	}
 
 	if err := refuseMalformedDepTarget(sourceID, dependsOnArg); err != nil {
-		return "", err
+		return "", nil, err
 	}
 
 	srcPrefix := types.ExtractPrefix(sourceID)
 	tgtPrefix := types.ExtractPrefix(dependsOnArg)
 	if srcPrefix != "" && tgtPrefix != "" && srcPrefix != tgtPrefix {
-		return dependsOnArg, nil
+		return dependsOnArg, depTargetLookupMiss(resolveErr), nil
 	}
 
-	return "", fmt.Errorf("resolving dependency ID %s: %v", dependsOnArg, resolveErr)
+	return "", nil, fmt.Errorf("resolving dependency ID %s: %v", dependsOnArg, resolveErr)
+}
+
+// depTargetLookupMiss is the miss both dep add routes keep for a cross-prefix
+// target their lookup did not find: the lookup error itself, which
+// unresolvedDepTargetWarning prints, or nil when bd could not look the target
+// up at all. A route into a rig in proxied-server mode is that case: bd will
+// not open a proxied-server workspace as a direct store
+// (errProxiedStoreUnrouted), and a routed read has no other way into one yet
+// (#5861, docs/workflows/gates.md). The refusal says nothing about the target,
+// and in an all-proxied town it answers for every cross-rig edge, so reporting
+// it would print a typo notice, with a bd dep remove that deletes the edge,
+// for every valid one. A typo into such a rig is stored without a notice, as
+// it was before GH#6556.
+func depTargetLookupMiss(lookupErr error) error {
+	var capErr *ProxyCapabilityError
+	if errors.As(lookupErr, &capErr) && capErr.Code == "proxy.store.unrouted" {
+		return nil
+	}
+	return lookupErr
 }
 
 var depCmd = &cobra.Command{
@@ -438,6 +468,7 @@ Examples:
 		ctx := rootCtx
 
 		var fromID, toID string
+		var toMiss error
 
 		isExternalRef := strings.HasPrefix(dependsOnArg, "external:")
 
@@ -460,7 +491,7 @@ Examples:
 			var toCleanup func()
 			toID, _, toCleanup, err = resolveIDWithRouting(ctx, store, dependsOnArg)
 			if err != nil {
-				toID, err = resolveUnresolvedDepTarget(fromID, dependsOnArg, err)
+				toID, toMiss, err = resolveUnresolvedDepTarget(fromID, dependsOnArg, err)
 				if err != nil {
 					return HandleErrorRespectJSON("%v", err)
 				}
@@ -509,6 +540,9 @@ Examples:
 
 		explicit := cmd.Flags().Changed("type") || cmd.Flags().Changed("blocked-by") || cmd.Flags().Changed("depends-on")
 		warnImplicitBlocksDefault(dt, explicit)
+		if toMiss != nil {
+			warnUnresolvedDepTarget("", fromID, toID, toMiss)
+		}
 
 		if jsonOutput {
 			return outputJSON(map[string]interface{}{
@@ -574,6 +608,60 @@ func emitImplicitBlocksDefaultWarning() {
 	fmt.Fprintf(os.Stderr, "warning: no -t/--type given; edge created as type=blocks — the dependent is excluded from bd ready until the edge resolves. Use -t parent-child for structural parent/child linkage (silence with --quiet or BD_NO_DEP_TYPE_WARNING=1)\n") //nolint:gosec // G705: stderr, not a browser context
 }
 
+// unresolvedDepTargetWarning is the notice for an edge stored with a target
+// nothing found: resolveUnresolvedDepTarget's outcome 3 on the direct route,
+// proxiedDepTargetMiss on the proxied one. where is "" or "line N: " for
+// --file. miss is the lookup error that left the target unverified. A
+// not-found says the target was found neither in this database nor through
+// routing; any other error (a routes.jsonl or rig that cannot be read, an ID
+// ambiguous in the routed rig) is named as the reason the target could not be
+// verified, because reporting it as a miss would misstate the cause, the rule
+// isRoutingFailure keeps. A rig bd cannot open at all, one in proxied-server
+// mode, never gets here: depTargetLookupMiss leaves no miss for it. miss is
+// printed as one line (remedy.PrintedError):
+// it can repeat the typed target or a routed path, and a line break in either
+// must not forge the remedy line under it.
+//
+// The IDs are the stored ones, so the bd dep remove command deletes exactly
+// the stored row (exactDependencyTarget); the target is user-typed, so it is
+// printed as printedIssueID spells it and goes into the command as one shell
+// word, or as a placeholder named escaped after it (remedy.CommandArg).
+func unresolvedDepTargetWarning(where, sourceID, targetID string, miss error) string {
+	srcArg, srcNote := remedy.CommandArg(runtime.GOOS, sourceID, "<issue-id>")
+	tgtArg, tgtNote := remedy.CommandArg(runtime.GOOS, targetID, "<target-id>")
+	outcome := "was not found in this database or through routing"
+	if !isNotFoundErr(miss) {
+		outcome = fmt.Sprintf("could not be verified: %v", remedy.PrintedError(miss))
+	}
+	return fmt.Sprintf("warning: %sdependency target %s %s; the edge was stored unverified as a cross-repo reference\n"+
+		"If %s is a typo, remove the edge with: bd dep remove %s %s%s%s\n",
+		where, printedIssueID(targetID), outcome, printedIssueID(targetID), srcArg, tgtArg, srcNote, tgtNote)
+}
+
+// warnUnresolvedDepTarget writes unresolvedDepTargetWarning to stderr. It is
+// called only after the edge is stored. Unlike the D1 warning it is not
+// TTY-gated: it fires only on the unresolved minority path, and scripted and
+// agent callers are where such a typo most often comes from. It honors
+// --quiet, like the package's other non-error notices.
+func warnUnresolvedDepTarget(where, sourceID, targetID string, miss error) {
+	if quietFlag {
+		return
+	}
+	fmt.Fprint(os.Stderr, unresolvedDepTargetWarning(where, sourceID, targetID, miss)) //nolint:gosec // G705: stderr, not a browser context
+}
+
+// warnUnverifiedBulkDepEdges warns once per edge whose TargetMiss is set, in
+// input order: each notice names its own line and remove command. Both --file
+// routes call it only once their all-or-nothing batch is stored, so every
+// edge it names was written.
+func warnUnverifiedBulkDepEdges(edges []bulkDepEdge) {
+	for _, edge := range edges {
+		if edge.TargetMiss != nil {
+			warnUnresolvedDepTarget(fmt.Sprintf("line %d: ", edge.Line), edge.IssueID, edge.DependsOnID, edge.TargetMiss)
+		}
+	}
+}
+
 type bulkDepInput struct {
 	From        string `json:"from"`
 	To          string `json:"to"`
@@ -594,6 +682,13 @@ type bulkDepEdge struct {
 	Store     storage.DoltStorage
 	StoreKey  string
 	Cleanups  []func()
+
+	// TargetMiss is the lookup error behind a target stored without being
+	// found, a bare cross-prefix reference (resolveUnresolvedDepTarget's
+	// outcome 3, or proxiedDepTargetMiss after a proxied write), and nil for
+	// every other edge. warnUnverifiedBulkDepEdges warns about each edge that
+	// has one once the batch is stored.
+	TargetMiss error
 }
 
 func addBulkDependencies(cmd *cobra.Command, file string, defaultType string) error {
@@ -662,6 +757,9 @@ func addBulkDependencies(cmd *cobra.Command, file string, defaultType string) er
 			}
 		}
 	}
+	// The batch is all-or-nothing, so reaching here means every edge was
+	// stored, the unverified ones included.
+	warnUnverifiedBulkDepEdges(resolved)
 
 	if jsonOutput {
 		out := make([]map[string]interface{}, 0, len(resolved))
@@ -795,7 +893,7 @@ func validateBulkDepEdges(ctx context.Context, edges []bulkDepEdge) ([]bulkDepEd
 				// --file used to carry its own copy of the cross-prefix ladder,
 				// which left the be-gmdx5 "type:id" shape accepted and stored
 				// here after the positional path started refusing it.
-				toID, err = resolveUnresolvedDepTarget(current.IssueID, edge.DependsOnID, err)
+				toID, current.TargetMiss, err = resolveUnresolvedDepTarget(current.IssueID, edge.DependsOnID, err)
 				if err != nil {
 					errs = append(errs, fmt.Sprintf("line %d: %v", edge.Line, err))
 					resolved = append(resolved, current)
