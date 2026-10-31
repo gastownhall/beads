@@ -3053,6 +3053,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   under this node. For a Postgres port: the
   refresh now reads the issue row, so under SERIALIZABLE expect more retried
   serialization failures between a holder's own edits and its heartbeat.
+- **`bd config set` no longer warns that `audit.*` and `list.*` keys are
+  unrecognized.** `bd config set audit.enabled true`, the command
+  `bd audit --help` prints, took effect but warned that the key was unknown,
+  and `list.limit` was answered with "Did you mean `lint.limit`?" (#6184).
 - **`bd gate list` works over a connected HTTP workspace** (S20). The
   workspace-wide listing built a raw `SearchIssues` filter, which the HTTP
   backend refuses, so gc's `renudge-stale-human-gates` order failed on every
