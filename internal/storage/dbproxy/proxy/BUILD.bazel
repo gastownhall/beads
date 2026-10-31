@@ -22,6 +22,8 @@ go_library(
         "unverified_process_unsupported.go",
         "unverified_process_windows.go",
         "upstream_error.go",
+        "upstream_error_unix.go",
+        "upstream_error_windows.go",
     ],
     importpath = "github.com/steveyegge/beads/internal/storage/dbproxy/proxy",
     visibility = ["//:__subpackages__"],
@@ -74,6 +76,7 @@ go_test(
         "server_epoch_internal_test.go",
         "server_test.go",
         "upstream_error_test.go",
+        "upstream_error_windows_test.go",
     ],
     embed = [":proxy"],
     deps = [
