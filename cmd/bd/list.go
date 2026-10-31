@@ -556,7 +556,7 @@ func init() {
 	listCmd.Flags().Bool("no-pager", false, "Disable pager output")
 
 	// Ready filter: show only issues ready to be worked on (bd-ihu31)
-	listCmd.Flags().Bool("ready", false, "Show only ready issues (no active blockers, same semantics as bd ready)")
+	listCmd.Flags().Bool("ready", false, "Show only ready issues: no active blockers, status open or an active-category custom status unless --status is given")
 
 	// Defensive row cap (be-x42v): exits 2 on overage, default disabled.
 	// ROUTED, not direct-only: both routes thread the cap now.

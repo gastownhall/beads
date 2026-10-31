@@ -223,7 +223,7 @@ func TestListFooterLineTruncationDisclosedAlongsideReady(t *testing.T) {
 }
 
 // GH#5832: an explicit --status under --ready is a different pin. The default
-// "open only — --ready excludes in_progress" sentence must not be reused.
+// open-pin sentence ("... --ready excludes in_progress") must not be reused.
 func TestListFooterLineReadyExplicitStatusNamesSelector(t *testing.T) {
 	line := listFooterLine(3, 0, 3, false, true, "in_progress")
 	if strings.Contains(line, "open only") || strings.Contains(line, "excludes in_progress") {
@@ -281,5 +281,32 @@ func TestDisplayWatchedIssueListReadyExplicitStatusFooter(t *testing.T) {
 	}
 	if !strings.Contains(out, "in_progress only") {
 		t.Errorf("--status in_progress --ready --watch must name the selected status, got: %q", out)
+	}
+}
+
+// GH#6188: the ready query reads a single "open" pin as open PLUS every custom
+// status in the active category (GH#5831), whether the pin is the --ready
+// default or an explicit --status open. A footer that says "open only" under a
+// row in such a status contradicts the row printed above it.
+func TestListFooterLineReadyOpenPinNamesActiveCategory(t *testing.T) {
+	issues := []*types.Issue{
+		{ID: "bd-1", Title: "A", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask},
+		{ID: "bd-2", Title: "B", Status: types.Status("in_review"), Priority: 1, IssueType: types.TypeTask},
+	}
+	for _, selector := range []string{"", "all", "open"} {
+		out := captureStdout(t, func() error {
+			displayPrettyListWithDeps(issues, false, nil, false, true, selector)
+			return nil
+		})
+		if strings.Contains(out, "open only") {
+			t.Errorf("--status %q: footer claims open only under a custom active-category row: %q", selector, out)
+		}
+		if !strings.Contains(out, "active-category custom status") {
+			t.Errorf("--status %q: footer must name the active-category custom statuses --ready admits, got: %q", selector, out)
+		}
+	}
+	// A multi-status selector is matched exactly, so it keeps naming itself.
+	if line := listFooterLine(2, 1, 0, false, true, "open,blocked"); !strings.Contains(line, "open,blocked only") {
+		t.Errorf("multi-status selector must be named exactly, got: %q", line)
 	}
 }

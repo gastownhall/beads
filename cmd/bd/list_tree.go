@@ -260,8 +260,10 @@ func listFooterLine(total, open, inProgress int, truncated, readyFiltered bool, 
 }
 
 // readyFooterScope names the status pin a --ready listing actually used.
-// Empty / "all" still take the open default; an explicit selector is the
-// intersection and must not reuse "excludes in_progress" (GH#5832).
+// Empty / "all" take the open default, and the ready query reads a single
+// "open" pin — default or explicit — as open plus every custom status in the
+// active category (GH#5831), so both say so (GH#6188). Any other selector is
+// matched exactly and must not reuse "excludes in_progress" (GH#5832).
 func readyFooterScope(statusSelector string) string {
 	var parts []string
 	for _, part := range strings.Split(statusSelector, ",") {
@@ -270,8 +272,8 @@ func readyFooterScope(statusSelector string) string {
 			parts = append(parts, part)
 		}
 	}
-	if len(parts) == 0 || (len(parts) == 1 && parts[0] == "all") {
-		return "open only — --ready excludes in_progress"
+	if len(parts) == 0 || (len(parts) == 1 && (parts[0] == "all" || parts[0] == string(types.StatusOpen))) {
+		return "open or active-category custom status — --ready excludes in_progress"
 	}
 	return strings.Join(parts, ",") + " only"
 }

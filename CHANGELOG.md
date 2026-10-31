@@ -2867,6 +2867,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   need `issues.list.filters` (see Added), as does the `--closed-after` in
   gascity's polecat pre-flight lookup of recently closed beads. Either flag
   with `--parent` in the default tree view still refuses over HTTP.
+- **`bd list --ready` says which statuses it matched.** Its footer read
+  `open only — --ready excludes in_progress` (and `open only` for an explicit
+  `--status open`), though the ready query also matches custom statuses in the
+  active category, so an `in_review` row could print above a footer claiming
+  open only. It now reads `open or active-category custom status`. The flag
+  help no longer claims the same semantics as `bd ready`, which stopped being
+  true when `--ready` began honoring `--status`; it names the default status
+  set and says `--status` replaces it (#6188).
 - **`bd gate create`, `bd gate add-waiter` and `bd gate discover` work over a
   connected HTTP workspace.** They wrote through the legacy `CreateIssue`,
   `AddDependency` and map-based `UpdateIssue`, which the HTTP store does not

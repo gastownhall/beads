@@ -56,7 +56,7 @@ Flags:
   -p, --priority string              Priority (0-4 or P0-P4, 0=highest)
       --priority-max string          Filter by maximum priority (inclusive, 0-4 or P0-P4)
       --priority-min string          Filter by minimum priority (inclusive, 0-4 or P0-P4)
-      --ready                        Show only ready issues (no active blockers, same semantics as bd ready)
+      --ready                        Show only ready issues: no active blockers, status open or an active-category custom status unless --status is given
   -r, --reverse                      Invert the sort field's default direction (created/updated/closed default to newest-first, so --sort updated --reverse is oldest-first)
       --skip-labels                  Skip label hydration. The labels field in output will be empty regardless of actual labels. Use only when the caller does not depend on label data. Cannot combine with --label, --label-any, --label-pattern, --label-regex, --exclude-label, or --no-labels.
       --sort string                  Sort by field: priority, created, updated, closed, status, id, title, type, assignee

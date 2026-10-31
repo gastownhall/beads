@@ -4397,7 +4397,7 @@ bd list
   flag --priority -p type=string default="" usage="Priority (0-4 or P0-P4, 0=highest)"
   flag --priority-max type=string default="" usage="Filter by maximum priority (inclusive, 0-4 or P0-P4)"
   flag --priority-min type=string default="" usage="Filter by minimum priority (inclusive, 0-4 or P0-P4)"
-  flag --ready type=bool default="false" usage="Show only ready issues (no active blockers, same semantics as bd ready)"
+  flag --ready type=bool default="false" usage="Show only ready issues: no active blockers, status open or an active-category custom status unless --status is given"
   flag --reverse -r type=bool default="false" usage="Invert the sort field's default direction (created/updated/closed default to newest-first, so --sort updated --reverse is oldest-first)"
   flag --skip-labels type=bool default="false" usage="Skip label hydration. The labels field in output will be empty regardless of actual labels. Use only when the caller does not depend on label data. Cannot combine with --label, --label-any, --label-pattern, --label-regex, --exclude-label, or --no-labels."
   flag --sort type=string default="" usage="Sort by field: priority, created, updated, closed, status, id, title, type, assignee"
