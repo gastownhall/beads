@@ -268,7 +268,10 @@ func maybeAutoExport(ctx context.Context, allowEmptyOverwrite bool) error {
 
 	// Optional git add — skip when no-git-ops is set (GH#3314), when not in a
 	// git repo (standalone BEADS_DIR flow), or when export.git-add is false.
-	if config.GetBool("export.git-add") && !config.GetBool("no-git-ops") && isGitRepo() {
+	// isGitRepo checks the cwd, but git add runs in the export file's
+	// directory, so also require that directory to be in a work tree: a
+	// BEADS_DIR outside the cwd's repo is the standalone flow too (GH#4351).
+	if config.GetBool("export.git-add") && !config.GetBool("no-git-ops") && isGitRepo() && isGitWorkTreeDir(filepath.Dir(fullPath)) {
 		if err := gitAddFile(fullPath); err != nil {
 			return fmt.Errorf("auto-export: git add failed: %w", err)
 		}
@@ -1192,6 +1195,18 @@ func pathInsideDir(path, dir string) bool {
 	}
 	sep := string(filepath.Separator)
 	return absPath == absDir || strings.HasPrefix(absPath, absDir+sep)
+}
+
+// isGitWorkTreeDir reports whether dir is inside a git work tree, using the
+// same scrubbed environment gitAddFile stages with.
+func isGitWorkTreeDir(dir string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), gitAddTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--is-inside-work-tree")
+	cmd.Dir = dir
+	cmd.Env = scrubGitHookEnv(os.Environ())
+	out, err := cmd.Output()
+	return err == nil && strings.TrimSpace(string(out)) == "true"
 }
 
 // tryIncrementalExport attempts to update an existing export file in place
