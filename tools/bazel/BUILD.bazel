@@ -192,6 +192,7 @@ release_cross_build(
         "//internal/audit:audit",
         "//internal/beads:beads",
         "//internal/ceiling:ceiling",
+        "//internal/certstore:certstore",
         "//internal/compact:compact",
         "//internal/config:config",
         "//internal/configfile:configfile",
