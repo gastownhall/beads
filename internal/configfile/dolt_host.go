@@ -78,6 +78,14 @@ func BdRunsServerAt(host string) bool {
 	return ClassifyDoltHost(host) == DoltHostBdServer
 }
 
+// SameServerHost reports whether hosts a and b name the same server as
+// configured: equal ignoring case, after UnbracketHost, so "[::1]" and
+// "::1" are one server. It compares spellings, not addresses: "localhost"
+// and "127.0.0.1" are different hosts here.
+func SameServerHost(a, b string) bool {
+	return strings.EqualFold(UnbracketHost(a), UnbracketHost(b))
+}
+
 // IsLocalHostString reports whether host is a standard loopback name of this
 // machine: bd's own address in any spelling, or the IPv6 loopback. It
 // answers the machine-locality question (GH#3545 mode inference, auto-backup

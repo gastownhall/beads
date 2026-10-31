@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -1581,7 +1582,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				// which init's store opens (see below).
 				err, disposition = nil, initRemoteCloneBootstrapped
 			}
-			if advice := initUnresolvedClonePortAdvice(err, externalServer, cloneCfg.GetDoltServerHost()); advice != "" {
+			if advice := initUnresolvedClonePortAdvice(err, externalServer, initCloneHost(cloneCfg)); advice != "" {
 				// Nothing was dialed: no port names the server to clone
 				// into, and the store would refuse it too. The advice is
 				// the store open's for that server: name the port.
@@ -1790,6 +1791,8 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 					fcfg := initTimeCloneConfig(initServerMode, serverHost, serverPort, serverSocket, serverUser, dbName)
 					if ferr := finalizeSyncedBootstrap(beadsDir, syncURL, fcfg, dbName); ferr != nil {
 						fmt.Fprintf(os.Stderr, "Warning: failed to finalize bootstrapped workspace: %s\n", remedy.PrintedMessage(ferr))
+					} else if serverHost != "" && fcfg.DoltMode == configfile.DoltModeServer && !usesProxiedServer() {
+						recordInitServerHost(os.Stderr, beadsDir, serverHost)
 					}
 				}
 				if jsonOutput {
@@ -2076,6 +2079,10 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			// rather than rejecting it (#5743).
 			if err := persistInitSyncRemote(beadsDir, initRemote, syncURL, syncFromRemote, syncURLFromConfig, syncURLFromGitOrigin); err != nil {
 				return fmt.Errorf("failed to persist sync.remote to config.yaml: %v", err)
+			}
+
+			if serverHost != "" && cfg.DoltMode == configfile.DoltModeServer {
+				recordInitServerHost(os.Stderr, beadsDir, serverHost)
 			}
 
 			// Enable shared server mode if requested via flag OR env var (GH#2377).
@@ -3822,12 +3829,13 @@ func initCloneSocketTransport(socket, host string, port int) string {
 const initCloneSocketProbeTimeout = 500 * time.Millisecond
 
 // initCloneEndpoint is the endpoint bd init --server's store opens, as its
-// clone mode (initRemoteCloneMode) reads it: cloneCfg's, on the port init's
-// store dials (initServerClonePort), as the user it presents (--server-user,
-// serverUser, over a credential command's token).
+// clone mode (initRemoteCloneMode) reads it: cloneCfg's, at the host init's
+// store dials (initCloneHost), on the port it dials (initServerClonePort), as
+// the user it presents (--server-user, serverUser, over a credential
+// command's token).
 func initCloneEndpoint(beadsDir string, cloneCfg *configfile.Config, serverUser string) doltserver.Endpoint {
 	port, source := initServerClonePortAndSource(beadsDir, cloneCfg)
-	ep := doltserver.ResolveEndpoint(beadsDir, cloneCfg).AtPort(port, source)
+	ep := doltserver.ResolveEndpoint(beadsDir, cloneCfg).WithHost(initCloneHost(cloneCfg)).AtPort(port, source)
 	if serverUser != "" {
 		ep = ep.WithUser(serverUser)
 	}
@@ -3867,7 +3875,7 @@ func initCloneFromRemote(ctx context.Context, beadsDir, remoteURL, dbName string
 			if held {
 				return &initCloneTargetHeldError{location: location}
 			}
-			if down && doltserver.HostRunsBDServer(cloneCfg.GetDoltServerHost()) {
+			if down && doltserver.HostRunsBDServer(initCloneHost(cloneCfg)) {
 				// A server some other process runs at bd's host that
 				// could not be dialed: keep main's CLI clone, so init's
 				// store open reports that server in its own words (the
@@ -4088,7 +4096,6 @@ func initTimeCloneConfig(serverMode bool, serverHost string, serverPort int, ser
 	cfg.DoltDatabase = dbName
 	if serverMode {
 		cfg.DoltMode = configfile.DoltModeServer
-		cfg.DoltServerHost = configfile.DefaultDoltServerHost
 		cfg.DoltServerUser = configfile.DefaultDoltServerUser
 	} else {
 		cfg.DoltMode = configfile.DoltModeEmbedded
@@ -4119,6 +4126,28 @@ func initStoreServerHost(serverHost string) string {
 		return h
 	}
 	return configfile.DefaultDoltServerHost
+}
+
+// initCloneHost is the host bd init's clone dials for cloneCfg: the host
+// init's store opens (initStoreServerHost of cloneCfg's --server-host), never
+// a dolt.host the loaded config names, which that store does not dial
+// (GH#5961).
+func initCloneHost(cloneCfg *configfile.Config) string {
+	if cloneCfg == nil {
+		return initStoreServerHost("")
+	}
+	return initStoreServerHost(cloneCfg.DoltServerHost)
+}
+
+// recordInitServerHost records bd init --server-host, serverHost, in
+// beadsDir's config.yaml beside metadata.json, where it outranks
+// dolt_server_host (GH#5961), when beadsDir has a config.yaml, and warns on w
+// when another setting still outranks it there.
+func recordInitServerHost(w io.Writer, beadsDir, serverHost string) {
+	if _, err := writeWorkspaceDoltHost(beadsDir, serverHost); err != nil {
+		fmt.Fprintf(w, "Warning: failed to record --server-host in config.yaml: %s\n", remedy.PrintedMessage(err))
+	}
+	warnDoltHostOutranked(w, beadsDir, serverHost)
 }
 
 // initStoreServerPort is the server port, and its source, that bd init puts on

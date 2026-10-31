@@ -95,7 +95,7 @@ Flags for 'bd dolt set':
 
 Examples:
   bd dolt set database myproject
-  bd dolt set host 192.168.1.100 --update-config
+  bd dolt set host 192.168.1.100
   bd dolt set data-dir /home/user/.beads-dolt/myproject
   export BEADS_DOLT_PASSWORD=... BEADS_DOLT_SERVER_TLS=1
   bd dolt test`,
@@ -140,6 +140,8 @@ not land in metadata.json. Use environment variables or the credentials file:
   See: bd dolt --help and docs/architecture/dolt.md
 
 Use --update-config to also write to config.yaml for team-wide defaults.
+host is always written to the workspace's config.yaml too, when it has one:
+its dolt.host outranks metadata.json, so bd dials the host you set.
 
 Examples:
   bd dolt set database myproject
@@ -2357,6 +2359,7 @@ func showDoltConfig(testConnection bool) error {
 	if err := validateConfiguredBackend(cfg, beadsDir); err != nil {
 		return HandleError("%v", err)
 	}
+	warnOutrankedServerHost(os.Stderr, beadsDir, cfg)
 
 	backend := cfg.GetBackend()
 	embedded := !usesSQLServer()
@@ -2602,13 +2605,37 @@ func setDoltConfig(key, value string, updateConfig bool) error {
 		return HandleError("saving config: %v", err)
 	}
 
+	// Also update config.yaml when asked to. A host always goes to the
+	// workspace's config.yaml when it has one: its dolt.host outranks
+	// metadata.json's dolt_server_host (GH#5961), so a host set in
+	// metadata.json alone would not be the host bd dials.
+	var yamlUpdated bool
+	var yamlErr error
+	switch {
+	case key == "host":
+		yamlUpdated, yamlErr = writeWorkspaceDoltHost(beadsDir, value)
+	case updateConfig && yamlKey != "":
+		yamlErr = config.SetYamlConfig(yamlKey, value)
+		yamlUpdated = yamlErr == nil
+	}
+	yamlWarning := ""
+	if yamlErr != nil {
+		yamlWarning = fmt.Sprintf("Warning: failed to update config.yaml: %v", yamlErr)
+	}
+
 	if jsonOutput {
+		if yamlWarning != "" {
+			fmt.Fprintln(os.Stderr, yamlWarning)
+		}
+		if key == "host" {
+			warnDoltHostOutranked(os.Stderr, beadsDir, value)
+		}
 		result := map[string]interface{}{
 			"key":      key,
 			"value":    value,
 			"location": "metadata.json",
 		}
-		if updateConfig {
+		if yamlUpdated {
 			result["config_yaml_updated"] = true
 		}
 		if err := outputJSON(result); err != nil {
@@ -2618,14 +2645,14 @@ func setDoltConfig(key, value string, updateConfig bool) error {
 	}
 
 	fmt.Printf("Set %s = %s (in metadata.json)\n", key, value)
-
-	// Also update config.yaml if requested
-	if updateConfig && yamlKey != "" {
-		if err := config.SetYamlConfig(yamlKey, value); err != nil {
-			fmt.Printf("%s\n", ui.RenderWarn(fmt.Sprintf("Warning: failed to update config.yaml: %v", err)))
-		} else {
-			fmt.Printf("Set %s = %s (in config.yaml)\n", yamlKey, value)
-		}
+	switch {
+	case yamlWarning != "":
+		fmt.Printf("%s\n", ui.RenderWarn(yamlWarning))
+	case yamlUpdated:
+		fmt.Printf("Set %s = %s (in config.yaml)\n", yamlKey, value)
+	}
+	if key == "host" {
+		warnDoltHostOutranked(os.Stderr, beadsDir, value)
 	}
 	return nil
 }

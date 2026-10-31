@@ -337,6 +337,12 @@ Configure the connection with flags or environment variables:
 | `--server-user` | `BEADS_DOLT_SERVER_USER` | `root` |
 | | `BEADS_DOLT_PASSWORD` | (none) |
 
+**Host order (GH#5961):** `BEADS_DOLT_SERVER_HOST`, then `dolt.host` from
+config (`BD_DOLT_HOST`, `.beads/config.local.yaml`, `.beads/config.yaml`, the
+user-level config.yaml), then `dolt_server_host` in `.beads/metadata.json`,
+then `127.0.0.1`. When a `dolt.host` outranks a different metadata host, `bd`
+warns once and names how to keep either. `bd dolt set host` writes both files.
+
 **`BEADS_DOLT_SERVER_PORT` also declares the server externally managed.**
 Setting it — or the legacy `BEADS_DOLT_PORT` — makes `ResolveServerMode`
 classify the workspace as an externally-managed server, so bd will not

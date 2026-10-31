@@ -37,6 +37,7 @@ go_test(
         "external_dolt_config_test.go",
         "graph_mode_test.go",
         "historical_sqlite_test.go",
+        "host_precedence_repro_test.go",
         "remedy_printing_test.go",
         "workspace_format_test.go",
     ],

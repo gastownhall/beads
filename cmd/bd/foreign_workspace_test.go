@@ -256,6 +256,9 @@ func TestTargetSelectsServerMode(t *testing.T) {
 		{name: "config.yaml local host", yaml: "dolt:\n  host: 127.0.0.1\n", want: false},
 		{name: "config.yaml mode embedded beside remote host", yaml: "dolt:\n  mode: embedded\n  host: db.example.com\n", want: false},
 		{name: "metadata remote host", metadata: `{"backend":"dolt","dolt_server_host":"db.example.com"}`, want: true},
+		{name: "config.yaml remote host over metadata local host", metadata: `{"backend":"dolt","dolt_server_host":"127.0.0.1"}`, yaml: "dolt:\n  host: db.example.com\n", want: true},
+		{name: "config.yaml local host over metadata remote host", metadata: `{"backend":"dolt","dolt_server_host":"db.example.com"}`, yaml: "dolt:\n  host: 127.0.0.1\n", want: false},
+		{name: "config.yaml mode embedded beside metadata naming the same remote host", metadata: `{"backend":"dolt","dolt_server_host":"db.example.com"}`, yaml: "dolt:\n  mode: embedded\n  host: DB.example.com\n", want: true},
 		{name: "proxied server", metadata: `{"backend":"dolt","dolt_mode":"proxied-server"}`, want: false},
 		{name: "env server mode", env: map[string]string{"BEADS_DOLT_SERVER_MODE": "1"}, want: true},
 		{name: "env remote host", env: map[string]string{"BEADS_DOLT_SERVER_HOST": "db.example.com"}, want: true},
@@ -344,8 +347,8 @@ func TestRefuseExistingCreateTargetRefusesEmbeddedOpenOfServerWorkspace(t *testi
 	// metadata.json port. Only the dolt.port differs: the launcher's own
 	// where bd there reads the target's own, and the user-level one where
 	// either names none. So for a host bd does not run its server at the
-	// remedy names the host the target itself dials (its metadata.json over
-	// its config.yaml, as bd run there resolves it) and the port bd there
+	// remedy names the host the target itself dials (its config.yaml over
+	// its metadata.json, as bd run there resolves it, GH#5961) and the port bd there
 	// dials, no port where a listener.port decides both opens, or asks for
 	// the port when nothing names one; setting only dolt_mode would dial
 	// another server, or auto-start one of bd's own inside the target. For
@@ -360,7 +363,9 @@ func TestRefuseExistingCreateTargetRefusesEmbeddedOpenOfServerWorkspace(t *testi
 	// planning repo (wantPlanning, "" for the same as want, which must then
 	// not offer the write inside), says this write cannot be aimed at the
 	// target's port from here. A launcher's port is named as its own
-	// configuration's only when that names it.
+	// configuration's only when that names it. A launcher's dolt.host naming
+	// another server outranks any host the edit could name for the open from
+	// here, so only the write inside the target reaches that server.
 	const bdHostInside = `Set "dolt_mode": "server" in its .beads/metadata.json, then make the write inside that repository, where bd dials the port its own config names, which bd here does not read; nothing was created`
 	const modeOnly = `Set "dolt_mode": "server" in its .beads/metadata.json, then rerun; nothing was created`
 	const bdHostCannotAim = `which bd here does not read, and it has no .beads/dolt-server.port, which bd here would dial first, so even once its .beads/metadata.json sets "dolt_mode": "server", bd migrate-personal cannot aim this write at that port, and a "dolt_server_port" there would declare the server bd runs for it externally managed; nothing was created`
@@ -427,7 +432,9 @@ func TestRefuseExistingCreateTargetRefusesEmbeddedOpenOfServerWorkspace(t *testi
 		// The target dials the port its metadata.json names, not the
 		// default for a remote host.
 		{name: "metadata names the port, config.yaml a remote host and no port", metadata: `{"backend":"dolt","dolt_database":"beads","dolt_server_port":23483}`, config: "dolt:\n  mode: server\n  host: 127.0.0.2\n", want: `Set "dolt_mode": "server", "dolt_server_host": "127.0.0.2" and "dolt_server_port": 23483 in its .beads/metadata.json, then rerun`},
-		{name: "metadata names 127.0.0.1 over a remote config.yaml host", metadata: `{"backend":"dolt","dolt_database":"beads","dolt_server_host":"127.0.0.1"}`, config: "dolt:\n  mode: server\n  host: db.example.com\n  port: 23481\n", want: bdHostInside, wantPlanning: "Its own config names dolt.port 23481, " + bdHostCannotAim},
+		// Its config.yaml host outranks its metadata.json host for bd there
+		// (GH#5961), and the open from here reads only the latter.
+		{name: "config.yaml names a remote host over metadata's 127.0.0.1", metadata: `{"backend":"dolt","dolt_database":"beads","dolt_server_host":"127.0.0.1"}`, config: "dolt:\n  mode: server\n  host: db.example.com\n  port: 23481\n", want: `Set "dolt_mode": "server", "dolt_server_host": "db.example.com" and "dolt_server_port": 23481 in its .beads/metadata.json, then rerun`},
 		// The open from here reads the metadata.json host, but not the
 		// config.yaml port. Any host there but bd's own and the IPv6
 		// loopback selects server mode for that open
@@ -447,6 +454,12 @@ func TestRefuseExistingCreateTargetRefusesEmbeddedOpenOfServerWorkspace(t *testi
 		// opens, and the target's own dolt.port outranks it for bd there.
 		{name: "remote host and port, user-level dolt.port naming another", user: launcherPort, config: "dolt:\n  mode: server\n  host: db.example.com\n  port: 23481\n", want: `Set "dolt_mode": "server", "dolt_server_host": "db.example.com" and "dolt_server_port": 23481 in its .beads/metadata.json, then make the write inside that repository, where bd dials the server its own config names: the user-level config.yaml names dolt.port 3307, which outranks that port when bd here opens it; nothing was created`, wantPlanning: `The user-level config.yaml names dolt.port 3307, which outranks any "dolt_server_port" in its .beads/metadata.json when bd here opens it, so bd migrate-personal cannot aim this write at port 23481, the port bd there dials for its server at "db.example.com"; nothing was created`},
 		{name: "remote host, no port, user-level dolt.port", user: launcherPort, config: "dolt:\n  mode: server\n  host: db.example.com\n", want: `Set "dolt_mode": "server", "dolt_server_host": "db.example.com" and "dolt_server_port": 3307 in its .beads/metadata.json, then rerun`},
+		// A launcher dolt.host outranks any metadata.json dolt_server_host
+		// for the open from here (GH#5961), so no edit there reaches the
+		// server the target's own config names: bd create's remedy is the
+		// write inside the target, and migrate-personal's offers no rerun.
+		{name: "remote host and port, launcher names another host", launcher: "dolt:\n  host: 127.0.0.1\n", config: "dolt:\n  mode: server\n  host: db.example.com\n  port: 23481\n", want: `Set "dolt_mode": "server" in its .beads/metadata.json, then make the write inside that repository, where bd dials the server its own config names: this workspace's own configuration names dolt.host "127.0.0.1", which outranks any "dolt_server_host" in its .beads/metadata.json when bd here opens it; nothing was created`, wantPlanning: `This workspace's own configuration names dolt.host "127.0.0.1", which outranks any "dolt_server_host" in its .beads/metadata.json when bd here opens it, so bd migrate-personal cannot aim this write at its server at "db.example.com"; nothing was created`},
+		{name: "remote host and port, user-level dolt.host naming another", user: "dolt:\n  host: 127.0.0.1\n", config: "dolt:\n  mode: server\n  host: db.example.com\n  port: 23481\n", want: `Set "dolt_mode": "server" in its .beads/metadata.json, then make the write inside that repository, where bd dials the server its own config names: the user-level config.yaml names dolt.host "127.0.0.1", which outranks any "dolt_server_host" in its .beads/metadata.json when bd here opens it; nothing was created`, wantPlanning: `The user-level config.yaml names dolt.host "127.0.0.1", which outranks any "dolt_server_host" in its .beads/metadata.json when bd here opens it, so bd migrate-personal cannot aim this write at its server at "db.example.com"; nothing was created`},
 		{name: "a host no shell word spells", config: "dolt:\n  mode: server\n  host: \"db$(touch x).example.com\"\n  port: 23481\n", want: `"dolt_server_host": "db\x24(touch x).example.com"`},
 	} {
 		t.Run("embedded launcher remedy/"+tc.name, func(t *testing.T) {

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/configfile"
 )
 
 func TestIsBackupAutoEnabled(t *testing.T) {
@@ -356,5 +357,43 @@ func TestClientServerShareFilesystem_GH3523(t *testing.T) {
 				t.Errorf("clientServerShareFilesystem() = %v, want %v", got, tt.wantShare)
 			}
 		})
+	}
+}
+
+// TestHostClassifiersFollowConfigYamlHostOverMetadataHost pins GH#5961 on
+// the two hand-rolled copies of the host precedence: a workspace whose
+// metadata.json names a local dolt_server_host and whose config.yaml names
+// a remote dolt.host dials the config.yaml host, so auto-backup must not
+// assume a shared filesystem and a foreign open must classify it as
+// server mode.
+func TestHostClassifiersFollowConfigYamlHostOverMetadataHost(t *testing.T) {
+	isolateForeignWorkspaceSignals(t, "")
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range map[string]string{
+		"metadata.json": `{"backend":"dolt","dolt_server_host":"127.0.0.1"}`,
+		"config.yaml":   "dolt:\n  host: db.example.com\n",
+	} {
+		if err := os.WriteFile(filepath.Join(beadsDir, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg, err := configfile.LoadForDiscovery(beadsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !targetSelectsServerMode(beadsDir, cfg) {
+		t.Error("targetSelectsServerMode = false, want true: config.yaml dolt.host db.example.com outranks the local metadata host")
+	}
+
+	t.Setenv("BEADS_DIR", beadsDir)
+	config.ResetForTesting()
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+	if clientServerShareFilesystem() {
+		t.Error("clientServerShareFilesystem() = true, want false: config.yaml dolt.host db.example.com outranks the local metadata host")
 	}
 }

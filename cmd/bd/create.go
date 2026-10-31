@@ -1435,14 +1435,19 @@ func refuseExistingCreateTarget(beadsDir string) error {
 // but the launching workspace's config.yaml, so it does not see the
 // target's own config.yaml dolt.host or dolt.port. When the host the
 // target itself dials (cfg.GetDoltServerHost under the target's own
-// configuration, config.WithBeadsDir: its metadata.json dolt_server_host
-// over its dolt.host, where config.local.yaml beside config.yaml outranks
-// it) is one bd does not run its server at (configfile.BdRunsServerAt), the
-// edit names that host, escaped (remedy.EscapedValue) since it is the
-// target repository's content, and the port bd run there dials, or asks
-// for the port its server listens on when nothing names one. Setting only
-// dolt_mode would dial another server, or auto-start a server of bd's own
-// inside the target.
+// configuration, config.WithBeadsDir: its dolt.host, where
+// config.local.yaml beside config.yaml outranks it, over its metadata.json
+// dolt_server_host, GH#5961) is one bd does not run its server at
+// (configfile.BdRunsServerAt), the edit names that host, escaped
+// (remedy.EscapedValue) since it is the target repository's content, and
+// the port bd run there dials, or asks for the port its server listens on
+// when nothing names one. Setting only dolt_mode would dial another server,
+// or auto-start a server of bd's own inside the target. Where the
+// launching workspace's own or the user-level config.yaml names another
+// dolt.host (existingTargetLaunchHost), which outranks the metadata.json
+// host for the open from here, no edit reaches that server, whatever host
+// the target dials: bd create's remedy is the write inside the target, and
+// bd migrate-personal's says it cannot aim this write at that server.
 //
 // Both opens, from here and from bd run there, take the target's port as
 // doltserver's port chain ranks it: its .beads/dolt-server.port, which bd
@@ -1492,6 +1497,14 @@ func existingTargetServerRemedy(beadsDir string, cfg *configfile.Config, writeIn
 	launchPort, launchConfig := existingTargetLaunchPort()
 	ownPort := workspaceDoltPort(beadsDir)
 	listenerPort := doltserver.DoltConfigYamlPort(beadsDir)
+	// Ahead of the host bd runs its server at too: a rerun from here would
+	// dial the launcher's host there as well (GH#5961).
+	if launchHost, hostConfig := existingTargetLaunchHost(); launchHost != "" && !configfile.SameServerHost(launchHost, host) {
+		if writeInside {
+			return fmt.Sprintf("Set \"dolt_mode\": \"server\" in its .beads/metadata.json, then make the write inside that repository, where bd dials the server its own config names: %s names dolt.host %s, which outranks any \"dolt_server_host\" in its .beads/metadata.json when bd here opens it; nothing was created", hostConfig, remedy.EscapedValue(launchHost))
+		}
+		return fmt.Sprintf("%s names dolt.host %s, which outranks any \"dolt_server_host\" in its .beads/metadata.json when bd here opens it, so bd migrate-personal cannot aim this write at its server at %s; nothing was created", capitalize(hostConfig), remedy.EscapedValue(launchHost), remedy.EscapedValue(host))
+	}
 	if configfile.BdRunsServerAt(host) {
 		portFile := doltserver.ReadPortFile(beadsDir)
 		sameServer := firstPort(portFile, listenerPort, launchPort, cfg.DoltServerPort) == firstPort(portFile, listenerPort, targetPort, cfg.DoltServerPort)
@@ -1578,6 +1591,28 @@ func existingTargetLaunchPort() (port int, where string) {
 		return port, "the user-level config.yaml"
 	}
 	return port, "this workspace's own configuration"
+}
+
+// existingTargetLaunchHost is the dolt.host this process resolves over a
+// target's metadata.json dolt_server_host (GH#5961), "" for none, and
+// where, as existingTargetLaunchPort names it: the user-level config.yaml
+// where that names the host, else this workspace's own configuration. An
+// open of a target from here never reads the dolt.host the target's own
+// config names. BEADS_DOLT_SERVER_HOST and BD_DOLT_HOST, which bd run in
+// the target reads too, never decide a refusal: the target resolves them
+// too, so the two hosts agree.
+func existingTargetLaunchHost() (host string, where string) {
+	if h := os.Getenv("BEADS_DOLT_SERVER_HOST"); h != "" {
+		return h, "the BEADS_DOLT_SERVER_HOST environment variable"
+	}
+	host = strings.TrimSpace(config.GetYamlConfig("dolt.host"))
+	if host == "" {
+		return "", ""
+	}
+	if user := config.GetUserYamlConfig("dolt.host"); user != "" && configfile.SameServerHost(host, user) {
+		return host, "the user-level config.yaml"
+	}
+	return host, "this workspace's own configuration"
 }
 
 // firstPort is the first of ports that names one, as a port chain picks
