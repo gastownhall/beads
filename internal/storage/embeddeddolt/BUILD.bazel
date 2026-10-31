@@ -27,6 +27,7 @@ go_library(
         "detection.go",
         "edgereader.go",
         "epoch_cas.go",
+        "events_retention.go",
         "federation.go",
         "get_issue.go",
         "graph_counter.go",
