@@ -2359,6 +2359,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `bd dep add`'s: `bd: dep add <from> <to>` in place of
   `dependency: add <type> <from> -> <to>`.
 
+- **An explicitly empty `BEADS_DIR`, `BEADS_DB` or `BD_DB` is no longer
+  overwritten by `.beads/.env`.** The selector loader treated a set-but-empty
+  variable as unset, so `BEADS_DIR= bd ...` still followed a `.env` that
+  named another workspace. It now checks whether the variable is set, matching
+  how the rest of `.env` loading behaves (#7303).
+
 - **`bd query` reports an uppercase duration unit as an unparseable time, not
   a negated internal error.** `created>30M` failed with
   `not a compact duration: "-30M"`, naming a value nobody typed; it now fails
