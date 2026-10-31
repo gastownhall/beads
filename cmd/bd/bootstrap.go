@@ -1516,8 +1516,9 @@ func executeSyncAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.
 		// now with bootstrap-specific guidance and a non-zero exit. Returning
 		// silent success here (as this path once did) sent operators in a
 		// loop: the first real command failed with the gate message, whose
-		// generic "adopt" remedy is `bd bootstrap` — which re-clones the same
-		// behind database and silently "succeeds" again (bd-6dnrw.31).
+		// generic "adopt" remedy then pointed back at `bd bootstrap`, which
+		// left the same behind database in place and silently "succeeded"
+		// again (bd-6dnrw.31).
 		var gateErr *schema.RemoteMigrateGateError
 		if errors.As(err, &gateErr) {
 			if !jsonOutput {
@@ -1592,13 +1593,11 @@ func printInitJoinGuidance(w io.Writer, e *schema.RemoteMigrateGateError) {
 		schema.SharedConsentCommand, schema.AllowRemoteMigrateEnv)
 }
 
-// printBootstrapRemoteBehindGuidance explains a remote-migrate gate refusal in
-// bootstrap terms. The gate's generic remedy ("adopt the migrated database:
-// bd bootstrap") is wrong from inside a bootstrap-style clone — the database
-// was just cloned from the remote, so the REMOTE is what is behind this binary
-// and re-cloning can never help. The way out is exactly one designated machine
-// migrating and pushing. rerunCmd is the command the operator just ran ("bd
-// bootstrap", "bd init") so the don't-bother-retrying line names it.
+// printBootstrapRemoteBehindGuidance explains a remote-migrate gate refusal
+// after a database has been cloned. The remote itself is behind this binary,
+// so one designated clone must migrate and push before adoption can help.
+// rerunCmd names the command the operator just ran ("bd bootstrap" or
+// "bd init") in the don't-bother-retrying line.
 func printBootstrapRemoteBehindGuidance(w io.Writer, e *schema.RemoteMigrateGateError, syncRemote, rerunCmd string) {
 	unit := "migrations"
 	if e.Pending == 1 {
@@ -1615,9 +1614,16 @@ func printBootstrapRemoteBehindGuidance(w io.Writer, e *schema.RemoteMigrateGate
 			"    • This machine is the designated migrator (exactly ONE machine should be):\n"+
 			"        bd migrate --force\n"+
 			"        bd dolt push\n"+
-			"      then other machines re-run `bd bootstrap` to adopt the migrated database.\n"+
+			"      then other machines adopt the migrated database.\n"+
 			"    • Another machine is the designated migrator: wait for it to push, then\n"+
-			"      re-run `bd bootstrap`, or keep using a bd version that matches the remote.\n\n")
+			"      adopt its database, or keep using a bd version that matches the remote.\n"+
+			"\n"+
+			"  For the adoption path: this clone now holds the database it just cloned,\n"+
+			"  so bare `bd bootstrap` reports \"Nothing to do.\" and won't adopt. The\n"+
+			"  adoption steps move the database aside, re-clone, and restore unpushed work\n"+
+			"  from a previous-version export. Run them with no other bd process using\n"+
+			"  this workspace; in server mode, follow the guide's server section:\n"+
+			"        "+schema.AdoptionGuideURL+"\n\n")
 }
 
 // finalizeSyncedBootstrap writes metadata.json and config.yaml after a

@@ -133,9 +133,22 @@ func TestPrintBootstrapRemoteBehindGuidance(t *testing.T) {
 		"Re-running `bd bootstrap` will NOT fix this",
 		"bd migrate --force",
 		"bd dolt push",
+		schema.AdoptionGuideURL,
+		`"Nothing to do."`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("guidance missing %q in:\n%s", want, out)
+		}
+	}
+	// gastownhall/beads#6687: once the migrator pushes, this clone already
+	// holds the database it just cloned, so re-running bootstrap no-ops.
+	if strings.Contains(out, "re-run `bd bootstrap`") || strings.Contains(out, "mv .beads") {
+		t.Errorf("guidance still tells the operator to re-run bd bootstrap, or prints a filesystem command:\n%s", out)
+	}
+	flat := strings.Join(strings.Fields(out), " ")
+	for _, want := range []string{"For the adoption path:", "no other bd process", "server section"} {
+		if !strings.Contains(flat, want) {
+			t.Errorf("guidance missing the adoption precondition %q in:\n%s", want, out)
 		}
 	}
 }
@@ -153,5 +166,13 @@ func TestPrintBootstrapRemoteBehindGuidance_InitWording(t *testing.T) {
 	out := buf.String()
 	if !strings.Contains(out, "Re-running `bd init` will NOT fix this") {
 		t.Errorf("guidance missing init-specific retry line in:\n%s", out)
+	}
+	for _, want := range []string{schema.AdoptionGuideURL, `"Nothing to do."`, "bd migrate --force", "bd dolt push"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("init guidance missing %q in:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "re-run `bd bootstrap`") || strings.Contains(out, "mv .beads") {
+		t.Errorf("init guidance tells the operator to re-run bd bootstrap, or prints a filesystem command:\n%s", out)
 	}
 }

@@ -111,6 +111,97 @@ func TestHandleRemoteMigrateGateJSON_Shape(t *testing.T) {
 	}
 }
 
+// TestHandleRemoteMigrateGateJSON_AdoptionDecisions pins the composed JSON
+// payload for the three adoption decisions (gastownhall/beads#6687): the
+// option is a procedure with an empty, non-null commands array, and the
+// observed/expected summaries must not promise that a re-clone keeps
+// everything local, which the option risk and directive say it does not.
+func TestHandleRemoteMigrateGateJSON_AdoptionDecisions(t *testing.T) {
+	for _, tc := range []struct {
+		decision     string
+		optionID     string
+		wantExpected string
+		goneObserved string
+		goneExpected string
+	}{
+		{decision: "adopt", optionID: "adopt", wantExpected: "operator decision"},
+		{decision: "adopt-ff", optionID: "adopt-fast-forward",
+			wantExpected: "restore clone-local data that a re-clone does not retain",
+			goneObserved: "losslessly", goneExpected: "nothing local is discarded"},
+		{decision: "fork-skew", optionID: "reconcile-fork",
+			wantExpected: "make sure the intended remote holds its database, then follow the adoption procedure",
+			goneExpected: "re-bootstrap"},
+	} {
+		for _, shared := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/shared=%v", tc.decision, shared), func(t *testing.T) {
+				gate := &schema.RemoteMigrateGateError{CurrentVersion: 53, LatestVersion: 69, Pending: 16,
+					Decision: tc.decision, Shared: shared}
+				if tc.decision == "fork-skew" {
+					gate.SkewVersions = []int{60}
+				}
+
+				origStderr := os.Stderr
+				r, w, pipeErr := os.Pipe()
+				if pipeErr != nil {
+					t.Fatal(pipeErr)
+				}
+				os.Stderr = w
+				handleRemoteMigrateGateJSON(gate)
+				_ = w.Close()
+				os.Stderr = origStderr
+				var buf bytes.Buffer
+				if _, err := io.Copy(&buf, r); err != nil {
+					t.Fatal(err)
+				}
+				_ = r.Close()
+
+				var parsed map[string]interface{}
+				if err := json.Unmarshal(buf.Bytes(), &parsed); err != nil {
+					t.Fatalf("json.Unmarshal stderr: %v\nstderr was: %s", err, buf.String())
+				}
+				if hint, _ := parsed["hint"].(string); !strings.Contains(hint, schema.AdoptionGuideURL) {
+					t.Errorf("hint must carry the adoption procedure; got %q", hint)
+				}
+				obj, ok := parsed["remote_migrate_gate"].(map[string]interface{})
+				if !ok {
+					t.Fatalf("remote_migrate_gate key missing or wrong type: %T", parsed["remote_migrate_gate"])
+				}
+				if got, _ := obj["decision"].(string); got != tc.decision {
+					t.Errorf("decision = %q, want %q", got, tc.decision)
+				}
+				if got, ok := obj["human_decision_required"].(bool); !ok || !got {
+					t.Errorf("human_decision_required = %v, want true", obj["human_decision_required"])
+				}
+				rawOpts, _ := obj["options"].([]interface{})
+				if len(rawOpts) != 1 {
+					t.Fatalf("options = %v, want exactly the %s option", obj["options"], tc.optionID)
+				}
+				o, _ := rawOpts[0].(map[string]interface{})
+				if id, _ := o["id"].(string); id != tc.optionID {
+					t.Errorf("option id = %q, want %q", id, tc.optionID)
+				}
+				// A JSON null decodes to a nil interface, so the type assertion
+				// below fails for null and for a missing key alike.
+				if cmds, ok := o["commands"].([]interface{}); !ok || len(cmds) != 0 {
+					t.Errorf("option commands = %#v, want an empty array", o["commands"])
+				}
+
+				observed, _ := obj["observed"].(string)
+				expected, _ := obj["expected"].(string)
+				if !strings.Contains(expected, tc.wantExpected) {
+					t.Errorf("expected = %q, want it to contain %q", expected, tc.wantExpected)
+				}
+				if tc.goneObserved != "" && strings.Contains(observed, tc.goneObserved) {
+					t.Errorf("observed still says %q: %q", tc.goneObserved, observed)
+				}
+				if tc.goneExpected != "" && strings.Contains(expected, tc.goneExpected) {
+					t.Errorf("expected still says %q: %q", tc.goneExpected, expected)
+				}
+			})
+		}
+	}
+}
+
 // TestHandleRemoteMigrateGateJSON_FallbackReason verifies the blunt-block JSON
 // carries the machine-readable fallback_reason field (gastownhall/beads#4551
 // follow-up), and that the smart-tailored adopt/fork-skew decisions never gain
