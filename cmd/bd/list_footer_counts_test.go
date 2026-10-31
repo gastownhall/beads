@@ -99,6 +99,29 @@ func TestListFooterLineCountsAreJustified(t *testing.T) {
 			statusSelector: "in_progress",
 			facts:          footerFacts{"total": 3},
 		},
+		{
+			// GH#7843: an explicit --status WITHOUT --ready is the same
+			// intersection. "0 open" is forced by the filter, not a finding.
+			name:  "explicit status, not ready, whole result set",
+			total: 4, open: 0, inProgress: 4,
+			statusSelector: "in_progress",
+			facts:          footerFacts{"total": 4},
+		},
+		{
+			// GH#7843: the truncated arm has the identical vacuity.
+			name:  "explicit status, not ready, truncated",
+			total: 2, open: 0, inProgress: 2, truncated: true,
+			statusSelector: "in_progress",
+			facts:          footerFacts{"total": 2, "limit-hint": 0},
+		},
+		{
+			// A bare --status=all pins nothing: the breakdown stays a real
+			// finding and must not be replaced.
+			name:  "explicit status=all, not ready, whole result set",
+			total: 9, open: 6, inProgress: 3,
+			statusSelector: "all",
+			facts:          footerFacts{"total": 9, "open": 6, "in_progress": 3},
+		},
 	}
 
 	for _, tt := range tests {
@@ -234,6 +257,44 @@ func TestListFooterLineReadyExplicitStatusNamesSelector(t *testing.T) {
 	}
 	if strings.Contains(line, "in progress)") {
 		t.Errorf("--ready summary must still omit the vacuous in-progress count: %q", line)
+	}
+}
+
+// GH#7843: an explicit --status WITHOUT --ready must name the selector
+// instead of printing the open/in-progress breakdown the filter forced,
+// for both the non-truncated and truncated arms.
+func TestListFooterLineExplicitStatusNamesSelector(t *testing.T) {
+	line := listFooterLine(4, 0, 4, false, false, "in_progress")
+	if strings.Contains(line, "in progress)") || strings.Contains(line, "0 open") {
+		t.Errorf("explicit --status without --ready must not print the forced breakdown: %q", line)
+	}
+	if !strings.Contains(line, "in_progress only") {
+		t.Errorf("explicit --status footer must name the selected status, got: %q", line)
+	}
+
+	truncatedLine := listFooterLine(2, 0, 2, true, false, "in_progress")
+	if strings.Contains(truncatedLine, "in progress)") || strings.Contains(truncatedLine, "0 open") {
+		t.Errorf("truncated explicit --status must not print the forced breakdown: %q", truncatedLine)
+	}
+	if !strings.Contains(truncatedLine, "in_progress only") {
+		t.Errorf("truncated explicit --status footer must name the selected status, got: %q", truncatedLine)
+	}
+	if !strings.Contains(truncatedLine, "truncated by --limit") {
+		t.Errorf("truncated explicit --status footer must still disclose truncation, got: %q", truncatedLine)
+	}
+}
+
+// An empty or "all" selector without --ready pins nothing, so the breakdown
+// is still a genuine finding and must survive unchanged — this is the half
+// of GH#7843's fix that must not regress.
+func TestListFooterLineUnpinnedStatusKeepsBreakdown(t *testing.T) {
+	for _, sel := range []string{"", "all"} {
+		line := listFooterLine(9, 6, 3, false, false, sel)
+		for _, want := range []string{"Total: 9 issues", "6 open", "3 in progress"} {
+			if !strings.Contains(line, want) {
+				t.Errorf("statusSelector=%q lost %q, got: %q", sel, want, line)
+			}
+		}
 	}
 }
 
