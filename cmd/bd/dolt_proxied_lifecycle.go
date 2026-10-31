@@ -38,6 +38,7 @@ func proxiedDoltStartRefusal() *ProxyCapabilityError {
 		Code:     proxyDoltStartConflictCode,
 		Message:  proxyDoltStartConflictMessage,
 		ExitCode: 1,
+		Reason:   ProxyReasonDesign,
 	}
 }
 
