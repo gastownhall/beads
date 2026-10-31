@@ -263,6 +263,9 @@ func adoTestStore(t *testing.T, prefix string) *dolt.DoltStore {
 	// never from the database (config.IsYamlOnlyKey), so a SetConfig of it
 	// on the store would leave the tracker without a PAT.
 	t.Setenv("AZURE_DEVOPS_PAT", "test-pat")
+	// The endpoint trust gate needs a workspace to key the pin on and
+	// isolated HOME/XDG to write it into.
+	setupEndpointTrustWorkspaceForTest(t)
 	dbPath := filepath.Join(t.TempDir(), ".beads", "dolt")
 	return newTestStoreIsolatedDB(t, dbPath, prefix)
 }
@@ -281,6 +284,9 @@ func TestADORoundTripCoreFields(t *testing.T) {
 	mock := newMockADOServer(project)
 	server := httptest.NewServer(mock)
 	defer server.Close()
+	// The store-config ado.url is shared configuration; a private source
+	// must confirm the endpoint before the credential goes out.
+	t.Setenv("AZURE_DEVOPS_URL", server.URL)
 
 	// Configure ADO settings in source store
 	for k, v := range map[string]string{
@@ -457,6 +463,9 @@ func TestADORoundTripBlockedStatus(t *testing.T) {
 	mock := newMockADOServer(project)
 	server := httptest.NewServer(mock)
 	defer server.Close()
+	// The store-config ado.url is shared configuration; a private source
+	// must confirm the endpoint before the credential goes out.
+	t.Setenv("AZURE_DEVOPS_URL", server.URL)
 
 	for k, v := range map[string]string{
 		"ado.url":     server.URL,
@@ -538,6 +547,9 @@ func TestADORoundTripLossyPriority(t *testing.T) {
 	mock := newMockADOServer(project)
 	server := httptest.NewServer(mock)
 	defer server.Close()
+	// The store-config ado.url is shared configuration; a private source
+	// must confirm the endpoint before the credential goes out.
+	t.Setenv("AZURE_DEVOPS_URL", server.URL)
 
 	for k, v := range map[string]string{
 		"ado.url":     server.URL,
@@ -632,6 +644,9 @@ func TestADORoundTripLabels(t *testing.T) {
 	mock := newMockADOServer(project)
 	server := httptest.NewServer(mock)
 	defer server.Close()
+	// The store-config ado.url is shared configuration; a private source
+	// must confirm the endpoint before the credential goes out.
+	t.Setenv("AZURE_DEVOPS_URL", server.URL)
 
 	for k, v := range map[string]string{
 		"ado.url":     server.URL,

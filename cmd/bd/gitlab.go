@@ -14,6 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/endpointtrust"
 	"github.com/steveyegge/beads/internal/gitlab"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
@@ -332,12 +333,15 @@ func maskGitLabToken(token string) string {
 }
 
 // getGitLabClient creates a GitLab client from the current configuration.
-func getGitLabClient(config GitLabConfig) *gitlab.Client {
+func getGitLabClient(config GitLabConfig) (*gitlab.Client, error) {
+	if err := endpointtrust.Check(endpointtrust.WorkspaceKey(), "gitlab", config.URL, endpointtrust.PrivateMatch("gitlab.url", "GITLAB_URL", config.URL)); err != nil {
+		return nil, err
+	}
 	client := gitlab.NewClient(config.Token, config.URL, config.ProjectID)
 	if config.GroupID != "" {
 		client = client.WithGroupID(config.GroupID)
 	}
-	return client
+	return client, nil
 }
 
 // runGitLabStatus implements the gitlab status command.
@@ -421,7 +425,10 @@ func runGitLabProjects(cmd *cobra.Command, args []string) error {
 	}
 
 	out := cmd.OutOrStdout()
-	client := getGitLabClient(config)
+	client, err := getGitLabClient(config)
+	if err != nil {
+		return HandleError("%v", err)
+	}
 	ctx := context.Background()
 
 	projects, err := client.ListProjects(ctx)

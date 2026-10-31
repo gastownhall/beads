@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/endpointtrust"
 	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -52,6 +53,11 @@ func (t *Tracker) ConfigPrefix() string { return "github" }
 func (t *Tracker) Init(ctx context.Context, store tracker.Store) error {
 	t.store = store
 
+	baseURL := t.getConfig(ctx, "github.url", "GITHUB_API_URL")
+	if err := endpointtrust.Check(endpointtrust.WorkspaceKey(), "github", baseURL, endpointtrust.PrivateMatch("github.url", "GITHUB_API_URL", baseURL)); err != nil {
+		return err
+	}
+
 	token := t.getConfig(ctx, "github.token", "GITHUB_TOKEN")
 	if token == "" {
 		return fmt.Errorf("GitHub token not configured (set github.token or GITHUB_TOKEN)")
@@ -82,7 +88,6 @@ func (t *Tracker) Init(ctx context.Context, store tracker.Store) error {
 	t.client = NewClient(token, owner, repo)
 
 	// Allow custom base URL for GitHub Enterprise
-	baseURL := t.getConfig(ctx, "github.url", "GITHUB_API_URL")
 	if baseURL != "" {
 		t.client = t.client.WithBaseURL(baseURL)
 	}

@@ -16,6 +16,7 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/endpointtrust"
 	"github.com/steveyegge/beads/internal/linear"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
@@ -1146,6 +1147,14 @@ func getLinearTeamIDsForStore(ctx context.Context, st tracker.Store, cliTeams []
 //  3. linear.oauth_client_id + linear.oauth_client_secret in config
 //  4. linear.api_key in config
 func getLinearClient(ctx context.Context) (*linear.Client, error) {
+	var endpoint string
+	if store != nil {
+		endpoint, _ = store.GetConfig(ctx, "linear.api_endpoint")
+	}
+	if err := endpointtrust.Check(endpointtrust.WorkspaceKey(), "linear", endpoint, endpointtrust.PrivateMatch("linear.api_endpoint", "LINEAR_API_ENDPOINT", endpoint)); err != nil {
+		return nil, err
+	}
+
 	teamIDs := getLinearTeamIDs(ctx, nil)
 	if len(teamIDs) == 0 {
 		return nil, fmt.Errorf("Linear team ID not configured")
@@ -1157,7 +1166,7 @@ func getLinearClient(ctx context.Context) (*linear.Client, error) {
 	}
 
 	if store != nil {
-		if endpoint, _ := store.GetConfig(ctx, "linear.api_endpoint"); endpoint != "" {
+		if endpoint != "" {
 			client = client.WithEndpoint(endpoint)
 		}
 		if projectID, _ := store.GetConfig(ctx, "linear.project_id"); projectID != "" {
@@ -1207,6 +1216,14 @@ func buildLinearClient(ctx context.Context, teamID string) (*linear.Client, erro
 }
 
 func buildLinearClientAPIOnly(ctx context.Context, teamID string, st tracker.Store) (*linear.Client, error) {
+	var endpoint string
+	if st != nil {
+		endpoint, _ = st.GetConfig(ctx, "linear.api_endpoint")
+	}
+	if err := endpointtrust.Check(endpointtrust.WorkspaceKey(), "linear", endpoint, endpointtrust.PrivateMatch("linear.api_endpoint", "LINEAR_API_ENDPOINT", endpoint)); err != nil {
+		return nil, err
+	}
+
 	oauthClientID := os.Getenv("LINEAR_OAUTH_CLIENT_ID")
 	oauthClientSecret := os.Getenv("LINEAR_OAUTH_CLIENT_SECRET")
 	if oauthClientID == "" {
@@ -1233,7 +1250,7 @@ func buildLinearClientAPIOnly(ctx context.Context, teamID string, st tracker.Sto
 		client = linear.NewClient(apiKey, teamID)
 	}
 	if st != nil {
-		if endpoint, _ := st.GetConfig(ctx, "linear.api_endpoint"); endpoint != "" {
+		if endpoint != "" {
 			client = client.WithEndpoint(endpoint)
 		}
 	}

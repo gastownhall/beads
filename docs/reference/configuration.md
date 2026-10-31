@@ -5,9 +5,9 @@ description: Complete reference for bd configuration across config.yaml and data
 
 Complete configuration reference for beads.
 
-Last reviewed: 2026-09-10
+Last reviewed: 2026-10-26
 
-Freshness source: `cmd/bd/main.go`, `cmd/bd/config.go`, and `internal/configfile/`.
+Freshness source: `cmd/bd/main.go`, `cmd/bd/config.go`, `internal/config/`, `internal/configfile/`, and `internal/endpointtrust/`.
 
 beads has two complementary configuration systems:
 
@@ -39,6 +39,8 @@ For Viper-managed (YAML) keys, highest to lowest:
 4. **Built-in defaults**
 
 Project-level keys written via `bd config set` (Jira, Linear, GitHub, status maps, etc.) live in the Dolt database. They are read at command time and have no env var override.
+
+bd pins the AI, tracker (GitHub, GitLab, Azure DevOps, Jira, Linear) and remote Dolt server endpoint each workspace sends credentials to, in `~/.config/beads/trusted-endpoints.json` (`$XDG_CONFIG_HOME/beads/` when set, `%APPDATA%\beads\` on Windows). The vendor default endpoint and bd's local Dolt server pin on first use; a custom endpoint from shared configuration is refused until a private source confirms it, and the confirmation pins it. The comparison covers scheme, host, port and path. If an endpoint from shared configuration (`.beads/config.yaml`, `.beads/config.local.yaml`, `.beads/.env`, `.beads/metadata.json` or the synced database) later differs from the pin, bd refuses to send the credential. To confirm an intended change, set the endpoint's environment variable in your shell (not in `.beads/.env`) or the key in `~/.config/bd/config.yaml`; to reset, delete the workspace's entry from the pin file. Dolt remote credentials (`DOLT_REMOTE_USER`/`DOLT_REMOTE_PASSWORD` for `sync.remote` and federation peers) are not covered by these pins.
 
 When a config.yaml value or environment variable shadows a database key, `bd config list` prints an override warning, and `bd config show` reports the source of every effective key.
 

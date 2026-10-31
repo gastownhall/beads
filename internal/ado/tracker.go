@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/endpointtrust"
 	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -77,14 +78,17 @@ func (t *Tracker) ConfigPrefix() string { return "ado" }
 func (t *Tracker) Init(ctx context.Context, store tracker.Store) error {
 	t.store = store
 
+	customURL := t.getConfig(ctx, "ado.url", "AZURE_DEVOPS_URL")
+	if err := endpointtrust.Check(endpointtrust.WorkspaceKey(), "ado", customURL, endpointtrust.PrivateMatch("ado.url", "AZURE_DEVOPS_URL", customURL)); err != nil {
+		return err
+	}
+
 	pat := t.getConfig(ctx, "ado.pat", "AZURE_DEVOPS_PAT")
 	if pat == "" {
 		return fmt.Errorf("Azure DevOps PAT not configured (set ado.pat or AZURE_DEVOPS_PAT)")
 	}
 
 	t.org = t.getConfig(ctx, "ado.org", "AZURE_DEVOPS_ORG")
-	customURL := t.getConfig(ctx, "ado.url", "AZURE_DEVOPS_URL")
-
 	if t.org == "" && customURL == "" {
 		return fmt.Errorf("Azure DevOps organization not configured (set ado.org or AZURE_DEVOPS_ORG)")
 	}

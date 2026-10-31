@@ -334,6 +334,12 @@ func resolveDoltServerConnection(ctx context.Context, beadsDir string, fileCfg *
 	// read as a caller assertion (see ApplyResolvedServerPort).
 	dolt.ApplyResolvedServerPort(beadsDir, doltCfg)
 	doltCfg.ServerSocket = fileCfg.GetDoltServerSocket()
+	doltCfg.BeadsDir = beadsDir
+	if os.Getenv("BEADS_DOLT_PASSWORD") != "" {
+		if err := dolt.CheckServerEndpointTrust(beadsDir, fileCfg, doltCfg.ServerHost, doltCfg.ServerPort, doltCfg.ServerSocket); err != nil {
+			return err
+		}
+	}
 	// A configured credential command targets an authenticating gateway server:
 	// run it for a short-lived token used as the connection username. Fail closed
 	// — never fall back to the static/root user when a command was configured but
@@ -560,9 +566,19 @@ func loadBeadsEnvFile(beadsDir string) {
 	if beadsDir == "" {
 		return
 	}
+	if !config.IsDotenvKey("BEADS_DIR") {
+		config.RecordWorkspaceBeadsDir(beadsDir)
+	}
 	envFile := filepath.Join(beadsDir, ".env")
 	if _, err := os.Stat(envFile); err != nil {
 		return
+	}
+	if pairs, err := gotenv.Read(envFile); err == nil {
+		for key, val := range pairs {
+			if os.Getenv(key) == "" && val != "" {
+				config.MarkDotenvValue(key, val)
+			}
+		}
 	}
 	// A .env-provided BEADS_DIR is user-authored selection wherever it is
 	// imported from, not only via loadBeadsSelectionEnvFile: that loader
@@ -599,6 +615,7 @@ func loadBeadsSelectionEnvFile(beadsDir string) {
 	if beadsDir == "" {
 		return
 	}
+	config.RecordWorkspaceBeadsDir(beadsDir)
 	envFile := filepath.Join(beadsDir, ".env")
 	pairs, err := gotenv.Read(envFile)
 	if err != nil {
@@ -610,6 +627,7 @@ func loadBeadsSelectionEnvFile(beadsDir string) {
 		}
 		if value, ok := pairs[key]; ok && strings.TrimSpace(value) != "" {
 			_ = os.Setenv(key, value)
+			config.MarkDotenvValue(key, value)
 			if key == "BEADS_DIR" {
 				// A .beads/.env that routes commands via BEADS_DIR is
 				// user-authored selection, same as exporting the variable

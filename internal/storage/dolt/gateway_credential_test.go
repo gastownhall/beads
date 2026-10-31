@@ -2,11 +2,13 @@ package dolt
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/endpointtrust"
 	"github.com/steveyegge/beads/internal/testutil/credentialcmd"
 )
 
@@ -101,6 +103,91 @@ func TestApplyGatewayCredentialNotConfigured(t *testing.T) {
 	if cfg.Gateway || cfg.ServerUser != "" {
 		t.Fatalf("config must be untouched when not configured: %+v", cfg)
 	}
+}
+
+func TestCheckServerEndpointTrust(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	beadsDir := t.TempDir()
+
+	// The file-config host is shared; a private env value confirms the pin.
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "remote-a.example")
+	cfg := &configfile.Config{DoltServerHost: "remote-a.example"}
+	if err := CheckServerEndpointTrust(beadsDir, cfg, cfg.DoltServerHost, 3307, ""); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	cfg.DoltServerHost = "remote-b.example"
+	err := CheckServerEndpointTrust(beadsDir, cfg, cfg.DoltServerHost, 3307, "")
+	if err == nil || !strings.Contains(err.Error(), "credential was not sent") {
+		t.Fatalf("changed remote endpoint error = %v", err)
+	}
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "remote-b.example")
+	if err := CheckServerEndpointTrust(beadsDir, cfg, cfg.DoltServerHost, 3307, ""); err != nil {
+		t.Fatalf("private environment confirmation: %v", err)
+	}
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	for _, endpoint := range []struct {
+		host, socket string
+	}{
+		{"127.0.0.1", ""},
+		{"::1", ""},
+		{"localhost", "/tmp/dolt.sock"},
+	} {
+		if err := CheckServerEndpointTrust(beadsDir, &configfile.Config{DoltServerHost: endpoint.host}, endpoint.host, 3307, endpoint.socket); err != nil {
+			t.Errorf("local/socket endpoint %q %q: %v", endpoint.host, endpoint.socket, err)
+		}
+	}
+}
+
+func TestCheckServerEndpointTrustChecksTCPFallbackWithSocket(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	beadsDir := t.TempDir()
+	socket := filepath.Join(t.TempDir(), "dolt.sock")
+	fileCfg := &configfile.Config{DoltServerHost: "remote-a.example"}
+
+	// The file-config host is shared; a private env value confirms the pin.
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "remote-a.example")
+	if err := CheckServerEndpointTrust(beadsDir, fileCfg, fileCfg.DoltServerHost, 3307, socket); err != nil {
+		t.Fatalf("initial socket and TCP endpoint: %v", err)
+	}
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	fileCfg.DoltServerHost = "remote-b.example"
+	err := CheckServerEndpointTrust(beadsDir, fileCfg, fileCfg.DoltServerHost, 3307, socket)
+	var mismatch *endpointtrust.MismatchError
+	if !errors.As(err, &mismatch) {
+		t.Fatalf("changed TCP fallback endpoint error = %v, want MismatchError", err)
+	}
+}
+
+func TestApplyGatewayCredentialStopsBeforeCommandOnTrustMismatch(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	beadsDir := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "credential-invoked")
+	t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", credentialcmd.Marker(t, marker))
+
+	// The file-config host is shared; a private env value confirms the pin.
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "remote-a.example")
+	fileCfg := &configfile.Config{DoltServerHost: "remote-a.example"}
+	if err := CheckServerEndpointTrust(beadsDir, fileCfg, fileCfg.DoltServerHost, 3307, ""); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	fileCfg.DoltServerHost = "remote-b.example"
+	cfg := &Config{BeadsDir: beadsDir, ServerHost: fileCfg.DoltServerHost, ServerPort: 3307}
+	applied, err := ApplyGatewayCredential(context.Background(), fileCfg, cfg)
+	if err == nil || applied {
+		t.Fatalf("applied=%v err=%v, expected trust failure", applied, err)
+	}
+	credentialcmd.AssertMarkerAbsent(t, marker)
 }
 
 // Through applyResolvedConfig: in server mode the command wins and marks Gateway; with

@@ -2,9 +2,12 @@ package github
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,6 +15,68 @@ import (
 	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
 )
+
+type endpointTestStore struct {
+	tracker.Store
+	endpoint string
+}
+
+func (s endpointTestStore) GetConfig(_ context.Context, key string) (string, error) {
+	if key == "github.url" {
+		return s.endpoint, nil
+	}
+	return "", nil
+}
+
+func TestInitRejectsChangedEndpointBeforeRequest(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("GITHUB_API_URL", "")
+	t.Setenv("GITHUB_TOKEN", "tracker-secret")
+	t.Setenv("GITHUB_OWNER", "owner")
+	t.Setenv("GITHUB_REPO", "repo")
+	t.Setenv("BEADS_DIR", "")
+	work := t.TempDir()
+	beadsDir := filepath.Join(work, ".beads")
+	if err := os.MkdirAll(beadsDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("{}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(work)
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+	if err := config.Initialize(); err != nil {
+		t.Fatal(err)
+	}
+
+	var secondRequests int
+	serverA := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer serverA.Close()
+	serverB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		secondRequests++
+		if r.Header.Get("Authorization") != "" {
+			t.Errorf("changed endpoint received Authorization header")
+		}
+	}))
+	defer serverB.Close()
+	// The store-config github.url is shared; private confirmation comes from
+	// the environment. The second Init's store endpoint does not match the
+	// env, so it reaches the gate as an unconfirmed change.
+	t.Setenv("GITHUB_API_URL", serverA.URL)
+	if err := (&Tracker{}).Init(context.Background(), endpointTestStore{endpoint: serverA.URL}); err != nil {
+		t.Fatal(err)
+	}
+	err := (&Tracker{}).Init(context.Background(), endpointTestStore{endpoint: serverB.URL})
+	if err == nil || !strings.Contains(err.Error(), "credential was not sent") {
+		t.Fatalf("changed endpoint Init error = %v", err)
+	}
+	if secondRequests != 0 {
+		t.Fatalf("changed endpoint received %d requests", secondRequests)
+	}
+}
 
 func TestRegistered(t *testing.T) {
 	factory := tracker.Get("github")

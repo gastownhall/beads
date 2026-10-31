@@ -50,6 +50,127 @@ func TestInitialize(t *testing.T) {
 	}
 }
 
+func TestIsFromProjectConfigTracksPrivateOverrides(t *testing.T) {
+	restore := envSnapshot(t)
+	defer restore()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("BEADS_DIR", "")
+
+	work := t.TempDir()
+	beadsDir := filepath.Join(work, ".beads")
+	if err := os.MkdirAll(beadsDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	projectPath := filepath.Join(beadsDir, "config.yaml")
+	if err := os.WriteFile(projectPath, []byte("ai:\n  base_url: https://project.example\ngithub:\n  url: https://project.example\nidentity: project\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(work)
+	t.Setenv("BD_AI_BASE_URL", "")
+	t.Setenv("BEADS_IDENTITY", "")
+	ResetForTesting()
+	t.Cleanup(ResetForTesting)
+
+	if err := Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	if !IsFromProjectConfig("AI.BASE_URL") || !IsFromProjectConfig("github.url") {
+		t.Fatal("project config keys were not classified")
+	}
+
+	// .beads/config.local.yaml lives inside the repo tree and can be committed,
+	// so it must still be classified as project-controlled rather than private.
+	// jira.url is defined only here, so a regression that drops
+	// config.local.yaml from the project paths loses this key's classification.
+	localPath := filepath.Join(beadsDir, LocalConfigFileName)
+	if err := os.WriteFile(localPath, []byte("github:\n  url: https://local.example\njira:\n  url: https://jira.local.example\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	if !IsFromProjectConfig("github.url") || PrivateConfigValue("github.url") != "" {
+		t.Fatal("local config override in .beads/config.local.yaml was treated as private")
+	}
+	if !IsFromProjectConfig("jira.url") || PrivateConfigValue("jira.url") != "" {
+		t.Fatal("key defined only in .beads/config.local.yaml was not classified as project-controlled")
+	}
+
+	// User-level global config (~/.config/bd/config.yaml) is private when it
+	// confirms the effective value.
+	userConfigDir := filepath.Join(home, ".config", "bd")
+	if err := os.MkdirAll(userConfigDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(userConfigDir, "config.yaml"), []byte("github:\n  url: https://local.example\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	if IsFromProjectConfig("github.url") || PrivateConfigValue("github.url") != "https://local.example" {
+		t.Fatal("matching user global config override was classified as project-controlled")
+	}
+
+	// A .beads/.env variable is project-controlled, not a private environment override.
+	t.Setenv("BD_AI_BASE_URL", "https://dotenv.example")
+	MarkDotenvValue("BD_AI_BASE_URL", "https://dotenv.example")
+	if !IsFromProjectConfig("ai.base_url") || PrivateConfigValue("ai.base_url") != "" {
+		t.Fatal("dotenv BD_ variable was treated as private")
+	}
+
+	// A real caller environment variable overrides dotenv and project config.
+	t.Setenv("BD_AI_BASE_URL", "https://private.example")
+	if err := Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	if IsFromProjectConfig("ai.base_url") || PrivateConfigValue("ai.base_url") != "https://private.example" {
+		t.Fatal("BD_ environment override was classified as project-controlled")
+	}
+
+	t.Setenv("BEADS_IDENTITY", "private")
+	if err := Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	if IsFromProjectConfig("identity") || PrivateConfigValue("identity") != "private" {
+		t.Fatal("explicit BindEnv override was classified as project-controlled")
+	}
+}
+
+// TestIsFromProjectConfigWorkspaceDoublingAsUserConfig pins the role rule for
+// a workspace .beads directory that is itself a user config location —
+// ~/.beads/config.yaml is the legacy user path: its keys are project
+// configuration and never privately confirm themselves.
+func TestIsFromProjectConfigWorkspaceDoublingAsUserConfig(t *testing.T) {
+	restore := envSnapshot(t)
+	defer restore()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	beadsDir := filepath.Join(home, ".beads")
+	if err := os.MkdirAll(beadsDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("github:\n  url: https://project.example\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DIR", beadsDir)
+	ResetForTesting()
+	t.Cleanup(ResetForTesting)
+
+	if err := Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	if !IsFromProjectConfig("github.url") {
+		t.Fatal("workspace ~/.beads config.yaml key was not classified as project-controlled")
+	}
+	if got := PrivateConfigValue("github.url"); got != "" {
+		t.Fatalf("PrivateConfigValue(github.url) = %q: the workspace config confirmed itself", got)
+	}
+}
+
 func TestDefaults(t *testing.T) {
 	// Isolate from environment variables
 	restore := envSnapshot(t)

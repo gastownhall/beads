@@ -10,6 +10,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/endpointtrust"
 	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -63,6 +64,9 @@ func (t *Tracker) Init(ctx context.Context, store tracker.Store) error {
 	jiraURL, err := t.getConfig(ctx, "jira.url", "JIRA_URL")
 	if err != nil || jiraURL == "" {
 		return fmt.Errorf("Jira URL not configured (set jira.url or JIRA_URL)")
+	}
+	if err := endpointtrust.Check(endpointtrust.WorkspaceKey(), "jira", jiraURL, endpointtrust.PrivateMatch("jira.url", "JIRA_URL", jiraURL)); err != nil {
+		return err
 	}
 	t.jiraURL = jiraURL
 

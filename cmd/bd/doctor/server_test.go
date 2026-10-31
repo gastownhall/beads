@@ -241,7 +241,7 @@ func TestRunDoltServerDiagnostics_Unreachable(t *testing.T) {
 	}
 
 	metrics := &DoltPerfMetrics{}
-	err = runDoltServerDiagnostics(metrics, cfg, "127.0.0.1", 1)
+	err = runDoltServerDiagnostics(metrics, cfg, "", "127.0.0.1", 1)
 	if err == nil {
 		t.Fatal("expected error connecting to unreachable server")
 	}

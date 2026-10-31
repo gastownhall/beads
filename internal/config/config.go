@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/viper"
@@ -36,6 +37,20 @@ var v *viper.Viper
 // overriddenKeys tracks keys explicitly set via Set() at runtime, so
 // GetValueSource can distinguish them from Viper defaults.
 var overriddenKeys = map[string]bool{}
+var projectConfigKeys = map[string]bool{}
+var userConfigValues = map[string]string{}
+var projectConfigPath string
+
+var (
+	dotenvMu          sync.RWMutex
+	dotenvVars        = map[string]string{}
+	workspaceBeadsDir string
+)
+
+var explicitEnvBindings = map[string][]string{
+	"identity": {"BEADS_IDENTITY"},
+	"node_id":  {"BEADS_NODE_ID", "BD_NODE_ID"},
+}
 
 // ignoredConfigKey normalizes a config path into the single form the
 // BEADS_TEST_IGNORE_REPO_CONFIG ignore set is keyed by, so that membership does
@@ -90,7 +105,11 @@ func Initialize() error {
 // configuration concurrently.
 func WithBeadsDir(beadsDir string, fn func()) error {
 	saved, savedOverrides := v, overriddenKeys
-	defer func() { v, overriddenKeys = saved, savedOverrides }()
+	savedProjectKeys, savedUserValues, savedProjectPath := projectConfigKeys, userConfigValues, projectConfigPath
+	defer func() {
+		v, overriddenKeys = saved, savedOverrides
+		projectConfigKeys, userConfigValues, projectConfigPath = savedProjectKeys, savedUserValues, savedProjectPath
+	}()
 	overriddenKeys = map[string]bool{}
 	err := initialize(beadsDir)
 	fn()
@@ -100,6 +119,9 @@ func WithBeadsDir(beadsDir string, fn func()) error {
 // initialize is Initialize for a process whose BEADS_DIR is beadsDirSetting.
 func initialize(beadsDirSetting string) error {
 	v = viper.New()
+	projectConfigKeys = map[string]bool{}
+	userConfigValues = map[string]string{}
+	projectConfigPath = ""
 
 	// Set config type to yaml (we only load config.yaml, not config.json)
 	v.SetConfigType("yaml")
@@ -118,6 +140,7 @@ func initialize(beadsDirSetting string) error {
 	// config existed — e.g., the idle-monitor daemon with BEADS_DIR set (GH#2375).
 	var configPaths []string     // ordered lowest priority first
 	var primaryConfigPath string // project-level config (for config.local.yaml and SaveConfigValue)
+	var localConfigPath string
 
 	// User-level paths are built once through the same absolute-native-path
 	// gate used by direct reads and writes. Invalid roots are silently skipped
@@ -140,6 +163,7 @@ func initialize(beadsDirSetting string) error {
 	appendExistingUserConfig(userConfigPaths.legacy)
 	appendExistingUserConfig(userConfigPaths.native)
 	appendExistingUserConfig(userConfigPaths.documented)
+	userConfigPathCount := len(configPaths)
 
 	// 1. Project: walk up from CWD to find .beads/config.yaml
 	beadsDirEnv := strings.TrimSpace(beadsDirSetting)
@@ -446,22 +470,56 @@ func initialize(beadsDirSetting string) error {
 
 		// Merge local config overrides if present (config.local.yaml)
 		// This allows machine-specific settings without polluting tracked config
-		localConfigPath := filepath.Join(filepath.Dir(primaryConfigPath), LocalConfigFileName)
-		if _, err := os.Stat(localConfigPath); err == nil {
-			v.SetConfigFile(localConfigPath)
-			if err := v.MergeInConfig(); err != nil {
-				return fmt.Errorf("error merging local config file: %w", err)
+		if primaryConfigPath != "" {
+			localConfigPath = filepath.Join(filepath.Dir(primaryConfigPath), LocalConfigFileName)
+			if _, err := os.Stat(localConfigPath); err == nil {
+				v.SetConfigFile(localConfigPath)
+				if err := v.MergeInConfig(); err != nil {
+					return fmt.Errorf("error merging local config file: %w", err)
+				}
+				debug.Logf("Debug: merged local config from %s\n", localConfigPath)
+				// Restore primary as ConfigFileUsed
+				v.SetConfigFile(primaryConfigPath)
 			}
-			debug.Logf("Debug: merged local config from %s\n", localConfigPath)
-			// Restore primary as ConfigFileUsed
-			v.SetConfigFile(primaryConfigPath)
 		}
 	} else {
 		// No config.yaml found - use defaults and environment variables
 		debug.Logf("Debug: no config.yaml found; using defaults and environment variables\n")
 	}
 
+	projectConfigPath = primaryConfigPath
+	projectPaths := append([]string{}, configPaths[userConfigPathCount:]...)
+	// A workspace .beads directory can double as a user config location —
+	// ~/.beads/config.yaml is the legacy user path — so the workspace's own
+	// config.yaml can land in the user slice too. The project role wins:
+	// committed configuration must never confirm itself as private.
+	if primaryConfigPath != "" {
+		projectPaths = append(projectPaths, primaryConfigPath)
+	}
+	if localConfigPath != "" {
+		projectPaths = append(projectPaths, localConfigPath)
+	}
+	projectConfigKeys = configKeys(projectPaths...)
+	userConfigValues = configStringValues(dropProjectPaths(configPaths[:userConfigPathCount], projectPaths)...)
 	return nil
+}
+
+// dropProjectPaths returns userPaths minus any entry naming the same file as
+// a project path, compared the way ignoredConfigKey normalizes paths.
+func dropProjectPaths(userPaths, projectPaths []string) []string {
+	project := map[string]bool{}
+	for _, p := range projectPaths {
+		if k := ignoredConfigKey(p); k != "" {
+			project[k] = true
+		}
+	}
+	var out []string
+	for _, p := range userPaths {
+		if !project[ignoredConfigKey(p)] {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // ResetForTesting clears the config state, allowing Initialize() to be called again.
@@ -470,6 +528,166 @@ func initialize(beadsDirSetting string) error {
 func ResetForTesting() {
 	v = nil
 	overriddenKeys = map[string]bool{}
+	projectConfigKeys = map[string]bool{}
+	userConfigValues = map[string]string{}
+	projectConfigPath = ""
+	dotenvMu.Lock()
+	dotenvVars = map[string]string{}
+	workspaceBeadsDir = ""
+	dotenvMu.Unlock()
+}
+
+func configKeys(paths ...string) map[string]bool {
+	keys := map[string]bool{}
+	for _, path := range paths {
+		if path == "" {
+			continue
+		}
+		if _, err := os.Stat(path); err != nil {
+			continue
+		}
+		fileConfig := viper.New()
+		fileConfig.SetConfigFile(path)
+		if err := fileConfig.ReadInConfig(); err != nil {
+			continue
+		}
+		for _, key := range fileConfig.AllKeys() {
+			keys[strings.ToLower(key)] = true
+		}
+	}
+	return keys
+}
+
+func configStringValues(paths ...string) map[string]string {
+	values := map[string]string{}
+	for _, path := range paths {
+		if path == "" {
+			continue
+		}
+		if _, err := os.Stat(path); err != nil {
+			continue
+		}
+		fileConfig := viper.New()
+		fileConfig.SetConfigFile(path)
+		if err := fileConfig.ReadInConfig(); err != nil {
+			continue
+		}
+		for _, key := range fileConfig.AllKeys() {
+			k := strings.ToLower(key)
+			if val := strings.TrimSpace(fileConfig.GetString(key)); val != "" {
+				values[k] = val
+			}
+		}
+	}
+	return values
+}
+
+// MarkDotenvValue records that key was populated from a project .beads/.env file
+// rather than the caller's process environment.
+func MarkDotenvValue(key, value string) {
+	if key == "" {
+		return
+	}
+	dotenvMu.Lock()
+	dotenvVars[strings.ToUpper(key)] = value
+	dotenvMu.Unlock()
+}
+
+// IsDotenvKey reports whether key's current non-empty environment value was
+// imported from a project .beads/.env file.
+func IsDotenvKey(key string) bool {
+	val := os.Getenv(key)
+	if val == "" {
+		return false
+	}
+	dotenvMu.RLock()
+	dotenvVal, ok := dotenvVars[strings.ToUpper(key)]
+	dotenvMu.RUnlock()
+	return ok && val == dotenvVal
+}
+
+// PrivateGetenv returns os.Getenv(key) only when the value came from the caller's
+// process environment rather than a project .beads/.env file.
+func PrivateGetenv(key string) string {
+	val := os.Getenv(key)
+	if val == "" || IsDotenvKey(key) {
+		return ""
+	}
+	return val
+}
+
+// RecordWorkspaceBeadsDir records the workspace .beads directory bd discovered
+// on its own. Callers skip it for a directory a .beads/.env BEADS_DIR line
+// selected, so endpoint pins stay keyed to the workspace holding that file.
+func RecordWorkspaceBeadsDir(beadsDir string) {
+	if beadsDir == "" {
+		return
+	}
+	dotenvMu.Lock()
+	workspaceBeadsDir = beadsDir
+	dotenvMu.Unlock()
+}
+
+// WorkspaceBeadsDir returns the recorded workspace .beads directory, or empty.
+func WorkspaceBeadsDir() string {
+	dotenvMu.RLock()
+	defer dotenvMu.RUnlock()
+	return workspaceBeadsDir
+}
+
+// ProjectConfigFileUsed returns the project-level config.yaml path loaded by
+// Initialize, or empty when no project config.yaml was loaded (even if a
+// user-level global config file was loaded).
+func ProjectConfigFileUsed() string {
+	return projectConfigPath
+}
+
+// PrivateConfigValue returns the value of key from a private source — a
+// non-dotenv process environment variable or a user-level global config file —
+// or empty string when no private source defines key.
+func PrivateConfigValue(key string) string {
+	key = strings.ToLower(key)
+	envKey := "BD_" + strings.ToUpper(strings.NewReplacer(".", "_", "-", "_").Replace(key))
+	if value := PrivateGetenv(envKey); value != "" {
+		return value
+	}
+	for _, boundKey := range explicitEnvBindings[key] {
+		if value := PrivateGetenv(boundKey); value != "" {
+			return value
+		}
+	}
+	return userConfigValues[key]
+}
+
+// IsFromProjectConfig reports whether key is defined by project configuration
+// (.beads/config.yaml, .beads/config.local.yaml, or .beads/.env) and has not
+// been confirmed by a private environment variable or user-level global config.
+func IsFromProjectConfig(key string) bool {
+	key = strings.ToLower(key)
+	envKey := "BD_" + strings.ToUpper(strings.NewReplacer(".", "_", "-", "_").Replace(key))
+	if value := PrivateGetenv(envKey); value != "" {
+		return false
+	}
+	for _, boundKey := range explicitEnvBindings[key] {
+		if value := PrivateGetenv(boundKey); value != "" {
+			return false
+		}
+	}
+	if IsDotenvKey(envKey) {
+		return true
+	}
+	for _, boundKey := range explicitEnvBindings[key] {
+		if IsDotenvKey(boundKey) {
+			return true
+		}
+	}
+	if !projectConfigKeys[key] {
+		return false
+	}
+	if userVal := userConfigValues[key]; userVal != "" && userVal == strings.TrimSpace(GetString(key)) {
+		return false
+	}
+	return true
 }
 
 func worktreeFallbackConfigPath(repoPath string) string {

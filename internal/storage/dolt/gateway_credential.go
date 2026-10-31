@@ -29,9 +29,16 @@ func ApplyGatewayCredential(ctx context.Context, fileCfg *configfile.Config, cfg
 	if cfg.ServerUser != "" {
 		return false, nil
 	}
+	command := fileCfg.GetDoltCredentialCommand()
+	if command == "" {
+		return false, nil
+	}
+	if err := CheckServerEndpointTrust(cfg.BeadsDir, fileCfg, cfg.ServerHost, cfg.ServerPort, cfg.ServerSocket); err != nil {
+		return false, err
+	}
 	// The token resolution is doltserver.GatewayIdentity's, which a dial
 	// through the endpoint presents too (doltserver.Endpoint.WithIdentity).
-	token, ok, err := doltserver.GatewayIdentity(ctx, fileCfg.GetDoltCredentialCommand())
+	token, ok, err := doltserver.GatewayIdentity(ctx, command)
 	if err != nil {
 		return false, err
 	}
@@ -42,4 +49,9 @@ func ApplyGatewayCredential(ctx context.Context, fileCfg *configfile.Config, cfg
 	cfg.Gateway = true
 	cfg.DisableAutoStart = true
 	return true, nil
+}
+
+// CheckServerEndpointTrust validates a Dolt server endpoint before gateway credentials are used.
+func CheckServerEndpointTrust(beadsDir string, fileCfg *configfile.Config, host string, port int, socket string) error {
+	return doltserver.CheckEndpointTrust(beadsDir, fileCfg, host, port, socket)
 }
