@@ -218,6 +218,7 @@ var readOnlyCommands = map[string]bool{
 	"backup":     true, // reads from Dolt, writes only to .beads/backup/
 	"export":     true, // reads from Dolt, writes JSONL to file/stdout
 	"tail":       true, // bd events tail: reads bd_events_journal, writes nothing
+	"head":       true, // bd events head: reads bd_events_journal, writes nothing
 }
 
 // isReadOnlyCommand returns true if the command only reads from the database.

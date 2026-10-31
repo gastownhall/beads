@@ -32,6 +32,14 @@ func TestEventsJournalAccessor_ServerMode(t *testing.T) {
 		}
 	}
 
+	// JournalHead on a never-written journal: nothing assigned, nothing
+	// retained.
+	head, floor, err := store.JournalHead(ctx)
+	must(err, "head before any writes")
+	if head != 0 || floor != 0 {
+		t.Fatalf("JournalHead before writes = (%d, %d), want (0, 0)", head, floor)
+	}
+
 	must(store.CreateIssue(ctx, mk("bd-acc-1"), "actor"), "create 1")
 	must(store.CreateIssue(ctx, mk("bd-acc-2"), "actor"), "create 2")
 	must(store.UpdateIssue(ctx, "bd-acc-1", map[string]interface{}{"title": "renamed"}, "actor"), "update")
@@ -57,6 +65,13 @@ func TestEventsJournalAccessor_ServerMode(t *testing.T) {
 		t.Error("journal row carries no timestamp; consumers order and age records by it")
 	}
 
+	// JournalHead after the writes, nothing pruned yet.
+	head, floor, err = store.JournalHead(ctx)
+	must(err, "head after writes")
+	if head != rows[len(rows)-1].Seq || floor != rows[0].Seq {
+		t.Fatalf("JournalHead after writes = (%d, %d), want (%d, %d)", head, floor, rows[len(rows)-1].Seq, rows[0].Seq)
+	}
+
 	// since + limit are the two knobs `bd events tail` drives.
 	sinceRows, err := store.ReadEventsJournal(ctx, rows[1].Seq, 0)
 	must(err, "read since")
@@ -76,8 +91,17 @@ func TestEventsJournalAccessor_ServerMode(t *testing.T) {
 	if n != 2 {
 		t.Fatalf("prune with retain-rows=2 deleted %d, want 2 (keep newest 2)", n)
 	}
-	if got := readJournalRows(t, store); len(got) != 2 {
-		t.Fatalf("journal rows after prune = %d, want 2: %+v", len(got), got)
+	survivors := readJournalRows(t, store)
+	if len(survivors) != 2 {
+		t.Fatalf("journal rows after prune = %d, want 2: %+v", len(survivors), survivors)
+	}
+
+	// JournalHead after the prune: head unchanged, floor advances to the
+	// oldest surviving row.
+	head, floor, err = store.JournalHead(ctx)
+	must(err, "head after prune")
+	if head != rows[len(rows)-1].Seq || floor != survivors[0].seq {
+		t.Fatalf("JournalHead after prune = (%d, %d), want (%d, %d)", head, floor, rows[len(rows)-1].Seq, survivors[0].seq)
 	}
 
 	// The server-mode read reaches the same truncation decision as the embedded

@@ -800,6 +800,7 @@ go_test(
         "events_autoprune_proxied_test.go",
         "events_delete_actor_e2e_test.go",
         "events_golden_test.go",
+        "events_head_e2e_test.go",
         "events_http_e2e_test.go",
         "events_journal_activation_e2e_test.go",
         "events_journal_construction_test.go",

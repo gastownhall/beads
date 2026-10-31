@@ -2401,6 +2401,25 @@ bd events export
     | present a pruned journal's surviving suffix as a complete history.
   flag --limit type=int default="0" usage="maximum number of records to return (0 = no limit)"
 
+bd events head
+  use: "head"
+  short: "Print the journal's head and floor sequence numbers"
+  hidden: false
+  runnable: true
+  long:
+    | Print the events journal's head (the highest seq ever assigned) and
+    | floor (the lowest seq still retained), without reading any journal rows.
+    |
+    | A consumer that wants to start following the journal "from now" otherwise has
+    | no cheap way to learn where "now" is: 'tail --since' past the head returns
+    | nothing without saying where the head is, and 'tail --since 0' replays the
+    | whole retained window just to find the last line. Read the head once here,
+    | then 'tail --since <head>' to follow everything committed after this moment.
+    |
+    | floor is the oldest seq still retained — the same field a truncated 'tail'
+    | reports. A --since at or above floor-1 is safe to resume from; below it will
+    | fail typed the same way 'tail' does.
+
 bd events prune
   use: "prune"
   short: "Delete journal records below a sequence number (retention)"

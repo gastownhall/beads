@@ -194,6 +194,7 @@
 100 48 TestEmbeddedReassignFenceCLI
 
 100 49 TestEmbeddedBackupRestoreStrictReadonly
+100 49 TestEmbeddedEventsHeadReportsHeadAndFloorWithoutReplayingRows
 100 49 TestEmbeddedInitAPushConsentAndRemoteBootstrap
 100 49 TestEmbeddedMigratePersonal_abortOnNoConfirm
 100 49 TestEmbeddedRemedyPrinting_closeContinue
