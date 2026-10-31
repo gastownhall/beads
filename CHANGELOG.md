@@ -1090,6 +1090,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd create --metadata` and `bd update --metadata` now refuse a top-level
+  key outside the metadata key grammar (`storage.ValidateMetadataKey`), with
+  the same `invalid metadata key` message `--set-metadata`, `--unset-metadata`
+  and the metadata filters already give (GH#7921). Such a key used to be
+  stored without complaint and could then not be filtered on, set with
+  `--set-metadata` or removed with `--unset-metadata`. Values, including
+  nested objects, are unchanged.
 - `bd migrate-personal` no longer leaves an issue in both databases when
   someone else's bead in the project database depends on it. The move's
   delete from the project database refuses such an issue, but it ran only
