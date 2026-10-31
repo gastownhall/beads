@@ -1366,6 +1366,11 @@ func (s *DoltStore) commitWriteTxOn(ctx context.Context, beginner txBeginner, fn
 	if err != nil {
 		return issueops.BlockedRecheck{}, fmt.Errorf("begin write tx: %w", err)
 	}
+	// Ends the Tx before a caller releases a pinned *sql.Conn beginner (see
+	// withDeleteFence): Conn.Close waits for an open Tx, so a panicking fn
+	// would otherwise hang there instead of propagating. A no-op after Commit
+	// or the error path's Rollback.
+	defer func() { _ = tx.Rollback() }()
 	clearJournalScope := s.scopeEventsJournalTransaction(tx)
 	defer clearJournalScope()
 	clearVersionScope, err := s.scopeVersionedHistoryTransaction(ctx, tx)
