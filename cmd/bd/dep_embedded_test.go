@@ -171,6 +171,37 @@ func TestEmbeddedDepAAddAndList(t *testing.T) {
 		}
 	})
 
+	// Regression for GH#7842: an unvalidated --direction on dep list fell
+	// through to the "down" set at exit 0 instead of rejecting it, the way
+	// dep tree's own --direction already does. "both" in particular is not a
+	// random typo — it is dep tree's third value, read by someone trying not
+	// to be caught by dep list's default — so it must fail loudly rather than
+	// silently return the one-directional default it was meant to avoid.
+	t.Run("list_direction_both_rejected", func(t *testing.T) {
+		out := bdDepFail(t, bd, dir, "list", issueC.ID, "--direction", "both")
+		if !strings.Contains(out, "--direction must be 'down' or 'up'") {
+			t.Errorf("expected direction validation error, got: %s", out)
+		}
+	})
+
+	t.Run("list_direction_typo_rejected", func(t *testing.T) {
+		out := bdDepFail(t, bd, dir, "list", issueC.ID, "--direction", "dwon")
+		if !strings.Contains(out, "--direction must be 'down' or 'up'") {
+			t.Errorf("expected direction validation error, got: %s", out)
+		}
+	})
+
+	t.Run("list_direction_explicit_empty_still_means_down", func(t *testing.T) {
+		// An explicit empty string hits the same "" -> "down" default as an
+		// omitted flag (cobra's own default value is already "down"), so it
+		// is not part of this fix's validation — only a non-empty value that
+		// is neither "down" nor "up" gets rejected.
+		out := bdDep(t, bd, dir, "list", issueC.ID, "--direction=")
+		if !strings.Contains(out, issueD.ID) {
+			t.Errorf("expected dependency in list output for explicit empty direction: %s", out)
+		}
+	})
+
 	t.Run("list_type_filter", func(t *testing.T) {
 		out := bdDep(t, bd, dir, "list", epic.ID, "--direction", "up", "--type", "parent-child")
 		if !strings.Contains(out, child1.ID) || !strings.Contains(out, child2.ID) {

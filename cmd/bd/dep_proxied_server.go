@@ -400,10 +400,11 @@ func runDepRemoveProxiedServer(_ *cobra.Command, ctx context.Context, args []str
 }
 
 func runDepListProxiedServer(cmd *cobra.Command, ctx context.Context, args []string) error {
-	direction, _ := cmd.Flags().GetString("direction")
+	directionFlag, _ := cmd.Flags().GetString("direction")
 	typeFilter, _ := cmd.Flags().GetString("type")
-	if direction == "" {
-		direction = "down"
+	direction, err := normalizeDepListDirection(directionFlag)
+	if err != nil {
+		return HandleErrorRespectJSON("%v", err)
 	}
 
 	// The multi-id edge listing is a different question with a different

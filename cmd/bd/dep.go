@@ -988,6 +988,22 @@ func warnDroppedDepEdges(ctx context.Context, reader issueops.EdgeReader, anchor
 	fmt.Fprintf(os.Stderr, "For raw edge records, run: bd dep list %s %s%s\n", arg, arg, note)
 }
 
+// normalizeDepListDirection applies dep list's "" -> "down" default and
+// validates the result. Unlike dep tree's TreeDirection (which also accepts
+// "both"), dep list only ever queries one direction per call — see GH#5960
+// for the separate, unresolved design question of a combined listing — so
+// anything other than "down" or "up" (a typo, or "both" itself) is rejected
+// instead of silently returning the "down" set (GH#7842).
+func normalizeDepListDirection(direction string) (string, error) {
+	if direction == "" {
+		direction = "down"
+	}
+	if direction != "down" && direction != "up" {
+		return "", fmt.Errorf("--direction must be 'down' or 'up'")
+	}
+	return direction, nil
+}
+
 var depListCmd = &cobra.Command{
 	Use:   "list [issue-id...]",
 	Short: "List dependencies or dependents of one or more issues",
@@ -1023,10 +1039,11 @@ Examples:
 		}
 
 		ctx := rootCtx
-		direction, _ := cmd.Flags().GetString("direction")
+		directionFlag, _ := cmd.Flags().GetString("direction")
 		typeFilter, _ := cmd.Flags().GetString("type")
-		if direction == "" {
-			direction = "down"
+		direction, err := normalizeDepListDirection(directionFlag)
+		if err != nil {
+			return HandleErrorRespectJSON("%v", err)
 		}
 
 		var resolved []depListAnchor
