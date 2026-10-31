@@ -1280,12 +1280,7 @@ func (s *DoltStore) withRetryTxOn(ctx context.Context, beginner txBeginner, fn f
 		return ErrCircuitOpen
 	}
 
-	bo := backoff.NewExponentialBackOff()
-	bo.InitialInterval = 25 * time.Millisecond
-	bo.MaxElapsedTime = 5 * time.Second
-	if s.serverMode {
-		bo.MaxElapsedTime = 15 * time.Second
-	}
+	bo := newWriteTxRetryBackOff(s.serverMode)
 	var pending issueops.BlockedRecheck
 	if err := backoff.Retry(func() error {
 		var err error
@@ -1337,6 +1332,26 @@ func (s *DoltStore) withRetryTxOn(ctx context.Context, beginner txBeginner, fn f
 	}
 	logBlockedRecheckFailure(ctx, pending, s.recheckBlockedAfterCommit(ctx, pending))
 	return nil
+}
+
+// writeTxRetryMaxInterval caps each wait between withRetryTx attempts (before
+// jitter). Uncapped, the exponential waits stretch to several seconds each, so
+// a writer that keeps losing commit-time conflicts gets at most 16 attempts in
+// the server budget; capped, the attempts keep arriving through all of it.
+const writeTxRetryMaxInterval = time.Second
+
+// newWriteTxRetryBackOff is withRetryTx's schedule: exponential waits from
+// 25ms, capped at writeTxRetryMaxInterval and randomized by half in either
+// direction, within a 15s budget on a sql-server (5s embedded).
+func newWriteTxRetryBackOff(serverMode bool) *backoff.ExponentialBackOff {
+	bo := backoff.NewExponentialBackOff()
+	bo.InitialInterval = 25 * time.Millisecond
+	bo.MaxInterval = writeTxRetryMaxInterval
+	bo.MaxElapsedTime = 5 * time.Second
+	if serverMode {
+		bo.MaxElapsedTime = 15 * time.Second
+	}
+	return bo
 }
 
 func (s *DoltStore) withWriteTx(ctx context.Context, fn func(tx *sql.Tx) error) error {

@@ -403,6 +403,7 @@ go_test(
         "wisp_validation_test.go",
         "wisps_cycle_test.go",
         "workspace_config_contract_test.go",
+        "write_retry_backoff_test.go",
     ],
     # Source-scan guards (journal/version scope completeness, helper sentinel
     # census) parse this package and ../issueops at test time; the PR4107 and
@@ -448,6 +449,7 @@ go_test(
         "//internal/versionedhistory",
         "//internal/workapi",
         "//issueops",
+        "@com_github_cenkalti_backoff_v4//:backoff",
         "@com_github_data_dog_go_sqlmock//:go-sqlmock",
         "@com_github_go_sql_driver_mysql//:mysql",
         "@com_github_google_uuid//:uuid",
