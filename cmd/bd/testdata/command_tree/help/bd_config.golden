@@ -23,6 +23,8 @@ Auto-Export (config.yaml):
   It is not cross-machine sync; use bd dolt push/pull with a Dolt remote.
   Disabled by default. Enable only for integrations that need fresh JSONL.
   Auto-staging is separate and disabled by default.
+  For pre-commit export, export.path must be relative and stay inside the repository,
+  outside .git; otherwise export is skipped with a warning.
 
   Keys:
     export.auto       Enable/disable auto-export (default: false)

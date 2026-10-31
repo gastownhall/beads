@@ -142,3 +142,59 @@ func TestDatabaseIntegrity_SharedWorktreeRestoresSharedRootOnTestBinaryError(t *
 		t.Fatalf("expected no worktree-local .beads directory, got err=%v", err)
 	}
 }
+
+func TestDatabaseIntegrity_RefusesEscapingAndSymlinkedDoltDataDir(t *testing.T) {
+	t.Run("escaping dolt_data_dir", func(t *testing.T) {
+		dir := setupTestWorkspace(t)
+		beadsDir := filepath.Join(dir, ".beads")
+		victim := filepath.Join(t.TempDir(), "victim")
+		if err := os.MkdirAll(victim, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		sentinel := filepath.Join(victim, "sentinel")
+		if err := os.WriteFile(sentinel, []byte("keep"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		rel, err := filepath.Rel(beadsDir, victim)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"backend":"dolt","dolt_data_dir":`+`"`+filepath.ToSlash(rel)+`"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		err = DatabaseIntegrity(dir)
+		if err == nil || !strings.Contains(err.Error(), "outside") {
+			t.Fatalf("expected outside error, got %v", err)
+		}
+		if data, rerr := os.ReadFile(sentinel); rerr != nil || string(data) != "keep" {
+			t.Fatalf("sentinel modified or moved: %q, %v", data, rerr)
+		}
+	})
+
+	t.Run("symlinked dolt directory", func(t *testing.T) {
+		dir := setupTestWorkspace(t)
+		beadsDir := filepath.Join(dir, ".beads")
+		victim := filepath.Join(t.TempDir(), "victim")
+		if err := os.MkdirAll(victim, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		sentinel := filepath.Join(victim, "sentinel")
+		if err := os.WriteFile(sentinel, []byte("keep"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		doltLink := filepath.Join(beadsDir, "dolt")
+		_ = os.RemoveAll(doltLink)
+		if err := os.Symlink(victim, doltLink); err != nil {
+			t.Fatal(err)
+		}
+
+		err := DatabaseIntegrity(dir)
+		if err == nil || !strings.Contains(err.Error(), "symlink") {
+			t.Fatalf("expected symlink error, got %v", err)
+		}
+		if data, rerr := os.ReadFile(sentinel); rerr != nil || string(data) != "keep" {
+			t.Fatalf("sentinel modified or moved: %q, %v", data, rerr)
+		}
+	})
+}

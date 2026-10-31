@@ -1207,7 +1207,11 @@ func runMigrateFromProxiedServer(dryRun bool, shared bool) error {
 		if errs := proxy.PurgeControlFiles(rootDir); len(errs) > 0 {
 			return HandleError("failed to retire proxy controls: %v", errs[0])
 		}
-		if errs := removeMigrateAssets(logAssets); len(errs) > 0 {
+		logDir := filepath.Join(beadsDir, "dolt")
+		if shared {
+			logDir = sharedDolt
+		}
+		if errs := removeMigrateAssets(logDir, logAssets); len(errs) > 0 {
 			return HandleError("failed to retire proxy logs: %v", errs[0])
 		}
 		if err := checkpointMigration(beadsDir, j, migrateOldControlsRetired); err != nil {
@@ -1283,10 +1287,30 @@ func proxiedLogAssets(beadsDir string) ([]string, error) {
 	return []string{logPath, logPath + ".1"}, nil
 }
 
-func removeMigrateAssets(paths []string) []error {
+func removeMigrateAssets(logDir string, paths []string) []error {
 	var errs []error
 	for _, p := range paths {
-		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+		root, rootErr := filepath.Abs(logDir)
+		path, pathErr := filepath.Abs(p)
+		rootInfo, statErr := os.Lstat(root)
+		if rootErr != nil || pathErr != nil || statErr != nil || !rootInfo.IsDir() ||
+			(path != filepath.Join(root, proxiedServerLogName) && path != filepath.Join(root, proxiedServerLogName+".1")) {
+			fmt.Fprintf(os.Stderr, "Warning: skipping untrusted migration log asset %q\n", p)
+			continue
+		}
+		info, err := os.Lstat(path)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if !info.Mode().IsRegular() {
+			fmt.Fprintf(os.Stderr, "Warning: skipping non-regular migration log asset %q\n", p)
+			continue
+		}
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			errs = append(errs, err)
 		}
 	}

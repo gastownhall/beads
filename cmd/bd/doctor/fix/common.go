@@ -150,6 +150,67 @@ func isWithinWorkspace(root, candidate string) bool {
 	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)))
 }
 
+func resolveExistingParent(dir string) (string, error) {
+	info, err := os.Lstat(dir)
+	if os.IsNotExist(err) {
+		parent, err := resolveExistingParent(filepath.Dir(dir))
+		if err != nil {
+			return "", err
+		}
+		return filepath.Join(parent, filepath.Base(dir)), nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
+		return "", fmt.Errorf("parent is not a directory: %s", dir)
+	}
+	return filepath.EvalSymlinks(dir)
+}
+
+func confinedDatabasePath(beadsDir, dbPath string) (string, error) {
+	absBeads, err := filepath.Abs(beadsDir)
+	if err != nil {
+		return "", fmt.Errorf("invalid beads directory: %w", err)
+	}
+	if info, lerr := os.Lstat(absBeads); lerr == nil && info.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("refusing symlinked beads directory: %s", beadsDir)
+	}
+	resolvedBeads, err := resolveExistingParent(absBeads)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve beads directory: %w", err)
+	}
+	absDB, err := filepath.Abs(dbPath)
+	if err != nil {
+		return "", fmt.Errorf("invalid database path: %w", err)
+	}
+	sep := string(filepath.Separator)
+	relLex, err := filepath.Rel(absBeads, absDB)
+	if err != nil || relLex == "." || relLex == ".." || strings.HasPrefix(relLex, ".."+sep) || filepath.IsAbs(relLex) {
+		return "", fmt.Errorf("refusing database path outside workspace .beads directory: %s", dbPath)
+	}
+	if info, lerr := os.Lstat(absDB); lerr == nil && info.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("refusing symlinked database path: %s", dbPath)
+	}
+	resolvedParent, err := resolveExistingParent(filepath.Dir(absDB))
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve database parent directory: %w", err)
+	}
+	relParent, err := filepath.Rel(resolvedBeads, resolvedParent)
+	if err != nil || (relParent != "." && (relParent == ".." || strings.HasPrefix(relParent, ".."+sep) || filepath.IsAbs(relParent))) {
+		return "", fmt.Errorf("refusing database path whose parent resolves outside .beads directory: %s", dbPath)
+	}
+	if resolvedDB, rerr := filepath.EvalSymlinks(absDB); rerr == nil {
+		relRes, err := filepath.Rel(resolvedBeads, resolvedDB)
+		if err != nil || relRes == "." || relRes == ".." || strings.HasPrefix(relRes, ".."+sep) || filepath.IsAbs(relRes) {
+			return "", fmt.Errorf("refusing database path resolving outside .beads directory: %s", dbPath)
+		}
+	} else if !os.IsNotExist(rerr) {
+		return "", rerr
+	}
+	return absDB, nil
+}
+
 // resolveBeadsDir follows .beads/redirect files to find the actual beads directory.
 // If no redirect exists, returns the original path unchanged.
 // This is a wrapper around beads.FollowRedirect for use within the fix package.

@@ -91,7 +91,7 @@ func RunDoltPerformanceDiagnostics(path string, enableProfiling bool) (*DoltPerf
 		if profileFile, err := startCPUProfile(profilePath); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to start CPU profiling: %v\n", err)
 		} else {
-			metrics.ProfilePath = profilePath
+			metrics.ProfilePath = profileFile.Name()
 			defer stopCPUProfile(profileFile)
 		}
 	}

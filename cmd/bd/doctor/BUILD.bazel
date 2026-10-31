@@ -142,6 +142,7 @@ go_test(
         "migration_validation_test.go",
         "multirepo_test.go",
         "nocow_test.go",
+        "path_writes_test.go",
         "perf_dolt_test.go",
         "quick_test.go",
         "role_test.go",

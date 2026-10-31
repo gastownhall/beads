@@ -32,7 +32,10 @@ func doltIntegrityRecovery(path, beadsDir string) error {
 		return err
 	}
 
-	doltPath := getDatabasePath(beadsDir)
+	doltPath, err := confinedDatabasePath(beadsDir, getDatabasePath(beadsDir))
+	if err != nil {
+		return err
+	}
 
 	// Check if dolt directory exists
 	if _, err := os.Stat(doltPath); os.IsNotExist(err) {
@@ -66,8 +69,10 @@ func doltIntegrityRecovery(path, beadsDir string) error {
 	if err := initCmd.Run(); err != nil {
 		// Restore backup on failure
 		fmt.Printf("  Warning: recovery failed, restoring corrupted Dolt database from %s\n", filepath.Base(backupPath))
-		_ = os.RemoveAll(doltPath)
-		_ = os.Rename(backupPath, doltPath)
+		if _, cerr := confinedDatabasePath(beadsDir, doltPath); cerr == nil {
+			_ = os.RemoveAll(doltPath)
+			_ = os.Rename(backupPath, doltPath)
+		}
 		return fmt.Errorf("failed to reinitialize Dolt database: %w", err)
 	}
 

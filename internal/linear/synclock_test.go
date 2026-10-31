@@ -6,6 +6,26 @@ import (
 	"testing"
 )
 
+func TestSyncLockRejectsSymlink(t *testing.T) {
+	dir := t.TempDir()
+	sentinel := filepath.Join(dir, "sentinel")
+	if err := os.WriteFile(sentinel, []byte("sentinel"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(sentinel, filepath.Join(dir, syncLockFilename)); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := AcquireSyncLock(dir, false)
+	if err == nil {
+		_ = lock.Release()
+		t.Error("lock accepted symlink")
+	}
+	data, readErr := os.ReadFile(sentinel)
+	if readErr != nil || string(data) != "sentinel" {
+		t.Errorf("sentinel changed: %q, %v", data, readErr)
+	}
+}
+
 func TestAcquireSyncLock(t *testing.T) {
 	t.Run("acquire and release", func(t *testing.T) {
 		dir := t.TempDir()

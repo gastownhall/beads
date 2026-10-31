@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
@@ -235,6 +236,9 @@ func openDoltStoreFromConfig(ctx context.Context, beadsDir string, requireExisti
 	if cfg != nil {
 		database = cfg.GetDoltDatabase()
 	}
+	if err := validateMetadataDatabaseName(database); err != nil {
+		return nil, err
+	}
 	if sanitized := sanitizeDBName(database); sanitized != database {
 		if err := migrateHyphenatedDB(beadsDir, cfg, database, sanitized); err != nil {
 			return nil, fmt.Errorf("auto-sanitize database name %q → %q: %w", database, sanitized, err)
@@ -256,6 +260,11 @@ func errNoRoutedEmbeddedDatabase(beadsDir string) error {
 // This handles projects initialized before GH#2142 that upgrade to
 // embedded-mode-default builds (GH#3231).
 func migrateHyphenatedDB(beadsDir string, cfg *configfile.Config, oldName, newName string) error {
+	for _, name := range []string{oldName, newName} {
+		if err := validateMetadataDatabaseName(name); err != nil {
+			return err
+		}
+	}
 	dataDir := filepath.Join(beadsDir, "embeddeddolt")
 	oldDir := filepath.Join(dataDir, oldName)
 	newDir := filepath.Join(dataDir, newName)
@@ -287,6 +296,13 @@ func migrateHyphenatedDB(beadsDir string, cfg *configfile.Config, oldName, newNa
 			return fmt.Errorf("persisting sanitized database name to metadata.json: %w", err)
 		}
 		fmt.Fprintf(os.Stderr, "bd: updated metadata.json dolt_database %q → %q (GH#3231)\n", oldName, newName)
+	}
+	return nil
+}
+
+func validateMetadataDatabaseName(name string) error {
+	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, "/\\\x00") || filepath.IsAbs(name) || filepath.VolumeName(name) != "" {
+		return fmt.Errorf("invalid dolt_database %q", name)
 	}
 	return nil
 }
@@ -367,6 +383,9 @@ func openNonMutatingStoreFromConfig(ctx context.Context, beadsDir string, previe
 	database := configfile.DefaultDoltDatabase
 	if cfg != nil {
 		database = cfg.GetDoltDatabase()
+	}
+	if err := validateMetadataDatabaseName(database); err != nil {
+		return nil, err
 	}
 	if sanitized := sanitizeDBName(database); sanitized != database {
 		database = sanitized
