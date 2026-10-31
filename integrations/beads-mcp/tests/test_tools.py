@@ -171,6 +171,20 @@ async def test_beads_update_issue(sample_issue):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("labels", [["bug", "urgent"], []])
+async def test_beads_update_issue_replaces_labels(sample_issue, labels):
+    updated_issue = sample_issue.model_copy(update={"labels": labels})
+    mock_client = AsyncMock()
+    mock_client.update = AsyncMock(return_value=updated_issue)
+
+    with patch("beads_mcp.tools._get_client", return_value=mock_client):
+        result = await beads_update_issue(issue_id="bd-1", labels=labels)
+
+    assert result.labels == labels
+    assert mock_client.update.call_args.args[0].labels == labels
+
+
+@pytest.mark.asyncio
 async def test_beads_claim_issue(sample_issue):
     """Test beads_claim_issue tool."""
     claimed_issue = sample_issue.model_copy(update={"status": "in_progress", "assignee": "agent-a"})
