@@ -13,7 +13,9 @@ import (
 
 // TestEmbeddedTransactionWispLifecyclePersistsDurableDependent verifies that
 // a transactional wisp lifecycle transition publishes the durable dependent's
-// recomputed blocked state into the versioned history.
+// recomputed blocked state into the versioned history: a close, a reopen, a
+// status update into closed, and a delete, which also removes the durable
+// edge that pointed at the wisp (GH#6647).
 func TestEmbeddedTransactionWispLifecyclePersistsDurableDependent(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 	ctx := t.Context()
@@ -50,6 +52,26 @@ func TestEmbeddedTransactionWispLifecyclePersistsDurableDependent(t *testing.T) 
 						t.Fatal("transactional reopen reported Changed=false")
 					}
 					return nil
+				})
+			},
+		},
+		{
+			name:       "update_close",
+			wispID:     "embedded-tx-wisp-update-close",
+			dependerID: "embedded-tx-update-close-depender",
+			run: func(_ *testing.T, store *embeddeddolt.EmbeddedDoltStore, ctx context.Context, wispID string) error {
+				return store.RunInTransaction(ctx, "test: update wisp blocker into closed", func(tx storage.Transaction) error {
+					return tx.UpdateIssue(ctx, wispID, map[string]interface{}{"status": types.StatusClosed}, "tester")
+				})
+			},
+		},
+		{
+			name:       "delete",
+			wispID:     "embedded-tx-wisp-delete",
+			dependerID: "embedded-tx-delete-depender",
+			run: func(_ *testing.T, store *embeddeddolt.EmbeddedDoltStore, ctx context.Context, wispID string) error {
+				return store.RunInTransaction(ctx, "test: delete wisp blocker", func(tx storage.Transaction) error {
+					return tx.DeleteIssue(ctx, wispID)
 				})
 			},
 		},
@@ -93,6 +115,12 @@ func TestEmbeddedTransactionWispLifecyclePersistsDurableDependent(t *testing.T) 
 			}
 			if committed != test.wantBlocked {
 				t.Errorf("committed durable depender is_blocked = %t, want %t", committed, test.wantBlocked)
+			}
+			var dirtyGraph int
+			te.queryScalar(t, ctx,
+				"SELECT COUNT(*) FROM dolt_status WHERE table_name IN ('issues', 'dependencies')", nil, &dirtyGraph)
+			if dirtyGraph != 0 {
+				t.Errorf("%d graph table(s) still dirty in the working set after the transaction committed", dirtyGraph)
 			}
 		})
 	}

@@ -64,9 +64,10 @@ func (t *DirtyTableTracker) DirtyTables() map[string]bool {
 // commit helpers already skip an empty staged set, so the false-positive side
 // is free; tracking real mints would mean threading state back out of the seam
 // for no behavioral gain. The one thing it does widen is `issues` on the
-// dependency paths, which stage only {dependencies, events} today -- and that
-// widening is exactly what the current_revision advance requires, gated on
-// history being on, so no flag-off commit changes shape.
+// dependency paths, which stage it only when the edge flipped a durable
+// is_blocked (GH#6647) -- and that widening is exactly what the
+// current_revision advance requires, gated on history being on, so no
+// flag-off commit changes shape.
 func (t *DirtyTableTracker) MarkVersionedHistoryDirty(enabled bool) {
 	if !enabled || len(t.tables) == 0 {
 		return

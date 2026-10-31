@@ -345,6 +345,7 @@
 40 19 TestEmbeddedMigration0062FlipsEventsToIgnoredPlane
 40 19 TestEmbeddedReaderListMaxRowsIsHonored
 40 19 TestEmbeddedRelationsAnswersInThePinnedOrder
+40 19 TestEmbeddedTransactionDependencyPersistsIsBlocked
 40 19 TestIgnoredCursorHealConvergesFromEveryCrashState
 40 19 TestOpenAfterCloseCreatesNewStore
 40 19 TestOpenReturnsCachedStore

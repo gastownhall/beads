@@ -19,13 +19,30 @@ const deleteBatchSize = 50
 // discovered during recursive dependent traversal.
 const maxRecursiveResults = 10000
 
+// DeleteIssueResult holds the result of a DeleteIssueInTxWithResult call.
+type DeleteIssueResult struct {
+	// IssueRowsChanged reports whether this delete changed a durable issues
+	// row: the deleted row itself, or a dependent whose is_blocked the delete
+	// recomputed. A wisp delete changes one only through the recompute.
+	IssueRowsChanged bool
+}
+
 // DeleteIssueInTx removes one row and everything that hangs off it, journaling
 // the delete and its edge removals to actor. Callers with a request behind them
 // pass its actor; the actorless system surfaces (storage.DeleteIssue,
 // Tx.DeleteIssue) pass "" — see the 0066 contract in journal.go.
+func DeleteIssueInTx(ctx context.Context, tx *sql.Tx, id string, actor string) error {
+	_, err := DeleteIssueInTxWithResult(ctx, tx, id, actor)
+	return err
+}
+
+// DeleteIssueInTxWithResult is DeleteIssueInTx reporting whether the delete
+// changed a durable issues row, so a caller that stages tables for a Dolt
+// commit can stage `issues` when deleting a wisp unblocked a durable dependent
+// (GH#6647).
 //
 //nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
-func DeleteIssueInTx(ctx context.Context, tx *sql.Tx, id string, actor string) error {
+func DeleteIssueInTxWithResult(ctx context.Context, tx *sql.Tx, id string, actor string) (DeleteIssueResult, error) {
 	isWisp := IsActiveWispInTx(ctx, tx, id)
 
 	var deletedIssues, deletedWisps []string
@@ -36,24 +53,25 @@ func DeleteIssueInTx(ctx context.Context, tx *sql.Tx, id string, actor string) e
 	}
 	affectedIssues, affectedWisps, aerr := AffectedByDeletionInTx(ctx, tx, deletedIssues, deletedWisps)
 	if aerr != nil {
-		return fmt.Errorf("affected by delete for %s: %w", id, aerr)
+		return DeleteIssueResult{}, fmt.Errorf("affected by delete for %s: %w", id, aerr)
 	}
 
 	// Edges are journaled before the rows go, while their source snapshots can
 	// still be read.
 	if err := RecordDependencyRemovalsForIssuesInTx(ctx, tx, []string{id}, actor); err != nil {
-		return fmt.Errorf("journal dependency removals for %s: %w", id, err)
+		return DeleteIssueResult{}, fmt.Errorf("journal dependency removals for %s: %w", id, err)
 	}
 	if err := deleteIssueRowInTx(ctx, tx, id, isWisp, actor); err != nil {
-		return err
+		return DeleteIssueResult{}, err
 	}
 
-	if err := RecomputeIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
-		return fmt.Errorf("recompute is_blocked after delete for %s: %w", id, err)
+	recompute, err := RecomputeIsBlockedInTxWithResult(ctx, tx, affectedIssues, affectedWisps)
+	if err != nil {
+		return DeleteIssueResult{}, fmt.Errorf("recompute is_blocked after delete for %s: %w", id, err)
 	}
 	NoteDeleteBlockedRecheck(tx, []string{id}, "", affectedIssues, affectedWisps)
 
-	return nil
+	return DeleteIssueResult{IssueRowsChanged: !isWisp || recompute.IssueRowsChanged}, nil
 }
 
 //nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
@@ -82,7 +100,10 @@ func deleteIssueRowInTx(ctx context.Context, tx *sql.Tx, id string, isWisp bool,
 		return err
 	}
 	if isWisp {
-		if err := DeleteWispFromDependenciesInTx(ctx, tx, id); err != nil {
+		// The callers that stage tables stage dependencies for any wisp
+		// delete (DeleteCascadeTables, the deleter's swept tables), so
+		// whether a durable edge went is not needed here.
+		if _, err := DeleteWispFromDependenciesInTx(ctx, tx, id); err != nil {
 			return err
 		}
 		if err := DeleteWispAuxRowsInTx(ctx, tx, []string{id}); err != nil {

@@ -55,7 +55,7 @@ func (s *DoltStore) addDependencyWithOptions(ctx context.Context, dep *types.Dep
 		}
 	}
 
-	var eventWritten bool
+	var written issueops.DependencyWriteResult
 	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
 		opts := issueops.AddDependencyOpts{
 			SourceTable:   "issues",
@@ -65,8 +65,10 @@ func (s *DoltStore) addDependencyWithOptions(ctx context.Context, dep *types.Dep
 			TargetKind:    &kind,
 			EmitEvent:     addOpts.EmitEvent,
 		}
+		// Assigned, never merged: a retried attempt's verdict replaces the
+		// rolled-back one's.
 		var e error
-		eventWritten, e = issueops.AddDependencyInTx(ctx, tx, dep, actor, opts)
+		written, e = issueops.AddDependencyInTxWithResult(ctx, tx, dep, actor, opts)
 		return e
 	}); err != nil {
 		return err
@@ -75,10 +77,15 @@ func (s *DoltStore) addDependencyWithOptions(ctx context.Context, dep *types.Dep
 	// Stage events only when AddDependencyInTx actually recorded a
 	// dependency_added event (explicit verb + genuine new edge). A structural or
 	// idempotent add writes no event, so staging events would sweep unrelated
-	// pending event rows into this dependency commit.
+	// pending event rows into this dependency commit. Stage issues only when
+	// the add flipped a durable is_blocked, so the flag rides the edge's
+	// commit (GH#6647) and a non-flipping add sweeps no pending issues edit.
 	tables := []string{"dependencies"}
-	if eventWritten {
+	if written.EventWritten {
 		tables = append(tables, "events")
+	}
+	if written.Blocked.IssueRowsChanged {
+		tables = append(tables, "issues")
 	}
 	return s.doltAddAndCommit(ctx, tables, "dependency: add "+string(dep.Type)+" "+dep.IssueID+" -> "+dep.DependsOnID)
 }
@@ -116,13 +123,12 @@ func (s *DoltStore) RemoveDependencyWithOptions(ctx context.Context, issueID, de
 			defer clearVersionScope()
 			clearRecheckScope := issueops.ScopeBlockedRecheckTransaction(tx)
 			defer clearRecheckScope()
-			if _, err := issueops.RemoveDependencyInTx(ctx, tx, issueID, dependsOnID, actor, rmOpts.EmitEvent); err != nil {
+			written, err := issueops.RemoveDependencyInTxWithResult(ctx, tx, issueID, dependsOnID, actor, rmOpts.EmitEvent)
+			if err != nil {
 				return err
 			}
-			if err := s.commitSQLTxAndRecheck(ctx, "commit remove wisp dependency", tx); err != nil {
-				return err
-			}
-			return nil
+			return s.commitWispTxAndRecheck(ctx, "commit remove wisp dependency", tx,
+				wispDurable{issues: written.Blocked.IssueRowsChanged}, "dependency: remove "+issueID+" -> "+dependsOnID)
 		}
 
 		tx, err := s.db.BeginTx(ctx, nil)
@@ -145,7 +151,7 @@ func (s *DoltStore) RemoveDependencyWithOptions(ctx context.Context, issueID, de
 		clearRecheckScope := issueops.ScopeBlockedRecheckTransaction(tx)
 		defer clearRecheckScope()
 
-		eventWritten, err := issueops.RemoveDependencyInTx(ctx, tx, issueID, dependsOnID, actor, rmOpts.EmitEvent)
+		written, err := issueops.RemoveDependencyInTxWithResult(ctx, tx, issueID, dependsOnID, actor, rmOpts.EmitEvent)
 		if err != nil {
 			return err
 		}
@@ -162,9 +168,15 @@ func (s *DoltStore) RemoveDependencyWithOptions(ctx context.Context, issueID, de
 		// dependency_removed event (explicit verb + genuine edge removal). A
 		// structural or missing-edge remove writes no event, so staging events would
 		// sweep unrelated pending event rows into this dependency commit.
+		// Issues is staged when the removal's recompute changed a durable
+		// is_blocked, so the unblock rides this commit (GH#6647); the recheck
+		// below only settles concurrent-unblock races.
 		tables := []string{"dependencies"}
-		if eventWritten {
+		if written.EventWritten {
 			tables = append(tables, "events")
+		}
+		if written.Blocked.IssueRowsChanged {
+			tables = append(tables, "issues")
 		}
 		return s.doltAddAndCommit(ctx, tables, "dependency: remove "+issueID+" -> "+dependsOnID)
 	})

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -571,4 +572,80 @@ func TestAddDependency(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestEmbeddedTransactionDependencyPersistsIsBlocked is GH#6647 on the
+// embedded store's explicit-transaction dep verbs: the is_blocked flip a
+// blocking edge makes, on its source or on a wisp source's durable child, is
+// staged with the edge, so the transaction's own Dolt commit carries it, for
+// the add and for the removal.
+func TestEmbeddedTransactionDependencyPersistsIsBlocked(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+
+	for _, test := range []struct {
+		name      string
+		sourceID  string
+		flippedID string
+		wisp      bool
+	}{
+		{name: "durable_source", sourceID: "etxdep-source", flippedID: "etxdep-source"},
+		{name: "wisp_source", sourceID: "etxdep-wisp", flippedID: "etxdep-child", wisp: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			te := newTestEnv(t, "etxdep")
+			const blockerID = "etxdep-blocker"
+			for _, issue := range []*types.Issue{
+				{ID: blockerID, Title: blockerID, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+				{ID: test.sourceID, Title: test.sourceID, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Ephemeral: test.wisp},
+			} {
+				if err := te.store.CreateIssue(ctx, issue, "tester"); err != nil {
+					t.Fatalf("CreateIssue %s: %v", issue.ID, err)
+				}
+			}
+			if test.wisp {
+				if err := te.store.CreateIssue(ctx, &types.Issue{ID: test.flippedID, Title: test.flippedID, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}, "tester"); err != nil {
+					t.Fatalf("CreateIssue child: %v", err)
+				}
+				if err := te.store.AddDependency(ctx, &types.Dependency{IssueID: test.flippedID, DependsOnID: test.sourceID, Type: types.DepParentChild}, "tester"); err != nil {
+					t.Fatalf("AddDependency parent-child: %v", err)
+				}
+			}
+			if err := te.store.Commit(ctx, "test: seed dependency endpoints"); err != nil {
+				t.Fatalf("Commit seed: %v", err)
+			}
+
+			if err := te.store.RunInTransaction(ctx, "test: tx dep add", func(tx storage.Transaction) error {
+				return tx.AddDependency(ctx, &types.Dependency{IssueID: test.sourceID, DependsOnID: blockerID, Type: types.DepBlocks}, "tester")
+			}); err != nil {
+				t.Fatalf("RunInTransaction AddDependency: %v", err)
+			}
+			assertEmbeddedCommittedIsBlocked(t, te, "tx dep add", test.flippedID, true)
+
+			if err := te.store.RunInTransaction(ctx, "test: tx dep remove", func(tx storage.Transaction) error {
+				return tx.RemoveDependency(ctx, test.sourceID, blockerID, "tester")
+			}); err != nil {
+				t.Fatalf("RunInTransaction RemoveDependency: %v", err)
+			}
+			assertEmbeddedCommittedIsBlocked(t, te, "tx dep remove", test.flippedID, false)
+		})
+	}
+}
+
+// assertEmbeddedCommittedIsBlocked fails unless op left issues clean and both
+// the working set and HEAD have id's is_blocked at want.
+func assertEmbeddedCommittedIsBlocked(t *testing.T, te *testEnv, op, id string, want bool) {
+	t.Helper()
+	ctx := t.Context()
+	var dirty int
+	te.queryScalar(t, ctx, "SELECT COUNT(*) FROM dolt_status WHERE table_name = 'issues'", nil, &dirty)
+	if dirty != 0 {
+		t.Errorf("%s left issues dirty in the working set: its is_blocked flip missed the transaction's commit", op)
+	}
+	var working, committed bool
+	te.queryScalar(t, ctx, "SELECT is_blocked FROM issues WHERE id = ?", []any{id}, &working)
+	te.queryScalar(t, ctx, "SELECT is_blocked FROM issues AS OF 'HEAD' WHERE id = ?", []any{id}, &committed)
+	if working != want || committed != want {
+		t.Errorf("after %s, %s is_blocked = working:%t HEAD:%t, want %t", op, id, working, committed, want)
+	}
 }

@@ -192,11 +192,11 @@ func VersionedHistoryEnabledFor(tx DBTX) bool {
 //
 // `issues` is in the list because the mint's LAST write is
 // `UPDATE issues SET current_revision`. On issue-plane mutations that table is
-// already staged; on the dependency paths it is not, which is the case this
-// list exists for. Note that staging `issues` there is gated on versioned
-// history being active (see the store-side callers), so it does not widen what
-// an ordinary dep-add commit contains — the pre-existing unstaged-`issues`
-// gap on those paths is bd-2y9ke, and deliberately still theirs to fix.
+// already staged; on the dependency paths it is staged only when the edge
+// flipped a durable is_blocked (DependencyWriteResult, GH#6647), so a
+// non-flipping dependency write that minted still needs it from here. Staging
+// `issues` there is gated on versioned history being active (see the
+// store-side callers).
 func VersionedHistoryStagedTables() []string {
 	return []string{"issue_versions", "store_epoch", "issues"}
 }
