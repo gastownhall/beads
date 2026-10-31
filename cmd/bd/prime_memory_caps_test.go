@@ -46,6 +46,9 @@ func TestRenderPrimeMemoriesCountCap(t *testing.T) {
 	if strings.Contains(out, "### mem-02\n") {
 		t.Fatalf("memory beyond the cap leaked into output: %q", out)
 	}
+	if !strings.Contains(out, "read one in full with `bd recall <key>`") || strings.Contains(out, "recall one with `bd remember") {
+		t.Fatalf("elision banner must point at bd recall, not bd remember (which writes a new memory): %q", out)
+	}
 	if banner, entries := strings.Index(out, "not shown"), strings.Index(out, "### mem-00"); banner > entries {
 		t.Fatalf("elision banner must precede entries so host truncation cannot hide it: %q", out)
 	}
