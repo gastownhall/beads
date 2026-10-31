@@ -22,31 +22,42 @@ func (blockingBackend) Dial(ctx context.Context) (net.Conn, error) {
 	return nil, ctx.Err()
 }
 
+func startAuthenticatedHandleConn(t *testing.T, p *proxyServer, ctx context.Context) (net.Conn, <-chan error) {
+	t.Helper()
+	p.dataToken = "test-token"
+	client, peer := net.Pipe()
+	done := make(chan error, 1)
+	go func() { done <- p.handleConn(ctx, client) }()
+	if _, err := io.WriteString(peer, dataAuthPrefix+p.dataToken+"\n"); err != nil {
+		t.Fatal(err)
+	}
+	return peer, done
+}
+
 func TestHandleConnBoundsBlockedBackendDial(t *testing.T) {
 	p := NewProxyServer(ProxyOpts{Server: blockingBackend{}})
 	p.logger = log.Default()
-	client, peer := net.Pipe()
+	peer, done := startAuthenticatedHandleConn(t, p, context.Background())
 	defer peer.Close()
 	start := time.Now()
-	err := p.handleConn(context.Background(), client)
+	err := <-done
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("error = %v, want deadline exceeded", err)
 	}
 	if elapsed := time.Since(start); elapsed > backendDialTimeout+time.Second {
 		t.Fatalf("blocked dial took %s", elapsed)
 	}
-	_, _ = io.Copy(io.Discard, peer)
 }
 
 func TestHandleConnCanceledClientDialClosesAndDrains(t *testing.T) {
 	stats := &Stats{}
 	p := NewProxyServer(ProxyOpts{Server: blockingBackend{}, Stats: stats})
 	p.logger = log.Default()
-	client, peer := net.Pipe()
-	defer peer.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	err := p.handleConn(ctx, client)
+	peer, done := startAuthenticatedHandleConn(t, p, ctx)
+	defer peer.Close()
+	err := <-done
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v, want context canceled", err)
 	}
@@ -81,12 +92,12 @@ func TestHandleConnTCPBlackholeIsBounded(t *testing.T) {
 	go func() { conn, _ := listener.Accept(); accepted <- conn }()
 	p := NewProxyServer(ProxyOpts{Server: tcpBlackholeBackend{address: listener.Addr().String()}, Stats: &Stats{}})
 	p.logger = log.Default()
-	client, peer := net.Pipe()
-	defer peer.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 	defer cancel()
+	peer, done := startAuthenticatedHandleConn(t, p, ctx)
+	defer peer.Close()
 	start := time.Now()
-	err = p.handleConn(ctx, client)
+	err = <-done
 	if conn := <-accepted; conn != nil {
 		_ = conn.Close()
 	}

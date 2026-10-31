@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"io"
@@ -64,6 +65,7 @@ type proxyServer struct {
 	stopEpoch   string
 
 	traceConnections bool
+	dataToken        string
 
 	// reportUpstreamOutage answers a connection whose upstream is not
 	// serving with a MySQL error instead of a bare close; see
@@ -266,9 +268,11 @@ func (p *proxyServer) ListenAndServe(parentCtx context.Context) error {
 		return fmt.Errorf("proxy: unexpected data listener address %T", ln.Addr())
 	}
 
-	if _, err := identity.WriteSecret(p.rootDir); err != nil {
+	secret, err := identity.WriteSecret(p.rootDir)
+	if err != nil {
 		return fmt.Errorf("write proxy secret: %w", err)
 	}
+	p.dataToken = identity.DataAuthTokenForPort(secret, dataPort.Port)
 
 	var identMu sync.RWMutex
 	identReply := identity.IdentReply{
@@ -345,14 +349,15 @@ func (p *proxyServer) ListenAndServe(parentCtx context.Context) error {
 	}
 
 	if err := pidfile.Write(p.rootDir, PIDFileName, pidfile.PidFile{
-		Pid:         os.Getpid(),
-		Port:        dataPort.Port,
-		UpstreamID:  upstreamID,
-		Schema:      pidfile.SchemaV2,
-		Kind:        pidfile.KindProxy,
-		Birth:       string(birth),
-		RootID:      rootID,
-		ControlPort: control.Port(),
+		Pid:          os.Getpid(),
+		Port:         dataPort.Port,
+		UpstreamID:   upstreamID,
+		Schema:       pidfile.SchemaV2,
+		Kind:         pidfile.KindProxy,
+		Birth:        string(birth),
+		RootID:       rootID,
+		ControlPort:  control.Port(),
+		ControlProto: pidfile.ControlProtoIdentMAC,
 	}); err != nil {
 		p.stats.IncBackendStop()
 		_ = stopBackendBounded(p.server)
@@ -363,6 +368,7 @@ func (p *proxyServer) ListenAndServe(parentCtx context.Context) error {
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error {
 		<-gctx.Done()
+		_ = pidfile.Remove(p.rootDir, PIDFileName)
 		_ = p.listener.Close()
 		_ = control.Close()
 		return nil
@@ -475,6 +481,28 @@ func (p *proxyServer) acceptLoop(ctx context.Context) error {
 func (p *proxyServer) handleConn(ctx context.Context, client net.Conn) error {
 	addr := client.RemoteAddr()
 	p.connTracef("handleConn(%s) start", addr)
+
+	expected := []byte(dataAuthPrefix + p.dataToken + "\n")
+	if err := client.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		_ = client.Close()
+		return err
+	}
+	got := make([]byte, len(expected))
+	if _, err := io.ReadFull(client, got); err != nil {
+		p.connTracef("handleConn(%s) data authentication failed", addr)
+		_ = client.Close()
+		return nil
+	}
+	if subtle.ConstantTimeCompare(got, expected) != 1 {
+		p.connTracef("handleConn(%s) data authentication failed", addr)
+		_ = client.Close()
+		return nil
+	}
+	if err := client.SetReadDeadline(time.Time{}); err != nil {
+		_ = client.Close()
+		return err
+	}
+
 	p.activeConns.Add(1)
 	defer func() {
 		p.activeConns.Add(-1)

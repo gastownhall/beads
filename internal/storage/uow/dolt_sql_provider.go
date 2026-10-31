@@ -701,8 +701,12 @@ func (b *bootstrapPreparer) prepare(ctx context.Context, conn *sql.Conn) (*schem
 	return b.heal, nil
 }
 
-func buildDSN(ep proxy.Endpoint, database, user, password, tlsConfigName string) string {
+// buildDSN renders the MySQL DSN for a proxy endpoint over the given dial
+// network: proxy.DataNetwork for managed connections (the bdproxy dialer
+// sends the BDPROXY1 handshake) or "tcp" for a raw server in tests.
+func buildDSN(network string, ep proxy.Endpoint, database, user, password, tlsConfigName string) string {
 	return util.DoltServerDSN{
+		Net:             network,
 		Host:            ep.Host,
 		Port:            ep.Port,
 		User:            user,
@@ -929,10 +933,12 @@ func requireServerDoltVersion(ctx context.Context, q doltversion.RowQuerier, ep 
 	})
 }
 
-// openAndInitSchema opens the provider through the proxy at ep. backend
-// names the server behind it when bd does not run that server (see
-// requireServerDoltVersion), and is empty otherwise.
-func openAndInitSchema(ctx context.Context, ep proxy.Endpoint, backend, database, rootUser, rootPassword, tlsConfigName string, teamServer bool, expectedProjectID string, opts providerOptions) (UnitOfWorkProvider, error) {
+// openAndInitSchema opens the provider through the endpoint ep over the
+// given MySQL dial network — proxy.DataNetwork for a bd-managed proxy
+// (which requires the BDPROXY1 handshake) or "tcp" for a raw server.
+// backend names the server behind it when bd does not run that server
+// (see requireServerDoltVersion), and is empty otherwise.
+func openAndInitSchema(ctx context.Context, network string, ep proxy.Endpoint, backend, database, rootUser, rootPassword, tlsConfigName string, teamServer bool, expectedProjectID string, opts providerOptions) (UnitOfWorkProvider, error) {
 	newProvider := func(pool *sql.DB) *doltSQLProvider {
 		return &doltSQLProvider{
 			defaultBranch:     defaultBranch,
@@ -987,7 +993,7 @@ func openAndInitSchema(ctx context.Context, ep proxy.Endpoint, backend, database
 	// signal, and every error message callers already match on. The probe is
 	// single-shot (openDBProbe) precisely so that fall-through cannot cost a
 	// second full retry budget.
-	probeConn, probeErr := openDBProbe(ctx, buildDSN(ep, database, rootUser, rootPassword, tlsConfigName))
+	probeConn, probeErr := openDBProbe(ctx, buildDSN(network, ep, database, rootUser, rootPassword, tlsConfigName))
 	if probeErr == nil {
 		if err := requireServerDoltVersion(ctx, probeConn, ep, backend); err != nil {
 			return nil, errors.Join(err, probeConn.Close())
@@ -1009,7 +1015,7 @@ func openAndInitSchema(ctx context.Context, ep proxy.Endpoint, backend, database
 	debug.Logf("uow: single-session open unavailable for %q, using the no-database init connection: %v\n",
 		database, probeErr)
 
-	initDB, err := openDB(ctx, buildDSN(ep, "", rootUser, rootPassword, tlsConfigName))
+	initDB, err := openDB(ctx, buildDSN(network, ep, "", rootUser, rootPassword, tlsConfigName))
 	if err != nil {
 		return nil, err
 	}
@@ -1030,7 +1036,7 @@ func openAndInitSchema(ctx context.Context, ep proxy.Endpoint, backend, database
 		return nil, fmt.Errorf("uow: close init db: %w", err)
 	}
 
-	dbConn, err := openDB(ctx, buildDSN(ep, database, rootUser, rootPassword, tlsConfigName))
+	dbConn, err := openDB(ctx, buildDSN(network, ep, database, rootUser, rootPassword, tlsConfigName))
 	if err != nil {
 		return nil, err
 	}

@@ -277,6 +277,24 @@ func TestAwaitOwnedListener_ReadyLine(t *testing.T) {
 	})
 }
 
+func TestAwaitOwnedListener_UnknownOwnershipRequiresReadyLine(t *testing.T) {
+	original := listenerOwnershipChecked
+	listenerOwnershipChecked = false
+	t.Cleanup(func() { listenerOwnershipChecked = original })
+
+	port := foreignGreeter(t)
+	logPath := filepath.Join(t.TempDir(), "dolt-server.log")
+	srv, off := startFakeSQLServerDelay(t, port, logPath, "10s")
+	err := awaitOwnedListener(srv, startupProbe{
+		host: "127.0.0.1", port: port, logPath: logPath, logOffset: off,
+		readyLineLogged: startupReadyLineLogged(false), timeout: time.Second,
+		owner: func(int, int) (bool, bool) { return false, false },
+	})
+	if err == nil || !strings.Contains(err.Error(), DoltReadyLine) {
+		t.Fatalf("awaitOwnedListener = %v, want timeout requiring the ready line", err)
+	}
+}
+
 // installFakeDolt puts a `dolt` on PATH that runs this test binary as
 // fakeDolt.
 func installFakeDolt(t *testing.T) {

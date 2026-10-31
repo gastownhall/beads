@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "backend.go",
         "control.go",
+        "data_auth.go",
         "endpoint.go",
         "endpoint_unix.go",
         "endpoint_windows.go",

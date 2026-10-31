@@ -51,6 +51,8 @@ type proxyHandle struct {
 	exited chan struct{} // closed when Start returns
 }
 
+var proxyTestRoots sync.Map
+
 func (h *proxyHandle) Cancel() { h.cancel() }
 
 func (h *proxyHandle) waitErr(t *testing.T, timeout time.Duration) error {
@@ -68,6 +70,7 @@ func (h *proxyHandle) waitErr(t *testing.T, timeout time.Duration) error {
 
 func runProxy(t *testing.T, opts proxy.ProxyOpts) *proxyHandle {
 	t.Helper()
+	proxyTestRoots.Store(opts.Port, opts.RootDir)
 	ctx, cancel := context.WithCancel(context.Background())
 	h := &proxyHandle{
 		cancel: cancel,
@@ -98,6 +101,7 @@ func waitListening(t *testing.T, root string, timeout time.Duration) {
 	for time.Now().Before(deadline) {
 		pf, err := pidfile.Read(root, proxy.PIDFileName)
 		if err == nil && pf != nil {
+			proxyTestRoots.Store(pf.Port, root)
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -117,6 +121,14 @@ func dialProxy(t *testing.T, port int) net.Conn {
 	c, err := net.DialTimeout("tcp", proxyAddr(port), ioTimeout)
 	require.NoError(t, err)
 	require.NoError(t, c.SetDeadline(time.Now().Add(ioTimeout)))
+	value, ok := proxyTestRoots.Load(port)
+	require.True(t, ok, "proxy test root for port %d must be registered", port)
+	root, ok := value.(string)
+	require.True(t, ok)
+	secret, err := identity.ReadSecret(root)
+	require.NoError(t, err)
+	_, err = io.WriteString(c, "BDPROXY1 "+identity.DataAuthTokenForPort(secret, port)+"\n")
+	require.NoError(t, err)
 	return c
 }
 
@@ -563,13 +575,8 @@ func TestProxy_ConcurrentConnections(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			c, err := net.DialTimeout("tcp", proxyAddr(port), ioTimeout)
-			if err != nil {
-				errs <- fmt.Errorf("dial: %w", err)
-				return
-			}
+			c := dialProxy(t, port)
 			defer c.Close()
-			_ = c.SetDeadline(time.Now().Add(ioTimeout))
 
 			payload := []byte(fmt.Sprintf("p%03d", i))
 			if _, err := c.Write(payload); err != nil {

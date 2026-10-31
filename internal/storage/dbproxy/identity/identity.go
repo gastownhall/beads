@@ -2,6 +2,7 @@
 package identity
 
 import (
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -9,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/atomicfile"
@@ -65,4 +67,23 @@ func ReadSecret(rootDir string) (string, error) {
 		return "", errors.New("identity: invalid proxy secret")
 	}
 	return secret, nil
+}
+
+// DataAuthToken derives the fixed token used to authenticate proxy data-port
+// connections when no port is bound.
+func DataAuthToken(secret string) string {
+	return DataAuthTokenForPort(secret, 0)
+}
+
+// DataAuthTokenForPort derives the token used to authenticate proxy data-port
+// connections on port, binding the HMAC to the target data port so a token
+// sent to a stale port cannot be replayed against a replacement port.
+func DataAuthTokenForPort(secret string, port int) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	if port > 0 {
+		_, _ = mac.Write([]byte("bd-proxy-data-v1:" + strconv.Itoa(port)))
+	} else {
+		_, _ = mac.Write([]byte("bd-proxy-data-v1"))
+	}
+	return hex.EncodeToString(mac.Sum(nil))
 }

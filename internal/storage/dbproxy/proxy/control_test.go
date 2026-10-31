@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"bufio"
+	"context"
 	"errors"
 	"io"
 	"net"
@@ -50,6 +52,147 @@ func TestControl_RejectsWrongSecret(t *testing.T) {
 	control, _, _ := newControlServer(t)
 	_, err := identity.Identify("127.0.0.1", control.Port(), "not-the-secret", time.Second)
 	require.ErrorIs(t, err, identity.ErrIdentRefused)
+}
+
+func TestControl_RejectsLegacyRawSecretRequest(t *testing.T) {
+	control, secret, _ := newControlServer(t)
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(control.Port())), time.Second)
+	require.NoError(t, err)
+	defer conn.Close()
+	require.NoError(t, conn.SetDeadline(time.Now().Add(time.Second)))
+	_, err = io.WriteString(conn, "IDENT "+secret+" 0123456789abcdef0123456789abcdef\n")
+	require.NoError(t, err)
+	buf := make([]byte, 1)
+	_, err = conn.Read(buf)
+	require.Error(t, err)
+}
+
+func TestDataPortRejectsUnauthenticatedAndWrongTokenConnections(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		send bool
+	}{
+		{name: "no header"},
+		{name: "wrong token", send: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stats := &Stats{}
+			p := NewProxyServer(ProxyOpts{Stats: stats})
+			p.dataToken = "target"
+			client, peer := net.Pipe()
+			done := make(chan error, 1)
+			go func() { done <- p.handleConn(context.Background(), client) }()
+			if tc.send {
+				_, err := io.WriteString(peer, dataAuthPrefix+"wrong!\n")
+				require.NoError(t, err)
+			} else {
+				_ = peer.Close()
+			}
+			select {
+			case err := <-done:
+				if tc.send {
+					require.NoError(t, err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("unauthenticated connection was not closed")
+			}
+			require.EqualValues(t, 0, stats.Snapshot().BackendDialAttempts)
+			if tc.send {
+				_ = peer.SetReadDeadline(time.Now().Add(time.Second))
+				_, err := peer.Read(make([]byte, 1))
+				require.Error(t, err)
+				_ = peer.Close()
+			}
+		})
+	}
+}
+
+func TestDataPortDoesNotCountUnauthenticatedConnectionsAsActive(t *testing.T) {
+	p := NewProxyServer(ProxyOpts{Stats: &Stats{}})
+	p.dataToken = "target"
+	client, peer := net.Pipe()
+	done := make(chan error, 1)
+	go func() { done <- p.handleConn(context.Background(), client) }()
+
+	// While the connection sits in the handshake read it must not count as
+	// active: an unauthenticated client that simply holds the port open
+	// would otherwise gate the idle watcher forever.
+	time.Sleep(100 * time.Millisecond)
+	assert.EqualValues(t, 0, p.activeConns.Load())
+
+	_ = peer.Close()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("unauthenticated connection was not closed after the peer hung up")
+	}
+	assert.EqualValues(t, 0, p.activeConns.Load())
+}
+
+func TestDialDataAuthenticatesRegisteredAddress(t *testing.T) {
+	root := t.TempDir()
+	secret, err := identity.WriteSecret(root)
+	require.NoError(t, err)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer listener.Close()
+	tcpAddr := listener.Addr().(*net.TCPAddr)
+	endpoint := Endpoint{Host: "127.0.0.1", Port: tcpAddr.Port}
+	require.NoError(t, pidfile.Write(root, PIDFileName, pidfile.PidFile{Pid: 1, Port: endpoint.Port}))
+	registerDataAddress(root, endpoint)
+
+	gotLine := make(chan string, 1)
+	serverErr := make(chan error, 1)
+	acceptOne := func() {
+		go func() {
+			conn, err := listener.Accept()
+			if err != nil {
+				serverErr <- err
+				return
+			}
+			defer conn.Close()
+			line, err := bufio.NewReader(conn).ReadString('\n')
+			if err != nil {
+				serverErr <- err
+				return
+			}
+			gotLine <- line
+			serverErr <- nil
+		}()
+	}
+
+	addr := net.JoinHostPort(endpoint.Host, strconv.Itoa(endpoint.Port))
+	acceptOne()
+	conn, err := dialData(context.Background(), addr)
+	require.NoError(t, err)
+	require.NoError(t, conn.Close())
+	assert.Equal(t, dataAuthPrefix+identity.DataAuthTokenForPort(secret, endpoint.Port)+"\n", <-gotLine)
+	assert.NoError(t, <-serverErr)
+
+	// The pidfile is consulted at registration, not on every pool dial: the
+	// proxy removes proxy.pid first at shutdown and a pooled dial must not
+	// race the removal into a bogus refusal, so a moved or missing pidfile
+	// leaves the verified registration — and its port-bound token — in
+	// effect.
+	require.NoError(t, pidfile.Write(root, PIDFileName, pidfile.PidFile{Pid: 1, Port: endpoint.Port + 1}))
+	acceptOne()
+	conn, err = dialData(context.Background(), addr)
+	require.NoError(t, err)
+	require.NoError(t, conn.Close())
+	assert.Equal(t, dataAuthPrefix+identity.DataAuthTokenForPort(secret, endpoint.Port)+"\n", <-gotLine)
+	assert.NoError(t, <-serverErr)
+
+	require.NoError(t, pidfile.Remove(root, PIDFileName))
+	acceptOne()
+	conn, err = dialData(context.Background(), addr)
+	require.NoError(t, err)
+	require.NoError(t, conn.Close())
+	assert.Equal(t, dataAuthPrefix+identity.DataAuthTokenForPort(secret, endpoint.Port)+"\n", <-gotLine)
+	assert.NoError(t, <-serverErr)
+
+	_, err = dialData(context.Background(), "127.0.0.1:65535")
+	require.ErrorContains(t, err, "unknown data address")
 }
 
 func TestControl_RejectsOversizedAndGarbageRequests(t *testing.T) {

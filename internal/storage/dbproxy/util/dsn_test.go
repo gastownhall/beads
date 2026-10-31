@@ -32,6 +32,28 @@ func TestDoltServerDSN_PinsMaxAllowedPacket(t *testing.T) {
 	}
 }
 
+func TestDoltServerDSN_Network(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		net  string
+		want string
+	}{
+		{name: "default tcp", want: "tcp"},
+		{name: "custom proxy network", net: "bdproxy", want: "bdproxy"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dsn := DoltServerDSN{Net: tc.net, Host: "127.0.0.1", Port: 3306, User: "root"}.String()
+			cfg, err := mysql.ParseDSN(dsn)
+			if err != nil {
+				t.Fatalf("ParseDSN(%q) failed: %v", dsn, err)
+			}
+			if cfg.Net != tc.want {
+				t.Fatalf("network = %q, want %q", cfg.Net, tc.want)
+			}
+		})
+	}
+}
+
 func TestDoltServerDSN_TLS(t *testing.T) {
 	t.Run("config name takes precedence", func(t *testing.T) {
 		dsn := DoltServerDSN{Host: "127.0.0.1", Port: 3306, User: "root", TLSConfigName: "beads-external-abc", TLSRequired: true}.String()

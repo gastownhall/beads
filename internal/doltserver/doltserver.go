@@ -1574,8 +1574,24 @@ func EnsureRunningDetailed(beadsDir string) (port int, startedByUs bool, err err
 //
 // Raising the floor to `warning` silences that chatter while still surfacing
 // warnings, errors, and fatal messages. Valid dolt levels are:
-// trace, debug, info, warning, error, fatal.
+// trace, debug, info, warning, error, fatal. Platforms without a listener
+// ownership check use info instead (serverLogLevel) so startup can require
+// Dolt's ready line.
 const doltServerLogLevel = "warning"
+
+func serverLogLevel(debug bool) string {
+	if debug {
+		return "debug"
+	}
+	if !listenerOwnershipChecked {
+		return "info"
+	}
+	return doltServerLogLevel
+}
+
+func startupReadyLineLogged(debug bool) bool {
+	return debug || !listenerOwnershipChecked
+}
 
 // ServerSpawnEnv returns the environment for a spawned dolt sql-server (the
 // directly-managed spawn here and the proxied one in dbproxy/server). The
@@ -1601,9 +1617,8 @@ func ServerSpawnEnv() []string {
 // (see ~/cursor_src/dolt/go/cmd/dolt/dolt.go runMain). The caller must
 // ensure profDir already exists — dolt panics if it does not.
 //
-// Debug mode also raises --loglevel from the default warning to debug;
-// the connection-log spam concern that motivated the warning floor is
-// the price of opting into debug.
+// Debug mode also raises the log level; platforms without listener ownership
+// proof use info so startup can require Dolt's ready line.
 func buildDoltServerArgs(host string, port, remotesAPIPort int, debug bool, profDir string) []string {
 	var args []string
 	if debug {
@@ -1617,11 +1632,7 @@ func buildDoltServerArgs(host string, port, remotesAPIPort int, debug bool, prof
 	if remotesAPIPort > 0 {
 		args = append(args, "--remotesapi-port", strconv.Itoa(remotesAPIPort))
 	}
-	if debug {
-		args = append(args, "--loglevel=debug")
-	} else {
-		args = append(args, "--loglevel="+doltServerLogLevel)
-	}
+	args = append(args, "--loglevel="+serverLogLevel(debug))
 	return args
 }
 
@@ -1739,10 +1750,7 @@ func resolveCfgDir(doltDir string) (string, error) {
 // unrecognized key is a hard parse error at server startup, not a
 // silently-ignored one.
 func buildDoltServerYAMLConfig(host string, port, remotesAPIPort int, debug bool, cfgDir string) ([]byte, error) {
-	logLevel := doltServerLogLevel
-	if debug {
-		logLevel = "debug"
-	}
+	logLevel := serverLogLevel(debug)
 	archiveLevel := 0
 	yc := &servercfg.YAMLConfig{
 		LogLevelStr: &logLevel,
@@ -2114,7 +2122,7 @@ func startLocked(beadsDir string) (*State, error) {
 				port:            actualPort,
 				logPath:         logPath(beadsDir),
 				logOffset:       logOffset,
-				readyLineLogged: debug,
+				readyLineLogged: startupReadyLineLogged(debug),
 				timeout:         readyTimeout(),
 			})
 			if waitErr != nil {

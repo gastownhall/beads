@@ -830,6 +830,56 @@ func TestControlFilePathsIncludesSecretAndQuarantines(t *testing.T) {
 	assert.NoFileExists(t, rotatedLog)
 }
 
+func TestStopVerifiedPreMACProxyStopsVerifiedProcess(t *testing.T) {
+	root := t.TempDir()
+	helper := startHelperProcess(t)
+	pf := v2Record(t, root, pidfile.KindProxy, helper)
+	require.NoError(t, pidfile.Write(root, PIDFileName, pf))
+
+	require.NoError(t, stopVerifiedPreMACProxy(root, &pf))
+	assertHelperExited(t, helper)
+}
+
+func TestIsPreMACIdentRefusal(t *testing.T) {
+	unmarked := &pidfile.PidFile{Schema: pidfile.SchemaV2, Kind: pidfile.KindProxy, Pid: 1, Port: 3307}
+	marked := &pidfile.PidFile{Schema: pidfile.SchemaV2, Kind: pidfile.KindProxy, Pid: 1, Port: 3307, ControlProto: pidfile.ControlProtoIdentMAC}
+	for _, tc := range []struct {
+		name      string
+		discovery adoptionResult
+		want      bool
+	}{
+		{
+			name:      "unmarked record refusing IDENT is pre-upgrade",
+			discovery: adoptionResult{status: adoptionIdentityMismatch, pidfile: unmarked, err: identity.ErrIdentRefused},
+			want:      true,
+		},
+		{
+			name:      "marked record refusing IDENT is a transient refusal",
+			discovery: adoptionResult{status: adoptionIdentityMismatch, pidfile: marked, err: identity.ErrIdentRefused},
+			want:      false,
+		},
+		{
+			name:      "refusal without a record has nothing to stop",
+			discovery: adoptionResult{status: adoptionIdentityMismatch, err: identity.ErrIdentRefused},
+			want:      false,
+		},
+		{
+			name:      "non-refusal mismatch on an unmarked record is not a stop signal",
+			discovery: adoptionResult{status: adoptionIdentityMismatch, pidfile: unmarked, err: errors.New("reply authentication failed")},
+			want:      false,
+		},
+		{
+			name:      "non-mismatch status with refusal error is not a stop signal",
+			discovery: adoptionResult{status: adoptionUnverifiable, pidfile: unmarked, err: identity.ErrIdentRefused},
+			want:      false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, isPreMACIdentRefusal(tc.discovery))
+		})
+	}
+}
+
 // N-process cold-start convergence remains intentionally deferred to the
 // lifecycle-lane stage; this security suite covers single-spawner invariants.
 

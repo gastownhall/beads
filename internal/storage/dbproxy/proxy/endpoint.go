@@ -237,7 +237,11 @@ func GetCreateDatabaseProxyServerEndpoint(rootDir string, opts OpenOpts) (Endpoi
 		discovery := readAndDial(rootDir)
 		switch discovery.status {
 		case adoptionAdopted:
-			return adoptedEndpoint(rootDir, want, discovery)
+			ep, err := adoptedEndpoint(rootDir, want, discovery)
+			if err == nil {
+				registerDataAddress(rootDir, ep)
+			}
+			return ep, err
 		case adoptionIOErr:
 			return Endpoint{}, fmt.Errorf("discover proxy from %s: %w", pidfile.Path(rootDir, PIDFileName), discovery.err)
 		}
@@ -250,7 +254,11 @@ func GetCreateDatabaseProxyServerEndpoint(rootDir string, opts OpenOpts) (Endpoi
 			discovery = readAndDial(rootDir)
 			if discovery.status == adoptionAdopted {
 				lock.Unlock()
-				return adoptedEndpoint(rootDir, want, discovery)
+				ep, err := adoptedEndpoint(rootDir, want, discovery)
+				if err == nil {
+					registerDataAddress(rootDir, ep)
+				}
+				return ep, err
 			}
 			if discovery.status == adoptionIOErr {
 				lock.Unlock()
@@ -273,6 +281,7 @@ func GetCreateDatabaseProxyServerEndpoint(rootDir string, opts OpenOpts) (Endpoi
 			var ep Endpoint
 			ep, lastSpawnErr = spawnAndHandoff(rootDir, opts, deadline, stopEpoch, lock, discovery)
 			if lastSpawnErr == nil {
+				registerDataAddress(rootDir, ep)
 				return ep, nil
 			}
 			if errors.Is(lastSpawnErr, errStartInterrupted) {
@@ -289,6 +298,10 @@ func GetCreateDatabaseProxyServerEndpoint(rootDir string, opts OpenOpts) (Endpoi
 				recordPath,
 				recordPath,
 			)
+		case isPreMACIdentRefusal(discovery):
+			if stopErr := stopVerifiedPreMACProxy(rootDir, discovery.pidfile); stopErr != nil {
+				return Endpoint{}, stopErr
+			}
 		}
 
 		select {
@@ -302,6 +315,20 @@ func GetCreateDatabaseProxyServerEndpoint(rootDir string, opts OpenOpts) (Endpoi
 	}
 }
 
+// isPreMACIdentRefusal reports whether a silent IDENT refusal comes from a
+// pre-upgrade proxy that cannot answer the request-MAC handshake: its
+// pidfile predates the ControlProto marker MAC-capable proxies publish. A
+// current proxy can also close a probe silently — its control handler
+// drops requests once the ident slots are full or the read deadline trips
+// — so refusal alone is never evidence enough to send a kill; a marked
+// record falls back to the normal bounded poll instead.
+func isPreMACIdentRefusal(discovery adoptionResult) bool {
+	return discovery.status == adoptionIdentityMismatch &&
+		errors.Is(discovery.err, identity.ErrIdentRefused) &&
+		discovery.pidfile != nil &&
+		discovery.pidfile.ControlProto < pidfile.ControlProtoIdentMAC
+}
+
 func adoptedEndpoint(rootDir, want string, discovery adoptionResult) (Endpoint, error) {
 	if want != "" && discovery.pidfile.UpstreamID != "" && discovery.pidfile.UpstreamID != want {
 		return Endpoint{}, &ErrUpstreamMismatch{
@@ -311,6 +338,26 @@ func adoptedEndpoint(rootDir, want string, discovery adoptionResult) (Endpoint, 
 		}
 	}
 	return discovery.endpoint, nil
+}
+
+func stopVerifiedPreMACProxy(rootDir string, pf *pidfile.PidFile) error {
+	if pf == nil {
+		return nil
+	}
+	if err := validateKillRecord(rootDir, pf, pidfile.KindProxy, killRecordChecks{VerifyRoot: true}); err != nil {
+		return nil
+	}
+	handle, dead, err := openRecordedProcess(pf)
+	if err != nil || dead {
+		return err
+	}
+	if err := handle.Kill(); err != nil {
+		_ = handle.Close()
+		return fmt.Errorf("stop pre-upgrade proxy pid %d: %w", pf.Pid, err)
+	}
+	_ = handle.Close()
+	_ = waitForRecordedProcessExit(pf, shutdownPostKillMinimum)
+	return nil
 }
 
 func spawnAndHandoff(

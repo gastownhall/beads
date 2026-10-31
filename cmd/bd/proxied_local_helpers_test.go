@@ -223,7 +223,8 @@ func openHeldManagedProxiedConn(t *testing.T, bd string, p proxiedProject) *held
 			return false, "proxy pidfile absent; issued bd list to start it"
 		}
 
-		dsn := fmt.Sprintf("root:@tcp(127.0.0.1:%d)/%s?parseTime=true", pf.Port, p.database)
+		proxy.RegisterDataAddress(p.proxyRoot, proxy.Endpoint{Host: "127.0.0.1", Port: pf.Port})
+		dsn := fmt.Sprintf("root:@%s(127.0.0.1:%d)/%s?parseTime=true", proxy.DataNetwork, pf.Port, p.database)
 		db, err := sql.Open("mysql", dsn)
 		if err != nil {
 			return false, fmt.Sprintf("sql.Open %s: %v", dsn, err)

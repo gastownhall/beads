@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dolthub/dolt/go/libraries/doltcore/servercfg"
 	"github.com/steveyegge/beads/internal/procid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -90,6 +91,46 @@ func TestDoltServer_Start_FakeReadyLine(t *testing.T) {
 	assert.True(t, s.Running(context.Background()))
 }
 
+func TestDoltServerStartUsesValidatedLaunchSnapshot(t *testing.T) {
+	s, _ := newFakeDoltServer(t, "ready", freeTestPort(t))
+	original, err := os.ReadFile(s.configPath)
+	require.NoError(t, err)
+	wantPort := s.config.Port()
+	s.SetConfigValidator(func(servercfg.ServerConfig) error {
+		return os.WriteFile(s.configPath, []byte("invalid: [operator mutation\n"), 0o600)
+	})
+
+	require.NoError(t, s.Start(context.Background()))
+	assert.Equal(t, s.launchSnapshotPath(), s.launchConfigPath)
+	body, err := os.ReadFile(s.launchSnapshotPath())
+	require.NoError(t, err)
+	assert.Equal(t, original, body)
+	assert.Equal(t, wantPort, s.config.Port())
+	info, err := os.Stat(s.launchSnapshotPath())
+	require.NoError(t, err)
+	if runtime.GOOS != "windows" {
+		assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+	}
+	conn, err := s.Dial(context.Background())
+	require.NoError(t, err)
+	require.NoError(t, conn.Close())
+}
+
+func TestDoltServerConfigValidatorRejectsBeforeSpawn(t *testing.T) {
+	s, rootDir := newFakeDoltServer(t, "ready", freeTestPort(t))
+	s.SetConfigValidator(func(servercfg.ServerConfig) error {
+		return errors.New("managed config rejected")
+	})
+
+	err := s.Start(context.Background())
+	require.ErrorContains(t, err, "managed config rejected")
+	assert.False(t, s.Running(context.Background()))
+	_, err = os.Stat(s.launchSnapshotPath())
+	assert.True(t, os.IsNotExist(err), "rejected validation must remove the launch snapshot")
+	_, err = os.Stat(filepath.Join(rootDir, PIDFileName))
+	assert.True(t, os.IsNotExist(err), "validation must reject before spawning")
+}
+
 // TestUseRuntimePort_CopiesRawText pins that the runtime config carries the
 // operator config's environment placeholders and "$$" escapes unexpanded:
 // dolt interpolates the runtime file when it reads it, so expanding them here
@@ -103,6 +144,7 @@ func TestUseRuntimePort_CopiesRawText(t *testing.T) {
 	s, err := NewDoltServer(os.Args[0], rootDir, cfg, "", 0, "")
 	require.NoError(t, err)
 	require.Equal(t, "127.0.0.1", s.config.Host())
+	require.NoError(t, os.WriteFile(cfg, []byte("log_level: info\nlistener:\n  host: 127.0.0.1\n  port: 40002\n"), 0o600))
 
 	require.NoError(t, s.useRuntimePort(40001))
 

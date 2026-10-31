@@ -17,8 +17,28 @@ import (
 	mysql "github.com/go-sql-driver/mysql"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/storage/dbproxy/identity"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/server"
 )
+
+const upstreamTestSecret = "test-upstream-secret"
+
+const upstreamTestNetwork = "bdproxy-upstream-test"
+
+func init() {
+	mysql.RegisterDialContext(upstreamTestNetwork, func(ctx context.Context, addr string) (net.Conn, error) {
+		conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", addr)
+		if err != nil {
+			return nil, err
+		}
+		_, err = io.WriteString(conn, dataAuthPrefix+identity.DataAuthToken(upstreamTestSecret)+"\n")
+		if err != nil {
+			_ = conn.Close()
+			return nil, err
+		}
+		return conn, nil
+	})
+}
 
 // serveThroughProxy runs handleConn for every connection accepted on a fresh
 // loopback listener and returns its address. reportOutage stands in for an
@@ -27,6 +47,7 @@ func serveThroughProxy(t *testing.T, backend tcpBlackholeBackend, reportOutage b
 	t.Helper()
 	p := NewProxyServer(ProxyOpts{Server: backend, Stats: &Stats{}})
 	p.logger = log.Default()
+	p.dataToken = identity.DataAuthToken(upstreamTestSecret)
 	p.reportUpstreamOutage = reportOutage
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -49,7 +70,13 @@ func serveThroughProxy(t *testing.T, backend tcpBlackholeBackend, reportOutage b
 // error and how long it took.
 func pingThroughProxy(t *testing.T, addr string) (time.Duration, error) {
 	t.Helper()
-	db, err := sql.Open("mysql", "root@tcp("+addr+")/?timeout=5s")
+	cfg := mysql.Config{
+		User:    "root",
+		Net:     upstreamTestNetwork,
+		Addr:    addr,
+		Timeout: 5 * time.Second,
+	}
+	db, err := sql.Open("mysql", cfg.FormatDSN())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,6 +86,20 @@ func pingThroughProxy(t *testing.T, addr string) (time.Duration, error) {
 	start := time.Now()
 	err = db.PingContext(ctx)
 	return time.Since(start), err
+}
+
+func dialAuthenticatedTestProxy(t *testing.T, addr string) net.Conn {
+	t.Helper()
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = io.WriteString(conn, dataAuthPrefix+identity.DataAuthToken(upstreamTestSecret)+"\n")
+	if err != nil {
+		_ = conn.Close()
+		t.Fatal(err)
+	}
+	return conn
 }
 
 func requireUpstreamUnreachable(t *testing.T, err error, elapsed time.Duration, wantInMessage string) {
@@ -141,10 +182,7 @@ func TestHandleConnUpstreamDropAfterGreetingStaysPlainClose(t *testing.T) {
 	}()
 
 	addr := serveThroughProxy(t, tcpBlackholeBackend{address: front.Addr().String()}, true)
-	conn, err := net.Dial("tcp", addr)
-	if err != nil {
-		t.Fatal(err)
-	}
+	conn := dialAuthenticatedTestProxy(t, addr)
 	defer conn.Close()
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	got, err := io.ReadAll(conn)
@@ -171,10 +209,7 @@ func TestHandleConnManagedBackendRefusalStaysPlainClose(t *testing.T) {
 	}
 
 	addr := serveThroughProxy(t, tcpBlackholeBackend{address: deadAddr}, false)
-	conn, err := net.Dial("tcp", addr)
-	if err != nil {
-		t.Fatal(err)
-	}
+	conn := dialAuthenticatedTestProxy(t, addr)
 	defer conn.Close()
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	got, err := io.ReadAll(conn)

@@ -401,10 +401,12 @@ func TestIsUserPrivateGroupNameComparisonExercisedDirectly(t *testing.T) {
 	restoreUser := userLookupIDFn
 	restoreGroup := userLookupGroupIDFn
 	restoreMembers := groupHasNoSupplementaryMembersFn
+	restorePrimary := groupHasNoOtherPrimaryMembersFn
 	t.Cleanup(func() {
 		userLookupIDFn = restoreUser
 		userLookupGroupIDFn = restoreGroup
 		groupHasNoSupplementaryMembersFn = restoreMembers
+		groupHasNoOtherPrimaryMembersFn = restorePrimary
 	})
 
 	const fakeUID, fakeGID = 4242, 4242
@@ -416,18 +418,24 @@ func TestIsUserPrivateGroupNameComparisonExercisedDirectly(t *testing.T) {
 		}
 		return restoreUser(uid)
 	}
-	// Stubbed to always report "no supplementary members" for fakeGID, in
-	// BOTH arms below: membership is a separate check from the name
-	// comparison under test here, and the real, unstubbed
-	// groupHasNoSupplementaryMembers would fail closed (false) for a gid that
-	// does not exist in this host's real /etc/group regardless of the name
-	// comparison's outcome — masking a mutant that neuters the name check
-	// instead of actually exercising it.
+	// Stubbed to always report "no supplementary members" and "no other
+	// primary members" for fakeGID, in BOTH arms below: membership is a
+	// separate check from the name comparison under test here, and the real,
+	// unstubbed functions would fail closed (false) for a uid/gid that does
+	// not exist in this host's real /etc/group or /etc/passwd regardless of
+	// the name comparison's outcome — masking a mutant that neuters the name
+	// check instead of actually exercising it.
 	groupHasNoSupplementaryMembersFn = func(gid uint32) bool {
 		if gid == fakeGID {
 			return true
 		}
 		return restoreMembers(gid)
+	}
+	groupHasNoOtherPrimaryMembersFn = func(uid, gid uint32) bool {
+		if uid == fakeUID && gid == fakeGID {
+			return true
+		}
+		return restorePrimary(uid, gid)
 	}
 
 	// Arm 1: the group's name does NOT match the owner's username -> refused.
@@ -550,5 +558,84 @@ func TestCAFileHygieneAcceptsGroupWritableFileUnderUserPrivateGroup(t *testing.T
 	}
 	if _, err := TransportForFile(path); err != nil {
 		t.Fatalf("TransportForFile refused a umask-002 (0775/0664) layout under the owner's own user-private group: %v", err)
+	}
+}
+
+func TestGroupHasNoOtherPrimaryMembers(t *testing.T) {
+	oldPath := passwdPath
+	t.Cleanup(func() { passwdPath = oldPath })
+
+	path := filepath.Join(t.TempDir(), "passwd")
+	passwdPath = path
+	if err := os.WriteFile(path, []byte(
+		"# comment\n\nbad:entry\n"+
+			"alice:x:4242:4242:Alice:/home/alice:/bin/sh\n"+
+			"bob:x:4243:4242:Bob:/home/bob:/bin/sh\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if groupHasNoOtherPrimaryMembers(4242, 4242) {
+		t.Fatal("accepted another account with this primary gid")
+	}
+
+	if err := os.WriteFile(path, []byte("alice:x:4242:4242:Alice:/home/alice:/bin/sh\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !groupHasNoOtherPrimaryMembers(4242, 4242) {
+		t.Fatal("rejected the owner's only primary-group entry")
+	}
+
+	passwdPath = filepath.Join(t.TempDir(), "missing-passwd")
+	if groupHasNoOtherPrimaryMembers(4242, 4242) {
+		t.Fatal("accepted an unreadable passwd file")
+	}
+
+	passwdPath = path
+	if err := os.WriteFile(path, []byte("bob:x:4243:4242:Bob:/home/bob:/bin/sh\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if groupHasNoOtherPrimaryMembers(4242, 4242) {
+		t.Fatal("accepted a passwd file missing the owner entry")
+	}
+
+	if err := os.WriteFile(path, []byte(strings.Repeat("x", 70*1024)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if groupHasNoOtherPrimaryMembers(4242, 4242) {
+		t.Fatal("accepted a passwd file with a scanner error")
+	}
+}
+
+func TestIsUserPrivateGroupRefusesOtherPrimaryMember(t *testing.T) {
+	oldUserLookup := userLookupIDFn
+	oldGroupLookup := userLookupGroupIDFn
+	oldSupplementaryCheck := groupHasNoSupplementaryMembersFn
+	oldPrimaryCheck := groupHasNoOtherPrimaryMembersFn
+	oldPasswdPath := passwdPath
+	t.Cleanup(func() {
+		userLookupIDFn = oldUserLookup
+		userLookupGroupIDFn = oldGroupLookup
+		groupHasNoSupplementaryMembersFn = oldSupplementaryCheck
+		groupHasNoOtherPrimaryMembersFn = oldPrimaryCheck
+		passwdPath = oldPasswdPath
+	})
+
+	const uid, gid = 4242, 4242
+	userLookupIDFn = func(string) (*user.User, error) {
+		return &user.User{Uid: "4242", Gid: "4242", Username: "alice"}, nil
+	}
+	userLookupGroupIDFn = func(string) (*user.Group, error) {
+		return &user.Group{Gid: "4242", Name: "alice"}, nil
+	}
+	groupHasNoSupplementaryMembersFn = func(uint32) bool { return true }
+	passwdPath = filepath.Join(t.TempDir(), "passwd")
+	if err := os.WriteFile(passwdPath, []byte(
+		"alice:x:4242:4242:Alice:/home/alice:/bin/sh\n"+
+			"bob:x:4243:4242:Bob:/home/bob:/bin/sh\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	groupHasNoOtherPrimaryMembersFn = groupHasNoOtherPrimaryMembers
+
+	if isUserPrivateGroup(uid, gid) {
+		t.Fatal("accepted a primary group shared by another account")
 	}
 }

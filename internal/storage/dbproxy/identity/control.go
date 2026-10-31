@@ -54,7 +54,11 @@ func Identify(host string, controlPort int, secret string, timeout time.Duration
 		return nil, fmt.Errorf("identity: generate request nonce: %w", err)
 	}
 	nonce := hex.EncodeToString(nonceBytes)
-	if _, err := io.WriteString(conn, "IDENT "+secret+" "+nonce+"\n"); err != nil {
+	requestMAC, err := IdentRequestMAC(secret, nonce)
+	if err != nil {
+		return nil, fmt.Errorf("identity: authenticate request: %w", err)
+	}
+	if _, err := io.WriteString(conn, "IDENT "+requestMAC+" "+nonce+"\n"); err != nil {
 		return nil, fmt.Errorf("identity: write request: %w", err)
 	}
 
@@ -77,6 +81,40 @@ func Identify(host string, controlPort int, secret string, timeout time.Duration
 		return nil, err
 	}
 	return &reply, nil
+}
+
+// IdentRequestMAC authenticates the nonce in an IDENT request without
+// disclosing the shared secret on the control connection.
+func IdentRequestMAC(secret, nonce string) (string, error) {
+	nonceBytes, err := decodeIdentNonce(nonce)
+	if err != nil {
+		return "", err
+	}
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = io.WriteString(mac, "bd-proxy-ident-request-v1\x00")
+	_, _ = mac.Write(nonceBytes)
+	return hex.EncodeToString(mac.Sum(nil)), nil
+}
+
+// VerifyIdentRequest verifies an IDENT request MAC.
+func VerifyIdentRequest(secret, nonce, mac string) bool {
+	_, err := decodeIdentNonce(nonce)
+	if err != nil {
+		return false
+	}
+	got, err := hex.DecodeString(mac)
+	if err != nil {
+		return false
+	}
+	want, err := IdentRequestMAC(secret, nonce)
+	if err != nil {
+		return false
+	}
+	wantBytes, err := hex.DecodeString(want)
+	if err != nil {
+		return false
+	}
+	return hmac.Equal(got, wantBytes)
 }
 
 // SignIdentReply authenticates reply for the nonce in an IDENT request.

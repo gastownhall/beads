@@ -16,6 +16,8 @@ var (
 	processParents = psParentPIDs
 )
 
+var listenerOwnershipChecked = true
+
 // listenerOwnership reports whether a TCP listener on port belongs to pid or
 // one of its descendants. Darwin has no /proc, so the listener's processes
 // come from lsof and the process tree from ps, the same two tools this

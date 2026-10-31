@@ -136,7 +136,7 @@ type startupProbe struct {
 	logPath   string
 	logOffset int64
 	// readyLineLogged is true when the child's log level lets dolt log
-	// DoltReadyLine (debug mode); the default warning level does not.
+	// DoltReadyLine; the default warning level does not.
 	readyLineLogged bool
 	timeout         time.Duration
 	// owner is listenerOwnership; tests replace it.
