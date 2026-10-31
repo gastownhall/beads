@@ -43,6 +43,27 @@ func TestTruncateTitle(t *testing.T) {
 			maxLen: 10,
 			want:   "",
 		},
+		{
+			// The issue's own repro: embedded newline and tab break a
+			// single terminal row and shift columns the padding never
+			// accounts for.
+			name:   "embedded newline and tab",
+			title:  "Uno\nDos\tTres",
+			maxLen: 20,
+			want:   "Uno Dos Tres",
+		},
+		{
+			name:   "embedded carriage return",
+			title:  "Uno\rDos",
+			maxLen: 20,
+			want:   "Uno Dos",
+		},
+		{
+			name:   "control characters still truncate",
+			title:  "Uno\nDos\tTres\nQuattro",
+			maxLen: 10,
+			want:   "Uno Dos T…",
+		},
 	}
 
 	for _, tt := range tests {
