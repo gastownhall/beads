@@ -6,6 +6,7 @@ go_library(
     importpath = "github.com/steveyegge/beads/internal/workapi/storestats",
     visibility = ["//:__subpackages__"],
     deps = [
+        "//internal/debug",
         "//internal/storage",
         "//internal/types",
         "//internal/workapi",

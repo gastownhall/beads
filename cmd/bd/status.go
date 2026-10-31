@@ -139,21 +139,15 @@ func openStatsReporter() (issueops.StatsReporter, error) {
 // remedy actually reconcile; a hint that does not is the same silent
 // disagreement this line exists to remove, one level down.
 //
-// It names two of the three type-based suppressions a default listing applies.
-// The third - the infra types, which applyTypeSuppressions
-// (internal/workapi/list.go) adds to ExcludeTypes independently of the wisp
-// plane bit - is NOT here, and not because a durable infra row is unreachable.
-// It is reachable: the plane routing and the listing's exclusions both read the
-// WORKSPACE-CONFIGURED types.infra set, and changing that set only invalidates
-// a cache (internal/storage/dolt/config.go) - it never moves rows already
-// written. So durable rows created while a type was not infra stay in the
-// issues plane once it becomes one, and a type evicted from the set creates
-// durable rows outright (pinned by the create contract in
-// backend/conformance/issue_operations_contract.go). Counting them therefore
-// needs that configured set, which ScanIssueCountsInTx - pure portable SQL with
-// no config seam - cannot reach. Tracked separately rather than guessed at
-// here with the built-in names, which would be wrong in exactly the workspaces
-// where it matters.
+// It names the three type-based suppressions a default listing applies: gates,
+// templates, and the infra types applyTypeSuppressions (internal/workapi/
+// list.go) excludes from the durable plane. The infra count is of the
+// WORKSPACE-CONFIGURED types.infra set, which is what the listing reads: that
+// set replaces the built-in names, and changing it never moves rows already
+// written, so durable rows of a type that has since become infra are counted
+// here and hidden there. Under --assigned the count covers the actor's rows of
+// those types on both planes, matching what that route's total counts. Its
+// remedy names --all for the same reason the other two do.
 func suppressedTypeSummary(stats *types.Statistics) string {
 	var parts []string
 	if stats.GateIssues > 0 {
@@ -161,6 +155,9 @@ func suppressedTypeSummary(stats *types.Statistics) string {
 	}
 	if stats.TemplateIssues > 0 {
 		parts = append(parts, fmt.Sprintf("%s (--include-templates --all)", pluralCount(stats.TemplateIssues, "template", "templates")))
+	}
+	if stats.InfraIssues > 0 {
+		parts = append(parts, fmt.Sprintf("%s (--include-infra --all)", pluralCount(stats.InfraIssues, "infra-typed issue", "infra-typed issues")))
 	}
 	return strings.Join(parts, ", ")
 }
