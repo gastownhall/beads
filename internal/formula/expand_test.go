@@ -1196,6 +1196,29 @@ func TestMaterializeExpansion(t *testing.T) {
 			t.Errorf("Description = %q, want double-brace vars preserved", f.Steps[0].Description)
 		}
 	})
+
+	t.Run("double-brace vars with a value are substituted whole", func(t *testing.T) {
+		f := &Formula{
+			Formula: "with-expansion-vars",
+			Type:    TypeExpansion,
+			Template: []*Step{
+				{
+					ID:    "{target}.work",
+					Title: "Work on {feature} / {{feature}} with brief: {{brief}}",
+				},
+			},
+		}
+
+		err := MaterializeExpansion(f, "main", map[string]string{"feature": "auth"})
+		if err != nil {
+			t.Fatalf("MaterializeExpansion failed: %v", err)
+		}
+
+		want := "Work on auth / auth with brief: {{brief}}"
+		if f.Steps[0].Title != want {
+			t.Errorf("Title = %q, want %q", f.Steps[0].Title, want)
+		}
+	})
 }
 
 func TestExpansionVarRefs(t *testing.T) {

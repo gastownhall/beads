@@ -17,6 +17,7 @@ package formula
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -195,7 +196,27 @@ func countStepIDs(steps []*Step, counts map[string]int) {
 // The vars parameter provides variable values for {varname} substitution.
 func expandStep(target *Step, template []*Step, vars map[string]string) ([]*Step, error) {
 	return expandStepWith(target, template, 0, func(s string) string {
-		return substituteVars(s, vars)
+		return substituteExpansionVars(s, vars)
+	})
+}
+
+// expansionVarPattern matches a {{varname}} or a {varname} placeholder, the
+// double-brace form first so that its inner braces are not matched alone.
+var expansionVarPattern = regexp.MustCompile(`\{\{\w+\}\}|\{\w+\}`)
+
+// substituteExpansionVars replaces {varname} and {{varname}} placeholders with
+// their values from vars. A placeholder whose name is not in vars is left
+// whole, so a {{varname}} for a workflow variable is substituted when the
+// molecule is poured.
+func substituteExpansionVars(s string, vars map[string]string) string {
+	if vars == nil {
+		return s
+	}
+	return expansionVarPattern.ReplaceAllStringFunc(s, func(match string) string {
+		if val, ok := vars[strings.Trim(match, "{}")]; ok {
+			return val
+		}
+		return match
 	})
 }
 
