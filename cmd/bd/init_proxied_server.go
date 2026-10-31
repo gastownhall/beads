@@ -11,7 +11,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/domain"
@@ -193,21 +192,6 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 
 	remoteURL := resolveProxiedInitRemoteURL(ctx, cwd, in)
 
-	// Unlike the origin lookup above, ComputeRepoID and GetCloneID still inherit
-	// Git routing: under an inherited GIT_DIR/GIT_WORK_TREE, repo_id and clone_id
-	// can describe a different repository than remoteURL, or fail to resolve.
-	var repoID, cloneID string
-	if id, err := beads.ComputeRepoID(); err == nil {
-		repoID = id
-	} else if !in.quiet {
-		fmt.Fprintf(os.Stderr, "Warning: could not compute repository ID: %v\n", err)
-	}
-	if id, err := beads.GetCloneID(); err == nil {
-		cloneID = id
-	} else if !in.quiet {
-		fmt.Fprintf(os.Stderr, "Warning: could not compute clone ID: %v\n", err)
-	}
-
 	// The order is VERIFY, then bootstrap or adopt: Bootstrapper REFUSES an
 	// already-identified substrate, and asking first is how a front door tells a
 	// re-init from the collision that guard exists for.
@@ -256,11 +240,13 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 			adoptedPrefix, adoptedProjectID = result.Prefix, result.ProjectID
 		}
 
-		// The per-clone tracking state is written on EVERY init, adopt or not,
-		// which is why it is not on the role: a fresh clone of an
-		// already-identified database needs its own fingerprints precisely
-		// because it bootstrapped nothing.
-		if err := recordProxiedInitTrackingState(ctx, initUOWProvider, repoID, cloneID); err != nil {
+		// Database-level bookkeeping is written on EVERY init, adopt or not,
+		// which is why it is not part of the one-time identity write. It
+		// deliberately records no repo_id/clone_id: every clone of a proxied
+		// server shares this database's metadata tables (local_metadata
+		// included), so a per-clone fingerprint would be last-init-wins —
+		// team-server mode and gateway init skip them for the same reason.
+		if err := recordProxiedInitTrackingState(ctx, initUOWProvider); err != nil {
 			return HandleError("%v", err)
 		}
 
@@ -276,16 +262,18 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 	}
 
 	// metadata.json was written with a locally-minted project id before any
-	// DB connection existed; the adopted id must replace it before the tail
-	// git-commits .beads/.
-	if in.teamServer && adoptedProjectID != projectID {
+	// DB connection existed; the id adopted from the database — team-server's
+	// provisioned identity, or the identity an earlier init already recorded
+	// on this database — must replace it before the tail git-commits .beads/.
+	// An empty adopted id is no identity to adopt: see shouldSaveAdoptedProjectID.
+	if shouldSaveAdoptedProjectID(adoptedProjectID, projectID) {
 		fileCfg, err := configfile.Load(beadsDir)
 		if err != nil || fileCfg == nil {
-			return HandleError("failed to reload %s to adopt the provisioned project identity: %v", configfile.ConfigFileName, err)
+			return HandleError("failed to reload %s to save the adopted project identity: %v", configfile.ConfigFileName, err)
 		}
 		fileCfg.ProjectID = adoptedProjectID
 		if err := fileCfg.Save(beadsDir); err != nil {
-			return HandleError("failed to save the provisioned project identity to %s: %v", configfile.ConfigFileName, err)
+			return HandleError("failed to save the adopted project identity to %s: %v", configfile.ConfigFileName, err)
 		}
 	}
 
@@ -364,30 +352,29 @@ func proxiedBootstrapper(provider uow.UnitOfWorkProvider) (issueops.Bootstrapper
 	return src.Bootstrapper()
 }
 
-// recordProxiedInitTrackingState seeds the per-clone bookkeeping: the
-// repository and clone fingerprints, the synced-at marker and the recorded
-// binary version.
+// shouldSaveAdoptedProjectID reports whether init must rewrite metadata.json's
+// project_id with the identity it adopted from the database. An empty adopted
+// id is a database carrying a prefix but no _project_id — a partial identity
+// issueops.Bootstrapper already treats as identified — and saving it would
+// blank the clone's own id.
+func shouldSaveAdoptedProjectID(adopted, local string) bool {
+	return adopted != "" && adopted != local
+}
+
+// recordProxiedInitTrackingState records the database-level bookkeeping of an
+// init: the synced-at marker and the recorded binary version.
 //
 // It is separate from the identity because its LIFETIME is: the identity is
-// written once and then adopted forever, while these four describe the clone
-// running init and are refreshed every time it runs. In the refusable one-time
-// write, a re-init on a shared database would silently stop recording them.
-func recordProxiedInitTrackingState(ctx context.Context, provider uow.UnitOfWorkProvider, repoID, cloneID string) error {
+// written once and then adopted forever, while these two describe the init
+// that just ran and are refreshed every time one does. It deliberately
+// records no repo_id/clone_id: those are per-clone fingerprints, and every
+// clone of a proxied server shares this database's metadata tables
+// (local_metadata included), so the rows would be last-init-wins;
+// team-server mode and gateway init (shouldWriteInitStateToDB) skip them for
+// the same reason.
+func recordProxiedInitTrackingState(ctx context.Context, provider uow.UnitOfWorkProvider) error {
 	return uow.RunTx(ctx, provider, func(ctx context.Context, uw uow.UnitOfWork) (string, error) {
 		cfg := uw.ConfigUseCase()
-		// An absent fingerprint is recorded as nothing rather than as "": an
-		// empty row reads back to cross-project verification as a clone whose
-		// fingerprint failed to compute.
-		if repoID != "" {
-			if err := cfg.SetMetadata(ctx, "repo_id", repoID); err != nil {
-				return "", fmt.Errorf("record repo_id: %w", err)
-			}
-		}
-		if cloneID != "" {
-			if err := cfg.SetMetadata(ctx, "clone_id", cloneID); err != nil {
-				return "", fmt.Errorf("record clone_id: %w", err)
-			}
-		}
 		if err := cfg.SetMetadata(ctx, "last_import_time", time.Now().UTC().Format(time.RFC3339)); err != nil {
 			return "", fmt.Errorf("record last_import_time: %w", err)
 		}

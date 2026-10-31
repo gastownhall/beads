@@ -104,12 +104,14 @@
 34 10 TestProxiedServerContext
 34 10 TestProxiedServerCreate2B
 34 10 TestProxiedServerGateCheckB
+34 10 TestProxiedServerInitPrefixOnlyDatabaseKeepsLocalProjectID
 34 10 TestProxiedServerServeRefusesAStreamOnADisabledJournal
 34 10 TestProxiedServerTypes
 34 10 TestProxiedServerUpdate2C
 
 34 11 TestProxiedServerBatchParity
 34 11 TestProxiedServerCompactHistory
+34 11 TestProxiedServerInitSecondCloneAdoptsDatabaseProjectID
 34 11 TestProxiedServerPour
 34 11 TestProxiedServerQuery
 34 11 TestProxiedServerReady
@@ -142,6 +144,7 @@
 
 34 15 TestProxiedServerDepConcurrent
 34 15 TestProxiedServerImport
+34 15 TestProxiedServerInitKeepsExistingSharedFingerprints
 34 15 TestProxiedServerMoleculeFrontDoorWriteParity
 34 15 TestProxiedServerReopenConcurrent
 34 15 TestProxiedServerSQL
@@ -177,6 +180,7 @@
 34 19 TestServerModeTypesAgreeWithCreate
 
 34 20 TestProxiedServerDelete
+34 20 TestProxiedServerInitStillRecordsVersionAndImportTime
 34 20 TestProxiedServerLint
 34 20 TestProxiedServerPriority
 34 20 TestProxiedServerShow2B
@@ -274,6 +278,7 @@
 34 32 TestProxiedServerCleanDatabasesPurgeDropped
 34 32 TestProxiedServerConfigConcurrent
 34 32 TestProxiedServerDepB
+34 32 TestProxiedServerInitBootstrapWritesNoCloneFingerprints
 34 32 TestProxiedServerServeStreamsTheJournalItIsWriting
 34 32 TestProxiedServerServeUpdateClaim
 34 32 TestProxiedServerStorageClass
