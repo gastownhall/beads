@@ -65,7 +65,7 @@ func init() {
 	findDuplicatesCmd.Flags().String("method", "mechanical", "Detection method: mechanical, ai")
 	findDuplicatesCmd.Flags().Float64("threshold", 0.5, "Similarity threshold (0.0-1.0, lower = more results)")
 	findDuplicatesCmd.Flags().StringP("status", "s", "", "Filter by status (default: non-closed)")
-	findDuplicatesCmd.Flags().IntP("limit", "n", 50, "Maximum number of pairs to show")
+	findDuplicatesCmd.Flags().IntP("limit", "n", 50, "Maximum number of pairs to show (default 50, use 0 for unlimited)")
 	findDuplicatesCmd.Flags().String("model", "", "AI model to use (only with --method ai; default from config ai.model)")
 	// Defensive row cap (be-x42v): exits 2 on overage, default disabled.
 	addMaxRowsFlag(findDuplicatesCmd)
@@ -79,6 +79,26 @@ type duplicatePair struct {
 	Similarity float64      `json:"similarity"`
 	Method     string       `json:"method"`
 	Reason     string       `json:"reason,omitempty"`
+}
+
+// duplicateSummary reports how many candidate pairs were actually found
+// versus how many are being shown, so a --limit-capped page is never
+// indistinguishable from a complete result (GH#7686).
+type duplicateSummary struct {
+	Total     int
+	Shown     int
+	Truncated bool
+}
+
+// summarizeDuplicates decides how many of total candidate pairs to show
+// under limit, and whether that is a truncation. limit <= 0 means
+// unlimited (matches the existing --limit semantics: 0 or negative
+// shows every pair).
+func summarizeDuplicates(total, limit int) duplicateSummary {
+	if limit > 0 && total > limit {
+		return duplicateSummary{Total: total, Shown: limit, Truncated: true}
+	}
+	return duplicateSummary{Total: total, Shown: total, Truncated: false}
 }
 
 func runFindDuplicates(cmd *cobra.Command, _ []string) error {
@@ -185,9 +205,12 @@ func reportFindDuplicates(ctx context.Context, issues []*types.Issue, method str
 		return pairs[i].Similarity > pairs[j].Similarity
 	})
 
-	// Apply limit
-	if limit > 0 && len(pairs) > limit {
-		pairs = pairs[:limit]
+	// Apply limit, but remember the true total so the summary and JSON
+	// output can say so when the page was capped (GH#7666... see GH#7686):
+	// a capped page must not be indistinguishable from a complete result.
+	summary := summarizeDuplicates(len(pairs), limit)
+	if summary.Truncated {
+		pairs = pairs[:summary.Shown]
 	}
 
 	// Output
@@ -216,6 +239,8 @@ func reportFindDuplicates(ctx context.Context, issues []*types.Issue, method str
 		return outputJSON(map[string]interface{}{
 			"pairs":     jsonPairs,
 			"count":     len(jsonPairs),
+			"total":     summary.Total,
+			"truncated": summary.Truncated,
 			"method":    method,
 			"threshold": threshold,
 		})
@@ -226,8 +251,13 @@ func reportFindDuplicates(ctx context.Context, issues []*types.Issue, method str
 		return nil
 	}
 
-	fmt.Printf("%s Found %d potential duplicate pair(s) (threshold: %.0f%%):\n\n",
-		ui.RenderWarn("🔍"), len(pairs), threshold*100)
+	if summary.Truncated {
+		fmt.Printf("%s Showing %d of %d potential duplicate pair(s) (threshold: %.0f%%); use --limit 0 for all:\n\n",
+			ui.RenderWarn("🔍"), summary.Shown, summary.Total, threshold*100)
+	} else {
+		fmt.Printf("%s Found %d potential duplicate pair(s) (threshold: %.0f%%):\n\n",
+			ui.RenderWarn("🔍"), summary.Shown, threshold*100)
+	}
 
 	for i, p := range pairs {
 		printDuplicatePair(i+1, p)
