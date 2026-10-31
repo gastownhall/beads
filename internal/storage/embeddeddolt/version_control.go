@@ -690,6 +690,64 @@ func (s *EmbeddedDoltStore) Fetch(ctx context.Context, peer string) error {
 	})
 }
 
+// RebaseRemote reconciles cross-clone hierarchical child-ID collisions with
+// remote that a plain pull cannot auto-merge (#4796): it fetches, renumbers the
+// losing side's colliding children, and completes the merge. The fetch and the
+// rebase run on one pinned session so the fetched tracking ref and the branch
+// checkouts stay visible across statements, mirroring PullRemote.
+//
+// Under opts.DryRun this writes NOTHING, and the three things it skips are each
+// a write the operator did not ask for:
+//
+//   - the pending-work auto-commit, which is the reason a dry run is worth
+//     having at all (bee-ghosttrack's question on #4844). Someone reaching for
+//     this command is mid-incident with a dirty working set, and a "just show
+//     me" that first commits their uncommitted work is not a preview;
+//   - the FETCH, because moving a remote-tracking ref is a write. cmd/bd
+//     classifies any command with a --dry-run flag as a preview and hands it a
+//     read-only store, so the mutating connection below would be refused — and
+//     rightly: a dry run reads the state the last fetch left. That is the state
+//     an operator actually has here, since the `bd dolt pull` that sent them
+//     looking has already fetched;
+//   - the is_blocked recompute, which has no merge to recompute after.
+//
+// The connection is therefore the plain pinned one, not the mutating one: a
+// read-only store must be able to answer a preview.
+func (s *EmbeddedDoltStore) RebaseRemote(ctx context.Context, remote string, opts storage.RebaseOptions) (*storage.RebaseReport, error) {
+	trackingRef := remote + "/" + s.branch
+
+	if opts.DryRun {
+		var report *storage.RebaseReport
+		err := s.withPinnedDBConn(ctx, func(db versioncontrolops.DBConn) error {
+			r, rerr := versioncontrolops.RebaseChildCollisions(ctx, db, trackingRef, opts)
+			report = r
+			return rerr
+		})
+		return report, err
+	}
+
+	if _, err := s.CommitPending(ctx, "beads"); err != nil {
+		return nil, fmt.Errorf("commit pending before rebase: %w", err)
+	}
+	preHead := s.preMergeHead(ctx)
+	var report *storage.RebaseReport
+	err := s.withMutatingPinnedDBConn(ctx, func(db versioncontrolops.DBConn) error {
+		if ferr := versioncontrolops.Fetch(ctx, db, remote, remoteAuthUser()); ferr != nil {
+			return fmt.Errorf("fetch %s before rebase: %w", remote, ferr)
+		}
+		r, rerr := versioncontrolops.RebaseChildCollisions(ctx, db, trackingRef, opts)
+		report = r
+		return rerr
+	})
+	if err != nil {
+		return report, err
+	}
+	if err := s.recomputeBlockedAfterPull(ctx, preHead); err != nil {
+		return report, fmt.Errorf("rebase succeeded but is_blocked recompute failed: %w", err)
+	}
+	return report, nil
+}
+
 func (s *EmbeddedDoltStore) PushTo(ctx context.Context, peer string) error {
 	// GH#5433: see Push.
 	if _, err := s.CommitPending(ctx, "beads"); err != nil {

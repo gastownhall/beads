@@ -314,6 +314,7 @@ var _ storage.GarbageCollector = (*DoltStore)(nil)
 var _ storage.FullGarbageCollector = (*DoltStore)(nil)
 var _ storage.Flattener = (*DoltStore)(nil)
 var _ storage.Compactor = (*DoltStore)(nil)
+var _ storage.ChildCollisionRebaser = (*DoltStore)(nil)
 var _ storage.SchemaMigrator = (*DoltStore)(nil)
 var _ storage.ExternalRefHistoryQuerier = (*DoltStore)(nil)
 var _ storage.EventsJournalConfigurer = (*DoltStore)(nil)
@@ -5329,6 +5330,63 @@ func (s *DoltStore) Pull(ctx context.Context) (retErr error) {
 // matches the default remote; otherwise nil creds are used.
 func (s *DoltStore) PullRemote(ctx context.Context, remote string) error {
 	return s.pullFromRemote(ctx, remote)
+}
+
+// RebaseRemote reconciles cross-clone hierarchical child-ID collisions with
+// remote that a plain pull cannot auto-merge (#4796): it fetches, renumbers the
+// losing side's colliding children, and completes the merge. It fetches through
+// the normal transport (CLI for git-protocol remotes), then drives the renumber
+// and merge on a single-session long-timeout connection, mirroring
+// pullWithAutoResolve's connection contract.
+//
+// opts.DryRun takes a shorter path that writes nothing at all — no auto-commit,
+// no fetch, no merge — and so is permitted on a read-only store. See the
+// EmbeddedDoltStore.RebaseRemote doc comment for why each of those is a write
+// the operator did not ask for.
+func (s *DoltStore) RebaseRemote(ctx context.Context, remote string, opts storage.RebaseOptions) (*storage.RebaseReport, error) {
+	trackingRef := remote + "/" + s.branch
+
+	// A dry run writes nothing — no auto-commit, no fetch, no merge — so it is
+	// allowed on a read-only store and must be, since cmd/bd opens one for any
+	// command carrying --dry-run. See EmbeddedDoltStore.RebaseRemote for why
+	// each skipped step is a write the operator did not ask for.
+	if opts.DryRun {
+		db, err := s.openLongTimeoutConn()
+		if err != nil {
+			return nil, err
+		}
+		defer db.Close()
+		return versioncontrolops.RebaseChildCollisions(ctx, db, trackingRef, opts)
+	}
+
+	if s.readOnly {
+		return nil, fmt.Errorf("cannot rebase: store is read-only")
+	}
+	if err := s.commitBeforePull(ctx, "auto-commit before rebase"); err != nil && !isDoltNothingToCommit(err) {
+		return nil, fmt.Errorf("commit pending before rebase: %w", err)
+	}
+	if err := s.Fetch(ctx, remote); err != nil {
+		return nil, fmt.Errorf("fetch %s before rebase: %w", remote, err)
+	}
+	preHead := ""
+	if h, err := s.GetCurrentCommit(ctx); err == nil {
+		preHead = h
+	}
+
+	db, err := s.openLongTimeoutConn()
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+
+	report, rerr := versioncontrolops.RebaseChildCollisions(ctx, db, trackingRef, opts)
+	if rerr != nil {
+		return report, rerr
+	}
+	if err := s.recomputeBlockedAfterPull(ctx, preHead); err != nil {
+		return report, fmt.Errorf("rebase succeeded but is_blocked recompute failed: %w", err)
+	}
+	return report, nil
 }
 
 // pullFromRemote is the internal implementation for all pull operations.
