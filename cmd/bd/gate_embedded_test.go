@@ -577,7 +577,7 @@ func TestEmbeddedGateCreateRepoErrorsList(t *testing.T) {
 		if err == nil {
 			t.Fatalf("--repo on a human gate must be refused; got:\n%s", stdout.String())
 		}
-		if combined := stdout.String() + stderr.String(); !strings.Contains(combined, "--repo applies only to gh:run and gh:pr gates") {
+		if combined := stdout.String() + stderr.String(); !strings.Contains(combined, "--repo applies only to GitHub or GitLab gates") {
 			t.Errorf("refusal text missing from output:\n%s", combined)
 		}
 	})

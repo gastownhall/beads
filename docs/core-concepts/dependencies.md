@@ -208,6 +208,8 @@ beads issue status.
 |------|-----------|-----------------|
 | `gh:pr` | PR merged | `gh pr view` returns MERGED |
 | `gh:run` | CI passes | `gh run view` returns completed + success |
+| `gl:pipeline` | GitLab pipeline succeeds | `glab api` returns pipeline status `success` |
+| `gl:mr` | GitLab merge request merges | `glab api` returns merge request state `merged` |
 | `timer` | Time elapsed | Current time exceeds timeout |
 | `bead` | Cross-rig issue closed | Remote bead status checked |
 | `human` | Manual approval | `bd gate resolve <id>` |
@@ -223,6 +225,14 @@ bd create --type=gate --title="Wait for PR #42" \
 bd create --type=gate --title="Wait for CI" \
   --await-type=gh:run --await-id=12345
 
+# Wait for GitLab pipeline ID 12345 (not its project-local IID)
+bd gate create --type=gl:pipeline --blocks bd-abc --await-id=12345 \
+  --repo=team/subgroup/project
+
+# Wait for GitLab merge request IID 7
+bd gate create --type=gl:mr --blocks bd-abc --await-id=7 \
+  --repo=team/subgroup/project
+
 # Wait 30 minutes
 bd create --type=gate --title="Cooldown" \
   --await-type=timer --await-id=30m
@@ -234,6 +244,15 @@ bd create --type=gate --title="Wait for upstream fix" \
 # Manual approval gate
 bd create --type=gate --title="Deploy approval"
 ```
+
+Install and authenticate `glab` for your GitLab instance before checking
+GitLab gates. Set `--repo` or the gate's `metadata.repo` to a project path such
+as `team/subgroup/project`, or use
+`https://code.example.org/team/subgroup/project` to select an explicit host.
+Without an explicit host, `glab` selects the authenticated host for the
+current repository. Without a project path, it also selects the project from
+the current GitLab remote. Ad-hoc gates inherit `metadata.repo` from the
+blocked issue when you omit `--repo`.
 
 ### Wiring Gates into Dependencies
 
@@ -252,6 +271,9 @@ bd dep add issue-2 <gate-id>
 bd gate check                    # Check all gates
 bd gate check --type=gh:pr       # Only PR gates
 bd gate check --type=gh:run      # Only CI gates
+bd gate check --type=gl          # Only GitLab gates
+bd gate check --type=gl:pipeline # Only GitLab pipeline gates
+bd gate check --type=gl:mr       # Only GitLab merge request gates
 bd gate check --type=timer       # Only timers
 bd gate check --dry-run          # Preview without changes
 bd gate check --escalate         # Escalate failed gates
@@ -259,6 +281,10 @@ bd gate check --escalate         # Escalate failed gates
 
 Escalation marks gates whose conditions failed (e.g., PR closed without
 merge, CI run failed) so they surface for attention.
+For GitLab, pipeline statuses `failed` and `canceled`, or a merge request
+closed without merging, fail the condition. Other statuses or states,
+including unknown pipeline statuses, keep the gate pending. A CLI or API
+error leaves the gate open and reports the error.
 
 ### Listing and Inspecting Gates
 
@@ -287,6 +313,19 @@ bd gate discover                 # Auto-match gates to runs
 bd gate discover --dry-run       # Preview matches
 bd gate discover --branch main   # Filter by branch
 ```
+
+For a `gl:pipeline` gate, leave `await_id` empty to discover the newest
+pipeline matching both the current branch and HEAD commit:
+
+```bash
+bd gate create --type=gl:pipeline --blocks bd-abc
+bd gate discover --dry-run       # Preview the pipeline match
+bd gate discover                 # Fill the empty await_id
+bd gate check --type=gl:pipeline  # Check the discovered pipeline
+```
+
+Discovery preserves existing pipeline IDs and honors `--dry-run`. See
+[GitLab gates](/workflows/gates#gitlab-gates) for more details.
 
 ### Automating Gate Checks
 

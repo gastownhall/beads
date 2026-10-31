@@ -1,6 +1,6 @@
 ---
 title: Gates
-description: Async wait conditions that park a workflow step until the world catches up — a human decision, a timer, or a GitHub run or PR.
+description: Async wait conditions that park a workflow step until the world catches up — a human decision, a timer, or a GitHub run or PR, or a GitLab pipeline or merge request.
 ---
 
 Some workflow steps can't proceed on code alone: a release needs CI to go
@@ -17,7 +17,7 @@ closes. Gates close in one of two ways:
 
 - **Manually** — `bd gate resolve <gate-id>` (human gates always close this
   way).
-- **Via `bd gate check`** — evaluates open timer, GitHub, and bead gates
+- **Via `bd gate check`** — evaluates open timer, GitHub, GitLab, and bead gates
   against the real world and closes the ones whose condition is met.
 
 ```bash
@@ -37,6 +37,8 @@ bd gate resolve <gate-id>    # close a gate manually
 | `timer` | a duration after gate creation | `bd gate check` once the timeout elapses |
 | `gh:run` | a GitHub Actions workflow to complete successfully | `bd gate check` (uses `gh run view`) |
 | `gh:pr` | a pull request to merge | `bd gate check` (uses `gh pr view`) |
+| `gl:pipeline` | a GitLab pipeline to succeed | `bd gate check` (uses `glab api`) |
+| `gl:mr` | a GitLab merge request to merge | `bd gate check` (uses `glab api`) |
 | `bead` | a bead to close, or to be deleted once a check has seen it — a plain ID names a bead in this rig, the cross-rig form is `<rig>:<bead-id>` | `bd gate check` for plain local IDs; cross-rig values cannot be checked — resolve those manually |
 
 A `bead` gate also closes when its awaited bead is deleted, as long as an
@@ -70,6 +72,43 @@ check.
 ```bash
 bd gate create --type=gh:pr --blocks bd-abc --await-id=42 --repo=owner/other-repo
 ```
+
+### GitLab gates
+
+Install and authenticate `glab` for your GitLab instance before checking gates.
+A `gl:pipeline` gate uses the pipeline **ID**, not its project-local IID.
+Only `success` resolves it. `failed` and `canceled` escalate it; all other
+statuses, including unknown statuses, keep it pending. A `gl:mr` gate uses
+the merge request's project-local **IID**. `merged` resolves it; `closed`
+without merging escalates it. Other states keep it pending.
+
+Set `metadata.repo` or `--repo` to a project path such as
+`team/subgroup/project`. To select an explicit host, use
+`https://code.example.org/team/subgroup/project`. Without an explicit host,
+`glab` selects the authenticated host for the current repository. Without a
+project path, it also selects the project from the current GitLab remote.
+Host names do not need to contain the word `gitlab`. Ad-hoc gates inherit
+`metadata.repo` from the blocked issue when you omit `--repo`.
+
+```bash
+bd gate create --type=gl:mr --blocks bd-abc --await-id=7 --repo=team/subgroup/project
+bd gate create --type=gl:pipeline --blocks bd-abc
+bd gate discover --dry-run
+bd gate discover
+bd gate check --type=gl
+```
+
+Discovery fills an empty pipeline `await_id` with the newest pipeline matching
+both the current branch and HEAD commit. It preserves existing IDs and honors
+`--dry-run`. Formula gates can also set `repo` for either GitLab type.
+
+`bd close` uses the same GitLab checks: pending and failed conditions require
+`--force`. As with GitHub gates, a CLI or API error produces a warning and
+allows manual close; `bd gate check` reports that error and leaves the gate open.
+
+The API fields follow the [GitLab pipelines API](https://docs.gitlab.com/api/pipelines/)
+and [merge requests API](https://docs.gitlab.com/api/merge_requests/).
+Host and current-project selection follow [glab api](https://docs.gitlab.com/cli/api/).
 
 ### Known limitations: multi-rig and proxied-server topologies
 

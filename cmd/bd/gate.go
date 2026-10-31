@@ -40,6 +40,8 @@ Gate types:
   timer   - Expires after timeout (Phase 2)
   gh:run  - Waits for GitHub workflow (Phase 3)
   gh:pr   - Waits for PR merge (Phase 3)
+  gl:pipeline - Waits for GitLab pipeline success
+  gl:mr   - Waits for GitLab merge request merge
   bead    - Waits for another bead to close (Phase 4)
 
 For bead gates, await_id may be a bead ID in this rig's database (e.g.,
@@ -511,8 +513,10 @@ Gate types:
   timer   - Auto-resolves after --timeout duration
   gh:run  - Waits for GitHub Actions workflow
   gh:pr   - Waits for PR merge
+  gl:pipeline - Waits for GitLab pipeline success
+  gl:mr   - Waits for GitLab merge request merge
 
-gh:run and gh:pr gates are checked in the current Git repository unless
+GitHub and GitLab gates are checked in the current Git repository unless
 --repo names another, or the blocked issue carries a metadata.repo value.
 
 Examples:
@@ -833,17 +837,24 @@ Gate types:
   gh       - Check all GitHub gates (gh:run and gh:pr)
   gh:run   - Check GitHub Actions workflow runs
   gh:pr    - Check pull request merge status
+  gl       - Check all GitLab gates
+  gl:pipeline - Check GitLab pipeline status
+  gl:mr    - Check GitLab merge request state
   timer    - Check timer gates (auto-expire based on timeout)
   bead     - Check bead gates
   all      - Check all gate types
 
-GitHub gates use the 'gh' CLI to query status:
+Forge gates use the gh and glab CLIs to query status:
   - gh:run checks 'gh run view <id> --json status,conclusion'
   - gh:pr checks 'gh pr view <id> --json state,title'
+  - gl:pipeline checks the GitLab pipeline API by pipeline ID via glab
+  - gl:mr checks the GitLab merge request API by project-local IID via glab
 
 A gate is resolved when:
   - gh:run: status=completed AND conclusion=success
   - gh:pr: state=MERGED
+  - gl:pipeline: status=success
+  - gl:mr: state=merged
   - timer: current time > created_at + timeout
   - bead: target bead status=closed, or a bead an earlier check saw in
     this rig no longer exists
@@ -851,6 +862,8 @@ A gate is resolved when:
 A gate is escalated when:
   - gh:run: status=completed AND conclusion in (failure, canceled)
   - gh:pr: state=CLOSED
+  - gl:pipeline: status in (failed, canceled)
+  - gl:mr: state=closed (unmerged)
 
 Examples:
   bd gate check              # Check all gates
@@ -1055,6 +1068,10 @@ func evaluateGates(ctx context.Context, gates []*types.Issue, now time.Time, get
 	for _, gate := range gates {
 		r := gateCheckResult{gate: gate}
 		switch {
+		case gate.AwaitType == "gl:pipeline":
+			r.resolved, r.escalated, r.reason, r.err = checkGLPipeline(gate)
+		case gate.AwaitType == "gl:mr":
+			r.resolved, r.escalated, r.reason, r.err = checkGLMR(gate)
 		case strings.HasPrefix(gate.AwaitType, "gh:run"):
 			r.resolved, r.escalated, r.reason, r.err = checkGHRun(gate, persistAwaitID)
 		case strings.HasPrefix(gate.AwaitType, "gh:pr"):
@@ -1146,6 +1163,9 @@ func printGateCheckSummary(checked, resolvedCount, escalatedCount, errorCount in
 func shouldCheckGate(gate *types.Issue, typeFilter string) bool {
 	if typeFilter == "" || typeFilter == "all" {
 		return true
+	}
+	if typeFilter == "gl" {
+		return isGitLabGateType(gate.AwaitType)
 	}
 	if typeFilter == "gh" {
 		return strings.HasPrefix(gate.AwaitType, "gh:")
@@ -1268,19 +1288,20 @@ func isGitHubGateType(gateType string) bool {
 }
 
 // repoMetadataForGate computes the metadata to store on a new ad-hoc gate,
-// inheriting a validated GitHub repo selector from the blocked issue.
+// inheriting a validated forge-specific repo selector from the blocked issue.
 //
-// This is restricted to gh:* gate types (SF4): "repo" is legal, unrelated
-// metadata on any issue (the metadata contract allows arbitrary JSON), so
-// running GitHub-repo validation for human/timer gates would fail ordinary
-// gate creation whenever the blocked issue happened to carry a non-GitHub-
-// shaped "repo" key. Only gh:run/gh:pr gates need the value at check time,
-// so only they inherit and validate it here.
+// Only forge gates inherit repo; other gate types treat it as unrelated metadata.
 func repoMetadataForGate(gateType string, targetIssue *types.Issue) (json.RawMessage, error) {
-	if !isGitHubGateType(gateType) {
+	if !isGitHubGateType(gateType) && !isGitLabGateType(gateType) {
 		return nil, nil
 	}
-	repo, err := githubRepoFromIssue(targetIssue)
+	var repo string
+	var err error
+	if isGitLabGateType(gateType) {
+		repo, err = gitlabRepoFromIssue(targetIssue)
+	} else {
+		repo, err = githubRepoFromIssue(targetIssue)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -1299,23 +1320,32 @@ func repoMetadataForGate(gateType string, targetIssue *types.Issue) (json.RawMes
 // blocked issue's validated metadata.repo (repoMetadataForGate). Both create
 // routes call this so the flag cannot drift between them.
 //
-// --repo is only meaningful on gh:* gates, whose check runs against a GitHub
-// repository; on any other type it is refused rather than stored, because a
-// repo selector nothing reads would look like a working cross-repo gate.
+// --repo is only meaningful on GitHub and GitLab gates. Other types refuse
+// it because a repo selector nothing reads would look like a working gate.
 // Errors are fully worded here (they name the flag or the blocked issue) so
 // the callers print them as-is.
 func gateMetadataForCreate(in gateCreateInput, targetIssue *types.Issue) (json.RawMessage, error) {
 	if in.repo == "" {
 		metadata, err := repoMetadataForGate(in.gateType, targetIssue)
 		if err != nil {
-			return nil, fmt.Errorf("invalid GitHub repository metadata on %s: %w", targetIssue.ID, err)
+			forge := "GitHub"
+			if isGitLabGateType(in.gateType) {
+				forge = "GitLab"
+			}
+			return nil, fmt.Errorf("invalid %s repository metadata on %s: %w", forge, targetIssue.ID, err)
 		}
 		return metadata, nil
 	}
-	if !isGitHubGateType(in.gateType) {
-		return nil, fmt.Errorf("--repo applies only to gh:run and gh:pr gates, not %q", in.gateType)
+	if !isGitHubGateType(in.gateType) && !isGitLabGateType(in.gateType) {
+		return nil, fmt.Errorf("--repo applies only to GitHub or GitLab gates, not %q", in.gateType)
 	}
-	repo, err := validateGitHubRepo(in.repo)
+	repo := in.repo
+	var err error
+	if isGitLabGateType(in.gateType) {
+		_, _, err = gitlabProjectSelector(repo)
+	} else {
+		repo, err = validateGitHubRepo(repo)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("--repo: %w", err)
 	}
@@ -1942,17 +1972,17 @@ func init() {
 	gateResolveCmd.Flags().StringP("reason", "r", "", "Reason for resolving the gate")
 
 	// gate check flags
-	gateCheckCmd.Flags().StringP("type", "t", "", "Gate type to check (gh, gh:run, gh:pr, timer, bead, all)")
+	gateCheckCmd.Flags().StringP("type", "t", "", "Gate type to check (gh, gh:run, gh:pr, gl, gl:pipeline, gl:mr, timer, bead, all)")
 	gateCheckCmd.Flags().Bool("dry-run", false, "Show what would happen without making changes")
 	gateCheckCmd.Flags().BoolP("escalate", "e", false, "Escalate failed/expired gates")
 	gateCheckCmd.Flags().IntP("limit", "l", 100, "Limit results (default 100)")
 
 	// gate create flags
 	gateCreateCmd.Flags().String("blocks", "", "Issue ID to block (required)")
-	gateCreateCmd.Flags().StringP("type", "t", "human", "Gate type (human, timer, gh:run, gh:pr)")
+	gateCreateCmd.Flags().StringP("type", "t", "human", "Gate type (human, timer, gh:run, gh:pr, gl:pipeline, gl:mr)")
 	gateCreateCmd.Flags().StringP("reason", "r", "", "Reason for the gate")
 	gateCreateCmd.Flags().String("await-id", "", "Condition identifier (run ID, PR number, etc.)")
-	gateCreateCmd.Flags().String("repo", "", "GitHub repository the gh:run/gh:pr condition is checked in (OWNER/REPO or HOST/OWNER/REPO); default: the blocked issue's metadata.repo, else the current repository")
+	gateCreateCmd.Flags().String("repo", "", "Repository for GitHub/GitLab gates (GitLab: nested NAMESPACE/PROJECT or https://HOST/NAMESPACE/PROJECT); default: the blocked issue's metadata.repo, else the current repository")
 	gateCreateCmd.Flags().String("timeout", "", "Timeout duration (e.g., 2h, 30m)")
 	gateCreateCmd.Flags().String("title", "", "Custom gate title (default: \"Gate: <type>\")")
 	_ = gateCreateCmd.MarkFlagRequired("blocks")

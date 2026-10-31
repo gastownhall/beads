@@ -540,15 +540,15 @@ func createGateIssue(step *formula.Step, parentID string) *types.Issue {
 
 	// Propagate the formula-declared repo selector (SF2), matching the
 	// declarative `metadata.repo` selector documented for ad-hoc gates.
-	// Malformed values are left for check time (githubRepoFromIssue) to
+	// Malformed values are left for the forge-specific check-time parser to
 	// reject, consistent with how a check-time-only value on any other
 	// gate created outside `bd gate create` is validated.
 	//
-	// Restricted to gh:* gate types (SF4), same as repoMetadataForGate: a
+	// Restricted to GitHub and GitLab gate types, same as repoMetadataForGate: a
 	// `repo` field on a human/timer/bead gate step is unrelated, ordinary
-	// metadata, not a GitHub repo selector, so only gh:run/gh:pr gates
+	// metadata, not a forge repo selector, so only GitHub/GitLab gates
 	// write it here.
-	if isGitHubGateType(step.Gate.Type) && step.Gate.Repo != "" {
+	if (isGitHubGateType(step.Gate.Type) || isGitLabGateType(step.Gate.Type)) && step.Gate.Repo != "" {
 		if metaJSON, err := json.Marshal(map[string]string{"repo": step.Gate.Repo}); err == nil {
 			gateIssue.Metadata = metaJSON
 		}
@@ -921,9 +921,9 @@ func formulaVarRefs(steps []*formula.Step) []string {
 			if step.Gate != nil {
 				// createGateIssue mirrors the awaitID into the gate issue's
 				// Title and AwaitID, and writes Repo to metadata.repo only for
-				// gh:* gate types.
+				// GitHub and GitLab gate types.
 				texts = append(texts, gateAwaitID(step.Gate))
-				if isGitHubGateType(step.Gate.Type) {
+				if isGitHubGateType(step.Gate.Type) || isGitLabGateType(step.Gate.Type) {
 					texts = append(texts, step.Gate.Repo)
 				}
 			}
