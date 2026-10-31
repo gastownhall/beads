@@ -3813,6 +3813,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and heals the pattern — self-healing, one privileged open per upgrade
   (degrading a denied seed to a skip is tracked separately).
 
+- **A #4356 untrack scratch table left only at HEAD is now swept.** When
+  `__temp__ignored_schema_migrations_untrack` was committed at HEAD but already
+  dropped from the working set, the open-time reconcile saw nothing to do, so
+  the uncommitted deletion stayed behind and `bd dolt pull` refused it. The
+  reconcile now also checks HEAD for the scratch table and sweeps that state;
+  it never treats a scratch that is absent from the working set as a source of
+  cursor rows, which would otherwise fail every writable open of a store whose
+  cursor table is also missing. This costs one more bounded read on each
+  writable open of a healthy database.
+
 - **`bd ready --parent` and `bd blocked --parent` no longer re-scan the whole
   parent-child edge relation for every descendant they find.** The transitive
   descendant walk recursed against a materialized `parent_edges` CTE that Dolt
