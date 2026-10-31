@@ -837,6 +837,7 @@ go_test(
         "format_json_alias_embedded_test.go",
         "formula_fixture_proxied_test.go",
         "formula_help_test.go",
+        "formula_path_fallback_test.go",
         "formula_primitives_test.go",
         "formula_schema_test.go",
         "gate_add_waiter_contention_test.go",
