@@ -391,14 +391,20 @@ func noticeSharedMigrateRefusal(err error) {
 	if globalFlag {
 		consent = schema.SharedConsentCommandGlobal
 	}
+	// Reads only survive the refusal once the leases table exists (#7302).
+	reads := "reads keep working meanwhile."
+	if gateErr.CurrentVersion < schema.FirstLeasesTableVersion {
+		reads = fmt.Sprintf("reads may fail too until then (schema v%d predates the leases table, v%d).",
+			gateErr.CurrentVersion, schema.FirstLeasesTableVersion)
+	}
 	var remedy string
 	switch gateErr.Decision {
 	case "shared-no-remote":
-		remedy = fmt.Sprintf("Run '%s' once every client of this server is upgraded; reads keep working meanwhile.", consent)
+		remedy = fmt.Sprintf("Run '%s' once every client of this server is upgraded; %s", consent, reads)
 	case "adopt", "adopt-ff":
 		// The remote is already migrated: migrating here would fork it, and
 		// the verb consent deliberately does not unlock this arm.
-		remedy = "Another clone has already migrated this database — adopt it with 'bd bootstrap' rather than migrating here; reads keep working meanwhile."
+		remedy = "Another clone has already migrated this database — adopt it with 'bd bootstrap' rather than migrating here; " + reads
 	case "fork-skew":
 		remedy = "This database and its remote already applied different content for the same migration (#4259) — run 'bd doctor' and follow its migration-content-skew guidance; do not migrate."
 	default:
@@ -406,7 +412,7 @@ func noticeSharedMigrateRefusal(err error) {
 		// first-mover suppression. Its full block names the designated-
 		// migrator and adopt paths with their preconditions, and picking one
 		// here would be guessing.
-		remedy = "This database has a remote — run 'bd migrate' to see the migrate-or-adopt options before choosing; reads keep working meanwhile."
+		remedy = "This database has a remote — run 'bd migrate' to see the migrate-or-adopt options before choosing; " + reads
 	}
 	fmt.Fprintf(os.Stderr,
 		"bd upgraded to %s: %d schema migration(s) pending on this database — not auto-applying (#5920).\n%s\n",
