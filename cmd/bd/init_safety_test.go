@@ -125,6 +125,57 @@ func TestInitFreshWithUnreachableGitOriginSucceeds(t *testing.T) {
 	}
 }
 
+// TestInitReinitLocalWithUnreachableGitOriginSucceeds pins GH#7665: a git
+// origin whose refs/dolt/data probe cannot even authenticate (exit 128 — the
+// credential-less private-remote shape, same repro the plain-init sibling
+// test above uses) must resolve the same way for --reinit-local as it
+// already does for a plain `bd init`. Before this fix, probe failure made
+// RemoteHasDoltData fail closed to true, and CheckRemoteSafety could not
+// distinguish "confirmed has history" from "unknown, probe failed" once a
+// user-override flag was set, so --reinit-local refused with "remote
+// already has Dolt history" — false; nothing was ever confirmed. The sibling
+// refusal test below (...WithDoltDataRefuses) pins that the real positive
+// (confirmed refs/dolt/data) must still refuse; this test pins that an
+// unreachable origin must not.
+func TestInitReinitLocalWithUnreachableGitOriginSucceeds(t *testing.T) {
+	bdBin := buildBDForInitTests(t)
+
+	workDir := t.TempDir()
+	runGitForBootstrapTest(t, workDir, "init", "-b", "main")
+	runGitForBootstrapTest(t, workDir, "config", "core.hooksPath", ".git/hooks")
+	runGitForBootstrapTest(t, workDir, "config", "user.email", "test@test.com")
+	runGitForBootstrapTest(t, workDir, "config", "user.name", "Test User")
+	runGitForBootstrapTest(t, workDir, "commit", "--allow-empty", "-m", "init")
+	// An origin whose probe errors (missing path -> git ls-remote exit 128),
+	// not one that answers "no refs/dolt/data" — the issue's own repro shape.
+	runGitForBootstrapTest(t, workDir, "remote", "add", "origin",
+		filepath.Join(t.TempDir(), "does-not-exist.git"))
+
+	homeDir := t.TempDir() // must differ from workDir: metrics.go caches to $HOME/.beads
+
+	cmd := exec.Command(bdBin, "init", "--reinit-local", "--prefix", "org", "--quiet", "--non-interactive", "--skip-hooks", "--skip-agents")
+	cmd.Dir = workDir
+	cmd.Env = hermeticInitEnv(homeDir)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	if err := cmd.Run(); err != nil {
+		lower := strings.ToLower(out.String())
+		if strings.Contains(lower, "dolt") && (strings.Contains(lower, "not supported") || strings.Contains(lower, "not available") || strings.Contains(lower, "unknown")) {
+			t.Skipf("dolt backend not available: %s", out.String())
+		}
+		t.Fatalf("bd init --reinit-local with an unreachable git origin failed: %v\noutput:\n%s", err, out.String())
+	}
+
+	if strings.Contains(out.String(), "already has Dolt history") {
+		t.Errorf("output falsely claims confirmed remote history for a probe that only errored: %s", out.String())
+	}
+
+	if _, err := os.Stat(filepath.Join(workDir, ".beads")); err != nil {
+		t.Fatalf(".beads should have been created by a successful init: %v", err)
+	}
+}
+
 // TestInitReinitLocalConfiguredRemoteWithDoltDataRefuses is the sibling case:
 // sync.remote (again via BD_SYNC_REMOTE, not --remote) points at a bare repo
 // that DOES have refs/dolt/data pushed to it. `bd init --reinit-local` must
@@ -157,6 +208,55 @@ func TestInitReinitLocalConfiguredRemoteWithDoltDataRefuses(t *testing.T) {
 	err := cmd.Run()
 	if err == nil {
 		t.Fatalf("bd init --reinit-local succeeded; expected refusal (sync.remote has Dolt history). stderr:\n%s", stderr.String())
+	}
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("non-exec-exit error: %v\nstderr:\n%s", err, stderr.String())
+	}
+	if code := exitErr.ExitCode(); code != ExitRemoteDivergenceRefused {
+		t.Errorf("exit code = %d, want %d (ExitRemoteDivergenceRefused)", code, ExitRemoteDivergenceRefused)
+	}
+
+	beadsDir := filepath.Join(workDir, ".beads")
+	if _, err := os.Stat(beadsDir); err == nil {
+		t.Errorf("refusal should not have created %s", beadsDir)
+	}
+}
+
+// TestInitReinitLocalConfiguredNonGitRemoteStaysFailClosed pins GH#7682
+// Finding 1: sync.remote (BD_SYNC_REMOTE) pointed at a URL the
+// refs/dolt/data probe (`git ls-remote <url> ...`) can never answer for —
+// here, a plain local directory with no git repository at all, the same
+// shape a DoltHub/aws://gs:// remote takes — must stay fail-CLOSED and
+// still refuse `bd init --reinit-local`. TestInitReinitLocalWithUnreachableGitOriginSucceeds
+// above pins the opposite outcome for the git-origin checkpoint; the two
+// checkpoints must not share the same UNKNOWN-is-safe-to-proceed answer,
+// because origin's URL is a git remote by construction and this
+// checkpoint's isn't. Before this fix both checkpoints shared one
+// RemoteProbeUnknown signal, so a probe error here (always, for a
+// non-git-ls-remote-able sync.remote) silently initialized a fresh local
+// database wired to a remote that may really hold history.
+func TestInitReinitLocalConfiguredNonGitRemoteStaysFailClosed(t *testing.T) {
+	bdBin := buildBDForInitTests(t)
+
+	// Not a git repository at all, so `git ls-remote <dir> refs/dolt/data`
+	// errors (exit 128) exactly as it does for a DoltHub/aws://gs:// URL —
+	// the probe has no way to tell "unreachable" from "really has data".
+	nonGitRemote := t.TempDir()
+
+	workDir := t.TempDir()
+	runGitForBootstrapTest(t, workDir, "init", "-b", "main")
+	runGitForBootstrapTest(t, workDir, "config", "core.hooksPath", ".git/hooks")
+	homeDir := t.TempDir() // see collision note above
+
+	cmd := exec.Command(bdBin, "init", "--reinit-local", "--prefix", "cfg", "--quiet", "--non-interactive", "--skip-hooks", "--skip-agents")
+	cmd.Dir = workDir
+	cmd.Env = hermeticInitEnv(homeDir, "BD_SYNC_REMOTE="+nonGitRemote)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err == nil {
+		t.Fatalf("bd init --reinit-local succeeded against an unverifiable sync.remote; expected fail-closed refusal. stderr:\n%s", stderr.String())
 	}
 	exitErr, ok := err.(*exec.ExitError)
 	if !ok {
@@ -212,6 +312,41 @@ func TestCheckRemoteSafety_GuardMatrix(t *testing.T) {
 			"remote/from-jsonl",
 			RemoteSafetyInput{RemoteHasDoltData: true, FromJSONL: true},
 			ActionRefuseDivergence, ExitRemoteDivergenceRefused,
+		},
+
+		// Remote-state-unknown column (GH#7665): RemoteHasDoltData is true
+		// only because the probe failed (resolveRemoteHasDoltDataProbe's
+		// fail-closed UNKNOWN), not because it was confirmed. Every override
+		// flag must treat this exactly like no-remote-data, matching the
+		// no-override path's own existing probe-failure fallback — refusing
+		// here would claim confirmed history that was never observed.
+		{
+			"unknown/force",
+			RemoteSafetyInput{RemoteHasDoltData: true, RemoteProbeUnknown: true, Force: true},
+			ActionNoRemoteData, 0,
+		},
+		{
+			"unknown/reinit-local",
+			RemoteSafetyInput{RemoteHasDoltData: true, RemoteProbeUnknown: true, ReinitLocal: true},
+			ActionNoRemoteData, 0,
+		},
+		{
+			"unknown/from-jsonl",
+			RemoteSafetyInput{RemoteHasDoltData: true, RemoteProbeUnknown: true, FromJSONL: true},
+			ActionNoRemoteData, 0,
+		},
+		// An explicit --discard-remote is the user's own claim that there is
+		// something to discard, even with a failed probe: that declared
+		// intent still gets the destroy-token safety check, not a silent
+		// skip. Mirrors "remote/force+discard/non-interactive/no-token"
+		// above, just with RemoteProbeUnknown set.
+		{
+			"unknown/force+discard/non-interactive/no-token",
+			RemoteSafetyInput{
+				RemoteHasDoltData: true, RemoteProbeUnknown: true, Force: true, DiscardRemote: true,
+				ExpectedToken: "DESTROY-bd",
+			},
+			ActionRequireDestroyToken, ExitDestroyTokenMissing,
 		},
 
 		// Remote-has-data, user forced WITH discard-remote, non-interactive,
