@@ -8546,6 +8546,17 @@ components:
           description: >-
             The edge type, e.g. `blocks`, `parent-child`, `related`,
             `discovered-from`. Not a closed vocabulary.
+        relation:
+          type: string
+          description: >-
+            The edge's role word, read from the shown issue's end, so a reader
+            need not know which side of the edge the row sits on. A
+            `duplicates` edge reads `duplicate_of` under `dependencies` and
+            `duplicated_by` under `dependents`; likewise `depends_on`/`blocks`,
+            `parent`/`children`, `superseded_by`/`supersedes`. A custom type
+            reads `<type>` outgoing and `<type>_inbound` incoming.
+            `GET /v0/beads/issues/{id}` fills it; `RelatedIssues.items`
+            leaves it empty for now.
 
     TreeNode:
       type: object
