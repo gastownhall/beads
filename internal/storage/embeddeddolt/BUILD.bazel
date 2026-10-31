@@ -31,6 +31,7 @@ go_library(
         "get_issue.go",
         "graph_counter.go",
         "heartbeater.go",
+        "imager.go",
         "init_verifier.go",
         "issue_claimer.go",
         "issue_operations.go",
