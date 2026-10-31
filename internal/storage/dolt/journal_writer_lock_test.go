@@ -7,13 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"go/ast"
-	"go/build"
-	"go/importer"
 	"go/parser"
 	"go/token"
 	gotypes "go/types"
 	"io/fs"
 	"os"
+	"reflect"
 	"regexp"
 	"slices"
 	"sort"
@@ -907,6 +906,83 @@ func TestJournalWriterLock_NoJournalGuardReachesEveryReceiver(t *testing.T) {
 	}
 }
 
+// noJournalStdlibInterfaceFixture has two NoJournal bodies. One journals
+// through a package type held in a standard-library interface (io.Closer),
+// which a stdlib-typed receiver must not hide. The other calls Close and
+// Commit on concrete database/sql values, which must reach no package method
+// of those names, fixtureJournalCloser.Close included. It is parsed into the
+// package's call graph only, never compiled.
+const noJournalStdlibInterfaceFixture = `package dolt
+
+import (
+	"context"
+	"database/sql"
+	"io"
+	"time"
+
+	"github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/steveyegge/beads/internal/types"
+)
+
+type fixtureJournalCloser struct {
+	ctx context.Context
+	tx  *sql.Tx
+}
+
+func (c *fixtureJournalCloser) Close() error {
+	_, err := issueops.ReclaimExpiredLeasesInTx(c.ctx, c.tx, time.Now(), types.ReclaimFilter{}, "fixture")
+	return err
+}
+
+func (m *memories) fixtureInterfaceNoJournal(ctx context.Context) error {
+	return m.store.withRetryTxNoJournal(ctx, func(tx *sql.Tx) error {
+		var c io.Closer = &fixtureJournalCloser{ctx: ctx, tx: tx}
+		return c.Close()
+	})
+}
+
+func (m *memories) fixtureConcreteNoJournal(ctx context.Context) error {
+	return m.store.withRetryTxNoJournal(ctx, func(tx *sql.Tx) error {
+		rows, err := tx.QueryContext(ctx, "SELECT 1")
+		if err != nil {
+			return err
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		return tx.Commit()
+	})
+}
+`
+
+// TestJournalWriterLock_NoJournalGuardFollowsStdlibInterfaces pins the
+// resolution rule's two sides without the standard library's sources: a call
+// through a standard-library interface keeps its edge to the package type it
+// can hold, and a call on a concrete database/sql value gets none.
+func TestJournalWriterLock_NoJournalGuardFollowsStdlibInterfaces(t *testing.T) {
+	mutators := journalingIssueopsMutators(t)
+	journalingMemoryopsMutators(t, mutators)
+	g := parseDoltCallGraph(t, noJournalStdlibInterfaceFixture)
+	_, violations := noJournalViolations(t, g, mutators)
+	// io.Closer dispatches by bare name to every package Close, so the
+	// interface body also reaches issueOperations.Close: only the fixture's
+	// own Close is pinned.
+	const caller = "memories.fixtureInterfaceNoJournal runs on a NoJournal transaction helper but calls "
+	if !slices.ContainsFunc(violations, func(v string) bool { return strings.HasPrefix(v, caller+"fixtureJournalCloser.Close,") }) {
+		t.Errorf("violations = %q, want one starting %q", violations, caller+"fixtureJournalCloser.Close,")
+	}
+	for _, v := range violations {
+		if !strings.HasPrefix(v, caller) {
+			t.Errorf("violation outside the interface body: %s", v)
+		}
+	}
+	for callee := range g["memories.fixtureConcreteNoJournal"].callees {
+		if callee != "DoltStore.withRetryTxNoJournal" {
+			t.Errorf("rows.Close/tx.Commit on database/sql values resolved to package method %s", callee)
+		}
+	}
+}
+
 // noJournalViolations reports every function that runs on a NoJournal
 // transaction helper and calls a journaling mutator or a package function that
 // reaches one, with the callers it checked.
@@ -991,26 +1067,30 @@ func (f *doltFunc) callsAnyOf(set map[string]bool) bool {
 
 // parseDoltCallGraph type-checks this package's non-test files, plus any
 // fixture sources, and resolves each reference to a package function by type:
-// m.store.withRetryTxNoJournal is DoltStore's method and rows.Close() is
-// *sql.Rows', not issueOperations.Close. Standard-library imports are checked
-// from GOROOT source; every other import is refused, and go/types gives it an
-// empty package and carries on, so every type this package declares and every
-// stdlib type still resolves.
+// m.store.withRetryTxNoJournal is DoltStore's method. Every import is refused,
+// the standard library's included, so the guard needs nothing but this
+// package's sources (a Bazel sandbox holds the Go SDK without its sources):
+// go/types gives each import an empty package and carries on, so every type
+// this package declares still resolves, and no other package's type does.
 //
-// The stdlib must resolve: without it rows.Close() has no known type and
-// becomes an edge to every package Close, so the plumbing reads as journaling
-// and every NoJournal caller is flagged. A sandbox may hold the Go SDK without
-// its sources (Bazel declares this package's sources, not GOROOT's). There the
-// guard skips, naming the missing SDK, rather than report a call graph with
-// holes. The compiler's export data is no fallback: the SDK ships no
-// precompiled standard library, and importer.Default builds it with
-// `go list -export`, which needs the same GOROOT sources.
+// A selector whose type is not known gets no edge only when its receiver is
+// proved unable to dispatch to a package method (stdlibTypes): its type is a
+// concrete standard-library type, read by reflect from the compiled standard
+// library (stdlibSeeds) and followed through fields and methods (tx *sql.Tx,
+// the rows of tx.QueryContext, s.db, ...). Such a type's methods are the
+// standard library's, so tx.Commit() and rows.Close() are never DoltStore.Commit
+// or issueOperations.Close. Every other receiver keeps the edge, by bare name,
+// to every package method of that name:
+//   - a standard-library interface (context.Context, io.Closer, ...), or a
+//     struct embedding one, since it can hold a package type;
+//   - another module's type, such as issueops.BlockedRecheck or a
+//     storage.Transaction, since that module's interface may dispatch to a
+//     package type;
+//   - a standard-library type or function stdlibSeeds does not reach, whose
+//     kind is not known without the standard library's sources.
 //
-// Where the type is not known, the edge is kept, by bare name, to every
-// package method of that name:
-//   - a selector on a value of another module's type (issueops.BlockedRecheck,
-//     ...), whose type the refused import left unknown;
-//   - an interface method, which may dispatch to any package type.
+// An interface method this package can see (its own interfaces, error) also
+// keeps the bare-name edge, and a name no package method declares has none.
 //
 // Not followed at all: calls through a func-typed value (a variable, field or
 // parameter), whose target is decided at run time. A NoJournal body's own
@@ -1037,24 +1117,16 @@ func parseDoltCallGraph(t *testing.T, fixtures ...string) doltCallGraph {
 		files = append(files, file)
 	}
 	info := &gotypes.Info{
+		Defs:       map[*ast.Ident]gotypes.Object{},
 		Uses:       map[*ast.Ident]gotypes.Object{},
 		Selections: map[*ast.SelectorExpr]*gotypes.Selection{},
 	}
-	imp := &stdlibImporter{src: importer.ForCompiler(fset, "source", nil), missing: map[string]error{}}
 	conf := gotypes.Config{
-		Importer: imp,
+		Importer: refusedImports{},
 		Error:    func(error) {}, // the refused imports; resolution goes on without them
 	}
 	pkg, _ := conf.Check("dolt", fset, files, info)
-	if len(imp.missing) > 0 {
-		paths := make([]string, 0, len(imp.missing))
-		for path := range imp.missing {
-			paths = append(paths, path)
-		}
-		sort.Strings(paths)
-		t.Skipf("the Go SDK's standard library sources are unavailable to the type checker (GOROOT %q does not load %v; first error: %v), so the call graph cannot be built without false journaling edges",
-			build.Default.GOROOT, paths, imp.missing[paths[0]])
-	}
+	stdlib := newStdlibTypes(info, files)
 
 	g := doltCallGraph{}
 	byName := map[string][]string{} // method name -> package method keys
@@ -1095,6 +1167,9 @@ func parseDoltCallGraph(t *testing.T, fixtures ...string) doltCallGraph {
 						if _, ok := info.Uses[x].(*gotypes.PkgName); ok {
 							return true // a qualified identifier of another package
 						}
+					}
+					if stdlib.cannotDispatch(node.X) {
+						return true // a field or method of a concrete standard-library value
 					}
 					for _, callee := range byName[node.Sel.Name] {
 						f.callees[callee] = true
@@ -1140,24 +1215,379 @@ func funcDeclKey(fn *ast.FuncDecl) string {
 	return fn.Name.Name
 }
 
-// stdlibImporter checks standard-library imports from source and refuses
-// every other path (see parseDoltCallGraph).
-type stdlibImporter struct {
-	src gotypes.Importer
-	// missing records each standard-library package src failed to load; a
-	// refused non-stdlib import is expected and not recorded.
-	missing map[string]error
+// refusedImports refuses every import, the standard library's included (see
+// parseDoltCallGraph).
+type refusedImports struct{}
+
+func (refusedImports) Import(path string) (*gotypes.Package, error) {
+	return nil, fmt.Errorf("%s: imports are not loaded", path)
 }
 
-func (i *stdlibImporter) Import(path string) (*gotypes.Package, error) {
-	if first, _, _ := strings.Cut(path, "/"); strings.Contains(first, ".") {
-		return nil, fmt.Errorf("%s: not a standard-library package", path)
+// stdlibSeeds are the standard-library types and functions the guard can name
+// without the standard library's sources: reflect reads each from the compiled
+// standard library, and what their fields and methods yield follows from it
+// (tx.QueryContext gives *sql.Rows, s.db.Conn gives *sql.Conn). A
+// standard-library value whose type is not reached from here is not known, so
+// its selectors keep their bare-name edges: an unlisted type can only add
+// edges, never hide one.
+var stdlibSeeds = map[string]reflect.Type{
+	"database/sql.Conn":   reflect.TypeFor[sql.Conn](),
+	"database/sql.DB":     reflect.TypeFor[sql.DB](),
+	"database/sql.Row":    reflect.TypeFor[sql.Row](),
+	"database/sql.Rows":   reflect.TypeFor[sql.Rows](),
+	"database/sql.Stmt":   reflect.TypeFor[sql.Stmt](),
+	"database/sql.Tx":     reflect.TypeFor[sql.Tx](),
+	"database/sql.Open":   reflect.TypeOf(sql.Open),
+	"database/sql.OpenDB": reflect.TypeOf(sql.OpenDB),
+	"os.File":             reflect.TypeFor[os.File](),
+	"os.Create":           reflect.TypeOf(os.Create),
+	"os.Open":             reflect.TypeOf(os.Open),
+	"os.OpenFile":         reflect.TypeOf(os.OpenFile),
+}
+
+// stdlibTypes gives, from this package's declarations and stdlibSeeds alone,
+// the standard-library type of a value: a variable, parameter or field
+// declared with one, or one declared from a seeded function, a field or method
+// of a value of a known type, or a package function or interface method whose
+// declared result has one. A value it cannot type (another module's type, a
+// standard-library type or function not seeded, a type switch binding, a
+// builtin's result) is not known (see parseDoltCallGraph).
+type stdlibTypes struct {
+	info     *gotypes.Info
+	declType map[gotypes.Object]ast.Expr       // the declared type of a variable, parameter or field
+	declFrom map[gotypes.Object]valueSource    // the value an untyped declaration took
+	results  map[gotypes.Object]*ast.FieldList // a package function's or interface method's declared results
+	visiting map[gotypes.Object]bool
+}
+
+// valueSource is the i-th value of expr (i > 0 only for a multi-value call),
+// or, for a range variable, the key or element expr yields.
+type valueSource struct {
+	expr ast.Expr
+	i    int
+	rng  rangePart
+}
+
+type rangePart int
+
+const (
+	notRange rangePart = iota
+	rangeKey
+	rangeElem
+)
+
+func newStdlibTypes(info *gotypes.Info, files []*ast.File) *stdlibTypes {
+	v := &stdlibTypes{
+		info:     info,
+		declType: map[gotypes.Object]ast.Expr{},
+		declFrom: map[gotypes.Object]valueSource{},
+		results:  map[gotypes.Object]*ast.FieldList{},
+		visiting: map[gotypes.Object]bool{},
 	}
-	pkg, err := i.src.Import(path)
-	if err != nil {
-		i.missing[path] = err
+	define := func(names []ast.Expr, typ ast.Expr, values []ast.Expr) {
+		for i, name := range names {
+			id, ok := name.(*ast.Ident)
+			if !ok || info.Defs[id] == nil {
+				continue
+			}
+			obj := info.Defs[id]
+			switch {
+			case typ != nil:
+				v.declType[obj] = typ
+			case len(values) == len(names):
+				v.declFrom[obj] = valueSource{expr: values[i]}
+			case len(values) == 1:
+				v.declFrom[obj] = valueSource{expr: values[0], i: i}
+			}
+		}
 	}
-	return pkg, err
+	idents := func(ids []*ast.Ident) []ast.Expr {
+		exprs := make([]ast.Expr, len(ids))
+		for i, id := range ids {
+			exprs[i] = id
+		}
+		return exprs
+	}
+	for _, file := range files {
+		ast.Inspect(file, func(n ast.Node) bool {
+			switch n := n.(type) {
+			case *ast.Field:
+				define(idents(n.Names), n.Type, nil)
+				if ft, ok := n.Type.(*ast.FuncType); ok {
+					for _, name := range n.Names {
+						if obj, ok := info.Defs[name].(*gotypes.Func); ok {
+							v.results[obj] = ft.Results // an interface method
+						}
+					}
+				}
+			case *ast.ValueSpec:
+				define(idents(n.Names), n.Type, n.Values)
+			case *ast.AssignStmt:
+				if n.Tok == token.DEFINE {
+					define(n.Lhs, nil, n.Rhs)
+				}
+			case *ast.RangeStmt:
+				if n.Tok == token.DEFINE {
+					for part, name := range map[rangePart]ast.Expr{rangeKey: n.Key, rangeElem: n.Value} {
+						if id, ok := name.(*ast.Ident); ok && info.Defs[id] != nil {
+							v.declFrom[info.Defs[id]] = valueSource{expr: n.X, rng: part}
+						}
+					}
+				}
+			case *ast.FuncDecl:
+				if obj := info.Defs[n.Name]; obj != nil {
+					v.results[obj] = n.Type.Results
+				}
+			}
+			return true
+		})
+	}
+	return v
+}
+
+// cannotDispatch reports whether a selector on e is proved never to reach a
+// method of this package: e's type is known and is a concrete
+// standard-library type, so its methods are the standard library's. A
+// standard-library interface (context.Context, io.Closer, ...) can hold a
+// package type, and so can a struct that embeds one, so neither is proved.
+func (v *stdlibTypes) cannotDispatch(e ast.Expr) bool {
+	t := v.nth(e, 0)
+	return t != nil && concrete(t, map[reflect.Type]bool{})
+}
+
+func concrete(t reflect.Type, seen map[reflect.Type]bool) bool {
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if seen[t] {
+		return true
+	}
+	seen[t] = true
+	switch t.Kind() {
+	case reflect.Interface:
+		return false
+	case reflect.Struct:
+		for i := range t.NumField() {
+			if f := t.Field(i); f.Anonymous && !concrete(f.Type, seen) {
+				return false // a method promoted from an embedded interface
+			}
+		}
+	}
+	return true
+}
+
+// nth is the type of the i-th value of e, or nil when it is not known.
+func (v *stdlibTypes) nth(e ast.Expr, i int) reflect.Type {
+	switch e := e.(type) {
+	case *ast.ParenExpr:
+		return v.nth(e.X, i)
+	case *ast.StarExpr:
+		if t := v.nth(e.X, 0); t != nil && t.Kind() == reflect.Pointer {
+			return t.Elem()
+		}
+	case *ast.UnaryExpr:
+		t := v.nth(e.X, 0)
+		switch {
+		case t == nil:
+		case e.Op == token.AND:
+			return reflect.PointerTo(t)
+		case e.Op == token.ARROW && t.Kind() == reflect.Chan && i == 0:
+			return t.Elem()
+		}
+	case *ast.IndexExpr:
+		if i == 0 {
+			return elem(v.nth(e.X, 0))
+		}
+	case *ast.TypeAssertExpr:
+		if i == 0 && e.Type != nil {
+			return v.typeOf(e.Type)
+		}
+	case *ast.CompositeLit:
+		if e.Type != nil {
+			return v.typeOf(e.Type)
+		}
+	case *ast.Ident:
+		return v.object(v.info.Uses[e])
+	case *ast.SelectorExpr:
+		if v.stdlibPkg(e.X) {
+			return nil // a standard-library variable: not seeded
+		}
+		if obj := v.info.Uses[e.Sel]; obj != nil {
+			return v.object(obj) // a field of a package type
+		}
+		return field(v.nth(e.X, 0), e.Sel.Name)
+	case *ast.CallExpr:
+		switch fun := ast.Unparen(e.Fun).(type) {
+		case *ast.SelectorExpr:
+			if v.stdlibPkg(fun.X) {
+				return out(v.typeOf(fun), i) // a seeded function, or a conversion
+			}
+			if obj := v.info.Uses[fun.Sel]; obj != nil {
+				return v.result(obj, i)
+			}
+			return out(method(v.nth(fun.X, 0), fun.Sel.Name), i)
+		case *ast.Ident:
+			return v.result(v.info.Uses[fun], i)
+		case *ast.StarExpr:
+			if i == 0 {
+				return v.typeOf(fun) // a conversion
+			}
+		}
+	}
+	return nil
+}
+
+func (v *stdlibTypes) object(obj gotypes.Object) reflect.Type {
+	if obj == nil || v.visiting[obj] {
+		return nil
+	}
+	v.visiting[obj] = true
+	defer delete(v.visiting, obj)
+	if typ, ok := v.declType[obj]; ok {
+		return v.typeOf(typ)
+	}
+	src, ok := v.declFrom[obj]
+	if !ok {
+		return nil
+	}
+	switch src.rng {
+	case rangeKey:
+		if t := v.nth(src.expr, 0); t != nil {
+			switch t.Kind() {
+			case reflect.Map:
+				return t.Key()
+			case reflect.Chan:
+				return t.Elem()
+			}
+		}
+		return nil
+	case rangeElem:
+		return elem(v.nth(src.expr, 0))
+	}
+	return v.nth(src.expr, src.i)
+}
+
+// result is the type of the i-th declared result of fn, a package function or
+// a method of a package interface.
+func (v *stdlibTypes) result(fn gotypes.Object, i int) reflect.Type {
+	if f, ok := fn.(*gotypes.Func); ok {
+		fn = f.Origin()
+	}
+	results := v.results[fn]
+	if results == nil {
+		return nil
+	}
+	for _, field := range results.List {
+		n := max(len(field.Names), 1)
+		if i < n {
+			return v.typeOf(field.Type)
+		}
+		i -= n
+	}
+	return nil
+}
+
+// typeOf is the type a type expression names, or nil when it is not known.
+func (v *stdlibTypes) typeOf(t ast.Expr) reflect.Type {
+	switch t := t.(type) {
+	case *ast.ParenExpr:
+		return v.typeOf(t.X)
+	case *ast.StarExpr:
+		if elem := v.typeOf(t.X); elem != nil {
+			return reflect.PointerTo(elem)
+		}
+	case *ast.ArrayType:
+		if elem := v.typeOf(t.Elt); elem != nil {
+			return reflect.SliceOf(elem) // an array indexes and ranges like a slice
+		}
+	case *ast.Ellipsis:
+		if elem := v.typeOf(t.Elt); elem != nil {
+			return reflect.SliceOf(elem)
+		}
+	case *ast.ChanType:
+		if elem := v.typeOf(t.Value); elem != nil {
+			return reflect.ChanOf(reflect.BothDir, elem)
+		}
+	case *ast.MapType:
+		key, elem := v.typeOf(t.Key), v.typeOf(t.Value)
+		if key != nil && elem != nil && key.Comparable() {
+			return reflect.MapOf(key, elem)
+		}
+	case *ast.SelectorExpr:
+		if id, ok := t.X.(*ast.Ident); ok && v.stdlibPkg(id) {
+			pkg := v.info.Uses[id].(*gotypes.PkgName).Imported().Path()
+			return stdlibSeeds[pkg+"."+t.Sel.Name]
+		}
+	}
+	return nil
+}
+
+// elem is the element type indexing or ranging over a value of type t yields.
+func elem(t reflect.Type) reflect.Type {
+	if t != nil && t.Kind() == reflect.Pointer && t.Elem().Kind() == reflect.Array {
+		t = t.Elem()
+	}
+	if t == nil {
+		return nil
+	}
+	switch t.Kind() {
+	case reflect.Slice, reflect.Array, reflect.Map, reflect.Chan:
+		return t.Elem()
+	}
+	return nil
+}
+
+// field is the type of the named field of a value of type t.
+func field(t reflect.Type, name string) reflect.Type {
+	for t != nil && t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if t == nil || t.Kind() != reflect.Struct {
+		return nil
+	}
+	if f, ok := t.FieldByName(name); ok {
+		return f.Type
+	}
+	return nil
+}
+
+// method is the type of the named method of a value of type t, an addressable
+// value's pointer methods included.
+func method(t reflect.Type, name string) reflect.Type {
+	if t == nil {
+		return nil
+	}
+	if m, ok := t.MethodByName(name); ok {
+		return m.Type
+	}
+	if t.Kind() != reflect.Pointer && t.Kind() != reflect.Interface {
+		if m, ok := reflect.PointerTo(t).MethodByName(name); ok {
+			return m.Type
+		}
+	}
+	return nil
+}
+
+// out is the i-th result of the function type fn.
+func out(fn reflect.Type, i int) reflect.Type {
+	if fn == nil || fn.Kind() != reflect.Func || i >= fn.NumOut() {
+		return nil
+	}
+	return fn.Out(i)
+}
+
+// stdlibPkg reports whether x names an imported standard-library package.
+func (v *stdlibTypes) stdlibPkg(x ast.Expr) bool {
+	id, ok := x.(*ast.Ident)
+	if !ok {
+		return false
+	}
+	name, ok := v.info.Uses[id].(*gotypes.PkgName)
+	if !ok {
+		return false
+	}
+	first, _, _ := strings.Cut(name.Imported().Path(), "/")
+	return !strings.Contains(first, ".")
 }
 
 // TestJournalWriterLock_NonJournaledWritesSkipAHeldLock pins the audit end to
