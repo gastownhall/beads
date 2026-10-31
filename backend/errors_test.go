@@ -7,6 +7,7 @@ import (
 
 	"github.com/steveyegge/beads/backend"
 	"github.com/steveyegge/beads/internal/storage"
+	internalissueops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/issueops"
 )
 
@@ -31,5 +32,16 @@ func TestErrIdempotencyExpiredAliasesTheIssueopsSentinel(t *testing.T) {
 	var err error = &issueops.IdempotencyExpiredError{ID: "bd-1"}
 	if !errors.Is(fmt.Errorf("create: %w", err), backend.ErrIdempotencyExpired) {
 		t.Fatalf("errors.Is(*IdempotencyExpiredError, backend.ErrIdempotencyExpired) = false")
+	}
+}
+
+func TestErrRenameLabelSameNameAliasesIssueopsSentinel(t *testing.T) {
+	if backend.ErrRenameLabelSameName != internalissueops.ErrRenameLabelSameName {
+		t.Fatal("backend ErrRenameLabelSameName must preserve the issueops sentinel identity")
+	}
+
+	err := fmt.Errorf("rename: %w", backend.ErrRenameLabelSameName)
+	if !errors.Is(err, internalissueops.ErrRenameLabelSameName) {
+		t.Fatalf("errors.Is(err, issueops.ErrRenameLabelSameName) = false; err = %v", err)
 	}
 }
