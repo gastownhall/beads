@@ -49,6 +49,18 @@ cert)
 		--argjson artifact "$ARTIFACT_ID" \
 		'{repo: $repo, run_id: $run, run_attempt: $attempt, pr: $pr, job: $job, artifact_id: $artifact}')
 	reply="$dir/mint.json"
+	# GitHub publishes an artifact shortly after the upload action reports it
+	# finalized; a read inside that read-after-write window answers "not found:
+	# /repos/<repo>/actions/artifacts/<id>" for an artifact that exists minutes
+	# later. For the CSR this job just uploaded that is the same "the mint could
+	# not (yet) see GitHub" condition the 502 branch already retries, so it is
+	# retryable too (GH#7429). The ID is this run's, so a not found for anything
+	# else stays a final answer.
+	artifact="/repos/${GITHUB_REPOSITORY}/actions/artifacts/${ARTIFACT_ID}"
+	retriable() {
+		case "$code" in 429 | 502 | 000) return 0 ;; esac
+		[ "$(jq -r '.error // empty' "$reply" 2>/dev/null || true)" = "not found: $artifact" ]
+	}
 	code=000
 	for attempt in 1 2 3 4; do
 		# --connect-timeout: a closed gate drops the SYN; fail fast, not in 60 s.
@@ -56,9 +68,18 @@ cert)
 			-H 'content-type: application/json' --data "$body" "$MINT/v1/cert") || code=000
 		# Retry what may pass on its own: a rate or live-certificate limit (429;
 		# the rates are per minute, the backoff sums to one), the mint could not
-		# reach GitHub (502), or the network (000). Everything else is an answer.
-		case "$code" in 429 | 502 | 000) ;; *) break ;; esac
-		[ "$attempt" -eq 4 ] || sleep $((attempt * 10))
+		# reach GitHub (502), the network (000), or a CSR artifact the mint cannot
+		# read yet. Everything else is an answer.
+		retriable || break
+		if [ "$attempt" -eq 4 ]; then
+			break
+		fi
+		if [ "$code" = 000 ] || [ "$code" = 429 ] || [ "$code" = 502 ]; then
+			echo "::notice title=rbe-fork::mint not ready (HTTP $code); retrying in $((attempt * 10))s" >&2
+		else
+			echo "::notice title=rbe-fork::mint cannot read artifact $ARTIFACT_ID yet; retrying in $((attempt * 10))s" >&2
+		fi
+		sleep $((attempt * 10))
 	done
 	if [ "$code" != 200 ]; then
 		echo "::error title=rbe-fork mint refused (HTTP $code)::$(jq -r '.error // empty' "$reply" 2>/dev/null || true)"

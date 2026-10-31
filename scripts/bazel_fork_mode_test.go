@@ -35,8 +35,9 @@ var rbeForkInstance = map[string]string{"ro": "oss-fork", "rw": "oss"}
 // timeouts on a "timeouts" line), and answers as BAZEL_TEST_MINT_CERT says: ro / rw (sign the CSR at
 // BAZEL_TEST_CSR, as the mint would after downloading the artifact),
 // ro-as-rw (tier rw with instance oss-fork), evil-endpoint, an HTTP status
-// with an error body, 000 (connection refused), or "<first>-then-<rest>"
-// (the first call answers <first>).
+// with an error body, 000 (connection refused), not-found / not-found-other
+// (a 404 not found for this run's artifact id, or for another one), or
+// "<first>-then-<rest>" (the first call answers <first>).
 const bazelTestMintCertStub = `#!/usr/bin/env bash
 set -euo pipefail
 d=$BAZEL_TEST_MINT_DIR
@@ -72,6 +73,12 @@ rw) sign rw oss ;;
 ro-as-rw) sign rw oss-fork ;;
 evil-endpoint) sign ro oss-fork grpcs://elsewhere.example:443 ;;
 000) echo "curl: (7) Failed to connect to rbe-mint.ops.gascity.com port 8444" >&2; exit 7 ;;
+# not-found / not-found-other: the mint reading this job's CSR artifact inside
+# GitHub's read-after-write window (404 not found: <artifact>), which the
+# client retries, and the same answer for an artifact id this run never
+# uploaded, which it does not.
+not-found) reply 404 "$(jq -cn --arg repo "${GITHUB_REPOSITORY:?}" --arg id "${ARTIFACT_ID:?}" '{error: ("not found: /repos/" + $repo + "/actions/artifacts/" + $id)}')" ;;
+not-found-other) reply 404 "$(jq -cn --arg repo "${GITHUB_REPOSITORY:?}" --argjson id "$((ARTIFACT_ID + 1))" '{error: ("not found: /repos/" + $repo + "/actions/artifacts/" + ($id | tostring))}')" ;;
 *) reply "$answer" "{\"error\": \"stub answer $answer\"}" ;;
 esac
 `
@@ -171,9 +178,9 @@ var (
 // key (EC P-256, PKCS#8, 0600, outside the workspace), the CSR artifact's
 // name, the request body (exactly the mint's six keys), the endpoint pin, the
 // tier/instance pairing, the tier check against the rbe job's, the retries
-// (429, 502 and connection failures only; backoff 10, 20, 30 s, none after
-// the last attempt), the timeouts (a closed gate drops the connection) and
-// the refusals.
+// (429, 502, connection failures, and this run's CSR artifact not being
+// readable yet; backoff 10, 20, 30 s, none after the last attempt), the
+// timeouts (a closed gate drops the connection) and the refusals.
 func TestSetupBazelForkCredential(t *testing.T) {
 	requireHostTool(t, "bash")
 	m := newForkMint(t)
@@ -268,7 +275,7 @@ func TestSetupBazelForkCredential(t *testing.T) {
 	}
 	wantBody := map[string]any{"repo": "beads", "run_id": 4242.0, "run_attempt": 2.0, "pr": 7123.0, "job": "bazel-test", "artifact_id": 99.0}
 	for _, tier := range []string{"ro", "rw"} {
-		for _, answer := range []string{tier, "429-then-" + tier, "502-then-" + tier, "000-then-" + tier} {
+		for _, answer := range []string{tier, "429-then-" + tier, "502-then-" + tier, "000-then-" + tier, "not-found-then-" + tier} {
 			got, logs, err := cert(t, answer, tier)
 			if err != nil {
 				t.Errorf("cert %s (mint %s): %v\n%s", tier, answer, err, logs)
@@ -318,6 +325,10 @@ func TestSetupBazelForkCredential(t *testing.T) {
 		{"503", "rw", 1, "rbe-fork mint refused (HTTP 503)"},
 		{"502", "ro", 4, "rbe-fork mint refused (HTTP 502)"},
 		{"000", "ro", 4, "rbe-fork mint refused (HTTP 000)"},
+		// A CSR artifact the mint cannot read yet retries, and a not found for
+		// anything but this run's artifact is a final answer (GH#7429).
+		{"not-found", "ro", 4, "rbe-fork mint refused (HTTP 404)::not found: /repos/gastownhall/beads/actions/artifacts/99"},
+		{"not-found-other", "ro", 1, "rbe-fork mint refused (HTTP 404)::not found: /repos/gastownhall/beads/actions/artifacts/100"},
 		{"rw", "ro", 1, "rbe-fork tier changed"},
 		{"ro", "rw", 1, "rbe-fork tier changed"},
 		{"ro-as-rw", "rw", 1, "returned tier 'rw' instance 'oss-fork'"},
