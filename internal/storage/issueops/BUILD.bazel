@@ -143,6 +143,7 @@ go_test(
         "arrival_seq_guard_test.go",
         "as_of_test.go",
         "asof_read_test.go",
+        "batch_apply_policy_test.go",
         "batch_apply_test.go",
         "batchget_test.go",
         "batching_test.go",

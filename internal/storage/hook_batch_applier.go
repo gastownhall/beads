@@ -21,6 +21,16 @@ func (h *HookFiringStore) BatchApplier() (issueops.BatchApplier, error) {
 	return &hookBatchApplier{inner: inner, hooks: h}, nil
 }
 
+// BatchApplierWithPolicy layers the completion hooks over the inner store's
+// policy-carrying applier, for the same reason BatchApplier recurses.
+func (h *HookFiringStore) BatchApplierWithPolicy(policy BatchClosePolicy) (issueops.BatchApplier, error) {
+	inner, err := BatchApplierWithPolicy(h.inner, policy)
+	if err != nil {
+		return nil, err
+	}
+	return &hookBatchApplier{inner: inner, hooks: h}, nil
+}
+
 type hookBatchApplier struct {
 	inner issueops.BatchApplier
 	hooks issueOperationHooks

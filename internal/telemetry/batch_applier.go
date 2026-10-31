@@ -3,6 +3,7 @@ package telemetry
 import (
 	"context"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/issueops"
 )
 
@@ -11,6 +12,16 @@ import (
 // delegation would return the inner surface unspanned and untimed.
 func (s *InstrumentedStorage) BatchApplier() (issueops.BatchApplier, error) {
 	inner, err := s.Unwrap().BatchApplier()
+	if err != nil {
+		return nil, err
+	}
+	return s.WrapBatchApplier(inner), nil
+}
+
+// BatchApplierWithPolicy forwards the close policy through this layer, so the
+// instrumented surface keeps the external blockers the decorator resolved.
+func (s *InstrumentedStorage) BatchApplierWithPolicy(policy storage.BatchClosePolicy) (issueops.BatchApplier, error) {
+	inner, err := storage.BatchApplierWithPolicy(s.Unwrap(), policy)
 	if err != nil {
 		return nil, err
 	}
