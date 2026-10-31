@@ -449,7 +449,9 @@ func (rc *RepoContext) RelPath(absPath string) (string, error) {
 	return filepath.Rel(rc.RepoRoot, absPath)
 }
 
-// ResetCaches clears the cached RepoContext, forcing re-resolution on next call.
+// ResetCaches clears the cached RepoContext, forcing re-resolution on next call,
+// and forgets the user-global .beads a selection walk passed over
+// (SkippedUserGlobalBeadsDir).
 //
 // This is intended for tests that need to change directory or BEADS_DIR
 // between test cases. In production, the cache is safe because these
@@ -467,6 +469,9 @@ func ResetCaches() {
 	repoCtxOnce = sync.Once{}
 	repoCtx = nil
 	repoCtxErr = nil
+	passedOverUserGlobalBeads.Lock()
+	passedOverUserGlobalBeads.dir = ""
+	passedOverUserGlobalBeads.Unlock()
 }
 
 // unsafePrefixes lists system directories that BEADS_DIR should never point to.

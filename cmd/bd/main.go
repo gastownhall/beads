@@ -934,9 +934,27 @@ func resolveCommandBeadsDir(dbPath string) string {
 		return beadsDir
 	}
 
+	// A dbPath that is a .beads directory, or lies directly inside one, names
+	// that directory, even before it exists: the directory form of --db and
+	// BEADS_DB (GH#2548), the workspace bd import sets up where none was
+	// found, or a create --repo target with no .beads yet. Climbing past it
+	// would bind whatever .beads lies above: one discovery never reached, or
+	// the user-global ~/.beads it passes over (GH#4402). For ~/.beads itself
+	// the climb would start at the home directory and end there, binding the
+	// home directory.
+	if filepath.Base(dbPath) == ".beads" {
+		return filepath.Clean(dbPath)
+	}
+	if parent := filepath.Dir(dbPath); filepath.Base(parent) == ".beads" {
+		return parent
+	}
+
 	bound := ceiling.For(filepath.Dir(dbPath))
 	for dir := filepath.Dir(dbPath); dir != "" && dir != filepath.Dir(dir) && !bound.Excludes(dir); dir = filepath.Dir(dir) {
 		candidate := filepath.Join(dir, ".beads")
+		if climbEndsAtAccountHome(dir, candidate, dbPath) {
+			break
+		}
 		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
 			return candidate
 		}
@@ -945,6 +963,22 @@ func resolveCommandBeadsDir(dbPath string) string {
 	// No candidate matched — fall back to parent directory of the db path.
 	// This handles bootstrap/init where no metadata.json exists yet.
 	return filepath.Dir(dbPath)
+}
+
+// climbEndsAtAccountHome reports whether resolveCommandBeadsDir's climb from
+// dbPath ends at dir instead of binding candidate, dir's .beads: dir is the
+// account home, whose .beads is the user-global directory discovery passes
+// over (GH#4402), dbPath does not lie inside that directory (one naming it,
+// or a path directly in it, never reaches the climb), and the home
+// directory is not a repository root (a dotfiles repository's .beads is its
+// own). An explicit --db, BEADS_DB or bd import target under the home
+// directory that does not exist yet then binds the directory it names, not
+// ~/.beads, and nothing above the home directory either, as bd bootstrap's
+// parent-config walk ends there.
+func climbEndsAtAccountHome(dir, candidate, dbPath string) bool {
+	return beads.IsAccountHomeDir(dir) &&
+		!strings.HasPrefix(dbPath, candidate+string(filepath.Separator)) &&
+		!isGitWorkTreeRoot(dir)
 }
 
 // resolveConfiguredActor returns the actor implied by env/config when no
@@ -1675,6 +1709,7 @@ var rootCmd = &cobra.Command{
 		}
 
 		// Initialize database path
+		fallbackBeadsDir := "" // the workspace import/setup set up when none is found
 		if dbPath == "" {
 			// Use public API to find database (same logic as extensions)
 			if foundDB := beads.FindDatabasePath(); foundDB != "" {
@@ -1721,10 +1756,11 @@ var rootCmd = &cobra.Command{
 				}
 
 				if dbPath == "" && cmd.Name() != "import" && cmd.Name() != "setup" {
-					// No database found - provide context-aware error message
-					fmt.Fprintf(os.Stderr, "Error: no beads database found\n")
-					fmt.Fprintf(os.Stderr, "Hint: %s\n", diagHint())
-					fmt.Fprintf(os.Stderr, "      or set BEADS_DIR to point to your .beads directory\n")
+					// No database found - provide context-aware error message.
+					// GH#4402: when discovery passed over the user's own
+					// ~/.beads, the refusal names it, so a misdirected write
+					// is visible and the opt-in is one paste away.
+					printNoDatabaseRefusal()
 					return SilentExit()
 				}
 
@@ -1744,14 +1780,35 @@ var rootCmd = &cobra.Command{
 						targetBeadsDir = beads.ExplicitBeadsDir()
 					}
 					if targetBeadsDir == "" {
+						// GH#4402: the working directory's own .beads is
+						// the fallback, except where discovery passes over
+						// the user-global ~/.beads. In the home directory
+						// the fallback is that directory, so bd import
+						// would write into the global database. Outside a
+						// repository, where discovery passed over a
+						// user-level workspace (SkippedUserGlobalBeadsDir),
+						// bd import refuses with the note that names it, as
+						// every other command run there does.
+						if cwd, err := os.Getwd(); (err == nil && beads.SkipsUserGlobalBeadsAt(cwd)) ||
+							beads.SkippedUserGlobalBeadsDir() != "" {
+							printNoDatabaseRefusal()
+							return SilentExit()
+						}
 						targetBeadsDir = ".beads"
 					}
 					dbPath = utils.CanonicalizePath(filepath.Join(targetBeadsDir, beads.CanonicalDatabaseName))
+					// Bind the directory chosen here: resolveCommandBeadsDir
+					// would climb from a BEADS_DIR not named .beads to the
+					// nearest .beads above it.
+					fallbackBeadsDir = filepath.Dir(dbPath)
 				}
 			}
 		}
 
-		beadsDir := resolveCommandBeadsDir(dbPath)
+		beadsDir := fallbackBeadsDir
+		if beadsDir == "" {
+			beadsDir = resolveCommandBeadsDir(dbPath)
+		}
 		prepareSelectedCommandContext(beadsDir, true)
 		refreshBoundCommandConfig(cmd)
 		if guardErr := guardLegacyUpgradeWorkspace(beadsDir); guardErr != nil {
