@@ -7,6 +7,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -62,7 +63,13 @@ func createIssueWithDeps(ctx context.Context, st storage.DoltStorage, issue *typ
 		commitMsg = "bd: create " + issue.ID
 	}
 
+	// tx.CreateIssue writes what it mints back into issue, and the transaction
+	// is replayed after a lost concurrent-write conflict: each attempt
+	// restarts from the caller's request, or a replay would take the
+	// rolled-back attempt's ID as the caller's own.
+	restore := issueops.SnapshotCreateInputs([]*types.Issue{issue})
 	return transactHonoringAutoCommit(ctx, st, commitMsg, func(tx storage.Transaction) error {
+		restore()
 		if err := tx.CreateIssue(ctx, issue, actor); err != nil {
 			return err
 		}

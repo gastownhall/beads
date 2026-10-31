@@ -655,7 +655,10 @@ type Storage interface {
 	// starts, it is invoked at most once for this public call: callers retry
 	// explicitly when repeating their work is safe. An error wrapping
 	// ErrCommitIndeterminate means the durable outcome may be unknown and must
-	// not be blindly replayed.
+	// not be blindly replayed. An error wrapping ErrTransactionConflict means
+	// the transaction lost a concurrent-write conflict and was rolled back
+	// whole; RunReplayableTransaction replays such a transaction for a caller
+	// whose callback is safe to repeat.
 	RunInTransaction(ctx context.Context, commitMsg string, fn func(tx Transaction) error) error
 
 	// MergeSlot — serialized conflict resolution primitive.

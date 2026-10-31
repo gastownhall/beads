@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	publicops "github.com/steveyegge/beads/issueops"
 )
@@ -370,5 +372,55 @@ func TestBatchCmd_Registered(t *testing.T) {
 	}
 	if cmd.Flags().Lookup("message") == nil {
 		t.Error("batch missing --message flag")
+	}
+}
+
+// batchReplayStore runs each transaction's callback against batchReplayTx and
+// makes the first transaction lose a write conflict at commit, as it does when
+// a concurrent writer wins.
+type batchReplayStore struct {
+	storage.DoltStorage
+	transactions int
+}
+
+func (s *batchReplayStore) RunInTransaction(_ context.Context, _ string, fn func(tx storage.Transaction) error) error {
+	s.transactions++
+	if err := fn(batchReplayTx{}); err != nil {
+		return err
+	}
+	if s.transactions == 1 {
+		return storage.MarkTransactionConflict(errors.New("sql commit (regular): serialization failure"))
+	}
+	return nil
+}
+
+type batchReplayTx struct{ storage.Transaction }
+
+func (batchReplayTx) CloseIssue(context.Context, string, string, string, string) error { return nil }
+
+func (batchReplayTx) UpdateIssue(context.Context, string, map[string]interface{}, string) error {
+	return nil
+}
+
+// TestRunBatchTransactionReplayReportsEachOpOnce: a batch whose transaction
+// loses a write conflict is replayed whole, and the report must describe the
+// transaction that committed, not the rolled-back attempt's ops as well.
+func TestRunBatchTransactionReplayReportsEachOpOnce(t *testing.T) {
+	origExplicit := commandDidExplicitDoltCommit
+	t.Cleanup(func() { commandDidExplicitDoltCommit = origExplicit })
+	ops, err := parseBatchScript(strings.NewReader("close bd-1 done\nupdate bd-2 priority=1\n"))
+	if err != nil {
+		t.Fatalf("parseBatchScript: %v", err)
+	}
+	st := &batchReplayStore{}
+	results, err := runBatchTransaction(context.Background(), st, "bd: batch", ops)
+	if err != nil {
+		t.Fatalf("runBatchTransaction was not replayed to success: %v", err)
+	}
+	if st.transactions != 2 {
+		t.Fatalf("transactions = %d, want 2 (one lost conflict, one replay)", st.transactions)
+	}
+	if len(results) != len(ops) {
+		t.Fatalf("results = %+v, want one per op (%d): the rolled-back attempt's ops were reported too", results, len(ops))
 	}
 }

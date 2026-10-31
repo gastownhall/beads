@@ -14,8 +14,13 @@ import (
 // DOLT_COMMIT occurred, preventing the redundant maybeAutoCommit in
 // PersistentPostRun. Use this instead of calling store.RunInTransaction
 // directly from command handlers.
+//
+// A transaction that loses a write conflict with a concurrent writer is
+// replayed whole (storage.RunReplayableTransaction), so fn must be safe to run
+// again from the top: it touches the database only through tx and re-derives
+// every value it hands back on each run.
 func transact(ctx context.Context, s storage.DoltStorage, commitMsg string, fn func(tx storage.Transaction) error) error {
-	err := s.RunInTransaction(ctx, commitMsg, fn)
+	err := storage.RunReplayableTransaction(ctx, s, commitMsg, fn)
 	if err == nil {
 		commandDidExplicitDoltCommit = true
 	}
@@ -26,7 +31,9 @@ func transact(ctx context.Context, s storage.DoltStorage, commitMsg string, fn f
 // part of command auto-commit policy. In batch/off modes the SQL transaction
 // still commits, but no Dolt version commit is created — the blank message
 // makes StageAndCommit a no-op, in embedded and SQL-server mode alike
-// (bd-4wamg: batch used to be silently inert in server mode).
+// (bd-4wamg: batch used to be silently inert in server mode). Like transact,
+// it replays a transaction that lost a concurrent-write conflict, so fn must
+// be safe to run again from the top.
 func transactHonoringAutoCommit(ctx context.Context, s storage.DoltStorage, commitMsg string, fn func(tx storage.Transaction) error) error {
 	msg := commitMsg
 	committedExplicitly := strings.TrimSpace(msg) != ""
@@ -39,7 +46,7 @@ func transactHonoringAutoCommit(ctx context.Context, s storage.DoltStorage, comm
 		committedExplicitly = false
 	}
 
-	err = s.RunInTransaction(ctx, msg, fn)
+	err = storage.RunReplayableTransaction(ctx, s, msg, fn)
 	if err == nil && committedExplicitly {
 		commandDidExplicitDoltCommit = true
 	}

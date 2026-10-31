@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -17,11 +18,12 @@ type createAtomicFakeTx struct {
 	created []*types.Issue
 	deps    []*types.Dependency
 	failDep string // DependsOnID whose AddDependency fails
+	mintID  string // the ID an auto-minted create receives in this transaction
 }
 
 func (t *createAtomicFakeTx) CreateIssue(_ context.Context, issue *types.Issue, _ string) error {
 	if issue.ID == "" {
-		issue.ID = "fake-1"
+		issue.ID = t.mintID
 	}
 	cp := *issue
 	t.created = append(t.created, &cp)
@@ -46,6 +48,10 @@ type createAtomicFakeStore struct {
 	committedIssues  []*types.Issue
 	committedDeps    []*types.Dependency
 	failDep          string
+	// lostConflicts makes the first transactions lose a write conflict at
+	// commit: the callback runs, nothing it wrote lands, and the failure is
+	// marked as one a replay may retry.
+	lostConflicts int
 }
 
 func (s *createAtomicFakeStore) IsInfraTypeCtx(context.Context, types.IssueType) bool { return false }
@@ -90,10 +96,15 @@ func (s *createAtomicFakeStore) CreateIssue(_ context.Context, issue *types.Issu
 
 func (s *createAtomicFakeStore) RunInTransaction(_ context.Context, _ string, fn func(tx storage.Transaction) error) error {
 	s.txCount++
-	tx := &createAtomicFakeTx{failDep: s.failDep}
+	// Each transaction mints the next number, as counter mode does when a
+	// concurrent writer has taken the previous one.
+	tx := &createAtomicFakeTx{failDep: s.failDep, mintID: fmt.Sprintf("fake-%d", s.txCount)}
 	if err := fn(tx); err != nil {
 		// Rollback: discard everything recorded inside the transaction.
 		return err
+	}
+	if s.txCount <= s.lostConflicts {
+		return storage.MarkTransactionConflict(errors.New("sql commit (regular): serialization failure"))
 	}
 	s.committedIssues = append(s.committedIssues, tx.created...)
 	s.committedDeps = append(s.committedDeps, tx.deps...)
@@ -183,6 +194,36 @@ func TestCreateIssueWithDepsRollsBackOnDepFailure(t *testing.T) {
 	}
 	if len(st.committedDeps) != 0 {
 		t.Errorf("committed deps = %+v, want none", st.committedDeps)
+	}
+}
+
+// TestCreateIssueWithDepsReplaysFromTheCallersRequest: a create that loses a
+// write conflict is replayed, and the replay must mint its own ID. Re-using
+// the rolled-back attempt's ID as if the caller had asked for it would take
+// the explicit-ID path and could overwrite the writer that won the conflict.
+func TestCreateIssueWithDepsReplaysFromTheCallersRequest(t *testing.T) {
+	saveCreateAtomicGlobals(t)
+	st := &createAtomicFakeStore{lostConflicts: 1}
+	issue := &types.Issue{Title: "replayed create", Status: types.StatusOpen, IssueType: types.TypeTask}
+
+	if err := createIssueWithDeps(context.Background(), st, issue, "tester", createDepEdges{parentID: "fake-parent"}); err != nil {
+		t.Fatalf("createIssueWithDeps was not replayed to success: %v", err)
+	}
+	if st.txCount != 2 {
+		t.Fatalf("transactions = %d, want 2 (one lost conflict, one replay)", st.txCount)
+	}
+	if len(st.committedIssues) != 1 || st.committedIssues[0].ID != "fake-2" {
+		var ids []string
+		for _, committed := range st.committedIssues {
+			ids = append(ids, committed.ID)
+		}
+		t.Fatalf("committed issues = %v, want the one the replay minted (fake-2), not the rolled-back attempt's fake-1", ids)
+	}
+	if len(st.committedDeps) != 1 || st.committedDeps[0].IssueID != "fake-2" {
+		t.Fatalf("committed deps = %+v, want the parent edge from fake-2", st.committedDeps)
+	}
+	if issue.ID != "fake-2" {
+		t.Fatalf("caller's issue reports %q, want the committed fake-2", issue.ID)
 	}
 }
 

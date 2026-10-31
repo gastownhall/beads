@@ -66,6 +66,7 @@ go_library(
         "remote_ref.go",
         "storage.go",
         "sync.go",
+        "transaction_replay.go",
         "version_control.go",
         "version_lister.go",
         "versioned.go",
@@ -74,12 +75,17 @@ go_library(
     importpath = "github.com/steveyegge/beads/internal/storage",
     visibility = ["//:__subpackages__"],
     deps = [
+        "//internal/debug",
         "//internal/hooks",
         "//internal/storage/kvkeys",
         "//internal/types",
         "//issueops",
         "//journalops",
         "//memoryops",
+        "@com_github_cenkalti_backoff_v4//:backoff",
+        "@io_opentelemetry_go_otel//:otel",
+        "@io_opentelemetry_go_otel//attribute",
+        "@io_opentelemetry_go_otel_metric//:metric",
     ],
 )
 
@@ -110,6 +116,7 @@ go_test(
         "issues_with_config_test.go",
         "journal_facade_test.go",
         "leg_contract_wiring_test.go",
+        "merge_slot_test.go",
         "metadata_cas_test.go",
         "metadata_edit_value_test.go",
         "metadata_jsonpath_test.go",
@@ -117,6 +124,7 @@ go_test(
         "metadata_test.go",
         "remote_ref_test.go",
         "role_accessor_decorator_test.go",
+        "transaction_replay_test.go",
     ],
     data = [
         ":tree_go_srcs",
@@ -131,6 +139,10 @@ go_test(
         "//issueops",
         "//journalops",
         "//memoryops",
+        "@com_github_cenkalti_backoff_v4//:backoff",
+        "@io_opentelemetry_go_otel//attribute",
+        "@io_opentelemetry_go_otel_sdk_metric//:metric",
+        "@io_opentelemetry_go_otel_sdk_metric//metricdata",
     ],
 )
 

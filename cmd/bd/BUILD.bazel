@@ -1314,6 +1314,7 @@ go_test(
         "topology_capability_matrix_test.go",
         "tracker_frontdoor_proxy_test.go",
         "tracker_proxy_uow_conformance_integration_test.go",
+        "transaction_replay_cgo_test.go",
         "types_builtin_test.go",
         "types_create_agreement_embedded_test.go",
         "types_create_agreement_test.go",
