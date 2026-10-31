@@ -4,7 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
+
+	"github.com/steveyegge/beads/internal/storage"
 )
 
 // readMetadataFlag resolves a --metadata flag value (inline JSON, or
@@ -22,6 +25,11 @@ import (
 // `bd update --metadata null` used to exit 0 having merged nothing. Refusing
 // null up front is therefore a deliberate (small) behavior change on update,
 // not a restatement of the merge's rule.
+//
+// Each top-level key must pass storage.ValidateMetadataKey, the grammar
+// --set-metadata, --unset-metadata and the metadata filters already enforce
+// (GH#7921): a key outside it would be stored once and could then not be
+// filtered on, set with --set-metadata or removed with --unset-metadata.
 //
 // Values inside the object are opaque, so a string value that happens to look
 // like JSON is kept verbatim.
@@ -46,6 +54,16 @@ func readMetadataFlag(value string) (json.RawMessage, error) {
 	// internal/httpapi/batch_apply.go.
 	if err := json.Unmarshal([]byte(metadataJSON), &object); err != nil || object == nil {
 		return nil, fmt.Errorf(`invalid --metadata: must be a JSON object such as {"key":"value"}, got %s`, jsonKind(metadataJSON))
+	}
+	keys := make([]string, 0, len(object))
+	for key := range object {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if err := storage.ValidateMetadataKey(key); err != nil {
+			return nil, fmt.Errorf("invalid --metadata: %w", err)
+		}
 	}
 	return json.RawMessage(metadataJSON), nil
 }

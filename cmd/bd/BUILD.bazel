@@ -1068,6 +1068,7 @@ go_test(
         "messaging_test.go",
         "metadata_edits_test.go",
         "metadata_filter_test.go",
+        "metadata_flag_keys_test.go",
         "metadata_flag_test.go",
         "metadata_ready_test.go",
         "metadataless_database_embedded_test.go",
