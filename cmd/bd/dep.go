@@ -948,19 +948,23 @@ func printDepListEdges(anchors []issueops.AnchorEdges) error {
 // and writes the row, but the single-id `bd dep list <id>` a caller runs
 // right after has no way to tell that from no dependency existing at all).
 //
-// It never writes to stdout, so the documented `bd dep list <id>` and
-// `--json` shapes for the common (fully-local) case are unchanged; a script
-// parsing stdout sees nothing new. A best-effort read: an error here is
-// swallowed rather than surfaced, since the command's actual answer was
-// already produced successfully by the Relations role above.
-func warnDroppedDepEdges(ctx context.Context, reader issueops.EdgeReader, anchorID, typeFilter string, shown []*issueops.RelatedIssue) {
+// It never writes to stdout itself. It returns the number of edges it warned
+// about so the caller can pass it to printNoDependencies — the ONE stdout
+// change (#6557): when every stored edge was dropped, the human line would
+// otherwise read "<id> has no dependencies", which is false. Stdout is
+// unchanged whenever it was already true (no hidden edges) or already
+// non-empty (some local rows shown), and `--json` is never touched. A
+// best-effort read: an error here is swallowed (returns 0) rather than
+// surfaced, since the command's actual answer was already produced
+// successfully by the Relations role above.
+func warnDroppedDepEdges(ctx context.Context, reader issueops.EdgeReader, anchorID, typeFilter string, shown []*issueops.RelatedIssue) int {
 	var depTypes []types.DependencyType
 	if typeFilter != "" {
 		depTypes = []types.DependencyType{types.DependencyType(typeFilter)}
 	}
 	result, err := reader.ReadEdges(ctx, issueops.EdgeReadRequest{IDs: []string{anchorID}, Types: depTypes})
 	if err != nil || len(result.Anchors) != 1 {
-		return
+		return 0
 	}
 	known := make(map[string]struct{}, len(shown))
 	for _, iss := range shown {
@@ -973,7 +977,7 @@ func warnDroppedDepEdges(ctx context.Context, reader issueops.EdgeReader, anchor
 		}
 	}
 	if len(dropped) == 0 {
-		return
+		return 0
 	}
 	// anchorID is the store's (a partial-id argument resolves to it), and the
 	// edges are the store's rows: each is named as printedIssueID spells it,
@@ -986,6 +990,19 @@ func warnDroppedDepEdges(ctx context.Context, reader issueops.EdgeReader, anchor
 	}
 	arg, note := remedy.CommandArg(runtime.GOOS, anchorID, "<issue-id>")
 	fmt.Fprintf(os.Stderr, "For raw edge records, run: bd dep list %s %s%s\n", arg, arg, note)
+	return len(dropped)
+}
+
+// printNoDependencies prints the single-id "down" empty-result line. hidden is
+// warnDroppedDepEdges' count: when it is nonzero the issue DOES have stored
+// dependencies, so "has no dependencies" would be an affirmative falsehood
+// (#6557) and the line says "no local dependencies" instead.
+func printNoDependencies(id string, hidden int) {
+	if hidden > 0 {
+		fmt.Printf("\n%s has no local dependencies (%d cross-repo/external edge(s) listed on stderr)\n", id, hidden)
+		return
+	}
+	fmt.Printf("\n%s has no dependencies\n", id)
 }
 
 var depListCmd = &cobra.Command{
@@ -1125,15 +1142,19 @@ Examples:
 		// this database (the doc comment above the batch branch says so).
 		// EdgeReader doesn't have that gap, and batchMode&&"down" already
 		// used it above, so this is reached for "down" only when there is
-		// exactly one resolved anchor — warn on stderr (never stdout/--json,
-		// so the documented single-id shape and any script parsing it are
-		// untouched) naming any edge Relations left out, so a `bd link`
-		// across databases doesn't look indistinguishable from no link at
-		// all (bd-mtla). "up" has the same gap but no inbound EdgeReader
-		// role exists to detect it from here — tracked separately.
+		// exactly one resolved anchor — warn on stderr naming any edge
+		// Relations left out, so a `bd link` across databases doesn't look
+		// indistinguishable from no link at all (bd-mtla). Stdout and --json
+		// keep their documented shape, with ONE exception (#6557): when no
+		// local row is shown but edges were dropped, the human line says
+		// "no local dependencies" rather than the false "has no
+		// dependencies" (printNoDependencies). "up" has the same gap but no
+		// inbound EdgeReader role exists to detect it from here — tracked
+		// separately.
+		hiddenDeps := 0
 		if direction == "down" && len(resolved) == 1 {
 			if reader, err := resolved[0].store.EdgeReader(); err == nil {
-				warnDroppedDepEdges(ctx, reader, resolved[0].fullID, typeFilter, allIssues)
+				hiddenDeps = warnDroppedDepEdges(ctx, reader, resolved[0].fullID, typeFilter, allIssues)
 			}
 		}
 
@@ -1149,7 +1170,7 @@ Examples:
 				if direction == "up" {
 					fmt.Printf("\nNo issues depend on %s\n", resolved[0].fullID)
 				} else {
-					fmt.Printf("\n%s has no dependencies\n", resolved[0].fullID)
+					printNoDependencies(resolved[0].fullID, hiddenDeps)
 				}
 			} else {
 				fmt.Println("\nNo dependencies found")

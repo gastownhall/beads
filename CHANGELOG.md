@@ -3401,6 +3401,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   database that exists; only the explicit, per-invocation `--recreate-missing`
   authorizes creating one where the configured database has gone missing.
 
+- **`bd dep list <id>` no longer says "has no dependencies" when the issue's
+  only dependencies are external or cross-repo.** Those edges are warned
+  about on stderr but not listed, so stdout contradicted the warning above
+  it. It now says the issue has no local dependencies and how many edges were
+  listed on stderr; output for an issue with no edges at all is unchanged
+  (#6557).
+
 - **`bd init --reinit-local` and `--force` no longer wave through a workspace
   that predates `project_id`.** Their missing-database safety net returned
   early whenever `.beads/metadata.json` carried no `project_id`, before it ever
