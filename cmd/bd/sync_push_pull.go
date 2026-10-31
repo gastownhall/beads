@@ -623,15 +623,16 @@ func runGitHubPush(cmd *cobra.Command, args []string) error {
 	}
 
 	// Relationship push pass, matching `bd github sync`: converge beads
-	// epic/child links and "blocks" dependencies among the requested issues
-	// into GitHub sub-issues and issue dependencies.
+	// parent-child links (any parent type) and "blocks" dependencies among
+	// the requested issues into GitHub sub-issues and issue dependencies.
 	warnLink := func(msg string) { fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }
 	linksPushed := pushGitHubDependencyLinks(ctx, gt, store, opts, dryRun, os.Stdout, warnLink)
-	// Under --dry-run PushLinks counts planned links in Created, so this line
-	// would affirm writes that never happened; the `bd github sync` twin gates
-	// it the same way.
-	if linksPushed > 0 && !dryRun && !jsonOutput {
-		fmt.Printf("✓ Synced %d relationship links\n", linksPushed)
+	if linksPushed > 0 && !jsonOutput {
+		if dryRun {
+			fmt.Printf("Would sync %d relationship links\n", linksPushed)
+		} else {
+			fmt.Printf("✓ Synced %d relationship links\n", linksPushed)
+		}
 	}
 
 	outputSyncResult(result, dryRun)

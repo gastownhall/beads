@@ -29,17 +29,6 @@ type RefScope struct {
 	repo    string
 }
 
-// SubIssueLinkFromParentChild is retained for existing callers. Relationship
-// sync itself uses the scoped RefScope method below.
-func SubIssueLinkFromParentChild(issue *types.Issue, parent *types.IssueWithDependencyMetadata) (DependencyLink, bool) {
-	return NewRefScope("https://github.com", "o", "r").SubIssueLinkFromParentChild(issue, parent)
-}
-
-// BlockedByLinkFromBeadsDependency is retained for existing callers.
-func BlockedByLinkFromBeadsDependency(issue *types.Issue, dep *types.IssueWithDependencyMetadata) (DependencyLink, bool) {
-	return NewRefScope("https://github.com", "o", "r").BlockedByLinkFromBeadsDependency(issue, dep)
-}
-
 // NewRefScope builds a ref scope for a repository reachable at the given REST
 // API base URL.
 func NewRefScope(baseURL, owner, repo string) RefScope {
@@ -71,6 +60,11 @@ func hostFromURL(raw string) string {
 	return strings.ToLower(u.Host)
 }
 
+// String names the repository refs must point at, for warnings.
+func (s RefScope) String() string {
+	return s.webHost + "/" + s.owner + "/" + s.repo
+}
+
 // IssueNumberFromRef extracts a repository-scoped GitHub issue number from a
 // beads external ref, but only when the ref points at this scope's repository.
 // A full issue URL must match the configured host and owner/repo; the
@@ -89,7 +83,7 @@ func (s RefScope) IssueNumberFromRef(ref string) (int, bool) {
 	}
 
 	u, err := url.Parse(ref)
-	if err != nil || u.Host == "" {
+	if err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") {
 		return 0, false
 	}
 	if host := strings.ToLower(u.Host); host != s.apiHost && host != s.webHost {
@@ -107,23 +101,29 @@ func (s RefScope) IssueNumberFromRef(ref string) (int, bool) {
 }
 
 // splitIssueURLPath pulls owner, repo, and issue number out of a GitHub issue
-// URL path. It accepts both the HTML form (/{owner}/{repo}/issues/42) and the
-// REST form (/repos/{owner}/{repo}/issues/42, optionally behind a GitHub
-// Enterprise /api/v3 prefix), and requires the number to be the last segment.
+// URL path. It accepts exactly the HTML form (/{owner}/{repo}/issues/42) and
+// the REST form (/repos/{owner}/{repo}/issues/42, optionally behind a GitHub
+// Enterprise /api/v3 prefix). Anything else, such as GitLab's
+// /{group}/{project}/-/issues/42 or a deeper path, is rejected.
 func splitIssueURLPath(path string) (owner, repo string, number int, ok bool) {
 	segments := strings.Split(strings.Trim(path, "/"), "/")
-	if len(segments) < 4 {
+	switch {
+	case len(segments) == 4:
+	case len(segments) == 5 && segments[0] == "repos":
+		segments = segments[1:]
+	case len(segments) == 7 && segments[0] == "api" && segments[1] == "v3" && segments[2] == "repos":
+		segments = segments[3:]
+	default:
 		return "", "", 0, false
 	}
-	last := len(segments) - 1
-	if segments[last-1] != "issues" {
+	if segments[2] != "issues" {
 		return "", "", 0, false
 	}
-	n, err := strconv.Atoi(segments[last])
+	n, err := strconv.Atoi(segments[3])
 	if err != nil || n <= 0 {
 		return "", "", 0, false
 	}
-	owner, repo = segments[last-3], segments[last-2]
+	owner, repo = segments[0], segments[1]
 	if owner == "" || repo == "" {
 		return "", "", 0, false
 	}
@@ -148,46 +148,25 @@ type PushLinkOptions struct {
 	OnPlan func(DependencyLink)
 }
 
-// PushLinkResult summarizes a PushLinks pass. UnsupportedSkipped counts
-// relationships skipped because GitHub answered 404 for the relationship
-// endpoint itself — the sub-issue and issue-dependency APIs are absent on
-// older GitHub Enterprise Server versions. SourceMissing counts relationships
-// skipped because the source issue 404s: deleted, renumbered, or not visible
-// to this token. The two are counted apart because a host that cannot do
-// relationships at all and a stale local ref call for different operator
-// responses; the caller emits one curated line per class instead of a raw
-// error per link. Errors holds genuine failures, at most one per source issue.
+// PushLinkResult summarizes a PushLinks pass. A 404 from a relationship
+// endpoint means one of two things, which PushLinks tells apart by fetching
+// the source issue itself:
+//
+//   - The source issue is gone (deleted or transferred). Only that issue's
+//     links are skipped; its number is listed once in MissingSources.
+//   - The issue exists, so the endpoint itself is absent (older GitHub
+//     Enterprise Server, or the feature is off). That link type is disabled
+//     for the rest of the pass: Unsupported lists the disabled types in the
+//     order they were hit, and UnsupportedSkipped counts the links dropped
+//     because of it, so the caller can warn once per type.
+//
+// Errors holds genuine failures, at most one per source issue.
 type PushLinkResult struct {
 	Created            int
 	UnsupportedSkipped int
-	SourceMissing      int
+	Unsupported        []string
+	MissingSources     []int
 	Errors             []error
-}
-
-// LinkResolver handles GitHub relationship convergence (sub-issues and issue
-// dependencies) for one repository.
-type LinkResolver struct {
-	Client *Client
-	scope  RefScope
-}
-
-// NewLinkResolver creates a GitHub dependency link resolver whose ref scope is
-// the client's repository.
-func NewLinkResolver(client *Client) *LinkResolver {
-	r := &LinkResolver{Client: client}
-	if client != nil {
-		r.scope = NewRefScope(client.BaseURL, client.Owner, client.Repo)
-	}
-	return r
-}
-
-// Scope returns the repository that external refs must point at to take part
-// in relationship sync.
-func (r *LinkResolver) Scope() RefScope {
-	if r == nil {
-		return RefScope{}
-	}
-	return r.scope
 }
 
 // SubIssueLinkFromParentChild converts one beads parent-child dependency into
@@ -292,9 +271,9 @@ func DeduplicateLinks(links []DependencyLink) []DependencyLink {
 // once and consulted before any create call, so re-running a sync does not
 // re-POST relationships that already exist. Stale remote relationships are
 // left untouched.
-func (r *LinkResolver) PushLinks(ctx context.Context, desired []DependencyLink, opts PushLinkOptions) PushLinkResult {
-	if r == nil || r.Client == nil {
-		return PushLinkResult{Errors: []error{fmt.Errorf("GitHub link resolver has no client")}}
+func (t *Tracker) PushLinks(ctx context.Context, desired []DependencyLink, opts PushLinkOptions) PushLinkResult {
+	if t == nil || t.client == nil {
+		return PushLinkResult{Errors: []error{fmt.Errorf("GitHub tracker not initialized")}}
 	}
 
 	desired = DeduplicateLinks(desired)
@@ -304,45 +283,70 @@ func (r *LinkResolver) PushLinks(ctx context.Context, desired []DependencyLink, 
 
 	sources := make(map[githubLinkSourceKey]*githubLinkSourceState)
 	idByNumber := make(map[int]int)
-	// One source issue can carry both link types, so the 404 classification
-	// probe below is cached by issue number rather than by source key.
-	missingByNumber := make(map[int]bool)
+	unsupported := make(map[string]bool)
 	var result PushLinkResult
+	markUnsupported := func(linkType string) {
+		if !unsupported[linkType] {
+			unsupported[linkType] = true
+			result.Unsupported = append(result.Unsupported, linkType)
+		}
+		result.UnsupportedSkipped++
+	}
+	// sourceGone caches whether a source issue answered 404 on a direct
+	// fetch, so a missing issue is probed once however many links hang off it.
+	sourceGone := make(map[int]bool)
+	// handleNotFound classifies a relationship-endpoint 404 for link and
+	// reports whether the link's source issue must be skipped for the rest of
+	// the pass. A missing source only skips that issue; an existing one means
+	// the endpoint is unsupported, which disables the whole link type.
+	handleNotFound := func(link DependencyLink) (skipSource bool) {
+		gone, probed := sourceGone[link.FromNumber]
+		if !probed {
+			_, err := t.client.FetchIssueByNumber(ctx, link.FromNumber)
+			switch {
+			case IsNotFound(err):
+				gone = true
+				result.MissingSources = append(result.MissingSources, link.FromNumber)
+			case err != nil:
+				result.Errors = append(result.Errors, fmt.Errorf("check GitHub issue #%d after %s 404: %w", link.FromNumber, link.LinkType, err))
+				return true
+			}
+			sourceGone[link.FromNumber] = gone
+		}
+		if gone {
+			return true
+		}
+		markUnsupported(link.LinkType)
+		return false
+	}
 
 	for _, link := range desired {
+		if unsupported[link.LinkType] {
+			result.UnsupportedSkipped++
+			continue
+		}
 		srcKey := githubLinkSourceKey{Number: link.FromNumber, LinkType: link.LinkType}
 		state, ok := sources[srcKey]
 		if !ok {
 			// One list call per (source issue, link type), and one error per
 			// failed source rather than one per link hanging off it.
-			targets, err := r.fetchCurrentTargets(ctx, link.FromNumber, link.LinkType)
+			targets, err := t.fetchCurrentTargets(ctx, link.FromNumber, link.LinkType)
 			state = &githubLinkSourceState{targets: targets}
-			if err != nil {
+			switch {
+			case IsNotFound(err):
 				state.failed = true
-				if IsNotFound(err) {
-					// A 404 here has two causes that need different reporting:
-					// the relationship API is absent on this host, or the
-					// source issue itself is gone — deleted, renumbered, or
-					// hidden from this token. Reading the issue separates
-					// them. Only a clean 404 from that read proves the issue
-					// is the missing half; anything else (including a probe
-					// that succeeds or fails for another reason) leaves the
-					// skip classified as an unavailable endpoint.
-					state.missing = r.sourceIssueMissing(ctx, link.FromNumber, missingByNumber)
-					state.notFound = !state.missing
-				} else {
-					result.Errors = append(result.Errors, fmt.Errorf("fetch GitHub %s for #%d: %w", link.LinkType, link.FromNumber, err))
+				if !handleNotFound(link) {
+					// Unsupported type: later links of this type stop at the
+					// check at the top of the loop.
+					continue
 				}
+			case err != nil:
+				state.failed = true
+				result.Errors = append(result.Errors, fmt.Errorf("fetch GitHub %s for #%d: %w", link.LinkType, link.FromNumber, err))
 			}
 			sources[srcKey] = state
 		}
 		if state.failed {
-			switch {
-			case state.missing:
-				result.SourceMissing++
-			case state.notFound:
-				result.UnsupportedSkipped++
-			}
 			continue
 		}
 		current := state.targets
@@ -365,7 +369,7 @@ func (r *LinkResolver) PushLinks(ctx context.Context, desired []DependencyLink, 
 
 		targetID, ok := idByNumber[link.ToNumber]
 		if !ok {
-			issue, err := r.Client.FetchIssueByNumber(ctx, link.ToNumber)
+			issue, err := t.client.FetchIssueByNumber(ctx, link.ToNumber)
 			if err != nil {
 				result.Errors = append(result.Errors, fmt.Errorf("resolve GitHub issue #%d: %w", link.ToNumber, err))
 				continue
@@ -377,19 +381,19 @@ func (r *LinkResolver) PushLinks(ctx context.Context, desired []DependencyLink, 
 		var err error
 		switch link.LinkType {
 		case githubLinkSubIssue:
-			err = r.Client.AddSubIssue(ctx, link.FromNumber, targetID)
+			err = t.client.AddSubIssue(ctx, link.FromNumber, targetID)
 		case githubLinkBlockedBy:
-			err = r.Client.AddBlockedBy(ctx, link.FromNumber, targetID)
+			err = t.client.AddBlockedBy(ctx, link.FromNumber, targetID)
 		default:
 			continue
 		}
 		if err != nil {
 			if IsNotFound(err) {
-				// Unambiguously the endpoint here, unlike the list call above:
-				// this source issue's relationships listed successfully and
-				// the target was just fetched by number, so neither issue can
-				// be the missing half. Counted, not error-spammed.
-				result.UnsupportedSkipped++
+				// Same classification as a 404 on the list call. The target's
+				// ID was just resolved, so the target itself exists.
+				if handleNotFound(link) {
+					state.failed = true
+				}
 				continue
 			}
 			result.Errors = append(result.Errors, fmt.Errorf("create GitHub %s link #%d -> #%d: %w", link.LinkType, link.FromNumber, link.ToNumber, err))
@@ -406,34 +410,18 @@ func (r *LinkResolver) PushLinks(ctx context.Context, desired []DependencyLink, 
 // single link type, or the fact that listing them failed. On a 404, notFound
 // and missing record which of the two causes the probe settled on.
 type githubLinkSourceState struct {
-	targets  map[int]struct{}
-	failed   bool
-	notFound bool
-	missing  bool
+	targets map[int]struct{}
+	failed  bool
 }
 
-// sourceIssueMissing reports whether issue number itself 404s, which is what
-// separates a stale local ref from a host whose relationship endpoints are
-// absent. Results are memoized in cache so a source issue carrying both link
-// types is probed once.
-func (r *LinkResolver) sourceIssueMissing(ctx context.Context, number int, cache map[int]bool) bool {
-	if missing, ok := cache[number]; ok {
-		return missing
-	}
-	_, err := r.Client.FetchIssueByNumber(ctx, number)
-	missing := err != nil && IsNotFound(err)
-	cache[number] = missing
-	return missing
-}
-
-func (r *LinkResolver) fetchCurrentTargets(ctx context.Context, number int, linkType string) (map[int]struct{}, error) {
+func (t *Tracker) fetchCurrentTargets(ctx context.Context, number int, linkType string) (map[int]struct{}, error) {
 	var issues []Issue
 	var err error
 	switch linkType {
 	case githubLinkSubIssue:
-		issues, err = r.Client.ListSubIssues(ctx, number)
+		issues, err = t.client.ListSubIssues(ctx, number)
 	case githubLinkBlockedBy:
-		issues, err = r.Client.ListBlockedBy(ctx, number)
+		issues, err = t.client.ListBlockedBy(ctx, number)
 	default:
 		return nil, fmt.Errorf("unknown GitHub link type %q", linkType)
 	}
