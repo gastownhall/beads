@@ -44,6 +44,8 @@ A curated list of community-built UIs, extensions, and integrations for Beads. R
 
 - **[beadside](https://github.com/thatmike1/beadside)** - Local web reader and inbox between you and your agents. A dense index groups beads into lanes by your own labels, with a waiting-on-you section first, and the selected bead stays open beside it with its description, notes and comment thread rendered as Markdown. Notes you write land as comments under your own author id and can flag the bead so the next agent session reads them first. Live updates follow `bd events tail --follow` when the events journal is on, with polling as the fallback. Full-text search over ids, titles, descriptions, notes and comments, also available to agents as `beadside search --json`. Uses the `bd` CLI for every read and write. Built by [@thatmike1](https://github.com/thatmike1). (TypeScript/React)
 
+- **[beads-desk](https://github.com/seungyeop-lee/beads-desk)** - Local web UI for reviewing what your agents leave in the tracker. View order lays out an epic's issues in stages by their `blocks` dependencies; Mermaid diagrams, local screenshots, and `.webm`/`.mp4` recordings linked from issues render in place; Decisions follows each `decision` through what it supersedes; Needs human collects the `human`-labeled questions and human gates agents leave so you can answer them in place. Reads and writes only through the `bd` CLI. macOS and Linux. Built by [@seungyeop-lee](https://github.com/seungyeop-lee). (Next.js/TypeScript)
+
 ## Editor Extensions
 
 - **[vscode-beads](https://marketplace.visualstudio.com/items?itemName=planet57.vscode-beads)** - VS Code extension with issues panel and server management. Built by [@jdillon](https://github.com/jdillon). (TypeScript)
