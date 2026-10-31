@@ -230,3 +230,14 @@ func BuildReadyWorkWhere(filter types.WorkFilter, tables FilterTables, in ReadyW
 
 	return "WHERE " + strings.Join(whereClauses, " AND "), args, nil
 }
+
+// DeferredParentPredicate renders the condition that makes a row a deferred
+// parent, whose children ready work hides: its status is 'deferred' (with or
+// without a defer_until) or its defer_until is still in the future. qualifier
+// prefixes each column (for example "parent."); pass "" for an unqualified
+// single-table query.
+func DeferredParentPredicate(qualifier string) string {
+	return qualifier + "status = 'deferred' OR (" +
+		qualifier + "defer_until IS NOT NULL AND " +
+		qualifier + "defer_until > UTC_TIMESTAMP())"
+}

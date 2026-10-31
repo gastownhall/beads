@@ -31,12 +31,14 @@ type readyWorkProbe struct {
 	// true whenever it was not probed exactly.
 	idCollision bool
 	// inputs are the ID sets the ready WHERE clause is rendered from
-	// (children of future-deferred parents, descendants of filter.ParentID),
+	// (children of deferred parents, descendants of filter.ParentID),
 	// shared by both families.
 	inputs sqlbuild.ReadyWorkWhereInputs
 }
 
-const futureDeferredPredicate = "defer_until IS NOT NULL AND defer_until > UTC_TIMESTAMP()"
+// deferredParentPredicate matches a deferred parent: status 'deferred' or a
+// future defer_until.
+var deferredParentPredicate = sqlbuild.DeferredParentPredicate("")
 
 // probeReadyWorkInTx resolves a readyWorkProbe for filter.
 //
@@ -79,8 +81,8 @@ func probeReadyWorkInTx(ctx context.Context, tx DBTX, filter types.WorkFilter, w
 
 	iIssuesDeferred, iWispsDeferred := -1, -1
 	if excludeDeferred {
-		iIssuesDeferred = appendFact("EXISTS (SELECT 1 FROM issues WHERE " + futureDeferredPredicate + ")")
-		iWispsDeferred = appendFact("EXISTS (SELECT 1 FROM wisps WHERE " + futureDeferredPredicate + ")")
+		iIssuesDeferred = appendFact("EXISTS (SELECT 1 FROM issues WHERE " + deferredParentPredicate + ")")
+		iWispsDeferred = appendFact("EXISTS (SELECT 1 FROM wisps WHERE " + deferredParentPredicate + ")")
 	}
 	iCollision := -1
 	if wantCollision {

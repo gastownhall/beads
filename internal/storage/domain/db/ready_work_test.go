@@ -27,6 +27,7 @@ func (s *testSuite) TestIssueGetReadyWork() {
 	s.Run("Unassigned", s.readyUnassigned)
 	s.Run("ExcludesDeferred", s.readyExcludesDeferred)
 	s.Run("IncludeDeferred", s.readyIncludeDeferred)
+	s.Run("ExcludesChildrenOfUndatedDeferredParent", s.readyExcludesChildrenOfUndatedDeferredParent)
 	s.Run("LabelFilter", s.readyLabelFilter)
 	s.Run("LimitRespected", s.readyLimitRespected)
 	s.Run("SortByPriority", s.readySortByPriority)
@@ -291,6 +292,30 @@ func (s *testSuite) readyIncludeDeferred() {
 	out, err := r.GetReadyWork(s.Ctx(), types.WorkFilter{IncludeDeferred: true})
 	s.Require().NoError(err)
 	s.Contains(issueIDsFrom(out), "bd-rdy-idf-1")
+}
+
+// readyExcludesChildrenOfUndatedDeferredParent pins GH#7300: a parent with
+// status 'deferred' and no defer_until hides its children. No row in the
+// database has a future defer_until, so only the status can trip the
+// deferred-parent probe.
+func (s *testSuite) readyExcludesChildrenOfUndatedDeferredParent() {
+	r := s.issueRepo()
+	parent := newTestIssue("bd-rdy-udp-parent", "undated deferred parent")
+	parent.IssueType = types.TypeEpic
+	parent.Status = types.StatusDeferred
+	s.Require().NoError(r.Insert(s.Ctx(), parent, "tester", domain.InsertIssueOpts{}))
+	child := newTestIssue("bd-rdy-udp-child", "child of undated deferred parent")
+	s.Require().NoError(r.Insert(s.Ctx(), child, "tester", domain.InsertIssueOpts{}))
+	s.Require().NoError(s.depRepo().Insert(s.Ctx(),
+		newDep(child.ID, parent.ID, types.DepParentChild), "tester", domain.DepInsertOpts{}))
+
+	out, err := r.GetReadyWork(s.Ctx(), types.WorkFilter{})
+	s.Require().NoError(err)
+	s.NotContains(issueIDsFrom(out), child.ID)
+
+	out, err = r.GetReadyWork(s.Ctx(), types.WorkFilter{IncludeDeferred: true})
+	s.Require().NoError(err)
+	s.Contains(issueIDsFrom(out), child.ID)
 }
 
 func (s *testSuite) readyLabelFilter() {

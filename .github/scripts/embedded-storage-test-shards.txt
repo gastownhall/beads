@@ -426,6 +426,7 @@
 40 25 TestHeartbeaterContract
 40 25 TestIgnoredCursorHealIsIdempotent
 40 25 TestIsBlockedBatchEmbedded
+40 25 TestReadyWorkHidesChildrenOfUndatedDeferredParent
 40 25 TestReadyWorkPageTotal
 40 25 TestWithPeerAuth_RestoresAbsentEnv
 
