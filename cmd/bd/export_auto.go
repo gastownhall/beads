@@ -85,6 +85,32 @@ type exportAutoState struct {
 const exportAutoStateFile = "export-state.json"
 const gitAddTimeout = 5 * time.Second
 
+// autoExportDefaultOffNote is printed when a workspace that auto-exported
+// before still relies on the export.auto default, which became false in
+// v1.0.5 (#4063). Without it the JSONL silently stops updating (GH#4887).
+const autoExportDefaultOffNote = "Note: auto-export is off: export.auto defaults to false since v1.0.5, " +
+	"but this workspace auto-exported before (.beads/" + exportAutoStateFile + "), so its JSONL is no longer updated.\n" +
+	"  Resume:  bd config set export.auto true\n" +
+	"  Silence: bd config set export.auto false\n"
+
+// noteAutoExportDefaultOff tells a workspace that auto-exported under the old
+// default that it no longer does. It speaks only while export.auto is unset
+// (an explicit true or false, in config or env, silences it) and only when
+// .beads/export-state.json, written by every auto-export, is present.
+func noteAutoExportDefaultOff() {
+	if debug.IsQuiet() || config.GetValueSource("export.auto") != config.SourceDefault {
+		return
+	}
+	beadsDir := beads.FindBeadsDir()
+	if beadsDir == "" {
+		return
+	}
+	if _, err := os.Stat(filepath.Join(beadsDir, exportAutoStateFile)); err != nil {
+		return
+	}
+	fmt.Fprint(os.Stderr, autoExportDefaultOffNote)
+}
+
 // maybeAutoExport writes a git-tracked JSONL file if enabled and due.
 // Called from PersistentPostRun after auto-backup.
 //
@@ -100,6 +126,7 @@ func maybeAutoExport(ctx context.Context, allowEmptyOverwrite bool) error {
 	}
 
 	if !config.GetBool("export.auto") {
+		noteAutoExportDefaultOff()
 		return nil
 	}
 	if store == nil {

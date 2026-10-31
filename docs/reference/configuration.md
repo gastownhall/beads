@@ -171,6 +171,18 @@ bd config set export.auto true
 bd config set export.git-add true
 ```
 
+A workspace that auto-exported under the old default has no `export.auto`
+key, so its export stops updating. While `export.auto` is unset and
+`.beads/export-state.json` exists (every auto-export writes it), `bd` prints a
+note on stderr after each write command:
+
+```bash
+bd config set export.auto true    # resume auto-export
+bd config set export.auto false   # keep it off and silence the note
+```
+
+Any explicit `export.auto` value, or `--quiet`, keeps the note silent.
+
 Use `bd dolt push` / `bd dolt pull` for sync and `bd backup` for restorable
 database backups.
 </Warning>

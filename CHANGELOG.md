@@ -1704,6 +1704,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `bd export` now exits non-zero and leaves the output file untouched, and
   auto-export keeps the previous JSONL with a warning and retries on the next
   write command. Previously both wrote records with those fields empty.
+- **A workspace that auto-exported before v1.0.5 and never set
+  `export.auto` is now told that auto-export is off** (GH#4887). Since #4063
+  made `export.auto` opt-in, such a workspace stopped updating its JSONL with
+  no message. While the key is unset and `.beads/export-state.json` exists, a
+  write command now prints a note on stderr naming
+  `bd config set export.auto true` to resume and
+  `bd config set export.auto false` to silence it. An explicit value in config
+  or env, or `--quiet`, keeps it silent; the default stays `false`.
 - **`bd setup` keeps a `.beads/recipes.toml` recipe's files inside the
   directory it runs in.** For a recipe from the workspace's
   `.beads/recipes.toml` (a custom recipe, or one that overrides `windsurf`,
