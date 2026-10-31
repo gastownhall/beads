@@ -853,6 +853,43 @@ type depListAnchor struct {
 	result *RoutedResult
 }
 
+// bulkLocalDepListAnchors is `bd dep list a b c ...`'s batch fast path: ONE
+// GetIssuesByIDs against the local store, instead of the two queries per
+// argument (the exact-match SearchIssues probe inside ResolvePartialID, then
+// GetIssue) that resolveAndGetIssueWithRouting pays for every id. The per-id
+// queries dominate wall time on large batches: 780 ids measured 44-70s on a
+// fresh embedded rig at e22608365, against 0.3s for one id.
+//
+// Only arguments that spell an issue's exact full ID answer here: partial and
+// unprefixed ids, and ids routed to another store, stay out of the answer and
+// still take the per-argument routing path, which keeps its local-first
+// order. A nil map on any bulk-read error degrades the command to today's
+// per-id shape rather than to a new failure.
+func bulkLocalDepListAnchors(ctx context.Context, store storage.DoltStorage, args []string) map[string]depListAnchor {
+	if len(args) < 2 {
+		return nil
+	}
+	unique := make([]string, 0, len(args))
+	seen := make(map[string]bool, len(args))
+	for _, arg := range args {
+		if !seen[arg] {
+			seen[arg] = true
+			unique = append(unique, arg)
+		}
+	}
+	issues, err := store.GetIssuesByIDs(ctx, unique)
+	if err != nil {
+		return nil
+	}
+	out := make(map[string]depListAnchor, len(issues))
+	for _, issue := range issues {
+		if issue != nil && seen[issue.ID] {
+			out[issue.ID] = depListAnchor{fullID: issue.ID, store: store}
+		}
+	}
+	return out
+}
+
 // readDepListEdges asks each anchor's OWN store for its stored edges and
 // reassembles the answers into the order the arguments named.
 //
@@ -1031,7 +1068,12 @@ Examples:
 
 		var resolved []depListAnchor
 		batchMode := len(args) > 1
+		bulk := bulkLocalDepListAnchors(ctx, store, args)
 		for _, arg := range args {
+			if anchor, ok := bulk[arg]; ok {
+				resolved = append(resolved, anchor)
+				continue
+			}
 			routedResult, err := resolveAndGetIssueWithRouting(ctx, store, arg)
 			if err != nil {
 				if batchMode {
