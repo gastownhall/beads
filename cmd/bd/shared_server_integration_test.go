@@ -129,6 +129,192 @@ func TestSharedServerConcurrent(t *testing.T) {
 		defer cancel()
 	}
 
+	// Exercise cd discovery through real CLI processes, not modeled runtime
+	// files. External and managed shared servers both leave server metadata
+	// without a local main-workspace database, which is the fallback predicate.
+	if !t.Run("WorktreeDiscoveryAndSafeRemoval", func(t *testing.T) {
+		root, err := filepath.EvalSymlinks(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		repo := filepath.Join(root, "main")
+		if err := os.Mkdir(repo, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		env := append(append([]string{}, baseEnv...),
+			"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_SYSTEM="+os.DevNull,
+			"GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_TEMPLATE_DIR="+t.TempDir())
+		for _, entry := range env {
+			if strings.HasPrefix(entry, "BEADS_DIR=") || strings.HasPrefix(entry, "BEADS_DB=") {
+				t.Fatalf("discovery override in fixture environment: %s", entry)
+			}
+		}
+		git := func(dir string, args ...string) string {
+			t.Helper()
+			out, err := ssExec(ctx, "git", dir, env, args...)
+			if err != nil {
+				t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)
+			}
+			return out
+		}
+		bd := func(dir string, args ...string) string {
+			t.Helper()
+			out, err := ssExec(ctx, bdBinary, dir, env, args...)
+			if err != nil {
+				t.Fatalf("bd %v in %s: %v\n%s", args, dir, err, out)
+			}
+			return out
+		}
+		read := func(path string) string {
+			t.Helper()
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read %s: %v", path, err)
+			}
+			return string(data)
+		}
+		write := func(path, body string) {
+			t.Helper()
+			if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+				t.Fatalf("write %s: %v", path, err)
+			}
+		}
+		requireAbsent := func(path string) {
+			t.Helper()
+			if _, err := os.Lstat(path); !os.IsNotExist(err) {
+				t.Fatalf("fixture requires absent %s, got %v", path, err)
+			}
+		}
+		git(repo, "init", "-b", "main")
+		git(repo, "config", "core.hooksPath", ".git/hooks")
+		git(repo, "config", "user.name", "Test")
+		git(repo, "config", "user.email", "test@test.com")
+		bd(repo, "init", "--shared-server", "--external", "--prefix", "wtcli",
+			"--quiet", "--non-interactive", "--skip-hooks", "--skip-agents")
+		mainBeads := filepath.Join(repo, ".beads")
+		metadata := read(filepath.Join(mainBeads, "metadata.json"))
+		if mode, err := ssJSONField(metadata, "dolt_mode"); err != nil || mode != "server" {
+			t.Fatalf("shared-server metadata mode = %q, err=%v", mode, err)
+		}
+		if database, err := ssJSONField(metadata, "dolt_database"); err != nil || database != "wtcli" {
+			t.Fatalf("shared-server database = %q, err=%v", database, err)
+		}
+		requireMetadataOnly := func(dir string) {
+			t.Helper()
+			beadsDir := filepath.Join(dir, ".beads")
+			if got := read(filepath.Join(beadsDir, "metadata.json")); got != metadata {
+				t.Fatalf("%s does not have the initialized server metadata", dir)
+			}
+			for _, name := range []string{"redirect", "dolt", "embeddeddolt"} {
+				requireAbsent(filepath.Join(beadsDir, name))
+			}
+			matches, err := filepath.Glob(filepath.Join(beadsDir, "*.db"))
+			if err != nil || len(matches) != 0 {
+				t.Fatalf("unexpected local database in %s: %v, err=%v", dir, matches, err)
+			}
+		}
+		requireMetadataOnly(repo)
+		created := bd(repo, "create", "Shared worktree CLI sentinel", "--json")
+		issueID, err := ssJSONField(created, "id")
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Track the actual init artifacts so Git checks out metadata in each
+		// lane. Runtime files remain ignored by bd's own generated rules.
+		ignore := filepath.Join(repo, ".gitignore")
+		write(ignore, read(ignore)+"\nignored-user.bin\n")
+		git(repo, "add", ".")
+		git(repo, "commit", "-m", "shared-server workspace")
+		git(repo, "ls-files", "--error-unmatch", ".beads/metadata.json", ".beads/config.yaml", ".beads/.gitignore")
+		if status := git(repo, "status", "--porcelain=v1", "--untracked-files=all"); status != "" {
+			t.Fatalf("main workspace is dirty: %s", status)
+		}
+		for _, name := range []string{"clean-lane", "ignored-lane"} {
+			lane := filepath.Join(root, name)
+			// The real create command uses Git common-dir discovery and does
+			// not install a redirect. Assert that rather than removing one.
+			bd(repo, "worktree", "create", lane, "--branch", name)
+			requireMetadataOnly(lane)
+			write(filepath.Join(lane, "feature.txt"), name+"\n")
+			git(lane, "add", "feature.txt")
+			git(lane, "commit", "-m", "contained lane change")
+			git(repo, "merge", "--ff-only", name)
+			git(repo, "commit", "--allow-empty", "-m", "independent containing main")
+			if status := git(lane, "status", "--porcelain=v1", "--untracked-files=all", "--ignored"); status != "" {
+				t.Fatalf("lane is not clean before bd list: %s", status)
+			}
+			listed := bd(lane, "list", "--json", "--flat")
+			var issues []struct {
+				ID string `json:"id"`
+			}
+			if err := json.Unmarshal([]byte(ssFirstJSON(listed)), &issues); err != nil {
+				t.Fatalf("parse lane list: %v\n%s", err, listed)
+			}
+			found := false
+			for _, issue := range issues {
+				found = found || issue.ID == issueID
+			}
+			if !found {
+				t.Fatalf("lane list did not read the main database's issue %s: %s", issueID, listed)
+			}
+			where := bd(lane, "where", "--json")
+			discovered, err := ssJSONField(where, "path")
+			if err != nil || filepath.Clean(discovered) != mainBeads {
+				t.Fatalf("lane discovery = %q, want %s, err=%v\n%s", discovered, mainBeads, err, where)
+			}
+			// These are real CLI runtime files; never seed them in the lane.
+			for _, path := range []string{filepath.Join(repo, ".beads.gate.lock"), filepath.Join(mainBeads, ".local_version")} {
+				if info, err := os.Lstat(path); err != nil || !info.Mode().IsRegular() {
+					t.Fatalf("expected real main runtime file %s: %v", path, err)
+				}
+			}
+			if port := strings.TrimSpace(read(filepath.Join(sharedDir, "dolt-server.port"))); port != strconv.Itoa(containerPort) {
+				t.Fatalf("shared provider port = %q, want %d", port, containerPort)
+			}
+			requireMetadataOnly(repo)
+			requireMetadataOnly(lane)
+			if status := git(lane, "status", "--porcelain=v1", "--untracked-files=all", "--ignored"); status != "" {
+				t.Fatalf("real bd commands left runtime files in linked worktree: %s", status)
+			}
+			if name == "clean-lane" {
+				bd(repo, "worktree", "remove", lane, "--merged-into", "refs/heads/main")
+				requireAbsent(lane)
+				if registry := git(repo, "worktree", "list", "--porcelain"); strings.Contains(registry, "worktree "+lane+"\n") {
+					t.Fatalf("removed lane remains registered: %s", registry)
+				}
+				continue
+			}
+			userFile := filepath.Join(lane, "ignored-user.bin")
+			write(userFile, "keep this user file\n")
+			git(lane, "check-ignore", "--", "ignored-user.bin")
+			beforeStatus := git(lane, "status", "--porcelain=v1", "--untracked-files=all", "--ignored")
+			if strings.TrimSpace(beforeStatus) != "!! ignored-user.bin" {
+				t.Fatalf("unexpected ignored-file status: %s", beforeStatus)
+			}
+			beforeRegistry := git(repo, "worktree", "list", "--porcelain")
+			beforeIgnore, beforeMarker := read(ignore), read(filepath.Join(lane, ".git"))
+			beforeInfo, err := os.Lstat(lane)
+			if err != nil || !beforeInfo.IsDir() {
+				t.Fatalf("inspect registered lane: %v", err)
+			}
+			out, err := ssExec(ctx, bdBinary, repo, env, "worktree", "remove", lane, "--merged-into", "refs/heads/main")
+			if err == nil || !strings.Contains(out, "modified, untracked, or ignored files") {
+				t.Fatalf("unforced removal must refuse the ignored user file: err=%v\n%s", err, out)
+			}
+			afterInfo, err := os.Lstat(lane)
+			if err != nil || !os.SameFile(beforeInfo, afterInfo) {
+				t.Fatalf("refusal changed the lane directory identity: %v", err)
+			}
+			if read(userFile) != "keep this user file\n" || read(ignore) != beforeIgnore || read(filepath.Join(lane, ".git")) != beforeMarker ||
+				git(lane, "status", "--porcelain=v1", "--untracked-files=all", "--ignored") != beforeStatus ||
+				git(repo, "worktree", "list", "--porcelain") != beforeRegistry {
+				t.Fatal("refused removal changed the user file, worktree registration, marker, ignore rules, or status")
+			}
+		}
+	}) {
+		return
+	}
+
 	// ── Init project directories ────────────────────────────────────────
 	// All at once: in shared-server mode every project's physical root is
 	// the one shared dolt dir, and bd init holds that root's gate
