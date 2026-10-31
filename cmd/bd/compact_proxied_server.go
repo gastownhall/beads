@@ -28,9 +28,16 @@ func runCompactProxiedServer(ctx context.Context) error {
 		return HandleError("--days must be non-negative")
 	}
 
+	// Read main's head before the log: a commit that lands between the two
+	// reads is then in the log but not at plannedHead, so Compact refuses
+	// instead of resetting main past it, and a refusal names the true head.
+	var plannedHead string
 	var logEntries []storage.CommitInfo
 	if err := runProxiedNonTx(ctx, func(ctx context.Context, conn *sql.Conn) error {
 		var err error
+		if plannedHead, err = versioncontrolops.MainHead(ctx, conn); err != nil {
+			return fmt.Errorf("reading the head of main: %w", err)
+		}
 		logEntries, err = versioncontrolops.Log(ctx, conn, 0)
 		return err
 	}); err != nil {
@@ -79,7 +86,7 @@ func runCompactProxiedServer(ctx context.Context) error {
 		if oldCommits <= 1 {
 			fmt.Printf("\n  Nothing to compact (0-1 old commits).\n")
 		} else {
-			fmt.Printf("\n  Result: %d commits → %d commits\n", totalCommits, recentCommits+1)
+			fmt.Printf("\n  Result: %d commits → %d commit%s\n", totalCommits, recentCommits+1, plural(recentCommits+1))
 			fmt.Printf("  Run with --force to proceed.\n")
 		}
 		return nil
@@ -116,7 +123,7 @@ func runCompactProxiedServer(ctx context.Context) error {
 
 	var pruned, tags []string
 	if err := runProxiedNonTx(ctx, func(ctx context.Context, conn *sql.Conn) error {
-		if err := versioncontrolops.Compact(ctx, conn, initialHash, boundaryHash, oldCommits, recentHashes); err != nil {
+		if err := versioncontrolops.CompactAtHead(ctx, conn, plannedHead, initialHash, boundaryHash, oldCommits, recentHashes); err != nil {
 			return err
 		}
 		var perr error
