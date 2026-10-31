@@ -122,13 +122,13 @@ $ bd dolt push
 | `BeadsDir` | Actual `.beads/` directory (after following redirects) |
 | `RepoRoot` | Repository root containing `BeadsDir` |
 | `CWDRepoRoot` | Repository root containing user's CWD (may differ) |
-| `IsRedirected` | True if BEADS_DIR points to different repo than CWD |
+| `IsRedirected` | True if BeadsDir is in a different repository than the CWD, or in none and outside the CWD's work tree while the CWD is in one (see [Resolving Without Git](#resolving-without-git)) |
 | `IsWorktree` | True if CWD is in a git worktree |
 
 ## Resolving Without Git
 
-`GetRepoContext()` requires a git repository: it finds `.beads/`, validates the
-path boundary, and only then asks git for a repository root. A workspace that
+`GetRepoContext()` requires a git repository for the CWD: it finds `.beads/`,
+validates the path boundary, and only then asks git for a repository root. A workspace that
 is located and boundary-checked but has no resolvable git root is therefore a
 *known* workspace, not an unknown one — which is why it is the one failure that
 is safe to recover from.
@@ -139,6 +139,22 @@ the `domain/fs` context provider behind the proxied route (which `bd serve`
 also resolves through). Anything that actually runs git commands must keep
 using `GetRepoContext()`, so a missing repository stays an error where it
 matters.
+
+The `.beads` itself need not be in a repository. Named from a CWD that is in
+one (`bd -C <dir>`, `BEADS_DIR`, `--db`), a `.beads` git cannot place resolves
+as external — `IsRedirected` true, `RepoRoot` its parent, as in the no-git
+table below — unless it belongs to the CWD repository's work tree, in which
+case it stays local. It belongs when it lies below the CWD's top level, or when
+it is reached through a `.beads` symlinked out of the tree where walk-up
+discovery finds one: in the CWD or an ancestor up to the top level, or, from a
+linked worktree, the main checkout's. Git-backed operations against such a
+`RepoRoot` fail at the point of use with git's own "not a git repository"
+error rather than running against the CWD's repository (GH#5700).
+
+One shape is not recognized: a symlinked `.beads` named from elsewhere in the
+same work tree, such as `bd -C sub` run from the top level when `sub/.beads`
+is the symlink. bd resolves `BEADS_DIR` to the symlink's target before this
+check, and nothing records which symlink led there, so it resolves as external.
 
 The selection is typed, deliberately. `buildRepoContext()` can fail three ways
 — no `.beads/`, the SEC-003 unsafe-location rejection, and no git root — and
@@ -153,9 +169,9 @@ The synthesized context differs from a normal one in what it can know:
 | Field | Value without git | Why |
 |-------|-------------------|-----|
 | `RepoRoot` | the repository containing `.beads`, else the `.beads` parent | the missing git root is the **CWD's**, not the `.beads`'s, so git is still asked from the `.beads` side (`repoRootForBeadsDir`); only when that cannot answer either does it fall back to the parent |
-| `CWDRepoRoot` | `""` | known-empty, not merely unanswered: `GetMainRepoRoot`, `GetRepoRoot` and `IsWorktree` share one cached git context, and reaching this path means that lookup already failed |
-| `IsRedirected` | true iff discovery standing in the CWD would not have found the resolved `.beads` | `isExternalBeadsDir` compares git *common dirs* and the CWD side needs a repository, so externality is decided **positionally** instead. This covers all four caller-directed channels (`BEADS_DIR`, `--db`, `BEADS_DB`/`BD_DB`, `-C`) uniformly, where an environment inventory could not: bd rewrites `BEADS_DIR` for itself before resolving, so the variable cannot distinguish a workspace the caller named from one bd just discovered. A store reachable only by being named is a redirect — including one in a *sibling* directory of the CWD — which is what `Role()` means by "external repo mode" |
-| `IsWorktree` | false | nothing to be a worktree of |
+| `CWDRepoRoot` | `""`, or the CWD's root for a [refused repository](#repositories-git-refuses) | `GetMainRepoRoot`, `GetRepoRoot` and `IsWorktree` share one cached git context, so when the CWD's lookup is what failed all three fail together; a refused repository leaves that lookup intact |
+| `IsRedirected` | true iff discovery standing in the CWD would not have found the resolved `.beads` | `isExternalBeadsDir` compares git *common dirs* and the CWD side needs a repository, so externality is decided **positionally** instead. This covers all four caller-directed channels (`BEADS_DIR`, `--db`, `BEADS_DB`/`BD_DB`, `-C`) uniformly, where an environment inventory could not: bd rewrites `BEADS_DIR` for itself before resolving, so the variable cannot distinguish a workspace the caller named from one bd just discovered. A store reachable only by being named is a redirect — including one in a *sibling* directory of the CWD — which is what `Role()` means by "external repo mode". A refused repository stays a redirect, as `buildRepoContext()` had already found it external |
+| `IsWorktree` | false, or the CWD's answer for a refused repository | as for `CWDRepoRoot` |
 
 `*NoRepoRootError` means "git could not tell us a root", which is broader than
 "there is no repo": a dangling gitfile, a dubious-ownership refusal, or git
@@ -180,6 +196,21 @@ cmd.Env = append(os.Environ(),
 
 This protects against scenarios where `BEADS_DIR` points to an untrusted
 repository that contains malicious `.git/hooks/` scripts.
+
+### Repositories Git Refuses
+
+`GitCmd()` pins `GIT_DIR` to `<RepoRoot>/.git`, and git skips its
+`safe.directory` ownership check for an explicit `GIT_DIR`. An external
+`RepoRoot` therefore comes from git itself (`git -C <BeadsDir> rev-parse
+--show-toplevel`, which applies the check), or is the `.beads` parent only when
+that parent holds no `.git`. When the parent's `.git` is one git did not open
+from the `.beads` (another user's repository, or one a
+`GIT_CEILING_DIRECTORIES` entry hides), `GetRepoContext()` returns
+`*NoRepoRootError` instead, whether the `.beads` was named (`bd -C`,
+`BEADS_DIR`) or reached through a `.beads/redirect`. bd never runs that
+repository's config (`core.fsmonitor`, filters) as the caller;
+`GetRepoContextAllowingNoGit()` still locates the workspace, and `Role()`
+answers Contributor there without running git.
 
 ### Path Boundary Validation
 
