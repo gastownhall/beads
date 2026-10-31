@@ -400,10 +400,15 @@ func testMainInner(m *testing.M) int {
 	// host rig's shared .git/config (core.bare=true, extensions.worktreeConfig,
 	// a test remote.origin.url over the real origin) and its hooks, breaking
 	// every worktree of that clone (wy-qlvlmf, r880). The common config and
-	// hooks are shared by every worktree of the clone, so the keys other
-	// worktrees rewrite routinely (branch tracking, a remote other than origin
-	// added or removed whole) only draw a note; any other change means a test
-	// most likely ran git against this checkout instead of a fixture it owns.
+	// hooks are shared by every worktree of the clone. Common-config changes
+	// that ordinary git use in any checkout makes (branch tracking, a remote
+	// other than origin added or removed whole) only draw a note. Other
+	// worktrees of a shared clone rewrite more of its common config while this
+	// suite runs, so there only keys of the kind the clobber rewrote fail the
+	// run. Any other common-config change in a clone no other checkout uses,
+	// and any change to a hook or to this checkout's own config.worktree,
+	// means a test most likely ran git against this checkout instead of a
+	// fixture it owns.
 	gitDirs, err := locateRepoGitDirs(repoRoot)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: this checkout's own git state is not guarded in this run: %v\n", err)
@@ -490,9 +495,13 @@ func testMainInner(m *testing.M) int {
 
 // repoGitDirs names a checkout's git directories: gitDir is its own (a linked
 // worktree's .git/worktrees/<name>), common is the one every worktree of the
-// clone shares. They are the same directory for a main checkout.
+// clone shares. They are the same directory for a main checkout. shared
+// records that the clone has linked worktrees registered (a linked worktree
+// is one of them), so checkouts other than this one can write its common
+// config.
 type repoGitDirs struct {
 	gitDir, common string
+	shared         bool
 }
 
 func (d repoGitDirs) commonConfig() string { return filepath.Join(d.common, "config") }
@@ -537,7 +546,18 @@ func locateRepoGitDirs(repoRoot string) (repoGitDirs, error) {
 	if dirs.common == "" {
 		return repoGitDirs{}, fmt.Errorf("git rev-parse in %s: no common git dir in %q", repoRoot, out)
 	}
+	// Decided here, before the run, so a test that registers a worktree on
+	// this clone cannot relax the check of its own writes.
+	dirs.shared = hasLinkedWorktrees(dirs.common)
 	return dirs, nil
+}
+
+// hasLinkedWorktrees reports whether a clone's common dir has any linked
+// worktree registered. A stale entry that `git worktree prune` has not removed
+// yet counts too, which only relaxes the guard.
+func hasLinkedWorktrees(common string) bool {
+	entries, err := os.ReadDir(filepath.Join(common, "worktrees"))
+	return err == nil && len(entries) > 0
 }
 
 // repoGitState captures the parts of a checkout's own git state that the r880
@@ -585,10 +605,11 @@ type gitStateChange struct {
 }
 
 // diffRepoGitState compares two readRepoGitState results. A common-config
-// change is routine when every changed key is one that other worktrees of a
-// shared clone rewrite as a matter of course (routineSharedConfigKey). Any
-// other change (a hook file, config.worktree, core.*, user.*, extensions.*, an
-// existing remote's url, origin added or removed) is the clobber class.
+// change is routine when ordinary git use outside this suite explains every
+// changed key (routineConfigKey). Every other change is the clobber class,
+// including any change to a hook file or config.worktree, a common config
+// created, deleted or left unparseable, and, in any clone, a change to a key
+// of the kind the r880 clobber rewrote (clobberConfigKey).
 func diffRepoGitState(before, after repoGitState) []gitStateChange {
 	paths := make([]string, 0, len(before.files))
 	for p := range before.files {
@@ -612,9 +633,13 @@ func diffRepoGitState(before, after repoGitState) []gitStateChange {
 		case !a.present:
 			changes = append(changes, gitStateChange{path: p, detail: fmt.Sprintf("deleted (was %d bytes)", len(b.data))})
 		case p == before.dirs.commonConfig():
-			changes = append(changes, diffGitConfig(p, b.data, a.data, true))
+			scope := soleCloneConfig
+			if before.dirs.shared {
+				scope = sharedCloneConfig
+			}
+			changes = append(changes, diffGitConfig(p, b.data, a.data, scope))
 		case p == before.dirs.worktreeConfig():
-			changes = append(changes, diffGitConfig(p, b.data, a.data, false))
+			changes = append(changes, diffGitConfig(p, b.data, a.data, checkoutConfig))
 		default:
 			changes = append(changes, gitStateChange{path: p, detail: fmt.Sprintf("changed (%d → %d bytes)", len(b.data), len(a.data))})
 		}
@@ -622,10 +647,24 @@ func diffRepoGitState(before, after repoGitState) []gitStateChange {
 	return changes
 }
 
+// gitConfigScope says which watched git config file a diff is for, and so how
+// much of its churn ordinary git use outside this suite explains.
+type gitConfigScope int
+
+const (
+	// checkoutConfig is a checkout's own config.worktree. Nothing but that
+	// checkout writes it, so every key change fails the run.
+	checkoutConfig gitConfigScope = iota
+	// soleCloneConfig is the common config of a clone no other checkout uses.
+	soleCloneConfig
+	// sharedCloneConfig is the common config of a clone that other worktrees
+	// use too; they rewrite it while this suite runs.
+	sharedCloneConfig
+)
+
 // diffGitConfig names the keys that differ between two versions of a git
-// config file. shared marks the clone's common config, the only file where
-// routine shared-clone keys do not count as a clobber.
-func diffGitConfig(path, before, after string, shared bool) gitStateChange {
+// config file of the given scope.
+func diffGitConfig(path, before, after string, scope gitConfigScope) gitStateChange {
 	change := gitStateChange{path: path}
 	b, errBefore := gitConfigEntries(before)
 	a, errAfter := gitConfigEntries(after)
@@ -635,7 +674,7 @@ func diffGitConfig(path, before, after string, shared bool) gitStateChange {
 	}
 	var clobbered, routine []string
 	for _, key := range changedConfigKeys(b, a) {
-		if shared && routineSharedConfigKey(key, b, a) {
+		if routineConfigKey(key, b, a, scope) {
 			routine = append(routine, describeConfigKey(key, b, a))
 		} else {
 			clobbered = append(clobbered, describeConfigKey(key, b, a))
@@ -645,7 +684,7 @@ func diffGitConfig(path, before, after string, shared bool) gitStateChange {
 	case len(clobbered) > 0:
 		change.detail = summarizeConfigKeys(clobbered)
 		if len(routine) > 0 {
-			change.detail += fmt.Sprintf("; also %d branch/remote key change(s)", len(routine))
+			change.detail += fmt.Sprintf("; also %d routine key change(s)", len(routine))
 		}
 	case len(routine) > 0:
 		change.routine = true
@@ -700,24 +739,49 @@ func changedConfigKeys(before, after map[string][]string) []string {
 	return keys
 }
 
-// routineSharedConfigKey reports whether a change to key in a clone's common
-// config is one that other worktrees of the clone make as a matter of course:
-// branch tracking (branch.<name>.*, from checkout -b, push -u or branch -d in
-// any worktree) and a remote other than origin added or removed whole
-// (remote.<name>.* where that remote exists on only one side). A changed key
-// of a remote that exists both before and after, such as remote.origin.url,
-// is the r880 clobber. So is origin itself appearing or disappearing: the
-// clone's worktrees do not add or remove it, while `git remote add origin` and
-// `git remote remove origin` are common fixture steps.
-func routineSharedConfigKey(key string, before, after map[string][]string) bool {
-	section, subsection, _ := splitConfigKey(key)
+// routineConfigKey reports whether ordinary git use outside this suite
+// explains a change to key in a config file of the given scope, so that it
+// only draws a note. Nothing in a checkout's own config.worktree is routine,
+// and no clobber key is anywhere. In the common config of any clone, branch
+// tracking is (branch.<name>.*, from checkout -b, push -u or branch -d in any
+// checkout), and so is a remote other than origin added or removed whole
+// (remote.<name>.* where that remote exists on only one side). Other
+// worktrees of a shared clone also rewrite keys like user.*, merge.*,
+// rerere.* or beads.role while this suite runs, so in a shared clone's common
+// config every key but the clobber keys is routine.
+func routineConfigKey(key string, before, after map[string][]string, scope gitConfigScope) bool {
+	section, subsection, name := splitConfigKey(key)
 	switch {
+	case scope == checkoutConfig, clobberConfigKey(section, subsection, name):
+		return false
+	case scope == sharedCloneConfig:
+		return true
 	case subsection == "":
 		return false
 	case section == "branch":
 		return true
-	case section == "remote" && subsection != "origin":
+	case section == "remote":
 		return !hasConfigSubsection(before, section, subsection) || !hasConfigSubsection(after, section, subsection)
+	}
+	return false
+}
+
+// clobberConfigKey reports whether a common-config key is one whose change
+// fails the run even in a shared clone: a key the r880 clobber rewrote, or
+// one of its kind, which changes how git runs in every worktree of the
+// clone. These are core.bare, core.worktree, core.hooksPath, every
+// extensions.* key, and every key of origin. That includes origin itself
+// appearing or disappearing: the clone's worktrees do not add or remove it,
+// while `git remote add origin` and `git remote remove origin` are common
+// fixture steps.
+func clobberConfigKey(section, subsection, name string) bool {
+	switch section {
+	case "core":
+		return subsection == "" && (name == "bare" || name == "worktree" || name == "hookspath")
+	case "extensions":
+		return true
+	case "remote":
+		return subsection == "origin"
 	}
 	return false
 }
@@ -765,8 +829,8 @@ func summarizeConfigKeys(descriptions []string) string {
 }
 
 // reportGitStateChanges renders the guard's verdict on changes. Routine
-// shared-clone changes get a NOTE and leave the run green: this suite and any
-// other process using the clone could have made them. Anything else is an
+// changes get a NOTE and leave the run green: another process using the clone
+// could have made them, as could this suite. Anything else is an
 // ERROR that fails the run, and the pre-run copies of the affected files are
 // saved under saveDir so a clobbered config can be restored by hand.
 func reportGitStateChanges(changes []gitStateChange, before repoGitState, saveDir string) (report string, failed bool) {
@@ -780,9 +844,9 @@ func reportGitStateChanges(changes []gitStateChange, before repoGitState, saveDi
 	}
 	var out strings.Builder
 	if len(routine) > 0 {
-		fmt.Fprintf(&out, "NOTE: this clone's shared git config changed during the run, by this suite or another "+
-			"process using the clone; branch tracking and whole-remote changes are routine for a shared clone "+
-			"(values not shown):\n%s\n", formatGitStateChanges(routine))
+		fmt.Fprintf(&out, "NOTE: another process using this clone, or this suite, changed its git config "+
+			"during the run; ordinary git use outside the suite makes these changes, so they do not fail "+
+			"the run (values not shown):\n%s\n", formatGitStateChanges(routine))
 	}
 	if len(clobbered) > 0 {
 		saved := "pre-run copies of the changed files: "
