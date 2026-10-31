@@ -51,7 +51,7 @@ run_bounded() {
 }
 
 echo "Checking documentation against CLI flags..."
-echo "Using: $($BD version 2>/dev/null | head -1 || echo "$BD")"
+echo "Using: $("$BD" version 2>/dev/null | head -1 || echo "$BD")"
 echo ""
 
 # --- Check 1: Known-removed commands ---
