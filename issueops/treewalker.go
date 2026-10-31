@@ -159,23 +159,30 @@ type TreeResult struct {
 	// CycleReport's canonicalization, which had to be strong because the walk
 	// there chose which cycles exist.
 	//
-	// EVERY NODE APPEARS AT MOST ONCE PER WALK, at the depth and parent of the
-	// FIRST path that reached it. That single rule is both the cycle policy and
-	// the diamond policy:
+	// EVERY FULL NODE OCCURRENCE APPEARS AT MOST ONCE PER WALK, at the depth
+	// and parent of the FIRST path that reached it; a later path may add a
+	// Deduped stub for the same id and nothing else. That single rule is both
+	// the cycle policy and the diamond policy:
 	//
 	//   - A CYCLE TERMINATES. Revisiting a node on the current path stops the
-	//     descent, so the walk finishes on a cyclic graph instead of recursing
-	//     forever. This role therefore never fails on a cycle and never reports
-	//     one; `bd dep cycles` and issueops.CycleDetector are where a cycle is
-	//     an answer.
-	//   - A SHARED SUBTREE IS RENDERED ONCE. A diamond — two parents reaching
-	//     one child — shows the child under whichever parent the walk reached
-	//     first, and the second parent has no visible edge to it. There is no
-	//     option to show it twice. `bd dep tree --show-all-paths` is a
-	//     DOCUMENTED NO-OP that predates this role: it was accepted and threaded
-	//     and never read by any walk, and nobody has specified what "all paths"
-	//     means for a DAG with shared subtrees. This contract deliberately does
-	//     not invent one.
+	//     descent — the revisit is re-emitted as a Deduped stub with no subtree —
+	//     so the walk finishes on a cyclic graph instead of recursing forever.
+	//     This role therefore never fails on a cycle and never reports one;
+	//     `bd dep cycles` and issueops.CycleDetector are where a cycle is an answer.
+	//   - A SHARED SUBTREE IS EXPANDED ONCE, EVERY EDGE IS VISIBLE. A diamond —
+	//     two parents reaching one child — shows the child in full under whichever
+	//     parent the walk reached first, and re-emits it under the second parent as
+	//     a Deduped stub: Depth, ParentID and EdgeFromParent carry the real edge,
+	//     the subtree lives only at the full occurrence, and TreeNode.Deduped
+	//     distinguishes the two. Dropping the second occurrence instead (the old
+	//     behavior) hid a real edge — most painfully a DIRECT blocker of the root —
+	//     and gastownhall/beads#5282 filed that as a bug. `bd dep tree
+	//     --show-all-paths` remains a DOCUMENTED NO-OP that predates this role:
+	//     every edge is now visible, but "all paths" was never specified for a DAG
+	//     with shared subtrees and this contract still does not invent one.
+	//     EVERY EDGE VISIBLE holds for the unpruned walk; a Status prune drops a
+	//     stub whose full occurrence survived, so the pruned answer shows each
+	//     id once — see PruneTreeByStatus in the storage implementation.
 	//
 	// FOR TreeBoth the two walks are INDEPENDENT and the answer is their
 	// concatenation: every up-tree node except the root, in the up walk's order,

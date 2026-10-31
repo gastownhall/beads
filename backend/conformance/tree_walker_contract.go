@@ -169,8 +169,9 @@ func RunTreeWalkerBoundsTheDescentAtMaxDepth(t *testing.T, ctx context.Context, 
 }
 
 // RunTreeWalkerTerminatesOnACycle pins treewalker.go:165-169: revisiting a node
-// stops the descent, so a cyclic graph is answered rather than hung, and no node
-// is repeated.
+// stops the descent, so a cyclic graph is answered rather than hung. The revisit
+// survives only as a Deduped stub — the back-edge is visible, and no SUBTREE is
+// ever expanded twice.
 //
 // SEEDING ONE TAKES RAW SQL, and that is a fact about the system rather than a
 // shortcut — the same fact the cycle-detector contract records. Every supported
@@ -192,16 +193,32 @@ func RunTreeWalkerTerminatesOnACycle(t *testing.T, ctx context.Context, fixture 
 		treeWalkerEdge{Source: c, Target: a})
 
 	result := walkTree(t, ctx, fixture, publicops.WalkTreeRequest{RootID: a, MaxDepth: 50})
-	assertTreeWalkerIDs(t, result, a, b, c)
+	// a -> b -> c, and the c -> a back-edge re-emits `a` as a stub: the walk
+	// terminates, and the only repeat anywhere in the answer is a Deduped node.
+	assertTreeWalkerIDs(t, result, a, b, c, a)
+	for _, node := range result.Nodes {
+		if node.ID != a && node.Deduped {
+			t.Errorf("node %s is Deduped; only the cycle-closing re-visit of %s may be", node.ID, a)
+		}
+	}
+	stub := result.Nodes[3]
+	if !stub.Deduped {
+		t.Errorf("the re-visit of %s is not Deduped: treewalker.go:165-169 stops the DESCENT by re-emitting the node as a stub, never by expanding it again", a)
+	}
+	if stub.Depth != 3 || stub.ParentID != c {
+		t.Errorf("stub of %s = depth %d parent %s, want depth 3 parent %s", a, stub.Depth, stub.ParentID, c)
+	}
 }
 
-// RunTreeWalkerRendersASharedSubtreeOnce pins treewalker.go:170-178: a diamond
-// shows the shared child under whichever parent the walk reached first, and
-// there is no option to show it twice.
+// RunTreeWalkerRendersASharedSubtreeOnce pins treewalker.go:170-178 (as amended
+// by gastownhall/beads#5283): a diamond expands the shared child ONCE — under
+// whichever parent the walk reached first — and re-emits it under the second
+// parent as a Deduped stub so the second edge stays visible. The subtree is
+// never rendered twice; the EDGE never disappears.
 //
-// This is the clause `--show-all-paths` would have changed, and the case exists
-// so that implementing that flag as a side effect of some later refactor fails
-// here rather than shipping.
+// The stub is what the `--show-all-paths` no-op was never allowed to become:
+// the flag would duplicate the SUBTREE, the stub duplicates only the node's
+// position. This case pins that line.
 func RunTreeWalkerRendersASharedSubtreeOnce(t *testing.T, ctx context.Context, fixture TreeWalkerFixture) {
 	t.Helper()
 	root := fixture.IssuePrefix + "-diamond-root"
@@ -215,10 +232,52 @@ func RunTreeWalkerRendersASharedSubtreeOnce(t *testing.T, ctx context.Context, f
 	seedTreeWalkerEdge(t, ctx, fixture, right, shared, types.DepBlocks)
 
 	result := walkTree(t, ctx, fixture, publicops.WalkTreeRequest{RootID: root, MaxDepth: 10})
-	if got := treeWalkerCount(result, shared); got != 1 {
-		t.Fatalf("the shared node appears %d times, want 1: treewalker.go:170-178 forbids a second path", got)
+	if got := treeWalkerCount(result, shared); got != 2 {
+		t.Fatalf("the shared node appears %d times, want 2 (one full occurrence, one Deduped stub): treewalker.go:170-178 shows every edge while expanding a subtree once", got)
 	}
-	assertTreeWalkerIDSet(t, result, root, left, right, shared)
+	var full, stub *types.TreeNode
+	for _, node := range result.Nodes {
+		if node.ID != shared {
+			continue
+		}
+		if node.Deduped {
+			stub = node
+		} else {
+			full = node
+		}
+	}
+	if full == nil || stub == nil {
+		t.Fatalf("shared occurrences: full=%v stub=%v, want exactly one of each", full, stub)
+	}
+	// The full occurrence is the one that expanded; the stub carries the
+	// second edge and nothing else.
+	byID := treeWalkerByID(t, result)
+	leftNode, rightNode := byID[left], byID[right]
+	if leftNode == nil || rightNode == nil {
+		t.Fatalf("diamond parents missing from the answer: %v", treeWalkerIDs(result))
+	}
+	firstParent, secondParent := leftNode.ID, rightNode.ID
+	if full.ParentID == secondParent && stub.ParentID == firstParent {
+		firstParent, secondParent = secondParent, firstParent
+	}
+	if full.ParentID != firstParent {
+		t.Errorf("full occurrence of %s has parent %s, want the first-reached parent %s", shared, full.ParentID, firstParent)
+	}
+	if stub.ParentID != secondParent {
+		t.Errorf("stub of %s has parent %s, want the second parent %s: the whole point of the stub is that edge", shared, stub.ParentID, secondParent)
+	}
+	if stub.Depth != full.Depth {
+		t.Errorf("stub depth %d, want the full occurrence's depth %d", stub.Depth, full.Depth)
+	}
+	if stub.EdgeFromParent != types.DepBlocks {
+		t.Errorf("stub edge = %q, want %q", stub.EdgeFromParent, types.DepBlocks)
+	}
+	// Nothing else repeats: the expansion happened once.
+	for _, id := range []string{root, left, right} {
+		if got := treeWalkerCount(result, id); got != 1 {
+			t.Errorf("%s appears %d times, want 1: only a re-visit, never an expansion, is repeated", id, got)
+		}
+	}
 }
 
 // RunTreeWalkerMergesTheDurableAndEphemeralPlanes pins treewalker.go:234-238:
