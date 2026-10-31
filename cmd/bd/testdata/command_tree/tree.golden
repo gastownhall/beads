@@ -6378,8 +6378,25 @@ bd rules compact
   short: "Merge related rules into composites"
   hidden: false
   runnable: true
-  flag --auto type=bool default="false" usage="Apply audit suggestions"
-  flag --dry-run type=bool default="false" usage="Preview without applying"
+  long:
+    | Merge related rules into composites.
+    |
+    | A composite keeps only the **Do:** and **Don't:** lines of its sources, plus a
+    | "Source rules:" line naming them. Any other prose in the source files is not
+    | carried over, and the source files are deleted when the merge is applied.
+    |
+    | Without --force, compact only prints the composite and the files it would
+    | delete. With --force it writes the composite and deletes the sources. It
+    | refuses to write a composite over an existing file, including one of its own
+    | sources.
+    |
+    | Examples:
+    |   bd rules compact --auto                    # Preview the audit's suggested merges
+    |   bd rules compact --auto --force            # Apply them
+    |   bd rules compact --group alpha,beta --force
+  flag --auto type=bool default="false" usage="Use audit suggestions to select merge groups"
+  flag --dry-run type=bool default="false" usage="Preview without applying (the default without --force)"
+  flag --force type=bool default="false" usage="Write the composite and delete the source files (without this flag, shows preview)"
   flag --group type=stringSlice default="[]" usage="Rule names to merge"
   flag --path type=string default=".claude/rules/" usage="Path to rules directory"
 
