@@ -139,6 +139,7 @@ func TestHookTimeoutBackendsRunUnderBazel(t *testing.T) {
 		`"$(rootpath //:.githooks/post-checkout)",`,
 		`"$(rootpath //:.githooks/prepare-commit-msg)",`,
 		`tags = ["pr-core-only"],`,
+		`target_compatible_with = LINUX_AMD64,`,
 	} {
 		if !strings.Contains(rule, want) {
 			t.Errorf("//tests/hook_timeout_backends:hook_timeout_backends_test lacks %q:\n%s", want, rule)
