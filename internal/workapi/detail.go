@@ -132,12 +132,25 @@ func BuildIssueDetails(ctx context.Context, src DetailSource, issue *types.Issue
 	// residual and is why this is an ordering mitigation rather than a fix —
 	// only a shared snapshot or a direct count of unresolvable edges closes
 	// it (be-lpi).
+	// A count whose query failed is left unset (GH#7563) rather than
+	// published as the zero-value Count* returns on error: the fields are
+	// already *int64 with omitempty for exactly this, and a published 0 is
+	// indistinguishable from an issue that genuinely has none, which is what
+	// the derived fields below already treat an error as - skipping
+	// UnresolvableDependencies/UnresolvableDependents on count failure while
+	// still letting the raw count through was the inconsistency.
 	dependentCount, dependentCountErr := src.CountDependents(ctx, id, isWisp)
-	details.DependentCount = &dependentCount
+	if dependentCountErr == nil {
+		details.DependentCount = &dependentCount
+	}
 	dependencyCount, dependencyCountErr := src.CountDependencies(ctx, id, isWisp)
-	details.DependencyCount = &dependencyCount
-	commentCount, _ := src.CountComments(ctx, id, isWisp)
-	details.CommentCount = &commentCount
+	if dependencyCountErr == nil {
+		details.DependencyCount = &dependencyCount
+	}
+	commentCount, commentCountErr := src.CountComments(ctx, id, isWisp)
+	if commentCountErr == nil {
+		details.CommentCount = &commentCount
+	}
 
 	// depsErr is kept rather than discarded: it is what separates "the edge
 	// list came back short" from "the edge list never came back", and the

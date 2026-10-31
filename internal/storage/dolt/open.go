@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
@@ -456,9 +457,7 @@ func applyResolvedConfig(ctx context.Context, beadsDir string, fileCfg *configfi
 // way. A new pool knob belongs here, not in applyResolvedConfig.
 func applyPoolKnobs(cfg *Config) {
 	if cfg.MaxOpenConns == 0 {
-		if n, err := strconv.Atoi(os.Getenv("BEADS_DOLT_MAX_CONNS")); err == nil && n > 0 {
-			cfg.MaxOpenConns = n
-		}
+		cfg.MaxOpenConns = envPoolIntOrWarn("BEADS_DOLT_MAX_CONNS")
 	}
 	if cfg.MaxOpenConns == 0 {
 		if n, err := strconv.Atoi(poolKnobFromConfig(cfg, "dolt.max-conns")); err == nil && n > 0 {
@@ -466,17 +465,53 @@ func applyPoolKnobs(cfg *Config) {
 		}
 	}
 	if cfg.PoolReadTimeout == 0 {
-		cfg.PoolReadTimeout = timeoutFromEnv("BEADS_DOLT_POOL_READ_TIMEOUT", 0)
+		cfg.PoolReadTimeout = envPoolTimeoutOrWarn("BEADS_DOLT_POOL_READ_TIMEOUT")
 	}
 	if cfg.PoolReadTimeout == 0 {
 		cfg.PoolReadTimeout = parseTimeout(poolKnobFromConfig(cfg, "dolt.pool-read-timeout"), 0)
 	}
 	if cfg.PoolWriteTimeout == 0 {
-		cfg.PoolWriteTimeout = timeoutFromEnv("BEADS_DOLT_POOL_WRITE_TIMEOUT", 0)
+		cfg.PoolWriteTimeout = envPoolTimeoutOrWarn("BEADS_DOLT_POOL_WRITE_TIMEOUT")
 	}
 	if cfg.PoolWriteTimeout == 0 {
 		cfg.PoolWriteTimeout = parseTimeout(poolKnobFromConfig(cfg, "dolt.pool-write-timeout"), 0)
 	}
+}
+
+// envPoolTimeoutOrWarn reads a pool-knob timeout env var the same way
+// timeoutFromEnv does, but when the var is SET to a value that fails to
+// parse (or parses non-positive), it warns on stderr instead of silently
+// returning 0 as if the var had been unset (GH#7564). An unset var still
+// returns 0 with no warning, since the ladder's next rung (config.yaml) is
+// exactly where an unset env var is supposed to fall through to - the bug is
+// only that a MALFORMED value fell through the same way with no signal that
+// the override the operator asked for never took effect. The ladder itself
+// (caller override > env var > config.yaml > default) is unchanged.
+func envPoolTimeoutOrWarn(env string) time.Duration {
+	raw := strings.TrimSpace(os.Getenv(env))
+	if raw == "" {
+		return 0
+	}
+	if d := parseTimeout(raw, 0); d > 0 {
+		return d
+	}
+	fmt.Fprintf(os.Stderr, "Warning: %s=%q is not a valid duration; ignoring it (dolt.pool-read-timeout/dolt.pool-write-timeout in config.yaml or the built-in default will be used instead).\n", env, raw)
+	return 0
+}
+
+// envPoolIntOrWarn is envPoolTimeoutOrWarn's counterpart for
+// BEADS_DOLT_MAX_CONNS, whose value is a plain positive integer rather than a
+// duration (GH#7564).
+func envPoolIntOrWarn(env string) int {
+	raw := strings.TrimSpace(os.Getenv(env))
+	if raw == "" {
+		return 0
+	}
+	if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+		return n
+	}
+	fmt.Fprintf(os.Stderr, "Warning: %s=%q is not a valid positive integer; ignoring it (dolt.max-conns in config.yaml or the built-in default will be used instead).\n", env, raw)
+	return 0
 }
 
 // poolKnobFromConfig reads a pool-knob key from the initialized config and,
