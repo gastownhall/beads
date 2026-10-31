@@ -118,7 +118,7 @@ Examples:
 			if oldCommits <= 1 {
 				fmt.Printf("\n  Nothing to compact (0-1 old commits).\n")
 			} else {
-				fmt.Printf("\n  Result: %d commits → %d commits\n", totalCommits, recentCommits+1)
+				fmt.Printf("\n  Result: %d commits → %d commit%s\n", totalCommits, recentCommits+1, plural(recentCommits+1))
 				fmt.Printf("  Run with --force to proceed.\n")
 			}
 			return nil
