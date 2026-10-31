@@ -29,6 +29,8 @@ const lastTouchedFallbackEnv = "BD_LAST_TOUCHED_FALLBACK"
 // Precedence mirrors isNonInteractiveBootstrap:
 // BD_LAST_TOUCHED_FALLBACK (any explicit value wins, only 1/true enables) >
 // BD_NON_INTERACTIVE / CI (deny) > stdin terminal detection.
+// BD_NON_INTERACTIVE=0/false does not enable the fallback; unlike init's
+// interaction override, it leaves CI and terminal detection in effect.
 func AllowLastTouchedFallback() bool {
 	if v := os.Getenv(lastTouchedFallbackEnv); v != "" {
 		return v == "1" || v == "true"
