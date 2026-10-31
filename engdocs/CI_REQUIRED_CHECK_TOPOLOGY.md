@@ -34,23 +34,39 @@ References:
 Current PR-related workflow names:
 
 - `.github/workflows/pr.yml`: `PR`
-  Runs on `pull_request` and `merge_group`. Contains the baseline PR jobs,
-  Linux build artifact stage, policy/lint compatibility jobs, package gates
-  that consume the Linux artifact, focused storage domain/uow coverage, the
-  Bazel lane (the `bazel` job calls `bazel.yml`), and the baseline aggregate
-  gate `PR / CI Gate / Required`.
+  Runs on `pull_request`, `merge_group` and push to `main`. Its `scope` job
+  (`.github/scripts/ci-scope.sh`) decides which job sets each event runs: a
+  pull request everything, a merge group the fast set, a push to `main` the
+  post-merge complement (see [Merge Queue](#merge-queue)). Contains the
+  baseline PR jobs, Linux build artifact stage, policy/lint compatibility
+  jobs, package gates that consume the Linux artifact, focused storage
+  domain/uow coverage, the Bazel lane (the `bazel` job calls `bazel.yml`),
+  and the baseline aggregate gate `PR / CI Gate / Required`.
 - `.github/workflows/bazel.yml`: `Bazel`
   Runs on `push` to `main`, manual dispatch, and `workflow_call` only. PRs and
-  merge groups run it once, through `pr.yml`'s `bazel` job. Its `rbe` job
+  merge groups run it once, through `pr.yml`'s `bazel` job (a merge group
+  without the Dolt-tier lanes: its scope passes `dolt-tiers: off`, see
+  [Merge Queue](#merge-queue)); its own push run on `main` is every lane.
+  Its `rbe` job
   decides the execution mode once (`remote`; for fork and Dependabot PRs,
   which get no secrets or variables, rbe-west's certificate mint decides
   (`rbe-mint.ops.gascity.com:8444/v1/status`, infra README "rbe-fork"):
   `fork-ro` or `fork-rw` while it is open for the run, every lane executing
   remotely on `rbe-fork.ops.gascity.com:8444` with its own short-lived
   certificate (instance `oss-fork`, the fork pool; or `oss`, the OSS pool,
-  for allowlisted authors), else `cache`: local execution plus rbe-west's
-  anonymous read-only action cache, `.bazelrc`'s `fork-cache` config;
-  `local` for `rbe=off` dispatches; or `skip` while the `RBE_WEST_WORKERS`
+  for allowlisted authors), else `local`; `cache` only for `rbe=cache`
+  dispatches: local execution on the Blacksmith runner plus rbe-west's
+  anonymous read-only action cache (rbe-cache), `.bazelrc`'s `fork-cache`
+  config; `local` for `rbe=off` dispatches, fork and Dependabot PRs while
+  rbe-fork is closed or refuses the run, unauthorized
+  `pull_request_target` fork runs, same-repo runs without the executor
+  secret, and every run in a fork repository's own CI
+  (`github.repository_owner` is not `gastownhall`: a push to the fork or a
+  PR within it; fork PRs into beads run with `github.repository`
+  `gastownhall/beads`), so no run reads rbe-cache from a GitHub-hosted
+  runner, which rbe-cache refuses (infra `nativelink-cas/west` README
+  "rbe-cache", GitHub-hosted runners; every lane's `runs-on` is Blacksmith
+  in modes `remote` and `cache`); or `skip` while the `RBE_WEST_WORKERS`
   repo variable is unset) and exports it as the `rbe-mode` / `rbe-enabled`
   outputs (`rbe-enabled` is `true` in `remote`, `fork-ro` and `fork-rw`);
   every lane exports its
@@ -63,16 +79,21 @@ Current PR-related workflow names:
   `pr.yml`'s gate requires the
   call's result (`BAZEL`) and `BAZEL_TEST`, `BAZEL_PURE`,
   `BAZEL_RELEASE_CROSS`, `BAZEL_EMBEDDED`, `BAZEL_INTEGRATION`,
-  `BAZEL_DOLTSERVER`, `BAZEL_PROXIED` and `BAZEL_SERVER_STORAGE`. These lanes are the only CI run of the Linux Go
+  `BAZEL_DOLTSERVER`, `BAZEL_PROXIED` and `BAZEL_SERVER_STORAGE` (on a
+  merge group `bazel-gate.sh` excuses the Dolt-tier ids, `BAZEL_EMBEDDED`,
+  `BAZEL_DOLTSERVER`, `BAZEL_PROXIED`, `BAZEL_SERVER_STORAGE` and
+  `BAZEL_CMD_DOLT`, exactly when the scope turned the tiers off and the call
+  reports its `dolt-tiers` output `off`). These lanes are the only CI run of the Linux Go
   test tiers: the legacy jobs they mirrored in `pr.yml` and `pr-risk.yml`
   are retired (ga-96smfk.22; see
   [Legacy Tier Retirement](#legacy-tier-retirement-d2)), so the gate also
   requires `BAZEL_REMOTE`: the call's mode must be `remote`, `fork-ro` or
   `fork-rw`. `.github/scripts/bazel-gate.sh` reads the exported mode, never
   the variable or the fork flag: mode `skip` allows every Bazel id to skip,
-  mode `cache` the remote-only `BAZEL_EMBEDDED`, `BAZEL_PROXIED` and
-  `BAZEL_SERVER_STORAGE`, mode `local` (`rbe=off` dispatches) those and
-  `BAZEL_INTEGRATION`, and modes `remote`, `fork-ro` and `fork-rw` none;
+  mode `cache` (`rbe=cache` dispatches) the remote-only `BAZEL_EMBEDDED`,
+  `BAZEL_PROXIED` and `BAZEL_SERVER_STORAGE`, mode `local` (`rbe=off`
+  dispatches, fork and Dependabot PRs while rbe-fork is closed, a fork
+  repository's own CI) those and `BAZEL_INTEGRATION`, and modes `remote`, `fork-ro` and `fork-rw` none;
   on `pr.yml` the first three are red anyway through `BAZEL_REMOTE`.
   A lane that should run and fails, is cancelled, or reports no result fails
   the gate, and so does a missing or invalid mode.
@@ -80,19 +101,19 @@ Current PR-related workflow names:
   successor of `main.yml`'s former Linux integration shards) is required on every PR:
   `pr.yml` passes `integration: "on"` (policy-pinned), so it runs in modes
   `remote` (same-repo PRs) and `fork-ro`/`fork-rw` (fork and Dependabot PRs
-  while rbe-fork is open), and in mode `cache` (fork and Dependabot PRs
-  while it is closed, locally on the GitHub-hosted runner with the
-  read-only cache), and a
+  while rbe-fork is open), and in mode `cache` (`rbe=cache` dispatches,
+  locally on the Blacksmith runner with the read-only cache), and a
   failure, cancellation or missing result turns the gate red. Its legacy
   twins still run only on push to `main`, so this lane is the only PR-time
   run of the full integration-tagged suite. In mode `cache` every action
   trusted CI already ran is a cache hit, so the runner builds and tests only
-  what the PR changed. Simulated on a 4-CPU runner (2026-10-02): about 2.5
+  what changed. Simulated on a 4-CPU runner (2026-10-02): about 2.5
   minutes warm, 3 to 5 for a `cmd/bd` change, and about 30 with the cache
   closed. Its step timeout (75 minutes) covers that cold local run with
   room to spare, and so also a remote cold compile plus the 1200 s
-  per-action cap (both policy-tested). Mode `local` (`rbe=off`) still
-  skips it.
+  per-action cap (both policy-tested). Mode `local` (`rbe=off`; fork and
+  Dependabot PRs while rbe-fork is closed, red anyway through
+  `BAZEL_REMOTE`) skips it.
   `scripts/ci_workflow_test.go` fails when a new `bazel.yml` job has neither
   a gate id nor an advisory entry.
   Runbook: if `main`'s Bazel BUILD files drift (every PR's Bazel lanes go
@@ -103,8 +124,8 @@ Current PR-related workflow names:
   to fall back to: unsetting the `RBE_WEST_WORKERS` repo variable (mode
   `skip`) turns `CI Gate / Required` red on every PR and merge group
   (`BAZEL_REMOTE`), by design. If rbe-west closes the read-only cache (the
-  farm's kill switch; the client has none), runs in mode `cache` execute
-  locally and are red through `BAZEL_REMOTE` as well. If it
+  farm's kill switch; the client has none), runs in mode `cache`
+  (`rbe=cache` dispatches) execute locally. If it
   is slow rather than closed, each lookup gives up after `fork-cache`'s
   15 s `--remote_timeout` (times its retries), and Bazel's failure circuit
   breaker (`--experimental_circuit_breaker_strategy=failure`) stops calling
@@ -139,9 +160,11 @@ Current PR-related workflow names:
   no ruleset requires it and nothing reads its results; see
   [Trusted-Author Fork PRs](#trusted-author-fork-prs-bazel-farm).
 - `.github/workflows/pr-risk.yml`: `PR Risk`
-  Runs on `pull_request` and `merge_group`. Contains only the Nix packaging
-  check (`test-nix`: `nix run .#default -- --help` and `nix flake check`)
-  and the risk aggregate gate `PR Risk / PR Risk Gate / Required`. Its
+  Runs on `pull_request`, `merge_group` and push to `main`. Contains only the
+  same `scope` job as `pr.yml`, the Nix packaging check (`test-nix`: `nix
+  run .#default -- --help` and `nix flake check`; pull requests and pushes
+  to `main`, a merge group skips it) and the risk aggregate gate `PR Risk /
+  PR Risk Gate / Required`. Its
   embedded, proxied and server-Dolt test tiers, the `detect-ci-tier` risk
   detection and the `bazel-coverage` decision were retired (ga-96smfk.22):
   `pr.yml`'s Bazel lanes run those tests.
@@ -150,10 +173,11 @@ Current PR-related workflow names:
   `go test -race -short` suite and the Windows smoke build on Blacksmith, and
   the push-to-main savers of the GOCACHEs pr.yml's Windows and macOS jobs
   restore. Every Linux check it used to repeat (migration hygiene, build
-  tags, versions, doc flags, gofmt, the PR policy wrapper, the package gates,
-  the Nix flake check and the Linux cache seeders) is gated before the merge
-  by the merge queue's `pr.yml`/`pr-risk.yml` run of the same commit, and
-  `bazel.yml`'s push run re-runs the Bazel targets (ga-96smfk.22).
+  tags, versions, doc flags, gofmt, the PR policy wrapper, the package gates
+  and the Linux cache seeders) is gated before the merge by the merge
+  queue's `pr.yml` run of the same commit, the Nix flake check runs in
+  `pr-risk.yml`'s push run, and `bazel.yml`'s push run re-runs the Bazel
+  targets (ga-96smfk.22).
 - `.github/workflows/nightly.yml`: `Nightly`
   Runs at 02:00 UTC. Calls `bazel.yml` with `fresh-test-results: true` (every
   test re-executed, no cached results) and checks the rbe-west worker-env
@@ -164,10 +188,11 @@ Current PR-related workflow names:
   the embedded tier.
 - The differential regression suite (`tests/regression`, formerly
   `regression.yml`) is `//tests/regression:regression_test`, tagged
-  `dolt-server-cmd`, so `bazel.yml`'s `bazel-cmd-dolt` lane runs it on every
-  PR, merge group and push to `main` (results cached until its inputs
-  change), against the catalog-pinned `@bd_releases//:v0.49.6` baseline and
-  a hermetic dolt sql-server.
+  `dolt-server-cmd`, so `bazel.yml`'s `bazel-cmd-dolt` lane (in mode
+  `remote` the `bazel-dolt-int` union) runs it on every PR and push to
+  `main` (a merge group skips the Dolt tiers; results cached until its
+  inputs change), against the catalog-pinned `@bd_releases//:v0.49.6`
+  baseline and a hermetic dolt sql-server.
 - The upgrade smoke tests (`scripts/upgrade-smoke-test.sh`, formerly
   `cross-version-smoke.yml`) are `//tests/upgrade_smoke:upgrade_smoke_<release>_test`,
   one per release in the newest 30 the release catalog pins, which
@@ -180,6 +205,18 @@ Current PR-related workflow names:
   `Update vendorHash for dependabot Go bumps`
   Runs on `pull_request_target` for Dependabot Go bumps. It mutates Dependabot
   branches and must not be a required PR check.
+- `.github/workflows/worker-env-autosync.yml`: `rbe worker-env autosync`
+  Runs on gascity's `repository_dispatch` (`gascity-worker-env-repinned`),
+  every 15 minutes and on dispatch. Opens or updates the rbe worker-env
+  pin-sync PR from `bot/worker-env-sync`; see
+  [rbe worker-env Pin Sync](#rbe-worker-env-pin-sync).
+- `.github/workflows/worker-env-sync-automerge.yml`:
+  `rbe worker-env sync automerge`
+  Runs on `pull_request_target`, on the completion of the pin-sync PR's
+  own `PR` and `PR Risk` runs (`workflow_run`) and every 15 minutes, and
+  does anything only while the repository variable
+  `WORKER_ENV_SYNC_AUTOMERGE` is `true`: verifies the pin-sync PR and
+  queues it once its required checks pass. No ruleset requires it.
 
 As of 2026-05-26, the live `gastownhall/beads` ruleset named
 `Protect main - light (beads and gastown)` enforces deletion and non-fast-forward
@@ -202,9 +239,12 @@ enforced there.
 
 ## Trusted-Author Fork PRs (Bazel Farm)
 
-Fork PRs get no Actions secrets, so `pr.yml`'s Bazel call runs them in mode
-`cache` (local execution with the anonymous read-only cache, slower; the
-remote-only embedded, proxied-server and server-storage tiers skip). `bazel-farm.yml` gives the
+Fork PRs get no Actions secrets, so `pr.yml`'s Bazel call runs them
+through rbe-fork (modes `fork-ro`/`fork-rw`) or, while it is closed or
+refuses the run, in mode `local` (local execution on the GitHub-hosted
+runner, slower; the remote-only embedded, proxied-server and
+server-storage tiers and integration skip; never rbe-cache, which refuses
+GitHub-hosted runners). `bazel-farm.yml` gives the
 remote-execution farm to fork PRs from an allowlist of trusted authors
 (`.github/bazel-farm-allowlist.txt`: the numeric user ids of the same four
 people as gascity's `.github/blacksmith-allowlist.txt`). Everyone else's
@@ -334,14 +374,20 @@ PR. It runs in the default branch's cache scope, which `push` runs on
   settles it. Record the answer here.
 - What a writable cache would reach, and what now stops it. The `bazel.yml`
   lanes on `main` and on same-repo PRs, which fall back to `main`'s scope,
-  restore two caches:
-  - The Bazel runner cache (`bazel-repo-v3-*`, restore-keys prefix). It now
+  restore three caches:
+  - The Bazel runner cache (`bazel-repo-v4-*`, restore-keys prefix). It
     holds only the content-addressable `--repository_cache`, whose hits
-    Bazel re-hashes. The Bazel binary is not cached: `setup-bazel`
-    downloads it into a fresh Bazelisk home with `BAZELISK_VERIFY_SHA256`
-    and checks it against a sha256 pinned for `.bazelversion`. The repo
-    contents cache (extracted repos, never re-verified) is off
-    (`--repo_contents_cache=`).
+    Bazel re-hashes. The repo contents cache (extracted repos, never
+    re-verified) is off (`--repo_contents_cache=`).
+  - Bazelisk and the Bazel binary (`bazel-bin-v1-*`, exact key on
+    `setup-bazel`'s action and `.bazelversion`, written only by
+    `bazel-test` on a push to `main`). `setup-bazel` checks both files
+    against their sha256 pins before installing them, replaces a file with
+    other content by a download, and runs Bazel from a fresh Bazelisk home
+    with `BAZELISK_SKIP_WRAPPER`. Like every `actions/cache` entry, the
+    archive is extracted wherever its paths point, so the pin check covers
+    the two binaries; the writer is what keeps the rest of the entry
+    trustworthy.
   - The Go module cache (`beads-go-mod-v2-*`). `bazel-test` runs
     `go mod verify` right after restoring it.
 
@@ -364,7 +410,7 @@ What anyone else can do: nothing new.
   the base allowlist and says no. `farm` is skipped, and no secret or PR
   code is involved.
 - Fork `pull_request` runs still get no secrets, and `bazel.yml` keeps them
-  local (mode `cache`) even if the fork's `pr.yml` passes `fork-farm`,
+  local (mode `local`) even if the fork's `pr.yml` passes `fork-farm`,
   because the event is not `pull_request_target`.
 
 Attacks considered:
@@ -626,6 +672,174 @@ job's `if:` or rotating the key, in either of two ways:
   step's own kill switch, checked before any network call. Deleting the
   variable does not disable pre-warming; it restores the default of 1.
 
+## rbe worker-env Pin Sync
+
+rbe-west's OSS pool workers run gastownhall/gascity's toolchain and advertise
+the sha256 of the manifest gascity's `tools/rbe/worker-env` measures, and the
+schedulers run an action only on a worker that advertises the action's exact
+`worker-env` pin (`//platforms:rbe_worker`). beads commits a byte-for-byte
+copy of gascity main's manifest (`tools/rbe/worker-env.txt`) and its pin
+(`platforms/BUILD.bazel`). When a gascity PR that re-pins (a Go, dolt or
+library bump) merges, new workers advertise the new pin at once, and every
+beads PR's `Bazel / execution mode` preflight (`tools/rbe/worker-env-sync`)
+fails until beads' copy lands, unless the
+[grace window](#rbe-worker-env-grace-window) covers it. On Oct 21,
+gascity#8165 merged at 01:09:31Z and the copy, #7746, landed at 02:38:04Z:
+89 minutes of red beads PRs.
+
+The sync, end to end:
+
+1. gascity sends `repository_dispatch` `gascity-worker-env-repinned`
+   (`client_payload`: `sha`, `pin`) within about a minute of a push to its
+   main that moves the pin.
+2. `worker-env-autosync.yml` runs on that event, and every 15 minutes as a
+   backstop. It resolves gascity main to a commit with `git ls-remote`
+   (`tools/rbe/worker-env-sync-ref`): raw.githubusercontent.com serves a
+   branch URL with `cache-control: max-age=300`, so for up to 5 minutes
+   after a re-pin the branch URL can still return the old manifest. The
+   payload's `sha` is used only while it is still main's head. On a
+   mismatch it copies the manifest and pin from that commit, pushes
+   `bot/worker-env-sync` (a run whose copy is already on the branch pushes
+   nothing, #7533) and opens the PR.
+3. With `WORKER_ENV_SYNC_AUTOMERGE` set to `true`, the PR opens with no
+   review label, and `worker-env-sync-automerge.yml` verifies it
+   (`tools/rbe/worker-env-sync-verify`: the author, branch and base, every
+   commit of `main...<head>`, the branch's newest push, exactly the two
+   files, the pin, and both files against gascity main, all read at one
+   head commit). It queues the PR only once `CI Gate / Required` and
+   `PR Risk Gate / Required` have both passed on that head, so GitHub queues
+   it at once, from that head, and nothing stays armed. A pending
+   auto-merge, by contrast, survives any writer's push: the PR's
+   `--match-head-commit` binds only the moment of arming, so a PR armed
+   before its checks pass could land a later, unverified head. The
+   `workflow_run` trigger on the sync PR's own `PR` and `PR Risk` runs
+   queues it the moment the second gate passes.
+4. The guard's act job fails closed. After every verification (one that
+   failed, or whose outputs were lost, included) it looks the open sync PR
+   up itself. It queues the PR, or keeps it queued, only on the verdict
+   "arm" for exactly the head it reads; an explicit "unknown" for that
+   same head also holds a queue entry for the next check, but only when
+   GitHub or gascity did not answer a read (briefly unreachable), never
+   when the activity API does not show who pushed the head. It never keeps
+   an auto-merge, whatever the verdict: it disables a pending one (armed,
+   not queued), and a later run on a green head arms afresh; on a PR it
+   keeps queued it disables the auto-merge and keeps the queue entry, since
+   an auto-merge left on could queue the PR again after a push or an
+   ejection. Otherwise it disables any auto-merge and takes the PR out of
+   the merge queue, and the job fails if the PR is still armed or queued
+   after that. A refused PR gets one comment per head commit with the
+   reasons. Without the variable, the PR is labeled
+   `status/needs-review-auto` and lands through the automated review, as
+   before.
+5. Every 15 minutes the guard re-checks an open sync PR (a missed event,
+   or a merge-queue ejection: it re-queues a PR twice per head at most).
+   On a `PR` or `PR Risk` run's completion, or that re-check, it also
+   re-runs, once per head commit, the failed jobs of a first attempt that
+   failed, was cancelled or timed out. A re-pin moves every action key, so
+   that first run is uncached: #7746's release cross-compile took 50
+   minutes, and the first attempts of #7411 and #7732 hit its 90-minute
+   timeout.
+
+The verifier reads the PR's files and file names, and prints them (a diff,
+a refusal), but nothing it prints reaches the runner as a workflow command:
+its stdout and stderr are defanged (`::` and the legacy `##[` broken up)
+before they leave it, and its own annotations escape `%`, which the runner
+decodes in a command's message. Unfiltered, a sync branch carrying a line
+`##[add-mask]true` would have the runner mask `true`, and the runner then
+drops every job output that holds a masked value. The act job's
+fail-closed reading is the second line of defense.
+
+Tokens: the autosync pushes with the gastownhall-autofix App (contents
+write) and opens the PR with the gascity-autofix App (pull-requests write),
+so neither of its tokens can do the other's job. The guard queues the PR
+and takes it out with a gascity-autofix token minted with contents,
+pull-requests and merge-queues write: `enablePullRequestAutoMerge` needs
+contents and pull-requests write on one token, and a PR queued with the
+`GITHUB_TOKEN` never starts its `merge_group` runs. It reads the PR with the
+job's own read-only token, and comments and labels with a
+pull-requests-only token from the same App. Both Apps' keys are secrets of
+the `autofix` environment, whose deployment branch is `main` (a
+`pull_request_target` or `workflow_run` run's ref is the default branch).
+
+Turning it on:
+
+1. Organization settings, Developer settings, GitHub Apps, gascity-autofix,
+   Permissions & events, Repository permissions: Contents "Read and write"
+   and Merge queues "Read and write" (Pull requests is "Read and write"
+   already); save, then accept the new permissions on the gastownhall
+   installation (Organization settings, GitHub Apps, gascity-autofix).
+2. `gh variable set WORKER_ENV_SYNC_AUTOMERGE --repo gastownhall/beads --body true`
+
+If the variable is set before the App has those permissions, the guard
+cannot mint its merge token and labels the PR `status/needs-review-auto`
+once instead (only if it carries no review-pipeline label), so the PR still
+lands through the review.
+
+Dry run, from a checkout on Linux with `gh` logged in:
+`tools/rbe/worker-env-sync-verify <pr>` prints every check and what the
+guard would do, and never writes. With no PR it finds the open sync PR.
+
+Rollback: `gh variable delete WORKER_ENV_SYNC_AUTOMERGE --repo
+gastownhall/beads`. The guard then does nothing and the autosync labels
+the next PR for review. A sync PR that is already queued stays queued:
+"Remove from queue" in the UI takes it out.
+
+Starting over: delete the `bot/worker-env-sync` branch. The autosync
+recreates it from main, and opens a fresh PR while beads is out of step.
+Closing the PR alone is not enough: the autosync pushes nothing to a branch
+that already carries the right two files, and opens a new PR from that same
+branch.
+
+`pull_request_target`: GitHub's workflow execution protections add a
+default rule that disables `pull_request_target` on public repositories
+without an applicable Actions event policy, enforced from 2026-12-02
+(`bazel-farm.yml` depends on the trigger too). Queueing does not depend on
+it: the guard queues on `workflow_run`. If the rule ends up blocking it
+here, a push to the sync branch still drops a queued PR from the queue on
+GitHub's side, and nothing the guard queues stays armed for the new head to
+inherit; the refusal and its comment come with the next `workflow_run` (the
+pushed head's own CI finishing) or the 15-minute run instead of at once.
+
+### rbe worker-env Grace Window
+
+A re-pin gascity can roll back (a Go release: the manifest's go line alone)
+need not turn beads PRs red while the sync PR is on its way. gascity
+publishes a record, `worker-env-grace.txt` alone on its
+`rbe/worker-env-grace` branch (gascity `tools/rbe/worker-env-grace`), with
+the pin before the re-pin and a window: beads may keep that previous pin
+for at most two hours, and rbe-west keeps workers of it an hour longer, for
+the runs beads accepted last. While the repository variable
+`RBE_WORKER_ENV_GRACE` is `true`, the preflight in mode `remote` runs
+`tools/rbe/worker-env-sync` with `WORKER_ENV_SYNC_GRACE=1`: a copy that
+still pins the record's previous pin, inside its window, exits 3, and the
+job proceeds with a notice naming the window's end, so the lanes run on the
+previous-pin workers until the sync PR lands. gascity publishes the record
+about a minute after the re-pin lands on its main, and until then the branch
+holds an earlier re-pin's record, so a record for another pin (or one that
+could not be read) is read again every 15 seconds for up to 150 seconds
+from the script's start (`WORKER_ENV_SYNC_GRACE_WAIT`, inside the job's 5
+minutes) before the preflight decides. Anything else fails the preflight as
+before, with one more line saying why the window does not apply: no record;
+a malformed one (anything but at most 64 KiB of printable ASCII in the exact
+`key value` form, or a window over two hours); an unreadable one after the
+wait; another pin after the wait; `previous none`; a previous pin other than
+beads'; a gascity manifest that moved more than the go line, a Go other than
+beads', or one whose rolled-back manifest does not hash to the previous pin;
+or a window not yet open or closed. Mode `remote` only: `fork-ro` executes
+on the separate `oss-fork` pool, which has no previous-pin workers, and fork
+runs see no variables. The nightly check, the autosync and the guard's
+verifier never ask for the window (`TestWorkerEnvSyncGraceStaysInThePreflight`),
+so the sync PR still opens and lands as above.
+
+Turning it on, once gascity publishes the record and rbe-west serves the
+previous pin (gastownhall/gascity#8271 merged, gascity/infra#2452 deployed):
+`gh variable set RBE_WORKER_ENV_GRACE --repo gastownhall/beads --body true`.
+Rollback: `gh variable delete RBE_WORKER_ENV_GRACE --repo
+gastownhall/beads`; the next run's preflight is strict again. Delete it too
+whenever rbe-west stops serving previous pins (its grace switch off or
+rolled back): beads would otherwise accept a pin no worker serves, and its
+lanes would queue instead of failing fast.
+
 ## dolt-race Union Lane
 
 In mode `remote`, `bazel.yml`'s `bazel-dolt-race` job (check name
@@ -634,13 +848,19 @@ In mode `remote`, `bazel.yml`'s `bazel-dolt-race` job (check name
 (`dolt-server lane`) and `bazel-proxied` (`proxied-server tier`) jobs.
 `--config=dolt-race` is exactly the union of `--config=doltserver` and
 `--config=doltserver-proxied`, with one tag filter for both tiers, so every
-member target's test action is unchanged (`bazel aquery`: the 27 + 35 = 62
-`TestRunner` actions are byte-identical under the member configs and the
-union). One client waits on rbe-west for both tiers at once, so the job ends
-with the slower tier and the other tier's runner is saved.
+member target's test action is unchanged (`bazel aquery` at the cutover: the
+27 + 35 = 62 `TestRunner` actions were byte-identical under the member
+configs and the union; there are 27 + 37 = 64 since
+`//cmd/bd:bd_managed_local_test` runs as 3 shards, and all must fit the
+union's `--jobs=64` at once, `scripts/bazel_dolt_race_test.go`, which leaves
+no headroom: another test action in either tier needs a `--jobs` or
+shard-count change first). One client
+waits on rbe-west for both tiers at once, so the job ends with the slower
+tier and the other tier's runner is saved.
 
-- Mode `remote` only (same-repo pull requests, merge groups, push, nightly,
-  dispatch and `bazel-farm.yml`'s authorized call). In the fork modes
+- Mode `remote` only (same-repo pull requests, push, nightly, dispatch and
+  `bazel-farm.yml`'s authorized call; a merge group skips it with the other
+  Dolt tiers, see [Merge Queue](#merge-queue)). In the fork modes
   (`fork-ro`, `fork-rw`), `cache` and `local`, `bazel-doltserver` and
   `bazel-proxied` run as before: there a single client does both tiers' work
   without in-flight deduplication, so a union would cost the sum of the
@@ -656,7 +876,8 @@ with the slower tier and the other tier's runner is saved.
   union's BEP (the proxied tier's `--suite`; the dolt-server tier has no
   shard-coverage check). The `bazel test` step has a 20-minute timeout,
   every step has one, and the job's (55 minutes) is at least their sum plus
-  5 and below the merge queue's 60-minute check timeout.
+  5 and below the merge queue's 60-minute check timeout, which keeps a
+  rollback of the fast set (a merge group running it again) safe.
 - Its ci-analytics `LANE` is `dolt-race`.
 - Policy: `scripts/bazel_dolt_race_test.go`. Rollback is a revert of the
   cutover PR: the gate ids never changed and the action keys are equal both
@@ -701,7 +922,7 @@ ran tests" steps (`check-ss`, `check-cd`, below) each carry their own
 (`tools/bazel/classify_tier_results.py`) reads the BEP by target label,
 folds each check step's outcome in via `--check NAME=OUTCOME`, computes each
 tier's own result, and fails the job itself iff server-storage's tier failed
-(a cmd-dolt-only test or zero-testcase failure leaves the job green, as
+(a cmd-dolt-only test or zero-testcase failure leaves that step green, as
 `bazel-cmd-dolt`'s own `continue-on-error` already does outside mode
 `remote`); `bazel`'s exit code being neither 0 nor 3 (not attributable to one
 tier) or a non-`PASSED` result for a label outside both `--tier` lists (the
@@ -716,8 +937,22 @@ the job (`scripts/bazel_dolt_int_test.go`'s exact pin of the classify step's
 `server_storage_result` and `cmd_dolt_result`, one per tier, instead of the
 uniform `result` every other lane's always() step records.
 
-- Mode `remote` only (same-repo pull requests, merge groups, push, nightly,
-  dispatch and `bazel-farm.yml`'s authorized call), and only when `integration`
+A cmd-dolt failure fails the job only where no caller gate reads
+`cmd_dolt_result`. In `pr.yml`'s call (pull requests, merge groups) the gate
+reads it as `BAZEL_CMD_DOLT`, so a pull request shows a cmd/bd tier failure
+as before: `BAZEL_CMD_DOLT` red, the call's aggregate `BAZEL` green. On a
+push to `main`, nightly, a dispatch and `bazel-farm.yml`'s advisory call
+nothing reads it, so the job's last step ("The cmd/bd Dolt-server tier fails
+the run outside pr.yml's call") fails the job when `cmd_dolt_result` is
+`failure`. A merge group skips the Dolt tiers, so `main`'s push run is the
+tier's first run on the merged tree, and its red is what
+`main-ci-alert.yml` reports (see [Merge Queue](#merge-queue)). That holds
+whatever `pr.yml`'s `BAZEL_CMD_DOLT_REQUIRED` says: the flag decides only
+what a pull request's gate requires.
+
+- Mode `remote` only (same-repo pull requests, push, nightly, dispatch and
+  `bazel-farm.yml`'s authorized call; a merge group skips it with the other
+  Dolt tiers), and only when `integration`
   is not `"off"` (matching the members). In the fork modes (`fork-ro`,
   `fork-rw`), `cache` and `local`, `bazel-server-storage` and `bazel-cmd-dolt`
   run as before: there a single client does both tiers' work without
@@ -752,11 +987,12 @@ uniform `result` every other lane's always() step records.
   BEP otherwise mixes both tiers' shards under one report. The `bazel test`
   step has a 25-minute timeout, every step has one (the two check steps
   1 minute each, preserving the pre-split step's combined 2-minute budget),
-  and the job's (58 minutes) is at least their sum plus 5 and below the merge
-  queue's 60-minute check timeout -- leaving only about 2 minutes for runner
+  and the job's (59 minutes) is at least their sum plus 5 and below the merge
+  queue's 60-minute check timeout -- leaving only about 1 minute for runner
   pickup and the rbe job inside that 60-minute budget, so a hang that runs to
-  this job's own timeout can drop the merge group; accepted, because such a
-  run is red anyway and the 58-minute job timeout bounds only this job, not
+  this job's own timeout can drop the merge group (were a merge group to run
+  it again: today it skips the Dolt tiers); accepted, because such a
+  run is red anyway and the 59-minute job timeout bounds only this job, not
   the whole run. "Upload test logs" runs `if: failure() || steps.test.outcome
   == 'failure'`, not `failure()` alone, since the `bazel test` step's own
   `continue-on-error` means an ordinary test failure there does not make
@@ -793,8 +1029,10 @@ compared with the cached entries by `tools/bazel/rrc_verify.py`; a mismatch
 fails the job and opens an `rrc-verify` issue, which lists the containment
 steps below.
 
-Mode `cache` lanes (fork PRs while rbe-fork is closed, `rbe=cache`
-dispatches) see no repository variables. The jobs with a reader step above
+Mode `cache` lanes (`rbe=cache` dispatches; no fork or Dependabot PR
+reaches mode `cache`, since rbe-cache refuses GitHub-hosted runners) do
+not follow the variable (the rbe job's `rrc` output is `off` outside mode
+`remote`). The jobs with a reader step above
 pass `BAZEL_RRC_READ: 'true'` to setup-bazel, and only those: their configs
 are the ones `rrc-lane-commands.txt` seeds (`bazel-release-cross` builds for
 other platforms and does not opt in). In mode `cache` they read the same
@@ -803,7 +1041,9 @@ adds the same two lines to its rc whenever
 `.github/actions/setup-bazel/cache-rrc-probe.sh` gets a GetCapabilities
 answer from rbe-cache, then NOT_FOUND for a GetActionResult key no action
 has and for a ByteStream Read of a blob the CAS does not hold. The reader
-lanes that run in mode `cache` use a pinned `ubuntu-24.04` runner there,
+lanes that run in mode `cache` run there on Blacksmith's `ubuntu-2404`
+image, the family `rrc-seed` writes from; their GitHub-hosted fallback (the
+other non-remote modes, which do not read) is a pinned `ubuntu-24.04`,
 not `ubuntu-latest`. Each job's step summary records whether it reads, and
 rbe-cache's TCP connect time (DNS lookup excluded). rbe-cache refuses every
 write, and fork-cache uploads nothing.
@@ -867,6 +1107,9 @@ would only be needed if maintainers still want exactly one required check.
 
 Do not require these existing check names directly:
 
+- `Scope` (`pr.yml`'s and `pr-risk.yml`'s scope job; the gates require
+  its result)
+- `Report main's push CI` (`main-ci-alert.yml`, push runs on `main` only)
 - `Detect CI tier`
 - `Fast checks (frozen migrations, .beads diff)` (the base-diff checks; the
   tree checks it used to run are Bazel tests, see
@@ -911,7 +1154,11 @@ on:
     branches: [ main ]
   merge_group:
     types: [ checks_requested ]
+  push:
+    branches: [ main ]
 ```
+
+(`push` carries the post-merge complement; see [Merge Queue](#merge-queue).)
 
 Do not add `paths`, `paths-ignore`, or narrower branch filters to `pr.yml` or
 `pr-risk.yml`. Path and risk decisions belong in detector jobs and job-level
@@ -1063,8 +1310,9 @@ listed paths can be blocked waiting for a check that GitHub never creates.
 
 Retired (ga-96smfk.22). `pr-risk.yml`'s `detect-ci-tier` used to run the
 embedded, proxied and server-Dolt matrices only for risky paths; the Bazel
-lanes that replaced them run on every PR and merge group, and their result
-cache keeps an unaffected PR's cost to a cache hit.
+lanes that replaced them run on every PR and every push to `main` (a merge
+group skips these Dolt tiers, see [Merge Queue](#merge-queue)), and their
+result cache keeps an unaffected PR's cost to a cache hit.
 
 ### Legacy Tier Retirement (D2)
 
@@ -1226,7 +1474,8 @@ Required` requires them to have run remotely and passed.
   Dependabot alike; merge groups run on this repository's
   `gh-readonly-queue/*` branch with the CI secrets) `pr.yml`'s gate requires
   `BAZEL_REMOTE` (the call's mode is `remote`, `fork-ro` or `fork-rw`) and
-  every lane's own id. Mode `skip` (the farm switch off) and mode `cache`
+  every lane's own id (a merge group every lane's but the Dolt tiers', which
+  main's push run runs: see [Merge Queue](#merge-queue)). Mode `skip` (the farm switch off) and mode `local`
   (the executor secret missing, or rbe-fork closed or refusing a fork run)
   are red, never a silent pass with fewer tests.
   `scripts/pr_risk_bazel_coverage_test.go`
@@ -1236,7 +1485,8 @@ Required` requires them to have run remotely and passed.
 
   On push to `main`, `bazel.yml`'s push run is the only run of these tiers
   (`main.yml`'s legacy embedded, proxied, integration, domain+uow and Linux
-  unit jobs were removed, ga-96smfk.14).
+  unit jobs were removed, ga-96smfk.14), and for the Dolt tiers the first
+  run on the merged tree.
 - Enforcement scope: the beads-only ruleset requires both gates on the
   default branch (`main`) only. On PRs into `release/**` both workflows run
   and report, but merging does not wait for them, before or after this
@@ -1454,7 +1704,8 @@ What stays a job, and why:
   `go build`), and attributes drift against the merge-base. Releases publish
   no pure-Go Linux binary a Bazel repository could pin by sha256.
 - The macOS and Windows legs of `check-doc-freshness-platforms` (no remote
-  workers for those hosts), on Blacksmith for every PR and merge group.
+  workers for those hosts), on Blacksmith for every PR and every push to
+  `main` (a merge group skips them, see [Merge Queue](#merge-queue)).
 
 `check-doc-freshness.sh` compares review dates with today's date, which is
 not in the action key: a cached pass stands until one of its inputs changes,
@@ -1462,9 +1713,10 @@ and nightly's `--config=fresh` run re-checks it against the date.
 
 ### Blacksmith Windows and macOS Jobs
 
-Every Windows and macOS job runs on Blacksmith for every PR and merge group,
-forks and Dependabot included (ga-96smfk.22); everything Linux runs under
-Bazel on rbe-west. pr.yml's Windows jobs (`test-windows-liveness`,
+Every Windows and macOS job runs on Blacksmith for every PR, forks and
+Dependabot included (ga-96smfk.22), and for every push to `main`; a merge
+group skips them (the scope job's `platforms` switch, see
+[Merge Queue](#merge-queue)). Everything Linux runs under Bazel on rbe-west. pr.yml's Windows jobs (`test-windows-liveness`,
 `test-windows-small`, `worktree-remove-windows`, `windows-make-shell`) name
 their `blacksmith-*vcpu-windows-2025` label literally; the two mixed-OS
 matrix jobs, `pr-preflight-platforms` and `check-doc-freshness-platforms`,
@@ -1532,8 +1784,8 @@ lane runs `//internal/storage/dolt:dolt_server_full_test` (16 shards) and
 `//tests/regression:regression_test` (14 shards) in `bazel.yml`'s
 `bazel-cmd-dolt` lane, which `pr.yml`'s `CI Gate / Required` requires
 (`BAZEL_CMD_DOLT_REQUIRED`), so regression is now part of the aggregate gate
-on PRs and merge groups instead of a separate, path-detected advisory
-workflow. Its path detector is replaced by test result caching: the target
+on PRs (a merge group skips the Dolt tiers; the push to `main` runs it)
+instead of a separate, path-detected advisory workflow. Its path detector is replaced by test result caching: the target
 re-runs only when `bd_for_tests`, the suite or its pinned inputs change. The
 baseline is `@bd_releases//:<BASELINE_VERSION>` (`tools/bazel/bd_releases.bzl`,
 pinned by `scripts/migration-test/release-catalog.json`); `TestMain` fails if
@@ -1571,9 +1823,14 @@ and 30 on tag pushes.
 `pr.yml` and `pr-risk.yml` run on `merge_group` (`types: [
 checks_requested ]`) and report `CI Gate / Required` and `PR Risk Gate /
 Required` on each queue entry's merge-group commit, so the ruleset's two
-required contexts work unchanged once the queue rule is on.
+required contexts work unchanged once the queue rule is on. A merge group
+runs only the fast build and unit set; the Windows, macOS and Nix jobs and
+the Dolt-tier Bazel lanes are skipped there by design and run after the
+merge, on `main`'s push ([Post-merge complement](#post-merge-complement)).
 `scripts/ci_merge_queue_test.go` simulates a `merge_group` run through the
-shared `evalGHExpr` evaluator and the workflows' own step scripts.
+shared `evalGHExpr` evaluator and the workflows' own step scripts;
+`scripts/ci_merge_group_scope_test.go` runs the scope script and both gates'
+real steps over a pull request, a merge group and a push to `main`.
 
 ### Queueing a PR
 
@@ -1585,28 +1842,69 @@ On a green PR this adds it to the queue; while the PR's own required
 checks are still running, `--auto` queues it once they pass (this needs
 the repository's "Allow auto-merge" setting). The queue's own merge
 method (squash) decides how it lands. `gh pr merge <number>
---disable-auto` (or "Remove from queue" in the UI) takes it out; `--admin`
-(bypass actors only) merges directly, skipping the queue.
+--disable-auto` disarms a PR still waiting for its checks; gh leaves a PR
+that is already queued as it is, and only "Remove from queue" in the UI or
+the GraphQL `dequeuePullRequest` mutation takes it out. `--admin` (bypass
+actors only) merges directly, skipping the queue.
 
-Planned queue settings (`merge_queue` rule in the `beads main: required
-CI gates` ruleset): merge method `SQUASH`, grouping strategy `ALLGREEN`,
+Queue settings (`merge_queue` rule in the `beads main: required CI gates`
+ruleset): merge method `SQUASH`, grouping strategy `ALLGREEN`,
 `max_entries_to_merge` 5, `max_entries_to_build` 3, `min_entries_to_merge`
 1, `min_entries_to_merge_wait_minutes` 2 (it only delays merging while
 fewer than `min_entries_to_merge` entries are queued, so at 1 it never
-waits), `check_response_timeout_minutes` 60. A same-repo `pr.yml` run takes
-about 10-11 minutes today. The build limit (3) and the timeout (60) leave
-headroom while the farm scales from zero, so a backlog does not time
-entries out and set off a rebuild cascade. Watch the first days'
-`merge_group` durations before raising the build limit. The required status checks
-stay exactly `CI Gate / Required` and `PR Risk Gate / Required` (GitHub
-Actions).
+waits), `check_response_timeout_minutes` 60. The build limit (3) and the
+timeout (60) leave headroom while the farm scales from zero, so a backlog
+does not time entries out and set off a rebuild cascade. The fast set
+leaves `max_entries_to_build` at 3; raising it to 5 is the follow-up, once
+the first days' `merge_group` durations confirm the shorter runs. The
+required status checks stay exactly `CI Gate / Required` and `PR Risk Gate
+/ Required` (GitHub Actions).
 
 ### What runs on a merge group
 
 Each queue entry gets a commit on `gh-readonly-queue/main/pr-<n>-<sha>`:
 `main` plus every PR ahead of it in the queue plus this PR. Both
-workflows run on that commit like a same-repo PR:
+workflows run on that commit like a same-repo PR, but only the fast set.
 
+- Scope: one script, `.github/scripts/ci-scope.sh`, decides what each
+  event runs. Both workflows' `scope` job runs it (the only job that reads
+  the event; it checks out nothing else), and every other job needs it and
+  runs on one of its switches:
+
+  | Event | `platforms` | `dolt-tiers` | `linux` | `advisory` |
+  | --- | --- | --- | --- | --- |
+  | `pull_request` | true | on | true | true |
+  | `merge_group` | false | off | true | false |
+  | `push` to `main` | true | on | false | false |
+
+  - `platforms`: the Windows and macOS jobs (`test-windows-liveness`,
+    `test-windows-small`, `worktree-remove-windows`, `windows-make-shell`,
+    `check-doc-freshness-platforms`, `pr-preflight-platforms`) and
+    `pr-risk.yml`'s `test-nix`.
+  - `linux`: `fast-checks`, `check-doc-flags` and the `bazel` call.
+  - `dolt-tiers`: passed to the `bazel` call. `off` skips
+    `bazel-embedded`, `bazel-dolt-race` and `bazel-dolt-int` (outside mode
+    `remote` their members `bazel-doltserver`, `bazel-proxied`,
+    `bazel-server-storage` and `bazel-cmd-dolt`), and the call reports
+    what it ran as its `dolt-tiers` output. Anything but `off` (every other
+    caller, push and dispatch) runs every lane. With `cmd-dolt-required`
+    the integration build's `//cmd/bd:bd_test` belongs to the cmd/bd
+    Dolt-server tier, so a merge group defers it as well.
+  - `advisory`: `advisory-reports`, pull requests only.
+
+  Any other event fails the scope job, and so both gates.
+- So a merge group runs `fast-checks`, `check-doc-flags`, the package
+  gates and the Bazel lanes `test`, `pure-Go and js/wasm`, `release
+  cross-compile` and `integration`. Merge-group job end times before the
+  change (W1, 2026-10, p50/p90 minutes from run creation): embedded
+  6.5/13.8, dolt-race 5.0/10.0, dolt-int 4.5/11.7, test 4.0/8.5, the
+  Windows jobs 2.4-3.0/3.8-4.8, Nix 2.6/4.0, integration 2.3/8.8, release
+  cross-compile 2.0/7.5, pure-Go 1.9/6.1. Without the skipped jobs the
+  merge-group run's p50 drops from about 7.0 to about 4.2 minutes, ending
+  with the `test` lane, and the Windows Make installers' network flakes (8
+  of the 12 W1 ejections) no longer eject entries. The scope job adds one
+  short Blacksmith job (a sparse checkout of the script) before the lanes
+  start.
 - Trust: same repository, CI secrets present, actor
   `github-merge-queue[bot]`. Every Blacksmith ternary names
   `merge_group` explicitly, `bazel.yml`'s `rbe` job takes mode `remote`
@@ -1623,12 +1921,15 @@ workflows run on that commit like a same-repo PR:
   exactly as before merging.** A ruleset `pull_request` rule (1 approval,
   approval of the most recent push) would enforce a review before queueing.
   That decision is pending.
-- The gate requires the Bazel lanes to have run remotely and passed
-  (`BAZEL_REMOTE`), exactly as on a PR: with the farm switch off (mode
-  `skip`) or a missing executor secret (mode `cache`) it is red.
-- `bazel-cmd-dolt` (required while `BAZEL_CMD_DOLT_REQUIRED` is `"true"`),
-  `bazel-integration`, the package gates and the F4 prebuilt Windows pair
-  run as on a PR.
+- The gate requires the fast set's Bazel lanes to have run remotely and
+  passed (`BAZEL_REMOTE`), exactly as on a PR: with the farm switch off
+  (mode `skip`) or a missing executor secret (mode `local`) it is red.
+  `bazel-integration` and the package gates run as on a PR. The Dolt-tier
+  ids (`BAZEL_EMBEDDED`, `BAZEL_DOLTSERVER`, `BAZEL_PROXIED`,
+  `BAZEL_SERVER_STORAGE`, `BAZEL_CMD_DOLT`) may skip only because
+  `bazel-gate.sh` sees both halves: the scope turned the tiers off and the
+  call reports `dolt-tiers` `off`. A Dolt-tier lane that ran anyway and
+  failed still reds the gate.
 - Diff bases: a merge group has no `pull_request` payload and no
   `base_ref`. The migration-hygiene `BASE_SHA`, the package gates'
   `PR_BASE_SHA`/`PR_HEAD_SHA`, the `.beads/issues.jsonl` guard and the
@@ -1648,6 +1949,118 @@ workflows run on that commit like a same-repo PR:
   cancels in progress for a merge group.
 - Autofix: `bazel-autofix.yml` and `docs-autofix.yml` act only on
   `pull_request` runs; a red merge group never gets an autofix push.
+
+### Post-merge complement
+
+The queue lands a batch of entries (up to `max_entries_to_merge`) as one
+push: `main` fast-forwards to the last entry's tested merge-group commit,
+the same tree, which contains every entry of the batch. Push workflows run
+once per push, for its head commit, so the push runs of that head run the
+rest:
+
+- `pr.yml` (scope `push`): the Windows and macOS jobs, and `CI Gate /
+  Required` over them. The Linux jobs and the whole `bazel` call are
+  skipped and excused there: the merge group ran the former on the same
+  tree, and `bazel.yml`'s own push run replaces the latter. `pr.yml` never
+  calls `bazel.yml` on a push: that run's `rrc-seed` mints its writer
+  certificate only for a main-push `bazel.yml` token.
+- `pr-risk.yml` (scope `push`): `test-nix`.
+- `bazel.yml`'s own push run: every Bazel lane (it has no inputs there, so
+  the Dolt tiers run, and `bazel-integration` keeps `//cmd/bd:bd_test`).
+  A cmd/bd Dolt-server tier failure fails `bazel-dolt-int` there (see
+  [dolt-int Union Lane](#dolt-int-union-lane)), as every other Dolt-tier
+  lane's failure fails its own job.
+- `main.yml`, as before.
+
+The invariant (`TestCIScopeCoversEveryGatedJobOnMain`,
+`TestCIScopeExcusedIDsRedTheirPushRun`): every push head on `main` runs
+every job either gate reads on a pull request, the fast set in its merge
+group and the rest in its push runs, and every id a merge group's gates
+excuse turns that push run red when its job fails there. An earlier entry
+of a batch gets the fast set on its own tree in its own merge group, and
+the complement only as part of the batch head's tree, which also holds
+the entries after it. `advisory-reports`, which neither gate reads, runs
+on pull requests only. A direct push to `main` (a bypass actor) has no
+merge group: as before, only its push runs check it.
+
+`pr.yml`, `pr-risk.yml` and `bazel.yml` key a push run's concurrency group
+on its commit, so a later push never cancels an earlier one's complement
+run or displaces it while it waits (GitHub cancels a group's pending run
+when a newer one queues).
+
+The cost: a regression only the Windows, macOS, Nix or Dolt-tier jobs see
+is no longer stopped by the queue. The PR's own run still runs them, so
+what reaches `main` is a regression that came from combining the PR with
+what landed after that run, or a flake; it surfaces on the push run, and
+the alert names every PR of the pushed range as a candidate.
+
+Caveats:
+
+- Concurrent push runs. Keying push runs on their commit lets a landing
+  burst run several full `bazel.yml` push runs at once: more farm load,
+  and parallel `rrc-seed` jobs. `rrc-seed`'s writer mint retries a 429
+  for about a minute (`.github/scripts/rrc-writer-credential.sh`) and then
+  fails the job, which reds that push run for infra noise; the alert then
+  reports it like any red, and re-running the failed job clears it. If it
+  shows up, give `rrc-seed` a shared job-level concurrency group that
+  queues instead of cancelling (`queue: max`; its uploads are
+  content-addressed, so serial seeding loses nothing). Not done here: a
+  key GitHub rejected in `bazel.yml` would fail every pull request's call
+  at startup.
+- Mode `remote`. The complement assumes `bazel.yml`'s push run takes mode
+  `remote`, as the merge group did (its gate requires it, `BAZEL_REMOTE`).
+  A push run in mode `skip` (the farm switch turned off) runs no lane, and
+  one in mode `local` (the executor secret gone) skips the remote-only
+  tiers and integration; both stay green on what they skipped. Only a change of the switch
+  or the secret between a merge group and its push gets there.
+
+### How a red main surfaces
+
+`.github/workflows/main-ci-alert.yml` runs on `workflow_run` (completed)
+of `PR`, `PR Risk`, `Bazel` and `Main` on `main`, and acts only on this
+repository's push runs (`.github/scripts/main-ci-alert.sh`):
+
+- A red push run (`failure`, `timed_out`, `startup_failure`) opens the one
+  `ci/main-red` issue with the workflow, the run, the head SHA and subject,
+  the candidate PRs and the failed jobs; while that issue is open, later
+  reds comment on it instead. The candidates are every PR a squash subject
+  (`(#N)`) names between that workflow's previous decided push run's head
+  and this run's head (the compare API, at most 100 commits; the head
+  commit's PR alone when there is no such run or the range cannot be
+  read): a batch lands as one push.
+- It comments on each candidate (at most the newest ten) only when this
+  run turns the workflow red (its previous decided push run was green, or
+  there is none) and is the run's first attempt. While the workflow stays
+  red, later reds, and a re-run that goes red again, update the issue
+  alone. Push runs overlap (each push keys its own concurrency group) and
+  can finish out of order: a red run with a newer green push run of the
+  same workflow is stale and notifies nobody, and reports only on an issue
+  already open. A runs or jobs API error does not lose the issue: the
+  candidates fall back to the head commit's PR (notified), or the job list
+  to a link to the run, with a warning.
+- A later green push run of the same workflow comments that it is green
+  again, and the issue closes once no tracked workflow's latest decided
+  push run on `main` is red. Cancelled runs (`main.yml` cancels older
+  runs) say nothing either way: the script reads the runs API page after
+  page past them. The API lists a workflow's newest 1000 push runs only; a
+  workflow none of them decided is unknown and keeps the issue open.
+- It holds `issues: write`, `pull-requests: write`, `actions: read` and
+  `contents: read`, checks out only its script from the default branch,
+  reads no artifact and runs nothing from the run it reports on. Runs are
+  serialized (`queue: max`), so two reds finishing together open one
+  issue.
+
+Fix forward or revert; the issue names the candidates.
+
+### Rolling back the fast set
+
+Make the merge group's scope full again: give `merge_group` the
+`pull_request` row in `.github/scripts/ci-scope.sh` (`platforms=true
+dolt-tiers=on linux=true`) and update `ciScopeRows` in
+`scripts/ci_merge_group_scope_test.go`. The merge group then runs every job
+again and the gates excuse nothing there; no ruleset change is needed. The
+push runs keep running the complement, redundantly, until they are removed
+too.
 
 ### Test result caching
 
@@ -1690,21 +2103,19 @@ check shows that `test.xml` is downloaded for cache hits, which
 `equivalence.py`, `check_testcases.py` and the pure-Go lane's test-count
 check read.
 
-Non-Bazel required jobs re-run in full on every merge group (approximate
-PR timings, 2026-10): `fast-checks` (~40 s), `pr-policy-wrapper`
-(~2.5 min), `check-doc-flags` (~1.7 min),
+Non-Bazel required jobs re-run in full wherever they run (approximate PR
+timings, 2026-10): on a merge group `fast-checks` (~40 s),
+`check-doc-flags` (~1.7 min) and the package gates (seconds unless their
+paths changed); on a pull request and on the push to `main` also
 `check-doc-freshness-platforms` and `pr-preflight-platforms` (Windows and
-macOS legs, up to ~5 min on Windows),
-`windows-make-shell` (~2.7 min), the native Windows pair
-(`test-windows-liveness`, `worktree-remove-windows`, ~1-5 min),
-`test-nix` (~3 min) and the package gates (seconds unless their paths
-changed). None caches results the way Bazel does; most are cheap or
-already path- or tier-gated. A candidate to skip on `merge_group`, not
-done here: the macOS legs of the preflight/doc-freshness matrices
-(platform behavior the PR run already checked on the same inputs). With
-result reuse the merge group's critical path is the Windows legs
-(~5 min), not the Bazel lanes once their tests are cached. An entry's first build after a base
-change still compiles what changed.
+macOS legs, up to ~5 min on Windows), `windows-make-shell` (~2.7 min), the
+native Windows pair (`test-windows-liveness`, `worktree-remove-windows`,
+~1-5 min) and `test-nix` (~3 min). None caches results the way Bazel
+does. Those platform jobs used to be the merge group's critical path (the
+Windows legs, ~5 min) and its flakiest checks (the Windows Make
+installers' network); a merge group now skips them, so its critical path
+is the Bazel `test` lane, which reuses cached results. An entry's first
+build after a base change still compiles what changed.
 
 ### Failures and flakes
 
@@ -1722,22 +2133,39 @@ on the branch with `fresh-test-results` checked. Runs of queue entries
 that were invalidated (an entry ahead was ejected) keep running to
 completion and use farm capacity; plan the build limit with that in mind.
 The 60-minute check timeout ejects an entry whose gates never report;
-both gates normally finish in about 10-15 minutes.
+both gates normally finish in about 4 minutes (p50; 8-9 at p90) on the
+fast set. A flake in a job the merge group skips (a Windows installer
+download, a Dolt-tier lane) no longer ejects anything: it reds a push run
+on `main` instead, which opens or comments on the `ci/main-red` issue
+([How a red main surfaces](#how-a-red-main-surfaces)); re-run that push
+run's failed jobs.
 
-Rollback: delete the `merge_queue` rule from the ruleset. Queued PRs fall
-back to the normal merge button; the `merge_group` triggers are inert
-without a queue.
+Rollback of the queue: delete the `merge_queue` rule from the ruleset.
+Queued PRs fall back to the normal merge button; the `merge_group`
+triggers are inert without a queue. Rollback of the fast set alone:
+[Rolling back the fast set](#rolling-back-the-fast-set).
 
 Policy for `merge_group`:
 
 - `PR` and `PR Risk` must include `merge_group` (`checks_requested`), and
   no job or step condition in them may key on the event: decisions belong
-  in detector jobs (`TestMergeQueueRequiredGatesRunOnMergeGroup`).
+  in detector jobs (`TestMergeQueueRequiredGatesRunOnMergeGroup`). The
+  scope job is that detector for what a merge group or a push to `main`
+  skips; `bazel.yml`'s `rbe` job decides the execution mode.
+- The scope job is the only place that may excuse a skip, and only these
+  sets: on a merge group the Windows, macOS and Nix jobs
+  (`CI_SCOPE_PLATFORMS_IDS`) and, through `bazel-gate.sh` and only when
+  the Bazel call reports `dolt-tiers` `off` too, the Dolt-tier lanes; on a
+  push to `main` `pr.yml`'s Linux jobs and its whole Bazel call
+  (`CI_SCOPE_LINUX_IDS`); on a pull request nothing. A scope job that
+  failed, or whose outputs are not exactly one event's row, reds both
+  gates (`TestCIScopePRGate`, `TestCIScopeRiskGate`). The execution-mode
+  skips of `bazel-gate.sh` are unchanged.
 - Any risk detector added to the required topology should default to run on
   `merge_group`, because the merge group commit may combine individually safe
   PRs into a risky integration state.
-- The aggregate gates evaluate merge group results exactly like PR results;
-  no skip is excused for `merge_group` alone.
+- Beyond those sets the aggregate gates evaluate merge group results exactly
+  like PR results.
 
 ## Initial Rollout Snapshot
 
@@ -1787,7 +2215,8 @@ would queue forever on a missing runner label instead of falling back to
 the label being unavailable). Revert these four together to take same-repo
 PRs off Blacksmith entirely and back onto `ubuntu-latest`:
 
-1. **F3's gate runners** — pr.yml's and pr-risk.yml's `ci-gate` jobs.
+1. **F3's gate runners** — pr.yml's and pr-risk.yml's `ci-gate` jobs, and
+   their `scope` jobs, which share the gates' runner expression.
 2. **bazel.yml's `rbe` job** runner.
 3. **F7a** — pr.yml's `fast-checks`, `advisory-reports`,
    `check-release-target-cross-compilation`, `check-doc-flags`,

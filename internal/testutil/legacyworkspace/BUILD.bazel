@@ -1,14 +1,10 @@
 load("@rules_go//go:def.bzl", "go_library")
 
 go_library(
-    name = "historicalsqlite",
-    srcs = ["workspace.go"],
-    importpath = "github.com/steveyegge/beads/internal/historicalsqlite",
+    name = "legacyworkspace",
+    srcs = ["legacyworkspace.go"],
+    importpath = "github.com/steveyegge/beads/internal/testutil/legacyworkspace",
     visibility = ["//:__subpackages__"],
-    deps = [
-        "//internal/configfile",
-        "//internal/storage/embeddeddolt",
-    ],
 )
 
 # --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---

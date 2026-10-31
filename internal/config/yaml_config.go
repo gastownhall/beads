@@ -8,11 +8,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/ceiling"
 	"github.com/steveyegge/beads/internal/gitenv"
+	"github.com/steveyegge/beads/internal/remedy"
 	"gopkg.in/yaml.v3"
 )
 
@@ -300,19 +302,24 @@ func checkSecretGitTracked(configPath, key string) error {
 		return nil
 	}
 	envVar := secretKeyEnvVarHint(key)
+	// The config path goes into the git rm and echo commands as one shell
+	// word each: bare, a workspace path with a space in it would untrack the
+	// wrong file and append to another.
+	configArg, configNote := remedy.CommandArg(runtime.GOOS, configPath, "<config>")
+	ignoreArg, ignoreNote := remedy.CommandArg(runtime.GOOS, filepath.Join(filepath.Dir(configPath), ".gitignore"), "<gitignore>")
 	return fmt.Errorf(
 		"refusing to write secret key %q to git-tracked config file %s\n\n"+
 			"This would expose your secret in git history. Instead:\n"+
 			"  export %s=\"your-key-here\"    # add to ~/.secrets or ~/.zshrc\n\n"+
 			"Or move config.yaml out of git tracking:\n"+
-			"  git rm --cached %s\n"+
-			"  echo \"config.yaml\" >> %s/.gitignore\n\n"+
+			"  git rm --cached %s%s\n"+
+			"  echo \"config.yaml\" >> %s%s\n\n"+
 			"To override this check (e.g., for testing):\n"+
 			"  bd config set --force-git-tracked %s \"value\"",
-		key, configPath,
+		key, remedy.PrintedValue(configPath),
 		envVar,
-		configPath,
-		filepath.Dir(configPath),
+		configArg, configNote,
+		ignoreArg, ignoreNote,
 		key,
 	)
 }

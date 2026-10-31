@@ -101,14 +101,15 @@ func configuredBackendUnavailable(backend, beadsDir string, cfg *configfile.Conf
 
 // checkDiscoveredBackend refuses a workspace that OpenBestAvailableWith cannot
 // open, reading its metadata as configfile.LoadForDiscovery does, which never
-// rewrites the workspace: a format this build does not support
-// (configfile.CheckDiscoveredWorkspaceFormat), or a removed or unrecognized
-// backend (configuredBackendUnavailable). It runs before configfile.Load, which
-// migrates a legacy config.json into metadata.json and drops the keys Config
-// does not know, as the CLI's command admission checks the same read before
-// any Load. Metadata that does not load is left to Load to report, unless the
-// graph format marker sits beside it (configfile.LoadDiscoveredForOpen); no
-// metadata at all (and no format marker) selects Dolt.
+// rewrites the workspace: a format this build does not support or a historical
+// SQLite workspace (configfile.LoadDiscoveredForOpen), or a removed or
+// unrecognized backend (configuredBackendUnavailable). It runs before
+// configfile.Load, which migrates a legacy config.json into metadata.json and
+// drops the keys Config does not know, and before anything that creates a
+// database or gate file, as the CLI's command admission checks the same read
+// before any Load. Metadata that does not load is left to Load to report,
+// unless the graph format marker sits beside it; no metadata at all (and no
+// format marker or SQLite database) selects Dolt.
 func checkDiscoveredBackend(beadsDir string) error {
 	cfg, err := configfile.LoadDiscoveredForOpen(beadsDir)
 	if err != nil {
@@ -120,7 +121,7 @@ func checkDiscoveredBackend(beadsDir string) error {
 	return nil
 }
 
-// UnsupportedWorkspaceFormatError is returned by OpenBestAvailable,
+// UnsupportedWorkspaceFormatError is returned by Open, OpenBestAvailable,
 // OpenBestAvailableWith, OpenFromConfig and OpenGated when the workspace
 // declares a data model this build cannot open: a metadata.json graph_mode
 // other than "dependency", such as the "link" workspaces graph-preview builds
@@ -131,6 +132,15 @@ func checkDiscoveredBackend(beadsDir string) error {
 // Aliased here because internal/configfile is unimportable outside this
 // module.
 type UnsupportedWorkspaceFormatError = configfile.UnsupportedWorkspaceFormatError
+
+// LegacyWorkspaceError is returned by Open, OpenBestAvailable,
+// OpenBestAvailableWith, OpenFromConfig and OpenGated for a workspace a
+// pre-Dolt bd left behind: a historical SQLite workspace, whose SQLite
+// database is still the only copy of its data. Nothing was opened, created or
+// modified, and its text is the refusal the bd CLI prints when run inside that
+// workspace: migrate it explicitly first. Match it with errors.As. Aliased
+// here because internal/configfile is unimportable outside this module.
+type LegacyWorkspaceError = configfile.LegacyWorkspaceError
 
 // Transaction provides atomic multi-operation support within a database transaction.
 // Use Storage.RunInTransaction() to obtain a Transaction instance.
@@ -393,8 +403,22 @@ func AllowSharedSchemaMigration(allow bool) {
 // Open opens a Dolt-backed beads database at the given path.
 // This always opens in embedded mode. Use OpenFromConfig to respect
 // server mode settings from metadata.json.
+//
+// The workspace holding dbPath (its parent directory) is refused, before
+// anything is written there, when bd run in it would refuse it from its
+// contents (checkDiscoveredBackend): a format this build cannot open
+// (*UnsupportedWorkspaceFormatError), a historical SQLite workspace
+// (*LegacyWorkspaceError), or a removed or unknown backend.
 func Open(ctx context.Context, dbPath string) (Storage, error) {
-	return dolt.New(ctx, &dolt.Config{Path: dbPath, CreateIfMissing: true})
+	if err := checkDiscoveredBackend(filepath.Dir(dbPath)); err != nil {
+		return nil, err
+	}
+	st, err := dolt.New(ctx, &dolt.Config{Path: dbPath, CreateIfMissing: true})
+	if err != nil {
+		// An untyped nil, as the other public opens return.
+		return nil, err
+	}
+	return st, nil
 }
 
 // OpenFromConfig opens the Dolt implementation using configuration from
@@ -647,8 +671,12 @@ var (
 	ErrNotClaimable    = storage.ErrNotClaimable
 	ErrCloseBlocked    = storage.ErrCloseBlocked
 	ErrVersionMismatch = storage.ErrVersionMismatch
-	ErrSelfDependency  = domain.ErrSelfDependency
-	ErrDependencyCycle = domain.ErrDependencyCycle
+	// ErrIdempotencyExpired matches a create refused because a retaining
+	// retention sweep retired its id: the create that used the id already
+	// happened and a create of it never runs again.
+	ErrIdempotencyExpired = storage.ErrIdempotencyExpired
+	ErrSelfDependency     = domain.ErrSelfDependency
+	ErrDependencyCycle    = domain.ErrDependencyCycle
 	// ErrDependencySourceNotFound and ErrDependencyTargetNotFound are the two
 	// endpoint-existence refusals AddDependency and AddDependencies raise; the
 	// typed value carrying the missing id is DependencyEndpointNotFoundError.

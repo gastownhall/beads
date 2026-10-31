@@ -810,6 +810,13 @@
     },
     {
       "schema": "BatchGetIssue",
+      "member": "arrival_seq",
+      "type": "integer",
+      "format": "int64",
+      "required": false
+    },
+    {
+      "schema": "BatchGetIssue",
       "member": "assignee",
       "type": "string",
       "required": false
@@ -1184,6 +1191,13 @@
       "schema": "BlockedIssue",
       "member": "actor",
       "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BlockedIssue",
+      "member": "arrival_seq",
+      "type": "integer",
+      "format": "int64",
       "required": false
     },
     {
@@ -2468,6 +2482,13 @@
     },
     {
       "schema": "Issue",
+      "member": "arrival_seq",
+      "type": "integer",
+      "format": "int64",
+      "required": false
+    },
+    {
+      "schema": "Issue",
       "member": "assignee",
       "type": "string",
       "required": false
@@ -2861,6 +2882,13 @@
       "schema": "IssueDetails",
       "member": "actor",
       "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "arrival_seq",
+      "type": "integer",
+      "format": "int64",
       "required": false
     },
     {
@@ -3461,6 +3489,13 @@
     },
     {
       "schema": "IssueWithCounts",
+      "member": "arrival_seq",
+      "type": "integer",
+      "format": "int64",
+      "required": false
+    },
+    {
+      "schema": "IssueWithCounts",
       "member": "assignee",
       "type": "string",
       "required": false
@@ -3838,6 +3873,13 @@
       "schema": "IssueWithDependencyMetadata",
       "member": "actor",
       "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
+      "member": "arrival_seq",
+      "type": "integer",
+      "format": "int64",
       "required": false
     },
     {
@@ -4283,6 +4325,13 @@
       "type": "array",
       "required": false,
       "item_type": "object"
+    },
+    {
+      "schema": "Problem",
+      "member": "closed_at",
+      "type": "string",
+      "format": "date-time",
+      "required": false
     },
     {
       "schema": "Problem",
@@ -4888,6 +4937,12 @@
     },
     {
       "schema": "SweepRequest",
+      "member": "retain_ids",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "SweepRequest",
       "member": "tier",
       "type": "string",
       "enum": [
@@ -4937,6 +4992,12 @@
     },
     {
       "schema": "SweepResult",
+      "member": "retain_ids",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "SweepResult",
       "member": "skipped",
       "type": "object",
       "required": true
@@ -4979,6 +5040,12 @@
     },
     {
       "schema": "SweepSkips",
+      "member": "retention_required",
+      "type": "integer",
+      "required": false
+    },
+    {
+      "schema": "SweepSkips",
       "member": "unknown_closed_at",
       "type": "integer",
       "required": true
@@ -4999,6 +5066,13 @@
       "schema": "TreeNode",
       "member": "actor",
       "type": "string",
+      "required": false
+    },
+    {
+      "schema": "TreeNode",
+      "member": "arrival_seq",
+      "type": "integer",
+      "format": "int64",
       "required": false
     },
     {

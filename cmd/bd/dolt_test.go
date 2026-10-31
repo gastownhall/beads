@@ -15,10 +15,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/hooks"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/testutil"
 )
@@ -1358,6 +1362,271 @@ func TestPersistedRemoteProberFor_PlainStore(t *testing.T) {
 	}
 }
 
+// fakeLeftoverCopyStore stands in for a server-mode store whose server lists
+// remotes (none by default) while a Dolt database left in the workspace's
+// Dolt root, which the server does not serve, records leftover: the state
+// `bd init --server --remote` leaves a gateway workspace in. Push and pull
+// fail as that server's do, with its remote-not-found error, and AddRemote
+// must not be reached.
+type fakeLeftoverCopyStore struct {
+	fakeSyncStore
+	persisted      bool
+	leftover       []storage.RemoteInfo
+	addRemoteCalls int
+}
+
+const leftoverCopyDir = "/workspace/.beads/dolt/beads"
+
+var leftoverCopyOrigin = storage.RemoteInfo{Name: "origin", URL: "git+ssh://git@example.com/org/repo.git"}
+
+func newFakeLeftoverCopyStore() *fakeLeftoverCopyStore {
+	notFound := errors.New("fatal: remote 'origin' not found")
+	return &fakeLeftoverCopyStore{
+		fakeSyncStore: fakeSyncStore{pullErr: notFound, pushErr: notFound},
+		leftover:      []storage.RemoteInfo{leftoverCopyOrigin},
+	}
+}
+
+func (f *fakeLeftoverCopyStore) HasPersistedRemote() bool { return f.persisted }
+
+func (f *fakeLeftoverCopyStore) LeftoverRemotes() (string, []storage.RemoteInfo) {
+	if len(f.leftover) == 0 {
+		return "", nil
+	}
+	return leftoverCopyDir, f.leftover
+}
+
+func (f *fakeLeftoverCopyStore) ForcePush(ctx context.Context) error { return f.Push(ctx) }
+
+func (f *fakeLeftoverCopyStore) AddRemote(_ context.Context, name, url string) error {
+	f.addRemoteCalls++
+	return fmt.Errorf("fakeLeftoverCopyStore: AddRemote(%q, %q) must not be called", name, url)
+}
+
+// leftoverOriginAddCommand is the command the refusal names for
+// leftoverCopyOrigin, its URL quoted for this platform's shells.
+func leftoverOriginAddCommand() string {
+	url, _ := remedy.CommandArg(runtime.GOOS, leftoverCopyOrigin.URL, "<url>")
+	return "bd dolt remote add origin " + url
+}
+
+// A remote recorded only in a Dolt database the server does not serve (the
+// clone `bd init --server --remote` leaves for a gateway) is neither
+// configured nor absent: push and pull run on the server, which lacks it,
+// and it is the remote the operator set up. The no-remote decision must say
+// so through the decorator chain, rather than let push, pull and sync report
+// "No remote is configured" and exit 0, or derive a remote from git origin.
+func TestHasConfiguredRemote_RemoteOnlyInALeftoverDatabase(t *testing.T) {
+	ctx := context.Background()
+	for _, chain := range []struct {
+		name      string
+		telemetry bool
+	}{
+		{"hooks only", false},
+		{"hooks + telemetry", true},
+	} {
+		t.Run(chain.name, func(t *testing.T) {
+			clearTelemetryEnv(t)
+			if chain.telemetry {
+				t.Setenv("BD_OTEL_STDOUT", "true")
+			}
+			decorate := func(raw storage.DoltStorage) storage.DoltStorage {
+				return wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), false)
+			}
+
+			raw := newFakeLeftoverCopyStore()
+			st := decorate(raw)
+			if _, direct := st.(leftoverRemoteLister); direct {
+				t.Fatalf("%T implements leftoverRemoteLister directly; this test no longer exercises the peel", st)
+			}
+			var leftover *remoteOnlyInLeftoverDatabaseError
+			configured, err := hasConfiguredRemote(ctx, st)
+			if configured || !errors.As(err, &leftover) {
+				t.Fatalf("hasConfiguredRemote = (%v, %v), want (false, a remoteOnlyInLeftoverDatabaseError)", configured, err)
+			}
+			for _, want := range []string{
+				"the Dolt server lists no remote",
+				leftoverCopyDir,
+				"origin (" + leftoverCopyOrigin.URL + ")",
+				"bd cannot confirm that the server serves that directory",
+				leftoverOriginAddCommand(),
+			} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("hasConfiguredRemote error lacks %q:\n%v", want, err)
+				}
+			}
+			// The server may serve that directory (a server the user runs
+			// over .beads/dolt on a socket, ::1 or TLS), so the error must
+			// not say it does not.
+			if strings.Contains(err.Error(), "is not the server's data") {
+				t.Errorf("hasConfiguredRemote error claims the directory is not the server's data:\n%v", err)
+			}
+			if hasNoRemoteConfigured(ctx, st) {
+				t.Error("hasNoRemoteConfigured = true: push, pull and sync would report no remote and exit 0 over the leftover database's origin")
+			}
+			if isConfirmedNoRemote(ctx, st, errors.New("remote 'origin' not found")) {
+				t.Error("isConfirmedNoRemote = true over the leftover database's origin")
+			}
+			// Consent is granted, so only the refusal can stop adopting the
+			// git origin.
+			if adopted, err := adoptGitOriginRemoteForPush(ctx, st, adoptPolicy{AssumeYes: true}, pushAdoptOptIn); adopted || !errors.As(err, &leftover) {
+				t.Errorf("adoptGitOriginRemoteForPush = (%v, %v), want (false, the remoteOnlyInLeftoverDatabaseError)", adopted, err)
+			}
+			if raw.addRemoteCalls != 0 {
+				t.Errorf("AddRemote called %d times", raw.addRemoteCalls)
+			}
+
+			// The server's own evidence still decides first: a remote it
+			// lists, or one persisted with its own data (GH#2118), is
+			// configured. Without the leftover database, nothing is.
+			listed, persisted, solo := newFakeLeftoverCopyStore(), newFakeLeftoverCopyStore(), newFakeLeftoverCopyStore()
+			listed.remotes = []storage.RemoteInfo{leftoverCopyOrigin}
+			persisted.persisted = true
+			solo.leftover = nil
+			for _, tc := range []struct {
+				name  string
+				store *fakeLeftoverCopyStore
+				want  bool
+			}{
+				{"listed by the server", listed, true},
+				{"persisted with the server's data", persisted, true},
+				{"no remote anywhere", solo, false},
+			} {
+				if got, err := hasConfiguredRemote(ctx, decorate(tc.store)); got != tc.want || err != nil {
+					t.Errorf("hasConfiguredRemote(%s) = (%v, %v), want (%v, nil)", tc.name, got, err, tc.want)
+				}
+			}
+		})
+	}
+}
+
+// TestPushPullSyncRefuseARemoteOnlyInALeftoverDatabase drives `bd dolt push`,
+// `bd dolt pull` and `bd sync` (also -q and --json) on that workspace, in a
+// git repository with an origin and in one without. Each exits 1 before
+// moving anything, naming the leftover database's origin and the command that
+// adds it on the server: not "No remote is configured" with exit 0, which
+// reported a sync that never reached the remote, and not the consent refusal
+// or prompt for adopting the git origin, which would publish elsewhere.
+func TestPushPullSyncRefuseARemoteOnlyInALeftoverDatabase(t *testing.T) {
+	const gitOriginURL = "https://github.com/example/proj.git"
+	for _, gitOrigin := range []bool{false, true} {
+		for _, verb := range []struct {
+			name        string
+			json, quiet bool
+			run         func() error
+		}{
+			{name: "bd dolt push", run: func() error { return doltPushCmd.RunE(doltPushCmd, nil) }},
+			{name: "bd dolt pull", run: func() error { return doltPullCmd.RunE(doltPullCmd, nil) }},
+			{name: "bd sync", run: func() error { return runSyncCommand(syncCmd, nil) }},
+			{name: "bd sync -q", quiet: true, run: func() error { return runSyncCommand(syncCmd, nil) }},
+			{name: "bd sync --json", json: true, run: func() error { return runSyncCommand(syncCmd, nil) }},
+		} {
+			t.Run(fmt.Sprintf("git origin=%v/%s", gitOrigin, verb.name), func(t *testing.T) {
+				isolateBeadsDirForTest(t)
+				t.Setenv("BD_NO_REMOTE_ADOPT", "")
+				dir := t.TempDir()
+				if gitOrigin {
+					initBareGitRepoForTest(t, dir)
+					runGitCommand(t, dir, "remote", "add", "origin", gitOriginURL)
+				}
+				// A config.yaml makes .beads a workspace bd resolves, so a
+				// regressed push or sync reaches the git origin from it.
+				if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, ".beads", "config.yaml"), nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				t.Chdir(dir)
+				beads.ResetCaches()
+				git.ResetCaches()
+				t.Cleanup(func() {
+					beads.ResetCaches()
+					git.ResetCaches()
+				})
+				// Nothing may prompt: a consent prompt here is itself the failure.
+				devNull, err := os.Open(os.DevNull)
+				if err != nil {
+					t.Fatal(err)
+				}
+				oldStdin := os.Stdin
+				os.Stdin = devNull
+				t.Cleanup(func() {
+					os.Stdin = oldStdin
+					_ = devNull.Close()
+				})
+
+				raw := newFakeLeftoverCopyStore()
+				setupSyncCommandTest(t, &raw.fakeSyncStore)
+				store = wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), false)
+				syncAdoptGitOrigin = adoptGitOriginRemoteForPush
+				jsonOutput, quietFlag = verb.json, verb.quiet
+				for _, f := range []struct {
+					cmd         *cobra.Command
+					name, value string
+				}{
+					{doltPushCmd, "yes", "false"}, {doltPushCmd, "no-adopt", "false"},
+					{doltPushCmd, "force", "false"}, {doltPushCmd, "remote", ""},
+					{doltPullCmd, "remote", ""}, {doltPullCmd, "strategy", ""},
+					{syncCmd, "yes", "false"}, {syncCmd, "no-adopt", "false"},
+				} {
+					if err := f.cmd.Flags().Set(f.name, f.value); err != nil {
+						t.Fatalf("reset --%s: %v", f.name, err)
+					}
+				}
+
+				var runErr error
+				stdout, stderr := captureStdio(t, func() { runErr = verb.run() })
+				out := stdout + stderr
+				var exit *exitError
+				if !errors.As(runErr, &exit) || exit.Code != 1 {
+					t.Fatalf("%s = %v, want exit 1\n%s", verb.name, runErr, out)
+				}
+				for _, want := range []string{"origin (" + leftoverCopyOrigin.URL + ")", leftoverOriginAddCommand()} {
+					if !strings.Contains(out, want) {
+						t.Errorf("%s output lacks %q:\n%s", verb.name, want, out)
+					}
+				}
+				for _, unwanted := range []string{"No remote is configured", gitOriginURL, "adopting git origin"} {
+					if strings.Contains(out, unwanted) {
+						t.Errorf("%s output has %q:\n%s", verb.name, unwanted, out)
+					}
+				}
+				if raw.pullCalls+raw.pushCalls+raw.addRemoteCalls != 0 {
+					t.Errorf("%s pulled %d, pushed %d and added %d remotes, want none", verb.name, raw.pullCalls, raw.pushCalls, raw.addRemoteCalls)
+				}
+			})
+		}
+	}
+}
+
+// TestServerRemoteAddCommandQuotesValuesAndKeepsTheRef pins the command the
+// refusal prints for each remote: bd dolt remote add with the values quoted
+// for the platform's shells, or a placeholder and the value escaped beside it
+// where no quoting passes it on; and, for a remote on a git ref of its own,
+// which bd dolt remote add would drop, the CALL DOLT_REMOTE statement that
+// keeps it.
+func TestServerRemoteAddCommandQuotesValuesAndKeepsTheRef(t *testing.T) {
+	for _, tc := range []struct {
+		goos   string
+		remote storage.RemoteInfo
+		want   string
+	}{
+		{"linux", storage.RemoteInfo{Name: "origin", URL: "https://doltremoteapi.dolthub.com/org/repo"},
+			"bd dolt remote add origin https://doltremoteapi.dolthub.com/org/repo"},
+		{"linux", leftoverCopyOrigin, "bd dolt remote add origin 'git+ssh://git@example.com/org/repo.git'"},
+		{"windows", leftoverCopyOrigin, `bd dolt remote add origin "git+ssh://git@example.com/org/repo.git"`},
+		{"linux", storage.RemoteInfo{Name: "origin", URL: "file:///tmp/x\x1b[2K"},
+			`bd dolt remote add origin <url>  (<url>: "file:///tmp/x\x1b[2K")`},
+		{"linux", storage.RemoteInfo{Name: "origin", URL: "git+ssh://git@example.com/org/repo.git", Ref: "refs/dolt/beads"},
+			`bd sql 'CALL DOLT_REMOTE("add", "--ref", "refs/dolt/beads", "origin", "git+ssh://git@example.com/org/repo.git")'`},
+	} {
+		if got := serverRemoteAddCommand(tc.goos, tc.remote); got != tc.want {
+			t.Errorf("serverRemoteAddCommand(%s, %+v) =\n  %s\nwant\n  %s", tc.goos, tc.remote, got, tc.want)
+		}
+	}
+}
+
 func TestPrintNoRemoteGuidance(t *testing.T) {
 	// Capture stdout output
 	oldStdout := os.Stdout
@@ -1452,34 +1721,6 @@ func TestPrintAncestorPKMismatchGuidance(t *testing.T) {
 	}
 }
 
-func TestIsLocalHost(t *testing.T) {
-	tests := []struct {
-		name string
-		host string
-		want bool
-	}{
-		{"empty defaults to local", "", true},
-		{"localhost literal", "localhost", true},
-		{"uppercase Localhost", "Localhost", true},
-		{"IPv4 loopback", "127.0.0.1", true},
-		{"IPv6 loopback", "::1", true},
-		{"IPv6 loopback bracketed", "[::1]", true},
-		{"all-zeros bind", "0.0.0.0", true},
-		{"surrounding whitespace", "  127.0.0.1  ", true},
-		{"public IPv4", "20.150.139.92", false},
-		{"named remote", "dolt.example.com", false},
-		{"private LAN IPv4", "192.168.1.10", false},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := isLocalHost(tc.host); got != tc.want {
-				t.Errorf("isLocalHost(%q) = %v, want %v", tc.host, got, tc.want)
-			}
-		})
-	}
-}
-
 // TestRunExternalDoltStatus_Unreachable exercises the external-server
 // status path (bd-q35w) against an unreachable port. This covers the DSN
 // build, ping failure branch, and both output modes (text + JSON) without
@@ -1491,7 +1732,7 @@ func TestRunExternalDoltStatus_Unreachable(t *testing.T) {
 	beadsDir := t.TempDir()
 	// Use 127.0.0.1 so the OS RSTs the connect() fast (connection refused)
 	// rather than taking the 5s DSN timeout against a routable-but-silent
-	// host. runExternalDoltStatus does not consult isLocalHost itself.
+	// host. runExternalDoltStatus does not consult the host predicate itself.
 	cfg := &configfile.Config{
 		DoltMode:       "server",
 		DoltServerHost: "127.0.0.1",
@@ -1744,6 +1985,62 @@ func TestShouldUseExternalDoltStatus(t *testing.T) {
 				t.Errorf("shouldUseExternalDoltStatus = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestStatusProbesEndpointBDDoesNotServe covers the second routing decision
+// of `bd dolt status`, taken when shouldUseExternalDoltStatus keeps the
+// PID-file path (auto-start on, a host bd runs its server at): with no server
+// of bd's own running, an endpoint bd does not serve is probed rather than
+// reported "not running" from bd's PID file, since no bd command starts a
+// server there (#7841 review). The endpoint is resolved as the store resolves
+// it, under each setting. bd's own server, running or not, keeps the PID-file
+// path.
+func TestStatusProbesEndpointBDDoesNotServe(t *testing.T) {
+	notRunning := &doltserver.State{Running: false}
+	running := &doltserver.State{Running: true, PID: 1, Port: 13306}
+	for _, tc := range []struct {
+		name  string
+		env   map[string]string
+		meta  func(*configfile.Config)
+		state *doltserver.State
+		want  bool
+	}{
+		{name: "bd's own server, not running", state: notRunning, want: false},
+		{name: "BEADS_DOLT_SERVER_PORT", env: map[string]string{"BEADS_DOLT_SERVER_PORT": "13306"}, state: notRunning, want: true},
+		{name: "legacy BEADS_DOLT_PORT", env: map[string]string{"BEADS_DOLT_PORT": "13306"}, state: notRunning, want: true},
+		{name: "BEADS_DOLT_SERVER_SOCKET", env: map[string]string{"BEADS_DOLT_SERVER_SOCKET": "/tmp/dolt.sock"}, state: notRunning, want: true},
+		{name: "metadata.json dolt_server_socket", meta: func(c *configfile.Config) { c.DoltServerSocket = "/tmp/dolt.sock" }, state: notRunning, want: true},
+		{name: "metadata.json dolt_server_port", meta: func(c *configfile.Config) { c.DoltServerPort = 13306 }, state: notRunning, want: true},
+		{name: "BEADS_DOLT_SERVER_MODE=1", env: map[string]string{"BEADS_DOLT_SERVER_MODE": "1"}, state: notRunning, want: true},
+		{name: "gateway credential command", env: map[string]string{"BEADS_DOLT_CREDENTIAL_COMMAND": "echo token"}, state: notRunning, want: true},
+		// `bd dolt start` runs bd's own server whatever declares the
+		// endpoint externally managed: its PID file describes it.
+		{name: "BEADS_DOLT_SERVER_PORT, bd's own server running", env: map[string]string{"BEADS_DOLT_SERVER_PORT": "13306"}, state: running, want: false},
+		{name: "embedded workspace", env: map[string]string{"BEADS_DOLT_SERVER_SOCKET": "/tmp/dolt.sock"},
+			meta: func(c *configfile.Config) { c.DoltMode = configfile.DoltModeEmbedded }, state: notRunning, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			endpointCredentialsEnv(t, nil)
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			beadsDir := t.TempDir()
+			cfg := &configfile.Config{Backend: configfile.BackendDolt, DoltMode: configfile.DoltModeServer, DoltDatabase: "status_route"}
+			if tc.meta != nil {
+				tc.meta(cfg)
+			}
+			if err := cfg.Save(beadsDir); err != nil {
+				t.Fatal(err)
+			}
+			ep := doltserver.ResolveEndpoint(beadsDir, cfg)
+			if got := statusProbesEndpointBDDoesNotServe(cfg, tc.state, ep); got != tc.want {
+				t.Errorf("statusProbesEndpointBDDoesNotServe = %v, want %v (endpoint %+v)", got, tc.want, ep)
+			}
+		})
+	}
+	if statusProbesEndpointBDDoesNotServe(nil, nil, doltserver.Endpoint{Socket: "/tmp/dolt.sock"}) {
+		t.Error("a nil config probes an endpoint; want the PID-file path")
 	}
 }
 
@@ -2257,6 +2554,9 @@ func TestResolveDoltShowRemotesCorruptStateWarns(t *testing.T) {
 // the same slice DefaultConfig resolves against, so it cannot drift out of sync.
 // The behavioral precedence itself (env > port file > dolt yaml > beads yaml >
 // metadata.json) is proven against DefaultConfig in internal/doltserver, not here.
+// Show prints the port the store dials, which the legacy BEADS_DOLT_PORT can
+// decide, so the banner names that rule too (doltserver.LegacyPortEnvLabel,
+// pinned against DialConfig by TestDialConfig_LegacyPortEnv) (#7874 review).
 func TestDoltShowConfigSourcesRendersPortSourceLabels(t *testing.T) {
 	var buf bytes.Buffer
 	printDoltShowConfigSources(&buf)
@@ -2267,6 +2567,9 @@ func TestDoltShowConfigSourcesRendersPortSourceLabels(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("printDoltShowConfigSources missing line %q in:\n%s", want, out)
 		}
+	}
+	if !strings.Contains(out, doltserver.LegacyPortEnvLabel) {
+		t.Errorf("printDoltShowConfigSources does not name the legacy BEADS_DOLT_PORT rule %q in:\n%s", doltserver.LegacyPortEnvLabel, out)
 	}
 }
 
@@ -2633,9 +2936,12 @@ func TestDoltStartRefusesIPv6LoopbackHost(t *testing.T) {
 		name  string
 		host  string
 		inEnv bool
+		want  string
 	}{
-		{"metadata.json bare", "::1", false},
-		{"BEADS_DOLT_SERVER_HOST bracketed", "[::1]", true},
+		{"metadata.json bare", "::1", false, "is the IPv6 loopback (::1)"},
+		{"BEADS_DOLT_SERVER_HOST bracketed", "[::1]", true, "is the IPv6 loopback ([::1])"},
+		{"metadata.json long form", "0:0:0:0:0:0:0:1", false, "is the IPv6 loopback (0:0:0:0:0:0:0:1)"},
+		{"metadata.json other loopback", "127.0.0.2", false, "is 127.0.0.2, a loopback address bd's own server does not listen on"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root, beadsDir, env := externallyManagedStartWorkspace(t, "true")
@@ -2645,7 +2951,7 @@ func TestDoltStartRefusesIPv6LoopbackHost(t *testing.T) {
 			if err == nil {
 				t.Fatalf("bd dolt start succeeded for the IPv6 loopback host %s:\n%s", tc.host, out)
 			}
-			if want := "the configured Dolt server host is the IPv6 loopback (" + tc.host + ")"; !strings.Contains(out, want) {
+			if want := "the configured Dolt server host " + tc.want; !strings.Contains(out, want) {
 				t.Errorf("refusal does not contain %q:\n%s", want, out)
 			}
 			if strings.Contains(out, "dolt is not installed") {
@@ -2676,9 +2982,12 @@ func TestDoltStopRefusesIPv6LoopbackHost(t *testing.T) {
 		name  string
 		host  string
 		inEnv bool
+		want  string
 	}{
-		{"metadata.json bare", "::1", false},
-		{"BEADS_DOLT_SERVER_HOST bracketed", "[::1]", true},
+		{"metadata.json bare", "::1", false, "is the IPv6 loopback (::1)"},
+		{"BEADS_DOLT_SERVER_HOST bracketed", "[::1]", true, "is the IPv6 loopback ([::1])"},
+		{"metadata.json long form", "0:0:0:0:0:0:0:1", false, "is the IPv6 loopback (0:0:0:0:0:0:0:1)"},
+		{"metadata.json other loopback", "127.0.0.2", false, "is 127.0.0.2, a loopback address bd's own server does not listen on"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root, beadsDir, env := externallyManagedStartWorkspace(t, "true")
@@ -2694,7 +3003,7 @@ func TestDoltStopRefusesIPv6LoopbackHost(t *testing.T) {
 			if err == nil {
 				t.Errorf("bd dolt stop succeeded for the IPv6 loopback host %s:\n%s", tc.host, out)
 			}
-			if want := "the configured Dolt server host is the IPv6 loopback (" + tc.host + ")"; !strings.Contains(out, want) {
+			if want := "the configured Dolt server host " + tc.want; !strings.Contains(out, want) {
 				t.Errorf("refusal does not contain %q:\n%s", want, out)
 			}
 			select {

@@ -2,9 +2,10 @@ package doctor
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 
-	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/cmd/bd/doctor/fix"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 )
 
@@ -20,20 +21,37 @@ const BlockedConsistencyCheckName = "Blocked State"
 // re-pull that merges nothing will not refresh it. `bd ready` trusts the
 // column, so stale values silently hide ready work or surface blocked work. The
 // repair is 'bd doctor --fix', which runs a full recompute.
-func CheckBlockedConsistencyWithStore(ss *SharedStore) DoctorCheck {
-	store := ss.Store()
-	if store == nil {
+//
+// It reads the server that recompute (fix.RecomputeBlocked) writes
+// (fix.OpenScanDB), not the shared store's: beside a live
+// BEADS_DOLT_SERVER_SOCKET and a resolved port the store reads the socket's
+// server, so the check reported its flags while --fix recomputed the server at
+// the port and reported them fixed (#7874 review). The shared store tells no
+// database at all ("No database yet") from a database whose repair server the
+// check cannot read, which it reports.
+func CheckBlockedConsistencyWithStore(path string, ss *SharedStore) DoctorCheck {
+	db, err := fix.OpenScanDB(path)
+	if err != nil {
+		if ss.Store() == nil {
+			return DoctorCheck{
+				Name:    BlockedConsistencyCheckName,
+				Status:  StatusOK,
+				Message: "No database yet",
+			}
+		}
 		return DoctorCheck{
 			Name:    BlockedConsistencyCheckName,
-			Status:  StatusOK,
-			Message: "No database yet",
+			Status:  StatusWarning,
+			Message: "Unable to check is_blocked consistency",
+			Detail:  err.Error(),
 		}
 	}
-	return checkBlockedConsistencyWithStore(context.Background(), store)
+	defer func() { _ = db.Close() }()
+	return checkBlockedConsistencyDB(context.Background(), db)
 }
 
-func checkBlockedConsistencyWithStore(ctx context.Context, store *dolt.DoltStore) DoctorCheck {
-	stale, err := issueops.CountIsBlockedInconsistenciesInTx(ctx, store.UnderlyingDB())
+func checkBlockedConsistencyDB(ctx context.Context, db *sql.DB) DoctorCheck {
+	stale, err := issueops.CountIsBlockedInconsistenciesInTx(ctx, db)
 	if err != nil {
 		return DoctorCheck{
 			Name:    BlockedConsistencyCheckName,

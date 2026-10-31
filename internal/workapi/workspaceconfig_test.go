@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
 )
 
@@ -81,6 +82,60 @@ func TestValidateSettingWriteParsesTheCustomStatusValue(t *testing.T) {
 	}
 }
 
+// TestValidateSettingWriteRefusesAMalformedRetainedTypesValue pins that
+// types.retained, a SAFETY setting, fails closed at write time on SYNTAX: a
+// value the lenient list parse would read as something other than the list
+// the operator wrote — a bracketed list that is not JSON, a quoted name, two
+// names split by a space — or as no name at all (`null`, `,`). Spelling is not
+// refused: an alias or a case variant of a built-in type is canonicalized by
+// the one read (RetainedTypesFromSetting), so it protects the type rows carry.
+func TestValidateSettingWriteRefusesAMalformedRetainedTypesValue(t *testing.T) {
+	for _, value := range []string{
+		"",                 // unsets the key
+		"   ",              // so does a blank one
+		"op",               // one name
+		"op,fact",          // the comma form
+		" op , fact ",      // trimmed on read
+		`["op","fact"]`,    // the JSON form
+		`[]`,               // an empty JSON list retains nothing
+		`[ ]`,              // so does one spelled with a space
+		"never-registered", // a well-formed unknown name matches nothing, and is allowed
+		"OpsKey",           // so does one in mixed case that is no built-in type
+		"feature",          // a built-in type
+		"feat",             // an alias: the read canonicalizes it to feature
+		"mol",              // an alias only bd update --type expands
+		"Chore",            // a built-in in another case: the read lower-cases it
+	} {
+		if _, err := ValidateSettingWrite(issueops.SettingKeyTypesRetained, value); err != nil {
+			t.Errorf("ValidateSettingWrite(types.retained, %q) = %v, want it accepted", value, err)
+		}
+	}
+	for _, test := range []struct{ value, wantInError string }{
+		{"[op]", "JSON array"},
+		{`["op","fact"`, "JSON array"},
+		{`[1]`, "JSON array"},
+		{`"op"`, "op"},
+		{"'op'", "op"},
+		{"op fact", "op fact"},
+		{`["op fact"]`, "op fact"},
+		{`["op,fact"]`, "op,fact"},
+		{"op,[fact]", "[fact]"},
+		{"null", "names no type"},
+		{",", "names no type"},
+		{" , ", "names no type"},
+		{`[""]`, "names no type"},
+	} {
+		_, err := ValidateSettingWrite(issueops.SettingKeyTypesRetained, test.value)
+		if !errors.Is(err, issueops.ErrValidation) {
+			t.Errorf("ValidateSettingWrite(types.retained, %q) error = %v, want ErrValidation", test.value, err)
+			continue
+		}
+		if !strings.Contains(err.Error(), test.wantInError) {
+			t.Errorf("ValidateSettingWrite(types.retained, %q) error = %q, want it to name %q", test.value, err, test.wantInError)
+		}
+	}
+}
+
 // TestValidateSettingWriteReturnsTheValueUnchanged is the machine half of
 // issueops.SetSettingResult.Value's promise: a successful write stores what the
 // caller sent. Nothing normalizes today, and this is what would fail if
@@ -100,6 +155,55 @@ func TestValidateSettingWriteReturnsTheValueUnchanged(t *testing.T) {
 		if got != test.value {
 			t.Errorf("ValidateSettingWrite(%q, %q) returned %q, want the value unchanged", test.key, test.value, got)
 		}
+	}
+}
+
+// TestValidateSettingWriteBoundsTheKeyAndTheValue pins that the storage bounds
+// are the ROLE's, so every leg refuses the same writes with the same typed
+// error rather than leaving the refusal to a column (Dolt's VARCHAR(255) key
+// and TEXT value) that answers with an unclassifiable driver error.
+//
+// THE CEILINGS ARE ASSERTED FIRST, because a validator that refused every long
+// value would pass the refusal arms on their own: what makes it a BOUND is that
+// exactly MaxFieldLen characters and exactly MaxTextBytes bytes are accepted.
+// The key is counted in characters and the value in bytes, so each arm also
+// drives the unit the other one does not count in.
+func TestValidateSettingWriteBoundsTheKeyAndTheValue(t *testing.T) {
+	keyAt := strings.Repeat("k", types.MaxFieldLen)
+	multibyteKeyAt := strings.Repeat("\u00e9", types.MaxFieldLen) // 510 bytes, 255 characters
+	valueAt := strings.Repeat("v", types.MaxTextBytes)
+	for _, ok := range []struct{ name, key, value string }{
+		{"a key of exactly MaxFieldLen characters", keyAt, "v"},
+		{"a multibyte key of exactly MaxFieldLen characters", multibyteKeyAt, "v"},
+		{"a value of exactly MaxTextBytes bytes", "custom.big", valueAt},
+	} {
+		if _, err := ValidateSettingWrite(ok.key, ok.value); err != nil {
+			t.Errorf("%s was refused: %v", ok.name, err)
+		}
+	}
+	for _, bad := range []struct{ name, key, value, want string }{
+		{"a key one character past MaxFieldLen", keyAt + "k", "v", "config key"},
+		{"a multibyte key one character past MaxFieldLen", multibyteKeyAt + "\u00e9", "v", "config key"},
+		{"a value one byte past MaxTextBytes", "custom.big", valueAt + "v", "config value"},
+		{"a value under MaxTextBytes characters that is past it in bytes", "custom.big",
+			strings.Repeat("\u00e9", types.MaxTextBytes/2+1), "config value"},
+	} {
+		_, err := ValidateSettingWrite(bad.key, bad.value)
+		if !errors.Is(err, issueops.ErrValidation) {
+			t.Errorf("%s: error = %v, want ErrValidation", bad.name, err)
+			continue
+		}
+		if !errors.Is(err, types.ErrFieldTooLong) {
+			t.Errorf("%s: error = %v, want it to carry types.ErrFieldTooLong too", bad.name, err)
+		}
+		if !strings.Contains(err.Error(), bad.want) {
+			t.Errorf("%s: message %q does not name %q", bad.name, err, bad.want)
+		}
+	}
+	// The READ and the REMOVE carry no bound: they compare a key and never
+	// store it.
+	if _, err := ValidateSettingKey(keyAt + "k"); err != nil {
+		t.Errorf("ValidateSettingKey(over-long key) = %v, want it accepted: only the write is bounded", err)
 	}
 }
 

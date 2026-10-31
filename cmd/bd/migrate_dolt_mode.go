@@ -719,23 +719,18 @@ func runMigrateToProxiedServer(dryRun bool, idleTimeout time.Duration, shared bo
 		if !cfg.IsDoltServerMode() {
 			return HandleError("repo is not in server mode (dolt_mode=%q); this command only migrates server-mode repos", cfg.GetDoltMode())
 		}
-		// This migration only re-points the proxy at the LOCAL Dolt root;
-		// it does not copy data. A workspace whose server mode comes from a
-		// remote host (GH#3545 inference or explicit config) would silently
-		// switch from the remote data to an empty/stale local database.
-		host := cfg.GetDoltServerHost()
-		if !configfile.IsLocalHostString(host) {
-			return HandleError("the configured Dolt server host is remote (%s); this migration only re-points the proxy at the local Dolt root and would abandon the remote data.\nMigrate on the server host itself, or clear dolt_server_host / dolt.host / BEADS_DOLT_SERVER_HOST first", host)
-		}
-		// Nor is the local root the data of a server at the IPv6 loopback:
-		// bd's own server listens on 127.0.0.1 only, so the server there is
-		// another one, and a root bd's own server left behind would replace
-		// its data just as silently.
-		if configfile.IsIPv6LoopbackHost(host) {
-			return HandleError("the configured Dolt server host is the IPv6 loopback (%s); this migration only re-points the proxy at the local Dolt root, which holds the data of bd's own server (it listens on 127.0.0.1 only), and would abandon the data of the server at [::1].\nTo migrate bd's own server instead, clear dolt_server_host / dolt.host / BEADS_DOLT_SERVER_HOST first", host)
-		}
 		if doltserver.IsSharedServerMode() {
 			return HandleErrorWithHint("repo is in shared-server mode", "use 'bd migrate from-shared-server-to-proxied-server'")
+		}
+	}
+	// This migration only re-points the proxy at the LOCAL Dolt root (or the
+	// shared one); it does not copy data. A workspace whose server bd does
+	// not run (GH#3545 inference or explicit config) would silently switch
+	// from that server's data to an empty/stale local database. Refused on
+	// every run until this one switches dolt_mode, a resumed one included.
+	if !cfg.IsDoltProxiedServerMode() {
+		if err := migrationHostRefusal(cfg, true, rootPath, migrationJournalForRefusal(beadsDir, j)); err != nil {
+			return err
 		}
 	}
 	if j == nil {
@@ -1090,6 +1085,16 @@ func runMigrateFromProxiedServer(dryRun bool, shared bool) error {
 		}
 	} else if sharedErr == nil && rootDir == sharedDolt {
 		return HandleErrorWithHint("proxied-server is rooted at the shared dolt directory", "use 'bd migrate from-proxied-server-to-shared-server'")
+	}
+
+	// The next command dials the configured host, not the proxy over
+	// rootDir: a server bd does not run there would strand rootDir's data.
+	// Refused on every run until this one switches dolt_mode, a resumed one
+	// included.
+	if cfg.IsDoltProxiedServerMode() {
+		if err := migrationHostRefusal(cfg, false, rootDir, migrationJournalForRefusal(beadsDir, j)); err != nil {
+			return err
+		}
 	}
 
 	if running, _ := proxy.IsRunning(rootDir); running {

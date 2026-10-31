@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/uimd"
@@ -68,7 +70,8 @@ func watchIssue(ctx context.Context, issueID string, commentsTail int) error {
 	})
 }
 
-// runIssueWatch drives watchIssueLoop on a real ticker until Ctrl+C or SIGTERM.
+// runIssueWatch drives watchIssueLoop, waiting showWatchPollInterval after
+// each poll, until Ctrl+C or SIGTERM.
 // It fails when the initial render found nothing to watch; the render has
 // already said why, so the failure is silent.
 func runIssueWatch(ctx context.Context, src issueWatchSource) error {
@@ -77,24 +80,28 @@ func runIssueWatch(ctx context.Context, src issueWatchSource) error {
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(sigChan)
 
-	ticker := time.NewTicker(showWatchPollInterval)
-	defer ticker.Stop()
-
-	if !watchIssueLoop(ctx, src, ticker.C, sigChan) {
+	poll := func() <-chan time.Time { return time.After(showWatchPollInterval) }
+	if !watchIssueLoop(ctx, src, poll, sigChan) {
 		return SilentExit()
 	}
 	return nil
 }
 
-// watchIssueLoop renders the issue once, then on every tick re-reads it and
+// watchIssueLoop renders the issue once, then after every wait re-reads it and
 // redraws only when singleIssueSnapshot changes. A poll that fails — the
 // issue was deleted, the backend blipped, a unit of work would not open — keeps
-// the last render on screen and is retried on the next tick without printing:
-// the watch is a live view, and a line (or, under --json, an error object) on
-// every tick for a condition the user can already see would bury it. It
-// returns when stop fires, or immediately, reporting false, when the initial
-// render found nothing to watch.
-func watchIssueLoop(ctx context.Context, src issueWatchSource, tick <-chan time.Time, stop <-chan os.Signal) bool {
+// the last render on screen and is retried after the next wait without
+// printing: the watch is a live view, and a line (or, under --json, an error
+// object) on every poll for a condition the user can already see would bury
+// it. It returns when stop fires, or immediately, reporting false, when the
+// initial render found nothing to watch.
+//
+// poll is called each time the loop starts waiting, which is after the
+// previous fetch (and any redraw) has returned, so every poll is followed by
+// a full wait. A fixed-rate ticker instead started the next fetch the moment
+// a slow one returned (GH#3415), and a stop that arrives during a fetch now
+// always wins over the next poll.
+func watchIssueLoop(ctx context.Context, src issueWatchSource, poll func() <-chan time.Time, stop <-chan os.Signal) bool {
 	issue := src.render(ctx)
 	if issue == nil {
 		return false
@@ -108,7 +115,7 @@ func watchIssueLoop(ctx context.Context, src issueWatchSource, tick <-chan time.
 		case <-stop:
 			fmt.Fprintf(os.Stderr, "\nStopped watching.\n")
 			return true
-		case <-tick:
+		case <-poll():
 			issue, err := src.fetch(ctx)
 			if err != nil || issue == nil {
 				continue
@@ -147,7 +154,7 @@ func displayShowIssueReturn(ctx context.Context, issueID string, commentsTail in
 		defer result.Close()
 	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error fetching issue: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error fetching issue: %s\n", remedy.PrintedMessage(err))
 		return nil
 	}
 	if result == nil || result.Issue == nil {
@@ -317,8 +324,10 @@ func warnUnresolvableDepEdges(issueID string, counts depCounts, deps, dependents
 		if missing <= 0 {
 			return false
 		}
+		// issueID is the store's, named as printedIssueID spells it so it
+		// cannot redraw the bd dep list pointer printed below.
 		fmt.Fprintf(os.Stderr, "warning: %s has %d %s edge(s) whose far end has no row in this database (cross-repo/external) and are not shown above\n",
-			issueID, missing, kind)
+			printedIssueID(issueID), missing, kind)
 		return true
 	}
 	outbound := report("dependency", counts.deps.n, counts.deps.err, deps)
@@ -336,7 +345,11 @@ func warnUnresolvableDepEdges(issueID string, counts depCounts, deps, dependents
 	if outbound {
 		// Named once, after both directions, so an issue short on each gets
 		// one pointer rather than two.
-		fmt.Fprintf(os.Stderr, "For raw edge records, run: bd dep list %s %s\n", issueID, issueID)
+		// issueID is the store's (a partial-id argument resolves to it), so it
+		// goes into the bd dep list command as one shell word, or as a
+		// placeholder named escaped after it (remedy.CommandArg).
+		arg, note := remedy.CommandArg(runtime.GOOS, issueID, "<issue-id>")
+		fmt.Fprintf(os.Stderr, "For raw edge records, run: bd dep list %s %s%s\n", arg, arg, note)
 	}
 	if inbound {
 		fmt.Fprintln(os.Stderr, "The unrenderable dependent edges have no raw CLI listing yet: bd dep list is outbound-only.")

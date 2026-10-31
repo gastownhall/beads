@@ -957,6 +957,7 @@ func (s *Server) failApplyBatch(w http.ResponseWriter, r *http.Request, request 
 		endpoint     *issueops.DependencyEndpointNotFoundError
 		openChildren *issueops.CloseOpenChildrenError
 		claimed      *issueops.ClaimConflictError
+		expired      *issueops.IdempotencyExpiredError
 	)
 	// The item wrapper is read once and shared by every branch below: a refusal
 	// that names an item names it whatever the inner sentinel turns out to be.
@@ -1027,6 +1028,21 @@ func (s *Server) failApplyBatch(w http.ResponseWriter, r *http.Request, request 
 	case errors.Is(err, issueops.ErrSelfDependency):
 		s.refusedApplyBatch(r, err)
 		s.fail(w, r, at(InvalidArgument("", ReasonInvalidValue, "an issue cannot depend on itself"), "target"))
+
+	// A RETIRED explicit id on a create item is a 410, by its own type and
+	// ahead of the occupied-id and validation arms, for failCreateIssue's
+	// reason.
+	case errors.As(err, &expired):
+		s.refusedApplyBatch(r, err)
+		if itemErr != nil && itemErr.IssueID == "" {
+			// A create refused before its id was minted names no id on the
+			// item; this refusal is ABOUT the id the caller sent, so it is the
+			// one `item_issue_id` can and should carry.
+			itemErr.IssueID = expired.ID
+		}
+		s.fail(w, r, at(newResult(CodeIdempotencyExpired,
+			"a create item's `id` was retired by a retention sweep; the create that used it already happened and nothing was written").
+			WithClosedAt(expired.ClosedAt), "id"))
 
 	// An occupied explicit id is a 409: the body is well-formed and stays
 	// well-formed, and what refuses it is STATE the client cannot see without

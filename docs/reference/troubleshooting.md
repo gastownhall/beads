@@ -258,12 +258,12 @@ before removing the stale directory.
 
 **Symptom (server mode):** commands fail with "Dolt server unreachable at
 127.0.0.1:3307", and bd says that `dolt_server_port` (or
-`BEADS_DOLT_SERVER_PORT`) declares that server externally managed, so it did
-not start one.
+`BEADS_DOLT_SERVER_PORT`, or the legacy `BEADS_DOLT_PORT`) declares that
+server externally managed, so it did not start one.
 
 **Cause:** When `metadata.json` has an explicit `dolt_server_port`, or the
-environment sets `BEADS_DOLT_SERVER_PORT`, bd treats the server as externally
-managed and intentionally disables auto-start — spawning a different server
+environment sets `BEADS_DOLT_SERVER_PORT` or `BEADS_DOLT_PORT`, bd treats the
+server as externally managed and intentionally disables auto-start — spawning a different server
 would create a shadow database. A `dolt_server_port` does so even when
 `config.yaml`'s `dolt.port` chose the port; bd then says the setting declares
 this workspace's server externally managed without claiming it names the
@@ -399,16 +399,47 @@ bd dolt stop
 bd dolt start
 ```
 
-### Proxied-server mode: "dolt is older than the recommended minimum" warning
+### "bd requires dolt 2.6.0 or newer" error
 
-Managed proxied-server mode spawns an external `dolt` CLI it finds via
-`BEADS_DOLT_BIN` or PATH (in that order — see
-[Environment Variables](/reference/configuration#environment-variables); a
-clone-local sidecar setting will slot between the two when the sidecar
-reader lands in contract part 2). On
-startup it probes that binary with `dolt version` and recommends
-**dolt >= 2.5.0** (the embedded engine `bd` links, and the release CI pins, is
-2.5.1). Older releases have known problems:
+`bd` refuses to run against Dolt older than **2.6.0** outside embedded mode.
+The error names what it checked and the version it found, for example:
+
+```
+dolt sql-server at 127.0.0.1:3307 is version 2.5.1, but bd requires dolt 2.6.0 or newer outside embedded mode. Upgrade dolt to 2.6.0 or newer, then restart the server on it: ...
+```
+
+- **`dolt binary "<path>"`**: `bd dolt start`, server-mode auto-start,
+  managed proxied-server mode, a CLI clone (`bd bootstrap`, `bd init
+  --remote`), a push, pull or fetch through the `dolt` CLI (prefixed
+  `dolt push:` and so on) or the remote-repo cache (`bd create --repo
+  <url>`, `bd repo sync`) found an old `dolt` CLI. Managed
+  proxied-server mode finds it via `BEADS_DOLT_BIN` or PATH (in that order —
+  see [Environment Variables](/reference/configuration#environment-variables));
+  the others use PATH. Install the pinned version and update PATH, or point
+  `BEADS_DOLT_BIN` at the new binary.
+- **`dolt sql-server at <address>`** (or **behind the bd proxy**): the
+  server `bd` connected to is old, whether `bd` started it or not. Upgrade
+  the `dolt` binary that server runs and restart it: `bd dolt stop` then
+  `bd dolt start` for a server `bd` manages, or `bd dolt stop` alone in a
+  managed proxied-server workspace, whose proxy starts its server again on
+  the next command (`bd dolt start` is refused there). For an external or
+  shared server, whoever runs it has to upgrade it; back it up first, and
+  treat the upgrade as one-way.
+
+Install the pinned version — see
+[Which Dolt version to install](/architecture/dolt#which-dolt-version-to-install)
+— rather than `latest`: the pin is the release measured clean for a
+[separate data-operation defect](/architecture/dolt#which-dolt-version-to-install),
+and `releases/latest` can move to an unmeasured release. There is no
+override. `bd doctor --server` reports the server's version against the
+same minimum. `bd doctor`, `bd doctor --fix` included, is exempt from it:
+its checks and repairs that use their own connection still run against an
+older server. Its checks that open the workspace's store fail: the
+✖ Database and Permissions errors only point at `bd dolt status` (which
+shows a healthy server), and this error itself appears in the ⚠ checks
+further down (Peer Connectivity, Sync Staleness, Federation Conflicts,
+Dolt Mode).
+Releases before 2.6.0 also have known defects, which that page measures:
 
 - Dolt 2.4.0 through 2.4.2 return no row for an ungrouped `MAX` or `MIN` over
   an unmatched primary-key prefix (dolthub/dolt#12093).
@@ -423,33 +454,22 @@ startup it probes that binary with `dolt version` and recommends
   `fk_comp_snap_issue`. Other writes and `information_schema` queries fail
   with `table has unknown fields`.
 
-[Which Dolt version to install](/architecture/dolt#which-dolt-version-to-install)
-records the dated measurements. (Earlier, the 2026-07-25 cross-version
-matrix had found that dolt < 2.0.0 cannot even *read* storage the module
-wrote.)
+Managed proxied-server mode caches a passing probe (keyed by the binary's
+path, size, and mtime, in the user cache directory), so day-to-day `bd` use
+does not fork `dolt version` on every command. A refusal is never cached:
+while the binary is refused, every command runs `dolt version` again, so the
+first command after an upgrade runs. That includes an upgrade behind a
+version manager's shim or a `BEADS_DOLT_BIN` wrapper script, whose own file
+does not change.
 
-This is a warning, not a hard failure — there is deliberately no hard
-version floor, so an older dolt can still be used at your own risk. To
-resolve it, install the pinned dolt version — see
-[Which Dolt version to install](/architecture/dolt#which-dolt-version-to-install)
-— and either update PATH or set `BEADS_DOLT_BIN` to the new binary's path.
-Install that specific version rather than `latest`: the pin is the release
-measured clean for a
-[separate data-operation defect](/architecture/dolt#which-dolt-version-to-install),
-and `releases/latest` can move to an unmeasured release.
-
-The advisory repeats at most once per day, not on every command: the probe
-result and the warning timestamp are cached (keyed by the binary's path,
-size, and mtime, in the user cache directory), so day-to-day `bd` use stays
-quiet while the reminder still resurfaces until the binary is upgraded.
-Upgrading or replacing the dolt binary re-probes immediately.
-
-If the probe can't parse `dolt version`'s output at all (most commonly a
-dev/custom build with non-standard version output), that also only warns —
-proxied-server mode still starts, since an unparseable version means "we
-don't know", not "this is definitely broken". A genuinely missing or
-broken `dolt` binary (not found, not executable, or the probe itself
-fails/times out) is a hard error, not a warning.
+A version `bd` cannot determine is not refused. If the probe can't parse
+`dolt version`'s output at all (most commonly a dev/custom build with
+non-standard version output), proxied-server mode warns
+(`could not verify dolt version`, at most once a day) and still starts, and
+`bd dolt start` launches it; a server whose `dolt_version()` does not answer
+with a version is used without the check (logged under `BD_DEBUG`). In
+proxied-server mode a genuinely missing or broken `dolt` binary (not found,
+not executable, or the probe itself fails/times out) is a hard error.
 
 ### Prefix routing: "proxy server store needs to be uow provider"
 
@@ -547,15 +567,19 @@ native Windows `timeout.exe` is not compatible. If neither a coreutils timeout
 nor Perl is available, the hook warns that it is running directly without a
 deadline.
 
-The coreutils helper sends `TERM`; on POSIX hosts, Perl's alarm applies to the
-direct `bd` process. Git for Windows Perl does not guarantee that alarm across
-`exec`, so a coreutils `timeout` (GNU or uutils) is preferred there.
-TERM-resistant work and descendant processes are not guaranteed to stop.
+Both helpers send `TERM` to `bd` and its process group, so the deadline also
+stops your chained hook. The Perl fallback runs `bd` in a process group of its
+own and sends the group `KILL` if `bd` is still running two seconds after the
+`TERM`. On Git for Windows a coreutils `timeout` (GNU or uutils) is preferred.
+A process that ignores `TERM` can outlive the hook. Both helpers run `bd`
+outside the terminal's foreground process group, so a chained hook that reads
+from the terminal is stopped until the deadline ends it.
 
 Already-installed hook sections are not refreshed automatically. After upgrading
-to a version that changed the timeout probe — the name-only check, or the uutils
-coreutils banner — run `bd hooks install` once to refresh existing canonical
-sections.
+to a version that changed the timeout probe — the name-only check, the uutils
+coreutils banner, or the Perl fallback that could not stop `bd`
+([#7753](https://github.com/gastownhall/beads/issues/7753)) — run
+`bd hooks install` once to refresh existing canonical sections.
 
 ### Permission denied on git hooks
 

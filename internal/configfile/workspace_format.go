@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/steveyegge/beads/internal/remedy"
 )
 
 // GraphFormatMarkerFile is the format sentinel graph-preview builds write in
@@ -33,13 +35,16 @@ type UnsupportedWorkspaceFormatError struct {
 	FormatMarker bool
 }
 
+// BeadsDir can be a routed planning or target repo a cloned repository's
+// committed routing config names, so Error names it through the remedy
+// printer (remedy.PrintedValue): it is printed beside Hint.
 func (e *UnsupportedWorkspaceFormatError) Error() string {
 	if e.FormatMarker {
 		return fmt.Sprintf("workspace %s has a %s marker, which this bd build does not support; %s",
-			e.BeadsDir, GraphFormatMarkerFile, BackendNotOpenedGuarantee)
+			remedy.PrintedValue(e.BeadsDir), GraphFormatMarkerFile, BackendNotOpenedGuarantee)
 	}
 	return fmt.Sprintf("workspace %s uses format graph_mode %q, which this bd build does not support; %s",
-		e.BeadsDir, e.GraphMode, BackendNotOpenedGuarantee)
+		remedy.PrintedValue(e.BeadsDir), e.GraphMode, BackendNotOpenedGuarantee)
 }
 
 // Hint names the remedy: a build that supports the format, with the
@@ -101,24 +106,37 @@ func HasGraphFormatMarker(beadsDir string) bool {
 	return err == nil
 }
 
-// CheckDiscoveredWorkspaceFormat runs CheckWorkspaceFormat on beadsDir's
-// metadata as LoadForDiscovery reads it, which never rewrites the workspace.
-// An open that has not yet decided this build may touch the workspace runs it
-// first: Load would otherwise migrate a legacy config.json into metadata.json
-// before the format check could refuse it. Metadata that does not load is
-// left to the caller's own load to report, unless the graph format marker
-// sits beside it (LoadAndCheckWorkspaceFormat).
-func CheckDiscoveredWorkspaceFormat(beadsDir string) error {
+// CheckDiscoveredForOpen is LoadDiscoveredForOpen for a caller that needs
+// only its refusal: an open, attach or create that has not yet decided this
+// build may touch beadsDir runs it before anything that writes there,
+// configfile.Load included, which would otherwise migrate a legacy config.json
+// into metadata.json before the caller could refuse the workspace.
+func CheckDiscoveredForOpen(beadsDir string) error {
 	_, err := LoadDiscoveredForOpen(beadsDir)
 	return err
 }
 
-// LoadDiscoveredForOpen is CheckDiscoveredWorkspaceFormat for a caller that
-// also checks the discovered metadata itself (its backend) before Load. It
-// returns the only error such a caller refuses on, an
-// *UnsupportedWorkspaceFormatError, and otherwise the metadata
-// LoadForDiscovery read: nil when there is none, or when it does not load and
-// is left to the caller's own load to report.
+// LoadDiscoveredForOpen is the one non-mutating check every path that opens
+// or inspects a workspace bd was not launched in runs before it writes
+// anything there: a migrating configfile.Load, a metadata.json save, or a
+// database, gate file or sidecar it would create. Command admission makes the
+// same refusals, in the same order, for the workspace bd runs in; this check
+// makes them for every other one (an external project, a routed or
+// auto-routed target, a create or planning target, an additional repo, or a
+// library open of another path), so such a workspace is never rewritten
+// before it is refused, and is refused with the text bd prints when run
+// inside it.
+//
+// It reads beadsDir's metadata as LoadForDiscovery does, which never rewrites
+// the workspace, and refuses
+//   - a workspace format this build cannot open
+//     (*UnsupportedWorkspaceFormatError, LoadAndCheckWorkspaceFormat), and
+//   - a historical SQLite workspace (*LegacyWorkspaceError,
+//     CheckHistoricalSQLiteWorkspace).
+//
+// Otherwise it returns the metadata LoadForDiscovery read: nil when there is
+// none, or when it does not load and is left to the caller's own load to
+// report. A caller that also refuses a backend checks that metadata itself.
 func LoadDiscoveredForOpen(beadsDir string) (*Config, error) {
 	cfg, err := LoadAndCheckWorkspaceFormat(beadsDir)
 	if err != nil {
@@ -127,6 +145,9 @@ func LoadDiscoveredForOpen(beadsDir string) (*Config, error) {
 			return nil, err
 		}
 		return nil, nil
+	}
+	if err := CheckHistoricalSQLiteWorkspace(beadsDir, cfg); err != nil {
+		return nil, err
 	}
 	return cfg, nil
 }

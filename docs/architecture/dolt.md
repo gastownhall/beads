@@ -26,7 +26,7 @@ Install a specific version. Do not install `releases/latest` — see
 version to use and why the pin exists.
 
 ```bash
-DOLT_VERSION=2.5.1   # see "Which Dolt version to install" below
+DOLT_VERSION=2.6.0   # see "Which Dolt version to install" below
 
 os=$(uname -s | tr '[:upper:]' '[:lower:]')
 arch=$(uname -m | sed -e 's/^x86_64$/amd64/' -e 's/^aarch64$/arm64/')
@@ -44,18 +44,86 @@ against the pin below.
 
 ### Which Dolt version to install
 
-Beads pins Dolt to **2.5.1**. CI installs that same pin with
+Beads pins Dolt to **2.6.0**. CI installs that same pin with
 `scripts/ci/install-dolt.sh`, which records the per-version measurements and
 the criterion for raising it; raise the pin here and in that script together.
 
 This pin is about the standalone `dolt` CLI, which only server and
 proxied-server mode use. Embedded mode is unaffected either way: it links the
-Dolt 2.5.1 engine into `bd` (`dolthub/driver` v2.4.1 with
-`github.com/dolthub/dolt/go` at the v2.5.1 release, in `go.mod`), no matter
+Dolt 2.6.0 engine into `bd` (`dolthub/driver` v2.4.1 with
+`github.com/dolthub/dolt/go` at the v2.6.0 release, in `go.mod`), no matter
 which `dolt` CLI is on your PATH. The CLI pin tracks that engine, so every mode
-runs the same Dolt. `bd` recommends Dolt **2.5.0** or newer, the first release
-whose engine is correct on the query shape in the table below, and managed
-proxied-server mode warns below it.
+runs the same Dolt.
+
+**`bd` requires Dolt 2.6.0 or newer** outside embedded mode, and refuses to
+run against anything older:
+
+- `bd dolt start`, and the auto-start behind server mode, refuse to launch a
+  `dolt` binary older than 2.6.0.
+- Managed proxied-server mode (`bd init --proxied-server`, and every command
+  after it) refuses a `dolt` binary older than 2.6.0 before it launches it.
+- Every server-mode and proxied-server store open asks the server it
+  reached for `SELECT dolt_version()` and refuses a server older than 2.6.0,
+  whoever started it, before it reads or writes through that open. That
+  includes an external server and a shared one.
+- `bd bootstrap` and `bd init --remote` check the server, or the `dolt`
+  CLI, before they clone; `bd init` checks a shared server before it
+  creates `beads_global` on it; and `bd dolt clean-databases` refuses an
+  older server before it drops anything.
+- A `bd dolt push`, `pull` or fetch (federation sync included) that runs
+  through the `dolt` binary on your `PATH` (git-protocol, credentialed,
+  cloud-auth and local remotes) refuses that binary when it is older than
+  2.6.0, like every other `dolt` `bd` runs. When `bd`'s own server holds the
+  database, dolt hands the transfer to that server; otherwise the binary's
+  own engine runs it. The check comes as soon as `bd` chooses the CLI route,
+  before it runs anything through the binary.
+- The remote-repo cache (`bd create --repo <url>`, `bd repo sync` for a
+  remote-URL repo) refuses the `dolt` on your `PATH` when it is older than
+  2.6.0, before it clones, pulls or pushes. No server holds the cache, so
+  that binary's own engine would run the transfer.
+- `bd doctor --server` reports a server older than 2.6.0 as an error.
+- `bd doctor`, `bd doctor --fix` included, is exempt, so you can still
+  diagnose and repair a workspace on an older server: its own checks and
+  repairs connect without the floor. Its checks that open the workspace's
+  store fail: the ✖ Database and Permissions errors only point at
+  `bd dolt status`, and the refusal itself is printed by the ⚠ checks
+  further down (Peer Connectivity, Sync Staleness, Federation Conflicts,
+  Dolt Mode). Run `bd doctor --server` to see the version.
+- `bd admin compact --dolt` is exempt: its `dolt gc` runs in an owned or
+  shared server's database, which the store open has already checked, and
+  dolt hands the GC to that running server. Read-only probes
+  (`bd dolt status`, `bd init`'s existing-database check) and the
+  working-set commit `bd dolt stop` makes before it stops a server `bd` runs
+  are not checked either.
+- Federation peers are not checked: `bd` checks only its own server and its
+  own `dolt` binary, so a peer on an older engine can still merge the same
+  criss-cross history differently (see below).
+
+The error names what was checked (the binary's path or the server's
+address), the version it reported, the 2.6.0 minimum, and where to get Dolt.
+To fix it, install 2.6.0 with the steps above (or `brew upgrade dolt`, then
+check `dolt version`) and restart any `dolt sql-server` on the new binary:
+for a server `bd` manages, `bd dolt stop` and `bd dolt start`; in a managed
+proxied-server workspace, `bd dolt stop` alone, since the proxy starts its
+server again on the next command and refuses `bd dolt start`. There is no
+override. A version `bd` cannot determine is not refused: a `dolt` binary
+whose `dolt version` output does not parse runs with a warning (proxied-server
+mode) and a server that does not answer `dolt_version()` with a version is
+used without the check (logged under `BD_DEBUG`). The
+[Dolt 2.6.0 release notes](https://github.com/dolthub/dolt/releases/tag/v2.6.0)
+list what changed. Two changes matter to `bd` users moving a server up to
+2.6.0:
+
+- When two histories have more than one merge base (criss-cross merges,
+  e.g. federation peers that pull from each other, or branches merged into
+  each other), Dolt 2.6.0 merges against a virtual base like git's ORT
+  strategy (new in 2.6.0, dolthub/dolt#12125). Some merges that 2.5.x
+  completed silently now conflict, and some spurious conflicts no longer
+  occur. Pull/push through a single remote is unaffected.
+- Dolt reports MySQL 8.0's strict default `sql_mode`, which includes
+  `NO_ZERO_IN_DATE`, `NO_ZERO_DATE` and `ERROR_FOR_DIVISION_BY_ZERO`, so
+  anything that reads `@@sql_mode` sees it. Dolt has done so since 2.3.3,
+  so this is new only to a server coming from a release before 2.3.3.
 
 Dolt 2.3.3 is the first release that stores a descending index column as
 descending (dolthub/dolt#11746), and older releases cannot read a table that
@@ -97,7 +165,8 @@ immediately calling the procedure:
 | 2.4.1 | yes | **no row** | 0 / 250 |
 | 2.4.2 | yes | **no row** | 0 / 250 |
 | **2.5.0** | yes | correct | 0 / 500 |
-| **2.5.1** (pinned) | yes | correct | 0 / 500 |
+| **2.5.1** | yes | correct | 0 / 500 |
+| **2.6.0** (pinned) | yes | correct | 0 / 500; 0 / 1000 across fresh servers (2026-10-24) |
 
 "Opens a database `bd` creates" means `information_schema` reads and writes
 don't fail with `table has unknown fields`. Every row of that column is
@@ -108,6 +177,19 @@ reads of `issues` still succeed on the releases marked "no".
   (2026-10-21), and 0 / 60 on 2.4.1 (2026-10-10). The 2026-10-10 and
   2026-10-21 runs re-measured 2.3.1 as a positive control, confirming the
   method still reproduces the regression.
+- 2.6.0 (2026-10-24): 0 / 500 on one server, and 0 / 1000 across 50 fresh
+  servers of 20 databases each; the embedded engine (`go.mod`'s
+  `dolthub/dolt/go` at the v2.6.0 release) 0 / 100 on one open and 0 / 400
+  across 20 fresh opens. The regression hits databases created soon after a
+  server starts, so one long-running server under-reports it: that day 2.3.1,
+  the positive control, measured 0 / 300 on one server but 31 / 600 across 30
+  fresh servers of 20 databases each. Measure across fresh servers.
+- 2.6.0: when two histories have more than one merge base (criss-cross
+  merges, e.g. federation peers that pull from each other, or branches merged
+  into each other), it merges against a virtual base like git's ORT strategy
+  (dolthub/dolt#12125). Some merges that 2.5.x completed silently now
+  conflict, and some spurious conflicts no longer occur. Pull/push through a
+  single remote is unaffected.
 - The `MAX`/`MIN` column is bee-ghosttrack's reproduction from
   [#7646](https://github.com/gastownhall/beads/pull/7646), reproduced on
   linux/amd64 and darwin/arm64. `bd`'s one query of that shape, the

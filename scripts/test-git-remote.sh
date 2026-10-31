@@ -8,7 +8,7 @@
 #   ./scripts/test-git-remote.sh              # Local bare git repo (default)
 #   ./scripts/test-git-remote.sh <github-url> # Push to real GitHub repo
 #
-# Requirements: bd, dolt (>= 2.3.3: older Dolt cannot open a database bd creates; 2.5.1, the pinned release, recommended), git
+# Requirements: bd, dolt (>= 2.6.0, the minimum bd requires outside embedded mode and the pinned release), git
 #
 # The script is self-contained: creates temp dirs, cleans up on exit.
 

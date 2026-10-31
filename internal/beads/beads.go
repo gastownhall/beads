@@ -745,6 +745,15 @@ func FindBeadsDirFrom(startDir string) string {
 	return ""
 }
 
+// HasProjectFiles reports whether discovery treats beadsDir as a beads
+// workspace (hasBeadsProjectFiles). bd run in a directory whose .beads it
+// does not treat as one finds no workspace there ("no beads database
+// found"), so a path that reaches such a .beads from another workspace
+// treats it the same way rather than opening it.
+func HasProjectFiles(beadsDir string) bool {
+	return hasBeadsProjectFiles(beadsDir)
+}
+
 // hasBeadsProjectFiles checks if a .beads directory contains actual project files.
 // Returns true if the directory contains any of:
 // - metadata.json or config.yaml (project configuration)

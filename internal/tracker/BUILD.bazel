@@ -36,6 +36,7 @@ go_test(
         "engine_create_only_test.go",
         "engine_external_ref_history_test.go",
         "engine_history_gate_cgo_test.go",
+        "engine_match_key_test.go",
         "engine_pull_failure_test.go",
         "engine_ratelimit_test.go",
         "engine_selective_test.go",

@@ -38,9 +38,10 @@ func LoadTarget(beadsDir string) (Target, error) { return httpclient.LoadTarget(
 // embedder that writes a workspace this way owns those decisions itself.
 //
 // It refuses a workspace in a format this build cannot open, as Attach does,
-// with *UnsupportedWorkspaceFormatError, and writes nothing there.
+// with *UnsupportedWorkspaceFormatError, and a historical SQLite workspace
+// with *LegacyWorkspaceError, and writes nothing there.
 func SaveTarget(beadsDir string, t Target) error {
-	if err := configfile.CheckDiscoveredWorkspaceFormat(beadsDir); err != nil {
+	if err := configfile.CheckDiscoveredForOpen(beadsDir); err != nil {
 		return err
 	}
 	return httpclient.SaveTarget(beadsDir, t)

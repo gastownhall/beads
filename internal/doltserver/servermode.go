@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
 
@@ -282,7 +283,7 @@ func ExternalPortSetting(beadsDir string, source PortSource, port int) ExternalP
 		return ExternalPortDeclaration{}
 	}
 	decl := ExternalPortDeclaration{
-		Setting:       "dolt_server_port in " + metadataPath,
+		Setting:       "dolt_server_port in " + remedy.PrintedValue(metadataPath),
 		NamesEndpoint: port == 0 || cfg.DoltServerPort == port,
 	}
 	switch {
@@ -332,10 +333,10 @@ func (d ExternalPortDeclaration) Advice(endpoint string) string {
 		return ExternallyManagedAdvice(d.Setting, endpoint)
 	}
 	advice := fmt.Sprintf("%s declares this workspace's Dolt server externally managed, so bd did not start one at %s.\n",
-		d.Setting, endpoint)
+		d.Setting, remedy.PrintedValue(endpoint))
 	if d.PortFile != "" {
 		return advice + fmt.Sprintf("bd took that port from %s, which records the port an earlier command reached "+
-			"and outranks dolt_server_port (%d). Start that server, or remove that file.", d.PortFile, d.DeclaredPort)
+			"and outranks dolt_server_port (%d). Start that server, or remove that file.", remedy.PrintedValue(d.PortFile), d.DeclaredPort)
 	}
 	advice += "Start that server, or point bd at the right endpoint."
 	if d.Sole {
@@ -349,21 +350,21 @@ func (d ExternalPortDeclaration) Advice(endpoint string) string {
 // externally managed. See ExternalPortDeclaration.Advice.
 func ExternallyManagedAdvice(setting, endpoint string) string {
 	return fmt.Sprintf("%s declares the Dolt server at %s externally managed, so bd did not start one.\n"+
-		"Start that server, or point bd at the right endpoint.", setting, endpoint)
+		"Start that server, or point bd at the right endpoint.", setting, remedy.PrintedValue(endpoint))
 }
 
 // UnreachableEndpointAdvice is the advice for a TCP dial of host:port, the
 // port resolved from source, that found no server, or "" when the caller's own
-// advice stands. A host off this machine gets the remote-host advice
-// (GH#3518): bd starts no server there, and `bd dolt start` refuses a remote
-// host. So does the IPv6 loopback, where bd's own server, which listens on
-// 127.0.0.1 only, never runs and `bd dolt start` refuses too. With no port
-// resolved (port 0), either gets UnresolvedPortAdvice instead, never a check
-// of port 0. Any other host on this machine gets the externally managed
-// advice when a setting declares the workspace's server so (see
+// advice stands. A host bd does not run its server at
+// (configfile.BdRunsServerAt) gets the remote-host advice (GH#3518): on
+// another machine, at the IPv6 loopback or at another loopback address bd
+// starts no server, and `bd dolt start` refuses the host. With no port
+// resolved (port 0), it gets UnresolvedPortAdvice instead, never a check of
+// port 0. The host bd runs its server at gets the externally managed advice
+// when a setting declares the workspace's server so (see
 // ExternalPortSetting).
 func UnreachableEndpointAdvice(beadsDir, host string, port int, source PortSource) string {
-	if !configfile.IsLocalHostString(host) || configfile.IsIPv6LoopbackHost(host) {
+	if !configfile.BdRunsServerAt(host) {
 		if port == 0 {
 			return UnresolvedPortAdvice(host)
 		}
@@ -373,21 +374,21 @@ func UnreachableEndpointAdvice(beadsDir, host string, port int, source PortSourc
 }
 
 // UnresolvedPortAdvice is the advice for a Dolt server at host for which no
-// port source resolved a port, or "" when bd runs the server there, whose
-// start resolves one. bd runs no server on another machine or at the IPv6
-// loopback, so no bd command publishes a port for one there, and the store
-// refuses to open until the port is pinned, with this advice.
+// port source resolved a port, or "" when bd runs the server there
+// (configfile.BdRunsServerAt), whose start resolves one. bd runs no server
+// anywhere else, so no bd command publishes a port for one there, and the
+// store refuses to open until the port is pinned, with this advice.
 func UnresolvedPortAdvice(host string) string {
-	if configfile.IsLocalHostString(host) && !configfile.IsIPv6LoopbackHost(host) {
+	if configfile.BdRunsServerAt(host) {
 		return ""
 	}
 	return fmt.Sprintf("bd does not manage the Dolt server at %s; pin its port with "+
-		"BEADS_DOLT_SERVER_PORT or dolt.port in .beads/config.yaml.", host)
+		"BEADS_DOLT_SERVER_PORT or dolt.port in .beads/config.yaml.", remedy.PrintedValue(host))
 }
 
 // remoteServerAdvice is the advice for a Dolt server at host:port that bd
-// does not run, on another machine or at the IPv6 loopback, and could not
-// reach, in the words the store uses for one.
+// does not run (configfile.BdRunsServerAt) and could not reach, in the words
+// the store uses for one.
 func remoteServerAdvice(host string, port int) string {
 	return "Verify the external server is running and reachable from this host:\n  " +
 		ReachabilityCheck(host, port)
@@ -397,12 +398,23 @@ func remoteServerAdvice(host string, port int) string {
 // server at host:port suggests. nc takes an IPv6 host bare, and curl takes it
 // bracketed with the port, in double quotes: a shell reads an unquoted
 // [::1]:3307 as a glob, which zsh refuses ("no matches found"). An IPv4
-// address or a hostname needs no quotes and gets none.
+// address or a hostname needs no quotes and gets none. The host is the
+// workspace's dolt.host, which a cloned repository's committed config.yaml
+// can set, so one that is not a plain shell word (remedy.IsPlainWord) is not
+// pasted into the commands: they take a <host> placeholder, and the host is
+// named beside them escaped (remedy.EscapedValue).
 func ReachabilityCheck(host string, port int) string {
-	target := doltutil.ServerAddr(host, port)
+	bare := configfile.UnbracketHost(host)
+	if !remedy.IsPlainWord(bare) {
+		return fmt.Sprintf("nc -zv <host> %d  # or curl <host>:%d for an HTTP-style check, with the dolt.host %s for <host>",
+			port, port, remedy.EscapedValue(bare))
+	}
+	// A plain word, and the address built from it, print as themselves, so
+	// PrintedValue spells each unchanged.
+	target := doltutil.PrintedServerAddr(host, port)
 	if strings.HasPrefix(target, "[") {
 		target = `"` + target + `"`
 	}
 	return fmt.Sprintf("nc -zv %s %d  # or curl %s for an HTTP-style check",
-		configfile.UnbracketHost(host), port, target)
+		remedy.PrintedValue(bare), port, target)
 }

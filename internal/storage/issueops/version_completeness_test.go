@@ -448,6 +448,7 @@ var versionExemptions = map[string]string{
 	// through RewriteDeletedReferencesInTx, never the deleted rows.
 	"DeleteIssueInTx":                 "delete family: no surviving row (Phase 3)",
 	"DeleteIssuesInTx":                "delete family: no surviving row (Phase 3)",
+	"DeleteIssuesBesideWispsInTx":     "delete family: no surviving row (Phase 3)",
 	"DeleteResolvedSetInTx":           "delete family: no surviving row (Phase 3)",
 	"DeleteInTx":                      "delete family: no surviving row (Phase 3); neighbours version via RewriteDeletedReferencesInTx",
 	"SweepInTx":                       "delete family: no surviving row (Phase 3)",
@@ -484,6 +485,7 @@ var versionExemptions = map[string]string{
 	"RecordFullEventInTable":        "writes the events audit table (templated %s), not work-bead state",
 	"InsertDerivedEvent":            "writes the events audit table (templated %s), not work-bead state",
 	"InsertDerivedEventReturningID": "writes the events audit table (templated %s), not work-bead state",
+	"RetireIDsInTx":                 "writes the id tombstone tables (templated %s), not work-bead state; a tombstone is not part of any bead's durable_state",
 
 	// the seam itself: its UPDATE issues SET current_revision is the
 	// bookkeeping half of the mint, not a mutation that needs its own.
@@ -499,6 +501,18 @@ var versionExemptions = map[string]string{
 	// mint a version dated in the past. It is the seam too, by the same
 	// reasoning as RecordVersionInTx's own entry above.
 	"RecordVersionAtInTx": "test-support twin of RecordVersionInTx, sharing its body; the seam itself, not a caller of it — advances current_revision to match the row it just inserted",
+}
+
+// versionSinkBookkeeping are the helpers whose own work-bead DML is the
+// bookkeeping half of a SINK rather than a mutation of the bead: they write a
+// column no durable_state reads and no caller can set, inside the sink's own
+// statement sequence. Their DML does not make every caller of the sink a bead
+// mutator — without this, every journal emitter (RecordEventInTx and its
+// siblings) would read as one, because the journal's create seam stamps
+// wisps.arrival_seq. Each entry must still exist and still write a bead table,
+// so the carve-out cannot outlive the code it names.
+var versionSinkBookkeeping = map[string]string{
+	"stampArrivalSeqInTx": "the journal's create seam stamping wisps.arrival_seq: a store-assigned, clone-local column outside durable_state",
 }
 
 // versionNeverMints pins the deliberate NOT-versioned rulings from the other
@@ -520,6 +534,7 @@ var versionNeverMints = map[string]string{
 	"MarkIsBlockedInTx":                "is_blocked is derived state",
 	"DeleteIssueInTx":                  "delete family (Phase 3)",
 	"DeleteIssuesInTx":                 "delete family (Phase 3)",
+	"DeleteIssuesBesideWispsInTx":      "delete family (Phase 3)",
 	"DeleteResolvedSetInTx":            "delete family (Phase 3)",
 	"DeleteIssuesBySourceRepoInTx":     "bulk delete (Phase 3)",
 	"UpdateIssueIDInTx":                "rename: out of contract by design",
@@ -842,8 +857,22 @@ func TestEveryVersionedEntryPointMints(t *testing.T) {
 func TestEveryBeadMutatorMintsOrIsExempt(t *testing.T) {
 	fns, mints := versionMints(t)
 
+	for name, reason := range versionSinkBookkeeping {
+		found := false
+		for _, f := range fns {
+			if f.Recv == "" && f.Name == name {
+				found = true
+				if !f.OwnBeadDML {
+					t.Errorf("sink bookkeeping helper %q no longer writes a work-bead table — remove it from versionSinkBookkeeping (%s)", name, reason)
+				}
+			}
+		}
+		if !found {
+			t.Errorf("sink bookkeeping helper %q not found in issueops — was it renamed? update versionSinkBookkeeping", name)
+		}
+	}
 	beadDML := journalscan.Fixpoint(fns,
-		func(f *journalscan.FuncInfo) bool { return f.OwnBeadDML },
+		func(f *journalscan.FuncInfo) bool { return f.OwnBeadDML && versionSinkBookkeeping[f.Name] == "" },
 		func(f *journalscan.FuncInfo) []string { return f.IdentCalls })
 
 	seenExempt := map[string]bool{}

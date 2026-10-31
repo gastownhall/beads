@@ -199,6 +199,9 @@ func RunAll(t *testing.T, factory Factory) {
 	// Keyset paging and the defensive row cap
 	t.Run("SearchPaging", func(t *testing.T) { RunSearchPaging(t, factory) })
 
+	// The --parent tree walk in one read transaction
+	t.Run("SearchDescendants", func(t *testing.T) { testSearchDescendants(t, factory) })
+
 	// Dependencies
 	t.Run("AddAndGetDeps", func(t *testing.T) { testAddAndGetDeps(t, factory) })
 	t.Run("DepCounts", func(t *testing.T) { testDepCounts(t, factory) })

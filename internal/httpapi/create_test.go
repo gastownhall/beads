@@ -349,6 +349,32 @@ func TestCreateRefusesAnOccupiedExplicitID(t *testing.T) {
 	}
 }
 
+// TestCreateRefusesARetiredExplicitID pins the 410: a create of an id a
+// retaining sweep retired answers `idempotency_expired` with `param` and the
+// tombstone's `closed_at`, never the occupied id's 409 and never a 400 — and
+// nothing reaches the wire from the role's prose.
+func TestCreateRefusesARetiredExplicitID(t *testing.T) {
+	closedAt := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
+	lifecycle := &roleLifecycle{createErr: fmt.Errorf("create: %w",
+		&issueops.IdempotencyExpiredError{ID: "bd-op-1", ClosedAt: closedAt})}
+	ts := newCreateServer(t, lifecycle)
+
+	resp := ts.createIssue(t, `{"actor":"alice","title":"one","id":"bd-op-1"}`)
+	if resp.StatusCode != http.StatusGone {
+		t.Fatalf("status = %d, want 410: %s", resp.StatusCode, readAll(t, resp))
+	}
+	body := decodeBody(t, resp)
+	if body["code"] != "idempotency_expired" {
+		t.Errorf("code = %v, want idempotency_expired", body["code"])
+	}
+	if body["param"] != "id" {
+		t.Errorf("param = %v, want id", body["param"])
+	}
+	if body["closed_at"] != "2026-03-01T12:00:00Z" {
+		t.Errorf("closed_at = %v, want the tombstone's 2026-03-01T12:00:00Z", body["closed_at"])
+	}
+}
+
 // TestCreateRefusesAGraphTheEdgesWouldBreak pins both arms of the one
 // dependency_cycle code, and the member PRESENCE that tells them apart. The
 // hierarchy refusal carries issue_id/blocker_id/blocker_is_ancestor and the

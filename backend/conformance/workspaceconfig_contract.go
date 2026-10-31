@@ -501,6 +501,58 @@ func RunWorkspaceConfigRefusesAnUnparseableCustomStatus(t *testing.T, ctx contex
 	assertWorkspaceConfigTableCount(t, ctx, fixture, "custom_statuses", 1)
 }
 
+// RunWorkspaceConfigBoundsTheKeyAndTheValueOnSet pins the two storage length
+// bounds workapi.ValidateSettingWrite applies: a key past
+// types.MaxFieldLen characters and a value past types.MaxTextBytes bytes are
+// refused with ErrValidation on a WRITE, and nothing is stored.
+//
+// IT IS A CONTRACT CASE because the legs used to disagree: Dolt's VARCHAR(255)
+// key and TEXT value refuse an overflow anyway, but as an unclassifiable driver
+// error, while the HTTP operation refused it as a typed ErrValidation at its
+// edge (and a backend with unbounded text columns would STORE it). The role is
+// the only place they can all be made one answer, and this is what keeps them
+// one.
+//
+// THE CEILINGS ARE ASSERTED FIRST, and read back verbatim, so a body that
+// refused every long write cannot pass. The REMOVE is not bounded: an
+// over-long key compares and stores nothing, so removing one succeeds.
+func RunWorkspaceConfigBoundsTheKeyAndTheValueOnSet(t *testing.T, ctx context.Context, fixture WorkspaceConfigFixture) {
+	t.Helper()
+	valueKey := workspaceConfigKey(fixture, "bounded-value")
+	atValue := strings.Repeat("v", types.MaxTextBytes)
+	setWorkspaceConfigSetting(t, ctx, fixture, valueKey, atValue)
+	if got := getWorkspaceConfigSetting(t, ctx, fixture, valueKey); got != atValue {
+		t.Fatalf("GetSetting(%q) returned %d bytes, want the %d-byte value stored verbatim", valueKey, len(got), len(atValue))
+	}
+	pastKey := workspaceConfigKey(fixture, "bounded-value-past")
+	if _, err := fixture.WorkspaceConfig.SetSetting(ctx, publicops.SetSettingRequest{
+		Key: pastKey, Value: atValue + "v",
+	}); !errors.Is(err, publicops.ErrValidation) {
+		t.Fatalf("SetSetting(a %d-byte value) error = %v, want ErrValidation", types.MaxTextBytes+1, err)
+	}
+	assertWorkspaceConfigRowCount(t, ctx, fixture, pastKey, 0)
+
+	prefix := workspaceConfigKey(fixture, "bounded-name-")
+	atKey := prefix + strings.Repeat("n", types.MaxFieldLen-len(prefix))
+	setWorkspaceConfigSetting(t, ctx, fixture, atKey, "v")
+	assertWorkspaceConfigValue(t, ctx, fixture, atKey, "v")
+	longKey := atKey + "n"
+	if _, err := fixture.WorkspaceConfig.SetSetting(ctx, publicops.SetSettingRequest{
+		Key: longKey, Value: "v",
+	}); !errors.Is(err, publicops.ErrValidation) {
+		t.Fatalf("SetSetting(a %d-character key) error = %v, want ErrValidation", types.MaxFieldLen+1, err)
+	}
+	// Read off the table BEFORE the remove below, which would otherwise erase
+	// the evidence: a body that stored the row and then answered ErrValidation
+	// must not pass the key half when it cannot pass the value half.
+	assertWorkspaceConfigRowCount(t, ctx, fixture, longKey, 0)
+	if _, err := fixture.WorkspaceConfig.UnsetSetting(ctx, publicops.UnsetSettingRequest{Key: longKey}); err != nil {
+		t.Fatalf("UnsetSetting(a %d-character key) = %v, want success: the remove carries no length bound", types.MaxFieldLen+1, err)
+	}
+	unsetWorkspaceConfigSetting(t, ctx, fixture, valueKey)
+	unsetWorkspaceConfigSetting(t, ctx, fixture, atKey)
+}
+
 // RunWorkspaceConfigProjectsCustomStatuses pins the side effect
 // workspaceconfig.go's SetSetting doc describes for status.custom: the value is
 // not merely stored, it REWRITES custom_statuses, which reads consult first.

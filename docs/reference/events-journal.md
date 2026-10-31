@@ -296,6 +296,9 @@ as their own `dep_*` and `comment` records.
 It is `null` on a `delete`, and on a dependency record whose source bead was
 itself removed by the same cascade.
 
+A snapshot of a wisp-plane bead carries its `arrival_seq` — see [Arrival order
+on the row](#arrival-order-on-the-row).
+
 ### Dependency records are not symmetric
 
 A `dep` member names the edge that changed:
@@ -315,6 +318,88 @@ history deduplicates that case and writes nothing; the journal does not. Treat
 a `dep_remove` it is the stored column read back just before the delete. The
 two can differ byte for byte while meaning the same thing, so compare parsed
 values rather than strings.
+
+## Arrival order on the row
+
+A consumer that falls behind the retained window re-baselines from rows, and
+rows alone do not say in what order they were created: `created_at` is the
+writer's clock at insert time, at one-second precision, so two creates that
+committed in one order can carry the same timestamp or the reverse. The journal
+therefore leaves its ordering on the row itself.
+
+A wisp-plane bead (`ephemeral` or `no_history`) created while the workspace
+journals carries `arrival_seq`: the `seq` of the `create` record written by the
+transaction that inserted it, stored on the row in that same transaction. Sort
+surviving rows by `arrival_seq` and you have the order their creates committed
+in — after the records themselves are long pruned.
+
+What it promises:
+
+- **Unique, and not reused.** No two rows in a workspace share a value, and a
+  value is not handed out again after its row is deleted or re-created, or
+  after the counter heals, while the counter, the journal or a surviving row
+  still holds it. A lost counter is the one exception (see below).
+- **Commit order.** Rows are ordered by the commit of the `create` record that
+  stamped them: if one such record committed before another, its row's value is
+  lower. A reader that sees a row stamped `n` also sees every surviving row
+  stamped below `n`. For a row created while the workspace journals, that record
+  is its insert. For a row created with the journal off and stamped later by a
+  synthetic `create` (see below), it is not, so that row sorts by its rename or
+  re-import, after rows created before it.
+- **It matches the journal.** The `create` record that stamped the row has
+  `seq` equal to it, and that record's snapshot — and every later snapshot of
+  the row — carries the same value.
+- **Batch order.** A batch stamps its items in the order the caller listed
+  them.
+- **Never changes.** Updates, closes, reopens, labels, comments, claims,
+  dependency edges and renames leave it alone. Promoting the bead to the
+  durable plane clears it.
+- **Touches nothing else.** Stamping changes no other column, so the revision
+  a caller reads right after its create still passes a compare-and-set.
+- **Assigned by storage only.** A value supplied on create, update or import
+  is never stored.
+- **Local.** Values compare only within the workspace that assigned them, and
+  `bd export` never writes them.
+
+What it does not promise:
+
+- **No stamp without the journal.** With `events-journal` off there is no
+  stamp and no extra statement (the unique index on the column is still
+  maintained on every wisp insert and delete, with NULL entries); turning it on
+  does not backfill. A row created while it was off carries none until a
+  `create` record is journaled for it.
+- **Durable beads carry none.** The durable plane replicates, and a
+  clone-local number would mean nothing on another clone.
+- **A bead moved onto the wisp plane carries none.** `bd update --ephemeral`
+  and every other persistence move into the wisp plane journal an `update`, not
+  a `create`, so the bead has no stamp until a `create` record is journaled for
+  it (a rename or a re-import).
+- **Read it from the row, not from a record's `seq`.** A rename and an import
+  upsert journal a synthetic `create` for a row that already exists. The first
+  `create` record journaled for an unstamped row stamps it; later ones never
+  move it.
+- **Create order only.** The order of later updates is not recoverable this
+  way.
+- **A lost counter forgets deleted rows.** Once a deleted row's `create` record
+  is pruned, only the seq counter remembers its value. A counter lost after that
+  is re-created past the journal's highest `seq` and the highest surviving
+  `arrival_seq`, so the deleted row's value can be handed out again. A consumer
+  that keeps an `arrival_seq` high-water mark across such a reset can skip
+  rows.
+
+Over HTTP the member is announced by the `issues.arrivalSeq` capability and
+appears on every issue-shaped response when present. The capability says the
+server knows the member; whether rows are being stamped follows journal
+activation, which `GET /v0/beads/events` reports by answering `409
+events_journal_disabled` when it is off.
+
+The stamp is a journal `seq`, so the counter never hands out a value a row
+already carries: the stale-counter heal raises it past both the journal's
+highest `seq` and the highest `arrival_seq`, and a unique index on the column
+turns any collision into a loud failure rather than a duplicate. A counter lost
+outright is re-created on the next open and raised past the highest surviving
+`arrival_seq` as well, so a pruned journal cannot hand a new row a value below
+rows that are still there.
 
 ## Resuming, and the truncation error
 

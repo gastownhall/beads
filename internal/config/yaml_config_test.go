@@ -1917,3 +1917,47 @@ func TestDoltRemotesAPIPortIsUserGlobal(t *testing.T) {
 		t.Fatal("dolt.remotesapi-port must be machine-global; a project config cannot vary one shared server")
 	}
 }
+
+// TestCheckSecretGitTracked_QuotesThePathInTheRemedy pins the
+// remedy-printing invariant at the git-tracked secret refusal: its git rm and
+// echo commands take the config path, and the .gitignore beside it, as one
+// shell word each (quoted when the workspace path holds a space).
+func TestCheckSecretGitTracked_QuotesThePathInTheRemedy(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the want spells the POSIX quoting")
+	}
+	tmpDir := filepath.Join(t.TempDir(), "my project")
+	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitInit := exec.Command("git", "init")
+	gitInit.Dir = tmpDir
+	if out, err := gitInit.CombinedOutput(); err != nil {
+		t.Fatalf("git init failed: %v\n%s", err, out)
+	}
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(beadsDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("json: false\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitAdd := exec.Command("git", "add", configPath)
+	gitAdd.Dir = tmpDir
+	if out, err := gitAdd.CombinedOutput(); err != nil {
+		t.Fatalf("git add failed: %v\n%s", err, out)
+	}
+	err := checkSecretGitTracked(configPath, "linear.api_key")
+	if err == nil {
+		t.Fatal("expected the git-tracked secret refusal")
+	}
+	for _, want := range []string{
+		"git rm --cached '" + configPath + "'\n",
+		`echo "config.yaml" >> '` + filepath.Join(beadsDir, ".gitignore") + "'\n",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal = %q, want it to hold %q", err.Error(), want)
+		}
+	}
+}

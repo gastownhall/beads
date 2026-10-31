@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/types"
@@ -340,6 +341,14 @@ func resolveViaPrefixRoutingWithAccess(ctx context.Context, id string, writable 
 		return nil, err
 	}
 
+	// Refuse what admission refuses from the target's own contents first, as
+	// an auto-route does (openAutoRoutedStore): the dolt_database lookup
+	// below would otherwise report a historical SQLite or legacy Dolt rig as
+	// a missing dolt_database field, or a missing metadata.json.
+	if _, err := admitForeignWorkspace(targetBeadsDir); err != nil {
+		return nil, fmt.Errorf("prefix route %q to %s: %w", matchedRoute.Prefix, matchedRoute.Path, err)
+	}
+
 	// Check that the target has a different dolt_database
 	targetDB, err := loadDoltDatabase(targetBeadsDir)
 	if err == nil && targetDB == "" {
@@ -369,7 +378,7 @@ func resolveViaPrefixRoutingWithAccess(ctx context.Context, id string, writable 
 	result.closeFn = func() { _ = targetStore.Close() }
 
 	if os.Getenv("BD_DEBUG_ROUTING") != "" {
-		fmt.Fprintf(os.Stderr, "[routing] Resolved %s via prefix route to %s (database: %s)\n", id, matchedRoute.Path, targetDB)
+		fmt.Fprintf(os.Stderr, "[routing] Resolved %s via prefix route to %s (database: %s)\n", id, remedy.PrintedValue(matchedRoute.Path), remedy.PrintedValue(targetDB))
 	}
 
 	return result, nil
@@ -434,6 +443,12 @@ func lookupPrefixRoute(id string) (*prefixRoute, string, error) {
 // named database under the target. An empty database leaves the environment
 // as it is: the target names no database of its own to prefer.
 //
+// It opens through openForeignStore, so a target admitForeignWorkspace
+// refuses (a legacy Dolt workspace among them) is refused before the open can
+// start a server there or run migrations into its database. That is not every
+// target bd run inside it refuses: see guardForeignLegacyDoltWorkspace and
+// targetSelectsServerMode for the legacy Dolt layouts it admits.
+//
 // A writable open never creates the target's database
 // (newExistingDoltStoreFromConfig): the open runs before the lookup it serves,
 // so an id that misses must leave a repository that has not been bootstrapped
@@ -455,9 +470,9 @@ func openRoutedTargetStore(ctx context.Context, beadsDir, database string, writa
 		}()
 	}
 	if writable {
-		return newExistingDoltStoreFromConfig(ctx, beadsDir)
+		return openForeignStore(ctx, beadsDir, foreignWrite)
 	}
-	return newReadOnlyStoreFromConfig(ctx, beadsDir)
+	return openForeignStore(ctx, beadsDir, foreignRead)
 }
 
 // matchPrefixRoute returns the route whose prefix is the longest leading match
@@ -518,7 +533,7 @@ func loadDoltDatabase(beadsDir string) (string, error) {
 		DoltDatabase string `json:"dolt_database"`
 	}
 	if err := json.Unmarshal(data, &meta); err != nil {
-		return "", fmt.Errorf("parsing %s: %w", metadataPath, err)
+		return "", fmt.Errorf("parsing %s: %w", remedy.PrintedValue(metadataPath), remedy.PrintedError(err))
 	}
 	return meta.DoltDatabase, nil
 }
@@ -553,9 +568,10 @@ func autoRouteTargetDatabase(beadsDir string, writable bool) (string, error) {
 	case !writable:
 		return database, nil
 	case err != nil:
-		return "", err
+		// A read or parse error repeats the routed path as the OS spelled it.
+		return "", remedy.PrintedError(err)
 	case database == "":
-		return "", fmt.Errorf("%s has no dolt_database field", filepath.Join(beadsDir, "metadata.json"))
+		return "", fmt.Errorf("%s has no dolt_database field", remedy.PrintedValue(filepath.Join(beadsDir, "metadata.json")))
 	}
 	return database, nil
 }

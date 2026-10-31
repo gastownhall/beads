@@ -19,6 +19,7 @@ import (
 	bdhttp "github.com/steveyegge/beads/backend/http"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/httpclient"
+	"github.com/steveyegge/beads/internal/testutil/legacyworkspace"
 )
 
 func mustAttachTestURL(t *testing.T, raw string) *url.URL {
@@ -310,6 +311,38 @@ func TestAttachConnectAndSaveTargetRefuseAGraphWorkspace(t *testing.T) {
 				}
 				if after := workspaceTreeDigest(t, root); !maps.Equal(after, before) {
 					t.Fatalf("%s changed the workspace: before %v, after %v", name, slices.Sorted(maps.Keys(before)), slices.Sorted(maps.Keys(after)))
+				}
+				server.wantNoRequests(t)
+			})
+		}
+	}
+}
+
+// TestAttachConnectAndSaveTargetRefuseAHistoricalSQLiteWorkspace pins that
+// this backend's activation refuses a historical SQLite workspace with the
+// refusal bd's command admission prints there, before it writes anything:
+// without it Attach migrated a pre-Dolt config.json, saved metadata.json
+// selecting backend http over the SQLite database, and wrote the sidecar and
+// .gitignore, after which bd itself no longer recognized the workspace as one
+// to migrate. Connect refuses before it dials.
+func TestAttachConnectAndSaveTargetRefuseAHistoricalSQLiteWorkspace(t *testing.T) {
+	hermeticEnv(t)
+	for _, layout := range legacyworkspace.HistoricalSQLiteLayouts() {
+		for name, activate := range workspaceWriters() {
+			t.Run(layout.Name+"/"+name, func(t *testing.T) {
+				root := t.TempDir()
+				beadsDir := filepath.Join(root, ".beads")
+				layout.Write(t, beadsDir)
+				before := workspaceTreeDigest(t, root)
+				server := newRecordingServer(t)
+
+				err := activate(t, beadsDir, server)
+				if after := workspaceTreeDigest(t, root); !maps.Equal(after, before) {
+					t.Fatalf("%s changed the workspace: before %v, after %v", name, slices.Sorted(maps.Keys(before)), slices.Sorted(maps.Keys(after)))
+				}
+				var legacyErr *bdhttp.LegacyWorkspaceError
+				if !errors.As(err, &legacyErr) || err.Error() != legacyworkspace.HistoricalSQLiteRefusal {
+					t.Fatalf("%s = %v, want *bdhttp.LegacyWorkspaceError with admission's refusal %q", name, err, legacyworkspace.HistoricalSQLiteRefusal)
 				}
 				server.wantNoRequests(t)
 			})

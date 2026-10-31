@@ -414,6 +414,30 @@ async def test_update_with_optional_fields(bd_client, mock_process):
 
 
 @pytest.mark.asyncio
+async def test_update_defer_until(bd_client, mock_process):
+    """defer_until="" sends --defer "" (bd clears the defer); left unset, no --defer is sent."""
+    issue_data = {
+        "id": "bd-1",
+        "title": "Test issue",
+        "status": "open",
+        "priority": 1,
+        "issue_type": "bug",
+        "created_at": "2025-01-25T00:00:00Z",
+        "updated_at": "2025-01-25T00:00:00Z",
+    }
+    mock_process.communicate = AsyncMock(return_value=(json.dumps(issue_data).encode(), b""))
+
+    with patch("asyncio.create_subprocess_exec", return_value=mock_process) as mock_exec:
+        await bd_client.update(UpdateIssueParams(issue_id="bd-1", status="open", defer_until=""))
+        cleared = mock_exec.call_args[0]
+        await bd_client.update(UpdateIssueParams(issue_id="bd-1", status="open"))
+        unset = mock_exec.call_args[0]
+
+    assert cleared[cleared.index("--defer") + 1] == ""
+    assert "--defer" not in unset
+
+
+@pytest.mark.asyncio
 async def test_update_invalid_response(bd_client, mock_process):
     """Test update method with invalid response type."""
     mock_process.communicate = AsyncMock(return_value=(json.dumps(["not a dict"]).encode(), b""))
@@ -601,6 +625,20 @@ async def test_reopen_invalid_response(bd_client, mock_process):
     ):
         params = ReopenIssueParams(issue_ids=["bd-1"])
         await bd_client.reopen(params)
+
+
+@pytest.mark.asyncio
+async def test_reopen_noop_returns_empty_list(bd_client, mock_process):
+    """Issue #6872: bd reopen reports no-ops (already open, or not a done
+    status) on stderr only and prints nothing on stdout with exit 0; that
+    must parse as an empty result, not "Invalid response for reopen"."""
+    mock_process.communicate = AsyncMock(return_value=(b"", b"bd-1 is already open\n"))
+
+    with patch("asyncio.create_subprocess_exec", return_value=mock_process):
+        params = ReopenIssueParams(issue_ids=["bd-1"])
+        issues = await bd_client.reopen(params)
+
+    assert issues == []
 
 
 @pytest.mark.asyncio

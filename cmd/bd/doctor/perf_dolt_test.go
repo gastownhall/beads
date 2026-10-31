@@ -262,9 +262,33 @@ func TestDatabaseSizeFor(t *testing.T) {
 		"::1":        "n/a (server bd does not run)",
 		"[::1]":      "n/a (server bd does not run)",
 		"db.invalid": "n/a (server on another machine)",
+		// One address gets one answer however it is spelled, and a loopback
+		// address bd's own server does not listen on is this machine but
+		// not bd's server.
+		"LOCALHOST":        "2.00 KB",
+		"0.0.0.0":          "2.00 KB",
+		"::ffff:127.0.0.1": "2.00 KB",
+		"0:0:0:0:0:0:0:1":  "n/a (server bd does not run)",
+		"127.0.0.2":        "n/a (server bd does not run)",
 	} {
 		if got := databaseSizeFor(beadsDir, host); got != want {
 			t.Errorf("databaseSizeFor(%q) = %q, want %q", host, got, want)
+		}
+	}
+}
+
+// TestBdRunsServerHostOwnership pins doctor's ownership decision (port-0
+// advice, health-check skip) to configfile.BdRunsServerAt in every spelling.
+// A proxied-server workspace's server is bd's own proxy whatever the host.
+func TestBdRunsServerHostOwnership(t *testing.T) {
+	server := &configfile.Config{Backend: configfile.BackendDolt, DoltMode: configfile.DoltModeServer}
+	proxied := &configfile.Config{Backend: configfile.BackendDolt, DoltMode: configfile.DoltModeProxiedServer}
+	for _, host := range []string{"", "127.0.0.1", "LOCALHOST", "0.0.0.0", "::ffff:127.0.0.1", "::1", "[::1]", "0:0:0:0:0:0:0:1", "127.0.0.2", "db.example.com"} {
+		if got, want := bdRunsServer(server, host), configfile.BdRunsServerAt(host); got != want {
+			t.Errorf("bdRunsServer(server mode, %q) = %v, want %v", host, got, want)
+		}
+		if !bdRunsServer(proxied, host) {
+			t.Errorf("bdRunsServer(proxied-server mode, %q) = false, want true", host)
 		}
 	}
 }

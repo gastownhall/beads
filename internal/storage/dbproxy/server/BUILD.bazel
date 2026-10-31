@@ -14,6 +14,7 @@ go_library(
         "//internal/configfile",
         "//internal/doltserver",
         "//internal/procid",
+        "//internal/remedy",
         "//internal/storage/dbproxy/identity",
         "//internal/storage/dbproxy/pidfile",
         "//internal/storage/dbproxy/util",

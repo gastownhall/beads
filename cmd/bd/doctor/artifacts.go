@@ -1,20 +1,18 @@
 package doctor
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/steveyegge/beads/cmd/bd/doctor/fix"
-	"github.com/steveyegge/beads/internal/configfile"
 )
 
 // ArtifactFinding represents a single detected artifact that may need cleanup.
 type ArtifactFinding struct {
 	Path        string // Absolute path to the artifact
-	Type        string // "jsonl", "sqlite", "cruft-beads", "redirect"
+	Type        string // "sqlite", "cruft-beads", "redirect"
 	Description string // Human-readable description
 	SafeDelete  bool   // Whether this is safe to delete without data loss
 }
@@ -28,10 +26,10 @@ type ArtifactReport struct {
 	SafeDeleteCount int
 }
 
-// CheckClassicArtifacts scans for beads classic artifacts that should be cleaned up
-// after the Dolt migration. This includes stale JSONL files in dolt-native directories,
-// leftover SQLite database files, cruft .beads directories that should be redirect-only,
-// and invalid redirect files.
+// CheckClassicArtifacts scans for beads classic artifacts left after the Dolt
+// migration: leftover SQLite files and cruft in .beads directories that should
+// be redirect-only, as fix.PlanArtifacts classifies them. It offers --fix only
+// when something is safe to delete.
 //
 // The scan is rooted at the given path and looks for .beads/ directories recursively,
 // checking each for artifacts that indicate incomplete migration cleanup.
@@ -85,12 +83,21 @@ func CheckClassicArtifacts(path string) DoctorCheck {
 		}
 	}
 
+	// Offer --fix only when it would remove something: findings that need
+	// manual review stay, and a fix that removes nothing would report them
+	// fixed.
+	fixHint := "Run 'bd doctor --fix' to clean up, or 'bd doctor --check=artifacts' for details"
+	if report.SafeDeleteCount == 0 {
+		fixHint = ""
+		details = append(details, "  Nothing here is safe to delete automatically; review these by hand ('bd doctor --check=artifacts' for details)")
+	}
+
 	return DoctorCheck{
 		Name:     "Classic Artifacts",
 		Status:   StatusWarning,
 		Message:  msg,
 		Detail:   strings.Join(details, "\n"),
-		Fix:      "Run 'bd doctor --fix' to clean up, or 'bd doctor --check=artifacts' for details",
+		Fix:      fixHint,
 		Category: CategoryMaintenance,
 	}
 }
@@ -98,36 +105,16 @@ func CheckClassicArtifacts(path string) DoctorCheck {
 // ScanForArtifacts performs a recursive scan of the given path for classic beads artifacts.
 // Returns an error if the walk itself fails (e.g., root path doesn't exist or is inaccessible).
 // Individual unreadable subdirectories are skipped without error.
+//
+// It reports what the cleanup (fix.ClassicArtifacts) acts on: both walk the
+// same .beads directories (fix.WalkBeadsDirs) and take each one's findings
+// from the same plan (fix.PlanArtifacts), so the cleanup removes exactly the
+// findings this marks safe to delete.
 func ScanForArtifacts(rootPath string) (ArtifactReport, error) {
 	var report ArtifactReport
 
-	// Walk the directory tree looking for .beads/ directories
-	walkErr := filepath.Walk(rootPath, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return nil // Skip directories we can't read
-		}
-
-		base := filepath.Base(path)
-		if base == ".git" && info.IsDir() {
-			scanGitWorktreeArtifacts(path, &report)
-			return filepath.SkipDir
-		}
-
-		// Skip node_modules and similar
-		if info.IsDir() && (base == "node_modules" || base == "vendor" || base == "__pycache__") {
-			return filepath.SkipDir
-		}
-
-		// We only care about directories named ".beads"
-		if !info.IsDir() || base != ".beads" {
-			return nil
-		}
-
-		// Found a .beads directory - scan it
-		scanBeadsDir(path, &report)
-
-		// Don't descend into .beads/ itself (we've scanned it)
-		return filepath.SkipDir
+	walkErr := fix.WalkBeadsDirs(rootPath, func(beadsDir string) {
+		scanBeadsDir(beadsDir, &report)
 	})
 	if walkErr != nil {
 		return report, fmt.Errorf("scanning artifacts at %s: %w", rootPath, walkErr)
@@ -150,227 +137,34 @@ func ScanForArtifacts(rootPath string) (ArtifactReport, error) {
 	return report, nil
 }
 
-// scanGitWorktreeArtifacts scans the git-managed worktree area only.
-// This avoids traversing the entire .git directory tree, which can be large and
-// is unrelated to classic beads artifact cleanup.
-func scanGitWorktreeArtifacts(gitDir string, report *ArtifactReport) {
-	worktreesDir := filepath.Join(gitDir, "beads-worktrees")
-	info, err := os.Stat(worktreesDir)
-	if err != nil || !info.IsDir() {
-		return
-	}
-
-	_ = filepath.Walk(worktreesDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return nil
-		}
-		if !info.IsDir() || filepath.Base(path) != ".beads" {
-			return nil
-		}
-		scanBeadsDir(path, report)
-		return filepath.SkipDir
-	})
-}
-
-// scanBeadsDir checks a single .beads directory for artifacts.
-//
-// The walk reaches the .beads directories of nested repositories, sub-projects
-// and worktrees, and command admission checked only the workspace doctor runs
-// in. So beadsDir's metadata is read as discovery reads it, without migrating
-// a legacy config.json into metadata.json, and a workspace in a format this
-// build cannot open is not scanned: configfile.Load would rewrite that
-// config.json, dropping keys it does not know, and its files are not this
-// build's to report for removal.
+// scanBeadsDir reports a single .beads directory's findings from
+// fix.PlanArtifacts, which reads its metadata as discovery reads it, without
+// migrating a legacy config.json into metadata.json, and skips a workspace in
+// a format this build cannot open.
 func scanBeadsDir(beadsDir string, report *ArtifactReport) {
-	cfg, err := configfile.LoadAndCheckWorkspaceFormat(beadsDir)
-	var formatErr *configfile.UnsupportedWorkspaceFormatError
-	if errors.As(err, &formatErr) {
+	findings, skip := fix.PlanArtifacts(beadsDir)
+	if skip {
 		return
 	}
-
-	// Check if this should be a redirect-only directory
-	isRedirectExpected := isRedirectExpectedDir(beadsDir)
-
-	// Check if it has a redirect file
-	hasRedirect := hasRedirectFile(beadsDir)
-
-	// 1. Check for SQLite artifacts. Metadata that is absent or does not
-	// load leaves cfg nil, which selects the default Dolt backend.
-	scanSQLiteArtifacts(beadsDir, cfg, report)
-
-	// 2. Check for cruft .beads directories (should be redirect-only)
-	if isRedirectExpected {
-		scanCruftBeadsDir(beadsDir, report)
+	for _, f := range findings {
+		finding := ArtifactFinding{Path: f.Path, Type: f.Type, Description: f.Description, SafeDelete: f.SafeDelete}
+		switch f.Type {
+		case fix.ArtifactSQLite:
+			report.SQLiteArtifacts = append(report.SQLiteArtifacts, finding)
+		case fix.ArtifactCruft:
+			report.CruftBeadsDirs = append(report.CruftBeadsDirs, finding)
+		}
 	}
 
-	// 3. Validate redirect files
-	if hasRedirect {
+	if hasRedirectFile(beadsDir) {
 		validateRedirect(beadsDir, report)
 	}
-}
-
-// isRedirectExpectedDir returns true if this .beads directory should contain
-// only a redirect file (i.e., it's in a worktree or orchestrator subdirectory).
-// NOTE: The polecats/crew/refinery patterns are retained for backwards compatibility
-// with existing orchestrator installations.
-func isRedirectExpectedDir(beadsDir string) bool {
-	// The parent of .beads is the project dir
-	// We need to determine if this is a "leaf" .beads that should redirect
-	// to a "canonical" .beads (typically in the main rig or main worktree)
-
-	parent := filepath.Dir(beadsDir)
-	parentName := filepath.Base(parent)
-	grandparent := filepath.Dir(parent)
-	grandparentName := filepath.Base(grandparent)
-
-	// Pattern: */polecats/*/.beads/ (orchestrator worker worktree — backwards compat)
-	if grandparentName == "polecats" {
-		return true
-	}
-
-	// Pattern: */crew/*/.beads/ (orchestrator assistant workspace — backwards compat)
-	if grandparentName == "crew" {
-		return true
-	}
-
-	// Pattern: */refinery/rig/.beads/ (orchestrator processor — backwards compat)
-	if parentName == "rig" && grandparentName == "refinery" {
-		return true
-	}
-
-	// Pattern: .git/beads-worktrees/*/.beads/
-	if grandparentName == "beads-worktrees" {
-		return true
-	}
-
-	// Check if this is a rig-root .beads/ (e.g., my-project/.beads/)
-	// that should redirect to mayor/rig/.beads/
-	// A rig-root .beads has a sibling "mayor/" or "polecats/" directory
-	if hasSibling(parent, "mayor") || hasSibling(parent, "polecats") {
-		// This looks like a rig root, check if there's a canonical location
-		canonicalDir := filepath.Join(parent, "mayor", "rig", ".beads")
-		if _, err := os.Stat(canonicalDir); err == nil {
-			return true
-		}
-	}
-
-	return false
-}
-
-// hasSibling returns true if the directory has a sibling with the given name.
-func hasSibling(dir string, siblingName string) bool {
-	sibling := filepath.Join(dir, siblingName)
-	info, err := os.Stat(sibling)
-	return err == nil && info.IsDir()
 }
 
 // hasRedirectFile returns true if the .beads directory has a redirect file.
 func hasRedirectFile(beadsDir string) bool {
 	_, err := os.Stat(filepath.Join(beadsDir, "redirect"))
 	return err == nil
-}
-
-// scanSQLiteArtifacts checks for leftover SQLite database files.
-// Only flags SQLite files as artifacts if beadsDir, whose metadata is cfg, is
-// on Dolt (fix.SelectsDolt). If SQLite is still the active backend, including
-// in a historical SQLite workspace whose metadata predates the backend key,
-// beads.db is the live database, and on any other backend, or one this build
-// does not recognize, the files are that backend's. The cleanup
-// (fix.ClassicArtifacts) uses the same predicate, so in a .beads both walks
-// reach it removes only the SQLite files this reports as safe to delete.
-func scanSQLiteArtifacts(beadsDir string, cfg *configfile.Config, report *ArtifactReport) {
-	if !fix.SelectsDolt(beadsDir, cfg) {
-		return
-	}
-
-	entries, err := os.ReadDir(beadsDir)
-	if err != nil {
-		return
-	}
-
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		name := entry.Name()
-
-		// beads.db and its WAL/SHM files
-		if name == "beads.db" || name == "beads.db-shm" || name == "beads.db-wal" {
-			report.SQLiteArtifacts = append(report.SQLiteArtifacts, ArtifactFinding{
-				Path:        filepath.Join(beadsDir, name),
-				Type:        "sqlite",
-				Description: "SQLite database file (Dolt is active backend)",
-				SafeDelete:  name == "beads.db-shm" || name == "beads.db-wal",
-			})
-			continue
-		}
-
-		// beads.backup-*.db pre-migration backups
-		if strings.HasPrefix(name, "beads.backup-") && strings.HasSuffix(name, ".db") {
-			report.SQLiteArtifacts = append(report.SQLiteArtifacts, ArtifactFinding{
-				Path:        filepath.Join(beadsDir, name),
-				Type:        "sqlite",
-				Description: "pre-migration backup",
-				SafeDelete:  true,
-			})
-		}
-	}
-}
-
-// scanCruftBeadsDir checks if a .beads directory that should be redirect-only
-// contains extra files beyond the redirect file. It passes over every entry
-// the cleanup (fix.ClassicArtifacts) keeps there, so it reports only files
-// that cleanup removes.
-func scanCruftBeadsDir(beadsDir string, report *ArtifactReport) {
-	entries, err := os.ReadDir(beadsDir)
-	if err != nil {
-		return
-	}
-
-	hasRedirect := false
-	for _, entry := range entries {
-		if entry.Name() == "redirect" {
-			hasRedirect = true
-			break
-		}
-	}
-
-	// Count non-redirect entries
-	var extraFiles []string
-	for _, entry := range entries {
-		name := entry.Name()
-		// redirect file is expected
-		if name == "redirect" {
-			continue
-		}
-		// .gitkeep is harmless
-		if name == ".gitkeep" {
-			continue
-		}
-		// Beside a redirect the cleanup keeps the directory's own metadata,
-		// metadata.json or an unmigrated, inert legacy config.json
-		// (gastownhall/beads#4692; see fix.cleanCruftBeadsDirFiles)
-		if (name == "metadata.json" || name == "config.json") && hasRedirect {
-			continue
-		}
-		extraFiles = append(extraFiles, name)
-	}
-
-	if len(extraFiles) == 0 {
-		return
-	}
-
-	desc := fmt.Sprintf("should be redirect-only but contains: %s", strings.Join(extraFiles, ", "))
-	if len(extraFiles) > 5 {
-		desc = fmt.Sprintf("should be redirect-only but contains %d extra files", len(extraFiles))
-	}
-
-	report.CruftBeadsDirs = append(report.CruftBeadsDirs, ArtifactFinding{
-		Path:        beadsDir,
-		Type:        "cruft-beads",
-		Description: desc,
-		SafeDelete:  true, // Safe: location is redirect-expected, extra files are cruft
-	})
 }
 
 // validateRedirect checks that a redirect file points to a valid target.
@@ -461,7 +255,7 @@ func validateRedirect(beadsDir string, report *ArtifactReport) {
 // FollowRedirect (internal/beads) applies before honoring a redirect;
 // duplicated locally (rather than importing internal/beads) to keep this
 // package's existing pattern of small, self-contained filesystem checks
-// (see isRedirectExpectedDir/hasRedirectFile above).
+// (see hasRedirectFile above).
 func hasDatabaseOrMetadata(dir string) bool {
 	if _, err := os.Stat(filepath.Join(dir, "metadata.json")); err == nil {
 		return true

@@ -9,21 +9,19 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
-	"strconv"
 	"strings"
-	"unicode"
-	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/routing"
 	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // openMigrationPlanningStore opens the personal planning workspace's store for
@@ -46,12 +44,17 @@ import (
 // (refuseUninitializablePlanningRepo, refuseUninitializableTarget): a planning
 // repo whose own config selects Dolt server mode, whose server data an
 // embedded metadata.json would hide; any workspace bd's own command admission
-// refuses there (guardLegacyUpgradeWorkspace), such as a SQLite-era repo,
-// whose data a fresh database beside it would hide; and one holding several
-// databases, where nothing records which one bd uses. A redirect stub is
-// refused whether or not it has a metadata.json of its own: bd run in the
-// planning repo follows the redirect, so it never reads a database inside the
-// stub.
+// refuses there (admitForeignWorkspace, classifying the planning repo from its
+// own config, plus the "loading config" refusal of a legacy config.json that
+// does not load), such as a SQLite-era repo or a legacy Dolt root, whose data
+// a fresh database beside it would hide; a fresh clone of a SQLite-era
+// project (a legacy config.json and no database), or of a project from before
+// bd wrote config.json (an issues.jsonl and no database), in which bd run
+// there finds no workspace and whose files a database initialized there
+// would hide; and one holding several databases, where nothing records which
+// one bd uses. A redirect stub is refused whether or not it has a metadata.json
+// of its own: bd run in the planning repo follows the redirect, so it never
+// reads a database inside the stub.
 //
 // The planning repo is the contributor auto-route target, so it then opens the
 // way a write auto-routed there does (openAutoRoutedStore): its own
@@ -84,7 +87,7 @@ func openMigrationPlanningStore(ctx context.Context, planningBeadsDir string, pr
 	}
 	initialized, err := initializePlanningRepo(ctx, planningBeadsDir, projectStore)
 	if err != nil {
-		return nil, fmt.Errorf("initialize planning repo: %w", err)
+		return nil, fmt.Errorf("initialize planning repo: %w", remedy.PrintedTextError(err))
 	}
 	database, err := autoRouteTargetDatabase(planningBeadsDir, true)
 	if err != nil {
@@ -145,11 +148,11 @@ func refuseUncommittedPlanningChanges(ctx context.Context, planningStore storage
 	if len(tables) == 0 {
 		return nil
 	}
-	remedy := "commit them there with `bd dolt commit`, then rerun"
+	next := "commit them there with `bd dolt commit`, then rerun"
 	if unnamedDatabase != "" {
-		remedy = fmt.Sprintf("bd run there opens the database %[1]q only once a metadata.json names it, so give it a .beads/metadata.json whose dolt_database is %[1]q, commit them there with `bd dolt commit`, then rerun", unnamedDatabase)
+		next = fmt.Sprintf("bd run there opens the database %[1]s only once a metadata.json names it, so give it a .beads/metadata.json whose dolt_database is %[1]s, commit them there with `bd dolt commit`, then rerun", remedy.EscapedValue(unnamedDatabase))
 	}
-	return refusePlanningRepo("planning repo %s has uncommitted changes (%s), which migrate-personal's commit would publish; %s; nothing was moved", planningRepo, strings.Join(tables, ", "), remedy)
+	return refusePlanningRepo("planning repo %s has uncommitted changes (%s), which migrate-personal's commit would publish; %s; nothing was moved", remedy.PrintedValue(planningRepo), remedy.PrintedList(tables, ", "), next)
 }
 
 // uncommittedTables lists the tables with staged or unstaged changes in st's
@@ -171,18 +174,43 @@ func uncommittedTables(ctx context.Context, st storage.DoltStorage) ([]string, e
 // openMigrationPlanningStore must not open or initialize: a redirect stub, with
 // or without a metadata.json of its own, and, when it has no metadata.json,
 // one a routed bd create would not initialize either (refuseUninitializableTarget:
-// its own config selects Dolt server mode, bd's own admission refuses it, or
-// it holds several databases). Every other metadata-less .beads is left to
+// its own config selects Dolt server mode, bd's own admission refuses it, it
+// is a fresh clone of a SQLite-era project, or of a project from before bd
+// wrote config.json, bd run there finds no workspace in, or it holds several
+// databases). Every other metadata-less .beads is left to
 // initializePlanningRepo. It writes nothing. A .beads that has a metadata.json
-// is left to the open, which refuses what it cannot use. A targetRefusal is
+// is refused here for what bd's admission refuses from its contents (a format
+// this build cannot open, a historical SQLite workspace, a legacy Dolt
+// workspace) and, as a routed create refuses it (refuseExistingCreateTarget),
+// when its own config selects Dolt server mode while its metadata names no
+// dolt_mode and this process would open it embedded; it is otherwise left to
+// the open, which refuses what it cannot use. A targetRefusal is
 // raised as a planningRepoRefusal naming the planning repo; bd's admission
-// refusals are returned as they are, for planningOpenError to render.
+// refusals, and the no-workspace error of either clone, are returned as they
+// are, for planningOpenError to render.
 func refuseUninitializablePlanningRepo(planningBeadsDir string) error {
 	if redirect := beads.ResolveRedirect(planningBeadsDir); utils.CanonicalizePath(redirect.TargetDir) != utils.CanonicalizePath(planningBeadsDir) {
 		return redirectedPlanningRepoError(planningBeadsDir, redirect.TargetDir, redirect.SourceDatabase)
 	}
+	// What admission refuses from the planning repo's own contents is refused
+	// as admission refuses it, whether or not it has a metadata.json: a
+	// historical SQLite planning repo whose metadata.json names its database
+	// would otherwise reach the open, and be refused there for the
+	// dolt_database it lacks.
+	if err := checkDiscoveredForOpen(planningBeadsDir); err != nil {
+		return err
+	}
+	// So is a planning repo a routed bd create refuses although it has a
+	// metadata.json (refuseExistingCreateTarget): a legacy Dolt planning
+	// repo, or a server workspace the writable open would give an embedded
+	// database.
 	if _, err := os.Stat(filepath.Join(planningBeadsDir, "metadata.json")); err == nil {
-		return nil
+		err := refuseExistingCreateTarget(planningBeadsDir)
+		var existing *existingTargetRefusal
+		if errors.As(err, &existing) {
+			return refusePlanningRepo("planning repo %s: %s", remedy.PrintedValue(filepath.Dir(planningBeadsDir)), existing.planningMsg)
+		}
+		return err
 	}
 	err := refuseUninitializableTarget(planningBeadsDir)
 	var refusal *targetRefusal
@@ -209,7 +237,7 @@ func redirectedPlanningRepoError(planningBeadsDir, target, stubDatabase string) 
 			return stubDatabaseRefusal(planningRepo, targetRepo, stubDatabase)
 		}
 	}
-	return refusePlanningRepo("planning repo %s redirects to %s; set routing.contributor to that repository instead", planningRepo, targetRepo)
+	return refusePlanningRepo("planning repo %s redirects to %s; set routing.contributor to that repository instead", remedy.PrintedValue(planningRepo), remedy.PrintedValue(targetRepo))
 }
 
 // stubDatabaseRefusal refuses planningRepo, a redirect stub to targetRepo that
@@ -217,7 +245,7 @@ func redirectedPlanningRepoError(planningBeadsDir, target, stubDatabase string) 
 // planning repo uses stubDatabase there, and routing.contributor, set to
 // targetRepo, selects targetRepo's own instead.
 func stubDatabaseRefusal(planningRepo, targetRepo, stubDatabase string) error {
-	return refusePlanningRepo("planning repo %s redirects to %s, where bd uses the database %q that the planning repo names; routing.contributor cannot select that database (set to %s, it selects that repository's own); set routing.contributor to a separate planning repository (e.g. ~/.beads-planning)", planningRepo, targetRepo, stubDatabase, targetRepo)
+	return refusePlanningRepo("planning repo %s redirects to %s, where bd uses the database %s that the planning repo names; routing.contributor cannot select that database (set to %s, it selects that repository's own); set routing.contributor to a separate planning repository (e.g. ~/.beads-planning)", remedy.PrintedValue(planningRepo), remedy.PrintedValue(targetRepo), remedy.EscapedValue(stubDatabase), remedy.PrintedValue(targetRepo))
 }
 
 // initializePlanningRepo gives a planning .beads that refuseUninitializablePlanningRepo
@@ -311,20 +339,20 @@ func refuseSelfPlanningRepo(planningPath, planningBeadsDir, projectBeadsDir stri
 		// refuseUninitializablePlanningRepo after it.
 		switch {
 		case planningDatabase == "" || planningDatabase == projectDatabase:
-			return fmt.Errorf("planning repo %s is this project's own workspace; set routing.contributor to a separate planning repository (e.g. ~/.beads-planning)", planningPath)
+			return fmt.Errorf("planning repo %s is this project's own workspace; set routing.contributor to a separate planning repository (e.g. ~/.beads-planning)", remedy.PrintedValue(planningPath))
 		case planningDatabase != sharedDatabase:
 			return stubDatabaseRefusal(filepath.Dir(planningBeadsDir), filepath.Dir(redirect.TargetDir), planningDatabase)
 		}
-		where := planningPath
+		where := remedy.PrintedValue(planningPath)
 		if redirect.WasRedirected {
-			where = fmt.Sprintf("%s redirects to %s, which", planningPath, filepath.Dir(redirect.TargetDir))
+			where = fmt.Sprintf("%s redirects to %s, which", remedy.PrintedValue(planningPath), remedy.PrintedValue(filepath.Dir(redirect.TargetDir)))
 		}
-		return fmt.Errorf("planning repo %s holds the .beads this project uses, where bd uses the database %q, not this project's %q; a database beside this project's is not a separate planning repository; set routing.contributor to a separate planning repository (e.g. ~/.beads-planning)", where, planningDatabase, projectDatabase)
+		return fmt.Errorf("planning repo %s holds the .beads this project uses, where bd uses the database %s, not this project's %s; a database beside this project's is not a separate planning repository; set routing.contributor to a separate planning repository (e.g. ~/.beads-planning)", where, remedy.EscapedValue(planningDatabase), remedy.EscapedValue(projectDatabase))
 	}
 	planningCfg, perr := configfile.LoadForDiscovery(planning)
 	if perr == nil && qerr == nil && planningCfg != nil && projectCfg != nil &&
 		planningCfg.ProjectID != "" && planningCfg.ProjectID == projectCfg.ProjectID {
-		return fmt.Errorf("planning repo %s has this project's project_id (%s), so it is a clone of this project's workspace, not a separate planning repository; set routing.contributor to a separate planning repository (e.g. ~/.beads-planning)", planningPath, planningCfg.ProjectID)
+		return fmt.Errorf("planning repo %s has this project's project_id (%s), so it is a clone of this project's workspace, not a separate planning repository; set routing.contributor to a separate planning repository (e.g. ~/.beads-planning)", remedy.PrintedValue(planningPath), remedy.PrintedValue(planningCfg.ProjectID))
 	}
 	return nil
 }
@@ -390,7 +418,7 @@ func runMigratePersonal(cmd *cobra.Command, args []string) error {
 	fmt.Printf("\n%s personal issues created by %s found in project database:\n\n",
 		ui.RenderBold(fmt.Sprintf("%d", len(personal))), ui.RenderAccent(identity))
 	for _, issue := range personal {
-		fmt.Printf("  %s  %s\n", ui.RenderAccent(issue.ID), issue.Title)
+		fmt.Printf("  %s  %s\n", ui.RenderAccent(remedy.PrintedValue(issue.ID)), remedy.PrintedValue(issue.Title))
 	}
 	fmt.Println()
 
@@ -408,13 +436,16 @@ func runMigratePersonal(cmd *cobra.Command, args []string) error {
 	// Validate planning DB path before any destructive operation
 	planningBeadsDir := filepath.Join(planningPath, ".beads")
 	if _, err := os.Stat(planningBeadsDir); os.IsNotExist(err) {
-		return fmt.Errorf("planning repo at %s has no .beads directory; initialize it first with 'bd init'", planningPath)
+		return fmt.Errorf("planning repo at %s has no .beads directory; initialize it first with 'bd init'", remedy.PrintedValue(planningPath))
 	}
 	if err := refuseSelfPlanningRepo(planningPath, planningBeadsDir, resolveCommandBeadsDir(dbPath)); err != nil {
 		return err
 	}
+	if err := refuseDependentsLeftBehind(ctx, store, personal); err != nil {
+		return err
+	}
 
-	fmt.Printf("Move to planning repo: %s\n\n", ui.RenderAccent(planningPath))
+	fmt.Printf("Move to planning repo: %s\n\n", ui.RenderAccent(remedy.PrintedValue(planningPath)))
 
 	if !migratePersonalYes && !confirmMigratePersonal(ctx, len(personal)) {
 		return nil
@@ -453,7 +484,7 @@ func runMigratePersonal(cmd *cobra.Command, args []string) error {
 		ui.RenderPass("✓"),
 		len(personal),
 		pluralIssue(len(personal)),
-		ui.RenderAccent(planningPath))
+		ui.RenderAccent(remedy.PrintedValue(planningPath)))
 	return nil
 }
 
@@ -507,9 +538,13 @@ func planningOpenError(planningPath string, err error) error {
 	case errors.As(err, &refusal):
 		return refusal
 	case isUnsupportedWorkspaceFormat(err) || isLegacyUpgradeRefusal(err):
-		return handleWorkspaceGuardError(fmt.Errorf("planning repo %s: %w", planningPath, err))
+		return handleWorkspaceGuardError(fmt.Errorf("planning repo %s: %w", remedy.PrintedValue(planningPath), err))
 	}
-	return fmt.Errorf("failed to open planning store at %s: %w", planningPath, err)
+	// The open error is bd's own and can span lines (a server-mode open
+	// names its remedy under it): the printer spells what in it a terminal
+	// acts on, such as the planning path as the OS repeated it, and keeps
+	// its lines.
+	return fmt.Errorf("failed to open planning store at %s: %w", remedy.PrintedValue(planningPath), remedy.PrintedTextError(err))
 }
 
 // refuseIssuesAlreadyInPlanning is phase 0 of runMigratePersonal: it refuses
@@ -526,9 +561,9 @@ func refuseIssuesAlreadyInPlanning(ctx context.Context, planningStore storage.Do
 			if isPlanningRepoMirror(issue, planningPath) {
 				return repoSyncMirrorRefusal(issue, planningPath, runtime.GOOS)
 			}
-			return fmt.Errorf("issue %s already exists in the planning repo %s; nothing was moved", issue.ID, planningPath)
+			return fmt.Errorf("issue %s already exists in the planning repo %s; nothing was moved", remedy.PrintedValue(issue.ID), remedy.PrintedValue(planningPath))
 		case !errors.Is(err, storage.ErrNotFound):
-			return fmt.Errorf("failed to check the planning DB for %s: %w", issue.ID, err)
+			return fmt.Errorf("failed to check the planning DB for %s: %w", remedy.PrintedValue(issue.ID), err)
 		}
 	}
 	return nil
@@ -549,151 +584,22 @@ func isPlanningRepoMirror(issue *types.Issue, planningPath string) bool {
 // repoSyncMirrorRefusal is the phase-0 refusal for a project copy that bd repo
 // sync imported from the planning repo (isPlanningRepoMirror). It names the
 // commands that remove those copies and turn their hydration back on, with
-// the recorded source_repo quoted for a shell on goos (shellQuotedFor), so
+// the recorded source_repo quoted for a shell on goos (remedy.ShellQuotedFor), so
 // each runs as printed; such a source_repo prints as itself, and the refusal
 // names it as it is. A source_repo no quoting there passes on unchanged is
 // left as a <path> placeholder for the path the refusal names escaped
-// (escapedValue), so pasting that name in its place runs nothing either. The
+// (remedy.EscapedValue), so pasting that name in its place runs nothing either. The
 // issue ID and planning repo it names beside the commands are spelled by
-// printedValue, so none of the values can redraw the commands.
+// remedy.PrintedValue, so none of the values can redraw the commands.
 func repoSyncMirrorRefusal(issue *types.Issue, planningPath, goos string) error {
-	repo, ok := shellQuotedFor(goos, issue.SourceRepo)
+	quoted, ok := remedy.ShellQuotedFor(goos, issue.SourceRepo)
 	sourceRepo, pathNote := issue.SourceRepo, ""
 	if !ok {
-		sourceRepo, repo, pathNote = escapedValue(issue.SourceRepo), "<path>", ", with that path for <path>"
+		sourceRepo, quoted, pathNote = remedy.EscapedValue(issue.SourceRepo), "<path>", ", with that path for <path>"
 	}
-	return fmt.Errorf("issue %s already exists in the planning repo %s; the project copy was imported from %s by `bd repo sync` (remove those copies with `bd repo remove %s`, then rerun, and run `bd repo add %s` again if you want them hydrated%s); nothing was moved",
-		printedValue(issue.ID), printedValue(planningPath), sourceRepo, repo, repo, pathNote)
+	return fmt.Errorf("issue %s already exists in the planning repo %s; the project copy was imported from %s by bd repo sync (remove those copies with bd repo remove %s, then rerun, and run bd repo add %s again if you want them hydrated%s); nothing was moved",
+		remedy.PrintedValue(issue.ID), remedy.PrintedValue(planningPath), sourceRepo, quoted, quoted, pathNote)
 }
-
-// printedValue spells value as a refusal names it beside a remedy command: as
-// it is when it prints as itself (printsAsItself), and otherwise escaped
-// (escapedValue), which spells each character that does not as an escape, so
-// the value cannot redraw, reorder or split the command. Unlike
-// ui.SanitizeForTerminal, which drops such characters, it still names the
-// value bd recorded.
-func printedValue(value string) string {
-	if printsAsItself(value) {
-		return value
-	}
-	return escapedValue(value)
-}
-
-// escapedValue spells value as a refusal names a value its remedy leaves as a
-// placeholder, for the user to quote in its place: Go-quoted, as %q spells it,
-// with each character shellQuotedFor refuses on some platform but the
-// backslash, which %q already escapes, also spelled as an escape: \x22 for ",
-// \x24 for $, \x26 for &, \u201c for “. Between the double quotes is then no
-// character a shell shellQuotedFor names expands, ends the quotes at or splits
-// the argument at, so a user who pastes the name as it is printed runs
-// nothing, and strconv.Unquote still reads it back as the value.
-func escapedValue(value string) string {
-	shellActive := func(r rune) bool {
-		return r != '\\' && strings.ContainsRune(unquotableOnPOSIX+unquotableOnWindows, r)
-	}
-	var escaped strings.Builder
-	escaped.WriteByte('"')
-	for value != "" {
-		// The run up to the next such character is spelled as %q spells it.
-		n := strings.IndexFunc(value, shellActive)
-		if n < 0 {
-			n = len(value)
-		}
-		quoted := strconv.Quote(value[:n])
-		escaped.WriteString(quoted[1 : len(quoted)-1])
-		value = value[n:]
-		if value == "" {
-			break
-		}
-		r, size := utf8.DecodeRuneInString(value)
-		if r < utf8.RuneSelf {
-			fmt.Fprintf(&escaped, `\x%02x`, r)
-		} else {
-			fmt.Fprintf(&escaped, `\u%04x`, r)
-		}
-		value = value[size:]
-	}
-	escaped.WriteByte('"')
-	return escaped.String()
-}
-
-// printsAsItself reports whether a terminal shows value as the characters it
-// holds: it is valid UTF-8, since a stray byte such as 0x9b starts a control
-// sequence in a terminal that reads 8-bit controls, and each rune is graphic
-// (unicode.IsGraphic): a letter, mark, number, punctuation, symbol or space,
-// such as the U+3000 a Japanese IME types. That rules out a control
-// character, such as a carriage return or the escape that starts a terminal
-// sequence, a format character, such as U+202E, which reverses the text after
-// it, and a line or paragraph separator, U+2028 or U+2029.
-func printsAsItself(value string) bool {
-	return utf8.ValidString(value) && !strings.ContainsFunc(value, func(r rune) bool { return !unicode.IsGraphic(r) })
-}
-
-// shellQuotedFor quotes value as one argument of a command printed for a user
-// to paste into a shell on goos, and reports whether it can: a remedy prints a
-// value in a command only when the shells people run there all pass it to bd
-// unchanged, and otherwise names it beside a placeholder.
-//
-// On every platform it refuses a value that does not print as itself
-// (printsAsItself): a line break ends the command in each shell, a carriage
-// return or terminal escape sequence can redraw the printed command so the
-// one a user copies is not the one bd printed, and a character such as U+202E
-// or U+2028 can reorder or split how the command shows.
-//
-// On POSIX a value goes in single quotes (doltutil.ShellQuote), which sh, bash,
-// zsh, fish and PowerShell keep literal, unless it holds:
-//   - \, which fish reads as an escape there, so a backslash before a quote
-//     ends them;
-//   - ', which ends them in each: doltutil.ShellQuote spells it as \' between
-//     two quoted parts, which sh, bash, zsh and fish read as a quote, but
-//     PowerShell, which takes a backslash literally, does not, and runs the
-//     rest of the value as a command;
-//   - ‘ ’ ‚ ‛ (U+2018 to U+201B), which end them in PowerShell.
-//
-// On Windows a value goes in plain double quotes, inside which cmd.exe,
-// PowerShell and Git Bash keep spaces, backslashes and ( ) ' # @ literal, as
-// Go's argument parsing does, unless it holds:
-//   - ", which ends the quotes in each, or “ ” „, which end them in PowerShell;
-//   - $ or `, which PowerShell and bash expand there;
-//   - % or !, which cmd.exe expands there (! with delayed expansion on), and
-//     bash expands ! as history;
-//   - & | < > or ^, which cmd.exe acts on when PowerShell hands a .cmd shim,
-//     such as npm's bd.cmd, an argument with no space in it unquoted, or ; ,
-//     or =, which cmd.exe reads there as separating a batch file's
-//     arguments, so a shim that reads them one by one (%1, %2) rather than
-//     passing them all on (%*), as npm's does, hands bd a host such as
-//     db.example.com;--recreate-missing as two (each refused whether or not
-//     the value has a space, so a path such as R&D planning gets a
-//     placeholder too);
-//   - \\, which bash reads there as one backslash;
-//
-// or ends in a backslash, which Go's argument parsing reads as escaping the
-// closing quote. cmd.exe needs it doubled, and PowerShell, which takes
-// backslashes literally, would then pass both on.
-func shellQuotedFor(goos, value string) (string, bool) {
-	if !printsAsItself(value) {
-		return "", false
-	}
-	if goos != "windows" {
-		if strings.ContainsAny(value, unquotableOnPOSIX) {
-			return "", false
-		}
-		return doltutil.ShellQuote(value), true
-	}
-	if strings.HasSuffix(value, `\`) || strings.Contains(value, `\\`) || strings.ContainsAny(value, unquotableOnWindows) {
-		return "", false
-	}
-	return `"` + value + `"`, true
-}
-
-// unquotableOnPOSIX and unquotableOnWindows hold the characters a shell there
-// does not keep literal inside the quotes shellQuotedFor puts a value in, or,
-// on Windows, in the argument PowerShell hands a .cmd shim unquoted.
-// escapedValue spells each of them as an escape.
-const (
-	unquotableOnPOSIX   = "\\'‘’‚‛"
-	unquotableOnWindows = "\"“”„$`%!&|<>^;,="
-)
 
 // copyIssuesToPlanning is phase 1 of runMigratePersonal: it copies every
 // personal issue from src to the planning store dst and returns their IDs. The
@@ -718,25 +624,25 @@ func copyIssuesToPlanning(ctx context.Context, src, dst storage.DoltStorage, per
 			return nil, err
 		}
 		if _, rollbackErr := dst.DeleteIssues(ctx, created, false, false, false); rollbackErr != nil {
-			return nil, fmt.Errorf("%w; rolling the copy back failed too, so the planning DB still holds %s: %w", err, strings.Join(created, ", "), rollbackErr)
+			return nil, fmt.Errorf("%w; rolling the copy back failed too, so the planning DB still holds %s: %w", err, remedy.PrintedList(created, ", "), rollbackErr)
 		}
 		return nil, err
 	}
 	for _, issue := range personal {
 		if err := dst.CreateIssue(ctx, issue, actor); err != nil {
-			return rollback(fmt.Errorf("failed to copy issue %s to planning DB: %w", issue.ID, err))
+			return rollback(fmt.Errorf("failed to copy issue %s to planning DB: %w", remedy.PrintedValue(issue.ID), err))
 		}
 		created = append(created, issue.ID)
 	}
 	for _, issue := range personal {
 		if err := copyIssueRelations(ctx, src, dst, issue, actor); err != nil {
-			return rollback(fmt.Errorf("failed to copy %s to planning DB: %w", issue.ID, err))
+			return rollback(fmt.Errorf("failed to copy %s to planning DB: %w", remedy.PrintedValue(issue.ID), err))
 		}
 	}
 	err := commitPlanningWrites(ctx, dst, formatDoltAutoCommitMessage("migrate-personal", actor, created))
 	switch {
 	case errors.Is(err, storage.ErrCommitIndeterminate):
-		return nil, fmt.Errorf("committing the copy in the planning repo may have failed: %w; the copy of %s is left there and nothing was deleted from the project DB, so run `bd dolt commit` in the planning repo, then resolve the duplicates manually", err, strings.Join(created, ", "))
+		return nil, fmt.Errorf("committing the copy in the planning repo may have failed: %w; the copy of %s is left there and nothing was deleted from the project DB, so run `bd dolt commit` in the planning repo, then resolve the duplicates manually", err, remedy.PrintedList(created, ", "))
 	case err != nil:
 		return rollback(fmt.Errorf("failed to commit the copy in the planning repo: %w", err))
 	}
@@ -770,23 +676,50 @@ func commitPlanningWrites(ctx context.Context, dst storage.DoltStorage, message 
 	return maybeAutoCommitStore(ctx, dst, doltAutoCommitParams{MessageOverride: message})
 }
 
+// refuseDependentsLeftBehind refuses, before anything is copied, a move whose
+// phase 2 delete would be refused: one that takes an issue that a bead it
+// leaves in the project database depends on, such as a bead someone else
+// created. That delete runs with cascade and force off, so it refuses such an
+// issue, but only once phase 1 has committed the copy, which left the issue in
+// both databases. The same delete is run here as a dry run, whose dependents
+// guard runs before it returns; it writes nothing. The ephemeral and
+// no-history beads the move takes are part of that request on both stores, as
+// in the delete itself (issueops.DeleteIssuesBesideWispsInTx), so a wisp child
+// does not count as a dependent left behind.
+func refuseDependentsLeftBehind(ctx context.Context, projectStore storage.DoltStorage, personal []*types.Issue) error {
+	ids := make([]string, len(personal))
+	for i, issue := range personal {
+		ids[i] = issue.ID
+	}
+	_, err := projectStore.DeleteIssues(ctx, ids, false, false, true)
+	var blocked *issueops.DependentsOutsideRequestError
+	switch {
+	case errors.As(err, &blocked):
+		return fmt.Errorf("issue %s has dependents that would stay in the project database (%s), depending on an issue it no longer holds; remove those dependencies with `bd dep remove`, then rerun; nothing was moved", remedy.PrintedValue(blocked.IssueID), remedy.PrintedList(blocked.Dependents, ", "))
+	case err != nil:
+		return fmt.Errorf("failed to check the project DB for dependents of the issues to move: %w", err)
+	}
+	return nil
+}
+
 // deleteMovedIssues is phase 2 of runMigratePersonal: it deletes the moved
 // issues from the project DB in a single transaction, under the command's
 // dolt.auto-commit policy (issueOpsContext), as bd delete does. Both halves of
 // the move then follow it: with on, a server-mode project commits the delete
 // as it runs and phase 1 commits the copy; with batch or off, the delete stays
 // in the working set, as phase 1 leaves the copy in an embedded planning store
-// (commitsPlanningWrites). The planning copy is complete at this point. If the
-// delete fails, the planning repo already holds the good copy and the project
-// DB is untouched, so the user is told to resolve the duplicate rather than
-// silently losing data.
+// (commitsPlanningWrites). The planning copy is complete at this point. Its
+// dependents guard already passed as a dry run before the copy
+// (refuseDependentsLeftBehind). If the delete fails all the same, the planning
+// repo already holds the good copy and the project DB is untouched, so the
+// user is told to resolve the duplicate rather than silently losing data.
 func deleteMovedIssues(ctx context.Context, projectStore storage.DoltStorage, ids []string, planningPath string) error {
 	opsCtx, err := issueOpsContext(ctx)
 	if err == nil {
 		_, err = projectStore.DeleteIssues(opsCtx, ids, false, false, false)
 	}
 	if err != nil {
-		return fmt.Errorf("issues copied to planning repo %s but deleting them from the project DB failed; resolve the duplicate manually: %w", planningPath, err)
+		return fmt.Errorf("issues copied to planning repo %s but deleting them from the project DB failed; resolve the duplicate manually: %w", remedy.PrintedValue(planningPath), err)
 	}
 	return nil
 }
@@ -800,27 +733,27 @@ func deleteMovedIssues(ctx context.Context, projectStore storage.DoltStorage, id
 func copyIssueRelations(ctx context.Context, src, dst storage.DoltStorage, issue *types.Issue, actor string) error {
 	labels, err := src.GetLabels(ctx, issue.ID)
 	if err != nil {
-		return fmt.Errorf("read labels for %s: %w", issue.ID, err)
+		return fmt.Errorf("read labels for %s: %w", remedy.PrintedValue(issue.ID), err)
 	}
 	for _, label := range labels {
 		if err := dst.AddLabel(ctx, issue.ID, label, actor); err != nil {
-			return fmt.Errorf("copy label %q for %s: %w", label, issue.ID, err)
+			return fmt.Errorf("copy label %q for %s: %w", label, remedy.PrintedValue(issue.ID), err)
 		}
 	}
 
 	deps, err := src.GetDependencyRecords(ctx, issue.ID)
 	if err != nil {
-		return fmt.Errorf("read dependencies for %s: %w", issue.ID, err)
+		return fmt.Errorf("read dependencies for %s: %w", remedy.PrintedValue(issue.ID), err)
 	}
 	for _, dep := range deps {
 		if err := dst.AddDependency(ctx, dep, actor); err != nil {
-			return fmt.Errorf("copy dependency %s→%s: %w", dep.IssueID, dep.DependsOnID, err)
+			return fmt.Errorf("copy dependency %s→%s: %w", remedy.PrintedValue(dep.IssueID), remedy.PrintedValue(dep.DependsOnID), err)
 		}
 	}
 
 	comments, err := src.GetIssueComments(ctx, issue.ID)
 	if err != nil {
-		return fmt.Errorf("read comments for %s: %w", issue.ID, err)
+		return fmt.Errorf("read comments for %s: %w", remedy.PrintedValue(issue.ID), err)
 	}
 	for _, c := range comments {
 		// ImportIssueComment writes a structured comment row preserving the
@@ -828,7 +761,7 @@ func copyIssueRelations(ctx context.Context, src, dst storage.DoltStorage, issue
 		// event-style entry that GetIssueComments never returns, silently
 		// dropping the comment from the migrated issue (maphew review, be-e2nb).
 		if _, err := dst.ImportIssueComment(ctx, issue.ID, c.Author, c.Text, c.CreatedAt); err != nil {
-			return fmt.Errorf("copy comment for %s: %w", issue.ID, err)
+			return fmt.Errorf("copy comment for %s: %w", remedy.PrintedValue(issue.ID), err)
 		}
 	}
 
