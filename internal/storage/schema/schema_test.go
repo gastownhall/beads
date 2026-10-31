@@ -2554,6 +2554,9 @@ func (m *mockDB) QueryRowContext(_ context.Context, _ string, _ ...any) *sql.Row
 // (0), so the repair takes its early no-op branch on both firings; any
 // OTHER QueryRowContext this pass might issue still surfaces loudly, via
 // sqlmock's own unmet/unexpected-call error rather than a silent success.
+// Between them, ignored/10's dropped-default check (verifyDroppedDefaults)
+// lists the tables once for each of the three wisp tables it drops a default
+// on; the listing is empty, so each is skipped as absent.
 // QueryContext answers the {ignored_schema_migrations, 31} repair's lookup of
 // main 0062's drop commit the same way: no such commit, so the pre-upgrade
 // events restore finds no source and changes nothing.
@@ -2574,11 +2577,16 @@ func newWispsAbsentDB(t *testing.T) *wispsAbsentDB {
 	// and {ignored_schema_migrations, 15} repairs; go-sqlmock v1.5.2 predates
 	// ExpectedQuery.Times, so the same expectation is set up twice instead of
 	// asking for a repeat count.
-	for i := 0; i < 2; i++ {
+	expectWispsAbsent := func() {
 		mock.ExpectQuery(`(?s)SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.TABLES.*TABLE_NAME = \?`).
 			WithArgs("wisps").
 			WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
 	}
+	expectWispsAbsent()      // ignored/7's repair
+	for i := 0; i < 3; i++ { // ignored/10's check: wisp_events, wisp_comments, wisp_dependencies
+		mock.ExpectQuery(`^SHOW TABLES$`).WillReturnRows(sqlmock.NewRows([]string{"Tables_in_beads"}))
+	}
+	expectWispsAbsent() // ignored/15's repair
 	mock.ExpectQuery(`SELECT commit_hash FROM dolt_log WHERE message = \?`).
 		WithArgs(eventsFlipDropCommitMessage).
 		WillReturnRows(sqlmock.NewRows([]string{"commit_hash"}))
