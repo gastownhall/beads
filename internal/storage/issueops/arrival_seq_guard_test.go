@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/dolthub/vitess/go/vt/sqlparser"
 )
 
 // Structural guards for arrival_seq, the create sequence the journal stamps on
@@ -29,15 +31,119 @@ var arrivalSeqWriters = map[string]map[string]bool{
 	"schema/cli_migrations.go": {"": true},
 }
 
-// sqlWriteVerbRe matches a statement that changes data or schema.
+// sqlWriteVerbRe is the conservative fallback for SQL-looking literals the
+// tokenizer cannot finish, including incomplete dynamically formatted SQL.
 var sqlWriteVerbRe = regexp.MustCompile(`(?i)\b(?:UPDATE|INSERT|REPLACE|ALTER|CREATE)\b`)
 
+// writesArrivalSeq recognizes a write keyword and the column identifier in
+// the same SQL statement. Tokenization excludes ordinary comments and quoted
+// values, but retains backtick identifiers and executable MySQL comments.
+// A SQL prefix keeps prose such as "arrival_seq, the journal's create stamp"
+// out of the scan. ON also admits dynamic upsert suffixes. This remains a
+// literal-level guard: it does not reconstruct SQL assembled across literals.
+func writesArrivalSeq(text string) bool {
+	if !strings.Contains(strings.ToLower(text), "arrival_seq") {
+		return false
+	}
+	tokens := sqlparser.NewStringTokenizer(text)
+	start, sql, write, column := true, false, false, false
+	for {
+		kind, value := tokens.Scan()
+		switch kind {
+		case 0:
+			return false
+		case sqlparser.COMMENT:
+			continue
+		case ';':
+			start, sql, write, column = true, false, false, false
+			continue
+		case sqlparser.LEX_ERROR:
+			// A lexical error is not proof of safety. Preserve the old
+			// conservative check once the literal looks like SQL.
+			return sql && sqlWriteVerbRe.MatchString(text)
+		}
+		if start {
+			switch kind {
+			case sqlparser.UPDATE, sqlparser.INSERT, sqlparser.REPLACE,
+				sqlparser.ALTER, sqlparser.CREATE, sqlparser.SELECT,
+				sqlparser.WITH, sqlparser.EXPLAIN, sqlparser.ON, '(':
+				sql = true
+			}
+			start = false
+		}
+		if !sql {
+			continue
+		}
+		switch kind {
+		case sqlparser.UPDATE, sqlparser.INSERT, sqlparser.REPLACE, sqlparser.ALTER, sqlparser.CREATE:
+			write = true
+		case sqlparser.ID:
+			column = column || strings.EqualFold(string(value), "arrival_seq")
+		}
+		if write && column {
+			return true
+		}
+	}
+}
+
+func TestWritesArrivalSeq(t *testing.T) {
+	cases := []struct {
+		name string
+		sql  string
+		want bool
+	}{
+		{"reported prose", "arrival_seq, the events journal's create stamp (BD-5)", false},
+		{"column list fragment", "id, title, arrival_seq", false},
+		{"read", "SELECT arrival_seq FROM wisps", false},
+		{"comment only", "/* UPDATE wisps SET arrival_seq = 1 */", false},
+		{"leading comment", "/* arrival_seq CREATE */ SELECT 1", false},
+		{"line comment", "-- UPDATE wisps SET arrival_seq = 1\nSELECT 1", false},
+		{"hash comment", "# UPDATE wisps SET arrival_seq = 1\nSELECT 1", false},
+		{"column in comment", "UPDATE wisps SET title = ? /* arrival_seq */", false},
+		{"write in comment", "SELECT arrival_seq /* UPDATE */ FROM wisps", false},
+		{"column in value", "UPDATE wisps SET title = 'arrival_seq'", false},
+		{"write in value", "SELECT 'UPDATE', arrival_seq FROM wisps", false},
+		{"both in value", "SELECT 'UPDATE arrival_seq'", false},
+		{"double quoted value", `UPDATE wisps SET title = "arrival_seq"`, false},
+		{"escaped value", `UPDATE wisps SET title = 'it\'s arrival_seq'`, false},
+		{"doubled quote", "UPDATE wisps SET title = 'it''s arrival_seq'", false},
+		{"longer identifier", "UPDATE wisps SET old_arrival_seq = 1", false},
+		{"unrelated statements", "SELECT arrival_seq FROM wisps; UPDATE wisps SET title = ?", false},
+		// These unauthorized writes are negative controls: making the
+		// classifier always return false must fail these fixtures.
+		{"update", "UPDATE wisps SET arrival_seq = ?", true},
+		{"insert", "INSERT INTO wisps (id, arrival_seq) VALUES (?, ?)", true},
+		{"replace", "REPLACE INTO wisps (id, arrival_seq) VALUES (?, ?)", true},
+		{"alter", "ALTER TABLE wisps ADD COLUMN arrival_seq BIGINT", true},
+		{"create table", "CREATE TABLE wisps (arrival_seq BIGINT)", true},
+		{"create index", "CREATE UNIQUE INDEX stamp ON wisps (arrival_seq)", true},
+		{"backtick identifier", "UPDATE `wisps` SET `arrival_seq` = ?", true},
+		{"mixed case", "  update wisps set ARRIVAL_SEQ = ?", true},
+		{"comment before write", "/* note */ -- note\nUPDATE wisps SET arrival_seq = ?", true},
+		{"cte update", "WITH ids AS (SELECT id FROM wisps) UPDATE wisps SET arrival_seq = ?", true},
+		{"dynamic table", "UPDATE %s SET arrival_seq = ?", true},
+		{"dynamic upsert suffix", "ON DUPLICATE KEY UPDATE arrival_seq = VALUES(arrival_seq)", true},
+		{"incomplete write", "INSERT INTO wisps (arrival_seq,", true},
+		{"lexical error before column", "UPDATE \x00 wisps SET arrival_seq = ?", true},
+		{"unterminated value", "UPDATE wisps SET title = 'arrival_seq", true},
+		{"later statement", "SELECT 1; UPDATE wisps SET arrival_seq = ?", true},
+		{"ddl bundle", "ALTER TABLE issues ADD COLUMN arrival_seq BIGINT; ALTER TABLE wisps ADD COLUMN arrival_seq BIGINT; CREATE UNIQUE INDEX stamp ON wisps (arrival_seq)", true},
+		{"executable comment", "/*! UPDATE wisps SET arrival_seq = 1 */", true},
+		{"counter heal", "UPDATE bd_events_seq SET next_seq = GREATEST(next_seq, (SELECT MAX(arrival_seq) FROM wisps))", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := writesArrivalSeq(tc.sql); got != tc.want {
+				t.Errorf("writesArrivalSeq(%q) = %v, want %v", tc.sql, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestArrivalSeqIsWrittenOnlyByTheJournalSeam scans every non-test Go file
-// under internal/storage for a string literal that both names arrival_seq and
-// carries a write verb, and fails on any outside arrivalSeqWriters. A read
-// (the column lists the scanners use) names no write verb, so it passes; a new
-// INSERT, upsert or UPDATE that binds the column — the way a caller-supplied
-// value would reach storage — does not.
+// under internal/storage for SQL-looking literals that name arrival_seq as
+// an identifier and carry a write keyword. It fails on any outside
+// arrivalSeqWriters, and proves every allowed writer was still reached.
 func TestArrivalSeqIsWrittenOnlyByTheJournalSeam(t *testing.T) {
 	root, err := filepath.Abs("..")
 	if err != nil {
@@ -77,7 +183,7 @@ func TestArrivalSeqIsWrittenOnlyByTheJournalSeam(t *testing.T) {
 				if err != nil {
 					text = lit.Value
 				}
-				if !strings.Contains(strings.ToLower(text), "arrival_seq") || !sqlWriteVerbRe.MatchString(text) {
+				if !writesArrivalSeq(text) {
 					return true
 				}
 				if arrivalSeqWriters[rel][owner] {

@@ -233,6 +233,7 @@ go_test(
         "//internal/storage/dolt:go_srcs",
         "//internal/storage/domain/db:go_srcs",
         "//internal/storage/embeddeddolt:go_srcs",
+        "//internal/storage/historyoffequiv:go_srcs",
         "//internal/storage/journalscan:go_srcs",
         "//internal/storage/schema:go_srcs",
         "//internal/storage/schema:migrations",
@@ -255,6 +256,7 @@ go_test(
         "//issueops",
         "@com_github_data_dog_go_sqlmock//:go-sqlmock",
         "@com_github_dolthub_go_mysql_server//sql",
+        "@com_github_dolthub_vitess//go/vt/sqlparser",
         "@com_github_go_sql_driver_mysql//:mysql",
     ],
 )
