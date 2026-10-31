@@ -762,21 +762,23 @@ func buildLinearPushHooksForStore(ctx context.Context, st tracker.Store, lt *lin
 		}
 		return labelCache
 	}
+	pushFieldsEqual := func(local *types.Issue, remote *tracker.TrackerIssue) bool {
+		remoteIssue, ok := remote.Raw.(*linear.Issue)
+		if ok && remoteIssue != nil {
+			return linear.PushFieldsEqual(local, remoteIssue, config, loadPushLabelCache())
+		}
+		remoteConv := lt.FieldMapper().IssueToBeads(remote)
+		if remoteConv == nil || remoteConv.Issue == nil {
+			return false
+		}
+		return linear.PushFieldsEqualToBeads(local, remoteConv.Issue)
+	}
 	return &tracker.PushHooks{
 		FormatDescription: func(issue *types.Issue) string {
 			return linear.BuildLinearDescription(issue)
 		},
-		ContentEqual: func(local *types.Issue, remote *tracker.TrackerIssue) bool {
-			remoteIssue, ok := remote.Raw.(*linear.Issue)
-			if ok && remoteIssue != nil {
-				return linear.PushFieldsEqual(local, remoteIssue, config, loadPushLabelCache())
-			}
-			remoteConv := lt.FieldMapper().IssueToBeads(remote)
-			if remoteConv == nil || remoteConv.Issue == nil {
-				return false
-			}
-			return linear.PushFieldsEqualToBeads(local, remoteConv.Issue)
-		},
+		ContentEqual:    pushFieldsEqual,
+		PushFieldsEqual: pushFieldsEqual,
 		BuildStateCache: func(ctx context.Context) (interface{}, error) {
 			return linear.BuildStateCacheFromTracker(ctx, lt)
 		},

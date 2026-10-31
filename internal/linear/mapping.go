@@ -385,7 +385,7 @@ func ResolveStateIDForBeadsStatus(cache *StateCache, status types.Status, config
 	// name/type matching below. This is the escape hatch when multiple Linear
 	// states share a type (e.g. "In Progress" and "In Review" are both
 	// "started") and the type-based fallback would otherwise be ambiguous.
-	if outboundName, ok := config.OutboundStateMap[strings.ToLower(strings.TrimSpace(string(status)))]; ok {
+	if outboundName, ok := outboundStateName(config, status); ok {
 		want := strings.ToLower(strings.TrimSpace(outboundName))
 		for _, state := range cache.States {
 			if strings.ToLower(strings.TrimSpace(state.Name)) == want {
@@ -397,8 +397,7 @@ func ResolveStateIDForBeadsStatus(cache *StateCache, status types.Status, config
 
 	var nameMatches []State
 	for _, state := range cache.States {
-		mapped, ok := config.ExplicitStateMap[strings.ToLower(strings.TrimSpace(state.Name))]
-		if ok && stateMapMatchesStatus(mapped, status) {
+		if explicitStateMapMatches(config, state.Name, status) {
 			nameMatches = append(nameMatches, state)
 		}
 	}
@@ -415,8 +414,7 @@ func ResolveStateIDForBeadsStatus(cache *StateCache, status types.Status, config
 
 	var typeMatches []State
 	for _, state := range cache.States {
-		mapped, ok := config.ExplicitStateMap[strings.ToLower(strings.TrimSpace(state.Type))]
-		if ok && stateMapMatchesStatus(mapped, status) {
+		if explicitStateMapMatches(config, state.Type, status) {
 			typeMatches = append(typeMatches, state)
 		}
 	}
@@ -432,6 +430,43 @@ func ResolveStateIDForBeadsStatus(cache *StateCache, status types.Status, config
 	}
 
 	return "", fmt.Errorf("linear.state_map has no configured Linear state for beads status %q", status)
+}
+
+// outboundStateName returns the Linear workflow state name that
+// linear.outbound_state_map names for status.
+func outboundStateName(config *MappingConfig, status types.Status) (string, bool) {
+	name, ok := config.OutboundStateMap[strings.ToLower(strings.TrimSpace(string(status)))]
+	return name, ok
+}
+
+// explicitStateMapMatches reports whether an explicit linear.state_map entry
+// keyed by a workflow state's name or type maps it to status.
+func explicitStateMapMatches(config *MappingConfig, key string, status types.Status) bool {
+	mapped, ok := config.ExplicitStateMap[strings.ToLower(strings.TrimSpace(key))]
+	return ok && stateMapMatchesStatus(mapped, status)
+}
+
+// pushStateEqual reports whether a push of status leaves a Linear issue in
+// state: state maps back to status on pull (StateToBeadsStatus), or the rules
+// of ResolveStateIDForBeadsStatus select it for status (the
+// linear.outbound_state_map name, else a linear.state_map entry for its name
+// or its type). The second covers a status pushed through a name-keyed
+// state_map entry whose state type maps elsewhere on pull ("Blocked", of type
+// started, maps back to in_progress), so the issue's own echo still matches.
+// The rules see state alone, not the team's other states, so a state matched
+// by type also counts where another state's name would win the push or make
+// it ambiguous.
+func pushStateEqual(state *State, status types.Status, config *MappingConfig) bool {
+	if StateToBeadsStatus(state, config) == status {
+		return true
+	}
+	if state == nil {
+		return false
+	}
+	if outboundName, ok := outboundStateName(config, status); ok {
+		return strings.ToLower(strings.TrimSpace(state.Name)) == strings.ToLower(strings.TrimSpace(outboundName))
+	}
+	return explicitStateMapMatches(config, state.Name, status) || explicitStateMapMatches(config, state.Type, status)
 }
 
 // ParseBeadsStatus converts a status string to types.Status.
@@ -574,9 +609,11 @@ func linearIssueLabelIDs(remote *Issue) []string {
 
 // PushFieldsEqual compares only the fields that a Linear push can actually
 // mutate. This avoids repeated updates caused by local-only fields such as
-// issue type and metadata. When labelCache is non-nil, resolved Linear label ID
-// sets are compared so label drift is detected; when nil, labels are ignored
-// (callers that can build a LabelCache should pass it for accurate skip logic).
+// issue type and metadata. The workflow state matches when a push of the
+// local status leaves it as it is (pushStateEqual). When labelCache is
+// non-nil, resolved Linear label ID sets are compared so label drift is
+// detected; when nil, labels are ignored (callers that can build a LabelCache
+// should pass it for accurate skip logic).
 func PushFieldsEqual(local *types.Issue, remote *Issue, config *MappingConfig, labelCache *LabelCache) bool {
 	if local == nil || remote == nil {
 		return false
@@ -590,7 +627,7 @@ func PushFieldsEqual(local *types.Issue, remote *Issue, config *MappingConfig, l
 	if PriorityToLinear(local.Priority, config) != remote.Priority {
 		return false
 	}
-	if StateToBeadsStatus(remote.State, config) != local.Status {
+	if !pushStateEqual(remote.State, local.Status, config) {
 		return false
 	}
 	if labelCache != nil {

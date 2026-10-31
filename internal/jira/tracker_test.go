@@ -963,6 +963,52 @@ func TestFetchIssuesIncludesPullJQLInQuery(t *testing.T) {
 	}
 }
 
+// TestFetchIssuesMatchesSinceToSinceGranularity pins SinceGranularity to the
+// JQL: a fetch from Since asks for exactly what a fetch from Since truncated
+// to SinceGranularity asks for, and a fetch from just before that asks for
+// more.
+func TestFetchIssuesMatchesSinceToSinceGranularity(t *testing.T) {
+	var capturedJQL string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/rest/api/3/search/jql" {
+			capturedJQL = r.URL.Query().Get("jql")
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"issues":     []Issue{},
+				"total":      0,
+				"maxResults": 50,
+				"startAt":    0,
+			})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	tr := &Tracker{
+		client:      newTestClient(srv.URL, "3"),
+		store:       &configStore{data: map[string]string{}},
+		projectKeys: []string{"TEST"},
+		apiVersion:  "3",
+	}
+	jqlFrom := func(since time.Time) string {
+		t.Helper()
+		if _, err := tr.FetchIssues(context.Background(), tracker.FetchOptions{Since: &since}); err != nil {
+			t.Fatalf("FetchIssues: %v", err)
+		}
+		return capturedJQL
+	}
+
+	since := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+	floor := since.Truncate(tr.SinceGranularity())
+	if got, want := jqlFrom(since), jqlFrom(floor); got != want {
+		t.Fatalf("JQL from %s = %q, want the JQL from %s: %q", since, got, floor, want)
+	}
+	if before := jqlFrom(floor.Add(-time.Nanosecond)); before == jqlFrom(floor) {
+		t.Fatalf("JQL from just before %s = %q, the same as from it: SinceGranularity is finer than the JQL", floor, before)
+	}
+}
+
 func TestFetchIssuesWithoutPullJQLOmitsExtraFilter(t *testing.T) {
 	var capturedJQL string
 
