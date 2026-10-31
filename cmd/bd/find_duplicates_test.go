@@ -1,7 +1,14 @@
 package main
 
 import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+
+	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/option"
 
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -259,5 +266,26 @@ func TestIssueText(t *testing.T) {
 	text2 := issueText(issue2)
 	if text2 != "Just title" {
 		t.Errorf("issueText() = %q, want %q", text2, "Just title")
+	}
+}
+
+// A reply that leads with a thinking block must still be parsed (#7515).
+func TestAnalyzeWithAI_SkipsLeadingThinkingBlock(t *testing.T) {
+	const reply = `[{"pair_index":0,"is_duplicate":true,"confidence":0.9,"reason":"same bug"}]`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"id":"msg_1","type":"message","role":"assistant","model":"m","stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1},"content":[{"type":"thinking","thinking":"hmm","signature":"sig"},{"type":"text","text":%q}]}`, reply)
+	}))
+	defer srv.Close()
+	client := anthropic.NewClient(option.WithAPIKey("k"), option.WithBaseURL(srv.URL), option.WithMaxRetries(0))
+
+	candidates := []duplicatePair{{
+		IssueA: &types.Issue{ID: "bd-1", Title: "a"},
+		IssueB: &types.Issue{ID: "bd-2", Title: "b"},
+		Method: "mechanical",
+	}}
+	got := analyzeWithAI(context.Background(), client, "m", candidates)
+	if len(got) != 1 || got[0].Method != "ai" || got[0].Reason != "same bug" {
+		t.Fatalf("got %+v, want one ai pair with reason %q", got, "same bug")
 	}
 }

@@ -513,13 +513,18 @@ func analyzeWithAI(ctx context.Context, client anthropic.Client, model anthropic
 	)
 	aiSpan.End()
 
-	if len(message.Content) == 0 || message.Content[0].Type != "text" {
-		fmt.Fprintf(os.Stderr, "Warning: unexpected AI response format\n")
+	// The reply may lead with thinking blocks; use the first text block.
+	responseText, found := "", false
+	for _, block := range message.Content {
+		if block.Type == "text" {
+			responseText, found = block.Text, true
+			break
+		}
+	}
+	if !found {
+		fmt.Fprintf(os.Stderr, "Warning: unexpected AI response format: no text block\n")
 		return candidates
 	}
-
-	// Parse the JSON response
-	responseText := message.Content[0].Text
 
 	// Try to extract JSON from the response (handle markdown code blocks)
 	jsonText := responseText

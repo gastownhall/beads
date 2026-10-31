@@ -2389,6 +2389,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `bd import --dry-run` is refused too, as `bd create --dry-run` already is
   and as a migration freeze already refuses it. `bd backup status` still runs
   under `--readonly`.
+- **`bd find-duplicates --method ai` and `bd admin compact --auto` accept a
+  reply that opens with a thinking block.** Both read only the first content
+  block and gave up unless it was text; they now use the first text block
+  (#7515).
+
 - **`bd init --server --external` no longer starts a Dolt server of its own.**
   Init builds its store config by hand and turned auto-start on for every
   server init, so an `--external` init that named no port launched a
