@@ -58,6 +58,37 @@ func TestValidateSettingWriteRefusesTheProtectedKeyInBothSpellings(t *testing.T)
 	}
 }
 
+// TestValidateSettingWriteRefusesYamlOnlyKeys pins GH#7559: `bd config set`
+// already refuses a YamlOnlyKey write via config.IsYamlOnlyKey at its own
+// door, but this plane's HTTP settings surface (bd serve and its dashboard,
+// PUT /v0/beads/config/{key}) had no such rule, so a tracker secret
+// (github.token, linear.api_key, jira.api_token, gitlab.token, ado.pat) sent
+// through it landed as a plain row in the Dolt config table — a SYNCED
+// table, replicated to every remote on the next bd dolt push/pull. The
+// PoC's five secret keys, plus a non-secret YamlOnlyKey (the exact GH#536
+// shape the map exists to prevent: a write that reports success but no
+// reader ever consults), must all be refused here now.
+func TestValidateSettingWriteRefusesYamlOnlyKeys(t *testing.T) {
+	for _, key := range []string{
+		// The PoC's five secrets.
+		"github.token", "linear.api_key", "jira.api_token", "gitlab.token", "ado.pat",
+		// A non-secret YamlOnlyKey: the rule is "this plane is the database,
+		// these settings are not database settings", not "secrets only".
+		"no-db",
+	} {
+		_, err := ValidateSettingWrite(key, "SECRET-OR-SETTING-VALUE")
+		if !errors.Is(err, issueops.ErrValidation) {
+			t.Fatalf("ValidateSettingWrite(%q) error = %v, want ErrValidation", key, err)
+		}
+		if strings.Contains(err.Error(), "SECRET-OR-SETTING-VALUE") {
+			t.Errorf("ValidateSettingWrite(%q) error echoes the value %v; a secret must never appear in an error message", key, err)
+		}
+		if !strings.Contains(err.Error(), "config.yaml") {
+			t.Errorf("ValidateSettingWrite(%q) message %q does not point the caller at config.yaml", key, err)
+		}
+	}
+}
+
 func TestValidateSettingWriteParsesTheCustomStatusValue(t *testing.T) {
 	for _, value := range []string{
 		"awaiting_review",

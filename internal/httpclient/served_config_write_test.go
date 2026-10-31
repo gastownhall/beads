@@ -27,29 +27,20 @@ import (
 // SERVER's, and a stub transport would let this file assert whatever it liked
 // about them.
 
-// TestServedConfigWriteAnswersTheReadThatFollowsIt is the redaction doctrine,
-// pinned on both sides of the one key it changes anything for.
+// TestServedConfigWriteAnswersTheReadThatFollowsIt pins GH#7559 end to end
+// against a real served role, beside the unrelated transcription property the
+// ordinary key below it was always here to prove.
 //
-// The operation PERMITS a credential-bearing write and WITHHOLDS the value from
-// its own answer — one projection serves the write and the read, so the body of
-// a PUT is byte-identical to the body of the GET after it. That leaves a
-// successful write whose `value` member is absent, and the role's result has no
-// spelling for "withheld": reporting "" would tell a caller the plane holds
-// nothing under that key, which is the write-side version of the confusion
-// RedactedSettingError exists to prevent on the read side.
-//
-// So the client answers with the value it SENT, and this asserts why that is
-// honest rather than convenient: the value really is stored, read RAW from the
-// reference store past the wire that hid it.
-//
-// WHAT THIS CASE CANNOT SAY is that the ordinary key beside it is TRANSCRIBED
-// off the answer rather than echoed from the request. Against a correct server
-// the two are byte-identical — the operation promises the stored value equals
-// the value sent for every key it accepts — so the difference is pinned where it
-// is observable, against a transport that answers something else:
-// TestSetSettingTranscribesTheAnswerRatherThanEchoingTheRequest. The ordinary
-// key runs here anyway, because a client that transcribed the WRONG member would
-// fail it.
+// BEFORE GH#7559 this case pinned the redaction doctrine: a credential-bearing
+// write was PERMITTED and only the ANSWER withheld the value. That doctrine
+// was wrong for this door — the credential landed in the Dolt config table,
+// a table `bd dolt push`/pull replicates to every remote — so the fix refuses
+// the write instead of merely hiding its result. There is nothing left for
+// this case to prove about REDACTION on a key workapi.ValidateSettingWrite now
+// refuses outright; the httpapi package's fake-role tests
+// (TestSetSettingAnswersWhatTheReadWouldAnswer, TestSetSettingWithholdsACredentialItJustAccepted)
+// keep pinning what the redaction PROJECTION does if a role ever did accept
+// such a write.
 func TestServedConfigWriteAnswersTheReadThatFollowsIt(t *testing.T) {
 	e := newServedEnv(t, "hcfgw1")
 	ctx := t.Context()
@@ -57,32 +48,28 @@ func TestServedConfigWriteAnswersTheReadThatFollowsIt(t *testing.T) {
 
 	const secretKey = "notion.token"
 	const secret = "shhh-real-secret"
-	res, err := settings.SetSetting(ctx, issueops.SetSettingRequest{Key: secretKey, Value: secret})
-	if err != nil {
-		t.Fatalf("SetSetting on a credential-bearing key = %v; the write is permitted and only the ANSWER withholds", err)
-	}
-	if res.Key != secretKey {
-		t.Errorf("SetSetting echoed key %q, want %q", res.Key, secretKey)
-	}
-	if res.Value != secret {
-		t.Errorf("SetSetting reported value %q, want %q: the answer withheld it, and \"\" would say the plane stores nothing there",
-			res.Value, secret)
+	_, err := settings.SetSetting(ctx, issueops.SetSettingRequest{Key: secretKey, Value: secret})
+	if !errors.Is(err, issueops.ErrValidation) {
+		t.Fatalf("SetSetting on a credential-bearing key = %v, want ErrValidation: "+
+			"this plane is the Dolt config table, synced to every remote on push/pull", err)
 	}
 
-	// Read RAW, past the role and past the wire: the point is that the value the
-	// response would not repeat IS the value the workspace now holds.
+	// Read RAW, past the role and past the wire: nothing was written.
 	stored, err := e.reference.GetConfig(ctx, secretKey)
 	if err != nil {
-		t.Fatalf("read the stored credential back from the reference store: %v", err)
+		t.Fatalf("read the reference store for the key that must not have been written: %v", err)
 	}
-	if stored != secret {
-		t.Errorf("the workspace stores %q under %q, want %q", stored, secretKey, secret)
+	if stored != "" {
+		t.Errorf("the workspace stores %q under %q, want nothing: the refused write must not have reached the store", stored, secretKey)
 	}
 
-	// And the READ that follows still withholds, which is the other half of "the
-	// PUT body is the GET body": a write does not unlock the key it just wrote.
+	// The READ side is unchanged by this fix and keeps its own doctrine: a
+	// GetSetting on a credential-bearing key withholds unconditionally, keyed
+	// on the KEY pattern rather than on whether anything is actually stored
+	// there — confirmed empirically (this is not something the write-side fix
+	// touches, so the refused write above leaves it exactly as it always was).
 	if _, err := settings.GetSetting(ctx, issueops.GetSettingRequest{Key: secretKey}); !errors.Is(err, ErrSettingRedacted) {
-		t.Errorf("GetSetting after the write = %v, want ErrSettingRedacted; the write does not unlock the read", err)
+		t.Errorf("GetSetting on a credential-bearing key = %v, want ErrSettingRedacted regardless of whether a write ever reached the store", err)
 	}
 
 	// The ordinary key is TRANSCRIBED, not echoed. The server answers this one
@@ -91,7 +78,7 @@ func TestServedConfigWriteAnswersTheReadThatFollowsIt(t *testing.T) {
 	// something else.
 	const plainKey = "custom.hcfgw1-plain"
 	const plain = "  spaces and , commas  "
-	res, err = settings.SetSetting(ctx, issueops.SetSettingRequest{Key: plainKey, Value: plain})
+	res, err := settings.SetSetting(ctx, issueops.SetSettingRequest{Key: plainKey, Value: plain})
 	if err != nil {
 		t.Fatalf("SetSetting on an ordinary key: %v", err)
 	}
