@@ -108,12 +108,9 @@ func (r *beadsDirFSRepositoryImpl) WriteBeadsGitignore(ctx context.Context) erro
 	if len(missing) == 0 {
 		return nil
 	}
-	content := string(existing)
-	if len(content) > 0 && !strings.HasSuffix(content, "\n") {
-		content += "\n"
-	}
-	content += "\n# Added by bd (missing required patterns)\n" + strings.Join(missing, "\n") + "\n"
-	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+	lines := append([]string{"", "# Added by bd (missing required patterns)"}, missing...)
+	content := gitignore.AppendLines(existing, lines)
+	if err := os.WriteFile(path, content, 0600); err != nil {
 		return fmt.Errorf("fs: WriteBeadsGitignore: %w", err)
 	}
 	return nil
