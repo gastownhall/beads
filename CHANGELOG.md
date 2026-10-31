@@ -909,6 +909,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an open child, every issue in the shape, that child included, stays
   blocked and none is ever ready. The same path through scheduling edges
   alone is still refused.
+- **A `bd list` page no longer costs what the whole match set does.** On
+  the local backends (embedded and server), when `--offset` plus `--limit`
+  is under 200 (bd reads one extra row to tell whether more follow) and the
+  sort is one SQL can express, bd now selects the page's ids first, with the
+  same filter, order and limit, and loads labels, counts, parent and
+  dependencies for those ids only. It used to aggregate every label,
+  dependency and comment row in the store before applying the limit. At 46k
+  wisps a one-label, 50-row page went from about 680 ms to about 50 ms with
+  Dolt table statistics off, and from about 500 ms to about 16 ms with them
+  on. Unbounded reads, `--sort id` and larger pages keep the previous
+  query. The by-IDs counts query behind it, which `bd ready` also uses, now
+  matches reverse blockers through each target column's index instead of a
+  `COALESCE` no index serves. The rows returned are unchanged, including on
+  stores that still hold a dependency row with two targets. (#7635)
 - `bd preflight --fix --json` no longer returns a `Version sync` fix result:
   version updates must keep all release surfaces aligned via `scripts/update-versions.sh`.
 - Release-tag pushes require Go and reject batches containing different release versions.
