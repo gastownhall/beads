@@ -296,7 +296,8 @@ func buildRepoContext() (*RepoContext, error) {
 	}, nil
 }
 
-// isExternalBeadsDir returns true if beadsDir is in a different git repo than CWD.
+// isExternalBeadsDir returns true if beadsDir is in a different git repo than CWD,
+// or in no git repo at all.
 // Uses git common dir to correctly handle worktrees and bare repos.
 func isExternalBeadsDir(beadsDir string) (bool, error) {
 	cwdCommonDir, err := git.GetGitCommonDir()
@@ -306,7 +307,7 @@ func isExternalBeadsDir(beadsDir string) (bool, error) {
 
 	beadsCommonDir, err := getGitCommonDirForPath(beadsDir)
 	if err != nil {
-		return false, err
+		return true, nil
 	}
 
 	return cwdCommonDir != beadsCommonDir, nil
