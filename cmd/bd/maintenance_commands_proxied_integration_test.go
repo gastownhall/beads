@@ -62,7 +62,7 @@ func TestProxiedServerGC(t *testing.T) {
 		if err != nil {
 			t.Fatalf("bd gc --dry-run failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
 		}
-		for _, want := range []string{"Phase 1/3", "Phase 2/3", "Phase 3/3", "DRY RUN complete"} {
+		for _, want := range []string{"Phase 1/4", "Phase 2/4", "Phase 3/4", "Phase 4/4", "DRY RUN complete"} {
 			if !strings.Contains(stdout, want) {
 				t.Errorf("expected %q in gc --dry-run output, got: %s", want, stdout)
 			}
@@ -137,8 +137,8 @@ func TestProxiedServerGC(t *testing.T) {
 			t.Errorf("expected dry_run=true, got: %v", m["dry_run"])
 		}
 		phases, ok := m["phases"].([]interface{})
-		if !ok || len(phases) != 3 {
-			t.Fatalf("expected 3 phases in JSON, got: %v", m["phases"])
+		if !ok || len(phases) != 4 {
+			t.Fatalf("expected 4 phases in JSON, got: %v", m["phases"])
 		}
 		names := map[string]bool{}
 		for _, ph := range phases {
@@ -146,7 +146,7 @@ func TestProxiedServerGC(t *testing.T) {
 				names[fmt.Sprintf("%v", pm["name"])] = true
 			}
 		}
-		for _, want := range []string{"Decay", "Compact", "Dolt GC"} {
+		for _, want := range []string{"Decay", "Events", "Compact", "Dolt GC"} {
 			if !names[want] {
 				t.Errorf("expected phase %q in JSON, got: %v", want, names)
 			}
