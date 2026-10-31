@@ -4372,7 +4372,7 @@ bd list
   flag --include-comments type=bool default="false" usage="Populate each row's comments field with full comment bodies in JSON output (--json only; costs one query per row that has comments). Without it, a row with comments carries comments_omitted=true, so an absent comments field is never mistaken for having none. Text output is unaffected either way."
   flag --include-ephemeral type=bool default="false" usage="Include ephemeral wisp-plane rows in output (normally hidden)"
   flag --include-gates type=bool default="false" usage="Include gate issues in output (normally hidden)"
-  flag --include-infra type=bool default="false" usage="Include infrastructure beads (agent/role/message) in output"
+  flag --include-infra type=bool default="false" usage="Include infrastructure beads (agent/role/message) and the ephemeral wisp-plane rows in output (--include-ephemeral admits the plane alone)"
   flag --include-templates type=bool default="false" usage="Include template molecules in output"
   flag --label -l type=stringSlice default="[]" usage="Filter by labels (AND: must have ALL). Can combine with --label-any"
   flag --label-any type=stringSlice default="[]" usage="Filter by labels (OR: must have AT LEAST ONE). Can combine with --label"
