@@ -43,6 +43,7 @@ var trackedRuntimePatterns = []string{
 	"last-touched",
 	"last_pull", // bd-578h9.6: gitignored since 7ebf4df6a, but gitignore cannot untrack already-committed copies
 	".local_version",
+	".upgrade_review_from",
 	"redirect",
 
 	// Sync / export state

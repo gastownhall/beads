@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -100,16 +102,10 @@ Examples:
 			}
 		}()
 
-		lastVersion := previousVersion
+		lastVersion := upgradeReviewBaseline()
 
 		if lastVersion == "" {
-			fmt.Println("No previous version recorded")
-			fmt.Println("Run 'bd info --whats-new' to see recent changes")
-			return nil
-		}
-
-		if !versionUpgradeDetected {
-			fmt.Printf("You're already on %s (no upgrade detected)\n", displayVersion(Version))
+			fmt.Printf("You're already on %s (no unacknowledged upgrade)\n", displayVersion(Version))
 			fmt.Println("Run 'bd info --whats-new' to see recent changes")
 			return nil
 		}
@@ -160,8 +156,8 @@ var upgradeAckCmd = &cobra.Command{
 	Long: `Mark the current bd version as acknowledged.
 
 This updates metadata.json to record that you've seen the current
-version. Mainly useful after reviewing upgrade changes to suppress
-future upgrade notifications.
+version, and clears the upgrade that 'bd upgrade review' reports.
+Mainly useful after reviewing upgrade changes.
 
 Note: Version tracking happens automatically, so you don't need to
 run this command unless you want to explicitly mark acknowledgement.
@@ -197,6 +193,9 @@ Examples:
 
 		if err := cfg.Save(beadsDir); err != nil {
 			return HandleError("saving metadata.json: %v", err)
+		}
+		if err := os.Remove(filepath.Join(beadsDir, upgradeReviewFile)); err != nil && !os.IsNotExist(err) {
+			return HandleError("clearing upgrade review marker: %v", err)
 		}
 
 		upgradeAcknowledged = true

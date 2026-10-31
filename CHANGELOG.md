@@ -3445,6 +3445,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--reinit-local` help, `bd help init-safety` and the recovery playbook now
   say that neither flag authorizes recreating a missing server-mode database.
 
+- **`bd upgrade review` keeps showing the upgrade until `bd upgrade ack`, even
+  when another command ran first.** The first command after an upgrade now
+  records the previous version in the gitignored `.beads/.upgrade_review_from`,
+  so review no longer reports "No previous version recorded" (#6670).
+
 - **`BEADS_DOLT_POOL_READ_TIMEOUT` / `dolt.pool-read-timeout` (and the write
   twins) now apply to every `bd` command in server mode.** The knobs shipped in
   #5089, but their env/config ladder ran only for callers of `NewFromConfig*`;
