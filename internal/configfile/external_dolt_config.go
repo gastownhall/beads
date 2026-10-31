@@ -95,9 +95,6 @@ func (c ExternalDoltConfig) Validate() error {
 		if err := c.certStoreSelector().Validate(); err != nil {
 			return fmt.Errorf("ExternalDoltConfig: %w", err)
 		}
-		if runtime.GOOS != "windows" {
-			return fmt.Errorf("ExternalDoltConfig: a certificate store selector needs the Windows certificate store, which %s does not have", runtime.GOOS)
-		}
 	}
 
 	if !c.TLSRequired {
@@ -113,6 +110,10 @@ func (c ExternalDoltConfig) Validate() error {
 		case c.TLSSkipVerify:
 			return errors.New("ExternalDoltConfig: TLSSkipVerify set without TLSRequired")
 		}
+	}
+
+	if c.usesCertStore() && runtime.GOOS != "windows" {
+		return fmt.Errorf("ExternalDoltConfig: a certificate store selector needs the Windows certificate store, which %s does not have", runtime.GOOS)
 	}
 
 	if c.TLSRequired && hasSocket && c.TLSServerName == "" && !c.TLSSkipVerify {

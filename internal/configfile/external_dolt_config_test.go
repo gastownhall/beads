@@ -24,18 +24,25 @@ func TestExternalDoltConfig_Validate_CertStore(t *testing.T) {
 	certPath, keyPath := writeSelfSignedPair(t)
 	base := ExternalDoltConfig{Host: "db", Port: 3306, TLSRequired: true}
 
-	rejected := map[string]ExternalDoltConfig{
-		"without TLSRequired":    {Host: "db", Port: 3306, TLSCertSubject: "CN=alice"},
-		"combined with PEM":      {Host: "db", Port: 3306, TLSRequired: true, TLSCertSubject: "CN=alice", TLSCert: certPath, TLSKey: keyPath},
-		"subject and thumbprint": {Host: "db", Port: 3306, TLSRequired: true, TLSCertSubject: "CN=alice", TLSCertThumbprint: strings.Repeat("ab", 20)},
-		"store without selector": {Host: "db", Port: 3306, TLSRequired: true, TLSCertStore: `LocalMachine\My`},
-		"unknown store location": {Host: "db", Port: 3306, TLSRequired: true, TLSCertStore: `Machine\My`, TLSCertSubject: "CN=alice"},
-		"short thumbprint":       {Host: "db", Port: 3306, TLSRequired: true, TLSCertThumbprint: "abcd"},
+	// Each case must fail for its own reason on every platform, ahead of the
+	// check that refuses a selector off Windows, so Linux CI covers them all.
+	rejected := []struct {
+		name string
+		cfg  ExternalDoltConfig
+		want string
+	}{
+		{"without TLSRequired", ExternalDoltConfig{Host: "db", Port: 3306, TLSCertSubject: "CN=alice"}, "selector set without TLSRequired"},
+		{"combined with PEM", ExternalDoltConfig{Host: "db", Port: 3306, TLSRequired: true, TLSCertSubject: "CN=alice", TLSCert: certPath, TLSKey: keyPath}, "cannot be combined with TLSCert/TLSKey"},
+		{"subject and thumbprint", ExternalDoltConfig{Host: "db", Port: 3306, TLSRequired: true, TLSCertSubject: "CN=alice", TLSCertThumbprint: strings.Repeat("ab", 20)}, "not both"},
+		{"store without selector", ExternalDoltConfig{Host: "db", Port: 3306, TLSRequired: true, TLSCertStore: `LocalMachine\My`}, "a subject or a thumbprint is required"},
+		{"unknown store location", ExternalDoltConfig{Host: "db", Port: 3306, TLSRequired: true, TLSCertStore: `Machine\My`, TLSCertSubject: "CN=alice"}, "location must be CurrentUser or LocalMachine"},
+		{"short thumbprint", ExternalDoltConfig{Host: "db", Port: 3306, TLSRequired: true, TLSCertThumbprint: "abcd"}, "40-digit"},
 	}
-	for name, c := range rejected {
-		t.Run(name, func(t *testing.T) {
-			if err := c.Validate(); err == nil {
-				t.Fatalf("Validate(%+v) = nil, want an error", c)
+	for _, tc := range rejected {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.cfg.Validate()
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Validate(%+v) = %v, want an error containing %q", tc.cfg, err, tc.want)
 			}
 		})
 	}

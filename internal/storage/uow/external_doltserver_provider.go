@@ -2,6 +2,7 @@ package uow
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -77,8 +78,14 @@ func NewExternalDoltServerUOWProvider(
 		releaseTLS()
 		return nil, err
 	}
-	provider.(*doltSQLProvider).releaseTLS = releaseTLS
-	return provider, nil
+	sqlProvider, ok := provider.(*doltSQLProvider)
+	if !ok {
+		closeErr := provider.Close(ctx)
+		releaseTLS()
+		return nil, errors.Join(fmt.Errorf("uow: external provider is a %T, which cannot release its TLS config", provider), closeErr)
+	}
+	sqlProvider.releaseTLS = releaseTLS
+	return sqlProvider, nil
 }
 
 // externalBackendAddress names the external server behind the proxy: its

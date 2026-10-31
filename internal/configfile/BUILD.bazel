@@ -43,6 +43,7 @@ go_test(
     ],
     embed = [":configfile"],
     deps = [
+        "//internal/certstore",
         "//internal/config",
         "//internal/testutil/legacyworkspace",
     ],

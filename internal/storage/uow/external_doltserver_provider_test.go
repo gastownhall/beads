@@ -7,9 +7,11 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	mysql "github.com/go-sql-driver/mysql"
 
 	"github.com/steveyegge/beads/internal/configfile"
@@ -92,6 +94,28 @@ func TestDoltSQLProviderClose_ReleasesTLSOnce(t *testing.T) {
 	require.NoError(t, p.Close(context.Background()))
 	require.NoError(t, p.Close(context.Background()))
 	assert.Equal(t, 1, calls)
+
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	mock.ExpectClose()
+	var concurrent atomic.Int32
+	var poolOpenAtRelease atomic.Bool
+	q := &doltSQLProvider{db: db, releaseTLS: func() {
+		concurrent.Add(1)
+		poolOpenAtRelease.Store(mock.ExpectationsWereMet() != nil)
+	}}
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = q.Close(context.Background())
+		}()
+	}
+	wg.Wait()
+	assert.Equal(t, int32(1), concurrent.Load(), "concurrent Close calls must release the TLS config once")
+	assert.False(t, poolOpenAtRelease.Load(), "the TLS config was released before the pool closed")
+	require.NoError(t, mock.ExpectationsWereMet())
 }
 
 func TestNewExternalDoltServerUOWProvider_EndToEnd(t *testing.T) {

@@ -2993,10 +2993,14 @@ func envTruthyValue(v string) bool {
 // wholesale. Federation add-peer's --password qualifies; its shorthand (-p) is
 // resolved per command via secretFlagTokens so the same letter bound to
 // --priority/--prefix/--parallel on other commands is never redacted. bd init's
-// certificate store selector is not a credential, but it names the user and
-// their certificate, so it is kept out of telemetry the same way.
+// client certificate flags (the store selector, and the PEM certificate and key
+// paths, which usually sit in the user's profile) are not credentials, but they
+// name the user and their certificate, so they are kept out of telemetry the
+// same way.
 var secretFlagNames = map[string]bool{
 	"password":                                    true,
+	"proxied-server-external-tls-cert-path":       true,
+	"proxied-server-external-tls-key-path":        true,
 	"proxied-server-external-tls-cert-store":      true,
 	"proxied-server-external-tls-cert-subject":    true,
 	"proxied-server-external-tls-cert-thumbprint": true,
