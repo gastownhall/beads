@@ -613,8 +613,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **An update-shaped event's `old_value` is the pre-image of the fields the
-  update changed, not the whole issue.** `claimed`, `status_changed`, `closed`,
-  `reopened` and `updated` rows in `events` (and `wisp_events`) used to record
+  update changed, not the whole issue.** `claimed`, `unclaimed`, `status_changed`,
+  `closed`, `reopened` and `updated` rows in `events` (and `wisp_events`) used to record
   `json.Marshal(oldIssue)` in `old_value` beside a `new_value` holding only the
   update map: 5-6 KB per row on a workspace with sizeable descriptions, so the
   events table outgrew every comment and every issue body together. `old_value`
@@ -624,7 +624,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `null`), so `bd history` shows a symmetric per-field diff and the row costs
   tens of bytes. Nothing in bd parsed `old_value` back into an issue; the events
   journal (`bd_events_journal.issue_json`) remains the replayable full
-  snapshot. Existing rows are untouched.
+  snapshot. Existing rows are untouched. The `historyoffequiv` and
+  `createbatchequiv` goldens are re-recorded for the new `old_value` (only the
+  `events`/`wisp_events` digests move).
 - **`bd` requires Dolt 2.6.0 or newer outside embedded mode, and refuses
   anything older.** `doltversion.RecommendedMin` (2.5.0, a warning) is now
   `doltversion.RequiredMin` (2.6.0, an error). `bd dolt start` and
