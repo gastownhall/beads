@@ -966,6 +966,22 @@ type EventsJournalAccessor interface {
 	PruneEventsJournal(ctx context.Context, before int64, retainDays, retainRows int) (int64, error)
 }
 
+// EventsRetention is the `bd gc` Events phase's view of a store: count and
+// delete the durable history events (the events table) created before a
+// cutoff. The direct stores implement it; the proxied-server route runs the
+// same issueops statements through its unit of work instead. Pruning a
+// Dolt-versioned table frees rows, not disk, until the commits that held them
+// are squashed and GC'd.
+type EventsRetention interface {
+	// CountEventsBefore reports how many events rows a PruneEventsBefore at
+	// this cutoff would delete.
+	CountEventsBefore(ctx context.Context, before time.Time) (int64, error)
+	// PruneEventsBefore deletes the events rows created before the cutoff,
+	// publishes the delete the way the store publishes any write, and returns
+	// the number of rows deleted.
+	PruneEventsBefore(ctx context.Context, before time.Time) (int64, error)
+}
+
 // EventsJournalConfigurer controls durable events journal activation on ONE
 // storage instance. Implementations must never use process-global state: a
 // process can hold several stores at once (multiple projects, a test binary's
