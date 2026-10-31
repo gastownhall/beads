@@ -16,6 +16,7 @@ Working With Issues:
   edit              Edit an issue field in $EDITOR
   gate              Manage async coordination gates
   heartbeat         Refresh the lease on an issue you hold in_progress
+  image             Print raw, hashable images of issues as JSON lines
   label             Manage issue labels
   link              Link two issues with a dependency
   list              List issues

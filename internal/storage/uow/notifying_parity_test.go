@@ -343,9 +343,8 @@ func TestNotifyingProviderBuildsRolesOnItself(t *testing.T) {
 // passed a use case. A caller that reaches the transaction directly — by
 // peeling the decorator with unwrapUOW, or by asserting the concrete unit of
 // work — writes rows no hook is fired for, and nothing about that is visible in
-// a method set. Today there is exactly one such caller, and it is deliberate;
-// the guard is here so that the SECOND one is a decision rather than an
-// accident.
+// a method set. Today there are two such callers, both deliberate; the guard
+// is here so that the next one is a decision rather than an accident.
 func TestUnitOfWorkBypassesAreAccountedFor(t *testing.T) {
 	bypasses := map[string]string{
 		"importStatementRunner": "the import role runs the shared batch-upsert engine on the " +
@@ -353,6 +352,9 @@ func TestUnitOfWorkBypassesAreAccountedFor(t *testing.T) {
 			"Import fires no hooks on the DoltStorage plumbing either — it runs the same engine " +
 			"there — so this is parity, not a gap. A hook per imported issue would be new " +
 			"behavior on both plumbings.",
+		"imageStatementRunner": "the image role runs the stores' shared ImageInTx on the " +
+			"transaction's statement runner (imager.go) inside one RunTxRead, so all three routes " +
+			"hash the same bytes. It only reads — no row is written — so there is no hook to fire.",
 	}
 
 	found := map[string]bool{}

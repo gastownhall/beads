@@ -3524,6 +3524,40 @@ bd human stats
     | Example:
     |   bd human stats
 
+bd image
+  use: "image <issue-id> [issue-id...]"
+  short: "Print raw, hashable images of issues as JSON lines"
+  group: "issues"
+  hidden: false
+  runnable: true
+  annotations: {bd.mutation-free="true"}
+  long:
+    | Print the raw image of each issue: one line of compact JSON per id, in
+    | the order given (duplicates collapse).
+    |
+    | An image is every stored row that belongs to the issue, read in one
+    | transaction for all ids: its own row, its labels, its comments, its
+    | events, and its dependencies in both directions. Rows are raw: every
+    | column by its column name, SQL NULL as null, JSON columns as the stored
+    | text, timestamps as UTC RFC 3339 at the column's stored precision.
+    | Keys are sorted and rows are sorted by primary key.
+    |
+    | Generated columns are excluded from the image and from the revision.
+    |
+    | The "revision" field is the sha256 (hex) of the canonical image without
+    | the revision field. It changes on any write to the issue - its body, a
+    | label, a comment, an event, a dependency in either direction, a status
+    | change - so an archive can later check that an issue is unchanged.
+    |
+    | If any id names no issue, nothing is printed and the command exits 1
+    | naming every missing id.
+    |
+    | Examples:
+    |   bd image bd-1
+    |   bd image bd-1 bd-2
+    |   bd image --from-file ids.txt
+  flag --from-file type=string default="" usage="Read issue IDs from file (one per line)"
+
 bd import
   use: "import [file|-]"
   short: "Import issues from a JSONL file or stdin into the database"

@@ -227,11 +227,22 @@ func isReadOnlyCommand(cmdName string) bool {
 	return readOnlyCommands[cmdName]
 }
 
+// mutationFreeAnnotation marks a command every invocation of which is a
+// non-mutating preview, with no flag to ask for it: `bd image`, whose contract
+// is no write of any kind. A classified read (readOnlyCommands) is not that —
+// it keeps version tracking, the post-upgrade migration and reconciliation,
+// schema initialization on the embedded open and post-command maintenance.
+const mutationFreeAnnotation = "bd.mutation-free"
+
 // isPreviewCommand reports whether cmd was explicitly invoked in a
-// non-mutating preview mode. Preview flags are command-local rather than
+// non-mutating preview mode, or is a command annotated mutation-free (every
+// invocation is one). Preview flags are command-local rather than
 // persistent, so checking them here after Cobra has parsed the selected
 // command is the earliest reliable point to keep the store open read-only.
 func isPreviewCommand(cmd *cobra.Command) bool {
+	if cmd.Annotations[mutationFreeAnnotation] == "true" {
+		return true
+	}
 	for _, name := range []string{"dry-run", "inspect"} {
 		if flag := cmd.Flags().Lookup(name); flag != nil {
 			enabled, err := cmd.Flags().GetBool(name)
@@ -2463,8 +2474,14 @@ var rootCmd = &cobra.Command{
 					}
 				}
 
-				// Auto-backup: sync a Dolt-native backup if enabled and due
-				runPostRunAutoBackup(rootCtx)
+				// Auto-backup: sync a Dolt-native backup if enabled and due.
+				// Not after a preview, as on the proxied arm above: a --dry-run
+				// or a mutation-free command (`bd image`) must not register a
+				// backup remote or write backup state — not even the state a
+				// refused backup records against a write-refusing store.
+				if !isPreviewCommand(cmd) {
+					runPostRunAutoBackup(rootCtx)
+				}
 
 				// Auto-export: write git-tracked JSONL for portability if enabled and due.
 				// Read-only commands must not perform post-run maintenance writes or emit

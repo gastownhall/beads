@@ -27,6 +27,7 @@ go_library(
         "external_doltserver_provider.go",
         "graph_counter.go",
         "heartbeater.go",
+        "imager.go",
         "importer.go",
         "init_verifier.go",
         "issue_claimer.go",
