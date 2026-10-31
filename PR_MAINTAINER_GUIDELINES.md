@@ -114,7 +114,8 @@ These rules apply to everyone who can merge — human maintainers and agents ali
 ### Schema, migration, and sync paths are protected
 
 - Any change touching `migrations/`, the schema, destructive data paths, or the Dolt sync/clone/merge paths requires a filled-out PR template and a real human review before merge — no exceptions, no self-merge, no bot-only approval.
-- These paths should be enforced by branch protection (review-required), not just convention. (Configuring branch protection and defining which agent identities may merge are owner actions tracked in bd-6dnrw.23.)
+- These paths should be enforced by branch protection (review-required), not just convention. Turning that on is a repository-settings change; the request is tracked as bd-qiw9i.
+- Merges into this repository are performed by its human maintainers, directly or through the maintainers' merge workflow; any other automated agent identity does not merge here.
 
 ### Revert ping-pong
 
