@@ -584,13 +584,14 @@ func (r *issueSQLRepositoryImpl) Claim(ctx context.Context, id, actor string, op
 		}
 	}
 
-	oldData, _ := json.Marshal(oldIssue)
-	newData, _ := json.Marshal(map[string]any{"assignee": actor, "status": "in_progress"})
+	claimUpdates := map[string]any{"assignee": actor, "status": "in_progress"}
+	oldData := issueops.ChangedFieldsPreImage(oldIssue, claimUpdates)
+	newData, _ := json.Marshal(claimUpdates)
 	if err := r.events.Record(ctx, domain.Event{
 		IssueID:  id,
 		Type:     types.EventType("claimed"),
 		Actor:    actor,
-		OldValue: string(oldData),
+		OldValue: oldData,
 		NewValue: string(newData),
 	}, domain.RecordEventOpts{UseWispsTable: opts.UseWispsTable}); err != nil {
 		return domain.ClaimRowResult{}, fmt.Errorf("db: Claim %s: record event: %w", id, err)

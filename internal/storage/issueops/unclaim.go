@@ -120,12 +120,15 @@ func finishUnclaimInTx(ctx context.Context, tx DBTX, eventTable string, id strin
 		return err
 	}
 
-	oldData, _ := json.Marshal(oldIssue)
-	newData, _ := json.Marshal(map[string]interface{}{
+	updates := map[string]interface{}{
 		"assignee": "",
 		"status":   "open",
-	})
-	if err := RecordFullEventInTable(ctx, tx, eventTable, id, "unclaimed", actor, string(oldData), string(newData)); err != nil {
+	}
+	// The pre-image of the two fields a release changes, like claimed: the
+	// whole old issue cost 5-6 KB per release for a two-field change.
+	oldData := ChangedFieldsPreImage(oldIssue, updates)
+	newData, _ := json.Marshal(updates)
+	if err := RecordFullEventInTable(ctx, tx, eventTable, id, "unclaimed", actor, oldData, string(newData)); err != nil {
 		return fmt.Errorf("failed to record unclaim event: %w", err)
 	}
 	// A release changes assignee and status, so it journals as an update. Both
