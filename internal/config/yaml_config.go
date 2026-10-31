@@ -45,6 +45,9 @@ var YamlOnlyKeys = map[string]bool{
 	"events-journal-retain-days": true,
 	"events-journal-retain-rows": true,
 	"events-journal-auto-prune":  true,
+	// History-events retention: `bd gc` reads it through viper the same way, so
+	// a DB-backed write would be silently unread.
+	"events-retain-days": true,
 
 	// Database and identity
 	"db":       true,

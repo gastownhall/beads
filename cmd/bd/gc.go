@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -18,6 +19,11 @@ var (
 	gcSkipDecay bool
 	gcSkipDolt  bool
 	gcFull      bool
+
+	// gcEventsOlderThan is -1 when --events-older-than was not given, so the
+	// events-retain-days config decides (gc_events.go).
+	gcEventsOlderThan int
+	gcSkipEvents      bool
 )
 
 var gcCmd = &cobra.Command{
@@ -26,17 +32,27 @@ var gcCmd = &cobra.Command{
 	Short:   "Garbage collect: decay old issues, compact Dolt commits, run Dolt GC",
 	Long: `Full lifecycle garbage collection for standalone Beads databases.
 
-Runs three phases in sequence:
+Runs four phases in sequence:
   1. DECAY   — Delete closed issues older than N days (default 90), except
                those of a type the workspace's types.retained setting names
                (only bd prune/purge --retain-ids deletes those)
-  2. COMPACT — Squash old Dolt commits into fewer commits (bd compact)
-  3. GC      — Run Dolt garbage collection to reclaim disk space
+  2. EVENTS  — Prune history events (the events table: claimed, status_changed,
+               updated, ... rows) older than events-retain-days; the default 0
+               keeps every event, and --events-older-than N overrides the
+               setting for one run
+  3. COMPACT — Squash old Dolt commits into fewer commits (bd compact)
+  4. GC      — Run Dolt garbage collection to reclaim disk space
 
 Each phase can be skipped individually. Use --dry-run to preview all phases
 without making changes.
 
-Phase 3 runs Dolt's default, generational GC: it only examines data written
+Phase 2 deletes rows from a Dolt-versioned table, so it frees rows, not disk:
+the pruned events stay reachable from the commits that held them until those
+commits are squashed (bd compact, bd flatten) and GC'd, which is why it runs
+ahead of phases 3 and 4. The events journal (bd_events_journal) has its own
+retention (events-journal-retain-days) and is untouched here.
+
+Phase 4 runs Dolt's default, generational GC: it only examines data written
 since the last GC. Data that survived an earlier GC lives in the old generation
 and is never revisited, so on a long-lived store the space freed by decay may
 not be reclaimed. Use --full to collect all generations (slower on large
@@ -48,6 +64,8 @@ Examples:
   bd gc --older-than 30              # Decay issues closed 30+ days ago
   bd gc --skip-decay                 # Skip issue deletion, just compact+GC
   bd gc --skip-dolt                  # Skip Dolt GC, just decay+compact
+  bd gc --events-older-than 30 --force   # Also prune history events older than 30 days
+  bd gc --skip-events                # Leave history events alone this run
   bd gc --full                       # Collect all storage generations
   bd gc --force                      # Skip confirmation prompt`,
 	SilenceUsage:  true,
@@ -88,7 +106,7 @@ Examples:
 			results = append(results, phaseResult{name: "Decay", skipped: true})
 		} else {
 			if !jsonOutput {
-				fmt.Println("Phase 1/3: Decay (delete old closed issues)")
+				fmt.Println("Phase 1/4: Decay (delete old closed issues)")
 			}
 
 			cutoffDays := gcOlderThan
@@ -164,8 +182,20 @@ Examples:
 			}
 		}
 
+		{
+			var count, prune func(context.Context, time.Time) (int64, error)
+			if retention, ok := storage.UnwrapStore(store).(storage.EventsRetention); ok {
+				count, prune = retention.CountEventsBefore, retention.PruneEventsBefore
+			}
+			outcome, err := runGCEventsPhase(ctx, count, prune)
+			if err != nil {
+				return HandleErrorRespectJSON("%v", err)
+			}
+			results = append(results, phaseResult{name: "Events", skipped: outcome.skipped, detail: outcome.detail})
+		}
+
 		if !jsonOutput {
-			fmt.Println("Phase 2/3: Compact (Dolt commit history info)")
+			fmt.Println("Phase 3/4: Compact (Dolt commit history info)")
 		}
 
 		commitCount := 0
@@ -201,7 +231,7 @@ Examples:
 			results = append(results, phaseResult{name: "Dolt GC", skipped: true})
 		} else {
 			if !jsonOutput {
-				fmt.Println("Phase 3/3: Dolt GC (reclaim disk space)")
+				fmt.Println("Phase 4/4: Dolt GC (reclaim disk space)")
 			}
 
 			gc, ok := storage.UnwrapStore(store).(storage.GarbageCollector)
@@ -312,6 +342,8 @@ func init() {
 	gcCmd.Flags().IntVar(&gcOlderThan, "older-than", 90, "Delete closed issues older than N days")
 	gcCmd.Flags().BoolVar(&gcSkipDecay, "skip-decay", false, "Skip issue deletion phase")
 	gcCmd.Flags().BoolVar(&gcSkipDolt, "skip-dolt", false, "Skip Dolt garbage collection phase")
+	gcCmd.Flags().IntVar(&gcEventsOlderThan, "events-older-than", -1, "Prune history events (the events table) older than N days; default is the events-retain-days setting, whose 0 keeps every event")
+	gcCmd.Flags().BoolVar(&gcSkipEvents, "skip-events", false, "Skip the history-events prune phase")
 	gcCmd.Flags().BoolVar(&gcFull, "full", false, "Run a full Dolt GC (all generations; slower, reclaims space default passes cannot)")
 
 	rootCmd.AddCommand(gcCmd)

@@ -289,6 +289,12 @@ func initialize(beadsDirSetting string) error {
 	// is for a consumer that wants the floors respected on reads but wants to
 	// own deletion itself. Env: BD_EVENTS_JOURNAL_AUTO_PRUNE.
 	v.SetDefault("events-journal-auto-prune", true)
+
+	// events-retain-days bounds the durable history events (the events table,
+	// not the journal): `bd gc` prunes rows older than this many days in its
+	// Events phase. 0, the default, keeps every event; --events-older-than on
+	// `bd gc` overrides it for one run.
+	v.SetDefault("events-retain-days", 0)
 	v.SetDefault("audit.enabled", false)
 	// versioned-history.enabled activates the dual-write issue-version history
 	// (issue_versions, issues.current_revision) that migrations 0067+ provision.

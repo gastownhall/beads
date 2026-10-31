@@ -9,6 +9,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage/domain"
+	storageissueops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"github.com/steveyegge/beads/internal/types"
@@ -48,7 +49,7 @@ func runGCProxiedServer(ctx context.Context) error {
 		results = append(results, phaseResult{name: "Decay", skipped: true})
 	} else {
 		if !jsonOutput {
-			fmt.Println("Phase 1/3: Decay (delete old closed issues)")
+			fmt.Println("Phase 1/4: Decay (delete old closed issues)")
 		}
 
 		cutoffDays := gcOlderThan
@@ -106,8 +107,34 @@ func runGCProxiedServer(ctx context.Context) error {
 		}
 	}
 
+	{
+		count := func(ctx context.Context, cutoff time.Time) (int64, error) {
+			return uow.RunTxRead(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (int64, error) {
+				res, err := uw.RawSQLUseCase().Query(ctx, storageissueops.CountEventsBeforeSQL, cutoff)
+				if err != nil {
+					return 0, err
+				}
+				return int64(scalarCount(res)), nil
+			})
+		}
+		prune := func(ctx context.Context, cutoff time.Time) (int64, error) {
+			return uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (int64, string, error) {
+				n, err := uw.RawSQLUseCase().Exec(ctx, storageissueops.PruneEventsBeforeSQL, cutoff)
+				if err != nil {
+					return 0, "", err
+				}
+				return n, fmt.Sprintf("bd: gc prune %d history event(s) before %s", n, cutoff.UTC().Format(time.RFC3339)), nil
+			})
+		}
+		outcome, err := runGCEventsPhase(ctx, count, prune)
+		if err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
+		results = append(results, phaseResult{name: "Events", skipped: outcome.skipped, detail: outcome.detail})
+	}
+
 	if !jsonOutput {
-		fmt.Println("Phase 2/3: Compact (Dolt commit history info)")
+		fmt.Println("Phase 3/4: Compact (Dolt commit history info)")
 	}
 
 	commitCount, logErr := uow.RunTxRead(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (int, error) {
@@ -144,7 +171,7 @@ func runGCProxiedServer(ctx context.Context) error {
 		results = append(results, phaseResult{name: "Dolt GC", skipped: true})
 	} else {
 		if !jsonOutput {
-			fmt.Println("Phase 3/3: Dolt GC (reclaim disk space)")
+			fmt.Println("Phase 4/4: Dolt GC (reclaim disk space)")
 		}
 		if gcDryRun {
 			if !jsonOutput {

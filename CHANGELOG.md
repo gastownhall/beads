@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`bd gc` prunes history events past `events-retain-days`.** The durable
+  `events` table (the `claimed`, `status_changed`, `updated`, ... rows behind
+  `bd history`) had no retention: the journal is bounded by its floors, but
+  events accrued for as long as the issue lived, and on a busy workspace they
+  outgrew every comment and issue body together. `bd gc` gains an EVENTS phase
+  between decay and compact that deletes events created more than
+  `events-retain-days` days ago (`bd config set events-retain-days 30`;
+  yaml-only, read through viper; the default 0 keeps every event), on both the
+  direct and the proxied-server routes, with `--dry-run` counting what would
+  go, `--force` required to delete, `--events-older-than N` overriding the
+  setting for one run (0 = every event older than now) and `--skip-events`
+  skipping the phase. The delete is one Dolt commit staging only `events`, and
+  it frees rows, not disk: the pruned rows stay reachable from the commits that
+  held them until those are squashed (`bd compact`, `bd flatten`) and GC'd,
+  which is why the phase runs ahead of compact and GC. The events journal
+  (`bd_events_journal`) keeps its own retention and is untouched.
 - **`arrival_seq`, a commit-ordered create sequence on wisp-plane rows.**
   While a workspace journals, every `ephemeral` or `no_history` bead it creates
   is stamped with the `seq` of its own `create` journal record, in the same
