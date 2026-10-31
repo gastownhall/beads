@@ -76,6 +76,7 @@ func TestInitConfigForTestNeutralizesLeakedRepoBeadsDir(t *testing.T) {
 // later test that does not call initConfigForTest.
 func TestDispatchDoesNotPolluteViperIssuePrefix(t *testing.T) {
 	isolateBeadsDirForTest(t)
+	savePersistentPreRunState(t)
 	ensureCleanGlobalState(t)
 	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
 
