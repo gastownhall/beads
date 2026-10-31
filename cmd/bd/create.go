@@ -647,7 +647,24 @@ var createCmd = &cobra.Command{
 				Command:  "create",
 				IssueIDs: []string{created.ID},
 			}); err != nil {
-				debug.Logf("warning: failed to commit routed repo: %v", err)
+				// A failed commit here USED TO be swallowed into debug.Logf, after
+				// which this function went on to print "✓ Created issue: <id>" and
+				// return nil. The row exists only in the working set at that point,
+				// so the caller is told the issue was created and is given an ID
+				// that does not survive a working-set reset.
+				//
+				// That is not hypothetical. A Gas Town patrol reported creating
+				// three beads on 2026-09-02 and none of them existed afterwards; a
+				// byte copy of the store taken 6.5 hours later contained none of
+				// the three, while every issue the SAME session UPDATED was present
+				// in that same copy. The split is explained exactly here: of the 23
+				// commitPendingIfEmbedded call sites, 16 return the error and this
+				// was the only one that discarded it.
+				//
+				// Report it the way `bd update` does. The issue may still be
+				// recoverable with `bd dolt commit`, which the caller can only do
+				// if they are told.
+				return HandleErrorRespectJSON("created %s but failed to commit it: %v\nThe issue exists in the working set only — run 'bd dolt commit' to persist it.", created.ID, err)
 			}
 		}
 
