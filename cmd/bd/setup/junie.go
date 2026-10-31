@@ -1,7 +1,6 @@
 package setup
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 )
@@ -127,7 +126,7 @@ func InstallJunie() error {
 	}
 
 	mcpConfig := junieMCPConfig()
-	mcpData, err := json.MarshalIndent(mcpConfig, "", "  ")
+	mcpData, err := marshalSettings(mcpConfig)
 	if err != nil {
 		return HandleError("marshal MCP config: %v", err)
 	}

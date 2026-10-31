@@ -2899,6 +2899,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `mc-gate-check-timer-resolves`, `mc-gate-add-waiter` and
   `mc-update-await-id` (pending until the reference server advertises the
   gate tokens), pinned passing by `TestE2E_GatesOverHTTP`.
+- **`bd setup gemini` keeps settings.json's trailing newline and skips no-op
+  rewrites.** Install and `--remove` wrote `.gemini/settings.json` without
+  its final newline and rewrote it on every run, even when nothing changed.
+  They now share the Claude installer's marshal and write-if-changed path, so
+  a re-run leaves the file untouched. `bd init`'s
+  `.claude/settings.local.json` and `bd setup junie`'s `.junie/mcp/mcp.json`
+  also end in a newline now (#6185).
 - **`bd import` no longer reports a failed dependency check as a skipped
   dependency.** Import skips an edge the dependency checks refuse (a
   self-dependency, a cycle, or a blocker that is the issue's own ancestor or
