@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -870,6 +871,18 @@ func blocksEdgesFrom(sg *TemplateSubgraph, issueID string) []string {
 	return out
 }
 
+// waitsForEdgesFrom returns the DepWaitsFor targets of issueID in subgraph
+// order.
+func waitsForEdgesFrom(sg *TemplateSubgraph, issueID string) []string {
+	var out []string
+	for _, d := range sg.Dependencies {
+		if d.IssueID == issueID && d.Type == types.DepWaitsFor {
+			out = append(out, d.DependsOnID)
+		}
+	}
+	return out
+}
+
 // TestCookFormulaToSubgraph_EntryGateWiring pins the entry-gate form that
 // GH#3316 leaves unchanged: a [steps.gate] on a step that is not declared
 // type = "gate" spawns a companion that blocks the step.
@@ -1543,5 +1556,512 @@ func TestStepTypeToIssueType(t *testing.T) {
 		if got := stepTypeToIssueType(tt.stepType); got != tt.want {
 			t.Errorf("stepTypeToIssueType(%q) = %q, want %q", tt.stepType, got, tt.want)
 		}
+	}
+}
+
+// cookFormulaTOMLWithVars cooks a TOML formula through
+// resolveAndCookFormulaWithVars with a non-nil vars map, so the step
+// condition filter runs as it does for pour and wisp (cookGateFormulaTOML
+// passes nil and skips it).
+func cookFormulaTOMLWithVars(t *testing.T, name, src string, vars map[string]string) (*TemplateSubgraph, error) {
+	t.Helper()
+	if vars == nil {
+		vars = map[string]string{}
+	}
+	dir := writePipelineFormula(t, name, src)
+	return resolveAndCookFormulaWithVars(name, []string{dir}, vars)
+}
+
+// conditionalFanoutFormula is a formula whose consumer names the conditional
+// fanout step through field (needs or depends_on).
+func conditionalFanoutFormula(name, field string) string {
+	return `formula = "` + name + `"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "fanout"
+title = "Fan out"
+type = "task"
+condition = "{{fanout_enabled}}"
+
+[[steps]]
+id = "consumer"
+title = "Consume"
+type = "task"
+` + field + ` = ["fanout"]
+`
+}
+
+// TestCookFormulaConditionDroppedNeedsTargetErrors: a step whose needs or
+// depends_on target is dropped by its condition must fail the cook, not pour
+// without its edge (GH#6437, PR #6642).
+func TestCookFormulaConditionDroppedNeedsTargetErrors(t *testing.T) {
+	for _, field := range []string{"needs", "depends_on"} {
+		t.Run(field, func(t *testing.T) {
+			name := "dangling-" + strings.ReplaceAll(field, "_", "-")
+			sg, err := cookFormulaTOMLWithVars(t, name, conditionalFanoutFormula(name, field),
+				map[string]string{"fanout_enabled": "false"})
+			if err == nil {
+				consumerID := name + ".consumer"
+				t.Fatalf("cook succeeded although consumer's %s target %q was dropped by its condition; consumer blocks edges: %v",
+					field, "fanout", blocksEdgesFrom(sg, consumerID))
+			}
+			if sg != nil {
+				t.Errorf("cook returned a subgraph alongside the error")
+			}
+			if !errors.Is(err, formula.ErrValidation) {
+				t.Errorf("errors.Is(err, formula.ErrValidation) = false for %v", err)
+			}
+			for _, want := range []string{`"consumer"`, field, `"fanout"`, "{{fanout_enabled}}"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not mention %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+// TestCookFormulaConditionDroppedWaitsForSpawnerErrors: a gate whose
+// waits_for spawner is dropped by its condition must fail the cook, not pour
+// a gate:<value> step that waits for no one (GH#6437, PR #6642).
+func TestCookFormulaConditionDroppedWaitsForSpawnerErrors(t *testing.T) {
+	const name = "dangling-waits-for"
+	sg, err := cookFormulaTOMLWithVars(t, name, `formula = "dangling-waits-for"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "fanout"
+title = "Fan out"
+type = "task"
+condition = "{{fanout_enabled}}"
+
+[[steps]]
+id = "gate"
+title = "Wait for the fanout"
+type = "task"
+needs = ["fanout"]
+waits_for = "all-children"
+`, map[string]string{"fanout_enabled": "false"})
+	if err == nil {
+		t.Fatalf("cook succeeded although gate's waits_for spawner %q was dropped by its condition; issues %v", "fanout", allIssueIDs(sg))
+	}
+	if sg != nil {
+		t.Errorf("cook returned a subgraph alongside the error")
+	}
+	if !errors.Is(err, formula.ErrValidation) {
+		t.Errorf("errors.Is(err, formula.ErrValidation) = false for %v", err)
+	}
+	for _, want := range []string{`step "gate": waits_for`, `"fanout"`, "{{fanout_enabled}}"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+}
+
+// TestCookFormulaConditionKeptNeedsTargetSucceeds: when the condition keeps
+// fanout, the consumer's needs edge is cooked as before (GH#6437).
+func TestCookFormulaConditionKeptNeedsTargetSucceeds(t *testing.T) {
+	const name = "kept-needs"
+	sg, err := cookFormulaTOMLWithVars(t, name, conditionalFanoutFormula(name, "needs"),
+		map[string]string{"fanout_enabled": "true"})
+	if err != nil {
+		t.Fatalf("cook %q: %v", name, err)
+	}
+	if got, want := blocksEdgesFrom(sg, name+".consumer"), []string{name + ".fanout"}; !slices.Equal(got, want) {
+		t.Errorf("consumer blocks edges = %v, want %v", got, want)
+	}
+}
+
+// TestCookFormulaLoopContainerExternalNeedsSkipped pins the skip that
+// collectDependencies keeps for a reference control flow replaced: ApplyLoops
+// replaces the loop container round with its expanded body and
+// rewriteLoopDependencies rewrites only in-body references, so after's needs
+// on round still names no issue at cook. The pour succeeds without that edge;
+// erroring on every dangling reference would break it (GH#6437).
+func TestCookFormulaLoopContainerExternalNeedsSkipped(t *testing.T) {
+	const name = "loop-external-needs"
+	sg, err := cookFormulaTOMLWithVars(t, name, `formula = "loop-external-needs"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "round"
+title = "Rounds"
+
+[steps.loop]
+count = 2
+
+[[steps.loop.body]]
+id = "work"
+title = "Work"
+
+[[steps]]
+id = "after"
+title = "After the rounds"
+needs = ["round"]
+`, map[string]string{})
+	if err != nil {
+		t.Fatalf("cook %q: %v", name, err)
+	}
+	for _, want := range []string{name + ".round.iter1.work", name + ".round.iter2.work", name + ".after"} {
+		if sg.IssueMap[want] == nil {
+			t.Errorf("missing issue %q; have %v", want, allIssueIDs(sg))
+		}
+	}
+	if got := blocksEdgesFrom(sg, name+".after"); slices.Contains(got, name+".round") {
+		t.Errorf("after blocks edges = %v, want none onto the replaced container %q", got, name+".round")
+	}
+}
+
+// TestCookFormulaConditionPrimitiveDefaultDropsUnreferencedDeploy: the
+// shipped condition primitive (examples/formulas/primitives/
+// condition.formula.toml) is the blessed unreferenced-leaf shape. Cooking
+// it with its own default (deploy=false) must keep succeeding - the
+// dropped-reference rejection must not over-error on a dropped step that
+// nothing names (GH#6437).
+func TestCookFormulaConditionPrimitiveDefaultDropsUnreferencedDeploy(t *testing.T) {
+	sg, err := resolveAndCookFormulaWithVars("condition", []string{primitivesDir(t)}, map[string]string{})
+	if err != nil {
+		t.Fatalf("cook condition primitive with its deploy=false default: %v", err)
+	}
+	if hasIssueID(sg, "condition.deploy") {
+		t.Errorf("deploy issue present although the default drops the step; issues: %v", allIssueIDs(sg))
+	}
+	if got := len(childIssueIDs(sg, "condition")); got != 2 {
+		t.Errorf("child issues = %d, want 2 (build, test): %v", got, allIssueIDs(sg))
+	}
+}
+
+// The dropped-reference rejection covers only references the formula wrote.
+// Loops, compose.branch and advice add needs edges of their own, and a
+// condition that drops one end of such an edge must not fail the pour with a
+// remedy that names a line the formula does not have. The tests below pour
+// each construct with its condition on and off.
+
+// TestCookFormulaConditionDroppedLastLoopBodyStepKeepsChain: a counted loop
+// chains iteration 2's first body step to iteration 1's last one. When the
+// last one's condition drops it, the chain goes to what it needed instead.
+func TestCookFormulaConditionDroppedLastLoopBodyStepKeepsChain(t *testing.T) {
+	const name = "loop-conditional-review"
+	const src = `formula = "loop-conditional-review"
+version = 1
+type = "workflow"
+
+[vars.with_review]
+default = "false"
+
+[[steps]]
+id = "round"
+title = "Rounds"
+
+[steps.loop]
+count = 2
+
+[[steps.loop.body]]
+id = "work"
+title = "Work"
+
+[[steps.loop.body]]
+id = "review"
+title = "Review"
+needs = ["work"]
+condition = "{{with_review}}"
+`
+	tests := []struct {
+		name       string
+		vars       map[string]string
+		wantChain  string // what round.iter2.work blocks on
+		wantReview bool
+	}{
+		{name: "review dropped by the default", vars: map[string]string{}, wantChain: name + ".round.iter1.work"},
+		{name: "review kept", vars: map[string]string{"with_review": "true"}, wantChain: name + ".round.iter1.review", wantReview: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sg, err := cookFormulaTOMLWithVars(t, name, src, tt.vars)
+			if err != nil {
+				t.Fatalf("cook %q: %v", name, err)
+			}
+			if got, want := blocksEdgesFrom(sg, name+".round.iter2.work"), []string{tt.wantChain}; !slices.Equal(got, want) {
+				t.Errorf("round.iter2.work blocks edges = %v, want %v", got, want)
+			}
+			for _, id := range []string{name + ".round.iter1.review", name + ".round.iter2.review"} {
+				if hasIssueID(sg, id) != tt.wantReview {
+					t.Errorf("issue %q present = %v, want %v; issues %v", id, !tt.wantReview, tt.wantReview, allIssueIDs(sg))
+				}
+			}
+		})
+	}
+}
+
+// TestCookFormulaConditionDroppedLastLoopBodyStepRoutesBareGate: a bare
+// waits_for gate first in a loop body declares no needs, so from iteration 2
+// on it infers its spawner from the chain edge onto iteration 1's last step.
+// That edge is bd's own, so when the last step's condition drops it the pour
+// still succeeds, and the gate waits for the step the chain is routed to.
+//
+// The test also pins a known gap that predates the condition filter:
+// Validate does not walk loop.body, so this gate escapes the check that
+// rejects a bare gate with no needs among steps and children. Iteration 1's
+// gate has no chain edge to infer a spawner from, so it is poured as a
+// gate:all-children label that waits for no one. Walking loop.body in
+// Validate is its own change, because it rejects formulas that cook today;
+// that change rejects this formula, and this test changes with it.
+func TestCookFormulaConditionDroppedLastLoopBodyStepRoutesBareGate(t *testing.T) {
+	const name = "loop-conditional-gate"
+	const src = `formula = "loop-conditional-gate"
+version = 1
+type = "workflow"
+
+[vars.with_review]
+default = "false"
+
+[[steps]]
+id = "round"
+title = "Rounds"
+
+[steps.loop]
+count = 2
+
+[[steps.loop.body]]
+id = "gate"
+title = "Wait for the round before"
+waits_for = "all-children"
+
+[[steps.loop.body]]
+id = "work"
+title = "Work"
+
+[[steps.loop.body]]
+id = "review"
+title = "Review"
+needs = ["work"]
+condition = "{{with_review}}"
+`
+	tests := []struct {
+		name        string
+		vars        map[string]string
+		wantSpawner string // what round.iter2.gate waits for
+	}{
+		{name: "review dropped by the default", vars: map[string]string{}, wantSpawner: name + ".round.iter1.work"},
+		{name: "review kept", vars: map[string]string{"with_review": "true"}, wantSpawner: name + ".round.iter1.review"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sg, err := cookFormulaTOMLWithVars(t, name, src, tt.vars)
+			if err != nil {
+				t.Fatalf("cook %q: %v", name, err)
+			}
+			if got, want := waitsForEdgesFrom(sg, name+".round.iter2.gate"), []string{tt.wantSpawner}; !slices.Equal(got, want) {
+				t.Errorf("round.iter2.gate waits-for edges = %v, want %v; deps %v", got, want, allDeps(sg))
+			}
+
+			gate1ID := name + ".round.iter1.gate"
+			gate1 := sg.IssueMap[gate1ID]
+			if gate1 == nil {
+				t.Fatalf("issue %s missing; issues %v", gate1ID, allIssueIDs(sg))
+			}
+			if !slices.Contains(gate1.Labels, "gate:all-children") {
+				t.Errorf("round.iter1.gate labels = %v, want gate:all-children", gate1.Labels)
+			}
+			if got := slices.Concat(waitsForEdgesFrom(sg, gate1ID), blocksEdgesFrom(sg, gate1ID)); len(got) != 0 {
+				t.Errorf("round.iter1.gate waits for %v, want no one (the known gap above); deps %v", got, allDeps(sg))
+			}
+		})
+	}
+}
+
+// TestCookFormulaConditionBareGateRoutedToNothingErrors: when the dropped last
+// body step needs nothing, the chain edge that iteration 2's bare gate takes
+// its spawner from has nowhere to go, and the gate would be poured as a
+// gate:all-children label that waits for no one. The pour fails instead,
+// naming the gate, the dropped step and its condition.
+func TestCookFormulaConditionBareGateRoutedToNothingErrors(t *testing.T) {
+	const name = "loop-conditional-gate-only"
+	const src = `formula = "loop-conditional-gate-only"
+version = 1
+type = "workflow"
+
+[vars.with_review]
+default = "false"
+
+[[steps]]
+id = "round"
+title = "Rounds"
+
+[steps.loop]
+count = 2
+
+[[steps.loop.body]]
+id = "gate"
+title = "Wait for the round before"
+waits_for = "all-children"
+
+[[steps.loop.body]]
+id = "review"
+title = "Review"
+condition = "{{with_review}}"
+`
+	t.Run("review dropped by the default", func(t *testing.T) {
+		sg, err := cookFormulaTOMLWithVars(t, name, src, map[string]string{})
+		if err == nil {
+			t.Fatalf("cook succeeded although round.iter2.gate's spawner was dropped with nothing to route to; round.iter2.gate waits-for edges %v",
+				waitsForEdgesFrom(sg, name+".round.iter2.gate"))
+		}
+		if sg != nil {
+			t.Errorf("cook returned a subgraph alongside the error")
+		}
+		if !errors.Is(err, formula.ErrValidation) {
+			t.Errorf("errors.Is(err, formula.ErrValidation) = false for %v", err)
+		}
+		for _, want := range []string{`step "round.iter2.gate": waits_for "all-children"`, `"round.iter1.review"`, "{{with_review}}", "nothing to wait for"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not mention %q", err, want)
+			}
+		}
+	})
+
+	t.Run("review kept", func(t *testing.T) {
+		sg, err := cookFormulaTOMLWithVars(t, name, src, map[string]string{"with_review": "true"})
+		if err != nil {
+			t.Fatalf("cook %q: %v", name, err)
+		}
+		if got, want := waitsForEdgesFrom(sg, name+".round.iter2.gate"), []string{name + ".round.iter1.review"}; !slices.Equal(got, want) {
+			t.Errorf("round.iter2.gate waits-for edges = %v, want %v; deps %v", got, want, allDeps(sg))
+		}
+	})
+}
+
+// TestCookFormulaConditionDroppedAdviceTargetDropsItsAdvice: advice steps
+// take their target's condition, so when deploy is dropped its before and
+// after steps go with it, instead of failing the pour on verify-deploy's
+// edge onto deploy or pouring them around a step that is not there.
+func TestCookFormulaConditionDroppedAdviceTargetDropsItsAdvice(t *testing.T) {
+	const name = "advice-conditional-deploy"
+	const src = `formula = "advice-conditional-deploy"
+version = 1
+type = "workflow"
+
+[vars.deploy]
+default = "false"
+
+[[steps]]
+id = "build"
+title = "Build"
+
+[[steps]]
+id = "deploy"
+title = "Deploy"
+needs = ["build"]
+condition = "{{deploy}} == true"
+
+[[advice]]
+target = "deploy"
+
+[advice.before]
+id = "approve-{step.id}"
+title = "Approve {step.title}"
+
+[advice.after]
+id = "verify-{step.id}"
+title = "Verify {step.title}"
+`
+	adviceIssues := []string{name + ".approve-deploy", name + ".deploy", name + ".verify-deploy"}
+
+	t.Run("deploy dropped by the default", func(t *testing.T) {
+		sg, err := cookFormulaTOMLWithVars(t, name, src, map[string]string{})
+		if err != nil {
+			t.Fatalf("cook %q: %v", name, err)
+		}
+		if !hasIssueID(sg, name+".build") {
+			t.Errorf("build missing; issues %v", allIssueIDs(sg))
+		}
+		for _, id := range adviceIssues {
+			if hasIssueID(sg, id) {
+				t.Errorf("issue %q poured although deploy was dropped; issues %v", id, allIssueIDs(sg))
+			}
+		}
+	})
+
+	t.Run("deploy kept", func(t *testing.T) {
+		sg, err := cookFormulaTOMLWithVars(t, name, src, map[string]string{"deploy": "true"})
+		if err != nil {
+			t.Fatalf("cook %q: %v", name, err)
+		}
+		for _, id := range adviceIssues {
+			if !hasIssueID(sg, id) {
+				t.Errorf("issue %q missing; issues %v", id, allIssueIDs(sg))
+			}
+		}
+		if got, want := blocksEdgesFrom(sg, name+".deploy"), []string{name + ".build", name + ".approve-deploy"}; !slices.Equal(got, want) {
+			t.Errorf("deploy blocks edges = %v, want %v", got, want)
+		}
+		if got, want := blocksEdgesFrom(sg, name+".verify-deploy"), []string{name + ".deploy"}; !slices.Equal(got, want) {
+			t.Errorf("verify-deploy blocks edges = %v, want %v", got, want)
+		}
+	})
+}
+
+// TestCookFormulaConditionDroppedBranchStepJoinWaitsForTheRest: compose.branch
+// makes the join need every parallel step. When e2e is dropped, deploy waits
+// for the parallel step that stays, and through e2e for prepare.
+func TestCookFormulaConditionDroppedBranchStepJoinWaitsForTheRest(t *testing.T) {
+	const name = "branch-conditional-e2e"
+	const src = `formula = "branch-conditional-e2e"
+version = 1
+type = "workflow"
+
+[vars.run_e2e]
+default = "false"
+
+[[steps]]
+id = "prepare"
+title = "Prepare"
+
+[[steps]]
+id = "unit"
+title = "Unit tests"
+
+[[steps]]
+id = "e2e"
+title = "End-to-end tests"
+condition = "{{run_e2e}}"
+
+[[steps]]
+id = "deploy"
+title = "Deploy"
+
+[[compose.branch]]
+from = "prepare"
+steps = ["unit", "e2e"]
+join = "deploy"
+`
+	tests := []struct {
+		name       string
+		vars       map[string]string
+		wantDeploy []string // what deploy blocks on
+		wantE2E    bool
+	}{
+		{name: "e2e dropped by the default", vars: map[string]string{}, wantDeploy: []string{name + ".unit", name + ".prepare"}},
+		{name: "e2e kept", vars: map[string]string{"run_e2e": "true"}, wantDeploy: []string{name + ".unit", name + ".e2e"}, wantE2E: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sg, err := cookFormulaTOMLWithVars(t, name, src, tt.vars)
+			if err != nil {
+				t.Fatalf("cook %q: %v", name, err)
+			}
+			if got := blocksEdgesFrom(sg, name+".deploy"); !slices.Equal(got, tt.wantDeploy) {
+				t.Errorf("deploy blocks edges = %v, want %v", got, tt.wantDeploy)
+			}
+			if got, want := blocksEdgesFrom(sg, name+".unit"), []string{name + ".prepare"}; !slices.Equal(got, want) {
+				t.Errorf("unit blocks edges = %v, want %v", got, want)
+			}
+			if hasIssueID(sg, name+".e2e") != tt.wantE2E {
+				t.Errorf("e2e present = %v, want %v; issues %v", !tt.wantE2E, tt.wantE2E, allIssueIDs(sg))
+			}
+		})
 	}
 }

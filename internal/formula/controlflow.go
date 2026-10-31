@@ -402,7 +402,7 @@ func chainExpandedIterations(steps []*Step, loopID string, count int) []*Step {
 
 		if hasFirst && hasPrevLast {
 			lastStepID := steps[prevLastIdx].ID
-			steps[firstIdx].Needs = appendUnique(steps[firstIdx].Needs, lastStepID)
+			addGeneratedNeed(steps[firstIdx], lastStepID)
 		}
 	}
 
@@ -467,14 +467,13 @@ func applyBranchesWithMap(stepMap map[string]*Step, compose *ComposeRules) error
 
 		// Add dependencies: branch steps depend on 'from'
 		for _, stepID := range branch.Steps {
-			step := stepMap[stepID]
-			step.Needs = appendUnique(step.Needs, branch.From)
+			addGeneratedNeed(stepMap[stepID], branch.From)
 		}
 
 		// Add dependencies: 'join' depends on all branch steps
 		joinStep := stepMap[branch.Join]
 		for _, stepID := range branch.Steps {
-			joinStep.Needs = appendUnique(joinStep.Needs, stepID)
+			addGeneratedNeed(joinStep, stepID)
 		}
 	}
 

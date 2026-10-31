@@ -239,6 +239,12 @@ type Step struct {
 	// Either Needs or DependsOn can be used; they are merged during cooking.
 	Needs []string `json:"needs,omitempty" toml:"needs,omitempty"`
 
+	// generatedNeeds lists the Needs entries a transform added on its own
+	// (loop iteration chaining, compose.branch, advice) rather than the
+	// formula text. FilterStepsByCondition routes such an edge around a step
+	// it drops; a reference the formula wrote to that step is an error.
+	generatedNeeds []string
+
 	// WaitsFor specifies a fanout gate type for this step.
 	// Values: "all-children" (wait for all dynamic children) or "any-children" (wait for first).
 	// When set, the cooked issue gets a "gate:<value>" label.
