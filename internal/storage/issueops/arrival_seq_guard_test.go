@@ -38,9 +38,10 @@ var sqlWriteVerbRe = regexp.MustCompile(`(?i)\b(?:UPDATE|INSERT|REPLACE|ALTER|CR
 // writesArrivalSeq recognizes a write keyword and the column identifier in
 // the same SQL statement. Tokenization excludes ordinary comments and quoted
 // values, but retains backtick identifiers and executable MySQL comments.
-// Keywords can occur after format verbs or inside statement fragments. SQL
-// tokens also enable a conservative fallback on lexical errors; prose such as
-// "arrival_seq, the journal's create stamp" errors before reaching one.
+// Statements and fragments must start with a recognized SQL opener, optionally
+// preceded by %s placeholders. Later SQL keywords or parentheses cannot turn
+// a prose prefix into SQL. A recognized opener also enables the conservative
+// fallback on lexical errors.
 // This remains a literal-level guard: it does not reconstruct SQL assembled
 // across literals or prove that the column is an assignment target.
 func writesArrivalSeq(text string) bool {
@@ -49,6 +50,7 @@ func writesArrivalSeq(text string) bool {
 	}
 	tokens := sqlparser.NewStringTokenizer(text)
 	sql, write, column := false, false, false
+	start, format := true, false
 	for {
 		kind, value := tokens.Scan()
 		switch kind {
@@ -58,17 +60,37 @@ func writesArrivalSeq(text string) bool {
 			continue
 		case ';':
 			sql, write, column = false, false, false
+			start, format = true, false
 			continue
 		case sqlparser.LEX_ERROR:
 			// A lexical error is not proof of safety. Preserve the old
 			// conservative check once the literal looks like SQL.
 			return sql && sqlWriteVerbRe.MatchString(text)
 		}
-		switch kind {
-		case sqlparser.UPDATE, sqlparser.INSERT, sqlparser.REPLACE,
-			sqlparser.ALTER, sqlparser.CREATE, sqlparser.SELECT,
-			sqlparser.WITH, sqlparser.EXPLAIN, sqlparser.ON, '(':
-			sql = true
+		if start {
+			if format {
+				format = false
+				if kind == sqlparser.ID && string(value) == "s" {
+					continue
+				}
+				start = false
+			} else if kind == '%' {
+				format = true
+				continue
+			} else {
+				start = false
+				switch kind {
+				case sqlparser.UPDATE, sqlparser.INSERT, sqlparser.REPLACE,
+					sqlparser.ALTER, sqlparser.CREATE, sqlparser.SELECT,
+					sqlparser.WITH, sqlparser.EXPLAIN, sqlparser.ON,
+					sqlparser.VALUES, sqlparser.AS, sqlparser.DUPLICATE,
+					sqlparser.INTO, sqlparser.IGNORE, '(', ')', ',':
+					sql = true
+				}
+			}
+		}
+		if !sql {
+			continue
 		}
 		switch kind {
 		case sqlparser.UPDATE, sqlparser.INSERT, sqlparser.REPLACE, sqlparser.ALTER, sqlparser.CREATE:
@@ -89,6 +111,9 @@ func TestWritesArrivalSeq(t *testing.T) {
 		want bool
 	}{
 		{"reported prose", "arrival_seq, the events journal's create stamp (BD-5)", false},
+		{"prose without apostrophe", "arrival_seq, the events journal create stamp (BD-5)", false},
+		{"prose with early parenthesis", "arrival_seq (BD-5), the events journal's create stamp", false},
+		{"error label prose", "journal: create arrival_seq stamp: %w", false},
 		{"column list fragment", "id, title, arrival_seq", false},
 		{"read", "SELECT arrival_seq FROM wisps", false},
 		{"comment only", "/* UPDATE wisps SET arrival_seq = 1 */", false},
