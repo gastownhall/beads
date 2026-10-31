@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -1278,6 +1279,42 @@ func TestEmbeddedInitBAutoCommitAndJSONLRemote(t *testing.T) {
 		}
 		if !strings.Contains(string(out), "JSONL authoritative") {
 			t.Fatalf("imported issue title missing from show output:\n%s", out)
+		}
+	})
+
+	// GH#6485: without --prefix, the local reinit preflight must expect the
+	// token for the resolved (directory-derived) prefix, not "DESTROY-".
+	t.Run("from_jsonl_reinit_destroy_token_uses_resolved_prefix", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "tokproj")
+		if err := os.MkdirAll(dir, 0750); err != nil {
+			t.Fatal(err)
+		}
+		initGitRepoAt(t, dir)
+		runBDInit(t, bd, dir, "--skip-hooks", "--skip-agents")
+		bdCreate(t, bd, dir, "existing issue")
+
+		issue := types.Issue{ID: "tokproj-abc123", Title: "JSONL rebuild", Status: types.StatusOpen,
+			Priority: 2, IssueType: types.TypeTask, CreatedAt: time.Now(), UpdatedAt: time.Now()}
+		line, _ := json.Marshal(issue)
+		if err := os.WriteFile(filepath.Join(dir, ".beads", "issues.jsonl"), append(line, '\n'), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		reinit := func(token string) (bytes.Buffer, error) {
+			cmd := exec.Command(bd, "init", "--from-jsonl", "--reinit-local", "--discard-remote", "--destroy-token="+token, "--skip-agents", "--skip-hooks", "--non-interactive")
+			cmd.Dir = dir
+			cmd.Env = bdEnv(dir)
+			_, stderr, err := runCommandBuffers(t, cmd)
+			return stderr, err
+		}
+
+		stderr, err := reinit("DESTROY-wrong")
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != ExitDestroyTokenMissing {
+			t.Fatalf("wrong token: want exit %d, got %v\nstderr:\n%s", ExitDestroyTokenMissing, err, stderr.String())
+		}
+		if stderr, err := reinit("DESTROY-tokproj"); err != nil {
+			t.Fatalf("DESTROY-<resolved prefix> must be accepted without --prefix: %v\nstderr:\n%s", err, stderr.String())
 		}
 	})
 }

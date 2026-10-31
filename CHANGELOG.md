@@ -3413,6 +3413,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   guard. `--recreate-missing` still opens it. The signal decision behind both
   guards is recorded in `engdocs/adr/0004-missing-database-guard-signal.md`.
 
+- **Non-interactive `bd init --reinit-local` accepts `DESTROY-<issue-prefix>`
+  without `--prefix`.** The local data-safety guard built its expected token
+  from the raw `--prefix` flag, so with the prefix coming from config or the
+  directory name it expected `DESTROY-` and refused the documented token with
+  exit 12; it now uses the resolved prefix, as the remote-safety check already
+  did (#6485).
+
 - **`bd init --recreate-missing` now reaches its own opt-in.** The existing-data
   check derived "is this project's database here?" from the Dolt data
   directory, which exists on every initialized workspace, so the

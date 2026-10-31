@@ -599,9 +599,6 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		serverUser, _ := cmd.Flags().GetString("server-user")
 		database, _ := cmd.Flags().GetString("database")
 		destroyToken, _ := cmd.Flags().GetString("destroy-token")
-		// Keep the exact input the former destructive-confirmation block used:
-		// before config/dirname fallback and before normalization.
-		destroyTokenPrefix := prefix
 
 		// The caller named a BEADS_DIR from an untracked home directory: the
 		// opt-out the home refusal offers, held to what it promises. Skipping
@@ -1250,7 +1247,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			plannedDBPathAbs = filepath.Dir(plannedDBPathAbs)
 		}
 		initGateHandle, gateErr := acquireInitMutationGate(rootCtx, beadsDirAbs, plannedDBPathAbs, func() error {
-			return runInitReinitPreflight(reinitLocal, destroyTokenPrefix, destroyToken)
+			return runInitReinitPreflight(reinitLocal, prefix, destroyToken)
 		})
 		if gateErr != nil {
 			return gateErr
