@@ -233,6 +233,7 @@ func writeReleaseFixture(t *testing.T, version string) string {
 	base, _, _ := strings.Cut(version, "-")
 	files := map[string]string{
 		"go.mod":                     "module github.com/steveyegge/beads\n\ngo 1.26\n",
+		"default.nix":                "{ buildGoModule }:\nbuildGoModule {\n  version = \"" + version + "\";\n}\n",
 		"cmd/bd/version.go":          "package main\n\nvar Version = \"" + version + "\"\n",
 		"scripts/update-versions.sh": "#!/bin/sh\n",
 		"integrations/beads-mcp/pyproject.toml": "[project]\nversion = \"" +
