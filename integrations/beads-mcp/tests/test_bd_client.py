@@ -310,6 +310,37 @@ async def test_create(bd_client, mock_process):
 
 
 @pytest.mark.asyncio
+async def test_create_passes_title_as_a_named_flag_not_a_bare_positional(bd_client, mock_process):
+    """create() (GH#7309-adjacent argv-injection class): the title must not
+    be the first bare positional after "create", or bd's own flag parser can
+    read an option-shaped title as a flag instead of literal content, the
+    same class of bug fixed in _run_text_command for comment/note (GH#7317).
+    bd create already exposes a --title flag for exactly this ("title ...
+    looks like a flag ... pass it explicitly: bd create --title=..."); this
+    pins that create() actually uses it.
+    """
+    issue_data = {
+        "id": "bd-9",
+        "title": "--actor=injected",
+        "status": "open",
+        "priority": 2,
+        "issue_type": "task",
+        "created_at": "2024-01-01T00:00:00Z",
+        "updated_at": "2024-01-01T00:00:00Z",
+    }
+    mock_process.communicate = AsyncMock(return_value=(json.dumps(issue_data).encode(), b""))
+
+    with patch("asyncio.create_subprocess_exec", return_value=mock_process) as mock_exec:
+        params = CreateIssueParams(title="--actor=injected", priority=2, issue_type="task")
+        await bd_client.create(params)
+
+    call_args = list(mock_exec.call_args[0])
+    assert "--title" in call_args, f"create() argv has no --title flag: {call_args}"
+    title_idx = call_args.index("--title")
+    assert call_args[title_idx + 1] == "--actor=injected"
+
+
+@pytest.mark.asyncio
 async def test_create_with_optional_fields(bd_client, mock_process):
     """Test create method with all optional fields."""
     issue_data = {
