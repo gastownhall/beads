@@ -14,7 +14,7 @@ jobs:
     steps:
       - name: Mint flake update token
         id: flake-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
         with:
           app-id: ${{ secrets.FLAKE_UPDATE_APP_ID }}
           private-key: ${{ secrets.FLAKE_UPDATE_APP_PRIVATE_KEY }}
@@ -30,7 +30,7 @@ jobs:
           token: ${{ steps.flake-token.outputs.token }}
 
       - name: Install Nix
-        uses: DeterminateSystems/determinate-nix-action@527f17dd63d2d60d3e5552934bc84b9a33a14d11 # v3
+        uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3 # v3
 
       - name: Update flake.lock
         run: nix flake update

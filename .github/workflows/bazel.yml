@@ -759,7 +759,7 @@ jobs:
       - name: Mint gastownhall/gascity installation token
         id: mint
         if: ${{ steps.has-app.outputs.has-app == 'true' }}
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
         with:
           client-id: Iv23ligrqVEhlamZnoPU
           private-key: ${{ secrets.RBE_POOL_APP_PRIVATE_KEY }}
@@ -1012,7 +1012,7 @@ jobs:
 
       - name: Upload build artifacts
         if: ${{ always() && steps.bd-artifact.outcome == 'success' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           overwrite: true # a job re-run is the same run: replace, not 409
           name: ${{ inputs.build-artifact-name || 'ci-build-artifacts' }}
@@ -1084,7 +1084,7 @@ jobs:
       # privileged consumer.
       - name: Upload BUILD sync patch
         if: ${{ always() && steps.sync.outcome == 'failure' && github.event_name != 'pull_request_target' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           overwrite: true # a job re-run is the same run: replace, not 409
           name: bazel-sync-patch
@@ -1094,7 +1094,7 @@ jobs:
 
       - name: Upload test logs
         if: ${{ failure() && steps.test.outcome == 'failure' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           overwrite: true # a job re-run is the same run: replace, not 409
           name: bazel-testlogs
@@ -1153,7 +1153,7 @@ jobs:
         if: "!cancelled() && steps.ci-analytics.outcome == 'success'"
         continue-on-error: true
         timeout-minutes: 2
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           overwrite: true # a job re-run is the same run: replace, not 409
           name: ci-analytics-test-${{ github.run_attempt }}
@@ -1213,7 +1213,7 @@ jobs:
           cache: false
 
       - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v6
         with:
           node-version: '24'
 
@@ -1375,7 +1375,7 @@ jobs:
         if: "!cancelled() && steps.ci-analytics.outcome == 'success'"
         continue-on-error: true
         timeout-minutes: 2
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           overwrite: true # a job re-run is the same run: replace, not 409
           name: ci-analytics-pure-${{ github.run_attempt }}
@@ -1598,7 +1598,7 @@ jobs:
 
       - name: Upload test logs
         if: ${{ failure() && steps.test.outcome != 'skipped' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           overwrite: true # a job re-run is the same run: replace, not 409
           name: bazel-embedded-testlogs
@@ -1619,7 +1619,7 @@ jobs:
         if: ${{ !cancelled() && steps.test.outcome != 'skipped' }}
         continue-on-error: true
         timeout-minutes: 2
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           overwrite: true # a job re-run is the same run: replace, not 409
           name: bazel-embedded-served-testxml
@@ -1650,7 +1650,7 @@ jobs:
         if: "!cancelled() && steps.ci-analytics.outcome == 'success'"
         continue-on-error: true
         timeout-minutes: 2
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           overwrite: true # a job re-run is the same run: replace, not 409
           name: ci-analytics-embedded-${{ github.run_attempt }}
@@ -1819,7 +1819,7 @@ jobs:
 
       - name: Upload test logs
         if: ${{ failure() && steps.test.outcome != 'skipped' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           overwrite: true # a job re-run is the same run: replace, not 409
           name: bazel-integration-testlogs
@@ -1852,7 +1852,7 @@ jobs:
         if: "!cancelled() && steps.ci-analytics.outcome == 'success'"
         continue-on-error: true
         timeout-minutes: 2
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           overwrite: true # a job re-run is the same run: replace, not 409
           name: ci-analytics-integration-${{ github.run_attempt }}
@@ -1952,7 +1952,7 @@ jobs:
 
       - name: Upload test logs
         if: ${{ failure() && steps.test.outcome == 'failure' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           overwrite: true # a job re-run is the same run: replace, not 409
           name: bazel-doltserver-testlogs
@@ -1985,7 +1985,7 @@ jobs:
         if: "!cancelled() && steps.ci-analytics.outcome == 'success'"
         continue-on-error: true
         timeout-minutes: 2
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           overwrite: true # a job re-run is the same run: replace, not 409
           name: ci-analytics-doltserver-${{ github.run_attempt }}
@@ -2122,7 +2122,7 @@ jobs:
 
       - name: Upload test logs
         if: ${{ failure() && steps.test.outcome != 'skipped' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           overwrite: true # a job re-run is the same run: replace, not 409
           name: bazel-proxied-testlogs
@@ -2155,7 +2155,7 @@ jobs:
         if: "!cancelled() && steps.ci-analytics.outcome == 'success'"
         continue-on-error: true
         timeout-minutes: 2
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           overwrite: true # a job re-run is the same run: replace, not 409
           name: ci-analytics-proxied-server-${{ github.run_attempt }}
@@ -2298,7 +2298,7 @@ jobs:
       - name: Upload test logs
         if: ${{ failure() && steps.test.outcome != 'skipped' }}
         timeout-minutes: 3
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           overwrite: true # a job re-run is the same run: replace, not 409
           name: bazel-dolt-race-testlogs
@@ -2331,7 +2331,7 @@ jobs:
         if: "!cancelled() && steps.ci-analytics.outcome == 'success'"
         continue-on-error: true
         timeout-minutes: 2
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           overwrite: true # a job re-run is the same run: replace, not 409
           name: ci-analytics-dolt-race-${{ github.run_attempt }}
@@ -2472,7 +2472,7 @@ jobs:
 
       - name: Upload test logs
         if: ${{ failure() && steps.test.outcome != 'skipped' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           overwrite: true # a job re-run is the same run: replace, not 409
           name: bazel-server-storage-testlogs
@@ -2505,7 +2505,7 @@ jobs:
         if: "!cancelled() && steps.ci-analytics.outcome == 'success'"
         continue-on-error: true
         timeout-minutes: 2
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           overwrite: true # a job re-run is the same run: replace, not 409
           name: ci-analytics-server-storage-${{ github.run_attempt }}
@@ -2625,7 +2625,7 @@ jobs:
 
       - name: Upload test logs
         if: ${{ failure() && steps.test.outcome != 'skipped' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           overwrite: true # a job re-run is the same run: replace, not 409
           name: bazel-cmd-dolt-testlogs
@@ -2658,7 +2658,7 @@ jobs:
         if: "!cancelled() && steps.ci-analytics.outcome == 'success'"
         continue-on-error: true
         timeout-minutes: 2
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           overwrite: true # a job re-run is the same run: replace, not 409
           name: ci-analytics-cmd-dolt-${{ github.run_attempt }}
@@ -2901,7 +2901,7 @@ jobs:
       - name: Upload test logs
         if: ${{ (failure() || steps.test.outcome == 'failure') && steps.test.outcome != 'skipped' }}
         timeout-minutes: 3
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           overwrite: true # a job re-run is the same run: replace, not 409
           name: bazel-dolt-int-testlogs
@@ -2934,7 +2934,7 @@ jobs:
         if: "!cancelled() && steps.ci-analytics.outcome == 'success'"
         continue-on-error: true
         timeout-minutes: 2
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           overwrite: true # a job re-run is the same run: replace, not 409
           name: ci-analytics-dolt-int-${{ github.run_attempt }}
@@ -3096,7 +3096,7 @@ jobs:
 
       - name: Set up Python
         if: ${{ steps.detect.outputs.mcp_package == 'true' }}
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.14.10'
 
@@ -3216,7 +3216,7 @@ jobs:
 
       - name: Set up Node.js
         if: ${{ steps.detect.outputs.npm_package == 'true' }}
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v6
         with:
           node-version: '24'
 
@@ -3346,7 +3346,7 @@ jobs:
             --json "$RUNNER_TEMP/rrc-verify.json" --summary "$GITHUB_STEP_SUMMARY"
       - name: Upload the report
         if: ${{ always() && hashFiles(format('{0}/rrc-verify.json', runner.temp)) != '' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           overwrite: true # a job re-run is the same run: replace, not 409
           name: rrc-verify-${{ github.run_attempt }}

@@ -466,7 +466,7 @@ jobs:
       # the fix to same-repo PR branches automatically.
       - name: Upload docs fix patch
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: cli-docs-freshness-patch
           path: ${{ runner.temp }}/cli-docs-freshness.patch
@@ -849,7 +849,7 @@ jobs:
         if: always()
         timeout-minutes: 3
         continue-on-error: true
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: complexity-report
           path: complexity-report.txt
@@ -944,7 +944,7 @@ jobs:
         id: install-msys2
         if: ${{ !cancelled() }}
         timeout-minutes: 10
-        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2.32.0
+        uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
         with:
           msystem: MSYS
           install: git make
@@ -965,7 +965,7 @@ jobs:
         # behind it, instead of consuming the whole 30-minute job timeout.
         continue-on-error: true
         timeout-minutes: 10
-        uses: cygwin/cygwin-install-action@3f0a3f9f988f7e96b8c18098ae05eaec175f5b52 # v6
+        uses: cygwin/cygwin-install-action@5a1b0cd107181fa6bb6bf3f90d500f4fb3132f18 # v7.0.0
         with:
           packages: git make
           add-to-path: 'false'
