@@ -222,3 +222,32 @@ func TestGatherInputRejectionsNameUnitSet(t *testing.T) {
 		assertNamesUnits(t, "--defer", message)
 	})
 }
+
+// TestRelativeTimeFlagUsagesNameUnitSet keeps --help in step with the rejection
+// hint. A caller should learn from `bd create --help`, before entering a value,
+// that +3m is months and +30min is minutes; +3m meant as minutes is accepted
+// silently, so no rejection would ever explain it.
+func TestRelativeTimeFlagUsagesNameUnitSet(t *testing.T) {
+	flags := []struct {
+		cmd  *cobra.Command
+		flag string
+	}{
+		{deferCmd, "until"},
+		{createCmd, "due"},
+		{createCmd, "defer"},
+		{updateCmd, "due"},
+		{updateCmd, "defer"},
+	}
+
+	for _, f := range flags {
+		lookup := f.cmd.Flags().Lookup(f.flag)
+		if lookup == nil {
+			t.Fatalf("%s has no --%s flag", f.cmd.Name(), f.flag)
+		}
+		for _, unit := range []string{"min=minutes", "h=hours", "d=days", "w=weeks", "m=months", "y=years"} {
+			if !strings.Contains(lookup.Usage, unit) {
+				t.Errorf("%s --%s usage does not name %q: %s", f.cmd.Name(), f.flag, unit, lookup.Usage)
+			}
+		}
+	}
+}
