@@ -609,8 +609,8 @@ func TestServedBatchApplyGcCloseWithMetadataIfMatch(t *testing.T) {
 func batchApplyColumnDirect(t *testing.T, ctx context.Context, fixture *conformance.BatchApplyFixture, column, id string) string {
 	t.Helper()
 	var value string
-	// CAST AS CHAR first, so COALESCE's '' never has to parse as a native
-	// JSON metadata column (PostgreSQL jsonb refuses that at PREPARE, 22P02).
+	// CAST AS CHAR first so PostgreSQL never types COALESCE's '' as jsonb
+	// (22P02 at PREPARE); see batchApplyEdgeMetadata in backend/conformance.
 	//nolint:gosec // G201: column is one of this file's own hardcoded names.
 	query := "SELECT COALESCE(CAST(" + column + " AS CHAR), '') FROM issues WHERE id = ?"
 	if err := fixture.QueryScalar(ctx, query, []any{id}, &value); err != nil {

@@ -2393,17 +2393,17 @@ func assertBatchApplyTypedEdgeCount(t *testing.T, ctx context.Context, fixture B
 // batchApplyEdgeMetadata reads the stored metadata blob of one edge, which is
 // where the waits-for gate normalization has to be visible.
 //
-// The column is CAST to CHAR before the COALESCE so the probe is portable
-// across the backends this package certifies. On a backend whose metadata
-// column is a native JSON type (PostgreSQL jsonb, for one), the engine
-// resolves a COALESCE's arguments to one type at plan time: over the bare
-// column it parses the empty-string literal as JSON and refuses the statement
-// at PREPARE (22P02), before a single row is read. CAST(metadata AS CHAR) is
-// native on Dolt/MySQL and is a plain text cast elsewhere, so every engine
-// returns the column's JSON text. That text is each engine's own
-// normalization of the stored value (Dolt reads 1.50 back as 1.5, Postgres
-// keeps 1.50), which is why every caller decodes the blob instead of
-// comparing it.
+// The column is CAST to CHAR before the COALESCE, the spelling
+// assertIssueOperationsStoredMetadata already reads metadata with, because a
+// COALESCE over the bare column does not port: PostgreSQL gives the untyped
+// empty-string literal the column's jsonb type, cannot parse it as JSON, and
+// refuses the statement at PREPARE (22P02) before reading a row. Like the rest
+// of this package's SQL the CAST is MySQL dialect, so a backend on another
+// engine has to translate CHAR to its unbounded text type: PostgreSQL reads a
+// bare CHAR as char(1) and would cut the blob to its first character. The
+// text is each engine's own rendering of the stored value (Dolt reads 1.50
+// back as 1.5, Postgres keeps 1.50), which is why every caller decodes the
+// blob instead of comparing it.
 func batchApplyEdgeMetadata(t *testing.T, ctx context.Context, fixture BatchApplyFixture, source, target string) string {
 	t.Helper()
 	var blob string
