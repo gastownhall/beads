@@ -302,6 +302,55 @@ func TestEmbeddedListFilteringBasicAndLabels(t *testing.T) {
 		}
 	})
 
+	t.Run("limit_truncation_json_envelope", func(t *testing.T) {
+		// GH#5444: under BD_JSON_ENVELOPE=1 a --limit-cut page carries the
+		// truncation verdict in-band, so a piping consumer does not have to
+		// read the terminal-gated stderr hint (GH#4094) to learn the array
+		// is partial.
+		run := func(args ...string) map[string]json.RawMessage {
+			fullArgs := append([]string{"list", "--json"}, args...)
+			cmd := exec.Command(bd, fullArgs...)
+			cmd.Dir = dir
+			cmd.Env = append(bdEnv(dir), "BD_JSON_ENVELOPE=1")
+			stdout, stderr, err := runCommandBuffers(t, cmd)
+			if err != nil {
+				t.Fatalf("bd list --json %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
+			}
+			var env map[string]json.RawMessage
+			if err := json.Unmarshal(stdout.Bytes(), &env); err != nil {
+				t.Fatalf("failed to parse envelope output: %v\nraw: %s", err, stdout.String())
+			}
+			return env
+		}
+
+		env := run("--limit", "2")
+		rawPag, ok := env["pagination"]
+		if !ok {
+			t.Fatalf("truncated page carried no pagination key: %v", env)
+		}
+		var pagFields map[string]json.RawMessage
+		if err := json.Unmarshal(rawPag, &pagFields); err != nil {
+			t.Fatalf("pagination is not an object: %s", rawPag)
+		}
+		if _, has := pagFields["total"]; has {
+			t.Errorf("pagination carries a total key (%s); no list-plane count exists, so it must stay omitted", pagFields["total"])
+		}
+		var pag PaginationMeta
+		if err := json.Unmarshal(rawPag, &pag); err != nil {
+			t.Fatalf("unmarshal pagination: %v", err)
+		}
+		if !pag.Truncated || pag.Returned != 2 {
+			t.Errorf("pagination = %+v, want returned=2 truncated", pag)
+		}
+
+		// An untruncated page carries no pagination key at all, matching the
+		// bd ready contract.
+		env = run("--limit", "0")
+		if _, ok := env["pagination"]; ok {
+			t.Errorf("unexpected pagination key on an untruncated page: %s", env["pagination"])
+		}
+	})
+
 	t.Run("list_limit_config_env", func(t *testing.T) {
 		// BD_LIST_LIMIT env var sets the default limit when --limit not passed.
 		// With BD_LIST_LIMIT=1, default list should return at most 1 issue.

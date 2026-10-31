@@ -31,8 +31,8 @@ Every `--json` command wraps output as:
 The original payload is untouched inside `.data` — no type corruption,
 no field injection. Works identically for objects, arrays, and maps.
 
-When a `--limit`-truncated listing runs in envelope mode (currently wired
-for `bd ready`), the envelope also carries a `pagination` key:
+When a `--limit`-truncated listing runs in envelope mode (wired for
+`bd ready` and `bd list`), the envelope also carries a `pagination` key:
 
 ```json
 {"schema_version": 1, "data": [...], "pagination": {"returned": 10, "total": 42, "truncated": true}}
@@ -174,6 +174,10 @@ Optional fields:
 - `dependencies` (object[]): Dependency records
 - `dependency_count`, `dependent_count`, `comment_count` (number)
 - `parent` (string|null): Parent issue ID
+
+In envelope mode a `--limit`-truncated result adds the envelope-level
+`pagination` key (see the envelope section above); `total` is omitted
+because no listing-plane count exists.
 
 ### bd ready --json
 

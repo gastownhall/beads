@@ -609,6 +609,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   each entry still decodes as the closed issue, and the output stays an
   array (under `closed` with `--suggest-next`, `--continue` or
   `--claim-next`).
+- **`bd list --json` reports a truncated page in-band.** Under
+  `BD_JSON_ENVELOPE=1`, a `--limit`-cut listing now carries the
+  `pagination` key `bd ready --json` already emits —
+  `{"returned": N, "truncated": true}` — so a piping consumer does not
+  have to read the terminal-gated stderr hint to learn the array is
+  partial. `total` is omitted: no listing-plane count exists. (#5444)
 
 ### Changed
 
