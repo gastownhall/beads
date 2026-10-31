@@ -2392,10 +2392,22 @@ func assertBatchApplyTypedEdgeCount(t *testing.T, ctx context.Context, fixture B
 
 // batchApplyEdgeMetadata reads the stored metadata blob of one edge, which is
 // where the waits-for gate normalization has to be visible.
+//
+// The column is CAST to CHAR before the COALESCE so the probe is portable
+// across the backends this package certifies. On a backend whose metadata
+// column is a native JSON type (PostgreSQL jsonb, for one), the engine
+// resolves a COALESCE's arguments to one type at plan time: over the bare
+// column it parses the empty-string literal as JSON and refuses the statement
+// at PREPARE (22P02), before a single row is read. CAST(metadata AS CHAR) is
+// native on Dolt/MySQL and is a plain text cast elsewhere, so every engine
+// returns the column's JSON text. That text is each engine's own
+// normalization of the stored value (Dolt reads 1.50 back as 1.5, Postgres
+// keeps 1.50), which is why every caller decodes the blob instead of
+// comparing it.
 func batchApplyEdgeMetadata(t *testing.T, ctx context.Context, fixture BatchApplyFixture, source, target string) string {
 	t.Helper()
 	var blob string
-	const query = "SELECT COALESCE(metadata, '') FROM dependencies WHERE issue_id = ?" +
+	const query = "SELECT COALESCE(CAST(metadata AS CHAR), '') FROM dependencies WHERE issue_id = ?" +
 		" AND COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) = ?"
 	if err := fixture.QueryScalar(ctx, query, []any{source, target}, &blob); err != nil {
 		t.Fatalf("reading edge metadata for %s -> %s: %v", source, target, err)
@@ -2426,7 +2438,7 @@ func batchApplyMetadataKey(t *testing.T, ctx context.Context, fixture BatchApply
 	// Scanned as a STRING, which is the destination the three kits' scalar
 	// readers agree on; a []byte destination is one of them only.
 	var blob string
-	const query = "SELECT COALESCE(metadata, '{}') FROM issues WHERE id = ?"
+	const query = "SELECT COALESCE(CAST(metadata AS CHAR), '{}') FROM issues WHERE id = ?"
 	if err := fixture.QueryScalar(ctx, query, []any{id}, &blob); err != nil {
 		t.Fatalf("reading issues.metadata for %s: %v", id, err)
 	}

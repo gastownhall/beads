@@ -388,7 +388,7 @@ func TestServedBatchApplyRefusesAMetadataRefWithoutNamingTheKey(t *testing.T) {
 		t.Fatalf("the same plan with a declared key refused: %v", err)
 	}
 	var metadata string
-	if err := fixture.QueryScalar(ctx, "SELECT COALESCE(metadata, '') FROM issues WHERE id = ?", []any{id}, &metadata); err != nil {
+	if err := fixture.QueryScalar(ctx, "SELECT COALESCE(CAST(metadata AS CHAR), '') FROM issues WHERE id = ?", []any{id}, &metadata); err != nil {
 		t.Fatalf("reading the spliced metadata: %v", err)
 	}
 	if !strings.Contains(metadata, peer) {
@@ -609,8 +609,10 @@ func TestServedBatchApplyGcCloseWithMetadataIfMatch(t *testing.T) {
 func batchApplyColumnDirect(t *testing.T, ctx context.Context, fixture *conformance.BatchApplyFixture, column, id string) string {
 	t.Helper()
 	var value string
+	// CAST AS CHAR first, so COALESCE's '' never has to parse as a native
+	// JSON metadata column (PostgreSQL jsonb refuses that at PREPARE, 22P02).
 	//nolint:gosec // G201: column is one of this file's own hardcoded names.
-	query := "SELECT COALESCE(" + column + ", '') FROM issues WHERE id = ?"
+	query := "SELECT COALESCE(CAST(" + column + " AS CHAR), '') FROM issues WHERE id = ?"
 	if err := fixture.QueryScalar(ctx, query, []any{id}, &value); err != nil {
 		t.Fatalf("reading issues.%s for %s: %v", column, id, err)
 	}
@@ -684,7 +686,7 @@ func TestServedBatchApplyGcApplyGraphPlan(t *testing.T) {
 	}
 
 	var metadata string
-	if err := fixture.QueryScalar(ctx, "SELECT COALESCE(metadata, '') FROM issues WHERE id = ?", []any{task}, &metadata); err != nil {
+	if err := fixture.QueryScalar(ctx, "SELECT COALESCE(CAST(metadata AS CHAR), '') FROM issues WHERE id = ?", []any{task}, &metadata); err != nil {
 		t.Fatalf("reading the spliced metadata: %v", err)
 	}
 	if !strings.Contains(metadata, result.Keys["epic"]) {
@@ -708,7 +710,7 @@ func TestServedBatchApplyGcApplyGraphPlan(t *testing.T) {
 	}
 
 	var waitsFor, thread string
-	const lineageQuery = `SELECT COALESCE(metadata, ''), COALESCE(thread_id, '') FROM dependencies
+	const lineageQuery = `SELECT COALESCE(CAST(metadata AS CHAR), ''), COALESCE(thread_id, '') FROM dependencies
 		WHERE issue_id = ? AND type = ? AND COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) = ?`
 	if err := fixture.QueryScalar(ctx, lineageQuery, []any{epic, "waits-for", blocker}, &waitsFor, &thread); err != nil {
 		t.Fatalf("reading the waits-for edge epic->blocker: %v", err)
