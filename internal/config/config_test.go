@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/viper"
 )
@@ -2392,5 +2393,46 @@ func TestInitialize_IgnoreRepoConfigMatchesASymlinkedBeadsDir(t *testing.T) {
 	}
 	if got := ConfigFileUsed(); got != "" {
 		t.Errorf("ConfigFileUsed() = %q, want empty when the repo config is ignored", got)
+	}
+}
+
+func TestClaimLeaseTTL(t *testing.T) {
+	restore := envSnapshot(t)
+	defer restore()
+
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() returned error: %v", err)
+	}
+	if got := ClaimLeaseTTL(); got != 0 {
+		t.Errorf("ClaimLeaseTTL() unset = %v, want 0", got)
+	}
+	for _, tc := range []struct {
+		value string
+		want  time.Duration
+	}{
+		{"48h", 48 * time.Hour},
+		{"90m", 90 * time.Minute},
+		{"0s", 0},
+		{"-5m", 0},
+		{"soon", 0},
+		{"300", 0},
+	} {
+		Set("claim.lease-ttl", tc.value)
+		if got := ClaimLeaseTTL(); got != tc.want {
+			t.Errorf("ClaimLeaseTTL() with %q = %v, want %v", tc.value, got, tc.want)
+		}
+	}
+}
+
+func TestClaimLeaseTTLFromEnv(t *testing.T) {
+	restore := envSnapshot(t)
+	defer restore()
+	t.Setenv("BD_CLAIM_LEASE_TTL", "2h")
+
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() returned error: %v", err)
+	}
+	if got := ClaimLeaseTTL(); got != 2*time.Hour {
+		t.Errorf("ClaimLeaseTTL() with BD_CLAIM_LEASE_TTL=2h = %v, want 2h", got)
 	}
 }

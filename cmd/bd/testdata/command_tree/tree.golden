@@ -924,6 +924,14 @@ bd config
     |   that if a taker's lease expires, bd reclaim returns the issue to the
     |   unassigned pool, not to the pool alias it was dispatched to.
     |
+    | Claim Leases (config.yaml):
+    |   A claim's lease expires 5m after the claim or the last bd heartbeat, and
+    |   bd reclaim may then revert the issue. claim.lease-ttl (or
+    |   BD_CLAIM_LEASE_TTL) sets a longer window for sessions or agents that work
+    |   a claim for long stretches without heartbeating:
+    |
+    |     bd config set claim.lease-ttl 2h
+    |
     | Suppressing Doctor Warnings:
     |   Suppress specific bd doctor warnings by check name slug:
     |     bd config set doctor.suppress.pending-migrations true
@@ -941,6 +949,7 @@ bd config
     |   bd config set jira.project "PROJ"
     |   bd config set status.custom "awaiting_review,awaiting_testing"
     |   bd config set claim.pools "fable-crew,night-crew"    # Pool aliases claimable by any actor
+    |   bd config set claim.lease-ttl 2h                     # Claim lease window (default 5m)
     |   bd config set doctor.suppress.pending-migrations true
     |   bd config set dolt.debug true                        # Enable Dolt sql-server debug mode (loglevel=debug, --prof cpu)
     |   bd config set dolt.local-only true                   # Skip wiring a Dolt sync remote during bd init
@@ -6054,17 +6063,17 @@ bd reclaim
   long:
     | Revert in_progress issues whose lease has gone stale back to ready.
     |
-    | When a worker claims an issue it takes a lease that expires after a TTL, kept
-    | alive by 'bd heartbeat'. A worker that dies stops heartbeating, so its lease
-    | expires and its issue would otherwise stay in_progress forever. reclaim is the
-    | reaper: it finds in_progress issues whose lease expired more than --older-than
-    | ago, clears the assignee, and sets them back to open so another worker can
-    | claim them. The previous owner's stale lease is recorded as a recovery event.
+    | When a worker claims an issue it takes a lease that expires after a TTL (5m,
+    | or claim.lease-ttl), kept alive by 'bd heartbeat'. A worker that dies stops
+    | heartbeating, so its lease expires and its issue would otherwise stay
+    | in_progress forever. reclaim is the reaper: it finds in_progress issues whose
+    | lease expired more than --older-than ago, clears the assignee, and sets them
+    | back to open so another worker can claim them. The previous owner's stale
+    | lease is recorded as a recovery event.
     |
     | --older-than is a grace window past lease expiry: only leases that expired at
     | least this long ago are reclaimed, so a worker briefly paused (GC, clock skew)
-    | is not robbed of live work. Run it from a supervisor on a timer with a window
-    | of roughly 2× the claim TTL.
+    | is not robbed of live work. Run it from a supervisor on a timer.
     |
     | By default reclaim covers every stale lease THIS replica granted. The scope
     | filters below narrow it further, using the same label surface claiming is
@@ -6092,7 +6101,8 @@ bd reclaim
     |
     | A TTL or grace shorter than the cadence at which replicas exchange state is
     | meaningless across the bridge — the remote view is a full interval old by
-    | construction. Raise the TTL/grace above the sync interval, never the reverse.
+    | construction. Raise the TTL (claim.lease-ttl) or grace above the sync interval,
+    | never the reverse.
     | The guard is opt-in: set BEADS_NODE_ID, or run 'bd config set node_id <name>'
     | (which writes the per-machine ~/.config/bd/config.yaml — never commit a node_id
     | to the git-tracked .beads/config.yaml, or every clone reads the same name and
@@ -6103,7 +6113,7 @@ bd reclaim
     | unguarded behavior instead of stranding its own work.
     |
     | Examples:
-    |   bd reclaim                       # default grace window (2× the lease TTL)
+    |   bd reclaim                       # default grace window (10m)
     |   bd reclaim --older-than 10m      # reclaim leases expired >10m ago
     |   bd reclaim --older-than 0s       # reclaim every currently-expired lease
     |   bd reclaim --label lane-a        # only this machine's claim partition

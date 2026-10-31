@@ -1156,6 +1156,15 @@ func NodeID() string {
 	return strings.TrimSpace(GetString("node_id"))
 }
 
+// ClaimLeaseTTL returns claim.lease-ttl (BD_CLAIM_LEASE_TTL), or 0 when it is
+// unset, unparsable or not positive, leaving the caller's default in force.
+func ClaimLeaseTTL() time.Duration {
+	if ttl, err := time.ParseDuration(strings.TrimSpace(GetString("claim.lease-ttl"))); err == nil && ttl > 0 {
+		return ttl
+	}
+	return 0
+}
+
 // FederationConfig holds the federation (Dolt remote) configuration.
 type FederationConfig struct {
 	Remote       string      // dolthub://org/beads, gs://bucket/beads, s3://bucket/beads

@@ -145,7 +145,9 @@ Three rules for choosing the interval:
   one full interval old, by construction.
 - **Lease TTL and reclaim grace must both exceed the interval.** A lease is
   only meaningful on the replica that granted it, and a reaper on the other
-  machine would be judging liveness from data older than the lease. See
+  machine would be judging liveness from data older than the lease. Set them
+  with `bd config set claim.lease-ttl <duration>` and
+  `bd reclaim --older-than <duration>`. See
   [Leases are per-replica](/multi-agent/federation#leases-are-per-replica),
   and name each replica with `bd config set node_id <name>` so the
   cross-replica reclaim guard arms.

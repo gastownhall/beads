@@ -5,8 +5,10 @@ import (
 	"errors"
 	"regexp"
 	"testing"
+	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -388,3 +390,26 @@ func TestCustomTypesYAMLFallback(t *testing.T) {
 type errSentinel string
 
 func (e errSentinel) Error() string { return string(e) }
+
+func TestLeaseTTLPrecedence(t *testing.T) {
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+	defer config.ResetForTesting()
+	ctx := context.Background()
+
+	if got := LeaseTTL(ctx); got != DefaultLeaseTTL {
+		t.Fatalf("LeaseTTL unconfigured = %v, want %v", got, DefaultLeaseTTL)
+	}
+	config.Set("claim.lease-ttl", "48h")
+	if got := LeaseTTL(ctx); got != 48*time.Hour {
+		t.Fatalf("LeaseTTL with claim.lease-ttl=48h = %v, want 48h", got)
+	}
+	if got := LeaseTTL(WithLeaseTTL(ctx, time.Hour)); got != time.Hour {
+		t.Fatalf("LeaseTTL with WithLeaseTTL(1h) = %v, want the context override 1h", got)
+	}
+	config.Set("claim.lease-ttl", "-1m")
+	if got := LeaseTTL(ctx); got != DefaultLeaseTTL {
+		t.Fatalf("LeaseTTL with claim.lease-ttl=-1m = %v, want %v", got, DefaultLeaseTTL)
+	}
+}

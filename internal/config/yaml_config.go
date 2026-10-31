@@ -53,7 +53,8 @@ var YamlOnlyKeys = map[string]bool{
 	// Replica identity: config.NodeID() reads this through viper (yaml/env)
 	// only, so a DB-backed write would be silently unread — exactly the
 	// GH#536 class this map exists to prevent.
-	"node_id": true,
+	"node_id":         true,
+	"claim.lease-ttl": true,
 
 	// Git settings
 	"git.author":      true,
