@@ -3,6 +3,7 @@ package versioncontrolops
 import (
 	"context"
 	"fmt"
+	neturl "net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -43,14 +44,103 @@ func BackupRemove(ctx context.Context, db DBConn, name string) error {
 func BackupRestore(ctx context.Context, db DBConn, url, dbName string, force bool) error {
 	if force {
 		if _, err := db.ExecContext(ctx, "CALL DOLT_BACKUP('restore', '--force', ?, ?)", url, dbName); err != nil {
-			return fmt.Errorf("restore from backup %s: %w", url, err)
+			return backupRestoreError(url, err)
 		}
 	} else {
 		if _, err := db.ExecContext(ctx, "CALL DOLT_BACKUP('restore', ?, ?)", url, dbName); err != nil {
-			return fmt.Errorf("restore from backup %s: %w", url, err)
+			return backupRestoreError(url, err)
 		}
 	}
 	return nil
+}
+
+// backupRestoreError wraps Dolt's error for a failed restore from raw without
+// printing raw's credentials (#6341). Naming the source safely is not enough:
+// Dolt quotes the URL in its own errors (url.Parse's error repeats it, and the
+// remotesapi factory's "could not access dolt url" prints it whole). So when
+// raw carries anything sanitizeURL strips, or cannot be named safely at all,
+// the error leaves Dolt's text out. It still unwraps to Dolt's error.
+func backupRestoreError(raw string, err error) error {
+	source, clean := backupRestoreSafeURL(raw)
+	if !clean {
+		return &restoreErrorWithheld{source: source, err: err}
+	}
+	return fmt.Errorf("restore from backup %s: %w", source, err)
+}
+
+// restoreErrorWithheld is a failed restore whose Dolt error may quote the
+// backup URL's credentials, so its text is left out of Error.
+type restoreErrorWithheld struct {
+	source string // backupRestoreSafeURL's name for the URL
+	err    error
+}
+
+func (e *restoreErrorWithheld) Error() string {
+	return "restore from backup " + e.source + ": Dolt's error is withheld because it may quote credentials from the URL"
+}
+
+func (e *restoreErrorWithheld) Unwrap() error { return e.err }
+
+// backupRestoreSafeURL names a restore source in error text without its
+// credentials, and reports whether raw carries none, so that an error quoting
+// it is safe to print as well. Any userinfo counts, since a token can be the
+// username alone, and so does a query or fragment, which sanitizeURL drops.
+//
+// A file URL without userinfo, the form DirToFileURL builds, names a local
+// directory and comes back as is, even where net/url rejects it (Windows'
+// file://C:\..., a '%' in a directory name). Any other URL is named without
+// its userinfo, query and fragment, unless net/url cannot parse it (a base64
+// secret holding '/', a password holding '#' or '?'), leaves an '@' outside
+// the userinfo (the same secrets where the part before the '/', '?' or '#'
+// parses as a host or port), or reads it as opaque with credentials
+// (scheme:KEY:SECRET@host). Then it is reduced to its scheme: sanitizeURL
+// would print it raw, or print part of the secret as the host, port or path.
+func backupRestoreSafeURL(raw string) (source string, clean bool) {
+	if isLocalFileURL(raw) {
+		return raw, true
+	}
+	u, err := parseRestoreURL(raw)
+	if err != nil || strings.ContainsAny(u.Opaque, ":@") || strings.Contains(u.Host+u.Path+u.RawQuery+u.Fragment, "@") {
+		return redactedURL(raw), false
+	}
+	clean = u.User == nil && u.RawQuery == "" && u.Fragment == ""
+	u.User, u.RawQuery, u.Fragment = nil, "", ""
+	return u.String(), clean
+}
+
+// parseRestoreURL parses raw with net/url the way Dolt does. Dolt's
+// aws://[bucket:table]/path form has a bracketed host that net/url rejects
+// since Go 1.25.2 (golang/go#75678), so, like Dolt, it parses the rest with a
+// stand-in host and then puts the bracketed one back.
+func parseRestoreURL(raw string) (*neturl.URL, error) {
+	rest, aws := strings.CutPrefix(raw, "aws://[")
+	host, tail, closed := strings.Cut(rest, "]")
+	if !aws || !closed {
+		return neturl.Parse(raw)
+	}
+	u, err := neturl.Parse("aws://hostname" + tail)
+	if err == nil {
+		u.Host = "[" + host + "]"
+	}
+	return u, err
+}
+
+// isLocalFileURL reports whether raw is a file URL without userinfo:
+// "file://" and an absolute path, POSIX or Windows.
+func isLocalFileURL(raw string) bool {
+	scheme, rest, ok := strings.Cut(raw, "://")
+	authority, _, _ := strings.Cut(strings.ReplaceAll(rest, `\`, "/"), "/")
+	return ok && strings.EqualFold(scheme, "file") && !strings.Contains(authority, "@")
+}
+
+// redactedURL is raw reduced to its scheme, or to nothing when what precedes
+// "://" is not a plain scheme.
+func redactedURL(raw string) string {
+	scheme, _, ok := strings.Cut(raw, "://")
+	if ok && scheme != "" && !strings.ContainsAny(scheme, ":/?#@") {
+		return scheme + ":[redacted]"
+	}
+	return "[redacted]"
 }
 
 // CurrentCommit returns the hash of the current HEAD commit.
