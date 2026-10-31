@@ -217,14 +217,14 @@ func claimIssueInTx(ctx context.Context, tx DBTX, id string, actor string, mintV
 	}
 
 	// Record the claim event.
-	oldData, _ := json.Marshal(oldIssue)
 	newUpdates := map[string]interface{}{
 		"assignee": actor,
 		"status":   "in_progress",
 	}
+	oldData := ChangedFieldsPreImage(oldIssue, newUpdates)
 	newData, _ := json.Marshal(newUpdates)
 
-	if err := RecordFullEventInTable(ctx, tx, eventTable, id, types.EventClaimed, actor, string(oldData), string(newData)); err != nil {
+	if err := RecordFullEventInTable(ctx, tx, eventTable, id, types.EventClaimed, actor, oldData, string(newData)); err != nil {
 		return nil, fmt.Errorf("failed to record claim event: %w", err)
 	}
 
