@@ -48,7 +48,16 @@ work. A root that would refuse its own close (an open blocker, a pin, another
 assignee) stays open with a warning, and the step's close stands. Under
 --json, the step's entry names the closed root (auto_closed_molecule) or the
 refusal (molecule_auto_close_refusal). --continue claims the next ready step
-in the molecule for you; add --no-auto to only show it.`,
+in the molecule for you; add --no-auto to only show it.
+
+With --cascade, each issue also closes every open descendant beneath it
+(children via parent-child edges, recursively). Descendants close first, so
+the open-children guard is satisfied by the cascade itself rather than
+waived: a descendant that cannot close (blocked, pinned, or a gate not yet
+satisfied) stays open — pruned from the cascade — and keeps its ancestors
+open with it through the same guard, unless --force is also given.
+Already-closed descendants are left untouched, and walking through them is
+how stranded open grandchildren under a closed child are recovered.`,
 	// Refuse a missing ID in argument validation, before root's
 	// PersistentPreRunE can open the store, migrate, or auto-import
 	// (bd-m00pb); see updateCmd for the full rationale.
@@ -94,6 +103,7 @@ in the molecule for you; add --no-auto to only show it.`,
 		}
 
 		force, _ := cmd.Flags().GetBool("force")
+		cascade, _ := cmd.Flags().GetBool("cascade")
 		continueFlag, _ := cmd.Flags().GetBool("continue")
 		noAuto, _ := cmd.Flags().GetBool("no-auto")
 		suggestNext, _ := cmd.Flags().GetBool("suggest-next")
@@ -118,12 +128,12 @@ in the molecule for you; add --no-auto to only show it.`,
 			return err
 		}
 		if ifRevision != nil {
-			// The bypass below never looks at these three post-close flags, so
+			// The bypass below never looks at these post-close flags, so
 			// honoring them would mean silently dropping what the caller asked
 			// for. Refuse instead of guessing, the same way --continue and
 			// --suggest-next already refuse a multi-id batch below.
-			if continueFlag || suggestNext || claimNext {
-				return HandleErrorRespectJSON("--if-revision does not support --continue, --suggest-next, or --claim-next")
+			if continueFlag || suggestNext || claimNext || cascade {
+				return HandleErrorRespectJSON("--if-revision does not support --continue, --suggest-next, --claim-next, or --cascade")
 			}
 			return runCloseDirectIfRevision(ctx, args[0], reasonForCloseIndex(reasons, 0), force, session, *ifRevision)
 		}
@@ -187,7 +197,24 @@ in the molecule for you; add --no-auto to only show it.`,
 		// there too (GH#962), so there is no read-then-write TOCTOU window
 		// between the check and the close.
 		plan := closeDirectPreflight(results, resolvedIDs, reasons, force)
-		outcomes, claimedNext := closeDirectRun(opsCtx, closeDirectBatches(plan.items), len(resolvedIDs),
+
+		// --cascade: discover each surviving argument's open descendants and
+		// fold them into the batch, deepest first. The expansion is read-only
+		// and the batch stays the only writer, so the engine's open-children
+		// guard still decides every close inside its own transaction — the
+		// cascade satisfies it by closing children first instead of waiving
+		// it, which is why a blocked descendant without --force stops its
+		// ancestors rather than orphaning them.
+		var cascadeExp *cascadeExpansion
+		if cascade {
+			cascadeExp, err = expandCloseCascadeForResults(ctx, plan, force)
+			if err != nil {
+				return HandleErrorRespectJSON("%v", err)
+			}
+			plan.items = orderCloseCascade(plan.items, len(resolvedIDs), cascadeExp)
+		}
+		outcomeSlots := len(resolvedIDs) + cascadeExp.cascadeCount()
+		outcomes, claimedNext := closeDirectRun(opsCtx, closeDirectBatches(plan.items), outcomeSlots,
 			session, force, postCloseStore, closeClaimNextRequest(claimNext, continueFlag))
 
 		// Report and follow up on every argument, in the order it was typed.
@@ -294,6 +321,77 @@ in the molecule for you; add --no-auto to only show it.`,
 				}
 			} else {
 				debug.PrintNormal("%s Closed %s: %s\n", ui.RenderPass("✓"), printedFeedbackID(id, issueTitleOrEmpty(issue)), reason)
+			}
+		}
+
+		// --cascade: report the descendants the expansion refused up front,
+		// then the ones the batch settled, in discovery order — the order
+		// their outcomes are slotted in. Every contract the typed loop runs
+		// — audit, molecule auto-close, store registration for the commit
+		// sweep — runs here too, because a cascade-closed step completes a
+		// molecule the same way a typed one does. Only last-touched stays
+		// with the typed ids: the command's target is what the user named,
+		// not what the cascade pulled in.
+		if cascadeExp != nil {
+			for _, r := range cascadeExp.refusals {
+				fmt.Fprintln(os.Stderr, r.refusal)
+				failures = append(failures, closeIDFailure{ID: r.id, Error: r.refusal})
+			}
+			for j, ci := range cascadeExp.items {
+				res := outcomes[len(resolvedIDs)+j]
+				if res == nil {
+					continue // never: every item slot gets an outcome
+				}
+				if res.Err != nil {
+					fmt.Fprintln(os.Stderr, closeDirectRefusal(ci.id, res.Err))
+					failures = append(failures, closeIDFailure{ID: ci.id, Error: closeDirectTypedRefusal(res.Err)})
+					continue
+				}
+
+				if res.OpenChildren > 0 {
+					fmt.Fprintf(os.Stderr, "warning: closing %s with %d open child issue(s) still active\n", ci.id, res.OpenChildren)
+				}
+
+				activeStore := ci.store
+				if activeStore == nil {
+					activeStore = postCloseStore
+				}
+
+				if !res.Changed {
+					// Same already-closed no-op contract as the typed loop:
+					// suppress the real-close side effects, keep the
+					// retry-safe ones.
+					alreadyClosed++
+				} else {
+					mutatedStores[activeStore] = append(mutatedStores[activeStore], ci.id)
+
+					oldStatus := "open"
+					if ci.issue != nil {
+						oldStatus = string(ci.issue.Status)
+					}
+					audit.LogFieldChange(ci.id, "status", oldStatus, "closed", currentActor(), ci.reason)
+					closedCount++
+				}
+
+				// The molecule root this cascade-closed step completed, closed
+				// by the library in the batch's own transaction — same as the
+				// typed loop's outcome-carried report.
+				if molID := reportMoleculeAutoClose(res.AutoClosedMolecule, res.MoleculeAutoCloseRefusal); molID != "" {
+					mutatedStores[activeStore] = append(mutatedStores[activeStore], molID)
+				}
+				noticeUnservedMoleculeAutoClose(ctx, activeStore, ci.id, unservedRoots)
+
+				closedIssue := res.Issue
+				if closedIssue != nil {
+					closedIssue.Dependencies = nil
+				}
+				if jsonOutput {
+					if closedIssue != nil {
+						closedIssues = append(closedIssues, newClosedIssueJSON(closedIssue, res.AutoClosedMolecule, res.MoleculeAutoCloseRefusal))
+					}
+				} else {
+					debug.PrintNormal("%s Closed %s: %s\n", ui.RenderPass("✓"), formatFeedbackID(ci.id, issueTitleOrEmpty(ci.issue)), ci.reason)
+				}
 			}
 		}
 
@@ -430,7 +528,7 @@ in the molecule for you; add --no-auto to only show it.`,
 			}
 		}
 
-		totalAttempted := len(resolvedIDs)
+		totalAttempted := len(resolvedIDs) + cascadeExp.cascadeCount()
 		if len(failures) > 0 {
 			return reportCloseFailures(failures, totalAttempted, closeClaimedID(claimedNextIssue), jsonOutput)
 		}
@@ -536,6 +634,7 @@ func init() {
 	_ = closeCmd.Flags().MarkHidden("comment") // Hidden alias for agent/CLI ergonomics
 	closeCmd.Flags().String("reason-file", "", "Read close reason from file (use - for stdin)")
 	closeCmd.Flags().BoolP("force", "f", false, "Force close pinned issues or unsatisfied gates")
+	closeCmd.Flags().Bool("cascade", false, "Also close all open descendants, recursively (children close first; a blocked, pinned, or gate-held descendant prunes its subtree unless --force)")
 	closeCmd.Flags().Bool("continue", false, "Auto-advance to next step in molecule")
 	closeCmd.Flags().Bool("no-auto", false, "With --continue, show next step but don't claim it")
 	closeCmd.Flags().Bool("suggest-next", false, "Show newly unblocked issues after closing")
