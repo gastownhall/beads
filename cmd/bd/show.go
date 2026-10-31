@@ -27,6 +27,42 @@ func showNotFoundHint(id string) string {
 	return fmt.Sprintf("this ID may have never existed, or may reference a deleted/purged record with no trace left in the live database — try 'bd history %s'", id)
 }
 
+// commentsOmittedHint tells a stderr reader that a JSON show withheld comment
+// bodies. The payload already says it via comment_count + comments_omitted
+// (ga-clgh), but a consumer that does not know the schema sees neither and
+// reads absent comments as no comments (#5078). Returns "" for anything not
+// withheld, so hydrated rows and zero-count rows keep stderr silent.
+func commentsOmittedHint(v interface{}) string {
+	d, ok := v.(*issueops.IssueDetails)
+	if !ok || d == nil || d.CommentsOmitted == nil || !*d.CommentsOmitted ||
+		d.CommentCount == nil || *d.CommentCount <= 0 {
+		return ""
+	}
+	n := *d.CommentCount
+	return fmt.Sprintf("Hint: %s has %d comment%s not shown; add --include-comments\n",
+		d.ID, n, pluralize(int(n)))
+}
+
+// writeCommentsOmittedHints emits commentsOmittedHint for every withheld
+// detail, one line per issue, on stderr. Gated on !quietFlag: --quiet is
+// documented as "Suppress non-essential output (errors only)" (main.go), and
+// the package's other non-error stderr notices honour it the same way
+// (printContributorRoutingNotice, tips.go, metrics.go). A consumer that
+// merges streams (2>&1, CombinedOutput()) gets these lines ahead of the
+// JSON, so --quiet is the documented escape hatch and it has to work.
+// Shared by both show routes — embedded here and proxied-server in
+// show_proxied_server.go — so neither mode keeps the #5078 blind spot.
+func writeCommentsOmittedHints(allDetails []interface{}) {
+	if quietFlag {
+		return
+	}
+	for _, d := range allDetails {
+		if h := commentsOmittedHint(d); h != "" {
+			fmt.Fprint(os.Stderr, h)
+		}
+	}
+}
+
 var showCmd = &cobra.Command{
 	Use:           "show [id...] [--id=<id>...] [--current]",
 	Aliases:       []string{"view"},
@@ -294,6 +330,7 @@ var showCmd = &cobra.Command{
 
 		if jsonOutput {
 			if len(allDetails) > 0 {
+				writeCommentsOmittedHints(allDetails)
 				if jerr := outputJSON(allDetails); jerr != nil {
 					return jerr
 				}
