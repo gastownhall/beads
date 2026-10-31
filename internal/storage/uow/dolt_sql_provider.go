@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -69,6 +70,11 @@ type doltSQLProvider struct {
 	// provider instance only. See SetVersionedHistoryEnabled and
 	// DeferVersionedHistory.
 	versionedHistory issueops.VersionedHistorySwitch
+	// releaseTLS undoes registerExternalTLSConfig when the provider closes.
+	// closeMu serializes Close, so the pool is closed before the TLS config
+	// is released and each happens once, however many callers close.
+	closeMu    sync.Mutex
+	releaseTLS func()
 }
 
 // SetEventsJournalEnabled activates the durable events journal for every unit
@@ -217,12 +223,20 @@ func (p *doltSQLProvider) NewUOW(ctx context.Context) (UnitOfWork, error) {
 }
 
 func (p *doltSQLProvider) Close(ctx context.Context) error {
-	if p.db == nil {
-		return nil
+	p.closeMu.Lock()
+	defer p.closeMu.Unlock()
+	var err error
+	if p.db != nil {
+		db := p.db
+		p.db = nil
+		err = db.Close()
 	}
-	db := p.db
-	p.db = nil
-	return db.Close()
+	if p.releaseTLS != nil {
+		release := p.releaseTLS
+		p.releaseTLS = nil
+		release()
+	}
+	return err
 }
 
 func (p *doltSQLProvider) BeginTx(ctx context.Context) (Tx, error) {

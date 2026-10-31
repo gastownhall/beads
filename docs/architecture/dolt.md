@@ -361,6 +361,57 @@ Switch to server mode when you need:
 - Orchestrator multi-rig setups
 - Federation with remote peers
 
+### Proxied-Server Mode Against an mTLS Dolt Server
+
+`bd init --proxied-server` with the `--proxied-server-external-*` flags puts
+bd's proxy in front of a Dolt sql-server that bd does not run. The password is
+read from `BEADS_PROXIED_SERVER_EXTERNAL_PASSWORD` and never stored. When the
+server requires client certificates (`listener.require_client_cert`), bd can
+present one from PEM files:
+
+```bash
+bd init --proxied-server \
+  --proxied-server-external-host dolt.example.com --proxied-server-external-port 3306 \
+  --proxied-server-external-tls \
+  --proxied-server-external-tls-cert-path /etc/beads/client.pem \
+  --proxied-server-external-tls-key-path /etc/beads/client.key
+```
+
+or, on Windows, from the Windows certificate store, where the private key may
+be non-exportable:
+
+```powershell
+bd init --proxied-server `
+  --proxied-server-external-host dolt.example.com --proxied-server-external-port 3306 `
+  --proxied-server-external-tls `
+  --proxied-server-external-tls-cert-subject "CN=Alice Smith"
+```
+
+How bd picks the store certificate:
+
+- `--proxied-server-external-tls-cert-subject` matches a case-insensitive part
+  of the subject as PowerShell shows it:
+  `Get-ChildItem Cert:\CurrentUser\My | Select-Object Subject, Thumbprint`.
+  A user principal name is often only in the subject alternative name, which
+  is not matched.
+- `--proxied-server-external-tls-cert-thumbprint` selects one certificate
+  exactly; it stops matching when the certificate is renewed.
+- A certificate is eligible when it is valid now, allows client
+  authentication (EKU), allows digital signatures when it has a key usage
+  extension, has an RSA or ECDSA key, and has a private key. Among eligible
+  matches the most recently issued is used, so a renewal is picked up without
+  running `bd init` again.
+- A certificate whose private key cannot be used is skipped for the next
+  newest: a key that is missing, that only a legacy CryptoAPI provider can
+  open, or that needs a PIN or consent prompt (bd never shows one). A server
+  that rejects the certificate's CA, or a key that cannot sign the way the
+  server requires, is skipped the same way at connection time.
+- Without `--proxied-server-external-tls-cert-store`, bd searches
+  `CurrentUser\My`, then `LocalMachine\My` only when the user store has nothing
+  eligible. Name a store, such as `LocalMachine\My`, to search only that one.
+- When no certificate is usable, `bd init` fails and lists each match it
+  rejected, with the reason.
+
 ## Maintenance — `bd prune` and `bd purge`
 
 `bd prune` permanently deletes closed non-ephemeral beads to reclaim storage

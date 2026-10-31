@@ -2988,12 +2988,23 @@ func envTruthyValue(v string) bool {
 	return true
 }
 
-// secretFlagNames are long flag names whose entire value is an opaque credential
-// that must never reach the bd.args telemetry span. The flag's value is redacted
-// wholesale. Only federation add-peer's --password currently qualifies. Its shorthand (-p) is
+// secretFlagNames are long flag names whose entire value must never reach the
+// bd.args telemetry span. The flag's value is redacted
+// wholesale. Federation add-peer's --password qualifies; its shorthand (-p) is
 // resolved per command via secretFlagTokens so the same letter bound to
-// --priority/--prefix/--parallel on other commands is never redacted.
-var secretFlagNames = map[string]bool{"password": true}
+// --priority/--prefix/--parallel on other commands is never redacted. bd init's
+// client certificate flags (the store selector, and the PEM certificate and key
+// paths, which usually sit in the user's profile) are not credentials, but they
+// name the user and their certificate, so they are kept out of telemetry the
+// same way.
+var secretFlagNames = map[string]bool{
+	"password":                                    true,
+	"proxied-server-external-tls-cert-path":       true,
+	"proxied-server-external-tls-key-path":        true,
+	"proxied-server-external-tls-cert-store":      true,
+	"proxied-server-external-tls-cert-subject":    true,
+	"proxied-server-external-tls-cert-thumbprint": true,
+}
 
 // secretFlagTokens returns the concrete --long and -short flag tokens that carry a
 // secret value for cmd. Resolving against the running command is what makes the
@@ -3028,7 +3039,10 @@ func scrubArgsForTelemetry(argv []string, secretFlags map[string]bool) string {
 	parts := make([]string, len(argv))
 	redactNext := false
 	for i, a := range argv {
-		if redactNext {
+		if redactNext || (i > 0 && secretFlags[argv[i-1]]) {
+			// <secret> following a bare --password / -p token. pflag takes
+			// the next token as the value even when it starts with "-" or
+			// holds "=", so this comes before any other parsing of it.
 			parts[i] = "xxxxx"
 			redactNext = false
 			continue
@@ -3048,13 +3062,6 @@ func scrubArgsForTelemetry(argv []string, secretFlags map[string]bool) string {
 					parts[i] = name + "=" + scrubbed
 					continue
 				}
-			}
-		}
-		if i > 0 {
-			if secretFlags[argv[i-1]] {
-				// <secret> following a bare --password / -p token.
-				parts[i] = "xxxxx"
-				continue
 			}
 		}
 		if short, ok := secretShorthandPrefix(a, secretFlags); ok {

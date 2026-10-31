@@ -5,9 +5,13 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"time"
+
+	"github.com/steveyegge/beads/internal/certstore"
 )
 
 const (
@@ -27,6 +31,13 @@ type ExternalDoltConfig struct {
 	TLSServerName   string        `json:"tls_server_name,omitempty"`
 	TLSSkipVerify   bool          `json:"tls_skip_verify,omitempty"`
 	KeepAlivePeriod time.Duration `json:"keep_alive_period,omitempty"`
+
+	// TLSCertStore, TLSCertSubject and TLSCertThumbprint select the client
+	// certificate from the Windows certificate store instead of PEM files;
+	// see certstore.Selector.
+	TLSCertStore      string `json:"tls_cert_store,omitempty"`
+	TLSCertSubject    string `json:"tls_cert_subject,omitempty"`
+	TLSCertThumbprint string `json:"tls_cert_thumbprint,omitempty"`
 }
 
 func (c ExternalDoltConfig) ResolvedUser() string {
@@ -77,17 +88,32 @@ func (c ExternalDoltConfig) Validate() error {
 		return fmt.Errorf("ExternalDoltConfig: TLSCACert %q is not absolute", c.TLSCACert)
 	}
 
+	if c.usesCertStore() {
+		if c.TLSCert != "" {
+			return errors.New("ExternalDoltConfig: a certificate store selector cannot be combined with TLSCert/TLSKey")
+		}
+		if err := c.certStoreSelector().Validate(); err != nil {
+			return fmt.Errorf("ExternalDoltConfig: %w", err)
+		}
+	}
+
 	if !c.TLSRequired {
 		switch {
 		case c.TLSCACert != "":
 			return errors.New("ExternalDoltConfig: TLSCACert set without TLSRequired")
 		case c.TLSCert != "" || c.TLSKey != "":
 			return errors.New("ExternalDoltConfig: TLSCert/TLSKey set without TLSRequired")
+		case c.usesCertStore():
+			return errors.New("ExternalDoltConfig: certificate store selector set without TLSRequired")
 		case c.TLSServerName != "":
 			return errors.New("ExternalDoltConfig: TLSServerName set without TLSRequired")
 		case c.TLSSkipVerify:
 			return errors.New("ExternalDoltConfig: TLSSkipVerify set without TLSRequired")
 		}
+	}
+
+	if c.usesCertStore() && runtime.GOOS != "windows" {
+		return fmt.Errorf("ExternalDoltConfig: a certificate store selector needs the Windows certificate store, which %s does not have", runtime.GOOS)
 	}
 
 	if c.TLSRequired && hasSocket && c.TLSServerName == "" && !c.TLSSkipVerify {
@@ -101,9 +127,20 @@ func (c ExternalDoltConfig) Validate() error {
 	return nil
 }
 
-func (c ExternalDoltConfig) TLSClientConfig() (*tls.Config, error) {
+func (c ExternalDoltConfig) usesCertStore() bool {
+	return c.TLSCertStore != "" || c.TLSCertSubject != "" || c.TLSCertThumbprint != ""
+}
+
+func (c ExternalDoltConfig) certStoreSelector() certstore.Selector {
+	return certstore.Selector{Store: c.TLSCertStore, Subject: c.TLSCertSubject, Thumbprint: c.TLSCertThumbprint}
+}
+
+// TLSClientConfig builds the client TLS configuration. The returned closer,
+// when not nil, releases the certificate store handles the configuration
+// signs with; close it once no connection can still handshake with it.
+func (c ExternalDoltConfig) TLSClientConfig() (*tls.Config, io.Closer, error) {
 	if !c.TLSRequired {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	cfg := &tls.Config{MinVersion: tls.VersionTLS12}
@@ -123,11 +160,11 @@ func (c ExternalDoltConfig) TLSClientConfig() (*tls.Config, error) {
 	if c.TLSCACert != "" {
 		pem, err := os.ReadFile(c.TLSCACert)
 		if err != nil {
-			return nil, fmt.Errorf("ExternalDoltConfig: read TLSCACert: %w", err)
+			return nil, nil, fmt.Errorf("ExternalDoltConfig: read TLSCACert: %w", err)
 		}
 		pool := x509.NewCertPool()
 		if !pool.AppendCertsFromPEM(pem) {
-			return nil, fmt.Errorf("ExternalDoltConfig: TLSCACert %q: no certificates parsed", c.TLSCACert)
+			return nil, nil, fmt.Errorf("ExternalDoltConfig: TLSCACert %q: no certificates parsed", c.TLSCACert)
 		}
 		cfg.RootCAs = pool
 	}
@@ -135,10 +172,18 @@ func (c ExternalDoltConfig) TLSClientConfig() (*tls.Config, error) {
 	if c.TLSCert != "" {
 		crt, err := tls.LoadX509KeyPair(c.TLSCert, c.TLSKey)
 		if err != nil {
-			return nil, fmt.Errorf("ExternalDoltConfig: load client cert/key: %w", err)
+			return nil, nil, fmt.Errorf("ExternalDoltConfig: load client cert/key: %w", err)
 		}
 		cfg.Certificates = []tls.Certificate{crt}
 	}
 
-	return cfg, nil
+	if c.usesCertStore() {
+		closer, err := c.certStoreSelector().Configure(cfg)
+		if err != nil {
+			return nil, nil, fmt.Errorf("ExternalDoltConfig: %w", err)
+		}
+		return cfg, closer, nil
+	}
+
+	return cfg, nil, nil
 }

@@ -6,13 +6,108 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"math/big"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/beads/internal/certstore"
 )
+
+func TestExternalDoltConfig_Validate_CertStore(t *testing.T) {
+	certPath, keyPath := writeSelfSignedPair(t)
+	base := ExternalDoltConfig{Host: "db", Port: 3306, TLSRequired: true}
+
+	// Each case must fail for its own reason on every platform, ahead of the
+	// check that refuses a selector off Windows, so Linux CI covers them all.
+	rejected := []struct {
+		name string
+		cfg  ExternalDoltConfig
+		want string
+	}{
+		{"without TLSRequired", ExternalDoltConfig{Host: "db", Port: 3306, TLSCertSubject: "CN=alice"}, "selector set without TLSRequired"},
+		{"combined with PEM", ExternalDoltConfig{Host: "db", Port: 3306, TLSRequired: true, TLSCertSubject: "CN=alice", TLSCert: certPath, TLSKey: keyPath}, "cannot be combined with TLSCert/TLSKey"},
+		{"subject and thumbprint", ExternalDoltConfig{Host: "db", Port: 3306, TLSRequired: true, TLSCertSubject: "CN=alice", TLSCertThumbprint: strings.Repeat("ab", 20)}, "not both"},
+		{"store without selector", ExternalDoltConfig{Host: "db", Port: 3306, TLSRequired: true, TLSCertStore: `LocalMachine\My`}, "a subject or a thumbprint is required"},
+		{"unknown store location", ExternalDoltConfig{Host: "db", Port: 3306, TLSRequired: true, TLSCertStore: `Machine\My`, TLSCertSubject: "CN=alice"}, "location must be CurrentUser or LocalMachine"},
+		{"short thumbprint", ExternalDoltConfig{Host: "db", Port: 3306, TLSRequired: true, TLSCertThumbprint: "abcd"}, "40-digit"},
+	}
+	for _, tc := range rejected {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.cfg.Validate()
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Validate(%+v) = %v, want an error containing %q", tc.cfg, err, tc.want)
+			}
+		})
+	}
+
+	accepted := []ExternalDoltConfig{
+		{TLSCertSubject: "CN=alice"},
+		{TLSCertStore: `Cert:\LocalMachine\My`, TLSCertSubject: "alice@example.com"},
+		{TLSCertThumbprint: "ab cd ef 01 23 45 67 89 ab cd ef 01 23 45 67 89 ab cd ef 01"},
+	}
+	for _, sel := range accepted {
+		c := base
+		c.TLSCertStore, c.TLSCertSubject, c.TLSCertThumbprint = sel.TLSCertStore, sel.TLSCertSubject, sel.TLSCertThumbprint
+		err := c.Validate()
+		if runtime.GOOS == "windows" {
+			if err != nil {
+				t.Errorf("Validate(%+v) = %v, want nil", c, err)
+			}
+			continue
+		}
+		if err == nil || !strings.Contains(err.Error(), runtime.GOOS) {
+			t.Errorf("Validate(%+v) = %v, want an error naming %s", c, err, runtime.GOOS)
+		}
+	}
+}
+
+func TestExternalDoltConfig_CertStoreJSONKeys(t *testing.T) {
+	raw, err := json.Marshal(ExternalDoltConfig{TLSCertStore: `LocalMachine\My`, TLSCertSubject: "CN=alice", TLSCertThumbprint: "AB"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{`"tls_cert_store":`, `"tls_cert_subject":`, `"tls_cert_thumbprint":`} {
+		if !strings.Contains(string(raw), key) {
+			t.Errorf("%s missing from %s", key, raw)
+		}
+	}
+	raw, err = json.Marshal(ExternalDoltConfig{Host: "db", Port: 3306})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "tls_cert_s") {
+		t.Errorf("unset selector fields serialized: %s", raw)
+	}
+}
+
+func TestExternalDoltConfig_TLSClientConfig_CertStore(t *testing.T) {
+	c := ExternalDoltConfig{Host: "db", Port: 3306, TLSRequired: true, TLSCertSubject: "CN=bd-test-no-such-certificate-7f3a9c"}
+	cfg, closer, err := c.TLSClientConfig()
+	if err == nil {
+		_ = closer.Close()
+		t.Fatalf("TLSClientConfig = %+v, want an error for a subject no certificate has", cfg)
+	}
+	if cfg != nil || closer != nil {
+		t.Fatalf("TLSClientConfig returned a config or closer with error %v", err)
+	}
+	if runtime.GOOS != "windows" {
+		if !errors.Is(err, certstore.ErrUnsupported) {
+			t.Fatalf("err = %v, want certstore.ErrUnsupported", err)
+		}
+		return
+	}
+	var none *certstore.NoEligibleError
+	if !errors.As(err, &none) {
+		t.Fatalf("err = %v, want *certstore.NoEligibleError", err)
+	}
+}
 
 func TestExternalDoltConfig_ResolvedUser(t *testing.T) {
 	t.Run("empty falls back to default", func(t *testing.T) {
@@ -82,7 +177,7 @@ func TestExternalDoltConfig_TLSClientConfig(t *testing.T) {
 	certPath, keyPath := writeSelfSignedPair(t)
 
 	t.Run("not required returns nil", func(t *testing.T) {
-		cfg, err := ExternalDoltConfig{Host: "db", Port: 3306}.TLSClientConfig()
+		cfg, _, err := ExternalDoltConfig{Host: "db", Port: 3306}.TLSClientConfig()
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -92,7 +187,7 @@ func TestExternalDoltConfig_TLSClientConfig(t *testing.T) {
 	})
 
 	t.Run("server name defaults to host", func(t *testing.T) {
-		cfg, err := ExternalDoltConfig{Host: "db.example.com", Port: 3306, TLSRequired: true}.TLSClientConfig()
+		cfg, _, err := ExternalDoltConfig{Host: "db.example.com", Port: 3306, TLSRequired: true}.TLSClientConfig()
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -106,7 +201,7 @@ func TestExternalDoltConfig_TLSClientConfig(t *testing.T) {
 
 	t.Run("server name defaults to an IPv6 host in either spelling, bare", func(t *testing.T) {
 		for _, host := range []string{"2001:db8::1", "[2001:db8::1]"} {
-			cfg, err := ExternalDoltConfig{Host: host, Port: 3306, TLSRequired: true}.TLSClientConfig()
+			cfg, _, err := ExternalDoltConfig{Host: host, Port: 3306, TLSRequired: true}.TLSClientConfig()
 			if err != nil {
 				t.Fatalf("host %q: unexpected error: %v", host, err)
 			}
@@ -117,7 +212,7 @@ func TestExternalDoltConfig_TLSClientConfig(t *testing.T) {
 	})
 
 	t.Run("server name override wins", func(t *testing.T) {
-		cfg, err := ExternalDoltConfig{Host: "127.0.0.1", Port: 3306, TLSRequired: true, TLSServerName: "real.host"}.TLSClientConfig()
+		cfg, _, err := ExternalDoltConfig{Host: "127.0.0.1", Port: 3306, TLSRequired: true, TLSServerName: "real.host"}.TLSClientConfig()
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -127,7 +222,7 @@ func TestExternalDoltConfig_TLSClientConfig(t *testing.T) {
 	})
 
 	t.Run("skip verify sets insecure and clears server name", func(t *testing.T) {
-		cfg, err := ExternalDoltConfig{Host: "db", Port: 3306, TLSRequired: true, TLSSkipVerify: true, TLSServerName: "db"}.TLSClientConfig()
+		cfg, _, err := ExternalDoltConfig{Host: "db", Port: 3306, TLSRequired: true, TLSSkipVerify: true, TLSServerName: "db"}.TLSClientConfig()
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -140,7 +235,7 @@ func TestExternalDoltConfig_TLSClientConfig(t *testing.T) {
 	})
 
 	t.Run("ca cert loaded into root pool", func(t *testing.T) {
-		cfg, err := ExternalDoltConfig{Host: "db", Port: 3306, TLSRequired: true, TLSCACert: certPath}.TLSClientConfig()
+		cfg, _, err := ExternalDoltConfig{Host: "db", Port: 3306, TLSRequired: true, TLSCACert: certPath}.TLSClientConfig()
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -150,7 +245,7 @@ func TestExternalDoltConfig_TLSClientConfig(t *testing.T) {
 	})
 
 	t.Run("empty ca cert uses system roots", func(t *testing.T) {
-		cfg, err := ExternalDoltConfig{Host: "db", Port: 3306, TLSRequired: true}.TLSClientConfig()
+		cfg, _, err := ExternalDoltConfig{Host: "db", Port: 3306, TLSRequired: true}.TLSClientConfig()
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -164,14 +259,14 @@ func TestExternalDoltConfig_TLSClientConfig(t *testing.T) {
 		if err := os.WriteFile(bad, []byte("not a pem"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		_, err := ExternalDoltConfig{Host: "db", Port: 3306, TLSRequired: true, TLSCACert: bad}.TLSClientConfig()
+		_, _, err := ExternalDoltConfig{Host: "db", Port: 3306, TLSRequired: true, TLSCACert: bad}.TLSClientConfig()
 		if err == nil {
 			t.Fatal("expected error for unparseable CA cert")
 		}
 	})
 
 	t.Run("client cert loaded for mtls", func(t *testing.T) {
-		cfg, err := ExternalDoltConfig{Host: "db", Port: 3306, TLSRequired: true, TLSCert: certPath, TLSKey: keyPath}.TLSClientConfig()
+		cfg, _, err := ExternalDoltConfig{Host: "db", Port: 3306, TLSRequired: true, TLSCert: certPath, TLSKey: keyPath}.TLSClientConfig()
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
