@@ -50,6 +50,53 @@ func TestStandaloneHooksAbsoluteFallbackHasNoConfigAuthority(t *testing.T) {
 	}
 }
 
+// TestStandaloneUninstallRemovesBothHookLayouts reproduces GH#7531: a repo
+// with bd's hooks installed both ways -- shims in .git/hooks from a plain
+// `bd hooks install`, and core.hooksPath pointing at .beads/hooks from a
+// later `bd hooks install --beads` -- had `bd hooks uninstall` report
+// success while removing only the beads-managed set. Clearing
+// core.hooksPath made .git/hooks effective again, where the earlier plain
+// install's shims were still in place and still ran on every commit, push
+// and checkout.
+func TestStandaloneUninstallRemovesBothHookLayouts(t *testing.T) {
+	tmpDir := newGitRepo(t)
+	runInDir(t, tmpDir, func() {
+		beadsDir := filepath.Join(tmpDir, ".beads")
+		require.NoError(t, os.Mkdir(beadsDir, 0755))
+		require.NoError(t, os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte("{}\n"), 0600))
+		t.Setenv("BEADS_DIR", beadsDir)
+
+		setStandaloneHookMode(t, "")
+		require.NoError(t, hooksInstallCmd.RunE(hooksInstallCmd, nil))
+		gitHooksShim := filepath.Join(tmpDir, ".git", "hooks", "pre-commit")
+		require.Contains(t, string(readInitHooksFile(t, gitHooksShim)), hookSectionBeginPrefix)
+
+		setStandaloneHookMode(t, "beads")
+		require.NoError(t, hooksInstallCmd.RunE(hooksInstallCmd, nil))
+		beadsShim := filepath.Join(tmpDir, ".beads", "hooks", "pre-commit")
+		require.Contains(t, string(readInitHooksFile(t, beadsShim)), hookSectionBeginPrefix)
+
+		hooksPathCmd := gitCommand("config", "--local", "--get", "core.hooksPath")
+		hooksPathCmd.Dir = tmpDir
+		out, err := hooksPathCmd.Output()
+		require.NoError(t, err)
+		require.True(t, utils.PathsEqual(filepath.Join(tmpDir, ".beads", "hooks"), strings.TrimSpace(string(out))),
+			"precondition: install --beads must have pointed core.hooksPath at .beads/hooks")
+
+		require.NoError(t, hooksUninstallCmd.RunE(hooksUninstallCmd, nil))
+
+		_, err = os.Stat(beadsShim)
+		require.ErrorIs(t, err, os.ErrNotExist)
+		_, err = os.Stat(gitHooksShim)
+		require.ErrorIs(t, err, os.ErrNotExist,
+			"the .git/hooks shim from the earlier plain install must be removed too, not just the beads-managed one (GH#7531)")
+
+		hooksPathCmd = gitCommand("config", "--local", "--get", "core.hooksPath")
+		hooksPathCmd.Dir = tmpDir
+		require.Error(t, hooksPathCmd.Run(), "core.hooksPath should be unset after uninstall")
+	})
+}
+
 // TestUninstallHooksUnsetsBeadsRole verifies AC2: bd hooks uninstall clears
 // beads.role in addition to core.hooksPath, so a manual `rm -rf .beads/`
 // followed by a proper uninstall doesn't leave stale beads-managed git
