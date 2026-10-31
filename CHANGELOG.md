@@ -1090,6 +1090,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd compact` no longer rewrites the preserved window's history with the
+  replay's timestamps. The cherry-pick replay stamped each preserved commit
+  with the time of the replay and the SQL session's identity, so after a
+  compaction every timestamp recorded before it (a tracker's last_sync, an
+  AS OF read) resolved to the wrong commit, and dolt_log showed the session
+  user as the committer of every preserved change. The replay now keeps
+  each preserved commit's original committer, author and dates, dates the
+  squashed base as the newest squashed commit, and checks the rebuilt
+  history before main moves onto it. A timestamp at or after the newest
+  squashed commit resolves as it did before the compaction; an earlier one
+  still resolves to the initial commit, as the history it named is gone
+  (#7294).
 - `bd migrate-personal` no longer leaves an issue in both databases when
   someone else's bead in the project database depends on it. The move's
   delete from the project database refuses such an issue, but it ran only

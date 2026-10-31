@@ -726,8 +726,12 @@ bd compact
     |
     | How it works:
     |   1. Identifies commits older than --days threshold
-    |   2. Creates a squashed base commit from all old history
-    |   3. Cherry-picks recent commits on top
+    |   2. Creates a squashed base commit from all old history, dated as the
+    |      newest squashed commit
+    |   3. Cherry-picks recent commits on top, keeping their original authors,
+    |      committers and dates, so AS OF reads and dolt_history views at or
+    |      after the newest squashed commit stay valid (an earlier time resolves
+    |      to the initial commit)
     |   4. Swaps main branch to the compacted version
     |   5. Prunes remote-tracking refs (they would keep the old history alive;
     |      the next push or fetch re-creates them at the new tip)
