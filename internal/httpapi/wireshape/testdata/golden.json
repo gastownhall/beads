@@ -4135,6 +4135,12 @@
     },
     {
       "schema": "IssueWithDependencyMetadata",
+      "member": "relation",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
       "member": "sender",
       "type": "string",
       "required": false

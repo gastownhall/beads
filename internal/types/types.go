@@ -1234,6 +1234,10 @@ type DependencyCounts struct {
 type IssueWithDependencyMetadata struct {
 	Issue
 	DependencyType DependencyType `json:"dependency_type"`
+	// Relation is the edge's role word read from the shown issue's end, e.g.
+	// "duplicate_of" / "duplicated_by" (see DependencyType.Relation). Empty
+	// means not computed: only the detail view fills it.
+	Relation string `json:"relation,omitempty"`
 }
 
 // IssueWithCounts extends Issue with dependency relationship counts

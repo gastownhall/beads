@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`bd show --json` names each dependency row's role: `relation`.** Every
+  `dependencies` and `dependents` row now carries `relation` beside
+  `dependency_type`: the edge's role word read from the shown issue's end, so
+  a reader need not know which side of the edge a row sits on. A `duplicates`
+  edge reads `duplicate_of` under `dependencies` and `duplicated_by` under
+  `dependents`; likewise `depends_on`/`blocks`, `parent`/`children`,
+  `superseded_by`/`supersedes`, and a custom type reads `<type>` outgoing and
+  `<type>_inbound` incoming. The words are the `bd show` text headings, which
+  now come from the same table (`internal/types`). `GET /v0/beads/issues/{id}`
+  carries it too. The field is additive and `omitempty` (#7632, #5687).
 - **`arrival_seq`, a commit-ordered create sequence on wisp-plane rows.**
   While a workspace journals, every `ephemeral` or `no_history` bead it creates
   is stamped with the `seq` of its own `create` journal record, in the same

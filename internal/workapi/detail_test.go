@@ -3,6 +3,7 @@ package workapi
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -655,6 +656,103 @@ func TestBuildIssueDetailsBriefDeps(t *testing.T) {
 		}
 		if details.Parent == nil || *details.Parent != "bd-parent" {
 			t.Errorf("parent = %v, want bd-parent", details.Parent)
+		}
+	})
+}
+
+// TestBuildIssueDetailsRelation guards the misread that filed a bead as a
+// duplicate of its own duplicate: dependency_type alone does not say which end
+// of the edge a row sits on. `bd duplicate copy --of canon` stores
+// (copy, canon, duplicates), so the copy's dependency row must read
+// duplicate_of and the canonical's dependent row duplicated_by.
+func TestBuildIssueDetailsRelation(t *testing.T) {
+	ctx := context.Background()
+	heavy := strings.Repeat("x", 1024)
+
+	newFixture := func() *detailFixture {
+		fx := newDetailFixture()
+		fx.issues["bd-canon"] = &types.Issue{ID: "bd-canon", Title: "Canonical", IssueType: types.TypeTask, Status: types.StatusOpen}
+		fx.issues["bd-copy"] = &types.Issue{ID: "bd-copy", Title: "Copy", IssueType: types.TypeTask, Status: types.StatusClosed}
+		fx.deps["bd-copy"] = []*types.IssueWithDependencyMetadata{{
+			Issue:          types.Issue{ID: "bd-canon", Title: "Canonical", Notes: heavy},
+			DependencyType: types.DepDuplicates,
+		}}
+		fx.dependents["bd-canon"] = []*types.IssueWithDependencyMetadata{{
+			Issue:          types.Issue{ID: "bd-copy", Title: "Copy", Notes: heavy},
+			DependencyType: types.DepDuplicates,
+		}}
+		return fx
+	}
+
+	for _, seam := range []string{"store seam", "use case seam"} {
+		pick := func(fx *detailFixture) DetailSource {
+			store, useCase := fixtureSources(fx)
+			if seam == "store seam" {
+				return store
+			}
+			return useCase
+		}
+
+		t.Run(seam+"/copy's dependency row reads duplicate_of", func(t *testing.T) {
+			for _, brief := range []bool{false, true} {
+				fx := newFixture()
+				details, err := BuildIssueDetails(ctx, pick(fx), fx.issues["bd-copy"], false, DetailOptions{BriefDeps: brief})
+				if err != nil {
+					t.Fatalf("BuildIssueDetails: %v", err)
+				}
+				if len(details.Dependencies) != 1 {
+					t.Fatalf("brief=%v: dependencies = %d, want 1", brief, len(details.Dependencies))
+				}
+				got := details.Dependencies[0]
+				if got.DependencyType != types.DepDuplicates || got.Relation != "duplicate_of" {
+					t.Errorf("brief=%v: dependency_type=%q relation=%q, want duplicates/duplicate_of",
+						brief, got.DependencyType, got.Relation)
+				}
+				if brief && got.Notes != "" {
+					t.Errorf("brief row kept its text: notes=%d", len(got.Notes))
+				}
+				if src := fx.deps["bd-copy"][0]; src.Relation != "" {
+					t.Errorf("brief=%v: source row was mutated: relation=%q", brief, src.Relation)
+				}
+			}
+		})
+
+		t.Run(seam+"/canonical's dependent row reads duplicated_by", func(t *testing.T) {
+			fx := newFixture()
+			details, err := BuildIssueDetails(ctx, pick(fx), fx.issues["bd-canon"], false, DetailOptions{IncludeDependents: true})
+			if err != nil {
+				t.Fatalf("BuildIssueDetails: %v", err)
+			}
+			if len(details.Dependents) != 1 {
+				t.Fatalf("dependents = %d, want 1", len(details.Dependents))
+			}
+			got := details.Dependents[0]
+			if got.ID != "bd-copy" || got.DependencyType != types.DepDuplicates || got.Relation != "duplicated_by" {
+				t.Errorf("dependent row = id %q dependency_type %q relation %q, want bd-copy/duplicates/duplicated_by",
+					got.ID, got.DependencyType, got.Relation)
+			}
+			if got.Notes != "" {
+				t.Errorf("shallow dependent kept its text: notes=%d", len(got.Notes))
+			}
+			if src := fx.dependents["bd-canon"][0]; src.Relation != "" {
+				t.Errorf("source row was mutated: relation=%q", src.Relation)
+			}
+		})
+	}
+
+	t.Run("relation is on the wire beside dependency_type", func(t *testing.T) {
+		fx := newFixture()
+		store, _ := fixtureSources(fx)
+		details, err := BuildIssueDetails(ctx, store, fx.issues["bd-copy"], false, DetailOptions{})
+		if err != nil {
+			t.Fatalf("BuildIssueDetails: %v", err)
+		}
+		raw, err := json.Marshal(details.Dependencies[0])
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		if !strings.Contains(string(raw), `"dependency_type":"duplicates","relation":"duplicate_of"`) {
+			t.Errorf("dependency row JSON = %s", raw)
 		}
 	})
 }
