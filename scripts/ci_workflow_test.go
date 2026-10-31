@@ -2599,6 +2599,22 @@ func TestPRWindowsSmallDbproxyServerIsCGODisabled(t *testing.T) {
 	}
 }
 
+// internal/certstore must build without cgo (the windows/arm64 release is
+// CGO_ENABLED=0), and its Windows step must fail rather than pass when the
+// tests skip.
+func TestPRWindowsSmallCertstoreIsCGODisabledAndRefusesSkips(t *testing.T) {
+	pr := readCIWorkflow(t, "pr.yml")
+	step := pr.job(t, "test-windows-small").step(t, "Run certstore package tests on Windows")
+	if step.Env["CGO_ENABLED"] != "0" {
+		t.Errorf("certstore step env CGO_ENABLED = %q, want \"0\"", step.Env["CGO_ENABLED"])
+	}
+	for _, want := range []string{"./internal/certstore/", "--- SKIP", "--- PASS: TestHandshakeWithIntermediateAgainstRootOnlyServer"} {
+		if !strings.Contains(step.Run, want) {
+			t.Errorf("certstore step run does not contain %q:\n%s", want, step.Run)
+		}
+	}
+}
+
 // stepContinueOnError reports whether a step's continue-on-error is truthy
 // (the field unmarshals as `any` because the YAML schema also allows an
 // expression string, which GitHub itself treats as whatever it evaluates to
@@ -2634,6 +2650,7 @@ func TestPRWindowsMakeShellLegsFailTheJob(t *testing.T) {
 		},
 		"test-windows-small": {
 			"Run doltversion package tests on Windows", "Run dbproxy server package tests on Windows",
+			"Run certstore package tests on Windows",
 		},
 	}
 	for jobName, names := range legSteps {
