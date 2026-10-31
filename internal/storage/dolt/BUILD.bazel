@@ -175,6 +175,7 @@ go_test(
         "commit_all_test.go",
         "commit_config_test.go",
         "commit_dirty_wisp_test.go",
+        "commit_write_tx_panic_test.go",
         "compact_test.go",
         "concurrent_test.go",
         "conflicts_integration_test.go",
