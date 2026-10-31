@@ -320,7 +320,9 @@ func commandMemoizesReads(cmd *cobra.Command) bool {
 // identity, and the only way to guarantee that is to resolve it once.
 //
 // It mirrors dolt.applyResolvedConfig, which this hand-built doltCfg path
-// bypasses.
+// bypasses. The getters and the port chain it reads end at the central server
+// config (~/.config/beads/server.json, GH#3895), so a workspace that names no
+// host, port, user or TLS of its own dials the server that file names.
 func resolveDoltServerConnection(ctx context.Context, beadsDir string, fileCfg *configfile.Config, doltCfg *dolt.Config) error {
 	// An IPv6 host may be configured bracketed ("[::1]") as well as bare. The
 	// store and `bd serve` (its socket-fallback probe and its proxy's

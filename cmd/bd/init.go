@@ -1646,11 +1646,11 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			CreateIfMissing:        true, // bd init is the only path that should create databases
 			OpenedByInit:           true, // shapes advice only: identity mismatch (GH#5558) and the externally managed endpoint's --server-port
 			AutoStart:              initServerMode && !externalServer && os.Getenv("BEADS_DOLT_AUTO_START") != "0",
-			ServerTLS:              initDoltServerTLSFromEnv(),
+			ServerTLS:              initDoltServerTLS(),
 		}
-		if serverHost != "" {
-			doltCfg.ServerHost = serverHost
-		}
+		// The store's own host default stops at BEADS_DOLT_SERVER_HOST, so
+		// hand it the central server config's host too.
+		doltCfg.ServerHost = initHost
 		if serverPort != 0 {
 			// `bd init --server-port` IS a caller assertion — and it must
 			// replace the source resolved above, not inherit it, or an
@@ -1665,6 +1665,9 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		if serverUser != "" {
 			doltCfg.ServerUser = serverUser
 		}
+		if initCentralConfigNamesServer(serverHost, initHost, doltCfg.ServerPortSource) {
+			doltCfg.AutoStart = false
+		}
 
 		// Route through the gateway credential machinery: when a credential
 		// command is configured, its token becomes the connection username and
@@ -1673,6 +1676,11 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		if err := applyInitGatewayCredential(ctx, beadsDir, doltCfg); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: resolving dolt credential command: %v\n", err)
 			return &exitError{Code: 1}
+		}
+		// Only now, so a configured credential command keeps the user it
+		// mints, as on the CLI's store open.
+		if doltCfg.ServerMode && doltCfg.ServerUser == "" {
+			doltCfg.ServerUser = initStoreServerUser("")
 		}
 
 		initLock, err := acquireEmbeddedLock(beadsDir, initServerMode || initProxiedServer)
@@ -1788,6 +1796,11 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 					// `bd migrate --force` (or BD_ALLOW_REMOTE_MIGRATE=1) and
 					// `bd dolt push` can open the cloned database.
 					fcfg := initTimeCloneConfig(initServerMode, serverHost, serverPort, serverSocket, serverUser, dbName)
+					// Record only what the flags name, as the metadata.json
+					// init writes on success does: a host or user recorded
+					// here would outrank the central server config for every
+					// later command (GH#3895).
+					fcfg.DoltServerHost, fcfg.DoltServerUser = serverHost, serverUser
 					if ferr := finalizeSyncedBootstrap(beadsDir, syncURL, fcfg, dbName); ferr != nil {
 						fmt.Fprintf(os.Stderr, "Warning: failed to finalize bootstrapped workspace: %s\n", remedy.PrintedMessage(ferr))
 					}
@@ -2469,15 +2482,12 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		if !usesSQLServer() {
 			fmt.Printf("  Mode: %s\n", ui.RenderAccent("embedded"))
 		} else {
-			user := serverUser
-			if user == "" {
-				user = configfile.DefaultDoltServerUser
-			}
+			user := initStoreServerUser(serverUser)
 			fmt.Printf("  Mode: %s\n", ui.RenderAccent("server"))
 			fmt.Printf("  Server: %s\n", ui.RenderAccent(fmt.Sprintf("%s@%s", remedy.PrintedValue(user), initSummaryServerAddr(beadsDir, serverHost, serverPort))))
 			// Warn when using the default localhost — this is the #1 misconfiguration
 			// for setups where Dolt runs on a remote machine (e.g., over Tailscale).
-			if serverHost == "" && os.Getenv("BEADS_DOLT_SERVER_HOST") == "" {
+			if serverHost == "" && os.Getenv("BEADS_DOLT_SERVER_HOST") == "" && configfile.CentralServerHost() == "" {
 				fmt.Fprintf(os.Stderr, "\n  %s Server host defaulted to %s.\n", ui.RenderWarn("⚠"), configfile.DefaultDoltServerHost)
 				fmt.Fprintf(os.Stderr, "    If your Dolt server is remote, set BEADS_DOLT_SERVER_HOST or pass --server-host.\n")
 			}
@@ -4078,8 +4088,34 @@ func promoteExplicitServerConnFlags(cmd *cobra.Command) (func(), error) {
 	return restore, nil
 }
 
-func initDoltServerTLSFromEnv() bool {
+// initDoltServerTLS is whether init's store dials with TLS:
+// BEADS_DOLT_SERVER_TLS, else the central server config's dolt_server_tls
+// (GH#3895). --server-tls reaches it through the environment.
+func initDoltServerTLS() bool {
 	return (&configfile.Config{}).GetDoltServerTLS()
+}
+
+// initStoreServerUser is the user init's store presents when no credential
+// command names one: --server-user, or else BEADS_DOLT_SERVER_USER, the
+// central server config's dolt_server_user (GH#3895) and then root.
+func initStoreServerUser(serverUser string) string {
+	if serverUser != "" {
+		return serverUser
+	}
+	return (&configfile.Config{}).GetDoltServerUser()
+}
+
+// initCentralConfigNamesServer reports whether the central server config
+// (~/.config/beads/server.json), not a flag or the environment, names the
+// server init's store dials at host on a port from portSource: its port, or
+// a host bd does not run its server at. Like --external, that names a server
+// bd does not manage, so init starts none (GH#3895).
+func initCentralConfigNamesServer(serverHost, host string, portSource doltserver.PortSource) bool {
+	if portSource == doltserver.PortSourceCentralConfig {
+		return true
+	}
+	return serverHost == "" && os.Getenv("BEADS_DOLT_SERVER_HOST") == "" &&
+		configfile.CentralServerHost() != "" && !configfile.BdRunsServerAt(host)
 }
 
 func initTimeCloneConfig(serverMode bool, serverHost string, serverPort int, serverSocket, serverUser, dbName string) *configfile.Config {
@@ -4088,8 +4124,8 @@ func initTimeCloneConfig(serverMode bool, serverHost string, serverPort int, ser
 	cfg.DoltDatabase = dbName
 	if serverMode {
 		cfg.DoltMode = configfile.DoltModeServer
-		cfg.DoltServerHost = configfile.DefaultDoltServerHost
-		cfg.DoltServerUser = configfile.DefaultDoltServerUser
+		cfg.DoltServerHost = initStoreServerHost("")
+		cfg.DoltServerUser = initStoreServerUser("")
 	} else {
 		cfg.DoltMode = configfile.DoltModeEmbedded
 	}
@@ -4109,13 +4145,17 @@ func initTimeCloneConfig(serverMode bool, serverHost string, serverPort int, ser
 }
 
 // initStoreServerHost is the host the store bd init opens dials:
-// --server-host, or else the store's own default, BEADS_DOLT_SERVER_HOST and
-// then 127.0.0.1.
+// --server-host, or else BEADS_DOLT_SERVER_HOST, the central server config's
+// dolt_server_host (GH#3895) and then 127.0.0.1. It reads no config.yaml
+// dolt.host: before .beads exists that is an enclosing workspace's (GH#2336).
 func initStoreServerHost(serverHost string) string {
 	if serverHost != "" {
 		return serverHost
 	}
 	if h := os.Getenv("BEADS_DOLT_SERVER_HOST"); h != "" {
+		return h
+	}
+	if h := configfile.CentralServerHost(); h != "" {
 		return h
 	}
 	return configfile.DefaultDoltServerHost
@@ -4156,7 +4196,9 @@ func initStoreServerHost(serverHost string) string {
 // named from the configuration init loaded (dolt.ResolveServerPort), as on
 // main, except where that fill would take the enclosing workspace's
 // config.yaml dolt.port (initLoadedConfigPort): the port of that
-// workspace's server, not one the new workspace names.
+// workspace's server, not one the new workspace names. The central server
+// config's dolt_server_port comes last, as in doltserver's port chain
+// (GH#3895).
 func initStoreServerPort(beadsDir, host string) (int, doltserver.PortSource, bool, bool) {
 	if p := os.Getenv("BEADS_DOLT_SERVER_PORT"); p != "" {
 		if port, err := strconv.Atoi(p); err == nil && port > 0 {
@@ -4181,6 +4223,9 @@ func initStoreServerPort(beadsDir, host string) (int, doltserver.PortSource, boo
 	}
 	if own, ok := initLoadedConfigPort(beadsDir); ok {
 		return own.Port, own.PortSource, own.PortSharedServer, true
+	}
+	if port := configfile.CentralServerPort(); port > 0 {
+		return port, doltserver.PortSourceCentralConfig, false, true
 	}
 	return 0, doltserver.PortSourceUnset, false, false
 }

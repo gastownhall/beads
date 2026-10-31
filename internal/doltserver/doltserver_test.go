@@ -4143,3 +4143,77 @@ func TestReachabilityCheckRefusesAnOptionHost(t *testing.T) {
 		t.Errorf("ReachabilityCheck = %q, want a <host> placeholder with the host named beside it", got)
 	}
 }
+
+// TestResolveServerModeCentralConfigEndpoint pins GH#3895's ownership rule: a
+// server-mode workspace whose port or non-local host only the central server
+// config (server.json) supplies is externally managed, since one file every
+// workspace on the machine shares cannot name a server one workspace owns, and
+// its down-endpoint advice names that file instead of `bd dolt start`. A
+// workspace whose dolt_mode is embedded or unset resolves as it does without
+// the file and keeps embedded storage.
+func TestResolveServerModeCentralConfigEndpoint(t *testing.T) {
+	const port = 13331
+	for _, tc := range []struct {
+		name    string
+		mode    string
+		host    string // metadata.json dolt_server_host
+		central string
+		want    ServerMode
+	}{
+		{"server mode, central port", configfile.DoltModeServer, "", `{"dolt_server_port":13331}`, ServerModeExternal},
+		{"server mode, central remote host", configfile.DoltModeServer, "", `{"dolt_server_host":"db.invalid"}`, ServerModeExternal},
+		{"server mode, central local host", configfile.DoltModeServer, "", `{"dolt_server_host":"127.0.0.1"}`, ServerModeOwned},
+		{"server mode, metadata host outranks the central host", configfile.DoltModeServer, "127.0.0.1", `{"dolt_server_host":"db.invalid"}`, ServerModeOwned},
+		{"embedded mode", configfile.DoltModeEmbedded, "", `{"dolt_server_host":"db.invalid","dolt_server_port":13331}`, ServerModeEmbedded},
+		{"unset mode", "", "", `{"dolt_server_host":"db.invalid","dolt_server_port":13331}`, ServerModeOwned},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			namedPortRefusalEnv(t)
+			centralPath := filepath.Join(t.TempDir(), "server.json")
+			if err := os.WriteFile(centralPath, []byte(tc.central), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("BEADS_CENTRAL_CONFIG", centralPath)
+			dir := t.TempDir()
+			cfg := configfile.DefaultConfig()
+			cfg.Backend = configfile.BackendDolt
+			cfg.DoltMode = tc.mode
+			cfg.DoltServerHost = tc.host
+			if err := cfg.Save(dir); err != nil {
+				t.Fatal(err)
+			}
+
+			if got := ResolveServerMode(dir); got != tc.want {
+				t.Errorf("ResolveServerMode = %v, want %v", got, tc.want)
+			}
+			if tc.mode != configfile.DoltModeServer {
+				loaded, err := configfile.Load(dir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if loaded.IsDoltServerMode() {
+					t.Error("the central server config moved the workspace onto server storage")
+				}
+			}
+		})
+	}
+
+	t.Run("down-endpoint advice names the central config", func(t *testing.T) {
+		namedPortRefusalEnv(t)
+		centralPath := filepath.Join(t.TempDir(), "server.json")
+		if err := os.WriteFile(centralPath, []byte(`{"dolt_server_port":13331}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("BEADS_CENTRAL_CONFIG", centralPath)
+		dir := namedPortServerWorkspace(t, 0)
+
+		decl := ExternalPortSetting(dir, PortSourceCentralConfig, port)
+		if want := "dolt_server_port in " + centralPath; decl.Setting != want || !decl.NamesEndpoint {
+			t.Errorf("ExternalPortSetting = %+v, want setting %q naming the endpoint", decl, want)
+		}
+		advice := decl.Advice(net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+		if !strings.Contains(advice, "externally managed") || strings.Contains(advice, "bd dolt start") {
+			t.Errorf("advice is not the externally managed advice:\n%s", advice)
+		}
+	})
+}
