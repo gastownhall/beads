@@ -267,6 +267,19 @@ func expandLoopIteration(step *Step, iteration int, iterVars map[string]string) 
 		clone.DependsOn = rewriteLoopDependencies(bodyStep.DependsOn, step.ID, iteration, bodyStepIDs)
 		clone.Needs = rewriteLoopDependencies(bodyStep.Needs, step.ID, iteration, bodyStepIDs)
 
+		// The loop step's own Needs/DependsOn (what gates the loop as a whole,
+		// declared outside the body) are not references the rewrite above can
+		// see at all, so without this they are silently dropped once the loop
+		// step itself stops existing post-expansion (GH#7636). Carry them onto
+		// this iteration's entry steps: the body steps with no dependency of
+		// their own on another body step, so only the first iteration (the
+		// loop has not started until THAT begins) and only its true starting
+		// points (not a step a sibling within the body already gates).
+		if iteration == 1 && !hasAnyBodyDependency(bodyStep, bodyStepIDs) {
+			clone.DependsOn = append(clone.DependsOn, step.DependsOn...)
+			clone.Needs = append(clone.Needs, step.Needs...)
+		}
+
 		// Recursively handle children with proper dependency rewriting
 		if len(bodyStep.Children) > 0 {
 			clone.Children = expandLoopChildren(bodyStep.Children, step.ID, iteration, bodyStepIDs)
@@ -303,6 +316,23 @@ func collectBodyStepIDs(body []*Step) map[string]bool {
 	}
 	collect(body)
 	return ids
+}
+
+// hasAnyBodyDependency reports whether step's own (pre-rewrite) DependsOn or
+// Needs names another step inside the same loop body — i.e. whether step is
+// gated by a sibling rather than being one of the body's own entry points.
+func hasAnyBodyDependency(step *Step, bodyStepIDs map[string]bool) bool {
+	for _, d := range step.DependsOn {
+		if bodyStepIDs[d] {
+			return true
+		}
+	}
+	for _, d := range step.Needs {
+		if bodyStepIDs[d] {
+			return true
+		}
+	}
+	return false
 }
 
 // rewriteLoopDependencies rewrites dependency references for loop expansion.

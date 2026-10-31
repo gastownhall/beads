@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
 	"sort"
 	"testing"
@@ -176,6 +177,278 @@ func seedChain(f *fakeMolecules) {
 	}
 	f.edge("m.b", "m.a", types.DepBlocks)
 	f.edge("m.c", "m.b", types.DepBlocks)
+}
+
+// seedGroupedFormula builds the exact grouped-formula shape from GH#7638:
+// brief <- group (needs brief) <- a, b (needs a). Only Brief should ever be
+// ready: Group is blocked by the still-open Brief, and A is blocked too,
+// inherited from its blocked parent Group, even though A carries no direct
+// blocking edge of its own.
+func seedGroupedFormula(f *fakeMolecules) {
+	f.add("m", types.TypeMolecule, types.StatusOpen)
+	f.add("m.brief", types.TypeTask, types.StatusOpen)
+	f.add("m.group", types.TypeTask, types.StatusOpen)
+	f.add("m.a", types.TypeTask, types.StatusOpen)
+	f.add("m.b", types.TypeTask, types.StatusOpen)
+	for _, id := range []string{"m.brief", "m.group"} {
+		f.edge(id, "m", types.DepParentChild)
+	}
+	for _, id := range []string{"m.a", "m.b"} {
+		f.edge(id, "m.group", types.DepParentChild)
+	}
+	f.edge("m.group", "m.brief", types.DepBlocks)
+	f.edge("m.b", "m.a", types.DepBlocks)
+}
+
+// TestMoleculeReadyInheritsParentBlockedState pins GH#7638: bd ready --mol
+// must agree with bd ready and bd blocked that a step whose parent is
+// blocked is itself blocked (parent-child's documented semantics,
+// docs/workflows/molecules.md:111, BlockedStateInvariant), and must never
+// offer the molecule root itself as a ready step.
+func TestMoleculeReadyInheritsParentBlockedState(t *testing.T) {
+	f := newFakeMolecules()
+	seedGroupedFormula(f)
+
+	view, err := issueops.ViewMolecule(context.Background(), f.reader(), "m")
+	if err != nil {
+		t.Fatalf("ViewMolecule: %v", err)
+	}
+
+	ready := map[string]bool{}
+	for _, issue := range view.Ready {
+		ready[issue.ID] = true
+	}
+	if want := map[string]bool{"m.brief": true}; !reflect.DeepEqual(ready, want) {
+		t.Fatalf("Ready = %v, want only m.brief: Group is blocked by the open Brief, A inherits Group's blocked state, B is blocked directly by A, and the root is not a step", ready)
+	}
+
+	info := view.Analysis.Steps["m.a"]
+	if info == nil || info.IsReady {
+		t.Fatalf("Steps[m.a].IsReady = %+v, want not ready: its parent m.group is blocked", info)
+	}
+	if len(info.BlockedBy) != 0 {
+		t.Fatalf("Steps[m.a].BlockedBy = %v, want empty: A carries no direct blocking edge, only an inherited one", info.BlockedBy)
+	}
+}
+
+// TestMoleculeReadyLetsAChildGoReadyOnceItsClosedParentStopsBlocking confirms
+// the inheritance in the test above is not a blanket ban on a parent-child
+// edge: once Group (A and B's parent) closes, it is no longer itself
+// blocked (closed rows are never blocked), so A becomes ready on its own
+// merits again.
+func TestMoleculeReadyLetsAChildGoReadyOnceItsClosedParentStopsBlocking(t *testing.T) {
+	f := newFakeMolecules()
+	seedGroupedFormula(f)
+	f.issues["m.brief"].Status = types.StatusClosed
+	f.issues["m.group"].Status = types.StatusClosed
+
+	view, err := issueops.ViewMolecule(context.Background(), f.reader(), "m")
+	if err != nil {
+		t.Fatalf("ViewMolecule: %v", err)
+	}
+	ready := map[string]bool{}
+	for _, issue := range view.Ready {
+		ready[issue.ID] = true
+	}
+	if !ready["m.a"] {
+		t.Fatalf("Ready = %v, want m.a ready once its closed parent m.group no longer blocks it", ready)
+	}
+	if ready["m.b"] {
+		t.Fatalf("Ready = %v, want m.b still blocked directly by the still-open m.a", ready)
+	}
+}
+
+// TestMoleculeReadyEpicCloseGateOnOwnChildrenIsNotLocked pins GH#7652
+// Finding 2: a parent-child edge must propagate only EXOGENOUS blockedness
+// (internal/storage/issueops/blocked_consistency.go's #6506 contract), not
+// whatever set parentInfo.BlockedBy. The root here blocks on its own
+// children — the "close gate on the epic" idiom — so neither child's
+// blocker is outside the root's own subtree. Before this fix that still
+// read as blocked (len(BlockedBy) > 0 regardless of target), so both
+// children locked forever: nothing could ever close, so the gate could
+// never open.
+func TestMoleculeReadyEpicCloseGateOnOwnChildrenIsNotLocked(t *testing.T) {
+	f := newFakeMolecules()
+	f.add("m", types.TypeMolecule, types.StatusOpen)
+	f.add("m.a", types.TypeTask, types.StatusOpen)
+	f.add("m.b", types.TypeTask, types.StatusOpen)
+	f.edge("m.a", "m", types.DepParentChild)
+	f.edge("m.b", "m", types.DepParentChild)
+	f.edge("m", "m.a", types.DepBlocks) // the root cannot close before its own children
+	f.edge("m", "m.b", types.DepBlocks)
+
+	view, err := issueops.ViewMolecule(context.Background(), f.reader(), "m")
+	if err != nil {
+		t.Fatalf("ViewMolecule: %v", err)
+	}
+	ready := map[string]bool{}
+	for _, issue := range view.Ready {
+		ready[issue.ID] = true
+	}
+	if want := map[string]bool{"m.a": true, "m.b": true}; !reflect.DeepEqual(ready, want) {
+		t.Fatalf("Ready = %v, want %v: the root's own close-gate blockers are inside its own subtree, so they must not darken the children it is waiting for", ready, want)
+	}
+}
+
+// TestMoleculeReadyParentBlockedBySiblingStillLocksChild is the mirror of
+// the test above: the parent's blocker is a true sibling, OUTSIDE the
+// parent's subtree, so the exogenous-only narrowing above must not weaken
+// the ordinary inheritance pinned by TestMoleculeReadyInheritsParentBlockedState.
+func TestMoleculeReadyParentBlockedBySiblingStillLocksChild(t *testing.T) {
+	f := newFakeMolecules()
+	f.add("m", types.TypeMolecule, types.StatusOpen)
+	f.add("m.p", types.TypeTask, types.StatusOpen)
+	f.add("m.c", types.TypeTask, types.StatusOpen)
+	f.add("m.x", types.TypeTask, types.StatusOpen)
+	f.edge("m.p", "m", types.DepParentChild)
+	f.edge("m.x", "m", types.DepParentChild)
+	f.edge("m.c", "m.p", types.DepParentChild)
+	f.edge("m.p", "m.x", types.DepBlocks) // p's blocker x is a sibling, not p's own descendant
+
+	view, err := issueops.ViewMolecule(context.Background(), f.reader(), "m")
+	if err != nil {
+		t.Fatalf("ViewMolecule: %v", err)
+	}
+	ready := map[string]bool{}
+	for _, issue := range view.Ready {
+		ready[issue.ID] = true
+	}
+	if want := map[string]bool{"m.x": true}; !reflect.DeepEqual(ready, want) {
+		t.Fatalf("Ready = %v, want only m.x: p is exogenously blocked by sibling x, so p's own child c must still inherit the block", ready)
+	}
+}
+
+// TestMoleculeReadyChildWithTwoParentsIsBlockedIfEitherParentIs pins GH#7652
+// Finding 3: a child under two parent-child parents got a nondeterministic
+// answer, because childParent kept only one parent per child, chosen by map
+// iteration order. childParents now keeps every parent, and isAncestorBlocked
+// treats "any blocked parent" as blocking — which is deterministic by
+// construction, independent of map order.
+func TestMoleculeReadyChildWithTwoParentsIsBlockedIfEitherParentIs(t *testing.T) {
+	f := newFakeMolecules()
+	f.add("m", types.TypeMolecule, types.StatusOpen)
+	f.add("m.p1", types.TypeTask, types.StatusOpen)
+	f.add("m.p2", types.TypeTask, types.StatusOpen)
+	f.add("m.c", types.TypeTask, types.StatusOpen)
+	f.add("m.x", types.TypeTask, types.StatusOpen)
+	f.edge("m.p1", "m", types.DepParentChild)
+	f.edge("m.p2", "m", types.DepParentChild)
+	f.edge("m.x", "m", types.DepParentChild)
+	// m.c has TWO parent-child parents: p1 (exogenously blocked by sibling x)
+	// and p2 (clear).
+	f.edge("m.c", "m.p1", types.DepParentChild)
+	f.edge("m.c", "m.p2", types.DepParentChild)
+	f.edge("m.p1", "m.x", types.DepBlocks)
+
+	view, err := issueops.ViewMolecule(context.Background(), f.reader(), "m")
+	if err != nil {
+		t.Fatalf("ViewMolecule: %v", err)
+	}
+	ready := map[string]bool{}
+	for _, issue := range view.Ready {
+		ready[issue.ID] = true
+	}
+	if ready["m.c"] {
+		t.Fatalf("Ready = %v, want m.c NOT ready: one of its two parents (p1) is blocked", ready)
+	}
+	if !ready["m.x"] {
+		t.Fatalf("Ready = %v, want m.x ready: it carries no blocker of its own", ready)
+	}
+}
+
+// TestMoleculeReadyParentChildCycleDoesNotCrash pins GH#7652 Finding 4: a
+// parent-child cycle (arriving one edge at a time, or through import/merge,
+// per the consistency tests' own note) must not overflow the stack. a and b
+// are each other's parent-child parent, and each is also a plain
+// parent-child child of the root, so the cycle is reachable from m without
+// otherwise affecting readiness (neither carries a real blocker).
+func TestMoleculeReadyParentChildCycleDoesNotCrash(t *testing.T) {
+	f := newFakeMolecules()
+	f.add("m", types.TypeMolecule, types.StatusOpen)
+	f.add("m.a", types.TypeTask, types.StatusOpen)
+	f.add("m.b", types.TypeTask, types.StatusOpen)
+	f.edge("m.a", "m", types.DepParentChild)
+	f.edge("m.b", "m", types.DepParentChild)
+	f.edge("m.a", "m.b", types.DepParentChild) // a's parents: m, b
+	f.edge("m.b", "m.a", types.DepParentChild) // b's parents: m, a — the cycle
+
+	view, err := issueops.ViewMolecule(context.Background(), f.reader(), "m")
+	if err != nil {
+		t.Fatalf("ViewMolecule: %v", err)
+	}
+	ready := map[string]bool{}
+	for _, issue := range view.Ready {
+		ready[issue.ID] = true
+	}
+	if want := map[string]bool{"m.a": true, "m.b": true}; !reflect.DeepEqual(ready, want) {
+		t.Fatalf("Ready = %v, want %v: the cycle carries no blocker, so it must not read as blocked either", ready, want)
+	}
+}
+
+// TestMoleculeReadyClosedMiddleParentStopsInheritedBlock pins GH#7652
+// Finding 5(a): the closed/pinned-parent exemption. A three-level chain
+// where the grandparent is genuinely exogenously blocked, but the middle
+// parent between it and the leaf is closed — inheritance must stop at the
+// closed parent, exactly as TestMoleculeReadyLetsAChildGoReadyOnceItsClosedParentStopsBlocking
+// pins one level up.
+func TestMoleculeReadyClosedMiddleParentStopsInheritedBlock(t *testing.T) {
+	f := newFakeMolecules()
+	f.add("m", types.TypeMolecule, types.StatusOpen)
+	f.add("m.g", types.TypeTask, types.StatusOpen)
+	f.add("m.mid", types.TypeTask, types.StatusClosed)
+	f.add("m.leaf", types.TypeTask, types.StatusOpen)
+	f.add("m.x", types.TypeTask, types.StatusOpen)
+	f.edge("m.g", "m", types.DepParentChild)
+	f.edge("m.x", "m", types.DepParentChild)
+	f.edge("m.mid", "m.g", types.DepParentChild)
+	f.edge("m.leaf", "m.mid", types.DepParentChild)
+	f.edge("m.g", "m.x", types.DepBlocks) // g is exogenously blocked by sibling x
+
+	view, err := issueops.ViewMolecule(context.Background(), f.reader(), "m")
+	if err != nil {
+		t.Fatalf("ViewMolecule: %v", err)
+	}
+	ready := map[string]bool{}
+	for _, issue := range view.Ready {
+		ready[issue.ID] = true
+	}
+	if !ready["m.leaf"] {
+		t.Fatalf("Ready = %v, want m.leaf ready: its closed parent m.mid stops the blocked-grandparent chain from inheriting past it", ready)
+	}
+}
+
+// TestMoleculeReadyGrandparentBlockInheritsThroughAnUnblockedMiddleParent
+// pins GH#7652 Finding 5(b): the `|| isParentExogenouslyBlocked(grandParentID)`
+// transitivity clause. The middle parent here carries no blocker of its
+// own, so without the clause the leaf would read as ready even though its
+// grandparent is genuinely exogenously blocked.
+func TestMoleculeReadyGrandparentBlockInheritsThroughAnUnblockedMiddleParent(t *testing.T) {
+	f := newFakeMolecules()
+	f.add("m", types.TypeMolecule, types.StatusOpen)
+	f.add("m.g", types.TypeTask, types.StatusOpen)
+	f.add("m.mid", types.TypeTask, types.StatusOpen)
+	f.add("m.leaf", types.TypeTask, types.StatusOpen)
+	f.add("m.x", types.TypeTask, types.StatusOpen)
+	f.edge("m.g", "m", types.DepParentChild)
+	f.edge("m.x", "m", types.DepParentChild)
+	f.edge("m.mid", "m.g", types.DepParentChild)
+	f.edge("m.leaf", "m.mid", types.DepParentChild)
+	f.edge("m.g", "m.x", types.DepBlocks) // g is exogenously blocked by sibling x; mid carries no blocker of its own
+
+	view, err := issueops.ViewMolecule(context.Background(), f.reader(), "m")
+	if err != nil {
+		t.Fatalf("ViewMolecule: %v", err)
+	}
+	ready := map[string]bool{}
+	for _, issue := range view.Ready {
+		ready[issue.ID] = true
+	}
+	if ready["m.leaf"] {
+		t.Fatalf("Ready = %v, want m.leaf NOT ready: m.g's exogenous block must inherit transitively through m.mid even though m.mid carries no direct blocker", ready)
+	}
+	if ready["m.mid"] {
+		t.Fatalf("Ready = %v, want m.mid NOT ready either: it inherits m.g's block directly", ready)
+	}
 }
 
 func TestMoleculeRootsWalksToTheTopmostMoleculeRoot(t *testing.T) {

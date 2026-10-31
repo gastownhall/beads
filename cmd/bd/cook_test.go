@@ -158,6 +158,93 @@ func newCookValidationTestCommand(searchPaths []string, variable string) *cobra.
 	return cmd
 }
 
+// TestRunCookAppliesConditionFiltering pins GH#7639: bd cook's runtime-mode
+// output must omit a step whose condition evaluates false for the given
+// vars, the same as bd mol pour's resolveAndCookFormulaWithVars already
+// does. Before the fix, cook's dry-run and ephemeral-JSON output both
+// listed the conditional step regardless of its condition.
+func TestRunCookAppliesConditionFiltering(t *testing.T) {
+	formulaDir := t.TempDir()
+	formulaPath := filepath.Join(formulaDir, "conditional.formula.toml")
+	formulaTOML := `formula = "conditional"
+version = 1
+type = "workflow"
+
+[vars.deploy]
+default = "false"
+
+[[steps]]
+id = "build"
+title = "Build"
+
+[[steps]]
+id = "deploy"
+title = "Deploy"
+needs = ["build"]
+condition = "{{deploy}}"
+`
+	if err := os.WriteFile(formulaPath, []byte(formulaTOML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("dry-run omits the false-condition step", func(t *testing.T) {
+		cmd := newCookValidationTestCommand(nil, "deploy=false")
+		stdout, stderr, err := runCookCapturingOutput(t, cmd, formulaPath)
+		if err != nil {
+			t.Fatalf("runCook: %v; stderr = %q", err, stderr)
+		}
+		if strings.Contains(stdout, "deploy: Deploy") {
+			t.Fatalf("runCook stdout = %q, want Deploy omitted when deploy=false", stdout)
+		}
+		if !strings.Contains(stdout, "build: Build") {
+			t.Fatalf("runCook stdout = %q, want Build still present", stdout)
+		}
+	})
+
+	t.Run("dry-run includes the true-condition step", func(t *testing.T) {
+		cmd := newCookValidationTestCommand(nil, "deploy=true")
+		stdout, stderr, err := runCookCapturingOutput(t, cmd, formulaPath)
+		if err != nil {
+			t.Fatalf("runCook: %v; stderr = %q", err, stderr)
+		}
+		if !strings.Contains(stdout, "deploy: Deploy") {
+			t.Fatalf("runCook stdout = %q, want Deploy present when deploy=true", stdout)
+		}
+	})
+
+	t.Run("ephemeral JSON output omits the false-condition step", func(t *testing.T) {
+		cmd := newCookEphemeralJSONTestCommand("deploy=false")
+		stdout, stderr, err := runCookCapturingOutput(t, cmd, formulaPath)
+		if err != nil {
+			t.Fatalf("runCook: %v; stderr = %q", err, stderr)
+		}
+		var resolved formula.Formula
+		if err := json.Unmarshal([]byte(stdout), &resolved); err != nil {
+			t.Fatalf("stdout not JSON: %v %q stderr=%q", err, stdout, stderr)
+		}
+		for _, step := range resolved.Steps {
+			if step.ID == "deploy" {
+				t.Fatalf("ephemeral output steps = %+v, want deploy step omitted when deploy=false", resolved.Steps)
+			}
+		}
+		if len(resolved.Steps) != 1 || resolved.Steps[0].ID != "build" {
+			t.Fatalf("ephemeral output steps = %+v, want only build", resolved.Steps)
+		}
+	})
+}
+
+func newCookEphemeralJSONTestCommand(variable string) *cobra.Command {
+	cmd := &cobra.Command{}
+	cmd.Flags().Bool("dry-run", false, "")
+	cmd.Flags().Bool("persist", false, "")
+	cmd.Flags().Bool("force", false, "")
+	cmd.Flags().StringSlice("search-path", nil, "")
+	cmd.Flags().String("prefix", "", "")
+	cmd.Flags().StringArray("var", []string{variable}, "")
+	cmd.Flags().String("mode", "runtime", "")
+	return cmd
+}
+
 // TestSubstituteFormulaVars tests variable substitution in formulas
 func TestSubstituteFormulaVars(t *testing.T) {
 	tests := []struct {
