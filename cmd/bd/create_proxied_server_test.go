@@ -375,3 +375,38 @@ func TestParseMarkdownDependencies_BlocksReversesDirection(t *testing.T) {
 		t.Errorf("got %#v, want %#v (reversed, like --deps)", got, want)
 	}
 }
+
+// GH#7519: a closed or in_progress node's status timestamp must not predate
+// its created_at. graphApplyNodeIssue stamps ClosedAt/StartedAt at plan time;
+// if it leaves CreatedAt zero, the insert stamps created_at later (one row at
+// a time), so a load crossing a second boundary stores closed_at < created_at.
+func TestGraphApplyNodeIssue_StatusTimestampsDoNotPredateCreatedAt(t *testing.T) {
+	for _, status := range []string{string(types.StatusClosed), string(types.StatusInProgress)} {
+		t.Run(status, func(t *testing.T) {
+			node := GraphApplyNode{Key: "n", Title: "N", Status: status}
+			issue := nodeIssueFromInput(t, node, createInput{createdBy: "t"})
+
+			// Mirror the insert (issueops/create.go, domain/db/issue.go): a zero
+			// CreatedAt is filled with the insert's own, later, clock reading.
+			insertNow := time.Now().UTC().Add(time.Second)
+			createdAt := issue.CreatedAt
+			if createdAt.IsZero() {
+				createdAt = insertNow
+			}
+
+			var stamped *time.Time
+			if status == string(types.StatusClosed) {
+				stamped = issue.ClosedAt
+			} else {
+				stamped = issue.StartedAt
+			}
+			if stamped == nil {
+				t.Fatalf("%s: status timestamp not stamped", status)
+			}
+			if stamped.Before(createdAt) {
+				t.Errorf("%s: status timestamp %v predates created_at %v (plan CreatedAt zero=%v)",
+					status, *stamped, createdAt, issue.CreatedAt.IsZero())
+			}
+		})
+	}
+}
