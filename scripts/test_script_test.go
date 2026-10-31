@@ -1,6 +1,7 @@
 package scripts_test
 
 import (
+	"bytes"
 	"io"
 	"os"
 	"os/exec"
@@ -88,6 +89,26 @@ func TestTestScriptPrebuiltBinaryContract(t *testing.T) {
 		commands := runTestScriptWithFakeGo(t, callerBinary)
 		assertFakeGoCommands(t, commands, "test")
 	})
+
+	// The launch probe asserts the routing: bare bd, from the first PATH
+	// entry, is the caller's binary even though it is not named bd.
+	t.Run("hooks reach a caller binary of another basename through bare bd", func(t *testing.T) {
+		callerDir := filepath.Join(t.TempDir(), "ci build artifacts")
+		if err := os.MkdirAll(callerDir, 0o755); err != nil {
+			t.Fatalf("create caller fixture root: %v", err)
+		}
+		callerBinary := filepath.Join(callerDir, "bd-linux-gms-pure"+nativeExecutableSuffix())
+		copyCurrentTestExecutable(t, callerBinary)
+
+		runTestScriptWithFakeGo(t, callerBinary)
+		entries, err := os.ReadDir(callerDir)
+		if err != nil {
+			t.Fatalf("read caller directory: %v", err)
+		}
+		if len(entries) != 1 {
+			t.Fatalf("caller directory holds %d entries after the run, want only the caller binary", len(entries))
+		}
+	})
 }
 
 // TestTestScriptPrebuiltBinaryLaunchProbe is selected only by the fake go test
@@ -111,6 +132,26 @@ func TestTestScriptPrebuiltBinaryLaunchProbe(t *testing.T) {
 	output, err := command.CombinedOutput()
 	if err != nil {
 		t.Fatalf("launch exported prebuilt binary through os/exec: %v\n%s", err, output)
+	}
+
+	// Installed hooks run bare bd: it must come from the first PATH entry and
+	// be the selected binary, whatever that binary is named. MSYS2's `ln -s`
+	// makes a copy by default (winsymlinks:deepcopy), so a byte-identical copy
+	// counts as the selected binary too.
+	bare, err := exec.LookPath("bd")
+	if err != nil {
+		t.Fatalf("bare bd does not resolve on the test PATH: %v", err)
+	}
+	if !sameTestScriptBinary(bare, expected) {
+		t.Fatalf("bare bd resolves to %q, want the selected binary %q", bare, expected)
+	}
+	first := filepath.SplitList(os.Getenv("PATH"))[0]
+	if !sameTestScriptFile(filepath.Dir(bare), first) {
+		t.Fatalf("bare bd resolves from %q, want the first PATH entry %q", filepath.Dir(bare), first)
+	}
+	output, err = exec.Command(bare, "-test.run=^$").CombinedOutput()
+	if err != nil {
+		t.Fatalf("launch bare bd through os/exec: %v\n%s", err, output)
 	}
 }
 
@@ -146,13 +187,14 @@ func runTestScriptWithFakeGo(t *testing.T, callerBinary string) []string {
 		t.Fatalf("bash is required to exercise scripts/test.sh: %v", err)
 	}
 	repoRoot := sourceRepoRoot(t)
-	env := testScriptEnvironment(testEnvRoot, tempRoot, expected, callerBinary)
+	systemPath := testScriptSystemPath(t)
+	env := testScriptEnvironment(testEnvRoot, tempRoot, expected, callerBinary, systemPath)
 	fakeBinShellPath := shellPathUnderEnv(t, bash, fakeBin, env)
 	fakeGoShellPath := shellPathUnderEnv(t, bash, fakeGo, env)
 	driverShellPath := shellPathUnderEnv(t, bash, currentTestExecutable(t), env)
 	callLogShellPath := shellPathUnderEnv(t, bash, callLog, env)
 	env = append(env,
-		"BEADS_TEST_COMMAND_PATH="+fakeBinShellPath+":/usr/bin:/bin",
+		"BEADS_TEST_COMMAND_PATH="+fakeBinShellPath+":"+systemPath,
 		testScriptDriverEnv+"="+driverShellPath,
 		testScriptFakeGoLogEnv+"="+callLogShellPath,
 	)
@@ -182,10 +224,29 @@ func runTestScriptWithFakeGo(t *testing.T, callerBinary string) []string {
 	return strings.Fields(string(content))
 }
 
-func testScriptEnvironment(testEnvRoot string, tempRoot string, expected string, callerBinary string) []string {
+// testScriptSystemPath is the PATH scripts/test.sh runs under: /usr/bin:/bin,
+// plus the directory holding coreutils when it is elsewhere (NixOS keeps them
+// only in /run/current-system/sw/bin). Windows keeps the MSYS paths unchanged.
+func testScriptSystemPath(t *testing.T) string {
+	t.Helper()
+	const systemPath = "/usr/bin:/bin"
+	if runtime.GOOS == "windows" {
+		return systemPath
+	}
+	dirname, err := exec.LookPath("dirname")
+	if err != nil {
+		t.Skipf("coreutils dirname is required to exercise scripts/test.sh: %v", err)
+	}
+	if dir := filepath.Dir(dirname); dir != "/usr/bin" && dir != "/bin" {
+		return systemPath + ":" + dir
+	}
+	return systemPath
+}
+
+func testScriptEnvironment(testEnvRoot string, tempRoot string, expected string, callerBinary string, systemPath string) []string {
 	home := filepath.Join(testEnvRoot, "home")
 	env := []string{
-		"PATH=/usr/bin:/bin",
+		"PATH=" + systemPath,
 		"HOME=" + portableTestScriptPath(home),
 		"USERPROFILE=" + portableTestScriptPath(home),
 		"TMPDIR=" + portableTestScriptPath(tempRoot),
@@ -256,6 +317,46 @@ func sameTestScriptFile(first string, second string) bool {
 	firstInfo, firstErr := os.Stat(first)
 	secondInfo, secondErr := os.Stat(second)
 	return firstErr == nil && secondErr == nil && os.SameFile(firstInfo, secondInfo)
+}
+
+func TestSameTestScriptBinary(t *testing.T) {
+	dir := t.TempDir()
+	selected := filepath.Join(dir, "selected")
+	copied := filepath.Join(dir, "copied")
+	other := filepath.Join(dir, "other")
+	for path, content := range map[string]string{selected: "bd v1", copied: "bd v1", other: "bd v2"} {
+		if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+	if !sameTestScriptBinary(selected, selected) {
+		t.Fatal("a file is not the same binary as itself")
+	}
+	if !sameTestScriptBinary(copied, selected) {
+		t.Fatal("a byte-identical copy is not accepted as the selected binary")
+	}
+	if sameTestScriptBinary(other, selected) {
+		t.Fatal("a different binary of the same size is accepted as the selected binary")
+	}
+	if sameTestScriptBinary(filepath.Join(dir, "missing"), selected) {
+		t.Fatal("a missing file is accepted as the selected binary")
+	}
+}
+
+// sameTestScriptBinary reports whether first is second or a byte-identical
+// copy of it.
+func sameTestScriptBinary(first string, second string) bool {
+	if sameTestScriptFile(first, second) {
+		return true
+	}
+	firstInfo, firstErr := os.Stat(first)
+	secondInfo, secondErr := os.Stat(second)
+	if firstErr != nil || secondErr != nil || firstInfo.Size() != secondInfo.Size() {
+		return false
+	}
+	firstContent, firstErr := os.ReadFile(first)
+	secondContent, secondErr := os.ReadFile(second)
+	return firstErr == nil && secondErr == nil && bytes.Equal(firstContent, secondContent)
 }
 
 func nativeExecutableSuffix() string {
