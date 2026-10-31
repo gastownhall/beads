@@ -48,6 +48,32 @@ func doltServerConfig(beadsDir, doltPath string) *dolt.Config {
 	return cfg
 }
 
+// federationServerProbe reports whether a Dolt SQL server answers at this
+// workspace's configured endpoint. The endpoint comes from
+// doltserver.ResolveEndpoint, the same resolver doltServerConfig's port and
+// doctor/dolt.go use, so the probe asks about the same server the remotes
+// check would open.
+func federationServerProbe(beadsDir string) bool {
+	ep := doltserver.ResolveEndpoint(beadsDir, nil)
+	if !ep.Resolved() {
+		return false
+	}
+	return isDoltServerRunning(ep.Host, ep.Port)
+}
+
+// serverRunningOrProbeable reports whether the federation checks should treat
+// the server as up: the PID file says so, or, when it does not, the configured
+// endpoint answers a probe. A server bd did not start (launchd, systemd, a
+// container) writes no PID file under the workspace, so the PID file alone
+// reports it as down. The probe is injected so the decision is testable
+// without a listener; a PID-tracked server never triggers a dial.
+func serverRunningOrProbeable(state *doltserver.State, probe func() bool) bool {
+	if state != nil && state.Running {
+		return true
+	}
+	return probe()
+}
+
 // CheckLegacyCLIRemotes warns when legacy filesystem CLI remotes are not
 // represented in SQL, because bd now treats SQL remotes as the source of truth.
 func CheckLegacyCLIRemotes(path string) DoctorCheck {
@@ -202,7 +228,13 @@ func CheckFederationRemotesAPI(path string) DoctorCheck {
 	// correctly resolves PID file paths (in beadsDir, not doltPath)
 	// and handles orchestrator daemon PID files.
 	serverState, _ := doltserver.IsRunning(beadsDir)
-	serverRunning := serverState != nil && serverState.Running
+	// Without a PID file the branch below opens the database on the very
+	// server it then reports as not running: a workspace with an origin
+	// remote gets "Server not running (1 peers configured)", one without
+	// gets its remotes check skipped. Probe the endpoint before deciding.
+	serverRunning := serverRunningOrProbeable(serverState, func() bool {
+		return federationServerProbe(beadsDir)
+	})
 
 	if !serverRunning {
 		// No server running - check if we have remotes configured
@@ -268,8 +300,12 @@ func CheckFederationRemotesAPI(path string) DoctorCheck {
 	}
 
 	// Server is running and peers are configured - check if remotesapi port is
-	// accessible.
-	return checkRemotesAPIListener(beadsDir, serverState.PID)
+	// accessible. A probe-confirmed server has no PID to report.
+	pid := 0
+	if serverState != nil {
+		pid = serverState.PID
+	}
+	return checkRemotesAPIListener(beadsDir, pid)
 }
 
 // checkRemotesAPIListener probes the remotesapi listener of a running server.
@@ -282,6 +318,8 @@ func CheckFederationRemotesAPI(path string) DoctorCheck {
 // The mode is classified once because it also decides the remedy. bd opens a
 // remotesapi listener only for the shared server it launches, so restarting is
 // the fix there; restarting a per-project server reproduces the same error.
+//
+// pid is 0 for a server the endpoint probe found rather than the PID file.
 func checkRemotesAPIListener(beadsDir string, pid int) DoctorCheck {
 	sharedMode := doltserver.IsSharedServerModeForDir(beadsDir)
 	remotesAPIPort := doltserver.ResolveRemotesAPIPortForMode(beadsDir, sharedMode)
@@ -312,11 +350,15 @@ func checkRemotesAPIListener(beadsDir string, pid int) DoctorCheck {
 		if sharedMode {
 			fix = "Restart the shared server so it picks up the resolved remotesapi port: bd dolt stop && bd dolt start"
 		}
+		serverDesc := fmt.Sprintf("Server running (PID %d)", pid)
+		if pid == 0 {
+			serverDesc = "Server reachable (no PID file in this workspace)"
+		}
 		return DoctorCheck{
 			Name:     "Federation remotesapi",
 			Status:   StatusError,
 			Message:  fmt.Sprintf("remotesapi port %d not accessible", remotesAPIPort),
-			Detail:   fmt.Sprintf("Server running (PID %d) but remotesapi port unreachable: %v", pid, err),
+			Detail:   fmt.Sprintf("%s but remotesapi port unreachable: %v", serverDesc, err),
 			Fix:      fix,
 			Category: CategoryFederation,
 		}
