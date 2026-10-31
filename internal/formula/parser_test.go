@@ -2298,3 +2298,56 @@ var noAutoMaintenance = []string{"-c", "maintenance.auto=false", "-c", "gc.auto=
 func gitCommand(args ...string) *exec.Cmd {
 	return exec.Command("git", append(append([]string{}, noAutoMaintenance...), args...)...)
 }
+
+// TestExtractVariables_WhitespaceForms pins that a placeholder with whitespace
+// inside the braces is a reference to the same variable as its tight form, so
+// cook lists and persists it; cmd/bd's variablePattern makes the same promise
+// for substitution at pour time.
+func TestExtractVariables_WhitespaceForms(t *testing.T) {
+	formula := &Formula{
+		Formula:     "mol-padded",
+		Description: "only padded {{ padded }}",
+		Steps: []*Step{
+			{ID: "s1", Title: "{{slug}} and {{ slug }} and {{\ttabbed\t}}"},
+			{ID: "s2", Notes: "{{ dupe }} {{dupe}} {{}} {{ 1bad }} {{ not closed"},
+		},
+	}
+
+	got := ExtractVariables(formula)
+	want := []string{"padded", "slug", "tabbed", "dupe"}
+	if len(got) != len(want) {
+		t.Fatalf("ExtractVariables = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("ExtractVariables = %v, want %v", got, want)
+			break
+		}
+	}
+}
+
+func TestSubstitute_WhitespaceForms(t *testing.T) {
+	vars := map[string]string{"slug": "ZZZ", "gate_repo": "acme/x"}
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"tight", "t {{slug}}", "t ZZZ"},
+		{"single space", "t {{ slug }}", "t ZZZ"},
+		{"tabs and multiple spaces", "t {{\t slug \t}}", "t ZZZ"},
+		{"underscore padded", "repo={{ gate_repo }}!", "repo=acme/x!"},
+		{"mixed forms", "{{slug}}/{{ slug }}/{{  slug  }}", "ZZZ/ZZZ/ZZZ"},
+		{"unknown padded stays literal", "x {{ nope }} y", "x {{ nope }} y"},
+		{"unknown tight stays literal", "x {{nope}} y", "x {{nope}} y"},
+		{"empty braces untouched", "x {{}} y", "x {{}} y"},
+		{"invalid identifier untouched", "x {{ 1bad }} y", "x {{ 1bad }} y"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := Substitute(tt.input, vars); got != tt.want {
+				t.Errorf("Substitute(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}

@@ -1298,6 +1298,7 @@ go_test(
         "sync_test.go",
         "telemetry_scrub_test.go",
         "template_test.go",
+        "template_var_whitespace_test.go",
         "test_dolt_server_cgo_test.go",
         "test_helpers_integration_test.go",
         "test_helpers_pure_test.go",

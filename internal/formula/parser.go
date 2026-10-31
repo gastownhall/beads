@@ -378,8 +378,11 @@ func mergeComposeRules(base, overlay *ComposeRules) *ComposeRules {
 	return result
 }
 
-// varPattern matches {{variable}} placeholders.
-var varPattern = regexp.MustCompile(`\{\{([a-zA-Z_][a-zA-Z0-9_]*)\}\}`)
+// varPattern matches {{variable}} placeholders. Whitespace inside the braces
+// ({{ var }}) is accepted and ignored, as cmd/bd's variablePattern does: the
+// two must agree on what counts as a reference, or cook lists and persists a
+// formula as taking no variables that pour then substitutes.
+var varPattern = regexp.MustCompile(`\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}`)
 
 // ExtractVariables finds all {{variable}} references in a formula.
 func ExtractVariables(formula *Formula) []string {
@@ -471,8 +474,13 @@ func metadataStrings(v interface{}, depth int) []string {
 // Substitute replaces {{variable}} placeholders with values.
 func Substitute(s string, vars map[string]string) string {
 	return varPattern.ReplaceAllStringFunc(s, func(match string) string {
-		// Extract variable name from {{name}}
-		name := match[2 : len(match)-2]
+		// Take the name from the capture group, not by slicing off the
+		// braces: the pattern allows inner whitespace ({{ name }}).
+		sub := varPattern.FindStringSubmatch(match)
+		if len(sub) < 2 {
+			return match
+		}
+		name := sub[1]
 		if val, ok := vars[name]; ok {
 			return val
 		}
