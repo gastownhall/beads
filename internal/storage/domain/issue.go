@@ -1087,6 +1087,15 @@ func (u *issueUseCaseImpl) create(ctx context.Context, params CreateIssueParams,
 	if err := u.issueRepo.Insert(ctx, issue, actor, insertOpts); err != nil {
 		return CreateIssueResult{}, fmt.Errorf("create: insert: %w", err)
 	}
+	// A caller-named child ID (bd create --id P.8, or an Issue.ID the caller
+	// set) did not come from NextChildID, so the parent's counter has not
+	// seen it. Without this the counter stays behind, and once the row is
+	// deleted the parent's next minted child reuses its suffix (GH#4750).
+	if explicitID {
+		if err := u.counterRepo.AdvanceForChild(ctx, issue); err != nil {
+			return CreateIssueResult{}, fmt.Errorf("create: advance child counter: %w", err)
+		}
+	}
 
 	if len(params.Comments) > 0 {
 		issue.Comments = make([]*types.Comment, 0, len(params.Comments))
