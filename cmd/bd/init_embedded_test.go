@@ -1000,6 +1000,53 @@ func TestEmbeddedInitBStealthAndForceReinit(t *testing.T) {
 
 	bd := buildEmbeddedBD(t)
 
+	// Regression (#7938): with no project config at startup, viper's ConfigFileUsed() is the
+	// user config, so persisting no-git-ops through it leaked stealth into every repository.
+	t.Run("stealth_no_git_ops_stays_out_of_user_config", func(t *testing.T) {
+		// bdEnv hard-codes HOME=dir, so this subtest drives exec.Command itself.
+		// A separate home keeps the legacy <home>/.beads/config.yaml candidate
+		// away from the project, XDG_CONFIG_HOME under it keeps the native user
+		// config out of directories shared with other tests, and the ceiling
+		// keeps the subprocess config walk inside the sandbox (bdEnv strips
+		// every BEADS_* variable, including the ceiling the test env exports).
+		home := t.TempDir()
+		userConfig := filepath.Join(home, ".config", "bd", "config.yaml")
+		if err := os.MkdirAll(filepath.Dir(userConfig), 0o755); err != nil {
+			t.Fatalf("mkdir user config dir: %v", err)
+		}
+		const seeded = "# user config\nactor: someone\n"
+		if err := os.WriteFile(userConfig, []byte(seeded), 0o644); err != nil {
+			t.Fatalf("seed user config: %v", err)
+		}
+
+		dir := t.TempDir()
+		initGitRepoAt(t, dir)
+		cmd := exec.Command(bd, "init", "--quiet", "--prefix", "sug", "--stealth")
+		cmd.Dir = dir
+		cmd.Env = append(envWithout(envWithout(bdEnv(dir), "HOME"), "XDG_CONFIG_HOME"),
+			"HOME="+home,
+			"XDG_CONFIG_HOME="+filepath.Join(home, ".config"),
+			"BEADS_CEILING_DIRECTORIES="+filepath.Dir(dir))
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("bd init --stealth failed: %v\n%s", err, out)
+		}
+
+		got, err := os.ReadFile(userConfig)
+		if err != nil {
+			t.Fatalf("read user config: %v", err)
+		}
+		if string(got) != seeded {
+			t.Errorf("stealth init modified the user config:\ngot:  %q\nwant: %q", got, seeded)
+		}
+		// The flag must land in the project config, read back the way
+		// isStealthRepo / bd doctor do (GH#2159).
+		beadsDir := filepath.Join(dir, ".beads")
+		projectConfig, _ := os.ReadFile(filepath.Join(beadsDir, "config.yaml"))
+		if config.GetStringFromDir(beadsDir, "no-git-ops") != "true" {
+			t.Errorf("stealth init did not persist no-git-ops in the project config; config.yaml:\n%s", projectConfig)
+		}
+	})
+
 	// Regression: bd init --stealth must not touch any git-visible files. Previously it
 	// created/modified the tracked project-root .gitignore via doctor.EnsureProjectGitignore, which
 	// showed up in `git status` and defeated stealth. Everything beads adds must be excluded
