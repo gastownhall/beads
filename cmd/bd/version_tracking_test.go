@@ -3,11 +3,13 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/storage/schema"
 )
 
 func TestGetVersionsSince(t *testing.T) {
@@ -636,6 +638,39 @@ func TestAutoMigrateOnVersionBump_NoDatabase(t *testing.T) {
 	autoMigrateOnVersionBump(tmpDir)
 
 	// Test passes if no panic occurs
+}
+
+func TestAutoMigrateFailureConsumesVersionOnlyForDeliberateDeferral(t *testing.T) {
+	if autoMigrateFailureConsumesVersion(&schema.DirtyTablesError{Tables: []string{"issues"}}) {
+		t.Fatal("DirtyTablesError consumed the version marker; the next command must retry")
+	}
+	if autoMigrateFailureConsumesVersion(errors.New("connection refused")) {
+		t.Fatal("ordinary migration failure consumed the version marker; the next command must retry")
+	}
+	if !autoMigrateFailureConsumesVersion(&schema.RemoteMigrateGateError{Pending: 1}) {
+		t.Fatal("remote migration consent deferral did not consume the one-shot marker")
+	}
+}
+
+func TestFinishBdVersionTrackingConsumesMarkerOnlyWhenAllowed(t *testing.T) {
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(beadsDir, localVersionFile)
+	if err := writeLocalVersion(marker, "1.1.0"); err != nil {
+		t.Fatal(err)
+	}
+
+	finishBdVersionTracking(beadsDir, false)
+	if got := readLocalVersion(marker); got != "1.1.0" {
+		t.Fatalf("failed reconciliation changed marker to %q, want old version", got)
+	}
+
+	finishBdVersionTracking(beadsDir, true)
+	if got := readLocalVersion(marker); got != Version {
+		t.Fatalf("successful/deferred reconciliation left marker at %q, want %q", got, Version)
+	}
 }
 
 // NOTE: TestAutoMigrateOnVersionBump_MigratesVersion, TestAutoMigrateOnVersionBump_AlreadyMigrated,
