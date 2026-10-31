@@ -609,6 +609,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   each entry still decodes as the closed issue, and the output stays an
   array (under `closed` with `--suggest-next`, `--continue` or
   `--claim-next`).
+- **POST /v0/beads/issues/{id}/comments** — the write half of comment
+  support over the wire (reads already ride
+  `getIssue?include_comments=true`). Plain sub-resource collection POST
+  returning the same pinned `Comment` schema the read path carries. (#5594)
 
 ### Changed
 
