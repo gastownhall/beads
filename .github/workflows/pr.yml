@@ -1643,10 +1643,17 @@ jobs:
           # secret, or rbe-fork closed or refusing) is red whatever
           # bazel-gate.sh's skip list allows; each lane's own result is
           # required above. A push to main's run never starts the call
-          # (skipped, which only its scope excuses).
+          # (skipped, which only its scope excuses). A fork repository's own
+          # CI (owner id not gastownhall's 255961667, bazel.yml's FORK_REPO)
+          # is always mode local, so a re-run never turns it green: the
+          # message says so instead of asking for one.
           BAZEL_REMOTE="$(bash .github/scripts/bazel-gate.sh remote)"
           if [[ "$BAZEL_REMOTE" == not-run-remotely ]]; then
-            echo "::error::The Bazel lanes did not run remotely on rbe-west (mode '${BAZEL_RBE_MODE:-none}'); they are this PR's only run of the Linux Go test tiers. In mode local on a PR without the CI secrets, rbe-fork was closed or refused this run: re-run all jobs later."
+            if [[ "${GITHUB_REPOSITORY_OWNER_ID:-}" != 255961667 ]]; then
+              echo "::error::The Bazel lanes did not run remotely on rbe-west (mode '${BAZEL_RBE_MODE:-none}'): this is a fork repository's own CI ($GITHUB_REPOSITORY), which always runs them in mode local, so this gate stays red here and a re-run will not change that. Open the pull request against gastownhall/beads to run them on rbe-west."
+            else
+              echo "::error::The Bazel lanes did not run remotely on rbe-west (mode '${BAZEL_RBE_MODE:-none}'); they are this PR's only run of the Linux Go test tiers. In mode local on a PR without the CI secrets, rbe-fork was closed or refused this run: re-run all jobs later."
+            fi
           fi
           export BAZEL_REMOTE
           export CI_GATE_SKIPPED_OK="$skipped_ok"

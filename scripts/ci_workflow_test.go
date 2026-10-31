@@ -1905,8 +1905,11 @@ const bazelRBEPrewarmIf = "${{ needs.rbe.outputs.mode == 'remote' }}"
 // F3: the rbe job's own runner (not gated by its own outputs - it decides
 // them). Same-repo PRs and merge_group/push/dispatch/schedule (never forks)
 // get Blacksmith; a pull_request_target farm run and any fork or Dependabot
-// PR stay GitHub-hosted. Pinned verbatim by TestSameRepoBlacksmithRunners.
-const wantRBERunsOn = "${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}"
+// PR stay GitHub-hosted. Only in gastownhall (gastownhallOwnerID): a fork
+// repository's own CI has no Blacksmith, so there it is GitHub-hosted on
+// every event (TestBazelRBERunnerOutsideGastownhall). Pinned verbatim by
+// TestSameRepoBlacksmithRunners.
+const wantRBERunsOn = "${{ github.repository_owner_id == '" + gastownhallOwnerID + "' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}"
 
 // The sameRepoBlacksmith{2,4,8}vcpu consts and the real-expression evaluator
 // that checks them now live in ci_blacksmith_runner_test.go (shared with
@@ -3190,7 +3193,10 @@ var fastChecksLegacyJobNames = map[string]string{
 func runPRGateStep(t *testing.T, step ciWorkflowStep, sc bazelGateScenario) (bool, string) {
 	t.Helper()
 	expr := regexp.MustCompile(`^\$\{\{ needs\.([A-Za-z0-9_-]+)\.(result|outputs\.([A-Za-z0-9_-]+))( \|\| 'skipped')? \}\}$`)
-	env := []string{"PATH=" + os.Getenv("PATH"), "GITHUB_EVENT_NAME=" + sc.event}
+	// GitHub's default variables for a run in gastownhall/beads; sc.flags
+	// (appended after: the last value wins) may move the run to a fork.
+	env := []string{"PATH=" + os.Getenv("PATH"), "GITHUB_EVENT_NAME=" + sc.event,
+		"GITHUB_REPOSITORY=" + mergeQueueOwnRepo, "GITHUB_REPOSITORY_OWNER_ID=" + gastownhallOwnerID}
 	for key, value := range sc.flags {
 		env = append(env, key+"="+value)
 	}
@@ -5059,10 +5065,11 @@ func TestBazelRBEJobDecidesOnce(t *testing.T) {
 			return
 		}
 		// F3: the rbe job's own runs-on picks a runner venue (Blacksmith vs
-		// ubuntu-latest) for trusted same-repo PRs; it shares some of the
-		// same trust predicates (github.actor, dependabot) as the mode
-		// decision but decides something else entirely (where the decide
-		// step runs, not what it decides) - not a re-derivation of mode.
+		// ubuntu-latest) for trusted same-repo PRs in gastownhall; it shares
+		// some of the same facts (github.actor, dependabot, the owner's id)
+		// as the mode decision but decides something else entirely (where
+		// the decide step runs, not what it decides) - not a re-derivation
+		// of mode.
 		if path == ".jobs."+bazelRBEJobName+".runs-on" {
 			return
 		}
