@@ -81,8 +81,8 @@ var upgradeReviewCmd = &cobra.Command{
 	Short: "Review changes since last bd version",
 	Long: `Show what's new in bd since the last version you used.
 
-Unlike 'bd info --whats-new' which shows the last 3 versions,
-this command shows ALL changes since your specific last version.
+Unlike 'bd info --whats-new', which shows the full documented release
+history, this command shows only the changes since your specific last version.
 
 If you're upgrading from an old version, you'll see the complete
 changelog of everything that changed since then.
