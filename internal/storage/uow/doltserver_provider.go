@@ -5,9 +5,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"time"
 
-	_ "github.com/go-sql-driver/mysql"
+	"github.com/go-sql-driver/mysql"
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
@@ -59,7 +60,7 @@ func NewDoltServerUOWProvider(
 	}
 
 	resolved := applyProviderOptions(opts)
-	ep, err := proxy.GetCreateDatabaseProxyServerEndpoint(absServerRootDir, proxy.OpenOpts{
+	openOpts := proxy.OpenOpts{
 		Backend:        backend,
 		ConfigFilePath: serverConfigFilePath,
 		LogFilePath:    serverLogFilePath,
@@ -68,10 +69,45 @@ func NewDoltServerUOWProvider(
 		Database:       database,
 		IdleTimeout:    idleTimeout,
 		Port:           proxyPort,
-	})
+	}
+	resolve := func(ctx context.Context) (proxy.Endpoint, error) {
+		return proxy.GetCreateDatabaseProxyServerEndpointContext(ctx, absServerRootDir, openOpts)
+	}
+	ep, err := resolve(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("uow: get proxy endpoint: %w", err)
 	}
 
-	return openAndInitSchema(ctx, ep, "", database, rootUser, rootPassword, "", teamServer, expectedProjectID, resolved)
+	// Keep the schema pool: steady-state opens still use one MySQL session.
+	// Bootstrap authority stays on ep until initialization succeeds. Only
+	// subsequent physical connections may discover a replacement endpoint.
+	var initialized atomic.Bool
+	beforeConnect := managedProxyBeforeConnect(&initialized, resolve)
+	provider, err := openAndInitSchema(ctx, ep, "", database, rootUser, rootPassword, "", teamServer, expectedProjectID, resolved, mysql.BeforeConnect(beforeConnect))
+	if err != nil {
+		return nil, err
+	}
+	initialized.Store(true)
+	return provider, nil
+}
+
+// managedProxyBeforeConnect uses the driver's per-connect configuration copy.
+// BeforeConnect runs before the TCP dial timeout, so discovery keeps its native
+// open budget and caller cancellation without consuming the five-second dial
+// budget. No statements or transactions are retried here.
+func managedProxyBeforeConnect(initialized *atomic.Bool, resolve func(context.Context) (proxy.Endpoint, error)) func(context.Context, *mysql.Config) error {
+	return func(ctx context.Context, cfg *mysql.Config) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if !initialized.Load() {
+			return nil
+		}
+		ep, err := resolve(ctx)
+		if err != nil {
+			return fmt.Errorf("uow: rediscover proxy endpoint: %w", err)
+		}
+		cfg.Addr = ep.Address()
+		return nil
+	}
 }

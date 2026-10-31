@@ -3,6 +3,7 @@
 package proxy
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -12,6 +13,9 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/procid"
+	"github.com/steveyegge/beads/internal/storage/dbproxy/identity"
+	"github.com/steveyegge/beads/internal/storage/dbproxy/pidfile"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/util"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -192,4 +196,289 @@ func TestForkExecChild_RotatesOversizedLogs(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCanceledDiscoveryDoesNotExecAfterStartWindow(t *testing.T) {
+	root := t.TempDir()
+	entered, release := holdStartBeforeExec(t, root)
+	require.NoError(t, os.WriteFile(filepath.Join(root, "exit-child.sh"), []byte("#!/bin/sh\ntouch \"$3/started\"\nexit 0\n"), 0o700))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := GetCreateDatabaseProxyServerEndpointContext(ctx, root, externalOpenOpts(root))
+		done <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(spawnStopFailAfter):
+		close(release)
+		t.Fatal("start did not reach pre-exec window")
+	}
+	cancel()
+	close(release)
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(spawnStopFailAfter):
+		t.Fatal("canceled start did not finish")
+	}
+	assert.NoFileExists(t, filepath.Join(root, "started"))
+	assert.NoFileExists(t, filepath.Join(root, spawnMarkerFileName))
+}
+
+// Force a peer to authenticate and adopt this opener's actual child before
+// canceling the original wait. Killing "our child" would kill the peer's proxy.
+func TestCanceledDiscoveryPreservesChildAdoptedByPeer(t *testing.T) {
+	root := t.TempDir()
+	stub := filepath.Join(root, "shared-child.sh")
+	require.NoError(t, os.WriteFile(stub, []byte("#!/bin/sh\nexec sleep 30\n"), 0o700))
+	previousResolve, previousHook := ResolveExecutable, afterProxyChildStart
+	ResolveExecutable = func() (string, error) { return stub, nil }
+	t.Cleanup(func() { ResolveExecutable, afterProxyChildStart = previousResolve, previousHook })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var childPID int
+	var birth procid.Token
+	adopted := false
+	afterProxyChildStart = func(child *spawnedProxyChild) {
+		childPID = child.cmd.Process.Pid
+		var err error
+		birth, err = procid.Capture(childPID)
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			handle, err := procid.Open(childPID, birth)
+			if err == nil {
+				_ = handle.Kill()
+				_ = handle.Close()
+			}
+			select {
+			case <-child.done:
+			case <-time.After(5 * time.Second):
+				t.Error("fixture child did not exit")
+			}
+		})
+		rootID, err := identity.RootID(root)
+		require.NoError(t, err)
+		_, err = identity.WriteSecret(root)
+		require.NoError(t, err)
+		// No MySQL data connection is needed for authenticated adoption.
+		var reply identity.IdentReply
+		var mu sync.RWMutex
+		control, err := startControl(root, func() identity.IdentReply {
+			mu.RLock()
+			defer mu.RUnlock()
+			return reply
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = control.Close() })
+		pf := pidfile.PidFile{Schema: pidfile.SchemaV2, Kind: pidfile.KindProxy,
+			Pid: childPID, Birth: string(birth), RootID: rootID, Port: 3307, ControlPort: control.Port()}
+		mu.Lock()
+		reply = identity.IdentReply{Schema: pf.Schema, Role: pf.Kind, RootID: pf.RootID,
+			PID: pf.Pid, Birth: pf.Birth, DataPort: pf.Port, ControlPort: pf.ControlPort}
+		mu.Unlock()
+		require.NoError(t, pidfile.Write(root, PIDFileName, pf))
+		peer, err := GetCreateDatabaseProxyServerEndpointContext(context.Background(), root, externalOpenOpts(root))
+		require.NoError(t, err)
+		require.Equal(t, pf.Port, peer.Port)
+		adopted = true
+		cancel()
+	}
+	_, err := GetCreateDatabaseProxyServerEndpointContext(ctx, root, externalOpenOpts(root))
+	require.ErrorIs(t, err, context.Canceled)
+	require.True(t, adopted, "peer must adopt before cancellation")
+	alive, err := procid.Verify(childPID, birth)
+	require.NoError(t, err)
+	assert.True(t, alive, "canceling the original opener must preserve a shared child")
+	assert.Equal(t, adoptionAdopted, readAndDial(root).status)
+}
+
+// These lifecycle tests use actual child processes because a returned timeout
+// alone cannot prove that startup cleanup ran or a peer's process survived.
+func installStartupChild(t *testing.T, root, script string, started func(*spawnedProxyChild)) *helperProcess {
+	t.Helper()
+	stub := filepath.Join(root, "startup-child.sh")
+	require.NoError(t, os.WriteFile(stub, []byte("#!/bin/sh\n"+script+"\n"), 0o700))
+	previousResolve, previousHook := ResolveExecutable, afterProxyChildStart
+	ResolveExecutable = func() (string, error) { return stub, nil }
+	child := &helperProcess{}
+	afterProxyChildStart = func(spawned *spawnedProxyChild) {
+		child.cmd, child.done = spawned.cmd, spawned.done
+		var err error
+		child.token, err = procid.Capture(child.cmd.Process.Pid)
+		// A deliberately failing child may already be gone. Its cmd/done
+		// still belong to this unreaped fixture and must be retained.
+		if err != nil && !procid.IsProcessGone(err) {
+			require.NoError(t, err)
+		}
+		if started != nil {
+			started(spawned)
+		}
+	}
+	t.Cleanup(func() {
+		ResolveExecutable, afterProxyChildStart = previousResolve, previousHook
+		if child.cmd == nil {
+			return
+		}
+		select {
+		case <-child.done:
+			return
+		default:
+		}
+		// This fixture owns the unreaped child. Do not use a handle closed
+		// by the resolver's defer, or signal a pid obtained from a pidfile.
+		_ = child.cmd.Process.Kill()
+		select {
+		case <-child.done:
+		case <-time.After(5 * time.Second):
+			t.Error("fixture child did not exit")
+		}
+	})
+	return child
+}
+
+func publishStartupChild(t *testing.T, root string, child *spawnedProxyChild) Endpoint {
+	t.Helper()
+	birth, err := procid.Capture(child.cmd.Process.Pid)
+	require.NoError(t, err)
+	rootID, err := identity.RootID(root)
+	require.NoError(t, err)
+	_, err = identity.WriteSecret(root)
+	require.NoError(t, err)
+	var reply identity.IdentReply
+	var mu sync.RWMutex
+	control, err := startControl(root, func() identity.IdentReply {
+		mu.RLock()
+		defer mu.RUnlock()
+		return reply
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = control.Close() })
+	pf := pidfile.PidFile{Schema: pidfile.SchemaV2, Kind: pidfile.KindProxy,
+		Pid: child.cmd.Process.Pid, Birth: string(birth), RootID: rootID,
+		Port: 3307, ControlPort: control.Port()}
+	mu.Lock()
+	reply = identity.IdentReply{Schema: pf.Schema, Role: pf.Kind, RootID: pf.RootID,
+		PID: pf.Pid, Birth: pf.Birth, DataPort: pf.Port, ControlPort: pf.ControlPort}
+	mu.Unlock()
+	require.NoError(t, pidfile.Write(root, PIDFileName, pf))
+	return Endpoint{Host: "127.0.0.1", Port: pf.Port}
+}
+
+func TestProxyStartupTimeoutKillsOwnedChild(t *testing.T) {
+	for _, entry := range []struct {
+		name string
+		open func(string, OpenOpts) (Endpoint, error)
+	}{
+		{"legacy", GetCreateDatabaseProxyServerEndpoint},
+		{"context", func(root string, opts OpenOpts) (Endpoint, error) {
+			return GetCreateDatabaseProxyServerEndpointContext(context.Background(), root, opts)
+		}},
+	} {
+		t.Run(entry.name, func(t *testing.T) {
+			root := t.TempDir()
+			child := installStartupChild(t, root, "exec sleep 120", nil)
+			_, err := entry.open(root, externalOpenOpts(root))
+			require.Error(t, err)
+			require.NotNil(t, child.cmd, "the actual child must start before the startup bound expires")
+			assert.Contains(t, err.Error(), "timeout waiting for proxy to become ready on port 3307")
+			assert.NotErrorIs(t, err, context.DeadlineExceeded, "prime must not classify our own timeout as its store timeout")
+			assertHelperExited(t, *child)
+			assert.NoFileExists(t, filepath.Join(root, spawnMarkerFileName))
+		})
+	}
+}
+
+func TestProxyOpenTimeoutPreservesLastSpawnError(t *testing.T) {
+	root := t.TempDir()
+	installStartupChild(t, root, "exit 7", func(_ *spawnedProxyChild) {
+		// Keep the outer opener waiting after its child's exit, so the
+		// operation bound must return the informative lastSpawnErr.
+		lock, err := util.TryLock(filepath.Join(root, LockFileName))
+		require.NoError(t, err)
+		t.Cleanup(lock.Unlock)
+	})
+	_, err := getCreateDatabaseProxyServerEndpointContext(context.Background(), root, externalOpenOpts(root), time.Now().Add(5*time.Second))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "proxy child exited before becoming ready on explicitly configured port 3307")
+	assert.Contains(t, err.Error(), externalOpenOpts(root).LogFilePath)
+	assert.Contains(t, err.Error(), "exit status 7")
+	assert.NotErrorIs(t, err, context.DeadlineExceeded)
+}
+
+func TestProxyCallerDeadlinePreservesChildAdoptedByPeer(t *testing.T) {
+	root := t.TempDir()
+	caller, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	adopted := false
+	child := installStartupChild(t, root, "exec sleep 120", func(spawned *spawnedProxyChild) {
+		want := publishStartupChild(t, root, spawned)
+		peer, err := GetCreateDatabaseProxyServerEndpoint(root, externalOpenOpts(root))
+		require.NoError(t, err)
+		require.Equal(t, want, peer)
+		adopted = true
+		<-caller.Done()
+	})
+	_, err := GetCreateDatabaseProxyServerEndpointContext(caller, root, externalOpenOpts(root))
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.True(t, adopted, "peer must authenticate before the caller deadline")
+	assertHelperAlive(t, *child)
+	assert.Equal(t, adoptionAdopted, readAndDial(root).status)
+}
+
+func TestProxyReadyReplyAtStartupDeadline(t *testing.T) {
+	for _, callerCancels := range []bool{false, true} {
+		name := "internal deadline accepts completed authentication"
+		if callerCancels {
+			name = "caller cancellation wins over completed authentication"
+		}
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			caller, cancelCaller := context.WithCancel(context.Background())
+			defer cancelCaller()
+			wait, cancelWait := context.WithTimeout(caller, 5*time.Second)
+			defer cancelWait()
+			previous := afterProxyIdentityRead
+			t.Cleanup(func() { afterProxyIdentityRead = previous })
+			var want Endpoint
+			child := installStartupChild(t, root, "exec sleep 120", func(spawned *spawnedProxyChild) {
+				want = publishStartupChild(t, root, spawned)
+			})
+			authenticated := false
+			afterProxyIdentityRead = func() {
+				authenticated = true
+				if callerCancels {
+					cancelCaller()
+				}
+				// Park only after the authenticated reply was validated, so
+				// the read-complete and deadline cases are both ready.
+				<-wait.Done()
+			}
+			lock, err := util.TryLock(filepath.Join(root, LockFileName))
+			require.NoError(t, err)
+			ep, err := spawnAndHandoffWait(caller, wait, root, externalOpenOpts(root), "", lock, adoptionResult{status: adoptionNoRecord})
+			require.True(t, authenticated)
+			if callerCancels {
+				require.ErrorIs(t, err, context.Canceled)
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, want, ep)
+			}
+			assertHelperAlive(t, *child)
+		})
+	}
+}
+
+func TestProxyStartupTimeoutHonorsStopEpoch(t *testing.T) {
+	root := t.TempDir()
+	child := installStartupChild(t, root, "exec sleep 120", func(_ *spawnedProxyChild) {
+		require.NoError(t, advanceStopEpoch(root))
+	})
+	lock, err := util.TryLock(filepath.Join(root, LockFileName))
+	require.NoError(t, err)
+	_, err = spawnAndHandoffContext(context.Background(), root, externalOpenOpts(root), time.Now().Add(5*time.Second), "", lock, adoptionResult{status: adoptionNoRecord})
+	require.ErrorIs(t, err, errStartInterrupted)
+	assert.NotErrorIs(t, err, context.DeadlineExceeded)
+	assertHelperAlive(t, *child)
 }

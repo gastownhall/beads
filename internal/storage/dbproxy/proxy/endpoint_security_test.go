@@ -3,6 +3,7 @@
 package proxy
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -847,4 +848,80 @@ func quarantines(t *testing.T, root, name string) []string {
 	matches, err := filepath.Glob(filepath.Join(root, name+".stale-*"))
 	require.NoError(t, err)
 	return matches
+}
+
+func TestEndpointDiscoveryCancellationWhileLocked(t *testing.T) {
+	root := t.TempDir()
+	lock, err := util.TryLock(filepath.Join(root, LockFileName))
+	require.NoError(t, err)
+	defer lock.Unlock()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	previous := beforeProxyLockWait
+	t.Cleanup(func() { beforeProxyLockWait = previous })
+	reachedWait := false
+	beforeProxyLockWait = func() {
+		reachedWait = true
+		cancel() // The held-lock branch has been reached with a live context.
+	}
+	_, err = GetCreateDatabaseProxyServerEndpointContext(ctx, root, externalOpenOpts(root))
+	require.ErrorIs(t, err, context.Canceled)
+	assert.True(t, reachedWait, "cancellation must not stop at the entry guard")
+	assert.NoFileExists(t, filepath.Join(root, spawnMarkerFileName))
+}
+
+func TestIdentityProbeCancellationDuringRead(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer listener.Close()
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err == nil {
+			accepted <- conn
+		}
+	}()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := identity.IdentifyContext(ctx, "127.0.0.1", listener.Addr().(*net.TCPAddr).Port, "test-secret", 5*time.Second)
+		done <- err
+	}()
+	select {
+	case conn := <-accepted:
+		defer conn.Close()
+	case <-time.After(time.Second):
+		t.Fatal("identity probe did not connect")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(time.Second):
+		t.Fatal("identity read ignored cancellation")
+	}
+}
+
+func TestCanceledOrphanCleanupLeavesExistingBackendAlone(t *testing.T) {
+	root := t.TempDir()
+	helper := startHelperProcess(t)
+	record := v2Record(t, root, pidfile.KindDoltBackend, helper)
+	require.NoError(t, pidfile.Write(root, server.PIDFileName, record))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	previous := beforeOrphanBackendKill
+	t.Cleanup(func() { beforeOrphanBackendKill = previous })
+	verified := false
+	beforeOrphanBackendKill = func() {
+		verified = true
+		cancel() // A verified handle exists, but no signal has been sent.
+	}
+	require.ErrorIs(t, cleanupOrphanBackendContext(ctx, root), context.Canceled)
+	assert.True(t, verified, "cleanup must reach verification before canceling")
+	assertHelperAlive(t, helper)
+	still, err := pidfile.Read(root, server.PIDFileName)
+	require.NoError(t, err)
+	require.NotNil(t, still)
+	assert.Equal(t, record.Birth, still.Birth)
 }
