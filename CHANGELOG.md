@@ -609,6 +609,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   each entry still decodes as the closed issue, and the output stays an
   array (under `closed` with `--suggest-next`, `--continue` or
   `--claim-next`).
+- `bd sync`'s `--json` (and the plain-text success line) now reports whether
+  local HEAD moved during the run, via new `pull_head_before`,
+  `pull_head_after`, and `local_head_moved` fields on the sync outcome.
+  Previously `"pulled": true` reported only that the pull step ran, so a
+  replica that silently drifted for days and one that was already current
+  produced byte-identical output — a supervising process had no way to tell
+  them apart. The field is named for what it measures rather than for what it
+  implies: HEAD moving is strong evidence a run did something and HEAD never
+  moving across many runs is worth investigating, but it is not proof of what
+  the remote sent in either direction, and the field comment records both ways
+  the two can diverge. All three are omitted or false when the commit hash
+  could not be read, and the text line falls back to a bare `Sync complete.`
+  rather than claiming currency it cannot evidence. Closes #6671 and #4068 (`--verbose` for `bd dolt pull`, held
+  open after #3589 as the tracking issue for the storage-layer rewrite that
+  has since landed): `bd sync` is now the supervised entry point that
+  answers both.
 
 ### Changed
 
