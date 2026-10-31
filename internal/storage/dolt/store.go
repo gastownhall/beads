@@ -1261,9 +1261,29 @@ func (s *DoltStore) withReadTxLongTimeout(ctx context.Context, fn func(tx *sql.T
 // conditional — otherwise a rolled-back attempt's values leak into post-tx
 // logic (verify passes, hooks, return values). See ready_claimer.ClaimNext's
 // `claimed = nil` reset for the canonical example.
+//
+// fn runs under the journal writer lock (see writeTxConn); a body that cannot
+// record a journal event uses withRetryTxNoJournal instead.
 func (s *DoltStore) withRetryTx(ctx context.Context, fn func(tx *sql.Tx) error) error {
 	return s.withRetryTxOn(ctx, s.db, fn)
 }
+
+// withRetryTxNoJournal is withRetryTx for a body that provably records no
+// journal event — config and metadata writes, journal prune. It takes no
+// journal writer lock, so it never queues behind journaled writers.
+// TestJournalWriterLock_NoJournalBodiesRecordNothing pins that no caller
+// reaches a journaling issueops mutator.
+func (s *DoltStore) withRetryTxNoJournal(ctx context.Context, fn func(tx *sql.Tx) error) error {
+	return s.retryWriteTx(ctx, s.db, unjournaledWrite, fn)
+}
+
+// writeLock says whether a write transaction takes the journal writer lock.
+type writeLock bool
+
+const (
+	journaledWrite   writeLock = true
+	unjournaledWrite writeLock = false
+)
 
 // withRetryTxOn is withRetryTx against a caller-chosen txBeginner instead of
 // the shared pool, so a caller that must hold a session-scoped resource (e.g.
@@ -1271,7 +1291,16 @@ func (s *DoltStore) withRetryTx(ctx context.Context, fn func(tx *sql.Tx) error) 
 // see withDeleteFence. Every retried attempt replays on that SAME connection,
 // which is required: txBeginner's one other implementer, *sql.Conn, is itself
 // the pinned session, there is no pool to hand back a different one.
+//
+// fn runs under the journal writer lock as in withRetryTx; on a pinned
+// *sql.Conn each attempt takes it on that same session, after the caller's own
+// lock (see writeTxSession).
 func (s *DoltStore) withRetryTxOn(ctx context.Context, beginner txBeginner, fn func(tx *sql.Tx) error) error {
+	return s.retryWriteTx(ctx, beginner, journaledWrite, fn)
+}
+
+// retryWriteTx is withRetryTxOn with the lock decision explicit.
+func (s *DoltStore) retryWriteTx(ctx context.Context, beginner txBeginner, lock writeLock, fn func(tx *sql.Tx) error) error {
 	// Keep circuit admission at the transaction retry boundary. Calling
 	// withRetry from here would multiply retries and could replay a write after
 	// an indeterminate commit.
@@ -1289,7 +1318,7 @@ func (s *DoltStore) withRetryTxOn(ctx context.Context, beginner txBeginner, fn f
 	var pending issueops.BlockedRecheck
 	if err := backoff.Retry(func() error {
 		var err error
-		pending, err = s.commitWriteTxOn(ctx, beginner, fn)
+		pending, err = s.commitWriteTxWith(ctx, beginner, lock, fn)
 		if err == nil {
 			if !circuitWriteManaged(ctx) && s.breaker != nil {
 				s.breaker.RecordSuccess()
@@ -1340,7 +1369,17 @@ func (s *DoltStore) withRetryTxOn(ctx context.Context, beginner txBeginner, fn f
 }
 
 func (s *DoltStore) withWriteTx(ctx context.Context, fn func(tx *sql.Tx) error) error {
-	pending, err := s.commitWriteTx(ctx, fn)
+	return s.writeTxOnce(ctx, journaledWrite, fn)
+}
+
+// withWriteTxNoJournal is withWriteTx for a body that provably records no
+// journal event (see withRetryTxNoJournal).
+func (s *DoltStore) withWriteTxNoJournal(ctx context.Context, fn func(tx *sql.Tx) error) error {
+	return s.writeTxOnce(ctx, unjournaledWrite, fn)
+}
+
+func (s *DoltStore) writeTxOnce(ctx context.Context, lock writeLock, fn func(tx *sql.Tx) error) error {
+	pending, err := s.commitWriteTxWith(ctx, s.db, lock, fn)
 	if err != nil {
 		return err
 	}
@@ -1359,14 +1398,35 @@ func (s *DoltStore) commitWriteTx(ctx context.Context, fn func(tx *sql.Tx) error
 // commitWriteTxOn is commitWriteTx against a caller-chosen txBeginner — see
 // withRetryTxOn.
 func (s *DoltStore) commitWriteTxOn(ctx context.Context, beginner txBeginner, fn func(tx *sql.Tx) error) (issueops.BlockedRecheck, error) {
+	return s.commitWriteTxWith(ctx, beginner, journaledWrite, fn)
+}
+
+// commitWriteTxWith is commitWriteTxOn with the lock decision explicit.
+func (s *DoltStore) commitWriteTxWith(ctx context.Context, beginner txBeginner, lock writeLock, fn func(tx *sql.Tx) error) (issueops.BlockedRecheck, error) {
 	if s.closed.Load() {
 		return issueops.BlockedRecheck{}, ErrStoreClosed
 	}
-	tx, err := beginner.BeginTx(ctx, nil)
+	conn, release, err := s.writeTxSession(ctx, beginner, lock)
+	if err != nil {
+		return issueops.BlockedRecheck{}, err
+	}
+	defer release()
+	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		return issueops.BlockedRecheck{}, fmt.Errorf("begin write tx: %w", err)
 	}
-	clearJournalScope := s.scopeEventsJournalTransaction(tx)
+	// Runs before release: Conn.Close waits for an open Tx, so a panicking fn
+	// would otherwise hang there instead of propagating. A no-op after Commit.
+	defer func() { _ = tx.Rollback() }()
+	// An unlocked tx is scoped so that an emit in its body fails with
+	// issueops.ErrJournalUnlockedTx instead of allocating a seq outside the
+	// journal writer lock, or skipping silently as an unscoped tx would.
+	var clearJournalScope func()
+	if lock == journaledWrite {
+		clearJournalScope = s.scopeEventsJournalTransaction(tx)
+	} else {
+		clearJournalScope = issueops.ScopeUnlockedJournalTransaction(tx)
+	}
 	defer clearJournalScope()
 	clearVersionScope, err := s.scopeVersionedHistoryTransaction(ctx, tx)
 	if err != nil {
@@ -1382,6 +1442,85 @@ func (s *DoltStore) commitWriteTxOn(ctx context.Context, beginner txBeginner, fn
 		return issueops.BlockedRecheck{}, wrapSQLCommitError("commit write tx", err)
 	}
 	return issueops.TakeBlockedRecheck(tx), nil
+}
+
+// writeTxConn pins the connection a journaled write transaction runs on and, in
+// server mode with the events journal on, takes the journal writer lock on it
+// first (see lockJournalWriter). The caller begins its transaction on conn and
+// calls release once the transaction has committed or rolled back; release
+// drops the lock and returns conn to the pool — or discards the session when
+// the RELEASE_LOCK fails or outlives issueops.JournalWriterUnlockTimeout — and
+// is idempotent.
+//
+// Every raw transaction that scopes the events journal must start here (or, on
+// a connection it already pinned, through lockJournalWriter): the lock protects
+// nothing unless every journaled writer takes it.
+func (s *DoltStore) writeTxConn(ctx context.Context) (*sql.Conn, func(), error) {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("begin write tx: %w", err)
+	}
+	unlock, err := s.lockJournalWriter(ctx, conn)
+	if err != nil {
+		_ = conn.Close()
+		return nil, nil, err
+	}
+	return conn, sync.OnceFunc(func() {
+		unlock()
+		_ = conn.Close()
+	}), nil
+}
+
+// unlockedTxConn is writeTxConn without the journal writer lock, for the
+// NoJournal transaction helpers.
+func (s *DoltStore) unlockedTxConn(ctx context.Context) (*sql.Conn, func(), error) {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("begin write tx: %w", err)
+	}
+	return conn, sync.OnceFunc(func() { _ = conn.Close() }), nil
+}
+
+// writeTxSession pins the session a write transaction on beginner runs on. A
+// *sql.Conn beginner is a session the caller pinned itself and may hold its own
+// lock on (withDeleteFence's GET_LOCK): a journaled write takes the journal
+// writer lock on that same session, so the order is the caller's lock first,
+// then the journal's, and release drops only the journal lock, leaving the
+// connection to the caller. Any other beginner is the store's pool, and the
+// session comes from writeTxConn or unlockedTxConn.
+func (s *DoltStore) writeTxSession(ctx context.Context, beginner txBeginner, lock writeLock) (*sql.Conn, func(), error) {
+	if conn, ok := beginner.(*sql.Conn); ok {
+		if lock == unjournaledWrite {
+			return conn, func() {}, nil
+		}
+		unlock, err := s.lockJournalWriter(ctx, conn)
+		if err != nil {
+			return nil, nil, err
+		}
+		return conn, unlock, nil
+	}
+	if lock == journaledWrite {
+		return s.writeTxConn(ctx)
+	}
+	return s.unlockedTxConn(ctx)
+}
+
+// lockJournalWriter takes the journal writer lock on conn
+// (issueops.LockJournalWriter) when the store is in server mode with the
+// events journal on, and is a no-op otherwise. It must run BEFORE the
+// transaction begins; the returned unlock is idempotent and must run after it
+// has committed or rolled back — and before any follow-up journaled write on
+// another connection (a post-commit blocked recheck), which queues on this
+// lock and would otherwise wait out the whole budget.
+func (s *DoltStore) lockJournalWriter(ctx context.Context, conn *sql.Conn) (func(), error) {
+	if !s.serverMode || !s.eventsJournalEnabled.Load() {
+		return func() {}, nil
+	}
+	unlock, err := issueops.LockJournalWriter(ctx, conn, s.database)
+	if err != nil {
+		return nil, fmt.Errorf("begin write tx: %w", err)
+	}
+	return unlock, nil
 }
 
 // recheckBlockedAfterCommit recomputes the blocked state of the dependents a

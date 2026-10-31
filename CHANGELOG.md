@@ -679,6 +679,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   base like git's ORT strategy (dolthub/dolt#12125). Some merges that 2.5.x
   completed silently now conflict, and some spurious conflicts no longer
   occur. Pull/push through a single remote is unaffected.
+
+- **A journal emit inside a NoJournal write transaction now fails** with
+  `issueops.ErrJournalUnlockedTx` instead of being skipped, so a journaled
+  write can no longer slip onto a transaction that does not take the journal
+  writer lock.
+
 - Over an HTTP workspace, `bd ready --json` without `BD_JSON_ENVELOPE` no
   longer sends `GET /v0/beads/ready:count` after a page the limit cut short:
   the total only went into the stderr hint. It lists one row past the limit
@@ -2338,6 +2344,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `bd dolt start` only when bd manages the server. A resolved port that does
   not answer keeps today's error. (bd-7pkvvd,
   [#7729](https://github.com/gastownhall/beads/pull/7729))
+
+- **Journaled writes in server mode queue instead of aborting each other**
+  ([#6117](https://github.com/gastownhall/beads/issues/6117)). Every write
+  that records a journal event now waits for a per-database server lock
+  before its transaction begins, instead of losing its commit on
+  `bd_events_seq` with a serialization failure and replaying. A holder that
+  goes silent for 30 s (a client that froze mid-write) is reclaimed, so it
+  cannot block the other writers until the server's idle cut.
+
 - An HTTP workspace whose server cannot be reached now says which step
   failed. A connect that is refused names the address and says nothing is
   listening; one that times out (a filtered port, a down host) names the

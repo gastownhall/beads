@@ -69,6 +69,9 @@ type doltSQLProvider struct {
 	// provider instance only. See SetVersionedHistoryEnabled and
 	// DeferVersionedHistory.
 	versionedHistory issueops.VersionedHistorySwitch
+	// database names the journal writer lock (see lockJournalWriter), so the
+	// lock is the one the dolt store's writers on the same database take.
+	database string
 }
 
 // SetEventsJournalEnabled activates the durable events journal for every unit
@@ -231,8 +234,17 @@ func (p *doltSQLProvider) BeginTx(ctx context.Context) (Tx, error) {
 		return nil, fmt.Errorf("uow: pin connection: %w", err)
 	}
 
+	unlock := func() {}
+	if p.eventsJournalEnabled.Load() && isJournalWriter(ctx) {
+		if unlock, err = lockJournalWriter(ctx, conn, p.database); err != nil {
+			_ = conn.Close()
+			return nil, err
+		}
+	}
+
 	_, err = conn.ExecContext(ctx, "START TRANSACTION;")
 	if err != nil {
+		unlock()
 		_ = conn.Close()
 		return nil, fmt.Errorf("uow: failed to start transaction: %w", err)
 	}
@@ -257,7 +269,40 @@ func (p *doltSQLProvider) BeginTx(ctx context.Context) (Tx, error) {
 		clearJournalScope: issueops.ScopeEventsJournalTransaction(conn, p.eventsJournalEnabled.Load()),
 		clearVersionScope: issueops.ScopeVersionedHistoryTransaction(conn, versioned),
 		clearRecheckScope: issueops.ScopeBlockedRecheckTransaction(conn),
+		unlockJournal:     unlock,
 	}, nil
+}
+
+type journalWriterKey struct{}
+
+// withJournalWriter marks ctx as opening a unit of work that may commit
+// journaled writes. RunTxResultWithin and RunTxScoped (the heartbeat, whose
+// re-arm journals) set it: every committing unit of work goes through one of
+// them, while reads (RunTxRead and the direct NewUOW readers, which never
+// commit) and the ephemeral metadata/prune writes (RunTxEphemeral), which
+// record no journal event, leave it unset and never queue on the lock.
+func withJournalWriter(ctx context.Context) context.Context {
+	return context.WithValue(ctx, journalWriterKey{}, true)
+}
+
+func isJournalWriter(ctx context.Context) bool {
+	on, _ := ctx.Value(journalWriterKey{}).(bool)
+	return on
+}
+
+// lockJournalWriter queues a journaled unit of work behind the others on
+// database, BEFORE its transaction starts: the same lock, name and bounds as the
+// dolt store's writers (issueops.LockJournalWriter, which says why the lock
+// exists and why it must precede START TRANSACTION). BeginTx calls it when the
+// journal is on and ctx carries the write intent; the provider always fronts a
+// SQL server, so those are the only conditions. The returned unlock is
+// idempotent and bounded, and discards the session when the release fails.
+func lockJournalWriter(ctx context.Context, conn *sql.Conn, database string) (func(), error) {
+	unlock, err := issueops.LockJournalWriter(ctx, conn, database)
+	if err != nil {
+		return nil, fmt.Errorf("uow: %w", err)
+	}
+	return unlock, nil
 }
 
 // selectProbeDatabase lets schema's pre-lock convergence probe reach the
@@ -943,6 +988,7 @@ func openAndInitSchema(ctx context.Context, ep proxy.Endpoint, backend, database
 			preview:           opts.preview,
 			readOnly:          opts.readOnly,
 			proxiedServerMode: opts.proxiedServerMode,
+			database:          database,
 		}
 	}
 

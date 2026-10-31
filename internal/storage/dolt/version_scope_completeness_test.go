@@ -148,15 +148,18 @@ func TestEveryRawTxVersionScopeIsScopedOrExempt(t *testing.T) {
 // this second arm exists rather than being folded into the first.
 var txMintingWrappers = []string{
 	"DoltStore.runDoltTransactionRecording",
-	// withWriteTx and withRetryTx delegate transaction creation and scoping to
-	// commitWriteTx, which itself only delegates to commitWriteTxOn(ctx, s.db,
-	// fn) — the mc-zndi7.73 delete-fence split moved the actual BeginTx call
-	// (and the scope calls beside it) down into commitWriteTxOn so a caller
-	// holding a session-scoped resource (withDeleteFence's GET_LOCK'd
-	// *sql.Conn) could mint the retried transaction on THAT connection
-	// instead of the pool. commitWriteTxOn is therefore the real tx-minting
-	// wrapper now; list it, not its thin commitWriteTx delegate.
-	"DoltStore.commitWriteTxOn",
+	// withWriteTx and withRetryTx delegate transaction creation and scoping
+	// down a chain of thin delegates: commitWriteTx calls
+	// commitWriteTxOn(ctx, s.db, fn), which calls commitWriteTxWith(ctx,
+	// beginner, journaledWrite, fn). The mc-zndi7.73 delete-fence split moved
+	// the BeginTx call (and the scope calls beside it) below commitWriteTx so
+	// a caller holding a session-scoped resource (withDeleteFence's GET_LOCK'd
+	// *sql.Conn) could mint the retried transaction on THAT connection instead
+	// of the pool; the journal writer lock then moved them once more, into
+	// commitWriteTxWith, so the NoJournal helpers can begin an unlocked
+	// transaction through the same body. commitWriteTxWith is therefore the
+	// real tx-minting wrapper; list it, not its thin delegates.
+	"DoltStore.commitWriteTxWith",
 }
 
 // TestTxMintingWrappersScopeVersionedHistory covers the half

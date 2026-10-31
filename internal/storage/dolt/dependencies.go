@@ -98,7 +98,12 @@ func (s *DoltStore) RemoveDependencyWithOptions(ctx context.Context, issueID, de
 	return s.withCircuitWrite(ctx, func(ctx context.Context) error {
 		// Wisps live in dolt_ignored tables — skip Dolt versioning entirely.
 		if s.isActiveWisp(ctx, issueID) {
-			tx, err := s.db.BeginTx(ctx, nil)
+			conn, release, err := s.writeTxConn(ctx)
+			if err != nil {
+				return err
+			}
+			defer release()
+			tx, err := conn.BeginTx(ctx, nil)
 			if err != nil {
 				return fmt.Errorf("failed to begin transaction: %w", err)
 			}
@@ -119,13 +124,18 @@ func (s *DoltStore) RemoveDependencyWithOptions(ctx context.Context, issueID, de
 			if _, err := issueops.RemoveDependencyInTx(ctx, tx, issueID, dependsOnID, actor, rmOpts.EmitEvent); err != nil {
 				return err
 			}
-			if err := s.commitSQLTxAndRecheck(ctx, "commit remove wisp dependency", tx); err != nil {
+			if err := s.commitSQLTxAndRecheck(ctx, "commit remove wisp dependency", tx, release); err != nil {
 				return err
 			}
 			return nil
 		}
 
-		tx, err := s.db.BeginTx(ctx, nil)
+		conn, release, err := s.writeTxConn(ctx)
+		if err != nil {
+			return err
+		}
+		defer release()
+		tx, err := conn.BeginTx(ctx, nil)
 		if err != nil {
 			return fmt.Errorf("failed to begin transaction: %w", err)
 		}
@@ -153,6 +163,9 @@ func (s *DoltStore) RemoveDependencyWithOptions(ctx context.Context, issueID, de
 		if err := s.commitSQLTx(ctx, "sql commit", tx); err != nil {
 			return err
 		}
+		// Drop the journal writer lock before the deferred recheck, a journaled
+		// write of its own that queues on it.
+		release()
 		// The removal is durable; its dependents are settled after this
 		// removal's own Dolt commit so the recheck's commit follows it.
 		pending := issueops.TakeBlockedRecheck(tx)
