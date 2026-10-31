@@ -84,7 +84,11 @@ const lenientSharedGateGuidance = "  This is a coordination decision, not an aut
 	"  migration unless you are the single designated migrator (only ONE\n" +
 	"  clone may migrate a shared remote, else the schema forks; #4259):\n" +
 	"    • designated migrator (only ONE machine): bd migrate --force && bd dolt push\n" +
-	"    • every other clone (another already migrated): bd bootstrap\n" +
+	"    • every other clone (another already migrated): adopt it. Bare\n" +
+	"      bd bootstrap reports \"Nothing to do.\" on this existing database; with\n" +
+	"      no other bd process using it, follow the adoption steps (move it aside,\n" +
+	"      re-clone, restore unpushed work from a previous-version export):\n" +
+	"        " + schema.AdoptionGuideURL + "\n" +
 	"    • several machines: only ONE migrates; sync each other clone and run\n" +
 	"      bd dolt pull after the migrator pushes, before upgrading it\n"
 

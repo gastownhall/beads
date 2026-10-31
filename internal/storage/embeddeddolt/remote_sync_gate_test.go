@@ -368,7 +368,8 @@ func TestEmbeddedLenientOpenWarning_OtherRefusalsKeepBluntGuidance(t *testing.T)
 
 	for _, want := range []string{
 		"designated migrator (only ONE machine): bd migrate --force && bd dolt push",
-		"every other clone (another already migrated): bd bootstrap",
+		"every other clone (another already migrated): adopt it",
+		schema.AdoptionGuideURL,
 		"Read-only command: continuing on schema v",
 	} {
 		if !strings.Contains(warning, want) {
@@ -377,5 +378,8 @@ func TestEmbeddedLenientOpenWarning_OtherRefusalsKeepBluntGuidance(t *testing.T)
 	}
 	if strings.Contains(warning, "This clone is BEHIND the remote") {
 		t.Errorf("the data-behind body leaked into a non-data-behind refusal; got:\n%s", warning)
+	}
+	if strings.Contains(warning, "every other clone (another already migrated): bd bootstrap\n") || strings.Contains(warning, "mv .beads") {
+		t.Errorf("blunt warning prescribes bare bd bootstrap or a filesystem command; got:\n%s", warning)
 	}
 }
