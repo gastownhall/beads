@@ -63,7 +63,11 @@ type Endpoint struct {
 	password    string
 	passwordSet bool
 	TLS         bool
-	Database    string
+	// AllowCleartextPassword is dolt_server_allow_cleartext_password
+	// (BEADS_DOLT_SERVER_ALLOW_CLEARTEXT_PASSWORD) as configured, with no TLS
+	// gate; CleartextAuth pairs it with TLS and refuses it without.
+	AllowCleartextPassword bool
+	Database               string
 	// CredentialCommand is BEADS_DOLT_CREDENTIAL_COMMAND, the gateway
 	// credential the store runs for its user.
 	CredentialCommand string
@@ -96,19 +100,20 @@ func ResolveEndpoint(beadsDir string, fileCfg *configfile.Config) Endpoint {
 // endpointFor is the endpoint fileCfg names with dial's port and mode.
 func endpointFor(beadsDir string, fileCfg *configfile.Config, dial *Config) Endpoint {
 	ep := Endpoint{
-		BeadsDir:          beadsDir,
-		Host:              fileCfg.GetDoltServerHost(),
-		Port:              dial.Port,
-		PortSource:        dial.PortSource,
-		PortSharedServer:  dial.PortSharedServer,
-		Mode:              dial.Mode,
-		Socket:            fileCfg.GetDoltServerSocket(),
-		User:              fileCfg.GetDoltServerUser(),
-		TLS:               fileCfg.GetDoltServerTLS(),
-		Database:          fileCfg.GetDoltDatabase(),
-		CredentialCommand: fileCfg.GetDoltCredentialCommand(),
-		SharedServer:      IsSharedServerMode(),
-		AutoStartDisabled: IsAutoStartDisabled(),
+		BeadsDir:               beadsDir,
+		Host:                   fileCfg.GetDoltServerHost(),
+		Port:                   dial.Port,
+		PortSource:             dial.PortSource,
+		PortSharedServer:       dial.PortSharedServer,
+		Mode:                   dial.Mode,
+		Socket:                 fileCfg.GetDoltServerSocket(),
+		User:                   fileCfg.GetDoltServerUser(),
+		TLS:                    fileCfg.GetDoltServerTLS(),
+		Database:               fileCfg.GetDoltDatabase(),
+		AllowCleartextPassword: fileCfg.GetDoltServerAllowCleartextPassword(),
+		CredentialCommand:      fileCfg.GetDoltCredentialCommand(),
+		SharedServer:           IsSharedServerMode(),
+		AutoStartDisabled:      IsAutoStartDisabled(),
 	}
 	return ep
 }
@@ -223,6 +228,17 @@ func (e Endpoint) WithIdentity(ctx context.Context) (Endpoint, error) {
 	return e, nil
 }
 
+// CleartextAuth is whether a dial to e may answer a mysql_clear_password
+// auth request: AllowCleartextPassword, refused without TLS
+// (configfile.ValidateServerAuthConfig owns the refusal text), so no caller
+// that dials through the endpoint sends a password in the clear.
+func (e Endpoint) CleartextAuth() (bool, error) {
+	if err := configfile.ValidateServerAuthConfig(e.AllowCleartextPassword, e.TLS); err != nil {
+		return false, err
+	}
+	return e.AllowCleartextPassword, nil
+}
+
 // DialDSN is the connection to e the store would make, on database ("" for
 // none): its transport (SocketTransport), the identity it presents
 // (WithIdentity) and the password keyed to its port. It refuses an endpoint
@@ -232,18 +248,23 @@ func (e Endpoint) DialDSN(ctx context.Context, database string) (doltutil.Server
 	if err := e.UnresolvedError(); err != nil {
 		return doltutil.ServerDSN{}, err
 	}
+	allowCleartext, err := e.CleartextAuth()
+	if err != nil {
+		return doltutil.ServerDSN{}, err
+	}
 	id, err := e.WithIdentity(ctx)
 	if err != nil {
 		return doltutil.ServerDSN{}, fmt.Errorf("resolving dolt credential command: %w", err)
 	}
 	return doltutil.ServerDSN{
-		Socket:   e.Transport(),
-		Host:     e.Host,
-		Port:     e.Port,
-		User:     id.User,
-		Password: e.Password(),
-		Database: database,
-		TLS:      e.TLS,
+		Socket:                  e.Transport(),
+		Host:                    e.Host,
+		Port:                    e.Port,
+		User:                    id.User,
+		Password:                e.Password(),
+		Database:                database,
+		TLS:                     e.TLS,
+		AllowCleartextPasswords: allowCleartext,
 	}, nil
 }
 

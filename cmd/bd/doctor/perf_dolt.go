@@ -150,13 +150,20 @@ func runDoltServerDiagnostics(metrics *DoltPerfMetrics, cfg *configfile.Config, 
 	// GetDoltServerPasswordForPort checks BEADS_DOLT_PASSWORD env first, then
 	// falls back to ~/.config/beads/credentials keyed by [host:port] — required
 	// for externally-hosted Dolt servers (bd-h5k7).
+	allowCleartext := cfg.GetDoltServerAllowCleartextPassword()
+	tls := cfg.GetDoltServerTLS()
+	if err := configfile.ValidateServerAuthConfig(allowCleartext, tls); err != nil {
+		return err
+	}
+
 	dsn := doltutil.ServerDSN{
-		Host:     host,
-		Port:     port,
-		User:     cfg.GetDoltServerUser(),
-		Password: cfg.GetDoltServerPasswordForPort(port),
-		Database: cfg.GetDoltDatabase(),
-		TLS:      cfg.GetDoltServerTLS(),
+		Host:                    host,
+		Port:                    port,
+		User:                    cfg.GetDoltServerUser(),
+		Password:                cfg.GetDoltServerPasswordForPort(port),
+		Database:                cfg.GetDoltDatabase(),
+		TLS:                     tls,
+		AllowCleartextPasswords: allowCleartext,
 	}.String()
 
 	// Measure connection time

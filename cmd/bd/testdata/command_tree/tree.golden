@@ -1890,8 +1890,11 @@ bd dolt
     | Remote server authentication (password + TLS) is NOT stored via 'bd dolt set'
     | (keeps secrets out of metadata.json). Configure them with:
     |
-    |   BEADS_DOLT_PASSWORD       Server password (highest priority)
-    |   BEADS_DOLT_SERVER_TLS     Enable TLS (set to "1" or "true")
+    |   BEADS_DOLT_PASSWORD                      Server password (highest priority)
+    |   BEADS_DOLT_SERVER_TLS                    Enable TLS (set to "1" or "true")
+    |   BEADS_DOLT_SERVER_ALLOW_CLEARTEXT_PASSWORD
+    |                                             Allow mysql_clear_password auth
+    |                                             ("1"/"true"); requires BEADS_DOLT_SERVER_TLS=1
     |   BEADS_DOLT_SERVER_USER    MySQL user override (else use 'bd dolt set user')
     |   BEADS_CREDENTIALS_FILE    Optional path to credentials file
     |
@@ -1912,7 +1915,9 @@ bd dolt
     |   bd dolt set host 192.168.1.100 --update-config
     |   bd dolt set data-dir /home/user/.beads-dolt/myproject
     |   export BEADS_DOLT_PASSWORD=... BEADS_DOLT_SERVER_TLS=1
-    |   bd dolt test
+    |   export BEADS_DOLT_PASSWORD=... BEADS_DOLT_SERVER_TLS=1 BEADS_DOLT_SERVER_ALLOW_CLEARTEXT_PASSWORD=1
+    |   bd list           # bd dolt test only probes an unauthenticated TCP greeting;
+    |                      # it confirms neither setting. bd list (or bd doctor) does.
 
 bd dolt clean-databases
   use: "clean-databases"
@@ -2128,9 +2133,20 @@ bd dolt set
     | There is no 'password' or 'tls' key here on purpose — secrets and TLS must
     | not land in metadata.json. Use environment variables or the credentials file:
     |
-    |   BEADS_DOLT_PASSWORD     Server password (highest priority)
-    |   BEADS_DOLT_SERVER_TLS   Enable TLS ("1" or "true")
+    |   BEADS_DOLT_PASSWORD                         Server password (highest priority)
+    |   BEADS_DOLT_SERVER_TLS                       Enable TLS ("1" or "true")
+    |   BEADS_DOLT_SERVER_ALLOW_CLEARTEXT_PASSWORD  Allow mysql_clear_password auth
+    |                                                ("1" or "true"); requires TLS
     |   BEADS_CREDENTIALS_FILE  Optional override path for credentials
+    |
+    | dolt_server_allow_cleartext_password IS intended as a metadata.json key too
+    | (mirroring dolt_server_tls): unlike password, it is not a secret, so it round-
+    | trips through 'bd dolt show' / 'bd config show'. It is read in this order —
+    | BEADS_DOLT_SERVER_ALLOW_CLEARTEXT_PASSWORD, then metadata.json, then the
+    | central ~/.config/beads/server.json — never config.yaml, which this key has
+    | no field for. 'bd dolt set' just doesn't write metadata.json for this key,
+    | same reasoning as tls: edit metadata.json or server.json by hand, or use the
+    | env var.
     |
     |   Default credentials file: ~/.config/beads/credentials
     |   Format:
@@ -3703,6 +3719,7 @@ bd init
   flag --prefix -p type=string default="" usage="Issue prefix (default: current directory name)"
   flag --proxied-server type=bool default="false" usage="[EXPERIMENTAL] Use a per-workspace proxied dolt sql-server (proxy + child dolt) rooted at .beads/dolt"
   flag --proxied-server-config-path type=string default="" usage="[EXPERIMENTAL] Absolute path to an existing dolt sql-server YAML config (proxied-server mode only). When set, bd uses this file instead of auto-generating one. Relative paths are rejected. Managed mode requires listener.host to be a numeric loopback IP (hostnames including localhost, non-loopback addresses, listener.socket, remotesapi, and cluster config are rejected); the same policy applies to BEADS_PROXIED_SERVER_CONFIG."
+  flag --proxied-server-external-allow-cleartext-password type=bool default="false" usage="[EXPERIMENTAL] Allow mysql_clear_password auth on the proxy→external connection (proxied-server mode only); requires --proxied-server-external-tls. Needed when a byte-relay proxy in front of the external dolt sql-server (e.g. a Warpgate MySQL listener) always demands mysql_clear_password."
   flag --proxied-server-external-host type=string default="" usage="[EXPERIMENTAL] Hostname or IP of an externally-managed dolt sql-server the proxy should front (proxied-server mode only). Mutually exclusive with --proxied-server-external-socket-path."
   flag --proxied-server-external-keep-alive type=duration default="0s" usage="[EXPERIMENTAL] TCP keepalive period for the proxy→external connection. Zero uses the package default (30s)."
   flag --proxied-server-external-port type=int default="0" usage="[EXPERIMENTAL] TCP port of the externally-managed dolt sql-server (proxied-server mode only). Required when --proxied-server-external-host is set."

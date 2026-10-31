@@ -91,14 +91,19 @@ func openScanDB(beadsDir string, cfg *configfile.Config) (*sql.DB, error) {
 // it is set, else TCP at ep's host and port, as the configured user with the
 // password keyed to that port.
 func openWorkspaceDB(ep doltserver.Endpoint, cfg *configfile.Config, socket string) (*sql.DB, error) {
+	allowCleartext, err := cfg.GetDoltServerAllowCleartextPasswordChecked()
+	if err != nil {
+		return nil, err
+	}
 	connStr := doltutil.ServerDSN{
-		Socket:   socket,
-		Host:     ep.Host,
-		Port:     ep.Port,
-		User:     cfg.GetDoltServerUser(),
-		Password: ep.Password(),
-		Database: cfg.GetDoltDatabase(),
-		TLS:      cfg.GetDoltServerTLS(),
+		Socket:                  socket,
+		Host:                    ep.Host,
+		Port:                    ep.Port,
+		User:                    cfg.GetDoltServerUser(),
+		Password:                ep.Password(),
+		Database:                cfg.GetDoltDatabase(),
+		TLS:                     cfg.GetDoltServerTLS(),
+		AllowCleartextPasswords: allowCleartext,
 	}.String()
 	return sql.Open("mysql", connStr)
 }

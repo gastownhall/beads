@@ -147,6 +147,41 @@ func TestApplyCentralDefaults_ProjectOverridesCentral(t *testing.T) {
 	}
 }
 
+func TestApplyCentralDefaults_AllowCleartextPassword_FillsEmptyField(t *testing.T) {
+	central := &Config{
+		DoltServerHost:                   "central.example.com",
+		DoltServerTLS:                    true,
+		DoltServerAllowCleartextPassword: true,
+	}
+	project := &Config{Database: "mydb"}
+
+	ApplyCentralDefaults(project, central)
+
+	if !project.DoltServerAllowCleartextPassword {
+		t.Error("DoltServerAllowCleartextPassword = false, want true (inherited from central)")
+	}
+}
+
+func TestApplyCentralDefaults_AllowCleartextPassword_ProjectOverridesCentral(t *testing.T) {
+	central := &Config{
+		DoltServerHost:                   "central.example.com",
+		DoltServerTLS:                    true,
+		DoltServerAllowCleartextPassword: true,
+	}
+	project := &Config{
+		DoltServerHost:                   "project.local",
+		DoltServerAllowCleartextPassword: false, // zero value — cannot override to false
+	}
+
+	ApplyCentralDefaults(project, central)
+
+	// Same documented caveat as DoltServerTLS: a bool zero value can't
+	// distinguish "explicitly false" from "unset", so central's true wins.
+	if !project.DoltServerAllowCleartextPassword {
+		t.Error("DoltServerAllowCleartextPassword = false, want true (zero value cannot override central)")
+	}
+}
+
 func TestApplyCentralDefaults_EnvVarsOverrideBoth(t *testing.T) {
 	// Central config provides defaults
 	central := &Config{

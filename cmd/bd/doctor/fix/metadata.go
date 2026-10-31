@@ -559,12 +559,17 @@ func isExpectedProbeError(err error) bool {
 // server before calling it. Like openFixDB, it does not check the server
 // against doltversion.RequiredMin: bd doctor --fix is exempt from the floor.
 func openServerCatalogDB(ep doltserver.Endpoint) (*sql.DB, error) {
+	allowCleartext, err := ep.CleartextAuth()
+	if err != nil {
+		return nil, err
+	}
 	connStr := doltutil.ServerDSN{
-		Host:     ep.Host,
-		Port:     ep.Port,
-		User:     ep.User,
-		Password: ep.Password(),
-		TLS:      ep.TLS,
+		Host:                    ep.Host,
+		Port:                    ep.Port,
+		User:                    ep.User,
+		Password:                ep.Password(),
+		TLS:                     ep.TLS,
+		AllowCleartextPasswords: allowCleartext,
 	}.String()
 	return sql.Open("mysql", connStr)
 }

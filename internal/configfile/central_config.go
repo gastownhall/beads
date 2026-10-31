@@ -83,4 +83,11 @@ func ApplyCentralDefaults(project *Config, central *Config) {
 	if !project.DoltServerTLS && central.DoltServerTLS {
 		project.DoltServerTLS = central.DoltServerTLS
 	}
+	// Same zero-value caveat as DoltServerTLS above: central can enable
+	// cleartext-password auth but a project cannot explicitly disable it via
+	// the zero value. Use BEADS_DOLT_SERVER_ALLOW_CLEARTEXT_PASSWORD=0 to
+	// override.
+	if !project.DoltServerAllowCleartextPassword && central.DoltServerAllowCleartextPassword {
+		project.DoltServerAllowCleartextPassword = central.DoltServerAllowCleartextPassword
+	}
 }

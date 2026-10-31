@@ -92,7 +92,7 @@ func TestOpenAndInitSchemaRefusesBelowRequiredMin(t *testing.T) {
 	ep := proxy.Endpoint{Host: "127.0.0.1", Port: port}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	admin, err := sql.Open("mysql", buildDSN(ep, "", "root", "", ""))
+	admin, err := sql.Open("mysql", buildDSN(ep, "", "root", "", "", false))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +105,7 @@ func TestOpenAndInitSchemaRefusesBelowRequiredMin(t *testing.T) {
 	doltversion.RequiredMin = doltversion.MustParse("99.0.0")
 	t.Cleanup(func() { doltversion.RequiredMin = prev })
 	for _, database := range []string{"floor_existing", "floor_fresh"} {
-		provider, err := openAndInitSchema(ctx, ep, "", database, "root", "", "", false, "", providerOptions{})
+		provider, err := openAndInitSchema(ctx, ep, "", database, "root", "", "", false, false, "", providerOptions{})
 		if provider != nil {
 			_ = provider.Close(ctx)
 			t.Errorf("%s: openAndInitSchema returned a provider along with its refusal", database)

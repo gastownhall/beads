@@ -4309,6 +4309,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   work, so an HTTP client can forward `bd update --claim` instead of refusing
   it, and can never mistake an older server for one that dropped the claim.
 
+- **`dolt_server_allow_cleartext_password` / `BEADS_DOLT_SERVER_ALLOW_CLEARTEXT_PASSWORD`
+  permits the `mysql_clear_password` auth plugin some MySQL-protocol proxies
+  (e.g. an SSH-bastion listener) demand.** Only takes effect together with
+  `dolt_server_tls` / `BEADS_DOLT_SERVER_TLS=1`; refused otherwise.
+
 ### Fixed
 
 - **`bd show` counts a wisp's comments instead of reporting `comment_count: 0`**
