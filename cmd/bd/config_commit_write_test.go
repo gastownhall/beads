@@ -77,6 +77,24 @@ func TestCommitMemoryWriteServerModeCommitsUserKVScreened(t *testing.T) {
 	}
 }
 
+// GH#7523: a kv write is user kv.* data like a memory, so it commits through
+// the same kv.*-screened variant.
+func TestCommitKVWriteServerModeCommitsUserKVScreened(t *testing.T) {
+	saveStorageMode(t)
+	serverMode = true
+
+	fake := &fakeConfigCommitStore{}
+	if err := commitKVWrite(context.Background(), fake, "kv set"); err != nil {
+		t.Fatalf("commitKVWrite: %v", err)
+	}
+	if fake.userKVCalls != 1 || fake.configOnlyCalls != 0 {
+		t.Fatalf("CommitConfigUserKVOnly/CommitConfigOnly calls = %d/%d, want 1/0 for a kv write", fake.userKVCalls, fake.configOnlyCalls)
+	}
+	if !strings.HasPrefix(fake.messages[0], "bd: kv set (auto-commit) by ") {
+		t.Fatalf("commit message = %q, want prefix %q", fake.messages[0], "bd: kv set (auto-commit) by ")
+	}
+}
+
 // The screen's refusal reaches the user rather than being taken for a
 // nothing-to-commit no-op, and keeps its type through the wrap: the --json
 // payload names the refused keys from it.

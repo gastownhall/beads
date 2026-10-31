@@ -182,9 +182,9 @@ func commitPendingIfEmbedded(ctx context.Context, st storage.DoltStorage, actor 
 // rename-prefix and migrate also write config (issue_prefix, sync.branch) and
 // are deliberately not wired here: they are multi-step operations, and when
 // their config row should become a commit is the GH#2455 question itself.
-// `bd kv set`/`clear` and the kv.memory rows `bd import` writes are not wired
-// here yet either, so on this route they stay in the working set until a later
-// commit stages config, such as `bd dolt commit`.
+// `bd kv set`/`clear` commit through commitKVWrite. The kv.memory rows
+// `bd import` writes are not wired here yet, so on this route they stay in the
+// working set until a later commit stages config, such as `bd dolt commit`.
 func commitConfigWrite(ctx context.Context, st storage.DoltStorage, command string) error {
 	if err := commitConfigTable(ctx, st, command, storage.DoltStorage.CommitConfigOnly); err != nil {
 		return fmt.Errorf("committing config write: %w", err)
@@ -200,6 +200,16 @@ func commitConfigWrite(ctx context.Context, st storage.DoltStorage, command stri
 func commitMemoryWrite(ctx context.Context, st storage.DoltStorage, command string) error {
 	if err := commitConfigTable(ctx, st, command, storage.DoltStorage.CommitConfigUserKVOnly); err != nil {
 		return fmt.Errorf("committing memory write: %w", err)
+	}
+	return nil
+}
+
+// commitKVWrite is commitMemoryWrite for bd kv set/clear (GH#7523): a kv
+// value is user kv.* data too, so it takes the same screened commit, and its
+// callers warn on a refusal for the same reason.
+func commitKVWrite(ctx context.Context, st storage.DoltStorage, command string) error {
+	if err := commitConfigTable(ctx, st, command, storage.DoltStorage.CommitConfigUserKVOnly); err != nil {
+		return fmt.Errorf("committing kv write: %w", err)
 	}
 	return nil
 }

@@ -2841,6 +2841,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   has run, and it was listed whatever its labels; it is now narrowed by the
   label filters like every other row, on every route. On the proxied-server
   route such a row also printed with no labels; it now prints them.
+- **`bd kv set` and `bd kv clear` commit their write.** Neither marked its
+  config write, so in embedded mode the auto-commit skipped it, and on the
+  direct SQL-server route nothing committed it: the `kv.*` row stayed in the
+  working set until a later commit picked it up. With `dolt.auto-commit` on
+  (the default) both now commit right away, in server mode through the same
+  `kv.*`-screened commit as `bd remember` and `bd forget`, so a dirty
+  internal config key is named in a warning and left for `bd dolt commit`
+  rather than swept in; `batch` and `off` defer the write as before (#7523).
 - **`bd gate add-waiter` survives contention the store gave up replaying.**
   It retried only a version miss, so a convoy adder failed when its guarded
   write ended in a serialization failure or deadlock the backend stopped
