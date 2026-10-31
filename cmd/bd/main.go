@@ -215,6 +215,7 @@ var readOnlyCommands = map[string]bool{
 	"comments":   true, // list comments (not add)
 	"current":    true, // bd sync mode current
 	"ping":       true,
+	"prime":      true, // session context reads existing memories only
 	"backup":     true, // reads from Dolt, writes only to .beads/backup/
 	"export":     true, // reads from Dolt, writes JSONL to file/stdout
 	"tail":       true, // bd events tail: reads bd_events_journal, writes nothing
@@ -273,8 +274,10 @@ func effectiveRootStorePolicy(cmdName string, strictReadonly bool) rootStorePoli
 // serve never reached this branch at all (PersistentPostRunE only closes the
 // provider there); server and shared-server mode do, so the exclusion has to be
 // stated rather than inherited.
+// Prime uses a write-refusing store for memory reads. Its session-start hook
+// must not attempt backups or advance maintenance throttles after that read.
 func runsPostCommandMaintenance(cmdName string, strictReadonly bool) bool {
-	if cmdName == serveCmdName {
+	if cmdName == serveCmdName || cmdName == "prime" {
 		return false
 	}
 	return effectiveRootStorePolicy(cmdName, strictReadonly).runMaintenance
@@ -2387,7 +2390,7 @@ var rootCmd = &cobra.Command{
 			}
 			// Auto-backup, through the provider this command opened. Same
 			// gate as the direct arm's maintenance net below (strict
-			// --readonly, `bd serve` and a migration freeze all skip it),
+			// --readonly, `bd serve`, `bd prime` and a migration freeze skip it),
 			// plus previews: a --dry-run must not register a backup remote
 			// or write backup state. proxiedAutoBackupBackend decides the
 			// topology, so this stays inert off managed-local.
