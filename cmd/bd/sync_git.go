@@ -128,7 +128,11 @@ func gitRemoteHasDoltDataRefStatus(remote string) (bool, error) {
 	// config discovery through env-derived paths (see testSSHConnectivity in
 	// dolt.go for the same taint path).
 	cmd := exec.CommandContext(ctx, "git", "ls-remote", gitRemoteURLForLsRemote(remote), "refs/dolt/data")
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	// Terminal prompts and inherited askpass helpers can block an advisory probe.
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=", "SSH_ASKPASS=")
+	// Descendants may retain stdout/stderr after Git exits or the context expires.
+	// Bound that pipe wait separately from the 10-second network deadline.
+	cmd.WaitDelay = 2 * time.Second
 	output, err := cmd.Output()
 	if err != nil {
 		return false, gitLsRemoteProbeError(ctx, err)
