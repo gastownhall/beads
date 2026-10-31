@@ -3,6 +3,7 @@ package uow
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"io"
 	"net"
 	"sync"
@@ -72,6 +73,48 @@ func TestPingWithRetryRetriesTheProxyOutageReportOnlyBriefly(t *testing.T) {
 type pingerFunc func(context.Context) error
 
 func (f pingerFunc) PingContext(ctx context.Context) error { return f(ctx) }
+
+// TestPingWithRetryKeepsBackingOffAfterTheOutageWindowForOtherTransientErrors
+// is the #7183 regression: once the outage window's deadline has passed, a
+// LATER attempt that fails with an ordinary transient error (not another
+// outage report) must still back off by the wrapped backoff's own interval.
+// outageWindowBackOff used to clamp every wait once any deadline had been
+// set, including waits for attempts that never triggered the clamp — once
+// the deadline passed, every one of those clamped to zero, and the retry
+// loop spun at the CPU's own rate until MaxElapsedTime instead of backing
+// off between attempts.
+func TestPingWithRetryKeepsBackingOffAfterTheOutageWindowForOtherTransientErrors(t *testing.T) {
+	shortOutageWindow(t, 10*time.Millisecond)
+	var calls atomic.Int32
+	p := pingerFunc(func(context.Context) error {
+		if calls.Add(1) == 1 {
+			return proxyOutageErr()
+		}
+		return mysql.ErrInvalidConn
+	})
+	bo := testPingBackOff()
+	bo.InitialInterval = 20 * time.Millisecond
+	bo.MaxInterval = 20 * time.Millisecond // caps quickly, so Stop depends on real elapsed time, not candidate-interval growth
+	bo.MaxElapsedTime = 200 * time.Millisecond
+	bo.Reset() // InitialInterval only takes effect on currentInterval via Reset
+
+	start := time.Now()
+	err := pingWithRetry(context.Background(), p, bo, testPingAttemptTimeout)
+	t.Logf("elapsed=%s calls=%d err=%v", time.Since(start), calls.Load(), err)
+
+	if !errors.Is(err, mysql.ErrInvalidConn) {
+		t.Fatalf("pingWithRetry() error = %v, want mysql.ErrInvalidConn", err)
+	}
+	// A real exponential backoff from 20ms fits only a handful of attempts
+	// into 200ms. The bug's zero-wait spin calls PingContext at the CPU's
+	// rate instead — the issue's own fake repro measured 1,968,138 calls in
+	// 1.25s, orders of magnitude past any bound a working backoff could
+	// reach. 1000 is generous for the fixed behavior and nowhere near what
+	// the bug produces.
+	if n := calls.Load(); n > 1000 {
+		t.Fatalf("PingContext called %d times in %s; backoff after the outage window is not being applied to ordinary transient errors", n, bo.MaxElapsedTime)
+	}
+}
 
 // TestOpenDBRidesOutAnUpstreamThatReturnsInsideTheOutageWindow plays the db
 // proxy in front of an external upstream that is briefly unreachable: the
