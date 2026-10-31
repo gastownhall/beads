@@ -275,8 +275,16 @@ func TestDoltServerTxCommitHonorsImmediateVersionCommit(t *testing.T) {
 // COMMIT and succeeds without advancing Dolt history (GH#4995).
 func TestDoltServerTxRunTxWithDeferredContextSkipsDoltCommit(t *testing.T) {
 	p, mock := newMockTxProvider(t)
+	// RunTx is a committing unit of work, so it takes the journal writer lock
+	// with the journal off too.
+	mock.ExpectQuery(matchGetLock).
+		WithArgs(issueops.JournalWriterLockName(""), issueops.JournalWriterLockWait).
+		WillReturnRows(sqlmock.NewRows([]string{"got"}).AddRow(1))
 	mock.ExpectExec("START TRANSACTION").WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(matchPlainCommit).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(matchReleaseLock).
+		WithArgs(issueops.JournalWriterLockName("")).
+		WillReturnResult(sqlmock.NewResult(0, 0))
 
 	ctx := issueops.WithDeferredVersionCommit(context.Background())
 	err := RunTx(ctx, p, func(ctx context.Context, uw UnitOfWork) (string, error) {

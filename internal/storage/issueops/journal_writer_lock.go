@@ -49,7 +49,18 @@ const (
 // covers the reclaim. A variable so tests can shorten it.
 var JournalWriterStaleHolder = 30 * time.Second
 
-// JournalWriterLockName is the server-wide GET_LOCK name journaled writers on
+// JournalWriterLockTables are the tables of a bead's image. In server mode every
+// write transaction that touches one takes the journal writer lock, events
+// journal on or off (see LockJournalWriter).
+var JournalWriterLockTables = []string{
+	"issues", "wisps",
+	"labels", "wisp_labels",
+	"dependencies", "wisp_dependencies",
+	"comments", "wisp_comments",
+	"events", "wisp_events",
+}
+
+// JournalWriterLockName is the server-wide GET_LOCK name bead writers on
 // database queue on. GET_LOCK names span every database on the server, so the
 // name carries the database. The dolt store and the unit-of-work provider both
 // build it here, so direct and proxied writers on one database share one lock.
@@ -78,6 +89,18 @@ func JournalWriterLockName(database string) string {
 // must precede BEGIN: a transaction that began before the previous holder
 // committed still reads the old counter, so locking inside it would only move
 // the conflict.
+//
+// The lock also orders bead writes with the journal off, so in server mode
+// every write transaction that touches a JournalWriterLockTables table takes
+// it, journaled or not. A guarded delete reads a bead's revision and deletes
+// it in one transaction; a comment or label on the same bead that overlapped
+// it unlocked would land between the two. Writes that touch none of those
+// tables stay unlocked so they never queue behind a long bead write: config
+// and metadata, journal prune.
+// The known exception is the remote-sync merge path (pull, its conflict
+// auto-resolve and blocked recompute, federation staging commits): it does
+// write bead tables but stays unlocked, because a DOLT_PULL can outlast the
+// lock's whole wait and would starve every other writer.
 //
 // A GET_LOCK that times out (0) or fails server-side (NULL) is retried up to
 // JournalWriterLockAttempts times; then the error names the lock and the total

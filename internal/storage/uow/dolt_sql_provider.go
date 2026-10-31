@@ -235,7 +235,7 @@ func (p *doltSQLProvider) BeginTx(ctx context.Context) (Tx, error) {
 	}
 
 	unlock := func() {}
-	if p.eventsJournalEnabled.Load() && isJournalWriter(ctx) {
+	if isJournalWriter(ctx) {
 		if unlock, err = lockJournalWriter(ctx, conn, p.database); err != nil {
 			_ = conn.Close()
 			return nil, err
@@ -275,12 +275,13 @@ func (p *doltSQLProvider) BeginTx(ctx context.Context) (Tx, error) {
 
 type journalWriterKey struct{}
 
-// withJournalWriter marks ctx as opening a unit of work that may commit
-// journaled writes. RunTxResultWithin and RunTxScoped (the heartbeat, whose
-// re-arm journals) set it: every committing unit of work goes through one of
-// them, while reads (RunTxRead and the direct NewUOW readers, which never
-// commit) and the ephemeral metadata/prune writes (RunTxEphemeral), which
-// record no journal event, leave it unset and never queue on the lock.
+// withJournalWriter marks ctx as opening a unit of work that may commit bead
+// writes. RunTxResultWithin and RunTxScoped (the heartbeat, whose re-arm
+// journals) set it: every committing unit of work goes through one of them,
+// while reads (RunTxRead and the direct NewUOW readers, which never commit)
+// and the ephemeral metadata/prune writes (RunTxEphemeral), which write none
+// of a bead's image tables (issueops.JournalWriterLockTables), leave it unset
+// and never queue on the lock.
 func withJournalWriter(ctx context.Context) context.Context {
 	return context.WithValue(ctx, journalWriterKey{}, true)
 }
@@ -290,12 +291,12 @@ func isJournalWriter(ctx context.Context) bool {
 	return on
 }
 
-// lockJournalWriter queues a journaled unit of work behind the others on
+// lockJournalWriter queues a bead-writing unit of work behind the others on
 // database, BEFORE its transaction starts: the same lock, name and bounds as the
 // dolt store's writers (issueops.LockJournalWriter, which says why the lock
-// exists and why it must precede START TRANSACTION). BeginTx calls it when the
-// journal is on and ctx carries the write intent; the provider always fronts a
-// SQL server, so those are the only conditions. The returned unlock is
+// exists and why it must precede START TRANSACTION). BeginTx calls it when ctx
+// carries the write intent, events journal on or off; the provider always
+// fronts a SQL server, so that is the only condition. The returned unlock is
 // idempotent and bounded, and discards the session when the release fails.
 func lockJournalWriter(ctx context.Context, conn *sql.Conn, database string) (func(), error) {
 	unlock, err := issueops.LockJournalWriter(ctx, conn, database)

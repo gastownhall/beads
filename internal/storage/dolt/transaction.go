@@ -200,9 +200,11 @@ func (s *DoltStore) runDoltTransactionRecording(ctx context.Context, commitMsg s
 		return issueops.BlockedRecheck{}, fmt.Errorf("failed to acquire connection: %w", err)
 	}
 	defer conn.Close()
-	// Queue behind other journaled writers before the transaction begins; see
-	// lockJournalWriter. Taken after the pool-wait bracket above, so a lock wait
-	// is not reported as pool exhaustion.
+	// Queue behind other bead writers before the transaction begins, journal on
+	// or off; see lockJournalWriter. Taken after the pool-wait bracket above, so
+	// a lock wait is not reported as pool exhaustion. With the journal off the
+	// wisp plane's ignored transaction runs on a second session below; this
+	// session's lock covers it, since it commits before unlock runs.
 	unlock, err := s.lockJournalWriter(ctx, conn)
 	if err != nil {
 		return issueops.BlockedRecheck{}, err

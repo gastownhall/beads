@@ -235,21 +235,20 @@ func newRecordingJournalLockMockStore(t *testing.T) (*DoltStore, sqlmock.Sqlmock
 	return store, mock, rec
 }
 
-// TestWriteTxConn_NoLockOutsideJournaledServerMode pins that the journal
-// writer lock costs nothing where it is not needed: embedded mode and a
-// journal-off server store pin the connection and issue no GET_LOCK.
-func TestWriteTxConn_NoLockOutsideJournaledServerMode(t *testing.T) {
+// TestWriteTxConn_NoLockInEmbeddedMode pins that the journal writer lock costs
+// nothing where there is no server to share: an embedded store pins the
+// connection and issues no GET_LOCK, journal on or off. A server store locks
+// with the journal off too (TestWriteTxConn_JournalWriterLockCarriesDatabase).
+func TestWriteTxConn_NoLockInEmbeddedMode(t *testing.T) {
 	for _, tc := range []struct {
-		name       string
-		serverMode bool
-		journal    bool
+		name    string
+		journal bool
 	}{
-		{"embedded, journal on", false, true},
-		{"server, journal off", true, false},
-		{"embedded, journal off", false, false},
+		{"journal on", true},
+		{"journal off", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			store, mock := newJournalLockMockStore(t, tc.serverMode, tc.journal)
+			store, mock := newJournalLockMockStore(t, false, tc.journal)
 			conn, release, err := store.writeTxConn(context.Background())
 			if err != nil {
 				t.Fatalf("writeTxConn: %v", err)
@@ -267,29 +266,33 @@ func TestWriteTxConn_NoLockOutsideJournaledServerMode(t *testing.T) {
 }
 
 // TestWriteTxConn_JournalWriterLockCarriesDatabase pins the lock's name and
-// lifecycle in server mode with the journal on: GET_LOCK on the database's
-// name before the caller begins, and exactly one RELEASE_LOCK however often
-// release runs.
+// lifecycle in server mode, events journal on or off: GET_LOCK on the
+// database's name before the caller begins, and exactly one RELEASE_LOCK
+// however often release runs.
 func TestWriteTxConn_JournalWriterLockCarriesDatabase(t *testing.T) {
-	store, mock := newJournalLockMockStore(t, true, true)
-	mock.ExpectQuery(matchGetLock).
-		WithArgs("bd_events_seq:proj_a", issueops.JournalWriterLockWait).
-		WillReturnRows(sqlmock.NewRows([]string{"got"}).AddRow(1))
-	mock.ExpectExec(matchReleaseLock).
-		WithArgs("bd_events_seq:proj_a").
-		WillReturnResult(sqlmock.NewResult(0, 0))
+	for _, journal := range []bool{true, false} {
+		t.Run(fmt.Sprintf("journal=%v", journal), func(t *testing.T) {
+			store, mock := newJournalLockMockStore(t, true, journal)
+			mock.ExpectQuery(matchGetLock).
+				WithArgs("bd_events_seq:proj_a", issueops.JournalWriterLockWait).
+				WillReturnRows(sqlmock.NewRows([]string{"got"}).AddRow(1))
+			mock.ExpectExec(matchReleaseLock).
+				WithArgs("bd_events_seq:proj_a").
+				WillReturnResult(sqlmock.NewResult(0, 0))
 
-	_, release, err := store.writeTxConn(context.Background())
-	if err != nil {
-		t.Fatalf("writeTxConn: %v", err)
-	}
-	release()
-	release()
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Fatalf("lock lifecycle: %v", err)
-	}
-	if got := store.db.Stats().Idle; got != 1 {
-		t.Fatalf("a confirmed release left %d idle sessions, want the session pooled (1)", got)
+			_, release, err := store.writeTxConn(context.Background())
+			if err != nil {
+				t.Fatalf("writeTxConn: %v", err)
+			}
+			release()
+			release()
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("lock lifecycle: %v", err)
+			}
+			if got := store.db.Stats().Idle; got != 1 {
+				t.Fatalf("a confirmed release left %d idle sessions, want the session pooled (1)", got)
+			}
+		})
 	}
 }
 
@@ -460,31 +463,35 @@ func TestWithRetryTxNoJournal_EmitFailsAndCommitsNothing(t *testing.T) {
 }
 
 // TestHeartbeatIssue_TakesTheJournalWriterLock pins that a lease heartbeat
-// queues behind journaled writers in server mode with the journal on: a
-// re-arm records a lease_rearmed event and a journal entry (RenewLeaseInTx),
-// so the heartbeat cannot run on a NoJournal helper, and a plain refresh takes
-// the same route.
+// queues behind bead writers in server mode, journal on or off: a re-arm
+// records a lease_rearmed event and a journal entry (RenewLeaseInTx), so the
+// heartbeat cannot run on a NoJournal helper, and a plain refresh takes the
+// same route.
 func TestHeartbeatIssue_TakesTheJournalWriterLock(t *testing.T) {
-	store, mock := newJournalLockMockStore(t, true, true)
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM wisps WHERE id = ?")).
-		WillReturnRows(sqlmock.NewRows([]string{"1"}))
-	mock.ExpectQuery(matchGetLock).
-		WithArgs("bd_events_seq:proj_a", issueops.JournalWriterLockWait).
-		WillReturnRows(sqlmock.NewRows([]string{"got"}).AddRow(1))
-	mock.ExpectBegin()
-	mock.ExpectExec("UPDATE leases SET lease_expires_at").WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM issues WHERE id = ?")).
-		WillReturnRows(sqlmock.NewRows([]string{"live"}).AddRow(1))
-	mock.ExpectCommit()
-	mock.ExpectExec(matchReleaseLock).
-		WithArgs("bd_events_seq:proj_a").
-		WillReturnResult(sqlmock.NewResult(0, 0))
+	for _, journal := range []bool{true, false} {
+		t.Run(fmt.Sprintf("journal=%v", journal), func(t *testing.T) {
+			store, mock := newJournalLockMockStore(t, true, journal)
+			mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM wisps WHERE id = ?")).
+				WillReturnRows(sqlmock.NewRows([]string{"1"}))
+			mock.ExpectQuery(matchGetLock).
+				WithArgs("bd_events_seq:proj_a", issueops.JournalWriterLockWait).
+				WillReturnRows(sqlmock.NewRows([]string{"got"}).AddRow(1))
+			mock.ExpectBegin()
+			mock.ExpectExec("UPDATE leases SET lease_expires_at").WillReturnResult(sqlmock.NewResult(0, 1))
+			mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM issues WHERE id = ?")).
+				WillReturnRows(sqlmock.NewRows([]string{"live"}).AddRow(1))
+			mock.ExpectCommit()
+			mock.ExpectExec(matchReleaseLock).
+				WithArgs("bd_events_seq:proj_a").
+				WillReturnResult(sqlmock.NewResult(0, 0))
 
-	if err := store.HeartbeatIssue(context.Background(), "bd-hb-1", "worker"); err != nil {
-		t.Fatalf("HeartbeatIssue: %v", err)
-	}
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Fatalf("heartbeat SQL: %v", err)
+			if err := store.HeartbeatIssue(context.Background(), "bd-hb-1", "worker"); err != nil {
+				t.Fatalf("HeartbeatIssue: %v", err)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("heartbeat SQL: %v", err)
+			}
+		})
 	}
 }
 
@@ -803,10 +810,119 @@ func journalingIssueopsMutators(t *testing.T) map[string]bool {
 	return mutators
 }
 
-// journalingMemoryopsMutators extends mutators with every exported function of
-// the storage memoryops package that reaches one: memories.Remember and
-// Forget reach issueops only through it.
-func journalingMemoryopsMutators(t *testing.T, mutators map[string]bool) {
+// imageWriteExempt are the issueops functions whose own SQL reads as a bead
+// image-table write to sqlWritesImageTable but is not one, each with why. Only
+// their own SQL is exempt: what they call is still followed.
+var imageWriteExempt = map[string]string{
+	"GetNextChildIDTx": "its templated INSERT INTO %s is child_counters or wisp_child_counters",
+}
+
+// eventTableWrite matches DML against the two event tables of a bead's image,
+// which journalscan.BeadTables leaves out.
+var eventTableWrite = regexp.MustCompile("(?i)\\b(INSERT\\s+(IGNORE\\s+)?INTO|REPLACE\\s+INTO|UPDATE|DELETE\\s+FROM)\\s+`?(wisp_)?events\\b")
+
+// sqlWritesImageTable reports whether a SQL string literal writes one of a
+// bead's image tables (issueops.JournalWriterLockTables): journalscan's bead
+// table detector, which also reads a templated %s table as one, plus the event
+// tables.
+func sqlWritesImageTable(lit string) bool {
+	return journalscan.SQLWritesBeadTable(lit) || eventTableWrite.MatchString(lit)
+}
+
+// imageWritingIssueopsFuncs derives, from the issueops source, every exported
+// function that writes a bead image table, in its own SQL or through any
+// number of issueops helpers (journalscan.Fixpoint, by bare name).
+func imageWritingIssueopsFuncs(t *testing.T) map[string]bool {
+	t.Helper()
+	issueFns, err := journalscan.ParsePackage("../issueops")
+	if err != nil {
+		t.Fatalf("parse issueops package: %v", err)
+	}
+	own := ownImageDML(t, "../issueops")
+	for name := range imageWriteExempt {
+		if !own[name] {
+			t.Fatalf("imageWriteExempt names %s, whose own SQL no longer reads as an image-table write — drop the exemption", name)
+		}
+		delete(own, name)
+	}
+	writes := journalscan.Fixpoint(issueFns,
+		func(f *journalscan.FuncInfo) bool {
+			if f.Recv != "" {
+				return own[f.Recv+"."+f.Name]
+			}
+			return own[f.Name]
+		},
+		func(f *journalscan.FuncInfo) []string { return f.AllCallNames() })
+	out := map[string]bool{}
+	for key, f := range issueFns {
+		if f.Exported && writes[key] {
+			out[f.Name] = true
+		}
+	}
+	// Writers the derivation must find: compaction rewrites the issues row but
+	// records no journal event, so only this rule keeps it locked.
+	for _, want := range []string{"ApplyCompactionInTx", "RestoreFromSnapshotInTx"} {
+		if !out[want] {
+			t.Fatalf("derived image-table writers %v lack %s — the DML detection changed and this guard is not actually running", out, want)
+		}
+	}
+	return out
+}
+
+// ownImageDML reports, per function of the package in dir keyed like
+// journalscan, whether its own body holds SQL that writes a bead image table.
+func ownImageDML(t *testing.T, dir string) map[string]bool {
+	t.Helper()
+	fset := token.NewFileSet()
+	pkgs, err := parser.ParseDir(fset, dir, func(fi fs.FileInfo) bool {
+		return !strings.HasSuffix(fi.Name(), "_test.go")
+	}, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", dir, err)
+	}
+	out := map[string]bool{}
+	for _, pkg := range pkgs {
+		for _, file := range pkg.Files {
+			for _, decl := range file.Decls {
+				if fn, ok := decl.(*ast.FuncDecl); ok && fn.Body != nil && bodyWritesImageTable(fn.Body) {
+					out[funcDeclKey(fn)] = true
+				}
+			}
+		}
+	}
+	return out
+}
+
+// bodyWritesImageTable reports whether body, closures included, holds a SQL
+// string literal that writes a bead image table.
+func bodyWritesImageTable(body *ast.BlockStmt) bool {
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		if lit, ok := n.(*ast.BasicLit); ok && lit.Kind == token.STRING && sqlWritesImageTable(lit.Value) {
+			found = true
+		}
+		return !found
+	})
+	return found
+}
+
+// lockedOnlyOps is every issueops and memoryops function a body must take the
+// journal writer lock to call: the journaling mutators and the image-table
+// writers.
+func lockedOnlyOps(t *testing.T) map[string]bool {
+	t.Helper()
+	ops := journalingIssueopsMutators(t)
+	for name := range imageWritingIssueopsFuncs(t) {
+		ops[name] = true
+	}
+	memoryopsReaching(t, ops)
+	return ops
+}
+
+// memoryopsReaching extends ops with every exported function of the storage
+// memoryops package that reaches one: memories.Remember and Forget reach
+// issueops only through it.
+func memoryopsReaching(t *testing.T, mutators map[string]bool) {
 	t.Helper()
 	memFns, err := journalscan.ParsePackage("../memoryops")
 	if err != nil {
@@ -822,47 +938,59 @@ func journalingMemoryopsMutators(t *testing.T, mutators map[string]bool) {
 	}
 }
 
-// noJournalCallers are the callers the audit put on the NoJournal helpers.
-// Each must stay where the converse guard looks: one that drops off the list
-// has either moved back to the locked route or been renamed past the guard.
+// noJournalCallers are the callers the audits put on the NoJournal helpers,
+// each with the tables it writes, none of a bead's image. Each must stay where
+// the converse guard looks: one that drops off the list has either moved back
+// to the locked route or been renamed past the guard.
 var noJournalCallers = []string{
-	"DoltStore.SetConfig",
-	"DoltStore.DeleteConfig",
-	"DoltStore.SetMetadata",
-	"DoltStore.SetLocalMetadata",
-	"DoltStore.PruneEventsJournal",
-	"DoltStore.RunEventsMaintenanceTx",
-	"DoltStore.SetRepoMtime",
-	"DoltStore.ClearRepoMtime",
-	"DoltStore.GetNextChildID",
+	"DoltStore.SetConfig",              // config
+	"DoltStore.DeleteConfig",           // config
+	"DoltStore.SetMetadata",            // metadata
+	"DoltStore.SetLocalMetadata",       // local_metadata
+	"DoltStore.PruneEventsJournal",     // bd_events_journal
+	"DoltStore.RunEventsMaintenanceTx", // bd_events_journal
+	"DoltStore.SetRepoMtime",           // repo_mtimes
+	"DoltStore.ClearRepoMtime",         // repo_mtimes
+	"DoltStore.GetNextChildID",         // child_counters, wisp_child_counters
+	"DoltStore.RecordProvenanceEvent",  // provenance_events
+	"memories.Remember",                // config
+	"memories.Forget",                  // config
+	"bootstrapper.Bootstrap",           // config, metadata
+}
+
+// lockedNotNoJournal are the callers moved off the NoJournal helpers because
+// they write a bead image table; the guard must not find them back.
+var lockedNotNoJournal = []string{
 	"DoltStore.ApplyCompaction",
 	"DoltStore.SnapshotIssue",
 	"DoltStore.RestoreFromSnapshot",
-	"DoltStore.RecordProvenanceEvent",
-	"memories.Remember",
-	"memories.Forget",
-	"bootstrapper.Bootstrap",
 }
 
 // TestJournalWriterLock_NoJournalBodiesRecordNothing is the converse guard:
 // the NoJournal transaction helpers skip the lock, which is only safe for a
-// body that can never advance bd_events_seq. A journaled write slipped into
-// one would go back to aborting its peers with 1213 — or being aborted. So no
-// function that calls withRetryTxNoJournal/withWriteTxNoJournal may call a
-// journaling issueops mutator, or a function of this package, on any receiver,
-// that reaches one through any number of helpers. See
+// body that can never advance bd_events_seq and writes none of a bead's image
+// tables. A journaled write slipped into one would go back to aborting its
+// peers with 1213 — or being aborted — and an image-table write would land
+// inside another writer's read-then-write window on the same bead. So no
+// function that calls withRetryTxNoJournal/withWriteTxNoJournal may write an
+// image table in its own SQL, or call a journaling or image-writing issueops
+// function, or a function of this package, on any receiver, that reaches one
+// through any number of helpers. See
 // parseDoltCallGraph for how calls resolve and noJournalViolations for the one
 // edge the reach does not follow.
 func TestJournalWriterLock_NoJournalBodiesRecordNothing(t *testing.T) {
-	mutators := journalingIssueopsMutators(t)
-	journalingMemoryopsMutators(t, mutators)
-	checked, violations := noJournalViolations(t, parseDoltCallGraph(t), mutators)
+	checked, violations := noJournalViolations(t, parseDoltCallGraph(t), lockedOnlyOps(t))
 	for _, v := range violations {
 		t.Error(v)
 	}
 	for _, want := range noJournalCallers {
 		if !checked[want] {
 			t.Errorf("NoJournal callers = %v, want %s among them — the guard is not looking where it should", checked, want)
+		}
+	}
+	for _, moved := range lockedNotNoJournal {
+		if checked[moved] {
+			t.Errorf("%s runs on a NoJournal transaction helper again; it writes a bead image table and must take the journal writer lock", moved)
 		}
 	}
 }
@@ -894,22 +1022,86 @@ func (m *memories) fixtureHopOne(ctx context.Context, tx *sql.Tx) error {
 }
 `
 
+// noJournalImageFixture holds NoJournal bodies that record no journal event
+// but write a bead image table: one through a helper that calls a
+// non-journaling issueops writer (compaction is a documented journal gap),
+// one through a helper's own SQL, and one in the body's own closure.
+const noJournalImageFixture = `package dolt
+
+import (
+	"context"
+	"database/sql"
+
+	"github.com/steveyegge/beads/internal/storage/issueops"
+)
+
+func (m *memories) fixtureImageProbe(ctx context.Context) error {
+	return m.store.withRetryTxNoJournal(ctx, func(tx *sql.Tx) error {
+		return m.fixtureCompactHop(ctx, tx)
+	})
+}
+
+func (m *memories) fixtureCompactHop(ctx context.Context, tx *sql.Tx) error {
+	return issueops.ApplyCompactionInTx(ctx, tx, "bd-fx", 1, 0, "")
+}
+
+func (s *DoltStore) fixtureRawImageProbe(ctx context.Context) error {
+	return s.withWriteTxNoJournal(ctx, func(tx *sql.Tx) error {
+		return fixtureRawLabelHop(ctx, tx)
+	})
+}
+
+func fixtureRawLabelHop(ctx context.Context, tx *sql.Tx) error {
+	_, err := tx.ExecContext(ctx, "INSERT INTO labels (issue_id, label) VALUES (?, ?)", "bd-fx", "x")
+	return err
+}
+
+func (s *DoltStore) fixtureOwnImageProbe(ctx context.Context) error {
+	return s.withRetryTxNoJournal(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, "DELETE FROM wisp_events WHERE issue_id = ?", "bd-fx")
+		return err
+	})
+}
+`
+
 // TestJournalWriterLock_NoJournalGuardReachesEveryReceiver pins the guard's
-// reach past DoltStore: the fixture's helper is a memories method, and the
-// guard must name it.
+// reach past DoltStore and its two rules: the journaling fixture's helper is a
+// memories method, and the image fixture's bodies journal nothing but write a
+// bead image table; the guard must name each.
 func TestJournalWriterLock_NoJournalGuardReachesEveryReceiver(t *testing.T) {
-	mutators := journalingIssueopsMutators(t)
-	journalingMemoryopsMutators(t, mutators)
-	_, violations := noJournalViolations(t, parseDoltCallGraph(t, noJournalGuardFixture), mutators)
-	want := "memories.fixtureNoJournalProbe runs on a NoJournal transaction helper but calls memories.fixtureHopOne,"
-	if len(violations) != 1 || !strings.HasPrefix(violations[0], want) {
-		t.Fatalf("violations = %q, want exactly one starting %q", violations, want)
+	ops := lockedOnlyOps(t)
+	for _, tc := range []struct {
+		name    string
+		fixture string
+		want    []string
+	}{
+		{"journaling helper", noJournalGuardFixture, []string{
+			"memories.fixtureNoJournalProbe runs on a NoJournal transaction helper but calls memories.fixtureHopOne,",
+		}},
+		{"image-table writes", noJournalImageFixture, []string{
+			"DoltStore.fixtureOwnImageProbe runs on a NoJournal transaction helper but writes a bead image table in its own SQL",
+			"DoltStore.fixtureRawImageProbe runs on a NoJournal transaction helper but calls fixtureRawLabelHop,",
+			"memories.fixtureImageProbe runs on a NoJournal transaction helper but calls memories.fixtureCompactHop,",
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, violations := noJournalViolations(t, parseDoltCallGraph(t, tc.fixture), ops)
+			if len(violations) != len(tc.want) {
+				t.Fatalf("violations = %q, want %d starting %q", violations, len(tc.want), tc.want)
+			}
+			for i, want := range tc.want {
+				if !strings.HasPrefix(violations[i], want) {
+					t.Errorf("violation %d = %q, want it to start %q", i, violations[i], want)
+				}
+			}
+		})
 	}
 }
 
 // noJournalViolations reports every function that runs on a NoJournal
-// transaction helper and calls a journaling mutator or a package function that
-// reaches one, with the callers it checked.
+// transaction helper and writes a bead image table in its own SQL, or calls
+// one of ops (lockedOnlyOps) or a package function that reaches one or writes
+// an image table itself, with the callers it checked.
 //
 // The reach follows every call but one: an edge into recheckBlockedAfterCommit.
 // That post-commit recheck journals on a locked transaction of its own
@@ -921,7 +1113,7 @@ func noJournalViolations(t *testing.T, g doltCallGraph, mutators map[string]bool
 	const postCommitRecheck = "DoltStore.recheckBlockedAfterCommit"
 	reaches := map[string]bool{}
 	for key, f := range g {
-		if f.callsAnyOf(mutators) {
+		if f.ownImageDML || f.callsAnyOf(mutators) {
 			reaches[key] = true
 		}
 	}
@@ -952,6 +1144,9 @@ func noJournalViolations(t *testing.T, g doltCallGraph, mutators map[string]bool
 			continue
 		}
 		checked[key] = true
+		if f.ownImageDML {
+			violations = append(violations, fmt.Sprintf("%s runs on a NoJournal transaction helper but writes a bead image table in its own SQL — use withRetryTx/withWriteTx so it takes the journal writer lock", key))
+		}
 		var bad []string
 		for _, c := range f.calls {
 			if mutators[c] {
@@ -964,7 +1159,7 @@ func noJournalViolations(t *testing.T, g doltCallGraph, mutators map[string]bool
 			}
 		}
 		for _, c := range bad {
-			violations = append(violations, fmt.Sprintf("%s runs on a NoJournal transaction helper but calls %s, which can record a journal event — use withRetryTx/withWriteTx so it takes the journal writer lock", key, c))
+			violations = append(violations, fmt.Sprintf("%s runs on a NoJournal transaction helper but calls %s, which can record a journal event or write a bead image table — use withRetryTx/withWriteTx so it takes the journal writer lock", key, c))
 		}
 	}
 	sort.Strings(violations)
@@ -976,8 +1171,9 @@ func noJournalViolations(t *testing.T, g doltCallGraph, mutators map[string]bool
 type doltCallGraph map[string]*doltFunc
 
 type doltFunc struct {
-	calls   []string        // every called name, bare or selector, as journalscan records them
-	callees map[string]bool // keys of the package functions the body calls or takes as a value
+	calls       []string        // every called name, bare or selector, as journalscan records them
+	callees     map[string]bool // keys of the package functions the body calls or takes as a value
+	ownImageDML bool            // the body's own SQL writes a bead image table (sqlWritesImageTable)
 }
 
 func (f *doltFunc) callsAnyOf(set map[string]bool) bool {
@@ -1078,6 +1274,7 @@ func parseDoltCallGraph(t *testing.T, fixtures ...string) doltCallGraph {
 				continue
 			}
 			f := g[funcDeclKey(fn)]
+			f.ownImageDML = bodyWritesImageTable(fn.Body)
 			ast.Inspect(fn.Body, func(n ast.Node) bool {
 				switch node := n.(type) {
 				case *ast.CallExpr:
@@ -1161,23 +1358,185 @@ func (i *stdlibImporter) Import(path string) (*gotypes.Package, error) {
 }
 
 // TestJournalWriterLock_NonJournaledWritesSkipAHeldLock pins the audit end to
-// end: while another session holds the journal writer lock, writes
-// that record no journal event complete inside a deadline far shorter than one
-// GET_LOCK wait, and a journaled write in the same window still waits.
+// end: while another session holds the journal writer lock, writes that touch
+// no bead image table complete inside a deadline far shorter than one GET_LOCK
+// wait, and a bead write in the same window still waits — events journal on or
+// off.
 //
 // It runs alone (setupSerialTestStore), so no other test's writer can hold
 // the lock it queues on.
 func TestJournalWriterLock_NonJournaledWritesSkipAHeldLock(t *testing.T) {
+	primary, cleanup := setupSerialTestStore(t)
+	defer cleanup()
+	ctx := context.Background()
+	holder := openSecondStoreOnBranch(t, ctx, primary)
+	conn, err := holder.db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("holder conn: %v", err)
+	}
+	defer conn.Close()
+	lockName := issueops.JournalWriterLockName(primary.database)
+	// One writer store per journal state, all opened while primary's session
+	// is still on the test branch: a write cut off in its GET_LOCK wait drops
+	// its store's single session, and the replacement starts on the default
+	// branch.
+	writers := map[bool]*DoltStore{true: openSecondStoreOnBranch(t, ctx, primary), false: openSecondStoreOnBranch(t, ctx, primary)}
+
+	for _, journal := range []bool{true, false} {
+		t.Run(fmt.Sprintf("journal=%v", journal), func(t *testing.T) {
+			store := writers[journal]
+			store.SetEventsJournalEnabled(journal)
+			mems, err := store.Memories()
+			if err != nil {
+				t.Fatalf("memories: %v", err)
+			}
+			id := fmt.Sprintf("bd-nj-%v", journal)
+			if err := store.CreateIssue(ctx, &types.Issue{ID: id, Title: "nj", IssueType: types.TypeTask, Status: types.StatusOpen}, "actor"); err != nil {
+				t.Fatalf("create: %v", err)
+			}
+
+			var got int
+			if err := conn.QueryRowContext(ctx, "SELECT GET_LOCK(?, 5)", lockName).Scan(&got); err != nil || got != 1 {
+				t.Fatalf("hold journal writer lock: got=%d err=%v", got, err)
+			}
+			defer func() { _, _ = conn.ExecContext(ctx, "SELECT RELEASE_LOCK(?)", lockName) }()
+
+			const deadline = time.Second
+			for _, tc := range []struct {
+				name string
+				call func(context.Context) error
+			}{
+				{"SetRepoMtime", func(ctx context.Context) error {
+					return store.SetRepoMtime(ctx, "/tmp/bd-nj/repo", "/tmp/bd-nj/repo/issues.jsonl", 1)
+				}},
+				{"ClearRepoMtime", func(ctx context.Context) error { return store.ClearRepoMtime(ctx, "/tmp/bd-nj/repo") }},
+				{"Remember", func(ctx context.Context) error {
+					_, err := mems.Remember(ctx, memoryops.RememberRequest{Key: "nj", Content: "held"})
+					return err
+				}},
+				{"Forget", func(ctx context.Context) error {
+					_, err := mems.Forget(ctx, memoryops.ForgetRequest{Key: "nj"})
+					return err
+				}},
+			} {
+				callCtx, cancel := context.WithTimeout(ctx, deadline)
+				start := time.Now()
+				err := tc.call(callCtx)
+				cancel()
+				t.Logf("%s under a held journal lock: %s", tc.name, time.Since(start))
+				if err != nil {
+					t.Errorf("%s, which writes no bead image table, waited on the held journal writer lock: %v", tc.name, err)
+				}
+			}
+
+			callCtx, cancel := context.WithTimeout(ctx, deadline)
+			defer cancel()
+			start := time.Now()
+			err = store.UpdateIssue(callCtx, id, map[string]interface{}{"title": "held"}, "actor")
+			t.Logf("UpdateIssue under a held journal lock: %s (err=%v)", time.Since(start), err)
+			if err == nil {
+				t.Fatal("UpdateIssue committed while another session held the journal writer lock; a bead write must wait")
+			}
+		})
+	}
+}
+
+// TestJournalWriterLock_HeartbeatWaitsOnAHeldLock pins that a lease heartbeat
+// queues on the journal writer lock, events journal on or off: a re-arm records
+// a lease_rearmed event and a journal entry (RenewLeaseInTx), so the heartbeat
+// runs on the locked route, and under a held lock it fails its short deadline
+// in the lock wait. Once the lock is free it lands.
+//
+// It runs alone (setupSerialTestStore), so no other test's writer can hold
+// the lock it queues on.
+func TestJournalWriterLock_HeartbeatWaitsOnAHeldLock(t *testing.T) {
+	primary, cleanup := setupSerialTestStore(t)
+	defer cleanup()
+	ctx := context.Background()
+	holder := openSecondStoreOnBranch(t, ctx, primary)
+	conn, err := holder.db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("holder conn: %v", err)
+	}
+	defer conn.Close()
+	lockName := issueops.JournalWriterLockName(primary.database)
+	// Per journal state, one store for the heartbeat cut off in its GET_LOCK
+	// wait and one for the free-lock pass, all opened while primary's session
+	// is still on the test branch: the cut-off wait drops its store's single
+	// session, and the replacement starts on the default branch.
+	type heartbeaters struct{ held, free *DoltStore }
+	stores := map[bool]heartbeaters{}
+	for _, journal := range []bool{true, false} {
+		stores[journal] = heartbeaters{held: openSecondStoreOnBranch(t, ctx, primary), free: openSecondStoreOnBranch(t, ctx, primary)}
+	}
+
+	for _, journal := range []bool{true, false} {
+		t.Run(fmt.Sprintf("journal=%v", journal), func(t *testing.T) {
+			held, free := stores[journal].held, stores[journal].free
+			held.SetEventsJournalEnabled(journal)
+			free.SetEventsJournalEnabled(journal)
+			id := fmt.Sprintf("bd-hbw-%v", journal)
+			if err := free.CreateIssue(ctx, &types.Issue{ID: id, Title: "hbw", IssueType: types.TypeTask, Status: types.StatusOpen}, "actor"); err != nil {
+				t.Fatalf("create: %v", err)
+			}
+			if err := free.ClaimIssue(ctx, id, "worker"); err != nil {
+				t.Fatalf("claim: %v", err)
+			}
+
+			var got int
+			if err := conn.QueryRowContext(ctx, "SELECT GET_LOCK(?, 5)", lockName).Scan(&got); err != nil || got != 1 {
+				t.Fatalf("hold journal writer lock: got=%d err=%v", got, err)
+			}
+			released := false
+			defer func() {
+				if !released {
+					_, _ = conn.ExecContext(ctx, "SELECT RELEASE_LOCK(?)", lockName)
+				}
+			}()
+
+			const deadline = time.Second
+			callCtx, cancel := context.WithTimeout(ctx, deadline)
+			start := time.Now()
+			err := held.HeartbeatIssue(callCtx, id, "worker")
+			waited := time.Since(start)
+			cancel()
+			t.Logf("HeartbeatIssue under a held journal lock: %s (err=%v)", waited, err)
+			if err == nil {
+				t.Fatal("HeartbeatIssue committed while another session held the journal writer lock; a heartbeat may re-arm, which journals, so it must wait")
+			}
+			if !strings.Contains(err.Error(), "journal writer lock") {
+				t.Errorf("HeartbeatIssue failed outside the journal writer lock wait: %v", err)
+			}
+
+			if _, err := conn.ExecContext(ctx, "SELECT RELEASE_LOCK(?)", lockName); err != nil {
+				t.Fatalf("release journal writer lock: %v", err)
+			}
+			released = true
+			if err := free.HeartbeatIssue(ctx, id, "worker"); err != nil {
+				t.Errorf("HeartbeatIssue with the lock free: %v", err)
+			}
+		})
+	}
+}
+
+// TestJournalWriterLock_CompactionWaitsOnAHeldLock pins that the compaction
+// writes, which record no journal event but write the issues row (or archive
+// it), take the journal writer lock with the journal off: under a held lock
+// each one fails its short deadline, and once the lock is free each one lands.
+//
+// It runs alone (setupSerialTestStore), so no other test's writer can hold
+// the lock it queues on.
+func TestJournalWriterLock_CompactionWaitsOnAHeldLock(t *testing.T) {
 	store, cleanup := setupSerialTestStore(t)
 	defer cleanup()
 	ctx := context.Background()
-	enableJournalForTest(t, store)
-	if err := store.CreateIssue(ctx, &types.Issue{ID: "bd-nj-1", Title: "nj", IssueType: types.TypeTask, Status: types.StatusOpen}, "actor"); err != nil {
+	// The free-lock pass runs on its own store, opened while store's session
+	// is on the test branch: a write cut off in its GET_LOCK wait drops the
+	// single session, and the replacement starts on the default branch.
+	free := openSecondStoreOnBranch(t, ctx, store)
+	const id = "bd-cw-1"
+	if err := store.CreateIssue(ctx, &types.Issue{ID: id, Title: "cw", Description: "long text", IssueType: types.TypeTask, Status: types.StatusClosed}, "actor"); err != nil {
 		t.Fatalf("create: %v", err)
-	}
-	mems, err := store.Memories()
-	if err != nil {
-		t.Fatalf("memories: %v", err)
 	}
 
 	holder := openSecondStoreOnBranch(t, ctx, store)
@@ -1187,47 +1546,40 @@ func TestJournalWriterLock_NonJournaledWritesSkipAHeldLock(t *testing.T) {
 	}
 	defer conn.Close()
 	lockName := issueops.JournalWriterLockName(store.database)
+
+	writes := []struct {
+		name string
+		call func(context.Context, *DoltStore) error
+	}{
+		{"SnapshotIssue", func(ctx context.Context, s *DoltStore) error { return s.SnapshotIssue(ctx, id, 1) }},
+		{"ApplyCompaction", func(ctx context.Context, s *DoltStore) error { return s.ApplyCompaction(ctx, id, 1, 9, 0, "") }},
+		{"RestoreFromSnapshot", func(ctx context.Context, s *DoltStore) error {
+			_, err := s.RestoreFromSnapshot(ctx, id)
+			return err
+		}},
+	}
+
 	var got int
 	if err := conn.QueryRowContext(ctx, "SELECT GET_LOCK(?, 5)", lockName).Scan(&got); err != nil || got != 1 {
 		t.Fatalf("hold journal writer lock: got=%d err=%v", got, err)
 	}
-	defer func() { _, _ = conn.ExecContext(ctx, "SELECT RELEASE_LOCK(?)", lockName) }()
-
-	const deadline = time.Second
-	for _, tc := range []struct {
-		name string
-		call func(context.Context) error
-	}{
-		{"SetRepoMtime", func(ctx context.Context) error {
-			return store.SetRepoMtime(ctx, "/tmp/bd-nj/repo", "/tmp/bd-nj/repo/issues.jsonl", 1)
-		}},
-		{"ClearRepoMtime", func(ctx context.Context) error { return store.ClearRepoMtime(ctx, "/tmp/bd-nj/repo") }},
-		{"Remember", func(ctx context.Context) error {
-			_, err := mems.Remember(ctx, memoryops.RememberRequest{Key: "nj", Content: "held"})
-			return err
-		}},
-		{"Forget", func(ctx context.Context) error {
-			_, err := mems.Forget(ctx, memoryops.ForgetRequest{Key: "nj"})
-			return err
-		}},
-	} {
-		callCtx, cancel := context.WithTimeout(ctx, deadline)
+	for _, w := range writes {
+		callCtx, cancel := context.WithTimeout(ctx, time.Second)
 		start := time.Now()
-		err := tc.call(callCtx)
+		err := w.call(callCtx, store)
 		cancel()
-		t.Logf("%s under a held journal lock: %s", tc.name, time.Since(start))
-		if err != nil {
-			t.Errorf("non-journaled %s waited on the held journal writer lock: %v", tc.name, err)
+		t.Logf("%s under a held journal lock: %s (err=%v)", w.name, time.Since(start), err)
+		if err == nil {
+			t.Errorf("%s committed while another session held the journal writer lock; a compaction write must wait", w.name)
 		}
 	}
-
-	callCtx, cancel := context.WithTimeout(ctx, deadline)
-	defer cancel()
-	start := time.Now()
-	err = store.UpdateIssue(callCtx, "bd-nj-1", map[string]interface{}{"title": "held"}, "actor")
-	t.Logf("journaled UpdateIssue under a held journal lock: %s (err=%v)", time.Since(start), err)
-	if err == nil {
-		t.Fatal("journaled UpdateIssue committed while another session held the journal writer lock; it must wait")
+	if _, err := conn.ExecContext(ctx, "SELECT RELEASE_LOCK(?)", lockName); err != nil {
+		t.Fatalf("release journal writer lock: %v", err)
+	}
+	for _, w := range writes {
+		if err := w.call(ctx, free); err != nil {
+			t.Errorf("%s with the lock free: %v", w.name, err)
+		}
 	}
 }
 
@@ -1360,6 +1712,70 @@ func TestEventsJournal_OverlappingServerWritersQueue(t *testing.T) {
 	ctx := context.Background()
 	second := openSecondStoreOnBranch(t, ctx, store)
 	assertJournaledWritersQueue(t, ctx, store, second)
+}
+
+// TestEventsJournalOff_OverlappingServerWritersQueue is
+// TestEventsJournal_OverlappingServerWritersQueue with the journal off: the
+// long writer and the short one write different tables of one bead, so
+// without the lock nothing would make the short one wait and it would
+// land inside the long one's read-then-write window. With the lock it queues
+// and commits after the long one.
+//
+// It runs alone (setupSerialTestStore), so no other test's writer can hold
+// the lock it queues on.
+func TestEventsJournalOff_OverlappingServerWritersQueue(t *testing.T) {
+	store, cleanup := setupSerialTestStore(t)
+	defer cleanup()
+	ctx := context.Background()
+	second := openSecondStoreOnBranch(t, ctx, store)
+	const id = "bd-qoff-1"
+	createLockOrderIssues(t, ctx, store, id)
+
+	attempts := 0
+	inside := make(chan struct{})
+	release := make(chan struct{})
+	releaseLong := sync.OnceFunc(func() { close(release) })
+	defer releaseLong()
+	longDone := make(chan error, 1)
+	go func() {
+		longDone <- store.withRetryTx(ctx, func(tx *sql.Tx) error {
+			attempts++
+			if _, err := tx.ExecContext(ctx, "UPDATE issues SET title = 'long' WHERE id = ?", id); err != nil {
+				return err
+			}
+			if attempts == 1 {
+				close(inside)
+				<-release
+			}
+			return nil
+		})
+	}()
+	<-inside
+
+	shortDone := make(chan error, 1)
+	go func() { shortDone <- second.AddLabel(ctx, id, "queued", "actor") }()
+	select {
+	case err := <-shortDone:
+		t.Fatalf("short bead write finished (err=%v) while the long one held the lock with the journal off; it must queue", err)
+	case <-time.After(500 * time.Millisecond):
+	}
+	releaseLong()
+	if err := <-longDone; err != nil {
+		t.Fatalf("long tx: %v", err)
+	}
+	if err := <-shortDone; err != nil {
+		t.Fatalf("short write: %v", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("long body ran %d times, want 1", attempts)
+	}
+	labels, err := store.GetLabels(ctx, id)
+	if err != nil {
+		t.Fatalf("labels: %v", err)
+	}
+	if !slices.Contains(labels, "queued") {
+		t.Fatalf("labels = %v, want the queued writer's label after the long write", labels)
+	}
 }
 
 // assertJournaledWritersQueue runs a long journaled transaction on long and,

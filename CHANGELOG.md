@@ -685,6 +685,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   write can no longer slip onto a transaction that does not take the journal
   writer lock.
 
+- **In server mode every bead write takes the journal writer lock, with the
+  events journal on or off.** A write transaction that touches a bead's
+  issues, labels, dependencies, comments or events rows (or their wisp
+  tables) queues on the per-database lock before it begins, so a write can no
+  longer land inside another writer's read-then-write window on the same bead
+  when the journal is off. Compaction's apply, snapshot and restore writes now
+  take the lock too. Writes that touch no bead table (config, metadata, repo
+  mtimes, journal prune) stay unlocked, and so does the pull and merge path,
+  since a pull can outlast the lock's wait.
+
 - Over an HTTP workspace, `bd ready --json` without `BD_JSON_ENVELOPE` no
   longer sends `GET /v0/beads/ready:count` after a page the limit cut short:
   the total only went into the stderr hint. It lists one row past the limit

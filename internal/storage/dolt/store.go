@@ -1262,17 +1262,19 @@ func (s *DoltStore) withReadTxLongTimeout(ctx context.Context, fn func(tx *sql.T
 // logic (verify passes, hooks, return values). See ready_claimer.ClaimNext's
 // `claimed = nil` reset for the canonical example.
 //
-// fn runs under the journal writer lock (see writeTxConn); a body that cannot
-// record a journal event uses withRetryTxNoJournal instead.
+// fn runs under the journal writer lock (see writeTxConn); only a body that
+// writes no bead image table may use withRetryTxNoJournal instead.
 func (s *DoltStore) withRetryTx(ctx context.Context, fn func(tx *sql.Tx) error) error {
 	return s.withRetryTxOn(ctx, s.db, fn)
 }
 
 // withRetryTxNoJournal is withRetryTx for a body that provably records no
-// journal event — config and metadata writes, journal prune. It takes no
-// journal writer lock, so it never queues behind journaled writers.
+// journal event and writes none of a bead's image tables
+// (issueops.JournalWriterLockTables) — config and metadata writes, journal
+// prune. It takes no journal writer lock, so it never queues behind bead
+// writers.
 // TestJournalWriterLock_NoJournalBodiesRecordNothing pins that no caller
-// reaches a journaling issueops mutator.
+// reaches a journaling issueops mutator or an image-table write.
 func (s *DoltStore) withRetryTxNoJournal(ctx context.Context, fn func(tx *sql.Tx) error) error {
 	return s.retryWriteTx(ctx, s.db, unjournaledWrite, fn)
 }
@@ -1444,17 +1446,18 @@ func (s *DoltStore) commitWriteTxWith(ctx context.Context, beginner txBeginner, 
 	return issueops.TakeBlockedRecheck(tx), nil
 }
 
-// writeTxConn pins the connection a journaled write transaction runs on and, in
-// server mode with the events journal on, takes the journal writer lock on it
-// first (see lockJournalWriter). The caller begins its transaction on conn and
+// writeTxConn pins the connection a bead write transaction runs on and, in
+// server mode, takes the journal writer lock on it first (see
+// lockJournalWriter), events journal on or off. The caller begins its transaction on conn and
 // calls release once the transaction has committed or rolled back; release
 // drops the lock and returns conn to the pool — or discards the session when
 // the RELEASE_LOCK fails or outlives issueops.JournalWriterUnlockTimeout — and
 // is idempotent.
 //
-// Every raw transaction that scopes the events journal must start here (or, on
-// a connection it already pinned, through lockJournalWriter): the lock protects
-// nothing unless every journaled writer takes it.
+// Every raw transaction that scopes the events journal or writes a bead image
+// table must start here (or, on a connection it already pinned, through
+// lockJournalWriter): the lock protects nothing unless every such writer takes
+// it.
 func (s *DoltStore) writeTxConn(ctx context.Context) (*sql.Conn, func(), error) {
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
@@ -1506,14 +1509,14 @@ func (s *DoltStore) writeTxSession(ctx context.Context, beginner txBeginner, loc
 }
 
 // lockJournalWriter takes the journal writer lock on conn
-// (issueops.LockJournalWriter) when the store is in server mode with the
-// events journal on, and is a no-op otherwise. It must run BEFORE the
+// (issueops.LockJournalWriter) when the store is in server mode, events journal
+// on or off, and is a no-op in embedded mode. It must run BEFORE the
 // transaction begins; the returned unlock is idempotent and must run after it
 // has committed or rolled back — and before any follow-up journaled write on
 // another connection (a post-commit blocked recheck), which queues on this
 // lock and would otherwise wait out the whole budget.
 func (s *DoltStore) lockJournalWriter(ctx context.Context, conn *sql.Conn) (func(), error) {
-	if !s.serverMode || !s.eventsJournalEnabled.Load() {
+	if !s.serverMode {
 		return func() {}, nil
 	}
 	unlock, err := issueops.LockJournalWriter(ctx, conn, s.database)

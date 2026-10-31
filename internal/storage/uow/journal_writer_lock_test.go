@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"errors"
+	"fmt"
 	"net"
 	"regexp"
 	"strconv"
@@ -24,12 +25,13 @@ import (
 )
 
 // The proxied plumbing's half of the journal writer lock (#6117): units of
-// work that may commit journaled writes queue on the same server-side lock as
-// the dolt store's writers, and nothing else does. sqlmock fails any statement
-// it was not told to expect, so a test that expects no GET_LOCK proves none
-// was sent. A RELEASE_LOCK it did not expect fails, and the failed release
-// discards the session, so "exactly one release" is asserted as "the session
-// went back to the pool" on every path that pools it.
+// work that may commit bead writes queue on the same server-side lock as the
+// dolt store's writers, events journal on or off, and nothing else does.
+// sqlmock fails any statement it was not told to expect, so a test that
+// expects no GET_LOCK proves none was sent. A RELEASE_LOCK it did not expect
+// fails, and the failed release discards the session, so "exactly one release"
+// is asserted as "the session went back to the pool" on every path that pools
+// it.
 
 var (
 	matchGetLock     = regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")
@@ -148,63 +150,83 @@ func TestJournalWriterLock_PoisonPathReleasesOnce(t *testing.T) {
 }
 
 // TestJournalWriterLock_RunTxScopedTakesAndReleases covers the heartbeat
-// route: a re-arm records a journal event, so RunTxScoped queues like RunTx,
-// even for an attempt that names no tables and takes the plain COMMIT.
+// route, journal on or off: a re-arm records a journal event, so RunTxScoped
+// queues like RunTx, even for an attempt that names no tables and takes the
+// plain COMMIT.
 func TestJournalWriterLock_RunTxScopedTakesAndReleases(t *testing.T) {
-	p, mock := newJournaledMockTxProvider(t)
-	expectJournalLock(mock)
-	mock.ExpectExec("START TRANSACTION").WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec(matchPlainCommit).WillReturnResult(sqlmock.NewResult(0, 0))
-	expectJournalUnlock(mock)
+	for _, journal := range []bool{true, false} {
+		t.Run(fmt.Sprintf("journal=%v", journal), func(t *testing.T) {
+			p, mock := newJournaledMockTxProvider(t)
+			p.SetEventsJournalEnabled(journal)
+			expectJournalLock(mock)
+			mock.ExpectExec("START TRANSACTION").WillReturnResult(sqlmock.NewResult(0, 0))
+			mock.ExpectExec(matchPlainCommit).WillReturnResult(sqlmock.NewResult(0, 0))
+			expectJournalUnlock(mock)
 
-	_, err := RunTxScoped(context.Background(), p, func(ctx context.Context, uw UnitOfWork) (struct{}, []string, string, error) {
-		return struct{}{}, nil, "", nil
-	})
-	require.NoError(t, err)
-	require.NoError(t, mock.ExpectationsWereMet())
-	assert.Equal(t, 1, p.db.Stats().OpenConnections, "a confirmed release pools the session")
+			_, err := RunTxScoped(context.Background(), p, func(ctx context.Context, uw UnitOfWork) (struct{}, []string, string, error) {
+				return struct{}{}, nil, "", nil
+			})
+			require.NoError(t, err)
+			require.NoError(t, mock.ExpectationsWereMet())
+			assert.Equal(t, 1, p.db.Stats().OpenConnections, "a confirmed release pools the session")
+		})
+	}
 }
 
-// TestJournalWriterLock_OnlyCommittingUnitsLock pins who does NOT queue:
-// reads (RunTxRead and the direct NewUOW readers), the ephemeral
-// metadata/prune writes, and every unit of work when the journal is off.
+// TestJournalWriterLock_OnlyCommittingUnitsLock pins who does NOT queue,
+// journal on or off: reads (RunTxRead and the direct NewUOW readers) and the
+// ephemeral metadata/prune writes, which write no bead image table. A
+// committing unit of work queues with the journal off too: a bead write that
+// skipped the lock could land inside another's read-then-write window on the
+// same bead.
 func TestJournalWriterLock_OnlyCommittingUnitsLock(t *testing.T) {
 	ctx := context.Background()
 	noop := func(ctx context.Context, uw UnitOfWork) (struct{}, error) { return struct{}{}, nil }
 
-	t.Run("RunTxRead", func(t *testing.T) {
-		p, mock := newJournaledMockTxProvider(t)
-		mock.ExpectExec("START TRANSACTION").WillReturnResult(sqlmock.NewResult(0, 0))
-		mock.ExpectExec("ROLLBACK").WillReturnResult(sqlmock.NewResult(0, 0))
-		_, err := RunTxRead(ctx, p, noop)
-		require.NoError(t, err)
-		require.NoError(t, mock.ExpectationsWereMet())
-	})
-	t.Run("RunTxEphemeral", func(t *testing.T) {
-		p, mock := newJournaledMockTxProvider(t)
-		mock.ExpectExec("START TRANSACTION").WillReturnResult(sqlmock.NewResult(0, 0))
-		mock.ExpectExec(matchPlainCommit).WillReturnResult(sqlmock.NewResult(0, 0))
-		_, err := RunTxEphemeral(ctx, p, noop)
-		require.NoError(t, err)
-		require.NoError(t, mock.ExpectationsWereMet())
-	})
-	t.Run("direct NewUOW", func(t *testing.T) {
-		p, mock := newJournaledMockTxProvider(t)
-		mock.ExpectExec("START TRANSACTION").WillReturnResult(sqlmock.NewResult(0, 0))
-		mock.ExpectExec("ROLLBACK").WillReturnResult(sqlmock.NewResult(0, 0))
-		uw, err := p.NewUOW(ctx)
-		require.NoError(t, err)
-		uw.Close(ctx)
-		require.NoError(t, mock.ExpectationsWereMet())
-	})
-	t.Run("RunTx with the journal off", func(t *testing.T) {
-		p, mock := newMockTxProvider(t)
-		p.database = "proj_a"
-		mock.ExpectExec("START TRANSACTION").WillReturnResult(sqlmock.NewResult(0, 0))
-		mock.ExpectExec("ROLLBACK").WillReturnResult(sqlmock.NewResult(0, 0))
-		require.NoError(t, RunTx(ctx, p, func(ctx context.Context, uw UnitOfWork) (string, error) { return "", nil }))
-		require.NoError(t, mock.ExpectationsWereMet())
-	})
+	for _, journal := range []bool{true, false} {
+		newProvider := func(t *testing.T) (*doltSQLProvider, sqlmock.Sqlmock) {
+			p, mock := newJournaledMockTxProvider(t)
+			p.SetEventsJournalEnabled(journal)
+			return p, mock
+		}
+		t.Run(fmt.Sprintf("journal=%v", journal), func(t *testing.T) {
+			t.Run("RunTxRead", func(t *testing.T) {
+				p, mock := newProvider(t)
+				mock.ExpectExec("START TRANSACTION").WillReturnResult(sqlmock.NewResult(0, 0))
+				mock.ExpectExec("ROLLBACK").WillReturnResult(sqlmock.NewResult(0, 0))
+				_, err := RunTxRead(ctx, p, noop)
+				require.NoError(t, err)
+				require.NoError(t, mock.ExpectationsWereMet())
+			})
+			t.Run("RunTxEphemeral", func(t *testing.T) {
+				p, mock := newProvider(t)
+				mock.ExpectExec("START TRANSACTION").WillReturnResult(sqlmock.NewResult(0, 0))
+				mock.ExpectExec(matchPlainCommit).WillReturnResult(sqlmock.NewResult(0, 0))
+				_, err := RunTxEphemeral(ctx, p, noop)
+				require.NoError(t, err)
+				require.NoError(t, mock.ExpectationsWereMet())
+			})
+			t.Run("direct NewUOW", func(t *testing.T) {
+				p, mock := newProvider(t)
+				mock.ExpectExec("START TRANSACTION").WillReturnResult(sqlmock.NewResult(0, 0))
+				mock.ExpectExec("ROLLBACK").WillReturnResult(sqlmock.NewResult(0, 0))
+				uw, err := p.NewUOW(ctx)
+				require.NoError(t, err)
+				uw.Close(ctx)
+				require.NoError(t, mock.ExpectationsWereMet())
+			})
+			t.Run("RunTx locks", func(t *testing.T) {
+				p, mock := newProvider(t)
+				expectJournalLock(mock)
+				mock.ExpectExec("START TRANSACTION").WillReturnResult(sqlmock.NewResult(0, 0))
+				mock.ExpectExec("ROLLBACK").WillReturnResult(sqlmock.NewResult(0, 0))
+				expectJournalUnlock(mock)
+				require.NoError(t, RunTx(ctx, p, func(ctx context.Context, uw UnitOfWork) (string, error) { return "", nil }))
+				require.NoError(t, mock.ExpectationsWereMet())
+				assert.Equal(t, 1, p.db.Stats().OpenConnections, "a confirmed release pools the session")
+			})
+		})
+	}
 }
 
 // TestJournalWriterLock_FailedUnlockDiscardsSession pins that a RELEASE_LOCK
