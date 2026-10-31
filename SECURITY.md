@@ -61,25 +61,49 @@ bd stores issue data locally in a Dolt database (`.beads/dolt/`), which is gitig
 
 ### Network & Privacy
 
-Beads is local-first — the beads codebase itself contains no telemetry,
-analytics, or outbound network calls.
+Beads is local-first, but it is not telemetry-free: two independent
+collectors are on by default, and disabling one does not disable the
+other.
 
-However, the **Dolt** database engine (a beads dependency) collects usage
-metrics by default, contacting `doltremoteapi.dolthub.com` even when no
-remotes are configured.
+**bd's own CLI usage metrics.** Each `bd` run queues an anonymous
+`cli_command` event (command name, bd version, OS, an HMAC-derived
+machine id) and flushes batches to `https://gastownhall-eventsapi.com/mp/collect`.
+Check the current status with `bd metrics`. To disable:
 
-To disable Dolt metrics collection, use either method:
+```sh
+# Method 1: bd config (persistent)
+bd metrics off
+
+# Method 2: Environment variable (per-session or export in shell profile)
+export DO_NOT_TRACK=1
+```
+
+`bd metrics example` shows the exact payload shape. `BEADS_METRICS_ENDPOINT`
+overrides the collection endpoint.
+
+**Dolt's own metrics.** The **Dolt** database engine (a beads dependency)
+separately collects its own usage metrics by default, contacting
+`doltremoteapi.dolthub.com` even when no remotes are configured. To
+disable Dolt metrics collection, use either method:
 
 ```sh
 # Method 1: Dolt config (persistent)
 dolt config --global --add metrics.disabled true
 
 # Method 2: Environment variable (per-session or export in shell profile)
-export DOLT_DISABLE_EVENT_FLUSH=1
+export BD_DISABLE_EVENT_FLUSH=1
 ```
 
-To verify, block `doltremoteapi.dolthub.com` in your firewall or DNS — beads
-continues working normally with no degradation.
+Both settings use the key name `metrics.disabled`, but in two different
+config files (`~/.config/bd/config.yaml` for bd, Dolt's own global config
+for Dolt) — disabling one does not disable the other.
+
+`bd doctor` also makes one outbound call not covered by either collector:
+a version check against `api.github.com/repos/steveyegge/beads/releases/latest`.
+
+To verify, block `doltremoteapi.dolthub.com` and `gastownhall-eventsapi.com`
+in your firewall or DNS — beads continues working normally with no
+degradation.
 
 ### Tracker Integration Trust Model
 
