@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -159,6 +160,73 @@ func TestDoltBackupStateRoundTrip(t *testing.T) {
 	}
 	if !loaded.LastSync.Equal(state.LastSync) {
 		t.Errorf("last_sync = %v, want %v", loaded.LastSync, state.LastSync)
+	}
+}
+
+func TestValidateBackupPruneGracePeriod(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    time.Duration
+		provided bool
+		want     time.Duration
+		prune    bool
+		wantErr  string
+	}{
+		{name: "omitted"},
+		{name: "minimum", input: 10 * time.Minute, provided: true, want: 10 * time.Minute, prune: true},
+		{name: "compound duration", input: 90 * time.Minute, provided: true, want: 90 * time.Minute, prune: true},
+		{name: "below minimum", input: 9*time.Minute + 59*time.Second, provided: true, prune: true, wantErr: "must be at least 10m"},
+		{name: "zero", input: 0, provided: true, prune: true, wantErr: "must be at least 10m"},
+		{name: "negative", input: -time.Hour, provided: true, prune: true, wantErr: "must be at least 10m"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, prune, err := validateBackupPruneGracePeriod(tt.input, tt.provided)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("validateBackupPruneGracePeriod(%s) error = %v, want %q", tt.input, err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("validateBackupPruneGracePeriod(%s): %v", tt.input, err)
+			}
+			if got != tt.want || prune != tt.prune {
+				t.Fatalf("validateBackupPruneGracePeriod(%s) = (%s, %v), want (%s, %v)", tt.input, got, prune, tt.want, tt.prune)
+			}
+		})
+	}
+}
+
+func TestValidateBackupPruneDestination(t *testing.T) {
+	tests := []struct {
+		name    string
+		url     string
+		wantErr string
+	}{
+		{name: "file URL", url: "file:///var/backups/beads"},
+		{name: "case-insensitive scheme", url: "FILE:///var/backups/beads"},
+		{name: "https destination", url: "https://user:secret@example.com/beads", wantErr: "configured scheme: https"},
+		{name: "file URI without //", url: "file:/var/backups/beads", wantErr: "requires a file://"},
+		{name: "scheme missing", url: "/var/backups/beads", wantErr: "requires a valid file://"},
+		{name: "malformed URL", url: "file://%zz", wantErr: "requires a valid file://"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateBackupPruneDestination(tt.url)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("validateBackupPruneDestination(%q): %v", tt.url, err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("validateBackupPruneDestination(%q) error = %v, want %q", tt.url, err, tt.wantErr)
+			}
+			if strings.Contains(err.Error(), "secret") {
+				t.Fatalf("validation error leaked URL credentials: %v", err)
+			}
+		})
 	}
 }
 

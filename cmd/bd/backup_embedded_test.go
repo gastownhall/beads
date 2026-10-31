@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // bdBackup runs "bd backup" with extra args. Returns combined output.
@@ -39,6 +40,20 @@ func bdBackupFail(t *testing.T, bd, dir string, args ...string) string {
 		t.Fatalf("bd backup %s should have failed, got: %s", strings.Join(args, " "), out)
 	}
 	return string(out)
+}
+
+func ageBackupDestinationEntries(t *testing.T, dir string, age time.Duration) {
+	t.Helper()
+	modified := time.Now().Add(-age)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if err := os.Chtimes(filepath.Join(dir, entry.Name()), modified, modified); err != nil {
+			t.Fatalf("age backup entry %s: %v", entry.Name(), err)
+		}
+	}
 }
 
 func TestEmbeddedBackup(t *testing.T) {
@@ -113,6 +128,51 @@ func TestEmbeddedBackup(t *testing.T) {
 		if _, err := os.Stat(backupDest); os.IsNotExist(err) {
 			t.Error("backup destination directory should exist after sync")
 		}
+	})
+
+	t.Run("sync_prunes_aged_orphan_and_backup_restores", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "bkprune")
+		before := bdCreateSilent(t, bd, dir, "issue present before pruning")
+
+		backupDest := filepath.Join(t.TempDir(), "dolt-backup-prune")
+		backupURL := "file://" + backupDest
+		bdBackup(t, bd, dir, "init", backupURL)
+		bdBackup(t, bd, dir, "sync")
+
+		// Model the table file left behind when a sync is interrupted before
+		// its manifest commit. Dolt's pruner removes it only after the whole
+		// destination has been quiet for the requested grace period.
+		orphan := filepath.Join(backupDest, "00000000000000000000000000000001")
+		if err := os.WriteFile(orphan, []byte("orphaned table file"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		ageBackupDestinationEntries(t, backupDest, 20*time.Minute)
+
+		out := bdBackup(t, bd, dir, "sync", "--prune-with-grace-period", "10m")
+		if !strings.Contains(out, "Backup synced") {
+			t.Fatalf("pruned sync did not report success: %s", out)
+		}
+		if _, err := os.Stat(orphan); !os.IsNotExist(err) {
+			t.Fatalf("pruned sync left the orphan in place; stat error: %v", err)
+		}
+
+		recentOrphan := filepath.Join(backupDest, "00000000000000000000000000000002")
+		if err := os.WriteFile(recentOrphan, []byte("recent orphaned table file"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if out := bdBackup(t, bd, dir, "sync", "--prune-with-grace-period", "10m"); !strings.Contains(out, "Backup synced") {
+			t.Fatalf("pruned sync with recent destination file did not report success: %s", out)
+		}
+		if _, err := os.Stat(recentOrphan); err != nil {
+			t.Fatalf("pruned sync removed a recent destination file; stat error: %v", err)
+		}
+
+		after := bdCreateSilent(t, bd, dir, "issue created after pruned backup")
+		bdBackup(t, bd, dir, "restore", backupDest, "--force")
+		if got := bdShow(t, bd, dir, before); got.Title != "issue present before pruning" {
+			t.Fatalf("restored backup lost its issue: %+v", got)
+		}
+		bdShowFail(t, bd, dir, after)
 	})
 
 	t.Run("sync_without_init", func(t *testing.T) {

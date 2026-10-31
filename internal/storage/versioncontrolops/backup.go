@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // ExportBackupName is the Dolt backup remote the auto-backup path registers
@@ -25,6 +26,27 @@ func BackupAdd(ctx context.Context, db DBConn, name, url string) error {
 func BackupSync(ctx context.Context, db DBConn, name string) error {
 	if _, err := db.ExecContext(ctx, "CALL DOLT_BACKUP('sync', ?)", name); err != nil {
 		return fmt.Errorf("sync backup %s: %w", name, err)
+	}
+	return nil
+}
+
+// MinBackupPruneGracePeriod is Dolt's minimum grace period for pruning a
+// file:// backup destination.
+const MinBackupPruneGracePeriod = 10 * time.Minute
+
+// BackupSyncWithPrune syncs the named backup and asks Dolt to remove table
+// files that are unreferenced by the destination manifest and older than the
+// supplied grace period. Dolt itself skips pruning when the destination is
+// not quiescent.
+func BackupSyncWithPrune(ctx context.Context, db DBConn, name string, gracePeriod time.Duration) error {
+	if gracePeriod < MinBackupPruneGracePeriod {
+		return fmt.Errorf("prune grace period must be at least %s", MinBackupPruneGracePeriod)
+	}
+	if _, err := db.ExecContext(ctx,
+		"CALL DOLT_BACKUP('sync', ?, '--prune-with-grace-period', ?)",
+		name, gracePeriod.String(),
+	); err != nil {
+		return fmt.Errorf("sync backup %s with pruning: %w", name, err)
 	}
 	return nil
 }
