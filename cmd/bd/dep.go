@@ -988,6 +988,37 @@ func warnDroppedDepEdges(ctx context.Context, reader issueops.EdgeReader, anchor
 	fmt.Fprintf(os.Stderr, "For raw edge records, run: bd dep list %s %s%s\n", arg, arg, note)
 }
 
+// noteHiddenChildren prints a stderr-only note when anchorID has parent-child
+// children that the default "down" view of `bd dep list` / `bd dep tree` (view
+// "list" or "tree") does not show (GH#5151). A parent-child edge is stored on
+// the child and points at the parent, so a parent's children are its INBOUND
+// edges, and a down view of a molecule root with 26 steps prints exactly what
+// a childless issue prints. The note counts them and names the --direction=up
+// command that lists them.
+//
+// The count is the same inbound parent-child read that command makes, so the
+// two always agree. Like warnDroppedDepEdges this never writes to stdout and
+// is best effort: an error or no children prints nothing.
+func noteHiddenChildren(ctx context.Context, rel issueops.Relations, anchorID, view string) {
+	children, err := rel.Related(ctx, issueops.RelatedRequest{
+		ID:        anchorID,
+		Direction: issueops.RelationIn,
+		Types:     []types.DependencyType{types.DepParentChild},
+	})
+	if err != nil || len(children) == 0 {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "note: %s has %d child issue(s) not shown here: this view lists what %s depends on, and its children depend on it (parent-child).\n",
+		printedIssueID(anchorID), len(children), printedIssueID(anchorID))
+	arg, note := remedy.CommandArg(runtime.GOOS, anchorID, "<issue-id>")
+	if view == "tree" {
+		// dep tree has no --type flag; up from a root reaches its children.
+		fmt.Fprintf(os.Stderr, "To see them, run: bd dep tree %s --direction=up%s\n", arg, note)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "To list them, run: bd dep list %s --direction=up --type=parent-child%s\n", arg, note)
+}
+
 var depListCmd = &cobra.Command{
 	Use:   "list [issue-id...]",
 	Short: "List dependencies or dependents of one or more issues",
@@ -1142,6 +1173,17 @@ Examples:
 				allIssues = []*issueops.RelatedIssue{}
 			}
 			return outputJSON(allIssues)
+		}
+
+		// A down view never reads the anchor's children (inbound parent-child
+		// edges), so a parent prints what a childless issue prints: say so on
+		// stderr after the listing (GH#5151). Keyed to the request actually
+		// issued — an unvalidated --direction=both issues the down request.
+		if !batchMode && len(resolved) == 1 && request.Direction == issueops.RelationOut &&
+			(typeFilter == "" || typeFilter == string(types.DepParentChild)) {
+			if rel, err := resolved[0].store.IssueRelations(); err == nil {
+				defer noteHiddenChildren(ctx, rel, resolved[0].fullID, "list")
+			}
 		}
 
 		if len(allIssues) == 0 {

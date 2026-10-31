@@ -983,3 +983,74 @@ func TestProxiedServerDepListSingleIDWarnsOnDroppedExternalEdge(t *testing.T) {
 		t.Errorf("batch mode should show both deps, got:\n%s", batchStdout.String())
 	}
 }
+
+// TestProxiedServerDepDefaultDirectionNotesHiddenChildren is the
+// proxied-server counterpart of TestEmbeddedDepDefaultDirectionNotesHiddenChildren
+// (GH#5151): the default down bd dep list / bd dep tree of a hooked molecule
+// root with 26 step children keep their stdout, and stderr counts the
+// children and names the --direction=up command that lists them.
+func TestProxiedServerDepDefaultDirectionNotesHiddenChildren(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+
+	p := newSharedProxiedProject(t, bd, "hcp1")
+	root := bdProxiedCreate(t, bd, p.dir, "Molecule root", "--type", "epic", "--ephemeral")
+	bdProxiedUpdate(t, bd, p.dir, root.ID, "--status", "hooked")
+	var steps []string
+	for i := 1; i <= 26; i++ {
+		step := bdProxiedCreate(t, bd, p.dir, fmt.Sprintf("Step %d", i), "--type", "task", "--ephemeral", "--parent", root.ID)
+		steps = append(steps, step.ID)
+	}
+
+	run := func(args ...string) (string, string) {
+		t.Helper()
+		cmd := exec.Command(bd, args...)
+		cmd.Dir = p.dir
+		cmd.Env = bdProxiedEnv(p.dir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err != nil {
+			t.Fatalf("bd %s: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
+		}
+		return stdout.String(), stderr.String()
+	}
+	note := fmt.Sprintf("note: %s has 26 child issue(s) not shown here", root.ID)
+
+	stdout, stderr := run("dep", "list", root.ID)
+	if want := "\n" + root.ID + " has no dependencies\n"; stdout != want {
+		t.Errorf("dep list stdout = %q, want %q", stdout, want)
+	}
+	if !strings.Contains(stderr, note) {
+		t.Errorf("dep list stderr missing the 26-child note:\n%s", stderr)
+	}
+	if want := "To list them, run: bd dep list " + root.ID + " --direction=up --type=parent-child\n"; !strings.Contains(stderr, want) {
+		t.Errorf("dep list stderr missing %q:\n%s", want, stderr)
+	}
+
+	stdout, stderr = run("dep", "tree", root.ID)
+	if !strings.Contains(stdout, "Dependency tree for "+root.ID) {
+		t.Errorf("dep tree stdout should render the root:\n%s", stdout)
+	}
+	for _, id := range steps {
+		if strings.Contains(stdout, id) {
+			t.Errorf("dep tree stdout should render the root alone, got step %s:\n%s", id, stdout)
+		}
+	}
+	if !strings.Contains(stderr, note) {
+		t.Errorf("dep tree stderr missing the 26-child note:\n%s", stderr)
+	}
+	if want := "To see them, run: bd dep tree " + root.ID + " --direction=up\n"; !strings.Contains(stderr, want) {
+		t.Errorf("dep tree stderr missing %q:\n%s", want, stderr)
+	}
+
+	// Machine output and the up view stay note-free.
+	for _, args := range [][]string{
+		{"dep", "list", root.ID, "--json"},
+		{"dep", "tree", root.ID, "--json"},
+		{"dep", "list", root.ID, "--direction=up"},
+	} {
+		if _, stderr := run(args...); strings.Contains(stderr, "note:") {
+			t.Errorf("%v: unexpected note:\n%s", args, stderr)
+		}
+	}
+}

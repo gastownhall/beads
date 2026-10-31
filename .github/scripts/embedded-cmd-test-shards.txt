@@ -178,6 +178,7 @@
 100 43 TestEmbeddedIfRevisionMultiIDRejected
 100 43 TestEmbeddedInitExplicitBeadsDirIsAuthoritative
 
+100 44 TestEmbeddedDepDefaultDirectionNotesHiddenChildren
 100 44 TestEmbeddedIfRevisionComposesWithIfAssigneeIfStatus
 100 44 TestEmbeddedStaleConcurrent
 

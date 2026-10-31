@@ -459,6 +459,13 @@ func runDepListProxiedServer(cmd *cobra.Command, ctx context.Context, args []str
 		return nil
 	}
 
+	// Same hidden-children note as the embedded RunE (GH#5151): a down view of
+	// one anchor never reads its inbound parent-child edges.
+	if len(args) == 1 && request.Direction == issueops.RelationOut &&
+		(typeFilter == "" || typeFilter == string(types.DepParentChild)) {
+		defer noteHiddenChildren(ctx, rel, args[0], "list")
+	}
+
 	if len(allIssues) == 0 {
 		if len(args) == 1 {
 			if direction == "up" {
