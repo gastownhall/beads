@@ -426,6 +426,14 @@ type Config struct {
 	// (embeddeddolt.OpenForPreviewCommand's policy).
 	RequireReadableSchema bool
 
+	// MigrationFrozen reports whether an active MIGRATION-FREEZE marker was
+	// found for this invocation (dc-6jaq: a read may run during a freeze,
+	// but no write may follow it). The embedded store's classified-read open
+	// uses it directly to gate its lazy defer-wake sweep off during a freeze
+	// (be-vbhpf, GH#7634) — server mode's equivalent sweep gate instead folds
+	// the freeze into ClassifiedRead itself.
+	MigrationFrozen bool
+
 	// LenientOpen opens the store leniently: a migration gate refusal (#4259),
 	// a dirty-working-set refusal (#4566) or a migration-consent refusal
 	// skips the migration instead of failing the open. Set for

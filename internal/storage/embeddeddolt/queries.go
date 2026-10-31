@@ -31,6 +31,13 @@ var _ storage.IssuesWithConfigSearcher = (*EmbeddedDoltStore)(nil)
 // OUTSIDE the read connections below because withConn(ctx, false, …) always
 // rolls back.
 func (s *EmbeddedDoltStore) wakeExpiredDefers(ctx context.Context) {
+	if s.frozen {
+		// dc-6jaq: a read may run during an active migration freeze, but no
+		// write may follow it. The sweep is a write; skip it silently so the
+		// read it precedes still answers from current state — a deferred
+		// issue stays deferred until the freeze lifts (GH#7634).
+		return
+	}
 	err := s.runIssueOperationTxWithMessage(ctx, func(tx *sql.Tx) (issueops.ChangedTables, string, error) {
 		woke, err := issueops.WakeExpiredDefersInTx(ctx, tx)
 		if err != nil {

@@ -1082,6 +1082,18 @@ func getOwner() string {
 	return ""
 }
 
+// resolvedCommitAuthorName resolves the Dolt commit author's name for
+// embedded mode (GH#7628): GIT_AUTHOR_NAME first — matching server mode's own
+// CommitterName resolution — else the resolved actor (--actor/BEADS_ACTOR/
+// BD_ACTOR/git user.name/$USER), which the issue asks embedded mode to fall
+// back to in addition to server mode's narrower GIT_AUTHOR_NAME-only check.
+func resolvedCommitAuthorName() string {
+	if name := os.Getenv("GIT_AUTHOR_NAME"); name != "" {
+		return name
+	}
+	return getActorWithGit()
+}
+
 func init() {
 	// Initialize viper configuration
 	if err := config.Initialize(); err != nil {
@@ -1872,6 +1884,34 @@ var rootCmd = &cobra.Command{
 			}
 		}
 
+		// GH#7628: resolve the Dolt commit identity embedded mode's connections
+		// use, the same way server mode's CommitterName/CommitterEmail already
+		// resolve (store.go's applyConfigDefaults) — GIT_AUTHOR_NAME first,
+		// then the actor fallback chain; email reuses getOwner's existing
+		// GIT_AUTHOR_EMAIL / git config user.email resolution. Set once, as
+		// early as possible, so it is in effect before autoMigrateOnVersionBump
+		// or trackBdVersion below open their own embedded stores, not only
+		// before the main command's open further down. A caller with neither
+		// env var and no git identity keeps the historical beads/beads@local
+		// author (SetCommitIdentity is a no-op on an empty name or email).
+		//
+		// Gated on !useReadOnly (gh-startup-git-exec): resolvedCommitAuthorName
+		// and getOwner each fall back to a `git config` subprocess, exactly the
+		// cost deferActorGitFallback exists to avoid for the actor above. A
+		// read-only command's connection never commits, so the DSN's commit-
+		// identity params it opens with are never consumed — paying for two
+		// `git config` spawns on every `bd list`/`bd show` regressed the
+		// no-git-on-reads invariant TestEmbeddedReadOnlyCommandsSpawnNoGit pins.
+		// The one narrow gap this accepts: a maintenance write that piggybacks
+		// on a read-classified command (trackBdVersion/autoMigrateOnVersionBump
+		// below, which run "regardless of the command's own classification" per
+		// the comment above) keeps the historical beads/beads@local author
+		// instead of the resolved one — unchanged from every release before
+		// GH#7628, and narrower than this fix's scope asks for.
+		if !useReadOnly {
+			embeddeddolt.SetCommitIdentity(resolvedCommitAuthorName(), getOwner())
+		}
+
 		// dc-6jaq (review round 2, ask #1): a command classified read-only —
 		// or an explicit preview — is deliberately allowed past the gate
 		// above; diagnosis must keep working during a freeze. But
@@ -1962,13 +2002,22 @@ var rootCmd = &cobra.Command{
 			PoolReadTimeoutFallback: bulkLoadPoolReadTimeout(cmd),
 			// Classification-only read (GH#804), never strict --readonly or a
 			// preview: the store is genuinely writable underneath, so the
-			// lazy defer-wake sweep may still run (be-vbhpf).
-			ClassifiedRead: policy.readOnly && !readonlyMode && !previewMode,
+			// lazy defer-wake sweep may still run (be-vbhpf) -- except during
+			// an active MIGRATION-FREEZE (GH#7634, dc-6jaq), which server
+			// mode's sweep gate (internal/storage/dolt, deferWakeSweepEligible)
+			// reads off this same field rather than a second MigrationFrozen
+			// parameter. See that package's doc comment on ClassifiedRead.
+			ClassifiedRead: policy.readOnly && !readonlyMode && !previewMode && !commandFreeze.Frozen(),
 			// A read-only or gateway open does not migrate, so a schema too
 			// old for this binary's issue reads is refused at open instead of
 			// failing each read on an unknown column. Not for a preview,
 			// which reports an incompatibility through its own query.
 			RequireReadableSchema: !previewMode,
+			// dc-6jaq: reused as-is (one lookup answers the whole invocation,
+			// see commandFreeze's own comment above) so the embedded store's
+			// classified-read open can gate its sweep off during a freeze
+			// (GH#7634) without a second, possibly-disagreeing marker lookup.
+			MigrationFrozen: commandFreeze.Frozen(),
 		}
 
 		// Load config to get database name and server connection settings.

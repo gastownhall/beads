@@ -339,6 +339,7 @@
 40 18 TestOpenDifferentDirsReturnsDifferentStores
 40 18 TestPromoteClearsNoHistory
 40 18 TestRemoteVerbPlainRemoteWithoutAuthPresentsNone
+40 18 TestSetCommitIdentity
 
 40 19 TestEmbeddedDependencyEditorRetypeRefusalLeavesTheOriginalEdge
 40 19 TestEmbeddedIssueOperationsUpdateInvalidIssueTypePreservesValidationSentinel
@@ -611,6 +612,7 @@
 40 39 TestEmbeddedMigrateRepairedDependenciesIDColumnCommitsAtomicallyWithVersion53_4690
 40 39 TestEmbeddedReaderListSkipCountsDropsTheCardinalitiesAndNothingElse
 40 39 TestEmbeddedRelationsResolvesAWispAnchor
+40 39 TestEmbeddedWakeExpiredDefersSkipsDuringMigrationFreeze
 40 39 TestParticipationGenerationFence
 40 39 TestPreviewStoreRefusesLocalMetadataWrite
 40 39 TestReclaimRefusesForeignReplicaLease
