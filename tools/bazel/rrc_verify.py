@@ -51,6 +51,7 @@ from typing import Callable, Iterable, Optional
 # release here (scripts/bazel_rrc_test.go checks .bazelversion has one).
 BAZEL_RRC_GUIDS = {
     "9.3.0": "06a53d89-9f52-46ed-8064-f7af6ba27769",
+    "9.3.1": "06a53d89-9f52-46ed-8064-f7af6ba27769",
 }
 MARKER_FILE_PATH = ".recorded_inputs"
 REPO_DIRECTORY_PATH = "repo_contents"

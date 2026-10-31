@@ -843,7 +843,7 @@ func TestRRCWriterCredential(t *testing.T) {
 // pins catch a local edit that would drift out of lockstep.
 var bazelRRCVendored = map[string]string{
 	bazelRRCCredential: "021788a724876bd1df7e5c117a4b3e1e60c5b25bb18bca472d61c35a08cb1fac",
-	bazelRRCVerifyTool: "00d50e569e2a50d8ef3d2740460de7337b71afd14dc76d2d2442dbd162236f94",
+	bazelRRCVerifyTool: "a10b2843e44ccfc080d3ca91564e3d45655274b83f075b0eb526fa4d8002de1b",
 	bazelRRCVerifyTest: "d934f13b466660f3148cf3c8dc7273803b4417f2a52f4edc2dd2f43afb93bfaa",
 }
 
