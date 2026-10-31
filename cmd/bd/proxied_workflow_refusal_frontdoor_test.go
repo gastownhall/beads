@@ -27,6 +27,22 @@ func TestDirectWorkflowRepresentativeBehavior(t *testing.T) {
 	if strings.Contains(strings.ToLower(out.String()), "proxied-server mode") {
 		t.Fatalf("direct mode used proxy refusal: %s", out.String())
 	}
+	for _, step := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"create", "native capability", "--labels", "export:native", "--json"}, `"id"`},
+		{[]string{"ship", "native", "--force", "--dry-run", "--json"}, `"status": "dry_run"`},
+		{[]string{"ship", "native", "--force", "--json"}, `"status": "shipped"`},
+		{[]string{"ship", "native", "--force", "--json"}, `"status": "already_shipped"`},
+	} {
+		cmd := exec.Command(bd, step.args...)
+		cmd.Dir, cmd.Env = dir, bdEnv(dir)
+		got, err := cmd.CombinedOutput()
+		if err != nil || !strings.Contains(string(got), step.want) {
+			t.Fatalf("%v: %v: %s", step.args, err, got)
+		}
+	}
 }
 
 // TestProxiedWorkflowRefusalsFrontDoor executes the real bd binary for every
@@ -51,7 +67,7 @@ func TestProxiedWorkflowRefusalsFrontDoor(t *testing.T) {
 		b, _ := os.ReadFile(filepath.Join(p.beadsDir, name))
 		artifactBefore[name] = b
 	}
-	commands := [][]string{{"cook", formula, "--persist"}, {"ship", "refusal"}, {"swarm", "create", epic.ID}, {"swarm", "list"}, {"merge-slot", "create"}, {"merge-slot", "check"}, {"merge-slot", "acquire"}, {"merge-slot", "release"}}
+	commands := [][]string{{"cook", formula, "--persist"}, {"swarm", "create", epic.ID}, {"swarm", "list"}, {"merge-slot", "create"}, {"merge-slot", "check"}, {"merge-slot", "acquire"}, {"merge-slot", "release"}}
 	expectedCode := func(args []string) string {
 		if args[0] == "swarm" {
 			return "proxy.swarm.unsupported"

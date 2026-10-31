@@ -620,7 +620,7 @@ func TestProxyMaintenanceNestedPathsRefuseBeforeProvider(t *testing.T) {
 }
 
 func TestProxyFormulaSwarmMergeSlotRefusals(t *testing.T) {
-	for _, path := range []string{"cook", "ship", "swarm create", "swarm list", "merge-slot create", "merge-slot check", "merge-slot acquire", "merge-slot release"} {
+	for _, path := range []string{"cook", "swarm create", "swarm list", "merge-slot create", "merge-slot check", "merge-slot acquire", "merge-slot release"} {
 		parts := strings.Split(path, " ")
 		root := &cobra.Command{Use: "bd"}
 		cmd := &cobra.Command{Use: parts[0]}
@@ -645,7 +645,6 @@ func TestProxyWorkflowRefusalContractAndNoMutation(t *testing.T) {
 		path, code, message string
 	}{
 		{"cook", "proxy.formula.unsupported", "cook is not supported in proxied-server mode"},
-		{"ship", "proxy.formula.unsupported", "ship is not supported in proxied-server mode"},
 		{"swarm create", "proxy.swarm.unsupported", "swarm create is not supported in proxied-server mode"},
 		{"merge-slot acquire", "proxy.merge_slot.unsupported", "merge-slot acquire is not supported in proxied-server mode"},
 	}

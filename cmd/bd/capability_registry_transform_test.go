@@ -39,10 +39,10 @@ func TestProxyTransformCapabilityRows(t *testing.T) {
 		{name: "rename-prefix dry-run", path: "rename-prefix", argument: "--dry-run", flags: []string{"dry-run"}, outcome: ProxyOutcomeRefused, code: "proxy.transform.unsupported", message: "rename-prefix --dry-run is not supported in proxied-server mode", exit: 1},
 		{name: "rename-prefix repair", path: "rename-prefix", argument: "--repair", flags: []string{"repair"}, outcome: ProxyOutcomeRefused, code: "proxy.transform.unsupported", message: "rename-prefix --repair is not supported in proxied-server mode", exit: 1},
 		{name: "rename-prefix repair dry-run", path: "rename-prefix", argument: "--dry-run --repair", flags: []string{"dry-run", "repair"}, outcome: ProxyOutcomeRefused, code: "proxy.transform.unsupported", message: "rename-prefix --dry-run --repair is not supported in proxied-server mode", exit: 1},
-		{name: "duplicate", path: "duplicate", outcome: ProxyOutcomeRefused, code: "proxy.transform.unsupported", message: "duplicate is not supported in proxied-server mode", exit: 1},
-		{name: "duplicate of", path: "duplicate", argument: "--of", flags: []string{"of"}, outcome: ProxyOutcomeRefused, code: "proxy.transform.unsupported", message: "duplicate --of is not supported in proxied-server mode", exit: 1},
-		{name: "supersede", path: "supersede", outcome: ProxyOutcomeRefused, code: "proxy.transform.unsupported", message: "supersede is not supported in proxied-server mode", exit: 1},
-		{name: "supersede with", path: "supersede", argument: "--with", flags: []string{"with"}, outcome: ProxyOutcomeRefused, code: "proxy.transform.unsupported", message: "supersede --with is not supported in proxied-server mode", exit: 1},
+		{name: "duplicate", path: "duplicate", outcome: ProxyOutcomeHonored},
+		{name: "duplicate of", path: "duplicate", argument: "--of", flags: []string{"of"}, outcome: ProxyOutcomeHonored},
+		{name: "supersede", path: "supersede", outcome: ProxyOutcomeHonored},
+		{name: "supersede with", path: "supersede", argument: "--with", flags: []string{"with"}, outcome: ProxyOutcomeHonored},
 		{name: "duplicates", path: "duplicates", flags: []string{"auto-merge", "dry-run"}, outcome: ProxyOutcomeHonored},
 		{name: "duplicates auto-merge", path: "duplicates", argument: "--auto-merge", flags: []string{"auto-merge", "dry-run"}, outcome: ProxyOutcomeRefused, code: "proxy.transform.unsupported", message: "duplicates --auto-merge is not supported in proxied-server mode", exit: 1},
 		{name: "duplicates auto-merge dry-run", path: "duplicates", argument: "--auto-merge --dry-run", flags: []string{"auto-merge", "dry-run"}, outcome: ProxyOutcomeHonored},
@@ -163,7 +163,7 @@ func TestProxyTransformRefusalHasNoProviderOrFileMutation(t *testing.T) {
 	uowProvider = nil
 	t.Cleanup(func() { uowProvider = oldProvider })
 
-	cmd := transformTestCommand("supersede")
+	cmd := transformTestCommand("rename")
 	err := validateProxyRegistryBeforeProvider(cmd, ProxyTopologyManagedLocal)
 	if err == nil {
 		t.Fatal("expected transform refusal")

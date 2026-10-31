@@ -59,7 +59,7 @@ func init() {
 
 func runDuplicate(cmd *cobra.Command, args []string) error {
 	if usesProxiedServer() {
-		return HandleErrorRespectJSON("duplicate is not supported in proxied-server mode")
+		return runDuplicateProxiedServer(cmd, args)
 	}
 	CheckReadonly("duplicate")
 
@@ -129,7 +129,7 @@ func runDuplicate(cmd *cobra.Command, args []string) error {
 
 func runSupersede(cmd *cobra.Command, args []string) error {
 	if usesProxiedServer() {
-		return HandleErrorRespectJSON("supersede is not supported in proxied-server mode")
+		return runSupersedeProxiedServer(cmd, args)
 	}
 	CheckReadonly("supersede")
 
