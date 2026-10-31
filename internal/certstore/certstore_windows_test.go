@@ -15,6 +15,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"math/big"
 	"net"
 	"runtime"
@@ -194,9 +195,44 @@ func (m *memStore) add(t *testing.T, der []byte, key uintptr) {
 	}
 }
 
+// cryptKeyProvInfo is CRYPT_KEY_PROV_INFO.
+type cryptKeyProvInfo struct {
+	containerName *uint16
+	provName      *uint16
+	provType      uint32
+	flags         uint32
+	provParamCnt  uint32
+	provParams    uintptr
+	keySpec       uint32
+}
+
+// addOrphaned puts der into the store with a key association that names a
+// CNG key container that does not exist, as a re-enrolment can leave behind.
+func (m *memStore) addOrphaned(t *testing.T, der []byte) {
+	t.Helper()
+	ctx, err := windows.CertCreateCertificateContext(windows.X509_ASN_ENCODING|windows.PKCS_7_ASN_ENCODING, &der[0], uint32(len(der)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer windows.CertFreeCertificateContext(ctx) //nolint:errcheck
+	var added *windows.CertContext
+	if err := windows.CertAddCertificateContextToStore(m.h, ctx, windows.CERT_STORE_ADD_ALWAYS, &added); err != nil {
+		t.Fatal(err)
+	}
+	defer windows.CertFreeCertificateContext(added) //nolint:errcheck
+	info := cryptKeyProvInfo{
+		containerName: utf16(t, fmt.Sprintf("certstore-test-missing-%d", serial.Add(1))),
+		provName:      utf16(t, "Microsoft Software Key Storage Provider"),
+	}
+	if r, _, err := procCertSetContextProperty.Call(uintptr(unsafe.Pointer(added)), certKeyProvInfoPropID, 0, uintptr(unsafe.Pointer(&info))); r == 0 {
+		t.Fatalf("CertSetCertificateContextProperty(KEY_PROV_INFO): %v", err)
+	}
+}
+
 // testResolver is a resolver whose stores are the given in-memory stores;
-// any other store path is missing.
-func testResolver(sel Selector, stores map[StorePath]*memStore) *resolver {
+// any other store path is missing. It is closed when the test ends.
+func testResolver(t *testing.T, sel Selector, stores map[StorePath]*memStore) *resolver {
+	t.Helper()
 	r := newResolver(sel)
 	r.open = func(p StorePath) (windows.Handle, func(), error) {
 		if m, ok := stores[p]; ok {
@@ -205,6 +241,17 @@ func testResolver(sel Selector, stores map[StorePath]*memStore) *resolver {
 		return 0, func() {}, nil
 	}
 	return r
+}
+
+// heldResolve resolves and, on success, drops the reference resolve returns
+// when the test ends, before the resolver is closed.
+func heldResolve(t *testing.T, r *resolver, cri *tls.CertificateRequestInfo) (*identity, error) {
+	t.Helper()
+	id, err := r.resolve(cri)
+	if err == nil {
+		t.Cleanup(func() { r.done(id) })
+	}
+	return id, err
 }
 
 var (
@@ -254,7 +301,7 @@ func TestSignerSchemes(t *testing.T) {
 			key, pub := newEphemeralKey(t, alg)
 			store := newMemStore(t)
 			store.add(t, ca.issue(t, pub, leafSpec{subject: jane("Jane")}), key)
-			id, err := testResolver(Selector{Subject: "jane"}, map[StorePath]*memStore{userMy: store}).resolve(nil)
+			id, err := heldResolve(t, testResolver(t, Selector{Subject: "jane"}, map[StorePath]*memStore{userMy: store}), nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -310,7 +357,7 @@ func TestResolveStoreOrderAndChain(t *testing.T) {
 	machine.add(t, machineDER, machineKey)
 
 	stores := map[StorePath]*memStore{userMy: user, machineMy: machine}
-	id, err := testResolver(Selector{Subject: "Jane Doe"}, stores).resolve(nil)
+	id, err := heldResolve(t, testResolver(t, Selector{Subject: "Jane Doe"}, stores), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -321,7 +368,7 @@ func TestResolveStoreOrderAndChain(t *testing.T) {
 	userKey, userPub := newEphemeralKey(t, "ECDSA_P256")
 	userDER := inter.issue(t, userPub, leafSpec{subject: jane("Jane Doe"), notBefore: time.Now().Add(-30 * 24 * time.Hour)})
 	user.add(t, userDER, userKey)
-	id, err = testResolver(Selector{Subject: "Jane Doe"}, stores).resolve(nil)
+	id, err = heldResolve(t, testResolver(t, Selector{Subject: "Jane Doe"}, stores), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -403,7 +450,7 @@ func TestHandshakeWithIntermediateAgainstRootOnlyServer(t *testing.T) {
 				roots := x509.NewCertPool()
 				roots.AddCert(root.cert)
 				addr, got := serve(t, roots)
-				r := testResolver(Selector{Subject: "Jane"}, map[StorePath]*memStore{userMy: store})
+				r := testResolver(t, Selector{Subject: "Jane"}, map[StorePath]*memStore{userMy: store})
 				if err := dialWith(t, addr, r, v); err != nil {
 					t.Fatalf("handshake: %v", err)
 				}
@@ -429,7 +476,7 @@ func TestHandshakeSkipsCertificateFromCAServerDoesNotAccept(t *testing.T) {
 	roots := x509.NewCertPool()
 	roots.AddCert(trusted.cert)
 	addr, got := serve(t, roots)
-	r := testResolver(Selector{Subject: "Jane"}, map[StorePath]*memStore{userMy: store})
+	r := testResolver(t, Selector{Subject: "Jane"}, map[StorePath]*memStore{userMy: store})
 	if err := dialWith(t, addr, r, 0); err != nil {
 		t.Fatalf("handshake: %v", err)
 	}
@@ -457,9 +504,8 @@ func TestHandshakeSkipsKeyThatCannotSignForTLS13(t *testing.T) {
 		return real(k, pad, d, f)
 	})
 
-	r := testResolver(Selector{Subject: "Jane"}, map[StorePath]*memStore{userMy: store})
-	t.Cleanup(func() { _ = r.Close() })
-	if id, err := r.resolve(nil); err != nil || id.signer.pkcs1Only {
+	r := testResolver(t, Selector{Subject: "Jane"}, map[StorePath]*memStore{userMy: store})
+	if id, err := heldResolve(t, r, nil); err != nil || id.signer.pkcs1Only {
 		t.Fatalf("eager resolve: %v; want the newest (ECDSA) certificate, so no TLS 1.2 cap", err)
 	}
 	roots := x509.NewCertPool()
@@ -478,24 +524,166 @@ func TestRenewalPickedUpByLaterResolve(t *testing.T) {
 	store := newMemStore(t)
 	k1, p1 := newEphemeralKey(t, "ECDSA_P256")
 	store.add(t, ca.issue(t, p1, leafSpec{subject: jane("Jane"), notBefore: time.Now().Add(-5 * time.Hour)}), k1)
-	r := testResolver(Selector{Subject: "Jane"}, map[StorePath]*memStore{userMy: store})
-	first, err := r.resolve(nil)
+	r := testResolver(t, Selector{Subject: "Jane"}, map[StorePath]*memStore{userMy: store})
+	first, err := heldResolve(t, r, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	k2, p2 := newEphemeralKey(t, "ECDSA_P256")
 	renewed := ca.issue(t, p2, leafSpec{subject: jane("Jane")})
 	store.add(t, renewed, k2)
-	second, err := r.resolve(nil)
+	second, err := heldResolve(t, r, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if second == first || string(second.chain[0]) != string(renewed) {
 		t.Fatal("a later resolve did not pick up the renewed certificate")
 	}
-	again, err := r.resolve(nil)
+	again, err := heldResolve(t, r, nil)
 	if err != nil || again != second {
 		t.Fatalf("an unchanged store did not reuse the cached identity: %v", err)
+	}
+}
+
+func TestNewestCertificateWithUnusableKeyIsSkipped(t *testing.T) {
+	ca := newTestCA(t, "root", nil)
+	store := newMemStore(t)
+	goodKey, goodPub := newEphemeralKey(t, "ECDSA_P256")
+	goodDER := ca.issue(t, goodPub, leafSpec{subject: jane("Jane"), notBefore: time.Now().Add(-10 * time.Hour)})
+	store.add(t, goodDER, goodKey)
+	badKey, badPub := newEphemeralKey(t, "RSA")
+	store.add(t, ca.issue(t, badPub, leafSpec{subject: jane("Jane")}), badKey)
+	real := ncryptSignHash
+	withSignHash(t, func(k uintptr, pad unsafe.Pointer, d []byte, f uintptr) ([]byte, error) {
+		if k == badKey {
+			return nil, nteSilentContext
+		}
+		return real(k, pad, d, f)
+	})
+
+	r := testResolver(t, Selector{Subject: "Jane"}, map[StorePath]*memStore{userMy: store})
+	id, err := heldResolve(t, r, nil)
+	if err != nil {
+		t.Fatalf("resolve: %v; want the older certificate, whose key works", err)
+	}
+	if string(id.chain[0]) != string(goodDER) {
+		t.Fatal("want the older certificate when the newest one's key needs a prompt")
+	}
+}
+
+func TestSupersededIdentityReleasedWhenNothingHoldsIt(t *testing.T) {
+	ca := newTestCA(t, "root", nil)
+	store := newMemStore(t)
+	k1, p1 := newEphemeralKey(t, "ECDSA_P256")
+	store.add(t, ca.issue(t, p1, leafSpec{subject: jane("Jane"), notBefore: time.Now().Add(-5 * time.Hour)}), k1)
+	r := testResolver(t, Selector{Subject: "Jane"}, map[StorePath]*memStore{userMy: store})
+	first, err := r.resolve(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	k2, p2 := newEphemeralKey(t, "ECDSA_P256")
+	store.add(t, ca.issue(t, p2, leafSpec{subject: jane("Jane")}), k2)
+	second, err := r.resolve(nil)
+	if err != nil || second == first {
+		t.Fatalf("renewal not picked up: %v", err)
+	}
+	digest := sha512.Sum384([]byte("x"))
+	if _, err := first.signer.Sign(nil, digest[:], crypto.SHA384); err != nil {
+		t.Fatalf("the superseded key was released while still held: %v", err)
+	}
+	r.done(first)
+	if _, err := first.signer.Sign(nil, digest[:], crypto.SHA384); err == nil {
+		t.Fatal("the superseded key was still open after its last holder let go")
+	}
+	if _, err := second.signer.Sign(nil, digest[:], crypto.SHA384); err != nil {
+		t.Fatalf("the current key was released: %v", err)
+	}
+	r.done(second)
+	r.mu.Lock()
+	cached := len(r.cache)
+	r.mu.Unlock()
+	if cached != 1 {
+		t.Fatalf("cache holds %d identities, want 1", cached)
+	}
+}
+
+// TestHandshakeKeepsKeyThroughRenewal pauses a handshake after certificate
+// selection, lets another resolve pick a renewal (retiring the first
+// certificate), then lets the handshake sign with the key it was given.
+func TestHandshakeKeepsKeyThroughRenewal(t *testing.T) {
+	ca := newTestCA(t, "root", nil)
+	store := newMemStore(t)
+	k1, p1 := newEphemeralKey(t, "ECDSA_P256")
+	oldDER := ca.issue(t, p1, leafSpec{subject: jane("Jane"), notBefore: time.Now().Add(-5 * time.Hour)})
+	store.add(t, oldDER, k1)
+	r := testResolver(t, Selector{Subject: "Jane"}, map[StorePath]*memStore{userMy: store})
+
+	selected := make(chan struct{})
+	proceed := make(chan struct{})
+	var release sync.Once
+	letProceed := func() { release.Do(func() { close(proceed) }) }
+	t.Cleanup(letProceed)
+	cfg := &tls.Config{InsecureSkipVerify: true, GetClientCertificate: func(cri *tls.CertificateRequestInfo) (*tls.Certificate, error) { //nolint:gosec // G402: the test server's identity is not under test
+		c, err := r.getClientCertificate(cri)
+		close(selected)
+		<-proceed
+		return c, err
+	}}
+	roots := x509.NewCertPool()
+	roots.AddCert(ca.cert)
+	addr, got := serve(t, roots)
+	dialed := make(chan error, 1)
+	go func() {
+		c, err := tls.DialWithDialer(&net.Dialer{Timeout: 10 * time.Second}, "tcp", addr, cfg)
+		if err == nil {
+			_ = c.Close()
+		}
+		dialed <- err
+	}()
+	select {
+	case <-selected:
+	case err := <-dialed:
+		t.Fatalf("handshake ended before certificate selection: %v", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("no certificate selection within 10s")
+	}
+
+	k2, p2 := newEphemeralKey(t, "ECDSA_P256")
+	store.add(t, ca.issue(t, p2, leafSpec{subject: jane("Jane")}), k2)
+	renewed, err := r.resolve(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.done(renewed)
+	letProceed()
+
+	if err := <-dialed; err != nil {
+		t.Fatalf("handshake whose certificate was superseded mid-handshake: %v", err)
+	}
+	if peer := <-got; len(peer) == 0 || string(peer[0].Raw) != string(oldDER) {
+		t.Fatal("server did not receive the certificate selected for the handshake")
+	}
+}
+
+// TestKeyFailureInOneStoreDoesNotRejectAnotherStoresCopy puts the same
+// certificate in both stores: the user store's copy points at a key container
+// that does not exist, the machine store's copy has a working key.
+func TestKeyFailureInOneStoreDoesNotRejectAnotherStoresCopy(t *testing.T) {
+	ca := newTestCA(t, "root", nil)
+	key, pub := newEphemeralKey(t, "ECDSA_P256")
+	der := ca.issue(t, pub, leafSpec{subject: jane("Jane")})
+	user, machine := newMemStore(t), newMemStore(t)
+	user.addOrphaned(t, der)
+	machine.add(t, der, key)
+
+	r := testResolver(t, Selector{Subject: "Jane"}, map[StorePath]*memStore{userMy: user, machineMy: machine})
+	id, err := r.resolve(nil)
+	if err != nil {
+		t.Fatalf("resolve: %v; want the machine store's copy", err)
+	}
+	defer r.done(id)
+	if id.store != machineMy {
+		t.Fatalf("selected the copy in %s, want %s", id.store, machineMy)
 	}
 }
 
@@ -504,7 +692,7 @@ func TestConcurrentSignatures(t *testing.T) {
 	key, pub := newEphemeralKey(t, "RSA")
 	store := newMemStore(t)
 	store.add(t, ca.issue(t, pub, leafSpec{subject: jane("Jane")}), key)
-	id, err := testResolver(Selector{Subject: "Jane"}, map[StorePath]*memStore{userMy: store}).resolve(nil)
+	id, err := heldResolve(t, testResolver(t, Selector{Subject: "Jane"}, map[StorePath]*memStore{userMy: store}), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -545,7 +733,7 @@ func TestFailedSignatureReopensKey(t *testing.T) {
 	key, pub := newEphemeralKey(t, "ECDSA_P256")
 	store := newMemStore(t)
 	store.add(t, ca.issue(t, pub, leafSpec{subject: jane("Jane")}), key)
-	r := testResolver(Selector{Subject: "Jane"}, map[StorePath]*memStore{userMy: store})
+	r := testResolver(t, Selector{Subject: "Jane"}, map[StorePath]*memStore{userMy: store})
 	first, err := r.resolve(nil)
 	if err != nil {
 		t.Fatal(err)
@@ -566,8 +754,9 @@ func TestFailedSignatureReopensKey(t *testing.T) {
 		t.Fatalf("Sign error = %v, want the provider status", err)
 	}
 	fail.Store(false)
+	r.done(first)
 
-	second, err := r.resolve(nil)
+	second, err := heldResolve(t, r, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -590,7 +779,7 @@ func TestKeyNeedingPromptIsAnError(t *testing.T) {
 	store := newMemStore(t)
 	store.add(t, ca.issue(t, pub, leafSpec{subject: jane("Jane")}), key)
 	withSignHash(t, func(uintptr, unsafe.Pointer, []byte, uintptr) ([]byte, error) { return nil, nteSilentContext })
-	_, err := testResolver(Selector{Subject: "Jane"}, map[StorePath]*memStore{userMy: store}).resolve(nil)
+	_, err := heldResolve(t, testResolver(t, Selector{Subject: "Jane"}, map[StorePath]*memStore{userMy: store}), nil)
 	if !errors.Is(err, nteSilentContext) || !strings.Contains(err.Error(), "PIN or consent prompt") {
 		t.Fatalf("err = %v, want the prompt-needed error", err)
 	}
@@ -603,7 +792,7 @@ func TestECDSAKeyNeedingPromptFailsConfigure(t *testing.T) {
 	store.add(t, ca.issue(t, pub, leafSpec{subject: jane("Jane")}), key)
 	withSignHash(t, func(uintptr, unsafe.Pointer, []byte, uintptr) ([]byte, error) { return nil, nteSilentContext })
 	cfg := &tls.Config{}
-	_, err := configure(cfg, testResolver(Selector{Subject: "Jane"}, map[StorePath]*memStore{userMy: store}))
+	_, err := configure(cfg, testResolver(t, Selector{Subject: "Jane"}, map[StorePath]*memStore{userMy: store}))
 	if !errors.Is(err, nteSilentContext) {
 		t.Fatalf("err = %v, want the prompt-needed error at setup", err)
 	}
@@ -625,8 +814,8 @@ func TestKeyWithoutPSSIsLimitedToTLS12(t *testing.T) {
 		}
 		return real(k, pad, d, f)
 	})
-	r := testResolver(Selector{Subject: "Jane"}, map[StorePath]*memStore{userMy: store})
-	id, err := r.resolve(nil)
+	r := testResolver(t, Selector{Subject: "Jane"}, map[StorePath]*memStore{userMy: store})
+	id, err := heldResolve(t, r, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -667,7 +856,7 @@ func TestConfigureCapsTLSForKeyWithoutPSS(t *testing.T) {
 
 	for _, preset := range []uint16{0, tls.VersionTLS13} {
 		cfg := &tls.Config{InsecureSkipVerify: true, MaxVersion: preset} //nolint:gosec // G402: the test server's identity is not under test
-		closer, err := configure(cfg, testResolver(Selector{Subject: "Jane"}, map[StorePath]*memStore{userMy: store}))
+		closer, err := configure(cfg, testResolver(t, Selector{Subject: "Jane"}, map[StorePath]*memStore{userMy: store}))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -691,7 +880,7 @@ func TestConfigureCapsTLSForKeyWithoutPSS(t *testing.T) {
 
 	cfg := &tls.Config{InsecureSkipVerify: true} //nolint:gosec // G402: as above
 	withSignHash(t, real)
-	closer, err := configure(cfg, testResolver(Selector{Subject: "Jane"}, map[StorePath]*memStore{userMy: store}))
+	closer, err := configure(cfg, testResolver(t, Selector{Subject: "Jane"}, map[StorePath]*memStore{userMy: store}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -706,7 +895,7 @@ func TestCloseReleasesKeysAndRefusesHandshakes(t *testing.T) {
 	key, pub := newEphemeralKey(t, "ECDSA_P256")
 	store := newMemStore(t)
 	store.add(t, ca.issue(t, pub, leafSpec{subject: jane("Jane")}), key)
-	r := testResolver(Selector{Subject: "Jane"}, map[StorePath]*memStore{userMy: store})
+	r := testResolver(t, Selector{Subject: "Jane"}, map[StorePath]*memStore{userMy: store})
 	cfg := &tls.Config{}
 	closer, err := configure(cfg, r)
 	if err != nil {
@@ -720,8 +909,12 @@ func TestCloseReleasesKeysAndRefusesHandshakes(t *testing.T) {
 		t.Fatal(err)
 	}
 	digest := sha256.Sum256([]byte("x"))
+	if _, err := id.signer.Sign(nil, digest[:], crypto.SHA256); err != nil {
+		t.Fatalf("Close released a key still held: %v", err)
+	}
+	r.done(id)
 	if _, err := id.signer.Sign(nil, digest[:], crypto.SHA256); err == nil {
-		t.Fatal("a signer still signs after Close")
+		t.Fatal("a signer still signs after Close and its last holder let go")
 	}
 	if _, err := cfg.GetClientCertificate(&tls.CertificateRequestInfo{Version: tls.VersionTLS13}); !errors.Is(err, errClosed) {
 		t.Fatalf("handshake after Close: err = %v, want errClosed", err)
@@ -777,7 +970,7 @@ func TestRolloverLinkCertificateStaysInChain(t *testing.T) {
 	roots := x509.NewCertPool()
 	roots.AddCert(oldRoot)
 	addr, got := serve(t, roots)
-	r := testResolver(Selector{Subject: "Jane"}, map[StorePath]*memStore{userMy: store})
+	r := testResolver(t, Selector{Subject: "Jane"}, map[StorePath]*memStore{userMy: store})
 	if err := dialWith(t, addr, r, 0); err != nil {
 		t.Fatalf("handshake: %v", err)
 	}

@@ -139,7 +139,8 @@ func TestChooseEligibility(t *testing.T) {
 		{"eligible", certSpec{cn: "Jane"}, ""},
 		{"not yet valid", certSpec{cn: "Jane", notBefore: testNow.Add(time.Hour)}, "not valid until"},
 		{"expired", certSpec{cn: "Jane", notAfter: testNow.Add(-time.Hour)}, "expired"},
-		{"expires exactly now", certSpec{cn: "Jane", notAfter: testNow}, "expired"},
+		{"valid through its NotAfter instant (RFC 5280: inclusive)", certSpec{cn: "Jane", notAfter: testNow}, ""},
+		{"expired a second ago", certSpec{cn: "Jane", notAfter: testNow.Add(-time.Second)}, "expired"},
 		{"server auth only", certSpec{cn: "Jane", eku: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}, "client authentication"},
 		{"no EKU extension", certSpec{cn: "Jane", eku: []x509.ExtKeyUsage{}}, "client authentication"},
 		{"any EKU only", certSpec{cn: "Jane", eku: []x509.ExtKeyUsage{x509.ExtKeyUsageAny}}, "client authentication"},
@@ -151,7 +152,7 @@ func TestChooseEligibility(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			cand := newCandidate(t, c.spec)
-			got, ok, rejected := Selector{Subject: "jane"}.choose(store, []Candidate{cand}, testNow, nil)
+			got, ok, rejected, _ := Selector{Subject: "jane"}.choose(store, []Candidate{cand}, testNow, nil)
 			if c.reason == "" {
 				if !ok || got.Cert != cand.Cert || len(rejected) != 0 {
 					t.Fatalf("want chosen, got ok=%v rejected=%v", ok, rejected)
@@ -177,7 +178,7 @@ func TestChooseRanking(t *testing.T) {
 	newestServerOnly := newCandidate(t, certSpec{cn: "Jane Doe", notBefore: testNow.Add(-day), eku: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}, serial: 4})
 	other := newCandidate(t, certSpec{cn: "John Roe", notBefore: testNow.Add(-time.Hour), serial: 5})
 
-	got, ok, rejected := Selector{Subject: "CN=JANE DOE"}.choose(store, []Candidate{older, newestExpired, other, newer, newestServerOnly}, testNow, nil)
+	got, ok, rejected, _ := Selector{Subject: "CN=JANE DOE"}.choose(store, []Candidate{older, newestExpired, other, newer, newestServerOnly}, testNow, nil)
 	if !ok || got.Cert != newer.Cert {
 		t.Fatalf("chose %v (ok=%v), want the most recently issued eligible certificate", got.Cert.NotBefore, ok)
 	}
@@ -188,7 +189,7 @@ func TestChooseRanking(t *testing.T) {
 	t.Run("same issue date prefers later expiry", func(t *testing.T) {
 		a := newCandidate(t, certSpec{cn: "Jane Doe", notBefore: testNow.Add(-day), notAfter: testNow.Add(30 * day), serial: 6})
 		b := newCandidate(t, certSpec{cn: "Jane Doe", notBefore: testNow.Add(-day), notAfter: testNow.Add(60 * day), serial: 7})
-		got, _, _ := Selector{Subject: "Jane"}.choose(store, []Candidate{a, b}, testNow, nil)
+		got, _, _, _ := Selector{Subject: "Jane"}.choose(store, []Candidate{a, b}, testNow, nil)
 		if got.Cert != b.Cert {
 			t.Fatal("want the certificate that expires later")
 		}
@@ -197,29 +198,32 @@ func TestChooseRanking(t *testing.T) {
 	t.Run("full tie is broken by thumbprint, independent of order", func(t *testing.T) {
 		a := newCandidate(t, certSpec{cn: "Jane Doe", notBefore: testNow.Add(-day), notAfter: testNow.Add(30 * day), serial: 8})
 		b := newCandidate(t, certSpec{cn: "Jane Doe", notBefore: testNow.Add(-day), notAfter: testNow.Add(30 * day), serial: 9})
-		first, _, _ := Selector{Subject: "Jane"}.choose(store, []Candidate{a, b}, testNow, nil)
-		second, _, _ := Selector{Subject: "Jane"}.choose(store, []Candidate{b, a}, testNow, nil)
+		first, _, _, _ := Selector{Subject: "Jane"}.choose(store, []Candidate{a, b}, testNow, nil)
+		second, _, _, _ := Selector{Subject: "Jane"}.choose(store, []Candidate{b, a}, testNow, nil)
 		if first.Cert != second.Cert {
 			t.Fatal("tie-break depends on enumeration order")
 		}
 	})
 
 	t.Run("thumbprint selects exactly one certificate and still applies eligibility", func(t *testing.T) {
-		got, ok, _ := Selector{Thumbprint: older.Thumbprint()}.choose(store, []Candidate{older, newer}, testNow, nil)
+		got, ok, _, _ := Selector{Thumbprint: older.Thumbprint()}.choose(store, []Candidate{older, newer}, testNow, nil)
 		if !ok || got.Cert != older.Cert {
 			t.Fatal("thumbprint did not select the pinned certificate")
 		}
-		_, ok, rejected := Selector{Thumbprint: strings.ToLower(newestExpired.Thumbprint())}.choose(store, []Candidate{newestExpired, newer}, testNow, nil)
+		_, ok, rejected, _ := Selector{Thumbprint: strings.ToLower(newestExpired.Thumbprint())}.choose(store, []Candidate{newestExpired, newer}, testNow, nil)
 		if ok || len(rejected) != 1 || !strings.Contains(rejected[0].Reason, "expired") {
 			t.Fatalf("pinned expired certificate: ok=%v rejected=%+v", ok, rejected)
 		}
 	})
 
 	t.Run("accept filter rejects with its reason", func(t *testing.T) {
-		deny := func(c Candidate) (bool, string) {
-			return c.Cert != newer.Cert, "issuer is not acceptable to the server"
+		deny := func(_ StorePath, c Candidate) error {
+			if c.Cert == newer.Cert {
+				return errors.New("issuer is not acceptable to the server")
+			}
+			return nil
 		}
-		got, ok, rejected := Selector{Subject: "Jane Doe"}.choose(store, []Candidate{older, newer}, testNow, deny)
+		got, ok, rejected, _ := Selector{Subject: "Jane Doe"}.choose(store, []Candidate{older, newer}, testNow, deny)
 		if !ok || got.Cert != older.Cert {
 			t.Fatal("want the older certificate once the newer one is filtered out")
 		}
@@ -285,4 +289,30 @@ func TestSearchOrder(t *testing.T) {
 			t.Fatalf("err = %v, want it to wrap the read error", err)
 		}
 	})
+}
+
+func TestChooseInvalidThumbprintIsAnError(t *testing.T) {
+	store := StorePath{CurrentUser, "My"}
+	cand := newCandidate(t, certSpec{cn: "Jane"})
+	got, ok, rejected, err := Selector{Thumbprint: "not-a-thumbprint"}.choose(store, []Candidate{cand}, testNow, nil)
+	if err == nil || ok || got.Cert != nil || len(rejected) != 0 {
+		t.Fatalf("choose with an invalid thumbprint: ok=%v rejected=%v err=%v; want an error and no match", ok, rejected, err)
+	}
+	if _, _, err := (Selector{Thumbprint: "abcd"}).search(func(StorePath) ([]Candidate, error) { return []Candidate{cand}, nil }, testNow, nil); err == nil {
+		t.Fatal("search with an invalid thumbprint did not fail")
+	}
+}
+
+func TestNoEligibleErrorUnwrapsRejectionErrors(t *testing.T) {
+	cand := newCandidate(t, certSpec{cn: "Jane"})
+	keyErr := errors.New("key is gone")
+	_, _, err := Selector{Subject: "Jane"}.search(func(StorePath) ([]Candidate, error) { return []Candidate{cand}, nil }, testNow,
+		func(StorePath, Candidate) error { return keyErr })
+	var none *NoEligibleError
+	if !errors.As(err, &none) || !errors.Is(err, keyErr) {
+		t.Fatalf("err = %v; want a *NoEligibleError that unwraps to the accept error", err)
+	}
+	if !strings.Contains(err.Error(), "key is gone") {
+		t.Errorf("listing %q does not carry the reason", err)
+	}
 }

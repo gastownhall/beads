@@ -37,6 +37,9 @@ type Rejection struct {
 	Thumbprint string
 	Subject    string
 	Reason     string
+	// Err is the error behind Reason, when there was one (for example the
+	// key could not be opened).
+	Err error
 }
 
 // NoEligibleError reports that no searched store held an eligible
@@ -46,6 +49,18 @@ type NoEligibleError struct {
 	Selector Selector
 	Searched []StorePath
 	Rejected []Rejection
+}
+
+// Unwrap returns the errors behind the rejections, so errors.Is and
+// errors.As reach them.
+func (e *NoEligibleError) Unwrap() []error {
+	var errs []error
+	for _, r := range e.Rejected {
+		if r.Err != nil {
+			errs = append(errs, r.Err)
+		}
+	}
+	return errs
 }
 
 func (e *NoEligibleError) Error() string {
@@ -82,7 +97,7 @@ func ineligibleReason(c Candidate, now time.Time) string {
 	switch {
 	case now.Before(cert.NotBefore):
 		return "not valid until " + cert.NotBefore.UTC().Format(time.RFC3339)
-	case !now.Before(cert.NotAfter):
+	case now.After(cert.NotAfter):
 		return "expired " + cert.NotAfter.UTC().Format(time.RFC3339)
 	case !hasClientAuthEKU(cert):
 		return "extended key usage does not include client authentication (1.3.6.1.5.5.7.3.2)"
@@ -116,11 +131,17 @@ func supportedKey(cert *x509.Certificate) bool {
 // choose returns the most recently issued eligible certificate in cands that
 // the selector names, and a rejection for every matching certificate it
 // passed over as ineligible. accept, when non-nil, is an additional filter
-// (for example the server's acceptable CAs); its rejections carry reason.
-func (s Selector) choose(store StorePath, cands []Candidate, now time.Time, accept func(Candidate) (bool, string)) (Candidate, bool, []Rejection) {
+// (for example the server's acceptable CAs) given the store and the
+// certificate; a certificate it returns an error for is rejected with that
+// error. An invalid thumbprint is an error, not a selector that matches every
+// certificate.
+func (s Selector) choose(store StorePath, cands []Candidate, now time.Time, accept func(StorePath, Candidate) error) (Candidate, bool, []Rejection, error) {
 	thumb := ""
 	if strings.TrimSpace(s.Thumbprint) != "" {
-		thumb, _ = normalizeThumbprint(s.Thumbprint)
+		var err error
+		if thumb, err = normalizeThumbprint(s.Thumbprint); err != nil {
+			return Candidate{}, false, nil, err
+		}
 	}
 	var eligible []Candidate
 	var rejected []Rejection
@@ -129,19 +150,20 @@ func (s Selector) choose(store StorePath, cands []Candidate, now time.Time, acce
 			continue
 		}
 		reason := ineligibleReason(c, now)
+		var err error
 		if reason == "" && accept != nil {
-			if ok, why := accept(c); !ok {
-				reason = why
+			if err = accept(store, c); err != nil {
+				reason = err.Error()
 			}
 		}
 		if reason != "" {
-			rejected = append(rejected, Rejection{Store: store, Thumbprint: c.Thumbprint(), Subject: c.Subject, Reason: reason})
+			rejected = append(rejected, Rejection{Store: store, Thumbprint: c.Thumbprint(), Subject: c.Subject, Reason: reason, Err: err})
 			continue
 		}
 		eligible = append(eligible, c)
 	}
 	if len(eligible) == 0 {
-		return Candidate{}, false, rejected
+		return Candidate{}, false, rejected, nil
 	}
 	sort.SliceStable(eligible, func(i, j int) bool {
 		a, b := eligible[i].Cert, eligible[j].Cert
@@ -153,7 +175,7 @@ func (s Selector) choose(store StorePath, cands []Candidate, now time.Time, acce
 		}
 		return eligible[i].Thumbprint() < eligible[j].Thumbprint()
 	})
-	return eligible[0], true, rejected
+	return eligible[0], true, rejected, nil
 }
 
 // search applies choose to each store in order and returns the first store's
@@ -161,7 +183,7 @@ func (s Selector) choose(store StorePath, cands []Candidate, now time.Time, acce
 // earlier store wins over a newer one in a later store. open returns the
 // candidates of one store; an error from it (other than a missing store)
 // stops the search.
-func (s Selector) search(open func(StorePath) ([]Candidate, error), now time.Time, accept func(Candidate) (bool, string)) (Candidate, StorePath, error) {
+func (s Selector) search(open func(StorePath) ([]Candidate, error), now time.Time, accept func(StorePath, Candidate) error) (Candidate, StorePath, error) {
 	order, err := s.searchOrder()
 	if err != nil {
 		return Candidate{}, StorePath{}, err
@@ -173,7 +195,10 @@ func (s Selector) search(open func(StorePath) ([]Candidate, error), now time.Tim
 			return Candidate{}, StorePath{}, fmt.Errorf("certstore: reading %s: %w", store, err)
 		}
 		noneErr.Searched = append(noneErr.Searched, store)
-		c, ok, rejected := s.choose(store, cands, now, accept)
+		c, ok, rejected, err := s.choose(store, cands, now, accept)
+		if err != nil {
+			return Candidate{}, StorePath{}, err
+		}
 		noneErr.Rejected = append(noneErr.Rejected, rejected...)
 		if ok {
 			return c, store, nil

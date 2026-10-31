@@ -39,12 +39,14 @@ const (
 // without reconfiguring. Call it before the config is registered or cloned.
 //
 // The eager resolve has no server CertificateRequest, so it proves less than
-// a handshake does: that the selector names an eligible certificate in the
-// first store that has one, and that the most recently issued such
-// certificate's key opens and signs. It fails when either is false.
-// A handshake may still choose an older certificate when the server's
-// acceptable CAs or signature schemes, or what the newest key can sign, rule
-// out the newest.
+// a handshake does: that the first store with an eligible certificate holds
+// one whose key opens and signs, and it selects the most recently issued such
+// certificate. A certificate whose key cannot be opened or cannot sign (an
+// orphaned key, one only a legacy CryptoAPI provider can open, one that needs
+// a PIN prompt) is skipped for the next newest, and appears with its reason in
+// the error when no certificate is usable. A handshake may still choose an
+// older certificate when the server's acceptable CAs or signature schemes, or
+// what the newest key can sign, rule out the newest.
 //
 // When that key cannot make RSA-PSS signatures (NTE_NOT_SUPPORTED), which
 // TLS 1.3 requires for RSA, Configure caps cfg.MaxVersion at TLS 1.2. The cap
@@ -66,7 +68,9 @@ func configure(cfg *tls.Config, r *resolver) (io.Closer, error) {
 		_ = r.Close()
 		return nil, err
 	}
-	if id.signer.pkcs1Only && (cfg.MaxVersion == 0 || cfg.MaxVersion > tls.VersionTLS12) {
+	pkcs1Only := id.signer.pkcs1Only
+	r.done(id)
+	if pkcs1Only && (cfg.MaxVersion == 0 || cfg.MaxVersion > tls.VersionTLS12) {
 		cfg.MaxVersion = tls.VersionTLS12
 	}
 	cfg.GetClientCertificate = r.getClientCertificate
@@ -105,12 +109,20 @@ func openSystemStore(p StorePath) (windows.Handle, func(), error) {
 	return h, func() { _ = windows.CertCloseStore(h, 0) }, nil
 }
 
-// identity is a resolved client certificate.
+// identity is a resolved client certificate. refs and retired are guarded
+// by the resolver's mu.
 type identity struct {
 	store  StorePath
 	leaf   *x509.Certificate
 	chain  [][]byte
 	signer *signer
+
+	// refs counts the holders of the identity: a handshake from certificate
+	// selection until it ends, or a caller of resolve until it calls done.
+	refs int
+	// retired is set once the identity leaves the cache. Its key is released
+	// when the last holder lets go.
+	retired bool
 }
 
 func (id *identity) tlsCertificate() *tls.Certificate {
@@ -121,38 +133,87 @@ func (id *identity) tlsCertificate() *tls.Certificate {
 	return c
 }
 
+// retire takes id out of service and reports whether nothing holds it, in
+// which case the caller releases its signer after unlocking. The resolver's
+// mu must be held.
+func (id *identity) retire() bool {
+	if id.retired {
+		return false
+	}
+	id.retired = true
+	return id.refs == 0
+}
+
+// cacheKey identifies a certificate in one store. The same certificate can
+// sit in two stores with different private keys.
+type cacheKey struct {
+	store StorePath
+	thumb string
+}
+
 type resolver struct {
 	sel  Selector
 	open storeOpener
 	now  func() time.Time
 
 	mu     sync.Mutex
-	cache  map[string]*identity // by thumbprint
+	cache  map[cacheKey]*identity
 	closed bool
 }
 
 var errClosed = errors.New("certstore: the client certificate configuration was closed")
 
-// Close releases every cached identity. Signatures in progress finish first.
+// Close takes every identity out of service and refuses later handshakes.
+// An identity nothing holds is released at once; one a handshake holds is
+// released when that handshake ends.
 func (r *resolver) Close() error {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	r.closed = true
-	for thumb, id := range r.cache {
+	var free []*identity
+	for k, id := range r.cache {
+		delete(r.cache, k)
+		if id.retire() {
+			free = append(free, id)
+		}
+	}
+	r.mu.Unlock()
+	for _, id := range free {
 		id.signer.release()
-		delete(r.cache, thumb)
 	}
 	return nil
 }
 
+// done drops a reference resolve returned, and releases the identity when it
+// was retired and this was the last reference.
+func (r *resolver) done(id *identity) {
+	r.mu.Lock()
+	id.refs--
+	free := id.retired && id.refs == 0
+	r.mu.Unlock()
+	if free {
+		id.signer.release()
+	}
+}
+
 func newResolver(sel Selector) *resolver {
-	return &resolver{sel: sel, open: openSystemStore, now: time.Now, cache: map[string]*identity{}}
+	return &resolver{sel: sel, open: openSystemStore, now: time.Now, cache: map[cacheKey]*identity{}}
 }
 
 func (r *resolver) getClientCertificate(cri *tls.CertificateRequestInfo) (*tls.Certificate, error) {
 	id, err := r.resolve(cri)
 	if err != nil {
 		return nil, err
+	}
+	// The handshake holds the identity until it ends, so a renewal selected
+	// by another handshake meanwhile cannot release the key before this one
+	// has signed. crypto/tls cancels this context when the handshake ends.
+	if ctx := cri.Context(); ctx != nil {
+		go func() {
+			<-ctx.Done()
+			r.done(id)
+		}()
+	} else {
+		r.done(id)
 	}
 	return id.tlsCertificate(), nil
 }
@@ -189,15 +250,18 @@ func (p publicKeyOnly) Sign(io.Reader, []byte, crypto.SignerOpts) ([]byte, error
 
 // resolve selects the certificate and returns its identity, reusing the
 // cached identity of a certificate used before unless its last signature
-// failed. cri is nil for the eager resolve in Configure; at a handshake it
-// supplies the server's acceptable CAs and signature schemes.
+// failed. The caller holds the returned identity and must call done when it
+// no longer needs the key. cri is nil for the eager resolve in Configure; at
+// a handshake it supplies the server's acceptable CAs and signature schemes.
 //
-// At a handshake, candidates are first judged by their public keys. The
-// winner's key is then opened and judged again with the signature schemes it
-// actually supports; a key that cannot sign for this server (an RSA key
-// without PSS under TLS 1.3) is excluded and the ranking runs again. A key
-// that cannot be opened is an error, never a reason to try an older
-// certificate.
+// Candidates are ranked first; the winner's key is then opened (or its cached
+// identity reused). A certificate whose key cannot be opened or cannot make
+// the test signature is excluded and the ranking runs again. At a handshake,
+// candidates are judged by their public keys before ranking, and the winner
+// is judged again with the signature schemes its key actually supports, so a
+// key that cannot sign for this server (an RSA key without PSS under TLS 1.3)
+// is excluded the same way. Exclusions are per store: the same certificate in
+// another store may have a working key.
 func (r *resolver) resolve(cri *tls.CertificateRequestInfo) (*identity, error) {
 	r.mu.Lock()
 	closed := r.closed
@@ -226,84 +290,152 @@ func (r *resolver) resolve(cri *tls.CertificateRequestInfo) (*identity, error) {
 		}
 		return o.cands, o.err
 	}
-	unusable := map[string]string{} // thumbprint → why its key cannot sign for this server
-	var accept func(Candidate) (bool, string)
-	if cri != nil {
-		accept = func(c Candidate) (bool, string) {
-			if why, ok := unusable[c.Thumbprint()]; ok {
-				return false, why
-			}
-			chain, err := r.chainFor(c, opened)
-			if err != nil {
-				return false, "building its certificate chain failed: " + err.Error()
-			}
-			if err := cri.SupportsCertificate(&tls.Certificate{Certificate: chain, PrivateKey: publicKeyOnly{c.Cert.PublicKey}, Leaf: c.Cert}); err != nil {
-				return false, "not acceptable to the server: " + err.Error()
-			}
-			return true, ""
+	unusable := map[cacheKey]error{} // why a certificate's key in a store cannot be used
+	accept := func(store StorePath, c Candidate) error {
+		if err, ok := unusable[cacheKey{store, c.Thumbprint()}]; ok {
+			return err
 		}
+		if cri == nil {
+			return nil
+		}
+		chain, err := r.chainFor(cacheKey{store, c.Thumbprint()}, opened[store])
+		if err != nil {
+			return fmt.Errorf("building its certificate chain: %w", err)
+		}
+		if err := cri.SupportsCertificate(&tls.Certificate{Certificate: chain, PrivateKey: publicKeyOnly{c.Cert.PublicKey}, Leaf: c.Cert}); err != nil {
+			return fmt.Errorf("not acceptable to the server: %w", err)
+		}
+		return nil
 	}
 	for {
 		cand, from, err := r.sel.search(open, r.now(), accept)
 		if err != nil {
 			return nil, err
 		}
-		id, err := r.identityFor(cand, from, opened[from])
-		if err != nil || cri == nil {
-			return id, err
+		key := cacheKey{from, cand.Thumbprint()}
+		id, err := r.identityFor(cand, key, opened[from])
+		if errors.Is(err, errClosed) {
+			return nil, err
 		}
-		if err := cri.SupportsCertificate(id.tlsCertificate()); err != nil {
-			why := "its key cannot make a signature the server accepts: " + err.Error()
-			if id.signer.pkcs1Only && cri.Version == tls.VersionTLS13 {
-				why = "its key cannot make RSA-PSS signatures, which TLS 1.3 requires"
-			}
-			unusable[cand.Thumbprint()] = why
+		if err != nil {
+			unusable[key] = err
 			continue
 		}
+		if cri != nil {
+			if err := cri.SupportsCertificate(id.tlsCertificate()); err != nil {
+				pkcs1Only := id.signer.pkcs1Only
+				r.done(id)
+				if pkcs1Only && cri.Version == tls.VersionTLS13 {
+					err = errors.New("its key cannot make RSA-PSS signatures, which TLS 1.3 requires")
+				} else {
+					err = fmt.Errorf("its key cannot make a signature the server accepts: %w", err)
+				}
+				unusable[key] = err
+				continue
+			}
+		}
+		r.retireOthers(key)
 		return id, nil
 	}
 }
 
-// identityFor returns the cached identity of cand, or opens its key.
-func (r *resolver) identityFor(cand Candidate, from StorePath, o *openedStore) (*identity, error) {
-	thumb := cand.Thumbprint()
+// identityFor returns the cached identity of cand, or opens its key, with a
+// reference the caller holds. Building the chain and the key's test
+// signature, which can wait on a smart card or a TPM, run without the
+// resolver's lock, so other handshakes are not held behind them.
+func (r *resolver) identityFor(cand Candidate, key cacheKey, o *openedStore) (*identity, error) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if r.closed {
+		r.mu.Unlock()
 		return nil, errClosed
 	}
-	if id, ok := r.cache[thumb]; ok {
+	var stale *identity
+	if id, ok := r.cache[key]; ok {
 		if !id.signer.failed.Load() {
+			id.refs++
+			r.mu.Unlock()
 			return id, nil
 		}
-		delete(r.cache, thumb)
-		id.signer.release()
+		delete(r.cache, key)
+		if id.retire() {
+			stale = id
+		}
 	}
-	ctx := windows.CertDuplicateCertificateContext(o.ctxs[thumb])
+	r.mu.Unlock()
+	if stale != nil {
+		stale.signer.release()
+	}
+
+	ctx := windows.CertDuplicateCertificateContext(o.ctxs[key.thumb])
 	chain, err := buildChain(ctx, o.store)
 	if err != nil {
 		_ = windows.CertFreeCertificateContext(ctx)
-		return nil, fmt.Errorf("certstore: client certificate %s in %s: building its certificate chain: %w", thumb, from, err)
+		return nil, fmt.Errorf("building its certificate chain: %w", err)
 	}
 	sg, err := acquireSigner(ctx, cand.Cert)
 	if err != nil {
-		return nil, fmt.Errorf("certstore: client certificate %s (%s) in %s: %w", thumb, cand.Subject, from, err)
+		return nil, err
 	}
-	id := &identity{store: from, leaf: cand.Cert, chain: chain, signer: sg}
-	r.cache[thumb] = id
+	id := &identity{store: key.store, leaf: cand.Cert, chain: chain, signer: sg, refs: 1}
+
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		sg.release()
+		return nil, errClosed
+	}
+	if cur, ok := r.cache[key]; ok {
+		if !cur.signer.failed.Load() {
+			// Another handshake opened the same key meanwhile; keep its.
+			cur.refs++
+			r.mu.Unlock()
+			sg.release()
+			return cur, nil
+		}
+		delete(r.cache, key)
+		if cur.retire() {
+			stale = cur
+		}
+	}
+	r.cache[key] = id
+	r.mu.Unlock()
+	if stale != nil {
+		stale.signer.release()
+	}
 	return id, nil
 }
 
-func (r *resolver) chainFor(c Candidate, opened map[StorePath]*openedStore) ([][]byte, error) {
-	thumb := c.Thumbprint()
+// retireOthers takes every cached identity but keep's out of service, so a
+// certificate that a renewal superseded does not hold its key until Close.
+// Each is released once no handshake holds it.
+func (r *resolver) retireOthers(keep cacheKey) {
+	var free []*identity
 	r.mu.Lock()
-	id, ok := r.cache[thumb]
+	for k, id := range r.cache {
+		if k != keep {
+			delete(r.cache, k)
+			if id.retire() {
+				free = append(free, id)
+			}
+		}
+	}
+	r.mu.Unlock()
+	for _, id := range free {
+		id.signer.release()
+	}
+}
+
+// chainFor returns the chain of the certificate key names: the cached
+// identity's, or one built from the store read in this resolve.
+func (r *resolver) chainFor(key cacheKey, o *openedStore) ([][]byte, error) {
+	r.mu.Lock()
+	id, ok := r.cache[key]
 	r.mu.Unlock()
 	if ok {
 		return id.chain, nil
 	}
-	for _, o := range opened {
-		if ctx, ok := o.ctxs[thumb]; ok {
+	if o != nil {
+		if ctx, ok := o.ctxs[key.thumb]; ok {
 			return buildChain(ctx, o.store)
 		}
 	}
