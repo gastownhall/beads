@@ -200,6 +200,7 @@ func checkDependencyIntegrity(db *sql.DB) DoctorCheck {
 		    OR (d.dep_table = 'wisp_dependencies' AND NOT EXISTS (SELECT 1 FROM wisps WHERE id = d.issue_id))
 		    OR (
 		      d.depends_on_id NOT LIKE 'external:%'
+		      AND NOT d.external_target
 		      AND NOT EXISTS (SELECT 1 FROM issues WHERE id = d.depends_on_id)
 		      AND NOT EXISTS (SELECT 1 FROM wisps WHERE id = d.depends_on_id)
 		    )

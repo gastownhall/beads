@@ -258,6 +258,49 @@ func TestChildParentDependencies_FixesBadDeps(t *testing.T) {
 	}
 }
 
+// TestOrphanedDependencies_KeepsCrossPrefixTarget pins #4647: bd doctor --fix
+// must not delete an edge whose target prefix names another repository. The
+// target is stored in depends_on_external and lives in that rig's database.
+func TestOrphanedDependencies_KeepsCrossPrefixTarget(t *testing.T) {
+	dir := t.TempDir()
+	store := newFixTestStore(t, dir, "bd")
+	ctx := context.Background()
+
+	issue := &types.Issue{
+		ID:        "bd-src",
+		Title:     "Source",
+		Status:    types.StatusOpen,
+		IssueType: types.TypeTask,
+		CreatedAt: time.Now(),
+	}
+	if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+		t.Fatal(err)
+	}
+	dep := &types.Dependency{
+		IssueID:     "bd-src",
+		DependsOnID: "other-xyz",
+		Type:        types.DepBlocks,
+		CreatedAt:   time.Now(),
+		CreatedBy:   "test",
+	}
+	if err := store.AddDependency(ctx, dep, "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := OrphanedDependencies(dir, false); err != nil {
+		t.Fatalf("OrphanedDependencies failed: %v", err)
+	}
+
+	db := store.UnderlyingDB()
+	var count int
+	if err := db.QueryRow("SELECT COUNT(*) FROM dependencies WHERE issue_id = 'bd-src' AND depends_on_external = 'other-xyz'").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Errorf("cross-prefix dependency rows after fix = %d, want 1", count)
+	}
+}
+
 // TestChildParentDependencies_PreservesParentChildType verifies that legitimate
 // parent-child type dependencies are NOT removed (only blocking types are removed).
 func TestChildParentDependencies_PreservesParentChildType(t *testing.T) {

@@ -46,7 +46,9 @@ func OrphanedDependencies(path string, verbose bool) error {
 		return err
 	}
 
-	// Find orphaned dependencies (exclude external: cross-rig tracking refs, #1593)
+	// Find orphaned dependencies (exclude external: cross-rig tracking refs,
+	// #1593, and every other depends_on_external target: a cross-prefix target
+	// lives in another rig's database, #4647)
 	//nolint:gosec // G202: fixDependencyUnionSQL returns a fixed internal SELECT fragment.
 	query := `
 		SELECT d.dep_table, d.issue_id, d.depends_on_id
@@ -54,6 +56,7 @@ func OrphanedDependencies(path string, verbose bool) error {
 		WHERE NOT EXISTS (SELECT 1 FROM issues i WHERE i.id = d.depends_on_id)
 		  AND NOT EXISTS (SELECT 1 FROM wisps w WHERE w.id = d.depends_on_id)
 		  AND d.depends_on_id NOT LIKE 'external:%'
+		  AND NOT d.external_target
 	`
 	rows, err := db.Query(query)
 	if err != nil {

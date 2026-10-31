@@ -71,12 +71,15 @@ func checkOrphanedDependenciesDB(db *sql.DB) DoctorCheck {
 	// Query for orphaned dependencies.
 	// Exclude external: refs — these are synthetic cross-rig tracking deps
 	// injected by the JSONL exporter and intentionally reference issues not
-	// present in the local database (#1593).
+	// present in the local database (#1593). Exclude every other target in
+	// depends_on_external too: a cross-prefix target lives in another rig's
+	// database, so its absence here is expected (#4647).
 	//nolint:gosec // G202: doctorDependencyUnionSQL returns a fixed internal SELECT fragment.
 	query := `
 		SELECT d.issue_id, d.depends_on_id, d.type
 		FROM (` + doctorDependencyUnionSQL() + `) d
 		WHERE d.depends_on_id NOT LIKE 'external:%'
+		  AND NOT d.external_target
 		  AND NOT EXISTS (SELECT 1 FROM issues i WHERE i.id = d.depends_on_id)
 		  AND NOT EXISTS (SELECT 1 FROM wisps w WHERE w.id = d.depends_on_id)
 	`

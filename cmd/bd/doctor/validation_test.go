@@ -665,6 +665,45 @@ func TestCheckOrphanedDependenciesDB_IssueToWispTargetIsNotOrphan(t *testing.T) 
 	}
 }
 
+// TestCheckOrphanedDependenciesDB_CrossPrefixTargetIsNotOrphan pins #4647: a
+// target whose prefix names another repository is stored in
+// depends_on_external and lives in that rig's database, so a missing local row
+// is expected and the edge is not reported as an orphan.
+func TestCheckOrphanedDependenciesDB_CrossPrefixTargetIsNotOrphan(t *testing.T) {
+	store := newTestDoltStore(t, "test")
+	ctx := context.Background()
+
+	issue := &types.Issue{ID: "test-cross-source", Title: "Source", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+		t.Fatalf("CreateIssue source: %v", err)
+	}
+
+	dep := &types.Dependency{
+		IssueID:     issue.ID,
+		DependsOnID: "other-target",
+		Type:        types.DepBlocks,
+		CreatedAt:   time.Now(),
+		CreatedBy:   "test",
+	}
+	if err := store.AddDependency(ctx, dep, "test"); err != nil {
+		t.Fatalf("AddDependency cross-prefix: %v", err)
+	}
+
+	var external sql.NullString
+	if err := store.DB().QueryRowContext(ctx,
+		"SELECT depends_on_external FROM dependencies WHERE issue_id = ?", issue.ID).Scan(&external); err != nil {
+		t.Fatalf("read dependency row: %v", err)
+	}
+	if external.String != "other-target" {
+		t.Fatalf("depends_on_external = %q, want %q", external.String, "other-target")
+	}
+
+	check := checkOrphanedDependenciesDB(store.DB())
+	if check.Status != StatusOK {
+		t.Fatalf("Status = %q, want %q; detail=%s", check.Status, StatusOK, check.Detail)
+	}
+}
+
 func TestCheckOrphanedDependenciesDB_WispDependencyMissingTargetDetected(t *testing.T) {
 	store := newTestDoltStore(t, "test")
 	ctx := context.Background()

@@ -1367,6 +1367,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   squashed commit resolves as it did before the compaction; an earlier one
   still resolves to the initial commit, as the history it named is gone
   (#7294).
+- `bd doctor` no longer reports a dependency on another repository's issue
+  as an orphaned dependency, and `bd doctor --fix` no longer deletes it. `bd
+  dep add` stores a target whose prefix names another repository in
+  `depends_on_external`, beside `external:` refs, but the orphan check, its
+  fix and the `--deep` integrity check excluded only `external:` refs, so
+  every intentional cross-repository edge was listed for deletion. A missing
+  local issue or wisp target is still reported and removed (#4647).
 - `bd migrate-personal` no longer leaves an issue in both databases when
   someone else's bead in the project database depends on it. The move's
   delete from the project database refuses such an issue, but it ran only
