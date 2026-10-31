@@ -352,6 +352,15 @@ func abortMerge(ctx context.Context, db DBConn, preMergeClean bool) {
 	}
 }
 
+// AbortMerge is abortMerge, exported for callers outside this package that
+// drove a merge themselves and need to restore the pre-merge working set
+// when a settle pass they implement declines it (e.g. package dolt's
+// finishCLIPull, which settles a CLI `dolt pull`'s merge the same way
+// SettleMerge settles a SQL DOLT_PULL's — see #7839).
+func AbortMerge(ctx context.Context, db DBConn, preMergeClean bool) {
+	abortMerge(ctx, db, preMergeClean)
+}
+
 // workingSetClean reports whether dolt_status is empty. Errors count as
 // dirty so the hard-reset fallback stays conservative.
 func workingSetClean(ctx context.Context, db DBConn) bool {

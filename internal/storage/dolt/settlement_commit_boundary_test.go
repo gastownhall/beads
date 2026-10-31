@@ -120,11 +120,13 @@ func TestServerSettlementSQLCommitResponseLossIsIndeterminate(t *testing.T) {
 		mock.ExpectExec(regexp.QuoteMeta("SET @@dolt_allow_commit_conflicts = 0")).
 			WillReturnResult(sqlmock.NewResult(0, 0))
 
+		// pullErr nil, preMergeClean true: no CLI pull error of its own is
+		// under test here, and the indeterminate-commit path below must NOT
+		// attempt a merge abort regardless of preMergeClean (#7839) — the
+		// mock's expectation list has no DOLT_MERGE('--abort') call, which is
+		// exactly the assertion.
 		store := &DoltStore{db: db}
-		resolved, err := store.autoResolveConflictsAfterCLIPull(t.Context())
-		if resolved {
-			t.Fatal("autoResolveConflictsAfterCLIPull() resolved = true after lost SQL commit response")
-		}
+		err = store.autoResolveConflictsAfterCLIPull(t.Context(), nil, true)
 		assertPublicCommitIndeterminate(t, err, responseLoss)
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Fatalf("unmet sqlmock expectations: %v", err)
