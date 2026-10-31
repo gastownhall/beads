@@ -38,15 +38,17 @@ var sqlWriteVerbRe = regexp.MustCompile(`(?i)\b(?:UPDATE|INSERT|REPLACE|ALTER|CR
 // writesArrivalSeq recognizes a write keyword and the column identifier in
 // the same SQL statement. Tokenization excludes ordinary comments and quoted
 // values, but retains backtick identifiers and executable MySQL comments.
-// A SQL prefix keeps prose such as "arrival_seq, the journal's create stamp"
-// out of the scan. ON also admits dynamic upsert suffixes. This remains a
-// literal-level guard: it does not reconstruct SQL assembled across literals.
+// Keywords can occur after format verbs or inside statement fragments. SQL
+// tokens also enable a conservative fallback on lexical errors; prose such as
+// "arrival_seq, the journal's create stamp" errors before reaching one.
+// This remains a literal-level guard: it does not reconstruct SQL assembled
+// across literals or prove that the column is an assignment target.
 func writesArrivalSeq(text string) bool {
 	if !strings.Contains(strings.ToLower(text), "arrival_seq") {
 		return false
 	}
 	tokens := sqlparser.NewStringTokenizer(text)
-	start, sql, write, column := true, false, false, false
+	sql, write, column := false, false, false
 	for {
 		kind, value := tokens.Scan()
 		switch kind {
@@ -55,24 +57,18 @@ func writesArrivalSeq(text string) bool {
 		case sqlparser.COMMENT:
 			continue
 		case ';':
-			start, sql, write, column = true, false, false, false
+			sql, write, column = false, false, false
 			continue
 		case sqlparser.LEX_ERROR:
 			// A lexical error is not proof of safety. Preserve the old
 			// conservative check once the literal looks like SQL.
 			return sql && sqlWriteVerbRe.MatchString(text)
 		}
-		if start {
-			switch kind {
-			case sqlparser.UPDATE, sqlparser.INSERT, sqlparser.REPLACE,
-				sqlparser.ALTER, sqlparser.CREATE, sqlparser.SELECT,
-				sqlparser.WITH, sqlparser.EXPLAIN, sqlparser.ON, '(':
-				sql = true
-			}
-			start = false
-		}
-		if !sql {
-			continue
+		switch kind {
+		case sqlparser.UPDATE, sqlparser.INSERT, sqlparser.REPLACE,
+			sqlparser.ALTER, sqlparser.CREATE, sqlparser.SELECT,
+			sqlparser.WITH, sqlparser.EXPLAIN, sqlparser.ON, '(':
+			sql = true
 		}
 		switch kind {
 		case sqlparser.UPDATE, sqlparser.INSERT, sqlparser.REPLACE, sqlparser.ALTER, sqlparser.CREATE:
@@ -122,6 +118,21 @@ func TestWritesArrivalSeq(t *testing.T) {
 		{"comment before write", "/* note */ -- note\nUPDATE wisps SET arrival_seq = ?", true},
 		{"cte update", "WITH ids AS (SELECT id FROM wisps) UPDATE wisps SET arrival_seq = ?", true},
 		{"dynamic table", "UPDATE %s SET arrival_seq = ?", true},
+		{"format prefix update", "%s UPDATE wisps SET arrival_seq = ?", true},
+		{"format prefix insert", "%s INSERT INTO wisps (arrival_seq) VALUES (?)", true},
+		{"format prefix replace", "%s REPLACE INTO wisps (arrival_seq) VALUES (?)", true},
+		{"format prefix alter", "%s ALTER TABLE wisps ADD arrival_seq BIGINT", true},
+		{"format prefix create", "%s CREATE TABLE wisps (arrival_seq BIGINT)", true},
+		{"closing paren upsert fragment", ") ON DUPLICATE KEY UPDATE arrival_seq = VALUES(arrival_seq)", true},
+		{"values upsert fragment", "VALUES (?, ?) ON DUPLICATE KEY UPDATE arrival_seq = ?", true},
+		{"alias upsert fragment", "AS incoming ON DUPLICATE KEY UPDATE arrival_seq = incoming.arrival_seq", true},
+		{"duplicate key fragment", "DUPLICATE KEY UPDATE arrival_seq = ?", true},
+		{"into upsert fragment", "INTO wisps (arrival_seq) VALUES (?) ON DUPLICATE KEY UPDATE arrival_seq = ?", true},
+		{"comma values fragment", ", (?) ON DUPLICATE KEY UPDATE arrival_seq = ?", true},
+		{"format prefix comment", "%s /* UPDATE arrival_seq */ SELECT 1", false},
+		{"format prefix quoted column", "%s UPDATE wisps SET title = 'arrival_seq'", false},
+		{"fragment quoted write", "VALUES ('UPDATE'), arrival_seq", false},
+		{"fragment separate statements", "VALUES (arrival_seq); UPDATE wisps SET title = ?", false},
 		{"dynamic upsert suffix", "ON DUPLICATE KEY UPDATE arrival_seq = VALUES(arrival_seq)", true},
 		{"incomplete write", "INSERT INTO wisps (arrival_seq,", true},
 		{"lexical error before column", "UPDATE \x00 wisps SET arrival_seq = ?", true},
@@ -169,6 +180,9 @@ func TestArrivalSeqIsWrittenOnlyByTheJournalSeam(t *testing.T) {
 			return err
 		}
 		scanned++
+		if rel == "historyoffequiv/historyoffequiv.go" {
+			t.Logf("scanning reported prose in %s", rel)
+		}
 		for _, decl := range file.Decls {
 			owner := ""
 			if fn, ok := decl.(*ast.FuncDecl); ok {
@@ -204,6 +218,7 @@ func TestArrivalSeqIsWrittenOnlyByTheJournalSeam(t *testing.T) {
 	if scanned == 0 {
 		t.Fatal("scanned no Go files under internal/storage; the guard is not running")
 	}
+	t.Logf("scanned %d non-test storage Go files", scanned)
 	// Each allowed writer must still be one, so the allowlist cannot outlive
 	// the code it names — and a missing one proves the scan did not reach it
 	// (under Bazel, a package dropped from this test's data).
