@@ -3434,6 +3434,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no-op in shared-server mode, which is the topology of the 2026-08-11 loss.
   User-visible wherever the data directory exists but the database is gone.
 
+- **`bd dep tree` no longer marks a row `[READY]` that `bd ready` omits and
+  `bd blocked` lists.** The marker looked only at the row's own blocking edges,
+  so a child of a blocked epic read as ready; tree nodes now carry the stored
+  transitive `is_blocked` flag those commands read, also in `--json` (#6630).
+
 - **The missing-database refusal no longer prints a ready-to-paste
   `bd init --recreate-missing` command line.** It names the flag and points
   to `bd help init-safety`, which keeps the full invocation behind the

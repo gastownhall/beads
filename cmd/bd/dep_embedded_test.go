@@ -414,6 +414,21 @@ func TestEmbeddedDepBTreeAndCycles(t *testing.T) {
 		}
 	})
 
+	// GH#6630: a child of a blocked epic has no blocking edge of its own, but it
+	// is blocked by inheritance, so `bd ready` omits it and `bd blocked` lists
+	// it. dep tree must not call it [READY].
+	t.Run("tree_root_blocked_through_parent", func(t *testing.T) {
+		blocker := bdCreate(t, bd, dir, "Inherited blocker", "--type", "task")
+		blockedEpic := bdCreate(t, bd, dir, "Inherited epic", "--type", "epic")
+		child := bdCreate(t, bd, dir, "Inherited child", "--type", "task", "--parent", blockedEpic.ID)
+		bdDep(t, bd, dir, "add", blockedEpic.ID, blocker.ID)
+
+		out := bdDep(t, bd, dir, "tree", child.ID)
+		if !strings.Contains(out, "[BLOCKED]") || strings.Contains(out, "[READY]") {
+			t.Fatalf("child of a blocked epic should render [BLOCKED], got:\n%s", out)
+		}
+	})
+
 	// ===== dep cycles =====
 
 	t.Run("cycles_detect", func(t *testing.T) {

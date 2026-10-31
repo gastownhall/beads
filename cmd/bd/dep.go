@@ -1467,7 +1467,9 @@ func renderTree(tree []*types.TreeNode, maxDepth int, direction string) {
 				break
 			}
 		}
-		r.rootBlocked = hasOpenBlockers
+		// root.IsBlocked is the stored transitive flag `bd ready`/`bd blocked`
+		// read, which also covers blocking inherited from a parent (GH#6630).
+		r.rootBlocked = hasOpenBlockers || root.IsBlocked
 	}
 
 	// Render recursively from root
