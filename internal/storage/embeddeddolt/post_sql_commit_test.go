@@ -5,7 +5,6 @@ package embeddeddolt
 import (
 	"context"
 	"database/sql"
-	"database/sql/driver"
 	"errors"
 	"strings"
 	"testing"
@@ -48,18 +47,23 @@ func TestStageAndCommitAfterSQLCommitResponseLossIsIndeterminateAndNotReplayed(t
 
 // newDoltStatusStub returns a *sql.DB whose dolt_status queries each yield a
 // single-row count of 1, standing in for the pending/staged empty-commit guard
-// reads (GH#4288 re-port) that StageAndCommit issues around its Exec calls.
-// The version-control call counting below deliberately tracks only Exec calls,
-// so the guard reads stay invisible to the assertions.
+// reads (GH#4288 re-port) that StageAndCommit issues around its CALLs, and
+// whose CALLs each answer the empty result set schema.DrainCall consumes. The
+// version-control call counting below deliberately tracks only QueryContext,
+// which the guard reads (QueryRowContext) never reach, so they stay invisible
+// to the assertions.
 func newDoltStatusStub(t *testing.T) *sql.DB {
 	t.Helper()
 	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
+	mock.MatchExpectationsInOrder(false)
 	for i := 0; i < 4; i++ {
 		mock.ExpectQuery(`FROM dolt_status`).
 			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+		mock.ExpectQuery(`^CALL DOLT_`).
+			WillReturnRows(sqlmock.NewRows([]string{"status"}))
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	return db
@@ -72,16 +76,18 @@ type postSQLCommitFailureConn struct {
 	status   *sql.DB
 }
 
-func (c *postSQLCommitFailureConn) ExecContext(_ context.Context, query string, _ ...any) (sql.Result, error) {
+// ExecContext refuses: StageAndCommit drains its CALLs through QueryContext
+// (schema.DrainCall), so a CALL arriving here is a revert to ExecContext.
+func (*postSQLCommitFailureConn) ExecContext(context.Context, string, ...any) (sql.Result, error) {
+	return nil, errors.New("unexpected ExecContext")
+}
+
+func (c *postSQLCommitFailureConn) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
 	c.calls = append(c.calls, query)
 	if len(c.calls) == c.failCall {
 		return nil, c.err
 	}
-	return driver.RowsAffected(1), nil
-}
-
-func (*postSQLCommitFailureConn) QueryContext(context.Context, string, ...any) (*sql.Rows, error) {
-	return nil, errors.New("unexpected QueryContext")
+	return c.status.QueryContext(ctx, query, args...)
 }
 
 func (c *postSQLCommitFailureConn) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {

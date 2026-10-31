@@ -11,6 +11,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/kvkeys"
+	"github.com/steveyegge/beads/internal/storage/schema"
 )
 
 // memoryConfigKeyPrefix is the config-table key prefix under which `bd remember`
@@ -31,6 +32,11 @@ const memoryConfigKeyPrefix = kvkeys.MemoryConfigKeyPrefix
 // config rows) and repairing FK cascade
 // violations (bd-6dnrw.4). All functions take a DBConn, which *sql.Tx,
 // *sql.Conn, and *sql.DB all satisfy.
+//
+// Because callers pin the session, every CALL DOLT_* here, and in the
+// StageAndCommit that MergeWithStrategy commits through, goes through
+// schema.DrainCall, which drains the procedure's result sets even when the
+// CALL fails (see its doc comment); plain DML stays on ExecContext (GH#5556).
 
 // MergeAndSettle merges ref into the current branch and settles the result:
 // safe conflict classes are auto-resolved, FK cascade violations are
@@ -69,7 +75,7 @@ func MergeAndSettleWithStrategy(ctx context.Context, db DBConn, ref, strategy st
 		return fmt.Errorf("set dolt_force_transaction_commit: %w", err)
 	}
 
-	_, mergeErr := db.ExecContext(ctx, "CALL DOLT_MERGE(?)", ref)
+	mergeErr := schema.DrainCall(ctx, db, "CALL DOLT_MERGE(?)", ref)
 	if mergeErr != nil && strings.Contains(mergeErr.Error(), "up to date") {
 		// DOLT_PULL swallows "Already up to date." internally; we do the same.
 		mergeErr = nil
@@ -166,7 +172,7 @@ func SettleMerge(ctx context.Context, db DBConn, mergeErr error, preMergeClean b
 					abortMerge(ctx, db, preMergeClean)
 					return fmt.Errorf("resolve %s conflicts with '%s' strategy: %w", table, strategy, err)
 				}
-				if _, err := db.ExecContext(ctx, "CALL DOLT_ADD(?)", table); err != nil {
+				if err := schema.DrainCall(ctx, db, "CALL DOLT_ADD(?)", table); err != nil {
 					abortMerge(ctx, db, preMergeClean)
 					return fmt.Errorf("stage resolved %s: %w", table, err)
 				}
@@ -217,7 +223,7 @@ func SettleMerge(ctx context.Context, db DBConn, mergeErr error, preMergeClean b
 		}
 	case strategyResolved:
 		msg := fmt.Sprintf("Resolve merge conflicts using '%s' strategy", strategy)
-		if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?)", msg); err != nil {
+		if err := schema.DrainCall(ctx, db, "CALL DOLT_COMMIT('-m', ?)", msg); err != nil {
 			abortMerge(ctx, db, preMergeClean)
 			if mergeErr != nil {
 				return mergeErr
@@ -272,7 +278,7 @@ func MergeWithStrategy(ctx context.Context, db DBConn, ref, author, strategy str
 		return nil, fmt.Errorf("set dolt_force_transaction_commit: %w", err)
 	}
 
-	_, mergeErr := db.ExecContext(ctx, "CALL DOLT_MERGE('--author', ?, ?)", author, ref)
+	mergeErr := schema.DrainCall(ctx, db, "CALL DOLT_MERGE('--author', ?, ?)", author, ref)
 	if mergeErr != nil && strings.Contains(mergeErr.Error(), "up to date") {
 		mergeErr = nil
 	}
@@ -347,8 +353,8 @@ func MergeWithStrategy(ctx context.Context, db DBConn, ref, author, strategy str
 // destroy uncommitted data the merge never touched (bd-578h9.2).
 // Best-effort: the caller's error is what matters.
 func abortMerge(ctx context.Context, db DBConn, preMergeClean bool) {
-	if _, err := db.ExecContext(ctx, "CALL DOLT_MERGE('--abort')"); err != nil && preMergeClean {
-		_, _ = db.ExecContext(ctx, "CALL DOLT_RESET('--hard')")
+	if err := schema.DrainCall(ctx, db, "CALL DOLT_MERGE('--abort')"); err != nil && preMergeClean {
+		_ = schema.DrainCall(ctx, db, "CALL DOLT_RESET('--hard')")
 	}
 }
 
@@ -540,7 +546,7 @@ func TryAutoResolveMergeConflicts(ctx context.Context, db DBConn) (bool, error) 
 						"local edits to %s were superseded\n",
 					len(keys), strings.Join(keys, ", "))
 			}
-			if _, err := db.ExecContext(ctx, "CALL DOLT_CONFLICTS_RESOLVE('--theirs', 'config')"); err != nil {
+			if err := schema.DrainCall(ctx, db, "CALL DOLT_CONFLICTS_RESOLVE('--theirs', 'config')"); err != nil {
 				return false, fmt.Errorf("failed to resolve config conflicts: %w", err)
 			}
 		case "issues":
@@ -556,12 +562,12 @@ func TryAutoResolveMergeConflicts(ctx context.Context, db DBConn) (bool, error) 
 			}
 		default:
 			//nolint:gosec // G201: table is one of the hardcoded constants above.
-			if _, err := db.ExecContext(ctx, "CALL DOLT_CONFLICTS_RESOLVE('--theirs', '"+table+"')"); err != nil {
+			if err := schema.DrainCall(ctx, db, "CALL DOLT_CONFLICTS_RESOLVE('--theirs', '"+table+"')"); err != nil {
 				return false, fmt.Errorf("failed to resolve %s conflicts: %w", table, err)
 			}
 		}
 		//nolint:gosec // G201: table is one of the hardcoded constants above.
-		if _, err := db.ExecContext(ctx, "CALL DOLT_ADD('"+table+"')"); err != nil {
+		if err := schema.DrainCall(ctx, db, "CALL DOLT_ADD('"+table+"')"); err != nil {
 			return false, fmt.Errorf("failed to stage %s: %w", table, err)
 		}
 	}
@@ -577,7 +583,7 @@ func TryAutoResolveMergeConflicts(ctx context.Context, db DBConn) (bool, error) 
 // cascade violation could never settle while the resolver committed first
 // (bd-578h9.14).
 func CommitResolvedConflicts(ctx context.Context, db DBConn) error {
-	if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-m', 'auto-resolve merge conflicts: metadata, dependencies, schema_migrations, config, issues (field-level three-way merge), labels/comments/events (union)')"); err != nil {
+	if err := schema.DrainCall(ctx, db, "CALL DOLT_COMMIT('-m', 'auto-resolve merge conflicts: metadata, dependencies, schema_migrations, config, issues (field-level three-way merge), labels/comments/events (union)')"); err != nil {
 		return fmt.Errorf("failed to commit resolved conflicts: %w", err)
 	}
 	return nil
@@ -780,7 +786,7 @@ func resolveSchemaMigrationsVintageConflicts(ctx context.Context, db DBConn) err
 			return fmt.Errorf("backfill content_hash for migration %d: %w", f.version, err)
 		}
 	}
-	if _, err := db.ExecContext(ctx, "CALL DOLT_CONFLICTS_RESOLVE('--ours', 'schema_migrations')"); err != nil {
+	if err := schema.DrainCall(ctx, db, "CALL DOLT_CONFLICTS_RESOLVE('--ours', 'schema_migrations')"); err != nil {
 		return fmt.Errorf("failed to resolve schema_migrations conflicts: %w", err)
 	}
 	return nil
@@ -876,7 +882,7 @@ func TryRepairFKCascadeViolations(ctx context.Context, db DBConn) (repaired, had
 			return false, true, fmt.Errorf("clear %s constraint violations: %w", t, err)
 		}
 		//nolint:gosec // G202: hardcoded table name.
-		if _, err := db.ExecContext(ctx, "CALL DOLT_ADD('"+t+"')"); err != nil {
+		if err := schema.DrainCall(ctx, db, "CALL DOLT_ADD('"+t+"')"); err != nil {
 			return false, true, fmt.Errorf("stage repaired %s: %w", t, err)
 		}
 		fmt.Fprintf(os.Stderr,
