@@ -180,6 +180,7 @@
 
 100 44 TestEmbeddedIfRevisionComposesWithIfAssigneeIfStatus
 100 44 TestEmbeddedStaleConcurrent
+100 44 TestEmbeddedUpdateJSONRevision
 
 100 45 TestEmbeddedGraph
 100 45 TestEmbeddedUpdateIfGuardsCLI

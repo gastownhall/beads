@@ -1335,6 +1335,8 @@ go_test(
         "update_conditional_proxied_test.go",
         "update_description_guard_test.go",
         "update_embedded_test.go",
+        "update_json_revision_direct_integration_test.go",
+        "update_json_revision_embedded_test.go",
         "update_lifecycle_test.go",
         "update_metadata_test.go",
         "update_multi_id_exit_test.go",

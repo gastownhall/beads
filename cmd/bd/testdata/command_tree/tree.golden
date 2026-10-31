@@ -283,7 +283,7 @@ bd assign
     |   bd assign bd-123 alice
     |   bd assign bd-123 ""      # unassign
   flag --force type=bool default="false" usage="Allow overwriting another actor's live in_progress claim (use only for abandoned claims — crashed agent, expired lease; prefer bd reclaim)"
-  flag --if-revision type=string default="" usage="Apply the write only if the issue's current revision equals this value (the decimal int64 from `bd show --json`'s \"revision\" field). One id only: refused before any write when combined with more than one issue id. A mismatch writes nothing and exits 13 (vs 1 for other failures)."
+  flag --if-revision type=string default="" usage="Apply the write only if the issue's current revision equals this value (the decimal int64 from the \"revision\" field of `bd show --json`, or of the row a previous `bd update --json` printed). One id only: refused before any write when combined with more than one issue id. A mismatch writes nothing and exits 13 (vs 1 for other failures)."
 
 bd audit
   use: "audit"
@@ -625,7 +625,7 @@ bd close
   flag --comment type=string default="" hidden usage="Alias for --reason"
   flag --continue type=bool default="false" usage="Auto-advance to next step in molecule"
   flag --force -f type=bool default="false" usage="Force close pinned issues or unsatisfied gates"
-  flag --if-revision type=string default="" usage="Apply the write only if the issue's current revision equals this value (the decimal int64 from `bd show --json`'s \"revision\" field). One id only: refused before any write when combined with more than one issue id. A mismatch writes nothing and exits 13 (vs 1 for other failures)."
+  flag --if-revision type=string default="" usage="Apply the write only if the issue's current revision equals this value (the decimal int64 from the \"revision\" field of `bd show --json`, or of the row a previous `bd update --json` printed). One id only: refused before any write when combined with more than one issue id. A mismatch writes nothing and exits 13 (vs 1 for other failures)."
   flag --message -m type=string default="" hidden usage="Alias for --reason (git commit convention)"
   flag --no-auto type=bool default="false" usage="With --continue, show next step but don't claim it"
   flag --reason -r type=string default="" usage="Reason for closing"
@@ -1509,7 +1509,7 @@ bd delete
   flag --dry-run type=bool default="false" usage="Preview what would be deleted without making changes"
   flag --force -f type=bool default="false" usage="Actually delete (without this flag, shows preview)"
   flag --from-file type=string default="" usage="Read issue IDs from file (one per line)"
-  flag --if-revision type=string default="" usage="Apply the write only if the issue's current revision equals this value (the decimal int64 from `bd show --json`'s \"revision\" field). One id only: refused before any write when combined with more than one issue id. A mismatch writes nothing and exits 13 (vs 1 for other failures)."
+  flag --if-revision type=string default="" usage="Apply the write only if the issue's current revision equals this value (the decimal int64 from the \"revision\" field of `bd show --json`, or of the row a previous `bd update --json` printed). One id only: refused before any write when combined with more than one issue id. A mismatch writes nothing and exits 13 (vs 1 for other failures)."
 
 bd dep
   use: "dep [issue-id]"
@@ -6252,7 +6252,7 @@ bd reopen
     | Exit codes: 1 for general failures; 13 when the failure is a stale
     | --if-revision guard (the precondition no longer held, nothing was written —
     | another actor won the race, so retrying the same guard is pointless).
-  flag --if-revision type=string default="" usage="Apply the write only if the issue's current revision equals this value (the decimal int64 from `bd show --json`'s \"revision\" field). One id only: refused before any write when combined with more than one issue id. A mismatch writes nothing and exits 13 (vs 1 for other failures)."
+  flag --if-revision type=string default="" usage="Apply the write only if the issue's current revision equals this value (the decimal int64 from the \"revision\" field of `bd show --json`, or of the row a previous `bd update --json` printed). One id only: refused before any write when combined with more than one issue id. A mismatch writes nothing and exits 13 (vs 1 for other failures)."
   flag --reason -r type=string default="" usage="Reason for reopening"
 
 bd repo
@@ -7202,7 +7202,7 @@ bd update
   flag --force type=bool default="false" usage="Override refusals: let -a/--assignee overwrite another actor's live in_progress claim (use only for abandoned claims — crashed agent, expired lease; prefer bd reclaim), let -s/--status move the issue into closed (or a configured done status) despite open children or a live blocker (same as bd close --force), and let --notes overwrite existing non-empty notes (use --append-notes to preserve history instead)"
   flag --history type=bool default="false" usage="Clear no-history flag (re-enable Dolt commit history)"
   flag --if-assignee type=string default="" usage="Apply the update only if the current assignee equals this value (--if-assignee '' requires unassigned); a mismatch writes nothing and exits 13 (vs 1 for other failures). Requires a field update; cannot combine with --claim"
-  flag --if-revision type=string default="" usage="Apply the write only if the issue's current revision equals this value (the decimal int64 from `bd show --json`'s \"revision\" field). One id only: refused before any write when combined with more than one issue id. A mismatch writes nothing and exits 13 (vs 1 for other failures). Composes with --if-assignee/--if-status: all guards present must hold."
+  flag --if-revision type=string default="" usage="Apply the write only if the issue's current revision equals this value (the decimal int64 from the \"revision\" field of `bd show --json`, or of the row a previous `bd update --json` printed). One id only: refused before any write when combined with more than one issue id. A mismatch writes nothing and exits 13 (vs 1 for other failures). Composes with --if-assignee/--if-status: all guards present must hold."
   flag --if-status type=string default="" usage="Apply the update only if the current status equals this value; a mismatch writes nothing and exits 13 (vs 1 for other failures). Requires a field update; cannot combine with --claim"
   flag --message -m type=string default="" hidden annotations={cobra_annotation_mutually_exclusive=["stdin message"]} usage="Alias for --description (git commit convention)"
   flag --metadata type=string default="" usage="Set custom metadata (JSON object, or @file.json to read from file)"

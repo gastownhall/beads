@@ -609,6 +609,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   each entry still decodes as the closed issue, and the output stays an
   array (under `closed` with `--suggest-next`, `--continue` or
   `--claim-next`).
+- `bd update --json` reports each row's revision after the write. Every
+  row carries `revision`, the same decimal-string token `bd show --json`
+  reports, so a guarded client can pass it to the next `--if-revision`
+  without running `bd show` after each update. It is on the direct and
+  proxied-server routes and under `BD_JSON_ENVELOPE=1`. A `--claim` row stays
+  the bare claim shape, which the v0 claim response also publishes and which
+  has no revision. Every other key is unchanged. `types.Issue.RowVersion` is
+  still `json:"-"`, so list and export output do not change (#7990).
 
 ### Changed
 

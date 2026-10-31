@@ -107,6 +107,7 @@
 34 10 TestProxiedServerServeRefusesAStreamOnADisabledJournal
 34 10 TestProxiedServerTypes
 34 10 TestProxiedServerUpdate2C
+34 10 TestProxiedServerUpdateJSONRevisionDirect
 
 34 11 TestProxiedServerBatchParity
 34 11 TestProxiedServerCompactHistory
@@ -114,6 +115,7 @@
 34 11 TestProxiedServerQuery
 34 11 TestProxiedServerReady
 34 11 TestProxiedServerServeAddDependencies
+34 11 TestProxiedServerUpdateJSONRevision
 
 34 12 TestProxiedServerBlocked
 34 12 TestProxiedServerChildren
