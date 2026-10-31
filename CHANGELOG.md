@@ -2375,6 +2375,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   existing gate file read-only and holds it shared as before, so a maintenance
   operation still sees it and a running one still makes it wait; when no gate
   file exists it holds nothing. Every other command still creates the files.
+- **Test fixtures no longer commit into a repository named by an inherited
+  `GIT_DIR`.** Run from a git hook or a shell that exports `GIT_DIR` and
+  `GIT_INDEX_FILE`, the git fixtures in `internal/routing`,
+  `internal/storage/domain/git`, `internal/beads` and `internal/storage/dolt`
+  followed those variables, so their `git commit` landed on the outer
+  repository's branch and deleted its tracked files, and `git config` rewrote
+  its `user.name`. Each suite's `TestMain` now unsets the repository-location
+  variables first, as `cmd/bd` and the doctor suites already did and as
+  #7857 did for `internal/git` (#7706).
 - **Strict `--readonly` refuses `bd backup init`, `backup sync`,
   `backup remove`, `backup restore` and `bd import`.** None of them checked
   readonly mode. On a server-mode store they ran to completion under

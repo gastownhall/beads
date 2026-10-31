@@ -18,11 +18,13 @@ go_test(
     srcs = [
         "git_test.go",
         "suite_test.go",
+        "testmain_test.go",
     ],
     embed = [":git"],
     deps = [
         "//internal/gitenv",
         "//internal/storage/domain",
+        "//internal/testutil",
         "@com_github_stretchr_testify//require",
         "@com_github_stretchr_testify//suite",
     ],

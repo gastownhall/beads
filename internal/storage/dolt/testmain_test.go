@@ -58,6 +58,14 @@ func TestMain(m *testing.M) {
 }
 
 func testMainInner(m *testing.M) int {
+	// A GIT_DIR/GIT_INDEX_FILE leaked in from the invoking shell or a git hook
+	// would route this suite's fixture git writes into that repository
+	// (gastownhall/beads#7706).
+	if err := testutil.UnsetGitRepoLocationEnv(); err != nil {
+		fmt.Fprintf(os.Stderr, "FATAL: %v\n", err)
+		return 1
+	}
+
 	// Package-wide migration consent: these tests exercise the machinery that
 	// runs BELOW the consent gate (migrate_consent.go), exactly as production
 	// does once an operator has consented. Gate-behavior tests manage the
