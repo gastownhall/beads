@@ -1,9 +1,12 @@
 package main
 
 import (
+	"io"
 	"testing"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/github"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // TestPushPullSubcommandsRegistered verifies push/pull subcommands exist on all tracker commands.
@@ -96,5 +99,25 @@ func TestPullSubcommandRequiresArgs(t *testing.T) {
 	err = gitlabPullCmd.RunE(gitlabPullCmd, []string{})
 	if err == nil {
 		t.Error("gitlab pull with no args should return error")
+	}
+}
+
+// TestNewGitHubEngineCarriesThePushHash pins the engine every GitHub command
+// builds, `bd github pull` included, to GitHub's push hash. A pull engine
+// without it clears the stored hash instead of refreshing it, and the next
+// push PATCHes bd's normalized labels over GitHub labels bd cannot map.
+func TestNewGitHubEngineCarriesThePushHash(t *testing.T) {
+	engine := newGitHubEngine(&github.Tracker{}, io.Discard)
+	if engine.PushHooks == nil || engine.PushHooks.ContentHash == nil {
+		t.Fatal("GitHub engine has no push ContentHash, so a pull clears the push hash")
+	}
+	ref := "https://github.com/o/r/issues/1"
+	issue := &types.Issue{
+		ID: "bd-1", Title: "Fix it", Status: types.StatusOpen, Priority: 2,
+		IssueType: types.TypeTask, ExternalRef: &ref,
+	}
+	want := github.PushContentHash(issue, github.DefaultMappingConfig())
+	if got := engine.PushHooks.ContentHash(issue); got == "" || got != want {
+		t.Fatalf("ContentHash = %q, want GitHub's push hash %q", got, want)
 	}
 }

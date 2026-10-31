@@ -85,6 +85,12 @@ type PushHooks struct {
 	// still incurs, so a no-op `--push-only` run does not drain the API rate limit
 	// (gastownhall/beads#4214). Returning "" disables the short-circuit for that
 	// issue (the engine falls back to the fetch + ContentEqual path).
+	//
+	// A pull that writes an issue, or finds it equal to the remote, refreshes
+	// its fingerprint to the pulled content, which is what the remote then
+	// holds. A pull by an engine without ContentHash (or one that returns "" for
+	// the pulled content) clears a stored fingerprint instead, so a later push
+	// never trusts the last push.
 	ContentHash func(local *types.Issue) string
 
 	// TargetScope returns the canonical remote namespace in which external issue
@@ -500,6 +506,11 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 		}
 
 		if existing != nil && pullIssueEqual(existing, conv.Issue, ref) {
+			if !opts.DryRun {
+				// Both sides can reach this content without a push, which
+				// leaves the hash of the last push stale.
+				e.refreshPushHashAfterPull(ctx, existing, conv.Issue, ref)
+			}
 			stats.Skipped++
 			continue
 		}
@@ -519,6 +530,8 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 			updates := buildPullIssueUpdates(existing, conv.Issue, ref)
 			if raw, ok := marshalTrackerMetadata(extIssue.Metadata); ok {
 				updates["metadata"] = raw
+				// The push hash below fingerprints the row this update writes.
+				conv.Issue.Metadata = raw
 			}
 
 			markPullIssueFields(updates)
@@ -540,6 +553,7 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 			if pulledIDs != nil {
 				pulledIDs[existing.ID] = true
 			}
+			e.refreshPushHashAfterPull(ctx, existing, conv.Issue, ref)
 		} else {
 			// Create new issue
 			conv.Issue.ExternalRef = strPtr(ref)
@@ -553,6 +567,10 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 			stats.Created++
 			if pulledIDs != nil {
 				pulledIDs[conv.Issue.ID] = true
+			}
+			// A new row has no stale entry to clear, so only record.
+			if conv.Issue.ID != "" {
+				e.recordPushHash(ctx, conv.Issue, ref)
 			}
 		}
 	}
@@ -1056,6 +1074,35 @@ func (e *Engine) recordPushHash(ctx context.Context, issue *types.Issue, externa
 	}
 	if err := e.Store.SetLocalMetadata(ctx, e.pushHashKey(issue.ID), h); err != nil {
 		e.warn("Failed to record push hash for %s: %v", issue.ID, err)
+	}
+}
+
+// refreshPushHashAfterPull keeps the stored push hash of a pulled issue in
+// step with the remote. After a pull the remote holds the pulled content, not
+// the content of the last push. The hash fingerprints row, the local issue the
+// pull wrote or found equal, as the pull leaves it: the pulled content under
+// row's ID (a GenerateID hook may have given pulled a fresh ID), with row's own
+// labels when pulled.Labels is nil, because ApplyIssueUpdate leaves the labels
+// alone for a nil set. Without a fingerprint, a stored hash is cleared so the
+// next push fetches and compares instead of trusting the last push. The entry
+// is written only when it changes, so a pull of unchanged issues writes none.
+func (e *Engine) refreshPushHashAfterPull(ctx context.Context, row, pulled *types.Issue, ref string) {
+	if row == nil || row.ID == "" || pulled == nil {
+		return
+	}
+	hashed := *pulled
+	hashed.ID = row.ID
+	hashed.ExternalRef = strPtr(ref)
+	if hashed.Labels == nil {
+		hashed.Labels = row.Labels
+	}
+	key := e.pushHashKey(row.ID)
+	value := e.pushCacheValue(&hashed, ref)
+	if stored, err := e.Store.GetLocalMetadata(ctx, key); err == nil && stored == value {
+		return
+	}
+	if err := e.Store.SetLocalMetadata(ctx, key, value); err != nil {
+		e.warn("Failed to refresh push hash for %s: %v", row.ID, err)
 	}
 }
 

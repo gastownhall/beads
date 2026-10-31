@@ -1425,6 +1425,7 @@ go_test(
         "//internal/git",
         "//internal/gitenv",
         "//internal/githooksenv",
+        "//internal/github",
         "//internal/gitlab",
         "//internal/hooks",
         "//internal/httpapi",

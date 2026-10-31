@@ -1090,6 +1090,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A tracker push (`bd github push`, `bd github sync --push-only`) no longer
+  skips an issue that was changed back to the content of its last push after a
+  pull imported a remote edit of it, or found the issue already equal to the
+  remote. The pull left the stored push hash describing the last push, so the
+  push treated the revert as already sent and the remote kept the pulled edit.
+  A pull now records the pulled content's hash for each issue it updates,
+  creates or finds equal. After a GitHub pull (`bd github pull`,
+  `bd github sync`), the next push of an unchanged pulled issue makes no
+  GitHub call, so bd no longer re-sends normalized fields over remote content
+  it cannot represent: it no longer adds `type::task` or `priority::medium`
+  labels, and no longer replaces an unmapped `priority::urgent`.
+- A GitHub pull (`bd github pull`, `bd github sync`) now removes the plain
+  labels of a local issue when the GitHub issue has none left. It used to keep
+  them, so a later push of the issue put them back on GitHub. As for an issue
+  that still has plain labels on GitHub, a pull that fetches the issue now
+  replaces its local plain labels with GitHub's, so a label added locally
+  since the last push is dropped instead of pushed.
 - `bd migrate-personal` no longer leaves an issue in both databases when
   someone else's bead in the project database depends on it. The move's
   delete from the project database refuses such an issue, but it ran only
