@@ -181,6 +181,40 @@ func TestDoltServerConfig_HonorsAutoStartOptOut(t *testing.T) {
 	}
 }
 
+func TestDoltServerConfig_PropagatesTLSAndPassword(t *testing.T) {
+	t.Setenv("BEADS_TEST_MODE", "")
+	t.Setenv("BEADS_DOLT_AUTO_START", "")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_DOLT_SERVER_TLS", "")
+	t.Setenv("BEADS_DOLT_PASSWORD", "test-secret")
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &configfile.Config{
+		Backend:        configfile.BackendDolt,
+		DoltDatabase:   "beads_test",
+		DoltServerPort: 12345,
+		DoltServerTLS:  true,
+	}
+	data, _ := json.Marshal(cfg)
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	result := doltServerConfig(beadsDir, filepath.Join(beadsDir, "dolt"))
+	if !result.ServerTLS {
+		t.Error("doltServerConfig dropped dolt_server_tls: ServerTLS should be true")
+	}
+	if result.ServerPassword != "test-secret" {
+		t.Errorf("doltServerConfig dropped the server password: got %q, want %q", result.ServerPassword, "test-secret")
+	}
+}
+
 func TestCheckFederationRemotesAPI_PidFileInBeadsDir(t *testing.T) {
 	// Isolate from orchestrator daemon which would be detected as a running server
 	t.Setenv("GT_ROOT", "")
