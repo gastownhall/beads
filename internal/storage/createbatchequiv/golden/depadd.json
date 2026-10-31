@@ -18,7 +18,7 @@
     },
     "events": {
       "rows": 25,
-      "sha256": "862fbc60ebe715d188dae09a2b36057a1e6028ccc70761df0e54158b1758a039"
+      "sha256": "dd6aaca54c3c3685c15a5fa8eaf3e1c3853a993b9620a2ccef15aba6dcb6ecb6"
     },
     "events_ids": {
       "rows": 1,
@@ -46,7 +46,7 @@
     },
     "wisp_events": {
       "rows": 3,
-      "sha256": "74ba23f262a1446e5a93b7c14c310f8def4f3476f96783ce47acd709c0c9b54b"
+      "sha256": "424c772755b718ca395e0dc546194059bfcf80c04b2f9f7ab24edae28416da79"
     },
     "wisp_labels": {
       "rows": 0,

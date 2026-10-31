@@ -63,7 +63,7 @@ func TestDependencyEventEmission(t *testing.T) {
 		if added[0].Actor != "tester" {
 			t.Fatalf("dependency_added actor = %q, want %q", added[0].Actor, "tester")
 		}
-		if got, want := newValueOf(t, added[0]), "Added dependency: de-add-a blocks de-add-b"; got != want {
+		if got, want := newValueOf(t, added[0]), "Added dependency: de-add-b blocks de-add-a"; got != want {
 			t.Fatalf("dependency_added new_value = %q, want %q", got, want)
 		}
 		// No event should land on the target (the source owns the edge history).
@@ -207,7 +207,7 @@ func TestDependencyEventEmission(t *testing.T) {
 		if len(added) != 1 {
 			t.Fatalf("wisp dependency_added event count on %s = %d, want 1", src, len(added))
 		}
-		if got, want := newValueOf(t, added[0]), "Added dependency: de-wisp-a blocks de-wisp-b"; got != want {
+		if got, want := newValueOf(t, added[0]), "Added dependency: de-wisp-b blocks de-wisp-a"; got != want {
 			t.Fatalf("wisp dependency_added new_value = %q, want %q", got, want)
 		}
 		var permCount int

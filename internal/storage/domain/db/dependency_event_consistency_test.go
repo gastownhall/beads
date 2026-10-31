@@ -38,7 +38,7 @@ func (s *testSuite) consistencyExplicitAddEmits() {
 	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
 		"SELECT new_value FROM events WHERE issue_id = ? AND event_type = ?",
 		"bd-cons-add-a", string(types.EventDependencyAdded)).Scan(&newValue))
-	s.Equal("Added dependency: bd-cons-add-a blocks bd-cons-add-b", newValue)
+	s.Equal("Added dependency: bd-cons-add-b blocks bd-cons-add-a", newValue)
 }
 
 // consistencyExplicitRemoveEmits proves the explicit `bd dep remove` verb —
