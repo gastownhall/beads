@@ -101,6 +101,8 @@ runs:
           9.2.0/arm64) bazel_sha=049dd21f40ad979db11c3ee68c96a42ce75f1185e69ac61ab20de1501427a410 ;;
           9.3.0/amd64) bazel_sha=d302d22ed77ee5658b87857249baa579db84300ecebe0a1e9a357b5b20f80eb8 ;;
           9.3.0/arm64) bazel_sha=615cc2509819047e4930fe6643c5f01ebd705ccadf75e8f0b85f9b83cc6a6ca0 ;;
+          9.3.1/amd64) bazel_sha=7f775b54bbec487efaf0f49ccda1d2ed02cd34f582edfdd6aeeec76e39ef585c ;;
+          9.3.1/arm64) bazel_sha=10ba9cb76d4ee748d274dcc2981992bb12b74a203dc41a9c2eceeb8f29359366 ;;
           *) echo "setup-bazel: no pinned sha256 for Bazel '$bazel_version' ($arch); add it from the release's .sha256 file" >&2; exit 1 ;;
         esac
         bin="$RUNNER_TEMP/bazel-bin"
