@@ -32,3 +32,29 @@ func TestJournalWriterLockNameHashesLongNames(t *testing.T) {
 		t.Fatal("JournalWriterLockName() maps two long databases to one lock")
 	}
 }
+
+func TestJournalWriterLockNameUsesRawNameAtTheLimit(t *testing.T) {
+	dbName := strings.Repeat("a", journalWriterLockNameMaxLength-len(journalWriterLockPrefix))
+	want := journalWriterLockPrefix + dbName
+	if len(want) != journalWriterLockNameMaxLength {
+		t.Fatalf("raw lock name length = %d, want exactly %d", len(want), journalWriterLockNameMaxLength)
+	}
+	if got := JournalWriterLockName(dbName); got != want {
+		t.Fatalf("JournalWriterLockName() = %q, want the raw name %q at exactly %d bytes", got, want, journalWriterLockNameMaxLength)
+	}
+}
+
+func TestJournalWriterLockNameHashesOneByteOverTheLimit(t *testing.T) {
+	dbName := strings.Repeat("a", journalWriterLockNameMaxLength-len(journalWriterLockPrefix)+1)
+	raw := journalWriterLockPrefix + dbName
+	if len(raw) != journalWriterLockNameMaxLength+1 {
+		t.Fatalf("raw lock name length = %d, want exactly %d", len(raw), journalWriterLockNameMaxLength+1)
+	}
+	got := JournalWriterLockName(dbName)
+	if got == raw {
+		t.Fatalf("JournalWriterLockName() used the %d-byte raw name %q", len(raw), got)
+	}
+	if len(got) > journalWriterLockNameMaxLength || !strings.HasPrefix(got, journalWriterLockPrefix) {
+		t.Fatalf("JournalWriterLockName() = %q, want a hashed name with prefix %q within %d bytes", got, journalWriterLockPrefix, journalWriterLockNameMaxLength)
+	}
+}
