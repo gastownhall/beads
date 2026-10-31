@@ -335,26 +335,27 @@ in; 13 is the HTTP surface, which lands with the command rather than after it.
     freshest wire slices** — `issueops.GraphCounter`'s (#5536) and
     `issueops.Relations`' (#5540), whose full file sets differ (each has its own
     handler, its own handler test and its own proxied integration test) around
-    an identical nine-file core:
+    a shared ten-file core:
 
     | File | Edit |
     |---|---|
     | `spec/openapi.v0.yaml` | The operation, its schemas, and the capability token in `ContextResponse.capabilities`'s prose — that token is hand-edited; `Capabilities()` itself is derived from the route table |
+    | `internal/httpapi/apigen/types.gen.go` | Regenerated from the spec — `make api-check` writes it; about thirty lines per operation in both evidence commits |
     | `problem.go` | The `Op<Name>` constant and its `operationCodes` row |
     | `routes.go` | The `routeTable` row, carrying the `capability` token |
     | `server.go` | A required `Config` field, its entry in `sourceRoles`, its name in `roleSourceNames`, the `Server` field, the `Listen` assignment, and the per-request accessor |
     | `claim.go` | The `timedProvider` accessor, plus the `uow.<Role>Source` compile-time assertion beside its siblings |
     | `cmd/bd/serve.go` | The `serveRoleSource` method, the `serveIssueRoles` row, the `serveRoles` field, and the `httpapi.Config` literal |
     | `cmd/bd/serve_source_test.go`, `cmd/bd/serve_store_identity_test.go` | The two serve stubs — a COMPILE ERROR since #5539 if you forget, see "the step with no number" |
+    | `internal/httpapi/roles_test.go` | The role's fake and its entry in `rolesConfig` — a test, so the compiler does not ask for it |
 
-    Nine files, and the spec tests name most of them if you miss one. Budget
+    Ten files, and the spec tests name most of them if you miss one. Budget
     `server.go` in particular: six lines in one file, and the `Config` field is
     REQUIRED, so every caller and test that built a Config grows a line too.
 
-    **And a tenth both slices paid, which is not in the core because it is a
-    test:** `internal/httpapi/roles_test.go` needs the role's fake and its entry
-    in `rolesConfig` — about thirty lines each time, and the compiler does not
-    ask for them, so it is the one on this list you can finish the operation
+    The last row is the one to budget hardest: `roles_test.go` costs about
+    thirty lines each time, and because it is a test nothing fails to compile
+    without it — it is the one on this list you can finish the operation
     without noticing.
 
     **A role may honestly have none, and `issueops.VersionReconciler` is the

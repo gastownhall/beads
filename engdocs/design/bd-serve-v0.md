@@ -229,7 +229,7 @@ server it has always been.
 `--auth-token-file` turns authentication on: every operation except
 `GET /healthz` then requires `Authorization: Bearer <token>`, including
 `GET /v0/beads/context`, which reports the repo root, beads directory and
-database name. The file holds one token per line and every line is accepted;
+database name. The file holds one token per line and every non-empty line is accepted;
 it is re-read while the server runs, so rotation and revocation both take
 effect within about a second and neither needs a restart. There is
 deliberately no `--auth-token` flag: an argument is readable out of the process

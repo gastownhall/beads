@@ -68,7 +68,7 @@ func roleAccessorNamesOf(surface reflect.Type) (names, unclassified []string) {
 }
 
 // TestEveryStoreRoleAccessorIsClassified fails when DoltStorage hands out an
-// interface the census cannot place. Every one of the thirty-one today is a
+// interface the census cannot place. Every one of the thirty-three today is a
 // facade role, so this costs nothing and closes the path where a role surface
 // grows a package and the census quietly stops covering it. (roleAccessorNames
 // is derived, so the count is prose and only this sentence goes stale — but it
@@ -150,8 +150,10 @@ func assertRoleAccessorsAreDeclared(t *testing.T, decorator reflect.Type) {
 	}
 }
 
-// roleAccessorStore is a DoltStorage whose only real methods are the
-// thirty-one role accessors, each answering with a distinguishable sentinel
+// roleAccessorStore is a DoltStorage whose only real methods are
+// thirty-one of the thirty-three role accessors — IssueClaimer and
+// MoleculeStepper are absent, answered only by the nil DoltStorage embed —
+// each answering with a distinguishable sentinel
 // so a test can tell a decorated surface from a passed-through one.
 type roleAccessorStore struct {
 	DoltStorage
@@ -302,9 +304,10 @@ func (s *roleAccessorStore) BlockedLister() (issueops.BlockedLister, error) {
 	return s.blockedLister, s.err
 }
 
-// roleAccessorSentinel implements thirty of the thirty-one roles at
+// roleAccessorSentinel implements thirty of the thirty-three roles at
 // once — every one but memoryops.Memories, whose List collides with
-// issueops.Reader.List and needs the second sentinel below.
+// issueops.Reader.List and needs the second sentinel below; issueops.Claimer
+// and issueops.MoleculeStepper are the other two absences.
 // Nothing calls its methods; identity is the whole point.
 type roleAccessorSentinel struct{}
 

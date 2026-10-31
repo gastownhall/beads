@@ -93,8 +93,10 @@ func TestInstrumentedStorageDeclaresEveryRoleAccessor(t *testing.T) {
 	}
 }
 
-// roleAccessorStore is a DoltStorage whose only real methods are the
-// thirty-one role accessors, each answering with a distinguishable sentinel
+// roleAccessorStore is a DoltStorage whose only real methods are
+// thirty-one of the thirty-three role accessors — IssueClaimer and
+// MoleculeStepper are absent, answered only by the nil DoltStorage embed —
+// each answering with a distinguishable sentinel
 // so a test can tell an instrumented surface from a passed-through one.
 //
 // TWO sentinels rather than one: memoryops.Memories.List and issueops.Reader.List
@@ -185,9 +187,10 @@ func (s *roleAccessorStore) BlockedLister() (issueops.BlockedLister, error) {
 	return s.surface, s.err
 }
 
-// roleAccessorSentinel implements thirty of the thirty-one roles at
+// roleAccessorSentinel implements thirty of the thirty-three roles at
 // once — every one but memoryops.Memories, whose List collides with
-// issueops.Reader.List and needs the second sentinel below.
+// issueops.Reader.List and needs the second sentinel below; issueops.Claimer
+// and issueops.MoleculeStepper are the other two absences.
 // Nothing calls its methods; identity is the whole point.
 type roleAccessorSentinel struct{}
 
