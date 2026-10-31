@@ -2858,6 +2858,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   server fault (500) and an unreachable database are still returned at once,
   and once the retries run out the error says no write was confirmed and
   names the write contention, instead of saying the gate kept changing.
+- `bd list --format` matches the `dot` and `digraph` format names
+  case-insensitively, as it already did `json`, so `--format DOT` prints the
+  Graphviz graph instead of the word `DOT` once per dependency edge. A custom
+  Go template keeps its case (#6279).
 - `bd list --title-contains X` works against an HTTP workspace. The client
   folds it onto the listing's existing `title` parameter (the store compiles
   both flags to the same case-insensitive substring predicate), so it needs

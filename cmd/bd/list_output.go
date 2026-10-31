@@ -138,8 +138,11 @@ func outputDotFormat(out io.Writer, issues []*types.Issue, depsByIssueID map[str
 }
 
 func outputFormattedList(out io.Writer, issues []*types.Issue, depsByIssueID map[string][]*types.Dependency, formatStr string) error {
+	// Format names fold case like 'json' does (GH#6279); a custom template
+	// is still parsed from formatStr, so its case is never changed.
+	formatKeyword := strings.ToLower(formatStr)
 	// Handle special 'dot' format (Graphviz output)
-	if formatStr == "dot" {
+	if formatKeyword == "dot" {
 		return outputDotFormat(out, issues, depsByIssueID)
 	}
 	w := &graphExportWriter{out: out}
@@ -150,7 +153,7 @@ func outputFormattedList(out io.Writer, issues []*types.Issue, depsByIssueID map
 	}
 
 	// Check if it's a preset
-	templateStr, isPreset := presets[formatStr]
+	templateStr, isPreset := presets[formatKeyword]
 	if !isPreset {
 		templateStr = formatStr
 	}
