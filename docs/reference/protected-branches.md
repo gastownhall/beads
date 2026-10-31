@@ -1,6 +1,6 @@
 ---
 title: Protected Branches
-description: Why beads needs no protected-branch workaround since Dolt stores issue data outside Git refs, plus team workflow and legacy sync-branch cleanup.
+description: Why beads needs no protected-branch workaround since Dolt stores issue data outside your code branches, which refs a git-backed remote holds, plus team workflow and legacy sync-branch cleanup.
 ---
 
 Beads does not need a protected-branch workaround in current releases.
@@ -45,6 +45,57 @@ data in its own ref namespace. That means:
 - `bd create`, `bd update`, and `bd close` do not create commits on `main`.
 - `bd dolt push` pushes Dolt data, not a code branch.
 - Normal code changes still go through your existing pull-request workflow.
+
+## Refs on a Git-Backed Remote
+
+When the Dolt remote is a Git repository (`git+ssh://`, `git+https://`, or a
+`git+file://` path ending in `.git`), Dolt keeps beads data in that repository
+on a Git ref. Dolt's default data ref is `refs/dolt/data`, which a normal branch
+list does not show. This section describes a remote that uses the default.
+
+| Ref | What it holds | Safe to delete? |
+|---|---|---|
+| `refs/dolt/data` | The Dolt store: all issue history on that remote | No |
+| `refs/heads/__dolt_remote_info__` | One file, `DOLT_REMOTE.md`, marking the repository as a Dolt remote | Yes, if the remote has another branch |
+
+### `refs/dolt/data`
+
+`git clone` and `git fetch` do not fetch `refs/dolt/*`, so an ordinary clone
+has no copy of this ref. `git push --mirror` from such a clone makes the
+remote's refs match the clone's, so it deletes `refs/dolt/data` on the remote.
+The only sign is a `- [deleted] refs/dolt/data` line in its output. The beads
+data at that ref is then gone. Local workspaces keep their own Dolt databases,
+which `git push` does not touch.
+
+To move a repository to a new host, push from a mirror clone, which carries
+every ref:
+
+```bash
+git clone --mirror <old-url> repo.git
+git -C repo.git push --mirror <new-url>
+```
+
+To check that a remote still holds `refs/dolt/data`:
+
+```bash
+git ls-remote <remote-url> refs/dolt/data
+```
+
+No output means the ref is missing.
+
+### `__dolt_remote_info__`
+
+After a push, Dolt can also force-push a branch named `__dolt_remote_info__`
+that holds one file, `DOLT_REMOTE.md`. Dolt writes this branch best-effort and
+never reads it back. It holds no issue data, so deleting it loses nothing, and
+Dolt writes it again on its next push unless the branch is turned off. Keep it
+if it is the remote's only branch: Dolt refuses a Git remote that has no
+branches (`git remote has no branches`).
+
+An empty `DOLT_REMOTE_INFO_BRANCH` turns the branch off. Set the variable in
+the environment of the process that pushes: the `bd` process in embedded mode,
+or the Dolt sql-server in server mode. A sql-server that bd starts inherits the
+variable from the `bd` command that starts it.
 
 ## Team Usage
 
