@@ -428,7 +428,7 @@ func isGitWorkTreeRoot(dir string) bool {
 //
 // This runs as the first thing in init's RunE, ahead of every path that has an
 // effect: the proxied dispatch (runInitProxiedServer -> EnsureGitRepo -> git
-// init), the --reinit-local/--force pre-checks (countExistingIssues opens a
+// init), the --reinit-local/--force pre-checks (countConfiguredIssues opens a
 // real store, which creates the data directory and can run migrations), and
 // the mode globals RunE sets on itself. A guard placed after any of those
 // refuses only after the damage it exists to prevent.
@@ -971,6 +971,15 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			}
 		}
 
+		// Which database this workspace's commands use today, and which one
+		// this init opens and records, resolved once (GH#6172). It must run
+		// before the promotion below: once the flags are in the environment
+		// the getters answer with init's target, not the workspace's database,
+		// and every guard that counts or witnesses the configured database
+		// reads it from initID instead of re-deriving it.
+		initID := resolveInitIdentity(resolveInitWorkspace(),
+			initIdentityFlags{Database: database, Host: serverHost, Port: serverPort}, initServerMode)
+
 		// Explicit connection flags outrank stale BEADS_DOLT_SERVER_* values
 		// (GH#5177). This must run AFTER every source of server mode has been
 		// consulted above: --server, BEADS_DOLT_SERVER_MODE, --shared-server,
@@ -1018,9 +1027,11 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 
 		// Historical workspaces need an explicit sealed-copy bridge. This runs
 		// before init's existing-workspace checks so even --force cannot create
-		// or rewrite state beside a source that has not been preserved.
-		if beadsDir := resolveInitBeadsDir(); beadsDir != "" {
-			if err := guardLegacyUpgradeWorkspaceForInit(beadsDir, initServerMode); err != nil {
+		// or rewrite state beside a source that has not been preserved. It
+		// guards the workspace the identity names — redirect included — for
+		// the same reason as the plain-init guard below (GH#6172).
+		if initID.BeadsDir != "" {
+			if err := guardLegacyUpgradeWorkspaceForInit(initID.BeadsDir, initServerMode); err != nil {
 				return handleWorkspaceGuardError(err)
 			}
 		}
@@ -1031,23 +1042,23 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// authorize cross-boundary operations on remote history (see
 		// CheckRemoteSafety at cmd/bd/init_safety.go and
 		// engdocs/adr/0002-init-safety-invariants.md), nor recreating a
-		// missing server-mode database (guardMissingServerDatabase below;
+		// missing server-mode database (guardMissingServerDatabaseFor below;
 		// engdocs/adr/0004-missing-database-guard-signal.md).
 		if reinitLocal {
 			// be-5up5 round 2 (review of PR #5791): --reinit-local/--force skip
 			// checkExistingBeadsData entirely, and the typed confirmation below
-			// keys on countExistingIssues, which returns 0/err in exactly the
+			// keys on countConfiguredIssues, which returns 0/err in exactly the
 			// missing-database case — so `bd init --force` against a lost
 			// server-side database used to create a fresh empty one with no
 			// prompt and no destroy token. Those flags authorize destroying a
 			// database that exists; only --recreate-missing authorizes creating
 			// one where the configured database has gone missing.
-			if err := guardMissingServerDatabase(prefix); err != nil {
+			if err := guardMissingServerDatabaseFor(initID.BeadsDir, &initID.Configured, prefix); err != nil {
 				return fmt.Errorf("%v", err)
 			}
 		}
 		if !reinitLocal {
-			if err := checkExistingBeadsData(prefix); err != nil {
+			if err := checkExistingBeadsDataRef(initID, prefix); err != nil {
 				// --init-if-missing makes init idempotent, but ONLY for the
 				// benign "workspace already initialized" case. An operational
 				// error from the check (e.g. an unreadable .beads/embeddeddolt
@@ -1165,16 +1176,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// This must be computed BEFORE initDBPath to ensure consistent path resolution
 		// (avoiding macOS /var -> /private/var symlink issues when directory creation
 		// happens between path computations).
-		var beadsDirForInit string
-		if envBeadsDir := os.Getenv("BEADS_DIR"); envBeadsDir != "" {
-			beadsDirForInit = utils.CanonicalizePath(envBeadsDir)
-		} else {
-			beadsDirForInit = beads.GetWorktreeFallbackBeadsDir()
-			if beadsDirForInit == "" {
-				localBeadsDir := filepath.Join(".", ".beads")
-				beadsDirForInit = beads.FollowRedirect(localBeadsDir)
-			}
-		}
+		beadsDirForInit, _ := initTargetBeadsDir()
 
 		// Plan the storage root for gate acquisition without side effects.
 		// The operational path is resolved after the destructive preflight.
@@ -1250,12 +1252,15 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			plannedDBPathAbs = filepath.Dir(plannedDBPathAbs)
 		}
 		initGateHandle, gateErr := acquireInitMutationGate(rootCtx, beadsDirAbs, plannedDBPathAbs, func() error {
-			return runInitReinitPreflight(reinitLocal, destroyTokenPrefix, destroyToken)
+			return runInitReinitPreflight(reinitLocal, destroyTokenPrefix, destroyToken, initID)
 		})
 		if gateErr != nil {
 			return gateErr
 		}
 		defer func() { _ = initGateHandle.Release() }()
+		// Every guard on the configured database has passed: say once that
+		// this init moves the workspace to another database (GH#6172).
+		printInitRepointNotice(initID, quiet)
 
 		// Resolve the operational storage path only after held-gate preflight
 		// succeeds. ResolveDoltDir retains its mkdir-on-use behavior for a
@@ -2713,6 +2718,23 @@ func alreadyInitialized(format string, args ...any) error {
 // operational and must not be treated as success.
 
 func checkExistingBeadsDataAt(beadsDir string, prefix string) error {
+	return checkExistingBeadsDataRef(initIdentity{BeadsDir: beadsDir}, prefix)
+}
+
+// checkExistingBeadsDataRef is the shared body of the plain-init guard, run
+// against the workspace the identity names. runInit passes the identity its
+// own chokepoint resolved (init_identity.go) — whose BeadsDir already
+// followed any .beads redirect — so this guard protects the workspace the
+// write path targets, not only the stub that points at it (GH#6172): a
+// redirect target that is an initialized workspace refuses a plain init the
+// same way a direct one does. The At wrapper passes an identity built at its
+// caller's directory, which may still be an unfollowed stub; the redirect
+// tail below keeps that shape working.
+func checkExistingBeadsDataRef(id initIdentity, prefix string) error {
+	beadsDir := id.BeadsDir
+	if beadsDir == "" {
+		return nil // Can't determine target, allow init to proceed
+	}
 	// Check if .beads directory exists
 	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
 		return nil // No .beads directory, safe to init
@@ -2947,9 +2969,23 @@ Aborting.`, remedy.PrintedValue(location), prefix)
 		return nil
 	}
 
-	// Check for redirect file - if present, check the redirect target
-	redirectTarget := beads.FollowRedirect(beadsDir)
-	if redirectTarget != beadsDir {
+	// Check for redirect - if present, check the redirect target.
+	//
+	// runInit passes an identity whose BeadsDir already followed the
+	// redirect, so the full metadata and Dolt checks above have already run
+	// against the target itself (GH#6172) — an initialized redirect target
+	// refuses as itself, and only the legacy beads.db artifact can still be
+	// missed there. The At wrapper passes an unfollowed stub; derive the
+	// redirect pair either way: an internal FollowRedirect that moves means
+	// the caller named a stub, while a non-empty RedirectedFrom means the
+	// identity already followed one.
+	redirectFrom, redirectTarget := "", beadsDir
+	if unfollowed := beads.FollowRedirect(beadsDir); unfollowed != beadsDir {
+		redirectFrom, redirectTarget = beadsDir, unfollowed
+	} else if id.RedirectedFrom != "" {
+		redirectFrom, redirectTarget = id.RedirectedFrom, beadsDir
+	}
+	if redirectFrom != "" {
 		targetDBPath := filepath.Join(redirectTarget, beads.CanonicalDatabaseName)
 		if _, err := os.Stat(targetDBPath); err == nil {
 			return alreadyInitialized(`
@@ -2994,46 +3030,24 @@ Aborting.`, dbPath, prefix)
 	return nil // No database found, safe to init
 }
 
-// countExistingIssues attempts to connect to the existing database and count
-// issues. Returns 0 if the database is unreachable or empty. Used by --force
-// safeguard to show users what they're about to destroy.
-func countExistingIssues(_ string) (int, error) {
-	var beadsDir string
-	if envBeadsDir := os.Getenv("BEADS_DIR"); envBeadsDir != "" {
-		beadsDir = utils.CanonicalizePath(envBeadsDir)
-	} else {
-		beadsDir = beads.FindBeadsDir()
-		if beadsDir == "" {
-			return 0, nil
-		}
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	store, err := newDoltStoreFromConfig(ctx, beadsDir)
-	if err != nil {
-		return 0, err
-	}
-	defer func() { _ = store.Close() }()
-
-	stats, err := store.GetStatistics(ctx)
-	if err != nil {
-		return 0, err
-	}
-	if stats == nil {
-		return 0, nil
-	}
-	return stats.TotalIssues, nil
-}
-
 // runInitReinitPreflight confirms the destructive local replacement while the
-// caller holds init's complete exclusive gate set.
-func runInitReinitPreflight(reinitLocal bool, prefix, destroyToken string) error {
+// caller holds init's complete exclusive gate set. The count is of the
+// database this workspace is configured for, at its configured endpoint
+// (initIdentity.Configured): that is the database a reinit destroys, or a
+// repoint stops reaching, whatever --database or the exported
+// BEADS_DOLT_SERVER_* variables name (GH#6172).
+func runInitReinitPreflight(reinitLocal bool, prefix, destroyToken string, id initIdentity) error {
 	if !reinitLocal {
 		return nil
 	}
-	count, err := countExistingIssues(prefix)
+	count, present, err := countConfiguredIssuesWithTimeout(id)
+	if err != nil && present && id.Repoints() {
+		// The configured database exists but its count is unknown, so
+		// there is nothing a confirmation could promise about the issues a
+		// repoint strands. Same identity keeps the historical skip: the
+		// reinit replaces the database it could not read.
+		return initRepointUnreadableError(id, err)
+	}
 	if err != nil || count == 0 {
 		return nil
 	}
@@ -3284,7 +3298,7 @@ func initModeExplicitlyRequested(cmd *cobra.Command) bool {
 //
 // It exists because those flags bypass checkExistingBeadsData entirely (see the
 // !reinitLocal gate in the init command), and the reinit path's own typed
-// confirmation keys on countExistingIssues — which returns 0 or an error in
+// confirmation keys on countConfiguredIssues — which returns 0 or an error in
 // exactly the case this guard is about, so no prompt fires either. That left
 // `bd init --force` against a lost database creating a fresh empty one with no
 // prompt and no destroy token: the precise reflex of the 2026-08-11 fleet-wide
@@ -3300,6 +3314,15 @@ func initModeExplicitlyRequested(cmd *cobra.Command) bool {
 // "already initialized" refusal that --reinit-local is legitimately meant to
 // bypass.
 func guardMissingServerDatabaseAt(beadsDir string, prefix string) error {
+	return guardMissingServerDatabaseFor(beadsDir, nil, prefix)
+}
+
+// guardMissingServerDatabaseFor is guardMissingServerDatabaseAt about the
+// database configured names: init passes its initIdentity.Configured, so the
+// witness is the workspace's own database at its own endpoint even after
+// --database/--server-host/--server-port were promoted into the environment
+// (GH#6172). A nil configured keeps the getters' answer.
+func guardMissingServerDatabaseFor(beadsDir string, configured *initDBRef, prefix string) error {
 	if initAllowRecreateMissing {
 		return nil
 	}
@@ -3323,6 +3346,12 @@ func guardMissingServerDatabaseAt(beadsDir string, prefix string) error {
 	host := cfg.GetDoltServerHost()
 	port := doltserver.DefaultConfig(beadsDir).Port
 	dbName := cfg.GetDoltDatabase()
+	if configured != nil {
+		host, dbName = configured.Host, configured.subject()
+		if configured.Port > 0 {
+			port = configured.Port
+		}
+	}
 	doltPath := doltserver.ResolveDoltDir(beadsDir)
 
 	// TIER 1 (ADR-0004, engdocs/adr/0004-missing-database-guard-signal.md).
@@ -3387,16 +3416,6 @@ func guardMissingServerDatabaseAt(beadsDir string, prefix string) error {
 	// project_id — the pre-GH#2372 cell permitted just above only when nothing
 	// local exists. Tell the message which evidence it actually has.
 	return initGuardMissingServerDBMessage(dbName, host, port, prefix, cfg.ProjectID != "")
-}
-
-// guardMissingServerDatabase resolves the init target the same way
-// checkExistingBeadsData does, then applies guardMissingServerDatabaseAt.
-func guardMissingServerDatabase(prefix string) error {
-	beadsDir := resolveInitBeadsDir()
-	if beadsDir == "" {
-		return nil
-	}
-	return guardMissingServerDatabaseAt(beadsDir, prefix)
 }
 
 func checkExistingBeadsData(prefix string) error {

@@ -40,7 +40,7 @@ var metadataFactoryReferences = map[string]string{
 	"main.go:var rootCmd":                              "own workspace: the root pre-run's identity preview of the workspace admission admitted",
 	"direct_mode.go:ensureStoreActiveWithContext":      "own workspace: the discovered workspace, after admission",
 	"store_reopen.go:openReadOnlyStoreForDBPath":       "own workspace: reopens the command's own database path",
-	"init.go:countExistingIssues":                      "own workspace: the workspace bd init runs in",
+	"init_identity.go:countConfiguredIssues":           "own workspace: the database the workspace bd init runs in is configured for",
 	"init_contributor.go:autoConfigureForkContributor": "a planning .beads bd init just created, empty",
 	"bootstrap.go:var openSyncedWarmupStore":           "own workspace: the workspace bd bootstrap just synced",
 	"repo.go:var repoSyncCmd":                          "bd-managed remote cache clone, never a user .beads",

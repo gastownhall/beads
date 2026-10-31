@@ -3788,6 +3788,18 @@ bd init-safety
     |
     |                                   bd init --recreate-missing --prefix <prefix>
     |
+    |   bd init --reinit-local \      Repoint the workspace to another
+    |       --database <name>         database (or --server-host/--server-port
+    |                                 naming another server). The destroy
+    |                                 confirmation counts the issues in the
+    |                                 database the workspace is configured for,
+    |                                 not the target or an exported
+    |                                 BEADS_DOLT_SERVER_* value. A configured
+    |                                 database that exists but cannot be read
+    |                                 refuses the repoint outright. See
+    |                                 init-repoint in
+    |                                 docs/recovery/init-safety.md.
+    |
     |   bd init --from-jsonl          Import from configured import.path. If
     |                                 origin has Dolt data, this refuses unless
     |                                 --discard-remote authorizes replacing that

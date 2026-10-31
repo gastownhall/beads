@@ -3,7 +3,7 @@ title: Recovery Playbooks
 description: Step-by-step recovery for bd init and bd dolt push/pull refusals, including the primary-key fork playbook
 ---
 
-Last reviewed: 2026-10-01
+Last reviewed: 2026-10-29
 
 Freshness source: `cmd/bd/init.go`, `cmd/bd/init_safety.go`,
 `cmd/bd/init_safety_test.go`, `cmd/bd/init_safety_help.go`, and
@@ -27,6 +27,7 @@ See also: `bd help init-safety`, and
 - [init-local-exists — `bd init --reinit-local` refused because local data already exists](#init-local-exists)
 - [init-home-refused — `bd init` refused because the working directory is your home directory](#init-home-refused)
 - [init-missing-server-db — `bd init` refused because the configured server-side database is missing](#init-missing-server-db)
+- [init-repoint — `bd init` moves a workspace to a different database, or refuses to](#init-repoint)
 - [pk-fork-refused — `bd dolt pull`/`push` refused because a table has different primary keys in its common ancestor](#pk-fork-refused)
 - [re-clone-gotchas — two gotchas hit during manual re-clone recovery: damaged stores left inside `data_dir`, and a fresh clone missing clone-local tables](#re-clone-gotchas)
 
@@ -440,6 +441,58 @@ rows rarely apply there.
   mode before creating anything, and does not restore over a database the
   server already holds. Elsewhere, including shared-server mode named only
   by `dolt.shared-server` in a config.yaml, it uses the embedded store.
+
+---
+
+## init-repoint
+
+In releases after v1.3.2.
+
+**Symptom**
+
+Proceeding:
+
+```
+Repointing this workspace from database A (127.0.0.1:3307) to B (127.0.0.1:3307).
+```
+
+Refused:
+
+```
+refusing to repoint this workspace from database A (127.0.0.1:3307) to B (127.0.0.1:3307): A exists but could not be read: ...
+```
+
+**What happened**
+
+`bd init --database`, `--server-host` or `--server-port` named a database
+other than the one this workspace's `metadata.json` records. That is a
+repoint: once init records the new database, the old one is no longer
+reachable from this workspace. A flag that only restates the recorded value
+(a case-only `--database` difference, `localhost` for `127.0.0.1`, or the
+workspace's own port while a different `BEADS_DOLT_SERVER_PORT` is exported)
+is not a repoint.
+
+Every guard reads the database the workspace is configured for, at its
+configured endpoint, never the target the flags name and never an exported
+`BEADS_DOLT_SERVER_DATABASE`, `BEADS_DOLT_SERVER_HOST` or
+`BEADS_DOLT_SERVER_PORT`:
+
+| Configured database | `bd init --reinit-local` / `--force` naming another database |
+|---|---|
+| Has issues | The [init-local-exists](#init-local-exists) confirmation for that count: exit `11` or `12` without it |
+| Exists with zero issues | Proceeds and prints the notice above |
+| Missing from its server, project_id recorded | The [init-missing-server-db](#init-missing-server-db) refusal for the configured database; `--recreate-missing` lets the repoint proceed |
+| Exists (its `.dolt` directory, or the server lists it) but cannot be read | Refused with an ordinary error (exit 1). Neither `--recreate-missing` nor `--destroy-token` lifts it, because its issue count is unknown |
+
+`--quiet` suppresses the notice.
+
+**Recovery paths**
+
+For the unreadable case, either repair the configured database and re-run, or
+re-initialize it in place (`bd init --reinit-local` without `--database`,
+`--server-host` or `--server-port`). If it is genuinely lost, move its
+directory aside so it is missing, where
+[init-missing-server-db](#init-missing-server-db) applies.
 
 ---
 
