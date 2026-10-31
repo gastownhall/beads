@@ -65,8 +65,30 @@ func (e *Evaluator) Evaluate(node Node) (*QueryResult, error) {
 
 	// Extract base filters for pre-filtering (optional optimization)
 	e.extractBaseFilters(node, &result.Filter)
+	// A parent predicate evaluates hydrated parent-child edges in memory. The
+	// filter-only path answers parent in SQL and needs no hydration, but an OR
+	// moves the comparison here, so make the candidate rows carry the same edge
+	// information the SQL filter consulted.
+	if mentionsField(node, "parent") {
+		result.Filter.IncludeDependencies = true
+	}
 
 	return result, nil
+}
+
+func mentionsField(node Node, field string) bool {
+	switch n := node.(type) {
+	case *ComparisonNode:
+		return n.Field == field
+	case *AndNode:
+		return mentionsField(n.Left, field) || mentionsField(n.Right, field)
+	case *OrNode:
+		return mentionsField(n.Left, field) || mentionsField(n.Right, field)
+	case *NotNode:
+		return mentionsField(n.Operand, field)
+	default:
+		return false
+	}
 }
 
 // canUseFilterOnly returns true if the query can be expressed as IssueFilter only.
@@ -719,12 +741,16 @@ func (e *Evaluator) buildComparisonPredicate(comp *ComparisonNode) (func(*types.
 		return e.buildIDPredicate(comp)
 	case "spec", "spec_id":
 		return e.buildSpecPredicate(comp)
+	case "parent":
+		return e.buildParentPredicate(comp)
 	case "pinned":
 		return e.buildBoolPredicate(comp, func(i *types.Issue) bool { return i.Pinned })
 	case "ephemeral":
 		return e.buildBoolPredicate(comp, func(i *types.Issue) bool { return i.Ephemeral })
 	case "template":
 		return e.buildBoolPredicate(comp, func(i *types.Issue) bool { return i.IsTemplate })
+	case "mol_type":
+		return e.buildMolTypePredicate(comp)
 	case "has_metadata_key":
 		return e.buildHasMetadataKeyPredicate(comp)
 	default:
@@ -733,6 +759,39 @@ func (e *Evaluator) buildComparisonPredicate(comp *ComparisonNode) (func(*types.
 		}
 		return nil, fmt.Errorf("unknown field: %s", comp.Field)
 	}
+}
+
+func (e *Evaluator) buildParentPredicate(comp *ComparisonNode) (func(*types.Issue) bool, error) {
+	if comp.Op != OpEquals {
+		return nil, fmt.Errorf("parent only supports = operator")
+	}
+	parentID := comp.Value
+	return func(issue *types.Issue) bool {
+		hasExplicitParent := false
+		for _, dep := range issue.Dependencies {
+			if dep == nil || dep.Type != types.DepParentChild {
+				continue
+			}
+			hasExplicitParent = true
+			if dep.DependsOnID == parentID {
+				return true
+			}
+		}
+		// Match the filter path's legacy dotted-ID fallback only when no
+		// explicit parent-child edge supersedes the inferred hierarchy.
+		return !hasExplicitParent && strings.HasPrefix(issue.ID, parentID+".")
+	}, nil
+}
+
+func (e *Evaluator) buildMolTypePredicate(comp *ComparisonNode) (func(*types.Issue) bool, error) {
+	if comp.Op != OpEquals {
+		return nil, fmt.Errorf("mol_type only supports = operator")
+	}
+	molType := types.MolType(strings.ToLower(comp.Value))
+	if !molType.IsValid() {
+		return nil, fmt.Errorf("invalid mol_type: %s", comp.Value)
+	}
+	return func(issue *types.Issue) bool { return issue.MolType == molType }, nil
 }
 
 func (e *Evaluator) buildStatusPredicate(comp *ComparisonNode) (func(*types.Issue) bool, error) {
