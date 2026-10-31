@@ -118,9 +118,28 @@ func primeCommand(ctx context.Context, args ...string) (*exec.Cmd, error) {
 // The hooks exec a subprocess (rather than calling prime in process) to avoid
 // re-entrant store initialization.
 func runBdPrime(ctx context.Context, args ...string) (string, error) {
+	return runBdPrimeInDir(ctx, "", args...)
+}
+
+func runBdPrimeInDir(ctx context.Context, cwd string, args ...string) (string, error) {
+	if cwd != "" {
+		if !filepath.IsAbs(cwd) {
+			return "", fmt.Errorf("bd prime workspace cwd must be absolute: %q", cwd)
+		}
+		info, err := os.Stat(cwd)
+		if err != nil {
+			return "", fmt.Errorf("inspect bd prime workspace cwd %q: %w", cwd, err)
+		}
+		if !info.IsDir() {
+			return "", fmt.Errorf("bd prime workspace cwd is not a directory: %q", cwd)
+		}
+	}
 	cmd, err := primeCommand(ctx, args...)
 	if err != nil {
 		return "", err
+	}
+	if cwd != "" {
+		cmd.Dir = cwd
 	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
