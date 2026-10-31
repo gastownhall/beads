@@ -9,6 +9,7 @@ import (
 
 	"github.com/steveyegge/beads/backend/conformance"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/types"
 	publicops "github.com/steveyegge/beads/issueops"
 )
@@ -88,11 +89,24 @@ func TestHeartbeaterContract(t *testing.T) {
 // sees, for a write still only in the working set (batch mode, or the window
 // before the writer's own Dolt commit). ScopedCommitter commits the SQL
 // transaction first.
+//
+// Neither concurrent write may take the journal writer lock: the re-arm's
+// session holds it for the whole window, so a locked writer (a committing
+// RunTx, journal on or off) waits it out and then reclaims the re-arm's session
+// as a silent holder. A locked writer cannot land in the window at all; the
+// writers that still can are the unlocked ones. The committed one is therefore
+// a raw session on the provider's pool that writes and mints its own Dolt
+// commit, as the unlocked pull/merge path does; the working-set one is an
+// ephemeral unit of work, which takes no lock.
 func TestHeartbeaterRearmKeepsAConcurrentWrite(t *testing.T) {
 	ctx := t.Context()
 	const prefix = "hbw"
 	provider := newUOWRoleFixtureProvider(t, ctx, prefix)
 	kit := newUOWRoleFixtureKit(provider, prefix)
+	sqlProvider, ok := provider.(*doltSQLProvider)
+	if !ok {
+		t.Fatalf("provider %T is not a *doltSQLProvider", provider)
+	}
 	lifecycle, err := provider.(IssueLifecycleSource).IssueLifecycle()
 	if err != nil {
 		t.Fatalf("IssueLifecycle(): %v", err)
@@ -103,10 +117,18 @@ func TestHeartbeaterRearmKeepsAConcurrentWrite(t *testing.T) {
 		write func(ctx context.Context, id, title string) error
 	}{
 		{"a write with its own dolt commit", func(ctx context.Context, id, title string) error {
-			return RunTx(ctx, provider, func(ctx context.Context, uw UnitOfWork) (string, error) {
-				_, err := uw.RawSQLUseCase().Exec(ctx, "UPDATE issues SET title = ? WHERE id = ?", title, id)
-				return "bd: retitle " + id, err
-			})
+			conn, err := sqlProvider.db.Conn(ctx)
+			if err != nil {
+				return err
+			}
+			defer conn.Close()
+			if _, err := conn.ExecContext(ctx, "UPDATE issues SET title = ? WHERE id = ?", title, id); err != nil {
+				return err
+			}
+			if err := schema.DrainCall(ctx, conn, "CALL DOLT_ADD(?)", "issues"); err != nil {
+				return err
+			}
+			return schema.DrainCall(ctx, conn, "CALL DOLT_COMMIT('-m', ?)", "bd: retitle "+id)
 		}},
 		{"a write only in the working set", func(ctx context.Context, id, title string) error {
 			_, err := RunTxEphemeral(ctx, provider, func(ctx context.Context, uw UnitOfWork) (struct{}, error) {

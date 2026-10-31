@@ -13,7 +13,7 @@ import (
 
 // SetConfig sets a configuration value
 func (s *DoltStore) SetConfig(ctx context.Context, key, value string) error {
-	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+	if err := s.withRetryTxNoJournal(ctx, func(tx *sql.Tx) error {
 		if err := issueops.SetConfigInTx(ctx, tx, key, value); err != nil {
 			return err
 		}
@@ -95,14 +95,14 @@ func (s *DoltStore) GetConfigByPrefix(ctx context.Context, prefix string) (map[s
 
 // DeleteConfig removes a configuration value
 func (s *DoltStore) DeleteConfig(ctx context.Context, key string) error {
-	return s.withRetryTx(ctx, func(tx *sql.Tx) error {
+	return s.withRetryTxNoJournal(ctx, func(tx *sql.Tx) error {
 		return issueops.DeleteConfigInTx(ctx, tx, key)
 	})
 }
 
 // SetMetadata sets a metadata value
 func (s *DoltStore) SetMetadata(ctx context.Context, key, value string) error {
-	return s.withRetryTx(ctx, func(tx *sql.Tx) error {
+	return s.withRetryTxNoJournal(ctx, func(tx *sql.Tx) error {
 		return issueops.SetMetadataInTx(ctx, tx, key, value)
 	})
 }
@@ -121,7 +121,7 @@ func (s *DoltStore) GetMetadata(ctx context.Context, key string) (string, error)
 // SetLocalMetadata sets a value in the dolt-ignored local_metadata table.
 // Used for clone-local state that should not generate merge conflicts.
 func (s *DoltStore) SetLocalMetadata(ctx context.Context, key, value string) error {
-	return s.withRetryTx(ctx, func(tx *sql.Tx) error {
+	return s.withRetryTxNoJournal(ctx, func(tx *sql.Tx) error {
 		return issueops.SetLocalMetadataInTx(ctx, tx, key, value)
 	})
 }

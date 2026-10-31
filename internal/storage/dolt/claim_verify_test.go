@@ -3,6 +3,7 @@ package dolt
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"strings"
@@ -48,11 +49,36 @@ func rawClaim(t *testing.T, s *DoltStore, id, actor string) error {
 	})
 }
 
+// newServerFailureStore is newFailureStore in server mode. Its sessions grant
+// the journal writer lock every server-mode bead write takes and leave every
+// other statement to the failure driver, so its prepare count is unchanged.
+func newServerFailureStore(d *failureDriver) *DoltStore {
+	return &DoltStore{db: sql.OpenDB(lockGrantingFailureConnector{d}), serverMode: true}
+}
+
+type lockGrantingFailureConnector struct{ d *failureDriver }
+
+func (c lockGrantingFailureConnector) Connect(context.Context) (driver.Conn, error) {
+	return lockGrantingFailureConn{&failureConn{driver: c.d}}, nil
+}
+
+func (c lockGrantingFailureConnector) Driver() driver.Driver { return c.d }
+
+type lockGrantingFailureConn struct{ *failureConn }
+
+// QueryContext answers GET_LOCK and sends every other query down the failure
+// driver's prepare path (driver.ErrSkip).
+func (c lockGrantingFailureConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
+	if strings.HasPrefix(query, "SELECT GET_LOCK") {
+		return &valRows{cols: []string{"got"}, vals: [][]driver.Value{{int64(1)}}}, nil
+	}
+	return nil, driver.ErrSkip
+}
+
 func TestVerifiedClaimWriteDoesNotReplayDefiniteMySQLError(t *testing.T) {
 	cause := &mysql.MySQLError{Number: 1105, Message: "connection lost while validating commit"}
 	driver := &failureDriver{commitErrs: []error{cause}}
-	store := newFailureStore(driver)
-	store.serverMode = true
+	store := newServerFailureStore(driver)
 	defer func() { _ = store.db.Close() }()
 
 	calls := 0
@@ -74,8 +100,7 @@ func TestVerifiedClaimWriteDoesNotReplayDefiniteMySQLError(t *testing.T) {
 func TestVerifiedReadyClaimDoesNotReplayDefiniteMySQLError(t *testing.T) {
 	cause := &mysql.MySQLError{Number: 1105, Message: "connection lost while validating commit"}
 	driver := &failureDriver{commitErrs: []error{cause}}
-	store := newFailureStore(driver)
-	store.serverMode = true
+	store := newServerFailureStore(driver)
 	defer func() { _ = store.db.Close() }()
 
 	calls := 0

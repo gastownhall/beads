@@ -45,7 +45,7 @@ func (s *DoltStore) ReadEventsJournalPage(ctx context.Context, since int64, limi
 // floors, and returns the number of rows deleted.
 func (s *DoltStore) PruneEventsJournal(ctx context.Context, before int64, retainDays, retainRows int) (int64, error) {
 	var n int64
-	err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+	err := s.withRetryTxNoJournal(ctx, func(tx *sql.Tx) error {
 		var pruneErr error
 		n, pruneErr = issueops.PruneEventsInTx(ctx, tx, before, retainDays, retainRows, time.Now().UTC())
 		return pruneErr
@@ -65,9 +65,13 @@ func (s *DoltStore) PruneEventsJournal(ctx context.Context, before int64, retain
 // asked for. A maintenance transaction that loses a race has nothing to
 // recover: the prefix delete is idempotent, the watermark is already stamped,
 // and the next trigger picks the backlog up. Failing immediately and letting
-// the caller log it is strictly better than waiting.
+// the caller log it is strictly better than waiting. For the same reason it
+// takes no journal writer lock (the NoJournal form): a maintenance step reads
+// the journal head and deletes old rows, records no event itself, and must not
+// queue behind user writers. Its only caller is eventsjournal's auto-prune,
+// whose callbacks read the prune state and delete journal rows.
 func (s *DoltStore) RunEventsMaintenanceTx(ctx context.Context, fn func(context.Context, issueops.DBTX) error) error {
-	return s.withWriteTx(ctx, func(tx *sql.Tx) error {
+	return s.withWriteTxNoJournal(ctx, func(tx *sql.Tx) error {
 		return fn(ctx, tx)
 	})
 }

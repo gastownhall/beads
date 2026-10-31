@@ -146,7 +146,25 @@ func CommentSources() []string {
 // A missing value is deliberately safe-off.
 type journalContextKey struct{}
 
-var journalTransactions sync.Map // map[DBTX]bool; entries live for one transaction
+var journalTransactions sync.Map // map[DBTX]journalScope; entries live for one transaction
+
+// journalScope is a transaction's journal activation. journalUnlocked marks a
+// write transaction that holds no journal writer lock (the dolt NoJournal
+// helpers): an emit there would allocate a seq on bd_events_seq outside the
+// lock and abort overlapping journaled writers with 1213, so it fails instead
+// of recording or skipping.
+type journalScope uint8
+
+const (
+	journalOff journalScope = iota
+	journalOn
+	journalUnlocked
+)
+
+// ErrJournalUnlockedTx is returned by a journal emit on a transaction scoped
+// with ScopeUnlockedJournalTransaction. The emit records nothing; returning it
+// from the transaction body rolls the whole write back.
+var ErrJournalUnlockedTx = errors.New("journal: emit in a transaction that holds no journal writer lock")
 
 // WithEventsJournal returns ctx scoped to one storage operation with the
 // durable events journal enabled or disabled.
@@ -180,17 +198,48 @@ func ScopeEventsJournalTransaction(tx DBTX, enabled bool) func() {
 	if tx == nil {
 		return func() {}
 	}
-	journalTransactions.Store(tx, enabled)
+	scope := journalOff
+	if enabled {
+		scope = journalOn
+	}
+	journalTransactions.Store(tx, scope)
 	return func() { journalTransactions.Delete(tx) }
 }
 
-func journalEnabled(ctx context.Context, tx DBTX) bool {
-	if enabled, ok := ctx.Value(journalContextKey{}).(bool); ok {
-		return enabled
+// ScopeUnlockedJournalTransaction marks tx as a write transaction that holds
+// no journal writer lock and returns a cleanup function. Every journal emit on
+// it returns ErrJournalUnlockedTx, whether or not the project's journal is on,
+// so a body that was meant to record nothing fails loudly the first time it
+// tries, rather than skipping silently (an unscoped tx) or writing outside the
+// lock (a journal-scoped one).
+func ScopeUnlockedJournalTransaction(tx DBTX) func() {
+	if tx == nil {
+		return func() {}
 	}
-	enabled, _ := journalTransactions.Load(tx)
-	on, _ := enabled.(bool)
-	return on
+	journalTransactions.Store(tx, journalUnlocked)
+	return func() { journalTransactions.Delete(tx) }
+}
+
+// journalActive reports whether an emit on tx should record, and fails with
+// ErrJournalUnlockedTx on an unlocked transaction. The unlocked check comes
+// first so the test-only context form cannot mask it.
+func journalActive(ctx context.Context, tx DBTX) (bool, error) {
+	scope, _ := journalTransactions.Load(tx)
+	if scope == journalUnlocked {
+		return false, ErrJournalUnlockedTx
+	}
+	if enabled, ok := ctx.Value(journalContextKey{}).(bool); ok {
+		return enabled, nil
+	}
+	return scope == journalOn, nil
+}
+
+// journalEnabled is journalActive for gates that cannot return the error. It
+// is true on an unlocked transaction, so the gated path goes on to an emit,
+// which fails with ErrJournalUnlockedTx.
+func journalEnabled(ctx context.Context, tx DBTX) bool {
+	on, err := journalActive(ctx, tx)
+	return on || err != nil
 }
 
 type blockedJournalKey struct {
@@ -208,8 +257,8 @@ func captureBlockedJournalSnapshot(
 	tx DBTX,
 	issueIDs, wispIDs []string,
 ) (blockedJournalSnapshot, error) {
-	if !journalEnabled(ctx, tx) {
-		return nil, nil
+	if on, err := journalActive(ctx, tx); !on {
+		return nil, err
 	}
 
 	snapshot := make(blockedJournalSnapshot, len(issueIDs)+len(wispIDs))
@@ -344,8 +393,8 @@ func RecordCreateEventInTx(ctx context.Context, tx DBTX, issue *types.Issue, act
 // journaled — nil when the journal is off — whose ArrivalSeq is the row's
 // stamp once the record is written.
 func recordIssueEventInTx(ctx context.Context, tx DBTX, op EventOp, issueID, actor string) (*types.Issue, error) {
-	if !journalEnabled(ctx, tx) {
-		return nil, nil
+	if on, err := journalActive(ctx, tx); !on {
+		return nil, err
 	}
 	issue, table, err := getJournalIssueInTx(ctx, tx, issueID)
 	if err != nil {
@@ -371,8 +420,8 @@ func recordIssueEventInTx(ctx context.Context, tx DBTX, op EventOp, issueID, act
 // row no longer exists). A no-op when journaling is disabled. actor as on
 // RecordEventInTx.
 func RecordDeleteInTx(ctx context.Context, tx DBTX, issueID, actor string) error {
-	if !journalEnabled(ctx, tx) {
-		return nil
+	if on, err := journalActive(ctx, tx); !on {
+		return err
 	}
 	return insertEventRow(ctx, tx, EventDelete, issueID, nil, nil, nil, actor, false)
 }
@@ -382,8 +431,8 @@ func RecordDeleteInTx(ctx context.Context, tx DBTX, issueID, actor string) error
 // nil) when journaling is disabled, keeping the extra read off the ordinary
 // local delete path. Callers MUST invoke it before issuing their DELETE.
 func journalableDeletesInTx(ctx context.Context, tx DBTX, table string, ids []string) ([]string, error) {
-	if !journalEnabled(ctx, tx) || len(ids) == 0 {
-		return nil, nil
+	if on, err := journalActive(ctx, tx); !on || len(ids) == 0 {
+		return nil, err
 	}
 	existing, err := ExistingIssueIDsInTableInTx(ctx, tx, table, ids)
 	if err != nil {
@@ -396,8 +445,8 @@ func journalableDeletesInTx(ctx context.Context, tx DBTX, table string, ids []st
 // the edge kind and target. The issue snapshot is the post-mutation state as of
 // tx. A no-op when journaling is disabled. actor as on RecordEventInTx.
 func RecordDepEventInTx(ctx context.Context, tx DBTX, op EventOp, issueID, kind, target, metadata, actor string) error {
-	if !journalEnabled(ctx, tx) {
-		return nil
+	if on, err := journalActive(ctx, tx); !on {
+		return err
 	}
 	issue, _, err := getJournalIssueInTx(ctx, tx, issueID)
 	if err != nil {
@@ -415,8 +464,8 @@ func RecordDepEventInTx(ctx context.Context, tx DBTX, op EventOp, issueID, kind,
 // journal row's actor is the comment's Author — the identity that wrote it —
 // so this takes no separate actor parameter.
 func RecordCommentEventInTx(ctx context.Context, tx DBTX, issueID string, comment *EventComment) error {
-	if !journalEnabled(ctx, tx) {
-		return nil
+	if on, err := journalActive(ctx, tx); !on {
+		return err
 	}
 	issue, _, err := getJournalIssueInTx(ctx, tx, issueID)
 	if err != nil {

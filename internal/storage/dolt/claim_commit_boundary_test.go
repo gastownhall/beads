@@ -85,6 +85,9 @@ func (c *claimCommitBoundaryConn) QueryContext(_ context.Context, query string, 
 	defer c.driver.mu.Unlock()
 
 	switch {
+	case strings.Contains(query, "SELECT GET_LOCK"):
+		// The journal writer lock every server-mode bead write takes.
+		return &claimCommitBoundaryRows{columns: []string{"got"}, values: [][]driver.Value{{int64(1)}}}, nil
 	case strings.Contains(query, "SELECT 1 FROM wisps WHERE id = ? LIMIT 1"):
 		if c.driver.activeWisp {
 			return &claimCommitBoundaryRows{columns: []string{"exists"}, values: [][]driver.Value{{int64(1)}}}, nil

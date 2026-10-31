@@ -21,10 +21,15 @@ func (s *DoltStore) settleBlockedRecheck(ctx context.Context, pending issueops.B
 // and the legacy dependency removal run on raw transactions outside
 // withWriteTx, so without this their writes would record into nothing and
 // keep the #6716 race.
-func (s *DoltStore) commitSQLTxAndRecheck(ctx context.Context, op string, tx *sql.Tx) error {
+//
+// release is the writeTxConn release of tx's connection. It runs between the
+// commit and the recheck: the recheck is a journaled write of its own on
+// another connection and queues on the journal writer lock tx holds.
+func (s *DoltStore) commitSQLTxAndRecheck(ctx context.Context, op string, tx *sql.Tx, release func()) error {
 	if err := s.commitSQLTx(ctx, op, tx); err != nil {
 		return err
 	}
+	release()
 	s.settleBlockedRecheck(ctx, issueops.TakeBlockedRecheck(tx))
 	return nil
 }
