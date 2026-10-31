@@ -28,7 +28,8 @@ import (
 // names the store's port, which may be any server's. Where a live server on
 // the dialed port does serve the workspace's Dolt root, as bd's own server
 // does, its recorded remote is one its listing has not caught up with yet
-// (GH#2118): the remote counts as configured and the add writes nothing.
+// (GH#2118): the remote counts as configured and the add registers it on
+// the server.
 func TestDoltRemoteAddReachesAServerThatDoesNotServeTheLeftoverDatabase(t *testing.T) {
 	const url = "git+ssh://git@example.com/org/repo.git"
 	for _, tc := range []struct {
@@ -101,8 +102,8 @@ func TestDoltRemoteAddReachesAServerThatDoesNotServeTheLeftoverDatabase(t *testi
 			if err != nil {
 				t.Fatalf("ListRemotes: %v", err)
 			}
-			if got := findDoltRemoteURL(remotes, "origin") != ""; got != refused {
-				t.Errorf("after remote add, the server lists origin = %v, want %v (server remotes %+v)", got, refused, remotes)
+			if got := findDoltRemoteURL(remotes, "origin"); got != url {
+				t.Errorf("after remote add, the server lists origin = %q, want %q (server remotes %+v)", got, url, remotes)
 			}
 			if configured, err := hasConfiguredRemote(ctx, st); !configured || err != nil {
 				t.Errorf("after remote add, hasConfiguredRemote = (%v, %v), want (true, nil)", configured, err)
