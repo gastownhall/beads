@@ -3375,6 +3375,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (already "bug"); pass a single value`.
   Single-flag and comma-form spellings behave exactly as before.
 
+- **`bd doctor --fix` now untracks a committed `.beads/dolt-server-config.yaml`
+  or `.beads/dolt-server.activity`.** Both were already gitignored, but the
+  tracked-runtime-files check did not list them, so a copy committed before
+  the ignore rule stayed tracked (#6191).
+
 - **`bd restore`, `bd admin compact`, `bd repo <add|remove|list|sync>`,
   `bd migrate [sync|hooks|schema]` and `bd preflight` no longer register a
   local `--json` that shadows the root persistent flag.** pflag keeps a
