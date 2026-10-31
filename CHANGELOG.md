@@ -1521,6 +1521,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   blocking edges and issue rows read once per batch. Ids are now
   de-duplicated before batching, matching the single `IN (...)` list the
   readers used before.
+- **`bd codex-hook SessionStart` no longer leaves the next prompt to prime the
+  session again.** A `PostCompact` arms a per-session refresh marker so the
+  next `UserPromptSubmit` re-injects `bd prime`. `SessionStart` injected prime
+  but left that marker in place, so a session that compacted and then resumed
+  or cleared got the same payload twice in a row. `SessionStart` now drops the
+  marker, as `bd cursor-hook` already did (#6273).
+
 - **`bd doctor`'s Classic Artifacts cleanup no longer deletes a database it
   can recognize, or anything in a `.beads` it cannot positively claim.** The cleanup
   (`bd doctor --fix` and `bd doctor --check=artifacts --clean`) emptied every
