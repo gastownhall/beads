@@ -2406,9 +2406,12 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	// This must run BEFORE store.initSchema below: initSchema runs migrations
 	// and Dolt commits against the database, so verifying first means a
 	// foreign existing database is rejected before bd writes anything into
-	// it, not after. On a database with no bd schema yet, GetMetadata errors
-	// and the verifier soft-skips, so this ordering does not change behavior
-	// for a genuinely fresh database.
+	// it, not after. A genuinely fresh database (nothing on the server yet)
+	// never reaches the verifier at all: the gate below only fires when the
+	// database was not created by this open. A database the verifier DOES
+	// reach whose metadata cannot be read (e.g. no bd schema yet) is refused
+	// with a named error, not silently adopted: an existing database whose
+	// identity cannot be proven is precisely what GH#4637 guards against.
 	//
 	// Gateway is effectively excluded from the alreadyExisted branch because
 	// openServerConnection never probes existence for it (see the Gateway
@@ -2696,7 +2699,10 @@ func shouldPersistResolvedPortFile() bool {
 
 // verifyProjectIdentity checks that the database belongs to the expected project.
 // If both the local metadata.json and the database have a project_id, they must match.
-// Returns nil if verification passes or is not applicable (missing IDs = old setup).
+// Returns nil if verification passes or is not applicable: a missing ID on
+// either side is an old setup and still skips, but a failure to READ the
+// database's project id — what survives withReadTx's bounded retry — is
+// refused, not skipped (an unreadable identity proves nothing).
 // openedByInit is Config.OpenedByInit: it only shapes the error's advice (see
 // projectIdentityMismatchError), never whether the check runs.
 func (s *DoltStore) verifyProjectIdentity(ctx context.Context, beadsDir string, openedByInit bool) error {
@@ -2715,9 +2721,20 @@ func (s *DoltStore) verifyProjectIdentity(ctx context.Context, beadsDir string, 
 		return nil // old-style metadata.json without project_id — skip
 	}
 
-	// Read project ID from database metadata table
+	// Read project ID from database metadata table. GetMetadata's read path
+	// (withReadTx -> withRetry) already retries transient read failures with
+	// exponential backoff for up to serverRetryMaxElapsed, so an error here is
+	// what remains AFTER that bounded retry — a warming-window blip has been
+	// waited out. The former `err != nil || dbID == ""` conflation read that
+	// error as "old database without project_id" and silently granted the
+	// connection in exactly the restart window this guard exists for (the
+	// server frees the port and fails metadata reads at the same time). A
+	// read failure is not evidence of anything: fail closed and name it.
 	dbID, err := s.GetMetadata(ctx, "_project_id")
-	if err != nil || dbID == "" {
+	if err != nil {
+		return fmt.Errorf("cannot verify project identity: %w", err)
+	}
+	if dbID == "" {
 		return nil // old database without project_id — skip
 	}
 
