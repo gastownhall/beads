@@ -1137,6 +1137,18 @@ func installHooksAt(hookNames []string, force, shared, chain, beadsHooks bool, s
 		}
 	}
 
+	// configuredDir is the directory Git runs hooks from: the mode branch above
+	// resolved it, and beads/shared mode records it in core.hooksPath below.
+	// In a linked worktree that is the primary checkout's copy (GH#2414 made
+	// core.hooksPath absolute so hooks run from every worktree), but the files
+	// written must be the invoking worktree's own tracked copy, not another
+	// branch's working tree. The two therefore diverge here on purpose.
+	configuredDir := hooksDir
+	hooksDir = worktreeHooksInstallDir(hooksDir, selected)
+	if !utils.PathsEqual(hooksDir, configuredDir) {
+		fmt.Fprintf(os.Stderr, "Note: linked worktree: writing this worktree's tracked copy %s; Git runs %s until the change reaches that checkout\n", hooksDir, configuredDir)
+	}
+
 	// Create hooks directory if it doesn't exist.
 	// Directories inside .beads/ use BeadsDirPerm (0700); git-managed hook
 	// dirs (.git/hooks, .beads-hooks) use 0755 so git can execute them.
@@ -1234,7 +1246,7 @@ func installHooksAt(hookNames []string, force, shared, chain, beadsHooks bool, s
 
 	// Configure git to use the hooks directory after writing, as in ordinary installs.
 	if selected != nil && (beadsHooks || shared) {
-		if err := selected.configureHooksPath(hooksDir); err != nil {
+		if err := selected.configureHooksPath(configuredDir); err != nil {
 			return fmt.Errorf("failed to configure git hooks path: %w", err)
 		}
 	} else if beadsHooks {
@@ -1541,6 +1553,89 @@ func isHuskyHelperSourceLine(line string) bool {
 		return true
 	}
 	return false
+}
+
+// worktreeHooksInstallDir returns the directory an install run from a linked
+// worktree should write its hook files to. It takes the worktree and primary
+// roots from the selected context when the install has one, and from the
+// cached ambient Git context otherwise (the init and config-apply callers,
+// which already resolved hooksDir from that same context).
+func worktreeHooksInstallDir(hooksDir string, selected *initHooksContext) string {
+	var wtRoot, mainRoot, commonDir string
+	var env []string
+	if selected != nil {
+		wtRoot, mainRoot, commonDir = selected.paths.RepoRoot, selected.paths.MainRepoRoot, selected.paths.CommonDir
+		env = selected.env
+	} else if git.IsWorktree() {
+		wtRoot = git.GetRepoRoot()
+		mainRoot, _ = git.GetMainRepoRoot()
+		commonDir, _ = git.GetGitCommonDir()
+		env = gitenv.ScrubRouting(os.Environ())
+	}
+	return worktreeHooksDir(hooksDir, wtRoot, mainRoot, commonDir, func(rel string) bool {
+		return worktreeTracksPath(wtRoot, rel, env)
+	})
+}
+
+// worktreeHooksDir is the pure gating decision behind worktreeHooksInstallDir.
+//
+// A hooks directory resolved for a linked worktree normally lives in the
+// primary checkout: core.hooksPath is absolute (GH#2414), --beads storage
+// discovery falls back to the primary's .beads, and --shared targets the
+// primary root's .beads-hooks. Git runs that copy from every worktree, so it
+// stays the configured directory. But when the invoking worktree tracks the
+// same directory (the default bd init layout commits .beads/hooks, and
+// .beads-hooks exists to be committed), writing the primary's copy edits the
+// working tree of whatever branch that checkout has out, dirties it with
+// changes nobody made there, and leaves the worktree's own copy stale: the
+// cross-worktree write GH#6680 fixed for the JSONL export. The same remedy
+// applies: a tracked file's contents belong to the worktree being worked in.
+//
+// The rewrite is therefore narrow. hooksDir moves to the worktree only when
+// all of:
+//
+//   - the install runs from a linked worktree (both roots known and distinct);
+//   - hooksDir is outside the common Git directory: .git/hooks, or a bare
+//     repository's hooks, is shared by Git itself and has no per-worktree copy;
+//   - hooksDir is inside the primary checkout and not already inside the
+//     invoking worktree, so a path above the repository, a BEADS_DIR or
+//     .beads/redirect target elsewhere, or a worktree-local store is left alone;
+//   - the worktree's index tracks something under the same relative path, so
+//     an untracked primary-only .beads/hooks (an ignored layout, or a hook set
+//     that only the primary's branch has) keeps receiving the install and the
+//     hooks Git runs stay current.
+//
+// The destination mirrors hooksDir's path relative to the primary checkout,
+// as worktreeJSONLDir does, because that relative path is the one the
+// worktree tracks.
+func worktreeHooksDir(hooksDir, wtRoot, mainRoot, commonDir string, tracked func(rel string) bool) string {
+	if hooksDir == "" || wtRoot == "" || mainRoot == "" || utils.PathsEqual(wtRoot, mainRoot) {
+		return hooksDir
+	}
+	if commonDir != "" && pathInsideDir(hooksDir, commonDir) {
+		return hooksDir
+	}
+	if pathInsideDir(hooksDir, wtRoot) || !pathInsideDir(hooksDir, mainRoot) {
+		return hooksDir
+	}
+	rel, err := filepath.Rel(mainRoot, hooksDir)
+	if err != nil || rel == "." || !filepath.IsLocal(rel) {
+		return hooksDir
+	}
+	if !tracked(rel) {
+		return hooksDir
+	}
+	return filepath.Join(wtRoot, rel)
+}
+
+// worktreeTracksPath reports whether the index of the worktree at wtRoot
+// tracks at least one file under rel (a path relative to wtRoot).
+func worktreeTracksPath(wtRoot, rel string, env []string) bool {
+	// #nosec G204 G702 - fixed "git" command; wtRoot and rel come from the
+	// resolved Git context and the hooks directory bd itself selected
+	cmd := exec.Command("git", "-C", wtRoot, "ls-files", "--error-unmatch", "--", filepath.ToSlash(rel))
+	cmd.Env = env
+	return cmd.Run() == nil
 }
 
 func configureSharedHooksPath() error {
