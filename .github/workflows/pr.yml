@@ -877,92 +877,166 @@ jobs:
   # reinstate a PR-side mirror rather than relying on main.yml alone.
 
   # F7a: fold of a 3-host matrix (native, msys2, cygwin) into one sequential
-  # job on a single windows-latest runner. Review SF-1 (2026-10-03): only the
-  # Cygwin *setup* step keeps `continue-on-error: true` (a flaky installer
-  # download is infrastructure noise, not a code failure). The native and
-  # msys2 install/exercise steps and the Cygwin *exercise* step carry no
-  # continue-on-error, so a genuine failure in any of them already fails the
-  # job on its own - no hand-written aggregator step needed. Each of those
-  # steps keeps `if: ${{ !cancelled() }}` (plus a check that its own leg's
-  # setup succeeded) so a failure in one leg does not stop the later legs
-  # from attempting to run - the fail-fast: false behavior the matrix used to
-  # give for free.
-  # Blacksmith Windows (blacksmith-4vcpu-windows-2025) for every PR.
+  # job. Review SF-1 (2026-10-03): only the Cygwin *setup* steps carry
+  # `continue-on-error: true` (a Cygwin setup failure is infrastructure
+  # noise, not a code failure). The native and MSYS2 steps and the Cygwin
+  # *exercise* step carry none, so a genuine failure in any of them fails the
+  # job on its own - no hand-written aggregator step needed. Each leg's steps
+  # keep `if: ${{ !cancelled() }}` (plus a check that the leg's own setup
+  # succeeded), so a failure in one leg does not stop the later legs from
+  # running - the fail-fast: false behavior the matrix used to give for free.
   #
-  # RISK (unverified from this sandbox, flagged in the F7b report): the
-  # native-Make step below assumes Chocolatey is preinstalled (`choco
-  # install ...`), as it is on GitHub's windows-latest image. Blacksmith's
-  # windows-2025 image is documented as GitHub's windows-2025 minus the full
-  # Visual Studio IDE/EdgeDriver/WinAppDriver; Chocolatey is a base-image
-  # tool unrelated to those, so it is expected to still be present, but this
-  # is not independently confirmed. The msys2/setup-msys2 and
-  # cygwin/cygwin-install-action steps download their own tooling and do not
-  # depend on any preinstalled image contents, so they carry no equivalent
-  # risk. If only the native-Make step fails here, that is the gap to roll
-  # back on (revert this runs-on line to the literal `windows-latest`).
+  # Blacksmith Windows (blacksmith-4vcpu-windows-2025) for every PR and merge
+  # group. No leg installs from the network on the common path: Chocolatey's
+  # 503s, MSYS2's slow mirrors and a DNS failure failed this job 28 times in
+  # two weeks of October 2026, 8 of them merge-queue ejections.
+  # - native: native-make.ps1 takes the image's MinGW-w64 GNU Make 4.4.1
+  #   (C:\mingw64\bin\mingw32-make.exe, from GitHub's windows-2025 image that
+  #   Blacksmith's is built on), else Chocolatey's make 4.4.1 binary from the
+  #   main-saved cache (SHA-256 pinned), else `choco install` (3 bounded
+  #   attempts with backoff), and puts it first on PATH as make.exe.
+  # - MSYS2: the image's C:\msys64, not a downloaded one. msys2-packages.sh
+  #   installs git and make from the main-saved package files: pacman
+  #   resolves them against the image's own sync database (never refreshed),
+  #   downloads only what the cache lacks (3 bounded attempts), checks every
+  #   signature and installs.
+  # - Cygwin (not on the image): cygwin-offline.ps1 installs from the
+  #   main-saved package tree with Cygwin's setup in local mode, after
+  #   checking setup's Authenticode signature; setup checks the signed
+  #   setup.zst and every archive's hash. If there is no cache or that fails,
+  #   cygwin-install-action downloads as before.
+  # main.yml's windows-make-shell-toolchains (push to main, this label) is
+  # the only writer of those caches; this job restores only. Before that
+  # saver has run on main, and in a PR that changes a cache key, the MSYS2
+  # and Cygwin legs (and the native leg on an image without MinGW-w64) take
+  # their network fallback. Pinned by ci_windows_make_shell_test.go,
+  # TestPRWindowsMakeShellLegsFailTheJob and
+  # TestPRWindowsMakeShellSetupStepsHaveTimeouts.
   windows-make-shell:
     name: Windows Make shell (native, msys2, cygwin)
     needs: scope
     if: ${{ needs.scope.outputs.platforms == 'true' }}
     runs-on: ${{ 'blacksmith-4vcpu-windows-2025' }}
-    timeout-minutes: 30
+    # Above the step caps' sum (34) plus 5 minutes for the uncapped steps, so
+    # a fallback that runs to its cap fails its own step and the later legs
+    # still run (TestWindowsMakeShellNetworkFallbacksAreBoundedAndRetried).
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
-      # F7b review fix (S9): print the preinstalled tool versions this job
-      # depends on before relying on them, so a Blacksmith image gap (see the
-      # RISK comment above) surfaces here instead of failing deep in a later
-      # step with an opaque "command not found".
+      # F7b review fix (S9): print what the legs rely on from the image (every
+      # GNU Make, C:\msys64 and its packages, Cygwin roots, Chocolatey) before
+      # relying on it, so an image change surfaces here instead of deep in a
+      # later step. Never fails, and runs no go: the image's go downloads
+      # go.mod's toolchain first.
       - name: Check Windows tooling diagnostics
         shell: pwsh
-        run: |
-          Write-Output "::group::choco"
-          choco --version
-          Write-Output "::endgroup::"
-          Write-Output "::group::go env (CGO_ENABLED, CC)"
-          go env CGO_ENABLED CC
-          Write-Output "::endgroup::"
+        run: ./scripts/ci/windows-make-shell/diagnostics.ps1
+
+      - name: Compute toolchain cache keys
+        id: toolchain-keys
+        shell: pwsh
+        run: ./scripts/ci/windows-make-shell/cache-keys.ps1
+
+      # Restore-only, like every restore here: main.yml's saver writes it. A
+      # stalled cache download is abandoned after a minute as a miss.
+      - name: Restore cached native GNU Make
+        id: native-make-cache
+        if: ${{ !cancelled() }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        env:
+          SEGMENT_DOWNLOAD_TIMEOUT_MINS: "1"
+        with:
+          path: ${{ runner.temp }}/make-shell/native
+          key: beads-make-shell-native-v1-${{ runner.os }}-${{ runner.arch }}-make-4.4.1-cc6dc291113d
 
       - name: Install native GNU Make
         id: install-native
         if: ${{ !cancelled() }}
+        timeout-minutes: 8
         shell: pwsh
-        run: choco install make --version=4.4.1 --yes --no-progress
+        env:
+          NATIVE_MAKE_CACHE: ${{ runner.temp }}/make-shell/native
+        run: ./scripts/ci/windows-make-shell/native-make.ps1 -Mode Install -CacheDir $env:NATIVE_MAKE_CACHE
 
-      # F7b review fix (B1): msys2/setup-msys2 caches its installed packages
-      # by default (action.yml: cache.default = true), which means this step
-      # would SAVE an actions/cache entry from a same-repo PR the moment it
-      # moved onto a Blacksmith runner -- confirmed via a real GitHub cache
-      # list entry (msys2-pkgs-upd:false-conf:...) with a
-      # refs/pull/.../merge ref. `runner.environment == 'github-hosted'`
-      # disables that implicit save on Blacksmith (fail-closed: only the
-      # literal "github-hosted" value keeps caching on, matching the
-      # fail-closed convention F7c review fix N1 set for actions/setup-go's
-      # own `cache` input). Pinned by
-      # TestBlacksmithReachablePRJobsDisableDefaultCachingActions.
-      - name: Set up MSYS2 GNU Make
-        id: install-msys2
+      # release: false uses the image's C:\msys64 instead of downloading MSYS2
+      # from GitHub; no update and no install here (msys2-packages.sh installs,
+      # with retries, against the image's sync database). F7b review fix
+      # (B1): setup-msys2's own package cache would SAVE an actions/cache
+      # entry from a PR on Blacksmith, so it is off
+      # (TestBlacksmithReachablePRJobsDisableDefaultCachingActions).
+      - name: Set up preinstalled MSYS2
+        id: msys2-shell
         if: ${{ !cancelled() }}
-        timeout-minutes: 10
+        timeout-minutes: 3
         uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2.32.0
         with:
           msystem: MSYS
-          install: git make
           path-type: minimal
-          cache: ${{ runner.environment == 'github-hosted' }}
+          release: false
+          update: false
+          cache: false
+
+      - name: Restore MSYS2 package cache
+        id: msys2-cache
+        if: ${{ !cancelled() && steps.toolchain-keys.outputs.msys2-sync-db != '' }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        env:
+          SEGMENT_DOWNLOAD_TIMEOUT_MINS: "1"
+        with:
+          path: ${{ runner.temp }}/make-shell/msys2
+          key: beads-make-shell-msys2-v1-${{ runner.os }}-${{ runner.arch }}-git-make-${{ steps.toolchain-keys.outputs.msys2-sync-db }}
+          restore-keys: beads-make-shell-msys2-v1-${{ runner.os }}-${{ runner.arch }}-git-make-
+
+      # git as well as make: the Makefile runs `git rev-parse` while parsing.
+      - name: Install MSYS2 GNU Make
+        id: install-msys2
+        if: ${{ !cancelled() && steps.msys2-shell.outcome == 'success' }}
+        timeout-minutes: 8
+        shell: msys2 {0}
+        env:
+          MSYS2_PACKAGE_CACHE: ${{ runner.temp }}/make-shell/msys2
+          MSYS2_PACKAGE_CACHE_HIT: ${{ steps.msys2-cache.outputs.cache-hit }}
+        run: bash scripts/ci/windows-make-shell/msys2-packages.sh git make
+
+      # This month's snapshot, or before main's saver has refreshed it, the
+      # newest older one: any of them installs offline.
+      - name: Restore Cygwin package cache
+        id: cygwin-cache
+        if: ${{ !cancelled() }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        env:
+          SEGMENT_DOWNLOAD_TIMEOUT_MINS: "1"
+        with:
+          path: ${{ runner.temp }}/make-shell/cygwin
+          key: beads-make-shell-cygwin-v1-${{ runner.os }}-${{ runner.arch }}-git-make-${{ steps.toolchain-keys.outputs.month }}
+          restore-keys: beads-make-shell-cygwin-v1-${{ runner.os }}-${{ runner.arch }}-git-make-
+
+      # A failure here (a corrupt or unverifiable cache) only hands over to
+      # the online installer below; the failed step stays visible.
+      - name: Install Cygwin GNU Make from the package cache
+        id: cygwin-cached
+        if: ${{ !cancelled() && steps.cygwin-cache.outputs.cache-matched-key != '' }}
+        continue-on-error: true
+        timeout-minutes: 5
+        shell: pwsh
+        env:
+          CYGWIN_PACKAGE_CACHE: ${{ runner.temp }}/make-shell/cygwin
+        run: ./scripts/ci/windows-make-shell/cygwin-offline.ps1 -Mode Install -CacheDir $env:CYGWIN_PACKAGE_CACHE -Root (Join-Path $env:RUNNER_TEMP 'cygwin')
 
       - name: Set up Cygwin GNU Make
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.cygwin-cached.outcome != 'success' }}
         id: cygwin
-        # cygwin-install-action downloads setup-x86_64.exe from cygwin.com. That
-        # download times out often enough to red the required check for a reason
-        # unrelated to the change under test. Treat a setup failure as a
-        # (non-blocking) warning: the smoke step below is gated on this step
-        # succeeding, so a genuine Cygwin Make regression still fails loudly,
-        # while a flaky installer download only skips the leg with a warning.
-        # Review SF-2 (2026-10-03): a 10-minute step timeout caps how long a
-        # hung download can block the native/msys2 legs' exercise steps
-        # behind it, instead of consuming the whole 30-minute job timeout.
+        # The network fallback when the package cache was missing or failed.
+        # cygwin-install-action downloads setup-x86_64.exe from cygwin.com and
+        # the packages from a mirror, often slowly enough to red the required
+        # check for a reason unrelated to the change under test. Treat a
+        # setup failure as a (non-blocking) warning: the smoke step below is
+        # gated on a Cygwin setup succeeding, so a genuine Cygwin Make
+        # regression still fails loudly, while a flaky download only skips
+        # the leg with a warning. Review SF-2 (2026-10-03): a 10-minute step
+        # timeout caps how long a hung download can block the exercise steps
+        # behind it, instead of consuming the whole 40-minute job timeout.
         continue-on-error: true
         timeout-minutes: 10
         uses: cygwin/cygwin-install-action@3f0a3f9f988f7e96b8c18098ae05eaec175f5b52 # v6
@@ -974,7 +1048,7 @@ jobs:
         if: ${{ !cancelled() && steps.cygwin.outcome == 'failure' }}
         shell: bash
         run: |
-          echo "::warning title=Cygwin Make-shell leg skipped::cygwin-install-action could not download the Cygwin installer (network flake); skipping the Cygwin-hosted Make smoke test. This is an infrastructure failure, not a code failure."
+          echo "::warning title=Cygwin Make-shell leg skipped::No Cygwin install: the main-saved package cache was missing or failed, and cygwin-install-action could not download Cygwin (network flake); skipping the Cygwin-hosted Make smoke test. This is an infrastructure failure, not a code failure."
 
       - name: Exercise native Windows Make
         id: native
@@ -1353,14 +1427,15 @@ jobs:
 
       - name: Exercise Cygwin-hosted Make
         id: cygwin-test
-        # Only run when the Cygwin toolchain actually installed; a skipped install
-        # (download flake) leaves this leg un-exercised rather than failing on a
-        # missing bash. A real install success followed by a Make regression here
-        # still fails the job as before.
-        if: ${{ !cancelled() && steps.cygwin.outcome == 'success' }}
+        # Only run when a Cygwin toolchain actually installed (from the package
+        # cache or the online installer), in that install's root; a skipped
+        # install (download flake) leaves this leg un-exercised rather than
+        # failing on a missing bash. A real install success followed by a Make
+        # regression here still fails the job as before.
+        if: ${{ !cancelled() && (steps.cygwin-cached.outcome == 'success' || steps.cygwin.outcome == 'success') }}
         shell: pwsh
         env:
-          CYGWIN_ROOT: ${{ steps.cygwin.outputs.root }}
+          CYGWIN_ROOT: ${{ steps.cygwin-cached.outputs.root || steps.cygwin.outputs.root }}
         run: |
           $ErrorActionPreference = 'Stop'
           $bash = Join-Path $env:CYGWIN_ROOT 'bin\bash.exe'
