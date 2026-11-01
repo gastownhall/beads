@@ -1,4 +1,5 @@
 load("@rules_go//go:def.bzl", "go_library", "go_test")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
 go_library(
     name = "versioncontrolops",
@@ -40,6 +41,7 @@ go_test(
         "backup_test.go",
         "clone_test.go",
         "commit_empty_test.go",
+        "compact_softreset_dolt_test.go",
         "conflicts_test.go",
         "fastforward_test.go",
         "gc_test.go",
@@ -51,8 +53,33 @@ go_test(
     embed = [":versioncontrolops"],
     deps = [
         "//internal/githooksenv",
+        "//internal/storage/doltutil",
+        "//internal/testutil",
         "@com_github_data_dog_go_sqlmock//:go-sqlmock",
     ],
+)
+
+# versioncontrolops_test on the dolt-server lane: the compact soft-reset
+# regression tests (compact_softreset_dolt_test.go) run against a real Dolt
+# server, started from the pinned dolt in the test wrapper's runfiles
+# (BEADS_TEST_DOLT_SERVER=local) and required, not skipped, on that lane.
+# Every other configuration of versioncontrolops_test passes
+# BEADS_TEST_SKIP=dolt and skips them.
+#
+# Tags:
+#   dolt-server: as testutil_dolt_test; excluded from --config=prcore/ci,
+#     selected by --config=doltserver.
+sh_test(
+    name = "versioncontrolops_dolt_test",
+    size = "medium",
+    srcs = ["//tools/bazel:go_test_variant.sh"],
+    args = ["$(rootpath :versioncontrolops_test)"],
+    data = [":versioncontrolops_test"],
+    env = {
+        "BEADS_TEST_DOLT_SERVER": "local",
+        "BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1",
+    },
+    tags = ["dolt-server"],
 )
 
 # --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---

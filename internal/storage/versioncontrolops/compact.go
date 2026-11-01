@@ -12,7 +12,10 @@ import (
 //  3. Soft-reset to initial commit (collapses old history into working set)
 //  4. Commit as single squashed base
 //  5. Cherry-pick each recent commit on top
-//  6. Checkout main, hard-reset to temp branch
+//  6. Checkout main, soft-reset to temp branch (a change that reached main
+//     while the rebuild ran — an uncommitted working-set row, or a commit
+//     landing in the window before the reset — survives in main's staged
+//     and working roots instead of being destroyed)
 //  7. Delete temp branch
 //
 // Callers should run PruneRemoteRefs and then DoltGC afterward to reclaim disk
@@ -72,7 +75,15 @@ func Compact(ctx context.Context, conn DBConn, initialHash, boundaryHash string,
 	if err := execSQL("checkout main", "CALL DOLT_CHECKOUT('main')"); err != nil {
 		return err
 	}
-	if err := execSQL("reset main to compacted", "CALL DOLT_RESET('--hard', 'compact-tmp')"); err != nil {
+	// Soft, not hard: main's staged and working roots must survive the
+	// reset. The rebuilt tree equals the planned head's tree, so everything
+	// dolt_status reports after the reset is exactly what reached main
+	// outside the compaction plan — a row main holds between its SQL commit
+	// and its DOLT_COMMIT (or a whole batch under batched auto-commit), or a
+	// commit another session landed during the rebuild. A hard reset here
+	// destroyed those writes after their writers had been told they
+	// succeeded (GH#7789).
+	if err := execSQL("reset main to compacted", "CALL DOLT_RESET('--soft', 'compact-tmp')"); err != nil {
 		return err
 	}
 	if err := execSQL("delete temp branch", "CALL DOLT_BRANCH('-D', 'compact-tmp')"); err != nil {
