@@ -3,11 +3,13 @@ package conformance
 import (
 	"encoding/json"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
+	publicops "github.com/steveyegge/beads/issueops"
 )
 
 // This file encodes audit findings for the "issue-lifecycle" slice: batch delete
@@ -48,6 +50,7 @@ func RunAudit_issue_lifecycle(t *testing.T, f Factory) {
 	t.Helper()
 	t.Run("DeleteIssuesBatchModes", func(t *testing.T) { testAuditDeleteIssuesBatchModes(t, f) })
 	t.Run("DeleteIssuesDryRunCounts", func(t *testing.T) { testAuditDeleteIssuesDryRunCounts(t, f) })
+	t.Run("DeleteIssuesDryRunCountsTheRequestsWisps", func(t *testing.T) { testAuditDeleteIssuesDryRunCountsTheRequestsWisps(t, f) })
 	t.Run("DeleteIssueCascadesChildRows", func(t *testing.T) { testAuditDeleteIssueCascadesChildRows(t, f) })
 	t.Run("CreateClosedDerivesClosedAt", func(t *testing.T) { testAuditCreateClosedDerivesClosedAt(t, f) })
 	t.Run("MetadataJSONRoundTrip", func(t *testing.T) { testAuditMetadataJSONRoundTrip(t, f) })
@@ -140,6 +143,53 @@ func testAuditDeleteIssuesDryRunCounts(t *testing.T, f Factory) {
 	// Dry run mutated nothing.
 	if _, err := s.GetIssue(ctx(), "dry-a"); err != nil {
 		t.Errorf("A should still exist after dry run, got %v", err)
+	}
+}
+
+// An unforced dry run answers as the delete does when the request holds wisps
+// that depend on one of its issues: here a durable parent with an ephemeral
+// child and a no-history child, all three named. The server-backed store
+// deletes a request's wisps apart, before its issues, so its guard must still
+// count them as part of the request when a dry run leaves them in place.
+// bd migrate-personal runs this dry run before it copies anything, and on the
+// server store it refused a move that takes a parent with its wisp children.
+func testAuditDeleteIssuesDryRunCountsTheRequestsWisps(t *testing.T, f Factory) {
+	s := f(t)
+	must(t, s.CreateIssue(ctx(), withDefaults(&types.Issue{ID: "dw-p", Title: "Parent"}), "a"))
+	must(t, s.CreateIssue(ctx(), withDefaults(&types.Issue{ID: "dw-e", Title: "Ephemeral child", Ephemeral: true}), "a"))
+	must(t, s.CreateIssue(ctx(), withDefaults(&types.Issue{ID: "dw-n", Title: "No-history child", NoHistory: true}), "a"))
+	for _, child := range []string{"dw-e", "dw-n"} {
+		must(t, s.AddDependency(ctx(), &types.Dependency{IssueID: child, DependsOnID: "dw-p", Type: types.DepParentChild}, "a"))
+	}
+
+	// Without its children in the request, the parent is refused for them.
+	_, err := s.DeleteIssues(ctx(), []string{"dw-p"}, false, false, true)
+	var blocked *publicops.DependentsOutsideRequestError
+	if !errors.As(err, &blocked) || blocked.IssueID != "dw-p" || !slices.Equal(blocked.Dependents, []string{"dw-e", "dw-n"}) {
+		t.Fatalf("dry run of dw-p alone: err = %v; want DependentsOutsideRequestError for dw-p naming [dw-e dw-n]", err)
+	}
+
+	ids := []string{"dw-p", "dw-e", "dw-n"}
+	res, err := s.DeleteIssues(ctx(), ids, false, false, true)
+	if err != nil {
+		t.Fatalf("dry run of dw-p with its wisp children: %v; want no dependent outside the request", err)
+	}
+	if res.DeletedCount != 3 {
+		t.Errorf("dry run DeletedCount = %d, want 3", res.DeletedCount)
+	}
+	for _, id := range ids {
+		if _, err := s.GetIssue(ctx(), id); err != nil {
+			t.Errorf("%s after the dry run: %v; want it still there", id, err)
+		}
+	}
+
+	if _, err := s.DeleteIssues(ctx(), ids, false, false, false); err != nil {
+		t.Fatalf("delete of dw-p with its wisp children: %v", err)
+	}
+	for _, id := range ids {
+		if _, err := s.GetIssue(ctx(), id); !errors.Is(err, storage.ErrNotFound) {
+			t.Errorf("%s after the delete: %v; want ErrNotFound", id, err)
+		}
 	}
 }
 

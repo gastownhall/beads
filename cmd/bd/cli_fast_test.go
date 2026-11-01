@@ -1064,14 +1064,17 @@ func init() {
 		bdBinary = "bd.exe"
 	}
 
-	// Fall back to building once (for CI or fresh checkouts)
+	// Fall back to building once (for CI or fresh checkouts). TestMain
+	// removes testBDBuildDir after the run.
 	tmpDir, err := os.MkdirTemp("", "bd-cli-test-*")
 	if err != nil {
 		panic(err)
 	}
+	testBDBuildDir = tmpDir
 	testBD = filepath.Join(tmpDir, bdBinary)
 	cmd := goBuildBDCommand(testBD)
 	if out, err := cmd.CombinedOutput(); err != nil {
+		_ = os.RemoveAll(tmpDir)
 		panic(string(out))
 	}
 }

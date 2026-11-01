@@ -115,6 +115,10 @@ func GetRepoContext() (*RepoContext, error) {
 // context` says so by leaving cwd_repo_root empty, and printContextText prints
 // "git: unavailable" for it.
 //
+// The CWD's lookup can also succeed while the .beads is external and sits in a
+// repository git would not open from it (externalRepoRoot): GitCmd must not
+// pin GIT_DIR there, so that repository is refused the same way.
+//
 // It is deliberately distinct from the other two failures buildRepoContext can
 // return ("no .beads directory found" and the unsafe-location rejection):
 // those mean bd does not know which workspace it is looking at, while this one
@@ -127,6 +131,10 @@ type NoRepoRootError struct {
 	BeadsDir string
 	// Err is the underlying git failure.
 	Err error
+
+	// external records that buildRepoContext had already found BeadsDir
+	// external to the CWD's repository when it refused BeadsDir's own.
+	external bool
 }
 
 func (e *NoRepoRootError) Error() string {
@@ -164,19 +172,20 @@ func recoverNoGit(rc *RepoContext, err error) (*RepoContext, error) {
 	return &RepoContext{
 		BeadsDir: noRoot.BeadsDir,
 		// Root from the .beads side, not at filepath.Dir(BeadsDir). The failure
-		// that reaches here is the CWD's missing repository, not the .beads's —
-		// so when the .beads DOES live inside a repo, naming its parent would
-		// report a subdirectory and the same workspace would answer differently
-		// depending only on where the caller stood. repoRootForBeadsDir asks git
-		// from the .beads directory, which needs no CWD repo, and already falls
-		// back to filepath.Dir(beadsDir) when git cannot answer — so the
-		// no-git-anywhere result is unchanged.
+		// that reaches here is usually the CWD's missing repository, not the
+		// .beads's — so when the .beads DOES live inside a repo, naming its
+		// parent would report a subdirectory and the same workspace would answer
+		// differently depending only on where the caller stood.
+		// repoRootForBeadsDir asks git from the .beads directory, which needs no
+		// CWD repo, and already falls back to filepath.Dir(beadsDir) when git
+		// cannot answer — so the no-git-anywhere result is unchanged, and so is
+		// a repository git would not open from the .beads (externalRepoRoot),
+		// which is reported here but never handed to GitCmd.
 		RepoRoot: repoRootForBeadsDir(noRoot.BeadsDir),
-		// Known-empty, not merely usually: GetMainRepoRoot, GetRepoRoot and
-		// IsWorktree all read one sync.Once-cached gitContext, so reaching
-		// recoverNoGit means that cached lookup has already failed and all three
-		// degrade together. The call stays because it documents where the value
-		// comes from, but it cannot return anything but "" here.
+		// Empty when the CWD's lookup is the failure: GetMainRepoRoot,
+		// GetRepoRoot and IsWorktree all read one sync.Once-cached gitContext, so
+		// they degrade together. When the failure is the .beads's own repository
+		// instead, that lookup succeeded and this is the CWD's root.
 		CWDRepoRoot: git.GetRepoRoot(),
 		// Externality is decided POSITIONALLY: the resolved .beads is a redirect
 		// iff discovery standing in the current working directory would not have
@@ -196,11 +205,13 @@ func recoverNoGit(rc *RepoContext, err error) (*RepoContext, error) {
 		//
 		// isExternalBeadsDir answers this by comparing git COMMON DIRS on the
 		// normal path; the CWD side of that comparison needs a repository, which
-		// is precisely what is missing here, so position is the substitute.
-		IsRedirected: beadsDirIsExternalToCWD(noRoot.BeadsDir),
-		// IsWorktree stays false for the same reason CWDRepoRoot is empty: the
-		// one cached git context this all reads has already failed, so
-		// git.IsWorktree() cannot be true here.
+		// is precisely what is missing here, so position is the substitute. A
+		// refused repository was already found external with the CWD's
+		// repository in hand, so it stays a redirect, and Role() answers
+		// without running git in it.
+		IsRedirected: noRoot.external || beadsDirIsExternalToCWD(noRoot.BeadsDir),
+		// False whenever CWDRepoRoot is empty, for the same reason.
+		IsWorktree: git.IsWorktree(),
 	}, nil
 }
 
@@ -255,7 +266,11 @@ func buildRepoContext() (*RepoContext, error) {
 	// 3. Check for redirect file in the local repo
 	redirectInfo := GetRedirectInfo()
 
-	// 4. Determine RepoRoot based on external/redirect status
+	// 4. Determine RepoRoot based on external/redirect status. A .beads that
+	// git cannot place in any repository, named from a CWD that is in one,
+	// is external unless it belongs to the CWD's work tree (see
+	// isExternalBeadsDir); it is then rooted at its parent, unless that
+	// parent holds a .git git did not open (see externalRepoRoot).
 	var repoRoot string
 	isExternal := redirectInfo.IsRedirected
 	if !isExternal {
@@ -266,7 +281,11 @@ func buildRepoContext() (*RepoContext, error) {
 
 	if isExternal {
 		// Beads dir is in a different repo - use that repo's root
-		repoRoot = repoRootForBeadsDir(beadsDir)
+		var err error
+		repoRoot, err = externalRepoRoot(beadsDir)
+		if err != nil {
+			return nil, &NoRepoRootError{BeadsDir: beadsDir, Err: err, external: true}
+		}
 	} else {
 		// Normal case - find repo root via git
 		var err error
@@ -298,6 +317,11 @@ func buildRepoContext() (*RepoContext, error) {
 
 // isExternalBeadsDir returns true if beadsDir is in a different git repo than CWD.
 // Uses git common dir to correctly handle worktrees and bare repos.
+//
+// When the CWD is in a repository but git cannot place beadsDir in one, the
+// answer is positional: beadsDir is external unless it belongs to the CWD
+// repository's work tree (GH#5700). The error return is reserved for a CWD
+// that is in no repository.
 func isExternalBeadsDir(beadsDir string) (bool, error) {
 	cwdCommonDir, err := git.GetGitCommonDir()
 	if err != nil {
@@ -306,10 +330,70 @@ func isExternalBeadsDir(beadsDir string) (bool, error) {
 
 	beadsCommonDir, err := getGitCommonDirForPath(beadsDir)
 	if err != nil {
-		return false, err
+		// CWD is in a repository, but git cannot place beadsDir in one:
+		// no repository, or discovery stopped (GIT_CEILING_DIRECTORIES,
+		// a filesystem boundary, a .beads symlinked out of the tree).
+		// It is the CWD repository's own only if it belongs to that
+		// repository's work tree.
+		return !beadsDirInCWDWorkTree(beadsDir), nil
 	}
 
 	return cwdCommonDir != beadsCommonDir, nil
+}
+
+// beadsDirInCWDWorkTree reports whether beadsDir belongs to the CWD
+// repository's work tree: it lies at or below the CWD's top level, or it is
+// reached through a .beads symlinked out of the tree where walk-up discovery
+// finds one — in the CWD or an ancestor up to the top level, or, from a linked
+// worktree, the main checkout's. Paths are compared symlink-resolved and, on
+// case-insensitive filesystems, case-folded.
+//
+// Containment is against the CWD's top level rather than GetMainRepoRoot: for
+// a worktree of a bare repository the latter is the directory holding the bare
+// repository, which can also hold unrelated projects.
+//
+// A symlinked .beads named from elsewhere in the work tree (bd -C <subdir>, or
+// BEADS_DIR, from a directory that is not at or below the .beads's parent) is
+// not recognized: ExplicitBeadsDir has already resolved it to its storage, and
+// nothing records which symlink led there.
+func beadsDirInCWDWorkTree(beadsDir string) bool {
+	root := git.GetRepoRoot()
+	if root == "" {
+		return false
+	}
+
+	normalizedRoot := utils.NormalizePathForComparison(root)
+	if pathAtOrBelow(utils.NormalizePathForComparison(beadsDir), normalizedRoot) {
+		return true
+	}
+
+	start := root
+	if cwd, err := os.Getwd(); err == nil {
+		if cwd = utils.CanonicalizePath(cwd); pathAtOrBelow(utils.NormalizePathForComparison(cwd), normalizedRoot) {
+			start = cwd
+		}
+	}
+	for dir := start; pathAtOrBelow(utils.NormalizePathForComparison(dir), normalizedRoot); dir = filepath.Dir(dir) {
+		if utils.PathsEqual(beadsDir, filepath.Join(dir, ".beads")) {
+			return true
+		}
+		if filepath.Dir(dir) == dir {
+			break
+		}
+	}
+	if git.IsWorktree() {
+		if fallback := GetWorktreeFallbackBeadsDir(); fallback != "" && utils.PathsEqual(beadsDir, fallback) {
+			return true
+		}
+	}
+	return false
+}
+
+// pathAtOrBelow reports whether path is root or lies below it. Both must
+// already be in utils.NormalizePathForComparison form.
+func pathAtOrBelow(path, root string) bool {
+	return path == root ||
+		strings.HasPrefix(path, strings.TrimSuffix(root, string(filepath.Separator))+string(filepath.Separator))
 }
 
 // getGitCommonDirForPath returns the shared git directory for a path.
@@ -358,6 +442,28 @@ func repoRootForBeadsDir(beadsDir string) string {
 	return filepath.Dir(beadsDir)
 }
 
+// externalRepoRoot is repoRootForBeadsDir for a context whose GitCmd runs
+// there. GitCmd pins GIT_DIR to <RepoRoot>/.git, and git skips its
+// safe.directory ownership check for an explicit GIT_DIR, so the parent
+// fallback is refused when the parent holds a .git: git, asked from beadsDir,
+// did not open that repository (another user's, or one a
+// GIT_CEILING_DIRECTORIES entry hides), and pinning it would run that
+// repository's config (core.fsmonitor, filters) as the caller.
+func externalRepoRoot(beadsDir string) (string, error) {
+	repoRoot, err := getRepoRootFromPath(beadsDir)
+	if err == nil && repoRoot != "" {
+		return repoRoot, nil
+	}
+	parent := filepath.Dir(beadsDir)
+	if _, statErr := os.Lstat(filepath.Join(parent, ".git")); statErr == nil {
+		if err == nil {
+			err = fmt.Errorf("git printed no work tree for %s", beadsDir)
+		}
+		return "", fmt.Errorf("git does not open the repository at %s: %w", parent, err)
+	}
+	return parent, nil
+}
+
 // RepoRootFor returns the git repository root containing dir, or "" when dir is
 // not inside a git repository (or when dir is empty). An empty result therefore
 // answers two questions at once: callers that need a path-scoped repo root get
@@ -379,7 +485,12 @@ func getRepoRootFromPath(path string) (string, error) {
 	cmd := exec.Command("git", "-C", path, "rev-parse", "--show-toplevel")
 	output, err := cmd.Output()
 	if err != nil {
-		return "", fmt.Errorf("failed to get git root for %s: %w", path, err)
+		err = fmt.Errorf("failed to get git root for %s: %w", path, err)
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && len(exit.Stderr) > 0 {
+			err = fmt.Errorf("%w: %s", err, strings.TrimSpace(string(exit.Stderr)))
+		}
+		return "", err
 	}
 	return strings.TrimSpace(string(output)), nil
 }

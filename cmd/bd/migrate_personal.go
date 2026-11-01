@@ -21,6 +21,7 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // openMigrationPlanningStore opens the personal planning workspace's store for
@@ -440,6 +441,9 @@ func runMigratePersonal(cmd *cobra.Command, args []string) error {
 	if err := refuseSelfPlanningRepo(planningPath, planningBeadsDir, resolveCommandBeadsDir(dbPath)); err != nil {
 		return err
 	}
+	if err := refuseDependentsLeftBehind(ctx, store, personal); err != nil {
+		return err
+	}
 
 	fmt.Printf("Move to planning repo: %s\n\n", ui.RenderAccent(remedy.PrintedValue(planningPath)))
 
@@ -672,16 +676,43 @@ func commitPlanningWrites(ctx context.Context, dst storage.DoltStorage, message 
 	return maybeAutoCommitStore(ctx, dst, doltAutoCommitParams{MessageOverride: message})
 }
 
+// refuseDependentsLeftBehind refuses, before anything is copied, a move whose
+// phase 2 delete would be refused: one that takes an issue that a bead it
+// leaves in the project database depends on, such as a bead someone else
+// created. That delete runs with cascade and force off, so it refuses such an
+// issue, but only once phase 1 has committed the copy, which left the issue in
+// both databases. The same delete is run here as a dry run, whose dependents
+// guard runs before it returns; it writes nothing. The ephemeral and
+// no-history beads the move takes are part of that request on both stores, as
+// in the delete itself (issueops.DeleteIssuesBesideWispsInTx), so a wisp child
+// does not count as a dependent left behind.
+func refuseDependentsLeftBehind(ctx context.Context, projectStore storage.DoltStorage, personal []*types.Issue) error {
+	ids := make([]string, len(personal))
+	for i, issue := range personal {
+		ids[i] = issue.ID
+	}
+	_, err := projectStore.DeleteIssues(ctx, ids, false, false, true)
+	var blocked *issueops.DependentsOutsideRequestError
+	switch {
+	case errors.As(err, &blocked):
+		return fmt.Errorf("issue %s has dependents that would stay in the project database (%s), depending on an issue it no longer holds; remove those dependencies with `bd dep remove`, then rerun; nothing was moved", remedy.PrintedValue(blocked.IssueID), remedy.PrintedList(blocked.Dependents, ", "))
+	case err != nil:
+		return fmt.Errorf("failed to check the project DB for dependents of the issues to move: %w", err)
+	}
+	return nil
+}
+
 // deleteMovedIssues is phase 2 of runMigratePersonal: it deletes the moved
 // issues from the project DB in a single transaction, under the command's
 // dolt.auto-commit policy (issueOpsContext), as bd delete does. Both halves of
 // the move then follow it: with on, a server-mode project commits the delete
 // as it runs and phase 1 commits the copy; with batch or off, the delete stays
 // in the working set, as phase 1 leaves the copy in an embedded planning store
-// (commitsPlanningWrites). The planning copy is complete at this point. If the
-// delete fails, the planning repo already holds the good copy and the project
-// DB is untouched, so the user is told to resolve the duplicate rather than
-// silently losing data.
+// (commitsPlanningWrites). The planning copy is complete at this point. Its
+// dependents guard already passed as a dry run before the copy
+// (refuseDependentsLeftBehind). If the delete fails all the same, the planning
+// repo already holds the good copy and the project DB is untouched, so the
+// user is told to resolve the duplicate rather than silently losing data.
 func deleteMovedIssues(ctx context.Context, projectStore storage.DoltStorage, ids []string, planningPath string) error {
 	opsCtx, err := issueOpsContext(ctx)
 	if err == nil {

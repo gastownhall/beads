@@ -159,6 +159,25 @@ func aliveAfterSignalZero(err error) bool {
 	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
+// serverInfoProcessExists reports whether pid, from a sql-server.info file,
+// names a process, by the dolt CLI's own test (sqlserver.ProcessExists): a
+// signal 0 that succeeds or fails with EPERM (a process of another user, such
+// as a dolt sql-server a service account runs). Unlike isProcessAlive it
+// takes EPERM as alive, as the dolt CLI does when it decides whether to hand
+// a command to the server a file names; ServesDatabaseDirOnPort also
+// requires the database's lock to be held, as the dolt CLI does.
+func serverInfoProcessExists(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	err = process.Signal(syscall.Signal(0))
+	return err == nil || errors.Is(err, syscall.EPERM)
+}
+
 // gracefulStop sends SIGTERM, waits for the process to exit, then SIGKILL if needed.
 // Used by reclaimPort and StopWithForce where data has already been flushed.
 func gracefulStop(pid int, timeout time.Duration) error {

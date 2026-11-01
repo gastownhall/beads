@@ -98,85 +98,72 @@ go_test(
         "//internal/configfile",
         "//internal/doltversion",
         "//internal/githooksenv",
+        "//internal/lockfile",
         "//internal/storage",
         "//internal/storage/backends",
         "//internal/storage/doltutil",
+        "//internal/testutil",
         "@com_github_dolthub_dolt_go//libraries/doltcore/servercfg",
     ] + select({
         "@rules_go//go/platform:aix": [
-            "//internal/testutil",
             "//internal/testutil/integration",
             "@com_github_go_sql_driver_mysql//:mysql",
         ],
         "@rules_go//go/platform:android": [
-            "//internal/testutil",
             "//internal/testutil/integration",
             "@com_github_go_sql_driver_mysql//:mysql",
             "@org_golang_x_sys//unix",
         ],
         "@rules_go//go/platform:darwin": [
-            "//internal/testutil",
             "//internal/testutil/integration",
             "@com_github_go_sql_driver_mysql//:mysql",
         ],
         "@rules_go//go/platform:dragonfly": [
-            "//internal/testutil",
             "//internal/testutil/integration",
             "@com_github_go_sql_driver_mysql//:mysql",
         ],
         "@rules_go//go/platform:freebsd": [
-            "//internal/testutil",
             "//internal/testutil/integration",
             "@com_github_go_sql_driver_mysql//:mysql",
         ],
         "@rules_go//go/platform:illumos": [
-            "//internal/testutil",
             "//internal/testutil/integration",
             "@com_github_go_sql_driver_mysql//:mysql",
         ],
         "@rules_go//go/platform:ios": [
-            "//internal/testutil",
             "//internal/testutil/integration",
             "@com_github_go_sql_driver_mysql//:mysql",
         ],
         "@rules_go//go/platform:js": [
-            "//internal/testutil",
             "//internal/testutil/integration",
             "@com_github_go_sql_driver_mysql//:mysql",
         ],
         "@rules_go//go/platform:linux": [
-            "//internal/testutil",
             "//internal/testutil/integration",
             "@com_github_go_sql_driver_mysql//:mysql",
             "@org_golang_x_sys//unix",
         ],
         "@rules_go//go/platform:netbsd": [
-            "//internal/testutil",
             "//internal/testutil/integration",
             "@com_github_go_sql_driver_mysql//:mysql",
         ],
         "@rules_go//go/platform:openbsd": [
-            "//internal/testutil",
             "//internal/testutil/integration",
             "@com_github_go_sql_driver_mysql//:mysql",
         ],
         "@rules_go//go/platform:osx": [
-            "//internal/testutil",
             "//internal/testutil/integration",
             "@com_github_go_sql_driver_mysql//:mysql",
         ],
         "@rules_go//go/platform:plan9": [
-            "//internal/testutil",
             "//internal/testutil/integration",
             "@com_github_go_sql_driver_mysql//:mysql",
         ],
         "@rules_go//go/platform:qnx": [
-            "//internal/testutil",
             "//internal/testutil/integration",
             "@com_github_go_sql_driver_mysql//:mysql",
         ],
         "@rules_go//go/platform:solaris": [
-            "//internal/testutil",
             "//internal/testutil/integration",
             "@com_github_go_sql_driver_mysql//:mysql",
         ],

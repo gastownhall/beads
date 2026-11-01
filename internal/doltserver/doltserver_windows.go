@@ -119,6 +119,21 @@ func isSignalableProcess(pid int) bool {
 	return isProcessAlive(pid)
 }
 
+// serverInfoProcessExists reports whether pid, from a sql-server.info file,
+// names a process, by the dolt CLI's own test on Windows
+// (sqlserver.ProcessExists): os.FindProcess opens it.
+func serverInfoProcessExists(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	_ = process.Release()
+	return true
+}
+
 // gracefulStop terminates a process on Windows. Uses TerminateProcess (hard kill)
 // directly. Data safety comes from FlushWorkingSet which runs in StopWithForce
 // before calling gracefulStop. The Unix SIGTERM is a courtesy; the real protection

@@ -735,6 +735,103 @@ func IsTrackedServerRunning(beadsDir string) bool {
 	return isProcessAlive(pid) && isDoltProcess(pid)
 }
 
+// ServerInfoFileName is the file `dolt sql-server` keeps in the .dolt
+// directory of the data directory it serves, as pid:port:secret, while it
+// runs. A dolt CLI command run in a database that a live server holds reads
+// it to hand the command to that server, through localhost:port.
+const ServerInfoFileName = "sql-server.info"
+
+// ServesDatabaseDirOnPort reports whether dir, a Dolt database directory, is
+// served by a live dolt sql-server listening on port, by the test the dolt
+// CLI makes before it hands a command run in dir to a server: the database
+// is locked (databaseLocked), and the first server info file found, in dir's
+// own .dolt (a server started in the database) or else in its parent's (a
+// multi-database data directory, as bd's own server serves .beads/dolt),
+// names a process that is live by the dolt CLI's own signal test
+// (serverInfoProcessExists). That file must also name port. A database
+// directory nothing serves is locked by nobody, even a copy that carries a
+// live server's info file (a cp -a of .beads/dolt taken while the server
+// ran), so a dolt CLI run there works on its files instead of handing the
+// command to the server on port.
+//
+// The first file found decides, as for the dolt CLI. One whose process is
+// gone does not hand the question to the parent's file: the dolt CLI command
+// bd would run removes it and then works on the directory's files without
+// reading the parent's, so that command never reaches the parent's server.
+// Until something removes the file (any dolt CLI command run in the
+// database does), bd takes the SQL route, which reaches that server anyway.
+//
+// A file a server left behind is no proof even where its PID now names
+// another process (a reused PID, or the host's PID 1 for a file a stopped
+// container server left on a bind mount, which a signal reaches with EPERM
+// and so counts as live): the lock went with the server. Neither check needs
+// ps, so the proof holds where the process list cannot be read (GH#7214). A
+// server whose file is above the parent, where the dolt CLI also searches,
+// gets bd's SQL route, which reaches it anyway. Read-only: it never removes a
+// stale file, and never creates, writes or holds the lock.
+func ServesDatabaseDirOnPort(dir string, port int) bool {
+	if dir == "" || port <= 0 {
+		return false
+	}
+	for _, d := range []string{dir, filepath.Dir(dir)} {
+		data, err := os.ReadFile(filepath.Join(d, ".dolt", ServerInfoFileName)) //nolint:gosec // G304: fixed file name in the store's CLIDir or its parent
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return false
+		}
+		parts := strings.Split(strings.TrimSpace(string(data)), ":")
+		if len(parts) != 3 {
+			return false
+		}
+		pid, perr := strconv.Atoi(parts[0])
+		infoPort, portErr := -1, error(nil) // "-": a socket-only server
+		if parts[1] != "-" {
+			infoPort, portErr = strconv.Atoi(parts[1])
+		}
+		if perr != nil || portErr != nil || pid <= 0 {
+			return false
+		}
+		return infoPort == port && serverInfoProcessExists(pid) && databaseLocked(dir)
+	}
+	return false
+}
+
+// databaseLocked reports whether a process holds the lock dolt takes on the
+// database in dir, .dolt/noms/LOCK, which every dolt process that has the
+// database open holds, a dolt sql-server for as long as it serves it. The
+// dolt CLI tries to take it to tell whether a server has the database. This
+// asks the same way, but for a shared lock and without waiting, and gives it
+// straight back; a dolt process opening the database at that instant still
+// gets the lock, since dolt waits up to 100ms for it. It never creates,
+// writes or removes the file. On Windows the shared lock spans every byte
+// (lockfile.FlockSharedNonBlock), so it meets the byte either of Dolt's lock
+// libraries locks: byte 0 (github.com/dolthub/fslock, which older Dolt
+// releases use) or byte 1<<63 (github.com/dolthub/file-locks). A lock that
+// is busy (lockfile.ErrLockBusy) counts as locked: a dolt process holds it.
+// A database with no lock file, one whose lock file this cannot open, or one
+// whose lock call fails for any other reason counts as not locked: no dolt
+// process has opened it, or a dolt CLI run there could not open it either,
+// and ServesDatabaseDirOnPort's callers then take the SQL route. dir is the
+// store's CLI directory (.beads/dolt/<db> by default, or <db> under a custom
+// dolt_data_dir or under the shared server's data directory). This probe is the
+// one exception AGENTS.md's storage boundary grants to its rule against
+// beads-side flocks, until the Dolt driver can report whether a directory is
+// served.
+func databaseLocked(dir string) bool {
+	f, err := os.Open(filepath.Join(dir, ".dolt", "noms", "LOCK")) //nolint:gosec // G304: fixed file name in the store's CLIDir
+	if err != nil {
+		return false
+	}
+	defer func() { _ = f.Close() }()
+	if err := lockfile.FlockSharedNonBlock(f); err != nil {
+		return errors.Is(err, lockfile.ErrLockBusy)
+	}
+	_ = lockfile.FlockUnlock(f)
+	return false
+}
+
 // PortFileSnapshot captures the exact prior contents of a project's port
 // file, so a caller that speculatively lets EnsureRunningDetailed write a
 // new one can restore the pre-call state exactly if it later decides not to

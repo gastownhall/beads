@@ -1187,6 +1187,28 @@ func GetInfraTypesFromYAML() []string {
 	return getConfigList("types.infra")
 }
 
+// GetRetainedTypesFromYAML reports a types.retained key in config.yaml (or
+// BD_TYPES_RETAINED). The setting is read from the workspace database ONLY —
+// a sweep never consults this layer, because the rule must be the same for
+// every client of a shared workspace — so the one use of this value is to warn
+// that it is ignored. Returns nil if the key is absent.
+func GetRetainedTypesFromYAML() []string {
+	return getConfigList("types.retained")
+}
+
+// RetainedTypesYAMLWarning is the warning for a types.retained key in
+// config.yaml (or BD_TYPES_RETAINED), or "" when there is none. Every command
+// that honors the setting prints it before it selects: the key here would
+// otherwise look like protection while protecting nothing.
+func RetainedTypesYAMLWarning() string {
+	names := GetRetainedTypesFromYAML()
+	if len(names) == 0 {
+		return ""
+	}
+	list := strings.Join(names, ",")
+	return fmt.Sprintf("types.retained in config.yaml (%s) is ignored: it is read from the workspace database only; set it with `bd config set types.retained %s`", list, list)
+}
+
 // GetCustomStatusesFromYAML retrieves custom statuses from config.yaml.
 // This is used as a fallback when the database doesn't have status.custom set yet
 // or when the database connection is temporarily unavailable.
