@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,8 +13,10 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/domain"
 	storeissueops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // resolveUnresolvedDepTarget is the decision point `bd dep add` reaches when
@@ -39,10 +43,20 @@ func TestResolveUnresolvedDepTarget(t *testing.T) {
 	resolveErr := errors.New("issue not found")
 
 	tests := []struct {
-		name            string
-		sourceID        string
-		dependsOnArg    string
-		wantToID        string
+		name         string
+		sourceID     string
+		dependsOnArg string
+		// lookupErr is the resolveIDWithRouting error the row passes in;
+		// nil means the shared resolveErr.
+		lookupErr error
+		wantToID  string
+		// wantUnverified is the cross-prefix pass-through signal the caller
+		// turns into the post-write stderr warning (GH#6556): a non-nil miss,
+		// which must be the lookup error itself, unwrapped, so the warning can
+		// tell a missing target from a lookup that failed. Only outcome 3 sets
+		// it: an external: ref is resolved later by the external-deps
+		// resolver, and a refusal stores nothing.
+		wantUnverified  bool
 		wantErr         bool
 		wantErrContains string
 		// wantErrOmits is the direction/diagnosis guard: for the reversing
@@ -51,11 +65,36 @@ func TestResolveUnresolvedDepTarget(t *testing.T) {
 		wantErrOmits string
 	}{
 		{
-			name:         "bare cross-prefix target is passed through as a cross-store edge",
+			name:           "bare cross-prefix target is passed through as a cross-store edge",
+			sourceID:       "be-abc",
+			dependsOnArg:   "xy-999",
+			wantToID:       "xy-999",
+			wantUnverified: true,
+			wantErr:        false,
+		},
+		{
+			// The accept on any resolution error predates the warning; what
+			// the row pins is that the routing failure reaches the warning as
+			// itself, not as the shared not-found.
+			name:           "bare cross-prefix target whose route failed is passed through with that failure",
+			sourceID:       "be-abc",
+			dependsOnArg:   "xy-999",
+			lookupErr:      errors.New(`resolving issue ID xy-999: prefix route "xy-" to rig: target rig has no dolt_database configured`),
+			wantToID:       "xy-999",
+			wantUnverified: true,
+			wantErr:        false,
+		},
+		{
+			// A route into a rig in proxied-server mode ends in the store
+			// factory's refusal, wrapped as resolveIDWithRouting wraps it. bd
+			// could not look the target up (#5861), so it leaves no miss: a
+			// notice here would offer a bd dep remove for an edge that may be
+			// valid.
+			name:         "bare cross-prefix target routed to a proxied-server rig is passed through with no miss",
 			sourceID:     "be-abc",
 			dependsOnArg: "xy-999",
+			lookupErr:    fmt.Errorf("resolving issue ID xy-999: opening routed store for rig: %w", errProxiedStoreUnrouted()),
 			wantToID:     "xy-999",
-			wantErr:      false,
 		},
 		{
 			name:            "type:id-shaped positional arg is rejected, not silently misparsed",
@@ -158,7 +197,11 @@ func TestResolveUnresolvedDepTarget(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			toID, err := resolveUnresolvedDepTarget(tt.sourceID, tt.dependsOnArg, resolveErr)
+			lookupErr := tt.lookupErr
+			if lookupErr == nil {
+				lookupErr = resolveErr
+			}
+			toID, miss, err := resolveUnresolvedDepTarget(tt.sourceID, tt.dependsOnArg, lookupErr)
 
 			if tt.wantErr {
 				if err == nil {
@@ -173,6 +216,9 @@ func TestResolveUnresolvedDepTarget(t *testing.T) {
 				if toID != "" {
 					t.Errorf("resolveUnresolvedDepTarget(%q, %q): got toID %q on error, want empty", tt.sourceID, tt.dependsOnArg, toID)
 				}
+				if miss != nil {
+					t.Errorf("resolveUnresolvedDepTarget(%q, %q): reported unverified (miss %v) on a refusal, which stores nothing", tt.sourceID, tt.dependsOnArg, miss)
+				}
 				return
 			}
 
@@ -181,6 +227,12 @@ func TestResolveUnresolvedDepTarget(t *testing.T) {
 			}
 			if toID != tt.wantToID {
 				t.Errorf("resolveUnresolvedDepTarget(%q, %q) = %q, want %q", tt.sourceID, tt.dependsOnArg, toID, tt.wantToID)
+			}
+			if (miss != nil) != tt.wantUnverified {
+				t.Errorf("resolveUnresolvedDepTarget(%q, %q): miss = %v, want unverified %v", tt.sourceID, tt.dependsOnArg, miss, tt.wantUnverified)
+			}
+			if tt.wantUnverified && miss != lookupErr {
+				t.Errorf("resolveUnresolvedDepTarget(%q, %q): miss = %v, want the lookup error %v itself", tt.sourceID, tt.dependsOnArg, miss, lookupErr)
 			}
 		})
 	}
@@ -197,22 +249,134 @@ func TestResolveUnresolvedDepTargetMatchesStorageClassification(t *testing.T) {
 	resolveErr := errors.New("issue not found")
 
 	const sourceID = "be-abc"
-	accepted := []string{
-		"xy-999",
-		"external:otherproj:some-capability",
+	// unverified is true only for the bare cross-prefix target: both land in
+	// depends_on_external, but only the external: ref has a resolver behind it.
+	accepted := []struct {
+		target     string
+		unverified bool
+	}{
+		{"xy-999", true},
+		{"external:otherproj:some-capability", false},
 	}
 
-	for _, target := range accepted {
+	for _, tc := range accepted {
+		target := tc.target
 		t.Run(target, func(t *testing.T) {
-			toID, err := resolveUnresolvedDepTarget(sourceID, target, resolveErr)
+			toID, miss, err := resolveUnresolvedDepTarget(sourceID, target, resolveErr)
 			if err != nil {
 				t.Fatalf("resolveUnresolvedDepTarget(%q, %q): unexpected error: %v", sourceID, target, err)
+			}
+			if (miss != nil) != tc.unverified {
+				t.Errorf("resolveUnresolvedDepTarget(%q, %q): miss = %v, want unverified %v", sourceID, target, miss, tc.unverified)
 			}
 			if !storeissueops.IsExternalDepTarget(sourceID, toID) {
 				t.Errorf("dep add accepted %q but storage would not classify it as an external dep target; "+
 					"the edge would be written to a column that cannot hold it", toID)
 			}
 		})
+	}
+}
+
+// depTargetNotFound is a plain miss as the direct route reports one:
+// resolveIDWithRouting wrapping utils.ResolvePartialID's not-found.
+var depTargetNotFound = fmt.Errorf("resolving issue ID xy-999: %w", fmt.Errorf("no issue found matching %q", "xy-999"))
+
+// TestUnresolvedDepTargetWarning pins the write-time notice dep add prints
+// after storing an edge whose bare cross-prefix target nothing found
+// (GH#6556), so the operator learns it was stored unverified and gets a
+// paste-ready command that deletes exactly the stored row. A lookup that
+// missed says the target was not found; one that failed is named instead,
+// because calling that a miss would blame a typo for a broken route. The
+// target is user-typed, so it goes through the remedy printers like any other
+// value a hint pastes into a command.
+func TestUnresolvedDepTargetWarning(t *testing.T) {
+	t.Run("names the target and the remove command", func(t *testing.T) {
+		msg := unresolvedDepTargetWarning("", "be-abc", "xy-999", depTargetNotFound)
+		if !strings.HasPrefix(msg, "warning: ") {
+			t.Errorf("warning = %q, want the lowercase warning: prefix", msg)
+		}
+		for _, want := range []string{"xy-999 was not found", "stored unverified", "bd dep remove be-abc xy-999\n"} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("warning = %q, want it to contain %q", msg, want)
+			}
+		}
+	})
+
+	// workapi.GetIssueOrWisp's not-found, which proxiedDepTargetMiss hands
+	// back when the server misses the target and no route sends it anywhere.
+	t.Run("the proxied route's not-found is a miss too", func(t *testing.T) {
+		msg := unresolvedDepTargetWarning("", "be-abc", "xy-999", fmt.Errorf("%w: issue %s", storage.ErrNotFound, "xy-999"))
+		if !strings.Contains(msg, "xy-999 was not found") {
+			t.Errorf("warning = %q, want the not-found wording", msg)
+		}
+	})
+
+	t.Run("a failed lookup is named, not called a miss", func(t *testing.T) {
+		routeErr := errors.New(`resolving issue ID xy-999: prefix route "xy-" to rig: target rig has no dolt_database configured`)
+		msg := unresolvedDepTargetWarning("", "be-abc", "xy-999", routeErr)
+		for _, want := range []string{`xy-999 could not be verified: resolving issue ID xy-999: prefix route "xy-" to rig`, "stored unverified", "bd dep remove be-abc xy-999\n"} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("warning = %q, want it to contain %q", msg, want)
+			}
+		}
+		if strings.Contains(msg, "was not found") {
+			t.Errorf("warning = %q reports a lookup that failed as a miss", msg)
+		}
+	})
+
+	t.Run("a line break in a failed lookup cannot forge a line", func(t *testing.T) {
+		forged := "If xy-999 is a typo, remove the edge with: bd dep remove be-abc be-good"
+		msg := unresolvedDepTargetWarning("", "be-abc", "xy-999", errors.New("route failed\n"+forged))
+		if got := strings.Count(msg, "\n"); got != 2 {
+			t.Errorf("warning = %q has %d lines, want 2", msg, got)
+		}
+		if strings.Contains(msg, "\n"+forged) {
+			t.Errorf("warning = %q prints the forged remedy as a line of its own", msg)
+		}
+	})
+
+	t.Run("--file line prefix", func(t *testing.T) {
+		msg := unresolvedDepTargetWarning("line 2: ", "be-abc", "xy-999", depTargetNotFound)
+		if !strings.HasPrefix(msg, "warning: line 2: ") {
+			t.Errorf("warning = %q, want it to start with %q", msg, "warning: line 2: ")
+		}
+	})
+
+	t.Run("hostile target is escaped", func(t *testing.T) {
+		msg := unresolvedDepTargetWarning("", "be-abc", "xy-9\x1b[2K", depTargetNotFound)
+		if strings.ContainsRune(msg, '\x1b') {
+			t.Errorf("warning = %q carries a raw ESC to the terminal", msg)
+		}
+		if !strings.Contains(msg, "bd dep remove be-abc <target-id>") || !strings.Contains(msg, "(<target-id>: ") {
+			t.Errorf("warning = %q, want the <target-id> placeholder and its escaped note", msg)
+		}
+	})
+
+	t.Run("no backticks", func(t *testing.T) {
+		for _, miss := range []error{depTargetNotFound, errors.New("route failed")} {
+			if msg := unresolvedDepTargetWarning("line 1: ", "be-abc", "xy-999", miss); strings.Contains(msg, "`") {
+				t.Errorf("warning = %q, want no backticks", msg)
+			}
+		}
+	})
+}
+
+// TestWarnUnresolvedDepTargetHonorsQuiet: the unresolved-target notice is
+// advisory, so the global --quiet ("errors only") silences it like the other
+// non-error notices in this package. Not parallel: it sets quietFlag.
+func TestWarnUnresolvedDepTargetHonorsQuiet(t *testing.T) {
+	oldQuiet := quietFlag
+	t.Cleanup(func() { quietFlag = oldQuiet })
+
+	quietFlag = true
+	if got := captureStderr(t, func() { warnUnresolvedDepTarget("", "be-abc", "xy-999", depTargetNotFound) }); got != "" {
+		t.Errorf("--quiet: stderr = %q, want empty", got)
+	}
+
+	quietFlag = false
+	want := unresolvedDepTargetWarning("", "be-abc", "xy-999", depTargetNotFound)
+	if got := captureStderr(t, func() { warnUnresolvedDepTarget("", "be-abc", "xy-999", depTargetNotFound) }); got != want {
+		t.Errorf("stderr = %q, want %q", got, want)
 	}
 }
 
@@ -284,10 +448,11 @@ func TestDepAddBulkProxiedRefusesDepsSpecTarget(t *testing.T) {
 // all validateBulkDepEdges needs to reach its target decision: the source has
 // to resolve (or the line fails earlier with "resolving issue ID"), and the
 // target has to not resolve anywhere (or the decision point is skipped).
-// Four methods carry that. SearchIssues is ResolvePartialID's fast path and
-// GetIssue is resolveAndGetFromStore's follow-up; GetConfig and GetAllConfig
-// are consulted by the prefix-routing and auto-routing fallbacks the target
-// falls through on its way to failing. Nothing here opens a store, so this
+// Five methods carry that. SearchIssues is ResolvePartialID's fast path and
+// SearchIssueIDs its substring fallback (reached by a hash-shaped target such
+// as xy-999); GetIssue is resolveAndGetFromStore's follow-up; GetConfig and
+// GetAllConfig are consulted by the prefix-routing and auto-routing fallbacks
+// the target falls through on its way to failing. Nothing here opens a store, so this
 // needs no cgo build tag and no container — the same reason the proxied pins
 // above are cheap.
 type bulkDepStubStore struct {
@@ -301,6 +466,10 @@ func (s *bulkDepStubStore) SearchIssues(_ context.Context, _ string, filter type
 			return []*types.Issue{{ID: s.resolvableID}}, nil
 		}
 	}
+	return nil, nil
+}
+
+func (s *bulkDepStubStore) SearchIssueIDs(_ context.Context, _ string, _ types.IssueFilter) ([]string, error) {
 	return nil, nil
 }
 
@@ -347,6 +516,78 @@ func TestValidateBulkDepEdgesRefusesDepsSpecTarget(t *testing.T) {
 	}
 }
 
+// TestValidateBulkDepEdgesMarksUnverifiedTarget is the --file wiring pin for
+// the GH#6556 warning: validateBulkDepEdges must carry the helper's unverified
+// signal onto the edge, or addBulkDependencies has nothing to warn about. A
+// well-formed external: ref is not unverified (the external-deps resolver
+// owns it).
+func TestValidateBulkDepEdgesMarksUnverifiedTarget(t *testing.T) {
+	oldStore := store
+	t.Cleanup(func() { store = oldStore })
+	store = &bulkDepStubStore{resolvableID: "be-abc"}
+	withBeadGateTown(t) // no routes.jsonl: the local miss is the whole answer
+
+	resolved, err := validateBulkDepEdges(context.Background(), []bulkDepEdge{
+		{Line: 1, IssueID: "be-abc", DependsOnID: "xy-999", Type: types.DepBlocks},
+		{Line: 2, IssueID: "be-abc", DependsOnID: "external:proj:cap", Type: types.DepBlocks},
+	})
+	if err != nil {
+		t.Fatalf("validateBulkDepEdges: unexpected error: %v", err)
+	}
+	t.Cleanup(func() {
+		for _, edge := range resolved {
+			for _, cleanup := range edge.Cleanups {
+				cleanup()
+			}
+		}
+	})
+	if len(resolved) != 2 {
+		t.Fatalf("validateBulkDepEdges returned %d edges, want 2", len(resolved))
+	}
+	// The miss is the real resolution's, so it must read as a not-found:
+	// anything else would turn this plain typo's notice into "could not be
+	// verified".
+	if miss := resolved[0].TargetMiss; miss == nil || !isNotFoundErr(miss) {
+		t.Errorf("line 1 (be-abc -> xy-999): TargetMiss = %v, want the lookup's not-found", miss)
+	}
+	if miss := resolved[1].TargetMiss; miss != nil {
+		t.Errorf("line 2 (be-abc -> external:proj:cap): TargetMiss = %v, want nil", miss)
+	}
+}
+
+// TestAddBulkDependenciesRefusedBatchWarnsNothing pins the half of the GH#6556
+// contract that only the order inside addBulkDependencies keeps: the notice
+// says the edge was stored, so it may print only once the all-or-nothing batch
+// is. Line 1 is accepted unverified before line 2, a same-prefix target that
+// resolves nowhere, refuses the batch; a notice printed when line 1 was
+// decided would describe an edge that was never written, and hand the user a
+// remove command for it. The failed-batch embedded case fails while reading
+// the file, before any target is decided, so it cannot catch that.
+func TestAddBulkDependenciesRefusedBatchWarnsNothing(t *testing.T) {
+	oldStore, oldCtx := store, rootCtx
+	t.Cleanup(func() { store, rootCtx = oldStore, oldCtx })
+	store = &bulkDepStubStore{resolvableID: "be-abc"}
+	rootCtx = context.Background()
+	withBeadGateTown(t)
+
+	file := filepath.Join(t.TempDir(), "edges.jsonl")
+	body := `{"from":"be-abc","to":"xy-999"}` + "\n" + `{"from":"be-abc","to":"be-nope"}` + "\n"
+	if err := os.WriteFile(file, []byte(body), 0o600); err != nil {
+		t.Fatalf("write bulk edge file: %v", err)
+	}
+
+	var err error
+	stderr := captureStderr(t, func() {
+		err = addBulkDependencies(newDepAddCommandForTest(), file, "blocks")
+	})
+	if err == nil || !strings.Contains(err.Error(), "line 2:") {
+		t.Fatalf("addBulkDependencies error = %v, want the batch refused at line 2", err)
+	}
+	if stderr != "" {
+		t.Errorf("stderr = %q, want nothing: the batch stored no edge, so none was stored unverified", stderr)
+	}
+}
+
 // TestDepBlocksProxiedServerRefusesDepsSpecTarget covers the fifth decision
 // site. `bd dep <blocker> --blocks <blocked>` is dispatched before any dep add
 // helper runs, and `bd dep --help` documents it as "equivalent to: bd dep add
@@ -373,5 +614,239 @@ func TestDepBlocksProxiedServerRefusesDepsSpecTarget(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "bd dep add be-abc ga-dguvnb --type discovered-from") {
 		t.Errorf("proxied --blocks refusal = %q, want the same target refusal the dep add surfaces emit", stderr)
+	}
+}
+
+// proxiedDepAddIssues is the server's issue table for the proxied dep add
+// pins. GetIssue finds the IDs in present and misses the rest the way the
+// domain seam does (a wrapped sql.ErrNoRows, as stubLookupIssueUC explains),
+// or fails every lookup with hardErr; GetWisp finds nothing.
+type proxiedDepAddIssues struct {
+	domain.IssueUseCase // any other method is a nil call
+	present             map[string]bool
+	hardErr             error
+}
+
+func (s proxiedDepAddIssues) GetIssue(_ context.Context, id string) (*types.Issue, error) {
+	if s.hardErr != nil {
+		return nil, s.hardErr
+	}
+	if s.present[id] {
+		return &types.Issue{ID: id, Title: "Present " + id}, nil
+	}
+	return nil, fmt.Errorf("get %s: %w", id, sql.ErrNoRows)
+}
+
+func (s proxiedDepAddIssues) GetWisp(_ context.Context, id string) (*types.Issue, error) {
+	if s.hardErr != nil {
+		return nil, s.hardErr
+	}
+	return nil, fmt.Errorf("get %s: %w", id, sql.ErrNoRows)
+}
+
+// proxiedDepAddServer is the proxied server on the dep add writers' success
+// path: its editor stores every edge it is handed, as a server classifying a
+// cross-prefix target under depends_on_external does without looking it up,
+// and each unit of work answers the post-write lookups from the issue table
+// (lookupOnlyUOW).
+type proxiedDepAddServer struct {
+	lookupOnlyProvider
+	stored []issueops.DependencyEdge
+}
+
+func (p *proxiedDepAddServer) DependencyEditor() (issueops.DependencyEditor, error) {
+	return proxiedDepAddEditor{server: p}, nil
+}
+
+type proxiedDepAddEditor struct {
+	issueops.DependencyEditor // any other method is a nil call
+	server                    *proxiedDepAddServer
+}
+
+func (e proxiedDepAddEditor) AddDependencies(_ context.Context, request issueops.AddDependenciesRequest) (issueops.AddDependenciesResult, error) {
+	e.server.stored = append(e.server.stored, request.Edges...)
+	return issueops.AddDependenciesResult{Added: request.Edges}, nil
+}
+
+// withProxiedDepAddServer points the proxied writers at a proxiedDepAddServer
+// holding issues, and dbPath at an empty town (withBeadGateTown), so no route
+// sends a missed target anywhere until the test writes the routes.jsonl in the
+// .beads directory it returns. Not parallel: it sets package globals.
+func withProxiedDepAddServer(t *testing.T, issues proxiedDepAddIssues) (*proxiedDepAddServer, string) {
+	t.Helper()
+	server := &proxiedDepAddServer{lookupOnlyProvider: lookupOnlyProvider{issues: issues}}
+	oldProvider, oldJSON, oldQuiet := uowProvider, jsonOutput, quietFlag
+	uowProvider, jsonOutput, quietFlag = server, false, false
+	t.Cleanup(func() { uowProvider, jsonOutput, quietFlag = oldProvider, oldJSON, oldQuiet })
+	return server, withBeadGateTown(t)
+}
+
+// proxiedDepAddCmd is newDepAddCommandForTest with the post-write cycle sweep
+// off: the stub server offers no cycle role, and the sweep is not what these
+// pins are about.
+func proxiedDepAddCmd(t *testing.T) *cobra.Command {
+	t.Helper()
+	cmd := newDepAddCommandForTest()
+	if err := cmd.Flags().Set("no-cycle-check", "true"); err != nil {
+		t.Fatalf("set --no-cycle-check: %v", err)
+	}
+	return cmd
+}
+
+// TestDepAddProxiedServerWarnsOnUnresolvedTarget is the proxied route's pin
+// for GH#6556. The proxied writers resolve no IDs, so the server stored a bare
+// cross-prefix typo with a success line and no notice while the direct route
+// warned about the same input. The notice has to come from a lookup after the
+// write and not from the prefix alone: a cross-prefix target the server holds
+// is not a typo, and a lookup that failed must be named rather than called a
+// miss.
+func TestDepAddProxiedServerWarnsOnUnresolvedTarget(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		issues proxiedDepAddIssues
+		target string
+		quiet  bool
+		routes string // routes.jsonl in the town; "" writes none
+		want   []string
+		// omit must not appear in stderr; with no want, the notice must not
+		// appear at all.
+		omit string
+	}{
+		{
+			name:   "missing cross-prefix target warns once it is stored",
+			target: "xy-999",
+			want: []string{
+				"warning: dependency target xy-999 was not found in this database or through routing; the edge was stored unverified",
+				"If xy-999 is a typo, remove the edge with: bd dep remove be-abc xy-999\n",
+			},
+		},
+		{
+			name:   "cross-prefix target the server holds does not warn",
+			issues: proxiedDepAddIssues{present: map[string]bool{"xy-999": true}},
+			target: "xy-999",
+		},
+		{
+			// The store's foreign key holds a same-prefix target, so the write
+			// itself found it; the editor stub does not check, and the notice
+			// must not either.
+			name:   "same-prefix target does not warn",
+			target: "be-def",
+		},
+		{
+			name:   "external ref does not warn",
+			target: "external:proj:cap",
+		},
+		{
+			name:   "--quiet silences the notice and not the write",
+			target: "xy-999",
+			quiet:  true,
+		},
+		{
+			name:   "a server lookup that fails is named, not called a miss",
+			issues: proxiedDepAddIssues{hardErr: errors.New(stubBackendError)},
+			target: "xy-999",
+			want:   []string{"dependency target xy-999 could not be verified: " + stubBackendError, "bd dep remove be-abc xy-999\n"},
+			omit:   "was not found",
+		},
+		{
+			// The route matches, but its rig has no metadata.json, so the
+			// server's not-found is not the answer: the target may live there.
+			name:   "a route that cannot be followed is named, not called a miss",
+			routes: `{"prefix":"xy-","path":"rig"}`,
+			target: "xy-999",
+			want:   []string{`dependency target xy-999 could not be verified: prefix route "xy-" to rig`, "bd dep remove be-abc xy-999\n"},
+			omit:   "was not found",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server, town := withProxiedDepAddServer(t, tt.issues)
+			quietFlag = tt.quiet
+			if tt.routes != "" {
+				if err := os.WriteFile(filepath.Join(town, "routes.jsonl"), []byte(tt.routes), 0o600); err != nil {
+					t.Fatalf("write routes.jsonl: %v", err)
+				}
+			}
+
+			var err error
+			stderr := captureStderr(t, func() {
+				err = runDepAddProxiedServer(proxiedDepAddCmd(t), context.Background(), []string{"be-abc", tt.target})
+			})
+			if err != nil {
+				t.Fatalf("runDepAddProxiedServer: %v\nstderr:\n%s", err, stderr)
+			}
+			if len(server.stored) != 1 || server.stored[0].IssueID != "be-abc" || server.stored[0].DependsOnID != tt.target {
+				t.Fatalf("stored edges = %+v, want the one edge be-abc -> %s", server.stored, tt.target)
+			}
+			if len(tt.want) == 0 && strings.Contains(stderr, "stored unverified") {
+				t.Errorf("stderr = %q, want no unresolved-target notice", stderr)
+			}
+			for _, want := range tt.want {
+				if !strings.Contains(stderr, want) {
+					t.Errorf("stderr = %q, want it to contain %q", stderr, want)
+				}
+			}
+			if tt.omit != "" && strings.Contains(stderr, tt.omit) {
+				t.Errorf("stderr = %q, want it not to contain %q", stderr, tt.omit)
+			}
+		})
+	}
+}
+
+// TestDepAddBulkProxiedWarnsPerUnresolvedLine is the proxied --file twin: one
+// notice per stored line whose target nothing found, named by its line as the
+// direct --file route names it, and none for a line whose target is
+// same-prefix or held by the server.
+func TestDepAddBulkProxiedWarnsPerUnresolvedLine(t *testing.T) {
+	server, _ := withProxiedDepAddServer(t, proxiedDepAddIssues{present: map[string]bool{"xy-111": true}})
+	file := filepath.Join(t.TempDir(), "edges.jsonl")
+	body := `{"from":"be-abc","to":"be-def"}` + "\n" +
+		`{"from":"be-abc","to":"xy-999"}` + "\n" +
+		`{"from":"be-abc","to":"xy-111"}` + "\n"
+	if err := os.WriteFile(file, []byte(body), 0o600); err != nil {
+		t.Fatalf("write bulk edge file: %v", err)
+	}
+
+	var err error
+	stderr := captureStderr(t, func() {
+		err = runDepAddBulkProxied(proxiedDepAddCmd(t), context.Background(), file, "blocks")
+	})
+	if err != nil {
+		t.Fatalf("runDepAddBulkProxied: %v\nstderr:\n%s", err, stderr)
+	}
+	if len(server.stored) != 3 {
+		t.Fatalf("stored edges = %+v, want all three lines", server.stored)
+	}
+	for _, want := range []string{"warning: line 2: dependency target xy-999 was not found", "bd dep remove be-abc xy-999\n"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr = %q, want it to contain %q", stderr, want)
+		}
+	}
+	for _, line := range []string{"line 1:", "line 3:"} {
+		if strings.Contains(stderr, line) {
+			t.Errorf("stderr = %q, want no notice for %s", stderr, line)
+		}
+	}
+}
+
+// TestDepBlocksProxiedServerWarnsOnUnresolvedBlocker: the --blocks alias
+// stores the blocker as the target, so the notice names the blocker, and its
+// remove command takes the blocked issue first, in the stored row's order.
+func TestDepBlocksProxiedServerWarnsOnUnresolvedBlocker(t *testing.T) {
+	server, _ := withProxiedDepAddServer(t, proxiedDepAddIssues{})
+
+	var err error
+	stderr := captureStderr(t, func() {
+		err = runDepBlocksProxiedServer(proxiedDepAddCmd(t), context.Background(), "xy-999", "be-abc")
+	})
+	if err != nil {
+		t.Fatalf("runDepBlocksProxiedServer: %v\nstderr:\n%s", err, stderr)
+	}
+	if len(server.stored) != 1 || server.stored[0].IssueID != "be-abc" || server.stored[0].DependsOnID != "xy-999" {
+		t.Fatalf("stored edges = %+v, want the one edge be-abc -> xy-999", server.stored)
+	}
+	for _, want := range []string{"dependency target xy-999 was not found", "If xy-999 is a typo, remove the edge with: bd dep remove be-abc xy-999\n"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr = %q, want it to contain %q", stderr, want)
+		}
 	}
 }

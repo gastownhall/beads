@@ -30,6 +30,21 @@ func bdDep(t *testing.T, bd, dir string, args ...string) string {
 	return stdout.String()
 }
 
+// bdRunSplit runs bd with the given args, requires success, and returns
+// stdout and stderr separately, so a stderr-only notice can be asserted
+// without it leaking into (or hiding behind) stdout.
+func bdRunSplit(t *testing.T, bd, dir string, args ...string) (stdout, stderr string) {
+	t.Helper()
+	cmd := exec.Command(bd, args...)
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	outBuf, errBuf, err := runCommandBuffers(t, cmd)
+	if err != nil {
+		t.Fatalf("bd %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, outBuf.String(), errBuf.String())
+	}
+	return outBuf.String(), errBuf.String()
+}
+
 // bdDepFail runs "bd dep" expecting failure.
 func bdDepFail(t *testing.T, bd, dir string, args ...string) string {
 	t.Helper()
@@ -299,6 +314,119 @@ func TestEmbeddedDepAAddRejectionsAndBulk(t *testing.T) {
 		list3 := bdDep(t, bd, dir, "list", b3.ID)
 		if !strings.Contains(list3, b2.ID) || !strings.Contains(list3, "tracks") {
 			t.Fatalf("expected typed bulk dependency in list: %s", list3)
+		}
+	})
+
+	// GH#6556: a bare cross-prefix target that resolves nowhere is still
+	// stored (the multi-rig "add now, route later" shape), but no longer
+	// silently: stderr names it and the command that removes the edge.
+	t.Run("add_unresolved_cross_prefix_warns", func(t *testing.T) {
+		src := bdCreate(t, bd, dir, "Unresolved target source", "--type", "task")
+		stdout, stderr := bdRunSplit(t, bd, dir, "dep", "add", src.ID, "zz-404")
+		if !strings.Contains(stdout, "Added dependency") || strings.Contains(stdout, "warning:") {
+			t.Errorf("stdout = %q, want the usual Added dependency line and no warning", stdout)
+		}
+		remove := fmt.Sprintf("bd dep remove %s zz-404", src.ID)
+		if !strings.Contains(stderr, "zz-404 was not found") || !strings.Contains(stderr, "stored unverified") || !strings.Contains(stderr, remove) {
+			t.Fatalf("stderr = %q, want the unresolved-target warning naming zz-404 and %q", stderr, remove)
+		}
+		if got := bdShowDetails(t, bd, dir, src.ID)["dependency_count"]; got != float64(1) {
+			t.Fatalf("dependency_count = %v, want 1: the edge must still be stored", got)
+		}
+		// The printed remedy addresses the stored row.
+		bdDep(t, bd, dir, "remove", src.ID, "zz-404")
+		if got := bdShowDetails(t, bd, dir, src.ID)["dependency_count"]; got != float64(0) {
+			t.Fatalf("dependency_count after the printed remove = %v, want 0", got)
+		}
+	})
+
+	t.Run("add_unresolved_cross_prefix_json", func(t *testing.T) {
+		src := bdCreate(t, bd, dir, "Unresolved target JSON source", "--type", "task")
+		stdout, stderr := bdRunSplit(t, bd, dir, "dep", "add", src.ID, "zz-404", "--json")
+		var got map[string]interface{}
+		if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &got); err != nil {
+			t.Fatalf("stdout is not one JSON object: %v\n%s", err, stdout)
+		}
+		// schema_version is outputJSON's envelope on every object; the
+		// warning must not add a key beside it.
+		if len(got) != 5 || got["schema_version"] == nil || got["status"] != "added" || got["issue_id"] != src.ID || got["depends_on_id"] != "zz-404" || got["type"] != "blocks" {
+			t.Errorf("stdout JSON = %v, want exactly status, issue_id, depends_on_id and type (plus schema_version)", got)
+		}
+		if !strings.Contains(stderr, "zz-404 was not found") || !strings.Contains(stderr, "bd dep remove "+src.ID+" zz-404") {
+			t.Fatalf("stderr = %q, want the unresolved-target warning", stderr)
+		}
+	})
+
+	t.Run("add_bulk_file_unresolved_warns", func(t *testing.T) {
+		a := bdCreate(t, bd, dir, "Bulk unresolved A", "--type", "task")
+		b := bdCreate(t, bd, dir, "Bulk unresolved B", "--type", "task")
+		path := filepath.Join(t.TempDir(), "unresolved-deps.jsonl")
+		body := fmt.Sprintf("{\"from\":%q,\"to\":%q}\n{\"from\":%q,\"to\":\"zz-405\"}\n", a.ID, b.ID, a.ID)
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatalf("write deps file: %v", err)
+		}
+
+		stdout, stderr := bdRunSplit(t, bd, dir, "dep", "add", "--file", path)
+		if !strings.Contains(stdout, "Added 2 dependencies") {
+			t.Fatalf("stdout = %q, want the bulk add summary", stdout)
+		}
+		if !strings.Contains(stderr, "warning: line 2: ") || !strings.Contains(stderr, "zz-405 was not found") {
+			t.Fatalf("stderr = %q, want the unresolved-target warning for line 2 naming zz-405", stderr)
+		}
+		if strings.Contains(stderr, "line 1:") {
+			t.Errorf("stderr = %q, want no warning for line 1 (a resolved local edge)", stderr)
+		}
+		if got := bdShowDetails(t, bd, dir, a.ID)["dependency_count"]; got != float64(2) {
+			t.Fatalf("dependency_count = %v, want 2: both edges must be written", got)
+		}
+	})
+
+	t.Run("add_resolved_and_external_no_warning", func(t *testing.T) {
+		a := bdCreate(t, bd, dir, "Resolved target A", "--type", "task")
+		c := bdCreate(t, bd, dir, "Resolved target C", "--type", "task")
+		d := bdCreate(t, bd, dir, "Resolved target D", "--type", "task")
+		for _, target := range []string{c.ID, "external:proj:cap"} {
+			_, stderr := bdRunSplit(t, bd, dir, "dep", "add", a.ID, target)
+			if strings.Contains(stderr, "was not found") {
+				t.Errorf("dep add %s %s: stderr = %q, want no unresolved-target warning", a.ID, target, stderr)
+			}
+		}
+		path := filepath.Join(t.TempDir(), "resolved-deps.jsonl")
+		body := fmt.Sprintf("{\"from\":%q,\"to\":%q}\n{\"from\":%q,\"to\":\"external:proj:cap2\"}\n", d.ID, c.ID, d.ID)
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatalf("write deps file: %v", err)
+		}
+		_, stderr := bdRunSplit(t, bd, dir, "dep", "add", "--file", path)
+		if strings.Contains(stderr, "was not found") {
+			t.Errorf("dep add --file: stderr = %q, want no unresolved-target warning", stderr)
+		}
+	})
+
+	t.Run("add_unresolved_quiet", func(t *testing.T) {
+		src := bdCreate(t, bd, dir, "Unresolved target quiet source", "--type", "task")
+		_, stderr := bdRunSplit(t, bd, dir, "--quiet", "dep", "add", src.ID, "zz-406")
+		if strings.Contains(stderr, "was not found") {
+			t.Errorf("stderr = %q, want no unresolved-target warning under --quiet", stderr)
+		}
+		if got := bdShowDetails(t, bd, dir, src.ID)["dependency_count"]; got != float64(1) {
+			t.Fatalf("dependency_count = %v, want 1: --quiet silences the warning, not the write", got)
+		}
+	})
+
+	// The notice says the edge was stored, so an edge refused after its
+	// target was accepted unverified gets none: --type is validated only
+	// once the target decision has run.
+	t.Run("add_unresolved_refused_type_no_warning", func(t *testing.T) {
+		src := bdCreate(t, bd, dir, "Unresolved target refused source", "--type", "task")
+		out := bdDepFail(t, bd, dir, "add", src.ID, "zz-407", "--type", "bogus")
+		if !strings.Contains(out, "unknown dependency type") {
+			t.Fatalf("output = %q, want the --type refusal", out)
+		}
+		if strings.Contains(out, "stored unverified") {
+			t.Errorf("output = %q, want no unresolved-target warning for an edge that was refused", out)
+		}
+		if got := bdShowDetails(t, bd, dir, src.ID)["dependency_count"]; got != float64(0) {
+			t.Fatalf("dependency_count = %v, want 0: the refused edge must not be stored", got)
 		}
 	})
 

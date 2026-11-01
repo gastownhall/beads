@@ -107,10 +107,10 @@ func TestServerSettlementSQLCommitResponseLossIsIndeterminate(t *testing.T) {
 		mock.ExpectBegin()
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT `table`, num_conflicts FROM dolt_conflicts")).
 			WillReturnRows(sqlmock.NewRows([]string{"table", "num_conflicts"}).AddRow("metadata", 1))
-		mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_CONFLICTS_RESOLVE('--theirs', 'metadata')")).
-			WillReturnResult(sqlmock.NewResult(0, 1))
-		mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_ADD('metadata')")).
-			WillReturnResult(sqlmock.NewResult(0, 1))
+		mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_CONFLICTS_RESOLVE('--theirs', 'metadata')")).
+			WillReturnRows(sqlmock.NewRows([]string{"status"}))
+		mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD('metadata')")).
+			WillReturnRows(sqlmock.NewRows([]string{"status"}))
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT `table` FROM dolt_constraint_violations WHERE num_violations > 0")).
 			WillReturnRows(sqlmock.NewRows([]string{"table"}))
 		// GH#7811: CommitResolvedConflicts now concludes with the FULL merge
