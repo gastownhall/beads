@@ -913,6 +913,190 @@ reports conflicts.`,
 	},
 }
 
+var doltRebaseCmd = &cobra.Command{
+	Use:           "rebase",
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	Short:         "Reconcile colliding child IDs so a blocked sync can merge",
+	Long: `Reconcile cross-clone hierarchical child-ID collisions that a plain pull
+cannot auto-merge — two clones that each created a child under the same parent
+while offline both minted the same "parent.N" id (#4796).
+
+bd dolt rebase fetches the remote, renumbers the losing side's colliding
+children to free ids, then completes the merge (resolving the child-counter to
+the true high-water mark). It leaves the push to you.
+
+By default the REMOTE keeps its ids and your local colliding children are
+renumbered (--remote-dominates), since the remote is the shared copy other
+clones have already pulled. Use --local-dominates to keep your local ids and
+renumber the remote's instead.
+
+A backup tag is created before anything is mutated; the command reports it.
+
+Use --dry-run first: it reports the collisions and the renumbers it would make
+and writes nothing at all — no auto-commit of your pending work (which a real
+run does before it starts), no backup tag, no renumber, no merge. It does not
+fetch either, so it reads the last fetched state of the remote: that is what you
+already have after a 'bd dolt pull' aborts on the collision, and 'bd dolt fetch'
+refreshes it if not.
+
+TEXT REFERENCES ARE NOT REWRITTEN. A renumber moves the bead and rekeys its
+dependency edges, but prose in OTHER beads that names the old id is left alone —
+and after the reconcile that id names the other clone's bead. The command cannot
+resolve that for you: in a collision the two sides' text genuinely meant
+different beads. What it does instead is leave a note on both affected beads
+saying the id moved and that inbound references are now ambiguous, so whoever
+follows a stale reference finds out at the bead rather than not at all.
+
+Top-level (non-child) id collisions are REPORTED but not repaired: child ids are
+sequential and collide routinely, top-level ids are random and collide only as a
+tail event, with no "next" id to move one to. Repair those with 'bd rename' on
+the non-dominant clone before its next pull.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if isDoltLocalOnly() {
+			fmt.Println("Remote sync is disabled for this project (dolt.local-only=true).")
+			fmt.Println("Nothing to rebase.")
+			return nil
+		}
+		localDom, _ := cmd.Flags().GetBool("local-dominates")
+		remoteDom, _ := cmd.Flags().GetBool("remote-dominates")
+		if localDom && remoteDom {
+			return HandleError("--local-dominates and --remote-dominates are mutually exclusive")
+		}
+		dryRun, _ := cmd.Flags().GetBool("dry-run")
+		ctx := context.Background()
+		st := getStore()
+		if st == nil {
+			return HandleError("no store available")
+		}
+		// Optional capability, reached the way cmd/bd reaches StoreLocator,
+		// Flattener and the rest: it is not on the engine interface, so it does not
+		// promote through a decorator and needs the unwrap.
+		rebaser, ok := storage.UnwrapStore(st).(storage.ChildCollisionRebaser)
+		if !ok {
+			return HandleError("this storage backend cannot rebase child-ID collisions")
+		}
+		remote, _ := cmd.Flags().GetString("remote")
+		if remote == "" {
+			remote = "origin"
+		}
+
+		if dryRun {
+			fmt.Printf("Dry run against the last fetched state of remote %q (%s) — nothing will be written...\n",
+				remote, directionLabel(localDom))
+		} else {
+			fmt.Printf("Rebasing against remote %q (%s)...\n", remote, directionLabel(localDom))
+		}
+		report, err := rebaser.RebaseRemote(ctx, remote, storage.RebaseOptions{
+			LocalDominates: localDom,
+			DryRun:         dryRun,
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			if isRemoteNotFoundErr(err) {
+				fmt.Fprintf(os.Stderr, "\nRemote %q is not configured.\n", remote)
+				fmt.Fprintln(os.Stderr, "Use 'bd dolt remote add <name> <url>' to add it.")
+			} else if report != nil && report.Restored {
+				// The reconcile itself failed: it is atomic, so it has already
+				// hard-reset the branch back to this pre-rebase tag and nothing was
+				// left half-done.
+				fmt.Fprintf(os.Stderr, "\nThe database was restored to its pre-rebase state (backup tag: %s).\n", report.BackupTag)
+				fmt.Fprintln(os.Stderr, "No changes were kept; resolve the cause above and retry.")
+			} else if report != nil && len(report.Renumbered) > 0 {
+				// The reconcile committed and a LATER step failed (the post-merge
+				// is_blocked recompute). Nothing was rolled back — saying otherwise
+				// would send the operator hunting for changes that are in fact live.
+				fmt.Fprintf(os.Stderr, "\nThe rebase itself completed and was committed; nothing was rolled back.\n")
+				fmt.Fprintf(os.Stderr, "Renumbered %d colliding child id(s):\n", len(report.Renumbered))
+				for _, r := range report.Renumbered {
+					fmt.Fprintf(os.Stderr, "  %s → %s\n", r.OldID, r.NewID)
+				}
+				fmt.Fprintln(os.Stderr, "Only the follow-up step above failed. Blocked state may be stale until you")
+				fmt.Fprintln(os.Stderr, "run 'bd doctor --fix', which recomputes it from the dependency graph.")
+				if report.BackupTag != "" {
+					fmt.Fprintf(os.Stderr, "Pre-rebase backup tag (to undo the rebase deliberately): %s\n", report.BackupTag)
+				}
+			}
+			return SilentExit()
+		}
+		if report == nil || len(report.Renumbered) == 0 {
+			fmt.Printf("No child-ID collisions between local and %q; nothing to rebase (use 'bd dolt pull').\n", remote)
+			// A top-level collision is the case where that advice alone is actively
+			// misleading: there is nothing for this mechanic to renumber, and the
+			// pull it points at is the very thing that is about to abort.
+			printTopLevelCollisions(report, remote)
+			return nil
+		}
+		if report.BackupTag != "" {
+			fmt.Printf("Pre-rebase backup tag: %s (kept as a safety net for this reconcile)\n", report.BackupTag)
+		}
+		verb := "Renumbered"
+		if report.DryRun {
+			verb = "Would renumber"
+		}
+		fmt.Printf("%s %d colliding child id(s):\n", verb, len(report.Renumbered))
+		for _, r := range report.Renumbered {
+			fmt.Printf("  %s → %s\n", r.OldID, r.NewID)
+		}
+		for parent, last := range report.CountersSet {
+			fmt.Printf("  counter %s → last_child %d\n", parent, last)
+		}
+		printTopLevelCollisions(report, remote)
+
+		if report.DryRun {
+			fmt.Println()
+			fmt.Println("Nothing was written: no pending work was committed, no backup tag was")
+			fmt.Println("taken, no id was renumbered, and no fetch or merge was performed.")
+			fmt.Println("Re-run without --dry-run to apply this (which WILL commit pending work first).")
+			return nil
+		}
+
+		// Say plainly what was NOT done. The renumber is the visible half; the
+		// stale prose references elsewhere are the half that bites weeks later,
+		// and an operator who is told only the good news has no reason to look.
+		fmt.Println()
+		fmt.Println("Text references to the OLD ids in other beads were NOT rewritten, and those")
+		fmt.Println("ids now name the other clone's beads. Each old and new id above carries a")
+		fmt.Printf("note recording the move; search for %q to find them.\n", "[bd dolt rebase #4796]")
+		switch {
+		case report.BreadcrumbWarning != "":
+			fmt.Printf("Warning: those notes could NOT be written (%s).\n", report.BreadcrumbWarning)
+			fmt.Println("The reconcile itself completed and stands; only the annotation is missing.")
+		case report.Breadcrumbs > 0:
+			fmt.Printf("Noted on %d bead(s).\n", report.Breadcrumbs)
+		}
+		fmt.Println()
+		fmt.Println("Rebase complete. Run 'bd dolt push' to share.")
+		return nil
+	},
+}
+
+// printTopLevelCollisions reports top-level id collisions this mechanic found
+// but does not repair, naming the manual route. Silent when there are none.
+func printTopLevelCollisions(report *storage.RebaseReport, remote string) {
+	if report == nil || len(report.TopLevelCollisions) == 0 {
+		return
+	}
+	fmt.Println()
+	fmt.Printf("WARNING: %d TOP-LEVEL id(s) were minted independently on both sides for\n", len(report.TopLevelCollisions))
+	fmt.Println("different beads. This command does not repair those — top-level ids are random,")
+	fmt.Println("so there is no next free number to move one to:")
+	for _, id := range report.TopLevelCollisions {
+		fmt.Printf("  %s\n", id)
+	}
+	fmt.Println("A merge cannot settle them either, so a plain pull will abort until they are")
+	fmt.Printf("resolved. Repair on whichever clone should give way, BEFORE it pulls from %q:\n", remote)
+	fmt.Println("  bd rename <colliding-id> <fresh-id>")
+}
+
+// directionLabel names the dominant side for user-facing output.
+func directionLabel(localDominates bool) string {
+	if localDominates {
+		return "local-dominates"
+	}
+	return "remote-dominates"
+}
+
 var doltCommitCmd = &cobra.Command{
 	Use:   "commit",
 	Short: "Create a Dolt commit from pending changes",
@@ -2211,6 +2395,10 @@ func init() {
 	doltPushCmd.Flags().Bool("no-adopt", false, "Never derive a Dolt remote from git origin (also BD_NO_REMOTE_ADOPT=1)")
 	doltPullCmd.Flags().String("remote", "", "Pull from a specific named remote instead of the default")
 	doltPullCmd.Flags().String("strategy", "", "Conflict resolution strategy for conflicts the auto-resolver declines: 'ours' or 'theirs' (embedded storage only, #4992)")
+	doltRebaseCmd.Flags().Bool("remote-dominates", false, "Remote keeps its ids; renumber local colliding children (default)")
+	doltRebaseCmd.Flags().Bool("local-dominates", false, "Local keeps its ids; renumber the remote's colliding children")
+	doltRebaseCmd.Flags().String("remote", "", "Rebase against a specific named remote instead of origin")
+	doltRebaseCmd.Flags().Bool("dry-run", false, "Report the collisions and planned renumbers; change nothing (no auto-commit, no backup tag, no merge)")
 	doltCommitCmd.Flags().StringP("message", "m", "", "Commit message (default: auto-generated)")
 	doltCleanDatabasesCmd.Flags().Bool("dry-run", false, "Show what would be dropped without dropping")
 	doltCleanDatabasesCmd.Flags().Bool("purge-dropped", false, "After dropping, also run CALL DOLT_PURGE_DROPPED_DATABASES() — server-global and irreversible, see --help")
@@ -2226,6 +2414,7 @@ func init() {
 	doltCmd.AddCommand(doltCommitCmd)
 	doltCmd.AddCommand(doltPushCmd)
 	doltCmd.AddCommand(doltPullCmd)
+	doltCmd.AddCommand(doltRebaseCmd)
 	doltCmd.AddCommand(doltStartCmd)
 	doltCmd.AddCommand(doltStopCmd)
 	doltCmd.AddCommand(doltStatusCmd)

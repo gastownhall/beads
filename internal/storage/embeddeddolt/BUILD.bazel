@@ -231,6 +231,7 @@ go_test(
         "ready_counter_contract_test.go",
         "ready_total_test.go",
         "ready_work_missing_table_test.go",
+        "rebase_collision_test.go",
         "reject_stale_upsert_test.go",
         "relations_contract_test.go",
         "releaser_contract_test.go",
