@@ -5040,6 +5040,12 @@
     },
     {
       "schema": "SweepSkips",
+      "member": "retention_required",
+      "type": "integer",
+      "required": false
+    },
+    {
+      "schema": "SweepSkips",
       "member": "unknown_closed_at",
       "type": "integer",
       "required": true

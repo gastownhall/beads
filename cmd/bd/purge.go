@@ -62,6 +62,9 @@ Deletes: issues, dependencies, labels, events, and comments for matching beads.
 Skips: pinned beads, and closed beads a live bead still depends on through a
 parent-child, tracks or blocks edge (a closed molecule root whose step is open,
 a closed bead a live convoy tracks). Live means any status that is not done.
+Without --retain-ids it also skips beads whose type the workspace's
+types.retained setting names (their ids are idempotency keys); --json reports
+them as retention_required.
 
 --wisps-plane selects by storage plane instead: every closed row stored in the
 wisps table, including --no-history beads, which the default ephemeral
@@ -141,6 +144,7 @@ func openSweeper() (issueops.Sweeper, error) {
 // `bd purge` (ephemeral tier) and `bd prune` (durable tier), on both routes.
 func runPurgeOrPrune(cmd *cobra.Command, scope purgeScope) error {
 	CheckReadonly(scope.cmdName)
+	warnIgnoredYAMLRetainedTypes()
 
 	force, _ := cmd.Flags().GetBool("force")
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
@@ -289,6 +293,23 @@ func printRetainNote(result issueops.SweepResult, dryRun bool) {
 	fmt.Printf("  Retired %d id(s): a create of any of them is refused from now on\n", result.Swept)
 }
 
+// addRetentionStats reports the closed beads the sweep kept because their type
+// is one the workspace retains (types.retained). It is attached only when it
+// held something back, the way pinned_skipped is.
+func addRetentionStats(stats map[string]interface{}, result issueops.SweepResult) {
+	if result.Skipped.RetentionRequired > 0 {
+		stats["retention_required"] = result.Skipped.RetentionRequired
+	}
+}
+
+// retentionNote is the text line for addRetentionStats' count. It names the
+// one flag that takes those beads, so the reader is not left with a sweep that
+// silently keeps rows.
+func retentionNote(result issueops.SweepResult) string {
+	return fmt.Sprintf("%d closed bead(s) of a retained type kept (types.retained) — only --retain-ids deletes and retires them",
+		result.Skipped.RetentionRequired)
+}
+
 // printLimitNote tells a text reader that --limit left rows behind.
 func printLimitNote(result issueops.SweepResult) {
 	if result.Remaining > 0 {
@@ -312,6 +333,7 @@ func emitSweepEmpty(scope purgeScope, olderThan, pattern string, limit int, resu
 			"message":      fmt.Sprintf("No %ss to %s", scope.subjectNoun, scope.cmdName),
 		}
 		addLiveDependentStats(stats, result)
+		addRetentionStats(stats, result)
 		addLimitStats(stats, limit, result)
 		addReferenceStats(scope, stats, result)
 		return outputJSON(stats)
@@ -327,6 +349,9 @@ func emitSweepEmpty(scope purgeScope, olderThan, pattern string, limit int, resu
 	if result.Skipped.LiveDependent > 0 {
 		fmt.Println(ui.MutedStyle.Render(fmt.Sprintf(
 			"  (%d closed bead(s) protected by live dependents)", result.Skipped.LiveDependent)))
+	}
+	if result.Skipped.RetentionRequired > 0 {
+		fmt.Println(ui.MutedStyle.Render("  (" + retentionNote(result) + ")"))
 	}
 	if result.Skipped.Referenced > 0 {
 		fmt.Println(ui.MutedStyle.Render(fmt.Sprintf(
@@ -349,6 +374,7 @@ func emitSweepDryRun(scope purgeScope, limit int, result issueops.SweepResult) e
 			stats["pinned_skipped"] = result.Skipped.Pinned
 		}
 		addLiveDependentStats(stats, result)
+		addRetentionStats(stats, result)
 		addLimitStats(stats, limit, result)
 		addReferenceStats(scope, stats, result)
 		addRetainStats(stats, result)
@@ -363,6 +389,9 @@ func emitSweepDryRun(scope purgeScope, limit int, result issueops.SweepResult) e
 	}
 	if result.Skipped.LiveDependent > 0 {
 		fmt.Printf("  Live dependent (skipped): %d\n", result.Skipped.LiveDependent)
+	}
+	if result.Skipped.RetentionRequired > 0 {
+		fmt.Printf("  %s\n", retentionNote(result))
 	}
 	if result.Skipped.Referenced > 0 {
 		fmt.Printf("  %s   %d\n", ui.MutedStyle.Render("Referenced (skipped):"), result.Skipped.Referenced)
@@ -393,6 +422,9 @@ func emitSweepConfirm(scope purgeScope, olderThan, pattern string, limit int, re
 	}
 	if result.Skipped.LiveDependent > 0 {
 		fmt.Printf("Skipping %d bead(s) a live bead depends on\n", result.Skipped.LiveDependent)
+	}
+	if result.Skipped.RetentionRequired > 0 {
+		fmt.Printf("Skipping %s\n", retentionNote(result))
 	}
 	if result.Skipped.Referenced > 0 {
 		fmt.Println(ui.MutedStyle.Render(fmt.Sprintf("Skipping %d referenced bead(s)", result.Skipped.Referenced)))
@@ -441,6 +473,7 @@ func emitSweepResult(scope purgeScope, limit int, result issueops.SweepResult) e
 			stats["pinned_skipped"] = result.Skipped.Pinned
 		}
 		addLiveDependentStats(stats, result)
+		addRetentionStats(stats, result)
 		addLimitStats(stats, limit, result)
 		addReferenceStats(scope, stats, result)
 		addRetainStats(stats, result)
@@ -455,6 +488,9 @@ func emitSweepResult(scope purgeScope, limit int, result issueops.SweepResult) e
 	}
 	if result.Skipped.LiveDependent > 0 {
 		fmt.Printf("  Live dependent (skipped): %d\n", result.Skipped.LiveDependent)
+	}
+	if result.Skipped.RetentionRequired > 0 {
+		fmt.Printf("  %s\n", retentionNote(result))
 	}
 	if result.Skipped.Referenced > 0 {
 		fmt.Printf("  %s %d\n", ui.MutedStyle.Render("Referenced (skipped):"), result.Skipped.Referenced)

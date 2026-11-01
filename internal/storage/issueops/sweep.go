@@ -50,6 +50,14 @@ func SweepInTx(ctx context.Context, tx *sql.Tx, req publicops.SweepRequest) (pub
 	kept, skips := workapi.FilterSweepCandidates(candidates, req.IDPattern, req.ClosedBefore)
 	result.Skipped = skips
 
+	if !req.RetainIDs {
+		retained, err := ResolveRetainedTypesInTx(ctx, tx)
+		if err != nil {
+			return publicops.SweepResult{}, err
+		}
+		kept, result.Skipped.RetentionRequired = workapi.PartitionSweepRetainedTypes(kept, retained)
+	}
+
 	if req.ProtectLiveDependents {
 		protected, err := sweepLiveDependentsInTx(ctx, tx, kept)
 		if err != nil {
@@ -105,6 +113,20 @@ func SweepInTx(ctx context.Context, tx *sql.Tx, req publicops.SweepRequest) (pub
 	result.Labels = deleted.LabelsCount
 	result.Events = deleted.EventsCount
 	return result, nil
+}
+
+// ResolveRetainedTypesInTx reads the workspace's retained issue types
+// (issueops.SettingKeyTypesRetained) on the caller's transaction. It reads the
+// config row only — no config.yaml layer, no cache — so a sweep sees exactly
+// what the workspace database holds at its own snapshot. A read error is
+// returned, never treated as "nothing retained": a sweep that could not read
+// the set must fail rather than delete rows it should have held back.
+func ResolveRetainedTypesInTx(ctx context.Context, tx DBTX) (map[string]bool, error) {
+	value, err := GetConfigInTx(ctx, tx, publicops.SettingKeyTypesRetained)
+	if err != nil {
+		return nil, fmt.Errorf("reading %s for the retained-type protection: %w", publicops.SettingKeyTypesRetained, err)
+	}
+	return workapi.RetainedTypesFromSetting(value), nil
 }
 
 // sweepRetiredIDsInTx builds the tombstones a retaining sweep writes for the

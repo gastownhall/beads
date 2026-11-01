@@ -389,6 +389,33 @@ func TestProxiedServerDepB(t *testing.T) {
 				t.Fatalf("expected 1-edge bulk add summary or clear external-ref error: %s", out)
 			}
 		})
+
+		// GH#6556: the proxied writers resolve no IDs, so the server stores a
+		// bare cross-prefix typo as before; the notice now comes from a lookup
+		// once it is stored, naming the target and the command that removes it.
+		t.Run("unresolved_cross_prefix_warns", func(t *testing.T) {
+			t.Parallel()
+			p := newSharedProxiedProject(t, bd, "dpa16")
+			src := bdProxiedCreate(t, bd, p.dir, "Unresolved target source", "--type", "task")
+			cmd := exec.Command(bd, "dep", "add", src.ID, "zz-404")
+			cmd.Dir = p.dir
+			cmd.Env = bdProxiedEnv(p.dir)
+			stdout, stderr, err := runCommandBuffers(t, cmd)
+			if err != nil {
+				t.Fatalf("bd dep add %s zz-404: %v\nstdout:\n%s\nstderr:\n%s", src.ID, err, stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stdout.String(), "Added dependency") {
+				t.Errorf("stdout = %q, want the usual Added dependency line", stdout.String())
+			}
+			remove := "bd dep remove " + src.ID + " zz-404"
+			if !strings.Contains(stderr.String(), "zz-404 was not found") || !strings.Contains(stderr.String(), remove) {
+				t.Fatalf("stderr = %q, want the unresolved-target warning naming zz-404 and %q", stderr.String(), remove)
+			}
+			// The printed remedy removes the stored row.
+			if out := bdProxiedDep(t, bd, p.dir, "remove", src.ID, "zz-404"); !strings.Contains(out, "Removed dependency") {
+				t.Fatalf("printed remove did not remove the edge: %s", out)
+			}
+		})
 	})
 }
 

@@ -1564,6 +1564,32 @@ types:
 	}
 }
 
+// TestRetainedTypesYAMLWarning pins the warning for a types.retained key in
+// config.yaml (or BD_TYPES_RETAINED). The setting is read from the workspace
+// database only, so such a key protects nothing; the commands that honor the
+// setting say so rather than letting an operator believe a type is retained.
+func TestRetainedTypesYAMLWarning(t *testing.T) {
+	restore := envSnapshot(t)
+	defer restore()
+	t.Chdir(t.TempDir())
+	ResetForTesting()
+	t.Cleanup(ResetForTesting)
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() returned error: %v", err)
+	}
+
+	if msg := RetainedTypesYAMLWarning(); msg != "" {
+		t.Errorf("warning with no yaml key = %q, want none", msg)
+	}
+	Set("types.retained", "op,fact")
+	msg := RetainedTypesYAMLWarning()
+	for _, want := range []string{"config.yaml", "ignored", "bd config set types.retained op,fact"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("warning = %q, want it to contain %q", msg, want)
+		}
+	}
+}
+
 // TestGetCustomTypesFromYAML_ListForm verifies that the YAML sequence form
 // (e.g. `types: { custom: [step, wisp] }`) is honored equivalently to the
 // legacy comma-separated string form. Before the fix, viper.GetString on a

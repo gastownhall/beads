@@ -86,6 +86,17 @@ func sweepInUOW(ctx context.Context, uw UnitOfWork, req publicops.SweepRequest) 
 	kept, skips := workapi.FilterSweepCandidates(candidates, req.IDPattern, req.ClosedBefore)
 	result.Skipped = skips
 
+	if !req.RetainIDs {
+		// The retained types are read on this unit of work, uncached, as the
+		// shared body reads them on its transaction; a read error fails the
+		// sweep rather than holding nothing back.
+		value, err := uw.ConfigUseCase().GetConfig(ctx, publicops.SettingKeyTypesRetained)
+		if err != nil {
+			return publicops.SweepResult{}, fmt.Errorf("reading %s for the retained-type protection: %w", publicops.SettingKeyTypesRetained, err)
+		}
+		kept, result.Skipped.RetentionRequired = workapi.PartitionSweepRetainedTypes(kept, workapi.RetainedTypesFromSetting(value))
+	}
+
 	if req.ProtectLiveDependents {
 		protected, err := sweepLiveDependentsInUOW(ctx, uw, kept)
 		if err != nil {

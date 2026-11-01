@@ -97,6 +97,12 @@ type stubWire struct {
 	lastApply       wire.ApplyBatchRequest
 	lastRelease     apigen.ReleaseIssueRequest
 	lastComment     apigen.AddCommentRequest
+
+	// settings, when non-nil, arms the one READ the write roles make: the
+	// sweeper's getSetting of types.retained against a server that does not
+	// advertise issues.sweep.retainedTypes. A key absent from the map is
+	// answered as unset. Nil keeps the read seam failing loudly.
+	settings map[string]string
 }
 
 func (s *stubWire) ServerContext(context.Context) (*apigen.ContextResponse, error) {
@@ -111,10 +117,28 @@ func (s *stubWire) ServerContext(context.Context) (*apigen.ContextResponse, erro
 // fail loudly rather than answering, so a write role that started routing
 // through the read path would say so instead of quietly recording no call.
 func (s *stubWire) Preflight(_ context.Context, op string) error {
+	if op == wire.OpGetSetting && s.settings != nil {
+		return nil
+	}
 	return fmt.Errorf("stubWire: the write seam does not pre-flight %q", op)
 }
 
-func (s *stubWire) Do(_ context.Context, req wire.Request, _ any) error {
+func (s *stubWire) Do(_ context.Context, req wire.Request, out any) error {
+	if req.Op == wire.OpGetSetting && s.settings != nil {
+		if err := s.record(req.Op); err != nil {
+			return err
+		}
+		key, err := url.PathUnescape(req.Path[strings.LastIndex(req.Path, "/")+1:])
+		if err != nil {
+			return err
+		}
+		setting := out.(*apigen.Setting)
+		setting.Key = key
+		if value, ok := s.settings[key]; ok {
+			setting.Value = &value
+		}
+		return nil
+	}
 	return fmt.Errorf("stubWire: the write seam does not dispatch %q generically", req.Op)
 }
 
@@ -385,12 +409,15 @@ func stubStore(t *testing.T, w *stubWire) *Store {
 	t.Helper()
 	// A current server: it advertises issues.update.allowTemplate, so
 	// Lifecycle.Update leaves the template guard to it and pre-reads nothing,
-	// and issues.update.claim, so a claim rides updateIssue.
-	// TestUpdateTemplateGuardAgainstAServerThatPredatesIt and
-	// TestUpdateClaimAgainstAServerWithoutTheToken cover the older ones.
+	// issues.update.claim, so a claim rides updateIssue, and
+	// issues.sweep.retainedTypes, so a plain sweep reads no setting first.
+	// TestUpdateTemplateGuardAgainstAServerThatPredatesIt,
+	// TestUpdateClaimAgainstAServerWithoutTheToken and
+	// TestAPlainSweepAgainstAServerWithoutRetainedTypesReadsTheSetting cover
+	// the older ones.
 	return New(testTarget(t), w, &apigen.ContextResponse{
 		BdVersion:    "1.2.3",
-		Capabilities: []string{wire.CapIssuesUpdateAllowTemplate, wire.CapIssuesUpdateClaim},
+		Capabilities: []string{wire.CapIssuesUpdateAllowTemplate, wire.CapIssuesUpdateClaim, wire.CapSweepRetainedTypes},
 	})
 }
 

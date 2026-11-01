@@ -2,13 +2,13 @@ package issueops
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/workapi"
 )
 
 // ParseStatusFallback converts legacy []string status names (from YAML) to []CustomStatus.
@@ -30,20 +30,9 @@ func ParseStatusFallback(names []string) []types.CustomStatus {
 }
 
 // ParseCommaSeparatedList splits a comma-separated string into a slice of
-// trimmed, non-empty entries.
+// trimmed, non-empty entries. It is workapi.ParseCommaSeparatedList.
 func ParseCommaSeparatedList(value string) []string {
-	if value == "" {
-		return nil
-	}
-	parts := strings.Split(value, ",")
-	result := make([]string, 0, len(parts))
-	for _, p := range parts {
-		trimmed := strings.TrimSpace(p)
-		if trimmed != "" {
-			result = append(result, trimmed)
-		}
-	}
-	return result
+	return workapi.ParseCommaSeparatedList(value)
 }
 
 func ResolveCustomConfigInTx(ctx context.Context, tx DBTX) (statuses []types.CustomStatus, customTypes []string, err error) {
@@ -432,25 +421,24 @@ func syncCustomTypesTable(ctx context.Context, tx DBTX, value string) error {
 // ParseTypesConfigValue parses a types.custom config value, accepting both
 // the JSON-array form written by bd config set / pour (e.g. ["duty","ops"])
 // and the legacy comma-separated form (duty,ops). Elements are trimmed and
-// empties dropped.
+// empties dropped. It is workapi.ParseTypeList, the one parser of that form,
+// which the sweep's read of types.retained shares.
 func ParseTypesConfigValue(value string) []string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return nil
-	}
-	// Try JSON array first (e.g. '["gate","convoy"]')
-	var jsonTypes []string
-	if err := json.Unmarshal([]byte(value), &jsonTypes); err == nil {
-		var out []string
-		for _, t := range jsonTypes {
-			if t = strings.TrimSpace(t); t != "" {
-				out = append(out, t)
-			}
-		}
-		return out
-	}
-	// Fall back to comma-separated
-	return ParseCommaSeparatedList(value)
+	return workapi.ParseTypeList(value)
+}
+
+// RetainedTypesFromSetting is workapi.RetainedTypesFromSetting, the one
+// canonicalizing read of types.retained, for a caller that may not import
+// internal/workapi (the HTTP client).
+func RetainedTypesFromSetting(value string) map[string]bool {
+	return workapi.RetainedTypesFromSetting(value)
+}
+
+// ValidateRetainedTypesValue is workapi.ValidateRetainedTypesValue, the
+// syntax check of a types.retained write, for a caller that may not import
+// internal/workapi (the HTTP client, which refuses before the dial).
+func ValidateRetainedTypesValue(value string) error {
+	return workapi.ValidateRetainedTypesValue(value)
 }
 
 // SyncConfigTables re-syncs the normalized lookup table backing a config

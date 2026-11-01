@@ -363,7 +363,7 @@ var roleContractCases = []roleContract{
 		RunGraphCounterWritesNothing,
 	),
 
-	roleCases("IDRetention", "Sweeper(), Lifecycle(), Reader(), BatchApplier(), BatchCreator(), Importer()", oncePerRole,
+	roleCases("IDRetention", "Sweeper(), Lifecycle(), Reader(), BatchApplier(), BatchCreator(), Importer(), WorkspaceConfig()", oncePerRole,
 		func(b RoleContractBundle) func(t *testing.T) *IDRetentionFixture { return b.IDRetention },
 		RunIDRetentionAPlainSweepLeavesTheIDReusable,
 		RunIDRetentionARetainingSweepRetiresEverySweptID,
@@ -385,6 +385,9 @@ var roleContractCases = []roleContract{
 		RunIDRetentionARacingImportNeverResurrects,
 		RunIDRetentionRefusesANoHistoryRecreateThroughEveryDoor,
 		RunIDRetentionAWispsPlaneRetainingSweepRetiresItsRows,
+		RunIDRetentionAPlainSweepSkipsARetainedType,
+		RunIDRetentionARetainedTypeIsHeldBackBeforeTheProtectionsAndTheLimit,
+		RunIDRetentionARetainedTypeReadErrorFailsTheSweep,
 	),
 
 	// The accessor named here is NOT a storage.DoltStorage one, alone among
@@ -802,6 +805,7 @@ var roleContractCases = []roleContract{
 		RunWorkspaceConfigRefusesTheProtectedKeyOnSet,
 		RunWorkspaceConfigUnsetDoesNotRefuseTheProtectedKey,
 		RunWorkspaceConfigRefusesAnUnparseableCustomStatus,
+		RunWorkspaceConfigBoundsTheKeyAndTheValueOnSet,
 		RunWorkspaceConfigProjectsCustomStatuses,
 		RunWorkspaceConfigProjectsCustomTypes,
 		RunWorkspaceConfigUnsetLeavesTheProjectionBehind,

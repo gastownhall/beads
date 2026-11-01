@@ -79,8 +79,11 @@ while read -r _local_ref local_sha remote_ref remote_sha; do
         # A new remote branch: compare against main's merge-base.
         base="$(git merge-base "$local_sha" origin/main 2>/dev/null || true)"
     fi
-    if [ -z "$base" ] || git diff --name-only "$base" "$local_sha" -- \
-        '*.go' 'go.mod' 'go.sum' '*.bazel' '*.bzl' '.bazelrc' '.bazelversion' 'MODULE.bazel.lock' | grep -q .; then
+    # Capture the names rather than piping to `grep -q`: under pipefail, grep
+    # exiting on the first line makes git die of SIGPIPE on a large diff,
+    # and the failed pipeline would read as "no changes".
+    if [ -z "$base" ] || [ -n "$(git diff --name-only "$base" "$local_sha" -- \
+        '*.go' 'go.mod' 'go.sum' '*.bazel' '*.bzl' '.bazelrc' '.bazelversion' 'MODULE.bazel.lock')" ]; then
         suite_needed=1
     fi
 done <<< "$push_refs"

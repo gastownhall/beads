@@ -273,13 +273,14 @@ func hasNoRemoteConfigured(ctx context.Context, st remoteLister) bool {
 // dolt_remotes after wy-xtv17 hardened the no-remote gate (wy-82hc5), so the
 // rule lives here once.
 //
-// Nor is a remote recorded only in a Dolt database the server does not serve
-// (leftoverRemotesFor), such as the clone `bd init --server --remote` leaves
-// for a gateway. It is not the server's, so the rig is not configured: push
-// and pull run on the server, which lacks it. But it is the remote the
-// operator set up, so the rig is not remote-less either: exiting 0 would
-// report a sync that never reached that remote, and adopting the git origin
-// would publish somewhere the operator never chose. That answer is a
+// Nor is a remote recorded only in a Dolt database bd cannot prove the server
+// serves (leftoverRemotesFor), such as the clone `bd init --server --remote`
+// leaves for a gateway, or a copy at 127.0.0.1 that no live server on the
+// dialed port holds. bd cannot count it as the server's, so the rig is not
+// configured: push and pull run on the server, which lacks it. But it is the
+// remote the operator set up, so the rig is not remote-less either: exiting 0
+// would report a sync that never reached that remote, and adopting the git
+// origin would publish somewhere the operator never chose. That answer is a
 // remoteOnlyInLeftoverDatabaseError, which names the remote and the command
 // that adds it on the server.
 func hasConfiguredRemote(ctx context.Context, st remoteLister) (bool, error) {
@@ -367,9 +368,9 @@ func persistedRemoteInfosFor(st any) []storage.RemoteInfo {
 }
 
 // leftoverRemoteLister is implemented by stores that can list the remotes
-// recorded in a Dolt database their server does not serve, with the directory
-// that records them (server-mode DoltStore): a copy in the workspace's Dolt
-// root, whose remotes persistedRemoteInfoLister leaves out.
+// recorded in a Dolt database bd cannot prove their server serves, with the
+// directory that records them (server-mode DoltStore): a copy in the
+// workspace's Dolt root, whose remotes persistedRemoteInfoLister leaves out.
 type leftoverRemoteLister interface {
 	LeftoverRemotes() (string, []storage.RemoteInfo)
 }
@@ -395,9 +396,12 @@ func leftoverRemotesFor(st any) (string, []storage.RemoteInfo) {
 }
 
 // remoteOnlyInLeftoverDatabaseError is hasConfiguredRemote's answer for a
-// server that lists no remote while a Dolt database it does not serve, in dir,
-// records remotes. bd pushes and pulls on the server, so each has to be added
-// there; the error names the command that does it.
+// server that lists no remote while a Dolt database in dir, which bd cannot
+// prove the server serves, records remotes. The server may still serve it (a
+// server the user runs over .beads/dolt on a socket, ::1 or TLS), so the
+// error does not say it is not the server's data. bd pushes and pulls on the
+// server, so each has to be added there; the error names the command that
+// does it.
 type remoteOnlyInLeftoverDatabaseError struct {
 	dir     string
 	remotes []storage.RemoteInfo
@@ -409,7 +413,7 @@ func (e *remoteOnlyInLeftoverDatabaseError) Error() string {
 		named[i] = remedy.PrintedValue(r.Name) + " (" + remedy.PrintedValue(r.URL) + ")"
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "the Dolt server lists no remote, but the Dolt database left in %s, which is not the server's data, records %s.\n",
+	fmt.Fprintf(&b, "the Dolt server lists no remote, but the Dolt database in %s records %s, and bd cannot confirm that the server serves that directory.\n",
 		remedy.PrintedValue(e.dir), strings.Join(named, ", "))
 	b.WriteString("Push and pull run on the server, so add the remote there:\n")
 	for _, r := range e.remotes {
@@ -697,8 +701,40 @@ func printDivergedHistoryGuidance(operation string) {
 	fmt.Fprintln(os.Stderr, "existing remote instead of 'bd init' to avoid divergent histories.")
 }
 
+// remoteFromArgs resolves the remote `bd dolt push|pull` targets: the
+// optional positional name, else --remote. "" means the default remote.
+// Cobra's default ArbitraryArgs used to accept `bd dolt push 1st` and RunE
+// dropped the name, so the push went to the default remote (GH#3720).
+func remoteFromArgs(cmd *cobra.Command, args []string) (string, error) {
+	flagRemote, _ := cmd.Flags().GetString("remote")
+	if len(args) == 0 {
+		return flagRemote, nil
+	}
+	remote := args[0]
+	// An empty name (`bd dolt push "$R"` with R unset) must not fall back to
+	// the default remote: that is the same silent misdirection.
+	if strings.TrimSpace(remote) == "" {
+		return "", HandleError("remote name is empty: name a remote (see 'bd dolt remote list') or omit the argument to use the default")
+	}
+	// Letting either spelling win would silently discard a selector the
+	// user typed, the bug class this resolves.
+	if flagRemote != "" && flagRemote != remote {
+		return "", HandleError("remote named twice: %q as an argument and %q with --remote; name it once", remote, flagRemote)
+	}
+	return remote, nil
+}
+
+// validateRemoteArg runs remoteFromArgs as cobra's Args validation, which
+// executes before PersistentPreRunE opens the store, so a bad remote argument
+// fails before any server start or migration (as validateCreateArgs does).
+func validateRemoteArg(cmd *cobra.Command, args []string) error {
+	_, err := remoteFromArgs(cmd, args)
+	return err
+}
+
 var doltPushCmd = &cobra.Command{
-	Use:           "push",
+	Use:           "push [remote]",
+	Args:          cobra.MatchAll(cobra.MaximumNArgs(1), validateRemoteArg),
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	Short:         "Push commits to Dolt remote",
@@ -714,8 +750,9 @@ variables for authentication.
 Use --force to overwrite remote changes (e.g., when the remote has
 uncommitted changes in its working set).
 
-Use --remote to push to a specific named remote instead of the default.
-The remote must already exist (see 'bd dolt remote add').`,
+Name a remote to push to it instead of the default: 'bd dolt push <remote>'
+or 'bd dolt push --remote <remote>'. The remote must already exist (see
+'bd dolt remote add').`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if config.GetBool("no-push") {
 			fmt.Println("skipping push: rig is local-only (no-push: true)")
@@ -739,7 +776,10 @@ The remote must already exist (see 'bd dolt remote add').`,
 			return HandleError("no store available")
 		}
 		force, _ := cmd.Flags().GetBool("force")
-		remote, _ := cmd.Flags().GetString("remote")
+		remote, err := remoteFromArgs(cmd, args)
+		if err != nil {
+			return err
+		}
 		if remote != "" {
 			fmt.Printf("Pushing to Dolt remote %q...\n", remote)
 			if err := st.PushRemote(ctx, remote, force); err != nil {
@@ -801,7 +841,8 @@ The remote must already exist (see 'bd dolt remote add').`,
 }
 
 var doltPullCmd = &cobra.Command{
-	Use:           "pull",
+	Use:           "pull [remote]",
+	Args:          cobra.MatchAll(cobra.MaximumNArgs(1), validateRemoteArg),
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	Short:         "Pull commits from Dolt remote",
@@ -811,8 +852,9 @@ Requires a Dolt remote to be configured in the database directory.
 For Hosted Dolt, set DOLT_REMOTE_USER and DOLT_REMOTE_PASSWORD environment
 variables for authentication.
 
-Use --remote to pull from a specific named remote instead of the default.
-The remote must already exist (see 'bd dolt remote add').
+Name a remote to pull from it instead of the default: 'bd dolt pull <remote>'
+or 'bd dolt pull --remote <remote>'. The remote must already exist (see
+'bd dolt remote add').
 
 Use --strategy ours|theirs to resolve conflicts the auto-resolver declines
 (e.g. both sides edited the same issue since the last sync) instead of
@@ -837,7 +879,10 @@ reports conflicts.`,
 		if st == nil {
 			return HandleError("no store available")
 		}
-		remote, _ := cmd.Flags().GetString("remote")
+		remote, err := remoteFromArgs(cmd, args)
+		if err != nil {
+			return err
+		}
 		strategy, _ := cmd.Flags().GetString("strategy")
 		if strategy != "" {
 			if err := versioncontrolops.ValidateConflictStrategy(strategy); err != nil {
@@ -885,7 +930,6 @@ reports conflicts.`,
 			return HandleError("%v", err)
 		}
 		fmt.Println("Pulling from Dolt remote...")
-		var err error
 		if strategy != "" {
 			err = puller.PullWithStrategy(ctx, strategy)
 		} else {

@@ -1042,8 +1042,12 @@ func ensureCloudAuthCLIDatabase(t *testing.T, store *DoltStore) {
 	t.Helper()
 	testutil.RequireDoltBinary(t)
 	// The database created here stands in for the one the store's server
-	// serves, which no port variable may name (cliDirServesServer).
+	// serves, which no port variable may name and which a live server on the
+	// dialed port must serve (cliDirServesServer). The suite's server serves
+	// a data directory of its own, and the routes run the dolt CLI in this
+	// one, so the test stands in for the proof that it is served.
 	clearServerPortEnv(t)
+	standInForServedDatabase(t, store.CLIDir(), store.cfg.ServerPort)
 
 	cliDir := store.CLIDir()
 	if err := os.MkdirAll(cliDir, 0o755); err != nil {
