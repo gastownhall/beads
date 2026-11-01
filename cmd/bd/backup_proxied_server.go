@@ -365,7 +365,9 @@ func runBackupRestoreProxied(ctx context.Context, dir string, force bool) error 
 	if err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}
-	backupURL, err := versioncontrolops.DirToFileURL(dir)
+	// Refuse a source without a Dolt backup while the topology is still up:
+	// past the quiesce below, Dolt drops the database before it finds out.
+	backupURL, err := versioncontrolops.RestoreSourceURL(dir)
 	if err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}
