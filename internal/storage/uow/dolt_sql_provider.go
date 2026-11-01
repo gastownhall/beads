@@ -784,23 +784,17 @@ func isTransientPingError(err error) bool {
 // upstream. A var so tests can shorten it.
 var upstreamOutageRetryWindow = time.Second
 
-// outageWindowBackOff clamps the wrapped backoff so that, once the first
-// upstream-outage report has been seen, no wait for ANOTHER outage report
-// runs past the end of upstreamOutageRetryWindow: the last attempt lands at
-// the window's end rather than up to one backoff interval after it.
-//
-// The clamp applies only to the wait that immediately follows an outage
-// report (armClamp), not to every wait once deadline is set. Once the
-// window has elapsed, deadline stays in the past forever, so clamping
-// unconditionally would clamp every later wait to zero too — including the
-// wait after an ordinary transient error (invalid connection, EOF, a
-// dial failure) that has nothing to do with the outage window. That
-// zero-wait clamp turned pingWithRetry's remaining MaxElapsedTime budget
-// into a CPU-bound spin instead of a backoff (#7183).
+// outageWindowBackOff clamps the wait after an upstream-outage report so it
+// does not run past the end of upstreamOutageRetryWindow, measured from the
+// first report: the last attempt lands at the window's end rather than up to
+// one backoff interval after it. Only the wait that follows an outage report
+// is clamped. A wait after any other transient error keeps the wrapped
+// backoff's own interval; clamping it to a deadline that has already passed
+// would make it zero and spin the retry loop at CPU rate (#7183).
 type outageWindowBackOff struct {
 	backoff.BackOff
 	deadline time.Time // zero until the first upstream-outage report
-	armClamp bool      // set by the attempt that just saw an outage report
+	armClamp bool      // the failure this wait follows was an outage report
 }
 
 func (b *outageWindowBackOff) NextBackOff() time.Duration {
@@ -817,12 +811,15 @@ func (b *outageWindowBackOff) NextBackOff() time.Duration {
 }
 
 // pingWithRetry pings until the server answers, the error proves durable, or
-// bo's MaxElapsedTime is spent. Each attempt gets its own deadline:
-// backoff.Retry bounds the gap between attempts but cannot interrupt one
-// already in flight, so without this cap a server that accepts TCP and then
-// stalls blocks for the caller's entire context. The db proxy's
+// the wrapped backoff's budget stops fitting another wait — an upper bound,
+// not a promise to keep retrying for all of MaxElapsedTime. Each attempt gets
+// its own deadline: backoff.Retry bounds the gap between attempts but cannot
+// interrupt one already in flight, so without this cap a server that accepts
+// TCP and then stalls blocks for the caller's entire context. The db proxy's
 // upstream-outage report is retried only for upstreamOutageRetryWindow from
-// the first time it is seen.
+// the first time it is seen, and only the wait right after such a report is
+// clamped to that window; waits after ordinary transient errors keep the
+// wrapped backoff's own intervals.
 func pingWithRetry(ctx context.Context, p pinger, bo *backoff.ExponentialBackOff, attemptTimeout time.Duration) error {
 	window := &outageWindowBackOff{BackOff: bo}
 	return backoff.Retry(func() error {
